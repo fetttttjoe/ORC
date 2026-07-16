@@ -1119,7 +1119,7 @@ git commit -m "feat: kernel facade with transactional plan lifecycle"
 
 **Interfaces:**
 - Consumes: `Kernel`, `EventLog`, `KernelError` from `@orc/kernel`; `PlanDraft` from `@orc/contracts`.
-- Produces: `openKernel(dir?: string): Kernel` (opens `<dir>/.orc/state.db`, mkdir -p), `singleStepDraft(task: {title: string; spec: string}, modelRef: string): PlanDraft`, `buildProgram(kernel: Kernel): Command`. Commands: `new <title> [--spec] [--parent]` (prints task id), `propose <taskId> [--file plan.json] [--model ref]` (no file → single-step template), `plan <taskId> [--version n]` (prints plan JSON), `approve <taskId> [--version n]`, `tasks`, `log <taskId>`.
+- Produces: `openKernel(dir?: string): Kernel` (opens `<dir>/.orc/state.db`, mkdir -p), `singleStepDraft(task: {title: string; spec: string}, modelRef: string): PlanDraft`, `buildProgram(kernel: Kernel): Command`. Commands: `new <title> [--spec] [--parent]` (prints task id), `propose <taskId> [--file plan.json] [--model ref]` (no file → single-step template), `edit <taskId> [--file plan.json] [--model ref]` (new version while awaiting approval; added per final review), `plan <taskId> [--version n]` (prints plan JSON), `approve <taskId> [--version n]`, `tasks`, `log <taskId>`.
 
 - [ ] **Step 1: Install deps**
 
