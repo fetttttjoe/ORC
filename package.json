@@ -1,0 +1,14 @@
+{
+  "name": "orchestrator",
+  "private": true,
+  "type": "module",
+  "workspaces": ["packages/*"],
+  "scripts": {
+    "test": "bun test",
+    "typecheck": "tsc --noEmit -p packages/contracts && tsc --noEmit -p packages/kernel && tsc --noEmit -p packages/cli"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.3.14",
+    "typescript": "^7.0.2"
+  }
+}
