@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, mock, spyOn } from 'bun:test'
-import { mkdtempSync } from 'node:fs'
+import { mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { EVENT_KIND } from '@orc/contracts'
@@ -64,5 +64,70 @@ describe('orc CLI', () => {
     await run('tasks')
     expect(lines[0]).toContain('draft')
     expect(lines[0]).toContain('listed task')
+  })
+
+  it('propose --file loads a plan draft from disk', async () => {
+    const { run, lines } = makeCli()
+    await run('new', 'file task')
+    const taskId = lines[0]
+
+    const draftPath = path.join(mkdtempSync(path.join(tmpdir(), 'orc-draft-')), 'draft.json')
+    writeFileSync(draftPath, JSON.stringify({
+      strategyRef: 'template:single',
+      costEstimateUSD: null,
+      steps: [{
+        id: 's1',
+        role: 'worker',
+        title: 'do the thing',
+        instructions: 'do the thing',
+        executorRef: 'api-loop',
+        modelRef: 'file/model',
+        skillRefs: [],
+        isolation: 'local',
+        zone: [],
+        maxIterations: 3,
+        dependsOn: [],
+      }],
+    }))
+
+    await run('propose', taskId, '--file', draftPath)
+    lines.length = 0
+    await run('plan', taskId)
+    const plan = JSON.parse(lines.join('\n'))
+    expect(plan.steps[0].modelRef).toBe('file/model')
+    expect(plan.steps[0].maxIterations).toBe(3)
+  })
+
+  it('propose --file rejects malformed JSON', async () => {
+    const { run, lines } = makeCli()
+    await run('new', 'bad file task')
+    const taskId = lines[0]
+
+    const badPath = path.join(mkdtempSync(path.join(tmpdir(), 'orc-draft-')), 'bad.json')
+    writeFileSync(badPath, '{not json')
+
+    expect(run('propose', taskId, '--file', badPath)).rejects.toThrow()
+  })
+
+  it('edit round-trip bumps the plan version and logs plan_edited', async () => {
+    const { run, lines } = makeCli()
+    await run('new', 'edit task')
+    const taskId = lines[0]
+    await run('propose', taskId)
+
+    lines.length = 0
+    await run('edit', taskId, '--model', 'ollama/other')
+    expect(lines[0]).toContain('plan v2 edited')
+
+    lines.length = 0
+    await run('plan', taskId)
+    const plan = JSON.parse(lines.join('\n'))
+    expect(plan.version).toBe(2)
+    expect(plan.steps[0].modelRef).toBe('ollama/other')
+
+    lines.length = 0
+    await run('log', taskId)
+    const kinds = lines.map(l => l.split(/\s+/).at(-1))
+    expect(kinds).toContain(EVENT_KIND.plan_edited)
   })
 })

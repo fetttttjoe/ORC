@@ -40,6 +40,11 @@ export function fold(events: EventRecord[]): State {
         if (t) state.tasks.set(p.taskId, { ...t, status: p.to })
         break
       }
+      default: {
+        const unhandled: never = e.kind
+        void unhandled
+        break
+      }
     }
   }
   return state
