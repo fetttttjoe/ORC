@@ -30,6 +30,12 @@ export function singleStepDraft(task: { title: string; spec: string }, modelRef:
   }
 }
 
+function resolveDraft(task: { title: string; spec: string }, opts: { file?: string; model: string }): PlanDraft {
+  return opts.file
+    ? PlanDraft.parse(JSON.parse(readFileSync(opts.file, 'utf8')))
+    : singleStepDraft(task, opts.model)
+}
+
 export function buildProgram(kernel: Kernel): Command {
   const program = new Command('orc')
   program.description('multi-agent orchestrator')
@@ -52,11 +58,22 @@ export function buildProgram(kernel: Kernel): Command {
     .action((taskId: string, opts: { file?: string; model: string }) => {
       const task = kernel.getTask(taskId)
       if (!task) throw new Error(`no task '${taskId}'`)
-      const draft = opts.file
-        ? PlanDraft.parse(JSON.parse(readFileSync(opts.file, 'utf8')))
-        : singleStepDraft(task, opts.model)
+      const draft = resolveDraft(task, opts)
       const plan = kernel.proposePlan(taskId, draft)
       console.log(`plan v${plan.version} proposed (${plan.steps.length} steps) — review with: orc plan ${taskId}`)
+    })
+
+  program
+    .command('edit <taskId>')
+    .description('edit a plan (default: single-step template)')
+    .option('--file <path>', 'plan draft JSON file')
+    .option('--model <ref>', 'model for template steps', 'anthropic/claude-sonnet-5')
+    .action((taskId: string, opts: { file?: string; model: string }) => {
+      const task = kernel.getTask(taskId)
+      if (!task) throw new Error(`no task '${taskId}'`)
+      const draft = resolveDraft(task, opts)
+      const plan = kernel.editPlan(taskId, draft)
+      console.log(`plan v${plan.version} edited — review with: orc plan ${taskId}`)
     })
 
   program
