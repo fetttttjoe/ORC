@@ -23,7 +23,7 @@
 - Approved plans are immutable; editing requires `awaiting_approval`; every edit is a new version (spec §5.2).
 - No DBOS, no LLM/provider SDKs, no plugin loading in M1. NOTE for M2: DBOS-on-Bun compatibility must be validated before M2 planning; the ExecutionPort hedge (ADR-004) and the Drizzle driver seam are the fallbacks.
 - Tests colocated as `packages/*/src/*.test.ts`, written against `bun:test`; run with `bun test` from the repo root.
-- Every commit message ends with: `Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>`
+- Commit style (user rule, 2026-07-16): Conventional Commits, single-line subject, max 2 lines total, NO AI attribution or trailers of any kind.
 
 ## Milestone Roadmap (later plans, not this one)
 
@@ -213,9 +213,7 @@ Expected: 3 tests PASS, typecheck clean.
 
 ```bash
 git add -A
-git commit -m "feat: monorepo scaffold + TaskNode contract
-
-Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
+git commit -m "feat: monorepo scaffold + TaskNode contract"
 ```
 
 ---
@@ -359,9 +357,7 @@ Expected: all PASS (8 tests total).
 
 ```bash
 git add -A
-git commit -m "feat: Plan/PlanStep contracts + DAG validation
-
-Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
+git commit -m "feat: Plan/PlanStep contracts + DAG validation"
 ```
 
 ---
@@ -466,9 +462,7 @@ Expected: all PASS (11 tests total).
 
 ```bash
 git add -A
-git commit -m "feat: event contracts with per-kind payload schemas
-
-Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
+git commit -m "feat: event contracts with per-kind payload schemas"
 ```
 
 ---
@@ -686,9 +680,7 @@ Expected: all PASS (15 tests total), typecheck clean.
 
 ```bash
 git add -A
-git commit -m "feat: append-only event log on Drizzle/bun:sqlite with generated migrations
-
-Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
+git commit -m "feat: append-only event log on Drizzle/bun:sqlite with generated migrations"
 ```
 
 ---
@@ -826,9 +818,7 @@ Expected: all PASS (18 tests total).
 
 ```bash
 git add -A
-git commit -m "feat: pure fold projection from event log to state
-
-Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
+git commit -m "feat: pure fold projection from event log to state"
 ```
 
 ---
@@ -1110,9 +1100,7 @@ Expected: all PASS (25 tests total), typecheck clean.
 
 ```bash
 git add -A
-git commit -m "feat: kernel facade with transactional plan lifecycle
-
-Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
+git commit -m "feat: kernel facade with transactional plan lifecycle"
 ```
 
 ---
@@ -1361,9 +1349,7 @@ Expected: propose/approve confirmations, then 5 events ending in `task_status_ch
 
 ```bash
 git add -A
-git commit -m "feat: orc CLI — new/propose/plan/approve/tasks/log
-
-Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
+git commit -m "feat: orc CLI — new/propose/plan/approve/tasks/log"
 ```
 
 ---
@@ -1498,9 +1484,7 @@ Expected: 31 tests PASS, typecheck clean.
 
 ```bash
 git add -A
-git commit -m "test: replay/restart guarantee + README quickstart
-
-Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
+git commit -m "test: replay/restart guarantee + README quickstart"
 ```
 
 ---
