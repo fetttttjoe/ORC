@@ -10,7 +10,7 @@ import { KERNEL_ERROR_CODE, KernelError } from './errors'
 export class Kernel {
   constructor(private readonly log: EventLog) {}
 
-  createTask(input: { title: string; spec?: string; type?: string; parentId?: string }): TaskNode {
+  createTask(input: { title: string; spec?: string; type?: string; parentId?: string; budgetUSD?: number | null }): TaskNode {
     return this.log.transaction(() => {
       const parent = input.parentId ? this.requireTask(input.parentId) : null
       const task: TaskNode = {
@@ -21,7 +21,7 @@ export class Kernel {
         spec: input.spec ?? '',
         status: TASK_STATUS.draft,
         zone: [],
-        budgetUSD: parent?.budgetUSD ?? null,
+        budgetUSD: input.budgetUSD ?? parent?.budgetUSD ?? null,
         depth: parent ? parent.depth + 1 : 0,
         createdAt: new Date().toISOString(),
       }
