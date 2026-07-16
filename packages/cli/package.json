@@ -2,5 +2,10 @@
   "name": "@orc/cli",
   "version": "0.0.0",
   "type": "module",
-  "exports": { ".": "./src/main.ts" }
+  "exports": { ".": "./src/main.ts" },
+  "dependencies": {
+    "@orc/contracts": "workspace:*",
+    "@orc/kernel": "workspace:*",
+    "commander": "^12.1.0"
+  }
 }
