@@ -50,10 +50,12 @@ describe('Kernel lifecycle', () => {
 
   it('child tasks inherit budget and increment depth', () => {
     const k = freshKernel()
-    const parent = k.createTask({ title: 'p' })
+    const parent = k.createTask({ title: 'p', budgetUSD: 5 })
     const child = k.createTask({ title: 'c', parentId: parent.id })
     expect(child.depth).toBe(1)
     expect(child.parentId).toBe(parent.id)
+    expect(parent.budgetUSD).toBe(5)
+    expect(child.budgetUSD).toBe(5)
   })
 
   it('rejects proposing twice', () => {
