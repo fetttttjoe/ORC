@@ -3,6 +3,8 @@ import { z } from 'zod'
 export const IsolationTier = z.enum(['local', 'worktree', 'docker'])
 export type IsolationTier = z.infer<typeof IsolationTier>
 
+export const ISOLATION_TIER = IsolationTier.enum
+
 export const PlanStep = z.object({
   id: z.string().min(1),
   role: z.string().min(1),

@@ -7,6 +7,8 @@ export const EventKind = z.enum([
 ])
 export type EventKind = z.infer<typeof EventKind>
 
+export const EVENT_KIND = EventKind.enum
+
 export const PAYLOAD_SCHEMAS: Record<EventKind, z.ZodType> = {
   task_created: z.object({ task: TaskNode }),
   plan_proposed: z.object({ plan: Plan }),
