@@ -836,7 +836,7 @@ git commit -m "feat: pure fold projection from event log to state"
 - Produces:
   - `KERNEL_ERROR_CODE` const map + `KernelErrorCode` type derived from it
   - `class KernelError extends Error { readonly code: KernelErrorCode }`
-  - `class Kernel { constructor(log: EventLog); createTask(input: {title: string; spec?: string; type?: string; parentId?: string}): TaskNode; proposePlan(taskId: string, draft: PlanDraft): Plan; editPlan(taskId: string, draft: PlanDraft): Plan; approvePlan(taskId: string, version?: number): Plan; state(): State; getTask(id: string): TaskNode | undefined; listTasks(): TaskNode[]; getPlan(taskId: string, version?: number): Plan | undefined; eventsFor(taskId: string): EventRecord[] }`
+  - `class Kernel { constructor(log: EventLog); createTask(input: {title: string; spec?: string; type?: string; parentId?: string; budgetUSD?: number | null}): TaskNode; proposePlan(taskId: string, draft: PlanDraft): Plan; editPlan(taskId: string, draft: PlanDraft): Plan; approvePlan(taskId: string, version?: number): Plan; state(): State; getTask(id: string): TaskNode | undefined; listTasks(): TaskNode[]; getPlan(taskId: string, version?: number): Plan | undefined; eventsFor(taskId: string): EventRecord[] }`
 
 Lifecycle rules (spec §5.3, §6.1): `proposePlan` only from `draft` (→ `awaiting_approval`); `editPlan` only in `awaiting_approval` (version+1); `approvePlan` only in `awaiting_approval` and only for the LATEST version (→ `approved`). Child tasks inherit `budgetUSD` and get `depth = parent.depth + 1`.
 
@@ -896,10 +896,12 @@ describe('Kernel lifecycle', () => {
 
   it('child tasks inherit budget and increment depth', () => {
     const k = freshKernel()
-    const parent = k.createTask({ title: 'p' })
+    const parent = k.createTask({ title: 'p', budgetUSD: 5 })
     const child = k.createTask({ title: 'c', parentId: parent.id })
     expect(child.depth).toBe(1)
     expect(child.parentId).toBe(parent.id)
+    expect(parent.budgetUSD).toBe(5)
+    expect(child.budgetUSD).toBe(5)
   })
 
   it('rejects proposing twice', () => {
@@ -981,7 +983,7 @@ import { KERNEL_ERROR_CODE, KernelError } from './errors'
 export class Kernel {
   constructor(private readonly log: EventLog) {}
 
-  createTask(input: { title: string; spec?: string; type?: string; parentId?: string }): TaskNode {
+  createTask(input: { title: string; spec?: string; type?: string; parentId?: string; budgetUSD?: number | null }): TaskNode {
     return this.log.transaction(() => {
       const parent = input.parentId ? this.requireTask(input.parentId) : null
       const task: TaskNode = {
@@ -992,7 +994,7 @@ export class Kernel {
         spec: input.spec ?? '',
         status: TASK_STATUS.draft,
         zone: [],
-        budgetUSD: parent?.budgetUSD ?? null,
+        budgetUSD: input.budgetUSD ?? parent?.budgetUSD ?? null,
         depth: parent ? parent.depth + 1 : 0,
         createdAt: new Date().toISOString(),
       }
