@@ -1,0 +1,62 @@
+import { z } from 'zod'
+
+export const IsolationTier = z.enum(['local', 'worktree', 'docker'])
+export type IsolationTier = z.infer<typeof IsolationTier>
+
+export const PlanStep = z.object({
+  id: z.string().min(1),
+  role: z.string().min(1),
+  title: z.string().min(1),
+  instructions: z.string().min(1),
+  executorRef: z.string().min(1),
+  modelRef: z.string().min(1),
+  skillRefs: z.array(z.string()),
+  isolation: IsolationTier,
+  zone: z.array(z.string()),
+  maxIterations: z.number().int().positive(),
+  dependsOn: z.array(z.string()),
+})
+export type PlanStep = z.infer<typeof PlanStep>
+
+export const Plan = z.object({
+  taskId: z.string().min(1),
+  version: z.number().int().positive(),
+  strategyRef: z.string().min(1),
+  costEstimateUSD: z.number().nonnegative().nullable(),
+  steps: z.array(PlanStep).min(1),
+})
+export type Plan = z.infer<typeof Plan>
+
+export const PlanDraft = Plan.omit({ taskId: true, version: true })
+export type PlanDraft = z.infer<typeof PlanDraft>
+
+export function validatePlan(plan: Plan): { ok: true } | { ok: false; errors: string[] } {
+  const errors: string[] = []
+  const ids = new Set<string>()
+  for (const s of plan.steps) {
+    if (ids.has(s.id)) errors.push(`duplicate step id: ${s.id}`)
+    ids.add(s.id)
+  }
+  for (const s of plan.steps)
+    for (const d of s.dependsOn)
+      if (!ids.has(d)) errors.push(`step ${s.id} depends on unknown step: ${d}`)
+  if (errors.length > 0) return { ok: false, errors }
+
+  // ponytail: O(n^2) fixpoint cycle check — Kahn's with a real queue if plans get huge
+  const remaining = new Map(plan.steps.map(s => [s.id, s.dependsOn]))
+  const done = new Set<string>()
+  let progress = true
+  while (progress) {
+    progress = false
+    for (const [id, deps] of remaining) {
+      if (deps.every(d => done.has(d))) {
+        done.add(id)
+        remaining.delete(id)
+        progress = true
+      }
+    }
+  }
+  if (remaining.size > 0)
+    errors.push(`dependency cycle involving: ${[...remaining.keys()].join(', ')}`)
+  return errors.length > 0 ? { ok: false, errors } : { ok: true }
+}
