@@ -6,6 +6,8 @@ export const TaskStatus = z.enum([
 ])
 export type TaskStatus = z.infer<typeof TaskStatus>
 
+export const TASK_STATUS = TaskStatus.enum
+
 export const TaskNode = z.object({
   id: z.string().min(1),
   parentId: z.string().min(1).nullable(),
