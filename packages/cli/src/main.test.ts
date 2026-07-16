@@ -106,7 +106,7 @@ describe('orc CLI', () => {
     const badPath = path.join(mkdtempSync(path.join(tmpdir(), 'orc-draft-')), 'bad.json')
     writeFileSync(badPath, '{not json')
 
-    expect(run('propose', taskId, '--file', badPath)).rejects.toThrow()
+    await expect(run('propose', taskId, '--file', badPath)).rejects.toThrow()
   })
 
   it('edit round-trip bumps the plan version and logs plan_edited', async () => {
