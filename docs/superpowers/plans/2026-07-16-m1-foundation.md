@@ -18,6 +18,7 @@
 - `@orc/contracts` has exactly ONE runtime dependency: `zod`. Nothing else, ever.
 - Every state change is an event append through `EventLog.append` — no other writes to the DB, no mutable state tables (spec §8.1). Multi-event invariants are wrapped in `EventLog.transaction`.
 - All SQL goes through Drizzle (user decision, 2026-07-16): table definitions live in `packages/kernel/src/schema.ts` (single source of truth), migrations are generated with drizzle-kit and committed — no hand-written SQL strings outside generated migrations. Driver: `bun:sqlite` (built into Bun).
+- No scattered strings (user rule, 2026-07-16): production code never matches on raw string literals. Use the exported const maps — `TASK_STATUS` (= `TaskStatus.enum`), `EVENT_KIND` (= `EventKind.enum`), `ISOLATION_TIER` (= `IsolationTier.enum`), `KERNEL_ERROR_CODE` — derived from the zod enums (single source of truth). Test fixtures/data literals are exempt; assertions should prefer the const maps.
 - Statuses (spec §5.2, copy verbatim): `draft | awaiting_approval | approved | running | blocked | done | failed | cancelled`.
 - Event kinds in M1 (subset of spec §8.1): `task_created | plan_proposed | plan_edited | plan_approved | task_status_changed`.
 - Approved plans are immutable; editing requires `awaiting_approval`; every edit is a new version (spec §5.2).
@@ -833,7 +834,7 @@ git commit -m "feat: pure fold projection from event log to state"
 **Interfaces:**
 - Consumes: `EventLog` (Task 4), `fold`/`State` (Task 5), contracts (Tasks 1-3).
 - Produces:
-  - `type KernelErrorCode = 'task_not_found' | 'invalid_transition' | 'version_conflict' | 'plan_validation_failed'`
+  - `KERNEL_ERROR_CODE` const map + `KernelErrorCode` type derived from it
   - `class KernelError extends Error { readonly code: KernelErrorCode }`
   - `class Kernel { constructor(log: EventLog); createTask(input: {title: string; spec?: string; type?: string; parentId?: string}): TaskNode; proposePlan(taskId: string, draft: PlanDraft): Plan; editPlan(taskId: string, draft: PlanDraft): Plan; approvePlan(taskId: string, version?: number): Plan; state(): State; getTask(id: string): TaskNode | undefined; listTasks(): TaskNode[]; getPlan(taskId: string, version?: number): Plan | undefined; eventsFor(taskId: string): EventRecord[] }`
 
@@ -847,9 +848,9 @@ import { describe, expect, it } from 'bun:test'
 import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import type { PlanDraft } from '@orc/contracts'
+import { TASK_STATUS, type PlanDraft } from '@orc/contracts'
 import { EventLog } from './eventlog'
-import { KernelError } from './errors'
+import { KERNEL_ERROR_CODE, KernelError } from './errors'
 import { Kernel } from './kernel'
 
 const freshKernel = () =>
@@ -878,18 +879,18 @@ describe('Kernel lifecycle', () => {
   it('create → propose → edit → approve happy path', () => {
     const k = freshKernel()
     const t = k.createTask({ title: 'hello', spec: 'world' })
-    expect(t.status).toBe('draft')
+    expect(t.status).toBe(TASK_STATUS.draft)
 
     const v1 = k.proposePlan(t.id, draft())
     expect(v1.version).toBe(1)
-    expect(k.getTask(t.id)?.status).toBe('awaiting_approval')
+    expect(k.getTask(t.id)?.status).toBe(TASK_STATUS.awaiting_approval)
 
     const v2 = k.editPlan(t.id, draft())
     expect(v2.version).toBe(2)
 
     const approved = k.approvePlan(t.id)
     expect(approved.version).toBe(2)
-    expect(k.getTask(t.id)?.status).toBe('approved')
+    expect(k.getTask(t.id)?.status).toBe(TASK_STATUS.approved)
     expect(k.state().plans.get(t.id)?.approvedVersion).toBe(2)
   })
 
@@ -905,13 +906,13 @@ describe('Kernel lifecycle', () => {
     const k = freshKernel()
     const t = k.createTask({ title: 'x' })
     k.proposePlan(t.id, draft())
-    expect(codeOf(() => k.proposePlan(t.id, draft()))).toBe('invalid_transition')
+    expect(codeOf(() => k.proposePlan(t.id, draft()))).toBe(KERNEL_ERROR_CODE.invalid_transition)
   })
 
   it('rejects editing before a proposal exists', () => {
     const k = freshKernel()
     const t = k.createTask({ title: 'x' })
-    expect(codeOf(() => k.editPlan(t.id, draft()))).toBe('invalid_transition')
+    expect(codeOf(() => k.editPlan(t.id, draft()))).toBe(KERNEL_ERROR_CODE.invalid_transition)
   })
 
   it('rejects approving a stale version', () => {
@@ -919,12 +920,12 @@ describe('Kernel lifecycle', () => {
     const t = k.createTask({ title: 'x' })
     k.proposePlan(t.id, draft())
     k.editPlan(t.id, draft())
-    expect(codeOf(() => k.approvePlan(t.id, 1))).toBe('version_conflict')
+    expect(codeOf(() => k.approvePlan(t.id, 1))).toBe(KERNEL_ERROR_CODE.version_conflict)
   })
 
   it('rejects unknown tasks', () => {
     const k = freshKernel()
-    expect(codeOf(() => k.proposePlan('ghost', draft()))).toBe('task_not_found')
+    expect(codeOf(() => k.proposePlan('ghost', draft()))).toBe(KERNEL_ERROR_CODE.task_not_found)
   })
 
   it('rejects invalid plan drafts (cycle)', () => {
@@ -935,8 +936,8 @@ describe('Kernel lifecycle', () => {
       { ...bad.steps[0], id: 'a', dependsOn: ['b'] },
       { ...bad.steps[0], id: 'b', dependsOn: ['a'] },
     ]
-    expect(codeOf(() => k.proposePlan(t.id, bad))).toBe('plan_validation_failed')
-    expect(k.getTask(t.id)?.status).toBe('draft')
+    expect(codeOf(() => k.proposePlan(t.id, bad))).toBe(KERNEL_ERROR_CODE.plan_validation_failed)
+    expect(k.getTask(t.id)?.status).toBe(TASK_STATUS.draft)
   })
 })
 ```
@@ -950,11 +951,13 @@ Expected: FAIL — cannot resolve `./errors` / `./kernel`.
 
 `packages/kernel/src/errors.ts`:
 ```ts
-export type KernelErrorCode =
-  | 'task_not_found'
-  | 'invalid_transition'
-  | 'version_conflict'
-  | 'plan_validation_failed'
+export const KERNEL_ERROR_CODE = {
+  task_not_found: 'task_not_found',
+  invalid_transition: 'invalid_transition',
+  version_conflict: 'version_conflict',
+  plan_validation_failed: 'plan_validation_failed',
+} as const
+export type KernelErrorCode = (typeof KERNEL_ERROR_CODE)[keyof typeof KERNEL_ERROR_CODE]
 
 export class KernelError extends Error {
   constructor(readonly code: KernelErrorCode, message: string) {
@@ -968,12 +971,12 @@ export class KernelError extends Error {
 ```ts
 import { randomUUID } from 'node:crypto'
 import {
-  PlanDraft, validatePlan,
-  type EventRecord, type Plan, type TaskNode, type TaskStatus,
+  EVENT_KIND, PlanDraft, TASK_STATUS, validatePlan,
+  type EventKind, type EventRecord, type Plan, type TaskNode, type TaskStatus,
 } from '@orc/contracts'
 import { EventLog } from './eventlog'
 import { fold, type State } from './projections'
-import { KernelError } from './errors'
+import { KERNEL_ERROR_CODE, KernelError } from './errors'
 
 export class Kernel {
   constructor(private readonly log: EventLog) {}
@@ -987,13 +990,13 @@ export class Kernel {
         type: input.type ?? 'generic',
         title: input.title,
         spec: input.spec ?? '',
-        status: 'draft',
+        status: TASK_STATUS.draft,
         zone: [],
         budgetUSD: parent?.budgetUSD ?? null,
         depth: parent ? parent.depth + 1 : 0,
         createdAt: new Date().toISOString(),
       }
-      this.append(task.id, 'task_created', { task })
+      this.append(task.id, EVENT_KIND.task_created, { task })
       return task
     })
   }
@@ -1001,35 +1004,35 @@ export class Kernel {
   proposePlan(taskId: string, draft: PlanDraft): Plan {
     return this.log.transaction(() => {
       const task = this.requireTask(taskId)
-      if (task.status !== 'draft')
-        throw new KernelError('invalid_transition', `cannot propose a plan while task is '${task.status}'`)
-      return this.appendPlanVersion(taskId, draft, 'plan_proposed', task.status)
+      if (task.status !== TASK_STATUS.draft)
+        throw new KernelError(KERNEL_ERROR_CODE.invalid_transition, `cannot propose a plan while task is '${task.status}'`)
+      return this.appendPlanVersion(taskId, draft, EVENT_KIND.plan_proposed, task.status)
     })
   }
 
   editPlan(taskId: string, draft: PlanDraft): Plan {
     return this.log.transaction(() => {
       const task = this.requireTask(taskId)
-      if (task.status !== 'awaiting_approval')
-        throw new KernelError('invalid_transition', `cannot edit a plan while task is '${task.status}'`)
-      return this.appendPlanVersion(taskId, draft, 'plan_edited', task.status)
+      if (task.status !== TASK_STATUS.awaiting_approval)
+        throw new KernelError(KERNEL_ERROR_CODE.invalid_transition, `cannot edit a plan while task is '${task.status}'`)
+      return this.appendPlanVersion(taskId, draft, EVENT_KIND.plan_edited, task.status)
     })
   }
 
   approvePlan(taskId: string, version?: number): Plan {
     return this.log.transaction(() => {
       const task = this.requireTask(taskId)
-      if (task.status !== 'awaiting_approval')
-        throw new KernelError('invalid_transition', `cannot approve while task is '${task.status}'`)
+      if (task.status !== TASK_STATUS.awaiting_approval)
+        throw new KernelError(KERNEL_ERROR_CODE.invalid_transition, `cannot approve while task is '${task.status}'`)
       const latest = this.state().plans.get(taskId)?.versions.at(-1)
-      if (!latest) throw new KernelError('invalid_transition', 'no plan to approve')
+      if (!latest) throw new KernelError(KERNEL_ERROR_CODE.invalid_transition, 'no plan to approve')
       const wanted = version ?? latest.version
       if (wanted !== latest.version)
-        throw new KernelError('version_conflict', `latest plan is v${latest.version}, not v${wanted}`)
-      this.append(taskId, 'plan_approved', {
+        throw new KernelError(KERNEL_ERROR_CODE.version_conflict, `latest plan is v${latest.version}, not v${wanted}`)
+      this.append(taskId, EVENT_KIND.plan_approved, {
         taskId, version: wanted, approvedAt: new Date().toISOString(),
       })
-      this.append(taskId, 'task_status_changed', { taskId, from: task.status, to: 'approved' })
+      this.append(taskId, EVENT_KIND.task_status_changed, { taskId, from: task.status, to: TASK_STATUS.approved })
       return latest
     })
   }
@@ -1060,26 +1063,26 @@ export class Kernel {
   private appendPlanVersion(
     taskId: string,
     draft: PlanDraft,
-    kind: 'plan_proposed' | 'plan_edited',
+    kind: Extract<EventKind, 'plan_proposed' | 'plan_edited'>,
     from: TaskStatus,
   ): Plan {
     const versions = this.state().plans.get(taskId)?.versions ?? []
     const plan: Plan = { ...PlanDraft.parse(draft), taskId, version: versions.length + 1 }
     const check = validatePlan(plan)
-    if (!check.ok) throw new KernelError('plan_validation_failed', check.errors.join('; '))
+    if (!check.ok) throw new KernelError(KERNEL_ERROR_CODE.plan_validation_failed, check.errors.join('; '))
     this.append(taskId, kind, { plan })
-    if (from !== 'awaiting_approval')
-      this.append(taskId, 'task_status_changed', { taskId, from, to: 'awaiting_approval' })
+    if (from !== TASK_STATUS.awaiting_approval)
+      this.append(taskId, EVENT_KIND.task_status_changed, { taskId, from, to: TASK_STATUS.awaiting_approval })
     return plan
   }
 
-  private append(taskId: string, kind: EventRecord['kind'], payload: Record<string, unknown>): void {
+  private append(taskId: string, kind: EventKind, payload: Record<string, unknown>): void {
     this.log.append({ taskId, stepId: null, runToken: null, kind, payload })
   }
 
   private requireTask(id: string): TaskNode {
     const t = this.state().tasks.get(id)
-    if (!t) throw new KernelError('task_not_found', `no task '${id}'`)
+    if (!t) throw new KernelError(KERNEL_ERROR_CODE.task_not_found, `no task '${id}'`)
     return t
   }
 }
@@ -1139,6 +1142,7 @@ import { afterEach, describe, expect, it, mock, spyOn } from 'bun:test'
 import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
+import { EVENT_KIND } from '@orc/contracts'
 import { buildProgram, openKernel } from './main'
 
 function makeCli() {
@@ -1176,8 +1180,8 @@ describe('orc CLI', () => {
     await run('log', taskId)
     const kinds = lines.map(l => l.split(/\s+/).at(-1))
     expect(kinds).toEqual([
-      'task_created', 'plan_proposed', 'task_status_changed',
-      'plan_approved', 'task_status_changed',
+      EVENT_KIND.task_created, EVENT_KIND.plan_proposed, EVENT_KIND.task_status_changed,
+      EVENT_KIND.plan_approved, EVENT_KIND.task_status_changed,
     ])
   })
 
@@ -1216,7 +1220,7 @@ Expected: FAIL — `./main` has no export `buildProgram`.
 import { mkdirSync, readFileSync } from 'node:fs'
 import path from 'node:path'
 import { Command } from 'commander'
-import { PlanDraft } from '@orc/contracts'
+import { ISOLATION_TIER, PlanDraft } from '@orc/contracts'
 import { EventLog, Kernel } from '@orc/kernel'
 
 export function openKernel(dir: string = process.cwd()): Kernel {
@@ -1237,7 +1241,7 @@ export function singleStepDraft(task: { title: string; spec: string }, modelRef:
       executorRef: 'api-loop',
       modelRef,
       skillRefs: [],
-      isolation: 'worktree',
+      isolation: ISOLATION_TIER.worktree,
       zone: [],
       maxIterations: 25,
       dependsOn: [],
@@ -1371,7 +1375,7 @@ import { describe, expect, it } from 'bun:test'
 import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import type { PlanDraft } from '@orc/contracts'
+import { EVENT_KIND, type PlanDraft } from '@orc/contracts'
 import { EventLog } from './eventlog'
 import { Kernel } from './kernel'
 import { fold } from './projections'
@@ -1413,11 +1417,11 @@ describe('replay guarantee (spec §10)', () => {
     k.proposePlan(t.id, draft())
     k.approvePlan(t.id)
     expect(log.byTask(t.id).map(e => e.kind)).toEqual([
-      'task_created',
-      'plan_proposed',
-      'task_status_changed',
-      'plan_approved',
-      'task_status_changed',
+      EVENT_KIND.task_created,
+      EVENT_KIND.plan_proposed,
+      EVENT_KIND.task_status_changed,
+      EVENT_KIND.plan_approved,
+      EVENT_KIND.task_status_changed,
     ])
   })
 

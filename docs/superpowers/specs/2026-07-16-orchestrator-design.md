@@ -44,6 +44,7 @@ Single user (developer) now; contracts designed so a small-team/server mode can 
 - **TypeScript end-to-end on Bun** (ADR-002, amended 2026-07-16): Bun is package manager, runtime, and test runner; Bun workspaces monorepo; no compiled-JS artifacts.
 - Local-first: state in SQLite + a markdown vault on disk; no server infrastructure required.
 - Open protocols at the edges: **MCP** for tools/capability plugins, **SKILL.md (agentskills.io)** for skills, **OKF** for the vault format, **A2A** reserved for future remote-agent interop.
+- Coding convention (user rule, 2026-07-16): no scattered string literals for matched values — production code references statuses/event kinds/tiers/error codes only via const maps derived from the zod enums (`TASK_STATUS`, `EVENT_KIND`, `ISOLATION_TIER`, `KERNEL_ERROR_CODE`).
 - LLM output is inherently non-deterministic; determinism guarantees apply to plan freezing, routing resolution, execution order, and replay — not to model output (user-confirmed).
 - External agent CLIs expose only what they expose; the capability matrix (§8.4) makes gaps explicit rather than papering over them.
 
