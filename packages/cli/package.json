@@ -1,0 +1,6 @@
+{
+  "name": "@orc/cli",
+  "version": "0.0.0",
+  "type": "module",
+  "exports": { ".": "./src/main.ts" }
+}

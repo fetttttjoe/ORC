@@ -1,0 +1,7 @@
+node_modules/
+dist/
+.orc/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
