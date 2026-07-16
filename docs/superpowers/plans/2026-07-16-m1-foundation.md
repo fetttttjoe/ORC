@@ -4,29 +4,31 @@
 
 **Goal:** The event-sourced kernel of the orchestrator: create a task, propose/edit a versioned plan, approve it through the human gate, and prove full replayability — driven by an `orc` CLI.
 
-**Architecture:** pnpm monorepo with three packages. `@orc/contracts` holds zod schemas only (the ecosystem's API surface). `@orc/kernel` is an append-only SQLite event log plus a pure `fold()` that derives all state from events — replay is identity by construction. `@orc/cli` is a thin commander wrapper. No DBOS, no providers, no plugins in M1 (those are M2/M3); the canonical event schema built here is what they attach to (spec ADR-004).
+**Architecture:** Bun workspaces monorepo with three packages. `@orc/contracts` holds zod schemas only (the ecosystem's API surface). `@orc/kernel` is an append-only SQLite event log (Drizzle over `bun:sqlite`) plus a pure `fold()` that derives all state from events — replay is identity by construction. `@orc/cli` is a thin commander wrapper. No DBOS, no providers, no plugins in M1 (those are M2/M3); the canonical event schema built here is what they attach to (spec ADR-004).
 
-**Tech Stack:** Node ≥ 22, pnpm workspaces, TypeScript strict (NodeNext), zod, better-sqlite3 (WAL), commander, vitest.
+**Tech Stack:** Bun ≥ 1.2 (package manager + runtime + test runner), TypeScript strict (`moduleResolution: bundler`, extensionless imports, zero JS artifacts), zod, Drizzle ORM + drizzle-kit migrations over `bun:sqlite` (WAL), commander.
 
 **Spec:** `docs/superpowers/specs/2026-07-16-orchestrator-design.md`
 
 ## Global Constraints
 
-- Node >= 22, pnpm >= 9. ESM only: `"type": "module"` in every package.json.
-- TypeScript strict; `module`/`moduleResolution` = `NodeNext`; relative imports use `.js` extensions.
+- Bun >= 1.2 is the package manager, runtime, AND test runner (user decision, 2026-07-16). No Node-specific tooling (no tsx, no vitest, no pnpm).
+- TypeScript everywhere, strict. `moduleResolution: "bundler"`, extensionless relative imports (`import './task'` — never `./task.js`). No compiled JS output anywhere (`noEmit`).
+- ESM only: `"type": "module"` in every package.json.
 - `@orc/contracts` has exactly ONE runtime dependency: `zod`. Nothing else, ever.
 - Every state change is an event append through `EventLog.append` — no other writes to the DB, no mutable state tables (spec §8.1). Multi-event invariants are wrapped in `EventLog.transaction`.
+- All SQL goes through Drizzle (user decision, 2026-07-16): table definitions live in `packages/kernel/src/schema.ts` (single source of truth), migrations are generated with drizzle-kit and committed — no hand-written SQL strings outside generated migrations. Driver: `bun:sqlite` (built into Bun).
 - Statuses (spec §5.2, copy verbatim): `draft | awaiting_approval | approved | running | blocked | done | failed | cancelled`.
 - Event kinds in M1 (subset of spec §8.1): `task_created | plan_proposed | plan_edited | plan_approved | task_status_changed`.
 - Approved plans are immutable; editing requires `awaiting_approval`; every edit is a new version (spec §5.2).
-- No DBOS, no LLM/provider SDKs, no plugin loading in M1.
-- Tests colocated as `packages/*/src/*.test.ts`; run with `pnpm test` (root vitest).
+- No DBOS, no LLM/provider SDKs, no plugin loading in M1. NOTE for M2: DBOS-on-Bun compatibility must be validated before M2 planning; the ExecutionPort hedge (ADR-004) and the Drizzle driver seam are the fallbacks.
+- Tests colocated as `packages/*/src/*.test.ts`, written against `bun:test`; run with `bun test` from the repo root.
 - Every commit message ends with: `Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>`
 
 ## Milestone Roadmap (later plans, not this one)
 
-- **M2 Execution:** ExecutionPort + DBOS, DAG interpreter, `api-loop` executor (Vercel AI SDK, incl. Ollama), typed signals, durable gates, usage accounting.
-- **M3 Plugin host:** T0 SKILL.md watcher + progressive disclosure, T2 jiti extensions, T1 MCP client.
+- **M2 Execution:** ExecutionPort + DBOS (validate on Bun first), DAG interpreter, `api-loop` executor (Vercel AI SDK, incl. Ollama), typed signals, durable gates, usage accounting.
+- **M3 Plugin host:** T0 SKILL.md watcher + progressive disclosure, T2 extensions, T1 MCP client.
 - **M4 Vault:** OKF projector, session transcripts, plan-edit parser (Obsidian round-trip), memory scopes + single-writer gateway.
 - **M5 Recursion & strategies:** child splits + ApprovalPolicy rules, strategy presets, `claude-code` adapter, worktree sandbox, zones.
 
@@ -35,7 +37,7 @@
 ### Task 1: Monorepo scaffold + TaskNode contract
 
 **Files:**
-- Create: `pnpm-workspace.yaml`, `package.json`, `tsconfig.base.json`, `vitest.config.ts`, `.gitignore`
+- Create: `package.json`, `tsconfig.base.json`, `.gitignore`
 - Create: `packages/contracts/package.json`, `packages/contracts/tsconfig.json`, `packages/contracts/src/index.ts`, `packages/contracts/src/task.ts`
 - Create: `packages/kernel/package.json`, `packages/kernel/tsconfig.json`, `packages/kernel/src/index.ts`
 - Create: `packages/cli/package.json`, `packages/cli/tsconfig.json`, `packages/cli/src/main.ts` (empty export for now)
@@ -46,21 +48,15 @@
 
 - [ ] **Step 1: Write scaffold files**
 
-`pnpm-workspace.yaml`:
-```yaml
-packages:
-  - 'packages/*'
-```
-
-`package.json`:
+`package.json` (repo root — workspaces live here, no pnpm-workspace.yaml):
 ```json
 {
   "name": "orchestrator",
   "private": true,
   "type": "module",
-  "engines": { "node": ">=22" },
+  "workspaces": ["packages/*"],
   "scripts": {
-    "test": "vitest run",
+    "test": "bun test",
     "typecheck": "tsc --noEmit -p packages/contracts && tsc --noEmit -p packages/kernel && tsc --noEmit -p packages/cli"
   }
 }
@@ -70,24 +66,15 @@ packages:
 ```json
 {
   "compilerOptions": {
-    "target": "ES2023",
-    "module": "NodeNext",
-    "moduleResolution": "NodeNext",
+    "target": "ESNext",
+    "module": "Preserve",
+    "moduleResolution": "bundler",
     "strict": true,
     "skipLibCheck": true,
     "noEmit": true,
-    "types": ["node"]
+    "types": ["bun"]
   }
 }
-```
-
-`vitest.config.ts`:
-```ts
-import { defineConfig } from 'vitest/config'
-
-export default defineConfig({
-  test: { include: ['packages/*/src/**/*.test.ts'] },
-})
 ```
 
 `.gitignore`:
@@ -148,17 +135,18 @@ export {}
 
 Run:
 ```bash
-pnpm add -D -w typescript vitest tsx @types/node
-pnpm add zod --filter @orc/contracts
+bun add -d typescript @types/bun
+cd packages/contracts && bun add zod && cd ../..
+bun install
 ```
-Expected: lockfile created, `node_modules` populated, no errors.
+Expected: `bun.lock` created, `node_modules` populated, no errors.
 
 - [ ] **Step 3: Write the failing test**
 
 `packages/contracts/src/task.test.ts`:
 ```ts
-import { describe, expect, it } from 'vitest'
-import { TaskNode } from './task.js'
+import { describe, expect, it } from 'bun:test'
+import { TaskNode } from './task'
 
 const valid = {
   id: 'a', parentId: null, type: 'generic', title: 'hello', spec: '',
@@ -181,8 +169,8 @@ describe('TaskNode', () => {
 
 - [ ] **Step 4: Run test to verify it fails**
 
-Run: `pnpm test`
-Expected: FAIL — cannot find module `./task.js`.
+Run: `bun test`
+Expected: FAIL — cannot resolve `./task`.
 
 - [ ] **Step 5: Implement the contract**
 
@@ -213,12 +201,12 @@ export type TaskNode = z.infer<typeof TaskNode>
 
 `packages/contracts/src/index.ts`:
 ```ts
-export * from './task.js'
+export * from './task'
 ```
 
 - [ ] **Step 6: Run tests + typecheck to verify green**
 
-Run: `pnpm test && pnpm typecheck`
+Run: `bun test && bun run typecheck`
 Expected: 3 tests PASS, typecheck clean.
 
 - [ ] **Step 7: Commit**
@@ -247,8 +235,8 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 
 `packages/contracts/src/plan.test.ts`:
 ```ts
-import { describe, expect, it } from 'vitest'
-import { Plan, validatePlan, type PlanStep } from './plan.js'
+import { describe, expect, it } from 'bun:test'
+import { Plan, validatePlan, type PlanStep } from './plan'
 
 const step = (id: string, dependsOn: string[] = []): PlanStep => ({
   id, role: 'worker', title: id, instructions: 'do the thing',
@@ -286,8 +274,8 @@ describe('validatePlan', () => {
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `pnpm test`
-Expected: FAIL — cannot find module `./plan.js`.
+Run: `bun test`
+Expected: FAIL — cannot resolve `./plan`.
 
 - [ ] **Step 3: Implement**
 
@@ -359,12 +347,12 @@ export function validatePlan(plan: Plan): { ok: true } | { ok: false; errors: st
 
 Append to `packages/contracts/src/index.ts`:
 ```ts
-export * from './plan.js'
+export * from './plan'
 ```
 
 - [ ] **Step 4: Run tests to verify green**
 
-Run: `pnpm test`
+Run: `bun test`
 Expected: all PASS (8 tests total).
 
 - [ ] **Step 5: Commit**
@@ -386,20 +374,20 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 - Test: `packages/contracts/src/events.test.ts`
 
 **Interfaces:**
-- Consumes: `TaskNode`, `TaskStatus` from `./task.js`; `Plan` from `./plan.js`.
-- Produces: `EventKind` (zod enum), `PAYLOAD_SCHEMAS: Record<EventKind, z.ZodType>`, `EventInput` (zod: `{taskId, stepId, runToken, kind, payload}`), `EventRecord` (interface: `EventInput & {seq: number; ts: string}`). Named `EventRecord`, not `Event`, to avoid shadowing the Node.js global.
+- Consumes: `TaskNode`, `TaskStatus` from `./task`; `Plan` from `./plan`.
+- Produces: `EventKind` (zod enum), `PAYLOAD_SCHEMAS: Record<EventKind, z.ZodType>`, `EventInput` (zod: `{taskId, stepId, runToken, kind, payload}`), `EventRecord` (interface: `EventInput & {seq: number; ts: string}`). Named `EventRecord`, not `Event`, to avoid shadowing the global.
 
 - [ ] **Step 1: Write the failing test**
 
 `packages/contracts/src/events.test.ts`:
 ```ts
-import { describe, expect, it } from 'vitest'
-import { EventInput, EventKind, PAYLOAD_SCHEMAS } from './events.js'
+import { describe, expect, it } from 'bun:test'
+import { EventInput, EventKind, PAYLOAD_SCHEMAS } from './events'
 
 describe('events', () => {
   it('has a payload schema for every kind', () => {
     for (const kind of EventKind.options) {
-      expect(PAYLOAD_SCHEMAS[kind], kind).toBeDefined()
+      expect(PAYLOAD_SCHEMAS[kind]).toBeDefined()
     }
   })
   it('parses a valid input envelope', () => {
@@ -421,16 +409,16 @@ describe('events', () => {
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `pnpm test`
-Expected: FAIL — cannot find module `./events.js`.
+Run: `bun test`
+Expected: FAIL — cannot resolve `./events`.
 
 - [ ] **Step 3: Implement**
 
 `packages/contracts/src/events.ts`:
 ```ts
 import { z } from 'zod'
-import { TaskNode, TaskStatus } from './task.js'
-import { Plan } from './plan.js'
+import { TaskNode, TaskStatus } from './task'
+import { Plan } from './plan'
 
 export const EventKind = z.enum([
   'task_created', 'plan_proposed', 'plan_edited', 'plan_approved', 'task_status_changed',
@@ -466,12 +454,12 @@ export interface EventRecord extends EventInput {
 
 Append to `packages/contracts/src/index.ts`:
 ```ts
-export * from './events.js'
+export * from './events'
 ```
 
 - [ ] **Step 4: Run tests to verify green**
 
-Run: `pnpm test`
+Run: `bun test`
 Expected: all PASS (11 tests total).
 
 - [ ] **Step 5: Commit**
@@ -485,37 +473,46 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 
 ---
 
-### Task 4: EventLog (SQLite append-only store)
+### Task 4: EventLog (Drizzle over bun:sqlite, append-only)
 
 **Files:**
-- Create: `packages/kernel/src/eventlog.ts`
-- Modify: `packages/kernel/src/index.ts` (replace `export {}`)
+- Create: `packages/kernel/drizzle.config.ts`, `packages/kernel/src/schema.ts`, `packages/kernel/src/eventlog.ts`
+- Create (generated): `packages/kernel/drizzle/` — drizzle-kit migration output, committed
+- Modify: `packages/kernel/package.json` (deps), `packages/kernel/src/index.ts` (replace `export {}`)
 - Test: `packages/kernel/src/eventlog.test.ts`
 
 **Interfaces:**
-- Consumes: `EventInput`, `EventRecord`, `PAYLOAD_SCHEMAS` from `@orc/contracts`.
-- Produces: `class EventLog { constructor(path: string); append(input: EventInput): EventRecord; byTask(taskId: string): EventRecord[]; all(): EventRecord[]; transaction<T>(fn: () => T): T; close(): void }`. Appends validate the envelope AND the kind-specific payload; `seq` is strictly monotonic; `ts` is set by SQLite.
+- Consumes: `EventInput`, `EventRecord`, `PAYLOAD_SCHEMAS`, `EventKind` from `@orc/contracts`.
+- Produces: `class EventLog { constructor(path: string); append(input: EventInput): EventRecord; byTask(taskId: string): EventRecord[]; all(): EventRecord[]; transaction<T>(fn: () => T): T; close(): void }` plus the `events` Drizzle table in `schema.ts`. Appends validate the envelope AND the kind-specific payload; `seq` is strictly monotonic; `ts` is set by SQLite.
 
 - [ ] **Step 1: Install deps**
 
-Run:
-```bash
-pnpm add better-sqlite3 --filter @orc/kernel
-pnpm add @orc/contracts --workspace --filter @orc/kernel
-pnpm add -D -w @types/better-sqlite3
+Edit `packages/kernel/package.json` to add:
+```json
+"dependencies": {
+  "@orc/contracts": "workspace:*"
+}
 ```
-Expected: installs clean (better-sqlite3 compiles a native module).
+Then run:
+```bash
+cd packages/kernel && bun add drizzle-orm && cd ../..
+bun add -d drizzle-kit
+bun install
+```
+Expected: installs clean. `bun:sqlite` is built into Bun — no driver package needed.
+
+If a Drizzle API named below has drifted in the installed version, adapt to the installed version's API and note it in your report — the tests are the contract, not the exact call names.
 
 - [ ] **Step 2: Write the failing test**
 
 `packages/kernel/src/eventlog.test.ts`:
 ```ts
+import { describe, expect, it } from 'bun:test'
 import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import { describe, expect, it } from 'vitest'
 import type { EventInput } from '@orc/contracts'
-import { EventLog } from './eventlog.js'
+import { EventLog } from './eventlog'
 
 const freshDbPath = () => path.join(mkdtempSync(path.join(tmpdir(), 'orc-')), 'state.db')
 
@@ -548,7 +545,7 @@ describe('EventLog', () => {
     log.append(statusEvent('t1'))
     expect(log.byTask('t1').map(e => e.seq)).toEqual([1, 3])
   })
-  it('persists across reopen', () => {
+  it('persists across reopen (migrations are idempotent)', () => {
     const p = freshDbPath()
     const log = new EventLog(p)
     log.append(statusEvent())
@@ -561,104 +558,135 @@ describe('EventLog', () => {
 
 - [ ] **Step 3: Run test to verify it fails**
 
-Run: `pnpm test`
-Expected: FAIL — cannot find module `./eventlog.js`.
+Run: `bun test`
+Expected: FAIL — cannot resolve `./eventlog`.
 
 - [ ] **Step 4: Implement**
 
+`packages/kernel/drizzle.config.ts`:
+```ts
+import { defineConfig } from 'drizzle-kit'
+
+export default defineConfig({
+  dialect: 'sqlite',
+  schema: './src/schema.ts',
+  out: './drizzle',
+})
+```
+
+`packages/kernel/src/schema.ts`:
+```ts
+import { sql } from 'drizzle-orm'
+import { index, integer, sqliteTable, text } from 'drizzle-orm/sqlite-core'
+import type { EventKind } from '@orc/contracts'
+
+export const events = sqliteTable(
+  'events',
+  {
+    seq: integer('seq').primaryKey({ autoIncrement: true }),
+    taskId: text('task_id').notNull(),
+    stepId: text('step_id'),
+    runToken: text('run_token'),
+    kind: text('kind').$type<EventKind>().notNull(),
+    payload: text('payload', { mode: 'json' }).$type<Record<string, unknown>>().notNull(),
+    ts: text('ts').notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`),
+  },
+  t => [index('idx_events_task').on(t.taskId)],
+)
+```
+
+Generate the migration:
+```bash
+cd packages/kernel && bunx drizzle-kit generate && cd ../..
+```
+Expected: `packages/kernel/drizzle/0000_*.sql` + `meta/` created. Commit these with the task.
+
 `packages/kernel/src/eventlog.ts`:
 ```ts
-import Database from 'better-sqlite3'
+import { fileURLToPath } from 'node:url'
+import { Database } from 'bun:sqlite'
+import { asc, eq } from 'drizzle-orm'
+import { drizzle, type BunSQLiteDatabase } from 'drizzle-orm/bun-sqlite'
+import { migrate } from 'drizzle-orm/bun-sqlite/migrator'
 import { EventInput, PAYLOAD_SCHEMAS, type EventRecord } from '@orc/contracts'
+import { events } from './schema'
 
-const SCHEMA = `
-CREATE TABLE IF NOT EXISTS events (
-  seq INTEGER PRIMARY KEY AUTOINCREMENT,
-  task_id TEXT NOT NULL,
-  step_id TEXT,
-  run_token TEXT,
-  kind TEXT NOT NULL,
-  payload TEXT NOT NULL,
-  ts TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
-);
-CREATE INDEX IF NOT EXISTS idx_events_task ON events(task_id);
-`
+const MIGRATIONS_FOLDER = fileURLToPath(new URL('../drizzle', import.meta.url))
 
-interface Row {
-  seq: number
-  task_id: string
-  step_id: string | null
-  run_token: string | null
-  kind: string
-  payload: string
-  ts: string
-}
+type Row = typeof events.$inferSelect
 
 const toRecord = (r: Row): EventRecord => ({
   seq: r.seq,
-  taskId: r.task_id,
-  stepId: r.step_id,
-  runToken: r.run_token,
-  kind: r.kind as EventRecord['kind'],
-  payload: JSON.parse(r.payload) as Record<string, unknown>,
+  taskId: r.taskId,
+  stepId: r.stepId,
+  runToken: r.runToken,
+  kind: r.kind,
+  payload: r.payload,
   ts: r.ts,
 })
 
 export class EventLog {
-  private readonly db: Database.Database
+  private readonly sqlite: Database
+  private readonly db: BunSQLiteDatabase
 
   constructor(path: string) {
-    this.db = new Database(path)
-    this.db.pragma('journal_mode = WAL')
-    this.db.exec(SCHEMA)
+    this.sqlite = new Database(path)
+    this.sqlite.exec('PRAGMA journal_mode = WAL;')
+    this.db = drizzle(this.sqlite)
+    migrate(this.db, { migrationsFolder: MIGRATIONS_FOLDER })
   }
 
   append(input: EventInput): EventRecord {
     const parsed = EventInput.parse(input)
     PAYLOAD_SCHEMAS[parsed.kind].parse(parsed.payload)
     const row = this.db
-      .prepare(
-        `INSERT INTO events (task_id, step_id, run_token, kind, payload)
-         VALUES (?, ?, ?, ?, ?) RETURNING seq, ts`,
-      )
-      .get(parsed.taskId, parsed.stepId, parsed.runToken, parsed.kind, JSON.stringify(parsed.payload)) as
-      Pick<Row, 'seq' | 'ts'>
+      .insert(events)
+      .values({
+        taskId: parsed.taskId,
+        stepId: parsed.stepId,
+        runToken: parsed.runToken,
+        kind: parsed.kind,
+        payload: parsed.payload,
+      })
+      .returning({ seq: events.seq, ts: events.ts })
+      .get()
     return { ...parsed, seq: row.seq, ts: row.ts }
   }
 
   byTask(taskId: string): EventRecord[] {
-    return (this.db.prepare('SELECT * FROM events WHERE task_id = ? ORDER BY seq').all(taskId) as Row[]).map(toRecord)
+    return this.db.select().from(events).where(eq(events.taskId, taskId)).orderBy(asc(events.seq)).all().map(toRecord)
   }
 
   all(): EventRecord[] {
-    return (this.db.prepare('SELECT * FROM events ORDER BY seq').all() as Row[]).map(toRecord)
+    return this.db.select().from(events).orderBy(asc(events.seq)).all().map(toRecord)
   }
 
   transaction<T>(fn: () => T): T {
-    return this.db.transaction(fn)()
+    return this.db.transaction(() => fn())
   }
 
   close(): void {
-    this.db.close()
+    this.sqlite.close()
   }
 }
 ```
 
 `packages/kernel/src/index.ts`:
 ```ts
-export * from './eventlog.js'
+export * from './eventlog'
+export * from './schema'
 ```
 
 - [ ] **Step 5: Run tests + typecheck to verify green**
 
-Run: `pnpm test && pnpm typecheck`
+Run: `bun test && bun run typecheck`
 Expected: all PASS (15 tests total), typecheck clean.
 
 - [ ] **Step 6: Commit**
 
 ```bash
 git add -A
-git commit -m "feat: append-only SQLite event log with payload validation
+git commit -m "feat: append-only event log on Drizzle/bun:sqlite with generated migrations
 
 Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 ```
@@ -680,9 +708,9 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 
 `packages/kernel/src/projections.test.ts`:
 ```ts
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it } from 'bun:test'
 import type { EventRecord, Plan, TaskNode } from '@orc/contracts'
-import { fold } from './projections.js'
+import { fold } from './projections'
 
 const task: TaskNode = {
   id: 't1', parentId: null, type: 'generic', title: 'hello', spec: '',
@@ -730,8 +758,8 @@ describe('fold', () => {
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `pnpm test`
-Expected: FAIL — cannot find module `./projections.js`.
+Run: `bun test`
+Expected: FAIL — cannot resolve `./projections`.
 
 - [ ] **Step 3: Implement**
 
@@ -786,12 +814,12 @@ export function fold(events: EventRecord[]): State {
 
 Append to `packages/kernel/src/index.ts`:
 ```ts
-export * from './projections.js'
+export * from './projections'
 ```
 
 - [ ] **Step 4: Run tests to verify green**
 
-Run: `pnpm test`
+Run: `bun test`
 Expected: all PASS (18 tests total).
 
 - [ ] **Step 5: Commit**
@@ -813,7 +841,7 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 - Test: `packages/kernel/src/kernel.test.ts`
 
 **Interfaces:**
-- Consumes: `EventLog` (Task 4), `fold`/`State` (Task 5), contracts.
+- Consumes: `EventLog` (Task 4), `fold`/`State` (Task 5), contracts (Tasks 1-3).
 - Produces:
   - `type KernelErrorCode = 'task_not_found' | 'invalid_transition' | 'version_conflict' | 'plan_validation_failed'`
   - `class KernelError extends Error { readonly code: KernelErrorCode }`
@@ -825,14 +853,14 @@ Lifecycle rules (spec §5.3, §6.1): `proposePlan` only from `draft` (→ `await
 
 `packages/kernel/src/kernel.test.ts`:
 ```ts
+import { describe, expect, it } from 'bun:test'
 import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import { describe, expect, it } from 'vitest'
 import type { PlanDraft } from '@orc/contracts'
-import { EventLog } from './eventlog.js'
-import { KernelError } from './errors.js'
-import { Kernel } from './kernel.js'
+import { EventLog } from './eventlog'
+import { KernelError } from './errors'
+import { Kernel } from './kernel'
 
 const freshKernel = () =>
   new Kernel(new EventLog(path.join(mkdtempSync(path.join(tmpdir(), 'orc-')), 'state.db')))
@@ -845,6 +873,16 @@ const draft = (): PlanDraft => ({
     isolation: 'local', zone: [], maxIterations: 5, dependsOn: [],
   }],
 })
+
+// bun:test-friendly error-code matcher: returns the KernelError code a call throws
+const codeOf = (fn: () => unknown): string => {
+  try {
+    fn()
+    return 'no_error'
+  } catch (e) {
+    return e instanceof KernelError ? e.code : `unexpected:${String(e)}`
+  }
+}
 
 describe('Kernel lifecycle', () => {
   it('create → propose → edit → approve happy path', () => {
@@ -877,17 +915,13 @@ describe('Kernel lifecycle', () => {
     const k = freshKernel()
     const t = k.createTask({ title: 'x' })
     k.proposePlan(t.id, draft())
-    expect(() => k.proposePlan(t.id, draft())).toThrowError(
-      expect.objectContaining({ code: 'invalid_transition' }),
-    )
+    expect(codeOf(() => k.proposePlan(t.id, draft()))).toBe('invalid_transition')
   })
 
   it('rejects editing before a proposal exists', () => {
     const k = freshKernel()
     const t = k.createTask({ title: 'x' })
-    expect(() => k.editPlan(t.id, draft())).toThrowError(
-      expect.objectContaining({ code: 'invalid_transition' }),
-    )
+    expect(codeOf(() => k.editPlan(t.id, draft()))).toBe('invalid_transition')
   })
 
   it('rejects approving a stale version', () => {
@@ -895,16 +929,12 @@ describe('Kernel lifecycle', () => {
     const t = k.createTask({ title: 'x' })
     k.proposePlan(t.id, draft())
     k.editPlan(t.id, draft())
-    expect(() => k.approvePlan(t.id, 1)).toThrowError(
-      expect.objectContaining({ code: 'version_conflict' }),
-    )
+    expect(codeOf(() => k.approvePlan(t.id, 1))).toBe('version_conflict')
   })
 
   it('rejects unknown tasks', () => {
     const k = freshKernel()
-    expect(() => k.proposePlan('ghost', draft())).toThrowError(
-      expect.objectContaining({ code: 'task_not_found' }),
-    )
+    expect(codeOf(() => k.proposePlan('ghost', draft()))).toBe('task_not_found')
   })
 
   it('rejects invalid plan drafts (cycle)', () => {
@@ -915,9 +945,7 @@ describe('Kernel lifecycle', () => {
       { ...bad.steps[0], id: 'a', dependsOn: ['b'] },
       { ...bad.steps[0], id: 'b', dependsOn: ['a'] },
     ]
-    expect(() => k.proposePlan(t.id, bad)).toThrowError(
-      expect.objectContaining({ code: 'plan_validation_failed' }),
-    )
+    expect(codeOf(() => k.proposePlan(t.id, bad))).toBe('plan_validation_failed')
     expect(k.getTask(t.id)?.status).toBe('draft')
   })
 })
@@ -925,8 +953,8 @@ describe('Kernel lifecycle', () => {
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `pnpm test`
-Expected: FAIL — cannot find module `./errors.js` / `./kernel.js`.
+Run: `bun test`
+Expected: FAIL — cannot resolve `./errors` / `./kernel`.
 
 - [ ] **Step 3: Implement**
 
@@ -953,9 +981,9 @@ import {
   PlanDraft, validatePlan,
   type EventRecord, type Plan, type TaskNode, type TaskStatus,
 } from '@orc/contracts'
-import { EventLog } from './eventlog.js'
-import { fold, type State } from './projections.js'
-import { KernelError } from './errors.js'
+import { EventLog } from './eventlog'
+import { fold, type State } from './projections'
+import { KernelError } from './errors'
 
 export class Kernel {
   constructor(private readonly log: EventLog) {}
@@ -1069,13 +1097,13 @@ export class Kernel {
 
 Append to `packages/kernel/src/index.ts`:
 ```ts
-export * from './errors.js'
-export * from './kernel.js'
+export * from './errors'
+export * from './kernel'
 ```
 
 - [ ] **Step 4: Run tests + typecheck to verify green**
 
-Run: `pnpm test && pnpm typecheck`
+Run: `bun test && bun run typecheck`
 Expected: all PASS (25 tests total), typecheck clean.
 
 - [ ] **Step 5: Commit**
@@ -1092,36 +1120,43 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 ### Task 7: CLI (`orc`)
 
 **Files:**
-- Modify: `packages/cli/src/main.ts` (replace `export {}`)
+- Modify: `packages/cli/package.json` (deps), `packages/cli/src/main.ts` (replace `export {}`)
 - Create: `packages/cli/src/bin.ts`
 - Test: `packages/cli/src/main.test.ts`
 
 **Interfaces:**
-- Consumes: `Kernel`, `EventLog` from `@orc/kernel`; `PlanDraft` from `@orc/contracts`.
+- Consumes: `Kernel`, `EventLog`, `KernelError` from `@orc/kernel`; `PlanDraft` from `@orc/contracts`.
 - Produces: `openKernel(dir?: string): Kernel` (opens `<dir>/.orc/state.db`, mkdir -p), `singleStepDraft(task: {title: string; spec: string}, modelRef: string): PlanDraft`, `buildProgram(kernel: Kernel): Command`. Commands: `new <title> [--spec] [--parent]` (prints task id), `propose <taskId> [--file plan.json] [--model ref]` (no file → single-step template), `plan <taskId> [--version n]` (prints plan JSON), `approve <taskId> [--version n]`, `tasks`, `log <taskId>`.
 
 - [ ] **Step 1: Install deps**
 
-Run:
+Edit `packages/cli/package.json` to add:
+```json
+"dependencies": {
+  "@orc/contracts": "workspace:*",
+  "@orc/kernel": "workspace:*"
+}
+```
+Then run:
 ```bash
-pnpm add commander --filter @orc/cli
-pnpm add @orc/kernel @orc/contracts --workspace --filter @orc/cli
+cd packages/cli && bun add commander && cd ../..
+bun install
 ```
 
 - [ ] **Step 2: Write the failing test**
 
 `packages/cli/src/main.test.ts`:
 ```ts
+import { afterEach, describe, expect, it, mock, spyOn } from 'bun:test'
 import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import { afterEach, describe, expect, it, vi } from 'vitest'
-import { buildProgram, openKernel } from './main.js'
+import { buildProgram, openKernel } from './main'
 
 function makeCli() {
   const kernel = openKernel(mkdtempSync(path.join(tmpdir(), 'orc-')))
   const lines: string[] = []
-  vi.spyOn(console, 'log').mockImplementation((...a: unknown[]) => {
+  spyOn(console, 'log').mockImplementation((...a: unknown[]) => {
     lines.push(a.join(' '))
   })
   // fresh Command instance per invocation; commander does not re-parse cleanly
@@ -1132,7 +1167,9 @@ function makeCli() {
   return { run, lines }
 }
 
-afterEach(() => vi.restoreAllMocks())
+afterEach(() => {
+  mock.restore()
+})
 
 describe('orc CLI', () => {
   it('new → propose → approve → log round-trip', async () => {
@@ -1181,8 +1218,8 @@ describe('orc CLI', () => {
 
 - [ ] **Step 3: Run test to verify it fails**
 
-Run: `pnpm test`
-Expected: FAIL — `main.js` has no export `buildProgram`.
+Run: `bun test`
+Expected: FAIL — `./main` has no export `buildProgram`.
 
 - [ ] **Step 4: Implement**
 
@@ -1290,7 +1327,7 @@ export function buildProgram(kernel: Kernel): Command {
 
 `packages/cli/src/bin.ts`:
 ```ts
-import { buildProgram, openKernel } from './main.js'
+import { buildProgram, openKernel } from './main'
 
 try {
   await buildProgram(openKernel()).parseAsync(process.argv)
@@ -1300,23 +1337,23 @@ try {
 }
 ```
 
-- [ ] **Step 5: Run tests to verify green**
+- [ ] **Step 5: Run tests + typecheck to verify green**
 
-Run: `pnpm test && pnpm typecheck`
+Run: `bun test && bun run typecheck`
 Expected: all PASS (28 tests total), typecheck clean.
 
 - [ ] **Step 6: Manual smoke test**
 
 Run:
 ```bash
-cd /tmp && mkdir -p orc-smoke && cd orc-smoke
-node --import tsx /home/yanneck/Work/orchestrator/packages/cli/src/bin.ts new "smoke test" --spec "prove the cli works"
+mkdir -p /tmp/orc-smoke && cd /tmp/orc-smoke
+bun /home/yanneck/Work/orchestrator/packages/cli/src/bin.ts new "smoke test" --spec "prove the cli works"
 ```
 Expected: prints a UUID. Then with that id:
 ```bash
-node --import tsx /home/yanneck/Work/orchestrator/packages/cli/src/bin.ts propose <id>
-node --import tsx /home/yanneck/Work/orchestrator/packages/cli/src/bin.ts approve <id>
-node --import tsx /home/yanneck/Work/orchestrator/packages/cli/src/bin.ts log <id>
+bun /home/yanneck/Work/orchestrator/packages/cli/src/bin.ts propose <id>
+bun /home/yanneck/Work/orchestrator/packages/cli/src/bin.ts approve <id>
+bun /home/yanneck/Work/orchestrator/packages/cli/src/bin.ts log <id>
 ```
 Expected: propose/approve confirmations, then 5 events ending in `task_status_changed`.
 
@@ -1344,14 +1381,14 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 
 `packages/kernel/src/replay.test.ts`:
 ```ts
+import { describe, expect, it } from 'bun:test'
 import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import { describe, expect, it } from 'vitest'
 import type { PlanDraft } from '@orc/contracts'
-import { EventLog } from './eventlog.js'
-import { Kernel } from './kernel.js'
-import { fold } from './projections.js'
+import { EventLog } from './eventlog'
+import { Kernel } from './kernel'
+import { fold } from './projections'
 
 const draft = (): PlanDraft => ({
   strategyRef: 'template:single', costEstimateUSD: null,
@@ -1411,7 +1448,7 @@ describe('replay guarantee (spec §10)', () => {
 
 - [ ] **Step 2: Run tests to verify green**
 
-Run: `pnpm test`
+Run: `bun test`
 Expected: all PASS (31 tests total). These should pass with no production changes — if any fail, the kernel has a replay bug: STOP and fix the kernel, do not adjust the test.
 
 - [ ] **Step 3: Write README**
@@ -1430,12 +1467,17 @@ M1 (foundation) — event-sourced kernel + CLI. Execution (M2), plugins (M3),
 vault (M4), recursion/strategies (M5) follow the roadmap in
 `docs/superpowers/plans/`.
 
+## Stack
+
+TypeScript end-to-end on Bun (package manager, runtime, test runner).
+Drizzle ORM over `bun:sqlite`. Zod contracts. Commander CLI.
+
 ## Quickstart
 
 ```bash
-pnpm install && pnpm test
+bun install && bun test
 
-alias orc="node --import tsx $PWD/packages/cli/src/bin.ts"
+alias orc="bun $PWD/packages/cli/src/bin.ts"
 orc new "write release notes" --spec "summarize changes since v1.2"
 orc propose <task-id>        # single-step template plan
 orc plan <task-id>           # review it
@@ -1449,7 +1491,7 @@ a pure fold over that log — replay and audit come for free.
 
 - [ ] **Step 4: Full suite + typecheck**
 
-Run: `pnpm test && pnpm typecheck`
+Run: `bun test && bun run typecheck`
 Expected: 31 tests PASS, typecheck clean.
 
 - [ ] **Step 5: Commit**
@@ -1466,5 +1508,6 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 ## Self-Review Notes
 
 - **Spec coverage (M1 slice):** R9 traceability → Tasks 4, 8; R2 gate (manual approve) → Tasks 6, 7; R1 tree shape (`parentId`/`depth`/budget inheritance) → Task 6; §5.2 contracts subset → Tasks 1-3; §10 Determinism + Robustness scenarios → Task 8. Deliberately deferred per roadmap: execution/R3 (M2), plugins/R5 (M3), vault/R10 + memory/R6 (M4), recursion execution + ApprovalPolicy rules + isolation/R7 (M5). `CoordinationStrategy`/`TypedEdge` schemas land in M5 with the strategy engine that consumes them (YAGNI until then; `strategyRef` string field already reserves the seam).
+- **Toolchain decisions (user, 2026-07-16):** Bun as package manager + runtime + test runner; Drizzle ORM from day one. Error-code assertions use a `codeOf` helper instead of `toThrowError(expect.objectContaining(...))` for bun:test compatibility.
 - **Type consistency check:** `EventRecord` (not `Event`) everywhere; `PlanDraft` = `Plan.omit(taskId, version)`; `KernelError.code` values match test expectations; `fold` consumed by both `Kernel.state()` and replay tests.
 - **No placeholders:** every step has complete code or exact commands.

@@ -41,7 +41,7 @@ Single user (developer) now; contracts designed so a small-team/server mode can 
 
 ## 2. Constraints
 
-- **TypeScript/Node** core (ADR-002); pnpm workspaces monorepo.
+- **TypeScript end-to-end on Bun** (ADR-002, amended 2026-07-16): Bun is package manager, runtime, and test runner; Bun workspaces monorepo; no compiled-JS artifacts.
 - Local-first: state in SQLite + a markdown vault on disk; no server infrastructure required.
 - Open protocols at the edges: **MCP** for tools/capability plugins, **SKILL.md (agentskills.io)** for skills, **OKF** for the vault format, **A2A** reserved for future remote-agent interop.
 - LLM output is inherently non-deterministic; determinism guarantees apply to plan freezing, routing resolution, execution order, and replay — not to model output (user-confirmed).
@@ -144,7 +144,7 @@ Typed classification on every failure event: `provider_error` (transient → DBO
 
 ## 7. Deployment View
 
-Single machine, `npm install -g` (or pnpm) delivers `orc`. State: one SQLite file + one vault directory per project (`.orc/state.db`, `vault/`). Long-running execution happens in a foreground `orc run` process (daemon mode later); durable waits mean the process can exit and resume at gates. Local models via the user's Ollama/vLLM endpoint. Small-team path (later): the kernel API is already process-internal RPC-shaped; a server wrapper + auth is additive.
+Single machine, `bun install -g` (npm-compatible registry) delivers `orc`. State: one SQLite file + one vault directory per project (`.orc/state.db`, `vault/`). Long-running execution happens in a foreground `orc run` process (daemon mode later); durable waits mean the process can exit and resume at gates. Local models via the user's Ollama/vLLM endpoint. Small-team path (later): the kernel API is already process-internal RPC-shaped; a server wrapper + auth is additive.
 
 ---
 
@@ -204,11 +204,11 @@ Per-run scoped signal tokens (an agent cannot flip another run's flags). MCP per
 
 **ADR-001 — Own thin core; no orchestration framework.** No surveyed framework (LangGraph, CrewAI, AutoGen/MS-AF, OpenAI Agents SDK, Claude Agent SDK, Mastra) provides pre-execution plan approval, runtime-loadable skills, or opt-in-only shared memory; the fight-the-framework tax exceeds the adapter tax. Open protocols at the edges instead (MCP, SKILL.md, OKF, A2A-later).
 
-**ADR-002 — TypeScript/Node.** Scored 71 vs Python 64 / Go 60 / Rust 55 on plugin mechanics, SDK availability, MCP maturity, contracts, UI story. Only language where core, hot-loadable plugins (jiti, pi's proven model), reference MCP SDK, all provider SDKs, zod→JSON-schema contracts, and future UI are one language. Bottega and pi mechanics port near-verbatim. Weakness (no true ESM unload) is moot: subprocess-per-agent gives real unload where it matters.
+**ADR-002 — TypeScript on Bun** *(amended 2026-07-16: user chose Bun over Node as package manager, runtime, and test runner)*. Scored 71 vs Python 64 / Go 60 / Rust 55 on plugin mechanics, SDK availability, MCP maturity, contracts, UI story. Only language where core, hot-loadable plugins (pi's proven model — Bun loads TS natively, so plain dynamic `import()` replaces jiti), reference MCP SDK, all provider SDKs, zod→JSON-schema contracts, and future UI are one language. Bottega and pi mechanics port near-verbatim. Weakness (no true ESM unload) is moot: subprocess-per-agent gives real unload where it matters. Amendment consequences: `bun:sqlite` as the Drizzle driver (see ADR-004 note); npm-ecosystem libraries must be Bun-compatible — validated per milestone.
 
 **ADR-003 — Two-layer provider seam.** Layer 1 Vercel AI SDK (formal provider spec; local models ≈ free via `baseUrl`); Layer 2 our own bottega-shaped `AgentExecutor`. One layer can't serve both "call a model" and "run Claude Code to completion". OpenRouter = one provider, not an abstraction. LiteLLM Proxy noted as escape hatch for containerized polyglot runners.
 
-**ADR-004 — DBOS Transact behind `ExecutionPort`; canonical state in our own SQLite schema.** Only durable-execution option shaped like a local-first tool (MIT, in-process library, SQLite). Provides retries/backoff, queues, concurrency limits, durable gate-waits. Rejected: Temporal (server cluster; dev-only single binary), Restate (BSL + extra process), Inngest (SSPL + inverted shape). Hedge: plan-is-data means a ~1-2 KLoC event-log fallback stays realistic; the port keeps DBOS swappable.
+**ADR-004 — DBOS Transact behind `ExecutionPort`; canonical state in our own SQLite schema** (Drizzle ORM over `bun:sqlite`, migrations via drizzle-kit — user decision 2026-07-16). Only durable-execution option shaped like a local-first tool (MIT, in-process library, SQLite). Provides retries/backoff, queues, concurrency limits, durable gate-waits. Rejected: Temporal (server cluster; dev-only single binary), Restate (BSL + extra process), Inngest (SSPL + inverted shape). Hedge: plan-is-data means a ~1-2 KLoC event-log fallback stays realistic; the port keeps DBOS swappable. **Bun note:** DBOS is Node-first — validate DBOS-on-Bun at M2 start; if incompatible, either the hand-rolled fallback executes (preferred) or the kernel runs under Node via a Drizzle driver swap (the ORM seam makes this a one-file change).
 
 **ADR-005 — Three-tier plugin system** (SKILL.md / MCP / jiti extensions). A bespoke subprocess-RPC protocol is strictly dominated by MCP (same mechanism, spec + SDKs + registry + universal client support already paid for). Skills as plain markdown cover the majority of "plugins" with zero loading machinery.
 
@@ -247,6 +247,7 @@ Per-run scoped signal tokens (an agent cannot flip another run's flags). MCP per
 5. **Capability gaps across agent CLIs** — capability matrix with mandatory guards; gaps surface at plan validation, not mid-run.
 6. **Cost blowout in recursion** — budget caps inherited down the tree; depth cap; bounded feedback rounds; normalized usage accounting on every event.
 7. **OKF is v0.1** — we depend only on its trivially-stable subset (frontmatter `type`, path identity, md links); worst case the vault is "just" clean markdown.
+8. **Bun runtime compatibility** (amendment 2026-07-16) — most risk concentrates in DBOS (M2, see ADR-004 note) and future provider SDKs; mitigations: per-milestone compatibility validation, Drizzle driver seam, ExecutionPort fallback. The contracts package is runtime-agnostic by construction.
 
 ---
 
