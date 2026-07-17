@@ -58,7 +58,25 @@ describe('loadConfig', () => {
     writeFileSync(path.join(dir, '.orc', 'config.json'), JSON.stringify({ skillsDir: 'custom/skills' }))
     expect(loadConfig(dir).skillsDir).toBe(path.resolve(dir, 'custom/skills'))
   })
+  it('vaultDir defaults under dir and skillsDir derives from it', () => {
+    const c = loadConfig('/proj')
+    expect(c.vaultDir).toBe(path.join('/proj', 'vault'))
+    expect(c.skillsDir).toBe(path.join('/proj', 'vault', 'skills'))
+  })
+  it('overriding vaultDir moves skillsDir with it', () => {
+    const d = tmpProject({ vaultDir: 'kb' })
+    const c = loadConfig(d)
+    expect(c.vaultDir).toBe(path.join(d, 'kb'))
+    expect(c.skillsDir).toBe(path.join(d, 'kb', 'skills'))
+  })
 })
+
+function tmpProject(cfg: Record<string, unknown>): string {
+  const d = mkdtempSync(path.join(tmpdir(), 'orc-cfg-'))
+  mkdirSync(path.join(d, '.orc'), { recursive: true })
+  writeFileSync(path.join(d, '.orc', 'config.json'), JSON.stringify(cfg))
+  return d
+}
 
 function withEnv(vars: Record<string, string>, fn: () => void): void {
   const prev = Object.fromEntries(Object.keys(vars).map(k => [k, process.env[k]]))

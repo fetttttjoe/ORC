@@ -19,7 +19,8 @@ const settingsSchema = (dir: string) =>
     workspaceRoot: z.string().default(path.join(dir, '.orc', 'workspaces')),
     ollamaBaseUrl: z.url().default('http://localhost:11434'),
     costOverrides: z.record(z.string(), z.record(z.string(), ModelCost)).default({}),
-    skillsDir: z.string().default(path.join('vault', 'skills')).transform(p => path.resolve(dir, p)),
+    vaultDir: z.string().default(path.join(dir, 'vault')).transform(p => path.resolve(dir, p)),
+    skillsDir: z.string().optional().transform(p => (p === undefined ? undefined : path.resolve(dir, p))),
     extensions: z.array(z.string()).default([]),
     mcpServers: z.record(z.string().regex(MCP_SERVER_ID_RE), McpServerConfig).default({}),
   })
@@ -35,10 +36,11 @@ const envOverrides = (): Record<string, string> => {
 }
 
 // derived from the schema so a new setting can never drift out of the type
-export type OrcConfig = z.infer<ReturnType<typeof settingsSchema>> & {
+export type OrcConfig = Omit<z.infer<ReturnType<typeof settingsSchema>>, 'skillsDir'> & {
   dir: string
   systemDatabaseUrl: string
   appVersion: string
+  skillsDir: string
 }
 
 export function deriveSystemUrl(databaseUrl: string): string {
@@ -65,6 +67,7 @@ export function loadConfig(dir: string = process.cwd()): OrcConfig {
   return {
     ...parsed.data,
     dir,
+    skillsDir: parsed.data.skillsDir ?? path.join(parsed.data.vaultDir, 'skills'),
     systemDatabaseUrl: deriveSystemUrl(parsed.data.databaseUrl),
     appVersion: APP_VERSION,
   }
