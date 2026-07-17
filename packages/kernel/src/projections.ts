@@ -89,6 +89,7 @@ export function fold(events: EventRecord[]): State {
       }
       case EVENT_KIND.run_started: {
         const p = e.payload as { planVersion: number; retryIndex: number; workflowId: string; cwd: string | null }
+        if (!e.taskId) break
         const runs = state.runs.get(e.taskId) ?? []
         runs.push({ planVersion: p.planVersion, retryIndex: p.retryIndex, workflowId: p.workflowId, cwd: p.cwd })
         state.runs.set(e.taskId, runs)
@@ -96,6 +97,7 @@ export function fold(events: EventRecord[]): State {
       }
       case EVENT_KIND.step_started: {
         const p = e.payload as { stepId: string; attempt: number }
+        if (!e.taskId) break
         setStep(e.taskId, {
           stepId: p.stepId, runToken: e.runToken!, attempt: p.attempt,
           status: STEP_RUN_STATUS.running, iterations: 0, output: null, failure: null,
@@ -104,6 +106,7 @@ export function fold(events: EventRecord[]): State {
       }
       case EVENT_KIND.agent_call: {
         const p = e.payload as { stepId: string; iteration: number }
+        if (!e.taskId) break
         const s = stepOf(e.taskId, p.stepId)
         if (s && s.runToken === e.runToken) s.iterations = Math.max(s.iterations, p.iteration)
         if (e.usage) state.usage.set(e.taskId, addUsage(state.usage.get(e.taskId) ?? ZERO_USAGE, e.usage))
@@ -113,9 +116,12 @@ export function fold(events: EventRecord[]): State {
       case EVENT_KIND.tool_call:
       case EVENT_KIND.tool_result:
       case EVENT_KIND.signal_received:
+      case EVENT_KIND.memory_written:
+      case EVENT_KIND.memory_deleted:
         break // traceability only; no state derivation
       case EVENT_KIND.step_completed: {
         const p = e.payload as { stepId: string; summary: string }
+        if (!e.taskId) break
         const s = stepOf(e.taskId, p.stepId)
         if (s && s.runToken === e.runToken) {
           s.status = STEP_RUN_STATUS.completed
@@ -125,6 +131,7 @@ export function fold(events: EventRecord[]): State {
       }
       case EVENT_KIND.step_failed: {
         const p = e.payload as { stepId: string; class: FailureClass; message: string }
+        if (!e.taskId) break
         const s = stepOf(e.taskId, p.stepId)
         if (s && s.runToken === e.runToken) {
           s.status = STEP_RUN_STATUS.failed

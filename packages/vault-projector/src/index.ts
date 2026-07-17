@@ -30,7 +30,7 @@ export function createVaultProjector(opts: { log: EventLog; config: { vaultDir: 
     await renderRoot()
   }
   const renderAll = async (): Promise<void> => {
-    const byTask = new Set((await log.all()).map(e => e.taskId))
+    const byTask = new Set((await log.all()).filter(e => e.taskId).map(e => e.taskId!))
     for (const id of byTask) writeVaultFiles(vaultDir, renderTaskFiles(id, await log.byTask(id)))
     await renderRoot()
   }
@@ -40,12 +40,14 @@ export function createVaultProjector(opts: { log: EventLog; config: { vaultDir: 
     start: async () => {
       await renderAll()
       unsub = await log.subscribe({}, e => {
-        const prev = timers.get(e.taskId)
+        if (!e.taskId) return // ponytail: memory events are project-scoped, not task-scoped
+        const taskId = e.taskId
+        const prev = timers.get(taskId)
         if (prev) clearTimeout(prev)
         // coalesce a burst into one render per task (spec §5) — not a poll
-        timers.set(e.taskId, setTimeout(() => {
-          timers.delete(e.taskId)
-          renderTask(e.taskId).catch(err => console.warn(`vault render failed: ${err instanceof Error ? err.message : String(err)}`))
+        timers.set(taskId, setTimeout(() => {
+          timers.delete(taskId)
+          renderTask(taskId).catch(err => console.warn(`vault render failed: ${err instanceof Error ? err.message : String(err)}`))
         }, 50))
       })
     },

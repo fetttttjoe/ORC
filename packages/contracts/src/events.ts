@@ -2,11 +2,13 @@ import { z } from 'zod'
 import { TaskNode, TaskStatus } from './task'
 import { Plan } from './plan'
 import { FailureClass, Signal, Usage } from './execution'
+import { MemoryNoteInput, MemoryAuthor } from './memory'
 
 export const EventKind = z.enum([
   'task_created', 'plan_proposed', 'plan_edited', 'plan_approved', 'task_status_changed',
   'run_started', 'step_started', 'skill_loaded', 'agent_call', 'tool_call', 'tool_result',
   'signal_received', 'step_completed', 'step_failed',
+  'memory_written', 'memory_deleted',
 ])
 export type EventKind = z.infer<typeof EventKind>
 
@@ -80,10 +82,16 @@ export const PAYLOAD_SCHEMAS: Record<EventKind, z.ZodType> = {
     class: FailureClass,
     message: z.string(),
   }),
+  memory_written: z.object({ note: MemoryNoteInput, author: MemoryAuthor }),
+  memory_deleted: z.object({
+    id: z.string().regex(/^[a-z0-9][a-z0-9-]*$/),
+    scope: z.string(),
+    author: MemoryAuthor,
+  }),
 }
 
 export const EventInput = z.object({
-  taskId: z.string().min(1),
+  taskId: z.string().min(1).nullable(),
   stepId: z.string().min(1).nullable(),
   runToken: z.string().min(1).nullable(),
   kind: EventKind,

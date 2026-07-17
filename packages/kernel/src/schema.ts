@@ -5,7 +5,7 @@ export const events = pgTable(
   'events',
   {
     seq: bigint('seq', { mode: 'number' }).primaryKey().generatedAlwaysAsIdentity(),
-    taskId: text('task_id').notNull(),
+    taskId: text('task_id'),
     stepId: text('step_id'),
     runToken: text('run_token'),
     kind: text('kind').$type<EventKind>().notNull(),
