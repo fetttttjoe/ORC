@@ -5,7 +5,7 @@
   "workspaces": ["packages/*", "plugins/*"],
   "scripts": {
     "test": "bun test",
-    "typecheck": "tsc --noEmit -p packages/contracts && tsc --noEmit -p packages/kernel && tsc --noEmit -p packages/cli && tsc --noEmit -p plugins/provider-anthropic && tsc --noEmit -p plugins/provider-openai && tsc --noEmit -p plugins/provider-ollama && tsc --noEmit -p plugins/executor-api-loop",
+    "typecheck": "tsc --noEmit -p packages/contracts && tsc --noEmit -p packages/kernel && tsc --noEmit -p packages/cli && tsc --noEmit -p plugins/provider-anthropic && tsc --noEmit -p plugins/provider-openai && tsc --noEmit -p plugins/provider-ollama && tsc --noEmit -p plugins/executor-api-loop && tsc --noEmit -p plugins/mcp-client",
     "db:up": "docker compose up -d --wait"
   },
   "devDependencies": {
