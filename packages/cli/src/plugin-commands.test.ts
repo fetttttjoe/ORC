@@ -1,5 +1,5 @@
 import { afterAll, afterEach, describe, expect, it, mock, spyOn } from 'bun:test'
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -32,12 +32,12 @@ async function makeCli(dir: string) {
     executors: new Map([['api-loop', { id: 'api-loop', startTurn: async function* () {} } as never]]),
   })
   const hub = createMcpHub(config.mcpServers, new Set(host.trust.mcp))
-  const { kernel } = await openKernel(db.url, { refValidator: host.refValidator })
+  const { kernel, log } = await openKernel(db.url, { refValidator: host.refValidator })
   const lines: string[] = []
   spyOn(console, 'log').mockImplementation((...a: unknown[]) => { lines.push(a.join(' ')) })
   const run = (...args: string[]) =>
-    buildProgram(kernel, undefined, { host, hub, config }).parseAsync(args, { from: 'user' })
-  return { run, lines, dir, host, hub }
+    buildProgram(kernel, undefined, { host, hub, config, log }).parseAsync(args, { from: 'user' })
+  return { run, lines, dir, host, hub, kernel, config }
 }
 
 describe('plugin commands', () => {
@@ -102,5 +102,15 @@ describe('plugin commands', () => {
       }],
     }))
     await expect(run('propose', taskId, '--file', draftFile)).rejects.toThrow(/not trusted/)
+  })
+
+  it('orc vault render writes the task tree', async () => {
+    const dir = project({})
+    const { run, lines, kernel, config } = await makeCli(dir)
+    const t = await kernel.createTask({ title: 'demo', spec: 'do it' })
+    await run('vault', t.id)
+    const idx = path.join(config.vaultDir, 'tasks', t.id, 'index.md')
+    expect(existsSync(idx)).toBe(true)
+    expect(lines.join('\n')).toContain('vault rendered')
   })
 })

@@ -18,7 +18,7 @@ try {
   await buildProgram(
     kernel,
     async () => (runtime.port ??= await buildRuntime({ ...plugins, config, log })),
-    { host: plugins.host, hub: plugins.hub, config },
+    { host: plugins.host, hub: plugins.hub, config, log },
   ).parseAsync(process.argv)
   if (runtime.port) await runtime.port.shutdown()
   else { await plugins.hub.close(); await plugins.host.shutdown() }

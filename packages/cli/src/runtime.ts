@@ -4,6 +4,7 @@ import { createAnthropicProvider } from '@orc/provider-anthropic'
 import { createOpenAIProvider } from '@orc/provider-openai'
 import { createOllamaProvider } from '@orc/provider-ollama'
 import { createMcpHub, type McpHub } from '@orc/mcp-client'
+import { createVaultProjector } from '@orc/vault-projector'
 import { createDbosPort, createPluginHost, loadConfig, EventLog, type DbosPort, type OrcConfig, type PluginHost } from '@orc/kernel'
 
 export function seedRegistries(config = loadConfig()) {
@@ -36,10 +37,13 @@ export async function buildRuntime(
     skills: host.skills, tools: hub,
   })
   await port.launch()
+  const projector = createVaultProjector({ log, config })
+  await projector.start()
   host.skills.watch() // hot-index during long-lived runs (spec quality scenario: <1s)
   return {
     ...port,
     shutdown: async () => {
+      await projector.close()
       await hub.close()
       await host.shutdown() // fires session_shutdown, deactivates extensions, stops the watcher
       await port.shutdown()
