@@ -57,28 +57,32 @@ describe('exec commands', () => {
     expect(calls).toContain(`start:${id}:/tmp/shared-ws`)
   })
 
-  it('run drains events written in the final poll window before printing the outcome', async () => {
-    const { run, lines, kernel, db } = await makeCli('blocked')
+  it('run drains events committed in the final window before printing the outcome', async () => {
+    const db = await createTestDb()
+    dbs.push(db)
+    const { kernel } = await openKernel(db.url)
+    const lines: string[] = []
+    spyOn(console, 'log').mockImplementation((...a: unknown[]) => { lines.push(a.join(' ')) })
+    const run = async (...args: string[]) => buildProgram(kernel, async () => port).parseAsync(args, { from: 'user' })
     const id = await approvedTask(run, lines)
     lines.length = 0
 
-    // Simulate the real race: the workflow's terminal event lands in the DB right after the
-    // tail loop's one poll fetch reads its snapshot, then handle.wait() settles — the pre-fix
-    // code exits the loop right there and never looks again.
-    const real = kernel.eventsSince.bind(kernel)
+    // Simulate the real race: the workflow's terminal event commits exactly as handle.wait()
+    // resolves — possibly before the push subscription's NOTIFY round-trip is delivered. The
+    // finally-block drain (a direct query, not NOTIFY-dependent) must still surface it, whether
+    // or not the live subscription got there first.
     const rawLog = await EventLog.open(db.url)
-    let calls = 0
-    spyOn(kernel, 'eventsSince').mockImplementation(async (taskId: string, afterSeq: number) => {
-      calls++
-      const snapshot = await real(taskId, afterSeq)
-      if (calls === 1) {
+    const handle: RunHandle = {
+      workflowId: 'run:x:v1',
+      wait: async () => {
         await rawLog.append({
           taskId: id, stepId: 's1', runToken: 'r1', kind: 'step_failed',
           payload: { stepId: 's1', runToken: 'r1', class: 'agent_error', message: 'blocked: boom' },
         })
-      }
-      return snapshot // call #1 (the loop's poll) returns the pre-append snapshot either way
-    })
+        return 'blocked'
+      },
+    }
+    const port: ExecutionPort = { startRun: async () => handle, retry: async () => handle, cancelRun: async () => {} }
 
     try {
       await run('run', id)

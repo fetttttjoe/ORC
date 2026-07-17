@@ -96,6 +96,10 @@ export class Kernel {
     return this.log.byTaskSince(taskId, afterSeq)
   }
 
+  subscribe(opts: { fromSeq?: number }, handler: (e: EventRecord) => void | Promise<void>): Promise<() => Promise<void>> {
+    return this.log.subscribe(opts, handler)
+  }
+
   private async stateOf(ops: EventLogOps): Promise<State> {
     return fold(await ops.all())
   }
