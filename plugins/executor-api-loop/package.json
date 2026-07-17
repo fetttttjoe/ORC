@@ -9,5 +9,9 @@
     "@orc/contracts": "workspace:*",
     "ai": "^7.0.30",
     "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@orc/provider-anthropic": "workspace:*",
+    "@orc/provider-ollama": "workspace:*"
   }
 }
