@@ -235,7 +235,10 @@ export async function createDbosPort(opts: {
       // ADAPTATION: registerQueue requires DBOS already launched in @dbos-inc/dbos-sdk v4.23 (see report)
       await DBOS.registerQueue(QUEUE, { concurrency: config.concurrency, workerConcurrency: config.concurrency })
     },
-    shutdown: () => DBOS.shutdown(),
+    // deregister clears the workflow/queue registries so a fresh port can re-register in the
+    // same process — required when >1 port is created per process (integration tests); a no-op
+    // at real process exit. (DBOS docs: use deregister when re-registering functions.)
+    shutdown: () => DBOS.shutdown({ deregister: true }),
     startRun: (taskId, o) => startRunAt(taskId, 0, o?.cwd),
     retry: async (taskId, o) => {
       const state = await foldState(taskId)

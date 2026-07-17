@@ -6,9 +6,10 @@ approval, multi-provider agent dispatch, plugin-first. Design spec:
 
 ## Status
 
-M2 (execution) — approved plans run on durable DBOS workflows across
-Anthropic / OpenAI / Ollama, with full event-log traceability, typed
-signals, cost accounting, and kill -9 resume. Plugins (M3), vault (M4),
+M3 (plugins) — the plugin host is live: SKILL.md skills are hot-indexed from
+`vault/skills/` and force-loaded into steps, MCP servers plug in as
+trust-gated tool providers, and in-process TypeScript extensions can register
+providers/executors and observe every event. Vault (M4) and
 recursion/strategies (M5) follow the roadmap in `docs/superpowers/plans/`.
 
 ## Stack
@@ -33,6 +34,11 @@ orc plan <task-id>              # review it
 orc approve <task-id>           # the human gate
 orc run <task-id>               # durable execution with live event tail
 orc status <task-id>            # per-step state + token/cost totals
+orc skills                      # indexed SKILL.md skills (vault/skills/<name>/SKILL.md)
+orc mcp list                    # declared MCP servers + trust state
+orc mcp trust <id>              # local consent (writes .orc/trust.json — never commit it)
+orc mcp tools <id>              # spawn a trusted server, list its tools
+orc ext list                    # declared T2 extensions + trust state
 orc retry <task-id>             # re-run failed steps after a block
 ```
 
@@ -44,6 +50,10 @@ completed model call is ever re-billed.
 ## Operational notes
 
 - `ORC_DATABASE_URL` overrides the default `postgresql://postgres:orc@localhost:5433/orc`.
+- Plugins: `.orc/config.json` *declares* (`mcpServers`, `extensions`, `skillsDir`);
+  `.orc/trust.json` *grants* — created only by `orc mcp trust` / `orc ext trust`,
+  never commit it. Steps opt into tools/skills via `toolRefs` / `skillRefs`;
+  plans referencing unknown or untrusted refs fail at propose time.
 - Never bundle the CLI (`bun build`): DBOS must run unbundled via `bun run`.
 - Upgrading orc: finish or `orc cancel` active runs first — DBOS recovery is
   keyed to the app version (`DBOS__APPVERSION`).
