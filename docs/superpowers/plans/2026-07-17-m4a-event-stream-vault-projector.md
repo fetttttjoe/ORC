@@ -1016,50 +1016,115 @@ git commit -m "feat: wire vault projector into runtime and CLI"
 
 ---
 
-### Task 8: Integration — full run projects a live vault
+### Task 8: End-to-end — a real run projects a live vault
+
+Genuine end-to-end: drive a **real run through the DBOS port** with a fake executor that emits a realistic transcript (agent text + a `fs_write` tool call/result + a success signal), with the projector **live-subscribed** (`start()`) throughout. Then assert the vault reflects the completed run — the mermaid working graph, the session transcript (tool call + agent text + signal), the log with every event kind, and the root index. This exercises the whole M4a stack end to end: `subscribe` (live) → `fold`/renderer → writer → disk, over real run events.
 
 **Files:**
-- Test: `packages/kernel/src/execution/vault-run.test.ts` (new; mirrors `mcp-run.test.ts` harness)
+- Test: `packages/kernel/src/execution/vault-run.test.ts` (new; mirrors the `dbos-port.test.ts` real-run harness)
 
 **Interfaces:**
-- Consumes: everything above; the fake-provider run harness from `test-helpers` / existing port tests.
+- Consumes: `createDbosPort` + `port.launch/startRun/shutdown`; `createVaultProjector` (`start`/`close`); `fakeProvider`/`createTestDb` from `test-helpers`; `draftFixture`/`stepFixture`.
 
-- [ ] **Step 1: Write the integration test**
+- [ ] **Step 1: Write the end-to-end test**
 
 ```ts
 // packages/kernel/src/execution/vault-run.test.ts
-import { afterEach, describe, expect, it } from 'bun:test'
+import { afterAll, beforeAll, describe, expect, it } from 'bun:test'
 import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import { createTestDb } from '../test-helpers'
+import {
+  EVENT_KIND, SIGNAL_OUTCOME,
+  type AgentExecutor, type EventDraft, type ExecutorContext, type UnifiedEvent,
+} from '@orc/contracts'
+import { draftFixture, stepFixture } from '@orc/contracts/fixtures'
 import { EventLog } from '../eventlog'
 import { Kernel } from '../kernel'
-import { createVaultProjector } from '@orc/vault-projector'
-import { draftFixture, stepFixture } from '@orc/contracts/fixtures'
+import { loadConfig, deriveSystemUrl } from '../config'
+import { createTestDb, fakeProvider } from '../test-helpers'
+import { createDbosPort, type DbosPort } from './dbos-port'
+import { createVaultProjector, type VaultProjector } from '@orc/vault-projector'
 
-const dbs: Array<{ drop: () => Promise<void> }> = []
-const dirs: string[] = []
-afterEach(async () => { for (const d of dbs.splice(0)) await d.drop(); for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true }) })
+// fake executor emitting a realistic transcript: agent text + a tool call/result + a success signal
+function fakeExecutor(): AgentExecutor<unknown> {
+  return {
+    id: 'api-loop',
+    async *startTurn(ctx: ExecutorContext<unknown>): AsyncIterable<UnifiedEvent> {
+      const base = { stepId: ctx.step.id, runToken: ctx.runToken }
+      await ctx.checkpoint('model:1', async () => 'ok', (): EventDraft[] => [
+        { kind: EVENT_KIND.agent_call, payload: { ...base, iteration: 1, request: {}, response: { text: 'writing the file' } }, usage: { inputTokens: 5, outputTokens: 3, costUSD: 0.001, estimated: false } },
+      ])
+      await ctx.checkpoint('tools:1', async () => 'ok', (): EventDraft[] => [
+        { kind: EVENT_KIND.tool_call, payload: { ...base, iteration: 1, toolCallId: 'c1', toolName: 'fs_write', input: { path: 'out.txt' } } },
+        { kind: EVENT_KIND.tool_result, payload: { ...base, iteration: 1, toolCallId: 'c1', toolName: 'fs_write', output: { written: 'out.txt' }, isError: false } },
+      ])
+      const signal = { ...base, outcome: SIGNAL_OUTCOME.success, summary: 'done: wrote out.txt' }
+      await ctx.checkpoint('signal:1', async () => signal, (): EventDraft[] => [
+        { kind: EVENT_KIND.signal_received, payload: { ...base, signal } },
+      ])
+      yield { type: 'signal', signal }
+      yield { type: 'done' }
+    },
+  }
+}
 
-describe('vault projection over a run', () => {
-  it('renders task/plan/log/sessions after approving and folding a run log', async () => {
-    const db = await createTestDb(); dbs.push(db)
-    const vaultDir = mkdtempSync(path.join(tmpdir(), 'orc-vrun-')); dirs.push(vaultDir)
-    const log = await EventLog.open(db.url)
-    const kernel = new Kernel(log)
-    const t = await kernel.createTask({ title: 'demo', spec: 'do it' })
+describe('vault projection over a real run (e2e)', () => {
+  let kernel: Kernel
+  let port: DbosPort
+  let projector: VaultProjector
+  let log: EventLog
+  let vaultDir: string
+  let teardown: () => Promise<void>
+
+  beforeAll(async () => {
+    const db = await createTestDb()
+    vaultDir = mkdtempSync(path.join(tmpdir(), 'orc-e2e-'))
+    log = await EventLog.open(db.url)
+    kernel = new Kernel(log)
+    const config = { ...loadConfig(), databaseUrl: db.url, systemDatabaseUrl: deriveSystemUrl(db.url), vaultDir }
+    port = await createDbosPort({
+      log, config,
+      providers: new Map([['fake', fakeProvider]]),
+      executors: new Map([['api-loop', fakeExecutor()]]),
+    })
+    await port.launch()
+    projector = createVaultProjector({ log, config })
+    await projector.start() // live subscribe for the whole run
+    teardown = async () => {
+      await projector.close()
+      await port.shutdown()
+      await log.close()
+      rmSync(vaultDir, { recursive: true, force: true })
+      await db.drop()
+    }
+  })
+  afterAll(() => teardown())
+
+  it('projects the full run: working-graph DAG, session transcript, log, root index', async () => {
+    const t = await kernel.createTask({ title: 'e2e demo', spec: 'write a file' })
     await kernel.proposePlan(t.id, draftFixture([stepFixture({ id: 's1', modelRef: 'fake/m' })]))
     await kernel.approvePlan(t.id)
 
-    const projector = createVaultProjector({ log, config: { vaultDir } })
-    await projector.renderAll()
-    await projector.close()
+    const handle = await port.startRun(t.id)
+    expect(await handle.wait()).toBe('done')
 
-    expect(readFileSync(path.join(vaultDir, `tasks/${t.id}/index.md`), 'utf8')).toContain('graph TD')
-    expect(existsSync(path.join(vaultDir, `tasks/${t.id}/plan-v1.md`))).toBe(true)
-    expect(readFileSync(path.join(vaultDir, `tasks/${t.id}/log.md`), 'utf8')).toContain('plan_approved')
-    await log.close()
+    await projector.close() // final authoritative sync (also flushes any live-debounced render)
+
+    const idx = readFileSync(path.join(vaultDir, `tasks/${t.id}/index.md`), 'utf8')
+    expect(idx).toContain('type: task')
+    expect(idx).toContain('graph TD') // live working graph rendered
+
+    const session = readFileSync(path.join(vaultDir, `tasks/${t.id}/sessions/s1.md`), 'utf8')
+    expect(session).toContain('fs_write')            // tool call in the transcript
+    expect(session).toContain('writing the file')    // agent text
+    expect(session).toContain('done: wrote out.txt') // signal summary
+
+    const logMd = readFileSync(path.join(vaultDir, `tasks/${t.id}/log.md`), 'utf8')
+    for (const kind of ['run_started', 'step_started', 'agent_call', 'tool_call', 'tool_result', 'signal_received', 'step_completed'])
+      expect(logMd).toContain(kind)
+
+    expect(existsSync(path.join(vaultDir, 'index.md'))).toBe(true)
   })
 })
 ```
@@ -1067,18 +1132,18 @@ describe('vault projection over a run', () => {
 - [ ] **Step 2: Run + verify**
 
 Run: `bun test packages/kernel/src/execution/vault-run.test.ts`
-Expected: PASS.
+Expected: PASS. (This is a real DBOS-port run — like `dbos-port.test.ts` it may time out only under heavy PARALLEL full-suite load; it passes reliably run on its own. If the full suite shows only this + the pre-existing `dbos-port.test.ts` timing out under parallel load, rerun both files alone to confirm.)
 
 - [ ] **Step 3: Full suite + typecheck**
 
 Run: `bun test && bun run typecheck`
-Expected: all pass (existing suites unaffected: new event stream is additive; no new event kinds; replay identity holds).
+Expected: all pass (per-package if the combined-invocation exit flake appears — see Global Constraints). Existing suites unaffected: the event stream is additive, no new event kinds, replay identity holds.
 
 - [ ] **Step 4: Commit**
 
 ```bash
 git add packages/kernel/src/execution/vault-run.test.ts
-git commit -m "test: vault projection over a full task log"
+git commit -m "test: e2e vault projection over a real port run"
 ```
 
 ---
