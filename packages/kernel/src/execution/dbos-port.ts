@@ -3,9 +3,10 @@ import path from 'node:path'
 import { DBOS } from '@dbos-inc/dbos-sdk'
 import {
   EVENT_KIND, FAILURE_CLASS, RUN_OUTCOME, SIGNAL_OUTCOME, TASK_STATUS,
-  isTerminalError, resolveModel, costUSDFor,
+  classifiedError, failureClassOf, isTerminalError, resolveModel, costUSDFor,
   type AgentExecutor, type Checkpoint, type EventDraft, type ExecutionPort, type ExecutorContext,
-  type ModelProvider, type Plan, type RunHandle, type RunOutcome, type Signal,
+  type FailureClass, type LoadedSkill, type ModelProvider, type Plan, type ResolvedTool,
+  type RunHandle, type RunOutcome, type Signal, type ToolSource,
 } from '@orc/contracts'
 import { EventLog } from '../eventlog'
 import { fold, completedStepIds, nextAttempts, taskUsage, type State } from '../projections'
@@ -33,8 +34,10 @@ export async function createDbosPort(opts: {
   config: OrcConfig
   providers: Map<string, ModelProvider<unknown>>
   executors: Map<string, AgentExecutor<unknown>>
+  skills?: { load(name: string): Promise<LoadedSkill> }
+  tools?: ToolSource
 }): Promise<DbosPort> {
-  const { log, config, providers, executors } = opts
+  const { log, config, providers, executors, skills, tools } = opts
 
   const foldState = async (taskId: string): Promise<State> => fold(await log.byTask(taskId))
 
@@ -70,8 +73,23 @@ export async function createDbosPort(opts: {
         const task = state.tasks.get(args.taskId)!
         const depOutputs: Record<string, string> = {}
         for (const dep of step.dependsOn) depOutputs[dep] = state.steps.get(args.taskId)?.get(dep)?.output ?? ''
-        return { step, taskSpec: task.spec, budgetUSD: task.budgetUSD, depOutputs }
-      }, () => [{ kind: EVENT_KIND.step_started, payload: { stepId: args.stepId, runToken, attempt: args.attempt } }])
+        const loadedSkills: LoadedSkill[] = []
+        for (const ref of step.skillRefs) {
+          if (!skills) throw classifiedError(FAILURE_CLASS.validation_error, `step declares skill '${ref}' but no skill index is configured`)
+          try {
+            loadedSkills.push(await skills.load(ref))
+          } catch (err) {
+            throw classifiedError(FAILURE_CLASS.validation_error, `skill '${ref}': ${err instanceof Error ? err.message : String(err)}`)
+          }
+        }
+        return { step, taskSpec: task.spec, budgetUSD: task.budgetUSD, depOutputs, skills: loadedSkills }
+      }, r => [
+        { kind: EVENT_KIND.step_started, payload: { stepId: args.stepId, runToken, attempt: args.attempt } },
+        ...r.skills.map(s => ({
+          kind: EVENT_KIND.skill_loaded,
+          payload: { stepId: args.stepId, runToken, name: s.name, hash: s.hash },
+        })),
+      ])
 
       const executor = executors.get(init.step.executorRef)
       if (!executor) return await finishFailed(checkpoint, args, runToken, `no executor '${init.step.executorRef}'`)
@@ -80,12 +98,24 @@ export async function createDbosPort(opts: {
       const workspaceDir = args.cwd ?? path.join(config.workspaceRoot, args.taskId, args.stepId)
       await checkpoint('workspace', async () => { mkdirSync(workspaceDir, { recursive: true }); return workspaceDir })
 
+      // tool resolution is idempotent infra that spawns servers and returns closures — it records
+      // nothing, so it lives in the workflow body (not a checkpoint) and re-runs cleanly on recovery.
+      let extraTools: ResolvedTool[] = []
+      if (init.step.toolRefs.length > 0) {
+        if (!tools) return await finishFailed(checkpoint, args, runToken, `step declares toolRefs but no tool source is configured`, FAILURE_CLASS.validation_error)
+        try {
+          extraTools = await tools.resolve(init.step.toolRefs)
+        } catch (err) {
+          return await finishFailed(checkpoint, args, runToken, err instanceof Error ? err.message : String(err), FAILURE_CLASS.validation_error)
+        }
+      }
+
       const ctx: ExecutorContext<unknown> = {
         step: init.step,
         taskSpec: init.taskSpec,
         depOutputs: init.depOutputs,
-        skills: [],
-        extraTools: [],
+        skills: init.skills,
+        extraTools,
         model,
         runToken,
         workspaceDir,
@@ -119,7 +149,9 @@ export async function createDbosPort(opts: {
       ])
       return { stepId: args.stepId, ok: false }
       } catch (err) {
-        return finishFailed(checkpoint, args, runToken, err instanceof Error ? err.message : String(err))
+        return finishFailed(checkpoint, args, runToken,
+          err instanceof Error ? err.message : String(err),
+          failureClassOf(err) ?? FAILURE_CLASS.agent_error)
       }
     },
     { name: 'orcStep' },
@@ -260,9 +292,10 @@ function priceDraft(d: EventDraft, provider: ModelProvider<unknown>, modelId: st
 
 async function finishFailed(
   checkpoint: Checkpoint, args: StepArgs, runToken: string, message: string,
+  cls: FailureClass = FAILURE_CLASS.agent_error,
 ): Promise<StepResult> {
   await checkpoint('finish', async () => message, () => [
-    { kind: EVENT_KIND.step_failed, payload: { stepId: args.stepId, runToken, class: FAILURE_CLASS.agent_error, message } },
+    { kind: EVENT_KIND.step_failed, payload: { stepId: args.stepId, runToken, class: cls, message } },
   ])
   return { stepId: args.stepId, ok: false }
 }

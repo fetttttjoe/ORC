@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from 'bun:test'
 import {
-  EVENT_KIND, SIGNAL_OUTCOME, TASK_STATUS,
+  EVENT_KIND, FAILURE_CLASS, SIGNAL_OUTCOME, TASK_STATUS,
   type AgentExecutor, type EventDraft, type ExecutorContext, type PlanDraft, type UnifiedEvent,
 } from '@orc/contracts'
 import { draftFixture, stepFixture } from '@orc/contracts/fixtures'
@@ -22,7 +22,7 @@ function fakeExecutor(): AgentExecutor<unknown> {
       const taskId = ctx.runToken.split(':')[1]!
       const behavior = behaviors.get(taskId) ?? {}
       const outcome = behavior[ctx.step.id] === 'fail' ? SIGNAL_OUTCOME.failure : SIGNAL_OUTCOME.success
-      const summary = `${ctx.step.id}:${outcome} deps=[${Object.keys(ctx.depOutputs).sort().join(',')}]`
+      const summary = `${ctx.step.id}:${outcome} deps=[${Object.keys(ctx.depOutputs).sort().join(',')}] skills=[${ctx.skills.map(s => s.name)}] tools=[${ctx.extraTools.map(t => t.name)}]`
       const signal = { stepId: ctx.step.id, runToken: ctx.runToken, outcome, summary }
       await ctx.checkpoint(
         'model:1',
@@ -59,16 +59,32 @@ describe('DBOS execution port (integration)', () => {
       log, config,
       providers: new Map([['fake', fakeProvider]]),
       executors: new Map([['api-loop', fakeExecutor()]]),
+      skills: {
+        load: async (name: string) => {
+          if (name === 'ghost-skill') throw new Error(`unknown skill 'ghost-skill'`)
+          return { name, body: `body of ${name}`, hash: `hash-${name}` }
+        },
+      },
+      tools: {
+        close: async () => {},
+        resolve: async (refs: string[]) => refs.map(ref => {
+          if (ref === 'fixture/nosuch') throw new Error(`unknown tool 'nosuch' on MCP server 'fixture'`)
+          return {
+            ref, name: `mcp__${ref.replaceAll('/', '__')}`, description: 'd', inputSchema: {},
+            execute: async () => ({ output: { ok: true }, isError: false }),
+          }
+        }),
+      },
     })
     await port.launch()
     teardown = async () => { await port.shutdown(); await log.close(); await db.drop() }
   })
   afterAll(async () => { await teardown() })
 
-  async function approvedTask(behavior: Record<string, 'ok' | 'fail'> = {}) {
+  async function approvedTask(behavior: Record<string, 'ok' | 'fail'> = {}, draft: PlanDraft = twoStepDraft()) {
     const t = await kernel.createTask({ title: 'exec test', spec: 'run the dag' })
     behaviors.set(t.id, behavior)
-    await kernel.proposePlan(t.id, twoStepDraft())
+    await kernel.proposePlan(t.id, draft)
     await kernel.approvePlan(t.id)
     return t
   }
@@ -145,5 +161,45 @@ describe('DBOS execution port (integration)', () => {
     expect(await (await port.startRun(t.id)).wait()).toBe('done')
     await expect(port.retry(t.id)).rejects.toThrow(/blocked/) // done — nothing to retry
     expect((await kernel.state()).runs.get(t.id)).toHaveLength(1)
+  })
+
+  it('force-loads skills: skill_loaded events in init, bodies handed to the executor', async () => {
+    const t = await approvedTask({}, draftFixture([stepFixture({ skillRefs: ['style-guide'] })]))
+    const handle = await port.startRun(t.id)
+    expect(await handle.wait()).toBe('done')
+    const events = await kernel.eventsFor(t.id)
+    const loaded = events.filter(e => e.kind === EVENT_KIND.skill_loaded)
+    expect(loaded).toHaveLength(1)
+    expect(loaded[0]!.payload).toMatchObject({ name: 'style-guide', hash: 'hash-style-guide' })
+    const done = events.find(e => e.kind === EVENT_KIND.step_completed)
+    expect((done!.payload as { summary: string }).summary).toContain('skills=[style-guide]')
+  })
+
+  it('resolves toolRefs into executor extraTools', async () => {
+    const t = await approvedTask({}, draftFixture([stepFixture({ toolRefs: ['fixture/echo'] })]))
+    const handle = await port.startRun(t.id)
+    expect(await handle.wait()).toBe('done')
+    const done = (await kernel.eventsFor(t.id)).find(e => e.kind === EVENT_KIND.step_completed)
+    expect((done!.payload as { summary: string }).summary).toContain('tools=[mcp__fixture__echo]')
+  })
+
+  it('unknown skill fails the step as validation_error before any model call', async () => {
+    const t = await approvedTask({}, draftFixture([stepFixture({ skillRefs: ['ghost-skill'] })]))
+    const handle = await port.startRun(t.id)
+    expect(await handle.wait()).toBe('blocked')
+    const events = await kernel.eventsFor(t.id)
+    const failed = events.find(e => e.kind === EVENT_KIND.step_failed)
+    expect((failed!.payload as { class: string }).class).toBe(FAILURE_CLASS.validation_error)
+    expect(events.filter(e => e.kind === EVENT_KIND.agent_call)).toHaveLength(0)
+  })
+
+  it('unknown tool ref fails the step as validation_error before any model call', async () => {
+    const t = await approvedTask({}, draftFixture([stepFixture({ toolRefs: ['fixture/nosuch'] })]))
+    const handle = await port.startRun(t.id)
+    expect(await handle.wait()).toBe('blocked')
+    const events = await kernel.eventsFor(t.id)
+    const failed = events.find(e => e.kind === EVENT_KIND.step_failed)
+    expect((failed!.payload as { class: string }).class).toBe(FAILURE_CLASS.validation_error)
+    expect(events.filter(e => e.kind === EVENT_KIND.agent_call)).toHaveLength(0)
   })
 })
