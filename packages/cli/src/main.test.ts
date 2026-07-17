@@ -1,12 +1,20 @@
-import { afterEach, describe, expect, it, mock, spyOn } from 'bun:test'
+import { afterAll, afterEach, describe, expect, it, mock, spyOn } from 'bun:test'
 import { mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { EVENT_KIND } from '@orc/contracts'
+import { createTestDb } from '@orc/kernel/test-helpers'
 import { buildProgram, openKernel } from './main'
 
-function makeCli() {
-  const kernel = openKernel(mkdtempSync(path.join(tmpdir(), 'orc-')))
+const dbs: Array<{ drop: () => Promise<void> }> = []
+afterAll(async () => {
+  for (const d of dbs) await d.drop()
+})
+
+async function makeCli() {
+  const db = await createTestDb()
+  dbs.push(db)
+  const kernel = await openKernel(db.url)
   const lines: string[] = []
   spyOn(console, 'log').mockImplementation((...a: unknown[]) => {
     lines.push(a.join(' '))
@@ -25,7 +33,7 @@ afterEach(() => {
 
 describe('orc CLI', () => {
   it('new → propose → approve → log round-trip', async () => {
-    const { run, lines } = makeCli()
+    const { run, lines } = await makeCli()
     await run('new', 'hello world', '--spec', 'do things')
     const taskId = lines[0]
     expect(taskId).toMatch(/[0-9a-f-]{36}/)
@@ -46,7 +54,7 @@ describe('orc CLI', () => {
   })
 
   it('plan prints the plan as JSON', async () => {
-    const { run, lines } = makeCli()
+    const { run, lines } = await makeCli()
     await run('new', 'x')
     const taskId = lines[0]
     await run('propose', taskId, '--model', 'ollama/llama3')
@@ -58,7 +66,7 @@ describe('orc CLI', () => {
   })
 
   it('tasks lists id, status and title', async () => {
-    const { run, lines } = makeCli()
+    const { run, lines } = await makeCli()
     await run('new', 'listed task')
     lines.length = 0
     await run('tasks')
@@ -67,7 +75,7 @@ describe('orc CLI', () => {
   })
 
   it('propose --file loads a plan draft from disk', async () => {
-    const { run, lines } = makeCli()
+    const { run, lines } = await makeCli()
     await run('new', 'file task')
     const taskId = lines[0]
 
@@ -99,7 +107,7 @@ describe('orc CLI', () => {
   })
 
   it('propose --file rejects malformed JSON', async () => {
-    const { run, lines } = makeCli()
+    const { run, lines } = await makeCli()
     await run('new', 'bad file task')
     const taskId = lines[0]
 
@@ -110,7 +118,7 @@ describe('orc CLI', () => {
   })
 
   it('edit round-trip bumps the plan version and logs plan_edited', async () => {
-    const { run, lines } = makeCli()
+    const { run, lines } = await makeCli()
     await run('new', 'edit task')
     const taskId = lines[0]
     await run('propose', taskId)
