@@ -42,7 +42,7 @@ Single user (developer) now; contracts designed so a small-team/server mode can 
 ## 2. Constraints
 
 - **TypeScript end-to-end on Bun** (ADR-002, amended 2026-07-16): Bun is package manager, runtime, and test runner; Bun workspaces monorepo; no compiled-JS artifacts.
-- Local-first: state in SQLite + a markdown vault on disk; no server infrastructure required.
+- Local-first: state in SQLite + a markdown vault on disk; no server infrastructure required. *(Amended 2026-07-17, M2 design D1: canonical state lives in Postgres run via a repo-local `docker compose` stack; "no server infrastructure" is relaxed to "local infra via compose". The vault remains files on disk.)*
 - Open protocols at the edges: **MCP** for tools/capability plugins, **SKILL.md (agentskills.io)** for skills, **OKF** for the vault format, **A2A** reserved for future remote-agent interop.
 - Coding convention (user rule, 2026-07-16): no scattered string literals for matched values — production code references statuses/event kinds/tiers/error codes only via const maps derived from the zod enums (`TASK_STATUS`, `EVENT_KIND`, `ISOLATION_TIER`, `KERNEL_ERROR_CODE`).
 - LLM output is inherently non-deterministic; determinism guarantees apply to plan freezing, routing resolution, execution order, and replay — not to model output (user-confirmed).
@@ -113,7 +113,7 @@ All contracts are zod schemas; types are inferred. This package is the API of th
 - **ExtensionManifest** — T2: `{id, hooks, registrations, trust: 'project'|'user'}` with `session_start/session_shutdown` lifecycle.
 - **SandboxProvider** `{tier, acquire(step) → Workspace, release}`.
 - **ApprovalPolicy** — `{default: 'manual'|'auto', rules: [{when: expr(depth, estCost, type), then}]}` evaluated deterministically.
-- **ExecutionPort** — the seam in front of DBOS: `{runStep, waitForSignal, enqueue, sleep}` (ADR-004 hedge).
+- **ExecutionPort** — the seam in front of DBOS: `{runStep, waitForSignal, enqueue, sleep}` (ADR-004 hedge). *(Amended 2026-07-17, M2 design D2: shipped shape is `{startRun, retry, cancelRun}` plus a per-step `checkpoint` capability handed to executors; `waitForSignal` returns in M5 with mid-run gates.)*
 - **Event** — see §8.1.
 - **Signal** — out-of-band typed completion flags, scoped by per-run token (ADR-008).
 
@@ -145,7 +145,7 @@ Typed classification on every failure event: `provider_error` (transient → DBO
 
 ## 7. Deployment View
 
-Single machine, `bun install -g` (npm-compatible registry) delivers `orc`. State: one SQLite file + one vault directory per project (`.orc/state.db`, `vault/`). Long-running execution happens in a foreground `orc run` process (daemon mode later); durable waits mean the process can exit and resume at gates. Local models via the user's Ollama/vLLM endpoint. Small-team path (later): the kernel API is already process-internal RPC-shaped; a server wrapper + auth is additive.
+Single machine, `bun install -g` (npm-compatible registry) delivers `orc`. State: one compose-managed Postgres (event log + DBOS system DB; *amended 2026-07-17, M2 design D1 — previously one SQLite file*) + one vault directory per project (`vault/`). Long-running execution happens in a foreground `orc run` process (daemon mode later); durable waits mean the process can exit and resume at gates. Local models via the user's Ollama/vLLM endpoint. Small-team path (later): the kernel API is already process-internal RPC-shaped; a server wrapper + auth is additive.
 
 ---
 
@@ -185,7 +185,7 @@ Deterministic steps **force-load** `skillRefs` — never rely on the model elect
 
 ### 8.4 Provider seam (R3, R8)
 
-Two layers. **Layer 1**: Vercel AI SDK, direct `@ai-sdk/*` packages (not the Gateway default); local models via OpenAI-compatible `baseUrl`. **Layer 2**: `AgentExecutor` (§5.2) for "run this subtask turn to completion" — where whole agent runtimes plug in. Provider/SDK shapes live below the seam; `raw` passthrough exists for debugging, never for routing. Routing = pure function of config + task metadata, resolved into the plan pre-approval; "best-option" routing is a future plugin whose output is still frozen at approval.
+Two layers. **Layer 1**: Vercel AI SDK, direct `@ai-sdk/*` packages (not the Gateway default); local models via OpenAI-compatible `baseUrl`. *(Amended 2026-07-17, M2 design: Ollama attaches via the community `ai-sdk-ollama` native-API provider instead — Ollama's OpenAI-compatible `/v1` endpoint drops streamed tool calls for some models and can omit usage counts. The two-layer seam itself is unchanged.)* **Layer 2**: `AgentExecutor` (§5.2) for "run this subtask turn to completion" — where whole agent runtimes plug in. Provider/SDK shapes live below the seam; `raw` passthrough exists for debugging, never for routing. Routing = pure function of config + task metadata, resolved into the plan pre-approval; "best-option" routing is a future plugin whose output is still frozen at approval.
 
 ### 8.5 Memory (R6)
 
@@ -210,6 +210,8 @@ Per-run scoped signal tokens (an agent cannot flip another run's flags). MCP per
 **ADR-003 — Two-layer provider seam.** Layer 1 Vercel AI SDK (formal provider spec; local models ≈ free via `baseUrl`); Layer 2 our own bottega-shaped `AgentExecutor`. One layer can't serve both "call a model" and "run Claude Code to completion". OpenRouter = one provider, not an abstraction. LiteLLM Proxy noted as escape hatch for containerized polyglot runners.
 
 **ADR-004 — DBOS Transact behind `ExecutionPort`; canonical state in our own SQLite schema** (Drizzle ORM over `bun:sqlite`, migrations via drizzle-kit — user decision 2026-07-16). Only durable-execution option shaped like a local-first tool (MIT, in-process library, SQLite). Provides retries/backoff, queues, concurrency limits, durable gate-waits. Rejected: Temporal (server cluster; dev-only single binary), Restate (BSL + extra process), Inngest (SSPL + inverted shape). Hedge: plan-is-data means a ~1-2 KLoC event-log fallback stays realistic; the port keeps DBOS swappable. **Bun note:** DBOS is Node-first — validate DBOS-on-Bun at M2 start; if incompatible, either the hand-rolled fallback executes (preferred) or the kernel runs under Node via a Drizzle driver swap (the ORM seam makes this a one-file change).
+
+*Amended 2026-07-17 (M2 design, D1): the M2-start validation ran — DBOS 4.23.6 works cleanly on Bun (incl. kill‑9 recovery), but its TS SDK requires **Postgres**, not SQLite (the "SQLite-shaped" premise was wrong; TS SQLite support is unmerged PR #1288). User decision: DBOS on a compose-managed local Postgres, and the canonical event log moves into the same Postgres (Drizzle driver swap `bun:sqlite` → `node-postgres`). SQLite is removed entirely. The `ExecutionPort` seam and event-log-as-truth are unchanged. Details: `2026-07-17-m2-execution-design.md`.*
 
 **ADR-005 — Three-tier plugin system** (SKILL.md / MCP / jiti extensions). A bespoke subprocess-RPC protocol is strictly dominated by MCP (same mechanism, spec + SDKs + registry + universal client support already paid for). Skills as plain markdown cover the majority of "plugins" with zero loading machinery.
 
