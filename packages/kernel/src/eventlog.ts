@@ -7,6 +7,7 @@ import { EventInput, PAYLOAD_SCHEMAS, type EventRecord } from '@orc/contracts'
 import { events } from './schema'
 
 const MIGRATIONS_FOLDER = fileURLToPath(new URL('../drizzle', import.meta.url))
+const NOTIFY_CHANNEL = 'orc_events'
 
 type Row = typeof events.$inferSelect
 type Queryable = Pick<NodePgDatabase, 'insert' | 'select' | 'execute'>
@@ -53,7 +54,7 @@ const makeOps = (db: Queryable, notify?: (e: EventRecord) => void): EventLogOps 
         usage: parsed.usage ?? null,
       })
       .returning({ seq: events.seq, ts: events.ts })
-    await db.execute(sql`select pg_notify('orc_events', ${String(row!.seq)})`)
+    await db.execute(sql`select pg_notify(${NOTIFY_CHANNEL}, ${String(row!.seq)})`)
     const record = { ...parsed, payload, usage: parsed.usage ?? null, seq: row!.seq, ts: row!.ts.toISOString() }
     try {
       notify?.(record)
@@ -108,13 +109,20 @@ export class EventLog implements EventLogOps {
 
   // Durable, ordered event stream (spec §4.1). One dedicated LISTEN connection; reads go
   // through the pool. Catch-up on connect closes the gap between fromSeq and now.
+  // Ordering caveat: the cursor advances monotonically by delivered seq. Under concurrent
+  // uncoordinated (non-transactional) appends, a lower seq that commits after a higher seq
+  // was already delivered can be skipped by the cursor. Consumers needing exactness re-read
+  // via byTask (this is why the vault projector does that, by design) — not fixed here.
   async subscribe(
     opts: { fromSeq?: number },
     handler: (e: EventRecord) => void | Promise<void>,
   ): Promise<() => Promise<void>> {
     const client = new pg.Client({ connectionString: this.url })
+    // Idle LISTEN connections can drop (DB restart, idle reaper, network blip); an 'error'
+    // event with no listener crashes the process (Node default), so this just logs.
+    client.on('error', err => console.warn(`event stream listener error: ${err instanceof Error ? err.message : String(err)}`))
     await client.connect()
-    await client.query('LISTEN orc_events')
+    await client.query(`LISTEN ${NOTIFY_CHANNEL}`)
     let cursor = opts.fromSeq ?? (await this.latestSeq())
     let pumping = false
     let wakeAgain = false
@@ -129,8 +137,15 @@ export class EventLog implements EventLogOps {
         } while (wakeAgain)
       } finally { pumping = false }
     }
-    client.on('notification', () => { void pump() })
-    await pump() // initial catch-up
+    client.on('notification', () => {
+      pump().catch(err => console.warn(`event stream pump failed: ${err instanceof Error ? err.message : String(err)}`))
+    })
+    try {
+      await pump() // initial catch-up
+    } catch (err) {
+      await client.end()
+      throw err
+    }
     return async () => { client.removeAllListeners('notification'); await client.end() }
   }
 
