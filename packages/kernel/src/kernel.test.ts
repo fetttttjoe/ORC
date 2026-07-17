@@ -115,4 +115,14 @@ describe('Kernel lifecycle', () => {
     const t = await k.createTask({ title: 'x' })
     await expect(k.proposePlan(t.id, draft())).resolves.toBeDefined()
   })
+
+  it('subscribe delivers appended events by seq', async () => {
+    const kernel = await freshKernel()
+    const seen: number[] = []
+    const unsub = await kernel.subscribe({ fromSeq: 0 }, e => { seen.push(e.seq) })
+    await kernel.createTask({ title: 'x' })
+    await new Promise(r => setTimeout(r, 100))
+    expect(seen.length).toBeGreaterThan(0)
+    await unsub()
+  })
 })

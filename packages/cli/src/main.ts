@@ -43,25 +43,19 @@ function resolveDraft(task: { title: string; spec: string }, opts: { file?: stri
     : singleStepDraft(task, opts.model)
 }
 
-// ponytail: 500ms poll on the events table for live tailing — LISTEN/NOTIFY when it matters
+// stream-driven tail (spec §5): no polling — LISTEN/NOTIFY pushes each event as it commits
 async function tailUntilDone(kernel: Kernel, taskId: string, handle: RunHandle): Promise<string> {
-  let lastSeq = Math.max(0, ...(await kernel.eventsFor(taskId)).map(e => e.seq))
-  let done = false
-  const outcomeP = handle.wait().finally(() => { done = true })
-  outcomeP.catch(() => {}) // attach a handler now so polling below can't trip an unhandled-rejection; real rejection still propagates via the return
-  const printFresh = async () => {
-    // delta query — late in a run the full history is megabytes of agent_call payloads
-    for (const e of await kernel.eventsSince(taskId, lastSeq)) {
-      lastSeq = e.seq
-      console.log(`${String(e.seq).padStart(4)}  ${e.kind}${e.stepId ? `  ${e.stepId}` : ''}`)
-    }
+  const print = (e: EventRecord) => console.log(`${String(e.seq).padStart(4)}  ${e.kind}${e.stepId ? `  ${e.stepId}` : ''}`)
+  let lastSeen = Math.max(0, ...(await kernel.eventsFor(taskId)).map(e => e.seq))
+  const unsub = await kernel.subscribe({ fromSeq: lastSeen }, e => {
+    if (e.taskId === taskId) { print(e); lastSeen = e.seq }
+  })
+  try {
+    return await handle.wait()
+  } finally {
+    await unsub()
+    for (const e of await kernel.eventsSince(taskId, lastSeen)) print(e) // drain final window
   }
-  while (!done) {
-    await new Promise(r => setTimeout(r, 500))
-    await printFresh()
-  }
-  await printFresh() // drain events written in the final ≤500ms window before wait() settled
-  return outcomeP
 }
 
 export function buildProgram(
