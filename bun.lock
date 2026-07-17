@@ -17,6 +17,7 @@
         "@orc/contracts": "workspace:*",
         "@orc/executor-api-loop": "workspace:*",
         "@orc/kernel": "workspace:*",
+        "@orc/mcp-client": "workspace:*",
         "@orc/provider-anthropic": "workspace:*",
         "@orc/provider-ollama": "workspace:*",
         "@orc/provider-openai": "workspace:*",
