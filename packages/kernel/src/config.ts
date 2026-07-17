@@ -1,7 +1,7 @@
 import { existsSync, readFileSync } from 'node:fs'
 import path from 'node:path'
 import { z } from 'zod'
-import { ModelCost } from '@orc/contracts'
+import { MCP_SERVER_ID_RE, McpServerConfig, ModelCost } from '@orc/contracts'
 
 // bump per release — pins DBOS__APPVERSION so recovery survives rebuilds (spec §4)
 export const APP_VERSION = 'orc-0.1.0'
@@ -21,6 +21,7 @@ const settingsSchema = (dir: string) =>
     costOverrides: z.record(z.string(), z.record(z.string(), ModelCost)).default({}),
     skillsDir: z.string().default(path.join('vault', 'skills')).transform(p => path.resolve(dir, p)),
     extensions: z.array(z.string()).default([]),
+    mcpServers: z.record(z.string().regex(MCP_SERVER_ID_RE), McpServerConfig).default({}),
   })
 
 // container reality: `VAR=` (empty) counts as unset, not as a value
@@ -42,6 +43,7 @@ export interface OrcConfig {
   ollamaBaseUrl: string
   skillsDir: string
   extensions: string[]
+  mcpServers: Record<string, McpServerConfig>
   appVersion: string
   costOverrides: Record<string, Record<string, z.infer<typeof ModelCost>>>
 }
