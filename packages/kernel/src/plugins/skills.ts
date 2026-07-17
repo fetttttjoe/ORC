@@ -136,7 +136,13 @@ export class SkillIndex {
       }
       const prev = this.cache.get(name)
       if (prev && prev.mtimeMs === st.mtimeMs && prev.size === st.size) continue
-      const { manifest, errors } = parseSkillMd(readFileSync(file, 'utf8'), name)
+      let text: string
+      try {
+        text = readFileSync(file, 'utf8')
+      } catch {
+        continue // vanished mid-scan; next rescan settles it
+      }
+      const { manifest, errors } = parseSkillMd(text, name)
       this.cache.set(name, {
         mtimeMs: st.mtimeMs,
         size: st.size,
