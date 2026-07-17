@@ -66,6 +66,12 @@ describe('parseSkillMd', () => {
     expect(r.errors).toEqual([])
     expect(r.manifest?.description).toBe('d')
   })
+
+  it('body is empty when the file ends exactly at the closing fence with no trailing newline', () => {
+    const r = parseSkillMd(`---\nname: a\ndescription: d\n---`, 'a')
+    expect(r.errors).toEqual([])
+    expect(r.body).toBe('')
+  })
 })
 
 describe('SkillIndex', () => {

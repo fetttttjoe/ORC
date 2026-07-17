@@ -81,6 +81,12 @@ describe('plugin commands', () => {
     expect(loadTrust(dir).extensions).toEqual(['exts/a.ts'])
   })
 
+  it('orc ext trust rejects an undeclared path', async () => {
+    const dir = project({ extensions: ['exts/a.ts'] })
+    const { run } = await makeCli(dir)
+    await expect(run('ext', 'trust', 'exts/ghost.ts')).rejects.toThrow(/undeclared/)
+  })
+
   it('propose rejects a plan referencing an untrusted server (wired refValidator)', async () => {
     const dir = project({ mcpServers: { fixture: { command: 'bun', args: [FIXTURE] } } })
     const { run, lines, dir: d } = await makeCli(dir)

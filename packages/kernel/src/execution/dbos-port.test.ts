@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from 'bun:test'
+import { Client } from 'pg'
 import {
   EVENT_KIND, FAILURE_CLASS, SIGNAL_OUTCOME, TASK_STATUS,
   type AgentExecutor, type EventDraft, type ExecutorContext, type PlanDraft, type UnifiedEvent,
@@ -49,9 +50,11 @@ describe('DBOS execution port (integration)', () => {
   let kernel: Kernel
   let port: DbosPort
   let teardown: () => Promise<void>
+  let dbUrl: string
 
   beforeAll(async () => {
     const db = await createTestDb()
+    dbUrl = db.url
     const log = await EventLog.open(db.url)
     kernel = new Kernel(log)
     const config = { ...loadConfig(), databaseUrl: db.url, systemDatabaseUrl: deriveSystemUrl(db.url) }
@@ -201,5 +204,35 @@ describe('DBOS execution port (integration)', () => {
     const failed = events.find(e => e.kind === EVENT_KIND.step_failed)
     expect((failed!.payload as { class: string }).class).toBe(FAILURE_CLASS.validation_error)
     expect(events.filter(e => e.kind === EVENT_KIND.agent_call)).toHaveLength(0)
+  })
+
+  it('a pre-M3 plan with no toolRefs in the log replays to done (no TypeError on undefined.length)', async () => {
+    const t = await kernel.createTask({ title: 'legacy plan', spec: 'x' })
+    // Kernel.proposePlan and even a direct EventLog.append re-parse payloads through the Plan
+    // zod schema, which would restore toolRefs via its .default([]) — masking the bug. The only
+    // honest way to reproduce a row that predates the field is to write it straight into the
+    // events table, bypassing that parse, exactly like a pre-M3 row already sitting in the log.
+    const draft = draftFixture([stepFixture()])
+    const legacyStep: Record<string, unknown> = { ...stepFixture() }
+    delete legacyStep.toolRefs
+    const legacyPlan = { ...draft, steps: [legacyStep], taskId: t.id, version: 1 }
+    const client = new Client({ connectionString: dbUrl })
+    await client.connect()
+    try {
+      await client.query(
+        'insert into events (task_id, step_id, run_token, kind, payload) values ($1, $2, $3, $4, $5)',
+        [t.id, null, null, EVENT_KIND.plan_proposed, JSON.stringify({ plan: legacyPlan })],
+      )
+      await client.query(
+        'insert into events (task_id, step_id, run_token, kind, payload) values ($1, $2, $3, $4, $5)',
+        [t.id, null, null, EVENT_KIND.task_status_changed, JSON.stringify({ taskId: t.id, from: TASK_STATUS.draft, to: TASK_STATUS.awaiting_approval })],
+      )
+    } finally {
+      await client.end()
+    }
+
+    await kernel.approvePlan(t.id)
+    expect(await (await port.startRun(t.id)).wait()).toBe('done')
+    expect((await kernel.eventsFor(t.id)).some(e => e.kind === EVENT_KIND.step_failed)).toBe(false)
   })
 })

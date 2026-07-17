@@ -1,4 +1,4 @@
-import { afterAll, describe, expect, it } from 'bun:test'
+import { afterAll, describe, expect, it, spyOn } from 'bun:test'
 import { fileURLToPath } from 'node:url'
 import type { McpServerConfig } from '@orc/contracts'
 import { createMcpHub } from './index'
@@ -71,6 +71,34 @@ describe('createMcpHub', () => {
       fixture: { command: 'bun', args: [FIXTURE], env: { FIXTURE_CRASH: '1' } },
     })
     await expect(hub.resolve(['fixture/echo'])).rejects.toThrow()
+  })
+
+  it('resolves a $VAR env value from the orc process env at spawn (crash proves it reached the child)', async () => {
+    process.env.SMOKE_CRASH_FLAG = '1'
+    try {
+      const hub = makeHub(new Set(['fixture']), {
+        fixture: { command: 'bun', args: [FIXTURE], env: { FIXTURE_CRASH: '$SMOKE_CRASH_FLAG' } },
+      })
+      await expect(hub.resolve(['fixture/echo'])).rejects.toThrow()
+    } finally {
+      delete process.env.SMOKE_CRASH_FLAG
+    }
+  })
+
+  it('omits an env value referencing an unset $VAR instead of passing "$VAR" literally', async () => {
+    // the fixture only crashes on the literal string '1', so a literal '$UNSET_VAR_XYZ' pass-through
+    // would ALSO resolve successfully — the warning is what actually proves omission happened
+    const warn = spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      const hub = makeHub(new Set(['fixture']), {
+        fixture: { command: 'bun', args: [FIXTURE], env: { FIXTURE_CRASH: '$UNSET_VAR_XYZ' } },
+      })
+      const [echo] = await hub.resolve(['fixture/echo'])
+      expect(echo!.name).toBe('mcp__fixture__echo')
+      expect(warn).toHaveBeenCalledWith(`MCP server 'fixture': env FIXTURE_CRASH references unset $UNSET_VAR_XYZ — omitted`)
+    } finally {
+      warn.mockRestore()
+    }
   })
 
   it('a dead server mid-call yields an isError result and respawns on the next call', async () => {

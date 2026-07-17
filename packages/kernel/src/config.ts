@@ -56,7 +56,14 @@ export function deriveSystemUrl(databaseUrl: string): string {
 
 export function loadConfig(dir: string = process.cwd()): OrcConfig {
   const file = path.join(dir, '.orc', 'config.json')
-  const fromFile: unknown = existsSync(file) ? JSON.parse(readFileSync(file, 'utf8')) : {}
+  let fromFile: unknown = {}
+  if (existsSync(file)) {
+    try {
+      fromFile = JSON.parse(readFileSync(file, 'utf8'))
+    } catch (err) {
+      throw new Error(`invalid orc config: ${file} is not valid JSON (${err instanceof Error ? err.message : String(err)})`)
+    }
+  }
   const parsed = settingsSchema(dir).safeParse({ ...(fromFile as Record<string, unknown>), ...envOverrides() })
   if (!parsed.success)
     throw new Error(

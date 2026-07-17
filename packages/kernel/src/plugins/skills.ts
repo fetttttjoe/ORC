@@ -27,7 +27,9 @@ export function parseSkillMd(
   const end = norm.indexOf('\n---', 4)
   if (end === -1) return { manifest: null, errors: ['unclosed frontmatter fence'], body: '' }
   const head = norm.slice(4, end).split('\n')
-  const body = norm.slice(norm.indexOf('\n', end + 1) + 1)
+  // a file ending exactly at the closing fence (no trailing newline) has no body line at all
+  const nl = norm.indexOf('\n', end + 1)
+  const body = nl === -1 ? '' : norm.slice(nl + 1)
 
   const raw: Record<string, unknown> = {}
   const errors: string[] = []

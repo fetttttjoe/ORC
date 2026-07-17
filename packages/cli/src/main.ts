@@ -262,6 +262,8 @@ export function buildProgram(
     .description('grant local trust to a declared extension')
     .action(async (p: string) => {
       const { config } = needPlugin()
+      if (!config.extensions.some(e => path.resolve(config.dir, e) === path.resolve(config.dir, p)))
+        throw new Error(`undeclared extension '${p}' — declare it in .orc/config.json first`)
       grantTrust('extensions', p, config.dir)
       console.log(`trusted extension '${p}' — takes effect on the next orc invocation`)
     })

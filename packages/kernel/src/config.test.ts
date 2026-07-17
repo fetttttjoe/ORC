@@ -43,6 +43,13 @@ describe('loadConfig', () => {
       expect(loadConfig(dir).concurrency).toBe(9)
     })
   })
+  it('wraps malformed JSON with the config file path, not a bare SyntaxError', () => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'orc-'))
+    mkdirSync(path.join(dir, '.orc'))
+    const file = path.join(dir, '.orc', 'config.json')
+    writeFileSync(file, '{nope')
+    expect(() => loadConfig(dir)).toThrow(file)
+  })
   it('skillsDir defaults under the project dir and honors file override', () => {
     const dir = mkdtempSync(path.join(tmpdir(), 'orc-'))
     expect(loadConfig(dir).skillsDir).toBe(path.join(dir, 'vault', 'skills'))
