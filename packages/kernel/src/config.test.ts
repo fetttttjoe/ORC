@@ -43,6 +43,14 @@ describe('loadConfig', () => {
       expect(loadConfig(dir).concurrency).toBe(9)
     })
   })
+  it('skillsDir defaults under the project dir and honors file override', () => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'orc-'))
+    expect(loadConfig(dir).skillsDir).toBe(path.join(dir, 'vault', 'skills'))
+
+    mkdirSync(path.join(dir, '.orc'))
+    writeFileSync(path.join(dir, '.orc', 'config.json'), JSON.stringify({ skillsDir: 'custom/skills' }))
+    expect(loadConfig(dir).skillsDir).toBe(path.resolve(dir, 'custom/skills'))
+  })
 })
 
 function withEnv(vars: Record<string, string>, fn: () => void): void {
