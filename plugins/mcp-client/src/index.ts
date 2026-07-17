@@ -8,6 +8,28 @@ import {
 
 interface ToolInfo { name: string; description: string; inputSchema: Record<string, unknown> }
 
+// literal env values pass through unchanged; a value starting with '$' resolves from the orc
+// process environment at spawn time — so secrets stay out of the committable config file and
+// only ever live in whatever already set them in orc's own env. Unset/empty parent vars are
+// dropped (container reality: `VAR=` is not a value), never passed through as the literal '$NAME'.
+function resolveEnv(env: Record<string, string> | undefined, serverId: string): Record<string, string> {
+  const out: Record<string, string> = {}
+  for (const [key, value] of Object.entries(env ?? {})) {
+    if (!value.startsWith('$')) {
+      out[key] = value
+      continue
+    }
+    const varName = value.slice(1)
+    const resolved = process.env[varName]
+    if (!resolved) {
+      console.warn(`MCP server '${serverId}': env ${key} references unset $${varName} — omitted`)
+      continue
+    }
+    out[key] = resolved
+  }
+  return out
+}
+
 export interface McpHub extends ToolSource {
   listTools(serverId: string): Promise<Array<{ name: string; description: string }>>
 }
@@ -31,7 +53,7 @@ export function createMcpHub(
     const transport = new StdioClientTransport({
       command: cfg.command,
       args: cfg.args ?? [],
-      env: { ...getDefaultEnvironment(), ...cfg.env }, // never full process.env (secrets)
+      env: { ...getDefaultEnvironment(), ...resolveEnv(cfg.env, serverId) }, // never full process.env (secrets)
       stderr: 'pipe',
     })
     const stderrChunks: string[] = []

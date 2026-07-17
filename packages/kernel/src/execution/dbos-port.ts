@@ -100,11 +100,13 @@ export async function createDbosPort(opts: {
 
       // tool resolution is idempotent infra that spawns servers and returns closures — it records
       // nothing, so it lives in the workflow body (not a checkpoint) and re-runs cleanly on recovery.
+      // pre-M3 plans in the log lack toolRefs — fold casts raw payloads, zod defaults don't apply to history
+      const toolRefs = init.step.toolRefs ?? []
       let extraTools: ResolvedTool[] = []
-      if (init.step.toolRefs.length > 0) {
+      if (toolRefs.length > 0) {
         if (!tools) return await finishFailed(checkpoint, args, runToken, `step declares toolRefs but no tool source is configured`, FAILURE_CLASS.validation_error)
         try {
-          extraTools = await tools.resolve(init.step.toolRefs)
+          extraTools = await tools.resolve(toolRefs)
         } catch (err) {
           return await finishFailed(checkpoint, args, runToken, err instanceof Error ? err.message : String(err), FAILURE_CLASS.validation_error)
         }
