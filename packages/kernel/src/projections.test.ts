@@ -51,7 +51,7 @@ describe('crashDedupKey', () => {
     expect(crashDedupKey(base)).not.toBe(crashDedupKey(other))
   })
 
-  it('matches when (runToken, kind, iteration, toolCallId) match, regardless of other fields', () => {
+  it('matches when (runToken, kind, iteration, toolCallId, name) match, regardless of other fields', () => {
     const e1: EventRecord = {
       seq: 1, ts: '2026-07-17T00:00:00.000Z', taskId: 't1', stepId: 's1',
       runToken: 'step:t1:s1:a1', kind: 'tool_call',
@@ -65,6 +65,18 @@ describe('crashDedupKey', () => {
       usage: null,
     }
     expect(crashDedupKey(e1)).toBe(crashDedupKey(e2))
+  })
+
+  it('skill_loaded events dedup per skill name, not per step', () => {
+    const mk = (seq: number, name: string): EventRecord => ({
+      seq, ts: 't', taskId: 't1', stepId: 's1', runToken: 'step:t1:s1:a1',
+      kind: 'skill_loaded', usage: null,
+      payload: { stepId: 's1', runToken: 'step:t1:s1:a1', name, hash: 'h' },
+    })
+    // two different skills in one init: both keys distinct
+    expect(crashDedupKey(mk(1, 'alpha'))).not.toBe(crashDedupKey(mk(2, 'beta')))
+    // crash-boundary duplicate of the same skill: identical key
+    expect(crashDedupKey(mk(1, 'alpha'))).toBe(crashDedupKey(mk(3, 'alpha')))
   })
 
   it('returns null for task_status_changed even when a runToken is present', () => {
@@ -106,6 +118,25 @@ describe('fold — execution kinds', () => {
     const state = fold([
       exEvt(1, 'run_started', { taskId: 't1', planVersion: 1, retryIndex: 0, workflowId: 'run:t1:v1', cwd: null }),
       exEvt(2, 'step_started', { stepId: 's1', runToken: rt('s1'), attempt: 1 }),
+      exEvt(3, 'agent_call', { stepId: 's1', runToken: rt('s1'), iteration: 1, request: {}, response: {} },
+        { inputTokens: 100, outputTokens: 50, costUSD: 0.01, estimated: false }),
+      exEvt(4, 'signal_received', { stepId: 's1', runToken: rt('s1'), signal: { stepId: 's1', runToken: rt('s1'), outcome: 'success', summary: 'ok' } }),
+      exEvt(5, 'step_completed', { stepId: 's1', runToken: rt('s1'), summary: 'ok' }),
+    ])
+    const step = state.steps.get('t1')?.get('s1')
+    expect(step?.status).toBe('completed')
+    expect(step?.output).toBe('ok')
+    expect(step?.iterations).toBe(1)
+    expect(state.runs.get('t1')).toHaveLength(1)
+    expect(state.usage.get('t1')?.costUSD).toBeCloseTo(0.01)
+    expect(completedStepIds(state, 't1')).toEqual(new Set(['s1']))
+  })
+
+  it('fold ignores skill_loaded for state (traceability only)', () => {
+    const state = fold([
+      exEvt(1, 'run_started', { taskId: 't1', planVersion: 1, retryIndex: 0, workflowId: 'run:t1:v1', cwd: null }),
+      exEvt(2, 'step_started', { stepId: 's1', runToken: rt('s1'), attempt: 1 }),
+      exEvt(2.5, 'skill_loaded', { stepId: 's1', runToken: rt('s1'), name: 'alpha', hash: 'h' }),
       exEvt(3, 'agent_call', { stepId: 's1', runToken: rt('s1'), iteration: 1, request: {}, response: {} },
         { inputTokens: 100, outputTokens: 50, costUSD: 0.01, estimated: false }),
       exEvt(4, 'signal_received', { stepId: 's1', runToken: rt('s1'), signal: { stepId: 's1', runToken: rt('s1'), outcome: 'success', summary: 'ok' } }),

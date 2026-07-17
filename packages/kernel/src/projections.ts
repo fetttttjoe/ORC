@@ -39,8 +39,9 @@ export const crashDedupKey = (e: EventRecord): string | null => {
   // task_status_changed is excluded: run-init (→running) and run-finish (→done) share a runToken
   // and would collide; a replayed status append is idempotent in fold anyway.
   if (!e.runToken || e.kind === EVENT_KIND.task_status_changed) return null
-  const p = e.payload as { iteration?: number; toolCallId?: string }
-  return `${e.runToken}:${e.kind}:${p.iteration ?? ''}:${p.toolCallId ?? ''}`
+  // `name` discriminates multiple `skill_loaded` events sharing one runToken.
+  const p = e.payload as { iteration?: number; toolCallId?: string; name?: string }
+  return `${e.runToken}:${e.kind}:${p.iteration ?? ''}:${p.toolCallId ?? ''}:${p.name ?? ''}`
 }
 
 export function fold(events: EventRecord[]): State {
