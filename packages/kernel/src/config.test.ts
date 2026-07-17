@@ -23,4 +23,14 @@ describe('loadConfig', () => {
     expect(c.databaseUrl).toContain('5433')
     expect(c.appVersion).toMatch(/^orc-/)
   })
+  it('ignores non-numeric ORC_CONCURRENCY', () => {
+    const prev = process.env.ORC_CONCURRENCY
+    process.env.ORC_CONCURRENCY = 'abc'
+    try {
+      expect(loadConfig(mkdtempSync(path.join(tmpdir(), 'orc-'))).concurrency).toBe(3)
+    } finally {
+      if (prev === undefined) delete process.env.ORC_CONCURRENCY
+      else process.env.ORC_CONCURRENCY = prev
+    }
+  })
 })

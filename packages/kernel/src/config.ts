@@ -35,10 +35,11 @@ export function loadConfig(dir: string = process.cwd()): OrcConfig {
   const file = path.join(dir, '.orc', 'config.json')
   const fromFile = existsSync(file) ? FileConfig.parse(JSON.parse(readFileSync(file, 'utf8'))) : {}
   const databaseUrl = process.env.ORC_DATABASE_URL ?? fromFile.databaseUrl ?? DEFAULT_DATABASE_URL
+  const concurrency = Number(process.env.ORC_CONCURRENCY ?? fromFile.concurrency ?? 3)
   return {
     databaseUrl,
     systemDatabaseUrl: deriveSystemUrl(databaseUrl),
-    concurrency: Number(process.env.ORC_CONCURRENCY ?? fromFile.concurrency ?? 3),
+    concurrency: Number.isFinite(concurrency) && concurrency > 0 ? concurrency : (fromFile.concurrency ?? 3),
     workspaceRoot: fromFile.workspaceRoot ?? path.join(dir, '.orc', 'workspaces'),
     ollamaBaseUrl: process.env.OLLAMA_BASE_URL ?? fromFile.ollamaBaseUrl ?? 'http://localhost:11434',
     appVersion: APP_VERSION,

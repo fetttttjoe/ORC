@@ -1,9 +1,10 @@
 import { describe, expect, it } from 'bun:test'
-import { mkdtempSync } from 'node:fs'
+import { mkdtempSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import type { Checkpoint, EventDraft, ExecutorContext, UnifiedEvent } from '@orc/contracts'
 import { EVENT_KIND } from '@orc/contracts'
+import { stepFixture } from '@orc/contracts/fixtures'
 import type { LanguageModel } from 'ai'
 import { apiLoopExecutor } from './loop'
 
@@ -18,11 +19,7 @@ function makeCheckpoint(captured: EventDraft[]): Checkpoint {
 
 function ctx(model: LanguageModel, captured: EventDraft[], over: Partial<ExecutorContext<LanguageModel>> = {}): ExecutorContext<LanguageModel> {
   return {
-    step: {
-      id: 's1', role: 'worker', title: 't', instructions: 'do the thing',
-      executorRef: 'api-loop', modelRef: 'fake/m', skillRefs: [],
-      isolation: 'local', zone: [], maxIterations: 3, dependsOn: [],
-    },
+    step: stepFixture({ instructions: 'do the thing', maxIterations: 3 }),
     taskSpec: 'the task',
     depOutputs: {},
     model,
@@ -122,7 +119,7 @@ describe('api-loop executor', () => {
     expect(parts[0]!.output.value.error).toContain('invalid signal input')
   })
 
-  it('agent_call drafts snapshot messages at call time, not the live mutated array', async () => {
+  it('agent_call drafts persist only the delta since the previous call, snapshotted', async () => {
     const captured: EventDraft[] = []
     const model = scriptModel([
       { toolCalls: [{ toolCallId: 'c1', toolName: 'fs_write', input: { path: 'out.txt', content: 'hi' } }] },
@@ -135,8 +132,29 @@ describe('api-loop executor', () => {
     expect(agentCallDrafts).toHaveLength(2)
     const messages1 = (agentCallDrafts[0]!.payload as { request: { messages: unknown[] } }).request.messages
     const messages2 = (agentCallDrafts[1]!.payload as { request: { messages: unknown[] } }).request.messages
-    expect(messages1).toHaveLength(1) // just the initial user prompt
-    expect(messages2).toHaveLength(3) // user + assistant (tool call) + tool result
-    expect(messages1.length).not.toBe(messages2.length)
+    expect(messages1).toHaveLength(1) // the initial user prompt
+    expect(messages2).toHaveLength(2) // ONLY what was appended since: assistant (tool call) + tool result
+    // concatenated deltas reconstruct the full request history without O(n²) storage
+    expect([...messages1, ...messages2].map(m => (m as { role: string }).role)).toEqual(['user', 'assistant', 'tool'])
+  })
+
+  it('a valid signal batched with sibling tool calls executes the siblings first', async () => {
+    const captured: EventDraft[] = []
+    const model = scriptModel([
+      { toolCalls: [
+        { toolCallId: 'c1', toolName: 'fs_write', input: { path: 'report.md', content: 'findings' } },
+        { toolCallId: 'c2', toolName: 'signal', input: { outcome: 'success', summary: 'wrote report' } },
+      ] },
+    ])
+    const c = ctx(model, captured)
+    const events = await drain(apiLoopExecutor().startTurn(c))
+
+    // the write actually happened and was recorded before the signal completed the step
+    expect(readFileSync(path.join(c.workspaceDir, 'report.md'), 'utf8')).toBe('findings')
+    expect(events.map(e => e.type)).toEqual(['usage', 'tool_call', 'tool_result', 'signal', 'done'])
+    const kinds = captured.map(d => d.kind)
+    expect(kinds).toContain(EVENT_KIND.tool_call)
+    expect(kinds).toContain(EVENT_KIND.tool_result)
+    expect(kinds.indexOf(EVENT_KIND.tool_result)).toBeLessThan(kinds.indexOf(EVENT_KIND.signal_received))
   })
 })

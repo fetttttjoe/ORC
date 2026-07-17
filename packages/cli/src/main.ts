@@ -1,20 +1,12 @@
 import { readFileSync } from 'node:fs'
 import { Command } from 'commander'
-import { ISOLATION_TIER, PlanDraft, type ExecutionPort, type RunHandle } from '@orc/contracts'
-import { EventLog, Kernel, taskUsage } from '@orc/kernel'
+import { ISOLATION_TIER, PlanDraft, type ExecutionPort, type Plan, type RunHandle } from '@orc/contracts'
+import { EventLog, Kernel, loadConfig, taskUsage } from '@orc/kernel'
 
-export const DEFAULT_DATABASE_URL = 'postgresql://postgres:orc@localhost:5433/orc'
-
-export async function openKernel(url = process.env.ORC_DATABASE_URL ?? DEFAULT_DATABASE_URL): Promise<Kernel> {
+// loadConfig is the ONE resolution of env → .orc/config.json → default; every command
+// (read-only or executing) must land on the same database
+export async function openKernel(url = loadConfig().databaseUrl): Promise<Kernel> {
   return new Kernel(await EventLog.open(url))
-}
-
-export function isConnectionRefused(err: unknown): boolean {
-  if (err instanceof AggregateError) return err.errors.some(isConnectionRefused)
-  if (typeof err === 'object' && err !== null && (err as { code?: string }).code === 'ECONNREFUSED') return true
-  // drizzle wraps driver errors in DrizzleQueryError; unwrap .cause to find the real ECONNREFUSED
-  const cause = (err as { cause?: unknown } | null)?.cause
-  return cause !== undefined && cause !== err && isConnectionRefused(cause)
 }
 
 export function singleStepDraft(task: { title: string; spec: string }, modelRef: string): PlanDraft {
@@ -50,8 +42,8 @@ async function tailUntilDone(kernel: Kernel, taskId: string, handle: RunHandle):
   const outcomeP = handle.wait().finally(() => { done = true })
   outcomeP.catch(() => {}) // attach a handler now so polling below can't trip an unhandled-rejection; real rejection still propagates via the return
   const printFresh = async () => {
-    const fresh = (await kernel.eventsFor(taskId)).filter(e => e.seq > lastSeq)
-    for (const e of fresh) {
+    // delta query — late in a run the full history is megabytes of agent_call payloads
+    for (const e of await kernel.eventsSince(taskId, lastSeq)) {
       lastSeq = e.seq
       console.log(`${String(e.seq).padStart(4)}  ${e.kind}${e.stepId ? `  ${e.stepId}` : ''}`)
     }
@@ -78,31 +70,27 @@ export function buildProgram(kernel: Kernel, portFactory?: () => Promise<Executi
       console.log(t.id)
     })
 
+  const planAction = (apply: (taskId: string, draft: PlanDraft) => Promise<Plan>, describe: (plan: Plan) => string) =>
+    async (taskId: string, opts: { file?: string; model: string }) => {
+      const task = await kernel.getTask(taskId)
+      if (!task) throw new Error(`no task '${taskId}'`)
+      const plan = await apply(taskId, resolveDraft(task, opts))
+      console.log(`plan v${plan.version} ${describe(plan)} — review with: orc plan ${taskId}`)
+    }
+
   program
     .command('propose <taskId>')
     .description('propose a plan (default: single-step template)')
     .option('--file <path>', 'plan draft JSON file')
     .option('--model <ref>', 'model for template steps', 'anthropic/claude-sonnet-5')
-    .action(async (taskId: string, opts: { file?: string; model: string }) => {
-      const task = await kernel.getTask(taskId)
-      if (!task) throw new Error(`no task '${taskId}'`)
-      const draft = resolveDraft(task, opts)
-      const plan = await kernel.proposePlan(taskId, draft)
-      console.log(`plan v${plan.version} proposed (${plan.steps.length} steps) — review with: orc plan ${taskId}`)
-    })
+    .action(planAction((id, draft) => kernel.proposePlan(id, draft), plan => `proposed (${plan.steps.length} steps)`))
 
   program
     .command('edit <taskId>')
     .description('edit a plan (default: single-step template)')
     .option('--file <path>', 'plan draft JSON file')
     .option('--model <ref>', 'model for template steps', 'anthropic/claude-sonnet-5')
-    .action(async (taskId: string, opts: { file?: string; model: string }) => {
-      const task = await kernel.getTask(taskId)
-      if (!task) throw new Error(`no task '${taskId}'`)
-      const draft = resolveDraft(task, opts)
-      const plan = await kernel.editPlan(taskId, draft)
-      console.log(`plan v${plan.version} edited — review with: orc plan ${taskId}`)
-    })
+    .action(planAction((id, draft) => kernel.editPlan(id, draft), () => 'edited'))
 
   program
     .command('plan <taskId>')
@@ -144,31 +132,32 @@ export function buildProgram(kernel: Kernel, portFactory?: () => Promise<Executi
     return portFactory()
   }
 
+  const execAction = (start: (port: ExecutionPort, taskId: string, cwd?: string) => Promise<RunHandle>, intro: (h: RunHandle, taskId: string) => string) =>
+    async (taskId: string, opts: { cwd?: string }) => {
+      const handle = await start(await needPort(), taskId, opts.cwd)
+      console.log(intro(handle, taskId))
+      const outcome = await tailUntilDone(kernel, taskId, handle)
+      console.log(`run finished: ${outcome}`)
+      process.exitCode = outcome === 'done' ? 0 : 1
+    }
+
   program
     .command('run <taskId>')
     .description('execute the approved plan (durable; re-run attaches/resumes)')
     .option('--cwd <dir>', 'shared workspace for all steps (default: per-step .orc/workspaces/)')
-    .action(async (taskId: string, opts: { cwd?: string }) => {
-      const port = await needPort()
-      const handle = await port.startRun(taskId, { cwd: opts.cwd })
-      console.log(`run ${handle.workflowId} started — tailing events (ctrl-c detaches, run keeps going)`)
-      const outcome = await tailUntilDone(kernel, taskId, handle)
-      console.log(`run finished: ${outcome}`)
-      process.exitCode = outcome === 'done' ? 0 : 1
-    })
+    .action(execAction(
+      (port, taskId, cwd) => port.startRun(taskId, { cwd }),
+      (h, taskId) => `run ${h.workflowId} started — tailing events (ctrl-c stops the run; re-run orc run ${taskId} to resume)`,
+    ))
 
   program
     .command('retry <taskId>')
     .description('re-run failed steps of a blocked task as new attempts')
     .option('--cwd <dir>')
-    .action(async (taskId: string, opts: { cwd?: string }) => {
-      const port = await needPort()
-      const handle = await port.retry(taskId, { cwd: opts.cwd })
-      console.log(`retry ${handle.workflowId} started`)
-      const outcome = await tailUntilDone(kernel, taskId, handle)
-      console.log(`run finished: ${outcome}`)
-      process.exitCode = outcome === 'done' ? 0 : 1
-    })
+    .action(execAction(
+      (port, taskId, cwd) => port.retry(taskId, { cwd }),
+      h => `retry ${h.workflowId} started`,
+    ))
 
   program
     .command('cancel <taskId>')

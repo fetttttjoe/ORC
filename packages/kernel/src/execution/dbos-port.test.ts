@@ -1,18 +1,14 @@
 import { afterAll, beforeAll, describe, expect, it } from 'bun:test'
 import {
   EVENT_KIND, SIGNAL_OUTCOME, TASK_STATUS,
-  type AgentExecutor, type EventDraft, type ExecutorContext, type ModelProvider, type PlanDraft, type UnifiedEvent,
+  type AgentExecutor, type EventDraft, type ExecutorContext, type PlanDraft, type UnifiedEvent,
 } from '@orc/contracts'
+import { draftFixture, stepFixture } from '@orc/contracts/fixtures'
 import { EventLog } from '../eventlog'
 import { Kernel } from '../kernel'
-import { loadConfig } from '../config'
-import { createTestDb } from '../test-helpers'
+import { loadConfig, deriveSystemUrl } from '../config'
+import { createTestDb, fakeProvider } from '../test-helpers'
 import { createDbosPort, type DbosPort } from './dbos-port'
-
-const fakeProvider: ModelProvider<unknown> = {
-  manifest: { id: 'fake', providerKind: 'fake', baseUrl: null, contextWindow: null, costs: {} },
-  languageModel: () => ({}),
-}
 
 // One DBOS runtime per process: registerWorkflow throws on duplicate names, so the whole file
 // shares ONE port + DB. Per-task scripting isolates the scenarios (behavior keyed by taskId,
@@ -22,7 +18,6 @@ const behaviors = new Map<string, Record<string, 'ok' | 'fail'>>()
 function fakeExecutor(): AgentExecutor<unknown> {
   return {
     id: 'api-loop',
-    getCapabilities: () => ({ tools: false, streaming: false }),
     async *startTurn(ctx: ExecutorContext<unknown>): AsyncIterable<UnifiedEvent> {
       const taskId = ctx.runToken.split(':')[1]!
       const behavior = behaviors.get(taskId) ?? {}
@@ -45,13 +40,10 @@ function fakeExecutor(): AgentExecutor<unknown> {
   }
 }
 
-const twoStepDraft = (): PlanDraft => ({
-  strategyRef: 'template:single', costEstimateUSD: null,
-  steps: [
-    { id: 'a', role: 'worker', title: 'a', instructions: 'first', executorRef: 'api-loop', modelRef: 'fake/m', skillRefs: [], isolation: 'local', zone: [], maxIterations: 3, dependsOn: [] },
-    { id: 'b', role: 'worker', title: 'b', instructions: 'second', executorRef: 'api-loop', modelRef: 'fake/m', skillRefs: [], isolation: 'local', zone: [], maxIterations: 3, dependsOn: ['a'] },
-  ],
-})
+const twoStepDraft = (): PlanDraft => draftFixture([
+  stepFixture({ id: 'a', title: 'a', instructions: 'first' }),
+  stepFixture({ id: 'b', title: 'b', instructions: 'second', dependsOn: ['a'] }),
+])
 
 describe('DBOS execution port (integration)', () => {
   let kernel: Kernel
@@ -62,7 +54,7 @@ describe('DBOS execution port (integration)', () => {
     const db = await createTestDb()
     const log = await EventLog.open(db.url)
     kernel = new Kernel(log)
-    const config = { ...loadConfig(), databaseUrl: db.url, systemDatabaseUrl: `${db.url}_dbos_sys` }
+    const config = { ...loadConfig(), databaseUrl: db.url, systemDatabaseUrl: deriveSystemUrl(db.url) }
     port = await createDbosPort({
       log, config,
       providers: new Map([['fake', fakeProvider]]),
@@ -126,5 +118,32 @@ describe('DBOS execution port (integration)', () => {
   it('refuses to run an unapproved task', async () => {
     const t = await kernel.createTask({ title: 'nope' })
     await expect(port.startRun(t.id)).rejects.toThrow(/approve/)
+  })
+
+  it('fails the step (no wedge) when modelRef is unresolvable', async () => {
+    const t = await kernel.createTask({ title: 'bad model', spec: 'x' })
+    await kernel.proposePlan(t.id, draftFixture([stepFixture({ modelRef: 'nope/x' })]))
+    await kernel.approvePlan(t.id)
+    expect(await (await port.startRun(t.id)).wait()).toBe('blocked')
+    expect((await kernel.getTask(t.id))?.status).toBe(TASK_STATUS.blocked)
+    const failure = (await kernel.state()).steps.get(t.id)?.get('s1')?.failure
+    expect(failure?.class).toBeTruthy()
+    expect(failure?.message).toContain('nope/x')
+  })
+
+  it('refuses to cancel a done task (no status event appended)', async () => {
+    const t = await approvedTask()
+    expect(await (await port.startRun(t.id)).wait()).toBe('done')
+    const before = (await kernel.eventsFor(t.id)).length
+    await expect(port.cancelRun(t.id)).rejects.toThrow(/running or blocked/)
+    expect((await kernel.eventsFor(t.id)).length).toBe(before)
+  })
+
+  it('refuses to retry a task that is not blocked (no second concurrent run)', async () => {
+    const t = await approvedTask()
+    await expect(port.retry(t.id)).rejects.toThrow(/blocked/) // approved, never run
+    expect(await (await port.startRun(t.id)).wait()).toBe('done')
+    await expect(port.retry(t.id)).rejects.toThrow(/blocked/) // done — nothing to retry
+    expect((await kernel.state()).runs.get(t.id)).toHaveLength(1)
   })
 })
