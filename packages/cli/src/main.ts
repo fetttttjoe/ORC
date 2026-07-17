@@ -221,12 +221,13 @@ export function buildProgram(
       }
     })
 
-  program
-    .command('vault')
-    .argument('[taskId]', 'render one task (default: all)')
-    .description('render the OKF vault from the event log')
+  const vault = program.command('vault').description('OKF vault projection')
+  vault
+    .command('render [taskId]')
+    .description('render the vault from the event log (all tasks if omitted)')
     .action(async (taskId?: string) => {
       const { config, log } = needPlugin()
+      if (taskId && !(await kernel.getTask(taskId))) throw new Error(`no task '${taskId}'`)
       const projector = createVaultProjector({ log, config })
       if (taskId) await projector.renderTask(taskId)
       else await projector.renderAll()

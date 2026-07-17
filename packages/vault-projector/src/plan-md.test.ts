@@ -12,7 +12,7 @@ describe('plan-md round-trip', () => {
         stepFixture({ id: 's2', dependsOn: ['s1'], skillRefs: [], toolRefs: [] }),
       ],
     })
-    const parsed = parsePlanFile(renderPlanFile(plan, 'awaiting_approval'))
+    const parsed = parsePlanFile(renderPlanFile(plan))
     expect(parsed).toEqual(PlanDraft.parse(draftFixture(plan.steps)))
   })
 

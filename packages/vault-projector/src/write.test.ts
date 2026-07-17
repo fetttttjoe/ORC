@@ -33,4 +33,9 @@ describe('writeVaultFiles', () => {
     writeVaultFiles(d, { 'tasks/t1/log.md': 'v2' })
     expect(readFileSync(path.join(d, 'tasks/t1/log.md'), 'utf8')).toBe('v2')
   })
+
+  it('rejects a rel path that escapes the vault root', () => {
+    const d = vault()
+    expect(() => writeVaultFiles(d, { '../escape.md': 'x' })).toThrow(/escapes root/)
+  })
 })

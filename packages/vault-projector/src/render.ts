@@ -74,7 +74,7 @@ export function renderTaskFiles(taskId: string, events: EventRecord[]): VaultFil
     [`${base}/index.md`]: renderTaskIndex(task, plans?.versions.at(-1), steps, state),
     [`${base}/log.md`]: renderLog(events),
   }
-  for (const p of plans?.versions ?? []) files[`${base}/plan-v${p.version}.md`] = renderPlanFile(p, task.status)
+  for (const p of plans?.versions ?? []) files[`${base}/plan-v${p.version}.md`] = renderPlanFile(p)
   const byStep = new Map<string, EventRecord[]>()
   for (const e of events) if (e.stepId) { const a = byStep.get(e.stepId) ?? []; a.push(e); byStep.set(e.stepId, a) }
   for (const [stepId, evs] of byStep) files[`${base}/sessions/${stepId}.md`] = renderSession(stepId, evs, steps?.get(stepId))

@@ -121,9 +121,7 @@ export class EventLog implements EventLogOps {
     // Idle LISTEN connections can drop (DB restart, idle reaper, network blip); an 'error'
     // event with no listener crashes the process (Node default), so this just logs.
     client.on('error', err => console.warn(`event stream listener error: ${err instanceof Error ? err.message : String(err)}`))
-    await client.connect()
-    await client.query(`LISTEN ${NOTIFY_CHANNEL}`)
-    let cursor = opts.fromSeq ?? (await this.latestSeq())
+    let cursor: number
     let pumping = false
     let wakeAgain = false
     const pump = async (): Promise<void> => {
@@ -137,10 +135,13 @@ export class EventLog implements EventLogOps {
         } while (wakeAgain)
       } finally { pumping = false }
     }
-    client.on('notification', () => {
-      pump().catch(err => console.warn(`event stream pump failed: ${err instanceof Error ? err.message : String(err)}`))
-    })
     try {
+      await client.connect()
+      await client.query(`LISTEN ${NOTIFY_CHANNEL}`)
+      cursor = opts.fromSeq ?? (await this.latestSeq())
+      client.on('notification', () => {
+        pump().catch(err => console.warn(`event stream pump failed: ${err instanceof Error ? err.message : String(err)}`))
+      })
       await pump() // initial catch-up
     } catch (err) {
       await client.end()
