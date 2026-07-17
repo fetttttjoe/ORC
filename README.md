@@ -2,7 +2,8 @@
 
 A generic multi-agent orchestrator: recursive task splitting, human plan
 approval, multi-provider agent dispatch, plugin-first. Design spec:
-`docs/superpowers/specs/2026-07-16-orchestrator-design.md`.
+`docs/superpowers/specs/2026-07-16-orchestrator-design.md`. Adding anything
+(provider, executor, skill, tool, event kind, …): `docs/EXTENDING.md`.
 
 ## Status
 

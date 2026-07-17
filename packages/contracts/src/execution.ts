@@ -82,13 +82,20 @@ export interface ModelProvider<LM = unknown> {
   languageModel(modelId: string): LM
 }
 
+// the ONE parse of 'provider/model' refs — resolveModel and plan validation must agree
+export function parseModelRef(ref: string): { providerId: string; modelId: string } {
+  const slash = ref.indexOf('/')
+  return {
+    providerId: slash === -1 ? ref : ref.slice(0, slash),
+    modelId: slash === -1 ? '' : ref.slice(slash + 1),
+  }
+}
+
 export function resolveModel<LM>(
   providers: Map<string, ModelProvider<LM>>,
   modelRef: string,
 ): { provider: ModelProvider<LM>; modelId: string; model: LM } {
-  const slash = modelRef.indexOf('/')
-  const providerId = slash === -1 ? modelRef : modelRef.slice(0, slash)
-  const modelId = slash === -1 ? '' : modelRef.slice(slash + 1)
+  const { providerId, modelId } = parseModelRef(modelRef)
   const provider = providers.get(providerId)
   if (!provider || modelId === '')
     throw new Error(`unknown provider or malformed modelRef '${modelRef}' (expected 'provider/model')`)

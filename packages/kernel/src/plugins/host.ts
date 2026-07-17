@@ -1,5 +1,5 @@
 import type { AgentExecutor, ExtensionApi, ModelProvider, Plan } from '@orc/contracts'
-import { HOOK_NAME, parseToolRef } from '@orc/contracts'
+import { HOOK_NAME, ISOLATION_TIER, parseModelRef, parseToolRef } from '@orc/contracts'
 import type { OrcConfig } from '../config'
 import { SkillIndex } from './skills'
 import { HookBus } from './hooks'
@@ -48,9 +48,11 @@ export async function createPluginHost(
       const byName = new Map(skills.list().map(e => [e.name, e]))
       for (const step of plan.steps) {
         if (!executors.has(step.executorRef)) errors.push(`step ${step.id}: unknown executor '${step.executorRef}'`)
-        const slash = step.modelRef.indexOf('/')
-        const providerId = slash === -1 ? step.modelRef : step.modelRef.slice(0, slash)
+        const { providerId } = parseModelRef(step.modelRef)
         if (!providers.has(providerId)) errors.push(`step ${step.id}: unknown provider '${providerId}'`)
+        // only 'local' execution exists — reject tiers a plan promises but no sandbox delivers yet
+        if (step.isolation !== ISOLATION_TIER.local)
+          errors.push(`step ${step.id}: isolation '${step.isolation}' is not implemented yet (only 'local')`)
         for (const ref of step.skillRefs) {
           const entry = byName.get(ref)
           if (!entry) errors.push(`step ${step.id}: unknown skill '${ref}'`)

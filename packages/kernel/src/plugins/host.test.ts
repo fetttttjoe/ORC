@@ -64,6 +64,14 @@ describe('createPluginHost / refValidator', () => {
     await host.shutdown()
   })
 
+  it('rejects isolation tiers that are not implemented', async () => {
+    const d = project()
+    const host = await makeHost(d)
+    const plan = planFixture({ steps: [stepFixture({ isolation: 'worktree' })] })
+    expect((await host.refValidator(plan)).join('\n')).toContain(`isolation 'worktree' is not implemented`)
+    await host.shutdown()
+  })
+
   it('an invalid skill fails validation with its errors', async () => {
     const d = project()
     const dir = path.join(d, 'vault', 'skills', 'bad-skill')

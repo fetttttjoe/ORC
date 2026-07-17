@@ -34,18 +34,11 @@ const envOverrides = (): Record<string, string> => {
   return Object.fromEntries(Object.entries(map).filter((e): e is [string, string] => Boolean(e[1])))
 }
 
-export interface OrcConfig {
+// derived from the schema so a new setting can never drift out of the type
+export type OrcConfig = z.infer<ReturnType<typeof settingsSchema>> & {
   dir: string
-  databaseUrl: string
   systemDatabaseUrl: string
-  concurrency: number
-  workspaceRoot: string
-  ollamaBaseUrl: string
-  skillsDir: string
-  extensions: string[]
-  mcpServers: Record<string, McpServerConfig>
   appVersion: string
-  costOverrides: Record<string, Record<string, z.infer<typeof ModelCost>>>
 }
 
 export function deriveSystemUrl(databaseUrl: string): string {

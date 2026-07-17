@@ -14,7 +14,7 @@ afterAll(async () => {
 async function makeCli() {
   const db = await createTestDb()
   dbs.push(db)
-  const kernel = await openKernel(db.url)
+  const { kernel } = await openKernel(db.url)
   const lines: string[] = []
   spyOn(console, 'log').mockImplementation((...a: unknown[]) => {
     lines.push(a.join(' '))

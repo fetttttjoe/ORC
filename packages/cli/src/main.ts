@@ -10,10 +10,10 @@ import type { McpHub } from '@orc/mcp-client'
 export async function openKernel(
   url = loadConfig().databaseUrl,
   opts: { refValidator?: (plan: Plan) => Promise<string[]>; onAppend?: (e: EventRecord) => void } = {},
-): Promise<Kernel> {
+): Promise<{ kernel: Kernel; log: EventLog }> {
   const log = await EventLog.open(url)
   if (opts.onAppend) log.onAppend = opts.onAppend
-  return new Kernel(log, opts.refValidator)
+  return { kernel: new Kernel(log, opts.refValidator), log }
 }
 
 export function singleStepDraft(task: { title: string; spec: string }, modelRef: string): PlanDraft {
@@ -29,7 +29,7 @@ export function singleStepDraft(task: { title: string; spec: string }, modelRef:
       modelRef,
       skillRefs: [],
       toolRefs: [],
-      isolation: ISOLATION_TIER.worktree,
+      isolation: ISOLATION_TIER.local, // the only implemented tier — worktree/docker come with sandbox plugins
       zone: [],
       maxIterations: 25,
       dependsOn: [],

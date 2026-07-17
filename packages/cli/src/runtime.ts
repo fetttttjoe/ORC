@@ -4,7 +4,7 @@ import { createAnthropicProvider } from '@orc/provider-anthropic'
 import { createOpenAIProvider } from '@orc/provider-openai'
 import { createOllamaProvider } from '@orc/provider-ollama'
 import { createMcpHub, type McpHub } from '@orc/mcp-client'
-import { createDbosPort, createPluginHost, loadConfig, EventLog, type DbosPort, type PluginHost } from '@orc/kernel'
+import { createDbosPort, createPluginHost, loadConfig, EventLog, type DbosPort, type OrcConfig, type PluginHost } from '@orc/kernel'
 
 export function seedRegistries(config = loadConfig()) {
   const providers = new Map<string, ModelProvider<unknown>>([
@@ -22,10 +22,13 @@ export async function buildPlugins(config = loadConfig()): Promise<{ host: Plugi
   return { host, hub }
 }
 
-export async function buildRuntime(shared?: { host: PluginHost; hub: McpHub }): Promise<DbosPort> {
-  const config = loadConfig()
+export async function buildRuntime(
+  shared?: { host: PluginHost; hub: McpHub; config?: OrcConfig; log?: EventLog },
+): Promise<DbosPort> {
+  const config = shared?.config ?? loadConfig()
   const { host, hub } = shared ?? (await buildPlugins(config))
-  const log = await EventLog.open(config.databaseUrl)
+  // reuse the caller's log (bin passes the kernel's) — one pool, migrations run once
+  const log = shared?.log ?? (await EventLog.open(config.databaseUrl))
   log.onAppend = e => void host.hooks.emit(HOOK_NAME.event_appended, e)
   const port = await createDbosPort({
     log, config,

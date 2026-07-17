@@ -32,7 +32,7 @@ async function makeCli(dir: string) {
     executors: new Map([['api-loop', { id: 'api-loop', startTurn: async function* () {} } as never]]),
   })
   const hub = createMcpHub(config.mcpServers, new Set(host.trust.mcp))
-  const kernel = await openKernel(db.url, { refValidator: host.refValidator })
+  const { kernel } = await openKernel(db.url, { refValidator: host.refValidator })
   const lines: string[] = []
   spyOn(console, 'log').mockImplementation((...a: unknown[]) => { lines.push(a.join(' ')) })
   const run = (...args: string[]) =>
