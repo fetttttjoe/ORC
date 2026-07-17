@@ -6,7 +6,8 @@ export type IsolationTier = z.infer<typeof IsolationTier>
 export const ISOLATION_TIER = IsolationTier.enum
 
 export const PlanStep = z.object({
-  id: z.string().min(1),
+  // path-safe: step ids flow into filesystem workspace paths and deterministic workflow ids
+  id: z.string().regex(/^[\w-]+$/),
   role: z.string().min(1),
   title: z.string().min(1),
   instructions: z.string().min(1),

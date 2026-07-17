@@ -1,14 +1,10 @@
 import { describe, expect, it } from 'bun:test'
 import { Plan, validatePlan, type PlanStep } from './plan'
+import { planFixture, stepFixture } from './fixtures'
 
-const step = (id: string, dependsOn: string[] = []): PlanStep => ({
-  id, role: 'worker', title: id, instructions: 'do the thing',
-  executorRef: 'api-loop', modelRef: 'anthropic/claude-sonnet-5',
-  skillRefs: [], isolation: 'local', zone: [], maxIterations: 5, dependsOn,
-})
+const step = (id: string, dependsOn: string[] = []): PlanStep => stepFixture({ id, title: id, dependsOn })
 
-const plan = (steps: PlanStep[]) =>
-  Plan.parse({ taskId: 't1', version: 1, strategyRef: 'template:single', costEstimateUSD: null, steps })
+const plan = (steps: PlanStep[]) => Plan.parse(planFixture({ steps }))
 
 describe('validatePlan', () => {
   it('accepts a valid DAG', () => {
@@ -31,5 +27,8 @@ describe('validatePlan', () => {
   })
   it('rejects an empty plan at parse time', () => {
     expect(() => plan([])).toThrow()
+  })
+  it('rejects path-unsafe step ids', () => {
+    expect(() => plan([step('../x')])).toThrow()
   })
 })
