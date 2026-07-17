@@ -1,15 +1,27 @@
 import { isConnectionRefused, loadConfig } from '@orc/kernel'
+import { HOOK_NAME } from '@orc/contracts'
 import { buildProgram, openKernel } from './main'
-import { buildRuntime } from './runtime'
+import { buildPlugins, buildRuntime } from './runtime'
 
 // The DBOS port is built lazily, once, only when a command actually asks for it —
 // read-only commands never pay the DBOS launch, and new port commands need no registration here.
 const runtime: { port: Awaited<ReturnType<typeof buildRuntime>> | null } = { port: null }
 
 try {
-  const kernel = await openKernel()
-  await buildProgram(kernel, async () => (runtime.port ??= await buildRuntime())).parseAsync(process.argv)
-  await runtime.port?.shutdown()
+  const config = loadConfig()
+  const plugins = await buildPlugins(config)
+  await plugins.host.hooks.emit(HOOK_NAME.session_start)
+  const kernel = await openKernel(config.databaseUrl, {
+    refValidator: plugins.host.refValidator,
+    onAppend: e => void plugins.host.hooks.emit(HOOK_NAME.event_appended, e),
+  })
+  await buildProgram(
+    kernel,
+    async () => (runtime.port ??= await buildRuntime(plugins)),
+    { host: plugins.host, hub: plugins.hub, config },
+  ).parseAsync(process.argv)
+  if (runtime.port) await runtime.port.shutdown()
+  else { await plugins.hub.close(); await plugins.host.shutdown() }
   process.exit(process.exitCode ?? 0)
 } catch (err) {
   if (isConnectionRefused(err)) {

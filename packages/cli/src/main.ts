@@ -1,12 +1,19 @@
 import { readFileSync } from 'node:fs'
+import path from 'node:path'
 import { Command } from 'commander'
-import { ISOLATION_TIER, PlanDraft, type ExecutionPort, type Plan, type RunHandle } from '@orc/contracts'
-import { EventLog, Kernel, loadConfig, taskUsage } from '@orc/kernel'
+import { ISOLATION_TIER, PlanDraft, type EventRecord, type ExecutionPort, type Plan, type RunHandle } from '@orc/contracts'
+import { EventLog, Kernel, grantTrust, loadConfig, taskUsage, type OrcConfig, type PluginHost } from '@orc/kernel'
+import type { McpHub } from '@orc/mcp-client'
 
 // loadConfig is the ONE resolution of env → .orc/config.json → default; every command
 // (read-only or executing) must land on the same database
-export async function openKernel(url = loadConfig().databaseUrl): Promise<Kernel> {
-  return new Kernel(await EventLog.open(url))
+export async function openKernel(
+  url = loadConfig().databaseUrl,
+  opts: { refValidator?: (plan: Plan) => Promise<string[]>; onAppend?: (e: EventRecord) => void } = {},
+): Promise<Kernel> {
+  const log = await EventLog.open(url)
+  if (opts.onAppend) log.onAppend = opts.onAppend
+  return new Kernel(log, opts.refValidator)
 }
 
 export function singleStepDraft(task: { title: string; spec: string }, modelRef: string): PlanDraft {
@@ -57,9 +64,18 @@ async function tailUntilDone(kernel: Kernel, taskId: string, handle: RunHandle):
   return outcomeP
 }
 
-export function buildProgram(kernel: Kernel, portFactory?: () => Promise<ExecutionPort>): Command {
+export function buildProgram(
+  kernel: Kernel,
+  portFactory?: () => Promise<ExecutionPort>,
+  plugin?: { host: PluginHost; hub: McpHub; config: OrcConfig },
+): Command {
   const program = new Command('orc')
   program.description('multi-agent orchestrator')
+
+  const needPlugin = () => {
+    if (!plugin) throw new Error('plugin commands are unavailable in this context')
+    return plugin
+  }
 
   program
     .command('new <title>')
@@ -185,6 +201,69 @@ export function buildProgram(kernel: Kernel, portFactory?: () => Promise<Executi
       }
       const u = taskUsage(state, taskId)
       console.log(`  tokens in/out: ${u.inputTokens}/${u.outputTokens}  cost: ${u.costUSD === null ? 'n/a' : `$${u.costUSD.toFixed(4)}${u.estimated ? ' (est)' : ''}`}`)
+    })
+
+  program
+    .command('skills')
+    .description('list indexed skills (vault/skills)')
+    .action(async () => {
+      const { host } = needPlugin()
+      for (const e of host.skills.list()) {
+        const mark = e.valid ? 'ok     ' : 'INVALID'
+        const desc = e.valid ? (e.manifest!.description.length > 80 ? `${e.manifest!.description.slice(0, 77)}...` : e.manifest!.description) : e.errors.join('; ')
+        console.log(`${mark} ${e.name.padEnd(24)} ${desc}`)
+      }
+    })
+
+  const mcp = program.command('mcp').description('MCP servers (T1 plugins)')
+  mcp
+    .command('list')
+    .description('declared servers and their trust state')
+    .action(async () => {
+      const { host, config } = needPlugin()
+      for (const [id, cfg] of Object.entries(config.mcpServers)) {
+        const state = host.trust.mcp.includes(id) ? 'trusted  ' : 'untrusted'
+        console.log(`${state} ${id.padEnd(16)} ${cfg.command} ${(cfg.args ?? []).join(' ')}`)
+      }
+    })
+  mcp
+    .command('tools <serverId>')
+    .description('spawn a trusted server and list its tools')
+    .action(async (serverId: string) => {
+      const { hub } = needPlugin()
+      console.log('vet MCP servers before trusting them: they run as local processes with the permissions of this user')
+      for (const t of await hub.listTools(serverId)) console.log(`${t.name.padEnd(24)} ${t.description}`)
+      await hub.close()
+    })
+  mcp
+    .command('trust <serverId>')
+    .description('grant local trust (writes .orc/trust.json — never commit it)')
+    .action(async (serverId: string) => {
+      const { config } = needPlugin()
+      if (!(serverId in config.mcpServers)) throw new Error(`undeclared MCP server '${serverId}' — declare it in .orc/config.json first`)
+      grantTrust('mcp', serverId, config.dir)
+      console.log(`trusted mcp server '${serverId}'`)
+    })
+
+  const ext = program.command('ext').description('T2 extensions')
+  ext
+    .command('list')
+    .description('declared extensions and their trust state')
+    .action(async () => {
+      const { host, config } = needPlugin()
+      for (const p of config.extensions) {
+        const state = host.trust.extensions.some(t => path.resolve(config.dir, t) === path.resolve(config.dir, p)) ? 'trusted  ' : 'untrusted'
+        const active = host.extensions.loaded.find(l => l.path === path.resolve(config.dir, p))
+        console.log(`${state} ${p}${active ? `  (loaded: ${active.manifest.id})` : ''}`)
+      }
+    })
+  ext
+    .command('trust <path>')
+    .description('grant local trust to a declared extension')
+    .action(async (p: string) => {
+      const { config } = needPlugin()
+      grantTrust('extensions', p, config.dir)
+      console.log(`trusted extension '${p}' — takes effect on the next orc invocation`)
     })
 
   return program
