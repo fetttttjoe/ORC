@@ -6,3 +6,6 @@ dist/
 *.db-wal
 *.db-shm
 .superpowers/
+.claude/skills/
+skills-lock.json
+.agents/
