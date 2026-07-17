@@ -4,7 +4,8 @@ import { renderPlanFile } from './plan-md'
 
 export type VaultFiles = Record<string, string>
 
-const fm = (obj: Record<string, unknown>, body: string): string => `---\n${Bun.YAML.stringify(obj)}---\n\n${body}\n`
+const fm = (obj: Record<string, unknown>, body: string): string =>
+  `---\n${Bun.YAML.stringify(obj, null, 2).trimEnd()}\n---\n\n${body}\n`
 const truncate = (s: string, n: number): string => (s.length > n ? s.slice(0, n) + '…' : s)
 
 const statusClass = (s: StepState | undefined): 'done' | 'running' | 'failed' | 'pending' =>
