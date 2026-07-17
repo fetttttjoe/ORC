@@ -71,7 +71,7 @@ M3 makes the plugin ecosystem real: skills as hot-indexed SKILL.md files force-l
 `createMcpHub(servers: Record<id, McpServerConfig>, trusted: Set<string>): ToolSource & { listTools(id): Promise<…>, }` on `@modelcontextprotocol/sdk` ^1.29:
 
 - `resolve(refs)`: group refs by server; reject any server not declared or not trusted (throw — this is the runtime half of the trust gate); lazily `connect()` one cached client per server (`StdioClientTransport`, `stderr: 'pipe'` retained for error surfacing); `listTools()` cached per server, invalidated by a `ToolListChangedNotificationSchema` handler; unknown tool name → throw. Returns `ResolvedTool[]` with mangled names and `execute` = `callTool` (SDK `isError` → tool-result `isError`; transport-level throw → `{ output: { error }, isError: true }` after one reconnect attempt — a dead server is a tool error the model can react to, not a step crash).
-- Spawn env: `{ ...getDefaultEnvironment(), ...cfg.env }` — the SDK's sanitized default (PATH/HOME/…), never the full `process.env` (which would hand `ANTHROPIC_API_KEY` etc. to every server binary); a server that needs a secret gets it via an explicit `env` entry in its config.
+- Spawn env: `{ ...getDefaultEnvironment(), ...resolved }` — the SDK's sanitized default (PATH/HOME/…), never the full `process.env` (which would hand `ANTHROPIC_API_KEY` etc. to every server binary); literal `env` values are for non-secret settings, and a value starting with `$` is resolved from the orc process environment at spawn (unset → omitted with a warning), so secrets stay env-side and never enter the committable config.
 - `close()`: `client.close()` per live server (spike: child dies <300 ms).
 
 ### 5.3 T2 — Extension loader (`packages/kernel/src/plugins/extensions.ts`)
