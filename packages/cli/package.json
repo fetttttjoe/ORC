@@ -6,6 +6,10 @@
   "dependencies": {
     "@orc/contracts": "workspace:*",
     "@orc/kernel": "workspace:*",
+    "@orc/executor-api-loop": "workspace:*",
+    "@orc/provider-anthropic": "workspace:*",
+    "@orc/provider-openai": "workspace:*",
+    "@orc/provider-ollama": "workspace:*",
     "commander": "^12.1.0"
   }
 }

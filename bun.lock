@@ -15,7 +15,11 @@
       "version": "0.0.0",
       "dependencies": {
         "@orc/contracts": "workspace:*",
+        "@orc/executor-api-loop": "workspace:*",
         "@orc/kernel": "workspace:*",
+        "@orc/provider-anthropic": "workspace:*",
+        "@orc/provider-ollama": "workspace:*",
+        "@orc/provider-openai": "workspace:*",
         "commander": "^12.1.0",
       },
     },
