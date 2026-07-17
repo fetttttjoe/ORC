@@ -15,7 +15,6 @@ function stubPort(outcome: 'done' | 'blocked' = 'done') {
     startRun: async (id, opts) => { calls.push(`start:${id}:${opts?.cwd ?? ''}`); return handle },
     retry: async id => { calls.push(`retry:${id}`); return handle },
     cancelRun: async id => { calls.push(`cancel:${id}`) },
-    runStatus: async () => ({ workflowId: 'run:x:v1', dbosStatus: 'SUCCESS' }),
   }
   return { port, calls }
 }
@@ -66,19 +65,19 @@ describe('exec commands', () => {
     // Simulate the real race: the workflow's terminal event lands in the DB right after the
     // tail loop's one poll fetch reads its snapshot, then handle.wait() settles — the pre-fix
     // code exits the loop right there and never looks again.
-    const real = kernel.eventsFor.bind(kernel)
+    const real = kernel.eventsSince.bind(kernel)
     const rawLog = await EventLog.open(db.url)
     let calls = 0
-    spyOn(kernel, 'eventsFor').mockImplementation(async (taskId: string) => {
+    spyOn(kernel, 'eventsSince').mockImplementation(async (taskId: string, afterSeq: number) => {
       calls++
-      const snapshot = await real(taskId)
-      if (calls === 2) {
+      const snapshot = await real(taskId, afterSeq)
+      if (calls === 1) {
         await rawLog.append({
           taskId: id, stepId: 's1', runToken: 'r1', kind: 'step_failed',
           payload: { stepId: 's1', runToken: 'r1', class: 'agent_error', message: 'blocked: boom' },
         })
       }
-      return snapshot // call #2 (the loop's poll) returns the pre-append snapshot either way
+      return snapshot // call #1 (the loop's poll) returns the pre-append snapshot either way
     })
 
     try {
