@@ -18,7 +18,7 @@ const planV = (version: number): Plan => ({
 })
 
 const evt = (seq: number, kind: EventRecord['kind'], payload: Record<string, unknown>): EventRecord =>
-  ({ seq, ts: '2026-07-16T00:00:00.000Z', taskId: 't1', stepId: null, runToken: null, kind, payload })
+  ({ seq, ts: '2026-07-16T00:00:00.000Z', taskId: 't1', stepId: null, runToken: null, kind, payload, usage: null })
 
 describe('fold', () => {
   it('replays a full lifecycle into consistent state', () => {
