@@ -90,7 +90,10 @@ export function apiLoopExecutor(): AgentExecutor<LanguageModel> {
             () => callModel(ctx.model, messages),
             (r): EventDraft[] => [{
               kind: EVENT_KIND.agent_call,
-              payload: { ...base, iteration, request: { messages }, response: { text: r.text, toolCalls: r.toolCalls } },
+              // shallow-copy: `messages` keeps growing via push() after this draft is built;
+              // without the copy the draft would alias the live array and later reads (R9
+              // traceability) would see telescoped history instead of this iteration's snapshot.
+              payload: { ...base, iteration, request: { messages: [...messages] }, response: { text: r.text, toolCalls: r.toolCalls } },
               usage: r.usage,
             }],
           )
@@ -109,7 +112,23 @@ export function apiLoopExecutor(): AgentExecutor<LanguageModel> {
         if (signalCall) {
           const parsed = SignalInput.safeParse(signalCall.input)
           if (!parsed.success) {
-            messages.push({ role: 'user', content: `Your signal call was invalid (${parsed.error.message}). Call signal again with {outcome: 'success'|'failure', summary: string}.` })
+            // The assistant turn's tool_use (signal, plus any siblings) must be answered by a
+            // matching tool result for EVERY call id, or a real provider rejects the next request
+            // with a 400 (terminal) — a bare user-message push leaves the signal call unresolved.
+            messages.push({
+              role: 'tool',
+              content: turn.toolCalls.map(call => ({
+                type: 'tool-result',
+                toolCallId: call.toolCallId,
+                toolName: call.toolName,
+                output: {
+                  type: 'json',
+                  value: call.toolCallId === signalCall.toolCallId
+                    ? { error: `invalid signal input: ${parsed.error.message}. Call signal again with {outcome: 'success'|'failure', summary: string}.` }
+                    : { error: 'not executed: resolve the invalid signal call first' },
+                },
+              })),
+            } as ModelMessage)
             continue // counts as an iteration (agent_error accounting, spec §9)
           }
           const signal: Signal = { ...base, outcome: parsed.data.outcome, summary: parsed.data.summary }

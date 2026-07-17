@@ -108,5 +108,35 @@ describe('api-loop executor', () => {
     ])
     const events = await drain(apiLoopExecutor().startTurn(ctx(model, captured)))
     expect(events.at(-1)?.type).toBe('done')
+
+    // Recovery must answer the unresolved 'signal' tool_use with a matching tool result —
+    // otherwise a real provider 400s the follow-up request (unresolved tool_use block).
+    const agentCallDrafts = captured.filter(d => d.kind === EVENT_KIND.agent_call)
+    expect(agentCallDrafts).toHaveLength(2)
+    const secondRequestMessages = (agentCallDrafts[1]!.payload as { request: { messages: Array<{ role: string; content: unknown }> } }).request.messages
+    const recoveryMessage = secondRequestMessages.at(-1)
+    expect(recoveryMessage?.role).toBe('tool')
+    const parts = recoveryMessage?.content as Array<{ toolCallId: string; output: { value: { error: string } } }>
+    expect(parts).toHaveLength(1)
+    expect(parts[0]!.toolCallId).toBe('c1')
+    expect(parts[0]!.output.value.error).toContain('invalid signal input')
+  })
+
+  it('agent_call drafts snapshot messages at call time, not the live mutated array', async () => {
+    const captured: EventDraft[] = []
+    const model = scriptModel([
+      { toolCalls: [{ toolCallId: 'c1', toolName: 'fs_write', input: { path: 'out.txt', content: 'hi' } }] },
+      { toolCalls: [{ toolCallId: 'c2', toolName: 'signal', input: { outcome: 'success', summary: 'wrote file' } }] },
+    ])
+    const events = await drain(apiLoopExecutor().startTurn(ctx(model, captured)))
+    expect(events.at(-1)?.type).toBe('done')
+
+    const agentCallDrafts = captured.filter(d => d.kind === EVENT_KIND.agent_call)
+    expect(agentCallDrafts).toHaveLength(2)
+    const messages1 = (agentCallDrafts[0]!.payload as { request: { messages: unknown[] } }).request.messages
+    const messages2 = (agentCallDrafts[1]!.payload as { request: { messages: unknown[] } }).request.messages
+    expect(messages1).toHaveLength(1) // just the initial user prompt
+    expect(messages2).toHaveLength(3) // user + assistant (tool call) + tool result
+    expect(messages1.length).not.toBe(messages2.length)
   })
 })
