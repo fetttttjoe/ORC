@@ -21,6 +21,7 @@
         "@orc/provider-anthropic": "workspace:*",
         "@orc/provider-ollama": "workspace:*",
         "@orc/provider-openai": "workspace:*",
+        "@orc/vault-projector": "workspace:*",
         "commander": "^12.1.0",
       },
     },

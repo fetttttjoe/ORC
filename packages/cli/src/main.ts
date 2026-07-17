@@ -1,8 +1,9 @@
-import { readFileSync } from 'node:fs'
+import { readdirSync, readFileSync } from 'node:fs'
 import path from 'node:path'
 import { Command } from 'commander'
 import { ISOLATION_TIER, PlanDraft, type EventRecord, type ExecutionPort, type Plan, type RunHandle } from '@orc/contracts'
 import { EventLog, Kernel, grantTrust, loadConfig, taskUsage, type OrcConfig, type PluginHost } from '@orc/kernel'
+import { createVaultProjector, parsePlanFile } from '@orc/vault-projector'
 import type { McpHub } from '@orc/mcp-client'
 
 // loadConfig is the ONE resolution of env → .orc/config.json → default; every command
@@ -37,7 +38,15 @@ export function singleStepDraft(task: { title: string; spec: string }, modelRef:
   }
 }
 
-function resolveDraft(task: { title: string; spec: string }, opts: { file?: string; model: string }): PlanDraft {
+function resolveDraft(task: { title: string; spec: string }, opts: { file?: string; model: string; fromVault?: boolean }, taskId: string, config?: OrcConfig): PlanDraft {
+  if (opts.fromVault) {
+    if (!config) throw new Error('--from-vault is unavailable in this context')
+    const dir = path.join(config.vaultDir, 'tasks', taskId)
+    const files = readdirSync(dir).filter(f => /^plan-v\d+\.md$/.test(f)).sort()
+    const latest = files.at(-1)
+    if (!latest) throw new Error(`no plan file in ${dir} — run 'orc vault render ${taskId}' first`)
+    return parsePlanFile(readFileSync(path.join(dir, latest), 'utf8'))
+  }
   return opts.file
     ? PlanDraft.parse(JSON.parse(readFileSync(opts.file, 'utf8')))
     : singleStepDraft(task, opts.model)
@@ -61,7 +70,7 @@ async function tailUntilDone(kernel: Kernel, taskId: string, handle: RunHandle):
 export function buildProgram(
   kernel: Kernel,
   portFactory?: () => Promise<ExecutionPort>,
-  plugin?: { host: PluginHost; hub: McpHub; config: OrcConfig },
+  plugin?: { host: PluginHost; hub: McpHub; config: OrcConfig; log: EventLog },
 ): Command {
   const program = new Command('orc')
   program.description('multi-agent orchestrator')
@@ -82,10 +91,10 @@ export function buildProgram(
     })
 
   const planAction = (apply: (taskId: string, draft: PlanDraft) => Promise<Plan>, describe: (plan: Plan) => string) =>
-    async (taskId: string, opts: { file?: string; model: string }) => {
+    async (taskId: string, opts: { file?: string; model: string; fromVault?: boolean }) => {
       const task = await kernel.getTask(taskId)
       if (!task) throw new Error(`no task '${taskId}'`)
-      const plan = await apply(taskId, resolveDraft(task, opts))
+      const plan = await apply(taskId, resolveDraft(task, opts, taskId, plugin?.config))
       console.log(`plan v${plan.version} ${describe(plan)} — review with: orc plan ${taskId}`)
     }
 
@@ -101,6 +110,7 @@ export function buildProgram(
     .description('edit a plan (default: single-step template)')
     .option('--file <path>', 'plan draft JSON file')
     .option('--model <ref>', 'model for template steps', 'anthropic/claude-sonnet-5')
+    .option('--from-vault', 'read the edited plan markdown from the vault')
     .action(planAction((id, draft) => kernel.editPlan(id, draft), () => 'edited'))
 
   program
@@ -207,6 +217,19 @@ export function buildProgram(
         const desc = e.valid ? (e.manifest!.description.length > 80 ? `${e.manifest!.description.slice(0, 77)}...` : e.manifest!.description) : e.errors.join('; ')
         console.log(`${mark} ${e.name.padEnd(24)} ${desc}`)
       }
+    })
+
+  program
+    .command('vault')
+    .argument('[taskId]', 'render one task (default: all)')
+    .description('render the OKF vault from the event log')
+    .action(async (taskId?: string) => {
+      const { config, log } = needPlugin()
+      const projector = createVaultProjector({ log, config })
+      if (taskId) await projector.renderTask(taskId)
+      else await projector.renderAll()
+      await projector.close()
+      console.log(`vault rendered → ${config.vaultDir}`)
     })
 
   const mcp = program.command('mcp').description('MCP servers (T1 plugins)')
