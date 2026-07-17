@@ -19,6 +19,7 @@ const settingsSchema = (dir: string) =>
     workspaceRoot: z.string().default(path.join(dir, '.orc', 'workspaces')),
     ollamaBaseUrl: z.url().default('http://localhost:11434'),
     costOverrides: z.record(z.string(), z.record(z.string(), ModelCost)).default({}),
+    skillsDir: z.string().default(path.join('vault', 'skills')).transform(p => path.resolve(dir, p)),
   })
 
 // container reality: `VAR=` (empty) counts as unset, not as a value
@@ -37,6 +38,7 @@ export interface OrcConfig {
   concurrency: number
   workspaceRoot: string
   ollamaBaseUrl: string
+  skillsDir: string
   appVersion: string
   costOverrides: Record<string, Record<string, z.infer<typeof ModelCost>>>
 }
