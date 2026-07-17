@@ -601,15 +601,58 @@ git commit -m "feat(memory): SurrealDB read-model adapter (apply/get/list/search
 
 ---
 
-### Task 5: Pure note renderer (`plugins/memory/src/note-md.ts`)
+### Task 5: Shared `frontmatter()` helper + pure note renderer
+
+> **Pre-flight resolution (folded in):** the user chose "extract + close the rider". The memory
+> renderer would be the THIRD place building `---<yaml>---` frontmatter (after `plan-md.ts` and
+> `render.ts`). Extract ONE `frontmatter()` helper in vault-projector, refactor both existing
+> callers onto it, and have the memory renderer consume it. Block-style YAML only
+> (`Bun.YAML.stringify(obj, null, 2)` + `.trimEnd()`) — the M4a-proven pattern; flow style
+> (no `null, 2`) reintroduces the closing-fence-gluing bug M4a fixed twice.
 
 **Files:**
+- Create: `packages/vault-projector/src/frontmatter.ts` (the ONE frontmatter builder)
+- Create: `packages/vault-projector/src/frontmatter.test.ts`
+- Modify: `packages/vault-projector/src/plan-md.ts` (use the helper)
+- Modify: `packages/vault-projector/src/render.ts` (replace its local `fm()` with the helper)
+- Modify: `packages/vault-projector/src/index.ts` (export `frontmatter`)
+- Modify: `plugins/memory/package.json` (add `"@orc/vault-projector": "workspace:*"`)
 - Create: `plugins/memory/src/note-md.ts`
 - Create: `plugins/memory/src/note-md.test.ts`
 
 **Interfaces:**
-- Consumes: `MemoryNote` (Task 1).
+- Produces: `frontmatter(obj: Record<string, unknown>): string` → `` `---\n<block-yaml>\n---\n` `` (through the closing fence + newline). Exported from `@orc/vault-projector`.
+- Consumes: `MemoryNote` (Task 1); `frontmatter` (this task).
 - Produces: `renderNoteFile(note: MemoryNote): string` (frontmatter + body), `noteRelPath(note): string` (`<id>.md` for `project`, else `<scope>/<id>.md`). Pure — no fs, no clock.
+
+- [ ] **Step 0a: Extract the shared helper** — `packages/vault-projector/src/frontmatter.ts`
+
+```ts
+// The ONE frontmatter builder for the whole vault (plan files, task files, memory notes).
+// Block style (Bun.YAML.stringify(obj, null, 2)) + trimEnd is load-bearing: flow style glues
+// the closing fence to content and breaks Obsidian frontmatter parsing (M4a Task 4/5 bug).
+export function frontmatter(obj: Record<string, unknown>): string {
+  return `---\n${Bun.YAML.stringify(obj, null, 2).trimEnd()}\n---\n`
+}
+```
+Add a `frontmatter.test.ts` asserting: starts with `---\n`, ends with `\n---\n`, contains a block-style key (`type: plan` for `{type:'plan'}`), and structurally matches `/^---\n[\s\S]+\n---\n$/`.
+
+- [ ] **Step 0b: Refactor the two existing callers**
+
+`render.ts` — its local `fm(obj, body)` becomes a thin wrapper (keep the export/callers unchanged):
+```ts
+import { frontmatter } from './frontmatter'
+const fm = (obj: Record<string, unknown>, body: string): string => `${frontmatter(obj)}\n${body}\n`
+```
+`plan-md.ts` — replace the inline `${FENCE}\n${front.trimEnd()}\n${FENCE}\n` construction:
+```ts
+import { frontmatter } from './frontmatter'
+// ...
+return `${frontmatter({ type: 'plan', task: plan.taskId, version: plan.version, strategyRef: plan.strategyRef, costEstimateUSD: plan.costEstimateUSD, steps: plan.steps })}\n# Plan v${plan.version}\n\n${summary}\n\n` +
+  `> The frontmatter above is authoritative. Edit it, then run \`orc edit ${plan.taskId} --from-vault\` to apply as a new version.\n`
+```
+`index.ts` — add `export { frontmatter } from './frontmatter'`.
+Run `bun test packages/vault-projector/` — the existing round-trip / structural-fence tests MUST stay green (this is a pure refactor; byte-identical output). This is the acceptance gate for the extraction.
 
 - [ ] **Step 1: Write the failing test** — `plugins/memory/src/note-md.test.ts`
 
@@ -652,26 +695,25 @@ Expected: FAIL — `./note-md` not found.
 - [ ] **Step 3: Implement `plugins/memory/src/note-md.ts`**
 
 ```ts
+import { frontmatter } from '@orc/vault-projector'
 import type { MemoryNote } from '@orc/contracts'
 
 export function noteRelPath(note: Pick<MemoryNote, 'id' | 'scope'>): string {
   return note.scope === 'project' ? `${note.id}.md` : `${note.scope}/${note.id}.md`
 }
 
-// Native Bun YAML keeps this lossless and dependency-free (same choice as the plan round-trip).
+// One shared frontmatter builder across the vault (block-style YAML — see frontmatter.ts).
 export function renderNoteFile(note: MemoryNote): string {
-  const fm = Bun.YAML.stringify({
+  return `${frontmatter({
     type: 'memory',
     id: note.id, scope: note.scope, title: note.title,
     categories: note.categories, tags: note.tags, links: note.links,
     paths: note.paths, rules: note.rules, summary: note.summary,
     createdAt: note.createdAt, createdBy: note.createdBy,
     updatedAt: note.updatedAt, updatedBy: note.updatedBy, revision: note.revision,
-  })
-  return `---\n${fm}---\n\n${note.body}\n`
+  })}\n${note.body}\n`
 }
 ```
-(If `Bun.YAML.stringify` is unavailable in the pinned Bun, use the same YAML approach the vault projector's `plan-md.ts` uses — match that file.)
 
 - [ ] **Step 4: Run tests to verify they pass**
 
@@ -696,7 +738,13 @@ git commit -m "feat(memory): pure OKF note renderer"
 
 **Interfaces:**
 - Consumes: `EventLog.subscribe`/`byTask`/`all` semantics; `SurrealMemory` (Task 4); `renderNoteFile`/`noteRelPath` (Task 5); `EVENT_KIND.memory_written`/`memory_deleted`.
-- Produces: `createMemoryProjector({ log, surreal, vaultDir }) → { start(): Promise<void>, close(): Promise<void>, rebuild(): Promise<void> }`; `writeMemoryFile(vaultDir, relPath, content)` and `deleteMemoryFile(vaultDir, relPath)` confined under `vault/memory/`.
+- Produces: `createMemoryProjector({ log, surreal, vaultDir }) → { start(): Promise<void>, close(): Promise<void>, rebuild(): Promise<void>, catchUp(): Promise<void> }`; `writeMemoryFile(vaultDir, relPath, content)` and `deleteMemoryFile(vaultDir, relPath)` confined under `vault/memory/`.
+
+> **Pre-flight resolution (folded in):** `catchUp()` drains log events with `seq > persisted cursor`
+> once (no clear, no subscription). It is the primitive the one-shot CLI commands (Task 9) use to
+> project after an `add`/`rm` and before an `ls`/`search`/`cat` — the long-lived subscription only
+> runs under `orc run`, so without `catchUp` a fresh-DB `orc memory add` then `ls` would show nothing.
+> `start()` already does a drain-from-cursor internally; `catchUp()` just exposes that same drain.
 
 - [ ] **Step 1: Write the failing writer test** — `plugins/memory/src/write-note.test.ts`
 
@@ -803,7 +851,7 @@ import { SurrealMemory } from './surreal'
 import { noteRelPath, renderNoteFile } from './note-md'
 import { deleteMemoryFile, writeMemoryFile } from './write-note'
 
-export interface MemoryProjector { start(): Promise<void>; close(): Promise<void>; rebuild(): Promise<void> }
+export interface MemoryProjector { start(): Promise<void>; close(): Promise<void>; rebuild(): Promise<void>; catchUp(): Promise<void> }
 
 export function createMemoryProjector(opts: { log: EventLog; surreal: SurrealMemory; vaultDir: string }): MemoryProjector {
   const { log, surreal, vaultDir } = opts
@@ -846,6 +894,8 @@ export function createMemoryProjector(opts: { log: EventLog; surreal: SurrealMem
     },
     close: async () => { if (unsub) { await unsub(); unsub = null } await applying },
     rebuild: async () => { await surreal.clear(); cursorCache = 0; await drainFrom(0); cursorCache = await surreal.getCursor() },
+    // one-shot drain from the persisted cursor (no clear, no subscription) — the CLI's projection path
+    catchUp: async () => { cursorCache = await surreal.getCursor(); await drainFrom(cursorCache); cursorCache = await surreal.getCursor() },
   }
 }
 ```
@@ -1189,28 +1239,29 @@ mem.command('add').requiredOption('--id <id>').requiredOption('--title <title>')
   .action(async o => {
     const { memory, close } = await withMemory()
     await memory.store.write({ id: o.id, title: o.title, summary: o.summary ?? '', body: o.body ?? '', tags: o.tags ?? [], categories: o.categories ?? [] } as any, { source: 'cli' })
+    await memory.projector.catchUp() // one-shot: no long-lived subscription here, so project the append now
     await close(); console.log(`wrote memory '${o.id}'`)
   })
 mem.command('rm').argument('<id>').option('--scope <s>').action(async (id, o) => {
-  const { memory, close } = await withMemory(); await memory.store.remove(id, o.scope); await close(); console.log(`deleted '${id}'`)
+  const { memory, close } = await withMemory(); await memory.store.remove(id, o.scope); await memory.projector.catchUp(); await close(); console.log(`deleted '${id}'`)
 })
 mem.command('ls').option('--category <c>').option('--tag <t>').action(async o => {
-  const { memory, close } = await withMemory(); const rows = await memory.store.list({ category: o.category, tag: o.tag }); await close()
+  const { memory, close } = await withMemory(); await memory.projector.catchUp(); const rows = await memory.store.list({ category: o.category, tag: o.tag }); await close()
   for (const n of rows) console.log(`${n.id}\t${n.title}\t[${n.categories.join(',')}]\t${n.summary}`)
 })
 mem.command('search').argument('<query>').action(async query => {
-  const { memory, close } = await withMemory(); const rows = await memory.store.search(query); await close()
+  const { memory, close } = await withMemory(); await memory.projector.catchUp(); const rows = await memory.store.search(query); await close()
   for (const n of rows) console.log(`${n.id}\t${n.title}\t${n.summary}`)
 })
 mem.command('cat').argument('<id>').option('--scope <s>').action(async (id, o) => {
-  const { memory, close } = await withMemory(); const n = await memory.store.get(id, o.scope); await close()
+  const { memory, close } = await withMemory(); await memory.projector.catchUp(); const n = await memory.store.get(id, o.scope); await close()
   console.log(n ? JSON.stringify(n, null, 2) : `no note '${id}'`)
 })
 mem.command('rebuild').action(async () => {
   const { memory, close } = await withMemory(); await memory.projector.rebuild(); await close(); console.log('memory read model rebuilt from the log')
 })
 ```
-(Adapt the exact `program`/`command` API to the CLI framework already in `main.ts`. `rebuild` here does not need a running subscription — it replays the whole log once.)
+(Adapt the exact `program`/`command` API to the CLI framework already in `main.ts` — commander, matching the existing `vault`/`mcp`/`ext` groups. `catchUp()` projects pending memory events in a one-shot command since the subscription only runs under `orc run`; `rebuild` replays the whole log once.)
 
 - [ ] **Step 4: Run test + typecheck + manual smoke**
 
