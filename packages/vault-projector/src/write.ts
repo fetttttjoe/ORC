@@ -13,12 +13,14 @@ export function writeVaultFiles(vaultDir: string, files: VaultFiles): void {
   let manifest: Record<string, string> = {}
   try { manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) } catch { manifest = {} }
 
+  const root = path.resolve(vaultDir)
   for (const [rel, content] of Object.entries(files)) {
-    const abs = path.join(vaultDir, rel)
+    const abs = path.resolve(vaultDir, rel)
+    if (abs !== root && !abs.startsWith(root + path.sep)) throw new Error(`vault write escapes root: ${rel}`)
     const onDisk = existsSync(abs) ? readFileSync(abs, 'utf8') : null
     if (onDisk === content) continue                       // unchanged
     if (isPlanFile(rel) && onDisk !== null) continue       // write-once (protects human edits)
-    if (!isPlanFile(rel) && onDisk !== null && sha(onDisk) !== manifest[rel])
+    if (!isPlanFile(rel) && onDisk !== null && manifest[rel] !== undefined && sha(onDisk) !== manifest[rel])
       console.warn(`vault: ${rel} was hand-edited; it is projection-only and is being overwritten`)
     mkdirSync(path.dirname(abs), { recursive: true })
     const tmp = `${abs}.tmp`

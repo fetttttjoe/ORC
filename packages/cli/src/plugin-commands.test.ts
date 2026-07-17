@@ -108,10 +108,16 @@ describe('plugin commands', () => {
     const dir = project({})
     const { run, lines, kernel, config } = await makeCli(dir)
     const t = await kernel.createTask({ title: 'demo', spec: 'do it' })
-    await run('vault', t.id)
+    await run('vault', 'render', t.id)
     const idx = path.join(config.vaultDir, 'tasks', t.id, 'index.md')
     expect(existsSync(idx)).toBe(true)
     expect(lines.join('\n')).toContain('vault rendered')
+  })
+
+  it('orc vault render rejects an unknown task id', async () => {
+    const dir = project({})
+    const { run } = await makeCli(dir)
+    await expect(run('vault', 'render', '00000000-0000-0000-0000-000000000000')).rejects.toThrow(/no task/)
   })
 
   it('orc edit --from-vault picks the numerically highest plan version, not the lexicographic one', async () => {
@@ -121,7 +127,7 @@ describe('plugin commands', () => {
     const taskId = lines[0]!
     await run('propose', taskId, '--model', 'fake/m') // v1 — 'fake' is the only provider this test's host registers
     for (let i = 0; i < 10; i++) await run('edit', taskId, '--model', 'fake/m') // v2..v11 — plan-v10/plan-v11 must sort after plan-v9 numerically, not lexicographically
-    await run('vault', taskId) // render every plan-vN.md to disk (real vault files, not a mock)
+    await run('vault', 'render', taskId) // render every plan-vN.md to disk (real vault files, not a mock)
 
     const planPath = path.join(config.vaultDir, 'tasks', taskId, 'plan-v11.md')
     expect(existsSync(planPath)).toBe(true)

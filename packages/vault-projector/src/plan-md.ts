@@ -2,12 +2,11 @@ import { PlanDraft, type Plan } from '@orc/contracts'
 
 const FENCE = '---'
 
-export function renderPlanFile(plan: Plan, status: string): string {
+export function renderPlanFile(plan: Plan): string {
   const front = Bun.YAML.stringify({
     type: 'plan',
     task: plan.taskId,
     version: plan.version,
-    status,
     strategyRef: plan.strategyRef,
     costEstimateUSD: plan.costEstimateUSD,
     steps: plan.steps,
