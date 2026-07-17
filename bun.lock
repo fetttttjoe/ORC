@@ -39,6 +39,15 @@
         "@types/pg": "^8.20.0",
       },
     },
+    "plugins/executor-api-loop": {
+      "name": "@orc/executor-api-loop",
+      "version": "0.0.0",
+      "dependencies": {
+        "@orc/contracts": "workspace:*",
+        "ai": "^7.0.30",
+        "zod": "^4.4.3",
+      },
+    },
     "plugins/provider-anthropic": {
       "name": "@orc/provider-anthropic",
       "version": "0.0.0",
@@ -139,6 +148,8 @@
     "@orc/cli": ["@orc/cli@workspace:packages/cli"],
 
     "@orc/contracts": ["@orc/contracts@workspace:packages/contracts"],
+
+    "@orc/executor-api-loop": ["@orc/executor-api-loop@workspace:plugins/executor-api-loop"],
 
     "@orc/kernel": ["@orc/kernel@workspace:packages/kernel"],
 

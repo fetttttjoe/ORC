@@ -1,0 +1,13 @@
+{
+  "name": "@orc/executor-api-loop",
+  "version": "0.0.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@orc/contracts": "workspace:*",
+    "ai": "^7.0.30",
+    "zod": "^4.4.3"
+  }
+}
