@@ -48,14 +48,19 @@ async function tailUntilDone(kernel: Kernel, taskId: string, handle: RunHandle):
   let lastSeq = Math.max(0, ...(await kernel.eventsFor(taskId)).map(e => e.seq))
   let done = false
   const outcomeP = handle.wait().finally(() => { done = true })
-  while (!done) {
-    await new Promise(r => setTimeout(r, 500))
+  outcomeP.catch(() => {}) // attach a handler now so polling below can't trip an unhandled-rejection; real rejection still propagates via the return
+  const printFresh = async () => {
     const fresh = (await kernel.eventsFor(taskId)).filter(e => e.seq > lastSeq)
     for (const e of fresh) {
       lastSeq = e.seq
       console.log(`${String(e.seq).padStart(4)}  ${e.kind}${e.stepId ? `  ${e.stepId}` : ''}`)
     }
   }
+  while (!done) {
+    await new Promise(r => setTimeout(r, 500))
+    await printFresh()
+  }
+  await printFresh() // drain events written in the final ≤500ms window before wait() settled
   return outcomeP
 }
 
