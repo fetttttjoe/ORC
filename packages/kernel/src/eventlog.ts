@@ -1,6 +1,6 @@
 import { fileURLToPath } from 'node:url'
 import pg from 'pg'
-import { and, asc, eq, gt, sql } from 'drizzle-orm'
+import { and, asc, desc, eq, gt, sql } from 'drizzle-orm'
 import { drizzle, type NodePgDatabase } from 'drizzle-orm/node-postgres'
 import { migrate } from 'drizzle-orm/node-postgres/migrator'
 import { EventInput, PAYLOAD_SCHEMAS, type EventRecord } from '@orc/contracts'
@@ -9,7 +9,7 @@ import { events } from './schema'
 const MIGRATIONS_FOLDER = fileURLToPath(new URL('../drizzle', import.meta.url))
 
 type Row = typeof events.$inferSelect
-type Queryable = Pick<NodePgDatabase, 'insert' | 'select'>
+type Queryable = Pick<NodePgDatabase, 'insert' | 'select' | 'execute'>
 
 // Postgres jsonb rejects \u0000 inside strings (22P05) — strip NULs at the boundary so
 // binary-ish tool output can never fail an append (the old TEXT-mode log accepted them).
@@ -53,6 +53,7 @@ const makeOps = (db: Queryable, notify?: (e: EventRecord) => void): EventLogOps 
         usage: parsed.usage ?? null,
       })
       .returning({ seq: events.seq, ts: events.ts })
+    await db.execute(sql`select pg_notify('orc_events', ${String(row!.seq)})`)
     const record = { ...parsed, payload, usage: parsed.usage ?? null, seq: row!.seq, ts: row!.ts.toISOString() }
     try {
       notify?.(record)
@@ -88,6 +89,7 @@ export class EventLog implements EventLogOps {
   private constructor(
     private readonly pool: pg.Pool,
     private readonly db: NodePgDatabase,
+    private readonly url: string,
   ) {
     this.ops = makeOps(db, e => this.onAppend?.(e))
   }
@@ -96,7 +98,40 @@ export class EventLog implements EventLogOps {
     const pool = new pg.Pool({ connectionString: url })
     const db = drizzle(pool)
     await migrate(db, { migrationsFolder: MIGRATIONS_FOLDER })
-    return new EventLog(pool, db)
+    return new EventLog(pool, db, url)
+  }
+
+  private async latestSeq(): Promise<number> {
+    const [row] = await this.db.select({ seq: events.seq }).from(events).orderBy(desc(events.seq)).limit(1)
+    return row?.seq ?? 0
+  }
+
+  // Durable, ordered event stream (spec §4.1). One dedicated LISTEN connection; reads go
+  // through the pool. Catch-up on connect closes the gap between fromSeq and now.
+  async subscribe(
+    opts: { fromSeq?: number },
+    handler: (e: EventRecord) => void | Promise<void>,
+  ): Promise<() => Promise<void>> {
+    const client = new pg.Client({ connectionString: this.url })
+    await client.connect()
+    await client.query('LISTEN orc_events')
+    let cursor = opts.fromSeq ?? (await this.latestSeq())
+    let pumping = false
+    let wakeAgain = false
+    const pump = async (): Promise<void> => {
+      if (pumping) { wakeAgain = true; return }
+      pumping = true
+      try {
+        do {
+          wakeAgain = false
+          const rows = await this.db.select().from(events).where(gt(events.seq, cursor)).orderBy(asc(events.seq))
+          for (const r of rows) { cursor = r.seq; await handler(toRecord(r)) }
+        } while (wakeAgain)
+      } finally { pumping = false }
+    }
+    client.on('notification', () => { void pump() })
+    await pump() // initial catch-up
+    return async () => { client.removeAllListeners('notification'); await client.end() }
   }
 
   append(input: EventInput): Promise<EventRecord> {
