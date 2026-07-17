@@ -40,6 +40,16 @@ export function fold(events: EventRecord[]): State {
         if (t) state.tasks.set(p.taskId, { ...t, status: p.to })
         break
       }
+      // ponytail: run/step event kinds don't project into State yet — no run-level view exists until a later task needs one
+      case EVENT_KIND.run_started:
+      case EVENT_KIND.step_started:
+      case EVENT_KIND.agent_call:
+      case EVENT_KIND.tool_call:
+      case EVENT_KIND.tool_result:
+      case EVENT_KIND.signal_received:
+      case EVENT_KIND.step_completed:
+      case EVENT_KIND.step_failed:
+        break
       default: {
         const unhandled: never = e.kind
         void unhandled

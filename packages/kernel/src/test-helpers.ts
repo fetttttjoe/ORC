@@ -1,6 +1,10 @@
 import { Client } from 'pg'
+import type { ModelProvider } from '@orc/contracts'
 
 const ADMIN_URL = process.env.ORC_DATABASE_URL ?? 'postgresql://postgres:orc@localhost:5433/orc'
+
+// shared by the port integration test and the kill-9 resume fixture — one shape to drift
+export const fakeProvider: ModelProvider<unknown> = { costs: {}, languageModel: () => ({}) }
 
 // ponytail: test-only helper; ephemeral DB per test file, dropped after
 export async function createTestDb(): Promise<{ url: string; drop: () => Promise<void> }> {

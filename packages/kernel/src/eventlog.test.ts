@@ -44,6 +44,23 @@ describe('EventLog (postgres)', () => {
     await log.append(statusEvent('t2'))
     await log.append(statusEvent('t1'))
     expect((await log.byTask('t1')).map(e => e.seq)).toEqual([1, 3])
+    expect((await log.byTaskSince('t1', 1)).map(e => e.seq)).toEqual([3])
+    await log.close()
+  })
+
+  it('strips \\u0000 from payload strings (jsonb cannot store them)', async () => {
+    const log = await freshLog()
+    const rec = await log.append({
+      taskId: 't1', stepId: 's1', runToken: 'r1',
+      kind: 'tool_result',
+      payload: {
+        stepId: 's1', runToken: 'r1', iteration: 1, toolCallId: 'c1', toolName: 'fs_read',
+        output: { content: 'binary\u0000data' }, isError: false,
+      },
+    })
+    expect((rec.payload as { output: { content: string } }).output.content).toBe('binarydata')
+    const [stored] = await log.byTask('t1')
+    expect((stored!.payload as { output: { content: string } }).output.content).toBe('binarydata')
     await log.close()
   })
 
