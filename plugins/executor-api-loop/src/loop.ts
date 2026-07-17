@@ -1,4 +1,4 @@
-import { generateText, type LanguageModel, type ModelMessage } from 'ai'
+import { generateText, type LanguageModel, type ModelMessage, type ToolSet } from 'ai'
 import {
   EVENT_KIND, FAILURE_CLASS, UNIFIED_EVENT_TYPE, terminalError,
   type AgentExecutor, type EventDraft, type ExecutorContext, type Signal,
@@ -41,10 +41,10 @@ function normalizeUsage(u: { inputTokens?: number; outputTokens?: number } | und
   }
 }
 
-async function callModel(model: LanguageModel, messages: ModelMessage[]): Promise<TurnResult> {
+async function callModel(model: LanguageModel, messages: ModelMessage[], tools: ToolSet): Promise<TurnResult> {
   let result
   try {
-    result = await generateText({ model, messages, tools: toolSet() })
+    result = await generateText({ model, messages, tools })
   } catch (err) {
     // transient → rethrow as-is so the port's checkpoint retries with backoff;
     // terminal (4xx bad key, context overflow, …) → marked so it is NOT retried
@@ -63,12 +63,16 @@ async function callModel(model: LanguageModel, messages: ModelMessage[]): Promis
 }
 
 function buildPrompt(ctx: ExecutorContext<LanguageModel>): string {
+  const skills = ctx.skills
+    .map(s => `# Skill: ${s.name}\n${s.body}`)
+    .join('\n\n')
   const deps = Object.entries(ctx.depOutputs)
     .map(([id, out]) => `### Output of step '${id}'\n${out}`)
     .join('\n\n')
   return [
     `# Task\n${ctx.taskSpec}`,
     `# Your step: ${ctx.step.title} (role: ${ctx.step.role})\n${ctx.step.instructions}`,
+    skills, // force-loaded plan data — never model-elective (spec §6)
     deps ? `# Upstream outputs\n${deps}` : '',
     `You have file tools scoped to your workspace. When finished (or stuck), call the 'signal' tool — its summary is the only thing downstream steps will see.`,
   ].filter(Boolean).join('\n\n')
@@ -80,6 +84,7 @@ export function apiLoopExecutor(): AgentExecutor<LanguageModel> {
 
     async *startTurn(ctx: ExecutorContext<LanguageModel>): AsyncIterable<UnifiedEvent> {
       const messages: ModelMessage[] = [{ role: 'user', content: buildPrompt(ctx) }]
+      const tools = toolSet(ctx.extraTools)
       const base = { stepId: ctx.step.id, runToken: ctx.runToken }
       let persistedThrough = 0 // messages[0..persistedThrough) are already in an agent_call event
 
@@ -94,7 +99,7 @@ export function apiLoopExecutor(): AgentExecutor<LanguageModel> {
         try {
           turn = await ctx.checkpoint(
             `model:${iteration}`,
-            () => callModel(ctx.model, messages),
+            () => callModel(ctx.model, messages, tools),
             (r): EventDraft[] => [{
               kind: EVENT_KIND.agent_call,
               // persist only the DELTA since the previous agent_call — the full cumulative
@@ -152,7 +157,7 @@ export function apiLoopExecutor(): AgentExecutor<LanguageModel> {
             `tools:${iteration}`,
             async () => {
               const out = []
-              for (const call of toolCalls) out.push(await executeTool(call.toolName, call.input, ctx.workspaceDir))
+              for (const call of toolCalls) out.push(await executeTool(call.toolName, call.input, ctx.workspaceDir, ctx.extraTools))
               return out
             },
             (rs): EventDraft[] => toolCalls.flatMap((call, i) => [

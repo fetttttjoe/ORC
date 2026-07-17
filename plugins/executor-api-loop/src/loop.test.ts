@@ -2,7 +2,7 @@ import { describe, expect, it } from 'bun:test'
 import { mkdtempSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import type { Checkpoint, EventDraft, ExecutorContext, UnifiedEvent } from '@orc/contracts'
+import type { Checkpoint, EventDraft, ExecutorContext, ResolvedTool, UnifiedEvent } from '@orc/contracts'
 import { EVENT_KIND } from '@orc/contracts'
 import { stepFixture } from '@orc/contracts/fixtures'
 import type { LanguageModel } from 'ai'
@@ -158,5 +158,44 @@ describe('api-loop executor', () => {
     expect(kinds).toContain(EVENT_KIND.tool_call)
     expect(kinds).toContain(EVENT_KIND.tool_result)
     expect(kinds.indexOf(EVENT_KIND.tool_result)).toBeLessThan(kinds.indexOf(EVENT_KIND.signal_received))
+  })
+
+  it('renders force-loaded skills into the prompt', async () => {
+    const captured: EventDraft[] = []
+    const model = scriptModel([
+      { toolCalls: [{ toolCallId: 'c1', toolName: 'signal', input: { outcome: 'success', summary: 'all good' } }] },
+    ])
+    const c = ctx(model, captured, { skills: [{ name: 'style-guide', body: 'Always write haiku.', hash: 'h' }] })
+    const events = await drain(apiLoopExecutor().startTurn(c))
+    expect(events.at(-1)?.type).toBe('done')
+
+    const agentCallDrafts = captured.filter(d => d.kind === EVENT_KIND.agent_call)
+    const firstRequestMessages = (agentCallDrafts[0]!.payload as { request: { messages: Array<{ role: string; content: unknown }> } }).request.messages
+    expect(firstRequestMessages[0]?.content).toContain('# Skill: style-guide')
+    expect(firstRequestMessages[0]?.content).toContain('Always write haiku.')
+  })
+
+  it('calls an extra tool end to end', async () => {
+    const captured: EventDraft[] = []
+    const extra: ResolvedTool = {
+      ref: 'srv/hello',
+      name: 'mcp__srv__hello',
+      description: 'says hello',
+      inputSchema: { type: 'object', properties: { who: { type: 'string' } } },
+      execute: async input => ({ output: { hi: (input as { who?: string }).who }, isError: false }),
+    }
+    const model = scriptModel([
+      { toolCalls: [{ toolCallId: 'c1', toolName: 'mcp__srv__hello', input: { who: 'x' } }] },
+      { toolCalls: [{ toolCallId: 'c2', toolName: 'signal', input: { outcome: 'success', summary: 'done' } }] },
+    ])
+    const c = ctx(model, captured, { extraTools: [extra] })
+    const events = await drain(apiLoopExecutor().startTurn(c))
+
+    expect(events.at(-1)?.type).toBe('done')
+    const toolCallEvent = events.find(e => e.type === 'tool_call' && e.toolName === 'mcp__srv__hello')
+    const toolResultEvent = events.find(e => e.type === 'tool_result' && e.toolName === 'mcp__srv__hello')
+    expect(toolCallEvent).toBeDefined()
+    expect(toolResultEvent?.type === 'tool_result' && toolResultEvent.output).toEqual({ hi: 'x' })
+    expect(toolResultEvent?.type === 'tool_result' && toolResultEvent.isError).toBe(false)
   })
 })

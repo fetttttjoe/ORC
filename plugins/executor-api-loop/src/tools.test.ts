@@ -2,6 +2,7 @@ import { describe, expect, it } from 'bun:test'
 import { mkdtempSync, readdirSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
+import type { ResolvedTool } from '@orc/contracts'
 import { TOOL_NAME, executeTool, resolveInWorkspace, toolSet } from './tools'
 
 const ws = () => mkdtempSync(path.join(tmpdir(), 'orc-ws-'))
@@ -70,5 +71,38 @@ describe('toolSet', () => {
       expect(tools[name]).toBeDefined()
       expect((tools[name] as { execute?: unknown }).execute).toBeUndefined()
     }
+  })
+})
+
+const extraTool = (over: Partial<ResolvedTool> = {}): ResolvedTool => ({
+  ref: 'srv/hello',
+  name: 'mcp__srv__hello',
+  description: 'says hello',
+  inputSchema: { type: 'object', properties: { who: { type: 'string' } } },
+  execute: async input => ({ output: { hi: (input as { who?: string }).who }, isError: false }),
+  ...over,
+})
+
+describe('extra tools', () => {
+  it('toolSet declares extra tools alongside builtins', () => {
+    const set = toolSet([extraTool()])
+    expect(Object.keys(set)).toContain('mcp__srv__hello')
+    expect(Object.keys(set)).toContain(TOOL_NAME.signal)
+  })
+
+  it('executeTool routes to the extra tool by mangled name', async () => {
+    const r = await executeTool('mcp__srv__hello', { who: 'orc' }, '/tmp', [extraTool()])
+    expect(r).toEqual({ output: { hi: 'orc' }, isError: false })
+  })
+
+  it('an extra tool that throws becomes an isError result, not an exception', async () => {
+    const bad = extraTool({ execute: async () => { throw new Error('transport died') } })
+    const r = await executeTool('mcp__srv__hello', {}, '/tmp', [bad])
+    expect(r.isError).toBe(true)
+  })
+
+  it('unknown names still error', async () => {
+    const r = await executeTool('mcp__other__x', {}, '/tmp', [extraTool()])
+    expect(r.isError).toBe(true)
   })
 })

@@ -1,7 +1,8 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
-import { tool } from 'ai'
+import { jsonSchema, tool } from 'ai'
 import { z } from 'zod'
+import type { ResolvedTool } from '@orc/contracts'
 import { SignalOutcome } from '@orc/contracts'
 
 export const TOOL_NAME = {
@@ -33,7 +34,8 @@ export function resolveInWorkspace(workspaceDir: string, p: string): string {
 }
 
 // Declared WITHOUT execute — the SDK returns tool calls; execution is ours, inside a durable step (spec §6.2).
-export function toolSet() {
+// Extra (MCP) tools are neutral ResolvedTool[] (spec seam D1) — their JSON Schema travels as-is via jsonSchema().
+export function toolSet(extra: ResolvedTool[] = []) {
   return {
     [TOOL_NAME.signal]: tool({
       description:
@@ -52,6 +54,10 @@ export function toolSet() {
       description: 'List directory entries inside the step workspace.',
       inputSchema: ListInput,
     }),
+    ...Object.fromEntries(extra.map(t => [
+      t.name,
+      tool({ description: t.description, inputSchema: jsonSchema(t.inputSchema as Parameters<typeof jsonSchema>[0]) }),
+    ])),
   }
 }
 
@@ -59,6 +65,7 @@ export async function executeTool(
   name: string,
   input: unknown,
   workspaceDir: string,
+  extra: ResolvedTool[] = [],
 ): Promise<{ output: unknown; isError: boolean }> {
   try {
     switch (name) {
@@ -77,8 +84,11 @@ export async function executeTool(
         const { path: p } = ListInput.parse(input)
         return { output: { entries: readdirSync(resolveInWorkspace(workspaceDir, p)).sort() }, isError: false }
       }
-      default:
-        return { output: { error: `unknown tool '${name}'` }, isError: true }
+      default: {
+        const ext = extra.find(t => t.name === name)
+        if (!ext) return { output: { error: `unknown tool '${name}'` }, isError: true }
+        return await ext.execute(input)
+      }
     }
   } catch (err) {
     return { output: { error: err instanceof Error ? err.message : String(err) }, isError: true }
