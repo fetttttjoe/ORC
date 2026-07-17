@@ -37,7 +37,7 @@ export interface EventLogOps {
   all(): Promise<EventRecord[]>
 }
 
-const makeOps = (db: Queryable): EventLogOps => ({
+const makeOps = (db: Queryable, notify?: (e: EventRecord) => void): EventLogOps => ({
   async append(input) {
     const parsed = EventInput.parse(input)
     PAYLOAD_SCHEMAS[parsed.kind].parse(parsed.payload)
@@ -53,7 +53,13 @@ const makeOps = (db: Queryable): EventLogOps => ({
         usage: parsed.usage ?? null,
       })
       .returning({ seq: events.seq, ts: events.ts })
-    return { ...parsed, payload, usage: parsed.usage ?? null, seq: row!.seq, ts: row!.ts.toISOString() }
+    const record = { ...parsed, payload, usage: parsed.usage ?? null, seq: row!.seq, ts: row!.ts.toISOString() }
+    try {
+      notify?.(record)
+    } catch (err) {
+      console.warn(`event observer failed: ${err instanceof Error ? err.message : String(err)}`)
+    }
+    return record
   },
   async byTask(taskId) {
     const rows = await db.select().from(events).where(eq(events.taskId, taskId)).orderBy(asc(events.seq))
@@ -72,18 +78,25 @@ const makeOps = (db: Queryable): EventLogOps => ({
   },
 })
 
+// onAppend is best-effort/observe-only (spec D6): for transaction appends it fires inside the
+// open transaction, so it may see events that later roll back. Acceptable — observers must not
+// assume durability of what they saw, only that it was appended at the time of the call.
 export class EventLog implements EventLogOps {
+  onAppend?: (e: EventRecord) => void
+  private readonly ops: EventLogOps
+
   private constructor(
     private readonly pool: pg.Pool,
     private readonly db: NodePgDatabase,
-    private readonly ops: EventLogOps,
-  ) {}
+  ) {
+    this.ops = makeOps(db, e => this.onAppend?.(e))
+  }
 
   static async open(url: string): Promise<EventLog> {
     const pool = new pg.Pool({ connectionString: url })
     const db = drizzle(pool)
     await migrate(db, { migrationsFolder: MIGRATIONS_FOLDER })
-    return new EventLog(pool, db, makeOps(db))
+    return new EventLog(pool, db)
   }
 
   append(input: EventInput): Promise<EventRecord> {
@@ -106,7 +119,7 @@ export class EventLog implements EventLogOps {
       // the advisory lock restores the old bun:sqlite single-writer serialization.
       // ponytail: one global lock — per-task locks if concurrent-writer throughput matters
       await tx.execute(sql`select pg_advisory_xact_lock(7303779)`) // 0x6f7263 'orc'
-      return fn(makeOps(tx as unknown as Queryable))
+      return fn(makeOps(tx as unknown as Queryable, e => this.onAppend?.(e)))
     })
   }
 

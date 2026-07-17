@@ -1,4 +1,4 @@
-import { afterAll, describe, expect, it } from 'bun:test'
+import { afterAll, describe, expect, it, mock, spyOn } from 'bun:test'
 import type { EventInput } from '@orc/contracts'
 import { EventLog } from './eventlog'
 import { createTestDb } from './test-helpers'
@@ -95,5 +95,24 @@ describe('EventLog (postgres)', () => {
     const reopened = await EventLog.open(db.url)
     expect(await reopened.all()).toHaveLength(1)
     await reopened.close()
+  })
+
+  it('onAppend observer fires for pool and transaction appends; its errors never break the append', async () => {
+    const warn = spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      const log = await freshLog()
+      const seen: string[] = []
+      log.onAppend = e => {
+        seen.push(`${e.seq}:${e.kind}`)
+        throw new Error('observer boom') // must be swallowed
+      }
+      const a = await log.append(statusEvent())
+      await log.transaction(async tx => { await tx.append(statusEvent()) })
+      expect(seen.length).toBe(2)
+      expect(seen[0]).toBe(`${a.seq}:task_status_changed`)
+      await log.close()
+    } finally {
+      mock.restore()
+    }
   })
 })
