@@ -35,7 +35,7 @@ export interface State {
 
 const ZERO_USAGE: Usage = { inputTokens: 0, outputTokens: 0, costUSD: null, estimated: false }
 
-const dedupKey = (e: EventRecord): string | null => {
+export const crashDedupKey = (e: EventRecord): string | null => {
   // task_status_changed is excluded: run-init (→running) and run-finish (→done) share a runToken
   // and would collide; a replayed status append is idempotent in fold anyway.
   if (!e.runToken || e.kind === EVENT_KIND.task_status_changed) return null
@@ -55,7 +55,7 @@ export function fold(events: EventRecord[]): State {
   }
 
   for (const e of events) {
-    const key = dedupKey(e)
+    const key = crashDedupKey(e)
     if (key !== null) {
       if (seen.has(key)) continue // crash-boundary duplicate (spec §6.2)
       seen.add(key)

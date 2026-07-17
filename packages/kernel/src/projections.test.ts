@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'bun:test'
 import type { EventRecord, Plan, TaskNode } from '@orc/contracts'
-import { fold, completedStepIds, nextAttempts } from './projections'
+import { planFixture } from '@orc/contracts/fixtures'
+import { fold, completedStepIds, nextAttempts, crashDedupKey } from './projections'
 
 const task: TaskNode = {
   id: 't1', parentId: null, type: 'generic', title: 'hello', spec: '',
@@ -8,14 +9,7 @@ const task: TaskNode = {
   createdAt: '2026-07-16T00:00:00.000Z',
 }
 
-const planV = (version: number): Plan => ({
-  taskId: 't1', version, strategyRef: 'template:single', costEstimateUSD: null,
-  steps: [{
-    id: 's1', role: 'worker', title: 'hello', instructions: 'do',
-    executorRef: 'api-loop', modelRef: 'm', skillRefs: [],
-    isolation: 'local', zone: [], maxIterations: 5, dependsOn: [],
-  }],
-})
+const planV = (version: number): Plan => planFixture({ version })
 
 const evt = (seq: number, kind: EventRecord['kind'], payload: Record<string, unknown>): EventRecord =>
   ({ seq, ts: '2026-07-16T00:00:00.000Z', taskId: 't1', stepId: null, runToken: null, kind, payload, usage: null })
@@ -42,6 +36,55 @@ describe('fold', () => {
     const state = fold([])
     expect(state.tasks.size).toBe(0)
     expect(state.plans.size).toBe(0)
+  })
+})
+
+describe('crashDedupKey', () => {
+  it('differs when toolCallId differs (same runToken/kind/iteration otherwise)', () => {
+    const base: EventRecord = {
+      seq: 1, ts: '2026-07-17T00:00:00.000Z', taskId: 't1', stepId: 's1',
+      runToken: 'step:t1:s1:a1', kind: 'tool_call',
+      payload: { stepId: 's1', runToken: 'step:t1:s1:a1', iteration: 1, toolCallId: 'c1', toolName: 'fs_read', input: {} },
+      usage: null,
+    }
+    const other: EventRecord = { ...base, payload: { ...base.payload, toolCallId: 'c2' } }
+    expect(crashDedupKey(base)).not.toBe(crashDedupKey(other))
+  })
+
+  it('matches when (runToken, kind, iteration, toolCallId) match, regardless of other fields', () => {
+    const e1: EventRecord = {
+      seq: 1, ts: '2026-07-17T00:00:00.000Z', taskId: 't1', stepId: 's1',
+      runToken: 'step:t1:s1:a1', kind: 'tool_call',
+      payload: { stepId: 's1', runToken: 'step:t1:s1:a1', iteration: 1, toolCallId: 'c1', toolName: 'fs_read', input: {} },
+      usage: null,
+    }
+    const e2: EventRecord = {
+      seq: 2, ts: '2026-07-17T00:05:00.000Z', taskId: 't1', stepId: 's1',
+      runToken: 'step:t1:s1:a1', kind: 'tool_call',
+      payload: { stepId: 's1', runToken: 'step:t1:s1:a1', iteration: 1, toolCallId: 'c1', toolName: 'different_tool', input: { x: 1 } },
+      usage: null,
+    }
+    expect(crashDedupKey(e1)).toBe(crashDedupKey(e2))
+  })
+
+  it('returns null for task_status_changed even when a runToken is present', () => {
+    const e: EventRecord = {
+      seq: 1, ts: '2026-07-17T00:00:00.000Z', taskId: 't1', stepId: null,
+      runToken: 'step:t1:s1:a1', kind: 'task_status_changed',
+      payload: { taskId: 't1', from: 'draft', to: 'approved' },
+      usage: null,
+    }
+    expect(crashDedupKey(e)).toBeNull()
+  })
+
+  it('returns null for any event with a null runToken', () => {
+    const e: EventRecord = {
+      seq: 1, ts: '2026-07-17T00:00:00.000Z', taskId: 't1', stepId: null,
+      runToken: null, kind: 'task_created',
+      payload: { task },
+      usage: null,
+    }
+    expect(crashDedupKey(e)).toBeNull()
   })
 })
 
@@ -103,5 +146,26 @@ describe('fold — execution kinds', () => {
     expect(state.steps.get('t1')?.get('s1')?.status).toBe('completed')
     expect(state.steps.get('t1')?.get('s1')?.attempt).toBe(2)
     expect(nextAttempts(state, 't1', plan)).toEqual({ s1: 3, s2: 1 })
+  })
+
+  it('rejects a late event carrying a superseded attempt runToken', () => {
+    const state = fold([
+      exEvt(1, 'step_started', { stepId: 's1', runToken: rt('s1', 1), attempt: 1 }),
+      exEvt(2, 'step_failed', { stepId: 's1', runToken: rt('s1', 1), class: 'agent_error', message: 'boom' }),
+      exEvt(3, 'step_started', { stepId: 's1', runToken: rt('s1', 2), attempt: 2 }),
+      exEvt(4, 'step_completed', { stepId: 's1', runToken: rt('s1', 2), summary: 'fresh' }),
+      // late/stale events from the superseded attempt 1 — envelope and payload both carry the old runToken
+      exEvt(5, 'step_completed', { stepId: 's1', runToken: rt('s1', 1), summary: 'stale' }),
+      exEvt(6, 'agent_call', { stepId: 's1', runToken: rt('s1', 1), iteration: 9, request: {}, response: {} },
+        { inputTokens: 5, outputTokens: 5, costUSD: 0, estimated: false }),
+    ])
+    const step = state.steps.get('t1')?.get('s1')
+    expect(step?.status).toBe('completed')
+    expect(step?.output).toBe('fresh')
+    expect(step?.attempt).toBe(2)
+    // stale agent_call's runToken doesn't match the current attempt, so it can't bump iterations
+    expect(step?.iterations).toBe(0)
+    // note: usage from the stale agent_call IS accumulated regardless — that update is deliberately
+    // unguarded (spec asymmetry), so it is intentionally not asserted to stay zero here.
   })
 })
