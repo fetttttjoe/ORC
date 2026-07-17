@@ -1,11 +1,18 @@
-import { describe, expect, it } from 'bun:test'
-import { mkdtempSync } from 'node:fs'
-import { tmpdir } from 'node:os'
-import path from 'node:path'
+import { afterAll, describe, expect, it } from 'bun:test'
 import type { EventInput } from '@orc/contracts'
 import { EventLog } from './eventlog'
+import { createTestDb } from './test-helpers'
 
-const freshDbPath = () => path.join(mkdtempSync(path.join(tmpdir(), 'orc-')), 'state.db')
+const dbs: Array<{ drop: () => Promise<void> }> = []
+afterAll(async () => {
+  for (const d of dbs) await d.drop()
+})
+
+async function freshLog(): Promise<EventLog> {
+  const db = await createTestDb()
+  dbs.push(db)
+  return EventLog.open(db.url)
+}
 
 const statusEvent = (taskId = 't1'): EventInput => ({
   taskId, stepId: null, runToken: null,
@@ -13,35 +20,63 @@ const statusEvent = (taskId = 't1'): EventInput => ({
   payload: { taskId, from: 'draft', to: 'awaiting_approval' },
 })
 
-describe('EventLog', () => {
-  it('appends with monotonic seq and a timestamp', () => {
-    const log = new EventLog(freshDbPath())
-    const a = log.append(statusEvent())
-    const b = log.append(statusEvent())
+describe('EventLog (postgres)', () => {
+  it('appends with monotonic seq and ISO timestamp', async () => {
+    const log = await freshLog()
+    const a = await log.append(statusEvent())
+    const b = await log.append(statusEvent())
     expect(a.seq).toBe(1)
     expect(b.seq).toBe(2)
     expect(a.ts).toMatch(/^\d{4}-\d{2}-\d{2}T/)
+    await log.close()
   })
-  it('rejects payloads that do not match the kind schema', () => {
-    const log = new EventLog(freshDbPath())
-    expect(() =>
-      log.append({ ...statusEvent(), payload: { wrong: true } }),
-    ).toThrow()
-    expect(log.all()).toHaveLength(0)
+
+  it('rejects payloads that do not match the kind schema', async () => {
+    const log = await freshLog()
+    await expect(log.append({ ...statusEvent(), payload: { wrong: true } })).rejects.toThrow()
+    expect(await log.all()).toHaveLength(0)
+    await log.close()
   })
-  it('filters by task and orders by seq', () => {
-    const log = new EventLog(freshDbPath())
-    log.append(statusEvent('t1'))
-    log.append(statusEvent('t2'))
-    log.append(statusEvent('t1'))
-    expect(log.byTask('t1').map(e => e.seq)).toEqual([1, 3])
+
+  it('filters by task and orders by seq', async () => {
+    const log = await freshLog()
+    await log.append(statusEvent('t1'))
+    await log.append(statusEvent('t2'))
+    await log.append(statusEvent('t1'))
+    expect((await log.byTask('t1')).map(e => e.seq)).toEqual([1, 3])
+    await log.close()
   })
-  it('persists across reopen (migrations are idempotent)', () => {
-    const p = freshDbPath()
-    const log = new EventLog(p)
-    log.append(statusEvent())
-    log.close()
-    const reopened = new EventLog(p)
-    expect(reopened.all()).toHaveLength(1)
+
+  it('transaction rolls back atomically on error', async () => {
+    const log = await freshLog()
+    await expect(
+      log.transaction(async tx => {
+        await tx.append(statusEvent())
+        throw new Error('boom')
+      }),
+    ).rejects.toThrow('boom')
+    expect(await log.all()).toHaveLength(0)
+    await log.close()
+  })
+
+  it('transaction reads see writes made inside the same transaction', async () => {
+    const log = await freshLog()
+    const count = await log.transaction(async tx => {
+      await tx.append(statusEvent())
+      return (await tx.all()).length
+    })
+    expect(count).toBe(1)
+    await log.close()
+  })
+
+  it('persists across reopen (migrations are idempotent)', async () => {
+    const db = await createTestDb()
+    dbs.push(db)
+    const log = await EventLog.open(db.url)
+    await log.append(statusEvent())
+    await log.close()
+    const reopened = await EventLog.open(db.url)
+    expect(await reopened.all()).toHaveLength(1)
+    await reopened.close()
   })
 })

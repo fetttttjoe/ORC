@@ -1,17 +1,17 @@
-import { sql } from 'drizzle-orm'
-import { index, integer, sqliteTable, text } from 'drizzle-orm/sqlite-core'
+import { bigint, index, jsonb, pgTable, text, timestamp } from 'drizzle-orm/pg-core'
 import type { EventKind } from '@orc/contracts'
 
-export const events = sqliteTable(
+export const events = pgTable(
   'events',
   {
-    seq: integer('seq').primaryKey({ autoIncrement: true }),
+    seq: bigint('seq', { mode: 'number' }).primaryKey().generatedAlwaysAsIdentity(),
     taskId: text('task_id').notNull(),
     stepId: text('step_id'),
     runToken: text('run_token'),
     kind: text('kind').$type<EventKind>().notNull(),
-    payload: text('payload', { mode: 'json' }).$type<Record<string, unknown>>().notNull(),
-    ts: text('ts').notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`),
+    payload: jsonb('payload').$type<Record<string, unknown>>().notNull(),
+    usage: jsonb('usage').$type<Record<string, unknown>>(),
+    ts: timestamp('ts', { withTimezone: true, mode: 'date' }).notNull().defaultNow(),
   },
   t => [index('idx_events_task').on(t.taskId)],
 )
