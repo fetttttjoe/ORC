@@ -21,4 +21,9 @@ describe('events', () => {
       PAYLOAD_SCHEMAS.task_status_changed.parse({ taskId: 't1', from: 'draft', to: 'not_a_status' }),
     ).toThrow()
   })
+  it('validates skill_loaded payloads', () => {
+    const good = { stepId: 's1', runToken: 'step:t:s1:a1', name: 'my-skill', hash: 'abc123' }
+    expect(() => PAYLOAD_SCHEMAS.skill_loaded.parse(good)).not.toThrow()
+    expect(() => PAYLOAD_SCHEMAS.skill_loaded.parse({ ...good, hash: '' })).toThrow()
+  })
 })

@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'bun:test'
 import { EventKind, PAYLOAD_SCHEMAS } from './events'
 import {
-  addUsage, costUSDFor, isTerminalError, resolveModel, terminalError, Signal, UnifiedEvent,
-  FAILURE_CLASS, SIGNAL_OUTCOME, type ModelProvider, type Usage,
+  addUsage, classifiedError, costUSDFor, failureClassOf, isTerminalError, resolveModel, terminalError,
+  Signal, UnifiedEvent, FAILURE_CLASS, SIGNAL_OUTCOME, type ModelProvider, type Usage,
 } from './execution'
 
 const usage = (i: number, o: number, cost: number | null = null, estimated = false): Usage =>
@@ -62,5 +62,13 @@ describe('execution contracts', () => {
     expect(isTerminalError(terminalError('bad api key'))).toBe(true)
     expect(isTerminalError(new Error('flaky network'))).toBe(false)
     expect(isTerminalError(undefined)).toBe(false)
+  })
+
+  it('classifiedError is terminal and carries its class', () => {
+    const err = classifiedError(FAILURE_CLASS.validation_error, 'bad ref')
+    expect(isTerminalError(err)).toBe(true)
+    expect(failureClassOf(err)).toBe(FAILURE_CLASS.validation_error)
+    expect(failureClassOf(new Error('plain'))).toBeNull()
+    expect(failureClassOf({ failureClass: 'not-a-class' })).toBeNull()
   })
 })

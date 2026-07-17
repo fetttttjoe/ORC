@@ -21,6 +21,7 @@ export function singleStepDraft(task: { title: string; spec: string }, modelRef:
       executorRef: 'api-loop',
       modelRef,
       skillRefs: [],
+      toolRefs: [],
       isolation: ISOLATION_TIER.worktree,
       zone: [],
       maxIterations: 25,

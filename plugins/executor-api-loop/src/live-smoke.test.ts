@@ -24,7 +24,7 @@ function liveCtx(model: LanguageModel): ExecutorContext<LanguageModel> {
       title: 'smoke', modelRef: 'live/m', maxIterations: 6,
       instructions: "Write the single word 'ping' to a file named pong.txt, then signal success with summary 'pong'.",
     }),
-    taskSpec: 'live smoke test', depOutputs: {}, model,
+    taskSpec: 'live smoke test', depOutputs: {}, skills: [], extraTools: [], model,
     runToken: 'step:smoke:s1:a1',
     workspaceDir: mkdtempSync(path.join(tmpdir(), 'orc-smoke-')),
     checkpoint: passthrough,
