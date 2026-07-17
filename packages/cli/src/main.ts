@@ -42,8 +42,10 @@ function resolveDraft(task: { title: string; spec: string }, opts: { file?: stri
   if (opts.fromVault) {
     if (!config) throw new Error('--from-vault is unavailable in this context')
     const dir = path.join(config.vaultDir, 'tasks', taskId)
-    const files = readdirSync(dir).filter(f => /^plan-v\d+\.md$/.test(f)).sort()
-    const latest = files.at(-1)
+    const latest = readdirSync(dir)
+      .filter(f => /^plan-v\d+\.md$/.test(f))
+      .sort((a, b) => Number(a.match(/\d+/)![0]) - Number(b.match(/\d+/)![0]))
+      .at(-1)
     if (!latest) throw new Error(`no plan file in ${dir} — run 'orc vault render ${taskId}' first`)
     return parsePlanFile(readFileSync(path.join(dir, latest), 'utf8'))
   }

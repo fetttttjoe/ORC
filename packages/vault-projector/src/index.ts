@@ -34,12 +34,6 @@ export function createVaultProjector(opts: { log: EventLog; config: { vaultDir: 
     for (const id of byTask) writeVaultFiles(vaultDir, renderTaskFiles(id, await log.byTask(id)))
     await renderRoot()
   }
-  const flush = async (): Promise<void> => {
-    const ids = [...timers.keys()]
-    for (const t of timers.values()) clearTimeout(t)
-    timers.clear()
-    for (const id of ids) await renderTask(id)
-  }
 
   return {
     renderTask, renderAll,
@@ -49,12 +43,18 @@ export function createVaultProjector(opts: { log: EventLog; config: { vaultDir: 
         const prev = timers.get(e.taskId)
         if (prev) clearTimeout(prev)
         // coalesce a burst into one render per task (spec §5) — not a poll
-        timers.set(e.taskId, setTimeout(() => { timers.delete(e.taskId); void renderTask(e.taskId) }, 50))
+        timers.set(e.taskId, setTimeout(() => {
+          timers.delete(e.taskId)
+          renderTask(e.taskId).catch(err => console.warn(`vault render failed: ${err instanceof Error ? err.message : String(err)}`))
+        }, 50))
       })
     },
     close: async () => {
-      if (unsub) { await unsub(); unsub = null }
-      await flush()
+      if (!unsub) { for (const t of timers.values()) clearTimeout(t); timers.clear(); return }
+      await unsub(); unsub = null
+      for (const t of timers.values()) clearTimeout(t)
+      timers.clear()
+      await renderAll()   // final authoritative sync — vault matches the committed log at close
     },
   }
 }

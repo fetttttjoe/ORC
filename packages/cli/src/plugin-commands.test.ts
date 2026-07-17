@@ -1,5 +1,5 @@
 import { afterAll, afterEach, describe, expect, it, mock, spyOn } from 'bun:test'
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -112,5 +112,29 @@ describe('plugin commands', () => {
     const idx = path.join(config.vaultDir, 'tasks', t.id, 'index.md')
     expect(existsSync(idx)).toBe(true)
     expect(lines.join('\n')).toContain('vault rendered')
+  })
+
+  it('orc edit --from-vault picks the numerically highest plan version, not the lexicographic one', async () => {
+    const dir = project({})
+    const { run, lines, config } = await makeCli(dir)
+    await run('new', 'vault edit task')
+    const taskId = lines[0]!
+    await run('propose', taskId, '--model', 'fake/m') // v1 — 'fake' is the only provider this test's host registers
+    for (let i = 0; i < 10; i++) await run('edit', taskId, '--model', 'fake/m') // v2..v11 — plan-v10/plan-v11 must sort after plan-v9 numerically, not lexicographically
+    await run('vault', taskId) // render every plan-vN.md to disk (real vault files, not a mock)
+
+    const planPath = path.join(config.vaultDir, 'tasks', taskId, 'plan-v11.md')
+    expect(existsSync(planPath)).toBe(true)
+    writeFileSync(planPath, readFileSync(planPath, 'utf8').replace('fake/m', 'fake/edited'))
+
+    lines.length = 0
+    await run('edit', taskId, '--from-vault')
+    expect(lines[0]).toContain('plan v12 edited')
+
+    lines.length = 0
+    await run('plan', taskId)
+    const plan = JSON.parse(lines.join('\n'))
+    expect(plan.version).toBe(12)
+    expect(plan.steps[0].modelRef).toBe('fake/edited')
   })
 })
