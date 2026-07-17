@@ -68,9 +68,12 @@ export async function createDbosPort(opts: {
       // checkpointed init: read plan/task/dep-outputs (event-log reads are non-deterministic → must be a step)
       const init = await checkpoint('init', async () => {
         const state = await foldState(args.taskId)
-        const plan = state.plans.get(args.taskId)!.versions.find(p => p.version === args.planVersion)!
-        const step = plan.steps.find(s => s.id === args.stepId)!
-        const task = state.tasks.get(args.taskId)!
+        const plan = state.plans.get(args.taskId)?.versions.find(p => p.version === args.planVersion)
+        if (!plan) throw classifiedError(FAILURE_CLASS.validation_error, `no plan v${args.planVersion} for task '${args.taskId}'`)
+        const step = plan.steps.find(s => s.id === args.stepId)
+        if (!step) throw classifiedError(FAILURE_CLASS.validation_error, `no step '${args.stepId}' in plan v${args.planVersion}`)
+        const task = state.tasks.get(args.taskId)
+        if (!task) throw classifiedError(FAILURE_CLASS.validation_error, `no task '${args.taskId}'`)
         const depOutputs: Record<string, string> = {}
         for (const dep of step.dependsOn) depOutputs[dep] = state.steps.get(args.taskId)?.get(dep)?.output ?? ''
         const loadedSkills: LoadedSkill[] = []

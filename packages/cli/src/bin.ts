@@ -11,13 +11,13 @@ try {
   const config = loadConfig()
   const plugins = await buildPlugins(config)
   await plugins.host.hooks.emit(HOOK_NAME.session_start)
-  const kernel = await openKernel(config.databaseUrl, {
+  const { kernel, log } = await openKernel(config.databaseUrl, {
     refValidator: plugins.host.refValidator,
     onAppend: e => void plugins.host.hooks.emit(HOOK_NAME.event_appended, e),
   })
   await buildProgram(
     kernel,
-    async () => (runtime.port ??= await buildRuntime(plugins)),
+    async () => (runtime.port ??= await buildRuntime({ ...plugins, config, log })),
     { host: plugins.host, hub: plugins.hub, config },
   ).parseAsync(process.argv)
   if (runtime.port) await runtime.port.shutdown()
