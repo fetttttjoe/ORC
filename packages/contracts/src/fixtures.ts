@@ -5,7 +5,7 @@ import type { Plan, PlanDraft, PlanStep } from './plan'
 export function stepFixture(over: Partial<PlanStep> = {}): PlanStep {
   return {
     id: 's1', role: 'worker', title: 's1', instructions: 'do',
-    executorRef: 'api-loop', modelRef: 'fake/m', skillRefs: [],
+    executorRef: 'api-loop', modelRef: 'fake/m', skillRefs: [], toolRefs: [],
     isolation: 'local', zone: [], maxIterations: 5, dependsOn: [],
     ...over,
   }

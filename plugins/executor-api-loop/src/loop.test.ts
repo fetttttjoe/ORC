@@ -22,6 +22,8 @@ function ctx(model: LanguageModel, captured: EventDraft[], over: Partial<Executo
     step: stepFixture({ instructions: 'do the thing', maxIterations: 3 }),
     taskSpec: 'the task',
     depOutputs: {},
+    skills: [],
+    extraTools: [],
     model,
     runToken: 'step:t1:s1:a1',
     workspaceDir: mkdtempSync(path.join(tmpdir(), 'orc-ws-')),

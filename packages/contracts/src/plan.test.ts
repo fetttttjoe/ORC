@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test'
-import { Plan, validatePlan, type PlanStep } from './plan'
+import { Plan, PlanStep, validatePlan } from './plan'
 import { planFixture, stepFixture } from './fixtures'
 
 const step = (id: string, dependsOn: string[] = []): PlanStep => stepFixture({ id, title: id, dependsOn })
@@ -30,5 +30,16 @@ describe('validatePlan', () => {
   })
   it('rejects path-unsafe step ids', () => {
     expect(() => plan([step('../x')])).toThrow()
+  })
+
+  it('toolRefs defaults to [] and validates ref shape', () => {
+    const s = PlanStep.parse({
+      id: 's1', role: 'r', title: 't', instructions: 'i', executorRef: 'api-loop',
+      modelRef: 'fake/m', skillRefs: [], isolation: 'local', zone: [],
+      maxIterations: 1, dependsOn: [],
+    })
+    expect(s.toolRefs).toEqual([])
+    expect(() => PlanStep.parse({ ...s, toolRefs: ['files/read_file'] })).not.toThrow()
+    expect(() => PlanStep.parse({ ...s, toolRefs: ['noslash'] })).toThrow()
   })
 })

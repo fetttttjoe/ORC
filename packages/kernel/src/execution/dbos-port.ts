@@ -84,6 +84,8 @@ export async function createDbosPort(opts: {
         step: init.step,
         taskSpec: init.taskSpec,
         depOutputs: init.depOutputs,
+        skills: [],
+        extraTools: [],
         model,
         runToken,
         workspaceDir,

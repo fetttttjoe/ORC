@@ -5,7 +5,7 @@ import { FailureClass, Signal, Usage } from './execution'
 
 export const EventKind = z.enum([
   'task_created', 'plan_proposed', 'plan_edited', 'plan_approved', 'task_status_changed',
-  'run_started', 'step_started', 'agent_call', 'tool_call', 'tool_result',
+  'run_started', 'step_started', 'skill_loaded', 'agent_call', 'tool_call', 'tool_result',
   'signal_received', 'step_completed', 'step_failed',
 ])
 export type EventKind = z.infer<typeof EventKind>
@@ -33,6 +33,12 @@ export const PAYLOAD_SCHEMAS: Record<EventKind, z.ZodType> = {
     stepId: z.string().min(1),
     runToken: z.string().min(1),
     attempt: z.number().int().positive(),
+  }),
+  skill_loaded: z.object({
+    stepId: z.string().min(1),
+    runToken: z.string().min(1),
+    name: z.string().min(1),
+    hash: z.string().min(1),
   }),
   agent_call: z.object({
     stepId: z.string().min(1),

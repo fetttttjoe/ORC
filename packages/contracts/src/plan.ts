@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { TOOL_REF_RE } from './plugins'
 
 export const IsolationTier = z.enum(['local', 'worktree', 'docker'])
 export type IsolationTier = z.infer<typeof IsolationTier>
@@ -14,6 +15,7 @@ export const PlanStep = z.object({
   executorRef: z.string().min(1),
   modelRef: z.string().min(1),
   skillRefs: z.array(z.string()),
+  toolRefs: z.array(z.string().regex(TOOL_REF_RE)).default([]),
   isolation: IsolationTier,
   zone: z.array(z.string()),
   maxIterations: z.number().int().positive(),

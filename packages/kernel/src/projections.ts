@@ -108,6 +108,7 @@ export function fold(events: EventRecord[]): State {
         if (e.usage) state.usage.set(e.taskId, addUsage(state.usage.get(e.taskId) ?? ZERO_USAGE, e.usage))
         break
       }
+      case EVENT_KIND.skill_loaded:
       case EVENT_KIND.tool_call:
       case EVENT_KIND.tool_result:
       case EVENT_KIND.signal_received:
