@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test'
-import { mkdtempSync, symlinkSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, readdirSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { TOOL_NAME, executeTool, resolveInWorkspace, toolSet } from './tools'
@@ -24,6 +24,18 @@ describe('workspace scoping (trust boundary)', () => {
     symlinkSync(outside, path.join(dir, 'sneaky'))
     const r = await executeTool(TOOL_NAME.fs_read, { path: 'sneaky/secret.txt' }, dir)
     expect(r.isError).toBe(true)
+  })
+  it('rejects fs_write through a symlinked dir at a deep nonexistent path (ancestor-walk loop)', async () => {
+    const dir = ws()
+    // Nothing below `sneaky` exists yet, so resolveInWorkspace's
+    // `while (!existsSync(probe)) probe = path.dirname(probe)` loop must climb
+    // past b/ and a/ before it finds `sneaky` itself — unlike the read test above,
+    // which finds an existing file on the first probe and never iterates.
+    const outside = mkdtempSync(path.join(tmpdir(), 'orc-outside-'))
+    symlinkSync(outside, path.join(dir, 'sneaky'))
+    const r = await executeTool(TOOL_NAME.fs_write, { path: 'sneaky/a/b/new.txt', content: 'x' }, dir)
+    expect(r.isError).toBe(true)
+    expect(readdirSync(outside)).toEqual([])
   })
 })
 
