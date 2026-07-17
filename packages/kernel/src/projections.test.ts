@@ -136,11 +136,11 @@ describe('fold — execution kinds', () => {
     const state = fold([
       exEvt(1, 'run_started', { taskId: 't1', planVersion: 1, retryIndex: 0, workflowId: 'run:t1:v1', cwd: null }),
       exEvt(2, 'step_started', { stepId: 's1', runToken: rt('s1'), attempt: 1 }),
-      exEvt(2.5, 'skill_loaded', { stepId: 's1', runToken: rt('s1'), name: 'alpha', hash: 'h' }),
-      exEvt(3, 'agent_call', { stepId: 's1', runToken: rt('s1'), iteration: 1, request: {}, response: {} },
+      exEvt(3, 'skill_loaded', { stepId: 's1', runToken: rt('s1'), name: 'alpha', hash: 'h' }),
+      exEvt(4, 'agent_call', { stepId: 's1', runToken: rt('s1'), iteration: 1, request: {}, response: {} },
         { inputTokens: 100, outputTokens: 50, costUSD: 0.01, estimated: false }),
-      exEvt(4, 'signal_received', { stepId: 's1', runToken: rt('s1'), signal: { stepId: 's1', runToken: rt('s1'), outcome: 'success', summary: 'ok' } }),
-      exEvt(5, 'step_completed', { stepId: 's1', runToken: rt('s1'), summary: 'ok' }),
+      exEvt(5, 'signal_received', { stepId: 's1', runToken: rt('s1'), signal: { stepId: 's1', runToken: rt('s1'), outcome: 'success', summary: 'ok' } }),
+      exEvt(6, 'step_completed', { stepId: 's1', runToken: rt('s1'), summary: 'ok' }),
     ])
     const step = state.steps.get('t1')?.get('s1')
     expect(step?.status).toBe('completed')
