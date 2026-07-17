@@ -54,6 +54,8 @@ completed model call is ever re-billed.
   `.orc/trust.json` *grants* — created only by `orc mcp trust` / `orc ext trust`,
   never commit it. Steps opt into tools/skills via `toolRefs` / `skillRefs`;
   plans referencing unknown or untrusted refs fail at propose time.
+- `env` values in `mcpServers` starting with `$` pull from orc's own environment
+  at spawn — secrets never go in the config file.
 - Never bundle the CLI (`bun build`): DBOS must run unbundled via `bun run`.
 - Upgrading orc: finish or `orc cancel` active runs first — DBOS recovery is
   keyed to the app version (`DBOS__APPVERSION`).
