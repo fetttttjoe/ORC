@@ -47,6 +47,14 @@
         "@types/pg": "^8.20.0",
       },
     },
+    "packages/vault-projector": {
+      "name": "@orc/vault-projector",
+      "version": "0.0.0",
+      "dependencies": {
+        "@orc/contracts": "workspace:*",
+        "@orc/kernel": "workspace:*",
+      },
+    },
     "plugins/executor-api-loop": {
       "name": "@orc/executor-api-loop",
       "version": "0.0.0",
@@ -187,6 +195,8 @@
     "@orc/provider-ollama": ["@orc/provider-ollama@workspace:plugins/provider-ollama"],
 
     "@orc/provider-openai": ["@orc/provider-openai@workspace:plugins/provider-openai"],
+
+    "@orc/vault-projector": ["@orc/vault-projector@workspace:packages/vault-projector"],
 
     "@standard-schema/spec": ["@standard-schema/spec@1.1.0", "", {}, "sha512-l2aFy5jALhniG5HgqrD6jXLi/rUWrKvqN/qJx6yoJsgKhblVd+iqqU4RCXavm/jPityDo5TCvKMnpjKnOriy0w=="],
 
