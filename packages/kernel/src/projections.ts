@@ -1,19 +1,65 @@
-import { EVENT_KIND } from '@orc/contracts'
-import type { EventRecord, Plan, TaskNode, TaskStatus } from '@orc/contracts'
+import { EVENT_KIND, STEP_RUN_STATUS, addUsage } from '@orc/contracts'
+import type {
+  EventRecord, FailureClass, Plan, StepRunStatus, TaskNode, TaskStatus, Usage,
+} from '@orc/contracts'
 
 export interface TaskPlans {
   versions: Plan[]
   approvedVersion: number | null
 }
 
+export interface StepState {
+  stepId: string
+  runToken: string
+  attempt: number
+  status: StepRunStatus
+  iterations: number
+  output: string | null
+  failure: { class: FailureClass; message: string } | null
+}
+
+export interface RunRecord {
+  planVersion: number
+  retryIndex: number
+  workflowId: string
+  cwd: string | null
+}
+
 export interface State {
   tasks: Map<string, TaskNode>
   plans: Map<string, TaskPlans>
+  steps: Map<string, Map<string, StepState>>
+  runs: Map<string, RunRecord[]>
+  usage: Map<string, Usage>
+}
+
+const ZERO_USAGE: Usage = { inputTokens: 0, outputTokens: 0, costUSD: null, estimated: false }
+
+const dedupKey = (e: EventRecord): string | null => {
+  // task_status_changed is excluded: run-init (→running) and run-finish (→done) share a runToken
+  // and would collide; a replayed status append is idempotent in fold anyway.
+  if (!e.runToken || e.kind === EVENT_KIND.task_status_changed) return null
+  const p = e.payload as { iteration?: number; toolCallId?: string }
+  return `${e.runToken}:${e.kind}:${p.iteration ?? ''}:${p.toolCallId ?? ''}`
 }
 
 export function fold(events: EventRecord[]): State {
-  const state: State = { tasks: new Map(), plans: new Map() }
+  const state: State = { tasks: new Map(), plans: new Map(), steps: new Map(), runs: new Map(), usage: new Map() }
+  const seen = new Set<string>()
+
+  const stepOf = (taskId: string, stepId: string): StepState | undefined => state.steps.get(taskId)?.get(stepId)
+  const setStep = (taskId: string, s: StepState): void => {
+    const m = state.steps.get(taskId) ?? new Map<string, StepState>()
+    m.set(s.stepId, s)
+    state.steps.set(taskId, m)
+  }
+
   for (const e of events) {
+    const key = dedupKey(e)
+    if (key !== null) {
+      if (seen.has(key)) continue // crash-boundary duplicate (spec §6.2)
+      seen.add(key)
+    }
     switch (e.kind) {
       case EVENT_KIND.task_created: {
         const { task } = e.payload as { task: TaskNode }
@@ -40,16 +86,50 @@ export function fold(events: EventRecord[]): State {
         if (t) state.tasks.set(p.taskId, { ...t, status: p.to })
         break
       }
-      // ponytail: run/step event kinds don't project into State yet — no run-level view exists until a later task needs one
-      case EVENT_KIND.run_started:
-      case EVENT_KIND.step_started:
-      case EVENT_KIND.agent_call:
+      case EVENT_KIND.run_started: {
+        const p = e.payload as { planVersion: number; retryIndex: number; workflowId: string; cwd: string | null }
+        const runs = state.runs.get(e.taskId) ?? []
+        runs.push({ planVersion: p.planVersion, retryIndex: p.retryIndex, workflowId: p.workflowId, cwd: p.cwd })
+        state.runs.set(e.taskId, runs)
+        break
+      }
+      case EVENT_KIND.step_started: {
+        const p = e.payload as { stepId: string; attempt: number }
+        setStep(e.taskId, {
+          stepId: p.stepId, runToken: e.runToken!, attempt: p.attempt,
+          status: STEP_RUN_STATUS.running, iterations: 0, output: null, failure: null,
+        })
+        break
+      }
+      case EVENT_KIND.agent_call: {
+        const p = e.payload as { stepId: string; iteration: number }
+        const s = stepOf(e.taskId, p.stepId)
+        if (s && s.runToken === e.runToken) s.iterations = Math.max(s.iterations, p.iteration)
+        if (e.usage) state.usage.set(e.taskId, addUsage(state.usage.get(e.taskId) ?? ZERO_USAGE, e.usage))
+        break
+      }
       case EVENT_KIND.tool_call:
       case EVENT_KIND.tool_result:
       case EVENT_KIND.signal_received:
-      case EVENT_KIND.step_completed:
-      case EVENT_KIND.step_failed:
+        break // traceability only; no state derivation
+      case EVENT_KIND.step_completed: {
+        const p = e.payload as { stepId: string; summary: string }
+        const s = stepOf(e.taskId, p.stepId)
+        if (s && s.runToken === e.runToken) {
+          s.status = STEP_RUN_STATUS.completed
+          s.output = p.summary
+        }
         break
+      }
+      case EVENT_KIND.step_failed: {
+        const p = e.payload as { stepId: string; class: FailureClass; message: string }
+        const s = stepOf(e.taskId, p.stepId)
+        if (s && s.runToken === e.runToken) {
+          s.status = STEP_RUN_STATUS.failed
+          s.failure = { class: p.class, message: p.message }
+        }
+        break
+      }
       default: {
         const unhandled: never = e.kind
         void unhandled
@@ -58,4 +138,24 @@ export function fold(events: EventRecord[]): State {
     }
   }
   return state
+}
+
+export function completedStepIds(state: State, taskId: string): Set<string> {
+  const out = new Set<string>()
+  for (const [id, s] of state.steps.get(taskId) ?? []) if (s.status === STEP_RUN_STATUS.completed) out.add(id)
+  return out
+}
+
+export function nextAttempts(state: State, taskId: string, plan: Pick<Plan, 'steps'>): Record<string, number> {
+  const out: Record<string, number> = {}
+  for (const step of plan.steps) {
+    const s = state.steps.get(taskId)?.get(step.id)
+    // running = orphaned/live attempt: reuse its number so the idempotent workflowID re-attaches
+    out[step.id] = s ? (s.status === STEP_RUN_STATUS.running ? s.attempt : s.attempt + 1) : 1
+  }
+  return out
+}
+
+export function taskUsage(state: State, taskId: string): Usage {
+  return state.usage.get(taskId) ?? ZERO_USAGE
 }
