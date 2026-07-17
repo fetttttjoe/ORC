@@ -7,13 +7,29 @@ import { ModelCost } from '@orc/contracts'
 export const APP_VERSION = 'orc-0.1.0'
 export const DEFAULT_DATABASE_URL = 'postgresql://postgres:orc@localhost:5433/orc'
 
-const FileConfig = z.object({
-  databaseUrl: z.string().optional(),
-  concurrency: z.number().int().positive().optional(),
-  workspaceRoot: z.string().optional(),
-  ollamaBaseUrl: z.string().optional(),
-  costOverrides: z.record(z.string(), z.record(z.string(), ModelCost)).optional(),
-})
+// ONE zod schema resolves all settings — defaults live in .default(), never in ?? chains.
+// Input is file config merged with env overrides (env wins); everything orc's own code
+// consumes is validated here, loudly. (Env of third-party processes we spawn — MCP
+// servers/containers — stays a loose optional record by design: theirs can be absent
+// or opaque.) The schema is a factory because path defaults depend on the project dir.
+const settingsSchema = (dir: string) =>
+  z.object({
+    databaseUrl: z.url().default(DEFAULT_DATABASE_URL),
+    concurrency: z.coerce.number().int().positive().default(3),
+    workspaceRoot: z.string().default(path.join(dir, '.orc', 'workspaces')),
+    ollamaBaseUrl: z.url().default('http://localhost:11434'),
+    costOverrides: z.record(z.string(), z.record(z.string(), ModelCost)).default({}),
+  })
+
+// container reality: `VAR=` (empty) counts as unset, not as a value
+const envOverrides = (): Record<string, string> => {
+  const map = {
+    databaseUrl: process.env.ORC_DATABASE_URL,
+    concurrency: process.env.ORC_CONCURRENCY,
+    ollamaBaseUrl: process.env.OLLAMA_BASE_URL,
+  }
+  return Object.fromEntries(Object.entries(map).filter((e): e is [string, string] => Boolean(e[1])))
+}
 
 export interface OrcConfig {
   databaseUrl: string
@@ -33,16 +49,15 @@ export function deriveSystemUrl(databaseUrl: string): string {
 
 export function loadConfig(dir: string = process.cwd()): OrcConfig {
   const file = path.join(dir, '.orc', 'config.json')
-  const fromFile = existsSync(file) ? FileConfig.parse(JSON.parse(readFileSync(file, 'utf8'))) : {}
-  const databaseUrl = process.env.ORC_DATABASE_URL ?? fromFile.databaseUrl ?? DEFAULT_DATABASE_URL
-  const concurrency = Number(process.env.ORC_CONCURRENCY ?? fromFile.concurrency ?? 3)
+  const fromFile: unknown = existsSync(file) ? JSON.parse(readFileSync(file, 'utf8')) : {}
+  const parsed = settingsSchema(dir).safeParse({ ...(fromFile as Record<string, unknown>), ...envOverrides() })
+  if (!parsed.success)
+    throw new Error(
+      `invalid orc config (env / .orc/config.json): ${parsed.error.issues.map(i => `${i.path.join('.')}: ${i.message}`).join('; ')}`,
+    )
   return {
-    databaseUrl,
-    systemDatabaseUrl: deriveSystemUrl(databaseUrl),
-    concurrency: Number.isFinite(concurrency) && concurrency > 0 ? concurrency : (fromFile.concurrency ?? 3),
-    workspaceRoot: fromFile.workspaceRoot ?? path.join(dir, '.orc', 'workspaces'),
-    ollamaBaseUrl: process.env.OLLAMA_BASE_URL ?? fromFile.ollamaBaseUrl ?? 'http://localhost:11434',
+    ...parsed.data,
+    systemDatabaseUrl: deriveSystemUrl(parsed.data.databaseUrl),
     appVersion: APP_VERSION,
-    costOverrides: fromFile.costOverrides ?? {},
   }
 }
