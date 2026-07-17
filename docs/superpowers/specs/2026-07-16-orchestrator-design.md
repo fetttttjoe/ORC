@@ -104,13 +104,13 @@ plugins/          # first-party plugins — ordinary packages, no special access
 All contracts are zod schemas; types are inferred. This package is the API of the ecosystem.
 
 - **TaskNode** `{id, parentId, type, title, spec, status, zone: string[], budget, depth}` — the recursive tree. Statuses: `draft | awaiting_approval | approved | running | blocked | done | failed | cancelled`.
-- **Plan** `{taskId, version, steps: PlanStep[], edges: TypedEdge[], strategyRef, costEstimate, approvedBy?, frozenAt?}` — versioned, immutable once approved. **PlanStep** `{id, role, executorRef, modelRef (pre-resolved), skillRefs (force-loaded), isolation: 'local'|'worktree'|'docker', zone, maxIterations, slots}`.
+- **Plan** `{taskId, version, steps: PlanStep[], edges: TypedEdge[], strategyRef, costEstimate, approvedBy?, frozenAt?}` — versioned, immutable once approved. **PlanStep** `{id, role, executorRef, modelRef (pre-resolved), skillRefs (force-loaded), isolation: 'local'|'worktree'|'docker', zone, maxIterations, slots}`. *(Amended 2026-07-17, M3 design D4: PlanStep gains `toolRefs` — the step's MCP tool surface, frozen at plan time as `<serverId>/<toolName>` refs; schemas are fetched deferred at step init.)*
 - **CoordinationStrategy** (declarative data) `{roles, edges: TypedEdge[], feedbackEdge?, maxRounds}` — RecursiveMAS-style topology. **TypedEdge** carries a payload schema, validated fail-fast at plan-load time. Upstream output enters downstream prompts only at named **slots**.
 - **AgentExecutor** `{id, getCapabilities(): CapabilityMatrix, startTurn, resume, abort, loadTranscript}` — returns an async stream of **UnifiedEvent** (discriminated union: `text | tool_call | tool_result | usage | signal | error | done`, each with `raw` passthrough). Capability matrix has mandatory guards — calling an unsupported capability is a typed error, not a runtime surprise.
 - **ModelProvider** — Layer 1: a Vercel AI SDK `LanguageModel` plus registry metadata `{id, providerKind, baseUrl?, costs, contextWindow}`.
 - **MemoryStore** `{scope, read, write, index, summary}` — scope = `private(runId) | shared(name)`; shared writes go through the kernel gateway.
 - **SkillManifest** — SKILL.md frontmatter (agentskills.io) + validation status.
-- **ExtensionManifest** — T2: `{id, hooks, registrations, trust: 'project'|'user'}` with `session_start/session_shutdown` lifecycle.
+- **ExtensionManifest** — T2: `{id, hooks, registrations, trust: 'project'|'user'}` with `session_start/session_shutdown` lifecycle. *(Amended 2026-07-17, M3 design D7: shipped shape is function-shaped — `{id, activate(api), deactivate?()}`; hooks and registrations are `activate()` calls, and trust moves out of the manifest into the local trust store `.orc/trust.json`. `trust: 'user'` returns with user-level config, M4.)*
 - **SandboxProvider** `{tier, acquire(step) → Workspace, release}`.
 - **ApprovalPolicy** — `{default: 'manual'|'auto', rules: [{when: expr(depth, estCost, type), then}]}` evaluated deterministically.
 - **ExecutionPort** — the seam in front of DBOS: `{runStep, waitForSignal, enqueue, sleep}` (ADR-004 hedge). *(Amended 2026-07-17, M2 design D2: shipped shape is `{startRun, retry, cancelRun}` plus a per-step `checkpoint` capability handed to executors; `waitForSignal` returns in M5 with mid-run gates.)*
@@ -177,7 +177,7 @@ Bidirectional edit surface is **only** the plan file during `awaiting_approval` 
 
 | Tier | Substrate | Load/unload | Trust |
 |---|---|---|---|
-| T0 skills | SKILL.md markdown in vault | file watch; progressive disclosure (name+description in index; body on demand); unload = deindex | sandbox-safe by construction; agent-authored skills strictly validated before activation |
+| T0 skills | SKILL.md markdown in vault | file watch *(M3: 500 ms polling rescan — Bun's recursive fs.watch never reports files in dirs created after watch start, spike 2026-07-17)*; progressive disclosure (name+description in index; body on demand); unload = deindex | sandbox-safe by construction; agent-authored skills strictly validated before activation |
 | T1 capabilities | MCP servers over stdio | spawn = load, kill = unload; `tools/listChanged` | manifest permission gate; deferred schema loading (never preload; ~300-500 tokens/tool); vetting warning surface |
 | T2 extensions | in-process TS via jiti | lifecycle hooks; live registration; cache-busted reload (no true ESM unload — accepted) | explicit project/user trust gate; documented as full-access |
 
@@ -197,7 +197,7 @@ Per-step tier: `local → worktree (default for code) → docker (v1.x)`. Splitt
 
 ### 8.7 Security & trust
 
-Per-run scoped signal tokens (an agent cannot flip another run's flags). MCP permission manifests + user consent on first load. T2 extensions install only from explicit trust. Agent-generated artifacts (skills, plans) validated before activation. Secrets (API keys) via env/keychain, never in vault or event payloads (redaction at the adapter seam).
+Per-run scoped signal tokens (an agent cannot flip another run's flags). MCP permission manifests + user consent on first load. T2 extensions install only from explicit trust. Agent-generated artifacts (skills, plans) validated before activation. Secrets (API keys) via env/keychain, never in vault or event payloads (redaction at the adapter seam). *(Amended 2026-07-17, M3 design D3: consent is a local never-committed grant file — `.orc/config.json` declares MCP servers/extensions, `.orc/trust.json` grants them via `orc mcp trust` / `orc ext trust`; a cloned repo cannot auto-execute anything.)*
 
 ---
 
