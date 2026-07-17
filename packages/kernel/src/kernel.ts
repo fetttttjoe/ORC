@@ -8,7 +8,10 @@ import { fold, type State } from './projections'
 import { KERNEL_ERROR_CODE, KernelError } from './errors'
 
 export class Kernel {
-  constructor(private readonly log: EventLog) {}
+  constructor(
+    private readonly log: EventLog,
+    private readonly refValidator?: (plan: Plan) => Promise<string[]>,
+  ) {}
 
   async createTask(input: { title: string; spec?: string; type?: string; parentId?: string; budgetUSD?: number | null }): Promise<TaskNode> {
     return this.log.transaction(async tx => {
@@ -108,6 +111,9 @@ export class Kernel {
     const plan: Plan = { ...PlanDraft.parse(draft), taskId, version: versions.length + 1 }
     const check = validatePlan(plan)
     if (!check.ok) throw new KernelError(KERNEL_ERROR_CODE.plan_validation_failed, check.errors.join('; '))
+    const refErrors = this.refValidator ? await this.refValidator(plan) : []
+    if (refErrors.length > 0)
+      throw new KernelError(KERNEL_ERROR_CODE.plan_validation_failed, refErrors.join('; '))
     await this.append(tx, taskId, kind, { plan })
     if (from !== TASK_STATUS.awaiting_approval)
       await this.append(tx, taskId, EVENT_KIND.task_status_changed, { taskId, from, to: TASK_STATUS.awaiting_approval })

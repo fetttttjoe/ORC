@@ -99,4 +99,20 @@ describe('Kernel lifecycle', () => {
     expect(await codeOf(k.proposePlan(t.id, bad))).toBe(KERNEL_ERROR_CODE.plan_validation_failed)
     expect((await k.getTask(t.id))?.status).toBe(TASK_STATUS.draft)
   })
+
+  it('propose fails with plan_validation_failed when the refValidator reports errors', async () => {
+    const db = await createTestDb()
+    dbs.push(db)
+    const k = new Kernel(await EventLog.open(db.url), async () => [`unknown executor 'nope'`])
+    const t = await k.createTask({ title: 'x' })
+    await expect(k.proposePlan(t.id, draft())).rejects.toThrow(/unknown executor 'nope'/)
+  })
+
+  it('propose succeeds when the refValidator returns no errors', async () => {
+    const db = await createTestDb()
+    dbs.push(db)
+    const k = new Kernel(await EventLog.open(db.url), async () => [])
+    const t = await k.createTask({ title: 'x' })
+    await expect(k.proposePlan(t.id, draft())).resolves.toBeDefined()
+  })
 })
