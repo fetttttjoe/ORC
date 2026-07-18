@@ -133,7 +133,7 @@ describe('DBOS execution port (integration)', () => {
     expect(state.steps.get(t.id)?.get('a')?.attempt).toBe(1) // completed step NOT re-run
     expect(state.steps.get(t.id)?.get('b')?.attempt).toBe(2)
     expect((await kernel.getTask(t.id))?.status).toBe(TASK_STATUS.done)
-  })
+  }, 15_000) // two full DBOS workflows — bun's 5s default is too tight under suite load
 
   it('refuses to run an unapproved task', async () => {
     const t = await kernel.createTask({ title: 'nope' })

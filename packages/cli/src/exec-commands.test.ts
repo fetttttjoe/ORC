@@ -1,3 +1,4 @@
+import path from 'node:path'
 import { afterAll, afterEach, describe, expect, it, mock, spyOn } from 'bun:test'
 import type { ExecutionPort, RunHandle } from '@orc/contracts'
 import { EventLog } from '@orc/kernel'
@@ -46,9 +47,24 @@ describe('exec commands', () => {
     await run('run', id)
     expect(calls).toContain(`start:${id}:`)
     expect(lines.join('\n')).toContain('done')
-    expect(process.exitCode).toBe(0)
-    process.exitCode = undefined // restore: a leftover exitCode must not flip the whole `bun test` run
   })
+
+  it('blocked run exits 1 — real process exit status via subprocess fixture', async () => {
+    const db = await createTestDb()
+    dbs.push(db)
+    const { kernel, log } = await openKernel(db.url)
+    const { port } = stubPort()
+    const lines: string[] = []
+    spyOn(console, 'log').mockImplementation((...a: unknown[]) => { lines.push(a.join(' ')) })
+    const run = async (...args: string[]) => buildProgram(kernel, async () => port).parseAsync(args, { from: 'user' })
+    const id = await approvedTask(run, lines)
+    mock.restore()
+    await log.close()
+
+    const fixture = path.join(import.meta.dir, 'exec-fixture.ts')
+    const child = Bun.spawn(['bun', fixture, db.url, id, 'blocked'], { stdout: 'ignore', stderr: 'inherit' })
+    expect(await child.exited).toBe(1)
+  }, 20_000)
 
   it('run --cwd forwards the override', async () => {
     const { run, lines, calls } = await makeCli()
@@ -79,7 +95,7 @@ describe('exec commands', () => {
           taskId: id, stepId: 's1', runToken: 'r1', kind: 'step_failed',
           payload: { stepId: 's1', runToken: 'r1', class: 'agent_error', message: 'blocked: boom' },
         })
-        return 'blocked'
+        return 'done' // draining is under test, not exit semantics — those live in the fixture test
       },
     }
     const port: ExecutionPort = { startRun: async () => handle, retry: async () => handle, cancelRun: async () => {} }
@@ -89,16 +105,13 @@ describe('exec commands', () => {
       expect(lines.join('\n')).toContain('step_failed')
     } finally {
       await rawLog.close()
-      process.exitCode = undefined // restore: a leftover exitCode must not flip the whole `bun test` run
     }
   })
 
   it('retry and cancel call through', async () => {
-    const { run, lines, calls } = await makeCli('blocked')
+    const { run, lines, calls } = await makeCli('done')
     const id = await approvedTask(run, lines)
     await run('retry', id)
-    expect(process.exitCode).toBe(1)
-    process.exitCode = undefined // restore: a leftover exitCode must not flip the whole `bun test` run
     await run('cancel', id)
     expect(calls).toContain(`retry:${id}`)
     expect(calls).toContain(`cancel:${id}`)
