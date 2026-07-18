@@ -15,6 +15,20 @@ export const MemoryAuthor = z.object({
 })
 export type MemoryAuthor = z.infer<typeof MemoryAuthor>
 
+export const LINK_KINDS = [
+  'refines', 'supersedes', 'contradicts', 'depends_on',
+  'example_of', 'derived_from', 'relates_to',
+] as const
+export const LinkKind = z.enum(LINK_KINDS)
+export type LinkKind = z.infer<typeof LinkKind>
+
+export const MemoryLink = z.object({
+  id: Id,
+  kind: LinkKind.default('relates_to'), // fills a missing key on a typed link; NOT a string-coercion
+  confidence: z.number().min(0).max(1).optional(),
+})
+export type MemoryLink = z.infer<typeof MemoryLink>
+
 // What a writer (agent/CLI) supplies. Arrays/strings default so a minimal note is one id+title.
 export const MemoryNoteInput = z.object({
   id: Id,
@@ -22,7 +36,7 @@ export const MemoryNoteInput = z.object({
   title: z.string().min(1).max(200),
   categories: z.array(z.string()).default([]),
   tags: z.array(z.string()).default([]),
-  links: z.array(Id).default([]),        // ids of related notes → the graph
+  links: z.array(MemoryLink).default([]), // clean typed graph edges — no string-id form
   paths: z.array(z.string()).default([]), // pointers down to code
   rules: z.array(z.string()).default([]), // normative statements agents honor
   summary: z.string().max(500).default(''),
@@ -45,6 +59,12 @@ export const NoteSummary = z.object({
   categories: z.array(z.string()), tags: z.array(z.string()), summary: z.string(),
 })
 export type NoteSummary = z.infer<typeof NoteSummary>
+
+export const NeighborResult = z.object({
+  id: z.string(), title: z.string(), summary: z.string(),
+  via: LinkKind, depth: z.number().int().positive(), score: z.number(),
+})
+export type NeighborResult = z.infer<typeof NeighborResult>
 
 export interface MemoryFilter { scope?: string; category?: string; tag?: string }
 
