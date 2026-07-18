@@ -1,11 +1,12 @@
 import { EVENT_KIND, type MemoryAuthor, type MemoryStore, type ResolvedTool } from '@orc/contracts'
-import { EventLog, projectDatabaseName, type ProjectConfig } from '@orc/kernel'
-import { SurrealMemory } from './surreal'
+import { EventLog, type ProjectConfig } from '@orc/kernel'
+import { openKnowledge } from './knowledge'
 import { createMemoryStore } from './store'
 import { createMemoryProjector, type MemoryProjector } from './projector'
 import { memoryTools } from './tools'
 
 export { SurrealMemory } from './surreal'
+export { openKnowledge, type Knowledge } from './knowledge'
 export { createMemoryStore } from './store'
 export { createMemoryProjector } from './projector'
 export { memoryTools, unavailableMemoryTools } from './tools'
@@ -23,30 +24,21 @@ export async function gitRevision(dir: string): Promise<string | null> {
   }
 }
 
-// SurrealDB's native database boundary isolates projects: the session is opened on a
-// name derived from (base, projectId), so tool inputs can never reach another project.
-const surrealTarget = (config: ProjectConfig) => ({
-  url: config.projectDbUrl,
-  ns: config.projectDbNamespace,
-  db: projectDatabaseName(config.projectDbName, config.projectId),
-  username: config.projectDbUser,
-  password: config.projectDbPassword,
-})
-
+// the orchestrator: assembles the knowledge service + event log into the memory domain
+// services (gateway, projector, tools) — the business logic never opens Surreal itself
 export async function createMemory(opts: { log: EventLog; config: ProjectConfig }): Promise<{
   store: MemoryStore
   projector: MemoryProjector
   buildTools: (author: MemoryAuthor) => ResolvedTool[]
   close: () => Promise<void>
 }> {
-  new URL(opts.config.projectDbUrl) // fail fast on a malformed setting; the adapter takes the raw string
-  const surreal = await SurrealMemory.open(surrealTarget(opts.config))
-  const store = createMemoryStore({ log: opts.log, surreal, sourceRevision: await gitRevision(opts.config.dir) })
-  const projector = createMemoryProjector({ log: opts.log, surreal, vaultDir: opts.config.vaultDir })
+  const knowledge = await openKnowledge(opts.config)
+  const store = createMemoryStore({ log: opts.log, surreal: knowledge, sourceRevision: await gitRevision(opts.config.dir) })
+  const projector = createMemoryProjector({ log: opts.log, surreal: knowledge, vaultDir: opts.config.vaultDir })
   return {
     store, projector,
     buildTools: author => memoryTools(store, author),
-    close: async () => { await projector.close(); await surreal.close() },
+    close: async () => { await projector.close(); await knowledge.close() },
   }
 }
 
@@ -56,11 +48,10 @@ export async function probeMemory(
   log: EventLog,
 ): Promise<{ healthy: true } | { healthy: false; reason: string }> {
   try {
-    new URL(config.projectDbUrl)
-    const surreal = await SurrealMemory.open(surrealTarget(config))
-    const cursor = await surreal.getCursor()
+    const knowledge = await openKnowledge(config)
+    const cursor = await knowledge.getCursor()
     const pending = await log.countAfter(cursor, [EVENT_KIND.memory_written, EVENT_KIND.memory_deleted])
-    await surreal.close()
+    await knowledge.close()
     return pending === 0 ? { healthy: true } : { healthy: false, reason: `${pending} unapplied events` }
   } catch (err) {
     return { healthy: false, reason: `unreachable: ${err instanceof Error ? err.message : String(err)}` }
