@@ -16,7 +16,7 @@ const noteTable = table('note', {
   categories: t.array(t.string()), tags: t.array(t.string()), links: t.array(t.string()),
   paths: t.array(t.string()), rules: t.array(t.string()), summary: t.string(), body: t.string(),
   createdAt: t.string(), createdBy: t.string(), updatedAt: t.string(), updatedBy: t.string(),
-  revision: t.number(), readCount: t.number(), lastReadAt: t.option(t.string()), deleted: t.bool(),
+  revision: t.number(), readCount: t.number(), lastReadAt: t.option(t.string()),
 })
 const metaTable = table('meta', { seq: t.number() })
 
@@ -57,7 +57,7 @@ export class SurrealMemory {
       paths: e.note.paths, rules: e.note.rules, summary: e.note.summary, body: e.note.body,
       createdAt: ex?.createdAt ?? e.ts, createdBy: ex?.createdBy ?? by,
       updatedAt: e.ts, updatedBy: by, revision: (ex?.revision ?? 0) + 1,
-      readCount: ex?.readCount ?? 0, deleted: false,
+      readCount: ex?.readCount ?? 0,
     }
     // OptionType fields validate against `undefined`, not `null` — omit rather than null it out.
     if (ex?.lastReadAt !== undefined) data.lastReadAt = ex.lastReadAt
@@ -71,7 +71,7 @@ export class SurrealMemory {
   async get(id: string, scope = 'project'): Promise<MemoryNote | null> {
     const rows = await this.db.select('note', key(scope, id))
     const r = rows[0]
-    if (!r || r.deleted) return null
+    if (!r) return null
     return MemoryNote.parse(toNote(r))
   }
 
@@ -94,11 +94,13 @@ export class SurrealMemory {
   async search(query: string, filter: MemoryFilter = {}): Promise<NoteSummary[]> {
     const q = query.toLowerCase()
     const rows = await this.db.select('note')
+      // text fields: case-insensitive substring match; tags: membership on the lowercased
+      // query, since tags are stored lowercase by convention here.
       .where(n => this.matchFilter(n, filter).and(
         n.title.lowercase().contains(q)
           .or(n.summary.lowercase().contains(q))
           .or(n.body.lowercase().contains(q))
-          .or(n.tags.contains(query)),
+          .or(n.tags.contains(q)),
       ))
       .orderBy('updatedAt', 'DESC')
     return rows.map(toSummary)
@@ -109,7 +111,9 @@ export class SurrealMemory {
   // `n` is the per-row Actionable proxy handed in by `.where()`; typed `any` here because it
   // crosses a helper-method boundary (the builder's context type is per-call-site generic).
   private matchFilter(n: any, filter: MemoryFilter): any {
-    let cond = n.deleted.eq(false)
+    // always-true seed (SurrealQL needs a base predicate to `.and()` onto; `deleted` used to
+    // serve this role, but there are no soft-deleted rows anymore — see applyDeleted).
+    let cond = n.scope.eq(n.scope)
     if (filter.scope) cond = cond.and(n.scope.eq(filter.scope))
     if (filter.category) cond = cond.and(n.categories.contains(filter.category))
     if (filter.tag) cond = cond.and(n.tags.contains(filter.tag))
