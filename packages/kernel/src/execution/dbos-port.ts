@@ -17,9 +17,13 @@ import type { OrcConfig } from '../config'
 export interface DbosPort extends ExecutionPort {
   launch(): Promise<void>
   shutdown(): Promise<void>
+  startChildRun(childTaskId: string): Promise<void>
 }
 
-const QUEUE = 'agents'
+// depth-partitioned queues (spec D7): a gate-waiting parent at depth d holds a slot on
+// agents:<d> only, so it can never starve the depth-d+1 children it is waiting on.
+const agentQueue = (depth: number): string => `agents:${depth}`
+const runQueue = (depth: number): string => `runs:${depth}`
 
 interface RunArgs { taskId: string; planVersion: number; retryIndex: number; cwd: string | null }
 interface StepArgs { taskId: string; stepId: string; planVersion: number; attempt: number; cwd: string | null }
@@ -36,7 +40,10 @@ export async function createDbosPort(opts: {
   executors: Map<string, AgentExecutor<unknown>>
   skills?: { load(name: string): Promise<LoadedSkill> }
   tools?: ToolSource
-  stepTools?: (p: { taskId: string; stepId: string; runToken: string; role: string; executor: string; model: string }) => ResolvedTool[]
+  stepTools?: (p: {
+    taskId: string; stepId: string; runToken: string; role: string; executor: string; model: string
+    modelRef: string; maxIterations: number
+  }) => ResolvedTool[]
 }): Promise<DbosPort> {
   const { log, config, providers, executors, skills, tools, stepTools } = opts
 
@@ -120,6 +127,7 @@ export async function createDbosPort(opts: {
         extraTools = [...extraTools, ...stepTools({
           taskId: args.taskId, stepId: args.stepId, runToken,
           role: init.step.role, executor: init.step.executorRef, model: modelId,
+          modelRef: init.step.modelRef, maxIterations: init.step.maxIterations,
         })]
 
       const ctx: ExecutorContext<unknown> = {
@@ -178,7 +186,8 @@ export async function createDbosPort(opts: {
         const state = await foldState(args.taskId)
         const plan = state.plans.get(args.taskId)!.versions.find(p => p.version === args.planVersion)!
         const from = state.tasks.get(args.taskId)!.status
-        return { plan, done: [...completedStepIds(state, args.taskId)], attempts: nextAttempts(state, args.taskId, plan), from }
+        const depth = state.tasks.get(args.taskId)!.depth
+        return { plan, done: [...completedStepIds(state, args.taskId)], attempts: nextAttempts(state, args.taskId, plan), from, depth }
       }, r => [
         { kind: EVENT_KIND.run_started, payload: { taskId: args.taskId, planVersion: args.planVersion, retryIndex: args.retryIndex, workflowId, cwd: args.cwd } },
         { kind: EVENT_KIND.task_status_changed, payload: { taskId: args.taskId, from: r.from, to: TASK_STATUS.running } },
@@ -198,7 +207,7 @@ export async function createDbosPort(opts: {
           started.add(s.id)
           const handle = await DBOS.startWorkflow(stepWorkflow, {
             workflowID: stepWorkflowId(args.taskId, s.id, init.attempts[s.id]!),
-            queueName: QUEUE,
+            queueName: agentQueue(init.depth),
           })({ taskId: args.taskId, stepId: s.id, planVersion: args.planVersion, attempt: init.attempts[s.id]!, cwd: args.cwd })
           pending.set(s.id, handle.getResult())
         }
@@ -245,12 +254,27 @@ export async function createDbosPort(opts: {
       DBOS.setConfig({ name: 'orc', systemDatabaseUrl: config.systemDatabaseUrl, logLevel: 'warn', runAdminServer: false })
       await DBOS.launch()
       // ADAPTATION: registerQueue requires DBOS already launched in @dbos-inc/dbos-sdk v4.23 (see report)
-      await DBOS.registerQueue(QUEUE, { concurrency: config.concurrency, workerConcurrency: config.concurrency })
+      for (let d = 0; d <= config.maxDepth; d++) {
+        await DBOS.registerQueue(agentQueue(d), { concurrency: config.concurrency, workerConcurrency: config.concurrency })
+        if (d > 0) await DBOS.registerQueue(runQueue(d), { concurrency: config.concurrency, workerConcurrency: config.concurrency })
+      }
     },
     // deregister clears the workflow/queue registries so a fresh port can re-register in the
     // same process — required when >1 port is created per process (integration tests); a no-op
     // at real process exit. (DBOS docs: use deregister when re-registering functions.)
     shutdown: () => DBOS.shutdown({ deregister: true }),
+    startChildRun: async (childTaskId: string): Promise<void> => {
+      const state = await foldState(childTaskId)
+      const task = state.tasks.get(childTaskId)
+      if (!task) throw new KernelError(KERNEL_ERROR_CODE.task_not_found, `no task '${childTaskId}'`)
+      const approved = state.plans.get(childTaskId)?.approvedVersion
+      if (!approved) throw new KernelError(KERNEL_ERROR_CODE.invalid_transition, `no approved plan for '${childTaskId}'`)
+      // deterministic id: the router may call this more than once (at-least-once delivery) — attaches idempotently
+      await DBOS.startWorkflow(runWorkflow, {
+        workflowID: `run:${childTaskId}:v${approved}`,
+        queueName: runQueue(task.depth),
+      })({ taskId: childTaskId, planVersion: approved, retryIndex: 0, cwd: null })
+    },
     startRun: (taskId, o) => startRunAt(taskId, 0, o?.cwd),
     retry: async (taskId, o) => {
       const state = await foldState(taskId)
