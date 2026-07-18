@@ -37,6 +37,27 @@ describe('SurrealMemory', () => {
     await m.close()
   })
 
+  it('materializes typed RELATE edges and ranks neighbours; delete removes edges', async () => {
+    const t = await createTestSurreal(); drops.push(t.drop)
+    const m = await SurrealMemory.open(t)
+    await m.applyWritten({ seq: 1, ts: '2026-07-18T00:00:00Z', note: note({ id: 'a', links: [{ id: 'b', kind: 'supersedes' }, { id: 'c', kind: 'relates_to' }] }), author: { source: 'cli' } })
+    await m.applyWritten({ seq: 2, ts: '2026-07-18T00:00:00Z', note: note({ id: 'b' }), author: { source: 'cli' } })
+    await m.applyWritten({ seq: 3, ts: '2026-07-18T00:00:00Z', note: note({ id: 'c' }), author: { source: 'cli' } })
+
+    const nb = await m.neighbors('a', { depth: 2 })
+    expect(nb.map(n => n.id)).toEqual(['b', 'c'])            // supersedes(1.0) ranked above relates_to(0.5)
+    expect(nb[0]).toMatchObject({ id: 'b', via: 'supersedes' })
+    expect((await m.neighbors('a', { kinds: ['supersedes'] })).map(n => n.id)).toEqual(['b'])
+
+    // re-writing a note re-materializes its out-edges (delete-then-RELATE), no duplicates
+    await m.applyWritten({ seq: 4, ts: '2026-07-18T01:00:00Z', note: note({ id: 'a', links: [{ id: 'b', kind: 'supersedes' }] }), author: { source: 'cli' } })
+    expect((await m.neighbors('a')).map(n => n.id)).toEqual(['b'])
+
+    await m.applyDeleted({ seq: 5, ts: '2026-07-18T02:00:00Z', id: 'a', scope: 'project', author: { source: 'cli' } })
+    expect(await m.neighbors('a')).toEqual([])               // edges gone with the note
+    await m.close()
+  })
+
   // ponytail: cheap de-risk for Task 7 (not in the brief's gate) — confirms upsert().set()
   // with a partial field set MERGES rather than REPLACES the stored note. readCount/lastReadAt
   // are Tier-2 fields dropped from the public MemoryNote (see toNote), so they're checked here
