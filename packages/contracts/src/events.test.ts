@@ -26,4 +26,10 @@ describe('events', () => {
     expect(() => PAYLOAD_SCHEMAS.skill_loaded.parse(good)).not.toThrow()
     expect(() => PAYLOAD_SCHEMAS.skill_loaded.parse({ ...good, hash: '' })).toThrow()
   })
+  it('memory_deleted rejects a path-unsafe id or scope (no poison event)', () => {
+    const good = { id: 'auth', scope: 'project', author: { source: 'cli' } }
+    expect(() => PAYLOAD_SCHEMAS.memory_deleted.parse(good)).not.toThrow()
+    expect(() => PAYLOAD_SCHEMAS.memory_deleted.parse({ ...good, scope: '../x' })).toThrow()
+    expect(() => PAYLOAD_SCHEMAS.memory_deleted.parse({ ...good, id: '../x' })).toThrow()
+  })
 })

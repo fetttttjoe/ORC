@@ -2,7 +2,7 @@ import { z } from 'zod'
 import { TaskNode, TaskStatus } from './task'
 import { Plan } from './plan'
 import { FailureClass, Signal, Usage } from './execution'
-import { MemoryNoteInput, MemoryAuthor } from './memory'
+import { MemoryNoteInput, MemoryAuthor, MEMORY_ID_RE } from './memory'
 
 export const EventKind = z.enum([
   'task_created', 'plan_proposed', 'plan_edited', 'plan_approved', 'task_status_changed',
@@ -84,8 +84,11 @@ export const PAYLOAD_SCHEMAS: Record<EventKind, z.ZodType> = {
   }),
   memory_written: z.object({ note: MemoryNoteInput, author: MemoryAuthor }),
   memory_deleted: z.object({
-    id: z.string().regex(/^[a-z0-9][a-z0-9-]*$/),
-    scope: z.string(),
+    // id AND scope must be MEMORY_ID_RE-safe: they flow into noteRelPath → the vault path guard,
+    // so an unconstrained scope (e.g. '../x') would throw in the projector and wedge the read
+    // model. append() validates payloads against PAYLOAD_SCHEMAS, so this rejects at write time.
+    id: z.string().regex(MEMORY_ID_RE),
+    scope: z.string().regex(MEMORY_ID_RE),
     author: MemoryAuthor,
   }),
 }
