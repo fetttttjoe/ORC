@@ -85,6 +85,7 @@
       "dependencies": {
         "@orc/contracts": "workspace:*",
         "@orc/kernel": "workspace:*",
+        "@orc/vault-projector": "workspace:*",
         "surqlize": "0.1.0",
         "surrealdb": "2.0.4",
         "zod": "^4.4.3",
