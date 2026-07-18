@@ -111,6 +111,17 @@ describe('createSignalRouter (integration, real EventLog)', () => {
     expect(sends[0]!.outcome).toBe('blocked')
   })
 
+  it('sweep route 2: an approved pending-split child with no run gets startChildRun on start()', async () => {
+    const approved: string[] = []
+    await seedSplit()
+    // child approved while the router was down — the plan_approved event will never be redelivered
+    await log.append({ taskId: 'c', stepId: null, runToken: null, kind: EVENT_KIND.plan_approved, payload: { taskId: 'c', version: 1, approvedAt: 'T', approvedBy: 'policy' } })
+    await log.append({ taskId: 'c', stepId: null, runToken: null, kind: EVENT_KIND.task_status_changed, payload: { taskId: 'c', from: TASK_STATUS.draft, to: TASK_STATUS.approved } })
+    router = createSignalRouter({ log, onChildApproved: async id => { approved.push(id) }, send: async () => {} })
+    await router.start() // sweep runs (and awaits onChildApproved) synchronously before returning
+    expect(approved).toEqual(['c'])
+  })
+
   it('route 2: plan_approved for a pending-split child calls onChildApproved', async () => {
     const approved: string[] = []
     router = createSignalRouter({ log, onChildApproved: async id => { approved.push(id) }, send: async () => {} })

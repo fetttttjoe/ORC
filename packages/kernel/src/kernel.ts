@@ -13,11 +13,11 @@ export class Kernel {
     private readonly refValidator?: (plan: Plan) => Promise<string[]>,
   ) {}
 
-  async createTask(input: { id?: string; title: string; spec?: string; type?: string; parentId?: string; budgetUSD?: number | null }): Promise<TaskNode> {
+  async createTask(input: { title: string; spec?: string; type?: string; parentId?: string; budgetUSD?: number | null }): Promise<TaskNode> {
     return this.log.transaction(async tx => {
       const parent = input.parentId ? await this.requireTask(tx, input.parentId) : null
       const task: TaskNode = {
-        id: input.id ?? randomUUID(),
+        id: randomUUID(),
         parentId: parent?.id ?? null,
         type: input.type ?? 'generic',
         title: input.title,
@@ -91,6 +91,12 @@ export class Kernel {
       // crash idempotency (D6): the checkpoint re-runs after append-before-commit — same ids, no-op
       const existing = state.splits.get(splitId)
       if (existing) return { splitId, childTaskId, gated: state.tasks.get(childTaskId)?.status === TASK_STATUS.awaiting_approval }
+
+      // childTaskId is attempt-independent (parentTaskId, stepId, toolCallId) but splitId carries
+      // the runToken — so a different attempt/split reusing this childTaskId slips past the check
+      // above. Reject it: re-appending task_created would poison the fold (duplicate subtree).
+      if (state.tasks.has(childTaskId))
+        throw new KernelError(KERNEL_ERROR_CODE.invalid_transition, `childTaskId '${childTaskId}' already exists from a different split`)
 
       if (parent.depth + 1 > input.maxDepth)
         throw new KernelError(KERNEL_ERROR_CODE.invalid_transition, `split exceeds max depth ${input.maxDepth}`)
