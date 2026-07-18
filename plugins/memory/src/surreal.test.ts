@@ -48,6 +48,7 @@ describe('SurrealMemory', () => {
     expect(nb.map(n => n.id)).toEqual(['b', 'c'])            // supersedes(1.0) ranked above relates_to(0.5)
     expect(nb[0]).toMatchObject({ id: 'b', via: 'supersedes' })
     expect((await m.neighbors('a', { kinds: ['supersedes'] })).map(n => n.id)).toEqual(['b'])
+    expect((await m.neighbors('b')).map(n => n.id)).toContain('a') // reverse: what supersedes b (spec RG4)
 
     // re-writing a note re-materializes its out-edges (delete-then-RELATE), no duplicates
     await m.applyWritten({ seq: 4, ts: '2026-07-18T01:00:00Z', note: note({ id: 'a', links: [{ id: 'b', kind: 'supersedes' }] }), author: { source: 'cli' } })

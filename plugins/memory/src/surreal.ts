@@ -8,7 +8,7 @@ import {
 import { rankNeighbors, type Edge } from './rank'
 
 // The read model's table names — single spelling for every builder call and RecordId.
-export enum Tb { Note = 'note', Meta = 'meta', Link = 'link' }
+enum Tb { Note = 'note', Meta = 'meta', Link = 'link' }
 
 type WrittenEvent = { seq: number; ts: string; note: MemoryNoteInput; author: MemoryAuthor }
 type DeletedEvent = { seq: number; ts: string; id: string; scope: string; author: MemoryAuthor }
@@ -96,13 +96,17 @@ export class SurrealMemory {
     await this.db.delete(Tb.Link).where(l => l.fromId.eq(e.id).or(l.toId.eq(e.id)).and(l.scope.eq(e.scope)))
   }
 
-  async neighbors(seed: string, opts: { kinds?: LinkKind[]; depth?: number; cap?: number; scope?: string } = {}): Promise<NeighborResult[]> {
+  async neighbors(seed: string, opts: { kinds?: LinkKind[]; depth?: number; scope?: string } = {}): Promise<NeighborResult[]> {
     const scope = opts.scope ?? 'project'
     // All in-scope edges, ranked in TS — fine for a hand-authored graph; a frontier-scoped
-    // fetch is a later optimisation (spec §4.2).
+    // fetch is a later optimisation (spec §4.2). Both directions (spec RG4): "what supersedes
+    // this note" must be reachable from the superseded seed, so each edge is added reversed too.
     const rows = await this.db.select(Tb.Link).where(l => l.scope.eq(scope))
-    const edges: Edge[] = rows.map(r => ({ from: r.fromId, to: r.toId, kind: r.kind, confidence: r.confidence }))
-    const ranked = rankNeighbors(edges, [seed], { depth: opts.depth, cap: opts.cap, kinds: opts.kinds })
+    const edges: Edge[] = rows.flatMap(r => [
+      { from: r.fromId, to: r.toId, kind: r.kind, confidence: r.confidence },
+      { from: r.toId, to: r.fromId, kind: r.kind, confidence: r.confidence },
+    ])
+    const ranked = rankNeighbors(edges, [seed], { depth: opts.depth, kinds: opts.kinds })
     // join title/summary from the note docs (cheap: small result set)
     const out: NeighborResult[] = []
     for (const n of ranked) {

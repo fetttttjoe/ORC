@@ -12,14 +12,16 @@ const SearchInput = z.object({
   query: z.string(), category: z.string().optional(), tag: z.string().optional(),
   detail_level: DetailLevel, limit: z.number().int().positive().optional(), budget: Budget,
 })
-const ReadInput = z.object({ id: z.string(), scope: z.string().optional(), detail_level: DetailLevel, budget: Budget })
+const ReadInput = z.object({ id: z.string(), scope: z.string().optional(), budget: Budget })
 const NeighborsInput = z.object({
-  seed: z.string(), kinds: z.array(LinkKind).optional(),
+  seed: z.string(), kinds: z.array(LinkKind).optional(), scope: z.string().optional(),
   depth: z.number().int().positive().optional(), budget: Budget,
 })
 
+// advertised JSON schemas mirror the zod parsers exactly, so the model can self-correct.
 const detailLevelSchema = { type: 'string', enum: ['minimal', 'standard'], description: 'minimal = top 5 + omitted count' }
-const budgetSchema = { type: 'number', description: 'approx token budget for the result (default 1500)' }
+const budgetSchema = { type: 'integer', minimum: 1, description: 'approx token budget for the result (default 1500)' }
+const idSchema = { type: 'string', pattern: '^[a-z0-9][a-z0-9-]*$' }
 
 // Injected as ResolvedTool[] via the same channel MCP tools use. Author is bound per step.
 export function memoryTools(store: MemoryStore, author: MemoryAuthor): ResolvedTool[] {
@@ -30,8 +32,9 @@ export function memoryTools(store: MemoryStore, author: MemoryAuthor): ResolvedT
       inputSchema: {
         type: 'object', required: ['id', 'title'],
         properties: {
-          id: { type: 'string', description: 'stable slug ^[a-z0-9][a-z0-9-]*$' },
-          title: { type: 'string' }, summary: { type: 'string' }, body: { type: 'string' },
+          id: { ...idSchema, description: 'stable slug' },
+          title: { type: 'string', minLength: 1, maxLength: 200 },
+          summary: { type: 'string', maxLength: 500 }, body: { type: 'string' },
           categories: { type: 'array', items: { type: 'string' } },
           tags: { type: 'array', items: { type: 'string' } },
           links: {
@@ -39,7 +42,7 @@ export function memoryTools(store: MemoryStore, author: MemoryAuthor): ResolvedT
             items: {
               type: 'object', required: ['id'],
               properties: {
-                id: { type: 'string', description: 'target note id' },
+                id: { ...idSchema, description: 'target note id' },
                 kind: { type: 'string', enum: [...LINK_KINDS], description: 'relationship kind (default relates_to)' },
                 confidence: { type: 'number', minimum: 0, maximum: 1 },
               },
@@ -47,7 +50,7 @@ export function memoryTools(store: MemoryStore, author: MemoryAuthor): ResolvedT
           },
           paths: { type: 'array', items: { type: 'string' }, description: 'code paths this note refers to' },
           rules: { type: 'array', items: { type: 'string' } },
-          scope: { type: 'string' },
+          scope: idSchema,
         },
       },
       execute: async input => { try { const n = await store.write(MemoryNoteInput.parse(input), author); return ok({ id: n.id, revision: n.revision }) } catch (e) { return err(e) } },
@@ -59,7 +62,7 @@ export function memoryTools(store: MemoryStore, author: MemoryAuthor): ResolvedT
         type: 'object', required: ['query'],
         properties: {
           query: { type: 'string' }, category: { type: 'string' }, tag: { type: 'string' },
-          detail_level: detailLevelSchema, limit: { type: 'number' }, budget: budgetSchema,
+          detail_level: detailLevelSchema, limit: { type: 'integer', minimum: 1 }, budget: budgetSchema,
         },
       },
       execute: async input => {
@@ -79,15 +82,16 @@ export function memoryTools(store: MemoryStore, author: MemoryAuthor): ResolvedT
       description: 'Read one project knowledge note in full by id.',
       inputSchema: {
         type: 'object', required: ['id'],
-        properties: { id: { type: 'string' }, scope: { type: 'string' }, detail_level: detailLevelSchema, budget: budgetSchema },
+        properties: { id: idSchema, scope: idSchema, budget: budgetSchema },
       },
       execute: async input => {
         try {
           const q = ReadInput.parse(input)
           const n = await store.get(q.id, q.scope)
           if (!n) return ok({ note: null })
-          if (q.detail_level === 'minimal' && approxTokens(n.body) > q.budget)
-            return ok({ note: { ...n, body: n.body.slice(0, q.budget * 4) }, truncated: true, next: 'memory_read with detail_level standard for the full body' })
+          // every pull tool honors its budget (spec RG5) — a huge body never floods the context.
+          if (approxTokens(n.body) > q.budget)
+            return ok({ note: { ...n, body: n.body.slice(0, q.budget * 4) }, truncated: true, next: 'memory_read with a larger budget for the full body' })
           return ok({ note: n, truncated: false })
         } catch (e) { return err(e) }
       },
@@ -98,16 +102,17 @@ export function memoryTools(store: MemoryStore, author: MemoryAuthor): ResolvedT
       inputSchema: {
         type: 'object', required: ['seed'],
         properties: {
-          seed: { type: 'string', description: 'note id to traverse from' },
+          seed: { ...idSchema, description: 'note id to traverse from' },
           kinds: { type: 'array', items: { type: 'string', enum: [...LINK_KINDS] }, description: 'only follow these link kinds' },
-          depth: { type: 'number', description: 'max hops (default 2)' },
+          depth: { type: 'integer', minimum: 1, description: 'max hops (default 2)' },
+          scope: idSchema,
           budget: budgetSchema,
         },
       },
       execute: async input => {
         try {
           const q = NeighborsInput.parse(input)
-          const ranked = await store.neighbors(q.seed, { kinds: q.kinds, depth: q.depth })
+          const ranked = await store.neighbors(q.seed, { kinds: q.kinds, depth: q.depth, scope: q.scope })
           const r = applyBudget(ranked, n => n.title + n.summary, { limit: 20, budget: q.budget })
           return ok({
             neighbors: r.items, truncated: r.truncated, omitted: r.omitted,
