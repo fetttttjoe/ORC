@@ -62,6 +62,21 @@ async function callModel(model: LanguageModel, messages: ModelMessage[], tools: 
   }
 }
 
+// A signal batched alongside join_splits is deferred, not executed — join_splits wins the
+// turn (spec: one suspension point per turn). This still answers the signal's tool_use id,
+// mirroring the malformed-signal precedent above (every call id in the turn needs a result).
+function notExecutedSignalResult(call: { toolCallId: string; toolName: string }) {
+  return {
+    type: 'tool-result' as const,
+    toolCallId: call.toolCallId,
+    toolName: call.toolName,
+    output: {
+      type: 'json' as const,
+      value: { error: 'not executed: signal cannot be combined with join_splits — the join ran; call signal again after reviewing its results' },
+    },
+  }
+}
+
 function buildPrompt(ctx: ExecutorContext<LanguageModel>): string {
   const skills = ctx.skills
     .map(s => `# Skill: ${s.name}\n${s.body}`)
@@ -204,14 +219,23 @@ export function apiLoopExecutor(): AgentExecutor<LanguageModel> {
           yield { type: UNIFIED_EVENT_TYPE.tool_result, toolCallId: joinCall.toolCallId, toolName: TOOL_NAME.join_splits, output: { splits: results }, isError: false }
           messages.push({
             role: 'tool',
-            content: [{ type: 'tool-result', toolCallId: joinCall.toolCallId, toolName: TOOL_NAME.join_splits, output: { type: 'json', value: { splits: results } } }],
+            content: [
+              { type: 'tool-result', toolCallId: joinCall.toolCallId, toolName: TOOL_NAME.join_splits, output: { type: 'json', value: { splits: results } } },
+              // a batched signal in the SAME turn as join_splits must still be answered here —
+              // its tool_use was already pushed via responseMessages above, and an unresolved
+              // tool_use makes the next generateText request rejected (missing tool result)
+              ...(signalCall ? [notExecutedSignalResult(signalCall)] : []),
+            ],
           } as ModelMessage)
           continue
         }
         if (joinCall && parsedJoin && !parsedJoin.success) {
           messages.push({
             role: 'tool',
-            content: [{ type: 'tool-result', toolCallId: joinCall.toolCallId, toolName: TOOL_NAME.join_splits, output: { type: 'json', value: { error: `invalid join_splits input: ${parsedJoin.error.message}` } } }],
+            content: [
+              { type: 'tool-result', toolCallId: joinCall.toolCallId, toolName: TOOL_NAME.join_splits, output: { type: 'json', value: { error: `invalid join_splits input: ${parsedJoin.error.message}` } } },
+              ...(signalCall ? [notExecutedSignalResult(signalCall)] : []),
+            ],
           } as ModelMessage)
           continue
         }

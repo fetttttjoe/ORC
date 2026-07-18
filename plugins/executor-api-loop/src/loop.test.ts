@@ -39,6 +39,22 @@ async function drain(it: AsyncIterable<UnifiedEvent>): Promise<UnifiedEvent[]> {
   return out
 }
 
+// A real provider 400s a generateText call if any prior assistant tool-call id lacks a
+// matching tool-result — every id that appears as a 'tool-call' part must also appear as a
+// 'tool-result' part somewhere in the prompt built so far.
+function unansweredToolCallIds(prompt: unknown): string[] {
+  const messages = prompt as Array<{ content?: Array<{ type: string; toolCallId?: string }> }>
+  const called = new Set<string>()
+  const answered = new Set<string>()
+  for (const m of messages) {
+    for (const part of m.content ?? []) {
+      if (part.type === 'tool-call' && part.toolCallId) called.add(part.toolCallId)
+      if (part.type === 'tool-result' && part.toolCallId) answered.add(part.toolCallId)
+    }
+  }
+  return [...called].filter(id => !answered.has(id))
+}
+
 // Build mock models per scenario. See the step preamble: construct with the installed
 // 'ai/test' mock class; each doGenerate call pops the next scripted response.
 // scriptModel(responses: Array<{ text?: string; toolCalls?: Array<{toolCallId,toolName,input}> }>): LanguageModel
@@ -225,5 +241,47 @@ describe('api-loop executor', () => {
     expect(events.at(-1)?.type).toBe('done')
     // the model's second turn saw the split results in its tool message
     expect(JSON.stringify(model.doGenerateCalls[1]!.prompt)).toContain('child ok')
+  })
+
+  it('a valid signal batched with a valid join_splits defers the signal instead of dropping it', async () => {
+    const captured: EventDraft[] = []
+    // turn 1: model batches signal + join_splits together (premature signal); turn 2: it re-signals
+    const model = scriptModel([
+      { toolCalls: [
+        { toolCallId: 'sig1', toolName: 'signal', input: { outcome: 'success', summary: 'premature' } },
+        { toolCallId: 'j1', toolName: 'join_splits', input: { splitIds: ['sp1'] } },
+      ] },
+      { toolCalls: [{ toolCallId: 'sig2', toolName: 'signal', input: { outcome: 'success', summary: 'joined for real' } }] },
+    ])
+    const gen = apiLoopExecutor().startTurn(ctx(model, captured))
+    const events: UnifiedEvent[] = []
+    let resume: SplitResult[] | undefined
+    while (true) {
+      const { value, done } = await gen.next(resume)
+      resume = undefined
+      if (done) break
+      events.push(value)
+      if (value.type === 'gate') resume = [{ splitId: 'sp1', childTaskId: 'c1', outcome: 'done', summary: 'child ok', notes: [] }]
+    }
+    // must NOT die with provider_error (the bug: the batched signal's tool_use went unanswered,
+    // so the next generateText call would be rejected for a missing tool result)
+    expect(events.some(e => e.type === 'error')).toBe(false)
+    expect(events.at(-1)?.type).toBe('done')
+    expect(unansweredToolCallIds(model.doGenerateCalls[1]!.prompt)).toEqual([])
+  })
+
+  it('a valid signal batched with an invalid join_splits input also answers every tool_use id', async () => {
+    const captured: EventDraft[] = []
+    const model = scriptModel([
+      { toolCalls: [
+        { toolCallId: 'sig1', toolName: 'signal', input: { outcome: 'success', summary: 'premature' } },
+        { toolCallId: 'j1', toolName: 'join_splits', input: { splitIds: 'not-an-array' } }, // invalid
+      ] },
+      { toolCalls: [{ toolCallId: 'sig2', toolName: 'signal', input: { outcome: 'success', summary: 'ok now' } }] },
+    ])
+    const events = await drain(apiLoopExecutor().startTurn(ctx(model, captured)))
+    expect(events.some(e => e.type === 'error')).toBe(false)
+    expect(events.at(-1)?.type).toBe('done')
+    expect(unansweredToolCallIds(model.doGenerateCalls[1]!.prompt)).toEqual([])
   })
 })
