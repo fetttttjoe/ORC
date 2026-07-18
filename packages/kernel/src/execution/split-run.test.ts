@@ -10,7 +10,7 @@ import {
 import { draftFixture, stepFixture } from '@orc/contracts/fixtures'
 import { createMemory } from '@orc/memory'
 import { createTestSurreal } from '@orc/memory/test-helpers'
-import { EventLog } from '../eventlog'
+import { openStorage } from '../storage'
 import { Kernel } from '../kernel'
 import { createTestDb, fakeProvider, testConfig, TEST_PROJECT_ID } from '../test-helpers'
 import { createDbosPort } from './dbos-port'
@@ -127,7 +127,8 @@ async function bringUp(policy: 'auto' | 'manual', executor: AgentExecutor<unknow
   const pg = await createTestDb()
   const ts = await createTestSurreal()
   const vaultDir = mkdtempSync(path.join(tmpdir(), 'orc-split-e2e-'))
-  const log = await EventLog.open(pg.url, { projectId: TEST_PROJECT_ID })
+  const storage = await openStorage(pg.url, { projectId: TEST_PROJECT_ID })
+  const log = storage.events
   const kernel = new Kernel(log)
   const config = testConfig(pg.url, {
     vaultDir,
@@ -138,7 +139,7 @@ async function bringUp(policy: 'auto' | 'manual', executor: AgentExecutor<unknow
   const memory = await createMemory({ log, config })
   await memory.projector.start()
   const port = await createDbosPort({
-    log, config,
+    storage, config,
     providers: new Map([['fake', fakeProvider]]),
     executors: new Map([['split-fake', executor]]),
     stepTools: p => [

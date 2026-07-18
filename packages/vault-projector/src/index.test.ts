@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, spyOn } from 'bun:test'
 import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import { Kernel, EventLog } from '@orc/kernel'
+import { Kernel, openStorage } from '@orc/kernel'
 import { createTestDb, TEST_PROJECT_ID } from '@orc/kernel/test-helpers'
 import { draftFixture, stepFixture } from '@orc/contracts/fixtures'
 import { createVaultProjector } from './index'
@@ -15,7 +15,7 @@ describe('createVaultProjector.renderAll', () => {
   it('renders a task tree from the log', async () => {
     const db = await createTestDb(); dbs.push(db)
     const vaultDir = mkdtempSync(path.join(tmpdir(), 'orc-vp-')); dirs.push(vaultDir)
-    const log = await EventLog.open(db.url, { projectId: TEST_PROJECT_ID })
+    const log = (await openStorage(db.url, { projectId: TEST_PROJECT_ID })).events
     const kernel = new Kernel(log)
     const t = await kernel.createTask({ title: 'demo', spec: 'do it' })
     await kernel.proposePlan(t.id, draftFixture([stepFixture({ id: 's1', modelRef: 'anthropic/claude-sonnet-5' })]))
@@ -33,7 +33,7 @@ describe('createVaultProjector.renderAll', () => {
   it('ignores project-scoped memory events (null taskId) — byTask is never called for the null taskId', async () => {
     const db = await createTestDb(); dbs.push(db)
     const vaultDir = mkdtempSync(path.join(tmpdir(), 'orc-vp-')); dirs.push(vaultDir)
-    const log = await EventLog.open(db.url, { projectId: TEST_PROJECT_ID })
+    const log = (await openStorage(db.url, { projectId: TEST_PROJECT_ID })).events
     const kernel = new Kernel(log)
     const t = await kernel.createTask({ title: 'demo', spec: 'do it' })
     await log.append({
@@ -65,7 +65,7 @@ describe('createVaultProjector.renderAll', () => {
   it('never scans the whole log — renderAll and live renders use scoped queries only', async () => {
     const db = await createTestDb(); dbs.push(db)
     const vaultDir = mkdtempSync(path.join(tmpdir(), 'orc-vp-')); dirs.push(vaultDir)
-    const log = await EventLog.open(db.url, { projectId: TEST_PROJECT_ID })
+    const log = (await openStorage(db.url, { projectId: TEST_PROJECT_ID })).events
     const kernel = new Kernel(log)
     const t = await kernel.createTask({ title: 'scoped', spec: 'x' })
     const allSpy = spyOn(log, 'all')
@@ -80,7 +80,7 @@ describe('createVaultProjector.renderAll', () => {
   it('start() subscribes and skips memory events (null taskId) while still rendering real task updates', async () => {
     const db = await createTestDb(); dbs.push(db)
     const vaultDir = mkdtempSync(path.join(tmpdir(), 'orc-vp-')); dirs.push(vaultDir)
-    const log = await EventLog.open(db.url, { projectId: TEST_PROJECT_ID })
+    const log = (await openStorage(db.url, { projectId: TEST_PROJECT_ID })).events
     const kernel = new Kernel(log)
 
     const projector = createVaultProjector({ log, config: { vaultDir } })

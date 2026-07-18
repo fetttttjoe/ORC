@@ -24,7 +24,12 @@ graph TD
   end
 
   subgraph KERNEL ["packages/kernel — policy-free core"]
-    LOG["eventlog.ts<br/>append/subscribe + operation journal"]
+    subgraph STORAGE_SVC ["storage/ — the Postgres service layer"]
+      PGSTORE["postgres.ts<br/>PostgresStore: pool, project lock, redaction"]
+      LOG["event-log.ts<br/>EventLog: append/subscribe/query"]
+      JOURNAL["operation-journal.ts<br/>OperationJournal: before/after nodes"]
+      MIG["migrate.ts<br/>explicit migrate + assertMigrated"]
+    end
     REDACT["redact.ts<br/>storage-boundary normalizer"]
     FOLD["projections.ts<br/>fold, applyOperationEvent"]
     KAPI["kernel.ts<br/>task/plan API"]
@@ -64,6 +69,7 @@ graph TD
 
   KAPI --> LOG
   PORT --> LOG
+  PORT --> JOURNAL
   PORT --> ART
   PORT --> ROUTER
   PORT --> APILOOP
@@ -73,8 +79,12 @@ graph TD
   HOST --> TRUST
   HOST --> SKILLS
 
-  LOG --> REDACT
-  LOG --> PG
+  LOG --> PGSTORE
+  JOURNAL --> PGSTORE
+  JOURNAL --> LOG
+  PGSTORE --> REDACT
+  PGSTORE --> MIG
+  PGSTORE --> PG
   PORT --> DBOSDB
   ROUTER --> LOG
   VP --> LOG
@@ -96,7 +106,18 @@ graph TD
 | Cylinder | Storage. **Postgres events is truth**; everything else is index or projection |
 | Solid arrow | Runtime call / data flow direction |
 | Dashed arrow | Compile-time dependency only (imports types/schemas, never calls back) |
-| Subgraph box | One workspace package; arrows crossing a box are its public surface |
+| Subgraph box | One workspace package (or, nested, the storage service layer) |
+
+**The storage service layer** (`packages/kernel/src/storage/`) is the single owner of every
+Postgres access. `openStorage(url, { projectId })` returns a `Storage` facade with two
+services — `events` (the `EventLog`: append / subscribe / query) and `operations` (the
+`OperationJournal`: durable before/after nodes). Both sit on one `PostgresStore`, which owns
+the connection pool, the per-project advisory lock, and secret redaction. No other module
+opens a connection, takes the lock, or migrates. Consumers that only read/write events (the
+kernel, memory store, vault projector) take the `EventLog`; the DBOS port, the one consumer
+that needs both, takes the whole `Storage`. Migration is an explicit step (`migrateDatabase`
+in test/CLI setup) — `openStorage` only *verifies* the schema and fails with guidance if the
+database is behind, never mutating it as an open-time side effect.
 
 Dependency rule (enforced by convention, `docs/EXTENDING.md` invariant 3): **contracts import
 nothing**, kernel imports contracts, plugins import contracts (never the kernel's internals
@@ -139,8 +160,11 @@ journal nodes and re-attempts unresolved ones as explicitly at-least-once (attem
 | Component | Owns | Explicitly does NOT own |
 |---|---|---|
 | `contracts` | Zod schemas, event kinds + typed payloads, executor/port/store interfaces, the workspace containment guard | Any I/O, any storage, any policy |
-| `kernel/eventlog` | Project-bound append (validate → redact → insert → notify, one locked transaction), idempotency keys, lossless subscribe with reconnect, the operation journal (begin/complete/fail/rebuild) | Deciding *what* to append (callers do), projections |
-| `kernel/redact` | The single storage-boundary normalizer: NUL strip + secret redaction | Being called anywhere except append/journal storage |
+| `kernel/storage/postgres` | The one Postgres owner: pool, project-scoped advisory lock (`withProjectLock`), redaction wiring, schema verification | Deciding *what* to store; the DBOS system database |
+| `kernel/storage/event-log` | Project-bound append (jsonb-shape → redact → validate → insert → notify, one locked transaction), idempotency keys, lossless subscribe with reconnect, scoped queries + `countAfter` | Deciding *what* to append (callers do), projections |
+| `kernel/storage/operation-journal` | Durable before/after nodes (begin/complete/fail), rebuild-from-log; transitions append through the `EventLog` in the same locked transaction | Model/tool specifics; the checkpoint machinery (that's the port) |
+| `kernel/storage/migrate` | Explicit `migrateDatabase`; `assertMigrated` fails loudly when a database is behind | Migrating implicitly at open time |
+| `kernel/redact` | The single storage-boundary normalizer: NUL strip + secret redaction (keys and values) | Being called anywhere except append/journal storage |
 | `kernel/projections` | `fold(events) → State`, `applyOperationEvent` (shared by live journal and rebuild), crash dedup | Persisting anything |
 | `kernel/kernel.ts` | Task/plan lifecycle API (create, propose, approve, cancel semantics) over the log | Execution |
 | `kernel/dbos-port` | Durable run/step workflows, `ctx.checkpoint` and `ctx.operation` wrappers, retry policy, queue partitioning, cancellation cascade, output receipt commit | Model/tool specifics (executor's job), plan authoring |

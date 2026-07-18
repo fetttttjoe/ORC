@@ -1,6 +1,7 @@
 import { Client } from 'pg'
 import type { ModelProvider } from '@orc/contracts'
 import { loadConfig, requireProject, type ProjectConfig } from './config'
+import { migrateDatabase } from './storage/migrate'
 
 const ADMIN_URL = process.env.ORC_DATABASE_URL ?? 'postgresql://postgres:orc@localhost:5433/orc'
 
@@ -21,14 +22,16 @@ export function testConfig(databaseUrl: string, overrides: Partial<ProjectConfig
   })
 }
 
-// ponytail: test-only helper; ephemeral DB per test file, dropped after
-export async function createTestDb(): Promise<{ url: string; drop: () => Promise<void> }> {
+// ponytail: test-only helper; ephemeral DB per test file, dropped after.
+// migrate defaults on; the migration test opts out to stage a partial schema itself.
+export async function createTestDb(opts: { migrate?: boolean } = {}): Promise<{ url: string; drop: () => Promise<void> }> {
   const admin = new Client({ connectionString: ADMIN_URL })
   await admin.connect()
   const name = `orc_test_${Math.random().toString(36).slice(2, 10)}`
   await admin.query(`CREATE DATABASE ${name}`)
   const url = new URL(ADMIN_URL)
   url.pathname = `/${name}`
+  if (opts.migrate !== false) await migrateDatabase(url.toString()) // schema setup is explicit — open() only verifies
   return {
     url: url.toString(),
     drop: async () => {

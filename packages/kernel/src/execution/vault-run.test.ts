@@ -7,7 +7,7 @@ import {
   type AgentExecutor, type EventDraft, type ExecutorContext, type SplitResult, type UnifiedEvent,
 } from '@orc/contracts'
 import { draftFixture, stepFixture } from '@orc/contracts/fixtures'
-import { EventLog } from '../eventlog'
+import { openStorage, type EventLog, type Storage } from '../storage'
 import { Kernel } from '../kernel'
 import { createTestDb, fakeProvider, testConfig, TEST_PROJECT_ID } from '../test-helpers'
 import { createDbosPort, type DbosPort } from './dbos-port'
@@ -41,17 +41,19 @@ describe('vault projection over a real run (e2e)', () => {
   let port: DbosPort
   let projector: VaultProjector
   let log: EventLog
+  let storage: Storage
   let vaultDir: string
   let teardown: () => Promise<void>
 
   beforeAll(async () => {
     const db = await createTestDb()
     vaultDir = mkdtempSync(path.join(tmpdir(), 'orc-e2e-'))
-    log = await EventLog.open(db.url, { projectId: TEST_PROJECT_ID })
+    storage = await openStorage(db.url, { projectId: TEST_PROJECT_ID })
+    log = storage.events
     kernel = new Kernel(log)
     const config = testConfig(db.url, { vaultDir })
     port = await createDbosPort({
-      log, config,
+      storage, config,
       providers: new Map([['fake', fakeProvider]]),
       executors: new Map([['api-loop', fakeExecutor()]]),
     })

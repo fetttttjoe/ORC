@@ -8,7 +8,7 @@ import {
   type FailureClass, type LoadedSkill, type ModelProvider, type OperationCheckpoint, type Plan,
   type ResolvedTool, type RunHandle, type RunOutcome, type Signal, type SplitResult, type ToolSource,
 } from '@orc/contracts'
-import { EventLog } from '../eventlog'
+import type { Storage } from '../storage'
 import { verifyArtifacts } from './artifacts'
 import { fold, completedStepIds, nextAttempts, subtreeTaskIds, subtreeUsage, type State } from '../projections'
 import { KERNEL_ERROR_CODE, KernelError } from '../errors'
@@ -43,7 +43,7 @@ const workflowIdOrThrow = (): string => {
 }
 
 export async function createDbosPort(opts: {
-  log: EventLog
+  storage: Storage
   config: ProjectConfig
   providers: Map<string, ModelProvider<unknown>>
   executors: Map<string, AgentExecutor<unknown>>
@@ -54,7 +54,8 @@ export async function createDbosPort(opts: {
     modelRef: string; maxIterations: number
   }) => ResolvedTool[]
 }): Promise<DbosPort> {
-  const { log, config, providers, executors, skills, tools, stepTools } = opts
+  const { config, providers, executors, skills, tools, stepTools } = opts
+  const { events: log, operations: journal } = opts.storage
 
   const foldState = async (taskId: string): Promise<State> => fold(await log.byTask(taskId))
 
@@ -91,15 +92,15 @@ export async function createDbosPort(opts: {
       DBOS.runStep(
         async () => {
           const context = { taskId, stepId, runToken }
-          const begin = await log.beginOperation(context, spec)
+          const begin = await journal.beginOperation(context, spec)
           // journal values are plain JSON — parse hands back the caller's shape
           if (begin.reused) return JSON.parse(JSON.stringify(begin.value ?? null))
           try {
             const result = await fn()
-            await log.completeOperation(context, spec, begin.attempt, result, toEvents ? toEvents(result) : [])
+            await journal.completeOperation(context, spec, begin.attempt, result, toEvents ? toEvents(result) : [])
             return result
           } catch (err) {
-            await log.failOperation(context, spec, begin.attempt, {
+            await journal.failOperation(context, spec, begin.attempt, {
               message: err instanceof Error ? err.message : String(err),
             })
             throw err

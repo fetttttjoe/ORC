@@ -2,7 +2,7 @@ import { afterAll, describe, expect, it } from 'bun:test'
 import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import { EventLog } from '@orc/kernel'
+import { openStorage } from '@orc/kernel'
 import { createTestDb, testConfig, TEST_PROJECT_ID } from '@orc/kernel/test-helpers'
 import { createMemory } from './index'
 import { createTestSurreal } from './test-helpers'
@@ -25,7 +25,7 @@ describe('project isolation (SurrealDB native database boundary)', () => {
         projectDbUrl: ts.url, projectDbNamespace: ts.ns, projectDbName: ts.db,
         projectDbUser: ts.username, projectDbPassword: ts.password,
       })
-      const log = await EventLog.open(pg.url, { projectId })
+      const log = (await openStorage(pg.url, { projectId })).events
       const memory = await createMemory({ log, config })
       return { log, memory }
     }

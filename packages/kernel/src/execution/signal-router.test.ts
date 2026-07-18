@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test'
 import { EVENT_KIND, TASK_STATUS, type EventRecord, type SplitResult, type TaskNode } from '@orc/contracts'
-import { EventLog } from '../eventlog'
+import { openStorage, type EventLog } from '../storage'
 import { createTestDb, TEST_PROJECT_ID } from '../test-helpers'
 import { composeSplitResult, createSignalRouter } from './signal-router'
 import { eventFixture } from '@orc/contracts/fixtures'
@@ -60,7 +60,7 @@ describe('createSignalRouter (integration, real EventLog)', () => {
 
   beforeEach(async () => {
     db = await createTestDb()
-    log = await EventLog.open(db.url, { projectId: TEST_PROJECT_ID })
+    log = (await openStorage(db.url, { projectId: TEST_PROJECT_ID })).events
     router = null
   })
   afterEach(async () => {

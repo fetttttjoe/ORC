@@ -68,7 +68,7 @@ describe('orc CLI', () => {
   it('replay reconstructs operation state at a sequence and appends nothing', async () => {
     const db = await createTestDb()
     dbs.push(db)
-    const { kernel, log } = await openKernel(db.url, { projectId: TEST_PROJECT_ID })
+    const { kernel, log, storage } = await openKernel(db.url, { projectId: TEST_PROJECT_ID })
     const lines: string[] = []
     spyOn(console, 'log').mockImplementation((...a: unknown[]) => { lines.push(a.join(' ')) })
     const run = async (...args: string[]) => buildProgram(kernel).parseAsync(args, { from: 'user' })
@@ -76,9 +76,9 @@ describe('orc CLI', () => {
     const t = await kernel.createTask({ title: 'audit me' })
     const opContext = { taskId: t.id, stepId: 's1', runToken: `step:${t.id}:s1:a1` }
     const spec: OperationSpec = { operationId: `${opContext.runToken}:model:1`, kind: 'model', name: 'fake/m', before: { q: 1 } }
-    await log.beginOperation(opContext, spec)
+    await storage.operations.beginOperation(opContext, spec)
     const startSeq = (await log.byTask(t.id)).at(-1)!.seq
-    await log.completeOperation(opContext, spec, 1, { text: 'answer' })
+    await storage.operations.completeOperation(opContext, spec, 1, { text: 'answer' })
     const countBefore = (await log.all()).length
 
     lines.length = 0

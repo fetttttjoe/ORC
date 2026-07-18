@@ -11,7 +11,7 @@ import {
   type SplitResult, type UnifiedEvent,
 } from '@orc/contracts'
 import { draftFixture, stepFixture } from '@orc/contracts/fixtures'
-import { EventLog } from '../eventlog'
+import { openStorage } from '../storage'
 import { Kernel } from '../kernel'
 import { createTestDb, fakeProvider, testConfig, TEST_PROJECT_ID } from '../test-helpers'
 import { createDbosPort, type DbosPort } from './dbos-port'
@@ -78,11 +78,12 @@ describe('DBOS execution port (integration)', () => {
   beforeAll(async () => {
     const db = await createTestDb()
     dbUrl = db.url
-    const log = await EventLog.open(db.url, { projectId: TEST_PROJECT_ID })
+    const storage = await openStorage(db.url, { projectId: TEST_PROJECT_ID })
+    const log = storage.events
     kernel = new Kernel(log)
     const config = testConfig(db.url)
     port = await createDbosPort({
-      log, config,
+      storage, config,
       providers: new Map([['fake', fakeProvider]]),
       executors: new Map([['api-loop', fakeExecutor()]]),
       skills: {

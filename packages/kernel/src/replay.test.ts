@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'bun:test'
 import { EVENT_KIND, type OperationSpec, type PlanDraft } from '@orc/contracts'
 import { draftFixture } from '@orc/contracts/fixtures'
-import { EventLog } from './eventlog'
+import { openStorage } from './storage'
 import { Kernel } from './kernel'
 import { fold } from './projections'
 import { createTestDb, TEST_PROJECT_ID } from './test-helpers'
@@ -12,7 +12,7 @@ describe('replay guarantee (spec §10)', () => {
   it('a reopened kernel folds to the identical state ("kill -9" scenario)', async () => {
     const db = await createTestDb()
     try {
-      const log1 = await EventLog.open(db.url, { projectId: TEST_PROJECT_ID })
+      const log1 = (await openStorage(db.url, { projectId: TEST_PROJECT_ID })).events
       const k1 = new Kernel(log1)
       const t = await k1.createTask({ title: 'parent', spec: 'root task' })
       const child = await k1.createTask({ title: 'child', parentId: t.id })
@@ -22,7 +22,7 @@ describe('replay guarantee (spec §10)', () => {
       const before = await k1.state()
       await log1.close() // simulated process death — nothing held in memory matters
 
-      const k2 = new Kernel(await EventLog.open(db.url, { projectId: TEST_PROJECT_ID }))
+      const k2 = new Kernel((await openStorage(db.url, { projectId: TEST_PROJECT_ID })).events)
       expect(await k2.state()).toEqual(before)
       expect((await k2.getTask(t.id))?.status).toBe('approved')
       expect((await k2.getTask(child.id))?.status).toBe('draft')
@@ -34,7 +34,8 @@ describe('replay guarantee (spec §10)', () => {
   it('the event trail is the complete story, in order', async () => {
     const db = await createTestDb()
     try {
-      const log = await EventLog.open(db.url, { projectId: TEST_PROJECT_ID })
+      const storage = await openStorage(db.url, { projectId: TEST_PROJECT_ID })
+      const log = storage.events
       const k = new Kernel(log)
       const t = await k.createTask({ title: 'x' })
       await k.proposePlan(t.id, draft())
@@ -54,7 +55,8 @@ describe('replay guarantee (spec §10)', () => {
   it('fold twice over the same log yields equal states (pure replay)', async () => {
     const db = await createTestDb()
     try {
-      const log = await EventLog.open(db.url, { projectId: TEST_PROJECT_ID })
+      const storage = await openStorage(db.url, { projectId: TEST_PROJECT_ID })
+      const log = storage.events
       const k = new Kernel(log)
       const t = await k.createTask({ title: 'x' })
       await k.proposePlan(t.id, draft())
@@ -67,7 +69,8 @@ describe('replay guarantee (spec §10)', () => {
   it('journal rows, folded state, replay-at-sequence, and reopen all agree on one history', async () => {
     const db = await createTestDb()
     try {
-      const log = await EventLog.open(db.url, { projectId: TEST_PROJECT_ID })
+      const storage = await openStorage(db.url, { projectId: TEST_PROJECT_ID })
+      const log = storage.events
       const k = new Kernel(log)
       const t = await k.createTask({ title: 'audited', spec: 'traced work' })
       await k.proposePlan(t.id, draft())
@@ -75,9 +78,9 @@ describe('replay guarantee (spec §10)', () => {
 
       const opContext = { taskId: t.id, stepId: 's1', runToken: `step:${t.id}:s1:a1` }
       const spec: OperationSpec = { operationId: `${opContext.runToken}:model:1`, kind: 'model', name: 'fake/m', before: { q: 1 } }
-      await log.beginOperation(opContext, spec)
+      await storage.operations.beginOperation(opContext, spec)
       const startedSeq = (await log.byTask(t.id)).at(-1)!.seq
-      await log.completeOperation(opContext, spec, 1, { text: 'result' })
+      await storage.operations.completeOperation(opContext, spec, 1, { text: 'result' })
       await log.append({
         taskId: t.id, stepId: 's1', runToken: opContext.runToken, kind: EVENT_KIND.artifact_produced,
         payload: { path: 'report.md', sha256: 'a'.repeat(64), size: 8 },
@@ -88,7 +91,7 @@ describe('replay guarantee (spec §10)', () => {
 
       // fold vs. durable journal row
       const foldedOp = state.operations.get(spec.operationId)
-      const [journalOp] = await log.operationsFor(t.id)
+      const [journalOp] = await storage.operations.operationsFor(t.id)
       expect(foldedOp).toEqual(journalOp)
       expect(foldedOp?.status).toBe('completed')
 
@@ -101,9 +104,10 @@ describe('replay guarantee (spec §10)', () => {
 
       // reopening loses nothing
       await log.close()
-      const reopened = await EventLog.open(db.url, { projectId: TEST_PROJECT_ID })
+      const reopenedStorage = await openStorage(db.url, { projectId: TEST_PROJECT_ID })
+      const reopened = reopenedStorage.events
       expect(fold(await reopened.byTask(t.id))).toEqual(state)
-      expect(await reopened.operationsFor(t.id)).toEqual([journalOp!])
+      expect(await reopenedStorage.operations.operationsFor(t.id)).toEqual([journalOp!])
       await reopened.close()
     } finally {
       await db.drop()

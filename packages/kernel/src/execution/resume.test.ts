@@ -5,7 +5,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { EVENT_KIND } from '@orc/contracts'
 import { draftFixture, stepFixture } from '@orc/contracts/fixtures'
-import { EventLog } from '../eventlog'
+import { openStorage } from '../storage'
 import { Kernel } from '../kernel'
 import { fold } from '../projections'
 import { createTestDb, TEST_PROJECT_ID } from '../test-helpers'
@@ -19,7 +19,8 @@ describe('kill -9 resume (spec §10/§11 — the crown jewel)', () => {
   it('a killed run resumes on restart; no double-billed iteration; replay identity holds', async () => {
     const db = await createTestDb()
     drop = db.drop
-    const log = await EventLog.open(db.url, { projectId: TEST_PROJECT_ID })
+    const storage = await openStorage(db.url, { projectId: TEST_PROJECT_ID })
+    const log = storage.events
     const kernel = new Kernel(log)
     const t = await kernel.createTask({ title: 'resume me', spec: 'survive kill -9' })
     await kernel.proposePlan(t.id, draftFixture([stepFixture({ title: 'slow', instructions: 'stall then finish' })]))
@@ -52,7 +53,7 @@ describe('kill -9 resume (spec §10/§11 — the crown jewel)', () => {
 
     // the interrupted operation is a single logical node: two start transitions, one final
     // completion, attempts=2 — never a blind gap, never a double effect.
-    const ops = await log.operationsFor(t.id)
+    const ops = await storage.operations.operationsFor(t.id)
     expect(ops).toHaveLength(1)
     expect(ops[0]!.status).toBe('completed')
     expect(ops[0]!.attempts).toBe(2)
@@ -64,7 +65,7 @@ describe('kill -9 resume (spec §10/§11 — the crown jewel)', () => {
     // replay identity (extends M1's guarantee to execution events)
     const events = await log.all()
     expect(fold(events)).toEqual(fold(events))
-    const reopened = await EventLog.open(db.url, { projectId: TEST_PROJECT_ID })
+    const reopened = (await openStorage(db.url, { projectId: TEST_PROJECT_ID })).events
     expect(fold(await reopened.all())).toEqual(state)
     await reopened.close()
     await log.close()

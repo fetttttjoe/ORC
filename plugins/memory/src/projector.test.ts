@@ -2,7 +2,7 @@ import { afterAll, describe, expect, it, spyOn } from 'bun:test'
 import { mkdtempSync, existsSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import { EventLog } from '@orc/kernel'
+import { openStorage } from '@orc/kernel'
 import { createTestDb, TEST_PROJECT_ID } from '@orc/kernel/test-helpers'
 import { SurrealMemory } from './surreal'
 import { createTestSurreal } from './test-helpers'
@@ -16,7 +16,7 @@ describe('memory projector', () => {
   it('applies written/deleted from the stream to SurrealDB + vault, and rebuilds from the log', async () => {
     const pg = await createTestDb(); drops.push(pg.drop)
     const ts = await createTestSurreal(); drops.push(ts.drop)
-    const log = await EventLog.open(pg.url, { projectId: TEST_PROJECT_ID })
+    const log = (await openStorage(pg.url, { projectId: TEST_PROJECT_ID })).events
     const surreal = await SurrealMemory.open(ts)
     const vaultDir = mkdtempSync(path.join(tmpdir(), 'vault-'))
     const proj = createMemoryProjector({ log, surreal, vaultDir })
@@ -40,7 +40,7 @@ describe('memory projector', () => {
   it('never scans the whole log — catch-up uses the scoped kind query', async () => {
     const pg = await createTestDb(); drops.push(pg.drop)
     const ts = await createTestSurreal(); drops.push(ts.drop)
-    const log = await EventLog.open(pg.url, { projectId: TEST_PROJECT_ID })
+    const log = (await openStorage(pg.url, { projectId: TEST_PROJECT_ID })).events
     const surreal = await SurrealMemory.open(ts)
     const vaultDir = mkdtempSync(path.join(tmpdir(), 'vault-'))
     await log.append({ taskId: null, stepId: null, runToken: null, kind: 'memory_written', payload: { note: noteInput, author: { source: 'cli' } } })

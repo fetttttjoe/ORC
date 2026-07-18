@@ -5,7 +5,7 @@ import { drizzle } from 'drizzle-orm/node-postgres'
 import type { TaskNode } from '@orc/contracts'
 import { EVENT_KIND } from '@orc/contracts'
 import { createTestDb, TEST_PROJECT_ID } from './test-helpers'
-import { EventLog } from './eventlog'
+import { openStorage, type EventLog } from './storage'
 
 const dbs: Array<{ drop: () => Promise<void> }> = []
 afterEach(async () => { for (const d of dbs.splice(0)) await d.drop() })
@@ -21,7 +21,7 @@ const sleep = (ms: number) => new Promise(r => setTimeout(r, ms))
 describe('EventLog.subscribe', () => {
   it('catches up from fromSeq then pushes new appends in order', async () => {
     const db = await createTestDb(); dbs.push(db)
-    const log = await EventLog.open(db.url, { projectId: TEST_PROJECT_ID })
+    const log = (await openStorage(db.url, { projectId: TEST_PROJECT_ID })).events
     await appendCreated(log, 'a')
     await appendCreated(log, 'b')
 
@@ -40,7 +40,7 @@ describe('EventLog.subscribe', () => {
 
   it('retries a failed handler from the same cursor — the event is not lost', async () => {
     const db = await createTestDb(); dbs.push(db)
-    const log = await EventLog.open(db.url, { projectId: TEST_PROJECT_ID })
+    const log = (await openStorage(db.url, { projectId: TEST_PROJECT_ID })).events
     const attempts: number[] = []
     let failedOnce = false
     const unsub = await log.subscribe({ fromSeq: 0 }, e => {
@@ -61,7 +61,7 @@ describe('EventLog.subscribe', () => {
 
   it('reconnects after the LISTEN backend dies and catches up without a gap', async () => {
     const db = await createTestDb(); dbs.push(db)
-    const log = await EventLog.open(db.url, { projectId: TEST_PROJECT_ID })
+    const log = (await openStorage(db.url, { projectId: TEST_PROJECT_ID })).events
     const seen: number[] = []
     const unsub = await log.subscribe({ fromSeq: 0 }, e => { seen.push(e.seq) })
     await appendCreated(log, 'a')
@@ -87,7 +87,7 @@ describe('EventLog.subscribe', () => {
 
   it('delivers nothing for a rolled-back transaction (commit-only)', async () => {
     const db = await createTestDb(); dbs.push(db)
-    const log = await EventLog.open(db.url, { projectId: TEST_PROJECT_ID })
+    const log = (await openStorage(db.url, { projectId: TEST_PROJECT_ID })).events
     const seen: number[] = []
     const unsub = await log.subscribe({ fromSeq: 0 }, e => { seen.push(e.seq) })
     await sleep(30)
