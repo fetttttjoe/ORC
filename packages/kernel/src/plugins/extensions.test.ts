@@ -48,11 +48,11 @@ describe('ExtensionHost', () => {
     const { api, registered } = fakeApi()
     const host = new ExtensionHost(api)
 
-    await host.load([file], [], root) // not trusted
+    await host.load([file], () => false, root) // not trusted
     expect(host.loaded).toEqual([])
     expect(warn).toHaveBeenCalled()
 
-    await host.load([file], [file], root) // trusted
+    await host.load([file], () => true, root) // trusted
     expect(host.loaded.map(l => l.manifest.id)).toEqual(['demo'])
     expect(registered).toEqual(['provider:p-v1'])
   })
@@ -66,7 +66,7 @@ describe('ExtensionHost', () => {
     writeFileSync(file, `export default { nope: true }\n`)
     const { api } = fakeApi()
     const host = new ExtensionHost(api)
-    await host.load([file], [file], root)
+    await host.load([file], () => true, root)
     expect(host.loaded).toEqual([])
     expect(warn).toHaveBeenCalled()
   })
@@ -76,7 +76,7 @@ describe('ExtensionHost', () => {
     const file = writeExt(root, 'v1')
     const { api, registered } = fakeApi()
     const host = new ExtensionHost(api)
-    await host.load([file], [file], root)
+    await host.load([file], () => true, root)
     expect(registered).toEqual(['provider:p-v1'])
 
     writeExt(root, 'v2') // edit dep.ts on disk
@@ -98,7 +98,7 @@ export default {
 }
 `)
     const host = new ExtensionHost(fakeApi().api)
-    await host.load([file], [file], root)
+    await host.load([file], () => true, root)
     await host.shutdown()
     expect(require('node:fs').readFileSync(path.join(root, 'out.txt'), 'utf8')).toBe('bye')
   })

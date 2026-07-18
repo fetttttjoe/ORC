@@ -132,6 +132,17 @@ describe('orc CLI', () => {
     ])
   })
 
+  it('propose --skill places the named skills in the template step', async () => {
+    const { run, lines } = await makeCli()
+    await run('new', 'documented task')
+    const taskId = lines[0]!
+    await run('propose', taskId, '--model', 'ollama/llama3', '--skill', 'documentation')
+    lines.length = 0
+    await run('plan', taskId)
+    const plan = JSON.parse(lines.join('\n'))
+    expect(plan.steps[0].skillRefs).toEqual(['documentation'])
+  })
+
   it('plan prints the plan as JSON', async () => {
     const { run, lines } = await makeCli()
     await run('new', 'x')

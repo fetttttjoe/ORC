@@ -5,7 +5,7 @@ import path from 'node:path'
 import type { ModelProvider } from '@orc/contracts'
 import { planFixture, stepFixture } from '@orc/contracts/fixtures'
 import { loadConfig } from '../config'
-import { grantTrust } from './trust'
+import { grantExtensionTrust, grantMcpTrust } from './trust'
 import { createPluginHost } from './host'
 
 let dirs: string[] = []
@@ -38,7 +38,7 @@ describe('createPluginHost / refValidator', () => {
   it('valid plan with known refs → no errors', async () => {
     const d = project({ mcpServers: { files: { command: 'bun' } } })
     writeSkill(d, 'good-skill')
-    grantTrust('mcp', 'files', d)
+    grantMcpTrust('files', { command: 'bun' }, d)
     const host = await makeHost(d)
     const plan = planFixture({ steps: [stepFixture({ skillRefs: ['good-skill'], toolRefs: ['files/read_file'] })] })
     expect(await host.refValidator(plan)).toEqual([])
@@ -94,7 +94,7 @@ export default {
   },
 }
 `)
-    grantTrust('extensions', 'exts/reg.ts', d)
+    grantExtensionTrust('exts/reg.ts', d)
     const host = await makeHost(d)
     expect(host.providers.has('extra')).toBe(true)
     const plan = planFixture({ steps: [stepFixture({ modelRef: 'extra/m' })] })

@@ -6,7 +6,7 @@ import { createOllamaProvider } from '@orc/provider-ollama'
 import { createMcpHub, type McpHub } from '@orc/mcp-client'
 import { createMemory, unavailableMemoryTools } from '@orc/memory'
 import { createVaultProjector } from '@orc/vault-projector'
-import { createDbosPort, createPluginHost, loadConfig, requireProject, splitTool, EventLog, Kernel, type DbosPort, type PluginHost, type ProjectConfig } from '@orc/kernel'
+import { createDbosPort, createPluginHost, isMcpTrusted, loadConfig, requireProject, splitTool, EventLog, Kernel, type DbosPort, type PluginHost, type ProjectConfig } from '@orc/kernel'
 
 export function seedRegistries(config = loadConfig()) {
   const providers = new Map<string, ModelProvider<unknown>>([
@@ -20,7 +20,11 @@ export function seedRegistries(config = loadConfig()) {
 
 export async function buildPlugins(config = loadConfig()): Promise<{ host: PluginHost; hub: McpHub }> {
   const host = await createPluginHost(config, seedRegistries(config))
-  const hub = createMcpHub(config.mcpServers, new Set(host.trust.mcp))
+  // only grants whose fingerprint still matches the current declaration reach the hub
+  const trusted = Object.entries(config.mcpServers)
+    .filter(([id, cfg]) => isMcpTrusted(host.trust, id, cfg))
+    .map(([id]) => id)
+  const hub = createMcpHub(config.mcpServers, new Set(trusted))
   return { host, hub }
 }
 

@@ -4,7 +4,7 @@ import type { OrcConfig } from '../config'
 import { SkillIndex } from './skills'
 import { HookBus } from './hooks'
 import { ExtensionHost } from './extensions'
-import { loadTrust, type TrustStore } from './trust'
+import { isExtensionTrusted, isMcpTrusted, loadTrust, type TrustStore } from './trust'
 
 export interface PluginHost {
   providers: Map<string, ModelProvider<unknown>>
@@ -38,7 +38,7 @@ export async function createPluginHost(
     on: (hook, handler) => hooks.on(hook, handler),
   }
   const extensions = new ExtensionHost(api)
-  await extensions.load(config.extensions, trust.extensions, config.dir)
+  await extensions.load(config.extensions, decl => isExtensionTrusted(trust, decl, config.dir), config.dir)
   const skills = await SkillIndex.open(config.skillsDir)
 
   return {
@@ -61,8 +61,9 @@ export async function createPluginHost(
         for (const ref of step.toolRefs) {
           try {
             const { serverId } = parseToolRef(ref)
-            if (!(serverId in config.mcpServers)) errors.push(`step ${step.id}: undeclared MCP server '${serverId}'`)
-            else if (!trust.mcp.includes(serverId)) errors.push(`step ${step.id}: MCP server '${serverId}' is not trusted (orc mcp trust ${serverId})`)
+            const declared = config.mcpServers[serverId]
+            if (!declared) errors.push(`step ${step.id}: undeclared MCP server '${serverId}'`)
+            else if (!isMcpTrusted(trust, serverId, declared)) errors.push(`step ${step.id}: MCP server '${serverId}' is not trusted (orc mcp trust ${serverId})`)
           } catch (err) {
             errors.push(`step ${step.id}: ${err instanceof Error ? err.message : String(err)}`)
           }
