@@ -6,12 +6,13 @@ import {
   classifiedError, failureClassOf, isTerminalError, resolveModel, costUSDFor,
   type AgentExecutor, type Checkpoint, type EventDraft, type ExecutionPort, type ExecutorContext,
   type FailureClass, type LoadedSkill, type ModelProvider, type Plan, type ResolvedTool,
-  type RunHandle, type RunOutcome, type Signal, type ToolSource,
+  type RunHandle, type RunOutcome, type Signal, type SplitResult, type ToolSource,
 } from '@orc/contracts'
 import { EventLog } from '../eventlog'
 import { fold, completedStepIds, nextAttempts, taskUsage, type State } from '../projections'
 import { KERNEL_ERROR_CODE, KernelError } from '../errors'
 import { readySteps, runOutcomeOf } from './interpreter'
+import { createSignalRouter } from './signal-router'
 import type { OrcConfig } from '../config'
 
 export interface DbosPort extends ExecutionPort {
@@ -151,9 +152,34 @@ export async function createDbosPort(opts: {
 
       let signal: Signal | null = null
       let error: { class: string; message: string } | null = null
-      for await (const ev of executor.startTurn(ctx)) {
+      const gen = executor.startTurn(ctx)
+      let resume: SplitResult[] | undefined
+      while (true) {
+        const { value: ev, done } = await gen.next(resume)
+        resume = undefined
+        if (done) break
         if (ev.type === 'signal') signal = ev.signal
         if (ev.type === 'error') error = { class: ev.class, message: ev.message }
+        if (ev.type === 'gate') {
+          // resolve targets in a checkpoint (log read = non-deterministic); default = all
+          // unresolved splits proposed by THIS step attempt
+          const targets = await checkpoint(`gate:targets:${ev.toolCallId}`, async () => {
+            if (ev.splitIds.length > 0) return ev.splitIds
+            const state = await foldState(args.taskId)
+            return [...state.splits.values()]
+              .filter(s => s.stepId === args.stepId && s.runToken === runToken && !s.resolved)
+              .map(s => s.splitId)
+          })
+          const results: SplitResult[] = []
+          for (const id of targets) {
+            // workflow context — recv is legal here and ONLY here (spec D9).
+            // 60s poll, loop forever: no gate timeout in v1; recv replays from DBOS's message log.
+            let msg: SplitResult | null = null
+            while (msg === null) msg = await DBOS.recv<SplitResult>(`split:${id}`, 60)
+            results.push(msg)
+          }
+          resume = results
+        }
       }
 
       if (signal?.outcome === SIGNAL_OUTCOME.success) {
@@ -247,7 +273,7 @@ export async function createDbosPort(opts: {
     return { workflowId: workflowID, wait: () => handle.getResult() }
   }
 
-  return {
+  const port: DbosPort = {
     launch: async () => {
       // DBOS__APPVERSION pinned from config BEFORE launch so recovery survives rebuilds (spec §4)
       process.env.DBOS__APPVERSION ??= config.appVersion
@@ -258,11 +284,12 @@ export async function createDbosPort(opts: {
         await DBOS.registerQueue(agentQueue(d), { concurrency: config.concurrency, workerConcurrency: config.concurrency })
         if (d > 0) await DBOS.registerQueue(runQueue(d), { concurrency: config.concurrency, workerConcurrency: config.concurrency })
       }
+      await router.start()
     },
     // deregister clears the workflow/queue registries so a fresh port can re-register in the
     // same process — required when >1 port is created per process (integration tests); a no-op
     // at real process exit. (DBOS docs: use deregister when re-registering functions.)
-    shutdown: () => DBOS.shutdown({ deregister: true }),
+    shutdown: async () => { await router.close(); await DBOS.shutdown({ deregister: true }) },
     startChildRun: async (childTaskId: string): Promise<void> => {
       const state = await foldState(childTaskId)
       const task = state.tasks.get(childTaskId)
@@ -321,6 +348,16 @@ export async function createDbosPort(opts: {
       })
     },
   }
+
+  // port-level: child-terminal events → split_resolved + DBOS.send; approved children → run start.
+  // References port.startChildRun, so it is built after the port object.
+  const router = createSignalRouter({
+    log,
+    onChildApproved: id => port.startChildRun(id),
+    send: (dest, result, topic, key) => DBOS.send(dest, result, topic, key),
+  })
+
+  return port
 }
 
 function priceDraft(d: EventDraft, provider: ModelProvider<unknown>, modelId: string): EventDraft {
