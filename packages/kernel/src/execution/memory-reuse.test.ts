@@ -4,7 +4,8 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import {
   EVENT_KIND, SIGNAL_OUTCOME,
-  type AgentExecutor, type EventDraft, type ExecutorContext, type ResolvedTool, type UnifiedEvent,
+  type AgentExecutor, type EventDraft, type ExecutorContext, type ResolvedTool,
+  type SplitResult, type UnifiedEvent,
 } from '@orc/contracts'
 import { draftFixture, stepFixture } from '@orc/contracts/fixtures'
 import { createMemory } from '@orc/memory'
@@ -23,7 +24,7 @@ const NOTE = { id: NOTE_ID, title: 'Finding X', summary: 'a durable finding', bo
 function memoryExecutor(): AgentExecutor<unknown> {
   return {
     id: 'memory-fake',
-    async *startTurn(ctx: ExecutorContext<unknown>): AsyncIterable<UnifiedEvent> {
+    async *startTurn(ctx: ExecutorContext<unknown>): AsyncGenerator<UnifiedEvent, void, SplitResult[] | undefined> {
       const base = { stepId: ctx.step.id, runToken: ctx.runToken }
       const tool = (name: string): ResolvedTool => {
         const t = ctx.extraTools.find(x => x.name === name)

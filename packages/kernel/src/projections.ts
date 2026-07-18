@@ -118,7 +118,9 @@ export function fold(events: EventRecord[]): State {
       case EVENT_KIND.signal_received:
       case EVENT_KIND.memory_written:
       case EVENT_KIND.memory_deleted:
-        break // traceability only; no state derivation
+      case EVENT_KIND.split_proposed:
+      case EVENT_KIND.split_resolved:
+        break // traceability only; no state derivation (split tracking lands in a later M5a task)
       case EVENT_KIND.step_completed: {
         const p = e.payload as { stepId: string; summary: string }
         if (!e.taskId) break

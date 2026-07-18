@@ -32,4 +32,27 @@ describe('events', () => {
     expect(() => PAYLOAD_SCHEMAS.memory_deleted.parse({ ...good, scope: '../x' })).toThrow()
     expect(() => PAYLOAD_SCHEMAS.memory_deleted.parse({ ...good, id: '../x' })).toThrow()
   })
+  it('split_proposed and split_resolved payloads validate; split_resolved pins RunOutcome + scoped notes', () => {
+    expect(PAYLOAD_SCHEMAS.split_proposed.safeParse({
+      splitId: 'split:step:t1:s1:a1:call_1', taskId: 't1', stepId: 's1',
+      runToken: 'step:t1:s1:a1', childTaskId: 't1.s1.call_1',
+    }).success).toBe(true)
+    expect(PAYLOAD_SCHEMAS.split_resolved.safeParse({
+      splitId: 'x', childTaskId: 'c', outcome: 'done', summary: 's',
+      notes: [{ id: 'finding-a', scope: 'project' }],
+    }).success).toBe(true)
+    expect(PAYLOAD_SCHEMAS.split_resolved.safeParse({
+      splitId: 'x', childTaskId: 'c', outcome: 'success', summary: 's', notes: [],
+    }).success).toBe(false) // SignalOutcome is NOT a RunOutcome
+    expect(PAYLOAD_SCHEMAS.split_resolved.safeParse({
+      splitId: 'x', childTaskId: 'c', outcome: 'done', summary: 's', notes: ['finding-a'],
+    }).success).toBe(false) // bare note ids rejected — notes are (id, scope) pairs
+  })
+
+  it('plan_approved requires approval provenance', () => {
+    const base = { taskId: 't1', version: 1, approvedAt: '2026-07-19T00:00:00Z' }
+    expect(PAYLOAD_SCHEMAS.plan_approved.safeParse(base).success).toBe(false)
+    expect(PAYLOAD_SCHEMAS.plan_approved.safeParse({ ...base, approvedBy: 'human' }).success).toBe(true)
+    expect(PAYLOAD_SCHEMAS.plan_approved.safeParse({ ...base, approvedBy: 'policy', ruleIndex: 0 }).success).toBe(true)
+  })
 })

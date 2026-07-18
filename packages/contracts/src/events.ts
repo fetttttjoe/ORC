@@ -1,13 +1,13 @@
 import { z } from 'zod'
 import { TaskNode, TaskStatus } from './task'
 import { Plan } from './plan'
-import { FailureClass, Signal, Usage } from './execution'
+import { FailureClass, RunOutcome, Signal, Usage } from './execution'
 import { MemoryNoteInput, MemoryAuthor, MEMORY_ID_RE } from './memory'
 
 export const EventKind = z.enum([
   'task_created', 'plan_proposed', 'plan_edited', 'plan_approved', 'task_status_changed',
   'run_started', 'step_started', 'skill_loaded', 'agent_call', 'tool_call', 'tool_result',
-  'signal_received', 'step_completed', 'step_failed',
+  'signal_received', 'step_completed', 'step_failed', 'split_proposed', 'split_resolved',
   'memory_written', 'memory_deleted',
 ])
 export type EventKind = z.infer<typeof EventKind>
@@ -22,6 +22,8 @@ export const PAYLOAD_SCHEMAS: Record<EventKind, z.ZodType> = {
     taskId: z.string().min(1),
     version: z.number().int().positive(),
     approvedAt: z.string(),
+    approvedBy: z.enum(['human', 'policy']),
+    ruleIndex: z.number().int().nonnegative().optional(), // which ApprovalPolicy rule matched
   }),
   task_status_changed: z.object({ taskId: z.string().min(1), from: TaskStatus, to: TaskStatus }),
   run_started: z.object({
@@ -81,6 +83,20 @@ export const PAYLOAD_SCHEMAS: Record<EventKind, z.ZodType> = {
     runToken: z.string().min(1),
     class: FailureClass,
     message: z.string(),
+  }),
+  split_proposed: z.object({
+    splitId: z.string().min(1),
+    taskId: z.string().min(1),      // parent task
+    stepId: z.string().min(1),
+    runToken: z.string().min(1),    // parent step workflow id = DBOS.send target
+    childTaskId: z.string().min(1),
+  }),
+  split_resolved: z.object({
+    splitId: z.string().min(1),
+    childTaskId: z.string().min(1),
+    outcome: RunOutcome,            // done | blocked | cancelled — NOT SignalOutcome (spec D5)
+    summary: z.string(),
+    notes: z.array(z.object({ id: z.string(), scope: z.string() })),
   }),
   memory_written: z.object({ note: MemoryNoteInput, author: MemoryAuthor }),
   memory_deleted: z.object({

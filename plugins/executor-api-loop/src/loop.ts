@@ -2,7 +2,7 @@ import { generateText, type LanguageModel, type ModelMessage, type ToolSet } fro
 import {
   EVENT_KIND, FAILURE_CLASS, UNIFIED_EVENT_TYPE, terminalError,
   type AgentExecutor, type EventDraft, type ExecutorContext, type Signal,
-  type UnifiedEvent, type Usage,
+  type SplitResult, type UnifiedEvent, type Usage,
 } from '@orc/contracts'
 import { SignalInput, TOOL_NAME, executeTool, toolSet } from './tools'
 
@@ -82,7 +82,7 @@ export function apiLoopExecutor(): AgentExecutor<LanguageModel> {
   return {
     id: 'api-loop',
 
-    async *startTurn(ctx: ExecutorContext<LanguageModel>): AsyncIterable<UnifiedEvent> {
+    async *startTurn(ctx: ExecutorContext<LanguageModel>): AsyncGenerator<UnifiedEvent, void, SplitResult[] | undefined> {
       const messages: ModelMessage[] = [{ role: 'user', content: buildPrompt(ctx) }]
       const tools = toolSet(ctx.extraTools)
       const base = { stepId: ctx.step.id, runToken: ctx.runToken }
