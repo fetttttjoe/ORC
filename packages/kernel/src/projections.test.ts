@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'bun:test'
 import type { EventRecord, Plan, TaskNode } from '@orc/contracts'
-import { planFixture } from '@orc/contracts/fixtures'
+import { draftFixture, planFixture, stepFixture } from '@orc/contracts/fixtures'
 import { fold, completedStepIds, nextAttempts, crashDedupKey } from './projections'
 
 const task: TaskNode = {
@@ -158,7 +158,7 @@ describe('fold — execution kinds', () => {
       kind: 'memory_written',
       payload: { note: { id: 'x', title: 'X', scope: 'project', categories: [], tags: [], links: [], paths: [], rules: [], summary: '', body: '' }, author: { source: 'cli' } },
       usage: null, ts: '2026-07-18T00:00:00Z',
-    }] as any)
+    }])
     expect(withMem.tasks.size).toBe(base.tasks.size)
   })
 
@@ -178,7 +178,7 @@ describe('fold — execution kinds', () => {
   })
 
   it('failed attempt then fresh attempt: latest wins, nextAttempts increments', () => {
-    const plan = { steps: [{ id: 's1' }, { id: 's2' }] } as never // only ids consulted
+    const plan = draftFixture([stepFixture({ id: 's1' }), stepFixture({ id: 's2' })])
     const state = fold([
       exEvt(1, 'step_started', { stepId: 's1', runToken: rt('s1', 1), attempt: 1 }),
       exEvt(2, 'step_failed', { stepId: 's1', runToken: rt('s1', 1), class: 'agent_error', message: 'nope' }),

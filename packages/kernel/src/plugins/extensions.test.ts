@@ -25,7 +25,7 @@ import { value } from './dep'
 const manifest: ExtensionManifest = {
   id: 'demo',
   activate(api: ExtensionApi) {
-    api.registerProvider('${marker}-' + value, { costs: {}, languageModel: () => ({}) } as never)
+    api.registerProvider('${marker}-' + value, { costs: {}, languageModel: () => ({}) })
   },
 }
 export default manifest

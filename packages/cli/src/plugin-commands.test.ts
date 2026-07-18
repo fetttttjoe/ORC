@@ -29,7 +29,7 @@ async function makeCli(dir: string) {
   const config = { ...loadConfig(dir), databaseUrl: db.url }
   const host = await createPluginHost(config, {
     providers: new Map([['fake', { costs: {}, languageModel: () => ({}) }]]),
-    executors: new Map([['api-loop', { id: 'api-loop', startTurn: async function* () {} } as never]]),
+    executors: new Map([['api-loop', { id: 'api-loop', startTurn: async function* () {} }]]),
   })
   const hub = createMcpHub(config.mcpServers, new Set(host.trust.mcp))
   const { kernel, log } = await openKernel(db.url, { refValidator: host.refValidator })

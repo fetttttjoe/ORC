@@ -170,7 +170,7 @@ export class EventLog implements EventLogOps {
       // the advisory lock restores the old bun:sqlite single-writer serialization.
       // ponytail: one global lock — per-task locks if concurrent-writer throughput matters
       await tx.execute(sql`select pg_advisory_xact_lock(7303779)`) // 0x6f7263 'orc'
-      return fn(makeOps(tx as unknown as Queryable, e => this.onAppend?.(e)))
+      return fn(makeOps(tx, e => this.onAppend?.(e)))
     })
   }
 

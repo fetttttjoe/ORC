@@ -22,12 +22,12 @@ describe('memory projector', () => {
     const proj = createMemoryProjector({ log, surreal, vaultDir })
     await proj.start()
 
-    await log.append({ taskId: null, stepId: null, runToken: null, kind: 'memory_written', payload: { note: noteInput, author: { source: 'cli' } } } as any)
+    await log.append({ taskId: null, stepId: null, runToken: null, kind: 'memory_written', payload: { note: noteInput, author: { source: 'cli' } } })
     await Bun.sleep(150)
     expect(existsSync(path.join(vaultDir, 'memory', 'auth.md'))).toBe(true)
     expect((await surreal.get('auth', 'project'))?.title).toBe('Auth')
 
-    await log.append({ taskId: null, stepId: null, runToken: null, kind: 'memory_deleted', payload: { id: 'auth', scope: 'project', author: { source: 'cli' } } } as any)
+    await log.append({ taskId: null, stepId: null, runToken: null, kind: 'memory_deleted', payload: { id: 'auth', scope: 'project', author: { source: 'cli' } } })
     await Bun.sleep(150)
     expect(existsSync(path.join(vaultDir, 'memory', 'auth.md'))).toBe(false)
     expect(await surreal.get('auth', 'project')).toBeNull()
