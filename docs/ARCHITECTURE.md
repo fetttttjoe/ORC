@@ -124,6 +124,66 @@ nothing**, kernel imports contracts, plugins import contracts (never the kernel'
 beyond its public exports), and the kernel never imports plugins — it receives them
 (`createDbosPort(opts)`, `createPluginHost(config, seed)`).
 
+## The storage service — read/write boundary
+
+Every Postgres read and write goes through one facade. Callers never touch a pool, a lock,
+redaction, or migrations — they call `events` / `operations` and the service handles the rest.
+
+```mermaid
+graph LR
+  subgraph APP ["application — never touches the DB directly"]
+    K["kernel.ts"]
+    MEM["memory store"]
+    VPR["vault projector"]
+    RTR["signal router"]
+    PRT["DBOS port"]
+  end
+
+  OPEN(["openStorage(url, projectId)"])
+
+  subgraph SVC ["Storage facade"]
+    direction TB
+    EV["events : EventLog<br/>append · subscribe · byTask · after · countAfter"]
+    OPJ["operations : OperationJournal<br/>begin · complete · fail · rebuild · operationsFor"]
+  end
+
+  subgraph OWNER ["PostgresStore — the sole owner"]
+    direction TB
+    POOL["pg pool"]
+    LOCK["withProjectLock (per-project advisory lock)"]
+    RED["redact (keys + values)"]
+    VER["assertMigrated (verify, never migrate)"]
+  end
+
+  DB[("Postgres<br/>events + operations tables<br/>scoped by project_id")]
+
+  K -->|read + write events| EV
+  MEM -->|write events| EV
+  VPR -->|read + subscribe| EV
+  RTR -->|read + write| EV
+  PRT -->|"read/write events"| EV
+  PRT -->|"journal begin/complete/fail"| OPJ
+
+  OPEN -.builds.-> EV
+  OPEN -.builds.-> OPJ
+  OPJ -->|"transitions append through"| EV
+  EV --> OWNER
+  OPJ --> OWNER
+  OWNER --> DB
+
+  classDef facade fill:#1a4d7a,color:#fff
+  classDef owner fill:#5a3d7a,color:#fff
+  class EV,OPJ facade
+  class POOL,LOCK,RED,VER owner
+```
+
+Every write path is one locked transaction: `EventLog.append` acquires the project lock,
+jsonb-shapes and redacts the payload, validates it, inserts, `pg_notify`s, and commits — all
+atomically. `OperationJournal` writes its node and its transition events *through* that same
+`EventLog` inside one lock, so the durable graph node and the append-only history can never
+disagree. Reads are project-scoped queries that bypass the lock. Migration is separate
+(`migrateDatabase`); `openStorage` only verifies and fails loudly if the schema is behind.
+
 ## Execution flow — one step, durably
 
 ```mermaid
