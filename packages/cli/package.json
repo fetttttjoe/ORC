@@ -7,6 +7,7 @@
     "@orc/contracts": "workspace:*",
     "@orc/kernel": "workspace:*",
     "@orc/mcp-client": "workspace:*",
+    "@orc/memory": "workspace:*",
     "@orc/vault-projector": "workspace:*",
     "@orc/executor-api-loop": "workspace:*",
     "@orc/provider-anthropic": "workspace:*",

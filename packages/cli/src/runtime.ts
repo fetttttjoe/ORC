@@ -4,6 +4,7 @@ import { createAnthropicProvider } from '@orc/provider-anthropic'
 import { createOpenAIProvider } from '@orc/provider-openai'
 import { createOllamaProvider } from '@orc/provider-ollama'
 import { createMcpHub, type McpHub } from '@orc/mcp-client'
+import { createMemory } from '@orc/memory'
 import { createVaultProjector } from '@orc/vault-projector'
 import { createDbosPort, createPluginHost, loadConfig, EventLog, type DbosPort, type OrcConfig, type PluginHost } from '@orc/kernel'
 
@@ -31,18 +32,23 @@ export async function buildRuntime(
   // reuse the caller's log (bin passes the kernel's) — one pool, migrations run once
   const log = shared?.log ?? (await EventLog.open(config.databaseUrl))
   log.onAppend = e => void host.hooks.emit(HOOK_NAME.event_appended, e)
+  const memory = await createMemory({ log, config })
   const port = await createDbosPort({
     log, config,
     providers: host.providers, executors: host.executors,
     skills: host.skills, tools: hub,
+    stepTools: p => memory.buildTools({ source: 'agent', taskId: p.taskId, stepId: p.stepId, runToken: p.runToken, executor: p.executor, model: p.model, role: p.role }),
   })
   await port.launch()
   const projector = createVaultProjector({ log, config })
   await projector.start()
+  await memory.projector.start()
   host.skills.watch() // hot-index during long-lived runs (spec quality scenario: <1s)
   return {
     ...port,
     shutdown: async () => {
+      await memory.projector.close()
+      await memory.close()
       await projector.close()
       await hub.close()
       await host.shutdown() // fires session_shutdown, deactivates extensions, stops the watcher
