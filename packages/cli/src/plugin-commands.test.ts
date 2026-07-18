@@ -5,7 +5,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createMcpHub } from '@orc/mcp-client'
 import { createPluginHost, grantTrust, loadConfig, loadTrust } from '@orc/kernel'
-import { createTestDb } from '@orc/kernel/test-helpers'
+import { createTestDb, TEST_PROJECT_ID } from '@orc/kernel/test-helpers'
 import { buildProgram, openKernel } from './main'
 
 const FIXTURE = fileURLToPath(new URL('../../../plugins/mcp-client/src/fixture-server.ts', import.meta.url))
@@ -32,7 +32,7 @@ async function makeCli(dir: string) {
     executors: new Map([['api-loop', { id: 'api-loop', startTurn: async function* () {} }]]),
   })
   const hub = createMcpHub(config.mcpServers, new Set(host.trust.mcp))
-  const { kernel, log } = await openKernel(db.url, { refValidator: host.refValidator })
+  const { kernel, log } = await openKernel(db.url, { projectId: TEST_PROJECT_ID, refValidator: host.refValidator })
   const lines: string[] = []
   spyOn(console, 'log').mockImplementation((...a: unknown[]) => { lines.push(a.join(' ')) })
   const run = (...args: string[]) =>

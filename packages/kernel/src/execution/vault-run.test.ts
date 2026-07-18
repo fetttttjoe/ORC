@@ -9,7 +9,7 @@ import {
 import { draftFixture, stepFixture } from '@orc/contracts/fixtures'
 import { EventLog } from '../eventlog'
 import { Kernel } from '../kernel'
-import { createTestDb, fakeProvider, testConfig } from '../test-helpers'
+import { createTestDb, fakeProvider, testConfig, TEST_PROJECT_ID } from '../test-helpers'
 import { createDbosPort, type DbosPort } from './dbos-port'
 import { createVaultProjector, type VaultProjector } from '@orc/vault-projector'
 
@@ -47,7 +47,7 @@ describe('vault projection over a real run (e2e)', () => {
   beforeAll(async () => {
     const db = await createTestDb()
     vaultDir = mkdtempSync(path.join(tmpdir(), 'orc-e2e-'))
-    log = await EventLog.open(db.url)
+    log = await EventLog.open(db.url, { projectId: TEST_PROJECT_ID })
     kernel = new Kernel(log)
     const config = testConfig(db.url, { vaultDir })
     port = await createDbosPort({

@@ -4,7 +4,7 @@ import { draftFixture, stepFixture } from '@orc/contracts/fixtures'
 import { EventLog } from './eventlog'
 import { KERNEL_ERROR_CODE, KernelError } from './errors'
 import { Kernel } from './kernel'
-import { createTestDb } from './test-helpers'
+import { createTestDb, TEST_PROJECT_ID } from './test-helpers'
 
 const dbs: Array<{ drop: () => Promise<void> }> = []
 afterAll(async () => {
@@ -14,7 +14,7 @@ afterAll(async () => {
 async function freshKernel(): Promise<Kernel> {
   const db = await createTestDb()
   dbs.push(db)
-  return new Kernel(await EventLog.open(db.url))
+  return new Kernel(await EventLog.open(db.url, { projectId: TEST_PROJECT_ID }))
 }
 
 const draft = (): PlanDraft => draftFixture()
@@ -103,7 +103,7 @@ describe('Kernel lifecycle', () => {
   it('propose fails with plan_validation_failed when the refValidator reports errors', async () => {
     const db = await createTestDb()
     dbs.push(db)
-    const k = new Kernel(await EventLog.open(db.url), async () => [`unknown executor 'nope'`])
+    const k = new Kernel(await EventLog.open(db.url, { projectId: TEST_PROJECT_ID }), async () => [`unknown executor 'nope'`])
     const t = await k.createTask({ title: 'x' })
     await expect(k.proposePlan(t.id, draft())).rejects.toThrow(/unknown executor 'nope'/)
   })
@@ -111,7 +111,7 @@ describe('Kernel lifecycle', () => {
   it('propose succeeds when the refValidator returns no errors', async () => {
     const db = await createTestDb()
     dbs.push(db)
-    const k = new Kernel(await EventLog.open(db.url), async () => [])
+    const k = new Kernel(await EventLog.open(db.url, { projectId: TEST_PROJECT_ID }), async () => [])
     const t = await k.createTask({ title: 'x' })
     await expect(k.proposePlan(t.id, draft())).resolves.toBeDefined()
   })

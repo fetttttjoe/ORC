@@ -8,7 +8,7 @@ import {
   type AgentExecutor, type EventDraft, type ExecutorContext, type SplitResult, type UnifiedEvent,
 } from '@orc/contracts'
 import { EventLog } from '../eventlog'
-import { fakeProvider, testConfig } from '../test-helpers'
+import { fakeProvider, testConfig, TEST_PROJECT_ID } from '../test-helpers'
 import { createDbosPort } from './dbos-port'
 
 const [dbUrl, taskId, marker] = process.argv.slice(2) as [string, string, string]
@@ -39,7 +39,7 @@ const stallOnce: AgentExecutor<unknown> = {
   },
 }
 
-const log = await EventLog.open(dbUrl)
+const log = await EventLog.open(dbUrl, { projectId: TEST_PROJECT_ID })
 const config = testConfig(dbUrl)
 const port = await createDbosPort({
   log, config,

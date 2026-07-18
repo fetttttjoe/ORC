@@ -13,7 +13,7 @@ describe('events', () => {
       kind: 'task_status_changed',
       payload: { taskId: 't1', from: 'draft', to: 'awaiting_approval' },
     }
-    expect(EventInput.parse(input)).toEqual(input)
+    expect(EventInput.parse(input)).toEqual({ ...input, idempotencyKey: null })
   })
   it('payload schemas reject wrong shapes', () => {
     expect(() => PAYLOAD_SCHEMAS.plan_approved.parse({})).toThrow()
@@ -54,5 +54,23 @@ describe('events', () => {
     expect(PAYLOAD_SCHEMAS.plan_approved.safeParse(base).success).toBe(false)
     expect(PAYLOAD_SCHEMAS.plan_approved.safeParse({ ...base, approvedBy: 'human' }).success).toBe(true)
     expect(PAYLOAD_SCHEMAS.plan_approved.safeParse({ ...base, approvedBy: 'policy', ruleIndex: 0 }).success).toBe(true)
+  })
+
+  it('idempotency key defaults to null, accepts a non-empty key, rejects empty', () => {
+    const base: EventInput = {
+      taskId: 't1', stepId: null, runToken: null,
+      kind: 'task_status_changed',
+      payload: { taskId: 't1', from: 'draft', to: 'awaiting_approval' },
+    }
+    expect(EventInput.parse(base).idempotencyKey).toBeNull()
+    expect(EventInput.parse({ ...base, idempotencyKey: 'r1:finish:0' }).idempotencyKey).toBe('r1:finish:0')
+    expect(EventInput.safeParse({ ...base, idempotencyKey: '' }).success).toBe(false)
+  })
+
+  it('artifact_produced requires path, full sha256 digest, and byte size', () => {
+    const good = { path: 'report.md', sha256: 'a'.repeat(64), size: 12 }
+    expect(PAYLOAD_SCHEMAS.artifact_produced.safeParse(good).success).toBe(true)
+    expect(PAYLOAD_SCHEMAS.artifact_produced.safeParse({ ...good, sha256: 'abc' }).success).toBe(false)
+    expect(PAYLOAD_SCHEMAS.artifact_produced.safeParse({ ...good, size: -1 }).success).toBe(false)
   })
 })

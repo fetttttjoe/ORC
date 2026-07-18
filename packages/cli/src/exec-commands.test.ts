@@ -2,7 +2,7 @@ import path from 'node:path'
 import { afterAll, afterEach, describe, expect, it, mock, spyOn } from 'bun:test'
 import type { ExecutionPort, RunHandle } from '@orc/contracts'
 import { EventLog } from '@orc/kernel'
-import { createTestDb } from '@orc/kernel/test-helpers'
+import { createTestDb, TEST_PROJECT_ID } from '@orc/kernel/test-helpers'
 import { buildProgram, openKernel } from './main'
 
 const dbs: Array<{ drop: () => Promise<void> }> = []
@@ -23,7 +23,7 @@ function stubPort(outcome: 'done' | 'blocked' = 'done') {
 async function makeCli(outcome: 'done' | 'blocked' = 'done') {
   const db = await createTestDb()
   dbs.push(db)
-  const { kernel } = await openKernel(db.url)
+  const { kernel } = await openKernel(db.url, { projectId: TEST_PROJECT_ID })
   const { port, calls } = stubPort(outcome)
   const lines: string[] = []
   spyOn(console, 'log').mockImplementation((...a: unknown[]) => { lines.push(a.join(' ')) })
@@ -52,7 +52,7 @@ describe('exec commands', () => {
   it('blocked run exits 1 — real process exit status via subprocess fixture', async () => {
     const db = await createTestDb()
     dbs.push(db)
-    const { kernel, log } = await openKernel(db.url)
+    const { kernel, log } = await openKernel(db.url, { projectId: TEST_PROJECT_ID })
     const { port } = stubPort()
     const lines: string[] = []
     spyOn(console, 'log').mockImplementation((...a: unknown[]) => { lines.push(a.join(' ')) })
@@ -76,7 +76,7 @@ describe('exec commands', () => {
   it('run drains events committed in the final window before printing the outcome', async () => {
     const db = await createTestDb()
     dbs.push(db)
-    const { kernel } = await openKernel(db.url)
+    const { kernel } = await openKernel(db.url, { projectId: TEST_PROJECT_ID })
     const lines: string[] = []
     spyOn(console, 'log').mockImplementation((...a: unknown[]) => { lines.push(a.join(' ')) })
     const run = async (...args: string[]) => buildProgram(kernel, async () => port).parseAsync(args, { from: 'user' })
@@ -87,7 +87,7 @@ describe('exec commands', () => {
     // resolves — possibly before the push subscription's NOTIFY round-trip is delivered. The
     // finally-block drain (a direct query, not NOTIFY-dependent) must still surface it, whether
     // or not the live subscription got there first.
-    const rawLog = await EventLog.open(db.url)
+    const rawLog = await EventLog.open(db.url, { projectId: TEST_PROJECT_ID })
     const handle: RunHandle = {
       workflowId: 'run:x:v1',
       wait: async () => {

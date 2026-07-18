@@ -4,7 +4,7 @@ import { draftFixture } from '@orc/contracts/fixtures'
 import { EventLog } from './eventlog'
 import { Kernel } from './kernel'
 import { fold } from './projections'
-import { createTestDb } from './test-helpers'
+import { createTestDb, TEST_PROJECT_ID } from './test-helpers'
 
 const draft = (): PlanDraft => draftFixture()
 
@@ -12,7 +12,7 @@ describe('replay guarantee (spec §10)', () => {
   it('a reopened kernel folds to the identical state ("kill -9" scenario)', async () => {
     const db = await createTestDb()
     try {
-      const log1 = await EventLog.open(db.url)
+      const log1 = await EventLog.open(db.url, { projectId: TEST_PROJECT_ID })
       const k1 = new Kernel(log1)
       const t = await k1.createTask({ title: 'parent', spec: 'root task' })
       const child = await k1.createTask({ title: 'child', parentId: t.id })
@@ -22,7 +22,7 @@ describe('replay guarantee (spec §10)', () => {
       const before = await k1.state()
       await log1.close() // simulated process death — nothing held in memory matters
 
-      const k2 = new Kernel(await EventLog.open(db.url))
+      const k2 = new Kernel(await EventLog.open(db.url, { projectId: TEST_PROJECT_ID }))
       expect(await k2.state()).toEqual(before)
       expect((await k2.getTask(t.id))?.status).toBe('approved')
       expect((await k2.getTask(child.id))?.status).toBe('draft')
@@ -34,7 +34,7 @@ describe('replay guarantee (spec §10)', () => {
   it('the event trail is the complete story, in order', async () => {
     const db = await createTestDb()
     try {
-      const log = await EventLog.open(db.url)
+      const log = await EventLog.open(db.url, { projectId: TEST_PROJECT_ID })
       const k = new Kernel(log)
       const t = await k.createTask({ title: 'x' })
       await k.proposePlan(t.id, draft())
@@ -54,7 +54,7 @@ describe('replay guarantee (spec §10)', () => {
   it('fold twice over the same log yields equal states (pure replay)', async () => {
     const db = await createTestDb()
     try {
-      const log = await EventLog.open(db.url)
+      const log = await EventLog.open(db.url, { projectId: TEST_PROJECT_ID })
       const k = new Kernel(log)
       const t = await k.createTask({ title: 'x' })
       await k.proposePlan(t.id, draft())

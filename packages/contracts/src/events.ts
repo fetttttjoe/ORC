@@ -2,12 +2,14 @@ import { z } from 'zod'
 import { TaskNode, TaskStatus } from './task'
 import { Plan } from './plan'
 import { FailureClass, RunOutcome, Signal, Usage } from './execution'
+import { OperationKind } from './operations'
 import { MemoryNoteInput, MemoryAuthor, MEMORY_ID_RE } from './memory'
 
 export const EventKind = z.enum([
   'task_created', 'plan_proposed', 'plan_edited', 'plan_approved', 'task_status_changed',
   'run_started', 'step_started', 'skill_loaded', 'agent_call', 'tool_call', 'tool_result',
   'signal_received', 'step_completed', 'step_failed', 'split_proposed', 'split_resolved',
+  'operation_started', 'operation_completed', 'operation_failed', 'artifact_produced',
   'memory_written', 'memory_deleted',
 ])
 export type EventKind = z.infer<typeof EventKind>
@@ -98,6 +100,28 @@ export const PAYLOAD_SCHEMAS: Record<EventKind, z.ZodType> = {
     summary: z.string(),
     notes: z.array(z.object({ id: z.string(), scope: z.string() })),
   }),
+  operation_started: z.object({
+    operationId: z.string().min(1),
+    attempt: z.number().int().positive(),
+    operationKind: OperationKind,
+    name: z.string().min(1),
+    before: z.unknown(),
+  }),
+  operation_completed: z.object({
+    operationId: z.string().min(1),
+    attempt: z.number().int().positive(),
+    after: z.unknown(),
+  }),
+  operation_failed: z.object({
+    operationId: z.string().min(1),
+    attempt: z.number().int().positive(),
+    error: z.unknown(),
+  }),
+  artifact_produced: z.object({
+    path: z.string().min(1),
+    sha256: z.string().regex(/^[a-f0-9]{64}$/),
+    size: z.number().int().nonnegative(),
+  }),
   memory_written: z.object({ note: MemoryNoteInput, author: MemoryAuthor }),
   memory_deleted: z.object({
     // id AND scope must be MEMORY_ID_RE-safe: they flow into noteRelPath → the vault path guard,
@@ -116,11 +140,21 @@ export const EventInput = z.object({
   kind: EventKind,
   payload: z.record(z.string(), z.unknown()),
   usage: Usage.nullable().optional(),
+  // deterministic writers supply a key; the log's project/key uniqueness absorbs retries
+  idempotencyKey: z.string().min(1).nullable().default(null),
 })
-export type EventInput = z.infer<typeof EventInput>
+export type EventInput = z.input<typeof EventInput>
 
-export interface EventRecord extends Omit<EventInput, 'usage'> {
+// the stored envelope: project binding and idempotency are explicit on every record
+export interface EventRecord {
   seq: number
-  ts: string
+  projectId: string
+  idempotencyKey: string | null
+  taskId: string | null
+  stepId: string | null
+  runToken: string | null
+  kind: EventKind
+  payload: Record<string, unknown>
   usage: Usage | null
+  ts: string
 }

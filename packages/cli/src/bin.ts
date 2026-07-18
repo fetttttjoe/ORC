@@ -17,6 +17,8 @@ try {
   const plugins = await buildPlugins(config)
   await plugins.host.hooks.emit(HOOK_NAME.session_start)
   const { kernel, log } = await openKernel(config.databaseUrl, {
+    projectId: config.projectId,
+    redactEnv: config.redactEnv,
     refValidator: plugins.host.refValidator,
     onAppend: e => void plugins.host.hooks.emit(HOOK_NAME.event_appended, e),
   })

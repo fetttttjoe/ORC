@@ -128,6 +128,10 @@ export function fold(events: EventRecord[]): State {
       case EVENT_KIND.tool_call:
       case EVENT_KIND.tool_result:
       case EVENT_KIND.signal_received:
+      case EVENT_KIND.operation_started:
+      case EVENT_KIND.operation_completed:
+      case EVENT_KIND.operation_failed:
+      case EVENT_KIND.artifact_produced:
       case EVENT_KIND.memory_written:
       case EVENT_KIND.memory_deleted:
         break // traceability only; no state derivation
