@@ -1,7 +1,7 @@
 import { existsSync, readFileSync } from 'node:fs'
 import path from 'node:path'
 import { z } from 'zod'
-import { MCP_SERVER_ID_RE, McpServerConfig, ModelCost } from '@orc/contracts'
+import { ApprovalPolicy, MCP_SERVER_ID_RE, McpServerConfig, ModelCost } from '@orc/contracts'
 
 // bump per release — pins DBOS__APPVERSION so recovery survives rebuilds (spec §4)
 export const APP_VERSION = 'orc-0.1.0'
@@ -16,6 +16,8 @@ const settingsSchema = (dir: string) =>
   z.object({
     databaseUrl: z.url().default(DEFAULT_DATABASE_URL),
     concurrency: z.coerce.number().int().positive().default(3),
+    maxDepth: z.coerce.number().int().positive().default(3),
+    approvalPolicy: ApprovalPolicy.prefault({}), // {} isn't the full output shape — prefault reparses it, applying ApprovalPolicy's own field defaults
     workspaceRoot: z.string().default(path.join(dir, '.orc', 'workspaces')),
     ollamaBaseUrl: z.url().default('http://localhost:11434'),
     projectDbUrl: z.string().default('ws://127.0.0.1:8000/rpc'),
@@ -35,6 +37,7 @@ const envOverrides = (): Record<string, string> => {
   const map = {
     databaseUrl: process.env.ORC_DATABASE_URL,
     concurrency: process.env.ORC_CONCURRENCY,
+    maxDepth: process.env.ORC_MAX_DEPTH,
     ollamaBaseUrl: process.env.OLLAMA_BASE_URL,
     projectDbUrl: process.env.ORC_PROJECT_DB_URL,
     projectDbName: process.env.ORC_PROJECT_DB_NAME,

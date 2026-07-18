@@ -99,6 +99,11 @@ describe('loadConfig', () => {
       expect(loadConfig('/tmp/x').projectDbPassword).toBe('secret')
     })
   })
+  it('maxDepth defaults to 3 and approvalPolicy defaults to manual/empty', () => {
+    const c = loadConfig(mkdtempSync(path.join(tmpdir(), 'orc-')))
+    expect(c.maxDepth).toBe(3)
+    expect(c.approvalPolicy).toEqual({ default: 'manual', rules: [] })
+  })
 })
 
 function tmpProject(cfg: Record<string, unknown>): string {
