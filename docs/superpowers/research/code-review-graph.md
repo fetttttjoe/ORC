@@ -1,5 +1,8 @@
 # Research note: code-review-graph
 
+Two repos folded in: **code-review-graph** (sections 1–3) and **RecursiveMAS**
+(its own section below), synthesised for M4b.
+
 Source: <https://github.com/tirth8205/code-review-graph> (Python 94% / TS 5.8%). Read
 2026-07-18: README, repo tree, `code_review_graph/graph.py`, `migrations.py`,
 `constants.py`, `tools/query.py`, `tools/review.py`. Not read (large / lower value):
@@ -130,6 +133,89 @@ reports `original_tokens` vs optimized size as `context_savings`.
    hybrid without embeddings now, and RRF is the exact merge point to slot vectors into later
    when we un-defer them — no re-architecture.
 
+## RecursiveMAS — what it is & architecture
+
+Source: <https://github.com/RecursiveMAS/RecursiveMAS> (Python; built on vLLM / ARPO /
+TextGrad). Read 2026-07-18: root + `inference/` READMEs, repo tree,
+`inference/inference_utils/inference_mas.py`, `train/outer/common.py`. Not read:
+`inference/modeling.py` (the RecursiveLink/adapter defs), the mixture/distill/deliberation
+inference variants, and the training loops (`train/train_*.py`).
+
+- **What it is:** a *research training + inference framework*, not an ops orchestrator. It
+  treats a whole multi-agent system as "one unified recursive computation" and **co-trains**
+  the agents to collaborate. Claims ~2.4x faster inference and ~75% token reduction across 9
+  benchmarks (math/science/medicine/code/search).
+- **Agents & topologies:** heterogeneous LLM agents wired in one of four patterns —
+  **Sequential** (Planner→Critic/Refiner→Solver), **Mixture** (domain experts + summarizer),
+  **Distillation** (Expert→Learner), **Deliberation** (Reflector + Tool-Caller). Each agent is a
+  separate model (`agent1/2/3_model_name_or_path`) driven by stage functions
+  (`run_planner_latent_stage`, `run_refiner_latent_stage`, `run_solver_latent_stage`).
+- **How it recurses** (`inference_mas.py::ours_recursive`): loops `recursive_rounds`; round 0
+  runs planner→refiner→solver, later rounds feed a solver *feedback* tensor back into the planner
+  (`run_*_feedback_latent_stage`). "Refinement" = rounds over a shared state, not re-reading tokens.
+- **How context is shared — the crux:** agents exchange **latent hidden-state tensors, not text**.
+  Planner hidden states pass through an `inner_N` adapter, then a `CrossModelAdapter`
+  (`outer_12`, `outer_23` — the "RecursiveLink") that re-projects them into the next agent's
+  embedding space and injects them as slot content (`build_stage_with_slot`). State lives
+  in-memory as `List[List[torch.Tensor]]`, is **pushed** to each agent via function params, and is
+  **discarded after each round**. There is **no persistent store, no graph, nothing an agent
+  pulls** — and the channel only works because inner+outer are **co-trained** (Inner-Outer Loop).
+
+So RecursiveMAS solves the *same problem* as code-review-graph and our M4b — stop every agent
+re-holding the full context; share a compact refined slice → token savings — but with the
+**opposite mechanism** to what we can use: opaque, ephemeral, pushed, co-trained tensors vs our
+interpretable, persistent, pulled, authored notes.
+
+## Synthesis: memory-graph as recursive-MAS context substrate
+
+The user's thesis — make the SurrealDB note-graph the shared substrate a recursive MAS traverses
+on demand — is essentially: **keep RecursiveMAS's problem framing and its collaboration
+topologies, but swap its latent-state channel for a persistent typed-link graph, and swap
+push-everything for blast-radius PULL** (code-review-graph's model). One line: no sub-agent
+inherits a compacting conversation; each binds a bounded slice by traversing typed links from its
+task's seed notes.
+
+Concrete mapping onto our pieces:
+
+- **Shared substrate = the `MemoryNote` typed-link graph** (idea #1 above). RecursiveMAS's
+  `outer_12/23` latent channel becomes our edges — but instead of a trained adapter compressing
+  state, an agent reads the specific neighbour notes it needs. Interpretable and rebuildable from
+  the event log; RecursiveMAS's tensors are neither.
+- **Per-agent context fetch = `memory_search` + `memory_read`, plus a thin
+  `memory_neighbors(noteId, kinds?, depth?, budget)` traverse tool** (= idea #2 graph-distance
+  ranker + idea #3 token budget, exposed as a tool). This is the *pull* equivalent of RecursiveMAS
+  *pushing* `planner_to_refiner`. Blast-radius from a seed note = the sub-agent's context slice; it
+  never loads the whole memory.
+- **Where an agent binds its slice = the DBOS step / sub-agent boundary.** When the orchestrator
+  spawns a sub-agent (a dbos step), that boundary runs the seed→traverse query and pins the
+  returned slice as the child's starting context — the analogue of RecursiveMAS injecting a
+  stage's slot content, but fetched, not handed down a compacting chat. Next "round": the child
+  writes new/updated notes via `memory_write` (append-only event); the parent/next agent
+  re-traverses. Recursion happens through the log + graph, not through passed tensors.
+- **Topologies → link kinds / categories:** Sequential/Deliberation feedback → a
+  `feedback`/`contradicts`/`refines` edge the next agent traverses; Mixture summarizer → a rollup
+  note that CONTAINS/links its experts' notes; Distillation → `derived_from`. RecursiveMAS's four
+  patterns become graph shapes, not code paths.
+
+Cheap-now vs contract-change vs deferred:
+
+- **Cheap now:** the blast-radius pull framing; `detail_level`/token-budget result shaping;
+  SurrealDB graph traversal for "neighbours of a seed note." No contract impact — works on today's
+  untyped `links[]` with degraded ranking.
+- **Contract change (flag, don't do):** typed + confidence-weighted links in the `memory_written`
+  payload (`{id, kind, confidence?}`), and a `memory_neighbors`/traverse tool added to the
+  pull-tool set. These unlock topology-aware traversal and the graph-distance ranker.
+- **Deferred / out of scope:** RecursiveMAS's actual mechanism — latent-state exchange,
+  cross-model adapters, Inner-Outer co-training — stays out entirely (push, ephemeral, opaque,
+  needs training the models; conflicts with CQRS/event-log-is-truth and interpretability). Vectors
+  stay deferred; graph-distance is the interim relevance signal.
+
+**Bottom line:** our design already *is* the better substrate for this vision — persistent,
+pulled, event-sourced, interpretable. RecursiveMAS validates the goal (share a slice, don't
+re-hold everything) and donates the topologies; code-review-graph donates the
+traversal/blast-radius/token-budget mechanics. Do **not** try to reproduce RecursiveMAS's latent
+channel.
+
 ## 4. What NOT to adopt
 
 - **Auto-deriving the graph from AST / Tree-sitter.** Their nodes/edges are *extracted from
@@ -152,6 +238,18 @@ reports `original_tokens` vs optimized size as `context_savings`.
 - **Tool sprawl (~30 MCP tools / 16 query patterns).** We have three pull tools; resist
   splintering. One `memory_search` with a `pattern`/`kind` param beats twelve tools.
 
+*RecursiveMAS-specific:*
+
+- **Latent hidden-state / tensor exchange via `CrossModelAdapter` ("RecursiveLink").** Opaque,
+  un-event-sourceable, and only works after co-training the agent models. Our channel is authored
+  notes — keep it interpretable text/data, never compressed tensors.
+- **Push + ephemeral in-memory state** (`List[List[torch.Tensor]]`, discarded each round). This is
+  exactly what we're replacing: pull a bounded slice from a persistent graph; don't push-and-discard.
+- **Inner-Outer co-training of the agents.** We orchestrate off-the-shelf models; no model
+  training. Fully out of scope.
+- **A single global run-blob holding all round-states.** Contrast our per-agent bounded slice +
+  single-writer event log. Don't centralize a mutable shared blob.
+
 ## 5. Open questions / follow-ups
 
 1. **Edge directionality:** `supersedes`/`refines` are directional; `relates_to`/`contradicts`
@@ -165,3 +263,15 @@ reports `original_tokens` vs optimized size as `context_savings`.
    SurrealDB BM25 from day one? Cheap to try graph-only first and add FTS if recall is poor.
 4. **Weights as config:** they expose decay/floor via env vars. A small tunable weight table for
    our edge kinds (default in code, overridable) is likely worth it once #1 and #2 land.
+
+*RecursiveMAS / substrate-specific:*
+
+5. **Slice binding at the dbos step boundary:** does a sub-agent need a stored "context manifest"
+   (which note ids it was given) for reproducibility/debugging, or is re-running the seed→traverse
+   query deterministic enough?
+6. **Closing the recursion loop:** when a child writes `contradicts`/`refines` notes, does the
+   parent re-traverse automatically or only on its next explicit `memory_search`? (Push is
+   deferred → pull-on-next-turn; confirm the loop actually closes.)
+7. **Seed selection:** what seeds a sub-agent's traversal — its task's `paths` matched to notes, an
+   explicit parent-passed note-id set, or a `memory_search` on the task text? Likely all three;
+   cheapest is search-on-task-text first, add the others if recall is poor.
