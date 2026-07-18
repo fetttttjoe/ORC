@@ -29,4 +29,28 @@ describe('createVaultProjector.renderAll', () => {
     expect(existsSync(path.join(vaultDir, `tasks/${t.id}/plan-v1.md`))).toBe(true)
     await log.close()
   })
+
+  it('ignores project-scoped memory events (null taskId) — no throw, no stray task dir', async () => {
+    const db = await createTestDb(); dbs.push(db)
+    const vaultDir = mkdtempSync(path.join(tmpdir(), 'orc-vp-')); dirs.push(vaultDir)
+    const log = await EventLog.open(db.url)
+    const kernel = new Kernel(log)
+    const t = await kernel.createTask({ title: 'demo', spec: 'do it' })
+    await log.append({
+      taskId: null, stepId: null, runToken: null,
+      kind: 'memory_written',
+      payload: {
+        note: { id: 'note-x', title: 'X', scope: 'project', categories: [], tags: [], links: [], paths: [], rules: [], summary: '', body: '' },
+        author: { source: 'cli' },
+      },
+    })
+
+    const projector = createVaultProjector({ log, config: { vaultDir } })
+    await expect(projector.renderAll()).resolves.toBeUndefined()
+    await projector.close()
+
+    expect(existsSync(path.join(vaultDir, `tasks/${t.id}`))).toBe(true)
+    expect(existsSync(path.join(vaultDir, 'tasks/null'))).toBe(false)
+    await log.close()
+  })
 })

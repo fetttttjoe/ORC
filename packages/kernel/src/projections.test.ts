@@ -151,6 +151,17 @@ describe('fold — execution kinds', () => {
     expect(completedStepIds(state, 't1')).toEqual(new Set(['s1']))
   })
 
+  it('ignores memory events and does not create a task', () => {
+    const base = fold([])
+    const withMem = fold([{
+      seq: 1, taskId: null, stepId: null, runToken: null,
+      kind: 'memory_written',
+      payload: { note: { id: 'x', title: 'X', scope: 'project', categories: [], tags: [], links: [], paths: [], rules: [], summary: '', body: '' }, author: { source: 'cli' } },
+      usage: null, ts: '2026-07-18T00:00:00Z',
+    }] as any)
+    expect(withMem.tasks.size).toBe(base.tasks.size)
+  })
+
   it('dedups crash-boundary duplicates by (runToken, kind, iteration, toolCallId)', () => {
     const dup = exEvt(3, 'agent_call', { stepId: 's1', runToken: rt('s1'), iteration: 1, request: {}, response: {} },
       { inputTokens: 100, outputTokens: 50, costUSD: 0.01, estimated: false })
