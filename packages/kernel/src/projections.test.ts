@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'bun:test'
 import type { EventRecord, Plan, TaskNode } from '@orc/contracts'
 import { draftFixture, planFixture, stepFixture } from '@orc/contracts/fixtures'
-import { fold, completedStepIds, nextAttempts, crashDedupKey } from './projections'
+import { fold, completedStepIds, nextAttempts, crashDedupKey, subtreeTaskIds, subtreeUsage, pendingSplitForChild } from './projections'
 
 const task: TaskNode = {
   id: 't1', parentId: null, type: 'generic', title: 'hello', spec: '',
@@ -209,5 +209,49 @@ describe('fold — execution kinds', () => {
     expect(step?.iterations).toBe(0)
     // note: usage from the stale agent_call IS accumulated regardless — that update is deliberately
     // unguarded (spec asymmetry), so it is intentionally not asserted to stay zero here.
+  })
+
+  it('folds splits: proposed pending, resolved marks; dedups replayed proposals by splitId', () => {
+    const splitP = { splitId: 'sp1', taskId: 't1', stepId: 's1', runToken: rt('s1'), childTaskId: 'c1' }
+    const state = fold([
+      { seq: 1, taskId: 't1', stepId: 's1', runToken: rt('s1'), kind: 'split_proposed', payload: splitP, usage: null, ts: 'T' },
+      { seq: 2, taskId: 't1', stepId: 's1', runToken: rt('s1'), kind: 'split_proposed', payload: splitP, usage: null, ts: 'T' }, // crash replay
+      { seq: 3, taskId: 't1', stepId: 's1', runToken: rt('s1'), kind: 'split_proposed', payload: { ...splitP, splitId: 'sp2', childTaskId: 'c2' }, usage: null, ts: 'T' },
+    ])
+    expect(state.splits.size).toBe(2) // sp1 deduped, sp2 distinct despite same runToken
+    expect(state.splits.get('sp1')?.resolved).toBe(false)
+    expect(pendingSplitForChild(state, 'c1')?.splitId).toBe('sp1')
+    const resolved = fold([
+      { seq: 1, taskId: 't1', stepId: 's1', runToken: rt('s1'), kind: 'split_proposed', payload: splitP, usage: null, ts: 'T' },
+      { seq: 2, taskId: 't1', stepId: null, runToken: null, kind: 'split_resolved', payload: { splitId: 'sp1', childTaskId: 'c1', outcome: 'done', summary: 'ok', notes: [] }, usage: null, ts: 'T' },
+    ])
+    expect(resolved.splits.get('sp1')?.resolved).toBe(true)
+    expect(pendingSplitForChild(resolved, 'c1')).toBeUndefined()
+  })
+
+  it('subtreeUsage sums a task and its descendants; subtreeTaskIds walks parentId', () => {
+    const t = (id: string, parentId: string | null): EventRecord => ({
+      seq: 0, taskId: id, stepId: null, runToken: null, kind: 'task_created',
+      payload: { task: { id, parentId, type: 'generic', title: id, spec: '', status: 'draft', zone: [], budgetUSD: null, depth: parentId ? 1 : 0, createdAt: 'T' } },
+      usage: null, ts: 'T',
+    })
+    const usage = (taskId: string, cost: number): EventRecord => ({
+      seq: 0, taskId, stepId: 's1', runToken: `rt-${taskId}`, kind: 'agent_call',
+      payload: { stepId: 's1', runToken: `rt-${taskId}`, iteration: 1, request: {}, response: {} },
+      usage: { inputTokens: 1, outputTokens: 1, costUSD: cost, estimated: false }, ts: 'T',
+    })
+    const state = fold([t('p', null), t('c1', 'p'), t('c2', 'p'), t('g1', 'c1'), usage('p', 1), usage('c1', 2), usage('g1', 4)].map((e, i) => ({ ...e, seq: i + 1 })))
+    expect(subtreeTaskIds(state, 'p')).toEqual(['p', 'c1', 'c2', 'g1'])
+    expect(subtreeUsage(state, 'p').costUSD).toBe(7)
+    expect(subtreeUsage(state, 'c1').costUSD).toBe(6)
+  })
+
+  it('plan_proposed replay with the same (taskId, version) folds once', () => {
+    const plan = planFixture({ taskId: 't1', version: 1 })
+    const state = fold([
+      { seq: 1, taskId: 't1', stepId: null, runToken: null, kind: 'plan_proposed', payload: { plan }, usage: null, ts: 'T' },
+      { seq: 2, taskId: 't1', stepId: null, runToken: null, kind: 'plan_proposed', payload: { plan }, usage: null, ts: 'T' },
+    ])
+    expect(state.plans.get('t1')?.versions).toHaveLength(1)
   })
 })

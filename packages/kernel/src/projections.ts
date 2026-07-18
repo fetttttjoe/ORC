@@ -25,12 +25,22 @@ export interface RunRecord {
   cwd: string | null
 }
 
+export interface SplitState {
+  splitId: string
+  taskId: string      // parent
+  stepId: string
+  runToken: string
+  childTaskId: string
+  resolved: boolean
+}
+
 export interface State {
   tasks: Map<string, TaskNode>
   plans: Map<string, TaskPlans>
   steps: Map<string, Map<string, StepState>>
   runs: Map<string, RunRecord[]>
   usage: Map<string, Usage>
+  splits: Map<string, SplitState>
 }
 
 const ZERO_USAGE: Usage = { inputTokens: 0, outputTokens: 0, costUSD: null, estimated: false }
@@ -40,12 +50,13 @@ export const crashDedupKey = (e: EventRecord): string | null => {
   // and would collide; a replayed status append is idempotent in fold anyway.
   if (!e.runToken || e.kind === EVENT_KIND.task_status_changed) return null
   // `name` discriminates multiple `skill_loaded` events sharing one runToken.
-  const p = e.payload as { iteration?: number; toolCallId?: string; name?: string }
-  return `${e.runToken}:${e.kind}:${p.iteration ?? ''}:${p.toolCallId ?? ''}:${p.name ?? ''}`
+  // `splitId` discriminates multiple `split_proposed` events sharing one runToken.
+  const p = e.payload as { iteration?: number; toolCallId?: string; name?: string; splitId?: string }
+  return `${e.runToken}:${e.kind}:${p.iteration ?? ''}:${p.toolCallId ?? ''}:${p.name ?? ''}:${p.splitId ?? ''}`
 }
 
 export function fold(events: EventRecord[]): State {
-  const state: State = { tasks: new Map(), plans: new Map(), steps: new Map(), runs: new Map(), usage: new Map() }
+  const state: State = { tasks: new Map(), plans: new Map(), steps: new Map(), runs: new Map(), usage: new Map(), splits: new Map() }
   const seen = new Set<string>()
 
   const stepOf = (taskId: string, stepId: string): StepState | undefined => state.steps.get(taskId)?.get(stepId)
@@ -71,6 +82,7 @@ export function fold(events: EventRecord[]): State {
       case EVENT_KIND.plan_edited: {
         const { plan } = e.payload as { plan: Plan }
         const tp = state.plans.get(plan.taskId) ?? { versions: [], approvedVersion: null }
+        if (tp.versions.some(v => v.version === plan.version)) break // crash-replayed re-propose
         tp.versions.push(plan)
         state.plans.set(plan.taskId, tp)
         break
@@ -118,9 +130,19 @@ export function fold(events: EventRecord[]): State {
       case EVENT_KIND.signal_received:
       case EVENT_KIND.memory_written:
       case EVENT_KIND.memory_deleted:
-      case EVENT_KIND.split_proposed:
-      case EVENT_KIND.split_resolved:
-        break // traceability only; no state derivation (split tracking lands in a later M5a task)
+        break // traceability only; no state derivation
+      case EVENT_KIND.split_proposed: {
+        const p = e.payload as { splitId: string; taskId: string; stepId: string; runToken: string; childTaskId: string }
+        if (!state.splits.has(p.splitId))
+          state.splits.set(p.splitId, { ...p, resolved: false })
+        break
+      }
+      case EVENT_KIND.split_resolved: {
+        const p = e.payload as { splitId: string }
+        const s = state.splits.get(p.splitId)
+        if (s) s.resolved = true
+        break
+      }
       case EVENT_KIND.step_completed: {
         const p = e.payload as { stepId: string; summary: string }
         if (!e.taskId) break
@@ -169,4 +191,28 @@ export function nextAttempts(state: State, taskId: string, plan: Pick<Plan, 'ste
 
 export function taskUsage(state: State, taskId: string): Usage {
   return state.usage.get(taskId) ?? ZERO_USAGE
+}
+
+export function subtreeTaskIds(state: State, rootId: string): string[] {
+  const children = new Map<string, string[]>()
+  for (const t of state.tasks.values())
+    if (t.parentId) (children.get(t.parentId) ?? children.set(t.parentId, []).get(t.parentId)!).push(t.id)
+  const out: string[] = []
+  const queue = [rootId]
+  while (queue.length) {
+    const id = queue.shift()!
+    out.push(id)
+    queue.push(...(children.get(id) ?? []))
+  }
+  return out
+}
+
+// ponytail: whole-subtree sum on every call — cache per fold if it measurably slows
+export function subtreeUsage(state: State, rootId: string): Usage {
+  return subtreeTaskIds(state, rootId).reduce((acc, id) => addUsage(acc, taskUsage(state, id)), ZERO_USAGE)
+}
+
+export function pendingSplitForChild(state: State, childTaskId: string): SplitState | undefined {
+  for (const s of state.splits.values()) if (s.childTaskId === childTaskId && !s.resolved) return s
+  return undefined
 }
