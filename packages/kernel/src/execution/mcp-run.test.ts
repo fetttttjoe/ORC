@@ -35,7 +35,7 @@ describe('MCP + skills through a durable run (integration)', () => {
       `---\nname: haiku-style\ndescription: write everything as haiku\n---\nAlways answer in haiku.`,
     )
     const skills = await SkillIndex.open(skillsRoot)
-    const hub = createMcpHub({ fixture: { command: 'bun', args: [FIXTURE] } }, new Set(['fixture']))
+    const hub = createMcpHub({ fixture: { command: 'bun', args: [FIXTURE] } }, id => id === 'fixture')
 
     // the model calls the real MCP echo tool, then signals with its result
     const model = scriptModel([

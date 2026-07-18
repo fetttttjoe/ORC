@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import type { EventRecord, MemoryNote } from '@orc/contracts'
 import { SurrealMemory } from './surreal'
+import { eventFixture } from '@orc/contracts/fixtures'
 import { createTestSurreal } from './test-helpers'
 import { renderMemoryIndex, rebuildVaultMemory } from './memory-index'
 
@@ -48,9 +49,8 @@ describe('rebuildVaultMemory', () => {
     const t = await createTestSurreal(); drops.push(t.drop)
     const m = await SurrealMemory.open(t)
     const vaultDir = mkdtempSync(path.join(tmpdir(), 'orc-memidx-'))
-    const written = (seq: number, id: string): EventRecord => ({
-      seq, projectId: 'p1', idempotencyKey: null, taskId: null, stepId: null, runToken: null,
-      kind: 'memory_written',
+    const written = (seq: number, id: string): EventRecord => eventFixture({
+      seq, taskId: null, kind: 'memory_written',
       payload: {
         note: {
           id, scope: 'project', kind: 'fact', sourceRevision: null, title: id,
@@ -58,7 +58,7 @@ describe('rebuildVaultMemory', () => {
         },
         author: { source: 'cli' },
       },
-      usage: null, ts: '2026-07-18T00:00:00Z',
+      ts: '2026-07-18T00:00:00Z',
     })
     await m.applyEvent(written(1, 'alpha'))
     await m.applyEvent(written(2, 'beta'))

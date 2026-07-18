@@ -1,10 +1,10 @@
+import { z } from 'zod'
 import {
-  ArtifactProducedPayload, EVENT_KIND, OPERATION_STATUS, STEP_RUN_STATUS, addUsage,
+  ArtifactProducedPayload, EVENT_KIND, FAILURE_CLASS, FailureClass, OPERATION_STATUS, Plan,
+  STEP_RUN_STATUS, TaskNode, TaskStatus, addUsage,
   OperationCompletedPayload, OperationFailedPayload, OperationStartedPayload,
 } from '@orc/contracts'
-import type {
-  EventRecord, FailureClass, OperationRecord, Plan, StepRunStatus, TaskNode, TaskStatus, Usage,
-} from '@orc/contracts'
+import type { EventRecord, OperationRecord, StepRunStatus, Usage } from '@orc/contracts'
 
 export interface TaskPlans {
   versions: Plan[]
@@ -90,12 +90,15 @@ const OPERATION_KINDS: Set<EventRecord['kind']> = new Set([
   EVENT_KIND.operation_started, EVENT_KIND.operation_completed, EVENT_KIND.operation_failed,
 ])
 
+// built once: the per-event discriminator read must not construct a schema each time
+const OperationIdOnly = OperationStartedPayload.pick({ operationId: true })
+
 // pure rebuild of the journal from the append-only truth
 export function foldOperations(events: EventRecord[]): Map<string, OperationRecord> {
   const out = new Map<string, OperationRecord>()
   for (const e of events) {
     if (!OPERATION_KINDS.has(e.kind)) continue
-    const id = OperationStartedPayload.pick({ operationId: true }).parse(e.payload).operationId
+    const id = OperationIdOnly.parse(e.payload).operationId
     out.set(id, applyOperationEvent(out.get(id), e))
   }
   return out
@@ -110,10 +113,32 @@ export const crashDedupKey = (e: EventRecord): string | null => {
   // `name` discriminates multiple `skill_loaded` events sharing one runToken.
   // `splitId` discriminates multiple `split_proposed` events sharing one runToken.
   // `path` discriminates multiple `artifact_produced` receipts sharing one runToken.
-  const p = e.payload as { iteration?: number; toolCallId?: string; name?: string; splitId?: string; path?: string }
-  return `${e.runToken}:${e.kind}:${p.iteration ?? ''}:${p.toolCallId ?? ''}:${p.name ?? ''}:${p.splitId ?? ''}:${p.path ?? ''}`
+  const f = (key: string): string => {
+    const v = e.payload[key]
+    return typeof v === 'string' || typeof v === 'number' ? String(v) : ''
+  }
+  return `${e.runToken}:${e.kind}:${f('iteration')}:${f('toolCallId')}:${f('name')}:${f('splitId')}:${f('path')}`
 }
 
+// Read-side views: only the fields fold derives state from, looser than the write-time
+// PAYLOAD_SCHEMAS on purpose — historical events may predate later-added fields (e.g.
+// plan_approved provenance), and reading must stay lenient where writing is strict.
+const View = {
+  task_created: z.object({ task: TaskNode }),
+  plan: z.object({ plan: Plan }),
+  plan_approved: z.object({ taskId: z.string(), version: z.number() }),
+  task_status_changed: z.object({ taskId: z.string(), to: TaskStatus }),
+  run_started: z.object({ planVersion: z.number(), retryIndex: z.number(), workflowId: z.string(), cwd: z.string().nullable().catch(null) }),
+  step_started: z.object({ stepId: z.string(), attempt: z.number() }),
+  agent_call: z.object({ stepId: z.string(), iteration: z.number() }),
+  split_proposed: z.object({ splitId: z.string(), taskId: z.string(), stepId: z.string(), runToken: z.string(), childTaskId: z.string() }),
+  split_resolved: z.object({ splitId: z.string() }),
+  step_completed: z.object({ stepId: z.string(), summary: z.string() }),
+  step_failed: z.object({ stepId: z.string(), class: FailureClass.catch(FAILURE_CLASS.agent_error), message: z.string() }),
+}
+
+// Lenient by design: fold must never throw on history — a malformed payload (from an
+// older schema or a poison event) skips its case rather than wedging every projection.
 export function fold(events: EventRecord[]): State {
   const state: State = { tasks: new Map(), plans: new Map(), steps: new Map(), runs: new Map(), usage: new Map(), splits: new Map(), operations: new Map(), artifacts: new Map() }
   const seen = new Set<string>()
@@ -133,13 +158,15 @@ export function fold(events: EventRecord[]): State {
     }
     switch (e.kind) {
       case EVENT_KIND.task_created: {
-        const { task } = e.payload as { task: TaskNode }
-        state.tasks.set(task.id, task)
+        const p = View.task_created.safeParse(e.payload)
+        if (p.success) state.tasks.set(p.data.task.id, p.data.task)
         break
       }
       case EVENT_KIND.plan_proposed:
       case EVENT_KIND.plan_edited: {
-        const { plan } = e.payload as { plan: Plan }
+        const p = View.plan.safeParse(e.payload)
+        if (!p.success) break
+        const plan = p.data.plan
         const tp = state.plans.get(plan.taskId) ?? { versions: [], approvedVersion: null }
         if (tp.versions.some(v => v.version === plan.version)) break // crash-replayed re-propose
         tp.versions.push(plan)
@@ -147,46 +174,48 @@ export function fold(events: EventRecord[]): State {
         break
       }
       case EVENT_KIND.plan_approved: {
-        const p = e.payload as { taskId: string; version: number }
-        const tp = state.plans.get(p.taskId)
-        if (tp) tp.approvedVersion = p.version
+        const p = View.plan_approved.safeParse(e.payload)
+        if (!p.success) break
+        const tp = state.plans.get(p.data.taskId)
+        if (tp) tp.approvedVersion = p.data.version
         break
       }
       case EVENT_KIND.task_status_changed: {
-        const p = e.payload as { taskId: string; to: TaskStatus }
-        const t = state.tasks.get(p.taskId)
-        if (t) state.tasks.set(p.taskId, { ...t, status: p.to })
+        const p = View.task_status_changed.safeParse(e.payload)
+        if (!p.success) break
+        const t = state.tasks.get(p.data.taskId)
+        if (t) state.tasks.set(p.data.taskId, { ...t, status: p.data.to })
         break
       }
       case EVENT_KIND.run_started: {
-        const p = e.payload as { planVersion: number; retryIndex: number; workflowId: string; cwd: string | null }
-        if (!e.taskId) break
+        const p = View.run_started.safeParse(e.payload)
+        if (!p.success || !e.taskId) break
         const runs = state.runs.get(e.taskId) ?? []
-        runs.push({ planVersion: p.planVersion, retryIndex: p.retryIndex, workflowId: p.workflowId, cwd: p.cwd })
+        runs.push({ planVersion: p.data.planVersion, retryIndex: p.data.retryIndex, workflowId: p.data.workflowId, cwd: p.data.cwd })
         state.runs.set(e.taskId, runs)
         break
       }
       case EVENT_KIND.step_started: {
-        const p = e.payload as { stepId: string; attempt: number }
-        if (!e.taskId) break
+        const p = View.step_started.safeParse(e.payload)
+        if (!p.success || !e.taskId || !e.runToken) break
         setStep(e.taskId, {
-          stepId: p.stepId, runToken: e.runToken!, attempt: p.attempt,
+          stepId: p.data.stepId, runToken: e.runToken, attempt: p.data.attempt,
           status: STEP_RUN_STATUS.running, iterations: 0, output: null, failure: null,
         })
         break
       }
       case EVENT_KIND.agent_call: {
-        const p = e.payload as { stepId: string; iteration: number }
-        if (!e.taskId) break
-        const s = stepOf(e.taskId, p.stepId)
-        if (s && s.runToken === e.runToken) s.iterations = Math.max(s.iterations, p.iteration)
+        const p = View.agent_call.safeParse(e.payload)
+        if (!p.success || !e.taskId) break
+        const s = stepOf(e.taskId, p.data.stepId)
+        if (s && s.runToken === e.runToken) s.iterations = Math.max(s.iterations, p.data.iteration)
         if (e.usage) state.usage.set(e.taskId, addUsage(state.usage.get(e.taskId) ?? ZERO_USAGE, e.usage))
         break
       }
       case EVENT_KIND.operation_started:
       case EVENT_KIND.operation_completed:
       case EVENT_KIND.operation_failed: {
-        const id = OperationStartedPayload.pick({ operationId: true }).parse(e.payload).operationId
+        const id = OperationIdOnly.parse(e.payload).operationId
         state.operations.set(id, applyOperationEvent(state.operations.get(id), e))
         break // journal only — operation events never drive step-status logic
       }
@@ -206,34 +235,36 @@ export function fold(events: EventRecord[]): State {
       case EVENT_KIND.memory_deleted:
         break // traceability only; no state derivation
       case EVENT_KIND.split_proposed: {
-        const p = e.payload as { splitId: string; taskId: string; stepId: string; runToken: string; childTaskId: string }
-        if (!state.splits.has(p.splitId))
-          state.splits.set(p.splitId, { ...p, resolved: false })
+        const p = View.split_proposed.safeParse(e.payload)
+        if (!p.success) break
+        if (!state.splits.has(p.data.splitId))
+          state.splits.set(p.data.splitId, { ...p.data, resolved: false })
         break
       }
       case EVENT_KIND.split_resolved: {
-        const p = e.payload as { splitId: string }
-        const s = state.splits.get(p.splitId)
+        const p = View.split_resolved.safeParse(e.payload)
+        if (!p.success) break
+        const s = state.splits.get(p.data.splitId)
         if (s) s.resolved = true
         break
       }
       case EVENT_KIND.step_completed: {
-        const p = e.payload as { stepId: string; summary: string }
-        if (!e.taskId) break
-        const s = stepOf(e.taskId, p.stepId)
+        const p = View.step_completed.safeParse(e.payload)
+        if (!p.success || !e.taskId) break
+        const s = stepOf(e.taskId, p.data.stepId)
         if (s && s.runToken === e.runToken) {
           s.status = STEP_RUN_STATUS.completed
-          s.output = p.summary
+          s.output = p.data.summary
         }
         break
       }
       case EVENT_KIND.step_failed: {
-        const p = e.payload as { stepId: string; class: FailureClass; message: string }
-        if (!e.taskId) break
-        const s = stepOf(e.taskId, p.stepId)
+        const p = View.step_failed.safeParse(e.payload)
+        if (!p.success || !e.taskId) break
+        const s = stepOf(e.taskId, p.data.stepId)
         if (s && s.runToken === e.runToken) {
           s.status = STEP_RUN_STATUS.failed
-          s.failure = { class: p.class, message: p.message }
+          s.failure = { class: p.data.class, message: p.data.message }
         }
         break
       }

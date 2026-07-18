@@ -59,7 +59,7 @@ export async function probeMemory(
     new URL(config.projectDbUrl)
     const surreal = await SurrealMemory.open(surrealTarget(config))
     const cursor = await surreal.getCursor()
-    const pending = (await log.after(cursor, [EVENT_KIND.memory_written, EVENT_KIND.memory_deleted])).length
+    const pending = await log.countAfter(cursor, [EVENT_KIND.memory_written, EVENT_KIND.memory_deleted])
     await surreal.close()
     return pending === 0 ? { healthy: true } : { healthy: false, reason: `${pending} unapplied events` }
   } catch (err) {

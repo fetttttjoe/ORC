@@ -33,6 +33,7 @@ export type MemoryLink = z.infer<typeof MemoryLink>
 export const NOTE_KINDS = ['fact', 'decision', 'architecture_current', 'architecture_target', 'documentation'] as const
 export const NoteKind = z.enum(NOTE_KINDS)
 export type NoteKind = z.infer<typeof NoteKind>
+export const NOTE_KIND = NoteKind.enum
 
 // What a writer (agent/CLI) supplies. Arrays/strings default so a minimal note is one id+title.
 const MemoryNoteBase = z.object({

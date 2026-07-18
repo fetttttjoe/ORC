@@ -24,7 +24,7 @@ export type EventKind = z.infer<typeof EventKind>
 
 export const EVENT_KIND = EventKind.enum
 
-export const PAYLOAD_SCHEMAS: Record<EventKind, z.ZodType> = {
+export const PAYLOAD_SCHEMAS = {
   task_created: z.object({ task: TaskNode }),
   plan_proposed: z.object({ plan: Plan }),
   plan_edited: z.object({ plan: Plan }),
@@ -114,7 +114,7 @@ export const PAYLOAD_SCHEMAS: Record<EventKind, z.ZodType> = {
   artifact_produced: ArtifactProducedPayload,
   memory_written: MemoryWrittenPayload,
   memory_deleted: MemoryDeletedPayload,
-}
+} satisfies Record<EventKind, z.ZodType>
 
 export const EventInput = z.object({
   taskId: z.string().min(1).nullable(),

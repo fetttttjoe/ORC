@@ -1,11 +1,11 @@
 import { fileURLToPath } from 'node:url'
 import { isDeepStrictEqual } from 'node:util'
 import pg from 'pg'
-import { and, asc, desc, eq, gt, inArray, sql } from 'drizzle-orm'
+import { and, asc, count, desc, eq, gt, inArray, sql } from 'drizzle-orm'
 import { drizzle, type NodePgDatabase } from 'drizzle-orm/node-postgres'
 import { migrate } from 'drizzle-orm/node-postgres/migrator'
 import {
-  EVENT_KIND, EventInput, OPERATION_STATUS, PAYLOAD_SCHEMAS,
+  EVENT_KIND, EventInput, OPERATION_STATUS, PAYLOAD_SCHEMAS, terminalError,
   type EventDraft, type EventKind, type EventRecord, type OperationRecord, type OperationSpec,
 } from '@orc/contracts'
 import { events, operations } from './schema'
@@ -87,9 +87,11 @@ const makeOps = (db: Queryable, ctx: LogContext): EventLogOps => {
     // so insert + pg_notify commit atomically and sequence allocation cannot cross
     async append(input) {
       const parsed = EventInput.parse(input)
-      PAYLOAD_SCHEMAS[parsed.kind].parse(parsed.payload)
-      const payload = ctx.redact.record(parsed.payload)
-      PAYLOAD_SCHEMAS[parsed.kind].parse(payload) // redaction must never invalidate a payload
+      // normalize to exactly what jsonb will store (undefined-valued keys dropped) BEFORE
+      // redacting and comparing — otherwise a byte-identical replay under an idempotency
+      // key deep-compares unequal against the stored round-tripped row and throws
+      const payload = ctx.redact(JSON.parse(JSON.stringify(parsed.payload)))
+      PAYLOAD_SCHEMAS[parsed.kind].parse(payload) // validated AFTER redaction: zod errors never quote raw secrets
       const values = {
         projectId: ctx.projectId,
         idempotencyKey: parsed.idempotencyKey,
@@ -156,6 +158,8 @@ export class EventLog implements EventLogOps {
   onAppend?: (e: EventRecord) => void
   private readonly ctx: LogContext
 
+  private readonly ops: EventLogOps
+
   private constructor(
     private readonly pool: pg.Pool,
     private readonly db: NodePgDatabase,
@@ -164,6 +168,7 @@ export class EventLog implements EventLogOps {
     redact: Redactor,
   ) {
     this.ctx = { projectId, redact, notify: e => this.onAppend?.(e) }
+    this.ops = makeOps(db, this.ctx)
   }
 
   static async open(url: string, opts: { projectId: string; redactEnv?: string[] }): Promise<EventLog> {
@@ -191,7 +196,8 @@ export class EventLog implements EventLogOps {
     let cursor = opts.fromSeq ?? (await this.latestSeq())
     let closed = false
     let client: pg.Client | null = null
-    let timer: ReturnType<typeof setTimeout> | null = null
+    let pumpTimer: ReturnType<typeof setTimeout> | null = null
+    let reconnectTimer: ReturnType<typeof setTimeout> | null = null
     let backoff = 0
     let pumping = false
     let wakeAgain = false
@@ -217,15 +223,15 @@ export class EventLog implements EventLogOps {
     const pumpSafe = (): void => {
       void pump().catch(err => {
         console.warn(`event stream pump failed: ${err instanceof Error ? err.message : String(err)}`)
-        if (!closed && timer === null) timer = setTimeout(() => { timer = null; pumpSafe() }, PUMP_RETRY_MS)
+        if (!closed && pumpTimer === null) pumpTimer = setTimeout(() => { pumpTimer = null; pumpSafe() }, PUMP_RETRY_MS)
       })
     }
     const scheduleReconnect = (): void => {
-      if (closed || timer !== null) return
+      if (closed || reconnectTimer !== null) return
       const delay = RECONNECT_DELAYS_MS[Math.min(backoff, RECONNECT_DELAYS_MS.length - 1)]!
       backoff += 1
-      timer = setTimeout(() => {
-        timer = null
+      reconnectTimer = setTimeout(() => {
+        reconnectTimer = null
         void connect(false)
       }, delay)
     }
@@ -254,7 +260,8 @@ export class EventLog implements EventLogOps {
     await connect(true)
     return async () => {
       closed = true
-      if (timer !== null) clearTimeout(timer)
+      if (pumpTimer !== null) clearTimeout(pumpTimer)
+      if (reconnectTimer !== null) clearTimeout(reconnectTimer)
       client?.removeAllListeners('notification')
       await client?.end()
     }
@@ -266,16 +273,23 @@ export class EventLog implements EventLogOps {
     return this.transaction(tx => tx.append(input))
   }
   byTask(taskId: string): Promise<EventRecord[]> {
-    return makeOps(this.db, this.ctx).byTask(taskId)
+    return this.ops.byTask(taskId)
   }
   byTaskSince(taskId: string, afterSeq: number): Promise<EventRecord[]> {
-    return makeOps(this.db, this.ctx).byTaskSince(taskId, afterSeq)
+    return this.ops.byTaskSince(taskId, afterSeq)
   }
   after(afterSeq: number, kinds?: EventKind[]): Promise<EventRecord[]> {
-    return makeOps(this.db, this.ctx).after(afterSeq, kinds)
+    return this.ops.after(afterSeq, kinds)
   }
   all(): Promise<EventRecord[]> {
-    return makeOps(this.db, this.ctx).all()
+    return this.ops.all()
+  }
+
+  // events with seq > afterSeq, counted in SQL — health probes must not materialize payloads
+  async countAfter(afterSeq: number, kinds?: EventKind[]): Promise<number> {
+    const [row] = await this.db.select({ n: count() }).from(events)
+      .where(and(eq(events.projectId, this.projectId), gt(events.seq, afterSeq), kinds ? inArray(events.kind, kinds) : undefined))
+    return row?.n ?? 0
   }
 
   // reads/appends inside fn MUST go through tx — pool queries would escape the transaction (spec §4)
@@ -288,6 +302,8 @@ export class EventLog implements EventLogOps {
       // Postgres READ COMMITTED lets two check-then-append transactions interleave (write
       // skew); the per-project advisory lock serializes writers within a project while
       // unrelated projects stay concurrent.
+      // ponytail: one lock per project — every append (traces included) serializes on it;
+      // move to per-task locks or a plain-append fast path if writer throughput matters
       await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${this.projectId}, 0))`)
       return fn(tx, makeOps(tx, this.ctx))
     })
@@ -329,7 +345,9 @@ export class EventLog implements EventLogOps {
   }
 
   // after-record: transition event, node update, and completion drafts commit atomically —
-  // the graph node and the append-only history can never disagree
+  // the graph node and the append-only history can never disagree.
+  // Re-entry for an attempt that already committed is idempotent; a stale attempt throws
+  // TERMINAL so the durable-step wrapper never re-fires the external effect over it.
   completeOperation(
     context: OperationContext,
     spec: OperationSpec,
@@ -338,7 +356,14 @@ export class EventLog implements EventLogOps {
     drafts: EventDraft[] = [],
   ): Promise<unknown> {
     return this.inTx(async (tx, ops) => {
-      const existing = await this.requireAttempt(tx, spec.operationId, attempt)
+      const existing = await this.operationRow(tx, spec.operationId)
+      if (!existing) throw terminalError(`operation '${spec.operationId}' was never started`)
+      if (existing.status === OPERATION_STATUS.completed) {
+        if (existing.attempts === attempt) return existing.after // lost-ack re-entry: already durable
+        throw terminalError(`operation '${spec.operationId}' already completed at attempt ${existing.attempts}`)
+      }
+      if (existing.attempts !== attempt)
+        throw terminalError(`operation '${spec.operationId}' attempt ${attempt} is stale (current attempt is ${existing.attempts})`)
       const event = await ops.append({
         taskId: context.taskId, stepId: context.stepId, runToken: context.runToken,
         kind: EVENT_KIND.operation_completed,
@@ -351,15 +376,20 @@ export class EventLog implements EventLogOps {
         await ops.append({
           taskId: context.taskId, stepId: context.stepId, runToken: context.runToken,
           kind: d.kind, payload: d.payload, usage: d.usage ?? null,
-          idempotencyKey: `${spec.operationId}:${attempt}:draft:${i}`,
+          idempotencyKey: d.idempotencyKey ?? `${spec.operationId}:${attempt}:draft:${i}`,
         })
       return next.after
     })
   }
 
+  // Non-throwing on ambiguity: this runs from failure paths whose original error must
+  // surface — and a COMPLETED node is never regressed (a lost commit-ack from
+  // completeOperation must not flip a durable success into failed + re-run).
   failOperation(context: OperationContext, spec: OperationSpec, attempt: number, error: unknown): Promise<void> {
     return this.inTx(async (tx, ops) => {
-      const existing = await this.requireAttempt(tx, spec.operationId, attempt)
+      const existing = await this.operationRow(tx, spec.operationId)
+      if (!existing) throw terminalError(`operation '${spec.operationId}' was never started`)
+      if (existing.status === OPERATION_STATUS.completed || existing.attempts !== attempt) return
       const event = await ops.append({
         taskId: context.taskId, stepId: context.stepId, runToken: context.runToken,
         kind: EVENT_KIND.operation_failed,
@@ -368,14 +398,6 @@ export class EventLog implements EventLogOps {
       })
       await this.upsertOperation(tx, applyOperationEvent(toOperation(existing), event))
     })
-  }
-
-  private async requireAttempt(tx: Tx, operationId: string, attempt: number): Promise<OperationRow> {
-    const existing = await this.operationRow(tx, operationId)
-    if (!existing) throw new Error(`operation '${operationId}' was never started`)
-    if (existing.attempts !== attempt)
-      throw new Error(`operation '${operationId}' attempt ${attempt} is stale (current attempt is ${existing.attempts})`)
-    return existing
   }
 
   async operationsFor(taskId: string): Promise<OperationRecord[]> {
@@ -394,7 +416,8 @@ export class EventLog implements EventLogOps {
       ])
       const folded = foldOperations(transitions)
       await tx.delete(operations).where(eq(operations.projectId, this.projectId))
-      for (const rec of folded.values()) await tx.insert(operations).values(toOperationRow(rec))
+      const rows = [...folded.values()].map(toOperationRow)
+      if (rows.length > 0) await tx.insert(operations).values(rows)
       return folded.size
     })
   }

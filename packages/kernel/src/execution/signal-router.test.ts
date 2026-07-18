@@ -3,10 +3,11 @@ import { EVENT_KIND, TASK_STATUS, type EventRecord, type SplitResult, type TaskN
 import { EventLog } from '../eventlog'
 import { createTestDb, TEST_PROJECT_ID } from '../test-helpers'
 import { composeSplitResult, createSignalRouter } from './signal-router'
+import { eventFixture } from '@orc/contracts/fixtures'
 
 const split = { splitId: 'sp1', taskId: 'p', stepId: 's1', runToken: 'rt', childTaskId: 'c1', resolved: false }
 const evt = (over: Partial<EventRecord>): EventRecord =>
-  ({ seq: 1, projectId: TEST_PROJECT_ID, idempotencyKey: null, taskId: 'c1', stepId: null, runToken: null, kind: 'task_created', payload: {}, usage: null, ts: 'T', ...over })
+  eventFixture({ projectId: TEST_PROJECT_ID, taskId: 'c1', ts: 'T', ...over })
 const childTask = (id: string, parentId: string) => evt({
   taskId: id,
   payload: { task: { id, parentId, type: 'split', title: id, spec: '', status: 'draft', zone: [], budgetUSD: null, depth: 1, createdAt: 'T' } },

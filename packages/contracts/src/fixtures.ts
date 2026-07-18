@@ -1,6 +1,16 @@
 // Shared test fixtures (import via '@orc/contracts/fixtures') — the single place a
-// PlanStep/Plan shape change has to touch across every package's tests.
+// PlanStep/Plan/EventRecord shape change has to touch across every package's tests.
+import type { EventRecord } from './events'
 import type { Plan, PlanDraft, PlanStep } from './plan'
+
+export function eventFixture(over: Partial<EventRecord> = {}): EventRecord {
+  return {
+    seq: 1, projectId: 'p1', idempotencyKey: null,
+    taskId: 't1', stepId: null, runToken: null,
+    kind: 'task_created', payload: {}, usage: null, ts: '2026-07-18T00:00:00.000Z',
+    ...over,
+  }
+}
 
 export function stepFixture(over: Partial<PlanStep> = {}): PlanStep {
   return {

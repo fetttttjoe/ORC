@@ -2,13 +2,12 @@ import { describe, expect, it } from 'bun:test'
 import type { EventRecord, TaskNode } from '@orc/contracts'
 import { EVENT_KIND } from '@orc/contracts'
 import { planFixture, stepFixture } from '@orc/contracts/fixtures'
+import { eventFixture } from '@orc/contracts/fixtures'
 import { renderRootIndex, renderTaskFiles } from './render'
 
 let seq = 0
-const ev = (over: Partial<EventRecord>): EventRecord => ({
-  seq: ++seq, projectId: 'p1', idempotencyKey: null, taskId: 't1', stepId: null, runToken: null,
-  kind: EVENT_KIND.task_created, payload: {}, usage: null, ts: '2026-07-17T00:00:00.000Z', ...over,
-})
+const ev = (over: Partial<EventRecord>): EventRecord =>
+  eventFixture({ seq: ++seq, ts: '2026-07-17T00:00:00.000Z', ...over })
 const task = (over: Partial<TaskNode> = {}): TaskNode => ({
   id: 't1', parentId: null, type: 'generic', title: 'demo', spec: 'do it', status: 'running',
   zone: [], budgetUSD: null, depth: 0, createdAt: '2026-07-17T00:00:00.000Z', ...over,

@@ -59,6 +59,7 @@
       "dependencies": {
         "@orc/contracts": "workspace:*",
         "@orc/kernel": "workspace:*",
+        "zod": "^4",
       },
     },
     "plugins/executor-api-loop": {

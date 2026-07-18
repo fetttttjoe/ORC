@@ -5,7 +5,7 @@ import { writeVaultFiles } from './write'
 
 export { frontmatter } from './frontmatter'
 export { parsePlanFile, renderPlanFile } from './plan-md'
-export { renderRootIndex, renderTaskFiles, type VaultFiles } from './render'
+export { mermaidLabel, renderRootIndex, renderTaskFiles, type VaultFiles } from './render'
 export { writeVaultFiles } from './write'
 
 export interface VaultProjector {
@@ -43,7 +43,8 @@ export function createVaultProjector(opts: { log: EventLog; config: { vaultDir: 
   return {
     renderTask, renderAll,
     start: async () => {
-      await renderAll()
+      // subscribe BEFORE the initial render: an event landing between renderAll's reads and a
+      // later subscribe would fall below the subscription's start cursor and never arrive
       unsub = await log.subscribe({}, e => {
         if (!e.taskId) return // ponytail: memory events are project-scoped, not task-scoped
         const taskId = e.taskId
@@ -55,6 +56,7 @@ export function createVaultProjector(opts: { log: EventLog; config: { vaultDir: 
           renderTask(taskId).catch(err => console.warn(`vault render failed: ${err instanceof Error ? err.message : String(err)}`))
         }, 50))
       })
+      await renderAll()
     },
     close: async () => {
       if (!unsub) { for (const t of timers.values()) clearTimeout(t); timers.clear(); return }

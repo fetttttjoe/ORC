@@ -1,18 +1,15 @@
 import { readdirSync, rmSync, statSync } from 'node:fs'
 import path from 'node:path'
-import type { MemoryNote, NoteKind } from '@orc/contracts'
-import { frontmatter } from '@orc/vault-projector'
+import { NOTE_KIND, type MemoryNote, type NoteKind } from '@orc/contracts'
+import { frontmatter, mermaidLabel } from '@orc/vault-projector'
 import { SurrealMemory } from './surreal'
 import { noteRelPath, renderNoteFile } from './note-md'
 import { writeMemoryFile } from './write-note'
 
-// mermaid labels: double quotes end the label — never let note data break the graph
-const label = (s: string): string => s.replaceAll('"', "'")
-
 const SECTIONS: { title: string; kinds: NoteKind[] }[] = [
-  { title: 'Current architecture', kinds: ['architecture_current'] },
-  { title: 'Target architecture', kinds: ['architecture_target'] },
-  { title: 'Decisions and facts', kinds: ['decision', 'fact', 'documentation'] },
+  { title: 'Current architecture', kinds: [NOTE_KIND.architecture_current] },
+  { title: 'Target architecture', kinds: [NOTE_KIND.architecture_target] },
+  { title: 'Decisions and facts', kinds: [NOTE_KIND.decision, NOTE_KIND.fact, NOTE_KIND.documentation] },
 ]
 
 function section(title: string, notes: MemoryNote[]): string {
@@ -21,7 +18,7 @@ function section(title: string, notes: MemoryNote[]): string {
   const lines = ['```mermaid', 'graph TD']
   for (const n of notes) {
     const name = node.get(`${n.scope}:${n.id}`)
-    lines.push(`  ${name}["${label(n.title)}"]`)
+    lines.push(`  ${name}["${mermaidLabel(n.title)}"]`)
     lines.push(`  click ${name} "${noteRelPath(n)}"`)
   }
   for (const n of notes)
@@ -52,11 +49,9 @@ export async function rebuildVaultMemory(surreal: SurrealMemory, vaultDir: strin
   writeMemoryFile(vaultDir, 'index.md', renderMemoryIndex(notes))
 }
 
-function listFiles(root: string, rel = ''): string[] {
-  const dir = path.join(root, rel)
-  if (!statSync(dir, { throwIfNoEntry: false })?.isDirectory()) return []
-  return readdirSync(dir).flatMap(entry => {
-    const child = rel === '' ? entry : `${rel}/${entry}`
-    return statSync(path.join(root, child)).isDirectory() ? listFiles(root, child) : [child]
-  })
+function listFiles(root: string): string[] {
+  if (!statSync(root, { throwIfNoEntry: false })?.isDirectory()) return []
+  return readdirSync(root, { recursive: true, withFileTypes: true })
+    .filter(e => e.isFile())
+    .map(e => path.relative(root, path.join(e.parentPath, e.name)))
 }
