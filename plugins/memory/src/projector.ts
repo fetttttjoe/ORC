@@ -32,7 +32,7 @@ export function createMemoryProjector(opts: { log: EventLog; surreal: SurrealMem
   // non-tx appends — spec §4.3). Callers are responsible for serializing calls (see `serialize`
   // below) so revision/ordering stays deterministic.
   const drainFrom = async (fromSeq: number): Promise<number> => {
-    const events = (await log.all()).filter(e => e.seq > fromSeq && (e.kind === EVENT_KIND.memory_written || e.kind === EVENT_KIND.memory_deleted))
+    const events = await log.after(fromSeq, [EVENT_KIND.memory_written, EVENT_KIND.memory_deleted])
     for (const e of events) await applyOne(e)
     return surreal.getCursor()
   }

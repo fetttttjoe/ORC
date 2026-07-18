@@ -2,7 +2,7 @@ import { readdirSync, readFileSync } from 'node:fs'
 import path from 'node:path'
 import { Command } from 'commander'
 import { ISOLATION_TIER, PlanDraft, type EventRecord, type ExecutionPort, type Plan, type RunHandle } from '@orc/contracts'
-import { EventLog, Kernel, grantTrust, initializeProject, loadConfig, requireProject, taskUsage, type OrcConfig, type PluginHost } from '@orc/kernel'
+import { EventLog, Kernel, fold, grantTrust, initializeProject, loadConfig, requireProject, taskUsage, type OrcConfig, type PluginHost } from '@orc/kernel'
 import { createVaultProjector, parsePlanFile } from '@orc/vault-projector'
 import { createMemory } from '@orc/memory'
 import type { McpHub } from '@orc/mcp-client'
@@ -170,9 +170,32 @@ export function buildProgram(
   program
     .command('log <taskId>')
     .description('show the event trail for a task')
-    .action(async (taskId: string) => {
-      for (const e of await kernel.eventsFor(taskId))
+    .option('--json', 'full redacted event records as JSON')
+    .action(async (taskId: string, opts: { json?: boolean }) => {
+      const events = await kernel.eventsFor(taskId)
+      if (opts.json) {
+        console.log(JSON.stringify(events, null, 2))
+        return
+      }
+      for (const e of events)
         console.log(`${String(e.seq).padStart(4)}  ${e.ts}  ${e.kind}`)
+    })
+
+  program
+    .command('replay <taskId>')
+    .description('read-only audit replay: folded state at an event sequence (default: latest)')
+    .option('--at <seq>', 'replay up to and including this sequence')
+    .action(async (taskId: string, opts: { at?: string }) => {
+      const at = opts.at === undefined ? Number.POSITIVE_INFINITY : Number(opts.at)
+      if (opts.at !== undefined && (!Number.isInteger(at) || at < 0))
+        throw new Error(`--at must be a non-negative integer, got '${opts.at}'`)
+      const events = (await kernel.eventsFor(taskId)).filter(e => e.seq <= at)
+      const state = fold(events)
+      console.log(JSON.stringify(
+        state,
+        (_key, value) => (value instanceof Map ? Object.fromEntries(value) : value),
+        2,
+      ))
     })
 
   const needPort = async (): Promise<ExecutionPort> => {
@@ -222,6 +245,8 @@ export function buildProgram(
       const state = await kernel.state()
       const task = state.tasks.get(taskId)
       if (!task) throw new Error(`no task '${taskId}'`)
+      if (plugin?.config.projectId && plugin.config.projectName)
+        console.log(`project: ${plugin.config.projectName} (${plugin.config.projectId})`)
       console.log(`${task.id}  ${task.status}  ${task.title}`)
       const plan = state.plans.get(taskId)?.versions.at(-1)
       for (const step of plan?.steps ?? []) {
@@ -230,6 +255,13 @@ export function buildProgram(
         const detail = s?.failure ? `  [${s.failure.class}] ${s.failure.message}` : (s?.output ? `  → ${s.output}` : '')
         console.log(`  ${step.id.padEnd(12)} ${status.padEnd(10)} attempt ${s?.attempt ?? 0}${detail}`)
       }
+      const ops = [...state.operations.values()]
+        .filter(o => o.taskId === taskId)
+        .sort((a, b) => a.startedSeq - b.startedSeq)
+      for (const o of ops)
+        console.log(`  op  ${o.kind.padEnd(6)} ${o.name.padEnd(24)} ${o.status.padEnd(10)} attempts ${o.attempts}`)
+      for (const a of state.artifacts.get(taskId) ?? [])
+        console.log(`  out ${(a.stepId ?? '?').padEnd(12)} ${a.path} · sha256:${a.sha256.slice(0, 12)} · ${a.size}B`)
       const u = taskUsage(state, taskId)
       console.log(`  tokens in/out: ${u.inputTokens}/${u.outputTokens}  cost: ${u.costUSD === null ? 'n/a' : `$${u.costUSD.toFixed(4)}${u.estimated ? ' (est)' : ''}`}`)
     })

@@ -1,4 +1,4 @@
-import { EVENT_KIND, STEP_RUN_STATUS, TASK_STATUS, type EventRecord, type Plan, type TaskNode } from '@orc/contracts'
+import { EVENT_KIND, OPERATION_STATUS, STEP_RUN_STATUS, TASK_STATUS, type EventRecord, type Plan, type TaskNode } from '@orc/contracts'
 import { fold, taskUsage, type State, type StepState } from '@orc/kernel'
 import { frontmatter } from './frontmatter'
 import { renderPlanFile } from './plan-md'
@@ -30,10 +30,57 @@ function mermaidDag(plan: Plan, steps: Map<string, StepState> | undefined): stri
   return lines.join('\n')
 }
 
+// mermaid labels: double quotes end the label — never let data break the graph
+const label = (s: string): string => s.replaceAll('"', "'")
+
+// Plan topology plus live operation nodes: which effects ran, how many attempts, and
+// whether any node is still unresolved (started with no completion — the honest gap).
+function renderExecution(task: TaskNode, plan: Plan | undefined, state: State): string {
+  const head = { type: 'execution', task: task.id }
+  if (!plan) return fm(head, `# Execution: ${task.title}\n\n_no plan yet_`)
+  const steps = state.steps.get(task.id)
+  const lines = ['```mermaid', 'graph TD']
+  for (const st of plan.steps) lines.push(`  ${st.id}["${label(`${st.id} · ${st.executorRef}`)}"]:::${statusClass(steps?.get(st.id))}`)
+  for (const st of plan.steps) for (const d of st.dependsOn) lines.push(`  ${d} --> ${st.id}`)
+  const ops = [...state.operations.values()]
+    .filter(o => o.taskId === task.id)
+    .sort((a, b) => a.startedSeq - b.startedSeq)
+  ops.forEach((o, i) => {
+    const cls = o.status === OPERATION_STATUS.completed ? 'done' : o.status === OPERATION_STATUS.failed ? 'failed' : 'unresolved'
+    lines.push(`  op${i}["${label(`${o.kind} ${o.name} · ${o.status} · attempts ${o.attempts}`)}"]:::${cls}`)
+    lines.push(`  ${o.stepId} --> op${i}`)
+  })
+  lines.push('  classDef done fill:#1a7f37,color:#fff')
+  lines.push('  classDef running fill:#bf8700,color:#fff')
+  lines.push('  classDef failed fill:#cf222e,color:#fff')
+  lines.push('  classDef pending fill:#6e7781,color:#fff')
+  lines.push('  classDef unresolved fill:#bf8700,color:#fff,stroke-dasharray: 5 5') // visually distinct: attempt began, outcome unknown
+  lines.push('```')
+  return fm(head, `# Execution: ${task.title}\n\n${lines.join('\n')}`)
+}
+
+// producing step → verified output receipt
+function renderLineage(task: TaskNode, state: State): string {
+  const head = { type: 'lineage', task: task.id }
+  const artifacts = state.artifacts.get(task.id) ?? []
+  if (artifacts.length === 0) return fm(head, `# Lineage: ${task.title}\n\n_no declared outputs_`)
+  const lines = ['```mermaid', 'graph LR']
+  const steps = [...new Set(artifacts.map(a => a.stepId ?? 'unknown'))]
+  for (const s of steps) lines.push(`  ${s}["${label(s)}"]`)
+  artifacts.forEach((a, i) => {
+    lines.push(`  art${i}["${label(`${a.path} · sha256:${a.sha256.slice(0, 12)} · ${a.size}B`)}"]`)
+    lines.push(`  ${a.stepId ?? 'unknown'} --> art${i}`)
+  })
+  lines.push('```')
+  return fm(head, `# Lineage: ${task.title}\n\n${lines.join('\n')}`)
+}
+
 function renderTaskIndex(task: TaskNode, plan: Plan | undefined, steps: Map<string, StepState> | undefined, state: State): string {
   const links = [
     plan ? `- [Plan v${plan.version}](plan-v${plan.version}.md)` : '',
     '- [Log](log.md)',
+    '- [Execution](execution.md)',
+    '- [Lineage](lineage.md)',
     ...(plan?.steps ?? []).map(s => `- [Session: ${s.id}](sessions/${s.id}.md)`),
   ].filter(Boolean).join('\n')
   const dag = plan ? mermaidDag(plan, steps) : '_no plan yet_'
@@ -73,6 +120,8 @@ export function renderTaskFiles(taskId: string, events: EventRecord[]): VaultFil
   const files: VaultFiles = {
     [`${base}/index.md`]: renderTaskIndex(task, plans?.versions.at(-1), steps, state),
     [`${base}/log.md`]: renderLog(events),
+    [`${base}/execution.md`]: renderExecution(task, plans?.versions.at(-1), state),
+    [`${base}/lineage.md`]: renderLineage(task, state),
   }
   for (const p of plans?.versions ?? []) files[`${base}/plan-v${p.version}.md`] = renderPlanFile(p)
   const byStep = new Map<string, EventRecord[]>()
@@ -81,10 +130,28 @@ export function renderTaskFiles(taskId: string, events: EventRecord[]): VaultFil
   return files
 }
 
+// deterministic recursive task-expansion graph: which task created which child, with live status
+function taskExpansionGraph(tasks: TaskNode[]): string {
+  if (tasks.length === 0) return '_no tasks_'
+  const node = new Map(tasks.map((t, i) => [t.id, `t${i}`]))
+  const lines = ['```mermaid', 'graph TD']
+  for (const t of tasks) lines.push(`  ${node.get(t.id)}["${label(`${t.title} · ${t.status}`)}"]`)
+  for (const t of tasks)
+    if (t.parentId && node.has(t.parentId)) lines.push(`  ${node.get(t.parentId)} --> ${node.get(t.id)}`)
+  lines.push('```')
+  return lines.join('\n')
+}
+
 export function renderRootIndex(tasks: TaskNode[]): string {
+  // one deterministic order for every section — the render must not depend on input order
+  const sorted = [...tasks].sort((a, b) =>
+    a.depth - b.depth || a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id))
   const link = (t: TaskNode, suffix: string): string => `- [${t.title}](tasks/${t.id}/index.md) — ${suffix}`
-  const running = tasks.filter(t => t.status === TASK_STATUS.running)
+  const running = sorted.filter(t => t.status === TASK_STATUS.running)
   const active = running.length ? running.map(t => link(t, 'running')).join('\n') : '_none_'
-  const all = tasks.length ? tasks.map(t => link(t, t.status)).join('\n') : '_no tasks_'
-  return fm({ type: 'index' }, `# Vault\n\n## Active runs\n\n${active}\n\n## All tasks\n\n${all}`)
+  const all = sorted.length ? sorted.map(t => link(t, t.status)).join('\n') : '_no tasks_'
+  return fm(
+    { type: 'index' },
+    `# Vault\n\n## Task expansion\n\n${taskExpansionGraph(sorted)}\n\n## Active runs\n\n${active}\n\n## All tasks\n\n${all}`,
+  )
 }

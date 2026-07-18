@@ -1,6 +1,6 @@
 import path from 'node:path'
 import { afterAll, afterEach, describe, expect, it, mock, spyOn } from 'bun:test'
-import type { ExecutionPort, RunHandle } from '@orc/contracts'
+import type { ExecutionPort, OperationSpec, RunHandle } from '@orc/contracts'
 import { EventLog } from '@orc/kernel'
 import { createTestDb, TEST_PROJECT_ID } from '@orc/kernel/test-helpers'
 import { buildProgram, openKernel } from './main'
@@ -124,5 +124,35 @@ describe('exec commands', () => {
     await run('status', id)
     expect(lines.join('\n')).toContain('approved') // task status
     expect(lines.join('\n')).toContain('s1')       // template step listed
+  })
+
+  it('status shows started/completed operations and output receipts', async () => {
+    const db = await createTestDb()
+    dbs.push(db)
+    const { kernel, log } = await openKernel(db.url, { projectId: TEST_PROJECT_ID })
+    const { port } = stubPort()
+    const lines: string[] = []
+    spyOn(console, 'log').mockImplementation((...a: unknown[]) => { lines.push(a.join(' ')) })
+    const run = async (...args: string[]) => buildProgram(kernel, async () => port).parseAsync(args, { from: 'user' })
+    const id = await approvedTask(run, lines)
+
+    const opContext = { taskId: id, stepId: 's1', runToken: `step:${id}:s1:a1` }
+    const modelSpec: OperationSpec = { operationId: `${opContext.runToken}:model:1`, kind: 'model', name: 'fake/m', before: {} }
+    const toolSpec: OperationSpec = { operationId: `${opContext.runToken}:tool:1:c1`, kind: 'tool', name: 'fs_write', before: {} }
+    await log.beginOperation(opContext, modelSpec)
+    await log.completeOperation(opContext, modelSpec, 1, { text: 'hi' })
+    await log.beginOperation(opContext, toolSpec) // stays started — visible pending work
+    await log.append({
+      taskId: id, stepId: 's1', runToken: opContext.runToken, kind: 'artifact_produced',
+      payload: { path: 'report.md', sha256: 'a'.repeat(64), size: 5 },
+    })
+
+    lines.length = 0
+    await run('status', id)
+    const out = lines.join('\n')
+    expect(out).toMatch(/op {2}model {2}fake\/m\s+completed/)
+    expect(out).toMatch(/op {2}tool {3}fs_write\s+started/)
+    expect(out).toContain('report.md · sha256:aaaaaaaaaaaa · 5B')
+    await log.close()
   })
 })

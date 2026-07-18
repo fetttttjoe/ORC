@@ -4,6 +4,15 @@ import { fold, pendingSplitForChild, subtreeTaskIds, type SplitState } from '../
 
 const TERMINAL: Set<TaskStatus> = new Set([TASK_STATUS.done, TASK_STATUS.blocked, TASK_STATUS.cancelled, TASK_STATUS.failed])
 
+// everything split routing/composition needs — excludes the high-volume trace kinds
+// (agent/tool calls, operations, artifacts) so the router never scans the whole log
+const ROUTER_KINDS = [
+  EVENT_KIND.task_created, EVENT_KIND.task_status_changed,
+  EVENT_KIND.plan_proposed, EVENT_KIND.plan_edited, EVENT_KIND.plan_approved,
+  EVENT_KIND.run_started, EVENT_KIND.step_started, EVENT_KIND.step_completed, EVENT_KIND.step_failed,
+  EVENT_KIND.split_proposed, EVENT_KIND.split_resolved, EVENT_KIND.memory_written,
+]
+
 // Pure composition of the thin join payload from the log (spec D5). Deterministic:
 // same events → same result, so at-least-once routing appends identical split_resolved payloads.
 export function composeSplitResult(events: EventRecord[], split: SplitState): SplitResult {
@@ -72,7 +81,7 @@ export function createSignalRouter(opts: {
       // catch-up sweep BEFORE subscribing: every unresolved split whose child is already terminal
       // gets resolved now — heals a handler throw AND a terminal event that landed while the router
       // was down (never redelivered, since the pump pre-advances its cursor).
-      const seed = await opts.log.all()
+      const seed = await opts.log.after(0, ROUTER_KINDS)
       const state = fold(seed)
       for (const split of state.splits.values()) {
         if (split.resolved) continue
@@ -89,7 +98,7 @@ export function createSignalRouter(opts: {
       unsub = await opts.log.subscribe({ fromSeq: seed.at(-1)?.seq ?? 0 }, async e => {
         // route 2: an approved child with a pending split gets its run started (policy OR human)
         if (e.kind === EVENT_KIND.plan_approved && e.taskId) {
-          if (pendingSplitForChild(fold(await opts.log.all()), e.taskId))
+          if (pendingSplitForChild(fold(await opts.log.after(0, ROUTER_KINDS)), e.taskId))
             await opts.onChildApproved(e.taskId).catch(err =>
               console.warn(`signal router: startChildRun ${e.taskId}: ${err instanceof Error ? err.message : String(err)}`))
           return
@@ -99,7 +108,7 @@ export function createSignalRouter(opts: {
         if (e.kind !== EVENT_KIND.task_status_changed) return
         const to = (e.payload as { to: TaskStatus }).to
         if (!TERMINAL.has(to) || !e.taskId) return
-        const all = await opts.log.all()
+        const all = await opts.log.after(0, ROUTER_KINDS)
         const split = pendingSplitForChild(fold(all), e.taskId)
         if (split) await resolveSplit(all, split)
       })

@@ -1,4 +1,4 @@
-import { afterAll, describe, expect, it } from 'bun:test'
+import { afterAll, describe, expect, it, spyOn } from 'bun:test'
 import { mkdtempSync, existsSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
@@ -35,5 +35,24 @@ describe('memory projector', () => {
     await proj.rebuild()   // replays memory_* from the log into a fresh store
     expect(await surreal.get('auth', 'project')).toBeNull() // deleted stayed deleted after replay
     await proj.close(); await surreal.close(); await log.close()
+  })
+
+  it('never scans the whole log — catch-up uses the scoped kind query', async () => {
+    const pg = await createTestDb(); drops.push(pg.drop)
+    const ts = await createTestSurreal(); drops.push(ts.drop)
+    const log = await EventLog.open(pg.url, { projectId: TEST_PROJECT_ID })
+    const surreal = await SurrealMemory.open(ts)
+    const vaultDir = mkdtempSync(path.join(tmpdir(), 'vault-'))
+    await log.append({ taskId: null, stepId: null, runToken: null, kind: 'memory_written', payload: { note: noteInput, author: { source: 'cli' } } })
+
+    const allSpy = spyOn(log, 'all')
+    const proj = createMemoryProjector({ log, surreal, vaultDir })
+    await proj.start()
+    await proj.catchUp()
+    await proj.rebuild()
+    await proj.close()
+    expect(allSpy).not.toHaveBeenCalled()
+    expect((await surreal.get('auth', 'project'))?.title).toBe('Auth')
+    await surreal.close(); await log.close()
   })
 })
