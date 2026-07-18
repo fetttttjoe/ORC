@@ -27,30 +27,44 @@ export function createMemoryProjector(opts: { log: EventLog; surreal: SurrealMem
     await surreal.setCursor(e.seq)
   }
 
-  // Serialize applies so revision/ordering is deterministic; reconcile by querying the log
-  // WHERE seq > cursor rather than trusting the subscribe payload's ordering (the log's
-  // subscribe cursor can skip a lower seq under concurrent non-tx appends — spec §4.3).
+  // Reconcile by querying the log WHERE seq > cursor rather than trusting the subscribe
+  // payload's ordering (the log's subscribe cursor can skip a lower seq under concurrent
+  // non-tx appends — spec §4.3). Callers are responsible for serializing calls (see `serialize`
+  // below) so revision/ordering stays deterministic.
   const drainFrom = async (fromSeq: number): Promise<number> => {
     const events = (await log.all()).filter(e => e.seq > fromSeq && (e.kind === EVENT_KIND.memory_written || e.kind === EVENT_KIND.memory_deleted))
     for (const e of events) await applyOne(e)
     return surreal.getCursor()
   }
 
+  // Every drain/clear goes through this so two passes (e.g. a subscribe notification firing
+  // during a rebuild()) never interleave — the whole instance applies serially.
+  const serialize = <T>(fn: () => Promise<T>): Promise<T> => {
+    const next = applying.then(fn, fn) // run after prior settles (success OR failure)
+    applying = next.then(() => {}, () => {}) // keep the chain alive, swallow to avoid unhandled rejection
+    return next
+  }
+
   let cursorCache = 0
   const enqueueReconcile = (): void => {
-    applying = applying
-      .then(async () => { cursorCache = await drainFrom(cursorCache) })
-      .catch(err => console.warn(`memory projector: ${err instanceof Error ? err.message : String(err)}`))
+    void serialize(async () => {
+      try {
+        cursorCache = await drainFrom(cursorCache)
+      } catch (err) {
+        console.warn(`memory projector: ${err instanceof Error ? err.message : String(err)}`)
+        cursorCache = await surreal.getCursor() // resume after last applied event; don't re-apply succeeded ones
+      }
+    })
   }
 
   return {
     start: async () => {
-      cursorCache = await drainFrom(await surreal.getCursor())
+      await serialize(async () => { cursorCache = await drainFrom(await surreal.getCursor()) })
       unsub = await log.subscribe({}, () => enqueueReconcile())
     },
     close: async () => { if (unsub) { await unsub(); unsub = null } await applying },
-    rebuild: async () => { await surreal.clear(); cursorCache = await drainFrom(0) },
+    rebuild: async () => { await serialize(async () => { await surreal.clear(); cursorCache = await drainFrom(0) }) },
     // one-shot drain from the persisted cursor (no clear, no subscription) — the CLI's projection path
-    catchUp: async () => { cursorCache = await drainFrom(await surreal.getCursor()) },
+    catchUp: async () => { await serialize(async () => { cursorCache = await drainFrom(await surreal.getCursor()) }) },
   }
 }
