@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'bun:test'
+import { afterEach, describe, expect, it, spyOn } from 'bun:test'
 import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
@@ -30,7 +30,7 @@ describe('createVaultProjector.renderAll', () => {
     await log.close()
   })
 
-  it('ignores project-scoped memory events (null taskId) — no throw, no stray task dir', async () => {
+  it('ignores project-scoped memory events (null taskId) — byTask is never called for the null taskId', async () => {
     const db = await createTestDb(); dbs.push(db)
     const vaultDir = mkdtempSync(path.join(tmpdir(), 'orc-vp-')); dirs.push(vaultDir)
     const log = await EventLog.open(db.url)
@@ -46,11 +46,54 @@ describe('createVaultProjector.renderAll', () => {
     })
 
     const projector = createVaultProjector({ log, config: { vaultDir } })
+    const byTaskSpy = spyOn(log, 'byTask')
     await expect(projector.renderAll()).resolves.toBeUndefined()
+
+    // load-bearing: the `.filter(e => e.taskId)` guard in renderAll means byTask is called
+    // exactly once — for the real task — and never for the memory event's null taskId.
+    // Without the guard, byTask(null) would also be called and these would fail.
+    expect(byTaskSpy).toHaveBeenCalledTimes(1)
+    expect(byTaskSpy).toHaveBeenCalledWith(t.id)
+
     await projector.close()
 
     expect(existsSync(path.join(vaultDir, `tasks/${t.id}`))).toBe(true)
     expect(existsSync(path.join(vaultDir, 'tasks/null'))).toBe(false)
+    await log.close()
+  })
+
+  it('start() subscribes and skips memory events (null taskId) while still rendering real task updates', async () => {
+    const db = await createTestDb(); dbs.push(db)
+    const vaultDir = mkdtempSync(path.join(tmpdir(), 'orc-vp-')); dirs.push(vaultDir)
+    const log = await EventLog.open(db.url)
+    const kernel = new Kernel(log)
+
+    const projector = createVaultProjector({ log, config: { vaultDir } })
+    await projector.start()
+    const byTaskSpy = spyOn(log, 'byTask')
+
+    const t = await kernel.createTask({ title: 'demo', spec: 'do it' })
+    await log.append({
+      taskId: null, stepId: null, runToken: null,
+      kind: 'memory_written',
+      payload: {
+        note: { id: 'note-y', title: 'Y', scope: 'project', categories: [], tags: [], links: [], paths: [], rules: [], summary: '', body: '' },
+        author: { source: 'cli' },
+      },
+    })
+
+    await Bun.sleep(120) // flush the 50ms debounce for both appended events
+
+    // load-bearing: the `if (!e.taskId) return` guard in the subscribe handler means
+    // byTask is never called for the memory event's null taskId. Without the guard,
+    // the debounced render for the null "task" would call byTask(null) and this would fail.
+    for (const call of byTaskSpy.mock.calls) expect(call[0]).not.toBeNull()
+    expect(byTaskSpy).toHaveBeenCalledWith(t.id)
+
+    expect(existsSync(path.join(vaultDir, `tasks/${t.id}`))).toBe(true)
+    expect(existsSync(path.join(vaultDir, 'tasks/null'))).toBe(false)
+
+    await projector.close()
     await log.close()
   })
 })
