@@ -3,7 +3,8 @@ import type { MemoryNote } from '@orc/contracts'
 import { noteRelPath, renderNoteFile } from './note-md'
 
 const note: MemoryNote = {
-  id: 'auth-token-refresh', scope: 'project', title: 'Auth token refresh flow',
+  id: 'auth-token-refresh', scope: 'project', kind: 'fact', sourceRevision: 'abc123def',
+  title: 'Auth token refresh flow',
   categories: ['architecture', 'security'], tags: ['auth'],
   links: [{ id: 'session-model', kind: 'refines' }, { id: 'cookie-auth', kind: 'supersedes', confidence: 0.9 }],
   paths: ['packages/kernel/src/auth.ts'], rules: ['Refresh tokens are single-use.'],

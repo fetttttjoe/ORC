@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createMcpHub } from '@orc/mcp-client'
-import { createPluginHost, grantTrust, loadConfig, loadTrust } from '@orc/kernel'
+import { createPluginHost, grantTrust, loadConfig, loadTrust, requireProject } from '@orc/kernel'
 import { createTestDb, TEST_PROJECT_ID } from '@orc/kernel/test-helpers'
 import { buildProgram, openKernel } from './main'
 
@@ -26,7 +26,7 @@ function project(configJson: Record<string, unknown>): string {
 async function makeCli(dir: string) {
   const db = await createTestDb()
   dbs.push(db)
-  const config = { ...loadConfig(dir), databaseUrl: db.url }
+  const config = requireProject({ ...loadConfig(dir), databaseUrl: db.url, projectId: TEST_PROJECT_ID, projectName: 'test' })
   const host = await createPluginHost(config, {
     providers: new Map([['fake', { costs: {}, languageModel: () => ({}) }]]),
     executors: new Map([['api-loop', { id: 'api-loop', startTurn: async function* () {} }]]),

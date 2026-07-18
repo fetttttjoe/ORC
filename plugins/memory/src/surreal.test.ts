@@ -1,21 +1,37 @@
 import { afterAll, describe, expect, it } from 'bun:test'
 import { RecordId, Surreal } from 'surrealdb'
+import type { EventRecord, MemoryAuthor } from '@orc/contracts'
 import { SurrealMemory } from './surreal'
 import { createTestSurreal } from './test-helpers'
 
-const note = (over = {}) => ({ id: 'auth', scope: 'project', title: 'Auth', categories: ['security'], tags: ['auth'], links: [], paths: ['src/auth.ts'], rules: [], summary: 'tokens rotate', body: 'full text about auth tokens', ...over })
+const note = (over = {}) => ({
+  id: 'auth', scope: 'project', kind: 'fact', sourceRevision: null,
+  title: 'Auth', categories: ['security'], tags: ['auth'], links: [], paths: ['src/auth.ts'], rules: [],
+  summary: 'tokens rotate', body: 'full text about auth tokens', ...over,
+})
+const cli: MemoryAuthor = { source: 'cli' }
+const written = (seq: number, n = note(), author: MemoryAuthor = cli): EventRecord => ({
+  seq, projectId: 'p1', idempotencyKey: null, taskId: null, stepId: null, runToken: null,
+  kind: 'memory_written', payload: { note: n, author }, usage: null, ts: `2026-07-18T0${Math.min(seq, 9)}:00:00Z`,
+})
+const deleted = (seq: number, id: string, scope = 'project'): EventRecord => ({
+  seq, projectId: 'p1', idempotencyKey: null, taskId: null, stepId: null, runToken: null,
+  kind: 'memory_deleted', payload: { id, scope, author: cli }, usage: null, ts: `2026-07-18T0${Math.min(seq, 9)}:00:00Z`,
+})
+
 const drops: (() => Promise<void>)[] = []
 afterAll(async () => { for (const d of drops) await d() })
 
-describe('SurrealMemory', () => {
+describe('SurrealMemory.applyEvent', () => {
   it('applies a write, reads it back, and increments revision on update', async () => {
     const t = await createTestSurreal(); drops.push(t.drop)
     const m = await SurrealMemory.open(t)
-    await m.applyWritten({ seq: 1, ts: '2026-07-18T00:00:00Z', note: note(), author: { source: 'cli' } })
+    expect(await m.applyEvent(written(1))).toBe(true)
     let got = await m.get('auth', 'project')
     expect(got?.revision).toBe(1)
     expect(got?.createdBy).toBe('cli')
-    await m.applyWritten({ seq: 2, ts: '2026-07-18T01:00:00Z', note: note({ summary: 'rotate on use' }), author: { source: 'agent', executor: 'api-loop', model: 'opus', role: 'review' } })
+    expect(got?.kind).toBe('fact')
+    await m.applyEvent(written(2, note({ summary: 'rotate on use' }), { source: 'agent', executor: 'api-loop', model: 'opus', role: 'review' }))
     got = await m.get('auth', 'project')
     expect(got?.revision).toBe(2)
     expect(got?.createdBy).toBe('cli')            // unchanged
@@ -24,15 +40,38 @@ describe('SurrealMemory', () => {
     await m.close()
   })
 
-  it('search matches on body/summary/title; delete removes; cursor round-trips', async () => {
+  it('redelivery is a no-op: same event twice leaves revision 1, one edge, cursor advanced once', async () => {
     const t = await createTestSurreal(); drops.push(t.drop)
     const m = await SurrealMemory.open(t)
-    await m.applyWritten({ seq: 1, ts: '2026-07-18T00:00:00Z', note: note(), author: { source: 'cli' } })
+    const e = written(3, note({ id: 'a', links: [{ id: 'b', kind: 'supersedes' }] }))
+    expect(await m.applyEvent(e)).toBe(true)
+    expect(await m.applyEvent(e)).toBe(false) // seq <= cursor → rejected inside the transaction
+    expect((await m.get('a', 'project'))?.revision).toBe(1)
+    await m.applyEvent(written(4, note({ id: 'b' })))
+    expect((await m.neighbors('a')).map(n => n.id)).toEqual(['b']) // exactly one edge
+    expect(await m.getCursor()).toBe(4)
+    await m.close()
+  })
+
+  it('write → delete → stale write leaves the note deleted, no tombstone needed', async () => {
+    const t = await createTestSurreal(); drops.push(t.drop)
+    const m = await SurrealMemory.open(t)
+    const stale = written(1)
+    await m.applyEvent(stale)
+    await m.applyEvent(deleted(2, 'auth'))
+    expect(await m.applyEvent(stale)).toBe(false) // ordered cursor rejects the redelivery
+    expect(await m.get('auth', 'project')).toBeNull()
+    await m.close()
+  })
+
+  it('search matches on body/summary/title; delete removes', async () => {
+    const t = await createTestSurreal(); drops.push(t.drop)
+    const m = await SurrealMemory.open(t)
+    await m.applyEvent(written(1))
     expect((await m.search('tokens')).map(n => n.id)).toEqual(['auth'])
     // case-insensitive: query is uppercase, stored summary/body are lowercase.
     expect((await m.search('TOKENS')).map(n => n.id)).toEqual(['auth'])
-    await m.setCursor(5); expect(await m.getCursor()).toBe(5)
-    await m.applyDeleted({ seq: 6, ts: '2026-07-18T02:00:00Z', id: 'auth', scope: 'project', author: { source: 'cli' } })
+    await m.applyEvent(deleted(6, 'auth'))
     expect(await m.get('auth', 'project')).toBeNull()
     await m.close()
   })
@@ -40,9 +79,9 @@ describe('SurrealMemory', () => {
   it('materializes typed RELATE edges and ranks neighbours; delete removes edges', async () => {
     const t = await createTestSurreal(); drops.push(t.drop)
     const m = await SurrealMemory.open(t)
-    await m.applyWritten({ seq: 1, ts: '2026-07-18T00:00:00Z', note: note({ id: 'a', links: [{ id: 'b', kind: 'supersedes' }, { id: 'c', kind: 'relates_to' }] }), author: { source: 'cli' } })
-    await m.applyWritten({ seq: 2, ts: '2026-07-18T00:00:00Z', note: note({ id: 'b' }), author: { source: 'cli' } })
-    await m.applyWritten({ seq: 3, ts: '2026-07-18T00:00:00Z', note: note({ id: 'c' }), author: { source: 'cli' } })
+    await m.applyEvent(written(1, note({ id: 'a', links: [{ id: 'b', kind: 'supersedes' }, { id: 'c', kind: 'relates_to' }] })))
+    await m.applyEvent(written(2, note({ id: 'b' })))
+    await m.applyEvent(written(3, note({ id: 'c' })))
 
     const nb = await m.neighbors('a', { depth: 2 })
     expect(nb.map(n => n.id)).toEqual(['b', 'c'])            // supersedes(1.0) ranked above relates_to(0.5)
@@ -51,11 +90,23 @@ describe('SurrealMemory', () => {
     expect((await m.neighbors('b')).map(n => n.id)).toContain('a') // reverse: what supersedes b (spec RG4)
 
     // re-writing a note re-materializes its out-edges (delete-then-RELATE), no duplicates
-    await m.applyWritten({ seq: 4, ts: '2026-07-18T01:00:00Z', note: note({ id: 'a', links: [{ id: 'b', kind: 'supersedes' }] }), author: { source: 'cli' } })
+    await m.applyEvent(written(4, note({ id: 'a', links: [{ id: 'b', kind: 'supersedes' }] })))
     expect((await m.neighbors('a')).map(n => n.id)).toEqual(['b'])
 
-    await m.applyDeleted({ seq: 5, ts: '2026-07-18T02:00:00Z', id: 'a', scope: 'project', author: { source: 'cli' } })
+    await m.applyEvent(deleted(5, 'a'))
     expect(await m.neighbors('a')).toEqual([])               // edges gone with the note
+    await m.close()
+  })
+
+  it('stores kind and sourceRevision; allNotes returns deterministic order', async () => {
+    const t = await createTestSurreal(); drops.push(t.drop)
+    const m = await SurrealMemory.open(t)
+    await m.applyEvent(written(1, note({ id: 'zz', kind: 'architecture_current', sourceRevision: 'abc123' })))
+    await m.applyEvent(written(2, note({ id: 'aa', kind: 'architecture_target' })))
+    const all = await m.allNotes()
+    expect(all.map(n => n.id)).toEqual(['aa', 'zz'])
+    expect(all[1]).toMatchObject({ kind: 'architecture_current', sourceRevision: 'abc123' })
+    expect(all[0]?.sourceRevision).toBeNull()
     await m.close()
   })
 
@@ -66,7 +117,7 @@ describe('SurrealMemory', () => {
   it('bumpRead merges readCount/lastReadAt without wiping other fields', async () => {
     const t = await createTestSurreal(); drops.push(t.drop)
     const m = await SurrealMemory.open(t)
-    await m.applyWritten({ seq: 1, ts: '2026-07-18T00:00:00Z', note: note(), author: { source: 'cli' } })
+    await m.applyEvent(written(1))
     await m.bumpRead('auth', 'project')
     const got = await m.get('auth', 'project')
     expect(got?.title).toBe('Auth')

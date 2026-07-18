@@ -1,26 +1,25 @@
 import { RecordId, Surreal } from 'surrealdb'
 import { edge, orm, table, t } from 'surqlize'
 import {
-  composeAuthor, LINK_KINDS, MemoryNote,
-  type LinkKind, type MemoryAuthor, type MemoryFilter, type MemoryNoteInput,
-  type NeighborResult, type NoteSummary,
+  composeAuthor, EVENT_KIND, LINK_KINDS, NOTE_KINDS,
+  MemoryDeletedPayload, MemoryNote, MemoryWrittenPayload,
+  type EventRecord, type LinkKind, type MemoryFilter, type NeighborResult, type NoteSummary,
 } from '@orc/contracts'
 import { rankNeighbors, type Edge } from './rank'
 
 // The read model's table names — single spelling for every builder call and RecordId.
 enum Tb { Note = 'note', Meta = 'meta', Link = 'link' }
 
-type WrittenEvent = { seq: number; ts: string; note: MemoryNoteInput; author: MemoryAuthor }
-type DeletedEvent = { seq: number; ts: string; id: string; scope: string; author: MemoryAuthor }
-
 // `noteId` holds the note's own string id (surqlize reserves `id` for the auto-added RecordId).
 // readCount/lastReadAt are Tier-2 read-observability fields — never event-sourced, only bumped
 // here — and are stripped back out in toNote() before the row reaches the public MemoryNote shape.
 // literal-typed link kind, derived from the contract's LINK_KINDS — rows come back as LinkKind.
 const kindType = t.union(LINK_KINDS.map(k => t.literal(k)))
+const noteKindType = t.union(NOTE_KINDS.map(k => t.literal(k)))
 
 const noteTable = table(Tb.Note, {
   noteId: t.string(), scope: t.string(), title: t.string(),
+  kind: noteKindType, sourceRevision: t.option(t.string()),
   categories: t.array(t.string()), tags: t.array(t.string()),
   links: t.array(t.object({ id: t.string(), kind: kindType, confidence: t.option(t.number()) })),
   paths: t.array(t.string()), rules: t.array(t.string()), summary: t.string(), body: t.string(),
@@ -63,37 +62,49 @@ export class SurrealMemory {
     return new SurrealMemory(surreal, makeOrm(surreal))
   }
 
-  // read-then-write: createdAt/By + readCount/lastReadAt preserved; updated/rev advance.
-  async applyWritten(e: WrittenEvent): Promise<void> {
-    const k = key(e.note.scope, e.note.id)
-    const rows = await this.db.select(Tb.Note, k)
-    const ex = rows[0]
-    const by = composeAuthor(e.author)
-    await this.db.upsert(Tb.Note, k).set({
-      noteId: e.note.id, scope: e.note.scope, title: e.note.title,
-      categories: e.note.categories, tags: e.note.tags,
-      // materialize the optional confidence key: t.option infers `number | undefined`, required
-      links: e.note.links.map(l => ({ id: l.id, kind: l.kind, confidence: l.confidence })),
-      paths: e.note.paths, rules: e.note.rules, summary: e.note.summary, body: e.note.body,
-      createdAt: ex?.createdAt ?? e.ts, createdBy: ex?.createdBy ?? by,
-      updatedAt: e.ts, updatedBy: by, revision: (ex?.revision ?? 0) + 1,
-      readCount: ex?.readCount ?? 0,
-      // OptionType fields validate against `undefined`, not `null` — omit rather than null it out.
-      ...(ex?.lastReadAt !== undefined && { lastReadAt: ex.lastReadAt }),
+  // The ONE apply path (design §8.2): note/edges/cursor commit in a single Surreal
+  // transaction, gated by the ordered cursor — redelivery of any memory event is a no-op,
+  // and revision counts distinct accepted writes, never delivery attempts.
+  async applyEvent(e: EventRecord): Promise<boolean> {
+    return this.db.transaction(async tx => {
+      const cursor = (await tx.select(Tb.Meta, 'cursor'))[0]?.seq ?? 0
+      if (e.seq <= cursor) return false
+      if (e.kind === EVENT_KIND.memory_written) {
+        const { note, author } = MemoryWrittenPayload.parse(e.payload)
+        const k = key(note.scope, note.id)
+        // read-then-write: createdAt/By + readCount/lastReadAt preserved; updated/rev advance
+        const ex = (await tx.select(Tb.Note, k))[0]
+        const by = composeAuthor(author)
+        await tx.upsert(Tb.Note, k).set({
+          noteId: note.id, scope: note.scope, title: note.title,
+          kind: note.kind,
+          ...(note.sourceRevision !== null && { sourceRevision: note.sourceRevision }),
+          categories: note.categories, tags: note.tags,
+          // materialize the optional confidence key: t.option infers `number | undefined`, required
+          links: note.links.map(l => ({ id: l.id, kind: l.kind, confidence: l.confidence })),
+          paths: note.paths, rules: note.rules, summary: note.summary, body: note.body,
+          createdAt: ex?.createdAt ?? e.ts, createdBy: ex?.createdBy ?? by,
+          updatedAt: e.ts, updatedBy: by, revision: (ex?.revision ?? 0) + 1,
+          readCount: ex?.readCount ?? 0,
+          // OptionType fields validate against `undefined`, not `null` — omit rather than null it out.
+          ...(ex?.lastReadAt !== undefined && { lastReadAt: ex.lastReadAt }),
+        })
+        // Re-materialize this note's out-edges (delete-then-RELATE) — deterministic on replay.
+        await tx.delete(Tb.Link).where(l => l.fromId.eq(note.id).and(l.scope.eq(note.scope)))
+        for (const l of note.links)
+          await tx.relate(Tb.Link, new RecordId(Tb.Note, k), new RecordId(Tb.Note, key(note.scope, l.id))).set({
+            kind: l.kind, fromId: note.id, toId: l.id, scope: note.scope,
+            ...(l.confidence !== undefined && { confidence: l.confidence }),
+          })
+      } else if (e.kind === EVENT_KIND.memory_deleted) {
+        const p = MemoryDeletedPayload.parse(e.payload)
+        await tx.delete(Tb.Note, key(p.scope, p.id))
+        // drop the note's edges in both directions with it
+        await tx.delete(Tb.Link).where(l => l.fromId.eq(p.id).or(l.toId.eq(p.id)).and(l.scope.eq(p.scope)))
+      }
+      await tx.upsert(Tb.Meta, 'cursor').set({ seq: e.seq })
+      return true
     })
-    // Re-materialize this note's out-edges (delete-then-RELATE) — deterministic on replay.
-    await this.db.delete(Tb.Link).where(l => l.fromId.eq(e.note.id).and(l.scope.eq(e.note.scope)))
-    for (const l of e.note.links)
-      await this.db.relate(Tb.Link, new RecordId(Tb.Note, k), new RecordId(Tb.Note, key(e.note.scope, l.id))).set({
-        kind: l.kind, fromId: e.note.id, toId: l.id, scope: e.note.scope,
-        ...(l.confidence !== undefined && { confidence: l.confidence }),
-      })
-  }
-
-  async applyDeleted(e: DeletedEvent): Promise<void> {
-    await this.db.delete(Tb.Note, key(e.scope, e.id))
-    // drop the note's edges in both directions with it
-    await this.db.delete(Tb.Link).where(l => l.fromId.eq(e.id).or(l.toId.eq(e.id)).and(l.scope.eq(e.scope)))
   }
 
   async neighbors(seed: string, opts: { kinds?: LinkKind[]; depth?: number; scope?: string } = {}): Promise<NeighborResult[]> {
@@ -172,8 +183,13 @@ export class SurrealMemory {
     const rows = await this.db.select(Tb.Meta, 'cursor')
     return rows[0]?.seq ?? 0
   }
-  async setCursor(seq: number): Promise<void> {
-    await this.db.upsert(Tb.Meta, 'cursor').set({ seq })
+
+  // every note across scopes, in deterministic (scope, id) order — the vault rebuild input
+  async allNotes(): Promise<MemoryNote[]> {
+    const rows = await this.db.select(Tb.Note)
+    return rows
+      .map(r => MemoryNote.parse(toNote(r)))
+      .sort((a, b) => a.scope.localeCompare(b.scope) || a.id.localeCompare(b.id))
   }
   // ESCAPE HATCH: delete-all is expressible via the builder too (`db.delete('note')` with no id
   // deletes the whole table), so no raw `surreal.query` is used here either.
@@ -188,7 +204,8 @@ export class SurrealMemory {
 // map the stored row back to the MemoryNote shape (noteId → id; drop RecordId + Tier-2 fields).
 function toNote(r: Record<string, any>): unknown {
   return {
-    id: r.noteId, scope: r.scope, title: r.title, categories: r.categories, tags: r.tags,
+    id: r.noteId, scope: r.scope, title: r.title, kind: r.kind, sourceRevision: r.sourceRevision ?? null,
+    categories: r.categories, tags: r.tags,
     links: r.links, paths: r.paths, rules: r.rules, summary: r.summary, body: r.body,
     createdAt: r.createdAt, createdBy: r.createdBy, updatedAt: r.updatedAt, updatedBy: r.updatedBy,
     revision: r.revision,

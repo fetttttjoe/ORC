@@ -29,10 +29,18 @@ export const MemoryLink = z.object({
 })
 export type MemoryLink = z.infer<typeof MemoryLink>
 
+// knowledge lifecycle: current/target architecture stay distinguishable and queryable
+export const NOTE_KINDS = ['fact', 'decision', 'architecture_current', 'architecture_target', 'documentation'] as const
+export const NoteKind = z.enum(NOTE_KINDS)
+export type NoteKind = z.infer<typeof NoteKind>
+
 // What a writer (agent/CLI) supplies. Arrays/strings default so a minimal note is one id+title.
-export const MemoryNoteInput = z.object({
+const MemoryNoteBase = z.object({
   id: Id,
   scope: z.string().regex(MEMORY_ID_RE).default('project'),
+  kind: NoteKind.default('fact'),
+  // stamped by the store gateway from the runtime's Git HEAD — agents cannot invent one
+  sourceRevision: z.string().nullable().default(null),
   title: z.string().min(1).max(200),
   categories: z.array(z.string()).default([]),
   tags: z.array(z.string()).default([]),
@@ -42,12 +50,16 @@ export const MemoryNoteInput = z.object({
   summary: z.string().max(500).default(''),
   body: z.string().default(''),
 })
+export const MemoryNoteInput = MemoryNoteBase.refine(
+  n => !(n.scope === 'project' && n.id === 'index'),
+  { message: "note id 'index' is reserved in the project scope (collides with vault/memory/index.md)" },
+)
 export type MemoryNoteInput = z.infer<typeof MemoryNoteInput>
 // What callers hand the gateway: the schema's raw input, defaults not yet applied.
 export type MemoryNoteDraft = z.input<typeof MemoryNoteInput>
 
 // The stored/rendered note: input + provenance/lifecycle the projector derives from events.
-export const MemoryNote = MemoryNoteInput.extend({
+export const MemoryNote = MemoryNoteBase.extend({
   createdAt: z.string(),
   createdBy: z.string(),   // composed identity: "executor·model·role" or "cli"
   updatedAt: z.string(),
@@ -72,6 +84,19 @@ export interface MemoryFilter { scope?: string; category?: string; tag?: string 
 
 // The single-writer gateway (the wrapper). write/remove append events; reads hit SurrealDB.
 // write takes the raw draft — the gateway parses (defaults + validation), callers never cast.
+// typed event payloads — PAYLOAD_SCHEMAS entries and the memory projector parse through
+// these, so payload access never needs a cast
+export const MemoryWrittenPayload = z.object({ note: MemoryNoteInput, author: MemoryAuthor })
+export type MemoryWrittenPayload = z.infer<typeof MemoryWrittenPayload>
+export const MemoryDeletedPayload = z.object({
+  // id AND scope must be MEMORY_ID_RE-safe: they flow into noteRelPath → the vault path guard,
+  // so an unconstrained scope (e.g. '../x') would throw in the projector and wedge the read model.
+  id: z.string().regex(MEMORY_ID_RE),
+  scope: z.string().regex(MEMORY_ID_RE),
+  author: MemoryAuthor,
+})
+export type MemoryDeletedPayload = z.infer<typeof MemoryDeletedPayload>
+
 export interface MemoryStore {
   // idempotencyKey: deterministic writers (tool-driven writes inside an operation) pass one so
   // a crash retry of the surrounding effect cannot append the note event twice
