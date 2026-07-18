@@ -36,8 +36,9 @@ export async function createDbosPort(opts: {
   executors: Map<string, AgentExecutor<unknown>>
   skills?: { load(name: string): Promise<LoadedSkill> }
   tools?: ToolSource
+  stepTools?: (p: { taskId: string; stepId: string; runToken: string; role: string; executor: string; model: string }) => ResolvedTool[]
 }): Promise<DbosPort> {
-  const { log, config, providers, executors, skills, tools } = opts
+  const { log, config, providers, executors, skills, tools, stepTools } = opts
 
   const foldState = async (taskId: string): Promise<State> => fold(await log.byTask(taskId))
 
@@ -114,6 +115,12 @@ export async function createDbosPort(opts: {
           return await finishFailed(checkpoint, args, runToken, err instanceof Error ? err.message : String(err), FAILURE_CLASS.validation_error)
         }
       }
+
+      if (stepTools)
+        extraTools = [...extraTools, ...stepTools({
+          taskId: args.taskId, stepId: args.stepId, runToken,
+          role: init.step.role, executor: init.step.executorRef, model: modelId,
+        })]
 
       const ctx: ExecutorContext<unknown> = {
         step: init.step,
