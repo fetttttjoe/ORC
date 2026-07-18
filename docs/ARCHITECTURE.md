@@ -5,7 +5,11 @@ store — the operations journal, SurrealDB, the vault, DBOS's system database �
 rebuildable index over that log or a disposable projection of it. All state is `fold(events)`.
 Everything below is arranged around protecting that invariant.
 
-## System map
+## System map — modules
+
+Every first-party module, its package, and how the calls flow. The data-access services live
+in the nested `storage/` cluster (Postgres) and the memory plugin's `knowledge.ts` (Surreal);
+the tier-by-tier view is the next section.
 
 ```mermaid
 graph TD
@@ -24,7 +28,7 @@ graph TD
   end
 
   subgraph KERNEL ["packages/kernel — policy-free core"]
-    subgraph STORAGE_SVC ["storage/ — the Postgres service layer"]
+    subgraph STORAGE_SVC ["storage/ — Postgres data-access service"]
       PGSTORE["postgres.ts<br/>PostgresStore: pool, project lock, redaction"]
       LOG["event-log.ts<br/>EventLog: append/subscribe/query"]
       JOURNAL["operation-journal.ts<br/>OperationJournal: before/after nodes"]
@@ -45,14 +49,17 @@ graph TD
     APILOOP["executor-api-loop<br/>model/tool loop"]
     PROV["provider-anthropic/openai/ollama"]
     MCP["mcp-client<br/>T1 tool servers"]
-    MEMPLUG["memory<br/>store, projector, tools"]
+    subgraph MEMPKG ["memory"]
+      MEMBIZ["store · projector · tools<br/>(business logic)"]
+      KNOW["knowledge.ts + surreal.ts<br/>Surreal data-access service"]
+    end
   end
 
   subgraph PROJ ["packages/vault-projector"]
     VP["index.ts + render.ts<br/>markdown/mermaid views"]
   end
 
-  subgraph STORES ["storage"]
+  subgraph STORES ["databases & files"]
     PG[("Postgres<br/>events + operations<br/>(canonical, per project)")]
     DBOSDB[("Postgres<br/>DBOS system db<br/>(per project)")]
     SUR[("SurrealDB<br/>knowledge read model<br/>(db per project)")]
@@ -64,7 +71,7 @@ graph TD
   MAIN --> KAPI
   RUNTIME --> PORT
   RUNTIME --> VP
-  RUNTIME --> MEMPLUG
+  RUNTIME --> MEMBIZ
   RUNTIME --> HOST
 
   KAPI --> LOG
@@ -89,9 +96,10 @@ graph TD
   ROUTER --> LOG
   VP --> LOG
   VP --> VAULT
-  MEMPLUG --> LOG
-  MEMPLUG --> SUR
-  MEMPLUG --> VAULT
+  MEMBIZ --> LOG
+  MEMBIZ --> KNOW
+  MEMBIZ --> VAULT
+  KNOW --> SUR
 
   KERNEL -.->|imports| CONTRACTS
   PLUGINS -.->|imports| CONTRACTS
@@ -103,26 +111,97 @@ graph TD
 | Notation | Meaning |
 |---|---|
 | Rectangle | First-party module (file named in the node) |
-| Cylinder | Storage. **Postgres events is truth**; everything else is index or projection |
+| Nested box | The data-access service inside its package (`storage/`, memory's `knowledge.ts`) |
+| Cylinder | A database or file store. **Postgres events is truth**; the rest are index or projection |
 | Solid arrow | Runtime call / data flow direction |
 | Dashed arrow | Compile-time dependency only (imports types/schemas, never calls back) |
-| Subgraph box | One workspace package (or, nested, the storage service layer) |
 
-**The storage service layer** (`packages/kernel/src/storage/`) is the single owner of every
-Postgres access. `openStorage(url, { projectId })` returns a `Storage` facade with two
-services — `events` (the `EventLog`: append / subscribe / query) and `operations` (the
-`OperationJournal`: durable before/after nodes). Both sit on one `PostgresStore`, which owns
-the connection pool, the per-project advisory lock, and secret redaction. No other module
-opens a connection, takes the lock, or migrates. Consumers that only read/write events (the
-kernel, memory store, vault projector) take the `EventLog`; the DBOS port, the one consumer
-that needs both, takes the whole `Storage`. Migration is an explicit step (`migrateDatabase`
-in test/CLI setup) — `openStorage` only *verifies* the schema and fails with guidance if the
-database is behind, never mutating it as an open-time side effect.
+## System map — three tiers
 
-Dependency rule (enforced by convention, `docs/EXTENDING.md` invariant 3): **contracts import
-nothing**, kernel imports contracts, plugins import contracts (never the kernel's internals
-beyond its public exports), and the kernel never imports plugins — it receives them
-(`createDbosPort(opts)`, `createPluginHost(config, seed)`).
+The same system as three layers: business logic never touches a database — every read and
+write crosses the **data-access service layer** in the middle. One service per store, each
+encapsulating connection, project scoping, locking/transactions, and redaction. Swap a
+backend or add a store and only its service changes; the tiers above and below do not.
+
+```mermaid
+graph TD
+  subgraph APP ["① Application — business logic (never touches a DB directly)"]
+    direction LR
+    CLI["packages/cli<br/>bin · main · runtime"]
+    KRN["packages/kernel<br/>task/plan API · fold · DBOS port · signal router · trust"]
+    MEMBIZ["plugins/memory<br/>gateway · projector · tools · ranking"]
+    VPBIZ["packages/vault-projector<br/>markdown/mermaid renders"]
+    PLG["plugins/*<br/>executor-api-loop · providers · mcp-client"]
+  end
+
+  subgraph SVC ["② Data-access service layer — one service per store, DB mechanics encapsulated"]
+    direction LR
+    PGSVC["Postgres service · openStorage()<br/>EventLog · OperationJournal<br/>PostgresStore: pool · project lock · redaction · assertMigrated"]
+    KNSVC["Knowledge service · openKnowledge()<br/>SurrealMemory: notes · typed edges · cursor<br/>project-derived database boundary"]
+    VWSVC["Vault writer<br/>atomic markdown writes (containment-guarded)"]
+  end
+
+  subgraph DBS ["③ Databases & files"]
+    direction LR
+    PG[("Postgres<br/>events + operations<br/>canonical, per project")]
+    SUR[("SurrealDB<br/>knowledge read model<br/>db per project")]
+    VLT[("vault/ markdown<br/>human projection")]
+    DBOS[("Postgres<br/>DBOS system db<br/>per project")]
+  end
+
+  CLI --> KRN
+  CLI --> MEMBIZ
+  CLI --> VPBIZ
+  PLG --> KRN
+
+  KRN -->|read + write events & operations| PGSVC
+  MEMBIZ -->|event-first note writes| PGSVC
+  MEMBIZ -->|read + write knowledge| KNSVC
+  MEMBIZ -->|memory md| VWSVC
+  VPBIZ -->|read + subscribe| PGSVC
+  VPBIZ -->|task md| VWSVC
+
+  PGSVC --> PG
+  KNSVC --> SUR
+  VWSVC --> VLT
+  KRN -. DBOS SDK owns its own store .-> DBOS
+
+  classDef svc fill:#1a4d7a,color:#fff
+  class PGSVC,KNSVC,VWSVC svc
+```
+
+### Legend
+
+| Notation | Meaning |
+|---|---|
+| **① / ② / ③** | The three tiers: application → data-access services → databases |
+| Blue box (tier ②) | A data-access service — the only code that opens/queries its store |
+| Cylinder (tier ③) | A database or file store. **Postgres events is truth**; the rest are index or projection |
+| Solid arrow | Runtime call / data flow (every app→DB edge passes through a service) |
+| Dashed arrow | DBOS SDK manages its own system database — the one store not behind our services |
+
+The layer is realized as sibling openers, each returning a facade whose methods are the whole
+contract — callers never see a pool, a lock, or a query:
+
+- **`openStorage(url, { projectId })` → `Storage { events, operations }`** — the Postgres
+  service (`packages/kernel/src/storage/`). `PostgresStore` owns the pool, the per-project
+  advisory lock, redaction, and schema verification; `EventLog` (append/subscribe/query) and
+  `OperationJournal` (before/after nodes) sit on top. Migration is a separate explicit step —
+  `openStorage` only verifies and fails loudly if the schema is behind.
+- **`openKnowledge(config)` → `Knowledge`** — the SurrealDB service
+  (`plugins/memory/src/knowledge.ts`), encapsulating auth and the project-derived database
+  name. The memory gateway/projector/tools read and write through it and never open a Surreal
+  session themselves.
+
+The kernel is business logic and stays free of both: it takes an `EventLog`, not a pool. The
+memory plugin's `createMemory` is the orchestrator that assembles the two services into the
+memory domain services. The one exception drawn dashed: the DBOS SDK manages its own system
+database directly (durable workflow checkpoints), which is not ours to mediate.
+
+Dependency rule (`docs/EXTENDING.md` invariant 3): **contracts import nothing**, kernel
+imports contracts, plugins import contracts (never the kernel's internals beyond its public
+exports), and the kernel never imports plugins — it receives them (`createDbosPort(opts)`,
+`createPluginHost(config, seed)`).
 
 ## The storage service — read/write boundary
 
