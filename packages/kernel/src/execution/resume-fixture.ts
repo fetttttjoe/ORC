@@ -7,7 +7,7 @@ import {
   EVENT_KIND, SIGNAL_OUTCOME,
   type AgentExecutor, type EventDraft, type ExecutorContext, type SplitResult, type UnifiedEvent,
 } from '@orc/contracts'
-import { EventLog } from '../eventlog'
+import { openStorage } from '../storage'
 import { fakeProvider, testConfig, TEST_PROJECT_ID } from '../test-helpers'
 import { createDbosPort } from './dbos-port'
 
@@ -43,10 +43,11 @@ const stallOnce: AgentExecutor<unknown> = {
   },
 }
 
-const log = await EventLog.open(dbUrl, { projectId: TEST_PROJECT_ID })
+const storage = await openStorage(dbUrl, { projectId: TEST_PROJECT_ID })
+const log = storage.events
 const config = testConfig(dbUrl)
 const port = await createDbosPort({
-  log, config,
+  storage, config,
   providers: new Map([['fake', fakeProvider]]),
   executors: new Map([['api-loop', stallOnce]]),
 })

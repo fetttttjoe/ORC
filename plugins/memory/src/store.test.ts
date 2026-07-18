@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { z } from 'zod'
 import { MemoryAuthor } from '@orc/contracts'
-import { EventLog } from '@orc/kernel'
+import { openStorage } from '@orc/kernel'
 import { createTestDb, TEST_PROJECT_ID } from '@orc/kernel/test-helpers'
 import { SurrealMemory } from './surreal'
 import { createTestSurreal } from './test-helpers'
@@ -18,7 +18,7 @@ describe('MemoryStore gateway', () => {
   it('write appends a memory_written event with stamped provenance and null taskId', async () => {
     const pg = await createTestDb(); drops.push(pg.drop)
     const ts = await createTestSurreal(); drops.push(ts.drop)
-    const log = await EventLog.open(pg.url, { projectId: TEST_PROJECT_ID })
+    const log = (await openStorage(pg.url, { projectId: TEST_PROJECT_ID })).events
     const store = createMemoryStore({ log, surreal: await SurrealMemory.open(ts) })
     await store.write({ id: 'auth', title: 'Auth' }, { source: 'agent', executor: 'api-loop', model: 'opus', role: 'review' })
     const events = await log.all()
@@ -33,7 +33,7 @@ describe('MemoryStore gateway', () => {
   it('replaying a write under one idempotency key leaves one memory_written event', async () => {
     const pg = await createTestDb(); drops.push(pg.drop)
     const ts = await createTestSurreal(); drops.push(ts.drop)
-    const log = await EventLog.open(pg.url, { projectId: TEST_PROJECT_ID })
+    const log = (await openStorage(pg.url, { projectId: TEST_PROJECT_ID })).events
     const store = createMemoryStore({ log, surreal: await SurrealMemory.open(ts) })
     const author: MemoryAuthor = { source: 'agent', runToken: 'step:t1:s1:a1' }
     const key = 'step:t1:s1:a1:tool:c1:memory:auth'
@@ -46,7 +46,7 @@ describe('MemoryStore gateway', () => {
   it('stamps the gateway sourceRevision — agent-supplied values are overwritten', async () => {
     const pg = await createTestDb(); drops.push(pg.drop)
     const ts = await createTestSurreal(); drops.push(ts.drop)
-    const log = await EventLog.open(pg.url, { projectId: TEST_PROJECT_ID })
+    const log = (await openStorage(pg.url, { projectId: TEST_PROJECT_ID })).events
     const store = createMemoryStore({ log, surreal: await SurrealMemory.open(ts), sourceRevision: 'head-sha-42' })
     await store.write({ id: 'auth', title: 'Auth', sourceRevision: 'invented-by-agent' }, { source: 'agent' })
     const [event] = await log.all()
@@ -67,7 +67,7 @@ describe('MemoryStore gateway', () => {
   it('rejects a malformed note without appending', async () => {
     const pg = await createTestDb(); drops.push(pg.drop)
     const ts = await createTestSurreal(); drops.push(ts.drop)
-    const log = await EventLog.open(pg.url, { projectId: TEST_PROJECT_ID })
+    const log = (await openStorage(pg.url, { projectId: TEST_PROJECT_ID })).events
     const store = createMemoryStore({ log, surreal: await SurrealMemory.open(ts) })
     await expect(store.write({ id: 'Bad Id', title: 'x' }, { source: 'cli' })).rejects.toThrow()
     expect(await log.all()).toHaveLength(0)

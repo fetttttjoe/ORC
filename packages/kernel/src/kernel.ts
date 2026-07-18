@@ -3,7 +3,7 @@ import {
   ChildPlanDraft, EVENT_KIND, ISOLATION_TIER, PlanDraft, TASK_STATUS, evaluateApproval, validatePlan,
   type ApprovalPolicy, type EventKind, type EventRecord, type Plan, type PlanStep, type TaskNode, type TaskStatus,
 } from '@orc/contracts'
-import { EventLog, type EventLogOps } from './eventlog'
+import { EventLog, type EventLogOps } from './storage'
 import { fold, subtreeUsage, type State } from './projections'
 import { KERNEL_ERROR_CODE, KernelError } from './errors'
 

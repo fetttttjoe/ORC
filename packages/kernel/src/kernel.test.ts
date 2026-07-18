@@ -1,7 +1,7 @@
 import { afterAll, describe, expect, it } from 'bun:test'
 import { ApprovalPolicy, TASK_STATUS, type PlanDraft } from '@orc/contracts'
 import { draftFixture, stepFixture } from '@orc/contracts/fixtures'
-import { EventLog } from './eventlog'
+import { openStorage } from './storage'
 import { KERNEL_ERROR_CODE, KernelError } from './errors'
 import { Kernel } from './kernel'
 import { createTestDb, TEST_PROJECT_ID } from './test-helpers'
@@ -14,7 +14,7 @@ afterAll(async () => {
 async function freshKernel(): Promise<Kernel> {
   const db = await createTestDb()
   dbs.push(db)
-  return new Kernel(await EventLog.open(db.url, { projectId: TEST_PROJECT_ID }))
+  return new Kernel((await openStorage(db.url, { projectId: TEST_PROJECT_ID })).events)
 }
 
 const draft = (): PlanDraft => draftFixture()
@@ -103,7 +103,7 @@ describe('Kernel lifecycle', () => {
   it('propose fails with plan_validation_failed when the refValidator reports errors', async () => {
     const db = await createTestDb()
     dbs.push(db)
-    const k = new Kernel(await EventLog.open(db.url, { projectId: TEST_PROJECT_ID }), async () => [`unknown executor 'nope'`])
+    const k = new Kernel((await openStorage(db.url, { projectId: TEST_PROJECT_ID })).events, async () => [`unknown executor 'nope'`])
     const t = await k.createTask({ title: 'x' })
     await expect(k.proposePlan(t.id, draft())).rejects.toThrow(/unknown executor 'nope'/)
   })
@@ -111,7 +111,7 @@ describe('Kernel lifecycle', () => {
   it('propose succeeds when the refValidator returns no errors', async () => {
     const db = await createTestDb()
     dbs.push(db)
-    const k = new Kernel(await EventLog.open(db.url, { projectId: TEST_PROJECT_ID }), async () => [])
+    const k = new Kernel((await openStorage(db.url, { projectId: TEST_PROJECT_ID })).events, async () => [])
     const t = await k.createTask({ title: 'x' })
     await expect(k.proposePlan(t.id, draft())).resolves.toBeDefined()
   })

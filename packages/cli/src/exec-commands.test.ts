@@ -1,7 +1,7 @@
 import path from 'node:path'
 import { afterAll, afterEach, describe, expect, it, mock, spyOn } from 'bun:test'
 import type { ExecutionPort, OperationSpec, RunHandle } from '@orc/contracts'
-import { EventLog } from '@orc/kernel'
+import { openStorage } from '@orc/kernel'
 import { createTestDb, TEST_PROJECT_ID } from '@orc/kernel/test-helpers'
 import { buildProgram, openKernel } from './main'
 
@@ -52,7 +52,7 @@ describe('exec commands', () => {
   it('blocked run exits 1 — real process exit status via subprocess fixture', async () => {
     const db = await createTestDb()
     dbs.push(db)
-    const { kernel, log } = await openKernel(db.url, { projectId: TEST_PROJECT_ID })
+    const { kernel, log, storage } = await openKernel(db.url, { projectId: TEST_PROJECT_ID })
     const { port } = stubPort()
     const lines: string[] = []
     spyOn(console, 'log').mockImplementation((...a: unknown[]) => { lines.push(a.join(' ')) })
@@ -87,7 +87,7 @@ describe('exec commands', () => {
     // resolves — possibly before the push subscription's NOTIFY round-trip is delivered. The
     // finally-block drain (a direct query, not NOTIFY-dependent) must still surface it, whether
     // or not the live subscription got there first.
-    const rawLog = await EventLog.open(db.url, { projectId: TEST_PROJECT_ID })
+    const rawLog = (await openStorage(db.url, { projectId: TEST_PROJECT_ID })).events
     const handle: RunHandle = {
       workflowId: 'run:x:v1',
       wait: async () => {
@@ -129,7 +129,7 @@ describe('exec commands', () => {
   it('status shows started/completed operations and output receipts', async () => {
     const db = await createTestDb()
     dbs.push(db)
-    const { kernel, log } = await openKernel(db.url, { projectId: TEST_PROJECT_ID })
+    const { kernel, log, storage } = await openKernel(db.url, { projectId: TEST_PROJECT_ID })
     const { port } = stubPort()
     const lines: string[] = []
     spyOn(console, 'log').mockImplementation((...a: unknown[]) => { lines.push(a.join(' ')) })
@@ -139,9 +139,9 @@ describe('exec commands', () => {
     const opContext = { taskId: id, stepId: 's1', runToken: `step:${id}:s1:a1` }
     const modelSpec: OperationSpec = { operationId: `${opContext.runToken}:model:1`, kind: 'model', name: 'fake/m', before: {} }
     const toolSpec: OperationSpec = { operationId: `${opContext.runToken}:tool:1:c1`, kind: 'tool', name: 'fs_write', before: {} }
-    await log.beginOperation(opContext, modelSpec)
-    await log.completeOperation(opContext, modelSpec, 1, { text: 'hi' })
-    await log.beginOperation(opContext, toolSpec) // stays started — visible pending work
+    await storage.operations.beginOperation(opContext, modelSpec)
+    await storage.operations.completeOperation(opContext, modelSpec, 1, { text: 'hi' })
+    await storage.operations.beginOperation(opContext, toolSpec) // stays started — visible pending work
     await log.append({
       taskId: id, stepId: 's1', runToken: opContext.runToken, kind: 'artifact_produced',
       payload: { path: 'report.md', sha256: 'a'.repeat(64), size: 5 },

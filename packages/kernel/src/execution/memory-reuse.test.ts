@@ -10,7 +10,7 @@ import {
 import { draftFixture, stepFixture } from '@orc/contracts/fixtures'
 import { createMemory } from '@orc/memory'
 import { createTestSurreal } from '@orc/memory/test-helpers'
-import { EventLog } from '../eventlog'
+import { openStorage } from '../storage'
 import { Kernel } from '../kernel'
 import { createTestDb, fakeProvider, testConfig, TEST_PROJECT_ID } from '../test-helpers'
 import { createDbosPort, type DbosPort } from './dbos-port'
@@ -80,7 +80,8 @@ describe('memory reuse over a real run (e2e): step B reads step A\'s note', () =
     const pg = await createTestDb()
     const ts = await createTestSurreal()
     const vaultDir = mkdtempSync(path.join(tmpdir(), 'orc-memory-e2e-'))
-    const log = await EventLog.open(pg.url, { projectId: TEST_PROJECT_ID })
+    const storage = await openStorage(pg.url, { projectId: TEST_PROJECT_ID })
+    const log = storage.events
     const kernel = new Kernel(log)
     const config = testConfig(pg.url, {
       vaultDir,
@@ -90,7 +91,7 @@ describe('memory reuse over a real run (e2e): step B reads step A\'s note', () =
     const memory = await createMemory({ log, config })
     await memory.projector.start()
     const port: DbosPort = await createDbosPort({
-      log, config,
+      storage, config,
       providers: new Map([['fake', fakeProvider]]),
       executors: new Map([['memory-fake', memoryExecutor()]]),
       stepTools: p => memory.buildTools({

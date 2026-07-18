@@ -6,7 +6,7 @@ import { createOllamaProvider } from '@orc/provider-ollama'
 import { createMcpHub, type McpHub } from '@orc/mcp-client'
 import { createMemory, unavailableMemoryTools } from '@orc/memory'
 import { createVaultProjector } from '@orc/vault-projector'
-import { createDbosPort, createPluginHost, isMcpTrusted, loadConfig, loadTrust, requireProject, splitTool, EventLog, Kernel, type DbosPort, type PluginHost, type ProjectConfig } from '@orc/kernel'
+import { createDbosPort, createPluginHost, isMcpTrusted, loadConfig, loadTrust, openStorage, requireProject, splitTool, Kernel, type DbosPort, type PluginHost, type ProjectConfig, type Storage } from '@orc/kernel'
 
 export function seedRegistries(config = loadConfig()) {
   const providers = new Map<string, ModelProvider<unknown>>([
@@ -27,12 +27,13 @@ export async function buildPlugins(config = loadConfig()): Promise<{ host: Plugi
 }
 
 export async function buildRuntime(
-  shared?: { host: PluginHost; hub: McpHub; config?: ProjectConfig; log?: EventLog; kernel?: Kernel },
+  shared?: { host: PluginHost; hub: McpHub; config?: ProjectConfig; storage?: Storage; kernel?: Kernel },
 ): Promise<DbosPort> {
   const config = shared?.config ?? requireProject(loadConfig())
   const { host, hub } = shared ?? (await buildPlugins(config))
-  // reuse the caller's log (bin passes the kernel's) — one pool, migrations run once
-  const log = shared?.log ?? (await EventLog.open(config.databaseUrl, { projectId: config.projectId, redactEnv: config.redactEnv }))
+  // reuse the caller's storage (bin passes the kernel's) — one pool, one lifecycle
+  const storage = shared?.storage ?? (await openStorage(config.databaseUrl, { projectId: config.projectId, redactEnv: config.redactEnv }))
+  const log = storage.events
   // reuse the caller's kernel (bin passes the one wired to its refValidator) so task_split's
   // expanded child plans go through the same toolRef/skillRef validation as `orc propose`
   const kernel = shared?.kernel ?? new Kernel(log, host.refValidator)
@@ -56,7 +57,7 @@ export async function buildRuntime(
   }
 
   const port = await createDbosPort({
-    log, config,
+    storage, config,
     providers: host.providers, executors: host.executors,
     skills: host.skills, tools: hub,
     stepTools: p => [

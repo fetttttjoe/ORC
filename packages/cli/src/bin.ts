@@ -16,7 +16,7 @@ try {
   const config = requireProject(loadConfig())
   const plugins = await buildPlugins(config)
   await plugins.host.hooks.emit(HOOK_NAME.session_start)
-  const { kernel, log } = await openKernel(config.databaseUrl, {
+  const { kernel, log, storage } = await openKernel(config.databaseUrl, {
     projectId: config.projectId,
     redactEnv: config.redactEnv,
     refValidator: plugins.host.refValidator,
@@ -24,7 +24,7 @@ try {
   })
   await buildProgram(
     kernel,
-    async () => (runtime.port ??= await buildRuntime({ ...plugins, config, log, kernel })),
+    async () => (runtime.port ??= await buildRuntime({ ...plugins, config, storage, kernel })),
     { host: plugins.host, hub: plugins.hub, config, log },
   ).parseAsync(process.argv)
   if (runtime.port) await runtime.port.shutdown()

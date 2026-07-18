@@ -8,7 +8,7 @@ import { draftFixture, stepFixture } from '@orc/contracts/fixtures'
 import { createMcpHub } from '@orc/mcp-client'
 import { apiLoopExecutor } from '@orc/executor-api-loop'
 import { scriptModel } from '@orc/executor-api-loop/test-model'
-import { EventLog } from '../eventlog'
+import { openStorage, type EventLog, type Storage } from '../storage'
 import { Kernel } from '../kernel'
 import { fold } from '../projections'
 import { createTestDb, testConfig, TEST_PROJECT_ID } from '../test-helpers'
@@ -21,11 +21,13 @@ describe('MCP + skills through a durable run (integration)', () => {
   let kernel: Kernel
   let port: DbosPort
   let log: EventLog
+  let storage: Storage
   let teardown: () => Promise<void>
 
   beforeAll(async () => {
     const db = await createTestDb()
-    log = await EventLog.open(db.url, { projectId: TEST_PROJECT_ID })
+    storage = await openStorage(db.url, { projectId: TEST_PROJECT_ID })
+    log = storage.events
     kernel = new Kernel(log)
 
     const skillsRoot = mkdtempSync(path.join(tmpdir(), 'orc-mcp-run-'))
@@ -44,7 +46,7 @@ describe('MCP + skills through a durable run (integration)', () => {
     ])
     const config = testConfig(db.url)
     port = await createDbosPort({
-      log, config,
+      storage, config,
       providers: new Map([['fake', { costs: {}, languageModel: () => model }]]),
       executors: new Map([['api-loop', apiLoopExecutor()]]),
       skills, tools: hub,

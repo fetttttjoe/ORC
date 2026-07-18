@@ -1,5 +1,5 @@
 export * from './atomic-file'
-export * from './eventlog'
+export * from './storage'
 export * from './schema'
 export * from './projections'
 export * from './errors'

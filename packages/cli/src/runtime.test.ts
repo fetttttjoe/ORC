@@ -7,7 +7,7 @@ import {
   type AgentExecutor, type EventDraft, type ExecutorContext, type SplitResult, type UnifiedEvent,
 } from '@orc/contracts'
 import { Surreal } from 'surrealdb'
-import { EventLog, Kernel, projectDatabaseName, type ProjectConfig } from '@orc/kernel'
+import { openStorage, Kernel, projectDatabaseName, type ProjectConfig } from '@orc/kernel'
 import { createTestDb, fakeProvider, testConfig, TEST_PROJECT_ID } from '@orc/kernel/test-helpers'
 import { draftFixture, stepFixture } from '@orc/contracts/fixtures'
 import { createMemory } from '@orc/memory'
@@ -61,7 +61,8 @@ describe('buildRuntime degraded memory', () => {
       skillsDir: path.join(vaultDir, 'skills'),
       projectDbUrl: 'not-a-url', // malformed on purpose: createMemory must throw, runtime must degrade
     })
-    const log = await EventLog.open(db.url, { projectId: TEST_PROJECT_ID })
+    const storage = await openStorage(db.url, { projectId: TEST_PROJECT_ID })
+    const log = storage.events
     const kernel = new Kernel(log)
     const { host, hub } = await buildPlugins(config)
     host.providers.set('fake', fakeProvider)
@@ -69,7 +70,7 @@ describe('buildRuntime degraded memory', () => {
 
     const warns: string[] = []
     spyOn(console, 'warn').mockImplementation((...a: unknown[]) => { warns.push(a.join(' ')) })
-    const port = await buildRuntime({ host, hub, config, log, kernel })
+    const port = await buildRuntime({ host, hub, config, storage, kernel })
     mock.restore()
     expect(warns.filter(w => w.includes('memory unavailable; continuing in degraded mode'))).toHaveLength(1)
 
@@ -99,7 +100,7 @@ describe('status memory health', () => {
     const projectDbName = `t_${Math.random().toString(36).slice(2, 10)}`
     const config = testConfig(db.url, { vaultDir, skillsDir: path.join(vaultDir, 'skills'), projectDbName })
     surrealBases.push(config)
-    const log = await EventLog.open(db.url, { projectId: TEST_PROJECT_ID })
+    const log = (await openStorage(db.url, { projectId: TEST_PROJECT_ID })).events
     const kernel = new Kernel(log)
     const { host, hub } = await buildPlugins(config)
     const lines: string[] = []

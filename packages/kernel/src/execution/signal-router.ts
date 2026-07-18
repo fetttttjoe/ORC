@@ -2,7 +2,7 @@ import {
   EVENT_KIND, EventKind, MemoryWrittenPayload, PAYLOAD_SCHEMAS, RUN_OUTCOME, SplitResult, TASK_STATUS,
   type EventRecord, type TaskStatus,
 } from '@orc/contracts'
-import { EventLog } from '../eventlog'
+import { EventLog } from '../storage'
 import { fold, pendingSplitForChild, subtreeTaskIds, type SplitState } from '../projections'
 
 const TERMINAL: Set<TaskStatus> = new Set([TASK_STATUS.done, TASK_STATUS.blocked, TASK_STATUS.cancelled, TASK_STATUS.failed])

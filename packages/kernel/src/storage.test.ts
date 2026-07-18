@@ -8,7 +8,8 @@ import { drizzle } from 'drizzle-orm/node-postgres'
 import { migrate } from 'drizzle-orm/node-postgres/migrator'
 import { jsonb, pgTable, text } from 'drizzle-orm/pg-core'
 import { isTerminalError, type EventInput, type OperationSpec } from '@orc/contracts'
-import { EventLog } from './eventlog'
+import { openStorage, type EventLog, type Storage } from './storage'
+import { migrateDatabase } from './storage/migrate'
 import { events } from './schema'
 import { createTestDb, TEST_PROJECT_ID } from './test-helpers'
 
@@ -17,10 +18,13 @@ afterAll(async () => {
   await Promise.all(dbs.map(d => d.drop()))
 }, 30_000)
 
-async function freshLog(): Promise<EventLog> {
+async function freshStorage(): Promise<Storage> {
   const db = await createTestDb()
   dbs.push(db)
-  return EventLog.open(db.url, { projectId: TEST_PROJECT_ID })
+  return openStorage(db.url, { projectId: TEST_PROJECT_ID })
+}
+async function freshLog(): Promise<EventLog> {
+  return (await freshStorage()).events
 }
 
 const statusEvent = (taskId = 't1'): EventInput => ({
@@ -99,16 +103,16 @@ describe('EventLog (postgres)', () => {
   it('persists across reopen (migrations are idempotent)', async () => {
     const db = await createTestDb()
     dbs.push(db)
-    const log = await EventLog.open(db.url, { projectId: TEST_PROJECT_ID })
+    const log = (await openStorage(db.url, { projectId: TEST_PROJECT_ID })).events
     await log.append(statusEvent())
     await log.close()
-    const reopened = await EventLog.open(db.url, { projectId: TEST_PROJECT_ID })
+    const reopened = (await openStorage(db.url, { projectId: TEST_PROJECT_ID })).events
     expect(await reopened.all()).toHaveLength(1)
     await reopened.close()
   })
 
   it('migration 0002 assigns pre-existing rows to the unreachable legacy project', async () => {
-    const db = await createTestDb()
+    const db = await createTestDb({ migrate: false })
     dbs.push(db)
     const migrations = fileURLToPath(new URL('../drizzle', import.meta.url))
 
@@ -135,8 +139,9 @@ describe('EventLog (postgres)', () => {
       payload: { taskId: 't-legacy', from: 'draft', to: 'awaiting_approval' },
     })
 
-    // reopening through EventLog applies 0002 on top of the populated database
-    const log = await EventLog.open(db.url, { projectId: TEST_PROJECT_ID })
+    // applying the remaining migration backfills project_id on the pre-existing rows
+    await migrateDatabase(db.url)
+    const log = (await openStorage(db.url, { projectId: TEST_PROJECT_ID })).events
     expect(await log.all()).toHaveLength(0) // legacy rows are unreachable from any project
     const [row] = await raw.select().from(events)
     expect(row!.projectId).toBe('legacy')
@@ -148,8 +153,8 @@ describe('EventLog (postgres)', () => {
     const db = await createTestDb()
     dbs.push(db)
     const other = '00000000-0000-4000-8000-000000000002'
-    const p1 = await EventLog.open(db.url, { projectId: TEST_PROJECT_ID })
-    const p2 = await EventLog.open(db.url, { projectId: other })
+    const p1 = (await openStorage(db.url, { projectId: TEST_PROJECT_ID })).events
+    const p2 = (await openStorage(db.url, { projectId: other })).events
     await p1.append(statusEvent('t1'))
     await p2.append(statusEvent('t1'))
     expect((await p1.all()).map(e => e.projectId)).toEqual([TEST_PROJECT_ID])
@@ -198,8 +203,8 @@ describe('EventLog (postgres)', () => {
   it('concurrent transactions serialize per project; unrelated projects stay concurrent', async () => {
     const db = await createTestDb()
     dbs.push(db)
-    const log = await EventLog.open(db.url, { projectId: TEST_PROJECT_ID })
-    const other = await EventLog.open(db.url, { projectId: '00000000-0000-4000-8000-000000000002' })
+    const log = (await openStorage(db.url, { projectId: TEST_PROJECT_ID })).events
+    const other = (await openStorage(db.url, { projectId: '00000000-0000-4000-8000-000000000002' })).events
 
     let releaseA = () => {}
     const gate = new Promise<void>(r => { releaseA = r })
@@ -242,10 +247,10 @@ describe('EventLog (postgres)', () => {
     process.env.ORC_TEST_FAKE_SECRET = 'embedded-secret-value-42'
     process.env.ORC_TEST_CUSTOM_CREDS = 'custom-credential-value-9'
     try {
-      const log = await EventLog.open(db.url, {
+      const log = (await openStorage(db.url, {
         projectId: TEST_PROJECT_ID,
         redactEnv: ['ORC_TEST_CUSTOM_CREDS'],
-      })
+      })).events
       await log.append({
         taskId: 't1', stepId: 's1', runToken: 'r1', kind: 'tool_result',
         payload: {
@@ -295,12 +300,12 @@ describe('EventLog (postgres)', () => {
 const OP_CONTEXT = { taskId: 't1', stepId: 's1', runToken: 'step:t1:s1:a1' }
 const OP_SPEC: OperationSpec = { operationId: 'step:t1:s1:a1:model:1', kind: 'model', name: 'fake/m', before: { messages: ['hi'] } }
 
-describe('EventLog operation journal', () => {
+describe('OperationJournal', () => {
   it('beginOperation commits a started node and its transition before external code runs', async () => {
-    const log = await freshLog()
-    const begin = await log.beginOperation(OP_CONTEXT, OP_SPEC)
+    const { events: log, operations: journal } = await freshStorage()
+    const begin = await journal.beginOperation(OP_CONTEXT, OP_SPEC)
     expect(begin).toEqual({ reused: false, attempt: 1 })
-    const [op] = await log.operationsFor('t1')
+    const [op] = await journal.operationsFor('t1')
     expect(op!.status).toBe('started')
     expect(op!.attempts).toBe(1)
     expect(op!.name).toBe('fake/m')
@@ -310,12 +315,12 @@ describe('EventLog operation journal', () => {
   })
 
   it('completeOperation stores after and appends completion plus drafts atomically', async () => {
-    const log = await freshLog()
-    await log.beginOperation(OP_CONTEXT, OP_SPEC)
-    await log.completeOperation(OP_CONTEXT, OP_SPEC, 1, { text: 'answer' }, [
+    const { events: log, operations: journal } = await freshStorage()
+    await journal.beginOperation(OP_CONTEXT, OP_SPEC)
+    await journal.completeOperation(OP_CONTEXT, OP_SPEC, 1, { text: 'answer' }, [
       { kind: 'agent_call', payload: { stepId: 's1', runToken: OP_CONTEXT.runToken, iteration: 1, request: {}, response: { text: 'answer' } } },
     ])
-    const [op] = await log.operationsFor('t1')
+    const [op] = await journal.operationsFor('t1')
     expect(op!.status).toBe('completed')
     expect(op!.after).toEqual({ text: 'answer' })
     expect(op!.finishedSeq).not.toBeNull()
@@ -325,21 +330,21 @@ describe('EventLog operation journal', () => {
   })
 
   it('beginOperation after completion reuses the stored value without another attempt', async () => {
-    const log = await freshLog()
-    await log.beginOperation(OP_CONTEXT, OP_SPEC)
-    await log.completeOperation(OP_CONTEXT, OP_SPEC, 1, { text: 'answer' })
-    const again = await log.beginOperation(OP_CONTEXT, OP_SPEC)
+    const { events: log, operations: journal } = await freshStorage()
+    await journal.beginOperation(OP_CONTEXT, OP_SPEC)
+    await journal.completeOperation(OP_CONTEXT, OP_SPEC, 1, { text: 'answer' })
+    const again = await journal.beginOperation(OP_CONTEXT, OP_SPEC)
     expect(again).toEqual({ reused: true, attempt: 1, value: { text: 'answer' } })
     expect((await log.byTask('t1')).filter(e => e.kind === 'operation_started')).toHaveLength(1)
     await log.close()
   })
 
   it('beginOperation on a still-started node records the ambiguous retry as attempt 2', async () => {
-    const log = await freshLog()
-    await log.beginOperation(OP_CONTEXT, OP_SPEC)
-    const second = await log.beginOperation(OP_CONTEXT, OP_SPEC)
+    const { events: log, operations: journal } = await freshStorage()
+    await journal.beginOperation(OP_CONTEXT, OP_SPEC)
+    const second = await journal.beginOperation(OP_CONTEXT, OP_SPEC)
     expect(second).toEqual({ reused: false, attempt: 2 })
-    const [op] = await log.operationsFor('t1')
+    const [op] = await journal.operationsFor('t1')
     expect(op!.attempts).toBe(2)
     expect(op!.status).toBe('started')
     expect((await log.byTask('t1')).filter(e => e.kind === 'operation_started')).toHaveLength(2)
@@ -347,27 +352,27 @@ describe('EventLog operation journal', () => {
   })
 
   it('a failed completion draft rolls back the whole completion', async () => {
-    const log = await freshLog()
-    await log.beginOperation(OP_CONTEXT, OP_SPEC)
+    const { events: log, operations: journal } = await freshStorage()
+    await journal.beginOperation(OP_CONTEXT, OP_SPEC)
     await expect(
-      log.completeOperation(OP_CONTEXT, OP_SPEC, 1, { text: 'x' }, [
+      journal.completeOperation(OP_CONTEXT, OP_SPEC, 1, { text: 'x' }, [
         { kind: 'agent_call', payload: { wrong: true } }, // fails payload validation
       ]),
     ).rejects.toThrow()
-    const [op] = await log.operationsFor('t1')
+    const [op] = await journal.operationsFor('t1')
     expect(op!.status).toBe('started') // update rolled back with the event
     expect((await log.byTask('t1')).map(e => e.kind)).toEqual(['operation_started'])
     await log.close()
   })
 
   it('failOperation records the error and a stale attempt is rejected', async () => {
-    const log = await freshLog()
-    await log.beginOperation(OP_CONTEXT, OP_SPEC)
-    await log.failOperation(OP_CONTEXT, OP_SPEC, 1, { message: 'boom' })
-    const [op] = await log.operationsFor('t1')
+    const { events: log, operations: journal } = await freshStorage()
+    await journal.beginOperation(OP_CONTEXT, OP_SPEC)
+    await journal.failOperation(OP_CONTEXT, OP_SPEC, 1, { message: 'boom' })
+    const [op] = await journal.operationsFor('t1')
     expect(op!.status).toBe('failed')
     expect(op!.error).toEqual({ message: 'boom' })
-    await expect(log.completeOperation(OP_CONTEXT, OP_SPEC, 2, {})).rejects.toThrow(/stale/)
+    await expect(journal.completeOperation(OP_CONTEXT, OP_SPEC, 2, {})).rejects.toThrow(/stale/)
     await log.close()
   })
 
@@ -376,13 +381,13 @@ describe('EventLog operation journal', () => {
     dbs.push(db)
     process.env.ORC_TEST_OP_SECRET = 'operation-secret-value-7'
     try {
-      const log = await EventLog.open(db.url, { projectId: TEST_PROJECT_ID })
+      const { events: log, operations: journal } = await openStorage(db.url, { projectId: TEST_PROJECT_ID })
       const spec = { ...OP_SPEC, before: { apiKey: 'raw-key-1', prompt: 'use operation-secret-value-7' } }
-      await log.beginOperation(OP_CONTEXT, spec)
-      await log.failOperation(OP_CONTEXT, spec, 1, { message: 'failed with operation-secret-value-7' })
-      const second = await log.beginOperation(OP_CONTEXT, spec)
-      await log.completeOperation(OP_CONTEXT, spec, second.attempt, { echo: 'operation-secret-value-7' })
-      const stored = JSON.stringify(await log.operationsFor('t1')) + JSON.stringify(await log.byTask('t1'))
+      await journal.beginOperation(OP_CONTEXT, spec)
+      await journal.failOperation(OP_CONTEXT, spec, 1, { message: 'failed with operation-secret-value-7' })
+      const second = await journal.beginOperation(OP_CONTEXT, spec)
+      await journal.completeOperation(OP_CONTEXT, spec, second.attempt, { echo: 'operation-secret-value-7' })
+      const stored = JSON.stringify(await journal.operationsFor('t1')) + JSON.stringify(await log.byTask('t1'))
       expect(stored).not.toContain('raw-key-1')
       expect(stored).not.toContain('operation-secret-value-7')
       await log.close()
@@ -404,19 +409,19 @@ describe('EventLog operation journal', () => {
   })
 
   it('failOperation never regresses a completed node; complete re-entry is idempotent; stale is terminal', async () => {
-    const log = await freshLog()
-    await log.beginOperation(OP_CONTEXT, OP_SPEC)
-    await log.completeOperation(OP_CONTEXT, OP_SPEC, 1, { text: 'done' })
+    const { events: log, operations: journal } = await freshStorage()
+    await journal.beginOperation(OP_CONTEXT, OP_SPEC)
+    await journal.completeOperation(OP_CONTEXT, OP_SPEC, 1, { text: 'done' })
 
     // lost-ack failure path after a durable completion: must be a no-op
-    await log.failOperation(OP_CONTEXT, OP_SPEC, 1, { message: 'connection reset' })
-    expect((await log.operationsFor('t1'))[0]!.status).toBe('completed')
+    await journal.failOperation(OP_CONTEXT, OP_SPEC, 1, { message: 'connection reset' })
+    expect((await journal.operationsFor('t1'))[0]!.status).toBe('completed')
 
     // re-entry of the committed attempt returns the stored value instead of throwing
-    expect(await log.completeOperation(OP_CONTEXT, OP_SPEC, 1, { text: 'done' })).toEqual({ text: 'done' })
+    expect(await journal.completeOperation(OP_CONTEXT, OP_SPEC, 1, { text: 'done' })).toEqual({ text: 'done' })
 
     // a stale attempt must be terminal — the durable-step wrapper must not re-fire the effect
-    const stale = await log.completeOperation(OP_CONTEXT, OP_SPEC, 7, {}).catch(e => e)
+    const stale = await journal.completeOperation(OP_CONTEXT, OP_SPEC, 7, {}).catch(e => e)
     expect(isTerminalError(stale)).toBe(true)
     await log.close()
   })
@@ -424,22 +429,23 @@ describe('EventLog operation journal', () => {
   it('rebuildOperations reproduces the journal byte-for-byte from transitions, per project', async () => {
     const db = await createTestDb()
     dbs.push(db)
-    const log = await EventLog.open(db.url, { projectId: TEST_PROJECT_ID })
-    const other = await EventLog.open(db.url, { projectId: '00000000-0000-4000-8000-000000000002' })
+    const s1 = await openStorage(db.url, { projectId: TEST_PROJECT_ID })
+    const s2 = await openStorage(db.url, { projectId: '00000000-0000-4000-8000-000000000002' })
+    const journal = s1.operations
     const spec2: OperationSpec = { ...OP_SPEC, operationId: 'step:t1:s1:a1:tool:1:c1', kind: 'tool', name: 'echo' }
-    await log.beginOperation(OP_CONTEXT, OP_SPEC)
-    await log.completeOperation(OP_CONTEXT, OP_SPEC, 1, { text: 'a' })
-    await log.beginOperation(OP_CONTEXT, spec2)
-    await log.completeOperation(OP_CONTEXT, spec2, 1, { ok: true })
-    await other.beginOperation(OP_CONTEXT, OP_SPEC)
+    await journal.beginOperation(OP_CONTEXT, OP_SPEC)
+    await journal.completeOperation(OP_CONTEXT, OP_SPEC, 1, { text: 'a' })
+    await journal.beginOperation(OP_CONTEXT, spec2)
+    await journal.completeOperation(OP_CONTEXT, spec2, 1, { ok: true })
+    await s2.operations.beginOperation(OP_CONTEXT, OP_SPEC)
 
-    const before = await log.operationsFor('t1')
+    const before = await journal.operationsFor('t1')
     // wipe this project's journal rows out from under it, then rebuild from events
-    const wiped = await log.rebuildOperations()
+    const wiped = await journal.rebuildOperations()
     expect(wiped).toBe(2)
-    expect(await log.operationsFor('t1')).toEqual(before)
-    expect(await other.operationsFor('t1')).toHaveLength(1) // untouched
-    await log.close()
-    await other.close()
+    expect(await journal.operationsFor('t1')).toEqual(before)
+    expect(await s2.operations.operationsFor('t1')).toHaveLength(1) // untouched
+    await s1.close()
+    await s2.close()
   })
 })
