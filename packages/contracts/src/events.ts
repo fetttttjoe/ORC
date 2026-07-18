@@ -3,7 +3,7 @@ import { TaskNode, TaskStatus } from './task'
 import { Plan } from './plan'
 import { FailureClass, RunOutcome, Signal, Usage } from './execution'
 import { OperationCompletedPayload, OperationFailedPayload, OperationStartedPayload } from './operations'
-import { MemoryNoteInput, MemoryAuthor, MEMORY_ID_RE } from './memory'
+import { MemoryDeletedPayload, MemoryWrittenPayload } from './memory'
 
 // typed so folds can parse receipts without casts
 export const ArtifactProducedPayload = z.object({
@@ -112,15 +112,8 @@ export const PAYLOAD_SCHEMAS: Record<EventKind, z.ZodType> = {
   operation_completed: OperationCompletedPayload,
   operation_failed: OperationFailedPayload,
   artifact_produced: ArtifactProducedPayload,
-  memory_written: z.object({ note: MemoryNoteInput, author: MemoryAuthor }),
-  memory_deleted: z.object({
-    // id AND scope must be MEMORY_ID_RE-safe: they flow into noteRelPath → the vault path guard,
-    // so an unconstrained scope (e.g. '../x') would throw in the projector and wedge the read
-    // model. append() validates payloads against PAYLOAD_SCHEMAS, so this rejects at write time.
-    id: z.string().regex(MEMORY_ID_RE),
-    scope: z.string().regex(MEMORY_ID_RE),
-    author: MemoryAuthor,
-  }),
+  memory_written: MemoryWrittenPayload,
+  memory_deleted: MemoryDeletedPayload,
 }
 
 export const EventInput = z.object({

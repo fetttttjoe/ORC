@@ -4,13 +4,13 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { Surreal } from 'surrealdb'
 import { EVENT_KIND, type OperationSpec } from '@orc/contracts'
-import { loadConfig, requireProject, type PluginHost } from '@orc/kernel'
+import { loadConfig, projectDatabaseName, requireProject, type PluginHost, type ProjectConfig } from '@orc/kernel'
 import { createTestDb, TEST_PROJECT_ID } from '@orc/kernel/test-helpers'
 import type { McpHub } from '@orc/mcp-client'
 import { buildProgram, openKernel, runInit } from './main'
 
 const dbs: Array<{ drop: () => Promise<void> }> = []
-const surrealConfigs: Array<Pick<ReturnType<typeof loadConfig>, 'projectDbUrl' | 'projectDbNamespace' | 'projectDbUser' | 'projectDbPassword' | 'projectDbName'>> = []
+const surrealConfigs: ProjectConfig[] = []
 afterAll(async () => {
   for (const d of dbs) await d.drop()
   for (const c of surrealConfigs) await dropSurrealDb(c)
@@ -22,12 +22,14 @@ afterAll(async () => {
 // `t_[a-z0-9]+`) db name is inlined directly, since `REMOVE DATABASE IF EXISTS type::database($db)`
 // is not a valid function path there (a parse error, easy to silently swallow via `.catch`).
 // Connection details come from the same injected `config` the test below builds — no literals.
-async function dropSurrealDb(config: Pick<ReturnType<typeof loadConfig>, 'projectDbUrl' | 'projectDbNamespace' | 'projectDbUser' | 'projectDbPassword' | 'projectDbName'>): Promise<void> {
+async function dropSurrealDb(config: ProjectConfig): Promise<void> {
   const s = new Surreal()
   await s.connect(config.projectDbUrl)
   await s.signin({ username: config.projectDbUser, password: config.projectDbPassword })
   await s.use({ namespace: config.projectDbNamespace })
-  await s.query(`REMOVE DATABASE IF EXISTS \`${config.projectDbName}\`;`).catch(() => {})
+  // createMemory opens the project-derived name; drop base and derived alike
+  for (const name of [config.projectDbName, projectDatabaseName(config.projectDbName, config.projectId)])
+    await s.query(`REMOVE DATABASE IF EXISTS \`${name}\`;`).catch(() => {})
   await s.close()
 }
 
@@ -226,7 +228,7 @@ describe('orc CLI', () => {
     dbs.push(db)
     const dir = mkdtempSync(path.join(tmpdir(), 'orc-memory-cli-'))
     const projectDbName = `t_${Math.random().toString(36).slice(2, 10)}`
-    const config = { ...loadConfig(dir), projectDbName }
+    const config = requireProject({ ...loadConfig(dir), projectDbName, projectId: TEST_PROJECT_ID, projectName: 'test' })
     surrealConfigs.push(config)
     const { kernel, log } = await openKernel(db.url, { projectId: TEST_PROJECT_ID })
     const lines: string[] = []

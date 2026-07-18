@@ -23,6 +23,15 @@ const detailLevelSchema = { type: 'string', enum: ['minimal', 'standard'], descr
 const budgetSchema = { type: 'integer', minimum: 1, description: 'approx token budget for the result (default 1500)' }
 const idSchema = { type: 'string', pattern: '^[a-z0-9][a-z0-9-]*$' }
 
+// Degraded mode (design §8.4): the same four tools exist but every call returns an explicit
+// isError result naming the reason — the model learns context is unavailable instead of
+// silently losing its memory tools.
+export function unavailableMemoryTools(reason: string): ResolvedTool[] {
+  const fail = async (): Promise<never> => { throw new Error(`memory unavailable: ${reason}`) }
+  const store: MemoryStore = { write: fail, remove: fail, get: fail, list: fail, search: fail, neighbors: fail }
+  return memoryTools(store, { source: 'agent' })
+}
+
 // Injected as ResolvedTool[] via the same channel MCP tools use. Author is bound per step.
 export function memoryTools(store: MemoryStore, author: MemoryAuthor): ResolvedTool[] {
   return [
@@ -34,6 +43,10 @@ export function memoryTools(store: MemoryStore, author: MemoryAuthor): ResolvedT
         properties: {
           id: { ...idSchema, description: 'stable slug' },
           title: { type: 'string', minLength: 1, maxLength: 200 },
+          kind: {
+            type: 'string', enum: ['fact', 'decision', 'architecture_current', 'architecture_target', 'documentation'],
+            description: 'architecture_current = observed implementation; architecture_target = intended design (default fact)',
+          },
           summary: { type: 'string', maxLength: 500 }, body: { type: 'string' },
           categories: { type: 'array', items: { type: 'string' } },
           tags: { type: 'array', items: { type: 'string' } },

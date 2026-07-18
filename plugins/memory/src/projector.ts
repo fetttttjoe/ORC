@@ -1,38 +1,40 @@
-import { EVENT_KIND, type EventRecord } from '@orc/contracts'
+import { EVENT_KIND, MemoryDeletedPayload, MemoryWrittenPayload, type EventRecord } from '@orc/contracts'
 import type { EventLog } from '@orc/kernel'
-import { MemoryNoteInput } from '@orc/contracts'
 import { SurrealMemory } from './surreal'
 import { noteRelPath, renderNoteFile } from './note-md'
 import { deleteMemoryFile, writeMemoryFile } from './write-note'
+import { rebuildVaultMemory } from './memory-index'
 
 export interface MemoryProjector { start(): Promise<void>; close(): Promise<void>; rebuild(): Promise<void>; catchUp(): Promise<void> }
+
+const MEMORY_KINDS = [EVENT_KIND.memory_written, EVENT_KIND.memory_deleted]
 
 export function createMemoryProjector(opts: { log: EventLog; surreal: SurrealMemory; vaultDir: string }): MemoryProjector {
   const { log, surreal, vaultDir } = opts
   let unsub: (() => Promise<void>) | null = null
   let applying: Promise<void> = Promise.resolve()
 
+  // Surreal commits note+edges+cursor in ONE transaction (applyEvent); the vault file is
+  // written only after an accepted apply. A crash between the two heals on the next
+  // start/catchUp/rebuild, which replaces vault/memory/** from current Surreal state.
   const applyOne = async (e: EventRecord): Promise<void> => {
+    const applied = await surreal.applyEvent(e)
+    if (!applied) return
     if (e.kind === EVENT_KIND.memory_written) {
-      const p = e.payload as { note: unknown; author: any }
-      const note = MemoryNoteInput.parse(p.note)
-      await surreal.applyWritten({ seq: e.seq, ts: e.ts, note, author: p.author })
+      const { note } = MemoryWrittenPayload.parse(e.payload)
       const full = await surreal.get(note.id, note.scope)
       if (full) writeMemoryFile(vaultDir, noteRelPath(full), renderNoteFile(full))
     } else if (e.kind === EVENT_KIND.memory_deleted) {
-      const p = e.payload as { id: string; scope: string; author: any }
-      await surreal.applyDeleted({ seq: e.seq, ts: e.ts, id: p.id, scope: p.scope, author: p.author })
-      deleteMemoryFile(vaultDir, noteRelPath({ id: p.id, scope: p.scope }))
+      const p = MemoryDeletedPayload.parse(e.payload)
+      deleteMemoryFile(vaultDir, noteRelPath(p))
     }
-    await surreal.setCursor(e.seq)
   }
 
   // Reconcile by querying the log WHERE seq > cursor rather than trusting the subscribe
-  // payload's ordering (the log's subscribe cursor can skip a lower seq under concurrent
-  // non-tx appends — spec §4.3). Callers are responsible for serializing calls (see `serialize`
+  // payload's ordering. Callers are responsible for serializing calls (see `serialize`
   // below) so revision/ordering stays deterministic.
   const drainFrom = async (fromSeq: number): Promise<number> => {
-    const events = await log.after(fromSeq, [EVENT_KIND.memory_written, EVENT_KIND.memory_deleted])
+    const events = await log.after(fromSeq, MEMORY_KINDS)
     for (const e of events) await applyOne(e)
     return surreal.getCursor()
   }
@@ -59,12 +61,26 @@ export function createMemoryProjector(opts: { log: EventLog; surreal: SurrealMem
 
   return {
     start: async () => {
-      await serialize(async () => { cursorCache = await drainFrom(await surreal.getCursor()) })
+      await serialize(async () => {
+        cursorCache = await drainFrom(await surreal.getCursor())
+        await rebuildVaultMemory(surreal, vaultDir)
+      })
       unsub = await log.subscribe({}, () => enqueueReconcile())
     },
     close: async () => { if (unsub) { await unsub(); unsub = null } await applying },
-    rebuild: async () => { await serialize(async () => { await surreal.clear(); cursorCache = await drainFrom(0) }) },
+    rebuild: async () => {
+      await serialize(async () => {
+        await surreal.clear()
+        cursorCache = await drainFrom(0)
+        await rebuildVaultMemory(surreal, vaultDir)
+      })
+    },
     // one-shot drain from the persisted cursor (no clear, no subscription) — the CLI's projection path
-    catchUp: async () => { await serialize(async () => { cursorCache = await drainFrom(await surreal.getCursor()) }) },
+    catchUp: async () => {
+      await serialize(async () => {
+        cursorCache = await drainFrom(await surreal.getCursor())
+        await rebuildVaultMemory(surreal, vaultDir)
+      })
+    },
   }
 }

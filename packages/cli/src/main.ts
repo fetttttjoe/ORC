@@ -2,9 +2,9 @@ import { readdirSync, readFileSync } from 'node:fs'
 import path from 'node:path'
 import { Command } from 'commander'
 import { ISOLATION_TIER, PlanDraft, type EventRecord, type ExecutionPort, type Plan, type RunHandle } from '@orc/contracts'
-import { EventLog, Kernel, fold, grantTrust, initializeProject, loadConfig, requireProject, taskUsage, type OrcConfig, type PluginHost } from '@orc/kernel'
+import { EventLog, Kernel, fold, grantTrust, initializeProject, loadConfig, requireProject, taskUsage, type OrcConfig, type PluginHost, type ProjectConfig } from '@orc/kernel'
 import { createVaultProjector, parsePlanFile } from '@orc/vault-projector'
-import { createMemory } from '@orc/memory'
+import { createMemory, probeMemory } from '@orc/memory'
 import type { McpHub } from '@orc/mcp-client'
 
 // loadConfig is the ONE resolution of env → .orc/config.json → default; every command
@@ -96,7 +96,7 @@ async function tailUntilDone(kernel: Kernel, taskId: string, handle: RunHandle):
 export function buildProgram(
   kernel: Kernel,
   portFactory?: () => Promise<ExecutionPort>,
-  plugin?: { host: PluginHost; hub: McpHub; config: OrcConfig; log: EventLog },
+  plugin?: { host: PluginHost; hub: McpHub; config: ProjectConfig; log: EventLog },
 ): Command {
   const program = new Command('orc')
   program.description('multi-agent orchestrator')
@@ -245,8 +245,11 @@ export function buildProgram(
       const state = await kernel.state()
       const task = state.tasks.get(taskId)
       if (!task) throw new Error(`no task '${taskId}'`)
-      if (plugin?.config.projectId && plugin.config.projectName)
+      if (plugin) {
         console.log(`project: ${plugin.config.projectName} (${plugin.config.projectId})`)
+        const health = await probeMemory(plugin.config, plugin.log)
+        console.log(health.healthy ? 'memory: healthy' : `memory: degraded (${health.reason})`)
+      }
       console.log(`${task.id}  ${task.status}  ${task.title}`)
       const plan = state.plans.get(taskId)?.versions.at(-1)
       for (const step of plan?.steps ?? []) {

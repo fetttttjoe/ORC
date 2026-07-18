@@ -50,4 +50,17 @@ describe('MemoryNoteInput', () => {
     })
     expect(full.revision).toBe(1)
   })
+
+  it('kind defaults to fact and sourceRevision to null', () => {
+    const n = MemoryNoteInput.parse({ id: 'x', title: 'X' })
+    expect(n.kind).toBe('fact')
+    expect(n.sourceRevision).toBeNull()
+    expect(MemoryNoteInput.safeParse({ id: 'x', title: 'X', kind: 'architecture_target' }).success).toBe(true)
+    expect(MemoryNoteInput.safeParse({ id: 'x', title: 'X', kind: 'vibes' }).success).toBe(false)
+  })
+
+  it("reserves project-scope note id 'index' (collides with vault/memory/index.md)", () => {
+    expect(MemoryNoteInput.safeParse({ id: 'index', title: 'X' }).success).toBe(false)
+    expect(MemoryNoteInput.safeParse({ id: 'index', scope: 'other', title: 'X' }).success).toBe(true)
+  })
 })

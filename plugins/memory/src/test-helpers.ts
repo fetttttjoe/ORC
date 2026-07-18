@@ -23,7 +23,12 @@ export async function createTestSurreal(): Promise<{
       // left ~80 throwaway `t_*` dbs behind). The working shape inlines the db name directly;
       // safe because `db` is generated above from `[a-z0-9]` only, never external input.
       await s.use({ namespace: NS })
-      await s.query(`REMOVE DATABASE IF EXISTS \`${db}\`;`).catch(() => {})
+      // createMemory derives `${db}_<projectSuffix>` from this base name — remove those too.
+      // INFO FOR NS lists databases; names are internally generated, never external input.
+      const [info] = await s.query<[{ databases: Record<string, unknown> }]>('INFO FOR NS;')
+      const derived = Object.keys(info?.databases ?? {}).filter(name => name.startsWith(`${db}_`))
+      for (const name of [db, ...derived])
+        await s.query(`REMOVE DATABASE IF EXISTS \`${name}\`;`).catch(() => {})
       await s.close()
     },
   }
