@@ -1,0 +1,20 @@
+diff --git a/dist/index.d.ts b/dist/index.d.ts
+index 38e2ffea81853e464a163a188cf7f4edbf6f6a4b..b368188f06543ae7d7056799f7352645acd15011 100644
+--- a/dist/index.d.ts
++++ b/dist/index.d.ts
+@@ -1385,13 +1385,13 @@ declare function literal<T extends string | number | boolean>(value: T extends s
+ /** Create a record reference type, optionally scoped to a specific table. */
+ declare function record<T extends string | undefined>(table?: T extends string ? T : T extends undefined ? T : never): RecordType<T>;
+ /** Extract the inferred TypeScript type from a type definition or workable. */
+-type infer<T extends AbstractType | Workable> = T extends Workable<WorkableContext, infer T> ? T["infer"] : T extends AbstractType ? T["infer"] : never;
++type Infer<T extends AbstractType | Workable> = T extends Workable<WorkableContext, infer T> ? T["infer"] : T extends AbstractType ? T["infer"] : never;
+ 
+ declare const t__null: typeof _null;
+ declare const t_array: typeof array;
+ declare const t_bool: typeof bool;
+ declare const t_date: typeof date;
+-type t_infer<T extends AbstractType | Workable> = infer<T>;
++type t_infer<T extends AbstractType | Workable> = Infer<T>;
+ declare const t_literal: typeof literal;
+ declare const t_never: typeof never;
+ declare const t_none: typeof none;
