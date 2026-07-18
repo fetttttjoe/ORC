@@ -59,7 +59,9 @@ export interface ResolvedTool {
   name: string // mangled, model-facing
   description: string
   inputSchema: Record<string, unknown> // JSON Schema, as delivered by the server
-  execute(input: unknown): Promise<{ output: unknown; isError: boolean }>
+  // toolCallId: the real provider tool_call id, when the caller has one (executeTool threads it
+  // through) — optional so MCP tools and other implementations that don't need it stay unchanged.
+  execute(input: unknown, toolCallId?: string): Promise<{ output: unknown; isError: boolean }>
 }
 
 export interface ToolSource {
