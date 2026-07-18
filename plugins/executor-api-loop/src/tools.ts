@@ -10,10 +10,12 @@ export const TOOL_NAME = {
   fs_read: 'fs_read',
   fs_write: 'fs_write',
   fs_list: 'fs_list',
+  join_splits: 'join_splits',
 } as const
 export type ToolName = (typeof TOOL_NAME)[keyof typeof TOOL_NAME]
 
 export const SignalInput = z.object({ outcome: SignalOutcome, summary: z.string().min(1) })
+export const JoinSplitsInput = z.object({ splitIds: z.array(z.string()).optional() })
 const ReadInput = z.object({ path: z.string().min(1) })
 const WriteInput = z.object({ path: z.string().min(1), content: z.string() })
 const ListInput = z.object({ path: z.string().default('.') })
@@ -53,6 +55,11 @@ export function toolSet(extra: ResolvedTool[] = []) {
     [TOOL_NAME.fs_list]: tool({
       description: 'List directory entries inside the step workspace.',
       inputSchema: ListInput,
+    }),
+    [TOOL_NAME.join_splits]: tool({
+      description:
+        'Durably wait for child splits proposed with task_split to finish. Returns per-split {outcome, summary, notes} — notes are memory ids to read with memory_read or traverse with memory_neighbors. Omit splitIds to wait for all your pending splits.',
+      inputSchema: JoinSplitsInput,
     }),
     ...Object.fromEntries(extra.map(t => [
       t.name,

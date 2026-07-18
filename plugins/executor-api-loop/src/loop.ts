@@ -4,7 +4,7 @@ import {
   type AgentExecutor, type EventDraft, type ExecutorContext, type Signal,
   type SplitResult, type UnifiedEvent, type Usage,
 } from '@orc/contracts'
-import { SignalInput, TOOL_NAME, executeTool, toolSet } from './tools'
+import { JoinSplitsInput, SignalInput, TOOL_NAME, executeTool, toolSet } from './tools'
 
 interface TurnResult {
   text: string
@@ -149,9 +149,12 @@ export function apiLoopExecutor(): AgentExecutor<LanguageModel> {
           continue
         }
 
+        const joinCall = turn.toolCalls.find(c => c.toolName === TOOL_NAME.join_splits)
+        const parsedJoin = joinCall ? JoinSplitsInput.safeParse(joinCall.input) : undefined
+
         // sibling tool calls batched with a valid signal still execute — a turn like
         // [fs_write, signal(success)] must not silently drop the write
-        const toolCalls = turn.toolCalls.filter(c => c !== signalCall)
+        const toolCalls = turn.toolCalls.filter(c => c !== signalCall && c !== joinCall)
         if (toolCalls.length > 0) {
           const results = await ctx.checkpoint(
             `tools:${iteration}`,
@@ -181,6 +184,36 @@ export function apiLoopExecutor(): AgentExecutor<LanguageModel> {
               output: { type: 'json', value: results[i]!.output },
             })),
           } as ModelMessage)
+        }
+
+        if (joinCall && parsedJoin?.success) {
+          // suspension point (spec D9): the port recv's in workflow context and resumes us
+          const results = (yield {
+            type: UNIFIED_EVENT_TYPE.gate,
+            splitIds: parsedJoin.data.splitIds ?? [],
+            toolCallId: joinCall.toolCallId,
+          }) ?? []
+          await ctx.checkpoint(
+            `join:${iteration}`,
+            async () => results,
+            (rs): EventDraft[] => [
+              { kind: EVENT_KIND.tool_call, payload: { ...base, iteration, toolCallId: joinCall.toolCallId, toolName: TOOL_NAME.join_splits, input: joinCall.input } },
+              { kind: EVENT_KIND.tool_result, payload: { ...base, iteration, toolCallId: joinCall.toolCallId, toolName: TOOL_NAME.join_splits, output: { splits: rs }, isError: false } },
+            ],
+          )
+          yield { type: UNIFIED_EVENT_TYPE.tool_result, toolCallId: joinCall.toolCallId, toolName: TOOL_NAME.join_splits, output: { splits: results }, isError: false }
+          messages.push({
+            role: 'tool',
+            content: [{ type: 'tool-result', toolCallId: joinCall.toolCallId, toolName: TOOL_NAME.join_splits, output: { type: 'json', value: { splits: results } } }],
+          } as ModelMessage)
+          continue
+        }
+        if (joinCall && parsedJoin && !parsedJoin.success) {
+          messages.push({
+            role: 'tool',
+            content: [{ type: 'tool-result', toolCallId: joinCall.toolCallId, toolName: TOOL_NAME.join_splits, output: { type: 'json', value: { error: `invalid join_splits input: ${parsedJoin.error.message}` } } }],
+          } as ModelMessage)
+          continue
         }
 
         if (signalCall && parsedSignal?.success) {
