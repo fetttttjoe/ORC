@@ -7,12 +7,16 @@ approval, multi-provider agent dispatch, plugin-first. Design spec:
 
 ## Status
 
-M5a + foundation hardening — recursion (task_split/join), committed project
-identity, project-scoped infrastructure, a durable model/tool operation
-journal with honest audit replay, verified output receipts, a typed
-agent-maintained knowledge graph with current/target architecture views, and
-degraded-memory startup. Every task is auditable, resumable, project-isolated,
-and visible through separate execution, lineage, and knowledge graphs.
+M4c + M5a + foundation hardening — recursion (task_split/join), committed
+project identity, project-scoped infrastructure, a durable model/tool operation
+journal with honest audit replay, verified output receipts, and a typed
+agent-maintained knowledge graph with current/target architecture views. The
+memory graph carries typed, confidence-weighted links (`RELATE` edges) with a
+graph-distance ranker and a `memory_neighbors` traverse tool, so a recursive
+agent can pull a bounded context slice instead of re-holding everything.
+Startup is degraded-memory tolerant. Every task is auditable, resumable,
+project-isolated, and visible through separate execution, lineage, and
+knowledge graphs.
 
 ## Stack
 
