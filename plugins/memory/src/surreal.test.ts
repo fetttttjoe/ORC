@@ -53,7 +53,7 @@ describe('SurrealMemory', () => {
 
     const raw = new Surreal()
     await raw.connect(t.url)
-    await raw.signin({ username: 'root', password: 'orc' })
+    await raw.signin({ username: t.username, password: t.password })
     await raw.use({ namespace: t.ns, database: t.db })
     const [rows] = await raw.query<[{ readCount: number; lastReadAt: string }[]]>(
       'SELECT readCount, lastReadAt FROM $rid', { rid: new RecordId('note', 'project:auth') },

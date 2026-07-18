@@ -20,6 +20,9 @@ const settingsSchema = (dir: string) =>
     ollamaBaseUrl: z.url().default('http://localhost:11434'),
     projectDbUrl: z.string().default('ws://127.0.0.1:8000/rpc'),
     projectDbName: z.string().default('memory'),
+    projectDbNamespace: z.string().default('orc'),
+    projectDbUser: z.string().default('root'),
+    projectDbPassword: z.string().default('orc'),
     costOverrides: z.record(z.string(), z.record(z.string(), ModelCost)).default({}),
     vaultDir: z.string().default(path.join(dir, 'vault')).transform(p => path.resolve(dir, p)),
     skillsDir: z.string().optional().transform(p => (p === undefined ? undefined : path.resolve(dir, p))),
@@ -35,6 +38,9 @@ const envOverrides = (): Record<string, string> => {
     ollamaBaseUrl: process.env.OLLAMA_BASE_URL,
     projectDbUrl: process.env.ORC_PROJECT_DB_URL,
     projectDbName: process.env.ORC_PROJECT_DB_NAME,
+    projectDbNamespace: process.env.ORC_PROJECT_DB_NAMESPACE,
+    projectDbUser: process.env.ORC_PROJECT_DB_USER,
+    projectDbPassword: process.env.ORC_PROJECT_DB_PASSWORD,
   }
   return Object.fromEntries(Object.entries(map).filter((e): e is [string, string] => Boolean(e[1])))
 }
