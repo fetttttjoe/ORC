@@ -151,6 +151,23 @@ describe('Kernel lifecycle', () => {
     expect((await k.listTasks()).filter(t => t.parentId === parent.id)).toHaveLength(1)
   })
 
+  it('proposeSplit: rejects a cross-attempt childTaskId collision (same toolCallId, new runToken)', async () => {
+    const k = await freshKernel()
+    const parent = await k.createTask({ title: 'P', spec: '', budgetUSD: 10 })
+    const base = {
+      parentTaskId: parent.id, stepId: 's1', toolCallId: 'call_1',
+      title: 'C', spec: 'child work',
+      plan: { steps: [{ id: 'w1', role: 'worker', title: 'w', instructions: 'do', dependsOn: [], skillRefs: [], toolRefs: [] }] },
+      parentStep: { executorRef: 'api-loop', modelRef: 'fake/m', maxIterations: 5 },
+      policy: ApprovalPolicy.parse({}), maxDepth: 3,
+    }
+    await k.proposeSplit({ ...base, runToken: `step:${parent.id}:s1:a1` })
+    // a2 mints a NEW splitId (runToken differs) but the SAME attempt-independent childTaskId —
+    // slips past the `existing` check, so the collision guard must reject it (poisoned fold otherwise)
+    expect(await codeOf(k.proposeSplit({ ...base, runToken: `step:${parent.id}:s1:a2` }))).toBe(KERNEL_ERROR_CODE.invalid_transition)
+    expect((await k.listTasks()).filter(t => t.parentId === parent.id)).toHaveLength(1)
+  })
+
   it('proposeSplit: auto policy approves with provenance; depth cap rejects', async () => {
     const k = await freshKernel()
     const parent = await k.createTask({ title: 'P', spec: '' })

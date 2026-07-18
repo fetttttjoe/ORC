@@ -73,9 +73,16 @@ export function createSignalRouter(opts: {
       for (const split of state.splits.values()) {
         if (split.resolved) continue
         const status = state.tasks.get(split.childTaskId)?.status
-        if (status && TERMINAL.has(status)) await resolveSplit(seed, split)
+        if (status && TERMINAL.has(status)) { await resolveSplit(seed, split); continue }
+        // route 2 catch-up: an approved child whose run never started (plan_approved landed while
+        // the router was down) still needs its run — same idempotent startChildRun as the live route.
+        if (status === TASK_STATUS.approved && !state.runs.get(split.childTaskId)?.length)
+          await opts.onChildApproved(split.childTaskId).catch(err =>
+            console.warn(`signal router: startChildRun ${split.childTaskId}: ${err instanceof Error ? err.message : String(err)}`))
       }
-      unsub = await opts.log.subscribe({}, async e => {
+      // resume the pump exactly where the sweep's seed ended (seq-exclusive), closing the gap for
+      // events that landed between all() and subscribe. Both routes are idempotent under replay.
+      unsub = await opts.log.subscribe({ fromSeq: seed.at(-1)?.seq ?? 0 }, async e => {
         // route 2: an approved child with a pending split gets its run started (policy OR human)
         if (e.kind === EVENT_KIND.plan_approved && e.taskId) {
           if (pendingSplitForChild(fold(await opts.log.all()), e.taskId))

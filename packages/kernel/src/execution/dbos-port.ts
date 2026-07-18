@@ -9,7 +9,7 @@ import {
   type RunHandle, type RunOutcome, type Signal, type SplitResult, type ToolSource,
 } from '@orc/contracts'
 import { EventLog } from '../eventlog'
-import { fold, completedStepIds, nextAttempts, subtreeTaskIds, taskUsage, type State } from '../projections'
+import { fold, completedStepIds, nextAttempts, subtreeTaskIds, subtreeUsage, type State } from '../projections'
 import { KERNEL_ERROR_CODE, KernelError } from '../errors'
 import { readySteps, runOutcomeOf } from './interpreter'
 import { createSignalRouter } from './signal-router'
@@ -145,7 +145,8 @@ export async function createDbosPort(opts: {
           checkpoint(name, fn, toEvents ? r => toEvents(r).map(d => priceDraft(d, provider, modelId)) : undefined),
         budgetRemainingUSD: async () => {
           if (init.budgetUSD === null) return null
-          const spent = taskUsage(await foldState(args.taskId), args.taskId).costUSD ?? 0
+          // ponytail: whole-log fold — subtree usage spans child tasks (spec D8), byTask is not enough
+          const spent = subtreeUsage(fold(await log.all()), args.taskId).costUSD ?? 0
           return init.budgetUSD - spent
         },
       }
@@ -161,14 +162,19 @@ export async function createDbosPort(opts: {
         if (ev.type === 'signal') signal = ev.signal
         if (ev.type === 'error') error = { class: ev.class, message: ev.message }
         if (ev.type === 'gate') {
-          // resolve targets in a checkpoint (log read = non-deterministic); default = all
-          // unresolved splits proposed by THIS step attempt
+          // resolve targets in a checkpoint (log read = non-deterministic). Default = all
+          // unresolved splits proposed by THIS step attempt; an explicit request is intersected
+          // with that set so an unknown/foreign/already-resolved id — which can never receive a
+          // message and would wedge recv forever (no gate timeout in v1) — is dropped. Empty
+          // intersection resumes with [] immediately.
           const targets = await checkpoint(`gate:targets:${ev.toolCallId}`, async () => {
-            if (ev.splitIds.length > 0) return ev.splitIds
             const state = await foldState(args.taskId)
-            return [...state.splits.values()]
+            const own = [...state.splits.values()]
               .filter(s => s.stepId === args.stepId && s.runToken === runToken && !s.resolved)
               .map(s => s.splitId)
+            if (ev.splitIds.length === 0) return own
+            const ownSet = new Set(own)
+            return ev.splitIds.filter(id => ownSet.has(id))
           })
           const results: SplitResult[] = []
           for (const id of targets) {

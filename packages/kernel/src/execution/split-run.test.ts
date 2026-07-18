@@ -33,7 +33,7 @@ const waitFor = async (pred: () => Promise<boolean>, ms = 15_000): Promise<boole
 // cfg.expectGated is what the parent asserts task_split returned; cfg.child selects the
 // child's behavior. Assertions are encoded into the parent's success/failure signal
 // (mirrors memory-reuse.test.ts: 'done' at the run level PROVES the encoded checks held).
-function splitFake(cfg: { expectGated: boolean; child: 'write' | 'signal' | 'sleep' }): AgentExecutor<unknown> {
+function splitFake(cfg: { expectGated: boolean; child: 'write' | 'signal' | 'sleep'; foreignSplit?: boolean }): AgentExecutor<unknown> {
   return {
     id: 'split-fake',
     async *startTurn(ctx: ExecutorContext<unknown>): AsyncGenerator<UnifiedEvent, void, SplitResult[] | undefined> {
@@ -87,8 +87,10 @@ function splitFake(cfg: { expectGated: boolean; child: 'write' | 'signal' | 'sle
       const out = res.output as { splitId: string; childTaskId: string; gated: boolean }
       const gatedOk = res.isError === false && out.gated === cfg.expectGated
 
-      // yield the gate; the port resumes the generator with SplitResult[] once the child resolves
-      const results = yield { type: 'gate', splitIds: [out.splitId], toolCallId: 'g1' }
+      // yield the gate; the port resumes the generator with SplitResult[] once the child resolves.
+      // a foreign id (not one of THIS attempt's splits) must be dropped, not recv-waited forever.
+      const splitIds = cfg.foreignSplit ? [out.splitId, 'split:foreign:nope'] : [out.splitId]
+      const results = yield { type: 'gate', splitIds, toolCallId: 'g1' }
       const r0 = results?.[0]
 
       // if the child wrote notes, read one back through the (eventually-consistent) memory store
@@ -236,6 +238,19 @@ describe('recursion e2e: split, gate, join, manual approve, queue partition', ()
       expect(await waitFor(async () =>
         (await log.all()).some(e => e.kind === EVENT_KIND.split_resolved && (e.payload as { outcome: string }).outcome === RUN_OUTCOME.cancelled),
       )).toBe(true)
+    } finally {
+      await cleanup()
+    }
+  }, 40_000)
+
+  it('(e) gate drops a foreign splitId: run joins the real child, never wedges recv on the bogus id', async () => {
+    // without the intersection guard the port recv-waits on split:split:foreign:nope forever and
+    // this run never settles (timeout); with it, the foreign id is dropped and only the real split awaited.
+    const { kernel, port, cleanup } = await bringUp('auto', splitFake({ expectGated: false, child: 'signal', foreignSplit: true }))
+    try {
+      const parentId = await parentTask(kernel)
+      const handle = await port.startRun(parentId)
+      expect(await handle.wait()).toBe('done')
     } finally {
       await cleanup()
     }
