@@ -175,7 +175,7 @@ export function apiLoopExecutor(): AgentExecutor<LanguageModel> {
             `tools:${iteration}`,
             async () => {
               const out = []
-              for (const call of toolCalls) out.push(await executeTool(call.toolName, call.input, ctx.workspaceDir, ctx.extraTools))
+              for (const call of toolCalls) out.push(await executeTool(call.toolName, call.input, ctx.workspaceDir, ctx.extraTools, call.toolCallId))
               return out
             },
             (rs): EventDraft[] => toolCalls.flatMap((call, i) => [

@@ -64,7 +64,16 @@ describe('memory tools', () => {
     let seen: { scope?: string } | undefined
     const { store } = fakeStore({ neighbors: async (_seed, opts) => { seen = opts; return [] } })
     const nb = memoryTools(store, { source: 'cli' }).find(t => t.name === 'memory_neighbors')!
-    await nb.execute({ seed: 'net-topology', scope: 'infra' })
+    const r = await nb.execute({ seed: 'net-topology', scope: 'infra' })
     expect(seen?.scope).toBe('infra')
+    // zero-result absence epistemics (E-i): empty is "no note matched", not "no such decision"
+    expect(r.output).toMatchObject({ note: "no note matched — absence is not proof a decision doesn't exist" })
+  })
+
+  it('memory_search with no matches includes the same absence-epistemics note', async () => {
+    const { store } = fakeStore({ search: async () => [] })
+    const search = memoryTools(store, { source: 'cli' }).find(t => t.name === 'memory_search')!
+    const r = await search.execute({ query: 'nope' })
+    expect(r.output).toMatchObject({ note: "no note matched — absence is not proof a decision doesn't exist" })
   })
 })

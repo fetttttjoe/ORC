@@ -105,4 +105,11 @@ describe('extra tools', () => {
     const r = await executeTool('mcp__other__x', {}, '/tmp', [extraTool()])
     expect(r.isError).toBe(true)
   })
+
+  it('threads the real provider toolCallId through to the extra tool', async () => {
+    let seen: string | undefined
+    const capture = extraTool({ execute: async (_input, toolCallId) => { seen = toolCallId; return { output: {}, isError: false } } })
+    await executeTool('mcp__srv__hello', {}, '/tmp', [capture], 'call_123')
+    expect(seen).toBe('call_123')
+  })
 })

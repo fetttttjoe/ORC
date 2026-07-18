@@ -73,6 +73,7 @@ export async function executeTool(
   input: unknown,
   workspaceDir: string,
   extra: ResolvedTool[] = [],
+  toolCallId?: string,
 ): Promise<{ output: unknown; isError: boolean }> {
   try {
     switch (name) {
@@ -94,7 +95,7 @@ export async function executeTool(
       default: {
         const ext = extra.find(t => t.name === name)
         if (!ext) return { output: { error: `unknown tool '${name}'` }, isError: true }
-        return await ext.execute(input)
+        return await ext.execute(input, toolCallId)
       }
     }
   } catch (err) {

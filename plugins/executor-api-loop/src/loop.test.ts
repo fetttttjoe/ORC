@@ -193,12 +193,13 @@ describe('api-loop executor', () => {
 
   it('calls an extra tool end to end', async () => {
     const captured: EventDraft[] = []
+    let seenToolCallId: string | undefined
     const extra: ResolvedTool = {
       ref: 'srv/hello',
       name: 'mcp__srv__hello',
       description: 'says hello',
       inputSchema: { type: 'object', properties: { who: { type: 'string' } } },
-      execute: async input => ({ output: { hi: (input as { who?: string }).who }, isError: false }),
+      execute: async (input, toolCallId) => { seenToolCallId = toolCallId; return { output: { hi: (input as { who?: string }).who }, isError: false } },
     }
     const model = scriptModel([
       { toolCalls: [{ toolCallId: 'c1', toolName: 'mcp__srv__hello', input: { who: 'x' } }] },
@@ -213,6 +214,9 @@ describe('api-loop executor', () => {
     expect(toolCallEvent).toBeDefined()
     expect(toolResultEvent?.type === 'tool_result' && toolResultEvent.output).toEqual({ hi: 'x' })
     expect(toolResultEvent?.type === 'tool_result' && toolResultEvent.isError).toBe(false)
+    // the real provider tool_call id reaches ResolvedTool.execute — this is what lets
+    // kernel/task_split derive a deterministic, non-colliding split id (Task 7)
+    expect(seenToolCallId).toBe('c1')
   })
 
   it('join_splits yields a gate and feeds the resume value back as the tool result', async () => {

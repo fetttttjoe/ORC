@@ -6,7 +6,7 @@ import { createOllamaProvider } from '@orc/provider-ollama'
 import { createMcpHub, type McpHub } from '@orc/mcp-client'
 import { createMemory } from '@orc/memory'
 import { createVaultProjector } from '@orc/vault-projector'
-import { createDbosPort, createPluginHost, loadConfig, EventLog, type DbosPort, type OrcConfig, type PluginHost } from '@orc/kernel'
+import { createDbosPort, createPluginHost, loadConfig, splitTool, EventLog, Kernel, type DbosPort, type OrcConfig, type PluginHost } from '@orc/kernel'
 
 export function seedRegistries(config = loadConfig()) {
   const providers = new Map<string, ModelProvider<unknown>>([
@@ -25,19 +25,25 @@ export async function buildPlugins(config = loadConfig()): Promise<{ host: Plugi
 }
 
 export async function buildRuntime(
-  shared?: { host: PluginHost; hub: McpHub; config?: OrcConfig; log?: EventLog },
+  shared?: { host: PluginHost; hub: McpHub; config?: OrcConfig; log?: EventLog; kernel?: Kernel },
 ): Promise<DbosPort> {
   const config = shared?.config ?? loadConfig()
   const { host, hub } = shared ?? (await buildPlugins(config))
   // reuse the caller's log (bin passes the kernel's) — one pool, migrations run once
   const log = shared?.log ?? (await EventLog.open(config.databaseUrl))
+  // reuse the caller's kernel (bin passes the one wired to its refValidator) so task_split's
+  // expanded child plans go through the same toolRef/skillRef validation as `orc propose`
+  const kernel = shared?.kernel ?? new Kernel(log, host.refValidator)
   log.onAppend = e => void host.hooks.emit(HOOK_NAME.event_appended, e)
   const memory = await createMemory({ log, config })
   const port = await createDbosPort({
     log, config,
     providers: host.providers, executors: host.executors,
     skills: host.skills, tools: hub,
-    stepTools: p => memory.buildTools({ source: 'agent', taskId: p.taskId, stepId: p.stepId, runToken: p.runToken, executor: p.executor, model: p.model, role: p.role }),
+    stepTools: p => [
+      ...memory.buildTools({ source: 'agent', taskId: p.taskId, stepId: p.stepId, runToken: p.runToken, executor: p.executor, model: p.model, role: p.role }),
+      splitTool({ kernel, config: { approvalPolicy: config.approvalPolicy, maxDepth: config.maxDepth }, p }),
+    ],
   })
   await port.launch()
   const projector = createVaultProjector({ log, config })
