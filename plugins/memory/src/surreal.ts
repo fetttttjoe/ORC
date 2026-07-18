@@ -32,10 +32,10 @@ type Db = ReturnType<typeof makeOrm>
 export class SurrealMemory {
   private constructor(private readonly surreal: Surreal, private readonly db: Db) {}
 
-  static async open(t: { url: string; ns: string; db: string }): Promise<SurrealMemory> {
+  static async open(t: { url: string; ns: string; db: string; username: string; password: string }): Promise<SurrealMemory> {
     const surreal = new Surreal()
     await surreal.connect(t.url)
-    await surreal.signin({ username: 'root', password: 'orc' })
+    await surreal.signin({ username: t.username, password: t.password })
     await surreal.use({ namespace: t.ns, database: t.db })
     // ESCAPE HATCH (raw): surqlize's builder assumes tables already exist — it has no DEFINE
     // TABLE op. On a brand-new namespace/database, SurrealDB v3.2.0 throws "table does not

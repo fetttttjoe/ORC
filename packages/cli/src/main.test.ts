@@ -10,26 +10,24 @@ import type { McpHub } from '@orc/mcp-client'
 import { buildProgram, openKernel } from './main'
 
 const dbs: Array<{ drop: () => Promise<void> }> = []
-const surrealDbNames: string[] = []
+const surrealConfigs: Array<Pick<ReturnType<typeof loadConfig>, 'projectDbUrl' | 'projectDbNamespace' | 'projectDbUser' | 'projectDbPassword' | 'projectDbName'>> = []
 afterAll(async () => {
   for (const d of dbs) await d.drop()
-  for (const db of surrealDbNames) await dropSurrealDb(db)
+  for (const c of surrealConfigs) await dropSurrealDb(c)
 })
 
-// mirrors plugins/memory/src/test-helpers.ts's createTestSurreal drop shape — not cross-imported
-// per the repo's no-cross-package-test-import convention. Diverges from that helper in two ways
-// verified necessary against the live SurrealDB v3.2.0: `type::database($db)` is not a valid
-// function path here (silently swallowed by that helper's `.catch(() => {})`, which is why it
-// leaves the throwaway dbs behind), and REMOVE DATABASE rejects a `use()` that has a database
-// selected — so this selects only the namespace and inlines the (internally-generated,
-// `t_[a-z0-9]+`) name directly.
-async function dropSurrealDb(db: string): Promise<void> {
-  const url = process.env.ORC_PROJECT_DB_URL ?? 'ws://127.0.0.1:8000/rpc'
+// mirrors plugins/memory/src/test-helpers.ts's createTestSurreal drop shape (not cross-imported
+// per the repo's no-cross-package-test-import convention) — both use the shape verified live
+// against SurrealDB v3.2.0: `use()` selects only the namespace, and the (internally-generated,
+// `t_[a-z0-9]+`) db name is inlined directly, since `REMOVE DATABASE IF EXISTS type::database($db)`
+// is not a valid function path there (a parse error, easy to silently swallow via `.catch`).
+// Connection details come from the same injected `config` the test below builds — no literals.
+async function dropSurrealDb(config: Pick<ReturnType<typeof loadConfig>, 'projectDbUrl' | 'projectDbNamespace' | 'projectDbUser' | 'projectDbPassword' | 'projectDbName'>): Promise<void> {
   const s = new Surreal()
-  await s.connect(url)
-  await s.signin({ username: 'root', password: 'orc' })
-  await s.use({ namespace: 'orc' })
-  await s.query(`REMOVE DATABASE IF EXISTS \`${db}\`;`).catch(() => {})
+  await s.connect(config.projectDbUrl)
+  await s.signin({ username: config.projectDbUser, password: config.projectDbPassword })
+  await s.use({ namespace: config.projectDbNamespace })
+  await s.query(`REMOVE DATABASE IF EXISTS \`${config.projectDbName}\`;`).catch(() => {})
   await s.close()
 }
 
@@ -171,8 +169,8 @@ describe('orc CLI', () => {
     dbs.push(db)
     const dir = mkdtempSync(path.join(tmpdir(), 'orc-memory-cli-'))
     const projectDbName = `t_${Math.random().toString(36).slice(2, 10)}`
-    surrealDbNames.push(projectDbName)
     const config = { ...loadConfig(dir), projectDbName }
+    surrealConfigs.push(config)
     const { kernel, log } = await openKernel(db.url)
     const lines: string[] = []
     spyOn(console, 'log').mockImplementation((...a: unknown[]) => { lines.push(a.join(' ')) })

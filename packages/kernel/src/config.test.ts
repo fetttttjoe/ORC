@@ -81,6 +81,24 @@ describe('loadConfig', () => {
       expect(loadConfig('/tmp/x').projectDbName).toBe('t_isolated')
     })
   })
+  it('defaults projectDbNamespace and honors the env override', () => {
+    expect(loadConfig('/tmp/x').projectDbNamespace).toBe('orc')
+    withEnv({ ORC_PROJECT_DB_NAMESPACE: 't_ns' }, () => {
+      expect(loadConfig('/tmp/x').projectDbNamespace).toBe('t_ns')
+    })
+  })
+  it('defaults projectDbUser and honors the env override', () => {
+    expect(loadConfig('/tmp/x').projectDbUser).toBe('root')
+    withEnv({ ORC_PROJECT_DB_USER: 'admin' }, () => {
+      expect(loadConfig('/tmp/x').projectDbUser).toBe('admin')
+    })
+  })
+  it('defaults projectDbPassword and honors the env override', () => {
+    expect(loadConfig('/tmp/x').projectDbPassword).toBe('orc')
+    withEnv({ ORC_PROJECT_DB_PASSWORD: 'secret' }, () => {
+      expect(loadConfig('/tmp/x').projectDbPassword).toBe('secret')
+    })
+  })
 })
 
 function tmpProject(cfg: Record<string, unknown>): string {
