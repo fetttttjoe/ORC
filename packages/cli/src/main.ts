@@ -4,6 +4,7 @@ import { Command } from 'commander'
 import { ISOLATION_TIER, PlanDraft, type EventRecord, type ExecutionPort, type Plan, type RunHandle } from '@orc/contracts'
 import { EventLog, Kernel, grantTrust, loadConfig, taskUsage, type OrcConfig, type PluginHost } from '@orc/kernel'
 import { createVaultProjector, parsePlanFile } from '@orc/vault-projector'
+import { createMemory } from '@orc/memory'
 import type { McpHub } from '@orc/mcp-client'
 
 // loadConfig is the ONE resolution of env → .orc/config.json → default; every command
@@ -286,6 +287,86 @@ export function buildProgram(
         throw new Error(`undeclared extension '${p}' — declare it in .orc/config.json first`)
       grantTrust('extensions', p, config.dir)
       console.log(`trusted extension '${p}' — takes effect on the next orc invocation`)
+    })
+
+  const mem = program.command('memory').description('project knowledge graph (M4b)')
+  mem
+    .command('add')
+    .description('write or update a memory note')
+    .requiredOption('--id <id>', 'note id')
+    .requiredOption('--title <title>', 'note title')
+    .option('--summary <s>', 'short summary')
+    .option('--body <b>', 'note body (markdown)')
+    .option('--tags <tags...>', 'tags')
+    .option('--categories <categories...>', 'categories')
+    .action(async (o: { id: string; title: string; summary?: string; body?: string; tags?: string[]; categories?: string[] }) => {
+      const { config, log } = needPlugin()
+      const memory = await createMemory({ log, config })
+      await memory.store.write({
+        id: o.id, title: o.title, summary: o.summary ?? '', body: o.body ?? '',
+        tags: o.tags ?? [], categories: o.categories ?? [],
+      } as any, { source: 'cli' })
+      await memory.projector.catchUp() // one-shot: no live subscription in a CLI process, so project the append now
+      await memory.close()
+      console.log(`wrote memory '${o.id}'`)
+    })
+  mem
+    .command('rm <id>')
+    .description('delete a memory note')
+    .option('--scope <s>', 'scope')
+    .action(async (id: string, o: { scope?: string }) => {
+      const { config, log } = needPlugin()
+      const memory = await createMemory({ log, config })
+      await memory.store.remove(id, o.scope)
+      await memory.projector.catchUp()
+      await memory.close()
+      console.log(`deleted '${id}'`)
+    })
+  mem
+    .command('ls')
+    .description('list memory notes')
+    .option('--category <c>', 'filter by category')
+    .option('--tag <t>', 'filter by tag')
+    .action(async (o: { category?: string; tag?: string }) => {
+      const { config, log } = needPlugin()
+      const memory = await createMemory({ log, config })
+      await memory.projector.catchUp()
+      const rows = await memory.store.list({ category: o.category, tag: o.tag })
+      await memory.close()
+      for (const n of rows) console.log(`${n.id}\t${n.title}\t[${n.categories.join(',')}]\t${n.summary}`)
+    })
+  mem
+    .command('search <query>')
+    .description('full-text search memory notes')
+    .action(async (query: string) => {
+      const { config, log } = needPlugin()
+      const memory = await createMemory({ log, config })
+      await memory.projector.catchUp()
+      const rows = await memory.store.search(query)
+      await memory.close()
+      for (const n of rows) console.log(`${n.id}\t${n.title}\t${n.summary}`)
+    })
+  mem
+    .command('cat <id>')
+    .description('print a memory note as JSON')
+    .option('--scope <s>', 'scope')
+    .action(async (id: string, o: { scope?: string }) => {
+      const { config, log } = needPlugin()
+      const memory = await createMemory({ log, config })
+      await memory.projector.catchUp()
+      const n = await memory.store.get(id, o.scope)
+      await memory.close()
+      console.log(n ? JSON.stringify(n, null, 2) : `no note '${id}'`)
+    })
+  mem
+    .command('rebuild')
+    .description('rebuild the memory read model from the event log')
+    .action(async () => {
+      const { config, log } = needPlugin()
+      const memory = await createMemory({ log, config })
+      await memory.projector.rebuild()
+      await memory.close()
+      console.log('memory read model rebuilt from the log')
     })
 
   return program

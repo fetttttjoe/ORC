@@ -3,7 +3,9 @@ import { mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { EVENT_KIND } from '@orc/contracts'
+import { loadConfig, type PluginHost } from '@orc/kernel'
 import { createTestDb } from '@orc/kernel/test-helpers'
+import type { McpHub } from '@orc/mcp-client'
 import { buildProgram, openKernel } from './main'
 
 const dbs: Array<{ drop: () => Promise<void> }> = []
@@ -137,5 +139,51 @@ describe('orc CLI', () => {
     await run('log', taskId)
     const kinds = lines.map(l => l.split(/\s+/).at(-1))
     expect(kinds).toContain(EVENT_KIND.plan_edited)
+  })
+
+  // memory commands need `needPlugin()` to resolve, so this injects a plugin the way
+  // plugin-commands.test.ts does — host/hub are untouched stubs, config/log are real.
+  it('memory add/rebuild/ls/cat/rm round-trip', async () => {
+    const db = await createTestDb()
+    dbs.push(db)
+    const dir = mkdtempSync(path.join(tmpdir(), 'orc-memory-cli-'))
+    const config = loadConfig(dir) // projectDbUrl defaults to the live SurrealDB
+    const { kernel, log } = await openKernel(db.url)
+    const lines: string[] = []
+    spyOn(console, 'log').mockImplementation((...a: unknown[]) => { lines.push(a.join(' ')) })
+    const plugin = { host: {} as PluginHost, hub: {} as McpHub, config, log } // memory commands never touch host/hub
+    const run = (...args: string[]) => buildProgram(kernel, undefined, plugin).parseAsync(args, { from: 'user' })
+
+    const id = `cli-test-${Math.random().toString(36).slice(2, 10)}`
+    await run('memory', 'add', '--id', id, '--title', 'T', '--body', 'B')
+
+    // Primary isolated assertion: this test's own (per-test Postgres) log recorded the append —
+    // true independent of SurrealDB, which every other assertion below depends on.
+    const written = (await log.all()).find(e => e.kind === EVENT_KIND.memory_written)
+    expect(written).toBeDefined()
+    expect((written!.payload as { note: { id: string } }).note.id).toBe(id)
+
+    // NOTE — shared-DB isolation hazard: createMemory() hardcodes ns:'orc' db:'memory' in the
+    // real SurrealDB, so `rebuild()` clears that WHOLE db and replays only the events in *this*
+    // test's own EventLog. A concurrently-running process/test writing memory notes through a
+    // different EventLog into the same SurrealDB would have its rows wiped and NOT replayed back.
+    // No other test in this repo currently writes to the shared memory db concurrently, so this
+    // is safe today, but it is a real hazard for Task 10's e2e suite (flagged in the task report).
+    await run('memory', 'rebuild')
+
+    lines.length = 0
+    await run('memory', 'ls')
+    expect(lines.join('\n')).toContain(id)
+
+    lines.length = 0
+    await run('memory', 'cat', id)
+    const note = JSON.parse(lines.join('\n'))
+    expect(note.id).toBe(id)
+    expect(note.title).toBe('T')
+
+    await run('memory', 'rm', id) // rm's action already runs catchUp() itself
+    lines.length = 0
+    await run('memory', 'cat', id)
+    expect(lines[0]).toContain(`no note '${id}'`)
   })
 })
