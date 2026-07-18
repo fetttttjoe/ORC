@@ -12,7 +12,7 @@ step is adding a seam to `packages/contracts`, not code to the kernel.
 | Add an agent executor | `AgentExecutor` | new `plugins/executor-<x>/` + `seedRegistries` — or `registerExecutor` from a T2 extension |
 | Add agent knowledge / procedure | SKILL.md | `vault/skills/<name>/SKILL.md` — no code, hot-indexed, force-loaded via `skillRefs` |
 | Add external tools | MCP server | declare in `.orc/config.json` `mcpServers`, arm with `orc mcp trust` — no code, steps opt in via `toolRefs` |
-| Observe / integrate (metrics, vault projection, notifications) | T2 extension | a `.ts` file default-exporting `{ id, activate(api) }`; `api.on('event_appended', …)`; declare in config, arm with `orc ext trust` |
+| Observe / integrate (metrics, notifications) | T2 extension | a `.ts` file default-exporting `{ id, activate(api) }`; `api.on('event_appended', …)`; declare in config, arm with `orc ext trust` (content-fingerprinted: editing the file revokes trust) |
 | Record new durable state | event kind | `EventKind` + `PAYLOAD_SCHEMAS` in `packages/contracts/src/events.ts`, then a `fold` case in `packages/kernel/src/projections.ts` (the exhaustive `switch` makes the compiler demand it); check `crashDedupKey` if the event is step-scoped |
 | Add a CLI verb | commander | `buildProgram` in `packages/cli/src/main.ts` |
 | Add a setting | config schema | `settingsSchema` in `packages/kernel/src/config.ts` — default in `.default()`, env override in `envOverrides` |
@@ -22,16 +22,26 @@ step is adding a seam to `packages/contracts`, not code to the kernel.
 ## Invariants — the rules that keep changes cheap
 
 1. **State is `fold(events)`.** Never store derived state; add an event kind
-   and a fold case. Replay and audit stay free only while this holds.
-2. **Every side effect lives in a `checkpoint`,** and its events are appended
-   inside the durable step. Throw `terminalError()` for don't-retry failures,
-   `classifiedError()` when the failure class matters.
+   and a fold case. Replay and audit stay free only while this holds. (The
+   Postgres `operations` table is a rebuildable index over operation transition
+   events — `rebuildOperations()` reproduces it from the log — not an exception.)
+2. **Every external model/tool effect lives in a `ctx.operation`** — the journal
+   records its `before` before the call and completion/failure after, keyed by a
+   deterministic operation id. Other side effects live in `ctx.checkpoint`; both
+   append their events transactionally under deterministic idempotency keys.
+   Throw `terminalError()` for don't-retry failures, `classifiedError()` when
+   the failure class matters.
 3. **Contracts stay runtime-dependency-free** (zod only). Plugins import
    contracts, never the kernel. The kernel never imports plugins — it receives
    them (see `createDbosPort(opts)`, `createPluginHost(config, seed)`).
-4. **Declare vs grant.** `.orc/config.json` declares, `.orc/trust.json` arms.
-   Enforce trust at the point of use (as `McpHub.ensureClient` does), not only
-   at plan validation.
+4. **Declare vs grant.** `.orc/config.json` declares, `.orc/trust.json` arms —
+   and a grant binds to a fingerprint of what was consented to (MCP: command,
+   args, env key names; extension: entry-file bytes). Enforce trust at the
+   point of use (as `McpHub.ensureClient` does), not only at plan validation.
+   Note the runtime split: the memory store/projector and vault projector are
+   privileged first-party runtime packages wired directly into the CLI runtime;
+   ordinary observation/integration goes through T0 (skills), T1 (MCP), or
+   T2 (extensions).
 5. **Refs are validated at propose time.** A new ref type (skill, tool,
    executor, provider) gets a check in `refValidator`
    (`packages/kernel/src/plugins/host.ts`) so bad plans die before approval,
