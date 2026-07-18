@@ -2,6 +2,7 @@ import { afterAll, afterEach, describe, expect, it, mock, spyOn } from 'bun:test
 import { mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
+import { Surreal } from 'surrealdb'
 import { EVENT_KIND } from '@orc/contracts'
 import { loadConfig, type PluginHost } from '@orc/kernel'
 import { createTestDb } from '@orc/kernel/test-helpers'
@@ -9,9 +10,28 @@ import type { McpHub } from '@orc/mcp-client'
 import { buildProgram, openKernel } from './main'
 
 const dbs: Array<{ drop: () => Promise<void> }> = []
+const surrealDbNames: string[] = []
 afterAll(async () => {
   for (const d of dbs) await d.drop()
+  for (const db of surrealDbNames) await dropSurrealDb(db)
 })
+
+// mirrors plugins/memory/src/test-helpers.ts's createTestSurreal drop shape — not cross-imported
+// per the repo's no-cross-package-test-import convention. Diverges from that helper in two ways
+// verified necessary against the live SurrealDB v3.2.0: `type::database($db)` is not a valid
+// function path here (silently swallowed by that helper's `.catch(() => {})`, which is why it
+// leaves the throwaway dbs behind), and REMOVE DATABASE rejects a `use()` that has a database
+// selected — so this selects only the namespace and inlines the (internally-generated,
+// `t_[a-z0-9]+`) name directly.
+async function dropSurrealDb(db: string): Promise<void> {
+  const url = process.env.ORC_PROJECT_DB_URL ?? 'ws://127.0.0.1:8000/rpc'
+  const s = new Surreal()
+  await s.connect(url)
+  await s.signin({ username: 'root', password: 'orc' })
+  await s.use({ namespace: 'orc' })
+  await s.query(`REMOVE DATABASE IF EXISTS \`${db}\`;`).catch(() => {})
+  await s.close()
+}
 
 async function makeCli() {
   const db = await createTestDb()
@@ -143,11 +163,16 @@ describe('orc CLI', () => {
 
   // memory commands need `needPlugin()` to resolve, so this injects a plugin the way
   // plugin-commands.test.ts does — host/hub are untouched stubs, config/log are real.
-  it('memory add/rebuild/ls/cat/rm round-trip', async () => {
+  // config.projectDbName is a per-test throwaway SurrealDB db (dropped in afterAll below),
+  // so this test is isolated from the shared `orc/memory` db and from any other test —
+  // `rebuild` is safe to call since it only ever clears this test's own db.
+  it('memory add/rebuild/ls/search/cat/rm round-trip against an isolated throwaway SurrealDB db', async () => {
     const db = await createTestDb()
     dbs.push(db)
     const dir = mkdtempSync(path.join(tmpdir(), 'orc-memory-cli-'))
-    const config = loadConfig(dir) // projectDbUrl defaults to the live SurrealDB
+    const projectDbName = `t_${Math.random().toString(36).slice(2, 10)}`
+    surrealDbNames.push(projectDbName)
+    const config = { ...loadConfig(dir), projectDbName }
     const { kernel, log } = await openKernel(db.url)
     const lines: string[] = []
     spyOn(console, 'log').mockImplementation((...a: unknown[]) => { lines.push(a.join(' ')) })
@@ -155,7 +180,7 @@ describe('orc CLI', () => {
     const run = (...args: string[]) => buildProgram(kernel, undefined, plugin).parseAsync(args, { from: 'user' })
 
     const id = `cli-test-${Math.random().toString(36).slice(2, 10)}`
-    await run('memory', 'add', '--id', id, '--title', 'T', '--body', 'B')
+    await run('memory', 'add', '--id', id, '--title', 'T', '--summary', 'S', '--body', 'B', '--tags', 'x')
 
     // Primary isolated assertion: this test's own (per-test Postgres) log recorded the append —
     // true independent of SurrealDB, which every other assertion below depends on.
@@ -163,12 +188,7 @@ describe('orc CLI', () => {
     expect(written).toBeDefined()
     expect((written!.payload as { note: { id: string } }).note.id).toBe(id)
 
-    // NOTE — shared-DB isolation hazard: createMemory() hardcodes ns:'orc' db:'memory' in the
-    // real SurrealDB, so `rebuild()` clears that WHOLE db and replays only the events in *this*
-    // test's own EventLog. A concurrently-running process/test writing memory notes through a
-    // different EventLog into the same SurrealDB would have its rows wiped and NOT replayed back.
-    // No other test in this repo currently writes to the shared memory db concurrently, so this
-    // is safe today, but it is a real hazard for Task 10's e2e suite (flagged in the task report).
+    // Isolated db — safe to clear-and-replay from this test's own event log only.
     await run('memory', 'rebuild')
 
     lines.length = 0
@@ -180,6 +200,12 @@ describe('orc CLI', () => {
     const note = JSON.parse(lines.join('\n'))
     expect(note.id).toBe(id)
     expect(note.title).toBe('T')
+    expect(note.summary).toBe('S')
+    expect(note.body).toBe('B')
+
+    lines.length = 0
+    await run('memory', 'search', 'x') // matches the 'x' tag
+    expect(lines.join('\n')).toContain(id)
 
     await run('memory', 'rm', id) // rm's action already runs catchUp() itself
     lines.length = 0

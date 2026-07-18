@@ -14,5 +14,8 @@
     "@orc/provider-openai": "workspace:*",
     "@orc/provider-ollama": "workspace:*",
     "commander": "^12.1.0"
+  },
+  "devDependencies": {
+    "surrealdb": "2.0.4"
   }
 }
