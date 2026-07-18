@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, it } from 'bun:test'
-import { TASK_STATUS, type PlanDraft } from '@orc/contracts'
+import { ApprovalPolicy, TASK_STATUS, type PlanDraft } from '@orc/contracts'
 import { draftFixture, stepFixture } from '@orc/contracts/fixtures'
 import { EventLog } from './eventlog'
 import { KERNEL_ERROR_CODE, KernelError } from './errors'
@@ -124,5 +124,48 @@ describe('Kernel lifecycle', () => {
     await new Promise(r => setTimeout(r, 100))
     expect(seen.length).toBeGreaterThan(0)
     await unsub()
+  })
+
+  it('proposeSplit: deterministic ids, inherited refs, clamped budget, manual gate parks the child', async () => {
+    const k = await freshKernel()
+    const parent = await k.createTask({ title: 'P', spec: 'parent', budgetUSD: 10 })
+    const args = {
+      parentTaskId: parent.id, stepId: 's1', runToken: `step:${parent.id}:s1:a1`, toolCallId: 'call_1',
+      title: 'C', spec: 'child work', budgetUSD: 99,
+      plan: { steps: [{ id: 'w1', role: 'worker', title: 'w', instructions: 'do', dependsOn: [], skillRefs: [], toolRefs: [] }] },
+      parentStep: { executorRef: 'api-loop', modelRef: 'fake/m', maxIterations: 5 },
+      policy: ApprovalPolicy.parse({}), maxDepth: 3,
+    }
+    const r = await k.proposeSplit(args)
+    expect(r).toEqual({ splitId: `split:step:${parent.id}:s1:a1:call_1`, childTaskId: `${parent.id}.s1.call_1`, gated: true })
+    const child = await k.getTask(r.childTaskId)
+    expect(child?.parentId).toBe(parent.id)
+    expect(child?.depth).toBe(1)
+    expect(child?.budgetUSD).toBe(10)             // clamped to subtree-remaining, not the requested 99
+    expect(child?.status).toBe('awaiting_approval') // manual default parks it
+    const plan = await k.getPlan(r.childTaskId)
+    expect(plan?.steps[0]).toMatchObject({ id: 'w1', executorRef: 'api-loop', modelRef: 'fake/m', maxIterations: 5, isolation: 'local' })
+    // idempotent: same (runToken, toolCallId) → same ids, no second child
+    const again = await k.proposeSplit(args)
+    expect(again.childTaskId).toBe(r.childTaskId)
+    expect((await k.listTasks()).filter(t => t.parentId === parent.id)).toHaveLength(1)
+  })
+
+  it('proposeSplit: auto policy approves with provenance; depth cap rejects', async () => {
+    const k = await freshKernel()
+    const parent = await k.createTask({ title: 'P', spec: '' })
+    const auto = ApprovalPolicy.parse({ default: 'auto' })
+    const base = {
+      parentTaskId: parent.id, stepId: 's1', runToken: `step:${parent.id}:s1:a1`, toolCallId: 'call_2',
+      title: 'C', spec: '', plan: { steps: [{ id: 'w1', role: 'worker', title: 'w', instructions: 'do', dependsOn: [], skillRefs: [], toolRefs: [] }] },
+      parentStep: { executorRef: 'api-loop', modelRef: 'fake/m', maxIterations: 5 },
+      policy: auto, maxDepth: 3,
+    }
+    const r = await k.proposeSplit(base)
+    expect(r.gated).toBe(false)
+    expect((await k.getTask(r.childTaskId))?.status).toBe('approved')
+    const approvedEvt = (await k.eventsFor(r.childTaskId)).find(e => e.kind === 'plan_approved')
+    expect(approvedEvt?.payload).toMatchObject({ approvedBy: 'policy' })
+    await expect(k.proposeSplit({ ...base, toolCallId: 'call_3', maxDepth: 0 })).rejects.toThrow(/depth/)
   })
 })
