@@ -12,10 +12,11 @@ export function createMemoryStore(opts: { log: EventLog; surreal: SurrealMemory 
       await log.append({ taskId: null, stepId: null, runToken: null, kind: 'memory_written', payload: { note, author } })
       // event-first: the record materializes via the projector shortly; return a best-effort
       // read (may be null within the flush window — callers treat write as fire-and-forget).
-      return (await surreal.get(note.id, note.scope)) ?? ({ ...note, createdAt: '', createdBy: '', updatedAt: '', updatedBy: '', revision: 1 } as MemoryNote)
+      return (await surreal.get(note.id, note.scope)) ?? { ...note, createdAt: '', createdBy: '', updatedAt: '', updatedBy: '', revision: 1 }
     },
     async remove(id, scope = 'project') {
-      await log.append({ taskId: null, stepId: null, runToken: null, kind: 'memory_deleted', payload: { id, scope, author: { source: 'cli' } as MemoryAuthor } })
+      const author: MemoryAuthor = { source: 'cli' }
+      await log.append({ taskId: null, stepId: null, runToken: null, kind: 'memory_deleted', payload: { id, scope, author } })
     },
     async get(id, scope = 'project') {
       const n = await surreal.get(id, scope)
@@ -24,5 +25,6 @@ export function createMemoryStore(opts: { log: EventLog; surreal: SurrealMemory 
     },
     list: (filter?: MemoryFilter): Promise<NoteSummary[]> => surreal.list(filter),
     search: (query: string, filter?: MemoryFilter): Promise<NoteSummary[]> => surreal.search(query, filter),
+    neighbors: (seed, opts) => surreal.neighbors(seed, opts),
   }
 }
