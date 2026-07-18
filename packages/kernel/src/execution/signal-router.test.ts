@@ -1,6 +1,8 @@
-import { describe, expect, it } from 'bun:test'
-import type { EventRecord } from '@orc/contracts'
-import { composeSplitResult } from './signal-router'
+import { afterEach, beforeEach, describe, expect, it } from 'bun:test'
+import { EVENT_KIND, TASK_STATUS, type EventRecord, type SplitResult, type TaskNode } from '@orc/contracts'
+import { EventLog } from '../eventlog'
+import { createTestDb } from '../test-helpers'
+import { composeSplitResult, createSignalRouter } from './signal-router'
 
 const split = { splitId: 'sp1', taskId: 'p', stepId: 's1', runToken: 'rt', childTaskId: 'c1', resolved: false }
 const evt = (over: Partial<EventRecord>): EventRecord =>
@@ -47,5 +49,88 @@ describe('composeSplitResult', () => {
       evt({ seq: 2, kind: 'task_status_changed', payload: { taskId: 'c1', from: 'running', to: 'cancelled' } }),
     ], split)
     expect(cancelled).toMatchObject({ outcome: 'cancelled', summary: 'cancelled' })
+  })
+})
+
+describe('createSignalRouter (integration, real EventLog)', () => {
+  let db: { url: string; drop: () => Promise<void> }
+  let log: EventLog
+  let router: { start(): Promise<void>; close(): Promise<void> } | null = null
+
+  beforeEach(async () => {
+    db = await createTestDb()
+    log = await EventLog.open(db.url)
+    router = null
+  })
+  afterEach(async () => {
+    if (router) await router.close()
+    await log.close()
+    await db.drop()
+  })
+
+  const taskNode = (id: string, parentId: string | null): TaskNode =>
+    ({ id, parentId, type: parentId ? 'split' : 'root', title: id, spec: '', status: TASK_STATUS.draft, zone: [], budgetUSD: null, depth: parentId ? 1 : 0, createdAt: 'T' })
+
+  // parent + child tasks and the split that binds them (runToken = the parent step's send target)
+  const seedSplit = async (): Promise<void> => {
+    await log.append({ taskId: 'p', stepId: null, runToken: null, kind: EVENT_KIND.task_created, payload: { task: taskNode('p', null) } })
+    await log.append({ taskId: 'c', stepId: null, runToken: null, kind: EVENT_KIND.task_created, payload: { task: taskNode('c', 'p') } })
+    await log.append({ taskId: 'p', stepId: 's1', runToken: 'rt', kind: EVENT_KIND.split_proposed, payload: { splitId: 'sp1', taskId: 'p', stepId: 's1', runToken: 'rt', childTaskId: 'c' } })
+  }
+  const terminal = (to: string) => log.append({
+    taskId: 'c', stepId: null, runToken: null,
+    kind: EVENT_KIND.task_status_changed, payload: { taskId: 'c', from: TASK_STATUS.running, to },
+  })
+  const resolvedCount = async (): Promise<number> => (await log.all()).filter(e => e.kind === EVENT_KIND.split_resolved).length
+  const waitFor = async (pred: () => Promise<boolean>, ms = 3000): Promise<boolean> => {
+    const start = Date.now()
+    while (Date.now() - start < ms) { if (await pred()) return true; await Bun.sleep(50) }
+    return false
+  }
+
+  it('route 1: terminal child appends split_resolved once and sends on split:<id> with idempotencyKey', async () => {
+    const sends: { dest: string; result: SplitResult; topic: string; key: string }[] = []
+    router = createSignalRouter({ log, onChildApproved: async () => {}, send: async (dest, result, topic, key) => { sends.push({ dest, result, topic, key }) } })
+    await router.start()
+    await seedSplit()
+    await terminal(TASK_STATUS.done)
+    expect(await waitFor(async () => (await resolvedCount()) === 1)).toBe(true)
+    expect(sends).toHaveLength(1)
+    expect(sends[0]).toMatchObject({ dest: 'rt', topic: 'split:sp1', key: 'sp1' })
+    expect(sends[0]!.result).toMatchObject({ splitId: 'sp1', childTaskId: 'c', outcome: 'done' })
+  })
+
+  it('sweep: a terminal split that landed before start is resolved by start() alone', async () => {
+    const sends: SplitResult[] = []
+    await seedSplit()
+    await terminal(TASK_STATUS.blocked) // lands with NO router subscribed
+    router = createSignalRouter({ log, onChildApproved: async () => {}, send: async (_d, result) => { sends.push(result) } })
+    await router.start() // sweep runs synchronously before returning
+    expect(await resolvedCount()).toBe(1)
+    expect(sends).toHaveLength(1)
+    expect(sends[0]!.outcome).toBe('blocked')
+  })
+
+  it('route 2: plan_approved for a pending-split child calls onChildApproved', async () => {
+    const approved: string[] = []
+    router = createSignalRouter({ log, onChildApproved: async id => { approved.push(id) }, send: async () => {} })
+    await router.start()
+    await seedSplit()
+    await log.append({ taskId: 'c', stepId: null, runToken: null, kind: EVENT_KIND.plan_approved, payload: { taskId: 'c', version: 1, approvedAt: 'T', approvedBy: 'policy' } })
+    expect(await waitFor(async () => approved.length > 0)).toBe(true)
+    expect(approved).toEqual(['c'])
+  })
+
+  it('redelivery: a second terminal status does not double-append split_resolved', async () => {
+    const sends: SplitResult[] = []
+    router = createSignalRouter({ log, onChildApproved: async () => {}, send: async (_d, result) => { sends.push(result) } })
+    await router.start()
+    await seedSplit()
+    await terminal(TASK_STATUS.done)
+    expect(await waitFor(async () => (await resolvedCount()) === 1)).toBe(true)
+    await terminal(TASK_STATUS.done) // duplicate delivery of the terminal event
+    await Bun.sleep(200) // give the pump time to (not) re-resolve
+    expect(await resolvedCount()).toBe(1)
+    expect(sends).toHaveLength(1)
   })
 })
