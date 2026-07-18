@@ -13,7 +13,7 @@ import { fold, completedStepIds, nextAttempts, subtreeTaskIds, subtreeUsage, typ
 import { KERNEL_ERROR_CODE, KernelError } from '../errors'
 import { readySteps, runOutcomeOf } from './interpreter'
 import { createSignalRouter } from './signal-router'
-import type { OrcConfig } from '../config'
+import { projectSuffix, type ProjectConfig } from '../config'
 
 export interface DbosPort extends ExecutionPort {
   launch(): Promise<void>
@@ -36,7 +36,7 @@ const stepWorkflowId = (taskId: string, stepId: string, attempt: number): string
 
 export async function createDbosPort(opts: {
   log: EventLog
-  config: OrcConfig
+  config: ProjectConfig
   providers: Map<string, ModelProvider<unknown>>
   executors: Map<string, AgentExecutor<unknown>>
   skills?: { load(name: string): Promise<LoadedSkill> }
@@ -316,7 +316,10 @@ export async function createDbosPort(opts: {
     launch: async () => {
       // DBOS__APPVERSION pinned from config BEFORE launch so recovery survives rebuilds (spec §4)
       process.env.DBOS__APPVERSION ??= config.appVersion
-      DBOS.setConfig({ name: 'orc', systemDatabaseUrl: config.systemDatabaseUrl, logLevel: 'warn', runAdminServer: false })
+      DBOS.setConfig({
+        name: `orc-${projectSuffix(config.projectId).slice(0, 12)}`,
+        systemDatabaseUrl: config.systemDatabaseUrl, logLevel: 'warn', runAdminServer: false,
+      })
       await DBOS.launch()
       // ADAPTATION: registerQueue requires DBOS already launched in @dbos-inc/dbos-sdk v4.23 (see report)
       for (let d = 0; d <= config.maxDepth; d++) {

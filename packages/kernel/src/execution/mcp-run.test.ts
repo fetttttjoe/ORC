@@ -11,8 +11,7 @@ import { scriptModel } from '@orc/executor-api-loop/test-model'
 import { EventLog } from '../eventlog'
 import { Kernel } from '../kernel'
 import { fold } from '../projections'
-import { loadConfig, deriveSystemUrl } from '../config'
-import { createTestDb } from '../test-helpers'
+import { createTestDb, testConfig } from '../test-helpers'
 import { SkillIndex } from '../plugins/skills'
 import { createDbosPort, type DbosPort } from './dbos-port'
 
@@ -43,7 +42,7 @@ describe('MCP + skills through a durable run (integration)', () => {
       { toolCalls: [{ toolCallId: 'c1', toolName: 'mcp__fixture__echo', input: { text: 'ping' } }] },
       { toolCalls: [{ toolCallId: 'c2', toolName: 'signal', input: { outcome: 'success', summary: 'echoed' } }] },
     ])
-    const config = { ...loadConfig(), databaseUrl: db.url, systemDatabaseUrl: deriveSystemUrl(db.url) }
+    const config = testConfig(db.url)
     port = await createDbosPort({
       log, config,
       providers: new Map([['fake', { costs: {}, languageModel: () => model }]]),

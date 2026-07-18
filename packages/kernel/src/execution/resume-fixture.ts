@@ -8,8 +8,7 @@ import {
   type AgentExecutor, type EventDraft, type ExecutorContext, type SplitResult, type UnifiedEvent,
 } from '@orc/contracts'
 import { EventLog } from '../eventlog'
-import { loadConfig, deriveSystemUrl } from '../config'
-import { fakeProvider } from '../test-helpers'
+import { fakeProvider, testConfig } from '../test-helpers'
 import { createDbosPort } from './dbos-port'
 
 const [dbUrl, taskId, marker] = process.argv.slice(2) as [string, string, string]
@@ -41,7 +40,7 @@ const stallOnce: AgentExecutor<unknown> = {
 }
 
 const log = await EventLog.open(dbUrl)
-const config = { ...loadConfig(), databaseUrl: dbUrl, systemDatabaseUrl: deriveSystemUrl(dbUrl) }
+const config = testConfig(dbUrl)
 const port = await createDbosPort({
   log, config,
   providers: new Map([['fake', fakeProvider]]),

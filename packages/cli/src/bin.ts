@@ -1,6 +1,6 @@
-import { isConnectionRefused, loadConfig } from '@orc/kernel'
+import { isConnectionRefused, loadConfig, requireProject } from '@orc/kernel'
 import { HOOK_NAME } from '@orc/contracts'
-import { buildProgram, openKernel } from './main'
+import { buildProgram, openKernel, runInit } from './main'
 import { buildPlugins, buildRuntime } from './runtime'
 
 // The DBOS port is built lazily, once, only when a command actually asks for it —
@@ -8,7 +8,12 @@ import { buildPlugins, buildRuntime } from './runtime'
 const runtime: { port: Awaited<ReturnType<typeof buildRuntime>> | null } = { port: null }
 
 try {
-  const config = loadConfig()
+  // init runs before Postgres/plugins/identity exist — everything else requires all three
+  if (process.argv[2] === 'init') {
+    await runInit(process.argv.slice(3))
+    process.exit(0)
+  }
+  const config = requireProject(loadConfig())
   const plugins = await buildPlugins(config)
   await plugins.host.hooks.emit(HOOK_NAME.session_start)
   const { kernel, log } = await openKernel(config.databaseUrl, {

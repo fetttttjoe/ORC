@@ -2,7 +2,7 @@ import { readdirSync, readFileSync } from 'node:fs'
 import path from 'node:path'
 import { Command } from 'commander'
 import { ISOLATION_TIER, PlanDraft, type EventRecord, type ExecutionPort, type Plan, type RunHandle } from '@orc/contracts'
-import { EventLog, Kernel, grantTrust, loadConfig, taskUsage, type OrcConfig, type PluginHost } from '@orc/kernel'
+import { EventLog, Kernel, grantTrust, initializeProject, loadConfig, taskUsage, type OrcConfig, type PluginHost } from '@orc/kernel'
 import { createVaultProjector, parsePlanFile } from '@orc/vault-projector'
 import { createMemory } from '@orc/memory'
 import type { McpHub } from '@orc/mcp-client'
@@ -16,6 +16,23 @@ export async function openKernel(
   const log = await EventLog.open(url)
   if (opts.onAppend) log.onAppend = opts.onAppend
   return { kernel: new Kernel(log, opts.refValidator), log }
+}
+
+// `orc init` must work before Postgres/plugins exist, so it gets a standalone entry
+// (bin.ts) and the same command inside buildProgram for help/unit visibility
+export function initCommand(dir?: string): Command {
+  return new Command('init')
+    .description('initialize project identity (writes .orc/config.json — commit it)')
+    .requiredOption('--name <name>', 'project name')
+    .option('--force', 'mint a new identity for a deliberate fork of an existing project')
+    .action((opts: { name: string; force?: boolean }) => {
+      const identity = initializeProject(dir ?? process.cwd(), opts.name, { force: opts.force })
+      console.log(`initialized project '${identity.projectName}' (${identity.projectId})`)
+    })
+}
+
+export async function runInit(args: string[], dir?: string): Promise<void> {
+  await initCommand(dir).parseAsync(args, { from: 'user' })
 }
 
 export function singleStepDraft(task: { title: string; spec: string }, modelRef: string): PlanDraft {
@@ -77,6 +94,7 @@ export function buildProgram(
 ): Command {
   const program = new Command('orc')
   program.description('multi-agent orchestrator')
+  program.addCommand(initCommand(plugin?.config.dir))
 
   const needPlugin = () => {
     if (!plugin) throw new Error('plugin commands are unavailable in this context')

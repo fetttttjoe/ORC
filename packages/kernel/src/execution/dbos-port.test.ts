@@ -8,8 +8,7 @@ import {
 import { draftFixture, stepFixture } from '@orc/contracts/fixtures'
 import { EventLog } from '../eventlog'
 import { Kernel } from '../kernel'
-import { loadConfig, deriveSystemUrl } from '../config'
-import { createTestDb, fakeProvider } from '../test-helpers'
+import { createTestDb, fakeProvider, testConfig } from '../test-helpers'
 import { createDbosPort, type DbosPort } from './dbos-port'
 
 // One DBOS runtime per process: registerWorkflow throws on duplicate names, so the whole file
@@ -58,7 +57,7 @@ describe('DBOS execution port (integration)', () => {
     dbUrl = db.url
     const log = await EventLog.open(db.url)
     kernel = new Kernel(log)
-    const config = { ...loadConfig(), databaseUrl: db.url, systemDatabaseUrl: deriveSystemUrl(db.url) }
+    const config = testConfig(db.url)
     port = await createDbosPort({
       log, config,
       providers: new Map([['fake', fakeProvider]]),

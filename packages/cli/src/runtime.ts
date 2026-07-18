@@ -6,15 +6,15 @@ import { createOllamaProvider } from '@orc/provider-ollama'
 import { createMcpHub, type McpHub } from '@orc/mcp-client'
 import { createMemory } from '@orc/memory'
 import { createVaultProjector } from '@orc/vault-projector'
-import { createDbosPort, createPluginHost, loadConfig, splitTool, EventLog, Kernel, type DbosPort, type OrcConfig, type PluginHost } from '@orc/kernel'
+import { createDbosPort, createPluginHost, loadConfig, requireProject, splitTool, EventLog, Kernel, type DbosPort, type PluginHost, type ProjectConfig } from '@orc/kernel'
 
 export function seedRegistries(config = loadConfig()) {
   const providers = new Map<string, ModelProvider<unknown>>([
-    ['anthropic', createAnthropicProvider(config.costOverrides['anthropic'] ?? {}) as ModelProvider<unknown>],
-    ['openai', createOpenAIProvider(config.costOverrides['openai'] ?? {}) as ModelProvider<unknown>],
-    ['ollama', createOllamaProvider({ baseUrl: config.ollamaBaseUrl, costOverrides: config.costOverrides['ollama'] ?? {} }) as ModelProvider<unknown>],
+    ['anthropic', createAnthropicProvider(config.costOverrides['anthropic'] ?? {})],
+    ['openai', createOpenAIProvider(config.costOverrides['openai'] ?? {})],
+    ['ollama', createOllamaProvider({ baseUrl: config.ollamaBaseUrl, costOverrides: config.costOverrides['ollama'] ?? {} })],
   ])
-  const executors = new Map<string, AgentExecutor<unknown>>([['api-loop', apiLoopExecutor() as AgentExecutor<unknown>]])
+  const executors = new Map<string, AgentExecutor<unknown>>([['api-loop', apiLoopExecutor()]])
   return { providers, executors }
 }
 
@@ -25,9 +25,9 @@ export async function buildPlugins(config = loadConfig()): Promise<{ host: Plugi
 }
 
 export async function buildRuntime(
-  shared?: { host: PluginHost; hub: McpHub; config?: OrcConfig; log?: EventLog; kernel?: Kernel },
+  shared?: { host: PluginHost; hub: McpHub; config?: ProjectConfig; log?: EventLog; kernel?: Kernel },
 ): Promise<DbosPort> {
-  const config = shared?.config ?? loadConfig()
+  const config = shared?.config ?? requireProject(loadConfig())
   const { host, hub } = shared ?? (await buildPlugins(config))
   // reuse the caller's log (bin passes the kernel's) — one pool, migrations run once
   const log = shared?.log ?? (await EventLog.open(config.databaseUrl))
