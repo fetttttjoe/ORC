@@ -1,7 +1,6 @@
 import { createRequire } from 'node:module'
 import path from 'node:path'
 import type { ExtensionApi, ExtensionManifest } from '@orc/contracts'
-import { isTrustedPath } from './trust'
 
 const require = createRequire(import.meta.url)
 
@@ -20,10 +19,10 @@ export class ExtensionHost {
 
   constructor(private readonly api: ExtensionApi) {}
 
-  async load(declared: string[], trustedList: string[], baseDir: string): Promise<void> {
+  async load(declared: string[], isTrusted: (decl: string) => boolean, baseDir: string): Promise<void> {
     for (const decl of declared) {
       const abs = path.resolve(baseDir, decl)
-      if (!isTrustedPath(decl, trustedList, baseDir)) {
+      if (!isTrusted(decl)) {
         console.warn(`extension '${decl}' is declared but not trusted — skipped (grant with: orc ext trust ${decl})`)
         continue
       }

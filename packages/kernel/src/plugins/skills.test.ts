@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'bun:test'
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { SkillIndex, parseSkillMd } from './skills'
@@ -134,6 +134,26 @@ describe('SkillIndex', () => {
       while (Date.now() < deadline && idx.list().some(e => e.name === 'evolving'))
         await new Promise(r => setTimeout(r, 20))
       expect(idx.list().some(e => e.name === 'evolving')).toBe(false)
+    } finally {
+      idx.close()
+    }
+  })
+})
+
+describe('shipped documentation skill', () => {
+  it('parses and indexes from vault/skills', async () => {
+    const root = new URL('../../../../vault/skills', import.meta.url).pathname
+    const md = readFileSync(path.join(root, 'documentation', 'SKILL.md'), 'utf8')
+    const parsed = parseSkillMd(md, 'documentation')
+    expect(parsed.errors).toEqual([])
+    expect(parsed.manifest?.name).toBe('documentation')
+    expect(parsed.body).toContain('signal')
+
+    const idx = await SkillIndex.open(root)
+    try {
+      const entry = idx.list().find(e => e.name === 'documentation')
+      expect(entry?.valid).toBe(true)
+      expect((await idx.load('documentation')).body).toContain('memory_write')
     } finally {
       idx.close()
     }

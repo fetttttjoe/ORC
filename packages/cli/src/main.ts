@@ -2,7 +2,7 @@ import { readdirSync, readFileSync } from 'node:fs'
 import path from 'node:path'
 import { Command } from 'commander'
 import { ISOLATION_TIER, PlanDraft, type EventRecord, type ExecutionPort, type Plan, type RunHandle } from '@orc/contracts'
-import { EventLog, Kernel, fold, grantTrust, initializeProject, loadConfig, requireProject, taskUsage, type OrcConfig, type PluginHost, type ProjectConfig } from '@orc/kernel'
+import { EventLog, Kernel, fold, grantExtensionTrust, grantMcpTrust, initializeProject, isExtensionTrusted, isMcpTrusted, loadConfig, loadTrust, requireProject, taskUsage, type OrcConfig, type PluginHost, type ProjectConfig } from '@orc/kernel'
 import { createVaultProjector, parsePlanFile } from '@orc/vault-projector'
 import { createMemory, probeMemory } from '@orc/memory'
 import type { McpHub } from '@orc/mcp-client'
@@ -41,7 +41,7 @@ export async function runInit(args: string[], dir?: string): Promise<void> {
   await initCommand(dir).parseAsync(args, { from: 'user' })
 }
 
-export function singleStepDraft(task: { title: string; spec: string }, modelRef: string): PlanDraft {
+export function singleStepDraft(task: { title: string; spec: string }, modelRef: string, skillRefs: string[] = []): PlanDraft {
   return {
     strategyRef: 'template:single',
     costEstimateUSD: null,
@@ -52,7 +52,7 @@ export function singleStepDraft(task: { title: string; spec: string }, modelRef:
       instructions: task.spec === '' ? task.title : task.spec,
       executorRef: 'api-loop',
       modelRef,
-      skillRefs: [],
+      skillRefs,
       toolRefs: [],
       isolation: ISOLATION_TIER.local, // the only implemented tier — worktree/docker come with sandbox plugins
       zone: [],
@@ -62,7 +62,7 @@ export function singleStepDraft(task: { title: string; spec: string }, modelRef:
   }
 }
 
-function resolveDraft(task: { title: string; spec: string }, opts: { file?: string; model: string; fromVault?: boolean }, taskId: string, config?: OrcConfig): PlanDraft {
+function resolveDraft(task: { title: string; spec: string }, opts: { file?: string; model: string; skill?: string[]; fromVault?: boolean }, taskId: string, config?: OrcConfig): PlanDraft {
   if (opts.fromVault) {
     if (!config) throw new Error('--from-vault is unavailable in this context')
     const dir = path.join(config.vaultDir, 'tasks', taskId)
@@ -75,7 +75,7 @@ function resolveDraft(task: { title: string; spec: string }, opts: { file?: stri
   }
   return opts.file
     ? PlanDraft.parse(JSON.parse(readFileSync(opts.file, 'utf8')))
-    : singleStepDraft(task, opts.model)
+    : singleStepDraft(task, opts.model, opts.skill ?? [])
 }
 
 // stream-driven tail (spec §5): no polling — LISTEN/NOTIFY pushes each event as it commits
@@ -118,7 +118,7 @@ export function buildProgram(
     })
 
   const planAction = (apply: (taskId: string, draft: PlanDraft) => Promise<Plan>, describe: (plan: Plan) => string) =>
-    async (taskId: string, opts: { file?: string; model: string; fromVault?: boolean }) => {
+    async (taskId: string, opts: { file?: string; model: string; skill?: string[]; fromVault?: boolean }) => {
       const task = await kernel.getTask(taskId)
       if (!task) throw new Error(`no task '${taskId}'`)
       const plan = await apply(taskId, resolveDraft(task, opts, taskId, plugin?.config))
@@ -130,6 +130,7 @@ export function buildProgram(
     .description('propose a plan (default: single-step template)')
     .option('--file <path>', 'plan draft JSON file')
     .option('--model <ref>', 'model for template steps', 'anthropic/claude-sonnet-5')
+    .option('--skill <names...>', 'force-load skills for the template step (e.g. documentation)')
     .action(planAction((id, draft) => kernel.proposePlan(id, draft), plan => `proposed (${plan.steps.length} steps)`))
 
   program
@@ -137,6 +138,7 @@ export function buildProgram(
     .description('edit a plan (default: single-step template)')
     .option('--file <path>', 'plan draft JSON file')
     .option('--model <ref>', 'model for template steps', 'anthropic/claude-sonnet-5')
+    .option('--skill <names...>', 'force-load skills for the template step (e.g. documentation)')
     .option('--from-vault', 'read the edited plan markdown from the vault')
     .action(planAction((id, draft) => kernel.editPlan(id, draft), () => 'edited'))
 
@@ -300,9 +302,10 @@ export function buildProgram(
     .command('list')
     .description('declared servers and their trust state')
     .action(async () => {
-      const { host, config } = needPlugin()
+      const { config } = needPlugin()
+      const trust = loadTrust(config.dir) // fresh read: grants take effect in the same session's list
       for (const [id, cfg] of Object.entries(config.mcpServers)) {
-        const state = host.trust.mcp.includes(id) ? 'trusted  ' : 'untrusted'
+        const state = isMcpTrusted(trust, id, cfg) ? 'trusted  ' : 'untrusted'
         console.log(`${state} ${id.padEnd(16)} ${cfg.command} ${(cfg.args ?? []).join(' ')}`)
       }
     })
@@ -320,9 +323,10 @@ export function buildProgram(
     .description('grant local trust (writes .orc/trust.json — never commit it)')
     .action(async (serverId: string) => {
       const { config } = needPlugin()
-      if (!(serverId in config.mcpServers)) throw new Error(`undeclared MCP server '${serverId}' — declare it in .orc/config.json first`)
-      grantTrust('mcp', serverId, config.dir)
-      console.log(`trusted mcp server '${serverId}'`)
+      const declared = config.mcpServers[serverId]
+      if (!declared) throw new Error(`undeclared MCP server '${serverId}' — declare it in .orc/config.json first`)
+      grantMcpTrust(serverId, declared, config.dir)
+      console.log(`trusted mcp server '${serverId}' (bound to its current command/args/env declaration)`)
     })
 
   const ext = program.command('ext').description('T2 extensions')
@@ -331,8 +335,9 @@ export function buildProgram(
     .description('declared extensions and their trust state')
     .action(async () => {
       const { host, config } = needPlugin()
+      const trust = loadTrust(config.dir) // fresh read: grants take effect in the same session's list
       for (const p of config.extensions) {
-        const state = host.trust.extensions.some(t => path.resolve(config.dir, t) === path.resolve(config.dir, p)) ? 'trusted  ' : 'untrusted'
+        const state = isExtensionTrusted(trust, p, config.dir) ? 'trusted  ' : 'untrusted'
         const active = host.extensions.loaded.find(l => l.path === path.resolve(config.dir, p))
         console.log(`${state} ${p}${active ? `  (loaded: ${active.manifest.id})` : ''}`)
       }
@@ -344,8 +349,8 @@ export function buildProgram(
       const { config } = needPlugin()
       if (!config.extensions.some(e => path.resolve(config.dir, e) === path.resolve(config.dir, p)))
         throw new Error(`undeclared extension '${p}' — declare it in .orc/config.json first`)
-      grantTrust('extensions', p, config.dir)
-      console.log(`trusted extension '${p}' — takes effect on the next orc invocation`)
+      grantExtensionTrust(p, config.dir)
+      console.log(`trusted extension '${p}' (bound to its current content) — takes effect on the next orc invocation`)
     })
 
   const mem = program.command('memory').description('project knowledge graph (M4b)')

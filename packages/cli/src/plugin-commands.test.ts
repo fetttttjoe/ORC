@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createMcpHub } from '@orc/mcp-client'
-import { createPluginHost, grantTrust, loadConfig, loadTrust, requireProject } from '@orc/kernel'
+import { createPluginHost, grantMcpTrust, isMcpTrusted, loadConfig, loadTrust, requireProject } from '@orc/kernel'
 import { createTestDb, TEST_PROJECT_ID } from '@orc/kernel/test-helpers'
 import { buildProgram, openKernel } from './main'
 
@@ -31,7 +31,8 @@ async function makeCli(dir: string) {
     providers: new Map([['fake', { costs: {}, languageModel: () => ({}) }]]),
     executors: new Map([['api-loop', { id: 'api-loop', startTurn: async function* () {} }]]),
   })
-  const hub = createMcpHub(config.mcpServers, new Set(host.trust.mcp))
+  const trusted = Object.entries(config.mcpServers).filter(([id, cfg]) => isMcpTrusted(host.trust, id, cfg)).map(([id]) => id)
+  const hub = createMcpHub(config.mcpServers, new Set(trusted))
   const { kernel, log } = await openKernel(db.url, { projectId: TEST_PROJECT_ID, refValidator: host.refValidator })
   const lines: string[] = []
   spyOn(console, 'log').mockImplementation((...a: unknown[]) => { lines.push(a.join(' ')) })
@@ -59,12 +60,15 @@ describe('plugin commands', () => {
     expect(lines.join('\n')).toContain('fixture')
     expect(lines.join('\n')).toContain('untrusted')
     await run('mcp', 'trust', 'fixture')
-    expect(loadTrust(dir).mcp).toEqual(['fixture'])
+    const store = loadTrust(dir)
+    expect(isMcpTrusted(store, 'fixture', { command: 'bun', args: [FIXTURE] })).toBe(true)
+    // a changed declaration invalidates the grant without touching trust.json
+    expect(isMcpTrusted(store, 'fixture', { command: 'bun', args: ['other.ts'] })).toBe(false)
   })
 
   it('orc mcp tools spawns a trusted server and lists tools with a vetting warning', async () => {
     const dir = project({ mcpServers: { fixture: { command: 'bun', args: [FIXTURE] } } })
-    grantTrust('mcp', 'fixture', dir)
+    grantMcpTrust('fixture', { command: 'bun', args: [FIXTURE] }, dir)
     const { run, lines, hub } = await makeCli(dir)
     await run('mcp', 'tools', 'fixture')
     expect(lines.join('\n')).toContain('echo')
@@ -72,13 +76,24 @@ describe('plugin commands', () => {
     await hub.close()
   })
 
-  it('orc ext trust grants and orc ext list shows state', async () => {
+  it('orc ext trust grants content-bound trust; list shows state; changed bytes untrust', async () => {
     const dir = project({ extensions: ['exts/a.ts'] })
+    mkdirSync(path.join(dir, 'exts'), { recursive: true })
     const { run, lines } = await makeCli(dir)
     await run('ext', 'list')
     expect(lines.join('\n')).toContain('untrusted')
+    writeFileSync(path.join(dir, 'exts', 'a.ts'), 'export default { id: "a", activate() {} }')
     await run('ext', 'trust', 'exts/a.ts')
-    expect(loadTrust(dir).extensions).toEqual(['exts/a.ts'])
+    expect(loadTrust(dir).extensions.map(r => r.id)).toEqual(['exts/a.ts'])
+    lines.length = 0
+    await run('ext', 'list')
+    expect(lines.join('\n')).toMatch(/^trusted/)
+
+    // changing the entry bytes invalidates the grant — consent is content-bound
+    writeFileSync(path.join(dir, 'exts', 'a.ts'), 'export default { id: "a", activate() { /* v2 */ } }')
+    lines.length = 0
+    await run('ext', 'list')
+    expect(lines.join('\n')).toContain('untrusted')
   })
 
   it('orc ext trust rejects an undeclared path', async () => {

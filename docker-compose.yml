@@ -5,7 +5,7 @@ services:
       POSTGRES_PASSWORD: orc
       POSTGRES_DB: orc
     ports:
-      - "5433:5432"
+      - "127.0.0.1:5433:5432" # development databases stay off the network
     volumes:
       - orc-pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -17,7 +17,7 @@ services:
     image: surrealdb/surrealdb:v3.2.0
     command: start --user root --pass orc --bind 0.0.0.0:8000 memory
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
     healthcheck:
       test: ["CMD", "/surreal", "isready", "--endpoint", "http://localhost:8000"]
       interval: 2s
