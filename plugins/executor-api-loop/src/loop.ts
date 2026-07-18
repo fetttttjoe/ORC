@@ -1,10 +1,32 @@
 import { generateText, type LanguageModel, type ModelMessage, type ToolSet } from 'ai'
 import {
-  EVENT_KIND, FAILURE_CLASS, UNIFIED_EVENT_TYPE, terminalError,
+  EVENT_KIND, FAILURE_CLASS, SIGNAL_OUTCOME, UNIFIED_EVENT_TYPE, terminalError,
   type AgentExecutor, type EventDraft, type ExecutorContext, type Signal,
   type SplitResult, type UnifiedEvent, type Usage,
 } from '@orc/contracts'
+import { statSync } from 'node:fs'
+import path from 'node:path'
+import { resolveInWorkspace } from '@orc/contracts'
 import { JoinSplitsInput, SignalInput, TOOL_NAME, executeTool, toolSet } from './tools'
+
+// Pre-flight for declared outputs, so the model can fix a bad declaration instead of the
+// step failing at the runtime's trusted verification. Returns an error string or null.
+function invalidOutputs(workspaceDir: string, outputs: string[]): string | null {
+  const seen = new Set<string>()
+  for (const p of outputs) {
+    let abs: string
+    try {
+      abs = resolveInWorkspace(workspaceDir, p)
+    } catch (err) {
+      return err instanceof Error ? err.message : String(err)
+    }
+    if (!statSync(abs, { throwIfNoEntry: false })?.isFile()) return `not a regular file: ${p}`
+    const canonical = path.relative(workspaceDir, abs)
+    if (seen.has(canonical)) return `duplicate output path: ${p}`
+    seen.add(canonical)
+  }
+  return null
+}
 
 interface TurnResult {
   text: string
@@ -251,7 +273,21 @@ export function apiLoopExecutor(): AgentExecutor<LanguageModel> {
         }
 
         if (signalCall && parsedSignal?.success) {
-          const signal: Signal = { ...base, outcome: parsedSignal.data.outcome, summary: parsedSignal.data.summary }
+          const declared = parsedSignal.data.outcome === SIGNAL_OUTCOME.success ? parsedSignal.data.outputs : undefined
+          const outputError = declared ? invalidOutputs(ctx.workspaceDir, declared) : null
+          if (outputError) {
+            messages.push({
+              role: 'tool',
+              content: [{
+                type: 'tool-result',
+                toolCallId: signalCall.toolCallId,
+                toolName: signalCall.toolName,
+                output: { type: 'json', value: { error: `invalid output path: ${outputError}. Fix the file or the declared path, then call signal again.` } },
+              }],
+            })
+            continue
+          }
+          const signal: Signal = { ...base, outcome: parsedSignal.data.outcome, summary: parsedSignal.data.summary, outputs: declared }
           await ctx.checkpoint(
             `signal:${iteration}`,
             async () => signal,

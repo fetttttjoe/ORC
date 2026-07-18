@@ -255,6 +255,16 @@ describe('fold — execution kinds', () => {
     expect(state.plans.get('t1')?.versions).toHaveLength(1)
   })
 
+  it('folds artifacts by task; distinct paths survive, a replayed receipt folds once', () => {
+    const receipt = (seq: number, p: string): EventRecord => ({
+      seq, projectId: 'p1', idempotencyKey: null, taskId: 't1', stepId: 's1',
+      runToken: rt('s1'), kind: 'artifact_produced',
+      payload: { path: p, sha256: 'a'.repeat(64), size: 1 }, usage: null, ts: 'T',
+    })
+    const state = fold([receipt(1, 'a.md'), receipt(2, 'b.md'), receipt(3, 'a.md')])
+    expect(state.artifacts.get('t1')?.map(a => a.path)).toEqual(['a.md', 'b.md'])
+  })
+
   it('folds operation transitions into replayable journal state', () => {
     const op = (seq: number, kind: EventRecord['kind'], payload: Record<string, unknown>): EventRecord => ({
       seq, projectId: 'p1', idempotencyKey: null, taskId: 't1', stepId: 's1',

@@ -3,7 +3,8 @@ import { mkdtempSync, readdirSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import type { ResolvedTool } from '@orc/contracts'
-import { TOOL_NAME, executeTool, resolveInWorkspace, toolSet } from './tools'
+import { resolveInWorkspace } from '@orc/contracts'
+import { TOOL_NAME, executeTool, toolSet } from './tools'
 
 const ws = () => mkdtempSync(path.join(tmpdir(), 'orc-ws-'))
 

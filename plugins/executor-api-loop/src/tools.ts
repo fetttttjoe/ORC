@@ -1,9 +1,9 @@
-import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
+import { mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import { jsonSchema, tool } from 'ai'
 import { z } from 'zod'
 import type { ResolvedTool } from '@orc/contracts'
-import { SignalOutcome } from '@orc/contracts'
+import { SignalOutcome, resolveInWorkspace } from '@orc/contracts'
 
 export const TOOL_NAME = {
   signal: 'signal',
@@ -14,26 +14,16 @@ export const TOOL_NAME = {
 } as const
 export type ToolName = (typeof TOOL_NAME)[keyof typeof TOOL_NAME]
 
-export const SignalInput = z.object({ outcome: SignalOutcome, summary: z.string().min(1) })
+export const SignalInput = z.object({
+  outcome: SignalOutcome,
+  summary: z.string().min(1),
+  // workspace-relative files this step produced — verified and receipted by the runtime
+  outputs: z.array(z.string().min(1)).optional(),
+})
 export const JoinSplitsInput = z.object({ splitIds: z.array(z.string()).optional() })
 const ReadInput = z.object({ path: z.string().min(1) })
 const WriteInput = z.object({ path: z.string().min(1), content: z.string() })
 const ListInput = z.object({ path: z.string().default('.') })
-
-// Trust boundary (spec §6.3): resolved path — symlinks included — must stay inside the workspace.
-export function resolveInWorkspace(workspaceDir: string, p: string): string {
-  const root = realpathSync(workspaceDir)
-  const resolved = path.resolve(root, p)
-  // realpath the deepest existing ancestor so symlinks cannot smuggle the path outside
-  let probe = resolved
-  while (!existsSync(probe)) probe = path.dirname(probe)
-  const real = realpathSync(probe)
-  if (real !== root && !real.startsWith(root + path.sep))
-    throw new Error(`path escapes workspace: ${p}`)
-  if (resolved !== root && !resolved.startsWith(root + path.sep))
-    throw new Error(`path escapes workspace: ${p}`)
-  return resolved
-}
 
 // Declared WITHOUT execute — the SDK returns tool calls; execution is ours, inside a durable step (spec §6.2).
 // Extra (MCP) tools are neutral ResolvedTool[] (spec seam D1) — their JSON Schema travels as-is via jsonSchema().
@@ -41,7 +31,7 @@ export function toolSet(extra: ResolvedTool[] = []) {
   return {
     [TOOL_NAME.signal]: tool({
       description:
-        'End this step and report the outcome. Your summary is the ONLY output downstream steps see — put your results/conclusions in it. Call this exactly once, when the work is done or cannot proceed.',
+        'End this step and report the outcome. Your summary is the ONLY output downstream steps see — put your results/conclusions in it. Declare files you produced in `outputs` (workspace-relative paths) so they are verified and receipted. Call this exactly once, when the work is done or cannot proceed.',
       inputSchema: SignalInput,
     }),
     [TOOL_NAME.fs_read]: tool({
