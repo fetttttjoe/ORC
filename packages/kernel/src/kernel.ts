@@ -1,10 +1,10 @@
 import { randomUUID } from 'node:crypto'
 import {
-  EVENT_KIND, PlanDraft, TASK_STATUS, validatePlan,
-  type EventKind, type EventRecord, type Plan, type TaskNode, type TaskStatus,
+  ChildPlanDraft, EVENT_KIND, ISOLATION_TIER, PlanDraft, TASK_STATUS, evaluateApproval, validatePlan,
+  type ApprovalPolicy, type EventKind, type EventRecord, type Plan, type PlanStep, type TaskNode, type TaskStatus,
 } from '@orc/contracts'
 import { EventLog, type EventLogOps } from './eventlog'
-import { fold, type State } from './projections'
+import { fold, subtreeUsage, type State } from './projections'
 import { KERNEL_ERROR_CODE, KernelError } from './errors'
 
 export class Kernel {
@@ -13,11 +13,11 @@ export class Kernel {
     private readonly refValidator?: (plan: Plan) => Promise<string[]>,
   ) {}
 
-  async createTask(input: { title: string; spec?: string; type?: string; parentId?: string; budgetUSD?: number | null }): Promise<TaskNode> {
+  async createTask(input: { id?: string; title: string; spec?: string; type?: string; parentId?: string; budgetUSD?: number | null }): Promise<TaskNode> {
     return this.log.transaction(async tx => {
       const parent = input.parentId ? await this.requireTask(tx, input.parentId) : null
       const task: TaskNode = {
-        id: randomUUID(),
+        id: input.id ?? randomUUID(),
         parentId: parent?.id ?? null,
         type: input.type ?? 'generic',
         title: input.title,
@@ -51,7 +51,11 @@ export class Kernel {
     })
   }
 
-  async approvePlan(taskId: string, version?: number): Promise<Plan> {
+  async approvePlan(
+    taskId: string,
+    version?: number,
+    approval?: { approvedBy: 'human' | 'policy'; ruleIndex?: number },
+  ): Promise<Plan> {
     return this.log.transaction(async tx => {
       const task = await this.requireTask(tx, taskId)
       if (task.status !== TASK_STATUS.awaiting_approval)
@@ -62,10 +66,73 @@ export class Kernel {
       if (wanted !== latest.version)
         throw new KernelError(KERNEL_ERROR_CODE.version_conflict, `latest plan is v${latest.version}, not v${wanted}`)
       await this.append(tx, taskId, EVENT_KIND.plan_approved, {
-        taskId, version: wanted, approvedAt: new Date().toISOString(), approvedBy: 'human',
+        taskId, version: wanted, approvedAt: new Date().toISOString(),
+        approvedBy: approval?.approvedBy ?? 'human',
+        ...(approval?.ruleIndex !== undefined && { ruleIndex: approval.ruleIndex }),
       })
       await this.append(tx, taskId, EVENT_KIND.task_status_changed, { taskId, from: task.status, to: TASK_STATUS.approved })
       return latest
+    })
+  }
+
+  async proposeSplit(input: {
+    parentTaskId: string; stepId: string; runToken: string; toolCallId: string
+    title: string; spec: string; plan: ChildPlanDraft; budgetUSD?: number
+    parentStep: Pick<PlanStep, 'executorRef' | 'modelRef' | 'maxIterations'>
+    policy: ApprovalPolicy; maxDepth: number
+  }): Promise<{ splitId: string; childTaskId: string; gated: boolean }> {
+    const splitId = `split:${input.runToken}:${input.toolCallId}`
+    const childTaskId = `${input.parentTaskId}.${input.stepId}.${input.toolCallId}`
+    return this.log.transaction(async tx => {
+      const state = await this.stateOf(tx)
+      const parent = state.tasks.get(input.parentTaskId)
+      if (!parent) throw new KernelError(KERNEL_ERROR_CODE.task_not_found, `no task '${input.parentTaskId}'`)
+
+      // crash idempotency (D6): the checkpoint re-runs after append-before-commit — same ids, no-op
+      const existing = state.splits.get(splitId)
+      if (existing) return { splitId, childTaskId, gated: state.tasks.get(childTaskId)?.status === TASK_STATUS.awaiting_approval }
+
+      if (parent.depth + 1 > input.maxDepth)
+        throw new KernelError(KERNEL_ERROR_CODE.invalid_transition, `split exceeds max depth ${input.maxDepth}`)
+
+      // subtree budget (D8): clamp to what the whole tree under the parent has left
+      let budgetUSD = input.budgetUSD ?? null
+      if (parent.budgetUSD !== null) {
+        const remaining = parent.budgetUSD - (subtreeUsage(state, input.parentTaskId).costUSD ?? 0)
+        if (remaining <= 0) throw new KernelError(KERNEL_ERROR_CODE.invalid_transition, `subtree budget exhausted`)
+        budgetUSD = Math.min(budgetUSD ?? remaining, remaining)
+      }
+
+      const draft = ChildPlanDraft.parse(input.plan)
+      const child: TaskNode = {
+        id: childTaskId, parentId: parent.id, type: 'split', title: input.title, spec: input.spec,
+        status: TASK_STATUS.draft, zone: [], budgetUSD, depth: parent.depth + 1,
+        createdAt: new Date().toISOString(),
+      }
+      await this.append(tx, child.id, EVENT_KIND.task_created, { task: child })
+      await this.append(tx, input.parentTaskId, EVENT_KIND.split_proposed, {
+        splitId, taskId: input.parentTaskId, stepId: input.stepId, runToken: input.runToken, childTaskId,
+      })
+
+      // expand the trimmed draft with inherited refs (spec D3) and propose+maybe-approve
+      const expanded: PlanDraft = {
+        strategyRef: 'split', costEstimateUSD: null,
+        steps: draft.steps.map(s => ({
+          ...s, executorRef: input.parentStep.executorRef, modelRef: input.parentStep.modelRef,
+          isolation: ISOLATION_TIER.local, zone: [], maxIterations: input.parentStep.maxIterations,
+        })),
+      }
+      const plan = await this.appendPlanVersion(tx, childTaskId, expanded, EVENT_KIND.plan_proposed, TASK_STATUS.draft)
+
+      const verdict = evaluateApproval(input.policy, { depth: child.depth, costEstimateUSD: plan.costEstimateUSD, type: child.type })
+      if (verdict.then === 'auto') {
+        await this.append(tx, childTaskId, EVENT_KIND.plan_approved, {
+          taskId: childTaskId, version: plan.version, approvedAt: new Date().toISOString(),
+          approvedBy: 'policy', ...(verdict.ruleIndex !== undefined && { ruleIndex: verdict.ruleIndex }),
+        })
+        await this.append(tx, childTaskId, EVENT_KIND.task_status_changed, { taskId: childTaskId, from: TASK_STATUS.awaiting_approval, to: TASK_STATUS.approved })
+      }
+      return { splitId, childTaskId, gated: verdict.then === 'manual' }
     })
   }
 
