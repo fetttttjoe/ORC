@@ -51,12 +51,20 @@ describe('memory tools', () => {
     expect(out.neighbors[0]?.via).toBe('supersedes')
   })
 
-  it('memory_read minimal truncates the body to the budget', async () => {
+  it('memory_read always truncates the body to the budget', async () => {
     const { store } = fakeStore({ get: async () => toNote({ id: 'auth', title: 'Auth', body: 'x'.repeat(400) }) })
     const read = memoryTools(store, { source: 'cli' }).find(t => t.name === 'memory_read')!
-    const r = await read.execute({ id: 'auth', detail_level: 'minimal', budget: 10 })
+    const r = await read.execute({ id: 'auth', budget: 10 })
     const out = r.output as { note: MemoryNote; truncated: boolean }
     expect(out.note.body.length).toBeLessThanOrEqual(40)
     expect(out.truncated).toBe(true)
+  })
+
+  it('memory_neighbors passes scope through to the store', async () => {
+    let seen: { scope?: string } | undefined
+    const { store } = fakeStore({ neighbors: async (_seed, opts) => { seen = opts; return [] } })
+    const nb = memoryTools(store, { source: 'cli' }).find(t => t.name === 'memory_neighbors')!
+    await nb.execute({ seed: 'net-topology', scope: 'infra' })
+    expect(seen?.scope).toBe('infra')
   })
 })

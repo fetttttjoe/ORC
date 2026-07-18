@@ -78,7 +78,7 @@ export interface MemoryStore {
   get(id: string, scope?: string): Promise<MemoryNote | null>
   list(filter?: MemoryFilter): Promise<NoteSummary[]>
   search(query: string, filter?: MemoryFilter): Promise<NoteSummary[]>
-  neighbors(seed: string, opts?: { kinds?: LinkKind[]; depth?: number; cap?: number; scope?: string }): Promise<NeighborResult[]>
+  neighbors(seed: string, opts?: { kinds?: LinkKind[]; depth?: number; scope?: string }): Promise<NeighborResult[]>
 }
 
 // Composed provenance string for createdBy/updatedBy (frontmatter + read model).

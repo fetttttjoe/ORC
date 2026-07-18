@@ -14,12 +14,11 @@ export type RankedNeighbor = { id: string; via: LinkKind; depth: number; score: 
 // Bounded best-score relaxation: score(path) = Π(weight(kind) × confidence) × decay^(depth-1).
 // Keep the strongest path per node, exclude seeds, prune below floor, cap the result.
 export function rankNeighbors(edges: Edge[], seeds: string[], opts: {
-  depth?: number; decay?: number; floor?: number; cap?: number
-  weights?: Record<LinkKind, number>; kinds?: LinkKind[]
+  depth?: number; floor?: number; cap?: number; kinds?: LinkKind[]
 } = {}): RankedNeighbor[] {
-  const depth = opts.depth ?? 2, decay = opts.decay ?? DEFAULT_DECAY
+  const depth = opts.depth ?? 2, decay = DEFAULT_DECAY
   const floor = opts.floor ?? DEFAULT_FLOOR, cap = opts.cap ?? DEFAULT_CAP
-  const weights = opts.weights ?? DEFAULT_LINK_WEIGHTS
+  const weights = DEFAULT_LINK_WEIGHTS
   const allow = opts.kinds ? new Set(opts.kinds) : null
 
   const adj = new Map<string, Edge[]>()
