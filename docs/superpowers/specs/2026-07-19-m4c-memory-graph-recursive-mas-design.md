@@ -351,7 +351,10 @@ slot-injection analogue, but **pulled** (`memory_neighbors`), and the auto-bindi
    deterministic enough? Deferred with the auto-binding (D5), noted here so M5 addresses it.
 6. **Confidence source.** Who sets `confidence` — the authoring agent's own estimate, or a provenance
    tier (human-confirmed vs agent-asserted, research §3.4)? v1: optional author-supplied float,
-   default 1.0. A provenance-derived tier is a clean later refinement.
+   default 1.0. A provenance-derived tier is a clean later refinement. *(Amended 2026-07-19,
+   codebase-memory-mcp research §5-F: the eventual evidence path is "confirmed-by-use" — derive
+   confidence from usage traces (a rule acted on successfully, a note refined-not-contradicted
+   downstream), not only author estimates. Stays deferred; named to prevent reinvention.)*
 
 ## 10. What this unlocks (context, not scope)
 
@@ -360,6 +363,11 @@ slot-injection analogue, but **pulled** (`memory_neighbors`), and the auto-bindi
   (research §3.7). Additive; no contract/store change.
 - **Push / auto-binding:** the runtime seeds a step's traversal from its task text/`paths` and
   pre-loads the neighbourhood into the prompt — built on `memory_neighbors` (research §5.7). The
-  deferred half of the recursive-MAS substrate.
+  deferred half of the recursive-MAS substrate. *(Amended 2026-07-19, codebase-memory-mcp research
+  §5-D: the pull-side primitive is a `paths→notes` lookup — `memory_for_paths(paths[])` or a `paths`
+  arg on `memory_search` — finding notes whose `paths` overlap a task's files and ranking their
+  neighbors. Still deferred; shape pinned so auto-binding stays trivial later. Also parked there:
+  epistemics envelope E-ii/E-iii (`unconfirmed` flag on low-confidence-edge neighbors, fail-loud
+  unknown category/tag) and §5-G's rebuild integrity guard.)*
 - **M5 topologies:** Sequential/Mixture/Distillation/Deliberation routed onto the link kinds (§8),
   so recursion happens through the graph, not through re-held context.
