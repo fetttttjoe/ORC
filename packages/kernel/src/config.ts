@@ -18,6 +18,7 @@ const settingsSchema = (dir: string) =>
     concurrency: z.coerce.number().int().positive().default(3),
     workspaceRoot: z.string().default(path.join(dir, '.orc', 'workspaces')),
     ollamaBaseUrl: z.url().default('http://localhost:11434'),
+    projectDbUrl: z.string().default('ws://127.0.0.1:8000/rpc'),
     costOverrides: z.record(z.string(), z.record(z.string(), ModelCost)).default({}),
     vaultDir: z.string().default(path.join(dir, 'vault')).transform(p => path.resolve(dir, p)),
     skillsDir: z.string().optional().transform(p => (p === undefined ? undefined : path.resolve(dir, p))),
@@ -31,6 +32,7 @@ const envOverrides = (): Record<string, string> => {
     databaseUrl: process.env.ORC_DATABASE_URL,
     concurrency: process.env.ORC_CONCURRENCY,
     ollamaBaseUrl: process.env.OLLAMA_BASE_URL,
+    projectDbUrl: process.env.ORC_PROJECT_DB_URL,
   }
   return Object.fromEntries(Object.entries(map).filter((e): e is [string, string] => Boolean(e[1])))
 }

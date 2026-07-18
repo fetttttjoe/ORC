@@ -13,5 +13,15 @@ services:
       interval: 2s
       timeout: 3s
       retries: 30
+  surrealdb:
+    image: surrealdb/surrealdb:v3.2.0
+    command: start --user root --pass orc --bind 0.0.0.0:8000 memory
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test: ["CMD", "/surreal", "isready", "--endpoint", "http://localhost:8000"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
 volumes:
   orc-pgdata:
