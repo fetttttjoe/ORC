@@ -6,6 +6,7 @@
   "dependencies": {
     "@orc/contracts": "workspace:*",
     "@orc/kernel": "workspace:*",
+    "@orc/vault-projector": "workspace:*",
     "surrealdb": "2.0.4",
     "surqlize": "0.1.0",
     "zod": "^4.4.3"
