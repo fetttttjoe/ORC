@@ -43,6 +43,8 @@ export const MemoryNoteInput = z.object({
   body: z.string().default(''),
 })
 export type MemoryNoteInput = z.infer<typeof MemoryNoteInput>
+// What callers hand the gateway: the schema's raw input, defaults not yet applied.
+export type MemoryNoteDraft = z.input<typeof MemoryNoteInput>
 
 // The stored/rendered note: input + provenance/lifecycle the projector derives from events.
 export const MemoryNote = MemoryNoteInput.extend({
@@ -69,8 +71,9 @@ export type NeighborResult = z.infer<typeof NeighborResult>
 export interface MemoryFilter { scope?: string; category?: string; tag?: string }
 
 // The single-writer gateway (the wrapper). write/remove append events; reads hit SurrealDB.
+// write takes the raw draft — the gateway parses (defaults + validation), callers never cast.
 export interface MemoryStore {
-  write(input: MemoryNoteInput, author: MemoryAuthor): Promise<MemoryNote>
+  write(input: MemoryNoteDraft, author: MemoryAuthor): Promise<MemoryNote>
   remove(id: string, scope?: string): Promise<void>
   get(id: string, scope?: string): Promise<MemoryNote | null>
   list(filter?: MemoryFilter): Promise<NoteSummary[]>
