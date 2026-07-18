@@ -35,6 +35,16 @@ export type Plan = z.infer<typeof Plan>
 export const PlanDraft = Plan.omit({ taskId: true, version: true })
 export type PlanDraft = z.infer<typeof PlanDraft>
 
+// What the proposing agent authors in task_split (spec D3): a trimmed PlanDraft.
+// executorRef/modelRef/isolation/zone/maxIterations are inherited from the parent step at expansion.
+export const ChildPlanStep = PlanStep.omit({
+  executorRef: true, modelRef: true, isolation: true, zone: true, maxIterations: true,
+})
+export type ChildPlanStep = z.infer<typeof ChildPlanStep>
+
+export const ChildPlanDraft = z.object({ steps: z.array(ChildPlanStep).min(1) })
+export type ChildPlanDraft = z.infer<typeof ChildPlanDraft>
+
 export function validatePlan(plan: Plan): { ok: true } | { ok: false; errors: string[] } {
   const errors: string[] = []
   const ids = new Set<string>()

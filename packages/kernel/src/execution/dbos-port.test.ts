@@ -2,7 +2,8 @@ import { afterAll, beforeAll, describe, expect, it } from 'bun:test'
 import { Client } from 'pg'
 import {
   EVENT_KIND, FAILURE_CLASS, SIGNAL_OUTCOME, TASK_STATUS,
-  type AgentExecutor, type EventDraft, type ExecutorContext, type PlanDraft, type UnifiedEvent,
+  type AgentExecutor, type EventDraft, type ExecutorContext, type PlanDraft,
+  type SplitResult, type UnifiedEvent,
 } from '@orc/contracts'
 import { draftFixture, stepFixture } from '@orc/contracts/fixtures'
 import { EventLog } from '../eventlog'
@@ -19,7 +20,7 @@ const behaviors = new Map<string, Record<string, 'ok' | 'fail'>>()
 function fakeExecutor(): AgentExecutor<unknown> {
   return {
     id: 'api-loop',
-    async *startTurn(ctx: ExecutorContext<unknown>): AsyncIterable<UnifiedEvent> {
+    async *startTurn(ctx: ExecutorContext<unknown>): AsyncGenerator<UnifiedEvent, void, SplitResult[] | undefined> {
       const taskId = ctx.runToken.split(':')[1]!
       const behavior = behaviors.get(taskId) ?? {}
       const outcome = behavior[ctx.step.id] === 'fail' ? SIGNAL_OUTCOME.failure : SIGNAL_OUTCOME.success

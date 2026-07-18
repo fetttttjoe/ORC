@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import {
   EVENT_KIND, SIGNAL_OUTCOME,
-  type AgentExecutor, type EventDraft, type ExecutorContext, type UnifiedEvent,
+  type AgentExecutor, type EventDraft, type ExecutorContext, type SplitResult, type UnifiedEvent,
 } from '@orc/contracts'
 import { draftFixture, stepFixture } from '@orc/contracts/fixtures'
 import { EventLog } from '../eventlog'
@@ -18,7 +18,7 @@ import { createVaultProjector, type VaultProjector } from '@orc/vault-projector'
 function fakeExecutor(): AgentExecutor<unknown> {
   return {
     id: 'api-loop',
-    async *startTurn(ctx: ExecutorContext<unknown>): AsyncIterable<UnifiedEvent> {
+    async *startTurn(ctx: ExecutorContext<unknown>): AsyncGenerator<UnifiedEvent, void, SplitResult[] | undefined> {
       const base = { stepId: ctx.step.id, runToken: ctx.runToken }
       await ctx.checkpoint('model:1', async () => 'ok', (): EventDraft[] => [
         { kind: EVENT_KIND.agent_call, payload: { ...base, iteration: 1, request: {}, response: { text: 'writing the file' } }, usage: { inputTokens: 5, outputTokens: 3, costUSD: 0.001, estimated: false } },

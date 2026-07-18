@@ -62,7 +62,7 @@ export class Kernel {
       if (wanted !== latest.version)
         throw new KernelError(KERNEL_ERROR_CODE.version_conflict, `latest plan is v${latest.version}, not v${wanted}`)
       await this.append(tx, taskId, EVENT_KIND.plan_approved, {
-        taskId, version: wanted, approvedAt: new Date().toISOString(),
+        taskId, version: wanted, approvedAt: new Date().toISOString(), approvedBy: 'human',
       })
       await this.append(tx, taskId, EVENT_KIND.task_status_changed, { taskId, from: task.status, to: TASK_STATUS.approved })
       return latest

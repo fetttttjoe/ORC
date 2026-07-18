@@ -5,7 +5,7 @@
 import { existsSync, writeFileSync } from 'node:fs'
 import {
   EVENT_KIND, SIGNAL_OUTCOME,
-  type AgentExecutor, type EventDraft, type ExecutorContext, type UnifiedEvent,
+  type AgentExecutor, type EventDraft, type ExecutorContext, type SplitResult, type UnifiedEvent,
 } from '@orc/contracts'
 import { EventLog } from '../eventlog'
 import { loadConfig, deriveSystemUrl } from '../config'
@@ -16,7 +16,7 @@ const [dbUrl, taskId, marker] = process.argv.slice(2) as [string, string, string
 
 const stallOnce: AgentExecutor<unknown> = {
   id: 'api-loop',
-  async *startTurn(ctx: ExecutorContext<unknown>): AsyncIterable<UnifiedEvent> {
+  async *startTurn(ctx: ExecutorContext<unknown>): AsyncGenerator<UnifiedEvent, void, SplitResult[] | undefined> {
     await ctx.checkpoint(
       'model:1',
       async () => {

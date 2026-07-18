@@ -58,11 +58,22 @@ export const RunOutcome = z.enum(['done', 'blocked', 'cancelled'])
 export type RunOutcome = z.infer<typeof RunOutcome>
 export const RUN_OUTCOME = RunOutcome.enum
 
+// The thin join payload (spec D5): what a parent gets back from a resolved split.
+// Same shape as the split_resolved event payload — the router composes it once.
+export const SplitResult = z.object({
+  splitId: z.string().min(1),
+  childTaskId: z.string().min(1),
+  outcome: RunOutcome,
+  summary: z.string(),
+  notes: z.array(z.object({ id: z.string(), scope: z.string() })),
+})
+export type SplitResult = z.infer<typeof SplitResult>
+
 export const StepRunStatus = z.enum(['running', 'completed', 'failed'])
 export type StepRunStatus = z.infer<typeof StepRunStatus>
 export const STEP_RUN_STATUS = StepRunStatus.enum
 
-export const UnifiedEventType = z.enum(['text', 'tool_call', 'tool_result', 'usage', 'signal', 'error', 'done'])
+export const UnifiedEventType = z.enum(['text', 'tool_call', 'tool_result', 'usage', 'signal', 'error', 'done', 'gate'])
 export type UnifiedEventType = z.infer<typeof UnifiedEventType>
 export const UNIFIED_EVENT_TYPE = UnifiedEventType.enum
 
@@ -74,6 +85,7 @@ export const UnifiedEvent = z.discriminatedUnion('type', [
   z.object({ type: z.literal('signal'), signal: Signal }),
   z.object({ type: z.literal('error'), class: FailureClass, message: z.string() }),
   z.object({ type: z.literal('done') }),
+  z.object({ type: z.literal('gate'), splitIds: z.array(z.string()), toolCallId: z.string() }),
 ])
 export type UnifiedEvent = z.infer<typeof UnifiedEvent>
 
@@ -141,7 +153,7 @@ export interface ExecutorContext<LM = unknown> {
 
 export interface AgentExecutor<LM = unknown> {
   id: string
-  startTurn(ctx: ExecutorContext<LM>): AsyncIterable<UnifiedEvent>
+  startTurn(ctx: ExecutorContext<LM>): AsyncGenerator<UnifiedEvent, void, SplitResult[] | undefined>
 }
 
 export interface RunHandle {
