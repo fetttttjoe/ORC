@@ -47,7 +47,7 @@ describe('MCP + skills through a durable run (integration)', () => {
     port = await createDbosPort({
       log, config,
       providers: new Map([['fake', { costs: {}, languageModel: () => model }]]),
-      executors: new Map([['api-loop', apiLoopExecutor() as never]]),
+      executors: new Map([['api-loop', apiLoopExecutor()]]),
       skills, tools: hub,
     })
     await port.launch()

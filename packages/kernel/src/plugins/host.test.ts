@@ -30,7 +30,7 @@ function writeSkill(root: string, name: string): void {
 async function makeHost(d: string) {
   return createPluginHost(loadConfig(d), {
     providers: new Map([['fake', fakeProvider]]),
-    executors: new Map([['api-loop', { id: 'api-loop', startTurn: async function* () {} } as never]]),
+    executors: new Map([['api-loop', { id: 'api-loop', startTurn: async function* () {} }]]),
   })
 }
 
