@@ -12,8 +12,7 @@ import { createMemory } from '@orc/memory'
 import { createTestSurreal } from '@orc/memory/test-helpers'
 import { EventLog } from '../eventlog'
 import { Kernel } from '../kernel'
-import { loadConfig, deriveSystemUrl } from '../config'
-import { createTestDb, fakeProvider } from '../test-helpers'
+import { createTestDb, fakeProvider, testConfig } from '../test-helpers'
 import { createDbosPort, type DbosPort } from './dbos-port'
 
 const NOTE_ID = 'finding-x'
@@ -83,11 +82,11 @@ describe('memory reuse over a real run (e2e): step B reads step A\'s note', () =
     const vaultDir = mkdtempSync(path.join(tmpdir(), 'orc-memory-e2e-'))
     const log = await EventLog.open(pg.url)
     const kernel = new Kernel(log)
-    const config = {
-      ...loadConfig(), databaseUrl: pg.url, systemDatabaseUrl: deriveSystemUrl(pg.url), vaultDir,
+    const config = testConfig(pg.url, {
+      vaultDir,
       projectDbUrl: ts.url, projectDbNamespace: ts.ns, projectDbName: ts.db,
       projectDbUser: ts.username, projectDbPassword: ts.password,
-    }
+    })
     const memory = await createMemory({ log, config })
     await memory.projector.start()
     const port: DbosPort = await createDbosPort({

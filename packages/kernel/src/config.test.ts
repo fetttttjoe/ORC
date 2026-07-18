@@ -1,14 +1,10 @@
 import { describe, expect, it } from 'bun:test'
-import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import { loadConfig } from './config'
+import { deriveSystemUrl, initializeProject, loadConfig, projectDatabaseName, requireProject } from './config'
 
 describe('loadConfig', () => {
-  it('derives systemDatabaseUrl from databaseUrl', () => {
-    const c = loadConfig(mkdtempSync(path.join(tmpdir(), 'orc-')))
-    expect(c.systemDatabaseUrl).toBe(c.databaseUrl.replace(/\/([^/]+)$/, '/$1_dbos_sys'))
-  })
   it('reads .orc/config.json overrides', () => {
     const dir = mkdtempSync(path.join(tmpdir(), 'orc-'))
     mkdirSync(path.join(dir, '.orc'))
@@ -103,6 +99,80 @@ describe('loadConfig', () => {
     const c = loadConfig(mkdtempSync(path.join(tmpdir(), 'orc-')))
     expect(c.maxDepth).toBe(3)
     expect(c.approvalPolicy).toEqual({ default: 'manual', rules: [] })
+  })
+})
+
+describe('project identity', () => {
+  it('loads an uninitialized project but requireProject rejects it', () => {
+    const c = loadConfig(mkdtempSync(path.join(tmpdir(), 'orc-')))
+    expect(c.projectId).toBeNull()
+    expect(() => requireProject(c)).toThrow(/orc init/)
+  })
+
+  it('accepts committed project identity', () => {
+    const dir = tmpProject({
+      projectId: '00000000-0000-4000-8000-000000000001',
+      projectName: 'demo',
+    })
+    expect(requireProject(loadConfig(dir)).projectName).toBe('demo')
+  })
+})
+
+describe('project-derived infrastructure boundaries', () => {
+  const p1 = '00000000-0000-4000-8000-000000000001'
+  const p2 = '00000000-0000-4000-8000-000000000002'
+
+  it('different projects get different Surreal database names', () => {
+    expect(projectDatabaseName('memory', p1)).not.toBe(projectDatabaseName('memory', p2))
+    expect(projectDatabaseName('memory', p1)).toBe(`memory_${p1.replaceAll('-', '')}`)
+  })
+
+  it('different projects get different DBOS system database urls', () => {
+    const url = 'postgresql://postgres:orc@localhost:5433/orc'
+    expect(deriveSystemUrl(url, p1)).not.toBe(deriveSystemUrl(url, p2))
+    expect(deriveSystemUrl(url, p1)).toContain(`/orc_dbos_${p1.replaceAll('-', '')}`)
+  })
+
+  it('derived names stay within the Postgres 63-byte identifier limit', () => {
+    const url = `postgresql://postgres:orc@localhost:5433/${'x'.repeat(60)}`
+    const dbName = new URL(deriveSystemUrl(url, p1)).pathname.slice(1)
+    expect(dbName.length).toBeLessThanOrEqual(63)
+    expect(projectDatabaseName('y'.repeat(60), p1).length).toBeLessThanOrEqual(63)
+  })
+
+  it('requireProject derives systemDatabaseUrl from databaseUrl and projectId', () => {
+    const dir = tmpProject({ projectId: p1, projectName: 'demo' })
+    const c = requireProject(loadConfig(dir))
+    expect(c.systemDatabaseUrl).toBe(deriveSystemUrl(c.databaseUrl, p1))
+  })
+})
+
+describe('initializeProject', () => {
+  it('merges identity into existing config without erasing settings', () => {
+    const dir = tmpProject({ concurrency: 7 })
+    initializeProject(dir, 'demo')
+    const cfg = JSON.parse(readFileSync(path.join(dir, '.orc', 'config.json'), 'utf8'))
+    expect(cfg.concurrency).toBe(7)
+    expect(cfg.projectId).toMatch(/^[0-9a-f-]{36}$/)
+    expect(cfg.projectName).toBe('demo')
+  })
+
+  it('refuses to overwrite identity unless forced; force keeps other settings', () => {
+    const dir = tmpProject({ concurrency: 7 })
+    initializeProject(dir, 'demo')
+    const first = JSON.parse(readFileSync(path.join(dir, '.orc', 'config.json'), 'utf8'))
+    expect(() => initializeProject(dir, 'demo2')).toThrow(/already initialized/)
+    initializeProject(dir, 'demo2', { force: true })
+    const second = JSON.parse(readFileSync(path.join(dir, '.orc', 'config.json'), 'utf8'))
+    expect(second.projectId).not.toBe(first.projectId)
+    expect(second.projectName).toBe('demo2')
+    expect(second.concurrency).toBe(7)
+  })
+
+  it('initializes a bare directory with no .orc at all', () => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'orc-'))
+    initializeProject(dir, 'fresh')
+    expect(requireProject(loadConfig(dir)).projectName).toBe('fresh')
   })
 })
 

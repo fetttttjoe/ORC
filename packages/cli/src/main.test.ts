@@ -4,10 +4,10 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { Surreal } from 'surrealdb'
 import { EVENT_KIND } from '@orc/contracts'
-import { loadConfig, type PluginHost } from '@orc/kernel'
+import { loadConfig, requireProject, type PluginHost } from '@orc/kernel'
 import { createTestDb } from '@orc/kernel/test-helpers'
 import type { McpHub } from '@orc/mcp-client'
-import { buildProgram, openKernel } from './main'
+import { buildProgram, openKernel, runInit } from './main'
 
 const dbs: Array<{ drop: () => Promise<void> }> = []
 const surrealConfigs: Array<Pick<ReturnType<typeof loadConfig>, 'projectDbUrl' | 'projectDbNamespace' | 'projectDbUser' | 'projectDbPassword' | 'projectDbName'>> = []
@@ -44,7 +44,7 @@ async function makeCli() {
     await buildProgram(kernel).parseAsync(args, { from: 'user' })
     return lines
   }
-  return { run, lines }
+  return { run, lines, kernel }
 }
 
 afterEach(() => {
@@ -52,6 +52,17 @@ afterEach(() => {
 })
 
 describe('orc CLI', () => {
+  it('init writes committed project identity into the given directory', async () => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'orc-init-'))
+    await runInit(['--name', 'demo'], dir)
+    expect(requireProject(loadConfig(dir)).projectName).toBe('demo')
+  })
+
+  it('buildProgram exposes init', async () => {
+    const { kernel } = await makeCli()
+    expect(buildProgram(kernel).commands.map(c => c.name())).toContain('init')
+  })
+
   it('new → propose → approve → log round-trip', async () => {
     const { run, lines } = await makeCli()
     await run('new', 'hello world', '--spec', 'do things')
