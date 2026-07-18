@@ -17,7 +17,8 @@ export function composeSplitResult(events: EventRecord[], split: SplitState): Sp
 
   let summary = 'cancelled'
   if (outcome === RUN_OUTCOME.done) {
-    const plan = state.plans.get(split.childTaskId)?.versions.at(-1)
+    const tp = state.plans.get(split.childTaskId)
+    const plan = tp?.versions.find(v => v.version === tp.approvedVersion) ?? tp?.versions.at(-1)
     const dependedOn = new Set(plan?.steps.flatMap(s => s.dependsOn) ?? [])
     const terminals = (plan?.steps ?? []).filter(s => !dependedOn.has(s.id))
     summary = terminals
@@ -46,27 +47,50 @@ export function createSignalRouter(opts: {
   send: (destinationId: string, result: SplitResult, topic: string, idempotencyKey: string) => Promise<void>
 }): { start(): Promise<void>; close(): Promise<void> } {
   let unsub: (() => Promise<void>) | null = null
+
+  // append split_resolved + send, CONTAINED: a poisoned event must not kill the pump mid-batch
+  // (the pump pre-advances its cursor, so a throw would strand the terminal event forever — the
+  // waiting parent's recv has no gate timeout in v1). A throw here is healed by the next start()
+  // sweep. Idempotent by construction: fold dedups split_resolved by splitId, send carries
+  // idempotencyKey=splitId, so re-running is a no-op end to end.
+  const resolveSplit = async (all: EventRecord[], split: SplitState): Promise<void> => {
+    try {
+      const result = composeSplitResult(all, split)
+      await opts.log.append({ taskId: split.taskId, stepId: split.stepId, runToken: split.runToken, kind: EVENT_KIND.split_resolved, payload: result })
+      await opts.send(split.runToken, result, `split:${split.splitId}`, split.splitId)
+    } catch (err) {
+      console.warn(`signal router: resolve split ${split.splitId}: ${err instanceof Error ? err.message : String(err)}`)
+    }
+  }
+
   return {
     async start() {
+      // catch-up sweep BEFORE subscribing: every unresolved split whose child is already terminal
+      // gets resolved now — heals a handler throw AND a terminal event that landed while the router
+      // was down (never redelivered, since the pump pre-advances its cursor).
+      const seed = await opts.log.all()
+      const state = fold(seed)
+      for (const split of state.splits.values()) {
+        if (split.resolved) continue
+        const status = state.tasks.get(split.childTaskId)?.status
+        if (status && TERMINAL.has(status)) await resolveSplit(seed, split)
+      }
       unsub = await opts.log.subscribe({}, async e => {
         // route 2: an approved child with a pending split gets its run started (policy OR human)
         if (e.kind === EVENT_KIND.plan_approved && e.taskId) {
-          const state = fold(await opts.log.all())
-          if (pendingSplitForChild(state, e.taskId))
+          if (pendingSplitForChild(fold(await opts.log.all()), e.taskId))
             await opts.onChildApproved(e.taskId).catch(err =>
               console.warn(`signal router: startChildRun ${e.taskId}: ${err instanceof Error ? err.message : String(err)}`))
           return
         }
-        // route 1: a terminal child resolves its split
+        // route 1: a terminal child resolves its split (guarded by pendingSplitForChild — a
+        // redelivered terminal status finds the split already resolved and no-ops)
         if (e.kind !== EVENT_KIND.task_status_changed) return
         const to = (e.payload as { to: TaskStatus }).to
         if (!TERMINAL.has(to) || !e.taskId) return
         const all = await opts.log.all()
         const split = pendingSplitForChild(fold(all), e.taskId)
-        if (!split) return
-        const result = composeSplitResult(all, split)
-        await opts.log.append({ taskId: split.taskId, stepId: split.stepId, runToken: split.runToken, kind: EVENT_KIND.split_resolved, payload: result })
-        await opts.send(split.runToken, result, `split:${split.splitId}`, split.splitId)
+        if (split) await resolveSplit(all, split)
       })
     },
     async close() { if (unsub) await unsub() },
