@@ -7,9 +7,12 @@ import type { SurrealMemory } from './surreal'
 export function createMemoryStore(opts: { log: EventLog; surreal: SurrealMemory }): MemoryStore {
   const { log, surreal } = opts
   return {
-    async write(input, author) {
+    async write(input, author, opts) {
       const note = MemoryNoteInput.parse(input)          // reject malformed BEFORE appending
-      await log.append({ taskId: null, stepId: null, runToken: null, kind: 'memory_written', payload: { note, author } })
+      await log.append({
+        taskId: null, stepId: null, runToken: null, kind: 'memory_written',
+        payload: { note, author }, idempotencyKey: opts?.idempotencyKey ?? null,
+      })
       // event-first: the record materializes via the projector shortly; return a best-effort
       // read (may be null within the flush window — callers treat write as fire-and-forget).
       return (await surreal.get(note.id, note.scope)) ?? { ...note, createdAt: '', createdBy: '', updatedAt: '', updatedBy: '', revision: 1 }

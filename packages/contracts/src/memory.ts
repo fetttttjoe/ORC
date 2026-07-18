@@ -73,7 +73,9 @@ export interface MemoryFilter { scope?: string; category?: string; tag?: string 
 // The single-writer gateway (the wrapper). write/remove append events; reads hit SurrealDB.
 // write takes the raw draft — the gateway parses (defaults + validation), callers never cast.
 export interface MemoryStore {
-  write(input: MemoryNoteDraft, author: MemoryAuthor): Promise<MemoryNote>
+  // idempotencyKey: deterministic writers (tool-driven writes inside an operation) pass one so
+  // a crash retry of the surrounding effect cannot append the note event twice
+  write(input: MemoryNoteDraft, author: MemoryAuthor, opts?: { idempotencyKey?: string }): Promise<MemoryNote>
   remove(id: string, scope?: string): Promise<void>
   get(id: string, scope?: string): Promise<MemoryNote | null>
   list(filter?: MemoryFilter): Promise<NoteSummary[]>

@@ -9,9 +9,9 @@ const summary = (id: string, title: string): NoteSummary =>
   ({ id, title, summary: 's', categories: [], tags: [], scope: 'project' })
 
 const fakeStore = (over: Partial<MemoryStore> = {}) => {
-  const written: { input: MemoryNoteDraft; author: unknown }[] = []
+  const written: { input: MemoryNoteDraft; author: unknown; idempotencyKey?: string }[] = []
   const store: MemoryStore = {
-    write: async (input, author) => { written.push({ input, author }); return toNote(input) },
+    write: async (input, author, opts) => { written.push({ input, author, idempotencyKey: opts?.idempotencyKey }); return toNote(input) },
     remove: async () => {},
     get: async () => toNote({ id: 'auth', title: 'Auth', body: 'b' }),
     list: async () => [],
@@ -31,6 +31,17 @@ describe('memory tools', () => {
     const r = await write.execute({ id: 'auth', title: 'Auth' })
     expect(r.isError).toBe(false)
     expect(written[0]?.author).toMatchObject({ executor: 'api-loop' })
+  })
+
+  it('memory_write derives an idempotency key from runToken + toolCallId; none without them', async () => {
+    const { store, written } = fakeStore()
+    const bound = memoryTools(store, { source: 'agent', runToken: 'step:t1:s1:a1' })
+    const write = bound.find(t => t.name === 'memory_write')!
+    await write.execute({ id: 'auth', title: 'Auth' }, 'call_9')
+    expect(written[0]?.idempotencyKey).toBe('step:t1:s1:a1:tool:call_9:memory:auth')
+
+    await write.execute({ id: 'auth', title: 'Auth' }) // no toolCallId (e.g. CLI path)
+    expect(written[1]?.idempotencyKey).toBeUndefined()
   })
 
   it('budgets search results and reports truncation with a next hint', async () => {

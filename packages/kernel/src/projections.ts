@@ -1,6 +1,9 @@
-import { EVENT_KIND, STEP_RUN_STATUS, addUsage } from '@orc/contracts'
+import {
+  EVENT_KIND, OPERATION_STATUS, STEP_RUN_STATUS, addUsage,
+  OperationCompletedPayload, OperationFailedPayload, OperationStartedPayload,
+} from '@orc/contracts'
 import type {
-  EventRecord, FailureClass, Plan, StepRunStatus, TaskNode, TaskStatus, Usage,
+  EventRecord, FailureClass, OperationRecord, Plan, StepRunStatus, TaskNode, TaskStatus, Usage,
 } from '@orc/contracts'
 
 export interface TaskPlans {
@@ -41,14 +44,58 @@ export interface State {
   runs: Map<string, RunRecord[]>
   usage: Map<string, Usage>
   splits: Map<string, SplitState>
+  operations: Map<string, OperationRecord>
 }
 
 const ZERO_USAGE: Usage = { inputTokens: 0, outputTokens: 0, costUSD: null, estimated: false }
 
+// The ONE transition function for the durable operation journal: the live journal row
+// mutation (EventLog.beginOperation/completeOperation/failOperation) and the rebuild fold
+// both apply committed transition events through here, so they can never disagree.
+export function applyOperationEvent(current: OperationRecord | undefined, e: EventRecord): OperationRecord {
+  if (e.kind === EVENT_KIND.operation_started) {
+    const p = OperationStartedPayload.parse(e.payload)
+    if (!e.taskId || !e.stepId || !e.runToken)
+      throw new Error(`operation_started ${p.operationId} is missing task/step/run binding`)
+    return {
+      projectId: e.projectId, operationId: p.operationId,
+      taskId: e.taskId, stepId: e.stepId, runToken: e.runToken,
+      kind: p.operationKind, name: p.name,
+      status: OPERATION_STATUS.started, attempts: p.attempt,
+      before: p.before ?? null, after: null, error: null,
+      startedSeq: e.seq, finishedSeq: null, startedAt: e.ts, finishedAt: null,
+    }
+  }
+  if (!current) throw new Error(`operation transition ${e.kind} without a started node (seq ${e.seq})`)
+  if (e.kind === EVENT_KIND.operation_completed) {
+    const p = OperationCompletedPayload.parse(e.payload)
+    return { ...current, status: OPERATION_STATUS.completed, attempts: p.attempt, after: p.after ?? null, finishedSeq: e.seq, finishedAt: e.ts }
+  }
+  const p = OperationFailedPayload.parse(e.payload)
+  return { ...current, status: OPERATION_STATUS.failed, attempts: p.attempt, error: p.error ?? null, finishedSeq: e.seq, finishedAt: e.ts }
+}
+
+const OPERATION_KINDS: Set<EventRecord['kind']> = new Set([
+  EVENT_KIND.operation_started, EVENT_KIND.operation_completed, EVENT_KIND.operation_failed,
+])
+
+// pure rebuild of the journal from the append-only truth
+export function foldOperations(events: EventRecord[]): Map<string, OperationRecord> {
+  const out = new Map<string, OperationRecord>()
+  for (const e of events) {
+    if (!OPERATION_KINDS.has(e.kind)) continue
+    const id = OperationStartedPayload.pick({ operationId: true }).parse(e.payload).operationId
+    out.set(id, applyOperationEvent(out.get(id), e))
+  }
+  return out
+}
+
 export const crashDedupKey = (e: EventRecord): string | null => {
   // task_status_changed is excluded: run-init (→running) and run-finish (→done) share a runToken
   // and would collide; a replayed status append is idempotent in fold anyway.
-  if (!e.runToken || e.kind === EVENT_KIND.task_status_changed) return null
+  // operation transitions are excluded: their db idempotency keys already forbid raw duplicates,
+  // and attempts 1 and 2 of one operation would collide here and hide the retry.
+  if (!e.runToken || e.kind === EVENT_KIND.task_status_changed || OPERATION_KINDS.has(e.kind)) return null
   // `name` discriminates multiple `skill_loaded` events sharing one runToken.
   // `splitId` discriminates multiple `split_proposed` events sharing one runToken.
   const p = e.payload as { iteration?: number; toolCallId?: string; name?: string; splitId?: string }
@@ -56,7 +103,7 @@ export const crashDedupKey = (e: EventRecord): string | null => {
 }
 
 export function fold(events: EventRecord[]): State {
-  const state: State = { tasks: new Map(), plans: new Map(), steps: new Map(), runs: new Map(), usage: new Map(), splits: new Map() }
+  const state: State = { tasks: new Map(), plans: new Map(), steps: new Map(), runs: new Map(), usage: new Map(), splits: new Map(), operations: new Map() }
   const seen = new Set<string>()
 
   const stepOf = (taskId: string, stepId: string): StepState | undefined => state.steps.get(taskId)?.get(stepId)
@@ -124,13 +171,17 @@ export function fold(events: EventRecord[]): State {
         if (e.usage) state.usage.set(e.taskId, addUsage(state.usage.get(e.taskId) ?? ZERO_USAGE, e.usage))
         break
       }
+      case EVENT_KIND.operation_started:
+      case EVENT_KIND.operation_completed:
+      case EVENT_KIND.operation_failed: {
+        const id = OperationStartedPayload.pick({ operationId: true }).parse(e.payload).operationId
+        state.operations.set(id, applyOperationEvent(state.operations.get(id), e))
+        break // journal only — operation events never drive step-status logic
+      }
       case EVENT_KIND.skill_loaded:
       case EVENT_KIND.tool_call:
       case EVENT_KIND.tool_result:
       case EVENT_KIND.signal_received:
-      case EVENT_KIND.operation_started:
-      case EVENT_KIND.operation_completed:
-      case EVENT_KIND.operation_failed:
       case EVENT_KIND.artifact_produced:
       case EVENT_KIND.memory_written:
       case EVENT_KIND.memory_deleted:

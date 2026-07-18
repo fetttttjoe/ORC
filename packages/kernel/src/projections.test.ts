@@ -254,4 +254,30 @@ describe('fold — execution kinds', () => {
     ])
     expect(state.plans.get('t1')?.versions).toHaveLength(1)
   })
+
+  it('folds operation transitions into replayable journal state', () => {
+    const op = (seq: number, kind: EventRecord['kind'], payload: Record<string, unknown>): EventRecord => ({
+      seq, projectId: 'p1', idempotencyKey: null, taskId: 't1', stepId: 's1',
+      runToken: rt('s1'), kind, payload, usage: null, ts: `T${seq}`,
+    })
+    const id = 'step:t1:s1:a1:model:1'
+    const state = fold([
+      op(1, 'operation_started', { operationId: id, attempt: 1, operationKind: 'model', name: 'fake/m', before: { q: 1 } }),
+      op(2, 'operation_failed', { operationId: id, attempt: 1, error: { message: 'boom' } }),
+      op(3, 'operation_started', { operationId: id, attempt: 2, operationKind: 'model', name: 'fake/m', before: { q: 1 } }),
+      op(4, 'operation_completed', { operationId: id, attempt: 2, after: { text: 'ok' } }),
+    ])
+    const node = state.operations.get(id)
+    expect(node?.status).toBe('completed')
+    expect(node?.attempts).toBe(2)
+    expect(node?.after).toEqual({ text: 'ok' })
+    expect(node?.startedSeq).toBe(3)
+    expect(node?.finishedSeq).toBe(4)
+
+    const unresolved = fold([
+      op(1, 'operation_started', { operationId: id, attempt: 1, operationKind: 'model', name: 'fake/m', before: null }),
+    ]).operations.get(id)
+    expect(unresolved?.status).toBe('started')
+    expect(unresolved?.finishedSeq).toBeNull()
+  })
 })

@@ -17,6 +17,9 @@ import { createDbosPort, type DbosPort } from './dbos-port'
 // shares ONE port + DB. Per-task scripting isolates the scenarios (behavior keyed by taskId,
 // which the executor recovers from runToken = step:<taskId>:<stepId>:a<attempt>).
 const behaviors = new Map<string, Record<string, 'ok' | 'fail'>>()
+// tasks in this set run their model effect through ctx.operation and count executions
+const operationTasks = new Set<string>()
+const operationRuns = new Map<string, number>()
 
 function fakeExecutor(): AgentExecutor<unknown> {
   return {
@@ -24,6 +27,14 @@ function fakeExecutor(): AgentExecutor<unknown> {
     async *startTurn(ctx: ExecutorContext<unknown>): AsyncGenerator<UnifiedEvent, void, SplitResult[] | undefined> {
       const taskId = ctx.runToken.split(':')[1]!
       const behavior = behaviors.get(taskId) ?? {}
+      if (operationTasks.has(taskId))
+        await ctx.operation(
+          { operationId: `${ctx.runToken}:model:1`, kind: 'model', name: 'fake/m', before: { iteration: 1 } },
+          async () => {
+            operationRuns.set(taskId, (operationRuns.get(taskId) ?? 0) + 1)
+            return { ok: true }
+          },
+        )
       const outcome = behavior[ctx.step.id] === 'fail' ? SIGNAL_OUTCOME.failure : SIGNAL_OUTCOME.success
       const summary = `${ctx.step.id}:${outcome} deps=[${Object.keys(ctx.depOutputs).sort().join(',')}] skills=[${ctx.skills.map(s => s.name)}] tools=[${ctx.extraTools.map(t => t.name)}]`
       const signal = { stepId: ctx.step.id, runToken: ctx.runToken, outcome, summary }
@@ -135,6 +146,23 @@ describe('DBOS execution port (integration)', () => {
     expect(state.steps.get(t.id)?.get('b')?.attempt).toBe(2)
     expect((await kernel.getTask(t.id))?.status).toBe(TASK_STATUS.done)
   }, 15_000) // two full DBOS workflows — bun's 5s default is too tight under suite load
+
+  it('ctx.operation journals before/after and runs the effect once across attached workflows', async () => {
+    const t = await approvedTask({}, draftFixture([stepFixture()]))
+    operationTasks.add(t.id)
+    const [h1, h2] = [await port.startRun(t.id), await port.startRun(t.id)]
+    expect(await h1.wait()).toBe('done')
+    expect(await h2.wait()).toBe('done')
+    expect(operationRuns.get(t.id)).toBe(1)
+
+    const events = await kernel.eventsFor(t.id)
+    expect(events.filter(e => e.kind === EVENT_KIND.operation_started)).toHaveLength(1)
+    expect(events.filter(e => e.kind === EVENT_KIND.operation_completed)).toHaveLength(1)
+    const op = [...(await kernel.state()).operations.values()].find(o => o.taskId === t.id)
+    expect(op?.status).toBe('completed')
+    expect(op?.attempts).toBe(1)
+    expect(op?.after).toEqual({ ok: true })
+  })
 
   it('refuses to run an unapproved task', async () => {
     const t = await kernel.createTask({ title: 'nope' })

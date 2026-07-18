@@ -112,8 +112,13 @@ export function apiLoopExecutor(): AgentExecutor<LanguageModel> {
 
         let turn: TurnResult
         try {
-          turn = await ctx.checkpoint(
-            `model:${iteration}`,
+          turn = await ctx.operation(
+            {
+              operationId: `${ctx.runToken}:model:${iteration}`,
+              kind: 'model',
+              name: ctx.step.modelRef,
+              before: { messages: messages.slice(persistedThrough) },
+            },
             () => callModel(ctx.model, messages, tools),
             (r): EventDraft[] => [{
               kind: EVENT_KIND.agent_call,
@@ -171,18 +176,23 @@ export function apiLoopExecutor(): AgentExecutor<LanguageModel> {
         // [fs_write, signal(success)] must not silently drop the write
         const toolCalls = turn.toolCalls.filter(c => c !== signalCall && c !== joinCall)
         if (toolCalls.length > 0) {
-          const results = await ctx.checkpoint(
-            `tools:${iteration}`,
-            async () => {
-              const out = []
-              for (const call of toolCalls) out.push(await executeTool(call.toolName, call.input, ctx.workspaceDir, ctx.extraTools, call.toolCallId))
-              return out
-            },
-            (rs): EventDraft[] => toolCalls.flatMap((call, i) => [
-              { kind: EVENT_KIND.tool_call, payload: { ...base, iteration, toolCallId: call.toolCallId, toolName: call.toolName, input: call.input } },
-              { kind: EVENT_KIND.tool_result, payload: { ...base, iteration, toolCallId: call.toolCallId, toolName: call.toolName, output: rs[i]!.output, isError: rs[i]!.isError } },
-            ]),
-          )
+          // one operation per external tool effect: a crash retry re-runs only the interrupted
+          // call, never already-completed siblings; result order stays the model's call order
+          const results: Awaited<ReturnType<typeof executeTool>>[] = []
+          for (const call of toolCalls)
+            results.push(await ctx.operation(
+              {
+                operationId: `${ctx.runToken}:tool:${iteration}:${call.toolCallId}`,
+                kind: 'tool',
+                name: call.toolName,
+                before: { input: call.input },
+              },
+              () => executeTool(call.toolName, call.input, ctx.workspaceDir, ctx.extraTools, call.toolCallId),
+              (r): EventDraft[] => [
+                { kind: EVENT_KIND.tool_call, payload: { ...base, iteration, toolCallId: call.toolCallId, toolName: call.toolName, input: call.input } },
+                { kind: EVENT_KIND.tool_result, payload: { ...base, iteration, toolCallId: call.toolCallId, toolName: call.toolName, output: r.output, isError: r.isError } },
+              ],
+            ))
 
           for (let i = 0; i < toolCalls.length; i++) {
             const call = toolCalls[i]!
