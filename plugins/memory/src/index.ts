@@ -18,7 +18,7 @@ export async function createMemory(opts: { log: EventLog; config: OrcConfig }): 
   close: () => Promise<void>
 }> {
   new URL(opts.config.projectDbUrl) // fail fast on a malformed setting; the adapter takes the raw string
-  const surreal = await SurrealMemory.open({ url: opts.config.projectDbUrl, ns: 'orc', db: 'memory' })
+  const surreal = await SurrealMemory.open({ url: opts.config.projectDbUrl, ns: 'orc', db: opts.config.projectDbName })
   const store = createMemoryStore({ log: opts.log, surreal })
   const projector = createMemoryProjector({ log: opts.log, surreal, vaultDir: opts.config.vaultDir })
   return {

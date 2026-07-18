@@ -75,6 +75,12 @@ describe('loadConfig', () => {
       expect(loadConfig('/tmp/x').projectDbUrl).toBe('ws://db:8000/rpc')
     })
   })
+  it('defaults projectDbName and honors the env override', () => {
+    expect(loadConfig('/tmp/x').projectDbName).toBe('memory')
+    withEnv({ ORC_PROJECT_DB_NAME: 't_isolated' }, () => {
+      expect(loadConfig('/tmp/x').projectDbName).toBe('t_isolated')
+    })
+  })
 })
 
 function tmpProject(cfg: Record<string, unknown>): string {
