@@ -33,7 +33,11 @@ export async function assertMigrated(db: NodePgDatabase): Promise<void> {
       const first = r.rows[0]
       return first && typeof first.n === 'number' ? first.n : 0
     })
-    .catch(() => 0) // table absent → nothing applied
+    // ponytail: any query error reads as "nothing applied" — deliberately covers both a fresh
+    // DB's missing table (42P01) AND its missing `drizzle` schema (3F000), so the "run migrate"
+    // message stays correct on first run. Distinguish a genuine transient/permission error here
+    // only if one ever actually misleads (near-unreachable: the pool just connected to run this).
+    .catch(() => 0)
   if (applied < expected)
     throw new Error(
       `database schema is behind (${applied}/${expected} migrations applied) — run 'orc db migrate'`,

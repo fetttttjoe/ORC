@@ -1,6 +1,6 @@
 import { EVENT_KIND, type MemoryAuthor, type MemoryStore, type ResolvedTool } from '@orc/contracts'
 import { EventLog, type ProjectConfig } from '@orc/kernel'
-import { openKnowledge } from './knowledge'
+import { openKnowledge, type Knowledge } from './knowledge'
 import { createMemoryStore } from './store'
 import { createMemoryProjector, type MemoryProjector } from './projector'
 import { memoryTools } from './tools'
@@ -47,13 +47,16 @@ export async function probeMemory(
   config: ProjectConfig,
   log: EventLog,
 ): Promise<{ healthy: true } | { healthy: false; reason: string }> {
+  let knowledge: Knowledge | undefined
   try {
-    const knowledge = await openKnowledge(config)
+    knowledge = await openKnowledge(config)
     const cursor = await knowledge.getCursor()
     const pending = await log.countAfter(cursor, [EVENT_KIND.memory_written, EVENT_KIND.memory_deleted])
-    await knowledge.close()
     return pending === 0 ? { healthy: true } : { healthy: false, reason: `${pending} unapplied events` }
   } catch (err) {
     return { healthy: false, reason: `unreachable: ${err instanceof Error ? err.message : String(err)}` }
+  } finally {
+    // close even if getCursor/countAfter threw after a successful open (same leak class as open())
+    await knowledge?.close().catch(() => {})
   }
 }
