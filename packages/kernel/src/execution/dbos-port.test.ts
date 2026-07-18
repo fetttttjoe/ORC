@@ -1,5 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from 'bun:test'
-import { Client } from 'pg'
+import pg from 'pg'
+import { drizzle } from 'drizzle-orm/node-postgres'
+import { events } from '../schema'
 import {
   ApprovalPolicy, EVENT_KIND, FAILURE_CLASS, SIGNAL_OUTCOME, TASK_STATUS,
   type AgentExecutor, type EventDraft, type ExecutorContext, type PlanDraft,
@@ -8,7 +10,7 @@ import {
 import { draftFixture, stepFixture } from '@orc/contracts/fixtures'
 import { EventLog } from '../eventlog'
 import { Kernel } from '../kernel'
-import { createTestDb, fakeProvider, testConfig } from '../test-helpers'
+import { createTestDb, fakeProvider, testConfig, TEST_PROJECT_ID } from '../test-helpers'
 import { createDbosPort, type DbosPort } from './dbos-port'
 
 // One DBOS runtime per process: registerWorkflow throws on duplicate names, so the whole file
@@ -55,7 +57,7 @@ describe('DBOS execution port (integration)', () => {
   beforeAll(async () => {
     const db = await createTestDb()
     dbUrl = db.url
-    const log = await EventLog.open(db.url)
+    const log = await EventLog.open(db.url, { projectId: TEST_PROJECT_ID })
     kernel = new Kernel(log)
     const config = testConfig(db.url)
     port = await createDbosPort({
@@ -250,19 +252,19 @@ describe('DBOS execution port (integration)', () => {
     const legacyStep: Record<string, unknown> = { ...stepFixture() }
     delete legacyStep.toolRefs
     const legacyPlan = { ...draft, steps: [legacyStep], taskId: t.id, version: 1 }
-    const client = new Client({ connectionString: dbUrl })
-    await client.connect()
+    const pool = new pg.Pool({ connectionString: dbUrl })
     try {
-      await client.query(
-        'insert into events (task_id, step_id, run_token, kind, payload) values ($1, $2, $3, $4, $5)',
-        [t.id, null, null, EVENT_KIND.plan_proposed, JSON.stringify({ plan: legacyPlan })],
-      )
-      await client.query(
-        'insert into events (task_id, step_id, run_token, kind, payload) values ($1, $2, $3, $4, $5)',
-        [t.id, null, null, EVENT_KIND.task_status_changed, JSON.stringify({ taskId: t.id, from: TASK_STATUS.draft, to: TASK_STATUS.awaiting_approval })],
-      )
+      const raw = drizzle(pool)
+      await raw.insert(events).values({
+        projectId: TEST_PROJECT_ID, taskId: t.id, kind: EVENT_KIND.plan_proposed,
+        payload: { plan: legacyPlan },
+      })
+      await raw.insert(events).values({
+        projectId: TEST_PROJECT_ID, taskId: t.id, kind: EVENT_KIND.task_status_changed,
+        payload: { taskId: t.id, from: TASK_STATUS.draft, to: TASK_STATUS.awaiting_approval },
+      })
     } finally {
-      await client.end()
+      await pool.end()
     }
 
     await kernel.approvePlan(t.id)

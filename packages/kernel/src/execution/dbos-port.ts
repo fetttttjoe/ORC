@@ -143,6 +143,9 @@ export async function createDbosPort(opts: {
         // prices usage drafts on the way through: fill costUSD from the provider table
         checkpoint: (name, fn, toEvents) =>
           checkpoint(name, fn, toEvents ? r => toEvents(r).map(d => priceDraft(d, provider, modelId)) : undefined),
+        // durable-step wrapper only until the operation journal lands (design §5.2)
+        operation: (spec, fn, toEvents) =>
+          checkpoint(`op:${spec.operationId}`, fn, toEvents ? r => toEvents(r).map(d => priceDraft(d, provider, modelId)) : undefined),
         budgetRemainingUSD: async () => {
           if (init.budgetUSD === null) return null
           // ponytail: whole-log fold — subtree usage spans child tasks (spec D8), byTask is not enough

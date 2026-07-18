@@ -5,7 +5,7 @@ import path from 'node:path'
 import { Surreal } from 'surrealdb'
 import { EVENT_KIND } from '@orc/contracts'
 import { loadConfig, requireProject, type PluginHost } from '@orc/kernel'
-import { createTestDb } from '@orc/kernel/test-helpers'
+import { createTestDb, TEST_PROJECT_ID } from '@orc/kernel/test-helpers'
 import type { McpHub } from '@orc/mcp-client'
 import { buildProgram, openKernel, runInit } from './main'
 
@@ -34,7 +34,7 @@ async function dropSurrealDb(config: Pick<ReturnType<typeof loadConfig>, 'projec
 async function makeCli() {
   const db = await createTestDb()
   dbs.push(db)
-  const { kernel } = await openKernel(db.url)
+  const { kernel } = await openKernel(db.url, { projectId: TEST_PROJECT_ID })
   const lines: string[] = []
   spyOn(console, 'log').mockImplementation((...a: unknown[]) => {
     lines.push(a.join(' '))
@@ -182,7 +182,7 @@ describe('orc CLI', () => {
     const projectDbName = `t_${Math.random().toString(36).slice(2, 10)}`
     const config = { ...loadConfig(dir), projectDbName }
     surrealConfigs.push(config)
-    const { kernel, log } = await openKernel(db.url)
+    const { kernel, log } = await openKernel(db.url, { projectId: TEST_PROJECT_ID })
     const lines: string[] = []
     spyOn(console, 'log').mockImplementation((...a: unknown[]) => { lines.push(a.join(' ')) })
     const plugin = { host: {} as PluginHost, hub: {} as McpHub, config, log } // memory commands never touch host/hub

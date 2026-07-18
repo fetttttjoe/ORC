@@ -2,18 +2,24 @@ import { readdirSync, readFileSync } from 'node:fs'
 import path from 'node:path'
 import { Command } from 'commander'
 import { ISOLATION_TIER, PlanDraft, type EventRecord, type ExecutionPort, type Plan, type RunHandle } from '@orc/contracts'
-import { EventLog, Kernel, grantTrust, initializeProject, loadConfig, taskUsage, type OrcConfig, type PluginHost } from '@orc/kernel'
+import { EventLog, Kernel, grantTrust, initializeProject, loadConfig, requireProject, taskUsage, type OrcConfig, type PluginHost } from '@orc/kernel'
 import { createVaultProjector, parsePlanFile } from '@orc/vault-projector'
 import { createMemory } from '@orc/memory'
 import type { McpHub } from '@orc/mcp-client'
 
 // loadConfig is the ONE resolution of env → .orc/config.json → default; every command
-// (read-only or executing) must land on the same database
+// (read-only or executing) must land on the same database, bound to one project
 export async function openKernel(
-  url = loadConfig().databaseUrl,
-  opts: { refValidator?: (plan: Plan) => Promise<string[]>; onAppend?: (e: EventRecord) => void } = {},
+  url: string,
+  opts: {
+    projectId?: string
+    redactEnv?: string[]
+    refValidator?: (plan: Plan) => Promise<string[]>
+    onAppend?: (e: EventRecord) => void
+  } = {},
 ): Promise<{ kernel: Kernel; log: EventLog }> {
-  const log = await EventLog.open(url)
+  const projectId = opts.projectId ?? requireProject(loadConfig()).projectId
+  const log = await EventLog.open(url, { projectId, redactEnv: opts.redactEnv })
   if (opts.onAppend) log.onAppend = opts.onAppend
   return { kernel: new Kernel(log, opts.refValidator), log }
 }

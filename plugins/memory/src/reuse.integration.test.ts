@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import type { NeighborResult } from '@orc/contracts'
 import { EventLog } from '@orc/kernel'
-import { createTestDb } from '@orc/kernel/test-helpers'
+import { createTestDb, TEST_PROJECT_ID } from '@orc/kernel/test-helpers'
 import { createMemoryProjector } from './projector'
 import { createMemoryStore } from './store'
 import { SurrealMemory } from './surreal'
@@ -15,7 +15,7 @@ describe('typed-link traversal (e2e)', () => {
     const pg = await createTestDb()
     const ts = await createTestSurreal()
     const vaultDir = mkdtempSync(path.join(tmpdir(), 'orc-memory-m4c-'))
-    const log = await EventLog.open(pg.url)
+    const log = await EventLog.open(pg.url, { projectId: TEST_PROJECT_ID })
     const surreal = await SurrealMemory.open(ts)
     const store = createMemoryStore({ log, surreal })
     const proj = createMemoryProjector({ log, surreal, vaultDir })

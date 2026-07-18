@@ -2,7 +2,7 @@ import { describe, expect, it } from 'bun:test'
 import { mkdtempSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import type { Checkpoint, EventDraft, ExecutorContext, ResolvedTool, SplitResult, UnifiedEvent } from '@orc/contracts'
+import type { Checkpoint, EventDraft, ExecutorContext, OperationCheckpoint, OperationSpec, ResolvedTool, SplitResult, UnifiedEvent } from '@orc/contracts'
 import { EVENT_KIND } from '@orc/contracts'
 import { stepFixture } from '@orc/contracts/fixtures'
 import type { LanguageModel } from 'ai'
@@ -11,6 +11,16 @@ import { apiLoopExecutor } from './loop'
 // test-double checkpoint: runs fn, captures drafted events (what DBOS would append durably)
 function makeCheckpoint(captured: EventDraft[]): Checkpoint {
   return async (_name, fn, toEvents) => {
+    const r = await fn()
+    if (toEvents) captured.push(...toEvents(r))
+    return r
+  }
+}
+
+// test-double operation journal: same capture shape, keyed by spec instead of name
+function makeOperation(captured: EventDraft[], specs: OperationSpec[] = []): OperationCheckpoint {
+  return async (spec, fn, toEvents) => {
+    specs.push(spec)
     const r = await fn()
     if (toEvents) captured.push(...toEvents(r))
     return r
@@ -28,6 +38,7 @@ function ctx(model: LanguageModel, captured: EventDraft[], over: Partial<Executo
     runToken: 'step:t1:s1:a1',
     workspaceDir: mkdtempSync(path.join(tmpdir(), 'orc-ws-')),
     checkpoint: makeCheckpoint(captured),
+    operation: makeOperation(captured),
     budgetRemainingUSD: async () => null,
     ...over,
   }

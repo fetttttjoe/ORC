@@ -1,6 +1,7 @@
 import { z } from 'zod'
 import type { PlanStep } from './plan'
 import type { EventKind } from './events'
+import type { OperationSpec } from './operations'
 import type { LoadedSkill, ResolvedTool } from './plugins'
 
 export const Usage = z.object({
@@ -47,6 +48,8 @@ export const Signal = z.object({
   runToken: z.string().min(1),
   outcome: SignalOutcome,
   summary: z.string().min(1),
+  // workspace-relative paths this step declares as produced outputs — verified by the runtime
+  outputs: z.array(z.string().min(1)).optional(),
 })
 export type Signal = z.infer<typeof Signal>
 
@@ -123,7 +126,7 @@ export function terminalError(message: string): Error {
   return Object.assign(new Error(message), { terminal: true })
 }
 export function isTerminalError(err: unknown): boolean {
-  return typeof err === 'object' && err !== null && (err as { terminal?: unknown }).terminal === true
+  return typeof err === 'object' && err !== null && 'terminal' in err && err.terminal === true
 }
 
 // terminal error that also names its failure class (e.g. validation_error at step init) —
@@ -132,11 +135,20 @@ export function classifiedError(cls: FailureClass, message: string): Error {
   return Object.assign(new Error(message), { terminal: true, failureClass: cls })
 }
 export function failureClassOf(err: unknown): FailureClass | null {
-  const cls = (err as { failureClass?: unknown } | null)?.failureClass
-  return FailureClass.safeParse(cls).success ? (cls as FailureClass) : null
+  if (typeof err !== 'object' || err === null || !('failureClass' in err)) return null
+  const parsed = FailureClass.safeParse(err.failureClass)
+  return parsed.success ? parsed.data : null
 }
 
 export type Checkpoint = <T>(name: string, fn: () => Promise<T>, toEvents?: (result: T) => EventDraft[]) => Promise<T>
+
+// the enforced before/after wrapper for external model/tool effects: the journal records
+// the spec before fn runs and its result (or failure) after — see OperationSpec
+export type OperationCheckpoint = <T>(
+  spec: OperationSpec,
+  fn: () => Promise<T>,
+  toEvents?: (result: T) => EventDraft[],
+) => Promise<T>
 
 export interface ExecutorContext<LM = unknown> {
   step: PlanStep
@@ -148,6 +160,7 @@ export interface ExecutorContext<LM = unknown> {
   runToken: string
   workspaceDir: string
   checkpoint: Checkpoint
+  operation: OperationCheckpoint
   budgetRemainingUSD: () => Promise<number | null>
 }
 

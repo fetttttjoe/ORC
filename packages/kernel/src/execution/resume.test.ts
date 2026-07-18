@@ -8,7 +8,7 @@ import { draftFixture, stepFixture } from '@orc/contracts/fixtures'
 import { EventLog } from '../eventlog'
 import { Kernel } from '../kernel'
 import { fold } from '../projections'
-import { createTestDb } from '../test-helpers'
+import { createTestDb, TEST_PROJECT_ID } from '../test-helpers'
 
 const FIXTURE = fileURLToPath(new URL('./resume-fixture.ts', import.meta.url))
 
@@ -19,7 +19,7 @@ describe('kill -9 resume (spec §10/§11 — the crown jewel)', () => {
   it('a killed run resumes on restart; no double-billed iteration; replay identity holds', async () => {
     const db = await createTestDb()
     drop = db.drop
-    const log = await EventLog.open(db.url)
+    const log = await EventLog.open(db.url, { projectId: TEST_PROJECT_ID })
     const kernel = new Kernel(log)
     const t = await kernel.createTask({ title: 'resume me', spec: 'survive kill -9' })
     await kernel.proposePlan(t.id, draftFixture([stepFixture({ title: 'slow', instructions: 'stall then finish' })]))
@@ -60,7 +60,7 @@ describe('kill -9 resume (spec §10/§11 — the crown jewel)', () => {
     // replay identity (extends M1's guarantee to execution events)
     const events = await log.all()
     expect(fold(events)).toEqual(fold(events))
-    const reopened = await EventLog.open(db.url)
+    const reopened = await EventLog.open(db.url, { projectId: TEST_PROJECT_ID })
     expect(fold(await reopened.all())).toEqual(state)
     await reopened.close()
     await log.close()

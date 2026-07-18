@@ -5,7 +5,7 @@ import { describe, expect, it } from 'bun:test'
 import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import type { Checkpoint, ExecutorContext } from '@orc/contracts'
+import type { Checkpoint, OperationCheckpoint, ExecutorContext } from '@orc/contracts'
 import { stepFixture } from '@orc/contracts/fixtures'
 import type { LanguageModel } from 'ai'
 import { apiLoopExecutor } from './loop'
@@ -13,6 +13,12 @@ import { apiLoopExecutor } from './loop'
 const LIVE = process.env.ORC_LIVE_SMOKE === '1'
 
 const passthrough: Checkpoint = async (_n, fn, toEvents) => {
+  const r = await fn()
+  void toEvents?.(r)
+  return r
+}
+
+const passthroughOperation: OperationCheckpoint = async (_spec, fn, toEvents) => {
   const r = await fn()
   void toEvents?.(r)
   return r
@@ -28,6 +34,7 @@ function liveCtx(model: LanguageModel): ExecutorContext<LanguageModel> {
     runToken: 'step:smoke:s1:a1',
     workspaceDir: mkdtempSync(path.join(tmpdir(), 'orc-smoke-')),
     checkpoint: passthrough,
+    operation: passthroughOperation,
     budgetRemainingUSD: async () => null,
   }
 }

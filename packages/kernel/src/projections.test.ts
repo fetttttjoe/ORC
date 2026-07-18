@@ -12,7 +12,7 @@ const task: TaskNode = {
 const planV = (version: number): Plan => planFixture({ version })
 
 const evt = (seq: number, kind: EventRecord['kind'], payload: Record<string, unknown>): EventRecord =>
-  ({ seq, ts: '2026-07-16T00:00:00.000Z', taskId: 't1', stepId: null, runToken: null, kind, payload, usage: null })
+  ({ seq, ts: '2026-07-16T00:00:00.000Z', projectId: 'p1', idempotencyKey: null, taskId: 't1', stepId: null, runToken: null, kind, payload, usage: null })
 
 describe('fold', () => {
   it('replays a full lifecycle into consistent state', () => {
@@ -42,7 +42,7 @@ describe('fold', () => {
 describe('crashDedupKey', () => {
   it('differs when toolCallId differs (same runToken/kind/iteration otherwise)', () => {
     const base: EventRecord = {
-      seq: 1, ts: '2026-07-17T00:00:00.000Z', taskId: 't1', stepId: 's1',
+      seq: 1, ts: '2026-07-17T00:00:00.000Z', projectId: 'p1', idempotencyKey: null, taskId: 't1', stepId: 's1',
       runToken: 'step:t1:s1:a1', kind: 'tool_call',
       payload: { stepId: 's1', runToken: 'step:t1:s1:a1', iteration: 1, toolCallId: 'c1', toolName: 'fs_read', input: {} },
       usage: null,
@@ -53,13 +53,13 @@ describe('crashDedupKey', () => {
 
   it('matches when (runToken, kind, iteration, toolCallId, name) match, regardless of other fields', () => {
     const e1: EventRecord = {
-      seq: 1, ts: '2026-07-17T00:00:00.000Z', taskId: 't1', stepId: 's1',
+      seq: 1, ts: '2026-07-17T00:00:00.000Z', projectId: 'p1', idempotencyKey: null, taskId: 't1', stepId: 's1',
       runToken: 'step:t1:s1:a1', kind: 'tool_call',
       payload: { stepId: 's1', runToken: 'step:t1:s1:a1', iteration: 1, toolCallId: 'c1', toolName: 'fs_read', input: {} },
       usage: null,
     }
     const e2: EventRecord = {
-      seq: 2, ts: '2026-07-17T00:05:00.000Z', taskId: 't1', stepId: 's1',
+      seq: 2, ts: '2026-07-17T00:05:00.000Z', projectId: 'p1', idempotencyKey: null, taskId: 't1', stepId: 's1',
       runToken: 'step:t1:s1:a1', kind: 'tool_call',
       payload: { stepId: 's1', runToken: 'step:t1:s1:a1', iteration: 1, toolCallId: 'c1', toolName: 'different_tool', input: { x: 1 } },
       usage: null,
@@ -69,7 +69,7 @@ describe('crashDedupKey', () => {
 
   it('skill_loaded events dedup per skill name, not per step', () => {
     const mk = (seq: number, name: string): EventRecord => ({
-      seq, ts: 't', taskId: 't1', stepId: 's1', runToken: 'step:t1:s1:a1',
+      seq, ts: 't', projectId: 'p1', idempotencyKey: null, taskId: 't1', stepId: 's1', runToken: 'step:t1:s1:a1',
       kind: 'skill_loaded', usage: null,
       payload: { stepId: 's1', runToken: 'step:t1:s1:a1', name, hash: 'h' },
     })
@@ -81,7 +81,7 @@ describe('crashDedupKey', () => {
 
   it('returns null for task_status_changed even when a runToken is present', () => {
     const e: EventRecord = {
-      seq: 1, ts: '2026-07-17T00:00:00.000Z', taskId: 't1', stepId: null,
+      seq: 1, ts: '2026-07-17T00:00:00.000Z', projectId: 'p1', idempotencyKey: null, taskId: 't1', stepId: null,
       runToken: 'step:t1:s1:a1', kind: 'task_status_changed',
       payload: { taskId: 't1', from: 'draft', to: 'approved' },
       usage: null,
@@ -91,7 +91,7 @@ describe('crashDedupKey', () => {
 
   it('returns null for any event with a null runToken', () => {
     const e: EventRecord = {
-      seq: 1, ts: '2026-07-17T00:00:00.000Z', taskId: 't1', stepId: null,
+      seq: 1, ts: '2026-07-17T00:00:00.000Z', projectId: 'p1', idempotencyKey: null, taskId: 't1', stepId: null,
       runToken: null, kind: 'task_created',
       payload: { task },
       usage: null,
@@ -110,8 +110,8 @@ const exEvt = (
 ): EventRecord =>
   // envelope runToken mirrors payload.runToken (as in real events); falls back for
   // envelope-only kinds like run_started whose payload carries no runToken.
-  ({ seq, ts: '2026-07-17T00:00:00.000Z', taskId: 't1', stepId: 's1',
-    runToken: (payload.runToken as string | undefined) ?? rt('s1'), kind, payload, usage })
+  ({ seq, ts: '2026-07-17T00:00:00.000Z', projectId: 'p1', idempotencyKey: null, taskId: 't1', stepId: 's1',
+    runToken: typeof payload.runToken === 'string' ? payload.runToken : rt('s1'), kind, payload, usage })
 
 describe('fold — execution kinds', () => {
   it('projects step lifecycle and per-task usage', () => {
@@ -154,7 +154,7 @@ describe('fold — execution kinds', () => {
   it('ignores memory events and does not create a task', () => {
     const base = fold([])
     const withMem = fold([{
-      seq: 1, taskId: null, stepId: null, runToken: null,
+      seq: 1, projectId: 'p1', idempotencyKey: null, taskId: null, stepId: null, runToken: null,
       kind: 'memory_written',
       payload: { note: { id: 'x', title: 'X', scope: 'project', categories: [], tags: [], links: [], paths: [], rules: [], summary: '', body: '' }, author: { source: 'cli' } },
       usage: null, ts: '2026-07-18T00:00:00Z',
@@ -214,16 +214,16 @@ describe('fold — execution kinds', () => {
   it('folds splits: proposed pending, resolved marks; dedups replayed proposals by splitId', () => {
     const splitP = { splitId: 'sp1', taskId: 't1', stepId: 's1', runToken: rt('s1'), childTaskId: 'c1' }
     const state = fold([
-      { seq: 1, taskId: 't1', stepId: 's1', runToken: rt('s1'), kind: 'split_proposed', payload: splitP, usage: null, ts: 'T' },
-      { seq: 2, taskId: 't1', stepId: 's1', runToken: rt('s1'), kind: 'split_proposed', payload: splitP, usage: null, ts: 'T' }, // crash replay
-      { seq: 3, taskId: 't1', stepId: 's1', runToken: rt('s1'), kind: 'split_proposed', payload: { ...splitP, splitId: 'sp2', childTaskId: 'c2' }, usage: null, ts: 'T' },
+      { seq: 1, projectId: 'p1', idempotencyKey: null, taskId: 't1', stepId: 's1', runToken: rt('s1'), kind: 'split_proposed', payload: splitP, usage: null, ts: 'T' },
+      { seq: 2, projectId: 'p1', idempotencyKey: null, taskId: 't1', stepId: 's1', runToken: rt('s1'), kind: 'split_proposed', payload: splitP, usage: null, ts: 'T' }, // crash replay
+      { seq: 3, projectId: 'p1', idempotencyKey: null, taskId: 't1', stepId: 's1', runToken: rt('s1'), kind: 'split_proposed', payload: { ...splitP, splitId: 'sp2', childTaskId: 'c2' }, usage: null, ts: 'T' },
     ])
     expect(state.splits.size).toBe(2) // sp1 deduped, sp2 distinct despite same runToken
     expect(state.splits.get('sp1')?.resolved).toBe(false)
     expect(pendingSplitForChild(state, 'c1')?.splitId).toBe('sp1')
     const resolved = fold([
-      { seq: 1, taskId: 't1', stepId: 's1', runToken: rt('s1'), kind: 'split_proposed', payload: splitP, usage: null, ts: 'T' },
-      { seq: 2, taskId: 't1', stepId: null, runToken: null, kind: 'split_resolved', payload: { splitId: 'sp1', childTaskId: 'c1', outcome: 'done', summary: 'ok', notes: [] }, usage: null, ts: 'T' },
+      { seq: 1, projectId: 'p1', idempotencyKey: null, taskId: 't1', stepId: 's1', runToken: rt('s1'), kind: 'split_proposed', payload: splitP, usage: null, ts: 'T' },
+      { seq: 2, projectId: 'p1', idempotencyKey: null, taskId: 't1', stepId: null, runToken: null, kind: 'split_resolved', payload: { splitId: 'sp1', childTaskId: 'c1', outcome: 'done', summary: 'ok', notes: [] }, usage: null, ts: 'T' },
     ])
     expect(resolved.splits.get('sp1')?.resolved).toBe(true)
     expect(pendingSplitForChild(resolved, 'c1')).toBeUndefined()
@@ -231,12 +231,12 @@ describe('fold — execution kinds', () => {
 
   it('subtreeUsage sums a task and its descendants; subtreeTaskIds walks parentId', () => {
     const t = (id: string, parentId: string | null): EventRecord => ({
-      seq: 0, taskId: id, stepId: null, runToken: null, kind: 'task_created',
+      seq: 0, projectId: 'p1', idempotencyKey: null, taskId: id, stepId: null, runToken: null, kind: 'task_created',
       payload: { task: { id, parentId, type: 'generic', title: id, spec: '', status: 'draft', zone: [], budgetUSD: null, depth: parentId ? 1 : 0, createdAt: 'T' } },
       usage: null, ts: 'T',
     })
     const usage = (taskId: string, cost: number): EventRecord => ({
-      seq: 0, taskId, stepId: 's1', runToken: `rt-${taskId}`, kind: 'agent_call',
+      seq: 0, projectId: 'p1', idempotencyKey: null, taskId, stepId: 's1', runToken: `rt-${taskId}`, kind: 'agent_call',
       payload: { stepId: 's1', runToken: `rt-${taskId}`, iteration: 1, request: {}, response: {} },
       usage: { inputTokens: 1, outputTokens: 1, costUSD: cost, estimated: false }, ts: 'T',
     })
@@ -249,8 +249,8 @@ describe('fold — execution kinds', () => {
   it('plan_proposed replay with the same (taskId, version) folds once', () => {
     const plan = planFixture({ taskId: 't1', version: 1 })
     const state = fold([
-      { seq: 1, taskId: 't1', stepId: null, runToken: null, kind: 'plan_proposed', payload: { plan }, usage: null, ts: 'T' },
-      { seq: 2, taskId: 't1', stepId: null, runToken: null, kind: 'plan_proposed', payload: { plan }, usage: null, ts: 'T' },
+      { seq: 1, projectId: 'p1', idempotencyKey: null, taskId: 't1', stepId: null, runToken: null, kind: 'plan_proposed', payload: { plan }, usage: null, ts: 'T' },
+      { seq: 2, projectId: 'p1', idempotencyKey: null, taskId: 't1', stepId: null, runToken: null, kind: 'plan_proposed', payload: { plan }, usage: null, ts: 'T' },
     ])
     expect(state.plans.get('t1')?.versions).toHaveLength(1)
   })

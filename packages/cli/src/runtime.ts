@@ -30,7 +30,7 @@ export async function buildRuntime(
   const config = shared?.config ?? requireProject(loadConfig())
   const { host, hub } = shared ?? (await buildPlugins(config))
   // reuse the caller's log (bin passes the kernel's) — one pool, migrations run once
-  const log = shared?.log ?? (await EventLog.open(config.databaseUrl))
+  const log = shared?.log ?? (await EventLog.open(config.databaseUrl, { projectId: config.projectId, redactEnv: config.redactEnv }))
   // reuse the caller's kernel (bin passes the one wired to its refValidator) so task_split's
   // expanded child plans go through the same toolRef/skillRef validation as `orc propose`
   const kernel = shared?.kernel ?? new Kernel(log, host.refValidator)

@@ -3,7 +3,7 @@ import { mkdtempSync, existsSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { EventLog } from '@orc/kernel'
-import { createTestDb } from '@orc/kernel/test-helpers'
+import { createTestDb, TEST_PROJECT_ID } from '@orc/kernel/test-helpers'
 import { SurrealMemory } from './surreal'
 import { createTestSurreal } from './test-helpers'
 import { createMemoryProjector } from './projector'
@@ -16,7 +16,7 @@ describe('memory projector', () => {
   it('applies written/deleted from the stream to SurrealDB + vault, and rebuilds from the log', async () => {
     const pg = await createTestDb(); drops.push(pg.drop)
     const ts = await createTestSurreal(); drops.push(ts.drop)
-    const log = await EventLog.open(pg.url)
+    const log = await EventLog.open(pg.url, { projectId: TEST_PROJECT_ID })
     const surreal = await SurrealMemory.open(ts)
     const vaultDir = mkdtempSync(path.join(tmpdir(), 'vault-'))
     const proj = createMemoryProjector({ log, surreal, vaultDir })

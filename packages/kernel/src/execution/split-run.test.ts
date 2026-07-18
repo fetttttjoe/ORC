@@ -12,7 +12,7 @@ import { createMemory } from '@orc/memory'
 import { createTestSurreal } from '@orc/memory/test-helpers'
 import { EventLog } from '../eventlog'
 import { Kernel } from '../kernel'
-import { createTestDb, fakeProvider, testConfig } from '../test-helpers'
+import { createTestDb, fakeProvider, testConfig, TEST_PROJECT_ID } from '../test-helpers'
 import { createDbosPort } from './dbos-port'
 import { splitTool } from './split-tool'
 
@@ -127,7 +127,7 @@ async function bringUp(policy: 'auto' | 'manual', executor: AgentExecutor<unknow
   const pg = await createTestDb()
   const ts = await createTestSurreal()
   const vaultDir = mkdtempSync(path.join(tmpdir(), 'orc-split-e2e-'))
-  const log = await EventLog.open(pg.url)
+  const log = await EventLog.open(pg.url, { projectId: TEST_PROJECT_ID })
   const kernel = new Kernel(log)
   const config = testConfig(pg.url, {
     vaultDir,

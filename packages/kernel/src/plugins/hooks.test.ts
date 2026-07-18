@@ -23,7 +23,7 @@ describe('HookBus', () => {
       bus.on(HOOK_NAME.event_appended, () => { throw new Error('boom') })
       bus.on(HOOK_NAME.event_appended, () => { calls.push('after') })
       await bus.emit(HOOK_NAME.event_appended, {
-        seq: 1, ts: 't', taskId: 't1', stepId: null, runToken: null,
+        seq: 1, ts: 't', projectId: 'p1', idempotencyKey: null, taskId: 't1', stepId: null, runToken: null,
         kind: 'task_status_changed', payload: { taskId: 't1', from: 'draft', to: 'awaiting_approval' }, usage: null,
       })
       expect(calls).toEqual(['after'])

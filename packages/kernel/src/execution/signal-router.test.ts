@@ -1,12 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test'
 import { EVENT_KIND, TASK_STATUS, type EventRecord, type SplitResult, type TaskNode } from '@orc/contracts'
 import { EventLog } from '../eventlog'
-import { createTestDb } from '../test-helpers'
+import { createTestDb, TEST_PROJECT_ID } from '../test-helpers'
 import { composeSplitResult, createSignalRouter } from './signal-router'
 
 const split = { splitId: 'sp1', taskId: 'p', stepId: 's1', runToken: 'rt', childTaskId: 'c1', resolved: false }
 const evt = (over: Partial<EventRecord>): EventRecord =>
-  ({ seq: 1, taskId: 'c1', stepId: null, runToken: null, kind: 'task_created', payload: {}, usage: null, ts: 'T', ...over })
+  ({ seq: 1, projectId: TEST_PROJECT_ID, idempotencyKey: null, taskId: 'c1', stepId: null, runToken: null, kind: 'task_created', payload: {}, usage: null, ts: 'T', ...over })
 const childTask = (id: string, parentId: string) => evt({
   taskId: id,
   payload: { task: { id, parentId, type: 'split', title: id, spec: '', status: 'draft', zone: [], budgetUSD: null, depth: 1, createdAt: 'T' } },
@@ -59,7 +59,7 @@ describe('createSignalRouter (integration, real EventLog)', () => {
 
   beforeEach(async () => {
     db = await createTestDb()
-    log = await EventLog.open(db.url)
+    log = await EventLog.open(db.url, { projectId: TEST_PROJECT_ID })
     router = null
   })
   afterEach(async () => {

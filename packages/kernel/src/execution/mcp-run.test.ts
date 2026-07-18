@@ -11,7 +11,7 @@ import { scriptModel } from '@orc/executor-api-loop/test-model'
 import { EventLog } from '../eventlog'
 import { Kernel } from '../kernel'
 import { fold } from '../projections'
-import { createTestDb, testConfig } from '../test-helpers'
+import { createTestDb, testConfig, TEST_PROJECT_ID } from '../test-helpers'
 import { SkillIndex } from '../plugins/skills'
 import { createDbosPort, type DbosPort } from './dbos-port'
 
@@ -25,7 +25,7 @@ describe('MCP + skills through a durable run (integration)', () => {
 
   beforeAll(async () => {
     const db = await createTestDb()
-    log = await EventLog.open(db.url)
+    log = await EventLog.open(db.url, { projectId: TEST_PROJECT_ID })
     kernel = new Kernel(log)
 
     const skillsRoot = mkdtempSync(path.join(tmpdir(), 'orc-mcp-run-'))

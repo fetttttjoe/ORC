@@ -6,8 +6,8 @@ import { renderRootIndex, renderTaskFiles } from './render'
 
 let seq = 0
 const ev = (over: Partial<EventRecord>): EventRecord => ({
-  seq: ++seq, taskId: 't1', stepId: null, runToken: null, kind: EVENT_KIND.task_created,
-  payload: {}, usage: null, ts: '2026-07-17T00:00:00.000Z', ...over,
+  seq: ++seq, projectId: 'p1', idempotencyKey: null, taskId: 't1', stepId: null, runToken: null,
+  kind: EVENT_KIND.task_created, payload: {}, usage: null, ts: '2026-07-17T00:00:00.000Z', ...over,
 })
 const task = (over: Partial<TaskNode> = {}): TaskNode => ({
   id: 't1', parentId: null, type: 'generic', title: 'demo', spec: 'do it', status: 'running',

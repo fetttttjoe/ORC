@@ -2,7 +2,8 @@ import { describe, expect, it } from 'bun:test'
 import { EventKind, PAYLOAD_SCHEMAS } from './events'
 import {
   addUsage, classifiedError, costUSDFor, failureClassOf, isTerminalError, resolveModel, terminalError,
-  Signal, UnifiedEvent, FAILURE_CLASS, SIGNAL_OUTCOME, type ModelProvider, type Usage,
+  Signal, UnifiedEvent, FAILURE_CLASS, SIGNAL_OUTCOME,
+  type EventDraft, type ModelProvider, type OperationCheckpoint, type Usage,
 } from './execution'
 
 const usage = (i: number, o: number, cost: number | null = null, estimated = false): Usage =>
@@ -56,6 +57,30 @@ describe('execution contracts', () => {
 
   it('Signal rejects an empty summary', () => {
     expect(() => Signal.parse({ stepId: 's', runToken: 'r', outcome: 'success', summary: '' })).toThrow()
+  })
+
+  it('Signal outputs are optional; declared paths must be non-empty', () => {
+    const base = { stepId: 's', runToken: 'r', outcome: 'success', summary: 'ok' }
+    expect(Signal.parse(base).outputs).toBeUndefined()
+    expect(Signal.parse({ ...base, outputs: ['report.md'] }).outputs).toEqual(['report.md'])
+    expect(Signal.safeParse({ ...base, outputs: [''] }).success).toBe(false)
+  })
+
+  it('OperationCheckpoint runs fn and surfaces its completion drafts', async () => {
+    // the test-double shape every executor test uses in place of the DBOS journal
+    const captured: EventDraft[] = []
+    const operation: OperationCheckpoint = async (_spec, fn, toEvents) => {
+      const r = await fn()
+      if (toEvents) captured.push(...toEvents(r))
+      return r
+    }
+    const result = await operation(
+      { operationId: 'r1:model:1', kind: 'model', name: 'fake/m', before: {} },
+      async () => 'answer',
+      r => [{ kind: 'agent_call', payload: { response: r } }],
+    )
+    expect(result).toBe('answer')
+    expect(captured).toHaveLength(1)
   })
 
   it('terminalError marks an error the retry protocol must not re-run', () => {
