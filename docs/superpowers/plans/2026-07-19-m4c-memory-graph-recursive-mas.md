@@ -4,7 +4,7 @@
 
 **Goal:** Turn M4b's flat `links: id[]` into a real typed, confidence-weighted, traversable knowledge graph: typed `RELATE` edges in the SurrealDB read model, a graph-distance relevance ranker (no embeddings), a `memory_neighbors` blast-radius pull tool, and token-budgeted pull-tool results — so a recursive MAS can bind a bounded context slice by traversing the graph instead of re-holding the whole context.
 
-**Architecture:** Additive over M4b's event-sourced CQRS. The one contract change — `links` becomes `{ id, kind, confidence? }[]` with **backward-compatible coercion of legacy string ids** — flows into the `memory_written` payload for free. Everything else is cheap-now and lives behind the log: SurrealDB `RELATE` edges are a **derived projection index** rebuilt on replay; two pure modules (`rank.ts`, `budget.ts`) keep scoring and token-shaping DB-free. Event log stays the only truth; SurrealDB + `vault/memory/**` stay disposable projections. See `docs/superpowers/specs/2026-07-19-m4c-memory-graph-recursive-mas-design.md`.
+**Architecture:** Additive over M4b's event-sourced CQRS. The one contract change — `links` becomes a clean `{ id, kind, confidence? }[]` array (no back-compat: v0.0.1 has never run, no deployed data) — flows into the `memory_written` payload for free. Everything else is cheap-now and lives behind the log: SurrealDB `RELATE` edges are a **derived projection index** rebuilt on replay; two pure modules (`rank.ts`, `budget.ts`) keep scoring and token-shaping DB-free. Event log stays the only truth; SurrealDB + `vault/memory/**` stay disposable projections. See `docs/superpowers/specs/2026-07-19-m4c-memory-graph-recursive-mas-design.md`.
 
 **Tech Stack:** Bun (test runner), TypeScript, zod v4, drizzle-orm + Postgres (event log), SurrealDB v3.2.0 + `surrealdb@2.0.4` client + `surqlize@0.1.0` ORM (read model), Vercel AI SDK tool shape (`ResolvedTool`), DBOS (execution port). No new dependency.
 
@@ -15,7 +15,7 @@ Carrying M4b's constraints verbatim, plus M4c-specific ones:
 - **Runtime/test:** Bun; `bun test`; typecheck with the root `typecheck` script. SurrealDB tests need `bun run db:up` (the `surrealdb` service, healthy).
 - **Validation:** every contract is a zod schema; types inferred. Defaults live in `.default()`, never `??` chains. **Ranker weights live as a `DEFAULT_*` const in code** (config override is deferred — spec §9.2).
 - **Event log is the only source of truth.** SurrealDB (docs + `RELATE` edges) and `vault/memory/**` are disposable projections rebuilt from the log. Never read truth from either.
-- **No log migration.** The link-shape change is a **tolerant contract** (`LinkInput` coerces legacy string ids → `relates_to`) + a read-model rebuild (`orc memory rebuild`). Historical `memory_written` payloads are never rewritten (append-only immutability — M4b RM2). Any old event MUST still `MemoryNoteInput.parse` — this is a hard test gate (Task 1).
+- **NO backwards compatibility (hard directive).** The program is v0.0.1, has never run, has no deployed data — throwing data away and starting clean is fine. `links` is a clean `z.array(MemoryLink)` with **no** string-id branch and **no** coercion. Do NOT write any migration/replay-coercion/dual-schema code. "Migration" = clear the SurrealDB read model + `vault/memory/**` (and reset the memory event log if convenient) and write notes fresh; `orc memory rebuild` handles the clear+replay. Notes are authored under the new contract from the start.
 - **Edges are a derived index, materialized by the single-writer projector.** `applyWritten` re-materializes a note's out-edges (delete-then-`RELATE`); `applyDeleted` removes its in+out edges; `clear`/`rebuild` drops the `link` table. Deterministic on replay.
 - **Memory writes stay non-locking blind appends; reads query SurrealDB — never `fold(log.all())`.** (M4b D2, unchanged.)
 - **Pull-only.** M4c adds a *pull* tool (`memory_neighbors`) to the per-step injected set. No push / no step-boundary auto-binding of a slice (spec D5, deferred).
@@ -26,26 +26,23 @@ Carrying M4b's constraints verbatim, plus M4c-specific ones:
 
 ---
 
-### Task 1: Contract — typed + confidence-weighted links (backward-compatible)
+### Task 1: Contract — typed + confidence-weighted links (clean, no back-compat)
 
 **Files:**
 - Modify: `packages/contracts/src/memory.ts` (link shape, `MemoryStore.neighbors`, `NeighborResult`)
-- Modify: `packages/contracts/src/memory.test.ts` (coercion + typed-link tests)
+- Modify: `packages/contracts/src/memory.test.ts` (typed-link tests)
 
 **Interfaces:**
-- Produces: `LINK_KINDS`, `LinkKind`, `MemoryLink`; `MemoryNoteInput.links: { id, kind, confidence? }[]` (coerces bare string → `{ id, kind: 'relates_to' }`); `NeighborResult`; `MemoryStore.neighbors(seed, opts?)`.
+- Produces: `LINK_KINDS`, `LinkKind`, `MemoryLink`; `MemoryNoteInput.links: { id, kind, confidence? }[]` (clean typed array — a bare string id is a **validation error**, not coerced); `NeighborResult`; `MemoryStore.neighbors(seed, opts?)`.
 - Consumes: existing `Id`, `MEMORY_ID_RE`, `MemoryNoteInput`.
 - **Untouched by design:** `packages/contracts/src/events.ts` — `memory_written` payload is `{ note: MemoryNoteInput, author }` (events.ts:85), so the link change propagates with no edit there. Confirm this in a test, do not edit events.ts.
+- **No migration code.** No `z.union`, no string-coercion, no replay-compat. See Global Constraints.
 
 - [ ] **Step 1: Write the failing test** — add to `packages/contracts/src/memory.test.ts`
 
 ```ts
 import { MemoryNoteInput, LINK_KINDS } from './memory'
 
-it('coerces a legacy flat string id to a relates_to link (replay-safe)', () => {
-  const n = MemoryNoteInput.parse({ id: 'a', title: 'A', links: ['b', 'c'] })
-  expect(n.links).toEqual([{ id: 'b', kind: 'relates_to' }, { id: 'c', kind: 'relates_to' }])
-})
 it('accepts a typed link with kind + optional confidence', () => {
   const n = MemoryNoteInput.parse({ id: 'a', title: 'A', links: [{ id: 'b', kind: 'supersedes', confidence: 0.9 }] })
   expect(n.links[0]).toEqual({ id: 'b', kind: 'supersedes', confidence: 0.9 })
@@ -55,6 +52,9 @@ it('defaults a typed link kind to relates_to and rejects a bad kind / out-of-ran
   expect(MemoryNoteInput.safeParse({ id: 'a', title: 'A', links: [{ id: 'b', kind: 'nope' }] }).success).toBe(false)
   expect(MemoryNoteInput.safeParse({ id: 'a', title: 'A', links: [{ id: 'b', confidence: 2 }] }).success).toBe(false)
   expect(LINK_KINDS).toContain('supersedes')
+})
+it('rejects a bare string id — links are typed objects only (no back-compat)', () => {
+  expect(MemoryNoteInput.safeParse({ id: 'a', title: 'A', links: ['b'] }).success).toBe(false)
 })
 ```
 
@@ -72,22 +72,15 @@ export type LinkKind = z.infer<typeof LinkKind>
 
 export const MemoryLink = z.object({
   id: Id,
-  kind: LinkKind.default('relates_to'),
+  kind: LinkKind.default('relates_to'),   // fills a missing key on a typed link; NOT a string-coercion
   confidence: z.number().min(0).max(1).optional(),
 })
 export type MemoryLink = z.infer<typeof MemoryLink>
-
-// Backward-compatible: a bare string id (every M4b event) coerces to a relates_to link,
-// so historical memory_written payloads still parse on replay. DO NOT drop the string branch.
-const LinkInput = z.union([
-  z.string().regex(MEMORY_ID_RE).transform(id => ({ id, kind: 'relates_to' as const })),
-  MemoryLink,
-])
 ```
 
 Change the `links` field of `MemoryNoteInput` (memory.ts:25) from `z.array(Id)` to:
 ```ts
-  links: z.array(LinkInput).default([]),   // typed graph edges; legacy string ids coerce to relates_to
+  links: z.array(MemoryLink).default([]),   // clean typed graph edges — no string-id form
 ```
 
 Add the neighbour result shape near `NoteSummary`:
@@ -107,9 +100,9 @@ Add to the `MemoryStore` interface (memory.ts:52):
 - [ ] **Step 4: Prove the payload propagated (no events.ts edit)** — add to the test:
 ```ts
 import { PAYLOAD_SCHEMAS } from './events'
-it('memory_written payload accepts typed AND legacy-string links unchanged', () => {
-  expect(PAYLOAD_SCHEMAS.memory_written.safeParse({ note: { id: 'a', title: 'A', links: ['b'] }, author: { source: 'cli' } }).success).toBe(true)
+it('memory_written payload carries typed links (and rejects bare strings) with no events.ts change', () => {
   expect(PAYLOAD_SCHEMAS.memory_written.safeParse({ note: { id: 'a', title: 'A', links: [{ id: 'b', kind: 'refines' }] }, author: { source: 'cli' } }).success).toBe(true)
+  expect(PAYLOAD_SCHEMAS.memory_written.safeParse({ note: { id: 'a', title: 'A', links: ['b'] }, author: { source: 'cli' } }).success).toBe(false)
 })
 ```
 
@@ -119,7 +112,7 @@ Run: `bun test packages/contracts/src/memory.test.ts packages/contracts/src/even
 Expected: PASS. (If any downstream `.links` consumer typechecks as `string[]`, it will surface here — Tasks 3/5 fix the real consumers; do not `as any` around it.)
 ```bash
 git add packages/contracts/src/memory.ts packages/contracts/src/memory.test.ts
-git commit -m "feat(contracts): typed + confidence-weighted memory links (legacy string ids coerce to relates_to)"
+git commit -m "feat(contracts): clean typed + confidence-weighted memory links (no string-id back-compat)"
 ```
 
 ---
@@ -230,7 +223,7 @@ git commit -m "feat(memory): pure graph-distance neighbour ranker (weight × dec
 
 **Files:**
 - Modify: `plugins/memory/src/surreal.ts` (link field type; edge materialization; edge fetch + `neighbors`)
-- Modify: `plugins/memory/src/surreal.test.ts` (edges + neighbours + legacy-link coercion)
+- Modify: `plugins/memory/src/surreal.test.ts` (edges + neighbours + delete-removes-edges)
 
 **Interfaces:**
 - Consumes: `MemoryLink`, `LinkKind`, `NeighborResult` (Task 1); `rankNeighbors`, `Edge` (Task 2); existing `composeAuthor`, `MemoryNote`.
@@ -243,10 +236,10 @@ git commit -m "feat(memory): pure graph-distance neighbour ranker (weight × dec
 - [ ] **Step 1: Write the failing test** — add to `plugins/memory/src/surreal.test.ts`
 
 ```ts
-it('materializes typed RELATE edges and ranks neighbours; delete removes edges; legacy strings coerce', async () => {
+it('materializes typed RELATE edges and ranks neighbours; delete removes edges', async () => {
   const t = await createTestSurreal(); drops.push(t.drop)
   const m = await SurrealMemory.open(t)
-  await m.applyWritten({ seq: 1, ts: '2026-07-18T00:00:00Z', note: note({ id: 'a', links: [{ id: 'b', kind: 'supersedes' }, 'c'] }), author: { source: 'cli' } })
+  await m.applyWritten({ seq: 1, ts: '2026-07-18T00:00:00Z', note: note({ id: 'a', links: [{ id: 'b', kind: 'supersedes' }, { id: 'c', kind: 'relates_to' }] }), author: { source: 'cli' } })
   await m.applyWritten({ seq: 2, ts: '2026-07-18T00:00:00Z', note: note({ id: 'b' }), author: { source: 'cli' } })
   await m.applyWritten({ seq: 3, ts: '2026-07-18T00:00:00Z', note: note({ id: 'c' }), author: { source: 'cli' } })
 
@@ -411,7 +404,7 @@ git commit -m "feat(memory): memory_neighbors traverse tool + token-budgeted pul
 
 The existing fixture uses `links: ['session-model']`; change it to typed and assert:
 ```ts
-links: [{ id: 'session-model', kind: 'refines' }, { id: 'legacy', kind: 'supersedes', confidence: 0.9 }],
+links: [{ id: 'session-model', kind: 'refines' }, { id: 'cookie-auth', kind: 'supersedes', confidence: 0.9 }],
 // ...
 expect(md).toContain('kind: supersedes')
 expect(md).toContain('id: session-model')
@@ -431,7 +424,7 @@ git commit -m "feat(memory): render typed links in vault/memory frontmatter"
 
 ---
 
-### Task 6: Integration — typed-traversal reuse proof + legacy replay
+### Task 6: Integration — typed-traversal reuse proof
 
 **Files:**
 - Modify/Create: `plugins/memory/src/reuse.integration.test.ts` (extend M4b's reuse proof, or add a sibling test)
@@ -442,7 +435,7 @@ git commit -m "feat(memory): render typed links in vault/memory frontmatter"
 - [ ] **Step 1: Write the integration test**
 
 ```ts
-it('traverses typed links written by one step and coerces a legacy flat-link event on rebuild', async () => {
+it('traverses typed links written by one step end-to-end, and rebuild reconstructs edges', async () => {
   // build log + surreal + projector (M4b Task 10 pattern); proj.start()
   await store.write({ id: 'decision-a', title: 'A', links: [{ id: 'decision-b', kind: 'supersedes' }] } as any, { source: 'cli' })
   await store.write({ id: 'decision-b', title: 'B' } as any, { source: 'cli' })
@@ -451,11 +444,9 @@ it('traverses typed links written by one step and coerces a legacy flat-link eve
   expect(nb.map(n => n.id)).toEqual(['decision-b'])
   expect(nb[0].via).toBe('supersedes')
 
-  // legacy: append a raw memory_written with FLAT string links (simulating a v1 event), rebuild, assert coercion
-  await log.append({ taskId: null, stepId: null, runToken: null, kind: 'memory_written',
-    payload: { note: { id: 'legacy', title: 'L', links: ['decision-a'] }, author: { source: 'cli' } } } as any)
+  // rebuild clears + replays the memory event log; typed edges are reconstructed identically.
   await proj.rebuild()
-  expect((await surreal.neighbors('legacy'))[0]).toMatchObject({ id: 'decision-a', via: 'relates_to' })
+  expect((await surreal.neighbors('decision-a'))[0]).toMatchObject({ id: 'decision-b', via: 'supersedes' })
 })
 ```
 
@@ -467,7 +458,7 @@ Expected: whole suite PASS. The M4b reuse proof and all M4b tests stay green (th
 - [ ] **Step 3: Commit**
 ```bash
 git add plugins/memory/src/reuse.integration.test.ts
-git commit -m "test(memory): typed-link traversal reuse proof + legacy flat-link replay coercion"
+git commit -m "test(memory): typed-link traversal reuse proof (end-to-end + rebuild)"
 ```
 
 ---
@@ -495,12 +486,12 @@ Explicitly out of scope — restated so no task quietly re-adds them (spec §2, 
 
 **Spec coverage:**
 - RG1 typed + confidence links → Task 1. ✓
-- RG2 free migration (tolerant contract + rebuild, no log rewrite) → Task 1 (coercion), Task 6 (legacy-replay proof). ✓
+- RG2 no back-compat: clean typed contract + clear-and-start-clean → Task 1 (clean `z.array(MemoryLink)`, bare-string rejected), Task 6 (rebuild reconstructs edges). ✓
 - RG3 graph-distance traversal ranker → Task 2 (pure), Task 3 (`neighbors`). ✓
 - RG4 reverse reachability via `RELATE` → Task 3 (edge materialization both directions). ✓
 - RG5 token-budgeted pulls → Task 4 (`budget.ts` + tool deltas). ✓
 - RG6 recursive-MAS substrate pull primitive → Task 4 (`memory_neighbors`); auto-binding deferred. ✓
-- Spec D1 (tolerant contract) → Task 1; D2/D3 (derived edges) → Task 3; D4 (no vectors) → Deferred; D5 (pull-only) → Task 4 + Deferred; D6 (no latent mechanism) → Deferred. ✓
+- Spec D1 (clean contract, no back-compat) → Task 1; D2/D3 (derived edges) → Task 3; D4 (no vectors) → Deferred; D5 (pull-only) → Task 4 + Deferred; D6 (no latent mechanism) → Deferred. ✓
 - Contract change is exactly one field + additive types; `events.ts` untouched (asserted in Task 1 Step 4). ✓
 
 **Ordering:** contract (1) → pure ranker (2) → adapter edges/traversal consuming both (3) → gateway/tools/budget consuming the adapter (4) → vault render (5) → end-to-end proof (6). Pure modules (2, budget in 4) precede their DB/tool consumers so failures localize.

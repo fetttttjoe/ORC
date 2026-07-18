@@ -35,10 +35,10 @@ adds a typed edge to the note contract and a derived edge index + traversal to t
 ## 2. Scope
 
 **In (contract-change):**
-- Typed + confidence-weighted links: `links: { id, kind, confidence? }[]` replacing `id[]`, with a
-  **backward-compatible coercion** so every historical flat-string link event still replays
-  (§6, D1). This is the one contract change; it flows into the `memory_written` payload for free
-  (`events.ts` payload already references `MemoryNoteInput`).
+- Typed + confidence-weighted links: `links: { id, kind, confidence? }[]` replacing `id[]` — a clean
+  break, no compatibility shim (§6, D1). This program is v0.0.1 and has never run; there is no
+  deployed data to preserve. The one contract change flows into the `memory_written` payload for
+  free (`events.ts` payload already references `MemoryNoteInput`).
 - `MemoryStore.neighbors(...)` on the gateway interface + a `NeighborResult` summary shape.
 - A `memory_neighbors` pull tool (the traverse / blast-radius tool).
 - `detail_level` + budget fields on `memory_search` / `memory_read` results.
@@ -65,9 +65,11 @@ Carrying M4b's RM1–RM7 unchanged, adding:
 - **RG1** Links carry the relationship the author already knew when they wrote them: a `kind`
   (`refines/supersedes/contradicts/depends_on/example_of/derived_from/relates_to`) and an optional
   `confidence` (research §3.1, §3.4). A flat id array throws that knowledge away.
-- **RG2** Migration is free under CQRS: no log rewrite. Old flat-string link events replay as
-  `kind: 'relates_to'` because the contract *coerces* them; only the read model (SurrealDB edges,
-  vault markdown) is rebuilt (research §5.2, §4 "SQLite as store-of-record" — the pain we avoid).
+- **RG2** No backwards compatibility. This is v0.0.1; nothing has run and there is no deployed data.
+  Changing the link shape is a clean break — no dual-schema handling, no coercion. "Migration" is
+  just: clear the read model + vault projection (and reset the memory event log if convenient) and
+  write notes fresh under the new contract (research §4 "SQLite as store-of-record" — the versioned
+  ALTER-migration pain we avoid by not carrying old data at all).
 - **RG3** Traversal answers "the notes that constrain this task": from seed notes, walk typed links
   N hops, ranked by (edge-kind weight × decay^depth), pruned at a floor, capped (research §3.2 —
   code-review-graph's `get_impact_radius`). No embeddings.
@@ -89,7 +91,7 @@ testable.
 
 ```
 packages/contracts/src/
-└── memory.ts        # links: id[] → { id, kind, confidence? }[] (coerces legacy strings);
+└── memory.ts        # links: id[] → { id, kind, confidence? }[] (clean typed array, no compat);
                      #   LINK_KINDS/LinkKind/MemoryLink; MemoryStore.neighbors; NeighborResult
                      # events.ts unchanged — its memory_written payload already refs MemoryNoteInput
 
@@ -114,25 +116,20 @@ export const LinkKind = z.enum(LINK_KINDS)
 
 const MemoryLink = z.object({
   id: Id,
-  kind: LinkKind.default('relates_to'),
+  kind: LinkKind.default('relates_to'),              // default only fills a missing key on a typed link
   confidence: z.number().min(0).max(1).optional(),   // absent ⇒ treated as 1.0 by the ranker
 })
 
-// Backward-compatible: a bare string id (every M4b event) coerces to relates_to.
-const LinkInput = z.union([
-  z.string().regex(MEMORY_ID_RE).transform(id => ({ id, kind: 'relates_to' as const })),
-  MemoryLink,
-])
-
-// in MemoryNoteInput:
-links: z.array(LinkInput).default([]),
+// in MemoryNoteInput — a clean typed array, no string-id branch:
+links: z.array(MemoryLink).default([]),
 ```
 
-This is the whole migration. The `memory_written` payload is `{ note: MemoryNoteInput, author }`
-(`events.ts:85`) — changing `MemoryNoteInput.links` changes the payload with no `events.ts` edit.
-The projector re-parses every replayed event through `MemoryNoteInput.parse` (`projector.ts:18`), so
-a v1 event carrying `links: ['session-model']` parses to `links: [{ id: 'session-model', kind:
-'relates_to' }]` on the next rebuild — automatically, for free, no data migration on the log.
+Clean break — there is no bare-string-id form and no coercion. The `memory_written` payload is
+`{ note: MemoryNoteInput, author }` (`events.ts:85`), so changing `MemoryNoteInput.links` changes the
+payload with no `events.ts` edit. Because nothing has run, there are no historical events to reparse:
+notes are written fresh under this contract, and any pre-existing read model / log is simply cleared
+(§4.2). The projector still re-parses each event through `MemoryNoteInput.parse` (`projector.ts:18`) —
+now every event carries a typed `links` array by construction.
 
 ### 4.2 Read-model edges (SurrealDB RELATE — cheap-now, derived)
 
@@ -224,16 +221,18 @@ overrides a decision); `depth` bounds the hops; `budget` bounds the tokens.
 
 ### Design decisions
 
-- **D1 — Migration is a tolerant contract + a read-model rebuild, not a log migration (RG2).** The
-  single biggest decision. Because the event log is truth and the projector re-parses every event on
-  replay, the *only* safe way to evolve the link shape is to make the new schema accept the old data.
-  `LinkInput` is a `z.union([string→coerce, MemoryLink])`; a legacy `links: ['x']` event parses to
-  `[{ id: 'x', kind: 'relates_to' }]`. Ship the contract, run `orc memory rebuild`, done — SurrealDB
-  and vault are rebuilt with typed links + edges; the log is untouched and every old event still
-  validates. *Considered and rejected:* a one-shot script rewriting historical `memory_written`
-  payloads (violates append-only immutability — M4b RM2 — and is exactly code-review-graph's
-  `migrations.py` v9 pain the CQRS model exists to avoid, research §4). The cost of the tolerant
-  union is one permanent branch in the schema; cheap and honest about history.
+- **D1 — Clean typed contract, no backwards compatibility (RG2).** The single biggest decision, and
+  it is to *not* build a migration. The program is v0.0.1, has never run, and has no deployed data —
+  throwing data away and starting clean is explicitly fine. So `links` is `z.array(MemoryLink)` with
+  **no** string-id branch and **no** coercion: the schema is exactly the shape we want, nothing
+  carries the old flat form. "Migration" reduces to a one-line operational step: clear the SurrealDB
+  read model + `vault/memory/**` projection (and reset the memory event log if convenient), then
+  write notes fresh under the new contract. The rebuildable-projection property still holds —
+  `orc memory rebuild` drops and replays — but here it means *start clean*, not *preserve history*.
+  *Considered and rejected:* a tolerant `z.union([string→coerce, MemoryLink])` that keeps old
+  flat-string events parseable. Rejected on the user's hard directive — it exists only to preserve
+  data we are forbidden from caring about, and it permanently forks the schema into two shapes.
+  A clean single-shape contract is smaller, clearer, and correct for a system that has never run.
 
 - **D2 — Links stay on the note document; edges are a derived index.** The note snapshot in the
   event carries its links; `get()` returns them; the vault renderer groups them. The `RELATE` edges
@@ -279,9 +278,9 @@ overrides a decision); `depth` bounds the hops; `budget` bounds the tokens.
 - **Traverse:** `memory_neighbors('a', { kinds: ['supersedes','contradicts'], depth: 2 })` →
   gateway `neighbors` → `surreal.neighbors` fetches edges frontier-by-frontier → `rankNeighbors` →
   budget-shaped `NeighborResult[]`.
-- **Legacy replay:** `orc memory rebuild` replays the log; a v1 `memory_written` with flat string
-  links coerces to `relates_to`, materializes `relates_to` edges — old knowledge joins the typed
-  graph with zero manual work.
+- **Start clean:** `orc memory rebuild` clears the read model + vault projection and replays the
+  memory event log into typed edges. On the clean cutover to this contract, clear the read model +
+  vault (and reset the memory event log if convenient) — there is no old data to preserve.
 - **Delete:** `memory_deleted` tombstone → note doc + all its edges (in and out) removed; a later
   `memory_written` re-creates note and edges (latest event wins).
 
@@ -309,8 +308,8 @@ read-obs stays out of the file (M4b D4, unchanged).
   override is an open question (§9), not scoped.
 - No new CLI subcommand required; `orc memory` gains typed-link display in `cat`/`ls` for free (they
   print the note). A `orc memory neighbors <id>` mirror of the tool is a cheap optional add.
-- `orc memory rebuild` is the migration command — it already exists; M4c just relies on it to
-  rebuild edges + coerce legacy links.
+- `orc memory rebuild` is the clean-start command — it already exists; M4c relies on it to clear the
+  read model + vault and rebuild typed edges from the memory event log. No coercion involved.
 
 ## 8. Recursive-MAS substrate (design framing — research §"Synthesis")
 
