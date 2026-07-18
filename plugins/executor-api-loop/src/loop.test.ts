@@ -135,6 +135,36 @@ describe('api-loop executor', () => {
     expect(captured.filter(d => d.kind === EVENT_KIND.tool_result)).toHaveLength(2)
   })
 
+  it('rejects a success signal declaring a missing output; accepts it once the file exists', async () => {
+    const captured: EventDraft[] = []
+    const model = scriptModel([
+      { toolCalls: [{ toolCallId: 'c1', toolName: 'signal', input: { outcome: 'success', summary: 'done', outputs: ['missing.md'] } }] },
+      { toolCalls: [{ toolCallId: 'c2', toolName: 'fs_write', input: { path: 'report.md', content: 'findings' } }] },
+      { toolCalls: [{ toolCallId: 'c3', toolName: 'signal', input: { outcome: 'success', summary: 'done', outputs: ['report.md'] } }] },
+    ])
+    const events = await drain(apiLoopExecutor().startTurn(ctx(model, captured)))
+    expect(events.at(-1)?.type).toBe('done')
+    const sig = events.find(e => e.type === 'signal')
+    expect(sig?.type === 'signal' && sig.signal.outputs).toEqual(['report.md'])
+    // turn one was rejected: exactly one signal_received, on the second attempt
+    expect(captured.filter(d => d.kind === EVENT_KIND.signal_received)).toHaveLength(1)
+  })
+
+  it('rejects escaping and duplicate output declarations', async () => {
+    const captured: EventDraft[] = []
+    const model = scriptModel([
+      { toolCalls: [{ toolCallId: 'c1', toolName: 'signal', input: { outcome: 'success', summary: 'done', outputs: ['../escape.md'] } }] },
+      { toolCalls: [{ toolCallId: 'c2', toolName: 'fs_write', input: { path: 'a.md', content: 'x' } }] },
+      { toolCalls: [{ toolCallId: 'c3', toolName: 'signal', input: { outcome: 'success', summary: 'done', outputs: ['a.md', './a.md'] } }] },
+      { toolCalls: [{ toolCallId: 'c4', toolName: 'signal', input: { outcome: 'success', summary: 'done', outputs: ['a.md'] } }] },
+    ])
+    const events = await drain(apiLoopExecutor().startTurn(
+      ctx(model, captured, { step: stepFixture({ instructions: 'do the thing', maxIterations: 5 }) }),
+    ))
+    expect(events.at(-1)?.type).toBe('done')
+    expect(captured.filter(d => d.kind === EVENT_KIND.signal_received)).toHaveLength(1)
+  })
+
   it('agent-declared failure → signal(outcome failure), no done-as-success ambiguity', async () => {
     const captured: EventDraft[] = []
     const model = scriptModel([

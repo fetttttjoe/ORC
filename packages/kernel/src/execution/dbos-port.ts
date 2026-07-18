@@ -9,6 +9,7 @@ import {
   type ResolvedTool, type RunHandle, type RunOutcome, type Signal, type SplitResult, type ToolSource,
 } from '@orc/contracts'
 import { EventLog } from '../eventlog'
+import { verifyArtifacts } from './artifacts'
 import { fold, completedStepIds, nextAttempts, subtreeTaskIds, subtreeUsage, type State } from '../projections'
 import { KERNEL_ERROR_CODE, KernelError } from '../errors'
 import { readySteps, runOutcomeOf } from './interpreter'
@@ -67,7 +68,7 @@ export async function createDbosPort(opts: {
               for (const [i, d] of drafts.entries())
                 await tx.append({
                   taskId, stepId, runToken, kind: d.kind, payload: d.payload, usage: d.usage ?? null,
-                  idempotencyKey: `${runToken}:${name}:${i}:${d.kind}`,
+                  idempotencyKey: d.idempotencyKey ?? `${runToken}:${name}:${i}:${d.kind}`,
                 })
             })
           return r
@@ -227,8 +228,22 @@ export async function createDbosPort(opts: {
       }
 
       if (signal?.outcome === SIGNAL_OUTCOME.success) {
-        await checkpoint('finish', async () => signal, () => [
-          { kind: EVENT_KIND.step_completed, payload: { stepId: args.stepId, runToken, summary: signal!.summary } },
+        const success = signal // closures below see the narrowed binding
+        // verify declared outputs at the trusted boundary; receipts and step_completed
+        // commit in ONE transaction — a completed step can never lack its receipts
+        await checkpoint('finish', async () => {
+          try {
+            return verifyArtifacts(workspaceDir, success.outputs ?? [])
+          } catch (err) {
+            throw classifiedError(FAILURE_CLASS.validation_error, err instanceof Error ? err.message : String(err))
+          }
+        }, receipts => [
+          ...receipts.map((r): EventDraft => ({
+            kind: EVENT_KIND.artifact_produced,
+            payload: { path: r.path, sha256: r.sha256, size: r.size },
+            idempotencyKey: `${runToken}:artifact:${r.path}`,
+          })),
+          { kind: EVENT_KIND.step_completed, payload: { stepId: args.stepId, runToken, summary: success.summary } },
         ])
         return { stepId: args.stepId, ok: true }
       }

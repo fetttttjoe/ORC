@@ -1,5 +1,5 @@
 import {
-  EVENT_KIND, OPERATION_STATUS, STEP_RUN_STATUS, addUsage,
+  ArtifactProducedPayload, EVENT_KIND, OPERATION_STATUS, STEP_RUN_STATUS, addUsage,
   OperationCompletedPayload, OperationFailedPayload, OperationStartedPayload,
 } from '@orc/contracts'
 import type {
@@ -37,6 +37,16 @@ export interface SplitState {
   resolved: boolean
 }
 
+// a verified output receipt bound to its producing step
+export interface ArtifactRecord {
+  path: string
+  sha256: string
+  size: number
+  stepId: string | null
+  runToken: string | null
+  seq: number
+}
+
 export interface State {
   tasks: Map<string, TaskNode>
   plans: Map<string, TaskPlans>
@@ -45,6 +55,7 @@ export interface State {
   usage: Map<string, Usage>
   splits: Map<string, SplitState>
   operations: Map<string, OperationRecord>
+  artifacts: Map<string, ArtifactRecord[]>
 }
 
 const ZERO_USAGE: Usage = { inputTokens: 0, outputTokens: 0, costUSD: null, estimated: false }
@@ -98,12 +109,13 @@ export const crashDedupKey = (e: EventRecord): string | null => {
   if (!e.runToken || e.kind === EVENT_KIND.task_status_changed || OPERATION_KINDS.has(e.kind)) return null
   // `name` discriminates multiple `skill_loaded` events sharing one runToken.
   // `splitId` discriminates multiple `split_proposed` events sharing one runToken.
-  const p = e.payload as { iteration?: number; toolCallId?: string; name?: string; splitId?: string }
-  return `${e.runToken}:${e.kind}:${p.iteration ?? ''}:${p.toolCallId ?? ''}:${p.name ?? ''}:${p.splitId ?? ''}`
+  // `path` discriminates multiple `artifact_produced` receipts sharing one runToken.
+  const p = e.payload as { iteration?: number; toolCallId?: string; name?: string; splitId?: string; path?: string }
+  return `${e.runToken}:${e.kind}:${p.iteration ?? ''}:${p.toolCallId ?? ''}:${p.name ?? ''}:${p.splitId ?? ''}:${p.path ?? ''}`
 }
 
 export function fold(events: EventRecord[]): State {
-  const state: State = { tasks: new Map(), plans: new Map(), steps: new Map(), runs: new Map(), usage: new Map(), splits: new Map(), operations: new Map() }
+  const state: State = { tasks: new Map(), plans: new Map(), steps: new Map(), runs: new Map(), usage: new Map(), splits: new Map(), operations: new Map(), artifacts: new Map() }
   const seen = new Set<string>()
 
   const stepOf = (taskId: string, stepId: string): StepState | undefined => state.steps.get(taskId)?.get(stepId)
@@ -178,11 +190,18 @@ export function fold(events: EventRecord[]): State {
         state.operations.set(id, applyOperationEvent(state.operations.get(id), e))
         break // journal only — operation events never drive step-status logic
       }
+      case EVENT_KIND.artifact_produced: {
+        if (!e.taskId) break
+        const p = ArtifactProducedPayload.parse(e.payload)
+        const list = state.artifacts.get(e.taskId) ?? []
+        list.push({ ...p, stepId: e.stepId, runToken: e.runToken, seq: e.seq })
+        state.artifacts.set(e.taskId, list)
+        break
+      }
       case EVENT_KIND.skill_loaded:
       case EVENT_KIND.tool_call:
       case EVENT_KIND.tool_result:
       case EVENT_KIND.signal_received:
-      case EVENT_KIND.artifact_produced:
       case EVENT_KIND.memory_written:
       case EVENT_KIND.memory_deleted:
         break // traceability only; no state derivation

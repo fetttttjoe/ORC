@@ -5,6 +5,14 @@ import { FailureClass, RunOutcome, Signal, Usage } from './execution'
 import { OperationCompletedPayload, OperationFailedPayload, OperationStartedPayload } from './operations'
 import { MemoryNoteInput, MemoryAuthor, MEMORY_ID_RE } from './memory'
 
+// typed so folds can parse receipts without casts
+export const ArtifactProducedPayload = z.object({
+  path: z.string().min(1),
+  sha256: z.string().regex(/^[a-f0-9]{64}$/),
+  size: z.number().int().nonnegative(),
+})
+export type ArtifactProducedPayload = z.infer<typeof ArtifactProducedPayload>
+
 export const EventKind = z.enum([
   'task_created', 'plan_proposed', 'plan_edited', 'plan_approved', 'task_status_changed',
   'run_started', 'step_started', 'skill_loaded', 'agent_call', 'tool_call', 'tool_result',
@@ -103,11 +111,7 @@ export const PAYLOAD_SCHEMAS: Record<EventKind, z.ZodType> = {
   operation_started: OperationStartedPayload,
   operation_completed: OperationCompletedPayload,
   operation_failed: OperationFailedPayload,
-  artifact_produced: z.object({
-    path: z.string().min(1),
-    sha256: z.string().regex(/^[a-f0-9]{64}$/),
-    size: z.number().int().nonnegative(),
-  }),
+  artifact_produced: ArtifactProducedPayload,
   memory_written: z.object({ note: MemoryNoteInput, author: MemoryAuthor }),
   memory_deleted: z.object({
     // id AND scope must be MEMORY_ID_RE-safe: they flow into noteRelPath → the vault path guard,

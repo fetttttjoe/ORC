@@ -1,4 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from 'bun:test'
+import { createHash } from 'node:crypto'
+import { writeFileSync } from 'node:fs'
+import path from 'node:path'
 import pg from 'pg'
 import { drizzle } from 'drizzle-orm/node-postgres'
 import { events } from '../schema'
@@ -20,6 +23,8 @@ const behaviors = new Map<string, Record<string, 'ok' | 'fail'>>()
 // tasks in this set run their model effect through ctx.operation and count executions
 const operationTasks = new Set<string>()
 const operationRuns = new Map<string, number>()
+// tasks here write `write` files into the workspace and declare `declare` in their signal
+const outputsByTask = new Map<string, { write: string[]; declare: string[] }>()
 
 function fakeExecutor(): AgentExecutor<unknown> {
   return {
@@ -37,7 +42,12 @@ function fakeExecutor(): AgentExecutor<unknown> {
         )
       const outcome = behavior[ctx.step.id] === 'fail' ? SIGNAL_OUTCOME.failure : SIGNAL_OUTCOME.success
       const summary = `${ctx.step.id}:${outcome} deps=[${Object.keys(ctx.depOutputs).sort().join(',')}] skills=[${ctx.skills.map(s => s.name)}] tools=[${ctx.extraTools.map(t => t.name)}]`
-      const signal = { stepId: ctx.step.id, runToken: ctx.runToken, outcome, summary }
+      const outputSpec = outputsByTask.get(taskId)
+      for (const f of outputSpec?.write ?? []) writeFileSync(path.join(ctx.workspaceDir, f), `content of ${f}`)
+      const signal = {
+        stepId: ctx.step.id, runToken: ctx.runToken, outcome, summary,
+        ...(outputSpec ? { outputs: outputSpec.declare } : {}),
+      }
       await ctx.checkpoint(
         'model:1',
         async () => summary,
@@ -162,6 +172,38 @@ describe('DBOS execution port (integration)', () => {
     expect(op?.status).toBe('completed')
     expect(op?.attempts).toBe(1)
     expect(op?.after).toEqual({ ok: true })
+  })
+
+  it('declared outputs are verified and receipted atomically before step completion', async () => {
+    const t = await approvedTask({}, draftFixture([stepFixture()]))
+    outputsByTask.set(t.id, { write: ['report.md'], declare: ['report.md'] })
+    expect(await (await port.startRun(t.id)).wait()).toBe('done')
+
+    const taskEvents = await kernel.eventsFor(t.id)
+    const receipt = taskEvents.find(e => e.kind === EVENT_KIND.artifact_produced)
+    const completed = taskEvents.find(e => e.kind === EVENT_KIND.step_completed)
+    expect(receipt?.payload).toEqual({
+      path: 'report.md',
+      sha256: createHash('sha256').update('content of report.md').digest('hex'),
+      size: 'content of report.md'.length,
+    })
+    expect(receipt!.seq).toBeLessThan(completed!.seq)
+    const artifacts = (await kernel.state()).artifacts.get(t.id)
+    expect(artifacts).toHaveLength(1)
+    expect(artifacts![0]!.path).toBe('report.md')
+  })
+
+  it('a missing declared output blocks the step with validation_error and no receipt', async () => {
+    const t = await approvedTask({}, draftFixture([stepFixture()]))
+    outputsByTask.set(t.id, { write: [], declare: ['ghost.md'] })
+    expect(await (await port.startRun(t.id)).wait()).toBe('blocked')
+
+    const taskEvents = await kernel.eventsFor(t.id)
+    expect(taskEvents.some(e => e.kind === EVENT_KIND.step_completed)).toBe(false)
+    expect(taskEvents.some(e => e.kind === EVENT_KIND.artifact_produced)).toBe(false)
+    const failure = (await kernel.state()).steps.get(t.id)?.get('s1')?.failure
+    expect(failure?.class).toBe(FAILURE_CLASS.validation_error)
+    expect(failure?.message).toContain('ghost.md')
   })
 
   it('refuses to run an unapproved task', async () => {

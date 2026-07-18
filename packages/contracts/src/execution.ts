@@ -117,7 +117,9 @@ export function resolveModel<LM>(
   return { provider, modelId, model: provider.languageModel(modelId) }
 }
 
-export type EventDraft = { kind: EventKind; payload: Record<string, unknown>; usage?: Usage | null }
+// idempotencyKey: checkpoints derive a positional key when absent; drafts with a natural
+// stable identity (e.g. artifact receipts keyed by path) set their own
+export type EventDraft = { kind: EventKind; payload: Record<string, unknown>; usage?: Usage | null; idempotencyKey?: string }
 
 // Retry protocol between checkpoint implementations (the port) and checkpoint callers
 // (executors): a fn that throws terminalError() is NOT re-run; any other throw is treated
