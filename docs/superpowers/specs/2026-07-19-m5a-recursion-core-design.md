@@ -40,7 +40,8 @@ second executor). This spec was adversarially challenged against the full docs c
 - **D6 — Deterministic ids (M2 harness discipline: nothing minted inside a crash window).**
   `task_split` executes inside a tools checkpoint; a crash after append before commit re-executes
   it. Random ids would mint a duplicate subtree. So: `splitId` derives from
-  `(runToken, toolCallId)`, `childTaskId` derives from `(parentTaskId, splitId)` — re-execution
+  `(runToken, toolCallId)`, `childTaskId` derives from `(parentTaskId, stepId, toolCallId)`
+  (attempt-independent; the collision guard in `proposeSplit` covers cross-attempt reuse) — re-execution
   re-appends byte-identical events and the fold absorbs them idempotently.
 - **D7 — Depth-partitioned queues.** A gate-waiting parent holds its DBOS queue slot (any
   PENDING workflow counts toward the concurrency cap). With today's single `agents` queue
@@ -70,7 +71,7 @@ split_proposed: z.object({
   taskId: z.string().min(1),            // parent task
   stepId: z.string().min(1),
   runToken: z.string().min(1),          // parent step workflow id = send target
-  childTaskId: z.string().min(1),       // derived: (parentTaskId, splitId) — D6
+  childTaskId: z.string().min(1),       // derived: (parentTaskId, stepId, toolCallId) — D6
 })
 split_resolved: z.object({
   splitId: z.string().min(1),
