@@ -2,7 +2,7 @@ import { describe, expect, it } from 'bun:test'
 import { mkdtempSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import type { Checkpoint, EventDraft, ExecutorContext, ResolvedTool, UnifiedEvent } from '@orc/contracts'
+import type { Checkpoint, EventDraft, ExecutorContext, ResolvedTool, SplitResult, UnifiedEvent } from '@orc/contracts'
 import { EVENT_KIND } from '@orc/contracts'
 import { stepFixture } from '@orc/contracts/fixtures'
 import type { LanguageModel } from 'ai'
@@ -197,5 +197,33 @@ describe('api-loop executor', () => {
     expect(toolCallEvent).toBeDefined()
     expect(toolResultEvent?.type === 'tool_result' && toolResultEvent.output).toEqual({ hi: 'x' })
     expect(toolResultEvent?.type === 'tool_result' && toolResultEvent.isError).toBe(false)
+  })
+
+  it('join_splits yields a gate and feeds the resume value back as the tool result', async () => {
+    const captured: EventDraft[] = []
+    // turn 1: model calls join_splits; turn 2: model sees results and signals success
+    const model = scriptModel([
+      { toolCalls: [{ toolCallId: 'j1', toolName: 'join_splits', input: { splitIds: ['sp1'] } }] },
+      { toolCalls: [{ toolCallId: 'sig', toolName: 'signal', input: { outcome: 'success', summary: 'joined' } }] },
+    ])
+    const gen = apiLoopExecutor().startTurn(ctx(model, captured))
+    const events: UnifiedEvent[] = []
+    let resume: SplitResult[] | undefined
+    while (true) {
+      const { value, done } = await gen.next(resume)
+      resume = undefined
+      if (done) break
+      events.push(value)
+      if (value.type === 'gate') {
+        expect(value.splitIds).toEqual(['sp1'])
+        resume = [{ splitId: 'sp1', childTaskId: 'c1', outcome: 'done', summary: 'child ok', notes: [{ id: 'n1', scope: 'project' }] }]
+      }
+    }
+    expect(events.some(e => e.type === 'gate')).toBe(true)
+    const result = events.find(e => e.type === 'tool_result' && e.toolCallId === 'j1')
+    expect(result?.type === 'tool_result' && !result.isError).toBe(true)
+    expect(events.at(-1)?.type).toBe('done')
+    // the model's second turn saw the split results in its tool message
+    expect(JSON.stringify(model.doGenerateCalls[1]!.prompt)).toContain('child ok')
   })
 })
