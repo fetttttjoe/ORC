@@ -69,6 +69,12 @@ describe('loadConfig', () => {
     expect(c.vaultDir).toBe(path.join(d, 'kb'))
     expect(c.skillsDir).toBe(path.join(d, 'kb', 'skills'))
   })
+  it('defaults projectDbUrl and honors the env override', () => {
+    expect(loadConfig('/tmp/x').projectDbUrl).toBe('ws://127.0.0.1:8000/rpc')
+    withEnv({ ORC_PROJECT_DB_URL: 'ws://db:8000/rpc' }, () => {
+      expect(loadConfig('/tmp/x').projectDbUrl).toBe('ws://db:8000/rpc')
+    })
+  })
 })
 
 function tmpProject(cfg: Record<string, unknown>): string {
