@@ -1,16 +1,15 @@
 import { describe, expect, it } from 'bun:test'
-import { z } from 'zod'
-import { MemoryNoteInput, type MemoryNote, type MemoryStore, type NoteSummary } from '@orc/contracts'
+import { MemoryNoteInput, type MemoryNote, type MemoryNoteDraft, type MemoryStore, type NoteSummary } from '@orc/contracts'
 import { memoryTools } from './tools'
 
-const toNote = (input: z.input<typeof MemoryNoteInput>): MemoryNote =>
+const toNote = (input: MemoryNoteDraft): MemoryNote =>
   ({ ...MemoryNoteInput.parse(input), createdAt: '', createdBy: '', updatedAt: '', updatedBy: '', revision: 1 })
 
 const summary = (id: string, title: string): NoteSummary =>
   ({ id, title, summary: 's', categories: [], tags: [], scope: 'project' })
 
 const fakeStore = (over: Partial<MemoryStore> = {}) => {
-  const written: { input: MemoryNoteInput; author: unknown }[] = []
+  const written: { input: MemoryNoteDraft; author: unknown }[] = []
   const store: MemoryStore = {
     write: async (input, author) => { written.push({ input, author }); return toNote(input) },
     remove: async () => {},

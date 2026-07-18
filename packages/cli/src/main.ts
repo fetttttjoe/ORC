@@ -303,9 +303,9 @@ export function buildProgram(
       const { config, log } = needPlugin()
       const memory = await createMemory({ log, config })
       await memory.store.write({
-        id: o.id, title: o.title, summary: o.summary ?? '', body: o.body ?? '',
-        tags: o.tags ?? [], categories: o.categories ?? [],
-      } as any, { source: 'cli' })
+        id: o.id, title: o.title, summary: o.summary, body: o.body,
+        tags: o.tags, categories: o.categories,
+      }, { source: 'cli' })
       await memory.projector.catchUp() // one-shot: no live subscription in a CLI process, so project the append now
       await memory.close()
       console.log(`wrote memory '${o.id}'`)

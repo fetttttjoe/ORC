@@ -1,4 +1,6 @@
 import { afterAll, describe, expect, it } from 'bun:test'
+import { z } from 'zod'
+import { MemoryAuthor } from '@orc/contracts'
 import { EventLog } from '@orc/kernel'
 import { createTestDb } from '@orc/kernel/test-helpers'
 import { SurrealMemory } from './surreal'
@@ -14,12 +16,13 @@ describe('MemoryStore gateway', () => {
     const ts = await createTestSurreal(); drops.push(ts.drop)
     const log = await EventLog.open(pg.url)
     const store = createMemoryStore({ log, surreal: await SurrealMemory.open(ts) })
-    await store.write({ id: 'auth', title: 'Auth' } as any, { source: 'agent', executor: 'api-loop', model: 'opus', role: 'review' })
+    await store.write({ id: 'auth', title: 'Auth' }, { source: 'agent', executor: 'api-loop', model: 'opus', role: 'review' })
     const events = await log.all()
     expect(events).toHaveLength(1)
     expect(events[0]!.kind).toBe('memory_written')
     expect(events[0]!.taskId).toBeNull()
-    expect((events[0]!.payload as any).author.executor).toBe('api-loop')
+    const { author } = z.object({ author: MemoryAuthor }).parse(events[0]!.payload)
+    expect(author.executor).toBe('api-loop')
     await log.close()
   })
 
@@ -28,7 +31,7 @@ describe('MemoryStore gateway', () => {
     const ts = await createTestSurreal(); drops.push(ts.drop)
     const log = await EventLog.open(pg.url)
     const store = createMemoryStore({ log, surreal: await SurrealMemory.open(ts) })
-    await expect(store.write({ id: 'Bad Id', title: 'x' } as any, { source: 'cli' })).rejects.toThrow()
+    await expect(store.write({ id: 'Bad Id', title: 'x' }, { source: 'cli' })).rejects.toThrow()
     expect(await log.all()).toHaveLength(0)
     await log.close()
   })
