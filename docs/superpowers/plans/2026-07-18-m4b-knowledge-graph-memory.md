@@ -16,7 +16,7 @@
 - **Memory writes use `EventLog.append` (non-locking) — never `EventLog.transaction`.** The advisory lock is for check-then-append; memory is a blind upsert keyed by `id`.
 - **Memory reads query SurrealDB — never `fold(log.all())`.** No read folds the log.
 - **Writer containment:** the memory projector writes/deletes ONLY under `vault/memory/**` (extends M4a D5). Atomic per file (tmp→rename), skip-unchanged, drift-warn on hand-edited files.
-- **SurrealDB pin:** server image `surrealdb/surrealdb:v2.1.4`; client `surrealdb@^1.3.0`. Namespace `orc`, database `memory`. All adapter ops use `db.query(surql, vars)` (stable across SDK point releases) rather than typed helpers. **Before writing the adapter, verify the pinned client's `connect()` signature** (it changed between client majors) and adjust only the connect call.
+- **SurrealDB pin (UPDATED — user chose the surqlize ORM on the latest stable stack):** server image `surrealdb/surrealdb:v3.2.0`; client `surrealdb@2.0.4`; ORM `surqlize@0.1.0` (peer-deps client `^2.0.0-alpha.18` + TS ≥5). Namespace `orc`, database `memory`. Adapter is built on **surqlize's fluent builder** (`orm(surreal, ...tables)`, `table()`, `db.upsert().set()`, `db.select(RecordId).then.val()`, `db.delete()`, `.where(row => row.field.contains(...))`). surqlize 0.1.0 has **no documented raw-SurrealQL escape hatch**, but we still hold the underlying `Surreal` client — use `surreal.query(surql, vars)` **only** for operations surqlize cannot express (candidates: case-insensitive substring search, array-membership filters, `clear`/delete-all) and report exactly which. **Client `connect`/auth for SDK 2.x is separate calls:** `new Surreal()` → `await surreal.connect(url)` → `await surreal.signin({ username:'root', password:'orc' })` → `await surreal.use({ namespace, database })`. surqlize is 0.x/pre-1.0 — if it cannot express the core upsert/get/delete at all, report BLOCKED rather than contorting.
 - **Timestamps come from the event row (`event.ts`), never a client clock** — the projector uses `event.ts`/`event.seq` so replay is deterministic. (`Date`/random are fine in normal code here; this rule is for determinism of the projection, not a sandbox limit.)
 - **ID safety:** note `id` matches `^[a-z0-9][a-z0-9-]*$` (safe filename + SurrealDB record id).
 - **Commits:** conventional-commit messages, one per task minimum; frequent commits within a task are fine.
@@ -315,7 +315,7 @@ git commit -m "feat(kernel): accept project-scoped (null taskId) memory events; 
 
 ```yaml
   surrealdb:
-    image: surrealdb/surrealdb:v2.1.4
+    image: surrealdb/surrealdb:v3.2.0
     command: start --user root --pass orc --bind 0.0.0.0:8000 memory
     ports:
       - "8000:8000"
@@ -325,6 +325,11 @@ git commit -m "feat(kernel): accept project-scoped (null taskId) memory events; 
       timeout: 3s
       retries: 30
 ```
+> **UPDATED to v3.2.0 (surqlize requires server ≥3.0).** The v2 `start` flags shown may have
+> shifted in v3.x — after editing, `bun run db:up` and confirm `docker compose ps` shows
+> `surrealdb` **healthy**; if not, `docker compose logs surrealdb`, adjust the `command`/`healthcheck`
+> to the real v3.2.0 CLI (e.g. `--user`/`--pass` may be `--username`/`--password`; the storage-backend
+> arg `memory` may need `--storage memory` or similar), and re-verify. Keep root creds root/orc, bind :8000.
 (`memory` is the storage backend arg → in-memory; state is rebuildable from the log, so durable storage isn't required. Use `rocksdb:/data/surreal.db` + a volume later if you want persistence across restarts.)
 
 - [ ] **Step 2: Write the failing config test** in `packages/kernel/src/config.test.ts`
@@ -366,7 +371,14 @@ git commit -m "feat(config): projectDbUrl + SurrealDB service for the memory rea
 
 ---
 
-### Task 4: SurrealDB adapter (`plugins/memory/src/surreal.ts`)
+### Task 4: SurrealDB adapter via **surqlize** (`plugins/memory/src/surreal.ts`)
+
+> **UPDATED — user chose the surqlize ORM on the latest stable stack (server v3.2.0, client
+> `surrealdb@2.0.4`, `surqlize@0.1.0`).** The adapter's PUBLIC CONTRACT and its tests are UNCHANGED
+> (downstream Tasks 6/7/8 depend on them verbatim) — only the internals switch from raw
+> `db.query` to surqlize's fluent builder. surqlize 0.1.0 is sparsely documented; **read its actual
+> types/source and verify every call against the live v3.2.0 server** — the code below is
+> ILLUSTRATIVE (the real 0.1.0 API may differ), the tests are the acceptance gate.
 
 **Files:**
 - Create: `plugins/memory/package.json`, `plugins/memory/tsconfig.json`
@@ -375,9 +387,16 @@ git commit -m "feat(config): projectDbUrl + SurrealDB service for the memory rea
 - Modify: root `package.json` `typecheck` script (append `&& tsc --noEmit -p plugins/memory`)
 - Create: `plugins/memory/src/test-helpers.ts` (ephemeral SurrealDB namespace/db per test)
 
-**Interfaces:**
+**Interfaces (UNCHANGED contract):**
 - Consumes: `MemoryNoteInput`, `MemoryNote`, `NoteSummary`, `MemoryFilter`, `MemoryAuthor`, `composeAuthor` (Task 1).
-- Produces: `SurrealMemory` with `open(url)`, `applyWritten(e)`, `applyDeleted(e)`, `get(id,scope)`, `list(filter)`, `search(query,filter)`, `bumpRead(id,scope)`, `getCursor()`, `setCursor(seq)`, `clear()`, `close()`. `e` is `{ seq, ts, note?, id?, scope?, author }` (the fields the projector passes).
+- Produces: `SurrealMemory` with `open(t)`, `applyWritten(e)`, `applyDeleted(e)`, `get(id,scope)`, `list(filter)`, `search(query,filter)`, `bumpRead(id,scope)`, `getCursor()`, `setCursor(seq)`, `clear()`, `close()`. `e` is `{ seq, ts, note?, id?, scope?, author }`.
+
+**surqlize design notes (the decisions that matter):**
+- **Escape-hatch policy:** build every op with surqlize's fluent builder where it can express it. surqlize 0.1.0 has **no documented raw-SurrealQL passthrough**, but you still hold the underlying `Surreal` client — keep a reference to it and use `surreal.query(surql, vars)` **only** for ops the builder can't do (likely candidates: case-insensitive `search`, `clear`/delete-all, and array-membership filters if `.where` lacks an array-contains). REPORT exactly which ops fell back to raw.
+- **RecordId vs the note's own id:** surqlize auto-adds an `id: RecordId<'note'>` to every table (reserved). Store the note under RecordId key `` `${scope}:${id}` `` and keep the note's own string id in a separate field (e.g. `noteId`); map `noteId → id` on read. Same for `scope`.
+- **createdAt/By preserve-on-update becomes a clean read-then-write in TS** (an ORM win over the old multi-statement SurrealQL): `const ex = await get-or-select(key)`; `createdAt = ex?.createdAt ?? e.ts`, `createdBy = ex?.createdBy ?? composeAuthor(e.author)`, `revision = (ex?.revision ?? 0) + 1`, `updatedAt = e.ts`, `updatedBy = composeAuthor(e.author)`. Ordering is guaranteed by the projector, so revision counts applies deterministically (replay-identical).
+- **Tier-2 read-obs (`lastReadAt`/`readCount`)** live only here (never event-sourced): `bumpRead` sets `readCount += 1`, `lastReadAt = now`. Preserve them across `applyWritten` updates (carry `ex.readCount`/`ex.lastReadAt`).
+- Tables: `note` (all note fields + provenance/lifecycle + `deleted:false`) and `meta` (the `{ seq }` cursor at key `cursor`).
 
 - [ ] **Step 1: Scaffold the package**
 
@@ -391,24 +410,26 @@ git commit -m "feat(config): projectDbUrl + SurrealDB service for the memory rea
   "dependencies": {
     "@orc/contracts": "workspace:*",
     "@orc/kernel": "workspace:*",
-    "surrealdb": "^1.3.0",
+    "surrealdb": "2.0.4",
+    "surqlize": "0.1.0",
     "zod": "^4.4.3"
   }
 }
 ```
-`plugins/memory/tsconfig.json` (copy `packages/vault-projector/tsconfig.json` if present; else extend the repo base):
+`plugins/memory/tsconfig.json`:
 ```json
 { "extends": "../../tsconfig.base.json", "include": ["src"] }
 ```
 Install: `bun install`. Append to the root `typecheck` script: `&& tsc --noEmit -p plugins/memory`.
+**Watch:** surqlize wants TS ≥5 for its inference; this repo's compiler is `typescript@^7.0.2` (tsgo). After install, run `bun run typecheck` early to confirm surqlize's types resolve under our compiler — if they don't, report the exact error (do NOT downgrade the repo's TypeScript).
 
 - [ ] **Step 2: Test helper** — `plugins/memory/src/test-helpers.ts`
 
+SDK 2.x connect is separate calls (`connect` → `signin` → `use`). Ephemeral ns/db per test file:
 ```ts
 import { Surreal } from 'surrealdb'
 const URL = process.env.ORC_PROJECT_DB_URL ?? 'ws://127.0.0.1:8000/rpc'
 
-// ponytail: test-only — ephemeral namespace/db per test file so tests never collide
 export async function createTestSurreal(): Promise<{ url: string; ns: string; db: string; drop: () => Promise<void> }> {
   const ns = 'orc'
   const db = `t_${Math.random().toString(36).slice(2, 10)}`
@@ -416,15 +437,17 @@ export async function createTestSurreal(): Promise<{ url: string; ns: string; db
     url: URL, ns, db,
     drop: async () => {
       const s = new Surreal()
-      await s.connect(URL, { namespace: ns, database: db, auth: { username: 'root', password: 'orc' } })
-      await s.query(`REMOVE DATABASE IF EXISTS type::database($db)`, { db }).catch(() => {})
+      await s.connect(URL)
+      await s.signin({ username: 'root', password: 'orc' })
+      await s.use({ namespace: ns, database: db })
+      await s.query('REMOVE DATABASE IF EXISTS type::database($db)', { db }).catch(() => {})
       await s.close()
     },
   }
 }
 ```
 
-- [ ] **Step 3: Write the failing adapter test** — `plugins/memory/src/surreal.test.ts`
+- [ ] **Step 3: Write the failing adapter test** — `plugins/memory/src/surreal.test.ts` (UNCHANGED — this is the contract)
 
 ```ts
 import { afterAll, describe, expect, it } from 'bun:test'
@@ -470,133 +493,131 @@ describe('SurrealMemory', () => {
 Run: `bun run db:up && bun test plugins/memory/src/surreal.test.ts`
 Expected: FAIL — `./surreal` not found.
 
-- [ ] **Step 5: Implement `plugins/memory/src/surreal.ts`**
+- [ ] **Step 5: Implement `plugins/memory/src/surreal.ts`** via surqlize
+
+ILLUSTRATIVE (verify the real surqlize 0.1.0 API against its types/source + the live server; the
+tests are the gate). Hold BOTH the `orm(...)` handle and the raw `Surreal` client (escape hatch).
 
 ```ts
-import { Surreal } from 'surrealdb'
+import { Surreal, RecordId } from 'surrealdb'
+import { orm, table, t } from 'surqlize'
 import { composeAuthor, MemoryNote, type MemoryAuthor, type MemoryFilter, type MemoryNoteInput, type NoteSummary } from '@orc/contracts'
 
-// NOTE: verify connect() against surrealdb@^1.3 before edits (see Global Constraints).
 type WrittenEvent = { seq: number; ts: string; note: MemoryNoteInput; author: MemoryAuthor }
 type DeletedEvent = { seq: number; ts: string; id: string; scope: string; author: MemoryAuthor }
 
-const CURSOR = 'meta:cursor'
+// `noteId` holds the note's own string id (surqlize reserves `id` for the RecordId).
+const noteTable = table('note', {
+  noteId: t.string(), scope: t.string(), title: t.string(),
+  categories: t.array(t.string()), tags: t.array(t.string()), links: t.array(t.string()),
+  paths: t.array(t.string()), rules: t.array(t.string()), summary: t.string(), body: t.string(),
+  createdAt: t.string(), createdBy: t.string(), updatedAt: t.string(), updatedBy: t.string(),
+  revision: t.number(), readCount: t.number(), lastReadAt: t.option(t.string()), deleted: t.bool(),
+})
+const metaTable = table('meta', { seq: t.number() })
+const key = (scope: string, id: string) => `${scope}:${id}`
 
 export class SurrealMemory {
-  private constructor(private readonly db: Surreal) {}
+  private constructor(private readonly surreal: Surreal, private readonly db: ReturnType<typeof orm>) {}
 
   static async open(t: { url: string; ns: string; db: string }): Promise<SurrealMemory> {
-    const db = new Surreal()
-    await db.connect(t.url, { namespace: t.ns, database: t.db, auth: { username: 'root', password: 'orc' } })
-    // schemaless notes; a numeric cursor row lives in the same db.
-    await db.query('DEFINE TABLE IF NOT EXISTS note SCHEMALESS; DEFINE TABLE IF NOT EXISTS meta SCHEMALESS;')
-    return new SurrealMemory(db)
+    const surreal = new Surreal()
+    await surreal.connect(t.url)
+    await surreal.signin({ username: 'root', password: 'orc' })
+    await surreal.use({ namespace: t.ns, database: t.db })
+    return new SurrealMemory(surreal, orm(surreal, noteTable, metaTable))
   }
 
-  // last-writer-wins content; createdAt/By fixed at first apply, updated/rev advance. Ordered
-  // by the projector, so revision counts applies deterministically (replay-identical).
+  // read-then-write: createdAt/By + readCount/lastReadAt preserved; updated/rev advance.
   async applyWritten(e: WrittenEvent): Promise<void> {
-    const key = `${e.note.scope}:${e.note.id}`
+    const k = key(e.note.scope, e.note.id)
+    const ex = await this.db.select(new RecordId('note', k)).then.val()
     const by = composeAuthor(e.author)
-    await this.db.query(
-      `LET $ex = (SELECT * FROM type::thing('note', $key))[0];
-       UPSERT type::thing('note', $key) CONTENT {
-         id: $note.id, scope: $note.scope, title: $note.title,
-         categories: $note.categories, tags: $note.tags, links: $note.links,
-         paths: $note.paths, rules: $note.rules, summary: $note.summary, body: $note.body,
-         createdAt: $ex.createdAt ?? $ts, createdBy: $ex.createdBy ?? $by,
-         updatedAt: $ts, updatedBy: $by, revision: ($ex.revision ?? 0) + 1,
-         lastReadAt: $ex.lastReadAt ?? NONE, readCount: $ex.readCount ?? 0,
-         deleted: false,
-       };`,
-      { key, note: e.note, ts: e.ts, by },
-    )
+    await this.db.upsert('note', k).set({
+      noteId: e.note.id, scope: e.note.scope, title: e.note.title,
+      categories: e.note.categories, tags: e.note.tags, links: e.note.links,
+      paths: e.note.paths, rules: e.note.rules, summary: e.note.summary, body: e.note.body,
+      createdAt: ex?.createdAt ?? e.ts, createdBy: ex?.createdBy ?? by,
+      updatedAt: e.ts, updatedBy: by, revision: (ex?.revision ?? 0) + 1,
+      readCount: ex?.readCount ?? 0, lastReadAt: ex?.lastReadAt ?? null, deleted: false,
+    })
   }
 
   async applyDeleted(e: DeletedEvent): Promise<void> {
-    await this.db.query(`DELETE type::thing('note', $key)`, { key: `${e.scope}:${e.id}` })
+    await this.db.delete('note', key(e.scope, e.id))
   }
 
   async get(id: string, scope = 'project'): Promise<MemoryNote | null> {
-    const [rows] = await this.db.query<[any[]]>(`SELECT * FROM type::thing('note', $key)`, { key: `${scope}:${id}` })
-    const r = rows?.[0]
+    const r = await this.db.select(new RecordId('note', key(scope, id))).then.val()
     if (!r || r.deleted) return null
-    return MemoryNote.parse(strip(r))
+    return MemoryNote.parse(toNote(r))
   }
 
   async bumpRead(id: string, scope = 'project'): Promise<void> {
-    await this.db.query(
-      `UPDATE type::thing('note', $key) SET lastReadAt = time::now(), readCount = (readCount ?? 0) + 1`,
-      { key: `${scope}:${id}` },
-    )
+    // atomic increment via surqlize operator; verify it MERGES (doesn't wipe other fields).
+    await this.db.upsert('note', key(scope, id)).set({ readCount: { '+=': 1 }, lastReadAt: new Date().toISOString() })
   }
 
   async list(filter: MemoryFilter = {}): Promise<NoteSummary[]> {
-    return this.select(where(filter))
+    // surqlize .where builder if it supports array-contains for category/tag; else raw fallback.
+    return this.query(filter)
   }
-
   async search(query: string, filter: MemoryFilter = {}): Promise<NoteSummary[]> {
-    const w = where(filter)
-    const clause = [
-      `(string::lowercase(title) CONTAINS string::lowercase($q)`,
-      `OR string::lowercase(summary) CONTAINS string::lowercase($q)`,
-      `OR string::lowercase(body) CONTAINS string::lowercase($q)`,
-      `OR $q IN tags)`,
-    ].join(' ')
-    return this.select([...w, clause], { q: query })
+    return this.query(filter, query)
   }
 
-  private async select(clauses: string[], vars: Record<string, unknown> = {}): Promise<NoteSummary[]> {
-    const cond = clauses.length ? `WHERE ${clauses.join(' AND ')}` : ''
-    const [rows] = await this.db.query<[any[]]>(
-      `SELECT id, scope, title, categories, tags, summary FROM note WHERE (deleted = false) ${cond ? 'AND ' + cond.slice(6) : ''} ORDER BY updatedAt DESC`,
-      vars,
+  // ESCAPE HATCH: case-insensitive search + array filters aren't cleanly expressible in the
+  // surqlize 0.1.0 builder — use the raw client here. If a later surqlize supports them, migrate.
+  private async query(f: MemoryFilter, q?: string): Promise<NoteSummary[]> {
+    const clauses = ['deleted = false']
+    const vars: Record<string, unknown> = {}
+    if (f.scope) { clauses.push('scope = $scope'); vars.scope = f.scope }
+    if (f.category) { clauses.push('$category IN categories'); vars.category = f.category }
+    if (f.tag) { clauses.push('$tag IN tags'); vars.tag = f.tag }
+    if (q !== undefined) {
+      clauses.push('(string::lowercase(title) CONTAINS string::lowercase($q) OR string::lowercase(summary) CONTAINS string::lowercase($q) OR string::lowercase(body) CONTAINS string::lowercase($q) OR $q IN tags)')
+      vars.q = q
+    }
+    const [rows] = await this.surreal.query<[any[]]>(
+      `SELECT noteId, scope, title, categories, tags, summary FROM note WHERE ${clauses.join(' AND ')} ORDER BY updatedAt DESC`, vars,
     )
-    return (rows ?? []).map(r => ({ id: r.id, scope: r.scope, title: r.title, categories: r.categories, tags: r.tags, summary: r.summary }))
+    return (rows ?? []).map(r => ({ id: r.noteId, scope: r.scope, title: r.title, categories: r.categories, tags: r.tags, summary: r.summary }))
   }
 
   async getCursor(): Promise<number> {
-    const [rows] = await this.db.query<[any[]]>(`SELECT seq FROM ${CURSOR}`)
-    return rows?.[0]?.seq ?? 0
+    return (await this.db.select(new RecordId('meta', 'cursor')).then.val())?.seq ?? 0
   }
-  async setCursor(seq: number): Promise<void> {
-    await this.db.query(`UPSERT ${CURSOR} CONTENT { seq: $seq }`, { seq })
-  }
-  async clear(): Promise<void> { await this.db.query('DELETE note; DELETE meta;') }
-  async close(): Promise<void> { await this.db.close() }
+  async setCursor(seq: number): Promise<void> { await this.db.upsert('meta', 'cursor').set({ seq }) }
+  async clear(): Promise<void> { await this.surreal.query('DELETE note; DELETE meta;') } // delete-all: raw
+  async close(): Promise<void> { await this.surreal.close() }
 }
 
-// SurrealDB record ids/metadata leak fields like `id` as a RecordId object; the note's own
-// `id` string is stored explicitly above, so read it from the content, not the record key.
-function strip(r: any) {
+// map the stored row back to the MemoryNote shape (noteId → id; drop RecordId + Tier-2 fields).
+function toNote(r: any) {
   return {
-    id: r.id, scope: r.scope, title: r.title, categories: r.categories, tags: r.tags,
+    id: r.noteId, scope: r.scope, title: r.title, categories: r.categories, tags: r.tags,
     links: r.links, paths: r.paths, rules: r.rules, summary: r.summary, body: r.body,
     createdAt: r.createdAt, createdBy: r.createdBy, updatedAt: r.updatedAt, updatedBy: r.updatedBy,
     revision: r.revision,
   }
 }
-function where(f: MemoryFilter): string[] {
-  const c: string[] = []
-  if (f.scope) c.push('scope = $scope')
-  if (f.category) c.push('$category IN categories')
-  if (f.tag) c.push('$tag IN tags')
-  return c
-}
 ```
-Note: `select` passes filter values via `vars`; thread `f.scope/category/tag` into the `vars` object at the call sites in `list`/`search` (add them alongside `q`). Keep the SurrealQL minimal and verify the exact result-tuple shape returned by the pinned client (`query` returns an array of per-statement results).
+The two ops that use the raw client (`search`/`list` filters, `clear`) are the documented fallback —
+surqlize's builder handles `open`/`applyWritten`/`applyDeleted`/`get`/`bumpRead`/cursor. If surqlize's
+builder actually CAN express the array filters cleanly, prefer it and shrink the raw `query()` to
+search-only; report the final split.
 
 - [ ] **Step 6: Run tests to verify they pass**
 
 Run: `bun test plugins/memory/src/surreal.test.ts`
-Expected: PASS. Iterate on SurrealQL result-shape details against the running container until green.
+Expected: PASS. Iterate the surqlize calls / result shapes against the running v3.2.0 container until green.
 
 - [ ] **Step 7: Typecheck + commit**
 
 Run: `bun run typecheck`
 ```bash
 git add plugins/memory package.json bun.lock
-git commit -m "feat(memory): SurrealDB read-model adapter (apply/get/list/search/cursor)"
+git commit -m "feat(memory): SurrealDB read-model adapter via surqlize"
 ```
 
 ---
