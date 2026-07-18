@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test'
-import { EVENT_KIND, type PlanDraft } from '@orc/contracts'
+import { EVENT_KIND, type OperationSpec, type PlanDraft } from '@orc/contracts'
 import { draftFixture } from '@orc/contracts/fixtures'
 import { EventLog } from './eventlog'
 import { Kernel } from './kernel'
@@ -59,6 +59,52 @@ describe('replay guarantee (spec §10)', () => {
       const t = await k.createTask({ title: 'x' })
       await k.proposePlan(t.id, draft())
       expect(fold(await log.all())).toEqual(fold(await log.all()))
+    } finally {
+      await db.drop()
+    }
+  })
+
+  it('journal rows, folded state, replay-at-sequence, and reopen all agree on one history', async () => {
+    const db = await createTestDb()
+    try {
+      const log = await EventLog.open(db.url, { projectId: TEST_PROJECT_ID })
+      const k = new Kernel(log)
+      const t = await k.createTask({ title: 'audited', spec: 'traced work' })
+      await k.proposePlan(t.id, draft())
+      await k.approvePlan(t.id)
+
+      const opContext = { taskId: t.id, stepId: 's1', runToken: `step:${t.id}:s1:a1` }
+      const spec: OperationSpec = { operationId: `${opContext.runToken}:model:1`, kind: 'model', name: 'fake/m', before: { q: 1 } }
+      await log.beginOperation(opContext, spec)
+      const startedSeq = (await log.byTask(t.id)).at(-1)!.seq
+      await log.completeOperation(opContext, spec, 1, { text: 'result' })
+      await log.append({
+        taskId: t.id, stepId: 's1', runToken: opContext.runToken, kind: EVENT_KIND.artifact_produced,
+        payload: { path: 'report.md', sha256: 'a'.repeat(64), size: 8 },
+      })
+
+      const events = await log.byTask(t.id)
+      const state = fold(events)
+
+      // fold vs. durable journal row
+      const foldedOp = state.operations.get(spec.operationId)
+      const [journalOp] = await log.operationsFor(t.id)
+      expect(foldedOp).toEqual(journalOp)
+      expect(foldedOp?.status).toBe('completed')
+
+      // replay-at-sequence: at the start transition the node is honestly unresolved
+      const atStart = fold(events.filter(e => e.seq <= startedSeq))
+      expect(atStart.operations.get(spec.operationId)?.status).toBe('started')
+
+      // artifact receipt visible in state and in the rendered lineage input
+      expect(state.artifacts.get(t.id)?.map(a => a.path)).toEqual(['report.md'])
+
+      // reopening loses nothing
+      await log.close()
+      const reopened = await EventLog.open(db.url, { projectId: TEST_PROJECT_ID })
+      expect(fold(await reopened.byTask(t.id))).toEqual(state)
+      expect(await reopened.operationsFor(t.id)).toEqual([journalOp!])
+      await reopened.close()
     } finally {
       await db.drop()
     }

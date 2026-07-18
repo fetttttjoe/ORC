@@ -1,3 +1,4 @@
+import { EVENT_KIND } from '@orc/contracts'
 import { fold, type EventLog } from '@orc/kernel'
 import { renderRootIndex, renderTaskFiles } from './render'
 import { writeVaultFiles } from './write'
@@ -23,7 +24,9 @@ export function createVaultProjector(opts: { log: EventLog; config: { vaultDir: 
   const timers = new Map<string, ReturnType<typeof setTimeout>>()
 
   const renderRoot = async (): Promise<void> => {
-    const tasks = [...fold(await log.all()).tasks.values()]
+    // task lifecycle only — the root index must never scan the whole log
+    const lifecycle = await log.after(0, [EVENT_KIND.task_created, EVENT_KIND.task_status_changed])
+    const tasks = [...fold(lifecycle).tasks.values()]
     writeVaultFiles(vaultDir, { 'index.md': renderRootIndex(tasks) })
   }
   const renderTask = async (taskId: string): Promise<void> => {
@@ -31,8 +34,9 @@ export function createVaultProjector(opts: { log: EventLog; config: { vaultDir: 
     await renderRoot()
   }
   const renderAll = async (): Promise<void> => {
-    const byTask = new Set((await log.all()).filter(e => e.taskId).map(e => e.taskId!))
-    for (const id of byTask) writeVaultFiles(vaultDir, renderTaskFiles(id, await log.byTask(id)))
+    const created = await log.after(0, [EVENT_KIND.task_created])
+    const ids = new Set(created.flatMap(e => (e.taskId ? [e.taskId] : [])))
+    for (const id of ids) writeVaultFiles(vaultDir, renderTaskFiles(id, await log.byTask(id)))
     await renderRoot()
   }
 

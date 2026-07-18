@@ -62,6 +62,21 @@ describe('createVaultProjector.renderAll', () => {
     await log.close()
   })
 
+  it('never scans the whole log — renderAll and live renders use scoped queries only', async () => {
+    const db = await createTestDb(); dbs.push(db)
+    const vaultDir = mkdtempSync(path.join(tmpdir(), 'orc-vp-')); dirs.push(vaultDir)
+    const log = await EventLog.open(db.url, { projectId: TEST_PROJECT_ID })
+    const kernel = new Kernel(log)
+    const t = await kernel.createTask({ title: 'scoped', spec: 'x' })
+    const allSpy = spyOn(log, 'all')
+    const projector = createVaultProjector({ log, config: { vaultDir } })
+    await projector.renderAll()
+    await projector.renderTask(t.id)
+    await projector.close()
+    expect(allSpy).not.toHaveBeenCalled()
+    await log.close()
+  })
+
   it('start() subscribes and skips memory events (null taskId) while still rendering real task updates', async () => {
     const db = await createTestDb(); dbs.push(db)
     const vaultDir = mkdtempSync(path.join(tmpdir(), 'orc-vp-')); dirs.push(vaultDir)

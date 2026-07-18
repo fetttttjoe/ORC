@@ -3,7 +3,7 @@ import { mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { Surreal } from 'surrealdb'
-import { EVENT_KIND } from '@orc/contracts'
+import { EVENT_KIND, type OperationSpec } from '@orc/contracts'
 import { loadConfig, requireProject, type PluginHost } from '@orc/kernel'
 import { createTestDb, TEST_PROJECT_ID } from '@orc/kernel/test-helpers'
 import type { McpHub } from '@orc/mcp-client'
@@ -61,6 +61,52 @@ describe('orc CLI', () => {
   it('buildProgram exposes init', async () => {
     const { kernel } = await makeCli()
     expect(buildProgram(kernel).commands.map(c => c.name())).toContain('init')
+  })
+
+  it('replay reconstructs operation state at a sequence and appends nothing', async () => {
+    const db = await createTestDb()
+    dbs.push(db)
+    const { kernel, log } = await openKernel(db.url, { projectId: TEST_PROJECT_ID })
+    const lines: string[] = []
+    spyOn(console, 'log').mockImplementation((...a: unknown[]) => { lines.push(a.join(' ')) })
+    const run = async (...args: string[]) => buildProgram(kernel).parseAsync(args, { from: 'user' })
+
+    const t = await kernel.createTask({ title: 'audit me' })
+    const opContext = { taskId: t.id, stepId: 's1', runToken: `step:${t.id}:s1:a1` }
+    const spec: OperationSpec = { operationId: `${opContext.runToken}:model:1`, kind: 'model', name: 'fake/m', before: { q: 1 } }
+    await log.beginOperation(opContext, spec)
+    const startSeq = (await log.byTask(t.id)).at(-1)!.seq
+    await log.completeOperation(opContext, spec, 1, { text: 'answer' })
+    const countBefore = (await log.all()).length
+
+    lines.length = 0
+    await run('replay', t.id, '--at', String(startSeq))
+    expect(JSON.parse(lines.join('\n')).operations[spec.operationId].status).toBe('started')
+
+    lines.length = 0
+    await run('replay', t.id)
+    expect(JSON.parse(lines.join('\n')).operations[spec.operationId].status).toBe('completed')
+
+    await expect(run('replay', t.id, '--at', 'x')).rejects.toThrow(/non-negative integer/)
+    await expect(run('replay', t.id, '--at', '-1')).rejects.toThrow(/non-negative integer/)
+    expect((await log.all()).length).toBe(countBefore) // replay never mutates history
+    await log.close()
+  })
+
+  it('log --json prints the full stored envelope', async () => {
+    const db = await createTestDb()
+    dbs.push(db)
+    const { kernel, log } = await openKernel(db.url, { projectId: TEST_PROJECT_ID })
+    const lines: string[] = []
+    spyOn(console, 'log').mockImplementation((...a: unknown[]) => { lines.push(a.join(' ')) })
+    const run = async (...args: string[]) => buildProgram(kernel).parseAsync(args, { from: 'user' })
+    const t = await kernel.createTask({ title: 'json log' })
+    lines.length = 0
+    await run('log', t.id, '--json')
+    const records = JSON.parse(lines.join('\n'))
+    expect(records[0]).toMatchObject({ kind: 'task_created', projectId: TEST_PROJECT_ID, idempotencyKey: null })
+    expect(records[0].seq).toBeGreaterThan(0)
+    await log.close()
   })
 
   it('new → propose → approve → log round-trip', async () => {
