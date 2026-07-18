@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from 'bun:test'
 import { Client } from 'pg'
 import {
-  EVENT_KIND, FAILURE_CLASS, SIGNAL_OUTCOME, TASK_STATUS,
+  ApprovalPolicy, EVENT_KIND, FAILURE_CLASS, SIGNAL_OUTCOME, TASK_STATUS,
   type AgentExecutor, type EventDraft, type ExecutorContext, type PlanDraft,
   type SplitResult, type UnifiedEvent,
 } from '@orc/contracts'
@@ -157,6 +157,40 @@ describe('DBOS execution port (integration)', () => {
     const before = (await kernel.eventsFor(t.id)).length
     await expect(port.cancelRun(t.id)).rejects.toThrow(/running or blocked/)
     expect((await kernel.eventsFor(t.id)).length).toBe(before)
+  })
+
+  it('cancelRun cascades to the subtree: a gated child (never started) is cancelled too', async () => {
+    const t = await approvedTask({ s1: 'fail' }, draftFixture([stepFixture()]))
+    expect(await (await port.startRun(t.id)).wait()).toBe('blocked')
+    expect((await kernel.getTask(t.id))?.status).toBe(TASK_STATUS.blocked)
+
+    // manual (default) policy parks the child at awaiting_approval — it never gets a run,
+    // so the router never touches it and this setup is race-free against the live router.
+    const split = await kernel.proposeSplit({
+      parentTaskId: t.id, stepId: 's1', runToken: `step:${t.id}:s1:a1`, toolCallId: 'call_1',
+      title: 'child', spec: 'child work',
+      plan: { steps: [{ id: 'w1', role: 'worker', title: 'w', instructions: 'do', dependsOn: [], skillRefs: [], toolRefs: [] }] },
+      parentStep: { executorRef: 'api-loop', modelRef: 'fake/m', maxIterations: 5 },
+      policy: ApprovalPolicy.parse({}), maxDepth: 3,
+    })
+    expect(split.gated).toBe(true)
+    expect((await kernel.getTask(split.childTaskId))?.status).toBe(TASK_STATUS.awaiting_approval)
+
+    await port.cancelRun(t.id)
+
+    expect((await kernel.getTask(t.id))?.status).toBe(TASK_STATUS.cancelled)
+    expect((await kernel.getTask(split.childTaskId))?.status).toBe(TASK_STATUS.cancelled)
+
+    // the router (live in this harness) resolves the still-pending split off the cancelled
+    // child's terminal status — split_resolved lands on the PARENT (split.taskId = parentTaskId)
+    const waitFor = async (pred: () => Promise<boolean>, ms = 3000): Promise<boolean> => {
+      const start = Date.now()
+      while (Date.now() - start < ms) { if (await pred()) return true; await Bun.sleep(50) }
+      return false
+    }
+    expect(await waitFor(async () => (await kernel.eventsFor(t.id)).some(e => e.kind === EVENT_KIND.split_resolved))).toBe(true)
+    const resolved = (await kernel.eventsFor(t.id)).find(e => e.kind === EVENT_KIND.split_resolved)
+    expect((resolved!.payload as { outcome: string }).outcome).toBe('cancelled')
   })
 
   it('refuses to retry a task that is not blocked (no second concurrent run)', async () => {

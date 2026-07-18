@@ -9,7 +9,7 @@ import {
   type RunHandle, type RunOutcome, type Signal, type SplitResult, type ToolSource,
 } from '@orc/contracts'
 import { EventLog } from '../eventlog'
-import { fold, completedStepIds, nextAttempts, taskUsage, type State } from '../projections'
+import { fold, completedStepIds, nextAttempts, subtreeTaskIds, taskUsage, type State } from '../projections'
 import { KERNEL_ERROR_CODE, KernelError } from '../errors'
 import { readySteps, runOutcomeOf } from './interpreter'
 import { createSignalRouter } from './signal-router'
@@ -273,6 +273,39 @@ export async function createDbosPort(opts: {
     return { workflowId: workflowID, wait: () => handle.getResult() }
   }
 
+  // one task's cancellation (spec §6.1): DBOS cancel does NOT cascade by default, so cancel
+  // EVERY non-completed step's deterministic workflow (catches enqueued-but-not-yet-dequeued
+  // steps too), then the run, then stamp the terminal status. Shared by cancelRun for both the
+  // target task and every running/blocked descendant in its subtree.
+  async function cancelOne(taskId: string, state: State): Promise<void> {
+    const latest = state.runs.get(taskId)?.at(-1)
+    if (!latest) throw new KernelError(KERNEL_ERROR_CODE.invalid_transition, `no run to cancel for '${taskId}'`)
+    const approved = state.plans.get(taskId)?.approvedVersion
+    const plan = state.plans.get(taskId)?.versions.find(p => p.version === approved)
+    if (plan) {
+      const done = completedStepIds(state, taskId)
+      const attempts = nextAttempts(state, taskId, plan)
+      for (const s of plan.steps)
+        if (!done.has(s.id))
+          // tolerated miss: an attempt that never started has no workflow row to cancel
+          await DBOS.cancelWorkflow(stepWorkflowId(taskId, s.id, attempts[s.id]!)).catch(() => {})
+    }
+    // the run workflow always exists (run_started recorded its id) — a cancel failure here
+    // must surface to the caller, NOT be recorded as a successful cancellation
+    await DBOS.cancelWorkflow(latest.workflowId)
+    await log.transaction(async tx => {
+      // re-check under the log's write serialization: if the run finished in the meantime,
+      // leave its terminal status alone instead of stamping a cancellation that didn't happen
+      const status = fold(await tx.byTask(taskId)).tasks.get(taskId)!.status
+      if (status !== TASK_STATUS.running && status !== TASK_STATUS.blocked) return
+      await tx.append({
+        taskId, stepId: null, runToken: null,
+        kind: EVENT_KIND.task_status_changed,
+        payload: { taskId, from: status, to: TASK_STATUS.cancelled },
+      })
+    })
+  }
+
   const port: DbosPort = {
     launch: async () => {
       // DBOS__APPVERSION pinned from config BEFORE launch so recovery survives rebuilds (spec §4)
@@ -313,39 +346,25 @@ export async function createDbosPort(opts: {
       return startRunAt(taskId, runs.length === 0 ? 0 : Math.max(...runs.map(r => r.retryIndex)) + 1, o?.cwd)
     },
     cancelRun: async taskId => {
-      const state = await foldState(taskId)
+      const state = fold(await log.all()) // subtree spans tasks — byTask is not enough here
       const task = state.tasks.get(taskId)
       if (!task) throw new KernelError(KERNEL_ERROR_CODE.task_not_found, `no task '${taskId}'`)
       if (task.status !== TASK_STATUS.running && task.status !== TASK_STATUS.blocked)
         throw new KernelError(KERNEL_ERROR_CODE.invalid_transition, `task is '${task.status}' — only a running or blocked task can be cancelled`)
-      const latest = state.runs.get(taskId)?.at(-1)
-      if (!latest) throw new KernelError(KERNEL_ERROR_CODE.invalid_transition, `no run to cancel for '${taskId}'`)
-      // DBOS cancel does NOT cascade by default (spec §6.1): cancel EVERY non-completed step's
-      // deterministic workflow (catches enqueued-but-not-yet-dequeued steps too), then the run.
-      const approved = state.plans.get(taskId)?.approvedVersion
-      const plan = state.plans.get(taskId)?.versions.find(p => p.version === approved)
-      if (plan) {
-        const done = completedStepIds(state, taskId)
-        const attempts = nextAttempts(state, taskId, plan)
-        for (const s of plan.steps)
-          if (!done.has(s.id))
-            // tolerated miss: an attempt that never started has no workflow row to cancel
-            await DBOS.cancelWorkflow(stepWorkflowId(taskId, s.id, attempts[s.id]!)).catch(() => {})
+      // children before parent, so a parent gate-waiting on a child sees the child resolve first
+      for (const id of subtreeTaskIds(state, taskId).reverse()) {
+        const t = state.tasks.get(id)!
+        if (t.status === TASK_STATUS.awaiting_approval || t.status === TASK_STATUS.approved || t.status === TASK_STATUS.draft) {
+          await log.transaction(async tx => {
+            const fresh = fold(await tx.byTask(id)).tasks.get(id)!.status
+            if (fresh === TASK_STATUS.awaiting_approval || fresh === TASK_STATUS.approved || fresh === TASK_STATUS.draft)
+              await tx.append({ taskId: id, stepId: null, runToken: null, kind: EVENT_KIND.task_status_changed, payload: { taskId: id, from: fresh, to: TASK_STATUS.cancelled } })
+          })
+          continue
+        }
+        if (t.status === TASK_STATUS.running || t.status === TASK_STATUS.blocked)
+          await cancelOne(id, state)
       }
-      // the run workflow always exists (run_started recorded its id) — a cancel failure here
-      // must surface to the caller, NOT be recorded as a successful cancellation
-      await DBOS.cancelWorkflow(latest.workflowId)
-      await log.transaction(async tx => {
-        // re-check under the log's write serialization: if the run finished in the meantime,
-        // leave its terminal status alone instead of stamping a cancellation that didn't happen
-        const status = fold(await tx.byTask(taskId)).tasks.get(taskId)!.status
-        if (status !== TASK_STATUS.running && status !== TASK_STATUS.blocked) return
-        await tx.append({
-          taskId, stepId: null, runToken: null,
-          kind: EVENT_KIND.task_status_changed,
-          payload: { taskId, from: status, to: TASK_STATUS.cancelled },
-        })
-      })
     },
   }
 
