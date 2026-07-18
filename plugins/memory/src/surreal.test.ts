@@ -2,6 +2,7 @@ import { afterAll, describe, expect, it } from 'bun:test'
 import { RecordId, Surreal } from 'surrealdb'
 import type { EventRecord, MemoryAuthor } from '@orc/contracts'
 import { SurrealMemory } from './surreal'
+import { eventFixture } from '@orc/contracts/fixtures'
 import { createTestSurreal } from './test-helpers'
 
 const note = (over = {}) => ({
@@ -10,14 +11,10 @@ const note = (over = {}) => ({
   summary: 'tokens rotate', body: 'full text about auth tokens', ...over,
 })
 const cli: MemoryAuthor = { source: 'cli' }
-const written = (seq: number, n = note(), author: MemoryAuthor = cli): EventRecord => ({
-  seq, projectId: 'p1', idempotencyKey: null, taskId: null, stepId: null, runToken: null,
-  kind: 'memory_written', payload: { note: n, author }, usage: null, ts: `2026-07-18T0${Math.min(seq, 9)}:00:00Z`,
-})
-const deleted = (seq: number, id: string, scope = 'project'): EventRecord => ({
-  seq, projectId: 'p1', idempotencyKey: null, taskId: null, stepId: null, runToken: null,
-  kind: 'memory_deleted', payload: { id, scope, author: cli }, usage: null, ts: `2026-07-18T0${Math.min(seq, 9)}:00:00Z`,
-})
+const written = (seq: number, n = note(), author: MemoryAuthor = cli): EventRecord =>
+  eventFixture({ seq, taskId: null, kind: 'memory_written', payload: { note: n, author }, ts: `2026-07-18T0${Math.min(seq, 9)}:00:00Z` })
+const deleted = (seq: number, id: string, scope = 'project'): EventRecord =>
+  eventFixture({ seq, taskId: null, kind: 'memory_deleted', payload: { id, scope, author: cli }, ts: `2026-07-18T0${Math.min(seq, 9)}:00:00Z` })
 
 const drops: (() => Promise<void>)[] = []
 afterAll(async () => { for (const d of drops) await d() })

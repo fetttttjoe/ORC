@@ -3,7 +3,7 @@ import type { EventLog } from '@orc/kernel'
 import { SurrealMemory } from './surreal'
 import { noteRelPath, renderNoteFile } from './note-md'
 import { deleteMemoryFile, writeMemoryFile } from './write-note'
-import { rebuildVaultMemory } from './memory-index'
+import { rebuildVaultMemory, renderMemoryIndex } from './memory-index'
 
 export interface MemoryProjector { start(): Promise<void>; close(): Promise<void>; rebuild(): Promise<void>; catchUp(): Promise<void> }
 
@@ -17,9 +17,9 @@ export function createMemoryProjector(opts: { log: EventLog; surreal: SurrealMem
   // Surreal commits note+edges+cursor in ONE transaction (applyEvent); the vault file is
   // written only after an accepted apply. A crash between the two heals on the next
   // start/catchUp/rebuild, which replaces vault/memory/** from current Surreal state.
-  const applyOne = async (e: EventRecord): Promise<void> => {
+  const applyOne = async (e: EventRecord): Promise<boolean> => {
     const applied = await surreal.applyEvent(e)
-    if (!applied) return
+    if (!applied) return false
     if (e.kind === EVENT_KIND.memory_written) {
       const { note } = MemoryWrittenPayload.parse(e.payload)
       const full = await surreal.get(note.id, note.scope)
@@ -28,15 +28,17 @@ export function createMemoryProjector(opts: { log: EventLog; surreal: SurrealMem
       const p = MemoryDeletedPayload.parse(e.payload)
       deleteMemoryFile(vaultDir, noteRelPath(p))
     }
+    return true
   }
 
   // Reconcile by querying the log WHERE seq > cursor rather than trusting the subscribe
   // payload's ordering. Callers are responsible for serializing calls (see `serialize`
   // below) so revision/ordering stays deterministic.
-  const drainFrom = async (fromSeq: number): Promise<number> => {
+  const drainFrom = async (fromSeq: number): Promise<{ cursor: number; applied: number }> => {
     const events = await log.after(fromSeq, MEMORY_KINDS)
-    for (const e of events) await applyOne(e)
-    return surreal.getCursor()
+    let applied = 0
+    for (const e of events) if (await applyOne(e)) applied += 1
+    return { cursor: await surreal.getCursor(), applied }
   }
 
   // Every drain/clear goes through this so two passes (e.g. a subscribe notification firing
@@ -47,11 +49,17 @@ export function createMemoryProjector(opts: { log: EventLog; surreal: SurrealMem
     return next
   }
 
+  // per-note files are written per accepted event; only the aggregate index needs a refresh
+  const refreshIndex = async (): Promise<void> =>
+    writeMemoryFile(vaultDir, 'index.md', renderMemoryIndex(await surreal.allNotes()))
+
   let cursorCache = 0
   const enqueueReconcile = (): void => {
     void serialize(async () => {
       try {
-        cursorCache = await drainFrom(cursorCache)
+        const r = await drainFrom(cursorCache)
+        cursorCache = r.cursor
+        if (r.applied > 0) await refreshIndex()
       } catch (err) {
         console.warn(`memory projector: ${err instanceof Error ? err.message : String(err)}`)
         cursorCache = await surreal.getCursor() // resume after last applied event; don't re-apply succeeded ones
@@ -61,25 +69,30 @@ export function createMemoryProjector(opts: { log: EventLog; surreal: SurrealMem
 
   return {
     start: async () => {
-      await serialize(async () => {
-        cursorCache = await drainFrom(await surreal.getCursor())
-        await rebuildVaultMemory(surreal, vaultDir)
-      })
+      // subscribe BEFORE the initial drain: an event landing between the drain's read and a
+      // later subscribe would fall below the subscription's start cursor and never arrive —
+      // this order guarantees every event is covered by the drain or the live stream
       unsub = await log.subscribe({}, () => enqueueReconcile())
+      await serialize(async () => {
+        cursorCache = (await drainFrom(await surreal.getCursor())).cursor
+        await rebuildVaultMemory(surreal, vaultDir) // boot-time heal: replace vault/memory/** from Surreal
+      })
     },
     close: async () => { if (unsub) { await unsub(); unsub = null } await applying },
     rebuild: async () => {
       await serialize(async () => {
         await surreal.clear()
-        cursorCache = await drainFrom(0)
+        cursorCache = (await drainFrom(0)).cursor
         await rebuildVaultMemory(surreal, vaultDir)
       })
     },
-    // one-shot drain from the persisted cursor (no clear, no subscription) — the CLI's projection path
+    // one-shot drain from the persisted cursor (no clear, no subscription) — the CLI's
+    // projection path. O(applied), not O(notes): the full vault reconcile stays on start/rebuild.
     catchUp: async () => {
       await serialize(async () => {
-        cursorCache = await drainFrom(await surreal.getCursor())
-        await rebuildVaultMemory(surreal, vaultDir)
+        const r = await drainFrom(await surreal.getCursor())
+        cursorCache = r.cursor
+        if (r.applied > 0) await refreshIndex()
       })
     },
   }

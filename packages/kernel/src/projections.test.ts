@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'bun:test'
 import type { EventRecord, Plan, TaskNode } from '@orc/contracts'
-import { draftFixture, planFixture, stepFixture } from '@orc/contracts/fixtures'
+import { eventFixture, draftFixture, planFixture, stepFixture } from '@orc/contracts/fixtures'
 import { fold, completedStepIds, nextAttempts, crashDedupKey, subtreeTaskIds, subtreeUsage, pendingSplitForChild } from './projections'
 
 const task: TaskNode = {
@@ -12,7 +12,7 @@ const task: TaskNode = {
 const planV = (version: number): Plan => planFixture({ version })
 
 const evt = (seq: number, kind: EventRecord['kind'], payload: Record<string, unknown>): EventRecord =>
-  ({ seq, ts: '2026-07-16T00:00:00.000Z', projectId: 'p1', idempotencyKey: null, taskId: 't1', stepId: null, runToken: null, kind, payload, usage: null })
+  eventFixture({ seq, ts: '2026-07-16T00:00:00.000Z', kind, payload })
 
 describe('fold', () => {
   it('replays a full lifecycle into consistent state', () => {
@@ -110,7 +110,7 @@ const exEvt = (
 ): EventRecord =>
   // envelope runToken mirrors payload.runToken (as in real events); falls back for
   // envelope-only kinds like run_started whose payload carries no runToken.
-  ({ seq, ts: '2026-07-17T00:00:00.000Z', projectId: 'p1', idempotencyKey: null, taskId: 't1', stepId: 's1',
+  eventFixture({ seq, ts: '2026-07-17T00:00:00.000Z', stepId: 's1',
     runToken: typeof payload.runToken === 'string' ? payload.runToken : rt('s1'), kind, payload, usage })
 
 describe('fold — execution kinds', () => {

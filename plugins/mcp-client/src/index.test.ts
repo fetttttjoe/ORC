@@ -7,7 +7,7 @@ const FIXTURE = fileURLToPath(new URL('./fixture-server.ts', import.meta.url))
 const SERVERS: Record<string, McpServerConfig> = { fixture: { command: 'bun', args: [FIXTURE] } }
 const hubs: Array<{ close(): Promise<void> }> = []
 const makeHub = (trusted = new Set(['fixture']), servers = SERVERS) => {
-  const hub = createMcpHub(servers, trusted)
+  const hub = createMcpHub(servers, id => trusted.has(id))
   hubs.push(hub)
   return hub
 }

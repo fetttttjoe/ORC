@@ -4,10 +4,10 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { Surreal } from 'surrealdb'
 import { EVENT_KIND, type OperationSpec } from '@orc/contracts'
-import { loadConfig, projectDatabaseName, requireProject, type PluginHost, type ProjectConfig } from '@orc/kernel'
+import { loadConfig, projectDatabaseName, requireProject, type ProjectConfig } from '@orc/kernel'
 import { createTestDb, TEST_PROJECT_ID } from '@orc/kernel/test-helpers'
-import type { McpHub } from '@orc/mcp-client'
 import { buildProgram, openKernel, runInit } from './main'
+import { buildPlugins } from './runtime'
 
 const dbs: Array<{ drop: () => Promise<void> }> = []
 const surrealConfigs: ProjectConfig[] = []
@@ -244,7 +244,8 @@ describe('orc CLI', () => {
     const { kernel, log } = await openKernel(db.url, { projectId: TEST_PROJECT_ID })
     const lines: string[] = []
     spyOn(console, 'log').mockImplementation((...a: unknown[]) => { lines.push(a.join(' ')) })
-    const plugin = { host: {} as PluginHost, hub: {} as McpHub, config, log } // memory commands never touch host/hub
+    const { host, hub } = await buildPlugins(config) // real plugin wiring — no stub casts
+    const plugin = { host, hub, config, log }
     const run = (...args: string[]) => buildProgram(kernel, undefined, plugin).parseAsync(args, { from: 'user' })
 
     const id = `cli-test-${Math.random().toString(36).slice(2, 10)}`
@@ -279,5 +280,9 @@ describe('orc CLI', () => {
     lines.length = 0
     await run('memory', 'cat', id)
     expect(lines[0]).toContain(`no note '${id}'`)
+
+    await hub.close()
+    await host.shutdown()
+    await log.close()
   })
 })

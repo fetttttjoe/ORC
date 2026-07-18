@@ -1,4 +1,4 @@
-import { PlanDraft, type Plan } from '@orc/contracts'
+import { isRecord, PlanDraft, type Plan } from '@orc/contracts'
 import { frontmatter } from './frontmatter'
 
 const FENCE = '---'
@@ -22,7 +22,9 @@ export function parsePlanFile(text: string): PlanDraft {
   if (!text.startsWith(`${FENCE}\n`)) throw new Error('plan file missing frontmatter fence')
   const end = text.indexOf(`\n${FENCE}`, FENCE.length)
   if (end === -1) throw new Error('plan file has unclosed frontmatter fence')
-  const data = Bun.YAML.parse(text.slice(FENCE.length + 1, end)) as Record<string, unknown>
+  const parsed: unknown = Bun.YAML.parse(text.slice(FENCE.length + 1, end))
+  if (!isRecord(parsed)) throw new Error('plan file frontmatter is not a mapping')
+  const data = parsed
   return PlanDraft.parse({
     strategyRef: data.strategyRef,
     costEstimateUSD: data.costEstimateUSD ?? null,

@@ -6,8 +6,8 @@ const require = createRequire(import.meta.url)
 
 const isManifest = (v: unknown): v is ExtensionManifest =>
   typeof v === 'object' && v !== null &&
-  typeof (v as ExtensionManifest).id === 'string' &&
-  typeof (v as ExtensionManifest).activate === 'function'
+  'id' in v && typeof v.id === 'string' &&
+  'activate' in v && typeof v.activate === 'function'
 
 export interface LoadedExtension { path: string; manifest: ExtensionManifest }
 
@@ -54,7 +54,7 @@ export class ExtensionHost {
 
   private async importAndActivate(abs: string, label: string): Promise<void> {
     try {
-      const mod = (await import(abs)) as { default?: unknown }
+      const mod: { default?: unknown } = await import(abs)
       if (!isManifest(mod.default)) {
         console.warn(`extension '${label}' has no valid default export ({ id, activate }) — skipped`)
         return

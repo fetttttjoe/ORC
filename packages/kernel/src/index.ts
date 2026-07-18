@@ -1,3 +1,4 @@
+export * from './atomic-file'
 export * from './eventlog'
 export * from './schema'
 export * from './projections'

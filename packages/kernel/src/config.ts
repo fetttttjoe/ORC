@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto'
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import path from 'node:path'
+import { atomicWriteFileSync } from './atomic-file'
 import { z } from 'zod'
 import { ApprovalPolicy, MCP_SERVER_ID_RE, McpServerConfig, ModelCost } from '@orc/contracts'
 
@@ -89,9 +90,7 @@ export function initializeProject(
   if (current.projectId && !opts.force)
     throw new Error(`project already initialized (${file}) — use --force to mint a new identity`)
   const next = { ...current, projectId: randomUUID(), projectName: name }
-  mkdirSync(path.dirname(file), { recursive: true })
-  writeFileSync(`${file}.tmp`, `${JSON.stringify(next, null, 2)}\n`)
-  renameSync(`${file}.tmp`, file)
+  atomicWriteFileSync(file, `${JSON.stringify(next, null, 2)}\n`)
   return { projectId: next.projectId, projectName: name }
 }
 

@@ -17,7 +17,8 @@ export class KernelError extends Error {
 // drizzle wraps driver errors in DrizzleQueryError (unwrap .cause), pg reports ECONNREFUSED.
 export function isConnectionRefused(err: unknown): boolean {
   if (err instanceof AggregateError) return err.errors.some(isConnectionRefused)
-  if (typeof err === 'object' && err !== null && (err as { code?: string }).code === 'ECONNREFUSED') return true
-  const cause = (err as { cause?: unknown } | null)?.cause
+  if (typeof err !== 'object' || err === null) return false
+  if ('code' in err && err.code === 'ECONNREFUSED') return true
+  const cause = 'cause' in err ? err.cause : undefined
   return cause !== undefined && cause !== err && isConnectionRefused(cause)
 }

@@ -35,6 +35,13 @@ interface StepResult { stepId: string; ok: boolean }
 const stepWorkflowId = (taskId: string, stepId: string, attempt: number): string =>
   `step:${taskId}:${stepId}:a${attempt}`
 
+// DBOS guarantees a workflow id inside a registered workflow — fail loudly if that ever breaks
+const workflowIdOrThrow = (): string => {
+  const id = DBOS.workflowID
+  if (!id) throw new Error('DBOS.workflowID is unset outside a workflow context')
+  return id
+}
+
 export async function createDbosPort(opts: {
   log: EventLog
   config: ProjectConfig
@@ -103,7 +110,7 @@ export async function createDbosPort(opts: {
 
   const stepWorkflow = DBOS.registerWorkflow(
     async (args: StepArgs): Promise<StepResult> => {
-      const runToken = DBOS.workflowID!
+      const runToken = workflowIdOrThrow()
       const checkpoint = makeCheckpoint(args.taskId, args.stepId, runToken)
       const operation = makeOperation(args.taskId, args.stepId, runToken)
 
@@ -134,9 +141,12 @@ export async function createDbosPort(opts: {
         return { step, taskSpec: task.spec, budgetUSD: task.budgetUSD, depOutputs, skills: loadedSkills }
       }, r => [
         { kind: EVENT_KIND.step_started, payload: { stepId: args.stepId, runToken, attempt: args.attempt } },
-        ...r.skills.map(s => ({
+        ...r.skills.map((s): EventDraft => ({
           kind: EVENT_KIND.skill_loaded,
           payload: { stepId: args.stepId, runToken, name: s.name, hash: s.hash },
+          // hash in the key: recovery after a hot skill edit records the new load instead of
+          // colliding with the committed draft and permanently failing the step
+          idempotencyKey: `${runToken}:skill:${s.name}:${s.hash}`,
         })),
       ])
 
@@ -230,20 +240,31 @@ export async function createDbosPort(opts: {
       if (signal?.outcome === SIGNAL_OUTCOME.success) {
         const success = signal // closures below see the narrowed binding
         // verify declared outputs at the trusted boundary; receipts and step_completed
-        // commit in ONE transaction — a completed step can never lack its receipts
+        // commit in ONE transaction — a completed step can never lack its receipts.
+        // If the completion already committed (crash before DBOS recorded the step result),
+        // skip re-verification: the workspace may have changed since, and re-hashing would
+        // conflict with the committed receipts and flip a durable success into failed.
         await checkpoint('finish', async () => {
+          const committed = (await log.byTask(args.taskId))
+            .some(e => e.kind === EVENT_KIND.step_completed && e.runToken === runToken)
+          if (committed) return null
           try {
             return verifyArtifacts(workspaceDir, success.outputs ?? [])
           } catch (err) {
             throw classifiedError(FAILURE_CLASS.validation_error, err instanceof Error ? err.message : String(err))
           }
-        }, receipts => [
+        }, receipts => receipts === null ? [] : [
           ...receipts.map((r): EventDraft => ({
             kind: EVENT_KIND.artifact_produced,
             payload: { path: r.path, sha256: r.sha256, size: r.size },
             idempotencyKey: `${runToken}:artifact:${r.path}`,
           })),
-          { kind: EVENT_KIND.step_completed, payload: { stepId: args.stepId, runToken, summary: success.summary } },
+          {
+            kind: EVENT_KIND.step_completed,
+            payload: { stepId: args.stepId, runToken, summary: success.summary },
+            // stable key: never positional — the receipt count must not shift it
+            idempotencyKey: `${runToken}:finish:step_completed`,
+          },
         ])
         return { stepId: args.stepId, ok: true }
       }
@@ -264,15 +285,15 @@ export async function createDbosPort(opts: {
 
   const runWorkflow = DBOS.registerWorkflow(
     async (args: RunArgs): Promise<RunOutcome> => {
-      const workflowId = DBOS.workflowID!
+      const workflowId = workflowIdOrThrow()
       const checkpoint = makeCheckpoint(args.taskId, null, workflowId) // run-level events carry no stepId
 
       const init = await checkpoint('init', async () => {
         const state = await foldState(args.taskId)
-        const plan = state.plans.get(args.taskId)!.versions.find(p => p.version === args.planVersion)!
-        const from = state.tasks.get(args.taskId)!.status
-        const depth = state.tasks.get(args.taskId)!.depth
-        return { plan, done: [...completedStepIds(state, args.taskId)], attempts: nextAttempts(state, args.taskId, plan), from, depth }
+        const task = state.tasks.get(args.taskId)
+        const plan = state.plans.get(args.taskId)?.versions.find(p => p.version === args.planVersion)
+        if (!task || !plan) throw classifiedError(FAILURE_CLASS.validation_error, `no task/plan v${args.planVersion} for '${args.taskId}'`)
+        return { plan, done: [...completedStepIds(state, args.taskId)], attempts: nextAttempts(state, args.taskId, plan), from: task.status, depth: task.depth }
       }, r => [
         { kind: EVENT_KIND.run_started, payload: { taskId: args.taskId, planVersion: args.planVersion, retryIndex: args.retryIndex, workflowId, cwd: args.cwd } },
         { kind: EVENT_KIND.task_status_changed, payload: { taskId: args.taskId, from: r.from, to: TASK_STATUS.running } },
@@ -307,7 +328,7 @@ export async function createDbosPort(opts: {
 
       const outcome = runOutcomeOf(plan, done)
       await checkpoint('finish', async () => {
-        const status = (await foldState(args.taskId)).tasks.get(args.taskId)!.status
+        const status = (await foldState(args.taskId)).tasks.get(args.taskId)?.status ?? TASK_STATUS.running
         return { outcome, status }
       }, r => r.status !== TASK_STATUS.running ? [] : [
         // a cancelRun that landed mid-run already appended running→cancelled — never overwrite it
@@ -355,7 +376,7 @@ export async function createDbosPort(opts: {
     await log.transaction(async tx => {
       // re-check under the log's write serialization: if the run finished in the meantime,
       // leave its terminal status alone instead of stamping a cancellation that didn't happen
-      const status = fold(await tx.byTask(taskId)).tasks.get(taskId)!.status
+      const status = fold(await tx.byTask(taskId)).tasks.get(taskId)?.status
       if (status !== TASK_STATUS.running && status !== TASK_STATUS.blocked) return
       await tx.append({
         taskId, stepId: null, runToken: null,

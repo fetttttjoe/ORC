@@ -13,10 +13,7 @@ const SECRET_ENV_RE = /(_KEY|_TOKEN|_SECRET|_PASSWORD)$/
 // short values are not globally string-replaced — they would corrupt ordinary text
 const MIN_SECRET_LENGTH = 8
 
-export interface Redactor {
-  value(v: unknown): unknown
-  record(r: Record<string, unknown>): Record<string, unknown>
-}
+export type Redactor = (record: Record<string, unknown>) => Record<string, unknown>
 
 export function buildRedactor(env: Record<string, string | undefined>, extraNames: string[]): Redactor {
   const names = new Set([...Object.keys(env).filter(n => SECRET_ENV_RE.test(n)), ...extraNames])
@@ -31,7 +28,10 @@ export function buildRedactor(env: Record<string, string | undefined>, extraName
     return out
   }
 
-  const entry = ([k, v]: [string, unknown]): [string, unknown] => [k, isSensitiveKey(k) ? '[REDACTED]' : value(v)]
+  // keys are cleaned too: a secret or NUL inside a JSON key (URL-keyed maps, header names)
+  // must not reach storage any more than one inside a value
+  const entry = ([k, v]: [string, unknown]): [string, unknown] =>
+    [cleanString(k), isSensitiveKey(k) ? '[REDACTED]' : value(v)]
 
   const value = (v: unknown): unknown =>
     typeof v === 'string' ? cleanString(v)
@@ -39,5 +39,5 @@ export function buildRedactor(env: Record<string, string | undefined>, extraName
     : v !== null && typeof v === 'object' ? Object.fromEntries(Object.entries(v).map(entry))
     : v
 
-  return { value, record: r => Object.fromEntries(Object.entries(r).map(entry)) }
+  return r => Object.fromEntries(Object.entries(r).map(entry))
 }

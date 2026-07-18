@@ -31,8 +31,7 @@ async function makeCli(dir: string) {
     providers: new Map([['fake', { costs: {}, languageModel: () => ({}) }]]),
     executors: new Map([['api-loop', { id: 'api-loop', startTurn: async function* () {} }]]),
   })
-  const trusted = Object.entries(config.mcpServers).filter(([id, cfg]) => isMcpTrusted(host.trust, id, cfg)).map(([id]) => id)
-  const hub = createMcpHub(config.mcpServers, new Set(trusted))
+  const hub = createMcpHub(config.mcpServers, (id, cfg) => isMcpTrusted(loadTrust(dir), id, cfg))
   const { kernel, log } = await openKernel(db.url, { projectId: TEST_PROJECT_ID, refValidator: host.refValidator })
   const lines: string[] = []
   spyOn(console, 'log').mockImplementation((...a: unknown[]) => { lines.push(a.join(' ')) })

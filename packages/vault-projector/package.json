@@ -2,9 +2,12 @@
   "name": "@orc/vault-projector",
   "version": "0.0.0",
   "type": "module",
-  "exports": { ".": "./src/index.ts" },
+  "exports": {
+    ".": "./src/index.ts"
+  },
   "dependencies": {
     "@orc/contracts": "workspace:*",
-    "@orc/kernel": "workspace:*"
+    "@orc/kernel": "workspace:*",
+    "zod": "^4"
   }
 }

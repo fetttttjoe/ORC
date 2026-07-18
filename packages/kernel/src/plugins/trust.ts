@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto'
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import path from 'node:path'
+import { atomicWriteFileSync } from '../atomic-file'
 import { z } from 'zod'
 import type { McpServerConfig } from '@orc/contracts'
 
@@ -44,13 +45,9 @@ export function loadTrust(dir: string = process.cwd()): TrustStore {
   }
 }
 
-// consent is local and private: atomic tmp+rename, owner-only mode
+// consent is local and private: atomic write, owner-only mode
 function saveTrust(dir: string, store: TrustStore): void {
-  const file = trustPath(dir)
-  mkdirSync(path.dirname(file), { recursive: true })
-  const tmp = `${file}.tmp`
-  writeFileSync(tmp, JSON.stringify(store, null, 2) + '\n', { mode: 0o600 })
-  renameSync(tmp, file)
+  atomicWriteFileSync(trustPath(dir), JSON.stringify(store, null, 2) + '\n', { mode: 0o600 })
 }
 
 function grant(kind: 'mcp' | 'extensions', record: TrustRecord, dir: string): TrustStore {

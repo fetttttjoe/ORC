@@ -3,14 +3,14 @@ import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { EventLog } from '@orc/kernel'
-import { createTestDb, testConfig } from '@orc/kernel/test-helpers'
+import { createTestDb, testConfig, TEST_PROJECT_ID } from '@orc/kernel/test-helpers'
 import { createMemory } from './index'
 import { createTestSurreal } from './test-helpers'
 
 const drops: (() => Promise<void>)[] = []
 afterAll(async () => { for (const d of drops) await d() })
 
-const P1 = '00000000-0000-4000-8000-000000000001'
+const P1 = TEST_PROJECT_ID
 const P2 = '00000000-0000-4000-8000-000000000002'
 
 describe('project isolation (SurrealDB native database boundary)', () => {

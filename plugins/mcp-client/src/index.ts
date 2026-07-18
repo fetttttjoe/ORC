@@ -2,7 +2,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StdioClientTransport, getDefaultEnvironment } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { ToolListChangedNotificationSchema } from '@modelcontextprotocol/sdk/types.js'
 import {
-  mcpToolName, parseToolRef,
+  isRecord, mcpToolName, parseToolRef,
   type McpServerConfig, type ResolvedTool, type ToolSource,
 } from '@orc/contracts'
 
@@ -39,7 +39,9 @@ export interface McpHub extends ToolSource {
 // plan validation — a stale approved plan cannot spawn an untrusted server.
 export function createMcpHub(
   servers: Record<string, McpServerConfig>,
-  trustedMcp: ReadonlySet<string>,
+  // predicate, not a startup snapshot: trust is re-evaluated at the moment a server is
+  // spawned, so a declaration that changed after launch can never ride an old grant
+  isTrusted: (serverId: string, cfg: McpServerConfig) => boolean,
 ): McpHub {
   const clients = new Map<string, Client>()
   const toolCache = new Map<string, ToolInfo[]>()
@@ -47,7 +49,7 @@ export function createMcpHub(
   async function ensureClient(serverId: string): Promise<Client> {
     const cfg = servers[serverId]
     if (!cfg) throw new Error(`undeclared MCP server '${serverId}' (declare it in .orc/config.json mcpServers)`)
-    if (!trustedMcp.has(serverId)) throw new Error(`MCP server '${serverId}' is not trusted (orc mcp trust ${serverId})`)
+    if (!isTrusted(serverId, cfg)) throw new Error(`MCP server '${serverId}' is not trusted (orc mcp trust ${serverId})`)
     const existing = clients.get(serverId)
     if (existing) return existing
     const transport = new StdioClientTransport({
@@ -82,7 +84,7 @@ export function createMcpHub(
     const tools = res.tools.map(t => ({
       name: t.name,
       description: t.description ?? '',
-      inputSchema: t.inputSchema as Record<string, unknown>,
+      inputSchema: isRecord(t.inputSchema) ? t.inputSchema : {},
     }))
     toolCache.set(serverId, tools)
     return tools
@@ -116,7 +118,7 @@ export function createMcpHub(
           inputSchema: tool.inputSchema,
           execute: async input => {
             try {
-              const r = await client.callTool({ name: toolName, arguments: (input ?? {}) as Record<string, unknown> })
+              const r = await client.callTool({ name: toolName, arguments: isRecord(input) ? input : {} })
               return { output: r.content, isError: r.isError === true }
             } catch (err) {
               // transport death is a tool error the model can react to; drop the client

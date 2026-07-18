@@ -1,5 +1,5 @@
 import { z } from 'zod'
-import { LINK_KINDS, LinkKind, MemoryNoteInput, type MemoryAuthor, type MemoryStore, type ResolvedTool } from '@orc/contracts'
+import { NOTE_KINDS, LINK_KINDS, LinkKind, MemoryNoteInput, type MemoryAuthor, type MemoryStore, type ResolvedTool } from '@orc/contracts'
 import { applyBudget, approxTokens } from './budget'
 
 const ok = (output: unknown) => ({ output, isError: false })
@@ -44,7 +44,7 @@ export function memoryTools(store: MemoryStore, author: MemoryAuthor): ResolvedT
           id: { ...idSchema, description: 'stable slug' },
           title: { type: 'string', minLength: 1, maxLength: 200 },
           kind: {
-            type: 'string', enum: ['fact', 'decision', 'architecture_current', 'architecture_target', 'documentation'],
+            type: 'string', enum: [...NOTE_KINDS],
             description: 'architecture_current = observed implementation; architecture_target = intended design (default fact)',
           },
           summary: { type: 'string', maxLength: 500 }, body: { type: 'string' },

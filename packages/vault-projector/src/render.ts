@@ -1,4 +1,5 @@
-import { EVENT_KIND, OPERATION_STATUS, STEP_RUN_STATUS, TASK_STATUS, type EventRecord, type Plan, type TaskNode } from '@orc/contracts'
+import { z } from 'zod'
+import { EVENT_KIND, OPERATION_STATUS, PAYLOAD_SCHEMAS, STEP_RUN_STATUS, TASK_STATUS, type EventRecord, type Plan, type TaskNode } from '@orc/contracts'
 import { fold, taskUsage, type State, type StepState } from '@orc/kernel'
 import { frontmatter } from './frontmatter'
 import { renderPlanFile } from './plan-md'
@@ -30,8 +31,10 @@ function mermaidDag(plan: Plan, steps: Map<string, StepState> | undefined): stri
   return lines.join('\n')
 }
 
-// mermaid labels: double quotes end the label — never let data break the graph
-const label = (s: string): string => s.replaceAll('"', "'")
+// mermaid labels: double quotes end the label — never let data break the graph.
+// Exported: every mermaid-producing view (incl. plugins/memory's index) must share one escaper.
+export const mermaidLabel = (s: string): string => s.replaceAll('"', "'")
+const label = mermaidLabel
 
 // Plan topology plus live operation nodes: which effects ran, how many attempts, and
 // whether any node is still unresolved (started with no completion — the honest gap).
@@ -98,14 +101,25 @@ function renderLog(events: EventRecord[]): string {
   return fm({ type: 'log' }, `# Log\n\n${rows || '_empty_'}`)
 }
 
+// lenient reads: a malformed historical payload renders as a gap, never a crash
+const AgentCallView = z.object({ iteration: z.number(), response: z.object({ text: z.string().optional() }).optional() })
+
 function renderSession(stepId: string, events: EventRecord[], step: StepState | undefined): string {
   const parts: string[] = []
   for (const e of events) {
-    const p = e.payload as Record<string, any>
-    if (e.kind === EVENT_KIND.agent_call) parts.push(`### Iteration ${p.iteration}\n\n${p.response?.text || '_(tool-only turn)_'}`)
-    else if (e.kind === EVENT_KIND.tool_call) parts.push(`- 🔧 **${p.toolName}** \`${truncate(JSON.stringify(p.input), 200)}\``)
-    else if (e.kind === EVENT_KIND.tool_result) parts.push(`  ↳ ${p.isError ? '❌' : '✓'} \`${truncate(JSON.stringify(p.output), 200)}\``)
-    else if (e.kind === EVENT_KIND.signal_received) parts.push(`### Signal: ${p.signal.outcome}\n\n${p.signal.summary}`)
+    if (e.kind === EVENT_KIND.agent_call) {
+      const p = AgentCallView.safeParse(e.payload)
+      if (p.success) parts.push(`### Iteration ${p.data.iteration}\n\n${p.data.response?.text || '_(tool-only turn)_'}`)
+    } else if (e.kind === EVENT_KIND.tool_call) {
+      const p = PAYLOAD_SCHEMAS.tool_call.safeParse(e.payload)
+      if (p.success) parts.push(`- 🔧 **${p.data.toolName}** \`${truncate(JSON.stringify(p.data.input), 200)}\``)
+    } else if (e.kind === EVENT_KIND.tool_result) {
+      const p = PAYLOAD_SCHEMAS.tool_result.safeParse(e.payload)
+      if (p.success) parts.push(`  ↳ ${p.data.isError ? '❌' : '✓'} \`${truncate(JSON.stringify(p.data.output), 200)}\``)
+    } else if (e.kind === EVENT_KIND.signal_received) {
+      const p = PAYLOAD_SCHEMAS.signal_received.safeParse(e.payload)
+      if (p.success) parts.push(`### Signal: ${p.data.signal.outcome}\n\n${p.data.signal.summary}`)
+    }
   }
   return fm({ type: 'session', step: stepId, status: step?.status ?? 'pending' }, `# Session: ${stepId}\n\n${parts.join('\n') || '_no activity yet_'}`)
 }

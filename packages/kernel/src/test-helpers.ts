@@ -33,7 +33,7 @@ export async function createTestDb(): Promise<{ url: string; drop: () => Promise
     url: url.toString(),
     drop: async () => {
       // also drop every per-project DBOS system DB a port test may have auto-created
-      const derived = await admin.query(`SELECT datname FROM pg_database WHERE datname LIKE '${name}_dbos_%'`)
+      const derived = await admin.query('SELECT datname FROM pg_database WHERE datname LIKE $1', [`${name}_dbos_%`])
       for (const row of derived.rows) {
         if (!/^[a-z0-9_]+$/.test(row.datname)) throw new Error(`unexpected database name: ${row.datname}`)
         await admin.query(`DROP DATABASE IF EXISTS ${row.datname} WITH (FORCE)`)

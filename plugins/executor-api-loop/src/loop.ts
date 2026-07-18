@@ -1,31 +1,22 @@
-import { generateText, type LanguageModel, type ModelMessage, type ToolSet } from 'ai'
+import { generateText, type JSONValue, type LanguageModel, type ModelMessage, type ToolSet } from 'ai'
 import {
-  EVENT_KIND, FAILURE_CLASS, SIGNAL_OUTCOME, UNIFIED_EVENT_TYPE, terminalError,
+  EVENT_KIND, FAILURE_CLASS, OPERATION_KIND, SIGNAL_OUTCOME, UNIFIED_EVENT_TYPE, terminalError,
   type AgentExecutor, type EventDraft, type ExecutorContext, type Signal,
   type SplitResult, type UnifiedEvent, type Usage,
 } from '@orc/contracts'
-import { statSync } from 'node:fs'
-import path from 'node:path'
-import { resolveInWorkspace } from '@orc/contracts'
+import { validateOutputPaths } from '@orc/contracts'
 import { JoinSplitsInput, SignalInput, TOOL_NAME, executeTool, toolSet } from './tools'
 
 // Pre-flight for declared outputs, so the model can fix a bad declaration instead of the
-// step failing at the runtime's trusted verification. Returns an error string or null.
+// step failing at the runtime's trusted verification. Same rule set as the runtime
+// (validateOutputPaths) — the two can never drift. Returns an error string or null.
 function invalidOutputs(workspaceDir: string, outputs: string[]): string | null {
-  const seen = new Set<string>()
-  for (const p of outputs) {
-    let abs: string
-    try {
-      abs = resolveInWorkspace(workspaceDir, p)
-    } catch (err) {
-      return err instanceof Error ? err.message : String(err)
-    }
-    if (!statSync(abs, { throwIfNoEntry: false })?.isFile()) return `not a regular file: ${p}`
-    const canonical = path.relative(workspaceDir, abs)
-    if (seen.has(canonical)) return `duplicate output path: ${p}`
-    seen.add(canonical)
+  try {
+    validateOutputPaths(workspaceDir, outputs)
+    return null
+  } catch (err) {
+    return err instanceof Error ? err.message : String(err)
   }
-  return null
 }
 
 interface TurnResult {
@@ -37,18 +28,24 @@ interface TurnResult {
 
 const TRANSIENT_STATUS = new Set([408, 409, 429, 500, 502, 503, 504])
 
+// tool outputs are JSON-shaped by construction; the round-trip proves it to the type system
+// (and normalizes undefined/Date exactly as the wire format would)
+const toJson = (v: unknown): JSONValue => JSON.parse(JSON.stringify(v ?? null))
+
+const errField = (err: unknown, key: string): unknown =>
+  typeof err === 'object' && err !== null && key in err ? Reflect.get(err, key) : undefined
+
 function isTransient(err: unknown): boolean {
   // ai@7 exhausts its internal retries on retryable errors and throws RetryError, which carries
   // no status fields itself — classify by the underlying provider error instead
-  const lastError = (err as { lastError?: unknown } | null)?.lastError
+  const lastError = errField(err, 'lastError')
   if (lastError !== undefined && lastError !== err) return isTransient(lastError)
   // APICallError/GatewayError expose the SDK's own retryability verdict — trust it first
-  const isRetryable = (err as { isRetryable?: unknown } | null)?.isRetryable
+  const isRetryable = errField(err, 'isRetryable')
   if (typeof isRetryable === 'boolean') return isRetryable
-  const status = (err as { statusCode?: number; status?: number }).statusCode
-    ?? (err as { status?: number }).status
+  const status = errField(err, 'statusCode') ?? errField(err, 'status')
   if (typeof status === 'number') return TRANSIENT_STATUS.has(status)
-  const code = (err as { code?: string }).code
+  const code = errField(err, 'code')
   return code === 'ECONNRESET' || code === 'ECONNREFUSED' || code === 'ETIMEDOUT' || code === 'ENOTFOUND'
 }
 
@@ -56,8 +53,8 @@ function normalizeUsage(u: { inputTokens?: number; outputTokens?: number } | und
   const input = u?.inputTokens
   const output = u?.outputTokens
   return {
-    inputTokens: Number.isFinite(input) ? Math.floor(input as number) : 0,
-    outputTokens: Number.isFinite(output) ? Math.floor(output as number) : 0,
+    inputTokens: typeof input === 'number' && Number.isFinite(input) ? Math.floor(input) : 0,
+    outputTokens: typeof output === 'number' && Number.isFinite(output) ? Math.floor(output) : 0,
     costUSD: null, // priced by the port, which knows the provider cost table
     estimated: !Number.isFinite(input) || !Number.isFinite(output),
   }
@@ -147,7 +144,7 @@ export function apiLoopExecutor(): AgentExecutor<LanguageModel> {
           turn = await ctx.operation(
             {
               operationId: `${ctx.runToken}:model:${iteration}`,
-              kind: 'model',
+              kind: OPERATION_KIND.model,
               name: ctx.step.modelRef,
               before: { messages: messages.slice(persistedThrough) },
             },
@@ -192,7 +189,7 @@ export function apiLoopExecutor(): AgentExecutor<LanguageModel> {
                   : { error: 'not executed: resolve the invalid signal call first' },
               },
             })),
-          } as ModelMessage)
+          })
           continue // counts as an iteration (agent_error accounting, spec §9)
         }
 
@@ -215,7 +212,7 @@ export function apiLoopExecutor(): AgentExecutor<LanguageModel> {
             results.push(await ctx.operation(
               {
                 operationId: `${ctx.runToken}:tool:${iteration}:${call.toolCallId}`,
-                kind: 'tool',
+                kind: OPERATION_KIND.tool,
                 name: call.toolName,
                 before: { input: call.input },
               },
@@ -238,9 +235,9 @@ export function apiLoopExecutor(): AgentExecutor<LanguageModel> {
               type: 'tool-result',
               toolCallId: call.toolCallId,
               toolName: call.toolName,
-              output: { type: 'json', value: results[i]!.output },
+              output: { type: 'json', value: toJson(results[i]!.output) },
             })),
-          } as ModelMessage)
+          })
         }
 
         if (joinCall && parsedJoin?.success) {
@@ -268,7 +265,7 @@ export function apiLoopExecutor(): AgentExecutor<LanguageModel> {
               // tool_use makes the next generateText request rejected (missing tool result)
               ...(signalCall ? [notExecutedSignalResult(signalCall)] : []),
             ],
-          } as ModelMessage)
+          })
           continue
         }
         if (joinCall && parsedJoin && !parsedJoin.success) {
@@ -278,7 +275,7 @@ export function apiLoopExecutor(): AgentExecutor<LanguageModel> {
               { type: 'tool-result', toolCallId: joinCall.toolCallId, toolName: TOOL_NAME.join_splits, output: { type: 'json', value: { error: `invalid join_splits input: ${parsedJoin.error.message}` } } },
               ...(signalCall ? [notExecutedSignalResult(signalCall)] : []),
             ],
-          } as ModelMessage)
+          })
           continue
         }
 
@@ -297,7 +294,7 @@ export function apiLoopExecutor(): AgentExecutor<LanguageModel> {
             })
             continue
           }
-          const signal: Signal = { ...base, outcome: parsedSignal.data.outcome, summary: parsedSignal.data.summary, outputs: declared }
+          const signal: Signal = { ...base, outcome: parsedSignal.data.outcome, summary: parsedSignal.data.summary, ...(declared ? { outputs: declared } : {}) }
           await ctx.checkpoint(
             `signal:${iteration}`,
             async () => signal,

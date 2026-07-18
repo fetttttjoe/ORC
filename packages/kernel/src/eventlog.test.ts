@@ -7,7 +7,7 @@ import pg from 'pg'
 import { drizzle } from 'drizzle-orm/node-postgres'
 import { migrate } from 'drizzle-orm/node-postgres/migrator'
 import { jsonb, pgTable, text } from 'drizzle-orm/pg-core'
-import type { EventInput, OperationSpec } from '@orc/contracts'
+import { isTerminalError, type EventInput, type OperationSpec } from '@orc/contracts'
 import { EventLog } from './eventlog'
 import { events } from './schema'
 import { createTestDb, TEST_PROJECT_ID } from './test-helpers'
@@ -389,6 +389,36 @@ describe('EventLog operation journal', () => {
     } finally {
       delete process.env.ORC_TEST_OP_SECRET
     }
+  })
+
+  it('a keyed replay whose payload has an undefined-valued key is still the same event', async () => {
+    const log = await freshLog()
+    const payload = {
+      stepId: 's1', runToken: 'r1',
+      signal: { stepId: 's1', runToken: 'r1', outcome: 'success', summary: 'ok', outputs: undefined },
+    }
+    const first = await log.append({ taskId: 't1', stepId: 's1', runToken: 'r1', kind: 'signal_received', payload, idempotencyKey: 'r1:signal' })
+    const replay = await log.append({ taskId: 't1', stepId: 's1', runToken: 'r1', kind: 'signal_received', payload, idempotencyKey: 'r1:signal' })
+    expect(replay.seq).toBe(first.seq) // jsonb drops the key; the comparison must agree
+    await log.close()
+  })
+
+  it('failOperation never regresses a completed node; complete re-entry is idempotent; stale is terminal', async () => {
+    const log = await freshLog()
+    await log.beginOperation(OP_CONTEXT, OP_SPEC)
+    await log.completeOperation(OP_CONTEXT, OP_SPEC, 1, { text: 'done' })
+
+    // lost-ack failure path after a durable completion: must be a no-op
+    await log.failOperation(OP_CONTEXT, OP_SPEC, 1, { message: 'connection reset' })
+    expect((await log.operationsFor('t1'))[0]!.status).toBe('completed')
+
+    // re-entry of the committed attempt returns the stored value instead of throwing
+    expect(await log.completeOperation(OP_CONTEXT, OP_SPEC, 1, { text: 'done' })).toEqual({ text: 'done' })
+
+    // a stale attempt must be terminal — the durable-step wrapper must not re-fire the effect
+    const stale = await log.completeOperation(OP_CONTEXT, OP_SPEC, 7, {}).catch(e => e)
+    expect(isTerminalError(stale)).toBe(true)
+    await log.close()
   })
 
   it('rebuildOperations reproduces the journal byte-for-byte from transitions, per project', async () => {
