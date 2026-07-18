@@ -49,17 +49,24 @@ export class SurrealMemory {
 
   static async open(t: { url: string; ns: string; db: string; username: string; password: string }): Promise<SurrealMemory> {
     const surreal = new Surreal()
-    await surreal.connect(t.url)
-    await surreal.signin({ username: t.username, password: t.password })
-    await surreal.use({ namespace: t.ns, database: t.db })
-    // ESCAPE HATCH (raw): surqlize's builder assumes tables already exist — it has no DEFINE
-    // TABLE op. On a brand-new namespace/database, SurrealDB v3.2.0 throws "table does not
-    // exist" on SELECT (even though CREATE/UPSERT auto-vivify it), so applyWritten's read-before-
-    // write would fail on the very first write. Defining both tables up front avoids that.
-    // `link` (default TYPE ANY, so RELATE works) is defined too: neighbors() SELECTs from it
-    // even when no edge was ever materialized.
-    await surreal.query([Tb.Note, Tb.Meta, Tb.Link].map(tb => `DEFINE TABLE IF NOT EXISTS ${tb} SCHEMALESS;`).join(' '))
-    return new SurrealMemory(surreal, makeOrm(surreal))
+    try {
+      await surreal.connect(t.url)
+      await surreal.signin({ username: t.username, password: t.password })
+      await surreal.use({ namespace: t.ns, database: t.db })
+      // ESCAPE HATCH (raw): surqlize's builder assumes tables already exist — it has no DEFINE
+      // TABLE op. On a brand-new namespace/database, SurrealDB v3.2.0 throws "table does not
+      // exist" on SELECT (even though CREATE/UPSERT auto-vivify it), so applyWritten's read-before-
+      // write would fail on the very first write. Defining both tables up front avoids that.
+      // `link` (default TYPE ANY, so RELATE works) is defined too: neighbors() SELECTs from it
+      // even when no edge was ever materialized.
+      await surreal.query([Tb.Note, Tb.Meta, Tb.Link].map(tb => `DEFINE TABLE IF NOT EXISTS ${tb} SCHEMALESS;`).join(' '))
+      return new SurrealMemory(surreal, makeOrm(surreal))
+    } catch (err) {
+      // connect() opens a live socket; if signin/use/DEFINE then throws, don't leak it
+      // (symmetry with PostgresStore.open, which pool.end()s on an assertMigrated throw).
+      await surreal.close().catch(() => {})
+      throw err
+    }
   }
 
   // The ONE apply path (design §8.2): note/edges/cursor commit in a single Surreal

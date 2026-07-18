@@ -220,6 +220,9 @@ export class EventLog implements EventLogOps {
       try {
         await c.connect()
         await c.query(`LISTEN ${NOTIFY_CHANNEL}`)
+        // the disposer may have run during the awaits above; if so, don't adopt this
+        // fresh LISTEN client — the disposer already ended the previous `client` and left.
+        if (closed) { await c.end().catch(() => {}); return }
         client = c
         c.on('notification', () => pumpSafe())
         c.once('end', () => {
