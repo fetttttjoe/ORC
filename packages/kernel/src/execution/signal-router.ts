@@ -56,7 +56,11 @@ export function createSignalRouter(opts: {
   const resolveSplit = async (all: EventRecord[], split: SplitState): Promise<void> => {
     try {
       const result = composeSplitResult(all, split)
-      await opts.log.append({ taskId: split.taskId, stepId: split.stepId, runToken: split.runToken, kind: EVENT_KIND.split_resolved, payload: result })
+      await opts.log.append({
+        taskId: split.taskId, stepId: split.stepId, runToken: split.runToken,
+        kind: EVENT_KIND.split_resolved, payload: result,
+        idempotencyKey: `${split.splitId}:resolved`,
+      })
       await opts.send(split.runToken, result, `split:${split.splitId}`, split.splitId)
     } catch (err) {
       console.warn(`signal router: resolve split ${split.splitId}: ${err instanceof Error ? err.message : String(err)}`)

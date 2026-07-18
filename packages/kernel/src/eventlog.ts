@@ -4,8 +4,12 @@ import pg from 'pg'
 import { and, asc, desc, eq, gt, inArray, sql } from 'drizzle-orm'
 import { drizzle, type NodePgDatabase } from 'drizzle-orm/node-postgres'
 import { migrate } from 'drizzle-orm/node-postgres/migrator'
-import { EventInput, PAYLOAD_SCHEMAS, type EventKind, type EventRecord } from '@orc/contracts'
-import { events } from './schema'
+import {
+  EVENT_KIND, EventInput, OPERATION_STATUS, PAYLOAD_SCHEMAS,
+  type EventDraft, type EventKind, type EventRecord, type OperationRecord, type OperationSpec,
+} from '@orc/contracts'
+import { events, operations } from './schema'
+import { applyOperationEvent, foldOperations } from './projections'
 import { buildRedactor, type Redactor } from './redact'
 
 const MIGRATIONS_FOLDER = fileURLToPath(new URL('../drizzle', import.meta.url))
@@ -14,7 +18,40 @@ const RECONNECT_DELAYS_MS = [100, 200, 400, 800, 1600, 3000]
 const PUMP_RETRY_MS = 250
 
 type Row = typeof events.$inferSelect
+type OperationRow = typeof operations.$inferSelect
 type Queryable = Pick<NodePgDatabase, 'insert' | 'select' | 'execute'>
+type Tx = Parameters<Parameters<NodePgDatabase['transaction']>[0]>[0]
+
+const toOperation = (r: OperationRow): OperationRecord => ({
+  projectId: r.projectId,
+  operationId: r.operationId,
+  taskId: r.taskId,
+  stepId: r.stepId,
+  runToken: r.runToken,
+  kind: r.kind,
+  name: r.name,
+  status: r.status,
+  attempts: r.attempts,
+  before: r.before,
+  after: r.after,
+  error: r.error,
+  startedSeq: r.startedSeq,
+  finishedSeq: r.finishedSeq,
+  startedAt: r.startedAt.toISOString(),
+  finishedAt: r.finishedAt?.toISOString() ?? null,
+})
+
+const toOperationRow = (o: OperationRecord) => ({
+  ...o,
+  startedAt: new Date(o.startedAt),
+  finishedAt: o.finishedAt === null ? null : new Date(o.finishedAt),
+})
+
+export interface OperationContext {
+  taskId: string
+  stepId: string
+  runToken: string
+}
 
 const toRecord = (r: Row): EventRecord => ({
   seq: r.seq,
@@ -243,12 +280,122 @@ export class EventLog implements EventLogOps {
 
   // reads/appends inside fn MUST go through tx — pool queries would escape the transaction (spec §4)
   transaction<T>(fn: (tx: EventLogOps) => Promise<T>): Promise<T> {
+    return this.inTx((_tx, ops) => fn(ops))
+  }
+
+  private inTx<T>(fn: (tx: Tx, ops: EventLogOps) => Promise<T>): Promise<T> {
     return this.db.transaction(async tx => {
       // Postgres READ COMMITTED lets two check-then-append transactions interleave (write
       // skew); the per-project advisory lock serializes writers within a project while
       // unrelated projects stay concurrent.
       await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${this.projectId}, 0))`)
-      return fn(makeOps(tx, this.ctx))
+      return fn(tx, makeOps(tx, this.ctx))
+    })
+  }
+
+  private async operationRow(tx: Tx, operationId: string): Promise<OperationRow | undefined> {
+    const [row] = await tx.select().from(operations)
+      .where(and(eq(operations.projectId, this.projectId), eq(operations.operationId, operationId)))
+    return row
+  }
+
+  private async upsertOperation(tx: Tx, rec: OperationRecord): Promise<void> {
+    await tx.insert(operations).values(toOperationRow(rec))
+      .onConflictDoUpdate({ target: [operations.projectId, operations.operationId], set: toOperationRow(rec) })
+  }
+
+  // The before-record of the durable journal (design §5.2): commits the start transition and
+  // the current node in one transaction BEFORE any external code runs. A completed node is
+  // reused (its redacted stored result), a started/failed node begins the next attempt —
+  // explicitly at-least-once, the ambiguity is recorded rather than hidden.
+  beginOperation(
+    context: OperationContext,
+    spec: OperationSpec,
+  ): Promise<{ reused: boolean; attempt: number; value?: unknown }> {
+    return this.inTx(async (tx, ops) => {
+      const existing = await this.operationRow(tx, spec.operationId)
+      if (existing?.status === OPERATION_STATUS.completed)
+        return { reused: true, attempt: existing.attempts, value: existing.after }
+      const attempt = (existing?.attempts ?? 0) + 1
+      const event = await ops.append({
+        taskId: context.taskId, stepId: context.stepId, runToken: context.runToken,
+        kind: EVENT_KIND.operation_started,
+        payload: { operationId: spec.operationId, attempt, operationKind: spec.kind, name: spec.name, before: spec.before },
+        idempotencyKey: `${spec.operationId}:${attempt}:started`,
+      })
+      await this.upsertOperation(tx, applyOperationEvent(undefined, event))
+      return { reused: false, attempt }
+    })
+  }
+
+  // after-record: transition event, node update, and completion drafts commit atomically —
+  // the graph node and the append-only history can never disagree
+  completeOperation(
+    context: OperationContext,
+    spec: OperationSpec,
+    attempt: number,
+    value: unknown,
+    drafts: EventDraft[] = [],
+  ): Promise<unknown> {
+    return this.inTx(async (tx, ops) => {
+      const existing = await this.requireAttempt(tx, spec.operationId, attempt)
+      const event = await ops.append({
+        taskId: context.taskId, stepId: context.stepId, runToken: context.runToken,
+        kind: EVENT_KIND.operation_completed,
+        payload: { operationId: spec.operationId, attempt, after: value },
+        idempotencyKey: `${spec.operationId}:${attempt}:completed`,
+      })
+      const next = applyOperationEvent(toOperation(existing), event)
+      await this.upsertOperation(tx, next)
+      for (const [i, d] of drafts.entries())
+        await ops.append({
+          taskId: context.taskId, stepId: context.stepId, runToken: context.runToken,
+          kind: d.kind, payload: d.payload, usage: d.usage ?? null,
+          idempotencyKey: `${spec.operationId}:${attempt}:draft:${i}`,
+        })
+      return next.after
+    })
+  }
+
+  failOperation(context: OperationContext, spec: OperationSpec, attempt: number, error: unknown): Promise<void> {
+    return this.inTx(async (tx, ops) => {
+      const existing = await this.requireAttempt(tx, spec.operationId, attempt)
+      const event = await ops.append({
+        taskId: context.taskId, stepId: context.stepId, runToken: context.runToken,
+        kind: EVENT_KIND.operation_failed,
+        payload: { operationId: spec.operationId, attempt, error },
+        idempotencyKey: `${spec.operationId}:${attempt}:failed`,
+      })
+      await this.upsertOperation(tx, applyOperationEvent(toOperation(existing), event))
+    })
+  }
+
+  private async requireAttempt(tx: Tx, operationId: string, attempt: number): Promise<OperationRow> {
+    const existing = await this.operationRow(tx, operationId)
+    if (!existing) throw new Error(`operation '${operationId}' was never started`)
+    if (existing.attempts !== attempt)
+      throw new Error(`operation '${operationId}' attempt ${attempt} is stale (current attempt is ${existing.attempts})`)
+    return existing
+  }
+
+  async operationsFor(taskId: string): Promise<OperationRecord[]> {
+    const rows = await this.db.select().from(operations)
+      .where(and(eq(operations.projectId, this.projectId), eq(operations.taskId, taskId)))
+      .orderBy(asc(operations.startedSeq))
+    return rows.map(toOperation)
+  }
+
+  // the journal is an index over the append-only truth: rebuild THIS project's rows from
+  // its committed operation transitions
+  rebuildOperations(): Promise<number> {
+    return this.inTx(async (tx, ops) => {
+      const transitions = await ops.after(0, [
+        EVENT_KIND.operation_started, EVENT_KIND.operation_completed, EVENT_KIND.operation_failed,
+      ])
+      const folded = foldOperations(transitions)
+      await tx.delete(operations).where(eq(operations.projectId, this.projectId))
+      for (const rec of folded.values()) await tx.insert(operations).values(toOperationRow(rec))
+      return folded.size
     })
   }
 

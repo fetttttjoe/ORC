@@ -41,20 +41,24 @@ describe('kill -9 resume (spec §10/§11 — the crown jewel)', () => {
     const code = await second.exited
     expect(code).toBe(0)
 
-    // task done: the kill lands inside the uncommitted step (before its checkpoint fn
-    // resolves), so the crashed attempt appends zero events — recovery re-runs the step
-    // clean from scratch, giving exactly one effective iteration. (True crash-boundary
-    // duplicates, where a partial event WAS appended before the kill, are covered by the
-    // crashDedupKey unit tests in projections.test.ts and the dbos-port idempotency test.)
+    // task done: the kill lands inside the operation (after operation_started committed,
+    // before completion), so the journal shows honest before/after continuity — attempt 1
+    // began and vanished, attempt 2 completed. Domain events stay single: one agent_call.
     expect((await kernel.getTask(t.id))?.status).toBe('done')
     const state = await kernel.state()
     expect(state.steps.get(t.id)?.get('s1')?.status).toBe('completed')
     expect(state.steps.get(t.id)?.get('s1')?.iterations).toBe(1)
-    expect(state.usage.get(t.id)?.inputTokens).toBe(1) // one checkpoint ever ran, so usage is recorded once
+    expect(state.usage.get(t.id)?.inputTokens).toBe(1) // completion drafts ran once, so usage is recorded once
 
-    // explicit enforcement: the killed attempt left no partial agent_call behind, so
-    // exactly one was ever recorded, for exactly one billed model call.
+    // the interrupted operation is a single logical node: two start transitions, one final
+    // completion, attempts=2 — never a blind gap, never a double effect.
+    const ops = await log.operationsFor(t.id)
+    expect(ops).toHaveLength(1)
+    expect(ops[0]!.status).toBe('completed')
+    expect(ops[0]!.attempts).toBe(2)
     const taskEvents = await log.byTask(t.id)
+    expect(taskEvents.filter(e => e.kind === EVENT_KIND.operation_started)).toHaveLength(2)
+    expect(taskEvents.filter(e => e.kind === EVENT_KIND.operation_completed)).toHaveLength(1)
     expect(taskEvents.filter(e => e.kind === EVENT_KIND.agent_call)).toHaveLength(1)
 
     // replay identity (extends M1's guarantee to execution events)

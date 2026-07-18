@@ -5,8 +5,8 @@ import {
   EVENT_KIND, FAILURE_CLASS, RUN_OUTCOME, SIGNAL_OUTCOME, TASK_STATUS,
   classifiedError, failureClassOf, isTerminalError, resolveModel, costUSDFor,
   type AgentExecutor, type Checkpoint, type EventDraft, type ExecutionPort, type ExecutorContext,
-  type FailureClass, type LoadedSkill, type ModelProvider, type Plan, type ResolvedTool,
-  type RunHandle, type RunOutcome, type Signal, type SplitResult, type ToolSource,
+  type FailureClass, type LoadedSkill, type ModelProvider, type OperationCheckpoint, type Plan,
+  type ResolvedTool, type RunHandle, type RunOutcome, type Signal, type SplitResult, type ToolSource,
 } from '@orc/contracts'
 import { EventLog } from '../eventlog'
 import { fold, completedStepIds, nextAttempts, subtreeTaskIds, subtreeUsage, type State } from '../projections'
@@ -50,25 +50,61 @@ export async function createDbosPort(opts: {
 
   const foldState = async (taskId: string): Promise<State> => fold(await log.byTask(taskId))
 
-  // durable step wrapper that also appends the drafted events INSIDE the step (spec §6.2)
+  // terminal errors (e.g. a 4xx model failure) must NOT retry — see terminalError in @orc/contracts
+  const RETRY_POLICY = { retriesAllowed: true, maxAttempts: 4, intervalSeconds: 1, backoffRate: 2, shouldRetry: (e: unknown) => !isTerminalError(e) }
+
+  // durable step wrapper that also appends the drafted events INSIDE the step (spec §6.2) —
+  // one transaction per batch, each draft under a deterministic idempotency key, so a crash
+  // retry returns the committed records instead of appending duplicates
   const makeCheckpoint = (taskId: string, stepId: string | null, runToken: string): Checkpoint =>
     (name, fn, toEvents) =>
       DBOS.runStep(
         async () => {
           const r = await fn()
-          if (toEvents)
-            for (const d of toEvents(r))
-              await log.append({ taskId, stepId, runToken, kind: d.kind, payload: d.payload, usage: d.usage ?? null })
+          const drafts = toEvents ? toEvents(r) : []
+          if (drafts.length > 0)
+            await log.transaction(async tx => {
+              for (const [i, d] of drafts.entries())
+                await tx.append({
+                  taskId, stepId, runToken, kind: d.kind, payload: d.payload, usage: d.usage ?? null,
+                  idempotencyKey: `${runToken}:${name}:${i}:${d.kind}`,
+                })
+            })
           return r
         },
-        // terminal errors (e.g. a 4xx model failure) must NOT retry — see terminalError in @orc/contracts
-        { name, retriesAllowed: true, maxAttempts: 4, intervalSeconds: 1, backoffRate: 2, shouldRetry: e => !isTerminalError(e) },
+        { name, ...RETRY_POLICY },
+      )
+
+  // The journal-backed operation checkpoint (design §5.2): before-record commits ahead of the
+  // external effect; completion/failure attaches afterward. On recovery a completed node
+  // short-circuits with its stored (redacted) value — the effect is never re-run.
+  const makeOperation = (taskId: string, stepId: string, runToken: string): OperationCheckpoint =>
+    (spec, fn, toEvents) =>
+      DBOS.runStep(
+        async () => {
+          const context = { taskId, stepId, runToken }
+          const begin = await log.beginOperation(context, spec)
+          // journal values are plain JSON — parse hands back the caller's shape
+          if (begin.reused) return JSON.parse(JSON.stringify(begin.value ?? null))
+          try {
+            const result = await fn()
+            await log.completeOperation(context, spec, begin.attempt, result, toEvents ? toEvents(result) : [])
+            return result
+          } catch (err) {
+            await log.failOperation(context, spec, begin.attempt, {
+              message: err instanceof Error ? err.message : String(err),
+            })
+            throw err
+          }
+        },
+        { name: `op:${spec.operationId}`, ...RETRY_POLICY },
       )
 
   const stepWorkflow = DBOS.registerWorkflow(
     async (args: StepArgs): Promise<StepResult> => {
       const runToken = DBOS.workflowID!
       const checkpoint = makeCheckpoint(args.taskId, args.stepId, runToken)
+      const operation = makeOperation(args.taskId, args.stepId, runToken)
 
       // ANY throw — init included — becomes a step_failed event instead of an uncaught workflow
       // error that would leave the task stuck 'running' with a burned ERROR workflow that retry
@@ -143,9 +179,8 @@ export async function createDbosPort(opts: {
         // prices usage drafts on the way through: fill costUSD from the provider table
         checkpoint: (name, fn, toEvents) =>
           checkpoint(name, fn, toEvents ? r => toEvents(r).map(d => priceDraft(d, provider, modelId)) : undefined),
-        // durable-step wrapper only until the operation journal lands (design §5.2)
         operation: (spec, fn, toEvents) =>
-          checkpoint(`op:${spec.operationId}`, fn, toEvents ? r => toEvents(r).map(d => priceDraft(d, provider, modelId)) : undefined),
+          operation(spec, fn, toEvents ? r => toEvents(r).map(d => priceDraft(d, provider, modelId)) : undefined),
         budgetRemainingUSD: async () => {
           if (init.budgetUSD === null) return null
           // ponytail: whole-log fold — subtree usage spans child tasks (spec D8), byTask is not enough

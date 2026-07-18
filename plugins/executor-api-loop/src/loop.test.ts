@@ -97,6 +97,44 @@ describe('api-loop executor', () => {
     expect(toolDrafts).toHaveLength(2)
   })
 
+  it('journals one model operation per iteration with stable deterministic IDs across reruns', async () => {
+    const script = () => scriptModel([
+      { text: 'thinking' },
+      { toolCalls: [{ toolCallId: 'c1', toolName: 'signal', input: { outcome: 'success', summary: 'ok' } }] },
+    ])
+    const runSpecs = async () => {
+      const captured: EventDraft[] = []
+      const specs: OperationSpec[] = []
+      await drain(apiLoopExecutor().startTurn(ctx(script(), captured, { operation: makeOperation(captured, specs) })))
+      return specs.filter(s => s.kind === 'model')
+    }
+    const first = await runSpecs()
+    expect(first.map(s => s.operationId)).toEqual(['step:t1:s1:a1:model:1', 'step:t1:s1:a1:model:2'])
+    expect(first[0]!.name).toBe('fake/m')
+    const second = await runSpecs()
+    expect(second.map(s => s.operationId)).toEqual(first.map(s => s.operationId))
+  })
+
+  it('journals each tool call as its own operation with one domain event pair per call', async () => {
+    const captured: EventDraft[] = []
+    const specs: OperationSpec[] = []
+    const model = scriptModel([
+      { toolCalls: [
+        { toolCallId: 'c1', toolName: 'fs_write', input: { path: 'a.txt', content: 'a' } },
+        { toolCallId: 'c2', toolName: 'fs_write', input: { path: 'b.txt', content: 'b' } },
+      ] },
+      { toolCalls: [{ toolCallId: 'c3', toolName: 'signal', input: { outcome: 'success', summary: 'ok' } }] },
+    ])
+    await drain(apiLoopExecutor().startTurn(ctx(model, captured, { operation: makeOperation(captured, specs) })))
+    const toolSpecs = specs.filter(s => s.kind === 'tool')
+    expect(toolSpecs.map(s => s.operationId)).toEqual([
+      'step:t1:s1:a1:tool:1:c1',
+      'step:t1:s1:a1:tool:1:c2',
+    ])
+    expect(captured.filter(d => d.kind === EVENT_KIND.tool_call)).toHaveLength(2)
+    expect(captured.filter(d => d.kind === EVENT_KIND.tool_result)).toHaveLength(2)
+  })
+
   it('agent-declared failure → signal(outcome failure), no done-as-success ambiguity', async () => {
     const captured: EventDraft[] = []
     const model = scriptModel([

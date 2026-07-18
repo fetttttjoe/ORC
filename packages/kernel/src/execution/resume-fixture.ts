@@ -11,13 +11,17 @@ import { EventLog } from '../eventlog'
 import { fakeProvider, testConfig, TEST_PROJECT_ID } from '../test-helpers'
 import { createDbosPort } from './dbos-port'
 
-const [dbUrl, taskId, marker] = process.argv.slice(2) as [string, string, string]
+const [dbUrl, taskId, marker] = process.argv.slice(2)
+if (!dbUrl || !taskId || !marker) throw new Error('usage: resume-fixture <dbUrl> <taskId> <markerPath>')
 
 const stallOnce: AgentExecutor<unknown> = {
   id: 'api-loop',
   async *startTurn(ctx: ExecutorContext<unknown>): AsyncGenerator<UnifiedEvent, void, SplitResult[] | undefined> {
-    await ctx.checkpoint(
-      'model:1',
+    // stall INSIDE the operation: operation_started has committed by the time fn runs, so the
+    // kill lands between the journal's before-record and its completion — the audit gap the
+    // journal exists to make visible.
+    await ctx.operation(
+      { operationId: `${ctx.runToken}:model:1`, kind: 'model', name: 'fake/m', before: { iteration: 1 } },
       async () => {
         if (!existsSync(marker)) {
           writeFileSync(marker, '')

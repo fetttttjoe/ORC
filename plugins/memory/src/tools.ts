@@ -53,7 +53,16 @@ export function memoryTools(store: MemoryStore, author: MemoryAuthor): ResolvedT
           scope: idSchema,
         },
       },
-      execute: async input => { try { const n = await store.write(MemoryNoteInput.parse(input), author); return ok({ id: n.id, revision: n.revision }) } catch (e) { return err(e) } },
+      execute: async (input, toolCallId) => {
+        try {
+          const note = MemoryNoteInput.parse(input)
+          const idempotencyKey = author.runToken && toolCallId
+            ? `${author.runToken}:tool:${toolCallId}:memory:${note.id}`
+            : undefined
+          const n = await store.write(note, author, { idempotencyKey })
+          return ok({ id: n.id, revision: n.revision })
+        } catch (e) { return err(e) }
+      },
     },
     {
       ref: 'memory/search', name: 'memory_search',

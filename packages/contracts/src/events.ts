@@ -2,7 +2,7 @@ import { z } from 'zod'
 import { TaskNode, TaskStatus } from './task'
 import { Plan } from './plan'
 import { FailureClass, RunOutcome, Signal, Usage } from './execution'
-import { OperationKind } from './operations'
+import { OperationCompletedPayload, OperationFailedPayload, OperationStartedPayload } from './operations'
 import { MemoryNoteInput, MemoryAuthor, MEMORY_ID_RE } from './memory'
 
 export const EventKind = z.enum([
@@ -100,23 +100,9 @@ export const PAYLOAD_SCHEMAS: Record<EventKind, z.ZodType> = {
     summary: z.string(),
     notes: z.array(z.object({ id: z.string(), scope: z.string() })),
   }),
-  operation_started: z.object({
-    operationId: z.string().min(1),
-    attempt: z.number().int().positive(),
-    operationKind: OperationKind,
-    name: z.string().min(1),
-    before: z.unknown(),
-  }),
-  operation_completed: z.object({
-    operationId: z.string().min(1),
-    attempt: z.number().int().positive(),
-    after: z.unknown(),
-  }),
-  operation_failed: z.object({
-    operationId: z.string().min(1),
-    attempt: z.number().int().positive(),
-    error: z.unknown(),
-  }),
+  operation_started: OperationStartedPayload,
+  operation_completed: OperationCompletedPayload,
+  operation_failed: OperationFailedPayload,
   artifact_produced: z.object({
     path: z.string().min(1),
     sha256: z.string().regex(/^[a-f0-9]{64}$/),
