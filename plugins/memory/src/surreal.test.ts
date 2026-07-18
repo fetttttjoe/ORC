@@ -29,6 +29,8 @@ describe('SurrealMemory', () => {
     const m = await SurrealMemory.open(t)
     await m.applyWritten({ seq: 1, ts: '2026-07-18T00:00:00Z', note: note(), author: { source: 'cli' } })
     expect((await m.search('tokens')).map(n => n.id)).toEqual(['auth'])
+    // case-insensitive: query is uppercase, stored summary/body are lowercase.
+    expect((await m.search('TOKENS')).map(n => n.id)).toEqual(['auth'])
     await m.setCursor(5); expect(await m.getCursor()).toBe(5)
     await m.applyDeleted({ seq: 6, ts: '2026-07-18T02:00:00Z', id: 'auth', scope: 'project', author: { source: 'cli' } })
     expect(await m.get('auth', 'project')).toBeNull()
