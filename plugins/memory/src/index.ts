@@ -1,0 +1,1 @@
+export { SurrealMemory } from './surreal'
