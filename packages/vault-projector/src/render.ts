@@ -1,5 +1,5 @@
 import { z } from 'zod'
-import { EVENT_KIND, OPERATION_STATUS, PAYLOAD_SCHEMAS, STEP_RUN_STATUS, TASK_STATUS, type EventRecord, type Plan, type TaskNode } from '@orc/contracts'
+import { EVENT_KIND, LINK_KIND, NOTE_KIND, OPERATION_STATUS, PAYLOAD_SCHEMAS, STEP_RUN_STATUS, TASK_STATUS, type EventRecord, type MemoryNote, type Plan, type TaskNode } from '@orc/contracts'
 import { fold, taskUsage, type State, type StepState } from '@orc/kernel'
 import { frontmatter } from './frontmatter'
 import { renderPlanFile } from './plan-md'
@@ -144,16 +144,40 @@ export function renderTaskFiles(taskId: string, events: EventRecord[]): VaultFil
   return files
 }
 
+// shared node+edge mermaid builder — used by the task-expansion graph and the masterplan DAG
+function mermaidGraph(nodes: { id: string; text: string }[], edges: { from: string; to: string; dashed?: boolean }[]): string {
+  const lines = ['```mermaid', 'graph TD']
+  for (const n of nodes) lines.push(`  ${n.id}["${label(n.text)}"]`)
+  for (const e of edges) lines.push(`  ${e.from} ${e.dashed ? '-.->' : '-->'} ${e.to}`)
+  lines.push('```')
+  return lines.join('\n')
+}
+
 // deterministic recursive task-expansion graph: which task created which child, with live status
 function taskExpansionGraph(tasks: TaskNode[]): string {
   if (tasks.length === 0) return '_no tasks_'
   const node = new Map(tasks.map((t, i) => [t.id, `t${i}`]))
-  const lines = ['```mermaid', 'graph TD']
-  for (const t of tasks) lines.push(`  ${node.get(t.id)}["${label(`${t.title} · ${t.status}`)}"]`)
-  for (const t of tasks)
-    if (t.parentId && node.has(t.parentId)) lines.push(`  ${node.get(t.parentId)} --> ${node.get(t.id)}`)
-  lines.push('```')
-  return lines.join('\n')
+  const nodes = tasks.map(t => ({ id: node.get(t.id)!, text: `${t.title} · ${t.status}` }))
+  const edges = tasks
+    .filter(t => t.parentId && node.has(t.parentId))
+    .map(t => ({ from: node.get(t.parentId!)!, to: node.get(t.id)! }))
+  return mermaidGraph(nodes, edges)
+}
+
+// masterplan overview: decomposes_into is the decomposition tree (solid), depends_on is
+// execution order (dashed) — same edge-direction convention as mermaidDag's dependsOn arrows.
+export function masterplanDag(notes: MemoryNote[]): string {
+  const plans = notes.filter(n => n.kind === NOTE_KIND.plan)
+  if (plans.length === 0) return '_no plan notes_'
+  const node = new Map(plans.map((n, i) => [n.id, `p${i}`]))
+  const nodes = plans.map(n => ({ id: node.get(n.id)!, text: n.title }))
+  const edges = plans.flatMap(n => n.links.flatMap(l => {
+    if (!node.has(l.id)) return []
+    if (l.kind === LINK_KIND.decomposes_into) return [{ from: node.get(n.id)!, to: node.get(l.id)! }]
+    if (l.kind === LINK_KIND.depends_on) return [{ from: node.get(l.id)!, to: node.get(n.id)!, dashed: true }]
+    return []
+  }))
+  return mermaidGraph(nodes, edges)
 }
 
 export function renderRootIndex(tasks: TaskNode[]): string {
