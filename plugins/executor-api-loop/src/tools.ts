@@ -11,6 +11,7 @@ export const TOOL_NAME = {
   fs_write: 'fs_write',
   fs_list: 'fs_list',
   join_splits: 'join_splits',
+  ask_human: 'ask_human',
 } as const
 export type ToolName = (typeof TOOL_NAME)[keyof typeof TOOL_NAME]
 
@@ -21,6 +22,7 @@ export const SignalInput = z.object({
   outputs: z.array(z.string().min(1)).optional(),
 })
 export const JoinSplitsInput = z.object({ splitIds: z.array(z.string()).optional() })
+export const AskHumanInput = z.object({ question: z.string().min(1), topic: z.string().min(1).optional() })
 const ReadInput = z.object({ path: z.string().min(1) })
 const WriteInput = z.object({ path: z.string().min(1), content: z.string() })
 const ListInput = z.object({ path: z.string().default('.') })
@@ -50,6 +52,11 @@ export function toolSet(extra: ResolvedTool[] = []) {
       description:
         'Durably wait for child splits proposed with task_split to finish. Returns per-split {outcome, summary, notes} — notes are memory ids to read with memory_read or traverse with memory_neighbors. Omit splitIds to wait for all your pending splits.',
       inputSchema: JoinSplitsInput,
+    }),
+    [TOOL_NAME.ask_human]: tool({
+      description:
+        'Durably ask the human a question and wait for their reply. The run suspends until a human answers, then returns {answer}. Use for approval/clarification (e.g. plan authoring); do NOT poll — one question per call.',
+      inputSchema: AskHumanInput,
     }),
     ...Object.fromEntries(extra.map(t => [
       t.name,

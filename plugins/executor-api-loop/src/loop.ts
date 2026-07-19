@@ -5,7 +5,7 @@ import {
   type SplitResult, type UnifiedEvent, type Usage,
 } from '@orc/contracts'
 import { validateOutputPaths } from '@orc/contracts'
-import { JoinSplitsInput, SignalInput, TOOL_NAME, executeTool, toolSet } from './tools'
+import { AskHumanInput, JoinSplitsInput, SignalInput, TOOL_NAME, executeTool, toolSet } from './tools'
 
 // Pre-flight for declared outputs, so the model can fix a bad declaration instead of the
 // step failing at the runtime's trusted verification. Same rule set as the runtime
@@ -81,20 +81,19 @@ async function callModel(model: LanguageModel, messages: ModelMessage[], tools: 
   }
 }
 
-// A signal batched alongside join_splits is deferred, not executed — join_splits wins the
-// turn (spec: one suspension point per turn). This still answers the signal's tool_use id,
-// mirroring the malformed-signal precedent above (every call id in the turn needs a result).
-function notExecutedSignalResult(call: { toolCallId: string; toolName: string }) {
+// A tool batched alongside the turn's suspension point (join_splits / ask_human) is deferred,
+// not executed — the suspension wins the turn (spec: one suspension point per turn). Every
+// call id in the turn still needs a tool_result, or the next generateText request 400s.
+function notExecutedResult(call: { toolCallId: string; toolName: string }, reason: string) {
   return {
     type: 'tool-result' as const,
     toolCallId: call.toolCallId,
     toolName: call.toolName,
-    output: {
-      type: 'json' as const,
-      value: { error: 'not executed: signal cannot be combined with join_splits — the join ran; call signal again after reviewing its results' },
-    },
+    output: { type: 'json' as const, value: { error: `not executed: ${reason}` } },
   }
 }
+const signalDeferred = 'signal cannot be combined with a suspension (join_splits/ask_human) — call signal again after'
+const askDeferred = 'ask_human cannot be combined with join_splits — the join ran; ask again after'
 
 // The knowledge protocol (design §10.2): a protocol, not context injection — agents keep
 // control of bounded pulls through the memory tools; note bodies are never auto-inlined.
@@ -126,7 +125,7 @@ export function apiLoopExecutor(): AgentExecutor<LanguageModel> {
   return {
     id: 'api-loop',
 
-    async *startTurn(ctx: ExecutorContext<LanguageModel>): AsyncGenerator<UnifiedEvent, void, SplitResult[] | undefined> {
+    async *startTurn(ctx: ExecutorContext<LanguageModel>): AsyncGenerator<UnifiedEvent, void, SplitResult[] | string | undefined> {
       const messages: ModelMessage[] = [{ role: 'user', content: buildPrompt(ctx) }]
       const tools = toolSet(ctx.extraTools)
       const base = { stepId: ctx.step.id, runToken: ctx.runToken }
@@ -200,10 +199,13 @@ export function apiLoopExecutor(): AgentExecutor<LanguageModel> {
 
         const joinCall = turn.toolCalls.find(c => c.toolName === TOOL_NAME.join_splits)
         const parsedJoin = joinCall ? JoinSplitsInput.safeParse(joinCall.input) : undefined
+        const askCall = turn.toolCalls.find(c => c.toolName === TOOL_NAME.ask_human)
+        const parsedAsk = askCall ? AskHumanInput.safeParse(askCall.input) : undefined
 
         // sibling tool calls batched with a valid signal still execute — a turn like
-        // [fs_write, signal(success)] must not silently drop the write
-        const toolCalls = turn.toolCalls.filter(c => c !== signalCall && c !== joinCall)
+        // [fs_write, signal(success)] must not silently drop the write. signal/join/ask are
+        // handled below (they have no execute), so they never reach executeTool.
+        const toolCalls = turn.toolCalls.filter(c => c !== signalCall && c !== joinCall && c !== askCall)
         if (toolCalls.length > 0) {
           // one operation per external tool effect: a crash retry re-runs only the interrupted
           // call, never already-completed siblings; result order stays the model's call order
@@ -241,12 +243,15 @@ export function apiLoopExecutor(): AgentExecutor<LanguageModel> {
         }
 
         if (joinCall && parsedJoin?.success) {
-          // suspension point (spec D9): the port recv's in workflow context and resumes us
-          const results = (yield {
+          // suspension point (spec D9): the port recv's in workflow context and resumes us.
+          // resume is typed SplitResult[] | string | undefined (feedback shares the channel) —
+          // a gate only ever resumes with SplitResult[], so narrow defensively.
+          const resumed = yield {
             type: UNIFIED_EVENT_TYPE.gate,
             splitIds: parsedJoin.data.splitIds ?? [],
             toolCallId: joinCall.toolCallId,
-          }) ?? []
+          }
+          const results = Array.isArray(resumed) ? resumed : []
           await ctx.checkpoint(
             `join:${iteration}`,
             async () => results,
@@ -260,10 +265,11 @@ export function apiLoopExecutor(): AgentExecutor<LanguageModel> {
             role: 'tool',
             content: [
               { type: 'tool-result', toolCallId: joinCall.toolCallId, toolName: TOOL_NAME.join_splits, output: { type: 'json', value: { splits: results } } },
-              // a batched signal in the SAME turn as join_splits must still be answered here —
+              // a batched signal/ask in the SAME turn as join_splits must still be answered here —
               // its tool_use was already pushed via responseMessages above, and an unresolved
               // tool_use makes the next generateText request rejected (missing tool result)
-              ...(signalCall ? [notExecutedSignalResult(signalCall)] : []),
+              ...(signalCall ? [notExecutedResult(signalCall, signalDeferred)] : []),
+              ...(askCall ? [notExecutedResult(askCall, askDeferred)] : []),
             ],
           })
           continue
@@ -273,7 +279,40 @@ export function apiLoopExecutor(): AgentExecutor<LanguageModel> {
             role: 'tool',
             content: [
               { type: 'tool-result', toolCallId: joinCall.toolCallId, toolName: TOOL_NAME.join_splits, output: { type: 'json', value: { error: `invalid join_splits input: ${parsedJoin.error.message}` } } },
-              ...(signalCall ? [notExecutedSignalResult(signalCall)] : []),
+              ...(signalCall ? [notExecutedResult(signalCall, signalDeferred)] : []),
+              ...(askCall ? [notExecutedResult(askCall, askDeferred)] : []),
+            ],
+          })
+          continue
+        }
+
+        // ask_human suspension (D4): mirrors join_splits but yields a feedback event instead of a
+        // gate. The port appends feedback_requested and DBOS.recv's on `feedback:<topic>`,
+        // resuming this turn with the human's reply string. topic defaults to a deterministic,
+        // replay-safe `${runToken}:${toolCallId}`.
+        if (askCall && parsedAsk?.success) {
+          const topic = parsedAsk.data.topic ?? `${ctx.runToken}:${askCall.toolCallId}`
+          const resumed = yield { type: UNIFIED_EVENT_TYPE.feedback, question: parsedAsk.data.question, topic, toolCallId: askCall.toolCallId }
+          const answer = typeof resumed === 'string' ? resumed : ''
+          yield { type: UNIFIED_EVENT_TYPE.tool_result, toolCallId: askCall.toolCallId, toolName: TOOL_NAME.ask_human, output: { answer }, isError: false }
+          // the reply flows back as the ask_human tool result; the next iteration's agent_call
+          // persists it (part of messages.slice(persistedThrough)) — no separate checkpoint,
+          // feedback_requested (port) + that agent_call reconstruct the full Q&A on replay.
+          messages.push({
+            role: 'tool',
+            content: [
+              { type: 'tool-result', toolCallId: askCall.toolCallId, toolName: TOOL_NAME.ask_human, output: { type: 'json', value: { answer } } },
+              ...(signalCall ? [notExecutedResult(signalCall, signalDeferred)] : []),
+            ],
+          })
+          continue
+        }
+        if (askCall && parsedAsk && !parsedAsk.success) {
+          messages.push({
+            role: 'tool',
+            content: [
+              { type: 'tool-result', toolCallId: askCall.toolCallId, toolName: TOOL_NAME.ask_human, output: { type: 'json', value: { error: `invalid ask_human input: ${parsedAsk.error.message}` } } },
+              ...(signalCall ? [notExecutedResult(signalCall, signalDeferred)] : []),
             ],
           })
           continue

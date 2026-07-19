@@ -1,8 +1,9 @@
 import { randomUUID } from 'node:crypto'
 import {
-  ChildPlanDraft, EVENT_KIND, ISOLATION_TIER, PlanDraft, TASK_STATUS, evaluateApproval, validatePlan,
-  type ApprovalPolicy, type EventKind, type EventRecord, type Plan, type PlanStep, type TaskNode, type TaskStatus,
+  ChildPlanDraft, EVENT_KIND, ISOLATION_TIER, PlanDraft, STRATEGY, TASK_STATUS, evaluateApproval, validatePlan,
+  type Analyzer, type ApprovalPolicy, type EventKind, type EventRecord, type Plan, type PlanStep, type TaskNode, type TaskStatus,
 } from '@orc/contracts'
+import { planScope } from './execution/strategies/grounded-plan'
 import { EventLog, type EventLogOps } from './storage'
 import { fold, subtreeUsage, type State } from './projections'
 import { KERNEL_ERROR_CODE, KernelError } from './errors'
@@ -11,7 +12,37 @@ export class Kernel {
   constructor(
     private readonly log: EventLog,
     private readonly refValidator?: (plan: Plan) => Promise<string[]>,
+    // analyzers seed the grounded-plan template's analyze step (D2); optional so non-grounded
+    // kernels (most tests, read-only CLI) construct without a plugin host.
+    private readonly analyzers?: Map<string, Analyzer>,
   ) {}
+
+  // The grounded-plan bootstrap (M5b): an auto-approved [analyze, plan] template. The analyze
+  // step is the resolved Analyzer's scout step; the plan step is an auditor api-loop step that
+  // authors a plan-note graph and calls finalize_plan. Policy-approved because the human's real
+  // gate is the conversational approve inside the plan step, not this scaffold.
+  async createGroundedTask(input: { title: string; spec: string; modelRef: string; analyzerRef: string; budgetUSD?: number | null }): Promise<TaskNode> {
+    const analyzer = this.analyzers?.get(input.analyzerRef)
+    if (!analyzer)
+      throw new KernelError(KERNEL_ERROR_CODE.invalid_transition, `unknown analyzer '${input.analyzerRef}' — register it or pass a valid analyzerRef`)
+    const task = await this.createTask({ title: input.title, spec: input.spec, type: 'grounded', budgetUSD: input.budgetUSD })
+    const analyzeStep = analyzer.analysisStep({ modelRef: input.modelRef, taskSpec: input.spec })
+    const planStep: PlanStep = {
+      id: 'plan', role: 'auditor', title: 'Author the executable plan',
+      // the concrete scope + root id, so the authoring agent (which never sees its taskId) and
+      // finalize_plan agree on where the plan-note graph lives.
+      instructions: `Author the plan-note graph in memory scope '${planScope(task.id)}' with root note id 'masterplan', iterate with the human via ask_human, then call finalize_plan. Follow the plan-authoring skill.`,
+      executorRef: 'api-loop', modelRef: input.modelRef, skillRefs: ['plan-authoring'], toolRefs: [],
+      isolation: ISOLATION_TIER.local, zone: [], maxIterations: 30, dependsOn: [analyzeStep.id],
+    }
+    const draft: PlanDraft = {
+      strategyRef: STRATEGY.groundedPlan, analyzerRef: input.analyzerRef, costEstimateUSD: null,
+      steps: [analyzeStep, planStep],
+    }
+    const plan = await this.proposePlan(task.id, draft)
+    await this.approvePlan(task.id, plan.version, { approvedBy: 'policy' })
+    return task
+  }
 
   async createTask(input: { title: string; spec?: string; type?: string; parentId?: string; budgetUSD?: number | null }): Promise<TaskNode> {
     return this.log.transaction(async tx => {
@@ -122,7 +153,7 @@ export class Kernel {
 
       // expand the trimmed draft with inherited refs (spec D3) and propose+maybe-approve
       const expanded: PlanDraft = {
-        strategyRef: 'split', costEstimateUSD: null,
+        strategyRef: STRATEGY.split, costEstimateUSD: null,
         steps: draft.steps.map(s => ({
           ...s, executorRef: input.parentStep.executorRef, modelRef: input.parentStep.modelRef,
           isolation: ISOLATION_TIER.local, zone: [], maxIterations: input.parentStep.maxIterations,

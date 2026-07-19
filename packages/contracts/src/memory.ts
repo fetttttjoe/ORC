@@ -21,6 +21,7 @@ export const LINK_KINDS = [
 ] as const
 export const LinkKind = z.enum(LINK_KINDS)
 export type LinkKind = z.infer<typeof LinkKind>
+export const LINK_KIND = LinkKind.enum
 
 export const MemoryLink = z.object({
   id: Id,
