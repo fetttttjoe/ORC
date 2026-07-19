@@ -5,7 +5,7 @@ import { createOpenAIProvider } from '@orc/provider-openai'
 import { createOllamaProvider } from '@orc/provider-ollama'
 import { agentAnalyzer } from '@orc/analyzer-agent'
 import { createMcpHub, type McpHub } from '@orc/mcp-client'
-import { createMemory, unavailableMemoryTools } from '@orc/memory'
+import { createMemory, unavailableMemoryTools, MEMORY_TIER, type MemoryTier } from '@orc/memory'
 import { createVaultProjector } from '@orc/vault-projector'
 import { createDbosPort, createPluginHost, dbosSend, finalizePlanTool, isMcpTrusted, loadConfig, loadTrust, openStorage, requireProject, splitTool, Kernel, type DbosPort, type PluginHost, type ProjectConfig, type Storage } from '@orc/kernel'
 
@@ -48,7 +48,7 @@ export async function buildRuntime(
   const projector = createVaultProjector({ log, config })
   await projector.start()
   let memory: Awaited<ReturnType<typeof createMemory>> | null = null
-  let buildMemoryTools: (author: MemoryAuthor) => ResolvedTool[]
+  let buildMemoryTools: (author: MemoryAuthor, tier?: MemoryTier) => ResolvedTool[]
   try {
     memory = await createMemory({ log, config })
     await memory.projector.start()
@@ -64,7 +64,12 @@ export async function buildRuntime(
     providers: host.providers, executors: host.executors,
     skills: host.skills, tools: hub,
     stepTools: p => [
-      ...buildMemoryTools({ source: 'agent', taskId: p.taskId, stepId: p.stepId, runToken: p.runToken, executor: p.executor, model: p.model, role: p.role }),
+      // step role keys the memory tier (Task 7): scout/auditor narrow or widen the tool surface
+      // + epistemic posture; every other role (e.g. plain worker steps) gets today's verify tier.
+      ...buildMemoryTools(
+        { source: 'agent', taskId: p.taskId, stepId: p.stepId, runToken: p.runToken, executor: p.executor, model: p.model, role: p.role },
+        p.role === MEMORY_TIER.scout ? MEMORY_TIER.scout : p.role === MEMORY_TIER.auditor ? MEMORY_TIER.auditor : MEMORY_TIER.verify,
+      ),
       splitTool({ kernel, config: { approvalPolicy: config.approvalPolicy, maxDepth: config.maxDepth }, p }),
       // finalize_plan needs the memory store to read the plan-note graph — only available when
       // memory is healthy (grounded plans are pointless in degraded mode anyway).
