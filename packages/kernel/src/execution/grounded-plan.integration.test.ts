@@ -73,7 +73,11 @@ function groundedFake(): AgentExecutor<unknown> {
         const analyzed = answer === 'yes'
         if (analyzed)
           await write('analysis', { id: 'analysis', title: 'Architecture', kind: NOTE_KIND.architecture_current, body: 'observed layering', summary: 'the shape of the code', paths: ['src/'] })
-        // RG7: consent 'no' → empty CoverageReport (analyzed:false); 'yes' → a grounded report.
+        // TEST-ONLY SCAFFOLD: production has NO emitter for analysis_completed/CoverageReport —
+        // it's a reserved contract seam (spec §9), fabricated here only by this fake, and the fold
+        // is a no-op (projections.ts). Do not read this as proof of RG7 degradation; the
+        // production-truthful proof is the persisted uncertainty[] on the plan-notes, asserted in
+        // test 2 below via the store/projection, not this event.
         const report: CoverageReport = analyzed
           ? { analyzed: true, scope: ['project'], gaps: ['auth flow not exercised'], confidence: 'medium', notesWritten: 1 }
           : { analyzed: false, scope: [], gaps: [], confidence: 'none', notesWritten: 0 }
@@ -299,7 +303,10 @@ describe('grounded-plan e2e: the full consent → analyze → plan-graph → ann
       expect(await waitFor(() => feedbackCount('consent').then(n => n >= 1))).toBe(true)
       expect(await kernel.replyFeedback(t.id, 'no')).toBe('consent')
 
-      // ASSERT: analysis_completed carries analyzed:false with an empty CoverageReport
+      // NOTE (test-only scaffold, not load-bearing): this only pins the FAKE's own emitted event —
+      // production has no analysis_completed emitter (reserved CoverageReport seam, spec §9), so this
+      // is not evidence of any real degradation behavior. The production-truthful proof of RG7
+      // degradation is below: persisted uncertainty[] on the plan-notes, read back from the store.
       expect(await waitFor(() => kernel.eventsFor(t.id).then(es => es.some(e => e.kind === EVENT_KIND.analysis_completed)))).toBe(true)
       const ac = (await kernel.eventsFor(t.id)).find(e => e.kind === EVENT_KIND.analysis_completed)
       const report = ac!.payload as CoverageReport
@@ -316,11 +323,13 @@ describe('grounded-plan e2e: the full consent → analyze → plan-graph → ann
       const childId2 = ((await kernel.eventsFor(t.id)).find(e => e.kind === EVENT_KIND.split_proposed)!.payload as { childTaskId: string }).childTaskId
       await waitFor(async () => (await kernel.getTask(childId2))?.status === TASK_STATUS.done, 30_000)
 
-      // ASSERT (FixA Gap A): the assumption-mode plan-notes carry marked uncertainties (every gap
-      // surfaced on the note it affects), and uncertainty[]/rationale round-trip THROUGH THE READ
-      // MODEL — read db's note back from the store (the SurrealDB projection), NOT the event log.
-      // Pre-FixA the projection dropped these fields, so this returned [] / '' even though the log
-      // carried them; FixA persists them through table/upsert/toNote.
+      // ASSERT (FixA Gap A) — THE PRODUCTION-TRUTHFUL PROOF OF RG7 DEGRADATION (not the fabricated
+      // analysis_completed above, which production never emits): the assumption-mode plan-notes
+      // carry marked uncertainties (every gap surfaced on the note it affects), and
+      // uncertainty[]/rationale round-trip THROUGH THE READ MODEL — read db's note back from the
+      // store (the SurrealDB projection), NOT the event log. Pre-FixA the projection dropped these
+      // fields, so this returned [] / '' even though the log carried them; FixA persists them
+      // through table/upsert/toNote.
       expect(await waitFor(async () => ((await memory.store.get('db', scope))?.uncertainty.length ?? 0) > 0)).toBe(true)
       const dbNote = await memory.store.get('db', scope)
       expect(dbNote?.uncertainty.length).toBeGreaterThan(0)

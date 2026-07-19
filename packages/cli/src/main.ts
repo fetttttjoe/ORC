@@ -119,6 +119,8 @@ export function buildProgram(
     .option('--model <ref>', `model for the grounded-plan analyze/plan steps (required with --strategy ${STRATEGY.groundedPlan})`)
     .option('--analyzer <ref>', 'analyzer for the grounded-plan analyze step', 'agent-analyzer')
     .action(async (title: string, opts: { spec: string; parent?: string; strategy?: string; model?: string; analyzer: string }) => {
+      if (opts.strategy !== undefined && !(Object.values(STRATEGY) as string[]).includes(opts.strategy))
+        throw new Error(`unknown --strategy '${opts.strategy}' — valid strategies: ${Object.values(STRATEGY).join(', ')}`)
       if (opts.strategy !== STRATEGY.groundedPlan) {
         const t = await kernel.createTask({ title, spec: opts.spec, parentId: opts.parent })
         console.log(t.id)
