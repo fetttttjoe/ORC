@@ -7,7 +7,7 @@ import { agentAnalyzer } from '@orc/analyzer-agent'
 import { createMcpHub, type McpHub } from '@orc/mcp-client'
 import { createMemory, unavailableMemoryTools, MEMORY_TIER, type MemoryTier } from '@orc/memory'
 import { createVaultProjector } from '@orc/vault-projector'
-import { createDbosPort, createPluginHost, dbosSend, finalizePlanTool, isMcpTrusted, loadConfig, loadTrust, openStorage, requireProject, splitTool, Kernel, type DbosPort, type PluginHost, type ProjectConfig, type Storage } from '@orc/kernel'
+import { createDbosPort, createPluginHost, dbosSend, finalizePlanTool, isMcpTrusted, loadConfig, loadTrust, openStorage, readAnnotationsTool, requireProject, splitTool, Kernel, type DbosPort, type PluginHost, type ProjectConfig, type Storage } from '@orc/kernel'
 
 export function seedRegistries(config = loadConfig()) {
   const providers = new Map<string, ModelProvider<unknown>>([
@@ -71,6 +71,9 @@ export async function buildRuntime(
         p.role === MEMORY_TIER.scout ? MEMORY_TIER.scout : p.role === MEMORY_TIER.auditor ? MEMORY_TIER.auditor : MEMORY_TIER.verify,
       ),
       splitTool({ kernel, config: { approvalPolicy: config.approvalPolicy, maxDepth: config.maxDepth }, p }),
+      // read_annotations only needs the kernel (reads plan_annotated off the log) — unconditional,
+      // like splitTool: harmless everywhere, returns an empty list for a task with no annotations.
+      readAnnotationsTool({ kernel, p }),
       // finalize_plan needs the memory store to read the plan-note graph — only available when
       // memory is healthy (grounded plans are pointless in degraded mode anyway).
       ...(memory ? [finalizePlanTool({ store: memory.store, kernel, config: { maxDepth: config.maxDepth }, p })] : []),

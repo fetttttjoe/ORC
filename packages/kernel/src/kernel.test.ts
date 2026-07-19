@@ -284,4 +284,21 @@ describe('Kernel lifecycle', () => {
       expect(await codeOf(k.annotatePlan(t.id, { targetNote: 'db', refs: [], text: 'x' }))).toBe(KERNEL_ERROR_CODE.invalid_transition)
     }
   })
+
+  it('listAnnotations returns the appended plan_annotated events, in chronological order', async () => {
+    const k = await freshKernel()
+    const t = await k.createTask({ title: 'x' })
+    await k.proposePlan(t.id, draft())
+    await k.approvePlan(t.id)
+    expect(await k.listAnnotations(t.id)).toEqual([])
+
+    await k.annotatePlan(t.id, { targetNote: 'db', refs: ['api'], text: 'use bcrypt' })
+    await k.annotatePlan(t.id, { targetNote: 'api', refs: [], text: 'add rate limiting' })
+
+    const annotations = await k.listAnnotations(t.id)
+    expect(annotations).toHaveLength(2)
+    expect(annotations[0]).toMatchObject({ targetNote: 'db', refs: ['api'], text: 'use bcrypt', planVersion: 1 })
+    expect(annotations[1]).toMatchObject({ targetNote: 'api', refs: [], text: 'add rate limiting', planVersion: 1 })
+    expect(annotations[0]!.seq).toBeLessThan(annotations[1]!.seq)
+  })
 })

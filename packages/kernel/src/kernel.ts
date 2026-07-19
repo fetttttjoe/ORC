@@ -9,6 +9,10 @@ import { EventLog, type EventLogOps } from './storage'
 import { fold, subtreeUsage, type State } from './projections'
 import { KERNEL_ERROR_CODE, KernelError } from './errors'
 
+// D6 targeted re-plan (M5b): what listAnnotations hands back to the read_annotations tool — the
+// plan_annotated payload plus the event's own seq, so the agent can order/dedupe across rounds.
+export type PlanAnnotation = PlanAnnotatedPayload & { seq: number }
+
 export class Kernel {
   constructor(
     private readonly log: EventLog,
@@ -192,6 +196,19 @@ export class Kernel {
       const payload = PlanAnnotatedPayload.parse({ planVersion: plan.version, targetNote: input.targetNote, refs: input.refs ?? [], text: input.text })
       await this.append(tx, taskId, EVENT_KIND.plan_annotated, payload)
     })
+  }
+
+  // D6 targeted re-plan, read side (M5b): the plan-authoring agent's read_annotations tool calls
+  // this to see what the human flagged — annotatePlan (above) is the write side, this reads the
+  // same plan_annotated events straight back off the log (the only source of truth). byTask is
+  // seq-ordered, so this returns in chronological order for free.
+  // ponytail: returns ALL annotations for the task; a since-marker (skip ones already applied) is
+  // a later refinement once multi-round convergence needs it, not now.
+  async listAnnotations(taskId: string): Promise<PlanAnnotation[]> {
+    const events = await this.log.byTask(taskId)
+    return events
+      .filter(e => e.kind === EVENT_KIND.plan_annotated)
+      .map(e => ({ ...(e.payload as PlanAnnotatedPayload), seq: e.seq }))
   }
 
   // D4 conversational gate, human side: answers the latest still-open feedback_requested (one
