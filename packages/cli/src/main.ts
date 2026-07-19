@@ -1,7 +1,7 @@
 import { readdirSync, readFileSync } from 'node:fs'
 import path from 'node:path'
 import { Command } from 'commander'
-import { ISOLATION_TIER, PlanDraft, type EventRecord, type ExecutionPort, type Plan, type RunHandle } from '@orc/contracts'
+import { ISOLATION_TIER, PlanDraft, type Analyzer, type EventRecord, type ExecutionPort, type Plan, type RunHandle } from '@orc/contracts'
 import { openStorage, Kernel, fold, grantExtensionTrust, grantMcpTrust, initializeProject, isExtensionTrusted, isMcpTrusted, loadConfig, loadTrust, requireProject, taskUsage, type EventLog, type OrcConfig, type PluginHost, type ProjectConfig, type Storage } from '@orc/kernel'
 import { createVaultProjector, parsePlanFile } from '@orc/vault-projector'
 import { createMemory, probeMemory } from '@orc/memory'
@@ -15,6 +15,7 @@ export async function openKernel(
     projectId?: string
     redactEnv?: string[]
     refValidator?: (plan: Plan) => Promise<string[]>
+    analyzers?: Map<string, Analyzer>
     onAppend?: (e: EventRecord) => void
   } = {},
 ): Promise<{ kernel: Kernel; log: EventLog; storage: Storage }> {
@@ -22,7 +23,7 @@ export async function openKernel(
   const storage = await openStorage(url, { projectId, redactEnv: opts.redactEnv })
   const log = storage.events
   if (opts.onAppend) log.onAppend = opts.onAppend
-  return { kernel: new Kernel(log, opts.refValidator), log, storage }
+  return { kernel: new Kernel(log, opts.refValidator, opts.analyzers), log, storage }
 }
 
 // `orc init` must work before Postgres/plugins exist, so it gets a standalone entry

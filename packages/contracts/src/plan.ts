@@ -23,10 +23,14 @@ export const PlanStep = z.object({
 })
 export type PlanStep = z.infer<typeof PlanStep>
 
+// matched values, never scattered literals: routing keys the runtime and M5a split path share.
+export const STRATEGY = { groundedPlan: 'grounded-plan', split: 'split', single: 'template:single' } as const
+
 export const Plan = z.object({
   taskId: z.string().min(1),
   version: z.number().int().positive(),
   strategyRef: z.string().min(1),
+  analyzerRef: z.string().min(1).optional(), // grounded-plan: which Analyzer seeds the graph (D2)
   costEstimateUSD: z.number().nonnegative().nullable(),
   steps: z.array(PlanStep).min(1),
 })

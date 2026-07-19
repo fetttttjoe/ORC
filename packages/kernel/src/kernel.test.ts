@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, it } from 'bun:test'
-import { ApprovalPolicy, TASK_STATUS, type PlanDraft } from '@orc/contracts'
+import { ApprovalPolicy, TASK_STATUS, type Analyzer, type PlanDraft, type PlanStep } from '@orc/contracts'
 import { draftFixture, stepFixture } from '@orc/contracts/fixtures'
 import { openStorage } from './storage'
 import { KERNEL_ERROR_CODE, KernelError } from './errors'
@@ -124,6 +124,30 @@ describe('Kernel lifecycle', () => {
     await new Promise(r => setTimeout(r, 100))
     expect(seen.length).toBeGreaterThan(0)
     await unsub()
+  })
+
+  it('createGroundedTask seeds an auto-approved [analyze, plan] template', async () => {
+    const db = await createTestDb()
+    dbs.push(db)
+    // fake analyzer stub: analysisStep returns the scout analyze step (agent-analyzer's real shape)
+    const analyze: PlanStep = stepFixture({ id: 'analyze', role: 'scout', skillRefs: ['codebase-analysis'] })
+    const analyzers = new Map<string, Analyzer>([['agent-analyzer', { id: 'agent-analyzer', analysisStep: () => analyze }]])
+    const k = new Kernel((await openStorage(db.url, { projectId: TEST_PROJECT_ID })).events, undefined, analyzers)
+    const t = await k.createGroundedTask({ title: 'build web', spec: 's', modelRef: 'anthropic/claude-sonnet-5', analyzerRef: 'agent-analyzer' })
+    const plan = (await k.getPlan(t.id))!
+    expect(plan.strategyRef).toBe('grounded-plan')
+    expect(plan.analyzerRef).toBe('agent-analyzer')
+    expect(plan.steps.map(s => s.id)).toEqual(['analyze', 'plan'])
+    expect(plan.steps[1]!.dependsOn).toEqual(['analyze'])
+    expect(plan.steps[1]!.skillRefs).toEqual(['plan-authoring'])
+    expect((await k.getTask(t.id))!.status).toBe(TASK_STATUS.approved)
+  })
+
+  it('createGroundedTask rejects an unknown analyzerRef', async () => {
+    const db = await createTestDb()
+    dbs.push(db)
+    const k = new Kernel((await openStorage(db.url, { projectId: TEST_PROJECT_ID })).events, undefined, new Map())
+    expect(await codeOf(k.createGroundedTask({ title: 'x', spec: '', modelRef: 'fake/m', analyzerRef: 'ghost' }))).toBe(KERNEL_ERROR_CODE.invalid_transition)
   })
 
   it('proposeSplit: deterministic ids, inherited refs, clamped budget, manual gate parks the child', async () => {

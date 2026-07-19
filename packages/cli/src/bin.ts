@@ -20,6 +20,7 @@ try {
     projectId: config.projectId,
     redactEnv: config.redactEnv,
     refValidator: plugins.host.refValidator,
+    analyzers: plugins.host.analyzers,
     onAppend: e => void plugins.host.hooks.emit(HOOK_NAME.event_appended, e),
   })
   await buildProgram(

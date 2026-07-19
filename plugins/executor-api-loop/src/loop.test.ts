@@ -384,4 +384,62 @@ describe('api-loop executor', () => {
     expect(events.at(-1)?.type).toBe('done')
     expect(unansweredToolCallIds(model.doGenerateCalls[1]!.prompt)).toEqual([])
   })
+
+  it('ask_human yields a feedback gate and feeds the human reply back as the tool result', async () => {
+    const captured: EventDraft[] = []
+    // turn 1: model asks the human; turn 2: it sees the reply and signals success
+    const model = scriptModel([
+      { toolCalls: [{ toolCallId: 'a1', toolName: 'ask_human', input: { question: 'Plan ready — approve?' } }] },
+      { toolCalls: [{ toolCallId: 'sig', toolName: 'signal', input: { outcome: 'success', summary: 'approved' } }] },
+    ])
+    const gen = apiLoopExecutor().startTurn(ctx(model, captured))
+    const events: UnifiedEvent[] = []
+    let resume: SplitResult[] | string | undefined
+    while (true) {
+      const { value, done } = await gen.next(resume)
+      resume = undefined
+      if (done) break
+      events.push(value)
+      if (value.type === 'feedback') {
+        expect(value.question).toBe('Plan ready — approve?')
+        expect(value.topic).toBe('step:t1:s1:a1:a1') // deterministic ${runToken}:${toolCallId} (replay-safe)
+        expect(value.toolCallId).toBe('a1')
+        resume = 'yes, approve'
+      }
+    }
+    expect(events.some(e => e.type === 'feedback')).toBe(true)
+    const result = events.find(e => e.type === 'tool_result' && e.toolCallId === 'a1')
+    expect(result?.type === 'tool_result' && !result.isError).toBe(true)
+    expect(events.at(-1)?.type).toBe('done')
+    // the model's second turn saw the human reply in its tool message
+    expect(JSON.stringify(model.doGenerateCalls[1]!.prompt)).toContain('yes, approve')
+  })
+
+  it('ask_human honors an explicit topic and defers a batched signal', async () => {
+    const captured: EventDraft[] = []
+    const model = scriptModel([
+      { toolCalls: [
+        { toolCallId: 'sig1', toolName: 'signal', input: { outcome: 'success', summary: 'premature' } },
+        { toolCallId: 'a1', toolName: 'ask_human', input: { question: 'continue?', topic: 'consent' } },
+      ] },
+      { toolCalls: [{ toolCallId: 'sig2', toolName: 'signal', input: { outcome: 'success', summary: 'done for real' } }] },
+    ])
+    const gen = apiLoopExecutor().startTurn(ctx(model, captured))
+    const events: UnifiedEvent[] = []
+    let resume: SplitResult[] | string | undefined
+    while (true) {
+      const { value, done } = await gen.next(resume)
+      resume = undefined
+      if (done) break
+      events.push(value)
+      if (value.type === 'feedback') {
+        expect(value.topic).toBe('consent') // explicit topic overrides the deterministic default
+        resume = 'go'
+      }
+    }
+    // the premature signal was deferred, not dropped: no error, and its tool_use is answered
+    expect(events.some(e => e.type === 'error')).toBe(false)
+    expect(events.at(-1)?.type).toBe('done')
+    expect(unansweredToolCallIds(model.doGenerateCalls[1]!.prompt)).toEqual([])
+  })
 })
