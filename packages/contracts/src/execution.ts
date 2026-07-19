@@ -76,7 +76,7 @@ export const StepRunStatus = z.enum(['running', 'completed', 'failed'])
 export type StepRunStatus = z.infer<typeof StepRunStatus>
 export const STEP_RUN_STATUS = StepRunStatus.enum
 
-export const UnifiedEventType = z.enum(['text', 'tool_call', 'tool_result', 'usage', 'signal', 'error', 'done', 'gate'])
+export const UnifiedEventType = z.enum(['text', 'tool_call', 'tool_result', 'usage', 'signal', 'error', 'done', 'gate', 'feedback'])
 export type UnifiedEventType = z.infer<typeof UnifiedEventType>
 export const UNIFIED_EVENT_TYPE = UnifiedEventType.enum
 
@@ -89,6 +89,7 @@ export const UnifiedEvent = z.discriminatedUnion('type', [
   z.object({ type: z.literal('error'), class: FailureClass, message: z.string() }),
   z.object({ type: z.literal('done') }),
   z.object({ type: z.literal('gate'), splitIds: z.array(z.string()), toolCallId: z.string() }),
+  z.object({ type: z.literal('feedback'), question: z.string(), topic: z.string(), toolCallId: z.string() }),
 ])
 export type UnifiedEvent = z.infer<typeof UnifiedEvent>
 
@@ -168,7 +169,7 @@ export interface ExecutorContext<LM = unknown> {
 
 export interface AgentExecutor<LM = unknown> {
   id: string
-  startTurn(ctx: ExecutorContext<LM>): AsyncGenerator<UnifiedEvent, void, SplitResult[] | undefined>
+  startTurn(ctx: ExecutorContext<LM>): AsyncGenerator<UnifiedEvent, void, SplitResult[] | string | undefined>
 }
 
 export interface RunHandle {

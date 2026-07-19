@@ -204,7 +204,7 @@ export async function createDbosPort(opts: {
       let signal: Signal | null = null
       let error: { class: string; message: string } | null = null
       const gen = executor.startTurn(ctx)
-      let resume: SplitResult[] | undefined
+      let resume: SplitResult[] | string | undefined
       while (true) {
         const { value: ev, done } = await gen.next(resume)
         resume = undefined
@@ -235,6 +235,15 @@ export async function createDbosPort(opts: {
             results.push(msg)
           }
           resume = results
+        }
+        if (ev.type === 'feedback') {
+          await checkpoint(`feedback:req:${ev.toolCallId}`, async () => 0, () =>
+            [{ kind: EVENT_KIND.feedback_requested, payload: { question: ev.question, topic: ev.topic } }])
+          // ponytail: 60s poll, loop forever — no gate timeout in v1 (mirrors the split gate); cancel is the escape
+          let msg: string | null = null
+          while (msg === null) msg = await DBOS.recv<string>(`feedback:${ev.topic}`, 60)
+          resume = msg
+          continue
         }
       }
 
