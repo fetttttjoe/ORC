@@ -17,7 +17,7 @@ export type MemoryAuthor = z.infer<typeof MemoryAuthor>
 
 export const LINK_KINDS = [
   'refines', 'supersedes', 'contradicts', 'depends_on',
-  'example_of', 'derived_from', 'relates_to',
+  'example_of', 'derived_from', 'relates_to', 'decomposes_into',
 ] as const
 export const LinkKind = z.enum(LINK_KINDS)
 export type LinkKind = z.infer<typeof LinkKind>
@@ -30,7 +30,7 @@ export const MemoryLink = z.object({
 export type MemoryLink = z.infer<typeof MemoryLink>
 
 // knowledge lifecycle: current/target architecture stay distinguishable and queryable
-export const NOTE_KINDS = ['fact', 'decision', 'architecture_current', 'architecture_target', 'documentation'] as const
+export const NOTE_KINDS = ['fact', 'decision', 'architecture_current', 'architecture_target', 'documentation', 'plan'] as const
 export const NoteKind = z.enum(NOTE_KINDS)
 export type NoteKind = z.infer<typeof NoteKind>
 export const NOTE_KIND = NoteKind.enum
@@ -50,6 +50,8 @@ const MemoryNoteBase = z.object({
   rules: z.array(z.string()).default([]), // normative statements agents honor
   summary: z.string().max(500).default(''),
   body: z.string().default(''),
+  rationale: z.string().default(''),          // plan-note: why this subplan exists
+  uncertainty: z.array(z.string()).default([]), // plan-note: coverage gaps / assumptions (RG7)
 })
 export const MemoryNoteInput = MemoryNoteBase.refine(
   n => !(n.scope === 'project' && n.id === 'index'),

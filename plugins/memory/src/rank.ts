@@ -2,6 +2,7 @@ import type { LinkKind } from '@orc/contracts'
 
 export const DEFAULT_LINK_WEIGHTS: Record<LinkKind, number> = {
   supersedes: 1.0, contradicts: 1.0, refines: 0.9, depends_on: 0.8,
+  decomposes_into: 0.8, // structural plan-graph edge, same weight class as depends_on
   derived_from: 0.7, example_of: 0.6, relates_to: 0.5,
 }
 export const DEFAULT_DECAY = 0.6
