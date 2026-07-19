@@ -1,7 +1,8 @@
 import { randomUUID } from 'node:crypto'
 import {
-  ChildPlanDraft, EVENT_KIND, ISOLATION_TIER, PlanDraft, STRATEGY, TASK_STATUS, evaluateApproval, validatePlan,
-  type Analyzer, type ApprovalPolicy, type EventKind, type EventRecord, type Plan, type PlanStep, type TaskNode, type TaskStatus,
+  ChildPlanDraft, EVENT_KIND, FeedbackProvidedPayload, ISOLATION_TIER, PlanAnnotatedPayload, PlanDraft, STRATEGY, TASK_STATUS, evaluateApproval, validatePlan,
+  type Analyzer, type ApprovalPolicy, type EventKind, type EventRecord, type FeedbackRequestedPayload,
+  type Plan, type PlanStep, type TaskNode, type TaskStatus,
 } from '@orc/contracts'
 import { planScope } from './execution/strategies/grounded-plan'
 import { EventLog, type EventLogOps } from './storage'
@@ -15,6 +16,12 @@ export class Kernel {
     // analyzers seed the grounded-plan template's analyze step (D2); optional so non-grounded
     // kernels (most tests, read-only CLI) construct without a plugin host.
     private readonly analyzers?: Map<string, Analyzer>,
+    // resumes a parked feedback gate (D4 conversational gate): DBOS.recv(`feedback:<topic>`, 60)
+    // runs inside the step workflow whose id IS the destination; the kernel stays DBOS-agnostic
+    // (unit-testable with a fake) and the real port-backed sender is wired at CLI runtime
+    // construction. Optional so most tests / read-only CLI contexts construct without it —
+    // replyFeedback still appends feedback_provided and returns the topic when it's absent.
+    private readonly send?: (workflowId: string, message: string, topic: string) => Promise<void>,
   ) {}
 
   // The grounded-plan bootstrap (M5b): an auto-approved [analyze, plan] template. The analyze
@@ -171,6 +178,46 @@ export class Kernel {
       }
       return { splitId, childTaskId, gated: verdict.then === 'manual' }
     })
+  }
+
+  // D5 human annotation on a plan-note (M5b): an input event only — the plan-authoring agent
+  // reads it and re-renders on its next revise. No fold/state change of its own.
+  async annotatePlan(taskId: string, input: { targetNote: string; refs?: string[]; text: string }): Promise<void> {
+    return this.log.transaction(async tx => {
+      const task = await this.requireTask(tx, taskId)
+      if (task.status === TASK_STATUS.done || task.status === TASK_STATUS.cancelled)
+        throw new KernelError(KERNEL_ERROR_CODE.invalid_transition, `cannot annotate a plan while task is '${task.status}'`)
+      const plan = (await this.stateOf(tx)).plans.get(taskId)?.versions.at(-1)
+      if (!plan) throw new KernelError(KERNEL_ERROR_CODE.invalid_transition, 'no plan to annotate')
+      const payload = PlanAnnotatedPayload.parse({ planVersion: plan.version, targetNote: input.targetNote, refs: input.refs ?? [], text: input.text })
+      await this.append(tx, taskId, EVENT_KIND.plan_annotated, payload)
+    })
+  }
+
+  // D4 conversational gate, human side: answers the latest still-open feedback_requested (one
+  // with no later feedback_provided on its topic) and resumes the step workflow parked on
+  // DBOS.recv(`feedback:<topic>`, 60) — that workflow's id is the event's own envelope runToken,
+  // recorded by the port from inside the step (never reconstructed here). Returns the resolved
+  // topic, or null if the task has no open question (the CLI reports either outcome).
+  async replyFeedback(taskId: string, text: string): Promise<string | null> {
+    const open = await this.log.transaction(async tx => {
+      await this.requireTask(tx, taskId)
+      const events = await tx.byTask(taskId)
+      const answeredAfter = (seq: number, topic: string): boolean =>
+        events.some(e => e.seq > seq && e.kind === EVENT_KIND.feedback_provided && (e.payload as FeedbackProvidedPayload).topic === topic)
+      const requested = [...events].reverse().find(e =>
+        e.kind === EVENT_KIND.feedback_requested && !answeredAfter(e.seq, (e.payload as FeedbackRequestedPayload).topic))
+      if (!requested) return null
+      const { topic } = requested.payload as FeedbackRequestedPayload
+      if (!requested.runToken)
+        throw new KernelError(KERNEL_ERROR_CODE.invalid_transition, `feedback_requested for topic '${topic}' has no runToken to resume`)
+      const payload = FeedbackProvidedPayload.parse({ topic, text, author: { source: 'cli' } })
+      await this.append(tx, taskId, EVENT_KIND.feedback_provided, payload)
+      return { topic, runToken: requested.runToken }
+    })
+    if (!open) return null
+    await this.send?.(open.runToken, text, `feedback:${open.topic}`)
+    return open.topic
   }
 
   // ponytail: state() refolds the whole log on every call — add snapshots when it measurably slows

@@ -42,6 +42,13 @@ const workflowIdOrThrow = (): string => {
   return id
 }
 
+// Thin wrapper so callers OUTSIDE a workflow (the CLI's `reply` verb) can resume a recv-gate
+// without the kernel taking a direct @dbos-inc/dbos-sdk dependency — mirrors the signal router's
+// own `send: (dest, result, topic, key) => DBOS.send(dest, result, topic, key)` wiring below.
+// Requires DBOS to already be launched in this process (same requirement as any other port call).
+export const dbosSend = (workflowId: string, message: string, topic: string): Promise<void> =>
+  DBOS.send(workflowId, message, topic)
+
 export async function createDbosPort(opts: {
   storage: Storage
   config: ProjectConfig

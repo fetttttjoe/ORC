@@ -229,6 +229,44 @@ describe('orc CLI', () => {
     expect(kinds).toContain(EVENT_KIND.plan_edited)
   })
 
+  it('plan-note appends plan_annotated; reply resolves the open feedback topic and notifies its runToken', async () => {
+    const db = await createTestDb()
+    dbs.push(db)
+    const sent: Array<{ id: string; message: string; topic: string }> = []
+    const { kernel, log } = await openKernel(db.url, {
+      projectId: TEST_PROJECT_ID,
+      send: async (id, message, topic) => { sent.push({ id, message, topic }) },
+    })
+    const lines: string[] = []
+    spyOn(console, 'log').mockImplementation((...a: unknown[]) => { lines.push(a.join(' ')) })
+    const run = async (...args: string[]) => buildProgram(kernel).parseAsync(args, { from: 'user' })
+
+    await run('new', 'grounded task')
+    const taskId = lines[0]!
+    await run('propose', taskId)
+
+    // simulate a running plan step raising a feedback gate — normally appended by the DBOS
+    // port's `feedback` branch (Task 2); Task 5 only adds the human-facing reply/annotate surface
+    const runToken = `step:${taskId}:plan:a1`
+    await log.append({ taskId, stepId: 'plan', runToken, kind: EVENT_KIND.feedback_requested, payload: { question: 'db choice?', topic: 'auth-1' } })
+
+    lines.length = 0
+    await run('plan-note', taskId, 'db', 'use bcrypt', '--ref', 'api')
+    expect(lines[0]).toContain("noted on 'db'")
+    expect((await log.byTask(taskId)).some(e => e.kind === EVENT_KIND.plan_annotated)).toBe(true)
+
+    lines.length = 0
+    await run('reply', taskId, 'approve')
+    expect(lines[0]).toContain('auth-1')
+    expect(sent).toEqual([{ id: runToken, message: 'approve', topic: 'feedback:auth-1' }])
+
+    lines.length = 0
+    await run('reply', taskId, 'again')
+    expect(lines[0]).toContain('no open feedback')
+
+    await log.close()
+  })
+
   // memory commands need `needPlugin()` to resolve, so this injects a plugin the way
   // plugin-commands.test.ts does — host/hub are untouched stubs, config/log are real.
   // config.projectDbName is a per-test throwaway SurrealDB db (dropped in afterAll below),
