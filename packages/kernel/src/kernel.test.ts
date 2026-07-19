@@ -7,9 +7,12 @@ import { Kernel } from './kernel'
 import { createTestDb, TEST_PROJECT_ID } from './test-helpers'
 
 const dbs: Array<{ drop: () => Promise<void> }> = []
+// Teardown drops one DB per freshKernel (14+ here), each a pg_database scan + DROP DATABASE WITH
+// FORCE on its own admin connection. Serial drops blew bun's default 5s hook budget under a
+// contended pg — the DBs are distinct so drop them concurrently, with headroom for a loaded box.
 afterAll(async () => {
-  for (const d of dbs) await d.drop()
-})
+  await Promise.all(dbs.map(d => d.drop()))
+}, 30_000)
 
 async function freshKernel(): Promise<Kernel> {
   const db = await createTestDb()
