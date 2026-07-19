@@ -14,6 +14,7 @@ function fakeApi() {
   const api: ExtensionApi = {
     registerProvider: id => { registered.push(`provider:${id}`) },
     registerExecutor: id => { registered.push(`executor:${id}`) },
+    registerAnalyzer: id => { registered.push(`analyzer:${id}`) },
     on: hook => { registered.push(`on:${hook}`) },
   }
   return { api, registered }
