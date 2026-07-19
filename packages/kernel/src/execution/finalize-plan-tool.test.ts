@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test'
-import { LINK_KIND, type MemoryLink, type MemoryNote } from '@orc/contracts'
+import type { MemoryLink, MemoryNote } from '@orc/contracts'
 import { finalizePlanTool } from './finalize-plan-tool'
 
 const p = { taskId: 't1', stepId: 'plan', runToken: 'step:t1:plan:a1', role: 'auditor', executor: 'api-loop', modelRef: 'anthropic/x', maxIterations: 30 }

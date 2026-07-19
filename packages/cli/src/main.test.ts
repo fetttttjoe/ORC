@@ -132,6 +132,11 @@ describe('orc CLI', () => {
     ])
   })
 
+  it('new rejects an unrecognized --strategy value instead of silently falling through', async () => {
+    const { run } = await makeCli()
+    await expect(run('new', 'x', '--strategy', 'grounded')).rejects.toThrow(/unknown --strategy 'grounded'/)
+  })
+
   it('propose --skill places the named skills in the template step', async () => {
     const { run, lines } = await makeCli()
     await run('new', 'documented task')
