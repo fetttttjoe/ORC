@@ -6,7 +6,7 @@
   "scripts": {
     "test": "bun test",
     "test:live": "bun test plugins/executor-api-loop/src/live-smoke.test.ts",
-    "typecheck": "tsc --noEmit -p packages/contracts && tsc --noEmit -p packages/kernel && tsc --noEmit -p packages/cli && tsc --noEmit -p plugins/provider-anthropic && tsc --noEmit -p plugins/provider-openai && tsc --noEmit -p plugins/provider-ollama && tsc --noEmit -p plugins/executor-api-loop && tsc --noEmit -p plugins/mcp-client && tsc --noEmit -p packages/vault-projector && tsc --noEmit -p plugins/memory",
+    "typecheck": "tsc --noEmit -p packages/contracts && tsc --noEmit -p packages/kernel && tsc --noEmit -p packages/cli && tsc --noEmit -p plugins/provider-anthropic && tsc --noEmit -p plugins/provider-openai && tsc --noEmit -p plugins/provider-ollama && tsc --noEmit -p plugins/executor-api-loop && tsc --noEmit -p plugins/mcp-client && tsc --noEmit -p packages/vault-projector && tsc --noEmit -p plugins/memory && tsc --noEmit -p plugins/analyzer-agent",
     "db:up": "docker compose up -d --wait"
   },
   "devDependencies": {

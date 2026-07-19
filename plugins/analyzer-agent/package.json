@@ -1,0 +1,11 @@
+{
+  "name": "@orc/analyzer-agent",
+  "version": "0.0.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@orc/contracts": "workspace:*"
+  }
+}

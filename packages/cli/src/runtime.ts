@@ -1,8 +1,9 @@
-import { HOOK_NAME, type AgentExecutor, type MemoryAuthor, type ModelProvider, type ResolvedTool } from '@orc/contracts'
+import { HOOK_NAME, type AgentExecutor, type Analyzer, type MemoryAuthor, type ModelProvider, type ResolvedTool } from '@orc/contracts'
 import { apiLoopExecutor } from '@orc/executor-api-loop'
 import { createAnthropicProvider } from '@orc/provider-anthropic'
 import { createOpenAIProvider } from '@orc/provider-openai'
 import { createOllamaProvider } from '@orc/provider-ollama'
+import { agentAnalyzer } from '@orc/analyzer-agent'
 import { createMcpHub, type McpHub } from '@orc/mcp-client'
 import { createMemory, unavailableMemoryTools } from '@orc/memory'
 import { createVaultProjector } from '@orc/vault-projector'
@@ -15,7 +16,8 @@ export function seedRegistries(config = loadConfig()) {
     ['ollama', createOllamaProvider({ baseUrl: config.ollamaBaseUrl, costOverrides: config.costOverrides['ollama'] ?? {} })],
   ])
   const executors = new Map<string, AgentExecutor<unknown>>([['api-loop', apiLoopExecutor()]])
-  return { providers, executors }
+  const analyzers = new Map<string, Analyzer>([['agent-analyzer', agentAnalyzer()]])
+  return { providers, executors, analyzers }
 }
 
 export async function buildPlugins(config = loadConfig()): Promise<{ host: PluginHost; hub: McpHub }> {

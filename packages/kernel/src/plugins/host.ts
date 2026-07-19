@@ -1,4 +1,4 @@
-import type { AgentExecutor, ExtensionApi, ModelProvider, Plan } from '@orc/contracts'
+import type { AgentExecutor, Analyzer, ExtensionApi, ModelProvider, Plan } from '@orc/contracts'
 import { HOOK_NAME, ISOLATION_TIER, parseModelRef, parseToolRef } from '@orc/contracts'
 import type { OrcConfig } from '../config'
 import { SkillIndex } from './skills'
@@ -9,6 +9,7 @@ import { isExtensionTrusted, isMcpTrusted, loadTrust, type TrustStore } from './
 export interface PluginHost {
   providers: Map<string, ModelProvider<unknown>>
   executors: Map<string, AgentExecutor<unknown>>
+  analyzers: Map<string, Analyzer>
   skills: SkillIndex
   hooks: HookBus
   extensions: ExtensionHost
@@ -19,10 +20,15 @@ export interface PluginHost {
 
 export async function createPluginHost(
   config: OrcConfig,
-  seed: { providers?: Map<string, ModelProvider<unknown>>; executors?: Map<string, AgentExecutor<unknown>> } = {},
+  seed: {
+    providers?: Map<string, ModelProvider<unknown>>
+    executors?: Map<string, AgentExecutor<unknown>>
+    analyzers?: Map<string, Analyzer>
+  } = {},
 ): Promise<PluginHost> {
   const providers = seed.providers ?? new Map()
   const executors = seed.executors ?? new Map()
+  const analyzers = seed.analyzers ?? new Map<string, Analyzer>()
   const hooks = new HookBus()
   const trust = loadTrust(config.dir)
 
@@ -35,6 +41,10 @@ export async function createPluginHost(
       if (executors.has(id)) console.warn(`extension shadows executor '${id}'`)
       executors.set(id, e)
     },
+    registerAnalyzer: (id, a) => {
+      if (analyzers.has(id)) console.warn(`extension shadows analyzer '${id}'`)
+      analyzers.set(id, a)
+    },
     on: (hook, handler) => hooks.on(hook, handler),
   }
   const extensions = new ExtensionHost(api)
@@ -42,7 +52,7 @@ export async function createPluginHost(
   const skills = await SkillIndex.open(config.skillsDir)
 
   return {
-    providers, executors, skills, hooks, extensions, trust,
+    providers, executors, analyzers, skills, hooks, extensions, trust,
     refValidator: async plan => {
       const errors: string[] = []
       const byName = new Map(skills.list().map(e => [e.name, e]))
@@ -69,6 +79,9 @@ export async function createPluginHost(
           }
         }
       }
+      // analyzerRef is added to Plan in Task 4; inert cast until then
+      const analyzerRef = (plan as { analyzerRef?: string }).analyzerRef
+      if (analyzerRef && !analyzers.has(analyzerRef)) errors.push(`unknown analyzer '${analyzerRef}'`)
       return errors
     },
     shutdown: async () => {

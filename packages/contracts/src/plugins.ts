@@ -1,6 +1,7 @@
 import { z } from 'zod'
 import type { AgentExecutor, ModelProvider } from './execution'
 import type { EventRecord } from './events'
+import type { Analyzer } from './analysis'
 
 // ---- T0 skills (agentskills.io open spec, strict) ----
 
@@ -84,6 +85,7 @@ export interface HookHandlers {
 export interface ExtensionApi {
   registerProvider(id: string, provider: ModelProvider<unknown>): void
   registerExecutor(id: string, executor: AgentExecutor<unknown>): void
+  registerAnalyzer(id: string, analyzer: Analyzer): void
   on<H extends HookName>(hook: H, handler: HookHandlers[H]): void
 }
 
