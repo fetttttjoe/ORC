@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'bun:test'
 import { MemoryNoteInput, type MemoryNote, type MemoryNoteDraft, type MemoryStore, type NoteSummary } from '@orc/contracts'
-import { memoryTools } from './tools'
+import { memoryTools, tierForRole } from './tools'
 
 const toNote = (input: MemoryNoteDraft): MemoryNote =>
   ({ ...MemoryNoteInput.parse(input), createdAt: '', createdBy: '', updatedAt: '', updatedBy: '', revision: 1 })
@@ -115,6 +115,13 @@ describe('memory tools', () => {
     const noTierArg = memoryTools(store, { source: 'cli' })
     const explicitVerify = memoryTools(store, { source: 'cli' }, 'verify')
     expect(shape(explicitVerify)).toEqual(shape(noTierArg))
+  })
+
+  it('tierForRole is the single source both prod (runtime.ts) and the grounded e2e derive tier from', () => {
+    expect(tierForRole('scout')).toBe('scout')
+    expect(tierForRole('auditor')).toBe('auditor')
+    expect(tierForRole('implementer')).toBe('verify')
+    expect(tierForRole('anything-else')).toBe('verify')
   })
 
   it('memory_write advertises rationale/uncertainty so a model can discover and set them', () => {

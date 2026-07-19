@@ -9,6 +9,11 @@ const err = (e: unknown) => ({ output: { error: e instanceof Error ? e.message :
 export const MEMORY_TIER = { scout: 'scout', verify: 'verify', auditor: 'auditor' } as const
 export type MemoryTier = (typeof MEMORY_TIER)[keyof typeof MEMORY_TIER]
 
+// single source of truth for role → tier: production (runtime.ts stepTools) and the grounded e2e
+// both derive tier by calling this — one function, so a future edit can't drift the two apart.
+export const tierForRole = (role: string): MemoryTier =>
+  role === MEMORY_TIER.scout ? MEMORY_TIER.scout : role === MEMORY_TIER.auditor ? MEMORY_TIER.auditor : MEMORY_TIER.verify
+
 // epistemic fragments — wording reused verbatim from what M5a already shipped elsewhere, so the
 // model sees one consistent posture rather than a divergent restatement:
 //  - scout: task_split's scout-child instruction (kernel/execution/split-tool.ts, ledger amendment A)

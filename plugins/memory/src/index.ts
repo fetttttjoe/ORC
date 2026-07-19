@@ -9,7 +9,7 @@ export { SurrealMemory } from './surreal'
 export { openKnowledge, type Knowledge } from './knowledge'
 export { createMemoryStore } from './store'
 export { createMemoryProjector } from './projector'
-export { memoryTools, unavailableMemoryTools, MEMORY_TIER, type MemoryTier } from './tools'
+export { memoryTools, unavailableMemoryTools, MEMORY_TIER, tierForRole, type MemoryTier } from './tools'
 export { renderMemoryIndex, rebuildVaultMemory } from './memory-index'
 export { renderNoteFile, noteRelPath } from './note-md'
 
