@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'bun:test'
-import { LINK_KIND, type MemoryLink, type MemoryNote } from '@orc/contracts'
-import { instantiateFrozenPlan, planScope } from './grounded-plan'
+import { EVENT_KIND, LINK_KIND, type EventRecord, type MemoryLink, type MemoryNote } from '@orc/contracts'
+import { foldPlanNotes, instantiateFrozenPlan, planScope } from './grounded-plan'
 
 const note = (over: Partial<MemoryNote> & { id: string }): MemoryNote => ({
   scope: 'plan-t', kind: 'plan', sourceRevision: null, title: over.id, categories: [], tags: [],
@@ -43,5 +43,66 @@ describe('instantiateFrozenPlan (pure, deterministic)', () => {
 
   it('planScope derives the per-task plan-note scope', () => {
     expect(planScope('abc-123')).toBe('plan-abc-123')
+  })
+})
+
+// FixE: the freeze is built from the EVENT LOG, not the async SurrealDB projection. foldPlanNotes
+// reconstructs the plan-note graph from memory_written/memory_deleted events — synchronously durable
+// at finalize time — so a lagging read model can never yield "no masterplan".
+describe('foldPlanNotes (log-fold, projection-independent)', () => {
+  let seq = 0
+  const written = (note: Record<string, unknown>): EventRecord => ({
+    seq: ++seq, projectId: 'p', idempotencyKey: null, taskId: null, stepId: null, runToken: null,
+    kind: EVENT_KIND.memory_written, payload: { note, author: { source: 'agent' } }, usage: null,
+    ts: `2026-01-01T00:00:0${seq}.000Z`,
+  })
+  const deleted = (id: string, scope: string): EventRecord => ({
+    seq: ++seq, projectId: 'p', idempotencyKey: null, taskId: null, stepId: null, runToken: null,
+    kind: EVENT_KIND.memory_deleted, payload: { id, scope, author: { source: 'cli' } }, usage: null,
+    ts: `2026-01-01T00:00:0${seq}.000Z`,
+  })
+
+  it('reconstructs the plan-note graph so instantiateFrozenPlan yields the approved draft', () => {
+    const scope = planScope('t1')
+    const notes = foldPlanNotes([
+      written({ id: 'masterplan', scope, kind: 'plan', title: 'Web app', body: 'whole thing', links: [{ id: 'db', kind: 'decomposes_into' }, { id: 'api', kind: 'decomposes_into' }] }),
+      written({ id: 'db', scope, kind: 'plan', title: 'DB', body: 'schema' }),
+      written({ id: 'api', scope, kind: 'plan', title: 'API', body: 'endpoints', links: [{ id: 'db', kind: 'depends_on' }] }),
+    ], scope)
+    expect(notes.map(n => n.id).sort()).toEqual(['api', 'db', 'masterplan'])
+    const draft = instantiateFrozenPlan('masterplan', notes)
+    expect(draft.steps.map(s => s.id)).toEqual(['db', 'api'])
+    expect(draft.steps.find(s => s.id === 'api')!.dependsOn).toEqual(['db'])
+  })
+
+  it('keeps only the latest write per id and mirrors the projector\'s provenance (createdAt fixed, revision advances)', () => {
+    const scope = planScope('t1')
+    const v1 = written({ id: 'db', scope, kind: 'plan', title: 'DB v1', body: 'draft' })
+    const v2 = written({ id: 'db', scope, kind: 'plan', title: 'DB v2', body: 'tightened' })
+    const notes = foldPlanNotes([v1, v2], scope)
+    expect(notes).toHaveLength(1)
+    expect(notes[0]!.title).toBe('DB v2')
+    expect(notes[0]!.revision).toBe(2)
+    expect(notes[0]!.createdAt).toBe(v1.ts) // fixed to the first write
+    expect(notes[0]!.updatedAt).toBe(v2.ts) // advances to the latest write
+  })
+
+  it('drops ids removed by a later memory_deleted', () => {
+    const scope = planScope('t1')
+    const notes = foldPlanNotes([
+      written({ id: 'masterplan', scope, kind: 'plan', title: 'M' }),
+      written({ id: 'gone', scope, kind: 'plan', title: 'Gone' }),
+      deleted('gone', scope),
+    ], scope)
+    expect(notes.map(n => n.id)).toEqual(['masterplan'])
+  })
+
+  it('filters to the task\'s plan scope: another task\'s notes never leak in', () => {
+    const notes = foldPlanNotes([
+      written({ id: 'masterplan', scope: planScope('t1'), kind: 'plan', title: 'Mine' }),
+      written({ id: 'masterplan', scope: planScope('t2'), kind: 'plan', title: 'Theirs' }),
+      written({ id: 'analysis', scope: 'project', kind: 'fact', title: 'Arch' }),
+    ], planScope('t1'))
+    expect(notes.map(n => n.title)).toEqual(['Mine'])
   })
 })

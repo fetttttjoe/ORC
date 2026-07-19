@@ -4,6 +4,7 @@ import { draftFixture, stepFixture } from '@orc/contracts/fixtures'
 import { openStorage } from './storage'
 import { KERNEL_ERROR_CODE, KernelError } from './errors'
 import { Kernel } from './kernel'
+import { instantiateFrozenPlan, planScope } from './execution/strategies/grounded-plan'
 import { createTestDb, TEST_PROJECT_ID } from './test-helpers'
 
 const dbs: Array<{ drop: () => Promise<void> }> = []
@@ -303,5 +304,28 @@ describe('Kernel lifecycle', () => {
     expect(annotations[0]).toMatchObject({ targetNote: 'db', refs: ['api'], text: 'use bcrypt', planVersion: 1 })
     expect(annotations[1]).toMatchObject({ targetNote: 'api', refs: [], text: 'add rate limiting', planVersion: 1 })
     expect(annotations[0]!.seq).toBeLessThan(annotations[1]!.seq)
+  })
+
+  // FixE: the freeze reads plan-notes from the LOG, never the async SurrealDB projection. Here NO
+  // memory projector runs, so the read model is empty — pre-fix finalize (store.list/get) would see
+  // "no masterplan"; listPlanNotes folds the memory_written events straight off the log and succeeds.
+  it('listPlanNotes reconstructs the plan-note graph from the log with no projection running', async () => {
+    const db = await createTestDb()
+    dbs.push(db)
+    const log = (await openStorage(db.url, { projectId: TEST_PROJECT_ID })).events
+    const k = new Kernel(log)
+    const taskId = 'grounded-1'
+    const scope = planScope(taskId)
+    const author = { source: 'agent' as const }
+    // memory_written events carry taskId:null (scoped by note.scope) — exactly what store.write appends
+    await log.append({ taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_written, payload: { note: { id: 'masterplan', scope, kind: 'plan', title: 'Web app', links: [{ id: 'db', kind: 'decomposes_into' }] }, author } })
+    await log.append({ taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_written, payload: { note: { id: 'db', scope, kind: 'plan', title: 'DB', body: 'schema' }, author } })
+    // a note in ANOTHER task's scope must not bleed into this task's freeze
+    await log.append({ taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_written, payload: { note: { id: 'masterplan', scope: planScope('other'), kind: 'plan', title: 'Theirs' }, author } })
+
+    const notes = await k.listPlanNotes(taskId)
+    expect(notes.map(n => n.id).sort()).toEqual(['db', 'masterplan'])
+    expect(notes.find(n => n.id === 'masterplan')!.title).toBe('Web app')
+    expect(instantiateFrozenPlan('masterplan', notes).steps.map(s => s.id)).toEqual(['db'])
   })
 })

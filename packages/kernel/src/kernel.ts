@@ -2,9 +2,9 @@ import { randomUUID } from 'node:crypto'
 import {
   ChildPlanDraft, EVENT_KIND, FeedbackProvidedPayload, ISOLATION_TIER, PlanAnnotatedPayload, PlanDraft, STRATEGY, TASK_STATUS, evaluateApproval, validatePlan,
   type Analyzer, type ApprovalPolicy, type EventKind, type EventRecord, type FeedbackRequestedPayload,
-  type Plan, type PlanStep, type TaskNode, type TaskStatus,
+  type MemoryNote, type Plan, type PlanStep, type TaskNode, type TaskStatus,
 } from '@orc/contracts'
-import { planScope } from './execution/strategies/grounded-plan'
+import { foldPlanNotes, planScope, PLAN_STEP_ROLE } from './execution/strategies/grounded-plan'
 import { EventLog, type EventLogOps } from './storage'
 import { fold, subtreeUsage, type State } from './projections'
 import { KERNEL_ERROR_CODE, KernelError } from './errors'
@@ -39,7 +39,7 @@ export class Kernel {
     const task = await this.createTask({ title: input.title, spec: input.spec, type: 'grounded', budgetUSD: input.budgetUSD })
     const analyzeStep = analyzer.analysisStep({ modelRef: input.modelRef, taskSpec: input.spec })
     const planStep: PlanStep = {
-      id: 'plan', role: 'auditor', title: 'Author the executable plan',
+      id: 'plan', role: PLAN_STEP_ROLE, title: 'Author the executable plan',
       // the concrete scope + root id, so the authoring agent (which never sees its taskId) and
       // finalize_plan agree on where the plan-note graph lives.
       instructions: `Author the plan-note graph in memory scope '${planScope(task.id)}' with root note id 'masterplan', iterate with the human via ask_human, then call finalize_plan. Follow the plan-authoring skill.`,
@@ -209,6 +209,16 @@ export class Kernel {
     return events
       .filter(e => e.kind === EVENT_KIND.plan_annotated)
       .map(e => ({ ...(e.payload as PlanAnnotatedPayload), seq: e.seq }))
+  }
+
+  // FixE freeze-from-log (M5b): reconstruct the task's plan-note graph from the event log — the
+  // source of truth — NOT the eventually-consistent SurrealDB projection. memory_written/deleted
+  // events carry taskId:null (scoped by note.scope), so they can't be read via byTask; after() with
+  // the memory kinds is how the projector reads them too. finalize_plan folds these into the
+  // deterministic executable plan, so the freeze never depends on projection catch-up.
+  async listPlanNotes(taskId: string): Promise<MemoryNote[]> {
+    const events = await this.log.after(0, [EVENT_KIND.memory_written, EVENT_KIND.memory_deleted])
+    return foldPlanNotes(events, planScope(taskId))
   }
 
   // D4 conversational gate, human side: answers the latest still-open feedback_requested (one
