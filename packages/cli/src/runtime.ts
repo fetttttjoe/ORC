@@ -5,7 +5,7 @@ import { createOpenAIProvider } from '@orc/provider-openai'
 import { createOllamaProvider } from '@orc/provider-ollama'
 import { agentAnalyzer } from '@orc/analyzer-agent'
 import { createMcpHub, type McpHub } from '@orc/mcp-client'
-import { createMemory, unavailableMemoryTools, MEMORY_TIER, type MemoryTier } from '@orc/memory'
+import { createMemory, unavailableMemoryTools, tierForRole, type MemoryTier } from '@orc/memory'
 import { createVaultProjector } from '@orc/vault-projector'
 import { createDbosPort, createPluginHost, dbosSend, finalizePlanTool, isMcpTrusted, loadConfig, loadTrust, openStorage, readAnnotationsTool, requireProject, splitTool, Kernel, type DbosPort, type PluginHost, type ProjectConfig, type Storage } from '@orc/kernel'
 
@@ -68,7 +68,7 @@ export async function buildRuntime(
       // + epistemic posture; every other role (e.g. plain worker steps) gets today's verify tier.
       ...buildMemoryTools(
         { source: 'agent', taskId: p.taskId, stepId: p.stepId, runToken: p.runToken, executor: p.executor, model: p.model, role: p.role },
-        p.role === MEMORY_TIER.scout ? MEMORY_TIER.scout : p.role === MEMORY_TIER.auditor ? MEMORY_TIER.auditor : MEMORY_TIER.verify,
+        tierForRole(p.role),
       ),
       splitTool({ kernel, config: { approvalPolicy: config.approvalPolicy, maxDepth: config.maxDepth }, p }),
       // read_annotations only needs the kernel (reads plan_annotated off the log) — unconditional,

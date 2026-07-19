@@ -8,7 +8,7 @@ import {
   type MemoryNoteDraft, type PlanStep, type ResolvedTool,
   type SplitResult, type UnifiedEvent,
 } from '@orc/contracts'
-import { createMemory, MEMORY_TIER } from '@orc/memory'
+import { createMemory, tierForRole } from '@orc/memory'
 import { createTestSurreal } from '@orc/memory/test-helpers'
 import { openStorage } from '../storage'
 import { Kernel } from '../kernel'
@@ -178,17 +178,18 @@ async function bringUp() {
     // fake ignores skill bodies — the loop behaviour comes from the scripted branches).
     skills: { load: async (name: string) => ({ name, body: `body of ${name}`, hash: `hash-${name}` }) },
     // FAITHFUL MIRROR of runtime.ts buildRuntime.stepTools — the SAME tier-derived memory surface +
-    // task_split + read_annotations + finalize_plan the CLI wires in production. Replicated (not
-    // imported) on purpose: that inline factory is a composition-root concern closing over cli-only
-    // handles, and sharing it would force kernel→memory as a PROD dep — the stepTools seam exists
-    // precisely so the kernel stays memory-agnostic. Kept byte-identical here AND the fake DRIVES
-    // these tools, so dropping any (or mis-deriving the tier) fails this test loudly, never silently.
+    // task_split + read_annotations + finalize_plan the CLI wires in production. The factory shape
+    // is replicated (not imported) on purpose: that inline factory is a composition-root concern
+    // closing over cli-only handles, and sharing it would force kernel→memory as a PROD dep — the
+    // stepTools seam exists precisely so the kernel stays memory-agnostic. But the tier DERIVATION
+    // itself now comes from tierForRole (@orc/memory is a devDependency here — test-only, no prod
+    // edge), so this test can no longer drift from production's role→tier mapping (FixD).
     stepTools: p => [
       // step role keys the memory tier: scout (analyze) / auditor (plan) narrow-or-widen the surface;
       // every other role (the implementer children) gets verify. Scout MUST keep memory_write (FixA).
       ...memory.buildTools(
         { source: 'agent', taskId: p.taskId, stepId: p.stepId, runToken: p.runToken, executor: p.executor, model: p.model, role: p.role },
-        p.role === MEMORY_TIER.scout ? MEMORY_TIER.scout : p.role === MEMORY_TIER.auditor ? MEMORY_TIER.auditor : MEMORY_TIER.verify,
+        tierForRole(p.role),
       ),
       splitTool({ kernel, config: { approvalPolicy: config.approvalPolicy, maxDepth: config.maxDepth }, p }),
       readAnnotationsTool({ kernel, p }),
