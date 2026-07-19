@@ -359,19 +359,23 @@ lazier, faithful realization, with **no new port code beyond the D4 gate**:
   `Analyzer` seam (D2) resolves `analyzerRef` → the analyze step's config (`analysisStep()`);
   `agent-analyzer` returns a `codebase-analysis`-skilled api-loop step; `ast-analyzer` later returns
   its own. `analyzed:false` degrades (RG7) with no crash.
-- **plan step** (auditor tier) is a **conversation**: it authors the plan-notes (D10), then uses the
-  D4 gate to present them and ask "changes or approve?"; each human reply (`plan_annotated` /
-  free-text via `orc reply`) re-authors; on "approve" it calls the `task_split` builtin with the
-  executable `ChildPlanDraft` it derived from the final plan-notes, **auto-approved** (the human
-  already approved conversationally), and signals success. The approved `task_split` children are the
-  frozen executable plan — this **is** the S1 "instantiation is the freeze" (execution runs the frozen
-  children, never live notes). No standalone `instantiateFrozenPlan`-at-approve, no post-approve
-  reopen machinery: the freeze is the `task_split` call.
-- **The re-plan loop is the plan step's conversation** (D4), not a separate re-run primitive — the
-  "chat approach," durable across crashes via `recv`. `orc plan note`/`orc reply` feed it; a
-  standalone `orc plan revise` and the D6 `scope` subset fold into "reply with changes" and become
-  **deferred refinements** (the agent authors notes + split consistently in one turn) — reserved, not
-  built. RG5/RG6/RG10 hold; only the mechanism moved from a bespoke driver to a template + gate.
+- **plan step** (auditor tier) is a **conversation**: it authors the plan-notes (D10) — and *only* the
+  notes (single source of truth) — then uses the D4 gate to present them and ask "changes or approve?".
+  Each human reply revises **only the annotated notes + their `decomposes_into` subtree**
+  (`plan_annotated` names the target note; the agent re-`memory_write`s just those as M4c revisions,
+  leaving the rest byte-stable) — the **scoped/targeted re-plan (D6)**, so huge plans never regenerate
+  wholesale and stay token-cheap. On "approve" the step calls a `finalize_plan` builtin that runs the
+  **deterministic** `instantiateFrozenPlan(master, planNotes)` → `task_split` (auto-approved; the human
+  already approved conversationally) → signals success. The frozen `task_split` children are the
+  executable plan (S1 "instantiation is the freeze", execution runs the frozen children never live
+  notes); deterministic translation ⇒ no notes↔plan drift.
+- **The re-plan loop is the plan step's conversation** (D4), durable across crashes via `recv` — the
+  "chat approach." It is **scoped by construction**: `orc plan note <note>` targets a note and the
+  agent's targeted revision (above) is the *mechanical* easy-edits guarantee required for huge plans
+  (D6) — **kept, not deferred** (it is a core end-goal capability). `orc plan revise [--scope <notes>]`
+  is optional sugar over the same path. RG5/RG6/RG10 hold; the mechanism moved from a bespoke driver to
+  a template + gate and gained deterministic instantiation.
 
-Net new runtime: the D4 conversational gate. Everything else is M5a template plans + `task_split` +
-gate + M4c notes.
+Net new runtime: the D4 conversational gate, the `finalize_plan`/`instantiateFrozenPlan` deterministic
+translation, and the targeted-revision discipline. Everything else is M5a template plans +
+`task_split` + gate + M4c notes.
