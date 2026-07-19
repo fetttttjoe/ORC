@@ -87,4 +87,39 @@ describe('memory tools', () => {
     const r = await search.execute({ query: 'nope' })
     expect(r.output).toMatchObject({ note: "no note matched — absence is not proof a decision doesn't exist" })
   })
+
+  it('scout tier narrows the tool surface; auditor keeps the full set', () => {
+    const { store } = fakeStore()
+    expect(memoryTools(store, { source: 'cli' }, 'scout').map(t => t.name).sort()).toEqual(['memory_read', 'memory_search'])
+    expect(memoryTools(store, { source: 'cli' }, 'auditor').map(t => t.name)).toContain('memory_neighbors')
+  })
+
+  it('scout tier appends the provisional-epistemics fragment to its two tools', () => {
+    const { store } = fakeStore()
+    const tools = memoryTools(store, { source: 'cli' }, 'scout')
+    for (const t of tools) expect(t.description).toContain('provisional')
+  })
+
+  it('auditor tier appends the traverse-before-asserting fragment to the full surface', () => {
+    const { store } = fakeStore()
+    const tools = memoryTools(store, { source: 'cli' }, 'auditor')
+    expect(tools).toHaveLength(4)
+    for (const t of tools) expect(t.description).toContain('contradicts/supersedes before asserting')
+  })
+
+  it('verify tier (default and explicit) is byte-for-byte identical to today', () => {
+    const { store } = fakeStore()
+    const shape = (tools: ReturnType<typeof memoryTools>) => tools.map(t => ({ ref: t.ref, name: t.name, description: t.description, inputSchema: t.inputSchema }))
+    const noTierArg = memoryTools(store, { source: 'cli' })
+    const explicitVerify = memoryTools(store, { source: 'cli' }, 'verify')
+    expect(shape(explicitVerify)).toEqual(shape(noTierArg))
+  })
+
+  it('memory_write advertises rationale/uncertainty so a model can discover and set them', () => {
+    const { store } = fakeStore()
+    const write = memoryTools(store, { source: 'cli' }).find(t => t.name === 'memory_write')!
+    const props = (write.inputSchema as { properties: Record<string, unknown> }).properties
+    expect(props.rationale).toMatchObject({ type: 'string' })
+    expect(props.uncertainty).toMatchObject({ type: 'array', items: { type: 'string' } })
+  })
 })

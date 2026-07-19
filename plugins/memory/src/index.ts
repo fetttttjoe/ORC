@@ -3,13 +3,13 @@ import { EventLog, type ProjectConfig } from '@orc/kernel'
 import { openKnowledge, type Knowledge } from './knowledge'
 import { createMemoryStore } from './store'
 import { createMemoryProjector, type MemoryProjector } from './projector'
-import { memoryTools } from './tools'
+import { memoryTools, type MemoryTier } from './tools'
 
 export { SurrealMemory } from './surreal'
 export { openKnowledge, type Knowledge } from './knowledge'
 export { createMemoryStore } from './store'
 export { createMemoryProjector } from './projector'
-export { memoryTools, unavailableMemoryTools } from './tools'
+export { memoryTools, unavailableMemoryTools, MEMORY_TIER, type MemoryTier } from './tools'
 export { renderMemoryIndex, rebuildVaultMemory } from './memory-index'
 export { renderNoteFile, noteRelPath } from './note-md'
 
@@ -29,7 +29,7 @@ export async function gitRevision(dir: string): Promise<string | null> {
 export async function createMemory(opts: { log: EventLog; config: ProjectConfig }): Promise<{
   store: MemoryStore
   projector: MemoryProjector
-  buildTools: (author: MemoryAuthor) => ResolvedTool[]
+  buildTools: (author: MemoryAuthor, tier?: MemoryTier) => ResolvedTool[]
   close: () => Promise<void>
 }> {
   const knowledge = await openKnowledge(opts.config)
@@ -37,7 +37,7 @@ export async function createMemory(opts: { log: EventLog; config: ProjectConfig 
   const projector = createMemoryProjector({ log: opts.log, surreal: knowledge, vaultDir: opts.config.vaultDir })
   return {
     store, projector,
-    buildTools: author => memoryTools(store, author),
+    buildTools: (author, tier) => memoryTools(store, author, tier),
     close: async () => { await projector.close(); await knowledge.close() },
   }
 }
