@@ -33,6 +33,11 @@ describe('MemoryNoteInput', () => {
     expect(LINK_KINDS).toContain('supersedes')
   })
 
+  it('accepts a decomposes_into typed link (M5b plan-graph edges)', () => {
+    const n = MemoryNoteInput.parse({ id: 'a', title: 'A', links: [{ id: 'subplan-1', kind: 'decomposes_into' }] })
+    expect(n.links[0]).toEqual({ id: 'subplan-1', kind: 'decomposes_into' })
+  })
+
   it('rejects a bare string id — links are typed objects only (no back-compat)', () => {
     expect(MemoryNoteInput.safeParse({ id: 'a', title: 'A', links: ['b'] }).success).toBe(false)
   })

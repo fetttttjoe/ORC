@@ -233,7 +233,11 @@ export function fold(events: EventRecord[]): State {
       case EVENT_KIND.signal_received:
       case EVENT_KIND.memory_written:
       case EVENT_KIND.memory_deleted:
-        break // traceability only; no state derivation
+      case EVENT_KIND.feedback_requested:
+      case EVENT_KIND.feedback_provided:
+      case EVENT_KIND.plan_annotated:
+      case EVENT_KIND.analysis_completed:
+        break // traceability only; no state derivation (ponytail: no fold state until a consumer needs it — read via events.byTask)
       case EVENT_KIND.split_proposed: {
         const p = View.split_proposed.safeParse(e.payload)
         if (!p.success) break
