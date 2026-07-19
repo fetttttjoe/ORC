@@ -317,6 +317,10 @@ export function buildProgram(
         const detail = s?.failure ? `  [${s.failure.class}] ${s.failure.message}` : (s?.output ? `  → ${s.output}` : '')
         console.log(`  ${step.id.padEnd(12)} ${status.padEnd(10)} attempt ${s?.attempt ?? 0}${detail}`)
       }
+      // D3: a grounded task shows what its analysis covered — and the gaps it did NOT (RG7 honesty).
+      const coverage = await kernel.latestCoverage(taskId)
+      if (coverage)
+        console.log(`  analysis: ${coverage.analyzed ? `${coverage.notesWritten} notes, confidence ${coverage.confidence}` : 'not analyzed'}${coverage.gaps.length ? `  gaps: ${coverage.gaps.join(', ')}` : ''}`)
       // D4 gate, human side: a grounded-plan step parked on ask_human shows its question here, so the
       // conversation isn't one-directional — the human sees the prompt, not just a blind reply target.
       const feedback = await kernel.openFeedback(taskId)

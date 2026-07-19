@@ -303,6 +303,20 @@ describe('Kernel lifecycle', () => {
     expect(p.notesWritten).toBe(0) // default
   })
 
+  it('latestCoverage returns the most recent analysis_completed, or null before any', async () => {
+    const db = await createTestDb()
+    dbs.push(db)
+    const log = (await openStorage(db.url, { projectId: TEST_PROJECT_ID })).events
+    const k = new Kernel(log)
+    const t = await k.createTask({ title: 'x' })
+    expect(await k.latestCoverage(t.id)).toBeNull()
+    const ctx = { taskId: t.id, stepId: 'analyze', runToken: `step:${t.id}:analyze:a1` }
+    await k.reportCoverage(ctx, { analyzed: false })
+    await k.reportCoverage(ctx, { analyzed: true, scope: ['pkgs'], gaps: ['no tests'], confidence: 'low', notesWritten: 2 })
+    const cov = await k.latestCoverage(t.id)
+    expect(cov).toMatchObject({ analyzed: true, notesWritten: 2, gaps: ['no tests'] }) // the latest, not the first
+  })
+
   it('annotatePlan rejects once the task is done, cancelled, or failed', async () => {
     const db = await createTestDb()
     dbs.push(db)
