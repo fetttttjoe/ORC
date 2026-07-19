@@ -343,3 +343,35 @@ symbol dump. "Plan" is a *task-scoped graph of M4c plan-notes* (D10), never a mo
 is a durable question/answer gate (D4), not a streaming chat UI. "Easy edits" is the `scope`
 parameter over `decomposes_into` subtrees (D6), not a live diff editor. "temp graph" is the
 task-scoped partition of the persistent M4c graph, not an ephemeral non-durable store.
+
+## Amendment A (2026-07-19) — strategy runtime realized as an analyze/plan template
+
+Firming the implementation plan against `packages/kernel/src/execution/dbos-port.ts` +
+`packages/kernel/src/kernel.ts` showed the port runs agent turns **only as plan steps**
+(`runWorkflow` → `launchReady` → `stepWorkflow`, which looks the step up in `plan.steps`). So a
+bespoke port "phase driver" — one reading of D9/§4.2 — would be new orchestration for no gain. The
+lazier, faithful realization, with **no new port code beyond the D4 gate**:
+
+- **grounded-plan is a two-step bootstrap template** on the task T: `plan = [analyze, plan]`,
+  `strategyRef:'grounded-plan'`, auto-approved by policy, run by the existing scheduler. Seeding is a
+  kernel helper (`createGroundedTask`) reusing `createTask` + `proposePlan` + `approvePlan`.
+- **analyze step** (scout tier): the consent gate (D4), then the `Analyzer`-selected analysis. The
+  `Analyzer` seam (D2) resolves `analyzerRef` → the analyze step's config (`analysisStep()`);
+  `agent-analyzer` returns a `codebase-analysis`-skilled api-loop step; `ast-analyzer` later returns
+  its own. `analyzed:false` degrades (RG7) with no crash.
+- **plan step** (auditor tier) is a **conversation**: it authors the plan-notes (D10), then uses the
+  D4 gate to present them and ask "changes or approve?"; each human reply (`plan_annotated` /
+  free-text via `orc reply`) re-authors; on "approve" it calls the `task_split` builtin with the
+  executable `ChildPlanDraft` it derived from the final plan-notes, **auto-approved** (the human
+  already approved conversationally), and signals success. The approved `task_split` children are the
+  frozen executable plan — this **is** the S1 "instantiation is the freeze" (execution runs the frozen
+  children, never live notes). No standalone `instantiateFrozenPlan`-at-approve, no post-approve
+  reopen machinery: the freeze is the `task_split` call.
+- **The re-plan loop is the plan step's conversation** (D4), not a separate re-run primitive — the
+  "chat approach," durable across crashes via `recv`. `orc plan note`/`orc reply` feed it; a
+  standalone `orc plan revise` and the D6 `scope` subset fold into "reply with changes" and become
+  **deferred refinements** (the agent authors notes + split consistently in one turn) — reserved, not
+  built. RG5/RG6/RG10 hold; only the mechanism moved from a bespoke driver to a template + gate.
+
+Net new runtime: the D4 conversational gate. Everything else is M5a template plans + `task_split` +
+gate + M4c notes.
