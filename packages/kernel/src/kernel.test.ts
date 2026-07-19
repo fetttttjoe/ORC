@@ -250,17 +250,38 @@ describe('Kernel lifecycle', () => {
     expect((await log.byTask(t.id)).some(e => e.kind === 'feedback_provided')).toBe(true)
   })
 
-  it('annotatePlan rejects once the task is done or cancelled', async () => {
+  it('replyFeedback targets the later still-open topic when an earlier one is already answered', async () => {
+    const db = await createTestDb()
+    dbs.push(db)
+    const log = (await openStorage(db.url, { projectId: TEST_PROJECT_ID })).events
+    const sent: Array<{ runToken: string; topic: string }> = []
+    const k = new Kernel(log, undefined, undefined, async (runToken, _message, topic) => { sent.push({ runToken, topic }) })
+    const t = await k.createTask({ title: 'x' })
+    const runTokenA = `step:${t.id}:s1:a1`
+    const runTokenB = `step:${t.id}:s2:a1`
+    await log.append({ taskId: t.id, stepId: 's1', runToken: runTokenA, kind: EVENT_KIND.feedback_requested, payload: { question: 'q1', topic: 'topic-a' } })
+    await log.append({ taskId: t.id, stepId: 's1', runToken: null, kind: EVENT_KIND.feedback_provided, payload: { topic: 'topic-a', text: 'ok', author: { source: 'cli' } } })
+    await log.append({ taskId: t.id, stepId: 's2', runToken: runTokenB, kind: EVENT_KIND.feedback_requested, payload: { question: 'q2', topic: 'topic-b' } })
+
+    const topic = await k.replyFeedback(t.id, 'approve')
+    expect(topic).toBe('topic-b') // the later, still-open topic — not the answered 'topic-a', not null
+    expect(sent).toEqual([{ runToken: runTokenB, topic: 'feedback:topic-b' }])
+  })
+
+  it('annotatePlan rejects once the task is done, cancelled, or failed', async () => {
     const db = await createTestDb()
     dbs.push(db)
     const log = (await openStorage(db.url, { projectId: TEST_PROJECT_ID })).events
     const k = new Kernel(log)
-    const t = await k.createTask({ title: 'x' })
-    await k.proposePlan(t.id, draft())
-    await k.approvePlan(t.id)
-    // Kernel has no public "mark done" mutator (that's the execution port's job, out of scope
-    // here) — append the status change directly, the way the port's run-finish checkpoint does.
-    await log.append({ taskId: t.id, stepId: null, runToken: null, kind: EVENT_KIND.task_status_changed, payload: { taskId: t.id, from: TASK_STATUS.approved, to: TASK_STATUS.done } })
-    expect(await codeOf(k.annotatePlan(t.id, { targetNote: 'db', refs: [], text: 'x' }))).toBe(KERNEL_ERROR_CODE.invalid_transition)
+    // Kernel has no public "mark done"/"mark failed" mutator (that's the execution port's job,
+    // out of scope here) — append the status change directly, the way the port's run-finish
+    // checkpoint does.
+    for (const to of [TASK_STATUS.done, TASK_STATUS.cancelled, TASK_STATUS.failed] as const) {
+      const t = await k.createTask({ title: 'x' })
+      await k.proposePlan(t.id, draft())
+      await k.approvePlan(t.id)
+      await log.append({ taskId: t.id, stepId: null, runToken: null, kind: EVENT_KIND.task_status_changed, payload: { taskId: t.id, from: TASK_STATUS.approved, to } })
+      expect(await codeOf(k.annotatePlan(t.id, { targetNote: 'db', refs: [], text: 'x' }))).toBe(KERNEL_ERROR_CODE.invalid_transition)
+    }
   })
 })

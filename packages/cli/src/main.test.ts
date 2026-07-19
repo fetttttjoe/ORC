@@ -3,7 +3,7 @@ import { mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { Surreal } from 'surrealdb'
-import { EVENT_KIND, type OperationSpec } from '@orc/contracts'
+import { EVENT_KIND, type ExecutionPort, type OperationSpec } from '@orc/contracts'
 import { loadConfig, projectDatabaseName, requireProject, type ProjectConfig } from '@orc/kernel'
 import { createTestDb, TEST_PROJECT_ID } from '@orc/kernel/test-helpers'
 import { buildProgram, openKernel, runInit } from './main'
@@ -239,7 +239,15 @@ describe('orc CLI', () => {
     })
     const lines: string[] = []
     spyOn(console, 'log').mockImplementation((...a: unknown[]) => { lines.push(a.join(' ')) })
-    const run = async (...args: string[]) => buildProgram(kernel).parseAsync(args, { from: 'user' })
+    // `reply` calls needPort() before replyFeedback (DBOS.send needs DBOS launched in-process) —
+    // this stub only satisfies that gate; `reply` never calls any of its methods. The real
+    // send path is exercised through the injected `send` above, not through this fake port.
+    const stubPort: ExecutionPort = {
+      startRun: async () => { throw new Error('unused in this test') },
+      retry: async () => { throw new Error('unused in this test') },
+      cancelRun: async () => {},
+    }
+    const run = async (...args: string[]) => buildProgram(kernel, async () => stubPort).parseAsync(args, { from: 'user' })
 
     await run('new', 'grounded task')
     const taskId = lines[0]!
@@ -265,6 +273,11 @@ describe('orc CLI', () => {
     expect(lines[0]).toContain('no open feedback')
 
     await log.close()
+  })
+
+  it('reply requires a live execution port (needPort gate, same as run/retry/cancel)', async () => {
+    const { run } = await makeCli() // no portFactory
+    await expect(run('reply', 'whatever', 'approve')).rejects.toThrow(/execution commands are unavailable/)
   })
 
   // memory commands need `needPlugin()` to resolve, so this injects a plugin the way

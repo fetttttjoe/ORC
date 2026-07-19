@@ -185,7 +185,7 @@ export class Kernel {
   async annotatePlan(taskId: string, input: { targetNote: string; refs?: string[]; text: string }): Promise<void> {
     return this.log.transaction(async tx => {
       const task = await this.requireTask(tx, taskId)
-      if (task.status === TASK_STATUS.done || task.status === TASK_STATUS.cancelled)
+      if (task.status === TASK_STATUS.done || task.status === TASK_STATUS.cancelled || task.status === TASK_STATUS.failed)
         throw new KernelError(KERNEL_ERROR_CODE.invalid_transition, `cannot annotate a plan while task is '${task.status}'`)
       const plan = (await this.stateOf(tx)).plans.get(taskId)?.versions.at(-1)
       if (!plan) throw new KernelError(KERNEL_ERROR_CODE.invalid_transition, 'no plan to annotate')

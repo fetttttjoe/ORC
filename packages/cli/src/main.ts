@@ -193,6 +193,10 @@ export function buildProgram(
     .command('reply <taskId> <text>')
     .description("answer a task's open feedback question (e.g. 'orc reply <taskId> approve'), resuming the waiting step")
     .action(async (taskId: string, text: string) => {
+      // DBOS.send (behind kernel.send) requires DBOS launched in THIS process — reply typically
+      // runs in a fresh CLI invocation, separate from the `orc run` it's answering, so the port
+      // must be brought up here first, exactly like run/retry/cancel do.
+      await needPort()
       const topic = await kernel.replyFeedback(taskId, text)
       console.log(topic ? `answered feedback:${topic}` : `no open feedback question for task '${taskId}'`)
     })
