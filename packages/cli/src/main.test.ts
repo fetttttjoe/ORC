@@ -11,10 +11,13 @@ import { buildPlugins } from './runtime'
 
 const dbs: Array<{ drop: () => Promise<void> }> = []
 const surrealConfigs: ProjectConfig[] = []
+// Teardown drops one Postgres DB per makeCli/openKernel (14+ here) plus each throwaway Surreal db.
+// Each pg drop is a DROP DATABASE WITH FORCE on its own admin connection; serial drops blew bun's
+// default 5s hook budget under a contended pg (same fix as kernel.test.ts) — the dbs are distinct,
+// so drop them concurrently, with headroom for a loaded box.
 afterAll(async () => {
-  for (const d of dbs) await d.drop()
-  for (const c of surrealConfigs) await dropSurrealDb(c)
-})
+  await Promise.all([...dbs.map(d => d.drop()), ...surrealConfigs.map(c => dropSurrealDb(c))])
+}, 30_000)
 
 // mirrors plugins/memory/src/test-helpers.ts's createTestSurreal drop shape (not cross-imported
 // per the repo's no-cross-package-test-import convention) — both use the shape verified live
