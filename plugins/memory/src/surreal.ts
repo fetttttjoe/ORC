@@ -23,6 +23,7 @@ const noteTable = table(Tb.Note, {
   categories: t.array(t.string()), tags: t.array(t.string()),
   links: t.array(t.object({ id: t.string(), kind: kindType, confidence: t.option(t.number()) })),
   paths: t.array(t.string()), rules: t.array(t.string()), summary: t.string(), body: t.string(),
+  rationale: t.string(), uncertainty: t.array(t.string()),
   createdAt: t.string(), createdBy: t.string(), updatedAt: t.string(), updatedBy: t.string(),
   revision: t.number(), readCount: t.number(), lastReadAt: t.option(t.string()),
 })
@@ -90,6 +91,7 @@ export class SurrealMemory {
           // materialize the optional confidence key: t.option infers `number | undefined`, required
           links: note.links.map(l => ({ id: l.id, kind: l.kind, confidence: l.confidence })),
           paths: note.paths, rules: note.rules, summary: note.summary, body: note.body,
+          rationale: note.rationale, uncertainty: note.uncertainty,
           createdAt: ex?.createdAt ?? e.ts, createdBy: ex?.createdBy ?? by,
           updatedAt: e.ts, updatedBy: by, revision: (ex?.revision ?? 0) + 1,
           readCount: ex?.readCount ?? 0,
@@ -214,6 +216,7 @@ function toNote(r: Record<string, any>): unknown {
     id: r.noteId, scope: r.scope, title: r.title, kind: r.kind, sourceRevision: r.sourceRevision ?? null,
     categories: r.categories, tags: r.tags,
     links: r.links, paths: r.paths, rules: r.rules, summary: r.summary, body: r.body,
+    rationale: r.rationale, uncertainty: r.uncertainty,
     createdAt: r.createdAt, createdBy: r.createdBy, updatedAt: r.updatedAt, updatedBy: r.updatedBy,
     revision: r.revision,
   }

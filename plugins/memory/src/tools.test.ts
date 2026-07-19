@@ -88,13 +88,15 @@ describe('memory tools', () => {
     expect(r.output).toMatchObject({ note: "no note matched — absence is not proof a decision doesn't exist" })
   })
 
-  it('scout tier narrows the tool surface; auditor keeps the full set', () => {
+  it('scout tier narrows the tool surface (authors notes, but never traverses); auditor keeps the full set', () => {
     const { store } = fakeStore()
-    expect(memoryTools(store, { source: 'cli' }, 'scout').map(t => t.name).sort()).toEqual(['memory_read', 'memory_search'])
+    const scoutNames = memoryTools(store, { source: 'cli' }, 'scout').map(t => t.name).sort()
+    expect(scoutNames).toEqual(['memory_read', 'memory_search', 'memory_write'])
+    expect(scoutNames).not.toContain('memory_neighbors') // deliberate narrowing: scout seeds the graph, doesn't traverse it
     expect(memoryTools(store, { source: 'cli' }, 'auditor').map(t => t.name)).toContain('memory_neighbors')
   })
 
-  it('scout tier appends the provisional-epistemics fragment to its two tools', () => {
+  it('scout tier appends the provisional-epistemics fragment to its three tools', () => {
     const { store } = fakeStore()
     const tools = memoryTools(store, { source: 'cli' }, 'scout')
     for (const t of tools) expect(t.description).toContain('provisional')

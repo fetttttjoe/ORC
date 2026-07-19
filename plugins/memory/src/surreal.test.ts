@@ -95,6 +95,16 @@ describe('SurrealMemory.applyEvent', () => {
     await m.close()
   })
 
+  it('persists rationale/uncertainty through the read model (not just the event log)', async () => {
+    const t = await createTestSurreal(); drops.push(t.drop)
+    const m = await SurrealMemory.open(t)
+    await m.applyEvent(written(1, note({ id: 'plan-db', rationale: 'why', uncertainty: ['schema unknown'] })))
+    const got = await m.get('plan-db', 'project')
+    expect(got?.rationale).toBe('why')
+    expect(got?.uncertainty).toEqual(['schema unknown'])
+    await m.close()
+  })
+
   it('stores kind and sourceRevision; allNotes returns deterministic order', async () => {
     const t = await createTestSurreal(); drops.push(t.drop)
     const m = await SurrealMemory.open(t)
