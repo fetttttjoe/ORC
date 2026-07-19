@@ -1,6 +1,7 @@
 import path from 'node:path'
 import { afterAll, afterEach, describe, expect, it, mock, spyOn } from 'bun:test'
-import type { ExecutionPort, OperationSpec, RunHandle } from '@orc/contracts'
+import type { Analyzer, ExecutionPort, OperationSpec, RunHandle } from '@orc/contracts'
+import { stepFixture } from '@orc/contracts/fixtures'
 import { openStorage } from '@orc/kernel'
 import { createTestDb, TEST_PROJECT_ID } from '@orc/kernel/test-helpers'
 import { buildProgram, openKernel } from './main'
@@ -115,6 +116,34 @@ describe('exec commands', () => {
     await run('cancel', id)
     expect(calls).toContain(`retry:${id}`)
     expect(calls).toContain(`cancel:${id}`)
+  })
+
+  it('new --strategy grounded-plan bootstraps via createGroundedTask and auto-starts the run', async () => {
+    const db = await createTestDb()
+    dbs.push(db)
+    const analyze = stepFixture({ id: 'analyze', role: 'scout' })
+    const analyzers = new Map<string, Analyzer>([['agent-analyzer', { id: 'agent-analyzer', analysisStep: () => analyze }]])
+    const { kernel } = await openKernel(db.url, { projectId: TEST_PROJECT_ID, analyzers })
+    // 'done' (not 'blocked') deliberately — a 'blocked' outcome sets process.exitCode in this
+    // same test process (see the subprocess fixture above for why that path is tested there).
+    const { port, calls } = stubPort('done')
+    const lines: string[] = []
+    spyOn(console, 'log').mockImplementation((...a: unknown[]) => { lines.push(a.join(' ')) })
+    const run = async (...args: string[]) => buildProgram(kernel, async () => port).parseAsync(args, { from: 'user' })
+
+    await run('new', 'grounded task', '--strategy', 'grounded-plan', '--model', 'anthropic/claude-sonnet-5')
+    const taskId = lines[0]!
+    const plan = await kernel.getPlan(taskId)
+    expect(plan?.strategyRef).toBe('grounded-plan')
+    expect(plan?.steps.map(s => s.id)).toEqual(['analyze', 'plan'])
+    expect((await kernel.getTask(taskId))?.status).toBe('approved') // auto-approved (D9)
+    expect(calls).toContain(`start:${taskId}:`) // auto-startRun fired
+    expect(lines.join('\n')).toContain('run finished: done')
+  })
+
+  it('new --strategy grounded-plan without --model is a clear error', async () => {
+    const { run } = await makeCli()
+    await expect(run('new', 'x', '--strategy', 'grounded-plan')).rejects.toThrow(/--model is required/)
   })
 
   it('status renders per-step state and cost totals from the fold', async () => {

@@ -7,7 +7,7 @@ import { agentAnalyzer } from '@orc/analyzer-agent'
 import { createMcpHub, type McpHub } from '@orc/mcp-client'
 import { createMemory, unavailableMemoryTools } from '@orc/memory'
 import { createVaultProjector } from '@orc/vault-projector'
-import { createDbosPort, createPluginHost, finalizePlanTool, isMcpTrusted, loadConfig, loadTrust, openStorage, requireProject, splitTool, Kernel, type DbosPort, type PluginHost, type ProjectConfig, type Storage } from '@orc/kernel'
+import { createDbosPort, createPluginHost, dbosSend, finalizePlanTool, isMcpTrusted, loadConfig, loadTrust, openStorage, requireProject, splitTool, Kernel, type DbosPort, type PluginHost, type ProjectConfig, type Storage } from '@orc/kernel'
 
 export function seedRegistries(config = loadConfig()) {
   const providers = new Map<string, ModelProvider<unknown>>([
@@ -39,7 +39,7 @@ export async function buildRuntime(
   // reuse the caller's kernel (bin passes the one wired to its refValidator + analyzers) so
   // task_split's expanded child plans go through the same toolRef/skillRef validation as
   // `orc propose`, and createGroundedTask can resolve its analyzer.
-  const kernel = shared?.kernel ?? new Kernel(log, host.refValidator, host.analyzers)
+  const kernel = shared?.kernel ?? new Kernel(log, host.refValidator, host.analyzers, dbosSend)
   log.onAppend = e => void host.hooks.emit(HOOK_NAME.event_appended, e)
 
   // Startup order (design §8.4): projections FIRST — DBOS recovery may emit events the

@@ -1,7 +1,7 @@
 import { readdirSync, readFileSync } from 'node:fs'
 import path from 'node:path'
 import { Command } from 'commander'
-import { ISOLATION_TIER, PlanDraft, type Analyzer, type EventRecord, type ExecutionPort, type Plan, type RunHandle } from '@orc/contracts'
+import { ISOLATION_TIER, PlanDraft, STRATEGY, type Analyzer, type EventRecord, type ExecutionPort, type Plan, type RunHandle } from '@orc/contracts'
 import { openStorage, Kernel, fold, grantExtensionTrust, grantMcpTrust, initializeProject, isExtensionTrusted, isMcpTrusted, loadConfig, loadTrust, requireProject, taskUsage, type EventLog, type OrcConfig, type PluginHost, type ProjectConfig, type Storage } from '@orc/kernel'
 import { createVaultProjector, parsePlanFile } from '@orc/vault-projector'
 import { createMemory, probeMemory } from '@orc/memory'
@@ -16,6 +16,7 @@ export async function openKernel(
     redactEnv?: string[]
     refValidator?: (plan: Plan) => Promise<string[]>
     analyzers?: Map<string, Analyzer>
+    send?: (workflowId: string, message: string, topic: string) => Promise<void>
     onAppend?: (e: EventRecord) => void
   } = {},
 ): Promise<{ kernel: Kernel; log: EventLog; storage: Storage }> {
@@ -23,7 +24,7 @@ export async function openKernel(
   const storage = await openStorage(url, { projectId, redactEnv: opts.redactEnv })
   const log = storage.events
   if (opts.onAppend) log.onAppend = opts.onAppend
-  return { kernel: new Kernel(log, opts.refValidator, opts.analyzers), log, storage }
+  return { kernel: new Kernel(log, opts.refValidator, opts.analyzers, opts.send), log, storage }
 }
 
 // `orc init` must work before Postgres/plugins exist, so it gets a standalone entry
@@ -45,7 +46,7 @@ export async function runInit(args: string[], dir?: string): Promise<void> {
 
 export function singleStepDraft(task: { title: string; spec: string }, modelRef: string, skillRefs: string[] = []): PlanDraft {
   return {
-    strategyRef: 'template:single',
+    strategyRef: STRATEGY.single,
     costEstimateUSD: null,
     steps: [{
       id: 's1',
@@ -114,9 +115,25 @@ export function buildProgram(
     .description('create a task')
     .option('--spec <text>', 'task description', '')
     .option('--parent <id>', 'parent task id')
-    .action(async (title: string, opts: { spec: string; parent?: string }) => {
-      const t = await kernel.createTask({ title, spec: opts.spec, parentId: opts.parent })
+    .option('--strategy <s>', `bootstrap strategy ('${STRATEGY.groundedPlan}' starts an analyze→plan conversation instead of a bare draft task)`)
+    .option('--model <ref>', `model for the grounded-plan analyze/plan steps (required with --strategy ${STRATEGY.groundedPlan})`)
+    .option('--analyzer <ref>', 'analyzer for the grounded-plan analyze step', 'agent-analyzer')
+    .action(async (title: string, opts: { spec: string; parent?: string; strategy?: string; model?: string; analyzer: string }) => {
+      if (opts.strategy !== STRATEGY.groundedPlan) {
+        const t = await kernel.createTask({ title, spec: opts.spec, parentId: opts.parent })
+        console.log(t.id)
+        return
+      }
+      if (!opts.model) throw new Error(`--model is required with --strategy ${STRATEGY.groundedPlan}`)
+      const t = await kernel.createGroundedTask({ title, spec: opts.spec, modelRef: opts.model, analyzerRef: opts.analyzer })
       console.log(t.id)
+      // auto-start: the grounded-plan template is policy-approved (its real gate is the
+      // conversational one inside the plan step), so the analyze→plan conversation begins now
+      const handle = await (await needPort()).startRun(t.id, {})
+      console.log(`run ${handle.workflowId} started — tailing events (ctrl-c stops the run; re-run orc run ${t.id} to resume)`)
+      const outcome = await tailUntilDone(kernel, t.id, handle)
+      console.log(`run finished: ${outcome}`)
+      process.exitCode = outcome === 'done' ? 0 : 1
     })
 
   const planAction = (apply: (taskId: string, draft: PlanDraft) => Promise<Plan>, describe: (plan: Plan) => string) =>
@@ -161,6 +178,23 @@ export function buildProgram(
     .action(async (taskId: string, opts: { version?: string }) => {
       const plan = await kernel.approvePlan(taskId, opts.version === undefined ? undefined : Number(opts.version))
       console.log(`plan v${plan.version} approved`)
+    })
+
+  program
+    .command('plan-note <taskId> <noteId> <text>')
+    .description('annotate a plan-note (grounded-plan) — the plan-authoring agent reads it on its next revise')
+    .option('--ref <ids...>', 'related plan-note ids')
+    .action(async (taskId: string, noteId: string, text: string, opts: { ref?: string[] }) => {
+      await kernel.annotatePlan(taskId, { targetNote: noteId, refs: opts.ref ?? [], text })
+      console.log(`noted on '${noteId}'`)
+    })
+
+  program
+    .command('reply <taskId> <text>')
+    .description("answer a task's open feedback question (e.g. 'orc reply <taskId> approve'), resuming the waiting step")
+    .action(async (taskId: string, text: string) => {
+      const topic = await kernel.replyFeedback(taskId, text)
+      console.log(topic ? `answered feedback:${topic}` : `no open feedback question for task '${taskId}'`)
     })
 
   program

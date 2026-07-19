@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, it } from 'bun:test'
-import { ApprovalPolicy, TASK_STATUS, type Analyzer, type PlanDraft, type PlanStep } from '@orc/contracts'
+import { ApprovalPolicy, EVENT_KIND, TASK_STATUS, type Analyzer, type PlanDraft, type PlanStep } from '@orc/contracts'
 import { draftFixture, stepFixture } from '@orc/contracts/fixtures'
 import { openStorage } from './storage'
 import { KERNEL_ERROR_CODE, KernelError } from './errors'
@@ -208,5 +208,59 @@ describe('Kernel lifecycle', () => {
     const approvedEvt = (await k.eventsFor(r.childTaskId)).find(e => e.kind === 'plan_approved')
     expect(approvedEvt?.payload).toMatchObject({ approvedBy: 'policy' })
     await expect(k.proposeSplit({ ...base, toolCallId: 'call_3', maxDepth: 0 })).rejects.toThrow(/depth/)
+  })
+
+  it('annotatePlan appends plan_annotated; replyFeedback resolves and answers the open feedback topic', async () => {
+    const db = await createTestDb()
+    dbs.push(db)
+    const log = (await openStorage(db.url, { projectId: TEST_PROJECT_ID })).events
+    const sent: Array<{ runToken: string; message: string; topic: string }> = []
+    const k = new Kernel(log, undefined, undefined, async (runToken, message, topic) => { sent.push({ runToken, message, topic }) })
+    const t = await k.createTask({ title: 'grounded task' })
+    await k.proposePlan(t.id, draft())
+    await k.approvePlan(t.id)
+    // simulate the port raising a feedback gate from inside the running plan step (Task 5 only
+    // adds the human-facing reply/annotate surface — the gate itself is Task 2's dbos-port branch)
+    const runToken = `step:${t.id}:plan:a1`
+    await log.append({ taskId: t.id, stepId: 'plan', runToken, kind: EVENT_KIND.feedback_requested, payload: { question: 'db choice?', topic: 'db-1' } })
+
+    await k.annotatePlan(t.id, { targetNote: 'db', refs: ['api'], text: 'use bcrypt' })
+    expect((await log.byTask(t.id)).some(e => e.kind === 'plan_annotated')).toBe(true)
+
+    const topic = await k.replyFeedback(t.id, 'approve')
+    expect(topic).toBe('db-1')
+    expect((await log.byTask(t.id)).some(e => e.kind === 'feedback_provided')).toBe(true)
+    expect(sent).toEqual([{ runToken, message: 'approve', topic: 'feedback:db-1' }])
+
+    // the gate is now answered — a second reply finds no open question
+    expect(await k.replyFeedback(t.id, 'again')).toBeNull()
+  })
+
+  it('replyFeedback appends feedback_provided and returns the topic even without an injected send', async () => {
+    const db = await createTestDb()
+    dbs.push(db)
+    const log = (await openStorage(db.url, { projectId: TEST_PROJECT_ID })).events
+    const k = new Kernel(log) // no send wired — matches read-only CLI / most-tests construction
+    const t = await k.createTask({ title: 'x' })
+    const runToken = `step:${t.id}:s1:a1`
+    await log.append({ taskId: t.id, stepId: 's1', runToken, kind: EVENT_KIND.feedback_requested, payload: { question: 'q', topic: 'topic-1' } })
+
+    const topic = await k.replyFeedback(t.id, 'yes')
+    expect(topic).toBe('topic-1')
+    expect((await log.byTask(t.id)).some(e => e.kind === 'feedback_provided')).toBe(true)
+  })
+
+  it('annotatePlan rejects once the task is done or cancelled', async () => {
+    const db = await createTestDb()
+    dbs.push(db)
+    const log = (await openStorage(db.url, { projectId: TEST_PROJECT_ID })).events
+    const k = new Kernel(log)
+    const t = await k.createTask({ title: 'x' })
+    await k.proposePlan(t.id, draft())
+    await k.approvePlan(t.id)
+    // Kernel has no public "mark done" mutator (that's the execution port's job, out of scope
+    // here) — append the status change directly, the way the port's run-finish checkpoint does.
+    await log.append({ taskId: t.id, stepId: null, runToken: null, kind: EVENT_KIND.task_status_changed, payload: { taskId: t.id, from: TASK_STATUS.approved, to: TASK_STATUS.done } })
+    expect(await codeOf(k.annotatePlan(t.id, { targetNote: 'db', refs: [], text: 'x' }))).toBe(KERNEL_ERROR_CODE.invalid_transition)
   })
 })

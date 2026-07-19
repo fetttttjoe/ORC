@@ -1,4 +1,4 @@
-import { isConnectionRefused, loadConfig, requireProject } from '@orc/kernel'
+import { dbosSend, isConnectionRefused, loadConfig, requireProject } from '@orc/kernel'
 import { HOOK_NAME } from '@orc/contracts'
 import { buildProgram, openKernel, runInit } from './main'
 import { buildPlugins, buildRuntime } from './runtime'
@@ -21,6 +21,7 @@ try {
     redactEnv: config.redactEnv,
     refValidator: plugins.host.refValidator,
     analyzers: plugins.host.analyzers,
+    send: dbosSend,
     onAppend: e => void plugins.host.hooks.emit(HOOK_NAME.event_appended, e),
   })
   await buildProgram(
