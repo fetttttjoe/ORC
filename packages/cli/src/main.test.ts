@@ -305,6 +305,26 @@ describe('orc CLI', () => {
     await log.close()
   })
 
+  it('status shows the analysis coverage once the analyze step has reported it', async () => {
+    const db = await createTestDb()
+    dbs.push(db)
+    const { kernel, log } = await openKernel(db.url, { projectId: TEST_PROJECT_ID })
+    const lines: string[] = []
+    spyOn(console, 'log').mockImplementation((...a: unknown[]) => { lines.push(a.join(' ')) })
+    const run = async (...args: string[]) => buildProgram(kernel).parseAsync(args, { from: 'user' })
+    const t = await kernel.createTask({ title: 'grounded' })
+    await kernel.reportCoverage(
+      { taskId: t.id, stepId: 'analyze', runToken: `step:${t.id}:analyze:a1` },
+      { analyzed: true, scope: ['packages'], gaps: ['no tests read'], confidence: 'medium', notesWritten: 3 },
+    )
+    lines.length = 0
+    await run('status', t.id)
+    const out = lines.join('\n')
+    expect(out).toContain('analysis')
+    expect(out).toContain('no tests read') // the gap surfaces so the human sees what was NOT covered
+    await log.close()
+  })
+
   it('plan-revise annotates each scoped note with the text, then resumes the open feedback', async () => {
     const db = await createTestDb()
     dbs.push(db)

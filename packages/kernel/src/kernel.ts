@@ -262,6 +262,14 @@ export class Kernel {
     return open.topic
   }
 
+  // D3 read side (M5b): the latest analysis_completed for the task (the scout's coverage self-report),
+  // or null before any. orc status renders it so a grounded task shows what its analysis covered and,
+  // crucially, the gaps it did NOT — the read half of the emitter below.
+  async latestCoverage(taskId: string): Promise<AnalysisCompletedPayload | null> {
+    const last = [...(await this.log.byTask(taskId))].reverse().find(e => e.kind === EVENT_KIND.analysis_completed)
+    return last ? AnalysisCompletedPayload.parse(last.payload) : null
+  }
+
   // D3/RG7 emitter (M5b): the analyze (scout) step self-reports its CoverageReport before signaling
   // success — the report_coverage tool's write side. Carries the step's runToken for provenance;
   // orc status reads the latest back off the log. Degradation (analyzed:false) is a valid report.
