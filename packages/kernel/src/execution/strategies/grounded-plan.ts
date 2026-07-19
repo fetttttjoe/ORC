@@ -8,6 +8,11 @@ export const planScope = (taskId: string): string => `plan-${taskId}`
 // createGroundedTask (which stamps it) and finalize_plan's defensive gate reference this one source.
 export const PLAN_STEP_ROLE = 'auditor'
 
+// The grounded analyze step's role (agentAnalyzer.analysisStep stamps it; runtime maps it → the
+// scout memory tier). report_coverage is only meaningful for THIS step, so its gate reads this one
+// source rather than a scattered 'scout' literal.
+export const ANALYZE_STEP_ROLE = 'scout'
+
 // FixE: reconstruct the task's plan-note graph from the EVENT LOG (the source of truth) rather than
 // the async SurrealDB projection — the log is synchronously durable the instant finalize runs, so the
 // frozen executable plan can never be built from a stale read model. Folds memory_written/deleted in

@@ -204,6 +204,21 @@ export function buildProgram(
     })
 
   program
+    .command('plan-revise <taskId> <text>')
+    .description('targeted re-plan (grounded-plan): annotate each --scope note with <text>, then resume the plan agent to revise just those notes')
+    .requiredOption('--scope <ids...>', 'plan-note ids to revise (only their decomposes_into subtree changes; every other note stays byte-stable)')
+    .action(async (taskId: string, text: string, opts: { scope: string[] }) => {
+      // annotate-and-resume sugar over `plan-note … && reply`: queue the same change onto each scoped
+      // note, then wake the parked plan step so it reads them (read_annotations) and revises in place.
+      await needPort() // resuming the gate needs DBOS launched here, exactly like reply
+      for (const noteId of opts.scope) await kernel.annotatePlan(taskId, { targetNote: noteId, refs: [], text })
+      const topic = await kernel.replyFeedback(taskId, text)
+      console.log(topic
+        ? `revised ${opts.scope.join(', ')} — answered feedback:${topic}`
+        : `annotated ${opts.scope.join(', ')} — no open feedback to resume (the agent reads them on its next revise)`)
+    })
+
+  program
     .command('tasks')
     .description('list tasks')
     .action(async () => {
@@ -302,6 +317,10 @@ export function buildProgram(
         const detail = s?.failure ? `  [${s.failure.class}] ${s.failure.message}` : (s?.output ? `  → ${s.output}` : '')
         console.log(`  ${step.id.padEnd(12)} ${status.padEnd(10)} attempt ${s?.attempt ?? 0}${detail}`)
       }
+      // D4 gate, human side: a grounded-plan step parked on ask_human shows its question here, so the
+      // conversation isn't one-directional — the human sees the prompt, not just a blind reply target.
+      const feedback = await kernel.openFeedback(taskId)
+      if (feedback) console.log(`  awaiting reply: ${feedback.question}  (orc reply ${taskId} <text>)`)
       const ops = [...state.operations.values()]
         .filter(o => o.taskId === taskId)
         .sort((a, b) => a.startedSeq - b.startedSeq)

@@ -272,6 +272,37 @@ describe('Kernel lifecycle', () => {
     expect(sent).toEqual([{ runToken: runTokenB, topic: 'feedback:topic-b' }])
   })
 
+  it('openFeedback surfaces the latest unanswered feedback_requested, then null once answered', async () => {
+    const db = await createTestDb()
+    dbs.push(db)
+    const log = (await openStorage(db.url, { projectId: TEST_PROJECT_ID })).events
+    const k = new Kernel(log)
+    const t = await k.createTask({ title: 'x' })
+    expect(await k.openFeedback(t.id)).toBeNull() // nothing pending
+    const runToken = `step:${t.id}:plan:a1`
+    await log.append({ taskId: t.id, stepId: 'plan', runToken, kind: EVENT_KIND.feedback_requested, payload: { question: 'changes or approve?', topic: 'plan-1' } })
+    expect(await k.openFeedback(t.id)).toMatchObject({ topic: 'plan-1', question: 'changes or approve?' })
+    await k.replyFeedback(t.id, 'approve')
+    expect(await k.openFeedback(t.id)).toBeNull() // answered → nothing to reply to
+  })
+
+  it('reportCoverage appends analysis_completed carrying the parsed CoverageReport (defaults + provenance)', async () => {
+    const db = await createTestDb()
+    dbs.push(db)
+    const log = (await openStorage(db.url, { projectId: TEST_PROJECT_ID })).events
+    const k = new Kernel(log)
+    const t = await k.createTask({ title: 'x' })
+    const runToken = `step:${t.id}:analyze:a1`
+    await k.reportCoverage({ taskId: t.id, stepId: 'analyze', runToken }, { analyzed: true, gaps: ['no tests read'] })
+    const ev = (await log.byTask(t.id)).find(e => e.kind === EVENT_KIND.analysis_completed)!
+    expect(ev.runToken).toBe(runToken) // emitted from within the analyze step
+    const p = ev.payload as { analyzed: boolean; gaps: string[]; confidence: string; notesWritten: number }
+    expect(p.analyzed).toBe(true)
+    expect(p.gaps).toEqual(['no tests read'])
+    expect(p.confidence).toBe('none') // default
+    expect(p.notesWritten).toBe(0) // default
+  })
+
   it('annotatePlan rejects once the task is done, cancelled, or failed', async () => {
     const db = await createTestDb()
     dbs.push(db)
