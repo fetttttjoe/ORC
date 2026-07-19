@@ -50,7 +50,10 @@ export function unavailableMemoryTools(reason: string): ResolvedTool[] {
 
 // Injected as ResolvedTool[] via the same channel MCP tools use. Author is bound per step.
 // tier keys the tool surface + epistemic posture (default 'verify' = today's unchanged behavior):
-//  - scout: memory_search/memory_read only, with the provisional-epistemics fragment.
+//  - scout: memory_search/memory_read/memory_write — the scout's job is authoring bounded
+//    interpretive notes (D8/P1/RG2), so it needs memory_write; it drops memory_neighbors
+//    because a scout seeds the graph, it doesn't traverse a rich one yet. Provisional-epistemics
+//    fragment applies to all three tools.
 //  - auditor: the full surface, with the traverse-before-asserting fragment.
 export function memoryTools(store: MemoryStore, author: MemoryAuthor, tier: MemoryTier = MEMORY_TIER.verify): ResolvedTool[] {
   const tools: ResolvedTool[] = [
@@ -169,7 +172,7 @@ export function memoryTools(store: MemoryStore, author: MemoryAuthor, tier: Memo
       },
     },
   ]
-  // scout narrows to the read-only surface (memory_search/memory_read) — nothing to assert with,
-  // so nothing to write or traverse with.
-  return tier === MEMORY_TIER.scout ? tools.filter(t => t.name === 'memory_search' || t.name === 'memory_read') : tools
+  // scout narrows off memory_neighbors only — it authors notes (memory_write) but doesn't yet
+  // have a rich graph to traverse.
+  return tier === MEMORY_TIER.scout ? tools.filter(t => t.name !== 'memory_neighbors') : tools
 }
