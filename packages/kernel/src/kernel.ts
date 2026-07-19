@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import {
-  ChildPlanDraft, EVENT_KIND, FeedbackProvidedPayload, ISOLATION_TIER, PlanAnnotatedPayload, PlanDraft, STRATEGY, TASK_STATUS, evaluateApproval, validatePlan,
+  AnalysisCompletedPayload, ChildPlanDraft, EVENT_KIND, FeedbackProvidedPayload, ISOLATION_TIER, PlanAnnotatedPayload, PlanDraft, STRATEGY, TASK_STATUS, evaluateApproval, validatePlan,
   type Analyzer, type ApprovalPolicy, type EventKind, type EventRecord, type FeedbackRequestedPayload,
   type MemoryNote, type Plan, type PlanStep, type TaskNode, type TaskStatus,
 } from '@orc/contracts'
@@ -221,19 +221,34 @@ export class Kernel {
     return foldPlanNotes(events, planScope(taskId))
   }
 
-  // D4 conversational gate, human side: answers the latest still-open feedback_requested (one
-  // with no later feedback_provided on its topic) and resumes the step workflow parked on
-  // DBOS.recv(`feedback:<topic>`, 60) — that workflow's id is the event's own envelope runToken,
-  // recorded by the port from inside the step (never reconstructed here). Returns the resolved
-  // topic, or null if the task has no open question (the CLI reports either outcome).
+  // The latest still-open feedback_requested (no later feedback_provided on its topic), or null.
+  // The ONE derivation shared by openFeedback (read side) and replyFeedback (write side) — so the
+  // question a human sees and the topic a reply resolves can never drift apart. byTask is seq-ordered.
+  private openRequest(events: EventRecord[]): EventRecord | null {
+    const answeredAfter = (seq: number, topic: string): boolean =>
+      events.some(e => e.seq > seq && e.kind === EVENT_KIND.feedback_provided && (e.payload as FeedbackProvidedPayload).topic === topic)
+    return [...events].reverse().find(e =>
+      e.kind === EVENT_KIND.feedback_requested && !answeredAfter(e.seq, (e.payload as FeedbackRequestedPayload).topic)) ?? null
+  }
+
+  // D4 gate, read side (M5b): the human-facing "what am I replying to?" — the pending question +
+  // topic, or null when nothing is open. orc status renders it so the conversational gate isn't
+  // one-directional (a human can see the prompt, not just answer a blind topic).
+  async openFeedback(taskId: string): Promise<{ topic: string; question: string; noteId?: string } | null> {
+    const open = this.openRequest(await this.log.byTask(taskId))
+    if (!open) return null
+    const { topic, question, noteId } = open.payload as FeedbackRequestedPayload
+    return { topic, question, ...(noteId ? { noteId } : {}) }
+  }
+
+  // D4 conversational gate, human side: answers the latest still-open feedback_requested and resumes
+  // the step workflow parked on DBOS.recv(`feedback:<topic>`, 60) — that workflow's id is the event's
+  // own envelope runToken, recorded by the port from inside the step (never reconstructed here).
+  // Returns the resolved topic, or null if the task has no open question (the CLI reports either).
   async replyFeedback(taskId: string, text: string): Promise<string | null> {
     const open = await this.log.transaction(async tx => {
       await this.requireTask(tx, taskId)
-      const events = await tx.byTask(taskId)
-      const answeredAfter = (seq: number, topic: string): boolean =>
-        events.some(e => e.seq > seq && e.kind === EVENT_KIND.feedback_provided && (e.payload as FeedbackProvidedPayload).topic === topic)
-      const requested = [...events].reverse().find(e =>
-        e.kind === EVENT_KIND.feedback_requested && !answeredAfter(e.seq, (e.payload as FeedbackRequestedPayload).topic))
+      const requested = this.openRequest(await tx.byTask(taskId))
       if (!requested) return null
       const { topic } = requested.payload as FeedbackRequestedPayload
       if (!requested.runToken)
@@ -245,6 +260,17 @@ export class Kernel {
     if (!open) return null
     await this.send?.(open.runToken, text, `feedback:${open.topic}`)
     return open.topic
+  }
+
+  // D3/RG7 emitter (M5b): the analyze (scout) step self-reports its CoverageReport before signaling
+  // success — the report_coverage tool's write side. Carries the step's runToken for provenance;
+  // orc status reads the latest back off the log. Degradation (analyzed:false) is a valid report.
+  async reportCoverage(ctx: { taskId: string; stepId: string; runToken: string }, coverage: unknown): Promise<void> {
+    return this.log.transaction(async tx => {
+      await this.requireTask(tx, ctx.taskId)
+      const payload = AnalysisCompletedPayload.parse(coverage)
+      await tx.append({ taskId: ctx.taskId, stepId: ctx.stepId, runToken: ctx.runToken, kind: EVENT_KIND.analysis_completed, payload })
+    })
   }
 
   // ponytail: state() refolds the whole log on every call — add snapshots when it measurably slows

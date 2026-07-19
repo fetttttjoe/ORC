@@ -288,6 +288,56 @@ describe('orc CLI', () => {
     await expect(run('reply', 'whatever', 'approve')).rejects.toThrow(/execution commands are unavailable/)
   })
 
+  it('status surfaces the open feedback question so the human sees what to reply to', async () => {
+    const db = await createTestDb()
+    dbs.push(db)
+    const { kernel, log } = await openKernel(db.url, { projectId: TEST_PROJECT_ID })
+    const lines: string[] = []
+    spyOn(console, 'log').mockImplementation((...a: unknown[]) => { lines.push(a.join(' ')) })
+    const run = async (...args: string[]) => buildProgram(kernel).parseAsync(args, { from: 'user' })
+    const t = await kernel.createTask({ title: 'grounded' })
+    const runToken = `step:${t.id}:plan:a1`
+    await log.append({ taskId: t.id, stepId: 'plan', runToken, kind: EVENT_KIND.feedback_requested, payload: { question: 'changes or approve?', topic: 'plan-1' } })
+
+    lines.length = 0
+    await run('status', t.id)
+    expect(lines.join('\n')).toContain('changes or approve?')
+    await log.close()
+  })
+
+  it('plan-revise annotates each scoped note with the text, then resumes the open feedback', async () => {
+    const db = await createTestDb()
+    dbs.push(db)
+    const sent: Array<{ id: string; message: string; topic: string }> = []
+    const { kernel, log } = await openKernel(db.url, {
+      projectId: TEST_PROJECT_ID,
+      send: async (id, message, topic) => { sent.push({ id, message, topic }) },
+    })
+    const lines: string[] = []
+    spyOn(console, 'log').mockImplementation((...a: unknown[]) => { lines.push(a.join(' ')) })
+    const stubPort: ExecutionPort = {
+      startRun: async () => { throw new Error('unused in this test') },
+      retry: async () => { throw new Error('unused in this test') },
+      cancelRun: async () => {},
+    }
+    const run = async (...args: string[]) => buildProgram(kernel, async () => stubPort).parseAsync(args, { from: 'user' })
+
+    await run('new', 'grounded task')
+    const taskId = lines[0]!
+    await run('propose', taskId)
+    const runToken = `step:${taskId}:plan:a1`
+    await log.append({ taskId, stepId: 'plan', runToken, kind: EVENT_KIND.feedback_requested, payload: { question: 'changes?', topic: 'auth-1' } })
+
+    lines.length = 0
+    await run('plan-revise', taskId, 'use argon2', '--scope', 'db', 'api')
+    const annotated = (await log.byTask(taskId)).filter(e => e.kind === EVENT_KIND.plan_annotated)
+    expect(annotated.map(e => (e.payload as { targetNote: string }).targetNote).sort()).toEqual(['api', 'db'])
+    expect(annotated.every(e => (e.payload as { text: string }).text === 'use argon2')).toBe(true)
+    // one send resumes the plan agent with the revise text — it reads the queued annotations on wake
+    expect(sent).toEqual([{ id: runToken, message: 'use argon2', topic: 'feedback:auth-1' }])
+    await log.close()
+  })
+
   // memory commands need `needPlugin()` to resolve, so this injects a plugin the way
   // plugin-commands.test.ts does — host/hub are untouched stubs, config/log are real.
   // config.projectDbName is a per-test throwaway SurrealDB db (dropped in afterAll below),
