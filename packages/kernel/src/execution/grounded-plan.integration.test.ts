@@ -5,17 +5,18 @@ import path from 'node:path'
 import {
   EVENT_KIND, ISOLATION_TIER, LINK_KIND, NOTE_KIND, SIGNAL_OUTCOME, TASK_STATUS,
   type AgentExecutor, type Analyzer, type CoverageReport, type EventDraft, type ExecutorContext,
-  type MemoryNoteDraft, type PlanAnnotatedPayload, type PlanStep, type ResolvedTool,
+  type MemoryNoteDraft, type PlanStep, type ResolvedTool,
   type SplitResult, type UnifiedEvent,
 } from '@orc/contracts'
-import { createMemory } from '@orc/memory'
+import { createMemory, MEMORY_TIER } from '@orc/memory'
 import { createTestSurreal } from '@orc/memory/test-helpers'
-import type { EventLog } from '../storage'
 import { openStorage } from '../storage'
 import { Kernel } from '../kernel'
 import { createTestDb, fakeProvider, testConfig, TEST_PROJECT_ID } from '../test-helpers'
 import { createDbosPort, dbosSend } from './dbos-port'
 import { finalizePlanTool } from './finalize-plan-tool'
+import { readAnnotationsTool } from './read-annotations-tool'
+import { splitTool } from './split-tool'
 import { planScope } from './strategies/grounded-plan'
 
 // The analyzer seam (Task 3): the kernel consumes ANY Analyzer; this test provides one whose
@@ -39,9 +40,10 @@ const taskIdOf = (runToken: string): string => runToken.split(':')[1]!
 // analyze scout, the plan auditor, and the db/api children the split expands (all inherit
 // executorRef 'api-loop'). It branches on ctx.step.id. Behaviour is a pure function of the human
 // replies the test delivers via replyFeedback + the plan-note graph it authors: it emits REAL
-// feedback gates, authors REAL plan-notes via the injected memory_write, and calls the REAL
-// finalize_plan — so the assertions read committed events / the projected store, never the fake.
-function groundedFake(log: EventLog): AgentExecutor<unknown> {
+// feedback gates, authors REAL plan-notes via the injected memory_write, reads the human's
+// annotations via the REAL read_annotations tool, and calls the REAL finalize_plan — so the
+// assertions read committed events / the projected store, never the fake.
+function groundedFake(): AgentExecutor<unknown> {
   return {
     id: 'api-loop',
     async *startTurn(ctx: ExecutorContext<unknown>): AsyncGenerator<UnifiedEvent, void, SplitResult[] | string | undefined> {
@@ -101,12 +103,15 @@ function groundedFake(log: EventLog): AgentExecutor<unknown> {
           cycle++
           const reply = yield { type: 'feedback', question: 'Plan ready — reply with changes, or "approve" to start.', topic: `plan:${cycle}`, toolCallId: `ask-${cycle}` }
           if (reply === 'approve') break
-          // targeted re-plan (D6): read the queued plan_annotated events, re-write ONLY those notes
-          // (+ leave every sibling byte-stable). The delivery channel is simulated here (the real
-          // api-loop will get annotations via context injection once wired) but the target is driven
-          // by the REAL annotation event, and the per-note revisioning under test is fully real.
-          const targets = await ctx.checkpoint(`annotations:${cycle}`, async () =>
-            (await log.byTask(taskId)).filter(e => e.kind === EVENT_KIND.plan_annotated).map(e => (e.payload as PlanAnnotatedPayload).targetNote))
+          // targeted re-plan (D6): learn which notes the human flagged by calling the REAL
+          // read_annotations tool (FixB's channel — kernel.listAnnotations off the log, taskId bound
+          // from the injected step context), then re-write ONLY those notes and leave every sibling
+          // byte-stable. No log peeking: a real agent has no such access — this injected tool is its
+          // only channel, so if read_annotations were dropped the fake throws and this test fails.
+          const targets = await ctx.checkpoint(`annotations:${cycle}`, async () => {
+            const r = await tool('read_annotations').execute({}, `annot-${cycle}`)
+            return (r.output as { annotations: { targetNote: string }[] }).annotations.map(a => a.targetNote)
+          })
           for (const target of new Set(targets)) {
             if (!notes[target]) continue
             notes[target] = { ...notes[target]!, body: `${notes[target]!.body} [revised per annotation]` }
@@ -168,15 +173,25 @@ async function bringUp() {
   const port = await createDbosPort({
     storage, config,
     providers: new Map([['fake', fakeProvider]]),
-    executors: new Map([['api-loop', groundedFake(log)]]),
+    executors: new Map([['api-loop', groundedFake()]]),
     // the analyze/plan steps declare skillRefs; a minimal loader satisfies the force-load (the
     // fake ignores skill bodies — the loop behaviour comes from the scripted branches).
     skills: { load: async (name: string) => ({ name, body: `body of ${name}`, hash: `hash-${name}` }) },
-    // mirrors runtime.ts stepTools: the memory surface + finalize_plan (reads the plan-note graph).
-    // Default (verify) tier so the scout can memory_write its analysis note — the referenced
-    // memory-reuse/split-run harnesses use the same default surface; Task 7 owns tier coverage.
+    // FAITHFUL MIRROR of runtime.ts buildRuntime.stepTools — the SAME tier-derived memory surface +
+    // task_split + read_annotations + finalize_plan the CLI wires in production. Replicated (not
+    // imported) on purpose: that inline factory is a composition-root concern closing over cli-only
+    // handles, and sharing it would force kernel→memory as a PROD dep — the stepTools seam exists
+    // precisely so the kernel stays memory-agnostic. Kept byte-identical here AND the fake DRIVES
+    // these tools, so dropping any (or mis-deriving the tier) fails this test loudly, never silently.
     stepTools: p => [
-      ...memory.buildTools({ source: 'agent', taskId: p.taskId, stepId: p.stepId, runToken: p.runToken, executor: p.executor, model: p.model, role: p.role }),
+      // step role keys the memory tier: scout (analyze) / auditor (plan) narrow-or-widen the surface;
+      // every other role (the implementer children) gets verify. Scout MUST keep memory_write (FixA).
+      ...memory.buildTools(
+        { source: 'agent', taskId: p.taskId, stepId: p.stepId, runToken: p.runToken, executor: p.executor, model: p.model, role: p.role },
+        p.role === MEMORY_TIER.scout ? MEMORY_TIER.scout : p.role === MEMORY_TIER.auditor ? MEMORY_TIER.auditor : MEMORY_TIER.verify,
+      ),
+      splitTool({ kernel, config: { approvalPolicy: config.approvalPolicy, maxDepth: config.maxDepth }, p }),
+      readAnnotationsTool({ kernel, p }),
       finalizePlanTool({ store: memory.store, kernel, config: { maxDepth: config.maxDepth }, p }),
     ],
   })
@@ -206,6 +221,14 @@ describe('grounded-plan e2e: the full consent → analyze → plan-graph → ann
       // consent gate → yes (the real durable feedback gate: recv parks, replyFeedback→DBOS.send resumes)
       expect(await waitFor(() => feedbackCount('consent').then(n => n >= 1))).toBe(true)
       expect(await kernel.replyFeedback(t.id, 'yes')).toBe('consent')
+
+      // ASSERT (FixA Gap C): the analyze SCOUT authored its note via the REAL memory_write tool —
+      // proof it runs under scout tier that STILL carries memory_write. Pre-FixA scout dropped
+      // memory_write, so the fake's write would throw "no 'memory_write' tool injected", the step
+      // would never finish, and 'analysis' would never exist. Read it back from the store (default
+      // 'project' scope) to prove authored-under-scout-tier + projected.
+      expect(await waitFor(async () => (await memory.store.get('analysis', 'project')) !== null)).toBe(true)
+      expect((await memory.store.get('analysis', 'project'))?.title).toBe('Architecture')
 
       // plan authored → first ask_human → annotate 'db' then reply 'go' (a targeted revise, not approve)
       expect(await waitFor(() => feedbackCount('plan:1').then(n => n >= 1))).toBe(true)
@@ -262,7 +285,7 @@ describe('grounded-plan e2e: the full consent → analyze → plan-graph → ann
   }, 60_000)
 
   it('consent no → empty CoverageReport (analyzed:false) → assumption-mode plan with marked uncertainties', async () => {
-    const { kernel, log, port, cleanup } = await bringUp()
+    const { kernel, memory, port, cleanup } = await bringUp()
     try {
       const t = await kernel.createGroundedTask({ title: 'CLI tool', spec: 'ship a cli', modelRef: 'fake/m', analyzerRef: 'agent-analyzer' })
       const scope = planScope(t.id)
@@ -292,19 +315,16 @@ describe('grounded-plan e2e: the full consent → analyze → plan-graph → ann
       const childId2 = ((await kernel.eventsFor(t.id)).find(e => e.kind === EVENT_KIND.split_proposed)!.payload as { childTaskId: string }).childTaskId
       await waitFor(async () => (await kernel.getTask(childId2))?.status === TASK_STATUS.done, 30_000)
 
-      // ASSERT: the assumption-mode plan-notes carry marked uncertainties (every gap surfaced on the
-      // note it affects). Read from the memory_written event — the log is the source of truth, and
-      // uncertainty[]/rationale live there + in the vault, but are NOT projected into the SurrealDB
-      // read model (see report: a latent read-model gap, out of scope for this task).
-      // memory_written events carry envelope taskId:null (global knowledge) — read them via log.all()
-      const dbWrite = (await log.all()).find(e =>
-        e.kind === EVENT_KIND.memory_written
-        && (e.payload as { note: { id: string; scope: string } }).note.id === 'db'
-        && (e.payload as { note: { id: string; scope: string } }).note.scope === scope)
-      expect(dbWrite).toBeDefined()
-      const dbNote = (dbWrite!.payload as { note: { uncertainty: string[] } }).note
-      expect(dbNote.uncertainty.length).toBeGreaterThan(0)
-      expect(dbNote.uncertainty[0]).toContain('unverified')
+      // ASSERT (FixA Gap A): the assumption-mode plan-notes carry marked uncertainties (every gap
+      // surfaced on the note it affects), and uncertainty[]/rationale round-trip THROUGH THE READ
+      // MODEL — read db's note back from the store (the SurrealDB projection), NOT the event log.
+      // Pre-FixA the projection dropped these fields, so this returned [] / '' even though the log
+      // carried them; FixA persists them through table/upsert/toNote.
+      expect(await waitFor(async () => ((await memory.store.get('db', scope))?.uncertainty.length ?? 0) > 0)).toBe(true)
+      const dbNote = await memory.store.get('db', scope)
+      expect(dbNote?.uncertainty.length).toBeGreaterThan(0)
+      expect(dbNote?.uncertainty[0]).toContain('unverified')
+      expect(dbNote?.rationale).toBe('data model first')
     } finally {
       await cleanup()
     }
