@@ -74,9 +74,10 @@ export async function buildRuntime(
       // read_annotations only needs the kernel (reads plan_annotated off the log) — unconditional,
       // like splitTool: harmless everywhere, returns an empty list for a task with no annotations.
       readAnnotationsTool({ kernel, p }),
-      // finalize_plan needs the memory store to read the plan-note graph — only available when
-      // memory is healthy (grounded plans are pointless in degraded mode anyway).
-      ...(memory ? [finalizePlanTool({ store: memory.store, kernel, config: { maxDepth: config.maxDepth }, p })] : []),
+      // finalize_plan reconstructs the plan-note graph from the log (kernel.listPlanNotes), not the
+      // memory store — but it's still only offered when memory is healthy: with the memory tools
+      // degraded the agent can't author a plan-note graph, so a grounded plan is pointless anyway.
+      ...(memory ? [finalizePlanTool({ kernel, config: { maxDepth: config.maxDepth }, p })] : []),
     ],
   })
   await port.launch()

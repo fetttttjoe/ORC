@@ -193,7 +193,7 @@ async function bringUp() {
       ),
       splitTool({ kernel, config: { approvalPolicy: config.approvalPolicy, maxDepth: config.maxDepth }, p }),
       readAnnotationsTool({ kernel, p }),
-      finalizePlanTool({ store: memory.store, kernel, config: { maxDepth: config.maxDepth }, p }),
+      finalizePlanTool({ kernel, config: { maxDepth: config.maxDepth }, p }),
     ],
   })
   await port.launch()
