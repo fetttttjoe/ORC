@@ -2,11 +2,43 @@ import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync } from '
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { Command, InvalidArgumentError } from 'commander'
-import { EVENT_KIND, MEMORY_ACCESS, PlanDraft, RUN_OUTCOME, STRATEGY, TASK_STATUS, type Analyzer, type EventRecord, type ExecutionPort, type Plan, type RunHandle } from '@orc/contracts'
+import { EVENT_KIND, MEMORY_ACCESS, PlanDraft, RUN_OUTCOME, STRATEGY, TASK_STATUS, costUSDFor, parseModelRef, type Analyzer, type EventRecord, type ExecutionPort, type Plan, type RunHandle } from '@orc/contracts'
 import { openStorage, Kernel, fold, grantExtensionTrust, grantMcpTrust, initializeProject, isExtensionTrusted, isMcpTrusted, loadConfig, loadTrust, migrateDatabase, requireProject, taskUsage, type EventLog, type OrcConfig, type PluginHost, type ProjectConfig, type Storage } from '@orc/kernel'
 import { createVaultProjector, parsePlanFile } from '@orc/vault-projector'
 import { createMemory, probeMemory } from '@orc/memory'
 import { buildOrcActions, singleStepDraft } from './actions'
+import { seedRegistries } from './runtime'
+
+// copilot model access: same provider registry (and cost table) the executor uses.
+// Providers are ModelProvider<unknown> by design (extensions may register anything) — the
+// boundary check below validates the shape at runtime instead of casting.
+type CopilotModel = ReturnType<import('@orc/graph-ui').CopilotConfig['resolveModel']>
+const isLanguageModel = (m: unknown): m is CopilotModel =>
+  typeof m === 'string' || (typeof m === 'object' && m !== null && 'specificationVersion' in m)
+
+function buildCopilotConfig(config: ProjectConfig) {
+  const { providers } = seedRegistries(config)
+  const providerFor = (ref: string) => {
+    const { providerId, modelId } = parseModelRef(ref)
+    const p = providers.get(providerId)
+    if (!p) throw new Error(`unknown provider '${providerId}'`)
+    return { p, modelId }
+  }
+  return {
+    defaultModelRef: 'anthropic/claude-haiku-4-5',
+    resolveModel: (ref: string) => {
+      const { p, modelId } = providerFor(ref)
+      const model = p.languageModel(modelId)
+      if (!isLanguageModel(model)) throw new Error(`provider '${ref}' returned a non-language-model`)
+      return model
+    },
+    price: (ref: string, usage: { inputTokens?: number; outputTokens?: number; inputTokenDetails?: { cacheReadTokens?: number; cacheWriteTokens?: number } }) => {
+      const { p, modelId } = providerFor(ref)
+      return costUSDFor(p.costs, modelId, usage.inputTokens ?? 0, usage.outputTokens ?? 0,
+        { readTokens: usage.inputTokenDetails?.cacheReadTokens, writeTokens: usage.inputTokenDetails?.cacheWriteTokens })
+    },
+  }
+}
 import type { McpHub } from '@orc/mcp-client'
 
 // loadConfig is the ONE resolution of env → .orc/config.json → default; every command
@@ -344,6 +376,7 @@ export function buildProgram(
         cwdProject: cfg ? { id: cfg.projectId, name: cfg.projectName } : undefined,
         // mutations only when launched inside a project with a real runtime behind it
         actions: portFactory && plugin ? actions() : undefined,
+        copilot: portFactory && plugin ? buildCopilotConfig(cfg!) : undefined,
         defaultCwd: cfg?.dir ?? process.cwd(),
       })
       console.log(`graph ui on http://127.0.0.1:${ui.port}`)

@@ -3,7 +3,14 @@ import { EVENT_KIND, type EventRecord } from '@orc/contracts'
 import { draftFixture, stepFixture } from '@orc/contracts/fixtures'
 import { Kernel, fold, openStorage, type EventLog } from '@orc/kernel'
 import { createTestDb, TEST_PROJECT_ID } from '@orc/kernel/test-helpers'
-import { buildGraph, diffGraphs, noteNodeId, stepNodeId } from './graph'
+import { planScope } from '@orc/kernel'
+import { buildGraph, diffGraphs, noteNodeId, planScopeName, stepNodeId } from './graph'
+
+// planScopeName is the browser-safe duplicate of kernel's planScope (kernel cannot enter the
+// page bundle) — this pins them together
+it('planScopeName matches the kernel planScope format', () => {
+  expect(planScopeName('t-1')).toBe(planScope('t-1'))
+})
 
 const dbs: Array<{ drop: () => Promise<void> }> = []
 afterAll(async () => { await Promise.all(dbs.map(d => d.drop())) }, 30_000)

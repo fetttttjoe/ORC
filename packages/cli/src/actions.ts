@@ -61,6 +61,11 @@ export function buildOrcActions(deps: {
       return { version: plan.version, steps: plan.steps.length }
     },
 
+    async edit(taskId, draft) {
+      const plan = await kernel.editPlan(taskId, draft)
+      return { version: plan.version }
+    },
+
     async approve(taskId, version) {
       const plan = await kernel.approvePlan(taskId, version)
       return { version: plan.version }
