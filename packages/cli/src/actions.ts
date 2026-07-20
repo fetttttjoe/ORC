@@ -1,7 +1,15 @@
 import { EVENT_KIND, ISOLATION_TIER, STRATEGY, type ExecutionPort, type PlanDraft } from '@orc/contracts'
-import { subtreeTaskIds, type EventLog, type Kernel, type ProjectConfig } from '@orc/kernel'
+import { initializeProject, openStorage, subtreeTaskIds, type EventLog, type Kernel, type ProjectConfig } from '@orc/kernel'
 import { createMemory, orphanedNotes } from '@orc/memory'
-import type { OrcActions } from '@orc/ui-core'
+import { PROJECT_NAME_NOTE_ID, type OrcActions } from '@orc/ui-core'
+import { existsSync } from 'node:fs'
+
+// the name note is a plain memory event — append directly so renaming works even when the
+// Surreal read model is down (the projector catches up on its own)
+const nameNote = (name: string) => ({
+  taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_written,
+  payload: { note: { id: PROJECT_NAME_NOTE_ID, title: name, kind: 'fact', summary: 'display name for the project chat' }, author: { source: 'cli' as const } },
+})
 
 export function singleStepDraft(task: { title: string; spec: string }, modelRef: string, skillRefs: string[] = [], maxIterations = 30): PlanDraft {
   return {
@@ -97,6 +105,26 @@ export function buildOrcActions(deps: {
       for (const noteId of scope) await kernel.annotatePlan(taskId, { targetNote: noteId, refs: [], text })
       const topic = await kernel.replyFeedback(taskId, text)
       return { topic }
+    },
+
+    async renameProject(name) {
+      if (!plugin) throw new Error('renaming needs a project context')
+      await plugin.log.append(nameNote(name))
+      return { name }
+    },
+
+    async newProject(dir, name) {
+      if (!plugin) throw new Error('creating projects needs a project context')
+      if (!existsSync(dir)) throw new Error(`directory does not exist: ${dir}`)
+      const { projectId } = initializeProject(dir, name)
+      // first event = the name note: the project becomes listable and named immediately
+      const storage = await openStorage(plugin.config.databaseUrl, { projectId })
+      try {
+        await storage.events.append(nameNote(name))
+      } finally {
+        await storage.close()
+      }
+      return { projectId }
     },
 
     async cancel(taskId) {

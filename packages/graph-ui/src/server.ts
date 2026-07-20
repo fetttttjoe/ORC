@@ -59,6 +59,8 @@ const ACTION_ROUTES: Record<string, ActionHandler> = {
     z.object({ taskId: id, text: z.string().min(1), scope: z.array(id).min(1) }),
     (a, d) => a.revise(d.taskId, d.text, d.scope),
   ),
+  renameProject: route(z.object({ name: z.string().min(1).max(80) }), (a, d) => a.renameProject(d.name)),
+  newProject: route(z.object({ dir: id, name: z.string().min(1).max(80) }), (a, d) => a.newProject(d.dir, d.name)),
 }
 
 // Thin web adapter: JSON + SSE over ProjectSessions. Nothing here knows how graphs are

@@ -26,9 +26,12 @@ const CARD_KINDS: Record<string, { label: string; tone: Tone }> = {
   [EVENT_KIND.artifact_produced]: { label: 'artifact', tone: 'warn' },
   [EVENT_KIND.memory_written]: { label: 'note written', tone: 'purple' },
   [EVENT_KIND.task_status_changed]: { label: 'status', tone: 'muted' },
+  [EVENT_KIND.analysis_completed]: { label: 'analysis done', tone: 'purple' },
 }
 // kinds that carry a plan change — these get a rich diagram card, not just a line
 const PLAN_KINDS = new Set<string>([EVENT_KIND.plan_proposed, EVENT_KIND.plan_edited, EVENT_KIND.plan_approved])
+// a finished analysis means the grounded decomposition exists — show it as a card
+const DECOMPOSITION_KINDS = new Set<string>([EVENT_KIND.analysis_completed])
 
 export function renderWaves(waves: TodoWave[]): HTMLElement {
   return el('div', { class: 'waves' }, ...waves.map(w =>
@@ -88,7 +91,20 @@ export class Conversation {
       el('span', { class: 'sys-seq' }, `#${row.seq}`),
     ))
     if (PLAN_KINDS.has(row.kind) && row.taskId) void this.planCard(row.taskId)
+    if (DECOMPOSITION_KINDS.has(row.kind) && row.taskId) void this.decompositionCard(row.taskId)
     this.trim()
+    this.scroll()
+  }
+
+  private async decompositionCard(taskId: string): Promise<void> {
+    const res = await api.planNotes(this.projectId, taskId).catch(() => null)
+    if (!res?.mermaid) return
+    const diagram = el('div', { class: 'diagram' })
+    void mermaidInto(diagram, res.mermaid)
+    this.list.append(el('div', { class: 'card plan-card' },
+      el('div', { class: 'card-title' }, 'proposed decomposition', Badge(`${res.notes.length} subplans`, 'purple')),
+      diagram,
+    ))
     this.scroll()
   }
 

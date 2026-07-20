@@ -58,7 +58,7 @@ export function buildCopilotTools(deps: {
       description: 'Read a grounded task’s decomposition plan-notes (the split-up: subplans, dependencies, uncertainty).',
       inputSchema: z.object({ taskId }),
       execute: async ({ taskId: id }) =>
-        (await sessions.planNotes(projectId, id)).map(n => ({
+        (await sessions.planNotes(projectId, id)).notes.map(n => ({
           id: n.id, title: n.title, summary: snip(n.summary), rationale: snip(n.rationale),
           uncertainty: n.uncertainty, links: n.links,
         })),

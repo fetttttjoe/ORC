@@ -21,6 +21,10 @@ export interface OrcActions {
   // scoped notes AND wakes the parked plan agent (the conversational gate)
   annotate(taskId: string, noteId: string, text: string, refs?: string[]): Promise<{ noteId: string }>
   revise(taskId: string, text: string, scope: string[]): Promise<{ topic: string | null }>
+  // project chat management: the display name is a memory note; a new project mints identity
+  // in the directory AND writes its name note as the first event, making it listable at once
+  renameProject(name: string): Promise<{ name: string }>
+  newProject(dir: string, name: string): Promise<{ projectId: string }>
   cancel(taskId: string): Promise<{
     swept: Array<{ id: string; scope: string; title: string }>
     sweepError: string | null // sweep is best-effort over a committed cancel — failures report, never throw
