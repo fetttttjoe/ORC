@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'bun:test'
-import { mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { writeVaultFiles } from './write'
@@ -17,6 +17,17 @@ describe('writeVaultFiles', () => {
     // idempotent: re-write identical content changes nothing (mtime check via content compare only)
     writeVaultFiles(d, { 'tasks/t1/log.md': 'a' })
     expect(readFileSync(path.join(d, 'tasks/t1/log.md'), 'utf8')).toBe('a')
+  })
+
+  it('ignores a stale shared temp path left by another writer', () => {
+    const d = vault()
+    const parent = path.join(d, 'tasks/t1')
+    mkdirSync(path.join(parent, 'log.md.tmp'), { recursive: true })
+
+    writeVaultFiles(d, { 'tasks/t1/log.md': 'complete' })
+
+    expect(readFileSync(path.join(parent, 'log.md'), 'utf8')).toBe('complete')
+    expect(readdirSync(parent).filter(name => name.endsWith('.tmp'))).toEqual(['log.md.tmp'])
   })
 
   it('never rewrites an existing plan version (write-once protects edits)', () => {

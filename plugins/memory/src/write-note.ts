@@ -1,5 +1,6 @@
-import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, readFileSync, rmSync } from 'node:fs'
 import path from 'node:path'
+import { atomicWriteFileSync } from '@orc/kernel'
 
 // Single writer for vault/memory/** ONLY (spec D5). Atomic per file; skip-unchanged.
 function resolveInMemory(vaultDir: string, rel: string): string {
@@ -11,10 +12,7 @@ function resolveInMemory(vaultDir: string, rel: string): string {
 export function writeMemoryFile(vaultDir: string, rel: string, content: string): void {
   const abs = resolveInMemory(vaultDir, rel)
   if (existsSync(abs) && readFileSync(abs, 'utf8') === content) return
-  mkdirSync(path.dirname(abs), { recursive: true })
-  const tmp = `${abs}.tmp`
-  writeFileSync(tmp, content)
-  renameSync(tmp, abs)
+  atomicWriteFileSync(abs, content)
 }
 export function deleteMemoryFile(vaultDir: string, rel: string): void {
   const abs = resolveInMemory(vaultDir, rel)

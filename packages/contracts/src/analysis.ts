@@ -22,7 +22,12 @@ export const FeedbackRequestedPayload = z.object({
   topic: z.string().min(1),
 })
 export type FeedbackRequestedPayload = z.infer<typeof FeedbackRequestedPayload>
-export const FeedbackProvidedPayload = z.object({ topic: z.string().min(1), text: z.string(), author: MemoryAuthor })
+export const FeedbackProvidedPayload = z.object({
+  topic: z.string().min(1),
+  text: z.string(),
+  author: MemoryAuthor,
+  planHash: z.string().regex(/^[a-f0-9]{64}$/).optional(),
+})
 export type FeedbackProvidedPayload = z.infer<typeof FeedbackProvidedPayload>
 
 // D5 human annotation on a plan-note — an input event; the plan re-renders from it.

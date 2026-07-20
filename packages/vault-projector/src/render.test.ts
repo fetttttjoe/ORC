@@ -3,7 +3,7 @@ import { LINK_KIND, type EventRecord, type MemoryLink, type MemoryNote, type Tas
 import { EVENT_KIND } from '@orc/contracts'
 import { planFixture, stepFixture } from '@orc/contracts/fixtures'
 import { eventFixture } from '@orc/contracts/fixtures'
-import { masterplanDag, renderRootIndex, renderTaskFiles } from './render'
+import { renderRootIndex, renderTaskFiles } from './render'
 
 let seq = 0
 const ev = (over: Partial<EventRecord>): EventRecord =>
@@ -107,38 +107,5 @@ describe('renderRootIndex', () => {
     expect(md).toContain('t1["child · done"]')
     expect(md).toContain('t0 --> t1')
     expect(md).toBe(renderRootIndex([parent, child]))
-  })
-})
-
-describe('masterplanDag', () => {
-  it('renders decomposes_into as solid edges and depends_on as dashed edges', () => {
-    const notes = [
-      planNote({ id: 'master', title: 'build web', links: [link('db', LINK_KIND.decomposes_into), link('api', LINK_KIND.decomposes_into)] }),
-      planNote({ id: 'db', title: 'DB' }),
-      planNote({ id: 'api', title: 'API', links: [link('db', LINK_KIND.depends_on)] }),
-    ]
-    const md = masterplanDag(notes)
-    expect(md).toContain('```mermaid')
-    expect(md).toContain('graph TD')
-    expect(md).toMatch(/p0\["build web"\]/)
-    expect(md).toContain('p0 --> p1') // master decomposes_into db (solid)
-    expect(md).toContain('p0 --> p2') // master decomposes_into api (solid)
-    expect(md).toContain('p1 -.-> p2') // api depends_on db (dashed)
-  })
-
-  it('ignores link kinds other than decomposes_into/depends_on, and links to notes outside the set', () => {
-    const notes = [
-      planNote({ id: 'master', links: [link('db', LINK_KIND.decomposes_into), link('unrelated', LINK_KIND.relates_to), link('ghost', LINK_KIND.decomposes_into)] }),
-      planNote({ id: 'db' }),
-    ]
-    const md = masterplanDag(notes)
-    expect(md).toContain('p0 --> p1')
-    expect(md).not.toContain('unrelated')
-    expect(md).not.toContain('ghost')
-  })
-
-  it('non-plan notes are excluded; empty input renders an explicit empty state', () => {
-    expect(masterplanDag([{ ...planNote({ id: 'not-a-plan' }), kind: 'fact' }])).toBe('_no plan notes_')
-    expect(masterplanDag([])).toBe('_no plan notes_')
   })
 })

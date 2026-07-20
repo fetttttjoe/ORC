@@ -40,7 +40,7 @@ export async function buildRuntime(
   // task_split's expanded child plans go through the same toolRef/skillRef validation as
   // `orc propose`, and createGroundedTask can resolve its analyzer.
   const kernel = shared?.kernel ?? new Kernel(log, host.refValidator, host.analyzers, dbosSend)
-  log.onAppend = e => void host.hooks.emit(HOOK_NAME.event_appended, e)
+  log.onAppend = e => host.hooks.dispatch(HOOK_NAME.event_appended, e)
 
   // Startup order (design §8.4): projections FIRST — DBOS recovery may emit events the
   // moment it launches, and they must already be observed. Surreal failure degrades memory
@@ -88,15 +88,11 @@ export async function buildRuntime(
   return {
     ...port,
     shutdown: async () => {
-      // only resources that actually opened
-      if (memory) {
-        await memory.projector.close()
-        await memory.close()
-      }
-      await projector.close()
-      await hub.close()
-      await host.shutdown() // fires session_shutdown, deactivates extensions, stops the watcher
       await port.shutdown()
+      if (memory) await memory.close()
+      await projector.close()
+      await host.shutdown() // drains hooks, fires session_shutdown, deactivates extensions, stops the watcher
+      await hub.close()
     },
   }
 }

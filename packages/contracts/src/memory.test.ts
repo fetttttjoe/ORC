@@ -15,6 +15,34 @@ describe('MemoryNoteInput', () => {
     expect(n.body).toBe('')
   })
 
+  // search lowercases the query before matching tags, while the list/ls filter compares
+  // case-exactly — an un-normalized tag is reachable from one path and invisible to the other.
+  it('lowercases tags so search and filter agree', () => {
+    const n = MemoryNoteInput.parse({ id: 'db-choice', title: 'DB choice', tags: ['Postgres', 'MIXED-Case'] })
+    expect(n.tags).toEqual(['postgres', 'mixed-case'])
+  })
+
+  it('rejects notes above persisted collection and text limits', () => {
+    const note = { id: 'bounded', title: 'Bounded' }
+    const invalid = [
+      { categories: Array(51).fill('x') },
+      { categories: ['x'.repeat(65)] },
+      { tags: Array(51).fill('x') },
+      { tags: ['x'.repeat(65)] },
+      { links: Array.from({ length: 101 }, (_, i) => ({ id: `n-${i}` })) },
+      { paths: Array(101).fill('x') },
+      { paths: ['x'.repeat(1001)] },
+      { rules: Array(101).fill('x') },
+      { rules: ['x'.repeat(1001)] },
+      { uncertainty: Array(101).fill('x') },
+      { uncertainty: ['x'.repeat(1001)] },
+      { body: 'x'.repeat(100_001) },
+      { rationale: 'x'.repeat(20_001) },
+    ]
+    for (const value of invalid)
+      expect(MemoryNoteInput.safeParse({ ...note, ...value }).success).toBe(false)
+  })
+
   it('rejects an id with illegal characters', () => {
     expect(MemoryNoteInput.safeParse({ id: 'Auth Token', title: 'x' }).success).toBe(false)
     expect(MEMORY_ID_RE.test('auth-token-refresh')).toBe(true)

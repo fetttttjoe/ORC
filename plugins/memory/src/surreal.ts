@@ -202,10 +202,18 @@ export class SurrealMemory {
   }
   // ESCAPE HATCH: delete-all is expressible via the builder too (`db.delete('note')` with no id
   // deletes the whole table), so no raw `surreal.query` is used here either.
+  //
+  // ONE transaction, not three statements. applyEvent gates replay on `e.seq <= cursor`, so a
+  // clear that drops content while leaving the cursor ahead of it is unrecoverable through the
+  // normal paths: start()/catchUp() both drain zero and probeMemory honestly reports healthy,
+  // because "no events after the cursor" is true. Atomicity makes that state unreachable
+  // instead of merely unlikely.
   async clear(): Promise<void> {
-    await this.db.delete(Tb.Note)
-    await this.db.delete(Tb.Meta)
-    await this.db.delete(Tb.Link)
+    await this.db.transaction(async tx => {
+      await tx.delete(Tb.Note)
+      await tx.delete(Tb.Meta)
+      await tx.delete(Tb.Link)
+    })
   }
   async close(): Promise<void> { await this.surreal.close() }
 }

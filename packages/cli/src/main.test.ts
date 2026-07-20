@@ -1,5 +1,5 @@
 import { afterAll, afterEach, describe, expect, it, mock, spyOn } from 'bun:test'
-import { mkdtempSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { Surreal } from 'surrealdb'
@@ -60,12 +60,30 @@ describe('orc CLI', () => {
   it('init writes committed project identity into the given directory', async () => {
     const dir = mkdtempSync(path.join(tmpdir(), 'orc-init-'))
     await runInit(['--name', 'demo'], dir)
-    expect(requireProject(loadConfig(dir)).projectName).toBe('demo')
+    const config = requireProject(loadConfig(dir))
+    expect(config.projectName).toBe('demo')
+    for (const name of ['codebase-analysis', 'plan-authoring', 'documentation'])
+      expect(existsSync(path.join(config.skillsDir, name, 'SKILL.md'))).toBe(true)
   })
 
-  it('buildProgram exposes init', async () => {
+  it('init honors a custom skills directory and preserves existing skill files', async () => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'orc-init-custom-'))
+    mkdirSync(path.join(dir, '.orc'), { recursive: true })
+    writeFileSync(path.join(dir, '.orc', 'config.json'), JSON.stringify({ skillsDir: 'custom/skills' }))
+    const existing = path.join(dir, 'custom', 'skills', 'documentation', 'SKILL.md')
+    mkdirSync(path.dirname(existing), { recursive: true })
+    writeFileSync(existing, 'user-owned documentation skill')
+
+    await runInit(['--name', 'demo'], dir)
+
+    expect(readFileSync(existing, 'utf8')).toBe('user-owned documentation skill')
+    for (const name of ['codebase-analysis', 'plan-authoring'])
+      expect(existsSync(path.join(dir, 'custom', 'skills', name, 'SKILL.md'))).toBe(true)
+  })
+
+  it('buildProgram exposes pre-bootstrap init and db commands', async () => {
     const { kernel } = await makeCli()
-    expect(buildProgram(kernel).commands.map(c => c.name())).toContain('init')
+    expect(buildProgram(kernel).commands.map(c => c.name())).toEqual(expect.arrayContaining(['init', 'db']))
   })
 
   it('replay reconstructs operation state at a sequence and appends nothing', async () => {
@@ -74,7 +92,11 @@ describe('orc CLI', () => {
     const { kernel, log, storage } = await openKernel(db.url, { projectId: TEST_PROJECT_ID })
     const lines: string[] = []
     spyOn(console, 'log').mockImplementation((...a: unknown[]) => { lines.push(a.join(' ')) })
-    const run = async (...args: string[]) => buildProgram(kernel).parseAsync(args, { from: 'user' })
+    const run = async (...args: string[]) => {
+      const program = buildProgram(kernel)
+      for (const command of program.commands) command.exitOverride()
+      await program.parseAsync(args, { from: 'user' })
+    }
 
     const t = await kernel.createTask({ title: 'audit me' })
     const opContext = { taskId: t.id, stepId: 's1', runToken: `step:${t.id}:s1:a1` }
@@ -112,6 +134,12 @@ describe('orc CLI', () => {
     expect(records[0]).toMatchObject({ kind: 'task_created', projectId: TEST_PROJECT_ID, idempotencyKey: null })
     expect(records[0].seq).toBeGreaterThan(0)
     await log.close()
+  })
+
+  it('log and replay reject unknown task ids', async () => {
+    const { run } = await makeCli()
+    await expect(run('log', 'missing-task')).rejects.toThrow("no task 'missing-task'")
+    await expect(run('replay', 'missing-task')).rejects.toThrow("no task 'missing-task'")
   })
 
   it('new → propose → approve → log round-trip', async () => {
@@ -161,6 +189,24 @@ describe('orc CLI', () => {
     const plan = JSON.parse(lines.join('\n'))
     expect(plan.steps[0].modelRef).toBe('ollama/llama3')
     expect(plan.strategyRef).toBe('template:single')
+  })
+
+  it('plan and approve reject non-integer versions during argument parsing', async () => {
+    const { kernel } = await makeCli()
+    const parse = (...args: string[]) => {
+      const program = buildProgram(kernel)
+      for (const command of program.commands) command.exitOverride()
+      return program.parseAsync(args, { from: 'user' })
+    }
+    await expect(parse('plan', 'missing', '--version', 'nope')).rejects.toThrow(/integer/)
+    await expect(parse('approve', 'missing', '--version', '1.5')).rejects.toThrow(/integer/)
+    await expect(parse('replay', 'missing', '--at', '1e2')).rejects.toThrow(/integer/)
+  })
+
+  it('tasks makes an empty project explicit', async () => {
+    const { run, lines } = await makeCli()
+    await run('tasks')
+    expect(lines).toEqual(['_no tasks_'])
   })
 
   it('tasks lists id, status and title', async () => {
@@ -363,6 +409,43 @@ describe('orc CLI', () => {
   // config.projectDbName is a per-test throwaway SurrealDB db (dropped in afterAll below),
   // so this test is isolated from the shared `orc/memory` db and from any other test —
   // `rebuild` is safe to call since it only ever clears this test's own db.
+  // A DBOS-cancelled workflow's getResult() rejects. Every stub port in this file has
+  // `wait: async () => outcome`, so no test ever exercised the rejecting path — and `orc run`
+  // only handled the resolve branch, printing a raw driver error and exit 1 for an advertised
+  // action ("ctrl-c stops the run") while `orc status` correctly showed 'cancelled'.
+  it('run reports a cancelled workflow as cancelled, not as a crash', async () => {
+    const db = await createTestDb()
+    dbs.push(db)
+    const { kernel, log } = await openKernel(db.url, { projectId: TEST_PROJECT_ID })
+    const lines: string[] = []
+    spyOn(console, 'log').mockImplementation((...a: unknown[]) => { lines.push(a.join(' ')) })
+    const cancellingPort: ExecutionPort = {
+      startRun: async () => ({
+        workflowId: 'wf-1',
+        wait: async () => { throw new Error('Workflow wf-1 was cancelled') },
+      }),
+      retry: async () => { throw new Error('unused') },
+      cancelRun: async () => {},
+    }
+    const run = (...args: string[]) => buildProgram(kernel, async () => cancellingPort).parseAsync(args, { from: 'user' })
+
+    await run('new', 'cancel me')
+    const taskId = lines[0]!
+    await run('propose', taskId)
+    await run('approve', taskId)
+    // the cancel that raced the run: the task is already terminal when wait() rejects, which is
+    // exactly the state `orc cancel` leaves behind (it appends under the project lock)
+    await log.append({
+      taskId, stepId: null, runToken: null, kind: EVENT_KIND.task_status_changed,
+      payload: { taskId, from: 'running', to: 'cancelled' },
+    })
+
+    lines.length = 0
+    await run('run', taskId)
+    expect(lines.join('\n')).toContain('run finished: cancelled')
+    await log.close()
+  })
+
   it('memory add/rebuild/ls/search/cat/rm round-trip against an isolated throwaway SurrealDB db', async () => {
     const db = await createTestDb()
     dbs.push(db)
@@ -407,8 +490,17 @@ describe('orc CLI', () => {
 
     await run('memory', 'rm', id) // rm's action already runs catchUp() itself
     lines.length = 0
-    await run('memory', 'cat', id)
-    expect(lines[0]).toContain(`no note '${id}'`)
+    await expect(run('memory', 'cat', id)).rejects.toThrow(`no note '${id}'`)
+
+    // Empty results print a sentinel, the way `tasks` does. Zero bytes reads as "no such note"
+    // when the honest answer is "the read model returned nothing" — the agent-facing tools
+    // already say exactly that, so the human must not get less.
+    lines.length = 0
+    await run('memory', 'ls')
+    expect(lines.join('\n').trim()).toBe('_no notes_')
+    lines.length = 0
+    await run('memory', 'search', 'definitely-not-present-anywhere')
+    expect(lines.join('\n').trim()).toBe('_no notes_')
 
     await hub.close()
     await host.shutdown()
