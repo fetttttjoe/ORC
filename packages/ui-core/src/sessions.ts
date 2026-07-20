@@ -1,6 +1,7 @@
 import { EVENT_KIND, MemoryAccessedPayload, foldLiveNotes, noteKey, type EventRecord, type Plan } from '@orc/contracts'
 import { fold, foldPlanNotes, listProjectIds, openStorage, planScope, taskUsage, type State, type Storage } from '@orc/kernel'
-import { buildGraph, diffGraphs, emptyPatch, type Graph, type GraphPatch } from './graph'
+import { NODE_PREFIX, buildGraph, diffGraphs, emptyPatch, type Graph, type GraphPatch } from './graph'
+import { planMermaid, todoWaves, type TodoWave } from './diagram'
 import { summarizeEvent, type LogRow } from './summarize'
 import { foldTranscript, type TranscriptItem } from './transcript'
 
@@ -22,7 +23,12 @@ export interface ProjectSessions {
   since(projectId: string, fromSeq: number): Promise<SessionUpdate | null>
   nodeDetail(projectId: string, nodeId: string): Promise<unknown | null>
   transcript(projectId: string, taskId: string, stepId?: string): Promise<TranscriptItem[]>
-  taskPlans(projectId: string, taskId: string): Promise<{ versions: Plan[]; approvedVersion: number | null } | null>
+  taskPlans(projectId: string, taskId: string): Promise<{
+    versions: Plan[]
+    approvedVersion: number | null
+    // rendered for the approved (else latest) version — conversation cards + request view
+    visual: { version: number; mermaid: string; waves: TodoWave[] } | null
+  } | null>
   // grounded decomposition: the plan-note graph living in the task's plan memory scope
   planNotes(projectId: string, taskId: string): Promise<ReturnType<typeof foldPlanNotes>>
   log(projectId: string, opts?: { taskId?: string; limit?: number }): Promise<LogRow[]>
@@ -104,7 +110,7 @@ export function createProjectSessions(opts: {
 
     async nodeDetail(projectId, nodeId) {
       const s = await sessionFor(projectId)
-      if (nodeId.startsWith('step:')) {
+      if (nodeId.startsWith(NODE_PREFIX.step)) {
         const [, taskId, stepId] = nodeId.split(':')
         if (!taskId || !stepId) return null
         const plans = s.state.plans.get(taskId)
@@ -113,13 +119,13 @@ export function createProjectSessions(opts: {
         if (!step) return null
         return { step, run: s.state.steps.get(taskId)?.get(stepId) ?? null }
       }
-      if (nodeId.startsWith('artifact:')) {
+      if (nodeId.startsWith(NODE_PREFIX.artifact)) {
         const [, taskId, ...pathParts] = nodeId.split(':')
         const path = pathParts.join(':') // artifact paths may contain ':'
         return (s.state.artifacts.get(taskId ?? '') ?? []).find(a => a.path === path) ?? null
       }
-      if (nodeId.startsWith('note:')) {
-        const key = nodeId.slice('note:'.length) // `${scope}\u0000${id}`
+      if (nodeId.startsWith(NODE_PREFIX.note)) {
+        const key = nodeId.slice(NODE_PREFIX.note.length) // `${scope}\u0000${id}`
         const live = foldLiveNotes(s.events)
         const payload = live.get(key)
         if (!payload) return null
@@ -153,7 +159,14 @@ export function createProjectSessions(opts: {
     async taskPlans(projectId, taskId) {
       const s = await sessionFor(projectId)
       const tp = s.state.plans.get(taskId)
-      return tp ? { versions: tp.versions, approvedVersion: tp.approvedVersion } : null
+      if (!tp) return null
+      const shown = (tp.approvedVersion != null ? tp.versions.find(v => v.version === tp.approvedVersion) : undefined) ?? tp.versions.at(-1)
+      const states = s.state.steps.get(taskId)
+      return {
+        versions: tp.versions,
+        approvedVersion: tp.approvedVersion,
+        visual: shown ? { version: shown.version, mermaid: planMermaid(shown.steps, states), waves: todoWaves(shown.steps, states) } : null,
+      }
     },
 
     async planNotes(projectId, taskId) {

@@ -1,0 +1,81 @@
+import { describe, expect, it } from 'bun:test'
+import { generateText, stepCountIs } from 'ai'
+import { MockLanguageModelV4 } from 'ai/test'
+import type { OrcActions } from './actions'
+import type { ProjectSessions } from './sessions'
+import { buildCopilotTools, copilotSystemPrompt } from './copilot'
+
+// minimal scripted model (doGenerate shape verified in plugins/executor-api-loop/src/test-model.ts)
+function scriptModel(turns: Array<{ text?: string; toolCalls?: Array<{ toolCallId: string; toolName: string; input: unknown }> }>) {
+  let i = 0
+  return new MockLanguageModelV4({
+    doGenerate: async () => {
+      const turn = turns[i++] ?? { text: '' }
+      return {
+        finishReason: { unified: (turn.toolCalls?.length ?? 0) > 0 ? 'tool-calls' as const : 'stop' as const, raw: undefined },
+        usage: {
+          inputTokens: { total: 10, noCache: undefined, cacheRead: undefined, cacheWrite: undefined },
+          outputTokens: { total: 5, text: undefined, reasoning: undefined },
+        },
+        content: [
+          ...(turn.text ? [{ type: 'text' as const, text: turn.text }] : []),
+          ...(turn.toolCalls ?? []).map(c => ({ type: 'tool-call' as const, toolCallId: c.toolCallId, toolName: c.toolName, input: JSON.stringify(c.input) })),
+        ],
+        warnings: [],
+      }
+    },
+  })
+}
+
+const stubSessions = {
+  snapshot: async () => ({
+    seq: 1,
+    graph: { nodes: [{ id: 't1', type: 'task', label: 'build it', detail: 'draft' }], links: [] },
+  }),
+  taskPlans: async () => null,
+  transcript: async () => [],
+  planNotes: async () => [],
+  log: async () => [],
+} as unknown as ProjectSessions
+
+describe('copilot tools', () => {
+  it('read tools ground the model; the loop runs tool → answer', async () => {
+    const tools = buildCopilotTools({ sessions: stubSessions, actions: null, projectId: 'p1' })
+    const result = await generateText({
+      model: scriptModel([
+        { toolCalls: [{ toolCallId: 'c1', toolName: 'project_status', input: {} }] },
+        { text: 'you have one draft task: build it' },
+      ]),
+      system: copilotSystemPrompt('test', false),
+      messages: [{ role: 'user', content: 'what is going on?' }],
+      tools,
+      stopWhen: stepCountIs(3),
+    })
+    expect(result.text).toContain('one draft task')
+    const toolResults = result.steps.flatMap(s => s.content.filter(c => c.type === 'tool-result'))
+    expect(toolResults).toHaveLength(1)
+    expect(JSON.stringify(toolResults[0])).toContain('build it')
+  })
+
+  it('mutating tools call OrcActions; absent entirely without actions', async () => {
+    const calls: unknown[] = []
+    const actions = {
+      newTask: async (input: unknown) => { calls.push(input); return { taskId: 't-new' } },
+    } as unknown as OrcActions
+    const tools = buildCopilotTools({ sessions: stubSessions, actions, projectId: 'p1' })
+    expect(Object.keys(tools)).toContain('new_request')
+    expect(Object.keys(buildCopilotTools({ sessions: stubSessions, actions: null, projectId: 'p1' }))).not.toContain('new_request')
+
+    const result = await generateText({
+      model: scriptModel([
+        { toolCalls: [{ toolCallId: 'c1', toolName: 'new_request', input: { title: 'demo request' } }] },
+        { text: 'created t-new' },
+      ]),
+      messages: [{ role: 'user', content: 'make a request called demo request' }],
+      tools,
+      stopWhen: stepCountIs(3),
+    })
+    expect(calls).toEqual([{ title: 'demo request' }])
+    expect(result.text).toContain('t-new')
+  })
+})
