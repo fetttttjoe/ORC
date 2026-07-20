@@ -14,3 +14,4 @@ review-findings.md
 .claude/skills/
 skills-lock.json
 .agents/
+test-results/
