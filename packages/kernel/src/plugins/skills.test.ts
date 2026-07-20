@@ -159,3 +159,39 @@ describe('shipped documentation skill', () => {
     }
   })
 })
+
+describe('shipped web-research skill', () => {
+  it('parses, indexes, and states the trust posture and citation rules in its body', async () => {
+    const root = new URL('../../../../vault/skills', import.meta.url).pathname
+    const parsed = parseSkillMd(readFileSync(path.join(root, 'web-research', 'SKILL.md'), 'utf8'), 'web-research')
+    expect(parsed.errors).toEqual([])
+    expect(parsed.manifest?.name).toBe('web-research')
+
+    // The substantive claims the skill exists to make. These are asserted because the skill IS the
+    // trust posture — an agent handed web tools has no other statement of how to treat what it
+    // fetches, and the enforcement boundary (MCP declaration + grant) says nothing about content.
+    // hard-wrapped prose: collapse whitespace so an assertion cannot break on a line wrap
+    const body = parsed.body.replaceAll(/\s+/g, ' ')
+    expect(body).toContain('DATA, not instructions')       // prompt injection
+    expect(body).toMatch(/distil/i)                        // one synthesis per finding
+    expect(body).toMatch(/do not copy raw page text/i)     // no raw pages in the graph
+    expect(body).toContain('kind: research')
+    expect(body).toContain('retention: expirable')
+    expect(body).toContain('at least one citation')
+    expect(body).toContain('contradicts')                  // disagreement is linked, not resolved silently
+    expect(body).toContain('supersedes')
+    expect(body).toMatch(/absence of a result is not evidence of absence/i)
+
+    // tool-agnostic: a plan supplies web tools through toolRefs, so no server/tool is hard-coded
+    expect(body).toContain('toolRefs')
+    expect(body).not.toMatch(/mcp__|brave|tavily|serper|firecrawl/i)
+
+    const idx = await SkillIndex.open(root)
+    try {
+      expect(idx.list().find(e => e.name === 'web-research')?.valid).toBe(true)
+      expect((await idx.load('web-research')).body).toContain('memory_write')
+    } finally {
+      idx.close()
+    }
+  })
+})

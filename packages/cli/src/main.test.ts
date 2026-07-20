@@ -62,7 +62,7 @@ describe('orc CLI', () => {
     await runInit(['--name', 'demo'], dir)
     const config = requireProject(loadConfig(dir))
     expect(config.projectName).toBe('demo')
-    for (const name of ['codebase-analysis', 'plan-authoring', 'documentation'])
+    for (const name of ['codebase-analysis', 'plan-authoring', 'documentation', 'web-research'])
       expect(existsSync(path.join(config.skillsDir, name, 'SKILL.md'))).toBe(true)
   })
 
@@ -77,7 +77,7 @@ describe('orc CLI', () => {
     await runInit(['--name', 'demo'], dir)
 
     expect(readFileSync(existing, 'utf8')).toBe('user-owned documentation skill')
-    for (const name of ['codebase-analysis', 'plan-authoring'])
+    for (const name of ['codebase-analysis', 'plan-authoring', 'web-research'])
       expect(existsSync(path.join(dir, 'custom', 'skills', name, 'SKILL.md'))).toBe(true)
   })
 
