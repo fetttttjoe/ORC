@@ -1,5 +1,5 @@
 import { z } from 'zod'
-import { MEMORY_LIMITS, NOTE_KINDS, LINK_KINDS, LinkKind, MemoryNoteInput, type MemoryAuthor, type MemoryStore, type ResolvedTool } from '@orc/contracts'
+import { MEMORY_LIMITS, MEMORY_SOURCE_LIMITS, NOTE_KINDS, LINK_KINDS, LinkKind, MemoryNoteInput, type MemoryAuthor, type MemoryStore, type ResolvedTool } from '@orc/contracts'
 import { applyBudget, fitMemoryNoteToBudget } from './budget'
 
 const ok = (output: unknown) => ({ output, isError: false })
@@ -72,7 +72,18 @@ export function memoryTools(store: MemoryStore, author: MemoryAuthor, tier: Memo
           title: { type: 'string', minLength: 1, maxLength: 200 },
           kind: {
             type: 'string', enum: [...NOTE_KINDS],
-            description: 'architecture_current = observed implementation; architecture_target = intended design (default fact)',
+            description: 'architecture_current = observed implementation; architecture_target = intended design; research = a distilled web finding, which REQUIRES sources (default fact)',
+          },
+          sources: {
+            type: 'array', maxItems: MEMORY_SOURCE_LIMITS.items,
+            description: 'citations backing this note; required for kind=research. Retrieval time is stamped by the system, not supplied.',
+            items: {
+              type: 'object', required: ['url'],
+              properties: {
+                url: { type: 'string', maxLength: MEMORY_SOURCE_LIMITS.urlChars, description: 'http(s) only, no embedded credentials' },
+                title: { type: 'string', maxLength: MEMORY_SOURCE_LIMITS.titleChars },
+              },
+            },
           },
           summary: { type: 'string', maxLength: 500 }, body: { type: 'string', maxLength: MEMORY_LIMITS.bodyChars },
           categories: { type: 'array', maxItems: MEMORY_LIMITS.labelItems, items: { type: 'string', maxLength: MEMORY_LIMITS.labelChars } },

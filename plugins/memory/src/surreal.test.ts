@@ -142,6 +142,29 @@ describe('SurrealMemory.applyEvent', () => {
     await m.close()
   })
 
+  // An agent must not be able to claim when it fetched a page, and a rebuild must reproduce the
+  // stamp exactly — so retrievedAt comes from the canonical event ts, not from wall-clock time.
+  it('stamps citation retrievedAt from the event timestamp, identically on redelivery', async () => {
+    const t = await createTestSurreal(); drops.push(t.drop)
+    const m = await SurrealMemory.open(t)
+    const cited = note({
+      id: 'finding', kind: 'research',
+      sources: [{ url: 'https://example.test/a', title: 'A' }, { url: 'https://example.test/b' }],
+    })
+    const e = written(1, cited)
+    await m.applyEvent(e)
+    const got = await m.get('finding', 'project')
+    expect(got?.sources).toEqual([
+      { url: 'https://example.test/a', title: 'A', retrievedAt: e.ts },
+      { url: 'https://example.test/b', title: undefined, retrievedAt: e.ts },
+    ])
+    // replaying the same history yields the same stamp — no wall-clock anywhere in the path
+    await m.clear()
+    await m.applyEvent(e)
+    expect((await m.get('finding', 'project'))?.sources?.[0]?.retrievedAt).toBe(e.ts)
+    await m.close()
+  })
+
   it('stores kind and sourceRevision; allNotes returns deterministic order', async () => {
     const t = await createTestSurreal(); drops.push(t.drop)
     const m = await SurrealMemory.open(t)

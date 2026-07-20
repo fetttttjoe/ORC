@@ -22,6 +22,7 @@ describe('fitMemoryNoteToBudget', () => {
   it('keeps the complete response within the irreducible floor even with oversized provenance', () => {
     const note: MemoryNote = {
       ...MemoryNoteInput.parse({ id: 'a'.repeat(128), title: 't'.repeat(200) }),
+      sources: [],
       scope: 's'.repeat(1_000), sourceRevision: 'r'.repeat(1_000),
       createdAt: 'c'.repeat(1_000), createdBy: 'c'.repeat(1_000),
       updatedAt: 'u'.repeat(1_000), updatedBy: 'u'.repeat(1_000), revision: 1,

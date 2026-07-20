@@ -9,7 +9,7 @@ const note = (over: Partial<MemoryNote> & { id: string }): MemoryNote => ({
   links: [{ id: 'session-model', kind: 'refines' }, { id: 'cookie-auth', kind: 'supersedes', confidence: 0.9 }],
   paths: ['packages/kernel/src/auth.ts'], rules: ['Refresh tokens are single-use.'],
   summary: 'Refresh tokens rotate on use.', body: '# Detail\nrotation logic',
-  rationale: '', uncertainty: [],
+  sources: [], rationale: '', uncertainty: [],
   createdAt: '2026-07-18T09:12:04Z', createdBy: 'api-loop·sonnet-5·research',
   updatedAt: '2026-07-18T11:30:22Z', updatedBy: 'api-loop·opus·review', revision: 3,
   ...over,
@@ -58,5 +58,19 @@ describe('renderNoteFile', () => {
     expect(md).not.toContain('## Uncertainty')
     expect(md).not.toContain('## Decomposes into')
     expect(md).not.toContain('## Depends on')
+  })
+
+  it('renders citations with their retrieval time, and no empty section when uncited', () => {
+    const cited = renderNoteFile(note({
+      id: 'finding', kind: 'research',
+      sources: [
+        { url: 'https://example.test/a', title: 'Paper A', retrievedAt: '2026-07-18T00:00:00Z' },
+        { url: 'https://example.test/b', retrievedAt: '2026-07-18T00:00:00Z' },
+      ],
+    }))
+    expect(cited).toContain('## Sources')
+    expect(cited).toContain('- [Paper A](https://example.test/a) — retrieved 2026-07-18T00:00:00Z')
+    expect(cited).toContain('- [https://example.test/b](https://example.test/b)') // falls back to the url
+    expect(renderNoteFile(note({ id: 'plain' }))).not.toContain('## Sources')
   })
 })

@@ -38,8 +38,35 @@ export const MemoryLink = z.object({
 })
 export type MemoryLink = z.infer<typeof MemoryLink>
 
-// knowledge lifecycle: current/target architecture stay distinguishable and queryable
-export const NOTE_KINDS = ['fact', 'decision', 'architecture_current', 'architecture_target', 'documentation', 'plan'] as const
+// Citations. A URL is checked structurally, not by regex: only http(s), and never with embedded
+// credentials — a `https://user:pw@host` citation would put a secret in the vault and in every
+// projection of it. Bounded so one note cannot carry an unbounded blob of provenance.
+export const MEMORY_SOURCE_LIMITS = { items: 20, urlChars: 2_048, titleChars: 300 } as const
+
+const HttpUrl = z.string().max(MEMORY_SOURCE_LIMITS.urlChars).refine(value => {
+  let url: URL
+  try { url = new URL(value) } catch { return false }
+  return (url.protocol === 'http:' || url.protocol === 'https:') && url.username === '' && url.password === ''
+}, { message: 'must be a credential-free http(s) URL' })
+
+// What a writer supplies. `retrievedAt` is absent by design — the projector stamps it from the
+// canonical memory_written event timestamp, so an agent cannot claim when it fetched something.
+// A supplied one is STRIPPED, not rejected: memory_write is an upsert, so an agent that reads a
+// research note and writes it back would otherwise fail on the retrievedAt it was just handed.
+// Forgery is defeated either way — the projector overwrites the field unconditionally.
+export const MemorySourceInput = z.object({
+  url: HttpUrl,
+  title: z.string().max(MEMORY_SOURCE_LIMITS.titleChars).optional(),
+})
+export type MemorySourceInput = z.infer<typeof MemorySourceInput>
+
+// What is stored and rendered: the authored citation plus the event-derived retrieval time.
+export const MemorySource = MemorySourceInput.extend({ retrievedAt: z.string() })
+export type MemorySource = z.infer<typeof MemorySource>
+
+// knowledge lifecycle: current/target architecture stay distinguishable and queryable.
+// `research` is a distilled web finding — it is the one kind that MUST carry a citation.
+export const NOTE_KINDS = ['fact', 'decision', 'architecture_current', 'architecture_target', 'documentation', 'plan', 'research'] as const
 export const NoteKind = z.enum(NOTE_KINDS)
 export type NoteKind = z.infer<typeof NoteKind>
 export const NOTE_KIND = NoteKind.enum
@@ -63,19 +90,27 @@ const MemoryNoteBase = z.object({
   rules: z.array(z.string().max(MEMORY_LIMITS.detailChars)).max(MEMORY_LIMITS.detailItems).default([]), // normative statements agents honor
   summary: z.string().max(500).default(''),
   body: z.string().max(MEMORY_LIMITS.bodyChars).default(''),
+  sources: z.array(MemorySourceInput).max(MEMORY_SOURCE_LIMITS.items).default([]), // provenance for a web finding
   rationale: z.string().max(MEMORY_LIMITS.rationaleChars).default(''),          // plan-note: why this subplan exists
   uncertainty: z.array(z.string().max(MEMORY_LIMITS.detailChars)).max(MEMORY_LIMITS.detailItems).default([]), // plan-note: coverage gaps / assumptions (RG7)
 })
 export const MemoryNoteInput = MemoryNoteBase.refine(
   n => !(n.scope === 'project' && n.id === 'index'),
   { message: "note id 'index' is reserved in the project scope (collides with vault/memory/index.md)" },
+).refine(
+  // the point of the kind: a research note without provenance is an unsourced claim
+  n => n.kind !== NOTE_KIND.research || n.sources.length > 0,
+  { message: "kind 'research' requires at least one source citation" },
 )
 export type MemoryNoteInput = z.infer<typeof MemoryNoteInput>
 // What callers hand the gateway: the schema's raw input, defaults not yet applied.
 export type MemoryNoteDraft = z.input<typeof MemoryNoteInput>
 
 // The stored/rendered note: input + provenance/lifecycle the projector derives from events.
+// `sources` is overridden with the stored shape — same citations, plus the retrieval time the
+// projector stamps from the event.
 export const MemoryNote = MemoryNoteBase.extend({
+  sources: z.array(MemorySource).max(MEMORY_SOURCE_LIMITS.items).default([]),
   createdAt: z.string(),
   createdBy: z.string(),   // composed identity: "executor·model·role" or "cli"
   updatedAt: z.string(),

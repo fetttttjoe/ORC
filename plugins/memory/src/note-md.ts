@@ -22,11 +22,17 @@ export function renderNoteFile(note: MemoryNote): string {
   })
   const decomposesInto = linksOf(note.links, LINK_KIND.decomposes_into)
   const dependsOn = linksOf(note.links, LINK_KIND.depends_on)
+  // citations render in the body, not frontmatter: they are for the human reading the note, and
+  // retrievedAt is what makes a stale finding visible as stale
+  const sources = note.sources
+    .map(s => `- [${s.title ?? s.url}](${s.url}) — retrieved ${s.retrievedAt}`)
+    .join('\n')
   const sections = [
     note.rationale ? `## Rationale\n\n${note.rationale}` : '',
     note.uncertainty.length ? `## Uncertainty\n\n${note.uncertainty.map(u => `- ${u}`).join('\n')}` : '',
     decomposesInto ? `## Decomposes into\n\n${decomposesInto}` : '',
     dependsOn ? `## Depends on\n\n${dependsOn}` : '',
+    sources ? `## Sources\n\n${sources}` : '',
   ].filter(Boolean)
   return `${head}\n${note.body}${sections.length ? `\n\n${sections.join('\n\n')}` : ''}\n`
 }

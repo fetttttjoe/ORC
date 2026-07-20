@@ -23,6 +23,7 @@ const noteTable = table(Tb.Note, {
   categories: t.array(t.string()), tags: t.array(t.string()),
   links: t.array(t.object({ id: t.string(), kind: kindType, confidence: t.option(t.number()) })),
   paths: t.array(t.string()), rules: t.array(t.string()), summary: t.string(), body: t.string(),
+  sources: t.array(t.object({ url: t.string(), title: t.option(t.string()), retrievedAt: t.string() })),
   rationale: t.string(), uncertainty: t.array(t.string()),
   createdAt: t.string(), createdBy: t.string(), updatedAt: t.string(), updatedBy: t.string(),
   revision: t.number(), readCount: t.number(), lastReadAt: t.option(t.string()),
@@ -91,6 +92,9 @@ export class SurrealMemory {
           // materialize the optional confidence key: t.option infers `number | undefined`, required
           links: note.links.map(l => ({ id: l.id, kind: l.kind, confidence: l.confidence })),
           paths: note.paths, rules: note.rules, summary: note.summary, body: note.body,
+          // retrievedAt comes from the canonical event timestamp, never from the writer — so it
+          // is identical on every replay and an agent cannot claim when it fetched a page.
+          sources: note.sources.map(s => ({ url: s.url, title: s.title, retrievedAt: e.ts })),
           rationale: note.rationale, uncertainty: note.uncertainty,
           createdAt: ex?.createdAt ?? e.ts, createdBy: ex?.createdBy ?? by,
           updatedAt: e.ts, updatedBy: by, revision: (ex?.revision ?? 0) + 1,
@@ -224,6 +228,8 @@ function toNote(r: Record<string, any>): unknown {
     id: r.noteId, scope: r.scope, title: r.title, kind: r.kind, sourceRevision: r.sourceRevision ?? null,
     categories: r.categories, tags: r.tags,
     links: r.links, paths: r.paths, rules: r.rules, summary: r.summary, body: r.body,
+    // ?? [] so a row written before citations existed still parses on rebuild
+    sources: r.sources ?? [],
     rationale: r.rationale, uncertainty: r.uncertainty,
     createdAt: r.createdAt, createdBy: r.createdBy, updatedAt: r.updatedAt, updatedBy: r.updatedBy,
     revision: r.revision,
