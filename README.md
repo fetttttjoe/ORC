@@ -14,9 +14,11 @@ agent-maintained knowledge graph with current/target architecture views. The
 memory graph carries typed, confidence-weighted links (`RELATE` edges) with a
 graph-distance ranker and a `memory_neighbors` traverse tool, so a recursive
 agent can pull a bounded context slice instead of re-holding everything.
-Startup is degraded-memory tolerant. Every task is auditable, resumable,
-project-isolated, and visible through separate execution, lineage, and
-knowledge graphs.
+Startup is degraded-memory tolerant. Findings pulled off the web land as
+cited `research` notes rather than pasted pages, and what memory actually gets
+read is event-sourced rather than guessed at. Every task is auditable,
+resumable, project-isolated, and visible through separate execution, lineage,
+and knowledge graphs.
 
 ## Stack
 
@@ -66,6 +68,43 @@ orc approve "$task_id"
 orc run "$task_id" --cwd .
 ```
 
+### Sourced web research
+
+No bundled web provider and no hard-coded tool names: research runs on whatever
+search/fetch MCP server the project declares and trusts, and the step opts in
+through ordinary `toolRefs`. `orc init` seeds the tool-agnostic `web-research`
+skill alongside the others.
+
+```bash
+orc mcp trust search             # after declaring a "search" server in .orc/config.json
+task_id=$(orc new "compare pgvector vs qdrant for our recall path" --spec "cite every claim")
+orc propose "$task_id" --file research-plan.json   # toolRefs live in the plan draft
+orc approve "$task_id" && orc run "$task_id" --cwd .
+orc memory ls --tag research     # hits column shows what later steps actually pulled back
+```
+
+```jsonc
+// research-plan.json — refs are validated at propose time, so a missing skill
+// or an untrusted server fails here rather than mid-run
+{
+  "strategyRef": "template:single", "costEstimateUSD": 0,
+  "steps": [{
+    "id": "research", "role": "scout", "title": "Compare pgvector and qdrant",
+    "instructions": "Answer the task spec. Cite every claim.",
+    "executorRef": "api-loop", "modelRef": "anthropic/claude-sonnet-5",
+    "skillRefs": ["web-research"],
+    "toolRefs": ["search/web_search", "search/fetch"],  // <server-id>/<tool-name>
+    "isolation": "local", "zone": [], "maxIterations": 12, "dependsOn": []
+  }]
+}
+```
+
+Fetched page text is untrusted **evidence, never instructions**. The raw
+response stays in the redacted audit trail; what reaches the knowledge graph is
+one distilled `research` note per finding — the one note kind that must carry a
+citation. Retrieval time is stamped by the system from the event, not supplied
+by the agent.
+
 ## Guarantees, stated precisely
 
 - **Project identity.** `orc init` writes `projectId`/`projectName` into the
@@ -100,6 +139,16 @@ orc run "$task_id" --cwd .
 - **Degraded memory.** SurrealDB down ⇒ one warning, explicit
   `memory unavailable` tool results, and everything else — history,
   execution, cancellation, vault trace — keeps working.
+- **Sourced knowledge.** A `research` note requires at least one bounded,
+  credential-free http(s) citation, and its `retrievedAt` is stamped by the
+  projector from the canonical event — writers cannot supply one, and replay
+  reproduces it exactly. Raw fetched text stays in the redacted audit trail;
+  only the distilled note reaches the knowledge graph.
+- **Observed use, not assumed use.** `memory_accessed` events make
+  `hits`/`lastAccessedAt` canonical, so they survive a read-model rebuild
+  instead of being silently zeroed by it. Nothing ranks or expires on the
+  counter — it is measurement, so a later decay policy can be tuned against
+  data rather than guessed.
 
 ## Vault views
 

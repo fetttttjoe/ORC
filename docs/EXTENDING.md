@@ -10,8 +10,8 @@ step is adding a seam to `packages/contracts`, not code to the kernel.
 |---|---|---|
 | Add a model provider | `ModelProvider<LM>` | new `plugins/provider-<x>/` + one line in `seedRegistries` (`packages/cli/src/runtime.ts`) — or zero-fork via a T2 extension calling `registerProvider` |
 | Add an agent executor | `AgentExecutor` | new `plugins/executor-<x>/` + `seedRegistries` — or `registerExecutor` from a T2 extension |
-| Add agent knowledge / procedure | SKILL.md | `vault/skills/<name>/SKILL.md` — no code, hot-indexed, force-loaded via `skillRefs` |
-| Add external tools | MCP server | declare in `.orc/config.json` `mcpServers`, arm with `orc mcp trust` — no code, steps opt in via `toolRefs` |
+| Add agent knowledge / procedure | SKILL.md | `vault/skills/<name>/SKILL.md` — no code, hot-indexed, force-loaded via `skillRefs`; add to `SHIPPED_SKILLS` (`packages/cli/src/main.ts`) only to seed it on `orc init`, which never overwrites project edits |
+| Add external tools | MCP server | declare in `.orc/config.json` `mcpServers`, arm with `orc mcp trust` — no code, steps opt in via `toolRefs`. Skills name *capabilities*, never server or tool names, so a procedure like `web-research` runs on whatever the project trusts |
 | Observe / integrate (metrics, notifications) | T2 extension | a `.ts` file default-exporting `{ id, activate(api) }`; `api.on('event_appended', …)`; declare in config, arm with `orc ext trust` (entry + literal local dependency closure + `bun.lock` fingerprint) |
 | Record new durable state | event kind | `EventKind` + `PAYLOAD_SCHEMAS` in `packages/contracts/src/events.ts`, then a `fold` case in `packages/kernel/src/projections.ts` (the exhaustive `switch` makes the compiler demand it); check `crashDedupKey` if the event is step-scoped |
 | Add a CLI verb | commander | `buildProgram` in `packages/cli/src/main.ts` |
@@ -48,7 +48,10 @@ step is adding a seam to `packages/contracts`, not code to the kernel.
    (`packages/kernel/src/plugins/host.ts`) so bad plans die before approval,
    not mid-run.
 6. **No scattered string literals** for matched values — always the const maps
-   (`TASK_STATUS`, `EVENT_KIND`, `ISOLATION_TIER`, `FAILURE_CLASS`, …).
+   (`TASK_STATUS`, `EVENT_KIND`, `ISOLATION_TIER`, `FAILURE_CLASS`, `NOTE_KIND`,
+   `MEMORY_ACCESS`, `RETENTION`, …). A new enum ships its map in the same
+   commit; a `z.enum` without one guarantees literals scattered at the call
+   sites within a release.
 7. **Deliberate ceilings carry a `ponytail:` comment** naming the ceiling and
    the upgrade path (existing examples: global advisory lock, refold-per-call,
    500 ms polling). A shortcut without its comment is a bug report waiting.

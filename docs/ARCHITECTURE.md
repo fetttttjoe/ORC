@@ -265,6 +265,37 @@ disagree. Reads are project-scoped queries that bypass the lock. Migration is se
 schema is behind. Missing migration tables map to 0 applied; connection/auth/permission errors
 remain their original failures.
 
+## Knowledge — raw evidence vs distilled note
+
+The event log and the knowledge graph answer different questions, and the split is deliberate.
+The log is *what happened*: every model call, every tool result, redacted once at the storage
+boundary and otherwise kept verbatim, because an audit that paraphrases is not an audit. The
+graph is *what we now believe*: notes an agent chose to write, small enough to pull back into a
+later context.
+
+Web research is where the split earns itself. A fetched page is untrusted evidence, never
+instructions — it enters through an ordinary MCP tool a plan opted into via `toolRefs`, and its
+raw text stays in the redacted `tool_result` event. What reaches memory is a distilled `research`
+note, which is the one note kind that **must** carry at least one citation: a finding without
+provenance is an unsourced claim. So a prompt-injection string embedded in a page survives in the
+audit trail (where it is evidence of what the server returned) and never reaches
+`vault/memory/**` (where it would read as project knowledge). The trust boundary itself is
+unchanged — MCP declaration plus `orc mcp trust` grant. The `web-research` skill is the posture,
+not the enforcement.
+
+Citations are value objects on the note, not nodes: a cited URL creates no note row and no graph
+edge, so the graph stays a graph of *our* knowledge. `retrievedAt` is stamped by the projector
+from the canonical `memory_written` event timestamp — a writer cannot supply one, and a replay
+reproduces it exactly.
+
+Access is a fact, not bookkeeping. `memory_accessed` is appended by the call sites that know a
+pull delivered something — `memory_read` on a hit, `memory_neighbors` against its seed, `orc
+memory cat` — and `hits`/`lastAccessedAt` project from those events like every other field, so
+they survive `rebuild()`. A miss, a failure, and `memory_search` record nothing: a summary list
+is not a read. The counter is measurement, not policy — nothing ranks or expires on it. It exists
+so that a future decay/sweep (`docs/IDEAS.md` entry 1) can be tuned against an observed hot/cold
+split instead of a guessed half-life.
+
 ## Execution flow — one step, durably
 
 ```mermaid

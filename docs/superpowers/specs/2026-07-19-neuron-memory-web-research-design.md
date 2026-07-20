@@ -1,11 +1,24 @@
 # Neuron-like memory lifecycle and sourced web research
 
-**Status:** Split 2026-07-20. The sourced-research half is being implemented via
-`docs/superpowers/plans/2026-07-20-sourced-research.md`. The memory-lifecycle
-half (activation, decay, depth-aware routing, sweep, archive, restore) is
-deferred to `docs/IDEAS.md` entry 1, which records three design corrections to
-apply before it is ever built. Sections below describing lifecycle behaviour
-are **not** implemented and are not a description of the system.
+**Status:** Split 2026-07-20. The sourced-research half is **implemented** —
+`docs/superpowers/plans/2026-07-20-sourced-research.md`, all five slices: the
+`research` note kind with required citations, event-stamped `retrievedAt`, the
+tool-agnostic `web-research` skill, a durable end-to-end test over a real MCP
+transport, and event-sourced access counts. The memory-lifecycle half
+(activation, decay, depth-aware routing, sweep, archive, restore) is deferred to
+`docs/IDEAS.md` entry 1, which records three design corrections to apply before
+it is ever built. Sections below describing lifecycle behaviour are **not**
+implemented and are not a description of the system.
+
+Two deliberate departures from the sections below, both narrower than designed:
+
+- **Activation is a plain counter, not a weight.** `memory_accessed` projects
+  `hits`/`lastAccessedAt`; nothing decays, ranks, or routes on them. Sorting on
+  a signal that is zero everywhere would be tuning against no data — the counter
+  exists to produce that data first.
+- **`retention` is captured but unread.** It is the author's judgment at write
+  time, and that is the only moment it exists; a field added alongside a future
+  sweep would silently default every note written in the interim to `durable`.
 **Scope:** Project-scoped sourced findings, event-derived note/edge activation, explicit depth-controlled sweeps, archive/restore, and a reusable lifecycle service
 **Compatibility:** Clean tool/application API break is allowed. Existing canonical memory history is retained and decoded as protected `durable` memory because preserving data is cheaper and safer than resetting it.
 

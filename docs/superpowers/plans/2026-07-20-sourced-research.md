@@ -6,6 +6,42 @@
 **Approach:** Vertical TDD slices; Postgres stays truth, SurrealDB stays the disposable read model
 **Expected shape:** citations on the note contract, one new note kind, one shipped skill, one durable end-to-end test, and event-sourced access counts replacing a projection-only counter. No new module, dependency, or SQL migration.
 
+## Status — 2026-07-20: COMPLETE
+
+All five slices implemented. Final verification:
+
+- `bun run typecheck` — 0 diagnostics
+- `bun test` — **483 pass / 2 skip / 0 fail** across 66 files (the 2 skips remain
+  the live-provider tests)
+- `bun audit` — no vulnerabilities
+- `git diff --check` — clean
+
+**Slice 1 shipped one field wider than planned.** `retention` was captured at
+write time even though the sweep that reads it is deferred (`docs/IDEAS.md`
+entry 2). It is the author's judgment at the moment of writing, and that moment
+does not come back: a field added alongside a future sweep would silently
+default every note written in the interim to `durable`, which is precisely wrong
+for research findings.
+
+**Slice 4 deviates from the plan on where the counter is displayed.** The plan
+said `orc status`; that command is task-scoped and lists no notes, so `hits`
+went to `orc memory ls`, which is where a human actually reads the graph. The
+hot/cold split the counter exists to expose is per-note, and `status` has no
+per-note row to hang it on.
+
+**Slice 4's neighbours rule is a judgment the plan left open.** `memory_neighbors`
+records **one** access against its seed, not one per returned neighbour: a
+traversal reads N notes internally to join titles, but the model was handed
+summaries it may never read. Counting those would inflate every neighbour's hits
+on a single traversal and make the measurement useless for the decay decision it
+exists to inform.
+
+**Where the projector diverges from "apply ⇒ refresh".** `drainFrom` now counts
+*vault* changes rather than applied events, because an access moves a counter no
+rendered file carries. Without that split, every `memory_read` would re-render
+`index.md` — every note body, every time — and reading the graph would cost more
+than writing it (`docs/IDEAS.md` entry 5).
+
 ## Plan: Store sourced findings as first-class cited knowledge, and measure what memory actually gets used
 
 ### 1. Citations and the `research` note kind
