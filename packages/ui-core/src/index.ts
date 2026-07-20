@@ -4,7 +4,7 @@ export {
 } from './graph'
 export { decompositionMermaid, planMermaid, todoWaves, type TodoWave } from './diagram'
 export {
-  createProjectSessions,
+  PROJECT_NAME_NOTE_ID, createProjectSessions,
   type ProjectSessions, type SessionSnapshot, type SessionUpdate, type Unsubscribe,
 } from './sessions'
 export { foldTranscript, type TranscriptItem } from './transcript'

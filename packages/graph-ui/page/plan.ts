@@ -25,6 +25,7 @@ export interface RequestCtx {
   t: TaskView | null
   open: OpenQuestion[]
   planNotes: PlanNoteView[]
+  decompositionMermaid: string | null
   knowledge: Array<{ id: string; label: string; detail: string }>
   planScopeName: string // `plan-<taskId>` — where decomposition notes live in the graph
   shownVersion: number | null
@@ -162,6 +163,11 @@ function decomposition(ctx: RequestCtx): HTMLElement | null {
 
   const section = Card([`decomposition (${ctx.planNotes.length} plan notes)`,
     Btn(ctx.focused ? 'unfocus graph' : 'focus graph', () => ctx.onFocus(!ctx.focused), 'muted')])
+  if (ctx.decompositionMermaid) {
+    const diagram = el('div', { class: 'diagram' })
+    void mermaidInto(diagram, ctx.decompositionMermaid)
+    section.append(diagram)
+  }
   for (const r of roots) section.append(noteRow(r))
   if (ctx.act) {
     const text = el('input', {})

@@ -1,7 +1,10 @@
 import { EVENT_KIND, MemoryAccessedPayload, foldLiveNotes, noteKey, type EventRecord, type Plan } from '@orc/contracts'
 import { fold, foldPlanNotes, listProjectIds, openStorage, planScope, taskUsage, type State, type Storage } from '@orc/kernel'
 import { NODE_PREFIX, buildGraph, diffGraphs, emptyPatch, type Graph, type GraphPatch } from './graph'
-import { planMermaid, todoWaves, type TodoWave } from './diagram'
+import { decompositionMermaid, planMermaid, todoWaves, type TodoWave } from './diagram'
+
+// the project's display name lives in a memory note — event-sourced, rebuild-safe, no schema
+export const PROJECT_NAME_NOTE_ID = 'ui-project-name'
 import { summarizeEvent, type LogRow } from './summarize'
 import { foldTranscript, type TranscriptItem } from './transcript'
 
@@ -29,8 +32,9 @@ export interface ProjectSessions {
     // rendered for the approved (else latest) version — conversation cards + request view
     visual: { version: number; mermaid: string; waves: TodoWave[] } | null
   } | null>
-  // grounded decomposition: the plan-note graph living in the task's plan memory scope
-  planNotes(projectId: string, taskId: string): Promise<ReturnType<typeof foldPlanNotes>>
+  // grounded decomposition: the plan-note graph living in the task's plan memory scope,
+  // plus its rendered mermaid (client bundles must not import the diagram deps' server chain)
+  planNotes(projectId: string, taskId: string): Promise<{ notes: ReturnType<typeof foldPlanNotes>; mermaid: string | null }>
   log(projectId: string, opts?: { taskId?: string; limit?: number }): Promise<LogRow[]>
   close(): Promise<void>
 }
@@ -86,7 +90,18 @@ export function createProjectSessions(opts: {
   return {
     async projects() {
       const ids = await listProjectIds(opts.url)
-      return ids.map(id => ({ id, name: id === opts.cwdProject?.id ? opts.cwdProject.name : null }))
+      return Promise.all(ids.map(async id => {
+        // a rename note (in already-open sessions) wins over the cwd config name; unopened
+        // foreign projects show a short id until first opened
+        let name = id === opts.cwdProject?.id ? opts.cwdProject.name : null
+        const cached = sessions.get(id)
+        if (cached) {
+          const s = await cached.catch(() => null)
+          const note = s ? foldLiveNotes(s.events).get(noteKey('project', PROJECT_NAME_NOTE_ID)) : undefined
+          if (note) name = note.note.title
+        }
+        return { id, name }
+      }))
     },
 
     async snapshot(projectId) {
@@ -171,7 +186,8 @@ export function createProjectSessions(opts: {
 
     async planNotes(projectId, taskId) {
       const s = await sessionFor(projectId)
-      return foldPlanNotes(s.events, planScope(taskId))
+      const notes = foldPlanNotes(s.events, planScope(taskId))
+      return { notes, mermaid: notes.length > 0 ? decompositionMermaid(notes) : null }
     },
 
     async log(projectId, opts = {}) {

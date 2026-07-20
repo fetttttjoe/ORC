@@ -138,6 +138,30 @@ function renderSidebar(): void {
   })) : [Empty('no requests yet')]))
 }
 
+function renderChatManagement(): void {
+  if (!session.actions) return
+  const renameBtn = Btn('rename chat', () => openDialog('rename this project chat', [
+    { name: 'name', label: 'name', value: projects.find(p => p.id === sel.project)?.name ?? '' },
+  ], 'rename', async v => {
+    if (!v.name?.trim()) throw new Error('name is required')
+    await api.act('renameProject', { name: v.name.trim() })
+    toast('renamed', 'ok')
+    projects = await api.projects()
+    renderSidebar()
+  }), 'muted')
+  const newChatBtn = Btn('+ new chat', () => openDialog('new project chat', [
+    { name: 'name', label: 'name', placeholder: 'project name' },
+    { name: 'dir', label: 'directory', value: session.defaultCwd ?? '' },
+  ], 'create', async v => {
+    if (!v.name?.trim() || !v.dir?.trim()) throw new Error('name and directory are required')
+    const { projectId } = await api.act<{ projectId: string }>('newProject', { dir: v.dir.trim(), name: v.name.trim() })
+    toast('project chat created', 'ok')
+    projects = await api.projects()
+    navigate({ project: projectId, node: null, tab: 'detail' })
+  }), 'muted')
+  newRequestHost.append(el('div', { class: 'row-split' }, newChatBtn, renameBtn))
+}
+
 function renderNewRequest(): void {
   if (!session.actions) { newRequestHost.replaceChildren(); return }
   const b = Btn('+ new request', () => openDialog('new request', [
@@ -163,6 +187,7 @@ function renderNewRequest(): void {
   }))
   b.classList.add('primary')
   newRequestHost.replaceChildren(b)
+  renderChatManagement()
 }
 
 // ---- inspector (the old tab system, now an overlay in the dock) ----
@@ -203,9 +228,10 @@ async function renderInspector(): Promise<void> {
         taskId,
         plans,
         t: detail as TaskView | null,
+        decompositionMermaid: planNotes.mermaid,
         open: transcript.filter((i): i is Extract<typeof i, { kind: 'question' }> => i.kind === 'question' && i.answer === null)
           .map((i): OpenQuestion => ({ question: i.question, stepId: i.stepId })),
-        planNotes,
+        planNotes: planNotes.notes,
         knowledge: wrote,
         planScopeName: planScopeName(taskId),
         shownVersion: shownPlanVersion,

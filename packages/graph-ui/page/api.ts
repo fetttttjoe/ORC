@@ -28,6 +28,7 @@ export interface PlanNoteView {
   uncertainty: string[]
   links: Array<{ id: string; kind: string }>
 }
+export interface PlanNotesView { notes: PlanNoteView[]; mermaid: string | null }
 export interface StreamEnvelope { patch: GraphPatch | null; summary: LogRow | null }
 export type CopilotPart =
   | { type: 'text'; text: string }
@@ -115,7 +116,7 @@ export const api = {
   transcript: (project: string, task: string, step?: string) =>
     get<TranscriptItem[]>('transcript', { project, task, step }),
   plans: (project: string, task: string) => get<PlansView | null>('plans', { project, task }, { nullOn404: true }),
-  planNotes: (project: string, task: string) => get<PlanNoteView[]>('plan-notes', { project, task }),
+  planNotes: (project: string, task: string) => get<PlanNotesView>('plan-notes', { project, task }),
   log: (project: string, opts: { task?: string; limit?: number } = {}) =>
     get<LogRow[]>('log', { project, task: opts.task, limit: opts.limit }),
 

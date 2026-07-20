@@ -34,7 +34,7 @@ const stubSessions = {
   }),
   taskPlans: async () => null,
   transcript: async () => [],
-  planNotes: async () => [],
+  planNotes: async () => ({ notes: [], mermaid: null }),
   log: async () => [],
 } as unknown as ProjectSessions
 
