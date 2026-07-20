@@ -18,29 +18,52 @@ export const SECTIONS: { title: string; kinds: NoteKind[] }[] = [
   { title: 'Research', kinds: [NOTE_KIND.research] },
 ]
 
-function section(title: string, notes: MemoryNote[]): string {
-  if (notes.length === 0) return `## ${title}\n\n_none_`
-  const node = new Map(notes.map((n, i) => [`${n.scope}:${n.id}`, `n${i}`]))
-  const lines = ['```mermaid', 'graph TD']
+// ONE graph, sections as subgraphs — not one graph per section. Per-section graphs could only
+// draw an edge whose endpoints shared a section, so every cross-kind link rendered nowhere while
+// memory_neighbors traversed it perfectly. Observed on a real run: an agent summarised a
+// `research` note and linked `derived_from` to it, and that edge — the most informative one in a
+// sourced-research workflow, since it is what ties a conclusion to its evidence — was invisible
+// in the index. Node ids are assigned across the whole note set for the same reason: per-section
+// numbering restarted at n0 and collided once the subgraphs shared a graph.
+function subgraph(title: string, notes: MemoryNote[], node: Map<string, string>): string[] {
+  if (notes.length === 0) return []
+  const lines = [`  subgraph ${title.replaceAll(' ', '_')}["${title}"]`]
   for (const n of notes) {
     const name = node.get(`${n.scope}:${n.id}`)
-    lines.push(`  ${name}["${mermaidLabel(n.title)}"]`)
-    lines.push(`  click ${name} "${noteRelPath(n)}"`)
+    lines.push(`    ${name}["${mermaidLabel(n.title)}"]`)
   }
-  for (const n of notes)
+  lines.push('  end')
+  return lines
+}
+
+// pure and deterministic: same notes → byte-identical markdown
+export function renderMemoryIndex(notes: MemoryNote[]): string {
+  const placed = SECTIONS.map(s => ({ ...s, notes: notes.filter(n => s.kinds.includes(n.kind)) }))
+  const shown = placed.flatMap(s => s.notes)
+  const node = new Map(shown.map((n, i) => [`${n.scope}:${n.id}`, `n${i}`]))
+
+  const lines = ['```mermaid', 'graph TD']
+  for (const s of placed) lines.push(...subgraph(s.title, s.notes, node))
+  // click bindings live outside the subgraphs: mermaid accepts them either way, and keeping them
+  // together makes the node declarations readable.
+  for (const n of shown) lines.push(`  click ${node.get(`${n.scope}:${n.id}`)} "${noteRelPath(n)}"`)
+  // every edge whose BOTH endpoints are rendered, regardless of which sections they landed in
+  for (const n of shown)
     for (const l of n.links) {
       const to = node.get(`${n.scope}:${l.id}`)
       if (to) lines.push(`  ${node.get(`${n.scope}:${n.id}`)} -->|${l.kind}| ${to}`)
     }
   lines.push('```')
-  return `## ${title}\n\n${lines.join('\n')}`
-}
 
-// pure and deterministic: same notes → byte-identical markdown
-export function renderMemoryIndex(notes: MemoryNote[]): string {
-  const body = SECTIONS
-    .map(s => section(s.title, notes.filter(n => s.kinds.includes(n.kind))))
-    .join('\n\n')
+  // Empty sections stay named rather than silently dropped: "no current architecture is
+  // documented" is a fact about the project, and an absent heading reads as "not a category
+  // here" instead of "nothing here yet".
+  const empty = placed.filter(s => s.notes.length === 0).map(s => s.title)
+  const body = [
+    shown.length === 0 ? '_none_' : lines.join('\n'),
+    empty.length > 0 ? `_Not yet documented: ${empty.join(', ')}._` : '',
+  ].filter(Boolean).join('\n\n')
+
   return `${frontmatter({ type: 'memory-index' })}\n# Knowledge\n\n${body}\n`
 }
 

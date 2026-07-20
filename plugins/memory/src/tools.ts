@@ -80,7 +80,7 @@ export function memoryTools(store: MemoryStore, author: MemoryAuthor, tier: Memo
           },
           sources: {
             type: 'array', maxItems: MEMORY_SOURCE_LIMITS.items,
-            description: 'citations backing this note; required for kind=research. Retrieval time is stamped by the system, not supplied.',
+            description: 'citations backing this note — put every URL you are citing HERE, not in a references section inside body: only this field is queryable, and a body that claims sources while this is empty is a note that reads as sourced but cannot be checked. Required for kind=research, allowed on every kind. Retrieval time is stamped by the system, not supplied. To credit another NOTE rather than a URL, use links with kind=derived_from.',
             items: {
               type: 'object', required: ['url'],
               properties: {
