@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test'
 import { EVENT_KIND, TASK_STATUS, type EventRecord, type SplitResult, type TaskNode } from '@orc/contracts'
+import { Kernel } from '../kernel'
 import { openStorage, type EventLog } from '../storage'
 import { createTestDb, TEST_PROJECT_ID } from '../test-helpers'
 import { composeSplitResult, createSignalRouter } from './signal-router'
@@ -89,9 +90,81 @@ describe('createSignalRouter (integration, real EventLog)', () => {
     return false
   }
 
+  it('routes live feedback_provided with the committed event idempotency key', async () => {
+    const sends: Array<{ dest: string; message: string; topic: string; key: string }> = []
+    router = createSignalRouter({
+      log,
+      onChildApproved: async () => {},
+      send: async () => {},
+      sendFeedback: async (dest, message, topic, key) => { sends.push({ dest, message, topic, key }) },
+    })
+    await router.start()
+    await log.append({ taskId: 'f', stepId: null, runToken: null, kind: EVENT_KIND.task_created, payload: { task: taskNode('f', null) } })
+    await log.append({ taskId: 'f', stepId: null, runToken: null, kind: EVENT_KIND.task_status_changed, payload: { taskId: 'f', from: TASK_STATUS.draft, to: TASK_STATUS.running } })
+    const event = await log.append({
+      taskId: 'f', stepId: 'plan', runToken: 'step:f:plan:a1', kind: EVENT_KIND.feedback_provided,
+      payload: { topic: 'approval', text: 'approve', author: { source: 'cli' } },
+    })
+
+    expect(await waitFor(async () => sends.length === 1)).toBe(true)
+    expect(sends).toEqual([{
+      dest: 'step:f:plan:a1', message: 'approve', topic: 'feedback:approval', key: `feedback:${event.seq}`,
+    }])
+  })
+
+  it('startup replays feedback only while its task is running', async () => {
+    const sends: Array<{ dest: string; key: string }> = []
+    for (const [id, status] of [['running', TASK_STATUS.running], ['done', TASK_STATUS.done]] as const) {
+      await log.append({ taskId: id, stepId: null, runToken: null, kind: EVENT_KIND.task_created, payload: { task: taskNode(id, null) } })
+      await log.append({ taskId: id, stepId: null, runToken: null, kind: EVENT_KIND.task_status_changed, payload: { taskId: id, from: TASK_STATUS.draft, to: status } })
+      await log.append({
+        taskId: id, stepId: 'plan', runToken: `step:${id}:plan:a1`, kind: EVENT_KIND.feedback_provided,
+        payload: { topic: id, text: 'answer', author: { source: 'cli' } },
+      })
+    }
+    router = createSignalRouter({
+      log, onChildApproved: async () => {}, send: async () => {},
+      sendFeedback: async (dest, _message, _topic, key) => { sends.push({ dest, key }) },
+    })
+
+    await router.start()
+
+    const event = (await log.byTask('running')).find(e => e.kind === EVENT_KIND.feedback_provided)!
+    expect(sends).toEqual([{ dest: 'step:running:plan:a1', key: `feedback:${event.seq}` }])
+  })
+
+  it('startup heals a reply committed before its immediate send failed', async () => {
+    const kernel = new Kernel(log, undefined, undefined, async () => { throw new Error('simulated send failure') })
+    const task = await kernel.createTask({ title: 'feedback recovery' })
+    await log.append({
+      taskId: task.id, stepId: null, runToken: null, kind: EVENT_KIND.task_status_changed,
+      payload: { taskId: task.id, from: TASK_STATUS.draft, to: TASK_STATUS.running },
+    })
+    const runToken = `step:${task.id}:s1:a1`
+    await log.append({
+      taskId: task.id, stepId: 's1', runToken, kind: EVENT_KIND.feedback_requested,
+      payload: { question: 'continue?', topic: 'consent' },
+    })
+
+    await expect(kernel.replyFeedback(task.id, 'yes')).rejects.toThrow('simulated send failure')
+    const provided = (await log.byTask(task.id)).find(e => e.kind === EVENT_KIND.feedback_provided)!
+    expect(await kernel.openFeedback(task.id)).toBeNull()
+
+    const sends: Array<{ dest: string; message: string; topic: string; key: string }> = []
+    router = createSignalRouter({
+      log, onChildApproved: async () => {}, send: async () => {},
+      sendFeedback: async (dest, message, topic, key) => { sends.push({ dest, message, topic, key }) },
+    })
+    await router.start()
+
+    expect(sends).toEqual([{
+      dest: runToken, message: 'yes', topic: 'feedback:consent', key: `feedback:${provided.seq}`,
+    }])
+  })
+
   it('route 1: terminal child appends split_resolved once and sends on split:<id> with idempotencyKey', async () => {
     const sends: { dest: string; result: SplitResult; topic: string; key: string }[] = []
-    router = createSignalRouter({ log, onChildApproved: async () => {}, send: async (dest, result, topic, key) => { sends.push({ dest, result, topic, key }) } })
+    router = createSignalRouter({ log, onChildApproved: async () => {}, send: async (dest, result, topic, key) => { sends.push({ dest, result, topic, key }) }, sendFeedback: async () => {} })
     await router.start()
     await seedSplit()
     await terminal(TASK_STATUS.done)
@@ -105,7 +178,7 @@ describe('createSignalRouter (integration, real EventLog)', () => {
     const sends: SplitResult[] = []
     await seedSplit()
     await terminal(TASK_STATUS.blocked) // lands with NO router subscribed
-    router = createSignalRouter({ log, onChildApproved: async () => {}, send: async (_d, result) => { sends.push(result) } })
+    router = createSignalRouter({ log, onChildApproved: async () => {}, send: async (_d, result) => { sends.push(result) }, sendFeedback: async () => {} })
     await router.start() // sweep runs synchronously before returning
     expect(await resolvedCount()).toBe(1)
     expect(sends).toHaveLength(1)
@@ -118,14 +191,14 @@ describe('createSignalRouter (integration, real EventLog)', () => {
     // child approved while the router was down — the plan_approved event will never be redelivered
     await log.append({ taskId: 'c', stepId: null, runToken: null, kind: EVENT_KIND.plan_approved, payload: { taskId: 'c', version: 1, approvedAt: 'T', approvedBy: 'policy' } })
     await log.append({ taskId: 'c', stepId: null, runToken: null, kind: EVENT_KIND.task_status_changed, payload: { taskId: 'c', from: TASK_STATUS.draft, to: TASK_STATUS.approved } })
-    router = createSignalRouter({ log, onChildApproved: async id => { approved.push(id) }, send: async () => {} })
+    router = createSignalRouter({ log, onChildApproved: async id => { approved.push(id) }, send: async () => {}, sendFeedback: async () => {} })
     await router.start() // sweep runs (and awaits onChildApproved) synchronously before returning
     expect(approved).toEqual(['c'])
   })
 
   it('route 2: plan_approved for a pending-split child calls onChildApproved', async () => {
     const approved: string[] = []
-    router = createSignalRouter({ log, onChildApproved: async id => { approved.push(id) }, send: async () => {} })
+    router = createSignalRouter({ log, onChildApproved: async id => { approved.push(id) }, send: async () => {}, sendFeedback: async () => {} })
     await router.start()
     await seedSplit()
     await log.append({ taskId: 'c', stepId: null, runToken: null, kind: EVENT_KIND.plan_approved, payload: { taskId: 'c', version: 1, approvedAt: 'T', approvedBy: 'policy' } })
@@ -135,7 +208,7 @@ describe('createSignalRouter (integration, real EventLog)', () => {
 
   it('redelivery: a second terminal status does not double-append split_resolved', async () => {
     const sends: SplitResult[] = []
-    router = createSignalRouter({ log, onChildApproved: async () => {}, send: async (_d, result) => { sends.push(result) } })
+    router = createSignalRouter({ log, onChildApproved: async () => {}, send: async (_d, result) => { sends.push(result) }, sendFeedback: async () => {} })
     await router.start()
     await seedSplit()
     await terminal(TASK_STATUS.done)

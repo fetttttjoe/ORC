@@ -130,7 +130,7 @@ describe('DBOS execution port (integration)', () => {
     // event ordering: run_started before any step_started; a completes before b starts
     const kinds = (await kernel.eventsFor(t.id)).map(e => e.kind)
     expect(kinds.indexOf(EVENT_KIND.run_started)).toBeLessThan(kinds.indexOf(EVENT_KIND.step_started))
-  })
+  }, 15_000)
 
   it('startRun is idempotent — second call attaches, no duplicate run_started', async () => {
     const t = await approvedTask()

@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { ApprovalPolicy, type ResolvedTool } from '@orc/contracts'
 import type { Kernel } from '../kernel'
-import { instantiateFrozenPlan, planScope, PLAN_STEP_ROLE } from './strategies/grounded-plan'
+import { instantiateFrozenPlan, planGraphHash, planScope, PLAN_STEP_ROLE } from './strategies/grounded-plan'
 
 // grounded-plan child policy: the human already approved conversationally (the ask_human loop),
 // so the derived split auto-approves — this scaffold is not a second human gate.
@@ -16,7 +16,7 @@ const AUTO_APPROVE = ApprovalPolicy.parse({ default: 'auto' })
 // ponytail: one decomposition level per approve — a subplan that itself decomposes re-splits when
 // its child runs; recurse only when a real 3-level plan needs it.
 export function finalizePlanTool(opts: {
-  kernel: Pick<Kernel, 'proposeSplit' | 'listPlanNotes'>
+  kernel: Pick<Kernel, 'proposeSplit' | 'listPlanNotes' | 'approvedPlanHash'>
   config: { maxDepth: number }
   p: { taskId: string; stepId: string; runToken: string; role: string; executor: string; modelRef: string; maxIterations: number }
 }): ResolvedTool {
@@ -40,6 +40,12 @@ export function finalizePlanTool(opts: {
         const notes = await kernel.listPlanNotes(p.taskId)
         if (!notes.some(n => n.id === 'masterplan'))
           return { output: { error: `no 'masterplan' note in scope '${planScope(p.taskId)}' — author the plan-note graph first` }, isError: true }
+        const currentHash = planGraphHash(notes)
+        const approvedHash = await kernel.approvedPlanHash(p.taskId, p.runToken)
+        if (!approvedHash)
+          return { output: { error: 'finalize_plan requires human approval for this plan run' }, isError: true }
+        if (approvedHash !== currentHash)
+          return { output: { error: 'the plan-note graph changed after approval — ask the human to approve it again' }, isError: true }
         const plan = instantiateFrozenPlan('masterplan', notes)
         const master = notes.find(n => n.id === 'masterplan')!
         const r = await kernel.proposeSplit({

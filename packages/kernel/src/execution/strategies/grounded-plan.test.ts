@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'bun:test'
 import { EVENT_KIND, LINK_KIND, type EventRecord, type MemoryLink, type MemoryNote } from '@orc/contracts'
 import { foldPlanNotes, instantiateFrozenPlan, planScope } from './grounded-plan'
+import * as groundedPlan from './grounded-plan'
 
 const note = (over: Partial<MemoryNote> & { id: string }): MemoryNote => ({
   scope: 'plan-t', kind: 'plan', sourceRevision: null, title: over.id, categories: [], tags: [],
@@ -8,6 +9,24 @@ const note = (over: Partial<MemoryNote> & { id: string }): MemoryNote => ({
   createdAt: '', createdBy: '', updatedAt: '', updatedBy: '', revision: 1, ...over,
 })
 const link = (id: string, kind: MemoryLink['kind']): MemoryLink => ({ id, kind })
+
+describe('planGraphHash', () => {
+  it('is canonical across note order and changes with reviewed graph content/order', () => {
+    expect(typeof groundedPlan.planGraphHash).toBe('function')
+    const hash = (groundedPlan as typeof groundedPlan & { planGraphHash(notes: MemoryNote[]): string }).planGraphHash
+    const notes = [
+      note({ id: 'masterplan', links: [link('a', LINK_KIND.decomposes_into), link('b', LINK_KIND.decomposes_into)] }),
+      note({ id: 'a', body: 'A', uncertainty: ['verify A'] }),
+      note({ id: 'b', body: 'B' }),
+    ]
+    const original = hash(notes)
+    expect(original).toMatch(/^[a-f0-9]{64}$/)
+    expect(hash([...notes].reverse())).toBe(original)
+    expect(hash(notes.map(n => n.id === 'a' ? { ...n, body: 'changed' } : n))).not.toBe(original)
+    expect(hash(notes.map(n => n.id === 'masterplan' ? { ...n, links: [...n.links].reverse() } : n))).not.toBe(original)
+    expect(hash(notes.map(n => n.id === 'a' ? { ...n, uncertainty: ['different'] } : n))).not.toBe(original)
+  })
+})
 
 describe('instantiateFrozenPlan (pure, deterministic)', () => {
   it('translates decomposes_into children into steps and depends_on into dependsOn', () => {
@@ -54,12 +73,12 @@ describe('foldPlanNotes (log-fold, projection-independent)', () => {
   const written = (note: Record<string, unknown>): EventRecord => ({
     seq: ++seq, projectId: 'p', idempotencyKey: null, taskId: null, stepId: null, runToken: null,
     kind: EVENT_KIND.memory_written, payload: { note, author: { source: 'agent' } }, usage: null,
-    ts: `2026-01-01T00:00:0${seq}.000Z`,
+    ts: `2026-01-01T00:00:${String(seq).padStart(2, '0')}.000Z`,
   })
   const deleted = (id: string, scope: string): EventRecord => ({
     seq: ++seq, projectId: 'p', idempotencyKey: null, taskId: null, stepId: null, runToken: null,
     kind: EVENT_KIND.memory_deleted, payload: { id, scope, author: { source: 'cli' } }, usage: null,
-    ts: `2026-01-01T00:00:0${seq}.000Z`,
+    ts: `2026-01-01T00:00:${String(seq).padStart(2, '0')}.000Z`,
   })
 
   it('reconstructs the plan-note graph so instantiateFrozenPlan yields the approved draft', () => {

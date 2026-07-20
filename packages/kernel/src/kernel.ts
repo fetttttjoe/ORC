@@ -4,7 +4,7 @@ import {
   type Analyzer, type ApprovalPolicy, type EventKind, type EventRecord, type FeedbackRequestedPayload,
   type MemoryNote, type Plan, type PlanStep, type TaskNode, type TaskStatus,
 } from '@orc/contracts'
-import { foldPlanNotes, planScope, PLAN_STEP_ROLE } from './execution/strategies/grounded-plan'
+import { foldPlanNotes, planGraphHash, planScope, PLAN_STEP_ROLE } from './execution/strategies/grounded-plan'
 import { EventLog, type EventLogOps } from './storage'
 import { fold, subtreeUsage, type State } from './projections'
 import { KERNEL_ERROR_CODE, KernelError } from './errors'
@@ -25,7 +25,7 @@ export class Kernel {
     // (unit-testable with a fake) and the real port-backed sender is wired at CLI runtime
     // construction. Optional so most tests / read-only CLI contexts construct without it —
     // replyFeedback still appends feedback_provided and returns the topic when it's absent.
-    private readonly send?: (workflowId: string, message: string, topic: string) => Promise<void>,
+    private readonly send?: (workflowId: string, message: string, topic: string, idempotencyKey: string) => Promise<void>,
   ) {}
 
   // The grounded-plan bootstrap (M5b): an auto-approved [analyze, plan] template. The analyze
@@ -36,43 +36,30 @@ export class Kernel {
     const analyzer = this.analyzers?.get(input.analyzerRef)
     if (!analyzer)
       throw new KernelError(KERNEL_ERROR_CODE.invalid_transition, `unknown analyzer '${input.analyzerRef}' — register it or pass a valid analyzerRef`)
-    const task = await this.createTask({ title: input.title, spec: input.spec, type: 'grounded', budgetUSD: input.budgetUSD })
-    const analyzeStep = analyzer.analysisStep({ modelRef: input.modelRef, taskSpec: input.spec })
-    const planStep: PlanStep = {
-      id: 'plan', role: PLAN_STEP_ROLE, title: 'Author the executable plan',
-      // the concrete scope + root id, so the authoring agent (which never sees its taskId) and
-      // finalize_plan agree on where the plan-note graph lives.
-      instructions: `Author the plan-note graph in memory scope '${planScope(task.id)}' with root note id 'masterplan', iterate with the human via ask_human, then call finalize_plan. Follow the plan-authoring skill.`,
-      executorRef: 'api-loop', modelRef: input.modelRef, skillRefs: ['plan-authoring'], toolRefs: [],
-      isolation: ISOLATION_TIER.local, zone: [], maxIterations: 30, dependsOn: [analyzeStep.id],
-    }
-    const draft: PlanDraft = {
-      strategyRef: STRATEGY.groundedPlan, analyzerRef: input.analyzerRef, costEstimateUSD: null,
-      steps: [analyzeStep, planStep],
-    }
-    const plan = await this.proposePlan(task.id, draft)
-    await this.approvePlan(task.id, plan.version, { approvedBy: 'policy' })
-    return task
+    const spec = input.spec.trim() === '' ? input.title : input.spec
+    return this.log.transaction(async tx => {
+      const task = await this.createTaskIn(tx, { title: input.title, spec, type: 'grounded', budgetUSD: input.budgetUSD })
+      const analyzeStep = analyzer.analysisStep({ modelRef: input.modelRef, taskSpec: spec })
+      const planStep: PlanStep = {
+        id: 'plan', role: PLAN_STEP_ROLE, title: 'Author the executable plan',
+        // the concrete scope + root id, so the authoring agent (which never sees its taskId) and
+        // finalize_plan agree on where the plan-note graph lives.
+        instructions: `Author the plan-note graph in memory scope '${planScope(task.id)}' with root note id 'masterplan', iterate with the human via ask_human, then call finalize_plan. Follow the plan-authoring skill.`,
+        executorRef: 'api-loop', modelRef: input.modelRef, skillRefs: ['plan-authoring'], toolRefs: [],
+        isolation: ISOLATION_TIER.local, zone: [], maxIterations: 30, dependsOn: [analyzeStep.id],
+      }
+      const draft: PlanDraft = {
+        strategyRef: STRATEGY.groundedPlan, analyzerRef: input.analyzerRef, costEstimateUSD: null,
+        steps: [analyzeStep, planStep],
+      }
+      const plan = await this.appendPlanVersion(tx, task.id, draft, EVENT_KIND.plan_proposed, task.status)
+      await this.approvePlanIn(tx, task.id, plan.version, { approvedBy: 'policy' })
+      return task
+    })
   }
 
   async createTask(input: { title: string; spec?: string; type?: string; parentId?: string; budgetUSD?: number | null }): Promise<TaskNode> {
-    return this.log.transaction(async tx => {
-      const parent = input.parentId ? await this.requireTask(tx, input.parentId) : null
-      const task: TaskNode = {
-        id: randomUUID(),
-        parentId: parent?.id ?? null,
-        type: input.type ?? 'generic',
-        title: input.title,
-        spec: input.spec ?? '',
-        status: TASK_STATUS.draft,
-        zone: [],
-        budgetUSD: input.budgetUSD ?? parent?.budgetUSD ?? null,
-        depth: parent ? parent.depth + 1 : 0,
-        createdAt: new Date().toISOString(),
-      }
-      await this.append(tx, task.id, EVENT_KIND.task_created, { task })
-      return task
-    })
+    return this.log.transaction(tx => this.createTaskIn(tx, input))
   }
 
   async proposePlan(taskId: string, draft: PlanDraft): Promise<Plan> {
@@ -98,23 +85,7 @@ export class Kernel {
     version?: number,
     approval?: { approvedBy: 'human' | 'policy'; ruleIndex?: number },
   ): Promise<Plan> {
-    return this.log.transaction(async tx => {
-      const task = await this.requireTask(tx, taskId)
-      if (task.status !== TASK_STATUS.awaiting_approval)
-        throw new KernelError(KERNEL_ERROR_CODE.invalid_transition, `cannot approve while task is '${task.status}'`)
-      const latest = (await this.stateOf(tx)).plans.get(taskId)?.versions.at(-1)
-      if (!latest) throw new KernelError(KERNEL_ERROR_CODE.invalid_transition, 'no plan to approve')
-      const wanted = version ?? latest.version
-      if (wanted !== latest.version)
-        throw new KernelError(KERNEL_ERROR_CODE.version_conflict, `latest plan is v${latest.version}, not v${wanted}`)
-      await this.append(tx, taskId, EVENT_KIND.plan_approved, {
-        taskId, version: wanted, approvedAt: new Date().toISOString(),
-        approvedBy: approval?.approvedBy ?? 'human',
-        ...(approval?.ruleIndex !== undefined && { ruleIndex: approval.ruleIndex }),
-      })
-      await this.append(tx, taskId, EVENT_KIND.task_status_changed, { taskId, from: task.status, to: TASK_STATUS.approved })
-      return latest
-    })
+    return this.log.transaction(tx => this.approvePlanIn(tx, taskId, version, approval))
   }
 
   async proposeSplit(input: {
@@ -241,24 +212,49 @@ export class Kernel {
     return { topic, question, ...(noteId ? { noteId } : {}) }
   }
 
+  async approvedPlanHash(taskId: string, runToken: string): Promise<string | null> {
+    for (const event of [...(await this.log.byTask(taskId))].reverse()) {
+      if (event.kind !== EVENT_KIND.feedback_provided || event.runToken !== runToken) continue
+      const parsed = FeedbackProvidedPayload.safeParse(event.payload)
+      if (parsed.success && parsed.data.author.source === 'cli'
+        && parsed.data.text.trim().toLowerCase() === 'approve' && parsed.data.planHash)
+        return parsed.data.planHash
+    }
+    return null
+  }
+
   // D4 conversational gate, human side: answers the latest still-open feedback_requested and resumes
   // the step workflow parked on DBOS.recv(`feedback:<topic>`, 60) — that workflow's id is the event's
   // own envelope runToken, recorded by the port from inside the step (never reconstructed here).
   // Returns the resolved topic, or null if the task has no open question (the CLI reports either).
   async replyFeedback(taskId: string, text: string): Promise<string | null> {
     const open = await this.log.transaction(async tx => {
-      await this.requireTask(tx, taskId)
+      const task = await this.requireTask(tx, taskId)
       const requested = this.openRequest(await tx.byTask(taskId))
       if (!requested) return null
       const { topic } = requested.payload as FeedbackRequestedPayload
-      if (!requested.runToken)
-        throw new KernelError(KERNEL_ERROR_CODE.invalid_transition, `feedback_requested for topic '${topic}' has no runToken to resume`)
-      const payload = FeedbackProvidedPayload.parse({ topic, text, author: { source: 'cli' } })
-      await this.append(tx, taskId, EVENT_KIND.feedback_provided, payload)
-      return { topic, runToken: requested.runToken }
+      if (!requested.stepId || !requested.runToken)
+        throw new KernelError(KERNEL_ERROR_CODE.invalid_transition, `feedback_requested for topic '${topic}' has no step/run envelope to resume`)
+      const approvingPlan = task.type === 'grounded' && requested.stepId === 'plan'
+        && text.trim().toLowerCase() === 'approve'
+      const planHash = approvingPlan
+        ? planGraphHash(foldPlanNotes(
+          await tx.after(0, [EVENT_KIND.memory_written, EVENT_KIND.memory_deleted]),
+          planScope(taskId),
+        ))
+        : undefined
+      const payload = FeedbackProvidedPayload.parse({
+        topic, text, author: { source: 'cli' }, ...(planHash && { planHash }),
+      })
+      const provided = await tx.append({
+        taskId, stepId: requested.stepId, runToken: requested.runToken,
+        kind: EVENT_KIND.feedback_provided, payload,
+        idempotencyKey: `feedback:${requested.seq}:provided`,
+      })
+      return { topic, runToken: requested.runToken, seq: provided.seq }
     })
     if (!open) return null
-    await this.send?.(open.runToken, text, `feedback:${open.topic}`)
+    await this.send?.(open.runToken, text, `feedback:${open.topic}`, `feedback:${open.seq}`)
     return open.topic
   }
 
@@ -314,6 +310,44 @@ export class Kernel {
 
   private async stateOf(ops: EventLogOps): Promise<State> {
     return fold(await ops.all())
+  }
+
+  private async createTaskIn(
+    tx: EventLogOps,
+    input: { title: string; spec?: string; type?: string; parentId?: string; budgetUSD?: number | null },
+  ): Promise<TaskNode> {
+    const parent = input.parentId ? await this.requireTask(tx, input.parentId) : null
+    const task: TaskNode = {
+      id: randomUUID(), parentId: parent?.id ?? null, type: input.type ?? 'generic',
+      title: input.title, spec: input.spec ?? '', status: TASK_STATUS.draft, zone: [],
+      budgetUSD: input.budgetUSD ?? parent?.budgetUSD ?? null,
+      depth: parent ? parent.depth + 1 : 0, createdAt: new Date().toISOString(),
+    }
+    await this.append(tx, task.id, EVENT_KIND.task_created, { task })
+    return task
+  }
+
+  private async approvePlanIn(
+    tx: EventLogOps,
+    taskId: string,
+    version?: number,
+    approval?: { approvedBy: 'human' | 'policy'; ruleIndex?: number },
+  ): Promise<Plan> {
+    const task = await this.requireTask(tx, taskId)
+    if (task.status !== TASK_STATUS.awaiting_approval)
+      throw new KernelError(KERNEL_ERROR_CODE.invalid_transition, `cannot approve while task is '${task.status}'`)
+    const latest = (await this.stateOf(tx)).plans.get(taskId)?.versions.at(-1)
+    if (!latest) throw new KernelError(KERNEL_ERROR_CODE.invalid_transition, 'no plan to approve')
+    const wanted = version ?? latest.version
+    if (wanted !== latest.version)
+      throw new KernelError(KERNEL_ERROR_CODE.version_conflict, `latest plan is v${latest.version}, not v${wanted}`)
+    await this.append(tx, taskId, EVENT_KIND.plan_approved, {
+      taskId, version: wanted, approvedAt: new Date().toISOString(),
+      approvedBy: approval?.approvedBy ?? 'human',
+      ...(approval?.ruleIndex !== undefined && { ruleIndex: approval.ruleIndex }),
+    })
+    await this.append(tx, taskId, EVENT_KIND.task_status_changed, { taskId, from: task.status, to: TASK_STATUS.approved })
+    return latest
   }
 
   private async appendPlanVersion(

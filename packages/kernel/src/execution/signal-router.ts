@@ -1,5 +1,5 @@
 import {
-  EVENT_KIND, EventKind, MemoryWrittenPayload, PAYLOAD_SCHEMAS, RUN_OUTCOME, SplitResult, TASK_STATUS,
+  EVENT_KIND, EventKind, FeedbackProvidedPayload, MemoryWrittenPayload, PAYLOAD_SCHEMAS, RUN_OUTCOME, SplitResult, TASK_STATUS,
   type EventRecord, type TaskStatus,
 } from '@orc/contracts'
 import { EventLog } from '../storage'
@@ -20,7 +20,7 @@ const ROUTER_RELEVANT: Record<EventKind, boolean> = {
   skill_loaded: false, agent_call: false, tool_call: false, tool_result: false,
   signal_received: false, operation_started: false, operation_completed: false,
   operation_failed: false, artifact_produced: false, memory_deleted: false,
-  feedback_requested: false, feedback_provided: false, plan_annotated: false, analysis_completed: false,
+  feedback_requested: false, feedback_provided: true, plan_annotated: false, analysis_completed: false,
 }
 const ROUTER_KINDS = EventKind.options.filter(k => ROUTER_RELEVANT[k])
 
@@ -76,11 +76,17 @@ export function createSignalRouter(opts: {
   log: EventLog
   onChildApproved: (childTaskId: string) => Promise<void>
   send: (destinationId: string, result: SplitResult, topic: string, idempotencyKey: string) => Promise<void>
+  sendFeedback: (destinationId: string, message: string, topic: string, idempotencyKey: string) => Promise<void>
 }): { start(): Promise<void>; close(): Promise<void> } {
   let unsub: (() => Promise<void>) | null = null
 
   const sendResult = async (split: SplitState, result: SplitResult): Promise<void> => {
     await opts.send(split.runToken, result, `split:${split.splitId}`, split.splitId)
+  }
+  const sendFeedback = async (event: EventRecord): Promise<void> => {
+    const payload = FeedbackProvidedPayload.parse(event.payload)
+    if (!event.runToken) throw new Error(`feedback_provided seq ${event.seq} has no runToken`)
+    await opts.sendFeedback(event.runToken, payload.text, `feedback:${payload.topic}`, `feedback:${event.seq}`)
   }
 
   // append split_resolved + send, CONTAINED: a poisoned event must not kill the pump mid-batch.
@@ -114,6 +120,12 @@ export function createSignalRouter(opts: {
       // was down (never redelivered, since the pump pre-advances its cursor).
       const seed = await opts.log.after(0, ROUTER_KINDS)
       const state = fold(seed)
+      for (const event of seed) {
+        if (event.kind !== EVENT_KIND.feedback_provided || !event.taskId
+          || state.tasks.get(event.taskId)?.status !== TASK_STATUS.running) continue
+        await sendFeedback(event).catch(err =>
+          console.warn(`signal router: re-send feedback seq ${event.seq}: ${err instanceof Error ? err.message : String(err)}`))
+      }
       for (const split of state.splits.values()) {
         if (split.resolved) {
           // a crash between append and send leaves the parent waiting on a committed
@@ -138,6 +150,11 @@ export function createSignalRouter(opts: {
       // ponytail: each routed event refetches+refolds router-kind history (O(tasks) per event) —
       // keep an incremental in-memory fold if task volume ever makes this hurt
       unsub = await opts.log.subscribe({ fromSeq: seed.at(-1)?.seq ?? 0 }, async e => {
+        if (e.kind === EVENT_KIND.feedback_provided) {
+          await sendFeedback(e).catch(err =>
+            console.warn(`signal router: send feedback seq ${e.seq}: ${err instanceof Error ? err.message : String(err)}`))
+          return
+        }
         // route 2: an approved child with a pending split gets its run started (policy OR human)
         if (e.kind === EVENT_KIND.plan_approved && e.taskId) {
           if (pendingSplitForChild(fold(await opts.log.after(0, ROUTER_KINDS)), e.taskId))

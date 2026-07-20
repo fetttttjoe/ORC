@@ -101,7 +101,18 @@ export function requireProject(config: OrcConfig): ProjectConfig {
   return { ...config, projectId, projectName, systemDatabaseUrl: deriveSystemUrl(config.databaseUrl, projectId) }
 }
 
-export function loadConfig(dir: string = process.cwd()): OrcConfig {
+function findProjectDir(start: string): string {
+  let current = path.resolve(start)
+  while (true) {
+    if (existsSync(path.join(current, '.orc', 'config.json'))) return current
+    const parent = path.dirname(current)
+    if (parent === current) return path.resolve(start)
+    current = parent
+  }
+}
+
+export function loadConfig(explicitDir?: string): OrcConfig {
+  const dir = explicitDir ?? findProjectDir(process.cwd())
   const file = path.join(dir, '.orc', 'config.json')
   let fromFile: Record<string, unknown> = {}
   if (existsSync(file)) {

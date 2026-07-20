@@ -24,20 +24,25 @@ export async function migrateDatabase(url: string): Promise<void> {
   }
 }
 
+function isMissingMigrationTable(error: unknown): boolean {
+  if (!error || typeof error !== 'object') return false
+  const value = error as { code?: unknown; cause?: unknown; errors?: unknown[] }
+  if (value.code === '42P01' || value.code === '3F000') return true
+  return isMissingMigrationTable(value.cause) || (value.errors ?? []).some(isMissingMigrationTable)
+}
+
 // reads drizzle's bookkeeping table; fails loudly when the database is behind
 export async function assertMigrated(db: NodePgDatabase): Promise<void> {
   const expected = journalEntryCount()
-  const applied = await db
-    .execute(sql`select count(*)::int as n from drizzle.__drizzle_migrations`)
-    .then(r => {
-      const first = r.rows[0]
-      return first && typeof first.n === 'number' ? first.n : 0
-    })
-    // ponytail: any query error reads as "nothing applied" — deliberately covers both a fresh
-    // DB's missing table (42P01) AND its missing `drizzle` schema (3F000), so the "run migrate"
-    // message stays correct on first run. Distinguish a genuine transient/permission error here
-    // only if one ever actually misleads (near-unreachable: the pool just connected to run this).
-    .catch(() => 0)
+  let applied: number
+  try {
+    const result = await db.execute(sql`select count(*)::int as n from drizzle.__drizzle_migrations`)
+    const first = result.rows[0]
+    applied = first && typeof first.n === 'number' ? first.n : 0
+  } catch (error) {
+    if (!isMissingMigrationTable(error)) throw error
+    applied = 0
+  }
   if (applied < expected)
     throw new Error(
       `database schema is behind (${applied}/${expected} migrations applied) — run 'orc db migrate'`,

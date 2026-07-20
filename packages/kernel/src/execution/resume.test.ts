@@ -11,6 +11,15 @@ import { fold } from '../projections'
 import { createTestDb, TEST_PROJECT_ID } from '../test-helpers'
 
 const FIXTURE = fileURLToPath(new URL('./resume-fixture.ts', import.meta.url))
+const PARALLEL_FIXTURE = fileURLToPath(new URL('./resume-parallel-fixture.ts', import.meta.url))
+
+const waitForFile = async (file: string, timeoutMs: number, what: string): Promise<void> => {
+  const deadline = Date.now() + timeoutMs
+  while (!existsSync(file)) {
+    if (Date.now() > deadline) throw new Error(what)
+    await new Promise(r => setTimeout(r, 100))
+  }
+}
 
 describe('kill -9 resume (spec §10/§11 — the crown jewel)', () => {
   let drop: (() => Promise<void>) | null = null
@@ -70,4 +79,52 @@ describe('kill -9 resume (spec §10/§11 — the crown jewel)', () => {
     await reopened.close()
     await log.close()
   }, 120_000)
+
+  // The single-step case above cannot catch scheduling-order bugs: one child launch means one
+  // function-ID slot, so positional binding is trivially correct. This one runs two independent
+  // steps that settle in the REVERSE of plan order, each gating a dependent launched from inside
+  // the loop — the only shape where replay order can diverge from first-run order.
+  it('two independent steps settling out of order resume with each result bound to its own step', async () => {
+    const db = await createTestDb()
+    drop = db.drop
+    const storage = await openStorage(db.url, { projectId: TEST_PROJECT_ID })
+    const log = storage.events
+    const kernel = new Kernel(log)
+    const t = await kernel.createTask({ title: 'resume me in parallel', spec: 'survive kill -9 with a wide plan' })
+    await kernel.proposePlan(t.id, draftFixture([
+      stepFixture({ id: 'a', title: 'a (slow)' }),
+      stepFixture({ id: 'b', title: 'b (fast)' }),
+      stepFixture({ id: 'c', title: 'c', dependsOn: ['a'] }),
+      stepFixture({ id: 'd', title: 'd', dependsOn: ['b'] }),
+    ]))
+    await kernel.approvePlan(t.id)
+    const markerDir = mkdtempSync(path.join(tmpdir(), 'orc-resume-parallel-'))
+
+    // First run: kill only once BOTH dependents are in flight, so the recovery has two
+    // recorded parents and two interrupted children — the state the ordering bug corrupts.
+    const first = Bun.spawn(['bun', PARALLEL_FIXTURE, db.url, t.id, markerDir], { stdout: 'pipe', stderr: 'pipe' })
+    await waitForFile(path.join(markerDir, 'c-started'), 60_000, 'fixture never launched step c')
+    await waitForFile(path.join(markerDir, 'd-started'), 60_000, 'fixture never launched step d')
+    first.kill(9)
+    await first.exited
+
+    // Bounded: a scheduler that mis-binds handles spins on an already-resolved promise and
+    // never appends its finish event, so this must fail as a timeout, not hang the suite.
+    const second = Bun.spawn(['bun', PARALLEL_FIXTURE, db.url, t.id, markerDir], { stdout: 'pipe', stderr: 'pipe' })
+    const code = await Promise.race([
+      second.exited,
+      new Promise<null>(r => setTimeout(() => r(null), 90_000)),
+    ])
+    if (code === null) {
+      second.kill(9)
+      throw new Error('resumed run never finished — the scheduling loop hung instead of draining')
+    }
+    expect(code).toBe(0)
+
+    expect((await kernel.getTask(t.id))?.status).toBe('done')
+    const steps = (await kernel.state()).steps.get(t.id)
+    // each id carries its OWN completion, not a sibling's — the positional-binding assertion
+    for (const id of ['a', 'b', 'c', 'd']) expect(steps?.get(id)?.status).toBe('completed')
+    await log.close()
+  }, 180_000)
 })
