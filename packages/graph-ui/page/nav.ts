@@ -1,10 +1,10 @@
 // The ONE navigation model: selection lives in the URL hash (#p=…&n=…&tab=…), navigate()
 // merges a partial change, and onChange is the only place selection gets rendered from.
 // Every link everywhere calls navigate — deep links, refresh, and back/forward come free.
-export type Tab = 'detail' | 'chat' | 'plan' | 'log'
+export type Tab = 'request' | 'detail' | 'chat' | 'log'
 export interface Selection { project: string; node: string | null; tab: Tab }
 
-const TABS: readonly Tab[] = ['detail', 'chat', 'plan', 'log']
+const TABS: readonly Tab[] = ['request', 'detail', 'chat', 'log']
 
 export function current(): Selection {
   const h = new URLSearchParams(location.hash.slice(1))

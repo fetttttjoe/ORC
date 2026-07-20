@@ -144,6 +144,50 @@ body {
 .tool-row[open] summary::before { content: '▾' }
 .tool-row .tool-body { padding: 0 10px 10px; display: flex; flex-direction: column; gap: 6px }
 
+/* buttons, toasts, dialogs */
+.btn {
+  font: var(--font); font-weight: 600; padding: 6px 14px; cursor: pointer;
+  border-radius: var(--radius-sm); border: 1px solid var(--border);
+  background: var(--surface-3); color: var(--text);
+}
+.btn.accent { background: color-mix(in srgb, var(--accent) 18%, var(--surface-2)); border-color: color-mix(in srgb, var(--accent) 45%, var(--border)) }
+.btn.warn   { background: color-mix(in srgb, var(--warn) 16%, var(--surface-2));   border-color: color-mix(in srgb, var(--warn) 45%, var(--border)) }
+.btn.danger { background: color-mix(in srgb, var(--danger) 14%, var(--surface-2)); border-color: color-mix(in srgb, var(--danger) 45%, var(--border)) }
+.btn.ok     { background: color-mix(in srgb, var(--ok) 14%, var(--surface-2));     border-color: color-mix(in srgb, var(--ok) 45%, var(--border)) }
+.btn.muted  { color: var(--muted) }
+.btn:hover:not([disabled]) { filter: brightness(1.15) }
+.btn[disabled] { opacity: .5; cursor: wait }
+.btn.primary { width: 100%; padding: 8px }
+
+.toasts { position: fixed; right: 14px; bottom: 14px; display: flex; flex-direction: column; gap: 8px; z-index: 10 }
+.toast {
+  background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius);
+  padding: 10px 14px; max-width: 360px; box-shadow: 0 4px 24px #0008;
+}
+.toast.danger { border-color: var(--danger) }
+.toast.ok { border-color: var(--ok) }
+
+.dlg {
+  background: var(--surface); color: var(--text); border: 1px solid var(--border);
+  border-radius: var(--radius); padding: 18px; min-width: 420px; font: var(--font);
+}
+.dlg::backdrop { background: #000a }
+.dlg form { display: flex; flex-direction: column; gap: 10px }
+.field { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--muted) }
+.field input, .field textarea, .field select {
+  font: var(--font); color: var(--text); background: var(--bg);
+  border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 7px 9px;
+}
+.field textarea { min-height: 84px; resize: vertical }
+.field input:focus, .field textarea:focus, .field select:focus { outline: 1px solid var(--accent) }
+.dlg-buttons { display: flex; justify-content: flex-end; gap: 8px; margin-top: 4px }
+
+/* decomposition tree + knowledge + focus */
+.tree-node { border-left: 2px solid var(--border); margin-left: 6px; padding-left: 10px }
+.reply-row { display: flex; gap: 6px; margin-top: 6px }
+.reply-row input { flex: 1; font: var(--font); color: var(--text); background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 6px 9px }
+.check-row { display: flex; align-items: center; gap: 6px }
+
 /* road (plan tab) */
 .road { display: flex; flex-direction: column; gap: 10px }
 .rail { display: flex; align-items: center; gap: 6px; padding: 2px 2px 6px }

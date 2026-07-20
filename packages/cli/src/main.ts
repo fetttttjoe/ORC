@@ -231,9 +231,7 @@ export function buildProgram(
     .action(async (taskId: string, text: string, opts: { scope: string[] }) => {
       // annotate-and-resume sugar over `plan-note … && reply`: queue the same change onto each scoped
       // note, then wake the parked plan step so it reads them (read_annotations) and revises in place.
-      await needPort() // resuming the gate needs DBOS launched here, exactly like reply
-      for (const noteId of opts.scope) await kernel.annotatePlan(taskId, { targetNote: noteId, refs: [], text })
-      const topic = await kernel.replyFeedback(taskId, text)
+      const { topic } = await actions().revise(taskId, text, opts.scope)
       console.log(topic
         ? `revised ${opts.scope.join(', ')} — answered feedback:${topic}`
         : `annotated ${opts.scope.join(', ')} — no open feedback to resume (the agent reads them on its next revise)`)

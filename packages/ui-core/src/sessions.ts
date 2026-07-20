@@ -1,5 +1,5 @@
 import { EVENT_KIND, MemoryAccessedPayload, foldLiveNotes, noteKey, type EventRecord, type Plan } from '@orc/contracts'
-import { fold, listProjectIds, openStorage, taskUsage, type State, type Storage } from '@orc/kernel'
+import { fold, foldPlanNotes, listProjectIds, openStorage, planScope, taskUsage, type State, type Storage } from '@orc/kernel'
 import { buildGraph, diffGraphs, emptyPatch, type Graph, type GraphPatch } from './graph'
 import { summarizeEvent, type LogRow } from './summarize'
 import { foldTranscript, type TranscriptItem } from './transcript'
@@ -23,6 +23,8 @@ export interface ProjectSessions {
   nodeDetail(projectId: string, nodeId: string): Promise<unknown | null>
   transcript(projectId: string, taskId: string, stepId?: string): Promise<TranscriptItem[]>
   taskPlans(projectId: string, taskId: string): Promise<{ versions: Plan[]; approvedVersion: number | null } | null>
+  // grounded decomposition: the plan-note graph living in the task's plan memory scope
+  planNotes(projectId: string, taskId: string): Promise<ReturnType<typeof foldPlanNotes>>
   log(projectId: string, opts?: { taskId?: string; limit?: number }): Promise<LogRow[]>
   close(): Promise<void>
 }
@@ -152,6 +154,11 @@ export function createProjectSessions(opts: {
       const s = await sessionFor(projectId)
       const tp = s.state.plans.get(taskId)
       return tp ? { versions: tp.versions, approvedVersion: tp.approvedVersion } : null
+    },
+
+    async planNotes(projectId, taskId) {
+      const s = await sessionFor(projectId)
+      return foldPlanNotes(s.events, planScope(taskId))
     },
 
     async log(projectId, opts = {}) {

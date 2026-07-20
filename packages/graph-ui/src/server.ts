@@ -2,21 +2,48 @@ import { z } from 'zod'
 import { createProjectSessions, emptyPatch, type OrcActions, type ProjectSessions } from '@orc/ui-core'
 import index from '../page/index.html'
 
-// Every mutating route's body, by action name. Parsed before dispatch — the web boundary is a
-// trust boundary even on localhost.
-const ACTION_INPUT = {
-  newTask: z.object({
-    title: z.string().min(1), spec: z.string().optional(), parentId: z.string().optional(),
-    grounded: z.object({ modelRef: z.string().min(1), cwd: z.string().min(1), analyzerRef: z.string().optional() }).optional(),
-  }),
-  propose: z.object({ taskId: z.string().min(1), modelRef: z.string().min(1), skillRefs: z.array(z.string()).optional() }),
-  approve: z.object({ taskId: z.string().min(1), version: z.number().int().positive().optional() }),
-  run: z.object({ taskId: z.string().min(1), cwd: z.string().min(1) }),
-  reply: z.object({ taskId: z.string().min(1), text: z.string().min(1) }),
-  retry: z.object({ taskId: z.string().min(1) }),
-  cancel: z.object({ taskId: z.string().min(1) }),
-} as const
-type ActionName = keyof typeof ACTION_INPUT
+// Every mutating route: its body schema and its dispatch, tied together in one closure so the
+// parsed type flows into the handler with no casts — zod IS the validation and the typing.
+// The web boundary is a trust boundary even on localhost.
+type ActionHandler = (a: OrcActions, body: unknown) => Promise<Response>
+
+const route = <S extends z.ZodType>(schema: S, run: (a: OrcActions, input: z.output<S>) => Promise<unknown>): ActionHandler =>
+  async (a, body) => {
+    const parsed = schema.safeParse(body)
+    if (!parsed.success) return Response.json({ error: parsed.error.message }, { status: 400 })
+    return Response.json(await run(a, parsed.data))
+  }
+
+const id = z.string().min(1)
+const ACTION_ROUTES: Record<string, ActionHandler> = {
+  newTask: route(
+    z.object({
+      title: z.string().min(1), spec: z.string().optional(), parentId: id.optional(),
+      grounded: z.object({ modelRef: id, cwd: id, analyzerRef: id.optional() }).optional(),
+    }),
+    (a, d) => a.newTask(d),
+  ),
+  propose: route(
+    z.object({ taskId: id, modelRef: id, skillRefs: z.array(z.string()).optional() }),
+    (a, d) => a.propose(d.taskId, { modelRef: d.modelRef, skillRefs: d.skillRefs }),
+  ),
+  approve: route(
+    z.object({ taskId: id, version: z.number().int().positive().optional() }),
+    (a, d) => a.approve(d.taskId, d.version),
+  ),
+  run: route(z.object({ taskId: id, cwd: id }), (a, d) => a.run(d.taskId, d.cwd)),
+  reply: route(z.object({ taskId: id, text: z.string().min(1) }), (a, d) => a.reply(d.taskId, d.text)),
+  retry: route(z.object({ taskId: id }), (a, d) => a.retry(d.taskId)),
+  cancel: route(z.object({ taskId: id }), (a, d) => a.cancel(d.taskId)),
+  annotate: route(
+    z.object({ taskId: id, noteId: id, text: z.string().min(1), refs: z.array(z.string()).optional() }),
+    (a, d) => a.annotate(d.taskId, d.noteId, d.text, d.refs),
+  ),
+  revise: route(
+    z.object({ taskId: id, text: z.string().min(1), scope: z.array(id).min(1) }),
+    (a, d) => a.revise(d.taskId, d.text, d.scope),
+  ),
+}
 
 // Thin web adapter: JSON + SSE over ProjectSessions. Nothing here knows how graphs are
 // computed; a TUI adapter imports @orc/ui-core directly and never touches this file.
@@ -42,21 +69,10 @@ export function startGraphUi(opts: {
   const act = async (req: Request, name: string): Promise<Response> => {
     if (!opts.actions) return Response.json({ error: 'read-only server: start orc graph inside a project' }, { status: 501 })
     if (req.headers.get('x-orc-token') !== token) return Response.json({ error: 'missing or invalid x-orc-token' }, { status: 403 })
-    if (!(name in ACTION_INPUT)) return Response.json({ error: `unknown action '${name}'` }, { status: 404 })
-    const parsed = ACTION_INPUT[name as ActionName].safeParse(await req.json().catch(() => null))
-    if (!parsed.success) return Response.json({ error: parsed.error.message }, { status: 400 })
+    const handler: ActionHandler | undefined = ACTION_ROUTES[name]
+    if (!handler) return Response.json({ error: `unknown action '${name}'` }, { status: 404 })
     try {
-      const a = opts.actions
-      const p = parsed.data as never // narrowed per-case below
-      switch (name as ActionName) {
-        case 'newTask': return Response.json(await a.newTask(p))
-        case 'propose': { const { taskId, ...rest } = parsed.data as z.infer<typeof ACTION_INPUT.propose>; return Response.json(await a.propose(taskId, rest)) }
-        case 'approve': { const d = parsed.data as z.infer<typeof ACTION_INPUT.approve>; return Response.json(await a.approve(d.taskId, d.version)) }
-        case 'run': { const d = parsed.data as z.infer<typeof ACTION_INPUT.run>; return Response.json(await a.run(d.taskId, d.cwd)) }
-        case 'reply': { const d = parsed.data as z.infer<typeof ACTION_INPUT.reply>; return Response.json(await a.reply(d.taskId, d.text)) }
-        case 'retry': { const d = parsed.data as z.infer<typeof ACTION_INPUT.retry>; return Response.json(await a.retry(d.taskId)) }
-        case 'cancel': { const d = parsed.data as z.infer<typeof ACTION_INPUT.cancel>; return Response.json(await a.cancel(d.taskId)) }
-      }
+      return await handler(opts.actions, await req.json().catch(() => null))
     } catch (err) {
       // kernel throws are user-actionable (stale version, unknown task, no open feedback)
       return Response.json({ error: err instanceof Error ? err.message : String(err) }, { status: 400 })
@@ -87,6 +103,8 @@ export function startGraphUi(opts: {
         const p = await sessions.taskPlans(project, u.searchParams.get('task') ?? '')
         return p === null ? new Response('not found', { status: 404 }) : Response.json(p)
       }
+      case '/api/plan-notes':
+        return Response.json(await sessions.planNotes(project, u.searchParams.get('task') ?? ''))
       case '/api/log': {
         const limitRaw = Number(u.searchParams.get('limit'))
         return Response.json(await sessions.log(project, {
