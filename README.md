@@ -155,7 +155,10 @@ by the agent.
 - `vault/index.md` — recursive task-expansion graph + live status
 - `vault/tasks/<id>/execution.md` — plan steps + operation nodes (attempts, unresolved/completed/failed)
 - `vault/tasks/<id>/lineage.md` — producing step → verified output receipts
-- `vault/memory/index.md` — authored knowledge: current architecture, target architecture, decisions
+- `vault/memory/index.md` — authored knowledge as one graph: current architecture, target
+  architecture, decisions/facts, and research, grouped as subgraphs with every typed link between
+  them drawn (a summary and the research note it was `derived_from` are in different groups, and
+  that edge is the point)
 
 ## Operational notes
 
