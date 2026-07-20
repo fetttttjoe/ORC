@@ -1,8 +1,8 @@
-import { EVENT_KIND, type MemoryAuthor, type MemoryStore, type ResolvedTool } from '@orc/contracts'
+import { type MemoryAuthor, type MemoryStore, type ResolvedTool } from '@orc/contracts'
 import { EventLog, type ProjectConfig } from '@orc/kernel'
 import { openKnowledge, type Knowledge } from './knowledge'
 import { createMemoryStore } from './store'
-import { createMemoryProjector, type MemoryProjector } from './projector'
+import { createMemoryProjector, KNOWLEDGE_KINDS, type MemoryProjector } from './projector'
 import { memoryTools, type MemoryTier } from './tools'
 
 export { SurrealMemory } from './surreal'
@@ -51,7 +51,7 @@ export async function probeMemory(
   try {
     knowledge = await openKnowledge(config)
     const cursor = await knowledge.getCursor()
-    const pending = await log.countAfter(cursor, [EVENT_KIND.memory_written, EVENT_KIND.memory_deleted])
+    const pending = await log.countAfter(cursor, KNOWLEDGE_KINDS)
     return pending === 0 ? { healthy: true } : { healthy: false, reason: `${pending} unapplied events` }
   } catch (err) {
     return { healthy: false, reason: `unreachable: ${err instanceof Error ? err.message : String(err)}` }
