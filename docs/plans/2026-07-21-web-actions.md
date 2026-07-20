@@ -17,6 +17,8 @@ Action inventory v1 (the task lifecycle the road shows):
 | `reply` | `await needPort()` (DBOS must be up in-process) then `kernel.replyFeedback(id, text)` |
 | `retry` | `port.retry(id)` |
 | `cancel` | `port.cancelRun(id)` + the orphan-note sweep (moves out of main.ts into the shared impl) |
+| `annotate` | `kernel.annotatePlan(id, { targetNote, refs, text })` — refine one plan-note |
+| `revise` | annotate each scoped note + `kernel.replyFeedback(id, text)` — wakes the parked plan agent (mirrors `orc plan-revise`) |
 
 Deliberately CLI-only (not in this plan): `mcp trust` / `ext trust` / `init` / `migrate`
 (local-consent and setup surfaces — weakening them over HTTP is a security regression), plan
@@ -110,7 +112,13 @@ Security (non-negotiable, mutations over localhost HTTP are CSRF-able):
      without actions → 501; `GET /api/session` shape.
    - **Verify:** `bun test packages/graph-ui` green.
 
-### Phase 3 — page: create dialog, road buttons, reply box, toasts
+### Phase 3 — page foundation: create dialog, action client, road buttons, reply box
+
+Navigation change (the user's "own field"): the request journey is first-class —
+- Sidebar top: a primary **`+ new request`** button (hidden on read-only servers).
+- The `plan` tab becomes the **`request`** tab (first position, default when a task is
+  selected): lifecycle rail → your-move buttons → **decomposition** (grounded tasks) → road of
+  steps → **knowledge** (notes this request created, growing live) → outputs.
 
 5. **Step 3.1 — primitives: `Toast` + `Dialog` (native `<dialog>`)**
    - **Files:** `page/ui/components.ts` + `theme.css`.
@@ -126,12 +134,16 @@ Security (non-negotiable, mutations over localhost HTTP are CSRF-able):
      ```
    - **Verify:** tsc; visual.
 
-6. **Step 3.2 — “+ new task” in the sidebar**
-   - **Files:** `page/app.ts` — button beside the brand (hidden when `!session.actions`):
-     dialog (title, spec) → `act('newTask', …)` → toast `task created` → the SSE patch adds the
-     node; `navigate({ node: taskId, tab: 'plan' })` — the road immediately shows "your move:
-     propose" as a button.
-   - **Verify:** manual — create from the browser, watch it appear in graph + task tree.
+6. **Step 3.2 — “+ new request” in the sidebar**
+   - **Files:** `page/app.ts` — primary button atop the sidebar (hidden when
+     `!session.actions`). Dialog fields: title, spec, and a mode select —
+     **quick** (single-step template; model input, default haiku) or **grounded** (the agent
+     analyzes the repo and proposes a decomposition; model input + cwd prefilled from
+     `session.defaultCwd`). Submit → `act('newTask', { …, grounded? })` → toast →
+     `navigate({ node: taskId, tab: 'request' })` — the journey view takes over: quick shows
+     "your move: propose"; grounded shows the analyze step already running.
+   - **Verify:** manual — create both modes from the browser; grounded starts its run
+     immediately and the chat tab shows the analyzer working.
 
 7. **Step 3.3 — road buttons + reply box**
    - **Files:** `page/plan.ts` — `renderRoad` gains `act: ((name, body) => Promise<unknown>) | null`.
@@ -142,17 +154,60 @@ Security (non-negotiable, mutations over localhost HTTP are CSRF-able):
      - approved → **Run** with a cwd input prefilled from `session.defaultCwd`
      - open question → inline textarea + **Reply**
      - failed → **Retry** · any active state → **Cancel** (confirm dialog)
-     Each button: disable while pending → `act(...)` → toast success/error; the SSE-driven road
-     refresh (already wired) repaints the new state — no optimistic UI.
+     Each button: disable while pending → `act(...)` → toast success/error; the SSE-driven
+     refresh repaints the new state — no optimistic UI.
    - **Files:** `page/chat.ts` — the unanswered question card gets the same reply textarea when
      actions exist (the slot we reserved).
    - **Verify:** manual matrix below; CLI parity spot-check (`orc plan <id>` shows v1 after a
      web propose).
 
-8. **Step 3.4 — docs**
-   - `README.md`: extend the `orc graph` bullet — "…with full task lifecycle from the browser
-     (create → propose → approve → run → reply/retry/cancel) when launched inside a project;
-     trust/init stay CLI-only."
+### Phase 4 — the request journey: decomposition, refine, knowledge growth
+
+8. **Step 4.1 — ui-core + actions: plan-notes and refine**
+   - **Files:** `packages/ui-core/src/sessions.ts` — new method
+     `planNotes(projectId, taskId)`: `foldPlanNotes(s.events, planScope(taskId))` (both
+     exported by `@orc/kernel`); returns the decomposition notes (title, summary, rationale,
+     uncertainty, `decomposes_into`/`depends_on` links). Test: grounded fixtures from
+     `packages/kernel/src/execution/strategies/grounded-plan.test.ts` style.
+   - **Files:** `packages/ui-core/src/actions.ts` interface + `packages/cli/src/actions.ts`:
+     `annotate(taskId, noteId, text, refs?)` and `revise(taskId, text, scope: string[])`
+     (annotate each + reply — same calls as the `plan-revise` command; migrate that command
+     onto it like cancel). Server: two schemas in `ACTION_INPUT` + dispatch. Tests: stub-level
+     route test + cli action test.
+   - **Verify:** `bun test packages/ui-core packages/cli packages/graph-ui` green.
+
+9. **Step 4.2 — request tab: decomposition + knowledge sections**
+   - **Files:** `page/plan.ts` (renders the whole request view), `page/app.ts` (tab rename
+     `plan` → `request`, first position, default tab for task nodes).
+     - **Decomposition** (grounded tasks, when `/api/plan-notes` is non-empty): the split-up as
+       an indented tree following `decomposes_into` (root first), each node: title, summary,
+       `Badge` for uncertainty count, `depends_on` chips, and — when actions exist — a per-note
+       **refine** input (annotate) plus one **revise scoped notes** action for the checked
+       notes; while the plan gate is open, **approve plan** = reply 'approve'. Every note links
+       into the graph (`noteNodeId(planScope(taskId), id)`) — the split IS graph data.
+     - **Knowledge**: notes whose `wrote` edge originates in this task's subtree — listed with
+       kind badges and live count ("knowledge: 4 notes"), each a `Link`; grows as SSE patches
+       land (the section re-renders with the road's existing live refresh).
+   - **Files:** `packages/graph-ui/src/server.ts` — `GET /api/plan-notes?project&task` →
+     `sessions.planNotes(...)`.
+   - **Verify:** manual — a grounded request shows its decomposition tree; annotating a note
+     and revising wakes the plan agent (chat shows it); knowledge list grows during a run.
+
+10. **Step 4.3 — graph focus mode (watch the expansion)**
+    - **Files:** `page/renderer.ts` — `focus(nodeIds: Set<string> | null): void`;
+      `sigma-renderer.ts` — sigma `nodeReducer`/`edgeReducer` dim (color → `#2a2a33`, no
+      label) everything outside the set; null restores. `page/app.ts` — a **focus** toggle in
+      the request view header: computes the set client-side from current graph links (task
+      subtree via `child` edges, their steps/artifacts via `plan`/`out`, their notes via
+      `wrote`, plus the plan-scope notes) — no server change. New patches re-apply the focus
+      filter, so freshly written notes light up inside a dimmed world as they arrive.
+    - **Verify:** manual — focus a running grounded task: the graph dims to its subtree and new
+      knowledge nodes appear bright as the agents write them.
+
+11. **Step 4.4 — docs**
+    - `README.md`: extend the `orc graph` bullet — "…full request lifecycle from the browser:
+      create (quick or grounded) → review the decomposition → refine/approve → run → watch the
+      knowledge graph grow; trust/init stay CLI-only."
 
 ## Verification matrix
 
@@ -161,17 +216,19 @@ Security (non-negotiable, mutations over localhost HTTP are CSRF-able):
 | `bun run typecheck` + `bun test` | clean / all green (new: cli actions tests, server action-route tests) |
 | POST action without `x-orc-token` | 403, action not executed (test) |
 | `orc graph` outside a project → POST action | 501; UI hides all buttons (`session.actions=false`) |
-| Browser: + new task → propose → approve → run | full lifecycle without touching the terminal; road advances stage by stage live |
+| Browser: + new request (quick) → propose → approve → run | full lifecycle without touching the terminal; road advances stage by stage live |
+| Browser: + new request (grounded) | analyze runs immediately; decomposition tree appears; refine a note → revise → plan updates; approve → steps instantiate |
+| Request view knowledge section + focus toggle | note count grows during the run; focus dims the graph to the request and new notes appear bright |
 | Agent asks a question (`ask_human`) | question card shows textarea; Reply resumes the step; answer appears in chat |
 | Web cancel of a running task | task cancelled + orphan notes swept (same events as CLI cancel — shared impl) |
 | CLI parity | `orc cancel` still sweeps (delegation kept main.test green); `orc plan` shows web-proposed plans |
 
 ## Files touched
 
-- `packages/ui-core/src/actions.ts` (new), `src/index.ts`
-- `packages/cli/src/actions.ts` (new), `actions.test.ts` (new), `main.ts` (cancel delegates; graph passes actions), `package.json` if needed
-- `packages/graph-ui/src/server.ts` + `server.test.ts` (session + action routes, CSRF)
-- `packages/graph-ui/page/api.ts` (new), `ui/components.ts` + `theme.css` (Toast, Dialog, buttons), `app.ts` (+ new-task), `plan.ts` (road buttons), `chat.ts` (reply box)
+- `packages/ui-core/src/actions.ts` (new), `src/sessions.ts` (planNotes), `src/index.ts`
+- `packages/cli/src/actions.ts` (new; annotate/revise too), `actions.test.ts` (new), `main.ts` (cancel + plan-revise delegate; graph passes actions)
+- `packages/graph-ui/src/server.ts` + `server.test.ts` (session + action routes + plan-notes, CSRF)
+- `packages/graph-ui/page/api.ts` (new), `ui/components.ts` + `theme.css` (Toast, Dialog, buttons, tree, focus), `app.ts` (new-request, request tab, focus), `plan.ts` (request view), `chat.ts` (reply box), `renderer.ts` + `sigma-renderer.ts` (focus)
 - `README.md`
 
 Ready to execute when you say go.

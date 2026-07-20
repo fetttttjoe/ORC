@@ -166,11 +166,14 @@ by the agent.
 - `maxIterations` in `.orc/config.json` (or `ORC_MAX_ITERATIONS`) sets the default agent-loop
   budget for authored steps (single-step template, grounded analyze) — default 30. Applies at
   plan-authoring time only; approved plans keep the budgets they were approved with.
-- `orc graph [--port 7749]` serves a live, read-only WebGL graph of tasks, steps, artifacts,
-  and memory notes for any project in the event log, with per-task chat transcripts, plan
-  versions, a live event log, and deep-linkable navigation (`#p=…&n=…&tab=…`) — every id in
-  every panel is a link. Logic lives in `@orc/ui-core`; the web server and browser renderer are
-  adapters — a TUI can reuse the core directly.
+- `orc graph [--port 7749]` serves a live WebGL graph of tasks, steps, artifacts, and memory
+  notes for any project in the event log, with per-task chat transcripts, a live event log,
+  deep-linkable navigation (`#p=…&n=…&tab=…`), and the Request view: create (quick or
+  grounded) → review the decomposition → refine/approve → run → watch the knowledge graph grow
+  (focus mode dims everything else). Mutations are available only when launched inside a
+  project (CSRF-token guarded, 127.0.0.1 only); trust/init stay CLI-only. Logic lives in
+  `@orc/ui-core`; the web server and browser renderer are adapters — a TUI can reuse the core
+  directly.
 - Plugins: `.orc/config.json` *declares* (`mcpServers`, `extensions`, `skillsDir`);
   `.orc/trust.json` *grants* — created only by `orc mcp trust` / `orc ext trust`,
   written atomically with mode 0600, never commit it. Grants bind to a
