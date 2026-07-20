@@ -65,15 +65,29 @@ export function createMemoryProjector(opts: { log: EventLog; surreal: SurrealMem
     writeMemoryFile(vaultDir, 'index.md', renderMemoryIndex(await surreal.allNotes()))
 
   let cursorCache = 0
+  let closed = false
+  // transient socket/transaction drops (idle WS reset, 'Transaction not found') heal on the next
+  // apply — one bounded retry absorbs them instead of warn-spamming a self-healing condition
+  const connectionShaped = (err: unknown): boolean =>
+    /connect|connection|socket|websocket|transaction not found/i.test(err instanceof Error ? err.message : String(err))
   const enqueueReconcile = (): void => {
     void serialize(async () => {
-      try {
-        const r = await drainFrom(cursorCache)
-        cursorCache = r.cursor
-        if (r.vaultChanged > 0) await refreshIndex()
-      } catch (err) {
-        console.warn(`memory projector: ${err instanceof Error ? err.message : String(err)}`)
-        cursorCache = await surreal.getCursor() // resume after last applied event; don't re-apply succeeded ones
+      for (let attempt = 1; ; attempt++) {
+        try {
+          const r = await drainFrom(cursorCache)
+          cursorCache = r.cursor
+          if (r.vaultChanged > 0) await refreshIndex()
+          return
+        } catch (err) {
+          if (closed) return // shutdown race: the socket is gone because we are — expected, not a warning
+          if (attempt === 1 && connectionShaped(err)) { await new Promise(r => setTimeout(r, 250)); continue }
+          console.warn(`memory projector: ${err instanceof Error ? err.message : String(err)}`)
+          // resume after last applied event; if even the cursor read fails, keep the old one —
+          // applyEvent is idempotent per cursor, and an uncaught throw here would reject the
+          // void-discarded serialize() promise as an unhandled rejection
+          try { cursorCache = await surreal.getCursor() } catch { /* next drain re-reads */ }
+          return
+        }
       }
     })
   }
@@ -89,7 +103,7 @@ export function createMemoryProjector(opts: { log: EventLog; surreal: SurrealMem
         await rebuildVaultMemory(surreal, vaultDir) // boot-time heal: replace vault/memory/** from Surreal
       })
     },
-    close: async () => { if (unsub) { await unsub(); unsub = null } await applying },
+    close: async () => { closed = true; if (unsub) { await unsub(); unsub = null } await applying },
     rebuild: async () => {
       await serialize(async () => {
         await surreal.clear()

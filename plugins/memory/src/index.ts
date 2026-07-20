@@ -11,6 +11,7 @@ export { createMemoryStore } from './store'
 export { createMemoryProjector } from './projector'
 export { memoryTools, unavailableMemoryTools, MEMORY_TIER, tierForRole, type MemoryTier } from './tools'
 export { renderMemoryIndex, rebuildVaultMemory } from './memory-index'
+export { orphanedNotes, type SweptNote } from './sweep'
 export { renderNoteFile, noteRelPath } from './note-md'
 
 // the actual revision of the code the runtime is looking at — null outside Git

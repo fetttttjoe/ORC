@@ -1,4 +1,7 @@
 import { z } from 'zod'
+// safe cycle with ./events (which imports our payload schemas): EVENT_KIND is only read
+// inside function bodies, long after both modules initialized
+import { EVENT_KIND, type EventRecord } from './events'
 
 export const MEMORY_ID_RE = /^[a-z0-9][a-z0-9-]*$/
 export const MEMORY_LIMITS = {
@@ -183,7 +186,7 @@ export interface MemoryStore {
   // idempotencyKey: deterministic writers (tool-driven writes inside an operation) pass one so
   // a crash retry of the surrounding effect cannot append the note event twice
   write(input: MemoryNoteDraft, author: MemoryAuthor, opts?: { idempotencyKey?: string }): Promise<MemoryNote>
-  remove(id: string, scope?: string): Promise<void>
+  remove(id: string, scope?: string, author?: MemoryAuthor): Promise<void>
   get(id: string, scope?: string): Promise<MemoryNote | null>
   list(filter?: MemoryFilter): Promise<NoteSummary[]>
   search(query: string, filter?: MemoryFilter): Promise<NoteSummary[]>
@@ -197,4 +200,25 @@ export interface MemoryStore {
 export function composeAuthor(a: MemoryAuthor): string {
   if (a.source === 'cli') return 'cli'
   return [a.executor, a.model, a.role].filter(Boolean).join('·') || 'agent'
+}
+
+export const noteKey = (scope: string, id: string): string => `${scope}\u0000${id}`
+
+// Last-write-wins fold of the memory event stream into the live note set. Lenient like fold():
+// an unparseable payload is skipped, never applied. Input needs only kind+payload so both
+// EventRecord[] and trimmed test fixtures work.
+export function foldLiveNotes(
+  events: Array<Pick<EventRecord, 'kind' | 'payload'>>,
+): Map<string, MemoryWrittenPayload> {
+  const live = new Map<string, MemoryWrittenPayload>()
+  for (const e of events) {
+    if (e.kind === EVENT_KIND.memory_written) {
+      const p = MemoryWrittenPayload.safeParse(e.payload)
+      if (p.success) live.set(noteKey(p.data.note.scope, p.data.note.id), p.data)
+    } else if (e.kind === EVENT_KIND.memory_deleted) {
+      const p = MemoryDeletedPayload.safeParse(e.payload)
+      if (p.success) live.delete(noteKey(p.data.scope, p.data.id))
+    }
+  }
+  return live
 }

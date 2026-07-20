@@ -35,9 +35,9 @@ export function createMemoryStore(opts: { log: EventLog; surreal: SurrealMemory;
         createdAt: '', createdBy: '', updatedAt: '', updatedBy: '', revision: 1,
       }
     },
-    async remove(id, scope = 'project') {
-      const author: MemoryAuthor = { source: 'cli' }
-      await log.append({ taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_deleted, payload: { id, scope, author } })
+    // optional author: cancel-sweep passes the cancelled task's identity as provenance
+    async remove(id, scope = 'project', author?: MemoryAuthor) {
+      await log.append({ taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_deleted, payload: { id, scope, author: author ?? { source: 'cli' } } })
     },
     get: (id, scope = 'project') => surreal.get(id, scope),
     // The access counter is event-sourced like everything else, so this is an append, not a
