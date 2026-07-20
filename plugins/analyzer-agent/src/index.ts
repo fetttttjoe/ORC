@@ -9,7 +9,7 @@ export function agentAnalyzer(): Analyzer {
       id: 'analyze', role: 'scout', title: 'Analyze the codebase',
       instructions: 'Ground the plan per the codebase-analysis skill.',
       executorRef: 'api-loop', modelRef, skillRefs: ['codebase-analysis'], toolRefs: [],
-      isolation: ISOLATION_TIER.local, zone: [], maxIterations: 15, dependsOn: [],
+      isolation: ISOLATION_TIER.local, zone: [], maxIterations: 30, dependsOn: [],
     }),
   }
 }

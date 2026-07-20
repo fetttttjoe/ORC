@@ -114,6 +114,14 @@ describe('loadConfig', () => {
       expect(loadConfig('/tmp/x').projectDbPassword).toBe('secret')
     })
   })
+  it('maxIterations defaults to 30; file and env override it (env wins)', () => {
+    expect(loadConfig(mkdtempSync(path.join(tmpdir(), 'orc-'))).maxIterations).toBe(30)
+    const dir = tmpProject({ maxIterations: 12 })
+    expect(loadConfig(dir).maxIterations).toBe(12)
+    withEnv({ ORC_MAX_ITERATIONS: '40' }, () => {
+      expect(loadConfig(dir).maxIterations).toBe(40)
+    })
+  })
   it('maxDepth defaults to 3 and approvalPolicy defaults to manual/empty', () => {
     const c = loadConfig(mkdtempSync(path.join(tmpdir(), 'orc-')))
     expect(c.maxDepth).toBe(3)

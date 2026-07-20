@@ -217,7 +217,8 @@ describe('api-loop executor', () => {
       { toolCalls: [{ toolCallId: 'c1', toolName: 'signal', input: { outcome: 'maybe' } }] }, // invalid
       { toolCalls: [{ toolCallId: 'c2', toolName: 'signal', input: { outcome: 'success', summary: 'ok now' } }] },
     ])
-    const events = await drain(apiLoopExecutor().startTurn(ctx(model, captured)))
+    // maxIterations 10: outside the endgame-budget window, so the recovery message stays last
+    const events = await drain(apiLoopExecutor().startTurn(ctx(model, captured, { step: stepFixture({ instructions: 'do the thing', maxIterations: 10 }) })))
     expect(events.at(-1)?.type).toBe('done')
 
     // Recovery must answer the unresolved 'signal' tool_use with a matching tool result —
@@ -239,7 +240,8 @@ describe('api-loop executor', () => {
       { toolCalls: [{ toolCallId: 'c1', toolName: 'fs_write', input: { path: 'out.txt', content: 'hi' } }] },
       { toolCalls: [{ toolCallId: 'c2', toolName: 'signal', input: { outcome: 'success', summary: 'wrote file' } }] },
     ])
-    const events = await drain(apiLoopExecutor().startTurn(ctx(model, captured)))
+    // maxIterations 10: outside the endgame-budget window, so the deltas contain no budget notes
+    const events = await drain(apiLoopExecutor().startTurn(ctx(model, captured, { step: stepFixture({ instructions: 'do the thing', maxIterations: 10 }) })))
     expect(events.at(-1)?.type).toBe('done')
 
     const agentCallDrafts = captured.filter(d => d.kind === EVENT_KIND.agent_call)
@@ -441,5 +443,46 @@ describe('api-loop executor', () => {
     expect(events.some(e => e.type === 'error')).toBe(false)
     expect(events.at(-1)?.type).toBe('done')
     expect(unansweredToolCallIds(model.doGenerateCalls[1]!.prompt)).toEqual([])
+  })
+})
+
+describe('iteration-budget awareness', () => {
+  it('announces the budget up front and warns durably in the final 3 iterations', async () => {
+    const captured: EventDraft[] = []
+    // 3 tool-less turns, maxIterations 3 -> every iteration is in the endgame window
+    const events = await drain(apiLoopExecutor().startTurn(ctx(scriptModel([{}, {}, {}]), captured)))
+
+    const requests = captured
+      .filter(e => e.kind === EVENT_KIND.agent_call)
+      .map(e => JSON.stringify((e.payload as { request: unknown }).request))
+    expect(requests).toHaveLength(3)
+    expect(requests[0]).toContain('Iteration budget: 3 model calls')  // static prompt line
+    expect(requests[0]).toContain('3 model calls left')               // endgame note, iter 1
+    expect(requests[2]).toContain('FINAL iteration (3/3)')            // loud final warning
+    // still fails honestly when the agent never signals
+    expect(events.at(-1)).toMatchObject({ type: 'error', message: 'maxIterations (3) exhausted without signal' })
+  })
+
+  it('stays silent outside the endgame window', async () => {
+    const captured: EventDraft[] = []
+    await drain(apiLoopExecutor().startTurn(ctx(
+      scriptModel([{ toolCalls: [{ toolCallId: 'c1', toolName: 'signal', input: { outcome: 'success', summary: 'ok' } }] }]),
+      captured,
+      { step: stepFixture({ instructions: 'do', maxIterations: 10 }) },
+    )))
+    const first = JSON.stringify((captured.find(e => e.kind === EVENT_KIND.agent_call)!.payload as { request: unknown }).request)
+    expect(first).toContain('Iteration budget: 10 model calls')
+    expect(first).not.toContain('model calls left')
+    expect(first).not.toContain('FINAL iteration')
+  })
+})
+
+describe('normalizeUsage cache capture', () => {
+  it('maps inputTokenDetails cache fields instead of discarding them', async () => {
+    const { normalizeUsage } = await import('./loop')
+    expect(normalizeUsage({ inputTokens: 100, outputTokens: 5, inputTokenDetails: { cacheReadTokens: 80, cacheWriteTokens: 15 } }))
+      .toMatchObject({ inputTokens: 100, cacheReadTokens: 80, cacheWriteTokens: 15 })
+    // absent details -> fields omitted
+    expect(Object.keys(normalizeUsage({ inputTokens: 1, outputTokens: 1 }))).not.toContain('cacheReadTokens')
   })
 })
