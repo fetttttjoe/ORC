@@ -56,18 +56,16 @@ export function createMcpHub(
       command: cfg.command,
       args: cfg.args ?? [],
       env: { ...getDefaultEnvironment(), ...resolveEnv(cfg.env, serverId) }, // never full process.env (secrets)
-      stderr: 'pipe',
+      // NOT piped into the error message: a third-party server's stderr is untrusted output that
+      // would land in the event log and the vault's log.md. Debuggability is not worth that —
+      // see index.test.ts's "without leaking stderr".
+      stderr: 'ignore',
     })
-    const stderrChunks: string[] = []
-    transport.stderr?.on('data', (d: Buffer) => stderrChunks.push(d.toString()))
     const client = new Client({ name: 'orc', version: '0.1.0' })
     try {
       await client.connect(transport)
     } catch (err) {
-      const detail = stderrChunks.join('').trim()
-      throw new Error(
-        `MCP server '${serverId}' failed to start: ${err instanceof Error ? err.message : String(err)}${detail ? ` — stderr: ${detail}` : ''}`,
-      )
+      throw new Error(`MCP server '${serverId}' failed to start: ${err instanceof Error ? err.message : String(err)}`)
     }
     client.setNotificationHandler(ToolListChangedNotificationSchema, async () => {
       toolCache.delete(serverId)

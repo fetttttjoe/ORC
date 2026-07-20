@@ -4,7 +4,7 @@ import type { OrcConfig } from '../config'
 import { SkillIndex } from './skills'
 import { HookBus } from './hooks'
 import { ExtensionHost } from './extensions'
-import { isExtensionTrusted, isMcpTrusted, loadTrust, type TrustStore } from './trust'
+import { isExtensionTrusted, isMcpTrusted, loadTrust } from './trust'
 
 export interface PluginHost {
   providers: Map<string, ModelProvider<unknown>>
@@ -13,7 +13,6 @@ export interface PluginHost {
   skills: SkillIndex
   hooks: HookBus
   extensions: ExtensionHost
-  trust: TrustStore
   refValidator(plan: Plan): Promise<string[]>
   shutdown(): Promise<void>
 }
@@ -30,7 +29,6 @@ export async function createPluginHost(
   const executors = seed.executors ?? new Map()
   const analyzers = seed.analyzers ?? new Map<string, Analyzer>()
   const hooks = new HookBus()
-  const trust = loadTrust(config.dir)
 
   const api: ExtensionApi = {
     registerProvider: (id, p) => {
@@ -48,13 +46,16 @@ export async function createPluginHost(
     on: (hook, handler) => hooks.on(hook, handler),
   }
   const extensions = new ExtensionHost(api)
-  await extensions.load(config.extensions, decl => isExtensionTrusted(trust, decl, config.dir), config.dir)
+  await extensions.load(config.extensions, decl => isExtensionTrusted(loadTrust(config.dir), decl, config.dir), config.dir)
   const skills = await SkillIndex.open(config.skillsDir)
 
   return {
-    providers, executors, analyzers, skills, hooks, extensions, trust,
+    providers, executors, analyzers, skills, hooks, extensions,
     refValidator: async plan => {
       const errors: string[] = []
+      // read fresh per validation: a grant revoked (or a declaration edited) since process start
+      // must be seen here, the way every other trust check in the codebase already does it
+      const trust = loadTrust(config.dir)
       const byName = new Map(skills.list().map(e => [e.name, e]))
       for (const step of plan.steps) {
         if (!executors.has(step.executorRef)) errors.push(`step ${step.id}: unknown executor '${step.executorRef}'`)
@@ -85,6 +86,7 @@ export async function createPluginHost(
       return errors
     },
     shutdown: async () => {
+      await hooks.drain()
       await hooks.emit(HOOK_NAME.session_shutdown)
       await extensions.shutdown()
       skills.close()

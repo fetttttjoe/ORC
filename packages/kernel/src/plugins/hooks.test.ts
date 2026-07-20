@@ -15,6 +15,24 @@ describe('HookBus', () => {
     expect(calls).toEqual(['a', 'b'])
   })
 
+  it('dispatch tracks detached handlers until drain completes', async () => {
+    const bus = new HookBus()
+    const calls: string[] = []
+    bus.on(HOOK_NAME.event_appended, async () => {
+      await Bun.sleep(25)
+      calls.push('done')
+    })
+    expect(typeof bus.dispatch).toBe('function')
+
+    bus.dispatch(HOOK_NAME.event_appended, {
+      seq: 1, ts: 't', projectId: 'p1', idempotencyKey: null, taskId: 't1', stepId: null, runToken: null,
+      kind: 'task_status_changed', payload: { taskId: 't1', from: 'draft', to: 'awaiting_approval' }, usage: null,
+    })
+    expect(calls).toEqual([])
+    await bus.drain()
+    expect(calls).toEqual(['done'])
+  })
+
   it('a throwing handler is contained and later handlers still run', async () => {
     const warn = spyOn(console, 'warn').mockImplementation(() => {})
     try {

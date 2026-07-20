@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from 'bun:test'
-import { existsSync, mkdtempSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { createHash } from 'node:crypto'
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import {
@@ -45,15 +46,64 @@ describe('trust store', () => {
     expect(loadTrust(d)).toEqual({ mcp: [], extensions: [] })
   })
 
-  it('a changed MCP declaration (args or env KEYS) invalidates the grant; a changed env VALUE does not', () => {
+  it('a changed MCP declaration (args or env KEYS) invalidates the grant; a rotated literal env VALUE does not', () => {
     const d = temp()
     const store = grantMcpTrust('files', server, d)
     expect(isMcpTrusted(store, 'files', { ...server, args: ['other.ts'] })).toBe(false)
     expect(isMcpTrusted(store, 'files', { ...server, env: { OTHER_KEY: 'x' } })).toBe(false)
-    // value rotation keeps consent, and the value never appears in the fingerprint or file
+    // literal rotation keeps consent, and the value never appears in the fingerprint or file
     expect(isMcpTrusted(store, 'files', { ...server, env: { API_KEY: 'rotated-value' } })).toBe(true)
     expect(JSON.stringify(store)).not.toContain('secret-value')
     expect(mcpFingerprint(server)).toBe(mcpFingerprint({ ...server, env: { API_KEY: 'rotated-value' } }))
+  })
+
+  // .orc/config.json is committed by design (.gitignore un-ignores it), so the declaration is a
+  // PR-reachable artifact and the fingerprint is the only thing between an edit and re-consent.
+  // Repointing an indirection is a privilege change, not a rotation: same command, same args,
+  // same env key — a different secret handed to a third-party process.
+  it('repointing a $VAR indirection at another secret invalidates the grant', () => {
+    const d = temp()
+    const declared = { command: 'bun', args: ['server.ts'], env: { API_KEY: '$WEATHER_TOKEN' } }
+    const store = grantMcpTrust('weather', declared, d)
+    expect(isMcpTrusted(store, 'weather', declared)).toBe(true)
+    expect(isMcpTrusted(store, 'weather', { ...declared, env: { API_KEY: '$ANTHROPIC_API_KEY' } })).toBe(false)
+    // the indirection is a reference, not secret material — safe to cover, and covered
+    expect(mcpFingerprint(declared)).not.toBe(mcpFingerprint({ ...declared, env: { API_KEY: '$OTHER' } }))
+  })
+
+  it('old entry-only extension fingerprints fail closed', () => {
+    const d = temp()
+    const entry = path.join(d, 'ext.ts')
+    writeFileSync(entry, 'export default { id: "x", activate() {} }')
+    grantExtensionTrust('ext.ts', d)
+    const oldFingerprint = createHash('sha256').update(readFileSync(entry)).digest('hex')
+    writeFileSync(path.join(d, '.orc', 'trust.json'), JSON.stringify({
+      mcp: [], extensions: [{ id: 'ext.ts', fingerprint: oldFingerprint }],
+    }))
+
+    expect(isExtensionTrusted(loadTrust(d), 'ext.ts', d)).toBe(false)
+  })
+
+  it('a changed project lockfile invalidates the extension grant', () => {
+    const d = temp()
+    writeFileSync(path.join(d, 'ext.ts'), 'export default { id: "x", activate() {} }')
+    writeFileSync(path.join(d, 'bun.lock'), 'lock-v1')
+    const store = grantExtensionTrust('ext.ts', d)
+    expect(isExtensionTrusted(store, 'ext.ts', d)).toBe(true)
+
+    writeFileSync(path.join(d, 'bun.lock'), 'lock-v2')
+    expect(isExtensionTrusted(store, 'ext.ts', d)).toBe(false)
+  })
+
+  it('a changed local extension dependency invalidates the grant', () => {
+    const d = temp()
+    writeFileSync(path.join(d, 'dep.ts'), `export const value = 'v1'\n`)
+    writeFileSync(path.join(d, 'ext.ts'), `import { value } from './dep'\nexport default value\n`)
+    const store = grantExtensionTrust('ext.ts', d)
+    expect(isExtensionTrusted(store, 'ext.ts', d)).toBe(true)
+
+    writeFileSync(path.join(d, 'dep.ts'), `export const value = 'v2'\n`)
+    expect(isExtensionTrusted(store, 'ext.ts', d)).toBe(false)
   })
 
   it('a changed extension byte invalidates the grant; missing entry never trusts', () => {
@@ -62,7 +112,7 @@ describe('trust store', () => {
     writeFileSync(entry, 'export default { id: "x", activate() {} }')
     const store = grantExtensionTrust('ext.ts', d)
     expect(isExtensionTrusted(store, 'ext.ts', d)).toBe(true)
-    expect(store.extensions[0]!.fingerprint).toBe(extensionFingerprint(entry))
+    expect(store.extensions[0]!.fingerprint).toBe(extensionFingerprint(entry, d))
 
     writeFileSync(entry, 'export default { id: "x", activate() { /* changed */ } }')
     expect(isExtensionTrusted(store, 'ext.ts', d)).toBe(false)

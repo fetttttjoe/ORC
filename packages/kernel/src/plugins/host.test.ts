@@ -102,6 +102,33 @@ export default {
     await host.shutdown()
   })
 
+  it('reload reads a newly granted extension fingerprint from disk', async () => {
+    const d = project({ extensions: ['exts/reg.ts'] })
+    mkdirSync(path.join(d, 'exts'), { recursive: true })
+    writeFileSync(path.join(d, 'exts', 'dep.ts'), `export const value = 'v1'\n`)
+    writeFileSync(path.join(d, 'exts', 'reg.ts'), `
+import { value } from './dep'
+export default {
+  id: 'reg',
+  activate(api: { registerProvider(id: string, p: unknown): void }) {
+    api.registerProvider('extra-' + value, { costs: {}, languageModel: () => ({}) })
+  },
+}
+`)
+    grantExtensionTrust('exts/reg.ts', d)
+    const host = await makeHost(d)
+    expect(host.providers.has('extra-v1')).toBe(true)
+
+    writeFileSync(path.join(d, 'exts', 'dep.ts'), `export const value = 'v2'\n`)
+    await host.extensions.reload()
+    expect(host.providers.has('extra-v2')).toBe(false)
+
+    grantExtensionTrust('exts/reg.ts', d)
+    await host.extensions.reload()
+    expect(host.providers.has('extra-v2')).toBe(true)
+    await host.shutdown()
+  })
+
   it('exposes a seeded analyzers registry, and refValidator rejects an unknown analyzerRef', async () => {
     const d = project()
     const a: Analyzer = { id: 'agent-analyzer', analysisStep: () => stepFixture({ id: 'analyze', role: 'scout' }) }
