@@ -2,6 +2,7 @@ import { afterAll, describe, expect, it } from 'bun:test'
 import { EVENT_KIND } from '@orc/contracts'
 import { Kernel, openStorage } from '@orc/kernel'
 import { createTestDb, TEST_PROJECT_ID } from '@orc/kernel/test-helpers'
+import { MockLanguageModelV4 } from 'ai/test'
 import { noteNodeId, type OrcActions } from '@orc/ui-core'
 import { startGraphUi } from './server'
 
@@ -131,6 +132,64 @@ describe('graph-ui web adapter', () => {
       method: 'POST', headers: { 'x-orc-token': roSession.token }, body: JSON.stringify({ taskId: 't1' }),
     })
     expect(blocked.status).toBe(501)
+    await ro.stop()
+  })
+
+  it('copilot endpoint streams text + usage; guarded like actions', async () => {
+    const db = await createTestDb()
+    dbs.push(db)
+    const storage = await openStorage(db.url, { projectId: TEST_PROJECT_ID })
+    await new Kernel(storage.events).createTask({ title: 'seed', spec: '' })
+    // provider-level scripted stream (shapes from @ai-sdk/provider LanguageModelV4StreamPart)
+    const model = new MockLanguageModelV4({
+      doStream: async () => ({
+        stream: new ReadableStream({
+          start(c) {
+            c.enqueue({ type: 'stream-start', warnings: [] })
+            c.enqueue({ type: 'text-start', id: '1' })
+            c.enqueue({ type: 'text-delta', id: '1', delta: 'hello from copilot' })
+            c.enqueue({ type: 'text-end', id: '1' })
+            c.enqueue({
+              type: 'finish',
+              finishReason: { unified: 'stop', raw: undefined },
+              usage: {
+                inputTokens: { total: 12, noCache: undefined, cacheRead: undefined, cacheWrite: undefined },
+                outputTokens: { total: 4, text: undefined, reasoning: undefined },
+              },
+            })
+            c.close()
+          },
+        }),
+      }),
+    })
+    const ui = startGraphUi({
+      url: db.url, port: 0,
+      copilot: { resolveModel: () => model, defaultModelRef: 'mock/m', price: () => 0.001 },
+    })
+    const base = `http://127.0.0.1:${ui.port}`
+    const session = await (await fetch(`${base}/api/session`)).json() as { token: string; copilot: boolean }
+    expect(session.copilot).toBe(true)
+
+    expect((await fetch(`${base}/api/copilot`, { method: 'POST', body: '{}' })).status).toBe(403)
+
+    const res = await fetch(`${base}/api/copilot`, {
+      method: 'POST', headers: { 'x-orc-token': session.token },
+      body: JSON.stringify({ projectId: TEST_PROJECT_ID, messages: [{ role: 'user', content: 'hi' }] }),
+    })
+    const body = await res.text()
+    expect(body).toContain('hello from copilot')
+    expect(body).toContain('"type":"done"')
+    expect(body).toContain('"costUSD":0.001')
+    await ui.stop(); await storage.close()
+
+    // no copilot config -> 501
+    const ro = startGraphUi({ url: db.url, port: 0 })
+    const roSession = await (await fetch(`http://127.0.0.1:${ro.port}/api/session`)).json() as { token: string; copilot: boolean }
+    expect(roSession.copilot).toBe(false)
+    expect((await fetch(`http://127.0.0.1:${ro.port}/api/copilot`, {
+      method: 'POST', headers: { 'x-orc-token': roSession.token },
+      body: JSON.stringify({ projectId: TEST_PROJECT_ID, messages: [{ role: 'user', content: 'hi' }] }),
+    })).status).toBe(501)
     await ro.stop()
   })
 

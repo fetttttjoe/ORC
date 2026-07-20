@@ -1,39 +1,47 @@
-import type { GraphLink, GraphNode, GraphPatch, LogRow } from '@orc/ui-core'
-import { act, initSession, session } from './api'
+import type { GraphLink, GraphNode, LogRow } from '@orc/ui-core'
+import { api, initApi, session, type Project } from './api'
 import { renderChat } from './chat'
+import { Conversation } from './conversation'
 import { renderDetail } from './detail'
 import { LogView } from './log'
-import { current, navigate, onChange, type Selection, type Tab } from './nav'
+import { current, navigate, onChange, type Selection, type Tab, type View } from './nav'
+import { EDGE, NODE_PREFIX, planScopeName } from '@orc/ui-core/graph'
 import { renderRequest, type OpenQuestion, type PlanNoteView, type PlansView, type TaskView } from './plan'
 import type { GraphRenderer } from './renderer'
 import { SigmaRenderer } from './sigma-renderer'
 import { Btn, Dot, Empty, NavItem, Section, Tabs, openDialog, toast } from './ui/components'
 import { el } from './ui/el'
 
-// ---- shell (sidebar | graph | resizer | detail), composed from ui/ primitives ----
+// ---- shell v2: nav | conversation | resizer | dock(graph + inspector overlay) ----
 const graphHost = el('div', { class: 'graph-host' })
+const viewModes = el('div', { class: 'viewmodes' })
 const newRequestHost = el('div', {})
 const projectList = el('div', { class: 'section' })
 const taskList = el('div', { class: 'section' })
-const legend = el('div', { class: 'section' })
 const statusDot = Dot('')
 const statusText = el('span', {}, 'connecting…')
-const tabHost = el('div', {})
-const tabBody = el('div', {})
+const inspectorTabs = el('div', {})
+const inspectorBody = el('div', {})
+const inspector = el('div', { class: 'inspector' },
+  el('div', { class: 'inspector-head' },
+    el('span', { class: 'grow' }),
+    el('button', { class: 'iconbtn', title: 'close', onClick: () => navigate({ node: null }) }, '×'),
+  ),
+  inspectorTabs, inspectorBody)
 const resizer = el('div', { class: 'resizer' })
-const detailPane = el('aside', { class: 'detail' }, tabHost, tabBody)
+const dock = el('main', { class: 'main' }, graphHost, inspector)
 const app = el('div', { class: 'app' },
   el('aside', { class: 'sidebar' },
-    el('div', { class: 'brand' }, el('span', { class: 'logo' }), 'orc graph'),
+    el('div', { class: 'brand' }, el('span', { class: 'logo' }), el('span', {}, 'orc')),
+    viewModes,
     newRequestHost,
-    Section('projects', projectList),
+    Section('chats', projectList),
     Section('requests', taskList),
-    Section('graph', legend),
     el('div', { class: 'statusbar' }, statusDot, statusText),
   ),
-  el('main', { class: 'main' }, graphHost),
+  el('div', {}, ''), // conversation mounts here after session init
   resizer,
-  detailPane,
+  dock,
 )
 document.body.append(app)
 
@@ -41,52 +49,49 @@ const renderer: GraphRenderer = new SigmaRenderer(graphHost)
 renderer.onNodeClick(id => navigate({ node: id }))
 const logView = new LogView(node => navigate({ node, tab: 'detail' }))
 
-// ---- panel resize + maximize ----
-let panelPx = 380
-const applyPanel = (): void => { app.style.gridTemplateColumns = `240px 1fr 5px ${panelPx}px` }
-applyPanel()
+// ---- dock resize (split view only; other views are class-driven) ----
+let dockPx = Math.round(window.innerWidth * 0.4)
+const applyColumns = (): void => {
+  app.style.gridTemplateColumns = sel.view === 'split' ? `240px 1fr 5px ${dockPx}px` : ''
+}
 resizer.addEventListener('pointerdown', (down: PointerEvent) => {
   down.preventDefault()
   const startX = down.clientX
-  const startPx = panelPx
+  const startPx = dockPx
   const move = (m: PointerEvent): void => {
-    panelPx = Math.min(Math.max(startPx + (startX - m.clientX), 260), window.innerWidth - 420)
-    applyPanel()
+    dockPx = Math.min(Math.max(startPx + (startX - m.clientX), 320), window.innerWidth - 480)
+    applyColumns()
   }
   const up = (): void => { window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', up) }
   window.addEventListener('pointermove', move)
   window.addEventListener('pointerup', up)
 })
-resizer.addEventListener('dblclick', () => {
-  panelPx = panelPx > window.innerWidth * 0.5 ? 380 : Math.round(window.innerWidth * 0.7)
-  applyPanel()
-})
 
 // ---- state ----
 // sentinel start: the FIRST onChange fire must see project/node as "changed" so deep links load
-let sel: Selection = { project: '', node: null, tab: 'detail' }
-let es: EventSource | undefined
+let sel: Selection = { project: '', node: null, tab: 'detail', view: 'split' }
+let stream: { close: () => void } | undefined
 let seq = 0
-let projects: Array<{ id: string; name: string | null }> = []
+let projects: Project[] = []
 const nodes = new Map<string, GraphNode>()
 const links = new Map<string, GraphLink>() // client-side edge index: feeds focus mode + knowledge
 const linkKey = (l: GraphLink): string => `${l.source}\u0000${l.target}\u0000${l.type}`
 let chatTimer: ReturnType<typeof setTimeout> | undefined
 let shownPlanVersion: number | null = null
 let focusedTask: string | null = null
+let conversation: Conversation | null = null
 
 const TAB_ITEMS: ReadonlyArray<{ id: Tab; label: string }> = [
   { id: 'request', label: 'Request' }, { id: 'detail', label: 'Detail' }, { id: 'chat', label: 'Chat' }, { id: 'log', label: 'Log' },
 ]
-
-const q = (params: Record<string, string | undefined>): string =>
-  Object.entries(params).filter((e): e is [string, string] => e[1] !== undefined)
-    .map(([k, v]) => `${k}=${encodeURIComponent(v)}`).join('&')
+const VIEW_ITEMS: ReadonlyArray<{ id: View; label: string }> = [
+  { id: 'chat', label: 'chat' }, { id: 'split', label: 'split' }, { id: 'graph', label: 'graph' },
+]
 
 const selectedTaskId = (): string | null => {
   if (!sel.node) return null
   if (nodes.get(sel.node)?.type === 'task') return sel.node
-  if (sel.node.startsWith('step:') || sel.node.startsWith('artifact:')) return sel.node.split(':')[1] ?? null
+  if (sel.node.startsWith(NODE_PREFIX.step) || sel.node.startsWith(NODE_PREFIX.artifact)) return sel.node.split(':')[1] ?? null
   return null
 }
 
@@ -96,19 +101,17 @@ function focusIds(taskId: string): Set<string> {
   for (let grew = true; grew;) { // subtree via child edges
     grew = false
     for (const l of links.values())
-      if (l.type === 'child' && set.has(l.source) && !set.has(l.target)) { set.add(l.target); grew = true }
+      if (l.type === EDGE.child && set.has(l.source) && !set.has(l.target)) { set.add(l.target); grew = true }
   }
   for (let pass = 0; pass < 3; pass++) // steps, then artifacts hanging off steps, then notes
     for (const l of links.values())
-      if ((l.type === 'plan' || l.type === 'out' || l.type === 'wrote' || l.type === 'depends') && set.has(l.source)) set.add(l.target)
-  const planPrefix = `note:plan-${taskId}\u0000`
+      if ((l.type === EDGE.plan || l.type === EDGE.out || l.type === EDGE.wrote || l.type === EDGE.depends) && set.has(l.source)) set.add(l.target)
+  const planPrefix = `${NODE_PREFIX.note}${planScopeName(taskId)}\u0000`
   for (const id of nodes.keys()) if (id.startsWith(planPrefix)) set.add(id)
   return set
 }
 
-function applyFocus(): void {
-  renderer.focus(focusedTask ? focusIds(focusedTask) : null)
-}
+const applyFocus = (): void => renderer.focus(focusedTask ? focusIds(focusedTask) : null)
 
 // ---- sidebar ----
 function setStatus(live: boolean, text: string): void {
@@ -117,8 +120,11 @@ function setStatus(live: boolean, text: string): void {
 }
 
 function renderSidebar(): void {
+  viewModes.replaceChildren(...VIEW_ITEMS.map(v =>
+    el('button', { class: `tab${v.id === sel.view ? ' active' : ''}`, onClick: () => navigate({ view: v.id }) }, v.label)))
   projectList.replaceChildren(...projects.map(p => NavItem({
     label: p.name ?? p.id.slice(0, 8),
+    dot: p.id === sel.project ? 'live' : '',
     active: p.id === sel.project,
     onClick: () => navigate({ project: p.id, node: null, tab: 'detail' }),
   })))
@@ -130,10 +136,6 @@ function renderSidebar(): void {
     active: t.id === sel.node,
     onClick: () => navigate({ node: t.id, tab: 'request' }),
   })) : [Empty('no requests yet')]))
-  const counts = { task: 0, step: 0, artifact: 0, note: 0 }
-  for (const n of nodes.values()) counts[n.type]++
-  legend.replaceChildren(...Object.entries(counts).map(([type, n]) =>
-    el('div', { class: 'navitem' }, Dot(type), el('span', { class: 'truncate' }, type), el('span', { class: 'meta' }, String(n)))))
 }
 
 function renderNewRequest(): void {
@@ -155,7 +157,7 @@ function renderNewRequest(): void {
     const body = v.mode === 'grounded'
       ? { title: v.title, spec: v.spec, grounded: { modelRef: v.model, cwd: v.cwd } }
       : { title: v.title, spec: v.spec }
-    const { taskId } = await act<{ taskId: string }>('newTask', body)
+    const { taskId } = await api.act<{ taskId: string }>('newTask', body)
     toast(v.mode === 'grounded' ? 'request created — analyze step running' : 'request created', 'ok')
     navigate({ node: taskId, tab: 'request' })
   }))
@@ -163,62 +165,62 @@ function renderNewRequest(): void {
   newRequestHost.replaceChildren(b)
 }
 
-// ---- tab rendering ----
-async function renderTab(): Promise<void> {
-  tabHost.replaceChildren(Tabs(TAB_ITEMS, sel.tab, id => navigate({ tab: id as Tab })))
+// ---- inspector (the old tab system, now an overlay in the dock) ----
+async function renderInspector(): Promise<void> {
+  if (!sel.node) { inspector.style.display = 'none'; return }
+  inspector.style.display = ''
+  inspectorTabs.replaceChildren(Tabs(TAB_ITEMS, sel.tab, id => navigate({ tab: id as Tab })))
   const taskId = selectedTaskId()
   switch (sel.tab) {
     case 'detail': {
-      if (!sel.node) { tabBody.replaceChildren(Empty('click a node')); return }
-      const res = await fetch(`/api/node?${q({ project: sel.project, id: sel.node })}`)
-      tabBody.replaceChildren(renderDetail(sel.node, res.ok ? await res.json() : null, node => navigate({ node, tab: 'detail' })))
+      const detail = await api.node(sel.project, sel.node)
+      inspectorBody.replaceChildren(renderDetail(sel.node, detail, node => navigate({ node, tab: 'detail' })))
       return
     }
     case 'chat': {
-      if (!taskId) { tabBody.replaceChildren(Empty('select a task or step')); return }
-      const step = sel.node?.startsWith('step:') ? sel.node.split(':')[2] : undefined
-      const items = await (await fetch(`/api/transcript?${q({ project: sel.project, task: taskId, step })}`)).json()
+      if (!taskId) { inspectorBody.replaceChildren(Empty('select a task or step')); return }
+      const step = sel.node?.startsWith(NODE_PREFIX.step) ? sel.node.split(':')[2] : undefined
+      const items = await api.transcript(sel.project, taskId, step)
       const onReply = session.actions
-        ? async (text: string) => { await act('reply', { taskId, text }); toast('replied — step resuming', 'ok') }
+        ? async (text: string) => { await api.act('reply', { taskId, text }); toast('replied — step resuming', 'ok') }
         : null
-      tabBody.replaceChildren(renderChat(items, onReply))
-      detailPane.scrollTop = detailPane.scrollHeight
+      inspectorBody.replaceChildren(renderChat(items, onReply))
       return
     }
     case 'request': {
-      if (!taskId) { tabBody.replaceChildren(Empty('select a request')); return }
-      const [plansRes, detailRes, transcript, planNotes] = await Promise.all([
-        fetch(`/api/plans?${q({ project: sel.project, task: taskId })}`),
-        fetch(`/api/node?${q({ project: sel.project, id: taskId })}`),
-        (await fetch(`/api/transcript?${q({ project: sel.project, task: taskId })}`)).json() as Promise<Array<{ kind: string; question?: string; answer?: string | null; stepId?: string }>>,
-        (await fetch(`/api/plan-notes?${q({ project: sel.project, task: taskId })}`)).json() as Promise<PlanNoteView[]>,
+      if (!taskId) { inspectorBody.replaceChildren(Empty('select a request')); return }
+      const [plans, detail, transcript, planNotes] = await Promise.all([
+        api.plans(sel.project, taskId),
+        api.node(sel.project, taskId),
+        api.transcript(sel.project, taskId),
+        api.planNotes(sel.project, taskId),
       ])
-      const subtree = focusIds(taskId) // same walk focus mode uses — feeds the knowledge list
-      const wrote = [...links.values()].filter(l => l.type === 'wrote' && subtree.has(l.source))
+      const subtree = focusIds(taskId)
+      const wrote = [...links.values()].filter(l => l.type === EDGE.wrote && subtree.has(l.source))
         .map(l => nodes.get(l.target)).filter((n): n is GraphNode => n !== undefined)
         .map(n => ({ id: n.id, label: n.label, detail: n.detail }))
-      tabBody.replaceChildren(renderRequest({
+      inspectorBody.replaceChildren(renderRequest({
         taskId,
-        plans: plansRes.ok ? await plansRes.json() as PlansView : null,
-        t: detailRes.ok ? await detailRes.json() as TaskView : null,
-        open: transcript.filter(i => i.kind === 'question' && i.answer === null)
-          .map((i): OpenQuestion => ({ question: i.question ?? '', stepId: i.stepId ?? '' })),
+        plans,
+        t: detail as TaskView | null,
+        open: transcript.filter((i): i is Extract<typeof i, { kind: 'question' }> => i.kind === 'question' && i.answer === null)
+          .map((i): OpenQuestion => ({ question: i.question, stepId: i.stepId })),
         planNotes,
         knowledge: wrote,
-        planScopeName: `plan-${taskId}`,
+        planScopeName: planScopeName(taskId),
         shownVersion: shownPlanVersion,
         focused: focusedTask === taskId,
         go: node => navigate({ node, tab: 'detail' }),
-        showVersion: v => { shownPlanVersion = v; void renderTab() },
-        act: session.actions ? act : null,
-        onFocus: on => { focusedTask = on ? taskId : null; applyFocus(); void renderTab() },
+        showVersion: v => { shownPlanVersion = v; void renderInspector() },
+        act: session.actions ? api.act : null,
+        onFocus: on => { focusedTask = on ? taskId : null; applyFocus(); void renderInspector() },
       }))
       return
     }
     case 'log': {
-      const rows = await (await fetch(`/api/log?${q({ project: sel.project, task: taskId ?? undefined })}`)).json() as LogRow[]
+      const rows = await api.log(sel.project, { task: taskId ?? undefined })
       logView.setRows(rows, taskId)
-      tabBody.replaceChildren(logView.root)
+      inspectorBody.replaceChildren(logView.root)
       return
     }
   }
@@ -226,40 +228,39 @@ async function renderTab(): Promise<void> {
 
 // ---- live stream ----
 function watch(fromSeq: number): void {
-  es?.close()
-  es = new EventSource(`/api/stream?${q({ project: sel.project, fromSeq: String(fromSeq) })}`)
-  es.onopen = () => setStatus(true, `live · seq ${seq}`)
-  es.onerror = () => setStatus(false, 'reconnecting…')
-  es.onmessage = m => {
-    seq = Number(m.lastEventId) || seq
-    const env = JSON.parse(m.data) as { patch: GraphPatch | null; summary: LogRow | null }
-    if (env.patch) {
+  stream?.close()
+  stream = api.eventStream(sel.project, fromSeq, {
+    onLive: () => setStatus(true, `live · seq ${seq}`),
+    onDown: () => setStatus(false, 'reconnecting…'),
+    onEnvelope: (env, envSeq) => {
+      seq = envSeq || seq
+      if (env.patch) {
       for (const n of [...env.patch.addNodes, ...env.patch.updateNodes]) nodes.set(n.id, n)
       for (const id of env.patch.removeNodeIds) nodes.delete(id)
       for (const l of env.patch.addLinks) links.set(linkKey(l), l)
       for (const l of env.patch.removeLinks) links.delete(linkKey(l))
       for (const id of env.patch.removeNodeIds)
         for (const [k, l] of links) if (l.source === id || l.target === id) links.delete(k)
-      renderer.applyPatch(env.patch)
-      renderSidebar()
-      if (focusedTask) applyFocus() // fresh knowledge lights up inside the dimmed world
-    }
-    if (env.summary) {
-      if (sel.tab === 'log') logView.append(env.summary)
-      // live-follow the open chat AND the request view (step statuses, your-move, knowledge)
-      if ((sel.tab === 'chat' || sel.tab === 'request') && env.summary.taskId && env.summary.taskId === selectedTaskId()) {
-        clearTimeout(chatTimer)
-        chatTimer = setTimeout(() => void renderTab(), 300)
+        renderer.applyPatch(env.patch)
+        renderSidebar()
+        if (focusedTask) applyFocus() // fresh knowledge lights up inside the dimmed world
       }
-    }
-    setStatus(true, `live · seq ${seq}`)
-  }
+      if (env.summary) {
+        conversation?.addSystemRow(env.summary)
+        if (sel.node && sel.tab === 'log') logView.append(env.summary)
+        if (sel.node && (sel.tab === 'chat' || sel.tab === 'request') && env.summary.taskId && env.summary.taskId === selectedTaskId()) {
+          clearTimeout(chatTimer)
+          chatTimer = setTimeout(() => void renderInspector(), 300)
+        }
+      }
+      setStatus(true, `live · seq ${seq}`)
+    },
+  })
 }
 
 // ---- selection routing (the ONE renderer of selection) ----
 async function loadProject(): Promise<void> {
-  const g = await (await fetch(`/api/graph?${q({ project: sel.project })}`)).json() as
-    { seq: number; nodes: GraphNode[]; links: GraphLink[] }
+  const g = await api.graph(sel.project)
   seq = g.seq
   nodes.clear()
   links.clear()
@@ -268,6 +269,7 @@ async function loadProject(): Promise<void> {
   renderer.setGraph(g)
   focusedTask = null
   renderer.focus(null)
+  conversation?.setProject(sel.project)
   watch(g.seq)
 }
 
@@ -276,22 +278,28 @@ onChange(s => {
     const projectChanged = s.project !== sel.project
     const nodeChanged = s.node !== sel.node
     sel = s
+    app.className = `app view-${sel.view}`
+    applyColumns()
     if (projectChanged) { shownPlanVersion = null; await loadProject() }
     if (nodeChanged) shownPlanVersion = null
     renderer.select(sel.node)
     renderSidebar()
-    await renderTab()
+    await renderInspector()
   })()
 })
 
 // ---- boot ----
-await initSession()
+initApi({ onError: err => toast(`${err.endpoint}: ${err.message}`, 'danger') })
+await api.initSession()
+conversation = new Conversation(node => navigate({ node, tab: 'detail' }))
+app.children[1]!.replaceWith(conversation.root)
 renderNewRequest()
-projects = await (await fetch('/api/projects')).json() as Array<{ id: string; name: string | null }>
+projects = await api.projects()
 if (!current().project && projects[0]) {
   navigate({ project: projects[0].id }) // triggers onChange
 } else if (current().project) {
-  renderSidebar() // onChange already fired with the deep link; paint names now that they exist
+  renderSidebar()
+  conversation.setProject(current().project)
 } else {
   projectList.append(Empty('no projects yet'))
 }

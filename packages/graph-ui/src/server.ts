@@ -1,6 +1,20 @@
+import { stepCountIs, streamText, type LanguageModel } from 'ai'
 import { z } from 'zod'
-import { createProjectSessions, emptyPatch, type OrcActions, type ProjectSessions } from '@orc/ui-core'
+import { PlanDraft } from '@orc/contracts'
+import { buildCopilotTools, copilotSystemPrompt, createProjectSessions, emptyPatch, type OrcActions, type ProjectSessions } from '@orc/ui-core'
 import index from '../page/index.html'
+
+export interface CopilotConfig {
+  resolveModel: (ref: string) => LanguageModel // throws for unknown provider/model
+  defaultModelRef: string
+  price?: (ref: string, usage: { inputTokens?: number; outputTokens?: number; inputTokenDetails?: { cacheReadTokens?: number; cacheWriteTokens?: number } }) => number | null
+}
+
+const CopilotBody = z.object({
+  projectId: z.string().min(1),
+  modelRef: z.string().min(1).optional(),
+  messages: z.array(z.object({ role: z.enum(['user', 'assistant']), content: z.string() })).min(1).max(60),
+})
 
 // Every mutating route: its body schema and its dispatch, tied together in one closure so the
 // parsed type flows into the handler with no casts — zod IS the validation and the typing.
@@ -27,6 +41,8 @@ const ACTION_ROUTES: Record<string, ActionHandler> = {
     z.object({ taskId: id, modelRef: id, skillRefs: z.array(z.string()).optional() }),
     (a, d) => a.propose(d.taskId, { modelRef: d.modelRef, skillRefs: d.skillRefs }),
   ),
+  // the draft is validated by the SAME contract schema the kernel writes with — no duplicate
+  edit: route(z.object({ taskId: id, draft: PlanDraft }), (a, d) => a.edit(d.taskId, d.draft)),
   approve: route(
     z.object({ taskId: id, version: z.number().int().positive().optional() }),
     (a, d) => a.approve(d.taskId, d.version),
@@ -59,12 +75,70 @@ export function startGraphUi(opts: {
   port: number
   cwdProject?: { id: string; name: string }
   actions?: OrcActions // absent = read-only server (launched outside a project)
+  copilot?: CopilotConfig
   defaultCwd?: string
 }): GraphUiServer {
   const sessions = createProjectSessions({ url: opts.url, cwdProject: opts.cwdProject })
   // CSRF guard: minted per boot, readable only same-origin (GET /api/session), required as a
   // custom header on every mutation — cross-origin pages can neither read nor send it.
   const token = crypto.randomUUID()
+
+  // the copilot loop: same tools as the UI, streamed to the client part by part — every tool
+  // call is visible, usage is priced through the same table as agent runs
+  const copilot = async (req: Request): Promise<Response> => {
+    const cfg = opts.copilot
+    if (!cfg) return Response.json({ error: 'copilot unavailable: start orc graph inside a project' }, { status: 501 })
+    if (req.headers.get('x-orc-token') !== token) return Response.json({ error: 'missing or invalid x-orc-token' }, { status: 403 })
+    const parsed = CopilotBody.safeParse(await req.json().catch(() => null))
+    if (!parsed.success) return Response.json({ error: parsed.error.message }, { status: 400 })
+    const { projectId, messages } = parsed.data
+    const modelRef = parsed.data.modelRef ?? cfg.defaultModelRef
+    let model: LanguageModel
+    try { model = cfg.resolveModel(modelRef) } catch (err) {
+      return Response.json({ error: err instanceof Error ? err.message : String(err) }, { status: 400 })
+    }
+    const name = projectId === opts.cwdProject?.id ? opts.cwdProject.name : projectId.slice(0, 8)
+    const result = streamText({
+      model,
+      system: copilotSystemPrompt(name, opts.actions !== undefined),
+      messages,
+      tools: buildCopilotTools({ sessions, actions: opts.actions ?? null, projectId }),
+      stopWhen: stepCountIs(8),
+    })
+    const enc = new TextEncoder()
+    const stream = new ReadableStream<Uint8Array>({
+      start: async controller => {
+        const send = (data: unknown): void => controller.enqueue(enc.encode(`data: ${JSON.stringify(data)}\n\n`))
+        try {
+          for await (const part of result.fullStream) {
+            switch (part.type) {
+              case 'text-delta': send({ type: 'text', text: part.text }); break
+              case 'tool-call': send({ type: 'tool-call', toolName: part.toolName, input: part.input }); break
+              case 'tool-result': send({ type: 'tool-result', toolName: part.toolName, output: part.output }); break
+              case 'tool-error': send({ type: 'tool-error', toolName: part.toolName, error: String(part.error) }); break
+              case 'error': send({ type: 'error', message: String(part.error) }); break
+              case 'finish':
+                send({
+                  type: 'done',
+                  usage: {
+                    inputTokens: part.totalUsage.inputTokens ?? 0,
+                    outputTokens: part.totalUsage.outputTokens ?? 0,
+                    costUSD: cfg.price?.(modelRef, part.totalUsage) ?? null,
+                  },
+                })
+                break
+              default: break // start/step/reasoning parts are wire noise for us
+            }
+          }
+        } catch (err) {
+          send({ type: 'error', message: err instanceof Error ? err.message : String(err) })
+        } finally {
+          controller.close()
+        }
+      },
+    })
+    return new Response(stream, { headers: { 'content-type': 'text/event-stream', 'cache-control': 'no-cache' } })
+  }
 
   const act = async (req: Request, name: string): Promise<Response> => {
     if (!opts.actions) return Response.json({ error: 'read-only server: start orc graph inside a project' }, { status: 501 })
@@ -81,12 +155,19 @@ export function startGraphUi(opts: {
 
   const api = async (req: Request): Promise<Response> => {
     const u = new URL(req.url)
+    if (req.method === 'POST' && u.pathname === '/api/copilot') return copilot(req)
     if (req.method === 'POST' && u.pathname.startsWith('/api/actions/'))
       return act(req, u.pathname.slice('/api/actions/'.length))
     const project = u.searchParams.get('project') ?? ''
     switch (u.pathname) {
       case '/api/session':
-        return Response.json({ actions: opts.actions !== undefined, token, defaultCwd: opts.defaultCwd ?? null })
+        return Response.json({
+          actions: opts.actions !== undefined,
+          copilot: opts.copilot !== undefined,
+          copilotModel: opts.copilot?.defaultModelRef ?? null,
+          token,
+          defaultCwd: opts.defaultCwd ?? null,
+        })
       case '/api/projects':
         return Response.json(await sessions.projects())
       case '/api/graph': {
