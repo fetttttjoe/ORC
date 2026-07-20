@@ -1,0 +1,150 @@
+import { afterAll, describe, expect, it } from 'bun:test'
+import { EVENT_KIND } from '@orc/contracts'
+import { Kernel, openStorage } from '@orc/kernel'
+import { createTestDb, TEST_PROJECT_ID } from '@orc/kernel/test-helpers'
+import { noteNodeId, type OrcActions } from '@orc/ui-core'
+import { startGraphUi } from './server'
+
+const dbs: Array<{ drop: () => Promise<void> }> = []
+afterAll(async () => { await Promise.all(dbs.map(d => d.drop())) }, 30_000)
+
+const noteEvent = (id: string) => ({
+  taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_written,
+  payload: { note: { id, title: id }, author: { source: 'cli' as const } },
+})
+
+async function setup() {
+  const db = await createTestDb()
+  dbs.push(db)
+  const storage = await openStorage(db.url, { projectId: TEST_PROJECT_ID })
+  const t = await new Kernel(storage.events).createTask({ title: 'seed task', spec: '' })
+  const ui = startGraphUi({ url: db.url, port: 0, cwdProject: { id: TEST_PROJECT_ID, name: 'test-proj' } })
+  const base = `http://127.0.0.1:${ui.port}`
+  return { storage, taskId: t.id, ui, base }
+}
+
+// read SSE messages off a live stream until the predicate matches (2s cap)
+async function readSse(res: Response, until: (msg: { id: number; data: string }) => boolean) {
+  const reader = res.body!.getReader()
+  const dec = new TextDecoder()
+  let buf = ''
+  const deadline = Date.now() + 2000
+  try {
+    while (Date.now() < deadline) {
+      const { value, done } = await reader.read()
+      if (done) break
+      buf += dec.decode(value)
+      for (const block of buf.split('\n\n').slice(0, -1)) {
+        const id = Number(block.match(/^id: (\d+)$/m)?.[1] ?? -1)
+        const data = block.match(/^data: (.*)$/m)?.[1] ?? ''
+        const msg = { id, data }
+        if (until(msg)) return msg
+      }
+    }
+    return null
+  } finally {
+    await reader.cancel().catch(() => {})
+  }
+}
+
+describe('graph-ui web adapter', () => {
+  it('serves projects, graph snapshot, node detail, and 404s', async () => {
+    const { storage, taskId, ui, base } = await setup()
+    expect(await (await fetch(`${base}/api/projects`)).json()).toEqual([{ id: TEST_PROJECT_ID, name: 'test-proj' }])
+    const g = await (await fetch(`${base}/api/graph?project=${TEST_PROJECT_ID}`)).json() as { seq: number; nodes: Array<{ id: string }> }
+    expect(g.seq).toBeGreaterThan(0)
+    expect(g.nodes.map(n => n.id)).toContain(taskId)
+    const d = await (await fetch(`${base}/api/node?project=${TEST_PROJECT_ID}&id=${taskId}`)).json() as { task: { title: string } }
+    expect(d.task.title).toBe('seed task')
+    expect((await fetch(`${base}/api/node?project=${TEST_PROJECT_ID}&id=nope`)).status).toBe(404)
+    expect((await fetch(`${base}/api/bogus`)).status).toBe(404)
+    await ui.stop(); await storage.close()
+  })
+
+  it('streams envelopes (patch + summary) and replays missed patches for a stale fromSeq', async () => {
+    const { storage, ui, base } = await setup()
+    const g = await (await fetch(`${base}/api/graph?project=${TEST_PROJECT_ID}`)).json() as { seq: number }
+
+    // live: open at the current seq, then append — the envelope must carry patch AND summary
+    const live = await fetch(`${base}/api/stream?project=${TEST_PROJECT_ID}&fromSeq=${g.seq}`)
+    const appended = await storage.events.append(noteEvent('live-note'))
+    const liveMsg = await readSse(live, m => m.data.includes('live-note'))
+    expect(liveMsg?.id).toBe(appended.seq)
+    const env = JSON.parse(liveMsg!.data) as { patch: { addNodes: Array<{ id: string }> }; summary: { kind: string; noteRef: string } }
+    expect(env.patch.addNodes.map(n => n.id)).toEqual([noteNodeId('project', 'live-note')])
+    expect(env.summary.kind).toBe(EVENT_KIND.memory_written)
+    expect(env.summary.noteRef).toBe(noteNodeId('project', 'live-note'))
+
+    // a graph-invisible event still streams: patch null, summary present
+    const accessed = await fetch(`${base}/api/stream?project=${TEST_PROJECT_ID}&fromSeq=${appended.seq}`)
+    await storage.events.append({
+      taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_accessed,
+      payload: { id: 'live-note', scope: 'project', mode: 'read', author: { source: 'cli' } },
+    })
+    const quiet = await readSse(accessed, m => m.data.includes('memory_accessed'))
+    const quietEnv = JSON.parse(quiet!.data) as { patch: null; summary: { line: string } }
+    expect(quietEnv.patch).toBeNull()
+    expect(quietEnv.summary.line).toContain('read')
+
+    // resume: a NEW stream with the OLD fromSeq gets the note in its catch-up patch
+    const resumed = await fetch(`${base}/api/stream?project=${TEST_PROJECT_ID}&fromSeq=${g.seq}`)
+    const catchUp = await readSse(resumed, m => m.data.includes('live-note'))
+    expect(catchUp).not.toBeNull()
+    expect((JSON.parse(catchUp!.data) as { patch: { addNodes: Array<{ id: string }> } }).patch.addNodes.map(n => n.id)).toEqual([noteNodeId('project', 'live-note')])
+
+    await ui.stop(); await storage.close()
+  })
+
+  it('action routes: CSRF-guarded, 501 when read-only, dispatched with parsed input', async () => {
+    const db = await createTestDb()
+    dbs.push(db)
+    const calls: unknown[] = []
+    const actions = { approve: async (taskId: string, version?: number) => { calls.push([taskId, version]); return { version: version ?? 1 } } } as unknown as OrcActions
+    const ui = startGraphUi({ url: db.url, port: 0, actions })
+    const base = `http://127.0.0.1:${ui.port}`
+
+    const session = await (await fetch(`${base}/api/session`)).json() as { actions: boolean; token: string }
+    expect(session.actions).toBe(true)
+
+    // no token -> 403, action not executed
+    const forbidden = await fetch(`${base}/api/actions/approve`, { method: 'POST', body: JSON.stringify({ taskId: 't1' }) })
+    expect(forbidden.status).toBe(403)
+    expect(calls).toEqual([])
+
+    // token + valid body -> dispatched
+    const ok = await fetch(`${base}/api/actions/approve`, {
+      method: 'POST', headers: { 'x-orc-token': session.token }, body: JSON.stringify({ taskId: 't1', version: 2 }),
+    })
+    expect(await ok.json()).toEqual({ version: 2 })
+    expect(calls).toEqual([['t1', 2]])
+
+    // bad body -> 400; unknown action -> 404
+    expect((await fetch(`${base}/api/actions/approve`, { method: 'POST', headers: { 'x-orc-token': session.token }, body: '{}' })).status).toBe(400)
+    expect((await fetch(`${base}/api/actions/nope`, { method: 'POST', headers: { 'x-orc-token': session.token }, body: '{}' })).status).toBe(404)
+    await ui.stop()
+
+    // read-only server (no actions) -> 501 regardless of token
+    const ro = startGraphUi({ url: db.url, port: 0 })
+    const roSession = await (await fetch(`http://127.0.0.1:${ro.port}/api/session`)).json() as { actions: boolean; token: string }
+    expect(roSession.actions).toBe(false)
+    const blocked = await fetch(`http://127.0.0.1:${ro.port}/api/actions/approve`, {
+      method: 'POST', headers: { 'x-orc-token': roSession.token }, body: JSON.stringify({ taskId: 't1' }),
+    })
+    expect(blocked.status).toBe(501)
+    await ro.stop()
+  })
+
+  it('serves transcript, plans (404 when none), and limited log', async () => {
+    const { storage, taskId, ui, base } = await setup()
+    await storage.events.append({
+      taskId, stepId: 's1', runToken: 'r1', kind: EVENT_KIND.agent_call,
+      payload: { stepId: 's1', runToken: 'r1', iteration: 1, request: {}, response: { text: 'transcript line', toolCalls: [] } },
+      usage: { inputTokens: 1, outputTokens: 1, costUSD: null, estimated: false },
+    })
+    const items = await (await fetch(`${base}/api/transcript?project=${TEST_PROJECT_ID}&task=${taskId}`)).json() as Array<{ text: string }>
+    expect(items.map(i => i.text)).toEqual(['transcript line'])
+    expect((await fetch(`${base}/api/plans?project=${TEST_PROJECT_ID}&task=${taskId}`)).status).toBe(404)
+    expect(await (await fetch(`${base}/api/log?project=${TEST_PROJECT_ID}&limit=1`)).json()).toHaveLength(1)
+    await ui.stop(); await storage.close()
+  })
+})
