@@ -536,7 +536,8 @@ export async function createDbosPort(opts: {
 
 function priceDraft(d: EventDraft, provider: ModelProvider<unknown>, modelId: string): EventDraft {
   if (!d.usage || d.usage.costUSD !== null) return d
-  const costUSD = costUSDFor(provider.costs, modelId, d.usage.inputTokens, d.usage.outputTokens)
+  const costUSD = costUSDFor(provider.costs, modelId, d.usage.inputTokens, d.usage.outputTokens,
+    { readTokens: d.usage.cacheReadTokens, writeTokens: d.usage.cacheWriteTokens })
   return { ...d, usage: { ...d.usage, costUSD, estimated: d.usage.estimated || costUSD === null } }
 }
 

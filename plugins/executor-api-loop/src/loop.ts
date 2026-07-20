@@ -49,12 +49,19 @@ function isTransient(err: unknown): boolean {
   return code === 'ECONNRESET' || code === 'ECONNREFUSED' || code === 'ETIMEDOUT' || code === 'ENOTFOUND'
 }
 
-function normalizeUsage(u: { inputTokens?: number; outputTokens?: number } | undefined): Usage {
+export function normalizeUsage(
+  u: { inputTokens?: number; outputTokens?: number; inputTokenDetails?: { cacheReadTokens?: number; cacheWriteTokens?: number } } | undefined,
+): Usage {
   const input = u?.inputTokens
   const output = u?.outputTokens
+  // cache split: priced ~10x apart from fresh input
+  const read = u?.inputTokenDetails?.cacheReadTokens
+  const write = u?.inputTokenDetails?.cacheWriteTokens
   return {
     inputTokens: typeof input === 'number' && Number.isFinite(input) ? Math.floor(input) : 0,
     outputTokens: typeof output === 'number' && Number.isFinite(output) ? Math.floor(output) : 0,
+    ...(typeof read === 'number' && read > 0 ? { cacheReadTokens: Math.floor(read) } : {}),
+    ...(typeof write === 'number' && write > 0 ? { cacheWriteTokens: Math.floor(write) } : {}),
     costUSD: null, // priced by the port, which knows the provider cost table
     estimated: !Number.isFinite(input) || !Number.isFinite(output),
   }
@@ -117,8 +124,19 @@ function buildPrompt(ctx: ExecutorContext<LanguageModel>): string {
     skills, // force-loaded plan data — never model-elective (spec §6)
     deps ? `# Upstream outputs\n${deps}` : '',
     KNOWLEDGE_PROTOCOL,
-    `You have file tools scoped to your workspace. When finished (or stuck), call the 'signal' tool — its summary is the only thing downstream steps will see.`,
+    `You have file tools scoped to your workspace. Iteration budget: ${ctx.step.maxIterations} model calls — plan to finish within it. When finished (or stuck), call the 'signal' tool — its summary is the only thing downstream steps will see.`,
   ].filter(Boolean).join('\n\n')
+}
+
+// Endgame budget note, durable + append-only: a transient per-call suffix at the prompt tail
+// would invalidate the provider's cached prefix every iteration. Warn only in the final 3
+// calls, loudly on the last.
+function budgetNote(iteration: number, max: number): string | null {
+  const remaining = max - iteration + 1
+  if (remaining > 3) return null
+  return remaining === 1
+    ? `FINAL iteration (${iteration}/${max}): call 'signal' THIS turn. Summarize what you have; put unfinished work in the summary.`
+    : `Budget: iteration ${iteration} of ${max} — ${remaining} model calls left. Stop exploring; finish pending writes and call 'signal'.`
 }
 
 export function apiLoopExecutor(): AgentExecutor<LanguageModel> {
@@ -132,6 +150,8 @@ export function apiLoopExecutor(): AgentExecutor<LanguageModel> {
       let persistedThrough = 0 // messages[0..persistedThrough) are already in an agent_call event
 
       for (let iteration = 1; iteration <= ctx.step.maxIterations; iteration++) {
+        const note = budgetNote(iteration, ctx.step.maxIterations)
+        if (note) messages.push({ role: 'user', content: note })
         const remaining = await ctx.checkpoint(`budget:${iteration}`, ctx.budgetRemainingUSD)
         if (remaining !== null && remaining <= 0) {
           yield { type: UNIFIED_EVENT_TYPE.error, class: FAILURE_CLASS.budget_exceeded, message: `budget exhausted before iteration ${iteration}` }

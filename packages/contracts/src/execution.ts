@@ -7,6 +7,9 @@ import type { LoadedSkill, ResolvedTool } from './plugins'
 export const Usage = z.object({
   inputTokens: z.number().int().nonnegative(),
   outputTokens: z.number().int().nonnegative(),
+  // prompt-cache split, optional (not every provider caches). inputTokens is the TOTAL.
+  cacheReadTokens: z.number().int().nonnegative().optional(),
+  cacheWriteTokens: z.number().int().nonnegative().optional(),
   costUSD: z.number().nonnegative().nullable(),
   estimated: z.boolean(),
 })
@@ -14,9 +17,12 @@ export type Usage = z.infer<typeof Usage>
 
 export function addUsage(a: Usage, b: Usage): Usage {
   const costs = [a.costUSD, b.costUSD].filter((c): c is number => c !== null)
+  const cacheRead = (a.cacheReadTokens ?? 0) + (b.cacheReadTokens ?? 0)
+  const cacheWrite = (a.cacheWriteTokens ?? 0) + (b.cacheWriteTokens ?? 0)
   return {
     inputTokens: a.inputTokens + b.inputTokens,
     outputTokens: a.outputTokens + b.outputTokens,
+    ...(cacheRead || cacheWrite ? { cacheReadTokens: cacheRead, cacheWriteTokens: cacheWrite } : {}),
     costUSD: costs.length > 0 ? costs.reduce((x, y) => x + y, 0) : null,
     estimated: a.estimated || b.estimated,
   }
@@ -25,6 +31,9 @@ export function addUsage(a: Usage, b: Usage): Usage {
 export const ModelCost = z.object({
   inPerMTok: z.number().nonnegative(),
   outPerMTok: z.number().nonnegative(),
+  // cache pricing — absent means cache tokens are priced at inPerMTok
+  cacheReadPerMTok: z.number().nonnegative().optional(),
+  cacheWritePerMTok: z.number().nonnegative().optional(),
 })
 export type ModelCost = z.infer<typeof ModelCost>
 
@@ -33,10 +42,19 @@ export function costUSDFor(
   modelId: string,
   inputTokens: number,
   outputTokens: number,
+  cache?: { readTokens?: number; writeTokens?: number },
 ): number | null {
   const c = costs[modelId] ?? costs['*']
   if (!c) return null
-  return (inputTokens * c.inPerMTok + outputTokens * c.outPerMTok) / 1_000_000
+  const read = cache?.readTokens ?? 0
+  const write = cache?.writeTokens ?? 0
+  const fresh = Math.max(0, inputTokens - read - write) // inputTokens is the total — split it
+  return (
+    fresh * c.inPerMTok +
+    read * (c.cacheReadPerMTok ?? c.inPerMTok) +
+    write * (c.cacheWritePerMTok ?? c.inPerMTok) +
+    outputTokens * c.outPerMTok
+  ) / 1_000_000
 }
 
 export const SignalOutcome = z.enum(['success', 'failure'])

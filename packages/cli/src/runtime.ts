@@ -16,7 +16,13 @@ export function seedRegistries(config = loadConfig()) {
     ['ollama', createOllamaProvider({ baseUrl: config.ollamaBaseUrl, costOverrides: config.costOverrides['ollama'] ?? {} })],
   ])
   const executors = new Map<string, AgentExecutor<unknown>>([['api-loop', apiLoopExecutor()]])
-  const analyzers = new Map<string, Analyzer>([['agent-analyzer', agentAnalyzer()]])
+  // config-driven iteration budget: the plugin keeps its own fallback; the project's
+  // maxIterations wins at plan-authoring time (approved plans stay frozen).
+  const base = agentAnalyzer()
+  const analyzers = new Map<string, Analyzer>([['agent-analyzer', {
+    ...base,
+    analysisStep: opts => ({ ...base.analysisStep(opts), maxIterations: config.maxIterations }),
+  }]])
   return { providers, executors, analyzers }
 }
 

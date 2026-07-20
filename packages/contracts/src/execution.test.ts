@@ -97,3 +97,16 @@ describe('execution contracts', () => {
     expect(failureClassOf({ failureClass: 'not-a-class' })).toBeNull()
   })
 })
+
+describe('costUSDFor cache pricing', () => {
+  const costs = { m: { inPerMTok: 1, outPerMTok: 5, cacheReadPerMTok: 0.1, cacheWritePerMTok: 1.25 } }
+  it('splits total input into fresh/read/write at their own rates', () => {
+    // 1M total = 800k read + 100k write + 100k fresh; 1M out
+    expect(costUSDFor(costs, 'm', 1_000_000, 1_000_000, { readTokens: 800_000, writeTokens: 100_000 }))
+      .toBeCloseTo(0.8 * 0.1 + 0.1 * 1.25 + 0.1 * 1 + 5, 10)
+  })
+  it('without cache info or rates, all input prices at inPerMTok', () => {
+    expect(costUSDFor(costs, 'm', 1_000_000, 0)).toBe(1)
+    expect(costUSDFor({ m: { inPerMTok: 1, outPerMTok: 5 } }, 'm', 1_000_000, 0, { readTokens: 900_000 })).toBe(1)
+  })
+})
