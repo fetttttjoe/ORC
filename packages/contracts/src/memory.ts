@@ -1,6 +1,14 @@
 import { z } from 'zod'
 
 export const MEMORY_ID_RE = /^[a-z0-9][a-z0-9-]*$/
+export const MEMORY_LIMITS = {
+  labelItems: 50,
+  labelChars: 64,
+  detailItems: 100,
+  detailChars: 1_000,
+  bodyChars: 100_000,
+  rationaleChars: 20_000,
+} as const
 
 const Id = z.string().regex(MEMORY_ID_RE).max(128)
 
@@ -44,15 +52,19 @@ const MemoryNoteBase = z.object({
   // stamped by the store gateway from the runtime's Git HEAD — agents cannot invent one
   sourceRevision: z.string().nullable().default(null),
   title: z.string().min(1).max(200),
-  categories: z.array(z.string()).default([]),
-  tags: z.array(z.string()).default([]),
-  links: z.array(MemoryLink).default([]), // clean typed graph edges — no string-id form
-  paths: z.array(z.string()).default([]), // pointers down to code
-  rules: z.array(z.string()).default([]), // normative statements agents honor
+  categories: z.array(z.string().max(MEMORY_LIMITS.labelChars)).max(MEMORY_LIMITS.labelItems).default([]),
+  // lowercased at the boundary: search matches tags against a lowercased query while the
+  // list/ls filter compares case-exactly, so an un-normalized 'Postgres' is silently
+  // unreachable from one path and reachable from the other. Normalizing here also applies on
+  // replay (the projector re-parses each payload), so a rebuild converges existing notes.
+  tags: z.array(z.string().max(MEMORY_LIMITS.labelChars).toLowerCase()).max(MEMORY_LIMITS.labelItems).default([]),
+  links: z.array(MemoryLink).max(MEMORY_LIMITS.detailItems).default([]), // clean typed graph edges — no string-id form
+  paths: z.array(z.string().max(MEMORY_LIMITS.detailChars)).max(MEMORY_LIMITS.detailItems).default([]), // pointers down to code
+  rules: z.array(z.string().max(MEMORY_LIMITS.detailChars)).max(MEMORY_LIMITS.detailItems).default([]), // normative statements agents honor
   summary: z.string().max(500).default(''),
-  body: z.string().default(''),
-  rationale: z.string().default(''),          // plan-note: why this subplan exists
-  uncertainty: z.array(z.string()).default([]), // plan-note: coverage gaps / assumptions (RG7)
+  body: z.string().max(MEMORY_LIMITS.bodyChars).default(''),
+  rationale: z.string().max(MEMORY_LIMITS.rationaleChars).default(''),          // plan-note: why this subplan exists
+  uncertainty: z.array(z.string().max(MEMORY_LIMITS.detailChars)).max(MEMORY_LIMITS.detailItems).default([]), // plan-note: coverage gaps / assumptions (RG7)
 })
 export const MemoryNoteInput = MemoryNoteBase.refine(
   n => !(n.scope === 'project' && n.id === 'index'),

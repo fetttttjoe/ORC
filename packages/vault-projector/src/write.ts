@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto'
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import path from 'node:path'
+import { atomicWriteFileSync } from '@orc/kernel'
 import type { VaultFiles } from './render'
 
 const sha = (s: string): string => createHash('sha256').update(s).digest('hex')
@@ -22,12 +23,8 @@ export function writeVaultFiles(vaultDir: string, files: VaultFiles): void {
     if (isPlanFile(rel) && onDisk !== null) continue       // write-once (protects human edits)
     if (!isPlanFile(rel) && onDisk !== null && manifest[rel] !== undefined && sha(onDisk) !== manifest[rel])
       console.warn(`vault: ${rel} was hand-edited; it is projection-only and is being overwritten`)
-    mkdirSync(path.dirname(abs), { recursive: true })
-    const tmp = `${abs}.tmp`
-    writeFileSync(tmp, content)
-    renameSync(tmp, abs)                                   // atomic swap
+    atomicWriteFileSync(abs, content)
     manifest[rel] = sha(content)
   }
-  mkdirSync(vaultDir, { recursive: true })
-  writeFileSync(manifestPath, JSON.stringify(manifest, null, 2) + '\n')
+  atomicWriteFileSync(manifestPath, JSON.stringify(manifest, null, 2) + '\n')
 }

@@ -1,8 +1,9 @@
-import { readdirSync, readFileSync } from 'node:fs'
+import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync } from 'node:fs'
 import path from 'node:path'
-import { Command } from 'commander'
-import { ISOLATION_TIER, PlanDraft, STRATEGY, type Analyzer, type EventRecord, type ExecutionPort, type Plan, type RunHandle } from '@orc/contracts'
-import { openStorage, Kernel, fold, grantExtensionTrust, grantMcpTrust, initializeProject, isExtensionTrusted, isMcpTrusted, loadConfig, loadTrust, requireProject, taskUsage, type EventLog, type OrcConfig, type PluginHost, type ProjectConfig, type Storage } from '@orc/kernel'
+import { fileURLToPath } from 'node:url'
+import { Command, InvalidArgumentError } from 'commander'
+import { ISOLATION_TIER, PlanDraft, RUN_OUTCOME, STRATEGY, TASK_STATUS, type Analyzer, type EventRecord, type ExecutionPort, type Plan, type RunHandle } from '@orc/contracts'
+import { openStorage, Kernel, fold, grantExtensionTrust, grantMcpTrust, initializeProject, isExtensionTrusted, isMcpTrusted, loadConfig, loadTrust, migrateDatabase, requireProject, taskUsage, type EventLog, type OrcConfig, type PluginHost, type ProjectConfig, type Storage } from '@orc/kernel'
 import { createVaultProjector, parsePlanFile } from '@orc/vault-projector'
 import { createMemory, probeMemory } from '@orc/memory'
 import type { McpHub } from '@orc/mcp-client'
@@ -16,7 +17,7 @@ export async function openKernel(
     redactEnv?: string[]
     refValidator?: (plan: Plan) => Promise<string[]>
     analyzers?: Map<string, Analyzer>
-    send?: (workflowId: string, message: string, topic: string) => Promise<void>
+    send?: (workflowId: string, message: string, topic: string, idempotencyKey: string) => Promise<void>
     onAppend?: (e: EventRecord) => void
   } = {},
 ): Promise<{ kernel: Kernel; log: EventLog; storage: Storage }> {
@@ -27,6 +28,9 @@ export async function openKernel(
   return { kernel: new Kernel(log, opts.refValidator, opts.analyzers, opts.send), log, storage }
 }
 
+const SHIPPED_SKILLS_DIR = fileURLToPath(new URL('../../../vault/skills', import.meta.url))
+const SHIPPED_SKILLS = ['codebase-analysis', 'plan-authoring', 'documentation']
+
 // `orc init` must work before Postgres/plugins exist, so it gets a standalone entry
 // (bin.ts) and the same command inside buildProgram for help/unit visibility
 export function initCommand(dir?: string): Command {
@@ -35,13 +39,36 @@ export function initCommand(dir?: string): Command {
     .requiredOption('--name <name>', 'project name')
     .option('--force', 'mint a new identity for a deliberate fork of an existing project')
     .action((opts: { name: string; force?: boolean }) => {
-      const identity = initializeProject(dir ?? process.cwd(), opts.name, { force: opts.force })
+      const projectDir = dir ?? process.cwd()
+      const identity = initializeProject(projectDir, opts.name, { force: opts.force })
+      const config = loadConfig(projectDir)
+      for (const name of SHIPPED_SKILLS) {
+        const target = path.join(config.skillsDir, name, 'SKILL.md')
+        if (existsSync(target)) continue
+        mkdirSync(path.dirname(target), { recursive: true })
+        copyFileSync(path.join(SHIPPED_SKILLS_DIR, name, 'SKILL.md'), target)
+      }
       console.log(`initialized project '${identity.projectName}' (${identity.projectId})`)
     })
 }
 
 export async function runInit(args: string[], dir?: string): Promise<void> {
   await initCommand(dir).parseAsync(args, { from: 'user' })
+}
+
+export function databaseCommand(dir?: string): Command {
+  const database = new Command('db').description('database schema')
+  database.command('migrate')
+    .description('apply committed database migrations')
+    .action(async () => {
+      await migrateDatabase(loadConfig(dir).databaseUrl)
+      console.log('database migrated')
+    })
+  return database
+}
+
+export async function runMigrate(args: string[], dir?: string): Promise<void> {
+  await databaseCommand(dir).parseAsync(args, { from: 'user' })
 }
 
 export function singleStepDraft(task: { title: string; spec: string }, modelRef: string, skillRefs: string[] = []): PlanDraft {
@@ -63,6 +90,13 @@ export function singleStepDraft(task: { title: string; spec: string }, modelRef:
       dependsOn: [],
     }],
   }
+}
+
+function parseNonNegativeInteger(value: string): number {
+  const parsed = Number(value)
+  if (!/^\d+$/.test(value) || !Number.isSafeInteger(parsed))
+    throw new InvalidArgumentError(`must be a non-negative integer, got '${value}'`)
+  return parsed
 }
 
 function resolveDraft(task: { title: string; spec: string }, opts: { file?: string; model: string; skill?: string[]; fromVault?: boolean }, taskId: string, config?: OrcConfig): PlanDraft {
@@ -104,6 +138,7 @@ export function buildProgram(
   const program = new Command('orc')
   program.description('multi-agent orchestrator')
   program.addCommand(initCommand(plugin?.config.dir))
+  program.addCommand(databaseCommand(plugin?.config.dir))
 
   const needPlugin = () => {
     if (!plugin) throw new Error('plugin commands are unavailable in this context')
@@ -131,17 +166,21 @@ export function buildProgram(
       console.log(t.id)
       // auto-start: the grounded-plan template is policy-approved (its real gate is the
       // conversational one inside the plan step), so the analyze→plan conversation begins now
-      const handle = await (await needPort()).startRun(t.id, {})
+      const handle = await (await needPort()).startRun(t.id, { cwd: plugin?.config.dir ?? process.cwd() })
       console.log(`run ${handle.workflowId} started — tailing events (ctrl-c stops the run; re-run orc run ${t.id} to resume)`)
       const outcome = await tailUntilDone(kernel, t.id, handle)
       console.log(`run finished: ${outcome}`)
       process.exitCode = outcome === 'done' ? 0 : 1
     })
 
+  const requireTask = async (taskId: string) => {
+    const task = await kernel.getTask(taskId)
+    if (!task) throw new Error(`no task '${taskId}'`)
+    return task
+  }
   const planAction = (apply: (taskId: string, draft: PlanDraft) => Promise<Plan>, describe: (plan: Plan) => string) =>
     async (taskId: string, opts: { file?: string; model: string; skill?: string[]; fromVault?: boolean }) => {
-      const task = await kernel.getTask(taskId)
-      if (!task) throw new Error(`no task '${taskId}'`)
+      const task = await requireTask(taskId)
       const plan = await apply(taskId, resolveDraft(task, opts, taskId, plugin?.config))
       console.log(`plan v${plan.version} ${describe(plan)} — review with: orc plan ${taskId}`)
     }
@@ -166,9 +205,9 @@ export function buildProgram(
   program
     .command('plan <taskId>')
     .description('show a plan (latest by default)')
-    .option('--version <n>', 'plan version')
-    .action(async (taskId: string, opts: { version?: string }) => {
-      const plan = await kernel.getPlan(taskId, opts.version === undefined ? undefined : Number(opts.version))
+    .option('--version <n>', 'plan version', parseNonNegativeInteger)
+    .action(async (taskId: string, opts: { version?: number }) => {
+      const plan = await kernel.getPlan(taskId, opts.version)
       if (!plan) throw new Error(`no plan for task '${taskId}'`)
       console.log(JSON.stringify(plan, null, 2))
     })
@@ -176,9 +215,9 @@ export function buildProgram(
   program
     .command('approve <taskId>')
     .description('approve the latest plan (the human gate)')
-    .option('--version <n>', 'expected version (fails if stale)')
-    .action(async (taskId: string, opts: { version?: string }) => {
-      const plan = await kernel.approvePlan(taskId, opts.version === undefined ? undefined : Number(opts.version))
+    .option('--version <n>', 'expected version (fails if stale)', parseNonNegativeInteger)
+    .action(async (taskId: string, opts: { version?: number }) => {
+      const plan = await kernel.approvePlan(taskId, opts.version)
       console.log(`plan v${plan.version} approved`)
     })
 
@@ -222,8 +261,9 @@ export function buildProgram(
     .command('tasks')
     .description('list tasks')
     .action(async () => {
-      for (const t of await kernel.listTasks())
-        console.log(`${t.id}  ${t.status.padEnd(17)} ${t.title}`)
+      const tasks = await kernel.listTasks()
+      if (tasks.length === 0) console.log('_no tasks_')
+      for (const t of tasks) console.log(`${t.id}  ${t.status.padEnd(17)} ${t.title}`)
     })
 
   program
@@ -231,6 +271,7 @@ export function buildProgram(
     .description('show the event trail for a task')
     .option('--json', 'full redacted event records as JSON')
     .action(async (taskId: string, opts: { json?: boolean }) => {
+      await requireTask(taskId)
       const events = await kernel.eventsFor(taskId)
       if (opts.json) {
         console.log(JSON.stringify(events, null, 2))
@@ -243,11 +284,10 @@ export function buildProgram(
   program
     .command('replay <taskId>')
     .description('read-only audit replay: folded state at an event sequence (default: latest)')
-    .option('--at <seq>', 'replay up to and including this sequence')
-    .action(async (taskId: string, opts: { at?: string }) => {
-      const at = opts.at === undefined ? Number.POSITIVE_INFINITY : Number(opts.at)
-      if (opts.at !== undefined && (!Number.isInteger(at) || at < 0))
-        throw new Error(`--at must be a non-negative integer, got '${opts.at}'`)
+    .option('--at <seq>', 'replay up to and including this sequence', parseNonNegativeInteger)
+    .action(async (taskId: string, opts: { at?: number }) => {
+      await requireTask(taskId)
+      const at = opts.at ?? Number.POSITIVE_INFINITY
       const events = (await kernel.eventsFor(taskId)).filter(e => e.seq <= at)
       const state = fold(events)
       console.log(JSON.stringify(
@@ -266,9 +306,17 @@ export function buildProgram(
     async (taskId: string, opts: { cwd?: string }) => {
       const handle = await start(await needPort(), taskId, opts.cwd)
       console.log(intro(handle, taskId))
-      const outcome = await tailUntilDone(kernel, taskId, handle)
+      // A DBOS-cancelled workflow's getResult() REJECTS (split-run.test.ts:245 notes it may
+      // resolve or reject). `orc cancel` from another terminal is an advertised path — the intro
+      // line promises ctrl-c stops the run — so surfacing it as a raw driver error and exit 1 is
+      // indistinguishable from a crash, while `orc status` correctly reads 'cancelled'.
+      const outcome = await tailUntilDone(kernel, taskId, handle).catch(async err => {
+        const status = (await kernel.getTask(taskId))?.status
+        if (status === TASK_STATUS.cancelled) return RUN_OUTCOME.cancelled
+        throw err
+      })
       console.log(`run finished: ${outcome}`)
-      process.exitCode = outcome === 'done' ? 0 : 1
+      process.exitCode = outcome === RUN_OUTCOME.done ? 0 : 1
     }
 
   program
@@ -462,6 +510,10 @@ export function buildProgram(
       await memory.projector.catchUp()
       const rows = await memory.store.list({ category: o.category, tag: o.tag })
       await memory.close()
+      // the agent path already says "absence is not proof a decision doesn't exist"; printing
+      // zero bytes gives the human strictly less than the model gets, and reads as "no such note"
+      // when the honest answer is "the read model returned nothing"
+      if (rows.length === 0) console.log('_no notes_')
       for (const n of rows) console.log(`${n.id}\t${n.title}\t[${n.categories.join(',')}]\t${n.summary}`)
     })
   mem
@@ -473,6 +525,7 @@ export function buildProgram(
       await memory.projector.catchUp()
       const rows = await memory.store.search(query)
       await memory.close()
+      if (rows.length === 0) console.log('_no notes_')
       for (const n of rows) console.log(`${n.id}\t${n.title}\t${n.summary}`)
     })
   mem
@@ -485,7 +538,8 @@ export function buildProgram(
       await memory.projector.catchUp()
       const n = await memory.store.get(id, o.scope)
       await memory.close()
-      console.log(n ? JSON.stringify(n, null, 2) : `no note '${id}'`)
+      if (!n) throw new Error(`no note '${id}'`)
+      console.log(JSON.stringify(n, null, 2))
     })
   mem
     .command('rebuild')

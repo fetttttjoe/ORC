@@ -105,6 +105,43 @@ describe('SurrealMemory.applyEvent', () => {
     await m.close()
   })
 
+  // The cursor authorizes replay: applyEvent rejects e.seq <= cursor. So a clear that drops
+  // content while leaving the cursor ahead of it is unrecoverable through the normal paths —
+  // start()/catchUp() both drain zero and probeMemory reports healthy, because "no events after
+  // the cursor" is legitimately true. Only an explicit second rebuild() would heal it.
+  it('a failed clear never leaves the cursor ahead of the content it describes', async () => {
+    const t = await createTestSurreal(); drops.push(t.drop)
+    const m = await SurrealMemory.open(t)
+    await m.applyEvent(written(1))
+    expect(await m.getCursor()).toBe(1)
+
+    // Fault injection: fail the SECOND delete of the clear. Injecting through the orm's
+    // transaction seam (rather than the raw socket) is also the regression check — if clear()
+    // ever goes back to independent statements, `insideTransaction` stays false.
+    const db = (m as unknown as { db: { transaction: (cb: (tx: unknown) => Promise<unknown>) => Promise<unknown> } }).db
+    const realTransaction = db.transaction.bind(db)
+    let insideTransaction = false
+    db.transaction = (cb) => realTransaction(async (tx) => {
+      insideTransaction = true
+      const t = tx as { delete: (...a: unknown[]) => unknown }
+      const realDelete = t.delete.bind(t)
+      let deletes = 0
+      t.delete = (...a: unknown[]) => {
+        if (++deletes === 2) throw new Error('socket dropped')
+        return realDelete(...a)
+      }
+      return cb(tx)
+    })
+    await m.clear().catch(() => {})
+    db.transaction = realTransaction
+
+    expect(insideTransaction).toBe(true) // clear() must apply its deletes atomically
+    const cursor = await m.getCursor()
+    const notes = await m.allNotes()
+    expect(cursor === 0 || notes.length > 0).toBe(true)
+    await m.close()
+  })
+
   it('stores kind and sourceRevision; allNotes returns deterministic order', async () => {
     const t = await createTestSurreal(); drops.push(t.drop)
     const m = await SurrealMemory.open(t)

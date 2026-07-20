@@ -31,9 +31,12 @@ function mermaidDag(plan: Plan, steps: Map<string, StepState> | undefined): stri
   return lines.join('\n')
 }
 
-// mermaid labels: double quotes end the label — never let data break the graph.
+// mermaid labels: double quotes end the label, and a newline ends the STATEMENT — an
+// agent-authored title carrying one escapes the graph entirely and renders as live markdown
+// (fences included) in the human-facing index. Titles are z.string().max(200) with no newline
+// restriction, so this escaper is the only guard.
 // Exported: every mermaid-producing view (incl. plugins/memory's index) must share one escaper.
-export const mermaidLabel = (s: string): string => s.replaceAll('"', "'")
+export const mermaidLabel = (s: string): string => s.replaceAll('"', "'").replaceAll(/[\r\n]+/g, ' ')
 const label = mermaidLabel
 
 // Plan topology plus live operation nodes: which effects ran, how many attempts, and
@@ -164,21 +167,6 @@ function taskExpansionGraph(tasks: TaskNode[]): string {
   return mermaidGraph(nodes, edges)
 }
 
-// masterplan overview: decomposes_into is the decomposition tree (solid), depends_on is
-// execution order (dashed) — same edge-direction convention as mermaidDag's dependsOn arrows.
-export function masterplanDag(notes: MemoryNote[]): string {
-  const plans = notes.filter(n => n.kind === NOTE_KIND.plan)
-  if (plans.length === 0) return '_no plan notes_'
-  const node = new Map(plans.map((n, i) => [n.id, `p${i}`]))
-  const nodes = plans.map(n => ({ id: node.get(n.id)!, text: n.title }))
-  const edges = plans.flatMap(n => n.links.flatMap(l => {
-    if (!node.has(l.id)) return []
-    if (l.kind === LINK_KIND.decomposes_into) return [{ from: node.get(n.id)!, to: node.get(l.id)! }]
-    if (l.kind === LINK_KIND.depends_on) return [{ from: node.get(l.id)!, to: node.get(n.id)!, dashed: true }]
-    return []
-  }))
-  return mermaidGraph(nodes, edges)
-}
 
 export function renderRootIndex(tasks: TaskNode[]): string {
   // one deterministic order for every section — the render must not depend on input order

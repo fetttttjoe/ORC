@@ -1,6 +1,6 @@
 import { z } from 'zod'
-import { NOTE_KINDS, LINK_KINDS, LinkKind, MemoryNoteInput, type MemoryAuthor, type MemoryStore, type ResolvedTool } from '@orc/contracts'
-import { applyBudget, approxTokens } from './budget'
+import { MEMORY_LIMITS, NOTE_KINDS, LINK_KINDS, LinkKind, MemoryNoteInput, type MemoryAuthor, type MemoryStore, type ResolvedTool } from '@orc/contracts'
+import { applyBudget, fitMemoryNoteToBudget } from './budget'
 
 const ok = (output: unknown) => ({ output, isError: false })
 const err = (e: unknown) => ({ output: { error: e instanceof Error ? e.message : String(e) }, isError: true })
@@ -74,11 +74,11 @@ export function memoryTools(store: MemoryStore, author: MemoryAuthor, tier: Memo
             type: 'string', enum: [...NOTE_KINDS],
             description: 'architecture_current = observed implementation; architecture_target = intended design (default fact)',
           },
-          summary: { type: 'string', maxLength: 500 }, body: { type: 'string' },
-          categories: { type: 'array', items: { type: 'string' } },
-          tags: { type: 'array', items: { type: 'string' } },
+          summary: { type: 'string', maxLength: 500 }, body: { type: 'string', maxLength: MEMORY_LIMITS.bodyChars },
+          categories: { type: 'array', maxItems: MEMORY_LIMITS.labelItems, items: { type: 'string', maxLength: MEMORY_LIMITS.labelChars } },
+          tags: { type: 'array', maxItems: MEMORY_LIMITS.labelItems, items: { type: 'string', maxLength: MEMORY_LIMITS.labelChars } },
           links: {
-            type: 'array', description: 'typed edges to related notes',
+            type: 'array', maxItems: MEMORY_LIMITS.detailItems, description: 'typed edges to related notes',
             items: {
               type: 'object', required: ['id'],
               properties: {
@@ -88,10 +88,10 @@ export function memoryTools(store: MemoryStore, author: MemoryAuthor, tier: Memo
               },
             },
           },
-          paths: { type: 'array', items: { type: 'string' }, description: 'code paths this note refers to' },
-          rules: { type: 'array', items: { type: 'string' } },
-          rationale: { type: 'string', description: 'plan-note: why this subplan exists' },
-          uncertainty: { type: 'array', items: { type: 'string' }, description: 'plan-note: coverage gaps / assumptions to surface (RG7)' },
+          paths: { type: 'array', maxItems: MEMORY_LIMITS.detailItems, items: { type: 'string', maxLength: MEMORY_LIMITS.detailChars }, description: 'code paths this note refers to' },
+          rules: { type: 'array', maxItems: MEMORY_LIMITS.detailItems, items: { type: 'string', maxLength: MEMORY_LIMITS.detailChars } },
+          rationale: { type: 'string', maxLength: MEMORY_LIMITS.rationaleChars, description: 'plan-note: why this subplan exists' },
+          uncertainty: { type: 'array', maxItems: MEMORY_LIMITS.detailItems, items: { type: 'string', maxLength: MEMORY_LIMITS.detailChars }, description: 'plan-note: coverage gaps / assumptions to surface (RG7)' },
           scope: idSchema,
         },
       },
@@ -102,7 +102,12 @@ export function memoryTools(store: MemoryStore, author: MemoryAuthor, tier: Memo
             ? `${author.runToken}:tool:${toolCallId}:memory:${note.id}`
             : undefined
           const n = await store.write(note, author, { idempotencyKey })
-          return ok({ id: n.id, revision: n.revision })
+          // No revision: the write is event-first and the projector is asynchronous, so within
+          // the flush window store.write reports the revision from BEFORE this write (and
+          // fabricates 1 when nothing is projected yet). Handing the model a number that was
+          // never true for its own write is worse than omitting it — read the note for the
+          // authoritative value.
+          return ok({ id: n.id })
         } catch (e) { return err(e) }
       },
     },
@@ -120,7 +125,7 @@ export function memoryTools(store: MemoryStore, author: MemoryAuthor, tier: Memo
         try {
           const q = SearchInput.parse(input)
           const limit = q.limit ?? (q.detail_level === 'minimal' ? 5 : 20)
-          const r = applyBudget(await store.search(q.query, { category: q.category, tag: q.tag }), n => n.title + n.summary, { limit, budget: q.budget })
+          const r = applyBudget(await store.search(q.query, { category: q.category, tag: q.tag }), n => JSON.stringify(n), { limit, budget: q.budget })
           return ok({
             notes: r.items, truncated: r.truncated, omitted: r.omitted,
             ...(r.truncated && { next: 'refine the query, or memory_read/memory_neighbors a specific id' }),
@@ -143,10 +148,8 @@ export function memoryTools(store: MemoryStore, author: MemoryAuthor, tier: Memo
           const q = ReadInput.parse(input)
           const n = await store.get(q.id, q.scope)
           if (!n) return ok({ note: null })
-          // every pull tool honors its budget (spec RG5) — a huge body never floods the context.
-          if (approxTokens(n.body) > q.budget)
-            return ok({ note: { ...n, body: n.body.slice(0, q.budget * 4) }, truncated: true, next: 'memory_read with a larger budget for the full body' })
-          return ok({ note: n, truncated: false })
+          // every pull tool honors its budget (spec RG5) — metadata cannot bypass body truncation.
+          return ok(fitMemoryNoteToBudget(n, q.budget))
         } catch (e) { return err(e) }
       },
     },

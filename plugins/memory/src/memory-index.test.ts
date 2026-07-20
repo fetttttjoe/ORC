@@ -19,6 +19,21 @@ const note = (over: Partial<MemoryNote>): MemoryNote => ({
 })
 
 describe('renderMemoryIndex', () => {
+  // A title is z.string().max(200) with no newline restriction and the memory_write tool
+  // advertises the same, so an agent can author one. A raw newline ends the mermaid statement:
+  // the block terminates early, the fence count goes odd, and the rest of the title renders as
+  // live markdown — every note in the section disappears from the human-facing index.
+  it('keeps an agent-authored newline from escaping the mermaid block', () => {
+    const md = renderMemoryIndex([
+      note({ id: 'evil', kind: 'architecture_current', title: 'Auth\n```\n## Injected heading' }),
+    ])
+    const lines = md.split('\n')
+    // the whole label stays one mermaid statement — nothing of it lands as document markdown
+    expect(lines.some(l => l.includes('n0[') && l.includes('Auth') && l.includes('Injected heading'))).toBe(true)
+    expect(lines).not.toContain('## Injected heading')
+    expect(lines.filter(l => l.trim() === '```')).toHaveLength(1) // the block still closes exactly once
+  })
+
   it('groups notes into current/target/decision sections with labeled edges and note links', () => {
     const notes = [
       note({ id: 'db', kind: 'architecture_current', title: 'Postgres log', links: [{ id: 'events', kind: 'depends_on' }] }),

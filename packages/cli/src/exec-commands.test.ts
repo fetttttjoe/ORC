@@ -136,8 +136,9 @@ describe('exec commands', () => {
     const plan = await kernel.getPlan(taskId)
     expect(plan?.strategyRef).toBe('grounded-plan')
     expect(plan?.steps.map(s => s.id)).toEqual(['analyze', 'plan'])
+    expect((await kernel.getTask(taskId))?.spec).toBe('grounded task')
     expect((await kernel.getTask(taskId))?.status).toBe('approved') // auto-approved (D9)
-    expect(calls).toContain(`start:${taskId}:`) // auto-startRun fired
+    expect(calls).toContain(`start:${taskId}:${process.cwd()}`) // grounded analysis starts at the project root
     expect(lines.join('\n')).toContain('run finished: done')
   })
 

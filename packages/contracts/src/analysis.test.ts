@@ -22,6 +22,12 @@ describe('M5b contracts', () => {
     expect(PAYLOAD_SCHEMAS.plan_annotated.safeParse({ planVersion: 1, targetNote: 'db', refs: ['api'], text: 'use bcrypt' }).success).toBe(true)
     expect(PAYLOAD_SCHEMAS.feedback_requested.safeParse({ question: 'analyze?', topic: 't-1' }).success).toBe(true)
     expect(PAYLOAD_SCHEMAS.feedback_provided.safeParse({ topic: 't-1', text: 'yes', author: { source: 'cli' } }).success).toBe(true)
+    expect(PAYLOAD_SCHEMAS.feedback_provided.safeParse({
+      topic: 't-1', text: 'approve', author: { source: 'cli' }, planHash: 'a'.repeat(64),
+    }).success).toBe(true)
+    expect(PAYLOAD_SCHEMAS.feedback_provided.safeParse({
+      topic: 't-1', text: 'approve', author: { source: 'cli' }, planHash: 'not-a-sha256',
+    }).success).toBe(false)
     expect(PAYLOAD_SCHEMAS.analysis_completed.safeParse({ analyzed: true }).success).toBe(true)
     expect(PlanAnnotatedPayload.safeParse({ planVersion: 1, targetNote: '../x', refs: [], text: 'x' }).success).toBe(false)
   })
