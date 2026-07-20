@@ -19,14 +19,25 @@ All 19 slices implemented. Final verification:
 - `git diff --check` — clean
 - `orc_test_*` databases: 257, none removed
 
-**Where coverage is weaker than the rest, stated plainly.** Slice 4 (the
-cancel/finish race) closes the window structurally — the status re-check and the
-terminal append now share one transaction, mirroring `cancelOne` — but there is
-**no test that drives the interleaving**. Landing a cancel between the finish
-read and its append needs a fault-injection seam the port does not expose, and
-the existing cancel tests only cover the already-terminal case. The change is
-argued from the code, not demonstrated by a failing-then-passing test, unlike
-every other slice here.
+**~~Where coverage is weaker than the rest~~ — closed 2026-07-20.** Slice 4 (the
+cancel/finish race) shipped argued-from-the-code rather than demonstrated: no
+test drove the interleaving, and the existing cancel tests only covered the
+already-terminal case. It now has one.
+
+The seam turned out to be `log.transaction` itself, not the fault injection
+point the note above assumed. A `beforeTransaction` hook in
+`dbos-port.test.ts` commits a competing `running→cancelled` immediately before
+the finish path opens its transaction — the one window that reproduces the
+defect under both shapes of the code. Against the original two-transaction form
+(status read in `fn()`, append from `toEvents`) the cancel lands after the read
+and is overwritten: **verified failing with `Expected: "cancelled" / Received:
+"done"`**, which is precisely the failure this slice describes. Against the
+shipped one-transaction form the same cancel commits first and the re-check
+honours it. The test arms only once `step_completed` is committed, so the
+injected cancel cannot land mid-run where the old code's read would have caught
+it and the test would have passed vacuously.
+
+Every slice in this plan is now demonstrated by a failing-then-passing test.
 
 **Correction to slice 13 — the MCP stderr item was wrong and is withdrawn.**
 The uncommitted `stderr: 'pipe'` → `'ignore'` change was deliberate, not a
@@ -244,7 +255,7 @@ Each of these is green today and would stay green through the regression it name
 | Two-step out-of-order resume | Task reaches `done`; each result binds to its own step; no hang |
 | Partial Surreal clear | `rebuild()` restores every note |
 | Early-finishing child | Parent's `join_splits` receives its summary and notes |
-| Cancel during finish | Final status stays `cancelled` |
+| Cancel during finish | Final status stays `cancelled`; no competing `done` behind it |
 | MCP env value changed | Trust revoked; server refuses to spawn |
 | Secret in step output | Absent from `operation_outputs.output` |
 | `runToken` after redaction | Still validates and round-trips |

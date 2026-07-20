@@ -11,7 +11,7 @@ import {
   type SplitResult, type UnifiedEvent,
 } from '@orc/contracts'
 import { draftFixture, stepFixture } from '@orc/contracts/fixtures'
-import { openStorage } from '../storage'
+import { openStorage, type EventLog } from '../storage'
 import { Kernel } from '../kernel'
 import { createTestDb, fakeProvider, testConfig, TEST_PROJECT_ID } from '../test-helpers'
 import { createDbosPort, type DbosPort } from './dbos-port'
@@ -72,14 +72,24 @@ const twoStepDraft = (): PlanDraft => draftFixture([
 describe('DBOS execution port (integration)', () => {
   let kernel: Kernel
   let port: DbosPort
+  let log: EventLog
   let teardown: () => Promise<void>
   let dbUrl: string
+  // Interleaving seam: runs just before any log transaction opens, so a test can commit a
+  // competing write into a check-then-append window. Null except inside the test that arms it.
+  let beforeTransaction: (() => Promise<void>) | null = null
 
   beforeAll(async () => {
     const db = await createTestDb()
     dbUrl = db.url
     const storage = await openStorage(db.url, { projectId: TEST_PROJECT_ID })
-    const log = storage.events
+    log = storage.events
+    // patched once on the shared log — the port is built one time for the whole file
+    const realTransaction = log.transaction.bind(log)
+    log.transaction = async fn => {
+      if (beforeTransaction) await beforeTransaction()
+      return realTransaction(fn)
+    }
     kernel = new Kernel(log)
     const config = testConfig(db.url)
     port = await createDbosPort({
@@ -230,6 +240,51 @@ describe('DBOS execution port (integration)', () => {
     await expect(port.cancelRun(t.id)).rejects.toThrow(/running or blocked/)
     expect((await kernel.eventsFor(t.id)).length).toBe(before)
   })
+
+  // The cancel/finish race, driven rather than argued. The run's terminal append is the only
+  // write that can land on top of a cancellation: fold is last-seq-wins with no `from` check
+  // (projections.ts), so whichever status is appended last wins outright.
+  //
+  // The seam is `log.transaction` itself. `beforeTransaction` fires immediately BEFORE the
+  // finish path opens its transaction — chosen because it is the one window that reproduces the
+  // defect under BOTH shapes of the code. The original wrote the status check and the append as
+  // two transactions (read in `fn()`, append from `toEvents` via makeCheckpoint), so a cancel
+  // here lands after that read and gets overwritten by running→done. The current code does the
+  // re-check and the append in one locked transaction, so the same cancel commits first and the
+  // re-check sees it. Same injection, opposite outcome — which is what makes this a test and
+  // not a restatement.
+  //
+  // Armed only once `step_completed` is committed, so the injected cancel cannot land mid-run,
+  // where the old code's read would have caught it anyway and the test would pass vacuously.
+  it('a cancel landing at the finish append is not overwritten by running→done', async () => {
+    const t = await approvedTask({}, draftFixture([stepFixture({ id: 'a', title: 'a', instructions: 'only' })]))
+    let injected = false
+    beforeTransaction = async () => {
+      if (injected) return
+      if (!(await log.byTask(t.id)).some(e => e.kind === EVENT_KIND.step_completed)) return
+      injected = true // set BEFORE the append: log.append re-enters this same hook
+      await log.append({
+        taskId: t.id, stepId: null, runToken: null, kind: EVENT_KIND.task_status_changed,
+        payload: { taskId: t.id, from: TASK_STATUS.running, to: TASK_STATUS.cancelled },
+      })
+    }
+    try {
+      await (await port.startRun(t.id)).wait()
+    } finally {
+      beforeTransaction = null
+    }
+
+    // guards the test itself: if the hook never armed, the assertion below would pass for the
+    // wrong reason (a task that was simply never cancelled)
+    expect(injected).toBe(true)
+    expect((await kernel.getTask(t.id))?.status).toBe(TASK_STATUS.cancelled)
+    // and the run did not append a competing terminal status behind it
+    const terminal = (await kernel.eventsFor(t.id))
+      .filter(e => e.kind === EVENT_KIND.task_status_changed)
+      .map(e => (e.payload as { to: string }).to)
+    expect(terminal.at(-1)).toBe(TASK_STATUS.cancelled)
+    expect(terminal).not.toContain(TASK_STATUS.done)
+  }, 15_000)
 
   it('cancelRun cascades to the subtree: a gated child (never started) is cancelled too', async () => {
     const t = await approvedTask({ s1: 'fail' }, draftFixture([stepFixture()]))
