@@ -30,7 +30,7 @@ that had never been observed to grow.
 
 **Trigger:** the knowledge graph reaches a size where an agent's `memory_search`
 regularly returns stale or superseded notes ahead of current ones, *and*
-`hits`/`lastAccessedAt` (shipped in the sourced-research plan, slice 4) show a
+`hits`/`lastAccessedAt` (shipped 2026-07-20, visible in `orc memory ls`) show a
 clear split between hot and cold notes. Both halves matter: bloat alone argues
 for better ranking, not deletion. Pick the half-life from the observed access
 distribution, not from the original design's 30.
@@ -52,7 +52,10 @@ is a perfect score is worse than no harness.
 
 The original design has three problems worth carrying forward:
 
-1. **Do not derive traffic by parsing `tool_result` payloads.** The design
+1. ~~**Do not derive traffic by parsing `tool_result` payloads.**~~ — **applied
+   2026-07-20**, so the traffic signal is already in the shape this asks for.
+   Kept below because the reasoning is what stops a future slice reverting it.
+   The design
    reverse-parsed note identities and traversal paths back out of stored tool
    output to avoid "bloating history" with access events. The economics are
    backwards — an access payload is ~100 bytes against a `tool_result` that
