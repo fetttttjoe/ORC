@@ -2,7 +2,9 @@
   "name": "@orc/graph-ui",
   "version": "0.0.0",
   "type": "module",
-  "exports": { ".": "./src/server.ts" },
+  "exports": {
+    ".": "./src/server.ts"
+  },
   "dependencies": {
     "@orc/ui-core": "workspace:*",
     "@orc/contracts": "workspace:*",
@@ -11,6 +13,13 @@
     "graphology-layout": "^0.6.1",
     "graphology-layout-forceatlas2": "^0.10.1",
     "sigma": "^3.0.3",
-    "zod": "^4.4.3"
+    "mermaid": "^11.12.2",
+    "@joint/core": "^4.3.0",
+    "@joint/layout-directed-graph": "^4.3.0",
+    "zod": "^4.4.3",
+    "ai": "^7.0.30"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.61.1"
   }
 }

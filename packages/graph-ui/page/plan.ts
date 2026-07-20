@@ -1,26 +1,22 @@
 // Request tab — the journey view: where this request stands (lifecycle rail), the single next
 // human action (buttons when the server has actions, command chips otherwise), the grounded
 // decomposition with refine controls, the road of steps, and the knowledge this request grew.
-import { noteNodeId, stepNodeId } from '@orc/ui-core/graph' // browser-safe subpath — never the ui-core index
+import { artifactNodeId, noteNodeId, stepNodeId } from '@orc/ui-core/graph' // browser-safe subpath — never the ui-core index
+import { renderWaves } from './conversation'
+import { mermaidInto } from './mermaid'
+import { draftFromSteps, openPlanEditor } from './plan-editor'
 import { el } from './ui/el'
 import { Badge, Btn, Card, Dot, Empty, KV, Link, Pre, Tabs, statusTone, toast } from './ui/components'
 
-export interface PlanStepView {
-  id: string; title: string; role: string; instructions: string
-  modelRef: string; skillRefs: string[]; maxIterations: number; dependsOn: string[]
-}
-export interface PlansView { versions: Array<{ version: number; steps: PlanStepView[] }>; approvedVersion: number | null }
+import type { PlanNoteView, PlansView, PlanStepView } from './api'
+export type { PlanNoteView, PlansView, PlanStepView } // view models re-export the api contract
+
 export interface TaskView {
   task: { id: string; title: string; status: string }
   steps: Array<{ stepId: string; status: string; iterations: number }>
   artifacts: Array<{ path: string; size: number }>
 }
 export interface OpenQuestion { question: string; stepId: string }
-export interface PlanNoteView {
-  id: string; title: string; summary: string; rationale: string
-  uncertainty: string[]
-  links: Array<{ id: string; kind: string }>
-}
 export type Act = <T = unknown>(name: string, body: unknown) => Promise<T>
 
 export interface RequestCtx {
@@ -216,12 +212,28 @@ export function renderRequest(ctx: RequestCtx): HTMLElement {
     const plans = ctx.plans
     const active = ctx.shownVersion ?? plans.approvedVersion ?? plans.versions.at(-1)!.version
     const plan = plans.versions.find(v => v.version === active) ?? plans.versions.at(-1)!
-    out.append(Tabs(
-      plans.versions.map(v => ({ id: String(v.version), label: `v${v.version}${v.version === plans.approvedVersion ? ' ✓' : ''}` })),
-      String(active),
-      id => ctx.showVersion(Number(id)),
+    const editable = ctx.act !== null && ctx.planNotes.length === 0
+      && (t.task.status === 'draft' || t.task.status === 'awaiting_approval')
+    out.append(el('div', { class: 'row-split' },
+      Tabs(
+        plans.versions.map(v => ({ id: String(v.version), label: `v${v.version}${v.version === plans.approvedVersion ? ' ✓' : ''}` })),
+        String(active),
+        id => ctx.showVersion(Number(id)),
+      ),
+      editable ? Btn('edit plan', () => openPlanEditor({
+        steps: plan.steps,
+        onSave: async edited => {
+          await ctx.act!('edit', { taskId: ctx.taskId, draft: draftFromSteps(edited) })
+          toast('new plan version proposed', 'ok')
+        },
+      }), 'muted') : null,
     ))
     if (active !== plans.approvedVersion) out.append(el('div', { class: 'empty' }, 'not the approved version'))
+    if (plans.visual && plans.visual.version === active) {
+      const diagram = el('div', { class: 'diagram' })
+      void mermaidInto(diagram, plans.visual.mermaid)
+      out.append(Card(['plan graph'], diagram, renderWaves(plans.visual.waves)))
+    }
     const runOf = new Map(t.steps.map(s => [s.stepId, s]))
     for (const s of topoOrder(plan.steps)) {
       const run = runOf.get(s.id)
@@ -250,6 +262,6 @@ export function renderRequest(ctx: RequestCtx): HTMLElement {
 
   // 6) destination: verified outputs
   if (t.artifacts.length) out.append(Card([`outputs (${t.artifacts.length})`],
-    KV(t.artifacts.map(a => ['', el('span', {}, Link(a.path, () => ctx.go(`artifact:${ctx.taskId}:${a.path}`)), ` · ${a.size}B`)] as [string, HTMLElement]))))
+    KV(t.artifacts.map(a => ['', el('span', {}, Link(a.path, () => ctx.go(artifactNodeId(ctx.taskId, a.path))), ` · ${a.size}B`)] as [string, HTMLElement]))))
   return out
 }

@@ -3,7 +3,7 @@
 // Input shapes are what ui-core's nodeDetail returns; unknown shapes fall back to raw JSON.
 // value import from the browser-safe subpath: the ui-core index pulls in the server-side
 // sessions (pg/DBOS) and must never enter the page bundle
-import { noteNodeId, stepNodeId } from '@orc/ui-core/graph'
+import { artifactNodeId, noteNodeId, stepNodeId } from '@orc/ui-core/graph'
 import { el } from './ui/el'
 import { Badge, Card, Empty, KV, Link, Pre, statusTone } from './ui/components'
 
@@ -62,7 +62,7 @@ export function renderDetail(nodeId: string, d: unknown, go: Go): HTMLElement {
         ? Card([`artifacts (${t.artifacts.length})`],
             KV(t.artifacts.map(a => [
               '',
-              links([Link(a.path, () => go(`artifact:${t.task.id}:${a.path}`)), `${a.size}B · ${a.sha256.slice(0, 12)}`]),
+              links([Link(a.path, () => go(artifactNodeId(t.task.id, a.path))), `${a.size}B · ${a.sha256.slice(0, 12)}`]),
             ] as [string, HTMLElement])))
         : null,
     )
