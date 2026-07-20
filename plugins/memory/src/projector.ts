@@ -7,7 +7,14 @@ import { rebuildVaultMemory, renderMemoryIndex } from './memory-index'
 
 export interface MemoryProjector { start(): Promise<void>; close(): Promise<void>; rebuild(): Promise<void>; catchUp(): Promise<void> }
 
-const MEMORY_KINDS = [EVENT_KIND.memory_written, EVENT_KIND.memory_deleted, EVENT_KIND.memory_accessed]
+// Everything the projector drains.
+export const MEMORY_KINDS = [EVENT_KIND.memory_written, EVENT_KIND.memory_deleted, EVENT_KIND.memory_accessed]
+
+// What "the read model is behind" means for HEALTH — derived from the drained set so a fourth
+// kind is covered automatically, with the one exclusion stated rather than implied. An
+// unprojected access leaves `hits` briefly stale; that is a lagging counter, not a knowledge
+// graph an agent would read wrongly, and reporting it as degraded would cry wolf on every read.
+export const KNOWLEDGE_KINDS = MEMORY_KINDS.filter(k => k !== EVENT_KIND.memory_accessed)
 
 export function createMemoryProjector(opts: { log: EventLog; surreal: SurrealMemory; vaultDir: string }): MemoryProjector {
   const { log, surreal, vaultDir } = opts

@@ -222,6 +222,21 @@ describe('SurrealMemory.applyEvent', () => {
     await m.close()
   })
 
+  // The degraded-memory guarantee depends on open() FAILING when Surreal is unreachable. The
+  // driver's connect() does not reject on an unreachable endpoint — measured still pending after
+  // 400s against a closed port — so without a bound here, every caller inherits an unbounded
+  // hang: `orc status`, `orc memory *`, and the degraded-mode catch in the CLI runtime, which
+  // can only run once open() throws. The test's own timeout is the assertion: a regression
+  // hangs, so bound it well under the 5s production default.
+  it('open() against an unreachable endpoint rejects instead of hanging', async () => {
+    const started = Date.now()
+    await expect(SurrealMemory.open({
+      url: 'ws://127.0.0.1:9/rpc', ns: 'orc', db: 'nope',
+      username: 'root', password: 'orc', connectTimeoutMs: 250,
+    })).rejects.toThrow(/unreachable|timed out/i)
+    expect(Date.now() - started).toBeLessThan(4_000)
+  }, 8_000)
+
   it('an access for a note that does not exist creates no phantom row', async () => {
     const t = await createTestSurreal(); drops.push(t.drop)
     const m = await SurrealMemory.open(t)

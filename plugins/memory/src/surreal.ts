@@ -44,6 +44,25 @@ const linkTable = edge(Tb.Note, Tb.Link, Tb.Note, {
 // an unambiguous separator); the table itself is always 'note'.
 const key = (scope: string, id: string) => `${scope}:${id}`
 
+const CONNECT_TIMEOUT_MS = 5_000
+const CLOSE_TIMEOUT_MS = 2_000
+
+// Bound a driver call that may never settle. The timer is always cleared, so a resolved promise
+// never holds the process open past its own work.
+async function withTimeout<T>(p: Promise<T>, ms: number, what: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  try {
+    return await Promise.race([
+      p,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`${what}: timed out after ${ms}ms`)), ms)
+      }),
+    ])
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
 function makeOrm(surreal: Surreal) {
   return orm(surreal, noteTable, metaTable, linkTable)
 }
@@ -52,10 +71,21 @@ type Db = ReturnType<typeof makeOrm>
 export class SurrealMemory {
   private constructor(private readonly surreal: Surreal, private readonly db: Db) {}
 
-  static async open(t: { url: string; ns: string; db: string; username: string; password: string }): Promise<SurrealMemory> {
+  static async open(t: {
+    url: string; ns: string; db: string; username: string; password: string
+    connectTimeoutMs?: number
+  }): Promise<SurrealMemory> {
     const surreal = new Surreal()
     try {
-      await surreal.connect(t.url)
+      // The driver's connect() does NOT reject on an unreachable endpoint — measured still
+      // pending after 400s against a closed port, because its reconnect budget governs a dropped
+      // established connection, not the initial dial. Every degraded-memory path in the system
+      // is downstream of this throwing: probeMemory's catch, and the CLI runtime's fallback to
+      // unavailableMemoryTools. Unbounded, `orc status` and every `orc memory` command hang
+      // forever instead of degrading, which is the opposite of the stated guarantee.
+      // ponytail: one constant, not a setting — promote it if a real deployment needs longer.
+      await withTimeout(surreal.connect(t.url), t.connectTimeoutMs ?? CONNECT_TIMEOUT_MS,
+        `surreal unreachable at ${t.url}`)
       await surreal.signin({ username: t.username, password: t.password })
       await surreal.use({ namespace: t.ns, database: t.db })
       // ESCAPE HATCH (raw): surqlize's builder assumes tables already exist — it has no DEFINE
@@ -69,7 +99,9 @@ export class SurrealMemory {
     } catch (err) {
       // connect() opens a live socket; if signin/use/DEFINE then throws, don't leak it
       // (symmetry with PostgresStore.open, which pool.end()s on an assertMigrated throw).
-      await surreal.close().catch(() => {})
+      // Bounded too: after a connect timeout the driver is still retrying underneath, and an
+      // unbounded close here would re-introduce exactly the hang this method now prevents.
+      await withTimeout(surreal.close(), CLOSE_TIMEOUT_MS, 'surreal close').catch(() => {})
       throw err
     }
   }

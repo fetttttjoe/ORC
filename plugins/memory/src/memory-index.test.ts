@@ -2,11 +2,13 @@ import { afterAll, describe, expect, it } from 'bun:test'
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import type { EventRecord, MemoryNote } from '@orc/contracts'
+import { NOTE_KIND, NOTE_KINDS, type EventRecord, type MemoryNote, type NoteKind } from '@orc/contracts'
 import { SurrealMemory } from './surreal'
 import { eventFixture } from '@orc/contracts/fixtures'
 import { createTestSurreal } from './test-helpers'
-import { renderMemoryIndex, rebuildVaultMemory } from './memory-index'
+import { renderMemoryIndex, rebuildVaultMemory, SECTIONS } from './memory-index'
+
+const SECTION_COUNT = SECTIONS.length
 
 const drops: (() => Promise<void>)[] = []
 afterAll(async () => { for (const d of drops) await d() })
@@ -56,7 +58,30 @@ describe('renderMemoryIndex', () => {
 
   it('renders explicit empty sections', () => {
     const md = renderMemoryIndex([])
-    expect(md.match(/_none_/g)).toHaveLength(3)
+    expect(md.match(/_none_/g)).toHaveLength(SECTION_COUNT)
+  })
+
+  // A kind missing from SECTIONS gets a note file but never appears in the human-facing index —
+  // silently, since nothing errors. That is how `research` shipped: the sourced-research feature
+  // writes cited findings that its own index then omits. Pin every kind the renderer must place,
+  // so the next kind added to NOTE_KINDS fails here instead of going invisible.
+  it('places every note kind in a section, or names it as deliberately unplaced', () => {
+    const placed = new Set(SECTIONS.flatMap(s => s.kinds))
+    // `plan` is deliberately absent: plan notes are reachable by path from the task they belong
+    // to, and nothing has asked for a plan DAG view (system-hardening plan, slice 19).
+    const deliberatelyUnplaced = new Set<NoteKind>([NOTE_KIND.plan])
+    const missing = NOTE_KINDS.filter(k => !placed.has(k) && !deliberatelyUnplaced.has(k))
+    expect(missing).toEqual([])
+  })
+
+  it('renders a research note into the index with its own section', () => {
+    const md = renderMemoryIndex([
+      note({ id: 'pgvector', kind: 'research', title: 'pgvector recall past 1M rows',
+        sources: [{ url: 'https://example.test/b', retrievedAt: 'T' }] }),
+    ])
+    expect(md).toContain('## Research')
+    expect(md).toContain('pgvector recall past 1M rows')
+    expect(md).toContain('click n0 "pgvector.md"')
   })
 })
 

@@ -6,10 +6,16 @@ import { SurrealMemory } from './surreal'
 import { noteRelPath, renderNoteFile } from './note-md'
 import { writeMemoryFile } from './write-note'
 
-const SECTIONS: { title: string; kinds: NoteKind[] }[] = [
+// Exported so a test can assert every NOTE_KINDS member is placed: a kind missing here still
+// gets its note file, but never appears in the index, and nothing errors — which is exactly how
+// `research` was invisible on arrival. `plan` stays deliberately unplaced (see that test).
+// Research is its own section rather than folded into decisions/facts: a cited web finding is
+// provisional and sweepable, and presenting it next to a decision would overstate it.
+export const SECTIONS: { title: string; kinds: NoteKind[] }[] = [
   { title: 'Current architecture', kinds: [NOTE_KIND.architecture_current] },
   { title: 'Target architecture', kinds: [NOTE_KIND.architecture_target] },
   { title: 'Decisions and facts', kinds: [NOTE_KIND.decision, NOTE_KIND.fact, NOTE_KIND.documentation] },
+  { title: 'Research', kinds: [NOTE_KIND.research] },
 ]
 
 function section(title: string, notes: MemoryNote[]): string {
