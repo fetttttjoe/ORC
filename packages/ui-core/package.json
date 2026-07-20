@@ -1,0 +1,14 @@
+{
+  "name": "@orc/ui-core",
+  "version": "0.0.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./graph": "./src/graph.ts"
+  },
+  "dependencies": {
+    "@orc/contracts": "workspace:*",
+    "@orc/kernel": "workspace:*",
+    "zod": "^4.4.3"
+  }
+}

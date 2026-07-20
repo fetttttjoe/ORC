@@ -43,3 +43,17 @@ export class PostgresStore {
     await this.pool.end()
   }
 }
+
+// Cross-project discovery for read-only viewers. Deliberately outside PostgresStore, which is
+// bound to ONE project by design. Ordered by most recent activity.
+export async function listProjectIds(url: string): Promise<string[]> {
+  const pool = new pg.Pool({ connectionString: url, max: 1 })
+  try {
+    const r = await pool.query<{ project_id: string }>(
+      'SELECT project_id, MAX(seq) AS last FROM events GROUP BY project_id ORDER BY last DESC',
+    )
+    return r.rows.map(row => row.project_id)
+  } finally {
+    await pool.end()
+  }
+}

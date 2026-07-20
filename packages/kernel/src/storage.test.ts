@@ -7,8 +7,8 @@ import pg from 'pg'
 import { drizzle } from 'drizzle-orm/node-postgres'
 import { migrate } from 'drizzle-orm/node-postgres/migrator'
 import { jsonb, pgTable, text } from 'drizzle-orm/pg-core'
-import { isTerminalError, type EventInput, type OperationSpec } from '@orc/contracts'
-import { openStorage, type EventLog, type Storage } from './storage'
+import { EVENT_KIND, isTerminalError, type EventInput, type OperationSpec } from '@orc/contracts'
+import { listProjectIds, openStorage, type EventLog, type Storage } from './storage'
 import { migrateDatabase } from './storage/migrate'
 import { events } from './schema'
 import { createTestDb, TEST_PROJECT_ID } from './test-helpers'
@@ -26,6 +26,21 @@ async function freshStorage(): Promise<Storage> {
 async function freshLog(): Promise<EventLog> {
   return (await freshStorage()).events
 }
+
+describe('listProjectIds', () => {
+  it('lists every project with events, most recently active first', async () => {
+    const db = await createTestDb()
+    dbs.push(db)
+    const s1 = await openStorage(db.url, { projectId: TEST_PROJECT_ID })
+    const other = '99999999-9999-9999-9999-999999999999'
+    const s2 = await openStorage(db.url, { projectId: other })
+    const draft = { taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_written, payload: { note: { id: 'p', title: 'p' }, author: { source: 'cli' } } } as const
+    await s1.events.append(draft)
+    await s2.events.append(draft)
+    expect(await listProjectIds(db.url)).toEqual([other, TEST_PROJECT_ID]) // s2 wrote last
+    await s1.close(); await s2.close()
+  })
+})
 
 function errorCodes(error: unknown): string[] {
   if (!error || typeof error !== 'object') return []
