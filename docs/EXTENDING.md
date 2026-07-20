@@ -12,7 +12,7 @@ step is adding a seam to `packages/contracts`, not code to the kernel.
 | Add an agent executor | `AgentExecutor` | new `plugins/executor-<x>/` + `seedRegistries` — or `registerExecutor` from a T2 extension |
 | Add agent knowledge / procedure | SKILL.md | `vault/skills/<name>/SKILL.md` — no code, hot-indexed, force-loaded via `skillRefs` |
 | Add external tools | MCP server | declare in `.orc/config.json` `mcpServers`, arm with `orc mcp trust` — no code, steps opt in via `toolRefs` |
-| Observe / integrate (metrics, notifications) | T2 extension | a `.ts` file default-exporting `{ id, activate(api) }`; `api.on('event_appended', …)`; declare in config, arm with `orc ext trust` (content-fingerprinted: editing the file revokes trust) |
+| Observe / integrate (metrics, notifications) | T2 extension | a `.ts` file default-exporting `{ id, activate(api) }`; `api.on('event_appended', …)`; declare in config, arm with `orc ext trust` (entry + literal local dependency closure + `bun.lock` fingerprint) |
 | Record new durable state | event kind | `EventKind` + `PAYLOAD_SCHEMAS` in `packages/contracts/src/events.ts`, then a `fold` case in `packages/kernel/src/projections.ts` (the exhaustive `switch` makes the compiler demand it); check `crashDedupKey` if the event is step-scoped |
 | Add a CLI verb | commander | `buildProgram` in `packages/cli/src/main.ts` |
 | Add a setting | config schema | `settingsSchema` in `packages/kernel/src/config.ts` — default in `.default()`, env override in `envOverrides` |
@@ -36,8 +36,9 @@ step is adding a seam to `packages/contracts`, not code to the kernel.
    them (see `createDbosPort(opts)`, `createPluginHost(config, seed)`).
 4. **Declare vs grant.** `.orc/config.json` declares, `.orc/trust.json` arms —
    and a grant binds to a fingerprint of what was consented to (MCP: command,
-   args, env key names; extension: entry-file bytes). Enforce trust at the
-   point of use (as `McpHub.ensureClient` does), not only at plan validation.
+   args, env key names; extension: entry + recursively resolved literal local
+   imports/dynamic imports/requires + project `bun.lock`). Enforce trust at the
+   point of use and again on extension reload, not only at plan validation.
    Note the runtime split: the memory store/projector and vault projector are
    privileged first-party runtime packages wired directly into the CLI runtime;
    ordinary observation/integration goes through T0 (skills), T1 (MCP), or
@@ -53,7 +54,8 @@ step is adding a seam to `packages/contracts`, not code to the kernel.
    500 ms polling). A shortcut without its comment is a bug report waiting.
 8. **A new seam ships with three things:** its contract in
    `packages/contracts`, its propose-time validation, and a test that fails
-   without it.
+   without it. Async observation hooks are detached from event transactions,
+   tracked by `HookBus`, and drained before extension deactivation.
 
 ## When to promote
 

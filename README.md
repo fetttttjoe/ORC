@@ -37,26 +37,27 @@ bun install && bun test
 alias orc="bun $PWD/packages/cli/src/bin.ts"
 export ANTHROPIC_API_KEY=...    # and/or run a local Ollama
 
-orc init --name my-project      # committed identity in .orc/config.json — run once, commit it
+orc db migrate                  # explicit schema setup; works before project initialization
+orc init --name my-project      # identity + first-party skills; run once, commit .orc/config.json
 orc new "write release notes" --spec "summarize changes since v1.2; declare the notes file as an output"
 orc propose <task-id> --model anthropic/claude-sonnet-5   # or ollama/<model>
 orc plan <task-id>              # review it
 orc approve <task-id>           # the human gate
-orc run <task-id>               # durable execution with live event tail
+orc run <task-id> --cwd .       # durable execution against this working tree, with live event tail
 orc status <task-id>            # project, memory health, steps, operations, receipts, cost
 orc replay <task-id> --at <seq> # read-only audit replay at any event sequence
 orc log <task-id> --json        # full redacted event records
 orc skills                      # indexed SKILL.md skills (vault/skills/<name>/SKILL.md)
 orc mcp trust <id>              # local consent, bound to the server's declaration fingerprint
-orc ext trust <path>            # local consent, bound to the extension's content hash
+orc ext trust <path>            # local consent, bound to extension dependency closure + bun.lock
 orc retry <task-id>             # re-run failed steps after a block
 ```
 
 ### Documentation from the knowledge graph
 
-Documentation is an ordinary orchestrated task — no extra runner. Skills are
-per-project: copy `vault/skills/documentation/` from this repo into your
-project's `vault/skills/` first (propose fails loudly on an unknown skill):
+Documentation is an ordinary orchestrated task — no extra runner. `orc init`
+seeds the project-local `documentation` skill (plus grounded-planning skills)
+without overwriting project edits:
 
 ```bash
 task_id=$(orc new "generate architecture docs" --spec "Write docs/architecture.md from current/target memory; declare it as an output")
@@ -86,6 +87,10 @@ orc run "$task_id" --cwd .
   ambiguity instead of claiming it away.
 - **Workflow recovery** (DBOS) is the continuation mechanism underneath —
   it is not the definition of replay.
+- **Durable human feedback.** `feedback_provided` events are an idempotent
+  outbox: live/startup routing retries committed replies. Grounded `approve`
+  replies carry a plan-graph SHA-256; `finalize_plan` accepts only a matching
+  approval from the same run, so edits require reapproval.
 - **Output lineage.** A success signal may declare workspace-relative
   `outputs`; the runtime verifies each file, computes its SHA-256 receipt, and
   commits `artifact_produced` atomically with `step_completed`.
@@ -110,17 +115,19 @@ orc run "$task_id" --cwd .
   `.orc/trust.json` *grants* — created only by `orc mcp trust` / `orc ext trust`,
   written atomically with mode 0600, never commit it. Grants bind to a
   fingerprint: MCP to (command, args, env *names*), extensions to the entry
-  file's content hash. Change either and the grant is invalid until re-trusted.
+  file plus literal local import/dynamic-import/require closure and project
+  `bun.lock`. Change any covered input and the grant is invalid until re-trusted.
   MCP servers still run with this user's full permissions — vet before trusting.
 - `env` values in `mcpServers` starting with `$` pull from orc's own environment
   at spawn — secrets never go in the config file (and env *values* never enter
   trust fingerprints).
-- Schema changes: migrations are committed SQL under `packages/kernel/drizzle/`.
-  `drizzle-kit` is deliberately not installed (its loader chain is vulnerable);
+- Schema changes: migrations are committed SQL under `packages/kernel/drizzle/`;
+  apply them explicitly with `orc db migrate`. `drizzle-kit` is deliberately
+  not installed (its loader chain is vulnerable);
   generate with a pinned one-shot `bunx drizzle-kit@latest generate` + audit
   the output, or write a reviewed SQL migration by hand.
-- Resetting development state: `docker compose down -v && docker compose up -d --wait`
-  drops Postgres (events, journal, DBOS) and SurrealDB; the vault re-renders
+- Resetting development state: `docker compose down -v && docker compose up -d --wait && orc db migrate`
+  drops and recreates Postgres (events, journal, DBOS) and SurrealDB; the vault re-renders
   and memory rebuilds from events on next use. Old pre-identity projects run
   `orc init` once; old string-only trust grants fail closed and must be granted again.
 - Never bundle the CLI (`bun build`): DBOS must run unbundled via `bun run`.

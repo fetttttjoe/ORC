@@ -14,7 +14,7 @@ the tier-by-tier view is the next section.
 ```mermaid
 graph TD
   subgraph CLI ["packages/cli — entrypoint & wiring"]
-    BIN["bin.ts<br/>process entry, init gate"]
+    BIN["bin.ts<br/>help/init/migrate bootstrap + cleanup"]
     MAIN["main.ts<br/>commands (buildProgram)"]
     RUNTIME["runtime.ts<br/>startup order, degraded mode"]
   end
@@ -36,10 +36,10 @@ graph TD
     end
     REDACT["redact.ts<br/>storage-boundary normalizer"]
     FOLD["projections.ts<br/>fold, applyOperationEvent"]
-    KAPI["kernel.ts<br/>task/plan API"]
+    KAPI["kernel.ts<br/>task/plan + feedback/approval API"]
     PORT["execution/dbos-port.ts<br/>durable workflows"]
     ART["execution/artifacts.ts<br/>verifyArtifacts receipts"]
-    ROUTER["execution/signal-router.ts<br/>split resolution"]
+    ROUTER["execution/signal-router.ts<br/>split + feedback delivery"]
     HOST["plugins/host.ts<br/>registry + refValidator"]
     TRUST["plugins/trust.ts<br/>fingerprint grants"]
     SKILLS["plugins/skills.ts<br/>SKILL.md index"]
@@ -186,8 +186,8 @@ contract — callers never see a pool, a lock, or a query:
 - **`openStorage(url, { projectId })` → `Storage { events, operations }`** — the Postgres
   service (`packages/kernel/src/storage/`). `PostgresStore` owns the pool, the per-project
   advisory lock, redaction, and schema verification; `EventLog` (append/subscribe/query) and
-  `OperationJournal` (before/after nodes) sit on top. Migration is a separate explicit step —
-  `openStorage` only verifies and fails loudly if the schema is behind.
+  `OperationJournal` (before/after nodes) sit on top. Migration is a separate explicit
+  `orc db migrate` step — `openStorage` only verifies and fails loudly if the schema is behind.
 - **`openKnowledge(config)` → `Knowledge`** — the SurrealDB service
   (`plugins/memory/src/knowledge.ts`), encapsulating auth and the project-derived database
   name. The memory gateway/projector/tools read and write through it and never open a Surreal
@@ -261,7 +261,9 @@ jsonb-shapes and redacts the payload, validates it, inserts, `pg_notify`s, and c
 atomically. `OperationJournal` writes its node and its transition events *through* that same
 `EventLog` inside one lock, so the durable graph node and the append-only history can never
 disagree. Reads are project-scoped queries that bypass the lock. Migration is separate
-(`migrateDatabase`); `openStorage` only verifies and fails loudly if the schema is behind.
+(`orc db migrate` → `migrateDatabase`); `openStorage` only verifies and fails loudly if the
+schema is behind. Missing migration tables map to 0 applied; connection/auth/permission errors
+remain their original failures.
 
 ## Execution flow — one step, durably
 
@@ -294,6 +296,17 @@ A crash between `operation_started` and completion leaves an **unresolved node**
 `orc status`, `orc replay`, and `vault/tasks/<id>/execution.md`. Recovery reuses completed
 journal nodes and re-attempts unresolved ones as explicitly at-least-once (attempts counted).
 
+## Feedback delivery and grounded approval
+
+`feedback_provided` is both audit history and the durable outbox. The event carries the requesting
+step/run envelope; immediate delivery and the signal router use `feedback:<event-seq>` as DBOS's
+idempotency key. The live router handles new events, and startup replays replies for still-running
+tasks, healing a crash after append but before send.
+
+For a grounded plan step, an exact normalized `approve` reply also stores SHA-256 of the canonical
+plan-note graph. `finalize_plan` recomputes that hash and accepts only a human approval from the same
+run token. Missing, cross-attempt, or stale approval returns a tool error before any child split.
+
 ## Responsibilities
 
 | Component | Owns | Explicitly does NOT own |
@@ -305,14 +318,14 @@ journal nodes and re-attempts unresolved ones as explicitly at-least-once (attem
 | `kernel/storage/migrate` | Explicit `migrateDatabase`; `assertMigrated` fails loudly when a database is behind | Migrating implicitly at open time |
 | `kernel/redact` | The single storage-boundary normalizer: NUL strip + secret redaction (keys and values) | Being called anywhere except append/journal storage |
 | `kernel/projections` | `fold(events) → State`, `applyOperationEvent` (shared by live journal and rebuild), crash dedup | Persisting anything |
-| `kernel/kernel.ts` | Task/plan lifecycle API (create, propose, approve, cancel semantics) over the log | Execution |
+| `kernel/kernel.ts` | Atomic task/plan lifecycle, feedback outbox events, plan-hash-bound human approval over the log | Execution |
 | `kernel/dbos-port` | Durable run/step workflows, `ctx.checkpoint` and `ctx.operation` wrappers, retry policy, queue partitioning, cancellation cascade, output receipt commit | Model/tool specifics (executor's job), plan authoring |
-| `kernel/signal-router` | Resolving splits when children reach terminal state; starting approved child runs | Composing plans, executing steps |
+| `kernel/signal-router` | Resolving splits, starting approved children, and live/startup delivery of committed feedback | Composing plans, executing steps |
 | `kernel/plugins/*` | Registry + propose-time ref validation (`host`), fingerprint trust store (`trust`), SKILL.md indexing (`skills`), T2 extension loading | Runtime tool execution (that's the hub/executor) |
 | `plugins/executor-api-loop` | The model⇄tool loop, prompt assembly (incl. knowledge protocol), signal/output pre-flight, per-call operation journaling | Durability (delegates to ctx), trust, receipts |
 | `plugins/memory` | Event-first note store (gateway stamps git revision), transactional Surreal projection, per-project database boundary, knowledge tools + degraded variants, `vault/memory/**` rebuild | Being authoritative — Surreal and vault/memory are disposable |
 | `packages/vault-projector` | Deterministic markdown/mermaid renders of tasks, execution, lineage, task expansion; coalesced live re-render | Truth of any kind; whole-log scans |
-| `packages/cli` | Command surface, startup order (projections before DBOS), degraded-memory wiring, project identity gate | Business rules (kernel's job) |
+| `packages/cli` | Pre-bootstrap help/init/migrate, command surface, project discovery, startup/shutdown order, degraded-memory wiring | Business rules (kernel's job) |
 
 ## Identity and isolation
 
@@ -322,5 +335,6 @@ journal nodes and re-attempts unresolved ones as explicitly at-least-once (attem
 - the per-project advisory lock serializes writers within a project only
 - DBOS system database name = `deriveSystemUrl(dbUrl, projectId)`
 - SurrealDB database name = `projectDatabaseName(base, projectId)`
-- `requireProject(config)` is the one gate: production paths take a `ProjectConfig`, and an
-  uninitialized directory can only run `orc init`
+- `requireProject(config)` gates project commands; uninitialized directories can still run
+  help, `orc db migrate`, and `orc init`
+- `orc init` seeds the first-party analysis/plan/documentation skills without overwriting project files
