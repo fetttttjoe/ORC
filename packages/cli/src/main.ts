@@ -29,7 +29,7 @@ export async function openKernel(
 }
 
 const SHIPPED_SKILLS_DIR = fileURLToPath(new URL('../../../vault/skills', import.meta.url))
-const SHIPPED_SKILLS = ['codebase-analysis', 'plan-authoring', 'documentation']
+const SHIPPED_SKILLS = ['codebase-analysis', 'plan-authoring', 'documentation', 'web-research']
 
 // `orc init` must work before Postgres/plugins exist, so it gets a standalone entry
 // (bin.ts) and the same command inside buildProgram for help/unit visibility
