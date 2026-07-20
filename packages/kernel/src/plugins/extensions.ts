@@ -16,28 +16,24 @@ export interface LoadedExtension { path: string; manifest: ExtensionManifest }
 // to stale cached deps (spike 2026-07-17), so the whole extension dir is evicted.
 export class ExtensionHost {
   loaded: LoadedExtension[] = []
+  private declarations: Array<{ declared: string; path: string }> = []
+  private isTrusted: (declared: string) => boolean = () => false
 
   constructor(private readonly api: ExtensionApi) {}
 
   async load(declared: string[], isTrusted: (decl: string) => boolean, baseDir: string): Promise<void> {
-    for (const decl of declared) {
-      const abs = path.resolve(baseDir, decl)
-      if (!isTrusted(decl)) {
-        console.warn(`extension '${decl}' is declared but not trusted — skipped (grant with: orc ext trust ${decl})`)
-        continue
-      }
-      await this.importAndActivate(abs, decl)
-    }
+    this.declarations = declared.map(value => ({ declared: value, path: path.resolve(baseDir, value) }))
+    this.isTrusted = isTrusted
+    for (const extension of this.declarations) await this.loadTrusted(extension)
   }
 
   async reload(): Promise<void> {
-    const paths = this.loaded.map(l => l.path)
     await this.shutdown()
-    for (const abs of paths) {
-      const prefix = path.dirname(abs) + path.sep
+    for (const extension of this.declarations) {
+      const prefix = path.dirname(extension.path) + path.sep
       for (const key of Object.keys(require.cache))
-        if (key.startsWith(prefix) || key === abs) delete require.cache[key]
-      await this.importAndActivate(abs, abs)
+        if (key.startsWith(prefix) || key === extension.path) delete require.cache[key]
+      await this.loadTrusted(extension)
     }
   }
 
@@ -50,6 +46,14 @@ export class ExtensionHost {
       }
     }
     this.loaded = []
+  }
+
+  private async loadTrusted(extension: { declared: string; path: string }): Promise<void> {
+    if (!this.isTrusted(extension.declared)) {
+      console.warn(`extension '${extension.declared}' is declared but not trusted — skipped (grant with: orc ext trust ${extension.declared})`)
+      return
+    }
+    await this.importAndActivate(extension.path, extension.declared)
   }
 
   private async importAndActivate(abs: string, label: string): Promise<void> {

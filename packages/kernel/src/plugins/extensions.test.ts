@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import type { ExtensionApi } from '@orc/contracts'
 import { ExtensionHost } from './extensions'
+import { grantExtensionTrust, isExtensionTrusted, loadTrust } from './trust'
 
 let dirs: string[] = []
 const temp = () => { const d = mkdtempSync(path.join(tmpdir(), 'orc-ext-')); dirs.push(d); return d }
@@ -72,17 +73,24 @@ describe('ExtensionHost', () => {
     expect(warn).toHaveBeenCalled()
   })
 
-  it('reload() re-evaluates the extension AND its local deps (closure eviction)', async () => {
+  it('reload() rechecks trust before loading changed local dependencies', async () => {
     const root = temp()
-    const file = writeExt(root, 'v1')
+    writeExt(root, 'v1')
+    const declared = 'exts/main.ts'
+    grantExtensionTrust(declared, root)
+    const trusted = () => isExtensionTrusted(loadTrust(root), declared, root)
     const { api, registered } = fakeApi()
     const host = new ExtensionHost(api)
-    await host.load([file], () => true, root)
+    await host.load([declared], trusted, root)
     expect(registered).toEqual(['provider:p-v1'])
 
-    writeExt(root, 'v2') // edit dep.ts on disk
+    writeExt(root, 'v2')
     await host.reload()
-    expect(registered).toEqual(['provider:p-v1', 'provider:p-v2']) // stale-dep would give p-v1 again
+    expect(registered).toEqual(['provider:p-v1'])
+
+    grantExtensionTrust(declared, root)
+    await host.reload()
+    expect(registered).toEqual(['provider:p-v1', 'provider:p-v2'])
   })
 
   it('shutdown() calls deactivate', async () => {

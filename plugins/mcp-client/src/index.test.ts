@@ -66,11 +66,14 @@ describe('createMcpHub', () => {
     expect(tools.map(t => t.name)).toContain('echo')
   })
 
-  it('a crashing server surfaces a clear error, not a hang', async () => {
+  it('a crashing server identifies the server without leaking stderr', async () => {
     const hub = makeHub(new Set(['fixture']), {
       fixture: { command: 'bun', args: [FIXTURE], env: { FIXTURE_CRASH: '1' } },
     })
-    await expect(hub.resolve(['fixture/echo'])).rejects.toThrow()
+    const error = await hub.resolve(['fixture/echo']).catch(value => value)
+    expect(error).toBeInstanceOf(Error)
+    expect(error.message).toContain("MCP server 'fixture' failed to start")
+    expect(error.message).not.toContain('fixture: crashing on purpose')
   })
 
   it('resolves a $VAR env value from the orc process env at spawn (crash proves it reached the child)', async () => {
