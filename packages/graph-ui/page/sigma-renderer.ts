@@ -20,13 +20,28 @@ export class SigmaRenderer implements GraphRenderer {
   private settleTimer: ReturnType<typeof setTimeout> | null = null
   private clickCb: ((nodeId: string) => void) | null = null
 
+  private focusSet: Set<string> | null = null
+
   constructor(container: HTMLElement) {
     this.sigma = new Sigma(this.graph, container, {
       labelColor: { color: '#ddd' },
       defaultEdgeColor: EDGE_COLOR,
       labelRenderedSizeThreshold: 8, // labels only when zoomed in enough — keeps big graphs legible
+      // focus mode: everything outside the set fades into the background, labels off
+      nodeReducer: (node, data) =>
+        this.focusSet && !this.focusSet.has(node) ? { ...data, color: '#22222a', label: '', zIndex: 0 } : data,
+      edgeReducer: (edge, data) => {
+        if (!this.focusSet) return data
+        const [s, t] = this.graph.extremities(edge)
+        return this.focusSet.has(s!) && this.focusSet.has(t!) ? data : { ...data, color: '#1a1a20' }
+      },
     })
     this.sigma.on('clickNode', ({ node }) => this.clickCb?.(node))
+  }
+
+  focus(nodeIds: Set<string> | null): void {
+    this.focusSet = nodeIds
+    this.sigma.refresh()
   }
 
   setGraph(g: Graph): void {

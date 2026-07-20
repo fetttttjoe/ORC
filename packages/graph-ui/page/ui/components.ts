@@ -42,6 +42,73 @@ export const Empty = (text: string): HTMLElement => el('div', { class: 'empty' }
 export const Link = (label: string, onClick: () => void): HTMLElement =>
   el('a', { class: 'link', onClick }, label)
 
+// action button: disables itself while the handler runs; failures surface as toasts
+export const Btn = (label: string, onClick: () => Promise<void> | void, tone: Tone = 'accent'): HTMLElement => {
+  const b = el('button', { class: `btn ${tone}` }, label)
+  b.addEventListener('click', () => {
+    b.toggleAttribute('disabled', true)
+    void Promise.resolve()
+      .then(onClick)
+      .catch(err => toast(err instanceof Error ? err.message : String(err), 'danger'))
+      .finally(() => b.toggleAttribute('disabled', false))
+  })
+  return b
+}
+
+export function toast(text: string, tone: Tone = 'default'): void {
+  let host = document.querySelector('.toasts')
+  if (!host) { host = el('div', { class: 'toasts' }); document.body.append(host) }
+  const t = el('div', { class: `toast ${tone}` }, text)
+  host.append(t)
+  setTimeout(() => t.remove(), 4_000)
+}
+
+export interface DialogField {
+  name: string
+  label: string
+  kind?: 'text' | 'textarea' | 'select'
+  options?: Array<{ value: string; label: string }>
+  value?: string
+  placeholder?: string
+}
+
+// native <dialog>: modal, esc-to-close, focus-trapped by the platform
+export function openDialog(
+  title: string,
+  fields: DialogField[],
+  submitLabel: string,
+  onSubmit: (values: Record<string, string>) => Promise<void> | void,
+): void {
+  const inputs = new Map<string, HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>()
+  const dlg = el('dialog', { class: 'dlg' })
+  const form = el('form', {},
+    el('div', { class: 'card-title' }, title),
+    ...fields.map(f => {
+      const input = f.kind === 'textarea' ? el('textarea', {})
+        : f.kind === 'select' ? el('select', {}, ...(f.options ?? []).map(o => new Option(o.label, o.value)))
+        : el('input', {})
+      if (input instanceof HTMLInputElement || input instanceof HTMLTextAreaElement) {
+        input.value = f.value ?? ''
+        input.placeholder = f.placeholder ?? ''
+      }
+      inputs.set(f.name, input)
+      return el('label', { class: 'field' }, el('span', {}, f.label), input)
+    }),
+    el('div', { class: 'dlg-buttons' },
+      Btn('cancel', () => dlg.close(), 'muted'),
+      Btn(submitLabel, async () => {
+        await onSubmit(Object.fromEntries([...inputs].map(([name, input]) => [name, input.value])))
+        dlg.close()
+      }),
+    ),
+  )
+  form.addEventListener('submit', ev => ev.preventDefault())
+  dlg.append(form)
+  dlg.addEventListener('close', () => dlg.remove())
+  document.body.append(dlg)
+  dlg.showModal()
+}
+
 export const Tabs = (items: ReadonlyArray<{ id: string; label: string }>, active: string, onSelect: (id: string) => void): HTMLElement =>
   el('div', { class: 'tabs' }, ...items.map(t =>
     el('button', { class: `tab${t.id === active ? ' active' : ''}`, onClick: () => onSelect(t.id) }, t.label)))

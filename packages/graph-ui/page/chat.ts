@@ -2,7 +2,7 @@
 // step node → that step only. Live: app.ts re-renders on matching SSE summaries (debounced).
 import type { TranscriptItem } from '@orc/ui-core'
 import { el } from './ui/el'
-import { Badge, Card, Empty, Pre, statusTone } from './ui/components'
+import { Badge, Btn, Card, Empty, Pre, statusTone } from './ui/components'
 
 const iterDivider = (n: number): HTMLElement => el('div', { class: 'chat-iter' }, `iter ${n}`)
 
@@ -21,11 +21,20 @@ function item(i: TranscriptItem): HTMLElement[] {
       )
       return [d]
     }
-    case 'question':
-      return [el('div', { class: 'card msg-q' },
+    case 'question': {
+      const card = el('div', { class: 'card msg-q' },
         el('div', { class: 'card-title' }, 'Q: ' + i.question, i.answer === null ? Badge('waiting', 'warn') : ''),
         i.answer !== null ? el('div', {}, `A: ${i.answer}`) : null,
-      )]
+      )
+      if (i.answer === null && onReplyCb) {
+        const input = el('input', {})
+        input.placeholder = 'your answer…'
+        card.append(el('div', { class: 'reply-row' }, input, Btn('reply', async () => {
+          if (input.value.trim()) await onReplyCb!(input.value.trim())
+        })))
+      }
+      return [card]
+    }
     case 'signal':
       return [el('div', { class: 'card' },
         el('div', { class: 'card-title' }, Badge(i.outcome, statusTone(i.outcome === 'success' ? 'done' : 'failed')), 'signal'),
@@ -34,7 +43,10 @@ function item(i: TranscriptItem): HTMLElement[] {
   }
 }
 
-export function renderChat(items: TranscriptItem[]): HTMLElement {
+let onReplyCb: ((text: string) => Promise<void>) | null = null
+
+export function renderChat(items: TranscriptItem[], onReply: ((text: string) => Promise<void>) | null = null): HTMLElement {
+  onReplyCb = onReply
   if (items.length === 0) return Empty('no conversation yet — select a task or step with agent activity')
   const out = el('div', { class: 'chat' })
   let iter = 0

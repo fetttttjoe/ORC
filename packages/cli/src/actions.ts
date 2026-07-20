@@ -82,6 +82,18 @@ export function buildOrcActions(deps: {
       return { workflowId: handle.workflowId }
     },
 
+    async annotate(taskId, noteId, text, refs) {
+      await kernel.annotatePlan(taskId, { targetNote: noteId, refs: refs ?? [], text })
+      return { noteId }
+    },
+
+    async revise(taskId, text, scope) {
+      await needPort() // resuming the gate needs DBOS launched here, exactly like reply
+      for (const noteId of scope) await kernel.annotatePlan(taskId, { targetNote: noteId, refs: [], text })
+      const topic = await kernel.replyFeedback(taskId, text)
+      return { topic }
+    },
+
     async cancel(taskId) {
       await (await needPort()).cancelRun(taskId)
       // Cancel is terminal — nothing will resume this subtree, so its still-owned, unreferenced
