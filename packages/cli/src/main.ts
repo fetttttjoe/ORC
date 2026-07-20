@@ -2,7 +2,7 @@ import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync } from '
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { Command, InvalidArgumentError } from 'commander'
-import { ISOLATION_TIER, PlanDraft, RUN_OUTCOME, STRATEGY, TASK_STATUS, type Analyzer, type EventRecord, type ExecutionPort, type Plan, type RunHandle } from '@orc/contracts'
+import { ISOLATION_TIER, MEMORY_ACCESS, PlanDraft, RUN_OUTCOME, STRATEGY, TASK_STATUS, type Analyzer, type EventRecord, type ExecutionPort, type Plan, type RunHandle } from '@orc/contracts'
 import { openStorage, Kernel, fold, grantExtensionTrust, grantMcpTrust, initializeProject, isExtensionTrusted, isMcpTrusted, loadConfig, loadTrust, migrateDatabase, requireProject, taskUsage, type EventLog, type OrcConfig, type PluginHost, type ProjectConfig, type Storage } from '@orc/kernel'
 import { createVaultProjector, parsePlanFile } from '@orc/vault-projector'
 import { createMemory, probeMemory } from '@orc/memory'
@@ -514,7 +514,9 @@ export function buildProgram(
       // zero bytes gives the human strictly less than the model gets, and reads as "no such note"
       // when the honest answer is "the read model returned nothing"
       if (rows.length === 0) console.log('_no notes_')
-      for (const n of rows) console.log(`${n.id}\t${n.title}\t[${n.categories.join(',')}]\t${n.summary}`)
+      // hits is the observed hot/cold split — the only evidence for whether a decay/sweep policy
+      // would ever be tuned against data rather than guessed at.
+      for (const n of rows) console.log(`${n.id}\t${n.title}\t[${n.categories.join(',')}]\thits ${n.hits}\t${n.summary}`)
     })
   mem
     .command('search <query>')
@@ -537,6 +539,10 @@ export function buildProgram(
       const memory = await createMemory({ log, config })
       await memory.projector.catchUp()
       const n = await memory.store.get(id, o.scope)
+      // a human read counts the same as an agent read — but only on a hit, and only after the
+      // note was actually produced (same rule the memory_read tool follows). No catchUp: the
+      // append is durable, and every read path already drains before it reads.
+      if (n) await memory.store.recordAccess(id, o.scope, MEMORY_ACCESS.read, { source: 'cli' })
       await memory.close()
       if (!n) throw new Error(`no note '${id}'`)
       console.log(JSON.stringify(n, null, 2))

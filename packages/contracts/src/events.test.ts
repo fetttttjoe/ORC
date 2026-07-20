@@ -32,6 +32,14 @@ describe('events', () => {
     expect(() => PAYLOAD_SCHEMAS.memory_deleted.parse({ ...good, scope: '../x' })).toThrow()
     expect(() => PAYLOAD_SCHEMAS.memory_deleted.parse({ ...good, id: '../x' })).toThrow()
   })
+  it('memory_accessed rejects a path-unsafe id or scope, and an unknown mode', () => {
+    const good = { id: 'auth', scope: 'project', mode: 'read', author: { source: 'cli' } }
+    expect(() => PAYLOAD_SCHEMAS.memory_accessed.parse(good)).not.toThrow()
+    expect(() => PAYLOAD_SCHEMAS.memory_accessed.parse({ ...good, mode: 'neighbors' })).not.toThrow()
+    expect(() => PAYLOAD_SCHEMAS.memory_accessed.parse({ ...good, scope: '../x' })).toThrow()
+    expect(() => PAYLOAD_SCHEMAS.memory_accessed.parse({ ...good, id: '../x' })).toThrow()
+    expect(() => PAYLOAD_SCHEMAS.memory_accessed.parse({ ...good, mode: 'write' })).toThrow()
+  })
   it('split_proposed and split_resolved payloads validate; split_resolved pins RunOutcome + scoped notes', () => {
     expect(PAYLOAD_SCHEMAS.split_proposed.safeParse({
       splitId: 'split:step:t1:s1:a1:call_1', taskId: 't1', stepId: 's1',

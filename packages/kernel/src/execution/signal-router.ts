@@ -19,7 +19,7 @@ const ROUTER_RELEVANT: Record<EventKind, boolean> = {
   memory_written: true, // composeSplitResult collects subtree-authored notes
   skill_loaded: false, agent_call: false, tool_call: false, tool_result: false,
   signal_received: false, operation_started: false, operation_completed: false,
-  operation_failed: false, artifact_produced: false, memory_deleted: false,
+  operation_failed: false, artifact_produced: false, memory_deleted: false, memory_accessed: false,
   feedback_requested: false, feedback_provided: true, plan_annotated: false, analysis_completed: false,
 }
 const ROUTER_KINDS = EventKind.options.filter(k => ROUTER_RELEVANT[k])

@@ -3,7 +3,7 @@ import { TaskNode, TaskStatus } from './task'
 import { Plan } from './plan'
 import { FailureClass, RunOutcome, Signal, Usage } from './execution'
 import { OperationCompletedPayload, OperationFailedPayload, OperationStartedPayload } from './operations'
-import { MemoryDeletedPayload, MemoryWrittenPayload } from './memory'
+import { MemoryAccessedPayload, MemoryDeletedPayload, MemoryWrittenPayload } from './memory'
 import { AnalysisCompletedPayload, FeedbackProvidedPayload, FeedbackRequestedPayload, PlanAnnotatedPayload } from './analysis'
 
 // typed so folds can parse receipts without casts
@@ -19,7 +19,7 @@ export const EventKind = z.enum([
   'run_started', 'step_started', 'skill_loaded', 'agent_call', 'tool_call', 'tool_result',
   'signal_received', 'step_completed', 'step_failed', 'split_proposed', 'split_resolved',
   'operation_started', 'operation_completed', 'operation_failed', 'artifact_produced',
-  'memory_written', 'memory_deleted',
+  'memory_written', 'memory_deleted', 'memory_accessed',
   'feedback_requested', 'feedback_provided', 'plan_annotated', 'analysis_completed',
 ])
 export type EventKind = z.infer<typeof EventKind>
@@ -116,6 +116,7 @@ export const PAYLOAD_SCHEMAS = {
   artifact_produced: ArtifactProducedPayload,
   memory_written: MemoryWrittenPayload,
   memory_deleted: MemoryDeletedPayload,
+  memory_accessed: MemoryAccessedPayload,
   feedback_requested: FeedbackRequestedPayload,
   feedback_provided: FeedbackProvidedPayload,
   plan_annotated: PlanAnnotatedPayload,

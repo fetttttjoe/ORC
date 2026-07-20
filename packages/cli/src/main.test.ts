@@ -489,9 +489,21 @@ describe('orc CLI', () => {
     await run('memory', 'search', 'x') // matches the 'x' tag
     expect(lines.join('\n')).toContain(id)
 
+    // `cat` is a read: it records one access, and `ls` surfaces the count so a human can see
+    // which knowledge is actually load-bearing. A miss records nothing — the note wasn't read.
+    const accesses = () => log.all().then(es => es.filter(e => e.kind === EVENT_KIND.memory_accessed))
+    expect(await accesses()).toHaveLength(1)
+    lines.length = 0
+    await run('memory', 'ls')
+    expect(lines.join('\n')).toContain('hits 1')
+
+    await expect(run('memory', 'cat', 'no-such-note-here')).rejects.toThrow()
+    expect(await accesses()).toHaveLength(1)
+
     await run('memory', 'rm', id) // rm's action already runs catchUp() itself
     lines.length = 0
     await expect(run('memory', 'cat', id)).rejects.toThrow(`no note '${id}'`)
+    expect(await accesses()).toHaveLength(1) // a deleted note is a miss, not a read
 
     // Empty results print a sentinel, the way `tasks` does. Zero bytes reads as "no such note"
     // when the honest answer is "the read model returned nothing" — the agent-facing tools

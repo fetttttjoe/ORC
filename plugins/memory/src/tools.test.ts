@@ -1,15 +1,16 @@
 import { describe, expect, it } from 'bun:test'
-import { MEMORY_LIMITS, MemoryNoteInput, type MemoryNote, type MemoryNoteDraft, type MemoryStore, type NoteSummary } from '@orc/contracts'
+import { MEMORY_ACCESS, MEMORY_LIMITS, MemoryNoteInput, type MemoryAccessMode, type MemoryNote, type MemoryNoteDraft, type MemoryStore, type NoteSummary } from '@orc/contracts'
 import { memoryTools, tierForRole } from './tools'
 
 const toNote = (input: MemoryNoteDraft): MemoryNote =>
   ({ ...MemoryNoteInput.parse(input), sources: [], createdAt: '', createdBy: '', updatedAt: '', updatedBy: '', revision: 1 })
 
 const summary = (id: string, title: string): NoteSummary =>
-  ({ id, title, summary: 's', categories: [], tags: [], scope: 'project' })
+  ({ id, title, summary: 's', categories: [], tags: [], scope: 'project', hits: 0, lastAccessedAt: null })
 
 const fakeStore = (over: Partial<MemoryStore> = {}) => {
   const written: { input: MemoryNoteDraft; author: unknown; idempotencyKey?: string }[] = []
+  const accessed: { id: string; scope?: string; mode: MemoryAccessMode; author: unknown }[] = []
   const store: MemoryStore = {
     write: async (input, author, opts) => { written.push({ input, author, idempotencyKey: opts?.idempotencyKey }); return toNote(input) },
     remove: async () => {},
@@ -17,9 +18,10 @@ const fakeStore = (over: Partial<MemoryStore> = {}) => {
     list: async () => [],
     search: async () => [summary('auth', 'Auth')],
     neighbors: async () => [],
+    recordAccess: async (id, scope, mode, author) => { accessed.push({ id, scope, mode, author }) },
     ...over,
   }
-  return { store, written }
+  return { store, written, accessed }
 }
 
 describe('memory tools', () => {
@@ -57,7 +59,7 @@ describe('memory tools', () => {
   it('search budgeting counts the complete serialized summaries', async () => {
     const bulky = Array.from({ length: 8 }, (_, i): NoteSummary => ({
       id: `n${i}`, scope: 'project', title: 'T', summary: '', categories: [],
-      tags: Array(50).fill('x'.repeat(64)),
+      tags: Array(50).fill('x'.repeat(64)), hits: 0, lastAccessedAt: null,
     }))
     const { store } = fakeStore({ search: async () => bulky })
     const search = memoryTools(store, { source: 'cli' }).find(t => t.name === 'memory_search')!
@@ -112,6 +114,41 @@ describe('memory tools', () => {
     const search = memoryTools(store, { source: 'cli' }).find(t => t.name === 'memory_search')!
     const r = await search.execute({ query: 'nope' })
     expect(r.output).toMatchObject({ note: "no note matched — absence is not proof a decision doesn't exist" })
+  })
+
+  // Access counts are the measurement that decides whether a decay/sweep is ever worth building,
+  // so they must count what an agent actually pulled — one event per hit, nothing for a miss, a
+  // failure, or a search (which returns summaries the model may never read).
+  it('a hit on memory_read records exactly one access; a miss and a failure record none', async () => {
+    const { store, accessed } = fakeStore()
+    const read = memoryTools(store, { source: 'agent', executor: 'api-loop' }).find(t => t.name === 'memory_read')!
+    await read.execute({ id: 'auth', scope: 'infra' })
+    expect(accessed).toEqual([{ id: 'auth', scope: 'infra', mode: MEMORY_ACCESS.read, author: { source: 'agent', executor: 'api-loop' } }])
+
+    const miss = fakeStore({ get: async () => null })
+    await memoryTools(miss.store, { source: 'cli' }).find(t => t.name === 'memory_read')!.execute({ id: 'nope' })
+    expect(miss.accessed).toHaveLength(0)
+
+    const boom = fakeStore({ get: async () => { throw new Error('surreal down') } })
+    const r = await memoryTools(boom.store, { source: 'cli' }).find(t => t.name === 'memory_read')!.execute({ id: 'auth' })
+    expect(r.isError).toBe(true)
+    expect(boom.accessed).toHaveLength(0)
+  })
+
+  it('memory_search records no access — a summary list is not a read', async () => {
+    const { store, accessed } = fakeStore()
+    await memoryTools(store, { source: 'cli' }).find(t => t.name === 'memory_search')!.execute({ query: 'auth' })
+    expect(accessed).toHaveLength(0)
+  })
+
+  it('memory_neighbors records one traversal against the seed, and none when nothing came back', async () => {
+    const hit = fakeStore({ neighbors: async () => [{ id: 'b', title: 'B', summary: 's', via: 'supersedes', depth: 1, score: 1 }] })
+    await memoryTools(hit.store, { source: 'cli' }).find(t => t.name === 'memory_neighbors')!.execute({ seed: 'a' })
+    expect(hit.accessed).toEqual([{ id: 'a', scope: undefined, mode: MEMORY_ACCESS.neighbors, author: { source: 'cli' } }])
+
+    const empty = fakeStore({ neighbors: async () => [] })
+    await memoryTools(empty.store, { source: 'cli' }).find(t => t.name === 'memory_neighbors')!.execute({ seed: 'a' })
+    expect(empty.accessed).toHaveLength(0)
   })
 
   it('scout tier narrows the tool surface (authors notes, but never traverses); auditor keeps the full set', () => {
