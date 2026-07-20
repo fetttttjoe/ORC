@@ -14,7 +14,7 @@ export function renderNoteFile(note: MemoryNote): string {
   const head = frontmatter({
     type: 'memory',
     id: note.id, scope: note.scope, title: note.title,
-    kind: note.kind, sourceRevision: note.sourceRevision,
+    kind: note.kind, retention: note.retention, sourceRevision: note.sourceRevision,
     categories: note.categories, tags: note.tags, links: note.links,
     paths: note.paths, rules: note.rules, summary: note.summary,
     createdAt: note.createdAt, createdBy: note.createdBy,

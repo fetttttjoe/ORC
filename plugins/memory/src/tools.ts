@@ -1,5 +1,5 @@
 import { z } from 'zod'
-import { MEMORY_LIMITS, MEMORY_SOURCE_LIMITS, NOTE_KINDS, LINK_KINDS, LinkKind, MemoryNoteInput, type MemoryAuthor, type MemoryStore, type ResolvedTool } from '@orc/contracts'
+import { MEMORY_LIMITS, MEMORY_SOURCE_LIMITS, NOTE_KINDS, LINK_KINDS, RETENTION_CLASSES, LinkKind, MemoryNoteInput, type MemoryAuthor, type MemoryStore, type ResolvedTool } from '@orc/contracts'
 import { applyBudget, fitMemoryNoteToBudget } from './budget'
 
 const ok = (output: unknown) => ({ output, isError: false })
@@ -73,6 +73,10 @@ export function memoryTools(store: MemoryStore, author: MemoryAuthor, tier: Memo
           kind: {
             type: 'string', enum: [...NOTE_KINDS],
             description: 'architecture_current = observed implementation; architecture_target = intended design; research = a distilled web finding, which REQUIRES sources (default fact)',
+          },
+          retention: {
+            type: 'string', enum: [...RETENTION_CLASSES],
+            description: 'durable = keep indefinitely (default); expirable = a provisional finding that may be swept once stale. Choose deliberately: this is not recoverable later.',
           },
           sources: {
             type: 'array', maxItems: MEMORY_SOURCE_LIMITS.items,

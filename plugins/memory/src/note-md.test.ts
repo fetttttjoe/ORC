@@ -9,7 +9,7 @@ const note = (over: Partial<MemoryNote> & { id: string }): MemoryNote => ({
   links: [{ id: 'session-model', kind: 'refines' }, { id: 'cookie-auth', kind: 'supersedes', confidence: 0.9 }],
   paths: ['packages/kernel/src/auth.ts'], rules: ['Refresh tokens are single-use.'],
   summary: 'Refresh tokens rotate on use.', body: '# Detail\nrotation logic',
-  sources: [], rationale: '', uncertainty: [],
+  retention: 'durable', sources: [], rationale: '', uncertainty: [],
   createdAt: '2026-07-18T09:12:04Z', createdBy: 'api-loop·sonnet-5·research',
   updatedAt: '2026-07-18T11:30:22Z', updatedBy: 'api-loop·opus·review', revision: 3,
   ...over,

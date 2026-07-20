@@ -15,6 +15,14 @@ describe('MemoryNoteInput', () => {
     expect(n.body).toBe('')
   })
 
+  // Captured at write time because that is the only moment the author's judgment exists; a note
+  // nobody classified must never become auto-deletable, so the default is durable.
+  it('defaults retention to durable and accepts an explicit expirable', () => {
+    expect(MemoryNoteInput.parse({ id: 'a', title: 'A' }).retention).toBe('durable')
+    expect(MemoryNoteInput.parse({ id: 'a', title: 'A', retention: 'expirable' }).retention).toBe('expirable')
+    expect(() => MemoryNoteInput.parse({ id: 'a', title: 'A', retention: 'forever' })).toThrow()
+  })
+
   // A finding pulled off the web is only knowledge if its provenance survives with it. These
   // bounds run before memory_written is appended, so a malformed citation never reaches history.
   it('accepts bounded credential-free http(s) citations', () => {

@@ -8,7 +8,7 @@ const config = { maxDepth: 3 }
 
 const note = (over: Partial<MemoryNote> & { id: string }): MemoryNote => ({
   scope: 'plan-t1', kind: 'plan', sourceRevision: null, title: over.id, categories: [], tags: [],
-  links: [], paths: [], rules: [], summary: '', body: '', sources: [], rationale: '', uncertainty: [],
+  links: [], paths: [], rules: [], summary: '', body: '', retention: 'durable', sources: [], rationale: '', uncertainty: [],
   createdAt: '', createdBy: '', updatedAt: '', updatedBy: '', revision: 1, ...over,
 })
 const link = (id: string, kind: MemoryLink['kind']): MemoryLink => ({ id, kind })
