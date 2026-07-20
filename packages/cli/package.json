@@ -9,6 +9,8 @@
     "@orc/analyzer-agent": "workspace:*",
     "@orc/mcp-client": "workspace:*",
     "@orc/memory": "workspace:*",
+    "@orc/graph-ui": "workspace:*",
+    "@orc/ui-core": "workspace:*",
     "@orc/vault-projector": "workspace:*",
     "@orc/executor-api-loop": "workspace:*",
     "@orc/provider-anthropic": "workspace:*",

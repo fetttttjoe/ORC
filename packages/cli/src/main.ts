@@ -2,10 +2,11 @@ import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync } from '
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { Command, InvalidArgumentError } from 'commander'
-import { ISOLATION_TIER, MEMORY_ACCESS, PlanDraft, RUN_OUTCOME, STRATEGY, TASK_STATUS, type Analyzer, type EventRecord, type ExecutionPort, type Plan, type RunHandle } from '@orc/contracts'
+import { EVENT_KIND, MEMORY_ACCESS, PlanDraft, RUN_OUTCOME, STRATEGY, TASK_STATUS, type Analyzer, type EventRecord, type ExecutionPort, type Plan, type RunHandle } from '@orc/contracts'
 import { openStorage, Kernel, fold, grantExtensionTrust, grantMcpTrust, initializeProject, isExtensionTrusted, isMcpTrusted, loadConfig, loadTrust, migrateDatabase, requireProject, taskUsage, type EventLog, type OrcConfig, type PluginHost, type ProjectConfig, type Storage } from '@orc/kernel'
 import { createVaultProjector, parsePlanFile } from '@orc/vault-projector'
 import { createMemory, probeMemory } from '@orc/memory'
+import { buildOrcActions, singleStepDraft } from './actions'
 import type { McpHub } from '@orc/mcp-client'
 
 // loadConfig is the ONE resolution of env → .orc/config.json → default; every command
@@ -71,26 +72,7 @@ export async function runMigrate(args: string[], dir?: string): Promise<void> {
   await databaseCommand(dir).parseAsync(args, { from: 'user' })
 }
 
-export function singleStepDraft(task: { title: string; spec: string }, modelRef: string, skillRefs: string[] = []): PlanDraft {
-  return {
-    strategyRef: STRATEGY.single,
-    costEstimateUSD: null,
-    steps: [{
-      id: 's1',
-      role: 'worker',
-      title: task.title,
-      instructions: task.spec === '' ? task.title : task.spec,
-      executorRef: 'api-loop',
-      modelRef,
-      skillRefs,
-      toolRefs: [],
-      isolation: ISOLATION_TIER.local, // the only implemented tier — worktree/docker come with sandbox plugins
-      zone: [],
-      maxIterations: 25,
-      dependsOn: [],
-    }],
-  }
-}
+export { singleStepDraft } from './actions' // moved next to the shared OrcActions implementation
 
 function parseNonNegativeInteger(value: string): number {
   const parsed = Number(value)
@@ -112,7 +94,7 @@ function resolveDraft(task: { title: string; spec: string }, opts: { file?: stri
   }
   return opts.file
     ? PlanDraft.parse(JSON.parse(readFileSync(opts.file, 'utf8')))
-    : singleStepDraft(task, opts.model, opts.skill ?? [])
+    : singleStepDraft(task, opts.model, opts.skill ?? [], config?.maxIterations)
 }
 
 // stream-driven tail (spec §5): no polling — LISTEN/NOTIFY pushes each event as it commits
@@ -297,6 +279,9 @@ export function buildProgram(
       ))
     })
 
+  // one shared implementation of every mutating command — the web adapter gets the same object
+  const actions = () => buildOrcActions({ kernel, needPort, plugin })
+
   const needPort = async (): Promise<ExecutionPort> => {
     if (!portFactory) throw new Error('execution commands are unavailable in this context')
     return portFactory()
@@ -339,10 +324,32 @@ export function buildProgram(
 
   program
     .command('cancel <taskId>')
-    .description('cancel the active run (terminal in M2)')
+    .description('cancel the active run (terminal in M2); sweeps knowledge notes the cancelled subtree still owns')
     .action(async (taskId: string) => {
-      await (await needPort()).cancelRun(taskId)
+      const { swept, sweepError } = await actions().cancel(taskId)
       console.log('cancelled')
+      if (sweepError) console.warn(`sweep skipped: ${sweepError} — orphaned notes remain (content is still in the event log)`)
+      for (const n of swept) console.log(`swept ${n.scope === 'project' ? '' : `${n.scope}/`}${n.id} — ${n.title}`)
+      if (swept.length > 0) console.log(`swept ${swept.length} orphaned note(s); content preserved in the event log`)
+    })
+
+  program
+    .command('graph')
+    .description('serve the live project graph UI (read-only, 127.0.0.1)')
+    .option('--port <n>', 'port', (v: string) => parseInt(v, 10), 7749)
+    .action(async (opts: { port: number }) => {
+      const { startGraphUi } = await import('@orc/graph-ui') // lazy: keep CLI startup lean
+      const cfg = plugin?.config
+      const ui = startGraphUi({
+        url: (cfg ?? loadConfig()).databaseUrl,
+        port: opts.port,
+        cwdProject: cfg ? { id: cfg.projectId, name: cfg.projectName } : undefined,
+        // mutations only when launched inside a project with a real runtime behind it
+        actions: portFactory && plugin ? actions() : undefined,
+        defaultCwd: cfg?.dir ?? process.cwd(),
+      })
+      console.log(`graph ui on http://127.0.0.1:${ui.port}`)
+      await new Promise(() => {}) // serve until Ctrl-C
     })
 
   program
@@ -381,7 +388,10 @@ export function buildProgram(
       for (const a of state.artifacts.get(taskId) ?? [])
         console.log(`  out ${(a.stepId ?? '?').padEnd(12)} ${a.path} · sha256:${a.sha256.slice(0, 12)} · ${a.size}B`)
       const u = taskUsage(state, taskId)
-      console.log(`  tokens in/out: ${u.inputTokens}/${u.outputTokens}  cost: ${u.costUSD === null ? 'n/a' : `$${u.costUSD.toFixed(4)}${u.estimated ? ' (est)' : ''}`}`)
+      const cache = u.cacheReadTokens || u.cacheWriteTokens
+        ? `  cache r/w: ${u.cacheReadTokens ?? 0}/${u.cacheWriteTokens ?? 0}`
+        : '' // no cache split recorded for this task
+      console.log(`  tokens in/out: ${u.inputTokens}/${u.outputTokens}${cache}  cost: ${u.costUSD === null ? 'n/a' : `$${u.costUSD.toFixed(4)}${u.estimated ? ' (est)' : ''}`}`)
     })
 
   program
