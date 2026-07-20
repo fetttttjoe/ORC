@@ -22,12 +22,16 @@ const waitForFile = async (file: string, timeoutMs: number, what: string): Promi
 }
 
 describe('kill -9 resume (spec §10/§11 — the crown jewel)', () => {
-  let drop: (() => Promise<void>) | null = null
-  afterAll(async () => { await drop?.() })
+  // An array, not a single `drop`: a lone variable is overwritten by the second test, so the
+  // first test's database and its _dbos_ sibling survive every suite run. Measured — one pair
+  // leaked per run, and the pair count grows with each CI pass forever, since nothing ever
+  // collects them. Every other multi-database test file in the repo already collects into a list.
+  const drops: (() => Promise<void>)[] = []
+  afterAll(async () => { for (const d of drops) await d() })
 
   it('a killed run resumes on restart; no double-billed iteration; replay identity holds', async () => {
     const db = await createTestDb()
-    drop = db.drop
+    drops.push(db.drop)
     const storage = await openStorage(db.url, { projectId: TEST_PROJECT_ID })
     const log = storage.events
     const kernel = new Kernel(log)
@@ -86,7 +90,7 @@ describe('kill -9 resume (spec §10/§11 — the crown jewel)', () => {
   // the loop — the only shape where replay order can diverge from first-run order.
   it('two independent steps settling out of order resume with each result bound to its own step', async () => {
     const db = await createTestDb()
-    drop = db.drop
+    drops.push(db.drop)
     const storage = await openStorage(db.url, { projectId: TEST_PROJECT_ID })
     const log = storage.events
     const kernel = new Kernel(log)

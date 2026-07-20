@@ -221,6 +221,22 @@ describe('memory tools', () => {
     expect(props.rationale).toMatchObject({ maxLength: MEMORY_LIMITS.rationaleChars })
   })
 
+  // Observed on a real run: an agent wrote a summary whose body carried a "### References"
+  // section listing two sources, while the structured `sources` stayed empty — it had chosen
+  // kind=fact, so the citation requirement never applied. The note reads as sourced and is
+  // unverifiable by query. The schema is the only place the model learns where provenance goes,
+  // so it has to say that the field is the ONLY queryable home for it, on every kind.
+  it('memory_write tells the model to put citations in sources, not in the body prose', () => {
+    const { store } = fakeStore()
+    const write = memoryTools(store, { source: 'cli' }).find(t => t.name === 'memory_write')!
+    const props = (write.inputSchema as { properties: Record<string, { description?: string }> }).properties
+    const sources = props.sources?.description ?? ''
+    expect(sources).toContain('not in a references section inside body')
+    expect(sources).toContain('queryable')
+    expect(sources).toContain('every kind')       // not just research
+    expect(sources).toContain('derived_from')     // note-to-note provenance has its own home
+  })
+
   it('memory_write advertises rationale/uncertainty so a model can discover and set them', () => {
     const { store } = fakeStore()
     const write = memoryTools(store, { source: 'cli' }).find(t => t.name === 'memory_write')!

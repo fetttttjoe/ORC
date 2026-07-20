@@ -8,7 +8,6 @@ import { eventFixture } from '@orc/contracts/fixtures'
 import { createTestSurreal } from './test-helpers'
 import { renderMemoryIndex, rebuildVaultMemory, SECTIONS } from './memory-index'
 
-const SECTION_COUNT = SECTIONS.length
 
 const drops: (() => Promise<void>)[] = []
 afterAll(async () => { for (const d of drops) await d() })
@@ -45,20 +44,39 @@ describe('renderMemoryIndex', () => {
       note({ id: 'plain', kind: 'fact', title: 'A fact' }),
     ]
     const md = renderMemoryIndex(notes)
-    expect(md).toContain('## Current architecture')
-    expect(md).toContain('## Target architecture')
-    expect(md).toContain('## Decisions and facts')
+    expect(md).toContain('["Current architecture"]')
+    expect(md).toContain('["Target architecture"]')
+    expect(md).toContain('["Decisions and facts"]')
     expect(md).toContain('-->|depends_on|')
     expect(md).toContain('click n0 "db.md"')
     expect(md).toContain("Event 'envelope'") // quotes sanitized out of mermaid labels
     expect(md).toContain('Team server')
     expect(md).toContain('Why Postgres')
+    expect(md).toContain('_Not yet documented: Research._') // the one section with no notes
     expect(md).toBe(renderMemoryIndex(notes)) // deterministic
   })
 
-  it('renders explicit empty sections', () => {
+  // Observed on a real run: an agent wrote a `fact` summarising a `research` note and linked
+  // `derived_from` back to it. Per-section graphs could not draw that edge — both endpoints have
+  // to share a graph — so the link tying a conclusion to its evidence rendered nowhere, while
+  // memory_neighbors traversed it fine. One graph with subgraphs is what makes it visible.
+  it('draws an edge whose endpoints are in different sections', () => {
+    const md = renderMemoryIndex([
+      note({ id: 'summary', kind: 'fact', title: 'Summary', links: [{ id: 'finding', kind: 'derived_from' }] }),
+      note({ id: 'finding', kind: 'research', title: 'Finding', sources: [{ url: 'https://e.test', retrievedAt: 'T' }] }),
+    ])
+    expect(md).toContain('-->|derived_from|')
+    expect(md.match(/```mermaid/g)).toHaveLength(1) // one graph, so cross-section edges CAN exist
+    // and the sections are still distinguishable within it
+    expect(md).toContain('["Decisions and facts"]')
+    expect(md).toContain('["Research"]')
+  })
+
+  it('names every section that has no notes, and says so plainly when there are none at all', () => {
     const md = renderMemoryIndex([])
-    expect(md.match(/_none_/g)).toHaveLength(SECTION_COUNT)
+    expect(md).toContain('_none_')
+    for (const s of SECTIONS) expect(md).toContain(s.title)
+    expect(md).not.toContain('```mermaid') // no empty graph block
   })
 
   // A kind missing from SECTIONS gets a note file but never appears in the human-facing index —
@@ -79,7 +97,7 @@ describe('renderMemoryIndex', () => {
       note({ id: 'pgvector', kind: 'research', title: 'pgvector recall past 1M rows',
         sources: [{ url: 'https://example.test/b', retrievedAt: 'T' }] }),
     ])
-    expect(md).toContain('## Research')
+    expect(md).toContain('["Research"]')
     expect(md).toContain('pgvector recall past 1M rows')
     expect(md).toContain('click n0 "pgvector.md"')
   })
