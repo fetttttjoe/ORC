@@ -85,15 +85,26 @@ behaviour, but the design should say so rather than frame it as collection.
 
 ---
 
-## 2. `retention: durable | expirable` on notes
+## 2. ~~`retention: durable | expirable` on notes~~ — SHIPPED 2026-07-20
 
-**Why deferred:** split out of slice 1 of the sourced-research plan. Nothing
-reads the field until a sweep exists; adding it early means touching every
-first-party writer and test fixture for a value no code branches on.
+**Deferred here on 2026-07-20, then reversed the same day. The deferral was wrong.**
 
-**Trigger:** ships with entry 1. One field on `MemoryNoteBase`, plus a replay
-decoder supplying `durable` for historical `memory_written` events so existing
-history stays readable and unsweepable. As cheap then as now.
+The original reasoning was "nothing reads the field until a sweep exists". That is the right
+test for a *feature* with no consumer; it is the wrong test for **data capture that is only
+possible at creation time**. `retention` is the authoring agent's judgment at write time, and
+that is the only moment it exists. Deferring the field would have meant every note written
+before the sweep shipped got retroactively defaulted to `durable` by the legacy decoder —
+exactly backwards for research findings, and unrecoverable without re-reading and re-judging
+every note. The sweep can wait; the label cannot.
+
+Shipped with one change from the original design, which required `retention` explicitly on
+every write (the source of that plan's 20-file churn): it **defaults to `durable`**. Same intent
+captured, a fraction of the cost, and it fails safe — a note nobody classified is never
+auto-deletable. `orc memory` and the vault frontmatter carry it; nothing branches on it until
+entry 1 ships.
+
+**Lesson worth keeping:** "no reader yet" justifies deferring behaviour, never deferring the
+recording of a judgment that cannot be reconstructed later.
 
 ---
 

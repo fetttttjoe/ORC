@@ -64,6 +64,16 @@ export type MemorySourceInput = z.infer<typeof MemorySourceInput>
 export const MemorySource = MemorySourceInput.extend({ retrievedAt: z.string() })
 export type MemorySource = z.infer<typeof MemorySource>
 
+// Whether a note may ever be swept. Nothing reads this yet — the sweep is deferred
+// (docs/IDEAS.md entry 1) — but it is captured now because it is the AUTHOR'S judgment at write
+// time, and that is the only moment it exists. A field added later would silently default every
+// note written in the interim to durable, which is precisely wrong for research findings.
+// Defaults to `durable`: a note nobody classified must never become auto-deletable.
+export const RETENTION_CLASSES = ['durable', 'expirable'] as const
+export const Retention = z.enum(RETENTION_CLASSES)
+export type Retention = z.infer<typeof Retention>
+export const RETENTION = Retention.enum
+
 // knowledge lifecycle: current/target architecture stay distinguishable and queryable.
 // `research` is a distilled web finding — it is the one kind that MUST carry a citation.
 export const NOTE_KINDS = ['fact', 'decision', 'architecture_current', 'architecture_target', 'documentation', 'plan', 'research'] as const
@@ -90,6 +100,7 @@ const MemoryNoteBase = z.object({
   rules: z.array(z.string().max(MEMORY_LIMITS.detailChars)).max(MEMORY_LIMITS.detailItems).default([]), // normative statements agents honor
   summary: z.string().max(500).default(''),
   body: z.string().max(MEMORY_LIMITS.bodyChars).default(''),
+  retention: Retention.default(RETENTION.durable),                                 // may this ever be swept?
   sources: z.array(MemorySourceInput).max(MEMORY_SOURCE_LIMITS.items).default([]), // provenance for a web finding
   rationale: z.string().max(MEMORY_LIMITS.rationaleChars).default(''),          // plan-note: why this subplan exists
   uncertainty: z.array(z.string().max(MEMORY_LIMITS.detailChars)).max(MEMORY_LIMITS.detailItems).default([]), // plan-note: coverage gaps / assumptions (RG7)
