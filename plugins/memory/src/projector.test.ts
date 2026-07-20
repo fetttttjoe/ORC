@@ -120,3 +120,58 @@ describe('memory projector', () => {
     await surreal.close(); await log.close()
   })
 })
+
+describe('projector resilience', () => {
+  const fullNote = {
+    ...noteInput, kind: 'fact', retention: 'durable', sourceRevision: null, sources: [],
+    rationale: '', uncertainty: [], createdAt: 't', createdBy: 'cli', updatedAt: 't', updatedBy: 'cli', revision: 1,
+  }
+  it('absorbs one connection-shaped failure with a silent retry; warns only when failures persist', async () => {
+    const pg = await createTestDb(); drops.push(pg.drop)
+    const log = (await openStorage(pg.url, { projectId: TEST_PROJECT_ID })).events
+    const vaultDir = mkdtempSync(path.join(tmpdir(), 'orc-vault-retry-'))
+    let applyCalls = 0
+    const stub = {
+      applyEvent: async () => {
+        applyCalls += 1
+        if (applyCalls === 1) throw new Error('Transaction not found') // transient, first apply only
+        return true
+      },
+      get: async () => fullNote,
+      getCursor: async () => 0,
+      allNotes: async () => [fullNote],
+    } as unknown as SurrealMemory
+    const warns: string[] = []
+    const warnSpy = spyOn(console, 'warn').mockImplementation((...a: unknown[]) => { warns.push(a.join(' ')) })
+    const proj = createMemoryProjector({ log, surreal: stub, vaultDir })
+    await proj.start()
+    await log.append({ taskId: null, stepId: null, runToken: null, kind: 'memory_written', payload: { note: noteInput, author: { source: 'cli' } } })
+    await Bun.sleep(600) // subscription fires -> fail -> 250ms backoff -> retry succeeds
+    await proj.close(); await log.close()
+    warnSpy.mockRestore()
+    expect(applyCalls).toBeGreaterThanOrEqual(2) // the retry actually re-applied
+    expect(warns.filter(w => w.includes('memory projector'))).toEqual([]) // silently healed
+    expect(existsSync(path.join(vaultDir, 'memory', 'auth.md'))).toBe(true) // and the apply landed
+  })
+  it('a persistent non-connection failure still warns once and does not reject unhandled', async () => {
+    const pg = await createTestDb(); drops.push(pg.drop)
+    const log = (await openStorage(pg.url, { projectId: TEST_PROJECT_ID })).events
+    const vaultDir = mkdtempSync(path.join(tmpdir(), 'orc-vault-warn-'))
+    const stub = {
+      applyEvent: async () => { throw new Error('boom') },
+      get: async () => fullNote,
+      getCursor: async () => { throw new Error('boom too') }, // catch-path cursor read also fails
+      allNotes: async () => [],
+    } as unknown as SurrealMemory
+    const warns: string[] = []
+    const warnSpy = spyOn(console, 'warn').mockImplementation((...a: unknown[]) => { warns.push(a.join(' ')) })
+    const proj = createMemoryProjector({ log, surreal: stub, vaultDir })
+    // start()'s initial drain hits the failing stub too — tolerate it; the subscription is live after
+    await proj.start().catch(() => {})
+    await log.append({ taskId: null, stepId: null, runToken: null, kind: 'memory_written', payload: { note: noteInput, author: { source: 'cli' } } })
+    await Bun.sleep(400)
+    await proj.close(); await log.close()
+    warnSpy.mockRestore()
+    expect(warns.some(w => w.includes('memory projector: boom'))).toBe(true) // honest warning survives
+  })
+})

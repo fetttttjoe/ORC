@@ -520,3 +520,56 @@ describe('orc CLI', () => {
     await log.close()
   })
 })
+
+describe('cancel-sweep wiring (real plugin, stub port)', () => {
+  it('cancel sweeps the task-owned orphan, keeps the adopted id, and stamps provenance', async () => {
+    const db = await createTestDb()
+    dbs.push(db)
+    const dir = mkdtempSync(path.join(tmpdir(), 'orc-cancel-sweep-'))
+    const projectDbName = `t_${Math.random().toString(36).slice(2, 10)}`
+    const config = requireProject({ ...loadConfig(dir), projectDbName, projectId: TEST_PROJECT_ID, projectName: 'test' })
+    surrealConfigs.push(config)
+    const { kernel, log } = await openKernel(db.url, { projectId: TEST_PROJECT_ID })
+    const lines: string[] = []
+    spyOn(console, 'log').mockImplementation((...a: unknown[]) => { lines.push(a.join(' ')) })
+    const { host, hub } = await buildPlugins(config)
+    const stubPort: ExecutionPort = {
+      startRun: async () => { throw new Error('unused') },
+      retry: async () => { throw new Error('unused') },
+      cancelRun: async () => {},
+    }
+    const run = (...args: string[]) =>
+      buildProgram(kernel, async () => stubPort, { host, hub, config, log }).parseAsync(args, { from: 'user' })
+
+    await run('new', 'sweep wiring')
+    const taskId = lines[0]!
+    const write = (id: string, author: Record<string, unknown>) => log.append({
+      taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_written,
+      payload: { note: { id, title: id }, author },
+    })
+    await write('wiring-orphan', { source: 'agent', taskId })
+    await write('wiring-adopted', { source: 'agent', taskId })
+    await write('wiring-adopted', { source: 'cli' }) // re-written by a live writer -> adopted
+
+    lines.length = 0
+    await run('cancel', taskId)
+    const out = lines.join('\n')
+    expect(out).toContain('cancelled')
+    expect(out).toContain('swept wiring-orphan')
+    expect(out).not.toContain('swept wiring-adopted')
+    const deleted = (await log.all()).filter(e => e.kind === EVENT_KIND.memory_deleted)
+    expect(deleted.map(e => (e.payload as { id: string }).id)).toEqual(['wiring-orphan'])
+    expect((deleted[0]!.payload as { author: { taskId?: string } }).author.taskId).toBe(taskId)
+
+    // failure path: a sweep failure warns; the cancel itself still exits clean
+    const warns: string[] = []
+    const warnSpy = spyOn(console, 'warn').mockImplementation((...a: unknown[]) => { warns.push(a.join(' ')) })
+    const afterSpy = spyOn(log, 'after').mockImplementation(async () => { throw new Error('surreal down') })
+    lines.length = 0
+    await run('cancel', taskId) // must not reject
+    expect(lines.join('\n')).toContain('cancelled')
+    expect(warns.join('\n')).toContain('sweep skipped: surreal down')
+    afterSpy.mockRestore(); warnSpy.mockRestore()
+    await log.close()
+  })
+})
