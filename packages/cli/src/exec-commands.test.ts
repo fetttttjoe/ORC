@@ -24,7 +24,8 @@ function stubPort(outcome: 'done' | 'blocked' = 'done') {
 async function makeCli(outcome: 'done' | 'blocked' = 'done') {
   const db = await createTestDb()
   dbs.push(db)
-  const { kernel } = await openKernel(db.url, { projectId: TEST_PROJECT_ID })
+  const { kernel, storage } = await openKernel(db.url, { projectId: TEST_PROJECT_ID })
+  db.onClose(() => storage.close())
   const { port, calls } = stubPort(outcome)
   const lines: string[] = []
   spyOn(console, 'log').mockImplementation((...a: unknown[]) => { lines.push(a.join(' ')) })

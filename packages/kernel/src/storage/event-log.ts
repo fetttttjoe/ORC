@@ -215,8 +215,14 @@ export class EventLog implements EventLogOps {
     const connect = async (initial: boolean): Promise<void> => {
       if (closed) return
       const c = new pg.Client({ connectionString: this.store.url, application_name: `orc-events-${this.store.projectId}` })
-      // an 'error' event with no listener crashes the process (Node default), so log + reconnect
-      c.on('error', err => console.warn(`event stream listener error: ${err instanceof Error ? err.message : String(err)}`))
+      // an 'error' event with no listener crashes the process (Node default), so the handler must
+      // stay attached even after close — but it must stop TALKING, the way the 'end' handler
+      // already does. A subscription that was disposed has nothing to report: the socket dying
+      // afterwards is the expected consequence of closing it, and warning about it prints an
+      // alarming line after the user's command already finished.
+      c.on('error', err => {
+        if (!closed) console.warn(`event stream listener error: ${err instanceof Error ? err.message : String(err)}`)
+      })
       try {
         await c.connect()
         await c.query(`LISTEN ${NOTIFY_CHANNEL}`)

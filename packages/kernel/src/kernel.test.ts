@@ -8,9 +8,10 @@ import { instantiateFrozenPlan, planGraphHash, planScope } from './execution/str
 import { createTestDb, TEST_PROJECT_ID } from './test-helpers'
 
 const dbs: Array<{ drop: () => Promise<void> }> = []
-// Teardown drops one DB per freshKernel (14+ here), each a pg_database scan + DROP DATABASE WITH
-// FORCE on its own admin connection. Serial drops blew bun's default 5s hook budget under a
-// contended pg — the DBs are distinct so drop them concurrently, with headroom for a loaded box.
+// Teardown drops one DB per freshKernel (14+ here), each a pg_database scan + DROP DATABASE on its
+// own admin connection. Each handle closes its registered pool first (createTestDb.onClose), so
+// DROP no longer has to terminate live backends — but the DBs are still distinct, so drop them
+// concurrently with headroom for a loaded box.
 afterAll(async () => {
   await Promise.all(dbs.map(d => d.drop()))
 }, 30_000)
@@ -18,7 +19,9 @@ afterAll(async () => {
 async function freshKernel(): Promise<Kernel> {
   const db = await createTestDb()
   dbs.push(db)
-  return new Kernel((await openStorage(db.url, { projectId: TEST_PROJECT_ID })).events)
+  const storage = await openStorage(db.url, { projectId: TEST_PROJECT_ID })
+  db.onClose(() => storage.close()) // pool closes before the database is dropped
+  return new Kernel(storage.events)
 }
 
 const draft = (): PlanDraft => draftFixture()
@@ -107,7 +110,9 @@ describe('Kernel lifecycle', () => {
   it('propose fails with plan_validation_failed when the refValidator reports errors', async () => {
     const db = await createTestDb()
     dbs.push(db)
-    const k = new Kernel((await openStorage(db.url, { projectId: TEST_PROJECT_ID })).events, async () => [`unknown executor 'nope'`])
+    const storage = await openStorage(db.url, { projectId: TEST_PROJECT_ID })
+    db.onClose(() => storage.close())
+    const k = new Kernel(storage.events, async () => [`unknown executor 'nope'`])
     const t = await k.createTask({ title: 'x' })
     await expect(k.proposePlan(t.id, draft())).rejects.toThrow(/unknown executor 'nope'/)
   })
@@ -115,7 +120,9 @@ describe('Kernel lifecycle', () => {
   it('propose succeeds when the refValidator returns no errors', async () => {
     const db = await createTestDb()
     dbs.push(db)
-    const k = new Kernel((await openStorage(db.url, { projectId: TEST_PROJECT_ID })).events, async () => [])
+    const storage = await openStorage(db.url, { projectId: TEST_PROJECT_ID })
+    db.onClose(() => storage.close())
+    const k = new Kernel(storage.events, async () => [])
     const t = await k.createTask({ title: 'x' })
     await expect(k.proposePlan(t.id, draft())).resolves.toBeDefined()
   })
@@ -145,7 +152,9 @@ describe('Kernel lifecycle', () => {
     // fake analyzer stub: analysisStep returns the scout analyze step (agent-analyzer's real shape)
     const analyze: PlanStep = stepFixture({ id: 'analyze', role: 'scout', skillRefs: ['codebase-analysis'] })
     const analyzers = new Map<string, Analyzer>([['agent-analyzer', { id: 'agent-analyzer', analysisStep: () => analyze }]])
-    const k = new Kernel((await openStorage(db.url, { projectId: TEST_PROJECT_ID })).events, undefined, analyzers)
+    const storage = await openStorage(db.url, { projectId: TEST_PROJECT_ID })
+    db.onClose(() => storage.close())
+    const k = new Kernel(storage.events, undefined, analyzers)
     const t = await k.createGroundedTask({ title: 'build web', spec: 's', modelRef: 'anthropic/claude-sonnet-5', analyzerRef: 'agent-analyzer' })
     const plan = (await k.getPlan(t.id))!
     expect(plan.strategyRef).toBe('grounded-plan')

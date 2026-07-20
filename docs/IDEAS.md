@@ -169,27 +169,30 @@ to `noteId/scope/title/kind/links`, and refresh on the drain's existing
 
 ---
 
-## 6. Test-helper connection pools are never closed
+## 6. ~~Test-helper connection pools are never closed~~ — FIXED 2026-07-20
 
-**Source:** repo-wide audit 2026-07-20.
+Fixed at the shared seam rather than per test file. `createTestDb` now returns a handle with
+`onClose(fn)`, and `drop()` runs registered closers LIFO **before** dropping the database. The
+leak was structural: the helper handed out a URL and had no idea who opened pools against it, so
+`DROP DATABASE ... WITH (FORCE)` terminated live backends as its routine mechanism — which is
+where "terminating connection due to administrator command" and "event stream reconnect failed:
+database does not exist" came from. FORCE is now a backstop for a wedged backend, not the path.
 
-`freshKernel` (`kernel.test.ts:18`) and `makeCli`
-(`main.test.ts:39`, `exec-commands.test.ts:24`) discard the `Storage`/pool that
-`openStorage`/`openKernel` returns. `kernel.test.ts` alone opens 19 pools and
-closes none.
+Adopted in `freshKernel` and both `makeCli` helpers plus three inline sites, which covers the
+bulk of the 86 storage-opening call sites because most route through those three helpers.
 
-**Why deferred:** measured at peak **38 of 100** Postgres connections during a
-full run — roughly 2.5× headroom. The bill is already visible elsewhere, though:
-both files carry comments explaining that serial teardown blew Bun's 5s hook
-budget, forcing `Promise.all` and a 30s budget, and `DROP DATABASE … WITH
-(FORCE)` has to terminate live backends precisely because these pools are open.
+**Measured:** peak Postgres connections during a full `bun test` went **38 → 15** of 100. Suite
+unchanged at 0 failures.
 
-**Trigger:** ~30 more `freshKernel`-style tests, or the first `too many clients
-already` failure — which will present as an order-dependent failure in whichever
-test happens to run at the peak, unrelated to the one that caused it. Fix is ~6
-lines: return `storage` from the three helpers and close it in the existing
-`afterAll`. Cheapest done opportunistically, next time any of those files is
-touched.
+Fixed alongside it, in production code: `EventLog.subscribe`'s disposer removed the `notification`
+listener but left the `error` listener talking, so a subscription that was already closed could
+still print a warning after the user's command finished. The handler must stay attached (an
+`error` event with no listener crashes the process) but now guards on `closed`, matching what the
+`end` handler already did.
+
+**Not silenced, deliberately:** `storage.subscribe.test.ts` still prints one
+`terminating connection due to administrator command`. That test calls `pg_terminate_backend` on
+the listener on purpose to prove the reconnect path works; the warning is the behavior under test.
 
 ---
 
