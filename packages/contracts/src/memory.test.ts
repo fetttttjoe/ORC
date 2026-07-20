@@ -15,6 +15,51 @@ describe('MemoryNoteInput', () => {
     expect(n.body).toBe('')
   })
 
+  // A finding pulled off the web is only knowledge if its provenance survives with it. These
+  // bounds run before memory_written is appended, so a malformed citation never reaches history.
+  it('accepts bounded credential-free http(s) citations', () => {
+    const n = MemoryNoteInput.parse({
+      id: 'finding', title: 'Finding',
+      sources: [{ url: 'https://example.test/a' }, { url: 'http://example.test/b', title: 'B' }],
+    })
+    expect(n.sources).toEqual([{ url: 'https://example.test/a' }, { url: 'http://example.test/b', title: 'B' }])
+    expect(MemoryNoteInput.parse({ id: 'plain', title: 'Plain' }).sources).toEqual([])
+  })
+
+  it('rejects unsafe or unbounded citations', () => {
+    const note = { id: 'bounded', title: 'Bounded' }
+    const invalid = [
+      { sources: Array(21).fill({ url: 'https://example.test/a' }) },     // over the 20 cap
+      { sources: [{ url: `https://example.test/${'x'.repeat(2_048)}` }] }, // over 2048 chars
+      { sources: [{ url: 'https://example.test/a', title: 'x'.repeat(301) }] },
+      { sources: [{ url: 'ftp://example.test/a' }] },                      // not http(s)
+      { sources: [{ url: 'javascript:alert(1)' }] },
+      { sources: [{ url: 'file:///etc/passwd' }] },
+      { sources: [{ url: 'https://user:pw@example.test/a' }] },            // embedded credentials
+      { sources: [{ url: 'not a url at all' }] },
+    ]
+    for (const over of invalid) expect(() => MemoryNoteInput.parse({ ...note, ...over })).toThrow()
+  })
+
+  // retrievedAt is derived from the canonical memory_written event timestamp by the projector —
+  // an agent must not be able to claim when it fetched something.
+  it("a writer cannot supply a citation's retrievedAt", () => {
+    const n = MemoryNoteInput.parse({
+      id: 'finding', title: 'Finding', kind: 'research',
+      sources: [{ url: 'https://example.test/a', retrievedAt: '1999-01-01T00:00:00.000Z' }],
+    })
+    expect(n.sources[0]).not.toHaveProperty('retrievedAt')
+  })
+
+  it('requires at least one citation for kind research, and only for research', () => {
+    expect(() => MemoryNoteInput.parse({ id: 'r', title: 'R', kind: 'research' })).toThrow()
+    expect(MemoryNoteInput.parse({
+      id: 'r', title: 'R', kind: 'research', sources: [{ url: 'https://example.test/a' }],
+    }).kind).toBe('research')
+    // every other kind may cite, or not
+    expect(MemoryNoteInput.parse({ id: 'f', title: 'F', kind: 'fact' }).sources).toEqual([])
+  })
+
   // search lowercases the query before matching tags, while the list/ls filter compares
   // case-exactly — an un-normalized tag is reachable from one path and invisible to the other.
   it('lowercases tags so search and filter agree', () => {

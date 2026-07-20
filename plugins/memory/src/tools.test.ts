@@ -3,7 +3,7 @@ import { MEMORY_LIMITS, MemoryNoteInput, type MemoryNote, type MemoryNoteDraft, 
 import { memoryTools, tierForRole } from './tools'
 
 const toNote = (input: MemoryNoteDraft): MemoryNote =>
-  ({ ...MemoryNoteInput.parse(input), createdAt: '', createdBy: '', updatedAt: '', updatedBy: '', revision: 1 })
+  ({ ...MemoryNoteInput.parse(input), sources: [], createdAt: '', createdBy: '', updatedAt: '', updatedBy: '', revision: 1 })
 
 const summary = (id: string, title: string): NoteSummary =>
   ({ id, title, summary: 's', categories: [], tags: [], scope: 'project' })

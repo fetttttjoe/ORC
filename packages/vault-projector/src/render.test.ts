@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test'
-import { LINK_KIND, type EventRecord, type MemoryLink, type MemoryNote, type TaskNode } from '@orc/contracts'
+import { type EventRecord, type TaskNode } from '@orc/contracts'
 import { EVENT_KIND } from '@orc/contracts'
 import { planFixture, stepFixture } from '@orc/contracts/fixtures'
 import { eventFixture } from '@orc/contracts/fixtures'
@@ -11,12 +11,6 @@ const ev = (over: Partial<EventRecord>): EventRecord =>
 const task = (over: Partial<TaskNode> = {}): TaskNode => ({
   id: 't1', parentId: null, type: 'generic', title: 'demo', spec: 'do it', status: 'running',
   zone: [], budgetUSD: null, depth: 0, createdAt: '2026-07-17T00:00:00.000Z', ...over,
-})
-const link = (id: string, kind: MemoryLink['kind']): MemoryLink => ({ id, kind })
-const planNote = (over: Partial<MemoryNote> & { id: string }): MemoryNote => ({
-  scope: 'plan-t1', kind: 'plan', sourceRevision: null, title: over.id, categories: [], tags: [],
-  links: [], paths: [], rules: [], summary: '', body: '', rationale: '', uncertainty: [],
-  createdAt: '', createdBy: '', updatedAt: '', updatedBy: '', revision: 1, ...over,
 })
 
 describe('renderTaskFiles', () => {

@@ -27,7 +27,13 @@ export function createMemoryStore(opts: { log: EventLog; surreal: SurrealMemory;
       }
       // event-first: the record materializes via the projector shortly; return a best-effort
       // read (may be null within the flush window — callers treat write as fire-and-forget).
-      return (await surreal.get(note.id, note.scope)) ?? { ...note, createdAt: '', createdBy: '', updatedAt: '', updatedBy: '', revision: 1 }
+      // retrievedAt is blank here for the same reason createdAt is: the projector stamps it from
+      // the committed event, and within the flush window this shape has no event to read.
+      return (await surreal.get(note.id, note.scope)) ?? {
+        ...note,
+        sources: note.sources.map(s => ({ ...s, retrievedAt: '' })),
+        createdAt: '', createdBy: '', updatedAt: '', updatedBy: '', revision: 1,
+      }
     },
     async remove(id, scope = 'project') {
       const author: MemoryAuthor = { source: 'cli' }
