@@ -1,0 +1,10 @@
+{
+  "projectId": "e4c293ed-f341-43df-aaeb-abf3276c6331",
+  "projectName": "orc-sim",
+  "mcpServers": {
+    "web": {
+      "command": "bun",
+      "args": ["/home/yanneck/Work/orchestrator/plugins/mcp-client/src/web-mcp.ts"]
+    }
+  }
+}
