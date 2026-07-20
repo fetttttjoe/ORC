@@ -12,9 +12,9 @@ import { buildPlugins } from './runtime'
 const dbs: Array<{ drop: () => Promise<void> }> = []
 const surrealConfigs: ProjectConfig[] = []
 // Teardown drops one Postgres DB per makeCli/openKernel (14+ here) plus each throwaway Surreal db.
-// Each pg drop is a DROP DATABASE WITH FORCE on its own admin connection; serial drops blew bun's
-// default 5s hook budget under a contended pg (same fix as kernel.test.ts) — the dbs are distinct,
-// so drop them concurrently, with headroom for a loaded box.
+// Each pg drop runs its handle's registered closers first (createTestDb.onClose) and then DROPs on
+// its own admin connection; serial drops blew bun's default 5s hook budget under a contended pg
+// (same fix as kernel.test.ts) — the dbs are distinct, so drop them concurrently.
 afterAll(async () => {
   await Promise.all([...dbs.map(d => d.drop()), ...surrealConfigs.map(c => dropSurrealDb(c))])
 }, 30_000)
@@ -39,7 +39,8 @@ async function dropSurrealDb(config: ProjectConfig): Promise<void> {
 async function makeCli() {
   const db = await createTestDb()
   dbs.push(db)
-  const { kernel } = await openKernel(db.url, { projectId: TEST_PROJECT_ID })
+  const { kernel, storage } = await openKernel(db.url, { projectId: TEST_PROJECT_ID })
+  db.onClose(() => storage.close())
   const lines: string[] = []
   spyOn(console, 'log').mockImplementation((...a: unknown[]) => {
     lines.push(a.join(' '))
