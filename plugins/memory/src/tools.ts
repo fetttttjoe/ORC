@@ -1,5 +1,5 @@
 import { z } from 'zod'
-import { MEMORY_LIMITS, MEMORY_SOURCE_LIMITS, NOTE_KINDS, LINK_KINDS, RETENTION_CLASSES, LinkKind, MemoryNoteInput, type MemoryAuthor, type MemoryStore, type ResolvedTool } from '@orc/contracts'
+import { MEMORY_ACCESS, MEMORY_LIMITS, MEMORY_SOURCE_LIMITS, NOTE_KINDS, LINK_KINDS, RETENTION_CLASSES, LinkKind, MemoryNoteInput, type MemoryAuthor, type MemoryStore, type ResolvedTool } from '@orc/contracts'
 import { applyBudget, fitMemoryNoteToBudget } from './budget'
 
 const ok = (output: unknown) => ({ output, isError: false })
@@ -49,7 +49,7 @@ const idSchema = { type: 'string', pattern: '^[a-z0-9][a-z0-9-]*$' }
 // silently losing its memory tools.
 export function unavailableMemoryTools(reason: string): ResolvedTool[] {
   const fail = async (): Promise<never> => { throw new Error(`memory unavailable: ${reason}`) }
-  const store: MemoryStore = { write: fail, remove: fail, get: fail, list: fail, search: fail, neighbors: fail }
+  const store: MemoryStore = { write: fail, remove: fail, get: fail, list: fail, search: fail, neighbors: fail, recordAccess: fail }
   return memoryTools(store, { source: 'agent' })
 }
 
@@ -163,6 +163,9 @@ export function memoryTools(store: MemoryStore, author: MemoryAuthor, tier: Memo
           const q = ReadInput.parse(input)
           const n = await store.get(q.id, q.scope)
           if (!n) return ok({ note: null })
+          // recorded here rather than in store.get: this is the call site that knows a pull
+          // actually delivered a note to a model. A miss above records nothing — nothing was read.
+          await store.recordAccess(q.id, q.scope, MEMORY_ACCESS.read, author)
           // every pull tool honors its budget (spec RG5) — metadata cannot bypass body truncation.
           return ok(fitMemoryNoteToBudget(n, q.budget))
         } catch (e) { return err(e) }
@@ -185,6 +188,9 @@ export function memoryTools(store: MemoryStore, author: MemoryAuthor, tier: Memo
         try {
           const q = NeighborsInput.parse(input)
           const ranked = await store.neighbors(q.seed, { kinds: q.kinds, depth: q.depth, scope: q.scope })
+          // one access against the SEED, not one per neighbour: the seed is what was pulled from,
+          // and the neighbours are summaries the model may never read.
+          if (ranked.length > 0) await store.recordAccess(q.seed, q.scope, MEMORY_ACCESS.neighbors, author)
           const r = applyBudget(ranked, n => n.title + n.summary, { limit: 20, budget: q.budget })
           return ok({
             neighbors: r.items, truncated: r.truncated, omitted: r.omitted,

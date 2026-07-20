@@ -39,10 +39,14 @@ export function createMemoryStore(opts: { log: EventLog; surreal: SurrealMemory;
       const author: MemoryAuthor = { source: 'cli' }
       await log.append({ taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_deleted, payload: { id, scope, author } })
     },
-    async get(id, scope = 'project') {
-      const n = await surreal.get(id, scope)
-      if (n) await surreal.bumpRead(id, scope)
-      return n
+    get: (id, scope = 'project') => surreal.get(id, scope),
+    // The access counter is event-sourced like everything else, so this is an append, not a
+    // Surreal write — the projector is still the only thing that touches the read model.
+    async recordAccess(id, scope = 'project', mode, author) {
+      await log.append({
+        taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_accessed,
+        payload: { id, scope, mode, author },
+      })
     },
     list: (filter?: MemoryFilter): Promise<NoteSummary[]> => surreal.list(filter),
     search: (query: string, filter?: MemoryFilter): Promise<NoteSummary[]> => surreal.search(query, filter),

@@ -7,7 +7,7 @@ import { rebuildVaultMemory, renderMemoryIndex } from './memory-index'
 
 export interface MemoryProjector { start(): Promise<void>; close(): Promise<void>; rebuild(): Promise<void>; catchUp(): Promise<void> }
 
-const MEMORY_KINDS = [EVENT_KIND.memory_written, EVENT_KIND.memory_deleted]
+const MEMORY_KINDS = [EVENT_KIND.memory_written, EVENT_KIND.memory_deleted, EVENT_KIND.memory_accessed]
 
 export function createMemoryProjector(opts: { log: EventLog; surreal: SurrealMemory; vaultDir: string }): MemoryProjector {
   const { log, surreal, vaultDir } = opts
@@ -17,6 +17,10 @@ export function createMemoryProjector(opts: { log: EventLog; surreal: SurrealMem
   // Surreal commits note+edges+cursor in ONE transaction (applyEvent); the vault file is
   // written only after an accepted apply. A crash between the two heals on the next
   // start/catchUp/rebuild, which replaces vault/memory/** from current Surreal state.
+  //
+  // Returns whether the VAULT changed, not whether the event applied: memory_accessed moves a
+  // counter that no rendered file carries, and reads are frequent — re-rendering index.md (every
+  // note body, every time) on each one would make reading the graph cost more than writing it.
   const applyOne = async (e: EventRecord): Promise<boolean> => {
     const applied = await surreal.applyEvent(e)
     if (!applied) return false
@@ -27,18 +31,18 @@ export function createMemoryProjector(opts: { log: EventLog; surreal: SurrealMem
     } else if (e.kind === EVENT_KIND.memory_deleted) {
       const p = MemoryDeletedPayload.parse(e.payload)
       deleteMemoryFile(vaultDir, noteRelPath(p))
-    }
+    } else return false
     return true
   }
 
   // Reconcile by querying the log WHERE seq > cursor rather than trusting the subscribe
   // payload's ordering. Callers are responsible for serializing calls (see `serialize`
   // below) so revision/ordering stays deterministic.
-  const drainFrom = async (fromSeq: number): Promise<{ cursor: number; applied: number }> => {
+  const drainFrom = async (fromSeq: number): Promise<{ cursor: number; vaultChanged: number }> => {
     const events = await log.after(fromSeq, MEMORY_KINDS)
-    let applied = 0
-    for (const e of events) if (await applyOne(e)) applied += 1
-    return { cursor: await surreal.getCursor(), applied }
+    let vaultChanged = 0
+    for (const e of events) if (await applyOne(e)) vaultChanged += 1
+    return { cursor: await surreal.getCursor(), vaultChanged }
   }
 
   // Every drain/clear goes through this so two passes (e.g. a subscribe notification firing
@@ -59,7 +63,7 @@ export function createMemoryProjector(opts: { log: EventLog; surreal: SurrealMem
       try {
         const r = await drainFrom(cursorCache)
         cursorCache = r.cursor
-        if (r.applied > 0) await refreshIndex()
+        if (r.vaultChanged > 0) await refreshIndex()
       } catch (err) {
         console.warn(`memory projector: ${err instanceof Error ? err.message : String(err)}`)
         cursorCache = await surreal.getCursor() // resume after last applied event; don't re-apply succeeded ones
@@ -92,7 +96,7 @@ export function createMemoryProjector(opts: { log: EventLog; surreal: SurrealMem
       await serialize(async () => {
         const r = await drainFrom(await surreal.getCursor())
         cursorCache = r.cursor
-        if (r.applied > 0) await refreshIndex()
+        if (r.vaultChanged > 0) await refreshIndex()
       })
     },
   }

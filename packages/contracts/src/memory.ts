@@ -133,6 +133,10 @@ export type MemoryNote = z.infer<typeof MemoryNote>
 export const NoteSummary = z.object({
   id: z.string(), scope: z.string(), title: z.string(),
   categories: z.array(z.string()), tags: z.array(z.string()), summary: z.string(),
+  // observed use, event-sourced (see MemoryAccessedPayload) — so it survives a rebuild and is
+  // real data rather than a projection-local counter that any replay silently zeroes.
+  hits: z.number().int().nonnegative(),
+  lastAccessedAt: z.string().nullable(),
 })
 export type NoteSummary = z.infer<typeof NoteSummary>
 
@@ -159,6 +163,22 @@ export const MemoryDeletedPayload = z.object({
 })
 export type MemoryDeletedPayload = z.infer<typeof MemoryDeletedPayload>
 
+// An access is a first-class fact, not projection bookkeeping: what an agent actually pulled is
+// the only evidence of which knowledge is load-bearing, and a counter written outside the log is
+// erased by every rebuild. Emitted per successful pull (a miss records nothing) — id and scope
+// carry the same MEMORY_ID_RE guard as memory_deleted, since both index the read model by key.
+export const MEMORY_ACCESS_MODES = ['read', 'neighbors'] as const
+export const MemoryAccessMode = z.enum(MEMORY_ACCESS_MODES)
+export type MemoryAccessMode = z.infer<typeof MemoryAccessMode>
+export const MEMORY_ACCESS = MemoryAccessMode.enum
+export const MemoryAccessedPayload = z.object({
+  id: z.string().regex(MEMORY_ID_RE),
+  scope: z.string().regex(MEMORY_ID_RE),
+  mode: MemoryAccessMode,
+  author: MemoryAuthor,
+})
+export type MemoryAccessedPayload = z.infer<typeof MemoryAccessedPayload>
+
 export interface MemoryStore {
   // idempotencyKey: deterministic writers (tool-driven writes inside an operation) pass one so
   // a crash retry of the surrounding effect cannot append the note event twice
@@ -168,6 +188,9 @@ export interface MemoryStore {
   list(filter?: MemoryFilter): Promise<NoteSummary[]>
   search(query: string, filter?: MemoryFilter): Promise<NoteSummary[]>
   neighbors(seed: string, opts?: { kinds?: LinkKind[]; depth?: number; scope?: string }): Promise<NeighborResult[]>
+  // called by the pull call sites (tools, CLI) rather than inside get(), so a traversal that
+  // reads N notes internally records one access against its seed, not N against its neighbours
+  recordAccess(id: string, scope: string | undefined, mode: MemoryAccessMode, author: MemoryAuthor): Promise<void>
 }
 
 // Composed provenance string for createdBy/updatedBy (frontmatter + read model).

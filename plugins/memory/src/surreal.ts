@@ -2,7 +2,7 @@ import { RecordId, Surreal } from 'surrealdb'
 import { edge, orm, table, t } from 'surqlize'
 import {
   composeAuthor, EVENT_KIND, LINK_KINDS, NOTE_KINDS,
-  MemoryDeletedPayload, MemoryNote, MemoryWrittenPayload,
+  MemoryAccessedPayload, MemoryDeletedPayload, MemoryNote, MemoryWrittenPayload,
   type EventRecord, type LinkKind, type MemoryFilter, type NeighborResult, type NoteSummary,
 } from '@orc/contracts'
 import { rankNeighbors, type Edge } from './rank'
@@ -11,8 +11,10 @@ import { rankNeighbors, type Edge } from './rank'
 enum Tb { Note = 'note', Meta = 'meta', Link = 'link' }
 
 // `noteId` holds the note's own string id (surqlize reserves `id` for the auto-added RecordId).
-// readCount/lastReadAt are Tier-2 read-observability fields — never event-sourced, only bumped
-// here — and are stripped back out in toNote() before the row reaches the public MemoryNote shape.
+// hits/lastAccessedAt are projected from memory_accessed like every other field — they survive a
+// rebuild — and are stripped back out in toNote() before the row reaches the public MemoryNote
+// shape (they belong to the summary, not to the authored note). Both are optional in the row
+// type so a note projected before the counter existed still selects without a rebuild.
 // literal-typed link kind, derived from the contract's LINK_KINDS — rows come back as LinkKind.
 const kindType = t.union(LINK_KINDS.map(k => t.literal(k)))
 const noteKindType = t.union(NOTE_KINDS.map(k => t.literal(k)))
@@ -27,7 +29,7 @@ const noteTable = table(Tb.Note, {
   sources: t.array(t.object({ url: t.string(), title: t.option(t.string()), retrievedAt: t.string() })),
   rationale: t.string(), uncertainty: t.array(t.string()),
   createdAt: t.string(), createdBy: t.string(), updatedAt: t.string(), updatedBy: t.string(),
-  revision: t.number(), readCount: t.number(), lastReadAt: t.option(t.string()),
+  revision: t.number(), hits: t.option(t.number()), lastAccessedAt: t.option(t.string()),
 })
 const metaTable = table(Tb.Meta, { seq: t.number() })
 
@@ -82,7 +84,7 @@ export class SurrealMemory {
       if (e.kind === EVENT_KIND.memory_written) {
         const { note, author } = MemoryWrittenPayload.parse(e.payload)
         const k = key(note.scope, note.id)
-        // read-then-write: createdAt/By + readCount/lastReadAt preserved; updated/rev advance
+        // read-then-write: createdAt/By + hits/lastAccessedAt preserved; updated/rev advance
         const ex = (await tx.select(Tb.Note, k))[0]
         const by = composeAuthor(author)
         await tx.upsert(Tb.Note, k).set({
@@ -100,9 +102,9 @@ export class SurrealMemory {
           rationale: note.rationale, uncertainty: note.uncertainty,
           createdAt: ex?.createdAt ?? e.ts, createdBy: ex?.createdBy ?? by,
           updatedAt: e.ts, updatedBy: by, revision: (ex?.revision ?? 0) + 1,
-          readCount: ex?.readCount ?? 0,
+          hits: ex?.hits ?? 0,
           // OptionType fields validate against `undefined`, not `null` — omit rather than null it out.
-          ...(ex?.lastReadAt !== undefined && { lastReadAt: ex.lastReadAt }),
+          ...(ex?.lastAccessedAt !== undefined && { lastAccessedAt: ex.lastAccessedAt }),
         })
         // Re-materialize this note's out-edges (delete-then-RELATE) — deterministic on replay.
         await tx.delete(Tb.Link).where(l => l.fromId.eq(note.id).and(l.scope.eq(note.scope)))
@@ -111,6 +113,14 @@ export class SurrealMemory {
             kind: l.kind, fromId: note.id, toId: l.id, scope: note.scope,
             ...(l.confidence !== undefined && { confidence: l.confidence }),
           })
+      } else if (e.kind === EVENT_KIND.memory_accessed) {
+        const p = MemoryAccessedPayload.parse(e.payload)
+        const k = key(p.scope, p.id)
+        // read-then-write, not a blind upsert: an access whose note was never projected (or was
+        // since deleted) must not conjure a row carrying nothing but a counter. lastAccessedAt is
+        // the event ts, so a replay lands on the same value the first pass did.
+        const ex = (await tx.select(Tb.Note, k))[0]
+        if (ex) await tx.upsert(Tb.Note, k).set({ hits: (ex.hits ?? 0) + 1, lastAccessedAt: e.ts })
       } else if (e.kind === EVENT_KIND.memory_deleted) {
         const p = MemoryDeletedPayload.parse(e.payload)
         await tx.delete(Tb.Note, key(p.scope, p.id))
@@ -147,15 +157,6 @@ export class SurrealMemory {
     const r = rows[0]
     if (!r) return null
     return MemoryNote.parse(toNote(r))
-  }
-
-  // surqlize's upsert().set() renders SurrealQL `SET field = value, ...` — verified (see
-  // surreal.test.ts) that this only touches the listed fields and leaves the rest of an
-  // existing row untouched (SurrealQL SET semantics), so this is a safe partial merge.
-  async bumpRead(id: string, scope = 'project'): Promise<void> {
-    await this.db.upsert(Tb.Note, key(scope, id)).set({
-      readCount: { '+=': 1 }, lastReadAt: new Date().toISOString(),
-    })
   }
 
   async list(filter: MemoryFilter = {}): Promise<NoteSummary[]> {
@@ -243,5 +244,6 @@ function toSummary(r: Record<string, any>): NoteSummary {
   return {
     id: r.noteId, scope: r.scope, title: r.title,
     categories: r.categories, tags: r.tags, summary: r.summary,
+    hits: r.hits ?? 0, lastAccessedAt: r.lastAccessedAt ?? null,
   }
 }

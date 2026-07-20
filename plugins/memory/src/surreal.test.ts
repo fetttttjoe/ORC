@@ -1,6 +1,6 @@
 import { afterAll, describe, expect, it } from 'bun:test'
 import { RecordId, Surreal } from 'surrealdb'
-import type { EventRecord, MemoryAuthor } from '@orc/contracts'
+import { MEMORY_ACCESS, type EventRecord, type MemoryAccessMode, type MemoryAuthor } from '@orc/contracts'
 import { SurrealMemory } from './surreal'
 import { eventFixture } from '@orc/contracts/fixtures'
 import { createTestSurreal } from './test-helpers'
@@ -15,6 +15,8 @@ const written = (seq: number, n = note(), author: MemoryAuthor = cli): EventReco
   eventFixture({ seq, taskId: null, kind: 'memory_written', payload: { note: n, author }, ts: `2026-07-18T0${Math.min(seq, 9)}:00:00Z` })
 const deleted = (seq: number, id: string, scope = 'project'): EventRecord =>
   eventFixture({ seq, taskId: null, kind: 'memory_deleted', payload: { id, scope, author: cli }, ts: `2026-07-18T0${Math.min(seq, 9)}:00:00Z` })
+const accessed = (seq: number, id: string, mode: MemoryAccessMode = MEMORY_ACCESS.read, scope = 'project'): EventRecord =>
+  eventFixture({ seq, taskId: null, kind: 'memory_accessed', payload: { id, scope, mode, author: cli }, ts: `2026-07-18T0${Math.min(seq, 9)}:00:00Z` })
 
 const drops: (() => Promise<void>)[] = []
 afterAll(async () => { for (const d of drops) await d() })
@@ -177,30 +179,55 @@ describe('SurrealMemory.applyEvent', () => {
     await m.close()
   })
 
-  // ponytail: cheap de-risk for Task 7 (not in the brief's gate) — confirms upsert().set()
-  // with a partial field set MERGES rather than REPLACES the stored note. readCount/lastReadAt
-  // are Tier-2 fields dropped from the public MemoryNote (see toNote), so they're checked here
-  // via a raw peek at the row rather than through m.get().
-  it('bumpRead merges readCount/lastReadAt without wiping other fields', async () => {
-    const t = await createTestSurreal(); drops.push(t.drop)
-    const m = await SurrealMemory.open(t)
-    await m.applyEvent(written(1))
-    await m.bumpRead('auth', 'project')
-    const got = await m.get('auth', 'project')
-    expect(got?.title).toBe('Auth')
-    expect(got?.body).toBe('full text about auth tokens')
-    expect(got?.revision).toBe(1)
-
+  // Access counts are canonical, not incidental: applying the event merges hits/lastAccessedAt
+  // onto the row without wiping the authored fields, and lastAccessedAt comes from the event ts
+  // so a replay lands on the same value. hits/lastAccessedAt are dropped from the public
+  // MemoryNote (see toNote), so they're checked via a raw peek at the row.
+  const rawRow = async (t: { url: string; ns: string; db: string; username: string; password: string }) => {
     const raw = new Surreal()
     await raw.connect(t.url)
     await raw.signin({ username: t.username, password: t.password })
     await raw.use({ namespace: t.ns, database: t.db })
-    const [rows] = await raw.query<[{ readCount: number; lastReadAt: string }[]]>(
-      'SELECT readCount, lastReadAt FROM $rid', { rid: new RecordId('note', 'project:auth') },
+    const [rows] = await raw.query<[{ hits?: number; lastAccessedAt?: string }[]]>(
+      'SELECT hits, lastAccessedAt FROM $rid', { rid: new RecordId('note', 'project:auth') },
     )
-    expect(rows[0]?.readCount).toBe(1)
-    expect(typeof rows[0]?.lastReadAt).toBe('string')
     await raw.close()
+    return rows[0]
+  }
+
+  it('memory_accessed merges hits/lastAccessedAt from the event ts, leaving authored fields intact', async () => {
+    const t = await createTestSurreal(); drops.push(t.drop)
+    const m = await SurrealMemory.open(t)
+    await m.applyEvent(written(1))
+    await m.applyEvent(accessed(2, 'auth'))
+    await m.applyEvent(accessed(3, 'auth'))
+    const got = await m.get('auth', 'project')
+    expect(got?.title).toBe('Auth')
+    expect(got?.body).toBe('full text about auth tokens')
+    expect(got?.revision).toBe(1) // an access is not a write
+
+    const row = await rawRow(t)
+    expect(row?.hits).toBe(2)
+    expect(row?.lastAccessedAt).toBe('2026-07-18T03:00:00Z') // the event ts, not wall-clock
+    await m.close()
+  })
+
+  it('get() performs no write — reading is not an access, only the event is', async () => {
+    const t = await createTestSurreal(); drops.push(t.drop)
+    const m = await SurrealMemory.open(t)
+    await m.applyEvent(written(1))
+    await m.get('auth', 'project')
+    await m.get('auth', 'project')
+    expect((await rawRow(t))?.hits).toBe(0)
+    await m.close()
+  })
+
+  it('an access for a note that does not exist creates no phantom row', async () => {
+    const t = await createTestSurreal(); drops.push(t.drop)
+    const m = await SurrealMemory.open(t)
+    expect(await m.applyEvent(accessed(1, 'ghost'))).toBe(true) // cursor still advances
+    expect(await m.get('ghost', 'project')).toBeNull()
+    expect(await m.allNotes()).toEqual([])
     await m.close()
   })
 })
