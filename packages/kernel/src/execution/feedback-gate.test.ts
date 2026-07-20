@@ -1,5 +1,4 @@
 import { afterAll, beforeAll, describe, expect, it } from 'bun:test'
-import { DBOS } from '@dbos-inc/dbos-sdk'
 import {
   EVENT_KIND, SIGNAL_OUTCOME, TASK_STATUS,
   type AgentExecutor, type EventDraft, type ExecutorContext, type SplitResult, type UnifiedEvent,
@@ -8,7 +7,7 @@ import { draftFixture, stepFixture } from '@orc/contracts/fixtures'
 import { openStorage } from '../storage'
 import { Kernel } from '../kernel'
 import { createTestDb, fakeProvider, testConfig, TEST_PROJECT_ID } from '../test-helpers'
-import { createDbosPort, type DbosPort } from './dbos-port'
+import { createDbosPort, dbosSend, type DbosPort } from './dbos-port'
 
 // what the executor observed as the resumed value of the feedback yield
 const seen: string[] = []
@@ -47,7 +46,7 @@ describe('durable conversational gate (feedback)', () => {
     const db = await createTestDb()
     const storage = await openStorage(db.url, { projectId: TEST_PROJECT_ID })
     const log = storage.events
-    kernel = new Kernel(log)
+    kernel = new Kernel(log, undefined, undefined, dbosSend)
     const config = testConfig(db.url)
     port = await createDbosPort({
       storage, config,
@@ -73,7 +72,7 @@ describe('durable conversational gate (feedback)', () => {
     const requested = (await kernel.eventsFor(t.id)).find(e => e.kind === EVENT_KIND.feedback_requested)
     expect(requested?.payload).toEqual({ question: 'analyze the codebase?', topic: 'consent' })
 
-    await DBOS.send<string>(runToken, 'yes', 'feedback:consent')
+    expect(await kernel.replyFeedback(t.id, 'yes')).toBe('consent')
 
     expect(await handle.wait()).toBe('done')
     expect(seen).toEqual(['yes'])

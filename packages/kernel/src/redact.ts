@@ -4,9 +4,20 @@
 
 // values under these keys are dropped wherever they appear (case/format-insensitive:
 // apiKey, api_key, API-KEY all match)
-const SENSITIVE_KEYS = new Set(['authorization', 'apikey', 'password', 'secret', 'accesstoken', 'refreshtoken', 'cookie'])
+// A bare 'token' suffix is NOT listed, deliberately: `runToken` normalizes to `runtoken`, which
+// would match, and runToken is a required field in most PAYLOAD_SCHEMAS — which are validated
+// AFTER redaction (event-log.ts), so every such event would fail to append. The token-shaped
+// names below are enumerated instead. Secrets minted during a run (a tool returning a freshly
+// created credential) are caught only by key, never by value: value-matching sees process.env.
+const SENSITIVE_KEY_SUFFIXES = [
+  'authorization', 'apikey', 'password', 'secret', 'privatekey', 'credentials', 'cookie',
+  'accesstoken', 'refreshtoken', 'authtoken', 'bearertoken', 'sessiontoken', 'apitoken', 'idtoken',
+]
 
-const isSensitiveKey = (key: string): boolean => SENSITIVE_KEYS.has(key.toLowerCase().replaceAll(/[-_]/g, ''))
+const isSensitiveKey = (key: string): boolean => {
+  const normalized = key.toLowerCase().replaceAll(/[-_]/g, '')
+  return SENSITIVE_KEY_SUFFIXES.some(suffix => normalized.endsWith(suffix))
+}
 
 const SECRET_ENV_RE = /(_KEY|_TOKEN|_SECRET|_PASSWORD)$/
 

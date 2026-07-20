@@ -4,7 +4,7 @@ import { draftFixture, stepFixture } from '@orc/contracts/fixtures'
 import { openStorage } from './storage'
 import { KERNEL_ERROR_CODE, KernelError } from './errors'
 import { Kernel } from './kernel'
-import { instantiateFrozenPlan, planScope } from './execution/strategies/grounded-plan'
+import { instantiateFrozenPlan, planGraphHash, planScope } from './execution/strategies/grounded-plan'
 import { createTestDb, TEST_PROJECT_ID } from './test-helpers'
 
 const dbs: Array<{ drop: () => Promise<void> }> = []
@@ -124,9 +124,18 @@ describe('Kernel lifecycle', () => {
     const kernel = await freshKernel()
     const seen: number[] = []
     const unsub = await kernel.subscribe({ fromSeq: 0 }, e => { seen.push(e.seq) })
-    await kernel.createTask({ title: 'x' })
-    await new Promise(r => setTimeout(r, 100))
-    expect(seen.length).toBeGreaterThan(0)
+    const t = await kernel.createTask({ title: 'x' })
+    await kernel.proposePlan(t.id, draft()) // more than one event, so ORDER is observable at all
+    // deadline poll, not a fixed sleep: a contended Postgres can exceed any constant, and every
+    // other subscription test in the repo already polls
+    const deadline = Date.now() + 15_000
+    while (seen.length < 2 && Date.now() < deadline) await new Promise(r => setTimeout(r, 25))
+    // the actual claim in the test's name. `seen.length > 0` would pass even if the pump handed
+    // back every record with seq 0, or duplicated them, or delivered them out of order.
+    expect(seen.length).toBeGreaterThanOrEqual(2)
+    expect(seen).toEqual([...seen].sort((a, b) => a - b))
+    expect(new Set(seen).size).toBe(seen.length)
+    expect(seen[0]).toBeGreaterThan(0)
     await unsub()
   })
 
@@ -145,6 +154,44 @@ describe('Kernel lifecycle', () => {
     expect(plan.steps[1]!.dependsOn).toEqual(['analyze'])
     expect(plan.steps[1]!.skillRefs).toEqual(['plan-authoring'])
     expect((await k.getTask(t.id))!.status).toBe(TASK_STATUS.approved)
+  })
+
+  it('createGroundedTask uses its title as a blank spec for storage and analysis', async () => {
+    const db = await createTestDb()
+    dbs.push(db)
+    const log = (await openStorage(db.url, { projectId: TEST_PROJECT_ID })).events
+    let analyzedSpec = ''
+    const analyzers = new Map<string, Analyzer>([['agent-analyzer', {
+      id: 'agent-analyzer',
+      analysisStep: ({ taskSpec }) => {
+        analyzedSpec = taskSpec
+        return stepFixture({ id: 'analyze', role: 'scout', skillRefs: ['codebase-analysis'] })
+      },
+    }]])
+    const k = new Kernel(log, undefined, analyzers)
+
+    const task = await k.createGroundedTask({
+      title: 'Build the release notes', spec: '   ', modelRef: 'fake/m', analyzerRef: 'agent-analyzer',
+    })
+
+    expect((await k.getTask(task.id))?.spec).toBe('Build the release notes')
+    expect(analyzedSpec).toBe('Build the release notes')
+  })
+
+  it('createGroundedTask rolls back the task when plan reference validation fails', async () => {
+    const db = await createTestDb()
+    dbs.push(db)
+    const log = (await openStorage(db.url, { projectId: TEST_PROJECT_ID })).events
+    const analyze: PlanStep = stepFixture({ id: 'analyze', role: 'scout', skillRefs: ['codebase-analysis'] })
+    const analyzers = new Map<string, Analyzer>([['agent-analyzer', { id: 'agent-analyzer', analysisStep: () => analyze }]])
+    const k = new Kernel(log, async () => [`unknown skill 'codebase-analysis'`], analyzers)
+
+    await expect(k.createGroundedTask({
+      title: 'build web', spec: 'ground it', modelRef: 'fake/m', analyzerRef: 'agent-analyzer',
+    })).rejects.toThrow("unknown skill 'codebase-analysis'")
+
+    expect(await log.all()).toHaveLength(0)
+    expect(await k.listTasks()).toEqual([])
   })
 
   it('createGroundedTask rejects an unknown analyzerRef', async () => {
@@ -218,8 +265,8 @@ describe('Kernel lifecycle', () => {
     const db = await createTestDb()
     dbs.push(db)
     const log = (await openStorage(db.url, { projectId: TEST_PROJECT_ID })).events
-    const sent: Array<{ runToken: string; message: string; topic: string }> = []
-    const k = new Kernel(log, undefined, undefined, async (runToken, message, topic) => { sent.push({ runToken, message, topic }) })
+    const sent: Array<{ runToken: string; message: string; topic: string; key?: string }> = []
+    const k = new Kernel(log, undefined, undefined, async (runToken, message, topic, key) => { sent.push({ runToken, message, topic, key }) })
     const t = await k.createTask({ title: 'grounded task' })
     await k.proposePlan(t.id, draft())
     await k.approvePlan(t.id)
@@ -233,11 +280,68 @@ describe('Kernel lifecycle', () => {
 
     const topic = await k.replyFeedback(t.id, 'approve')
     expect(topic).toBe('db-1')
-    expect((await log.byTask(t.id)).some(e => e.kind === 'feedback_provided')).toBe(true)
-    expect(sent).toEqual([{ runToken, message: 'approve', topic: 'feedback:db-1' }])
+    const provided = (await log.byTask(t.id)).find(e => e.kind === 'feedback_provided')!
+    expect(provided).toMatchObject({
+      taskId: t.id, stepId: 'plan', runToken,
+      idempotencyKey: expect.stringMatching(/^feedback:\d+:provided$/),
+    })
+    expect(sent).toEqual([{ runToken, message: 'approve', topic: 'feedback:db-1', key: `feedback:${provided.seq}` }])
 
     // the gate is now answered — a second reply finds no open question
     expect(await k.replyFeedback(t.id, 'again')).toBeNull()
+  })
+
+  it('replyFeedback binds exact grounded plan approval to the current graph hash', async () => {
+    const db = await createTestDb()
+    dbs.push(db)
+    const log = (await openStorage(db.url, { projectId: TEST_PROJECT_ID })).events
+    const k = new Kernel(log)
+    const t = await k.createTask({ title: 'grounded', type: 'grounded' })
+    const scope = planScope(t.id)
+    const author = { source: 'agent' as const }
+    await log.append({ taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_written, payload: { note: { id: 'masterplan', scope, kind: 'plan', title: 'Plan', links: [{ id: 'db', kind: 'decomposes_into' }] }, author } })
+    await log.append({ taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_written, payload: { note: { id: 'db', scope, kind: 'plan', title: 'DB', body: 'schema' }, author } })
+    const runToken = `step:${t.id}:plan:a1`
+    await log.append({ taskId: t.id, stepId: 'plan', runToken, kind: EVENT_KIND.feedback_requested, payload: { question: 'approve?', topic: 'plan-1' } })
+
+    await k.replyFeedback(t.id, '  ApPrOvE  ')
+
+    const provided = (await log.byTask(t.id)).find(e => e.kind === EVENT_KIND.feedback_provided)!
+    expect(provided.payload.planHash).toBe(planGraphHash(await k.listPlanNotes(t.id)))
+  })
+
+  it('replyFeedback does not stamp ordinary or non-approve replies', async () => {
+    const db = await createTestDb()
+    dbs.push(db)
+    const log = (await openStorage(db.url, { projectId: TEST_PROJECT_ID })).events
+    const k = new Kernel(log)
+    for (const [type, text] of [['generic', 'approve'], ['grounded', 'yes']] as const) {
+      const task = await k.createTask({ title: type, type })
+      await log.append({
+        taskId: task.id, stepId: 'plan', runToken: `step:${task.id}:plan:a1`,
+        kind: EVENT_KIND.feedback_requested, payload: { question: 'continue?', topic: `${type}-1` },
+      })
+      await k.replyFeedback(task.id, text)
+      const provided = (await log.byTask(task.id)).find(e => e.kind === EVENT_KIND.feedback_provided)!
+      expect(provided.payload).not.toHaveProperty('planHash')
+    }
+  })
+
+  it('approvedPlanHash is scoped to the exact run attempt', async () => {
+    const db = await createTestDb()
+    dbs.push(db)
+    const log = (await openStorage(db.url, { projectId: TEST_PROJECT_ID })).events
+    const k = new Kernel(log)
+    expect(typeof k.approvedPlanHash).toBe('function')
+    const task = await k.createTask({ title: 'grounded', type: 'grounded' })
+    const runA = `step:${task.id}:plan:a1`
+    const runB = `step:${task.id}:plan:a2`
+    await log.append({ taskId: task.id, stepId: 'plan', runToken: runA, kind: EVENT_KIND.feedback_provided, payload: { topic: 'a', text: 'approve', author: { source: 'cli' }, planHash: 'a'.repeat(64) } })
+    await log.append({ taskId: task.id, stepId: 'plan', runToken: runB, kind: EVENT_KIND.feedback_provided, payload: { topic: 'b', text: 'approve', author: { source: 'cli' }, planHash: 'b'.repeat(64) } })
+
+    expect(await k.approvedPlanHash(task.id, runA)).toBe('a'.repeat(64))
+    expect(await k.approvedPlanHash(task.id, runB)).toBe('b'.repeat(64))
+    expect(await k.approvedPlanHash(task.id, `step:${task.id}:plan:a3`)).toBeNull()
   })
 
   it('replyFeedback appends feedback_provided and returns the topic even without an injected send', async () => {

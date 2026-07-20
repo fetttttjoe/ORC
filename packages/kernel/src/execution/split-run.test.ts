@@ -32,7 +32,13 @@ const waitFor = async (pred: () => Promise<boolean>, ms = 15_000): Promise<boole
 // cfg.expectGated is what the parent asserts task_split returned; cfg.child selects the
 // child's behavior. Assertions are encoded into the parent's success/failure signal
 // (mirrors memory-reuse.test.ts: 'done' at the run level PROVES the encoded checks held).
-function splitFake(cfg: { expectGated: boolean; child: 'write' | 'signal' | 'sleep'; foreignSplit?: boolean }): AgentExecutor<unknown> {
+// cfg.beforeGate is a mutable box the test fills AFTER bringUp (the log does not exist when the
+// executor is constructed). It lets the parent block until the child's split is genuinely
+// resolved, which is the only way to reproduce a child outrunning its parent's join.
+function splitFake(cfg: {
+  expectGated: boolean; child: 'write' | 'signal' | 'sleep'; foreignSplit?: boolean
+  expectedWorkspace?: string; defaultTargets?: boolean; beforeGate?: { wait?: (splitId: string) => Promise<void> }
+}): AgentExecutor<unknown> {
   return {
     id: 'split-fake',
     async *startTurn(ctx: ExecutorContext<unknown>): AsyncGenerator<UnifiedEvent, void, SplitResult[] | undefined> {
@@ -44,6 +50,7 @@ function splitFake(cfg: { expectGated: boolean; child: 'write' | 'signal' | 'sle
       }
       // ---- CHILD step (w1) ----
       if (ctx.step.id === 'w1') {
+        const workspaceOk = cfg.expectedWorkspace === undefined || ctx.workspaceDir === cfg.expectedWorkspace
         if (cfg.child === 'sleep') {
           // genuinely running until DBOS cancels the workflow (the next checkpoint throws).
           // ponytail: bounded at ~20s so a missed cancel can't wedge the suite; cancel lands <1s.
@@ -59,7 +66,11 @@ function splitFake(cfg: { expectGated: boolean; child: 'write' | 'signal' | 'sle
             { kind: EVENT_KIND.tool_call, payload: { ...base, iteration: 1, toolCallId: 'c1', toolName: 'memory_write', input: CHILD_NOTE } },
             { kind: EVENT_KIND.tool_result, payload: { ...base, iteration: 1, toolCallId: 'c1', toolName: 'memory_write', output: r.output, isError: r.isError } },
           ])
-          const signal = { ...base, outcome: r.isError ? SIGNAL_OUTCOME.failure : SIGNAL_OUTCOME.success, summary: r.isError ? 'write failed' : 'wrote child-finding' }
+          const signal = {
+            ...base,
+            outcome: r.isError || !workspaceOk ? SIGNAL_OUTCOME.failure : SIGNAL_OUTCOME.success,
+            summary: r.isError ? 'write failed' : (!workspaceOk ? `wrong workspace: ${ctx.workspaceDir}` : 'wrote child-finding'),
+          }
           await ctx.checkpoint('signal:1', async () => signal, (): EventDraft[] => [
             { kind: EVENT_KIND.signal_received, payload: { ...base, signal } },
           ])
@@ -67,7 +78,11 @@ function splitFake(cfg: { expectGated: boolean; child: 'write' | 'signal' | 'sle
           yield { type: 'done' }
           return
         }
-        const signal = { ...base, outcome: SIGNAL_OUTCOME.success, summary: 'child ok' }
+        const signal = {
+          ...base,
+          outcome: workspaceOk ? SIGNAL_OUTCOME.success : SIGNAL_OUTCOME.failure,
+          summary: workspaceOk ? 'child ok' : `wrong workspace: ${ctx.workspaceDir}`,
+        }
         await ctx.checkpoint('signal:1', async () => signal, (): EventDraft[] => [
           { kind: EVENT_KIND.signal_received, payload: { ...base, signal } },
         ])
@@ -88,7 +103,11 @@ function splitFake(cfg: { expectGated: boolean; child: 'write' | 'signal' | 'sle
 
       // yield the gate; the port resumes the generator with SplitResult[] once the child resolves.
       // a foreign id (not one of THIS attempt's splits) must be dropped, not recv-waited forever.
-      const splitIds = cfg.foreignSplit ? [out.splitId, 'split:foreign:nope'] : [out.splitId]
+      // let the child fully resolve first, so the gate is reached AFTER split_resolved committed
+      if (cfg.beforeGate?.wait) await cfg.beforeGate.wait(out.splitId)
+      // defaultTargets exercises the [] path loop.ts actually uses (join_splits with no ids)
+      const splitIds = cfg.defaultTargets ? []
+        : cfg.foreignSplit ? [out.splitId, 'split:foreign:nope'] : [out.splitId]
       const results = yield { type: 'gate', splitIds, toolCallId: 'g1' }
       const r0 = results?.[0]
 
@@ -168,11 +187,12 @@ const parentTask = async (kernel: Kernel): Promise<string> => {
 
 describe('recursion e2e: split, gate, join, manual approve, queue partition', () => {
   it('(a) auto-approved split runs the full loop: propose → child runs → join → read back', async () => {
-    const { kernel, log, port, cleanup } = await bringUp('auto', splitFake({ expectGated: false, child: 'write' }))
+    const sharedWorkspace = mkdtempSync(path.join(tmpdir(), 'orc-split-workspace-'))
+    const { kernel, log, port, cleanup } = await bringUp('auto', splitFake({ expectGated: false, child: 'write', expectedWorkspace: sharedWorkspace }))
     try {
       const parentId = await parentTask(kernel)
       const childId = `${parentId}.s1.call-1`
-      const handle = await port.startRun(parentId)
+      const handle = await port.startRun(parentId, { cwd: sharedWorkspace })
       expect(await handle.wait()).toBe('done') // proves gate!==true, join outcome=done, note round-tripped
 
       const events = await log.all()
@@ -182,10 +202,12 @@ describe('recursion e2e: split, gate, join, manual approve, queue partition', ()
       expect(resolved!.payload).toMatchObject({ outcome: RUN_OUTCOME.done, notes: [{ id: 'child-finding', scope: 'project' }] })
 
       expect((await kernel.getTask(childId))?.status).toBe(TASK_STATUS.done)
+      expect((await kernel.state()).runs.get(childId)?.at(-1)?.cwd).toBe(sharedWorkspace)
       const approved = events.find(e => e.kind === EVENT_KIND.plan_approved && e.taskId === childId)
       expect((approved!.payload as { approvedBy: string }).approvedBy).toBe('policy')
     } finally {
       await cleanup()
+      rmSync(sharedWorkspace, { recursive: true, force: true })
     }
   }, 20_000)
 
@@ -242,6 +264,35 @@ describe('recursion e2e: split, gate, join, manual approve, queue partition', ()
       await cleanup()
     }
   }, 40_000)
+
+  it('(f) a child that resolves BEFORE the parent joins still delivers its summary and notes', async () => {
+    // split_resolved is appended by the router at RESOLUTION time, then the payload is sent. So a
+    // split already resolved when the parent reaches its gate is exactly the one with a message
+    // waiting — filtering it out as "already resolved" dropped the child's summary and notes and
+    // handed the agent an empty join. Uses the default [] target path, which is what loop.ts passes.
+    const gate: { wait?: (splitId: string) => Promise<void> } = {}
+    const { kernel, log, port, cleanup } = await bringUp('auto', splitFake({
+      expectGated: false, child: 'write', defaultTargets: true, beforeGate: gate,
+    }))
+    try {
+      gate.wait = async splitId => {
+        const deadline = Date.now() + 30_000
+        while (Date.now() < deadline) {
+          const events = await log.all()
+          if (events.some(e => e.kind === EVENT_KIND.split_resolved && (e.payload as { splitId: string }).splitId === splitId)) return
+          await Bun.sleep(100)
+        }
+        throw new Error('child never resolved before the parent reached its gate')
+      }
+      const parentId = await parentTask(kernel)
+      const handle = await port.startRun(parentId)
+      // the parent encodes its own assertions into the signal: 'done' proves r0 arrived with
+      // outcome=done AND the child's note was readable through the memory store
+      expect(await handle.wait()).toBe('done')
+    } finally {
+      await cleanup()
+    }
+  }, 60_000)
 
   it('(e) gate drops a foreign splitId: run joins the real child, never wedges recv on the bogus id', async () => {
     // without the intersection guard the port recv-waits on split:split:foreign:nope forever and

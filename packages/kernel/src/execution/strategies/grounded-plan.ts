@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import { composeAuthor, EVENT_KIND, LINK_KIND, MemoryDeletedPayload, MemoryNote, MemoryWrittenPayload, type ChildPlanDraft, type EventRecord } from '@orc/contracts'
 
 // The per-task plan-note scope. The authoring agent (told this string in its step instructions)
@@ -12,6 +13,13 @@ export const PLAN_STEP_ROLE = 'auditor'
 // scout memory tier). report_coverage is only meaningful for THIS step, so its gate reads this one
 // source rather than a scattered 'scout' literal.
 export const ANALYZE_STEP_ROLE = 'scout'
+
+export function planGraphHash(notes: MemoryNote[]): string {
+  const canonical = [...notes]
+    .sort((a, b) => a.scope.localeCompare(b.scope) || a.id.localeCompare(b.id))
+    .map(note => MemoryNote.parse(note))
+  return createHash('sha256').update(JSON.stringify(canonical)).digest('hex')
+}
 
 // FixE: reconstruct the task's plan-note graph from the EVENT LOG (the source of truth) rather than
 // the async SurrealDB projection — the log is synchronously durable the instant finalize runs, so the

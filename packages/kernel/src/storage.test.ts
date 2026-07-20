@@ -27,6 +27,35 @@ async function freshLog(): Promise<EventLog> {
   return (await freshStorage()).events
 }
 
+function errorCodes(error: unknown): string[] {
+  if (!error || typeof error !== 'object') return []
+  const value = error as { code?: unknown; cause?: unknown; errors?: unknown[] }
+  return [
+    ...(typeof value.code === 'string' ? [value.code] : []),
+    ...errorCodes(value.cause),
+    ...(value.errors ?? []).flatMap(errorCodes),
+  ]
+}
+
+describe('schema migration', () => {
+  it('preserves connection failures instead of reporting an unmigrated schema', async () => {
+    const error = await openStorage('postgresql://postgres:orc@127.0.0.1:59999/orc', {
+      projectId: TEST_PROJECT_ID,
+    }).catch(value => value)
+
+    expect(errorCodes(error)).toContain('ECONNREFUSED')
+  })
+
+  it('reports an empty schema as zero applied migrations', async () => {
+    const db = await createTestDb({ migrate: false })
+    dbs.push(db)
+
+    await expect(openStorage(db.url, { projectId: TEST_PROJECT_ID })).rejects.toThrow(
+      /database schema is behind \(0\/\d+ migrations applied\)/,
+    )
+  })
+})
+
 const statusEvent = (taskId = 't1'): EventInput => ({
   taskId, stepId: null, runToken: null,
   kind: 'task_status_changed',
@@ -257,16 +286,34 @@ describe('EventLog (postgres)', () => {
           stepId: 's1', runToken: 'r1', iteration: 1, toolCallId: 'c1', toolName: 'http',
           isError: false,
           output: {
-            config: { apiKey: 'raw-api-key-material' },
+            config: {
+              apiKey: 'raw-api-key-material',
+              client_secret: 'raw-client-secret',
+              private_key: 'raw-private-key',
+              x_api_key: 'raw-prefixed-api-key',
+              servicePassword: 'raw-service-password',
+              credentials: 'raw-credentials',
+              // minted-during-a-run secrets: never in process.env, so key matching is the ONLY
+              // thing that catches them
+              authToken: 'raw-auth-token', bearer_token: 'raw-bearer-token',
+              sessionToken: 'raw-session-token', apiToken: 'raw-api-token',
+              publicKey: 'safe-public-key',
+            },
             headers: { Authorization: 'Bearer embedded-secret-value-42' },
             text: 'curl -H "X: embedded-secret-value-42" used custom-credential-value-9 here',
           },
         },
       })
       const stored = JSON.stringify(await log.all())
-      expect(stored).not.toContain('raw-api-key-material')
-      expect(stored).not.toContain('embedded-secret-value-42')
-      expect(stored).not.toContain('custom-credential-value-9')
+      for (const secret of [
+        'raw-api-key-material', 'raw-client-secret', 'raw-private-key', 'raw-prefixed-api-key',
+        'raw-service-password', 'raw-credentials', 'embedded-secret-value-42', 'custom-credential-value-9',
+        'raw-auth-token', 'raw-bearer-token', 'raw-session-token', 'raw-api-token',
+      ]) expect(stored).not.toContain(secret)
+      expect(stored).toContain('safe-public-key')
+      // the trap: runToken normalizes to 'runtoken'. Redacting it would fail PAYLOAD_SCHEMAS
+      // validation, which runs after redaction — so it must survive intact.
+      expect(stored).toContain('"runToken":"r1"')
       expect(stored).toContain('[REDACTED]')
       expect(stored).toContain('[REDACTED:ORC_TEST_FAKE_SECRET]')
       expect(stored).toContain('[REDACTED:ORC_TEST_CUSTOM_CREDS]')
@@ -382,14 +429,26 @@ describe('OperationJournal', () => {
     process.env.ORC_TEST_OP_SECRET = 'operation-secret-value-7'
     try {
       const { events: log, operations: journal } = await openStorage(db.url, { projectId: TEST_PROJECT_ID })
-      const spec = { ...OP_SPEC, before: { apiKey: 'raw-key-1', prompt: 'use operation-secret-value-7' } }
+      const spec = {
+        ...OP_SPEC,
+        before: {
+          apiKey: 'raw-key-1', client_secret: 'raw-op-client-secret',
+          prompt: 'use operation-secret-value-7',
+        },
+      }
       await journal.beginOperation(OP_CONTEXT, spec)
-      await journal.failOperation(OP_CONTEXT, spec, 1, { message: 'failed with operation-secret-value-7' })
+      await journal.failOperation(OP_CONTEXT, spec, 1, {
+        message: 'failed with operation-secret-value-7', private_key: 'raw-op-private-key',
+      })
       const second = await journal.beginOperation(OP_CONTEXT, spec)
-      await journal.completeOperation(OP_CONTEXT, spec, second.attempt, { echo: 'operation-secret-value-7' })
+      await journal.completeOperation(OP_CONTEXT, spec, second.attempt, {
+        echo: 'operation-secret-value-7', credentials: 'raw-op-credentials',
+      })
       const stored = JSON.stringify(await journal.operationsFor('t1')) + JSON.stringify(await log.byTask('t1'))
-      expect(stored).not.toContain('raw-key-1')
-      expect(stored).not.toContain('operation-secret-value-7')
+      for (const secret of [
+        'raw-key-1', 'raw-op-client-secret', 'raw-op-private-key',
+        'raw-op-credentials', 'operation-secret-value-7',
+      ]) expect(stored).not.toContain(secret)
       await log.close()
     } finally {
       delete process.env.ORC_TEST_OP_SECRET

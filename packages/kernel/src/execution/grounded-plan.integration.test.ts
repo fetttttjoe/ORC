@@ -35,6 +35,7 @@ const testAnalyzer: Analyzer = {
 // The taskId (grounded task) / childTaskId is not on ExecutorContext, but the runToken is the
 // step workflow id `step:<taskId>:<stepId>:aN` — the deterministic id the port builds. Parse it.
 const taskIdOf = (runToken: string): string => runToken.split(':')[1]!
+const mutateAfterApprovalTasks = new Set<string>()
 
 // ONE scripted executor registered as 'api-loop' drives every step of the grounded loop — the
 // analyze scout, the plan auditor, and the db/api children the split expands (all inherit
@@ -73,11 +74,9 @@ function groundedFake(): AgentExecutor<unknown> {
         const analyzed = answer === 'yes'
         if (analyzed)
           await write('analysis', { id: 'analysis', title: 'Architecture', kind: NOTE_KIND.architecture_current, body: 'observed layering', summary: 'the shape of the code', paths: ['src/'] })
-        // TEST-ONLY SCAFFOLD: production has NO emitter for analysis_completed/CoverageReport —
-        // it's a reserved contract seam (spec §9), fabricated here only by this fake, and the fold
-        // is a no-op (projections.ts). Do not read this as proof of RG7 degradation; the
-        // production-truthful proof is the persisted uncertainty[] on the plan-notes, asserted in
-        // test 2 below via the store/projection, not this event.
+        // The production report_coverage tool emits analysis_completed through Kernel.reportCoverage.
+        // This scripted executor checkpoints the equivalent event directly; persisted plan-note
+        // uncertainty below remains the end-to-end proof that degraded analysis affects planning.
         const report: CoverageReport = analyzed
           ? { analyzed: true, scope: ['project'], gaps: ['auth flow not exercised'], confidence: 'medium', notesWritten: 1 }
           : { analyzed: false, scope: [], gaps: [], confidence: 'none', notesWritten: 0 }
@@ -100,13 +99,31 @@ function groundedFake(): AgentExecutor<unknown> {
           api: { id: 'api', title: 'API', kind: NOTE_KIND.plan, scope, body: 'build the endpoints', rationale: 'consumers need a surface', links: [{ id: 'db', kind: LINK_KIND.depends_on }] },
         }
         for (const id of ['masterplan', 'db', 'api']) await write(id, notes[id]!)
+        const finalize = (checkpoint: string, toolCallId: string) =>
+          ctx.checkpoint(checkpoint, () => tool('finalize_plan').execute({}, toolCallId), (r): EventDraft[] => [
+            { kind: EVENT_KIND.tool_call, payload: { ...base, iteration: 2, toolCallId, toolName: 'finalize_plan', input: {} } },
+            { kind: EVENT_KIND.tool_result, payload: { ...base, iteration: 2, toolCallId, toolName: 'finalize_plan', output: r.output, isError: r.isError } },
+          ])
+
+        // A model calling finalize before ask_human cannot manufacture approval.
+        const premature = await finalize('finalize:premature', 'finalize-premature')
+        if (!premature.isError) { yield* signalDone('premature finalize unexpectedly succeeded', false); return }
 
         // ask_human loop: revise on any non-'approve' reply, applying ONLY the annotated notes.
         let cycle = 0
         for (;;) {
           cycle++
           const reply = yield { type: 'feedback', question: 'Plan ready — reply with changes, or "approve" to start.', topic: `plan:${cycle}`, toolCallId: `ask-${cycle}` }
-          if (reply === 'approve') break
+          if (reply === 'approve') {
+            if (mutateAfterApprovalTasks.delete(taskId)) {
+              notes.db = { ...notes.db!, body: `${notes.db!.body} [mutated after approval]` }
+              await write('db-post-approval', notes.db)
+              const stale = await finalize('finalize:stale', 'finalize-stale')
+              if (!stale.isError) { yield* signalDone('stale approval unexpectedly finalized', false); return }
+              continue
+            }
+            break
+          }
           // targeted re-plan (D6): learn which notes the human flagged by calling the REAL
           // read_annotations tool (FixB's channel — kernel.listAnnotations off the log, taskId bound
           // from the injected step context), then re-write ONLY those notes and leave every sibling
@@ -124,10 +141,7 @@ function groundedFake(): AgentExecutor<unknown> {
         }
 
         // approve → finalize_plan freezes the graph and task_splits it (REAL kernel.proposeSplit).
-        const fin = await ctx.checkpoint('finalize', () => tool('finalize_plan').execute({}, 'finalize'), (r): EventDraft[] => [
-          { kind: EVENT_KIND.tool_call, payload: { ...base, iteration: 2, toolCallId: 'finalize', toolName: 'finalize_plan', input: {} } },
-          { kind: EVENT_KIND.tool_result, payload: { ...base, iteration: 2, toolCallId: 'finalize', toolName: 'finalize_plan', output: r.output, isError: r.isError } },
-        ])
+        const fin = await finalize('finalize', 'finalize')
         yield* signalDone(fin.isError ? `finalize failed: ${JSON.stringify(fin.output)}` : 'plan finalized', !fin.isError)
         return
       }
@@ -217,6 +231,7 @@ describe('grounded-plan e2e: the full consent → analyze → plan-graph → ann
     const { kernel, memory, port, cleanup } = await bringUp()
     try {
       const t = await kernel.createGroundedTask({ title: 'Web app', spec: 'build a web app', modelRef: 'fake/m', analyzerRef: 'agent-analyzer' })
+      mutateAfterApprovalTasks.add(t.id)
       const scope = planScope(t.id)
       const feedbackCount = async (topic: string): Promise<number> =>
         (await kernel.eventsFor(t.id)).filter(e => e.kind === EVENT_KIND.feedback_requested && (e.payload as { topic: string }).topic === topic).length
@@ -235,8 +250,15 @@ describe('grounded-plan e2e: the full consent → analyze → plan-graph → ann
       expect(await waitFor(async () => (await memory.store.get('analysis', 'project')) !== null)).toBe(true)
       expect((await memory.store.get('analysis', 'project'))?.title).toBe('Architecture')
 
-      // plan authored → first ask_human → annotate 'db' then reply 'go' (a targeted revise, not approve)
+      // plan authored → an untrusted direct finalize is rejected before the first human gate.
       expect(await waitFor(() => feedbackCount('plan:1').then(n => n >= 1))).toBe(true)
+      const premature = (await kernel.eventsFor(t.id)).find(e =>
+        e.kind === EVENT_KIND.tool_result && (e.payload as { toolCallId: string }).toolCallId === 'finalize-premature')
+      expect(premature?.payload).toMatchObject({ isError: true })
+      expect(JSON.stringify(premature?.payload)).toContain('approval')
+      expect((await kernel.eventsFor(t.id)).some(e => e.kind === EVENT_KIND.split_proposed)).toBe(false)
+
+      // annotate 'db' then reply 'go' (a targeted revise, not approve)
       await kernel.annotatePlan(t.id, { targetNote: 'db', text: 'tighten the schema step' })
       expect(await kernel.replyFeedback(t.id, 'go')).toBe('plan:1')
 
@@ -254,9 +276,19 @@ describe('grounded-plan e2e: the full consent → analyze → plan-graph → ann
       expect(dbNote?.body).toContain('[revised per annotation]')
       expect(apiNote?.body).not.toContain('[revised')
 
-      // second ask_human → approve → finalize_plan → task_split
+      // First approval binds revision 2. The scripted agent then mutates db to revision 3;
+      // finalize rejects the stale hash and asks again instead of splitting.
       expect(await waitFor(() => feedbackCount('plan:2').then(n => n >= 1))).toBe(true)
       expect(await kernel.replyFeedback(t.id, 'approve')).toBe('plan:2')
+      expect(await waitFor(() => feedbackCount('plan:3').then(n => n >= 1))).toBe(true)
+      const stale = (await kernel.eventsFor(t.id)).find(e =>
+        e.kind === EVENT_KIND.tool_result && (e.payload as { toolCallId: string }).toolCallId === 'finalize-stale')
+      expect(stale?.payload).toMatchObject({ isError: true })
+      expect(JSON.stringify(stale?.payload)).toContain('changed after approval')
+      expect((await kernel.eventsFor(t.id)).some(e => e.kind === EVENT_KIND.split_proposed)).toBe(false)
+
+      // A second approval binds revision 3 and permits the deterministic split.
+      expect(await kernel.replyFeedback(t.id, 'approve')).toBe('plan:3')
 
       // ASSERT (d.1): the grounded run resolves 'done' (plan step signalled after finalize_plan)
       expect(await handle.wait()).toBe('done')
@@ -303,10 +335,9 @@ describe('grounded-plan e2e: the full consent → analyze → plan-graph → ann
       expect(await waitFor(() => feedbackCount('consent').then(n => n >= 1))).toBe(true)
       expect(await kernel.replyFeedback(t.id, 'no')).toBe('consent')
 
-      // NOTE (test-only scaffold, not load-bearing): this only pins the FAKE's own emitted event —
-      // production has no analysis_completed emitter (reserved CoverageReport seam, spec §9), so this
-      // is not evidence of any real degradation behavior. The production-truthful proof of RG7
-      // degradation is below: persisted uncertainty[] on the plan-notes, read back from the store.
+      // The fake checkpoints the same analysis_completed payload emitted by production's
+      // report_coverage tool. The persisted uncertainty[] assertion below proves the report's
+      // planning consequence through the real memory projection.
       expect(await waitFor(() => kernel.eventsFor(t.id).then(es => es.some(e => e.kind === EVENT_KIND.analysis_completed)))).toBe(true)
       const ac = (await kernel.eventsFor(t.id)).find(e => e.kind === EVENT_KIND.analysis_completed)
       const report = ac!.payload as CoverageReport
@@ -323,9 +354,8 @@ describe('grounded-plan e2e: the full consent → analyze → plan-graph → ann
       const childId2 = ((await kernel.eventsFor(t.id)).find(e => e.kind === EVENT_KIND.split_proposed)!.payload as { childTaskId: string }).childTaskId
       await waitFor(async () => (await kernel.getTask(childId2))?.status === TASK_STATUS.done, 30_000)
 
-      // ASSERT (FixA Gap A) — THE PRODUCTION-TRUTHFUL PROOF OF RG7 DEGRADATION (not the fabricated
-      // analysis_completed above, which production never emits): the assumption-mode plan-notes
-      // carry marked uncertainties (every gap surfaced on the note it affects), and
+      // ASSERT (FixA Gap A) — the assumption-mode plan-notes carry marked uncertainties
+      // (every gap surfaced on the note it affects), and
       // uncertainty[]/rationale round-trip THROUGH THE READ MODEL — read db's note back from the
       // store (the SurrealDB projection), NOT the event log. Pre-FixA the projection dropped these
       // fields, so this returned [] / '' even though the log carried them; FixA persists them

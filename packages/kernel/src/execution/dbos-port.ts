@@ -27,6 +27,11 @@ export interface DbosPort extends ExecutionPort {
 const agentQueue = (depth: number): string => `agents:${depth}`
 const runQueue = (depth: number): string => `runs:${depth}`
 
+// How long one DBOS.recv waits before looping. Human gates park for hours, and every expiry
+// writes durable rows that recovery must replay in order — so this trades nothing but row
+// count. Cancellation responsiveness is independent of it (see the split gate).
+const GATE_POLL_SECONDS = 3_600
+
 interface RunArgs { taskId: string; planVersion: number; retryIndex: number; cwd: string | null }
 interface StepArgs { taskId: string; stepId: string; planVersion: number; attempt: number; cwd: string | null }
 interface StepResult { stepId: string; ok: boolean }
@@ -46,8 +51,8 @@ const workflowIdOrThrow = (): string => {
 // without the kernel taking a direct @dbos-inc/dbos-sdk dependency — mirrors the signal router's
 // own `send: (dest, result, topic, key) => DBOS.send(dest, result, topic, key)` wiring below.
 // Requires DBOS to already be launched in this process (same requirement as any other port call).
-export const dbosSend = (workflowId: string, message: string, topic: string): Promise<void> =>
-  DBOS.send(workflowId, message, topic)
+export const dbosSend = (workflowId: string, message: string, topic: string, idempotencyKey: string): Promise<void> =>
+  DBOS.send(workflowId, message, topic, idempotencyKey)
 
 export async function createDbosPort(opts: {
   storage: Storage
@@ -62,7 +67,16 @@ export async function createDbosPort(opts: {
   }) => ResolvedTool[]
 }): Promise<DbosPort> {
   const { config, providers, executors, skills, tools, stepTools } = opts
-  const { events: log, operations: journal } = opts.storage
+  const { events: log, operations: journal, redact } = opts.storage
+
+  // DBOS serializes EVERY step's return value into its own operation_outputs table
+  // (dbos-executor's recordOperationResult), in the DBOS system database — same Postgres
+  // cluster and credentials as the event log, but NOT behind EventLog.append's redaction.
+  // Raw tool results and full model turns pass through here, so this is the one place they
+  // leave a step and must be scrubbed. Wrapping in an object routes arrays and primitives
+  // through the redactor's recursive walk while preserving the caller's shape.
+  const redactStepResult = <T>(r: T): T =>
+    r === null || typeof r !== 'object' ? r : (redact({ v: r } as Record<string, unknown>).v as T)
 
   const foldState = async (taskId: string): Promise<State> => fold(await log.byTask(taskId))
 
@@ -86,7 +100,8 @@ export async function createDbosPort(opts: {
                   idempotencyKey: d.idempotencyKey ?? `${runToken}:${name}:${i}:${d.kind}`,
                 })
             })
-          return r
+          // drafts go through log.append, which redacts on its own; this guards what DBOS persists
+          return redactStepResult(r)
         },
         { name, ...RETRY_POLICY },
       )
@@ -105,7 +120,7 @@ export async function createDbosPort(opts: {
           try {
             const result = await fn()
             await journal.completeOperation(context, spec, begin.attempt, result, toEvents ? toEvents(result) : [])
-            return result
+            return redactStepResult(result)
           } catch (err) {
             await journal.failOperation(context, spec, begin.attempt, {
               message: err instanceof Error ? err.message : String(err),
@@ -212,6 +227,9 @@ export async function createDbosPort(opts: {
       let error: { class: string; message: string } | null = null
       const gen = executor.startTurn(ctx)
       let resume: SplitResult[] | string | undefined
+      // splitIds already handed to a previous gate in THIS workflow. Rebuilds correctly on
+      // replay because each gate:targets checkpoint replays its recorded value in order.
+      const consumed = new Set<string>()
       while (true) {
         const { value: ev, done } = await gen.next(resume)
         resume = undefined
@@ -219,26 +237,36 @@ export async function createDbosPort(opts: {
         if (ev.type === 'signal') signal = ev.signal
         if (ev.type === 'error') error = { class: ev.class, message: ev.message }
         if (ev.type === 'gate') {
-          // resolve targets in a checkpoint (log read = non-deterministic). Default = all
-          // unresolved splits proposed by THIS step attempt; an explicit request is intersected
-          // with that set so an unknown/foreign/already-resolved id — which can never receive a
-          // message and would wedge recv forever (no gate timeout in v1) — is dropped. Empty
-          // intersection resumes with [] immediately.
+          // Resolve targets in a checkpoint (log read = non-deterministic). Default = every
+          // split proposed by THIS step attempt that this workflow has not already consumed;
+          // an explicit request is intersected with that set so an unknown or foreign id —
+          // which can never receive a message and would wedge recv forever (no gate timeout in
+          // v1) — is dropped. Empty intersection resumes with [] immediately.
+          //
+          // `resolved` is NOT the consumed marker: the router appends split_resolved and THEN
+          // sends, so a split that resolved before the parent reached its gate is precisely the
+          // one with a message waiting. Filtering on it dropped the child's summary and notes —
+          // the whole payload of the split protocol — whenever a child outran its parent.
           const targets = await checkpoint(`gate:targets:${ev.toolCallId}`, async () => {
             const state = await foldState(args.taskId)
             const own = [...state.splits.values()]
-              .filter(s => s.stepId === args.stepId && s.runToken === runToken && !s.resolved)
+              .filter(s => s.stepId === args.stepId && s.runToken === runToken && !consumed.has(s.splitId))
               .map(s => s.splitId)
             if (ev.splitIds.length === 0) return own
             const ownSet = new Set(own)
             return ev.splitIds.filter(id => ownSet.has(id))
           })
+          for (const id of targets) consumed.add(id)
           const results: SplitResult[] = []
           for (const id of targets) {
             // workflow context — recv is legal here and ONLY here (spec D9).
-            // 60s poll, loop forever: no gate timeout in v1; recv replays from DBOS's message log.
+            // Long poll, loop forever: no gate timeout in v1; recv replays from DBOS's message log.
+            // The timeout is NOT a responsiveness knob — every recv records a durable row even on
+            // expiry, and recovery replays each one sequentially, so a short poll bills a parked
+            // gate by wall-clock time (60s => ~1,440 rows overnight). Cancellation is unaffected:
+            // sysdb.recv re-checks it every dbPollingIntervalEventMs (10s) regardless.
             let msg: SplitResult | null = null
-            while (msg === null) msg = await DBOS.recv<SplitResult>(`split:${id}`, 60)
+            while (msg === null) msg = await DBOS.recv<SplitResult>(`split:${id}`, GATE_POLL_SECONDS)
             results.push(msg)
           }
           resume = results
@@ -246,9 +274,9 @@ export async function createDbosPort(opts: {
         if (ev.type === 'feedback') {
           await checkpoint(`feedback:req:${ev.toolCallId}`, async () => 0, () =>
             [{ kind: EVENT_KIND.feedback_requested, payload: { question: ev.question, topic: ev.topic } }])
-          // ponytail: 60s poll, loop forever — no gate timeout in v1 (mirrors the split gate); cancel is the escape
+          // ponytail: long poll, loop forever — no gate timeout in v1 (mirrors the split gate); cancel is the escape
           let msg: string | null = null
-          while (msg === null) msg = await DBOS.recv<string>(`feedback:${ev.topic}`, 60)
+          while (msg === null) msg = await DBOS.recv<string>(`feedback:${ev.topic}`, GATE_POLL_SECONDS)
           resume = msg
           continue
         }
@@ -320,37 +348,62 @@ export async function createDbosPort(opts: {
       const done = new Set(init.done)
       const failed = new Set<string>()
       const started = new Set(init.done)
-      const pending = new Map<string, Promise<StepResult>>()
 
-      // continuous scheduling: re-evaluate readiness as EACH step settles, so a fast step's
-      // dependents never wait on a slow unrelated sibling. Recovery-safe: child workflow ids
-      // are deterministic, so re-issued startWorkflow calls attach idempotently.
-      const launchReady = async (): Promise<void> => {
-        for (const s of readySteps(plan, done, failed, started)) {
+      // Wave scheduling: launch every ready step IN PLAN ORDER, await the whole wave, then
+      // recompute readiness. Launch order is therefore a pure function of (plan, done, failed)
+      // — identical on the first run and on every replay.
+      //
+      // It has to be. DBOS binds child workflows POSITIONALLY, not by the workflowID argument:
+      // a replayed startWorkflow looks up (callerID, callerFunctionID) and returns a handle to
+      // whatever child is recorded at that slot (dbos-executor.js internalWorkflow), ignoring
+      // the id we asked for. The previous continuous scheduler launched dependents from inside
+      // a Promise.race settle loop, so first-run order followed real completion timing while
+      // replay order followed Map insertion order — two steps could swap slots, each receive
+      // the other's handle, and the loop would then spin forever on an already-resolved promise
+      // with the task pinned 'running'. See resume.test.ts's two-independent-step case.
+      //
+      // Cost, knowingly paid: a fast step's dependents now wait for its whole wave. Keeping
+      // continuous scheduling would need DBOS's startWfFuncId, which DBOS.startWorkflow does
+      // not expose.
+      for (;;) {
+        const wave = readySteps(plan, done, failed, started)
+        if (wave.length === 0) break
+        const results: Promise<StepResult>[] = []
+        for (const s of wave) {
           started.add(s.id)
           const handle = await DBOS.startWorkflow(stepWorkflow, {
             workflowID: stepWorkflowId(args.taskId, s.id, init.attempts[s.id]!),
             queueName: agentQueue(init.depth),
           })({ taskId: args.taskId, stepId: s.id, planVersion: args.planVersion, attempt: init.attempts[s.id]!, cwd: args.cwd })
-          pending.set(s.id, handle.getResult())
+          results.push(handle.getResult())
         }
-      }
-      await launchReady()
-      while (pending.size > 0) {
-        const r = await Promise.race(pending.values())
-        pending.delete(r.stepId)
-        ;(r.ok ? done : failed).add(r.stepId)
-        await launchReady()
+        for (const r of await Promise.all(results)) (r.ok ? done : failed).add(r.stepId)
       }
 
       const outcome = runOutcomeOf(plan, done)
+      // The status re-check and the terminal append happen in ONE transaction, deliberately not
+      // via the checkpoint's draft path: makeCheckpoint runs fn() and THEN opens a separate
+      // transaction for its drafts, so reading the status in fn and appending from toEvents is
+      // TOCTOU. An `orc cancel` landing in that window takes the project lock, re-checks, and
+      // appends running→cancelled — and this would then append running→done on top of it. fold
+      // is last-seq-wins with no `from` check (projections.ts), so the task would report done
+      // while the router had already told the parent it was cancelled. cancelOne reads and
+      // writes under one lock; this now matches it.
       await checkpoint('finish', async () => {
-        const status = (await foldState(args.taskId)).tasks.get(args.taskId)?.status ?? TASK_STATUS.running
-        return { outcome, status }
-      }, r => r.status !== TASK_STATUS.running ? [] : [
-        // a cancelRun that landed mid-run already appended running→cancelled — never overwrite it
-        { kind: EVENT_KIND.task_status_changed, payload: { taskId: args.taskId, from: TASK_STATUS.running, to: r.outcome === RUN_OUTCOME.done ? TASK_STATUS.done : TASK_STATUS.blocked } },
-      ])
+        await log.transaction(async tx => {
+          const status = fold(await tx.byTask(args.taskId)).tasks.get(args.taskId)?.status ?? TASK_STATUS.running
+          if (status !== TASK_STATUS.running) return // a cancel already stamped a terminal status
+          await tx.append({
+            taskId: args.taskId, stepId: null, runToken: workflowId,
+            kind: EVENT_KIND.task_status_changed,
+            payload: { taskId: args.taskId, from: TASK_STATUS.running, to: outcome === RUN_OUTCOME.done ? TASK_STATUS.done : TASK_STATUS.blocked },
+            usage: null,
+            // same shape makeCheckpoint's drafts use, so a step retry cannot double-append
+            idempotencyKey: `${workflowId}:finish:0:${EVENT_KIND.task_status_changed}`,
+          })
+        })
+        return { outcome }
+      })
       return outcome
     },
     { name: 'orcRun' },
@@ -424,16 +477,17 @@ export async function createDbosPort(opts: {
     // at real process exit. (DBOS docs: use deregister when re-registering functions.)
     shutdown: async () => { await router.close(); await DBOS.shutdown({ deregister: true }) },
     startChildRun: async (childTaskId: string): Promise<void> => {
-      const state = await foldState(childTaskId)
+      const state = fold(await log.all())
       const task = state.tasks.get(childTaskId)
       if (!task) throw new KernelError(KERNEL_ERROR_CODE.task_not_found, `no task '${childTaskId}'`)
       const approved = state.plans.get(childTaskId)?.approvedVersion
       if (!approved) throw new KernelError(KERNEL_ERROR_CODE.invalid_transition, `no approved plan for '${childTaskId}'`)
       // deterministic id: the router may call this more than once (at-least-once delivery) — attaches idempotently
+      const cwd = task.parentId ? state.runs.get(task.parentId)?.at(-1)?.cwd ?? null : null
       await DBOS.startWorkflow(runWorkflow, {
         workflowID: `run:${childTaskId}:v${approved}`,
         queueName: runQueue(task.depth),
-      })({ taskId: childTaskId, planVersion: approved, retryIndex: 0, cwd: null })
+      })({ taskId: childTaskId, planVersion: approved, retryIndex: 0, cwd })
     },
     startRun: (taskId, o) => startRunAt(taskId, 0, o?.cwd),
     retry: async (taskId, o) => {
@@ -474,6 +528,7 @@ export async function createDbosPort(opts: {
     log,
     onChildApproved: id => port.startChildRun(id),
     send: (dest, result, topic, key) => DBOS.send(dest, result, topic, key),
+    sendFeedback: dbosSend,
   })
 
   return port

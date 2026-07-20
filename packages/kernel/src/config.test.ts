@@ -13,6 +13,25 @@ describe('loadConfig', () => {
     expect(c.concurrency).toBe(7)
     expect(c.workspaceRoot).toBe('ws')
   })
+  it('discovers the nearest initialized ancestor only when no directory is explicit', () => {
+    const project = tmpProject({
+      projectId: '00000000-0000-4000-8000-000000000001',
+      projectName: 'ancestor',
+    })
+    const nested = path.join(project, 'src', 'nested')
+    mkdirSync(nested, { recursive: true })
+    const before = process.cwd()
+    try {
+      process.chdir(nested)
+      expect(loadConfig().dir).toBe(project)
+      expect(loadConfig().projectName).toBe('ancestor')
+      expect(loadConfig(nested).dir).toBe(nested)
+      expect(loadConfig(nested).projectName).toBeNull()
+    } finally {
+      process.chdir(before)
+    }
+  })
+
   it('has sane defaults', () => {
     const c = loadConfig(mkdtempSync(path.join(tmpdir(), 'orc-')))
     expect(c.concurrency).toBe(3)
