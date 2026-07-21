@@ -63,7 +63,7 @@ async function main(): Promise<number> {
     return await parse(buildProgram(
       opened.kernel,
       async () => (runtime.port ??= await buildRuntime({ ...plugins!, config, storage: opened.storage, kernel: opened.kernel })),
-      { host: plugins.host, hub: plugins.hub, config, log: opened.log },
+      { host: plugins.host, hub: plugins.hub, config, log: opened.log, storage: opened.storage },
     ), process.argv)
   } finally {
     try {

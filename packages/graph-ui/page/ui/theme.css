@@ -123,6 +123,7 @@ input, textarea, select, button { font: var(--font) }
 .dot.step { background: var(--ok) }
 .dot.artifact { background: var(--warn) }
 .dot.note { background: var(--purple) }
+.dot.model { background: #89dceb }
 
 .empty { color: var(--muted); padding: 26px 8px; text-align: center; font-size: 12.5px }
 
@@ -186,6 +187,8 @@ input, textarea, select, button { font: var(--font) }
 }
 .field textarea { min-height: 88px; resize: vertical }
 .field input:focus, .field textarea:focus, .field select:focus { outline: 0; border-color: var(--accent) }
+.dlg-error { color: var(--danger); font-size: 12.5px; white-space: pre-wrap }
+.dlg-error:empty { display: none }
 .dlg-buttons { display: flex; justify-content: flex-end; gap: 8px; margin-top: 6px }
 
 /* ─── Conversation (center) ─────────────────────────────────────────────────── */
@@ -219,6 +222,9 @@ input, textarea, select, button { font: var(--font) }
 .conv .tool-row { align-self: stretch; max-width: 74% }
 .conv-usage { align-self: flex-start; color: #4a4a56; font-size: 10.5px; padding: 0 6px }
 .conv-inputrow { display: flex; gap: 10px; padding: 14px 26px 18px; border-top: 1px solid var(--border-soft); background: var(--bg-raise) }
+/* inline question-answer row inside the feed — a card-like strip, not the page-wide bar */
+.conv-inputrow.answer { padding: 8px 10px; border: 1px solid color-mix(in srgb, var(--warn) 30%, var(--border)); border-radius: 10px; background: var(--surface-2) }
+.deco-chips { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-top: 8px }
 .conv-input {
   flex: 1; resize: none; color: var(--text); background: var(--surface-2);
   border: 1px solid var(--border); border-radius: var(--radius); padding: 11px 14px;
@@ -318,8 +324,13 @@ input, textarea, select, button { font: var(--font) }
 .wave { display: flex; align-items: center; gap: 8px; flex-wrap: wrap }
 .wave-label { color: var(--muted); font-size: 10.5px; display: inline-flex; gap: 6px; align-items: center; min-width: 88px }
 .wave-step { padding: 2.5px 10px; border-radius: 999px; background: var(--surface-3); border: 1px solid var(--border-soft); font-size: 11.5px }
+.wave-step.link { cursor: pointer }
+.wave-step.link:hover { border-color: var(--accent); color: var(--accent) }
+.deco-chips .tab.correct { padding-inline: 7px }
 .wave-step.completed { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 30%, transparent) }
-.wave-step.running { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 30%, transparent) }
+.wave-step.running { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 30%, transparent); animation: pulse 1.6s ease-in-out infinite }
+.sys-card.working .badge { animation: pulse 1.6s ease-in-out infinite }
+@keyframes pulse { 50% { opacity: 0.5 } }
 .wave-step.failed { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 30%, transparent) }
 .plan-card { max-width: 100% }
 
@@ -334,7 +345,8 @@ input, textarea, select, button { font: var(--font) }
 .editor-main { flex: 1; display: grid; grid-template-columns: 1fr 300px; min-height: 0 }
 .editor-canvas { position: relative; overflow: hidden }
 .editor-inspector { border-left: 1px solid var(--border-soft); padding: 16px; overflow-y: auto; display: flex; flex-direction: column; gap: 11px; background: var(--bg-raise) }
-.row-split { display: flex; align-items: center; gap: 8px; justify-content: space-between }
+.row-split { display: flex; align-items: center; gap: 6px; justify-content: space-between; flex-wrap: wrap }
+.row-split > .btn { flex: 1 1 auto; min-width: 0; padding-inline: 8px; white-space: nowrap }
 
 .detail-head { display: flex; align-items: center; gap: 6px }
 .detail-head .grow { flex: 1 }

@@ -2,54 +2,29 @@ import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync } from '
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { Command, InvalidArgumentError } from 'commander'
-import { EVENT_KIND, MEMORY_ACCESS, PlanDraft, RUN_OUTCOME, STRATEGY, TASK_STATUS, costUSDFor, parseModelRef, type Analyzer, type EventRecord, type ExecutionPort, type Plan, type RunHandle } from '@orc/contracts'
+import { EVENT_KIND, MEMORY_ACCESS, PlanDraft, RUN_OUTCOME, STRATEGY, TASK_STATUS, type Analyzer, type EventRecord, type ExecutionPort, type Plan, type RunHandle } from '@orc/contracts'
 import { openStorage, Kernel, fold, grantExtensionTrust, grantMcpTrust, initializeProject, isExtensionTrusted, isMcpTrusted, loadConfig, loadTrust, migrateDatabase, requireProject, taskUsage, type EventLog, type OrcConfig, type PluginHost, type ProjectConfig, type Storage } from '@orc/kernel'
 import { createVaultProjector, parsePlanFile } from '@orc/vault-projector'
 import { createMemory, probeMemory } from '@orc/memory'
-import { buildOrcActions, singleStepDraft } from './actions'
-import { seedRegistries } from './runtime'
+import { buildModelDiscovery, buildOrcActions, singleStepDraft } from './actions'
 
-// copilot model access: same provider registry (and cost table) the executor uses.
 // Providers are ModelProvider<unknown> by design (extensions may register anything) — the
-// boundary check below validates the shape at runtime instead of casting.
+// boundary check validates the shape at runtime instead of casting.
 type CopilotModel = ReturnType<import('@orc/graph-ui').CopilotConfig['resolveModel']>
 const isLanguageModel = (m: unknown): m is CopilotModel =>
   typeof m === 'string' || (typeof m === 'object' && m !== null && 'specificationVersion' in m)
 
-function buildCopilotConfig(config: ProjectConfig) {
-  const { providers } = seedRegistries(config)
-  const providerFor = (ref: string) => {
-    const { providerId, modelId } = parseModelRef(ref)
-    const p = providers.get(providerId)
-    if (!p) throw new Error(`unknown provider '${providerId}'`)
-    return { p, modelId }
-  }
-  // live discovery across every registered provider, as refs — cached briefly so pickers and
-  // the copilot tool don't hammer three APIs per keystroke
-  let modelCache: { at: number; refs: string[] } | null = null
-  const listModels = async (): Promise<string[]> => {
-    if (modelCache && Date.now() - modelCache.at < 300_000) return modelCache.refs
-    const refs = (await Promise.all([...providers.entries()].map(async ([pid, p]) => {
-      const ids = p.listModels ? await p.listModels() : Object.keys(p.costs).filter(k => k !== '*')
-      return ids.map(id => `${pid}/${id}`)
-    }))).flat().sort()
-    modelCache = { at: Date.now(), refs }
-    return refs
-  }
+function buildCopilotConfig(discovery: ReturnType<typeof buildModelDiscovery>) {
   return {
     defaultModelRef: 'anthropic/claude-haiku-4-5',
-    listModels,
+    listModels: discovery.listModels,
     resolveModel: (ref: string) => {
-      const { p, modelId } = providerFor(ref)
+      const { p, modelId } = discovery.providerFor(ref)
       const model = p.languageModel(modelId)
       if (!isLanguageModel(model)) throw new Error(`provider '${ref}' returned a non-language-model`)
       return model
     },
-    price: (ref: string, usage: { inputTokens?: number; outputTokens?: number; inputTokenDetails?: { cacheReadTokens?: number; cacheWriteTokens?: number } }) => {
-      const { p, modelId } = providerFor(ref)
-      return costUSDFor(p.costs, modelId, usage.inputTokens ?? 0, usage.outputTokens ?? 0,
-        { readTokens: usage.inputTokenDetails?.cacheReadTokens, writeTokens: usage.inputTokenDetails?.cacheWriteTokens })
-    },
+    price: discovery.price,
   }
 }
 import type { McpHub } from '@orc/mcp-client'
@@ -160,7 +135,7 @@ async function tailUntilDone(kernel: Kernel, taskId: string, handle: RunHandle):
 export function buildProgram(
   kernel: Kernel,
   portFactory?: () => Promise<ExecutionPort>,
-  plugin?: { host: PluginHost; hub: McpHub; config: ProjectConfig; log: EventLog },
+  plugin?: { host: PluginHost; hub: McpHub; config: ProjectConfig; log: EventLog; storage?: Storage },
 ): Command {
   const program = new Command('orc')
   program.description('multi-agent orchestrator')
@@ -283,6 +258,16 @@ export function buildProgram(
     })
 
   program
+    .command('purge')
+    .description("cancel running work and delete this project's events, operations, and memory read model — identity stays (clean slate for re-testing)")
+    .requiredOption('--yes', 'confirm: this irreversibly deletes the project history')
+    .action(async () => {
+      const r = await actions().purgeProject()
+      console.log(`purged ${r.events} event(s), ${r.operations} operation(s)`)
+      for (const w of r.warnings) console.log(`warning: ${w}`)
+    })
+
+  program
     .command('tasks')
     .description('list tasks')
     .action(async () => {
@@ -322,8 +307,10 @@ export function buildProgram(
       ))
     })
 
-  // one shared implementation of every mutating command — the web adapter gets the same object
-  const actions = () => buildOrcActions({ kernel, needPort, plugin })
+  // one shared implementation of every mutating command — the web adapter gets the same object.
+  // Discovery-backed model validation rejects invented refs at creation time on every surface.
+  const discovery = plugin ? buildModelDiscovery(plugin.config, plugin.log) : undefined
+  const actions = () => buildOrcActions({ kernel, needPort, plugin, listModels: discovery?.listModels })
 
   const needPort = async (): Promise<ExecutionPort> => {
     if (!portFactory) throw new Error('execution commands are unavailable in this context')
@@ -386,10 +373,10 @@ export function buildProgram(
       const ui = startGraphUi({
         url: (cfg ?? loadConfig()).databaseUrl,
         port: opts.port,
-        cwdProject: cfg ? { id: cfg.projectId, name: cfg.projectName } : undefined,
+        cwdProject: cfg ? { id: cfg.projectId, name: cfg.projectName, dir: cfg.dir } : undefined,
         // mutations only when launched inside a project with a real runtime behind it
         actions: portFactory && plugin ? actions() : undefined,
-        copilot: portFactory && plugin ? buildCopilotConfig(cfg!) : undefined,
+        copilot: portFactory && plugin && discovery ? buildCopilotConfig(discovery) : undefined,
         defaultCwd: cfg?.dir ?? process.cwd(),
       })
       console.log(`graph ui on http://127.0.0.1:${ui.port}`)

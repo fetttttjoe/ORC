@@ -8,17 +8,28 @@ import type { ProjectSessions } from './sessions'
 
 const snip = (s: string, n = 400): string => (s.length > n ? s.slice(0, n) + '…' : s)
 
-export function copilotSystemPrompt(projectName: string, canAct: boolean): string {
+// Why a session can't act: 'read-only' = server started outside a project; 'foreign-project'
+// = the user is viewing a chat other than the one this server runs in.
+export type CopilotMode = 'act' | 'read-only' | 'foreign-project'
+
+const MODE_LINES: Record<CopilotMode, string> = {
+  act: `You may execute actions (create requests, propose, approve, run, reply, refine plans). Confirm with the user before cancel. Prefer grounded requests for repo work (the agent analyzes the codebase first); quick requests for simple one-shot jobs. After acting, state what you did and what happens next.`,
+  'read-only': `This session is read-only: explain state and suggest the CLI commands the user could run.`,
+  'foreign-project': `This chat is READ-ONLY: actions run only in the project chat where orc graph was started. If the user wants to act, tell them to switch to that chat — or restart orc graph from this project's directory.`,
+}
+
+export function copilotSystemPrompt(projectName: string, mode: CopilotMode): string {
   return [
     `You are the orc copilot for the project "${projectName}" — a guide through a multi-agent orchestrator.`,
     `Requests (tasks) move through: draft → plan proposed → approved (human gate) → running steps → done, with verified output artifacts and a growing knowledge graph of memory notes.`,
     `Ground every answer in tool reads — never invent task ids, statuses, or content. Read before you act.`,
     `Model refs have the form provider/model (e.g. anthropic/…). Call available_models before choosing one — never guess a ref.`,
-    canAct
-      ? `You may execute actions (create requests, propose, approve, run, reply, refine plans). Confirm with the user before cancel. Prefer grounded requests for repo work (the agent analyzes the codebase first); quick requests for simple one-shot jobs. After acting, state what you did and what happens next.`
-      : `This session is read-only: explain state and suggest the CLI commands the user could run.`,
+    MODE_LINES[mode],
+    `The UI already streams every event to the user live — NEVER offer to poll, watch, or "check back periodically". After an action, verify once with project_status/recent_activity, report, and stop.`,
     `When the user names a folder/repository to work on, that ABSOLUTE path is the cwd: pass it as grounded.cwd (grounded requests) or as run's cwd — the agents' file tools are scoped to that directory. Never run repo work in a different cwd.`,
     `A quick request is only runnable after propose → approve (the human gate): create it, propose a plan, then ASK the user to review before you approve — unless they already told you to proceed fully.`,
+    `HONESTY ABOUT PROGRESS: after starting or resuming runs, VERIFY with project_status/recent_activity before describing progress. A step_failed or task status 'failed' means it FAILED — report the error text verbatim and propose the fix. Never describe agents as 'working' unless the activity log shows it.`,
+    `If a tool call fails, read its error message — it usually names the fix. Do not retry the same input more than once.`,
     `Be concise. When the user is unsure, propose a concrete next move.`,
   ].join('\n')
 }
@@ -45,7 +56,7 @@ export function buildCopilotTools(deps: {
       inputSchema: z.object({}),
       execute: async () => {
         const { graph } = await sessions.snapshot(projectId)
-        const counts = { task: 0, step: 0, artifact: 0, note: 0 }
+        const counts = { task: 0, step: 0, artifact: 0, note: 0, model: 0 }
         for (const n of graph.nodes) counts[n.type]++
         return {
           tasks: graph.nodes.filter(n => n.type === 'task').map(n => ({ taskId: n.id, title: n.label, status: n.detail })),
@@ -85,7 +96,7 @@ export function buildCopilotTools(deps: {
 
   const mutate: ToolSet = {
     new_request: tool({
-      description: 'Create a new request. grounded=true makes an agent analyze the repo and propose a decomposition (needs cwd); otherwise a quick single-step task is created (then propose/approve/run it).',
+      description: 'Create a new request. The title is a short LABEL; spec carries the actual intent (goal, constraints, outputs) — agents never infer intent from the title. grounded=true makes an agent analyze the repo and propose a decomposition (REQUIRES spec and cwd); otherwise a quick single-step task is created (then propose/approve/run it).',
       inputSchema: z.object({
         title: z.string().min(1), spec: z.string().optional(),
         grounded: z.object({ modelRef: z.string().min(1), cwd: z.string().min(1) }).optional(),

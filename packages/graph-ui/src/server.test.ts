@@ -51,7 +51,7 @@ async function readSse(res: Response, until: (msg: { id: number; data: string })
 describe('graph-ui web adapter', () => {
   it('serves projects, graph snapshot, node detail, and 404s', async () => {
     const { storage, taskId, ui, base } = await setup()
-    expect(await (await fetch(`${base}/api/projects`)).json()).toEqual([{ id: TEST_PROJECT_ID, name: 'test-proj' }])
+    expect(await (await fetch(`${base}/api/projects`)).json()).toEqual([{ id: TEST_PROJECT_ID, name: 'test-proj', dir: null }])
     const g = await (await fetch(`${base}/api/graph?project=${TEST_PROJECT_ID}`)).json() as { seq: number; nodes: Array<{ id: string }> }
     expect(g.seq).toBeGreaterThan(0)
     expect(g.nodes.map(n => n.id)).toContain(taskId)
@@ -133,6 +133,68 @@ describe('graph-ui web adapter', () => {
     })
     expect(blocked.status).toBe(501)
     await ro.stop()
+  })
+
+  it('refuses cross-project mutations; newProject stays project-free', async () => {
+    const db = await createTestDb()
+    dbs.push(db)
+    const calls: string[] = []
+    const actions = {
+      approve: async (taskId: string) => { calls.push(`approve:${taskId}`); return { version: 1 } },
+      newProject: async (dir: string, name: string) => { calls.push(`newProject:${name}`); return { projectId: 'p2' } },
+    } as unknown as OrcActions
+    const ui = startGraphUi({ url: db.url, port: 0, cwdProject: { id: TEST_PROJECT_ID, name: 'home' }, actions })
+    const base = `http://127.0.0.1:${ui.port}`
+    const session = await (await fetch(`${base}/api/session`)).json() as { token: string; projectId: string }
+    expect(session.projectId).toBe(TEST_PROJECT_ID)
+
+    const post = (name: string, project: string, body: unknown) => fetch(`${base}/api/actions/${name}`, {
+      method: 'POST',
+      headers: { 'x-orc-token': session.token, 'x-orc-project': project },
+      body: JSON.stringify(body),
+    })
+
+    // foreign chat → 409 with guidance, action NOT executed
+    const blocked = await post('approve', 'some-other-project', { taskId: 't1' })
+    expect(blocked.status).toBe(409)
+    expect(((await blocked.json()) as { error: string }).error).toContain('home')
+    expect(calls).toEqual([])
+
+    // home chat → dispatched; newProject allowed from ANY chat
+    expect(((await (await post('approve', TEST_PROJECT_ID, { taskId: 't1' })).json()) as { version: number }).version).toBe(1)
+    expect((await post('newProject', 'some-other-project', { dir: '/tmp', name: 'fresh' })).status).toBe(200)
+    expect(calls).toEqual(['approve:t1', 'newProject:fresh'])
+    await ui.stop()
+  })
+
+  it('purgeProject resets the cached session — the next snapshot refolds from the empty log', async () => {
+    const db = await createTestDb()
+    dbs.push(db)
+    const storage = await openStorage(db.url, { projectId: TEST_PROJECT_ID })
+    await new Kernel(storage.events).createTask({ title: 'doomed', spec: '' })
+    const actions = {
+      purgeProject: async () => ({ ...(await storage.purge()), warnings: [] }),
+    } as unknown as OrcActions
+    const ui = startGraphUi({ url: db.url, port: 0, cwdProject: { id: TEST_PROJECT_ID, name: 'home' }, actions })
+    const base = `http://127.0.0.1:${ui.port}`
+    const session = await (await fetch(`${base}/api/session`)).json() as { token: string }
+
+    // session caches the task…
+    const before = await (await fetch(`${base}/api/graph?project=${TEST_PROJECT_ID}`)).json() as { nodes: unknown[] }
+    expect(before.nodes.length).toBeGreaterThan(0)
+
+    const purged = await fetch(`${base}/api/actions/purgeProject`, {
+      method: 'POST',
+      headers: { 'x-orc-token': session.token, 'x-orc-project': TEST_PROJECT_ID },
+      body: '{}',
+    })
+    expect(((await purged.json()) as { events: number }).events).toBeGreaterThan(0)
+
+    // …and after the purge the SAME endpoint serves the refolded (empty) world
+    const after = await (await fetch(`${base}/api/graph?project=${TEST_PROJECT_ID}`)).json() as { seq: number; nodes: unknown[] }
+    expect(after.nodes).toEqual([])
+    expect(after.seq).toBe(0)
+    await ui.stop(); await storage.close()
   })
 
   it('copilot endpoint streams text + usage; guarded like actions', async () => {

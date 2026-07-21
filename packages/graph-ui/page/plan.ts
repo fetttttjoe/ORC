@@ -238,7 +238,7 @@ export function renderRequest(ctx: RequestCtx): HTMLElement {
     if (plans.visual && plans.visual.version === active) {
       const diagram = el('div', { class: 'diagram' })
       void mermaidInto(diagram, plans.visual.mermaid)
-      out.append(Card(['plan graph'], diagram, renderWaves(plans.visual.waves)))
+      out.append(Card(['plan graph'], diagram, renderWaves(plans.visual.waves, id => ctx.go(stepNodeId(ctx.taskId, id)))))
     }
     const runOf = new Map(t.steps.map(s => [s.stepId, s]))
     for (const s of topoOrder(plan.steps)) {

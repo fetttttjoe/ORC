@@ -11,8 +11,10 @@ export interface Session {
   copilotModel: string | null
   token: string
   defaultCwd: string | null
+  projectId: string | null // the ONE project this server can mutate (null = read-only server)
+  bootedAt: string // server boot time — the page shows it so a stale process is visible
 }
-export interface Project { id: string; name: string | null }
+export interface Project { id: string; name: string | null; dir: string | null }
 export interface GraphSnapshot extends Graph { seq: number }
 export interface PlanStepView {
   id: string; title: string; role: string; instructions: string
@@ -49,7 +51,15 @@ interface ApiConfig { onError: (err: ApiError) => void }
 let config: ApiConfig = { onError: () => {} }
 export function initApi(c: ApiConfig): void { config = c }
 
-export let session: Session = { actions: false, copilot: false, copilotModel: null, token: '', defaultCwd: null }
+export let session: Session = { actions: false, copilot: false, copilotModel: null, token: '', defaultCwd: null, projectId: null, bootedAt: '' }
+
+// the chat the user is looking at — sent with every mutation so the server can refuse
+// cross-project writes instead of silently landing them in its own project
+let activeProject = ''
+export function setApiProject(projectId: string): void { activeProject = projectId }
+// mutations are allowed only in the server's own project chat — the page fences its buttons
+// with this, the server enforces the same rule on x-orc-project
+export const canAct = (): boolean => session.actions && activeProject === session.projectId
 
 // ---- plumbing ----
 const query = (params: Record<string, string | number | undefined>): string => {
@@ -78,7 +88,7 @@ async function get<T>(endpoint: string, params: Record<string, string | number |
 async function post<T>(endpoint: string, body: unknown): Promise<T> {
   const res = await fetch(`/api/${endpoint}`, {
     method: 'POST',
-    headers: { 'x-orc-token': session.token, 'content-type': 'application/json' },
+    headers: { 'x-orc-token': session.token, 'x-orc-project': activeProject, 'content-type': 'application/json' },
     body: JSON.stringify(body),
   })
   if (!res.ok) return fail(endpoint, res)
@@ -111,7 +121,7 @@ export const api = {
   },
 
   projects: () => get<Project[]>('projects', {}),
-  models: () => get<string[]>('models', {}),
+  models: (project?: string) => get<string[]>('models', { project }),
   graph: (project: string) => get<GraphSnapshot>('graph', { project }),
   node: (project: string, id: string) => get<unknown | null>('node', { project, id }, { nullOn404: true }),
   transcript: (project: string, task: string, step?: string) =>

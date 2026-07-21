@@ -20,6 +20,14 @@ read is event-sourced rather than guessed at. Every task is auditable,
 resumable, project-isolated, and visible through separate execution, lineage,
 and knowledge graphs.
 
+## Documentation
+
+- **[Roadmap: Implementation Plans](docs/plans/INDEX.md)** — 18 plans organized by milestone and feature area; approval status and cross-references to ADRs
+- **[Architecture](docs/ARCHITECTURE.md)** — System map, three-tier layers, storage boundary, knowledge vs audit split
+- **[Extending](docs/EXTENDING.md)** — Adding providers, executors, skills, tools, event kinds
+- **[ADRs](docs/)** — 8 durable architecture decision records
+- **[Ideas & Backlog](docs/IDEAS.md)** — Deferred features, research directions, future optimizations
+
 ## Stack
 
 TypeScript end-to-end on Bun (package manager, runtime, test runner).

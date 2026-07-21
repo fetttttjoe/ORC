@@ -102,6 +102,21 @@ export function renderDetail(nodeId: string, d: unknown, go: Go): HTMLElement {
       n.note.sources.length ? Card(['sources'], KV(n.note.sources.map(s => [s.title ?? 'link', s.url]))) : null,
     ))
   }
+  if (d !== null && typeof d === 'object' && 'ref' in d && 'totals' in d) {
+    const m = d as { ref: string; tasks: Array<{ taskId: string; title: string; status: string; calls: number; usage: { inputTokens: number; outputTokens: number; costUSD: number | null } }>; totals: { inputTokens: number; outputTokens: number; costUSD: number | null } }
+    return el('div', {}, Card([m.ref, Badge(`${m.tasks.length} task(s)`, 'accent')],
+      KV([
+        ['total tokens', `${m.totals.inputTokens} in / ${m.totals.outputTokens} out`],
+        ['total cost', m.totals.costUSD === null ? 'n/a' : `$${m.totals.costUSD.toFixed(4)}`],
+      ]),
+      ...m.tasks.map(t => Card([Link(t.title, () => go(t.taskId)), Badge(t.status, statusTone(t.status))],
+        KV([
+          ['calls', String(t.calls)],
+          ['tokens', `${t.usage.inputTokens} in / ${t.usage.outputTokens} out`],
+          ['cost', t.usage.costUSD === null ? 'n/a' : `$${t.usage.costUSD.toFixed(4)}`],
+        ]))),
+    ))
+  }
   if (d !== null && typeof d === 'object' && 'sha256' in d) {
     const a = d as ArtifactDetail
     const taskId = nodeId.split(':')[1] ?? ''

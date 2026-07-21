@@ -165,7 +165,7 @@ describe('Kernel lifecycle', () => {
     expect((await k.getTask(t.id))!.status).toBe(TASK_STATUS.approved)
   })
 
-  it('createGroundedTask uses its title as a blank spec for storage and analysis', async () => {
+  it('createGroundedTask stores the spec verbatim and hands it to the analyzer — the title never substitutes', async () => {
     const db = await createTestDb()
     dbs.push(db)
     const log = (await openStorage(db.url, { projectId: TEST_PROJECT_ID })).events
@@ -180,11 +180,11 @@ describe('Kernel lifecycle', () => {
     const k = new Kernel(log, undefined, analyzers)
 
     const task = await k.createGroundedTask({
-      title: 'Build the release notes', spec: '   ', modelRef: 'fake/m', analyzerRef: 'agent-analyzer',
+      title: 'release notes', spec: 'Summarize changes since v1.2 into notes.md', modelRef: 'fake/m', analyzerRef: 'agent-analyzer',
     })
 
-    expect((await k.getTask(task.id))?.spec).toBe('Build the release notes')
-    expect(analyzedSpec).toBe('Build the release notes')
+    expect((await k.getTask(task.id))?.spec).toBe('Summarize changes since v1.2 into notes.md')
+    expect(analyzedSpec).toBe('Summarize changes since v1.2 into notes.md')
   })
 
   it('createGroundedTask rolls back the task when plan reference validation fails', async () => {
@@ -208,6 +208,13 @@ describe('Kernel lifecycle', () => {
     dbs.push(db)
     const k = new Kernel((await openStorage(db.url, { projectId: TEST_PROJECT_ID })).events, undefined, new Map())
     expect(await codeOf(k.createGroundedTask({ title: 'x', spec: '', modelRef: 'fake/m', analyzerRef: 'ghost' }))).toBe(KERNEL_ERROR_CODE.invalid_transition)
+  })
+
+  it('createGroundedTask rejects an empty spec — the title is a label, never the goal', async () => {
+    const k = await freshKernel()
+    await expect(k.createGroundedTask({ title: 'test', spec: '  ', modelRef: 'fake/m', analyzerRef: 'agent-analyzer' }))
+      .rejects.toThrow(/grounded tasks need a spec/)
+    expect(await k.listTasks()).toEqual([]) // nothing committed, no analyze run wasted
   })
 
   it('proposeSplit: deterministic ids, inherited refs, clamped budget, manual gate parks the child', async () => {

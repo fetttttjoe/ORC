@@ -22,11 +22,18 @@ export interface OrcActions {
   annotate(taskId: string, noteId: string, text: string, refs?: string[]): Promise<{ noteId: string }>
   revise(taskId: string, text: string, scope: string[]): Promise<{ topic: string | null }>
   // project chat management: the display name is a memory note; a new project mints identity
-  // in the directory AND writes its name note as the first event, making it listable at once
+  // in the directory AND writes its name note as the first event, making it listable at once.
+  // A directory that already holds an orc project is REUSED (reused: true), never re-minted.
   renameProject(name: string): Promise<{ name: string }>
-  newProject(dir: string, name: string): Promise<{ projectId: string }>
+  newProject(dir: string, name: string): Promise<{ projectId: string; reused: boolean }>
   cancel(taskId: string): Promise<{
     swept: Array<{ id: string; scope: string; title: string }>
     sweepError: string | null // sweep is best-effort over a committed cancel — failures report, never throw
   }>
+  // destructive test-reset of the CURRENT project: erases pending durable-execution state
+  // (crashed runs included — nothing gets recovered into the fresh log), deletes its events +
+  // operation journal, and clears the memory read model; identity stays, so the chat survives
+  // empty. warnings report best-effort cleanup steps that failed — the log purge itself is
+  // committed once this resolves.
+  purgeProject(): Promise<{ events: number; operations: number; warnings: string[] }>
 }

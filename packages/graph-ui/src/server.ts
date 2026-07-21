@@ -1,7 +1,7 @@
 import { stepCountIs, streamText, type LanguageModel } from 'ai'
 import { z } from 'zod'
 import { PlanDraft } from '@orc/contracts'
-import { buildCopilotTools, copilotSystemPrompt, createProjectSessions, emptyPatch, type OrcActions, type ProjectSessions } from '@orc/ui-core'
+import { buildCopilotTools, copilotSystemPrompt, createProjectSessions, emptyPatch, type CopilotMode, type OrcActions, type ProjectSessions } from '@orc/ui-core'
 import index from '../page/index.html'
 
 export interface CopilotConfig {
@@ -62,7 +62,14 @@ const ACTION_ROUTES: Record<string, ActionHandler> = {
   ),
   renameProject: route(z.object({ name: z.string().min(1).max(80) }), (a, d) => a.renameProject(d.name)),
   newProject: route(z.object({ dir: id, name: z.string().min(1).max(80) }), (a, d) => a.newProject(d.dir, d.name)),
+  purgeProject: route(z.object({}), a => a.purgeProject()),
 }
+
+// actions execute against the ONE project this server was started in — except creating a new
+// project, which touches no existing state. Everything else in a foreign chat is a silent
+// cross-project write and must die loudly at this boundary.
+// ponytail: fence, not feature — per-project kernels/DBOS runtimes would lift it
+const PROJECT_FREE_ACTIONS = new Set(['newProject'])
 
 // Thin web adapter: JSON + SSE over ProjectSessions. Nothing here knows how graphs are
 // computed; a TUI adapter imports @orc/ui-core directly and never touches this file.
@@ -76,7 +83,7 @@ export interface GraphUiServer {
 export function startGraphUi(opts: {
   url: string
   port: number
-  cwdProject?: { id: string; name: string }
+  cwdProject?: { id: string; name: string; dir?: string }
   actions?: OrcActions // absent = read-only server (launched outside a project)
   copilot?: CopilotConfig
   defaultCwd?: string
@@ -85,6 +92,8 @@ export function startGraphUi(opts: {
   // CSRF guard: minted per boot, readable only same-origin (GET /api/session), required as a
   // custom header on every mutation — cross-origin pages can neither read nor send it.
   const token = crypto.randomUUID()
+  // shown in the page footer — makes a stale server process (old bundle, old routes) visible
+  const bootedAt = new Date().toISOString()
 
   // the copilot loop: same tools as the UI, streamed to the client part by part — every tool
   // call is visible, usage is priced through the same table as agent runs
@@ -100,12 +109,15 @@ export function startGraphUi(opts: {
     try { model = cfg.resolveModel(modelRef) } catch (err) {
       return Response.json({ error: err instanceof Error ? err.message : String(err) }, { status: 400 })
     }
-    const name = projectId === opts.cwdProject?.id ? opts.cwdProject.name : projectId.slice(0, 8)
+    const home = projectId === opts.cwdProject?.id
+    const name = home ? opts.cwdProject!.name : projectId.slice(0, 8)
+    // same fence as /api/actions: the copilot may only mutate the project it runs in
+    const mode: CopilotMode = opts.actions === undefined ? 'read-only' : home ? 'act' : 'foreign-project'
     const result = streamText({
       model,
-      system: copilotSystemPrompt(name, opts.actions !== undefined),
+      system: copilotSystemPrompt(name, mode),
       messages,
-      tools: buildCopilotTools({ sessions, actions: opts.actions ?? null, projectId, listModels: cfg.listModels }),
+      tools: buildCopilotTools({ sessions, actions: mode === 'act' ? opts.actions! : null, projectId, listModels: cfg.listModels }),
       stopWhen: stepCountIs(8),
     })
     const enc = new TextEncoder()
@@ -148,8 +160,16 @@ export function startGraphUi(opts: {
     if (req.headers.get('x-orc-token') !== token) return Response.json({ error: 'missing or invalid x-orc-token' }, { status: 403 })
     const handler: ActionHandler | undefined = ACTION_ROUTES[name]
     if (!handler) return Response.json({ error: `unknown action '${name}'` }, { status: 404 })
+    const claimed = req.headers.get('x-orc-project')
+    if (claimed && opts.cwdProject && claimed !== opts.cwdProject.id && !PROJECT_FREE_ACTIONS.has(name))
+      return Response.json({
+        error: `this chat is read-only — actions run in "${opts.cwdProject.name}" (where orc graph was started). Switch to that chat, or restart orc graph in this project's directory.`,
+      }, { status: 409 })
     try {
-      return await handler(opts.actions, await req.json().catch(() => null))
+      const res = await handler(opts.actions, await req.json().catch(() => null))
+      // a purge rewrote history behind the cached session — drop it so reads refold from the log
+      if (name === 'purgeProject' && res.ok && opts.cwdProject) await sessions.reset(opts.cwdProject.id)
+      return res
     } catch (err) {
       // kernel throws are user-actionable (stale version, unknown task, no open feedback)
       return Response.json({ error: err instanceof Error ? err.message : String(err) }, { status: 400 })
@@ -170,11 +190,19 @@ export function startGraphUi(opts: {
           copilotModel: opts.copilot?.defaultModelRef ?? null,
           token,
           defaultCwd: opts.defaultCwd ?? null,
+          // the ONE project this server can mutate — the page fences its buttons with it
+          projectId: opts.cwdProject?.id ?? null,
+          bootedAt,
         })
       case '/api/projects':
         return Response.json(await sessions.projects())
-      case '/api/models':
+      case '/api/models': {
+        // the event-sourced catalog first (works read-only, no provider APIs in the request
+        // path); live discovery as fallback and to seed the first catalog events
+        const catalog = project ? await sessions.modelCatalog(project) : []
+        if (catalog.length > 0) return Response.json(catalog)
         return Response.json(await opts.copilot?.listModels?.() ?? [])
+      }
       case '/api/graph': {
         const s = await sessions.snapshot(project)
         return Response.json({ seq: s.seq, nodes: s.graph.nodes, links: s.graph.links })
