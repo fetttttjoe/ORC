@@ -1,10 +1,24 @@
-import { EVENT_KIND, MemoryAccessedPayload, foldLiveNotes, noteKey, type EventRecord, type Plan } from '@orc/contracts'
+import { EVENT_KIND, MemoryAccessedPayload, ModelsDiscoveredPayload, addUsage, foldLiveNotes, noteKey, type EventRecord, type Plan, type Usage } from '@orc/contracts'
 import { fold, foldPlanNotes, listProjectIds, openStorage, planScope, taskUsage, type State, type Storage } from '@orc/kernel'
 import { NODE_PREFIX, buildGraph, diffGraphs, emptyPatch, type Graph, type GraphPatch } from './graph'
 import { decompositionMermaid, planMermaid, todoWaves, type TodoWave } from './diagram'
 
 // the project's display name lives in a memory note — event-sourced, rebuild-safe, no schema
 export const PROJECT_NAME_NOTE_ID = 'ui-project-name'
+// its working directory lives in a sibling note (title = absolute path) — feeds the new-chat
+// directory autocomplete and lets the UI say where a chat's project actually lives
+export const PROJECT_DIR_NOTE_ID = 'ui-project-dir'
+
+// latest models_discovered per provider IS the catalog (append-on-change upstream)
+export function foldModelCatalog(events: Array<Pick<EventRecord, 'kind' | 'payload'>>): Map<string, string[]> {
+  const catalog = new Map<string, string[]>()
+  for (const e of events) {
+    if (e.kind !== EVENT_KIND.models_discovered) continue
+    const p = ModelsDiscoveredPayload.safeParse(e.payload)
+    if (p.success) catalog.set(p.data.providerId, p.data.models)
+  }
+  return catalog
+}
 import { summarizeEvent, type LogRow } from './summarize'
 import { foldTranscript, type TranscriptItem } from './transcript'
 
@@ -17,7 +31,7 @@ export type Unsubscribe = () => void
 // callers get snapshots, per-event patches, catch-up patches, and node detail — never SQL,
 // never HTTP.
 export interface ProjectSessions {
-  projects(): Promise<Array<{ id: string; name: string | null }>>
+  projects(): Promise<Array<{ id: string; name: string | null; dir: string | null }>>
   snapshot(projectId: string): Promise<SessionSnapshot>
   // fires on EVERY event: the patch may be empty, the summary/log row is always present —
   // graph adapters filter on the patch, feed adapters (log, chat, TUI) consume the summary
@@ -25,6 +39,12 @@ export interface ProjectSessions {
   // catch-up for resume: one cumulative patch from a client's seq to now (null when current)
   since(projectId: string, fromSeq: number): Promise<SessionUpdate | null>
   nodeDetail(projectId: string, nodeId: string): Promise<unknown | null>
+  // event-sourced provider/model refs — [] until a discovery has been appended
+  modelCatalog(projectId: string): Promise<string[]>
+  // drop a cached session (after a purge): the next read refolds from the log. Live SSE
+  // subscribers of the old session go silent — the initiating client re-attaches itself;
+  // other tabs stay stale until their next reload.
+  reset(projectId: string): Promise<void>
   transcript(projectId: string, taskId: string, stepId?: string): Promise<TranscriptItem[]>
   taskPlans(projectId: string, taskId: string): Promise<{
     versions: Plan[]
@@ -51,7 +71,7 @@ interface Session {
 
 export function createProjectSessions(opts: {
   url: string
-  cwdProject?: { id: string; name: string }
+  cwdProject?: { id: string; name: string; dir?: string }
 }): ProjectSessions {
   const sessions = new Map<string, Promise<Session>>()
 
@@ -83,7 +103,12 @@ export function createProjectSessions(opts: {
 
   const sessionFor = (projectId: string): Promise<Session> => {
     let s = sessions.get(projectId)
-    if (!s) { s = open(projectId); sessions.set(projectId, s) }
+    if (!s) {
+      s = open(projectId)
+      sessions.set(projectId, s)
+      // a failed open must not brick the project until restart — drop it so the next call retries
+      s.catch(() => sessions.delete(projectId))
+    }
     return s
   }
 
@@ -91,16 +116,20 @@ export function createProjectSessions(opts: {
     async projects() {
       const ids = await listProjectIds(opts.url)
       return Promise.all(ids.map(async id => {
-        // a rename note (in already-open sessions) wins over the cwd config name; unopened
+        // notes (in already-open sessions) win over the cwd config values; unopened
         // foreign projects show a short id until first opened
         let name = id === opts.cwdProject?.id ? opts.cwdProject.name : null
+        let dir = id === opts.cwdProject?.id ? opts.cwdProject.dir ?? null : null
         const cached = sessions.get(id)
         if (cached) {
           const s = await cached.catch(() => null)
-          const note = s ? foldLiveNotes(s.events).get(noteKey('project', PROJECT_NAME_NOTE_ID)) : undefined
-          if (note) name = note.note.title
+          const live = s ? foldLiveNotes(s.events) : undefined
+          const nameNote = live?.get(noteKey('project', PROJECT_NAME_NOTE_ID))
+          if (nameNote) name = nameNote.note.title
+          const dirNote = live?.get(noteKey('project', PROJECT_DIR_NOTE_ID))
+          if (dirNote) dir = dirNote.note.title
         }
-        return { id, name }
+        return { id, name, dir }
       }))
     },
 
@@ -138,6 +167,29 @@ export function createProjectSessions(opts: {
         const [, taskId, ...pathParts] = nodeId.split(':')
         const path = pathParts.join(':') // artifact paths may contain ':'
         return (s.state.artifacts.get(taskId ?? '') ?? []).find(a => a.path === path) ?? null
+      }
+      if (nodeId.startsWith(NODE_PREFIX.model)) {
+        // performance lens: every task this model took over, with per-model usage summed from
+        // the agent_call events of exactly the steps that ran on it
+        const ref = nodeId.slice(NODE_PREFIX.model.length)
+        const zero: Usage = { inputTokens: 0, outputTokens: 0, costUSD: null, estimated: false }
+        const tasks: Array<{ taskId: string; title: string; status: string; calls: number; usage: Usage }> = []
+        for (const t of s.state.tasks.values()) {
+          const tp = s.state.plans.get(t.id)
+          const plan = tp?.approvedVersion != null ? tp.versions.find(v => v.version === tp.approvedVersion) : undefined
+          const stepIds = new Set((plan?.steps ?? []).filter(st => st.modelRef === ref).map(st => st.id))
+          if (stepIds.size === 0) continue
+          let usage = zero
+          let calls = 0
+          for (const e of s.events) {
+            if (e.kind !== EVENT_KIND.agent_call || e.taskId !== t.id || !e.stepId || !stepIds.has(e.stepId) || !e.usage) continue
+            usage = addUsage(usage, e.usage)
+            calls++
+          }
+          tasks.push({ taskId: t.id, title: t.title, status: t.status, calls, usage })
+        }
+        if (tasks.length === 0) return null
+        return { ref, tasks, totals: tasks.reduce((acc, t) => addUsage(acc, t.usage), zero) }
       }
       if (nodeId.startsWith(NODE_PREFIX.note)) {
         const key = nodeId.slice(NODE_PREFIX.note.length) // `${scope}\u0000${id}`
@@ -188,6 +240,19 @@ export function createProjectSessions(opts: {
       const s = await sessionFor(projectId)
       const notes = foldPlanNotes(s.events, planScope(taskId))
       return { notes, mermaid: notes.length > 0 ? decompositionMermaid(notes) : null }
+    },
+
+    async modelCatalog(projectId) {
+      const s = await sessionFor(projectId)
+      return [...foldModelCatalog(s.events).entries()].flatMap(([pid, models]) => models.map(m => `${pid}/${m}`)).sort()
+    },
+
+    async reset(projectId) {
+      const p = sessions.get(projectId)
+      if (!p) return
+      sessions.delete(projectId)
+      const s = await p.catch(() => null)
+      if (s) { await s.unsubscribe(); await s.storage.close() }
     },
 
     async log(projectId, opts = {}) {

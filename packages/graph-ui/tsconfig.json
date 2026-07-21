@@ -3,5 +3,5 @@
   "compilerOptions": {
     "lib": ["ESNext", "DOM", "DOM.Iterable"]
   },
-  "include": ["src", "page"]
+  "include": ["src", "page", "e2e", "playwright.config.ts"]
 }

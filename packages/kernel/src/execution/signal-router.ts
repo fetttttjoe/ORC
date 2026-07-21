@@ -21,6 +21,7 @@ const ROUTER_RELEVANT: Record<EventKind, boolean> = {
   signal_received: false, operation_started: false, operation_completed: false,
   operation_failed: false, artifact_produced: false, memory_deleted: false, memory_accessed: false,
   feedback_requested: false, feedback_provided: true, plan_annotated: false, analysis_completed: false,
+  models_discovered: false, // catalog metadata — nothing to route
 }
 const ROUTER_KINDS = EventKind.options.filter(k => ROUTER_RELEVANT[k])
 

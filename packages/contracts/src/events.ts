@@ -14,6 +14,14 @@ export const ArtifactProducedPayload = z.object({
 })
 export type ArtifactProducedPayload = z.infer<typeof ArtifactProducedPayload>
 
+// the provider's live catalog at discovery time — append-on-change only, so the latest event
+// per provider IS the catalog and history shows drift. Bounded: a catalog is not a blob dump.
+export const ModelsDiscoveredPayload = z.object({
+  providerId: z.string().min(1).max(64),
+  models: z.array(z.string().min(1).max(128)).max(500),
+})
+export type ModelsDiscoveredPayload = z.infer<typeof ModelsDiscoveredPayload>
+
 export const EventKind = z.enum([
   'task_created', 'plan_proposed', 'plan_edited', 'plan_approved', 'task_status_changed',
   'run_started', 'step_started', 'skill_loaded', 'agent_call', 'tool_call', 'tool_result',
@@ -21,6 +29,7 @@ export const EventKind = z.enum([
   'operation_started', 'operation_completed', 'operation_failed', 'artifact_produced',
   'memory_written', 'memory_deleted', 'memory_accessed',
   'feedback_requested', 'feedback_provided', 'plan_annotated', 'analysis_completed',
+  'models_discovered',
 ])
 export type EventKind = z.infer<typeof EventKind>
 
@@ -121,6 +130,7 @@ export const PAYLOAD_SCHEMAS = {
   feedback_provided: FeedbackProvidedPayload,
   plan_annotated: PlanAnnotatedPayload,
   analysis_completed: AnalysisCompletedPayload,
+  models_discovered: ModelsDiscoveredPayload,
 } satisfies Record<EventKind, z.ZodType>
 
 export const EventInput = z.object({

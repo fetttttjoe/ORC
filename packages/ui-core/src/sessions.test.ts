@@ -26,7 +26,7 @@ const noteEvent = (id: string) => ({
 describe('ProjectSessions', () => {
   it('projects() names the cwd project; snapshot holds the seeded task', async () => {
     const { storage, taskId, sessions } = await setup()
-    expect(await sessions.projects()).toEqual([{ id: TEST_PROJECT_ID, name: 'test-proj' }])
+    expect(await sessions.projects()).toEqual([{ id: TEST_PROJECT_ID, name: 'test-proj', dir: null }])
     const snap = await sessions.snapshot(TEST_PROJECT_ID)
     expect(snap.seq).toBeGreaterThan(0)
     expect(snap.graph.nodes.map(n => n.id)).toContain(taskId)

@@ -42,9 +42,12 @@ export const Empty = (text: string): HTMLElement => el('div', { class: 'empty' }
 export const Link = (label: string, onClick: () => void): HTMLElement =>
   el('a', { class: 'link', onClick }, label)
 
-// action button: disables itself while the handler runs; failures surface as toasts
+// action button: disables itself while the handler runs; failures surface as toasts.
+// type='button' — inside a <form>, the default type='submit' makes Enter "click" the first
+// button (implicit submission), which turned Enter-in-a-dialog into cancel.
 export const Btn = (label: string, onClick: () => Promise<void> | void, tone: Tone = 'accent'): HTMLElement => {
   const b = el('button', { class: `btn ${tone}` }, label)
+  b.type = 'button'
   b.addEventListener('click', () => {
     b.toggleAttribute('disabled', true)
     void Promise.resolve()
@@ -82,7 +85,9 @@ export interface DialogField {
 
 let datalistCounter = 0
 
-// native <dialog>: modal, esc-to-close, focus-trapped by the platform
+// native <dialog>: modal, esc-to-close, focus-trapped by the platform.
+// Submit failures render INSIDE the dialog — the modal lives in the browser top layer, so a
+// toast (or anything else in the page) can never appear above it.
 export function openDialog(
   title: string,
   fields: DialogField[],
@@ -91,6 +96,17 @@ export function openDialog(
 ): void {
   const inputs = new Map<string, HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>()
   const dlg = el('dialog', { class: 'dlg' })
+  const error = el('div', { class: 'dlg-error' })
+  const submitBtn = Btn(submitLabel, async () => {
+    error.textContent = ''
+    try {
+      await onSubmit(Object.fromEntries([...inputs].map(([name, input]) => [name, input.value])))
+    } catch (err) {
+      error.textContent = err instanceof Error ? err.message : String(err)
+      return // dialog stays open — the user reads the reason and fixes the input
+    }
+    dlg.close()
+  }) as HTMLButtonElement
   const form = el('form', {},
     el('div', { class: 'card-title' }, title),
     ...fields.map(f => {
@@ -112,15 +128,15 @@ export function openDialog(
       inputs.set(f.name, input)
       return el('label', { class: 'field' }, el('span', {}, f.label), input, datalist)
     }),
+    error,
     el('div', { class: 'dlg-buttons' },
       Btn('cancel', () => dlg.close(), 'muted'),
-      Btn(submitLabel, async () => {
-        await onSubmit(Object.fromEntries([...inputs].map(([name, input]) => [name, input.value])))
-        dlg.close()
-      }),
+      submitBtn,
     ),
   )
-  form.addEventListener('submit', ev => ev.preventDefault())
+  // Enter in a field submits the dialog (textareas keep Enter for newlines — implicit
+  // submission never fires from a textarea)
+  form.addEventListener('submit', ev => { ev.preventDefault(); submitBtn.click() })
   dlg.append(form)
   dlg.addEventListener('close', () => dlg.remove())
   document.body.append(dlg)

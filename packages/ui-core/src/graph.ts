@@ -3,9 +3,9 @@ import type { State } from '@orc/kernel'
 
 export interface GraphNode {
   id: string
-  type: 'task' | 'step' | 'artifact' | 'note'
+  type: 'task' | 'step' | 'artifact' | 'note' | 'model'
   label: string
-  detail: string // task: status; step: run status or 'pending'; artifact: size; note: kind
+  detail: string // task: status; step: run status or 'pending'; artifact: size; note: kind; model: provider
 }
 export interface GraphLink { source: string; target: string; type: string }
 export interface Graph { nodes: GraphNode[]; links: GraphLink[] }
@@ -22,11 +22,12 @@ export const emptyPatch = (p: GraphPatch): boolean =>
 
 // The graph vocabulary — every producer and consumer speaks through these, never literals.
 export const EDGE = {
-  child: 'child', plan: 'plan', depends: 'depends', out: 'out', wrote: 'wrote',
+  child: 'child', plan: 'plan', depends: 'depends', out: 'out', wrote: 'wrote', uses: 'uses',
 } as const
 export type EdgeType = (typeof EDGE)[keyof typeof EDGE]
 
-export const NODE_PREFIX = { step: 'step:', artifact: 'artifact:', note: 'note:' } as const
+export const NODE_PREFIX = { step: 'step:', artifact: 'artifact:', note: 'note:', model: 'model:' } as const
+export const modelNodeId = (ref: string): string => `${NODE_PREFIX.model}${ref}`
 
 export const stepNodeId = (taskId: string, id: string): string => `${NODE_PREFIX.step}${taskId}:${id}`
 export const artifactNodeId = (taskId: string, path: string): string => `${NODE_PREFIX.artifact}${taskId}:${path}`
@@ -55,6 +56,15 @@ export function buildGraph(state: State, events: Array<Pick<EventRecord, 'kind' 
       const id = artifactNodeId(t.id, a.path)
       nodes.push({ id, type: 'artifact', label: a.path, detail: `${a.size}B` })
       links.push({ source: a.stepId ? stepNodeId(t.id, a.stepId) : t.id, target: id, type: EDGE.out })
+    }
+    // which model took this task over — one shared node per ref, so the graph shows every
+    // task a model executed (the raw material for "was it a good choice")
+    for (const ref of new Set((plan?.steps ?? []).map(s => s.modelRef))) {
+      if (!nodes.some(n => n.id === modelNodeId(ref))) {
+        const slash = ref.indexOf('/')
+        nodes.push({ id: modelNodeId(ref), type: 'model', label: slash > 0 ? ref.slice(slash + 1) : ref, detail: slash > 0 ? ref.slice(0, slash) : '' })
+      }
+      links.push({ source: t.id, target: modelNodeId(ref), type: EDGE.uses })
     }
   }
   const live = foldLiveNotes(events)

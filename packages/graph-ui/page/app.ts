@@ -1,5 +1,5 @@
 import type { GraphLink, GraphNode, LogRow } from '@orc/ui-core'
-import { api, initApi, session, type Project } from './api'
+import { api, canAct, initApi, session, setApiProject, type Project } from './api'
 import { renderChat } from './chat'
 import { Conversation } from './conversation'
 import { renderDetail } from './detail'
@@ -105,7 +105,7 @@ function focusIds(taskId: string): Set<string> {
   }
   for (let pass = 0; pass < 3; pass++) // steps, then artifacts hanging off steps, then notes
     for (const l of links.values())
-      if ((l.type === EDGE.plan || l.type === EDGE.out || l.type === EDGE.wrote || l.type === EDGE.depends) && set.has(l.source)) set.add(l.target)
+      if ((l.type === EDGE.plan || l.type === EDGE.out || l.type === EDGE.wrote || l.type === EDGE.depends || l.type === EDGE.uses) && set.has(l.source)) set.add(l.target)
   const planPrefix = `${NODE_PREFIX.note}${planScopeName(taskId)}\u0000`
   for (const id of nodes.keys()) if (id.startsWith(planPrefix)) set.add(id)
   return set
@@ -116,7 +116,9 @@ const applyFocus = (): void => renderer.focus(focusedTask ? focusIds(focusedTask
 // ---- sidebar ----
 function setStatus(live: boolean, text: string): void {
   statusDot.className = `dot${live ? ' live' : ''}`
-  statusText.textContent = text
+  // the boot stamp makes a stale server process obvious (old process = old page bundle)
+  const up = session.bootedAt ? ` · up ${new Date(session.bootedAt).toLocaleTimeString()}` : ''
+  statusText.textContent = `${text}${up}`
 }
 
 function renderSidebar(): void {
@@ -140,7 +142,7 @@ function renderSidebar(): void {
 
 function renderChatManagement(): void {
   if (!session.actions) return
-  const renameBtn = Btn('rename chat', () => openDialog('rename this project chat', [
+  const renameBtn = canAct() ? Btn('rename chat', () => openDialog('rename this project chat', [
     { name: 'name', label: 'name', value: projects.find(p => p.id === sel.project)?.name ?? '' },
   ], 'rename', async v => {
     if (!v.name?.trim()) throw new Error('name is required')
@@ -148,40 +150,84 @@ function renderChatManagement(): void {
     toast('renamed', 'ok')
     projects = await api.projects()
     renderSidebar()
-  }), 'muted')
+  }), 'muted') : null
   const newChatBtn = Btn('+ new chat', () => openDialog('new project chat', [
     { name: 'name', label: 'name', placeholder: 'project name' },
-    { name: 'dir', label: 'directory', value: session.defaultCwd ?? '' },
+    {
+      name: 'dir', label: 'directory (existing orc projects are reopened)',
+      // placeholder, not value: a pre-filled input makes the datalist filter to itself
+      placeholder: session.defaultCwd ?? 'absolute path',
+      suggestions: knownDirs(),
+    },
   ], 'create', async v => {
-    if (!v.name?.trim() || !v.dir?.trim()) throw new Error('name and directory are required')
-    const { projectId } = await api.act<{ projectId: string }>('newProject', { dir: v.dir.trim(), name: v.name.trim() })
-    toast('project chat created', 'ok')
+    const dir = v.dir?.trim() || session.defaultCwd
+    if (!v.name?.trim() || !dir) throw new Error('name and directory are required')
+    const { projectId, reused } = await api.act<{ projectId: string; reused: boolean }>('newProject', { dir, name: v.name.trim() })
+    toast(reused ? 'existing project reopened as chat' : 'project chat created', 'ok')
     projects = await api.projects()
     navigate({ project: projectId, node: null, tab: 'detail' })
   }), 'muted')
-  newRequestHost.append(el('div', { class: 'row-split' }, newChatBtn, renameBtn))
+  // destructive test-reset: type the chat's name to confirm; failures render inside the dialog
+  const purgeBtn = canAct() ? Btn('purge', () => {
+    const name = projects.find(p => p.id === sel.project)?.name ?? sel.project.slice(0, 8)
+    openDialog(`purge “${name}” — cancels running work and deletes ALL requests, history, and knowledge; the empty chat stays`, [
+      { name: 'confirm', label: `type “${name}” to confirm`, placeholder: name },
+    ], 'purge', async v => {
+      if (v.confirm !== name) throw new Error('name does not match — not purging')
+      const r = await api.act<{ events: number; operations: number; warnings: string[] }>('purgeProject', {})
+      toast(`purged ${r.events} event(s)${r.warnings.length ? ` — ${r.warnings.join('; ')}` : ''}`, r.warnings.length ? 'warn' : 'ok')
+      // chat text is the USER'S (persists); the event narrative resets NOW, not at next reload
+      conversation?.reload()
+      projects = await api.projects()
+      await loadProject() // fresh snapshot + stream; seed over the empty log adds nothing
+      renderSidebar()
+    })
+  }, 'danger') : null
+  newRequestHost.append(el('div', { class: 'row-split' }, newChatBtn, renameBtn, purgeBtn))
 }
 
-let modelRefs: string[] = [] // live-discovered provider/model refs, fetched once at boot
+let modelRefs: string[] = [] // live-discovered provider/model refs, refreshed per project
+const refreshModels = (): void => {
+  void api.models(sel.project || undefined).then(refs => { modelRefs = refs }).catch(() => {})
+}
+// directories of every known project chat + the server's cwd — the new-chat autocomplete
+const knownDirs = (): string[] =>
+  [...new Set([session.defaultCwd, ...projects.map(p => p.dir)].filter((d): d is string => Boolean(d)))]
 
 function renderNewRequest(): void {
   if (!session.actions) { newRequestHost.replaceChildren(); return }
+  if (!canAct()) {
+    // foreign chat: requests would land in the server's project — the server refuses, we don't offer
+    const home = projects.find(p => p.id === session.projectId)?.name ?? 'the chat where orc graph runs'
+    newRequestHost.replaceChildren(Empty(`read-only chat — requests run in “${home}”`))
+    renderChatManagement()
+    return
+  }
   const b = Btn('+ new request', () => openDialog('new request', [
     { name: 'title', label: 'title', placeholder: 'what should happen?' },
     { name: 'spec', label: 'spec', kind: 'textarea', placeholder: 'details, constraints, outputs…' },
     {
       name: 'mode', label: 'mode', kind: 'select',
+      // grounded first = default: decomposition is the point of this tool; quick is the escape
+      // hatch for one-shot jobs, and its product is a template, not a plan
       options: [
-        { value: 'quick', label: 'quick — single-step template' },
-        { value: 'grounded', label: 'grounded — agent analyzes the repo and proposes a decomposition' },
+        { value: 'grounded', label: 'grounded — analyze the repo, decompose, review (recommended)' },
+        { value: 'quick', label: 'quick — ONE step running your spec verbatim (simple one-shot jobs)' },
       ],
     },
-    { name: 'model', label: 'model', value: session.copilotModel ?? '', suggestions: modelRefs },
-    { name: 'cwd', label: 'cwd (grounded)', value: session.defaultCwd ?? '' },
+    // placeholder, not value: a pre-filled input makes the datalist filter to itself —
+    // empty shows EVERY model, submit falls back to the default
+    { name: 'model', label: 'model', placeholder: session.copilotModel ?? 'provider/model', suggestions: modelRefs },
+    { name: 'cwd', label: 'cwd (grounded)', placeholder: session.defaultCwd ?? 'absolute path', suggestions: knownDirs() },
   ], 'create', async v => {
     if (!v.title?.trim()) throw new Error('title is required')
+    const model = v.model?.trim() || session.copilotModel
+    const cwd = v.cwd?.trim() || session.defaultCwd
+    if (v.mode === 'grounded' && !v.spec?.trim())
+      throw new Error('grounded requests need a spec — the title is only a label; state what should happen')
+    if (v.mode === 'grounded' && (!model || !cwd)) throw new Error('grounded requests need a model and a cwd')
     const body = v.mode === 'grounded'
-      ? { title: v.title, spec: v.spec, grounded: { modelRef: v.model, cwd: v.cwd } }
+      ? { title: v.title, spec: v.spec, grounded: { modelRef: model, cwd } }
       : { title: v.title, spec: v.spec }
     const { taskId } = await api.act<{ taskId: string }>('newTask', body)
     toast(v.mode === 'grounded' ? 'request created — analyze step running' : 'request created', 'ok')
@@ -208,7 +254,7 @@ async function renderInspector(): Promise<void> {
       if (!taskId) { inspectorBody.replaceChildren(Empty('select a task or step')); return }
       const step = sel.node?.startsWith(NODE_PREFIX.step) ? sel.node.split(':')[2] : undefined
       const items = await api.transcript(sel.project, taskId, step)
-      const onReply = session.actions
+      const onReply = canAct()
         ? async (text: string) => { await api.act('reply', { taskId, text }); toast('replied — step resuming', 'ok') }
         : null
       inspectorBody.replaceChildren(renderChat(items, onReply))
@@ -240,7 +286,7 @@ async function renderInspector(): Promise<void> {
         focused: focusedTask === taskId,
         go: node => navigate({ node, tab: 'detail' }),
         showVersion: v => { shownPlanVersion = v; void renderInspector() },
-        act: session.actions ? api.act : null,
+        act: canAct() ? api.act : null,
         onFocus: on => { focusedTask = on ? taskId : null; applyFocus(); void renderInspector() },
       }))
       return
@@ -298,17 +344,32 @@ async function loadProject(): Promise<void> {
   focusedTask = null
   renderer.focus(null)
   conversation?.setProject(sel.project)
+  // rebuild the chat's narrative from the log up to the snapshot; the stream takes over after
+  await conversation?.seed(g.seq)
   watch(g.seq)
 }
+
+// ---- boot ----
+// Order matters: session + conversation + projects FIRST, onChange registration LAST — its
+// immediate fire drives the first loadProject (deep links included), and everything it
+// touches must already exist. A null conversation here once swallowed the chat seed silently.
+initApi({ onError: err => toast(`${err.endpoint}: ${err.message}`, 'danger') })
+await api.initSession()
+conversation = new Conversation(node => navigate({ node, tab: 'detail' }))
+app.children[1]!.replaceWith(conversation.root)
+renderNewRequest()
+refreshModels()
+projects = await api.projects()
 
 onChange(s => {
   void (async () => {
     const projectChanged = s.project !== sel.project
     const nodeChanged = s.node !== sel.node
     sel = s
+    setApiProject(sel.project) // mutations carry the viewed project; the server fences mismatches
     app.className = `app view-${sel.view}`
     applyColumns()
-    if (projectChanged) { shownPlanVersion = null; await loadProject() }
+    if (projectChanged) { shownPlanVersion = null; renderNewRequest(); refreshModels(); await loadProject() }
     if (nodeChanged) shownPlanVersion = null
     renderer.select(sel.node)
     renderSidebar()
@@ -316,19 +377,5 @@ onChange(s => {
   })()
 })
 
-// ---- boot ----
-initApi({ onError: err => toast(`${err.endpoint}: ${err.message}`, 'danger') })
-await api.initSession()
-conversation = new Conversation(node => navigate({ node, tab: 'detail' }))
-app.children[1]!.replaceWith(conversation.root)
-renderNewRequest()
-void api.models().then(refs => { modelRefs = refs }).catch(() => {})
-projects = await api.projects()
-if (!current().project && projects[0]) {
-  navigate({ project: projects[0].id }) // triggers onChange
-} else if (current().project) {
-  renderSidebar()
-  conversation.setProject(current().project)
-} else {
-  projectList.append(Empty('no projects yet'))
-}
+if (!current().project && projects[0]) navigate({ project: projects[0].id }) // triggers onChange
+else if (!current().project) projectList.append(Empty('no projects yet'))

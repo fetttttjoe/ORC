@@ -46,7 +46,7 @@ describe('copilot tools', () => {
         { toolCalls: [{ toolCallId: 'c1', toolName: 'project_status', input: {} }] },
         { text: 'you have one draft task: build it' },
       ]),
-      system: copilotSystemPrompt('test', false),
+      system: copilotSystemPrompt('test', 'read-only'),
       messages: [{ role: 'user', content: 'what is going on?' }],
       tools,
       stopWhen: stepCountIs(3),

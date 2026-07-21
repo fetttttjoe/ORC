@@ -132,12 +132,12 @@ describe('exec commands', () => {
     spyOn(console, 'log').mockImplementation((...a: unknown[]) => { lines.push(a.join(' ')) })
     const run = async (...args: string[]) => buildProgram(kernel, async () => port).parseAsync(args, { from: 'user' })
 
-    await run('new', 'grounded task', '--strategy', 'grounded-plan', '--model', 'anthropic/claude-sonnet-5')
+    await run('new', 'grounded task', '--spec', 'analyze the repo and split the work', '--strategy', 'grounded-plan', '--model', 'anthropic/claude-sonnet-5')
     const taskId = lines[0]!
     const plan = await kernel.getPlan(taskId)
     expect(plan?.strategyRef).toBe('grounded-plan')
     expect(plan?.steps.map(s => s.id)).toEqual(['analyze', 'plan'])
-    expect((await kernel.getTask(taskId))?.spec).toBe('grounded task')
+    expect((await kernel.getTask(taskId))?.spec).toBe('analyze the repo and split the work')
     expect((await kernel.getTask(taskId))?.status).toBe('approved') // auto-approved (D9)
     expect(calls).toContain(`start:${taskId}:${process.cwd()}`) // grounded analysis starts at the project root
     expect(lines.join('\n')).toContain('run finished: done')

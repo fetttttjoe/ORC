@@ -51,6 +51,7 @@ const actions: OrcActions = {
   revise: unsupported('revise'),
   renameProject: unsupported('renameProject'),
   newProject: unsupported('newProject'),
+  purgeProject: unsupported('purgeProject'),
 }
 
 startGraphUi({

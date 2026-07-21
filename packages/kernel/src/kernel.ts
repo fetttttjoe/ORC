@@ -33,10 +33,15 @@ export class Kernel {
   // authors a plan-note graph and calls finalize_plan. Policy-approved because the human's real
   // gate is the conversational approve inside the plan step, not this scaffold.
   async createGroundedTask(input: { title: string; spec: string; modelRef: string; analyzerRef: string; budgetUSD?: number | null }): Promise<TaskNode> {
+    // the title is a LABEL, never the goal — a grounded run without intent would make the
+    // analyze/plan agents guess (burning an analyze pass on "what did you mean?")
+    const spec = input.spec.trim()
+    if (spec === '')
+      throw new KernelError(KERNEL_ERROR_CODE.invalid_transition,
+        'grounded tasks need a spec — the title is only a label. State the intent: what should happen, constraints, expected outputs.')
     const analyzer = this.analyzers?.get(input.analyzerRef)
     if (!analyzer)
       throw new KernelError(KERNEL_ERROR_CODE.invalid_transition, `unknown analyzer '${input.analyzerRef}' — register it or pass a valid analyzerRef`)
-    const spec = input.spec.trim() === '' ? input.title : input.spec
     return this.log.transaction(async tx => {
       const task = await this.createTaskIn(tx, { title: input.title, spec, type: 'grounded', budgetUSD: input.budgetUSD })
       const analyzeStep = analyzer.analysisStep({ modelRef: input.modelRef, taskSpec: spec })

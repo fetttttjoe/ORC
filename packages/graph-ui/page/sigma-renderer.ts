@@ -6,7 +6,7 @@ import type { Graph, GraphLink, GraphNode, GraphPatch } from '@orc/ui-core'
 import type { GraphRenderer } from './renderer'
 
 const COLORS: Record<GraphNode['type'], string> = {
-  task: '#7aa2f7', step: '#9ece6a', artifact: '#e0af68', note: '#bb9af7',
+  task: '#7aa2f7', step: '#9ece6a', artifact: '#e0af68', note: '#bb9af7', model: '#89dceb',
 }
 const EDGE_COLOR = '#3b3b47'
 const SETTLE_MS = 3_000 // keep the worker layout running this long after the last change

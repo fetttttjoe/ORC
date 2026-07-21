@@ -234,6 +234,7 @@ export function fold(events: EventRecord[]): State {
       case EVENT_KIND.memory_written:
       case EVENT_KIND.memory_deleted:
       case EVENT_KIND.memory_accessed:
+      case EVENT_KIND.models_discovered:
       case EVENT_KIND.feedback_requested:
       case EVENT_KIND.feedback_provided:
       case EVENT_KIND.plan_annotated:
