@@ -162,6 +162,8 @@ function renderChatManagement(): void {
   newRequestHost.append(el('div', { class: 'row-split' }, newChatBtn, renameBtn))
 }
 
+let modelRefs: string[] = [] // live-discovered provider/model refs, fetched once at boot
+
 function renderNewRequest(): void {
   if (!session.actions) { newRequestHost.replaceChildren(); return }
   const b = Btn('+ new request', () => openDialog('new request', [
@@ -174,7 +176,7 @@ function renderNewRequest(): void {
         { value: 'grounded', label: 'grounded — agent analyzes the repo and proposes a decomposition' },
       ],
     },
-    { name: 'model', label: 'model', value: 'anthropic/claude-haiku-4-5' },
+    { name: 'model', label: 'model', value: session.copilotModel ?? '', suggestions: modelRefs },
     { name: 'cwd', label: 'cwd (grounded)', value: session.defaultCwd ?? '' },
   ], 'create', async v => {
     if (!v.title?.trim()) throw new Error('title is required')
@@ -320,6 +322,7 @@ await api.initSession()
 conversation = new Conversation(node => navigate({ node, tab: 'detail' }))
 app.children[1]!.replaceWith(conversation.root)
 renderNewRequest()
+void api.models().then(refs => { modelRefs = refs }).catch(() => {})
 projects = await api.projects()
 if (!current().project && projects[0]) {
   navigate({ project: projects[0].id }) // triggers onChange

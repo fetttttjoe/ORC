@@ -57,6 +57,26 @@ describe('copilot tools', () => {
     expect(JSON.stringify(toolResults[0])).toContain('build it')
   })
 
+  it('available_models lists live refs and only exists when discovery is wired', async () => {
+    const tools = buildCopilotTools({
+      sessions: stubSessions, actions: null, projectId: 'p1',
+      listModels: async () => ['anthropic/claude-x', 'ollama/llama3.2:3b'],
+    })
+    expect(Object.keys(tools)).toContain('available_models')
+    expect(Object.keys(buildCopilotTools({ sessions: stubSessions, actions: null, projectId: 'p1' }))).not.toContain('available_models')
+    const result = await generateText({
+      model: scriptModel([
+        { toolCalls: [{ toolCallId: 'c1', toolName: 'available_models', input: {} }] },
+        { text: 'pick anthropic/claude-x' },
+      ]),
+      messages: [{ role: 'user', content: 'which models can I use?' }],
+      tools,
+      stopWhen: stepCountIs(3),
+    })
+    const toolResults = result.steps.flatMap(s => s.content.filter(c => c.type === 'tool-result'))
+    expect(JSON.stringify(toolResults[0])).toContain('ollama/llama3.2:3b')
+  })
+
   it('mutating tools call OrcActions; absent entirely without actions', async () => {
     const calls: unknown[] = []
     const actions = {
