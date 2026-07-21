@@ -48,6 +48,8 @@ export class Conversation {
   private readonly input = el('textarea', { class: 'conv-input' }) as HTMLTextAreaElement
   private projectId = ''
   private busy = false
+  private abort: AbortController | null = null
+  private readonly sendBtn = Btn('send', () => this.sendOrStop())
   private readonly goNode: (node: string) => void
 
   constructor(goNode: (node: string) => void) {
@@ -55,15 +57,19 @@ export class Conversation {
     this.input.placeholder = 'ask the copilot — it can read state, create requests, approve, run…'
     this.input.rows = 2
     this.input.addEventListener('keydown', ev => {
-      if (ev.key === 'Enter' && !ev.shiftKey) { ev.preventDefault(); void this.send() }
+      if (ev.key === 'Enter' && !ev.shiftKey) { ev.preventDefault(); void this.sendOrStop() }
     })
-    const sendBtn = Btn('send', () => this.send())
     this.root.append(
       this.list,
       session.copilot
-        ? el('div', { class: 'conv-inputrow' }, this.input, sendBtn)
+        ? el('div', { class: 'conv-inputrow' }, this.input, this.sendBtn)
         : el('div', { class: 'conv-inputrow' }, Empty('copilot unavailable — start orc graph inside a project')),
     )
+  }
+
+  private sendOrStop(): Promise<void> | void {
+    if (this.busy) { this.abort?.abort(); return }
+    return this.send()
   }
 
   setProject(projectId: string): void {
@@ -150,6 +156,9 @@ export class Conversation {
     const text = this.input.value.trim()
     if (!text || this.busy || !this.projectId) return
     this.busy = true
+    this.abort = new AbortController()
+    this.sendBtn.textContent = 'stop'
+    this.sendBtn.classList.add('danger')
     this.input.value = ''
     const messages = [...this.history(), { role: 'user' as const, content: text }]
     this.saveHistory(messages)
@@ -190,14 +199,21 @@ export class Conversation {
       this.scroll()
     }
     try {
-      await api.copilot({ projectId: this.projectId, messages: messages.slice(-HISTORY_LIMIT) }, onPart)
+      await api.copilot({ projectId: this.projectId, messages: messages.slice(-HISTORY_LIMIT) }, onPart, this.abort.signal)
       if (answer) this.saveHistory([...messages, { role: 'assistant', content: answer }])
-    } catch {
-      // the api layer already routed the error to the configured handler
+    } catch (err) {
+      if (err instanceof DOMException && err.name === 'AbortError') {
+        assistant.append(' ⏹')
+        if (answer) this.saveHistory([...messages, { role: 'assistant', content: `${answer} (aborted)` }])
+      }
+      // other failures were already routed to the configured error handler by the api layer
     } finally {
       assistant.classList.remove('streaming')
       if (!assistant.textContent) assistant.remove()
       this.busy = false
+      this.abort = null
+      this.sendBtn.textContent = 'send'
+      this.sendBtn.classList.remove('danger')
       this.scroll()
     }
   }

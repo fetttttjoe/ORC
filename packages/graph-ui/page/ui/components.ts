@@ -55,11 +55,18 @@ export const Btn = (label: string, onClick: () => Promise<void> | void, tone: To
   return b
 }
 
+const recentToasts = new Map<string, number>()
 export function toast(text: string, tone: Tone = 'default'): void {
+  // identical messages within 3s collapse to one — a failing stream must not bury the page
+  const now = Date.now()
+  const last = recentToasts.get(text)
+  if (last !== undefined && now - last < 3_000) return
+  recentToasts.set(text, now)
   let host = document.querySelector('.toasts')
   if (!host) { host = el('div', { class: 'toasts' }); document.body.append(host) }
   const t = el('div', { class: `toast ${tone}` }, text)
   host.append(t)
+  while (host.childElementCount > 4) host.firstElementChild!.remove()
   setTimeout(() => t.remove(), 4_000)
 }
 

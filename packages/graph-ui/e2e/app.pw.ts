@@ -24,6 +24,14 @@ test('request click opens the inspector journey; view modes switch', async ({ pa
   await expect(page.locator('.conv')).toBeVisible()
 })
 
+test('conversation list is scrollable (flex min-height regression)', async ({ page }) => {
+  await page.goto('/')
+  const conv = page.locator('.conv-list')
+  expect(await conv.evaluate(n => getComputedStyle(n).overflowY)).toBe('auto')
+  expect(await conv.evaluate(n => getComputedStyle(n).minHeight)).toBe('0px')
+  expect(await conv.evaluate(n => getComputedStyle(n.parentElement!).minHeight)).toBe('0px')
+})
+
 test('copilot exchange streams into the conversation', async ({ page }) => {
   await page.goto('/')
   const input = page.locator('.conv-input')

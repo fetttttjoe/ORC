@@ -122,12 +122,18 @@ export const api = {
 
   act: <T = unknown>(name: string, body: unknown) => post<T>(`actions/${name}`, body),
 
-  // copilot exchange: streams typed parts to the handler; resolves when the stream closes
-  async copilot(body: { projectId: string; modelRef?: string; messages: Array<{ role: 'user' | 'assistant'; content: string }> }, onPart: (part: CopilotPart) => void): Promise<void> {
+  // copilot exchange: streams typed parts to the handler; resolves when the stream closes.
+  // The signal aborts mid-stream (the server loop dies with the connection).
+  async copilot(
+    body: { projectId: string; modelRef?: string; messages: Array<{ role: 'user' | 'assistant'; content: string }> },
+    onPart: (part: CopilotPart) => void,
+    signal?: AbortSignal,
+  ): Promise<void> {
     const res = await fetch('/api/copilot', {
       method: 'POST',
       headers: { 'x-orc-token': session.token, 'content-type': 'application/json' },
       body: JSON.stringify(body),
+      signal,
     })
     if (!res.ok) return fail('copilot', res)
     await readSse(res, data => onPart(JSON.parse(data) as CopilotPart))

@@ -189,8 +189,10 @@ input, textarea, select, button { font: var(--font) }
 .dlg-buttons { display: flex; justify-content: flex-end; gap: 8px; margin-top: 6px }
 
 /* ─── Conversation (center) ─────────────────────────────────────────────────── */
-.conv { display: flex; flex-direction: column; min-width: 0; background: var(--bg) }
-.conv-list { flex: 1; overflow-y: auto; padding: 22px 26px; display: flex; flex-direction: column; gap: 9px }
+/* min-height 0: grid/flex children refuse to shrink without it, which silently kills
+   overflow scrolling (the "chat not scrollable" class of bug) */
+.conv { display: flex; flex-direction: column; min-width: 0; min-height: 0; background: var(--bg) }
+.conv-list { flex: 1; min-height: 0; overflow-y: auto; padding: 22px 26px; display: flex; flex-direction: column; gap: 9px }
 .bubble {
   max-width: 74%; padding: 10px 14px; border-radius: 16px; white-space: pre-wrap; word-break: break-word;
   background: var(--surface-2); border: 1px solid var(--border-soft); box-shadow: var(--shadow-1);
