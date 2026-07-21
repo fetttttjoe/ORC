@@ -13,6 +13,7 @@ export function copilotSystemPrompt(projectName: string, canAct: boolean): strin
     `You are the orc copilot for the project "${projectName}" — a guide through a multi-agent orchestrator.`,
     `Requests (tasks) move through: draft → plan proposed → approved (human gate) → running steps → done, with verified output artifacts and a growing knowledge graph of memory notes.`,
     `Ground every answer in tool reads — never invent task ids, statuses, or content. Read before you act.`,
+    `Model refs have the form provider/model (e.g. anthropic/…). Call available_models before choosing one — never guess a ref.`,
     canAct
       ? `You may execute actions (create requests, propose, approve, run, reply, refine plans). Confirm with the user before cancel. Prefer grounded requests for repo work (the agent analyzes the codebase first); quick requests for simple one-shot jobs. After acting, state what you did and what happens next.`
       : `This session is read-only: explain state and suggest the CLI commands the user could run.`,
@@ -26,11 +27,19 @@ export function buildCopilotTools(deps: {
   sessions: ProjectSessions
   actions: OrcActions | null
   projectId: string
+  listModels?: () => Promise<string[]>
 }): ToolSet {
-  const { sessions, actions, projectId } = deps
+  const { sessions, actions, projectId, listModels } = deps
   const taskId = z.string().min(1)
 
   const read: ToolSet = {
+    ...(listModels ? {
+      available_models: tool({
+        description: 'List every usable model ref (provider/model), fetched live from the providers. ALWAYS call this before choosing a modelRef — never invent one.',
+        inputSchema: z.object({}),
+        execute: async () => ({ refs: await listModels() }),
+      }),
+    } : {}),
     project_status: tool({
       description: 'List every request (task) in this project with its status, plus graph counts. Start here.',
       inputSchema: z.object({}),

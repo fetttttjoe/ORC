@@ -75,9 +75,12 @@ export interface DialogField {
   label: string
   kind?: 'text' | 'textarea' | 'select'
   options?: Array<{ value: string; label: string }>
+  suggestions?: string[] // native <datalist> autocompletion for text fields
   value?: string
   placeholder?: string
 }
+
+let datalistCounter = 0
 
 // native <dialog>: modal, esc-to-close, focus-trapped by the platform
 export function openDialog(
@@ -98,8 +101,16 @@ export function openDialog(
         input.value = f.value ?? ''
         input.placeholder = f.placeholder ?? ''
       }
+      let datalist: HTMLElement | null = null
+      if (f.suggestions?.length && input instanceof HTMLInputElement) {
+        const listId = `dl-${++datalistCounter}`
+        input.setAttribute('list', listId)
+        datalist = el('datalist', {})
+        datalist.id = listId
+        for (const s of f.suggestions) datalist.append(new Option('', s))
+      }
       inputs.set(f.name, input)
-      return el('label', { class: 'field' }, el('span', {}, f.label), input)
+      return el('label', { class: 'field' }, el('span', {}, f.label), input, datalist)
     }),
     el('div', { class: 'dlg-buttons' },
       Btn('cancel', () => dlg.close(), 'muted'),

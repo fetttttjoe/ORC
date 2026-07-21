@@ -24,8 +24,21 @@ function buildCopilotConfig(config: ProjectConfig) {
     if (!p) throw new Error(`unknown provider '${providerId}'`)
     return { p, modelId }
   }
+  // live discovery across every registered provider, as refs — cached briefly so pickers and
+  // the copilot tool don't hammer three APIs per keystroke
+  let modelCache: { at: number; refs: string[] } | null = null
+  const listModels = async (): Promise<string[]> => {
+    if (modelCache && Date.now() - modelCache.at < 300_000) return modelCache.refs
+    const refs = (await Promise.all([...providers.entries()].map(async ([pid, p]) => {
+      const ids = p.listModels ? await p.listModels() : Object.keys(p.costs).filter(k => k !== '*')
+      return ids.map(id => `${pid}/${id}`)
+    }))).flat().sort()
+    modelCache = { at: Date.now(), refs }
+    return refs
+  }
   return {
     defaultModelRef: 'anthropic/claude-haiku-4-5',
+    listModels,
     resolveModel: (ref: string) => {
       const { p, modelId } = providerFor(ref)
       const model = p.languageModel(modelId)

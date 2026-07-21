@@ -111,6 +111,7 @@ export const api = {
   },
 
   projects: () => get<Project[]>('projects', {}),
+  models: () => get<string[]>('models', {}),
   graph: (project: string) => get<GraphSnapshot>('graph', { project }),
   node: (project: string, id: string) => get<unknown | null>('node', { project, id }, { nullOn404: true }),
   transcript: (project: string, task: string, step?: string) =>

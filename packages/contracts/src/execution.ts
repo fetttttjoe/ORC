@@ -114,6 +114,10 @@ export type UnifiedEvent = z.infer<typeof UnifiedEvent>
 export interface ModelProvider<LM = unknown> {
   costs: Record<string, ModelCost>
   languageModel(modelId: string): LM
+  // live model discovery, plugin-driven: each provider queries its own API. Optional — callers
+  // fall back to the cost-table keys. Implementations must resolve (never reject) with [] or a
+  // static fallback when the API is unreachable: discovery is a convenience, not a dependency.
+  listModels?(): Promise<string[]>
 }
 
 // the ONE parse of 'provider/model' refs — resolveModel and plan validation must agree

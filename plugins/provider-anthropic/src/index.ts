@@ -22,6 +22,27 @@ function useOAuth(): boolean {
   return Boolean(process.env.CLAUDE_CODE_OAUTH_TOKEN)
 }
 
+// live model discovery — works on both auth paths; falls back to the cost-table ids offline.
+// fetch is injectable for tests.
+export async function listAnthropicModels(fetchImpl: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response> = fetch): Promise<string[]> {
+  try {
+    const headers: Record<string, string> = { 'anthropic-version': '2023-06-01' }
+    if (useOAuth()) {
+      headers.authorization = `Bearer ${await loadOAuthToken()}`
+      headers['anthropic-beta'] = 'oauth-2025-04-20'
+    } else {
+      headers['x-api-key'] = process.env.ANTHROPIC_API_KEY ?? ''
+    }
+    const res = await fetchImpl('https://api.anthropic.com/v1/models?limit=100', { headers })
+    if (!res.ok) return Object.keys(COSTS)
+    const body = await res.json() as { data?: Array<{ id?: string }> }
+    const ids = (body.data ?? []).map(m => m.id).filter((id): id is string => typeof id === 'string')
+    return ids.length > 0 ? ids : Object.keys(COSTS)
+  } catch {
+    return Object.keys(COSTS)
+  }
+}
+
 export function createAnthropicProvider(
   costOverrides: Record<string, ModelCost> = {},
 ): ModelProvider<LanguageModel> {
@@ -36,5 +57,6 @@ export function createAnthropicProvider(
   return {
     costs: { ...COSTS, ...costOverrides },
     languageModel: modelId => anthropic(modelId),
+    listModels: () => listAnthropicModels(),
   }
 }

@@ -7,6 +7,7 @@ import index from '../page/index.html'
 export interface CopilotConfig {
   resolveModel: (ref: string) => LanguageModel // throws for unknown provider/model
   defaultModelRef: string
+  listModels?: () => Promise<string[]> // live provider/model refs for pickers + the copilot
   price?: (ref: string, usage: { inputTokens?: number; outputTokens?: number; inputTokenDetails?: { cacheReadTokens?: number; cacheWriteTokens?: number } }) => number | null
 }
 
@@ -104,7 +105,7 @@ export function startGraphUi(opts: {
       model,
       system: copilotSystemPrompt(name, opts.actions !== undefined),
       messages,
-      tools: buildCopilotTools({ sessions, actions: opts.actions ?? null, projectId }),
+      tools: buildCopilotTools({ sessions, actions: opts.actions ?? null, projectId, listModels: cfg.listModels }),
       stopWhen: stepCountIs(8),
     })
     const enc = new TextEncoder()
@@ -172,6 +173,8 @@ export function startGraphUi(opts: {
         })
       case '/api/projects':
         return Response.json(await sessions.projects())
+      case '/api/models':
+        return Response.json(await opts.copilot?.listModels?.() ?? [])
       case '/api/graph': {
         const s = await sessions.snapshot(project)
         return Response.json({ seq: s.seq, nodes: s.graph.nodes, links: s.graph.links })
