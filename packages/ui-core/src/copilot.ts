@@ -16,6 +16,8 @@ export function copilotSystemPrompt(projectName: string, canAct: boolean): strin
     canAct
       ? `You may execute actions (create requests, propose, approve, run, reply, refine plans). Confirm with the user before cancel. Prefer grounded requests for repo work (the agent analyzes the codebase first); quick requests for simple one-shot jobs. After acting, state what you did and what happens next.`
       : `This session is read-only: explain state and suggest the CLI commands the user could run.`,
+    `When the user names a folder/repository to work on, that ABSOLUTE path is the cwd: pass it as grounded.cwd (grounded requests) or as run's cwd — the agents' file tools are scoped to that directory. Never run repo work in a different cwd.`,
+    `A quick request is only runnable after propose → approve (the human gate): create it, propose a plan, then ASK the user to review before you approve — unless they already told you to proceed fully.`,
     `Be concise. When the user is unsure, propose a concrete next move.`,
   ].join('\n')
 }
