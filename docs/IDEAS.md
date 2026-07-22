@@ -247,11 +247,11 @@ Three things worth keeping:
 2. **Reciprocal Rank Fusion.** Merge N ranked lists by summing `1/(60 + rank)`.
    Eight lines, no dependency, and it uses only ordinal position — so a
    substring-relevance rank and a graph-distance rank fuse without being
-   commensurable. Nothing to fuse yet: `surreal.ts` `search()` orders by
-   `updatedAt DESC` and relevance plays no part, so under budget pressure
-   `memory_search` returns the most recently *updated* matches, not the best
-   ones. Defensible while recency proxies currency in a `supersedes` graph.
-   Build RRF only when a second ranking signal actually exists.
+   commensurable. TRIGGER ARMED 2026-07-22: `surreal.ts` `search()` now ranks
+   by field-weighted term relevance (+ durable-scope boost) with recency as
+   tie-break only — the second ranking signal exists, so RRF graduates the
+   moment search relevance and graph distance need combining in one result
+   (e.g. neighbors-aware search). Until a call site wants the fusion, hold.
 3. **Calibrate the estimator, never replace it.** `budget.ts`'s `approxTokens`
    is chars/4 with a ponytail comment saying "swap for a real tokenizer only if
    it misbudgets". Their pattern is strictly better: keep chars/4 in the hot
