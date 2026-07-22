@@ -3,7 +3,7 @@
 // ponytail: read-only console scoreboard; add JSON output when something consumes it.
 import { execSync } from 'node:child_process'
 // ponytail: relative imports — bench/ is not a workspace package and doesn't need to be
-import { MemoryScope } from '../packages/contracts/src/index.ts'
+import { LinkKind, MemoryScope } from '../packages/contracts/src/index.ts'
 import { loadConfig, openStorage, requireProject } from '../packages/kernel/src/index.ts'
 import { createMemory } from '../plugins/memory/src/index.ts'
 import probes from './probes.json'
@@ -44,7 +44,7 @@ for (const p of probes.search) {
 
 console.log('')
 for (const p of probes.neighbors) {
-  const ns = await memory.store.neighbors(p.seed, { kinds: p.kinds as never })
+  const ns = await memory.store.neighbors(p.seed, { kinds: p.kinds?.map(k => LinkKind.parse(k)) })
   const ids = new Set(ns.map(n => n.id))
   const missing = p.expectMin.filter(id => !ids.has(id))
   const scores = ns.map(n => n.score)
