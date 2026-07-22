@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'bun:test'
 import { EVENT_KIND, LINK_KIND, type EventRecord, type MemoryLink, type MemoryNote } from '@orc/contracts'
-import { foldPlanNotes, instantiateFrozenPlan, planScope } from './grounded-plan'
+import { AUDITOR_CONTRACT, foldPlanNotes, instantiateFrozenPlan, planScope } from './grounded-plan'
 import * as groundedPlan from './grounded-plan'
 
 const note = (over: Partial<MemoryNote> & { id: string }): MemoryNote => ({
@@ -62,6 +62,10 @@ describe('instantiateFrozenPlan (pure, deterministic)', () => {
     const draft = instantiateFrozenPlan('masterplan', notes)
     expect(draft.steps.find(s => s.id === 'verify')!.role).toBe('auditor')
     expect(draft.steps.find(s => s.id === 'work')!.role).toBe('implementer')
+    // the auditor contract is frozen into the verify step's instructions — plan-approved, not
+    // injected as executor policy; implementer siblings never carry it
+    expect(draft.steps.find(s => s.id === 'verify')!.instructions).toBe(`audit it\n\n${AUDITOR_CONTRACT}`)
+    expect(draft.steps.find(s => s.id === 'work')!.instructions).toBe('do it')
   })
 
   it('is a pure function of the notes: same input → identical output', () => {
