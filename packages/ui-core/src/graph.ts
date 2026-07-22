@@ -27,12 +27,19 @@ export const EDGE = {
 export type EdgeType = (typeof EDGE)[keyof typeof EDGE]
 
 export const NODE_PREFIX = { step: 'step:', artifact: 'artifact:', note: 'note:', model: 'model:' } as const
+
+// project-chat metadata notes (display name, working directory) — infrastructure, not
+// knowledge. Hidden from the graph and the chat narrative; fully present in the log/replay.
+export const PROJECT_NAME_NOTE_ID = 'ui-project-name'
+export const PROJECT_DIR_NOTE_ID = 'ui-project-dir'
+const UI_META_NOTE_IDS = new Set<string>([PROJECT_NAME_NOTE_ID, PROJECT_DIR_NOTE_ID])
+export const isUiMetaNote = (scope: string, id: string): boolean => scope === 'project' && UI_META_NOTE_IDS.has(id)
 export const modelNodeId = (ref: string): string => `${NODE_PREFIX.model}${ref}`
 
 export const stepNodeId = (taskId: string, id: string): string => `${NODE_PREFIX.step}${taskId}:${id}`
 export const artifactNodeId = (taskId: string, path: string): string => `${NODE_PREFIX.artifact}${taskId}:${path}`
 export const noteNodeId = (scope: string, id: string): string => `${NODE_PREFIX.note}${noteKey(scope, id)}`
-export const planScopeName = (taskId: string): string => `plan-${taskId}`
+
 
 // The ONE events→graph projection. Every full load and (via diffGraphs) every patch comes from
 // here, so no consumer can ever see a graph this function would not produce.
@@ -69,12 +76,19 @@ export function buildGraph(state: State, events: Array<Pick<EventRecord, 'kind' 
   }
   const live = foldLiveNotes(events)
   for (const { note, author } of live.values()) {
+    if (isUiMetaNote(note.scope, note.id)) continue // chat metadata is not knowledge
     nodes.push({ id: noteNodeId(note.scope, note.id), type: 'note', label: note.title, detail: note.kind })
     if (author.taskId && state.tasks.has(author.taskId))
       links.push({ source: author.taskId, target: noteNodeId(note.scope, note.id), type: EDGE.wrote })
-    for (const l of note.links)
-      if (live.has(noteKey(note.scope, l.id))) // links resolve same-scope, system-wide semantics
-        links.push({ source: noteNodeId(note.scope, note.id), target: noteNodeId(note.scope, l.id), type: l.kind })
+    for (const l of note.links) {
+      // links resolve same-scope (system-wide semantics); for the HUMAN view only, an
+      // unresolved link falls back to the project scope — plan subplans wire visibly into
+      // the knowledge map (derived_from arch-overview/area-*) instead of dangling invisibly.
+      // Agent traversal (memory_neighbors) keeps strict scoping.
+      const targetScope = live.has(noteKey(note.scope, l.id)) ? note.scope
+        : live.has(noteKey('project', l.id)) ? 'project' : null
+      if (targetScope) links.push({ source: noteNodeId(note.scope, note.id), target: noteNodeId(targetScope, l.id), type: l.kind })
+    }
   }
   return { nodes, links }
 }

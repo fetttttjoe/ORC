@@ -9,7 +9,6 @@
   "dependencies": {
     "@orc/contracts": "workspace:*",
     "@orc/kernel": "workspace:*",
-    "@orc/vault-projector": "workspace:*",
     "ai": "^7.0.30",
     "zod": "^4.4.3"
   }

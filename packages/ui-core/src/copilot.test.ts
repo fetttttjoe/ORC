@@ -3,7 +3,7 @@ import { generateText, stepCountIs } from 'ai'
 import { MockLanguageModelV4 } from 'ai/test'
 import type { OrcActions } from './actions'
 import type { ProjectSessions } from './sessions'
-import { buildCopilotTools, copilotSystemPrompt } from './copilot'
+import { asResolvedTools, buildCopilotTools, copilotSystemPrompt } from './copilot'
 
 // minimal scripted model (doGenerate shape verified in plugins/executor-api-loop/src/test-model.ts)
 function scriptModel(turns: Array<{ text?: string; toolCalls?: Array<{ toolCallId: string; toolName: string; input: unknown }> }>) {
@@ -55,6 +55,24 @@ describe('copilot tools', () => {
     const toolResults = result.steps.flatMap(s => s.content.filter(c => c.type === 'tool-result'))
     expect(toolResults).toHaveLength(1)
     expect(JSON.stringify(toolResults[0])).toContain('build it')
+  })
+
+  it('asResolvedTools reshapes the copilot toolset for door #2: JSON schemas + {output,isError}', async () => {
+    const tools = asResolvedTools(buildCopilotTools({ sessions: stubSessions, actions: null, projectId: 'p1' }))
+    const status = tools.find(t => t.name === 'project_status')!
+    expect((status.inputSchema as { type?: string }).type).toBe('object')
+    expect((status.inputSchema as { $schema?: string }).$schema).toBeUndefined() // stripped for MCP
+    const r = await status.execute({}, undefined)
+    expect(r.isError).toBe(false)
+    expect(r.output).toHaveProperty('tasks')
+  })
+
+  it('the human gate is structural: no approve tool even with actions wired', () => {
+    const acting = buildCopilotTools({ sessions: stubSessions, actions: {} as never, projectId: 'p1' })
+    expect(Object.keys(acting)).toContain('run')
+    expect(Object.keys(acting)).toContain('reply')
+    expect(Object.keys(acting)).not.toContain('approve')
+    expect(copilotSystemPrompt('proj', 'act')).toContain('HUMAN-ONLY')
   })
 
   it('available_models lists live refs and only exists when discovery is wired', async () => {

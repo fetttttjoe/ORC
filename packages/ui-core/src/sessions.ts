@@ -1,13 +1,10 @@
-import { EVENT_KIND, MemoryAccessedPayload, ModelsDiscoveredPayload, addUsage, foldLiveNotes, noteKey, type EventRecord, type Plan, type Usage } from '@orc/contracts'
-import { fold, foldPlanNotes, listProjectIds, openStorage, planScope, taskUsage, type State, type Storage } from '@orc/kernel'
-import { NODE_PREFIX, buildGraph, diffGraphs, emptyPatch, type Graph, type GraphPatch } from './graph'
+import { EVENT_KIND, MemoryAccessedPayload, ModelsDiscoveredPayload, ZERO_USAGE, addUsage, foldLiveNotes, noteKey, type EventRecord, type Plan, type Usage } from '@orc/contracts'
+import { fold, foldPlanNotes, listProjectIds, openStorage, planScope, stepUsage, taskUsage, type State, type Storage } from '@orc/kernel'
+import { NODE_PREFIX, PROJECT_DIR_NOTE_ID, PROJECT_NAME_NOTE_ID, buildGraph, diffGraphs, emptyPatch, type Graph, type GraphPatch } from './graph'
 import { decompositionMermaid, planMermaid, todoWaves, type TodoWave } from './diagram'
 
-// the project's display name lives in a memory note — event-sourced, rebuild-safe, no schema
-export const PROJECT_NAME_NOTE_ID = 'ui-project-name'
-// its working directory lives in a sibling note (title = absolute path) — feeds the new-chat
-// directory autocomplete and lets the UI say where a chat's project actually lives
-export const PROJECT_DIR_NOTE_ID = 'ui-project-dir'
+// the project's display name / working directory live in memory notes — event-sourced,
+// rebuild-safe, no schema; ids + view filtering live in graph.ts (imported below)
 
 // latest models_discovered per provider IS the catalog (append-on-change upstream)
 export function foldModelCatalog(events: Array<Pick<EventRecord, 'kind' | 'payload'>>): Map<string, string[]> {
@@ -114,6 +111,8 @@ export function createProjectSessions(opts: {
 
   return {
     async projects() {
+      // listed = has events. Purge keeps its project listed by re-seeding identity notes;
+      // a DELETED project has zero events and correctly disappears — even the server's own.
       const ids = await listProjectIds(opts.url)
       return Promise.all(ids.map(async id => {
         // notes (in already-open sessions) win over the cwd config values; unopened
@@ -172,14 +171,14 @@ export function createProjectSessions(opts: {
         // performance lens: every task this model took over, with per-model usage summed from
         // the agent_call events of exactly the steps that ran on it
         const ref = nodeId.slice(NODE_PREFIX.model.length)
-        const zero: Usage = { inputTokens: 0, outputTokens: 0, costUSD: null, estimated: false }
+
         const tasks: Array<{ taskId: string; title: string; status: string; calls: number; usage: Usage }> = []
         for (const t of s.state.tasks.values()) {
           const tp = s.state.plans.get(t.id)
           const plan = tp?.approvedVersion != null ? tp.versions.find(v => v.version === tp.approvedVersion) : undefined
           const stepIds = new Set((plan?.steps ?? []).filter(st => st.modelRef === ref).map(st => st.id))
           if (stepIds.size === 0) continue
-          let usage = zero
+          let usage: Usage = ZERO_USAGE
           let calls = 0
           for (const e of s.events) {
             if (e.kind !== EVENT_KIND.agent_call || e.taskId !== t.id || !e.stepId || !stepIds.has(e.stepId) || !e.usage) continue
@@ -189,7 +188,7 @@ export function createProjectSessions(opts: {
           tasks.push({ taskId: t.id, title: t.title, status: t.status, calls, usage })
         }
         if (tasks.length === 0) return null
-        return { ref, tasks, totals: tasks.reduce((acc, t) => addUsage(acc, t.usage), zero) }
+        return { ref, tasks, totals: tasks.reduce((acc, t) => addUsage(acc, t.usage), ZERO_USAGE) }
       }
       if (nodeId.startsWith(NODE_PREFIX.note)) {
         const key = nodeId.slice(NODE_PREFIX.note.length) // `${scope}\u0000${id}`
@@ -210,11 +209,17 @@ export function createProjectSessions(opts: {
       }
       const task = s.state.tasks.get(nodeId)
       if (!task) return null
+      // artifacts dedup by (path, sha): a verify step re-declaring the same output is one
+      // artifact, not two — the raw per-event list stays available on the artifact node itself
+      const arts = new Map((s.state.artifacts.get(nodeId) ?? []).map(a => [`${a.path}\u0000${a.sha256}`, a] as const))
       return {
         task,
         usage: taskUsage(s.state, nodeId),
-        steps: [...(s.state.steps.get(nodeId)?.values() ?? [])],
-        artifacts: s.state.artifacts.get(nodeId) ?? [],
+        steps: [...(s.state.steps.get(nodeId)?.values() ?? [])].map(st => ({ ...st, usage: stepUsage(s.state, nodeId, st.stepId) })),
+        artifacts: [...arts.values()],
+        // token-economy made visible: how often this task pulled knowledge instead of re-reading
+        // (memory_accessed envelopes are task-bound since the store threads author identity)
+        memoryPulls: s.events.filter(e => e.kind === EVENT_KIND.memory_accessed && e.taskId === nodeId).length,
       }
     },
 

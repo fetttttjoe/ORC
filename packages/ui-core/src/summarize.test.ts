@@ -24,6 +24,16 @@ describe('summarizeEvent', () => {
     expect(row.noteRef).toBe('note:project\u0000auth-map')
   })
 
+  it('copilot_exchange summarizes the turn and side-channels the full record', () => {
+    const row = summarizeEvent(eventFixture({
+      kind: EVENT_KIND.copilot_exchange,
+      payload: { user: 'run it', assistant: 'which task?', toolCalls: [{ toolName: 'list_tasks', summary: '{}' }], modelRef: 'anthropic/x' },
+    }))
+    expect(row.line).toContain('run it')
+    expect(row.line).toContain('(1 tools)')
+    expect(row.exchange?.assistant).toBe('which task?')
+  })
+
   it('unknown kinds fall back to a snipped payload', () => {
     const row = summarizeEvent(eventFixture({ kind: EVENT_KIND.run_started, payload: { workflowId: 'w1', planVersion: 1 } }))
     expect(row.line).toContain('w1')
