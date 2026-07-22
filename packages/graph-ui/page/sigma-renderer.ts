@@ -37,7 +37,14 @@ export class SigmaRenderer implements GraphRenderer {
       },
     })
     this.sigma.on('clickNode', ({ node }) => this.clickCb?.(node))
+    // sigma only tracks WINDOW resizes; the container resizes without one (flex settling on
+    // initial load, the detail panel opening from a deep link, chat/split/graph mode switches)
+    // and sigma keeps rendering into stale dimensions — the reload-time clipped-graph bug.
+    this.resizeObserver = new ResizeObserver(() => this.sigma.resize())
+    this.resizeObserver.observe(container)
   }
+
+  private readonly resizeObserver: ResizeObserver
 
   focus(nodeIds: Set<string> | null): void {
     this.focusSet = nodeIds
@@ -76,6 +83,7 @@ export class SigmaRenderer implements GraphRenderer {
   }
 
   destroy(): void {
+    this.resizeObserver.disconnect()
     if (this.settleTimer) clearTimeout(this.settleTimer)
     this.layout?.kill()
     this.sigma.kill()
