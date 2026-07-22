@@ -16,7 +16,10 @@ You are an **auditor** authoring an executable plan, grounded in the analysis no
    - **Order lives in `depends_on`, never in names.** The executable plan runs everything whose
      dependencies are met IN PARALLEL. If subplan B needs A's output, link B `depends_on: A` — and
      do not number subplans into fake phases the links don't encode. Truly independent subplans
-     carry a rationale line saying they may run concurrently (and must not write the same files).
+     carry a rationale line saying they may run concurrently. File safety is the runtime's job,
+     not yours: concurrent writes to one file are refused with a named error (never a silent
+     clobber). Optionally declare `zone` globs (workspace-relative, e.g. `zone: ["docs/**"]`) to
+     fence a subplan to its area — the executor refuses out-of-zone writes.
    - **End with a subplan whose id is `verify`**, linked `depends_on` EVERY other subplan (note ids
      become step ids — the gate is mechanical). Its requirements: audit the siblings' outputs
      against their own requirement notes and report gaps. A plan that changes things and never

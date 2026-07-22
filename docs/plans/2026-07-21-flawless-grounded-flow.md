@@ -78,13 +78,16 @@ Grounded facts (evidence from the event log / session):
 - Acceptance met at unit level: dependency-free multi-step plan rejected at every authoring
   path; `verify` freezes as auditor; out-of-zone write fails with a named fence; EACCES
   fails on attempt 1.
-- [ ] FOLLOW-UP (noted 2026-07-22): zones are not expressible for grounded SUBPLANS —
-      `ChildPlanStep` omits `zone` and expansion stamps `[]` (kernel.ts), so parallel
-      siblings in one worktree are guarded only by the plan-authoring skill's prose rule
-      ("must not write the same files"). Upgrade path: plan notes declare write zones →
-      `instantiateFrozenPlan` freezes them into child steps → the existing executor fence
-      enforces disjointness mechanically. Until then the skill line stays — there is NO
-      workspace write queue; the advisory lock serializes event appends only.
+- [x] FOLLOW-UP — SHIPPED 2026-07-22, and stronger than planned: file safety no longer begs
+      the model at all. (1) `fs_write` is atomic (same-dir temp + rename — no torn files) and
+      an in-process write-claim registry refuses a CONCURRENT sibling writing a path a
+      still-running step owns (named error; claims release when the turn ends; sequential
+      dependsOn successors write freely). (2) Zones became declarable end-to-end as intent +
+      fence: plan notes carry `zone` globs → `instantiateFrozenPlan` freezes them into child
+      steps → `ChildPlanStep.zone` → expansion → executor fence. The skill line now states
+      the guarantee instead of begging: "file safety is the runtime's job, not yours."
+      ponytail: claims are an in-process Map (single-process DBOS runtime today); move to pg
+      advisory locks if step execution ever spans processes.
 
 ## Phase 3 — no silent degradation, ever — ✅ SHIPPED 2026-07-22
 - [x] `/api/health` on the graph server (`opts.health` provider, wired by the CLI to
