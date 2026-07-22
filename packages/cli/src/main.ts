@@ -2,7 +2,7 @@ import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync } from '
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { Command, InvalidArgumentError } from 'commander'
-import { EVENT_KIND, MEMORY_ACCESS, PlanDraft, RUN_OUTCOME, STRATEGY, TASK_STATUS, type Analyzer, type EventRecord, type ExecutionPort, type Plan, type RunHandle } from '@orc/contracts'
+import { EVENT_KIND, LINK_KINDS, MEMORY_ACCESS, PlanDraft, RUN_OUTCOME, STRATEGY, TASK_STATUS, type Analyzer, type EventRecord, type ExecutionPort, type LinkKind, type Plan, type RunHandle } from '@orc/contracts'
 import { openStorage, Kernel, fold, grantExtensionTrust, grantMcpTrust, initializeProject, isExtensionTrusted, isMcpTrusted, loadConfig, loadTrust, migrateDatabase, requireProject, taskUsage, type EventLog, type OrcConfig, type PluginHost, type ProjectConfig, type Storage } from '@orc/kernel'
 import { createVaultProjector, parsePlanFile } from '@orc/vault-projector'
 import { createMemory, probeMemory } from '@orc/memory'
@@ -98,6 +98,15 @@ function parseNonNegativeInteger(value: string): number {
   const parsed = Number(value)
   if (!/^\d+$/.test(value) || !Number.isSafeInteger(parsed))
     throw new InvalidArgumentError(`must be a non-negative integer, got '${value}'`)
+  return parsed
+}
+
+// neighbors --depth must be >= 1: the store default is 2 and rankNeighbors requires a positive
+// hop count (depth 0 traverses nothing and silently returns []), so reject it at parse time with
+// a clear error rather than letting a 0 look like "no neighbors".
+function parsePositiveInteger(value: string): number {
+  const parsed = parseNonNegativeInteger(value)
+  if (parsed < 1) throw new InvalidArgumentError(`must be a positive integer (>= 1), got '${value}'`)
   return parsed
 }
 
@@ -608,6 +617,34 @@ export function buildProgram(
       await memory.close()
       if (!n) throw new Error(`no note '${id}'`)
       console.log(JSON.stringify(n, null, 2))
+    })
+  mem
+    .command('neighbors <id>')
+    .description('traverse typed links from a seed note (ranked blast radius)')
+    .option('--kinds <k...>', 'only follow these link kinds')
+    .option('--depth <n>', 'max hops (default 2)', parsePositiveInteger)
+    .option('--scope <s>', 'scope')
+    .action(async (id: string, o: { kinds?: string[]; depth?: number; scope?: string }) => {
+      // validate --kinds against the known link kinds the way `new --strategy` does — a friendly
+      // error beats the store silently ignoring an unknown kind (which reads as "no neighbors").
+      if (o.kinds) for (const k of o.kinds)
+        if (!(LINK_KINDS as readonly string[]).includes(k))
+          throw new Error(`unknown --kinds '${k}' — valid kinds: ${LINK_KINDS.join(', ')}`)
+      const kinds = o.kinds as LinkKind[] | undefined
+      const { config, log } = needPlugin()
+      const memory = await createMemory({ log, config })
+      try {
+        await memory.projector.catchUp()
+        const ranked = await memory.store.neighbors(id, { kinds, depth: o.depth, scope: o.scope })
+        // mirror the memory_neighbors MCP tool: one access against the SEED, only on a hit —
+        // the neighbours are summaries the caller may never read.
+        if (ranked.length > 0) await memory.store.recordAccess(id, o.scope, MEMORY_ACCESS.neighbors, { source: 'cli' })
+        // empty prints a sentinel (like ls/search's `_no notes_`) so a human isn't shown zero bytes.
+        if (ranked.length === 0) { console.log('_no neighbors_'); return }
+        for (const n of ranked) console.log(`${n.id}\t${n.via}\t${n.depth}\t${n.score.toFixed(2)}\t${n.title}`)
+      } finally {
+        await memory.close()
+      }
     })
   mem
     .command('rebuild')

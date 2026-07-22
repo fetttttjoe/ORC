@@ -7,6 +7,19 @@ import { EVENT_KIND, type ExecutionPort, type OperationSpec } from '@orc/contrac
 import { loadConfig, projectDatabaseName, requireProject, type ProjectConfig } from '@orc/kernel'
 import { createTestDb, TEST_PROJECT_ID } from '@orc/kernel/test-helpers'
 import { buildProgram, openKernel, runInit } from './main'
+
+// exitOverride must reach NESTED subcommands too (e.g. `memory neighbors`): commander only
+// copies the setting to children created afterwards, and buildProgram creates them all before
+// any test can call exitOverride — so a subcommand option error would process.exit(1) and kill
+// the whole test process mid-suite instead of rejecting.
+const overrideExits = (program: ReturnType<typeof buildProgram>): ReturnType<typeof buildProgram> => {
+  const walk = (c: { exitOverride(): unknown; commands: readonly unknown[] }): void => {
+    c.exitOverride()
+    for (const sub of c.commands) walk(sub as typeof c)
+  }
+  walk(program)
+  return program
+}
 import { buildPlugins } from './runtime'
 
 const dbs: Array<{ drop: () => Promise<void> }> = []
@@ -47,7 +60,7 @@ async function makeCli() {
   })
   // fresh Command instance per invocation; commander does not re-parse cleanly
   const run = async (...args: string[]) => {
-    await buildProgram(kernel).parseAsync(args, { from: 'user' })
+    await overrideExits(buildProgram(kernel)).parseAsync(args, { from: 'user' })
     return lines
   }
   return { run, lines, kernel }
@@ -94,9 +107,7 @@ describe('orc CLI', () => {
     const lines: string[] = []
     spyOn(console, 'log').mockImplementation((...a: unknown[]) => { lines.push(a.join(' ')) })
     const run = async (...args: string[]) => {
-      const program = buildProgram(kernel)
-      for (const command of program.commands) command.exitOverride()
-      await program.parseAsync(args, { from: 'user' })
+      await overrideExits(buildProgram(kernel)).parseAsync(args, { from: 'user' })
     }
 
     const t = await kernel.createTask({ title: 'audit me' })
@@ -195,9 +206,7 @@ describe('orc CLI', () => {
   it('plan and approve reject non-integer versions during argument parsing', async () => {
     const { kernel } = await makeCli()
     const parse = (...args: string[]) => {
-      const program = buildProgram(kernel)
-      for (const command of program.commands) command.exitOverride()
-      return program.parseAsync(args, { from: 'user' })
+      return overrideExits(buildProgram(kernel)).parseAsync(args, { from: 'user' })
     }
     await expect(parse('plan', 'missing', '--version', 'nope')).rejects.toThrow(/integer/)
     await expect(parse('approve', 'missing', '--version', '1.5')).rejects.toThrow(/integer/)
@@ -459,7 +468,7 @@ describe('orc CLI', () => {
     spyOn(console, 'log').mockImplementation((...a: unknown[]) => { lines.push(a.join(' ')) })
     const { host, hub } = await buildPlugins(config) // real plugin wiring — no stub casts
     const plugin = { host, hub, config, log }
-    const run = (...args: string[]) => buildProgram(kernel, undefined, plugin).parseAsync(args, { from: 'user' })
+    const run = (...args: string[]) => overrideExits(buildProgram(kernel, undefined, plugin)).parseAsync(args, { from: 'user' })
 
     const id = `cli-test-${Math.random().toString(36).slice(2, 10)}`
     await run('memory', 'add', '--id', id, '--title', 'T', '--summary', 'S', '--body', 'B', '--tags', 'x')
@@ -514,6 +523,82 @@ describe('orc CLI', () => {
     lines.length = 0
     await run('memory', 'search', 'definitely-not-present-anywhere')
     expect(lines.join('\n').trim()).toBe('_no notes_')
+
+    // --- neighbors traversal (M4b) -------------------------------------------------------------
+    // memory add has no --links flag, so seed a linked graph the way the cancel-sweep test seeds
+    // notes: append memory_written directly, then rebuild the read model from this test's own log.
+    // Chain: seed --depends_on--> hop1 --relates_to--> hop2, plus seed --refines--> other.
+    const seedNote = (nid: string, links: Array<{ id: string; kind: string }> = []) =>
+      log.append({
+        taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_written,
+        payload: { note: { id: nid, title: nid, links }, author: { source: 'cli' } },
+      })
+    await seedNote('nb-seed', [{ id: 'nb-hop1', kind: 'depends_on' }, { id: 'nb-other', kind: 'refines' }])
+    await seedNote('nb-hop1', [{ id: 'nb-hop2', kind: 'relates_to' }])
+    await seedNote('nb-hop2')
+    await seedNote('nb-other')
+    await seedNote('nb-isolated') // no links either way
+    await run('memory', 'rebuild')
+
+    const accessCount = () => log.all().then(es => es.filter(e => e.kind === EVENT_KIND.memory_accessed).length)
+
+    // 1. bare neighbors prints the linked neighbor with its via/depth/score/title row.
+    const beforeHit = await accessCount()
+    lines.length = 0
+    await run('memory', 'neighbors', 'nb-seed')
+    const nbOut = lines.join('\n')
+    expect(nbOut).toContain('nb-hop1')
+    expect(nbOut).toContain('nb-other')
+    // row shape: id\tvia\tdepth\tscore(2dp)\ttitle
+    const hop1Row = lines.find(l => l.startsWith('nb-hop1\t'))!
+    expect(hop1Row).toBeDefined()
+    const cols = hop1Row.split('\t')
+    expect(cols[1]).toBe('depends_on')      // via = link kind
+    expect(cols[2]).toBe('1')               // depth (1 hop from the seed)
+    expect(cols[3]).toMatch(/^\d+\.\d{2}$/) // score, 2 decimals
+    expect(cols[4]).toBe('nb-hop1')         // title
+
+    // Acceptance #3: a hit records exactly one memory_accessed(mode:neighbors) against the SEED.
+    const afterHit = await accessCount()
+    expect(afterHit).toBe(beforeHit + 1)
+    const accessed = (await log.all()).filter(e => e.kind === EVENT_KIND.memory_accessed)
+    const lastAccess = accessed.at(-1)!.payload as { id: string; mode: string }
+    expect(lastAccess.mode).toBe('neighbors')
+    expect(lastAccess.id).toBe('nb-seed')
+
+    // 2. --kinds depends_on narrows: nb-other (refines) is excluded, nb-hop1 (depends_on) stays.
+    lines.length = 0
+    await run('memory', 'neighbors', 'nb-seed', '--kinds', 'depends_on')
+    const kindsOut = lines.join('\n')
+    expect(kindsOut).toContain('nb-hop1')
+    expect(kindsOut).not.toContain('nb-other')
+
+    // an unknown kind is a friendly error, not a silent empty result (matches --strategy).
+    await expect(run('memory', 'neighbors', 'nb-seed', '--kinds', 'not-a-kind')).rejects.toThrow(/unknown --kinds/)
+
+    // 3. --depth 1 bounds traversal: the 2-hop nb-hop2 is absent at depth 1, present by default (2).
+    lines.length = 0
+    await run('memory', 'neighbors', 'nb-seed', '--depth', '1')
+    expect(lines.join('\n')).not.toContain('nb-hop2')
+    lines.length = 0
+    await run('memory', 'neighbors', 'nb-seed', '--depth', '2')
+    expect(lines.join('\n')).toContain('nb-hop2')
+
+    // depth < 1 is rejected at parse time (store default is 2, rank needs a positive hop count).
+    await expect(run('memory', 'neighbors', 'nb-seed', '--depth', '0')).rejects.toThrow(/positive integer/)
+
+    // 4. --scope selects: the seeded notes live in the default 'project' scope; an explicit
+    // --scope project still finds them.
+    lines.length = 0
+    await run('memory', 'neighbors', 'nb-seed', '--scope', 'project')
+    expect(lines.join('\n')).toContain('nb-hop1')
+
+    // 6. empty case: an isolated seed prints the sentinel and records NO new access.
+    const beforeMiss = await accessCount()
+    lines.length = 0
+    await run('memory', 'neighbors', 'nb-isolated')
+    expect(lines.join('\n').trim()).toBe('_no neighbors_')
+    expect(await accessCount()).toBe(beforeMiss) // a miss records nothing
 
     await hub.close()
     await host.shutdown()
