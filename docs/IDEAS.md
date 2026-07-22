@@ -300,3 +300,38 @@ and a rule without enforcement is decoration.
 
 **Trigger:** an agent repeats an approach a human already rejected, or a bench
 probe like `"what rules govern fs writes"` exists and fails.
+
+---
+
+## 10. Knowledge zones: per-agent note ownership for parallel subplans
+
+**Source:** knowledge-graph optimization session, 2026-07-22 — while watching
+the graph-refresh plan solve this by hand.
+
+**What it is:** the memory analog of the file write-fence. A plan-note declares
+which note ids/prefixes its subplan OWNS (`noteZone`, mirroring `zone`); the
+freezer carries it into the step; the memory store refuses writes outside it.
+Parallel subplans then get mechanically disjoint knowledge spaces — per-topic
+sub-graphs each agent maintains alone — instead of disjointness by prose
+convention. A librarian-style read surface ("what do we already know about X,
+who owns it") is the query half: agents ask before researching, so no topic is
+re-derived twice.
+
+**Why deferred:** the convention already works (the refresh plan's ownership
+map had zero collisions), merge-on-omit removed the worst clobber class, and
+the search-first rule in the codebase-analysis skill covers the ask-before-
+research half for free. Enforcement is only worth building when convention is
+observed to fail.
+
+**Design fixes already known:**
+
+1. Reuse the zone machinery end-to-end (contracts field → freezer copy → store
+   fence) — same shape, same tests, different resource.
+2. The read surface is memory_search + the hub, not a new service: if agents
+   cannot find a topic, fix ranking/summaries, don't add an oracle in front.
+3. Cross-scope: ownership binds WRITES; reads stay global — a fence that
+   blocks reading another subplan's findings would defeat the graph.
+
+**Trigger:** two parallel subplans write the same note id in one run, or a
+scout re-derives a topic an existing note already covered (contamination-check
+style audit can detect both from the event log).

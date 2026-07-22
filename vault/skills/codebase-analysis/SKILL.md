@@ -8,8 +8,13 @@ plan? (yes/no)")`. If the answer is no, call `report_coverage({ analyzed: false,
 declined codebase analysis"] })` and signal success immediately with a summary noting no analysis
 was done.
 
-If yes: read the working tree and build a **connected knowledge map** via `memory_write` — a graph,
-not a pile. Write in this order:
+If yes: **search before you read** — `memory_search` every topic the task names, `memory_read` what
+hits. Knowledge that already exists is refined (same ids), never re-derived from code: re-deriving
+what a note already states is the single biggest waste in a scout run. Only the GAPS earn
+working-tree reading.
+
+Then build a **connected knowledge map** via `memory_write` — a graph, not a pile. Write in this
+order:
 
 1. **The hub** — one `architecture_current` note (id `arch-overview`): the subsystems, the data
    flow, and the one or two invariants that explain everything else. The hub links
