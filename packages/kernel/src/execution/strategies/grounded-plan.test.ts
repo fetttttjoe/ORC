@@ -42,6 +42,17 @@ describe('instantiateFrozenPlan (pure, deterministic)', () => {
     expect(draft.steps[0]).toEqual({ id: 'db', role: 'implementer', title: 'DB', instructions: 'create the schema', dependsOn: [], skillRefs: [], toolRefs: [] })
   })
 
+  it("freezes a 'verify' subplan as auditor; siblings stay implementer", () => {
+    const notes: MemoryNote[] = [
+      note({ id: 'masterplan', links: [link('work', LINK_KIND.decomposes_into), link('verify', LINK_KIND.decomposes_into)] }),
+      note({ id: 'work', title: 'Work', body: 'do it' }),
+      note({ id: 'verify', title: 'Verify', body: 'audit it', links: [link('work', LINK_KIND.depends_on)] }),
+    ]
+    const draft = instantiateFrozenPlan('masterplan', notes)
+    expect(draft.steps.find(s => s.id === 'verify')!.role).toBe('auditor')
+    expect(draft.steps.find(s => s.id === 'work')!.role).toBe('implementer')
+  })
+
   it('is a pure function of the notes: same input → identical output', () => {
     const notes: MemoryNote[] = [
       note({ id: 'masterplan', links: [link('a', LINK_KIND.decomposes_into)] }),

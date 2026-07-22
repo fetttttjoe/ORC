@@ -1,7 +1,7 @@
 import { isDeepStrictEqual } from 'node:util'
 import pg from 'pg'
 import { and, asc, count, desc, eq, gt, inArray, sql } from 'drizzle-orm'
-import { EventInput, PAYLOAD_SCHEMAS, type EventKind, type EventRecord } from '@orc/contracts'
+import { errorMessage, EventInput, PAYLOAD_SCHEMAS, type EventKind, type EventRecord } from '@orc/contracts'
 import { events } from '../schema'
 import type { Redactor } from '../redact'
 import { PostgresStore, type Tx } from './postgres'
@@ -80,7 +80,7 @@ const makeOps = (db: Queryable, ctx: LogContext): EventLogOps => {
       try {
         ctx.notify?.(record)
       } catch (err) {
-        console.warn(`event observer failed: ${err instanceof Error ? err.message : String(err)}`)
+        console.warn(`event observer failed: ${errorMessage(err)}`)
       }
       return record
     },
@@ -199,7 +199,7 @@ export class EventLog implements EventLogOps {
     }
     const pumpSafe = (): void => {
       void pump().catch(err => {
-        console.warn(`event stream pump failed: ${err instanceof Error ? err.message : String(err)}`)
+        console.warn(`event stream pump failed: ${errorMessage(err)}`)
         if (!closed && pumpTimer === null) pumpTimer = setTimeout(() => { pumpTimer = null; pumpSafe() }, PUMP_RETRY_MS)
       })
     }
@@ -221,7 +221,7 @@ export class EventLog implements EventLogOps {
       // afterwards is the expected consequence of closing it, and warning about it prints an
       // alarming line after the user's command already finished.
       c.on('error', err => {
-        if (!closed) console.warn(`event stream listener error: ${err instanceof Error ? err.message : String(err)}`)
+        if (!closed) console.warn(`event stream listener error: ${errorMessage(err)}`)
       })
       try {
         await c.connect()
@@ -239,7 +239,7 @@ export class EventLog implements EventLogOps {
       } catch (err) {
         await c.end().catch(() => {})
         if (initial) throw err
-        console.warn(`event stream reconnect failed: ${err instanceof Error ? err.message : String(err)}`)
+        console.warn(`event stream reconnect failed: ${errorMessage(err)}`)
         scheduleReconnect()
       }
     }

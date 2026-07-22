@@ -1,4 +1,5 @@
 import {
+  errorMessage,
   EVENT_KIND, EventKind, FeedbackProvidedPayload, MemoryWrittenPayload, PAYLOAD_SCHEMAS, RUN_OUTCOME, SplitResult, TASK_STATUS,
   type EventRecord, type TaskStatus,
 } from '@orc/contracts'
@@ -22,6 +23,7 @@ const ROUTER_RELEVANT: Record<EventKind, boolean> = {
   operation_failed: false, artifact_produced: false, memory_deleted: false, memory_accessed: false,
   feedback_requested: false, feedback_provided: true, plan_annotated: false, analysis_completed: false,
   models_discovered: false, // catalog metadata — nothing to route
+  copilot_exchange: false, // conversation record — nothing to route
 }
 const ROUTER_KINDS = EventKind.options.filter(k => ROUTER_RELEVANT[k])
 
@@ -110,7 +112,7 @@ export function createSignalRouter(opts: {
         await sendResult(split, committed)
       }
     } catch (err) {
-      console.warn(`signal router: resolve split ${split.splitId}: ${err instanceof Error ? err.message : String(err)}`)
+      console.warn(`signal router: resolve split ${split.splitId}: ${errorMessage(err)}`)
     }
   }
 
@@ -125,7 +127,7 @@ export function createSignalRouter(opts: {
         if (event.kind !== EVENT_KIND.feedback_provided || !event.taskId
           || state.tasks.get(event.taskId)?.status !== TASK_STATUS.running) continue
         await sendFeedback(event).catch(err =>
-          console.warn(`signal router: re-send feedback seq ${event.seq}: ${err instanceof Error ? err.message : String(err)}`))
+          console.warn(`signal router: re-send feedback seq ${event.seq}: ${errorMessage(err)}`))
       }
       for (const split of state.splits.values()) {
         if (split.resolved) {
@@ -134,7 +136,7 @@ export function createSignalRouter(opts: {
           if (state.tasks.get(split.taskId)?.status === TASK_STATUS.running) {
             const committed = storedResolution(seed, split.splitId)
             if (committed) await sendResult(split, committed).catch(err =>
-              console.warn(`signal router: re-send split ${split.splitId}: ${err instanceof Error ? err.message : String(err)}`))
+              console.warn(`signal router: re-send split ${split.splitId}: ${errorMessage(err)}`))
           }
           continue
         }
@@ -144,7 +146,7 @@ export function createSignalRouter(opts: {
         // the router was down) still needs its run — same idempotent startChildRun as the live route.
         if (status === TASK_STATUS.approved && !state.runs.get(split.childTaskId)?.length)
           await opts.onChildApproved(split.childTaskId).catch(err =>
-            console.warn(`signal router: startChildRun ${split.childTaskId}: ${err instanceof Error ? err.message : String(err)}`))
+            console.warn(`signal router: startChildRun ${split.childTaskId}: ${errorMessage(err)}`))
       }
       // resume the pump exactly where the sweep's seed ended (seq-exclusive), closing the gap for
       // events that landed between the sweep read and subscribe. Both routes are idempotent under replay.
@@ -153,14 +155,14 @@ export function createSignalRouter(opts: {
       unsub = await opts.log.subscribe({ fromSeq: seed.at(-1)?.seq ?? 0 }, async e => {
         if (e.kind === EVENT_KIND.feedback_provided) {
           await sendFeedback(e).catch(err =>
-            console.warn(`signal router: send feedback seq ${e.seq}: ${err instanceof Error ? err.message : String(err)}`))
+            console.warn(`signal router: send feedback seq ${e.seq}: ${errorMessage(err)}`))
           return
         }
         // route 2: an approved child with a pending split gets its run started (policy OR human)
         if (e.kind === EVENT_KIND.plan_approved && e.taskId) {
           if (pendingSplitForChild(fold(await opts.log.after(0, ROUTER_KINDS)), e.taskId))
             await opts.onChildApproved(e.taskId).catch(err =>
-              console.warn(`signal router: startChildRun ${e.taskId}: ${err instanceof Error ? err.message : String(err)}`))
+              console.warn(`signal router: startChildRun ${e.taskId}: ${errorMessage(err)}`))
           return
         }
         // route 1: a terminal child resolves its split (guarded by pendingSplitForChild — a

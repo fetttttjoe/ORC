@@ -1,4 +1,5 @@
 import type { ResolvedTool } from '@orc/contracts'
+import { errorMessage } from '@orc/contracts'
 import type { Kernel } from '../kernel'
 import { ANALYZE_STEP_ROLE } from './strategies/grounded-plan'
 
@@ -37,7 +38,7 @@ export function reportCoverageTool(opts: {
         await kernel.reportCoverage({ taskId: p.taskId, stepId: p.stepId, runToken: p.runToken }, input)
         return { output: { recorded: true }, isError: false }
       } catch (e) {
-        return { output: { error: e instanceof Error ? e.message : String(e) }, isError: true }
+        return { output: { error: errorMessage(e) }, isError: true }
       }
     },
   }

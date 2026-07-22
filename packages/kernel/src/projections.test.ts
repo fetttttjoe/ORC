@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'bun:test'
 import type { EventRecord, Plan, TaskNode } from '@orc/contracts'
 import { eventFixture, draftFixture, planFixture, stepFixture } from '@orc/contracts/fixtures'
-import { fold, completedStepIds, nextAttempts, crashDedupKey, subtreeTaskIds, subtreeUsage, pendingSplitForChild } from './projections'
+import { fold, completedStepIds, nextAttempts, crashDedupKey, stepUsage, subtreeTaskIds, subtreeUsage, pendingSplitForChild } from './projections'
 
 const task: TaskNode = {
   id: 't1', parentId: null, type: 'generic', title: 'hello', spec: '',
@@ -129,6 +129,8 @@ describe('fold — execution kinds', () => {
     expect(step?.iterations).toBe(1)
     expect(state.runs.get('t1')).toHaveLength(1)
     expect(state.usage.get('t1')?.costUSD).toBeCloseTo(0.01)
+    expect(stepUsage(state, 't1', 's1').costUSD).toBeCloseTo(0.01) // same events, per-step key
+    expect(stepUsage(state, 't1', 'ghost').costUSD).toBeNull() // unknown step → zero usage
     expect(completedStepIds(state, 't1')).toEqual(new Set(['s1']))
   })
 
@@ -149,6 +151,12 @@ describe('fold — execution kinds', () => {
     expect(state.runs.get('t1')).toHaveLength(1)
     expect(state.usage.get('t1')?.costUSD).toBeCloseTo(0.01)
     expect(completedStepIds(state, 't1')).toEqual(new Set(['s1']))
+  })
+
+  it('copilot_exchange is traceability-only: folds to no state', () => {
+    const state = fold([eventFixture({ kind: 'copilot_exchange', payload: { user: 'u', assistant: 'a', toolCalls: [], modelRef: 'm/x' } })])
+    expect(state.tasks.size).toBe(0)
+    expect(state.usage.size).toBe(0)
   })
 
   it('ignores memory events and does not create a task', () => {
