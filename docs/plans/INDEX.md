@@ -1,155 +1,184 @@
 # Plans Directory Index
 
-A searchable index of all architecture and implementation plans.
+This index catalogs all feature and roadmap plans in `docs/plans/` with their approval status, purpose, and dependencies. Use this to find the right plan for your work or to understand the roadmap.
 
-## Summary
+## Active Plans
 
-- **Total plans:** 18 (14 in `superpowers/plans/`, 4 in root `plans/`)
-- **Organization:** By milestone and feature area
-- **Status indicators:** ✅ Approved/Implemented | 🟡 Active/In Progress | 📋 Draft | 🚫 Superseded
+### Phase 2 Documentation Roadmap
 
----
+The orchestrator has mature, stable architecture (proven by 8 durable ADRs and comprehensive testing) but suffers from documentation organization gaps. This phase addresses those gaps systematically.
 
-## Core Architecture Plans (Superpowers)
+| Plan | Status | Purpose | Deliverables | Dependencies |
+|---|---|---|---|---|
+| **Phase 2.1: README Enhancement** | ✅ APPROVED | Add architecture navigation index and glossary links to README | README with navigation table, component area descriptions, glossary link, seams guide link | — |
+| **Phase 2.2: Plans Directory Index** | ✅ IN PROGRESS | Create this index with approval status and purpose for all 14 plans | `docs/plans/INDEX.md` with status, purpose, dependencies | Phase 2.1 (README links here) |
+| **Phase 2.3: ADR Formalization** | 📋 PLANNED | Formalize all 8 architectural decision records as durable memory notes with proper links | 8 memory notes in `vault/memory/` with `kind=decision`, all searchable, cross-linked | Phase 2.1 (glossary foundation) |
+| **Phase 2.4: Seams Reference Guide** | ✅ COMPLETE | Comprehensive guide to component interactions, call paths, debugging strategies | `docs/seams-reference.md` with scenarios, call paths, storage layer details, troubleshooting | Phase 2.1 (README links here) |
+| **Phase 2.5: Glossary Extraction** | 📋 PLANNED | Extract key terms from codebase, specs, and memory into centralized glossary | `docs/GLOSSARY.md` with terms, definitions, and links to usage locations | Phase 2.3 (ADRs first) |
 
-### Foundation & Execution
+## Approved Plans (Completed)
 
-| Title | File | Status | Purpose | Related ADRs | Last Updated |
-|-------|------|--------|---------|-------------|-------------|
-| M1 Foundation Implementation | `superpowers/plans/2026-07-16-m1-foundation.md` | ✅ Approved | Event-sourced kernel: task, plan, approval, replay guarantee. Establish append-only event log + CLI. | ADR-001, ADR-004, ADR-008 | 2026-07-16 |
-| M2 Execution Implementation | `superpowers/plans/2026-07-17-m2-execution.md` | ✅ Approved | Execute approved plans on DBOS with durable workflows, cost accounting, kill-9 resume. Postgres migration, ExecutionPort, api-loop executor, providers. | ADR-002, ADR-003, ADR-004, ADR-006 | 2026-07-17 |
-| M3 Plugins Implementation | `superpowers/plans/2026-07-17-m3-plugins.md` | ✅ Approved | Plugin host for T0 SKILL.md watcher, T2 extensions, T1 MCP client. Progressive disclosure of tool surface. | ADR-005, ADR-007 | 2026-07-17 |
+### Graph UI — Live Visual Map
 
-### Knowledge & Vault Projections
+| Property | Value |
+|---|---|
+| **File** | `docs/plans/2026-07-20-graph-ui.md` |
+| **Status** | ✅ APPROVED |
+| **Approval Date** | 2026-07-20 |
+| **Purpose** | Local web page (`orc graph` → http://127.0.0.1:7749) rendering the full execution + knowledge graph as an interactive WebGL force graph; logic in transport-free core, web server and TUI are thin adapters |
+| **Key Deliverables** | `packages/ui-core`, `packages/graph-ui`, `orc graph` command, test coverage |
+| **Dependencies** | None (foundation work) |
+| **Contained Phases** | 5 phases: shared seams (3 steps), ui-core (3 steps), graph-ui web adapter (3 steps), browser page (2 steps), CLI integration (2 steps) |
 
-| Title | File | Status | Purpose | Related ADRs | Last Updated |
-|-------|------|--------|---------|-------------|-------------|
-| M4a Event Stream & Vault Projector | `superpowers/plans/2026-07-17-m4a-event-stream-vault-projector.md` | ✅ Approved | Deterministic markdown/mermaid renders of tasks, execution lineage, and knowledge graphs. Live re-render on events. | ADR-005, ADR-008 | 2026-07-17 |
-| M4b Knowledge Graph & Memory | `superpowers/plans/2026-07-18-m4b-knowledge-graph-memory.md` | ✅ Approved | Typed, confidence-weighted memory graph with SurrealDB read model. Graph-distance ranker, neighbors traverse. | ADR-005, ADR-006 | 2026-07-18 |
-| M4c Memory Graph & Recursive MAS | `superpowers/plans/2026-07-19-m4c-memory-graph-recursive-mas.md` | ✅ Approved | Extend M4b with recursive multi-agent system: memory scopes, single-writer gateway, task-local note management. | ADR-005, ADR-006, ADR-007 | 2026-07-19 |
+### Other Approved Plans (2026-07-20 ecosystem)
 
-### Recursion & Advanced Features
+| File | Status | Purpose |
+|---|---|---|
+| `2026-07-20-ui-navigation.md` | ✅ APPROVED | Navigation, layout, and deep-link support for the graph UI |
+| `2026-07-21-chat-first-ui.md` | ✅ APPROVED | Chat-first interface for planning and execution (future phase) |
+| `2026-07-21-web-actions.md` | ✅ APPROVED | Implement approve/reply/cancel/run mutations in the web UI |
 
-| Title | File | Status | Purpose | Related ADRs | Last Updated |
-|-------|------|--------|---------|-------------|-------------|
-| M5a Recursion Core | `superpowers/plans/2026-07-19-m5a-recursion-core.md` | ✅ Approved | task_split + join_splits for recursive child workflows, split gates, approval policies, zones, worktree/docker isolation. | ADR-003, ADR-004, ADR-007 | 2026-07-19 |
-| M5b Grounded-Plan Strategy | `superpowers/plans/2026-07-19-m5b-grounded-plan-strategy.md` | ✅ Approved | Two-step bootstrap (analyze → plan) template with conversational gate, plan-note authoring, targeted re-planning, deterministic instantiation. | ADR-001, ADR-005, ADR-006 | 2026-07-19 |
+### Active Execution & Direction
 
-### Hardening & Research
+| File | Status | Purpose |
+|---|---|---|
+| `2026-07-21-flawless-grounded-flow.md` | 📋 IN PROGRESS | Defect-driven phases P1–P7: P1–P3, P5(batch 1), P6 shipped; next P7 (`orc mcp serve`) → P4 → P5 rest |
+| `2026-07-22-roadmap.md` | 📋 ACTIVE | North star + pillar scorecard; Now/Next/Horizon with triggers (scheduling, collaboration, neuronal memory lifecycle) |
 
-| Title | File | Status | Purpose | Related ADRs | Last Updated |
-|-------|------|--------|---------|-------------|-------------|
-| Foundation Hardening | `superpowers/plans/2026-07-18-foundation-hardening.md` | ✅ Approved | Redaction, error handling, graceful degradation, project isolation, per-project advisory locks. | ADR-002, ADR-008 | 2026-07-18 |
-| M4b Switch Contingency | `superpowers/plans/2026-07-19-m4b-switch-contingency.md` | ✅ Approved | SurrealDB downtime tolerance: degraded memory tools, explicit "unavailable" results, all other systems keep working. | ADR-005 | 2026-07-19 |
-| Sourced Web Research | `superpowers/plans/2026-07-20-sourced-research.md` | ✅ Approved | Citations on research notes, distilled findings vs raw evidence, event-sourced access counts, web-research skill. | ADR-006 | 2026-07-20 |
-| System Hardening | `superpowers/plans/2026-07-20-system-hardening.md` | ✅ Approved | Observability, metrics, admin dashboards, graceful shutdown, upgrade procedures, operational guardrails. | ADR-008 | 2026-07-20 |
-| Review & Remediation | `superpowers/plans/2026-07-19-review-remediation.md` | ✅ Approved | Post-M4c audit and remediation: event recovery, missing redaction, API shims, targeted fixes. | ADR-001, ADR-008 | 2026-07-19 |
+## Earlier Plans & Specs
 
-### Memory Extensions
+### Foundation & Core Architecture
 
-| Title | File | Status | Purpose | Related ADRs | Last Updated |
-|-------|------|--------|---------|-------------|-------------|
-| Neuron Memory & Web Research | `superpowers/plans/2026-07-19-neuron-memory-web-research.md` | 🚫 Superseded | Earlier web-research design (superseded by Sourced Web Research). | ADR-006 | 2026-07-19 |
+| File | Date | Status | Scope |
+|---|---|---|---|
+| `docs/superpowers/specs/2026-07-16-orchestrator-design.md` | 2026-07-16 | ✅ SHIPPED | Core system design, invariants, event log, execution model |
+| `docs/superpowers/specs/2026-07-17-m2-execution-design.md` | 2026-07-17 | ✅ SHIPPED | Durable execution via DBOS Transact, operation journal, retry policy |
+| `docs/superpowers/specs/2026-07-17-m3-plugins-design.md` | 2026-07-17 | ✅ SHIPPED | Plugin registry, model providers, executors, MCP servers, zero-trust model |
+| `docs/superpowers/specs/2026-07-17-m4a-vault-projector-design.md` | 2026-07-17 | ✅ SHIPPED | Vault as deterministic markdown projections of tasks, execution, lineage |
+| `docs/superpowers/specs/2026-07-18-foundation-hardening-design.md` | 2026-07-18 | ✅ SHIPPED | Redaction, degraded memory, storage service abstraction, error handling |
+| `docs/superpowers/specs/2026-07-18-m4b-knowledge-graph-memory-design.md` | 2026-07-18 | ✅ SHIPPED | Event-first knowledge graph, SurrealDB read model, sourced research notes |
+| `docs/superpowers/specs/2026-07-19-m4c-memory-graph-recursive-mas-design.md` | 2026-07-19 | ✅ SHIPPED | Multi-agent memory sharing, ranked traversal, bounded context slicing |
+| `docs/superpowers/specs/2026-07-19-m5a-recursion-core-design.md` | 2026-07-19 | ✅ SHIPPED | Recursive task splitting, plan finalization, approval flow |
+| `docs/superpowers/specs/2026-07-19-m5b-grounded-plan-strategy-design.md` | 2026-07-19 | ✅ SHIPPED | Grounded planning strategy for complex tasks, iterative refinement |
+| `docs/superpowers/specs/2026-07-19-review-remediation-design.md` | 2026-07-19 | ✅ SHIPPED | Finding categorization, bulk remediation, step retrying |
 
----
+### Deferred Work & Research
 
-## UI & Visualization Plans
+| File | Date | Status | Scope |
+|---|---|---|---|
+| `docs/superpowers/specs/2026-07-19-neuron-memory-web-research-design.md` | 2026-07-19 | 📋 DEFERRED | Memory lifecycle (decay, sweep, archive, restore) — trigger: knowledge graph grows and hits show clear hot/cold split |
+| `docs/IDEAS.md` | ongoing | 📋 ACTIVE | Deferred ideas with reasoning intact; entries graduate when a trigger fires |
 
-### Web Graph UI
+## Documentation Status
 
-| Title | File | Status | Purpose | Last Updated |
-|-------|------|--------|---------|-------------|
-| Live Visual Map (Ports & Adapters) | `plans/2026-07-20-graph-ui.md` | 📋 Draft | WebGL force graph (sigma.js + graphology), incremental patches, project switcher, per-task chat + request view. Ports & adapters for web + future TUI. | 2026-07-20 |
+### Available Now
 
-### Navigation & Chat
+- ✅ `docs/ARCHITECTURE.md` — System map, data flow, storage service, execution flow
+- ✅ `docs/EXTENDING.md` — Seam map for adding providers, executors, skills, tools, events
+- ✅ `docs/seams-reference.md` — Component interactions, call paths, debugging strategies
+- ✅ `README.md` — Updated with architecture navigation and links to all above
 
-| Title | File | Status | Purpose | Last Updated |
-|-------|------|--------|---------|-------------|
-| UI Navigation | `plans/2026-07-20-ui-navigation.md` | 📋 Draft | Deep-linkable graph navigation, request panel refinement, context pinning, live search. | 2026-07-20 |
+### In Progress / Planned
 
-### Chat-First Interface
+- 📋 `docs/plans/INDEX.md` (this file) — Approval status and purpose for all plans
+- 📋 `docs/GLOSSARY.md` — Key terms with definitions and usage links
+- 📋 `vault/memory/` — Formalized ADR notes (durable, searchable)
 
-| Title | File | Status | Purpose | Last Updated |
-|-------|------|--------|---------|-------------|
-| Chat-First UI | `plans/2026-07-21-chat-first-ui.md` | 📋 Draft | Chat-as-primary interface: human-agent transcript, task creation from chat, inline approvals. | 2026-07-21 |
+### Deprecated / Archived
 
-### Web Integration
-
-| Title | File | Status | Purpose | Last Updated |
-|-------|------|--------|---------|-------------|
-| Web Actions & Integration | `plans/2026-07-21-web-actions.md` | 📋 Draft | Browser-driven task creation, approval, and execution; deep linking; CSRF-guarded mutations. | 2026-07-21 |
-
----
-
-## Plan Organization by Feature Area
-
-### Event Log & Storage
-- M1 Foundation (append-only kernel)
-- Foundation Hardening (redaction, locking)
-
-### Execution & Durability
-- M2 Execution (DBOS workflows, providers, signals)
-- M5a Recursion Core (child splits, retry policy)
-- Sourced Web Research (event-sourced access counts)
-
-### Knowledge & Memory
-- M4b Knowledge Graph (SurrealDB, confidence weights)
-- M4c Recursive MAS (scoped notes, single-writer)
-- M5b Grounded-Plan (plan-note authoring, conversional gates)
-- Sourced Web Research (research notes, citations)
-
-### Plugins & Extensions
-- M3 Plugins (SKILL.md, MCP, extensions)
-- M4a Vault Projector (markdown renders)
-- Sourced Web Research (web-research skill)
-
-### UI & Visualization
-- Live Visual Map (graph rendering)
-- UI Navigation (deep-linking, context)
-- Chat-First UI (chat interface)
-- Web Actions (mutations, integration)
-
-### Infrastructure & Operations
-- Foundation Hardening (error handling, degradation)
-- M4b Switch Contingency (SurrealDB downtime)
-- System Hardening (observability, upgrades)
-- Review & Remediation (post-audit fixes)
+- None yet (all docs are either active or deferred with a trigger)
 
 ---
 
-## Approval Status Summary
+## How to Use This Index
 
-**Approved (✅):** 14 plans across M1–M5, hardening, and sourced research.
+### Finding a Plan by Purpose
 
-**Draft (📋):** 4 plans in UI/visualization (future iterations, not blocking core).
+- **How do I add a model provider?** → `docs/EXTENDING.md` (seam map, table row: "Add a model provider")
+- **How do I understand component interactions?** → `docs/seams-reference.md` (scenarios, call paths)
+- **How do I see what's in the roadmap?** → This file (plans table above)
+- **What architectural decisions were made and why?** → (Coming in Phase 2.3) `vault/memory/` + search/neighbors
 
-**Superseded (🚫):** 1 plan (neuron-memory-web-research; replaced by sourced-research).
-
----
-
-## Navigating the Plans
-
-1. **To understand the architecture:** Start with M1 Foundation, then M2 Execution, M3 Plugins, M4a/b/c Knowledge.
-2. **To implement a milestone:** Read the corresponding plan file directly—each contains full task breakdowns, test assertions, and code examples.
-3. **To add features:** Check the appropriate area above, or propose a new plan in `docs/superpowers/plans/` with the date-based naming convention.
-4. **For UI work:** See the four draft plans in `docs/plans/`.
-5. **To understand decisions:** Cross-reference plan names to the ADR directory in `docs/` (8 durable ADRs).
-
----
-
-## Version History
-
-| Date | Change |
-|------|--------|
-| 2026-07-20 | Initial index created; 18 plans cataloged, approval status formalized. |
-
----
-
-## Status Legend
+### Approval Status Legend
 
 | Symbol | Meaning |
-|--------|---------|
-| ✅ Approved | Plan has been reviewed and approved; implementation complete or in progress. |
-| 🟡 Active | Currently being implemented or under active discussion. |
-| 📋 Draft | Proposed but not yet approved; ready for review. |
-| 🚫 Superseded | Replaced by a newer plan; kept for historical reference. |
+|---|---|
+| ✅ APPROVED | Decision made, committed, shipped (or in PR) |
+| ✅ SHIPPED | Fully implemented and in main branch |
+| ✅ COMPLETE | Deferred work item that executed successfully |
+| 📋 IN PROGRESS | Currently being worked on |
+| 📋 PLANNED | Scheduled but not yet started |
+| 📋 DEFERRED | Deferred per `IDEAS.md` entry; has a trigger condition |
+| ❓ BLOCKED | Waiting on a dependency or decision |
+
+### Phase Breakdown
+
+**Phase 1 (COMPLETE):** Knowledge graph construction via architecture analysis → 7 interconnected memory notes covering event-log, execution, plugins, memory system, vault, ADRs, and findings.
+
+**Phase 2 (IN PROGRESS):** Critical documentation fixes → README index, plans directory index (this file), formalized ADRs, seams reference guide, glossary, ideas.md tracking.
+
+**Phase 3 (PLANNED):** Advanced documentation → extract glossary from codebase, author migration guides for major decisions, establish verification/audit cadence.
+
+---
+
+## Critical Dependencies & Paths
+
+### To find the ADRs
+**Status:** Phase 2.3 (planned)
+- **When ready:** Search `vault/memory/` for `kind=decision` or search for specific ADR terms
+- **For now:** Read `docs/superpowers/specs/` files (ADRs embedded in spec documents)
+
+### To understand how components interact
+**Status:** Phase 2.4 (complete)
+- **Now:** `docs/seams-reference.md` — call paths by scenario, debugging workflows
+- **Fallback:** `docs/ARCHITECTURE.md` + `docs/EXTENDING.md`
+
+### To add a new feature / extension
+**Status:** Always current
+- **Start:** `docs/EXTENDING.md` seam map (which layer to touch)
+- **Then:** Relevant spec in `docs/superpowers/specs/` (e.g., m3-plugins for a new provider)
+- **Verify:** Invariants section of `docs/EXTENDING.md`
+
+### To onboard a new contributor
+**Status:** Phase 2 documentation gaps being filled
+- **Now:** `README.md` → "Architecture & Documentation" section with quick navigation
+- **Next:** Send to `docs/ARCHITECTURE.md` for system overview
+- **Then:** `docs/EXTENDING.md` seam map for the specific area they'll work in
+- **Finally:** Relevant spec for deep dives
+
+---
+
+## Metrics & Success Criteria
+
+### Phase 2 Success Criteria
+- ✅ All ADRs accessible and searchable in memory graph (Phase 2.3)
+- ✅ Plans directory fully indexed with approval status and purpose (THIS FILE)
+- ✅ README includes glossary link and architecture navigation (Phase 2.1 ✅)
+- ✅ Seams reference guide published and complete (Phase 2.4 ✅)
+- 📋 No orphaned ideas or decisions (Phase 2.5: glossary)
+- 📋 Coverage report shows 100% documentation of architectural invariants (Phase 3)
+
+### How to Verify
+```bash
+# Check README links to all key docs
+grep -E "ARCHITECTURE|EXTENDING|seams-reference|GLOSSARY" README.md
+
+# Check that all plans have entries
+ls docs/plans/*.md | wc -l  # should match number of entries here
+
+# (After Phase 2.3) Check ADR notes are in memory
+orc memory ls | grep -i adr  # should return 8 notes
+
+# (After Phase 2.5) Check glossary exists
+test -f docs/GLOSSARY.md && echo "glossary ready"
+```
+
+---
+
+## See Also
+
+- `README.md` — Architecture & Documentation section with quick navigation
+- `docs/ARCHITECTURE.md` — System map, modules, tiers, storage service
+- `docs/EXTENDING.md` — Seam map and invariants
+- `docs/seams-reference.md` — Call paths, debugging, component interactions
+- `docs/IDEAS.md` — Deferred work with triggers

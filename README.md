@@ -20,13 +20,40 @@ read is event-sourced rather than guessed at. Every task is auditable,
 resumable, project-isolated, and visible through separate execution, lineage,
 and knowledge graphs.
 
-## Documentation
+## Architecture & Documentation
 
-- **[Roadmap: Implementation Plans](docs/plans/INDEX.md)** — 18 plans organized by milestone and feature area; approval status and cross-references to ADRs
-- **[Architecture](docs/ARCHITECTURE.md)** — System map, three-tier layers, storage boundary, knowledge vs audit split
-- **[Extending](docs/EXTENDING.md)** — Adding providers, executors, skills, tools, event kinds
-- **[ADRs](docs/)** — 8 durable architecture decision records
-- **[Ideas & Backlog](docs/IDEAS.md)** — Deferred features, research directions, future optimizations
+Start here to navigate the codebase and understand the architectural foundations.
+
+### Quick Navigation
+
+| Topic | Purpose | Where to Find |
+|---|---|---|
+| **Architecture overview** | System map, data flow, seams, invariants | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — modules, tiers, storage service, execution flow |
+| **Extension points** | How to add providers, executors, tools, skills, events | [`docs/EXTENDING.md`](docs/EXTENDING.md) — seam map with invariants |
+| **Decisions & roadmap** | 18+ plans and architectural decision records | [`docs/plans/INDEX.md`](docs/plans/INDEX.md) — approval status, purpose, dependencies |
+| **Seams reference** | Component interactions, call paths, debugging | [`docs/seams-reference.md`](docs/seams-reference.md) — 5 scenarios, troubleshooting workflows |
+| **Glossary** | Key terms with definitions and links | [`docs/GLOSSARY.md`](docs/GLOSSARY.md) — 80+ architectural terms |
+| **Ideas & backlog** | Deferred features with triggers | [`docs/IDEAS.md`](docs/IDEAS.md) (spec) and [`docs/IDEAS-MEMORY-INDEX.md`](docs/IDEAS-MEMORY-INDEX.md) (memory-indexed) — future optimizations with conditions to ship |
+
+### Component Areas
+
+- **Event log** — canonical Postgres append-only history; foldable, auditable, never partial
+- **Execution** — durable workflows via DBOS Transact; operation journal before/after nodes; at-least-once recovery
+- **Plugins** — replaceable executor, model providers, MCP servers, extension system; zero-trust (declare + consent + fingerprint)
+- **Memory system** — event-first SurrealDB knowledge graph; typed edges; degraded-mode tolerant; web research carries citations
+- **Vault** — deterministic markdown projections of tasks, lineage, artifacts, and knowledge (disposable, rebuilt on restart)
+
+### Visual Navigation
+
+- `orc graph [--port 7749]` — live WebGL graph of tasks, steps, artifacts, and memory notes (read-only, localhost only)
+- `vault/` — filesystem projections: `index.md` (task tree + status), `tasks/<id>/execution.md` (steps + operations), `tasks/<id>/lineage.md` (artifact receipts), `memory/index.md` (knowledge graph)
+
+### Troubleshooting
+
+- **Degraded memory** — SurrealDB down? ⇒ one warning, explicit `memory unavailable` tool results, everything else keeps working
+- **Crash recovery** — resumable at any step via DBOS journal; see `orc status <task>` for unresolved operations
+- **Audit trail** — `orc log <task> --json` for full redacted event record; `orc replay <task> --at <seq>` to freeze-frame any moment
+- See also: [Seams reference guide](docs/seams-reference.md) — detailed debugging strategies
 
 ## Stack
 
@@ -59,6 +86,7 @@ orc replay <task-id> --at <seq> # read-only audit replay at any event sequence
 orc log <task-id> --json        # full redacted event records
 orc skills                      # indexed SKILL.md skills (vault/skills/<name>/SKILL.md)
 orc mcp trust <id>              # local consent, bound to the server's declaration fingerprint
+orc mcp serve [--autonomy full] # serve THIS project to external agents over stdio (door #2)
 orc ext trust <path>            # local consent, bound to extension dependency closure + bun.lock
 orc retry <task-id>             # re-run failed steps after a block
 ```
@@ -75,6 +103,31 @@ orc propose "$task_id" --model anthropic/claude-sonnet-5 --skill documentation
 orc approve "$task_id"
 orc run "$task_id" --cwd .
 ```
+
+### Driving orc from another agent (door #2, MCP)
+
+orc is usable from two doors: humans work the web UI (`orc graph`); external agents —
+Claude Code, any MCP client — drive the same substrate over stdio:
+
+```bash
+claude mcp add orc -- bun /path/to/orchestrator/packages/cli/src/bin.ts mcp serve
+# or fully autonomous (approve included, attributed as approvedBy: mcp):
+claude mcp add orc -- … mcp serve --autonomy full
+```
+
+Tools served (project-bound, same `OrcActions` validation as the web):
+
+| Kind | Tools |
+|---|---|
+| Read | `project_status`, `task_plan`, `task_transcript`, `plan_notes`, `recent_activity` |
+| Knowledge (degraded-tolerant) | `memory_search`, `memory_read`, `memory_neighbors` |
+| Mutate | `new_request` (quick/grounded), `propose`, `run`, `reply`, `retry`, `cancel`, `annotate`, `revise` |
+| The gate | `approve` — refuses under the default `--autonomy gated` (the human approves in the UI or `orc approve`); approves under `--autonomy full`, recorded as `approvedBy: mcp` |
+
+stdout carries ONLY protocol frames: boot diagnostics are rebound to stderr, and the
+transport owns the real stdout — DBOS's logger cannot corrupt the channel. Trust grants and
+`orc init` are never exposed over MCP. Memory writing stays with the agents running inside
+plans — the external driver reads knowledge, it does not author it.
 
 ### Sourced web research
 
@@ -154,9 +207,25 @@ by the agent.
   only the distilled note reaches the knowledge graph.
 - **Observed use, not assumed use.** `memory_accessed` events make
   `hits`/`lastAccessedAt` canonical, so they survive a read-model rebuild
-  instead of being silently zeroed by it. Nothing ranks or expires on the
+  instead of being silently zeroed by it. Agent reads are task-bound in the
+  envelope (per-task pull counts in the UI). Nothing ranks or expires on the
   counter — it is measurement, so a later decay policy can be tuned against
   data rather than guessed.
+- **The human gate is structural.** The copilot has no approve tool; over MCP,
+  `approve` exists only behind the launch-time `--autonomy full` dial and every
+  such approval is recorded as `approvedBy: mcp`. An agent can never widen its
+  own autonomy mid-session.
+- **Copilot conversations are events.** Each web-chat exchange is journaled as a
+  `copilot_exchange` event (user text, assistant text, tool summaries, priced
+  usage); the chat pane rebuilds from the log after reload — the browser is a
+  cache, never the record.
+- **Zone write-fences.** A step declaring `zone` globs can only write inside
+  them (`fs_write` refuses with a named fence); reads stay free, empty zone =
+  unrestricted. Deterministic env errors (`EACCES`/`ENOENT`/…) fail a step on
+  attempt 1 instead of burning retries.
+- **Degradation is visible.** `orc graph` polls `/api/health` (backed by
+  `probeMemory`) and shows a red badge with the projector lag when the memory
+  read model is stale or unreachable — within one 15s poll interval.
 
 ## Vault views
 
