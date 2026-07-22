@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'bun:test'
+import { z } from 'zod'
 import { MEMORY_ACCESS, MEMORY_LIMITS, MemoryNoteInput, type MemoryAccessMode, type MemoryNote, type MemoryNoteDraft, type MemoryStore, type NoteSummary } from '@orc/contracts'
 import { MEMORY_READ_TOOLS, memoryTools, tierForRole } from './tools'
 
@@ -42,6 +43,26 @@ describe('memory tools', () => {
     const z = await write.execute({ id: 'sub-a', title: 'Sub A', zone: ['docs/**'] })
     expect(z.isError).toBe(false)
     expect(written[1]?.input).toMatchObject({ zone: ['docs/**'] })
+  })
+
+  it('memory_write passes omissions through raw (no injected defaults) and surfaces lint warnings', async () => {
+    const { store, written } = fakeStore()
+    const tools = memoryTools(store, { source: 'agent' })
+    const write = tools.find(t => t.name === 'memory_write')!
+    // an omitted body must reach the gateway as an OMISSION — a defaulted '' here would turn
+    // every partial update into a destructive clear (the graph-refresh body-wipe, tool edition)
+    await write.execute({ id: 'auth', title: 'Auth' })
+    expect('body' in written[0]!.input).toBe(false)
+    expect('links' in written[0]!.input).toBe(false)
+    // lint: a flat relates_to star comes back as a warning the model can act on next iteration
+    const linty = await write.execute({
+      id: 'hub', title: 'Hub', kind: 'architecture_current',
+      links: [{ id: 'a', kind: 'relates_to' }, { id: 'b', kind: 'relates_to' }, { id: 'c', kind: 'relates_to' }],
+    })
+    expect(linty.isError).toBe(false)
+    const out = z.object({ id: z.string(), warnings: z.array(z.string()) }).parse(linty.output)
+    expect(out.warnings.some(w => w.includes('relates_to'))).toBe(true)
+    expect(out.warnings.some(w => w.includes('categories'))).toBe(true)
   })
 
   it('memory_write derives an idempotency key from runToken + toolCallId; none without them', async () => {
