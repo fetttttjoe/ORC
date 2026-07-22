@@ -110,8 +110,9 @@ const KNOWLEDGE_PROTOCOL = `# Project knowledge protocol
 3. Verify stale or path-relevant notes against the workspace before relying on them.
 4. Write or refine durable findings after architecture, conventions, or important code paths change.
 5. Use kind 'architecture_current' for observed implementation and 'architecture_target' for intent.
-6. memory_write merges: omitted fields keep their stored values — update only what changed; pass an explicit empty string/array to clear a field.
-7. Scope discipline: the 'project' scope holds durable knowledge only (architecture, decisions, conventions). Step reports, audit results, and other run output belong in your plan scope.`
+6. Update only what changed — memory_write merges omitted fields; an explicit empty clears.
+7. Scope discipline: 'project' scope holds durable knowledge only; step reports and audit output belong in your plan scope.
+8. Hand off by reference: findings go into notes; your signal summary carries conclusions plus the note ids — never restate note bodies. Downstream steps pull them at their own budget.`
 
 function buildPrompt(ctx: ExecutorContext<LanguageModel>): string {
   const skills = ctx.skills
