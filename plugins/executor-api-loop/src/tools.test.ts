@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import type { ResolvedTool } from '@orc/contracts'
 import { resolveInWorkspace } from '@orc/contracts'
-import { TOOL_NAME, executeTool, toolSet } from './tools'
+import { TOOL_NAME, executeTool, releaseWriteClaims, toolSet } from './tools'
 
 const ws = () => mkdtempSync(path.join(tmpdir(), 'orc-ws-'))
 
@@ -44,14 +44,39 @@ describe('workspace scoping (trust boundary)', () => {
 describe('fs tools', () => {
   it('fs_write outside the declared zone fails with a named fence; inside passes; reads unfenced', async () => {
     const dir = ws()
-    const denied = await executeTool(TOOL_NAME.fs_write, { path: 'src/x.ts', content: 'x' }, dir, [], undefined, ['docs/**'])
+    const denied = await executeTool(TOOL_NAME.fs_write, { path: 'src/x.ts', content: 'x' }, dir, [], undefined, { zone: ['docs/**'] })
     expect(denied.isError).toBe(true)
     expect(JSON.stringify(denied.output)).toContain('zone fence')
-    const ok = await executeTool(TOOL_NAME.fs_write, { path: 'docs/notes.md', content: 'n' }, dir, [], undefined, ['docs/**'])
+    const ok = await executeTool(TOOL_NAME.fs_write, { path: 'docs/notes.md', content: 'n' }, dir, [], undefined, { zone: ['docs/**'] })
     expect(ok.isError).toBe(false)
     // reads are never fenced — the zone is a WRITE boundary
-    const read = await executeTool(TOOL_NAME.fs_read, { path: 'docs/notes.md' }, dir, [], undefined, ['other/**'])
+    const read = await executeTool(TOOL_NAME.fs_read, { path: 'docs/notes.md' }, dir, [], undefined, { zone: ['other/**'] })
     expect(read.isError).toBe(false)
+  })
+
+  it('concurrent sibling writes to one path are refused mechanically; release frees the claim', async () => {
+    const dir = ws()
+    const a = { writer: 'step:t:a:a1' }
+    const b = { writer: 'step:t:b:a1' }
+    expect((await executeTool(TOOL_NAME.fs_write, { path: 'shared.md', content: 'A' }, dir, [], undefined, a)).isError).toBe(false)
+    // same step rewrites its own file freely (iterations)
+    expect((await executeTool(TOOL_NAME.fs_write, { path: 'shared.md', content: 'A2' }, dir, [], undefined, a)).isError).toBe(false)
+    const clash = await executeTool(TOOL_NAME.fs_write, { path: 'shared.md', content: 'B' }, dir, [], undefined, b)
+    expect(clash.isError).toBe(true)
+    expect(JSON.stringify(clash.output)).toContain('concurrent write refused')
+    // step A ends → claims release → the sequential successor may write (dependsOn ordering)
+    releaseWriteClaims(a.writer)
+    expect((await executeTool(TOOL_NAME.fs_write, { path: 'shared.md', content: 'B' }, dir, [], undefined, b)).isError).toBe(false)
+    releaseWriteClaims(b.writer)
+  })
+
+  it('fs_write is atomic: content lands whole and no temp files remain', async () => {
+    const dir = ws()
+    await executeTool(TOOL_NAME.fs_write, { path: 'out/f.txt', content: 'whole' }, dir)
+    const r = await executeTool(TOOL_NAME.fs_read, { path: 'out/f.txt' }, dir)
+    expect((r.output as { content: string }).content).toBe('whole')
+    const l = await executeTool(TOOL_NAME.fs_list, { path: 'out' }, dir)
+    expect((l.output as { entries: string[] }).entries).toEqual(['f.txt']) // no .tmp residue
   })
 
   it('write → read → list roundtrip, mkdir -p for parents', async () => {
