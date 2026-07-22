@@ -107,6 +107,10 @@ const MemoryNoteBase = z.object({
   sources: z.array(MemorySourceInput).max(MEMORY_SOURCE_LIMITS.items).default([]), // provenance for a web finding
   rationale: z.string().max(MEMORY_LIMITS.rationaleChars).default(''),          // plan-note: why this subplan exists
   uncertainty: z.array(z.string().max(MEMORY_LIMITS.detailChars)).max(MEMORY_LIMITS.detailItems).default([]), // plan-note: coverage gaps / assumptions (RG7)
+  // plan-note: workspace-relative write globs this subplan may touch at execution — the freezer
+  // carries them into the child step's zone and the executor's write-fence enforces them.
+  // Parallel siblings declare DISJOINT zones; empty = unfenced (paths is documentation, zone is policy).
+  zone: z.array(z.string().min(1).max(MEMORY_LIMITS.detailChars)).max(16).default([]),
 })
 export const MemoryNoteInput = MemoryNoteBase.refine(
   n => !(n.scope === 'project' && n.id === 'index'),

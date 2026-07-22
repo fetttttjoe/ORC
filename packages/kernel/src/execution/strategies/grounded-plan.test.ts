@@ -5,7 +5,7 @@ import * as groundedPlan from './grounded-plan'
 
 const note = (over: Partial<MemoryNote> & { id: string }): MemoryNote => ({
   scope: 'plan-t', kind: 'plan', sourceRevision: null, title: over.id, categories: [], tags: [],
-  links: [], paths: [], rules: [], summary: '', body: '', retention: 'durable', sources: [], rationale: '', uncertainty: [],
+  links: [], paths: [], rules: [], summary: '', body: '', retention: 'durable', sources: [], rationale: '', uncertainty: [], zone: [],
   createdAt: '', createdBy: '', updatedAt: '', updatedBy: '', revision: 1, ...over,
 })
 const link = (id: string, kind: MemoryLink['kind']): MemoryLink => ({ id, kind })
@@ -39,7 +39,18 @@ describe('instantiateFrozenPlan (pure, deterministic)', () => {
     expect(draft.steps.map(s => s.id)).toEqual(['db', 'api'])
     expect(draft.steps.find(s => s.id === 'api')!.dependsOn).toEqual(['db'])
     expect(draft.steps.find(s => s.id === 'db')!.dependsOn).toEqual([])
-    expect(draft.steps[0]).toEqual({ id: 'db', role: 'implementer', title: 'DB', instructions: 'create the schema', dependsOn: [], skillRefs: [], toolRefs: [] })
+    expect(draft.steps[0]).toEqual({ id: 'db', role: 'implementer', title: 'DB', instructions: 'create the schema', dependsOn: [], skillRefs: [], toolRefs: [], zone: [] })
+  })
+
+  it("freezes a note's declared write zone into the step — the fence, not the skill, holds it", () => {
+    const notes: MemoryNote[] = [
+      note({ id: 'masterplan', links: [link('a', LINK_KIND.decomposes_into), link('b', LINK_KIND.decomposes_into)] }),
+      note({ id: 'a', title: 'A', body: 'x', zone: ['docs/**'] }),
+      note({ id: 'b', title: 'B', body: 'y' }),
+    ]
+    const draft = instantiateFrozenPlan('masterplan', notes)
+    expect(draft.steps.find(s => s.id === 'a')!.zone).toEqual(['docs/**'])
+    expect(draft.steps.find(s => s.id === 'b')!.zone).toEqual([]) // undeclared = unfenced
   })
 
   it("freezes a 'verify' subplan as auditor; siblings stay implementer", () => {

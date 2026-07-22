@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test'
-import { Plan, PlanStep, validatePlan } from './plan'
+import { ChildPlanStep, Plan, PlanStep, validatePlan } from './plan'
 import { planFixture, stepFixture } from './fixtures'
 
 const step = (id: string, dependsOn: string[] = []): PlanStep => stepFixture({ id, title: id, dependsOn })
@@ -44,6 +44,13 @@ describe('validatePlan', () => {
   })
   it('rejects path-unsafe step ids', () => {
     expect(() => plan([step('../x')])).toThrow()
+  })
+
+  it('ChildPlanStep: zone is the child\u2019s own declaration, defaulting to unfenced', () => {
+    const base = { id: 's1', role: 'r', title: 't', instructions: 'i', skillRefs: [], toolRefs: [], dependsOn: [] }
+    expect(ChildPlanStep.parse(base).zone).toEqual([])
+    expect(ChildPlanStep.parse({ ...base, zone: ['docs/**'] }).zone).toEqual(['docs/**'])
+    expect(() => ChildPlanStep.parse({ ...base, zone: [''] })).toThrow() // empty glob is a typo, not a fence
   })
 
   it('toolRefs defaults to [] and validates ref shape', () => {

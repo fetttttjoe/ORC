@@ -48,14 +48,17 @@ export const PlanDraft = Plan.omit({ taskId: true, version: true })
 export type PlanDraft = z.infer<typeof PlanDraft>
 
 // What the proposing agent authors in task_split (spec D3): a trimmed PlanDraft.
-// executorRef/modelRef/isolation/zone/maxIterations are inherited from the parent step at expansion.
+// executorRef/modelRef/isolation/maxIterations are inherited from the parent step at expansion;
+// zone is the child's OWN declaration (write-fence for parallel siblings) — default unfenced.
 export const ChildPlanStep = PlanStep.omit({
   executorRef: true, modelRef: true, isolation: true, zone: true, maxIterations: true,
-})
+}).extend({ zone: z.array(z.string().min(1)).max(16).default([]) })
 export type ChildPlanStep = z.infer<typeof ChildPlanStep>
 
 export const ChildPlanDraft = z.object({ steps: z.array(ChildPlanStep).min(1) })
 export type ChildPlanDraft = z.infer<typeof ChildPlanDraft>
+// what CALLERS hand proposeSplit: defaults (zone) not yet applied — the kernel parses
+export type ChildPlanDraftInput = z.input<typeof ChildPlanDraft>
 
 export function validatePlan(plan: Plan): { ok: true } | { ok: false; errors: string[] } {
   const errors: string[] = []

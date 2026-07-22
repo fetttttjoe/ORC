@@ -15,7 +15,7 @@ afterAll(async () => { for (const d of drops) await d() })
 const note = (over: Partial<MemoryNote>): MemoryNote => ({
   id: 'n', scope: 'project', kind: 'fact', sourceRevision: null, title: 'N',
   categories: [], tags: [], links: [], paths: [], rules: [], summary: '', body: 'body',
-  retention: 'durable', sources: [], rationale: '', uncertainty: [],
+  retention: 'durable', sources: [], rationale: '', uncertainty: [], zone: [],
   createdAt: 'T', createdBy: 'cli', updatedAt: 'T', updatedBy: 'cli', revision: 1, ...over,
 })
 

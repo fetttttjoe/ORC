@@ -232,7 +232,7 @@ describe('Kernel lifecycle', () => {
     const args = {
       parentTaskId: parent.id, stepId: 's1', runToken: `step:${parent.id}:s1:a1`, toolCallId: 'call_1',
       title: 'C', spec: 'child work', budgetUSD: 99,
-      plan: { steps: [{ id: 'w1', role: 'worker', title: 'w', instructions: 'do', dependsOn: [], skillRefs: [], toolRefs: [] }] },
+      plan: { steps: [{ id: 'w1', role: 'worker', title: 'w', instructions: 'do', dependsOn: [], skillRefs: [], toolRefs: [], zone: ['docs/**'] }] },
       parentStep: { executorRef: 'api-loop', modelRef: 'fake/m', maxIterations: 5 },
       policy: ApprovalPolicy.parse({}), maxDepth: 3,
     }
@@ -244,7 +244,7 @@ describe('Kernel lifecycle', () => {
     expect(child?.budgetUSD).toBe(10)             // clamped to subtree-remaining, not the requested 99
     expect(child?.status).toBe('awaiting_approval') // manual default parks it
     const plan = await k.getPlan(r.childTaskId)
-    expect(plan?.steps[0]).toMatchObject({ id: 'w1', executorRef: 'api-loop', modelRef: 'fake/m', maxIterations: 5, isolation: 'local' })
+    expect(plan?.steps[0]).toMatchObject({ id: 'w1', executorRef: 'api-loop', modelRef: 'fake/m', maxIterations: 5, isolation: 'local', zone: ['docs/**'] })
     // idempotent: same (runToken, toolCallId) → same ids, no second child
     const again = await k.proposeSplit(args)
     expect(again.childTaskId).toBe(r.childTaskId)
