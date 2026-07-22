@@ -7,6 +7,7 @@
 // pin the connection to the vetted IP via a custom dispatcher if this graduates past simulation;
 // same for the single search backend.
 import { lookup } from 'node:dns/promises'
+import { errorMessage } from '@orc/contracts'
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { z } from 'zod'
@@ -108,7 +109,7 @@ server.registerTool(
       const results = await search(query, limit ?? 5)
       return { content: [{ type: 'text', text: JSON.stringify(results, null, 2) }] }
     } catch (e) {
-      return { content: [{ type: 'text', text: `search failed: ${e instanceof Error ? e.message : String(e)}` }], isError: true }
+      return { content: [{ type: 'text', text: `search failed: ${errorMessage(e)}` }], isError: true }
     }
   },
 )
@@ -125,7 +126,7 @@ server.registerTool(
       const text = stripHtml(await r.text()).slice(0, 5000)
       return { content: [{ type: 'text', text: `URL: ${url}\nHTTP ${r.status}\n\n${text}` }] }
     } catch (e) {
-      return { content: [{ type: 'text', text: `fetch failed: ${e instanceof Error ? e.message : String(e)}` }], isError: true }
+      return { content: [{ type: 'text', text: `fetch failed: ${errorMessage(e)}` }], isError: true }
     }
   },
 )
