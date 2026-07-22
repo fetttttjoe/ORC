@@ -3,7 +3,7 @@ import path from 'node:path'
 import { jsonSchema, tool } from 'ai'
 import { z } from 'zod'
 import type { ResolvedTool } from '@orc/contracts'
-import { SignalOutcome, resolveInWorkspace } from '@orc/contracts'
+import { errorMessage, SignalOutcome, assertInZone, resolveInWorkspace } from '@orc/contracts'
 
 export const TOOL_NAME = {
   signal: 'signal',
@@ -71,6 +71,7 @@ export async function executeTool(
   workspaceDir: string,
   extra: ResolvedTool[] = [],
   toolCallId?: string,
+  zone: string[] = [], // step's declared write-fence globs; [] = unrestricted
 ): Promise<{ output: unknown; isError: boolean }> {
   try {
     switch (name) {
@@ -81,6 +82,7 @@ export async function executeTool(
       case TOOL_NAME.fs_write: {
         const { path: p, content } = WriteInput.parse(input)
         const abs = resolveInWorkspace(workspaceDir, p)
+        assertInZone(workspaceDir, abs, zone) // named fence error → the model can correct course
         mkdirSync(path.dirname(abs), { recursive: true })
         writeFileSync(abs, content)
         return { output: { written: p }, isError: false }
@@ -96,6 +98,6 @@ export async function executeTool(
       }
     }
   } catch (err) {
-    return { output: { error: err instanceof Error ? err.message : String(err) }, isError: true }
+    return { output: { error: errorMessage(err) }, isError: true }
   }
 }
