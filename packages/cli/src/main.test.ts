@@ -2,8 +2,9 @@ import { afterAll, afterEach, describe, expect, it, mock, spyOn } from 'bun:test
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
+import type { Command } from 'commander'
 import { Surreal } from 'surrealdb'
-import { EVENT_KIND, type ExecutionPort, type OperationSpec } from '@orc/contracts'
+import { EVENT_KIND, MemoryAccessedPayload, type ExecutionPort, type OperationSpec } from '@orc/contracts'
 import { loadConfig, projectDatabaseName, requireProject, type ProjectConfig } from '@orc/kernel'
 import { createTestDb, TEST_PROJECT_ID } from '@orc/kernel/test-helpers'
 import { buildProgram, openKernel, runInit } from './main'
@@ -13,9 +14,9 @@ import { buildProgram, openKernel, runInit } from './main'
 // any test can call exitOverride — so a subcommand option error would process.exit(1) and kill
 // the whole test process mid-suite instead of rejecting.
 const overrideExits = (program: ReturnType<typeof buildProgram>): ReturnType<typeof buildProgram> => {
-  const walk = (c: { exitOverride(): unknown; commands: readonly unknown[] }): void => {
+  const walk = (c: Command): void => {
     c.exitOverride()
-    for (const sub of c.commands) walk(sub as typeof c)
+    for (const sub of c.commands) walk(sub)
   }
   walk(program)
   return program
@@ -562,7 +563,7 @@ describe('orc CLI', () => {
     const afterHit = await accessCount()
     expect(afterHit).toBe(beforeHit + 1)
     const accessed = (await log.all()).filter(e => e.kind === EVENT_KIND.memory_accessed)
-    const lastAccess = accessed.at(-1)!.payload as { id: string; mode: string }
+    const lastAccess = MemoryAccessedPayload.parse(accessed.at(-1)!.payload)
     expect(lastAccess.mode).toBe('neighbors')
     expect(lastAccess.id).toBe('nb-seed')
 

@@ -1,6 +1,7 @@
 // How the knowledge graph folded out during a task: which notes were pulled and
 // written, by which step. Run: bun bench/graph-usage.ts <taskId-prefix>
 // ponytail: relative imports — bench/ is not a workspace package and doesn't need to be
+import { MemoryAccessedPayload, MemoryWrittenPayload } from '../packages/contracts/src/index.ts'
 import { loadConfig, openStorage, requireProject } from '../packages/kernel/src/index.ts'
 
 const prefix = process.argv[2]
@@ -15,12 +16,12 @@ const rows: Row[] = []
 for (const e of events) {
   if (e.kind === 'memory_accessed') {
     if (!e.taskId?.startsWith(prefix)) continue // envelope-bound to the acting step
-    const p = e.payload as { id: string; scope: string; mode: string }
+    const p = MemoryAccessedPayload.parse(e.payload)
     rows.push({ step: e.stepId ?? '?', kind: `pull:${p.mode}`, note: `${p.scope}/${p.id}`, detail: '' })
   } else {
-    const p = e.payload as { note: { id: string; scope: string; body?: string; links?: unknown[] }; author: { taskId?: string | null } }
-    if (!p.author?.taskId?.startsWith(prefix)) continue // writes carry the author, not the envelope
-    rows.push({ step: '(author)', kind: 'write', note: `${p.note.scope}/${p.note.id}`, detail: `${(p.note.body ?? '').length}ch ${(p.note.links ?? []).length} links` })
+    const p = MemoryWrittenPayload.parse(e.payload)
+    if (!p.author.taskId?.startsWith(prefix)) continue // writes carry the author, not the envelope
+    rows.push({ step: '(author)', kind: 'write', note: `${p.note.scope}/${p.note.id}`, detail: `${p.note.body.length}ch ${p.note.links.length} links` })
   }
 }
 
