@@ -1,6 +1,23 @@
 import { z } from 'zod'
-import { errorMessage, MEMORY_ACCESS, MEMORY_LIMITS, MEMORY_SOURCE_LIMITS, NOTE_KINDS, LINK_KINDS, RETENTION_CLASSES, LinkKind, MemoryNoteInput, type MemoryAuthor, type MemoryStore, type ResolvedTool } from '@orc/contracts'
+import { errorMessage, MEMORY_ACCESS, MEMORY_LIMITS, MEMORY_SOURCE_LIMITS, NOTE_KINDS, LINK_KIND, LINK_KINDS, RETENTION_CLASSES, LinkKind, MemoryNoteDraftInput, type MemoryAuthor, type MemoryNote, type MemoryStore, type ResolvedTool } from '@orc/contracts'
 import { applyBudget, fitMemoryNoteToBudget } from './budget'
+
+// Advisory note lint, echoed back in the memory_write result so the writing agent can improve
+// the note in its next iteration — warnings, never rejections: a blocked write mid-run burns
+// more tokens than a mediocre note. Thresholds follow the codebase-analysis skill's skeleton.
+const BODY_SOFT_CAP = 1600
+export function noteLint(n: MemoryNote): string[] {
+  const w: string[] = []
+  if (n.body.length > BODY_SOFT_CAP)
+    w.push(`body is ${n.body.length} chars — the skeleton caps at ~1200: move facts into paths/rules/links fields, keep bullets only`)
+  if (n.kind.startsWith('architecture') && n.categories.length === 0)
+    w.push(`categories empty — set one of subsystem | cross-cutting | target so category-filtered search finds this`)
+  if (n.links.length >= 3 && n.links.every(l => l.kind === LINK_KIND.relates_to))
+    w.push(`every edge is relates_to — type structural edges (decomposes_into for hub→area, depends_on for imports)`)
+  if (n.summary && n.summary.toLowerCase().replace(/[^a-z0-9]/g, '').startsWith(n.title.toLowerCase().replace(/[^a-z0-9]/g, '')))
+    w.push(`summary restates the title — it is the retrieval surface; spend it on what searches must find`)
+  return w
+}
 
 const ok = (output: unknown) => ({ output, isError: false })
 const err = (e: unknown) => ({ output: { error: errorMessage(e) }, isError: true })
@@ -119,17 +136,21 @@ export function memoryTools(store: MemoryStore, author: MemoryAuthor, tier: Memo
       },
       execute: async (input, toolCallId) => {
         try {
-          const note = MemoryNoteInput.parse(input)
+          // parse WITHOUT defaults: MemoryNoteInput here would fill body:'' etc. and turn every
+          // omitted field into an explicit clear, defeating the store gateway's merge-on-omit.
+          // The gateway parses the merged note fully — same validation, right order, no casts.
+          const draft = MemoryNoteDraftInput.parse(input)
           const idempotencyKey = author.runToken && toolCallId
-            ? `${author.runToken}:tool:${toolCallId}:memory:${note.id}`
+            ? `${author.runToken}:tool:${toolCallId}:memory:${draft.id}`
             : undefined
-          const n = await store.write(note, author, { idempotencyKey })
+          const n = await store.write(draft, author, { idempotencyKey })
           // No revision: the write is event-first and the projector is asynchronous, so within
           // the flush window store.write reports the revision from BEFORE this write (and
           // fabricates 1 when nothing is projected yet). Handing the model a number that was
           // never true for its own write is worse than omitting it — read the note for the
           // authoritative value.
-          return ok({ id: n.id })
+          const warnings = noteLint(n)
+          return ok(warnings.length ? { id: n.id, warnings } : { id: n.id })
         } catch (e) { return err(e) }
       },
     },

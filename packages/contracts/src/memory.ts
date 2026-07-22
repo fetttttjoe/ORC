@@ -129,6 +129,37 @@ export type MemoryNoteInput = z.infer<typeof MemoryNoteInput>
 // What callers hand the gateway: the schema's raw input, defaults not yet applied.
 export type MemoryNoteDraft = z.input<typeof MemoryNoteInput>
 
+// Validates an upsert draft AT A TOOL BOUNDARY without applying defaults — an omitted field must
+// reach the store gateway as an omission (merge-on-omit carries the stored value forward), never
+// as a defaulted empty. `.partial()` is NOT enough: a defaulted field still fires its default for
+// a missing key. Each optional field references the base shape so constraints stay single-source;
+// the gateway parses the merged note with MemoryNoteInput afterwards (refinements included).
+const optionalNoDefault = <T extends z.ZodTypeAny>(s: z.ZodDefault<T>): z.ZodOptional<T> =>
+  s.removeDefault().optional()
+export const MemoryNoteDraftInput = z.object({
+  id: MemoryNoteBase.shape.id,
+  title: MemoryNoteBase.shape.title,
+  scope: optionalNoDefault(MemoryNoteBase.shape.scope),
+  kind: optionalNoDefault(MemoryNoteBase.shape.kind),
+  sourceRevision: optionalNoDefault(MemoryNoteBase.shape.sourceRevision),
+  categories: optionalNoDefault(MemoryNoteBase.shape.categories),
+  tags: optionalNoDefault(MemoryNoteBase.shape.tags),
+  links: optionalNoDefault(MemoryNoteBase.shape.links),
+  paths: optionalNoDefault(MemoryNoteBase.shape.paths),
+  rules: optionalNoDefault(MemoryNoteBase.shape.rules),
+  summary: optionalNoDefault(MemoryNoteBase.shape.summary),
+  body: optionalNoDefault(MemoryNoteBase.shape.body),
+  retention: optionalNoDefault(MemoryNoteBase.shape.retention),
+  sources: optionalNoDefault(MemoryNoteBase.shape.sources),
+  rationale: optionalNoDefault(MemoryNoteBase.shape.rationale),
+  uncertainty: optionalNoDefault(MemoryNoteBase.shape.uncertainty),
+  zone: optionalNoDefault(MemoryNoteBase.shape.zone),
+})
+// a field added to MemoryNoteBase but forgotten here is a compile error, not silent drift
+type DraftCoversBase = keyof typeof MemoryNoteBase.shape extends keyof typeof MemoryNoteDraftInput.shape ? true : never
+const draftCoversBase: DraftCoversBase = true
+void draftCoversBase
+
 // The stored/rendered note: input + provenance/lifecycle the projector derives from events.
 // `sources` is overridden with the stored shape — same citations, plus the retrieval time the
 // projector stamps from the event.
