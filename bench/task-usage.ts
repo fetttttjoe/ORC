@@ -38,4 +38,17 @@ for (const id of ids) {
 }
 const mins = firstTs && lastTs ? (new Date(lastTs).getTime() - new Date(firstTs).getTime()) / 60_000 : 0
 console.log(`\nTOTAL in=${fmt(inTok)} out=${fmt(outTok)} cacheRead=${fmt(cacheTok)} cost=$${cost.toFixed(4)}  iterations=${iterations}  wall=${mins.toFixed(1)}min`)
+
+// cross-validation: the fold above must agree with an independent raw scan over event.usage —
+// if these ever disagree, either the fold or the extractor is wrong and the report is untrustworthy
+let rawIn = 0, rawOut = 0
+for (const e of events) {
+  if (!e.usage || !e.taskId || !ids.includes(e.taskId)) continue
+  rawIn += e.usage.inputTokens; rawOut += e.usage.outputTokens
+}
+if (rawIn !== inTok || rawOut !== outTok) {
+  console.error(`VALIDATION FAILED: fold(in=${fmt(inTok)},out=${fmt(outTok)}) != raw-scan(in=${fmt(rawIn)},out=${fmt(rawOut)})`)
+  process.exit(1)
+}
+console.log(`validated: fold totals match independent raw event scan`)
 process.exit(0)
