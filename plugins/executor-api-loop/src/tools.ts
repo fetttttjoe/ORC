@@ -33,7 +33,7 @@ export function toolSet(extra: ResolvedTool[] = []) {
   return {
     [TOOL_NAME.signal]: tool({
       description:
-        'End this step and report the outcome. Your summary is the ONLY output downstream steps see — put your results/conclusions in it. Declare files you produced in `outputs` (workspace-relative paths) so they are verified and receipted. Call this exactly once, when the work is done or cannot proceed.',
+        'End this step and report the outcome. Your summary is the ONLY output downstream steps see — put your conclusions and the ids of notes you wrote in it; do not restate note bodies (downstream pulls notes at its own budget). Declare files you produced in `outputs` (workspace-relative paths) so they are verified and receipted. Call this exactly once, when the work is done or cannot proceed.',
       inputSchema: SignalInput,
     }),
     [TOOL_NAME.fs_read]: tool({
