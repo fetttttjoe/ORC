@@ -2,7 +2,7 @@ import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync } from '
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { Command, InvalidArgumentError } from 'commander'
-import { EVENT_KIND, LINK_KINDS, MEMORY_ACCESS, PlanDraft, RUN_OUTCOME, STRATEGY, TASK_STATUS, type Analyzer, type EventRecord, type ExecutionPort, type LinkKind, type Plan, type RunHandle } from '@orc/contracts'
+import { EVENT_KIND, LINK_KINDS, MEMORY_ACCESS, PlanDraft, RUN_OUTCOME, STRATEGY, TASK_STATUS, LinkKind, type Analyzer, type EventRecord, type ExecutionPort, type Plan, type RunHandle } from '@orc/contracts'
 import { openStorage, Kernel, fold, grantExtensionTrust, grantMcpTrust, initializeProject, isExtensionTrusted, isMcpTrusted, loadConfig, loadTrust, migrateDatabase, requireProject, taskUsage, type EventLog, type OrcConfig, type PluginHost, type ProjectConfig, type Storage } from '@orc/kernel'
 import { createVaultProjector, parsePlanFile } from '@orc/vault-projector'
 import { createMemory, probeMemory } from '@orc/memory'
@@ -630,7 +630,8 @@ export function buildProgram(
       if (o.kinds) for (const k of o.kinds)
         if (!(LINK_KINDS as readonly string[]).includes(k))
           throw new Error(`unknown --kinds '${k}' — valid kinds: ${LINK_KINDS.join(', ')}`)
-      const kinds = o.kinds as LinkKind[] | undefined
+      // parse at the boundary, never cast — the loop above guarantees this cannot throw
+      const kinds = o.kinds?.map(k => LinkKind.parse(k))
       const { config, log } = needPlugin()
       const memory = await createMemory({ log, config })
       try {
