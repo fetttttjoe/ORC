@@ -267,3 +267,36 @@ Code. That last one is the direct inverse of our posture — declaration in
 `.orc/config.json`, consent in `.orc/trust.json`, grants bound to a fingerprint,
 `orc mcp trust` an explicit human act. Their convenience is our threat model;
 worth remembering only as a thing to keep not doing.
+
+---
+
+## 9. First-class rule notes with a violation trail
+
+**Source:** knowledge-graph optimization session, 2026-07-22.
+
+**What it is:** `'rule'` as a new `NOTE_KIND` — project rules become
+addressable graph nodes agents actually see, proposed by a small
+"architect" model from project settings/instructions but **human-approved
+before they bind** (same gate philosophy as plans). A violation is itself a
+note linking `contradicts → rule-x` with the reason in the body and
+`retention: expirable`, so agents can ask "was this tried and rejected?"
+before re-litigating, and the trail can be swept.
+
+**Why deferred:** waiting on the graph-refresh run and bench results first;
+and a rule without enforcement is decoration.
+
+**Design fixes already known:**
+
+1. The per-note `rules[]` field is dead weight today — stored, rendered,
+   token-budgeted, never injected into any agent prompt. Fold it into rule-note
+   bodies when this ships; two homes for rules is worse than either.
+2. Reuse, don't invent: `contradicts` covers the violation edge, `expirable`
+   covers the trail's lifecycle. No new link kind, no new retention class.
+3. Three enforcement tiers, each with existing precedent: code-enforced (the
+   zone write-fence — executor refuses), auditor-checked (the `verify` step
+   receives rule notes in its prompt and is the one writer of violation notes —
+   never self-reporting agents), advisory (top-N relevant rules pushed into
+   step prompts; an agent will not search for the rule it is about to break).
+
+**Trigger:** an agent repeats an approach a human already rejected, or a bench
+probe like `"what rules govern fs writes"` exists and fails.
