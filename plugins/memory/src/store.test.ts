@@ -79,6 +79,34 @@ describe('MemoryStore gateway', () => {
     expect(await gitRevision(dir)).toMatch(/^[0-9a-f]{40}$/)
   })
 
+  it('upsert merges omitted fields from the existing note; explicit empty clears', async () => {
+    const pg = await createTestDb(); drops.push(pg.drop)
+    const ts = await createTestSurreal(); drops.push(ts.drop)
+    const log = (await openStorage(pg.url, { projectId: TEST_PROJECT_ID })).events
+    const surreal = await SurrealMemory.open(ts)
+    const store = createMemoryStore({ log, surreal })
+    const notePayload = z.object({ note: z.object({ title: z.string(), summary: z.string(), body: z.string(), tags: z.array(z.string()), links: z.array(z.object({ id: z.string(), kind: z.string() })) }) })
+    await store.write({ id: 'auth', title: 'Auth', summary: 'tokens rotate', body: 'long body', tags: ['auth'], links: [{ id: 'other', kind: 'depends_on' }] }, { source: 'cli' })
+    let events = await log.all()
+    await surreal.applyEvent(events[0]!) // materialize so the gateway sees the previous revision
+    // omitting body/tags/links must NOT wipe them (the graph-refresh body-wipe defect)
+    await store.write({ id: 'auth', title: 'Auth v2' }, { source: 'cli' })
+    events = await log.all()
+    let { note } = notePayload.parse(events[1]!.payload)
+    expect(note.title).toBe('Auth v2')            // supplied → replaced
+    expect(note.body).toBe('long body')           // omitted → preserved
+    expect(note.tags).toEqual(['auth'])
+    expect(note.links).toEqual([{ id: 'other', kind: 'depends_on' }])
+    // an EXPLICIT empty still clears; an undefined-valued key is an omission (CLI optional flags)
+    await surreal.applyEvent(events[1]!)
+    await store.write({ id: 'auth', title: 'Auth v2', body: '', summary: undefined }, { source: 'cli' })
+    events = await log.all()
+    note = notePayload.parse(events[2]!.payload).note
+    expect(note.body).toBe('')
+    expect(note.summary).toBe('tokens rotate')
+    await log.close()
+  })
+
   it('rejects a malformed note without appending', async () => {
     const pg = await createTestDb(); drops.push(pg.drop)
     const ts = await createTestSurreal(); drops.push(ts.drop)

@@ -70,7 +70,7 @@ export function memoryTools(store: MemoryStore, author: MemoryAuthor, tier: Memo
   const tools: ResolvedTool[] = [
     {
       ref: 'memory/write', name: 'memory_write',
-      description: withTier('Create or update a project knowledge note (upsert by id). Record durable findings/decisions/conventions so later steps reuse them.', tier),
+      description: withTier('Create or update a project knowledge note (upsert by id — omitted fields keep their stored values; pass an explicit empty string/array to clear one). Record durable findings/decisions/conventions so later steps reuse them.', tier),
       inputSchema: {
         type: 'object', required: ['id', 'title'],
         properties: {
