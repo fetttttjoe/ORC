@@ -1,8 +1,8 @@
 import { frontmatter } from '@orc/vault-projector'
-import { LINK_KIND, type MemoryLink, type MemoryNote } from '@orc/contracts'
+import { LINK_KIND, MemoryScope, type MemoryLink, type MemoryNote } from '@orc/contracts'
 
 export function noteRelPath(note: Pick<MemoryNote, 'id' | 'scope'>): string {
-  return note.scope === 'project' ? `${note.id}.md` : `${note.scope}/${note.id}.md`
+  return note.scope === MemoryScope.project ? `${note.id}.md` : `${note.scope}/${note.id}.md`
 }
 
 // decomposes_into/depends_on links as navigable body links — other link kinds stay frontmatter-only

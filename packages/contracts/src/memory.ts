@@ -84,10 +84,15 @@ export const NoteKind = z.enum(NOTE_KINDS)
 export type NoteKind = z.infer<typeof NoteKind>
 export const NOTE_KIND = NoteKind.enum
 
+// The scope families of a memory note — matched values, never scattered literals (same rule
+// as STRATEGY in plan.ts). `project` is the one durable knowledge scope; per-task transient
+// plan scopes are derived by planScope(taskId) in plan.ts.
+export enum MemoryScope { project = 'project' }
+
 // What a writer (agent/CLI) supplies. Arrays/strings default so a minimal note is one id+title.
 const MemoryNoteBase = z.object({
   id: Id,
-  scope: z.string().regex(MEMORY_ID_RE).default('project'),
+  scope: z.string().regex(MEMORY_ID_RE).default(MemoryScope.project),
   kind: NoteKind.default('fact'),
   // stamped by the store gateway from the runtime's Git HEAD — agents cannot invent one
   sourceRevision: z.string().nullable().default(null),
@@ -113,7 +118,7 @@ const MemoryNoteBase = z.object({
   zone: z.array(z.string().min(1).max(MEMORY_LIMITS.detailChars)).max(16).default([]),
 })
 export const MemoryNoteInput = MemoryNoteBase.refine(
-  n => !(n.scope === 'project' && n.id === 'index'),
+  n => !(n.scope === MemoryScope.project && n.id === 'index'),
   { message: "note id 'index' is reserved in the project scope (collides with vault/memory/index.md)" },
 ).refine(
   // the point of the kind: a research note without provenance is an unsourced claim
