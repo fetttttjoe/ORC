@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'bun:test'
 import { MEMORY_ACCESS, MEMORY_LIMITS, MemoryNoteInput, type MemoryAccessMode, type MemoryNote, type MemoryNoteDraft, type MemoryStore, type NoteSummary } from '@orc/contracts'
-import { memoryTools, tierForRole } from './tools'
+import { MEMORY_READ_TOOLS, memoryTools, tierForRole } from './tools'
 
 const toNote = (input: MemoryNoteDraft): MemoryNote =>
   ({ ...MemoryNoteInput.parse(input), sources: [], createdAt: '', createdBy: '', updatedAt: '', updatedBy: '', revision: 1 })
@@ -29,6 +29,11 @@ describe('memory tools', () => {
     const { store, written } = fakeStore()
     const tools = memoryTools(store, { source: 'agent', executor: 'api-loop', model: 'opus', role: 'review' })
     expect(tools.map(t => t.name).sort()).toEqual(['memory_neighbors', 'memory_read', 'memory_search', 'memory_write'])
+    // the exported read subset pins to the real surface — rename a tool and this fails HERE,
+    // in the owning package, not silently in a consumer's filter (orc mcp serve)
+    const names = new Set(tools.map(t => t.name))
+    for (const read of MEMORY_READ_TOOLS) expect(names.has(read)).toBe(true)
+    expect((MEMORY_READ_TOOLS as readonly string[])).not.toContain('memory_write')
     const write = tools.find(t => t.name === 'memory_write')!
     const r = await write.execute({ id: 'auth', title: 'Auth' })
     expect(r.isError).toBe(false)

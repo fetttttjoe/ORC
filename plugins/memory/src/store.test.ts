@@ -30,6 +30,21 @@ describe('MemoryStore gateway', () => {
     await log.close()
   })
 
+  it('recordAccess binds the event envelope to the author task identity', async () => {
+    const pg = await createTestDb(); drops.push(pg.drop)
+    const ts = await createTestSurreal(); drops.push(ts.drop)
+    const log = (await openStorage(pg.url, { projectId: TEST_PROJECT_ID })).events
+    const store = createMemoryStore({ log, surreal: await SurrealMemory.open(ts) })
+    await store.recordAccess('auth', 'project', 'read', { source: 'agent', taskId: 't1', stepId: 's1', runToken: 'r1' })
+    await store.recordAccess('auth', 'project', 'read', { source: 'cli' })
+    const events = await log.all()
+    expect(events[0]!.taskId).toBe('t1')
+    expect(events[0]!.stepId).toBe('s1')
+    expect(events[0]!.runToken).toBe('r1')
+    expect(events[1]!.taskId).toBeNull() // cli access stays unbound
+    await log.close()
+  })
+
   it('replaying a write under one idempotency key leaves one memory_written event', async () => {
     const pg = await createTestDb(); drops.push(pg.drop)
     const ts = await createTestSurreal(); drops.push(ts.drop)

@@ -84,9 +84,14 @@ export class SurrealMemory {
       // unavailableMemoryTools. Unbounded, `orc status` and every `orc memory` command hang
       // forever instead of degrading, which is the opposite of the stated guarantee.
       // ponytail: one constant, not a setting — promote it if a real deployment needs longer.
-      await withTimeout(surreal.connect(t.url), t.connectTimeoutMs ?? CONNECT_TIMEOUT_MS,
+      // authentication as a connect-option PROVIDER, not a one-shot .signin(): when the
+      // session expires or the socket reconnects, the driver's renewal chain re-invokes the
+      // provider with these credentials. A .signin() covers only the current session — after
+      // expiry every query fails 'Anonymous access not allowed' until the process restarts.
+      await withTimeout(
+        surreal.connect(t.url, { authentication: { username: t.username, password: t.password } }),
+        t.connectTimeoutMs ?? CONNECT_TIMEOUT_MS,
         `surreal unreachable at ${t.url}`)
-      await surreal.signin({ username: t.username, password: t.password })
       await surreal.use({ namespace: t.ns, database: t.db })
       // ESCAPE HATCH (raw): surqlize's builder assumes tables already exist — it has no DEFINE
       // TABLE op. On a brand-new namespace/database, SurrealDB v3.2.0 throws "table does not

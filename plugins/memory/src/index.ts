@@ -1,4 +1,5 @@
 import { type MemoryAuthor, type MemoryStore, type ResolvedTool } from '@orc/contracts'
+import { errorMessage } from '@orc/contracts'
 import { EventLog, type ProjectConfig } from '@orc/kernel'
 import { openKnowledge, type Knowledge } from './knowledge'
 import { createMemoryStore } from './store'
@@ -9,7 +10,7 @@ export { SurrealMemory } from './surreal'
 export { openKnowledge, type Knowledge } from './knowledge'
 export { createMemoryStore } from './store'
 export { createMemoryProjector } from './projector'
-export { memoryTools, unavailableMemoryTools, MEMORY_TIER, tierForRole, type MemoryTier } from './tools'
+export { memoryTools, unavailableMemoryTools, MEMORY_READ_TOOLS, MEMORY_TIER, tierForRole, type MemoryTier } from './tools'
 export { renderMemoryIndex, rebuildVaultMemory } from './memory-index'
 export { orphanedNotes, type SweptNote } from './sweep'
 export { renderNoteFile, noteRelPath } from './note-md'
@@ -55,7 +56,7 @@ export async function probeMemory(
     const pending = await log.countAfter(cursor, KNOWLEDGE_KINDS)
     return pending === 0 ? { healthy: true } : { healthy: false, reason: `${pending} unapplied events` }
   } catch (err) {
-    return { healthy: false, reason: `unreachable: ${err instanceof Error ? err.message : String(err)}` }
+    return { healthy: false, reason: `unreachable: ${errorMessage(err)}` }
   } finally {
     // close even if getCursor/countAfter threw after a successful open (same leak class as open())
     await knowledge?.close().catch(() => {})
