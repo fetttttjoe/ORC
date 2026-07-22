@@ -1,0 +1,20 @@
+{
+  "comment": "Knowledge-graph usefulness probes. search: query must surface one of `expect` in the top 3. neighbors: traversal from `seed` must return every id in `expectMin`. Grow this file whenever a real question the graph failed to answer comes up.",
+  "search": [
+    { "q": "write zone", "expect": ["zone-write-fence", "area-executor", "area-contracts"] },
+    { "q": "fs_write fence", "expect": ["zone-write-fence", "area-executor"] },
+    { "q": "event log truth projection", "expect": ["arch-overview"] },
+    { "q": "durable execution workflow", "expect": ["area-execution"] },
+    { "q": "plan approval hash", "expect": ["area-kernel"] },
+    { "q": "surreal knowledge graph", "expect": ["area-memory"] },
+    { "q": "event-sourced chat", "expect": ["area-cli", "area-ui"] },
+    { "q": "model provider seam", "expect": ["area-providers"] },
+    { "q": "operation journal crash retry", "expect": ["area-storage", "area-execution", "arch-overview"] },
+    { "q": "mermaid vault markdown render", "expect": ["area-vault"] }
+  ],
+  "neighbors": [
+    { "seed": "area-contracts", "kinds": ["depends_on"], "expectMin": ["area-kernel", "area-executor", "area-memory"], "why": "tier rule as edges: who imports contracts" },
+    { "seed": "arch-overview", "expectMin": ["area-kernel", "area-contracts", "area-execution", "area-memory"], "minScoreSpread": 0.05, "why": "hub decomposition; spread>0 proves edges are typed, not a flat star" },
+    { "seed": "area-memory", "expectMin": ["target-memory-lifecycle"], "why": "target/deferred work reachable from its current-state note" }
+  ]
+}
