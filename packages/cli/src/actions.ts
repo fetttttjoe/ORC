@@ -1,10 +1,10 @@
-import { EVENT_KIND, ISOLATION_TIER, STRATEGY, TASK_STATUS, costUSDFor, parseModelRef, type ExecutionPort, type PlanDraft } from '@orc/contracts'
-import { initializeProject, loadConfig, openStorage, resetSystemDatabase, subtreeTaskIds, type EventLog, type Kernel, type ProjectConfig, type Storage } from '@orc/kernel'
+import { errorMessage, EVENT_KIND, ISOLATION_TIER, STRATEGY, TASK_STATUS, costUSDFor, parseModelRef, type ExecutionPort, type PlanDraft } from '@orc/contracts'
+import { deriveSystemUrl, initializeProject, loadConfig, openStorage, resetSystemDatabase, subtreeTaskIds, type EventLog, type Kernel, type ProjectConfig, type Storage } from '@orc/kernel'
 import { seedRegistries } from './runtime'
 import { createMemory, orphanedNotes } from '@orc/memory'
 import { PROJECT_DIR_NOTE_ID, PROJECT_NAME_NOTE_ID, type OrcActions } from '@orc/ui-core'
 import { createVaultProjector } from '@orc/vault-projector'
-import { existsSync, rmSync } from 'node:fs'
+import { existsSync, rmSync, statSync } from 'node:fs'
 import path from 'node:path'
 
 // ui metadata notes are plain memory events — appended directly so they work even when the
@@ -108,6 +108,15 @@ export function buildOrcActions(deps: {
     return task
   }
 
+  // fail at the BOUNDARY, not 4 retries deep in the executor: a cwd that does not exist is
+  // a deterministic EACCES/ENOENT later (models love inventing /workspace/… paths)
+  const assertRunnableCwd = (cwd: string): string => {
+    const abs = path.resolve(cwd)
+    if (!existsSync(abs) || !statSync(abs).isDirectory())
+      throw new Error(`cwd is not an existing directory: ${abs}${plugin ? ` — the project's directory is ${plugin.config.dir}` : ''}`)
+    return abs
+  }
+
   // fail at CREATION, not mid-run: an invented model ref must never reach a frozen plan.
   // Best-effort — when discovery is unavailable (offline, no listModels) nothing is blocked.
   const assertKnownModel = async (ref: string): Promise<void> => {
@@ -124,13 +133,14 @@ export function buildOrcActions(deps: {
         return { taskId: t.id }
       }
       await assertKnownModel(input.grounded.modelRef)
+      const cwd = assertRunnableCwd(input.grounded.cwd)
       const t = await kernel.createGroundedTask({
         title: input.title, spec: input.spec ?? '',
         modelRef: input.grounded.modelRef, analyzerRef: input.grounded.analyzerRef ?? 'agent-analyzer',
       })
       // the grounded template is policy-approved — the analyze→plan conversation starts now;
       // callers watch progress over the event stream, nothing tails here
-      await (await needPort()).startRun(t.id, { cwd: input.grounded.cwd })
+      await (await needPort()).startRun(t.id, { cwd })
       return { taskId: t.id }
     },
 
@@ -147,13 +157,13 @@ export function buildOrcActions(deps: {
       return { version: plan.version }
     },
 
-    async approve(taskId, version) {
-      const plan = await kernel.approvePlan(taskId, version)
+    async approve(taskId, version, approvedBy) {
+      const plan = await kernel.approvePlan(taskId, version, approvedBy ? { approvedBy } : undefined)
       return { version: plan.version }
     },
 
     async run(taskId, cwd) {
-      const handle = await (await needPort()).startRun(taskId, { cwd })
+      const handle = await (await needPort()).startRun(taskId, { cwd: assertRunnableCwd(cwd) })
       return { workflowId: handle.workflowId }
     },
 
@@ -214,16 +224,20 @@ export function buildOrcActions(deps: {
       try {
         await resetSystemDatabase(plugin.config.systemDatabaseUrl)
       } catch (err) {
-        warnings.push(`durable-execution state not reset (${err instanceof Error ? err.message : String(err)}) — restart orc before the next run`)
+        warnings.push(`durable-execution state not reset (${errorMessage(err)}) — restart orc before the next run`)
       }
       // 2. the history: every event + journal row, one locked transaction
       const counts = await plugin.storage.purge()
+      // re-seed identity FIRST: "the empty chat stays" — without these notes the project has
+      // zero events, drops off the chats list, and the UI strands the user in a foreign chat
+      if (plugin.config.projectName) await plugin.log.append(nameNote(plugin.config.projectName))
+      if (plugin.config.dir) await plugin.log.append(dirNote(plugin.config.dir))
       // 3. vault task traces: dead task folders would linger — drop them, re-render the index
       try {
         rmSync(path.join(plugin.config.vaultDir, 'tasks'), { recursive: true, force: true })
         await createVaultProjector({ log: plugin.log, config: plugin.config }).renderAll()
       } catch (err) {
-        warnings.push(`vault trace not cleared (${err instanceof Error ? err.message : String(err)})`)
+        warnings.push(`vault trace not cleared (${errorMessage(err)})`)
       }
       // 4. read model + memory vault files: rebuild over the now-empty log clears both. Best-effort —
       //    the log purge is committed; a down Surreal heals on the next projector run.
@@ -232,11 +246,31 @@ export function buildOrcActions(deps: {
         memory = await createMemory({ log: plugin.log, config: plugin.config })
         await memory.projector.rebuild()
       } catch (err) {
-        warnings.push(`memory read model not cleared (${err instanceof Error ? err.message : String(err)}) — run 'orc memory rebuild' once it is reachable`)
+        warnings.push(`memory read model not cleared (${errorMessage(err)}) — run 'orc memory rebuild' once it is reachable`)
       } finally {
         await memory?.close().catch(() => {})
       }
       return { ...counts, warnings }
+    },
+
+    async deleteProject(projectId) {
+      if (!plugin) throw new Error('deleting projects needs a project context')
+      const warnings: string[] = []
+      // stop-then-wipe, same order as purge; no identity re-seed — deletion IS the point.
+      // Deleting the HOME project is allowed too: full wipe, though it stays listed (empty)
+      // while this server runs from it. Surreal read-model garbage is inert — not cleaned.
+      try {
+        await resetSystemDatabase(deriveSystemUrl(plugin.config.databaseUrl, projectId))
+      } catch (err) {
+        warnings.push(`durable-execution state not reset (${errorMessage(err)})`)
+      }
+      const storage = await openStorage(plugin.config.databaseUrl, { projectId })
+      try {
+        const counts = await storage.purge()
+        return { ...counts, warnings }
+      } finally {
+        await storage.close()
+      }
     },
 
     async cancel(taskId) {
@@ -260,7 +294,7 @@ export function buildOrcActions(deps: {
         await memory.projector.catchUp().catch(() => {})
         return { swept: goes.map(({ id, scope, title }) => ({ id, scope, title })), sweepError: null }
       } catch (err) {
-        return { swept: [], sweepError: err instanceof Error ? err.message : String(err) }
+        return { swept: [], sweepError: errorMessage(err) }
       } finally {
         await memory?.close().catch(() => {})
       }

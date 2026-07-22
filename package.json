@@ -5,7 +5,7 @@
   "workspaces": ["packages/*", "plugins/*"],
   "scripts": {
     "orc": "bun packages/cli/src/bin.ts",
-    "graph": "bun packages/cli/src/bin.ts graph",
+    "graph": "ORC_GRAPH_DEV=1 bun packages/cli/src/bin.ts graph",
     "e2e": "cd packages/graph-ui && bunx playwright test",
     "test": "bun test",
     "test:live": "bun test plugins/executor-api-loop/src/live-smoke.test.ts",

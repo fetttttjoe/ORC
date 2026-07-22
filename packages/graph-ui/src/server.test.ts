@@ -142,6 +142,7 @@ describe('graph-ui web adapter', () => {
     const actions = {
       approve: async (taskId: string) => { calls.push(`approve:${taskId}`); return { version: 1 } },
       newProject: async (dir: string, name: string) => { calls.push(`newProject:${name}`); return { projectId: 'p2' } },
+      deleteProject: async (projectId: string) => { calls.push(`deleteProject:${projectId}`); return { events: 0, operations: 0, warnings: [] } },
     } as unknown as OrcActions
     const ui = startGraphUi({ url: db.url, port: 0, cwdProject: { id: TEST_PROJECT_ID, name: 'home' }, actions })
     const base = `http://127.0.0.1:${ui.port}`
@@ -160,10 +161,11 @@ describe('graph-ui web adapter', () => {
     expect(((await blocked.json()) as { error: string }).error).toContain('home')
     expect(calls).toEqual([])
 
-    // home chat → dispatched; newProject allowed from ANY chat
+    // home chat → dispatched; newProject/deleteProject allowed from ANY chat (project-free)
     expect(((await (await post('approve', TEST_PROJECT_ID, { taskId: 't1' })).json()) as { version: number }).version).toBe(1)
     expect((await post('newProject', 'some-other-project', { dir: '/tmp', name: 'fresh' })).status).toBe(200)
-    expect(calls).toEqual(['approve:t1', 'newProject:fresh'])
+    expect((await post('deleteProject', 'some-other-project', { projectId: 'doomed' })).status).toBe(200)
+    expect(calls).toEqual(['approve:t1', 'newProject:fresh', 'deleteProject:doomed'])
     await ui.stop()
   })
 

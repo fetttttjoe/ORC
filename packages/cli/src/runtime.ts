@@ -1,4 +1,4 @@
-import { HOOK_NAME, type AgentExecutor, type Analyzer, type MemoryAuthor, type ModelProvider, type ResolvedTool } from '@orc/contracts'
+import { errorMessage, HOOK_NAME, type AgentExecutor, type Analyzer, type MemoryAuthor, type ModelProvider, type ResolvedTool } from '@orc/contracts'
 import { apiLoopExecutor } from '@orc/executor-api-loop'
 import { createAnthropicProvider } from '@orc/provider-anthropic'
 import { createOpenAIProvider } from '@orc/provider-openai'
@@ -60,7 +60,7 @@ export async function buildRuntime(
     await memory.projector.start()
     buildMemoryTools = memory.buildTools
   } catch (err) {
-    const reason = err instanceof Error ? err.message : String(err)
+    const reason = errorMessage(err)
     console.warn(`memory unavailable; continuing in degraded mode: ${reason}`)
     buildMemoryTools = () => unavailableMemoryTools(reason)
   }

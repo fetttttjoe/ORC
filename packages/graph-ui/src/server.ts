@@ -1,6 +1,6 @@
 import { stepCountIs, streamText, type LanguageModel } from 'ai'
 import { z } from 'zod'
-import { PlanDraft } from '@orc/contracts'
+import { errorMessage, PlanDraft, type CopilotExchangePayload, type Usage } from '@orc/contracts'
 import { buildCopilotTools, copilotSystemPrompt, createProjectSessions, emptyPatch, type CopilotMode, type OrcActions, type ProjectSessions } from '@orc/ui-core'
 import index from '../page/index.html'
 
@@ -63,13 +63,15 @@ const ACTION_ROUTES: Record<string, ActionHandler> = {
   renameProject: route(z.object({ name: z.string().min(1).max(80) }), (a, d) => a.renameProject(d.name)),
   newProject: route(z.object({ dir: id, name: z.string().min(1).max(80) }), (a, d) => a.newProject(d.dir, d.name)),
   purgeProject: route(z.object({}), a => a.purgeProject()),
+  deleteProject: route(z.object({ projectId: id }), (a, d) => a.deleteProject(d.projectId)),
 }
 
 // actions execute against the ONE project this server was started in — except creating a new
 // project, which touches no existing state. Everything else in a foreign chat is a silent
 // cross-project write and must die loudly at this boundary.
-// ponytail: fence, not feature — per-project kernels/DBOS runtimes would lift it
-const PROJECT_FREE_ACTIONS = new Set(['newProject'])
+// ponytail: fence, not feature — per-project kernels/DBOS runtimes would lift it.
+// deleteProject targets an explicit FOREIGN project by design (the action refuses home).
+const PROJECT_FREE_ACTIONS = new Set(['newProject', 'deleteProject'])
 
 // Thin web adapter: JSON + SSE over ProjectSessions. Nothing here knows how graphs are
 // computed; a TUI adapter imports @orc/ui-core directly and never touches this file.
@@ -87,6 +89,11 @@ export function startGraphUi(opts: {
   actions?: OrcActions // absent = read-only server (launched outside a project)
   copilot?: CopilotConfig
   defaultCwd?: string
+  // degraded-state probe (memory read model, projector lag) — absent = health unknown
+  health?: () => Promise<{ memory: { healthy: boolean; reason?: string } }>
+  // P6 interaction journaling: append one copilot_exchange event per completed exchange — the
+  // conversation that caused an action is part of the record. Absent = exchanges unrecorded.
+  appendExchange?: (x: { payload: CopilotExchangePayload; usage: Usage | null }) => Promise<void>
 }): GraphUiServer {
   const sessions = createProjectSessions({ url: opts.url, cwdProject: opts.cwdProject })
   // CSRF guard: minted per boot, readable only same-origin (GET /api/session), required as a
@@ -107,7 +114,7 @@ export function startGraphUi(opts: {
     const modelRef = parsed.data.modelRef ?? cfg.defaultModelRef
     let model: LanguageModel
     try { model = cfg.resolveModel(modelRef) } catch (err) {
-      return Response.json({ error: err instanceof Error ? err.message : String(err) }, { status: 400 })
+      return Response.json({ error: errorMessage(err) }, { status: 400 })
     }
     const home = projectId === opts.cwdProject?.id
     const name = home ? opts.cwdProject!.name : projectId.slice(0, 8)
@@ -115,39 +122,53 @@ export function startGraphUi(opts: {
     const mode: CopilotMode = opts.actions === undefined ? 'read-only' : home ? 'act' : 'foreign-project'
     const result = streamText({
       model,
-      system: copilotSystemPrompt(name, mode),
+      system: copilotSystemPrompt(name, mode, opts.defaultCwd),
       messages,
       tools: buildCopilotTools({ sessions, actions: mode === 'act' ? opts.actions! : null, projectId, listModels: cfg.listModels }),
       stopWhen: stepCountIs(8),
     })
     const enc = new TextEncoder()
+    // the exchange record accumulates AS the stream flows — journaled once, after completion
+    let assistant = ''
+    const toolCalls: CopilotExchangePayload['toolCalls'] = []
+    let exUsage: Usage | null = null
     const stream = new ReadableStream<Uint8Array>({
       start: async controller => {
         const send = (data: unknown): void => controller.enqueue(enc.encode(`data: ${JSON.stringify(data)}\n\n`))
         try {
           for await (const part of result.fullStream) {
             switch (part.type) {
-              case 'text-delta': send({ type: 'text', text: part.text }); break
-              case 'tool-call': send({ type: 'tool-call', toolName: part.toolName, input: part.input }); break
+              case 'text-delta': send({ type: 'text', text: part.text }); assistant += part.text; break
+              case 'tool-call':
+                send({ type: 'tool-call', toolName: part.toolName, input: part.input })
+                if (toolCalls.length < 64) toolCalls.push({ toolName: part.toolName, summary: (JSON.stringify(part.input) ?? '').slice(0, 140) })
+                break
               case 'tool-result': send({ type: 'tool-result', toolName: part.toolName, output: part.output }); break
               case 'tool-error': send({ type: 'tool-error', toolName: part.toolName, error: String(part.error) }); break
               case 'error': send({ type: 'error', message: String(part.error) }); break
-              case 'finish':
-                send({
-                  type: 'done',
-                  usage: {
-                    inputTokens: part.totalUsage.inputTokens ?? 0,
-                    outputTokens: part.totalUsage.outputTokens ?? 0,
-                    costUSD: cfg.price?.(modelRef, part.totalUsage) ?? null,
-                  },
-                })
+              case 'finish': {
+                const usage = {
+                  inputTokens: part.totalUsage.inputTokens ?? 0,
+                  outputTokens: part.totalUsage.outputTokens ?? 0,
+                  costUSD: cfg.price?.(modelRef, part.totalUsage) ?? null,
+                }
+                exUsage = { ...usage, estimated: false }
+                send({ type: 'done', usage })
                 break
+              }
               default: break // start/step/reasoning parts are wire noise for us
             }
           }
         } catch (err) {
-          send({ type: 'error', message: err instanceof Error ? err.message : String(err) })
+          send({ type: 'error', message: errorMessage(err) })
         } finally {
+          // journal only the project this server can act in — a foreign-project chat is
+          // read-only and its record belongs to that project's own server
+          if (opts.appendExchange && home && (assistant !== '' || toolCalls.length > 0)) {
+            const user = [...messages].reverse().find(m => m.role === 'user')?.content ?? ''
+            await opts.appendExchange({ payload: { user, assistant, toolCalls, modelRef }, usage: exUsage })
+              .catch(err => console.error('copilot exchange journaling failed:', err))
+          }
           controller.close()
         }
       },
@@ -166,13 +187,20 @@ export function startGraphUi(opts: {
         error: `this chat is read-only — actions run in "${opts.cwdProject.name}" (where orc graph was started). Switch to that chat, or restart orc graph in this project's directory.`,
       }, { status: 409 })
     try {
-      const res = await handler(opts.actions, await req.json().catch(() => null))
-      // a purge rewrote history behind the cached session — drop it so reads refold from the log
-      if (name === 'purgeProject' && res.ok && opts.cwdProject) await sessions.reset(opts.cwdProject.id)
+      const body: unknown = await req.json().catch(() => null)
+      const res = await handler(opts.actions, body)
+      // purge/delete rewrote history behind a cached session — drop it so reads refold
+      if (res.ok) {
+        if (name === 'purgeProject' && opts.cwdProject) await sessions.reset(opts.cwdProject.id)
+        if (name === 'deleteProject') {
+          const target = (body as { projectId?: string } | null)?.projectId
+          if (target) await sessions.reset(target)
+        }
+      }
       return res
     } catch (err) {
       // kernel throws are user-actionable (stale version, unknown task, no open feedback)
-      return Response.json({ error: err instanceof Error ? err.message : String(err) }, { status: 400 })
+      return Response.json({ error: errorMessage(err) }, { status: 400 })
     }
   }
 
@@ -196,6 +224,11 @@ export function startGraphUi(opts: {
         })
       case '/api/projects':
         return Response.json(await sessions.projects())
+      case '/api/health':
+        // never throws: a probe failure IS the degraded signal, not a 500
+        return Response.json(opts.health
+          ? await opts.health().catch(err => ({ memory: { healthy: false, reason: errorMessage(err) } }))
+          : { memory: null })
       case '/api/models': {
         // the event-sourced catalog first (works read-only, no provider APIs in the request
         // path); live discovery as fallback and to seed the first catalog events

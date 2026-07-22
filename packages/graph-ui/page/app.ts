@@ -5,7 +5,8 @@ import { Conversation } from './conversation'
 import { renderDetail } from './detail'
 import { LogView } from './log'
 import { current, navigate, onChange, type Selection, type Tab, type View } from './nav'
-import { EDGE, NODE_PREFIX, planScopeName } from '@orc/ui-core/graph'
+import { planScope } from '@orc/contracts'
+import { EDGE, NODE_PREFIX } from '@orc/ui-core/graph'
 import { renderRequest, type OpenQuestion, type PlanNoteView, type PlansView, type TaskView } from './plan'
 import type { GraphRenderer } from './renderer'
 import { SigmaRenderer } from './sigma-renderer'
@@ -20,6 +21,8 @@ const projectList = el('div', { class: 'section' })
 const taskList = el('div', { class: 'section' })
 const statusDot = Dot('')
 const statusText = el('span', {}, 'connecting…')
+// degraded-state badge (P3): empty while healthy/unknown; a failing memory probe must be SEEN
+const healthBadge = el('span', { class: 'health-badge' })
 const inspectorTabs = el('div', {})
 const inspectorBody = el('div', {})
 const inspector = el('div', { class: 'inspector' },
@@ -37,7 +40,7 @@ const app = el('div', { class: 'app' },
     newRequestHost,
     Section('chats', projectList),
     Section('requests', taskList),
-    el('div', { class: 'statusbar' }, statusDot, statusText),
+    el('div', { class: 'statusbar' }, statusDot, statusText, healthBadge),
   ),
   el('div', {}, ''), // conversation mounts here after session init
   resizer,
@@ -106,7 +109,7 @@ function focusIds(taskId: string): Set<string> {
   for (let pass = 0; pass < 3; pass++) // steps, then artifacts hanging off steps, then notes
     for (const l of links.values())
       if ((l.type === EDGE.plan || l.type === EDGE.out || l.type === EDGE.wrote || l.type === EDGE.depends || l.type === EDGE.uses) && set.has(l.source)) set.add(l.target)
-  const planPrefix = `${NODE_PREFIX.note}${planScopeName(taskId)}\u0000`
+  const planPrefix = `${NODE_PREFIX.note}${planScope(taskId)}\u0000`
   for (const id of nodes.keys()) if (id.startsWith(planPrefix)) set.add(id)
   return set
 }
@@ -167,6 +170,24 @@ function renderChatManagement(): void {
     projects = await api.projects()
     navigate({ project: projectId, node: null, tab: 'detail' })
   }), 'muted')
+  // every chat is deletable — full wipe, no identity re-seed (purge stays the home reset)
+  const deleteBtn = sel.project ? Btn('delete chat', () => {
+    const name = projects.find(p => p.id === sel.project)?.name ?? sel.project.slice(0, 8)
+    openDialog(`delete “${name}” — removes this chat and ALL its data permanently`, [
+      { name: 'confirm', label: `type “${name}” to confirm`, placeholder: name },
+    ], 'delete', async v => {
+      if (v.confirm !== name) throw new Error('name does not match — not deleting')
+      const target = sel.project
+      const r = await api.act<{ events: number; warnings: string[] }>('deleteProject', { projectId: target })
+      toast(`deleted — ${r.events} event(s) removed${r.warnings.length ? `; ${r.warnings.join('; ')}` : ''}`, r.warnings.length ? 'warn' : 'ok')
+      conversation?.clear() // the deleted chat's text goes with it
+      projects = await api.projects()
+      // land on the first remaining chat; none left → the empty shell
+      const next = projects[0]?.id ?? ''
+      if (next === sel.project) { await loadProject(); renderSidebar(); renderNewRequest() }
+      else navigate({ project: next, node: null, tab: 'detail' })
+    })
+  }, 'danger') : null
   // destructive test-reset: type the chat's name to confirm; failures render inside the dialog
   const purgeBtn = canAct() ? Btn('purge', () => {
     const name = projects.find(p => p.id === sel.project)?.name ?? sel.project.slice(0, 8)
@@ -176,14 +197,14 @@ function renderChatManagement(): void {
       if (v.confirm !== name) throw new Error('name does not match — not purging')
       const r = await api.act<{ events: number; operations: number; warnings: string[] }>('purgeProject', {})
       toast(`purged ${r.events} event(s)${r.warnings.length ? ` — ${r.warnings.join('; ')}` : ''}`, r.warnings.length ? 'warn' : 'ok')
-      // chat text is the USER'S (persists); the event narrative resets NOW, not at next reload
-      conversation?.reload()
+      // purge = clean slate, full stop: chat text AND narrative go (the dialog says "deletes ALL")
+      conversation?.clear()
       projects = await api.projects()
       await loadProject() // fresh snapshot + stream; seed over the empty log adds nothing
       renderSidebar()
     })
   }, 'danger') : null
-  newRequestHost.append(el('div', { class: 'row-split' }, newChatBtn, renameBtn, purgeBtn))
+  newRequestHost.append(el('div', { class: 'row-split' }, newChatBtn, renameBtn, purgeBtn, deleteBtn))
 }
 
 let modelRefs: string[] = [] // live-discovered provider/model refs, refreshed per project
@@ -281,7 +302,7 @@ async function renderInspector(): Promise<void> {
           .map((i): OpenQuestion => ({ question: i.question, stepId: i.stepId })),
         planNotes: planNotes.notes,
         knowledge: wrote,
-        planScopeName: planScopeName(taskId),
+        planScopeName: planScope(taskId),
         shownVersion: shownPlanVersion,
         focused: focusedTask === taskId,
         go: node => navigate({ node, tab: 'detail' }),
@@ -334,6 +355,15 @@ function watch(fromSeq: number): void {
 
 // ---- selection routing (the ONE renderer of selection) ----
 async function loadProject(): Promise<void> {
+  if (!sel.project) { // no chat selected (e.g. every chat deleted): a quiet empty shell
+    stream?.close()
+    nodes.clear()
+    links.clear()
+    renderer.setGraph({ nodes: [], links: [] })
+    conversation?.setProject('')
+    setStatus(false, 'no chat selected')
+    return
+  }
   const g = await api.graph(sel.project)
   seq = g.seq
   nodes.clear()
@@ -379,3 +409,21 @@ onChange(s => {
 
 if (!current().project && projects[0]) navigate({ project: projects[0].id }) // triggers onChange
 else if (!current().project) projectList.append(Empty('no projects yet'))
+
+// health poll (P3): the footer must change within one interval of memory degrading — agents'
+// tool results already degrade politely; the HUMAN needs to see it without opening a terminal
+async function pollHealth(): Promise<void> {
+  const h = await api.health().catch(() => null)
+  const m = h?.memory ?? null
+  if (m && !m.healthy) {
+    healthBadge.textContent = 'memory degraded'
+    healthBadge.title = m.reason ?? ''
+    healthBadge.classList.add('on')
+  } else {
+    healthBadge.textContent = ''
+    healthBadge.title = ''
+    healthBadge.classList.remove('on')
+  }
+}
+void pollHealth()
+setInterval(() => void pollHealth(), 15_000)

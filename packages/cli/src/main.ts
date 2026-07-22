@@ -378,6 +378,12 @@ export function buildProgram(
         actions: portFactory && plugin ? actions() : undefined,
         copilot: portFactory && plugin && discovery ? buildCopilotConfig(discovery) : undefined,
         defaultCwd: cfg?.dir ?? process.cwd(),
+        // degraded-memory visibility (P3): the footer badge polls this — probe per call, no cache
+        health: plugin ? async () => ({ memory: await probeMemory(plugin.config, plugin.log) }) : undefined,
+        // P6: copilot exchanges are events — the log is the record, the browser is a cache
+        appendExchange: plugin ? async x => {
+          await plugin.log.append({ taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.copilot_exchange, payload: x.payload, usage: x.usage })
+        } : undefined,
       })
       console.log(`graph ui on http://127.0.0.1:${ui.port}`)
       await new Promise(() => {}) // serve until Ctrl-C
@@ -451,7 +457,22 @@ export function buildProgram(
       console.log(`vault rendered → ${config.vaultDir}`)
     })
 
-  const mcp = program.command('mcp').description('MCP servers (T1 plugins)')
+  const mcp = program.command('mcp').description('MCP servers (T1 plugins) + serving orc itself')
+  mcp
+    .command('serve')
+    .description('serve orc over stdio as an MCP server — door #2 for external agents (Claude Code, …)')
+    .option('--autonomy <mode>', "'gated' (default): approval stays with the human; 'full': the client may approve (attributed as mcp)", 'gated')
+    .action(async (opts: { autonomy: string }) => {
+      if (opts.autonomy !== 'gated' && opts.autonomy !== 'full')
+        throw new Error(`--autonomy must be 'gated' or 'full', got '${opts.autonomy}'`)
+      const { config, log } = needPlugin()
+      const { startMcpServe } = await import('./mcp-serve') // lazy: the SDK loads only here
+      await startMcpServe({
+        config, log,
+        actions: portFactory ? actions() : null,
+        autonomy: opts.autonomy,
+      })
+    })
   mcp
     .command('list')
     .description('declared servers and their trust state')
