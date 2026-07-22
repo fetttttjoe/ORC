@@ -31,7 +31,14 @@ for (const p of probes.search) {
   line(!!hit, `search "${p.q}"`, hit ? `hit ${hit.id} @${top.indexOf(hit) + 1}` : `top3=[${top.map(n => n.id).join(', ')}]`)
   if (hit) {
     const note = await memory.store.get(hit.id, MemoryScope.project)
-    if (note && note.sourceRevision && note.sourceRevision !== head) stale.add(hit.id)
+    // path-aware staleness: HEAD moving is not drift — a commit touching the note's declared
+    // paths since its stamp is. Notes without paths fall back to the strict HEAD comparison.
+    if (note && note.sourceRevision && note.sourceRevision !== head) {
+      const touched = note.paths.length
+        ? execSync(`git rev-list ${note.sourceRevision}..HEAD -- ${note.paths.map(p => `'${p}'`).join(' ')}`, { cwd: config.dir }).toString().trim()
+        : 'no-paths'
+      if (touched) stale.add(hit.id)
+    }
   }
 }
 
