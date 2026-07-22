@@ -42,6 +42,18 @@ describe('workspace scoping (trust boundary)', () => {
 })
 
 describe('fs tools', () => {
+  it('fs_write outside the declared zone fails with a named fence; inside passes; reads unfenced', async () => {
+    const dir = ws()
+    const denied = await executeTool(TOOL_NAME.fs_write, { path: 'src/x.ts', content: 'x' }, dir, [], undefined, ['docs/**'])
+    expect(denied.isError).toBe(true)
+    expect(JSON.stringify(denied.output)).toContain('zone fence')
+    const ok = await executeTool(TOOL_NAME.fs_write, { path: 'docs/notes.md', content: 'n' }, dir, [], undefined, ['docs/**'])
+    expect(ok.isError).toBe(false)
+    // reads are never fenced — the zone is a WRITE boundary
+    const read = await executeTool(TOOL_NAME.fs_read, { path: 'docs/notes.md' }, dir, [], undefined, ['other/**'])
+    expect(read.isError).toBe(false)
+  })
+
   it('write → read → list roundtrip, mkdir -p for parents', async () => {
     const dir = ws()
     const w = await executeTool(TOOL_NAME.fs_write, { path: 'a/b/hello.txt', content: 'hi' }, dir)

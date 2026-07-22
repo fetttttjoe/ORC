@@ -4,7 +4,7 @@ import {
   type AgentExecutor, type EventDraft, type ExecutorContext, type Signal,
   type SplitResult, type UnifiedEvent, type Usage,
 } from '@orc/contracts'
-import { validateOutputPaths } from '@orc/contracts'
+import { errorMessage, validateOutputPaths } from '@orc/contracts'
 import { AskHumanInput, JoinSplitsInput, SignalInput, TOOL_NAME, executeTool, toolSet } from './tools'
 
 // Pre-flight for declared outputs, so the model can fix a bad declaration instead of the
@@ -15,7 +15,7 @@ function invalidOutputs(workspaceDir: string, outputs: string[]): string | null 
     validateOutputPaths(workspaceDir, outputs)
     return null
   } catch (err) {
-    return err instanceof Error ? err.message : String(err)
+    return errorMessage(err)
   }
 }
 
@@ -75,7 +75,7 @@ async function callModel(model: LanguageModel, messages: ModelMessage[], tools: 
     // transient → rethrow as-is so the port's checkpoint retries with backoff;
     // terminal (4xx bad key, context overflow, …) → marked so it is NOT retried
     if (isTransient(err)) throw err
-    throw terminalError(err instanceof Error ? err.message : String(err))
+    throw terminalError(errorMessage(err))
   }
   return {
     text: result.text,
@@ -181,7 +181,7 @@ export function apiLoopExecutor(): AgentExecutor<LanguageModel> {
         } catch (err) {
           // transient errors retry inside the checkpoint (DBOS); reaching here means retries
           // are exhausted or the error is terminal → terminal provider failure.
-          yield { type: UNIFIED_EVENT_TYPE.error, class: FAILURE_CLASS.provider_error, message: err instanceof Error ? err.message : String(err) }
+          yield { type: UNIFIED_EVENT_TYPE.error, class: FAILURE_CLASS.provider_error, message: errorMessage(err) }
           return
         }
 
@@ -238,7 +238,7 @@ export function apiLoopExecutor(): AgentExecutor<LanguageModel> {
                 name: call.toolName,
                 before: { input: call.input },
               },
-              () => executeTool(call.toolName, call.input, ctx.workspaceDir, ctx.extraTools, call.toolCallId),
+              () => executeTool(call.toolName, call.input, ctx.workspaceDir, ctx.extraTools, call.toolCallId, ctx.step.zone),
               (r): EventDraft[] => [
                 { kind: EVENT_KIND.tool_call, payload: { ...base, iteration, toolCallId: call.toolCallId, toolName: call.toolName, input: call.input } },
                 { kind: EVENT_KIND.tool_result, payload: { ...base, iteration, toolCallId: call.toolCallId, toolName: call.toolName, output: r.output, isError: r.isError } },
