@@ -13,6 +13,13 @@ export const PLAN_STEP_ROLE = 'auditor'
 // source rather than a scattered 'scout' literal.
 export const ANALYZE_STEP_ROLE = 'scout'
 
+// The auditor role's contract, appended to the verify step's instructions at the freeze so it is
+// part of the plan-hash-approved artifact (not executor policy). Without it an auditor that finds
+// defects can signal success with the defects buried in the summary — downstream only reads the
+// outcome, so a defect-carrying success is indistinguishable from a clean pass.
+export const AUDITOR_CONTRACT =
+  "Auditor rule: if your audit finds ANY defect, signal outcome 'failure' and list every defect in the summary — never 'success' with defects noted inside it. Success means zero defects."
+
 export function planGraphHash(notes: MemoryNote[]): string {
   const canonical = [...notes]
     .sort((a, b) => a.scope.localeCompare(b.scope) || a.id.localeCompare(b.id))
@@ -64,7 +71,8 @@ export function instantiateFrozenPlan(masterId: string, notes: MemoryNote[]): Ch
         // role mapping at the freeze (P2): the verify subplan runs as auditor — memory tier
         // and prompt framing follow from the role automatically
         id, role: id === VERIFY_STEP_ID ? 'auditor' : 'implementer', title: n.title,
-        instructions: n.body || n.summary || n.title,
+        instructions: (n.body || n.summary || n.title)
+          + (id === VERIFY_STEP_ID ? `\n\n${AUDITOR_CONTRACT}` : ''),
         dependsOn: n.links.filter(l => l.kind === LINK_KIND.depends_on).map(l => l.id).filter(d => kids.includes(d)),
         // the note's declared write-globs become the step's zone — the executor fence makes
         // "parallel siblings must not write the same files" mechanical instead of prose
