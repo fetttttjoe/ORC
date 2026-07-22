@@ -1,5 +1,5 @@
 import { z } from 'zod'
-import { EVENT_KIND, LINK_KIND, NOTE_KIND, OPERATION_STATUS, PAYLOAD_SCHEMAS, STEP_RUN_STATUS, TASK_STATUS, type EventRecord, type MemoryNote, type Plan, type TaskNode } from '@orc/contracts'
+import { EVENT_KIND, LINK_KIND, NOTE_KIND, OPERATION_STATUS, PAYLOAD_SCHEMAS, STEP_RUN_STATUS, TASK_STATUS, mermaidLabel, type EventRecord, type MemoryNote, type Plan, type TaskNode } from '@orc/contracts'
 import { fold, taskUsage, type State, type StepState } from '@orc/kernel'
 import { frontmatter } from './frontmatter'
 import { renderPlanFile } from './plan-md'
@@ -31,12 +31,7 @@ function mermaidDag(plan: Plan, steps: Map<string, StepState> | undefined): stri
   return lines.join('\n')
 }
 
-// mermaid labels: double quotes end the label, and a newline ends the STATEMENT — an
-// agent-authored title carrying one escapes the graph entirely and renders as live markdown
-// (fences included) in the human-facing index. Titles are z.string().max(200) with no newline
-// restriction, so this escaper is the only guard.
-// Exported: every mermaid-producing view (incl. plugins/memory's index) must share one escaper.
-export const mermaidLabel = (s: string): string => s.replaceAll('"', "'").replaceAll(/[\r\n]+/g, ' ')
+// the one mermaid escaper lives in contracts (guards) — every producing view shares it
 const label = mermaidLabel
 
 // Plan topology plus live operation nodes: which effects ran, how many attempts, and

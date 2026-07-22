@@ -2,6 +2,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StdioClientTransport, getDefaultEnvironment } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { ToolListChangedNotificationSchema } from '@modelcontextprotocol/sdk/types.js'
 import {
+  errorMessage,
   isRecord, mcpToolName, parseToolRef,
   type McpServerConfig, type ResolvedTool, type ToolSource,
 } from '@orc/contracts'
@@ -65,7 +66,7 @@ export function createMcpHub(
     try {
       await client.connect(transport)
     } catch (err) {
-      throw new Error(`MCP server '${serverId}' failed to start: ${err instanceof Error ? err.message : String(err)}`)
+      throw new Error(`MCP server '${serverId}' failed to start: ${errorMessage(err)}`)
     }
     client.setNotificationHandler(ToolListChangedNotificationSchema, async () => {
       toolCache.delete(serverId)
@@ -122,7 +123,7 @@ export function createMcpHub(
               // transport death is a tool error the model can react to; drop the client
               // so the next resolve lazily respawns (spec D9)
               await dropClient(serverId)
-              return { output: { error: err instanceof Error ? err.message : String(err) }, isError: true }
+              return { output: { error: errorMessage(err) }, isError: true }
             }
           },
         })

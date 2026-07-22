@@ -1,11 +1,11 @@
-import { EVENT_KIND } from '@orc/contracts'
+import { errorMessage, EVENT_KIND } from '@orc/contracts'
 import { fold, type EventLog } from '@orc/kernel'
 import { renderRootIndex, renderTaskFiles } from './render'
 import { writeVaultFiles } from './write'
 
 export { frontmatter } from './frontmatter'
 export { parsePlanFile, renderPlanFile } from './plan-md'
-export { mermaidLabel, renderRootIndex, renderTaskFiles, type VaultFiles } from './render'
+export { renderRootIndex, renderTaskFiles, type VaultFiles } from './render'
 export { writeVaultFiles } from './write'
 
 export interface VaultProjector {
@@ -53,7 +53,7 @@ export function createVaultProjector(opts: { log: EventLog; config: { vaultDir: 
         // coalesce a burst into one render per task (spec §5) — not a poll
         timers.set(taskId, setTimeout(() => {
           timers.delete(taskId)
-          renderTask(taskId).catch(err => console.warn(`vault render failed: ${err instanceof Error ? err.message : String(err)}`))
+          renderTask(taskId).catch(err => console.warn(`vault render failed: ${errorMessage(err)}`))
         }, 50))
       })
       await renderAll()
