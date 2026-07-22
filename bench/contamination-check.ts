@@ -2,6 +2,7 @@
 // (e.g. the sealed baseline). Run: bun bench/contamination-check.ts <taskId-prefix> [pattern...]
 // Exit 1 if any forbidden path was read — the run's judgement data is then tainted.
 // ponytail: relative imports — bench/ is not a workspace package and doesn't need to be
+import { PAYLOAD_SCHEMAS } from '../packages/contracts/src/index.ts'
 import { loadConfig, openStorage, requireProject } from '../packages/kernel/src/index.ts'
 
 const [prefix, ...patterns] = process.argv.slice(2)
@@ -16,10 +17,11 @@ let reads = 0
 const hits: string[] = []
 for (const e of evs) {
   if (!e.taskId?.startsWith(prefix)) continue
-  const p = e.payload as { toolName?: string; input?: { path?: string } }
+  const p = PAYLOAD_SCHEMAS.tool_call.parse(e.payload)
   if (p.toolName !== 'fs_read' && p.toolName !== 'fs_list') continue
   reads += 1
-  const path = p.input?.path ?? ''
+  const input = typeof p.input === 'object' && p.input !== null ? p.input : {}
+  const path = 'path' in input && typeof input.path === 'string' ? input.path : ''
   if (forbidden.some(f => path.includes(f))) hits.push(`${p.toolName} ${path} (step ${e.stepId})`)
 }
 
