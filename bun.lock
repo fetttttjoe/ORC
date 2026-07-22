@@ -13,6 +13,7 @@
       "name": "@orc/cli",
       "version": "0.0.0",
       "dependencies": {
+        "@modelcontextprotocol/sdk": "^1.29.0",
         "@orc/analyzer-agent": "workspace:*",
         "@orc/contracts": "workspace:*",
         "@orc/executor-api-loop": "workspace:*",
@@ -83,7 +84,6 @@
       "dependencies": {
         "@orc/contracts": "workspace:*",
         "@orc/kernel": "workspace:*",
-        "@orc/vault-projector": "workspace:*",
         "ai": "^7.0.30",
         "zod": "^4.4.3",
       },

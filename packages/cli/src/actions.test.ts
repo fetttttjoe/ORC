@@ -29,9 +29,11 @@ async function setup(listModels?: () => Promise<string[]>) {
     // system-db url points at a never-created database (the common pre-first-run state)
     plugin: {
       config: {
+        projectId: TEST_PROJECT_ID,
         databaseUrl: db.url, projectDbUrl: 'ws://127.0.0.1:1/rpc',
         systemDatabaseUrl: deriveSystemUrl(db.url, TEST_PROJECT_ID),
         vaultDir: mkdtempSync(path.join(tmpdir(), 'orc-vault-')),
+        projectName: 'purge-me', dir: '/tmp/purge-me',
       } as ProjectConfig,
       log: storage.events, storage,
     },
@@ -92,9 +94,52 @@ describe('purgeProject', () => {
     expect(r.warnings[0]).toContain('memory read model')
     expect(await kernel.listTasks()).toEqual([])
 
+    // identity survives the wipe: name + dir notes are re-seeded, so the chat stays listed
+    const identity = await openStorage(url, { projectId: TEST_PROJECT_ID })
+    const notes = (await identity.events.all()).filter(e => e.kind === EVENT_KIND.memory_written)
+      .map(e => (e.payload as { note: { id: string; title: string } }).note)
+    expect(notes.map(n => [n.id, n.title])).toEqual([['ui-project-name', 'purge-me'], ['ui-project-dir', '/tmp/purge-me']])
+    await identity.close()
+
     // the empty project is immediately usable again — the re-test loop
     const again = await actions.newTask({ title: 'fresh start' })
     expect((await kernel.getTask(again.taskId))?.title).toBe('fresh start')
+    await close()
+  })
+})
+
+describe('cwd validation at the action boundary', () => {
+  it('an invented cwd dies at creation/run — never 4 retries deep in the executor', async () => {
+    const { kernel, actions, close } = await setup()
+    await expect(actions.newTask({ title: 'g', spec: 'do it', grounded: { modelRef: 'any/model', cwd: '/workspace/orc-sim' } }))
+      .rejects.toThrow(/cwd is not an existing directory: \/workspace\/orc-sim/)
+    const t = await kernel.createTask({ title: 'q', spec: '' })
+    await expect(actions.run(t.id, '/no/such/dir')).rejects.toThrow(/cwd is not an existing directory/)
+    await close()
+  })
+})
+
+describe('deleteProject', () => {
+  it('wipes any project outright — foreign AND home — with no identity re-seed', async () => {
+    const { kernel, actions, url, close } = await setup()
+    // home: full wipe, resolves (purge remains the identity-preserving reset)
+    await kernel.createTask({ title: 'home task', spec: '' })
+    expect((await actions.deleteProject(TEST_PROJECT_ID)).events).toBeGreaterThan(0)
+    expect(await kernel.listTasks()).toEqual([])
+
+    // seed a foreign project, then delete it — no identity re-seed, so it is GONE
+    const foreign = await openStorage(url, { projectId: 'doomed-project' })
+    await foreign.events.append({
+      taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_written,
+      payload: { note: { id: 'n1', title: 'n1' }, author: { source: 'cli' } },
+    })
+    await foreign.close()
+
+    const r = await actions.deleteProject('doomed-project')
+    expect(r.events).toBe(1)
+    const check = await openStorage(url, { projectId: 'doomed-project' })
+    expect(await check.events.all()).toEqual([])
+    await check.close()
     await close()
   })
 })

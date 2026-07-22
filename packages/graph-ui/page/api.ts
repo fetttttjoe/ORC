@@ -121,6 +121,8 @@ export const api = {
   },
 
   projects: () => get<Project[]>('projects', {}),
+  // memory: null = server has no probe (launched outside a project) — render nothing
+  health: () => get<{ memory: { healthy: boolean; reason?: string } | null }>('health', {}),
   models: (project?: string) => get<string[]>('models', { project }),
   graph: (project: string) => get<GraphSnapshot>('graph', { project }),
   node: (project: string, id: string) => get<unknown | null>('node', { project, id }, { nullOn404: true }),

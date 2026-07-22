@@ -34,12 +34,19 @@ test('conversation list is scrollable (flex min-height regression)', async ({ pa
 
 test('copilot exchange streams into the conversation', async ({ page }) => {
   await page.goto('/')
+  // the pane binds its project asynchronously (setProject → reload renders the placeholder);
+  // typing before that is a silent no-op by design — wait for the ready signal
+  await expect(page.locator('.conv-list .empty')).toBeVisible()
   const input = page.locator('.conv-input')
   await input.fill('what is going on?')
   await input.press('Enter')
   await expect(page.locator('.bubble.user')).toContainText('what is going on?')
   await expect(page.locator('.bubble.assistant')).toContainText('e2e copilot reply', { timeout: 10_000 })
   await expect(page.locator('.conv-usage')).toContainText('10 in / 3 out')
+  // P6 acceptance: the exchange is journaled — a reload rebuilds the bubbles FROM THE LOG
+  await page.reload()
+  await expect(page.locator('.bubble.user')).toContainText('what is going on?', { timeout: 10_000 })
+  await expect(page.locator('.bubble.assistant')).toContainText('e2e copilot reply')
 })
 
 test('approve from the road advances the request live', async ({ page }) => {

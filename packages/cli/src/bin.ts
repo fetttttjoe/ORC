@@ -1,5 +1,5 @@
 import { dbosSend, isConnectionRefused, loadConfig, requireProject, type Kernel } from '@orc/kernel'
-import { HOOK_NAME } from '@orc/contracts'
+import { errorMessage, HOOK_NAME } from '@orc/contracts'
 import { buildProgram, openKernel, runInit, runMigrate } from './main'
 import type { Command } from 'commander'
 import { buildPlugins, buildRuntime } from './runtime'
@@ -16,7 +16,7 @@ function formatCliError(error: unknown): string {
       const path = value.path?.map(String).join('.') || 'input'
       return `${path}: ${String(value.message ?? 'invalid value')}`
     }).join('\n')
-  return error instanceof Error ? error.message : String(error)
+  return errorMessage(error)
 }
 
 function overrideExits(command: Command): void {
@@ -39,6 +39,11 @@ async function parse(program: Command, argv: string[]): Promise<number> {
 
 async function main(): Promise<number> {
   const args = process.argv.slice(2)
+  // P7 door #2: under `mcp serve`, stdout carries ONLY MCP protocol frames — rebind every
+  // stdout-bound console channel to stderr BEFORE any boot code (plugins, storage, memory)
+  // can print. warn/error already target stderr; DBOS never boots on the read path (lazy port).
+  if (args[0] === 'mcp' && args[1] === 'serve')
+    for (const k of ['log', 'info', 'debug'] as const) console[k] = console.error.bind(console)
   let plugins: Awaited<ReturnType<typeof buildPlugins>> | null = null
   let storage: Awaited<ReturnType<typeof openKernel>>['storage'] | null = null
   try {

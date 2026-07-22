@@ -1,6 +1,7 @@
 // The primitive set — small, typed, composable. Bigger views (detail panel, sidebar) are
 // compositions of these, the way shadcn components compose primitives once generated.
 import { el, type Child } from './el'
+import { errorMessage } from '@orc/contracts'
 
 export type Tone = 'accent' | 'ok' | 'warn' | 'purple' | 'danger' | 'muted' | 'default'
 
@@ -52,7 +53,7 @@ export const Btn = (label: string, onClick: () => Promise<void> | void, tone: To
     b.toggleAttribute('disabled', true)
     void Promise.resolve()
       .then(onClick)
-      .catch(err => toast(err instanceof Error ? err.message : String(err), 'danger'))
+      .catch(err => toast(errorMessage(err), 'danger'))
       .finally(() => b.toggleAttribute('disabled', false))
   })
   return b
@@ -102,7 +103,7 @@ export function openDialog(
     try {
       await onSubmit(Object.fromEntries([...inputs].map(([name, input]) => [name, input.value])))
     } catch (err) {
-      error.textContent = err instanceof Error ? err.message : String(err)
+      error.textContent = errorMessage(err)
       return // dialog stays open — the user reads the reason and fixes the input
     }
     dlg.close()

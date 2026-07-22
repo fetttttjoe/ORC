@@ -2,9 +2,9 @@
 // visible cards) interleaved with system cards narrating the event stream (zero copilot
 // tokens). History (text messages only) persists per project in localStorage; the copilot
 // re-grounds itself from live state each exchange, so history is presentational context.
-import { EVENT_KIND } from '@orc/contracts'
+import { EVENT_KIND, planScope } from '@orc/contracts'
 import type { LogRow, TodoWave } from '@orc/ui-core'
-import { noteNodeId, planScopeName, stepNodeId } from '@orc/ui-core/graph'
+import { isUiMetaNote, noteNodeId, stepNodeId } from '@orc/ui-core/graph'
 import { api, canAct, session, type CopilotPart } from './api'
 import { mermaidInto } from './mermaid'
 import { el } from './ui/el'
@@ -72,7 +72,7 @@ export class Conversation {
 
   constructor(goNode: (node: string) => void) {
     this.goNode = goNode
-    this.input.placeholder = 'ask the copilot — it can read state, create requests, approve, run…  (/new starts a fresh chat)'
+    this.input.placeholder = 'ask the copilot — it can read state, create requests, propose, run… (approval stays yours)  (/new starts a fresh chat)'
     this.input.rows = 2
     this.input.addEventListener('keydown', ev => {
       if (ev.key === 'Enter' && !ev.shiftKey) { ev.preventDefault(); void this.sendOrStop() }
@@ -96,17 +96,17 @@ export class Conversation {
     this.reload()
   }
 
-  // repaint from persistent state only: text bubbles (localStorage) stay, event narrative
-  // drops — the caller re-seeds from the log (which, after a purge, is empty)
+  // repaint to empty — the caller re-seeds from the log, which rebuilds BOTH the event
+  // narrative and the copilot bubbles (copilot_exchange events) in true seq order.
+  // localStorage only feeds the model's short-term context (history()), never the pane.
   reload(): void {
     this.planCards.clear()
     this.decoCards.clear()
     this.answerRows.clear()
+    this.retryRows.clear()
     this.ticker = null
     this.list.replaceChildren()
-    for (const m of this.history()) this.bubble(m.role, m.content)
-    if (this.list.childElementCount === 0)
-      this.list.append(Empty('this is the project chat — system events appear here live, and the copilot can guide you'))
+    this.list.append(Empty('this is the project chat — system events appear here live, and the copilot can guide you'))
     this.scroll()
   }
 
@@ -114,8 +114,10 @@ export class Conversation {
   // through the SAME pipeline as the live stream rebuilds cards, the plan/decomposition
   // state, and — crucially — the answer boxes of still-open questions. Rows beyond uptoSeq
   // are left to the live stream (which attaches at exactly that seq): no gap, no duplicate.
+  private seedCutoff = 0
   async seed(uptoSeq: number, limit = 150): Promise<void> {
     const project = this.projectId
+    this.seedCutoff = uptoSeq
     const rows = await api.log(project, { limit }).catch(() => [])
     if (this.projectId !== project) return // switched away while fetching
     for (const row of rows) if (row.seq <= uptoSeq) this.addSystemRow(row)
@@ -123,6 +125,15 @@ export class Conversation {
 
   // system narration from the SSE envelope — no tokens spent
   addSystemRow(row: LogRow): void {
+    // chat-metadata notes (project name/dir, e.g. the post-purge identity re-seed) are
+    // infrastructure — they'd read as "notes written" right after purging
+    if (row.noteRef?.startsWith('note:project\u0000') && isUiMetaNote('project', row.noteRef.split('\u0000')[1] ?? '')) return
+    // copilot exchanges: seeded rows rebuild real bubbles (the log is the record); live rows
+    // are skipped — this tab already rendered the exchange as it streamed (localhost, one user)
+    if (row.kind === EVENT_KIND.copilot_exchange) {
+      if (row.seq <= this.seedCutoff) this.renderExchange(row)
+      return
+    }
     const kind = CARD_KINDS[row.kind]
     if (!kind) { this.tick(row); return }
     // a lifecycle card supersedes the ticker — it re-appears on the next working event
@@ -148,6 +159,14 @@ export class Conversation {
     if (row.kind === EVENT_KIND.feedback_provided && row.taskId) {
       this.answerRows.get(row.taskId)?.remove()
       this.answerRows.delete(row.taskId)
+    }
+    // a failed step is actionable RIGHT HERE (P3): the card names the failure class, the row
+    // retries with the same action the inspector uses — no tab switch to unblock a run
+    if (row.kind === EVENT_KIND.step_failed && row.taskId && canAct()) this.retryRow(row.taskId)
+    // a new run/attempt supersedes the offer — stale retry buttons must not double-start
+    if ((row.kind === EVENT_KIND.run_started || row.kind === EVENT_KIND.step_started) && row.taskId) {
+      this.retryRows.get(row.taskId)?.remove()
+      this.retryRows.delete(row.taskId)
     }
     if (PLAN_KINDS.has(row.kind) && row.taskId) void this.planCard(row.taskId)
     if (DECOMPOSITION_KINDS.has(row.kind) && row.taskId) void this.decompositionCard(row.taskId)
@@ -177,6 +196,21 @@ export class Conversation {
     this.list.append(row)
     this.scroll()
     input.focus()
+  }
+
+  // inline retry for a failed step — same retry action as the inspector, one per task
+  private readonly retryRows = new Map<string, HTMLElement>()
+  private retryRow(taskId: string): void {
+    this.retryRows.get(taskId)?.remove() // latest failure owns the button
+    const row = el('div', { class: 'conv-inputrow answer' }, Btn('retry failed step', async () => {
+      await api.act('retry', { taskId })
+      toast('retry started', 'ok')
+      row.remove()
+      this.retryRows.delete(taskId)
+    }, 'danger'))
+    this.retryRows.set(taskId, row)
+    this.list.append(row)
+    this.scroll()
   }
 
   // inline reply for an open agent question — same reply action as the inspector, one shot
@@ -241,7 +275,7 @@ export class Conversation {
         ...res.notes.flatMap(n => [
           el('button', {
             class: 'tab', title: 'open in inspector (audit: content, reads, backlinks)',
-            onClick: () => this.goNode(noteNodeId(planScopeName(taskId), n.id)),
+            onClick: () => this.goNode(noteNodeId(planScope(taskId), n.id)),
           }, n.title),
           ...(canAct() ? [el('button', { class: 'tab correct', title: `correct “${n.title}”`, onClick: () => this.correctionRow(taskId, n.id, n.title) }, '✎')] : []),
         ]),
@@ -304,6 +338,20 @@ export class Conversation {
     const b = el('div', { class: `bubble ${role}` }, text)
     this.list.append(b)
     return b
+  }
+
+  // one journaled exchange → user bubble, collapsed tool summaries, assistant bubble — the
+  // same shapes the live stream renders, so a reloaded pane is indistinguishable from live
+  private renderExchange(row: LogRow): void {
+    const x = row.exchange
+    if (!x) return
+    if (x.user) this.bubble('user', x.user)
+    for (const t of x.toolCalls) {
+      const d = el('details', { class: 'tool-row' })
+      d.append(el('summary', {}, `⚙ ${t.toolName}`), el('div', { class: 'tool-body' }, Pre(t.summary)))
+      this.list.append(d)
+    }
+    if (x.assistant) this.bubble('assistant', x.assistant)
   }
 
   private toolCard(toolName: string, input: unknown): HTMLElement {

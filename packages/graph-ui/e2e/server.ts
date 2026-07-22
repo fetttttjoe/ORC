@@ -52,6 +52,7 @@ const actions: OrcActions = {
   renameProject: unsupported('renameProject'),
   newProject: unsupported('newProject'),
   purgeProject: unsupported('purgeProject'),
+  deleteProject: unsupported('deleteProject'),
 }
 
 startGraphUi({
@@ -61,5 +62,8 @@ startGraphUi({
   actions,
   copilot: { resolveModel: () => copilotModel, defaultModelRef: 'mock/e2e', price: () => 0.0001 },
   defaultCwd: '/tmp',
+  appendExchange: async x => {
+    await storage.events.append({ taskId: null, stepId: null, runToken: null, kind: 'copilot_exchange', payload: x.payload, usage: x.usage })
+  },
 })
 console.log(`e2e server on http://127.0.0.1:${E2E_PORT}`)

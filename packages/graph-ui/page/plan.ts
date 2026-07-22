@@ -13,8 +13,9 @@ export type { PlanNoteView, PlansView, PlanStepView } // view models re-export t
 
 export interface TaskView {
   task: { id: string; title: string; status: string }
-  steps: Array<{ stepId: string; status: string; iterations: number }>
+  steps: Array<{ stepId: string; status: string; iterations: number; usage?: { inputTokens: number; outputTokens: number; costUSD: number | null } | null }>
   artifacts: Array<{ path: string; size: number }>
+  memoryPulls?: number // knowledge reads this task made instead of re-reading the repo
 }
 export interface OpenQuestion { question: string; stepId: string }
 export type Act = <T = unknown>(name: string, body: unknown) => Promise<T>
@@ -48,6 +49,15 @@ function topoOrder(steps: PlanStepView[]): PlanStepView[] {
     rest = rest.filter(s => !placed.has(s.id))
   }
   return out
+}
+
+const fmtTok = (n: number): string => (n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n))
+// `$0.0132 · 45.2k tok` — null when the step has no usage yet
+function usageChip(u: { inputTokens: number; outputTokens: number; costUSD: number | null }): string | null {
+  const tok = u.inputTokens + u.outputTokens
+  if (tok === 0 && u.costUSD == null) return null
+  const cost = u.costUSD != null ? `$${u.costUSD.toFixed(u.costUSD < 0.1 ? 4 : 2)} · ` : ''
+  return `${cost}${fmtTok(tok)} tok`
 }
 
 const cmdChip = (cmd: string): HTMLElement =>
@@ -244,11 +254,13 @@ export function renderRequest(ctx: RequestCtx): HTMLElement {
     for (const s of topoOrder(plan.steps)) {
       const run = runOf.get(s.id)
       const status = run?.status ?? 'pending'
+      const uc = run?.usage ? usageChip(run.usage) : null
       out.append(el('div', { class: 'road-step' },
         el('div', { class: 'road-marker' }, Dot(status === 'completed' ? 'step' : 'task')),
         Card(
           [Link(s.title, () => ctx.go(stepNodeId(ctx.taskId, s.id))), Badge(status, statusTone(status)),
-            run ? Badge(`${run.iterations}/${s.maxIterations} iter`, 'muted') : null].filter((x): x is NonNullable<typeof x> => x !== null),
+            run ? Badge(`${run.iterations}/${s.maxIterations} iter`, 'muted') : null,
+            uc ? Badge(uc, 'muted') : null].filter((x): x is NonNullable<typeof x> => x !== null),
           KV([
             ['role', s.role],
             ['model', s.modelRef],
@@ -262,12 +274,13 @@ export function renderRequest(ctx: RequestCtx): HTMLElement {
     out.append(Empty('no plan proposed yet'))
   }
 
-  // 5) knowledge this request grew
-  if (ctx.knowledge.length) out.append(Card([`knowledge (${ctx.knowledge.length} notes)`],
+  // 5) knowledge this request grew — pulls make the token economy visible (graph reads, not re-reads)
+  const pulls = t.memoryPulls ?? 0
+  if (ctx.knowledge.length) out.append(Card([`knowledge (${ctx.knowledge.length} notes${pulls > 0 ? ` · ${pulls} pulls` : ''})`],
     KV(ctx.knowledge.map(n => ['', el('span', {}, Link(n.label, () => ctx.go(n.id)), ' ', Badge(n.detail, 'purple'))] as [string, HTMLElement]))))
 
   // 6) destination: verified outputs
   if (t.artifacts.length) out.append(Card([`outputs (${t.artifacts.length})`],
-    KV(t.artifacts.map(a => ['', el('span', {}, Link(a.path, () => ctx.go(artifactNodeId(ctx.taskId, a.path))), ` · ${a.size}B`)] as [string, HTMLElement]))))
+    KV(t.artifacts.map(a => ['', el('span', {}, Link(a.path, () => ctx.go(artifactNodeId(ctx.taskId, a.path))), ` · ${(a.size / 1024).toFixed(1)} KB`)] as [string, HTMLElement]))))
   return out
 }

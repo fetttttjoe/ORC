@@ -84,6 +84,11 @@ input, textarea, select, button { font: var(--font) }
   margin-top: auto; padding: 10px 10px 2px; border-top: 1px solid var(--border-soft);
   display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 11px;
 }
+.health-badge { display: none }
+.health-badge.on {
+  display: inline-block; color: var(--danger); border: 1px solid var(--danger);
+  border-radius: 4px; padding: 0 5px; cursor: help;
+}
 
 /* ─── Primitives ────────────────────────────────────────────────────────────── */
 .badge {
