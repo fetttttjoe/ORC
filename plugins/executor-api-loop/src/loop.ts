@@ -5,7 +5,7 @@ import {
   type SplitResult, type UnifiedEvent, type Usage,
 } from '@orc/contracts'
 import { errorMessage, validateOutputPaths } from '@orc/contracts'
-import { AskHumanInput, JoinSplitsInput, SignalInput, TOOL_NAME, executeTool, toolSet } from './tools'
+import { AskHumanInput, JoinSplitsInput, SignalInput, TOOL_NAME, executeTool, releaseWriteClaims, toolSet } from './tools'
 
 // Pre-flight for declared outputs, so the model can fix a bad declaration instead of the
 // step failing at the runtime's trusted verification. Same rule set as the runtime
@@ -144,228 +144,232 @@ export function apiLoopExecutor(): AgentExecutor<LanguageModel> {
     id: 'api-loop',
 
     async *startTurn(ctx: ExecutorContext<LanguageModel>): AsyncGenerator<UnifiedEvent, void, SplitResult[] | string | undefined> {
-      const messages: ModelMessage[] = [{ role: 'user', content: buildPrompt(ctx) }]
-      const tools = toolSet(ctx.extraTools)
-      const base = { stepId: ctx.step.id, runToken: ctx.runToken }
-      let persistedThrough = 0 // messages[0..persistedThrough) are already in an agent_call event
+      try {
+        const messages: ModelMessage[] = [{ role: 'user', content: buildPrompt(ctx) }]
+        const tools = toolSet(ctx.extraTools)
+        const base = { stepId: ctx.step.id, runToken: ctx.runToken }
+        let persistedThrough = 0 // messages[0..persistedThrough) are already in an agent_call event
 
-      for (let iteration = 1; iteration <= ctx.step.maxIterations; iteration++) {
-        const note = budgetNote(iteration, ctx.step.maxIterations)
-        if (note) messages.push({ role: 'user', content: note })
-        const remaining = await ctx.checkpoint(`budget:${iteration}`, ctx.budgetRemainingUSD)
-        if (remaining !== null && remaining <= 0) {
-          yield { type: UNIFIED_EVENT_TYPE.error, class: FAILURE_CLASS.budget_exceeded, message: `budget exhausted before iteration ${iteration}` }
-          return
-        }
+        for (let iteration = 1; iteration <= ctx.step.maxIterations; iteration++) {
+          const note = budgetNote(iteration, ctx.step.maxIterations)
+          if (note) messages.push({ role: 'user', content: note })
+          const remaining = await ctx.checkpoint(`budget:${iteration}`, ctx.budgetRemainingUSD)
+          if (remaining !== null && remaining <= 0) {
+            yield { type: UNIFIED_EVENT_TYPE.error, class: FAILURE_CLASS.budget_exceeded, message: `budget exhausted before iteration ${iteration}` }
+            return
+          }
 
-        let turn: TurnResult
-        try {
-          turn = await ctx.operation(
-            {
-              operationId: `${ctx.runToken}:model:${iteration}`,
-              kind: OPERATION_KIND.model,
-              name: ctx.step.modelRef,
-              before: { messages: messages.slice(persistedThrough) },
-            },
-            () => callModel(ctx.model, messages, tools),
-            (r): EventDraft[] => [{
-              kind: EVENT_KIND.agent_call,
-              // persist only the DELTA since the previous agent_call — the full cumulative
-              // history would be O(iterations²) bytes; slice() also snapshots, so the draft
-              // never aliases the live array that keeps growing via push() (R9 traceability).
-              payload: { ...base, iteration, request: { messages: messages.slice(persistedThrough) }, response: { text: r.text, toolCalls: r.toolCalls } },
-              usage: r.usage,
-            }],
-          )
-          persistedThrough = messages.length
-        } catch (err) {
-          // transient errors retry inside the checkpoint (DBOS); reaching here means retries
-          // are exhausted or the error is terminal → terminal provider failure.
-          yield { type: UNIFIED_EVENT_TYPE.error, class: FAILURE_CLASS.provider_error, message: errorMessage(err) }
-          return
-        }
-
-        yield { type: UNIFIED_EVENT_TYPE.usage, usage: turn.usage }
-        if (turn.text) yield { type: UNIFIED_EVENT_TYPE.text, text: turn.text }
-        messages.push(...turn.responseMessages)
-
-        const signalCall = turn.toolCalls.find(c => c.toolName === TOOL_NAME.signal)
-        const parsedSignal = signalCall ? SignalInput.safeParse(signalCall.input) : undefined
-        if (signalCall && parsedSignal && !parsedSignal.success) {
-          // The assistant turn's tool_use (signal, plus any siblings) must be answered by a
-          // matching tool result for EVERY call id, or a real provider rejects the next request
-          // with a 400 (terminal) — a bare user-message push leaves the signal call unresolved.
-          messages.push({
-            role: 'tool',
-            content: turn.toolCalls.map(call => ({
-              type: 'tool-result',
-              toolCallId: call.toolCallId,
-              toolName: call.toolName,
-              output: {
-                type: 'json',
-                value: call.toolCallId === signalCall.toolCallId
-                  ? { error: `invalid signal input: ${parsedSignal.error.message}. Call signal again with {outcome: 'success'|'failure', summary: string}.` }
-                  : { error: 'not executed: resolve the invalid signal call first' },
-              },
-            })),
-          })
-          continue // counts as an iteration (agent_error accounting, spec §9)
-        }
-
-        if (turn.toolCalls.length === 0) {
-          messages.push({ role: 'user', content: `Continue. Use your tools, and call 'signal' when the step is complete.` })
-          continue
-        }
-
-        const joinCall = turn.toolCalls.find(c => c.toolName === TOOL_NAME.join_splits)
-        const parsedJoin = joinCall ? JoinSplitsInput.safeParse(joinCall.input) : undefined
-        const askCall = turn.toolCalls.find(c => c.toolName === TOOL_NAME.ask_human)
-        const parsedAsk = askCall ? AskHumanInput.safeParse(askCall.input) : undefined
-
-        // sibling tool calls batched with a valid signal still execute — a turn like
-        // [fs_write, signal(success)] must not silently drop the write. signal/join/ask are
-        // handled below (they have no execute), so they never reach executeTool.
-        const toolCalls = turn.toolCalls.filter(c => c !== signalCall && c !== joinCall && c !== askCall)
-        if (toolCalls.length > 0) {
-          // one operation per external tool effect: a crash retry re-runs only the interrupted
-          // call, never already-completed siblings; result order stays the model's call order
-          const results: Awaited<ReturnType<typeof executeTool>>[] = []
-          for (const call of toolCalls)
-            results.push(await ctx.operation(
+          let turn: TurnResult
+          try {
+            turn = await ctx.operation(
               {
-                operationId: `${ctx.runToken}:tool:${iteration}:${call.toolCallId}`,
-                kind: OPERATION_KIND.tool,
-                name: call.toolName,
-                before: { input: call.input },
+                operationId: `${ctx.runToken}:model:${iteration}`,
+                kind: OPERATION_KIND.model,
+                name: ctx.step.modelRef,
+                before: { messages: messages.slice(persistedThrough) },
               },
-              () => executeTool(call.toolName, call.input, ctx.workspaceDir, ctx.extraTools, call.toolCallId, ctx.step.zone),
-              (r): EventDraft[] => [
-                { kind: EVENT_KIND.tool_call, payload: { ...base, iteration, toolCallId: call.toolCallId, toolName: call.toolName, input: call.input } },
-                { kind: EVENT_KIND.tool_result, payload: { ...base, iteration, toolCallId: call.toolCallId, toolName: call.toolName, output: r.output, isError: r.isError } },
-              ],
-            ))
-
-          for (let i = 0; i < toolCalls.length; i++) {
-            const call = toolCalls[i]!
-            yield { type: UNIFIED_EVENT_TYPE.tool_call, toolCallId: call.toolCallId, toolName: call.toolName, input: call.input }
-            yield { type: UNIFIED_EVENT_TYPE.tool_result, toolCallId: call.toolCallId, toolName: call.toolName, output: results[i]!.output, isError: results[i]!.isError }
+              () => callModel(ctx.model, messages, tools),
+              (r): EventDraft[] => [{
+                kind: EVENT_KIND.agent_call,
+                // persist only the DELTA since the previous agent_call — the full cumulative
+                // history would be O(iterations²) bytes; slice() also snapshots, so the draft
+                // never aliases the live array that keeps growing via push() (R9 traceability).
+                payload: { ...base, iteration, request: { messages: messages.slice(persistedThrough) }, response: { text: r.text, toolCalls: r.toolCalls } },
+                usage: r.usage,
+              }],
+            )
+            persistedThrough = messages.length
+          } catch (err) {
+            // transient errors retry inside the checkpoint (DBOS); reaching here means retries
+            // are exhausted or the error is terminal → terminal provider failure.
+            yield { type: UNIFIED_EVENT_TYPE.error, class: FAILURE_CLASS.provider_error, message: errorMessage(err) }
+            return
           }
 
-          messages.push({
-            role: 'tool',
-            content: toolCalls.map((call, i) => ({
-              type: 'tool-result',
-              toolCallId: call.toolCallId,
-              toolName: call.toolName,
-              output: { type: 'json', value: toJson(results[i]!.output) },
-            })),
-          })
-        }
+          yield { type: UNIFIED_EVENT_TYPE.usage, usage: turn.usage }
+          if (turn.text) yield { type: UNIFIED_EVENT_TYPE.text, text: turn.text }
+          messages.push(...turn.responseMessages)
 
-        if (joinCall && parsedJoin?.success) {
-          // suspension point (spec D9): the port recv's in workflow context and resumes us.
-          // resume is typed SplitResult[] | string | undefined (feedback shares the channel) —
-          // a gate only ever resumes with SplitResult[], so narrow defensively.
-          const resumed = yield {
-            type: UNIFIED_EVENT_TYPE.gate,
-            splitIds: parsedJoin.data.splitIds ?? [],
-            toolCallId: joinCall.toolCallId,
-          }
-          const results = Array.isArray(resumed) ? resumed : []
-          await ctx.checkpoint(
-            `join:${iteration}`,
-            async () => results,
-            (rs): EventDraft[] => [
-              { kind: EVENT_KIND.tool_call, payload: { ...base, iteration, toolCallId: joinCall.toolCallId, toolName: TOOL_NAME.join_splits, input: joinCall.input } },
-              { kind: EVENT_KIND.tool_result, payload: { ...base, iteration, toolCallId: joinCall.toolCallId, toolName: TOOL_NAME.join_splits, output: { splits: rs }, isError: false } },
-            ],
-          )
-          yield { type: UNIFIED_EVENT_TYPE.tool_result, toolCallId: joinCall.toolCallId, toolName: TOOL_NAME.join_splits, output: { splits: results }, isError: false }
-          messages.push({
-            role: 'tool',
-            content: [
-              { type: 'tool-result', toolCallId: joinCall.toolCallId, toolName: TOOL_NAME.join_splits, output: { type: 'json', value: { splits: results } } },
-              // a batched signal/ask in the SAME turn as join_splits must still be answered here —
-              // its tool_use was already pushed via responseMessages above, and an unresolved
-              // tool_use makes the next generateText request rejected (missing tool result)
-              ...(signalCall ? [notExecutedResult(signalCall, signalDeferred)] : []),
-              ...(askCall ? [notExecutedResult(askCall, askDeferred)] : []),
-            ],
-          })
-          continue
-        }
-        if (joinCall && parsedJoin && !parsedJoin.success) {
-          messages.push({
-            role: 'tool',
-            content: [
-              { type: 'tool-result', toolCallId: joinCall.toolCallId, toolName: TOOL_NAME.join_splits, output: { type: 'json', value: { error: `invalid join_splits input: ${parsedJoin.error.message}` } } },
-              ...(signalCall ? [notExecutedResult(signalCall, signalDeferred)] : []),
-              ...(askCall ? [notExecutedResult(askCall, askDeferred)] : []),
-            ],
-          })
-          continue
-        }
-
-        // ask_human suspension (D4): mirrors join_splits but yields a feedback event instead of a
-        // gate. The port appends feedback_requested and DBOS.recv's on `feedback:<topic>`,
-        // resuming this turn with the human's reply string. topic defaults to a deterministic,
-        // replay-safe `${runToken}:${toolCallId}`.
-        if (askCall && parsedAsk?.success) {
-          const topic = parsedAsk.data.topic ?? `${ctx.runToken}:${askCall.toolCallId}`
-          const resumed = yield { type: UNIFIED_EVENT_TYPE.feedback, question: parsedAsk.data.question, topic, toolCallId: askCall.toolCallId }
-          const answer = typeof resumed === 'string' ? resumed : ''
-          yield { type: UNIFIED_EVENT_TYPE.tool_result, toolCallId: askCall.toolCallId, toolName: TOOL_NAME.ask_human, output: { answer }, isError: false }
-          // the reply flows back as the ask_human tool result; the next iteration's agent_call
-          // persists it (part of messages.slice(persistedThrough)) — no separate checkpoint,
-          // feedback_requested (port) + that agent_call reconstruct the full Q&A on replay.
-          messages.push({
-            role: 'tool',
-            content: [
-              { type: 'tool-result', toolCallId: askCall.toolCallId, toolName: TOOL_NAME.ask_human, output: { type: 'json', value: { answer } } },
-              ...(signalCall ? [notExecutedResult(signalCall, signalDeferred)] : []),
-            ],
-          })
-          continue
-        }
-        if (askCall && parsedAsk && !parsedAsk.success) {
-          messages.push({
-            role: 'tool',
-            content: [
-              { type: 'tool-result', toolCallId: askCall.toolCallId, toolName: TOOL_NAME.ask_human, output: { type: 'json', value: { error: `invalid ask_human input: ${parsedAsk.error.message}` } } },
-              ...(signalCall ? [notExecutedResult(signalCall, signalDeferred)] : []),
-            ],
-          })
-          continue
-        }
-
-        if (signalCall && parsedSignal?.success) {
-          const declared = parsedSignal.data.outcome === SIGNAL_OUTCOME.success ? parsedSignal.data.outputs : undefined
-          const outputError = declared ? invalidOutputs(ctx.workspaceDir, declared) : null
-          if (outputError) {
+          const signalCall = turn.toolCalls.find(c => c.toolName === TOOL_NAME.signal)
+          const parsedSignal = signalCall ? SignalInput.safeParse(signalCall.input) : undefined
+          if (signalCall && parsedSignal && !parsedSignal.success) {
+            // The assistant turn's tool_use (signal, plus any siblings) must be answered by a
+            // matching tool result for EVERY call id, or a real provider rejects the next request
+            // with a 400 (terminal) — a bare user-message push leaves the signal call unresolved.
             messages.push({
               role: 'tool',
-              content: [{
+              content: turn.toolCalls.map(call => ({
                 type: 'tool-result',
-                toolCallId: signalCall.toolCallId,
-                toolName: signalCall.toolName,
-                output: { type: 'json', value: { error: `invalid output path: ${outputError}. Fix the file or the declared path, then call signal again.` } },
-              }],
+                toolCallId: call.toolCallId,
+                toolName: call.toolName,
+                output: {
+                  type: 'json',
+                  value: call.toolCallId === signalCall.toolCallId
+                    ? { error: `invalid signal input: ${parsedSignal.error.message}. Call signal again with {outcome: 'success'|'failure', summary: string}.` }
+                    : { error: 'not executed: resolve the invalid signal call first' },
+                },
+              })),
+            })
+            continue // counts as an iteration (agent_error accounting, spec §9)
+          }
+
+          if (turn.toolCalls.length === 0) {
+            messages.push({ role: 'user', content: `Continue. Use your tools, and call 'signal' when the step is complete.` })
+            continue
+          }
+
+          const joinCall = turn.toolCalls.find(c => c.toolName === TOOL_NAME.join_splits)
+          const parsedJoin = joinCall ? JoinSplitsInput.safeParse(joinCall.input) : undefined
+          const askCall = turn.toolCalls.find(c => c.toolName === TOOL_NAME.ask_human)
+          const parsedAsk = askCall ? AskHumanInput.safeParse(askCall.input) : undefined
+
+          // sibling tool calls batched with a valid signal still execute — a turn like
+          // [fs_write, signal(success)] must not silently drop the write. signal/join/ask are
+          // handled below (they have no execute), so they never reach executeTool.
+          const toolCalls = turn.toolCalls.filter(c => c !== signalCall && c !== joinCall && c !== askCall)
+          if (toolCalls.length > 0) {
+            // one operation per external tool effect: a crash retry re-runs only the interrupted
+            // call, never already-completed siblings; result order stays the model's call order
+            const results: Awaited<ReturnType<typeof executeTool>>[] = []
+            for (const call of toolCalls)
+              results.push(await ctx.operation(
+                {
+                  operationId: `${ctx.runToken}:tool:${iteration}:${call.toolCallId}`,
+                  kind: OPERATION_KIND.tool,
+                  name: call.toolName,
+                  before: { input: call.input },
+                },
+                () => executeTool(call.toolName, call.input, ctx.workspaceDir, ctx.extraTools, call.toolCallId, { zone: ctx.step.zone, writer: ctx.runToken }),
+                (r): EventDraft[] => [
+                  { kind: EVENT_KIND.tool_call, payload: { ...base, iteration, toolCallId: call.toolCallId, toolName: call.toolName, input: call.input } },
+                  { kind: EVENT_KIND.tool_result, payload: { ...base, iteration, toolCallId: call.toolCallId, toolName: call.toolName, output: r.output, isError: r.isError } },
+                ],
+              ))
+
+            for (let i = 0; i < toolCalls.length; i++) {
+              const call = toolCalls[i]!
+              yield { type: UNIFIED_EVENT_TYPE.tool_call, toolCallId: call.toolCallId, toolName: call.toolName, input: call.input }
+              yield { type: UNIFIED_EVENT_TYPE.tool_result, toolCallId: call.toolCallId, toolName: call.toolName, output: results[i]!.output, isError: results[i]!.isError }
+            }
+
+            messages.push({
+              role: 'tool',
+              content: toolCalls.map((call, i) => ({
+                type: 'tool-result',
+                toolCallId: call.toolCallId,
+                toolName: call.toolName,
+                output: { type: 'json', value: toJson(results[i]!.output) },
+              })),
+            })
+          }
+
+          if (joinCall && parsedJoin?.success) {
+            // suspension point (spec D9): the port recv's in workflow context and resumes us.
+            // resume is typed SplitResult[] | string | undefined (feedback shares the channel) —
+            // a gate only ever resumes with SplitResult[], so narrow defensively.
+            const resumed = yield {
+              type: UNIFIED_EVENT_TYPE.gate,
+              splitIds: parsedJoin.data.splitIds ?? [],
+              toolCallId: joinCall.toolCallId,
+            }
+            const results = Array.isArray(resumed) ? resumed : []
+            await ctx.checkpoint(
+              `join:${iteration}`,
+              async () => results,
+              (rs): EventDraft[] => [
+                { kind: EVENT_KIND.tool_call, payload: { ...base, iteration, toolCallId: joinCall.toolCallId, toolName: TOOL_NAME.join_splits, input: joinCall.input } },
+                { kind: EVENT_KIND.tool_result, payload: { ...base, iteration, toolCallId: joinCall.toolCallId, toolName: TOOL_NAME.join_splits, output: { splits: rs }, isError: false } },
+              ],
+            )
+            yield { type: UNIFIED_EVENT_TYPE.tool_result, toolCallId: joinCall.toolCallId, toolName: TOOL_NAME.join_splits, output: { splits: results }, isError: false }
+            messages.push({
+              role: 'tool',
+              content: [
+                { type: 'tool-result', toolCallId: joinCall.toolCallId, toolName: TOOL_NAME.join_splits, output: { type: 'json', value: { splits: results } } },
+                // a batched signal/ask in the SAME turn as join_splits must still be answered here —
+                // its tool_use was already pushed via responseMessages above, and an unresolved
+                // tool_use makes the next generateText request rejected (missing tool result)
+                ...(signalCall ? [notExecutedResult(signalCall, signalDeferred)] : []),
+                ...(askCall ? [notExecutedResult(askCall, askDeferred)] : []),
+              ],
             })
             continue
           }
-          const signal: Signal = { ...base, outcome: parsedSignal.data.outcome, summary: parsedSignal.data.summary, ...(declared ? { outputs: declared } : {}) }
-          await ctx.checkpoint(
-            `signal:${iteration}`,
-            async () => signal,
-            (): EventDraft[] => [{ kind: EVENT_KIND.signal_received, payload: { ...base, signal } }],
-          )
-          yield { type: UNIFIED_EVENT_TYPE.signal, signal }
-          yield { type: UNIFIED_EVENT_TYPE.done }
-          return
-        }
-      }
+          if (joinCall && parsedJoin && !parsedJoin.success) {
+            messages.push({
+              role: 'tool',
+              content: [
+                { type: 'tool-result', toolCallId: joinCall.toolCallId, toolName: TOOL_NAME.join_splits, output: { type: 'json', value: { error: `invalid join_splits input: ${parsedJoin.error.message}` } } },
+                ...(signalCall ? [notExecutedResult(signalCall, signalDeferred)] : []),
+                ...(askCall ? [notExecutedResult(askCall, askDeferred)] : []),
+              ],
+            })
+            continue
+          }
 
-      yield { type: UNIFIED_EVENT_TYPE.error, class: FAILURE_CLASS.agent_error, message: `maxIterations (${ctx.step.maxIterations}) exhausted without signal` }
+          // ask_human suspension (D4): mirrors join_splits but yields a feedback event instead of a
+          // gate. The port appends feedback_requested and DBOS.recv's on `feedback:<topic>`,
+          // resuming this turn with the human's reply string. topic defaults to a deterministic,
+          // replay-safe `${runToken}:${toolCallId}`.
+          if (askCall && parsedAsk?.success) {
+            const topic = parsedAsk.data.topic ?? `${ctx.runToken}:${askCall.toolCallId}`
+            const resumed = yield { type: UNIFIED_EVENT_TYPE.feedback, question: parsedAsk.data.question, topic, toolCallId: askCall.toolCallId }
+            const answer = typeof resumed === 'string' ? resumed : ''
+            yield { type: UNIFIED_EVENT_TYPE.tool_result, toolCallId: askCall.toolCallId, toolName: TOOL_NAME.ask_human, output: { answer }, isError: false }
+            // the reply flows back as the ask_human tool result; the next iteration's agent_call
+            // persists it (part of messages.slice(persistedThrough)) — no separate checkpoint,
+            // feedback_requested (port) + that agent_call reconstruct the full Q&A on replay.
+            messages.push({
+              role: 'tool',
+              content: [
+                { type: 'tool-result', toolCallId: askCall.toolCallId, toolName: TOOL_NAME.ask_human, output: { type: 'json', value: { answer } } },
+                ...(signalCall ? [notExecutedResult(signalCall, signalDeferred)] : []),
+              ],
+            })
+            continue
+          }
+          if (askCall && parsedAsk && !parsedAsk.success) {
+            messages.push({
+              role: 'tool',
+              content: [
+                { type: 'tool-result', toolCallId: askCall.toolCallId, toolName: TOOL_NAME.ask_human, output: { type: 'json', value: { error: `invalid ask_human input: ${parsedAsk.error.message}` } } },
+                ...(signalCall ? [notExecutedResult(signalCall, signalDeferred)] : []),
+              ],
+            })
+            continue
+          }
+
+          if (signalCall && parsedSignal?.success) {
+            const declared = parsedSignal.data.outcome === SIGNAL_OUTCOME.success ? parsedSignal.data.outputs : undefined
+            const outputError = declared ? invalidOutputs(ctx.workspaceDir, declared) : null
+            if (outputError) {
+              messages.push({
+                role: 'tool',
+                content: [{
+                  type: 'tool-result',
+                  toolCallId: signalCall.toolCallId,
+                  toolName: signalCall.toolName,
+                  output: { type: 'json', value: { error: `invalid output path: ${outputError}. Fix the file or the declared path, then call signal again.` } },
+                }],
+              })
+              continue
+            }
+            const signal: Signal = { ...base, outcome: parsedSignal.data.outcome, summary: parsedSignal.data.summary, ...(declared ? { outputs: declared } : {}) }
+            await ctx.checkpoint(
+              `signal:${iteration}`,
+              async () => signal,
+              (): EventDraft[] => [{ kind: EVENT_KIND.signal_received, payload: { ...base, signal } }],
+            )
+            yield { type: UNIFIED_EVENT_TYPE.signal, signal }
+            yield { type: UNIFIED_EVENT_TYPE.done }
+            return
+          }
+        }
+
+        yield { type: UNIFIED_EVENT_TYPE.error, class: FAILURE_CLASS.agent_error, message: `maxIterations (${ctx.step.maxIterations}) exhausted without signal` }
+      } finally {
+        releaseWriteClaims(ctx.runToken) // claims die with the turn — success, failure, or abort
+      }
     },
   }
 }

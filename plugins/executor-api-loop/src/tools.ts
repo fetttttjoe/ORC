@@ -1,4 +1,4 @@
-import { mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { mkdirSync, readdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import { jsonSchema, tool } from 'ai'
 import { z } from 'zod'
@@ -65,13 +65,30 @@ export function toolSet(extra: ResolvedTool[] = []) {
   }
 }
 
+// In-process write-claim registry — the enforcement the plan-authoring skill can only ask
+// for: the FIRST still-running step to write a path owns it; a concurrent sibling writing
+// the same path is refused with a named error instead of silently last-write-winning.
+// Claims release when the step's turn ends (loop.ts finally); a retry attempt is a new
+// writer. Crash-safe by construction: a dead process takes its map with it.
+// ponytail: in-process Map matches the single-process DBOS runtime; move claims to pg
+// advisory locks if step execution ever spans processes.
+const writeClaims = new Map<string, string>() // `${workspaceDir}\u0000${abs}` → writer (runToken)
+export function releaseWriteClaims(writer: string): void {
+  for (const [k, v] of writeClaims) if (v === writer) writeClaims.delete(k)
+}
+
+export interface WriteGuard {
+  zone?: string[] // declared write-fence globs; [] / absent = unfenced
+  writer?: string // claim owner (the step's runToken); absent = no concurrency guard (tests, single-step)
+}
+
 export async function executeTool(
   name: string,
   input: unknown,
   workspaceDir: string,
   extra: ResolvedTool[] = [],
   toolCallId?: string,
-  zone: string[] = [], // step's declared write-fence globs; [] = unrestricted
+  guard: WriteGuard = {},
 ): Promise<{ output: unknown; isError: boolean }> {
   try {
     switch (name) {
@@ -82,9 +99,24 @@ export async function executeTool(
       case TOOL_NAME.fs_write: {
         const { path: p, content } = WriteInput.parse(input)
         const abs = resolveInWorkspace(workspaceDir, p)
-        assertInZone(workspaceDir, abs, zone) // named fence error → the model can correct course
+        assertInZone(workspaceDir, abs, guard.zone ?? []) // named fence error → the model can correct course
+        if (guard.writer) {
+          const key = `${workspaceDir}\u0000${abs}`
+          const owner = writeClaims.get(key)
+          if (owner !== undefined && owner !== guard.writer)
+            return { output: { error: `concurrent write refused: '${p}' is being written by a still-running sibling step — write elsewhere or order the steps with dependsOn` }, isError: true }
+          writeClaims.set(key, guard.writer)
+        }
         mkdirSync(path.dirname(abs), { recursive: true })
-        writeFileSync(abs, content)
+        // atomic replace: same-directory temp + rename — a reader or a crash never sees a torn file
+        const tmp = `${abs}.${process.pid}.${Math.random().toString(36).slice(2, 10)}.tmp`
+        try {
+          writeFileSync(tmp, content)
+          renameSync(tmp, abs)
+        } catch (err) {
+          try { unlinkSync(tmp) } catch { /* best effort */ }
+          throw err
+        }
         return { output: { written: p }, isError: false }
       }
       case TOOL_NAME.fs_list: {
