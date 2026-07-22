@@ -338,6 +338,59 @@ For a grounded plan step, an exact normalized `approve` reply also stores SHA-25
 plan-note graph. `finalize_plan` recomputes that hash and accepts only a human approval from the same
 run token. Missing, cross-attempt, or stale approval returns a tool error before any child split.
 
+## Adapters — two doors over one transport-free core
+
+Everything a user or an external agent touches goes through `@orc/ui-core`, which is
+transport-free by contract: it exposes `ProjectSessions` (live read model: snapshots,
+patches, transcripts, plans, log rows), `OrcActions` (the one mutation surface), and the
+copilot toolset. Adapters stay thin because the core does the thinking:
+
+```mermaid
+graph TD
+  subgraph CORE ["packages/ui-core — transport-free"]
+    SESS["sessions.ts<br/>ProjectSessions: snapshot · patches · detail · log"]
+    ACT["actions.ts<br/>OrcActions (interface)"]
+    CTOOLS["copilot.ts<br/>buildCopilotTools · asResolvedTools"]
+  end
+  subgraph WEB ["door #1 — packages/graph-ui (web)"]
+    SRV["src/server.ts<br/>JSON + SSE · /api/health · copilot stream"]
+    PAGE["page/* (browser)"]
+  end
+  subgraph MCPD ["door #2 — packages/cli/src/mcp-serve.ts (stdio MCP)"]
+    MSRV["Server + StdioServerTransport<br/>--autonomy gated|full"]
+  end
+  CLIA["packages/cli/src/actions.ts<br/>OrcActions implementation"]
+
+  PAGE --> SRV
+  SRV --> SESS
+  SRV --> CTOOLS
+  SRV -->|mutations| CLIA
+  MSRV --> SESS
+  MSRV --> CTOOLS
+  MSRV -->|mutations| CLIA
+  CLIA --> ACT
+  SRV -->|copilot_exchange · append| EVL[("event log")]
+  SESS --> EVL
+```
+
+Door discipline, stated precisely:
+
+- **One toolset, two doors.** `buildCopilotTools` defines the read+mutate surface once;
+  the web copilot consumes it as an AI toolset, the MCP server reshapes the same set via
+  `asResolvedTools` (zod → JSON Schema). The doors differ in exactly one tool: `approve`.
+  The web UI has an approve *button* (human click); the copilot has NO approve tool (P2);
+  MCP gets an approve tool only behind the launch-time `--autonomy full` dial, attributed
+  `approvedBy: mcp` in the `plan_approved` event.
+- **The web door journals its conversations**: each copilot exchange is appended as a
+  `copilot_exchange` event (server-side, home project only); the chat pane rebuilds from
+  the log — the browser is a cache, never the record.
+- **The stdio door owns stdout**: boot diagnostics rebind to stderr (bin.ts, first lines),
+  and the MCP transport holds the real stdout while `process.stdout.write` reroutes to
+  stderr — a lazily-booting DBOS (winston writes past `console`) cannot corrupt frames.
+- **Health is a provider, not a subsystem**: the CLI wires `probeMemory` into the web
+  server's `opts.health`; the footer polls `/api/health` and shows degradation + projector
+  lag within one 15s interval.
+
 ## Responsibilities
 
 | Component | Owns | Explicitly does NOT own |
@@ -357,6 +410,9 @@ run token. Missing, cross-attempt, or stale approval returns a tool error before
 | `plugins/memory` | Event-first note store (gateway stamps git revision), transactional Surreal projection, per-project database boundary, knowledge tools + degraded variants, `vault/memory/**` rebuild | Being authoritative — Surreal and vault/memory are disposable |
 | `packages/vault-projector` | Deterministic markdown/mermaid renders of tasks, execution, lineage, task expansion; coalesced live re-render | Truth of any kind; whole-log scans |
 | `packages/cli` | Pre-bootstrap help/init/migrate, command surface, project discovery, startup/shutdown order, degraded-memory wiring | Business rules (kernel's job) |
+| `packages/ui-core` | Transport-free UI core: `ProjectSessions` (live folds, graph patches, transcripts, log rows), `OrcActions` interface, the copilot toolset + `asResolvedTools` door-#2 bridge | Any transport (HTTP/SSE/stdio are adapters' jobs), any DOM |
+| `packages/graph-ui` | Door #1: web adapter — JSON+SSE routes, CSRF-token mutations fenced to the home project, `/api/health`, copilot streaming + `copilot_exchange` journaling, browser page | Deciding what a graph or plan IS (ui-core's job) |
+| `packages/cli/mcp-serve` | Door #2: stdio MCP adapter — same toolset via `asResolvedTools`, memory read tools, the `--autonomy gated\|full` approve dial, stdout ownership | Its own tool semantics (they are the copilot's), trust/init (CLI-only, never over MCP) |
 
 ## Identity and isolation
 
