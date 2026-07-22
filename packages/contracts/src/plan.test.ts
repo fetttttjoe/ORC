@@ -25,6 +25,20 @@ describe('validatePlan', () => {
     expect(r.ok).toBe(false)
     if (!r.ok) expect(r.errors[0]).toContain('cycle')
   })
+  it('rejects the malformed shape: multi-step, all parallel, no verify', () => {
+    const r = validatePlan(plan([step('a'), step('b'), step('c')]))
+    expect(r.ok).toBe(false)
+    if (!r.ok) expect(r.errors[0]).toContain('malformed plan shape')
+  })
+  it('accepts multi-step when any dependency exists', () => {
+    expect(validatePlan(plan([step('a'), step('b', ['a'])]))).toEqual({ ok: true })
+  })
+  it('accepts all-parallel steps when a verify step exists', () => {
+    expect(validatePlan(plan([step('a'), step('b'), step('verify')]))).toEqual({ ok: true })
+  })
+  it('accepts a single dependency-free step', () => {
+    expect(validatePlan(plan([step('only')]))).toEqual({ ok: true })
+  })
   it('rejects an empty plan at parse time', () => {
     expect(() => plan([])).toThrow()
   })

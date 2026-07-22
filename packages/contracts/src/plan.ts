@@ -26,6 +26,14 @@ export type PlanStep = z.infer<typeof PlanStep>
 // matched values, never scattered literals: routing keys the runtime and M5a split path share.
 export const STRATEGY = { groundedPlan: 'grounded-plan', split: 'split', single: 'template:single' } as const
 
+// The one verification-step id the system recognizes: validatePlan accepts it as the
+// alternative to explicit dependencies, and the grounded freezer maps it to the auditor role.
+export const VERIFY_STEP_ID = 'verify'
+
+// The per-task plan-note scope. The authoring agent, finalize_plan, and every UI view derive
+// it from the taskId — one format, one place (was duplicated as ui-core's planScopeName).
+export const planScope = (taskId: string): string => `plan-${taskId}`
+
 export const Plan = z.object({
   taskId: z.string().min(1),
   version: z.number().int().positive(),
@@ -59,6 +67,14 @@ export function validatePlan(plan: Plan): { ok: true } | { ok: false; errors: st
   for (const s of plan.steps)
     for (const d of s.dependsOn)
       if (!ids.has(d)) errors.push(`step ${s.id} depends on unknown step: ${d}`)
+  // the kernel refuses what the planning skill forbids: a multi-step plan where EVERY step is
+  // parallel (no dependsOn anywhere) and nothing is a 'verify' step shipped once in live testing —
+  // its verification ran in parallel with the work it verified, in one shared worktree
+  if (plan.steps.length > 1
+    && plan.steps.every(s => s.dependsOn.length === 0)
+    && !plan.steps.some(s => s.id === VERIFY_STEP_ID))
+    errors.push(
+      `malformed plan shape: ${plan.steps.length} steps, all parallel (every dependsOn empty) and no '${VERIFY_STEP_ID}' step — declare dependencies between steps or add a final '${VERIFY_STEP_ID}' step`)
   if (errors.length > 0) return { ok: false, errors }
 
   // ponytail: O(n^2) fixpoint cycle check — Kahn's with a real queue if plans get huge
