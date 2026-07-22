@@ -1,4 +1,4 @@
-import { EVENT_KIND, MemoryNoteInput, type MemoryAuthor, type MemoryFilter, type MemoryNote, type MemoryStore, type NoteSummary } from '@orc/contracts'
+import { EVENT_KIND, MemoryNoteInput, MemoryScope, type MemoryAuthor, type MemoryFilter, type MemoryNote, type MemoryStore, type NoteSummary } from '@orc/contracts'
 import type { EventLog } from '@orc/kernel'
 import type { SurrealMemory } from './surreal'
 
@@ -9,7 +9,19 @@ export function createMemoryStore(opts: { log: EventLog; surreal: SurrealMemory;
   const { log, surreal } = opts
   return {
     async write(input, author, writeOpts) {
-      const parsed = MemoryNoteInput.parse(input)        // reject malformed BEFORE appending
+      // merge-on-omit upsert: fields the writer did not supply carry the previous revision's
+      // values forward — zod defaults otherwise turn every omission into a destructive clear
+      // (a refresh agent omitting `body` silently wiped three area notes' bodies). An EXPLICIT
+      // empty (''/[]) still clears; undefined-valued keys count as omissions (CLI optional
+      // flags arrive that way). Unknown keys on the merge base (createdAt, revision, …) are
+      // stripped by the schema parse.
+      // ponytail: the merge base reads the projector, which may lag one flush behind the log —
+      // fold the base from the event log instead if rapid same-note rewrites ever matter.
+      const supplied = Object.fromEntries(Object.entries(input).filter(([, v]) => v !== undefined))
+      const existing = typeof input.id === 'string'
+        ? await surreal.get(input.id, typeof supplied.scope === 'string' ? supplied.scope : MemoryScope.project)
+        : null
+      const parsed = MemoryNoteInput.parse(existing ? { ...existing, ...supplied } : input) // reject malformed BEFORE appending
       // the gateway stamps the runtime's Git revision — agents cannot claim another one
       const note = { ...parsed, sourceRevision: opts.sourceRevision ?? null }
       try {
@@ -36,13 +48,13 @@ export function createMemoryStore(opts: { log: EventLog; surreal: SurrealMemory;
       }
     },
     // optional author: cancel-sweep passes the cancelled task's identity as provenance
-    async remove(id, scope = 'project', author?: MemoryAuthor) {
+    async remove(id, scope = MemoryScope.project, author?: MemoryAuthor) {
       await log.append({ taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_deleted, payload: { id, scope, author: author ?? { source: 'cli' } } })
     },
-    get: (id, scope = 'project') => surreal.get(id, scope),
+    get: (id, scope = MemoryScope.project) => surreal.get(id, scope),
     // The access counter is event-sourced like everything else, so this is an append, not a
     // Surreal write — the projector is still the only thing that touches the read model.
-    async recordAccess(id, scope = 'project', mode, author) {
+    async recordAccess(id, scope = MemoryScope.project, mode, author) {
       await log.append({
         // envelope binds the access to the acting step when the author carries one — per-task
         // pull counts fold from the envelope instead of payload archaeology (P5 token-economy)
