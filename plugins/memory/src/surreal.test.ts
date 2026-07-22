@@ -75,6 +75,31 @@ describe('SurrealMemory.applyEvent', () => {
     await m.close()
   })
 
+  it('search ANDs whitespace-separated terms, each matching any field', async () => {
+    const t = await createTestSurreal(); drops.push(t.drop)
+    const m = await SurrealMemory.open(t)
+    await m.applyEvent(written(1))
+    await m.applyEvent(written(2, note({ id: 'other', title: 'Sessions', summary: 'cookies expire', body: 'session cookie details' })))
+    // terms scattered across title/summary/body — a whole-query substring match would miss
+    expect((await m.search('rotate auth')).map(n => n.id)).toEqual(['auth'])
+    // one term with no match anywhere rejects the note
+    expect(await m.search('rotate cookies')).toEqual([])
+    await m.close()
+  })
+
+  it('search ranks field-weighted relevance above recency', async () => {
+    const t = await createTestSurreal(); drops.push(t.drop)
+    const m = await SurrealMemory.open(t)
+    // older note matches in title+summary; newer one only deep in the body
+    await m.applyEvent(written(1, note({ id: 'relevant', title: 'Token rotation', summary: 'tokens rotate on use' })))
+    await m.applyEvent(written(2, note({ id: 'recent', title: 'Sessions', summary: 'cookie jar', body: 'mentions tokens once' })))
+    expect((await m.search('tokens')).map(n => n.id)).toEqual(['relevant', 'recent'])
+    // durable project notes outrank same-relevance transient plan-scope notes
+    await m.applyEvent(written(3, note({ id: 'plannote', scope: 'plan-x', title: 'Token rotation', summary: 'tokens rotate on use' })))
+    expect((await m.search('tokens'))[0].id).toBe('relevant')
+    await m.close()
+  })
+
   it('materializes typed RELATE edges and ranks neighbours; delete removes edges', async () => {
     const t = await createTestSurreal(); drops.push(t.drop)
     const m = await SurrealMemory.open(t)

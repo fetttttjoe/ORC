@@ -1,7 +1,7 @@
 import { RecordId, Surreal } from 'surrealdb'
 import { edge, orm, table, t } from 'surqlize'
 import {
-  composeAuthor, EVENT_KIND, LINK_KINDS, NOTE_KINDS,
+  composeAuthor, EVENT_KIND, LINK_KINDS, NOTE_KINDS, MemoryScope,
   MemoryAccessedPayload, MemoryDeletedPayload, MemoryNote, MemoryWrittenPayload,
   type EventRecord, type LinkKind, type MemoryFilter, type NeighborResult, type NoteSummary,
 } from '@orc/contracts'
@@ -170,7 +170,7 @@ export class SurrealMemory {
   }
 
   async neighbors(seed: string, opts: { kinds?: LinkKind[]; depth?: number; scope?: string } = {}): Promise<NeighborResult[]> {
-    const scope = opts.scope ?? 'project'
+    const scope = opts.scope ?? MemoryScope.project
     // All in-scope edges, ranked in TS — fine for a hand-authored graph; a frontier-scoped
     // fetch is a later optimisation (spec §4.2). Both directions (spec RG4): "what supersedes
     // this note" must be reachable from the superseded seed, so each edge is added reversed too.
@@ -189,7 +189,7 @@ export class SurrealMemory {
     return out
   }
 
-  async get(id: string, scope = 'project'): Promise<MemoryNote | null> {
+  async get(id: string, scope: string = MemoryScope.project): Promise<MemoryNote | null> {
     const rows = await this.db.select(Tb.Note, key(scope, id))
     const r = rows[0]
     if (!r) return null
@@ -204,18 +204,34 @@ export class SurrealMemory {
   }
 
   async search(query: string, filter: MemoryFilter = {}): Promise<NoteSummary[]> {
-    const q = query.toLowerCase()
+    // AND across whitespace-separated terms, each term matching ANY field — a whole-query
+    // substring match made every multi-word query miss unless the exact phrase appeared.
+    // text fields: case-insensitive substring match; tags: membership on the lowercased
+    // term, since tags are stored lowercase by convention here.
+    const terms = query.toLowerCase().split(/\s+/).filter(Boolean)
     const rows = await this.db.select(Tb.Note)
-      // text fields: case-insensitive substring match; tags: membership on the lowercased
-      // query, since tags are stored lowercase by convention here.
-      .where(n => this.matchFilter(n, filter).and(
+      .where(n => terms.reduce((acc, q) => acc.and(
         n.title.lowercase().contains(q)
           .or(n.summary.lowercase().contains(q))
           .or(n.body.lowercase().contains(q))
           .or(n.tags.contains(q)),
-      ))
+      ), this.matchFilter(n, filter)))
       .orderBy('updatedAt', 'DESC')
-    return rows.map(toSummary)
+    // relevance over recency: field-weighted term score, +1 for durable project scope so
+    // transient plan-scope notes don't bury the knowledge base; updatedAt breaks ties.
+    // ponytail: substring scoring — swap for a Surreal FTS index if this plateaus.
+    const score = (r: Record<string, any>): number => {
+      let s = r.scope === MemoryScope.project ? 1 : 0
+      for (const q of terms) {
+        if (r.title.toLowerCase().includes(q)) s += 3
+        if (r.summary.toLowerCase().includes(q)) s += 2
+        if (r.body.toLowerCase().includes(q) || r.tags.includes(q)) s += 1
+      }
+      return s
+    }
+    return rows.map(r => ({ r, s: score(r) }))
+      .sort((a, b) => b.s - a.s)
+      .map(({ r }) => toSummary(r))
   }
 
   // surqlize's fluent `.where()` builder expresses scope/category/tag filtering directly
