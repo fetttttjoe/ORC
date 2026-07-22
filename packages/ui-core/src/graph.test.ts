@@ -3,14 +3,10 @@ import { EVENT_KIND, type EventRecord } from '@orc/contracts'
 import { draftFixture, stepFixture } from '@orc/contracts/fixtures'
 import { Kernel, fold, openStorage, type EventLog } from '@orc/kernel'
 import { createTestDb, TEST_PROJECT_ID } from '@orc/kernel/test-helpers'
-import { planScope } from '@orc/kernel'
-import { buildGraph, diffGraphs, noteNodeId, planScopeName, stepNodeId } from './graph'
+import { buildGraph, diffGraphs, noteNodeId, stepNodeId } from './graph'
 
-// planScopeName is the browser-safe duplicate of kernel's planScope (kernel cannot enter the
-// page bundle) — this pins them together
-it('planScopeName matches the kernel planScope format', () => {
-  expect(planScopeName('t-1')).toBe(planScope('t-1'))
-})
+// the planScopeName↔planScope drift-guard test is gone WITH the duplication it guarded:
+// contracts' planScope is now the single definition, imported everywhere
 
 const dbs: Array<{ drop: () => Promise<void> }> = []
 afterAll(async () => { await Promise.all(dbs.map(d => d.drop())) }, 30_000)
@@ -58,6 +54,40 @@ describe('buildGraph', () => {
     expect(g.links).toContainEqual({ source: stepNodeId(taskId, 's1'), target: `artifact:${taskId}:out.txt`, type: 'out' })
     expect(g.links).toContainEqual({ source: taskId, target: noteNodeId('project', 'task-note'), type: 'wrote' })
     expect(g.links).toContainEqual({ source: noteNodeId('project', 'task-note'), target: noteNodeId('project', 'base-note'), type: 'relates_to' })
+    await log.close()
+  })
+
+  it('plan-scope notes wire into project-scope knowledge (cross-scope view fallback)', async () => {
+    const log = await freshLog()
+    await writeNote(log, 'arch-overview') // project scope only: the knowledge hub
+    await writeNote(log, 'shared') // exists in BOTH scopes — precedence probe
+    await writeNote(log, 'shared', { scope: 'plan-t1' })
+    await writeNote(log, 'sub-a', {
+      scope: 'plan-t1',
+      links: [{ id: 'arch-overview', kind: 'derived_from' }, { id: 'sub-b', kind: 'depends_on' }, { id: 'shared', kind: 'relates_to' }],
+    })
+    await writeNote(log, 'sub-b', { scope: 'plan-t1' })
+    const events = await log.all()
+    const g = buildGraph(fold(events), events)
+    // project-only target → falls back into the knowledge map
+    expect(g.links).toContainEqual({ source: noteNodeId('plan-t1', 'sub-a'), target: noteNodeId('project', 'arch-overview'), type: 'derived_from' })
+    // same-scope target resolves normally
+    expect(g.links).toContainEqual({ source: noteNodeId('plan-t1', 'sub-a'), target: noteNodeId('plan-t1', 'sub-b'), type: 'depends_on' })
+    // both scopes hold the id → same-scope WINS (fallback never shadows local resolution)
+    expect(g.links).toContainEqual({ source: noteNodeId('plan-t1', 'sub-a'), target: noteNodeId('plan-t1', 'shared'), type: 'relates_to' })
+    expect(g.links).not.toContainEqual({ source: noteNodeId('plan-t1', 'sub-a'), target: noteNodeId('project', 'shared'), type: 'relates_to' })
+    await log.close()
+  })
+
+  it('hides project-chat metadata notes (name/dir) — infrastructure, not knowledge', async () => {
+    const log = await freshLog()
+    await writeNote(log, 'ui-project-name', { title: 'my chat' })
+    await writeNote(log, 'ui-project-dir', { title: '/some/dir' })
+    await writeNote(log, 'real-knowledge')
+    const events = await log.all()
+    const g = buildGraph(fold(events), events)
+    const noteIds = g.nodes.filter(n => n.type === 'note').map(n => n.id)
+    expect(noteIds).toEqual([noteNodeId('project', 'real-knowledge')])
     await log.close()
   })
 

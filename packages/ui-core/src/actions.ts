@@ -13,7 +13,9 @@ export interface OrcActions {
   }): Promise<{ taskId: string }>
   propose(taskId: string, opts: { modelRef: string; skillRefs?: string[] }): Promise<{ version: number; steps: number }>
   edit(taskId: string, draft: PlanDraft): Promise<{ version: number }> // full-draft edit, pre-approval only (kernel enforces)
-  approve(taskId: string, version?: number): Promise<{ version: number }>
+  // approvedBy: the web door omits it (human click → 'human'); the MCP door under
+  // --autonomy full passes 'mcp' so replay shows exactly who approved (P7 attribution)
+  approve(taskId: string, version?: number, approvedBy?: 'human' | 'mcp'): Promise<{ version: number }>
   run(taskId: string, cwd: string): Promise<{ workflowId: string }>
   reply(taskId: string, text: string): Promise<{ answered: boolean }>
   retry(taskId: string): Promise<{ workflowId: string }>
@@ -36,4 +38,7 @@ export interface OrcActions {
   // empty. warnings report best-effort cleanup steps that failed — the log purge itself is
   // committed once this resolves.
   purgeProject(): Promise<{ events: number; operations: number; warnings: string[] }>
+  // remove a FOREIGN project outright: events + journal + durable-execution state, no identity
+  // re-seed — it disappears from the chats list. The home project refuses (purge is its reset).
+  deleteProject(projectId: string): Promise<{ events: number; operations: number; warnings: string[] }>
 }

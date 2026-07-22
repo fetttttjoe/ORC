@@ -24,6 +24,14 @@ const noteEvent = (id: string) => ({
 })
 
 describe('ProjectSessions', () => {
+  it('projects() omits event-less projects — a deleted chat leaves no row, even the cwd one', async () => {
+    const db = await createTestDb()
+    dbs.push(db)
+    const sessions = createProjectSessions({ url: db.url, cwdProject: { id: 'deleted-project', name: 'ghost' } })
+    expect(await sessions.projects()).toEqual([])
+    await sessions.close()
+  })
+
   it('projects() names the cwd project; snapshot holds the seeded task', async () => {
     const { storage, taskId, sessions } = await setup()
     expect(await sessions.projects()).toEqual([{ id: TEST_PROJECT_ID, name: 'test-proj', dir: null }])

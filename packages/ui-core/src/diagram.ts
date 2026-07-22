@@ -1,7 +1,7 @@
 // Mermaid text + todo-wave layering for plans and decompositions — pure, shared by the web
-// conversation cards, the request view, and any future TUI. Labels go through the vault's
-// mermaidLabel escaper (agent-authored titles must never escape the graph).
-import { mermaidLabel } from '@orc/vault-projector'
+// conversation cards, the request view, and any future TUI. Labels go through the ONE
+// mermaidLabel escaper (contracts) — agent-authored titles must never escape the graph.
+import { mermaidLabel } from '@orc/contracts'
 
 export interface DiagramStep { id: string; title: string; dependsOn: string[] }
 export interface StepStatusLookup { get(id: string): { status: string } | undefined }
