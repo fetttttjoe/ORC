@@ -32,6 +32,15 @@ describe('events', () => {
     expect(() => PAYLOAD_SCHEMAS.memory_deleted.parse({ ...good, scope: '../x' })).toThrow()
     expect(() => PAYLOAD_SCHEMAS.memory_deleted.parse({ ...good, id: '../x' })).toThrow()
   })
+  it('copilot_exchange carries the full conversation record, tool summaries bounded', () => {
+    const ok = PAYLOAD_SCHEMAS.copilot_exchange.safeParse({
+      user: 'run it', assistant: 'which of the two runnable tasks?', modelRef: 'anthropic/x',
+      toolCalls: [{ toolName: 'project_status', summary: '{}' }],
+    })
+    expect(ok.success).toBe(true)
+    expect(PAYLOAD_SCHEMAS.copilot_exchange.safeParse({ user: 'x', assistant: 'y', modelRef: '', toolCalls: [] }).success).toBe(false)
+  })
+
   it('memory_accessed rejects a path-unsafe id or scope, and an unknown mode', () => {
     const good = { id: 'auth', scope: 'project', mode: 'read', author: { source: 'cli' } }
     expect(() => PAYLOAD_SCHEMAS.memory_accessed.parse(good)).not.toThrow()

@@ -17,6 +17,17 @@ export function resolveInWorkspace(workspaceDir: string, p: string): string {
   return resolved
 }
 
+// The zone write-fence (P2): a step that declares `zone` globs may only WRITE inside them.
+// Pure rule over the canonical workspace-relative path — the caller resolves containment first
+// (resolveInWorkspace), so escapes are already dead and `rel` is always root-relative.
+// Empty zone = unrestricted (declared semantics). Reads are never fenced.
+export function assertInZone(workspaceDir: string, abs: string, zone: string[]): void {
+  if (zone.length === 0) return
+  const rel = path.relative(realpathSync(workspaceDir), abs)
+  if (!zone.some(g => new Bun.Glob(g).match(rel)))
+    throw new Error(`zone fence: '${rel}' is outside this step's zone [${zone.join(', ')}]`)
+}
+
 export interface OutputPath {
   path: string // canonical workspace-relative
   abs: string

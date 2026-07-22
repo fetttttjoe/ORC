@@ -89,6 +89,14 @@ describe('execution contracts', () => {
     expect(isTerminalError(undefined)).toBe(false)
   })
 
+  it('permanent fs codes are terminal without a marker; transient codes stay retryable', () => {
+    expect(isTerminalError(Object.assign(new Error('permission denied'), { code: 'EACCES' }))).toBe(true)
+    expect(isTerminalError(Object.assign(new Error('no such dir'), { code: 'ENOENT' }))).toBe(true)
+    expect(isTerminalError(Object.assign(new Error('read-only fs'), { code: 'EROFS' }))).toBe(true)
+    expect(isTerminalError(Object.assign(new Error('resource busy'), { code: 'EBUSY' }))).toBe(false)
+    expect(isTerminalError(Object.assign(new Error('try again'), { code: 'EAGAIN' }))).toBe(false)
+  })
+
   it('classifiedError is terminal and carries its class', () => {
     const err = classifiedError(FAILURE_CLASS.validation_error, 'bad ref')
     expect(isTerminalError(err)).toBe(true)

@@ -22,6 +22,18 @@ export const ModelsDiscoveredPayload = z.object({
 })
 export type ModelsDiscoveredPayload = z.infer<typeof ModelsDiscoveredPayload>
 
+// one completed copilot exchange (P6): the conversation that CAUSED an action is part of the
+// record, not browser state — appended by the graph server after the stream ends, usage on the
+// envelope, redacted at the storage boundary like every event. Tool calls are one-line
+// summaries; the actions they triggered have their own full-fidelity events.
+export const CopilotExchangePayload = z.object({
+  user: z.string(),
+  assistant: z.string(),
+  toolCalls: z.array(z.object({ toolName: z.string().min(1), summary: z.string() })).max(64),
+  modelRef: z.string().min(1),
+})
+export type CopilotExchangePayload = z.infer<typeof CopilotExchangePayload>
+
 export const EventKind = z.enum([
   'task_created', 'plan_proposed', 'plan_edited', 'plan_approved', 'task_status_changed',
   'run_started', 'step_started', 'skill_loaded', 'agent_call', 'tool_call', 'tool_result',
@@ -29,7 +41,7 @@ export const EventKind = z.enum([
   'operation_started', 'operation_completed', 'operation_failed', 'artifact_produced',
   'memory_written', 'memory_deleted', 'memory_accessed',
   'feedback_requested', 'feedback_provided', 'plan_annotated', 'analysis_completed',
-  'models_discovered',
+  'models_discovered', 'copilot_exchange',
 ])
 export type EventKind = z.infer<typeof EventKind>
 
@@ -43,7 +55,7 @@ export const PAYLOAD_SCHEMAS = {
     taskId: z.string().min(1),
     version: z.number().int().positive(),
     approvedAt: z.string(),
-    approvedBy: z.enum(['human', 'policy']),
+    approvedBy: z.enum(['human', 'policy', 'mcp']), // mcp = an external agent under --autonomy full (P7)
     ruleIndex: z.number().int().nonnegative().optional(), // which ApprovalPolicy rule matched
   }),
   task_status_changed: z.object({ taskId: z.string().min(1), from: TaskStatus, to: TaskStatus }),
@@ -131,6 +143,7 @@ export const PAYLOAD_SCHEMAS = {
   plan_annotated: PlanAnnotatedPayload,
   analysis_completed: AnalysisCompletedPayload,
   models_discovered: ModelsDiscoveredPayload,
+  copilot_exchange: CopilotExchangePayload,
 } satisfies Record<EventKind, z.ZodType>
 
 export const EventInput = z.object({

@@ -15,6 +15,9 @@ export const Usage = z.object({
 })
 export type Usage = z.infer<typeof Usage>
 
+// the one zero — folds and views start from this instead of hand-rolling the literal
+export const ZERO_USAGE: Usage = { inputTokens: 0, outputTokens: 0, costUSD: null, estimated: false }
+
 export function addUsage(a: Usage, b: Usage): Usage {
   const costs = [a.costUSD, b.costUSD].filter((c): c is number => c !== null)
   const cacheRead = (a.cacheReadTokens ?? 0) + (b.cacheReadTokens ?? 0)
@@ -150,8 +153,14 @@ export type EventDraft = { kind: EventKind; payload: Record<string, unknown>; us
 export function terminalError(message: string): Error {
   return Object.assign(new Error(message), { terminal: true })
 }
+// Deterministic environment failures: retrying cannot change a permission or a missing path,
+// so these fail on attempt 1 instead of burning the retry budget (observed live: 4 workspace
+// retries on one EACCES). Transient codes (EBUSY, EAGAIN, EMFILE, …) stay retryable.
+const PERMANENT_FS_CODES = new Set(['EACCES', 'EPERM', 'ENOENT', 'EROFS', 'ENOTDIR', 'EISDIR'])
 export function isTerminalError(err: unknown): boolean {
-  return typeof err === 'object' && err !== null && 'terminal' in err && err.terminal === true
+  if (typeof err !== 'object' || err === null) return false
+  if ('terminal' in err && err.terminal === true) return true
+  return 'code' in err && typeof err.code === 'string' && PERMANENT_FS_CODES.has(err.code)
 }
 
 // terminal error that also names its failure class (e.g. validation_error at step init) —
