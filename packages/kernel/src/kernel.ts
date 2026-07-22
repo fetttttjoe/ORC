@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import {
-  AnalysisCompletedPayload, ChildPlanDraft, EVENT_KIND, FeedbackProvidedPayload, ISOLATION_TIER, PlanAnnotatedPayload, PlanDraft, STRATEGY, TASK_STATUS, evaluateApproval, validatePlan,
+  AnalysisCompletedPayload, ChildPlanDraft, EVENT_KIND, FeedbackProvidedPayload, ISOLATION_TIER, PlanAnnotatedPayload, PlanDraft, STRATEGY, TASK_STATUS, evaluateApproval, validatePlan, type ChildPlanDraftInput,
   type Analyzer, type ApprovalPolicy, type EventKind, type EventRecord, type FeedbackRequestedPayload,
   type MemoryNote, type Plan, type PlanStep, type TaskNode, type TaskStatus,
 } from '@orc/contracts'
@@ -95,7 +95,7 @@ export class Kernel {
 
   async proposeSplit(input: {
     parentTaskId: string; stepId: string; runToken: string; toolCallId: string
-    title: string; spec: string; plan: ChildPlanDraft; budgetUSD?: number
+    title: string; spec: string; plan: ChildPlanDraftInput; budgetUSD?: number
     parentStep: Pick<PlanStep, 'executorRef' | 'modelRef' | 'maxIterations'>
     policy: ApprovalPolicy; maxDepth: number
   }): Promise<{ splitId: string; childTaskId: string; gated: boolean }> {
@@ -143,7 +143,8 @@ export class Kernel {
         strategyRef: STRATEGY.split, costEstimateUSD: null,
         steps: draft.steps.map(s => ({
           ...s, executorRef: input.parentStep.executorRef, modelRef: input.parentStep.modelRef,
-          isolation: ISOLATION_TIER.local, zone: [], maxIterations: input.parentStep.maxIterations,
+          // zone is the child's own declaration (write-fence) — parsed default [] = unfenced
+          isolation: ISOLATION_TIER.local, zone: s.zone, maxIterations: input.parentStep.maxIterations,
         })),
       }
       const plan = await this.appendPlanVersion(tx, childTaskId, expanded, EVENT_KIND.plan_proposed, TASK_STATUS.draft)

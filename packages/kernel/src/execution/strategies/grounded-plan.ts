@@ -66,6 +66,9 @@ export function instantiateFrozenPlan(masterId: string, notes: MemoryNote[]): Ch
         id, role: id === VERIFY_STEP_ID ? 'auditor' : 'implementer', title: n.title,
         instructions: n.body || n.summary || n.title,
         dependsOn: n.links.filter(l => l.kind === LINK_KIND.depends_on).map(l => l.id).filter(d => kids.includes(d)),
+        // the note's declared write-globs become the step's zone — the executor fence makes
+        // "parallel siblings must not write the same files" mechanical instead of prose
+        zone: n.zone,
         skillRefs: [] as string[],
         toolRefs: [] as string[],
       }

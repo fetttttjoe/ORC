@@ -27,7 +27,7 @@ const noteTable = table(Tb.Note, {
   paths: t.array(t.string()), rules: t.array(t.string()), summary: t.string(), body: t.string(),
   retention: t.string(),
   sources: t.array(t.object({ url: t.string(), title: t.option(t.string()), retrievedAt: t.string() })),
-  rationale: t.string(), uncertainty: t.array(t.string()),
+  rationale: t.string(), uncertainty: t.array(t.string()), zone: t.option(t.array(t.string())),
   createdAt: t.string(), createdBy: t.string(), updatedAt: t.string(), updatedBy: t.string(),
   revision: t.number(), hits: t.option(t.number()), lastAccessedAt: t.option(t.string()),
 })
@@ -136,7 +136,7 @@ export class SurrealMemory {
           // retrievedAt comes from the canonical event timestamp, never from the writer — so it
           // is identical on every replay and an agent cannot claim when it fetched a page.
           sources: note.sources.map(s => ({ url: s.url, title: s.title, retrievedAt: e.ts })),
-          rationale: note.rationale, uncertainty: note.uncertainty,
+          rationale: note.rationale, uncertainty: note.uncertainty, zone: note.zone,
           createdAt: ex?.createdAt ?? e.ts, createdBy: ex?.createdBy ?? by,
           updatedAt: e.ts, updatedBy: by, revision: (ex?.revision ?? 0) + 1,
           hits: ex?.hits ?? 0,
@@ -272,6 +272,7 @@ function toNote(r: Record<string, any>): unknown {
     retention: r.retention ?? 'durable',
     sources: r.sources ?? [],
     rationale: r.rationale, uncertainty: r.uncertainty,
+    zone: r.zone ?? [], // rows written before the field existed parse on rebuild
     createdAt: r.createdAt, createdBy: r.createdBy, updatedAt: r.updatedAt, updatedBy: r.updatedBy,
     revision: r.revision,
   }

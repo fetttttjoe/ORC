@@ -113,6 +113,7 @@ export function memoryTools(store: MemoryStore, author: MemoryAuthor, tier: Memo
           rules: { type: 'array', maxItems: MEMORY_LIMITS.detailItems, items: { type: 'string', maxLength: MEMORY_LIMITS.detailChars } },
           rationale: { type: 'string', maxLength: MEMORY_LIMITS.rationaleChars, description: 'plan-note: why this subplan exists' },
           uncertainty: { type: 'array', maxItems: MEMORY_LIMITS.detailItems, items: { type: 'string', maxLength: MEMORY_LIMITS.detailChars }, description: 'plan-note: coverage gaps / assumptions to surface (RG7)' },
+          zone: { type: 'array', maxItems: 16, items: { type: 'string', minLength: 1, maxLength: MEMORY_LIMITS.detailChars }, description: "plan-note: workspace-relative write globs this subplan may touch at execution (e.g. 'docs/**'), frozen into the step and enforced as a write-fence. Concurrent writes to one file are refused mechanically regardless — zone additionally scopes WHERE this step may write. Empty = unfenced." },
           scope: idSchema,
         },
       },

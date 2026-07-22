@@ -38,6 +38,10 @@ describe('memory tools', () => {
     const r = await write.execute({ id: 'auth', title: 'Auth' })
     expect(r.isError).toBe(false)
     expect(written[0]?.author).toMatchObject({ executor: 'api-loop' })
+    // a plan-note's declared write zone flows through to the stored note (freezer reads it)
+    const z = await write.execute({ id: 'sub-a', title: 'Sub A', zone: ['docs/**'] })
+    expect(z.isError).toBe(false)
+    expect(written[1]?.input).toMatchObject({ zone: ['docs/**'] })
   })
 
   it('memory_write derives an idempotency key from runToken + toolCallId; none without them', async () => {
