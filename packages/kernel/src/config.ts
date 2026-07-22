@@ -3,7 +3,7 @@ import { existsSync, readFileSync } from 'node:fs'
 import path from 'node:path'
 import { atomicWriteFileSync } from './atomic-file'
 import { z } from 'zod'
-import { ApprovalPolicy, MCP_SERVER_ID_RE, McpServerConfig, ModelCost } from '@orc/contracts'
+import { errorMessage, ApprovalPolicy, MCP_SERVER_ID_RE, McpServerConfig, ModelCost } from '@orc/contracts'
 
 // bump per release — pins DBOS__APPVERSION so recovery survives rebuilds (spec §4)
 export const APP_VERSION = 'orc-0.1.0'
@@ -123,7 +123,7 @@ export function loadConfig(explicitDir?: string): OrcConfig {
     try {
       fromFile = JSON.parse(readFileSync(file, 'utf8'))
     } catch (err) {
-      throw new Error(`invalid orc config: ${file} is not valid JSON (${err instanceof Error ? err.message : String(err)})`)
+      throw new Error(`invalid orc config: ${file} is not valid JSON (${errorMessage(err)})`)
     }
   }
   const parsed = settingsSchema(dir).safeParse({ ...fromFile, ...envOverrides() })

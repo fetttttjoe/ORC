@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto'
+import { errorMessage } from '@orc/contracts'
 import { existsSync, readFileSync, realpathSync } from 'node:fs'
 import path from 'node:path'
 import { atomicWriteFileSync } from '../atomic-file'
@@ -81,7 +82,7 @@ export function loadTrust(dir: string = process.cwd()): TrustStore {
     return TrustFile.parse(JSON.parse(readFileSync(file, 'utf8')))
   } catch (err) {
     // fail closed, but never silently: a corrupted grant file revokes everything
-    console.warn(`ignoring malformed ${file} — all plugins untrusted (${err instanceof Error ? err.message : String(err)})`)
+    console.warn(`ignoring malformed ${file} — all plugins untrusted (${errorMessage(err)})`)
     return { mcp: [], extensions: [] }
   }
 }

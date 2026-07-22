@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import { ApprovalPolicy, type ResolvedTool } from '@orc/contracts'
+import { errorMessage, ApprovalPolicy, type ResolvedTool } from '@orc/contracts'
 import type { Kernel } from '../kernel'
 import { instantiateFrozenPlan, planGraphHash, planScope, PLAN_STEP_ROLE } from './strategies/grounded-plan'
 
@@ -57,7 +57,7 @@ export function finalizePlanTool(opts: {
         })
         return { output: r, isError: false }
       } catch (e) {
-        return { output: { error: e instanceof Error ? e.message : String(e) }, isError: true }
+        return { output: { error: errorMessage(e) }, isError: true }
       }
     },
   }

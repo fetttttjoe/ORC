@@ -1,9 +1,8 @@
 import { createHash } from 'node:crypto'
-import { composeAuthor, EVENT_KIND, LINK_KIND, MemoryDeletedPayload, MemoryNote, MemoryWrittenPayload, type ChildPlanDraft, type EventRecord } from '@orc/contracts'
+import { composeAuthor, EVENT_KIND, LINK_KIND, MemoryDeletedPayload, MemoryNote, MemoryWrittenPayload, VERIFY_STEP_ID, planScope, type ChildPlanDraft, type EventRecord } from '@orc/contracts'
 
-// The per-task plan-note scope. The authoring agent (told this string in its step instructions)
-// and finalize_plan both derive it from the taskId, so they read/write the same graph.
-export const planScope = (taskId: string): string => `plan-${taskId}`
+// planScope moved to contracts (one format, one place); re-exported so kernel callers keep working
+export { planScope }
 
 // The grounded plan-authoring step's role. finalize_plan is only meaningful for THIS step, so both
 // createGroundedTask (which stamps it) and finalize_plan's defensive gate reference this one source.
@@ -62,7 +61,9 @@ export function instantiateFrozenPlan(masterId: string, notes: MemoryNote[]): Ch
       const n = byId.get(id)
       if (!n) throw new Error(`masterplan decomposes_into '${id}' but no such plan-note exists`)
       return {
-        id, role: 'implementer', title: n.title,
+        // role mapping at the freeze (P2): the verify subplan runs as auditor — memory tier
+        // and prompt framing follow from the role automatically
+        id, role: id === VERIFY_STEP_ID ? 'auditor' : 'implementer', title: n.title,
         instructions: n.body || n.summary || n.title,
         dependsOn: n.links.filter(l => l.kind === LINK_KIND.depends_on).map(l => l.id).filter(d => kids.includes(d)),
         skillRefs: [] as string[],

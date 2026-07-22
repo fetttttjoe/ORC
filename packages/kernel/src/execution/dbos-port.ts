@@ -3,7 +3,7 @@ import path from 'node:path'
 import { DBOS } from '@dbos-inc/dbos-sdk'
 import {
   EVENT_KIND, FAILURE_CLASS, RUN_OUTCOME, SIGNAL_OUTCOME, TASK_STATUS,
-  classifiedError, failureClassOf, isTerminalError, resolveModel, costUSDFor,
+  classifiedError, errorMessage, failureClassOf, isTerminalError, resolveModel, costUSDFor,
   type AgentExecutor, type Checkpoint, type EventDraft, type ExecutionPort, type ExecutorContext,
   type FailureClass, type LoadedSkill, type ModelProvider, type OperationCheckpoint, type Plan,
   type ResolvedTool, type RunHandle, type RunOutcome, type Signal, type SplitResult, type ToolSource,
@@ -123,7 +123,7 @@ export async function createDbosPort(opts: {
             return redactStepResult(result)
           } catch (err) {
             await journal.failOperation(context, spec, begin.attempt, {
-              message: err instanceof Error ? err.message : String(err),
+              message: errorMessage(err),
             })
             throw err
           }
@@ -158,7 +158,7 @@ export async function createDbosPort(opts: {
           try {
             loadedSkills.push(await skills.load(ref))
           } catch (err) {
-            throw classifiedError(FAILURE_CLASS.validation_error, `skill '${ref}': ${err instanceof Error ? err.message : String(err)}`)
+            throw classifiedError(FAILURE_CLASS.validation_error, `skill '${ref}': ${errorMessage(err)}`)
           }
         }
         return { step, taskSpec: task.spec, budgetUSD: task.budgetUSD, depOutputs, skills: loadedSkills }
@@ -190,7 +190,7 @@ export async function createDbosPort(opts: {
         try {
           extraTools = await tools.resolve(toolRefs)
         } catch (err) {
-          return await finishFailed(checkpoint, args, runToken, err instanceof Error ? err.message : String(err), FAILURE_CLASS.validation_error)
+          return await finishFailed(checkpoint, args, runToken, errorMessage(err), FAILURE_CLASS.validation_error)
         }
       }
 
@@ -296,7 +296,7 @@ export async function createDbosPort(opts: {
           try {
             return verifyArtifacts(workspaceDir, success.outputs ?? [])
           } catch (err) {
-            throw classifiedError(FAILURE_CLASS.validation_error, err instanceof Error ? err.message : String(err))
+            throw classifiedError(FAILURE_CLASS.validation_error, errorMessage(err))
           }
         }, receipts => receipts === null ? [] : [
           ...receipts.map((r): EventDraft => ({
@@ -321,7 +321,7 @@ export async function createDbosPort(opts: {
       return { stepId: args.stepId, ok: false }
       } catch (err) {
         return finishFailed(checkpoint, args, runToken,
-          err instanceof Error ? err.message : String(err),
+          errorMessage(err),
           failureClassOf(err) ?? FAILURE_CLASS.agent_error)
       }
     },

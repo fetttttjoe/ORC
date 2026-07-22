@@ -88,7 +88,7 @@ export class Kernel {
   async approvePlan(
     taskId: string,
     version?: number,
-    approval?: { approvedBy: 'human' | 'policy'; ruleIndex?: number },
+    approval?: { approvedBy: 'human' | 'policy' | 'mcp'; ruleIndex?: number },
   ): Promise<Plan> {
     return this.log.transaction(tx => this.approvePlanIn(tx, taskId, version, approval))
   }
@@ -336,7 +336,7 @@ export class Kernel {
     tx: EventLogOps,
     taskId: string,
     version?: number,
-    approval?: { approvedBy: 'human' | 'policy'; ruleIndex?: number },
+    approval?: { approvedBy: 'human' | 'policy' | 'mcp'; ruleIndex?: number },
   ): Promise<Plan> {
     const task = await this.requireTask(tx, taskId)
     if (task.status !== TASK_STATUS.awaiting_approval)

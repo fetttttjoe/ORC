@@ -1,5 +1,5 @@
 import type { AgentExecutor, Analyzer, ExtensionApi, ModelProvider, Plan } from '@orc/contracts'
-import { HOOK_NAME, ISOLATION_TIER, parseModelRef, parseToolRef } from '@orc/contracts'
+import { errorMessage, HOOK_NAME, ISOLATION_TIER, parseModelRef, parseToolRef } from '@orc/contracts'
 import type { OrcConfig } from '../config'
 import { SkillIndex } from './skills'
 import { HookBus } from './hooks'
@@ -76,7 +76,7 @@ export async function createPluginHost(
             if (!declared) errors.push(`step ${step.id}: undeclared MCP server '${serverId}'`)
             else if (!isMcpTrusted(trust, serverId, declared)) errors.push(`step ${step.id}: MCP server '${serverId}' is not trusted (orc mcp trust ${serverId})`)
           } catch (err) {
-            errors.push(`step ${step.id}: ${err instanceof Error ? err.message : String(err)}`)
+            errors.push(`step ${step.id}: ${errorMessage(err)}`)
           }
         }
       }

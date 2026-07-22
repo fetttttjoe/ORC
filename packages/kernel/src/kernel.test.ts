@@ -54,6 +54,15 @@ describe('Kernel lifecycle', () => {
     expect((await k.state()).plans.get(t.id)?.approvedVersion).toBe(2)
   })
 
+  it('approvePlan records who approved: default human, mcp when an agent drove (P7)', async () => {
+    const k = await freshKernel()
+    const t = await k.createTask({ title: 'attributed' })
+    await k.proposePlan(t.id, draft())
+    await k.approvePlan(t.id, undefined, { approvedBy: 'mcp' })
+    const evt = (await k.eventsFor(t.id)).find(e => e.kind === 'plan_approved')!
+    expect((evt.payload as { approvedBy: string }).approvedBy).toBe('mcp')
+  })
+
   it('child tasks inherit budget and increment depth', async () => {
     const k = await freshKernel()
     const parent = await k.createTask({ title: 'p', budgetUSD: 5 })

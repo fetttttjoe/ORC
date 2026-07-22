@@ -1,4 +1,5 @@
 import { createRequire } from 'node:module'
+import { errorMessage } from '@orc/contracts'
 import path from 'node:path'
 import type { ExtensionApi, ExtensionManifest } from '@orc/contracts'
 
@@ -42,7 +43,7 @@ export class ExtensionHost {
       try {
         await l.manifest.deactivate?.()
       } catch (err) {
-        console.warn(`extension '${l.manifest.id}' deactivate failed: ${err instanceof Error ? err.message : String(err)}`)
+        console.warn(`extension '${l.manifest.id}' deactivate failed: ${errorMessage(err)}`)
       }
     }
     this.loaded = []
@@ -66,7 +67,7 @@ export class ExtensionHost {
       await mod.default.activate(this.api)
       this.loaded.push({ path: abs, manifest: mod.default })
     } catch (err) {
-      console.warn(`extension '${label}' failed to load: ${err instanceof Error ? err.message : String(err)}`)
+      console.warn(`extension '${label}' failed to load: ${errorMessage(err)}`)
     }
   }
 }

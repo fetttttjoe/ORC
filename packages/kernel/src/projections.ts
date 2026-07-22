@@ -1,7 +1,7 @@
 import { z } from 'zod'
 import {
   ArtifactProducedPayload, EVENT_KIND, FAILURE_CLASS, FailureClass, OPERATION_STATUS, Plan,
-  STEP_RUN_STATUS, TaskNode, TaskStatus, addUsage,
+  STEP_RUN_STATUS, TaskNode, TaskStatus, ZERO_USAGE, addUsage,
   OperationCompletedPayload, OperationFailedPayload, OperationStartedPayload,
 } from '@orc/contracts'
 import type { EventRecord, OperationRecord, StepRunStatus, Usage } from '@orc/contracts'
@@ -53,12 +53,13 @@ export interface State {
   steps: Map<string, Map<string, StepState>>
   runs: Map<string, RunRecord[]>
   usage: Map<string, Usage>
+  stepUsage: Map<string, Usage> // keyed `${taskId}\u0000${stepId}` — folded from the same agent_call events as `usage`
   splits: Map<string, SplitState>
   operations: Map<string, OperationRecord>
   artifacts: Map<string, ArtifactRecord[]>
 }
 
-const ZERO_USAGE: Usage = { inputTokens: 0, outputTokens: 0, costUSD: null, estimated: false }
+
 
 // The ONE transition function for the durable operation journal: the live journal row
 // mutation (EventLog.beginOperation/completeOperation/failOperation) and the rebuild fold
@@ -140,7 +141,7 @@ const View = {
 // Lenient by design: fold must never throw on history — a malformed payload (from an
 // older schema or a poison event) skips its case rather than wedging every projection.
 export function fold(events: EventRecord[]): State {
-  const state: State = { tasks: new Map(), plans: new Map(), steps: new Map(), runs: new Map(), usage: new Map(), splits: new Map(), operations: new Map(), artifacts: new Map() }
+  const state: State = { tasks: new Map(), plans: new Map(), steps: new Map(), runs: new Map(), usage: new Map(), stepUsage: new Map(), splits: new Map(), operations: new Map(), artifacts: new Map() }
   const seen = new Set<string>()
 
   const stepOf = (taskId: string, stepId: string): StepState | undefined => state.steps.get(taskId)?.get(stepId)
@@ -209,7 +210,11 @@ export function fold(events: EventRecord[]): State {
         if (!p.success || !e.taskId) break
         const s = stepOf(e.taskId, p.data.stepId)
         if (s && s.runToken === e.runToken) s.iterations = Math.max(s.iterations, p.data.iteration)
-        if (e.usage) state.usage.set(e.taskId, addUsage(state.usage.get(e.taskId) ?? ZERO_USAGE, e.usage))
+        if (e.usage) {
+          state.usage.set(e.taskId, addUsage(state.usage.get(e.taskId) ?? ZERO_USAGE, e.usage))
+          const sk = `${e.taskId}\u0000${p.data.stepId}`
+          state.stepUsage.set(sk, addUsage(state.stepUsage.get(sk) ?? ZERO_USAGE, e.usage))
+        }
         break
       }
       case EVENT_KIND.operation_started:
@@ -239,6 +244,7 @@ export function fold(events: EventRecord[]): State {
       case EVENT_KIND.feedback_provided:
       case EVENT_KIND.plan_annotated:
       case EVENT_KIND.analysis_completed:
+      case EVENT_KIND.copilot_exchange:
         break // traceability only; no state derivation (ponytail: no fold state until a consumer needs it — read via events.byTask)
       case EVENT_KIND.split_proposed: {
         const p = View.split_proposed.safeParse(e.payload)
@@ -302,6 +308,10 @@ export function nextAttempts(state: State, taskId: string, plan: Pick<Plan, 'ste
 
 export function taskUsage(state: State, taskId: string): Usage {
   return state.usage.get(taskId) ?? ZERO_USAGE
+}
+
+export function stepUsage(state: State, taskId: string, stepId: string): Usage {
+  return state.stepUsage.get(`${taskId}\u0000${stepId}`) ?? ZERO_USAGE
 }
 
 export function subtreeTaskIds(state: State, rootId: string): string[] {

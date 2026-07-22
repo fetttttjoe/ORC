@@ -1,4 +1,5 @@
 import type { HookHandlers, HookName } from '@orc/contracts'
+import { errorMessage } from '@orc/contracts'
 
 // Observe-only hook bus (spec D6): handlers see, never veto. Errors are contained —
 // a broken extension must not take down an append or a run. Under DBOS at-least-once
@@ -18,7 +19,7 @@ export class HookBus {
       try {
         await (h as (...a: Parameters<HookHandlers[H]>) => unknown)(...args)
       } catch (err) {
-        console.warn(`hook '${hook}' handler failed: ${err instanceof Error ? err.message : String(err)}`)
+        console.warn(`hook '${hook}' handler failed: ${errorMessage(err)}`)
       }
     }
   }
