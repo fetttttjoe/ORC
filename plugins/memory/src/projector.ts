@@ -1,4 +1,4 @@
-import { EVENT_KIND, MemoryDeletedPayload, MemoryWrittenPayload, type EventRecord } from '@orc/contracts'
+import { errorMessage, EVENT_KIND, MemoryDeletedPayload, MemoryWrittenPayload, type EventRecord } from '@orc/contracts'
 import type { EventLog } from '@orc/kernel'
 import { SurrealMemory } from './surreal'
 import { noteRelPath, renderNoteFile } from './note-md'
@@ -69,7 +69,9 @@ export function createMemoryProjector(opts: { log: EventLog; surreal: SurrealMem
   // transient socket/transaction drops (idle WS reset, 'Transaction not found') heal on the next
   // apply — one bounded retry absorbs them instead of warn-spamming a self-healing condition
   const connectionShaped = (err: unknown): boolean =>
-    /connect|connection|socket|websocket|transaction not found/i.test(err instanceof Error ? err.message : String(err))
+    // auth-shaped errors heal the same way: the connect-option auth provider re-authenticates
+    // on the driver's session renewal, so the retry lands on a fresh authenticated session
+    /connect|connection|socket|websocket|transaction not found|anonymous access|not enough permissions/i.test(errorMessage(err))
   const enqueueReconcile = (): void => {
     void serialize(async () => {
       for (let attempt = 1; ; attempt++) {
@@ -81,7 +83,7 @@ export function createMemoryProjector(opts: { log: EventLog; surreal: SurrealMem
         } catch (err) {
           if (closed) return // shutdown race: the socket is gone because we are — expected, not a warning
           if (attempt === 1 && connectionShaped(err)) { await new Promise(r => setTimeout(r, 250)); continue }
-          console.warn(`memory projector: ${err instanceof Error ? err.message : String(err)}`)
+          console.warn(`memory projector: ${errorMessage(err)}`)
           // resume after last applied event; if even the cursor read fails, keep the old one —
           // applyEvent is idempotent per cursor, and an uncaught throw here would reject the
           // void-discarded serialize() promise as an unhandled rejection

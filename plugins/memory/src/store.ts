@@ -44,7 +44,12 @@ export function createMemoryStore(opts: { log: EventLog; surreal: SurrealMemory;
     // Surreal write — the projector is still the only thing that touches the read model.
     async recordAccess(id, scope = 'project', mode, author) {
       await log.append({
-        taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_accessed,
+        // envelope binds the access to the acting step when the author carries one — per-task
+        // pull counts fold from the envelope instead of payload archaeology (P5 token-economy)
+        // `|| null`, not `?? null`: an empty-string id would fail the envelope's min(1) and
+        // turn a memory read into a tool error — normalize falsy to unbound instead
+        taskId: author?.taskId || null, stepId: author?.stepId || null, runToken: author?.runToken || null,
+        kind: EVENT_KIND.memory_accessed,
         payload: { id, scope, mode, author },
       })
     },

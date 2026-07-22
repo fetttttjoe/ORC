@@ -1,9 +1,9 @@
 import { z } from 'zod'
-import { MEMORY_ACCESS, MEMORY_LIMITS, MEMORY_SOURCE_LIMITS, NOTE_KINDS, LINK_KINDS, RETENTION_CLASSES, LinkKind, MemoryNoteInput, type MemoryAuthor, type MemoryStore, type ResolvedTool } from '@orc/contracts'
+import { errorMessage, MEMORY_ACCESS, MEMORY_LIMITS, MEMORY_SOURCE_LIMITS, NOTE_KINDS, LINK_KINDS, RETENTION_CLASSES, LinkKind, MemoryNoteInput, type MemoryAuthor, type MemoryStore, type ResolvedTool } from '@orc/contracts'
 import { applyBudget, fitMemoryNoteToBudget } from './budget'
 
 const ok = (output: unknown) => ({ output, isError: false })
-const err = (e: unknown) => ({ output: { error: e instanceof Error ? e.message : String(e) }, isError: true })
+const err = (e: unknown) => ({ output: { error: errorMessage(e) }, isError: true })
 
 // matched values, never scattered literals: the step role → tier mapping (runtime.ts) keys off this.
 export const MEMORY_TIER = { scout: 'scout', verify: 'verify', auditor: 'auditor' } as const
@@ -52,6 +52,12 @@ export function unavailableMemoryTools(reason: string): ResolvedTool[] {
   const store: MemoryStore = { write: fail, remove: fail, get: fail, list: fail, search: fail, neighbors: fail, recordAccess: fail }
   return memoryTools(store, { source: 'agent' })
 }
+
+// The read-only subset of the memory surface, OWNED HERE next to the tool definitions so a
+// rename cannot drift a consumer's copy: external drivers (orc mcp serve) expose exactly
+// these — reading knowledge is theirs, authoring it belongs to agents running inside plans.
+// tools.test.ts pins every name to the actual surface.
+export const MEMORY_READ_TOOLS = ['memory_search', 'memory_read', 'memory_neighbors'] as const
 
 // Injected as ResolvedTool[] via the same channel MCP tools use. Author is bound per step.
 // tier keys the tool surface + epistemic posture (default 'verify' = today's unchanged behavior):
