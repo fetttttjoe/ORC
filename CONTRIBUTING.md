@@ -851,8 +851,9 @@ contribution.
   shape gets a top-level, documented declaration — never an anonymous inline object type
   in a signature, never `z.object({...}).parse(...)` at a call site. (Tiny route
   argument-envelopes wrapping already-named ids are the one established exception.)
-- **No `as` casts.** Parse or guard at the boundary (zod schema / typed predicate);
-  `as const` and `satisfies` are fine.
+- **No `as` casts — tests included.** Parse or guard at the boundary (zod schema /
+  typed predicate); `as const` and `satisfies` are fine. A test that casts is a test
+  that lies about the shape it pins; name a schema and parse instead.
 - **Matched values through const maps / z.enum** — never scattered string literals
   (docs/EXTENDING.md invariant 6).
 - **One schema, one source.** A shape validated in two places imports one declaration;
