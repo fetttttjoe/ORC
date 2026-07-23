@@ -25,6 +25,24 @@ describe('rankNeighbors', () => {
     expect(dir[0]).toMatchObject({ id: 'b', via: 'supersedes', direction: 'in' })
   })
 
+  it('breaks genuine score ties deterministically (final order by id, best-path via by kind)', () => {
+    // two DIFFERENT nodes at equal score+depth → final order is id-asc regardless of edge-array order
+    const twoNodes = [
+      { from: 'a', to: 'c', kind: 'relates_to' as const }, // 0.5
+      { from: 'a', to: 'b', kind: 'relates_to' as const }, // 0.5
+    ]
+    expect(rankNeighbors(twoNodes, ['a']).map(n => n.id)).toEqual(['b', 'c'])
+    expect(rankNeighbors([...twoNodes].reverse(), ['a']).map(n => n.id)).toEqual(['b', 'c'])
+    // two equal-score paths to ONE node via different kinds (1.0×0.5 == 0.5×1.0) → via tie-break
+    // picks the lexicographically smaller kind, identical whichever edge is seen first
+    const oneNode = [
+      { from: 'a', to: 'd', kind: 'supersedes' as const, confidence: 0.5 }, // 1.0 × 0.5 = 0.5
+      { from: 'a', to: 'd', kind: 'relates_to' as const, confidence: 1 },   // 0.5 × 1.0 = 0.5
+    ]
+    expect(rankNeighbors(oneNode, ['a'])[0]).toMatchObject({ id: 'd', via: 'relates_to' })
+    expect(rankNeighbors([...oneNode].reverse(), ['a'])[0]).toMatchObject({ id: 'd', via: 'relates_to' })
+  })
+
   it('prunes below the floor', () => {
     expect(rankNeighbors(edges, ['a'], { depth: 3, floor: 0.6 }).map(n => n.id)).toEqual(['b'])
   })

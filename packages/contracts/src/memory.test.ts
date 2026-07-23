@@ -92,6 +92,18 @@ describe('MemoryNoteInput', () => {
     expect(MemoryNoteInput.safeParse({ id: 'x', title: 'X', links: 'other-note' }).success).toBe(false)
   })
 
+  it("collapses an explicit empty string to [] (the model's clear spelling), never a junk [''] entry", () => {
+    const n = MemoryNoteInput.parse({ id: 'clear', title: 'Clear', categories: '', tags: '', paths: '', rules: '', uncertainty: '' })
+    expect(n.categories).toEqual([])
+    expect(n.tags).toEqual([])
+    expect(n.paths).toEqual([])
+    expect(n.rules).toEqual([])
+    expect(n.uncertainty).toEqual([])
+    expect(n.categories).not.toContain('') // the regression: '' → [''] would render junk in the vault
+    // zone keeps its own min(1) item, so '' still rejects there (an empty glob is meaningless)
+    expect(MemoryNoteInput.safeParse({ id: 'z', title: 'Z', zone: '' }).success).toBe(false)
+  })
+
   it('rejects notes above persisted collection and text limits', () => {
     const note = { id: 'bounded', title: 'Bounded' }
     const invalid = [
