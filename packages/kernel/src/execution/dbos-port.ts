@@ -2,15 +2,15 @@ import { mkdirSync } from 'node:fs'
 import path from 'node:path'
 import { DBOS } from '@dbos-inc/dbos-sdk'
 import {
-  EVENT_KIND, FAILURE_CLASS, RUN_OUTCOME, SIGNAL_OUTCOME, TASK_STATUS,
+  EVENT_KIND, FAILURE_CLASS, RUN_OUTCOME, SIGNAL_OUTCOME, TASK_STATUS, UNIFIED_EVENT_TYPE,
   classifiedError, errorMessage, failureClassOf, isTerminalError, resolveModel, costUSDFor,
   type AgentExecutor, type Checkpoint, type EventDraft, type ExecutionPort, type ExecutorContext,
   type FailureClass, type LoadedSkill, type ModelProvider, type OperationCheckpoint, type Plan,
   type ResolvedTool, type RunHandle, type RunOutcome, type Signal, type SplitResult, type ToolSource,
 } from '@orc/contracts'
-import type { Storage } from '../storage'
+import { type Storage, type EventLogOps } from '../storage'
 import { verifyArtifacts } from './artifacts'
-import { fold, completedStepIds, nextAttempts, subtreeTaskIds, subtreeUsage, type State } from '../projections'
+import { fold, completedStepIds, nextAttempts, subtreeTaskIds, remainingBudget, inheritedCwd, type State } from '../projections'
 import { KERNEL_ERROR_CODE, KernelError } from '../errors'
 import { readySteps, runOutcomeOf } from './interpreter'
 import { createSignalRouter } from './signal-router'
@@ -53,6 +53,48 @@ const workflowIdOrThrow = (): string => {
 // Requires DBOS to already be launched in this process (same requirement as any other port call).
 export const dbosSend = (workflowId: string, message: string, topic: string, idempotencyKey: string): Promise<void> =>
   DBOS.send(workflowId, message, topic, idempotencyKey)
+
+// The run-workflow init side effect, extracted so it is a named, directly-testable unit. Appends
+// run_started idempotently, then RE-CHECKS status inside the SAME transaction before stamping
+// approved/blocked → running. Exported so a test can call it twice to simulate DBOS re-executing
+// init's fn() on resume (the crash window is between this transaction committing and DBOS recording
+// the init step's output): the re-check makes the second call a clean no-op instead of a fixed-key
+// idempotency_conflict that would brick the task at 'running'.
+export async function appendRunInit(tx: EventLogOps, args: RunArgs, workflowId: string): Promise<void> {
+  await tx.append({
+    taskId: args.taskId, stepId: null, runToken: workflowId, kind: EVENT_KIND.run_started,
+    payload: { taskId: args.taskId, planVersion: args.planVersion, retryIndex: args.retryIndex, workflowId, cwd: args.cwd },
+    idempotencyKey: `${workflowId}:init:run_started`,
+  })
+  const status = fold(await tx.byTask(args.taskId)).tasks.get(args.taskId)?.status
+  if (status === TASK_STATUS.approved || status === TASK_STATUS.blocked)
+    await tx.append({
+      taskId: args.taskId, stepId: null, runToken: workflowId, kind: EVENT_KIND.task_status_changed,
+      payload: { taskId: args.taskId, from: status, to: TASK_STATUS.running },
+      idempotencyKey: `${workflowId}:init:task_status_changed`,
+    })
+}
+
+// Drive an async generator to completion, GUARANTEEING gen.return() runs in a finally — so the
+// generator's own finally (e.g. loop.ts releaseWriteClaims) executes even when the driver throws
+// while the generator is suspended at a yield (a cancelled gate recv). onEvent returns the value to
+// resume the generator with (or undefined). Extracted from the port's step loop so the "always
+// clean up on any exit" policy is one testable unit, DBOS-free.
+export async function driveGenerator<T, R>(
+  gen: AsyncGenerator<T, void, R | undefined>,
+  onEvent: (ev: T) => Promise<R | undefined>,
+): Promise<void> {
+  try {
+    let resume: R | undefined
+    while (true) {
+      const { value, done } = await gen.next(resume)
+      if (done) return
+      resume = await onEvent(value)
+    }
+  } finally {
+    await gen.return(undefined).catch(() => {})
+  }
+}
 
 export async function createDbosPort(opts: {
   storage: Storage
@@ -215,92 +257,74 @@ export async function createDbosPort(opts: {
           checkpoint(name, fn, toEvents ? r => toEvents(r).map(d => priceDraft(d, provider, modelId)) : undefined),
         operation: (spec, fn, toEvents) =>
           operation(spec, fn, toEvents ? r => toEvents(r).map(d => priceDraft(d, provider, modelId)) : undefined),
-        budgetRemainingUSD: async () => {
-          // Enforce at the point spend happens, across the WHOLE ancestor chain — not just this
-          // task's own budget. Grants are clamped at propose time but never reserved, so N sibling
-          // splits proposed before any spend each saw ~$0 used and each got the full remaining
-          // budget; without an ancestor check they could together spend N× the parent's envelope.
-          // min over ancestors makes a fleet of children share the parent's budget by construction.
-          const state = fold(await log.all())
-          let remaining: number | null = null
-          for (let id: string | undefined = args.taskId; id !== undefined; id = state.tasks.get(id)?.parentId ?? undefined) {
-            const t = state.tasks.get(id)
-            if (!t || t.budgetUSD === null) continue
-            const r = t.budgetUSD - (subtreeUsage(state, id).costUSD ?? 0)
-            remaining = remaining === null ? r : Math.min(remaining, r)
-          }
-          return remaining
-        },
+        // Enforce spend at the point it happens across the whole ancestor chain (projections.remainingBudget):
+        // grants are clamped at propose time but never reserved, so without an ancestor check N sibling splits
+        // could each spend the full parent budget. min-over-ancestors shares it by construction.
+        budgetRemainingUSD: async () => remainingBudget(fold(await log.all()), args.taskId),
       }
 
-      let signal: Signal | null = null
-      let error: { class: string; message: string } | null = null
+      // a holder, not two `let`s: the callback below assigns these, and TS control-flow can't see a
+      // closure assignment — a plain `let signal` would narrow to `null` at the reads after the drive
+      const collected: { signal: Signal | null; error: { class: string; message: string } | null } = { signal: null, error: null }
       const gen = executor.startTurn(ctx)
-      let resume: SplitResult[] | string | undefined
       // splitIds already handed to a previous gate in THIS workflow. Rebuilds correctly on
       // replay because each gate:targets checkpoint replays its recorded value in order.
       const consumed = new Set<string>()
-      // Drive the executor generator inside try/finally so its OWN finally (releaseWriteClaims)
-      // runs even when the PORT throws while the generator is suspended at a gate (a cancelled
-      // recv, a checkpoint failure). An abandoned async generator's finally never runs, so the
-      // step's write-claims would leak and poison later retries in a long-lived port process
-      // (graph-ui server, mcp serve). gen.return() resumes it at the yield to run that finally.
-      try {
-        while (true) {
-          const { value: ev, done } = await gen.next(resume)
-          resume = undefined
-          if (done) break
-          if (ev.type === 'signal') signal = ev.signal
-          if (ev.type === 'error') error = { class: ev.class, message: ev.message }
-          if (ev.type === 'gate') {
-            // Resolve targets in a checkpoint (log read = non-deterministic). Default = every
-            // split proposed by THIS step attempt that this workflow has not already consumed;
-            // an explicit request is intersected with that set so an unknown or foreign id —
-            // which can never receive a message and would wedge recv forever (no gate timeout in
-            // v1) — is dropped. Empty intersection resumes with [] immediately.
-            //
-            // `resolved` is NOT the consumed marker: the router appends split_resolved and THEN
-            // sends, so a split that resolved before the parent reached its gate is precisely the
-            // one with a message waiting. Filtering on it dropped the child's summary and notes —
-            // the whole payload of the split protocol — whenever a child outran its parent.
-            const targets = await checkpoint(`gate:targets:${ev.toolCallId}`, async () => {
-              const state = await foldState(args.taskId)
-              const own = [...state.splits.values()]
-                .filter(s => s.stepId === args.stepId && s.runToken === runToken && !consumed.has(s.splitId))
-                .map(s => s.splitId)
-              if (ev.splitIds.length === 0) return own
-              const ownSet = new Set(own)
-              return ev.splitIds.filter(id => ownSet.has(id))
-            })
-            for (const id of targets) consumed.add(id)
-            const results: SplitResult[] = []
-            for (const id of targets) {
-              // workflow context — recv is legal here and ONLY here (spec D9).
-              // Long poll, loop forever: no gate timeout in v1; recv replays from DBOS's message log.
-              // The timeout is NOT a responsiveness knob — every recv records a durable row even on
-              // expiry, and recovery replays each one sequentially, so a short poll bills a parked
-              // gate by wall-clock time (60s => ~1,440 rows overnight). Cancellation is unaffected:
-              // sysdb.recv re-checks it every dbPollingIntervalEventMs (10s) regardless.
-              let msg: SplitResult | null = null
-              while (msg === null) msg = await DBOS.recv<SplitResult>(`split:${id}`, GATE_POLL_SECONDS)
-              results.push(msg)
-            }
-            resume = results
+      // driveGenerator guarantees gen.return() in a finally, so loop.ts's OWN finally
+      // (releaseWriteClaims) runs even when the PORT throws while the generator is suspended at a
+      // gate (a cancelled recv, a checkpoint failure). An abandoned async generator's finally never
+      // runs, so the step's write-claims would leak and poison later retries in a long-lived port
+      // process (graph-ui server, mcp serve). The callback returns the value to resume with.
+      await driveGenerator(gen, async ev => {
+        if (ev.type === UNIFIED_EVENT_TYPE.signal) { collected.signal = ev.signal; return undefined }
+        if (ev.type === UNIFIED_EVENT_TYPE.error) { collected.error = { class: ev.class, message: ev.message }; return undefined }
+        if (ev.type === UNIFIED_EVENT_TYPE.gate) {
+          // Resolve targets in a checkpoint (log read = non-deterministic). Default = every
+          // split proposed by THIS step attempt that this workflow has not already consumed;
+          // an explicit request is intersected with that set so an unknown or foreign id —
+          // which can never receive a message and would wedge recv forever (no gate timeout in
+          // v1) — is dropped. Empty intersection resumes with [] immediately.
+          //
+          // `resolved` is NOT the consumed marker: the router appends split_resolved and THEN
+          // sends, so a split that resolved before the parent reached its gate is precisely the
+          // one with a message waiting. Filtering on it dropped the child's summary and notes —
+          // the whole payload of the split protocol — whenever a child outran its parent.
+          const targets = await checkpoint(`gate:targets:${ev.toolCallId}`, async () => {
+            const state = await foldState(args.taskId)
+            const own = [...state.splits.values()]
+              .filter(s => s.stepId === args.stepId && s.runToken === runToken && !consumed.has(s.splitId))
+              .map(s => s.splitId)
+            if (ev.splitIds.length === 0) return own
+            const ownSet = new Set(own)
+            return ev.splitIds.filter(id => ownSet.has(id))
+          })
+          for (const id of targets) consumed.add(id)
+          const results: SplitResult[] = []
+          for (const id of targets) {
+            // workflow context — recv is legal here and ONLY here (spec D9).
+            // Long poll, loop forever: no gate timeout in v1; recv replays from DBOS's message log.
+            // The timeout is NOT a responsiveness knob — every recv records a durable row even on
+            // expiry, and recovery replays each one sequentially, so a short poll bills a parked
+            // gate by wall-clock time (60s => ~1,440 rows overnight). Cancellation is unaffected:
+            // sysdb.recv re-checks it every dbPollingIntervalEventMs (10s) regardless.
+            let msg: SplitResult | null = null
+            while (msg === null) msg = await DBOS.recv<SplitResult>(`split:${id}`, GATE_POLL_SECONDS)
+            results.push(msg)
           }
-          if (ev.type === 'feedback') {
-            await checkpoint(`feedback:req:${ev.toolCallId}`, async () => 0, () =>
-              [{ kind: EVENT_KIND.feedback_requested, payload: { question: ev.question, topic: ev.topic } }])
-            // ponytail: long poll, loop forever — no gate timeout in v1 (mirrors the split gate); cancel is the escape
-            let msg: string | null = null
-            while (msg === null) msg = await DBOS.recv<string>(`feedback:${ev.topic}`, GATE_POLL_SECONDS)
-            resume = msg
-            continue
-          }
+          return results
         }
-      } finally {
-        // resume the generator at its suspension point so loop.ts's finally releases write-claims
-        await gen.return(undefined).catch(() => {})
-      }
+        if (ev.type === UNIFIED_EVENT_TYPE.feedback) {
+          await checkpoint(`feedback:req:${ev.toolCallId}`, async () => 0, () =>
+            [{ kind: EVENT_KIND.feedback_requested, payload: { question: ev.question, topic: ev.topic } }])
+          // ponytail: long poll, loop forever — no gate timeout in v1 (mirrors the split gate); cancel is the escape
+          let msg: string | null = null
+          while (msg === null) msg = await DBOS.recv<string>(`feedback:${ev.topic}`, GATE_POLL_SECONDS)
+          return msg
+        }
+        return undefined
+      })
+      const signal = collected.signal
+      const error = collected.error
 
       if (signal?.outcome === SIGNAL_OUTCOME.success) {
         const success = signal // closures below see the narrowed binding
@@ -366,20 +390,7 @@ export async function createDbosPort(opts: {
           // ERROR workflow retry cannot resume. Mirror the finish checkpoint — append run_started
           // idempotently and stamp running only while the status is still pre-run (also no-ops
           // cleanly if an orc cancel raced in).
-          await log.transaction(async tx => {
-            await tx.append({
-              taskId: args.taskId, stepId: null, runToken: workflowId, kind: EVENT_KIND.run_started,
-              payload: { taskId: args.taskId, planVersion: args.planVersion, retryIndex: args.retryIndex, workflowId, cwd: args.cwd },
-              idempotencyKey: `${workflowId}:init:run_started`,
-            })
-            const status = fold(await tx.byTask(args.taskId)).tasks.get(args.taskId)?.status
-            if (status === TASK_STATUS.approved || status === TASK_STATUS.blocked)
-              await tx.append({
-                taskId: args.taskId, stepId: null, runToken: workflowId, kind: EVENT_KIND.task_status_changed,
-                payload: { taskId: args.taskId, from: status, to: TASK_STATUS.running },
-                idempotencyKey: `${workflowId}:init:task_status_changed`,
-              })
-          })
+          await log.transaction(tx => appendRunInit(tx, args, workflowId))
           return { plan, done: [...completedStepIds(state, args.taskId)], attempts: nextAttempts(state, args.taskId, plan), depth: task.depth }
         })
 
@@ -549,10 +560,9 @@ export async function createDbosPort(opts: {
       const approved = state.plans.get(childTaskId)?.approvedVersion
       if (!approved) throw new KernelError(KERNEL_ERROR_CODE.invalid_transition, `no approved plan for '${childTaskId}'`)
       // deterministic id: the router may call this more than once (at-least-once delivery) — attaches idempotently
-      // parent cwd inherits from its most recent run that HAD a cwd — findLast, not at(-1), the same
-      // rule retry() uses: a pre-project-dir-default bare retry (cwd null) must not poison the child
-      // into empty scratch; falls back to the project dir when no parent run ever had one
-      const cwd = (task.parentId ? state.runs.get(task.parentId)?.findLast(r => r.cwd)?.cwd : null) ?? config.dir
+      // parent cwd inherits by the shared rule (projections.inheritedCwd): the most recent parent run
+      // that HAD a cwd (findLast, skip null-cwd history), else the project dir — same as retry()
+      const cwd = inheritedCwd(task.parentId ? state.runs.get(task.parentId) : undefined, undefined, config.dir)
       await DBOS.startWorkflow(runWorkflow, {
         workflowID: `run:${childTaskId}:v${approved}`,
         queueName: runQueue(task.depth),
@@ -566,12 +576,10 @@ export async function createDbosPort(opts: {
       if (task.status !== TASK_STATUS.blocked)
         throw new KernelError(KERNEL_ERROR_CODE.invalid_transition, `task is '${task.status}' — only a blocked task can be retried`)
       const runs = state.runs.get(taskId) ?? []
-      // A retry re-enters the world the run failed in: without an explicit override, inherit the
-      // most recent run that HAD a cwd — not runs.at(-1), because histories from before the
-      // project-dir default carry null-cwd retries that would poison plain last-run inheritance
-      // (scenario-2's log is exactly [repo, null, null, null]). No run ever had one →
-      // startRunAt's project-dir default applies.
-      const cwd = o?.cwd ?? runs.findLast(r => r.cwd)?.cwd ?? undefined
+      // A retry re-enters the world the run failed in: shared rule (projections.inheritedCwd) — an
+      // explicit override wins, else inherit the most recent run that HAD a cwd (not at(-1), so a
+      // null-cwd retry from before the project-dir default cannot poison inheritance), else the project dir.
+      const cwd = inheritedCwd(runs, o?.cwd, config.dir)
       return startRunAt(taskId, runs.length === 0 ? 0 : Math.max(...runs.map(r => r.retryIndex)) + 1, cwd)
     },
     cancelRun: async taskId => {
