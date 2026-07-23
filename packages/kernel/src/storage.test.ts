@@ -65,7 +65,7 @@ describe('schema migration', () => {
     const db = await createTestDb({ migrate: false })
     dbs.push(db)
 
-    const err = await openStorage(db.url, { projectId: TEST_PROJECT_ID }).catch(e => e as Error)
+    const err = (await openStorage(db.url, { projectId: TEST_PROJECT_ID }).catch((e: unknown) => e)) as Error
     expect(err.message).toMatch(/database schema is behind \(0\/\d+ migrations applied\)/)
     // the "(checked host/db)" suffix says WHICH database (a wrong cwd hits a different one) —
     // but only host+path, never credentials, so a regression that interpolates the raw url is caught
