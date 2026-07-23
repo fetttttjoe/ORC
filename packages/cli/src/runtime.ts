@@ -7,7 +7,7 @@ import { agentAnalyzer } from '@orc/analyzer-agent'
 import { createMcpHub, type McpHub } from '@orc/mcp-client'
 import { createMemory, unavailableMemoryTools, tierForRole, type MemoryTier } from '@orc/memory'
 import { createVaultProjector } from '@orc/vault-projector'
-import { createDbosPort, createPluginHost, dbosSend, finalizePlanTool, isMcpTrusted, loadConfig, loadTrust, openStorage, readAnnotationsTool, reportCoverageTool, requireProject, splitTool, Kernel, type DbosPort, type PluginHost, type ProjectConfig, type Storage } from '@orc/kernel'
+import { createDbosPort, createPluginHost, dbosSend, execTool, finalizePlanTool, isMcpTrusted, loadConfig, loadTrust, openStorage, readAnnotationsTool, reportCoverageTool, requireProject, splitTool, Kernel, type DbosPort, type PluginHost, type ProjectConfig, type Storage } from '@orc/kernel'
 
 export function seedRegistries(config = loadConfig()) {
   const providers = new Map<string, ModelProvider<unknown>>([
@@ -80,9 +80,13 @@ export async function buildRuntime(
       // read_annotations only needs the kernel (reads plan_annotated off the log) — unconditional,
       // like splitTool: harmless everywhere, returns an empty list for a task with no annotations.
       readAnnotationsTool({ kernel, p }),
-      // report_coverage emits analysis_completed; unconditional but self-gates to the scout analyze
-      // step (p.role), so it's inert on every other step exactly like finalize_plan is off the auditor.
-      reportCoverageTool({ kernel, p }),
+      // report_coverage emits analysis_completed; registration-gated inside the factory to the
+      // scout analyze step — a tool that can only ever error must not be visible (scenario-2's
+      // verify auditor burned one iteration per attempt calling it).
+      ...reportCoverageTool({ kernel, p }),
+      // exec runs operator-allowlisted commands (execAllowlist in .orc/config.json) in the step
+      // workspace — the acceptance-gate tool. Empty allowlist = not offered.
+      ...execTool({ workspaceDir: p.workspaceDir, allowlist: config.execAllowlist }),
       // finalize_plan reconstructs the plan-note graph from the log (kernel.listPlanNotes), not the
       // memory store — but it's still only offered when memory is healthy: with the memory tools
       // degraded the agent can't author a plan-note graph, so a grounded plan is pointless anyway.

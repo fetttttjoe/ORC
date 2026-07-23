@@ -1,6 +1,7 @@
 {
   "projectId": "e4c293ed-f341-43df-aaeb-abf3276c6331",
   "projectName": "orc-sim",
+  "execAllowlist": ["bun test", "bun run typecheck"],
   "mcpServers": {
     "web": {
       "command": "bun",

@@ -27,6 +27,11 @@ const settingsSchema = (dir: string) =>
     maxIterations: z.coerce.number().int().positive().default(30),
     approvalPolicy: ApprovalPolicy.prefault({}), // {} isn't the full output shape — prefault reparses it, applying ApprovalPolicy's own field defaults
     workspaceRoot: z.string().default(path.join(dir, '.orc', 'workspaces')),
+    // operator-allowlisted commands steps may run via the `exec` tool (e.g. "bun test",
+    // "bun run typecheck"). Empty = the tool is not offered at all. Without this, acceptance
+    // criteria like "tests green" are structurally unverifiable by every step: implementers
+    // ship unexecuted tests and an honest auditor can only refuse to certify.
+    execAllowlist: z.array(z.string().min(1)).default([]),
     ollamaBaseUrl: z.url().default('http://localhost:11434'),
     projectDbUrl: z.string().default('ws://127.0.0.1:8000/rpc'),
     projectDbName: z.string().default('memory'),
