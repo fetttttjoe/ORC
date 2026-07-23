@@ -1,4 +1,5 @@
 import { afterAll, describe, expect, it } from 'bun:test'
+import { z } from 'zod'
 import { EVENT_KIND } from '@orc/contracts'
 import { Kernel, openStorage } from '@orc/kernel'
 import { createTestDb, TEST_PROJECT_ID } from '@orc/kernel/test-helpers'
@@ -13,6 +14,16 @@ const noteEvent = (id: string) => ({
   taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_written,
   payload: { note: { id, title: id }, author: { source: 'cli' as const } },
 })
+
+// Asserted subsets of the SSE stream contract (ui-core StreamEnvelope) — runtime-parsed
+// because the test reads raw frames; shapes are named here, never cast at a call site.
+const NodeRefView = z.object({ id: z.string() })
+const AddNodesPatch = z.object({ addNodes: z.array(NodeRefView) })
+const WriteSummary = z.object({ kind: z.string(), noteRef: z.string() })
+const WriteEnvelope = z.object({ patch: AddNodesPatch, summary: WriteSummary })
+const HeatNodeView = z.object({ id: z.string(), heat: z.number().optional() })
+const HeatEnvelope = z.object({ patch: z.object({ updateNodes: z.array(HeatNodeView) }), summary: z.object({ line: z.string() }) })
+const CatchUpEnvelope = z.object({ patch: AddNodesPatch })
 
 async function setup() {
   const db = await createTestDb()
@@ -73,7 +84,7 @@ describe('graph-ui web adapter', () => {
     const appended = await storage.events.append(noteEvent('live-note'))
     const liveMsg = await readSse(live, m => m.data.includes('live-note'))
     expect(liveMsg?.id).toBe(appended.seq)
-    const env = JSON.parse(liveMsg!.data) as { patch: { addNodes: Array<{ id: string }> }; summary: { kind: string; noteRef: string } }
+    const env = WriteEnvelope.parse(JSON.parse(liveMsg!.data))
     expect(env.patch.addNodes.map(n => n.id)).toEqual([noteNodeId('project', 'live-note')])
     expect(env.summary.kind).toBe(EVENT_KIND.memory_written)
     expect(env.summary.noteRef).toBe(noteNodeId('project', 'live-note'))
@@ -86,7 +97,7 @@ describe('graph-ui web adapter', () => {
       payload: { id: 'live-note', scope: 'project', mode: 'read', author: { source: 'cli' } },
     })
     const heated = await readSse(accessed, m => m.data.includes('memory_accessed'))
-    const heatedEnv = JSON.parse(heated!.data) as { patch: { updateNodes: Array<{ id: string; heat?: number }> }; summary: { line: string } }
+    const heatedEnv = HeatEnvelope.parse(JSON.parse(heated!.data))
     const heatedNote = heatedEnv.patch.updateNodes.find(n => n.id === noteNodeId('project', 'live-note'))
     expect(heatedNote?.heat).toBeGreaterThan(0)
     expect(heatedEnv.summary.line).toContain('read')
@@ -95,7 +106,7 @@ describe('graph-ui web adapter', () => {
     const resumed = await fetch(`${base}/api/stream?project=${TEST_PROJECT_ID}&fromSeq=${g.seq}`)
     const catchUp = await readSse(resumed, m => m.data.includes('live-note'))
     expect(catchUp).not.toBeNull()
-    expect((JSON.parse(catchUp!.data) as { patch: { addNodes: Array<{ id: string }> } }).patch.addNodes.map(n => n.id)).toEqual([noteNodeId('project', 'live-note')])
+    expect(CatchUpEnvelope.parse(JSON.parse(catchUp!.data)).patch.addNodes.map(n => n.id)).toEqual([noteNodeId('project', 'live-note')])
 
     await ui.stop(); await storage.close()
   })
