@@ -1,4 +1,4 @@
-import type { LinkKind } from '@orc/contracts'
+import { EDGE_DIRECTION, type EdgeDirection, type LinkKind } from '@orc/contracts'
 
 export const DEFAULT_LINK_WEIGHTS: Record<LinkKind, number> = {
   supersedes: 1.0, contradicts: 1.0, refines: 0.9, depends_on: 0.8,
@@ -12,8 +12,8 @@ export const DEFAULT_CAP = 20
 // direction is relative to the SEED: 'out' = the seed points at this neighbour via `kind`; 'in' =
 // this neighbour points at the seed. Without it an asymmetric kind (supersedes/contradicts/refines/
 // depends_on/derived_from) is ambiguous — 'via: supersedes' can't tell superseder from superseded.
-export type Edge = { from: string; to: string; kind: LinkKind; confidence?: number; direction?: 'out' | 'in' }
-export type RankedNeighbor = { id: string; via: LinkKind; depth: number; score: number; direction: 'out' | 'in' }
+export type Edge = { from: string; to: string; kind: LinkKind; confidence?: number; direction?: EdgeDirection }
+export type RankedNeighbor = { id: string; via: LinkKind; depth: number; score: number; direction: EdgeDirection }
 
 // Bounded best-score relaxation: score(path) = Π(weight(kind) × confidence) × decay^(depth-1).
 // Keep the strongest path per node, exclude seeds, prune below floor, cap the result.
@@ -48,7 +48,7 @@ export function rankNeighbors(edges: Edge[], seeds: string[], opts: {
       // depth, then lexicographic via-kind) so via/depth attribution is a pure function of the
       // logical graph — not of edge-fetch order, which a rebuild reshuffles (new RELATE record ids).
       if (!prev || sd > prev.score || (sd === prev.score && (d < prev.depth || (d === prev.depth && e.kind < prev.via)))) {
-        best.set(e.to, { id: e.to, via: e.kind, depth: d, score: sd, direction: e.direction ?? 'out' })
+        best.set(e.to, { id: e.to, via: e.kind, depth: d, score: sd, direction: e.direction ?? EDGE_DIRECTION.out })
         next.push({ id: e.to, score: s })
       }
     }
