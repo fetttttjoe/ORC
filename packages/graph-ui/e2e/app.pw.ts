@@ -1,4 +1,5 @@
 import { expect, test } from '@playwright/test'
+import { z } from 'zod'
 
 test('shell boots: chats, requests, live status', async ({ page }) => {
   await page.goto('/')
@@ -65,9 +66,10 @@ test('note authoring: create, link, edit, delete from the page', async ({ page }
   await dlg.locator('label.field input').fill('e2e-authored-note')
   await dlg.locator('.dlg-buttons button', { hasText: 'delete' }).click()
   await expect(page.locator('.inspector')).toBeHidden({ timeout: 10_000 })
-  const { projectId } = await (await page.request.get('/api/session')).json() as { projectId: string }
+  const { projectId } = z.object({ projectId: z.string() }).parse(await (await page.request.get('/api/session')).json())
   await expect.poll(async () => {
-    const g = await (await page.request.get(`/api/graph?project=${projectId}`)).json() as { nodes: Array<{ label: string }> }
+    const raw = await (await page.request.get(`/api/graph?project=${projectId}`)).json()
+    const g = z.object({ nodes: z.array(z.object({ label: z.string() })) }).parse(raw)
     return g.nodes.some(n => n.label === 'E2e Authored Note')
   }, { timeout: 10_000 }).toBe(false)
 })
