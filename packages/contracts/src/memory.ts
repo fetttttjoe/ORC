@@ -197,6 +197,9 @@ export type NoteSummary = z.infer<typeof NoteSummary>
 export const NeighborResult = z.object({
   id: z.string(), title: z.string(), summary: z.string(),
   via: LinkKind, depth: z.number().int().positive(), score: z.number(),
+  // 'out' = seed →(via)→ neighbour; 'in' = neighbour →(via)→ seed. Disambiguates asymmetric kinds
+  // (e.g. supersedes) that reverse-traversal would otherwise flatten into one ambiguous label.
+  direction: z.enum(['out', 'in']),
 })
 export type NeighborResult = z.infer<typeof NeighborResult>
 

@@ -9,8 +9,11 @@ export const DEFAULT_DECAY = 0.6
 export const DEFAULT_FLOOR = 0.05
 export const DEFAULT_CAP = 20
 
-export type Edge = { from: string; to: string; kind: LinkKind; confidence?: number }
-export type RankedNeighbor = { id: string; via: LinkKind; depth: number; score: number }
+// direction is relative to the SEED: 'out' = the seed points at this neighbour via `kind`; 'in' =
+// this neighbour points at the seed. Without it an asymmetric kind (supersedes/contradicts/refines/
+// depends_on/derived_from) is ambiguous — 'via: supersedes' can't tell superseder from superseded.
+export type Edge = { from: string; to: string; kind: LinkKind; confidence?: number; direction?: 'out' | 'in' }
+export type RankedNeighbor = { id: string; via: LinkKind; depth: number; score: number; direction: 'out' | 'in' }
 
 // Bounded best-score relaxation: score(path) = Π(weight(kind) × confidence) × decay^(depth-1).
 // Keep the strongest path per node, exclude seeds, prune below floor, cap the result.
@@ -41,13 +44,17 @@ export function rankNeighbors(edges: Edge[], seeds: string[], opts: {
       if (sd < floor || seedSet.has(e.to)) continue
       const prev = best.get(e.to)
       // sd is monotone along the best path (sd_next = sd × weight × conf × decay),
-      // so only an improved node needs re-expansion.
-      if (!prev || sd > prev.score) {
-        best.set(e.to, { id: e.to, via: e.kind, depth: d, score: sd })
+      // so only an improved node needs re-expansion. Ties are broken DETERMINISTICALLY (shallower
+      // depth, then lexicographic via-kind) so via/depth attribution is a pure function of the
+      // logical graph — not of edge-fetch order, which a rebuild reshuffles (new RELATE record ids).
+      if (!prev || sd > prev.score || (sd === prev.score && (d < prev.depth || (d === prev.depth && e.kind < prev.via)))) {
+        best.set(e.to, { id: e.to, via: e.kind, depth: d, score: sd, direction: e.direction ?? 'out' })
         next.push({ id: e.to, score: s })
       }
     }
     frontier = next
   }
-  return [...best.values()].sort((a, b) => b.score - a.score).slice(0, cap)
+  // total order: score desc, then depth asc, then id asc — so the ranking AND the cap cutoff are
+  // reproducible across rebuilds of the same graph (needed for RRF's ordinal fusion and the eval harness).
+  return [...best.values()].sort((a, b) => b.score - a.score || a.depth - b.depth || a.id.localeCompare(b.id)).slice(0, cap)
 }

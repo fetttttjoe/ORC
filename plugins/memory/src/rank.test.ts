@@ -17,6 +17,14 @@ describe('rankNeighbors', () => {
     expect(r[1].score).toBeCloseTo(0.54)
   })
 
+  it('is a pure function of the graph: edge-array order does not change the ranking, and direction is carried', () => {
+    const shuffled = [edges[2]!, edges[0]!, edges[1]!] // same graph, different fetch order (a rebuild reshuffles ids)
+    expect(rankNeighbors(shuffled, ['a'], { depth: 3 }).map(n => n.id))
+      .toEqual(rankNeighbors(edges, ['a'], { depth: 3 }).map(n => n.id))
+    const dir = rankNeighbors([{ from: 'a', to: 'b', kind: 'supersedes' as const, direction: 'in' as const }], ['a'])
+    expect(dir[0]).toMatchObject({ id: 'b', via: 'supersedes', direction: 'in' })
+  })
+
   it('prunes below the floor', () => {
     expect(rankNeighbors(edges, ['a'], { depth: 3, floor: 0.6 }).map(n => n.id)).toEqual(['b'])
   })
