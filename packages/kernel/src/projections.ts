@@ -340,6 +340,31 @@ export function subtreeUsage(state: State, rootId: string): Usage {
   return subtreeTaskIds(state, rootId).reduce((acc, id) => addUsage(acc, taskUsage(state, id)), ZERO_USAGE)
 }
 
+// The budget a task may still spend: the TIGHTEST remaining envelope over its whole ancestor chain
+// (itself, parent, grandparent, …) — min over ancestors that set a budgetUSD of
+// (ancestor.budgetUSD − subtreeUsage(ancestor)). Ancestors with no budget are unconstrained and
+// skipped; null means no ancestor sets one at all. Enforcing at the spend point across ancestors is
+// what stops N sibling splits — each granted the full remaining budget before any spend — from
+// together overspending the parent's envelope.
+export function remainingBudget(state: State, taskId: string): number | null {
+  let remaining: number | null = null
+  for (let id: string | undefined = taskId; id !== undefined; id = state.tasks.get(id)?.parentId ?? undefined) {
+    const t = state.tasks.get(id)
+    if (!t || t.budgetUSD === null) continue
+    const r = t.budgetUSD - (subtreeUsage(state, id).costUSD ?? 0)
+    remaining = remaining === null ? r : Math.min(remaining, r)
+  }
+  return remaining
+}
+
+// The cwd a retry or a child run inherits: an explicit override always wins; otherwise the most
+// recent run in history that HAD a cwd — findLast, never runs.at(-1), so a pre-project-dir-default
+// run recorded with a null cwd cannot poison inheritance into an empty scratch dir. Falls back when
+// no run in the history ever had one. Shared by retry() and startChildRun() so the rule lives once.
+export function inheritedCwd(runs: RunRecord[] | undefined, override: string | undefined, fallback: string): string {
+  return override ?? runs?.findLast(r => r.cwd)?.cwd ?? fallback
+}
+
 export function pendingSplitForChild(state: State, childTaskId: string): SplitState | undefined {
   for (const s of state.splits.values()) if (s.childTaskId === childTaskId && !s.resolved) return s
   return undefined
