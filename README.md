@@ -285,3 +285,18 @@ by the agent.
 - Never bundle the CLI (`bun build`): DBOS must run unbundled via `bun run`.
 - Upgrading orc: finish or `orc cancel` active runs first — DBOS recovery is
   keyed to the app version (`DBOS__APPVERSION`).
+
+## License
+
+orc is dual-licensed:
+
+- **Noncommercial use — free.** Use it, modify it, share it (with your
+  changes) under the [PolyForm Noncommercial License 1.0.0](LICENSE.md) —
+  personal projects, research, study, education, and noncommercial
+  organizations. Keep the license and the Required Notice with every copy.
+- **Commercial / monetized use — by agreement.** Selling it, hosting it as a
+  service, building it into a paid product, or using it inside a for-profit
+  business requires a commercial license with two standing terms: a fair
+  share of the value it helps create, and visible attribution. See
+  [COMMERCIAL-LICENSE.md](COMMERCIAL-LICENSE.md) — 30-day free evaluation for
+  commercial entities included.
