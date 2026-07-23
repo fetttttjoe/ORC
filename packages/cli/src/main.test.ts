@@ -204,7 +204,7 @@ describe('orc CLI', () => {
     const taskId = lines[0]!
     await run('propose', taskId, '--model', 'ollama/llama3', '--skill', 'documentation')
     lines.length = 0
-    await run('plan', taskId)
+    await run('plan', taskId, '--json')
     const plan = JSON.parse(lines.join('\n'))
     expect(plan.steps[0].skillRefs).toEqual(['documentation'])
   })
@@ -215,10 +215,14 @@ describe('orc CLI', () => {
     const taskId = lines[0]
     await run('propose', taskId, '--model', 'ollama/llama3')
     lines.length = 0
-    await run('plan', taskId)
+    await run('plan', taskId, '--json')
     const plan = JSON.parse(lines.join('\n'))
     expect(plan.steps[0].modelRef).toBe('ollama/llama3')
     expect(plan.strategyRef).toBe('template:single')
+
+    lines.length = 0
+    await run('plan', taskId) // default render is the human review, not JSON
+    expect(lines.join('\n')).toContain('cost estimate:')
   })
 
   it('plan and approve reject non-integer versions during argument parsing', async () => {
@@ -272,7 +276,7 @@ describe('orc CLI', () => {
 
     await run('propose', taskId, '--file', draftPath)
     lines.length = 0
-    await run('plan', taskId)
+    await run('plan', taskId, '--json')
     const plan = JSON.parse(lines.join('\n'))
     expect(plan.steps[0].modelRef).toBe('file/model')
     expect(plan.steps[0].maxIterations).toBe(3)
@@ -300,7 +304,7 @@ describe('orc CLI', () => {
     expect(lines[0]).toContain('plan v2 edited')
 
     lines.length = 0
-    await run('plan', taskId)
+    await run('plan', taskId, '--json')
     const plan = JSON.parse(lines.join('\n'))
     expect(plan.version).toBe(2)
     expect(plan.steps[0].modelRef).toBe('ollama/other')
