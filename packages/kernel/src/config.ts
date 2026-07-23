@@ -25,6 +25,11 @@ const settingsSchema = (dir: string) =>
     // default agent-loop budget for AUTHORED steps (single-step template, analyzer step) — plans
     // are frozen data, so this applies at plan-authoring time, never to already-approved plans.
     maxIterations: z.coerce.number().int().positive().default(30),
+    // half-life for the memory activation derivation (days) — THE calibration knob the neuron
+    // ranking needs once real hot/cold data exists. Read-time only: changing it re-ranks and
+    // re-heats instantly, rewrites nothing. Threaded to BOTH consumers (store ranking, Task 8;
+    // graph heat via sessions, Task 9) so the two surfaces always decay at ONE rate.
+    memoryHalfLifeDays: z.coerce.number().positive().default(14),
     approvalPolicy: ApprovalPolicy.prefault({}), // {} isn't the full output shape — prefault reparses it, applying ApprovalPolicy's own field defaults
     workspaceRoot: z.string().default(path.join(dir, '.orc', 'workspaces')),
     // operator-allowlisted commands steps may run via the `exec` tool (e.g. "bun test",
@@ -52,6 +57,7 @@ const envOverrides = (): Record<string, string> => {
     concurrency: process.env.ORC_CONCURRENCY,
     maxDepth: process.env.ORC_MAX_DEPTH,
     maxIterations: process.env.ORC_MAX_ITERATIONS,
+    memoryHalfLifeDays: process.env.ORC_MEMORY_HALF_LIFE_DAYS,
     ollamaBaseUrl: process.env.OLLAMA_BASE_URL,
     projectDbUrl: process.env.ORC_PROJECT_DB_URL,
     projectDbName: process.env.ORC_PROJECT_DB_NAME,

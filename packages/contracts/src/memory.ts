@@ -308,3 +308,43 @@ export function foldLiveNotes(
   }
   return live
 }
+
+// ---- activation: the first consumer of the observed-use measurement ----
+// Read-time derivation, never stored: a pure function of the event-sourced hits/lastAccessedAt
+// plus the caller's clock — rebuild-safe by construction, and replay reproduces it exactly.
+// Boost-only by design (banked spec correction: activation RANKS, never filters): a
+// never-accessed note keeps its structural score, nothing is pruned by coldness.
+
+// The observed-use measurement for one note, as folded from memory_accessed events.
+// NoteSummary carries these same two fields, so a summary passes to activation() directly.
+export interface AccessStats { hits: number; lastAccessedAt: string | null }
+
+export const DEFAULT_HALF_LIFE_DAYS = 14
+export const ACTIVATION_GAIN = 0.25
+
+export function activation(stats: AccessStats, now: string, halfLifeDays: number = DEFAULT_HALF_LIFE_DAYS): number {
+  if (stats.hits <= 0 || !stats.lastAccessedAt) return 0
+  const ageDays = (Date.parse(now) - Date.parse(stats.lastAccessedAt)) / 86_400_000
+  if (!Number.isFinite(ageDays)) return 0
+  return stats.hits * 0.5 ** (Math.max(0, ageDays) / halfLifeDays)
+}
+
+export const activationBoost = (a: number): number => 1 + ACTIVATION_GAIN * Math.log1p(a)
+
+// Fold memory_accessed into per-note (hits, lastAccessedAt) — lenient like foldLiveNotes.
+// The graph view derives heat from this; the Surreal projector keeps its own incremental copy.
+// `ts` is optional so trimmed {kind, payload} fixtures keep working — a tsless access is skipped
+// (activation without a timestamp is undefined anyway).
+export function foldAccessCounts(
+  events: Array<Pick<EventRecord, 'kind' | 'payload'> & { ts?: string }>,
+): Map<string, AccessStats> {
+  const acc = new Map<string, AccessStats>()
+  for (const e of events) {
+    if (e.kind !== EVENT_KIND.memory_accessed || !e.ts) continue
+    const p = MemoryAccessedPayload.safeParse(e.payload)
+    if (!p.success) continue
+    const k = noteKey(p.data.scope, p.data.id)
+    acc.set(k, { hits: (acc.get(k)?.hits ?? 0) + 1, lastAccessedAt: e.ts })
+  }
+  return acc
+}
