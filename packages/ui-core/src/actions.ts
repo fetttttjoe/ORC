@@ -2,7 +2,7 @@
 // see packages/cli/src/actions.ts). Adapters (web server, future TUI) receive this interface;
 // ui-core itself never constructs one. Implementations return data and never print: each
 // adapter renders results its own way (CLI lines, web toasts).
-import type { PlanDraft } from '@orc/contracts'
+import type { NoteAuthoringDraft, PlanDraft } from '@orc/contracts'
 
 export interface OrcActions {
   newTask(input: {
@@ -23,6 +23,13 @@ export interface OrcActions {
   // scoped notes AND wakes the parked plan agent (the conversational gate)
   annotate(taskId: string, noteId: string, text: string, refs?: string[]): Promise<{ noteId: string }>
   revise(taskId: string, text: string, scope: string[]): Promise<{ topic: string | null }>
+  // knowledge authoring — the neural interface's write path. NoteAuthoringDraft is the named
+  // contract: the web route validates with the SAME schema this consumes (PlanDraft precedent,
+  // no duplicate shape anywhere). Omitted fields merge-on-omit at the store gateway. Always
+  // writes the durable 'project' scope — plan scopes are agent-owned transients.
+  writeNote(note: NoteAuthoringDraft): Promise<{ id: string; scope: string }>
+  // positional like MemoryStore.remove, which this fronts; omitted scope = project scope
+  deleteNote(id: string, scope?: string): Promise<{ id: string }>
   // project chat management: the display name is a memory note; a new project mints identity
   // in the directory AND writes its name note as the first event, making it listable at once.
   // A directory that already holds an orc project is REUSED (reused: true), never re-minted.

@@ -1,6 +1,6 @@
 import { stepCountIs, streamText, type LanguageModel } from 'ai'
 import { z } from 'zod'
-import { errorMessage, PlanDraft, type CopilotExchangePayload, type Usage } from '@orc/contracts'
+import { errorMessage, NoteAuthoringDraft, NoteRef, PlanDraft, type CopilotExchangePayload, type Usage } from '@orc/contracts'
 import { buildCopilotTools, copilotSystemPrompt, createProjectSessions, emptyPatch, type CopilotMode, type OrcActions, type ProjectSessions } from '@orc/ui-core'
 import index from '../page/index.html'
 
@@ -60,6 +60,8 @@ const ACTION_ROUTES: Record<string, ActionHandler> = {
     z.object({ taskId: id, text: z.string().min(1), scope: z.array(id).min(1) }),
     (a, d) => a.revise(d.taskId, d.text, d.scope),
   ),
+  writeNote: route(NoteAuthoringDraft, (a, d) => a.writeNote(d)),
+  deleteNote: route(NoteRef, (a, d) => a.deleteNote(d.id, d.scope)),
   renameProject: route(z.object({ name: z.string().min(1).max(80) }), (a, d) => a.renameProject(d.name)),
   newProject: route(z.object({ dir: id, name: z.string().min(1).max(80) }), (a, d) => a.newProject(d.dir, d.name)),
   purgeProject: route(z.object({}), a => a.purgeProject()),
