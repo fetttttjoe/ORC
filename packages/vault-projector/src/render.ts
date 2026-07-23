@@ -87,7 +87,7 @@ function renderLineage(task: TaskNode, state: State): string {
   const steps = [...new Set(artifacts.map(a => a.stepId ?? 'unknown'))]
   for (const s of steps) lines.push(`  ${s}["${label(s)}"]`)
   artifacts.forEach((a, i) => {
-    lines.push(`  art${i}["${label(`${a.path} · sha256:${a.sha256.slice(0, 12)} · ${a.size}B`)}"]`)
+    lines.push(`  art${i}["${label(`${a.path} · sha256:${a.sha256.slice(0, 12)}… · ${a.size}B`)}"]`)
     lines.push(`  ${a.stepId ?? 'unknown'} --> art${i}`)
   })
   lines.push('```')

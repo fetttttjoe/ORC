@@ -432,7 +432,7 @@ export function buildProgram(
       for (const o of ops)
         console.log(`  op  ${o.kind.padEnd(6)} ${o.name.padEnd(24)} ${o.status.padEnd(10)} attempts ${o.attempts}`)
       for (const a of state.artifacts.get(taskId) ?? [])
-        console.log(`  out ${(a.stepId ?? '?').padEnd(12)} ${a.path} · sha256:${a.sha256.slice(0, 12)} · ${a.size}B`)
+        console.log(`  out ${(a.stepId ?? '?').padEnd(12)} ${a.path} · sha256:${a.sha256.slice(0, 12)}… · ${a.size}B`)
       const u = taskUsage(state, taskId)
       const cache = u.cacheReadTokens || u.cacheWriteTokens
         ? `  cache r/w: ${u.cacheReadTokens ?? 0}/${u.cacheWriteTokens ?? 0}`

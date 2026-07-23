@@ -183,7 +183,7 @@ describe('exec commands', () => {
     const out = lines.join('\n')
     expect(out).toMatch(/op {2}model {2}fake\/m\s+completed/)
     expect(out).toMatch(/op {2}tool {3}fs_write\s+started/)
-    expect(out).toContain('report.md · sha256:aaaaaaaaaaaa · 5B')
+    expect(out).toContain('report.md · sha256:aaaaaaaaaaaa… · 5B')
     await log.close()
   })
 })
