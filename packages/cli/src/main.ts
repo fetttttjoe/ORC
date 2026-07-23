@@ -346,7 +346,7 @@ export function buildProgram(
   program
     .command('run <taskId>')
     .description('execute the approved plan (durable; re-run attaches/resumes)')
-    .option('--cwd <dir>', 'shared workspace for all steps (default: per-step .orc/workspaces/)')
+    .option('--cwd <dir>', 'shared workspace for all steps (default: the project directory)')
     .action(execAction(
       (port, taskId, cwd) => port.startRun(taskId, { cwd }),
       (h, taskId) => `run ${h.workflowId} started — tailing events (ctrl-c stops the run; re-run orc run ${taskId} to resume)`,
@@ -355,7 +355,7 @@ export function buildProgram(
   program
     .command('retry <taskId>')
     .description('re-run failed steps of a blocked task as new attempts')
-    .option('--cwd <dir>')
+    .option('--cwd <dir>', "workspace override (default: the previous run's cwd, else the project directory)")
     .action(execAction(
       (port, taskId, cwd) => port.retry(taskId, { cwd }),
       h => `retry ${h.workflowId} started`,
@@ -642,7 +642,8 @@ export function buildProgram(
         if (ranked.length > 0) await memory.store.recordAccess(id, o.scope, MEMORY_ACCESS.neighbors, { source: 'cli' })
         // empty prints a sentinel (like ls/search's `_no notes_`) so a human isn't shown zero bytes.
         if (ranked.length === 0) { console.log('_no neighbors_'); return }
-        for (const n of ranked) console.log(`${n.id}\t${n.via}\t${n.depth}\t${n.score.toFixed(2)}\t${n.title}`)
+        // direction disambiguates asymmetric kinds: '→ supersedes' = seed supersedes n; '← supersedes' = n supersedes seed
+        for (const n of ranked) console.log(`${n.id}\t${n.direction === 'out' ? '→' : '←'} ${n.via}\t${n.depth}\t${n.score.toFixed(2)}\t${n.title}`)
       } finally {
         await memory.close()
       }

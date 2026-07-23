@@ -100,7 +100,7 @@ describe('memory tools', () => {
   })
 
   it('memory_neighbors traverses from a seed and returns ranked neighbours', async () => {
-    const { store } = fakeStore({ neighbors: async () => [{ id: 'b', title: 'B', summary: 's', via: 'supersedes', depth: 1, score: 1 }] })
+    const { store } = fakeStore({ neighbors: async () => [{ id: 'b', title: 'B', summary: 's', via: 'supersedes', depth: 1, score: 1, direction: 'out' }] })
     const nb = memoryTools(store, { source: 'cli' }).find(t => t.name === 'memory_neighbors')!
     const r = await nb.execute({ seed: 'a' })
     const out = r.output as { neighbors: { via: string }[] }
@@ -172,7 +172,7 @@ describe('memory tools', () => {
   })
 
   it('memory_neighbors records one traversal against the seed, and none when nothing came back', async () => {
-    const hit = fakeStore({ neighbors: async () => [{ id: 'b', title: 'B', summary: 's', via: 'supersedes', depth: 1, score: 1 }] })
+    const hit = fakeStore({ neighbors: async () => [{ id: 'b', title: 'B', summary: 's', via: 'supersedes', depth: 1, score: 1, direction: 'out' }] })
     await memoryTools(hit.store, { source: 'cli' }).find(t => t.name === 'memory_neighbors')!.execute({ seed: 'a' })
     expect(hit.accessed).toEqual([{ id: 'a', scope: undefined, mode: MEMORY_ACCESS.neighbors, author: { source: 'cli' } }])
 
