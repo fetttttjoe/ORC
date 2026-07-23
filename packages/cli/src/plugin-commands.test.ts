@@ -152,7 +152,7 @@ describe('plugin commands', () => {
     expect(lines[0]).toContain('plan v12 edited')
 
     lines.length = 0
-    await run('plan', taskId)
+    await run('plan', taskId, '--json')
     const plan = JSON.parse(lines.join('\n'))
     expect(plan.version).toBe(12)
     expect(plan.steps[0].modelRef).toBe('fake/edited')
