@@ -2,7 +2,7 @@ import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync } from '
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { Command, InvalidArgumentError } from 'commander'
-import { EDGE_DIRECTION, EVENT_KIND, LINK_KINDS, MEMORY_ACCESS, PlanDraft, RUN_OUTCOME, STRATEGY, TASK_STATUS, LinkKind, type Analyzer, type EventRecord, type ExecutionPort, type Plan, type RunHandle } from '@orc/contracts'
+import { EDGE_DIRECTION, EVENT_KIND, LINK_KINDS, MEMORY_ACCESS, PlanDraft, RUN_OUTCOME, STRATEGY, TASK_STATUS, LinkKind, slugId, type Analyzer, type EventRecord, type ExecutionPort, type Plan, type RunHandle } from '@orc/contracts'
 import { openStorage, Kernel, fold, grantExtensionTrust, grantMcpTrust, initializeProject, isExtensionTrusted, isMcpTrusted, loadConfig, loadTrust, migrateDatabase, requireProject, taskUsage, type EventLog, type OrcConfig, type PluginHost, type ProjectConfig, type Storage } from '@orc/kernel'
 import { createVaultProjector, parsePlanFile } from '@orc/vault-projector'
 import { createMemory, probeMemory } from '@orc/memory'
@@ -682,6 +682,25 @@ export function buildProgram(
       await memory.projector.rebuild()
       await memory.close()
       console.log('memory read model rebuilt from the log')
+    })
+
+  program
+    .command('note <title>')
+    .description("quick capture: write a project knowledge note with NO task/plan/approve ceremony (id = slugged title; noting the same title again updates that note)")
+    .option('--summary <text>', 'one-line summary')
+    .option('--body <text>', 'note body (markdown)')
+    .option('--tags <tags...>', 'tags')
+    .action(async (title: string, o: { summary?: string; body?: string; tags?: string[] }) => {
+      const { config, log } = needPlugin()
+      const memory = await createMemory({ log, config })
+      try {
+        const id = slugId(title)
+        await memory.store.write({ id, title, summary: o.summary, body: o.body, tags: o.tags }, { source: 'cli' })
+        await memory.projector.catchUp() // one-shot CLI process: project the append now
+        console.log(`noted '${id}' — read it back: orc memory cat ${id}`)
+      } finally {
+        await memory.close()
+      }
     })
 
   return program

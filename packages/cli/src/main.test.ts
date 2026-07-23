@@ -623,6 +623,14 @@ describe('orc CLI', () => {
     expect(lines.join('\n').trim()).toBe('_no neighbors_')
     expect(await accessCount()).toBe(beforeMiss) // a miss records nothing
 
+    // quick capture: same plugin wiring, zero ceremony, slugged-title id
+    lines.length = 0
+    await run('note', 'Quick Capture Works!', '--summary', 'from the test')
+    expect(lines.join('\n')).toContain("noted 'quick-capture-works'")
+    lines.length = 0
+    await run('memory', 'cat', 'quick-capture-works')
+    expect(lines.join('\n')).toContain('from the test')
+
     await hub.close()
     await host.shutdown()
     await log.close()
