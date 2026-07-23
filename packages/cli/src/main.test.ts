@@ -550,11 +550,11 @@ describe('orc CLI', () => {
     const nbOut = lines.join('\n')
     expect(nbOut).toContain('nb-hop1')
     expect(nbOut).toContain('nb-other')
-    // row shape: id\tvia\tdepth\tscore(2dp)\ttitle
+    // row shape: id\t<dir> via\tdepth\tscore(2dp)\ttitle  (dir: → seed→n, ← n→seed)
     const hop1Row = lines.find(l => l.startsWith('nb-hop1\t'))!
     expect(hop1Row).toBeDefined()
     const cols = hop1Row.split('\t')
-    expect(cols[1]).toBe('depends_on')      // via = link kind
+    expect(cols[1]).toMatch(/^[→←] depends_on$/) // direction-tagged link kind
     expect(cols[2]).toBe('1')               // depth (1 hop from the seed)
     expect(cols[3]).toMatch(/^\d+\.\d{2}$/) // score, 2 decimals
     expect(cols[4]).toBe('nb-hop1')         // title
