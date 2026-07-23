@@ -75,6 +75,23 @@ describe('MemoryNoteInput', () => {
     expect(n.tags).toEqual(['postgres', 'mixed-case'])
   })
 
+  // Models write `paths: "src/x.ts"` for `paths: ["src/x.ts"]` often enough to cost real
+  // iterations — the scalar is the same intent, so it coerces instead of failing the write.
+  // Object arrays (links/sources) stay strict: a bare string there is a shape mistake.
+  it('accepts a bare string as a one-element list for string-array fields', () => {
+    const n = MemoryNoteInput.parse({
+      id: 'coerce', title: 'Coerce', paths: 'src/x.ts', tags: 'Postgres', rules: 'never do Y',
+      categories: 'arch', uncertainty: 'untested', zone: 'docs/**',
+    })
+    expect(n.paths).toEqual(['src/x.ts'])
+    expect(n.tags).toEqual(['postgres']) // item normalization still applies
+    expect(n.rules).toEqual(['never do Y'])
+    expect(n.categories).toEqual(['arch'])
+    expect(n.uncertainty).toEqual(['untested'])
+    expect(n.zone).toEqual(['docs/**'])
+    expect(MemoryNoteInput.safeParse({ id: 'x', title: 'X', links: 'other-note' }).success).toBe(false)
+  })
+
   it('rejects notes above persisted collection and text limits', () => {
     const note = { id: 'bounded', title: 'Bounded' }
     const invalid = [

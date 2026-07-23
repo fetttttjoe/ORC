@@ -1,7 +1,7 @@
 import { RecordId, Surreal } from 'surrealdb'
 import { edge, orm, table, t } from 'surqlize'
 import {
-  composeAuthor, EVENT_KIND, LINK_KINDS, NOTE_KINDS, MemoryScope,
+  deriveNoteProvenance, EVENT_KIND, LINK_KINDS, NOTE_KINDS, MemoryScope,
   MemoryAccessedPayload, MemoryDeletedPayload, MemoryNote, MemoryWrittenPayload,
   type EventRecord, type LinkKind, type MemoryFilter, type NeighborResult, type NoteSummary,
 } from '@orc/contracts'
@@ -123,7 +123,9 @@ export class SurrealMemory {
         const k = key(note.scope, note.id)
         // read-then-write: createdAt/By + hits/lastAccessedAt preserved; updated/rev advance
         const ex = (await tx.select(Tb.Note, k))[0]
-        const by = composeAuthor(author)
+        // provenance + retrievedAt stamping shared with the kernel plan-note fold (deriveNoteProvenance):
+        // the one place this is computed, so projector and log-side fold cannot disagree.
+        const prov = deriveNoteProvenance(note, author, e.ts, ex)
         await tx.upsert(Tb.Note, k).set({
           noteId: note.id, scope: note.scope, title: note.title,
           kind: note.kind,
@@ -133,12 +135,11 @@ export class SurrealMemory {
           links: note.links.map(l => ({ id: l.id, kind: l.kind, confidence: l.confidence })),
           paths: note.paths, rules: note.rules, summary: note.summary, body: note.body,
           retention: note.retention,
-          // retrievedAt comes from the canonical event timestamp, never from the writer — so it
-          // is identical on every replay and an agent cannot claim when it fetched a page.
-          sources: note.sources.map(s => ({ url: s.url, title: s.title, retrievedAt: e.ts })),
+          // ORM row wants the title key always present (OptionType); retrievedAt already stamped by deriveNoteProvenance
+          sources: prov.sources.map(s => ({ url: s.url, title: s.title, retrievedAt: s.retrievedAt })),
           rationale: note.rationale, uncertainty: note.uncertainty, zone: note.zone,
-          createdAt: ex?.createdAt ?? e.ts, createdBy: ex?.createdBy ?? by,
-          updatedAt: e.ts, updatedBy: by, revision: (ex?.revision ?? 0) + 1,
+          createdAt: prov.createdAt, createdBy: prov.createdBy,
+          updatedAt: prov.updatedAt, updatedBy: prov.updatedBy, revision: prov.revision,
           hits: ex?.hits ?? 0,
           // OptionType fields validate against `undefined`, not `null` — omit rather than null it out.
           ...(ex?.lastAccessedAt !== undefined && { lastAccessedAt: ex.lastAccessedAt }),

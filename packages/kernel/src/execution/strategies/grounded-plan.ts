@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { composeAuthor, EVENT_KIND, LINK_KIND, MemoryDeletedPayload, MemoryNote, MemoryWrittenPayload, VERIFY_STEP_ID, planScope, type ChildPlanDraft, type EventRecord } from '@orc/contracts'
+import { deriveNoteProvenance, EVENT_KIND, LINK_KIND, MemoryDeletedPayload, MemoryNote, MemoryWrittenPayload, VERIFY_STEP_ID, planScope, type ChildPlanDraft, type EventRecord } from '@orc/contracts'
 
 // planScope moved to contracts (one format, one place); re-exported so kernel callers keep working
 export { planScope }
@@ -38,18 +38,19 @@ export function foldPlanNotes(events: EventRecord[], scope: string): MemoryNote[
   const byId = new Map<string, MemoryNote>()
   for (const e of events) {
     if (e.kind === EVENT_KIND.memory_written) {
-      const { note, author } = MemoryWrittenPayload.parse(e.payload)
+      // lenient like the projector's fold contract: one unparseable/legacy payload (any scope, any
+      // age) must skip its case, not throw out of every grounded task's plan freeze and approval.
+      const parsed = MemoryWrittenPayload.safeParse(e.payload)
+      if (!parsed.success) continue
+      const { note, author } = parsed.data
       if (note.scope !== scope) continue
       const prev = byId.get(note.id)
-      const by = composeAuthor(author)
-      byId.set(note.id, MemoryNote.parse({
-        ...note,
-        createdAt: prev?.createdAt ?? e.ts, createdBy: prev?.createdBy ?? by,
-        updatedAt: e.ts, updatedBy: by, revision: (prev?.revision ?? 0) + 1,
-      }))
+      // shared derivation with the projector — this once forgot to stamp sources.retrievedAt and
+      // threw MemoryNote.parse on every sourced plan note, blocking approval.
+      byId.set(note.id, MemoryNote.parse({ ...note, ...deriveNoteProvenance(note, author, e.ts, prev) }))
     } else if (e.kind === EVENT_KIND.memory_deleted) {
-      const del = MemoryDeletedPayload.parse(e.payload)
-      if (del.scope === scope) byId.delete(del.id)
+      const del = MemoryDeletedPayload.safeParse(e.payload)
+      if (del.success && del.data.scope === scope) byId.delete(del.data.id)
     }
   }
   return [...byId.values()]

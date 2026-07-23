@@ -89,6 +89,17 @@ export const NOTE_KIND = NoteKind.enum
 // plan scopes are derived by planScope(taskId) in plan.ts.
 export enum MemoryScope { project = 'project' }
 
+// Models pass a bare string where a one-element array is meant often enough to cost real
+// iterations (a scenario-2 verify step lost a turn to `paths: "src/x.ts"` → zod error → retry).
+// Accept the scalar as [scalar] at this boundary — a typed union, not z.preprocess, so the
+// draft's input types stay precise for TS callers. Object arrays (links/sources) stay strict:
+// a bare string there is a genuine shape mistake, not a spelling of the same intent.
+// An explicit empty string is the model's "clear this field" spelling (see the memory_write tool
+// description) — collapse it to [] rather than persisting a junk [''] entry that renders in the
+// vault and survives replay. zone keeps its own min(1) item, so '' still rejects there.
+const stringOrList = <T extends z.ZodType<string>>(item: T, max: number) =>
+  z.union([z.array(item).max(max), item.transform(v => (v === '' ? [] : [v]))])
+
 // What a writer (agent/CLI) supplies. Arrays/strings default so a minimal note is one id+title.
 const MemoryNoteBase = z.object({
   id: Id,
@@ -97,25 +108,25 @@ const MemoryNoteBase = z.object({
   // stamped by the store gateway from the runtime's Git HEAD — agents cannot invent one
   sourceRevision: z.string().nullable().default(null),
   title: z.string().min(1).max(200),
-  categories: z.array(z.string().max(MEMORY_LIMITS.labelChars)).max(MEMORY_LIMITS.labelItems).default([]),
+  categories: stringOrList(z.string().max(MEMORY_LIMITS.labelChars), MEMORY_LIMITS.labelItems).default([]),
   // lowercased at the boundary: search matches tags against a lowercased query while the
   // list/ls filter compares case-exactly, so an un-normalized 'Postgres' is silently
   // unreachable from one path and reachable from the other. Normalizing here also applies on
   // replay (the projector re-parses each payload), so a rebuild converges existing notes.
-  tags: z.array(z.string().max(MEMORY_LIMITS.labelChars).toLowerCase()).max(MEMORY_LIMITS.labelItems).default([]),
+  tags: stringOrList(z.string().max(MEMORY_LIMITS.labelChars).toLowerCase(), MEMORY_LIMITS.labelItems).default([]),
   links: z.array(MemoryLink).max(MEMORY_LIMITS.detailItems).default([]), // clean typed graph edges — no string-id form
-  paths: z.array(z.string().max(MEMORY_LIMITS.detailChars)).max(MEMORY_LIMITS.detailItems).default([]), // pointers down to code
-  rules: z.array(z.string().max(MEMORY_LIMITS.detailChars)).max(MEMORY_LIMITS.detailItems).default([]), // normative statements agents honor
+  paths: stringOrList(z.string().max(MEMORY_LIMITS.detailChars), MEMORY_LIMITS.detailItems).default([]), // pointers down to code
+  rules: stringOrList(z.string().max(MEMORY_LIMITS.detailChars), MEMORY_LIMITS.detailItems).default([]), // normative statements agents honor
   summary: z.string().max(500).default(''),
   body: z.string().max(MEMORY_LIMITS.bodyChars).default(''),
   retention: Retention.default(RETENTION.durable),                                 // may this ever be swept?
   sources: z.array(MemorySourceInput).max(MEMORY_SOURCE_LIMITS.items).default([]), // provenance for a web finding
   rationale: z.string().max(MEMORY_LIMITS.rationaleChars).default(''),          // plan-note: why this subplan exists
-  uncertainty: z.array(z.string().max(MEMORY_LIMITS.detailChars)).max(MEMORY_LIMITS.detailItems).default([]), // plan-note: coverage gaps / assumptions (RG7)
+  uncertainty: stringOrList(z.string().max(MEMORY_LIMITS.detailChars), MEMORY_LIMITS.detailItems).default([]), // plan-note: coverage gaps / assumptions (RG7)
   // plan-note: workspace-relative write globs this subplan may touch at execution — the freezer
   // carries them into the child step's zone and the executor's write-fence enforces them.
   // Parallel siblings declare DISJOINT zones; empty = unfenced (paths is documentation, zone is policy).
-  zone: z.array(z.string().min(1).max(MEMORY_LIMITS.detailChars)).max(16).default([]),
+  zone: stringOrList(z.string().min(1).max(MEMORY_LIMITS.detailChars), 16).default([]),
 })
 export const MemoryNoteInput = MemoryNoteBase.refine(
   n => !(n.scope === MemoryScope.project && n.id === 'index'),
@@ -240,6 +251,29 @@ export interface MemoryStore {
 export function composeAuthor(a: MemoryAuthor): string {
   if (a.source === 'cli') return 'cli'
   return [a.executor, a.model, a.role].filter(Boolean).join('·') || 'agent'
+}
+
+// The ONE derivation of a stored note's event-derived fields from a memory_written event: sources
+// stamped with retrievedAt (from the event ts, never the writer), provenance preserved/advanced.
+// Every fold of the memory stream — the Surreal projector, the kernel plan-note fold, any future
+// activation/decay derivation — MUST route through this, or they drift: a kernel fold once omitted
+// the retrievedAt stamp and threw `MemoryNote.parse` on every plan note carrying a citation, wedging
+// human approval. `prev` carries only what survives a re-write (createdAt/By, revision).
+export function deriveNoteProvenance(
+  note: MemoryNoteInput,
+  author: MemoryAuthor,
+  ts: string,
+  prev?: { createdAt?: string; createdBy?: string; revision?: number },
+): { sources: MemorySource[]; createdAt: string; createdBy: string; updatedAt: string; updatedBy: string; revision: number } {
+  const by = composeAuthor(author)
+  return {
+    sources: note.sources.map(s => ({ ...s, retrievedAt: ts })),
+    createdAt: prev?.createdAt ?? ts,
+    createdBy: prev?.createdBy ?? by,
+    updatedAt: ts,
+    updatedBy: by,
+    revision: (prev?.revision ?? 0) + 1,
+  }
 }
 
 export const noteKey = (scope: string, id: string): string => `${scope}\u0000${id}`
