@@ -87,6 +87,17 @@ describe('SurrealMemory.applyEvent', () => {
     await m.close()
   })
 
+  it('search survives a long query — term cap keeps the WHERE depth bounded', async () => {
+    const t = await createTestSurreal(); drops.push(t.drop)
+    const m = await SurrealMemory.open(t)
+    await m.applyEvent(written(1))
+    // pre-cap this threw SurrealDB's "Exceeded query recursion depth limit" (observed live
+    // from an agent's long descriptive query); post-cap it is a clean empty result
+    const spam = Array.from({ length: 40 }, (_, i) => `zz${i}`).join(' ')
+    expect(await m.search(spam)).toEqual([])
+    await m.close()
+  })
+
   it('search ranks field-weighted relevance above recency', async () => {
     const t = await createTestSurreal(); drops.push(t.drop)
     const m = await SurrealMemory.open(t)
