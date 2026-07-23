@@ -21,7 +21,7 @@ export class PostgresStore {
     const pool = new pg.Pool({ connectionString: url })
     const db = drizzle(pool)
     try {
-      await assertMigrated(db)
+      await assertMigrated(db, url)
     } catch (err) {
       await pool.end()
       throw err
