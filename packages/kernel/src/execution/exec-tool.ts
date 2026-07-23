@@ -81,6 +81,12 @@ export function execTool(opts: { workspaceDir: string; allowlist: string[] }): R
         child.stderr.setEncoding('utf8')
         child.stdout.on('data', d => { if (stdout.length < MAX_BYTES) stdout += d })
         child.stderr.on('data', d => { if (stderr.length < MAX_BYTES) stderr += d })
+        // a stream 'error' with no listener throws as an UNHANDLED error (e.g. EPIPE when we SIGKILL
+        // a child mid-write) — funnel it to finish so it can never crash the process; the 'close'
+        // handler still wins on the normal path via the `settled` guard.
+        const onStreamError = (e: Error): void => finish({ output: { error: errorMessage(e) }, isError: true })
+        child.stdout.on('error', onStreamError)
+        child.stderr.on('error', onStreamError)
         // enforceable timeout: SIGTERM, then SIGKILL after a grace — spawnSync's timeout only sent
         // SIGTERM, so a child ignoring it blocked past the timeout (indefinitely).
         const killTimer = setTimeout(() => {
