@@ -1,11 +1,8 @@
 import { createAnthropic } from '@ai-sdk/anthropic'
 import type { LanguageModel } from 'ai'
-import type { ModelCost, ModelProvider } from '@orc/contracts'
+import { isRecord, type ModelCost, type ModelProvider } from '@orc/contracts'
 import { cachingFetch } from './cache'
 import { loadOAuthToken, oauthFetch } from './oauth'
-
-// narrow unknown JSON to an indexable object at the fetch boundary — no cast (repo rule: parse, don't assert)
-const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null
 
 // per-MTok pricing, verified 2026-07-17 (platform.claude.com/docs/en/pricing) — override via .orc/config.json
 // cache rates: reads 0.1× input, 5m-TTL writes 1.25× input (platform.claude.com/docs pricing)

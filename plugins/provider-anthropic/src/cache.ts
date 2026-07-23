@@ -4,10 +4,9 @@
 // content block of the last message) makes each iteration a cache READ of the shared prefix
 // instead of full-price input. Anthropic allows 4 breakpoints; we use 2. Requests below the
 // model's minimum cacheable prefix are unaffected (the marker is ignored server-side).
-type MinimalFetch = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>
+import { isRecord } from '@orc/contracts'
 
-// narrow unknown JSON to an indexable object at the fetch boundary — no cast (repo rule: parse, don't assert)
-const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null
+type MinimalFetch = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>
 
 export function markCacheBreakpoints(json: Record<string, unknown>): void {
   const sys = json.system

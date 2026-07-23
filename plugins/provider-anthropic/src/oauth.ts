@@ -14,6 +14,7 @@
 import { readFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
+import { isRecord } from '@orc/contracts'
 
 export const CLAUDE_CODE_IDENTITY = "You are Claude Code, Anthropic's official CLI for Claude."
 const OAUTH_BETA = 'oauth-2025-04-20'
@@ -27,9 +28,6 @@ export const CRED_PATH = join(homedir(), '.claude', '.credentials.json')
 // TOCTOU guard: a token that expires between this check and the request lands as a mid-request
 // 401 — treat anything expiring within the buffer as already expired.
 const EXPIRY_BUFFER_MS = 60_000
-
-// narrow unknown JSON to an indexable object at the file boundary — no cast (repo rule: parse, don't assert)
-const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null
 
 // the slice of ~/.claude/.credentials.json's claudeAiOauth that gates a request
 type OAuthCred = { accessToken?: string; expiresAt?: number }
@@ -75,7 +73,11 @@ const isSystemBlock = (v: unknown): v is SystemBlock => isRecord(v) && v.type ==
 
 // The OAuth beta rejects requests whose first system block is not the Claude Code identity.
 // Normalise whatever the caller sent (nothing / string / block array) so that block leads.
-export function prependClaudeCodeIdentity(system: unknown): SystemBlock[] {
+// Returns unknown[], not SystemBlock[]: elements are never filtered or dereferenced by shape here
+// — the sole caller (oauthFetch, below) assigns the result straight to json.system and
+// JSON.stringifies it into the request body, so a SystemBlock[] return type would be an unchecked
+// lie for any API-shaped-but-non-SystemBlock element the caller originally passed through.
+export function prependClaudeCodeIdentity(system: unknown): unknown[] {
   const identity: SystemBlock = { type: 'text', text: CLAUDE_CODE_IDENTITY }
   if (system == null || system === '') return [identity]
   if (typeof system === 'string') return [identity, { type: 'text', text: system }]
