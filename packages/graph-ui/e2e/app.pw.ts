@@ -8,7 +8,7 @@ test('shell boots: chats, requests, live status', async ({ page }) => {
   await expect(page.locator('.statusbar')).toContainText('live', { timeout: 10_000 })
 })
 
-test('request click opens the inspector journey; view modes switch', async ({ page }) => {
+test('request click opens the inspector journey', async ({ page }) => {
   await page.goto('/')
   await page.locator('.navitem', { hasText: 'hello world request' }).click()
   await expect(page.locator('.inspector')).toBeVisible()
@@ -16,11 +16,7 @@ test('request click opens the inspector journey; view modes switch', async ({ pa
   await expect(page.locator('.inspector .move')).toContainText('your move')
   // deep link carries the selection
   expect(page.url()).toContain('tab=request')
-
-  await page.locator('.viewmodes .tab', { hasText: 'graph' }).click()
-  await expect(page.locator('.conv')).toBeHidden()
-  expect(page.url()).toContain('view=graph')
-  await page.locator('.viewmodes .tab', { hasText: 'split' }).click()
+  // split is the ONE layout (7616abb): the conversation pane is always present
   await expect(page.locator('.conv')).toBeVisible()
 })
 
