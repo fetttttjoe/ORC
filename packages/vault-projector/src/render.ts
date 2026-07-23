@@ -1,6 +1,7 @@
 import { z } from 'zod'
 import { EVENT_KIND, LINK_KIND, NOTE_KIND, OPERATION_STATUS, PAYLOAD_SCHEMAS, STEP_RUN_STATUS, TASK_STATUS, mermaidLabel, type EventRecord, type MemoryNote, type Plan, type TaskNode } from '@orc/contracts'
-import { fold, taskUsage, type State, type StepState } from '@orc/kernel'
+import { fold, stepUsage, taskUsage, type State, type StepState } from '@orc/kernel'
+import type { Usage } from '@orc/contracts'
 import { frontmatter } from './frontmatter'
 import { renderPlanFile } from './plan-md'
 
@@ -33,6 +34,23 @@ function mermaidDag(plan: Plan, steps: Map<string, StepState> | undefined): stri
 
 // the one mermaid escaper lives in contracts (guards) — every producing view shares it
 const label = mermaidLabel
+
+// nullable cost renders as a single placeholder — pinned in the render suite; consistent
+// between per-step rows and the totals row so the same events always yield the same bytes.
+const NO_COST = '—'
+const cost = (c: number | null): string => (c === null ? NO_COST : String(c))
+// per-step / totals row of the ## Usage table — numeric cells need no escaping
+const usageRow = (label: string, u: Usage): string =>
+  `| ${label} | ${u.inputTokens} | ${u.outputTokens} | ${u.cacheReadTokens ?? 0} | ${cost(u.costUSD)} |`
+
+// fold-derived per-step usage table: one row per plan step in stored order (never Map
+// iteration — that is what keeps the render byte-identical), plus a totals row from taskUsage.
+function usageTable(task: TaskNode, plan: Plan, state: State): string {
+  const header = '| Step | Input | Output | Cache Read | Cost USD |\n| --- | --- | --- | --- | --- |'
+  const rows = plan.steps.map(st => usageRow(st.id, stepUsage(state, task.id, st.id)))
+  const totals = usageRow('**Totals**', taskUsage(state, task.id))
+  return [header, ...rows, totals].join('\n')
+}
 
 // Plan topology plus live operation nodes: which effects ran, how many attempts, and
 // whether any node is still unresolved (started with no completion — the honest gap).
@@ -85,10 +103,10 @@ function renderTaskIndex(task: TaskNode, plan: Plan | undefined, steps: Map<stri
     ...(plan?.steps ?? []).map(s => `- [Session: ${s.id}](sessions/${s.id}.md)`),
   ].filter(Boolean).join('\n')
   const dag = plan ? mermaidDag(plan, steps) : '_no plan yet_'
-  const u = taskUsage(state, task.id)
+  const usage = plan ? usageTable(task, plan, state) : '_no plan yet_'
   return fm(
     { type: 'task', id: task.id, title: task.title, status: task.status, parent: task.parentId, depth: task.depth, budgetUSD: task.budgetUSD },
-    `# ${task.title}\n\n${task.spec || '_no spec_'}\n\n## Working graph\n\n${dag}\n\n## Artifacts\n\n${links}\n\n_tokens in/out: ${u.inputTokens}/${u.outputTokens}_`,
+    `# ${task.title}\n\n${task.spec || '_no spec_'}\n\n## Working graph\n\n${dag}\n\n## Artifacts\n\n${links}\n\n## Usage\n\n${usage}`,
   )
 }
 
