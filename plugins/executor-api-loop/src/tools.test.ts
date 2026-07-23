@@ -92,6 +92,13 @@ describe('fs tools', () => {
     const r = await executeTool(TOOL_NAME.fs_read, { path: 'ghost.txt' }, ws())
     expect(r.isError).toBe(true)
   })
+  it('read of a directory names the correction, not a raw errno', async () => {
+    const dir = ws()
+    await executeTool(TOOL_NAME.fs_write, { path: 'sub/f.txt', content: 'x' }, dir)
+    const r = await executeTool(TOOL_NAME.fs_read, { path: 'sub' }, dir)
+    expect(r.isError).toBe(true)
+    expect(r.output).toEqual({ error: "'sub' is a directory — use fs_list to see its entries" })
+  })
   it('malformed input is an error result', async () => {
     const r = await executeTool(TOOL_NAME.fs_write, { nope: true }, ws())
     expect(r.isError).toBe(true)

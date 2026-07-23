@@ -16,6 +16,10 @@ enum Tb { Note = 'note', Meta = 'meta', Link = 'link' }
 // shape (they belong to the summary, not to the authored note). Both are optional in the row
 // type so a note projected before the counter existed still selects without a rebuild.
 // literal-typed link kind, derived from the contract's LINK_KINDS — rows come back as LinkKind.
+// search-term cap: bounds the WHERE expression depth (see search()); 8 terms is far past the
+// point where AND-matching returns anything on a note corpus
+const MAX_SEARCH_TERMS = 8
+
 const kindType = t.union(LINK_KINDS.map(k => t.literal(k)))
 const noteKindType = t.union(NOTE_KINDS.map(k => t.literal(k)))
 
@@ -221,7 +225,10 @@ export class SurrealMemory {
     // substring match made every multi-word query miss unless the exact phrase appeared.
     // text fields: case-insensitive substring match; tags: membership on the lowercased
     // term, since tags are stored lowercase by convention here.
-    const terms = query.toLowerCase().split(/\s+/).filter(Boolean)
+    // Term count is CAPPED: each term adds ~5 nested binary nodes to the WHERE expression and
+    // SurrealDB rejects deep ASTs ("Exceeded query recursion depth limit"); under AND
+    // semantics extra terms only narrow, so the first MAX_SEARCH_TERMS carry the query.
+    const terms = query.toLowerCase().split(/\s+/).filter(Boolean).slice(0, MAX_SEARCH_TERMS)
     const rows = await this.db.select(Tb.Note)
       .where(n => terms.reduce((acc, q) => acc.and(
         n.title.lowercase().contains(q)

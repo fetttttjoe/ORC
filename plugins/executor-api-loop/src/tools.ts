@@ -94,7 +94,14 @@ export async function executeTool(
     switch (name) {
       case TOOL_NAME.fs_read: {
         const { path: p } = ReadInput.parse(input)
-        return { output: { content: readFileSync(resolveInWorkspace(workspaceDir, p), 'utf8') }, isError: false }
+        try {
+          return { output: { content: readFileSync(resolveInWorkspace(workspaceDir, p), 'utf8') }, isError: false }
+        } catch (err) {
+          // a raw EISDIR errno reads like a crash — name the correction instead
+          if (typeof err === 'object' && err !== null && 'code' in err && err.code === 'EISDIR')
+            return { output: { error: `'${p}' is a directory — use fs_list to see its entries` }, isError: true }
+          throw err
+        }
       }
       case TOOL_NAME.fs_write: {
         const { path: p, content } = WriteInput.parse(input)
