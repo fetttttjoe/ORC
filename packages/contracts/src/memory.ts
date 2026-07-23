@@ -4,6 +4,17 @@ import { z } from 'zod'
 import { EVENT_KIND, type EventRecord } from './events'
 
 export const MEMORY_ID_RE = /^[a-z0-9][a-z0-9-]*$/
+
+// Deterministic MEMORY_ID_RE-safe id from a human title. Quick capture keys notes by title,
+// so re-noting the same title UPDATES the note (memory_write is an upsert) instead of forking
+// near-duplicates — deliberate: capture is idempotent, disambiguation is renaming the title.
+export function slugId(title: string): string {
+  const s = title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 64).replace(/-+$/, '')
+  if (!MEMORY_ID_RE.test(s))
+    throw new Error(`cannot derive a note id from '${title}' — use latin letters/digits, or 'orc memory add --id <id>'`)
+  return s
+}
+
 export const MEMORY_LIMITS = {
   labelItems: 50,
   labelChars: 64,
@@ -170,6 +181,27 @@ export const MemoryNoteDraftInput = z.object({
 type DraftCoversBase = keyof typeof MemoryNoteBase.shape extends keyof typeof MemoryNoteDraftInput.shape ? true : never
 const draftCoversBase: DraftCoversBase = true
 void draftCoversBase
+
+// The HUMAN-authorable surface of a note draft — what the web UI and quick capture may write.
+// A .pick of MemoryNoteDraftInput, so every field keeps its single-source constraint. Least
+// authority: only fields a human editor actually authors are exposed — `links` is here because
+// the note editor writes manual connections (the vision's hand-wired synapse); `kind`/`categories`
+// and the execution-plumbing fields (scope, retention, sources, paths, rules, rationale,
+// uncertainty, zone, sourceRevision) stay with the agent tools and CLI flags that own them, and
+// widen later only WITH a consumer. Human authoring always targets the durable project scope —
+// the callee fixes it; an attacker-supplied `scope` key is stripped by the schema parse.
+export const NoteAuthoringDraft = MemoryNoteDraftInput.pick({
+  id: true, title: true, summary: true, body: true, tags: true, links: true,
+})
+export type NoteAuthoringDraft = z.input<typeof NoteAuthoringDraft>
+
+// Address of one note: an id within a scope. Omitted scope means the durable project scope —
+// the same defaulting MemoryStore.remove/get apply.
+export const NoteRef = z.object({
+  id: z.string().regex(MEMORY_ID_RE),
+  scope: z.string().regex(MEMORY_ID_RE).optional(),
+})
+export type NoteRef = z.infer<typeof NoteRef>
 
 // The stored/rendered note: input + provenance/lifecycle the projector derives from events.
 // `sources` is overridden with the stored shape — same citations, plus the retrieval time the

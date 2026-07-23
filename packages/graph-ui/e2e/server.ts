@@ -49,6 +49,8 @@ const actions: OrcActions = {
   cancel: unsupported('cancel'),
   annotate: unsupported('annotate'),
   revise: unsupported('revise'),
+  writeNote: unsupported('writeNote'),
+  deleteNote: unsupported('deleteNote'),
   renameProject: unsupported('renameProject'),
   newProject: unsupported('newProject'),
   purgeProject: unsupported('purgeProject'),

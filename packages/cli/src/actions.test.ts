@@ -65,6 +65,17 @@ describe('model validation at the action boundary', () => {
   })
 })
 
+describe('writeNote/deleteNote guards', () => {
+  it('refuse without a project context and refuse reserved ui-metadata ids', async () => {
+    const { kernel, actions, close } = await setup() // setup() wires a real plugin behind actions
+    await expect(actions.writeNote({ id: 'ui-project-name', title: 'x' })).rejects.toThrow(/reserved/)
+    await expect(actions.deleteNote('ui-project-dir')).rejects.toThrow(/reserved/)
+    const bare = buildOrcActions({ kernel, needPort: async () => stubPort }) // no plugin
+    await expect(bare.writeNote({ id: 'x', title: 'x' })).rejects.toThrow(/project context/)
+    await close()
+  })
+})
+
 describe('modelUniverse', () => {
   it('unions live ids with priced cost-table ids — aliases stay valid when the API lists dated ids', () => {
     expect(modelUniverse(['claude-haiku-4-5-20251001'], { 'claude-haiku-4-5': {}, '*': {} }))

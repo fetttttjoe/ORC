@@ -190,6 +190,37 @@ export function buildOrcActions(deps: {
       return { topic }
     },
 
+    async writeNote(note) {
+      if (!plugin) throw new Error('writing notes needs a project context')
+      if (note.id === PROJECT_NAME_NOTE_ID || note.id === PROJECT_DIR_NOTE_ID)
+        throw new Error(`'${note.id}' is a reserved ui-metadata note id`)
+      let memory: Awaited<ReturnType<typeof createMemory>> | undefined
+      try {
+        memory = await createMemory({ log: plugin.log, config: plugin.config })
+        const written = await memory.store.write(note, { source: 'cli' })
+        // event committed — the read model heals on the next drain if this catch-up fails
+        await memory.projector.catchUp().catch(() => {})
+        return { id: written.id, scope: written.scope }
+      } finally {
+        await memory?.close().catch(() => {})
+      }
+    },
+
+    async deleteNote(id, scope) {
+      if (!plugin) throw new Error('deleting notes needs a project context')
+      if (id === PROJECT_NAME_NOTE_ID || id === PROJECT_DIR_NOTE_ID)
+        throw new Error(`'${id}' is a reserved ui-metadata note id`)
+      let memory: Awaited<ReturnType<typeof createMemory>> | undefined
+      try {
+        memory = await createMemory({ log: plugin.log, config: plugin.config })
+        await memory.store.remove(id, scope, { source: 'cli' })
+        await memory.projector.catchUp().catch(() => {})
+        return { id }
+      } finally {
+        await memory?.close().catch(() => {})
+      }
+    },
+
     async renameProject(name) {
       if (!plugin) throw new Error('renaming needs a project context')
       await plugin.log.append(nameNote(name))
