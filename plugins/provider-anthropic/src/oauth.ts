@@ -28,6 +28,12 @@ export const CRED_PATH = join(homedir(), '.claude', '.credentials.json')
 // 401 — treat anything expiring within the buffer as already expired.
 const EXPIRY_BUFFER_MS = 60_000
 
+// narrow unknown JSON to an indexable object at the file boundary — no cast (repo rule: parse, don't assert)
+const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null
+
+// the slice of ~/.claude/.credentials.json's claudeAiOauth that gates a request
+type OAuthCred = { accessToken?: string; expiresAt?: number }
+
 export async function loadOAuthToken(now: number = Date.now(), credPath: string = CRED_PATH): Promise<string> {
   const fromEnv = process.env.CLAUDE_CODE_OAUTH_TOKEN
   if (fromEnv) return fromEnv
@@ -40,9 +46,16 @@ export async function loadOAuthToken(now: number = Date.now(), credPath: string 
       `Anthropic OAuth selected but no token found: log in with Claude Code or set CLAUDE_CODE_OAUTH_TOKEN (${credPath} unreadable).`,
     )
   }
-  let oauth: { accessToken?: string; expiresAt?: number } | undefined
+  let oauth: OAuthCred | undefined
   try {
-    oauth = (JSON.parse(raw) as { claudeAiOauth?: { accessToken?: string; expiresAt?: number } }).claudeAiOauth
+    const parsed: unknown = JSON.parse(raw)
+    const cred = isRecord(parsed) ? parsed.claudeAiOauth : undefined
+    if (isRecord(cred)) {
+      oauth = {
+        accessToken: typeof cred.accessToken === 'string' ? cred.accessToken : undefined,
+        expiresAt: typeof cred.expiresAt === 'number' ? cred.expiresAt : undefined,
+      }
+    }
   } catch {
     throw new Error(`Malformed JSON in ${credPath} — log in with Claude Code again.`)
   }
@@ -57,6 +70,9 @@ export async function loadOAuthToken(now: number = Date.now(), credPath: string 
 
 type SystemBlock = { type: 'text'; text: string }
 
+// an Anthropic system block, recognised by shape at the boundary — no cast (repo rule: parse, don't assert)
+const isSystemBlock = (v: unknown): v is SystemBlock => isRecord(v) && v.type === 'text' && typeof v.text === 'string'
+
 // The OAuth beta rejects requests whose first system block is not the Claude Code identity.
 // Normalise whatever the caller sent (nothing / string / block array) so that block leads.
 export function prependClaudeCodeIdentity(system: unknown): SystemBlock[] {
@@ -64,9 +80,9 @@ export function prependClaudeCodeIdentity(system: unknown): SystemBlock[] {
   if (system == null || system === '') return [identity]
   if (typeof system === 'string') return [identity, { type: 'text', text: system }]
   if (Array.isArray(system)) {
-    const first = system[0] as SystemBlock | undefined
-    if (first?.type === 'text' && first.text === CLAUDE_CODE_IDENTITY) return system as SystemBlock[]
-    return [identity, ...(system as SystemBlock[])]
+    const first: unknown = system[0]
+    if (isSystemBlock(first) && first.text === CLAUDE_CODE_IDENTITY) return system
+    return [identity, ...system]
   }
   return [identity]
 }
@@ -87,10 +103,12 @@ export function oauthFetch(getToken: () => Promise<string>, baseFetch: MinimalFe
     let body = init?.body
     if (typeof body === 'string') {
       try {
-        const json = JSON.parse(body) as { system?: unknown }
-        json.system = prependClaudeCodeIdentity(json.system)
-        body = JSON.stringify(json)
-        headers.delete('content-length') // body length changed — let the runtime recompute it
+        const json: unknown = JSON.parse(body)
+        if (isRecord(json)) {
+          json.system = prependClaudeCodeIdentity(json.system)
+          body = JSON.stringify(json)
+          headers.delete('content-length') // body length changed — let the runtime recompute it
+        }
       } catch {
         // non-JSON body (shouldn't happen for the Messages API): leave untouched
       }

@@ -4,6 +4,9 @@ import type { ModelCost, ModelProvider } from '@orc/contracts'
 import { cachingFetch } from './cache'
 import { loadOAuthToken, oauthFetch } from './oauth'
 
+// narrow unknown JSON to an indexable object at the fetch boundary — no cast (repo rule: parse, don't assert)
+const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null
+
 // per-MTok pricing, verified 2026-07-17 (platform.claude.com/docs/en/pricing) — override via .orc/config.json
 // cache rates: reads 0.1× input, 5m-TTL writes 1.25× input (platform.claude.com/docs pricing)
 const COSTS: Record<string, ModelCost> = {
@@ -35,8 +38,9 @@ export async function listAnthropicModels(fetchImpl: (input: RequestInfo | URL, 
     }
     const res = await fetchImpl('https://api.anthropic.com/v1/models?limit=100', { headers })
     if (!res.ok) return Object.keys(COSTS)
-    const body = await res.json() as { data?: Array<{ id?: string }> }
-    const ids = (body.data ?? []).map(m => m.id).filter((id): id is string => typeof id === 'string')
+    const body: unknown = await res.json()
+    const data: unknown[] = isRecord(body) && Array.isArray(body.data) ? body.data : []
+    const ids = data.map(m => (isRecord(m) ? m.id : undefined)).filter((id): id is string => typeof id === 'string')
     return ids.length > 0 ? ids : Object.keys(COSTS)
   } catch {
     return Object.keys(COSTS)
