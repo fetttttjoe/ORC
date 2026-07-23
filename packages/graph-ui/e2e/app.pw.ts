@@ -1,6 +1,13 @@
 import { expect, test } from '@playwright/test'
 import { z } from 'zod'
 
+// Named response contracts — the asserted subsets of the page's API types (page/api.ts
+// Session / GraphSnapshot). Runtime-parsed because e2e reads raw HTTP, never the typed
+// api layer; shapes are declared HERE, never inline at a call site.
+const SessionResponse = z.object({ projectId: z.string() })
+const GraphNodeView = z.object({ label: z.string() })
+const GraphResponse = z.object({ nodes: z.array(GraphNodeView) })
+
 test('shell boots: chats, requests, live status', async ({ page }) => {
   await page.goto('/')
   await expect(page.locator('.brand')).toContainText('orc')
@@ -66,10 +73,9 @@ test('note authoring: create, link, edit, delete from the page', async ({ page }
   await dlg.locator('label.field input').fill('e2e-authored-note')
   await dlg.locator('.dlg-buttons button', { hasText: 'delete' }).click()
   await expect(page.locator('.inspector')).toBeHidden({ timeout: 10_000 })
-  const { projectId } = z.object({ projectId: z.string() }).parse(await (await page.request.get('/api/session')).json())
+  const { projectId } = SessionResponse.parse(await (await page.request.get('/api/session')).json())
   await expect.poll(async () => {
-    const raw = await (await page.request.get(`/api/graph?project=${projectId}`)).json()
-    const g = z.object({ nodes: z.array(z.object({ label: z.string() })) }).parse(raw)
+    const g = GraphResponse.parse(await (await page.request.get(`/api/graph?project=${projectId}`)).json())
     return g.nodes.some(n => n.label === 'E2e Authored Note')
   }, { timeout: 10_000 }).toBe(false)
 })
