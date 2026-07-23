@@ -3,6 +3,7 @@ import pg from 'pg'
 import { and, asc, count, desc, eq, gt, inArray, sql } from 'drizzle-orm'
 import { errorMessage, EventInput, PAYLOAD_SCHEMAS, type EventKind, type EventRecord } from '@orc/contracts'
 import { events } from '../schema'
+import { KERNEL_ERROR_CODE, KernelError } from '../errors'
 import type { Redactor } from '../redact'
 import { PostgresStore, type Tx } from './postgres'
 
@@ -72,7 +73,7 @@ const makeOps = (db: Queryable, ctx: LogContext): EventLogOps => {
           && record.stepId === values.stepId && record.runToken === values.runToken
           && isDeepStrictEqual(record.payload, values.payload)
           && isDeepStrictEqual(record.usage, values.usage)
-        if (!same) throw new Error(`idempotency key '${key}' reused with different event data`)
+        if (!same) throw new KernelError(KERNEL_ERROR_CODE.idempotency_conflict, `idempotency key '${key}' reused with different event data`)
         return record
       }
       await db.execute(sql`select pg_notify(${NOTIFY_CHANNEL}, ${String(row.seq)})`)

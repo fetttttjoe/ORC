@@ -1,5 +1,5 @@
 import { EVENT_KIND, foldLiveNotes, MemoryNoteInput, MemoryScope, noteKey, type MemoryAuthor, type MemoryFilter, type MemoryNote, type MemoryStore, type NoteSummary } from '@orc/contracts'
-import type { EventLog } from '@orc/kernel'
+import { KERNEL_ERROR_CODE, KernelError, type EventLog } from '@orc/kernel'
 import type { SurrealMemory } from './surreal'
 
 // The single writer (spec RM5). Writes are event-first appends — like every append they
@@ -41,7 +41,7 @@ export function createMemoryStore(opts: { log: EventLog; surreal: SurrealMemory;
           // restart) is still the SAME tool call: the first committed write stands, this one
           // must not fail the surrounding operation.
           const conflicted = writeOpts?.idempotencyKey
-            && err instanceof Error && err.message.includes('reused with different event data')
+            && err instanceof KernelError && err.code === KERNEL_ERROR_CODE.idempotency_conflict
           if (!conflicted) throw err
         }
         return merged
