@@ -220,15 +220,22 @@ export function fold(events: EventRecord[]): State {
       case EVENT_KIND.operation_started:
       case EVENT_KIND.operation_completed:
       case EVENT_KIND.operation_failed: {
-        const id = OperationIdOnly.parse(e.payload).operationId
-        state.operations.set(id, applyOperationEvent(state.operations.get(id), e))
+        // honor fold's own contract uniformly: a malformed/orphaned operation transition skips its
+        // case rather than throwing out of every consumer (status, vault, ui, the run-init checkpoint).
+        // foldOperations/rebuild stays strict below — surfacing a poison event loudly is intended there.
+        const id = OperationIdOnly.safeParse(e.payload)
+        if (!id.success) break
+        try {
+          state.operations.set(id.data.operationId, applyOperationEvent(state.operations.get(id.data.operationId), e))
+        } catch { /* orphaned/malformed transition — skip, do not wedge */ }
         break // journal only — operation events never drive step-status logic
       }
       case EVENT_KIND.artifact_produced: {
         if (!e.taskId) break
-        const p = ArtifactProducedPayload.parse(e.payload)
+        const p = ArtifactProducedPayload.safeParse(e.payload)
+        if (!p.success) break
         const list = state.artifacts.get(e.taskId) ?? []
-        list.push({ ...p, stepId: e.stepId, runToken: e.runToken, seq: e.seq })
+        list.push({ ...p.data, stepId: e.stepId, runToken: e.runToken, seq: e.seq })
         state.artifacts.set(e.taskId, list)
         break
       }

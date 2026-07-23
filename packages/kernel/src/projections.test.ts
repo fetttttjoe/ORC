@@ -298,4 +298,25 @@ describe('fold — execution kinds', () => {
     expect(unresolved?.status).toBe('started')
     expect(unresolved?.finishedSeq).toBeNull()
   })
+
+  it('fold is total: one poison operation/artifact event skips its case, never throws (contract: never wedge on history)', () => {
+    const good = 'step:t1:s1:a1:model:1'
+    const op = (seq: number, kind: EventRecord['kind'], payload: Record<string, unknown>): EventRecord => ({
+      seq, projectId: 'p1', idempotencyKey: null, taskId: 't1', stepId: 's1', runToken: rt('s1'), kind, payload, usage: null, ts: `T${seq}`,
+    })
+    // an orphaned completion (no started node) and a malformed artifact payload would previously
+    // throw out of fold and wedge status/vault/ui/replay for the whole project on one bad event.
+    let state!: ReturnType<typeof fold>
+    expect(() => {
+      state = fold([
+        op(1, 'operation_completed', { operationId: 'orphan', attempt: 1, after: {} }), // no started node
+        op(2, 'operation_started', { operationId: good, attempt: 1, operationKind: 'model', name: 'fake/m', before: null }),
+        exEvt(3, 'artifact_produced', { nope: true }), // malformed artifact payload
+        exEvt(4, 'artifact_produced', { path: 'ok.md', sha256: 'ab'.repeat(32), size: 3 }),
+      ])
+    }).not.toThrow()
+    expect(state.operations.get(good)?.status).toBe('started') // the good event still applied
+    expect(state.operations.has('orphan')).toBe(false)         // the poison one skipped
+    expect(state.artifacts.get('t1')?.map(a => a.path)).toEqual(['ok.md']) // only the valid receipt
+  })
 })
