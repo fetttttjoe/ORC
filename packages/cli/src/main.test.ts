@@ -133,6 +133,23 @@ describe('orc CLI', () => {
     await log.close()
   })
 
+  it('replay --at below the task range explains that sequences are global', async () => {
+    const db = await createTestDb()
+    dbs.push(db)
+    const { kernel, log } = await openKernel(db.url, { projectId: TEST_PROJECT_ID })
+    const t = await kernel.createTask({ title: 'audit me', spec: '' })
+    const events = await kernel.eventsFor(t.id)
+    const first = events[0]!.seq
+    const errors: string[] = []
+    spyOn(console, 'error').mockImplementation((...a: unknown[]) => { errors.push(a.join(' ')) })
+    const prevExit = process.exitCode
+    await overrideExits(buildProgram(kernel)).parseAsync(['replay', t.id, '--at', String(first - 1)], { from: 'user' })
+    expect(errors.join('\n')).toContain('sequences are GLOBAL')
+    expect(errors.join('\n')).toContain(`${first}..${events.at(-1)!.seq}`)
+    process.exitCode = prevExit // the out-of-range replay sets exitCode 1 by design — don't leak it to the test process
+    await log.close()
+  })
+
   it('log --json prints the full stored envelope', async () => {
     const db = await createTestDb()
     dbs.push(db)

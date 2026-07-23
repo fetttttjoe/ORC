@@ -303,11 +303,18 @@ export function buildProgram(
   program
     .command('replay <taskId>')
     .description('read-only audit replay: folded state at an event sequence (default: latest)')
-    .option('--at <seq>', 'replay up to and including this sequence', parseNonNegativeInteger)
+    .option('--at <seq>', "replay up to and including this GLOBAL event sequence — sequences span the whole project log, not one task; see 'orc log <taskId>' for the task's range", parseNonNegativeInteger)
     .action(async (taskId: string, opts: { at?: number }) => {
       await requireTask(taskId)
+      const all = await kernel.eventsFor(taskId)
       const at = opts.at ?? Number.POSITIVE_INFINITY
-      const events = (await kernel.eventsFor(taskId)).filter(e => e.seq <= at)
+      const events = all.filter(e => e.seq <= at)
+      if (events.length === 0 && all.length > 0) {
+        // an empty fold here is a footgun, not data: --at is below this task's first event
+        console.error(`no events for '${taskId}' at or before seq ${opts.at} — sequences are GLOBAL across the project log; this task's events span ${all[0]!.seq}..${all.at(-1)!.seq} (orc log ${taskId})`)
+        process.exitCode = 1
+        return
+      }
       const state = fold(events)
       console.log(JSON.stringify(
         state,
