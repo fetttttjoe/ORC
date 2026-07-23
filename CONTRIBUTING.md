@@ -844,3 +844,18 @@ project author may also license it as part of the project under the
 commercial terms in [COMMERCIAL-LICENSE.md](COMMERCIAL-LICENSE.md) — this is
 what keeps the dual-licensing model workable. You keep the copyright to your
 contribution.
+
+## Code style (binding)
+
+- **Named contracts only.** Every interface, type, and zod schema that describes a real
+  shape gets a top-level, documented declaration — never an anonymous inline object type
+  in a signature, never `z.object({...}).parse(...)` at a call site. (Tiny route
+  argument-envelopes wrapping already-named ids are the one established exception.)
+- **No `as` casts.** Parse or guard at the boundary (zod schema / typed predicate);
+  `as const` and `satisfies` are fine.
+- **Matched values through const maps / z.enum** — never scattered string literals
+  (docs/EXTENDING.md invariant 6).
+- **One schema, one source.** A shape validated in two places imports one declaration;
+  web routes validate with the exact schema the action consumes.
+- **Deliberate shortcuts carry a `ponytail:` comment** naming the ceiling and upgrade path.
+- **Commits:** conventional `type(scope): subject`, at most one body line, no AI mention.
