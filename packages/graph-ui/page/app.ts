@@ -328,6 +328,9 @@ function watch(fromSeq: number): void {
     onLive: () => setStatus(true, `live · seq ${seq}`),
     onDown: () => setStatus(false, 'reconnecting…'),
     onEnvelope: (env, envSeq) => {
+      // seq regression = the log this tab knew was reset out-of-band (CLI purge, dev wipe);
+      // patching on top of stale state would duplicate the world — resync from a fresh snapshot
+      if (envSeq && envSeq < seq) { void loadProject(); return }
       seq = envSeq || seq
       if (env.patch) {
       for (const n of [...env.patch.addNodes, ...env.patch.updateNodes]) nodes.set(n.id, n)
