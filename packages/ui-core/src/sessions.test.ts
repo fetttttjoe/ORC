@@ -1,9 +1,16 @@
 import { afterAll, describe, expect, it } from 'bun:test'
+import { z } from 'zod'
 import { EVENT_KIND } from '@orc/contracts'
 import { Kernel, openStorage } from '@orc/kernel'
 import { createTestDb, TEST_PROJECT_ID } from '@orc/kernel/test-helpers'
 import { noteNodeId } from './graph'
 import { createProjectSessions, type SessionUpdate } from './sessions'
+
+// nodeDetail returns an opaque view (Promise<unknown | null>); these name the subsets each
+// assertion pins, parsed at the read boundary instead of cast.
+const BacklinksView = z.object({ backlinks: z.array(z.object({ id: z.string() })) })
+const TaskDetailView = z.object({ task: z.object({ title: z.string() }) })
+const NoteHitsView = z.object({ hits: z.number() })
 
 const dbs: Array<{ drop: () => Promise<void> }> = []
 afterAll(async () => { await Promise.all(dbs.map(d => d.drop())) }, 30_000)
@@ -111,7 +118,7 @@ describe('ProjectSessions', () => {
       taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_written,
       payload: { note: { id: 'pointer', title: 'pointer', links: [{ id: 'target' }] }, author: { source: 'cli' } },
     })
-    const d = await sessions.nodeDetail(TEST_PROJECT_ID, noteNodeId('project', 'target')) as { backlinks: Array<{ id: string }> }
+    const d = BacklinksView.parse(await sessions.nodeDetail(TEST_PROJECT_ID, noteNodeId('project', 'target')))
     expect(d.backlinks.map(b => b.id)).toEqual(['pointer'])
     await sessions.close(); await storage.close()
   })
@@ -123,9 +130,9 @@ describe('ProjectSessions', () => {
       taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_accessed,
       payload: { id: 'detail-note', scope: 'project', mode: 'read', author: { source: 'cli' } },
     })
-    const task = await sessions.nodeDetail(TEST_PROJECT_ID, taskId) as { task: { title: string } }
+    const task = TaskDetailView.parse(await sessions.nodeDetail(TEST_PROJECT_ID, taskId))
     expect(task.task.title).toBe('seed task')
-    const note = await sessions.nodeDetail(TEST_PROJECT_ID, noteNodeId('project', 'detail-note')) as { hits: number }
+    const note = NoteHitsView.parse(await sessions.nodeDetail(TEST_PROJECT_ID, noteNodeId('project', 'detail-note')))
     expect(note.hits).toBe(1)
     expect(await sessions.nodeDetail(TEST_PROJECT_ID, 'nope')).toBeNull()
     await sessions.close(); await storage.close()

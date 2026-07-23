@@ -5,6 +5,26 @@ import type { OrcActions } from './actions'
 import type { ProjectSessions } from './sessions'
 import { asResolvedTools, buildCopilotTools, copilotSystemPrompt } from './copilot'
 
+// Honest stubs for the ui-core ports this suite drives: every member throws unless overridden,
+// so an unexercised call surfaces loudly instead of a cast pretending the object is complete.
+// ponytail: mirrors the e2e fixture's unsupported() helper; promote to a shared test-helper if a
+// third suite needs it.
+const unsupported = (name: string) => async (): Promise<never> => { throw new Error(`${name} not available in this test`) }
+const sessionsStub = (over: Partial<ProjectSessions> = {}): ProjectSessions => ({
+  projects: unsupported('projects'), snapshot: unsupported('snapshot'), subscribe: unsupported('subscribe'),
+  since: unsupported('since'), nodeDetail: unsupported('nodeDetail'), modelCatalog: unsupported('modelCatalog'),
+  reset: unsupported('reset'), transcript: unsupported('transcript'), taskPlans: unsupported('taskPlans'),
+  planNotes: unsupported('planNotes'), log: unsupported('log'), close: unsupported('close'), ...over,
+})
+const actionsStub = (over: Partial<OrcActions> = {}): OrcActions => ({
+  newTask: unsupported('newTask'), propose: unsupported('propose'), edit: unsupported('edit'),
+  approve: unsupported('approve'), run: unsupported('run'), reply: unsupported('reply'),
+  retry: unsupported('retry'), annotate: unsupported('annotate'), revise: unsupported('revise'),
+  writeNote: unsupported('writeNote'), deleteNote: unsupported('deleteNote'),
+  renameProject: unsupported('renameProject'), newProject: unsupported('newProject'),
+  cancel: unsupported('cancel'), purgeProject: unsupported('purgeProject'), deleteProject: unsupported('deleteProject'), ...over,
+})
+
 // minimal scripted model (doGenerate shape verified in plugins/executor-api-loop/src/test-model.ts)
 function scriptModel(turns: Array<{ text?: string; toolCalls?: Array<{ toolCallId: string; toolName: string; input: unknown }> }>) {
   let i = 0
@@ -27,7 +47,7 @@ function scriptModel(turns: Array<{ text?: string; toolCalls?: Array<{ toolCallI
   })
 }
 
-const stubSessions = {
+const stubSessions = sessionsStub({
   snapshot: async () => ({
     seq: 1,
     graph: { nodes: [{ id: 't1', type: 'task', label: 'build it', detail: 'draft' }], links: [] },
@@ -36,7 +56,7 @@ const stubSessions = {
   transcript: async () => [],
   planNotes: async () => ({ notes: [], mermaid: null }),
   log: async () => [],
-} as unknown as ProjectSessions
+})
 
 describe('copilot tools', () => {
   it('read tools ground the model; the loop runs tool → answer', async () => {
@@ -60,15 +80,15 @@ describe('copilot tools', () => {
   it('asResolvedTools reshapes the copilot toolset for door #2: JSON schemas + {output,isError}', async () => {
     const tools = asResolvedTools(buildCopilotTools({ sessions: stubSessions, actions: null, projectId: 'p1' }))
     const status = tools.find(t => t.name === 'project_status')!
-    expect((status.inputSchema as { type?: string }).type).toBe('object')
-    expect((status.inputSchema as { $schema?: string }).$schema).toBeUndefined() // stripped for MCP
+    expect(status.inputSchema.type).toBe('object')
+    expect(status.inputSchema.$schema).toBeUndefined() // stripped for MCP
     const r = await status.execute({}, undefined)
     expect(r.isError).toBe(false)
     expect(r.output).toHaveProperty('tasks')
   })
 
   it('the human gate is structural: no approve tool even with actions wired', () => {
-    const acting = buildCopilotTools({ sessions: stubSessions, actions: {} as never, projectId: 'p1' })
+    const acting = buildCopilotTools({ sessions: stubSessions, actions: actionsStub(), projectId: 'p1' })
     expect(Object.keys(acting)).toContain('run')
     expect(Object.keys(acting)).toContain('reply')
     expect(Object.keys(acting)).not.toContain('approve')
@@ -97,9 +117,9 @@ describe('copilot tools', () => {
 
   it('mutating tools call OrcActions; absent entirely without actions', async () => {
     const calls: unknown[] = []
-    const actions = {
-      newTask: async (input: unknown) => { calls.push(input); return { taskId: 't-new' } },
-    } as unknown as OrcActions
+    const actions = actionsStub({
+      newTask: async input => { calls.push(input); return { taskId: 't-new' } },
+    })
     const tools = buildCopilotTools({ sessions: stubSessions, actions, projectId: 'p1' })
     expect(Object.keys(tools)).toContain('new_request')
     expect(Object.keys(buildCopilotTools({ sessions: stubSessions, actions: null, projectId: 'p1' }))).not.toContain('new_request')
