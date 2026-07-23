@@ -97,6 +97,32 @@ describe('api-loop executor', () => {
     expect(toolDrafts).toHaveLength(2)
   })
 
+  it('zone write-fence holds at the loop seam: a write outside step.zone is refused, inside succeeds', async () => {
+    // pins the ONE seam that connects the fence — loop.ts passing `zone: ctx.step.zone` to executeTool.
+    // Every other link (assertInZone, executeTool, plan-note zone) is tested in isolation, so dropping
+    // this wiring would leave the whole suite green while parallel siblings lose mechanical isolation.
+    const captured: EventDraft[] = []
+    const workspaceDir = mkdtempSync(path.join(tmpdir(), 'orc-zone-'))
+    const model = scriptModel([
+      { toolCalls: [
+        { toolCallId: 'c1', toolName: 'fs_write', input: { path: 'src/x.ts', content: 'nope' } }, // outside docs/**
+        { toolCallId: 'c2', toolName: 'fs_write', input: { path: 'docs/ok.md', content: 'yes' } }, // inside the zone
+      ] },
+      { toolCalls: [{ toolCallId: 'c3', toolName: 'signal', input: { outcome: 'success', summary: 'done' } }] },
+    ])
+    await drain(apiLoopExecutor().startTurn(
+      ctx(model, captured, { workspaceDir, step: stepFixture({ instructions: 'x', maxIterations: 3, zone: ['docs/**'] }) }),
+    ))
+    const results = captured.filter(d => d.kind === EVENT_KIND.tool_result).map(d => d.payload as { toolCallId: string; isError: boolean; output: unknown })
+    const outside = results.find(r => r.toolCallId === 'c1')!
+    const inside = results.find(r => r.toolCallId === 'c2')!
+    expect(outside.isError).toBe(true)
+    expect(JSON.stringify(outside.output)).toMatch(/zone|fence/i) // named fence error, not a generic failure
+    expect(inside.isError).toBe(false)
+    expect(() => readFileSync(path.join(workspaceDir, 'src/x.ts'), 'utf8')).toThrow() // the out-of-zone write never happened
+    expect(readFileSync(path.join(workspaceDir, 'docs/ok.md'), 'utf8')).toBe('yes')
+  })
+
   it('prompts the five knowledge-protocol rules without injecting any note bodies', async () => {
     const captured: EventDraft[] = []
     const model = scriptModel([
