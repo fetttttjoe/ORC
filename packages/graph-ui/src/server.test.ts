@@ -59,6 +59,8 @@ describe('graph-ui web adapter', () => {
     expect(d.task.title).toBe('seed task')
     expect((await fetch(`${base}/api/node?project=${TEST_PROJECT_ID}&id=nope`)).status).toBe(404)
     expect((await fetch(`${base}/api/bogus`)).status).toBe(404)
+    // DNS-rebinding defense: a request carrying a non-loopback Host is refused before routing
+    expect((await fetch(`${base}/api/projects`, { headers: { host: 'evil.example.com' } })).status).toBe(403)
     await ui.stop(); await storage.close()
   })
 

@@ -130,6 +130,16 @@ describe('loadConfig', () => {
     // an empty entry would make the exec prefix check (`command.startsWith(' ')`) admit any spaced command
     expect(() => loadConfig(tmpProject({ execAllowlist: ['bun test', ''] }))).toThrow()
   })
+  it('seeds redactEnv with MCP $NAME secret refs so consented secrets get value-redacted', () => {
+    const dir = tmpProject({
+      redactEnv: ['MANUAL_SECRET'],
+      mcpServers: { notes: { command: 'notes-mcp', env: { AUTH: '$NOTES_CREDENTIAL', PLAIN: 'literal' } } },
+    })
+    const c = loadConfig(dir)
+    expect(c.redactEnv).toContain('MANUAL_SECRET')     // operator list preserved
+    expect(c.redactEnv).toContain('NOTES_CREDENTIAL')  // $NAME ref harvested
+    expect(c.redactEnv).not.toContain('PLAIN')         // literal env value is not a secret ref
+  })
   it('maxDepth defaults to 3 and approvalPolicy defaults to manual/empty', () => {
     const c = loadConfig(mkdtempSync(path.join(tmpdir(), 'orc-')))
     expect(c.maxDepth).toBe(3)
