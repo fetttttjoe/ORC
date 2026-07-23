@@ -1,9 +1,10 @@
 import { RecordId, Surreal } from 'surrealdb'
 import { edge, orm, table, t } from 'surqlize'
 import {
+  activation, activationBoost, DEFAULT_HALF_LIFE_DAYS,
   deriveNoteProvenance, EDGE_DIRECTION, EVENT_KIND, LINK_KINDS, NOTE_KINDS, MemoryScope,
   MemoryAccessedPayload, MemoryDeletedPayload, MemoryNote, MemoryWrittenPayload,
-  type EventRecord, type LinkKind, type MemoryFilter, type NeighborResult, type NoteSummary,
+  type EventRecord, type NeighborQuery, type MemoryFilter, type NeighborResult, type NoteSummary,
 } from '@orc/contracts'
 import { rankNeighbors, type Edge } from './rank'
 
@@ -184,7 +185,7 @@ export class SurrealMemory {
     })
   }
 
-  async neighbors(seed: string, opts: { kinds?: LinkKind[]; depth?: number; scope?: string } = {}): Promise<NeighborResult[]> {
+  async neighbors(seed: string, opts: NeighborQuery = {}): Promise<NeighborResult[]> {
     const scope = opts.scope ?? MemoryScope.project
     // All in-scope edges, ranked in TS — fine for a hand-authored graph; a frontier-scoped
     // fetch is a later optimisation (spec §4.2). Both directions (spec RG4): "what supersedes
@@ -197,13 +198,25 @@ export class SurrealMemory {
       { from: r.toId, to: r.fromId, kind: r.kind, confidence: r.confidence, direction: EDGE_DIRECTION.in },
     ])
     const ranked = rankNeighbors(edges, [seed], { depth: opts.depth, kinds: opts.kinds })
-    // join title/summary from the note docs (cheap: small result set)
+    const halfLife = opts.halfLifeDays ?? DEFAULT_HALF_LIFE_DAYS
+    const now = opts.now ?? new Date().toISOString()
+    // join title/summary AND the activation inputs from the raw row (hits/lastAccessedAt are
+    // Tier-2 fields toNote strips) — then re-weight: structure × activationBoost. Boost-only,
+    // so a graph with zero accesses ranks exactly as before.
+    // ponytail: rankNeighbors' cap applies pre-boost — a hot node outside the structural top-20
+    // cannot boost in; widen the cap into an opts pass-through if that ever bites.
     const out: NeighborResult[] = []
     for (const n of ranked) {
-      const doc = await this.get(n.id, scope)
-      if (doc) out.push({ id: n.id, title: doc.title, summary: doc.summary, via: n.via, depth: n.depth, score: n.score, direction: n.direction })
+      const row = (await this.db.select(Tb.Note, key(scope, n.id)))[0]
+      if (!row) continue
+      const act = activation({ hits: row.hits ?? 0, lastAccessedAt: row.lastAccessedAt ?? null }, now, halfLife)
+      out.push({
+        id: n.id, title: row.title, summary: row.summary, via: n.via, depth: n.depth,
+        score: n.score * activationBoost(act), direction: n.direction, activation: act,
+      })
     }
-    return out
+    // same total order rule as rankNeighbors, now over the boosted score
+    return out.sort((a, b) => b.score - a.score || a.depth - b.depth || a.id.localeCompare(b.id))
   }
 
   async get(id: string, scope: string = MemoryScope.project): Promise<MemoryNote | null> {

@@ -35,7 +35,7 @@ export async function createMemory(opts: { log: EventLog; config: ProjectConfig 
   close: () => Promise<void>
 }> {
   const knowledge = await openKnowledge(opts.config)
-  const store = createMemoryStore({ log: opts.log, surreal: knowledge, sourceRevision: await gitRevision(opts.config.dir) })
+  const store = createMemoryStore({ log: opts.log, surreal: knowledge, sourceRevision: await gitRevision(opts.config.dir), halfLifeDays: opts.config.memoryHalfLifeDays })
   const projector = createMemoryProjector({ log: opts.log, surreal: knowledge, vaultDir: opts.config.vaultDir })
   return {
     store, projector,
