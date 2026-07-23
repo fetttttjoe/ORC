@@ -238,8 +238,22 @@ export const NeighborResult = z.object({
   id: z.string(), title: z.string(), summary: z.string(),
   via: LinkKind, depth: z.number().int().positive(), score: z.number(),
   direction: EdgeDirection,
+  // read-time activation of this neighbor (0 = never accessed) — the score already includes
+  // its boost; exposed so callers/UI can tell structure from heat
+  activation: z.number().nonnegative(),
 })
 export type NeighborResult = z.infer<typeof NeighborResult>
+
+// Options for a neighbors() traversal. halfLifeDays tunes the activation boost (the store
+// feeds it from config.memoryHalfLifeDays); `now` exists for deterministic tests —
+// production callers omit it and get the wall clock.
+export interface NeighborQuery {
+  kinds?: LinkKind[]
+  depth?: number
+  scope?: string
+  halfLifeDays?: number
+  now?: string
+}
 
 export interface MemoryFilter { scope?: string; category?: string; tag?: string }
 
@@ -282,7 +296,7 @@ export interface MemoryStore {
   get(id: string, scope?: string): Promise<MemoryNote | null>
   list(filter?: MemoryFilter): Promise<NoteSummary[]>
   search(query: string, filter?: MemoryFilter): Promise<NoteSummary[]>
-  neighbors(seed: string, opts?: { kinds?: LinkKind[]; depth?: number; scope?: string }): Promise<NeighborResult[]>
+  neighbors(seed: string, opts?: NeighborQuery): Promise<NeighborResult[]>
   // called by the pull call sites (tools, CLI) rather than inside get(), so a traversal that
   // reads N notes internally records one access against its seed, not N against its neighbours.
   // idempotencyKey: like write(), a tool-driven access runs inside an at-least-once operation — a

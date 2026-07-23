@@ -668,7 +668,7 @@ export function buildProgram(
         // empty prints a sentinel (like ls/search's `_no notes_`) so a human isn't shown zero bytes.
         if (ranked.length === 0) { console.log('_no neighbors_'); return }
         // direction disambiguates asymmetric kinds: '→ supersedes' = seed supersedes n; '← supersedes' = n supersedes seed
-        for (const n of ranked) console.log(`${n.id}\t${n.direction === EDGE_DIRECTION.out ? '→' : '←'} ${n.via}\t${n.depth}\t${n.score.toFixed(2)}\t${n.title}`)
+        for (const n of ranked) console.log(`${n.id}\t${n.direction === EDGE_DIRECTION.out ? '→' : '←'} ${n.via}\t${n.depth}\t${n.score.toFixed(2)}\tact ${n.activation.toFixed(2)}\t${n.title}`)
       } finally {
         await memory.close()
       }

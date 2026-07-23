@@ -1,6 +1,6 @@
 import { afterAll, describe, expect, it } from 'bun:test'
 import { RecordId, Surreal } from 'surrealdb'
-import { MEMORY_ACCESS, type EventRecord, type MemoryAccessMode, type MemoryAuthor } from '@orc/contracts'
+import { EVENT_KIND, MEMORY_ACCESS, type EventKind, type EventRecord, type MemoryAccessMode, type MemoryAuthor } from '@orc/contracts'
 import { SurrealMemory } from './surreal'
 import { eventFixture } from '@orc/contracts/fixtures'
 import { createTestSurreal } from './test-helpers'
@@ -279,6 +279,29 @@ describe('SurrealMemory.applyEvent', () => {
     expect(await m.applyEvent(accessed(1, 'ghost'))).toBe(true) // cursor still advances
     expect(await m.get('ghost', 'project')).toBeNull()
     expect(await m.allNotes()).toEqual([])
+    await m.close()
+  })
+
+  it('re-ranks equal structural neighbors by activation: the hot note wins, and activation is exposed', async () => {
+    const t = await createTestSurreal()
+    drops.push(t.drop)
+    const m = await SurrealMemory.open(t)
+    const ts = '2026-07-01T00:00:00.000Z'
+    let seq = 0
+    const apply = (kind: EventKind, payload: Record<string, unknown>) =>
+      m.applyEvent(eventFixture({ seq: ++seq, ts, kind, payload }))
+    const note = (id: string, links: Array<{ id: string; kind: 'relates_to' }> = []) =>
+      apply(EVENT_KIND.memory_written, { note: { id, scope: 'project', title: id, links }, author: { source: 'cli' } })
+    // seed → b and seed → c with the SAME kind: identical structural score
+    await note('act-b')
+    await note('act-c')
+    await note('act-seed', [{ id: 'act-b', kind: 'relates_to' }, { id: 'act-c', kind: 'relates_to' }])
+    for (let i = 0; i < 5; i++)
+      await apply(EVENT_KIND.memory_accessed, { id: 'act-c', scope: 'project', mode: 'read', author: { source: 'cli' } })
+    const ranked = await m.neighbors('act-seed', { now: ts })
+    expect(ranked.map(n => n.id)[0]).toBe('act-c') // hot beats cold at equal structure
+    expect(ranked.find(n => n.id === 'act-c')!.activation).toBeGreaterThan(0)
+    expect(ranked.find(n => n.id === 'act-b')!.activation).toBe(0)
     await m.close()
   })
 })

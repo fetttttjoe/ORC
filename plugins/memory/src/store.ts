@@ -5,7 +5,7 @@ import type { SurrealMemory } from './surreal'
 // The single writer (spec RM5). Writes are event-first appends — like every append they
 // serialize on the per-project advisory lock; the projector applies to SurrealDB. Reads
 // hit SurrealDB directly.
-export function createMemoryStore(opts: { log: EventLog; surreal: SurrealMemory; sourceRevision?: string | null }): MemoryStore {
+export function createMemoryStore(opts: { log: EventLog; surreal: SurrealMemory; sourceRevision?: string | null; halfLifeDays?: number }): MemoryStore {
   const { log, surreal } = opts
   return {
     async write(input, author, writeOpts) {
@@ -78,6 +78,6 @@ export function createMemoryStore(opts: { log: EventLog; surreal: SurrealMemory;
     },
     list: (filter?: MemoryFilter): Promise<NoteSummary[]> => surreal.list(filter),
     search: (query: string, filter?: MemoryFilter): Promise<NoteSummary[]> => surreal.search(query, filter),
-    neighbors: (seed, opts) => surreal.neighbors(seed, opts),
+    neighbors: (seed, o) => surreal.neighbors(seed, { ...o, halfLifeDays: o?.halfLifeDays ?? opts.halfLifeDays }),
   }
 }

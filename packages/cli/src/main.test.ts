@@ -578,7 +578,8 @@ describe('orc CLI', () => {
     expect(cols[1]).toMatch(/^[→←] depends_on$/) // direction-tagged link kind
     expect(cols[2]).toBe('1')               // depth (1 hop from the seed)
     expect(cols[3]).toMatch(/^\d+\.\d{2}$/) // score, 2 decimals
-    expect(cols[4]).toBe('nb-hop1')         // title
+    expect(cols[4]).toMatch(/^act \d+\.\d\d$/) // activation column (2 decimals)
+    expect(cols[5]).toBe('nb-hop1')         // title
 
     // Acceptance #3: a hit records exactly one memory_accessed(mode:neighbors) against the SEED.
     const afterHit = await accessCount()
