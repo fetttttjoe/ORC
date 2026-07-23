@@ -104,6 +104,18 @@ orc approve "$task_id"
 orc run "$task_id" --cwd .
 ```
 
+### Rebuilding the knowledge graph in parallel
+
+`docs/kb-build-parallel.plan.json` is a committed plan draft: ten area scouts map the
+codebase concurrently (wave 1), one assembler writes the hub + cross-cuts and verifies
+connectivity (wave 2). Use after a purge or a large refactor:
+
+```bash
+task_id=$(orc new "Rebuild the knowledge graph" --spec "map every area, then assemble the hub")
+orc propose "$task_id" --file docs/kb-build-parallel.plan.json
+orc approve "$task_id" && orc run "$task_id" --cwd .
+```
+
 ### Driving orc from another agent (door #2, MCP)
 
 orc is usable from two doors: humans work the web UI (`orc graph`); external agents —

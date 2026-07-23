@@ -1,4 +1,4 @@
-import { foldLiveNotes, noteKey, type EventRecord } from '@orc/contracts'
+import { foldLiveNotes, noteKey, STEP_RUN_STATUS, type EventRecord } from '@orc/contracts'
 import type { State } from '@orc/kernel'
 
 export interface GraphNode {
@@ -55,7 +55,12 @@ export function buildGraph(state: State, events: Array<Pick<EventRecord, 'kind' 
     const plan = plans?.approvedVersion != null ? plans.versions.find(v => v.version === plans.approvedVersion) : undefined
     for (const s of plan?.steps ?? []) {
       const run = state.steps.get(t.id)?.get(s.id)
-      nodes.push({ id: stepNodeId(t.id, s.id), type: 'step', label: s.title, detail: run?.status ?? 'pending' })
+      // single-step templates copy the task title onto the step — two same-named nodes read
+      // as a duplicate insert; the step names itself. Running steps carry their live loop
+      // progress so the graph shows plan iteration, not just that something works.
+      const base = s.title === t.title ? `${s.title} · ${s.id}` : s.title
+      const label = run?.status === STEP_RUN_STATUS.running ? `${base} · ${run.iterations}/${s.maxIterations}` : base
+      nodes.push({ id: stepNodeId(t.id, s.id), type: 'step', label, detail: run?.status ?? 'pending' })
       links.push({ source: t.id, target: stepNodeId(t.id, s.id), type: EDGE.plan })
       for (const dep of s.dependsOn) links.push({ source: stepNodeId(t.id, dep), target: stepNodeId(t.id, s.id), type: EDGE.depends })
     }

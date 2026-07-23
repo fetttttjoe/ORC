@@ -57,6 +57,22 @@ describe('buildGraph', () => {
     await log.close()
   })
 
+  it('step labels: twin-title steps name themselves; running steps carry live iteration', async () => {
+    const log = await freshLog()
+    const k = new Kernel(log)
+    // single-step template shape: step title === task title → two same-named nodes otherwise
+    const t = await k.createTask({ title: 'build the thing', spec: 'spec' })
+    await k.proposePlan(t.id, draftFixture([stepFixture({ title: 'build the thing' })]))
+    await k.approvePlan(t.id)
+    const pending = buildGraph(fold(await log.all()), await log.all())
+    expect(pending.nodes.find(n => n.id === stepNodeId(t.id, 's1'))?.label).toBe('build the thing · s1')
+    await log.append({ taskId: t.id, stepId: 's1', runToken: 'r1', kind: EVENT_KIND.step_started, payload: { stepId: 's1', runToken: 'r1', attempt: 1 } })
+    await log.append({ taskId: t.id, stepId: 's1', runToken: 'r1', kind: EVENT_KIND.agent_call, payload: { stepId: 's1', runToken: 'r1', iteration: 3, request: null, response: null } })
+    const running = buildGraph(fold(await log.all()), await log.all())
+    expect(running.nodes.find(n => n.id === stepNodeId(t.id, 's1'))?.label).toBe('build the thing · s1 · 3/5')
+    await log.close()
+  })
+
   it('plan-scope notes wire into project-scope knowledge (cross-scope view fallback)', async () => {
     const log = await freshLog()
     await writeNote(log, 'arch-overview') // project scope only: the knowledge hub
