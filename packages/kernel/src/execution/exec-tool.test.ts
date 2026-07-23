@@ -2,7 +2,11 @@ import { describe, expect, it } from 'bun:test'
 import { mkdtempSync, realpathSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
+import { z } from 'zod'
 import { execTool } from './exec-tool'
+
+// the success-shape of an exec result — parse (never cast) the tool output the assertions read
+const ExecOut = z.object({ exitCode: z.number(), stdout: z.string(), stderr: z.string() })
 
 const ws = () => mkdtempSync(path.join(tmpdir(), 'orc-exec-'))
 const tool = (allowlist: string[], dir = ws()) => execTool({ workspaceDir: dir, allowlist })[0]!
@@ -16,7 +20,7 @@ describe('exec tool', () => {
     const dir = ws()
     const r = await tool(['pwd'], dir).execute({ command: 'pwd' })
     expect(r.isError).toBe(false)
-    const out = r.output as { exitCode: number; stdout: string; stderr: string }
+    const out = ExecOut.parse(r.output)
     expect(out.exitCode).toBe(0)
     expect(out.stdout.trim()).toBe(realpathSync(dir))
     expect(out.stderr).toBe('')
@@ -25,7 +29,7 @@ describe('exec tool', () => {
   it('a non-zero exit is a result, not a tool error — the model must read it, not retry blindly', async () => {
     const r = await tool(['ls']).execute({ command: 'ls no-such-file-here' })
     expect(r.isError).toBe(false)
-    const out = r.output as { exitCode: number; stderr: string }
+    const out = ExecOut.parse(r.output)
     expect(out.exitCode).not.toBe(0)
     expect(out.stderr).toContain('no-such-file-here')
   })
@@ -46,13 +50,13 @@ describe('exec tool', () => {
     const r = await tool(['echo']).execute({ command: 'echo hi; rm -rf /' })
     expect(r.isError).toBe(false)
     // echo printed the tokens literally; nothing was chained or executed
-    expect((r.output as { stdout: string }).stdout.trim()).toBe('hi; rm -rf /')
+    expect(ExecOut.parse(r.output).stdout.trim()).toBe('hi; rm -rf /')
   })
 
   it('clips a huge stream head+tail with an omission marker', async () => {
     const r = await tool(['seq']).execute({ command: 'seq 1 100000' })
     expect(r.isError).toBe(false)
-    const out = (r.output as { stdout: string }).stdout
+    const out = ExecOut.parse(r.output).stdout
     expect(out).toContain('chars omitted')
     expect(out.startsWith('1\n')).toBe(true) // head survives
     expect(out.trimEnd().endsWith('100000')).toBe(true) // tail survives

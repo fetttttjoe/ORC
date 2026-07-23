@@ -5,6 +5,7 @@ import path from 'node:path'
 import type { Checkpoint, EventDraft, ExecutorContext, OperationCheckpoint, OperationSpec, ResolvedTool, SplitResult, UnifiedEvent } from '@orc/contracts'
 import { EVENT_KIND } from '@orc/contracts'
 import { stepFixture } from '@orc/contracts/fixtures'
+import { z } from 'zod'
 import type { LanguageModel } from 'ai'
 import { apiLoopExecutor } from './loop'
 
@@ -113,7 +114,8 @@ describe('api-loop executor', () => {
     await drain(apiLoopExecutor().startTurn(
       ctx(model, captured, { workspaceDir, step: stepFixture({ instructions: 'x', maxIterations: 3, zone: ['docs/**'] }) }),
     ))
-    const results = captured.filter(d => d.kind === EVENT_KIND.tool_result).map(d => d.payload as { toolCallId: string; isError: boolean; output: unknown })
+    const ToolResultView = z.object({ toolCallId: z.string(), isError: z.boolean(), output: z.unknown() })
+    const results = captured.filter(d => d.kind === EVENT_KIND.tool_result).map(d => ToolResultView.parse(d.payload))
     const outside = results.find(r => r.toolCallId === 'c1')!
     const inside = results.find(r => r.toolCallId === 'c2')!
     expect(outside.isError).toBe(true)
