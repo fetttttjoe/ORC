@@ -230,56 +230,66 @@ export async function createDbosPort(opts: {
       // splitIds already handed to a previous gate in THIS workflow. Rebuilds correctly on
       // replay because each gate:targets checkpoint replays its recorded value in order.
       const consumed = new Set<string>()
-      while (true) {
-        const { value: ev, done } = await gen.next(resume)
-        resume = undefined
-        if (done) break
-        if (ev.type === 'signal') signal = ev.signal
-        if (ev.type === 'error') error = { class: ev.class, message: ev.message }
-        if (ev.type === 'gate') {
-          // Resolve targets in a checkpoint (log read = non-deterministic). Default = every
-          // split proposed by THIS step attempt that this workflow has not already consumed;
-          // an explicit request is intersected with that set so an unknown or foreign id —
-          // which can never receive a message and would wedge recv forever (no gate timeout in
-          // v1) — is dropped. Empty intersection resumes with [] immediately.
-          //
-          // `resolved` is NOT the consumed marker: the router appends split_resolved and THEN
-          // sends, so a split that resolved before the parent reached its gate is precisely the
-          // one with a message waiting. Filtering on it dropped the child's summary and notes —
-          // the whole payload of the split protocol — whenever a child outran its parent.
-          const targets = await checkpoint(`gate:targets:${ev.toolCallId}`, async () => {
-            const state = await foldState(args.taskId)
-            const own = [...state.splits.values()]
-              .filter(s => s.stepId === args.stepId && s.runToken === runToken && !consumed.has(s.splitId))
-              .map(s => s.splitId)
-            if (ev.splitIds.length === 0) return own
-            const ownSet = new Set(own)
-            return ev.splitIds.filter(id => ownSet.has(id))
-          })
-          for (const id of targets) consumed.add(id)
-          const results: SplitResult[] = []
-          for (const id of targets) {
-            // workflow context — recv is legal here and ONLY here (spec D9).
-            // Long poll, loop forever: no gate timeout in v1; recv replays from DBOS's message log.
-            // The timeout is NOT a responsiveness knob — every recv records a durable row even on
-            // expiry, and recovery replays each one sequentially, so a short poll bills a parked
-            // gate by wall-clock time (60s => ~1,440 rows overnight). Cancellation is unaffected:
-            // sysdb.recv re-checks it every dbPollingIntervalEventMs (10s) regardless.
-            let msg: SplitResult | null = null
-            while (msg === null) msg = await DBOS.recv<SplitResult>(`split:${id}`, GATE_POLL_SECONDS)
-            results.push(msg)
+      // Drive the executor generator inside try/finally so its OWN finally (releaseWriteClaims)
+      // runs even when the PORT throws while the generator is suspended at a gate (a cancelled
+      // recv, a checkpoint failure). An abandoned async generator's finally never runs, so the
+      // step's write-claims would leak and poison later retries in a long-lived port process
+      // (graph-ui server, mcp serve). gen.return() resumes it at the yield to run that finally.
+      try {
+        while (true) {
+          const { value: ev, done } = await gen.next(resume)
+          resume = undefined
+          if (done) break
+          if (ev.type === 'signal') signal = ev.signal
+          if (ev.type === 'error') error = { class: ev.class, message: ev.message }
+          if (ev.type === 'gate') {
+            // Resolve targets in a checkpoint (log read = non-deterministic). Default = every
+            // split proposed by THIS step attempt that this workflow has not already consumed;
+            // an explicit request is intersected with that set so an unknown or foreign id —
+            // which can never receive a message and would wedge recv forever (no gate timeout in
+            // v1) — is dropped. Empty intersection resumes with [] immediately.
+            //
+            // `resolved` is NOT the consumed marker: the router appends split_resolved and THEN
+            // sends, so a split that resolved before the parent reached its gate is precisely the
+            // one with a message waiting. Filtering on it dropped the child's summary and notes —
+            // the whole payload of the split protocol — whenever a child outran its parent.
+            const targets = await checkpoint(`gate:targets:${ev.toolCallId}`, async () => {
+              const state = await foldState(args.taskId)
+              const own = [...state.splits.values()]
+                .filter(s => s.stepId === args.stepId && s.runToken === runToken && !consumed.has(s.splitId))
+                .map(s => s.splitId)
+              if (ev.splitIds.length === 0) return own
+              const ownSet = new Set(own)
+              return ev.splitIds.filter(id => ownSet.has(id))
+            })
+            for (const id of targets) consumed.add(id)
+            const results: SplitResult[] = []
+            for (const id of targets) {
+              // workflow context — recv is legal here and ONLY here (spec D9).
+              // Long poll, loop forever: no gate timeout in v1; recv replays from DBOS's message log.
+              // The timeout is NOT a responsiveness knob — every recv records a durable row even on
+              // expiry, and recovery replays each one sequentially, so a short poll bills a parked
+              // gate by wall-clock time (60s => ~1,440 rows overnight). Cancellation is unaffected:
+              // sysdb.recv re-checks it every dbPollingIntervalEventMs (10s) regardless.
+              let msg: SplitResult | null = null
+              while (msg === null) msg = await DBOS.recv<SplitResult>(`split:${id}`, GATE_POLL_SECONDS)
+              results.push(msg)
+            }
+            resume = results
           }
-          resume = results
+          if (ev.type === 'feedback') {
+            await checkpoint(`feedback:req:${ev.toolCallId}`, async () => 0, () =>
+              [{ kind: EVENT_KIND.feedback_requested, payload: { question: ev.question, topic: ev.topic } }])
+            // ponytail: long poll, loop forever — no gate timeout in v1 (mirrors the split gate); cancel is the escape
+            let msg: string | null = null
+            while (msg === null) msg = await DBOS.recv<string>(`feedback:${ev.topic}`, GATE_POLL_SECONDS)
+            resume = msg
+            continue
+          }
         }
-        if (ev.type === 'feedback') {
-          await checkpoint(`feedback:req:${ev.toolCallId}`, async () => 0, () =>
-            [{ kind: EVENT_KIND.feedback_requested, payload: { question: ev.question, topic: ev.topic } }])
-          // ponytail: long poll, loop forever — no gate timeout in v1 (mirrors the split gate); cancel is the escape
-          let msg: string | null = null
-          while (msg === null) msg = await DBOS.recv<string>(`feedback:${ev.topic}`, GATE_POLL_SECONDS)
-          resume = msg
-          continue
-        }
+      } finally {
+        // resume the generator at its suspension point so loop.ts's finally releases write-claims
+        await gen.return(undefined).catch(() => {})
       }
 
       if (signal?.outcome === SIGNAL_OUTCOME.success) {
