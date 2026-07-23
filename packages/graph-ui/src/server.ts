@@ -205,6 +205,13 @@ export function startGraphUi(opts: {
   }
 
   const api = async (req: Request): Promise<Response> => {
+    // Host-header allowlist: a DNS-rebinding page reaches this loopback server carrying its OWN
+    // hostname in Host (attacker.com rebound to 127.0.0.1), so the browser treats it as same-origin
+    // and BOTH the localhost bind and the CSRF token are defeated — it can read /api/session and
+    // then drive run/deleteProject/copilot. Only a genuinely-loopback Host is the real UI.
+    const hostname = (req.headers.get('host') ?? '').replace(/:\d+$/, '').replace(/^\[|\]$/g, '')
+    if (hostname !== '127.0.0.1' && hostname !== 'localhost' && hostname !== '::1')
+      return new Response('forbidden host', { status: 403 })
     const u = new URL(req.url)
     if (req.method === 'POST' && u.pathname === '/api/copilot') return copilot(req)
     if (req.method === 'POST' && u.pathname.startsWith('/api/actions/'))

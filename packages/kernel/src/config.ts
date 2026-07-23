@@ -76,6 +76,20 @@ export const projectSuffix = (id: string): string => id.replaceAll('-', '')
 export const projectDatabaseName = (base: string, id: string): string =>
   `${base.slice(0, 30)}_${projectSuffix(id)}`
 
+// Env values written as "$NAME" in mcpServers pull a secret from orc's own environment and hand it
+// verbatim to a third-party server (mcp-client's resolveEnv). Those exact secret VALUES must be
+// redacted from the canonical event log even though their NAMES rarely match the _KEY/_TOKEN/...
+// suffix heuristic — the operator consented to the server RECEIVING the secret, not to it landing
+// in the log if a hostile/buggy/injected server echoes it back in a tool result. Seeded into
+// redactEnv so the redactor value-redacts every consented MCP secret automatically.
+export function mcpSecretEnvNames(mcpServers: Record<string, { env?: Record<string, string> }>): string[] {
+  const names = new Set<string>()
+  for (const cfg of Object.values(mcpServers))
+    for (const v of Object.values(cfg.env ?? {}))
+      if (typeof v === 'string' && v.startsWith('$')) names.add(v.slice(1))
+  return [...names]
+}
+
 export function deriveSystemUrl(databaseUrl: string, projectId: string): string {
   const url = new URL(databaseUrl)
   const base = url.pathname.slice(1)
@@ -138,6 +152,8 @@ export function loadConfig(explicitDir?: string): OrcConfig {
     )
   return {
     ...parsed.data,
+    // consented MCP secrets ($NAME refs) join the operator's redactEnv so their values never reach the log
+    redactEnv: [...new Set([...parsed.data.redactEnv, ...mcpSecretEnvNames(parsed.data.mcpServers)])],
     dir,
     skillsDir: parsed.data.skillsDir ?? path.join(parsed.data.vaultDir, 'skills'),
     appVersion: APP_VERSION,
