@@ -119,7 +119,13 @@ export class SurrealMemory {
       const cursor = (await tx.select(Tb.Meta, 'cursor'))[0]?.seq ?? 0
       if (e.seq <= cursor) return false
       if (e.kind === EVENT_KIND.memory_written) {
-        const { note, author } = MemoryWrittenPayload.parse(e.payload)
+        // skip-and-advance: an unparseable/legacy payload costs this ONE note revision, never the
+        // whole read model. Strict .parse used to abort drainFrom at this seq and re-hit it on every
+        // reconcile AND every rebuild(), permanently wedging memory — the log is immutable, so the
+        // wedge could never be operated away. The cursor advances at the end regardless.
+        const parsed = MemoryWrittenPayload.safeParse(e.payload)
+        if (!parsed.success) { console.warn(`[memory] skipping unparseable memory_written at seq ${e.seq}: ${parsed.error.message}`); await tx.upsert(Tb.Meta, 'cursor').set({ seq: e.seq }); return true }
+        const { note, author } = parsed.data
         const k = key(note.scope, note.id)
         // read-then-write: createdAt/By + hits/lastAccessedAt preserved; updated/rev advance
         const ex = (await tx.select(Tb.Note, k))[0]
@@ -152,7 +158,9 @@ export class SurrealMemory {
             ...(l.confidence !== undefined && { confidence: l.confidence }),
           })
       } else if (e.kind === EVENT_KIND.memory_accessed) {
-        const p = MemoryAccessedPayload.parse(e.payload)
+        const parsed = MemoryAccessedPayload.safeParse(e.payload)
+        if (!parsed.success) { console.warn(`[memory] skipping unparseable memory_accessed at seq ${e.seq}: ${parsed.error.message}`); await tx.upsert(Tb.Meta, 'cursor').set({ seq: e.seq }); return true }
+        const p = parsed.data
         const k = key(p.scope, p.id)
         // read-then-write, not a blind upsert: an access whose note was never projected (or was
         // since deleted) must not conjure a row carrying nothing but a counter. lastAccessedAt is
@@ -160,7 +168,9 @@ export class SurrealMemory {
         const ex = (await tx.select(Tb.Note, k))[0]
         if (ex) await tx.upsert(Tb.Note, k).set({ hits: (ex.hits ?? 0) + 1, lastAccessedAt: e.ts })
       } else if (e.kind === EVENT_KIND.memory_deleted) {
-        const p = MemoryDeletedPayload.parse(e.payload)
+        const parsed = MemoryDeletedPayload.safeParse(e.payload)
+        if (!parsed.success) { console.warn(`[memory] skipping unparseable memory_deleted at seq ${e.seq}: ${parsed.error.message}`); await tx.upsert(Tb.Meta, 'cursor').set({ seq: e.seq }); return true }
+        const p = parsed.data
         await tx.delete(Tb.Note, key(p.scope, p.id))
         // drop the note's edges in both directions with it
         await tx.delete(Tb.Link).where(l => l.fromId.eq(p.id).or(l.toId.eq(p.id)).and(l.scope.eq(p.scope)))
