@@ -216,10 +216,20 @@ export async function createDbosPort(opts: {
         operation: (spec, fn, toEvents) =>
           operation(spec, fn, toEvents ? r => toEvents(r).map(d => priceDraft(d, provider, modelId)) : undefined),
         budgetRemainingUSD: async () => {
-          if (init.budgetUSD === null) return null
-          // ponytail: whole-log fold — subtree usage spans child tasks (spec D8), byTask is not enough
-          const spent = subtreeUsage(fold(await log.all()), args.taskId).costUSD ?? 0
-          return init.budgetUSD - spent
+          // Enforce at the point spend happens, across the WHOLE ancestor chain — not just this
+          // task's own budget. Grants are clamped at propose time but never reserved, so N sibling
+          // splits proposed before any spend each saw ~$0 used and each got the full remaining
+          // budget; without an ancestor check they could together spend N× the parent's envelope.
+          // min over ancestors makes a fleet of children share the parent's budget by construction.
+          const state = fold(await log.all())
+          let remaining: number | null = null
+          for (let id: string | undefined = args.taskId; id !== undefined; id = state.tasks.get(id)?.parentId ?? undefined) {
+            const t = state.tasks.get(id)
+            if (!t || t.budgetUSD === null) continue
+            const r = t.budgetUSD - (subtreeUsage(state, id).costUSD ?? 0)
+            remaining = remaining === null ? r : Math.min(remaining, r)
+          }
+          return remaining
         },
       }
 
