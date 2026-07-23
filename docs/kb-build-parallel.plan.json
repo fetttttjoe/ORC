@@ -1,0 +1,73 @@
+{
+  "strategyRef": "file:kb-build-parallel",
+  "costEstimateUSD": null,
+  "steps": [
+    {
+      "id": "map-contracts", "role": "scout", "title": "Map packages/contracts",
+      "instructions": "Author ONE memory note via memory_write: id area-contracts, kind architecture_current, categories [subsystem]. Subject: packages/contracts — the seam layer. Read the source first (fs_list, then fs_read the files you claim about). Title ≤60 chars naming the thing; 2-sentence standalone summary; bullet-fact body ≤1200 chars with exact file paths and function names; links: depends_on for every area this one imports from, chosen ONLY among [area-contracts, area-kernel, area-storage, area-execution, area-memory, area-executor, area-providers, area-cli, area-ui, area-vault], derived from package.json workspace deps and actual imports. End the body with one line: Verified: <files read line-by-line> / skimmed: <files only listed>. Write exactly this one note, modify no repository files, then signal success with a one-line summary naming the note id.",
+      "executorRef": "api-loop", "modelRef": "anthropic/claude-sonnet-5", "skillRefs": [], "toolRefs": [],
+      "isolation": "local", "zone": [], "maxIterations": 15, "dependsOn": []
+    },
+    {
+      "id": "map-kernel", "role": "scout", "title": "Map kernel core",
+      "instructions": "Author ONE memory note via memory_write: id area-kernel, kind architecture_current, categories [subsystem]. Subject: packages/kernel/src core — kernel.ts task/plan lifecycle, projections.ts fold, plugins/ host+trust+skills, config.ts (EXCLUDE storage/ and execution/ subtrees — sibling steps own those). Same note contract as every area step: read before claiming; title ≤60; 2-sentence summary; bullet-fact body ≤1200 chars with exact paths+functions; depends_on links only among the ten area-* ids, from real imports; end body with 'Verified: <read line-by-line> / skimmed: <listed>'. One note, no repo modifications, signal success with a one-line summary.",
+      "executorRef": "api-loop", "modelRef": "anthropic/claude-sonnet-5", "skillRefs": [], "toolRefs": [],
+      "isolation": "local", "zone": [], "maxIterations": 15, "dependsOn": []
+    },
+    {
+      "id": "map-storage", "role": "scout", "title": "Map kernel storage",
+      "instructions": "Author ONE memory note via memory_write: id area-storage, kind architecture_current, categories [subsystem]. Subject: packages/kernel/src/storage (postgres.ts, event-log.ts, operation-journal.ts, migrate.ts, system-db.ts) plus kernel/src/redact.ts and drizzle migrations. Same note contract as every area step: read before claiming; title ≤60; 2-sentence summary; bullet-fact body ≤1200 chars with exact paths+functions; depends_on links only among the ten area-* ids, from real imports; end body with 'Verified: <read line-by-line> / skimmed: <listed>'. One note, no repo modifications, signal success with a one-line summary.",
+      "executorRef": "api-loop", "modelRef": "anthropic/claude-sonnet-5", "skillRefs": [], "toolRefs": [],
+      "isolation": "local", "zone": [], "maxIterations": 15, "dependsOn": []
+    },
+    {
+      "id": "map-execution", "role": "scout", "title": "Map kernel execution",
+      "instructions": "Author ONE memory note via memory_write: id area-execution, kind architecture_current, categories [subsystem]. Subject: packages/kernel/src/execution — DBOS durable port, wave scheduler, operation journaling seams, signal router, exec tool, strategies/. Same note contract as every area step: read before claiming; title ≤60; 2-sentence summary; bullet-fact body ≤1200 chars with exact paths+functions; depends_on links only among the ten area-* ids, from real imports; end body with 'Verified: <read line-by-line> / skimmed: <listed>'. One note, no repo modifications, signal success with a one-line summary.",
+      "executorRef": "api-loop", "modelRef": "anthropic/claude-sonnet-5", "skillRefs": [], "toolRefs": [],
+      "isolation": "local", "zone": [], "maxIterations": 15, "dependsOn": []
+    },
+    {
+      "id": "map-memory", "role": "scout", "title": "Map memory plugin",
+      "instructions": "Author ONE memory note via memory_write: id area-memory, kind architecture_current, categories [subsystem]. Subject: plugins/memory — event-first SurrealDB knowledge-graph projection, store gateway, rank/budget, agent tools, cancel-time sweep. Same note contract as every area step: read before claiming; title ≤60; 2-sentence summary; bullet-fact body ≤1200 chars with exact paths+functions; depends_on links only among the ten area-* ids, from real imports; end body with 'Verified: <read line-by-line> / skimmed: <listed>'. One note, no repo modifications, signal success with a one-line summary.",
+      "executorRef": "api-loop", "modelRef": "anthropic/claude-sonnet-5", "skillRefs": [], "toolRefs": [],
+      "isolation": "local", "zone": [], "maxIterations": 15, "dependsOn": []
+    },
+    {
+      "id": "map-executor", "role": "scout", "title": "Map executor plugin",
+      "instructions": "Author ONE memory note via memory_write: id area-executor, kind architecture_current, categories [subsystem]. Subject: plugins/executor-api-loop — the model⇄tool agent loop, built-in fs/signal/ask_human tools, zone write-fence enforcement, write claims, retry classification. Same note contract as every area step: read before claiming; title ≤60; 2-sentence summary; bullet-fact body ≤1200 chars with exact paths+functions; depends_on links only among the ten area-* ids, from real imports; end body with 'Verified: <read line-by-line> / skimmed: <listed>'. One note, no repo modifications, signal success with a one-line summary.",
+      "executorRef": "api-loop", "modelRef": "anthropic/claude-sonnet-5", "skillRefs": [], "toolRefs": [],
+      "isolation": "local", "zone": [], "maxIterations": 15, "dependsOn": []
+    },
+    {
+      "id": "map-providers", "role": "scout", "title": "Map provider + mcp-client plugins",
+      "instructions": "Author ONE memory note via memory_write: id area-providers, kind architecture_current, categories [subsystem]. Subject: plugins/provider-anthropic|openai|ollama (thin ModelProvider adapters, cost tables, auth) and plugins/mcp-client (T1 tool servers). Same note contract as every area step: read before claiming; title ≤60; 2-sentence summary; bullet-fact body ≤1200 chars with exact paths+functions; depends_on links only among the ten area-* ids, from real imports; end body with 'Verified: <read line-by-line> / skimmed: <listed>'. One note, no repo modifications, signal success with a one-line summary.",
+      "executorRef": "api-loop", "modelRef": "anthropic/claude-sonnet-5", "skillRefs": [], "toolRefs": [],
+      "isolation": "local", "zone": [], "maxIterations": 15, "dependsOn": []
+    },
+    {
+      "id": "map-cli", "role": "scout", "title": "Map cli package",
+      "instructions": "Author ONE memory note via memory_write: id area-cli, kind architecture_current, categories [subsystem]. Subject: packages/cli — commander wiring, buildOrcActions shared mutation layer, runtime bootstrap, mcp serve (door #2). Same note contract as every area step: read before claiming; title ≤60; 2-sentence summary; bullet-fact body ≤1200 chars with exact paths+functions; depends_on links only among the ten area-* ids, from real imports; end body with 'Verified: <read line-by-line> / skimmed: <listed>'. One note, no repo modifications, signal success with a one-line summary.",
+      "executorRef": "api-loop", "modelRef": "anthropic/claude-sonnet-5", "skillRefs": [], "toolRefs": [],
+      "isolation": "local", "zone": [], "maxIterations": 15, "dependsOn": []
+    },
+    {
+      "id": "map-ui", "role": "scout", "title": "Map ui-core + graph-ui",
+      "instructions": "Author ONE memory note via memory_write: id area-ui, kind architecture_current, categories [subsystem]. Subject: packages/ui-core (transport-free sessions/graph/diagram/copilot/palette) and packages/graph-ui (server adapter + browser page: sigma renderer, status-style live markers, conversation cards, seq-regression resync). Same note contract as every area step: read before claiming; title ≤60; 2-sentence summary; bullet-fact body ≤1200 chars with exact paths+functions; depends_on links only among the ten area-* ids, from real imports; end body with 'Verified: <read line-by-line> / skimmed: <listed>'. One note, no repo modifications, signal success with a one-line summary.",
+      "executorRef": "api-loop", "modelRef": "anthropic/claude-sonnet-5", "skillRefs": [], "toolRefs": [],
+      "isolation": "local", "zone": [], "maxIterations": 15, "dependsOn": []
+    },
+    {
+      "id": "map-vault", "role": "scout", "title": "Map vault-projector",
+      "instructions": "Author ONE memory note via memory_write: id area-vault, kind architecture_current, categories [subsystem]. Subject: packages/vault-projector — deterministic markdown/mermaid projection of the event log (task index, execution, lineage, memory index, usage table). Same note contract as every area step: read before claiming; title ≤60; 2-sentence summary; bullet-fact body ≤1200 chars with exact paths+functions; depends_on links only among the ten area-* ids, from real imports; end body with 'Verified: <read line-by-line> / skimmed: <listed>'. One note, no repo modifications, signal success with a one-line summary.",
+      "executorRef": "api-loop", "modelRef": "anthropic/claude-sonnet-5", "skillRefs": [], "toolRefs": [],
+      "isolation": "local", "zone": [], "maxIterations": 15, "dependsOn": []
+    },
+    {
+      "id": "assemble", "role": "scout", "title": "Assemble hub, cross-cuts, and verify connectivity",
+      "instructions": "The ten map-* siblings each wrote one area-* note. memory_read ALL of them first. Then author via memory_write: (1) hub note arch-overview (kind architecture_current, categories [subsystem]) — the system in one note (event-sourced multi-agent orchestrator, Postgres event log as the ONLY truth, everything else rebuildable projections), linking decomposes_into EVERY area note; (2) zone-write-fence (kind fact, categories [cross-cutting]) — the fs_write zone mechanism across contracts/kernel/executor/memory, relates_to those four areas; (3) target-memory-lifecycle (kind architecture_target, categories [target]) — decay/sweep/archive designed but deferred, gated on hits data, relates_to area-memory. Then VERIFY: every note reachable from the hub via typed links, ≤14 notes total; if an area note is missing or unreachable, say so explicitly. Signal success with a summary listing areas covered and gaps.",
+      "executorRef": "api-loop", "modelRef": "anthropic/claude-sonnet-5", "skillRefs": [], "toolRefs": [],
+      "isolation": "local", "zone": [], "maxIterations": 25,
+      "dependsOn": ["map-contracts", "map-kernel", "map-storage", "map-execution", "map-memory", "map-executor", "map-providers", "map-cli", "map-ui", "map-vault"]
+    }
+  ]
+}
