@@ -835,3 +835,12 @@ curl http://localhost:8000/health
 **Last Updated**: 2026-07-21
 **Maintained By**: Architecture Team
 **See Also**: `docs/VERIFICATION-CHECKLIST.md` (complete verification guide)
+
+## Contributions and licensing
+
+By contributing you agree that your contribution is provided under the
+project's license ([PolyForm Noncommercial 1.0.0](LICENSE.md)) and that the
+project author may also license it as part of the project under the
+commercial terms in [COMMERCIAL-LICENSE.md](COMMERCIAL-LICENSE.md) — this is
+what keeps the dual-licensing model workable. You keep the copyright to your
+contribution.
