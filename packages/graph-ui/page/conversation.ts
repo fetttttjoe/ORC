@@ -285,11 +285,12 @@ export class Conversation {
   // same no-duplicates contract as the plan card below
   private readonly decoCards = new Map<string, { root: HTMLElement; key: string }>()
   private async decompositionCard(taskId: string): Promise<void> {
+    // claim the slot BEFORE the fetch: a reload's seed replay fires this in a burst, and
+    // post-await registration appended one card per in-flight call (the reload-duplicate bug)
+    const entry = this.claimCard(this.decoCards, taskId)
     const res = await api.planNotes(this.projectId, taskId).catch(() => null)
-    if (!res?.mermaid) return
-    const existing = this.decoCards.get(taskId)
-    if (existing && !existing.root.isConnected) this.decoCards.delete(taskId)
-    if (existing?.root.isConnected && existing.key === res.mermaid) return
+    if (!res?.mermaid) { this.dropIfEmpty(this.decoCards, taskId, entry); return }
+    if (entry.key === res.mermaid) return
     const diagram = el('div', { class: 'diagram' })
     void mermaidInto(diagram, res.mermaid)
     const content = [
@@ -309,15 +310,34 @@ export class Conversation {
         ]),
       ),
     ]
-    if (existing?.root.isConnected) {
-      existing.root.replaceChildren(...content)
-      this.decoCards.set(taskId, { root: existing.root, key: res.mermaid })
-    } else {
-      const root = el('div', { class: 'card plan-card' }, ...content)
-      this.decoCards.set(taskId, { root, key: res.mermaid })
-      this.list.append(root)
-      this.scroll()
+    entry.root.replaceChildren(...content)
+    entry.key = res.mermaid
+    this.scroll()
+  }
+
+  // shared card-slot claim: reuse the connected card, or append a placeholder SYNCHRONOUSLY
+  // so concurrent calls converge on one element (they dedupe on `key` after their fetches)
+  private claimCard(map: Map<string, { root: HTMLElement; key: string }>, taskId: string): { root: HTMLElement; key: string } {
+    let entry = map.get(taskId)
+    if (entry && !entry.root.isConnected) { map.delete(taskId); entry = undefined } // trimmed away
+    if (!entry) {
+      entry = { root: el('div', { class: 'card plan-card' }), key: '' }
+      map.set(taskId, entry)
+      this.list.append(entry.root)
     }
+    return entry
+  }
+
+  // a placeholder whose fetch came back empty must not linger as a blank card — but only
+  // remove it while still unfilled: a concurrent call may have rendered into it meanwhile
+  private dropIfEmpty(map: Map<string, { root: HTMLElement; key: string }>, taskId: string, entry: { root: HTMLElement; key: string }): void {
+    if (entry.key === '') { entry.root.remove(); map.delete(taskId) }
+  }
+
+  // reload safety: materialize the live cards for tasks whose plan/step events fell outside
+  // the seed window — the chat must show the current plan, not only recent event noise
+  ensureCards(taskIds: string[]): void {
+    for (const id of taskIds) { void this.planCard(id); void this.decompositionCard(id) }
   }
 
   // The live plan card: ONE element per task, updated in place — proposal, approval, and
@@ -325,14 +345,13 @@ export class Conversation {
   // real-time progress view: what the request contains and which step runs right now.
   private readonly planCards = new Map<string, { root: HTMLElement; key: string }>()
   private async planCard(taskId: string): Promise<void> {
+    const entry = this.claimCard(this.planCards, taskId) // sync claim — see decompositionCard
     const plans = await api.plans(this.projectId, taskId).catch(() => null)
-    if (!plans?.visual) return
+    if (!plans?.visual) { this.dropIfEmpty(this.planCards, taskId, entry); return }
     const v = plans.visual
     // skip re-renders that would change nothing (approval straight after proposal)
     const key = `${v.version}:${v.waves.map(w => w.steps.map(s => s.status).join(',')).join('|')}`
-    const existing = this.planCards.get(taskId)
-    if (existing && !existing.root.isConnected) this.planCards.delete(taskId) // trimmed away
-    if (existing?.root.isConnected && existing.key === key) return
+    if (entry.key === key) return
     const diagram = el('div', { class: 'diagram' })
     void mermaidInto(diagram, v.mermaid)
     // a one-step template is not a decomposition — say so instead of dressing it up
@@ -343,15 +362,9 @@ export class Conversation {
       ...(single ? [] : [diagram]),
       renderWaves(v.waves, id => this.goNode(stepNodeId(taskId, id))),
     ]
-    if (existing?.root.isConnected) {
-      existing.root.replaceChildren(...content)
-      this.planCards.set(taskId, { root: existing.root, key })
-    } else {
-      const root = el('div', { class: 'card plan-card' }, ...content)
-      this.planCards.set(taskId, { root, key })
-      this.list.append(root)
-      this.scroll()
-    }
+    entry.root.replaceChildren(...content)
+    entry.key = key
+    this.scroll()
   }
 
   private history(): ChatMessage[] {

@@ -5,7 +5,7 @@ import { Conversation } from './conversation'
 import { renderDetail } from './detail'
 import { LogView } from './log'
 import { current, navigate, onChange, type Selection, type Tab } from './nav'
-import { planScope } from '@orc/contracts'
+import { planScope, TASK_STATUS } from '@orc/contracts'
 import { EDGE, NODE_PREFIX, stepNodeId } from '@orc/ui-core/graph'
 import { renderRequest, type OpenQuestion, type PlanNoteView, type PlansView, type TaskView } from './plan'
 import type { GraphRenderer } from './renderer'
@@ -379,6 +379,9 @@ async function loadProject(): Promise<void> {
   conversation?.setProject(sel.project)
   // rebuild the chat's narrative from the log up to the snapshot; the stream takes over after
   await conversation?.seed(g.seq)
+  // a running task's plan card must exist after reload even when its plan/step events fell
+  // outside the seed window — the chat shows the current plan, not only recent noise
+  conversation?.ensureCards(g.nodes.filter(n => n.type === 'task' && n.detail === TASK_STATUS.running).map(n => n.id))
   watch(g.seq)
 }
 
