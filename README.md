@@ -71,7 +71,7 @@ models. Zod contracts. Commander CLI.
 docker compose up -d --wait     # Postgres :5433 + SurrealDB :8000, loopback-only
 bun install && bun test
 
-alias orc="bun $PWD/packages/cli/src/bin.ts"
+(cd packages/cli && bun link)          # installs a global `orc` (Bun shim); alias works too
 export ANTHROPIC_API_KEY=...    # and/or run a local Ollama
 
 orc db migrate                  # explicit schema setup; works before project initialization
