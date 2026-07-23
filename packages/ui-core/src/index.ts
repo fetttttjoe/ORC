@@ -3,6 +3,7 @@ export {
   type EdgeType, type Graph, type GraphLink, type GraphNode, type GraphPatch,
 } from './graph'
 export { decompositionMermaid, planMermaid, todoWaves, type TodoWave } from './diagram'
+export { PALETTE } from './palette'
 export {
   createProjectSessions, foldModelCatalog,
   type ProjectSessions, type SessionSnapshot, type SessionUpdate, type Unsubscribe,

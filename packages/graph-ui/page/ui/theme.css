@@ -337,6 +337,8 @@ input, textarea, select, button { font: var(--font) }
 .sys-card.working .badge { animation: pulse 1.6s ease-in-out infinite }
 @keyframes pulse { 50% { opacity: 0.5 } }
 .wave-step.failed { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 30%, transparent) }
+/* event ripple: the chip the SSE handler just processed flashes briefly (class removed on animationend) */
+.wave-step.ripple, .tab.ripple { animation: pulse 0.45s ease-in-out 3; border-color: var(--accent) }
 .plan-card { max-width: 100% }
 
 /* ─── Plan editor ───────────────────────────────────────────────────────────── */

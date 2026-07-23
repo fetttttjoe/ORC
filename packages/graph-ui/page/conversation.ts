@@ -55,6 +55,7 @@ export function renderWaves(waves: TodoWave[], onStep?: (stepId: string) => void
         class: `wave-step ${s.status}${onStep ? ' link' : ''}`,
         onClick: onStep ? () => onStep(s.id) : undefined,
         title: onStep ? 'open step in inspector' : undefined,
+        data: { step: s.id },
       },
         s.status === 'completed' ? '✓ ' : s.status === 'failed' ? '✗ ' : s.status === 'running' ? '◔ ' : '○ ', s.title)),
     )))
@@ -170,10 +171,35 @@ export class Conversation {
     }
     if (PLAN_KINDS.has(row.kind) && row.taskId) void this.planCard(row.taskId)
     if (DECOMPOSITION_KINDS.has(row.kind) && row.taskId) void this.decompositionCard(row.taskId)
-    // live progress: step events re-render the existing plan card's waves in place
-    if (STEP_KINDS.has(row.kind) && row.taskId && this.planCards.has(row.taskId)) void this.planCard(row.taskId)
+    // live progress: step events render the task's plan card — CREATING it if the plan events
+    // fell outside the seed window (a long run's chat must still show current status)
+    if (STEP_KINDS.has(row.kind) && row.taskId) void this.planCard(row.taskId)
+    this.ripple(row)
     this.trim()
     this.scroll()
+  }
+
+  // event ripple: the chip the SSE handler just processed pulses for a moment — the chat's
+  // plan/decomposition cards show WHERE work is happening, not just that it happened
+  private ripple(row: LogRow): void {
+    if (!row.taskId) return
+    const chips: Element[] = []
+    if (row.stepId) {
+      const card = this.planCards.get(row.taskId)
+      if (card?.root.isConnected) chips.push(...card.root.querySelectorAll(`[data-step="${CSS.escape(row.stepId)}"]`))
+    }
+    const noteId = row.noteRef?.split('\u0000')[1]
+    if (noteId) {
+      const deco = this.decoCards.get(row.taskId)
+      if (deco?.root.isConnected) chips.push(...deco.root.querySelectorAll(`[data-note="${CSS.escape(noteId)}"]`))
+    }
+    for (const chip of chips) {
+      chip.classList.remove('ripple') // restart the animation if it is still running
+      void (chip as HTMLElement).offsetWidth
+      chip.classList.add('ripple')
+      // drop the class when the flash ends so a `.running` chip's infinite pulse resumes
+      chip.addEventListener('animationend', () => chip.classList.remove('ripple'), { once: true })
+    }
   }
 
   // targeted correction on one plan-note: annotates it and wakes the plan agent (revise) —
@@ -239,6 +265,7 @@ export class Conversation {
   private ticker: HTMLElement | null = null
   private tick(row: LogRow): void {
     if (!WORKING_KINDS.has(row.kind)) return
+    this.ripple(row) // working events are exactly the "currently processing" signal
     const line = `${row.kind.replace(/_/g, ' ')}  ${row.line}`.trim()
     if (!this.ticker) {
       this.ticker = el('div', {
@@ -276,6 +303,7 @@ export class Conversation {
           el('button', {
             class: 'tab', title: 'open in inspector (audit: content, reads, backlinks)',
             onClick: () => this.goNode(noteNodeId(planScope(taskId), n.id)),
+            data: { note: n.id },
           }, n.title),
           ...(canAct() ? [el('button', { class: 'tab correct', title: `correct “${n.title}”`, onClick: () => this.correctionRow(taskId, n.id, n.title) }, '✎')] : []),
         ]),
