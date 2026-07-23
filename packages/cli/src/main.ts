@@ -7,6 +7,7 @@ import { openStorage, Kernel, fold, grantExtensionTrust, grantMcpTrust, initiali
 import { createVaultProjector, parsePlanFile } from '@orc/vault-projector'
 import { createMemory, probeMemory } from '@orc/memory'
 import { buildModelDiscovery, buildOrcActions, singleStepDraft } from './actions'
+import { renderPlanHuman } from './plan-render'
 
 // Providers are ModelProvider<unknown> by design (extensions may register anything) — the
 // boundary check validates the shape at runtime instead of casting.
@@ -156,6 +157,10 @@ export function buildProgram(
     return plugin
   }
 
+  // Discovery-backed model validation rejects invented refs at creation time on every surface;
+  // declared here (not at the actions site below) so the `plan` command's rate line can reach it.
+  const discovery = plugin ? buildModelDiscovery(plugin.config, plugin.log) : undefined
+
   program
     .command('new <title>')
     .description('create a task')
@@ -198,7 +203,7 @@ export function buildProgram(
 
   program
     .command('propose <taskId>')
-    .description('propose a plan (default: single-step template)')
+    .description('stamp a plan for review (default: a single-step template of your spec — NO model call; --file supplies an authored multi-step draft)')
     .option('--file <path>', 'plan draft JSON file')
     .option('--model <ref>', 'model for template steps', 'anthropic/claude-sonnet-5')
     .option('--skill <names...>', 'force-load skills for the template step (e.g. documentation)')
@@ -213,14 +218,28 @@ export function buildProgram(
     .option('--from-vault', 'read the edited plan markdown from the vault')
     .action(planAction((id, draft) => kernel.editPlan(id, draft), () => 'edited'))
 
+  // per-MTok rate for the gate: the human weighs spend BEFORE approving. Best-effort —
+  // no provider/discovery (read-only context, unknown ref) renders without a rate.
+  const rateFor = (ref: string): string | null => {
+    if (!discovery) return null
+    try {
+      const { p, modelId } = discovery.providerFor(ref)
+      const c = p.costs[modelId] ?? p.costs['*']
+      return c ? `$${c.inPerMTok}/M in · $${c.outPerMTok}/M out` : null
+    } catch { return null }
+  }
+
   program
     .command('plan <taskId>')
-    .description('show a plan (latest by default)')
+    .description('show a plan for review (latest by default; --json for the raw draft)')
     .option('--version <n>', 'plan version', parseNonNegativeInteger)
-    .action(async (taskId: string, opts: { version?: number }) => {
+    .option('--json', 'raw plan JSON (scripts; the full field set)')
+    .action(async (taskId: string, opts: { version?: number; json?: boolean }) => {
       const plan = await kernel.getPlan(taskId, opts.version)
       if (!plan) throw new Error(`no plan for task '${taskId}'`)
-      console.log(JSON.stringify(plan, null, 2))
+      if (opts.json) { console.log(JSON.stringify(plan, null, 2)); return }
+      console.log(renderPlanHuman(plan, rateFor))
+      console.log(`approve: orc approve ${taskId} · raw: orc plan ${taskId} --json`)
     })
 
   program
@@ -324,8 +343,7 @@ export function buildProgram(
     })
 
   // one shared implementation of every mutating command — the web adapter gets the same object.
-  // Discovery-backed model validation rejects invented refs at creation time on every surface.
-  const discovery = plugin ? buildModelDiscovery(plugin.config, plugin.log) : undefined
+  // (discovery is declared up top so the `plan` command's rate line can reach it too)
   const actions = () => buildOrcActions({ kernel, needPort, plugin, listModels: discovery?.listModels })
 
   const needPort = async (): Promise<ExecutionPort> => {
