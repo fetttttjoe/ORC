@@ -63,7 +63,7 @@ export async function createDbosPort(opts: {
   tools?: ToolSource
   stepTools?: (p: {
     taskId: string; stepId: string; runToken: string; role: string; executor: string; model: string
-    modelRef: string; maxIterations: number
+    modelRef: string; maxIterations: number; workspaceDir: string
   }) => ResolvedTool[]
 }): Promise<DbosPort> {
   const { config, providers, executors, skills, tools, stepTools } = opts
@@ -198,7 +198,7 @@ export async function createDbosPort(opts: {
         extraTools = [...extraTools, ...stepTools({
           taskId: args.taskId, stepId: args.stepId, runToken,
           role: init.step.role, executor: init.step.executorRef, model: modelId,
-          modelRef: init.step.modelRef, maxIterations: init.step.maxIterations,
+          modelRef: init.step.modelRef, maxIterations: init.step.maxIterations, workspaceDir,
         })]
 
       const ctx: ExecutorContext<unknown> = {
@@ -333,78 +333,119 @@ export async function createDbosPort(opts: {
       const workflowId = workflowIdOrThrow()
       const checkpoint = makeCheckpoint(args.taskId, null, workflowId) // run-level events carry no stepId
 
-      const init = await checkpoint('init', async () => {
-        const state = await foldState(args.taskId)
-        const task = state.tasks.get(args.taskId)
-        const plan = state.plans.get(args.taskId)?.versions.find(p => p.version === args.planVersion)
-        if (!task || !plan) throw classifiedError(FAILURE_CLASS.validation_error, `no task/plan v${args.planVersion} for '${args.taskId}'`)
-        return { plan, done: [...completedStepIds(state, args.taskId)], attempts: nextAttempts(state, args.taskId, plan), from: task.status, depth: task.depth }
-      }, r => [
-        { kind: EVENT_KIND.run_started, payload: { taskId: args.taskId, planVersion: args.planVersion, retryIndex: args.retryIndex, workflowId, cwd: args.cwd } },
-        { kind: EVENT_KIND.task_status_changed, payload: { taskId: args.taskId, from: r.from, to: TASK_STATUS.running } },
-      ])
-
-      const plan: Plan = init.plan
-      const done = new Set(init.done)
-      const failed = new Set<string>()
-      const started = new Set(init.done)
-
-      // Wave scheduling: launch every ready step IN PLAN ORDER, await the whole wave, then
-      // recompute readiness. Launch order is therefore a pure function of (plan, done, failed)
-      // — identical on the first run and on every replay.
-      //
-      // It has to be. DBOS binds child workflows POSITIONALLY, not by the workflowID argument:
-      // a replayed startWorkflow looks up (callerID, callerFunctionID) and returns a handle to
-      // whatever child is recorded at that slot (dbos-executor.js internalWorkflow), ignoring
-      // the id we asked for. The previous continuous scheduler launched dependents from inside
-      // a Promise.race settle loop, so first-run order followed real completion timing while
-      // replay order followed Map insertion order — two steps could swap slots, each receive
-      // the other's handle, and the loop would then spin forever on an already-resolved promise
-      // with the task pinned 'running'. See resume.test.ts's two-independent-step case.
-      //
-      // Cost, knowingly paid: a fast step's dependents now wait for its whole wave. Keeping
-      // continuous scheduling would need DBOS's startWfFuncId, which DBOS.startWorkflow does
-      // not expose.
-      for (;;) {
-        const wave = readySteps(plan, done, failed, started)
-        if (wave.length === 0) break
-        const results: Promise<StepResult>[] = []
-        for (const s of wave) {
-          started.add(s.id)
-          const handle = await DBOS.startWorkflow(stepWorkflow, {
-            workflowID: stepWorkflowId(args.taskId, s.id, init.attempts[s.id]!),
-            queueName: agentQueue(init.depth),
-          })({ taskId: args.taskId, stepId: s.id, planVersion: args.planVersion, attempt: init.attempts[s.id]!, cwd: args.cwd })
-          results.push(handle.getResult())
-        }
-        for (const r of await Promise.all(results)) (r.ok ? done : failed).add(r.stepId)
-      }
-
-      const outcome = runOutcomeOf(plan, done)
-      // The status re-check and the terminal append happen in ONE transaction, deliberately not
-      // via the checkpoint's draft path: makeCheckpoint runs fn() and THEN opens a separate
-      // transaction for its drafts, so reading the status in fn and appending from toEvents is
-      // TOCTOU. An `orc cancel` landing in that window takes the project lock, re-checks, and
-      // appends running→cancelled — and this would then append running→done on top of it. fold
-      // is last-seq-wins with no `from` check (projections.ts), so the task would report done
-      // while the router had already told the parent it was cancelled. cancelOne reads and
-      // writes under one lock; this now matches it.
-      await checkpoint('finish', async () => {
-        await log.transaction(async tx => {
-          const status = fold(await tx.byTask(args.taskId)).tasks.get(args.taskId)?.status ?? TASK_STATUS.running
-          if (status !== TASK_STATUS.running) return // a cancel already stamped a terminal status
-          await tx.append({
-            taskId: args.taskId, stepId: null, runToken: workflowId,
-            kind: EVENT_KIND.task_status_changed,
-            payload: { taskId: args.taskId, from: TASK_STATUS.running, to: outcome === RUN_OUTCOME.done ? TASK_STATUS.done : TASK_STATUS.blocked },
-            usage: null,
-            // same shape makeCheckpoint's drafts use, so a step retry cannot double-append
-            idempotencyKey: `${workflowId}:finish:0:${EVENT_KIND.task_status_changed}`,
+      try {
+        const init = await checkpoint('init', async () => {
+          const state = await foldState(args.taskId)
+          const task = state.tasks.get(args.taskId)
+          const plan = state.plans.get(args.taskId)?.versions.find(p => p.version === args.planVersion)
+          if (!task || !plan) throw classifiedError(FAILURE_CLASS.validation_error, `no task/plan v${args.planVersion} for '${args.taskId}'`)
+          // run_started + the running-transition commit in ONE transaction inside fn, NOT the
+          // toEvents draft path: the status change depends on foldable state, and a fixed-key draft
+          // that re-derives {from: task.status} on recovery flips to {from: running} (its own
+          // committed event), conflicts under the same key, and bricks the task at 'running' with an
+          // ERROR workflow retry cannot resume. Mirror the finish checkpoint — append run_started
+          // idempotently and stamp running only while the status is still pre-run (also no-ops
+          // cleanly if an orc cancel raced in).
+          await log.transaction(async tx => {
+            await tx.append({
+              taskId: args.taskId, stepId: null, runToken: workflowId, kind: EVENT_KIND.run_started,
+              payload: { taskId: args.taskId, planVersion: args.planVersion, retryIndex: args.retryIndex, workflowId, cwd: args.cwd },
+              idempotencyKey: `${workflowId}:init:run_started`,
+            })
+            const status = fold(await tx.byTask(args.taskId)).tasks.get(args.taskId)?.status
+            if (status === TASK_STATUS.approved || status === TASK_STATUS.blocked)
+              await tx.append({
+                taskId: args.taskId, stepId: null, runToken: workflowId, kind: EVENT_KIND.task_status_changed,
+                payload: { taskId: args.taskId, from: status, to: TASK_STATUS.running },
+                idempotencyKey: `${workflowId}:init:task_status_changed`,
+              })
           })
+          return { plan, done: [...completedStepIds(state, args.taskId)], attempts: nextAttempts(state, args.taskId, plan), depth: task.depth }
         })
-        return { outcome }
-      })
-      return outcome
+
+        const plan: Plan = init.plan
+        const done = new Set(init.done)
+        const failed = new Set<string>()
+        const started = new Set(init.done)
+
+        // Wave scheduling: launch every ready step IN PLAN ORDER, await the whole wave, then
+        // recompute readiness. Launch order is therefore a pure function of (plan, done, failed)
+        // — identical on the first run and on every replay.
+        //
+        // It has to be. DBOS binds child workflows POSITIONALLY, not by the workflowID argument:
+        // a replayed startWorkflow looks up (callerID, callerFunctionID) and returns a handle to
+        // whatever child is recorded at that slot (dbos-executor.js internalWorkflow), ignoring
+        // the id we asked for. The previous continuous scheduler launched dependents from inside
+        // a Promise.race settle loop, so first-run order followed real completion timing while
+        // replay order followed Map insertion order — two steps could swap slots, each receive
+        // the other's handle, and the loop would then spin forever on an already-resolved promise
+        // with the task pinned 'running'. See resume.test.ts's two-independent-step case.
+        //
+        // Cost, knowingly paid: a fast step's dependents now wait for its whole wave. Keeping
+        // continuous scheduling would need DBOS's startWfFuncId, which DBOS.startWorkflow does
+        // not expose.
+        for (;;) {
+          const wave = readySteps(plan, done, failed, started)
+          if (wave.length === 0) break
+          const results: Promise<StepResult>[] = []
+          for (const s of wave) {
+            started.add(s.id)
+            const handle = await DBOS.startWorkflow(stepWorkflow, {
+              workflowID: stepWorkflowId(args.taskId, s.id, init.attempts[s.id]!),
+              queueName: agentQueue(init.depth),
+            })({ taskId: args.taskId, stepId: s.id, planVersion: args.planVersion, attempt: init.attempts[s.id]!, cwd: args.cwd })
+            results.push(handle.getResult())
+          }
+          for (const r of await Promise.all(results)) (r.ok ? done : failed).add(r.stepId)
+        }
+
+        const outcome = runOutcomeOf(plan, done)
+        // The status re-check and the terminal append happen in ONE transaction, deliberately not
+        // via the checkpoint's draft path: makeCheckpoint runs fn() and THEN opens a separate
+        // transaction for its drafts, so reading the status in fn and appending from toEvents is
+        // TOCTOU. An `orc cancel` landing in that window takes the project lock, re-checks, and
+        // appends running→cancelled — and this would then append running→done on top of it. fold
+        // is last-seq-wins with no `from` check (projections.ts), so the task would report done
+        // while the router had already told the parent it was cancelled. cancelOne reads and
+        // writes under one lock; this now matches it.
+        await checkpoint('finish', async () => {
+          await log.transaction(async tx => {
+            const status = fold(await tx.byTask(args.taskId)).tasks.get(args.taskId)?.status ?? TASK_STATUS.running
+            if (status !== TASK_STATUS.running) return // a cancel already stamped a terminal status
+            await tx.append({
+              taskId: args.taskId, stepId: null, runToken: workflowId,
+              kind: EVENT_KIND.task_status_changed,
+              payload: { taskId: args.taskId, from: TASK_STATUS.running, to: outcome === RUN_OUTCOME.done ? TASK_STATUS.done : TASK_STATUS.blocked },
+              usage: null,
+              // same shape makeCheckpoint's drafts use, so a step retry cannot double-append
+              idempotencyKey: `${workflowId}:finish:0:${EVENT_KIND.task_status_changed}`,
+            })
+          })
+          return { outcome }
+        })
+        return outcome
+      } catch (err) {
+        // Containment (mirrors stepWorkflow's try/catch): an uncaught run-workflow error must not
+        // strand the task 'running' with a burned ERROR workflow that orc retry re-attaches to and
+        // rethrows forever. Stamp running→blocked — the state retry resumes from — under the same
+        // locked re-check. Best-effort: if containment itself can't run (e.g. the workflow was
+        // cancelled), surface the original error and let cancelOne own the terminal status.
+        try {
+          await checkpoint('contain', async () => {
+            await log.transaction(async tx => {
+              const status = fold(await tx.byTask(args.taskId)).tasks.get(args.taskId)?.status
+              if (status === TASK_STATUS.running)
+                await tx.append({
+                  taskId: args.taskId, stepId: null, runToken: workflowId, kind: EVENT_KIND.task_status_changed,
+                  payload: { taskId: args.taskId, from: TASK_STATUS.running, to: TASK_STATUS.blocked },
+                  idempotencyKey: `${workflowId}:contain:task_status_changed`,
+                })
+            })
+            return { contained: true }
+          })
+        } catch { /* best-effort containment — original error still propagates */ }
+        throw err
+      }
     },
     { name: 'orcRun' },
   )
@@ -418,7 +459,12 @@ export async function createDbosPort(opts: {
       throw new KernelError(KERNEL_ERROR_CODE.invalid_transition, `task is '${task.status}' — approve a plan first (orc approve ${taskId})`)
     const workflowID = retryIndex === 0 ? `run:${taskId}:v${approved}` : `run:${taskId}:v${approved}:r${retryIndex}`
     const handle = await DBOS.startWorkflow(runWorkflow, { workflowID })({
-      taskId, planVersion: approved, retryIndex, cwd: cwd ?? null,
+      // A run with no explicit cwd works on the PROJECT, not in an empty scratch dir. The old
+      // per-step .orc/workspaces/ default gave every step a directory with nothing in it — a
+      // workspace no repo task can succeed in (scenario-2 burned five verify attempts on it,
+      // each ENOENT-blind). Explicit --cwd still overrides; the recorded cwd feeds retry/child
+      // inheritance so the whole run tree stays in one world.
+      taskId, planVersion: approved, retryIndex, cwd: cwd ?? config.dir,
     })
     return { workflowId: workflowID, wait: () => handle.getResult() }
   }
@@ -483,7 +529,10 @@ export async function createDbosPort(opts: {
       const approved = state.plans.get(childTaskId)?.approvedVersion
       if (!approved) throw new KernelError(KERNEL_ERROR_CODE.invalid_transition, `no approved plan for '${childTaskId}'`)
       // deterministic id: the router may call this more than once (at-least-once delivery) — attaches idempotently
-      const cwd = task.parentId ? state.runs.get(task.parentId)?.at(-1)?.cwd ?? null : null
+      // parent cwd inherits from its most recent run that HAD a cwd — findLast, not at(-1), the same
+      // rule retry() uses: a pre-project-dir-default bare retry (cwd null) must not poison the child
+      // into empty scratch; falls back to the project dir when no parent run ever had one
+      const cwd = (task.parentId ? state.runs.get(task.parentId)?.findLast(r => r.cwd)?.cwd : null) ?? config.dir
       await DBOS.startWorkflow(runWorkflow, {
         workflowID: `run:${childTaskId}:v${approved}`,
         queueName: runQueue(task.depth),
@@ -497,7 +546,13 @@ export async function createDbosPort(opts: {
       if (task.status !== TASK_STATUS.blocked)
         throw new KernelError(KERNEL_ERROR_CODE.invalid_transition, `task is '${task.status}' — only a blocked task can be retried`)
       const runs = state.runs.get(taskId) ?? []
-      return startRunAt(taskId, runs.length === 0 ? 0 : Math.max(...runs.map(r => r.retryIndex)) + 1, o?.cwd)
+      // A retry re-enters the world the run failed in: without an explicit override, inherit the
+      // most recent run that HAD a cwd — not runs.at(-1), because histories from before the
+      // project-dir default carry null-cwd retries that would poison plain last-run inheritance
+      // (scenario-2's log is exactly [repo, null, null, null]). No run ever had one →
+      // startRunAt's project-dir default applies.
+      const cwd = o?.cwd ?? runs.findLast(r => r.cwd)?.cwd ?? undefined
+      return startRunAt(taskId, runs.length === 0 ? 0 : Math.max(...runs.map(r => r.retryIndex)) + 1, cwd)
     },
     cancelRun: async taskId => {
       const state = fold(await log.all()) // subtree spans tasks — byTask is not enough here
