@@ -37,6 +37,7 @@ describe('loadConfig', () => {
     expect(c.concurrency).toBe(3)
     expect(c.databaseUrl).toContain('5433')
     expect(c.appVersion).toMatch(/^orc-/)
+    expect(c.execAllowlist).toEqual([]) // no allowlist → exec tool is not offered
   })
   it('rejects malformed ORC_CONCURRENCY loudly — orc env is zod-validated', () => {
     withEnv({ ORC_CONCURRENCY: 'abc' }, () => {
@@ -121,6 +122,13 @@ describe('loadConfig', () => {
     withEnv({ ORC_MAX_ITERATIONS: '40' }, () => {
       expect(loadConfig(dir).maxIterations).toBe(40)
     })
+  })
+  it('execAllowlist reads from the config file — the operator trust boundary — and rejects empty entries', () => {
+    // the security-relevant path production uses: allowlist comes from .orc/config.json, not just the default
+    const dir = tmpProject({ execAllowlist: ['bun test', 'bun run typecheck'] })
+    expect(loadConfig(dir).execAllowlist).toEqual(['bun test', 'bun run typecheck'])
+    // an empty entry would make the exec prefix check (`command.startsWith(' ')`) admit any spaced command
+    expect(() => loadConfig(tmpProject({ execAllowlist: ['bun test', ''] }))).toThrow()
   })
   it('maxDepth defaults to 3 and approvalPolicy defaults to manual/empty', () => {
     const c = loadConfig(mkdtempSync(path.join(tmpdir(), 'orc-')))

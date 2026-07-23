@@ -14,9 +14,13 @@ import { ANALYZE_STEP_ROLE } from './strategies/grounded-plan'
 export function reportCoverageTool(opts: {
   kernel: Pick<Kernel, 'reportCoverage'>
   p: { taskId: string; stepId: string; runToken: string; role: string }
-}): ResolvedTool {
+}): ResolvedTool[] {
   const { kernel, p } = opts
-  return {
+  // Registration gate, not an execute-time rejection: a visible tool that can only ever error
+  // gets called anyway — scenario-2's verify auditor burned one iteration per attempt on it.
+  // For every non-scout step the tool simply does not exist.
+  if (p.role !== ANALYZE_STEP_ROLE) return []
+  return [{
     ref: 'kernel/report_coverage', name: 'report_coverage',
     description:
       'Record what this analysis covered: { analyzed, scope?, gaps?, confidence?, notesWritten? }. Call once, just before signaling success. Set analyzed:false with a gap explaining why when you could not read the codebase.',
@@ -32,8 +36,6 @@ export function reportCoverageTool(opts: {
       required: ['analyzed'],
     },
     execute: async input => {
-      if (p.role !== ANALYZE_STEP_ROLE)
-        return { output: { error: `report_coverage is only valid for a grounded-plan's '${ANALYZE_STEP_ROLE}' step` }, isError: true }
       try {
         await kernel.reportCoverage({ taskId: p.taskId, stepId: p.stepId, runToken: p.runToken }, input)
         return { output: { recorded: true }, isError: false }
@@ -41,5 +43,5 @@ export function reportCoverageTool(opts: {
         return { output: { error: errorMessage(e) }, isError: true }
       }
     },
-  }
+  }]
 }
