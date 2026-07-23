@@ -1,6 +1,7 @@
 // E2E fixture server (run by playwright's webServer): real Postgres test db, seeded state,
 // scripted copilot, kernel-backed newTask — everything else read-only-stubbed.
 import { MockLanguageModelV4 } from 'ai/test'
+import { EVENT_KIND } from '@orc/contracts'
 import { draftFixture } from '@orc/contracts/fixtures'
 import { Kernel, openStorage } from '@orc/kernel'
 import { createTestDb, TEST_PROJECT_ID } from '@orc/kernel/test-helpers'
@@ -49,8 +50,14 @@ const actions: OrcActions = {
   cancel: unsupported('cancel'),
   annotate: unsupported('annotate'),
   revise: unsupported('revise'),
-  writeNote: unsupported('writeNote'),
-  deleteNote: unsupported('deleteNote'),
+  writeNote: async note => {
+    await storage.events.append({ taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_written, payload: { note, author: { source: 'cli' } } })
+    return { id: note.id, scope: 'project' }
+  },
+  deleteNote: async (id, scope) => {
+    await storage.events.append({ taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_deleted, payload: { id, scope: scope ?? 'project', author: { source: 'cli' } } })
+    return { id }
+  },
   renameProject: unsupported('renameProject'),
   newProject: unsupported('newProject'),
   purgeProject: unsupported('purgeProject'),

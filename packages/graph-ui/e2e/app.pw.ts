@@ -45,6 +45,33 @@ test('copilot exchange streams into the conversation', async ({ page }) => {
   await expect(page.locator('.bubble.assistant')).toContainText('e2e copilot reply')
 })
 
+test('note authoring: create, link, edit, delete from the page', async ({ page }) => {
+  await page.goto('/')
+  await page.locator('button', { hasText: '+ note' }).click()
+  // openDialog renders each field as label.field > (input|textarea); submit sits in .dlg-buttons
+  const dlg = page.locator('.dlg')
+  await dlg.locator('label.field', { hasText: 'title' }).locator('input').fill('E2e Authored Note')
+  await dlg.locator('label.field', { hasText: 'body' }).locator('textarea').fill('hello')
+  await dlg.locator('.dlg-buttons button', { hasText: 'save' }).click()
+  // the shell navigates to the new note — its detail card renders via the SSE-driven refresh
+  await expect(page.locator('.inspector')).toContainText('E2e Authored Note', { timeout: 10_000 })
+  // edit: change the summary — the card refreshes with it
+  await page.locator('.inspector button', { hasText: 'edit' }).click()
+  await dlg.locator('label.field', { hasText: 'summary' }).locator('input').fill('now-edited')
+  await dlg.locator('.dlg-buttons button', { hasText: 'save' }).click()
+  await expect(page.locator('.inspector')).toContainText('now-edited', { timeout: 10_000 })
+  // delete: typed confirm — the inspector empties and the node leaves the graph
+  await page.locator('.inspector button', { hasText: 'delete' }).click()
+  await dlg.locator('label.field input').fill('e2e-authored-note')
+  await dlg.locator('.dlg-buttons button', { hasText: 'delete' }).click()
+  await expect(page.locator('.inspector')).toBeHidden({ timeout: 10_000 })
+  const { projectId } = await (await page.request.get('/api/session')).json() as { projectId: string }
+  await expect.poll(async () => {
+    const g = await (await page.request.get(`/api/graph?project=${projectId}`)).json() as { nodes: Array<{ label: string }> }
+    return g.nodes.some(n => n.label === 'E2e Authored Note')
+  }, { timeout: 10_000 }).toBe(false)
+})
+
 test('approve from the road advances the request live', async ({ page }) => {
   await page.goto('/')
   await page.locator('.navitem', { hasText: 'hello world request' }).click()
