@@ -15,8 +15,8 @@ import { z } from 'zod'
 const UA = 'orc-sim-web-mcp/0.0 (durable-workflow research simulation)'
 
 const stripHtml = (s: string): string =>
-  s.replace(/<script[\s\S]*?<\/script>/gi, ' ')
-    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+  s.replace(/<script[\s\S]*?<\/script\s*>/gi, ' ')
+    .replace(/<style[\s\S]*?<\/style\s*>/gi, ' ')
     .replace(/<[^>]+>/g, ' ')
     .replace(/&[a-z]+;/gi, ' ')
     .replace(/\s+/g, ' ')
@@ -83,6 +83,7 @@ if (process.argv.includes('--selftest')) {
   const assert = (c: boolean, m: string) => { if (!c) { console.error('FAIL:', m); process.exit(1) } }
   assert(stripHtml('<b>Event</b> <span class="x">sourcing</span>') === 'Event sourcing', 'stripHtml tags')
   assert(stripHtml('a<script>evil()</script>b') === 'a b', 'stripHtml drops script body')
+  assert(stripHtml('a<script>evil()</script >b') === 'a b', 'stripHtml drops script body with spaced end tag')
   assert(wikiUrl('Saga (computer science)') === 'https://en.wikipedia.org/wiki/Saga_(computer_science)', 'wikiUrl')
   // SSRF classifier: the exact ranges an agent-driven fetch must never reach
   for (const ip of ['127.0.0.1', '10.0.0.1', '172.16.0.1', '172.31.255.255', '192.168.1.1',

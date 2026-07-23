@@ -34,6 +34,63 @@ describe('renderTaskFiles', () => {
   })
 })
 
+describe('renderTaskFiles — ## Usage table', () => {
+  // a plan-step step, plus an agent_call carrying envelope usage bound to that step
+  // per-step runTokens, as production issues them: the fold dedupes usage by
+  // (runToken, iteration) — at-least-once redelivery must not double-bill — so a shared
+  // token across steps would silently swallow every step's usage after the first.
+  const agentCall = (stepId: string, usage: EventRecord['usage']) =>
+    ev({ kind: EVENT_KIND.agent_call, stepId, runToken: `step:t1:${stepId}:a1`, usage, payload: { stepId, runToken: `step:t1:${stepId}:a1`, iteration: 1, request: {}, response: {} } })
+
+  it('tabulates per-step usage in stored order with a totals row; pins null-cost and absent-cacheRead', () => {
+    seq = 0
+    const plan = planFixture({
+      taskId: 't1', version: 1,
+      steps: [stepFixture({ id: 's1' }), stepFixture({ id: 's2' })],
+    })
+    const events: EventRecord[] = [
+      ev({ kind: EVENT_KIND.task_created, payload: { task: task() } }),
+      ev({ kind: EVENT_KIND.plan_proposed, payload: { plan } }),
+      // s1: full usage, costUSD set, cacheReadTokens present
+      agentCall('s1', { inputTokens: 100, outputTokens: 20, cacheReadTokens: 10, costUSD: 0.05, estimated: false }),
+      // s2: costUSD null → placeholder; cacheReadTokens absent → `?? 0`
+      agentCall('s2', { inputTokens: 200, outputTokens: 40, costUSD: null, estimated: false }),
+    ]
+    const md = renderTaskFiles('t1', events)['tasks/t1/index.md']!
+    // header + separator
+    expect(md).toContain('## Usage\n\n| Step | Input | Output | Cache Read | Cost USD |\n| --- | --- | --- | --- | --- |')
+    // per-step rows, in stored order
+    expect(md).toContain('| s1 | 100 | 20 | 10 | 0.05 |')
+    expect(md).toContain('| s2 | 200 | 40 | 0 | — |') // null-cost placeholder + absent cacheRead → 0
+    // totals row: costs sum over the non-null step(s); tokens are additive
+    expect(md).toContain('| **Totals** | 300 | 60 | 10 | 0.05 |')
+    // stored order: s1 row before s2 row before totals
+    expect(md.indexOf('| s1 |')).toBeLessThan(md.indexOf('| s2 |'))
+    expect(md.indexOf('| s2 |')).toBeLessThan(md.indexOf('| **Totals** |'))
+    // the Totals row is the single source of task token totals — no separate duplicate line
+    expect(md).not.toContain('_tokens in/out:')
+  })
+
+  it('empty view: no plan yet renders the italic gap, not an empty table', () => {
+    seq = 0
+    const md = renderTaskFiles('t1', [ev({ kind: EVENT_KIND.task_created, payload: { task: task() } })])['tasks/t1/index.md']!
+    expect(md).toContain('## Usage\n\n_no plan yet_')
+    expect(md).not.toContain('| Step | Input |')
+  })
+
+  it('two renders of a usage history are byte-identical', () => {
+    seq = 0
+    const plan = planFixture({ taskId: 't1', version: 1, steps: [stepFixture({ id: 's1' }), stepFixture({ id: 's2' })] })
+    const events: EventRecord[] = [
+      ev({ kind: EVENT_KIND.task_created, payload: { task: task() } }),
+      ev({ kind: EVENT_KIND.plan_proposed, payload: { plan } }),
+      agentCall('s1', { inputTokens: 100, outputTokens: 20, cacheReadTokens: 10, costUSD: 0.05, estimated: false }),
+      agentCall('s2', { inputTokens: 200, outputTokens: 40, costUSD: null, estimated: false }),
+    ]
+    expect(renderTaskFiles('t1', events)).toEqual(renderTaskFiles('t1', events))
+  })
+})
+
 describe('renderTaskFiles — execution and lineage graphs', () => {
   it('renders operation nodes with attempts; unresolved is visually distinct from done/failed', () => {
     seq = 0
