@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'bun:test'
 import type { EventRecord, Plan, TaskNode } from '@orc/contracts'
 import { eventFixture, draftFixture, planFixture, stepFixture } from '@orc/contracts/fixtures'
-import { fold, completedStepIds, nextAttempts, crashDedupKey, stepUsage, subtreeTaskIds, subtreeUsage, pendingSplitForChild } from './projections'
+import { fold, completedStepIds, nextAttempts, crashDedupKey, stepUsage, subtreeTaskIds, subtreeUsage, pendingSplitForChild, remainingBudget, inheritedCwd } from './projections'
 
 const task: TaskNode = {
   id: 't1', parentId: null, type: 'generic', title: 'hello', spec: '',
@@ -252,6 +252,36 @@ describe('fold — execution kinds', () => {
     expect(subtreeTaskIds(state, 'p')).toEqual(['p', 'c1', 'c2', 'g1'])
     expect(subtreeUsage(state, 'p').costUSD).toBe(7)
     expect(subtreeUsage(state, 'c1').costUSD).toBe(6)
+  })
+
+  it("remainingBudget is the min over the ancestor chain, not just the task's own budget", () => {
+    const t = (id: string, parentId: string | null, budgetUSD: number | null): EventRecord => ({
+      seq: 0, projectId: 'p1', idempotencyKey: null, taskId: id, stepId: null, runToken: null, kind: 'task_created',
+      payload: { task: { id, parentId, type: 'generic', title: id, spec: '', status: 'draft', zone: [], budgetUSD, depth: parentId ? 1 : 0, createdAt: 'T' } },
+      usage: null, ts: 'T',
+    })
+    const usage = (taskId: string, cost: number): EventRecord => ({
+      seq: 0, projectId: 'p1', idempotencyKey: null, taskId, stepId: 's1', runToken: `rt-${taskId}`, kind: 'agent_call',
+      payload: { stepId: 's1', runToken: `rt-${taskId}`, iteration: 1, request: {}, response: {} },
+      usage: { inputTokens: 1, outputTokens: 1, costUSD: cost, estimated: false }, ts: 'T',
+    })
+    // parent budget 10, already spent 9 (its own usage) → parent has $1 left. Child budget is 99
+    // with zero usage of its own: consulting only the child's row would wrongly report ~99.
+    const state = fold([t('p', null, 10), t('c', 'p', 99), usage('p', 9)].map((e, i) => ({ ...e, seq: i + 1 })))
+    expect(remainingBudget(state, 'c')).toBe(1)  // capped by the ancestor, not its own huge budget
+    expect(remainingBudget(state, 'p')).toBe(1)
+    // no budget anywhere in the chain → unconstrained (null)
+    const free = fold([t('x', null, null), t('y', 'x', null)].map((e, i) => ({ ...e, seq: i + 1 })))
+    expect(remainingBudget(free, 'y')).toBeNull()
+  })
+
+  it('inheritedCwd: override wins; else the last run that HAD a cwd (skip null history); else fallback', () => {
+    const run = (cwd: string | null) => ({ planVersion: 1, retryIndex: 0, workflowId: 'w', cwd })
+    expect(inheritedCwd(undefined, undefined, '/proj')).toBe('/proj')          // no runs → fallback
+    expect(inheritedCwd([], 'over', '/proj')).toBe('over')                      // override always wins
+    expect(inheritedCwd([run(null), run(null)], undefined, '/proj')).toBe('/proj') // all-null history → fallback
+    expect(inheritedCwd([run('/repo'), run(null), run(null)], undefined, '/proj')).toBe('/repo') // skip the null poison
+    expect(inheritedCwd([run('/repo')], '/override', '/proj')).toBe('/override') // override beats a real history too
   })
 
   it('plan_proposed replay with the same (taskId, version) folds once', () => {
