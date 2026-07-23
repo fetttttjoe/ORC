@@ -126,7 +126,7 @@ describe('renderTaskFiles — execution and lineage graphs', () => {
     ]
     const md = renderTaskFiles('t1', events)['tasks/t1/lineage.md']!
     expect(md).toContain('type: lineage')
-    expect(md).toContain('report.md · sha256:abababababab · 42B')
+    expect(md).toContain('report.md · sha256:abababababab… · 42B')
     expect(md).toContain('s1 --> art0')
     // no receipts → explicit empty view, deterministic
     const empty = renderTaskFiles('t1', [ev({ kind: EVENT_KIND.task_created, payload: { task: task() } })])['tasks/t1/lineage.md']!
