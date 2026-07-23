@@ -68,7 +68,8 @@ export class SigmaRenderer implements GraphRenderer {
       if (this.graph.hasNode(n.id)) {
         // detail carries the lifecycle — merging it (and its color) is what makes live
         // status flips visible; dropping it was the invisible-run bug
-        this.graph.mergeNodeAttributes(n.id, { label: n.label, nodeType: n.type, detail: n.detail, color: colorFor(n.type, n.detail) })
+        const base = BASE_SIZE + (n.heat ?? 0) * 4
+        this.graph.mergeNodeAttributes(n.id, { label: n.label, nodeType: n.type, detail: n.detail, color: colorFor(n.type, n.detail), baseSize: base, ...(this.selected === n.id ? {} : { size: base }) })
         this.trackActivity(n)
       }
     for (const id of p.removeNodeIds) if (this.graph.hasNode(id)) { this.graph.dropNode(id); this.active.delete(id); this.hot.delete(id) } // incident edges drop too
@@ -105,10 +106,15 @@ export class SigmaRenderer implements GraphRenderer {
     for (const [id, until] of this.hot) if (until <= now || !this.graph.hasNode(id)) this.hot.delete(id)
     const live = new Set([...this.active].filter(id => this.graph.hasNode(id)))
     for (const id of this.hot.keys()) live.add(id)
-    for (const id of this.pulsing) if (!live.has(id) && this.graph.hasNode(id) && id !== this.selected) this.graph.setNodeAttribute(id, 'size', BASE_SIZE)
-    for (const id of live) if (id !== this.selected) this.graph.setNodeAttribute(id, 'size', this.phase ? BASE_SIZE + 2.5 : BASE_SIZE + 0.5)
+    for (const id of this.pulsing) if (!live.has(id) && this.graph.hasNode(id) && id !== this.selected) this.graph.setNodeAttribute(id, 'size', this.baseOf(id))
+    for (const id of live) if (id !== this.selected) this.graph.setNodeAttribute(id, 'size', this.phase ? this.baseOf(id) + 2.5 : this.baseOf(id) + 0.5)
     this.pulsing = live
     if (!live.size && this.pulseTimer) { clearInterval(this.pulseTimer); this.pulseTimer = null }
+  }
+
+  private baseOf(id: string): number {
+    const b: unknown = this.graph.getNodeAttribute(id, 'baseSize')
+    return typeof b === 'number' ? b : BASE_SIZE
   }
 
   onNodeClick(cb: (nodeId: string) => void): void {
@@ -119,10 +125,10 @@ export class SigmaRenderer implements GraphRenderer {
   select(nodeId: string | null): void {
     if (this.selected === nodeId) return
     if (this.selected && this.graph.hasNode(this.selected))
-      this.graph.mergeNodeAttributes(this.selected, { highlighted: false, size: BASE_SIZE })
+      this.graph.mergeNodeAttributes(this.selected, { highlighted: false, size: this.baseOf(this.selected) })
     this.selected = nodeId
     if (nodeId && this.graph.hasNode(nodeId))
-      this.graph.mergeNodeAttributes(nodeId, { highlighted: true, size: 7 })
+      this.graph.mergeNodeAttributes(nodeId, { highlighted: true, size: this.baseOf(nodeId) + 3 })
   }
 
   destroy(): void {
@@ -143,7 +149,8 @@ export class SigmaRenderer implements GraphRenderer {
     const at = neighborId
       ? { x: this.graph.getNodeAttribute(neighborId, 'x') + (Math.random() - 0.5), y: this.graph.getNodeAttribute(neighborId, 'y') + (Math.random() - 0.5) }
       : { x: Math.random() * 10, y: Math.random() * 10 }
-    this.graph.addNode(n.id, { ...at, size: BASE_SIZE, label: n.label, color: colorFor(n.type, n.detail), nodeType: n.type, detail: n.detail })
+    const base = BASE_SIZE + (n.heat ?? 0) * 4
+    this.graph.addNode(n.id, { ...at, size: base, baseSize: base, label: n.label, color: colorFor(n.type, n.detail), nodeType: n.type, detail: n.detail })
     this.trackActivity(n)
   }
 

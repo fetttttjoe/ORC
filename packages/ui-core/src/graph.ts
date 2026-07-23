@@ -1,4 +1,4 @@
-import { foldLiveNotes, noteKey, STEP_RUN_STATUS, type EventRecord } from '@orc/contracts'
+import { activation, DEFAULT_HALF_LIFE_DAYS, foldAccessCounts, foldLiveNotes, noteKey, STEP_RUN_STATUS, type EventRecord } from '@orc/contracts'
 import type { State } from '@orc/kernel'
 
 export interface GraphNode {
@@ -6,6 +6,7 @@ export interface GraphNode {
   type: 'task' | 'step' | 'artifact' | 'note' | 'model'
   label: string
   detail: string // task: status; step: run status or 'pending'; artifact: size; note: kind; model: provider
+  heat?: number // notes only: 0–1 activation heat (2dp) — recently-pulled knowledge renders hot; absent = cold
 }
 export interface GraphLink { source: string; target: string; type: string }
 export interface Graph { nodes: GraphNode[]; links: GraphLink[] }
@@ -41,9 +42,16 @@ export const artifactNodeId = (taskId: string, path: string): string => `${NODE_
 export const noteNodeId = (scope: string, id: string): string => `${NODE_PREFIX.note}${noteKey(scope, id)}`
 
 
+// Options for the events→graph projection. `now` exists for deterministic tests (defaults to
+// the wall clock); halfLifeDays feeds note heat and is threaded by the sessions layer from the
+// project's config — the SAME value the store's neighbor ranking uses, so graph heat and CLI
+// ranking always decay at one rate.
+export interface GraphBuildOptions { now?: string; halfLifeDays?: number }
+
 // The ONE events→graph projection. Every full load and (via diffGraphs) every patch comes from
 // here, so no consumer can ever see a graph this function would not produce.
-export function buildGraph(state: State, events: Array<Pick<EventRecord, 'kind' | 'payload'>>): Graph {
+export function buildGraph(state: State, events: Array<Pick<EventRecord, 'kind' | 'payload'> & { ts?: string }>, opts: GraphBuildOptions = {}): Graph {
+  const now = opts.now ?? new Date().toISOString()
   const nodes: GraphNode[] = []
   const links: GraphLink[] = []
   for (const t of state.tasks.values()) {
@@ -79,10 +87,22 @@ export function buildGraph(state: State, events: Array<Pick<EventRecord, 'kind' 
       links.push({ source: t.id, target: modelNodeId(ref), type: EDGE.uses })
     }
   }
+  const access = foldAccessCounts(events)
+  // heat: log-scaled activation, saturating at ~50. Rounded to 2dp so closely-spaced rebuilds
+  // don't churn the patch stream — slow drift across a long session still patches occasionally,
+  // and that IS the fade (patches are idempotent, the cost is negligible). halfLifeDays arrives
+  // from project config via the sessions layer — the same value the store's ranking uses.
+  const heatOf = (k: string): number | undefined => {
+    const stats = access.get(k)
+    if (!stats) return undefined
+    const act = activation(stats, now, opts.halfLifeDays ?? DEFAULT_HALF_LIFE_DAYS) // AccessStats passes straight through
+    if (act <= 0) return undefined
+    return Math.round(Math.min(1, Math.log1p(act) / Math.log1p(50)) * 100) / 100
+  }
   const live = foldLiveNotes(events)
   for (const { note, author } of live.values()) {
     if (isUiMetaNote(note.scope, note.id)) continue // chat metadata is not knowledge
-    nodes.push({ id: noteNodeId(note.scope, note.id), type: 'note', label: note.title, detail: note.kind })
+    nodes.push({ id: noteNodeId(note.scope, note.id), type: 'note', label: note.title, detail: note.kind, heat: heatOf(noteKey(note.scope, note.id)) })
     if (author.taskId && state.tasks.has(author.taskId))
       links.push({ source: author.taskId, target: noteNodeId(note.scope, note.id), type: EDGE.wrote })
     for (const l of note.links) {
@@ -111,7 +131,7 @@ export function diffGraphs(prev: Graph, next: Graph): GraphPatch {
     addNodes: next.nodes.filter(n => !prevN.has(n.id)),
     updateNodes: next.nodes.filter(n => {
       const p = prevN.get(n.id)
-      return p !== undefined && (p.label !== n.label || p.detail !== n.detail)
+      return p !== undefined && (p.label !== n.label || p.detail !== n.detail || p.heat !== n.heat)
     }),
     removeNodeIds: prev.nodes.filter(n => !nextN.has(n.id)).map(n => n.id),
     addLinks: next.links.filter(l => !prevL.has(linkKey(l))),

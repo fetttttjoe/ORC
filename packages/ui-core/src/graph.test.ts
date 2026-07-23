@@ -107,6 +107,22 @@ describe('buildGraph', () => {
     await log.close()
   })
 
+  it('derives note heat from access events, and diffGraphs patches on heat change', () => {
+    const ts = '2026-07-01T00:00:00.000Z'
+    const written = { kind: EVENT_KIND.memory_written, ts, payload: { note: { id: 'hot', scope: 'project', title: 'hot' }, author: { source: 'cli' } } }
+    const access = { kind: EVENT_KIND.memory_accessed, ts, payload: { id: 'hot', scope: 'project', mode: 'read', author: { source: 'cli' } } }
+    const empty = fold([]) // no tasks — notes fold straight from the events
+    const cold = buildGraph(empty, [written], { now: ts })
+    const hot = buildGraph(empty, [written, access, access, access], { now: ts })
+    const coldNode = cold.nodes.find(n => n.id === noteNodeId('project', 'hot'))!
+    const hotNode = hot.nodes.find(n => n.id === noteNodeId('project', 'hot'))!
+    expect(coldNode.heat).toBeUndefined()
+    expect(hotNode.heat).toBeGreaterThan(0)
+    expect(hotNode.heat).toBeLessThanOrEqual(1)
+    const patch = diffGraphs(cold, hot)
+    expect(patch.updateNodes.map(n => n.id)).toContain(hotNode.id) // heat alone must patch
+  })
+
   it('never links to a node that does not exist (dangling note link, deleted target)', async () => {
     const log = await freshLog()
     await seed(log)
