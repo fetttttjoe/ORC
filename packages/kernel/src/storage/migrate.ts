@@ -31,8 +31,22 @@ function isMissingMigrationTable(error: unknown): boolean {
   return isMissingMigrationTable(value.cause) || (value.errors ?? []).some(isMissingMigrationTable)
 }
 
+// credential-free database identity for error messages — WHICH database was checked is the
+// first thing a "schema is behind" report needs (a wrong cwd resolves to a different database
+// and the bare message reads like corruption)
+const where = (url?: string): string => {
+  if (!url) return ''
+  try {
+    const u = new URL(url)
+    u.password = ''
+    return ` (checked ${u.host}${u.pathname})`
+  } catch {
+    return ''
+  }
+}
+
 // reads drizzle's bookkeeping table; fails loudly when the database is behind
-export async function assertMigrated(db: NodePgDatabase): Promise<void> {
+export async function assertMigrated(db: NodePgDatabase, url?: string): Promise<void> {
   const expected = journalEntryCount()
   let applied: number
   try {
@@ -45,6 +59,6 @@ export async function assertMigrated(db: NodePgDatabase): Promise<void> {
   }
   if (applied < expected)
     throw new Error(
-      `database schema is behind (${applied}/${expected} migrations applied) — run 'orc db migrate'`,
+      `database schema is behind (${applied}/${expected} migrations applied)${where(url)} — run 'orc db migrate'`,
     )
 }

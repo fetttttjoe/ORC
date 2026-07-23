@@ -61,13 +61,17 @@ describe('schema migration', () => {
     expect(errorCodes(error)).toContain('ECONNREFUSED')
   })
 
-  it('reports an empty schema as zero applied migrations', async () => {
+  it('reports an empty schema as zero applied migrations, naming the checked database without credentials', async () => {
     const db = await createTestDb({ migrate: false })
     dbs.push(db)
 
-    await expect(openStorage(db.url, { projectId: TEST_PROJECT_ID })).rejects.toThrow(
-      /database schema is behind \(0\/\d+ migrations applied\)/,
-    )
+    const err = await openStorage(db.url, { projectId: TEST_PROJECT_ID }).catch(e => e as Error)
+    expect(err.message).toMatch(/database schema is behind \(0\/\d+ migrations applied\)/)
+    // the "(checked host/db)" suffix says WHICH database (a wrong cwd hits a different one) —
+    // but only host+path, never credentials, so a regression that interpolates the raw url is caught
+    expect(err.message).toContain('(checked ')
+    expect(err.message).toContain(new URL(db.url).host) // host:port is shown
+    expect(err.message).not.toContain('@')              // no user/password ever reaches the message
   })
 })
 
