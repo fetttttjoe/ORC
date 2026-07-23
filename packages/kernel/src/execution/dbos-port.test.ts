@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from 'bun:test'
+import { z } from 'zod'
 import { createHash } from 'node:crypto'
 import { mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -15,7 +16,7 @@ import { draftFixture, stepFixture } from '@orc/contracts/fixtures'
 import { openStorage, type EventLog } from '../storage'
 import { Kernel } from '../kernel'
 import { createTestDb, fakeProvider, testConfig, TEST_PROJECT_ID } from '../test-helpers'
-import { createDbosPort, type DbosPort } from './dbos-port'
+import { appendRunInit, createDbosPort, type DbosPort } from './dbos-port'
 
 // One DBOS runtime per process: registerWorkflow throws on duplicate names, so the whole file
 // shares ONE port + DB. Per-task scripting isolates the scenarios (behavior keyed by taskId,
@@ -225,6 +226,26 @@ describe('DBOS execution port (integration)', () => {
     expect(threw).toBe(true)      // the original error still propagates to the caller
     expect((await kernel.getTask(t.id))?.status).toBe(TASK_STATUS.blocked) // contained → retryable, not stuck running
   }, 30_000)
+
+  // §D#2: DBOS re-executes a step's fn() from scratch when a crash lands between the init
+  // checkpoint's own transaction committing and DBOS recording that step's output. Resume replays
+  // init's whole body, including this append — simulate it by calling appendRunInit twice with the
+  // same deterministic args + workflowId. The old code drafted the running-transition under a FIXED
+  // key with a `from` recomputed in a separate transaction, so the second run saw status already
+  // 'running' and redrafted {from:running} under the same key → idempotency_conflict, bricking the
+  // task. The in-transaction status re-check makes the second call a clean no-op instead.
+  it('D2: re-running init (the resume replay window) is a no-op, not an idempotency conflict', async () => {
+    const t = await approvedTask()
+    const args = { taskId: t.id, planVersion: 1, retryIndex: 0, cwd: null }
+    const workflowId = `run:${t.id}:v1`
+    await log.transaction(tx => appendRunInit(tx, args, workflowId))
+    await log.transaction(tx => appendRunInit(tx, args, workflowId)) // = DBOS replaying init fn() — must not throw
+    const events = await kernel.eventsFor(t.id)
+    expect(events.filter(e => e.kind === EVENT_KIND.run_started)).toHaveLength(1)
+    const toStatus = z.object({ to: z.string() })
+    const running = events.filter(e => e.kind === EVENT_KIND.task_status_changed && toStatus.parse(e.payload).to === TASK_STATUS.running)
+    expect(running).toHaveLength(1)
+  })
 
   it('ctx.operation journals before/after and runs the effect once across attached workflows', async () => {
     const t = await approvedTask({}, draftFixture([stepFixture()]))
