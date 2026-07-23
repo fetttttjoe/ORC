@@ -1,9 +1,6 @@
 import { createOllama } from 'ai-sdk-ollama'
 import type { LanguageModel } from 'ai'
-import type { ModelCost, ModelProvider } from '@orc/contracts'
-
-// narrow unknown JSON to an indexable object at the fetch boundary — no cast (repo rule: parse, don't assert)
-const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null
+import { isRecord, type ModelCost, type ModelProvider } from '@orc/contracts'
 
 // live model discovery from the local daemon — [] when it is not running (fetch injectable for tests)
 export async function listOllamaModels(baseUrl: string, fetchImpl: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response> = fetch): Promise<string[]> {
