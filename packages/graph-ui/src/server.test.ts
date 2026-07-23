@@ -78,16 +78,18 @@ describe('graph-ui web adapter', () => {
     expect(env.summary.kind).toBe(EVENT_KIND.memory_written)
     expect(env.summary.noteRef).toBe(noteNodeId('project', 'live-note'))
 
-    // a graph-invisible event still streams: patch null, summary present
+    // a memory access is NOT graph-invisible since activation heat: the touched note re-patches
+    // with heat > 0 (the "graph re-weights from use" contract), and the summary still streams
     const accessed = await fetch(`${base}/api/stream?project=${TEST_PROJECT_ID}&fromSeq=${appended.seq}`)
     await storage.events.append({
       taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_accessed,
       payload: { id: 'live-note', scope: 'project', mode: 'read', author: { source: 'cli' } },
     })
-    const quiet = await readSse(accessed, m => m.data.includes('memory_accessed'))
-    const quietEnv = JSON.parse(quiet!.data) as { patch: null; summary: { line: string } }
-    expect(quietEnv.patch).toBeNull()
-    expect(quietEnv.summary.line).toContain('read')
+    const heated = await readSse(accessed, m => m.data.includes('memory_accessed'))
+    const heatedEnv = JSON.parse(heated!.data) as { patch: { updateNodes: Array<{ id: string; heat?: number }> }; summary: { line: string } }
+    const heatedNote = heatedEnv.patch.updateNodes.find(n => n.id === noteNodeId('project', 'live-note'))
+    expect(heatedNote?.heat).toBeGreaterThan(0)
+    expect(heatedEnv.summary.line).toContain('read')
 
     // resume: a NEW stream with the OLD fromSeq gets the note in its catch-up patch
     const resumed = await fetch(`${base}/api/stream?project=${TEST_PROJECT_ID}&fromSeq=${g.seq}`)
