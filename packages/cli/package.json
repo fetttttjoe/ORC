@@ -1,6 +1,7 @@
 {
   "name": "@orc/cli",
   "version": "0.0.0",
+  "bin": { "orc": "./src/bin.ts" },
   "type": "module",
   "exports": { ".": "./src/main.ts" },
   "dependencies": {

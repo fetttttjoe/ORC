@@ -52,7 +52,7 @@ bun run packages/cli/src/bin.ts init --name my-project
 bun test
 
 # Create CLI alias for convenience
-alias orc="bun $PWD/packages/cli/src/bin.ts"
+(cd packages/cli && bun link)          # installs a global `orc` (Bun shim); alias works too
 
 # Verify setup
 orc status

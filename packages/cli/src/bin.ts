@@ -1,3 +1,4 @@
+#!/usr/bin/env bun
 import { dbosSend, isConnectionRefused, loadConfig, requireProject, type Kernel } from '@orc/kernel'
 import { errorMessage, HOOK_NAME } from '@orc/contracts'
 import { buildProgram, openKernel, runInit, runMigrate } from './main'
