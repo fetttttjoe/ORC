@@ -24,6 +24,19 @@ async function freshKernel(): Promise<Kernel> {
   return new Kernel(storage.events)
 }
 
+// proposeSplit only ever fires from a LIVE step, so its parent is running — expose the log so the
+// split fixtures can model that precondition (the guard rejects splits from a non-running parent).
+type TestLog = Awaited<ReturnType<typeof openStorage>>['events']
+async function freshKernelAndLog(): Promise<{ k: Kernel; log: TestLog }> {
+  const db = await createTestDb()
+  dbs.push(db)
+  const storage = await openStorage(db.url, { projectId: TEST_PROJECT_ID })
+  db.onClose(() => storage.close())
+  return { k: new Kernel(storage.events), log: storage.events }
+}
+const toRunning = (log: TestLog, taskId: string): Promise<unknown> =>
+  log.append({ taskId, stepId: null, runToken: null, kind: EVENT_KIND.task_status_changed, payload: { taskId, from: TASK_STATUS.draft, to: TASK_STATUS.running } })
+
 const draft = (): PlanDraft => draftFixture()
 
 const codeOf = async (p: Promise<unknown>): Promise<string> => {
@@ -227,8 +240,9 @@ describe('Kernel lifecycle', () => {
   })
 
   it('proposeSplit: deterministic ids, inherited refs, clamped budget, manual gate parks the child', async () => {
-    const k = await freshKernel()
+    const { k, log } = await freshKernelAndLog()
     const parent = await k.createTask({ title: 'P', spec: 'parent', budgetUSD: 10 })
+    await toRunning(log, parent.id)
     const args = {
       parentTaskId: parent.id, stepId: 's1', runToken: `step:${parent.id}:s1:a1`, toolCallId: 'call_1',
       title: 'C', spec: 'child work', budgetUSD: 99,
@@ -252,8 +266,9 @@ describe('Kernel lifecycle', () => {
   })
 
   it('proposeSplit: rejects a cross-attempt childTaskId collision (same toolCallId, new runToken)', async () => {
-    const k = await freshKernel()
+    const { k, log } = await freshKernelAndLog()
     const parent = await k.createTask({ title: 'P', spec: '', budgetUSD: 10 })
+    await toRunning(log, parent.id)
     const base = {
       parentTaskId: parent.id, stepId: 's1', toolCallId: 'call_1',
       title: 'C', spec: 'child work',
@@ -269,8 +284,9 @@ describe('Kernel lifecycle', () => {
   })
 
   it('proposeSplit: auto policy approves with provenance; depth cap rejects', async () => {
-    const k = await freshKernel()
+    const { k, log } = await freshKernelAndLog()
     const parent = await k.createTask({ title: 'P', spec: '' })
+    await toRunning(log, parent.id)
     const auto = ApprovalPolicy.parse({ default: 'auto' })
     const base = {
       parentTaskId: parent.id, stepId: 's1', runToken: `step:${parent.id}:s1:a1`, toolCallId: 'call_2',
@@ -284,6 +300,20 @@ describe('Kernel lifecycle', () => {
     const approvedEvt = (await k.eventsFor(r.childTaskId)).find(e => e.kind === 'plan_approved')
     expect(approvedEvt?.payload).toMatchObject({ approvedBy: 'policy' })
     await expect(k.proposeSplit({ ...base, toolCallId: 'call_3', maxDepth: 0 })).rejects.toThrow(/depth/)
+  })
+
+  it('proposeSplit: refuses a split from a non-running (cancelled) parent — closes the cancel race', async () => {
+    const { k, log } = await freshKernelAndLog()
+    const parent = await k.createTask({ title: 'P', spec: '' })
+    await log.append({ taskId: parent.id, stepId: null, runToken: null, kind: EVENT_KIND.task_status_changed, payload: { taskId: parent.id, from: TASK_STATUS.draft, to: TASK_STATUS.cancelled } })
+    const args = {
+      parentTaskId: parent.id, stepId: 's1', runToken: `step:${parent.id}:s1:a1`, toolCallId: 'call_9',
+      title: 'C', spec: '', plan: { steps: [{ id: 'w1', role: 'worker', title: 'w', instructions: 'do', dependsOn: [], skillRefs: [], toolRefs: [] }] },
+      parentStep: { executorRef: 'api-loop', modelRef: 'fake/m', maxIterations: 5 },
+      policy: ApprovalPolicy.parse({}), maxDepth: 3,
+    }
+    expect(await codeOf(k.proposeSplit(args))).toBe(KERNEL_ERROR_CODE.invalid_transition)
+    expect((await k.listTasks()).filter(t => t.parentId === parent.id)).toHaveLength(0)
   })
 
   it('annotatePlan appends plan_annotated; replyFeedback resolves and answers the open feedback topic', async () => {

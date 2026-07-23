@@ -110,6 +110,13 @@ export class Kernel {
       const existing = state.splits.get(splitId)
       if (existing) return { splitId, childTaskId, gated: state.tasks.get(childTaskId)?.status === TASK_STATUS.awaiting_approval }
 
+      // a split may only ORIGINATE from a live step: reject when the parent is not running, so an
+      // `orc cancel` that already stamped a terminal status (under this same project lock) can never
+      // race a late task_split into an orphaned, auto-approved, unattended running subtree that the
+      // cancel sweep — folded before this child existed — never reaches.
+      if (parent.status !== TASK_STATUS.running)
+        throw new KernelError(KERNEL_ERROR_CODE.invalid_transition, `cannot split a '${parent.status}' task — its run is no longer live`)
+
       // childTaskId is attempt-independent (parentTaskId, stepId, toolCallId) but splitId carries
       // the runToken — so a different attempt/split reusing this childTaskId slips past the check
       // above. Reject it: re-appending task_created would poison the fold (duplicate subtree).
