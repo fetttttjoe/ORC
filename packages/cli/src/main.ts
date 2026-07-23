@@ -408,6 +408,7 @@ export function buildProgram(
         url: (cfg ?? loadConfig()).databaseUrl,
         port: opts.port,
         cwdProject: cfg ? { id: cfg.projectId, name: cfg.projectName, dir: cfg.dir } : undefined,
+        memoryHalfLifeDays: (cfg ?? loadConfig()).memoryHalfLifeDays,
         // mutations only when launched inside a project with a real runtime behind it
         actions: portFactory && plugin ? actions() : undefined,
         copilot: portFactory && plugin && discovery ? buildCopilotConfig(discovery) : undefined,

@@ -96,8 +96,10 @@ export function startGraphUi(opts: {
   // P6 interaction journaling: append one copilot_exchange event per completed exchange — the
   // conversation that caused an action is part of the record. Absent = exchanges unrecorded.
   appendExchange?: (x: { payload: CopilotExchangePayload; usage: Usage | null }) => Promise<void>
+  // threads config → sessions → graph heat: the same decay rate the store ranking uses
+  memoryHalfLifeDays?: number
 }): GraphUiServer {
-  const sessions = createProjectSessions({ url: opts.url, cwdProject: opts.cwdProject })
+  const sessions = createProjectSessions({ url: opts.url, cwdProject: opts.cwdProject, halfLifeDays: opts.memoryHalfLifeDays })
   // CSRF guard: minted per boot, readable only same-origin (GET /api/session), required as a
   // custom header on every mutation — cross-origin pages can neither read nor send it.
   const token = crypto.randomUUID()

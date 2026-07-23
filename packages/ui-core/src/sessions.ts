@@ -69,6 +69,9 @@ interface Session {
 export function createProjectSessions(opts: {
   url: string
   cwdProject?: { id: string; name: string; dir?: string }
+  // feeds buildGraph heat — the graph server passes the project's memoryHalfLifeDays so heat
+  // and store ranking share one decay rate
+  halfLifeDays?: number
 }): ProjectSessions {
   const sessions = new Map<string, Promise<Session>>()
 
@@ -78,7 +81,7 @@ export function createProjectSessions(opts: {
     const state = fold(events)
     const session: Session = {
       storage, events, state,
-      graph: buildGraph(state, events),
+      graph: buildGraph(state, events, { halfLifeDays: opts.halfLifeDays }),
       seq: events.at(-1)?.seq ?? 0,
       subscribers: new Set(),
       unsubscribe: async () => {},
@@ -88,7 +91,7 @@ export function createProjectSessions(opts: {
     session.unsubscribe = await storage.events.subscribe({ fromSeq: session.seq }, e => {
       session.events.push(e)
       session.state = fold(session.events)
-      const next = buildGraph(session.state, session.events)
+      const next = buildGraph(session.state, session.events, { halfLifeDays: opts.halfLifeDays })
       const patch = diffGraphs(session.graph, next)
       session.graph = next
       session.seq = e.seq
@@ -147,7 +150,7 @@ export function createProjectSessions(opts: {
       const s = await sessionFor(projectId)
       if (fromSeq >= s.seq) return null
       const past = s.events.filter(e => e.seq <= fromSeq)
-      const patch = diffGraphs(buildGraph(fold(past), past), s.graph)
+      const patch = diffGraphs(buildGraph(fold(past), past, { halfLifeDays: opts.halfLifeDays }), s.graph)
       return emptyPatch(patch) ? null : { seq: s.seq, patch, event: null, summary: null }
     },
 
