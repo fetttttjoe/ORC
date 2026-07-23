@@ -1,7 +1,7 @@
 import { RecordId, Surreal } from 'surrealdb'
 import { edge, orm, table, t } from 'surqlize'
 import {
-  deriveNoteProvenance, EVENT_KIND, LINK_KINDS, NOTE_KINDS, MemoryScope,
+  deriveNoteProvenance, EDGE_DIRECTION, EVENT_KIND, LINK_KINDS, NOTE_KINDS, MemoryScope,
   MemoryAccessedPayload, MemoryDeletedPayload, MemoryNote, MemoryWrittenPayload,
   type EventRecord, type LinkKind, type MemoryFilter, type NeighborResult, type NoteSummary,
 } from '@orc/contracts'
@@ -189,8 +189,8 @@ export class SurrealMemory {
     // each stored edge is traversed both ways (spec RG4), but tagged with direction so an asymmetric
     // kind stays unambiguous: the authored A→B edge is 'out' from A / 'in' from B.
     const edges: Edge[] = rows.flatMap(r => [
-      { from: r.fromId, to: r.toId, kind: r.kind, confidence: r.confidence, direction: 'out' },
-      { from: r.toId, to: r.fromId, kind: r.kind, confidence: r.confidence, direction: 'in' },
+      { from: r.fromId, to: r.toId, kind: r.kind, confidence: r.confidence, direction: EDGE_DIRECTION.out },
+      { from: r.toId, to: r.fromId, kind: r.kind, confidence: r.confidence, direction: EDGE_DIRECTION.in },
     ])
     const ranked = rankNeighbors(edges, [seed], { depth: opts.depth, kinds: opts.kinds })
     // join title/summary from the note docs (cheap: small result set)

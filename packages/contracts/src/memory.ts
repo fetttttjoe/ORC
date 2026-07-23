@@ -194,12 +194,18 @@ export const NoteSummary = z.object({
 })
 export type NoteSummary = z.infer<typeof NoteSummary>
 
+// Traversal direction relative to the seed — a matched value, so it lives as a const map, never
+// scattered 'out'/'in' literals. 'out' = seed →(via)→ neighbour; 'in' = neighbour →(via)→ seed.
+// Disambiguates asymmetric kinds (e.g. supersedes) that reverse-traversal would otherwise flatten.
+export const EDGE_DIRECTIONS = ['out', 'in'] as const
+export const EdgeDirection = z.enum(EDGE_DIRECTIONS)
+export type EdgeDirection = z.infer<typeof EdgeDirection>
+export const EDGE_DIRECTION = EdgeDirection.enum
+
 export const NeighborResult = z.object({
   id: z.string(), title: z.string(), summary: z.string(),
   via: LinkKind, depth: z.number().int().positive(), score: z.number(),
-  // 'out' = seed →(via)→ neighbour; 'in' = neighbour →(via)→ seed. Disambiguates asymmetric kinds
-  // (e.g. supersedes) that reverse-traversal would otherwise flatten into one ambiguous label.
-  direction: z.enum(['out', 'in']),
+  direction: EdgeDirection,
 })
 export type NeighborResult = z.infer<typeof NeighborResult>
 

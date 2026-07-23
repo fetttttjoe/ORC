@@ -2,7 +2,7 @@ import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync } from '
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { Command, InvalidArgumentError } from 'commander'
-import { EVENT_KIND, LINK_KINDS, MEMORY_ACCESS, PlanDraft, RUN_OUTCOME, STRATEGY, TASK_STATUS, LinkKind, type Analyzer, type EventRecord, type ExecutionPort, type Plan, type RunHandle } from '@orc/contracts'
+import { EDGE_DIRECTION, EVENT_KIND, LINK_KINDS, MEMORY_ACCESS, PlanDraft, RUN_OUTCOME, STRATEGY, TASK_STATUS, LinkKind, type Analyzer, type EventRecord, type ExecutionPort, type Plan, type RunHandle } from '@orc/contracts'
 import { openStorage, Kernel, fold, grantExtensionTrust, grantMcpTrust, initializeProject, isExtensionTrusted, isMcpTrusted, loadConfig, loadTrust, migrateDatabase, requireProject, taskUsage, type EventLog, type OrcConfig, type PluginHost, type ProjectConfig, type Storage } from '@orc/kernel'
 import { createVaultProjector, parsePlanFile } from '@orc/vault-projector'
 import { createMemory, probeMemory } from '@orc/memory'
@@ -643,7 +643,7 @@ export function buildProgram(
         // empty prints a sentinel (like ls/search's `_no notes_`) so a human isn't shown zero bytes.
         if (ranked.length === 0) { console.log('_no neighbors_'); return }
         // direction disambiguates asymmetric kinds: '→ supersedes' = seed supersedes n; '← supersedes' = n supersedes seed
-        for (const n of ranked) console.log(`${n.id}\t${n.direction === 'out' ? '→' : '←'} ${n.via}\t${n.depth}\t${n.score.toFixed(2)}\t${n.title}`)
+        for (const n of ranked) console.log(`${n.id}\t${n.direction === EDGE_DIRECTION.out ? '→' : '←'} ${n.via}\t${n.depth}\t${n.score.toFixed(2)}\t${n.title}`)
       } finally {
         await memory.close()
       }
