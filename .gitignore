@@ -15,3 +15,7 @@ review-findings.md
 skills-lock.json
 .agents/
 test-results/
+# local-only working files: the orc MCP config (dogfooding; the README documents the
+# equivalent `claude mcp add`) and one-off review reports
+.mcp.json
+FOUNDATION-REVIEW-*.md
