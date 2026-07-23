@@ -6,7 +6,7 @@ import { renderDetail } from './detail'
 import { LogView } from './log'
 import { current, navigate, onChange, type Selection, type Tab, type View } from './nav'
 import { planScope } from '@orc/contracts'
-import { EDGE, NODE_PREFIX } from '@orc/ui-core/graph'
+import { EDGE, NODE_PREFIX, stepNodeId } from '@orc/ui-core/graph'
 import { renderRequest, type OpenQuestion, type PlanNoteView, type PlansView, type TaskView } from './plan'
 import type { GraphRenderer } from './renderer'
 import { SigmaRenderer } from './sigma-renderer'
@@ -341,6 +341,14 @@ function watch(fromSeq: number): void {
         if (focusedTask) applyFocus() // fresh knowledge lights up inside the dimmed world
       }
       if (env.summary) {
+        // ripple the event through the graph: the nodes it touched flash for a few seconds
+        const touched: string[] = []
+        if (env.summary.noteRef) touched.push(env.summary.noteRef)
+        if (env.summary.taskId) {
+          touched.push(env.summary.taskId)
+          if (env.summary.stepId) touched.push(stepNodeId(env.summary.taskId, env.summary.stepId))
+        }
+        if (touched.length) renderer.flash(touched)
         conversation?.addSystemRow(env.summary)
         if (sel.node && sel.tab === 'log') logView.append(env.summary)
         if (sel.node && (sel.tab === 'chat' || sel.tab === 'request') && env.summary.taskId && env.summary.taskId === selectedTaskId()) {
