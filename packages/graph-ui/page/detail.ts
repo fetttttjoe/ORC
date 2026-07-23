@@ -4,8 +4,10 @@
 // value import from the browser-safe subpath: the ui-core index pulls in the server-side
 // sessions (pg/DBOS) and must never enter the page bundle
 import { artifactNodeId, noteNodeId, stepNodeId } from '@orc/ui-core/graph'
+import type { NoteAuthoringDraft, NoteRef } from '@orc/contracts'
 import { el } from './ui/el'
-import { Badge, Card, Empty, KV, Link, Pre, statusTone } from './ui/components'
+import { Badge, Btn, Card, Empty, KV, Link, openDialog, Pre, statusTone } from './ui/components'
+import { formatLinkSpec, parseLinkSpec } from './link-spec'
 
 interface TaskDetail {
   task: { id: string; title: string; status: string; spec: string; createdAt: string; parentId: string | null }
@@ -25,6 +27,15 @@ interface NoteDetail {
 }
 interface ArtifactDetail { path: string; sha256: string; size: number; stepId: string | null }
 
+// Capabilities the shell injects when the viewer may mutate (canAct). Detail views render the
+// dialogs; the SHELL owns the effects (api call, toast, navigation) — the same inversion as
+// `go`, so detail.ts stays a pure composition of ui/ primitives with no api import. null =
+// read-only viewer: the buttons simply don't render.
+export interface NoteDetailActions {
+  write(note: NoteAuthoringDraft): Promise<void>
+  remove(ref: NoteRef): Promise<void>
+}
+
 type Go = (node: string) => void
 
 const cost = (u: TaskDetail['usage']): string =>
@@ -36,7 +47,7 @@ const links = (parts: Array<HTMLElement | string>): HTMLElement => {
   return out
 }
 
-export function renderDetail(nodeId: string, d: unknown, go: Go): HTMLElement {
+export function renderDetail(nodeId: string, d: unknown, go: Go, notes?: NoteDetailActions | null): HTMLElement {
   if (d !== null && typeof d === 'object' && 'task' in d) {
     const t = d as TaskDetail
     return el('div', {},
@@ -100,7 +111,33 @@ export function renderDetail(nodeId: string, d: unknown, go: Go): HTMLElement {
       n.note.body ? Pre(n.note.body) : null,
       n.note.rules.length ? Card(['rules'], KV(n.note.rules.map((r, i) => [`#${i + 1}`, r]))) : null,
       n.note.sources.length ? Card(['sources'], KV(n.note.sources.map(s => [s.title ?? 'link', s.url]))) : null,
-    ))
+    ),
+      ...(notes && n.note.scope === 'project' ? [el('div', { class: 'row-split' },
+        Btn('edit', () => openDialog(`edit '${n.note.id}'`, [
+          { name: 'title', label: 'title', value: n.note.title },
+          { name: 'summary', label: 'summary', value: n.note.summary },
+          { name: 'body', label: 'body', kind: 'textarea', value: n.note.body },
+          { name: 'tags', label: 'tags', value: n.note.tags.join(', ') },
+          { name: 'links', label: 'links (kind:note-id, …)', value: formatLinkSpec(n.note.links) },
+        ], 'save', async v => {
+          if (!v.title?.trim()) throw new Error('title is required')
+          // explicit ''/[] (not omission): an emptied field is an intentional CLEAR —
+          // the gateway treats omission as keep, empties as clear
+          await notes.write({
+            id: n.note.id, title: v.title.trim(),
+            summary: v.summary ?? '', body: v.body ?? '',
+            tags: (v.tags ?? '').split(',').map(t => t.trim()).filter(Boolean),
+            links: parseLinkSpec(v.links ?? ''),
+          })
+        }), 'muted'),
+        Btn('delete', () => openDialog(`delete '${n.note.id}' — the content stays in the event log`, [
+          { name: 'confirm', label: `type '${n.note.id}' to confirm`, placeholder: n.note.id },
+        ], 'delete', async v => {
+          if (v.confirm !== n.note.id) throw new Error('id does not match — not deleting')
+          await notes.remove({ id: n.note.id, scope: n.note.scope })
+        }), 'danger'),
+      )] : []),
+    )
   }
   if (d !== null && typeof d === 'object' && 'ref' in d && 'totals' in d) {
     const m = d as { ref: string; tasks: Array<{ taskId: string; title: string; status: string; calls: number; usage: { inputTokens: number; outputTokens: number; costUSD: number | null } }>; totals: { inputTokens: number; outputTokens: number; costUSD: number | null } }

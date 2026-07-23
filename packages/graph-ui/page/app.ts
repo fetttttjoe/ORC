@@ -2,11 +2,12 @@ import type { GraphLink, GraphNode, LogRow } from '@orc/ui-core'
 import { api, canAct, initApi, session, setApiProject, type Project } from './api'
 import { renderChat } from './chat'
 import { Conversation } from './conversation'
-import { renderDetail } from './detail'
+import { renderDetail, type NoteDetailActions } from './detail'
 import { LogView } from './log'
 import { current, navigate, onChange, type Selection, type Tab } from './nav'
-import { planScope, TASK_STATUS } from '@orc/contracts'
-import { EDGE, NODE_PREFIX, stepNodeId } from '@orc/ui-core/graph'
+import { planScope, slugId, TASK_STATUS } from '@orc/contracts'
+import { EDGE, NODE_PREFIX, noteNodeId, stepNodeId } from '@orc/ui-core/graph'
+import { parseLinkSpec } from './link-spec'
 import { renderRequest, type OpenQuestion, type PlanNoteView, type PlansView, type TaskView } from './plan'
 import type { GraphRenderer } from './renderer'
 import { SigmaRenderer } from './sigma-renderer'
@@ -247,7 +248,26 @@ function renderNewRequest(): void {
     navigate({ node: taskId, tab: 'request' })
   }))
   b.classList.add('primary')
-  newRequestHost.replaceChildren(b)
+  const noteBtn = Btn('+ note', () => openDialog('new note', [
+    { name: 'title', label: 'title', placeholder: 'what to remember?' },
+    { name: 'summary', label: 'summary', placeholder: 'one line (optional)' },
+    { name: 'body', label: 'body', kind: 'textarea', placeholder: 'markdown (optional)' },
+    { name: 'tags', label: 'tags', placeholder: 'comma-separated (optional)' },
+    { name: 'links', label: 'links (kind:note-id, …)', placeholder: 'supersedes:old-note, other-note (optional)' },
+  ], 'save', async v => {
+    if (!v.title?.trim()) throw new Error('title is required')
+    const id = slugId(v.title.trim()) // throws its own friendly error into the dialog
+    await api.act('writeNote', {
+      id, title: v.title.trim(),
+      ...(v.summary?.trim() && { summary: v.summary.trim() }),
+      ...(v.body?.trim() && { body: v.body }),
+      ...(v.tags?.trim() && { tags: v.tags.split(',').map(t => t.trim()).filter(Boolean) }),
+      ...(v.links?.trim() && { links: parseLinkSpec(v.links) }),
+    })
+    toast(`noted '${id}'`, 'ok')
+    navigate({ node: noteNodeId('project', id), tab: 'detail' })
+  }), 'muted')
+  newRequestHost.replaceChildren(el('div', { class: 'row-split' }, b, noteBtn))
   renderChatManagement()
 }
 
@@ -260,7 +280,21 @@ async function renderInspector(): Promise<void> {
   switch (sel.tab) {
     case 'detail': {
       const detail = await api.node(sel.project, sel.node)
-      inspectorBody.replaceChildren(renderDetail(sel.node, detail, node => navigate({ node, tab: 'detail' })))
+      // capability injection: detail renders the dialogs, the shell owns the effects —
+      // same inversion as `go`, so detail.ts never imports the api layer
+      const notes: NoteDetailActions | null = canAct() ? {
+        write: async note => {
+          await api.act('writeNote', note)
+          toast('note saved', 'ok')
+          void renderInspector()
+        },
+        remove: async ref => {
+          await api.act('deleteNote', ref)
+          toast('note deleted', 'ok')
+          navigate({ node: null }) // the node is gone — don't re-render a dead selection
+        },
+      } : null
+      inspectorBody.replaceChildren(renderDetail(sel.node, detail, node => navigate({ node, tab: 'detail' }), notes))
       return
     }
     case 'chat': {
@@ -347,6 +381,13 @@ function watch(fromSeq: number): void {
         conversation?.addSystemRow(env.summary)
         if (sel.node && sel.tab === 'log') logView.append(env.summary)
         if (sel.node && (sel.tab === 'chat' || sel.tab === 'request') && env.summary.taskId && env.summary.taskId === selectedTaskId()) {
+          clearTimeout(chatTimer)
+          chatTimer = setTimeout(() => void renderInspector(), 300)
+        }
+        // the note the user is inspecting just changed — or just materialized after a
+        // create-navigate raced the async projector. Same debounced refresh the chat/request
+        // tabs already get; noteRef is the graph node id the flash path uses.
+        if (sel.node && sel.tab === 'detail' && env.summary.noteRef === sel.node) {
           clearTimeout(chatTimer)
           chatTimer = setTimeout(() => void renderInspector(), 300)
         }
