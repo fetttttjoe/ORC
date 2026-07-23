@@ -1,4 +1,4 @@
-import { EVENT_KIND, MemoryNoteInput, MemoryScope, type MemoryAuthor, type MemoryFilter, type MemoryNote, type MemoryStore, type NoteSummary } from '@orc/contracts'
+import { EVENT_KIND, foldLiveNotes, MemoryNoteInput, MemoryScope, noteKey, type MemoryAuthor, type MemoryFilter, type MemoryNote, type MemoryStore, type NoteSummary } from '@orc/contracts'
 import type { EventLog } from '@orc/kernel'
 import type { SurrealMemory } from './surreal'
 
@@ -15,28 +15,37 @@ export function createMemoryStore(opts: { log: EventLog; surreal: SurrealMemory;
       // empty (''/[]) still clears; undefined-valued keys count as omissions (CLI optional
       // flags arrive that way). Unknown keys on the merge base (createdAt, revision, …) are
       // stripped by the schema parse.
-      // ponytail: the merge base reads the projector, which may lag one flush behind the log —
-      // fold the base from the event log instead if rapid same-note rewrites ever matter.
       const supplied = Object.fromEntries(Object.entries(input).filter(([, v]) => v !== undefined))
-      const existing = typeof input.id === 'string'
-        ? await surreal.get(input.id, typeof supplied.scope === 'string' ? supplied.scope : MemoryScope.project)
-        : null
-      const parsed = MemoryNoteInput.parse(existing ? { ...existing, ...supplied } : input) // reject malformed BEFORE appending
-      // the gateway stamps the runtime's Git revision — agents cannot claim another one
-      const note = { ...parsed, sourceRevision: opts.sourceRevision ?? null }
-      try {
-        await log.append({
-          taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_written,
-          payload: { note, author }, idempotencyKey: writeOpts?.idempotencyKey ?? null,
-        })
-      } catch (err) {
-        // A keyed replay whose payload differs only in the gateway stamp (a new HEAD after a
-        // restart) is still the SAME tool call: the first committed write stands, this one
-        // must not fail the surrounding operation.
-        const conflicted = writeOpts?.idempotencyKey
-          && err instanceof Error && err.message.includes('reused with different event data')
-        if (!conflicted) throw err
-      }
+      const scope = typeof supplied.scope === 'string' ? supplied.scope : MemoryScope.project
+      // Author truth from truth: fold the merge base from the EVENT LOG inside the append
+      // transaction, never from the async projection. Two writes to one note inside the projector's
+      // flush window otherwise merge against a stale base and append REGRESSED field values into the
+      // canonical log itself — corruption every rebuild faithfully reproduces (the projection heals;
+      // the log does not). read + merge + append are atomic under the project advisory lock.
+      // ponytail: folds the whole memory-event history per write — fine for a hand-authored graph;
+      // add a (scope,id)-indexed read if the corpus ever makes this hot.
+      const note = await log.transaction(async tx => {
+        const existing = typeof input.id === 'string'
+          ? foldLiveNotes(await tx.after(0, [EVENT_KIND.memory_written, EVENT_KIND.memory_deleted])).get(noteKey(scope, input.id))?.note ?? null
+          : null
+        const parsed = MemoryNoteInput.parse(existing ? { ...existing, ...supplied } : input) // reject malformed BEFORE appending
+        // the gateway stamps the runtime's Git revision — agents cannot claim another one
+        const merged = { ...parsed, sourceRevision: opts.sourceRevision ?? null }
+        try {
+          await tx.append({
+            taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_written,
+            payload: { note: merged, author }, idempotencyKey: writeOpts?.idempotencyKey ?? null,
+          })
+        } catch (err) {
+          // A keyed replay whose payload differs only in the gateway stamp (a new HEAD after a
+          // restart) is still the SAME tool call: the first committed write stands, this one
+          // must not fail the surrounding operation.
+          const conflicted = writeOpts?.idempotencyKey
+            && err instanceof Error && err.message.includes('reused with different event data')
+          if (!conflicted) throw err
+        }
+        return merged
+      })
       // event-first: the record materializes via the projector shortly; return a best-effort
       // read (may be null within the flush window — callers treat write as fire-and-forget).
       // retrievedAt is blank here for the same reason createdAt is: the projector stamps it from
@@ -54,7 +63,7 @@ export function createMemoryStore(opts: { log: EventLog; surreal: SurrealMemory;
     get: (id, scope = MemoryScope.project) => surreal.get(id, scope),
     // The access counter is event-sourced like everything else, so this is an append, not a
     // Surreal write — the projector is still the only thing that touches the read model.
-    async recordAccess(id, scope = MemoryScope.project, mode, author) {
+    async recordAccess(id, scope = MemoryScope.project, mode, author, accessOpts) {
       await log.append({
         // envelope binds the access to the acting step when the author carries one — per-task
         // pull counts fold from the envelope instead of payload archaeology (P5 token-economy)
@@ -63,6 +72,8 @@ export function createMemoryStore(opts: { log: EventLog; surreal: SurrealMemory;
         taskId: author?.taskId || null, stepId: author?.stepId || null, runToken: author?.runToken || null,
         kind: EVENT_KIND.memory_accessed,
         payload: { id, scope, mode, author },
+        // at-least-once: a crash-retry of the surrounding operation must not append a second access
+        idempotencyKey: accessOpts?.idempotencyKey ?? null,
       })
     },
     list: (filter?: MemoryFilter): Promise<NoteSummary[]> => surreal.list(filter),

@@ -107,6 +107,26 @@ describe('MemoryStore gateway', () => {
     await log.close()
   })
 
+  it('merge base folds from the log, not the projection: a stalled projector cannot regress fields', async () => {
+    const pg = await createTestDb(); drops.push(pg.drop)
+    const ts = await createTestSurreal(); drops.push(ts.drop)
+    const log = (await openStorage(pg.url, { projectId: TEST_PROJECT_ID })).events
+    const surreal = await SurrealMemory.open(ts)
+    const store = createMemoryStore({ log, surreal })
+    const notePayload = z.object({ note: z.object({ title: z.string(), body: z.string(), tags: z.array(z.string()) }) })
+    // write A (full), then partial B WITHOUT projecting A — the projector is "stalled". Under the old
+    // projection-based merge, surreal.get returns null and B clears body/tags into the canonical log;
+    // folding the merge base from the log preserves them.
+    await store.write({ id: 'auth', title: 'Auth', body: 'long body', tags: ['auth'] }, { source: 'cli' })
+    await store.write({ id: 'auth', title: 'Auth v2' }, { source: 'cli' })
+    const events = await log.all()
+    const { note } = notePayload.parse(events[1]!.payload)
+    expect(note.title).toBe('Auth v2')       // supplied → replaced
+    expect(note.body).toBe('long body')       // omitted → preserved despite the un-projected first write
+    expect(note.tags).toEqual(['auth'])
+    await log.close()
+  })
+
   it('rejects a malformed note without appending', async () => {
     const pg = await createTestDb(); drops.push(pg.drop)
     const ts = await createTestSurreal(); drops.push(ts.drop)
