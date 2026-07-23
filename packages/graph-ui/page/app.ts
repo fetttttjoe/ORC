@@ -4,7 +4,7 @@ import { renderChat } from './chat'
 import { Conversation } from './conversation'
 import { renderDetail } from './detail'
 import { LogView } from './log'
-import { current, navigate, onChange, type Selection, type Tab, type View } from './nav'
+import { current, navigate, onChange, type Selection, type Tab } from './nav'
 import { planScope } from '@orc/contracts'
 import { EDGE, NODE_PREFIX, stepNodeId } from '@orc/ui-core/graph'
 import { renderRequest, type OpenQuestion, type PlanNoteView, type PlansView, type TaskView } from './plan'
@@ -15,7 +15,6 @@ import { el } from './ui/el'
 
 // ---- shell v2: nav | conversation | resizer | dock(graph + inspector overlay) ----
 const graphHost = el('div', { class: 'graph-host' })
-const viewModes = el('div', { class: 'viewmodes' })
 const newRequestHost = el('div', {})
 const projectList = el('div', { class: 'section' })
 const taskList = el('div', { class: 'section' })
@@ -36,7 +35,6 @@ const dock = el('main', { class: 'main' }, graphHost, inspector)
 const app = el('div', { class: 'app' },
   el('aside', { class: 'sidebar' },
     el('div', { class: 'brand' }, el('span', { class: 'logo' }), el('span', {}, 'orc')),
-    viewModes,
     newRequestHost,
     Section('chats', projectList),
     Section('requests', taskList),
@@ -52,10 +50,10 @@ const renderer: GraphRenderer = new SigmaRenderer(graphHost)
 renderer.onNodeClick(id => navigate({ node: id }))
 const logView = new LogView(node => navigate({ node, tab: 'detail' }))
 
-// ---- dock resize (split view only; other views are class-driven) ----
+// ---- dock resize ----
 let dockPx = Math.round(window.innerWidth * 0.4)
 const applyColumns = (): void => {
-  app.style.gridTemplateColumns = sel.view === 'split' ? `240px 1fr 5px ${dockPx}px` : ''
+  app.style.gridTemplateColumns = `240px 1fr 5px ${dockPx}px`
 }
 resizer.addEventListener('pointerdown', (down: PointerEvent) => {
   down.preventDefault()
@@ -72,7 +70,7 @@ resizer.addEventListener('pointerdown', (down: PointerEvent) => {
 
 // ---- state ----
 // sentinel start: the FIRST onChange fire must see project/node as "changed" so deep links load
-let sel: Selection = { project: '', node: null, tab: 'detail', view: 'split' }
+let sel: Selection = { project: '', node: null, tab: 'detail' }
 let stream: { close: () => void } | undefined
 let seq = 0
 let projects: Project[] = []
@@ -87,10 +85,6 @@ let conversation: Conversation | null = null
 const TAB_ITEMS: ReadonlyArray<{ id: Tab; label: string }> = [
   { id: 'request', label: 'Request' }, { id: 'detail', label: 'Detail' }, { id: 'chat', label: 'Chat' }, { id: 'log', label: 'Log' },
 ]
-const VIEW_ITEMS: ReadonlyArray<{ id: View; label: string }> = [
-  { id: 'chat', label: 'chat' }, { id: 'split', label: 'split' }, { id: 'graph', label: 'graph' },
-]
-
 const selectedTaskId = (): string | null => {
   if (!sel.node) return null
   if (nodes.get(sel.node)?.type === 'task') return sel.node
@@ -125,8 +119,6 @@ function setStatus(live: boolean, text: string): void {
 }
 
 function renderSidebar(): void {
-  viewModes.replaceChildren(...VIEW_ITEMS.map(v =>
-    el('button', { class: `tab${v.id === sel.view ? ' active' : ''}`, onClick: () => navigate({ view: v.id }) }, v.label)))
   projectList.replaceChildren(...projects.map(p => NavItem({
     label: p.name ?? p.id.slice(0, 8),
     dot: p.id === sel.project ? 'live' : '',
@@ -408,7 +400,6 @@ onChange(s => {
     const nodeChanged = s.node !== sel.node
     sel = s
     setApiProject(sel.project) // mutations carry the viewed project; the server fences mismatches
-    app.className = `app view-${sel.view}`
     applyColumns()
     if (projectChanged) { shownPlanVersion = null; renderNewRequest(); refreshModels(); await loadProject() }
     if (nodeChanged) shownPlanVersion = null
