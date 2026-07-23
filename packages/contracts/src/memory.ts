@@ -243,8 +243,11 @@ export interface MemoryStore {
   search(query: string, filter?: MemoryFilter): Promise<NoteSummary[]>
   neighbors(seed: string, opts?: { kinds?: LinkKind[]; depth?: number; scope?: string }): Promise<NeighborResult[]>
   // called by the pull call sites (tools, CLI) rather than inside get(), so a traversal that
-  // reads N notes internally records one access against its seed, not N against its neighbours
-  recordAccess(id: string, scope: string | undefined, mode: MemoryAccessMode, author: MemoryAuthor): Promise<void>
+  // reads N notes internally records one access against its seed, not N against its neighbours.
+  // idempotencyKey: like write(), a tool-driven access runs inside an at-least-once operation — a
+  // key keeps a crash-retry from double-counting the activation signal the lifecycle is tuned on
+  // (the CLI path has no retry machinery and stays keyless).
+  recordAccess(id: string, scope: string | undefined, mode: MemoryAccessMode, author: MemoryAuthor, opts?: { idempotencyKey?: string }): Promise<void>
 }
 
 // Composed provenance string for createdBy/updatedBy (frontmatter + read model).

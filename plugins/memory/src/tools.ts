@@ -186,14 +186,16 @@ export function memoryTools(store: MemoryStore, author: MemoryAuthor, tier: Memo
         type: 'object', required: ['id'],
         properties: { id: idSchema, scope: idSchema, budget: budgetSchema },
       },
-      execute: async input => {
+      execute: async (input, toolCallId) => {
         try {
           const q = ReadInput.parse(input)
           const n = await store.get(q.id, q.scope)
           if (!n) return ok({ note: null })
           // recorded here rather than in store.get: this is the call site that knows a pull
           // actually delivered a note to a model. A miss above records nothing — nothing was read.
-          await store.recordAccess(q.id, q.scope, MEMORY_ACCESS.read, author)
+          // keyed like memory_write so an at-least-once retry doesn't double-count the access.
+          const accessKey = author.runToken && toolCallId ? `${author.runToken}:tool:${toolCallId}:access:${q.id}` : undefined
+          await store.recordAccess(q.id, q.scope, MEMORY_ACCESS.read, author, { idempotencyKey: accessKey })
           // every pull tool honors its budget (spec RG5) — metadata cannot bypass body truncation.
           return ok(fitMemoryNoteToBudget(n, q.budget))
         } catch (e) { return err(e) }
@@ -212,13 +214,14 @@ export function memoryTools(store: MemoryStore, author: MemoryAuthor, tier: Memo
           budget: budgetSchema,
         },
       },
-      execute: async input => {
+      execute: async (input, toolCallId) => {
         try {
           const q = NeighborsInput.parse(input)
           const ranked = await store.neighbors(q.seed, { kinds: q.kinds, depth: q.depth, scope: q.scope })
           // one access against the SEED, not one per neighbour: the seed is what was pulled from,
           // and the neighbours are summaries the model may never read.
-          if (ranked.length > 0) await store.recordAccess(q.seed, q.scope, MEMORY_ACCESS.neighbors, author)
+          const accessKey = author.runToken && toolCallId ? `${author.runToken}:tool:${toolCallId}:access:${q.seed}` : undefined
+          if (ranked.length > 0) await store.recordAccess(q.seed, q.scope, MEMORY_ACCESS.neighbors, author, { idempotencyKey: accessKey })
           const r = applyBudget(ranked, n => n.title + n.summary, { limit: 20, budget: q.budget })
           return ok({
             neighbors: r.items, truncated: r.truncated, omitted: r.omitted,
