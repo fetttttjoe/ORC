@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from 'bun:test'
 import { createHash } from 'node:crypto'
-import { writeFileSync } from 'node:fs'
+import { mkdtempSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import path from 'node:path'
 import pg from 'pg'
 import { drizzle } from 'drizzle-orm/node-postgres'
@@ -75,6 +76,7 @@ describe('DBOS execution port (integration)', () => {
   let log: EventLog
   let teardown: () => Promise<void>
   let dbUrl: string
+  let projectDir: string
   // Interleaving seam: runs just before any log transaction opens, so a test can commit a
   // competing write into a check-then-append window. Null except inside the test that arms it.
   let beforeTransaction: (() => Promise<void>) | null = null
@@ -91,7 +93,10 @@ describe('DBOS execution port (integration)', () => {
       return realTransaction(fn)
     }
     kernel = new Kernel(log)
-    const config = testConfig(db.url)
+    // isolated dir: bare runs now default their workspace to config.dir — tests that write
+    // real files (declared outputs) must land in a scratch dir, never the actual repo
+    projectDir = mkdtempSync(path.join(tmpdir(), 'orc-project-'))
+    const config = testConfig(db.url, { dir: projectDir })
     port = await createDbosPort({
       storage, config,
       providers: new Map([['fake', fakeProvider]]),
@@ -167,6 +172,37 @@ describe('DBOS execution port (integration)', () => {
     expect(state.steps.get(t.id)?.get('b')?.attempt).toBe(2)
     expect((await kernel.getTask(t.id))?.status).toBe(TASK_STATUS.done)
   }, 15_000) // two full DBOS workflows — bun's 5s default is too tight under suite load
+
+  // A run with no explicit cwd works on the project, never in an empty scratch dir — scenario-2
+  // burned five verify attempts in workspaces where every fs_read of the repo was ENOENT.
+  it('a bare startRun records the project dir as its cwd', async () => {
+    const t = await approvedTask()
+    expect(await (await port.startRun(t.id)).wait()).toBe('done')
+    expect((await kernel.state()).runs.get(t.id)?.at(-1)?.cwd).toBe(projectDir)
+  }, 15_000)
+
+  // A retry must re-enter the world the run failed in. Inheritance skips null-cwd runs: histories
+  // from before the project-dir default carry bare retries (scenario-2's log is exactly
+  // [repo, null, null, null]) that would poison plain last-run inheritance.
+  it("retry without --cwd inherits the last run that HAD a cwd, over null-cwd history", async () => {
+    const behavior: Record<string, 'ok' | 'fail'> = { a: 'ok', b: 'fail' }
+    const t = await approvedTask(behavior)
+    const shared = mkdtempSync(path.join(tmpdir(), 'orc-cwd-'))
+    expect(await (await port.startRun(t.id, { cwd: shared })).wait()).toBe('blocked')
+    // fabricate a pre-fix bare retry: run_started with cwd null (only records the run in fold)
+    await log.transaction(async tx => {
+      await tx.append({
+        taskId: t.id, stepId: null, runToken: null, kind: EVENT_KIND.run_started,
+        payload: { taskId: t.id, planVersion: 1, retryIndex: 1, workflowId: `run:${t.id}:v1:r1`, cwd: null },
+      })
+    })
+
+    behavior.b = 'ok'
+    expect(await (await port.retry(t.id)).wait()).toBe('done')
+
+    const runs = (await kernel.state()).runs.get(t.id) ?? []
+    expect(runs.map(r => r.cwd)).toEqual([shared, null, shared]) // inherited past the poison, not defaulted away
+  }, 15_000)
 
   it('ctx.operation journals before/after and runs the effect once across attached workflows', async () => {
     const t = await approvedTask({}, draftFixture([stepFixture()]))
