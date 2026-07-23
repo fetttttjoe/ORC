@@ -58,6 +58,22 @@ describe('MemoryStore gateway', () => {
     await log.close()
   })
 
+  it('tolerates a keyed replay whose payload changed only by the gateway stamp (typed conflict, not a throw)', async () => {
+    const pg = await createTestDb(); drops.push(pg.drop)
+    const ts = await createTestSurreal(); drops.push(ts.drop)
+    const log = (await openStorage(pg.url, { projectId: TEST_PROJECT_ID })).events
+    const surreal = await SurrealMemory.open(ts)
+    const author: MemoryAuthor = { source: 'agent', runToken: 'step:t1:s1:a1' }
+    const key = 'step:t1:s1:a1:tool:c1:memory:auth'
+    // same tool call replayed after a restart: identical draft, but a new Git HEAD stamp → the
+    // memory_written payload DIFFERS. The event log throws KernelError(idempotency_conflict); the
+    // gateway must recognize it by CODE and swallow it (the first write stands), not fail the op.
+    await createMemoryStore({ log, surreal, sourceRevision: 'sha-A' }).write({ id: 'auth', title: 'Auth' }, author, { idempotencyKey: key })
+    await createMemoryStore({ log, surreal, sourceRevision: 'sha-B' }).write({ id: 'auth', title: 'Auth' }, author, { idempotencyKey: key })
+    expect(await log.all()).toHaveLength(1) // one event; the differing replay was tolerated, not thrown
+    await log.close()
+  })
+
   it('stamps the gateway sourceRevision — agent-supplied values are overwritten', async () => {
     const pg = await createTestDb(); drops.push(pg.drop)
     const ts = await createTestSurreal(); drops.push(ts.drop)

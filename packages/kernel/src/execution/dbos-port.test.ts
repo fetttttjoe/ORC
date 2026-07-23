@@ -204,6 +204,28 @@ describe('DBOS execution port (integration)', () => {
     expect(runs.map(r => r.cwd)).toEqual([shared, null, shared]) // inherited past the poison, not defaulted away
   }, 15_000)
 
+  // Containment (§D#3): an uncaught error in the run workflow AFTER the task is 'running' must not
+  // strand it 'running' with a burned ERROR workflow — it settles 'blocked', the retryable state.
+  // Inject a throw into the finish path for all its retries, then let the contain transaction through.
+  it('an uncaught run-workflow failure is contained: the task settles blocked, not stuck running', async () => {
+    const t = await approvedTask({}, draftFixture([stepFixture({ id: 'a', title: 'a', instructions: 'only' })]))
+    let finishThrows = 0
+    beforeTransaction = async () => {
+      if (!(await log.byTask(t.id)).some(e => e.kind === EVENT_KIND.step_completed)) return
+      // fail every finish attempt (RETRY_POLICY = 4), then stop so the catch's contain append commits
+      if (finishThrows < 4) { finishThrows++; throw new Error('PROBE: injected finish-path failure') }
+    }
+    let threw = false
+    try {
+      await (await port.startRun(t.id)).wait()
+    } catch { threw = true } finally {
+      beforeTransaction = null
+    }
+    expect(finishThrows).toBe(4)  // the injection actually armed and exhausted retries
+    expect(threw).toBe(true)      // the original error still propagates to the caller
+    expect((await kernel.getTask(t.id))?.status).toBe(TASK_STATUS.blocked) // contained → retryable, not stuck running
+  }, 30_000)
+
   it('ctx.operation journals before/after and runs the effect once across attached workflows', async () => {
     const t = await approvedTask({}, draftFixture([stepFixture()]))
     operationTasks.add(t.id)
