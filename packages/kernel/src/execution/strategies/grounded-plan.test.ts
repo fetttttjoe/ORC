@@ -150,4 +150,25 @@ describe('foldPlanNotes (log-fold, projection-independent)', () => {
     ], planScope('t1'))
     expect(notes.map(n => n.title)).toEqual(['Mine'])
   })
+
+  it('folds a plan note carrying a citation — retrievedAt is stamped from the event, not required from the writer', () => {
+    // regression: foldPlanNotes forgot to stamp sources.retrievedAt and threw MemoryNote.parse on
+    // every sourced plan note, which wedged human approval (planGraphHash) and finalize_plan.
+    const scope = planScope('t1')
+    const ev = written({ id: 'masterplan', scope, kind: 'plan', title: 'M', sources: [{ url: 'https://example.com/spec' }] })
+    const notes = foldPlanNotes([ev], scope)
+    expect(notes).toHaveLength(1)
+    expect(notes[0]!.sources[0]!.retrievedAt).toBe(ev.ts) // stamped from the canonical event ts
+  })
+
+  it('is lenient: one unparseable memory_written (any scope) is skipped, not fatal to the whole fold', () => {
+    const scope = planScope('t1')
+    const poison: EventRecord = {
+      seq: ++seq, projectId: 'p', idempotencyKey: null, taskId: null, stepId: null, runToken: null,
+      kind: EVENT_KIND.memory_written, payload: { note: { id: 'BAD ID WITH SPACES' }, author: { source: 'agent' } },
+      usage: null, ts: '2026-01-01T00:00:59.000Z',
+    }
+    const notes = foldPlanNotes([poison, written({ id: 'masterplan', scope, kind: 'plan', title: 'M' })], scope)
+    expect(notes.map(n => n.id)).toEqual(['masterplan'])
+  })
 })
