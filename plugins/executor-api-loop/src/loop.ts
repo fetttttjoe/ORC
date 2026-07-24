@@ -1,6 +1,6 @@
 import { generateText, type JSONValue, type LanguageModel, type ModelMessage, type ToolSet } from 'ai'
 import {
-  EVENT_KIND, FAILURE_CLASS, OPERATION_KIND, SIGNAL_OUTCOME, UNIFIED_EVENT_TYPE, terminalError,
+  EVENT_KIND, FAILURE_CLASS, MEMORY_TOOL_NAME, MemoryWriteResult, OPERATION_KIND, SIGNAL_OUTCOME, UNIFIED_EVENT_TYPE, terminalError,
   type AgentExecutor, type EventDraft, type ExecutorContext, type Signal,
   type SplitResult, type UnifiedEvent, type Usage,
 } from '@orc/contracts'
@@ -152,10 +152,21 @@ export function apiLoopExecutor(): AgentExecutor<LanguageModel> {
         const tools = toolSet(ctx.extraTools)
         const base = { stepId: ctx.step.id, runToken: ctx.runToken }
         let persistedThrough = 0 // messages[0..persistedThrough) are already in an agent_call event
+        // set right after a memory_write result lints with a warning; nudged into the very next
+        // iteration's prompt then cleared — fires once per warning, at any point in the budget
+        // (unlike budgetNote, this is NOT gated to the endgame window).
+        let pendingLintNudge: { id: string; warning: string } | null = null
 
         for (let iteration = 1; iteration <= ctx.step.maxIterations; iteration++) {
           const note = budgetNote(iteration, ctx.step.maxIterations)
           if (note) messages.push({ role: 'user', content: note })
+          if (pendingLintNudge) {
+            messages.push({
+              role: 'user',
+              content: `memory lint on '${pendingLintNudge.id}': ${pendingLintNudge.warning}. Restructure that note before you signal — the warning is not optional.`,
+            })
+            pendingLintNudge = null
+          }
           const remaining = await ctx.checkpoint(`budget:${iteration}`, ctx.budgetRemainingUSD)
           if (remaining !== null && remaining <= 0) {
             yield { type: UNIFIED_EVENT_TYPE.error, class: FAILURE_CLASS.budget_exceeded, message: `budget exhausted before iteration ${iteration}` }
@@ -253,6 +264,13 @@ export function apiLoopExecutor(): AgentExecutor<LanguageModel> {
               const call = toolCalls[i]!
               yield { type: UNIFIED_EVENT_TYPE.tool_call, toolCallId: call.toolCallId, toolName: call.toolName, input: call.input }
               yield { type: UNIFIED_EVENT_TYPE.tool_result, toolCallId: call.toolCallId, toolName: call.toolName, output: results[i]!.output, isError: results[i]!.isError }
+              // noteLint warnings (plugins/memory) are advisory and observed live to be ignored —
+              // carry the first one into the next iteration's prompt instead of leaving it inert.
+              if (call.toolName === MEMORY_TOOL_NAME.write && !results[i]!.isError) {
+                const parsed = MemoryWriteResult.safeParse(results[i]!.output)
+                if (parsed.success && parsed.data.warnings?.length)
+                  pendingLintNudge = { id: parsed.data.id, warning: parsed.data.warnings[0]! }
+              }
             }
 
             messages.push({

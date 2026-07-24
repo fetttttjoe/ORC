@@ -100,6 +100,17 @@ export const NOTE_KIND = NoteKind.enum
 // plan scopes are derived by planScope(taskId) in plan.ts.
 export enum MemoryScope { project = 'project' }
 
+// The memory tool surface by name — matched values, never scattered literals. Owned in
+// contracts so the executor loop (which cannot import the memory plugin) matches the same
+// spelling the plugin registers. tools.ts derives its registrations from this map.
+export const MEMORY_TOOL_NAME = {
+  write: 'memory_write', search: 'memory_search', read: 'memory_read', neighbors: 'memory_neighbors',
+} as const
+
+// memory_write's result envelope (tools.ts constructs it; the loop parses it — no casts).
+export const MemoryWriteResult = z.object({ id: z.string(), warnings: z.array(z.string()).optional() })
+export type MemoryWriteResult = z.infer<typeof MemoryWriteResult>
+
 // Models pass a bare string where a one-element array is meant often enough to cost real
 // iterations (a scenario-2 verify step lost a turn to `paths: "src/x.ts"` → zod error → retry).
 // Accept the scalar as [scalar] at this boundary — a typed union, not z.preprocess, so the
