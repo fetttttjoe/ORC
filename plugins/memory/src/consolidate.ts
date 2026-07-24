@@ -85,5 +85,8 @@ export async function consolidateTask(
   const steps = (await deps.store.list({ scope: planScope(taskId) })).map(n => ({ title: n.title, summary: n.summary }))
   const derivedFrom = await accessedProjectIds(deps.log, taskId)
   if (!opts.force && !isSubstantive({ steps, derivedFrom })) return null
-  return deps.store.write(consolidatedNote({ taskTitle: title, steps, derivedFrom }), { source: 'cli' }, { idempotencyKey: `consolidate:${taskId}` })
+  // force (an explicit manual request) always REWRITES; the auto path keys by task so a redelivered
+  // completion converges on one event instead of appending a duplicate memory_written.
+  const writeOpts = opts.force ? {} : { idempotencyKey: `consolidate:${taskId}` }
+  return deps.store.write(consolidatedNote({ taskTitle: title, steps, derivedFrom }), { source: 'cli' }, writeOpts)
 }
