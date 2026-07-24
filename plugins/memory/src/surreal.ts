@@ -1,12 +1,15 @@
+import { z } from 'zod'
 import { RecordId, Surreal } from 'surrealdb'
 import { edge, orm, table, t } from 'surqlize'
 import {
   activation, activationBoost, DEFAULT_HALF_LIFE_DAYS,
   deriveNoteProvenance, EDGE_DIRECTION, EVENT_KIND, LINK_KINDS, NOTE_KINDS, MemoryScope,
   MemoryAccessedPayload, MemoryDeletedPayload, MemoryNote, MemoryWrittenPayload,
-  type EventRecord, type NeighborQuery, type MemoryFilter, type NeighborResult, type NoteSummary,
+  SEARCH_MODE, errorMessage, noteKey,
+  type EmbeddingProvider, type EventRecord, type NeighborQuery, type MemoryFilter,
+  type MemorySearchOpts, type NeighborResult, type NoteSummary,
 } from '@orc/contracts'
-import { rankNeighbors, type Edge } from './rank'
+import { rankNeighbors, rrfFuse, type Edge } from './rank'
 
 // The read model's table names — single spelling for every builder call and RecordId.
 enum Tb { Note = 'note', Meta = 'meta', Link = 'link' }
@@ -35,6 +38,9 @@ const noteTable = table(Tb.Note, {
   rationale: t.string(), uncertainty: t.array(t.string()), zone: t.option(t.array(t.string())),
   createdAt: t.string(), createdBy: t.string(), updatedAt: t.string(), updatedBy: t.string(),
   revision: t.number(), hits: t.option(t.number()), lastAccessedAt: t.option(t.string()),
+  // the note's dense vector (embedder-derived, Tier-2 like hits) — set only when an embedder was
+  // configured at write/rebuild; the semantic scan reads it raw, toNote/toSummary drop it.
+  embedding: t.option(t.array(t.number())),
 })
 const metaTable = table(Tb.Meta, { seq: t.number() })
 
@@ -51,6 +57,15 @@ const linkTable = edge(Tb.Note, Tb.Link, Tb.Note, {
 // RecordId key = `${scope}:${id}` (scope/id are separately restricted to [a-z0-9-], so ':' is
 // an unambiguous separator); the table itself is always 'note'.
 const key = (scope: string, id: string) => `${scope}:${id}`
+
+// Raw semantic-scan rows — the fields the cosine SELECT projects, parsed (never cast) at the
+// boundary like every other DB read. hits/lastAccessedAt are optional (a note may predate them).
+const SemanticRow = z.object({
+  noteId: z.string(), scope: z.string(), title: z.string(),
+  categories: z.array(z.string()), tags: z.array(z.string()), summary: z.string(),
+  hits: z.number().optional(), lastAccessedAt: z.string().nullable().optional(),
+  score: z.number(),
+})
 
 const CONNECT_TIMEOUT_MS = 5_000
 const CLOSE_TIMEOUT_MS = 2_000
@@ -77,12 +92,16 @@ function makeOrm(surreal: Surreal) {
 type Db = ReturnType<typeof makeOrm>
 
 export class SurrealMemory {
-  private constructor(private readonly surreal: Surreal, private readonly db: Db) {}
+  private constructor(
+    private readonly surreal: Surreal,
+    private readonly db: Db,
+    private readonly embedder?: EmbeddingProvider,
+  ) {}
 
   static async open(t: {
     url: string; ns: string; db: string; username: string; password: string
     connectTimeoutMs?: number
-  }): Promise<SurrealMemory> {
+  }, embedder?: EmbeddingProvider): Promise<SurrealMemory> {
     const surreal = new Surreal()
     try {
       // The driver's connect() does NOT reject on an unreachable endpoint — measured still
@@ -108,7 +127,7 @@ export class SurrealMemory {
       // `link` (default TYPE ANY, so RELATE works) is defined too: neighbors() SELECTs from it
       // even when no edge was ever materialized.
       await surreal.query([Tb.Note, Tb.Meta, Tb.Link].map(tb => `DEFINE TABLE IF NOT EXISTS ${tb} SCHEMALESS;`).join(' '))
-      return new SurrealMemory(surreal, makeOrm(surreal))
+      return new SurrealMemory(surreal, makeOrm(surreal), embedder)
     } catch (err) {
       // connect() opens a live socket; if signin/use/DEFINE then throws, don't leak it
       // (symmetry with PostgresStore.open, which pool.end()s on an assertMigrated throw).
@@ -123,6 +142,11 @@ export class SurrealMemory {
   // transaction, gated by the ordered cursor — redelivery of any memory event is a no-op,
   // and revision counts distinct accepted writes, never delivery attempts.
   async applyEvent(e: EventRecord): Promise<boolean> {
+    // Embed BEFORE opening the transaction: an embedder round-trip must never be held inside a
+    // Surreal tx. Embedding is derived data (recomputed on every rebuild), so re-embedding a
+    // redelivered event is harmless waste, not a correctness issue.
+    // ponytail: re-embeds even a redelivered memory_written; gate behind the cursor if it bites.
+    const embedding = e.kind === EVENT_KIND.memory_written ? await this.embedWritten(e) : undefined
     return this.db.transaction(async tx => {
       const cursor = (await tx.select(Tb.Meta, 'cursor'))[0]?.seq ?? 0
       if (e.seq <= cursor) return false
@@ -157,6 +181,9 @@ export class SurrealMemory {
           hits: ex?.hits ?? 0,
           // OptionType fields validate against `undefined`, not `null` — omit rather than null it out.
           ...(ex?.lastAccessedAt !== undefined && { lastAccessedAt: ex.lastAccessedAt }),
+          // the embedder-derived vector when configured (omit-if-undefined like the fields above —
+          // a keyword-only deployment simply never sets it, and a rebuild re-derives it)
+          ...(embedding && { embedding }),
         })
         // Re-materialize this note's out-edges (delete-then-RELATE) — deterministic on replay.
         // PRESERVE stats first: read the existing out-edges before the delete wipes them, keyed
@@ -266,7 +293,59 @@ export class SurrealMemory {
     return rows.map(toSummary)
   }
 
-  async search(query: string, filter: MemoryFilter = {}): Promise<NoteSummary[]> {
+  async search(query: string, filter: MemoryFilter = {}, opts: MemorySearchOpts = {}): Promise<NoteSummary[]> {
+    // No embedder configured → keyword is the only mode that can run, whatever was requested.
+    const mode = this.embedder ? (opts.mode ?? SEARCH_MODE.hybrid) : SEARCH_MODE.keyword
+    if (mode === SEARCH_MODE.keyword) return this.keywordSearch(query, filter)
+    const semantic = await this.semanticSearch(query, filter)
+    if (mode === SEARCH_MODE.semantic) return semantic
+    // hybrid: fuse the two orderings by reciprocal rank, keyed by (scope,id) since ids repeat
+    // across scopes. A note found by only one arm still ranks; agreement between arms wins.
+    const keyword = await this.keywordSearch(query, filter)
+    const byKey = new Map<string, NoteSummary>()
+    for (const n of [...semantic, ...keyword]) byKey.set(noteKey(n.scope, n.id), n)
+    const fused = rrfFuse([keyword.map(n => noteKey(n.scope, n.id)), semantic.map(n => noteKey(n.scope, n.id))])
+    return fused.map(f => byKey.get(f.id)).filter((n): n is NoteSummary => n !== undefined)
+  }
+
+  // Vector cosine over stored embeddings — a linear scan, brute-force but exact; fine for a
+  // hand-authored corpus. Filters apply in TS, mirroring keywordSearch. ponytail: swap the scan for
+  // a DEFINE INDEX ... HNSW + `<|K|>` KNN select when the corpus outgrows a full scan.
+  private async semanticSearch(query: string, filter: MemoryFilter): Promise<NoteSummary[]> {
+    if (!this.embedder) return []
+    let qv: number[] | undefined
+    try { [qv] = await this.embedder.embed([query]) }
+    catch (err) { console.warn(`[memory] query embed failed: ${errorMessage(err)}`); return [] }
+    if (!qv) return []
+    // raw query: surqlize has no vector::* select builder — the same escape hatch open() uses for
+    // DEFINE TABLE. $q binds the query vector; rows without an embedding are excluded.
+    const res = await this.surreal.query(
+      `SELECT noteId, scope, title, categories, tags, summary, hits, lastAccessedAt,`
+      + ` vector::similarity::cosine(embedding, $q) AS score`
+      + ` FROM ${Tb.Note} WHERE embedding != NONE ORDER BY score DESC LIMIT 50`,
+      { q: qv },
+    )
+    const rows = SemanticRow.array().parse(Array.isArray(res) ? res[0] : res)
+    return rows
+      .filter(r => (!filter.scope || r.scope === filter.scope)
+        && (!filter.category || r.categories.includes(filter.category))
+        && (!filter.tag || r.tags.includes(filter.tag)))
+      .map(toSummary)
+  }
+
+  // Compute a note's vector from its retrieval-bearing text. Best-effort: a backend failure logs
+  // once and yields undefined (the note still stores, keyword still finds it).
+  private async embedWritten(e: EventRecord): Promise<number[] | undefined> {
+    if (!this.embedder) return undefined
+    const p = MemoryWrittenPayload.safeParse(e.payload)
+    if (!p.success) return undefined
+    const { note } = p.data
+    const text = [note.title, note.summary, note.body].filter(Boolean).join('\n').slice(0, 8_000)
+    try { const [vec] = await this.embedder.embed([text]); return vec }
+    catch (err) { console.warn(`[memory] embed failed at seq ${e.seq}: ${errorMessage(err)}`); return undefined }
+  }
+
+  private async keywordSearch(query: string, filter: MemoryFilter = {}): Promise<NoteSummary[]> {
     // AND across whitespace-separated terms, each term matching ANY field — a whole-query
     // substring match made every multi-word query miss unless the exact phrase appeared.
     // text fields: case-insensitive substring match; tags: membership on the lowercased

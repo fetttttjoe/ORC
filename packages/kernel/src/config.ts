@@ -34,6 +34,11 @@ const settingsSchema = (dir: string) =>
     // before iteration 1, rendered as a "Known project context" block. 0 = off (skip preload
     // entirely, prompt unchanged) — same escape hatch shape as ambientCapture below.
     memoryPreloadTokens: z.coerce.number().int().nonnegative().default(800),
+    // the embedding model for SEMANTIC memory retrieval, as a 'provider/model' ref. '' disables it
+    // (keyword-only, the prior behaviour). Default is a tiny local Ollama encoder (all-minilm, 384d)
+    // — swap for any provider/model via config or ORC_MEMORY_EMBED_MODEL. A model change needs
+    // `orc memory rebuild` to re-embed, since vectors from different models are not comparable.
+    memoryEmbedModel: z.string().default('ollama/all-minilm'),
     // ambient capture kill switch (Task 4): displaces the manual step-report protocol rule —
     // successful steps auto-persist their signal summary as an expirable plan note, at zero
     // model-call cost. z.stringbool(), NOT z.coerce.boolean(): coerce turns the env string
@@ -73,6 +78,7 @@ const envOverrides = (): Record<string, string> => {
     maxIterations: process.env.ORC_MAX_ITERATIONS,
     memoryHalfLifeDays: process.env.ORC_MEMORY_HALF_LIFE_DAYS,
     memoryPreloadTokens: process.env.ORC_MEMORY_PRELOAD_TOKENS,
+    memoryEmbedModel: process.env.ORC_MEMORY_EMBED_MODEL,
     ambientCapture: process.env.ORC_AMBIENT_CAPTURE,
     ollamaBaseUrl: process.env.OLLAMA_BASE_URL,
     projectDbUrl: process.env.ORC_PROJECT_DB_URL,

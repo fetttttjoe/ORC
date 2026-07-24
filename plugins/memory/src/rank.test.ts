@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test'
-import { rankNeighbors, DEFAULT_LINK_WEIGHTS } from './rank'
+import { rankNeighbors, DEFAULT_LINK_WEIGHTS, rrfFuse } from './rank'
 
 const edges = [
   { from: 'a', to: 'b', kind: 'supersedes' as const }, // weight 1.0, depth 1 → 1.0
@@ -59,5 +59,24 @@ describe('rankNeighbors', () => {
     const low = rankNeighbors([{ from: 'a', to: 'b', kind: 'supersedes', confidence: 0.1 }], ['a'])
     expect(low[0].score).toBeCloseTo(0.1) // 1.0 weight × 0.1 confidence, no decay at depth 1
     expect(DEFAULT_LINK_WEIGHTS.relates_to).toBe(0.5)
+  })
+})
+
+describe('rrfFuse', () => {
+  it('sums reciprocal rank across lists; equal totals break by id-asc', () => {
+    // a: 1/60 + 1/61 ; b: 1/61 + 1/60 (equal to a) → id-asc puts a first; c,d: 1/62 each → c before d
+    expect(rrfFuse([['a', 'b', 'c'], ['b', 'a', 'd']]).map(r => r.id)).toEqual(['a', 'b', 'c', 'd'])
+  })
+
+  it('rewards agreement: an id present in BOTH lists can outrank one that tops only one list', () => {
+    // x tops list 1 alone (1/60 ≈ 0.0167); y is rank-1 in both (2/61 ≈ 0.0328) → y wins
+    expect(rrfFuse([['x', 'y'], ['z', 'y']])[0].id).toBe('y')
+  })
+
+  it('is a pure function of the lists — list order does not change the result; singletons are kept', () => {
+    expect(rrfFuse([['a'], ['b']]).map(r => r.id)).toEqual(['a', 'b'])
+    expect(rrfFuse([['b'], ['a']]).map(r => r.id)).toEqual(['a', 'b']) // swapping the two lists is identical
+    expect(rrfFuse([['solo']]).map(r => r.id)).toEqual(['solo'])
+    expect(rrfFuse([])).toEqual([])
   })
 })

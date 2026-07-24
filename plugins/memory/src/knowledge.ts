@@ -1,4 +1,5 @@
 import { projectDatabaseName, type ProjectConfig } from '@orc/kernel'
+import type { EmbeddingProvider } from '@orc/contracts'
 import { SurrealMemory } from './surreal'
 
 // The SurrealDB knowledge service — the peer of openStorage for Postgres. It encapsulates
@@ -7,7 +8,7 @@ import { SurrealMemory } from './surreal'
 // consumes this and never opens a Surreal session itself.
 export type Knowledge = SurrealMemory
 
-export async function openKnowledge(config: ProjectConfig): Promise<Knowledge> {
+export async function openKnowledge(config: ProjectConfig, embedder?: EmbeddingProvider): Promise<Knowledge> {
   new URL(config.projectDbUrl) // fail fast on a malformed setting; the adapter takes the raw string
   return SurrealMemory.open({
     url: config.projectDbUrl,
@@ -17,5 +18,5 @@ export async function openKnowledge(config: ProjectConfig): Promise<Knowledge> {
     username: config.projectDbUser,
     password: config.projectDbPassword,
     connectTimeoutMs: config.projectDbConnectTimeoutMs,
-  })
+  }, embedder)
 }

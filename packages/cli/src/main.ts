@@ -5,7 +5,8 @@ import { Command, InvalidArgumentError } from 'commander'
 import { EDGE_DIRECTION, EVENT_KIND, LINK_KINDS, MEMORY_ACCESS, PlanDraft, RUN_OUTCOME, STRATEGY, TASK_STATUS, LinkKind, slugId, type Analyzer, type EventRecord, type ExecutionPort, type Plan, type RunHandle } from '@orc/contracts'
 import { openStorage, Kernel, fold, grantExtensionTrust, grantMcpTrust, initializeProject, isExtensionTrusted, isMcpTrusted, loadConfig, loadTrust, migrateDatabase, requireProject, taskUsage, type EventLog, type OrcConfig, type PluginHost, type ProjectConfig, type Storage } from '@orc/kernel'
 import { createVaultProjector, parsePlanFile } from '@orc/vault-projector'
-import { createMemory, probeMemory } from '@orc/memory'
+import { probeMemory } from '@orc/memory'
+import { openMemory } from './memory-open'
 import { buildModelDiscovery, buildOrcActions, singleStepDraft } from './actions'
 import { renderPlanHuman } from './plan-render'
 
@@ -575,7 +576,7 @@ export function buildProgram(
     .option('--categories <categories...>', 'categories')
     .action(async (o: { id: string; title: string; summary?: string; body?: string; tags?: string[]; categories?: string[] }) => {
       const { config, log } = needPlugin()
-      const memory = await createMemory({ log, config })
+      const memory = await openMemory({ log, config })
       await memory.store.write({
         id: o.id, title: o.title, summary: o.summary, body: o.body,
         tags: o.tags, categories: o.categories,
@@ -590,7 +591,7 @@ export function buildProgram(
     .option('--scope <s>', 'scope')
     .action(async (id: string, o: { scope?: string }) => {
       const { config, log } = needPlugin()
-      const memory = await createMemory({ log, config })
+      const memory = await openMemory({ log, config })
       await memory.store.remove(id, o.scope)
       await memory.projector.catchUp()
       await memory.close()
@@ -603,7 +604,7 @@ export function buildProgram(
     .option('--tag <t>', 'filter by tag')
     .action(async (o: { category?: string; tag?: string }) => {
       const { config, log } = needPlugin()
-      const memory = await createMemory({ log, config })
+      const memory = await openMemory({ log, config })
       await memory.projector.catchUp()
       const rows = await memory.store.list({ category: o.category, tag: o.tag })
       await memory.close()
@@ -617,10 +618,10 @@ export function buildProgram(
     })
   mem
     .command('search <query>')
-    .description('full-text search memory notes')
+    .description('search memory notes by meaning + keyword (hybrid; keyword-only if no embedder is configured)')
     .action(async (query: string) => {
       const { config, log } = needPlugin()
-      const memory = await createMemory({ log, config })
+      const memory = await openMemory({ log, config })
       await memory.projector.catchUp()
       const rows = await memory.store.search(query)
       await memory.close()
@@ -633,7 +634,7 @@ export function buildProgram(
     .option('--scope <s>', 'scope')
     .action(async (id: string, o: { scope?: string }) => {
       const { config, log } = needPlugin()
-      const memory = await createMemory({ log, config })
+      const memory = await openMemory({ log, config })
       await memory.projector.catchUp()
       const n = await memory.store.get(id, o.scope)
       // a human read counts the same as an agent read — but only on a hit, and only after the
@@ -659,7 +660,7 @@ export function buildProgram(
       // parse at the boundary, never cast — the loop above guarantees this cannot throw
       const kinds = o.kinds?.map(k => LinkKind.parse(k))
       const { config, log } = needPlugin()
-      const memory = await createMemory({ log, config })
+      const memory = await openMemory({ log, config })
       try {
         await memory.projector.catchUp()
         const ranked = await memory.store.neighbors(id, { kinds, depth: o.depth, scope: o.scope })
@@ -679,7 +680,7 @@ export function buildProgram(
     .description('rebuild the memory read model from the event log')
     .action(async () => {
       const { config, log } = needPlugin()
-      const memory = await createMemory({ log, config })
+      const memory = await openMemory({ log, config })
       await memory.projector.rebuild()
       await memory.close()
       console.log('memory read model rebuilt from the log')
@@ -693,7 +694,7 @@ export function buildProgram(
     .option('--tags <tags...>', 'tags')
     .action(async (title: string, o: { summary?: string; body?: string; tags?: string[] }) => {
       const { config, log } = needPlugin()
-      const memory = await createMemory({ log, config })
+      const memory = await openMemory({ log, config })
       try {
         const id = slugId(title)
         await memory.store.write({ id, title, summary: o.summary, body: o.body, tags: o.tags }, { source: 'cli' })

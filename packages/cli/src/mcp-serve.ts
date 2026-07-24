@@ -18,6 +18,7 @@ import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprot
 import { errorMessage, type ResolvedTool } from '@orc/contracts'
 import type { EventLog, ProjectConfig } from '@orc/kernel'
 import { MEMORY_READ_TOOLS, MEMORY_TIER, createMemory, unavailableMemoryTools } from '@orc/memory'
+import { openMemory } from './memory-open'
 import { asResolvedTools, buildCopilotTools, createProjectSessions, type OrcActions } from '@orc/ui-core'
 
 export type Autonomy = 'gated' | 'full'
@@ -98,7 +99,7 @@ export async function startMcpServe(opts: {
   let memory: Awaited<ReturnType<typeof createMemory>> | null = null
   let memoryTools: ResolvedTool[]
   try {
-    memory = await createMemory({ log, config })
+    memory = await openMemory({ log, config })
     memoryTools = memory.buildTools({ source: 'agent', executor: 'mcp-serve' }, MEMORY_TIER.verify)
   } catch (err) {
     memoryTools = unavailableMemoryTools(errorMessage(err))

@@ -2,6 +2,7 @@ import { errorMessage, EVENT_KIND, ISOLATION_TIER, STRATEGY, TASK_STATUS, costUS
 import { deriveSystemUrl, initializeProject, loadConfig, openStorage, resetSystemDatabase, subtreeTaskIds, type EventLog, type Kernel, type ProjectConfig, type Storage } from '@orc/kernel'
 import { seedRegistries } from './runtime'
 import { createMemory, orphanedNotes } from '@orc/memory'
+import { openMemory } from './memory-open'
 import { PROJECT_DIR_NOTE_ID, PROJECT_NAME_NOTE_ID, type OrcActions } from '@orc/ui-core'
 import { createVaultProjector } from '@orc/vault-projector'
 import { existsSync, rmSync, statSync } from 'node:fs'
@@ -196,7 +197,7 @@ export function buildOrcActions(deps: {
         throw new Error(`'${note.id}' is a reserved ui-metadata note id`)
       let memory: Awaited<ReturnType<typeof createMemory>> | undefined
       try {
-        memory = await createMemory({ log: plugin.log, config: plugin.config })
+        memory = await openMemory({ log: plugin.log, config: plugin.config })
         const written = await memory.store.write(note, { source: 'cli' })
         // event committed — the read model heals on the next drain if this catch-up fails
         await memory.projector.catchUp().catch(() => {})
@@ -212,7 +213,7 @@ export function buildOrcActions(deps: {
         throw new Error(`'${id}' is a reserved ui-metadata note id`)
       let memory: Awaited<ReturnType<typeof createMemory>> | undefined
       try {
-        memory = await createMemory({ log: plugin.log, config: plugin.config })
+        memory = await openMemory({ log: plugin.log, config: plugin.config })
         await memory.store.remove(id, scope, { source: 'cli' })
         await memory.projector.catchUp().catch(() => {})
         return { id }
@@ -274,7 +275,7 @@ export function buildOrcActions(deps: {
       //    the log purge is committed; a down Surreal heals on the next projector run.
       let memory: Awaited<ReturnType<typeof createMemory>> | undefined
       try {
-        memory = await createMemory({ log: plugin.log, config: plugin.config })
+        memory = await openMemory({ log: plugin.log, config: plugin.config })
         await memory.projector.rebuild()
       } catch (err) {
         warnings.push(`memory read model not cleared (${errorMessage(err)}) — run 'orc memory rebuild' once it is reachable`)
@@ -318,7 +319,7 @@ export function buildOrcActions(deps: {
         const cancelled = new Set(subtreeTaskIds(await kernel.state(), taskId))
         const goes = orphanedNotes(await plugin.log.after(0, [EVENT_KIND.memory_written, EVENT_KIND.memory_deleted]), cancelled)
         if (goes.length === 0) return { swept: [], sweepError: null }
-        memory = await createMemory({ log: plugin.log, config: plugin.config })
+        memory = await openMemory({ log: plugin.log, config: plugin.config })
         for (const n of goes) await memory.store.remove(n.id, n.scope, { source: 'cli', taskId })
         // deletes are committed (event-first) — the read-model catch-up is best-effort; the
         // projector self-heals on the next invocation

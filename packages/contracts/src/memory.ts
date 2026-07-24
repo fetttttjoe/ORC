@@ -281,6 +281,16 @@ export interface NeighborQuery {
   now?: string
 }
 
+// Retrieval mode. keyword = substring AND-match; semantic = vector cosine over embeddings;
+// hybrid = reciprocal-rank fusion of both. The store falls back to keyword whenever no embedder
+// is configured, so 'hybrid'/'semantic' are safe defaults on any deployment.
+export const SEARCH_MODES = ['keyword', 'semantic', 'hybrid'] as const
+export const SearchMode = z.enum(SEARCH_MODES)
+export type SearchMode = z.infer<typeof SearchMode>
+export const SEARCH_MODE = SearchMode.enum
+
+export interface MemorySearchOpts { mode?: SearchMode }
+
 export interface MemoryFilter { scope?: string; category?: string; tag?: string }
 
 // The single-writer gateway (the wrapper). write/remove append events; reads hit SurrealDB.
@@ -335,7 +345,7 @@ export interface MemoryStore {
   remove(id: string, scope?: string, author?: MemoryAuthor): Promise<void>
   get(id: string, scope?: string): Promise<MemoryNote | null>
   list(filter?: MemoryFilter): Promise<NoteSummary[]>
-  search(query: string, filter?: MemoryFilter): Promise<NoteSummary[]>
+  search(query: string, filter?: MemoryFilter, opts?: MemorySearchOpts): Promise<NoteSummary[]>
   neighbors(seed: string, opts?: NeighborQuery): Promise<NeighborResult[]>
   // called by the pull call sites (tools, CLI) rather than inside get(), so a traversal that
   // reads N notes internally records one access against its seed, not N against its neighbours.

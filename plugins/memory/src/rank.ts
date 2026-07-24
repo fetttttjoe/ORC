@@ -58,3 +58,19 @@ export function rankNeighbors(edges: Edge[], seeds: string[], opts: {
   // reproducible across rebuilds of the same graph (needed for RRF's ordinal fusion and the eval harness).
   return [...best.values()].sort((a, b) => b.score - a.score || a.depth - b.depth || a.id.localeCompare(b.id)).slice(0, cap)
 }
+
+// Reciprocal-rank fusion: merge several ranked id lists into one order. score(id) = Σ_l 1/(k + rank_l),
+// where rank_l is the 0-based position of id in list l (absent from a list contributes nothing). k
+// dampens the pull of the very top ranks so one list cannot dominate — 60 is the field-standard
+// default. Deterministic: ties break by id-asc, so the fused order is a pure function of the inputs'
+// orders (never fetch order), the same discipline rankNeighbors holds — so hybrid search reproduces
+// across rebuilds.
+export function rrfFuse(rankings: string[][], k: number = 60): { id: string; score: number }[] {
+  const score = new Map<string, number>()
+  for (const list of rankings)
+    for (let rank = 0; rank < list.length; rank++)
+      score.set(list[rank]!, (score.get(list[rank]!) ?? 0) + 1 / (k + rank))
+  return [...score.entries()]
+    .map(([id, s]) => ({ id, score: s }))
+    .sort((a, b) => b.score - a.score || a.id.localeCompare(b.id))
+}

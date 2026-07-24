@@ -1,4 +1,4 @@
-import { EVENT_KIND, foldLiveNotes, MemoryNoteInput, MemoryScope, noteKey, type MemoryAuthor, type MemoryFilter, type MemoryNote, type MemoryStore, type NoteSummary } from '@orc/contracts'
+import { EVENT_KIND, foldLiveNotes, MemoryNoteInput, MemoryScope, noteKey, type MemoryAuthor, type MemoryFilter, type MemorySearchOpts, type MemoryNote, type MemoryStore, type NoteSummary } from '@orc/contracts'
 import { KERNEL_ERROR_CODE, KernelError, type EventLog } from '@orc/kernel'
 import type { SurrealMemory } from './surreal'
 
@@ -77,7 +77,7 @@ export function createMemoryStore(opts: { log: EventLog; surreal: SurrealMemory;
       })
     },
     list: (filter?: MemoryFilter): Promise<NoteSummary[]> => surreal.list(filter),
-    search: (query: string, filter?: MemoryFilter): Promise<NoteSummary[]> => surreal.search(query, filter),
+    search: (query: string, filter?: MemoryFilter, opts?: MemorySearchOpts): Promise<NoteSummary[]> => surreal.search(query, filter, opts),
     neighbors: (seed, o) => surreal.neighbors(seed, { ...o, halfLifeDays: o?.halfLifeDays ?? opts.halfLifeDays }),
   }
 }

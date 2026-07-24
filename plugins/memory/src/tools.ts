@@ -1,5 +1,5 @@
 import { z } from 'zod'
-import { AccessVia, EDGE_DIRECTIONS, errorMessage, MEMORY_ACCESS, MEMORY_LIMITS, MEMORY_SOURCE_LIMITS, MEMORY_TOOL_NAME, MemorySearchResult, MemoryWriteResult, NOTE_KINDS, LINK_KIND, LINK_KINDS, RETENTION_CLASSES, LinkKind, MemoryNoteDraftInput, slugId, type MemoryAuthor, type MemoryNote, type MemoryStore, type ResolvedTool } from '@orc/contracts'
+import { AccessVia, EDGE_DIRECTIONS, errorMessage, MEMORY_ACCESS, MEMORY_LIMITS, MEMORY_SOURCE_LIMITS, MEMORY_TOOL_NAME, MemorySearchResult, MemoryWriteResult, NOTE_KINDS, LINK_KIND, LINK_KINDS, RETENTION_CLASSES, SEARCH_MODES, SearchMode, LinkKind, MemoryNoteDraftInput, slugId, type MemoryAuthor, type MemoryNote, type MemoryStore, type ResolvedTool } from '@orc/contracts'
 import { applyBudget, fitMemoryNoteToBudget } from './budget'
 
 // Advisory note lint, echoed back in the memory_write result so the writing agent can improve
@@ -49,6 +49,7 @@ const Budget = z.number().int().positive().default(1500)
 const SearchInput = z.object({
   query: z.string(), category: z.string().optional(), tag: z.string().optional(),
   detail_level: DetailLevel, limit: z.number().int().positive().optional(), budget: Budget,
+  mode: SearchMode.optional(),
 })
 const ReadInput = z.object({ id: z.string(), scope: z.string().optional(), budget: Budget, via: AccessVia.optional() })
 const NeighborsInput = z.object({
@@ -168,19 +169,20 @@ export function memoryTools(store: MemoryStore, author: MemoryAuthor, tier: Memo
     },
     {
       ref: 'memory/search', name: MEMORY_TOOL_NAME.search,
-      description: withTier('Search project knowledge by keyword. Returns note summaries (id, title, categories, tags, summary). Read the full note with memory_read.', tier),
+      description: withTier('Search project knowledge by meaning and keyword (hybrid). Returns note summaries (id, title, categories, tags, summary). Read the full note with memory_read.', tier),
       inputSchema: {
         type: 'object', required: ['query'],
         properties: {
           query: { type: 'string' }, category: { type: 'string' }, tag: { type: 'string' },
           detail_level: detailLevelSchema, limit: { type: 'integer', minimum: 1 }, budget: budgetSchema,
+          mode: { type: 'string', enum: [...SEARCH_MODES], description: 'keyword | semantic | hybrid (default hybrid; falls back to keyword when no embedder is configured)' },
         },
       },
       execute: async input => {
         try {
           const q = SearchInput.parse(input)
           const limit = q.limit ?? (q.detail_level === 'minimal' ? 5 : 20)
-          const r = applyBudget(await store.search(q.query, { category: q.category, tag: q.tag }), n => JSON.stringify(n), { limit, budget: q.budget })
+          const r = applyBudget(await store.search(q.query, { category: q.category, tag: q.tag }, { mode: q.mode }), n => JSON.stringify(n), { limit, budget: q.budget })
           return ok(MemorySearchResult.parse({
             notes: r.items, truncated: r.truncated, omitted: r.omitted,
             ...(r.truncated && { next: 'refine the query, or memory_read/memory_neighbors a specific id' }),

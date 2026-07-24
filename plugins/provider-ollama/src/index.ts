@@ -1,6 +1,6 @@
 import { createOllama } from 'ai-sdk-ollama'
 import type { LanguageModel } from 'ai'
-import { isRecord, type ModelCost, type ModelProvider } from '@orc/contracts'
+import { isRecord, type EmbeddingProvider, type ModelCost, type ModelProvider } from '@orc/contracts'
 
 // live model discovery from the local daemon — [] when it is not running (fetch injectable for tests)
 export async function listOllamaModels(baseUrl: string, fetchImpl: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response> = fetch): Promise<string[]> {
@@ -24,5 +24,43 @@ export function createOllamaProvider(
     costs: { '*': { inPerMTok: 0, outPerMTok: 0 }, ...opts.costOverrides }, // local models are free by default
     languageModel: modelId => ollama(modelId),
     listModels: () => listOllamaModels(baseUrl),
+  }
+}
+
+// Known embedding-model output widths (the daemon does not report them until first call). Stamped
+// onto EmbeddingProvider.dimensions; an unknown model falls back to 0 — informational only, the
+// current cosine scan needs no fixed dimension. Extend as models are adopted.
+const OLLAMA_EMBED_DIMENSIONS: Record<string, number> = {
+  'all-minilm': 384, 'nomic-embed-text': 768, 'mxbai-embed-large': 1024, 'bge-m3': 1024,
+}
+
+const isNumberArray = (v: unknown): v is number[] => Array.isArray(v) && v.every(x => typeof x === 'number')
+
+// The embedding half of the Ollama provider — a text→vector encoder over the local daemon's
+// /api/embed, behind the shared EmbeddingProvider seam. No SDK, no new dep: one fetch, parsed at
+// the boundary (isRecord/isNumberArray, never a cast) exactly like listOllamaModels.
+export function createOllamaEmbeddingProvider(
+  opts: { model: string; baseUrl?: string; dimensions?: number },
+): EmbeddingProvider {
+  const baseUrl = (opts.baseUrl ?? 'http://localhost:11434').replace(/\/$/, '')
+  return {
+    modelId: `ollama/${opts.model}`,
+    dimensions: opts.dimensions ?? OLLAMA_EMBED_DIMENSIONS[opts.model] ?? 0,
+    async embed(texts) {
+      if (texts.length === 0) return []
+      const res = await fetch(`${baseUrl}/api/embed`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ model: opts.model, input: texts }),
+      })
+      if (!res.ok) throw new Error(`ollama embed ${res.status}: ${(await res.text().catch(() => '')).slice(0, 200)}`)
+      const body: unknown = await res.json()
+      const rows: unknown = isRecord(body) ? body.embeddings : undefined
+      if (!Array.isArray(rows)) throw new Error('ollama embed: response missing embeddings array')
+      return rows.map(r => {
+        if (!isNumberArray(r)) throw new Error('ollama embed: a returned embedding is not a number array')
+        return r
+      })
+    },
   }
 }

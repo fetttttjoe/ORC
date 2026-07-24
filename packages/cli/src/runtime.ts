@@ -6,6 +6,7 @@ import { createOllamaProvider } from '@orc/provider-ollama'
 import { agentAnalyzer } from '@orc/analyzer-agent'
 import { createMcpHub, type McpHub } from '@orc/mcp-client'
 import { createMemory, unavailableMemoryTools, tierForRole, type MemoryTier } from '@orc/memory'
+import { openMemory } from './memory-open'
 import { createVaultProjector } from '@orc/vault-projector'
 import { createDbosPort, createPluginHost, dbosSend, execTool, finalizePlanTool, isMcpTrusted, loadConfig, loadTrust, openStorage, readAnnotationsTool, reportCoverageTool, requireProject, splitTool, Kernel, type DbosPort, type PluginHost, type ProjectConfig, type Storage } from '@orc/kernel'
 
@@ -56,7 +57,7 @@ export async function buildRuntime(
   let memory: Awaited<ReturnType<typeof createMemory>> | null = null
   let buildMemoryTools: (author: MemoryAuthor, tier?: MemoryTier) => ResolvedTool[]
   try {
-    memory = await createMemory({ log, config })
+    memory = await openMemory({ log, config })
     await memory.projector.start()
     buildMemoryTools = memory.buildTools
   } catch (err) {

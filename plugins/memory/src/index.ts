@@ -1,4 +1,4 @@
-import { type MemoryAuthor, type MemoryStore, type ResolvedTool } from '@orc/contracts'
+import { type EmbeddingProvider, type MemoryAuthor, type MemoryStore, type ResolvedTool } from '@orc/contracts'
 import { errorMessage } from '@orc/contracts'
 import { EventLog, type ProjectConfig } from '@orc/kernel'
 import { openKnowledge, type Knowledge } from './knowledge'
@@ -28,13 +28,13 @@ export async function gitRevision(dir: string): Promise<string | null> {
 
 // the orchestrator: assembles the knowledge service + event log into the memory domain
 // services (gateway, projector, tools) — the business logic never opens Surreal itself
-export async function createMemory(opts: { log: EventLog; config: ProjectConfig }): Promise<{
+export async function createMemory(opts: { log: EventLog; config: ProjectConfig; embedder?: EmbeddingProvider }): Promise<{
   store: MemoryStore
   projector: MemoryProjector
   buildTools: (author: MemoryAuthor, tier?: MemoryTier) => ResolvedTool[]
   close: () => Promise<void>
 }> {
-  const knowledge = await openKnowledge(opts.config)
+  const knowledge = await openKnowledge(opts.config, opts.embedder)
   const store = createMemoryStore({ log: opts.log, surreal: knowledge, sourceRevision: await gitRevision(opts.config.dir), halfLifeDays: opts.config.memoryHalfLifeDays })
   const projector = createMemoryProjector({ log: opts.log, surreal: knowledge, vaultDir: opts.config.vaultDir })
   return {
