@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from 'bun:test'
 import {
-  EVENT_KIND, SIGNAL_OUTCOME, TASK_STATUS,
+  EVENT_KIND, PAYLOAD_SCHEMAS, SIGNAL_OUTCOME, TASK_STATUS,
   type AgentExecutor, type EventDraft, type ExecutorContext, type SplitResult, type UnifiedEvent,
 } from '@orc/contracts'
 import { draftFixture, stepFixture } from '@orc/contracts/fixtures'
@@ -78,7 +78,7 @@ describe('durable conversational gate (feedback)', () => {
     expect(seen).toEqual(['yes'])
 
     const completed = (await kernel.eventsFor(t.id)).find(e => e.kind === EVENT_KIND.step_completed)
-    expect((completed!.payload as { summary: string }).summary).toContain('got:yes')
+    expect(PAYLOAD_SCHEMAS.step_completed.parse(completed!.payload).summary).toContain('got:yes')
     expect((await kernel.getTask(t.id))?.status).toBe(TASK_STATUS.done)
   })
 })

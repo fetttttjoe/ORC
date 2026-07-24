@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from 'bun:test'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import type { Analyzer, ModelProvider, Plan } from '@orc/contracts'
+import type { Analyzer, ModelProvider } from '@orc/contracts'
 import { planFixture, stepFixture } from '@orc/contracts/fixtures'
 import { loadConfig } from '../config'
 import { grantExtensionTrust, grantMcpTrust } from './trust'
@@ -134,8 +134,8 @@ export default {
     const a: Analyzer = { id: 'agent-analyzer', analysisStep: () => stepFixture({ id: 'analyze', role: 'scout' }) }
     const host = await createPluginHost(loadConfig(d), { analyzers: new Map([['agent-analyzer', a]]) })
     expect(host.analyzers.has('agent-analyzer')).toBe(true)
-    // analyzerRef is added to Plan in Task 4; cast an excess-property literal until then
-    const plan = { ...planFixture(), analyzerRef: 'nope' } as Plan
+    // analyzerRef is an optional Plan field; refValidator must reject an unknown one
+    const plan = { ...planFixture(), analyzerRef: 'nope' }
     expect(await host.refValidator(plan)).toContain(`unknown analyzer 'nope'`)
     await host.shutdown()
   })

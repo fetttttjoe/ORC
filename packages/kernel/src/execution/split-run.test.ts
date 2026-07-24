@@ -1,9 +1,10 @@
 import { describe, expect, it } from 'bun:test'
+import { z } from 'zod'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import {
-  ApprovalPolicy, EVENT_KIND, RUN_OUTCOME, SIGNAL_OUTCOME, TASK_STATUS,
+  ApprovalPolicy, EVENT_KIND, PAYLOAD_SCHEMAS, RUN_OUTCOME, SIGNAL_OUTCOME, TASK_STATUS,
   type AgentExecutor, type EventDraft, type ExecutorContext, type ResolvedTool,
   type SplitResult, type UnifiedEvent,
 } from '@orc/contracts'
@@ -15,6 +16,11 @@ import { Kernel } from '../kernel'
 import { createTestDb, fakeProvider, testConfig, TEST_PROJECT_ID } from '../test-helpers'
 import { createDbosPort } from './dbos-port'
 import { splitTool } from './split-tool'
+
+// task_split's tool output (contract-`unknown`): the child's address and whether it gated.
+const SplitOutput = z.object({ splitId: z.string(), childTaskId: z.string(), gated: z.boolean() })
+// memory_read's tool output where the reuse assertion only needs the child note's body.
+const ReadBody = z.object({ note: z.object({ body: z.string() }).nullable() })
 
 // The 1-step child plan the parent proposes via task_split (dependsOn/skillRefs are required
 // on ChildPlanStep — no zod default — so they are spelled out here).
@@ -98,7 +104,7 @@ function splitFake(cfg: {
         { kind: EVENT_KIND.tool_call, payload: { ...base, iteration: 1, toolCallId: 'call-1', toolName: 'task_split', input } },
         { kind: EVENT_KIND.tool_result, payload: { ...base, iteration: 1, toolCallId: 'call-1', toolName: 'task_split', output: r.output, isError: r.isError } },
       ])
-      const out = res.output as { splitId: string; childTaskId: string; gated: boolean }
+      const out = SplitOutput.parse(res.output)
       const gatedOk = res.isError === false && out.gated === cfg.expectGated
 
       // yield the gate; the port resumes the generator with SplitResult[] once the child resolves.
@@ -119,7 +125,7 @@ function splitFake(cfg: {
         const body = await ctx.checkpoint('tools:read', async () => {
           for (let i = 0; i < 20; i++) {
             const rr = await read.execute({ id: n.id, scope: n.scope })
-            const note = (rr.output as { note: { body: string } | null }).note
+            const note = ReadBody.parse(rr.output).note
             if (note) return note.body
             await Bun.sleep(100)
           }
@@ -204,7 +210,7 @@ describe('recursion e2e: split, gate, join, manual approve, queue partition', ()
       expect((await kernel.getTask(childId))?.status).toBe(TASK_STATUS.done)
       expect((await kernel.state()).runs.get(childId)?.at(-1)?.cwd).toBe(sharedWorkspace)
       const approved = events.find(e => e.kind === EVENT_KIND.plan_approved && e.taskId === childId)
-      expect((approved!.payload as { approvedBy: string }).approvedBy).toBe('policy')
+      expect(PAYLOAD_SCHEMAS.plan_approved.parse(approved!.payload).approvedBy).toBe('policy')
     } finally {
       await cleanup()
       rmSync(sharedWorkspace, { recursive: true, force: true })
@@ -258,7 +264,7 @@ describe('recursion e2e: split, gate, join, manual approve, queue partition', ()
       expect((await kernel.getTask(childId))?.status).toBe(TASK_STATUS.cancelled)
       // the live router resolves the still-pending split off the child's cancelled terminal status
       expect(await waitFor(async () =>
-        (await log.all()).some(e => e.kind === EVENT_KIND.split_resolved && (e.payload as { outcome: string }).outcome === RUN_OUTCOME.cancelled),
+        (await log.all()).some(e => e.kind === EVENT_KIND.split_resolved && PAYLOAD_SCHEMAS.split_resolved.parse(e.payload).outcome === RUN_OUTCOME.cancelled),
       )).toBe(true)
     } finally {
       await cleanup()
@@ -279,7 +285,7 @@ describe('recursion e2e: split, gate, join, manual approve, queue partition', ()
         const deadline = Date.now() + 30_000
         while (Date.now() < deadline) {
           const events = await log.all()
-          if (events.some(e => e.kind === EVENT_KIND.split_resolved && (e.payload as { splitId: string }).splitId === splitId)) return
+          if (events.some(e => e.kind === EVENT_KIND.split_resolved && PAYLOAD_SCHEMAS.split_resolved.parse(e.payload).splitId === splitId)) return
           await Bun.sleep(100)
         }
         throw new Error('child never resolved before the parent reached its gate')

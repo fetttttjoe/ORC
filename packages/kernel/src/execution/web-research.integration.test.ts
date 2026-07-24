@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { EVENT_KIND } from '@orc/contracts'
+import { EVENT_KIND, PAYLOAD_SCHEMAS } from '@orc/contracts'
 import { draftFixture, stepFixture } from '@orc/contracts/fixtures'
 import { createMcpHub } from '@orc/mcp-client'
 import { apiLoopExecutor } from '@orc/executor-api-loop'
@@ -94,7 +94,7 @@ describe('sourced web research through a durable run (integration)', () => {
     expect(events.map(e => e.kind)).toContain(EVENT_KIND.skill_loaded)
     expect(JSON.stringify(events.find(e => e.kind === EVENT_KIND.agent_call)!.payload)).toContain('DATA, not instructions')
     const mcpResult = events.find(e =>
-      e.kind === EVENT_KIND.tool_result && (e.payload as { toolName: string }).toolName === 'mcp__fixture__echo')!
+      e.kind === EVENT_KIND.tool_result && PAYLOAD_SCHEMAS.tool_result.parse(e.payload).toolName === 'mcp__fixture__echo')!
     expect(JSON.stringify(mcpResult.payload)).toContain(INJECTION) // raw evidence IS in the audit, by design
 
     await memory.projector.catchUp()

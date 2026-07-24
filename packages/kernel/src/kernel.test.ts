@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, it } from 'bun:test'
-import { ApprovalPolicy, EVENT_KIND, TASK_STATUS, type Analyzer, type PlanDraft, type PlanStep } from '@orc/contracts'
+import { ApprovalPolicy, EVENT_KIND, PAYLOAD_SCHEMAS, TASK_STATUS, type Analyzer, type PlanDraft, type PlanStep } from '@orc/contracts'
 import { draftFixture, stepFixture } from '@orc/contracts/fixtures'
 import { openStorage } from './storage'
 import { KERNEL_ERROR_CODE, KernelError } from './errors'
@@ -73,7 +73,7 @@ describe('Kernel lifecycle', () => {
     await k.proposePlan(t.id, draft())
     await k.approvePlan(t.id, undefined, { approvedBy: 'mcp' })
     const evt = (await k.eventsFor(t.id)).find(e => e.kind === 'plan_approved')!
-    expect((evt.payload as { approvedBy: string }).approvedBy).toBe('mcp')
+    expect(PAYLOAD_SCHEMAS.plan_approved.parse(evt.payload).approvedBy).toBe('mcp')
   })
 
   it('child tasks inherit budget and increment depth', async () => {
@@ -455,7 +455,7 @@ describe('Kernel lifecycle', () => {
     await k.reportCoverage({ taskId: t.id, stepId: 'analyze', runToken }, { analyzed: true, gaps: ['no tests read'] })
     const ev = (await log.byTask(t.id)).find(e => e.kind === EVENT_KIND.analysis_completed)!
     expect(ev.runToken).toBe(runToken) // emitted from within the analyze step
-    const p = ev.payload as { analyzed: boolean; gaps: string[]; confidence: string; notesWritten: number }
+    const p = PAYLOAD_SCHEMAS.analysis_completed.parse(ev.payload)
     expect(p.analyzed).toBe(true)
     expect(p.gaps).toEqual(['no tests read'])
     expect(p.confidence).toBe('none') // default

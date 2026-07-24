@@ -2,7 +2,7 @@ import { afterAll, describe, expect, it } from 'bun:test'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import { EVENT_KIND, MEMORY_ACCESS, type MemoryAccessedPayload } from '@orc/contracts'
+import { EVENT_KIND, MEMORY_ACCESS, MemoryAccessedPayload } from '@orc/contracts'
 import { draftFixture, stepFixture } from '@orc/contracts/fixtures'
 import { apiLoopExecutor } from '@orc/executor-api-loop'
 import { scriptModel } from '@orc/executor-api-loop/test-model'
@@ -80,7 +80,7 @@ describe('agent-side memory access recording (integration)', () => {
     // memory events are project-scoped (taskId: null), so read the whole log, not the task slice
     const accesses = (await log.all())
       .filter(e => e.kind === EVENT_KIND.memory_accessed)
-      .map(e => e.payload as unknown as MemoryAccessedPayload)
+      .map(e => MemoryAccessedPayload.parse(e.payload))
 
     // exactly two: the read that hit, and the traversal that returned something. The search, the
     // miss, and the kind-filtered traversal that matched nothing each recorded nothing.
