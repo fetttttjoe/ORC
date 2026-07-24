@@ -131,6 +131,10 @@ describe('projector resilience', () => {
     const log = (await openStorage(pg.url, { projectId: TEST_PROJECT_ID })).events
     const vaultDir = mkdtempSync(path.join(tmpdir(), 'orc-vault-retry-'))
     let applyCalls = 0
+    // ponytail: SurrealMemory is a class with a private constructor + private fields, so a
+    // fault-injecting stub can't structurally satisfy it — this is the one shape that stays a
+    // cast. Upgrade path: type createMemoryProjector's `surreal` param as a minimal
+    // { applyEvent; get; getCursor; allNotes } interface (the surface it actually calls).
     const stub = {
       applyEvent: async () => {
         applyCalls += 1
@@ -157,6 +161,7 @@ describe('projector resilience', () => {
     const pg = await createTestDb(); drops.push(pg.drop)
     const log = (await openStorage(pg.url, { projectId: TEST_PROJECT_ID })).events
     const vaultDir = mkdtempSync(path.join(tmpdir(), 'orc-vault-warn-'))
+    // ponytail: retained cast — see the SurrealMemory-is-a-class note above.
     const stub = {
       applyEvent: async () => { throw new Error('boom') },
       get: async () => fullNote,

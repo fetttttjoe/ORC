@@ -1,6 +1,6 @@
 import { afterAll, describe, expect, it } from 'bun:test'
 import { RecordId, Surreal } from 'surrealdb'
-import { EVENT_KIND, MEMORY_ACCESS, type EventKind, type EventRecord, type MemoryAccessMode, type MemoryAuthor } from '@orc/contracts'
+import { EVENT_KIND, MEMORY_ACCESS, isRecord, type EventKind, type EventRecord, type MemoryAccessMode, type MemoryAuthor } from '@orc/contracts'
 import { SurrealMemory } from './surreal'
 import { eventFixture } from '@orc/contracts/fixtures'
 import { createTestSurreal } from './test-helpers'
@@ -156,15 +156,17 @@ describe('SurrealMemory.applyEvent', () => {
     // Fault injection: fail the SECOND delete of the clear. Injecting through the orm's
     // transaction seam (rather than the raw socket) is also the regression check — if clear()
     // ever goes back to independent statements, `insideTransaction` stays false.
+    // ponytail: retained cast — `db` is a private field of SurrealMemory; TypeScript has no
+    // cast-free read of a private member. Upgrade path: an internal/test-only accessor for the orm.
     const db = (m as unknown as { db: { transaction: (cb: (tx: unknown) => Promise<unknown>) => Promise<unknown> } }).db
     const realTransaction = db.transaction.bind(db)
     let insideTransaction = false
     db.transaction = (cb) => realTransaction(async (tx) => {
       insideTransaction = true
-      const t = tx as { delete: (...a: unknown[]) => unknown }
-      const realDelete = t.delete.bind(t)
+      if (!isRecord(tx) || typeof tx.delete !== 'function') throw new Error('transaction seam exposes no delete')
+      const realDelete = tx.delete.bind(tx)
       let deletes = 0
-      t.delete = (...a: unknown[]) => {
+      tx.delete = (...a: unknown[]) => {
         if (++deletes === 2) throw new Error('socket dropped')
         return realDelete(...a)
       }
