@@ -1,9 +1,9 @@
 import { afterAll, describe, expect, it } from 'bun:test'
-import { mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs'
+import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { EVENT_KIND, PAYLOAD_SCHEMAS } from '@orc/contracts'
+import { EVENT_KIND, MemoryScope, PAYLOAD_SCHEMAS } from '@orc/contracts'
 import { draftFixture, stepFixture } from '@orc/contracts/fixtures'
 import { createMcpHub } from '@orc/mcp-client'
 import { apiLoopExecutor } from '@orc/executor-api-loop'
@@ -114,13 +114,20 @@ describe('sourced web research through a durable run (integration)', () => {
     expect(vaultFile).toContain(FINDING)
     expect(vaultFile).toContain(SOURCE_URL)
     expect(vaultFile).not.toContain(INJECTION)
-    const everyVaultFile = readdirSync(path.join(vaultDir, 'memory'))
-      .map(f => readFileSync(path.join(vaultDir, 'memory', f), 'utf8')).join('\n')
+    // recursive: non-project scopes nest under a subdirectory (noteRelPath) — Task 4's ambient
+    // capture now also lands a plan-scoped step note here, so the scan must not assume a flat dir
+    const memoryDir = path.join(vaultDir, 'memory')
+    const everyVaultFile = readdirSync(memoryDir, { recursive: true })
+      .map(f => path.join(memoryDir, f))
+      .filter(p => statSync(p).isFile())
+      .map(p => readFileSync(p, 'utf8')).join('\n')
     expect(everyVaultFile).not.toContain(INJECTION)
     expect(JSON.stringify(note)).not.toContain(INJECTION)
 
-    // citations are provenance, not graph nodes: no note or edge is minted for a URL
-    expect((await memory.store.list()).map(n => n.id)).toEqual(['pg16-logical-replication'])
+    // citations are provenance, not graph nodes: no note or edge is minted for a URL.
+    // project scope only: Task 4's ambient capture also lands a plan-scoped step note for this
+    // run, which is a different, expected thing (a step report, not derived from the citation).
+    expect((await memory.store.list({ scope: MemoryScope.project })).map(n => n.id)).toEqual(['pg16-logical-replication'])
     expect(await memory.store.neighbors('pg16-logical-replication')).toEqual([])
   }, 120_000)
 })
