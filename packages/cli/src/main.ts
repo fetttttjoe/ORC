@@ -2,10 +2,10 @@ import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync } from '
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { Command, InvalidArgumentError } from 'commander'
-import { EDGE_DIRECTION, EVENT_KIND, LINK_KINDS, MEMORY_ACCESS, PlanDraft, RUN_OUTCOME, STRATEGY, TASK_STATUS, LinkKind, slugId, type Analyzer, type EventRecord, type ExecutionPort, type Plan, type RunHandle } from '@orc/contracts'
+import { EDGE_DIRECTION, EVENT_KIND, LINK_KINDS, MEMORY_ACCESS, MemoryAccessedPayload, MemoryScope, planScope, PlanDraft, RUN_OUTCOME, STRATEGY, TASK_STATUS, LinkKind, slugId, type Analyzer, type EventRecord, type ExecutionPort, type Plan, type RunHandle } from '@orc/contracts'
 import { openStorage, Kernel, fold, grantExtensionTrust, grantMcpTrust, initializeProject, isExtensionTrusted, isMcpTrusted, loadConfig, loadTrust, migrateDatabase, requireProject, taskUsage, type EventLog, type OrcConfig, type PluginHost, type ProjectConfig, type Storage } from '@orc/kernel'
 import { createVaultProjector, parsePlanFile } from '@orc/vault-projector'
-import { probeMemory } from '@orc/memory'
+import { consolidatedNote, probeMemory } from '@orc/memory'
 import { openMemory } from './memory-open'
 import { buildModelDiscovery, buildOrcActions, singleStepDraft } from './actions'
 import { renderPlanHuman } from './plan-render'
@@ -684,6 +684,33 @@ export function buildProgram(
       await memory.projector.rebuild()
       await memory.close()
       console.log('memory read model rebuilt from the log')
+    })
+  mem
+    .command('consolidate <taskId>')
+    .description("distill a task's step notes into one durable project note, linked to the knowledge it used")
+    .action(async (taskId: string) => {
+      const task = (await kernel.state()).tasks.get(taskId)
+      if (!task) throw new Error(`no task '${taskId}'`)
+      const { config, log } = needPlugin()
+      const memory = await openMemory({ log, config })
+      try {
+        await memory.projector.catchUp()
+        // raw material: the task's transient plan-scoped step notes
+        const steps = (await memory.store.list({ scope: planScope(taskId) })).map(n => ({ title: n.title, summary: n.summary }))
+        // provenance: the DURABLE project notes this task actually read. memory_accessed carries the
+        // acting task in its envelope; parse the payload for the note id + scope, never cast.
+        const derivedFrom: string[] = []
+        for (const e of await log.after(0, [EVENT_KIND.memory_accessed])) {
+          if (e.taskId !== taskId) continue
+          const p = MemoryAccessedPayload.safeParse(e.payload)
+          if (p.success && p.data.scope === MemoryScope.project) derivedFrom.push(p.data.id)
+        }
+        const written = await memory.store.write(consolidatedNote({ taskTitle: task.title, steps, derivedFrom }), { source: 'cli' })
+        await memory.projector.catchUp()
+        console.log(`consolidated '${written.id}' from ${steps.length} step note(s), ${new Set(derivedFrom).size} source link(s) — read it: orc memory cat ${written.id}`)
+      } finally {
+        await memory.close()
+      }
     })
 
   program
