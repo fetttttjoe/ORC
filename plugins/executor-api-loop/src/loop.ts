@@ -2,7 +2,7 @@ import { generateText, type JSONValue, type LanguageModel, type ModelMessage, ty
 import {
   EVENT_KIND, FAILURE_CLASS, MEMORY_TOOL_NAME, MemoryScope, MemorySearchResult, MemoryWriteResult, NOTE_KIND, OPERATION_KIND, planScope, RETENTION, SIGNAL_OUTCOME,
   slugId, UNIFIED_EVENT_TYPE, terminalError,
-  type AgentExecutor, type EventDraft, type ExecutorContext, type NoteSummary, type ResolvedTool, type Signal,
+  type AgentExecutor, type EventDraft, type ExecutorContext, type NoteSummary, type ResolvedTool, type Signal, type SignalOutcome,
   type SplitResult, type UnifiedEvent, type Usage,
 } from '@orc/contracts'
 import { errorMessage, validateOutputPaths } from '@orc/contracts'
@@ -235,37 +235,47 @@ async function preloadKnownContext(ctx: ExecutorContext<LanguageModel>): Promise
   }
 }
 
-// Task 4: ambient capture — every successful step leaves a note, zero model calls. The signal
-// summary already exists ("its summary is the only thing downstream steps will see", buildPrompt
-// above) and is journaled; persisting it as an expirable plan-scoped note costs no model call and
-// makes accumulation ambient instead of opt-in. Displacement, not addition: KNOWLEDGE_PROTOCOL
-// rule 4 stops asking agents to spend a turn writing their own step report.
+// Task 4 + Phase 2: ambient capture — every signalled step (success OR failure) leaves a note,
+// zero model calls. The signal summary already exists ("its summary is the only thing downstream
+// steps will see", buildPrompt above) and is journaled; persisting it as an expirable plan-scoped
+// note costs no model call and makes accumulation ambient instead of opt-in. A FAILURE summary is
+// negative knowledge ("tried X, it failed because Y") — higher-value than a success per the memory
+// research, and previously discarded. Displacement, not addition: KNOWLEDGE_PROTOCOL rule 4 stops
+// asking agents to spend a turn writing their own step report.
 // ponytail: bypasses the operation journal — safe because the synthetic idempotency key makes the
 // event append converge on replay; move inside ctx.operation if ambient notes ever carry
 // non-idempotent content.
+
+// Per-outcome capture parameters — matched values in ONE place, never scattered literals. Distinct
+// id prefixes so a later success cannot overwrite the failure lesson (both notes coexist), and
+// distinct synthetic tool-call-id prefixes so each stays independently idempotent on replay.
+interface AmbientSpec { idPrefix: string; tags: readonly string[]; callIdPrefix: string }
+const AMBIENT_CAPTURE: Record<SignalOutcome, AmbientSpec> = {
+  [SIGNAL_OUTCOME.success]: { idPrefix: 'step', tags: ['ambient'], callIdPrefix: 'ambient' },
+  [SIGNAL_OUTCOME.failure]: { idPrefix: 'failed step', tags: ['ambient', 'failure'], callIdPrefix: 'ambient-fail' },
+}
+
 async function captureAmbientNote(ctx: ExecutorContext<LanguageModel>, signal: Signal): Promise<void> {
-  if (ctx.ambientCapture === false || signal.outcome !== SIGNAL_OUTCOME.success || !signal.summary || !ctx.taskId) return
+  if (ctx.ambientCapture === false || !signal.summary || !ctx.taskId) return
   const memoryWrite = ctx.extraTools.find(t => t.name === MEMORY_TOOL_NAME.write)
   if (!memoryWrite) return
+  const spec = AMBIENT_CAPTURE[signal.outcome]
   const draft = {
-    id: slugId(`step ${ctx.step.title}`),
+    id: slugId(`${spec.idPrefix} ${ctx.step.title}`),
     scope: planScope(ctx.taskId),
     title: ctx.step.title.slice(0, 200),
     summary: signal.summary.slice(0, 500),
-    tags: ['ambient'],
+    tags: [...spec.tags],
     retention: RETENTION.expirable,
     kind: NOTE_KIND.fact,
   }
   // the SYNTHETIC toolCallId matters: without it the write's idempotencyKey is undefined and a
-  // crash-recovery replay between the signal checkpoint and workflow completion appends a
-  // DUPLICATE memory_written event; with it the memory tool derives
-  // `${runToken}:tool:ambient:<stepId>:memory:<id>`, which makes the replay append idempotent.
-  // the execute envelope is documented as never rejecting ({ output, isError }), but that's
-  // convention, not a guarantee this call site can lean on — a throwing tool must not turn an
-  // already-checkpointed SUCCESSFUL signal into a failed step, so the call is wrapped the same
-  // way executeTool (tools.ts) wraps every tool invocation.
+  // crash-recovery replay between the signal checkpoint and workflow completion appends a DUPLICATE
+  // memory_written event; with it the memory tool derives `${runToken}:tool:<callId>:memory:<id>`,
+  // which makes the replay append idempotent. A throwing tool must not turn an already-checkpointed
+  // signal into a failed step, so the call is wrapped the same way executeTool wraps every tool call.
   try {
-    const result = await memoryWrite.execute(draft, `ambient:${ctx.step.id}`)
+    const result = await memoryWrite.execute(draft, `${spec.callIdPrefix}:${ctx.step.id}`)
     if (result.isError) console.warn(`ambient capture failed for step '${ctx.step.id}':`, result.output)
   } catch (err) {
     console.warn(`ambient capture failed for step '${ctx.step.id}':`, errorMessage(err))

@@ -609,6 +609,27 @@ describe('ambient capture', () => {
     expect(draft.summary).toHaveLength(500)
   })
 
+  it('captures a FAILURE signal as a distinct negative-knowledge note (own id, failure tag)', async () => {
+    const captured: EventDraft[] = []
+    const calls: Array<{ input: unknown; toolCallId: string | undefined }> = []
+    const step = stepFixture({ id: 'step1', title: 'Distill findings', instructions: 'do', maxIterations: 3 })
+    const model = scriptModel([
+      { toolCalls: [{ toolCallId: 'c1', toolName: 'signal', input: { outcome: 'failure', summary: 'blocked: the API returned 500' } }] },
+    ])
+    const events = await drain(apiLoopExecutor().startTurn(ctx(model, captured, {
+      extraTools: [fakeMemoryWrite(calls)], taskId: 'task-1', step,
+    })))
+    expect(events.at(-1)?.type).toBe('done')
+    expect(calls).toHaveLength(1)
+    expect(calls[0]!.toolCallId).toBe(`ambient-fail:${step.id}`)
+    const draft = AmbientDraft.parse(calls[0]!.input)
+    expect(draft.id).toBe(slugId(`failed step ${step.title}`)) // distinct from the success id → both can coexist
+    expect(draft.id).not.toBe(slugId(`step ${step.title}`))
+    expect(draft.tags).toEqual(['ambient', 'failure'])
+    expect(draft.summary).toBe('blocked: the API returned 500')
+    expect(draft.retention).toBe('expirable')
+  })
+
   it('ambientCapture: false skips the write entirely', async () => {
     const captured: EventDraft[] = []
     const calls: Array<{ input: unknown; toolCallId: string | undefined }> = []
