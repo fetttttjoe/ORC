@@ -1,15 +1,7 @@
 import { afterAll, describe, expect, it } from 'bun:test'
-import { mkdtempSync } from 'node:fs'
-import { tmpdir } from 'node:os'
-import path from 'node:path'
 import { EVENT_KIND, planScope, slugId, type TaskNode } from '@orc/contracts'
 import { eventFixture } from '@orc/contracts/fixtures'
-import { openStorage } from '@orc/kernel'
-import { createTestDb, TEST_PROJECT_ID } from '@orc/kernel/test-helpers'
-import { SurrealMemory } from './surreal'
-import { createTestSurreal } from './test-helpers'
-import { createMemoryStore } from './store'
-import { createMemoryProjector } from './projector'
+import { createLiveMemory } from './test-helpers'
 import { consolidateTask } from './consolidate'
 import { consolidateOnCompletion } from './lifecycle'
 
@@ -23,17 +15,13 @@ const taskNode = (id: string, title: string): TaskNode => ({
 const done = (taskId: string) =>
   eventFixture({ kind: EVENT_KIND.task_status_changed, payload: { taskId, from: 'running', to: 'done' } })
 
-// A live memory store over test Postgres + SurrealDB, seeded with the task's task_created event.
+// A live memory stack seeded with the task's task_created event — consolidation folds the title
+// out of the log, so a task the log has never heard of is the "unknown task" case.
 async function harness(taskId: string, title: string) {
-  const pg = await createTestDb(); drops.push(pg.drop)
-  const ts = await createTestSurreal(); drops.push(ts.drop)
-  const log = (await openStorage(pg.url, { projectId: TEST_PROJECT_ID })).events
-  const surreal = await SurrealMemory.open(ts)
-  const store = createMemoryStore({ log, surreal })
-  const projector = createMemoryProjector({ log, surreal, vaultDir: mkdtempSync(path.join(tmpdir(), 'consol-')) })
-  await log.append({ taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.task_created, payload: { task: taskNode(taskId, title) } })
-  drops.push(() => log.close())
-  return { log, store, projector }
+  const live = await createLiveMemory()
+  drops.push(live.close)
+  await live.log.append({ taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.task_created, payload: { task: taskNode(taskId, title) } })
+  return live
 }
 
 describe('consolidateTask (integration)', () => {

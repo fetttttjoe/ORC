@@ -5,7 +5,7 @@ import { Command, InvalidArgumentError } from 'commander'
 import { EDGE_DIRECTION, EVENT_KIND, LINK_KINDS, MEMORY_ACCESS, PlanDraft, RUN_OUTCOME, STRATEGY, TASK_STATUS, LinkKind, slugId, type Analyzer, type EventRecord, type ExecutionPort, type Plan, type RunHandle } from '@orc/contracts'
 import { openStorage, Kernel, fold, grantExtensionTrust, grantMcpTrust, initializeProject, isExtensionTrusted, isMcpTrusted, loadConfig, loadTrust, migrateDatabase, requireProject, taskUsage, type EventLog, type OrcConfig, type PluginHost, type ProjectConfig, type Storage } from '@orc/kernel'
 import { createVaultProjector, parsePlanFile } from '@orc/vault-projector'
-import { consolidateTask, probeMemory } from '@orc/memory'
+import { consolidateTask, probeMemory, staleNotes, DEFAULT_SWEEP_DAYS } from '@orc/memory'
 import { openMemory } from './memory-open'
 import { buildDistiller } from './consolidation-distiller'
 import { seedRegistries } from './runtime'
@@ -594,6 +594,34 @@ export function buildProgram(
       await memory.projector.catchUp()
       await memory.close()
       console.log(`deleted '${id}'`)
+    })
+  mem
+    .command('sweep')
+    .description('retire expirable notes nobody has touched (dry run; --apply deletes)')
+    .option('--days <n>', `untouched for at least this many days (default ${DEFAULT_SWEEP_DAYS})`, parsePositiveInteger)
+    .option('--apply', 'append the deletions (default: report only)')
+    .action(async (o: { days?: number; apply?: boolean }) => {
+      const { config, log } = needPlugin()
+      const days = o.days ?? DEFAULT_SWEEP_DAYS
+      // the policy is a pure fold of the log, so the dry run needs no read model at all
+      const events = await log.after(0, [EVENT_KIND.memory_written, EVENT_KIND.memory_deleted, EVENT_KIND.memory_accessed])
+      const goes = staleNotes(events, { now: new Date().toISOString(), days })
+      for (const n of goes)
+        console.log(`${n.scope}/${n.id}\t${n.title}\thits ${n.hits}\tlast touched ${n.lastTouchedAt}`)
+      if (goes.length === 0) {
+        console.log(`_nothing expirable has gone untouched for ${days} days_`)
+        return
+      }
+      if (!o.apply) {
+        console.log(`${goes.length} note(s) would be retired — re-run with --apply to delete`)
+        return
+      }
+      const memory = await openMemory({ log, config })
+      // each delete is a memory_deleted event: the content stays in the log for audit/replay
+      for (const n of goes) await memory.store.remove(n.id, n.scope, { source: 'cli' })
+      await memory.projector.catchUp()
+      await memory.close()
+      console.log(`retired ${goes.length} note(s)`)
     })
   mem
     .command('ls')

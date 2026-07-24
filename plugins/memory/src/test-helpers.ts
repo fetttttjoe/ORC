@@ -1,4 +1,13 @@
+import { mkdtempSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import path from 'node:path'
 import { Surreal } from 'surrealdb'
+import type { MemoryStore } from '@orc/contracts'
+import { openStorage, type EventLog } from '@orc/kernel'
+import { createTestDb, TEST_PROJECT_ID } from '@orc/kernel/test-helpers'
+import { SurrealMemory } from './surreal'
+import { createMemoryStore } from './store'
+import { createMemoryProjector, type MemoryProjector } from './projector'
 
 // single source for test connection defaults — env-overridable, matching orc's own config
 // (see packages/kernel/src/config.ts's projectDb* fields); literals appear exactly once here.
@@ -31,5 +40,23 @@ export async function createTestSurreal(): Promise<{
         await s.query(`REMOVE DATABASE IF EXISTS \`${name}\`;`).catch(() => {})
       await s.close()
     },
+  }
+}
+
+// A real memory stack — test Postgres log, throwaway SurrealDB read model, vault in a temp dir —
+// for the integration tests that must exercise the event-first write path rather than a fake store.
+// The caller owns teardown: `await live.close()` in an afterAll drops both databases.
+export interface LiveMemory { log: EventLog; store: MemoryStore; projector: MemoryProjector; close: () => Promise<void> }
+
+export async function createLiveMemory(): Promise<LiveMemory> {
+  const pg = await createTestDb()
+  const ts = await createTestSurreal()
+  const log = (await openStorage(pg.url, { projectId: TEST_PROJECT_ID })).events
+  const surreal = await SurrealMemory.open(ts)
+  return {
+    log,
+    store: createMemoryStore({ log, surreal }),
+    projector: createMemoryProjector({ log, surreal, vaultDir: mkdtempSync(path.join(tmpdir(), 'orc-memory-')) }),
+    close: async () => { await log.close(); await ts.drop(); await pg.drop() },
   }
 }

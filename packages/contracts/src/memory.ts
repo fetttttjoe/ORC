@@ -447,6 +447,22 @@ export function foldAccessCounts(
   return acc
 }
 
+// When each note was last WRITTEN, folded from the same stream foldLiveNotes reads. It is a
+// separate fold because foldLiveNotes' input is deliberately ts-free (trimmed fixtures parse
+// against it), while a lifecycle policy needs the clock: "untouched" means neither written nor
+// read for N days, so the write time is half the answer and foldAccessCounts is the other half.
+export function foldWriteTimes(
+  events: Array<Pick<EventRecord, 'kind' | 'payload'> & { ts?: string }>,
+): Map<string, string> {
+  const written = new Map<string, string>()
+  for (const e of events) {
+    if (e.kind !== EVENT_KIND.memory_written || !e.ts) continue
+    const p = MemoryWrittenPayload.safeParse(e.payload)
+    if (p.success) written.set(noteKey(p.data.note.scope, p.data.note.id), e.ts)
+  }
+  return written
+}
+
 export const edgeKey = (scope: string, from: string, to: string, kind: LinkKind): string =>
   [scope, from, to, kind].join(' ')
 
