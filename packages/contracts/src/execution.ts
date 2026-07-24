@@ -196,6 +196,12 @@ export interface ExecutorContext<LM = unknown> {
   checkpoint: Checkpoint
   operation: OperationCheckpoint
   budgetRemainingUSD: () => Promise<number | null>
+  // Optional, additive runtime knobs (no config→executor path existed before these — maxIterations
+  // reaches the loop as a frozen PlanStep field, wrong for a runtime knob). Optional so every
+  // existing ctx constructor (tests, fixtures) keeps compiling untouched.
+  taskId?: string // the plan this step belongs to — absent in bare test ctxs, which skip ambient capture
+  ambientCapture?: boolean // kill switch for Task 4's ambient step-note capture; undefined behaves as enabled
+  memoryPreloadTokens?: number // Task 7's memory-preload budget rides this same contract change; not yet consumed
 }
 
 export interface AgentExecutor<LM = unknown> {

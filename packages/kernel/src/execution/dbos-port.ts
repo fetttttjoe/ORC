@@ -252,6 +252,8 @@ export async function createDbosPort(opts: {
         model,
         runToken,
         workspaceDir,
+        taskId: args.taskId,
+        ambientCapture: config.ambientCapture,
         // prices usage drafts on the way through: fill costUSD from the provider table
         checkpoint: (name, fn, toEvents) =>
           checkpoint(name, fn, toEvents ? r => toEvents(r).map(d => priceDraft(d, provider, modelId)) : undefined),

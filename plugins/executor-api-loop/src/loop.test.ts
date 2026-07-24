@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import type { Checkpoint, EventDraft, ExecutorContext, OperationCheckpoint, OperationSpec, ResolvedTool, SplitResult, UnifiedEvent } from '@orc/contracts'
-import { EVENT_KIND } from '@orc/contracts'
+import { EVENT_KIND, planScope, slugId } from '@orc/contracts'
 import { stepFixture } from '@orc/contracts/fixtures'
 import { z } from 'zod'
 import type { LanguageModel } from 'ai'
@@ -550,6 +550,103 @@ describe('memory lint nudge', () => {
     // fires once: the third iteration's delta must not repeat the nudge
     const thirdRequest = JSON.stringify(AgentCallRequest.parse(agentCallDrafts[2]!.payload).request.messages)
     expect(thirdRequest).not.toContain('memory lint')
+  })
+})
+
+describe('ambient capture', () => {
+  // Named wire-shape subset this suite pins for the ambient note draft — parsed, never cast.
+  const AmbientDraft = z.object({
+    id: z.string(), scope: z.string(), title: z.string(), summary: z.string(),
+    tags: z.array(z.string()), retention: z.string(), kind: z.string(),
+  })
+
+  function fakeMemoryWrite(calls: Array<{ input: unknown; toolCallId: string | undefined }>, result: { output: unknown; isError: boolean } = { output: { id: 'x' }, isError: false }): ResolvedTool {
+    return {
+      ref: 'memory/write',
+      name: 'memory_write',
+      description: 'fake memory_write',
+      inputSchema: { type: 'object', properties: {} },
+      execute: async (input, toolCallId) => { calls.push({ input, toolCallId }); return result },
+    }
+  }
+
+  function withWarnSpy<T>(fn: (warnCalls: unknown[][]) => Promise<T>): Promise<T> {
+    const warnCalls: unknown[][] = []
+    const original = console.warn
+    console.warn = (...args: unknown[]) => { warnCalls.push(args) }
+    return fn(warnCalls).finally(() => { console.warn = original })
+  }
+
+  it('captures a successful signal summary as an expirable plan-scoped note, zero model calls', async () => {
+    const captured: EventDraft[] = []
+    const calls: Array<{ input: unknown; toolCallId: string | undefined }> = []
+    const longSummary = 'x'.repeat(600)
+    const step = stepFixture({ id: 'step1', title: 'Distill findings', instructions: 'do', maxIterations: 3 })
+    const model = scriptModel([
+      { toolCalls: [{ toolCallId: 'c1', toolName: 'signal', input: { outcome: 'success', summary: longSummary } }] },
+    ])
+    const events = await drain(apiLoopExecutor().startTurn(ctx(model, captured, {
+      extraTools: [fakeMemoryWrite(calls)], taskId: 'task-1', step,
+    })))
+    expect(events.at(-1)?.type).toBe('done')
+    // zero model calls: the ambient write is a direct tool invocation, no generateText round trip
+    expect(model.doGenerateCalls).toHaveLength(1)
+    expect(calls).toHaveLength(1)
+    expect(calls[0]!.toolCallId).toBe(`ambient:${step.id}`)
+    const draft = AmbientDraft.parse(calls[0]!.input)
+    expect(draft.id).toBe(slugId(`step ${step.title}`))
+    expect(draft.scope).toBe(planScope('task-1'))
+    expect(draft.title).toBe(step.title)
+    expect(draft.tags).toEqual(['ambient'])
+    expect(draft.retention).toBe('expirable')
+    expect(draft.kind).toBe('fact')
+    expect(draft.summary).toBe(longSummary.slice(0, 500))
+    expect(draft.summary).toHaveLength(500)
+  })
+
+  it('ambientCapture: false skips the write entirely', async () => {
+    const captured: EventDraft[] = []
+    const calls: Array<{ input: unknown; toolCallId: string | undefined }> = []
+    const model = scriptModel([
+      { toolCalls: [{ toolCallId: 'c1', toolName: 'signal', input: { outcome: 'success', summary: 'ok' } }] },
+    ])
+    const events = await drain(apiLoopExecutor().startTurn(ctx(model, captured, {
+      extraTools: [fakeMemoryWrite(calls)], taskId: 'task-1', ambientCapture: false,
+    })))
+    expect(events.at(-1)?.type).toBe('done')
+    expect(calls).toHaveLength(0)
+  })
+
+  it('memory_write tool absent → capture is skipped silently, step still succeeds, zero warns', async () => {
+    const captured: EventDraft[] = []
+    const model = scriptModel([
+      { toolCalls: [{ toolCallId: 'c1', toolName: 'signal', input: { outcome: 'success', summary: 'ok' } }] },
+    ])
+    const warnCalls = await withWarnSpy(warns =>
+      drain(apiLoopExecutor().startTurn(ctx(model, captured, { taskId: 'task-1' }))).then(events => {
+        expect(events.at(-1)?.type).toBe('done')
+        return warns
+      }),
+    )
+    expect(warnCalls).toHaveLength(0)
+  })
+
+  it('memory_write returning isError never fails the step — warns once', async () => {
+    const captured: EventDraft[] = []
+    const calls: Array<{ input: unknown; toolCallId: string | undefined }> = []
+    const model = scriptModel([
+      { toolCalls: [{ toolCallId: 'c1', toolName: 'signal', input: { outcome: 'success', summary: 'ok' } }] },
+    ])
+    const warnCalls = await withWarnSpy(warns =>
+      drain(apiLoopExecutor().startTurn(ctx(model, captured, {
+        extraTools: [fakeMemoryWrite(calls, { output: { error: 'degraded tier' }, isError: true })], taskId: 'task-1',
+      }))).then(events => {
+        expect(events.at(-1)?.type).toBe('done')
+        return warns
+      }),
+    )
+    expect(calls).toHaveLength(1)
+    expect(warnCalls).toHaveLength(1)
   })
 })
 

@@ -30,6 +30,11 @@ const settingsSchema = (dir: string) =>
     // re-heats instantly, rewrites nothing. Threaded to BOTH consumers (store ranking, Task 8;
     // graph heat via sessions, Task 9) so the two surfaces always decay at ONE rate.
     memoryHalfLifeDays: z.coerce.number().positive().default(14),
+    // ambient capture kill switch (Task 4): displaces the manual step-report protocol rule —
+    // successful steps auto-persist their signal summary as an expirable plan note, at zero
+    // model-call cost. z.stringbool(), NOT z.coerce.boolean(): coerce turns the env string
+    // 'false' into `true` (any non-empty string is truthy), which would make the switch inoperable.
+    ambientCapture: z.union([z.boolean(), z.stringbool()]).default(true),
     approvalPolicy: ApprovalPolicy.prefault({}), // {} isn't the full output shape — prefault reparses it, applying ApprovalPolicy's own field defaults
     workspaceRoot: z.string().default(path.join(dir, '.orc', 'workspaces')),
     // operator-allowlisted commands steps may run via the `exec` tool (e.g. "bun test",
@@ -63,6 +68,7 @@ const envOverrides = (): Record<string, string> => {
     maxDepth: process.env.ORC_MAX_DEPTH,
     maxIterations: process.env.ORC_MAX_ITERATIONS,
     memoryHalfLifeDays: process.env.ORC_MEMORY_HALF_LIFE_DAYS,
+    ambientCapture: process.env.ORC_AMBIENT_CAPTURE,
     ollamaBaseUrl: process.env.OLLAMA_BASE_URL,
     projectDbUrl: process.env.ORC_PROJECT_DB_URL,
     projectDbConnectTimeoutMs: process.env.ORC_PROJECT_DB_CONNECT_TIMEOUT_MS,
