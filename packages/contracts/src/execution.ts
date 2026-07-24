@@ -201,7 +201,7 @@ export interface ExecutorContext<LM = unknown> {
   // existing ctx constructor (tests, fixtures) keeps compiling untouched.
   taskId?: string // the plan this step belongs to — absent in bare test ctxs, which skip ambient capture
   ambientCapture?: boolean // kill switch for Task 4's ambient step-note capture; undefined behaves as enabled
-  memoryPreloadTokens?: number // Task 7's memory-preload budget rides this same contract change; not yet consumed
+  memoryPreloadTokens?: number // Task 7's memory-preload budget: fed via dbos-port config, consumed by the loop's preload search
 }
 
 export interface AgentExecutor<LM = unknown> {

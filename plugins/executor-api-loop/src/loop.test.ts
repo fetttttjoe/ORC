@@ -694,13 +694,34 @@ describe('knowledge preload', () => {
       step: distinctiveStep(), extraTools: [search], memoryPreloadTokens: 500, operation: makeOperation(captured, specs),
     })))
     const prompt = JSON.stringify(specs[0]?.before)
-    expect(prompt).toContain('# Known project context (ids — memory_read for detail, verify before relying)')
+    expect(prompt).toContain('# Known project context (ids — memory_read for detail, pass scope where shown, verify before relying)')
     expect(prompt).toContain(note.id)
     expect(prompt).toContain(note.summary)
+    // project-scope note (the default) renders its bare id — no scope qualifier
+    expect(prompt).toContain(`${note.id} — ${note.title}: ${note.summary}`)
     // placed between deps and the knowledge protocol
     expect(prompt.indexOf('Known project context')).toBeLessThan(prompt.indexOf('Project knowledge protocol'))
     // query derived from the TITLE only — instructions prose never leaks in, and one call suffices
     expect(queries).toEqual(['refactor authentication middleware'])
+  })
+
+  it('a non-project-scope note renders its id qualified with scope; a project-scope note stays bare', async () => {
+    const captured: EventDraft[] = []
+    const specs: OperationSpec[] = []
+    const queries: string[] = []
+    const planNote = noteSummary({ id: 'plan-note', scope: planScope('task-1'), title: 'Plan-local finding', summary: 'Only relevant to this plan.' })
+    const projectNote = noteSummary({ id: 'project-note', scope: 'project', title: 'Durable fact', summary: 'True project-wide.' })
+    const search = fakeMemorySearch(queries, { output: { notes: [planNote, projectNote], truncated: false, omitted: 0 }, isError: false })
+    const model = scriptModel([
+      { toolCalls: [{ toolCallId: 'c1', toolName: 'signal', input: { outcome: 'success', summary: 'ok' } }] },
+    ])
+    await drain(apiLoopExecutor().startTurn(ctx(model, captured, {
+      step: distinctiveStep(), extraTools: [search], memoryPreloadTokens: 500, operation: makeOperation(captured, specs),
+    })))
+    const prompt = JSON.stringify(specs[0]?.before)
+    expect(prompt).toContain(`${planNote.id} (scope: ${planNote.scope}) — ${planNote.title}: ${planNote.summary}`)
+    expect(prompt).toContain(`${projectNote.id} — ${projectNote.title}: ${projectNote.summary}`)
+    expect(prompt).not.toContain(`${projectNote.id} (scope:`)
   })
 
   it('memoryPreloadTokens: 0 skips preload entirely — no search call, no block', async () => {

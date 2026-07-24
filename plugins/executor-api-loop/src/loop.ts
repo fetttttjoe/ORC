@@ -1,6 +1,6 @@
 import { generateText, type JSONValue, type LanguageModel, type ModelMessage, type ToolSet } from 'ai'
 import {
-  EVENT_KIND, FAILURE_CLASS, MEMORY_TOOL_NAME, MemorySearchResult, MemoryWriteResult, NOTE_KIND, OPERATION_KIND, planScope, RETENTION, SIGNAL_OUTCOME,
+  EVENT_KIND, FAILURE_CLASS, MEMORY_TOOL_NAME, MemoryScope, MemorySearchResult, MemoryWriteResult, NOTE_KIND, OPERATION_KIND, planScope, RETENTION, SIGNAL_OUTCOME,
   slugId, UNIFIED_EVENT_TYPE, terminalError,
   type AgentExecutor, type EventDraft, type ExecutorContext, type NoteSummary, type ResolvedTool, type Signal,
   type SplitResult, type UnifiedEvent, type Usage,
@@ -188,10 +188,14 @@ async function preloadSearch(tool: ResolvedTool, terms: string[], budget: number
   return searchNotes(tool, longest, budget)
 }
 
+// memory_read defaults to project scope — a plan-scoped (or other non-project) note id is
+// unreadable as a bare id, so it carries its scope inline; project-scope ids stay bare.
 const renderKnownContext = (notes: NoteSummary[]): string =>
   [
-    '# Known project context (ids — memory_read for detail, verify before relying)',
-    ...notes.map(n => `${n.id} — ${n.title}: ${n.summary}`),
+    '# Known project context (ids — memory_read for detail, pass scope where shown, verify before relying)',
+    ...notes.map(n => n.scope === MemoryScope.project
+      ? `${n.id} — ${n.title}: ${n.summary}`
+      : `${n.id} (scope: ${n.scope}) — ${n.title}: ${n.summary}`),
   ].join('\n')
 
 // Runs before iteration 1. The search call(s) happen INSIDE ctx.checkpoint so a crash-recovery
@@ -210,7 +214,7 @@ async function preloadKnownContext(ctx: ExecutorContext<LanguageModel>): Promise
     return notes.length > 0 ? renderKnownContext(notes) : ''
   } catch (err) {
     // never block the step over a preload failure — same posture as captureAmbientNote below
-    console.warn('memory preload failed:', errorMessage(err))
+    console.warn(`memory preload failed for step '${ctx.step.id}':`, errorMessage(err))
     return ''
   }
 }
@@ -229,8 +233,8 @@ async function captureAmbientNote(ctx: ExecutorContext<LanguageModel>, signal: S
   if (!memoryWrite) return
   const draft = {
     id: slugId(`step ${ctx.step.title}`),
-    scope: ctx.taskId ? planScope(ctx.taskId) : undefined,
-    title: ctx.step.title,
+    scope: planScope(ctx.taskId),
+    title: ctx.step.title.slice(0, 200),
     summary: signal.summary.slice(0, 500),
     tags: ['ambient'],
     retention: RETENTION.expirable,

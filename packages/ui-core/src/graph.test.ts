@@ -1,9 +1,9 @@
 import { afterAll, describe, expect, it } from 'bun:test'
 import { EVENT_KIND, type EventRecord } from '@orc/contracts'
-import { draftFixture, stepFixture } from '@orc/contracts/fixtures'
+import { draftFixture, eventFixture, stepFixture } from '@orc/contracts/fixtures'
 import { Kernel, fold, openStorage, type EventLog } from '@orc/kernel'
 import { createTestDb, TEST_PROJECT_ID } from '@orc/kernel/test-helpers'
-import { buildGraph, diffGraphs, noteNodeId, stepNodeId } from './graph'
+import { buildGraph, diffGraphs, EDGE, noteNodeId, stepNodeId } from './graph'
 
 // the planScopeName↔planScope drift-guard test is gone WITH the duplication it guarded:
 // contracts' planScope is now the single definition, imported everywhere
@@ -125,16 +125,24 @@ describe('buildGraph', () => {
 
   it('derives edge heat from accessed.via events, on note-link edges only', () => {
     const ts = '2026-07-01T00:00:00.000Z'
+    // a real task, so the task-authored note below produces an actual 'wrote' edge — otherwise
+    // the non-note-link assertion below would loop over zero edges and prove nothing
+    const state = fold([eventFixture({
+      kind: EVENT_KIND.task_created, ts,
+      payload: { task: { id: 't1', parentId: null, type: 'generic', title: 'task', spec: '', status: 'draft', zone: [], budgetUSD: null, depth: 0, createdAt: ts } },
+    })])
     const events = [
-      { kind: EVENT_KIND.memory_written, ts, payload: { note: { id: 'eseed', scope: 'project', title: 'eseed', links: [{ id: 'ewalked', kind: 'relates_to' }] }, author: { source: 'cli' } } },
+      { kind: EVENT_KIND.memory_written, ts, payload: { note: { id: 'eseed', scope: 'project', title: 'eseed', links: [{ id: 'ewalked', kind: 'relates_to' }] }, author: { source: 'agent', taskId: 't1' } } },
       { kind: EVENT_KIND.memory_written, ts, payload: { note: { id: 'ewalked', scope: 'project', title: 'ewalked' }, author: { source: 'cli' } } },
       // via-provenance access: the connection itself, not just the node, gets credit
       { kind: EVENT_KIND.memory_accessed, ts, payload: { id: 'ewalked', scope: 'project', mode: 'read', author: { source: 'cli' }, via: { seed: 'eseed', kind: 'relates_to', direction: 'out' } } },
     ]
-    const g = buildGraph(fold([]), events, { now: ts })
+    const g = buildGraph(state, events, { now: ts })
     const edge = g.links.find(l => l.source === noteNodeId('project', 'eseed') && l.target === noteNodeId('project', 'ewalked'))!
     expect(edge.heat).toBeGreaterThan(0)
     expect(edge.heat).toBeLessThanOrEqual(1)
+    const wroteEdge = g.links.find(l => l.type === EDGE.wrote)!
+    expect(wroteEdge).toBeDefined() // guard: a real non-note-link edge exists in this fixture
     // non-note-link edges (task→note 'wrote' etc.) never carry heat — only walked-edge kinds do
     for (const l of g.links) if (l.type !== 'relates_to') expect(l.heat).toBeUndefined()
   })
