@@ -12,6 +12,7 @@ import { asResolvedTools, buildCopilotTools, copilotSystemPrompt } from './copil
 const unsupported = (name: string) => async (): Promise<never> => { throw new Error(`${name} not available in this test`) }
 const sessionsStub = (over: Partial<ProjectSessions> = {}): ProjectSessions => ({
   projects: unsupported('projects'), snapshot: unsupported('snapshot'), subscribe: unsupported('subscribe'),
+  subscribeProjects: unsupported('subscribeProjects'), notifyProjectsChanged: unsupported('notifyProjectsChanged'),
   since: unsupported('since'), nodeDetail: unsupported('nodeDetail'), modelCatalog: unsupported('modelCatalog'),
   reset: unsupported('reset'), transcript: unsupported('transcript'), taskPlans: unsupported('taskPlans'),
   planNotes: unsupported('planNotes'), log: unsupported('log'), close: unsupported('close'), ...over,

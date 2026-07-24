@@ -1,5 +1,5 @@
-import { EVENT_KIND, MemoryAccessedPayload, ModelsDiscoveredPayload, ZERO_USAGE, addUsage, foldLiveNotes, noteKey, type EventRecord, type Plan, type Usage } from '@orc/contracts'
-import { fold, foldPlanNotes, listProjectIds, openStorage, planScope, stepUsage, taskUsage, type State, type Storage } from '@orc/kernel'
+import { EVENT_KIND, MemoryAccessedPayload, ModelsDiscoveredPayload, ZERO_USAGE, addUsage, errorMessage, foldLiveNotes, noteKey, type EventRecord, type Plan, type Usage } from '@orc/contracts'
+import { fold, foldPlanNotes, listProjectIds, openStorage, planScope, stepUsage, taskUsage, watchProjectIds, type ProjectIdsWatch, type State, type Storage } from '@orc/kernel'
 import { NODE_PREFIX, PROJECT_DIR_NOTE_ID, PROJECT_NAME_NOTE_ID, buildGraph, diffGraphs, emptyPatch, type Graph, type GraphPatch } from './graph'
 import { decompositionMermaid, planMermaid, todoWaves, type TodoWave } from './diagram'
 
@@ -24,11 +24,21 @@ export interface SessionSnapshot { seq: number; graph: Graph }
 export interface SessionUpdate { seq: number; patch: GraphPatch; event: EventRecord | null; summary: LogRow | null }
 export type Unsubscribe = () => void
 
+// One chats-list entry: id always; name/dir resolve from the project's identity notes and are
+// null until that project's session has been opened (foreign, never-viewed projects).
+export interface ProjectEntry { id: string; name: string | null; dir: string | null }
+
 // The one live store every adapter (web server, future TUI) subscribes to. Transport-free:
 // callers get snapshots, per-event patches, catch-up patches, and node detail — never SQL,
 // never HTTP.
 export interface ProjectSessions {
-  projects(): Promise<Array<{ id: string; name: string | null; dir: string | null }>>
+  projects(): Promise<ProjectEntry[]>
+  // membership/name push: fires with the fresh, name-resolved list whenever it actually changed —
+  // new chats appear in every adapter without a reload. Backed by the storage-level
+  // watchProjectIds wake (the shared NOTIFY channel). Row-deleting operations emit no NOTIFY;
+  // the adapter that performs them calls notifyProjectsChanged() afterwards.
+  subscribeProjects(cb: (projects: ProjectEntry[]) => void): Promise<Unsubscribe>
+  notifyProjectsChanged(): Promise<void>
   snapshot(projectId: string): Promise<SessionSnapshot>
   // fires on EVERY event: the patch may be empty, the summary/log row is always present —
   // graph adapters filter on the patch, feed adapters (log, chat, TUI) consume the summary
@@ -112,27 +122,56 @@ export function createProjectSessions(opts: {
     return s
   }
 
+  // listed = has events. Purge keeps its project listed by re-seeding identity notes;
+  // a DELETED project has zero events and correctly disappears — even the server's own.
+  const listProjects = async (ids?: string[]): Promise<ProjectEntry[]> => {
+    return Promise.all((ids ?? await listProjectIds(opts.url)).map(async id => {
+      // notes (in already-open sessions) win over the cwd config values; unopened
+      // foreign projects show a short id until first opened
+      let name = id === opts.cwdProject?.id ? opts.cwdProject.name : null
+      let dir = id === opts.cwdProject?.id ? opts.cwdProject.dir ?? null : null
+      const cached = sessions.get(id)
+      if (cached) {
+        const s = await cached.catch(() => null)
+        const live = s ? foldLiveNotes(s.events) : undefined
+        const nameNote = live?.get(noteKey('project', PROJECT_NAME_NOTE_ID))
+        if (nameNote) name = nameNote.note.title
+        const dirNote = live?.get(noteKey('project', PROJECT_DIR_NOTE_ID))
+        if (dirNote) dir = dirNote.note.title
+      }
+      return { id, name, dir }
+    }))
+  }
+
+  // chats-list push: the watch wakes on every append anywhere; the authoritative diff happens
+  // here over the NAME-RESOLVED list, so both membership changes and renames emit exactly once.
+  const projectSubs = new Set<(ps: ProjectEntry[]) => void>()
+  let projectsWatch: Promise<ProjectIdsWatch> | null = null
+  let lastProjectsKey: string | null = null
+  const emitProjects = async (ids?: string[]): Promise<void> => {
+    if (projectSubs.size === 0) return
+    const ps = await listProjects(ids)
+    const key = JSON.stringify(ps)
+    if (key === lastProjectsKey) return
+    lastProjectsKey = key
+    for (const cb of projectSubs) cb(ps)
+  }
+
   return {
-    async projects() {
-      // listed = has events. Purge keeps its project listed by re-seeding identity notes;
-      // a DELETED project has zero events and correctly disappears — even the server's own.
-      const ids = await listProjectIds(opts.url)
-      return Promise.all(ids.map(async id => {
-        // notes (in already-open sessions) win over the cwd config values; unopened
-        // foreign projects show a short id until first opened
-        let name = id === opts.cwdProject?.id ? opts.cwdProject.name : null
-        let dir = id === opts.cwdProject?.id ? opts.cwdProject.dir ?? null : null
-        const cached = sessions.get(id)
-        if (cached) {
-          const s = await cached.catch(() => null)
-          const live = s ? foldLiveNotes(s.events) : undefined
-          const nameNote = live?.get(noteKey('project', PROJECT_NAME_NOTE_ID))
-          if (nameNote) name = nameNote.note.title
-          const dirNote = live?.get(noteKey('project', PROJECT_DIR_NOTE_ID))
-          if (dirNote) dir = dirNote.note.title
-        }
-        return { id, name, dir }
-      }))
+    projects: () => listProjects(),
+
+    async subscribeProjects(cb) {
+      projectSubs.add(cb)
+      projectsWatch ??= watchProjectIds(opts.url, ids => {
+        void emitProjects(ids).catch(err => console.warn(`projects push failed: ${errorMessage(err)}`))
+      })
+      // a failed watch open must not brick the push until restart — retry on the next subscribe
+      await projectsWatch.catch(() => { projectsWatch = null })
+      return () => { projectSubs.delete(cb) }
+    },
+
+    async notifyProjectsChanged() {
+      await emitProjects()
     },
 
     async snapshot(projectId) {
@@ -273,6 +312,12 @@ export function createProjectSessions(opts: {
     },
 
     async close() {
+      if (projectsWatch) {
+        const w = await projectsWatch.catch(() => null)
+        await w?.close()
+        projectsWatch = null
+      }
+      projectSubs.clear()
       for (const p of sessions.values()) {
         const s = await p.catch(() => null)
         if (s) { await s.unsubscribe(); await s.storage.close() }

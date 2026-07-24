@@ -5,10 +5,8 @@ import { errorMessage, EventInput, PAYLOAD_SCHEMAS, type EventKind, type EventRe
 import { events } from '../schema'
 import { KERNEL_ERROR_CODE, KernelError } from '../errors'
 import type { Redactor } from '../redact'
-import { PostgresStore, type Tx } from './postgres'
+import { NOTIFY_CHANNEL, PostgresStore, RECONNECT_DELAYS_MS, type Tx } from './postgres'
 
-const NOTIFY_CHANNEL = 'orc_events'
-const RECONNECT_DELAYS_MS = [100, 200, 400, 800, 1600, 3000]
 const PUMP_RETRY_MS = 250
 
 type Row = typeof events.$inferSelect
