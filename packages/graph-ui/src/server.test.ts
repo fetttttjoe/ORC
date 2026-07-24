@@ -25,6 +25,40 @@ const HeatNodeView = z.object({ id: z.string(), heat: z.number().optional() })
 const HeatEnvelope = z.object({ patch: z.object({ updateNodes: z.array(HeatNodeView) }), summary: z.object({ line: z.string() }) })
 const CatchUpEnvelope = z.object({ patch: AddNodesPatch })
 
+// Asserted subsets of the JSON the web endpoints return — parsed at the read boundary so a
+// contract drift fails the parse here instead of a cast silently lying about the shape.
+const GraphView = z.object({ seq: z.number(), nodes: z.array(NodeRefView) })
+const NodeDetailView = z.object({ task: z.object({ title: z.string() }) })
+const SessionView = z.object({
+  token: z.string(),
+  actions: z.boolean(),
+  copilot: z.boolean(),
+  // null when the server has no cwdProject (read-only / project-free boots) — a bare `string`
+  // cast here lied for every server started without one
+  projectId: z.string().nullable(),
+})
+const ErrorView = z.object({ error: z.string() })
+const ApproveResultView = z.object({ version: z.number() })
+const PurgeResultView = z.object({ events: z.number() })
+const TranscriptView = z.array(z.object({ text: z.string() }))
+
+// A full OrcActions whose members throw unless overridden — the honest stub for route tests
+// that drive only a verb or two (the e2e/server.ts `unsupported` precedent). Every member is
+// present, so the value IS an OrcActions and needs no cast.
+const unsupported = (name: string) => async (): Promise<never> => { throw new Error(`${name} not stubbed in this test`) }
+function stubActions(over: Partial<OrcActions>): OrcActions {
+  return {
+    newTask: unsupported('newTask'), propose: unsupported('propose'), edit: unsupported('edit'),
+    approve: unsupported('approve'), run: unsupported('run'), reply: unsupported('reply'),
+    retry: unsupported('retry'), annotate: unsupported('annotate'), revise: unsupported('revise'),
+    writeNote: unsupported('writeNote'), deleteNote: unsupported('deleteNote'),
+    renameProject: unsupported('renameProject'), newProject: unsupported('newProject'),
+    cancel: unsupported('cancel'), purgeProject: unsupported('purgeProject'),
+    deleteProject: unsupported('deleteProject'),
+    ...over,
+  }
+}
+
 async function setup() {
   const db = await createTestDb()
   dbs.push(db)
@@ -63,10 +97,10 @@ describe('graph-ui web adapter', () => {
   it('serves projects, graph snapshot, node detail, and 404s', async () => {
     const { storage, taskId, ui, base } = await setup()
     expect(await (await fetch(`${base}/api/projects`)).json()).toEqual([{ id: TEST_PROJECT_ID, name: 'test-proj', dir: null }])
-    const g = await (await fetch(`${base}/api/graph?project=${TEST_PROJECT_ID}`)).json() as { seq: number; nodes: Array<{ id: string }> }
+    const g = GraphView.parse(await (await fetch(`${base}/api/graph?project=${TEST_PROJECT_ID}`)).json())
     expect(g.seq).toBeGreaterThan(0)
     expect(g.nodes.map(n => n.id)).toContain(taskId)
-    const d = await (await fetch(`${base}/api/node?project=${TEST_PROJECT_ID}&id=${taskId}`)).json() as { task: { title: string } }
+    const d = NodeDetailView.parse(await (await fetch(`${base}/api/node?project=${TEST_PROJECT_ID}&id=${taskId}`)).json())
     expect(d.task.title).toBe('seed task')
     expect((await fetch(`${base}/api/node?project=${TEST_PROJECT_ID}&id=nope`)).status).toBe(404)
     expect((await fetch(`${base}/api/bogus`)).status).toBe(404)
@@ -77,7 +111,7 @@ describe('graph-ui web adapter', () => {
 
   it('streams envelopes (patch + summary) and replays missed patches for a stale fromSeq', async () => {
     const { storage, ui, base } = await setup()
-    const g = await (await fetch(`${base}/api/graph?project=${TEST_PROJECT_ID}`)).json() as { seq: number }
+    const g = GraphView.parse(await (await fetch(`${base}/api/graph?project=${TEST_PROJECT_ID}`)).json())
 
     // live: open at the current seq, then append — the envelope must carry patch AND summary
     const live = await fetch(`${base}/api/stream?project=${TEST_PROJECT_ID}&fromSeq=${g.seq}`)
@@ -115,11 +149,11 @@ describe('graph-ui web adapter', () => {
     const db = await createTestDb()
     dbs.push(db)
     const calls: unknown[] = []
-    const actions = { approve: async (taskId: string, version?: number) => { calls.push([taskId, version]); return { version: version ?? 1 } } } as unknown as OrcActions
+    const actions = stubActions({ approve: async (taskId: string, version?: number) => { calls.push([taskId, version]); return { version: version ?? 1 } } })
     const ui = startGraphUi({ url: db.url, port: 0, actions })
     const base = `http://127.0.0.1:${ui.port}`
 
-    const session = await (await fetch(`${base}/api/session`)).json() as { actions: boolean; token: string }
+    const session = SessionView.parse(await (await fetch(`${base}/api/session`)).json())
     expect(session.actions).toBe(true)
 
     // no token -> 403, action not executed
@@ -141,7 +175,7 @@ describe('graph-ui web adapter', () => {
 
     // read-only server (no actions) -> 501 regardless of token
     const ro = startGraphUi({ url: db.url, port: 0 })
-    const roSession = await (await fetch(`http://127.0.0.1:${ro.port}/api/session`)).json() as { actions: boolean; token: string }
+    const roSession = SessionView.parse(await (await fetch(`http://127.0.0.1:${ro.port}/api/session`)).json())
     expect(roSession.actions).toBe(false)
     const blocked = await fetch(`http://127.0.0.1:${ro.port}/api/actions/approve`, {
       method: 'POST', headers: { 'x-orc-token': roSession.token }, body: JSON.stringify({ taskId: 't1' }),
@@ -154,14 +188,14 @@ describe('graph-ui web adapter', () => {
     const db = await createTestDb()
     dbs.push(db)
     const calls: string[] = []
-    const actions = {
+    const actions = stubActions({
       approve: async (taskId: string) => { calls.push(`approve:${taskId}`); return { version: 1 } },
-      newProject: async (dir: string, name: string) => { calls.push(`newProject:${name}`); return { projectId: 'p2' } },
+      newProject: async (dir: string, name: string) => { calls.push(`newProject:${name}`); return { projectId: 'p2', reused: false } },
       deleteProject: async (projectId: string) => { calls.push(`deleteProject:${projectId}`); return { events: 0, operations: 0, warnings: [] } },
-    } as unknown as OrcActions
+    })
     const ui = startGraphUi({ url: db.url, port: 0, cwdProject: { id: TEST_PROJECT_ID, name: 'home' }, actions })
     const base = `http://127.0.0.1:${ui.port}`
-    const session = await (await fetch(`${base}/api/session`)).json() as { token: string; projectId: string }
+    const session = SessionView.parse(await (await fetch(`${base}/api/session`)).json())
     expect(session.projectId).toBe(TEST_PROJECT_ID)
 
     const post = (name: string, project: string, body: unknown) => fetch(`${base}/api/actions/${name}`, {
@@ -173,11 +207,11 @@ describe('graph-ui web adapter', () => {
     // foreign chat → 409 with guidance, action NOT executed
     const blocked = await post('approve', 'some-other-project', { taskId: 't1' })
     expect(blocked.status).toBe(409)
-    expect(((await blocked.json()) as { error: string }).error).toContain('home')
+    expect(ErrorView.parse(await blocked.json()).error).toContain('home')
     expect(calls).toEqual([])
 
     // home chat → dispatched; newProject/deleteProject allowed from ANY chat (project-free)
-    expect(((await (await post('approve', TEST_PROJECT_ID, { taskId: 't1' })).json()) as { version: number }).version).toBe(1)
+    expect(ApproveResultView.parse(await (await post('approve', TEST_PROJECT_ID, { taskId: 't1' })).json()).version).toBe(1)
     expect((await post('newProject', 'some-other-project', { dir: '/tmp', name: 'fresh' })).status).toBe(200)
     expect((await post('deleteProject', 'some-other-project', { projectId: 'doomed' })).status).toBe(200)
     expect(calls).toEqual(['approve:t1', 'newProject:fresh', 'deleteProject:doomed'])
@@ -189,15 +223,15 @@ describe('graph-ui web adapter', () => {
     dbs.push(db)
     const storage = await openStorage(db.url, { projectId: TEST_PROJECT_ID })
     await new Kernel(storage.events).createTask({ title: 'doomed', spec: '' })
-    const actions = {
+    const actions = stubActions({
       purgeProject: async () => ({ ...(await storage.purge()), warnings: [] }),
-    } as unknown as OrcActions
+    })
     const ui = startGraphUi({ url: db.url, port: 0, cwdProject: { id: TEST_PROJECT_ID, name: 'home' }, actions })
     const base = `http://127.0.0.1:${ui.port}`
-    const session = await (await fetch(`${base}/api/session`)).json() as { token: string }
+    const session = SessionView.parse(await (await fetch(`${base}/api/session`)).json())
 
     // session caches the task…
-    const before = await (await fetch(`${base}/api/graph?project=${TEST_PROJECT_ID}`)).json() as { nodes: unknown[] }
+    const before = GraphView.parse(await (await fetch(`${base}/api/graph?project=${TEST_PROJECT_ID}`)).json())
     expect(before.nodes.length).toBeGreaterThan(0)
 
     const purged = await fetch(`${base}/api/actions/purgeProject`, {
@@ -205,10 +239,10 @@ describe('graph-ui web adapter', () => {
       headers: { 'x-orc-token': session.token, 'x-orc-project': TEST_PROJECT_ID },
       body: '{}',
     })
-    expect(((await purged.json()) as { events: number }).events).toBeGreaterThan(0)
+    expect(PurgeResultView.parse(await purged.json()).events).toBeGreaterThan(0)
 
     // …and after the purge the SAME endpoint serves the refolded (empty) world
-    const after = await (await fetch(`${base}/api/graph?project=${TEST_PROJECT_ID}`)).json() as { seq: number; nodes: unknown[] }
+    const after = GraphView.parse(await (await fetch(`${base}/api/graph?project=${TEST_PROJECT_ID}`)).json())
     expect(after.nodes).toEqual([])
     expect(after.seq).toBe(0)
     await ui.stop(); await storage.close()
@@ -246,7 +280,7 @@ describe('graph-ui web adapter', () => {
       copilot: { resolveModel: () => model, defaultModelRef: 'mock/m', price: () => 0.001 },
     })
     const base = `http://127.0.0.1:${ui.port}`
-    const session = await (await fetch(`${base}/api/session`)).json() as { token: string; copilot: boolean }
+    const session = SessionView.parse(await (await fetch(`${base}/api/session`)).json())
     expect(session.copilot).toBe(true)
 
     expect((await fetch(`${base}/api/copilot`, { method: 'POST', body: '{}' })).status).toBe(403)
@@ -263,7 +297,7 @@ describe('graph-ui web adapter', () => {
 
     // no copilot config -> 501
     const ro = startGraphUi({ url: db.url, port: 0 })
-    const roSession = await (await fetch(`http://127.0.0.1:${ro.port}/api/session`)).json() as { token: string; copilot: boolean }
+    const roSession = SessionView.parse(await (await fetch(`http://127.0.0.1:${ro.port}/api/session`)).json())
     expect(roSession.copilot).toBe(false)
     expect((await fetch(`http://127.0.0.1:${ro.port}/api/copilot`, {
       method: 'POST', headers: { 'x-orc-token': roSession.token },
@@ -279,7 +313,7 @@ describe('graph-ui web adapter', () => {
       payload: { stepId: 's1', runToken: 'r1', iteration: 1, request: {}, response: { text: 'transcript line', toolCalls: [] } },
       usage: { inputTokens: 1, outputTokens: 1, costUSD: null, estimated: false },
     })
-    const items = await (await fetch(`${base}/api/transcript?project=${TEST_PROJECT_ID}&task=${taskId}`)).json() as Array<{ text: string }>
+    const items = TranscriptView.parse(await (await fetch(`${base}/api/transcript?project=${TEST_PROJECT_ID}&task=${taskId}`)).json())
     expect(items.map(i => i.text)).toEqual(['transcript line'])
     expect((await fetch(`${base}/api/plans?project=${TEST_PROJECT_ID}&task=${taskId}`)).status).toBe(404)
     expect(await (await fetch(`${base}/api/log?project=${TEST_PROJECT_ID}&limit=1`)).json()).toHaveLength(1)
