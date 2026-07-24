@@ -51,11 +51,25 @@ async function drain(it: AsyncIterable<UnifiedEvent>): Promise<UnifiedEvent[]> {
   return out
 }
 
+// Named wire-shape subsets this suite pins, parsed at each read boundary instead of cast.
+// Prompt messages carry an array of parts here; a bare-string body simply yields no parts.
+const PromptPart = z.object({ type: z.string(), toolCallId: z.string().optional() })
+const PromptMessages = z.array(z.object({ content: z.array(PromptPart).optional().catch(undefined) }))
+// agent_call payload → the provider request's message array (role + opaque content)
+const AgentRequestMessage = z.object({ role: z.string(), content: z.unknown() })
+const AgentCallRequest = z.object({ request: z.object({ messages: z.array(AgentRequestMessage) }) })
+// agent_call payload → just its request blob (stringified in budget-note assertions)
+const RequestPayload = z.object({ request: z.unknown() })
+// the recovery tool-result parts a malformed signal produces
+const ToolResultParts = z.array(z.object({ toolCallId: z.string(), output: z.object({ value: z.object({ error: z.string() }) }) }))
+// an extra tool's echo input
+const HelloToolInput = z.object({ who: z.string().optional() })
+
 // A real provider 400s a generateText call if any prior assistant tool-call id lacks a
 // matching tool-result — every id that appears as a 'tool-call' part must also appear as a
 // 'tool-result' part somewhere in the prompt built so far.
 function unansweredToolCallIds(prompt: unknown): string[] {
-  const messages = prompt as Array<{ content?: Array<{ type: string; toolCallId?: string }> }>
+  const messages = PromptMessages.parse(prompt)
   const called = new Set<string>()
   const answered = new Set<string>()
   for (const m of messages) {
@@ -235,7 +249,8 @@ describe('api-loop executor', () => {
     const events = await drain(
       apiLoopExecutor().startTurn(ctx(model, captured, { budgetRemainingUSD: async () => 0 })),
     )
-    expect(events.at(-1)?.type === 'error' && (events.at(-1) as { class: string }).class).toBe('budget_exceeded')
+    const last = events.at(-1)
+    expect(last?.type === 'error' && last.class).toBe('budget_exceeded')
     expect(captured.filter(d => d.kind === EVENT_KIND.agent_call)).toHaveLength(0)
   })
 
@@ -253,10 +268,10 @@ describe('api-loop executor', () => {
     // otherwise a real provider 400s the follow-up request (unresolved tool_use block).
     const agentCallDrafts = captured.filter(d => d.kind === EVENT_KIND.agent_call)
     expect(agentCallDrafts).toHaveLength(2)
-    const secondRequestMessages = (agentCallDrafts[1]!.payload as { request: { messages: Array<{ role: string; content: unknown }> } }).request.messages
+    const secondRequestMessages = AgentCallRequest.parse(agentCallDrafts[1]!.payload).request.messages
     const recoveryMessage = secondRequestMessages.at(-1)
     expect(recoveryMessage?.role).toBe('tool')
-    const parts = recoveryMessage?.content as Array<{ toolCallId: string; output: { value: { error: string } } }>
+    const parts = ToolResultParts.parse(recoveryMessage?.content)
     expect(parts).toHaveLength(1)
     expect(parts[0]!.toolCallId).toBe('c1')
     expect(parts[0]!.output.value.error).toContain('invalid signal input')
@@ -274,12 +289,12 @@ describe('api-loop executor', () => {
 
     const agentCallDrafts = captured.filter(d => d.kind === EVENT_KIND.agent_call)
     expect(agentCallDrafts).toHaveLength(2)
-    const messages1 = (agentCallDrafts[0]!.payload as { request: { messages: unknown[] } }).request.messages
-    const messages2 = (agentCallDrafts[1]!.payload as { request: { messages: unknown[] } }).request.messages
+    const messages1 = AgentCallRequest.parse(agentCallDrafts[0]!.payload).request.messages
+    const messages2 = AgentCallRequest.parse(agentCallDrafts[1]!.payload).request.messages
     expect(messages1).toHaveLength(1) // the initial user prompt
     expect(messages2).toHaveLength(2) // ONLY what was appended since: assistant (tool call) + tool result
     // concatenated deltas reconstruct the full request history without O(n²) storage
-    expect([...messages1, ...messages2].map(m => (m as { role: string }).role)).toEqual(['user', 'assistant', 'tool'])
+    expect([...messages1, ...messages2].map(m => m.role)).toEqual(['user', 'assistant', 'tool'])
   })
 
   it('a valid signal batched with sibling tool calls executes the siblings first', async () => {
@@ -312,7 +327,7 @@ describe('api-loop executor', () => {
     expect(events.at(-1)?.type).toBe('done')
 
     const agentCallDrafts = captured.filter(d => d.kind === EVENT_KIND.agent_call)
-    const firstRequestMessages = (agentCallDrafts[0]!.payload as { request: { messages: Array<{ role: string; content: unknown }> } }).request.messages
+    const firstRequestMessages = AgentCallRequest.parse(agentCallDrafts[0]!.payload).request.messages
     expect(firstRequestMessages[0]?.content).toContain('# Skill: style-guide')
     expect(firstRequestMessages[0]?.content).toContain('Always write haiku.')
   })
@@ -325,7 +340,7 @@ describe('api-loop executor', () => {
       name: 'mcp__srv__hello',
       description: 'says hello',
       inputSchema: { type: 'object', properties: { who: { type: 'string' } } },
-      execute: async (input, toolCallId) => { seenToolCallId = toolCallId; return { output: { hi: (input as { who?: string }).who }, isError: false } },
+      execute: async (input, toolCallId) => { seenToolCallId = toolCallId; return { output: { hi: HelloToolInput.parse(input).who }, isError: false } },
     }
     const model = scriptModel([
       { toolCalls: [{ toolCallId: 'c1', toolName: 'mcp__srv__hello', input: { who: 'x' } }] },
@@ -482,7 +497,7 @@ describe('iteration-budget awareness', () => {
 
     const requests = captured
       .filter(e => e.kind === EVENT_KIND.agent_call)
-      .map(e => JSON.stringify((e.payload as { request: unknown }).request))
+      .map(e => JSON.stringify(RequestPayload.parse(e.payload).request))
     expect(requests).toHaveLength(3)
     expect(requests[0]).toContain('Iteration budget: 3 model calls')  // static prompt line
     expect(requests[0]).toContain('3 model calls left')               // endgame note, iter 1
@@ -498,7 +513,7 @@ describe('iteration-budget awareness', () => {
       captured,
       { step: stepFixture({ instructions: 'do', maxIterations: 10 }) },
     )))
-    const first = JSON.stringify((captured.find(e => e.kind === EVENT_KIND.agent_call)!.payload as { request: unknown }).request)
+    const first = JSON.stringify(RequestPayload.parse(captured.find(e => e.kind === EVENT_KIND.agent_call)!.payload).request)
     expect(first).toContain('Iteration budget: 10 model calls')
     expect(first).not.toContain('model calls left')
     expect(first).not.toContain('FINAL iteration')
