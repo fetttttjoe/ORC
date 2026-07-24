@@ -326,11 +326,20 @@ export class SurrealMemory {
       { q: qv },
     )
     const rows = SemanticRow.array().parse(Array.isArray(res) ? res[0] : res)
+    // use makes memory more findable: re-rank cosine by activation heat, mirroring neighbors() so
+    // a note agents keep reading rises in search (and thus in preload) the same way it rises in the
+    // graph. The DB already returned the cosine top-50; boosting within that window is enough here.
+    // ponytail: a hot note outside the cosine top-50 can't boost in — widen the LIMIT if that bites.
+    const now = new Date().toISOString()
+    const heat = (r: { hits?: number; lastAccessedAt?: string | null }): number =>
+      activationBoost(activation({ hits: r.hits ?? 0, lastAccessedAt: r.lastAccessedAt ?? null }, now))
     return rows
       .filter(r => (!filter.scope || r.scope === filter.scope)
         && (!filter.category || r.categories.includes(filter.category))
         && (!filter.tag || r.tags.includes(filter.tag)))
-      .map(toSummary)
+      .map(r => ({ r, s: r.score * heat(r) }))
+      .sort((a, b) => b.s - a.s)
+      .map(({ r }) => toSummary(r))
   }
 
   // Compute a note's vector from its retrieval-bearing text. Best-effort: a backend failure logs

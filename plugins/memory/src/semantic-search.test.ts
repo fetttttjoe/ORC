@@ -22,6 +22,8 @@ const note = (over = {}) => ({
 })
 const written = (seq: number, n: object): EventRecord =>
   eventFixture({ seq, taskId: null, kind: 'memory_written', payload: { note: n, author: cli }, ts: `2026-07-24T0${seq}:00:00Z` })
+const accessed = (seq: number, id: string): EventRecord =>
+  eventFixture({ seq, taskId: null, kind: 'memory_accessed', payload: { id, scope: 'project', mode: 'read', author: cli }, ts: `2026-07-24T0${seq}:00:00Z` })
 
 const drops: (() => Promise<void>)[] = []
 afterAll(async () => { for (const d of drops) await d() })
@@ -56,6 +58,18 @@ describe('SurrealMemory semantic + hybrid search', () => {
     await m.applyEvent(written(1, note({ id: 'k', title: 'Tokens', summary: 'tokens rotate', body: 'x' })))
     expect((await m.search('tokens', {}, { mode: 'semantic' })).map(n => n.id)).toEqual(['k']) // keyword still serves
     expect(await m.search('zeta', {}, { mode: 'semantic' })).toEqual([]) // no vector path, no match
+    await m.close()
+  })
+
+  it('a note that gets USED ranks above an equally-relevant cold note (activation heat)', async () => {
+    const t = await createTestSurreal(); drops.push(t.drop)
+    const m = await SurrealMemory.open(t, fakeEmbedder)
+    await m.applyEvent(written(1, note({ id: 'alpha-hot', title: 'Alpha one', summary: 'alpha', body: 'alpha' })))
+    await m.applyEvent(written(2, note({ id: 'alpha-cold', title: 'Alpha two', summary: 'alpha', body: 'alpha' })))
+    // both map to the SAME vector (a cosine tie) — only read-heat can separate them
+    await m.applyEvent(accessed(3, 'alpha-hot'))
+    await m.applyEvent(accessed(4, 'alpha-hot'))
+    expect((await m.search('alpha', {}, { mode: 'semantic' })).map(n => n.id)).toEqual(['alpha-hot', 'alpha-cold'])
     await m.close()
   })
 })
