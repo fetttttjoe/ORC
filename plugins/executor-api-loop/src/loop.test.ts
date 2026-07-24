@@ -599,7 +599,7 @@ describe('ambient capture', () => {
     expect(calls).toHaveLength(1)
     expect(calls[0]!.toolCallId).toBe(`ambient:${step.id}`)
     const draft = AmbientDraft.parse(calls[0]!.input)
-    expect(draft.id).toBe(slugId(`step ${step.title}`))
+    expect(draft.id).toBe(slugId(`step ${step.id}`))
     expect(draft.scope).toBe(planScope('task-1'))
     expect(draft.title).toBe(step.title)
     expect(draft.tags).toEqual(['ambient'])
@@ -623,8 +623,8 @@ describe('ambient capture', () => {
     expect(calls).toHaveLength(1)
     expect(calls[0]!.toolCallId).toBe(`ambient-fail:${step.id}`)
     const draft = AmbientDraft.parse(calls[0]!.input)
-    expect(draft.id).toBe(slugId(`failed step ${step.title}`)) // distinct from the success id → both can coexist
-    expect(draft.id).not.toBe(slugId(`step ${step.title}`))
+    expect(draft.id).toBe(slugId(`failed step ${step.id}`)) // distinct from the success id → both can coexist
+    expect(draft.id).not.toBe(slugId(`step ${step.id}`))
     expect(draft.tags).toEqual(['ambient', 'failure'])
     expect(draft.summary).toBe('blocked: the API returned 500')
     expect(draft.retention).toBe('expirable')

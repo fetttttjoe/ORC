@@ -261,7 +261,7 @@ async function captureAmbientNote(ctx: ExecutorContext<LanguageModel>, signal: S
   if (!memoryWrite) return
   const spec = AMBIENT_CAPTURE[signal.outcome]
   const draft = {
-    id: slugId(`${spec.idPrefix} ${ctx.step.title}`),
+    id: slugId(`${spec.idPrefix} ${ctx.step.id}`), // keyed by step ID (unique in a plan), not the free-form title: two same-titled steps must not collide and lose one's lesson
     scope: planScope(ctx.taskId),
     title: ctx.step.title.slice(0, 200),
     summary: signal.summary.slice(0, 500),

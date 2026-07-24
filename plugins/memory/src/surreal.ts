@@ -313,33 +313,42 @@ export class SurrealMemory {
   // a DEFINE INDEX ... HNSW + `<|K|>` KNN select when the corpus outgrows a full scan.
   private async semanticSearch(query: string, filter: MemoryFilter): Promise<NoteSummary[]> {
     if (!this.embedder) return []
-    let qv: number[] | undefined
-    try { [qv] = await this.embedder.embed([query]) }
-    catch (err) { console.warn(`[memory] query embed failed: ${errorMessage(err)}`); return [] }
-    if (!qv) return []
-    // raw query: surqlize has no vector::* select builder — the same escape hatch open() uses for
-    // DEFINE TABLE. $q binds the query vector; rows without an embedding are excluded.
-    const res = await this.surreal.query(
-      `SELECT noteId, scope, title, categories, tags, summary, hits, lastAccessedAt,`
-      + ` vector::similarity::cosine(embedding, $q) AS score`
-      + ` FROM ${Tb.Note} WHERE embedding != NONE ORDER BY score DESC LIMIT 50`,
-      { q: qv },
-    )
-    const rows = SemanticRow.array().parse(Array.isArray(res) ? res[0] : res)
-    // use makes memory more findable: re-rank cosine by activation heat, mirroring neighbors() so
-    // a note agents keep reading rises in search (and thus in preload) the same way it rises in the
-    // graph. The DB already returned the cosine top-50; boosting within that window is enough here.
-    // ponytail: a hot note outside the cosine top-50 can't boost in — widen the LIMIT if that bites.
-    const now = new Date().toISOString()
-    const heat = (r: { hits?: number; lastAccessedAt?: string | null }): number =>
-      activationBoost(activation({ hits: r.hits ?? 0, lastAccessedAt: r.lastAccessedAt ?? null }, now))
-    return rows
-      .filter(r => (!filter.scope || r.scope === filter.scope)
-        && (!filter.category || r.categories.includes(filter.category))
-        && (!filter.tag || r.tags.includes(filter.tag)))
-      .map(r => ({ r, s: r.score * heat(r) }))
-      .sort((a, b) => b.s - a.s)
-      .map(({ r }) => toSummary(r))
+    // Everything after the embedder check is best-effort and guarded as ONE unit: a query-embed
+    // reject, a cosine DIMENSION error (a note embedded under a different model width after a model
+    // swap without a rebuild), or a malformed row must DEGRADE to keyword — never fail the whole
+    // search. Returning [] makes hybrid fuse keyword-only (keyword notes survive) and semantic-only
+    // return the honest empty; it honours the contract's degraded-tolerant intent.
+    try {
+      const [qv] = await this.embedder.embed([query])
+      if (!qv) return []
+      // raw query: surqlize has no vector::* select builder — the same escape hatch open() uses for
+      // DEFINE TABLE. $q binds the query vector; rows without an embedding are excluded.
+      const res = await this.surreal.query(
+        `SELECT noteId, scope, title, categories, tags, summary, hits, lastAccessedAt,`
+        + ` vector::similarity::cosine(embedding, $q) AS score`
+        + ` FROM ${Tb.Note} WHERE embedding != NONE ORDER BY score DESC LIMIT 50`,
+        { q: qv },
+      )
+      const rows = SemanticRow.array().parse(Array.isArray(res) ? res[0] : res)
+      // use makes memory more findable: re-rank cosine by activation heat, mirroring neighbors() so a
+      // note agents keep reading rises in search (and thus preload) as it does in the graph. Shift
+      // cosine into [0,2] BEFORE boosting so the heat factor (≥1) stays monotonic across the WHOLE
+      // cosine range — multiplying a negative cosine by ≥1 would otherwise sink a hotter note below
+      // a colder one. ponytail: a hot note outside the cosine top-50 can't boost in — widen LIMIT if it bites.
+      const now = new Date().toISOString()
+      const heat = (r: { hits?: number; lastAccessedAt?: string | null }): number =>
+        activationBoost(activation({ hits: r.hits ?? 0, lastAccessedAt: r.lastAccessedAt ?? null }, now))
+      return rows
+        .filter(r => (!filter.scope || r.scope === filter.scope)
+          && (!filter.category || r.categories.includes(filter.category))
+          && (!filter.tag || r.tags.includes(filter.tag)))
+        .map(r => ({ r, s: (r.score + 1) * heat(r) }))
+        .sort((a, b) => b.s - a.s)
+        .map(({ r }) => toSummary(r))
+    } catch (err) {
+      console.warn(`[memory] semantic search failed, falling back to keyword: ${errorMessage(err)}`)
+      return []
+    }
   }
 
   // Compute a note's vector from its retrieval-bearing text. Best-effort: a backend failure logs

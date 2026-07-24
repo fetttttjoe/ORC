@@ -128,12 +128,6 @@ export interface ModelProvider<LM = unknown> {
 // Optional across the system: when no embedder is configured, memory retrieval degrades to
 // keyword-only (the whole memory subsystem is already degraded-tolerant).
 export interface EmbeddingProvider {
-  // 'provider/model' ref (e.g. 'ollama/all-minilm') — informational today; the pin a future model
-  // swap would key a re-embed off, since vectors from different models are not comparable.
-  readonly modelId: string
-  // fixed output width — reserved for a fixed-dimension vector index; the current cosine scan does
-  // not require it, but a model swap that changes it must trigger a re-embed.
-  readonly dimensions: number
   // one cosine-ready vector per input, in order and of equal length to `texts`. May reject on a
   // backend failure; callers catch and fall back to keyword rather than failing the operation.
   embed(texts: string[]): Promise<number[][]>

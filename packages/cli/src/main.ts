@@ -9,14 +9,10 @@ import { consolidateTask, probeMemory } from '@orc/memory'
 import { openMemory } from './memory-open'
 import { buildDistiller } from './consolidation-distiller'
 import { seedRegistries } from './runtime'
+import { isLanguageModel } from './model-guard'
 import { buildModelDiscovery, buildOrcActions, singleStepDraft } from './actions'
 import { renderPlanHuman } from './plan-render'
 
-// Providers are ModelProvider<unknown> by design (extensions may register anything) — the
-// boundary check validates the shape at runtime instead of casting.
-type CopilotModel = ReturnType<import('@orc/graph-ui').CopilotConfig['resolveModel']>
-const isLanguageModel = (m: unknown): m is CopilotModel =>
-  typeof m === 'string' || (typeof m === 'object' && m !== null && 'specificationVersion' in m)
 
 function buildCopilotConfig(discovery: ReturnType<typeof buildModelDiscovery>) {
   return {

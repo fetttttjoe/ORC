@@ -61,11 +61,13 @@ export async function buildRuntime(
   try {
     memory = await openMemory({ log, config })
     await memory.projector.start()
+    const memoryProjector = memory.projector // captured for the lifecycle closure (memory is narrowed non-null here)
     // post-task memory maintenance (auto-consolidation) — a decoupled subscriber, started only in
     // the execution runtime (never in the one-shot CLI memory commands) and stopped at shutdown.
     // `distill` (optional, memoryConsolidateModel) upgrades the note from extractive bullets to a
-    // coherent synthesis, off the agent turn budget; absent → extractive.
-    lifecycle = createMemoryLifecycle({ log, store: memory.store, distill: buildDistiller(host.providers, config.memoryConsolidateModel) })
+    // coherent synthesis, off the agent turn budget; absent → extractive. `catchUp` flushes the
+    // projection before a consolidation reads the step notes.
+    lifecycle = createMemoryLifecycle({ log, store: memory.store, distill: buildDistiller(host.providers, config.memoryConsolidateModel), catchUp: () => memoryProjector.catchUp() })
     await lifecycle.start()
     buildMemoryTools = memory.buildTools
   } catch (err) {

@@ -13,7 +13,7 @@ const vec = (text: string): number[] => {
   if (t.includes('beta')) return [0, 1, 0]
   return [0, 0, 1]
 }
-const fakeEmbedder: EmbeddingProvider = { modelId: 'fake/test', dimensions: 3, embed: async texts => texts.map(vec) }
+const fakeEmbedder: EmbeddingProvider = { embed: async texts => texts.map(vec) }
 
 const cli: MemoryAuthor = { source: 'cli' }
 const note = (over = {}) => ({

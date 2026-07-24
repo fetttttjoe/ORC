@@ -16,7 +16,11 @@ export function taskCompletedId(e: EventRecord): string | null {
   return p.success && p.data.to === TASK_STATUS.done ? p.data.taskId : null
 }
 
-export function createMemoryLifecycle(deps: ConsolidationDeps): MemoryLifecycle {
+// catchUp lets the caller flush the read-model projection before a consolidation reads it —
+// consolidateTask gathers a task's step notes from the projected note table, which a SEPARATE async
+// projector fills; without catching up first, a still-unprojected step note yields a partial note or
+// a wrongly-failed salience gate that never re-fires. Kept optional so the pure deps stay minimal.
+export function createMemoryLifecycle(deps: ConsolidationDeps & { catchUp?: () => Promise<void> }): MemoryLifecycle {
   let unsub: (() => Promise<void>) | null = null
   let inflight: Promise<void> = Promise.resolve()
   // subscribe delivers events losslessly and awaits the handler (the cursor advances only on
@@ -26,7 +30,8 @@ export function createMemoryLifecycle(deps: ConsolidationDeps): MemoryLifecycle 
   const handle = async (e: EventRecord): Promise<void> => {
     const taskId = taskCompletedId(e)
     if (taskId === null) return
-    inflight = consolidateTask(deps, taskId)
+    inflight = Promise.resolve(deps.catchUp?.())
+      .then(() => consolidateTask(deps, taskId))
       .then(() => {}, err => console.warn(`memory lifecycle: consolidate '${taskId}' failed:`, errorMessage(err)))
     await inflight
   }

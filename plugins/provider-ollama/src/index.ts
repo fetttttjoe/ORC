@@ -27,25 +27,16 @@ export function createOllamaProvider(
   }
 }
 
-// Known embedding-model output widths (the daemon does not report them until first call). Stamped
-// onto EmbeddingProvider.dimensions; an unknown model falls back to 0 — informational only, the
-// current cosine scan needs no fixed dimension. Extend as models are adopted.
-const OLLAMA_EMBED_DIMENSIONS: Record<string, number> = {
-  'all-minilm': 384, 'nomic-embed-text': 768, 'mxbai-embed-large': 1024, 'bge-m3': 1024,
-}
-
 const isNumberArray = (v: unknown): v is number[] => Array.isArray(v) && v.every(x => typeof x === 'number')
 
 // The embedding half of the Ollama provider — a text→vector encoder over the local daemon's
 // /api/embed, behind the shared EmbeddingProvider seam. No SDK, no new dep: one fetch, parsed at
 // the boundary (isRecord/isNumberArray, never a cast) exactly like listOllamaModels.
 export function createOllamaEmbeddingProvider(
-  opts: { model: string; baseUrl?: string; dimensions?: number },
+  opts: { model: string; baseUrl?: string },
 ): EmbeddingProvider {
   const baseUrl = (opts.baseUrl ?? 'http://localhost:11434').replace(/\/$/, '')
   return {
-    modelId: `ollama/${opts.model}`,
-    dimensions: opts.dimensions ?? OLLAMA_EMBED_DIMENSIONS[opts.model] ?? 0,
     async embed(texts) {
       if (texts.length === 0) return []
       const res = await fetch(`${baseUrl}/api/embed`, {

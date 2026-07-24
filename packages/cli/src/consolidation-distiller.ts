@@ -1,13 +1,8 @@
-import { generateObject, type LanguageModel } from 'ai'
+import { generateObject } from 'ai'
 import { z } from 'zod'
 import { parseModelRef, type ModelProvider } from '@orc/contracts'
 import type { ConsolidationDistiller, ConsolidationInput } from '@orc/memory'
-
-// Providers are ModelProvider<unknown> by design (extensions may register anything) — narrow to a
-// usable LanguageModel at the boundary with a runtime shape check (the same guard main.ts uses for
-// the copilot), never a cast.
-const isLanguageModel = (m: unknown): m is LanguageModel =>
-  typeof m === 'string' || (typeof m === 'object' && m !== null && 'specificationVersion' in m)
+import { isLanguageModel } from './model-guard'
 
 // Bounded so a distilled note still fits the note limits (title 200, summary 500) and search stays
 // legible; the model is told to be concise. Parsed by generateObject, so a malformed reply retries.
@@ -43,5 +38,9 @@ export function buildDistiller(
     console.warn(`consolidation model '${ref}': not a resolvable language model — staying extractive`)
     return undefined
   }
-  return async input => (await generateObject({ model, schema: DistilledSchema, prompt: distillPrompt(input) })).object
+  // AbortSignal.timeout bounds a hung/slow model so it can't wedge shutdown (the lifecycle awaits
+  // the in-flight consolidation on close); a timeout rejects → consolidateTask's catch → extractive.
+  return async input => (await generateObject({
+    model, schema: DistilledSchema, prompt: distillPrompt(input), abortSignal: AbortSignal.timeout(30_000),
+  })).object
 }
