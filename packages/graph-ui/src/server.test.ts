@@ -66,11 +66,18 @@ async function setup() {
   const t = await new Kernel(storage.events).createTask({ title: 'seed task', spec: '' })
   const ui = startGraphUi({ url: db.url, port: 0, cwdProject: { id: TEST_PROJECT_ID, name: 'test-proj' } })
   const base = `http://127.0.0.1:${ui.port}`
-  return { storage, taskId: t.id, ui, base }
+  return { storage, taskId: t.id, ui, base, url: db.url }
 }
 
-// read SSE messages off a live stream until the predicate matches (2s cap)
-async function readSse(res: Response, until: (msg: { id: number; data: string }) => boolean) {
+// Asserted subset of the chats-list push frames the stream carries alongside patches.
+const ProjectsFrame = z.object({
+  projects: z.array(z.object({ id: z.string(), name: z.string().nullable(), dir: z.string().nullable() })),
+})
+
+// read SSE messages off a live stream until the predicate matches (2s cap); `seen` observes
+// every frame on the way — for asserting an earlier frame and a later one on ONE stream
+// (a response body reader cannot be re-acquired after cancel)
+async function readSse(res: Response, until: (msg: { id: number; data: string }) => boolean, seen?: (msg: { id: number; data: string }) => void) {
   const reader = res.body!.getReader()
   const dec = new TextDecoder()
   let buf = ''
@@ -84,6 +91,7 @@ async function readSse(res: Response, until: (msg: { id: number; data: string })
         const id = Number(block.match(/^id: (\d+)$/m)?.[1] ?? -1)
         const data = block.match(/^data: (.*)$/m)?.[1] ?? ''
         const msg = { id, data }
+        seen?.(msg)
         if (until(msg)) return msg
       }
     }
@@ -143,6 +151,33 @@ describe('graph-ui web adapter', () => {
     expect(CatchUpEnvelope.parse(JSON.parse(catchUp!.data)).patch.addNodes.map(n => n.id)).toEqual([noteNodeId('project', 'live-note')])
 
     await ui.stop(); await storage.close()
+  })
+
+  it('pushes the chats list over the stream: seed on connect, update when a foreign project appears', async () => {
+    const { storage, ui, base, url } = await setup()
+    const stream = await fetch(`${base}/api/stream?project=${TEST_PROJECT_ID}&fromSeq=0`)
+
+    // a FOREIGN project's first event (CLI init elsewhere, a bench run, …) must push the new
+    // list to this already-open stream — the sidebar learns of chats this tab never touched
+    const other = crypto.randomUUID()
+    const foreign = await openStorage(url, { projectId: other })
+    await foreign.events.append(noteEvent('foreign-born'))
+
+    // one reader pass: collect every frame until the growth frame lands
+    const frames: Array<{ id: number; data: string }> = []
+    const grown = await readSse(stream, m => m.data.includes(other), m => frames.push(m))
+    expect(grown).not.toBeNull()
+    // projects frames carry NO SSE id: state sync must never advance Last-Event-ID resume
+    expect(grown!.id).toBe(-1)
+    expect(ProjectsFrame.parse(JSON.parse(grown!.data)).projects.map(p => p.id)).toContain(other)
+
+    // the connect-time seed frame preceded it — reconnecting tabs converge without a reload
+    const seed = frames.find(f => f.data.includes('"projects"'))
+    expect(seed).not.toBeUndefined()
+    expect(seed!.id).toBe(-1)
+    expect(ProjectsFrame.parse(JSON.parse(seed!.data)).projects.map(p => p.id)).toContain(TEST_PROJECT_ID)
+
+    await foreign.close(); await ui.stop(); await storage.close()
   })
 
   it('action routes: CSRF-guarded, 501 when read-only, dispatched with parsed input', async () => {

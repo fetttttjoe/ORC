@@ -31,7 +31,10 @@ export interface PlanNoteView {
   links: Array<{ id: string; kind: string }>
 }
 export interface PlanNotesView { notes: PlanNoteView[]; mermaid: string | null }
-export interface StreamEnvelope { patch: GraphPatch | null; summary: LogRow | null }
+// `projects` frames are membership/name pushes riding the same stream (no SSE id — they never
+// advance the resume cursor); present only when the chats list actually changed, plus one seed
+// frame on connect.
+export interface StreamEnvelope { patch: GraphPatch | null; summary: LogRow | null; projects?: Project[] }
 export type CopilotPart =
   | { type: 'text'; text: string }
   | { type: 'tool-call'; toolName: string; input: unknown }

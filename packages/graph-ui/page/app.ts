@@ -354,6 +354,9 @@ function watch(fromSeq: number): void {
     onLive: () => setStatus(true, `live · seq ${seq}`),
     onDown: () => setStatus(false, 'reconnecting…'),
     onEnvelope: (env, envSeq) => {
+      // chats-list push: a project born or renamed ANYWHERE (CLI init, a bench run, another
+      // tab) reaches this sidebar without a reload
+      if (env.projects) { projects = env.projects; renderSidebar() }
       // seq regression = the log this tab knew was reset out-of-band (CLI purge, dev wipe);
       // patching on top of stale state would duplicate the world — resync from a fresh snapshot
       if (envSeq && envSeq < seq) { void loadProject(); return }

@@ -6,7 +6,7 @@ export { decompositionMermaid, planMermaid, todoWaves, type TodoWave } from './d
 export { PALETTE } from './palette'
 export {
   createProjectSessions, foldModelCatalog,
-  type ProjectSessions, type SessionSnapshot, type SessionUpdate, type Unsubscribe,
+  type ProjectEntry, type ProjectSessions, type SessionSnapshot, type SessionUpdate, type Unsubscribe,
 } from './sessions'
 export { foldTranscript, type TranscriptItem } from './transcript'
 export type { OrcActions } from './actions'

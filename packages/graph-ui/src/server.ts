@@ -1,7 +1,7 @@
 import { stepCountIs, streamText, type LanguageModel } from 'ai'
 import { z } from 'zod'
-import { errorMessage, NoteAuthoringDraft, NoteRef, PlanDraft, type CopilotExchangePayload, type Usage } from '@orc/contracts'
-import { buildCopilotTools, copilotSystemPrompt, createProjectSessions, emptyPatch, type CopilotMode, type OrcActions, type ProjectSessions } from '@orc/ui-core'
+import { errorMessage, isRecord, NoteAuthoringDraft, NoteRef, PlanDraft, type CopilotExchangePayload, type Usage } from '@orc/contracts'
+import { buildCopilotTools, copilotSystemPrompt, createProjectSessions, emptyPatch, type CopilotMode, type OrcActions, type ProjectEntry, type ProjectSessions, type SessionUpdate } from '@orc/ui-core'
 import index from '../page/index.html'
 
 export interface CopilotConfig {
@@ -100,6 +100,10 @@ export function startGraphUi(opts: {
   memoryHalfLifeDays?: number
 }): GraphUiServer {
   const sessions = createProjectSessions({ url: opts.url, cwdProject: opts.cwdProject, halfLifeDays: opts.memoryHalfLifeDays })
+  // chats-list push: one sessions-level watch for the whole server, fanned out to every open
+  // stream — a project born anywhere (CLI init, a bench run) reaches every sidebar live
+  const projectFeeds = new Set<(ps: ProjectEntry[]) => void>()
+  const projectsPush = sessions.subscribeProjects(ps => { for (const feed of projectFeeds) feed(ps) })
   // CSRF guard: minted per boot, readable only same-origin (GET /api/session), required as a
   // custom header on every mutation — cross-origin pages can neither read nor send it.
   const token = crypto.randomUUID()
@@ -193,13 +197,13 @@ export function startGraphUi(opts: {
     try {
       const body: unknown = await req.json().catch(() => null)
       const res = await handler(opts.actions, body)
-      // purge/delete rewrote history behind a cached session — drop it so reads refold
-      if (res.ok) {
+      // purge/delete rewrote history behind a cached session — drop it so reads refold; both
+      // change the chats list without an append NOTIFY (deletion removes rows outright), so
+      // the push must be told explicitly
+      if (res.ok && (name === 'purgeProject' || name === 'deleteProject')) {
         if (name === 'purgeProject' && opts.cwdProject) await sessions.reset(opts.cwdProject.id)
-        if (name === 'deleteProject') {
-          const target = (body as { projectId?: string } | null)?.projectId
-          if (target) await sessions.reset(target)
-        }
+        if (name === 'deleteProject' && isRecord(body) && typeof body.projectId === 'string') await sessions.reset(body.projectId)
+        await sessions.notifyProjectsChanged()
       }
       return res
     } catch (err) {
@@ -276,6 +280,8 @@ export function startGraphUi(opts: {
         const fromSeq = Number(lastEventId ?? u.searchParams.get('fromSeq') ?? 0)
         let unsub: (() => void) | undefined
         let ping: ReturnType<typeof setInterval> | undefined
+        let feed: ((ps: ProjectEntry[]) => void) | undefined
+        const dropFeed = (): void => { if (feed) projectFeeds.delete(feed) }
         const stream = new ReadableStream<Uint8Array>({
           start: async controller => {
             const enc = new TextEncoder()
@@ -285,20 +291,38 @@ export function startGraphUi(opts: {
             // keepalive: quiet projects emit nothing — periodic comments keep the connection
             // alive through idle timeouts and proxies, and detect dead clients (enqueue throws)
             ping = setInterval(() => {
-              try { controller.enqueue(enc.encode(': ping\n\n')) } catch { clearInterval(ping); unsub?.() }
+              try { controller.enqueue(enc.encode(': ping\n\n')) } catch { clearInterval(ping); unsub?.(); dropFeed() }
             }, 25_000)
-            // catch-up first (one cumulative patch), then live — seq gaps are impossible
-            // because the session serializes both through the same event subscription.
-            // Envelope: { patch|null, summary|null } — patch feeds the graph, summary feeds
-            // the log/chat views; empty patches are nulled to keep messages small.
-            const missed = await sessions.since(project, Number.isFinite(fromSeq) ? fromSeq : 0)
-            if (missed) send(missed.seq, { patch: missed.patch, summary: null })
-            unsub = await sessions.subscribe(project, up => {
+            // Subscribe FIRST (buffering), catch up second, flush third: an event landing
+            // during the catch-up await is buffered, never lost. The old order (since → then
+            // subscribe) left a gap the width of the awaits in between — luck-sized before,
+            // structural zero now. Envelope: { patch|null, summary|null, projects? }.
+            let liveNow = false
+            const buffered: SessionUpdate[] = []
+            const deliver = (up: SessionUpdate): void => {
               const patch = emptyPatch(up.patch) ? null : up.patch
-              try { send(up.seq, { patch, summary: up.summary }) } catch { unsub?.() }
+              try { send(up.seq, { patch, summary: up.summary }) } catch { unsub?.(); dropFeed() }
+            }
+            unsub = await sessions.subscribe(project, up => {
+              if (liveNow) deliver(up)
+              else buffered.push(up)
             })
+            const fromSafe = Number.isFinite(fromSeq) ? fromSeq : 0
+            const missed = await sessions.since(project, fromSafe)
+            if (missed) send(missed.seq, { patch: missed.patch, summary: null })
+            const cutoff = missed?.seq ?? fromSafe
+            for (const up of buffered) if (up.seq > cutoff) deliver(up)
+            liveNow = true // sync flip before any yield — nothing can interleave
+            // chats-list frames ride the same stream WITHOUT an `id:` line — state sync must
+            // never advance the client's Last-Event-ID cursor. Seeded LAST: its await must not
+            // sit inside the event-delivery path.
+            feed = ps => {
+              try { controller.enqueue(enc.encode(`data: ${JSON.stringify({ patch: null, summary: null, projects: ps })}\n\n`)) } catch { dropFeed() }
+            }
+            projectFeeds.add(feed)
+            feed(await sessions.projects()) // seed: a (re)connecting tab converges without a reload
           },
-          cancel: () => { clearInterval(ping); unsub?.() },
+          cancel: () => { clearInterval(ping); unsub?.(); dropFeed() },
         })
         return new Response(stream, {
           headers: { 'content-type': 'text/event-stream', 'cache-control': 'no-cache' },
@@ -324,6 +348,11 @@ export function startGraphUi(opts: {
     port: server.port ?? opts.port,
     sessions,
     token,
-    stop: async () => { await server.stop(true); await sessions.close() },
+    stop: async () => {
+      const unsubProjects = await projectsPush.catch(() => null)
+      unsubProjects?.()
+      await server.stop(true)
+      await sessions.close()
+    },
   }
 }

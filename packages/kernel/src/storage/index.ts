@@ -5,7 +5,7 @@ import { OperationJournal } from './operation-journal'
 import { events, operations } from '../schema'
 import type { Redactor } from '../redact'
 
-export { PostgresStore, listProjectIds, type Tx } from './postgres'
+export { PostgresStore, listProjectIds, watchProjectIds, type ProjectIdsWatch, type Tx } from './postgres'
 export { EventLog, type EventLogOps } from './event-log'
 export { OperationJournal, type OperationContext } from './operation-journal'
 export { assertMigrated, migrateDatabase } from './migrate'
