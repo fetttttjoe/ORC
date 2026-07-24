@@ -2,11 +2,17 @@ import { describe, expect, it } from 'bun:test'
 import { mkdtempSync, readdirSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
+import { z } from 'zod'
 import type { ResolvedTool } from '@orc/contracts'
 import { resolveInWorkspace } from '@orc/contracts'
 import { TOOL_NAME, executeTool, releaseWriteClaims, toolSet } from './tools'
 
 const ws = () => mkdtempSync(path.join(tmpdir(), 'orc-ws-'))
+
+// tool results (execute() returns { output: unknown }); named subsets parsed at the read boundary.
+const FsReadOutput = z.object({ content: z.string() })
+const FsListOutput = z.object({ entries: z.array(z.string()) })
+const HelloToolInput = z.object({ who: z.string().optional() })
 
 describe('workspace scoping (trust boundary)', () => {
   it('rejects .. traversal and absolute escapes', () => {
@@ -74,9 +80,9 @@ describe('fs tools', () => {
     const dir = ws()
     await executeTool(TOOL_NAME.fs_write, { path: 'out/f.txt', content: 'whole' }, dir)
     const r = await executeTool(TOOL_NAME.fs_read, { path: 'out/f.txt' }, dir)
-    expect((r.output as { content: string }).content).toBe('whole')
+    expect(FsReadOutput.parse(r.output).content).toBe('whole')
     const l = await executeTool(TOOL_NAME.fs_list, { path: 'out' }, dir)
-    expect((l.output as { entries: string[] }).entries).toEqual(['f.txt']) // no .tmp residue
+    expect(FsListOutput.parse(l.output).entries).toEqual(['f.txt']) // no .tmp residue
   })
 
   it('write → read → list roundtrip, mkdir -p for parents', async () => {
@@ -114,7 +120,7 @@ describe('toolSet', () => {
     const tools = toolSet()
     for (const name of Object.values(TOOL_NAME)) {
       expect(tools[name]).toBeDefined()
-      expect((tools[name] as { execute?: unknown }).execute).toBeUndefined()
+      expect(tools[name].execute).toBeUndefined()
     }
   })
 })
@@ -124,7 +130,7 @@ const extraTool = (over: Partial<ResolvedTool> = {}): ResolvedTool => ({
   name: 'mcp__srv__hello',
   description: 'says hello',
   inputSchema: { type: 'object', properties: { who: { type: 'string' } } },
-  execute: async input => ({ output: { hi: (input as { who?: string }).who }, isError: false }),
+  execute: async input => ({ output: { hi: HelloToolInput.parse(input).who }, isError: false }),
   ...over,
 })
 
