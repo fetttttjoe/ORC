@@ -89,3 +89,33 @@ describe('SurrealMemory semantic + hybrid search', () => {
     await m.close()
   })
 })
+
+describe('tier on the retrieval surface', () => {
+  // Regression: the cosine SELECT projected every summary field EXCEPT tier, so a vector hit on a
+  // plan or episodic note came back labelled 'semantic' — the lane a reader uses to tell durable
+  // knowledge from one run's trail was fabricated by shape inference over a row that carries none
+  // of the columns inference reads.
+  it('a vector hit reports the lane it actually came from, not an inferred one', async () => {
+    const t = await createTestSurreal(); drops.push(t.drop)
+    const m = await SurrealMemory.open(t, fakeEmbedder)
+    await m.applyEvent(written(1, { tier: 'plan', id: 'subplan', scope: 'plan-t1', title: 'Alpha subplan', body: 'alpha', rationale: 'why' }))
+    await m.applyEvent(written(2, { tier: 'episodic', id: 'step-a', scope: 'plan-t1', title: 'Alpha step', body: 'alpha' }))
+    await m.applyEvent(written(3, note({ id: 'claim', title: 'Alpha claim', body: 'alpha' })))
+    const byId = new Map((await m.search('alpha', {}, { mode: 'semantic' })).map(n => [n.id, n.tier]))
+    expect(byId.get('subplan')).toBe('plan')
+    expect(byId.get('step-a')).toBe('episodic')
+    expect(byId.get('claim')).toBe('semantic')
+    await m.close()
+  })
+
+  it('filters both retrieval arms and list() down to one lane', async () => {
+    const t = await createTestSurreal(); drops.push(t.drop)
+    const m = await SurrealMemory.open(t, fakeEmbedder)
+    await m.applyEvent(written(1, { tier: 'episodic', id: 'step-a', scope: 'plan-t1', title: 'Alpha step', body: 'alpha' }))
+    await m.applyEvent(written(2, note({ id: 'claim', title: 'Alpha claim', body: 'alpha' })))
+    for (const mode of ['keyword', 'semantic', 'hybrid'] as const)
+      expect((await m.search('alpha', { tier: 'semantic' }, { mode })).map(n => n.id)).toEqual(['claim'])
+    expect((await m.list({ tier: 'episodic' })).map(n => n.id)).toEqual(['step-a'])
+    await m.close()
+  })
+})

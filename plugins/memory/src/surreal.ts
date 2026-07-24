@@ -66,7 +66,11 @@ const key = (scope: string, id: string) => `${scope}:${id}`
 // boundary like every other DB read. hits/lastAccessedAt are optional (a note may predate them).
 const SemanticRow = z.object({
   noteId: z.string(), scope: z.string(), title: z.string(),
-  categories: z.array(z.string()), tags: z.array(z.string()), summary: z.string(),
+  // projected like every other summary field: without it toSummary would fall back to shape
+  // inference over a row that carries none of the columns inference reads, and label every
+  // vector hit 'semantic' — including the plan and episodic notes it surfaced.
+  tier: NoteTier.optional(),
+  categories: z.array(z.string()).optional(), tags: z.array(z.string()), summary: z.string(),
   hits: z.number().optional(), lastAccessedAt: z.string().nullable().optional(),
   score: z.number(),
 })
@@ -337,7 +341,7 @@ export class SurrealMemory {
       // raw query: surqlize has no vector::* select builder — the same escape hatch open() uses for
       // DEFINE TABLE. $q binds the query vector; rows without an embedding are excluded.
       const res = await this.surreal.query(
-        `SELECT noteId, scope, title, categories, tags, summary, hits, lastAccessedAt,`
+        `SELECT noteId, scope, title, tier, categories, tags, summary, hits, lastAccessedAt,`
         + ` vector::similarity::cosine(embedding, $q) AS score`
         + ` FROM ${Tb.Note} WHERE embedding != NONE ORDER BY score DESC LIMIT 50`,
         { q: qv },
@@ -353,7 +357,8 @@ export class SurrealMemory {
         activationBoost(activation({ hits: r.hits ?? 0, lastAccessedAt: r.lastAccessedAt ?? null }, now))
       return rows
         .filter(r => (!filter.scope || r.scope === filter.scope)
-          && (!filter.category || r.categories.includes(filter.category))
+          && (!filter.tier || r.tier === filter.tier)
+          && (!filter.category || (r.categories ?? []).includes(filter.category))
           && (!filter.tag || r.tags.includes(filter.tag)))
         .map(r => ({ r, s: (r.score + 1) * heat(r) }))
         .sort((a, b) => b.s - a.s)
@@ -419,6 +424,10 @@ export class SurrealMemory {
     // serve this role, but there are no soft-deleted rows anymore — see applyDeleted).
     let cond = n.scope.eq(n.scope)
     if (filter.scope) cond = cond.and(n.scope.eq(filter.scope))
+    // the stored column, never an inferred one: a row from before the split has no tier, and
+    // `orc memory rebuild` is what gives it one — guessing here would answer a lane question
+    // with a fabricated lane.
+    if (filter.tier) cond = cond.and(n.tier.eq(filter.tier))
     if (filter.category) cond = cond.and(n.categories.contains(filter.category))
     if (filter.tag) cond = cond.and(n.tags.contains(filter.tag))
     return cond

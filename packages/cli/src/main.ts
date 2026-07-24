@@ -2,7 +2,7 @@ import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync } from '
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { Command, InvalidArgumentError } from 'commander'
-import { EDGE_DIRECTION, EVENT_KIND, LINK_KINDS, MEMORY_ACCESS, PlanDraft, RUN_OUTCOME, STRATEGY, TASK_STATUS, LinkKind, slugId, type Analyzer, type EventRecord, type ExecutionPort, type Plan, type RunHandle } from '@orc/contracts'
+import { EDGE_DIRECTION, EVENT_KIND, LINK_KINDS, MEMORY_ACCESS, NOTE_TIERS, NoteTier, PlanDraft, RUN_OUTCOME, STRATEGY, TASK_STATUS, LinkKind, slugId, type Analyzer, type EventRecord, type ExecutionPort, type Plan, type RunHandle } from '@orc/contracts'
 import { openStorage, Kernel, fold, grantExtensionTrust, grantMcpTrust, initializeProject, isExtensionTrusted, isMcpTrusted, loadConfig, loadTrust, migrateDatabase, requireProject, taskUsage, type EventLog, type OrcConfig, type PluginHost, type ProjectConfig, type Storage } from '@orc/kernel'
 import { createVaultProjector, parsePlanFile } from '@orc/vault-projector'
 import { consolidateTask, probeMemory, staleNotes, DEFAULT_SWEEP_DAYS } from '@orc/memory'
@@ -99,6 +99,14 @@ function parseNonNegativeInteger(value: string): number {
   if (!/^\d+$/.test(value) || !Number.isSafeInteger(parsed))
     throw new InvalidArgumentError(`must be a non-negative integer, got '${value}'`)
   return parsed
+}
+
+// Same discipline as `neighbors --kinds`: reject an unknown lane at parse time with the valid set,
+// rather than letting a typo silently filter everything out and read as "this lane is empty".
+function parseNoteTier(value: string): NoteTier {
+  const parsed = NoteTier.safeParse(value)
+  if (!parsed.success) throw new InvalidArgumentError(`unknown tier '${value}' — valid tiers: ${NOTE_TIERS.join(', ')}`)
+  return parsed.data
 }
 
 // neighbors --depth must be >= 1: the store default is 2 and rankNeighbors requires a positive
@@ -628,11 +636,12 @@ export function buildProgram(
     .description('list memory notes')
     .option('--category <c>', 'filter by category')
     .option('--tag <t>', 'filter by tag')
-    .action(async (o: { category?: string; tag?: string }) => {
+    .option('--tier <t>', `only one memory lane: ${NOTE_TIERS.join(' | ')}`, parseNoteTier)
+    .action(async (o: { category?: string; tag?: string; tier?: NoteTier }) => {
       const { config, log } = needPlugin()
       const memory = await openMemory({ log, config })
       await memory.projector.catchUp()
-      const rows = await memory.store.list({ category: o.category, tag: o.tag })
+      const rows = await memory.store.list({ category: o.category, tag: o.tag, tier: o.tier })
       await memory.close()
       // the agent path already says "absence is not proof a decision doesn't exist"; printing
       // zero bytes gives the human strictly less than the model gets, and reads as "no such note"
@@ -640,7 +649,7 @@ export function buildProgram(
       if (rows.length === 0) console.log('_no notes_')
       // hits is the observed hot/cold split — the only evidence for whether a decay/sweep policy
       // would ever be tuned against data rather than guessed at.
-      for (const n of rows) console.log(`${n.id}\t${n.title}\t[${n.categories.join(',')}]\thits ${n.hits}\t${n.summary}`)
+      for (const n of rows) console.log(`${n.id}\t${n.tier}\t${n.title}\t[${n.categories.join(',')}]\thits ${n.hits}\t${n.summary}`)
     })
   mem
     .command('search <query>')
