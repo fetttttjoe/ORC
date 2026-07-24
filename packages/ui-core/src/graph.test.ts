@@ -123,6 +123,22 @@ describe('buildGraph', () => {
     expect(patch.updateNodes.map(n => n.id)).toContain(hotNode.id) // heat alone must patch
   })
 
+  it('derives edge heat from accessed.via events, on note-link edges only', () => {
+    const ts = '2026-07-01T00:00:00.000Z'
+    const events = [
+      { kind: EVENT_KIND.memory_written, ts, payload: { note: { id: 'eseed', scope: 'project', title: 'eseed', links: [{ id: 'ewalked', kind: 'relates_to' }] }, author: { source: 'cli' } } },
+      { kind: EVENT_KIND.memory_written, ts, payload: { note: { id: 'ewalked', scope: 'project', title: 'ewalked' }, author: { source: 'cli' } } },
+      // via-provenance access: the connection itself, not just the node, gets credit
+      { kind: EVENT_KIND.memory_accessed, ts, payload: { id: 'ewalked', scope: 'project', mode: 'read', author: { source: 'cli' }, via: { seed: 'eseed', kind: 'relates_to', direction: 'out' } } },
+    ]
+    const g = buildGraph(fold([]), events, { now: ts })
+    const edge = g.links.find(l => l.source === noteNodeId('project', 'eseed') && l.target === noteNodeId('project', 'ewalked'))!
+    expect(edge.heat).toBeGreaterThan(0)
+    expect(edge.heat).toBeLessThanOrEqual(1)
+    // non-note-link edges (task→note 'wrote' etc.) never carry heat — only walked-edge kinds do
+    for (const l of g.links) if (l.type !== 'relates_to') expect(l.heat).toBeUndefined()
+  })
+
   it('never links to a node that does not exist (dangling note link, deleted target)', async () => {
     const log = await freshLog()
     await seed(log)
@@ -172,5 +188,22 @@ describe('diffGraphs', () => {
     expect(patch.removeLinks.map(l => l.type).sort()).toEqual(['relates_to', 'wrote'])
     expect(patch.addNodes).toEqual([])
     await log.close()
+  })
+
+  it('emits an updateLinks entry (not remove+add) when only edge heat changes', () => {
+    const ts = '2026-07-01T00:00:00.000Z'
+    const written = [
+      { kind: EVENT_KIND.memory_written, ts, payload: { note: { id: 'ueseed', scope: 'project', title: 'ueseed', links: [{ id: 'uewalked', kind: 'relates_to' }] }, author: { source: 'cli' } } },
+      { kind: EVENT_KIND.memory_written, ts, payload: { note: { id: 'uewalked', scope: 'project', title: 'uewalked' }, author: { source: 'cli' } } },
+    ]
+    const access = { kind: EVENT_KIND.memory_accessed, ts, payload: { id: 'uewalked', scope: 'project', mode: 'read', author: { source: 'cli' }, via: { seed: 'ueseed', kind: 'relates_to', direction: 'out' } } }
+    const empty = fold([])
+    const cold = buildGraph(empty, written, { now: ts })
+    const hot = buildGraph(empty, [...written, access], { now: ts })
+    const patch = diffGraphs(cold, hot)
+    const key = `${noteNodeId('project', 'ueseed')} ${noteNodeId('project', 'uewalked')} relates_to`
+    expect(patch.updateLinks.some(l => `${l.source} ${l.target} ${l.type}` === key)).toBe(true)
+    expect(patch.addLinks).toEqual([])
+    expect(patch.removeLinks).toEqual([])
   })
 })

@@ -364,7 +364,7 @@ function watch(fromSeq: number): void {
       if (env.patch) {
       for (const n of [...env.patch.addNodes, ...env.patch.updateNodes]) nodes.set(n.id, n)
       for (const id of env.patch.removeNodeIds) nodes.delete(id)
-      for (const l of env.patch.addLinks) links.set(linkKey(l), l)
+      for (const l of [...env.patch.addLinks, ...env.patch.updateLinks]) links.set(linkKey(l), l)
       for (const l of env.patch.removeLinks) links.delete(linkKey(l))
       for (const id of env.patch.removeNodeIds)
         for (const [k, l] of links) if (l.source === id || l.target === id) links.delete(k)

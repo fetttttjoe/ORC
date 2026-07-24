@@ -43,6 +43,9 @@ const metaTable = table(Tb.Meta, { seq: t.number() })
 const linkTable = edge(Tb.Note, Tb.Link, Tb.Note, {
   kind: kindType, confidence: t.option(t.number()),
   fromId: t.string(), toId: t.string(), scope: t.string(),
+  // observed use, per-EDGE (see memory_accessed's `via` branch below) — optional so a
+  // pre-existing link row projected before these fields existed still selects without a rebuild.
+  hits: t.option(t.number()), lastAccessedAt: t.option(t.string()),
 })
 
 // RecordId key = `${scope}:${id}` (scope/id are separately restricted to [a-z0-9-], so ':' is
@@ -156,12 +159,24 @@ export class SurrealMemory {
           ...(ex?.lastAccessedAt !== undefined && { lastAccessedAt: ex.lastAccessedAt }),
         })
         // Re-materialize this note's out-edges (delete-then-RELATE) — deterministic on replay.
+        // PRESERVE stats first: read the existing out-edges before the delete wipes them, keyed
+        // by (toId, kind), so a link that SURVIVES the rewrite carries its earned hits/
+        // lastAccessedAt into the re-RELATE below (same omit-if-undefined pattern as the note row
+        // above, surreal.ts:154-156). A link the update REMOVES loses its stats with it — correct,
+        // the connection no longer exists. Skipping this read is the blocker T6 was named for:
+        // every note UPDATE would otherwise silently wipe its edges' accumulated activation.
+        const existingLinks = await tx.select(Tb.Link).where(l => l.fromId.eq(note.id).and(l.scope.eq(note.scope)))
+        const linkStats = new Map(existingLinks.map(l => [`${l.toId} ${l.kind}`, l]))
         await tx.delete(Tb.Link).where(l => l.fromId.eq(note.id).and(l.scope.eq(note.scope)))
-        for (const l of note.links)
+        for (const l of note.links) {
+          const exLink = linkStats.get(`${l.id} ${l.kind}`)
           await tx.relate(Tb.Link, new RecordId(Tb.Note, k), new RecordId(Tb.Note, key(note.scope, l.id))).set({
             kind: l.kind, fromId: note.id, toId: l.id, scope: note.scope,
             ...(l.confidence !== undefined && { confidence: l.confidence }),
+            hits: exLink?.hits ?? 0,
+            ...(exLink?.lastAccessedAt !== undefined && { lastAccessedAt: exLink.lastAccessedAt }),
           })
+        }
       } else if (e.kind === EVENT_KIND.memory_accessed) {
         const parsed = MemoryAccessedPayload.safeParse(e.payload)
         if (!parsed.success) { console.warn(`[memory] skipping unparseable memory_accessed at seq ${e.seq}: ${parsed.error.message}`); await tx.upsert(Tb.Meta, 'cursor').set({ seq: e.seq }); return true }
@@ -172,6 +187,18 @@ export class SurrealMemory {
         // the event ts, so a replay lands on the same value the first pass did.
         const ex = (await tx.select(Tb.Note, k))[0]
         if (ex) await tx.upsert(Tb.Note, k).set({ hits: (ex.hits ?? 0) + 1, lastAccessedAt: e.ts })
+        // the walked EDGE strengthens too, not just the node — same canonicalization as
+        // foldEdgeStats (contracts/memory.ts): direction 'out' means seed→id, so the stored
+        // (fromId, toId) pair is (seed, id); 'in' reverses it. No row matched (edge since
+        // removed, or this access carries no provenance) → no-op.
+        if (p.via) {
+          const { seed, kind, direction } = p.via
+          const fromId = direction === EDGE_DIRECTION.out ? seed : p.id
+          const toId = direction === EDGE_DIRECTION.out ? p.id : seed
+          const link = (await tx.select(Tb.Link).where(l =>
+            l.scope.eq(p.scope).and(l.kind.eq(kind)).and(l.fromId.eq(fromId)).and(l.toId.eq(toId))))[0]
+          if (link) await tx.update(link.id).set({ hits: (link.hits ?? 0) + 1, lastAccessedAt: e.ts })
+        }
       } else if (e.kind === EVENT_KIND.memory_deleted) {
         const parsed = MemoryDeletedPayload.safeParse(e.payload)
         if (!parsed.success) { console.warn(`[memory] skipping unparseable memory_deleted at seq ${e.seq}: ${parsed.error.message}`); await tx.upsert(Tb.Meta, 'cursor').set({ seq: e.seq }); return true }
@@ -187,19 +214,25 @@ export class SurrealMemory {
 
   async neighbors(seed: string, opts: NeighborQuery = {}): Promise<NeighborResult[]> {
     const scope = opts.scope ?? MemoryScope.project
+    const halfLife = opts.halfLifeDays ?? DEFAULT_HALF_LIFE_DAYS
+    const now = opts.now ?? new Date().toISOString()
     // All in-scope edges, ranked in TS — fine for a hand-authored graph; a frontier-scoped
     // fetch is a later optimisation (spec §4.2). Both directions (spec RG4): "what supersedes
     // this note" must be reachable from the superseded seed, so each edge is added reversed too.
     const rows = await this.db.select(Tb.Link).where(l => l.scope.eq(scope))
     // each stored edge is traversed both ways (spec RG4), but tagged with direction so an asymmetric
     // kind stays unambiguous: the authored A→B edge is 'out' from A / 'in' from B.
-    const edges: Edge[] = rows.flatMap(r => [
-      { from: r.fromId, to: r.toId, kind: r.kind, confidence: r.confidence, direction: EDGE_DIRECTION.out },
-      { from: r.toId, to: r.fromId, kind: r.kind, confidence: r.confidence, direction: EDGE_DIRECTION.in },
-    ])
+    const edges: Edge[] = rows.flatMap(r => {
+      // edge heat folds into confidence: one multiplication, rank stays purely structural.
+      // ponytail: promote to an explicit Edge field if rank ever needs raw confidence.
+      const act = activation({ hits: r.hits ?? 0, lastAccessedAt: r.lastAccessedAt ?? null }, now, halfLife)
+      const confidence = (r.confidence ?? 1) * activationBoost(act)
+      return [
+        { from: r.fromId, to: r.toId, kind: r.kind, confidence, direction: EDGE_DIRECTION.out },
+        { from: r.toId, to: r.fromId, kind: r.kind, confidence, direction: EDGE_DIRECTION.in },
+      ]
+    })
     const ranked = rankNeighbors(edges, [seed], { depth: opts.depth, kinds: opts.kinds })
-    const halfLife = opts.halfLifeDays ?? DEFAULT_HALF_LIFE_DAYS
-    const now = opts.now ?? new Date().toISOString()
     // join title/summary AND the activation inputs from the raw row (hits/lastAccessedAt are
     // Tier-2 fields toNote strips) — then re-weight: structure × activationBoost. Boost-only,
     // so a graph with zero accesses ranks exactly as before.

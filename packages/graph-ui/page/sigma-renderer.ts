@@ -12,8 +12,20 @@ const SETTLE_MS = 3_000 // keep the worker layout running this long after the la
 const BASE_SIZE = 4
 const FLASH_MS = 4_000 // how long an event ripple keeps a node hot
 const PULSE_MS = 550 // pulse half-period — running/hot nodes breathe at ~1Hz
+const EDGE_BASE_SIZE = 1
+const EDGE_HEAT_SIZE_SCALE = 2 // a maximally-hot edge renders 3x a cold one
 
 const edgeKey = (l: GraphLink): string => `${l.source}\u0000${l.target}\u0000${l.type}`
+
+// brightness from heat: lerp the dim base edge color toward white — a walked connection reads
+// as lit, an untouched one stays in the chrome background. heat 0 renders the same color as
+// EDGE_COLOR (as an rgb() triplet, which canvas treats identically to the hex literal).
+function edgeColorFor(heat: number): string {
+  const n = parseInt(EDGE_COLOR.slice(1), 16)
+  const r = (n >> 16) & 0xff, g = (n >> 8) & 0xff, b = n & 0xff
+  const mix = (c: number) => Math.round(c + (255 - c) * heat)
+  return `rgb(${mix(r)}, ${mix(g)}, ${mix(b)})`
+}
 
 export class SigmaRenderer implements GraphRenderer {
   private readonly graph = new MultiGraph()
@@ -74,6 +86,13 @@ export class SigmaRenderer implements GraphRenderer {
       }
     for (const id of p.removeNodeIds) if (this.graph.hasNode(id)) { this.graph.dropNode(id); this.active.delete(id); this.hot.delete(id) } // incident edges drop too
     for (const l of p.addLinks) this.addLink(l)
+    // heat-only update: an in-place attribute merge, NOT drop+re-add — dropping would reset
+    // whatever live edge state the layout/renderer carries on it for no visual reason.
+    for (const l of p.updateLinks)
+      if (this.graph.hasEdge(edgeKey(l))) {
+        const heat = l.heat ?? 0
+        this.graph.mergeEdgeAttributes(edgeKey(l), { color: edgeColorFor(heat), size: EDGE_BASE_SIZE + heat * EDGE_HEAT_SIZE_SCALE })
+      }
     for (const l of p.removeLinks) if (this.graph.hasEdge(edgeKey(l))) this.graph.dropEdge(edgeKey(l))
     this.restartLayout()
   }
@@ -156,7 +175,8 @@ export class SigmaRenderer implements GraphRenderer {
 
   private addLink(l: GraphLink): void {
     if (this.graph.hasEdge(edgeKey(l)) || !this.graph.hasNode(l.source) || !this.graph.hasNode(l.target)) return
-    this.graph.addEdgeWithKey(edgeKey(l), l.source, l.target, { color: EDGE_COLOR, linkType: l.type })
+    const heat = l.heat ?? 0
+    this.graph.addEdgeWithKey(edgeKey(l), l.source, l.target, { color: edgeColorFor(heat), size: EDGE_BASE_SIZE + heat * EDGE_HEAT_SIZE_SCALE, linkType: l.type })
   }
 
   private restartLayout(): void {

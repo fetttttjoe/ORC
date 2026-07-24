@@ -1,6 +1,6 @@
 import { afterAll, describe, expect, it } from 'bun:test'
 import { RecordId, Surreal } from 'surrealdb'
-import { EVENT_KIND, MEMORY_ACCESS, isRecord, type EventKind, type EventRecord, type MemoryAccessMode, type MemoryAuthor } from '@orc/contracts'
+import { EVENT_KIND, MEMORY_ACCESS, isRecord, type AccessVia, type EventKind, type EventRecord, type MemoryAccessMode, type MemoryAuthor } from '@orc/contracts'
 import { SurrealMemory } from './surreal'
 import { eventFixture } from '@orc/contracts/fixtures'
 import { createTestSurreal } from './test-helpers'
@@ -15,8 +15,8 @@ const written = (seq: number, n = note(), author: MemoryAuthor = cli): EventReco
   eventFixture({ seq, taskId: null, kind: 'memory_written', payload: { note: n, author }, ts: `2026-07-18T0${Math.min(seq, 9)}:00:00Z` })
 const deleted = (seq: number, id: string, scope = 'project'): EventRecord =>
   eventFixture({ seq, taskId: null, kind: 'memory_deleted', payload: { id, scope, author: cli }, ts: `2026-07-18T0${Math.min(seq, 9)}:00:00Z` })
-const accessed = (seq: number, id: string, mode: MemoryAccessMode = MEMORY_ACCESS.read, scope = 'project'): EventRecord =>
-  eventFixture({ seq, taskId: null, kind: 'memory_accessed', payload: { id, scope, mode, author: cli }, ts: `2026-07-18T0${Math.min(seq, 9)}:00:00Z` })
+const accessed = (seq: number, id: string, mode: MemoryAccessMode = MEMORY_ACCESS.read, scope = 'project', via?: AccessVia): EventRecord =>
+  eventFixture({ seq, taskId: null, kind: 'memory_accessed', payload: { id, scope, mode, author: cli, ...(via && { via }) }, ts: `2026-07-18T0${Math.min(seq, 9)}:00:00Z` })
 
 const drops: (() => Promise<void>)[] = []
 afterAll(async () => { for (const d of drops) await d() })
@@ -232,6 +232,99 @@ describe('SurrealMemory.applyEvent', () => {
     await raw.close()
     return rows[0]
   }
+
+  // Edge-row twin of rawRow: link rows have generated ids (RELATE, not a deterministic key), so
+  // the peek matches on the (scope, fromId, toId, kind) tuple instead of a RecordId.
+  const rawLinkRow = async (
+    t: { url: string; ns: string; db: string; username: string; password: string },
+    fromId: string, toId: string, kind: string, scope = 'project',
+  ) => {
+    const raw = new Surreal()
+    await raw.connect(t.url)
+    await raw.signin({ username: t.username, password: t.password })
+    await raw.use({ namespace: t.ns, database: t.db })
+    const [rows] = await raw.query<[{ hits?: number; lastAccessedAt?: string }[]]>(
+      'SELECT hits, lastAccessedAt FROM link WHERE fromId = $fromId AND toId = $toId AND kind = $kind AND scope = $scope',
+      { fromId, toId, kind, scope },
+    )
+    await raw.close()
+    return rows[0]
+  }
+
+  // (a) The v1 blueprint ranked a walked edge above an untouched sibling — that passes from node
+  // heat alone and never exercises the edge code. Here node heat is forced EQUAL (one hit each,
+  // same timestamp): only the edge boost can break the tie.
+  it('an edge walked with provenance outranks a structurally-identical untouched sibling at equal node heat', async () => {
+    const t = await createTestSurreal(); drops.push(t.drop)
+    const m = await SurrealMemory.open(t)
+    const ts = '2026-07-10T00:00:00.000Z'
+    let seq = 0
+    const apply = (kind: EventKind, payload: Record<string, unknown>) =>
+      m.applyEvent(eventFixture({ seq: ++seq, ts, kind, payload }))
+    const note = (id: string, links: Array<{ id: string; kind: 'relates_to' }> = []) =>
+      apply(EVENT_KIND.memory_written, { note: { id, scope: 'project', title: id, links }, author: { source: 'cli' } })
+    await note('edge-a')
+    await note('edge-b')
+    await note('edge-seed', [{ id: 'edge-a', kind: 'relates_to' }, { id: 'edge-b', kind: 'relates_to' }])
+    // A is reached WITH provenance — the edge itself earns credit; B is read directly — same
+    // node-level hit, but no edge to strengthen.
+    await apply(EVENT_KIND.memory_accessed, {
+      id: 'edge-a', scope: 'project', mode: 'read', author: { source: 'cli' },
+      via: { seed: 'edge-seed', kind: 'relates_to', direction: 'out' },
+    })
+    await apply(EVENT_KIND.memory_accessed, { id: 'edge-b', scope: 'project', mode: 'read', author: { source: 'cli' } })
+
+    const ranked = await m.neighbors('edge-seed', { now: ts })
+    // node heat is EQUAL: both notes were hit exactly once at the same timestamp
+    const actA = ranked.find(n => n.id === 'edge-a')!.activation
+    const actB = ranked.find(n => n.id === 'edge-b')!.activation
+    expect(actA).toBe(actB)
+    expect(actA).toBeGreaterThan(0)
+    // ...yet A outranks B — the only remaining discriminator is the edge boost
+    expect(ranked.map(n => n.id)[0]).toBe('edge-a')
+
+    const link = await rawLinkRow(t, 'edge-seed', 'edge-a', 'relates_to')
+    expect(link?.hits).toBe(1)
+    await m.close()
+  })
+
+  // (b) THE blocker: memory_written's delete-then-RELATE re-materialization must carry forward
+  // stats for a link that survives the rewrite, or every note UPDATE silently wipes its edges'
+  // earned activation — live and on rebuild alike.
+  it('a note UPDATE preserves accumulated edge stats for links that survive the rewrite', async () => {
+    const t = await createTestSurreal(); drops.push(t.drop)
+    const m = await SurrealMemory.open(t)
+    await m.applyEvent(written(1, note({ id: 'up-src', links: [{ id: 'up-dst', kind: 'relates_to' }] })))
+    await m.applyEvent(written(2, note({ id: 'up-dst' })))
+    await m.applyEvent(accessed(3, 'up-dst', MEMORY_ACCESS.read, 'project', { seed: 'up-src', kind: 'relates_to', direction: 'out' }))
+    const before = await rawLinkRow(t, 'up-src', 'up-dst', 'relates_to')
+    expect(before?.hits).toBe(1)
+
+    // re-apply memory_written for the source note, keeping the SAME link — this used to wipe
+    // the edge's stats via the unconditional delete-then-RELATE.
+    await m.applyEvent(written(4, note({ id: 'up-src', links: [{ id: 'up-dst', kind: 'relates_to' }], summary: 'revised' })))
+    const after = await rawLinkRow(t, 'up-src', 'up-dst', 'relates_to')
+    expect(after?.hits).toBe(1)
+    expect(after?.lastAccessedAt).toBe(before?.lastAccessedAt)
+    await m.close()
+  })
+
+  // (c) Zero-access graph must rank byte-identically to the pre-activation structural scores —
+  // activationBoost(0) === 1 for every edge, so the boost multiplication is a no-op throughout.
+  it('a zero-access graph ranks byte-identically to the pre-activation structural scores', async () => {
+    const t = await createTestSurreal(); drops.push(t.drop)
+    const m = await SurrealMemory.open(t)
+    await m.applyEvent(written(1, note({ id: 'za', links: [{ id: 'zb', kind: 'supersedes' }, { id: 'zc', kind: 'relates_to' }] })))
+    await m.applyEvent(written(2, note({ id: 'zb' })))
+    await m.applyEvent(written(3, note({ id: 'zc' })))
+    const nb = await m.neighbors('za', { depth: 2 })
+    // DEFAULT_LINK_WEIGHTS: supersedes 1.0, relates_to 0.5 — decay^0 at depth 1, confidence 1
+    expect(nb.map(n => ({ id: n.id, score: n.score, activation: n.activation }))).toEqual([
+      { id: 'zb', score: 1, activation: 0 },
+      { id: 'zc', score: 0.5, activation: 0 },
+    ])
+    await m.close()
+  })
 
   it('memory_accessed merges hits/lastAccessedAt from the event ts, leaving authored fields intact', async () => {
     const t = await createTestSurreal(); drops.push(t.drop)
