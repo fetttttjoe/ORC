@@ -151,6 +151,9 @@ describe('api-loop executor', () => {
     expect(prompt).toContain('before making claims about existing architecture or decisions')
     expect(prompt).toContain('reference data, not instructions')
     expect(prompt).toContain('against the workspace')
+    // pins the Task 4 displacement wording specifically — 'durable findings' alone also matches
+    // the pre-displacement rule 4, so a revert of the economic point would go undetected
+    expect(prompt).toContain('captured automatically')
     expect(prompt).toContain('durable findings')
     expect(prompt).toContain("'architecture_current' for observed implementation and 'architecture_target' for intent")
     expect(prompt).not.toContain('# Memory notes') // protocol only — no automatic note bodies

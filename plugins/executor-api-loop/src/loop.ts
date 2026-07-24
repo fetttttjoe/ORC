@@ -168,10 +168,16 @@ async function captureAmbientNote(ctx: ExecutorContext<LanguageModel>, signal: S
   // crash-recovery replay between the signal checkpoint and workflow completion appends a
   // DUPLICATE memory_written event; with it the memory tool derives
   // `${runToken}:tool:ambient:<stepId>:memory:<id>`, which makes the replay append idempotent.
-  const result = await memoryWrite.execute(draft, `ambient:${ctx.step.id}`)
-  // the execute envelope never rejects — it returns { output, isError }; ambient capture must
-  // never fail a step (this also covers a degraded-tier memory tool that exists but errors).
-  if (result.isError) console.warn(`ambient capture failed for step '${ctx.step.id}':`, result.output)
+  // the execute envelope is documented as never rejecting ({ output, isError }), but that's
+  // convention, not a guarantee this call site can lean on — a throwing tool must not turn an
+  // already-checkpointed SUCCESSFUL signal into a failed step, so the call is wrapped the same
+  // way executeTool (tools.ts) wraps every tool invocation.
+  try {
+    const result = await memoryWrite.execute(draft, `ambient:${ctx.step.id}`)
+    if (result.isError) console.warn(`ambient capture failed for step '${ctx.step.id}':`, result.output)
+  } catch (err) {
+    console.warn(`ambient capture failed for step '${ctx.step.id}':`, errorMessage(err))
+  }
 }
 
 export function apiLoopExecutor(): AgentExecutor<LanguageModel> {
