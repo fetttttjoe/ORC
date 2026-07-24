@@ -9,6 +9,7 @@ export const TOOL_NAME = {
   signal: 'signal',
   fs_read: 'fs_read',
   fs_write: 'fs_write',
+  fs_edit: 'fs_edit',
   fs_list: 'fs_list',
   join_splits: 'join_splits',
   ask_human: 'ask_human',
@@ -25,6 +26,7 @@ export const JoinSplitsInput = z.object({ splitIds: z.array(z.string()).optional
 export const AskHumanInput = z.object({ question: z.string().min(1), topic: z.string().min(1).optional() })
 const ReadInput = z.object({ path: z.string().min(1) })
 const WriteInput = z.object({ path: z.string().min(1), content: z.string() })
+const EditInput = z.object({ path: z.string().min(1), old_string: z.string().min(1), new_string: z.string() })
 const ListInput = z.object({ path: z.string().default('.') })
 
 // Declared WITHOUT execute — the SDK returns tool calls; execution is ours, inside a durable step (spec §6.2).
@@ -41,8 +43,12 @@ export function toolSet(extra: ResolvedTool[] = []) {
       inputSchema: ReadInput,
     }),
     [TOOL_NAME.fs_write]: tool({
-      description: 'Write a UTF-8 text file inside the step workspace (parent directories are created).',
+      description: 'Write a UTF-8 text file inside the step workspace (parent directories are created). Use fs_edit to change part of an existing file — rewriting a whole file to change a few lines corrupts the rest.',
       inputSchema: WriteInput,
+    }),
+    [TOOL_NAME.fs_edit]: tool({
+      description: 'Replace an exact string in an existing file inside the step workspace. `old_string` must appear EXACTLY ONCE — include enough surrounding context to make it unique. Prefer this over fs_write for any change to a file that already exists: it touches only what you name, so the rest of the file cannot be altered by accident.',
+      inputSchema: EditInput,
     }),
     [TOOL_NAME.fs_list]: tool({
       description: 'List directory entries inside the step workspace.',
@@ -90,6 +96,33 @@ export async function executeTool(
   toolCallId?: string,
   guard: WriteGuard = {},
 ): Promise<{ output: unknown; isError: boolean }> {
+  // Every write path — whole-file or surgical — passes the same two gates, in the same order, so a
+  // new write tool cannot accidentally ship without the fence or the claim registry.
+  // Returns an error envelope when the write is refused, or null when it may proceed.
+  const claimWrite = (p: string): { output: unknown; isError: boolean } | null => {
+    const abs = resolveInWorkspace(workspaceDir, p)
+    assertInZone(workspaceDir, abs, guard.zone ?? []) // named fence error → the model can correct course
+    if (!guard.writer) return null
+    const key = `${workspaceDir}\u0000${abs}`
+    const owner = writeClaims.get(key)
+    if (owner !== undefined && owner !== guard.writer)
+      return { output: { error: `concurrent write refused: '${p}' is being written by a still-running sibling step — write elsewhere or order the steps with dependsOn` }, isError: true }
+    writeClaims.set(key, guard.writer)
+    return null
+  }
+  // atomic replace: same-directory temp + rename — a reader or a crash never sees a torn file
+  const writeFileAtomic = (abs: string, content: string): void => {
+    mkdirSync(path.dirname(abs), { recursive: true })
+    const tmp = `${abs}.${process.pid}.${Math.random().toString(36).slice(2, 10)}.tmp`
+    try {
+      writeFileSync(tmp, content)
+      renameSync(tmp, abs)
+    } catch (err) {
+      try { unlinkSync(tmp) } catch { /* best effort */ }
+      throw err
+    }
+  }
+
   try {
     switch (name) {
       case TOOL_NAME.fs_read: {
@@ -105,26 +138,32 @@ export async function executeTool(
       }
       case TOOL_NAME.fs_write: {
         const { path: p, content } = WriteInput.parse(input)
-        const abs = resolveInWorkspace(workspaceDir, p)
-        assertInZone(workspaceDir, abs, guard.zone ?? []) // named fence error → the model can correct course
-        if (guard.writer) {
-          const key = `${workspaceDir}\u0000${abs}`
-          const owner = writeClaims.get(key)
-          if (owner !== undefined && owner !== guard.writer)
-            return { output: { error: `concurrent write refused: '${p}' is being written by a still-running sibling step — write elsewhere or order the steps with dependsOn` }, isError: true }
-          writeClaims.set(key, guard.writer)
-        }
-        mkdirSync(path.dirname(abs), { recursive: true })
-        // atomic replace: same-directory temp + rename — a reader or a crash never sees a torn file
-        const tmp = `${abs}.${process.pid}.${Math.random().toString(36).slice(2, 10)}.tmp`
-        try {
-          writeFileSync(tmp, content)
-          renameSync(tmp, abs)
-        } catch (err) {
-          try { unlinkSync(tmp) } catch { /* best effort */ }
-          throw err
-        }
+        const claim = claimWrite(p)
+        if (claim) return claim
+        writeFileAtomic(resolveInWorkspace(workspaceDir, p), content)
         return { output: { written: p }, isError: false }
+      }
+      case TOOL_NAME.fs_edit: {
+        const { path: p, old_string: oldString, new_string: newString } = EditInput.parse(input)
+        const claim = claimWrite(p)
+        if (claim) return claim
+        const abs = resolveInWorkspace(workspaceDir, p)
+        let current: string
+        try {
+          current = readFileSync(abs, 'utf8')
+        } catch {
+          return { output: { error: `'${p}' does not exist — use fs_write to create it` }, isError: true }
+        }
+        // exactly once, or refuse: zero means the model is editing something it did not read, and
+        // more than one means it cannot know which site it changed. Both are silent corruption if
+        // guessed at, and both are cheap for the model to fix by widening the context it names.
+        const occurrences = current.split(oldString).length - 1
+        if (occurrences === 0)
+          return { output: { error: `old_string not found in '${p}' — fs_read it and copy the exact text, whitespace included` }, isError: true }
+        if (occurrences > 1)
+          return { output: { error: `old_string appears ${occurrences} times in '${p}' — include surrounding lines until it is unique` }, isError: true }
+        writeFileAtomic(abs, current.replace(oldString, newString))
+        return { output: { edited: p }, isError: false }
       }
       case TOOL_NAME.fs_list: {
         const { path: p } = ListInput.parse(input)

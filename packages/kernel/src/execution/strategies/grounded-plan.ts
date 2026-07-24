@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { deriveNoteProvenance, EVENT_KIND, LINK_KIND, MemoryDeletedPayload, MemoryNote, MemoryWrittenPayload, NOTE_TIER, VERIFY_STEP_ID, planScope, type ChildPlanDraft, type EventRecord, type PlanNote } from '@orc/contracts'
+import { deriveNoteProvenance, EVENT_KIND, LINK_KIND, MemoryDeletedPayload, MemoryNote, MemoryWrittenPayload, NOTE_TIER, PAYLOAD_SCHEMAS, STRATEGY, VERIFY_STEP_ID, planScope, type ChildPlanDraft, type EventRecord, type PlanNote } from '@orc/contracts'
 
 // planScope moved to contracts (one format, one place); re-exported so kernel callers keep working
 export { planScope }
@@ -7,6 +7,39 @@ export { planScope }
 // The grounded plan-authoring step's role. finalize_plan is only meaningful for THIS step, so both
 // createGroundedTask (which stamps it) and finalize_plan's defensive gate reference this one source.
 export const PLAN_STEP_ROLE = 'auditor'
+
+// Its step id, stamped by createGroundedTask — one source, so the step that must produce a plan and
+// the check that it did cannot drift apart.
+export const PLAN_STEP_ID = 'plan'
+
+// A grounded plan step's whole job is to PRODUCE a plan: a decomposition the human approved, which
+// finalize_plan freezes into a split. Signalling success without one means the agent did the work
+// itself, or merely narrated it — and the run then reports success while the entire point of the
+// strategy, splitting into executable steps, silently did not happen. Observed live on a real run:
+// a plan step wrote two unlinked notes, never called finalize_plan, and passed.
+//
+// Returns the reason to REFUSE the success, or null when this is not a grounded plan step or it did
+// produce its split. Pure: the caller supplies the task's events.
+export function groundedPlanOmission(events: EventRecord[], stepId: string, runToken: string): string | null {
+  if (stepId !== PLAN_STEP_ID) return null
+  const isGrounded = events.some(e => {
+    if (e.kind !== EVENT_KIND.plan_proposed) return false
+    const p = PAYLOAD_SCHEMAS.plan_proposed.safeParse(e.payload)
+    return p.success && p.data.plan.strategyRef === STRATEGY.groundedPlan
+  })
+  if (!isGrounded) return null
+  const split = events.some(e => {
+    if (e.kind !== EVENT_KIND.split_proposed) return false
+    const p = PAYLOAD_SCHEMAS.split_proposed.safeParse(e.payload)
+    return p.success && p.data.runToken === runToken
+  })
+  return split
+    ? null
+    : 'the plan step signalled success without calling finalize_plan — author the plan-note graph '
+      + `in scope '${planScope(events[0]?.taskId ?? '')}' (root note 'masterplan', each subplan linked `
+      + 'decomposes_into), get the human to approve it, then call finalize_plan. Doing the work '
+      + 'yourself instead of decomposing it defeats the grounded-plan strategy.'
+}
 
 // The grounded analyze step's role (agentAnalyzer.analysisStep stamps it; runtime maps it → the
 // scout memory tier). report_coverage is only meaningful for THIS step, so its gate reads this one

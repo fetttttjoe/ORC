@@ -3,7 +3,7 @@ import { EVENT_KIND, planScope, slugId, type TaskNode } from '@orc/contracts'
 import { eventFixture } from '@orc/contracts/fixtures'
 import { createLiveMemory } from './test-helpers'
 import { consolidateTask } from './consolidate'
-import { consolidateOnCompletion } from './lifecycle'
+import { consolidateOnCompletion, createMemoryLifecycle } from './lifecycle'
 
 const drops: (() => Promise<void>)[] = []
 afterAll(async () => { for (const d of drops) await d() })
@@ -23,6 +23,29 @@ async function harness(taskId: string, title: string) {
   await live.log.append({ taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.task_created, payload: { task: taskNode(taskId, title) } })
   return live
 }
+
+// A completion nobody was listening for used to be lost for good: the subscription starts at the
+// latest seq, and nothing supervises runs, so a task that finished while the CLI process was on its
+// way out simply never got consolidated. Observed live on a real grounded run.
+it('consolidates a task that finished while no lifecycle was attached', async () => {
+  const live = await createLiveMemory()
+  drops.push(live.close)
+  await live.log.append({ taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.task_created, payload: { task: taskNode('t9', 'Detached task') } })
+  await live.store.write({ id: 'sa', scope: planScope('t9'), title: 'Step A', summary: 'did A' }, { source: 'cli' })
+  await live.store.write({ id: 'sb', scope: planScope('t9'), title: 'Step B', summary: 'did B' }, { source: 'cli' })
+  // the completion lands with NOBODY subscribed — exactly the case that used to vanish
+  await live.log.append({ taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.task_status_changed, payload: { taskId: 't9', from: 'running', to: 'done' } })
+  const outcomeId = slugId('outcome Detached task')
+  await live.projector.catchUp()
+  expect(await live.store.get(outcomeId)).toBeNull()
+
+  // starting a lifecycle later must find it
+  const lifecycle = createMemoryLifecycle({ log: live.log, store: live.store, catchUp: () => live.projector.catchUp() })
+  await lifecycle.start()
+  await lifecycle.close()
+  await live.projector.catchUp()
+  expect(await live.store.get(outcomeId)).not.toBeNull()
+})
 
 describe('consolidateTask (integration)', () => {
   it('substantive task: non-force converges idempotently, force always rewrites', async () => {

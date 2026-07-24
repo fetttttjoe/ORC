@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test'
-import { mkdtempSync, readdirSync, symlinkSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { z } from 'zod'
@@ -112,6 +112,54 @@ describe('fs tools', () => {
   it('unknown tool name is an error result', async () => {
     const r = await executeTool('rm_rf', {}, ws())
     expect(r.isError).toBe(true)
+  })
+})
+
+// The corruption this tool exists to prevent, observed live: an agent asked to add ~11 lines to a
+// 347-line file rewrote the whole file through fs_write and baked JSON escapes into 85 lines of it.
+// A surgical edit cannot touch what it does not name.
+describe('fs_edit', () => {
+  it('replaces only the named text and leaves the rest of the file byte-identical', async () => {
+    const dir = ws()
+    const original = 'line one\nsubgraph CLI ["packages/cli"]\nline three\n'
+    writeFileSync(path.join(dir, 'doc.md'), original)
+    const r = await executeTool(TOOL_NAME.fs_edit, { path: 'doc.md', old_string: 'line three', new_string: 'line three\nline four' }, dir)
+    expect(r.isError).toBe(false)
+    expect(readFileSync(path.join(dir, 'doc.md'), 'utf8')).toBe('line one\nsubgraph CLI ["packages/cli"]\nline three\nline four\n')
+  })
+
+  it('refuses an ambiguous match instead of guessing which site to change', async () => {
+    const dir = ws()
+    writeFileSync(path.join(dir, 'doc.md'), 'x\nsame\ny\nsame\n')
+    const r = await executeTool(TOOL_NAME.fs_edit, { path: 'doc.md', old_string: 'same', new_string: 'changed' }, dir)
+    expect(r.isError).toBe(true)
+    expect(JSON.stringify(r.output)).toContain('appears 2 times')
+    expect(readFileSync(path.join(dir, 'doc.md'), 'utf8')).toBe('x\nsame\ny\nsame\n') // untouched
+  })
+
+  it('refuses a match it cannot find, and names the correction', async () => {
+    const dir = ws()
+    writeFileSync(path.join(dir, 'doc.md'), 'hello\n')
+    const r = await executeTool(TOOL_NAME.fs_edit, { path: 'doc.md', old_string: 'goodbye', new_string: 'x' }, dir)
+    expect(r.isError).toBe(true)
+    expect(JSON.stringify(r.output)).toContain('fs_read')
+  })
+
+  it('refuses a file that does not exist and points at fs_write', async () => {
+    const r = await executeTool(TOOL_NAME.fs_edit, { path: 'missing.md', old_string: 'a', new_string: 'b' }, ws())
+    expect(r.isError).toBe(true)
+    expect(JSON.stringify(r.output)).toContain('fs_write')
+  })
+
+  // the zone fence and the sibling write-claim are write-path gates, not fs_write gates
+  it('honours the zone write-fence', async () => {
+    const dir = ws()
+    mkdirSync(path.join(dir, 'src'), { recursive: true })
+    writeFileSync(path.join(dir, 'src', 'x.ts'), 'a')
+    const denied = await executeTool(TOOL_NAME.fs_edit, { path: 'src/x.ts', old_string: 'a', new_string: 'b' }, dir, [], undefined, { zone: ['docs/**'] })
+    expect(denied.isError).toBe(true)
+    expect(JSON.stringify(denied.output)).toContain('zone fence')
+    expect(readFileSync(path.join(dir, 'src', 'x.ts'), 'utf8')).toBe('a') // fence refused before any write
   })
 })
 

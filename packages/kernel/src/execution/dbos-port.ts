@@ -9,6 +9,7 @@ import {
   type ResolvedTool, type RunHandle, type RunOutcome, type Signal, type SplitResult, type ToolSource,
 } from '@orc/contracts'
 import { type Storage, type EventLogOps } from '../storage'
+import { groundedPlanOmission } from './strategies/grounded-plan'
 import { verifyArtifacts } from './artifacts'
 import { fold, completedStepIds, nextAttempts, subtreeTaskIds, remainingBudget, inheritedCwd, type State } from '../projections'
 import { KERNEL_ERROR_CODE, KernelError } from '../errors'
@@ -337,9 +338,14 @@ export async function createDbosPort(opts: {
         // skip re-verification: the workspace may have changed since, and re-hashing would
         // conflict with the committed receipts and flip a durable success into failed.
         await checkpoint('finish', async () => {
-          const committed = (await log.byTask(args.taskId))
-            .some(e => e.kind === EVENT_KIND.step_completed && e.runToken === runToken)
+          const events = await log.byTask(args.taskId)
+          const committed = events.some(e => e.kind === EVENT_KIND.step_completed && e.runToken === runToken)
           if (committed) return null
+          // A step's declared outputs are not the only thing a success can be missing: a strategy
+          // step that skipped the artifact the strategy exists to produce is just as false a
+          // success, and just as invisible downstream. Same boundary, same refusal.
+          const omission = groundedPlanOmission(events, args.stepId, runToken)
+          if (omission) throw classifiedError(FAILURE_CLASS.validation_error, omission)
           try {
             return verifyArtifacts(workspaceDir, success.outputs ?? [])
           } catch (err) {

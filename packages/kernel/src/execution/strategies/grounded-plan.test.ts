@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'bun:test'
 import { EVENT_KIND, LINK_KIND, type EventRecord, type MemoryLink, type PlanNote } from '@orc/contracts'
-import { planNoteFixture } from '@orc/contracts/fixtures'
-import { AUDITOR_CONTRACT, foldPlanNotes, instantiateFrozenPlan, planScope } from './grounded-plan'
+import { planNoteFixture, stepFixture } from '@orc/contracts/fixtures'
+import { AUDITOR_CONTRACT, foldPlanNotes, groundedPlanOmission, instantiateFrozenPlan, planScope } from './grounded-plan'
 import * as groundedPlan from './grounded-plan'
 
 const note = (over: Partial<PlanNote> & { id: string }): PlanNote =>
@@ -180,5 +180,44 @@ describe('foldPlanNotes (log-fold, projection-independent)', () => {
     }
     const notes = foldPlanNotes([poison, written({ id: 'masterplan', scope, tier: 'plan', title: 'M' })], scope)
     expect(notes.map(n => n.id)).toEqual(['masterplan'])
+  })
+})
+
+// The grounded strategy exists to DECOMPOSE. A plan step that signals success without freezing a
+// split did not do its job — and the run reported success anyway, with an empty plan graph. This
+// happened on a real run: the agent verified the analyze step's work itself and passed.
+describe('groundedPlanOmission', () => {
+  const runToken = 'step:t1:plan:a1'
+  const grounded = (over: Partial<EventRecord> = {}): EventRecord => ({
+    seq: 1, projectId: 'p', idempotencyKey: null, taskId: 't1', stepId: null, runToken: null,
+    kind: EVENT_KIND.plan_proposed, usage: null, ts: '2026-07-24T00:00:00.000Z',
+    payload: { plan: { taskId: 't1', version: 1, strategyRef: 'grounded-plan', costEstimateUSD: null, steps: [stepFixture({ id: 'plan' })] } },
+    ...over,
+  })
+  const split = (token: string): EventRecord => grounded({
+    seq: 2, kind: EVENT_KIND.split_proposed,
+    payload: { splitId: 's1', taskId: 't1', stepId: 'plan', runToken: token, childTaskId: 'c1' },
+  })
+
+  it('refuses a plan step that signalled success without freezing a split', () => {
+    const reason = groundedPlanOmission([grounded()], 'plan', runToken)
+    expect(reason).toContain('finalize_plan')
+    expect(reason).toContain('masterplan')
+  })
+
+  it('accepts a plan step that proposed its split', () => {
+    expect(groundedPlanOmission([grounded(), split(runToken)], 'plan', runToken)).toBeNull()
+  })
+
+  // a split from an EARLIER attempt is not this attempt's work — the check is per runToken
+  it('does not accept another attempt\'s split', () => {
+    expect(groundedPlanOmission([grounded(), split('step:t1:plan:a0')], 'plan', runToken)).toContain('finalize_plan')
+  })
+
+  it('leaves every other step alone — only the grounded plan step owes a plan', () => {
+    expect(groundedPlanOmission([grounded()], 'verify', runToken)).toBeNull()
+    // same step id, but the task is not a grounded-plan task
+    const authored = grounded({ payload: { plan: { taskId: 't1', version: 1, strategyRef: 'single-step', costEstimateUSD: null, steps: [stepFixture({ id: 'plan' })] } } })
+    expect(groundedPlanOmission([authored], 'plan', runToken)).toBeNull()
   })
 })

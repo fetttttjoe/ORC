@@ -14,7 +14,7 @@ export { memoryTools, unavailableMemoryTools, MEMORY_READ_TOOLS, MEMORY_ROLE, me
 export { renderMemoryIndex, rebuildVaultMemory } from './memory-index'
 export { orphanedNotes, staleNotes, DEFAULT_SWEEP_DAYS, type SweptNote, type StaleNote } from './sweep'
 export { consolidatedNote, consolidateTask, isSubstantive, CONSOLIDATED_TAG, type ConsolidationInput, type ConsolidationDeps, type ConsolidationDistiller, type DistilledText, type StepOutcome } from './consolidate'
-export { createMemoryLifecycle, taskCompletedId, type MemoryLifecycle } from './lifecycle'
+export { createMemoryLifecycle, consolidateBacklog, taskCompletedId, type MemoryLifecycle } from './lifecycle'
 export { renderNoteFile, noteRelPath } from './note-md'
 
 // the actual revision of the code the runtime is looking at — null outside Git

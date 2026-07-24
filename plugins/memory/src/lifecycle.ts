@@ -37,6 +37,38 @@ export async function consolidateOnCompletion(deps: LifecycleDeps, e: EventRecor
   }
 }
 
+// Every task the log says is finished, newest status wins — a pure fold, so "which tasks are done"
+// never depends on a projection being caught up.
+function completedTaskIds(events: EventRecord[]): string[] {
+  const done = new Set<string>()
+  for (const e of events) {
+    const p = PAYLOAD_SCHEMAS.task_status_changed.safeParse(e.payload)
+    if (e.kind !== EVENT_KIND.task_status_changed || !p.success) continue
+    if (p.data.to === TASK_STATUS.done) done.add(p.data.taskId)
+    else done.delete(p.data.taskId) // re-opened (retry): not finished after all
+  }
+  return [...done]
+}
+
+// Consolidate finished tasks that nobody consolidated. A subscription only sees completions that
+// land while it is attached, and there is no supervisor: a run driven by a CLI process that exits
+// as the task finishes had its completion observed by nobody, and the consolidation was lost with
+// no trace. Catching up on start makes the outcome a function of the log rather than of who
+// happened to be listening. Safe to repeat: consolidateTask keys its write by task, so a task that
+// already has its note appends nothing.
+// ponytail: rescans every finished task at startup — fine for a project's worth of tasks; give the
+// lifecycle a persisted cursor if a long history ever makes this slow.
+export async function consolidateBacklog(deps: LifecycleDeps): Promise<void> {
+  await deps.catchUp?.()
+  for (const taskId of completedTaskIds(await deps.log.after(0, [EVENT_KIND.task_status_changed]))) {
+    try {
+      await consolidateTask(deps, taskId)
+    } catch (err) {
+      console.warn(`memory lifecycle: backlog consolidate '${taskId}' failed:`, errorMessage(err))
+    }
+  }
+}
+
 export function createMemoryLifecycle(deps: LifecycleDeps): MemoryLifecycle {
   let unsub: (() => Promise<void>) | null = null
   let inflight: Promise<void> = Promise.resolve()
@@ -48,9 +80,14 @@ export function createMemoryLifecycle(deps: LifecycleDeps): MemoryLifecycle {
     await inflight
   }
   return {
-    // fromSeq defaults to the latest seq → react only to LIVE completions, never re-consolidate the
-    // backlog on every startup (the manual `orc memory consolidate` covers historical tasks).
-    start: async () => { unsub = await deps.log.subscribe({}, handle) },
+    // Subscribe FIRST, then catch up: a completion landing between the two is seen by the
+    // subscription, and one landing before it is caught by the backlog pass — the pair has no gap.
+    // fromSeq defaults to the latest seq, so the subscription itself only carries live completions.
+    start: async () => {
+      unsub = await deps.log.subscribe({}, handle)
+      inflight = consolidateBacklog(deps)
+      await inflight
+    },
     close: async () => { if (unsub) { await unsub(); unsub = null } await inflight },
   }
 }
