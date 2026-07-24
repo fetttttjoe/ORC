@@ -520,6 +520,39 @@ describe('iteration-budget awareness', () => {
   })
 })
 
+describe('memory lint nudge', () => {
+  it('a memory_write lint warning nudges the very next iteration only, not the one after', async () => {
+    const captured: EventDraft[] = []
+    const memoryWrite: ResolvedTool = {
+      ref: 'memory/write',
+      name: 'memory_write',
+      description: 'fake memory_write',
+      inputSchema: { type: 'object', properties: {} },
+      execute: async () => ({ output: { id: 'x', warnings: ['body is 1840 chars — …'] }, isError: false }),
+    }
+    const model = scriptModel([
+      { toolCalls: [{ toolCallId: 'c1', toolName: 'memory_write', input: { id: 'x', title: 'X' } }] },
+      { text: 'thinking' }, // no tool calls -> generic 'Continue' nudge, no memory lint to report
+      { toolCalls: [{ toolCallId: 'c2', toolName: 'signal', input: { outcome: 'success', summary: 'done' } }] },
+    ])
+    // maxIterations 10: outside the endgame-budget window — the fixture default of 3 would mask gating bugs
+    const events = await drain(apiLoopExecutor().startTurn(ctx(model, captured, {
+      extraTools: [memoryWrite],
+      step: stepFixture({ instructions: 'do the thing', maxIterations: 10 }),
+    })))
+    expect(events.at(-1)?.type).toBe('done')
+
+    const agentCallDrafts = captured.filter(d => d.kind === EVENT_KIND.agent_call)
+    expect(agentCallDrafts).toHaveLength(3)
+    const secondRequest = JSON.stringify(AgentCallRequest.parse(agentCallDrafts[1]!.payload).request.messages)
+    expect(secondRequest).toContain(`memory lint on 'x'`)
+    expect(secondRequest).toContain('not optional')
+    // fires once: the third iteration's delta must not repeat the nudge
+    const thirdRequest = JSON.stringify(AgentCallRequest.parse(agentCallDrafts[2]!.payload).request.messages)
+    expect(thirdRequest).not.toContain('memory lint')
+  })
+})
+
 describe('normalizeUsage cache capture', () => {
   it('maps inputTokenDetails cache fields instead of discarding them', async () => {
     const { normalizeUsage } = await import('./loop')
