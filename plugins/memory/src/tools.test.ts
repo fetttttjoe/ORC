@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'bun:test'
 import { z } from 'zod'
 import { LINK_KINDS, MEMORY_ACCESS, MEMORY_LIMITS, MemoryNoteInput, NOTE_TIER, MemoryWriteResult, type AccessVia, type MemoryAccessMode, type MemoryNote, type MemoryNoteDraft, type MemoryStore, type NoteSummary } from '@orc/contracts'
-import { MEMORY_READ_TOOLS, memoryTools, memoryRoleFor } from './tools'
+import { episodicNoteFixture, semanticNoteFixture } from '@orc/contracts/fixtures'
+import { MEMORY_READ_TOOLS, memoryTools, memoryRoleFor, noteLint } from './tools'
 
 // the store gateway parses a draft into whichever tier it belongs to, then stamps provenance —
 // this mirrors that, so a fixture cannot invent a note the real write path could not produce
@@ -61,6 +62,22 @@ describe('memory tools', () => {
     const z = await write.execute({ id: 'sub-a', title: 'Sub A', zone: ['docs/**'] })
     expect(z.isError).toBe(false)
     expect(written[1]?.input).toMatchObject({ zone: ['docs/**'] })
+  })
+
+  // Each of these was measured in the live graph before the lint existed: 2 notes with an empty
+  // summary, 2 project notes nothing linked to, and 3 carrying backslash-escaped text.
+  it('warns on the three shapes that made real notes unreachable or wrong', () => {
+    const clean = semanticNoteFixture({ summary: 'what searches must find', links: [{ id: 'area-memory', kind: 'refines' }] })
+    expect(noteLint(clean)).toEqual([])
+
+    expect(noteLint(semanticNoteFixture({ summary: '  ', links: [{ id: 'a', kind: 'refines' }] })).join(' '))
+      .toContain('retrieval surface')
+    expect(noteLint(semanticNoteFixture({ summary: 's', links: [] })).join(' '))
+      .toContain('no links')
+    expect(noteLint(semanticNoteFixture({ summary: 'quoting \\"this\\" thing', links: [{ id: 'a', kind: 'refines' }] })).join(' '))
+      .toContain('escaped')
+    // an episodic step note is edgeless BY DESIGN — the link lint must not nag the ambient writer
+    expect(noteLint(episodicNoteFixture({ summary: 'did the thing' }))).toEqual([])
   })
 
   it('memory_write passes omissions through raw (no injected defaults) and surfaces lint warnings', async () => {

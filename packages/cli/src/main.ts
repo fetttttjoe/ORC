@@ -2,7 +2,7 @@ import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync } from '
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { Command, InvalidArgumentError } from 'commander'
-import { EDGE_DIRECTION, EVENT_KIND, LINK_KINDS, MEMORY_ACCESS, NOTE_TIERS, NoteTier, PlanDraft, RUN_OUTCOME, STRATEGY, TASK_STATUS, LinkKind, slugId, type Analyzer, type RunOutcome, type EventRecord, type ExecutionPort, type Plan, type RunHandle } from '@orc/contracts'
+import { EDGE_DIRECTION, EVENT_KIND, LINK_KINDS, MEMORY_ACCESS, NOTE_TIERS, NoteTier, parseLinkSpec, PlanDraft, RUN_OUTCOME, STRATEGY, TASK_STATUS, LinkKind, slugId, type Analyzer, type RunOutcome, type EventRecord, type MemoryLink, type ExecutionPort, type Plan, type RunHandle } from '@orc/contracts'
 import { openStorage, Kernel, fold, grantExtensionTrust, grantMcpTrust, initializeProject, isExtensionTrusted, isMcpTrusted, loadConfig, loadTrust, migrateDatabase, requireProject, taskUsage, type EventLog, type OrcConfig, type PluginHost, type ProjectConfig, type Storage } from '@orc/kernel'
 import { createVaultProjector, parsePlanFile } from '@orc/vault-projector'
 import { consolidateTask, probeMemory, staleNotes, DEFAULT_SWEEP_DAYS } from '@orc/memory'
@@ -634,12 +634,16 @@ export function buildProgram(
     .option('--body <b>', 'note body (markdown)')
     .option('--tags <tags...>', 'tags')
     .option('--categories <categories...>', 'categories')
-    .action(async (o: { id: string; title: string; summary?: string; body?: string; tags?: string[]; categories?: string[] }) => {
+    // Without this the CLI could create knowledge but never wire it in, so every human-authored
+    // note landed isolated — reachable by search, invisible to traversal. Same shorthand the web
+    // note editor uses, so a note wired from either surface is the same edge.
+    .option('--links <spec>', "typed edges, comma-separated: 'refines:area-memory, other-note'", parseLinkSpec)
+    .action(async (o: { id: string; title: string; summary?: string; body?: string; tags?: string[]; categories?: string[]; links?: MemoryLink[] }) => {
       const { config, log } = needPlugin()
       const memory = await openMemory({ log, config })
       await memory.store.write({
         id: o.id, title: o.title, summary: o.summary, body: o.body,
-        tags: o.tags, categories: o.categories,
+        tags: o.tags, categories: o.categories, links: o.links,
       }, { source: 'cli' })
       await memory.projector.catchUp() // one-shot: no live subscription in a CLI process, so project the append now
       await memory.close()

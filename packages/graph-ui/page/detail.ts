@@ -7,7 +7,7 @@ import { artifactNodeId, noteNodeId, stepNodeId } from '@orc/ui-core/graph'
 import type { NoteAuthoringDraft, NoteRef } from '@orc/contracts'
 import { el } from './ui/el'
 import { Badge, Btn, Card, Empty, KV, Link, openDialog, Pre, statusTone } from './ui/components'
-import { formatLinkSpec, parseLinkSpec } from './link-spec'
+import { formatLinkSpec, parseLinkSpec } from '@orc/contracts'
 
 interface TaskDetail {
   task: { id: string; title: string; status: string; spec: string; createdAt: string; parentId: string | null }

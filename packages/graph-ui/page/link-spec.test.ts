@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test'
-import { formatLinkSpec, parseLinkSpec } from './link-spec'
+import { formatLinkSpec, parseLinkSpec } from '@orc/contracts'
 
 describe('parseLinkSpec', () => {
   it('parses bare ids and kind:id entries, defaulting kind by omission', () => {

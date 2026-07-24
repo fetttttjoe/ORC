@@ -162,6 +162,21 @@ describe('deleteProject', () => {
     await check.close()
     await close()
   })
+
+  // Deleting a chat has to take its knowledge with it — the read model lives in a project-derived
+  // SurrealDB database that the home project's memory instance cannot reach. It used to be left
+  // behind silently as "inert garbage", which it was not: those notes stayed live in `orc memory
+  // ls`, in search and in agent recall, with no events behind them, until a later rebuild dropped
+  // them. This setup points at an unreachable Surreal, so it pins the half that must never go
+  // quiet again — when the wipe cannot happen, the caller is told.
+  it('reports when the deleted chat\'s knowledge could not be wiped', async () => {
+    const { kernel, actions, close } = await setup()
+    await kernel.createTask({ title: 'home task', spec: '' })
+    const r = await actions.deleteProject(TEST_PROJECT_ID)
+    expect(r.warnings.some(w => w.includes('memory read model not cleared'))).toBe(true)
+    expect(r.warnings.some(w => w.includes('vanish on the next rebuild'))).toBe(true)
+    await close()
+  })
 })
 
 describe('newProject', () => {

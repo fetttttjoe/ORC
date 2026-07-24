@@ -1,7 +1,7 @@
 import { STEP_ROLE, errorMessage, EVENT_KIND, ISOLATION_TIER, STRATEGY, TASK_STATUS, costUSDFor, parseModelRef, type ExecutionPort, type PlanDraft } from '@orc/contracts'
 import { deriveSystemUrl, initializeProject, loadConfig, openStorage, resetSystemDatabase, subtreeTaskIds, type EventLog, type Kernel, type ProjectConfig, type Storage } from '@orc/kernel'
 import { seedRegistries } from './runtime'
-import { createMemory, orphanedNotes } from '@orc/memory'
+import { createMemory, openKnowledge, orphanedNotes } from '@orc/memory'
 import { openMemory } from './memory-open'
 import { PROJECT_DIR_NOTE_ID, PROJECT_NAME_NOTE_ID, type OrcActions } from '@orc/ui-core'
 import { createVaultProjector } from '@orc/vault-projector'
@@ -290,7 +290,7 @@ export function buildOrcActions(deps: {
       const warnings: string[] = []
       // stop-then-wipe, same order as purge; no identity re-seed — deletion IS the point.
       // Deleting the HOME project is allowed too: full wipe, though it stays listed (empty)
-      // while this server runs from it. Surreal read-model garbage is inert — not cleaned.
+      // while this server runs from it.
       try {
         await resetSystemDatabase(deriveSystemUrl(plugin.config.databaseUrl, projectId))
       } catch (err) {
@@ -299,6 +299,18 @@ export function buildOrcActions(deps: {
       const storage = await openStorage(plugin.config.databaseUrl, { projectId })
       try {
         const counts = await storage.purge()
+        // The knowledge goes with the chat. This read model lives in a PROJECT-DERIVED SurrealDB
+        // database, so the home project's memory instance cannot reach it — and leaving it was not
+        // the harmless "inert garbage" this comment used to claim: a deleted project's notes stayed
+        // live in `orc memory ls`, in memory_search, in agent recall and in the graph UI, with no
+        // events behind them, until some later rebuild silently dropped them. Deleting a chat has
+        // to mean the data goes too, which is what anyone clicking delete already assumes.
+        try {
+          const knowledge = await openKnowledge({ ...plugin.config, projectId })
+          try { await knowledge.clear() } finally { await knowledge.close() }
+        } catch (err) {
+          warnings.push(`memory read model not cleared (${errorMessage(err)}) — its notes will vanish on the next rebuild`)
+        }
         return { ...counts, warnings }
       } finally {
         await storage.close()

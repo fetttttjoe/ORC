@@ -296,6 +296,17 @@ is not a read. The counter is measurement, not policy — nothing ranks or expir
 so that a future decay/sweep (`docs/IDEAS.md` entry 1) can be tuned against an observed hot/cold
 split instead of a guessed half-life.
 
+### Memory TTL sweep — retiring expirable notes
+
+`orc memory sweep` retires notes the author marked `expirable` that nobody has written or read for
+N days (a dry run until `--apply`, which commits the `memory_deleted` events — the content stays in
+the log). A candidate is protected by an authored inbound link from a note that itself **survives**
+the sweep, so deleting can never leave a live note's `links[]` pointing at a dead id. Candidates
+that link only to each other protect nobody and go together: mutual links between two cold notes
+would otherwise keep a dead chain alive forever. Traffic is deliberately not consulted for
+protection — three live notes may point at a note nobody has walked, and that topology is what
+makes it worth keeping.
+
 ## Execution flow — one step, durably
 
 ```mermaid

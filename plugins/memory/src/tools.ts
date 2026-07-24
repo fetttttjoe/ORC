@@ -6,8 +6,22 @@ import { applyBudget, fitMemoryNoteToBudget } from './budget'
 // the note in its next iteration — warnings, never rejections: a blocked write mid-run burns
 // more tokens than a mediocre note. Thresholds follow the codebase-analysis skill's skeleton.
 const BODY_SOFT_CAP = 1600
+// Text a writer double-escaped on its way in: a model that emits `\\"` inside a JSON tool argument
+// stores a literal backslash, and the note then reads wrong everywhere it is rendered. Observed on
+// a live run, in 3 of 28 notes. Warned rather than stripped on purpose — silently repairing it
+// would hide a writer that is mis-encoding everything it sends, including the files it writes.
+const OVER_ESCAPED = /\\["`]/
+
 export function noteLint(note: MemoryNote): string[] {
   const w: string[] = []
+  if (note.summary.trim() === '')
+    w.push('summary is empty — it is the retrieval surface, so a note without one is reachable only by an exact id someone already knows')
+  // a claim nothing links to cannot be reached by traversal, only by search: it sits outside the
+  // graph the blast-radius queries walk. Measured: 2 of 24 project notes were isolated this way.
+  if (note.tier === NOTE_TIER.semantic && note.links.length === 0)
+    w.push('no links — wire this into the graph (refines/depends_on/derived_from an existing note) or it is findable only by search')
+  if (OVER_ESCAPED.test(`${note.title}\n${note.summary}\n${note.body}`))
+    w.push('text contains backslash-escaped quotes or backticks — send the raw characters; the tool argument is already JSON, so escaping them again stores the backslash')
   if (note.body.length > BODY_SOFT_CAP)
     w.push(`body is ${note.body.length} chars — the skeleton caps at ~1200: move facts into paths/rules/links fields, keep bullets only`)
   // the categories lint targets the retrieval surface, so it only fires on the tier that has one
