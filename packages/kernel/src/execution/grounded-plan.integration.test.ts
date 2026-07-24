@@ -1,9 +1,10 @@
 import { describe, expect, it } from 'bun:test'
+import { z } from 'zod'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import {
-  EVENT_KIND, ISOLATION_TIER, LINK_KIND, NOTE_KIND, SIGNAL_OUTCOME, TASK_STATUS,
+  EVENT_KIND, ISOLATION_TIER, LINK_KIND, NOTE_KIND, PAYLOAD_SCHEMAS, SIGNAL_OUTCOME, TASK_STATUS,
   type AgentExecutor, type Analyzer, type CoverageReport, type EventDraft, type ExecutorContext,
   type MemoryNoteDraft, type PlanStep, type ResolvedTool,
   type SplitResult, type UnifiedEvent,
@@ -18,6 +19,11 @@ import { finalizePlanTool } from './finalize-plan-tool'
 import { readAnnotationsTool } from './read-annotations-tool'
 import { splitTool } from './split-tool'
 import { planScope } from './strategies/grounded-plan'
+
+// Tool outputs are contract-`unknown`; these name the shapes this suite reads back at the boundary.
+const AnnotationsOutput = z.object({ annotations: z.array(z.object({ targetNote: z.string() })) })
+const ReadNoteOutput = z.object({ note: z.unknown() }) // note kept opaque — it round-trips into a recorded event untouched
+const ReadTitleOutput = z.object({ note: z.object({ title: z.string() }).nullable() })
 
 // The analyzer seam (Task 3): the kernel consumes ANY Analyzer; this test provides one whose
 // analysisStep mirrors the real agent-analyzer's scout step verbatim (id 'analyze', role 'scout',
@@ -131,7 +137,7 @@ function groundedFake(): AgentExecutor<unknown> {
           // only channel, so if read_annotations were dropped the fake throws and this test fails.
           const targets = await ctx.checkpoint(`annotations:${cycle}`, async () => {
             const r = await tool('read_annotations').execute({}, `annot-${cycle}`)
-            return (r.output as { annotations: { targetNote: string }[] }).annotations.map(a => a.targetNote)
+            return AnnotationsOutput.parse(r.output).annotations.map(a => a.targetNote)
           })
           for (const target of new Set(targets)) {
             if (!notes[target]) continue
@@ -152,7 +158,7 @@ function groundedFake(): AgentExecutor<unknown> {
       const found = await ctx.checkpoint('read-subplan', async () => {
         for (let i = 0; i < 20; i++) {
           const r = await tool('memory_read').execute({ id: ctx.step.id, scope })
-          const note = (r.output as { note: { title: string } | null }).note
+          const note = ReadNoteOutput.parse(r.output).note
           if (note) return note
           await Bun.sleep(100)
         }
@@ -234,7 +240,7 @@ describe('grounded-plan e2e: the full consent → analyze → plan-graph → ann
       mutateAfterApprovalTasks.add(t.id)
       const scope = planScope(t.id)
       const feedbackCount = async (topic: string): Promise<number> =>
-        (await kernel.eventsFor(t.id)).filter(e => e.kind === EVENT_KIND.feedback_requested && (e.payload as { topic: string }).topic === topic).length
+        (await kernel.eventsFor(t.id)).filter(e => e.kind === EVENT_KIND.feedback_requested && PAYLOAD_SCHEMAS.feedback_requested.parse(e.payload).topic === topic).length
 
       const handle = await port.startRun(t.id)
 
@@ -253,7 +259,7 @@ describe('grounded-plan e2e: the full consent → analyze → plan-graph → ann
       // plan authored → an untrusted direct finalize is rejected before the first human gate.
       expect(await waitFor(() => feedbackCount('plan:1').then(n => n >= 1))).toBe(true)
       const premature = (await kernel.eventsFor(t.id)).find(e =>
-        e.kind === EVENT_KIND.tool_result && (e.payload as { toolCallId: string }).toolCallId === 'finalize-premature')
+        e.kind === EVENT_KIND.tool_result && PAYLOAD_SCHEMAS.tool_result.parse(e.payload).toolCallId === 'finalize-premature')
       expect(premature?.payload).toMatchObject({ isError: true })
       expect(JSON.stringify(premature?.payload)).toContain('approval')
       expect((await kernel.eventsFor(t.id)).some(e => e.kind === EVENT_KIND.split_proposed)).toBe(false)
@@ -282,7 +288,7 @@ describe('grounded-plan e2e: the full consent → analyze → plan-graph → ann
       expect(await kernel.replyFeedback(t.id, 'approve')).toBe('plan:2')
       expect(await waitFor(() => feedbackCount('plan:3').then(n => n >= 1))).toBe(true)
       const stale = (await kernel.eventsFor(t.id)).find(e =>
-        e.kind === EVENT_KIND.tool_result && (e.payload as { toolCallId: string }).toolCallId === 'finalize-stale')
+        e.kind === EVENT_KIND.tool_result && PAYLOAD_SCHEMAS.tool_result.parse(e.payload).toolCallId === 'finalize-stale')
       expect(stale?.payload).toMatchObject({ isError: true })
       expect(JSON.stringify(stale?.payload)).toContain('changed after approval')
       expect((await kernel.eventsFor(t.id)).some(e => e.kind === EVENT_KIND.split_proposed)).toBe(false)
@@ -296,7 +302,7 @@ describe('grounded-plan e2e: the full consent → analyze → plan-graph → ann
       // finalize_plan split off a child task carrying the frozen db/api plan
       const split = (await kernel.eventsFor(t.id)).find(e => e.kind === EVENT_KIND.split_proposed)
       expect(split).toBeDefined()
-      const childId = (split!.payload as { childTaskId: string }).childTaskId
+      const childId = PAYLOAD_SCHEMAS.split_proposed.parse(split!.payload).childTaskId
 
       // ASSERT (d.2): the child (db → api) runs to completion via the router-started child run
       expect(await waitFor(async () => (await kernel.getTask(childId))?.status === TASK_STATUS.done, 30_000)).toBe(true)
@@ -304,18 +310,20 @@ describe('grounded-plan e2e: the full consent → analyze → plan-graph → ann
       const childEvents = await kernel.eventsFor(childId)
       // ASSERT (b): 'api' started only AFTER 'db' completed — the real ready-set scheduler honoured
       // api depends_on db (instantiateFrozenPlan → dependsOn). Proven by log seq ordering.
-      const dbDone = childEvents.find(e => e.kind === EVENT_KIND.step_completed && (e.payload as { stepId: string }).stepId === 'db')
-      const apiStart = childEvents.find(e => e.kind === EVENT_KIND.step_started && (e.payload as { stepId: string }).stepId === 'api')
+      const dbDone = childEvents.find(e => e.kind === EVENT_KIND.step_completed && PAYLOAD_SCHEMAS.step_completed.parse(e.payload).stepId === 'db')
+      const apiStart = childEvents.find(e => e.kind === EVENT_KIND.step_started && PAYLOAD_SCHEMAS.step_started.parse(e.payload).stepId === 'api')
       expect(dbDone).toBeDefined()
       expect(apiStart).toBeDefined()
       expect(dbDone!.seq).toBeLessThan(apiStart!.seq)
 
       // ASSERT (c): a child read its OWN subplan-note back from the plan-note graph (memory traversal).
-      const apiRead = childEvents.find(e => e.kind === EVENT_KIND.tool_result
-        && (e.payload as { toolName: string }).toolName === 'memory_read'
-        && (e.payload as { stepId: string }).stepId === 'api')
+      const apiRead = childEvents.find(e => {
+        if (e.kind !== EVENT_KIND.tool_result) return false
+        const p = PAYLOAD_SCHEMAS.tool_result.parse(e.payload)
+        return p.toolName === 'memory_read' && p.stepId === 'api'
+      })
       expect(apiRead).toBeDefined()
-      expect((apiRead!.payload as { output: { note: { title: string } | null } }).output.note?.title).toBe('API')
+      expect(ReadTitleOutput.parse(PAYLOAD_SCHEMAS.tool_result.parse(apiRead!.payload).output).note?.title).toBe('API')
     } finally {
       await cleanup()
     }
@@ -327,7 +335,7 @@ describe('grounded-plan e2e: the full consent → analyze → plan-graph → ann
       const t = await kernel.createGroundedTask({ title: 'CLI tool', spec: 'ship a cli', modelRef: 'fake/m', analyzerRef: 'agent-analyzer' })
       const scope = planScope(t.id)
       const feedbackCount = async (topic: string): Promise<number> =>
-        (await kernel.eventsFor(t.id)).filter(e => e.kind === EVENT_KIND.feedback_requested && (e.payload as { topic: string }).topic === topic).length
+        (await kernel.eventsFor(t.id)).filter(e => e.kind === EVENT_KIND.feedback_requested && PAYLOAD_SCHEMAS.feedback_requested.parse(e.payload).topic === topic).length
 
       const handle = await port.startRun(t.id)
 
@@ -340,7 +348,7 @@ describe('grounded-plan e2e: the full consent → analyze → plan-graph → ann
       // planning consequence through the real memory projection.
       expect(await waitFor(() => kernel.eventsFor(t.id).then(es => es.some(e => e.kind === EVENT_KIND.analysis_completed)))).toBe(true)
       const ac = (await kernel.eventsFor(t.id)).find(e => e.kind === EVENT_KIND.analysis_completed)
-      const report = ac!.payload as CoverageReport
+      const report = PAYLOAD_SCHEMAS.analysis_completed.parse(ac!.payload)
       expect(report.analyzed).toBe(false)
       expect(report.gaps).toEqual([])
       expect(report.notesWritten).toBe(0)
@@ -351,7 +359,7 @@ describe('grounded-plan e2e: the full consent → analyze → plan-graph → ann
       expect(await handle.wait()).toBe('done')
 
       // let the router-started child run settle before teardown (avoids racing memory.close())
-      const childId2 = ((await kernel.eventsFor(t.id)).find(e => e.kind === EVENT_KIND.split_proposed)!.payload as { childTaskId: string }).childTaskId
+      const childId2 = PAYLOAD_SCHEMAS.split_proposed.parse((await kernel.eventsFor(t.id)).find(e => e.kind === EVENT_KIND.split_proposed)!.payload).childTaskId
       await waitFor(async () => (await kernel.getTask(childId2))?.status === TASK_STATUS.done, 30_000)
 
       // ASSERT (FixA Gap A) — the assumption-mode plan-notes carry marked uncertainties
@@ -376,7 +384,7 @@ describe('grounded-plan e2e: the full consent → analyze → plan-graph → ann
       const t = await kernel.createGroundedTask({ title: 'Service', spec: 'build a service', modelRef: 'fake/m', analyzerRef: 'agent-analyzer' })
       const scope = planScope(t.id)
       const feedbackCount = async (topic: string): Promise<number> =>
-        (await kernel.eventsFor(t.id)).filter(e => e.kind === EVENT_KIND.feedback_requested && (e.payload as { topic: string }).topic === topic).length
+        (await kernel.eventsFor(t.id)).filter(e => e.kind === EVENT_KIND.feedback_requested && PAYLOAD_SCHEMAS.feedback_requested.parse(e.payload).topic === topic).length
 
       const handle = await port.startRun(t.id)
       expect(await waitFor(() => feedbackCount('consent').then(n => n >= 1))).toBe(true)
@@ -386,7 +394,7 @@ describe('grounded-plan e2e: the full consent → analyze → plan-graph → ann
       expect(await handle.wait()).toBe('done')
 
       // let the router-started child run settle before teardown (avoids racing memory.close())
-      const childId3 = ((await kernel.eventsFor(t.id)).find(e => e.kind === EVENT_KIND.split_proposed)!.payload as { childTaskId: string }).childTaskId
+      const childId3 = PAYLOAD_SCHEMAS.split_proposed.parse((await kernel.eventsFor(t.id)).find(e => e.kind === EVENT_KIND.split_proposed)!.payload).childTaskId
       await waitFor(async () => (await kernel.getTask(childId3))?.status === TASK_STATUS.done, 30_000)
 
       // wait for the whole plan-note graph to project, then traverse decomposes_into from masterplan

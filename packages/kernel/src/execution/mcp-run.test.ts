@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { EVENT_KIND } from '@orc/contracts'
+import { EVENT_KIND, PAYLOAD_SCHEMAS } from '@orc/contracts'
 import { draftFixture, stepFixture } from '@orc/contracts/fixtures'
 import { createMcpHub } from '@orc/mcp-client'
 import { apiLoopExecutor } from '@orc/executor-api-loop'
@@ -77,10 +77,10 @@ describe('MCP + skills through a durable run (integration)', () => {
     const kinds = events.map(e => e.kind)
     expect(kinds).toContain(EVENT_KIND.skill_loaded)
     const call = events.find(e => e.kind === EVENT_KIND.tool_call)!
-    expect((call.payload as { toolName: string }).toolName).toBe('mcp__fixture__echo')
+    expect(PAYLOAD_SCHEMAS.tool_call.parse(call.payload).toolName).toBe('mcp__fixture__echo')
     const result = events.find(e => e.kind === EVENT_KIND.tool_result)!
     expect(JSON.stringify(result.payload)).toContain('echo: ping')
-    expect((result.payload as { isError: boolean }).isError).toBe(false)
+    expect(PAYLOAD_SCHEMAS.tool_result.parse(result.payload).isError).toBe(false)
 
     // the skill body reached the model: recorded in the agent_call request (R9)
     const agentCall = events.find(e => e.kind === EVENT_KIND.agent_call)!

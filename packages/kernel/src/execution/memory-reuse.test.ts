@@ -1,9 +1,10 @@
 import { describe, expect, it } from 'bun:test'
+import { z } from 'zod'
 import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import {
-  EVENT_KIND, SIGNAL_OUTCOME,
+  EVENT_KIND, MemoryWrittenPayload, SIGNAL_OUTCOME,
   type AgentExecutor, type EventDraft, type ExecutorContext, type ResolvedTool,
   type SplitResult, type UnifiedEvent,
 } from '@orc/contracts'
@@ -14,6 +15,12 @@ import { openStorage } from '../storage'
 import { Kernel } from '../kernel'
 import { createTestDb, fakeProvider, testConfig, TEST_PROJECT_ID } from '../test-helpers'
 import { createDbosPort, type DbosPort } from './dbos-port'
+
+// memory_read's tool output is `{ note: <full note | null> }` (tool output is contract-`unknown`).
+// The note stays opaque — it round-trips into a recorded event untouched; only its title is read
+// for the reuse summary, parsed on its own.
+const ReadOutput = z.object({ note: z.unknown() })
+const NoteTitle = z.object({ title: z.string() })
 
 const NOTE_ID = 'finding-x'
 const NOTE = { id: NOTE_ID, title: 'Finding X', summary: 'a durable finding', body: 'the full write-up' }
@@ -53,7 +60,8 @@ function memoryExecutor(): AgentExecutor<unknown> {
       const found = await ctx.checkpoint('tools:read', async () => {
         for (let i = 0; i < 20; i++) {
           const r = await read.execute({ id: NOTE_ID })
-          const note = (r.output as { note: unknown } | undefined)?.note ?? null
+          const parsed = ReadOutput.safeParse(r.output)
+          const note = parsed.success ? (parsed.data.note ?? null) : null
           if (note) return { note, isError: r.isError }
           await Bun.sleep(100)
         }
@@ -63,7 +71,7 @@ function memoryExecutor(): AgentExecutor<unknown> {
         { kind: EVENT_KIND.tool_result, payload: { ...base, iteration: 1, toolCallId: 'c2', toolName: 'memory_read', output: { note: r.note }, isError: r.isError } },
       ])
       const signal = found.note
-        ? { ...base, outcome: SIGNAL_OUTCOME.success, summary: `read back: ${(found.note as { title: string }).title}` }
+        ? { ...base, outcome: SIGNAL_OUTCOME.success, summary: `read back: ${NoteTitle.parse(found.note).title}` }
         : { ...base, outcome: SIGNAL_OUTCOME.failure, summary: 'finding-x never appeared' }
       await ctx.checkpoint('signal:1', async () => signal, (): EventDraft[] => [
         { kind: EVENT_KIND.signal_received, payload: { ...base, signal } },
@@ -118,7 +126,7 @@ describe('memory reuse over a real run (e2e): step B reads step A\'s note', () =
       const written = events.find(e => e.kind === 'memory_written')
       expect(written).toBeDefined()
       expect(written!.taskId).toBeNull()
-      const author = (written!.payload as { author: { executor?: string; role?: string } }).author
+      const author = MemoryWrittenPayload.parse(written!.payload).author
       expect(author.executor).toBe('memory-fake')
       expect(author.role).toBe('worker')
 

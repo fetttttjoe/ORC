@@ -7,7 +7,7 @@ import pg from 'pg'
 import { drizzle } from 'drizzle-orm/node-postgres'
 import { migrate } from 'drizzle-orm/node-postgres/migrator'
 import { jsonb, pgTable, text } from 'drizzle-orm/pg-core'
-import { EVENT_KIND, isTerminalError, type EventInput, type OperationSpec } from '@orc/contracts'
+import { EVENT_KIND, isRecord, isTerminalError, type EventInput, type OperationSpec } from '@orc/contracts'
 import { listProjectIds, openStorage, type EventLog, type Storage } from './storage'
 import { migrateDatabase } from './storage/migrate'
 import { events } from './schema'
@@ -43,12 +43,11 @@ describe('listProjectIds', () => {
 })
 
 function errorCodes(error: unknown): string[] {
-  if (!error || typeof error !== 'object') return []
-  const value = error as { code?: unknown; cause?: unknown; errors?: unknown[] }
+  if (!isRecord(error)) return []
   return [
-    ...(typeof value.code === 'string' ? [value.code] : []),
-    ...errorCodes(value.cause),
-    ...(value.errors ?? []).flatMap(errorCodes),
+    ...(typeof error.code === 'string' ? [error.code] : []),
+    ...errorCodes(error.cause),
+    ...(Array.isArray(error.errors) ? error.errors : []).flatMap(errorCodes),
   ]
 }
 

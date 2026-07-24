@@ -8,7 +8,7 @@ import pg from 'pg'
 import { drizzle } from 'drizzle-orm/node-postgres'
 import { events } from '../schema'
 import {
-  ApprovalPolicy, EVENT_KIND, FAILURE_CLASS, SIGNAL_OUTCOME, TASK_STATUS,
+  ApprovalPolicy, EVENT_KIND, FAILURE_CLASS, PAYLOAD_SCHEMAS, SIGNAL_OUTCOME, TASK_STATUS,
   type AgentExecutor, type EventDraft, type ExecutorContext, type PlanDraft,
   type SplitResult, type UnifiedEvent,
 } from '@orc/contracts'
@@ -360,7 +360,7 @@ describe('DBOS execution port (integration)', () => {
     // and the run did not append a competing terminal status behind it
     const terminal = (await kernel.eventsFor(t.id))
       .filter(e => e.kind === EVENT_KIND.task_status_changed)
-      .map(e => (e.payload as { to: string }).to)
+      .map(e => PAYLOAD_SCHEMAS.task_status_changed.parse(e.payload).to)
     expect(terminal.at(-1)).toBe(TASK_STATUS.cancelled)
     expect(terminal).not.toContain(TASK_STATUS.done)
   }, 15_000)
@@ -396,7 +396,7 @@ describe('DBOS execution port (integration)', () => {
     }
     expect(await waitFor(async () => (await kernel.eventsFor(t.id)).some(e => e.kind === EVENT_KIND.split_resolved))).toBe(true)
     const resolved = (await kernel.eventsFor(t.id)).find(e => e.kind === EVENT_KIND.split_resolved)
-    expect((resolved!.payload as { outcome: string }).outcome).toBe('cancelled')
+    expect(PAYLOAD_SCHEMAS.split_resolved.parse(resolved!.payload).outcome).toBe('cancelled')
   })
 
   it('refuses to retry a task that is not blocked (no second concurrent run)', async () => {
@@ -416,7 +416,7 @@ describe('DBOS execution port (integration)', () => {
     expect(loaded).toHaveLength(1)
     expect(loaded[0]!.payload).toMatchObject({ name: 'style-guide', hash: 'hash-style-guide' })
     const done = events.find(e => e.kind === EVENT_KIND.step_completed)
-    expect((done!.payload as { summary: string }).summary).toContain('skills=[style-guide]')
+    expect(PAYLOAD_SCHEMAS.step_completed.parse(done!.payload).summary).toContain('skills=[style-guide]')
   })
 
   it('resolves toolRefs into executor extraTools', async () => {
@@ -424,7 +424,7 @@ describe('DBOS execution port (integration)', () => {
     const handle = await port.startRun(t.id)
     expect(await handle.wait()).toBe('done')
     const done = (await kernel.eventsFor(t.id)).find(e => e.kind === EVENT_KIND.step_completed)
-    expect((done!.payload as { summary: string }).summary).toContain('tools=[mcp__fixture__echo]')
+    expect(PAYLOAD_SCHEMAS.step_completed.parse(done!.payload).summary).toContain('tools=[mcp__fixture__echo]')
   })
 
   it('unknown skill fails the step as validation_error before any model call', async () => {
@@ -433,7 +433,7 @@ describe('DBOS execution port (integration)', () => {
     expect(await handle.wait()).toBe('blocked')
     const events = await kernel.eventsFor(t.id)
     const failed = events.find(e => e.kind === EVENT_KIND.step_failed)
-    expect((failed!.payload as { class: string }).class).toBe(FAILURE_CLASS.validation_error)
+    expect(PAYLOAD_SCHEMAS.step_failed.parse(failed!.payload).class).toBe(FAILURE_CLASS.validation_error)
     expect(events.filter(e => e.kind === EVENT_KIND.agent_call)).toHaveLength(0)
   })
 
@@ -443,7 +443,7 @@ describe('DBOS execution port (integration)', () => {
     expect(await handle.wait()).toBe('blocked')
     const events = await kernel.eventsFor(t.id)
     const failed = events.find(e => e.kind === EVENT_KIND.step_failed)
-    expect((failed!.payload as { class: string }).class).toBe(FAILURE_CLASS.validation_error)
+    expect(PAYLOAD_SCHEMAS.step_failed.parse(failed!.payload).class).toBe(FAILURE_CLASS.validation_error)
     expect(events.filter(e => e.kind === EVENT_KIND.agent_call)).toHaveLength(0)
   })
 
