@@ -1,5 +1,5 @@
 import { z } from 'zod'
-import { errorMessage, MEMORY_ACCESS, MEMORY_LIMITS, MEMORY_SOURCE_LIMITS, MEMORY_TOOL_NAME, MemoryWriteResult, NOTE_KINDS, LINK_KIND, LINK_KINDS, RETENTION_CLASSES, LinkKind, MemoryNoteDraftInput, type MemoryAuthor, type MemoryNote, type MemoryStore, type ResolvedTool } from '@orc/contracts'
+import { errorMessage, MEMORY_ACCESS, MEMORY_LIMITS, MEMORY_SOURCE_LIMITS, MEMORY_TOOL_NAME, MemoryWriteResult, NOTE_KINDS, LINK_KIND, LINK_KINDS, RETENTION_CLASSES, LinkKind, MemoryNoteDraftInput, slugId, type MemoryAuthor, type MemoryNote, type MemoryStore, type ResolvedTool } from '@orc/contracts'
 import { applyBudget, fitMemoryNoteToBudget } from './budget'
 
 // Advisory note lint, echoed back in the memory_write result so the writing agent can improve
@@ -55,6 +55,9 @@ const NeighborsInput = z.object({
   seed: z.string(), kinds: z.array(LinkKind).optional(), scope: z.string().optional(),
   depth: z.number().int().positive().optional(), budget: Budget,
 })
+// Tool-boundary variant: agents may omit id — the title-derived slug makes the same finding
+// converge instead of forking (bench: note-id drift). Named top-level, not call-site.
+const MemoryWriteToolInput = MemoryNoteDraftInput.extend({ id: MemoryNoteDraftInput.shape.id.optional() })
 
 // advertised JSON schemas mirror the zod parsers exactly, so the model can self-correct.
 const detailLevelSchema = { type: 'string', enum: ['minimal', 'standard'], description: 'minimal = top 5 + omitted count' }
@@ -90,9 +93,9 @@ export function memoryTools(store: MemoryStore, author: MemoryAuthor, tier: Memo
       ref: 'memory/write', name: MEMORY_TOOL_NAME.write,
       description: withTier('Create or update a project knowledge note (upsert by id — omitted fields keep their stored values; pass an explicit empty string/array to clear one). Record durable findings/decisions/conventions so later steps reuse them.', tier),
       inputSchema: {
-        type: 'object', required: ['id', 'title'],
+        type: 'object', required: ['title'],
         properties: {
-          id: { ...idSchema, description: 'stable slug' },
+          id: { ...idSchema, description: 'omit id unless you are updating a note whose id you read — the title-derived slug makes the same finding converge instead of forking.' },
           title: { type: 'string', minLength: 1, maxLength: 200 },
           kind: {
             type: 'string', enum: [...NOTE_KINDS],
@@ -140,11 +143,19 @@ export function memoryTools(store: MemoryStore, author: MemoryAuthor, tier: Memo
           // parse WITHOUT defaults: MemoryNoteInput here would fill body:'' etc. and turn every
           // omitted field into an explicit clear, defeating the store gateway's merge-on-omit.
           // The gateway parses the merged note fully — same validation, right order, no casts.
-          const draft = MemoryNoteDraftInput.parse(input)
+          const parsed = MemoryWriteToolInput.parse(input)
+          let id: string
+          try {
+            id = parsed.id ?? slugId(parsed.title)
+          } catch {
+            // slugId's own error is CLI-flavored ("orc memory add --id ...") — this boundary
+            // has no such command, so it gets tool-appropriate guidance instead.
+            throw new Error('title cannot be slugged — pass an explicit id')
+          }
           const idempotencyKey = author.runToken && toolCallId
-            ? `${author.runToken}:tool:${toolCallId}:memory:${draft.id}`
+            ? `${author.runToken}:tool:${toolCallId}:memory:${id}`
             : undefined
-          const n = await store.write(draft, author, { idempotencyKey })
+          const n = await store.write({ ...parsed, id }, author, { idempotencyKey })
           // No revision: the write is event-first and the projector is asynchronous, so within
           // the flush window store.write reports the revision from BEFORE this write (and
           // fabricates 1 when nothing is projected yet). Handing the model a number that was
