@@ -32,7 +32,10 @@ describe('applyBudget', () => {
 describe('fitMemoryNoteToBudget', () => {
   it('keeps the complete response within the irreducible floor even with oversized provenance', () => {
     const note: MemoryNote = {
-      ...MemoryNoteInput.parse({ id: 'a'.repeat(128), title: 't'.repeat(200) }),
+      ...MemoryNoteInput.parse({
+        id: 'a'.repeat(128), title: 't'.repeat(200),
+        summary: 's'.repeat(50), rationale: 'r'.repeat(50), body: 'b'.repeat(50),
+      }),
       sources: [],
       scope: 's'.repeat(1_000), sourceRevision: 'r'.repeat(1_000),
       createdAt: 'c'.repeat(1_000), createdBy: 'c'.repeat(1_000),
@@ -41,6 +44,12 @@ describe('fitMemoryNoteToBudget', () => {
     const result = fitMemoryNoteToBudget(note, 1)
     expect(result.truncated).toBe(true)
     expect(JSON.stringify(result).length).toBeLessThanOrEqual(1_024)
+    // contentLimit=4 is smaller than TRIM_MARKER itself: summary/rationale/body all get forced
+    // to low===0 — left empty, not a bare-marker stub with no content in front of it.
+    expect(result.note.summary).toBe('')
+    expect(result.note.rationale).toBe('')
+    expect(result.note.body).toBe('')
+    expect(JSON.stringify(result.note)).not.toContain(TRIM_MARKER)
   })
 
   it('trims at a whitespace boundary and marks the cut — never a silent mid-word slice', () => {
