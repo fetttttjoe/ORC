@@ -1,6 +1,17 @@
 import { describe, expect, it } from 'bun:test'
 import { MemoryNoteInput, type MemoryNote } from '@orc/contracts'
-import { applyBudget, approxTokens, fitMemoryNoteToBudget } from './budget'
+import { applyBudget, approxTokens, fitMemoryNoteToBudget, TRIM_MARKER } from './budget'
+
+// Minimal valid MemoryNote (provenance fields MemoryNoteInput doesn't cover), with overrides —
+// the pattern the pre-existing budget test below builds inline, factored out for reuse.
+const noteWith = (overrides: Partial<MemoryNote>): MemoryNote => ({
+  ...MemoryNoteInput.parse({ id: 'n', title: 'N' }),
+  sources: [],
+  createdAt: '2026-01-01T00:00:00.000Z', createdBy: 'cli',
+  updatedAt: '2026-01-01T00:00:00.000Z', updatedBy: 'cli',
+  revision: 1,
+  ...overrides,
+})
 
 describe('applyBudget', () => {
   it('caps by count and by token budget, reporting truncation + omitted', () => {
@@ -30,5 +41,33 @@ describe('fitMemoryNoteToBudget', () => {
     const result = fitMemoryNoteToBudget(note, 1)
     expect(result.truncated).toBe(true)
     expect(JSON.stringify(result).length).toBeLessThanOrEqual(1_024)
+  })
+
+  it('trims at a whitespace boundary and marks the cut — never a silent mid-word slice', () => {
+    const long = Array.from({ length: 400 }, (_, i) => `word${i}`).join(' ')
+    const { note: fitted, truncated } = fitMemoryNoteToBudget(noteWith({ body: long }), 200)
+    expect(truncated).toBe(true)
+    expect(fitted.body.endsWith(TRIM_MARKER)).toBe(true)
+    const kept = fitted.body.slice(0, -TRIM_MARKER.length)
+    expect(long.startsWith(kept.trimEnd())).toBe(true)
+    expect(kept.trimEnd()).toMatch(/word\d+$/) // boundary cut: last token is whole
+  })
+
+  it('whitespace-free content keeps its budget: mid-word cut + marker, no collapse', () => {
+    const { note: fitted } = fitMemoryNoteToBudget(noteWith({ body: 'x'.repeat(4_000) }), 100)
+    // must NOT collapse to ~1 char: backoff only applies when whitespace exists near the cut
+    expect(fitted.body.length).toBeGreaterThan(200) // well over half of contentLimit=400
+    expect(fitted.body.endsWith(TRIM_MARKER)).toBe(true)
+  })
+
+  it('surfaces the next-hint on truncation (regression pin — shipped behavior)', () => {
+    const { next } = fitMemoryNoteToBudget(noteWith({ body: 'x'.repeat(50_000) }), 100)
+    expect(next).toContain('memory_read')
+  })
+
+  it('leaves fields byte-identical and unmarked when everything fits', () => {
+    const { note: fitted, truncated } = fitMemoryNoteToBudget(noteWith({ body: 'short body' }), 5_000)
+    expect(truncated).toBe(false)
+    expect(fitted.body).toBe('short body')
   })
 })
