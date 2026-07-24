@@ -25,6 +25,17 @@ const fakeStore = (over: Partial<MemoryStore> = {}) => {
   return { store, written, accessed }
 }
 
+// Tool-result subsets each assertion pins — execute() returns { output: unknown }, parsed here.
+const SearchOutput = z.object({ notes: z.array(z.unknown()), next: z.string() })
+const BudgetOutput = z.object({ notes: z.array(z.unknown()), truncated: z.boolean() })
+const NeighborsOutput = z.object({ neighbors: z.array(z.object({ via: z.string() })) })
+const ReadOutput = z.object({ note: z.object({ body: z.string() }), truncated: z.boolean() })
+// JSON-Schema view of memory_write's advertised input (inputSchema is Record<string, unknown>).
+// Property values stay z.unknown() so the raw defs (maxItems/maxLength/type) survive toMatchObject;
+// the description projection is a separate named schema because it deliberately strips to that field.
+const WriteInputProps = z.object({ properties: z.record(z.string(), z.unknown()) })
+const WriteInputDescriptions = z.object({ properties: z.record(z.string(), z.object({ description: z.string().optional() })) })
+
 describe('memory tools', () => {
   it('declares four tools; memory_write routes to the store with the bound author', async () => {
     const { store, written } = fakeStore()
@@ -34,7 +45,7 @@ describe('memory tools', () => {
     // in the owning package, not silently in a consumer's filter (orc mcp serve)
     const names = new Set(tools.map(t => t.name))
     for (const read of MEMORY_READ_TOOLS) expect(names.has(read)).toBe(true)
-    expect((MEMORY_READ_TOOLS as readonly string[])).not.toContain('memory_write')
+    expect(MEMORY_READ_TOOLS).not.toContain('memory_write')
     const write = tools.find(t => t.name === 'memory_write')!
     const r = await write.execute({ id: 'auth', title: 'Auth' })
     expect(r.isError).toBe(false)
@@ -81,7 +92,7 @@ describe('memory tools', () => {
     const search = memoryTools(store, { source: 'cli' }).find(t => t.name === 'memory_search')!
     const r = await search.execute({ query: 'x', detail_level: 'minimal' })
     expect(r.output).toMatchObject({ truncated: true, omitted: 3 })
-    const out = r.output as { notes: NoteSummary[]; next: string }
+    const out = SearchOutput.parse(r.output)
     expect(out.notes).toHaveLength(5)
     expect(out.next).toContain('memory_read')
   })
@@ -94,7 +105,7 @@ describe('memory tools', () => {
     const { store } = fakeStore({ search: async () => bulky })
     const search = memoryTools(store, { source: 'cli' }).find(t => t.name === 'memory_search')!
     const result = await search.execute({ query: 'x', budget: 10 })
-    const output = result.output as { notes: NoteSummary[]; truncated: boolean }
+    const output = BudgetOutput.parse(result.output)
     expect(output.notes).toHaveLength(1)
     expect(output.truncated).toBe(true)
   })
@@ -103,7 +114,7 @@ describe('memory tools', () => {
     const { store } = fakeStore({ neighbors: async () => [{ id: 'b', title: 'B', summary: 's', via: 'supersedes', depth: 1, score: 1, direction: 'out', activation: 0 }] })
     const nb = memoryTools(store, { source: 'cli' }).find(t => t.name === 'memory_neighbors')!
     const r = await nb.execute({ seed: 'a' })
-    const out = r.output as { neighbors: { via: string }[] }
+    const out = NeighborsOutput.parse(r.output)
     expect(out.neighbors[0]?.via).toBe('supersedes')
   })
 
@@ -111,7 +122,7 @@ describe('memory tools', () => {
     const { store } = fakeStore({ get: async () => toNote({ id: 'auth', title: 'Auth', body: 'x'.repeat(400) }) })
     const read = memoryTools(store, { source: 'cli' }).find(t => t.name === 'memory_read')!
     const r = await read.execute({ id: 'auth', budget: 10 })
-    const out = r.output as { note: MemoryNote; truncated: boolean }
+    const out = ReadOutput.parse(r.output)
     expect(out.note.body.length).toBeLessThanOrEqual(40)
     expect(out.truncated).toBe(true)
   })
@@ -232,7 +243,7 @@ describe('memory tools', () => {
   it('memory_write advertises the same collection and text limits it enforces', () => {
     const { store } = fakeStore()
     const write = memoryTools(store, { source: 'cli' }).find(t => t.name === 'memory_write')!
-    const props = (write.inputSchema as { properties: Record<string, unknown> }).properties
+    const props = WriteInputProps.parse(write.inputSchema).properties
     expect(props.categories).toMatchObject({
       maxItems: MEMORY_LIMITS.labelItems,
       items: { maxLength: MEMORY_LIMITS.labelChars },
@@ -259,7 +270,7 @@ describe('memory tools', () => {
   it('memory_write tells the model to put citations in sources, not in the body prose', () => {
     const { store } = fakeStore()
     const write = memoryTools(store, { source: 'cli' }).find(t => t.name === 'memory_write')!
-    const props = (write.inputSchema as { properties: Record<string, { description?: string }> }).properties
+    const props = WriteInputDescriptions.parse(write.inputSchema).properties
     const sources = props.sources?.description ?? ''
     expect(sources).toContain('not in a references section inside body')
     expect(sources).toContain('queryable')
@@ -270,7 +281,7 @@ describe('memory tools', () => {
   it('memory_write advertises rationale/uncertainty so a model can discover and set them', () => {
     const { store } = fakeStore()
     const write = memoryTools(store, { source: 'cli' }).find(t => t.name === 'memory_write')!
-    const props = (write.inputSchema as { properties: Record<string, unknown> }).properties
+    const props = WriteInputProps.parse(write.inputSchema).properties
     expect(props.rationale).toMatchObject({ type: 'string' })
     expect(props.uncertainty).toMatchObject({ type: 'array', items: { type: 'string' } })
   })
