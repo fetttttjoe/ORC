@@ -16,23 +16,35 @@ export function taskCompletedId(e: EventRecord): string | null {
   return p.success && p.data.to === TASK_STATUS.done ? p.data.taskId : null
 }
 
-// catchUp lets the caller flush the read-model projection before a consolidation reads it —
-// consolidateTask gathers a task's step notes from the projected note table, which a SEPARATE async
-// projector fills; without catching up first, a still-unprojected step note yields a partial note or
-// a wrongly-failed salience gate that never re-fires. Kept optional so the pure deps stay minimal.
-export function createMemoryLifecycle(deps: ConsolidationDeps & { catchUp?: () => Promise<void> }): MemoryLifecycle {
+// `catchUp` flushes the read-model projection before a consolidation reads it — consolidateTask
+// gathers a task's step notes from the projected note table, which a SEPARATE async projector fills;
+// without catching up first, a still-unprojected step note yields a partial note or a wrongly-failed
+// salience gate that never re-fires. Optional, so the pure deps stay minimal.
+export type LifecycleDeps = ConsolidationDeps & { catchUp?: () => Promise<void> }
+
+// The per-completion action, exported for DETERMINISTIC testing (no live subscription needed): on a
+// terminal completion event, catch the projection up, then consolidate. Errors are SWALLOWED
+// (logged) so one bad task never wedges the subscription stream, and the write is idempotent so an
+// at-least-once redelivery is safe. A non-completion event is a no-op.
+export async function consolidateOnCompletion(deps: LifecycleDeps, e: EventRecord): Promise<void> {
+  const taskId = taskCompletedId(e)
+  if (taskId === null) return
+  try {
+    await deps.catchUp?.()
+    await consolidateTask(deps, taskId)
+  } catch (err) {
+    console.warn(`memory lifecycle: consolidate '${taskId}' failed:`, errorMessage(err))
+  }
+}
+
+export function createMemoryLifecycle(deps: LifecycleDeps): MemoryLifecycle {
   let unsub: (() => Promise<void>) | null = null
   let inflight: Promise<void> = Promise.resolve()
   // subscribe delivers events losslessly and awaits the handler (the cursor advances only on
-  // success), so consolidating INLINE serializes naturally. A failure is caught, not thrown: one
-  // bad task must not wedge the stream, and the write is idempotent so an at-least-once redelivery
-  // is harmless. `inflight` is tracked so close() drains a consolidation still running at shutdown.
+  // success), so consolidating INLINE serializes naturally. `inflight` is tracked so close() drains
+  // a consolidation still running at shutdown.
   const handle = async (e: EventRecord): Promise<void> => {
-    const taskId = taskCompletedId(e)
-    if (taskId === null) return
-    inflight = Promise.resolve(deps.catchUp?.())
-      .then(() => consolidateTask(deps, taskId))
-      .then(() => {}, err => console.warn(`memory lifecycle: consolidate '${taskId}' failed:`, errorMessage(err)))
+    inflight = consolidateOnCompletion(deps, e)
     await inflight
   }
   return {

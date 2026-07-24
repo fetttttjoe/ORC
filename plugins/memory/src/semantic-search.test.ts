@@ -61,6 +61,22 @@ describe('SurrealMemory semantic + hybrid search', () => {
     await m.close()
   })
 
+  it('hybrid fusion is load-bearing: keyword agreement lifts a note above a hotter semantic-only one', async () => {
+    const t = await createTestSurreal(); drops.push(t.drop)
+    const m = await SurrealMemory.open(t, fakeEmbedder)
+    // 'both' matches query 'alpha' by BOTH keyword (token 'alpha') and vector; left cold.
+    await m.applyEvent(written(1, note({ id: 'both', title: 'Alpha', summary: 'alpha', body: 'alpha' })))
+    // 'sem' matches ONLY by vector (body 'zeta' ≈ alpha, no 'alpha' token) and is read twice → hot,
+    // so in the semantic arm alone it outranks 'both'. Only keyword agreement can flip the order.
+    await m.applyEvent(written(2, note({ id: 'sem', title: 'S', summary: 'zeta', body: 'zeta' })))
+    await m.applyEvent(accessed(3, 'sem'))
+    await m.applyEvent(accessed(4, 'sem'))
+    const ids = (await m.search('alpha', {}, { mode: 'hybrid' })).map(n => n.id)
+    expect(ids[0]).toBe('both') // fails if only the semantic arm is returned (would give the hotter 'sem')
+    expect(ids).toContain('sem') // the semantic-only note survives the (scope,id) fuse; fails if mis-keyed
+    await m.close()
+  })
+
   it('a note that gets USED ranks above an equally-relevant cold note (activation heat)', async () => {
     const t = await createTestSurreal(); drops.push(t.drop)
     const m = await SurrealMemory.open(t, fakeEmbedder)
