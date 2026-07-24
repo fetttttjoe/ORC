@@ -145,6 +145,12 @@ describe('loadConfig', () => {
     expect(c.maxDepth).toBe(3)
     expect(c.approvalPolicy).toEqual({ default: 'manual', rules: [] })
   })
+  it('ambientCapture defaults true; ORC_AMBIENT_CAPTURE=false disables it (the kill switch)', () => {
+    expect(loadConfig(mkdtempSync(path.join(tmpdir(), 'orc-'))).ambientCapture).toBe(true)
+    withEnv({ ORC_AMBIENT_CAPTURE: 'false' }, () => {
+      expect(loadConfig(mkdtempSync(path.join(tmpdir(), 'orc-'))).ambientCapture).toBe(false)
+    })
+  })
 })
 
 describe('project identity', () => {
