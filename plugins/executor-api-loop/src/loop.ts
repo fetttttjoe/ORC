@@ -151,9 +151,11 @@ function budgetNote(iteration: number, max: number): string | null {
 // FIRST prompt, so the mandatory "search before you claim anything" turn the bench measured
 // as memory's cost is no longer mandatory: relevant notes are already there to be memory_read.
 //
-// Query derivation is a pure helper (exported for its own unit tests): store search ANDs up to
-// 8 whitespace terms as substring matches (surreal.ts), so title+instructions prose routinely
-// matches nothing — a few distinctive terms from the title alone are the query.
+// Query strategy is SEMANTIC-FIRST now that memory_search defaults to hybrid (vector⊕keyword):
+// the primary query is the step's FULL INTENT (title + instructions) — embeddings match meaning,
+// so natural-language prose is an asset, not the liability it was under substring AND. The few-
+// distinctive-terms derivation stays as the keyword-only FALLBACK: with no embedder configured,
+// prose ANDs to nothing and a couple of rare title words are what still match.
 const STOPWORDS = new Set([
   'this', 'that', 'with', 'from', 'into', 'your', 'have', 'will', 'were', 'been', 'being',
   'their', 'about', 'after', 'before', 'which', 'while', 'where', 'there', 'these', 'those',
@@ -171,19 +173,32 @@ export function deriveQueryTerms(title: string): string[] {
   return terms
 }
 
-// One call at { query, budget }; if it comes back empty and there was more than one term, ONE
-// fallback call with the single longest term (a rarer word narrows less than an AND of three).
-// isError is folded to "no notes" here, not thrown — a degraded search tool must never block
-// the step, and the same empty-result path already knows how to give up quietly.
+// The step's intent as a natural-language query for the semantic arm — title plus its
+// instructions, bounded (the query is embedded, so length is cheap, but unbounded prose dilutes).
+export function preloadQuery(step: { title: string; instructions: string }): string {
+  return `${step.title}\n${step.instructions}`.trim().slice(0, 600)
+}
+
+// isError is folded to "no notes" here, not thrown — a degraded search tool must never block the
+// step, and the empty-result path already knows how to give up quietly.
 async function searchNotes(tool: ResolvedTool, query: string, budget: number): Promise<NoteSummary[]> {
   const result = await tool.execute({ query, budget })
   if (result.isError) return []
   const parsed = MemorySearchResult.safeParse(result.output)
   return parsed.success ? parsed.data.notes : []
 }
-async function preloadSearch(tool: ResolvedTool, terms: string[], budget: number): Promise<NoteSummary[]> {
-  const first = await searchNotes(tool, terms.join(' '), budget)
-  if (first.length > 0 || terms.length <= 1) return first
+// Semantic-first, then degrade: (1) the full-intent query — hybrid search matches it by meaning;
+// (2) on empty, the distinctive title terms — what a keyword-only deployment needs since prose
+// ANDs to nothing there; (3) on empty with >1 term, the single longest term (a rarer word narrows
+// less than an AND of several). The first non-empty result wins.
+async function preloadSearch(tool: ResolvedTool, intent: string, terms: string[], budget: number): Promise<NoteSummary[]> {
+  if (intent) {
+    const byIntent = await searchNotes(tool, intent, budget)
+    if (byIntent.length > 0) return byIntent
+  }
+  if (terms.length === 0) return []
+  const byTerms = await searchNotes(tool, terms.join(' '), budget)
+  if (byTerms.length > 0 || terms.length <= 1) return byTerms
   const longest = terms.reduce((a, b) => (b.length > a.length ? b : a))
   return searchNotes(tool, longest, budget)
 }
@@ -206,11 +221,12 @@ async function preloadKnownContext(ctx: ExecutorContext<LanguageModel>): Promise
   if (!ctx.memoryPreloadTokens || ctx.memoryPreloadTokens <= 0) return ''
   const search = ctx.extraTools.find(t => t.name === MEMORY_TOOL_NAME.search)
   if (!search) return ''
+  const intent = preloadQuery(ctx.step)
   const terms = deriveQueryTerms(ctx.step.title)
-  if (terms.length === 0) return ''
+  if (!intent && terms.length === 0) return ''
   const budget = ctx.memoryPreloadTokens
   try {
-    const notes = await ctx.checkpoint('preload', () => preloadSearch(search, terms, budget))
+    const notes = await ctx.checkpoint('preload', () => preloadSearch(search, intent, terms, budget))
     return notes.length > 0 ? renderKnownContext(notes) : ''
   } catch (err) {
     // never block the step over a preload failure — same posture as captureAmbientNote below

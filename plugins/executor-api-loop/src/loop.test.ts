@@ -701,8 +701,8 @@ describe('knowledge preload', () => {
     expect(prompt).toContain(`${note.id} — ${note.title}: ${note.summary}`)
     // placed between deps and the knowledge protocol
     expect(prompt.indexOf('Known project context')).toBeLessThan(prompt.indexOf('Project knowledge protocol'))
-    // query derived from the TITLE only — instructions prose never leaks in, and one call suffices
-    expect(queries).toEqual(['refactor authentication middleware'])
+    // semantic-first: the primary query is the step's full intent (title + instructions); one non-empty call suffices
+    expect(queries).toEqual(['Refactor authentication middleware handling\ndo the thing'])
   })
 
   it('a non-project-scope note renders its id qualified with scope; a project-scope note stays bare', async () => {
@@ -753,8 +753,8 @@ describe('knowledge preload', () => {
     })))
     const prompt = JSON.stringify(specs[0]?.before)
     expect(prompt).not.toContain('# Known project context (')
-    // primary call ≤3 title terms, then ONE fallback with the single longest term
-    expect(queries).toEqual(['refactor authentication middleware', 'authentication'])
+    // intent query first, then the ≤3 title terms, then the single longest term — all empty here
+    expect(queries).toEqual(['Refactor authentication middleware handling\ndo the thing', 'refactor authentication middleware', 'authentication'])
   })
 
   it('memory_search isError → preload skips silently, the step still proceeds', async () => {
