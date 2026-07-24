@@ -441,19 +441,50 @@ renderNewRequest()
 refreshModels()
 projects = await api.projects()
 
+// A navigation step must never leave the shell half-rendered. This body used to be a `void`-ed
+// async IIFE, so a rejection anywhere inside it — in practice a snapshot fetch losing a race with a
+// restarting server — became an unhandled rejection that skipped every render after it: empty
+// graph, stale sidebar, no error, no retry, working again only after a manual reload. Each fallible
+// stage is now contained, so one failure costs its own stage and nothing else.
+async function applyNavigation(s: Selection): Promise<void> {
+  const projectChanged = s.project !== sel.project
+  const nodeChanged = s.node !== sel.node
+  sel = s
+  setApiProject(sel.project) // mutations carry the viewed project; the server fences mismatches
+  applyColumns()
+  if (projectChanged) {
+    shownPlanVersion = null
+    renderNewRequest()
+    refreshModels()
+    await loadProjectOrRetry()
+  }
+  if (nodeChanged) shownPlanVersion = null
+  renderer.select(sel.node)
+  renderSidebar()
+  await renderInspector()
+}
+
+// The snapshot is the one fetch the whole view is built on, and nothing else recovers it: `watch()`
+// runs at the END of loadProject, so a failure leaves no stream to reconnect and no path back
+// except a reload. One delayed retry turns the common cause — a server that was still coming up —
+// into a blink instead of a dead page.
+// ponytail: one retry, fixed delay; give it a backoff only if a real deployment needs it.
+const SNAPSHOT_RETRY_MS = 1_500
+async function loadProjectOrRetry(): Promise<void> {
+  try {
+    await loadProject()
+  } catch (err) {
+    setStatus(false, `snapshot failed — retrying: ${err instanceof Error ? err.message : String(err)}`)
+    await new Promise(resolve => setTimeout(resolve, SNAPSHOT_RETRY_MS))
+    await loadProject()
+  }
+}
+
 onChange(s => {
-  void (async () => {
-    const projectChanged = s.project !== sel.project
-    const nodeChanged = s.node !== sel.node
-    sel = s
-    setApiProject(sel.project) // mutations carry the viewed project; the server fences mismatches
-    applyColumns()
-    if (projectChanged) { shownPlanVersion = null; renderNewRequest(); refreshModels(); await loadProject() }
-    if (nodeChanged) shownPlanVersion = null
-    renderer.select(sel.node)
-    renderSidebar()
-    await renderInspector()
-  })()
+  void applyNavigation(s).catch(err => {
+    // last resort: the API layer already toasts, so this is about not dying silently
+    setStatus(false, `view failed to load: ${err instanceof Error ? err.message : String(err)}`)
+  })
 })
 
 if (!current().project && projects[0]) navigate({ project: projects[0].id }) // triggers onChange
