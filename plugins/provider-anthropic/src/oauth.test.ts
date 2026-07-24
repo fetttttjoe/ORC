@@ -2,7 +2,12 @@ import { afterEach, describe, expect, it } from 'bun:test'
 import { mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { isRecord } from '@orc/contracts'
 import { CLAUDE_CODE_IDENTITY, loadOAuthToken, oauthFetch, prependClaudeCodeIdentity } from './oauth'
+
+// oauthFetch injects a `system` array (identity block first); narrow the captured body
+// at the read boundary rather than casting it.
+const hasSystemArray = (v: unknown): v is { system: unknown[] } => isRecord(v) && Array.isArray(v.system)
 
 const savedToken = process.env.CLAUDE_CODE_OAUTH_TOKEN
 afterEach(() => {
@@ -61,7 +66,8 @@ describe('oauthFetch', () => {
     expect(seen.headers.get('x-api-key')).toBeNull()
     expect(seen.headers.get('authorization')).toBe('Bearer tok-123')
     expect(seen.headers.get('anthropic-beta')).toContain('oauth-2025-04-20')
-    expect((seen.body as { system: unknown[] }).system[0]).toEqual({ type: 'text', text: CLAUDE_CODE_IDENTITY })
+    if (!hasSystemArray(seen.body)) throw new Error('captured body has no system array')
+    expect(seen.body.system[0]).toEqual({ type: 'text', text: CLAUDE_CODE_IDENTITY })
   })
 })
 
