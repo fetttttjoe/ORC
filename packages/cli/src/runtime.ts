@@ -5,7 +5,7 @@ import { createOpenAIProvider } from '@orc/provider-openai'
 import { createOllamaProvider } from '@orc/provider-ollama'
 import { agentAnalyzer } from '@orc/analyzer-agent'
 import { createMcpHub, type McpHub } from '@orc/mcp-client'
-import { createMemory, unavailableMemoryTools, tierForRole, type MemoryTier } from '@orc/memory'
+import { createMemory, createMemoryLifecycle, unavailableMemoryTools, tierForRole, type MemoryLifecycle, type MemoryTier } from '@orc/memory'
 import { openMemory } from './memory-open'
 import { createVaultProjector } from '@orc/vault-projector'
 import { createDbosPort, createPluginHost, dbosSend, execTool, finalizePlanTool, isMcpTrusted, loadConfig, loadTrust, openStorage, readAnnotationsTool, reportCoverageTool, requireProject, splitTool, Kernel, type DbosPort, type PluginHost, type ProjectConfig, type Storage } from '@orc/kernel'
@@ -55,10 +55,15 @@ export async function buildRuntime(
   const projector = createVaultProjector({ log, config })
   await projector.start()
   let memory: Awaited<ReturnType<typeof createMemory>> | null = null
+  let lifecycle: MemoryLifecycle | null = null
   let buildMemoryTools: (author: MemoryAuthor, tier?: MemoryTier) => ResolvedTool[]
   try {
     memory = await openMemory({ log, config })
     await memory.projector.start()
+    // post-task memory maintenance (auto-consolidation) — a decoupled subscriber, started only in
+    // the execution runtime (never in the one-shot CLI memory commands) and stopped at shutdown.
+    lifecycle = createMemoryLifecycle({ log, store: memory.store })
+    await lifecycle.start()
     buildMemoryTools = memory.buildTools
   } catch (err) {
     const reason = errorMessage(err)
@@ -100,6 +105,7 @@ export async function buildRuntime(
     ...port,
     shutdown: async () => {
       await port.shutdown()
+      if (lifecycle) await lifecycle.close()
       if (memory) await memory.close()
       await projector.close()
       await host.shutdown() // drains hooks, fires session_shutdown, deactivates extensions, stops the watcher

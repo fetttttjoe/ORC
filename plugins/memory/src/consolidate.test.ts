@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'bun:test'
 import { LINK_KIND, MemoryNoteInput, slugId } from '@orc/contracts'
-import { CONSOLIDATED_TAG, consolidatedNote } from './consolidate'
+import { CONSOLIDATED_TAG, consolidatedNote, isSubstantive } from './consolidate'
 
 describe('consolidatedNote', () => {
   it('promotes step outcomes into one durable project note, linked derived_from what the task read', () => {
@@ -31,5 +31,14 @@ describe('consolidatedNote', () => {
     expect(draft.links).toEqual([])
     expect(draft.summary).toBe('Empty task')
     expect(() => MemoryNoteInput.parse(draft)).not.toThrow()
+  })
+})
+
+describe('isSubstantive', () => {
+  it('gates on real work: read project knowledge OR multiple steps; skips trivial single lookups', () => {
+    expect(isSubstantive({ steps: [{ title: 'a', summary: 'x' }], derivedFrom: ['area-memory'] })).toBe(true) // has provenance
+    expect(isSubstantive({ steps: [{ title: 'a', summary: 'x' }, { title: 'b', summary: 'y' }], derivedFrom: [] })).toBe(true) // composed
+    expect(isSubstantive({ steps: [{ title: 'a', summary: 'x' }], derivedFrom: [] })).toBe(false) // trivial single lookup
+    expect(isSubstantive({ steps: [], derivedFrom: [] })).toBe(false)
   })
 })
