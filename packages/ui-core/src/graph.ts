@@ -1,4 +1,4 @@
-import { activation, DEFAULT_HALF_LIFE_DAYS, foldAccessCounts, foldLiveNotes, noteKey, STEP_RUN_STATUS, type EventRecord } from '@orc/contracts'
+import { activation, DEFAULT_HALF_LIFE_DAYS, edgeKey, foldAccessCounts, foldEdgeStats, foldLiveNotes, noteKey, STEP_RUN_STATUS, type AccessStats, type EventRecord, type LinkKind } from '@orc/contracts'
 import type { State } from '@orc/kernel'
 
 export interface GraphNode {
@@ -8,7 +8,10 @@ export interface GraphNode {
   detail: string // task: status; step: run status or 'pending'; artifact: size; note: kind; model: provider
   heat?: number // notes only: 0–1 activation heat (2dp) — recently-pulled knowledge renders hot; absent = cold
 }
-export interface GraphLink { source: string; target: string; type: string }
+export interface GraphLink {
+  source: string; target: string; type: string
+  heat?: number // note-link edges only: 0–1 edge activation heat (2dp) — walked connections render hot; absent = cold
+}
 export interface Graph { nodes: GraphNode[]; links: GraphLink[] }
 
 export interface GraphPatch {
@@ -17,9 +20,10 @@ export interface GraphPatch {
   removeNodeIds: string[]
   addLinks: GraphLink[]
   removeLinks: GraphLink[]
+  updateLinks: GraphLink[] // same-key link, heat changed — the edge twin of updateNodes; NOT remove+add (would churn the renderer)
 }
 export const emptyPatch = (p: GraphPatch): boolean =>
-  !p.addNodes.length && !p.updateNodes.length && !p.removeNodeIds.length && !p.addLinks.length && !p.removeLinks.length
+  !p.addNodes.length && !p.updateNodes.length && !p.removeNodeIds.length && !p.addLinks.length && !p.removeLinks.length && !p.updateLinks.length
 
 // The graph vocabulary — every producer and consumer speaks through these, never literals.
 export const EDGE = {
@@ -88,17 +92,21 @@ export function buildGraph(state: State, events: Array<Pick<EventRecord, 'kind' 
     }
   }
   const access = foldAccessCounts(events)
+  const edgeAccess = foldEdgeStats(events)
   // heat: log-scaled activation, saturating at ~50. Rounded to 2dp so closely-spaced rebuilds
   // don't churn the patch stream — slow drift across a long session still patches occasionally,
   // and that IS the fade (patches are idempotent, the cost is negligible). halfLifeDays arrives
   // from project config via the sessions layer — the same value the store's ranking uses.
-  const heatOf = (k: string): number | undefined => {
-    const stats = access.get(k)
+  // Shared by nodes and edges — foldAccessCounts/foldEdgeStats both yield AccessStats.
+  const toHeat = (stats: AccessStats | undefined): number | undefined => {
     if (!stats) return undefined
-    const act = activation(stats, now, opts.halfLifeDays ?? DEFAULT_HALF_LIFE_DAYS) // AccessStats passes straight through
+    const act = activation(stats, now, opts.halfLifeDays ?? DEFAULT_HALF_LIFE_DAYS)
     if (act <= 0) return undefined
     return Math.round(Math.min(1, Math.log1p(act) / Math.log1p(50)) * 100) / 100
   }
+  const heatOf = (k: string): number | undefined => toHeat(access.get(k))
+  const edgeHeatOf = (scope: string, from: string, to: string, kind: LinkKind): number | undefined =>
+    toHeat(edgeAccess.get(edgeKey(scope, from, to, kind)))
   const live = foldLiveNotes(events)
   for (const { note, author } of live.values()) {
     if (isUiMetaNote(note.scope, note.id)) continue // chat metadata is not knowledge
@@ -112,7 +120,9 @@ export function buildGraph(state: State, events: Array<Pick<EventRecord, 'kind' 
       // Agent traversal (memory_neighbors) keeps strict scoping.
       const targetScope = live.has(noteKey(note.scope, l.id)) ? note.scope
         : live.has(noteKey('project', l.id)) ? 'project' : null
-      if (targetScope) links.push({ source: noteNodeId(note.scope, note.id), target: noteNodeId(targetScope, l.id), type: l.kind })
+      // edge stats key on note.scope (the persisted RELATE's own scope), not targetScope: the
+      // cross-scope UI fallback above is a display-only convenience, not how the edge was stored.
+      if (targetScope) links.push({ source: noteNodeId(note.scope, note.id), target: noteNodeId(targetScope, l.id), type: l.kind, heat: edgeHeatOf(note.scope, note.id, l.id, l.kind) })
     }
   }
   return { nodes, links }
@@ -136,5 +146,11 @@ export function diffGraphs(prev: Graph, next: Graph): GraphPatch {
     removeNodeIds: prev.nodes.filter(n => !nextN.has(n.id)).map(n => n.id),
     addLinks: next.links.filter(l => !prevL.has(linkKey(l))),
     removeLinks: prev.links.filter(l => !nextL.has(linkKey(l))),
+    // same-key link whose heat changed — an in-place attribute update, not remove+add (which
+    // would churn the renderer's edge, dropping any live layout/animation state on it)
+    updateLinks: next.links.filter(l => {
+      const p = prevL.get(linkKey(l))
+      return p !== undefined && p.heat !== l.heat
+    }),
   }
 }
