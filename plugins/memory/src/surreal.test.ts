@@ -253,7 +253,10 @@ describe('SurrealMemory.applyEvent', () => {
 
   // (a) The v1 blueprint ranked a walked edge above an untouched sibling — that passes from node
   // heat alone and never exercises the edge code. Here node heat is forced EQUAL (one hit each,
-  // same timestamp): only the edge boost can break the tie.
+  // same timestamp): only the edge boost can break the tie. Ids are deliberately chosen so
+  // alphabetical order OPPOSES the intended winner (walked 'edge-z' vs untouched 'edge-a') —
+  // rankNeighbors' tie-break sort is `localeCompare(id)`, so a same-named-the-other-way test
+  // would pass on tie-break luck even with a no-op boost. Score is asserted directly too.
   it('an edge walked with provenance outranks a structurally-identical untouched sibling at equal node heat', async () => {
     const t = await createTestSurreal(); drops.push(t.drop)
     const m = await SurrealMemory.open(t)
@@ -263,27 +266,30 @@ describe('SurrealMemory.applyEvent', () => {
       m.applyEvent(eventFixture({ seq: ++seq, ts, kind, payload }))
     const note = (id: string, links: Array<{ id: string; kind: 'relates_to' }> = []) =>
       apply(EVENT_KIND.memory_written, { note: { id, scope: 'project', title: id, links }, author: { source: 'cli' } })
+    await note('edge-z')
     await note('edge-a')
-    await note('edge-b')
-    await note('edge-seed', [{ id: 'edge-a', kind: 'relates_to' }, { id: 'edge-b', kind: 'relates_to' }])
-    // A is reached WITH provenance — the edge itself earns credit; B is read directly — same
-    // node-level hit, but no edge to strengthen.
+    await note('edge-seed', [{ id: 'edge-z', kind: 'relates_to' }, { id: 'edge-a', kind: 'relates_to' }])
+    // Z is reached WITH provenance — the edge itself earns credit; A is read directly — same
+    // node-level hit, but no edge to strengthen. A would win a same-score tie-break sort
+    // (localeCompare), so Z winning proves the boost, not alphabetical luck.
     await apply(EVENT_KIND.memory_accessed, {
-      id: 'edge-a', scope: 'project', mode: 'read', author: { source: 'cli' },
+      id: 'edge-z', scope: 'project', mode: 'read', author: { source: 'cli' },
       via: { seed: 'edge-seed', kind: 'relates_to', direction: 'out' },
     })
-    await apply(EVENT_KIND.memory_accessed, { id: 'edge-b', scope: 'project', mode: 'read', author: { source: 'cli' } })
+    await apply(EVENT_KIND.memory_accessed, { id: 'edge-a', scope: 'project', mode: 'read', author: { source: 'cli' } })
 
     const ranked = await m.neighbors('edge-seed', { now: ts })
     // node heat is EQUAL: both notes were hit exactly once at the same timestamp
-    const actA = ranked.find(n => n.id === 'edge-a')!.activation
-    const actB = ranked.find(n => n.id === 'edge-b')!.activation
-    expect(actA).toBe(actB)
-    expect(actA).toBeGreaterThan(0)
-    // ...yet A outranks B — the only remaining discriminator is the edge boost
-    expect(ranked.map(n => n.id)[0]).toBe('edge-a')
+    const z = ranked.find(n => n.id === 'edge-z')!
+    const a = ranked.find(n => n.id === 'edge-a')!
+    expect(z.activation).toBe(a.activation)
+    expect(z.activation).toBeGreaterThan(0)
+    // ...yet Z outranks A — the only remaining discriminator is the edge boost (score checked
+    // directly, not just rank, so a tie-break-driven pass is impossible)
+    expect(z.score).toBeGreaterThan(a.score)
+    expect(ranked.map(n => n.id)[0]).toBe('edge-z')
 
-    const link = await rawLinkRow(t, 'edge-seed', 'edge-a', 'relates_to')
+    const link = await rawLinkRow(t, 'edge-seed', 'edge-z', 'relates_to')
     expect(link?.hits).toBe(1)
     await m.close()
   })
