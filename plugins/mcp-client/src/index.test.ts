@@ -20,7 +20,7 @@ describe('createMcpHub', () => {
     expect(echo!.name).toBe('mcp__fixture__echo')
     expect(echo!.ref).toBe('fixture/echo')
     expect(echo!.description).toBe('echo text back')
-    expect((echo!.inputSchema as { properties?: Record<string, unknown> }).properties).toHaveProperty('text')
+    expect(echo!.inputSchema.properties).toHaveProperty('text')
     const r = await echo!.execute({ text: 'hi' })
     expect(r.isError).toBe(false)
     expect(JSON.stringify(r.output)).toContain('echo: hi')
