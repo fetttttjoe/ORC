@@ -13,7 +13,7 @@ const link = (id: string, kind: MemoryLink['kind']): MemoryLink => ({ id, kind }
 describe('planGraphHash', () => {
   it('is canonical across note order and changes with reviewed graph content/order', () => {
     expect(typeof groundedPlan.planGraphHash).toBe('function')
-    const hash = (groundedPlan as typeof groundedPlan & { planGraphHash(notes: MemoryNote[]): string }).planGraphHash
+    const hash = groundedPlan.planGraphHash
     const notes = [
       note({ id: 'masterplan', links: [link('a', LINK_KIND.decomposes_into), link('b', LINK_KIND.decomposes_into)] }),
       note({ id: 'a', body: 'A', uncertainty: ['verify A'] }),
