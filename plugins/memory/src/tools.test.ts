@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'bun:test'
 import { z } from 'zod'
-import { MEMORY_ACCESS, MEMORY_LIMITS, MemoryNoteInput, type MemoryAccessMode, type MemoryNote, type MemoryNoteDraft, type MemoryStore, type NoteSummary } from '@orc/contracts'
+import { MEMORY_ACCESS, MEMORY_LIMITS, MemoryNoteInput, MemoryWriteResult, type MemoryAccessMode, type MemoryNote, type MemoryNoteDraft, type MemoryStore, type NoteSummary } from '@orc/contracts'
 import { MEMORY_READ_TOOLS, memoryTools, tierForRole } from './tools'
 
 const toNote = (input: MemoryNoteDraft): MemoryNote =>
@@ -85,6 +85,24 @@ describe('memory tools', () => {
 
     await write.execute({ id: 'auth', title: 'Auth' }) // no toolCallId (e.g. CLI path)
     expect(written[1]?.idempotencyKey).toBeUndefined()
+  })
+
+  it('memory_write without id derives the title slug — same finding, one id', async () => {
+    const { store } = fakeStore()
+    const write = memoryTools(store, { source: 'cli' }).find(t => t.name === 'memory_write')!
+    const w1 = await write.execute({ title: 'Approval Gate Mechanism', summary: 'v1' })
+    const w2 = await write.execute({ title: 'Approval Gate Mechanism!', summary: 'v2' })
+    expect(w1.isError).toBe(false)
+    expect(MemoryWriteResult.parse(w1.output).id).toBe('approval-gate-mechanism')
+    expect(MemoryWriteResult.parse(w2.output).id).toBe('approval-gate-mechanism') // same slug at the boundary
+  })
+
+  it('memory_write without id and an unsluggable title fails naming the fix, not the CLI-flavored message', async () => {
+    const { store } = fakeStore()
+    const write = memoryTools(store, { source: 'cli' }).find(t => t.name === 'memory_write')!
+    const r = await write.execute({ title: '—' })
+    expect(r.isError).toBe(true)
+    expect(r.output).toMatchObject({ error: expect.stringMatching(/pass an explicit id/) })
   })
 
   it('budgets search results and reports truncation with a next hint', async () => {
