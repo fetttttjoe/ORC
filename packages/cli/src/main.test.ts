@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import type { Command } from 'commander'
 import { Surreal } from 'surrealdb'
-import { EVENT_KIND, MemoryAccessedPayload, isRecord, type ExecutionPort, type OperationSpec } from '@orc/contracts'
+import { EVENT_KIND, MemoryAccessedPayload, RUN_OUTCOME, isRecord, type ExecutionPort, type OperationSpec } from '@orc/contracts'
 import { loadConfig, projectDatabaseName, requireProject, type ProjectConfig } from '@orc/kernel'
 import { createTestDb, TEST_PROJECT_ID } from '@orc/kernel/test-helpers'
 import { buildProgram, openKernel, runInit } from './main'
@@ -337,11 +337,12 @@ describe('orc CLI', () => {
     })
     const lines: string[] = []
     spyOn(console, 'log').mockImplementation((...a: unknown[]) => { lines.push(a.join(' ')) })
-    // `reply` calls needPort() before replyFeedback (DBOS.send needs DBOS launched in-process) —
-    // this stub only satisfies that gate; `reply` never calls any of its methods. The real
-    // send path is exercised through the injected `send` above, not through this fake port.
+    // `reply` calls needPort() before replyFeedback (DBOS.send needs DBOS launched in-process), and
+    // then ATTACHES to the run it just unblocked — answering without driving is what left runs
+    // parked. The real send path is still the injected `send` above; startRun here only stands in
+    // for the driver so the reply can complete.
     const stubPort: ExecutionPort = {
-      startRun: async () => { throw new Error('unused in this test') },
+      startRun: async () => ({ workflowId: 'run:x:v1', wait: async () => RUN_OUTCOME.done }),
       retry: async () => { throw new Error('unused in this test') },
       cancelRun: async () => {},
     }

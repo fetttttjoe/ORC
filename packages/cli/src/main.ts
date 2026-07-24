@@ -2,7 +2,7 @@ import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync } from '
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { Command, InvalidArgumentError } from 'commander'
-import { EDGE_DIRECTION, EVENT_KIND, LINK_KINDS, MEMORY_ACCESS, NOTE_TIERS, NoteTier, PlanDraft, RUN_OUTCOME, STRATEGY, TASK_STATUS, LinkKind, slugId, type Analyzer, type EventRecord, type ExecutionPort, type Plan, type RunHandle } from '@orc/contracts'
+import { EDGE_DIRECTION, EVENT_KIND, LINK_KINDS, MEMORY_ACCESS, NOTE_TIERS, NoteTier, PlanDraft, RUN_OUTCOME, STRATEGY, TASK_STATUS, LinkKind, slugId, type Analyzer, type RunOutcome, type EventRecord, type ExecutionPort, type Plan, type RunHandle } from '@orc/contracts'
 import { openStorage, Kernel, fold, grantExtensionTrust, grantMcpTrust, initializeProject, isExtensionTrusted, isMcpTrusted, loadConfig, loadTrust, migrateDatabase, requireProject, taskUsage, type EventLog, type OrcConfig, type PluginHost, type ProjectConfig, type Storage } from '@orc/kernel'
 import { createVaultProjector, parsePlanFile } from '@orc/vault-projector'
 import { consolidateTask, probeMemory, staleNotes, DEFAULT_SWEEP_DAYS } from '@orc/memory'
@@ -101,6 +101,13 @@ function parseNonNegativeInteger(value: string): number {
   return parsed
 }
 
+function parsePositiveNumber(value: string): number {
+  const parsed = Number(value)
+  if (!Number.isFinite(parsed) || parsed <= 0)
+    throw new InvalidArgumentError(`must be a positive amount, got '${value}'`)
+  return parsed
+}
+
 // Same discipline as `neighbors --kinds`: reject an unknown lane at parse time with the valid set,
 // rather than letting a typo silently filter everything out and read as "this lane is empty".
 function parseNoteTier(value: string): NoteTier {
@@ -134,20 +141,42 @@ function resolveDraft(task: { title: string; spec: string }, opts: { file?: stri
     : singleStepDraft(task, opts.model, opts.skill ?? [], config?.maxIterations)
 }
 
+// A tail ends one of two ways: the run reaches a terminal outcome, or it PARKS on a human gate and
+// cannot move again until someone answers. Parking is not an outcome — the run is alive, durable and
+// resumable — so it is its own case rather than a fake outcome. Before this existed, every driver
+// (`run`, `retry`, `new --strategy grounded-plan`) waited forever on a result that could not arrive,
+// which is indistinguishable at the terminal from a hang.
+type TailResult =
+  | { parked: false; outcome: RunOutcome }
+  | { parked: true; question: string }
+
 // stream-driven tail (spec §5): no polling — LISTEN/NOTIFY pushes each event as it commits
-async function tailUntilDone(kernel: Kernel, taskId: string, handle: RunHandle): Promise<string> {
+async function tailUntilDone(kernel: Kernel, taskId: string, handle: RunHandle): Promise<TailResult> {
   const print = (e: EventRecord) => console.log(`${String(e.seq).padStart(4)}  ${e.kind}${e.stepId ? `  ${e.stepId}` : ''}`)
   let lastSeen = Math.max(0, ...(await kernel.eventsFor(taskId)).map(e => e.seq))
+  let onPark: (question: string) => void = () => {}
+  const parked = new Promise<TailResult>(resolve => { onPark = question => resolve({ parked: true, question }) })
   const unsub = await kernel.subscribe({ fromSeq: lastSeen }, e => {
-    if (e.taskId === taskId) { print(e); lastSeen = e.seq }
+    if (e.taskId !== taskId) return
+    print(e)
+    lastSeen = e.seq
+    // a gate event only parks the run if it is STILL unanswered when we look: an answer landing in
+    // the same window means the step is about to resume, not stop. openFeedback is the one
+    // derivation the reply side uses too, so "open" can never mean two things.
+    if (e.kind === EVENT_KIND.feedback_requested)
+      void kernel.openFeedback(taskId).then(open => { if (open) onPark(open.question) }).catch(() => {})
   })
   try {
-    return await handle.wait()
+    // already parked when we attached — report instead of waiting on a result nobody will produce
+    const open = await kernel.openFeedback(taskId)
+    if (open) return { parked: true, question: open.question }
+    return await Promise.race([handle.wait().then(outcome => ({ parked: false as const, outcome })), parked])
   } finally {
     await unsub()
     for (const e of await kernel.eventsSince(taskId, lastSeen)) print(e) // drain final window
   }
 }
+
 
 export function buildProgram(
   kernel: Kernel,
@@ -176,24 +205,26 @@ export function buildProgram(
     .option('--strategy <s>', `bootstrap strategy ('${STRATEGY.groundedPlan}' starts an analyze→plan conversation instead of a bare draft task)`)
     .option('--model <ref>', `model for the grounded-plan analyze/plan steps (required with --strategy ${STRATEGY.groundedPlan})`)
     .option('--analyzer <ref>', 'analyzer for the grounded-plan analyze step', 'agent-analyzer')
-    .action(async (title: string, opts: { spec: string; parent?: string; strategy?: string; model?: string; analyzer: string }) => {
+    // TaskNode.budgetUSD has been enforced by the kernel all along (proposeSplit debits a child's
+    // budget from the parent's remaining), but nothing could SET it — a spend cap no caller can
+    // turn on is a cap that does not exist.
+    .option('--budget <usd>', 'cap total spend for this task and its subtree', parsePositiveNumber)
+    .action(async (title: string, opts: { spec: string; parent?: string; strategy?: string; model?: string; analyzer: string; budget?: number }) => {
       if (opts.strategy !== undefined && !(Object.values(STRATEGY) as string[]).includes(opts.strategy))
         throw new Error(`unknown --strategy '${opts.strategy}' — valid strategies: ${Object.values(STRATEGY).join(', ')}`)
       if (opts.strategy !== STRATEGY.groundedPlan) {
-        const t = await kernel.createTask({ title, spec: opts.spec, parentId: opts.parent })
+        const t = await kernel.createTask({ title, spec: opts.spec, parentId: opts.parent, budgetUSD: opts.budget ?? null })
         console.log(t.id)
         return
       }
       if (!opts.model) throw new Error(`--model is required with --strategy ${STRATEGY.groundedPlan}`)
-      const t = await kernel.createGroundedTask({ title, spec: opts.spec, modelRef: opts.model, analyzerRef: opts.analyzer })
+      const t = await kernel.createGroundedTask({ title, spec: opts.spec, modelRef: opts.model, analyzerRef: opts.analyzer, budgetUSD: opts.budget ?? null })
       console.log(t.id)
       // auto-start: the grounded-plan template is policy-approved (its real gate is the
       // conversational one inside the plan step), so the analyze→plan conversation begins now
       const handle = await (await needPort()).startRun(t.id, { cwd: plugin?.config.dir ?? process.cwd() })
       console.log(`run ${handle.workflowId} started — tailing events (ctrl-c stops the run; re-run orc run ${t.id} to resume)`)
-      const outcome = await tailUntilDone(kernel, t.id, handle)
-      console.log(`run finished: ${outcome}`)
-      process.exitCode = outcome === 'done' ? 0 : 1
+      await driveRun(t.id, handle)
     })
 
   const requireTask = async (taskId: string) => {
@@ -269,14 +300,23 @@ export function buildProgram(
 
   program
     .command('reply <taskId> <text>')
-    .description("answer a task's open feedback question (e.g. 'orc reply <taskId> approve'), resuming the waiting step")
+    .description("answer a task's open feedback question (e.g. 'orc reply <taskId> approve'), then drive the resumed run")
     .action(async (taskId: string, text: string) => {
       // DBOS.send (behind kernel.send) requires DBOS launched in THIS process — reply typically
       // runs in a fresh CLI invocation, separate from the `orc run` it's answering, so the port
       // must be brought up here first, exactly like run/retry/cancel do.
-      await needPort()
+      const port = await needPort()
       const topic = await kernel.replyFeedback(taskId, text)
-      console.log(topic ? `answered feedback:${topic}` : `no open feedback question for task '${taskId}'`)
+      if (!topic) {
+        console.log(`no open feedback question for task '${taskId}'`)
+        return
+      }
+      console.log(`answered feedback:${topic}`)
+      // Sending the answer only UNBLOCKS the step — something still has to execute it. Nothing in
+      // this system supervises runs: a run is driven by the process that attached to it, so a reply
+      // from a fresh terminal left the answer sitting durable in DBOS's notification table while the
+      // run stayed parked. Attaching here is what makes this command's promise true.
+      await driveRun(taskId, await port.startRun(taskId, { cwd: plugin?.config.dir ?? process.cwd() }))
     })
 
   program
@@ -358,21 +398,35 @@ export function buildProgram(
     return portFactory()
   }
 
+  // Drive an already-started run to its next stopping point and report what happened. The ONE place
+  // `new`, `run`, `retry` and `reply` share, so they cannot drift on what a terminal outcome, a
+  // cancellation, or a parked human gate means at the shell.
+  const driveRun = async (taskId: string, handle: RunHandle): Promise<void> => {
+    // A DBOS-cancelled workflow's getResult() REJECTS (split-run.test.ts:245 notes it may resolve
+    // or reject). `orc cancel` from another terminal is an advertised path — the intro line
+    // promises ctrl-c stops the run — so surfacing it as a raw driver error and exit 1 is
+    // indistinguishable from a crash, while `orc status` correctly reads 'cancelled'.
+    const result = await tailUntilDone(kernel, taskId, handle).catch(async (err): Promise<TailResult> => {
+      if ((await kernel.getTask(taskId))?.status === TASK_STATUS.cancelled)
+        return { parked: false, outcome: RUN_OUTCOME.cancelled }
+      throw err
+    })
+    // A parked run is not a failure: the work is durable and waiting on a person, so exit 0 and
+    // name the one command that unparks it.
+    if (result.parked) {
+      console.log(`run parked on a question: ${result.question}`)
+      console.log(`answer it to continue: orc reply ${taskId} <text>`)
+      return
+    }
+    console.log(`run finished: ${result.outcome}`)
+    process.exitCode = result.outcome === RUN_OUTCOME.done ? 0 : 1
+  }
+
   const execAction = (start: (port: ExecutionPort, taskId: string, cwd?: string) => Promise<RunHandle>, intro: (h: RunHandle, taskId: string) => string) =>
     async (taskId: string, opts: { cwd?: string }) => {
       const handle = await start(await needPort(), taskId, opts.cwd)
       console.log(intro(handle, taskId))
-      // A DBOS-cancelled workflow's getResult() REJECTS (split-run.test.ts:245 notes it may
-      // resolve or reject). `orc cancel` from another terminal is an advertised path — the intro
-      // line promises ctrl-c stops the run — so surfacing it as a raw driver error and exit 1 is
-      // indistinguishable from a crash, while `orc status` correctly reads 'cancelled'.
-      const outcome = await tailUntilDone(kernel, taskId, handle).catch(async err => {
-        const status = (await kernel.getTask(taskId))?.status
-        if (status === TASK_STATUS.cancelled) return RUN_OUTCOME.cancelled
-        throw err
-      })
-      console.log(`run finished: ${outcome}`)
-      process.exitCode = outcome === RUN_OUTCOME.done ? 0 : 1
+      await driveRun(taskId, handle)
     }
 
   program

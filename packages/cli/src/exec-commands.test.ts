@@ -1,6 +1,6 @@
 import path from 'node:path'
 import { afterAll, afterEach, describe, expect, it, mock, spyOn } from 'bun:test'
-import type { Analyzer, ExecutionPort, OperationSpec, RunHandle } from '@orc/contracts'
+import type { Analyzer, ExecutionPort, OperationSpec, RunHandle, RunOutcome } from '@orc/contracts'
 import { stepFixture } from '@orc/contracts/fixtures'
 import { openStorage } from '@orc/kernel'
 import { createTestDb, TEST_PROJECT_ID } from '@orc/kernel/test-helpers'
@@ -108,6 +108,71 @@ describe('exec commands', () => {
     } finally {
       await rawLog.close()
     }
+  })
+
+  // Regression: a run that parks on ask_human never produces a terminal result, so the tail waited
+  // on a promise that could not resolve — at the terminal that is indistinguishable from a hang,
+  // and it is what killed the driver of a real grounded run mid-question.
+  it('a run parked on a human gate reports the question and stops tailing', async () => {
+    const db = await createTestDb()
+    dbs.push(db)
+    const { kernel, log, storage } = await openKernel(db.url, { projectId: TEST_PROJECT_ID })
+    db.onClose(() => storage.close())
+    const lines: string[] = []
+    spyOn(console, 'log').mockImplementation((...a: unknown[]) => { lines.push(a.join(' ')) })
+    // the workflow is suspended on the gate: its result NEVER arrives
+    const handle: RunHandle = { workflowId: 'run:x:v1', wait: () => new Promise<RunOutcome>(() => {}) }
+    const port: ExecutionPort = { startRun: async () => handle, retry: async () => handle, cancelRun: async () => {} }
+    const run = async (...args: string[]) => buildProgram(kernel, async () => port).parseAsync(args, { from: 'user' })
+    const id = await approvedTask(run, lines)
+    await log.append({
+      taskId: id, stepId: 's1', runToken: 'r1', kind: 'feedback_requested',
+      payload: { question: 'May I analyze the codebase?', topic: `${id}:s1:1` },
+    })
+    lines.length = 0
+
+    await run('run', id) // must RETURN — before the fix this awaited forever
+    const out = lines.join('\n')
+    expect(out).toContain('parked')
+    expect(out).toContain('May I analyze the codebase?')
+    expect(out).toContain(`orc reply ${id}`)
+    expect(out).not.toContain('run finished')
+    await log.close()
+  }, 15_000)
+
+  // `orc reply` used to send the DBOS message and exit, so the answer sat durable while the run
+  // stayed parked — its own description claimed it resumed the step.
+  it('reply drives the run it just unblocked', async () => {
+    const db = await createTestDb()
+    dbs.push(db)
+    const { kernel, log, storage } = await openKernel(db.url, { projectId: TEST_PROJECT_ID })
+    db.onClose(() => storage.close())
+    const { port, calls } = stubPort('done')
+    const lines: string[] = []
+    spyOn(console, 'log').mockImplementation((...a: unknown[]) => { lines.push(a.join(' ')) })
+    const run = async (...args: string[]) => buildProgram(kernel, async () => port).parseAsync(args, { from: 'user' })
+    const id = await approvedTask(run, lines)
+    await log.append({
+      taskId: id, stepId: 's1', runToken: 'r1', kind: 'feedback_requested',
+      payload: { question: 'proceed?', topic: `${id}:s1:1` },
+    })
+    calls.length = 0
+    lines.length = 0
+
+    await run('reply', id, 'yes')
+    expect(calls.some(c => c.startsWith(`start:${id}`))).toBe(true) // attached a driver
+    expect(lines.join('\n')).toContain('run finished: done')
+    await log.close()
+  }, 15_000)
+
+  it('reply without an open question says so and attaches nothing', async () => {
+    const { run, lines, calls } = await makeCli()
+    const id = await approvedTask(run, lines)
+    calls.length = 0
+    lines.length = 0
+    await run('reply', id, 'yes')
+    expect(lines.join('\n')).toContain('no open feedback question')
+    expect(calls).toEqual([])
   })
 
   it('retry and cancel call through', async () => {
