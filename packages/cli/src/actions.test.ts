@@ -38,6 +38,9 @@ async function setup(listModels?: () => Promise<string[]>) {
     plugin: {
       config: testConfig(db.url, {
         projectDbUrl: 'ws://127.0.0.1:1/rpc',
+        // the driver pends on unreachable endpoints, so the connect guard IS the failure path —
+        // at its 5000ms production default the designed failure cannot fit a 5s test budget
+        projectDbConnectTimeoutMs: 300,
         vaultDir: mkdtempSync(path.join(tmpdir(), 'orc-vault-')),
         projectName: 'purge-me', dir: '/tmp/purge-me',
       }),

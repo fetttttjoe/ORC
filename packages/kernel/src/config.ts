@@ -39,6 +39,11 @@ const settingsSchema = (dir: string) =>
     execAllowlist: z.array(z.string().min(1)).default([]),
     ollamaBaseUrl: z.url().default('http://localhost:11434'),
     projectDbUrl: z.string().default('ws://127.0.0.1:8000/rpc'),
+    // ceiling for the surreal driver's initial dial — the driver does not reject unreachable
+    // endpoints on its own (measured: still pending after 400s against a closed port), so this
+    // guard IS the failure path for a down read model. Tests point at dead endpoints on purpose
+    // and lower it so the designed failure fits their budget.
+    projectDbConnectTimeoutMs: z.coerce.number().int().positive().default(5000),
     projectDbName: z.string().default('memory'),
     projectDbNamespace: z.string().default('orc'),
     projectDbUser: z.string().default('root'),
@@ -60,6 +65,7 @@ const envOverrides = (): Record<string, string> => {
     memoryHalfLifeDays: process.env.ORC_MEMORY_HALF_LIFE_DAYS,
     ollamaBaseUrl: process.env.OLLAMA_BASE_URL,
     projectDbUrl: process.env.ORC_PROJECT_DB_URL,
+    projectDbConnectTimeoutMs: process.env.ORC_PROJECT_DB_CONNECT_TIMEOUT_MS,
     projectDbName: process.env.ORC_PROJECT_DB_NAME,
     projectDbNamespace: process.env.ORC_PROJECT_DB_NAMESPACE,
     projectDbUser: process.env.ORC_PROJECT_DB_USER,
