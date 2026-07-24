@@ -5,7 +5,7 @@ import { createOpenAIProvider } from '@orc/provider-openai'
 import { createOllamaProvider } from '@orc/provider-ollama'
 import { agentAnalyzer } from '@orc/analyzer-agent'
 import { createMcpHub, type McpHub } from '@orc/mcp-client'
-import { createMemory, createMemoryLifecycle, unavailableMemoryTools, tierForRole, type MemoryLifecycle, type MemoryTier } from '@orc/memory'
+import { createMemory, createMemoryLifecycle, unavailableMemoryTools, memoryRoleFor, type MemoryLifecycle, type MemoryRole } from '@orc/memory'
 import { openMemory } from './memory-open'
 import { buildDistiller } from './consolidation-distiller'
 import { createVaultProjector } from '@orc/vault-projector'
@@ -57,7 +57,7 @@ export async function buildRuntime(
   await projector.start()
   let memory: Awaited<ReturnType<typeof createMemory>> | null = null
   let lifecycle: MemoryLifecycle | null = null
-  let buildMemoryTools: (author: MemoryAuthor, tier?: MemoryTier) => ResolvedTool[]
+  let buildMemoryTools: (author: MemoryAuthor, role?: MemoryRole) => ResolvedTool[]
   try {
     memory = await openMemory({ log, config })
     await memory.projector.start()
@@ -81,11 +81,11 @@ export async function buildRuntime(
     providers: host.providers, executors: host.executors,
     skills: host.skills, tools: hub,
     stepTools: p => [
-      // step role keys the memory tier (Task 7): scout/auditor narrow or widen the tool surface
-      // + epistemic posture; every other role (e.g. plain worker steps) gets today's verify tier.
+      // step role keys the memory role (Task 7): scout/auditor narrow or widen the tool surface
+      // + epistemic posture; every other role (e.g. plain worker steps) gets today's verify role.
       ...buildMemoryTools(
         { source: 'agent', taskId: p.taskId, stepId: p.stepId, runToken: p.runToken, executor: p.executor, model: p.model, role: p.role },
-        tierForRole(p.role),
+        memoryRoleFor(p.role),
       ),
       splitTool({ kernel, config: { approvalPolicy: config.approvalPolicy, maxDepth: config.maxDepth }, p }),
       // read_annotations only needs the kernel (reads plan_annotated off the log) — unconditional,

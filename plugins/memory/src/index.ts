@@ -4,13 +4,13 @@ import { EventLog, type ProjectConfig } from '@orc/kernel'
 import { openKnowledge, type Knowledge } from './knowledge'
 import { createMemoryStore } from './store'
 import { createMemoryProjector, KNOWLEDGE_KINDS, type MemoryProjector } from './projector'
-import { memoryTools, type MemoryTier } from './tools'
+import { memoryTools, type MemoryRole } from './tools'
 
 export { SurrealMemory } from './surreal'
 export { openKnowledge, type Knowledge } from './knowledge'
 export { createMemoryStore } from './store'
 export { createMemoryProjector } from './projector'
-export { memoryTools, unavailableMemoryTools, MEMORY_READ_TOOLS, MEMORY_TIER, tierForRole, type MemoryTier } from './tools'
+export { memoryTools, unavailableMemoryTools, MEMORY_READ_TOOLS, MEMORY_ROLE, memoryRoleFor, type MemoryRole } from './tools'
 export { renderMemoryIndex, rebuildVaultMemory } from './memory-index'
 export { orphanedNotes, staleNotes, DEFAULT_SWEEP_DAYS, type SweptNote, type StaleNote } from './sweep'
 export { consolidatedNote, consolidateTask, isSubstantive, CONSOLIDATED_TAG, type ConsolidationInput, type ConsolidationDeps, type ConsolidationDistiller, type DistilledText, type StepOutcome } from './consolidate'
@@ -33,7 +33,7 @@ export async function gitRevision(dir: string): Promise<string | null> {
 export async function createMemory(opts: { log: EventLog; config: ProjectConfig; embedder?: EmbeddingProvider }): Promise<{
   store: MemoryStore
   projector: MemoryProjector
-  buildTools: (author: MemoryAuthor, tier?: MemoryTier) => ResolvedTool[]
+  buildTools: (author: MemoryAuthor, role?: MemoryRole) => ResolvedTool[]
   close: () => Promise<void>
 }> {
   const knowledge = await openKnowledge(opts.config, opts.embedder)
@@ -41,7 +41,7 @@ export async function createMemory(opts: { log: EventLog; config: ProjectConfig;
   const projector = createMemoryProjector({ log: opts.log, surreal: knowledge, vaultDir: opts.config.vaultDir })
   return {
     store, projector,
-    buildTools: (author, tier) => memoryTools(store, author, tier),
+    buildTools: (author, role) => memoryTools(store, author, role),
     close: async () => { await projector.close(); await knowledge.close() },
   }
 }

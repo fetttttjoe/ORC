@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'bun:test'
 import { z } from 'zod'
 import { LINK_KINDS, MEMORY_ACCESS, MEMORY_LIMITS, MemoryNoteInput, MemoryWriteResult, type AccessVia, type MemoryAccessMode, type MemoryNote, type MemoryNoteDraft, type MemoryStore, type NoteSummary } from '@orc/contracts'
-import { MEMORY_READ_TOOLS, memoryTools, tierForRole } from './tools'
+import { MEMORY_READ_TOOLS, memoryTools, memoryRoleFor } from './tools'
 
 const toNote = (input: MemoryNoteDraft): MemoryNote =>
   ({ ...MemoryNoteInput.parse(input), sources: [], createdAt: '', createdBy: '', updatedAt: '', updatedBy: '', revision: 1 })
@@ -242,7 +242,7 @@ describe('memory tools', () => {
   // Comparing memoryTools(store, author) against memoryTools(store, author, 'verify') proves only
   // that the default parameter is 'verify' — both sides are the same call. Appending an
   // epistemics fragment to the verify descriptions moves both sides together and the test stays
-  // green, while every plain worker step (the tierForRole default in production) silently ships a
+  // green, while every plain worker step (the memoryRoleFor default in production) silently ships a
   // changed tool surface to the model. Pin the surface against literals instead.
   it('verify tier carries the full tool set with NO epistemics fragment appended', () => {
     const { store } = fakeStore()
@@ -259,11 +259,11 @@ describe('memory tools', () => {
     }
   })
 
-  it('tierForRole is the single source both prod (runtime.ts) and the grounded e2e derive tier from', () => {
-    expect(tierForRole('scout')).toBe('scout')
-    expect(tierForRole('auditor')).toBe('auditor')
-    expect(tierForRole('implementer')).toBe('verify')
-    expect(tierForRole('anything-else')).toBe('verify')
+  it('memoryRoleFor is the single source both prod (runtime.ts) and the grounded e2e derive the role from', () => {
+    expect(memoryRoleFor('scout')).toBe('scout')
+    expect(memoryRoleFor('auditor')).toBe('auditor')
+    expect(memoryRoleFor('implementer')).toBe('verify')
+    expect(memoryRoleFor('anything-else')).toBe('verify')
   })
 
   it('memory_write advertises the same collection and text limits it enforces', () => {
