@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import type { Command } from 'commander'
 import { Surreal } from 'surrealdb'
-import { EVENT_KIND, MemoryAccessedPayload, type ExecutionPort, type OperationSpec } from '@orc/contracts'
+import { EVENT_KIND, MemoryAccessedPayload, isRecord, type ExecutionPort, type OperationSpec } from '@orc/contracts'
 import { loadConfig, projectDatabaseName, requireProject, type ProjectConfig } from '@orc/kernel'
 import { createTestDb, TEST_PROJECT_ID } from '@orc/kernel/test-helpers'
 import { buildProgram, openKernel, runInit } from './main'
@@ -22,6 +22,18 @@ const overrideExits = (program: ReturnType<typeof buildProgram>): ReturnType<typ
   return program
 }
 import { buildPlugins } from './runtime'
+
+// memory_written / memory_deleted payloads read at the boundary (cli has no zod — narrow
+// with isRecord instead of casting a lie about the payload shape).
+const notePayloadId = (payload: unknown): string => {
+  if (!isRecord(payload) || !isRecord(payload.note) || typeof payload.note.id !== 'string')
+    throw new Error('event payload has no note.id')
+  return payload.note.id
+}
+const deletedAuthorTaskId = (payload: unknown): string | undefined => {
+  if (!isRecord(payload) || !isRecord(payload.author)) throw new Error('event payload has no author')
+  return typeof payload.author.taskId === 'string' ? payload.author.taskId : undefined
+}
 
 const dbs: Array<{ drop: () => Promise<void> }> = []
 const surrealConfigs: ProjectConfig[] = []
@@ -429,8 +441,8 @@ describe('orc CLI', () => {
     lines.length = 0
     await run('plan-revise', taskId, 'use argon2', '--scope', 'db', 'api')
     const annotated = (await log.byTask(taskId)).filter(e => e.kind === EVENT_KIND.plan_annotated)
-    expect(annotated.map(e => (e.payload as { targetNote: string }).targetNote).sort()).toEqual(['api', 'db'])
-    expect(annotated.every(e => (e.payload as { text: string }).text === 'use argon2')).toBe(true)
+    expect(annotated.map(e => e.payload.targetNote).sort()).toEqual(['api', 'db'])
+    expect(annotated.every(e => e.payload.text === 'use argon2')).toBe(true)
     // one send resumes the plan agent with the revise text — it reads the queued annotations on wake
     expect(sent).toEqual([{ id: runToken, message: 'use argon2', topic: 'feedback:auth-1' }])
     await log.close()
@@ -499,7 +511,7 @@ describe('orc CLI', () => {
     // true independent of SurrealDB, which every other assertion below depends on.
     const written = (await log.all()).find(e => e.kind === EVENT_KIND.memory_written)
     expect(written).toBeDefined()
-    expect((written!.payload as { note: { id: string } }).note.id).toBe(id)
+    expect(notePayloadId(written!.payload)).toBe(id)
 
     // Isolated db — safe to clear-and-replay from this test's own event log only.
     await run('memory', 'rebuild')
@@ -674,8 +686,8 @@ describe('cancel-sweep wiring (real plugin, stub port)', () => {
     expect(out).toContain('swept wiring-orphan')
     expect(out).not.toContain('swept wiring-adopted')
     const deleted = (await log.all()).filter(e => e.kind === EVENT_KIND.memory_deleted)
-    expect(deleted.map(e => (e.payload as { id: string }).id)).toEqual(['wiring-orphan'])
-    expect((deleted[0]!.payload as { author: { taskId?: string } }).author.taskId).toBe(taskId)
+    expect(deleted.map(e => e.payload.id)).toEqual(['wiring-orphan'])
+    expect(deletedAuthorTaskId(deleted[0]!.payload)).toBe(taskId)
 
     // failure path: a sweep failure warns; the cancel itself still exits clean
     const warns: string[] = []

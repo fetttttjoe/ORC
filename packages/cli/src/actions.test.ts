@@ -2,14 +2,22 @@ import { afterAll, describe, expect, it } from 'bun:test'
 import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import { EVENT_KIND, TASK_STATUS, type ExecutionPort } from '@orc/contracts'
-import { Kernel, deriveSystemUrl, initializeProject, openStorage, type ProjectConfig } from '@orc/kernel'
-import { createTestDb, TEST_PROJECT_ID } from '@orc/kernel/test-helpers'
+import { EVENT_KIND, TASK_STATUS, isRecord, type ExecutionPort } from '@orc/contracts'
+import { Kernel, initializeProject, openStorage } from '@orc/kernel'
+import { createTestDb, TEST_PROJECT_ID, testConfig } from '@orc/kernel/test-helpers'
 import { PROJECT_DIR_NOTE_ID } from '@orc/ui-core'
 import { buildOrcActions, modelUniverse } from './actions'
 
 const dbs: Array<{ drop: () => Promise<void> }> = []
 afterAll(async () => { await Promise.all(dbs.map(d => d.drop())) }, 30_000)
+
+// memory_written payload carries the authored note; pin id + title at the read boundary
+// (cli has no zod — narrow with isRecord instead of casting).
+const writtenNote = (payload: unknown): { id: string; title: string } => {
+  if (!isRecord(payload) || !isRecord(payload.note) || typeof payload.note.id !== 'string' || typeof payload.note.title !== 'string')
+    throw new Error('event is not a memory_written note payload')
+  return { id: payload.note.id, title: payload.note.title }
+}
 
 const stubPort: ExecutionPort = {
   startRun: async () => ({ workflowId: 'w1', wait: async () => 'done' as const }),
@@ -28,13 +36,11 @@ async function setup(listModels?: () => Promise<string[]>) {
     // bogus surreal url makes purge's memory rebuild report instead of hang, and the derived
     // system-db url points at a never-created database (the common pre-first-run state)
     plugin: {
-      config: {
-        projectId: TEST_PROJECT_ID,
-        databaseUrl: db.url, projectDbUrl: 'ws://127.0.0.1:1/rpc',
-        systemDatabaseUrl: deriveSystemUrl(db.url, TEST_PROJECT_ID),
+      config: testConfig(db.url, {
+        projectDbUrl: 'ws://127.0.0.1:1/rpc',
         vaultDir: mkdtempSync(path.join(tmpdir(), 'orc-vault-')),
         projectName: 'purge-me', dir: '/tmp/purge-me',
-      } as ProjectConfig,
+      }),
       log: storage.events, storage,
     },
   })
@@ -108,7 +114,7 @@ describe('purgeProject', () => {
     // identity survives the wipe: name + dir notes are re-seeded, so the chat stays listed
     const identity = await openStorage(url, { projectId: TEST_PROJECT_ID })
     const notes = (await identity.events.all()).filter(e => e.kind === EVENT_KIND.memory_written)
-      .map(e => (e.payload as { note: { id: string; title: string } }).note)
+      .map(e => writtenNote(e.payload))
     expect(notes.map(n => [n.id, n.title])).toEqual([['ui-project-name', 'purge-me'], ['ui-project-dir', '/tmp/purge-me']])
     await identity.close()
 
@@ -168,7 +174,7 @@ describe('newProject', () => {
     // the dir note is appended so the chat is locatable (autocomplete, guidance)
     const target = await openStorage(url, { projectId: original })
     const notes = (await target.events.after(0, [EVENT_KIND.memory_written]))
-      .map(e => (e.payload as { note: { id: string; title: string } }).note)
+      .map(e => writtenNote(e.payload))
     expect(notes.find(n => n.id === PROJECT_DIR_NOTE_ID)?.title).toBe(dir)
     await target.close()
 
