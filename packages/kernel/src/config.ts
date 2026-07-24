@@ -30,6 +30,10 @@ const settingsSchema = (dir: string) =>
     // re-heats instantly, rewrites nothing. Threaded to BOTH consumers (store ranking, Task 8;
     // graph heat via sessions, Task 9) so the two surfaces always decay at ONE rate.
     memoryHalfLifeDays: z.coerce.number().positive().default(14),
+    // Task 7 preload budget: token budget for the ONE journaled memory_search the loop runs
+    // before iteration 1, rendered as a "Known project context" block. 0 = off (skip preload
+    // entirely, prompt unchanged) — same escape hatch shape as ambientCapture below.
+    memoryPreloadTokens: z.coerce.number().int().nonnegative().default(800),
     // ambient capture kill switch (Task 4): displaces the manual step-report protocol rule —
     // successful steps auto-persist their signal summary as an expirable plan note, at zero
     // model-call cost. z.stringbool(), NOT z.coerce.boolean(): coerce turns the env string
@@ -68,6 +72,7 @@ const envOverrides = (): Record<string, string> => {
     maxDepth: process.env.ORC_MAX_DEPTH,
     maxIterations: process.env.ORC_MAX_ITERATIONS,
     memoryHalfLifeDays: process.env.ORC_MEMORY_HALF_LIFE_DAYS,
+    memoryPreloadTokens: process.env.ORC_MEMORY_PRELOAD_TOKENS,
     ambientCapture: process.env.ORC_AMBIENT_CAPTURE,
     ollamaBaseUrl: process.env.OLLAMA_BASE_URL,
     projectDbUrl: process.env.ORC_PROJECT_DB_URL,

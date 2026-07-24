@@ -151,6 +151,15 @@ describe('loadConfig', () => {
       expect(loadConfig(mkdtempSync(path.join(tmpdir(), 'orc-'))).ambientCapture).toBe(false)
     })
   })
+  it('memoryPreloadTokens defaults to 800; ORC_MEMORY_PRELOAD_TOKENS overrides it, 0 disables preload', () => {
+    expect(loadConfig(mkdtempSync(path.join(tmpdir(), 'orc-'))).memoryPreloadTokens).toBe(800)
+    withEnv({ ORC_MEMORY_PRELOAD_TOKENS: '300' }, () => {
+      expect(loadConfig(mkdtempSync(path.join(tmpdir(), 'orc-'))).memoryPreloadTokens).toBe(300)
+    })
+    withEnv({ ORC_MEMORY_PRELOAD_TOKENS: '0' }, () => {
+      expect(loadConfig(mkdtempSync(path.join(tmpdir(), 'orc-'))).memoryPreloadTokens).toBe(0)
+    })
+  })
 })
 
 describe('project identity', () => {
