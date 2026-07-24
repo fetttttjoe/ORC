@@ -1,10 +1,10 @@
 import { randomUUID } from 'node:crypto'
-import {
-  AnalysisCompletedPayload, ChildPlanDraft, EVENT_KIND, FeedbackProvidedPayload, ISOLATION_TIER, PlanAnnotatedPayload, PlanDraft, STRATEGY, TASK_STATUS, evaluateApproval, validatePlan, type ChildPlanDraftInput,
-  type Analyzer, type ApprovalPolicy, type EventKind, type EventRecord, type FeedbackRequestedPayload,
+import { MASTERPLAN_NOTE_ID,
+  AnalysisCompletedPayload, ChildPlanDraft, EVENT_KIND, FeedbackProvidedPayload, ISOLATION_TIER, PAYLOAD_SCHEMAS, PlanAnnotatedPayload, PlanDraft, STRATEGY, TASK_STATUS, evaluateApproval, validatePlan, type ChildPlanDraftInput,
+  type Analyzer, type ApprovalPolicy, type EventKind, type EventRecord,
   type PlanNote, type Plan, type PlanStep, type TaskNode, type TaskStatus,
 } from '@orc/contracts'
-import { foldPlanNotes, planGraphHash, planScope, PLAN_STEP_ROLE } from './execution/strategies/grounded-plan'
+import { foldPlanNotes, planGraphHash, planScope, PLAN_STEP_ID, PLAN_STEP_ROLE } from './execution/strategies/grounded-plan'
 import { EventLog, type EventLogOps } from './storage'
 import { fold, subtreeUsage, type State } from './projections'
 import { KERNEL_ERROR_CODE, KernelError } from './errors'
@@ -12,6 +12,15 @@ import { KERNEL_ERROR_CODE, KernelError } from './errors'
 // D6 targeted re-plan (M5b): what listAnnotations hands back to the read_annotations tool — the
 // plan_annotated payload plus the event's own seq, so the agent can order/dedupe across rounds.
 export type PlanAnnotation = PlanAnnotatedPayload & { seq: number }
+
+// One open feedback question, already parsed. The raw event travels with it because the reply path
+// resumes the step/run envelope the question was asked from.
+interface OpenRequest {
+  event: EventRecord
+  topic: string
+  question: string
+  noteId?: string
+}
 
 export class Kernel {
   constructor(
@@ -46,10 +55,10 @@ export class Kernel {
       const task = await this.createTaskIn(tx, { title: input.title, spec, type: 'grounded', budgetUSD: input.budgetUSD })
       const analyzeStep = analyzer.analysisStep({ modelRef: input.modelRef, taskSpec: spec })
       const planStep: PlanStep = {
-        id: 'plan', role: PLAN_STEP_ROLE, title: 'Author the executable plan',
+        id: PLAN_STEP_ID, role: PLAN_STEP_ROLE, title: 'Author the executable plan',
         // the concrete scope + root id, so the authoring agent (which never sees its taskId) and
         // finalize_plan agree on where the plan-note graph lives.
-        instructions: `Author the plan-note graph in memory scope '${planScope(task.id)}' with root note id 'masterplan', iterate with the human via ask_human, then call finalize_plan. Follow the plan-authoring skill.`,
+        instructions: `Author the plan-note graph in memory scope '${planScope(task.id)}' with root note id '${MASTERPLAN_NOTE_ID}', iterate with the human via ask_human, then call finalize_plan. Follow the plan-authoring skill.`,
         executorRef: 'api-loop', modelRef: input.modelRef, skillRefs: ['plan-authoring'], toolRefs: [],
         isolation: ISOLATION_TIER.local, zone: [], maxIterations: 30, dependsOn: [analyzeStep.id],
       }
@@ -191,8 +200,13 @@ export class Kernel {
   async listAnnotations(taskId: string): Promise<PlanAnnotation[]> {
     const events = await this.log.byTask(taskId)
     return events
-      .filter(e => e.kind === EVENT_KIND.plan_annotated)
-      .map(e => ({ ...(e.payload as PlanAnnotatedPayload), seq: e.seq }))
+      .flatMap(e => {
+        if (e.kind !== EVENT_KIND.plan_annotated) return []
+        // parsed, not asserted: an annotation whose payload does not parse is not an instruction
+        // the plan agent can act on, and passing it through as a shaped lie is worse than dropping it
+        const p = PAYLOAD_SCHEMAS.plan_annotated.safeParse(e.payload)
+        return p.success ? [{ ...p.data, seq: e.seq }] : []
+      })
   }
 
   // FixE freeze-from-log (M5b): reconstruct the task's plan-note graph from the event log — the
@@ -206,13 +220,27 @@ export class Kernel {
   }
 
   // The latest still-open feedback_requested (no later feedback_provided on its topic), or null.
+  // Returns it PARSED — every caller needs `topic`, and handing back a raw event made each of them
+  // re-assert the payload shape by hand, which is the one thing this codebase does not do at a
+  // boundary. The event travels alongside because the reply path resumes its step/run envelope.
   // The ONE derivation shared by openFeedback (read side) and replyFeedback (write side) — so the
   // question a human sees and the topic a reply resolves can never drift apart. byTask is seq-ordered.
-  private openRequest(events: EventRecord[]): EventRecord | null {
-    const answeredAfter = (seq: number, topic: string): boolean =>
-      events.some(e => e.seq > seq && e.kind === EVENT_KIND.feedback_provided && (e.payload as FeedbackProvidedPayload).topic === topic)
-    return [...events].reverse().find(e =>
-      e.kind === EVENT_KIND.feedback_requested && !answeredAfter(e.seq, (e.payload as FeedbackRequestedPayload).topic)) ?? null
+  private openRequest(events: EventRecord[]): OpenRequest | null {
+    const answers = events.flatMap(e => {
+      if (e.kind !== EVENT_KIND.feedback_provided) return []
+      const p = PAYLOAD_SCHEMAS.feedback_provided.safeParse(e.payload)
+      return p.success ? [{ seq: e.seq, topic: p.data.topic }] : []
+    })
+    for (const event of [...events].reverse()) {
+      if (event.kind !== EVENT_KIND.feedback_requested) continue
+      // lenient like every other fold: a payload that does not parse is not a question anyone can
+      // answer, so it must not present itself as the open gate and wedge the task
+      const p = PAYLOAD_SCHEMAS.feedback_requested.safeParse(event.payload)
+      if (!p.success) continue
+      if (answers.some(a => a.seq > event.seq && a.topic === p.data.topic)) continue
+      return { event, ...p.data }
+    }
+    return null
   }
 
   // D4 gate, read side (M5b): the human-facing "what am I replying to?" — the pending question +
@@ -221,7 +249,7 @@ export class Kernel {
   async openFeedback(taskId: string): Promise<{ topic: string; question: string; noteId?: string } | null> {
     const open = this.openRequest(await this.log.byTask(taskId))
     if (!open) return null
-    const { topic, question, noteId } = open.payload as FeedbackRequestedPayload
+    const { topic, question, noteId } = open
     return { topic, question, ...(noteId ? { noteId } : {}) }
   }
 
@@ -245,10 +273,10 @@ export class Kernel {
       const task = await this.requireTask(tx, taskId)
       const requested = this.openRequest(await tx.byTask(taskId))
       if (!requested) return null
-      const { topic } = requested.payload as FeedbackRequestedPayload
-      if (!requested.stepId || !requested.runToken)
+      const { topic, event } = requested
+      if (!event.stepId || !event.runToken)
         throw new KernelError(KERNEL_ERROR_CODE.invalid_transition, `feedback_requested for topic '${topic}' has no step/run envelope to resume`)
-      const approvingPlan = task.type === 'grounded' && requested.stepId === 'plan'
+      const approvingPlan = task.type === 'grounded' && event.stepId === PLAN_STEP_ID
         && text.trim().toLowerCase() === 'approve'
       const planHash = approvingPlan
         ? planGraphHash(foldPlanNotes(
@@ -260,11 +288,11 @@ export class Kernel {
         topic, text, author: { source: 'cli' }, ...(planHash && { planHash }),
       })
       const provided = await tx.append({
-        taskId, stepId: requested.stepId, runToken: requested.runToken,
+        taskId, stepId: event.stepId, runToken: event.runToken,
         kind: EVENT_KIND.feedback_provided, payload,
-        idempotencyKey: `feedback:${requested.seq}:provided`,
+        idempotencyKey: `feedback:${event.seq}:provided`,
       })
-      return { topic, runToken: requested.runToken, seq: provided.seq }
+      return { topic, runToken: event.runToken, seq: provided.seq }
     })
     if (!open) return null
     await this.send?.(open.runToken, text, `feedback:${open.topic}`, `feedback:${open.seq}`)

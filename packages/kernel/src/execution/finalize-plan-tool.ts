@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import { errorMessage, ApprovalPolicy, type ResolvedTool } from '@orc/contracts'
+import { MASTERPLAN_NOTE_ID, errorMessage, ApprovalPolicy, type ResolvedTool } from '@orc/contracts'
 import type { Kernel } from '../kernel'
 import { instantiateFrozenPlan, planGraphHash, planScope, PLAN_STEP_ROLE } from './strategies/grounded-plan'
 
@@ -38,16 +38,16 @@ export function finalizePlanTool(opts: {
         return { output: { error: `finalize_plan is only valid for a grounded-plan's '${PLAN_STEP_ROLE}' step` }, isError: true }
       try {
         const notes = await kernel.listPlanNotes(p.taskId)
-        if (!notes.some(n => n.id === 'masterplan'))
-          return { output: { error: `no 'masterplan' note in scope '${planScope(p.taskId)}' — author the plan-note graph first` }, isError: true }
+        if (!notes.some(n => n.id === MASTERPLAN_NOTE_ID))
+          return { output: { error: `no '${MASTERPLAN_NOTE_ID}' note in scope '${planScope(p.taskId)}' — author the plan-note graph first` }, isError: true }
         const currentHash = planGraphHash(notes)
         const approvedHash = await kernel.approvedPlanHash(p.taskId, p.runToken)
         if (!approvedHash)
           return { output: { error: 'finalize_plan requires human approval for this plan run' }, isError: true }
         if (approvedHash !== currentHash)
           return { output: { error: 'the plan-note graph changed after approval — ask the human to approve it again' }, isError: true }
-        const plan = instantiateFrozenPlan('masterplan', notes)
-        const master = notes.find(n => n.id === 'masterplan')!
+        const plan = instantiateFrozenPlan(MASTERPLAN_NOTE_ID, notes)
+        const master = notes.find(n => n.id === MASTERPLAN_NOTE_ID)!
         const r = await kernel.proposeSplit({
           parentTaskId: p.taskId, stepId: p.stepId, runToken: p.runToken,
           toolCallId: toolCallId ?? randomUUID(),

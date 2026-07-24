@@ -1,4 +1,4 @@
-import { errorMessage, EVENT_KIND, ISOLATION_TIER, STRATEGY, TASK_STATUS, costUSDFor, parseModelRef, type ExecutionPort, type PlanDraft } from '@orc/contracts'
+import { STEP_ROLE, errorMessage, EVENT_KIND, ISOLATION_TIER, STRATEGY, TASK_STATUS, costUSDFor, parseModelRef, type ExecutionPort, type PlanDraft } from '@orc/contracts'
 import { deriveSystemUrl, initializeProject, loadConfig, openStorage, resetSystemDatabase, subtreeTaskIds, type EventLog, type Kernel, type ProjectConfig, type Storage } from '@orc/kernel'
 import { seedRegistries } from './runtime'
 import { createMemory, orphanedNotes } from '@orc/memory'
@@ -23,7 +23,7 @@ export function singleStepDraft(task: { title: string; spec: string }, modelRef:
     costEstimateUSD: null,
     steps: [{
       id: 's1',
-      role: 'worker',
+      role: STEP_ROLE.worker,
       title: task.title,
       instructions: task.spec === '' ? task.title : task.spec,
       executorRef: 'api-loop',

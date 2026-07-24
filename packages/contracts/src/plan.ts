@@ -26,9 +26,28 @@ export type PlanStep = z.infer<typeof PlanStep>
 // matched values, never scattered literals: routing keys the runtime and M5a split path share.
 export const STRATEGY = { groundedPlan: 'grounded-plan', split: 'split', single: 'template:single' } as const
 
-// The one verification-step id the system recognizes: validatePlan accepts it as the
-// alternative to explicit dependencies, and the grounded freezer maps it to the auditor role.
-export const VERIFY_STEP_ID = 'verify'
+// The well-known ids and roles of a plan, in ONE place. They live in contracts rather than beside
+// the grounded-plan strategy because both sides of the seam need them: the kernel stamps them, and
+// plugins (the analyzer, the executor) match on them without being allowed to import the kernel.
+// Splitting them was why 'masterplan', 'analyze', 'scout' and 'implementer' ended up as scattered
+// literals — a plugin that cannot import the constant retypes the string.
+//
+// VERIFY_STEP_ID: validatePlan accepts it as the alternative to explicit dependencies, and the
+// grounded freezer maps it to the auditor role.
+export const STEP_ID = { analyze: 'analyze', plan: 'plan', verify: 'verify' } as const
+export const VERIFY_STEP_ID = STEP_ID.verify
+
+// The root of a grounded plan-note graph — what the authoring agent names, finalize_plan looks up,
+// and the freezer decomposes from.
+export const MASTERPLAN_NOTE_ID = 'masterplan'
+
+// Step roles the system gives meaning to. `PlanStep.role` stays an open string on purpose — an
+// extension may introduce its own role, and memoryRoleFor maps an unknown one to the default
+// surface — so this is the KNOWN set, not a closed enum.
+export const STEP_ROLE = {
+  scout: 'scout', implementer: 'implementer', auditor: 'auditor', worker: 'worker',
+} as const
+export type StepRole = (typeof STEP_ROLE)[keyof typeof STEP_ROLE]
 
 // The per-task plan-note scope. The authoring agent, finalize_plan, and every UI view derive
 // it from the taskId — one format, one place (was duplicated as ui-core's planScopeName).

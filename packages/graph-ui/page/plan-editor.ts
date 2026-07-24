@@ -4,7 +4,7 @@
 // is gated). @joint/core draws; our draft object stays the single source of truth.
 import { dia, shapes } from '@joint/core'
 import { DirectedGraph } from '@joint/layout-directed-graph'
-import { STRATEGY } from '@orc/contracts'
+import { STEP_ROLE, STRATEGY } from '@orc/contracts'
 import type { PlanStepView } from './api'
 import { el } from './ui/el'
 import { Badge, Btn, KV, toast } from './ui/components'
@@ -155,7 +155,7 @@ export function openPlanEditor(opts: {
     let n = steps.length + 1
     while (byId().has(`s${n}`)) n++
     const s: EditorStep = {
-      id: `s${n}`, role: 'worker', title: `step ${n}`, instructions: 'describe the work',
+      id: `s${n}`, role: STEP_ROLE.worker, title: `step ${n}`, instructions: 'describe the work',
       modelRef: 'anthropic/claude-haiku-4-5', skillRefs: [], maxIterations: 10, dependsOn: [],
     }
     steps.push(s)

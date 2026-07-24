@@ -1,16 +1,16 @@
 import { createHash } from 'node:crypto'
-import { deriveNoteProvenance, EVENT_KIND, LINK_KIND, MemoryDeletedPayload, MemoryNote, MemoryWrittenPayload, NOTE_TIER, PAYLOAD_SCHEMAS, STRATEGY, VERIFY_STEP_ID, planScope, type ChildPlanDraft, type EventRecord, type PlanNote } from '@orc/contracts'
+import { deriveNoteProvenance, EVENT_KIND, LINK_KIND, MemoryDeletedPayload, MemoryNote, MemoryWrittenPayload, MASTERPLAN_NOTE_ID, NOTE_TIER, PAYLOAD_SCHEMAS, STEP_ID, STEP_ROLE, STRATEGY, VERIFY_STEP_ID, planScope, type ChildPlanDraft, type EventRecord, type PlanNote } from '@orc/contracts'
 
 // planScope moved to contracts (one format, one place); re-exported so kernel callers keep working
 export { planScope }
 
 // The grounded plan-authoring step's role. finalize_plan is only meaningful for THIS step, so both
 // createGroundedTask (which stamps it) and finalize_plan's defensive gate reference this one source.
-export const PLAN_STEP_ROLE = 'auditor'
+export const PLAN_STEP_ROLE = STEP_ROLE.auditor
 
 // Its step id, stamped by createGroundedTask — one source, so the step that must produce a plan and
 // the check that it did cannot drift apart.
-export const PLAN_STEP_ID = 'plan'
+export const PLAN_STEP_ID = STEP_ID.plan
 
 // A grounded plan step's whole job is to PRODUCE a plan: a decomposition the human approved, which
 // finalize_plan freezes into a split. Signalling success without one means the agent did the work
@@ -36,7 +36,7 @@ export function groundedPlanOmission(events: EventRecord[], stepId: string, runT
   return split
     ? null
     : 'the plan step signalled success without calling finalize_plan — author the plan-note graph '
-      + `in scope '${planScope(events[0]?.taskId ?? '')}' (root note 'masterplan', each subplan linked `
+      + `in scope '${planScope(events[0]?.taskId ?? '')}' (root note '${MASTERPLAN_NOTE_ID}', each subplan linked `
       + 'decomposes_into), get the human to approve it, then call finalize_plan. Doing the work '
       + 'yourself instead of decomposing it defeats the grounded-plan strategy.'
 }
@@ -44,7 +44,7 @@ export function groundedPlanOmission(events: EventRecord[], stepId: string, runT
 // The grounded analyze step's role (agentAnalyzer.analysisStep stamps it; runtime maps it → the
 // scout memory tier). report_coverage is only meaningful for THIS step, so its gate reads this one
 // source rather than a scattered 'scout' literal.
-export const ANALYZE_STEP_ROLE = 'scout'
+export const ANALYZE_STEP_ROLE = STEP_ROLE.scout
 
 // The auditor role's contract, appended to the verify step's instructions at the freeze so it is
 // part of the plan-hash-approved artifact (not executor policy). Without it an auditor that finds
@@ -109,7 +109,7 @@ export function instantiateFrozenPlan(masterId: string, notes: PlanNote[]): Chil
       return {
         // role mapping at the freeze (P2): the verify subplan runs as auditor — memory tier
         // and prompt framing follow from the role automatically
-        id, role: id === VERIFY_STEP_ID ? 'auditor' : 'implementer', title: n.title,
+        id, role: id === VERIFY_STEP_ID ? STEP_ROLE.auditor : STEP_ROLE.implementer, title: n.title,
         instructions: (n.body || n.summary || n.title)
           + (id === VERIFY_STEP_ID ? `\n\n${AUDITOR_CONTRACT}` : ''),
         dependsOn: n.links.filter(l => l.kind === LINK_KIND.depends_on).map(l => l.id).filter(d => kids.includes(d)),
