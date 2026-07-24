@@ -150,28 +150,45 @@ type TailResult =
   | { parked: false; outcome: RunOutcome }
   | { parked: true; question: string }
 
+// An open question means the run MIGHT be parked — not that it is. A step retry can be running
+// concurrently (the operation journal's stale-attempt fence produces exactly that: attempt 1 asks,
+// attempt 2 works on), and returning then tears the runtime down under live work. So the park is
+// declared only once the stream goes QUIET: any event for this task cancels the pending decision
+// and the tail keeps waiting. A run that is genuinely suspended emits nothing, so it settles fast.
+const PARK_QUIET_MS = 750
+
 // stream-driven tail (spec §5): no polling — LISTEN/NOTIFY pushes each event as it commits
 async function tailUntilDone(kernel: Kernel, taskId: string, handle: RunHandle): Promise<TailResult> {
   const print = (e: EventRecord) => console.log(`${String(e.seq).padStart(4)}  ${e.kind}${e.stepId ? `  ${e.stepId}` : ''}`)
   let lastSeen = Math.max(0, ...(await kernel.eventsFor(taskId)).map(e => e.seq))
-  let onPark: (question: string) => void = () => {}
-  const parked = new Promise<TailResult>(resolve => { onPark = question => resolve({ parked: true, question }) })
+  let quiet: ReturnType<typeof setTimeout> | undefined
+  // assigned synchronously by the Promise executor below, before any subscriber can call it
+  let confirmPark: () => void = () => {}
+  const parked = new Promise<TailResult>(resolve => {
+    // openFeedback is the one derivation the reply side uses too, so "open" can never mean two
+    // things — and re-reading it when the timer fires means an answer that arrived meanwhile wins.
+    confirmPark = () => {
+      quiet = setTimeout(() => {
+        void kernel.openFeedback(taskId)
+          .then(open => { if (open) resolve({ parked: true, question: open.question }) })
+          .catch(() => {})
+      }, PARK_QUIET_MS)
+    }
+  })
   const unsub = await kernel.subscribe({ fromSeq: lastSeen }, e => {
     if (e.taskId !== taskId) return
     print(e)
     lastSeen = e.seq
-    // a gate event only parks the run if it is STILL unanswered when we look: an answer landing in
-    // the same window means the step is about to resume, not stop. openFeedback is the one
-    // derivation the reply side uses too, so "open" can never mean two things.
-    if (e.kind === EVENT_KIND.feedback_requested)
-      void kernel.openFeedback(taskId).then(open => { if (open) onPark(open.question) }).catch(() => {})
+    clearTimeout(quiet) // the run is still moving: whatever we were about to conclude is stale
+    if (e.kind === EVENT_KIND.feedback_requested) confirmPark()
   })
   try {
-    // already parked when we attached — report instead of waiting on a result nobody will produce
-    const open = await kernel.openFeedback(taskId)
-    if (open) return { parked: true, question: open.question }
+    // already at a gate when we attached — same quiet rule, so attaching to a busy run cannot
+    // mistake an older unanswered question for a stopped one
+    if (await kernel.openFeedback(taskId)) confirmPark()
     return await Promise.race([handle.wait().then(outcome => ({ parked: false as const, outcome })), parked])
   } finally {
+    clearTimeout(quiet)
     await unsub()
     for (const e of await kernel.eventsSince(taskId, lastSeen)) print(e) // drain final window
   }

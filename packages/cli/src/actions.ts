@@ -311,6 +311,18 @@ export function buildOrcActions(deps: {
         } catch (err) {
           warnings.push(`memory read model not cleared (${errorMessage(err)}) — its notes will vanish on the next rebuild`)
         }
+        // …and its rendered trace. Only for the HOME project: its vault path comes from config and
+        // is trusted, while a foreign project's vault lives in ITS directory, which this server has
+        // no business deleting from — so that case is reported rather than guessed at.
+        if (projectId === plugin.config.projectId) {
+          try {
+            for (const dir of ['memory', 'tasks']) rmSync(path.join(plugin.config.vaultDir, dir), { recursive: true, force: true })
+          } catch (err) {
+            warnings.push(`vault trace not cleared (${errorMessage(err)})`)
+          }
+        } else {
+          warnings.push(`vault files under that project's own directory are left in place — delete them there if you want them gone`)
+        }
         return { ...counts, warnings }
       } finally {
         await storage.close()

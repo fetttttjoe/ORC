@@ -211,6 +211,15 @@ const knownDirs = (): string[] =>
 function renderNewRequest(): void {
   if (!session.actions) { newRequestHost.replaceChildren(); return }
   if (!canAct()) {
+    // Two different states land here and they must not read the same. With no chat selected at all
+    // — the state right after deleting the one you were in — "read-only chat" describes a chat that
+    // does not exist and points at another that may not either. Say what is actually true, and the
+    // '+ new chat' button below is the way out.
+    if (!sel.project) {
+      newRequestHost.replaceChildren(Empty('no chat selected — create one to start'))
+      renderChatManagement()
+      return
+    }
     // foreign chat: requests would land in the server's project — the server refuses, we don't offer
     const home = projects.find(p => p.id === session.projectId)?.name ?? 'the chat where orc graph runs'
     newRequestHost.replaceChildren(Empty(`read-only chat — requests run in “${home}”`))
