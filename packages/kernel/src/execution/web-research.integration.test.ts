@@ -117,7 +117,7 @@ describe('sourced web research through a durable run (integration)', () => {
     // recursive: non-project scopes nest under a subdirectory (noteRelPath) — Task 4's ambient
     // capture now also lands a plan-scoped step note here, so the scan must not assume a flat dir
     const memoryDir = path.join(vaultDir, 'memory')
-    const everyVaultFile = readdirSync(memoryDir, { recursive: true })
+    const everyVaultFile = readdirSync(memoryDir, { recursive: true, encoding: 'utf8' })
       .map(f => path.join(memoryDir, f))
       .filter(p => statSync(p).isFile())
       .map(p => readFileSync(p, 'utf8')).join('\n')
