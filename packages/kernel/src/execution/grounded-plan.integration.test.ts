@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import {
-  EVENT_KIND, ISOLATION_TIER, LINK_KIND, NOTE_KIND, PAYLOAD_SCHEMAS, SIGNAL_OUTCOME, TASK_STATUS,
+  EVENT_KIND, ISOLATION_TIER, LINK_KIND, NOTE_TIER, PAYLOAD_SCHEMAS, SIGNAL_OUTCOME, TASK_STATUS, type NoteView,
   type AgentExecutor, type Analyzer, type CoverageReport, type EventDraft, type ExecutorContext,
   type MemoryNoteDraft, type PlanStep, type ResolvedTool,
   type SplitResult, type UnifiedEvent,
@@ -79,7 +79,7 @@ function groundedFake(): AgentExecutor<unknown> {
         const answer = yield { type: 'feedback', question: 'May I analyze the codebase to ground the plan? (yes/no)', topic: 'consent', toolCallId: 'consent-1' }
         const analyzed = answer === 'yes'
         if (analyzed)
-          await write('analysis', { id: 'analysis', title: 'Architecture', kind: NOTE_KIND.architecture_current, body: 'observed layering', summary: 'the shape of the code', paths: ['src/'] })
+          await write('analysis', { id: 'analysis', title: 'Architecture', kind: 'architecture_current', body: 'observed layering', summary: 'the shape of the code', paths: ['src/'] })
         // The production report_coverage tool emits analysis_completed through Kernel.reportCoverage.
         // This scripted executor checkpoints the equivalent event directly; persisted plan-note
         // uncertainty below remains the end-to-end proof that degraded analysis affects planning.
@@ -100,9 +100,9 @@ function groundedFake(): AgentExecutor<unknown> {
         // masterplan decomposes_into {db, api}; api depends_on db; db carries an uncertainty (RG7 —
         // in assumption mode this is the only ground truth about the gap).
         const notes: Record<string, MemoryNoteDraft> = {
-          masterplan: { id: 'masterplan', title: 'Web app', kind: NOTE_KIND.plan, scope, body: 'build the whole web app', links: [{ id: 'db', kind: LINK_KIND.decomposes_into }, { id: 'api', kind: LINK_KIND.decomposes_into }] },
-          db: { id: 'db', title: 'DB', kind: NOTE_KIND.plan, scope, body: 'create the schema', rationale: 'data model first', uncertainty: ['schema shape unverified — no analysis of existing tables'] },
-          api: { id: 'api', title: 'API', kind: NOTE_KIND.plan, scope, body: 'build the endpoints', rationale: 'consumers need a surface', links: [{ id: 'db', kind: LINK_KIND.depends_on }] },
+          masterplan: { id: 'masterplan', title: 'Web app', tier: NOTE_TIER.plan, scope, body: 'build the whole web app', links: [{ id: 'db', kind: LINK_KIND.decomposes_into }, { id: 'api', kind: LINK_KIND.decomposes_into }] },
+          db: { id: 'db', title: 'DB', tier: NOTE_TIER.plan, scope, body: 'create the schema', rationale: 'data model first', uncertainty: ['schema shape unverified — no analysis of existing tables'] },
+          api: { id: 'api', title: 'API', tier: NOTE_TIER.plan, scope, body: 'build the endpoints', rationale: 'consumers need a surface', links: [{ id: 'db', kind: LINK_KIND.depends_on }] },
         }
         for (const id of ['masterplan', 'db', 'api']) await write(id, notes[id]!)
         const finalize = (checkpoint: string, toolCallId: string) =>
@@ -368,10 +368,12 @@ describe('grounded-plan e2e: the full consent → analyze → plan-graph → ann
       // store (the SurrealDB projection), NOT the event log. Pre-FixA the projection dropped these
       // fields, so this returned [] / '' even though the log carried them; FixA persists them
       // through table/upsert/toNote.
-      expect(await waitFor(async () => ((await memory.store.get('db', scope))?.uncertainty.length ?? 0) > 0)).toBe(true)
-      const dbNote = await memory.store.get('db', scope)
-      expect(dbNote?.uncertainty.length).toBeGreaterThan(0)
-      expect(dbNote?.uncertainty[0]).toContain('unverified')
+      const planNote = async (id: string): Promise<NoteView | undefined> => (await memory.store.get(id, scope)) ?? undefined
+      expect(await waitFor(async () => ((await planNote('db'))?.uncertainty?.length ?? 0) > 0)).toBe(true)
+      const dbNote = await planNote('db')
+      expect(dbNote?.tier).toBe(NOTE_TIER.plan)
+      expect(dbNote?.uncertainty?.length).toBeGreaterThan(0)
+      expect(dbNote?.uncertainty?.[0]).toContain('unverified')
       expect(dbNote?.rationale).toBe('data model first')
     } finally {
       await cleanup()

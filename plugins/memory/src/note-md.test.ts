@@ -1,15 +1,15 @@
 import { describe, expect, it } from 'bun:test'
-import type { MemoryNote } from '@orc/contracts'
+import type { SemanticNote } from '@orc/contracts'
+import { planNoteFixture, semanticNoteFixture } from '@orc/contracts/fixtures'
 import { noteRelPath, renderNoteFile } from './note-md'
 
-const note = (over: Partial<MemoryNote> & { id: string }): MemoryNote => ({
-  scope: 'project', kind: 'fact', sourceRevision: 'abc123def',
+const note = (over: Partial<SemanticNote> & { id: string }): SemanticNote => semanticNoteFixture({
+  sourceRevision: 'abc123def',
   title: 'Auth token refresh flow',
   categories: ['architecture', 'security'], tags: ['auth'],
   links: [{ id: 'session-model', kind: 'refines' }, { id: 'cookie-auth', kind: 'supersedes', confidence: 0.9 }],
   paths: ['packages/kernel/src/auth.ts'], rules: ['Refresh tokens are single-use.'],
   summary: 'Refresh tokens rotate on use.', body: '# Detail\nrotation logic',
-  retention: 'durable', sources: [], rationale: '', uncertainty: [], zone: [],
   createdAt: '2026-07-18T09:12:04Z', createdBy: 'api-loop·sonnet-5·research',
   updatedAt: '2026-07-18T11:30:22Z', updatedBy: 'api-loop·opus·review', revision: 3,
   ...over,
@@ -38,11 +38,12 @@ describe('renderNoteFile', () => {
     expect(noteRelPath(note({ id: 'auth-token-refresh', scope: 'infra' }))).toBe('infra/auth-token-refresh.md')
   })
   it('renders a plan-note with decomposes_into links, rationale, and uncertainty', () => {
-    const md = renderNoteFile(note({
-      id: 'master', kind: 'plan', title: 'build web', rationale: 'why',
+    const md = renderNoteFile(planNoteFixture({
+      id: 'master', scope: 'project', title: 'build web', rationale: 'why',
       uncertainty: ['schema unknown'], links: [{ id: 'db', kind: 'decomposes_into' }],
     }))
-    expect(md).toContain('kind: plan')
+    expect(md).toContain('tier: plan')
+    expect(md).not.toContain('rules:') // a plan note has no retrieval surface to render
     expect(md).toContain('decomposes_into')
     expect(md).toContain('schema unknown')
     expect(md).toContain('## Rationale')

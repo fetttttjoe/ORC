@@ -1,4 +1,4 @@
-import { EVENT_KIND, MemoryAccessedPayload, ModelsDiscoveredPayload, ZERO_USAGE, addUsage, errorMessage, foldLiveNotes, noteKey, type EventRecord, type Plan, type Usage } from '@orc/contracts'
+import { EVENT_KIND, MemoryAccessedPayload, ModelsDiscoveredPayload, ZERO_USAGE, addUsage, errorMessage, foldLiveNotes, noteKey, noteLabel, type EventRecord, type Plan, type Usage } from '@orc/contracts'
 import { fold, foldPlanNotes, listProjectIds, openStorage, planScope, stepUsage, taskUsage, watchProjectIds, type ProjectIdsWatch, type State, type Storage } from '@orc/kernel'
 import { NODE_PREFIX, PROJECT_DIR_NOTE_ID, PROJECT_NAME_NOTE_ID, buildGraph, diffGraphs, emptyPatch, type Graph, type GraphPatch } from './graph'
 import { decompositionMermaid, planMermaid, todoWaves, type TodoWave } from './diagram'
@@ -246,7 +246,7 @@ export function createProjectSessions(opts: {
         // backlinks: notes whose links target this note (links resolve same-scope)
         const backlinks = [...live.values()]
           .filter(({ note }) => note.scope === scope && note.links.some(l => l.id === id))
-          .map(({ note }) => ({ id: note.id, scope: note.scope, title: note.title, kind: note.kind }))
+          .map(({ note }) => ({ id: note.id, scope: note.scope, title: note.title, kind: noteLabel(note) }))
         return { ...payload, hits, backlinks }
       }
       const task = s.state.tasks.get(nodeId)

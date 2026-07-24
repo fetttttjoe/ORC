@@ -1,4 +1,4 @@
-import { EVENT_KIND, LINK_KIND, MemoryAccessedPayload, MemoryScope, NOTE_KIND, PAYLOAD_SCHEMAS, RETENTION, planScope, slugId, type MemoryNote, type MemoryNoteDraft, type MemoryStore } from '@orc/contracts'
+import { EVENT_KIND, LINK_KIND, MemoryAccessedPayload, MemoryScope, NOTE_KIND, NOTE_TIER, PAYLOAD_SCHEMAS, RETENTION, planScope, slugId, type MemoryNote, type MemoryNoteDraft, type MemoryStore } from '@orc/contracts'
 import type { EventLog } from '@orc/kernel'
 
 // One transient step outcome — the (title, summary) of a plan-scoped ambient note a task left behind.
@@ -35,7 +35,9 @@ export function consolidatedNote(input: ConsolidationInput, distilled?: Distille
   const links = [...new Set(input.derivedFrom)].map(id => ({ id, kind: LINK_KIND.derived_from }))
   return {
     id: slugId(`outcome ${input.taskTitle}`), // keyed on the task, distilled or not — stable + idempotent
-    scope: MemoryScope.project, // durable knowledge — the whole point is promotion OUT of plan scope
+    // promotion is the whole point: an episodic per-task trail becomes ONE semantic project claim
+    tier: NOTE_TIER.semantic,
+    scope: MemoryScope.project,
     kind: NOTE_KIND.decision,
     title: (distilled?.title ?? `Outcome: ${input.taskTitle}`).slice(0, 200),
     summary: (distilled?.summary ?? withSummary[0]?.summary ?? input.taskTitle).slice(0, 500),

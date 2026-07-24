@@ -1,17 +1,9 @@
 import { describe, expect, it } from 'bun:test'
-import { MemoryNoteInput, type MemoryNote } from '@orc/contracts'
+import type { SemanticNote } from '@orc/contracts'
+import { planNoteFixture, semanticNoteFixture } from '@orc/contracts/fixtures'
 import { applyBudget, approxTokens, fitMemoryNoteToBudget, TRIM_MARKER } from './budget'
 
-// Minimal valid MemoryNote (provenance fields MemoryNoteInput doesn't cover), with overrides —
-// the pattern the pre-existing budget test below builds inline, factored out for reuse.
-const noteWith = (overrides: Partial<MemoryNote>): MemoryNote => ({
-  ...MemoryNoteInput.parse({ id: 'n', title: 'N' }),
-  sources: [],
-  createdAt: '2026-01-01T00:00:00.000Z', createdBy: 'cli',
-  updatedAt: '2026-01-01T00:00:00.000Z', updatedBy: 'cli',
-  revision: 1,
-  ...overrides,
-})
+const noteWith = (overrides: Partial<SemanticNote>): SemanticNote => semanticNoteFixture(overrides)
 
 describe('applyBudget', () => {
   it('caps by count and by token budget, reporting truncation + omitted', () => {
@@ -31,16 +23,15 @@ describe('applyBudget', () => {
 
 describe('fitMemoryNoteToBudget', () => {
   it('keeps the complete response within the irreducible floor even with oversized provenance', () => {
-    const note: MemoryNote = {
-      ...MemoryNoteInput.parse({
-        id: 'a'.repeat(128), title: 't'.repeat(200),
-        summary: 's'.repeat(50), rationale: 'r'.repeat(50), body: 'b'.repeat(50),
-      }),
-      sources: [],
+    // a PLAN note: the only tier with all three trimmable text fields, so this exercises the
+    // whole ladder in one case
+    const note = planNoteFixture({
+      id: 'a'.repeat(128), title: 't'.repeat(200),
+      summary: 's'.repeat(50), rationale: 'r'.repeat(50), body: 'b'.repeat(50),
       scope: 's'.repeat(1_000), sourceRevision: 'r'.repeat(1_000),
       createdAt: 'c'.repeat(1_000), createdBy: 'c'.repeat(1_000),
       updatedAt: 'u'.repeat(1_000), updatedBy: 'u'.repeat(1_000), revision: 1,
-    }
+    })
     const result = fitMemoryNoteToBudget(note, 1)
     expect(result.truncated).toBe(true)
     expect(JSON.stringify(result).length).toBeLessThanOrEqual(1_024)
@@ -56,17 +47,16 @@ describe('fitMemoryNoteToBudget', () => {
     const long = Array.from({ length: 400 }, (_, i) => `word${i}`).join(' ')
     const { note: fitted, truncated } = fitMemoryNoteToBudget(noteWith({ body: long }), 200)
     expect(truncated).toBe(true)
-    expect(fitted.body.endsWith(TRIM_MARKER)).toBe(true)
-    const kept = fitted.body.slice(0, -TRIM_MARKER.length)
+    expect(fitted.body ?? '').toEndWith(TRIM_MARKER)
+    const kept = (fitted.body ?? '').slice(0, -TRIM_MARKER.length)
     expect(long.startsWith(kept.trimEnd())).toBe(true)
     expect(kept.trimEnd()).toMatch(/word\d+$/) // boundary cut: last token is whole
   })
 
   it('whitespace-free content keeps its budget: mid-word cut + marker, no collapse', () => {
     const { note: fitted } = fitMemoryNoteToBudget(noteWith({ body: 'x'.repeat(4_000) }), 100)
-    // must NOT collapse to ~1 char: backoff only applies when whitespace exists near the cut
-    expect(fitted.body.length).toBeGreaterThan(200) // well over half of contentLimit=400
-    expect(fitted.body.endsWith(TRIM_MARKER)).toBe(true)
+    expect((fitted.body ?? '').length).toBeGreaterThan(200) // well over half of contentLimit=400
+    expect(fitted.body ?? '').toEndWith(TRIM_MARKER)
   })
 
   it('surfaces the next-hint on truncation (regression pin — shipped behavior)', () => {

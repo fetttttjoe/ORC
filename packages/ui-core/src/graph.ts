@@ -1,4 +1,4 @@
-import { activation, DEFAULT_HALF_LIFE_DAYS, edgeKey, foldAccessCounts, foldEdgeStats, foldLiveNotes, noteKey, STEP_RUN_STATUS, type AccessStats, type EventRecord, type LinkKind } from '@orc/contracts'
+import { activation, DEFAULT_HALF_LIFE_DAYS, edgeKey, foldAccessCounts, foldEdgeStats, foldLiveNotes, noteKey, noteLabel, STEP_RUN_STATUS, type AccessStats, type EventRecord, type LinkKind } from '@orc/contracts'
 import type { State } from '@orc/kernel'
 
 export interface GraphNode {
@@ -110,7 +110,7 @@ export function buildGraph(state: State, events: Array<Pick<EventRecord, 'kind' 
   const live = foldLiveNotes(events)
   for (const { note, author } of live.values()) {
     if (isUiMetaNote(note.scope, note.id)) continue // chat metadata is not knowledge
-    nodes.push({ id: noteNodeId(note.scope, note.id), type: 'note', label: note.title, detail: note.kind, heat: heatOf(noteKey(note.scope, note.id)) })
+    nodes.push({ id: noteNodeId(note.scope, note.id), type: 'note', label: note.title, detail: noteLabel(note), heat: heatOf(noteKey(note.scope, note.id)) })
     if (author.taskId && state.tasks.has(author.taskId))
       links.push({ source: author.taskId, target: noteNodeId(note.scope, note.id), type: EDGE.wrote })
     for (const l of note.links) {

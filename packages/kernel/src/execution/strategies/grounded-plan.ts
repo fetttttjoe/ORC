@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { deriveNoteProvenance, EVENT_KIND, LINK_KIND, MemoryDeletedPayload, MemoryNote, MemoryWrittenPayload, VERIFY_STEP_ID, planScope, type ChildPlanDraft, type EventRecord } from '@orc/contracts'
+import { deriveNoteProvenance, EVENT_KIND, LINK_KIND, MemoryDeletedPayload, MemoryNote, MemoryWrittenPayload, NOTE_TIER, VERIFY_STEP_ID, planScope, type ChildPlanDraft, type EventRecord, type PlanNote } from '@orc/contracts'
 
 // planScope moved to contracts (one format, one place); re-exported so kernel callers keep working
 export { planScope }
@@ -20,7 +20,7 @@ export const ANALYZE_STEP_ROLE = 'scout'
 export const AUDITOR_CONTRACT =
   "Auditor rule: if your audit finds ANY defect, signal outcome 'failure' and list every defect in the summary — never 'success' with defects noted inside it. Success means zero defects."
 
-export function planGraphHash(notes: MemoryNote[]): string {
+export function planGraphHash(notes: PlanNote[]): string {
   const canonical = [...notes]
     .sort((a, b) => a.scope.localeCompare(b.scope) || a.id.localeCompare(b.id))
     .map(note => MemoryNote.parse(note))
@@ -34,8 +34,12 @@ export function planGraphHash(notes: MemoryNote[]): string {
 // provenance derivation (surreal.applyEvent) so the note shape matches what instantiateFrozenPlan
 // expects. Pure: the caller supplies the already-read events (scoped to the memory kinds).
 // ponytail: caller hands the full memory-event history; add a scope-indexed read if it ever costs.
-export function foldPlanNotes(events: EventRecord[], scope: string): MemoryNote[] {
-  const byId = new Map<string, MemoryNote>()
+// PLAN TIER ONLY: a task's plan scope also holds the episodic notes its own planning step left
+// behind (ambient capture writes one per step, into the same scope). Those are not part of the
+// decomposition, and including them would let a step note the human never reviewed change the
+// plan hash between approval and freeze.
+export function foldPlanNotes(events: EventRecord[], scope: string): PlanNote[] {
+  const byId = new Map<string, PlanNote>()
   for (const e of events) {
     if (e.kind === EVENT_KIND.memory_written) {
       // lenient like the projector's fold contract: one unparseable/legacy payload (any scope, any
@@ -43,11 +47,12 @@ export function foldPlanNotes(events: EventRecord[], scope: string): MemoryNote[
       const parsed = MemoryWrittenPayload.safeParse(e.payload)
       if (!parsed.success) continue
       const { note, author } = parsed.data
-      if (note.scope !== scope) continue
+      if (note.scope !== scope || note.tier !== NOTE_TIER.plan) continue
       const prev = byId.get(note.id)
       // shared derivation with the projector — this once forgot to stamp sources.retrievedAt and
       // threw MemoryNote.parse on every sourced plan note, blocking approval.
-      byId.set(note.id, MemoryNote.parse({ ...note, ...deriveNoteProvenance(note, author, e.ts, prev) }))
+      const full = MemoryNote.parse({ ...note, ...deriveNoteProvenance(note, author, e.ts, prev) })
+      if (full.tier === NOTE_TIER.plan) byId.set(note.id, full)
     } else if (e.kind === EVENT_KIND.memory_deleted) {
       const del = MemoryDeletedPayload.safeParse(e.payload)
       if (del.success && del.data.scope === scope) byId.delete(del.data.id)
@@ -61,7 +66,7 @@ export function foldPlanNotes(events: EventRecord[], scope: string): MemoryNote[
 // master's decomposes_into children → steps; each child's depends_on links → dependsOn.
 // ponytail: one decomposition level per approve — a subplan that itself decomposes re-splits
 // when its child runs; recurse only when a real 3-level plan needs it.
-export function instantiateFrozenPlan(masterId: string, notes: MemoryNote[]): ChildPlanDraft {
+export function instantiateFrozenPlan(masterId: string, notes: PlanNote[]): ChildPlanDraft {
   const byId = new Map(notes.map(n => [n.id, n]))
   const kids = (byId.get(masterId)?.links ?? []).filter(l => l.kind === LINK_KIND.decomposes_into).map(l => l.id)
   return {

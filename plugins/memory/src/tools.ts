@@ -1,20 +1,21 @@
 import { z } from 'zod'
-import { AccessVia, EDGE_DIRECTIONS, errorMessage, MEMORY_ACCESS, MEMORY_LIMITS, MEMORY_SOURCE_LIMITS, MEMORY_TOOL_NAME, MemorySearchResult, MemoryWriteResult, NOTE_KINDS, LINK_KIND, LINK_KINDS, RETENTION_CLASSES, SEARCH_MODES, SearchMode, LinkKind, MemoryNoteDraftInput, slugId, type MemoryAuthor, type MemoryNote, type MemoryStore, type ResolvedTool } from '@orc/contracts'
+import { AccessVia, EDGE_DIRECTIONS, errorMessage, MEMORY_ACCESS, MEMORY_LIMITS, MEMORY_SOURCE_LIMITS, MEMORY_TOOL_NAME, MemorySearchResult, MemoryWriteResult, NOTE_KINDS, LINK_KIND, LINK_KINDS, RETENTION_CLASSES, SEARCH_MODES, SearchMode, LinkKind, MemoryNoteDraftInput, NOTE_TIER, NOTE_TIERS, slugId, type MemoryAuthor, type MemoryNote, type MemoryStore, type ResolvedTool } from '@orc/contracts'
 import { applyBudget, fitMemoryNoteToBudget } from './budget'
 
 // Advisory note lint, echoed back in the memory_write result so the writing agent can improve
 // the note in its next iteration — warnings, never rejections: a blocked write mid-run burns
 // more tokens than a mediocre note. Thresholds follow the codebase-analysis skill's skeleton.
 const BODY_SOFT_CAP = 1600
-export function noteLint(n: MemoryNote): string[] {
+export function noteLint(note: MemoryNote): string[] {
   const w: string[] = []
-  if (n.body.length > BODY_SOFT_CAP)
-    w.push(`body is ${n.body.length} chars — the skeleton caps at ~1200: move facts into paths/rules/links fields, keep bullets only`)
-  if (n.kind.startsWith('architecture') && n.categories.length === 0)
+  if (note.body.length > BODY_SOFT_CAP)
+    w.push(`body is ${note.body.length} chars — the skeleton caps at ~1200: move facts into paths/rules/links fields, keep bullets only`)
+  // the categories lint targets the retrieval surface, so it only fires on the tier that has one
+  if (note.tier === NOTE_TIER.semantic && note.kind.startsWith('architecture') && note.categories.length === 0)
     w.push(`categories empty — set one of subsystem | cross-cutting | target so category-filtered search finds this`)
-  if (n.links.length >= 3 && n.links.every(l => l.kind === LINK_KIND.relates_to))
+  if (note.links.length >= 3 && note.links.every(l => l.kind === LINK_KIND.relates_to))
     w.push(`every edge is relates_to — type structural edges (decomposes_into for hub→area, depends_on for imports)`)
-  if (n.summary && n.summary.toLowerCase().replace(/[^a-z0-9]/g, '').startsWith(n.title.toLowerCase().replace(/[^a-z0-9]/g, '')))
+  if (note.summary && note.summary.toLowerCase().replace(/[^a-z0-9]/g, '').startsWith(note.title.toLowerCase().replace(/[^a-z0-9]/g, '')))
     w.push(`summary restates the title — it is the retrieval surface; spend it on what searches must find`)
   return w
 }
@@ -98,9 +99,13 @@ export function memoryTools(store: MemoryStore, author: MemoryAuthor, role: Memo
         properties: {
           id: { ...idSchema, description: 'omit id unless you are updating a note whose id you read — the title-derived slug makes the same finding converge instead of forking.' },
           title: { type: 'string', minLength: 1, maxLength: 200 },
+          tier: {
+            type: 'string', enum: [...NOTE_TIERS],
+            description: "which memory this note belongs to (default semantic). semantic = durable project knowledge, and the only tier that takes kind/categories/paths/rules/sources. plan = one node of a task's decomposition, and the only tier that takes rationale/uncertainty/zone. episodic = a record of what one run did, expirable, title+summary+tags only. Fields outside the tier you name are dropped.",
+          },
           kind: {
             type: 'string', enum: [...NOTE_KINDS],
-            description: 'architecture_current = observed implementation; architecture_target = intended design; research = a distilled web finding, which REQUIRES sources (default fact)',
+            description: 'semantic only. architecture_current = observed implementation; architecture_target = intended design; research = a distilled web finding, which REQUIRES sources (default fact)',
           },
           retention: {
             type: 'string', enum: [...RETENTION_CLASSES],
@@ -133,9 +138,9 @@ export function memoryTools(store: MemoryStore, author: MemoryAuthor, role: Memo
           },
           paths: { type: 'array', maxItems: MEMORY_LIMITS.detailItems, items: { type: 'string', maxLength: MEMORY_LIMITS.detailChars }, description: 'code paths this note refers to' },
           rules: { type: 'array', maxItems: MEMORY_LIMITS.detailItems, items: { type: 'string', maxLength: MEMORY_LIMITS.detailChars } },
-          rationale: { type: 'string', maxLength: MEMORY_LIMITS.rationaleChars, description: 'plan-note: why this subplan exists' },
-          uncertainty: { type: 'array', maxItems: MEMORY_LIMITS.detailItems, items: { type: 'string', maxLength: MEMORY_LIMITS.detailChars }, description: 'plan-note: coverage gaps / assumptions to surface (RG7)' },
-          zone: { type: 'array', maxItems: 16, items: { type: 'string', minLength: 1, maxLength: MEMORY_LIMITS.detailChars }, description: "plan-note: workspace-relative write globs this subplan may touch at execution (e.g. 'docs/**'), frozen into the step and enforced as a write-fence. Concurrent writes to one file are refused mechanically regardless — zone additionally scopes WHERE this step may write. Empty = unfenced." },
+          rationale: { type: 'string', maxLength: MEMORY_LIMITS.rationaleChars, description: 'plan tier only: why this subplan exists' },
+          uncertainty: { type: 'array', maxItems: MEMORY_LIMITS.detailItems, items: { type: 'string', maxLength: MEMORY_LIMITS.detailChars }, description: 'plan tier only: coverage gaps / assumptions to surface (RG7)' },
+          zone: { type: 'array', maxItems: 16, items: { type: 'string', minLength: 1, maxLength: MEMORY_LIMITS.detailChars }, description: "plan tier only: workspace-relative write globs this subplan may touch at execution (e.g. 'docs/**'), frozen into the step and enforced as a write-fence. Concurrent writes to one file are refused mechanically regardless — zone additionally scopes WHERE this step may write. Empty = unfenced." },
           scope: idSchema,
         },
       },

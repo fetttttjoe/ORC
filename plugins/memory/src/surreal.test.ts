@@ -1,6 +1,6 @@
 import { afterAll, describe, expect, it } from 'bun:test'
 import { RecordId, Surreal } from 'surrealdb'
-import { EVENT_KIND, MEMORY_ACCESS, isRecord, type AccessVia, type EventKind, type EventRecord, type MemoryAccessMode, type MemoryAuthor } from '@orc/contracts'
+import { EVENT_KIND, MEMORY_ACCESS, isRecord, type AccessVia, type EventKind, type EventRecord, type MemoryAccessMode, type MemoryAuthor, type MemoryNote, type NoteView } from '@orc/contracts'
 import { SurrealMemory } from './surreal'
 import { eventFixture } from '@orc/contracts/fixtures'
 import { createTestSurreal } from './test-helpers'
@@ -10,6 +10,9 @@ const note = (over = {}) => ({
   title: 'Auth', categories: ['security'], tags: ['auth'], links: [], paths: ['src/auth.ts'], rules: [],
   summary: 'tokens rotate', body: 'full text about auth tokens', ...over,
 })
+// tier-specific columns read through the shared view: these tests assert on what the read model
+// stored, not on which lane a fixture happened to land in
+const view = (n: MemoryNote | null): NoteView | undefined => n ?? undefined
 const cli: MemoryAuthor = { source: 'cli' }
 const written = (seq: number, n = note(), author: MemoryAuthor = cli): EventRecord =>
   eventFixture({ seq, taskId: null, kind: 'memory_written', payload: { note: n, author }, ts: `2026-07-18T0${Math.min(seq, 9)}:00:00Z` })
@@ -29,7 +32,7 @@ describe('SurrealMemory.applyEvent', () => {
     let got = await m.get('auth', 'project')
     expect(got?.revision).toBe(1)
     expect(got?.createdBy).toBe('cli')
-    expect(got?.kind).toBe('fact')
+    expect(view(got)?.kind).toBe('fact')
     await m.applyEvent(written(2, note({ summary: 'rotate on use' }), { source: 'agent', executor: 'api-loop', model: 'opus', role: 'review' }))
     got = await m.get('auth', 'project')
     expect(got?.revision).toBe(2)
@@ -138,8 +141,8 @@ describe('SurrealMemory.applyEvent', () => {
     const m = await SurrealMemory.open(t)
     await m.applyEvent(written(1, note({ id: 'plan-db', rationale: 'why', uncertainty: ['schema unknown'] })))
     const got = await m.get('plan-db', 'project')
-    expect(got?.rationale).toBe('why')
-    expect(got?.uncertainty).toEqual(['schema unknown'])
+    expect(view(got)?.rationale).toBe('why')
+    expect(view(got)?.uncertainty).toEqual(['schema unknown'])
     await m.close()
   })
 
@@ -194,14 +197,14 @@ describe('SurrealMemory.applyEvent', () => {
     const e = written(1, cited)
     await m.applyEvent(e)
     const got = await m.get('finding', 'project')
-    expect(got?.sources).toEqual([
+    expect(view(got)?.sources).toEqual([
       { url: 'https://example.test/a', title: 'A', retrievedAt: e.ts },
       { url: 'https://example.test/b', title: undefined, retrievedAt: e.ts },
     ])
     // replaying the same history yields the same stamp — no wall-clock anywhere in the path
     await m.clear()
     await m.applyEvent(e)
-    expect((await m.get('finding', 'project'))?.sources?.[0]?.retrievedAt).toBe(e.ts)
+    expect(view(await m.get('finding', 'project'))?.sources?.[0]?.retrievedAt).toBe(e.ts)
     await m.close()
   })
 

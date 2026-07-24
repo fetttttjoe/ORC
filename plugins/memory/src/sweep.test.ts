@@ -108,3 +108,13 @@ test('reports the observed use that justified the retirement', () => {
     { id: 'n1', scope: 'project', title: 'n1', hits: 1, lastTouchedAt: daysAgo(60) },
   ])
 })
+
+// The episodic tier pins retention to expirable, so the trail a run leaves behind is sweepable by
+// construction — the TTL needs no convention or tag to recognize one.
+test('an episodic note is a sweep candidate without anyone declaring it expirable', () => {
+  const episodic = eventFixture({
+    ts: daysAgo(100), kind: 'memory_written',
+    payload: { note: { tier: 'episodic', id: 'step-a', scope: 'plan-t1', title: 'Step A' }, author: { source: 'agent' } },
+  })
+  expect(swept([episodic])).toEqual(['step-a'])
+})

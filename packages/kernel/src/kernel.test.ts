@@ -354,8 +354,8 @@ describe('Kernel lifecycle', () => {
     const t = await k.createTask({ title: 'grounded', type: 'grounded' })
     const scope = planScope(t.id)
     const author = { source: 'agent' as const }
-    await log.append({ taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_written, payload: { note: { id: 'masterplan', scope, kind: 'plan', title: 'Plan', links: [{ id: 'db', kind: 'decomposes_into' }] }, author } })
-    await log.append({ taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_written, payload: { note: { id: 'db', scope, kind: 'plan', title: 'DB', body: 'schema' }, author } })
+    await log.append({ taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_written, payload: { note: { id: 'masterplan', scope, tier: 'plan', title: 'Plan', links: [{ id: 'db', kind: 'decomposes_into' }] }, author } })
+    await log.append({ taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_written, payload: { note: { id: 'db', scope, tier: 'plan', title: 'DB', body: 'schema' }, author } })
     const runToken = `step:${t.id}:plan:a1`
     await log.append({ taskId: t.id, stepId: 'plan', runToken, kind: EVENT_KIND.feedback_requested, payload: { question: 'approve?', topic: 'plan-1' } })
 
@@ -522,10 +522,10 @@ describe('Kernel lifecycle', () => {
     const scope = planScope(taskId)
     const author = { source: 'agent' as const }
     // memory_written events carry taskId:null (scoped by note.scope) — exactly what store.write appends
-    await log.append({ taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_written, payload: { note: { id: 'masterplan', scope, kind: 'plan', title: 'Web app', links: [{ id: 'db', kind: 'decomposes_into' }] }, author } })
-    await log.append({ taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_written, payload: { note: { id: 'db', scope, kind: 'plan', title: 'DB', body: 'schema' }, author } })
+    await log.append({ taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_written, payload: { note: { id: 'masterplan', scope, tier: 'plan', title: 'Web app', links: [{ id: 'db', kind: 'decomposes_into' }] }, author } })
+    await log.append({ taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_written, payload: { note: { id: 'db', scope, tier: 'plan', title: 'DB', body: 'schema' }, author } })
     // a note in ANOTHER task's scope must not bleed into this task's freeze
-    await log.append({ taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_written, payload: { note: { id: 'masterplan', scope: planScope('other'), kind: 'plan', title: 'Theirs' }, author } })
+    await log.append({ taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_written, payload: { note: { id: 'masterplan', scope: planScope('other'), tier: 'plan', title: 'Theirs' }, author } })
 
     const notes = await k.listPlanNotes(taskId)
     expect(notes.map(n => n.id).sort()).toEqual(['db', 'masterplan'])

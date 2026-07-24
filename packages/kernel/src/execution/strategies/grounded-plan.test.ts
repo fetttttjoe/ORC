@@ -1,13 +1,11 @@
 import { describe, expect, it } from 'bun:test'
-import { EVENT_KIND, LINK_KIND, type EventRecord, type MemoryLink, type MemoryNote } from '@orc/contracts'
+import { EVENT_KIND, LINK_KIND, type EventRecord, type MemoryLink, type PlanNote } from '@orc/contracts'
+import { planNoteFixture } from '@orc/contracts/fixtures'
 import { AUDITOR_CONTRACT, foldPlanNotes, instantiateFrozenPlan, planScope } from './grounded-plan'
 import * as groundedPlan from './grounded-plan'
 
-const note = (over: Partial<MemoryNote> & { id: string }): MemoryNote => ({
-  scope: 'plan-t', kind: 'plan', sourceRevision: null, title: over.id, categories: [], tags: [],
-  links: [], paths: [], rules: [], summary: '', body: '', retention: 'durable', sources: [], rationale: '', uncertainty: [], zone: [],
-  createdAt: '', createdBy: '', updatedAt: '', updatedBy: '', revision: 1, ...over,
-})
+const note = (over: Partial<PlanNote> & { id: string }): PlanNote =>
+  planNoteFixture({ scope: 'plan-t', title: over.id, ...over })
 const link = (id: string, kind: MemoryLink['kind']): MemoryLink => ({ id, kind })
 
 describe('planGraphHash', () => {
@@ -30,7 +28,7 @@ describe('planGraphHash', () => {
 
 describe('instantiateFrozenPlan (pure, deterministic)', () => {
   it('translates decomposes_into children into steps and depends_on into dependsOn', () => {
-    const notes: MemoryNote[] = [
+    const notes: PlanNote[] = [
       note({ id: 'masterplan', links: [link('db', LINK_KIND.decomposes_into), link('api', LINK_KIND.decomposes_into)] }),
       note({ id: 'db', title: 'DB', body: 'create the schema' }),
       note({ id: 'api', title: 'API', body: 'build the api', links: [link('db', LINK_KIND.depends_on)] }),
@@ -43,7 +41,7 @@ describe('instantiateFrozenPlan (pure, deterministic)', () => {
   })
 
   it("freezes a note's declared write zone into the step — the fence, not the skill, holds it", () => {
-    const notes: MemoryNote[] = [
+    const notes: PlanNote[] = [
       note({ id: 'masterplan', links: [link('a', LINK_KIND.decomposes_into), link('b', LINK_KIND.decomposes_into)] }),
       note({ id: 'a', title: 'A', body: 'x', zone: ['docs/**'] }),
       note({ id: 'b', title: 'B', body: 'y' }),
@@ -54,7 +52,7 @@ describe('instantiateFrozenPlan (pure, deterministic)', () => {
   })
 
   it("freezes a 'verify' subplan as auditor; siblings stay implementer", () => {
-    const notes: MemoryNote[] = [
+    const notes: PlanNote[] = [
       note({ id: 'masterplan', links: [link('work', LINK_KIND.decomposes_into), link('verify', LINK_KIND.decomposes_into)] }),
       note({ id: 'work', title: 'Work', body: 'do it' }),
       note({ id: 'verify', title: 'Verify', body: 'audit it', links: [link('work', LINK_KIND.depends_on)] }),
@@ -69,7 +67,7 @@ describe('instantiateFrozenPlan (pure, deterministic)', () => {
   })
 
   it('is a pure function of the notes: same input → identical output', () => {
-    const notes: MemoryNote[] = [
+    const notes: PlanNote[] = [
       note({ id: 'masterplan', links: [link('a', LINK_KIND.decomposes_into)] }),
       note({ id: 'a', title: 'A', summary: 'sum' }),
     ]
@@ -79,7 +77,7 @@ describe('instantiateFrozenPlan (pure, deterministic)', () => {
   })
 
   it('drops depends_on edges to non-siblings (only sibling subplans become dependsOn)', () => {
-    const notes: MemoryNote[] = [
+    const notes: PlanNote[] = [
       note({ id: 'masterplan', links: [link('a', LINK_KIND.decomposes_into)] }),
       note({ id: 'a', title: 'A', links: [link('outsider', LINK_KIND.depends_on)] }),
     ]
@@ -110,9 +108,9 @@ describe('foldPlanNotes (log-fold, projection-independent)', () => {
   it('reconstructs the plan-note graph so instantiateFrozenPlan yields the approved draft', () => {
     const scope = planScope('t1')
     const notes = foldPlanNotes([
-      written({ id: 'masterplan', scope, kind: 'plan', title: 'Web app', body: 'whole thing', links: [{ id: 'db', kind: 'decomposes_into' }, { id: 'api', kind: 'decomposes_into' }] }),
-      written({ id: 'db', scope, kind: 'plan', title: 'DB', body: 'schema' }),
-      written({ id: 'api', scope, kind: 'plan', title: 'API', body: 'endpoints', links: [{ id: 'db', kind: 'depends_on' }] }),
+      written({ id: 'masterplan', scope, tier: 'plan', title: 'Web app', body: 'whole thing', links: [{ id: 'db', kind: 'decomposes_into' }, { id: 'api', kind: 'decomposes_into' }] }),
+      written({ id: 'db', scope, tier: 'plan', title: 'DB', body: 'schema' }),
+      written({ id: 'api', scope, tier: 'plan', title: 'API', body: 'endpoints', links: [{ id: 'db', kind: 'depends_on' }] }),
     ], scope)
     expect(notes.map(n => n.id).sort()).toEqual(['api', 'db', 'masterplan'])
     const draft = instantiateFrozenPlan('masterplan', notes)
@@ -122,8 +120,8 @@ describe('foldPlanNotes (log-fold, projection-independent)', () => {
 
   it('keeps only the latest write per id and mirrors the projector\'s provenance (createdAt fixed, revision advances)', () => {
     const scope = planScope('t1')
-    const v1 = written({ id: 'db', scope, kind: 'plan', title: 'DB v1', body: 'draft' })
-    const v2 = written({ id: 'db', scope, kind: 'plan', title: 'DB v2', body: 'tightened' })
+    const v1 = written({ id: 'db', scope, tier: 'plan', title: 'DB v1', body: 'draft' })
+    const v2 = written({ id: 'db', scope, tier: 'plan', title: 'DB v2', body: 'tightened' })
     const notes = foldPlanNotes([v1, v2], scope)
     expect(notes).toHaveLength(1)
     expect(notes[0]!.title).toBe('DB v2')
@@ -135,8 +133,8 @@ describe('foldPlanNotes (log-fold, projection-independent)', () => {
   it('drops ids removed by a later memory_deleted', () => {
     const scope = planScope('t1')
     const notes = foldPlanNotes([
-      written({ id: 'masterplan', scope, kind: 'plan', title: 'M' }),
-      written({ id: 'gone', scope, kind: 'plan', title: 'Gone' }),
+      written({ id: 'masterplan', scope, tier: 'plan', title: 'M' }),
+      written({ id: 'gone', scope, tier: 'plan', title: 'Gone' }),
       deleted('gone', scope),
     ], scope)
     expect(notes.map(n => n.id)).toEqual(['masterplan'])
@@ -144,21 +142,33 @@ describe('foldPlanNotes (log-fold, projection-independent)', () => {
 
   it('filters to the task\'s plan scope: another task\'s notes never leak in', () => {
     const notes = foldPlanNotes([
-      written({ id: 'masterplan', scope: planScope('t1'), kind: 'plan', title: 'Mine' }),
-      written({ id: 'masterplan', scope: planScope('t2'), kind: 'plan', title: 'Theirs' }),
+      written({ id: 'masterplan', scope: planScope('t1'), tier: 'plan', title: 'Mine' }),
+      written({ id: 'masterplan', scope: planScope('t2'), tier: 'plan', title: 'Theirs' }),
       written({ id: 'analysis', scope: 'project', kind: 'fact', title: 'Arch' }),
     ], planScope('t1'))
     expect(notes.map(n => n.title)).toEqual(['Mine'])
   })
 
-  it('folds a plan note carrying a citation — retrievedAt is stamped from the event, not required from the writer', () => {
-    // regression: foldPlanNotes forgot to stamp sources.retrievedAt and threw MemoryNote.parse on
-    // every sourced plan note, which wedged human approval (planGraphHash) and finalize_plan.
+  it('stamps provenance from the event, not from the writer', () => {
+    // regression: foldPlanNotes skipped the shared derivation and threw MemoryNote.parse on notes
+    // whose provenance it had not stamped, wedging human approval (planGraphHash) and finalize.
     const scope = planScope('t1')
-    const ev = written({ id: 'masterplan', scope, kind: 'plan', title: 'M', sources: [{ url: 'https://example.com/spec' }] })
+    const ev = written({ id: 'masterplan', scope, tier: 'plan', title: 'M' })
     const notes = foldPlanNotes([ev], scope)
     expect(notes).toHaveLength(1)
-    expect(notes[0]!.sources[0]!.retrievedAt).toBe(ev.ts) // stamped from the canonical event ts
+    expect(notes[0]!.createdAt).toBe(ev.ts) // stamped from the canonical event ts
+    expect(notes[0]!.revision).toBe(1)
+  })
+
+  // A task's plan scope also holds the episodic notes its own planning step left behind. Folding
+  // those in would let a step note the human never reviewed move the plan hash after approval.
+  it("folds ONLY the plan tier — the planning step's own ambient notes are not the plan", () => {
+    const scope = planScope('t1')
+    const notes = foldPlanNotes([
+      written({ id: 'masterplan', scope, tier: 'plan', title: 'M' }),
+      written({ id: 'step-author-plan', scope, tier: 'episodic', title: 'Authored the plan' }),
+    ], scope)
+    expect(notes.map(n => n.id)).toEqual(['masterplan'])
   })
 
   it('is lenient: one unparseable memory_written (any scope) is skipped, not fatal to the whole fold', () => {
@@ -168,7 +178,7 @@ describe('foldPlanNotes (log-fold, projection-independent)', () => {
       kind: EVENT_KIND.memory_written, payload: { note: { id: 'BAD ID WITH SPACES' }, author: { source: 'agent' } },
       usage: null, ts: '2026-01-01T00:00:59.000Z',
     }
-    const notes = foldPlanNotes([poison, written({ id: 'masterplan', scope, kind: 'plan', title: 'M' })], scope)
+    const notes = foldPlanNotes([poison, written({ id: 'masterplan', scope, tier: 'plan', title: 'M' })], scope)
     expect(notes.map(n => n.id)).toEqual(['masterplan'])
   })
 })

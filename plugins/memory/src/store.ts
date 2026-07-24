@@ -1,4 +1,4 @@
-import { EVENT_KIND, foldLiveNotes, MemoryNoteInput, MemoryScope, noteKey, type MemoryAuthor, type MemoryFilter, type MemorySearchOpts, type MemoryNote, type MemoryStore, type NoteSummary } from '@orc/contracts'
+import { EVENT_KIND, foldLiveNotes, MemoryNoteInput, MemoryScope, NOTE_TIER, noteKey, type MemoryAuthor, type MemoryFilter, type MemorySearchOpts, type MemoryNote, type MemoryStore, type NoteSummary } from '@orc/contracts'
 import { KERNEL_ERROR_CODE, KernelError, type EventLog } from '@orc/kernel'
 import type { SurrealMemory } from './surreal'
 
@@ -50,11 +50,13 @@ export function createMemoryStore(opts: { log: EventLog; surreal: SurrealMemory;
       // read (may be null within the flush window — callers treat write as fire-and-forget).
       // retrievedAt is blank here for the same reason createdAt is: the projector stamps it from
       // the committed event, and within the flush window this shape has no event to read.
-      return (await surreal.get(note.id, note.scope)) ?? {
-        ...note,
-        sources: note.sources.map(s => ({ ...s, retrievedAt: '' })),
-        createdAt: '', createdBy: '', updatedAt: '', updatedBy: '', revision: 1,
-      }
+      const projected = await surreal.get(note.id, note.scope)
+      if (projected) return projected
+      const stamped = { createdAt: '', createdBy: '', updatedAt: '', updatedBy: '', revision: 1 }
+      // only the semantic tier cites; the other two have no sources field to stamp
+      return note.tier === NOTE_TIER.semantic
+        ? { ...note, ...stamped, sources: note.sources.map(s => ({ ...s, retrievedAt: '' })) }
+        : { ...note, ...stamped }
     },
     // optional author: cancel-sweep passes the cancelled task's identity as provenance
     async remove(id, scope = MemoryScope.project, author?: MemoryAuthor) {

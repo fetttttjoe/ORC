@@ -2,6 +2,7 @@ import { z } from 'zod'
 import { TaskNode, TaskStatus } from './task'
 import { Plan } from './plan'
 import { FailureClass, RunOutcome, Signal, Usage } from './execution'
+import { EventKind } from './event-kinds'
 import { OperationCompletedPayload, OperationFailedPayload, OperationStartedPayload } from './operations'
 import { MemoryAccessedPayload, MemoryDeletedPayload, MemoryWrittenPayload } from './memory'
 import { AnalysisCompletedPayload, FeedbackProvidedPayload, FeedbackRequestedPayload, PlanAnnotatedPayload } from './analysis'
@@ -34,18 +35,7 @@ export const CopilotExchangePayload = z.object({
 })
 export type CopilotExchangePayload = z.infer<typeof CopilotExchangePayload>
 
-export const EventKind = z.enum([
-  'task_created', 'plan_proposed', 'plan_edited', 'plan_approved', 'task_status_changed',
-  'run_started', 'step_started', 'skill_loaded', 'agent_call', 'tool_call', 'tool_result',
-  'signal_received', 'step_completed', 'step_failed', 'split_proposed', 'split_resolved',
-  'operation_started', 'operation_completed', 'operation_failed', 'artifact_produced',
-  'memory_written', 'memory_deleted', 'memory_accessed',
-  'feedback_requested', 'feedback_provided', 'plan_annotated', 'analysis_completed',
-  'models_discovered', 'copilot_exchange',
-])
-export type EventKind = z.infer<typeof EventKind>
-
-export const EVENT_KIND = EventKind.enum
+export { EventKind, EVENT_KIND, type EventRecord } from './event-kinds'
 
 export const PAYLOAD_SCHEMAS = {
   task_created: z.object({ task: TaskNode }),
@@ -158,16 +148,4 @@ export const EventInput = z.object({
 })
 export type EventInput = z.input<typeof EventInput>
 
-// the stored envelope: project binding and idempotency are explicit on every record
-export interface EventRecord {
-  seq: number
-  projectId: string
-  idempotencyKey: string | null
-  taskId: string | null
-  stepId: string | null
-  runToken: string | null
-  kind: EventKind
-  payload: Record<string, unknown>
-  usage: Usage | null
-  ts: string
-}
+

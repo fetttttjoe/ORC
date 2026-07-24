@@ -2,9 +2,9 @@ import { afterAll, describe, expect, it } from 'bun:test'
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import { NOTE_KIND, NOTE_KINDS, type EventRecord, type MemoryNote, type NoteKind } from '@orc/contracts'
+import { NOTE_KINDS, type EventRecord, type SemanticNote } from '@orc/contracts'
 import { SurrealMemory } from './surreal'
-import { eventFixture } from '@orc/contracts/fixtures'
+import { episodicNoteFixture, eventFixture, planNoteFixture, semanticNoteFixture } from '@orc/contracts/fixtures'
 import { createTestSurreal } from './test-helpers'
 import { renderMemoryIndex, rebuildVaultMemory, SECTIONS } from './memory-index'
 
@@ -12,12 +12,7 @@ import { renderMemoryIndex, rebuildVaultMemory, SECTIONS } from './memory-index'
 const drops: (() => Promise<void>)[] = []
 afterAll(async () => { for (const d of drops) await d() })
 
-const note = (over: Partial<MemoryNote>): MemoryNote => ({
-  id: 'n', scope: 'project', kind: 'fact', sourceRevision: null, title: 'N',
-  categories: [], tags: [], links: [], paths: [], rules: [], summary: '', body: 'body',
-  retention: 'durable', sources: [], rationale: '', uncertainty: [], zone: [],
-  createdAt: 'T', createdBy: 'cli', updatedAt: 'T', updatedBy: 'cli', revision: 1, ...over,
-})
+const note = (over: Partial<SemanticNote>): SemanticNote => semanticNoteFixture({ body: 'body', ...over })
 
 describe('renderMemoryIndex', () => {
   // A title is z.string().max(200) with no newline restriction and the memory_write tool
@@ -83,13 +78,17 @@ describe('renderMemoryIndex', () => {
   // silently, since nothing errors. That is how `research` shipped: the sourced-research feature
   // writes cited findings that its own index then omits. Pin every kind the renderer must place,
   // so the next kind added to NOTE_KINDS fails here instead of going invisible.
-  it('places every note kind in a section, or names it as deliberately unplaced', () => {
+  it('places every note kind in a section — a new kind cannot go invisible', () => {
     const placed = new Set(SECTIONS.flatMap(s => s.kinds))
-    // `plan` is deliberately absent: plan notes are reachable by path from the task they belong
-    // to, and nothing has asked for a plan DAG view (system-hardening plan, slice 19).
-    const deliberatelyUnplaced = new Set<NoteKind>([NOTE_KIND.plan])
-    const missing = NOTE_KINDS.filter(k => !placed.has(k) && !deliberatelyUnplaced.has(k))
-    expect(missing).toEqual([])
+    expect(NOTE_KINDS.filter(k => !placed.has(k))).toEqual([])
+  })
+
+  // The index is the knowledge map: only the semantic tier claims anything about the project.
+  it('leaves plan and episodic notes out of the index entirely', () => {
+    const md = renderMemoryIndex([note({ id: 'claim', title: 'A claim' }), planNoteFixture({ id: 'masterplan', title: 'A plan' }), episodicNoteFixture({ id: 'step-a', title: 'A step' })])
+    expect(md).toContain('A claim')
+    expect(md).not.toContain('A plan')
+    expect(md).not.toContain('A step')
   })
 
   it('renders a research note into the index with its own section', () => {

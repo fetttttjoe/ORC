@@ -1,13 +1,20 @@
 import { describe, expect, it } from 'bun:test'
 import { z } from 'zod'
-import { LINK_KINDS, MEMORY_ACCESS, MEMORY_LIMITS, MemoryNoteInput, MemoryWriteResult, type AccessVia, type MemoryAccessMode, type MemoryNote, type MemoryNoteDraft, type MemoryStore, type NoteSummary } from '@orc/contracts'
+import { LINK_KINDS, MEMORY_ACCESS, MEMORY_LIMITS, MemoryNoteInput, NOTE_TIER, MemoryWriteResult, type AccessVia, type MemoryAccessMode, type MemoryNote, type MemoryNoteDraft, type MemoryStore, type NoteSummary } from '@orc/contracts'
 import { MEMORY_READ_TOOLS, memoryTools, memoryRoleFor } from './tools'
 
-const toNote = (input: MemoryNoteDraft): MemoryNote =>
-  ({ ...MemoryNoteInput.parse(input), sources: [], createdAt: '', createdBy: '', updatedAt: '', updatedBy: '', revision: 1 })
+// the store gateway parses a draft into whichever tier it belongs to, then stamps provenance —
+// this mirrors that, so a fixture cannot invent a note the real write path could not produce
+const toNote = (input: MemoryNoteDraft): MemoryNote => {
+  const authored = MemoryNoteInput.parse(input)
+  const stamped = { createdAt: '', createdBy: '', updatedAt: '', updatedBy: '', revision: 1 }
+  return authored.tier === NOTE_TIER.semantic
+    ? { ...authored, ...stamped, sources: authored.sources.map(src => ({ ...src, retrievedAt: '' })) }
+    : { ...authored, ...stamped }
+}
 
 const summary = (id: string, title: string): NoteSummary =>
-  ({ id, title, summary: 's', categories: [], tags: [], scope: 'project', hits: 0, lastAccessedAt: null })
+  ({ id, title, summary: 's', tier: NOTE_TIER.semantic, categories: [], tags: [], scope: 'project', hits: 0, lastAccessedAt: null })
 
 const fakeStore = (over: Partial<MemoryStore> = {}) => {
   const written: { input: MemoryNoteDraft; author: unknown; idempotencyKey?: string }[] = []
@@ -117,7 +124,7 @@ describe('memory tools', () => {
 
   it('search budgeting counts the complete serialized summaries', async () => {
     const bulky = Array.from({ length: 8 }, (_, i): NoteSummary => ({
-      id: `n${i}`, scope: 'project', title: 'T', summary: '', categories: [],
+      id: `n${i}`, scope: 'project', title: 'T', summary: '', tier: NOTE_TIER.semantic, categories: [],
       tags: Array(50).fill('x'.repeat(64)), hits: 0, lastAccessedAt: null,
     }))
     const { store } = fakeStore({ search: async () => bulky })

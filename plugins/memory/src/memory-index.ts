@@ -1,6 +1,6 @@
 import { readdirSync, rmSync, statSync } from 'node:fs'
 import path from 'node:path'
-import { NOTE_KIND, type MemoryNote, type NoteKind } from '@orc/contracts'
+import { NOTE_KIND, NOTE_TIER, type MemoryNote, type NoteKind, type SemanticNote } from '@orc/contracts'
 import { mermaidLabel } from '@orc/contracts'
 import { frontmatter } from '@orc/vault-projector'
 import { SurrealMemory } from './surreal'
@@ -9,7 +9,7 @@ import { writeMemoryFile } from './write-note'
 
 // Exported so a test can assert every NOTE_KINDS member is placed: a kind missing here still
 // gets its note file, but never appears in the index, and nothing errors — which is exactly how
-// `research` was invisible on arrival. `plan` stays deliberately unplaced (see that test).
+// `research` was invisible on arrival.
 // Research is its own section rather than folded into decisions/facts: a cited web finding is
 // provisional and sweepable, and presenting it next to a decision would overstate it.
 export const SECTIONS: { title: string; kinds: NoteKind[] }[] = [
@@ -39,7 +39,11 @@ function subgraph(title: string, notes: MemoryNote[], node: Map<string, string>)
 
 // pure and deterministic: same notes → byte-identical markdown
 export function renderMemoryIndex(notes: MemoryNote[]): string {
-  const placed = SECTIONS.map(s => ({ ...s, notes: notes.filter(n => s.kinds.includes(n.kind)) }))
+  // The index is the KNOWLEDGE map, so only the semantic tier appears in it: plan and episodic
+  // notes are per-task and transient. They still get their own vault file — they just do not
+  // claim anything about the project, which is what this map is of.
+  const claims = notes.filter((n): n is SemanticNote => n.tier === NOTE_TIER.semantic)
+  const placed = SECTIONS.map(s => ({ ...s, notes: claims.filter(n => s.kinds.includes(n.kind)) }))
   const shown = placed.flatMap(s => s.notes)
   const node = new Map(shown.map((n, i) => [`${n.scope}:${n.id}`, `n${i}`]))
 

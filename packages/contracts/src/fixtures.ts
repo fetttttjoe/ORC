@@ -2,6 +2,33 @@
 // PlanStep/Plan/EventRecord shape change has to touch across every package's tests.
 import type { EventRecord } from './events'
 import { STRATEGY, type Plan, type PlanDraft, type PlanStep } from './plan'
+import {
+  EpisodicNoteInput, NOTE_TIER, PlanNoteInput, SemanticNoteInput,
+  type EpisodicNote, type PlanNote, type SemanticNote,
+} from './memory'
+
+// A stored note of each tier. One fixture per tier rather than one superset literal: the tiers
+// exist precisely so a note cannot carry another lane's fields, and a test fixture that ignored
+// that would let a wrong-lane field look legal.
+const NOTE_PROVENANCE = {
+  createdAt: '2026-07-18T00:00:00.000Z', createdBy: 'cli',
+  updatedAt: '2026-07-18T00:00:00.000Z', updatedBy: 'cli', revision: 1,
+}
+
+export function semanticNoteFixture(over: Partial<SemanticNote> = {}): SemanticNote {
+  const authored = SemanticNoteInput.parse({ tier: NOTE_TIER.semantic, id: 'n', title: 'N' })
+  return { ...authored, sources: [], ...NOTE_PROVENANCE, ...over }
+}
+
+export function planNoteFixture(over: Partial<PlanNote> = {}): PlanNote {
+  const authored = PlanNoteInput.parse({ tier: NOTE_TIER.plan, id: 'masterplan', scope: 'plan-t1', title: 'Plan' })
+  return { ...authored, ...NOTE_PROVENANCE, ...over }
+}
+
+export function episodicNoteFixture(over: Partial<EpisodicNote> = {}): EpisodicNote {
+  const authored = EpisodicNoteInput.parse({ tier: NOTE_TIER.episodic, id: 'step-a', scope: 'plan-t1', title: 'Step A' })
+  return { ...authored, ...NOTE_PROVENANCE, ...over }
+}
 
 export function eventFixture(over: Partial<EventRecord> = {}): EventRecord {
   return {

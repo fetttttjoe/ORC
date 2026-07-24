@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import type { Checkpoint, EventDraft, ExecutorContext, NoteSummary, OperationCheckpoint, OperationSpec, ResolvedTool, SplitResult, UnifiedEvent } from '@orc/contracts'
-import { EVENT_KIND, planScope, slugId } from '@orc/contracts'
+import { EVENT_KIND, NOTE_TIER, planScope, slugId } from '@orc/contracts'
 import { stepFixture } from '@orc/contracts/fixtures'
 import { z } from 'zod'
 import type { LanguageModel } from 'ai'
@@ -562,7 +562,7 @@ describe('ambient capture', () => {
   // Named wire-shape subset this suite pins for the ambient note draft — parsed, never cast.
   const AmbientDraft = z.object({
     id: z.string(), scope: z.string(), title: z.string(), summary: z.string(),
-    tags: z.array(z.string()), retention: z.string(), kind: z.string(),
+    tags: z.array(z.string()), tier: z.string(),
   })
 
   function fakeMemoryWrite(calls: Array<{ input: unknown; toolCallId: string | undefined }>, result: { output: unknown; isError: boolean } = { output: { id: 'x' }, isError: false }): ResolvedTool {
@@ -603,8 +603,7 @@ describe('ambient capture', () => {
     expect(draft.scope).toBe(planScope('task-1'))
     expect(draft.title).toBe(step.title)
     expect(draft.tags).toEqual(['ambient'])
-    expect(draft.retention).toBe('expirable')
-    expect(draft.kind).toBe('fact')
+    expect(draft.tier).toBe(NOTE_TIER.episodic)
     expect(draft.summary).toBe(longSummary.slice(0, 500))
     expect(draft.summary).toHaveLength(500)
   })
@@ -627,7 +626,7 @@ describe('ambient capture', () => {
     expect(draft.id).not.toBe(slugId(`step ${step.id}`))
     expect(draft.tags).toEqual(['ambient', 'failure'])
     expect(draft.summary).toBe('blocked: the API returned 500')
-    expect(draft.retention).toBe('expirable')
+    expect(draft.tier).toBe(NOTE_TIER.episodic)
   })
 
   it('ambientCapture: false skips the write entirely', async () => {
@@ -680,7 +679,7 @@ describe('knowledge preload', () => {
   function noteSummary(over: Partial<NoteSummary> = {}): NoteSummary {
     return {
       id: 'auth-middleware', scope: 'project', title: 'Auth middleware overview',
-      categories: [], tags: [], summary: 'Handles session validation.',
+      tier: NOTE_TIER.semantic, categories: [], tags: [], summary: 'Handles session validation.',
       hits: 0, lastAccessedAt: null, ...over,
     }
   }

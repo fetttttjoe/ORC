@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from 'node:f
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { EVENT_KIND, MemoryScope, PAYLOAD_SCHEMAS } from '@orc/contracts'
+import { EVENT_KIND, MemoryScope, PAYLOAD_SCHEMAS, type NoteView } from '@orc/contracts'
 import { draftFixture, stepFixture } from '@orc/contracts/fixtures'
 import { createMcpHub } from '@orc/mcp-client'
 import { apiLoopExecutor } from '@orc/executor-api-loop'
@@ -98,16 +98,17 @@ describe('sourced web research through a durable run (integration)', () => {
     expect(JSON.stringify(mcpResult.payload)).toContain(INJECTION) // raw evidence IS in the audit, by design
 
     await memory.projector.catchUp()
-    const note = await memory.store.get('pg16-logical-replication')
-    expect(note).not.toBeNull()
-    expect(note!.kind).toBe('research')
-    expect(note!.retention).toBe('expirable')
-    expect(note!.body).toBe(FINDING)
+    const stored = await memory.store.get('pg16-logical-replication')
+    expect(stored).not.toBeNull()
+    const note: NoteView = stored!
+    expect(note.kind).toBe('research')
+    expect(note.retention).toBe('expirable')
+    expect(note.body).toBe(FINDING)
 
     // the citation is stamped from the canonical write event, not by the agent. Memory events are
     // project-scoped (taskId: null), so they are not in this task's event slice.
     const written = (await log.all()).find(e => e.kind === EVENT_KIND.memory_written)!
-    expect(note!.sources).toEqual([{ url: SOURCE_URL, title: 'Postgres 16 release notes', retrievedAt: written.ts }])
+    expect(note.sources).toEqual([{ url: SOURCE_URL, title: 'Postgres 16 release notes', retrievedAt: written.ts }])
 
     // THE POINT: the distilled fact reaches the vault, the hostile page does not — anywhere.
     const vaultFile = readFileSync(path.join(vaultDir, 'memory', 'pg16-logical-replication.md'), 'utf8')

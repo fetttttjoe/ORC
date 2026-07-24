@@ -98,7 +98,9 @@ Key terms used throughout the orchestrator codebase and documentation. Many term
 
 **Memory** — Durable knowledge graph (SurrealDB read model + vault projection). Event-first, degradation-tolerant, sourced-research-only. See [`vault/memory/`](README.md#vault-views), [memory system](docs/seams-reference.md#memory-subsystem-interaction).
 
-**Memory note** — Authored fact, decision, finding, or plan recorded in the knowledge graph. Has `id`, `scope`, `kind`, `links`, `body`, optional `sources`. Only `research` kind requires citations. See [note kinds](packages/contracts/src/memory.ts), [`memory_write` tool](plugins/memory/).
+**Memory note** — Authored fact, decision, finding, or plan recorded in the knowledge graph. Has `id`, `scope`, `tier`, `links`, `body`, plus whatever else its [tier](#note-tier) allows. Only `research` kind requires citations. See [note tiers](packages/contracts/src/memory.ts), [`memory_write` tool](plugins/memory/).
+
+**Note tier** — Which memory a note belongs to, and therefore which fields it may carry. `semantic` = durable project knowledge (a claim plus its retrieval surface: `kind`, `categories`, `paths`, `rules`, `sources`). `episodic` = the per-task trail a run leaves behind (title/summary/tags only, always `expirable`). `plan` = one node of a task's decomposition (`rationale`, `uncertainty`, `zone`). A note written without a tier is classified from its shape. See [NOTE_TIERS](packages/contracts/src/memory.ts).
 
 **MCP** — Model Context Protocol. External tool server. Declared in `.orc/config.json`, armed with `orc mcp trust` (fingerprint grant), referenced in plans via `toolRefs`. See [MCP server pattern](README.md#operational-notes), [`mcp-client` plugin](plugins/mcp-client/), [trust model](docs/EXTENDING.md#invariants-—-the-rules-that-keep-changes-cheap).
 
@@ -142,7 +144,7 @@ Key terms used throughout the orchestrator codebase and documentation. Many term
 
 **Research note** — Only note kind that MUST carry citations. Raw fetched pages stay in audit trail; distilled findings land in memory only as `research` notes with sources. See [sourced knowledge](README.md#guarantees-stated-precisely), [research note pattern](docs/ARCHITECTURE.md#knowledge-—-raw-evidence-vs-distilled-note).
 
-**Retention** — Note field: `durable` (default, permanent) or `expirable` (may be swept in future; see [`IDEAS.md` entry 2](docs/IDEAS.md#2-retention-durable--expirable-on-notes-—-shipped-2026-07-20)). Authoring judgment at write time. See [retention field](packages/contracts/src/memory.ts).
+**Retention** — Note field: `durable` (default, permanent) or `expirable` (may be retired by `orc memory sweep` once nothing has touched it for the TTL, unless a surviving note links to it). Authoring judgment at write time; pinned to `expirable` on the episodic tier. See [retention field](packages/contracts/src/memory.ts), [sweep policy](plugins/memory/src/sweep.ts).
 
 ---
 
@@ -198,7 +200,7 @@ Key terms used throughout the orchestrator codebase and documentation. Many term
 - [Checkpoint](#checkpoint), [Operation](#operation), [Signal](#signal), [Workflow](#workflow), [Fold](#fold), [DBOS](#dbos)
 
 **Knowledge & Memory**
-- [Memory note](#memory-note), [Knowledge graph](#knowledge-graph), [Research note](#research-note), [Citation](#citation), [Scope](#scope), [Retention](#retention)
+- [Memory note](#memory-note), [Note tier](#note-tier), [Knowledge graph](#knowledge-graph), [Research note](#research-note), [Citation](#citation), [Scope](#scope), [Retention](#retention)
 
 **Architecture**
 - [Event](#event), [Event log](#event-log), [Data-access service](#data-access-service), [Kernel](#kernel), [Contracts](#contracts), [Seam](#seam), [Plugin](#plugin)

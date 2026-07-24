@@ -1,23 +1,21 @@
 import { describe, expect, it } from 'bun:test'
-import type { MemoryLink, MemoryNote } from '@orc/contracts'
+import type { MemoryLink, PlanNote } from '@orc/contracts'
+import { planNoteFixture } from '@orc/contracts/fixtures'
 import { finalizePlanTool } from './finalize-plan-tool'
 import { planGraphHash } from './strategies/grounded-plan'
 
 const p = { taskId: 't1', stepId: 'plan', runToken: 'step:t1:plan:a1', role: 'auditor', executor: 'api-loop', modelRef: 'anthropic/x', maxIterations: 30 }
 const config = { maxDepth: 3 }
 
-const note = (over: Partial<MemoryNote> & { id: string }): MemoryNote => ({
-  scope: 'plan-t1', kind: 'plan', sourceRevision: null, title: over.id, categories: [], tags: [],
-  links: [], paths: [], rules: [], summary: '', body: '', retention: 'durable', sources: [], rationale: '', uncertainty: [], zone: [],
-  createdAt: '', createdBy: '', updatedAt: '', updatedBy: '', revision: 1, ...over,
-})
+const note = (over: Partial<PlanNote> & { id: string }): PlanNote =>
+  planNoteFixture({ scope: 'plan-t1', title: over.id, createdAt: '', createdBy: '', updatedAt: '', updatedBy: '', ...over })
 const link = (id: string, kind: MemoryLink['kind']): MemoryLink => ({ id, kind })
 
 // FixE: finalize_plan now sources the frozen plan from kernel.listPlanNotes (a LOG fold) — never the
 // SurrealDB projection. The double models that log-fold; there is NO memory store here, so a finalize
 // that still read the async read model could not possibly work.
 function fakeKernel(
-  notes: MemoryNote[], calls: unknown[] = [], approvedHash: string | null = planGraphHash(notes),
+  notes: PlanNote[], calls: unknown[] = [], approvedHash: string | null = planGraphHash(notes),
 ): Pick<import('../kernel').Kernel, 'proposeSplit' | 'listPlanNotes' | 'approvedPlanHash'> {
   return {
     listPlanNotes: async () => notes,

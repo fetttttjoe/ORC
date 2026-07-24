@@ -1,19 +1,10 @@
 import { z } from 'zod'
-// safe cycle with ./events (which imports our payload schemas): EVENT_KIND is only read
-// inside function bodies, long after both modules initialized
-import { EVENT_KIND, type EventRecord } from './events'
+import { EVENT_KIND, type EventRecord } from './event-kinds'
+import { composeAuthor, MEMORY_ID_RE, MemoryAuthor } from './ids'
 
-export const MEMORY_ID_RE = /^[a-z0-9][a-z0-9-]*$/
+// re-exported so every memory consumer keeps importing this vocabulary from one place
+export { MEMORY_ID_RE, slugId, MemoryAuthor, composeAuthor } from './ids'
 
-// Deterministic MEMORY_ID_RE-safe id from a human title. Quick capture keys notes by title,
-// so re-noting the same title UPDATES the note (memory_write is an upsert) instead of forking
-// near-duplicates — deliberate: capture is idempotent, disambiguation is renaming the title.
-export function slugId(title: string): string {
-  const s = title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 64).replace(/-+$/, '')
-  if (!MEMORY_ID_RE.test(s))
-    throw new Error(`cannot derive a note id from '${title}' — use latin letters/digits, or 'orc memory add --id <id>'`)
-  return s
-}
 
 export const MEMORY_LIMITS = {
   labelItems: 50,
@@ -26,16 +17,6 @@ export const MEMORY_LIMITS = {
 
 const Id = z.string().regex(MEMORY_ID_RE).max(128)
 
-export const MemoryAuthor = z.object({
-  source: z.enum(['agent', 'cli']),
-  taskId: z.string().nullable().optional(),
-  stepId: z.string().nullable().optional(),
-  runToken: z.string().nullable().optional(),
-  executor: z.string().optional(),
-  model: z.string().optional(),
-  role: z.string().optional(),
-})
-export type MemoryAuthor = z.infer<typeof MemoryAuthor>
 
 export const LINK_KINDS = [
   'refines', 'supersedes', 'contradicts', 'depends_on',
@@ -90,10 +71,25 @@ export const RETENTION = Retention.enum
 
 // knowledge lifecycle: current/target architecture stay distinguishable and queryable.
 // `research` is a distilled web finding — it is the one kind that MUST carry a citation.
-export const NOTE_KINDS = ['fact', 'decision', 'architecture_current', 'architecture_target', 'documentation', 'plan', 'research'] as const
+// A kind classifies a CLAIM, so it belongs to the semantic tier alone: 'plan' is not a kind of
+// claim, it is a different memory system, and it lives in NOTE_TIERS below.
+export const NOTE_KINDS = ['fact', 'decision', 'architecture_current', 'architecture_target', 'documentation', 'research'] as const
 export const NoteKind = z.enum(NOTE_KINDS)
 export type NoteKind = z.infer<typeof NoteKind>
 export const NOTE_KIND = NoteKind.enum
+
+// Every agent-memory system worth copying separates a cheap, lossless EPISODIC trail from a
+// distilled, linked SEMANTIC tier. orc adds a third, PLAN, because a decomposition is neither: it
+// is executable structure a human approves and the freezer turns into steps.
+//   semantic — durable project knowledge: a claim plus its retrieval surface. The default.
+//   episodic — the per-task trail a run leaves behind. Expirable by construction, swept by TTL.
+//   plan     — one node of a task's decomposition: requirements, rationale, write-fence, deps.
+// The tier decides which FIELDS a note may carry, so the lanes are separated structurally rather
+// than by a soft rank penalty: a step note cannot grow rules[], and a claim cannot smuggle a zone.
+export const NOTE_TIERS = ['semantic', 'episodic', 'plan'] as const
+export const NoteTier = z.enum(NOTE_TIERS)
+export type NoteTier = z.infer<typeof NoteTier>
+export const NOTE_TIER = NoteTier.enum
 
 // The scope families of a memory note — matched values, never scattered literals (same rule
 // as STRATEGY in plan.ts). `project` is the one durable knowledge scope; per-task transient
@@ -122,76 +118,162 @@ export type MemoryWriteResult = z.infer<typeof MemoryWriteResult>
 const stringOrList = <T extends z.ZodType<string>>(item: T, max: number) =>
   z.union([z.array(item).max(max), item.transform(v => (v === '' ? [] : [v]))])
 
-// What a writer (agent/CLI) supplies. Arrays/strings default so a minimal note is one id+title.
-const MemoryNoteBase = z.object({
+// What EVERY note carries, whatever tier it lives in: its address, what it is called, what it
+// says, and how it connects. One literal so a core field can never drift between the tiers.
+const noteCore = {
   id: Id,
   scope: z.string().regex(MEMORY_ID_RE).default(MemoryScope.project),
-  kind: NoteKind.default('fact'),
   // stamped by the store gateway from the runtime's Git HEAD — agents cannot invent one
   sourceRevision: z.string().nullable().default(null),
   title: z.string().min(1).max(200),
-  categories: stringOrList(z.string().max(MEMORY_LIMITS.labelChars), MEMORY_LIMITS.labelItems).default([]),
   // lowercased at the boundary: search matches tags against a lowercased query while the
   // list/ls filter compares case-exactly, so an un-normalized 'Postgres' is silently
   // unreachable from one path and reachable from the other. Normalizing here also applies on
   // replay (the projector re-parses each payload), so a rebuild converges existing notes.
   tags: stringOrList(z.string().max(MEMORY_LIMITS.labelChars).toLowerCase(), MEMORY_LIMITS.labelItems).default([]),
   links: z.array(MemoryLink).max(MEMORY_LIMITS.detailItems).default([]), // clean typed graph edges — no string-id form
-  paths: stringOrList(z.string().max(MEMORY_LIMITS.detailChars), MEMORY_LIMITS.detailItems).default([]), // pointers down to code
-  rules: stringOrList(z.string().max(MEMORY_LIMITS.detailChars), MEMORY_LIMITS.detailItems).default([]), // normative statements agents honor
   summary: z.string().max(500).default(''),
   body: z.string().max(MEMORY_LIMITS.bodyChars).default(''),
+}
+
+// SEMANTIC — durable project knowledge. It alone owns the retrieval surface (kind/categories/
+// paths/rules) and citations, because it alone makes claims another agent will act on.
+export const SemanticNoteInput = z.object({
+  ...noteCore,
+  tier: z.literal(NOTE_TIER.semantic),
+  kind: NoteKind.default(NOTE_KIND.fact),
+  categories: stringOrList(z.string().max(MEMORY_LIMITS.labelChars), MEMORY_LIMITS.labelItems).default([]),
+  paths: stringOrList(z.string().max(MEMORY_LIMITS.detailChars), MEMORY_LIMITS.detailItems).default([]), // pointers down to code
+  rules: stringOrList(z.string().max(MEMORY_LIMITS.detailChars), MEMORY_LIMITS.detailItems).default([]), // normative statements agents honor
   retention: Retention.default(RETENTION.durable),                                 // may this ever be swept?
   sources: z.array(MemorySourceInput).max(MEMORY_SOURCE_LIMITS.items).default([]), // provenance for a web finding
-  rationale: z.string().max(MEMORY_LIMITS.rationaleChars).default(''),          // plan-note: why this subplan exists
-  uncertainty: stringOrList(z.string().max(MEMORY_LIMITS.detailChars), MEMORY_LIMITS.detailItems).default([]), // plan-note: coverage gaps / assumptions (RG7)
-  // plan-note: workspace-relative write globs this subplan may touch at execution — the freezer
-  // carries them into the child step's zone and the executor's write-fence enforces them.
-  // Parallel siblings declare DISJOINT zones; empty = unfenced (paths is documentation, zone is policy).
+})
+export type SemanticNoteInput = z.infer<typeof SemanticNoteInput>
+
+// EPISODIC — the trail a run leaves behind (ambient step capture). Nothing beyond the core: it is
+// a record of what happened, not a claim about the project. `retention` is PINNED expirable rather
+// than defaulted, so the lane's sweepability is structural — no writer can mint an immortal
+// step note, and the TTL sweep needs no convention to recognize one.
+export const EpisodicNoteInput = z.object({
+  ...noteCore,
+  tier: z.literal(NOTE_TIER.episodic),
+  retention: z.literal(RETENTION.expirable).default(RETENTION.expirable),
+})
+export type EpisodicNoteInput = z.infer<typeof EpisodicNoteInput>
+
+// PLAN — one node of a task's decomposition. Its extra fields are execution payload, not
+// knowledge: the freezer reads `zone` into the child step's write-fence, and the human reviews
+// `rationale`/`uncertainty` before approving.
+export const PlanNoteInput = z.object({
+  ...noteCore,
+  tier: z.literal(NOTE_TIER.plan),
+  retention: Retention.default(RETENTION.durable),
+  rationale: z.string().max(MEMORY_LIMITS.rationaleChars).default(''),          // why this subplan exists
+  uncertainty: stringOrList(z.string().max(MEMORY_LIMITS.detailChars), MEMORY_LIMITS.detailItems).default([]), // coverage gaps / assumptions (RG7)
+  // workspace-relative write globs this subplan may touch at execution — the freezer carries them
+  // into the child step's zone and the executor's write-fence enforces them. Parallel siblings
+  // declare DISJOINT zones; empty = unfenced (paths is documentation, zone is policy).
   zone: stringOrList(z.string().min(1).max(MEMORY_LIMITS.detailChars), 16).default([]),
 })
-export const MemoryNoteInput = MemoryNoteBase.refine(
+export type PlanNoteInput = z.infer<typeof PlanNoteInput>
+
+// Classify a note whose payload predates the tier field, or whose writer left it off. Explicit
+// always wins — this only fills a gap, so it can never re-label a note against its author. The
+// rules read the shapes the writers actually produce, and nothing else:
+//   plan     — the plan-authoring skill's notes are the only ones carrying zone/rationale/
+//              uncertainty (and, before the split, kind 'plan').
+//   episodic — a non-project-scope note its author marked expirable: exactly ambient capture.
+//   semantic — everything else, which includes every project-scope note ever written.
+const TierProbe = z.object({
+  scope: z.string().optional(), kind: z.string().optional(), retention: z.string().optional(),
+  rationale: z.string().optional(), zone: z.unknown().optional(), uncertainty: z.unknown().optional(),
+})
+// classification runs on the RAW payload, before stringOrList coerces — so a scalar 'docs/**' is
+// as much a filled zone as ['docs/**'] is, and '' is empty either way (the model's clear spelling)
+const filled = (v: unknown): boolean => Array.isArray(v) ? v.length > 0 : typeof v === 'string' && v !== ''
+// what plan notes were spelled as before the tier existed — the skill wrote `kind: 'plan'`
+const LEGACY_PLAN_KIND = 'plan'
+
+export function inferTier(raw: unknown): NoteTier {
+  const probe = TierProbe.safeParse(raw)
+  if (!probe.success) return NOTE_TIER.semantic
+  const n = probe.data
+  if (n.kind === LEGACY_PLAN_KIND || filled(n.zone) || filled(n.uncertainty) || (n.rationale ?? '') !== '')
+    return NOTE_TIER.plan
+  if (n.scope !== undefined && n.scope !== MemoryScope.project && n.retention === RETENTION.expirable)
+    return NOTE_TIER.episodic
+  return NOTE_TIER.semantic
+}
+
+// The tier is what discriminates the union, so it has to be present before parsing. A payload
+// without one is classified from its shape — this is what lets every event written before the
+// split still fold, and lets a caller write a plain semantic note without naming its lane.
+const withTier = (raw: unknown): unknown => {
+  if (typeof raw !== 'object' || raw === null) return raw
+  if ('tier' in raw && raw.tier !== undefined) return raw
+  return { ...raw, tier: inferTier(raw) }
+}
+
+// An AUTHORED note seen by a reader that does not care which tier it got: every tier's fields,
+// all optional, so one code path can render or project any of them and a field the tier does not
+// own simply reads as undefined. NoteView below is the same idea for a STORED note.
+export interface NoteFields extends Partial<Omit<SemanticNoteInput, 'tier'> & Omit<PlanNoteInput, 'tier'>> {
+  tier: NoteTier
+}
+
+export const MemoryNoteInput = z.preprocess(
+  withTier,
+  z.discriminatedUnion('tier', [SemanticNoteInput, EpisodicNoteInput, PlanNoteInput]),
+).refine(
   n => !(n.scope === MemoryScope.project && n.id === 'index'),
   { message: "note id 'index' is reserved in the project scope (collides with vault/memory/index.md)" },
 ).refine(
   // the point of the kind: a research note without provenance is an unsourced claim
-  n => n.kind !== NOTE_KIND.research || n.sources.length > 0,
+  n => n.tier !== NOTE_TIER.semantic || n.kind !== NOTE_KIND.research || n.sources.length > 0,
   { message: "kind 'research' requires at least one source citation" },
 )
 export type MemoryNoteInput = z.infer<typeof MemoryNoteInput>
-// What callers hand the gateway: the schema's raw input, defaults not yet applied.
-export type MemoryNoteDraft = z.input<typeof MemoryNoteInput>
 
 // Validates an upsert draft AT A TOOL BOUNDARY without applying defaults — an omitted field must
 // reach the store gateway as an omission (merge-on-omit carries the stored value forward), never
 // as a defaulted empty. `.partial()` is NOT enough: a defaulted field still fires its default for
-// a missing key. Each optional field references the base shape so constraints stay single-source;
-// the gateway parses the merged note with MemoryNoteInput afterwards (refinements included).
+// a missing key. Deliberately ONE permissive shape rather than three: a partial update need not
+// restate its tier, and inferring one from a fragment would silently re-lane the note. Which
+// fields a tier may actually keep is enforced one layer down, when the gateway parses the merged
+// note with MemoryNoteInput — cross-lane fields are dropped there, by the tier's own schema.
 const optionalNoDefault = <T extends z.ZodTypeAny>(s: z.ZodDefault<T>): z.ZodOptional<T> =>
   s.removeDefault().optional()
 export const MemoryNoteDraftInput = z.object({
-  id: MemoryNoteBase.shape.id,
-  title: MemoryNoteBase.shape.title,
-  scope: optionalNoDefault(MemoryNoteBase.shape.scope),
-  kind: optionalNoDefault(MemoryNoteBase.shape.kind),
-  sourceRevision: optionalNoDefault(MemoryNoteBase.shape.sourceRevision),
-  categories: optionalNoDefault(MemoryNoteBase.shape.categories),
-  tags: optionalNoDefault(MemoryNoteBase.shape.tags),
-  links: optionalNoDefault(MemoryNoteBase.shape.links),
-  paths: optionalNoDefault(MemoryNoteBase.shape.paths),
-  rules: optionalNoDefault(MemoryNoteBase.shape.rules),
-  summary: optionalNoDefault(MemoryNoteBase.shape.summary),
-  body: optionalNoDefault(MemoryNoteBase.shape.body),
-  retention: optionalNoDefault(MemoryNoteBase.shape.retention),
-  sources: optionalNoDefault(MemoryNoteBase.shape.sources),
-  rationale: optionalNoDefault(MemoryNoteBase.shape.rationale),
-  uncertainty: optionalNoDefault(MemoryNoteBase.shape.uncertainty),
-  zone: optionalNoDefault(MemoryNoteBase.shape.zone),
+  id: noteCore.id,
+  title: noteCore.title,
+  tier: NoteTier.optional(),
+  scope: optionalNoDefault(noteCore.scope),
+  sourceRevision: optionalNoDefault(noteCore.sourceRevision),
+  tags: optionalNoDefault(noteCore.tags),
+  links: optionalNoDefault(noteCore.links),
+  summary: optionalNoDefault(noteCore.summary),
+  body: optionalNoDefault(noteCore.body),
+  kind: optionalNoDefault(SemanticNoteInput.shape.kind),
+  categories: optionalNoDefault(SemanticNoteInput.shape.categories),
+  paths: optionalNoDefault(SemanticNoteInput.shape.paths),
+  rules: optionalNoDefault(SemanticNoteInput.shape.rules),
+  retention: optionalNoDefault(SemanticNoteInput.shape.retention),
+  sources: optionalNoDefault(SemanticNoteInput.shape.sources),
+  rationale: optionalNoDefault(PlanNoteInput.shape.rationale),
+  uncertainty: optionalNoDefault(PlanNoteInput.shape.uncertainty),
+  zone: optionalNoDefault(PlanNoteInput.shape.zone),
 })
-// a field added to MemoryNoteBase but forgotten here is a compile error, not silent drift
-type DraftCoversBase = keyof typeof MemoryNoteBase.shape extends keyof typeof MemoryNoteDraftInput.shape ? true : never
-const draftCoversBase: DraftCoversBase = true
-void draftCoversBase
+// a field added to a tier but forgotten here is a compile error, not silent drift
+type TierFields =
+  | keyof typeof SemanticNoteInput.shape
+  | keyof typeof EpisodicNoteInput.shape
+  | keyof typeof PlanNoteInput.shape
+type DraftCoversTiers = TierFields extends keyof typeof MemoryNoteDraftInput.shape ? true : never
+const draftCoversTiers: DraftCoversTiers = true
+void draftCoversTiers
+
+// What callers hand the gateway: the draft's raw input, defaults not yet applied.
+export type MemoryNoteDraft = z.input<typeof MemoryNoteDraftInput>
 
 // The HUMAN-authorable surface of a note draft — what the web UI and quick capture may write.
 // A .pick of MemoryNoteDraftInput, so every field keeps its single-source constraint. Least
@@ -214,21 +296,46 @@ export const NoteRef = z.object({
 })
 export type NoteRef = z.infer<typeof NoteRef>
 
-// The stored/rendered note: input + provenance/lifecycle the projector derives from events.
-// `sources` is overridden with the stored shape — same citations, plus the retrieval time the
-// projector stamps from the event.
-export const MemoryNote = MemoryNoteBase.extend({
-  sources: z.array(MemorySource).max(MEMORY_SOURCE_LIMITS.items).default([]),
+// The stored/rendered note: the tier's input shape plus the provenance the projector derives from
+// events. Semantic notes also swap `sources` for the stored shape — same citations, plus the
+// retrieval time the projector stamps from the event.
+const noteProvenance = {
   createdAt: z.string(),
   createdBy: z.string(),   // composed identity: "executor·model·role" or "cli"
   updatedAt: z.string(),
   updatedBy: z.string(),
   revision: z.number().int().positive(),
+}
+export const SemanticNote = SemanticNoteInput.extend({
+  ...noteProvenance,
+  sources: z.array(MemorySource).max(MEMORY_SOURCE_LIMITS.items).default([]),
 })
+export type SemanticNote = z.infer<typeof SemanticNote>
+export const EpisodicNote = EpisodicNoteInput.extend(noteProvenance)
+export type EpisodicNote = z.infer<typeof EpisodicNote>
+export const PlanNote = PlanNoteInput.extend(noteProvenance)
+export type PlanNote = z.infer<typeof PlanNote>
+
+export const MemoryNote = z.preprocess(
+  withTier,
+  z.discriminatedUnion('tier', [SemanticNote, EpisodicNote, PlanNote]),
+)
 export type MemoryNote = z.infer<typeof MemoryNote>
+
+// A note as a READER may receive it: every tier's fields, all optional. This is what a budget
+// fitter produces — trimming may empty `title` or drop provenance to make a response fit, so the
+// result is a view OF a note, never a valid one, and typing it as MemoryNote would be a claim the
+// trimmer cannot honour. Episodic is absent from the intersection deliberately: it adds no field
+// beyond the core, and its literal `retention` would narrow the view's to 'expirable'.
+export interface NoteView extends Partial<Omit<SemanticNote, 'tier'> & Omit<PlanNote, 'tier'>> {
+  tier: NoteTier
+}
 
 export const NoteSummary = z.object({
   id: z.string(), scope: z.string(), title: z.string(),
+  // which lane the hit came from: a reader has to be able to tell durable project knowledge from
+  // one run's step trail, and `categories` is empty on both non-semantic tiers
+  tier: NoteTier,
   categories: z.array(z.string()), tags: z.array(z.string()), summary: z.string(),
   // observed use, event-sourced (see MemoryAccessedPayload) — so it survives a rebuild and is
   // real data rather than a projection-local counter that any replay silently zeroes.
@@ -291,7 +398,7 @@ export const SEARCH_MODE = SearchMode.enum
 
 export interface MemorySearchOpts { mode?: SearchMode }
 
-export interface MemoryFilter { scope?: string; category?: string; tag?: string }
+export interface MemoryFilter { scope?: string; category?: string; tag?: string; tier?: NoteTier }
 
 // The single-writer gateway (the wrapper). write/remove append events; reads hit SurrealDB.
 // write takes the raw draft — the gateway parses (defaults + validation), callers never cast.
@@ -357,11 +464,6 @@ export interface MemoryStore {
   recordAccess(id: string, scope: string | undefined, mode: MemoryAccessMode, author: MemoryAuthor, opts?: { idempotencyKey?: string; via?: AccessVia }): Promise<void>
 }
 
-// Composed provenance string for createdBy/updatedBy (frontmatter + read model).
-export function composeAuthor(a: MemoryAuthor): string {
-  if (a.source === 'cli') return 'cli'
-  return [a.executor, a.model, a.role].filter(Boolean).join('·') || 'agent'
-}
 
 // The ONE derivation of a stored note's event-derived fields from a memory_written event: sources
 // stamped with retrievedAt (from the event ts, never the writer), provenance preserved/advanced.
@@ -374,10 +476,12 @@ export function deriveNoteProvenance(
   author: MemoryAuthor,
   ts: string,
   prev?: { createdAt?: string; createdBy?: string; revision?: number },
-): { sources: MemorySource[]; createdAt: string; createdBy: string; updatedAt: string; updatedBy: string; revision: number } {
+): { sources?: MemorySource[]; createdAt: string; createdBy: string; updatedAt: string; updatedBy: string; revision: number } {
   const by = composeAuthor(author)
   return {
-    sources: note.sources.map(s => ({ ...s, retrievedAt: ts })),
+    // only the semantic tier cites: spreading a sources key onto the others would be a field
+    // their schema does not have, silently dropped rather than honestly absent
+    ...(note.tier === NOTE_TIER.semantic && { sources: note.sources.map(s => ({ ...s, retrievedAt: ts })) }),
     createdAt: prev?.createdAt ?? ts,
     createdBy: prev?.createdBy ?? by,
     updatedAt: ts,
@@ -385,6 +489,11 @@ export function deriveNoteProvenance(
     revision: (prev?.revision ?? 0) + 1,
   }
 }
+
+// The one-word label for a note in a human view: the CLAIM's kind when the note makes one,
+// otherwise its tier. A decision reads 'decision', a subplan reads 'plan', a step note reads
+// 'episodic' — one derivation, so the graph node and the backlink row cannot label it differently.
+export const noteLabel = (note: NoteFields): string => note.kind ?? note.tier
 
 export const noteKey = (scope: string, id: string): string => `${scope}\u0000${id}`
 

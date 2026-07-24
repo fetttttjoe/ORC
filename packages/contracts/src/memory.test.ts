@@ -1,10 +1,67 @@
 import { describe, expect, it } from 'bun:test'
-import { MemoryNoteInput, MemoryNote, MEMORY_ID_RE, LINK_KINDS } from './memory'
+import { MemoryNoteInput, MemoryNote, MEMORY_ID_RE, LINK_KINDS, NOTE_TIER, inferTier, type PlanNoteInput, type SemanticNoteInput } from './memory'
 import { PAYLOAD_SCHEMAS } from './events'
+
+// The tier discriminates the union, so a test that asserts tier-specific fields has to say which
+// lane it is in. These parse through the real union (inference included) and then narrow, so a
+// note that lands in the wrong lane fails the test loudly instead of type-erroring at compile time.
+const semantic = (draft: unknown): SemanticNoteInput => {
+  const n = MemoryNoteInput.parse(draft)
+  if (n.tier !== NOTE_TIER.semantic) throw new Error(`expected a semantic note, got '${n.tier}'`)
+  return n
+}
+const plan = (draft: unknown): PlanNoteInput => {
+  const n = MemoryNoteInput.parse(draft)
+  if (n.tier !== NOTE_TIER.plan) throw new Error(`expected a plan note, got '${n.tier}'`)
+  return n
+}
+
+describe('note tiers', () => {
+  // The lane a writer never named is derived from the shape it wrote — this is what lets every
+  // event appended before the split still fold, and it must not re-label anything by accident.
+  it('classifies an unlabelled note from the shape its writer produced', () => {
+    expect(inferTier({ id: 'a', title: 'A' })).toBe('semantic')
+    expect(inferTier({ id: 'a', title: 'A', scope: 'project', retention: 'expirable' })).toBe('semantic')
+    expect(inferTier({ id: 'a', title: 'A', scope: 'plan-t1', retention: 'expirable' })).toBe('episodic')
+    expect(inferTier({ id: 'a', title: 'A', scope: 'plan-t1', kind: 'plan' })).toBe('plan')
+    expect(inferTier({ id: 'a', title: 'A', zone: ['docs/**'] })).toBe('plan')
+    expect(inferTier({ id: 'a', title: 'A', rationale: 'because' })).toBe('plan')
+    expect(inferTier({ id: 'a', title: 'A', uncertainty: ['unknown'] })).toBe('plan')
+    expect(inferTier('not an object')).toBe('semantic')
+  })
+
+  it('an explicit tier always wins over inference', () => {
+    // a plan-shaped payload the author labelled semantic keeps the label — and loses the fields
+    // that lane does not have, rather than being silently re-laned
+    const n = MemoryNoteInput.parse({ tier: 'semantic', id: 'a', title: 'A', zone: ['docs/**'] })
+    expect(n.tier).toBe('semantic')
+    expect(n).not.toHaveProperty('zone')
+  })
+
+  // The episodic lane's sweepability is structural, not conventional: no writer can mint a step
+  // note the TTL sweep will never be allowed to touch.
+  it('pins episodic retention to expirable and rejects an attempt to make one durable', () => {
+    const n = MemoryNoteInput.parse({ tier: 'episodic', id: 'step-a', scope: 'plan-t1', title: 'Step A' })
+    expect(n.retention).toBe('expirable')
+    expect(MemoryNoteInput.safeParse({ tier: 'episodic', id: 'step-a', scope: 'plan-t1', title: 'Step A', retention: 'durable' }).success).toBe(false)
+  })
+
+  it('each tier keeps only its own fields', () => {
+    const s = semantic({ id: 'a', title: 'A', rules: ['never do Y'] })
+    expect(s.rules).toEqual(['never do Y'])
+    expect(s).not.toHaveProperty('zone')
+    const p = plan({ id: 'b', title: 'B', zone: ['docs/**'], rules: ['never do Y'] })
+    expect(p.zone).toEqual(['docs/**'])
+    expect(p).not.toHaveProperty('rules')
+    const e = MemoryNoteInput.parse({ tier: 'episodic', id: 'c', scope: 'plan-t1', title: 'C', rules: ['x'], zone: ['y'] })
+    expect(e).not.toHaveProperty('rules')
+    expect(e).not.toHaveProperty('zone')
+  })
+})
 
 describe('MemoryNoteInput', () => {
   it('accepts a minimal note and applies array/string defaults', () => {
-    const n = MemoryNoteInput.parse({ id: 'auth-token-refresh', title: 'Auth token refresh' })
+    const n = semantic({ id: 'auth-token-refresh', title: 'Auth token refresh' })
     expect(n.scope).toBe('project')
     expect(n.categories).toEqual([])
     expect(n.tags).toEqual([])
@@ -26,12 +83,12 @@ describe('MemoryNoteInput', () => {
   // A finding pulled off the web is only knowledge if its provenance survives with it. These
   // bounds run before memory_written is appended, so a malformed citation never reaches history.
   it('accepts bounded credential-free http(s) citations', () => {
-    const n = MemoryNoteInput.parse({
+    const n = semantic({
       id: 'finding', title: 'Finding',
       sources: [{ url: 'https://example.test/a' }, { url: 'http://example.test/b', title: 'B' }],
     })
     expect(n.sources).toEqual([{ url: 'https://example.test/a' }, { url: 'http://example.test/b', title: 'B' }])
-    expect(MemoryNoteInput.parse({ id: 'plain', title: 'Plain' }).sources).toEqual([])
+    expect(semantic({ id: 'plain', title: 'Plain' }).sources).toEqual([])
   })
 
   it('rejects unsafe or unbounded citations', () => {
@@ -52,7 +109,7 @@ describe('MemoryNoteInput', () => {
   // retrievedAt is derived from the canonical memory_written event timestamp by the projector —
   // an agent must not be able to claim when it fetched something.
   it("a writer cannot supply a citation's retrievedAt", () => {
-    const n = MemoryNoteInput.parse({
+    const n = semantic({
       id: 'finding', title: 'Finding', kind: 'research',
       sources: [{ url: 'https://example.test/a', retrievedAt: '1999-01-01T00:00:00.000Z' }],
     })
@@ -61,11 +118,11 @@ describe('MemoryNoteInput', () => {
 
   it('requires at least one citation for kind research, and only for research', () => {
     expect(() => MemoryNoteInput.parse({ id: 'r', title: 'R', kind: 'research' })).toThrow()
-    expect(MemoryNoteInput.parse({
+    expect(semantic({
       id: 'r', title: 'R', kind: 'research', sources: [{ url: 'https://example.test/a' }],
     }).kind).toBe('research')
     // every other kind may cite, or not
-    expect(MemoryNoteInput.parse({ id: 'f', title: 'F', kind: 'fact' }).sources).toEqual([])
+    expect(semantic({ id: 'f', title: 'F', kind: 'fact' }).sources).toEqual([])
   })
 
   // search lowercases the query before matching tags, while the list/ls filter compares
@@ -79,29 +136,27 @@ describe('MemoryNoteInput', () => {
   // iterations — the scalar is the same intent, so it coerces instead of failing the write.
   // Object arrays (links/sources) stay strict: a bare string there is a shape mistake.
   it('accepts a bare string as a one-element list for string-array fields', () => {
-    const n = MemoryNoteInput.parse({
-      id: 'coerce', title: 'Coerce', paths: 'src/x.ts', tags: 'Postgres', rules: 'never do Y',
-      categories: 'arch', uncertainty: 'untested', zone: 'docs/**',
-    })
+    const n = semantic({ id: 'coerce', title: 'Coerce', paths: 'src/x.ts', tags: 'Postgres', rules: 'never do Y', categories: 'arch' })
     expect(n.paths).toEqual(['src/x.ts'])
     expect(n.tags).toEqual(['postgres']) // item normalization still applies
     expect(n.rules).toEqual(['never do Y'])
     expect(n.categories).toEqual(['arch'])
-    expect(n.uncertainty).toEqual(['untested'])
-    expect(n.zone).toEqual(['docs/**'])
+    const p = plan({ id: 'coerce-plan', title: 'Coerce plan', uncertainty: 'untested', zone: 'docs/**' })
+    expect(p.uncertainty).toEqual(['untested'])
+    expect(p.zone).toEqual(['docs/**'])
     expect(MemoryNoteInput.safeParse({ id: 'x', title: 'X', links: 'other-note' }).success).toBe(false)
   })
 
   it("collapses an explicit empty string to [] (the model's clear spelling), never a junk [''] entry", () => {
-    const n = MemoryNoteInput.parse({ id: 'clear', title: 'Clear', categories: '', tags: '', paths: '', rules: '', uncertainty: '' })
+    const n = semantic({ id: 'clear', title: 'Clear', categories: '', tags: '', paths: '', rules: '' })
     expect(n.categories).toEqual([])
     expect(n.tags).toEqual([])
     expect(n.paths).toEqual([])
     expect(n.rules).toEqual([])
-    expect(n.uncertainty).toEqual([])
     expect(n.categories).not.toContain('') // the regression: '' → [''] would render junk in the vault
+    expect(plan({ tier: 'plan', id: 'clear-plan', title: 'Clear plan', uncertainty: '' }).uncertainty).toEqual([])
     // zone keeps its own min(1) item, so '' still rejects there (an empty glob is meaningless)
-    expect(MemoryNoteInput.safeParse({ id: 'z', title: 'Z', zone: '' }).success).toBe(false)
+    expect(MemoryNoteInput.safeParse({ tier: 'plan', id: 'z', title: 'Z', zone: '' }).success).toBe(false)
   })
 
   it('rejects notes above persisted collection and text limits', () => {
@@ -164,10 +219,11 @@ describe('MemoryNoteInput', () => {
       updatedAt: '2026-07-18T00:00:00Z', updatedBy: 'cli', revision: 1,
     })
     expect(full.revision).toBe(1)
+    expect(full.tier).toBe('semantic')
   })
 
   it('kind defaults to fact and sourceRevision to null', () => {
-    const n = MemoryNoteInput.parse({ id: 'x', title: 'X' })
+    const n = semantic({ id: 'x', title: 'X' })
     expect(n.kind).toBe('fact')
     expect(n.sourceRevision).toBeNull()
     expect(MemoryNoteInput.safeParse({ id: 'x', title: 'X', kind: 'architecture_target' }).success).toBe(true)

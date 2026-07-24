@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto'
 import {
   AnalysisCompletedPayload, ChildPlanDraft, EVENT_KIND, FeedbackProvidedPayload, ISOLATION_TIER, PlanAnnotatedPayload, PlanDraft, STRATEGY, TASK_STATUS, evaluateApproval, validatePlan, type ChildPlanDraftInput,
   type Analyzer, type ApprovalPolicy, type EventKind, type EventRecord, type FeedbackRequestedPayload,
-  type MemoryNote, type Plan, type PlanStep, type TaskNode, type TaskStatus,
+  type PlanNote, type Plan, type PlanStep, type TaskNode, type TaskStatus,
 } from '@orc/contracts'
 import { foldPlanNotes, planGraphHash, planScope, PLAN_STEP_ROLE } from './execution/strategies/grounded-plan'
 import { EventLog, type EventLogOps } from './storage'
@@ -200,7 +200,7 @@ export class Kernel {
   // events carry taskId:null (scoped by note.scope), so they can't be read via byTask; after() with
   // the memory kinds is how the projector reads them too. finalize_plan folds these into the
   // deterministic executable plan, so the freeze never depends on projection catch-up.
-  async listPlanNotes(taskId: string): Promise<MemoryNote[]> {
+  async listPlanNotes(taskId: string): Promise<PlanNote[]> {
     const events = await this.log.after(0, [EVENT_KIND.memory_written, EVENT_KIND.memory_deleted])
     return foldPlanNotes(events, planScope(taskId))
   }

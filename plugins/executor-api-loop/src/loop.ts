@@ -1,6 +1,6 @@
 import { generateText, type JSONValue, type LanguageModel, type ModelMessage, type ToolSet } from 'ai'
 import {
-  EVENT_KIND, FAILURE_CLASS, MEMORY_TOOL_NAME, MemoryScope, MemorySearchResult, MemoryWriteResult, NOTE_KIND, OPERATION_KIND, planScope, RETENTION, SIGNAL_OUTCOME,
+  EVENT_KIND, FAILURE_CLASS, MEMORY_TOOL_NAME, MemoryScope, MemorySearchResult, MemoryWriteResult, NOTE_TIER, OPERATION_KIND, planScope, SIGNAL_OUTCOME,
   slugId, UNIFIED_EVENT_TYPE, terminalError,
   type AgentExecutor, type EventDraft, type ExecutorContext, type NoteSummary, type ResolvedTool, type Signal, type SignalOutcome,
   type SplitResult, type UnifiedEvent, type Usage,
@@ -237,7 +237,7 @@ async function preloadKnownContext(ctx: ExecutorContext<LanguageModel>): Promise
 
 // Task 4 + Phase 2: ambient capture — every signalled step (success OR failure) leaves a note,
 // zero model calls. The signal summary already exists ("its summary is the only thing downstream
-// steps will see", buildPrompt above) and is journaled; persisting it as an expirable plan-scoped
+// steps will see", buildPrompt above) and is journaled; persisting it as an episodic plan-scoped
 // note costs no model call and makes accumulation ambient instead of opt-in. A FAILURE summary is
 // negative knowledge ("tried X, it failed because Y") — higher-value than a success per the memory
 // research, and previously discarded. Displacement, not addition: KNOWLEDGE_PROTOCOL rule 4 stops
@@ -266,8 +266,9 @@ async function captureAmbientNote(ctx: ExecutorContext<LanguageModel>, signal: S
     title: ctx.step.title.slice(0, 200),
     summary: signal.summary.slice(0, 500),
     tags: [...spec.tags],
-    retention: RETENTION.expirable,
-    kind: NOTE_KIND.fact,
+    // the EPISODIC tier by name, not by convention: this is a record of what one run did, not a
+    // claim about the project, and the tier is what makes it expirable and sweepable by construction
+    tier: NOTE_TIER.episodic,
   }
   // the SYNTHETIC toolCallId matters: without it the write's idempotencyKey is undefined and a
   // crash-recovery replay between the signal checkpoint and workflow completion appends a DUPLICATE

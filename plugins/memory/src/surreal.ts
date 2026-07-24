@@ -5,8 +5,8 @@ import {
   activation, activationBoost, DEFAULT_HALF_LIFE_DAYS,
   deriveNoteProvenance, EDGE_DIRECTION, EVENT_KIND, LINK_KINDS, NOTE_KINDS, MemoryScope,
   MemoryAccessedPayload, MemoryDeletedPayload, MemoryNote, MemoryWrittenPayload,
-  SEARCH_MODE, errorMessage, noteKey,
-  type EmbeddingProvider, type EventRecord, type NeighborQuery, type MemoryFilter,
+  SEARCH_MODE, errorMessage, inferTier, noteKey, NoteTier,
+  type EmbeddingProvider, type EventRecord, type NeighborQuery, type MemoryFilter, type NoteFields,
   type MemorySearchOpts, type NeighborResult, type NoteSummary,
 } from '@orc/contracts'
 import { rankNeighbors, rrfFuse, type Edge } from './rank'
@@ -27,15 +27,19 @@ const MAX_SEARCH_TERMS = 8
 const kindType = t.union(LINK_KINDS.map(k => t.literal(k)))
 const noteKindType = t.union(NOTE_KINDS.map(k => t.literal(k)))
 
+// Tier-specific columns are optional because a row only HAS the columns its tier owns — a plan
+// note has no `rules` column at all, not an empty one. `tier` itself is optional so a row
+// projected before the split still selects; `orc memory rebuild` re-derives it from the log.
 const noteTable = table(Tb.Note, {
-  noteId: t.string(), scope: t.string(), title: t.string(),
-  kind: noteKindType, sourceRevision: t.option(t.string()),
-  categories: t.array(t.string()), tags: t.array(t.string()),
+  noteId: t.string(), scope: t.string(), title: t.string(), tier: t.option(t.string()),
+  kind: t.option(noteKindType), sourceRevision: t.option(t.string()),
+  categories: t.option(t.array(t.string())), tags: t.array(t.string()),
   links: t.array(t.object({ id: t.string(), kind: kindType, confidence: t.option(t.number()) })),
-  paths: t.array(t.string()), rules: t.array(t.string()), summary: t.string(), body: t.string(),
+  paths: t.option(t.array(t.string())), rules: t.option(t.array(t.string())),
+  summary: t.string(), body: t.string(),
   retention: t.string(),
-  sources: t.array(t.object({ url: t.string(), title: t.option(t.string()), retrievedAt: t.string() })),
-  rationale: t.string(), uncertainty: t.array(t.string()), zone: t.option(t.array(t.string())),
+  sources: t.option(t.array(t.object({ url: t.string(), title: t.option(t.string()), retrievedAt: t.string() }))),
+  rationale: t.option(t.string()), uncertainty: t.option(t.array(t.string())), zone: t.option(t.array(t.string())),
   createdAt: t.string(), createdBy: t.string(), updatedAt: t.string(), updatedBy: t.string(),
   revision: t.number(), hits: t.option(t.number()), lastAccessedAt: t.option(t.string()),
   // the note's dense vector (embedder-derived, Tier-2 like hits) — set only when an embedder was
@@ -164,18 +168,27 @@ export class SurrealMemory {
         // provenance + retrievedAt stamping shared with the kernel plan-note fold (deriveNoteProvenance):
         // the one place this is computed, so projector and log-side fold cannot disagree.
         const prov = deriveNoteProvenance(note, author, e.ts, ex)
+        // read through NoteView so one write path covers every tier: a column the note's tier does
+        // not own is spread away, so the row carries the tier's real shape and a later tier change
+        // cannot leave a stale foreign column behind.
+        const n: NoteFields = note
         await tx.upsert(Tb.Note, k).set({
-          noteId: note.id, scope: note.scope, title: note.title,
-          kind: note.kind,
+          noteId: note.id, scope: note.scope, title: note.title, tier: note.tier,
+          ...(n.kind !== undefined && { kind: n.kind }),
           ...(note.sourceRevision !== null && { sourceRevision: note.sourceRevision }),
-          categories: note.categories, tags: note.tags,
+          ...(n.categories !== undefined && { categories: n.categories }),
+          tags: note.tags,
           // materialize the optional confidence key: t.option infers `number | undefined`, required
           links: note.links.map(l => ({ id: l.id, kind: l.kind, confidence: l.confidence })),
-          paths: note.paths, rules: note.rules, summary: note.summary, body: note.body,
+          ...(n.paths !== undefined && { paths: n.paths }),
+          ...(n.rules !== undefined && { rules: n.rules }),
+          summary: note.summary, body: note.body,
           retention: note.retention,
           // ORM row wants the title key always present (OptionType); retrievedAt already stamped by deriveNoteProvenance
-          sources: prov.sources.map(s => ({ url: s.url, title: s.title, retrievedAt: s.retrievedAt })),
-          rationale: note.rationale, uncertainty: note.uncertainty, zone: note.zone,
+          ...(prov.sources !== undefined && { sources: prov.sources.map(s => ({ url: s.url, title: s.title, retrievedAt: s.retrievedAt })) }),
+          ...(n.rationale !== undefined && { rationale: n.rationale }),
+          ...(n.uncertainty !== undefined && { uncertainty: n.uncertainty }),
+          ...(n.zone !== undefined && { zone: n.zone }),
           createdAt: prov.createdAt, createdBy: prov.createdBy,
           updatedAt: prov.updatedAt, updatedBy: prov.updatedBy, revision: prov.revision,
           hits: ex?.hits ?? 0,
@@ -444,14 +457,16 @@ export class SurrealMemory {
 // map the stored row back to the MemoryNote shape (noteId → id; drop RecordId + Tier-2 fields).
 function toNote(r: Record<string, any>): unknown {
   return {
-    id: r.noteId, scope: r.scope, title: r.title, kind: r.kind, sourceRevision: r.sourceRevision ?? null,
+    // an absent tier (a row projected before the split) is classified by MemoryNote's own decoder
+    // from the columns below, so a read model that has not been rebuilt still parses
+    tier: r.tier, id: r.noteId, scope: r.scope, title: r.title, kind: r.kind,
+    sourceRevision: r.sourceRevision ?? null,
     categories: r.categories, tags: r.tags,
     links: r.links, paths: r.paths, rules: r.rules, summary: r.summary, body: r.body,
     // ?? fallbacks so a row written before these fields existed still parses on rebuild
     retention: r.retention ?? 'durable',
-    sources: r.sources ?? [],
-    rationale: r.rationale, uncertainty: r.uncertainty,
-    zone: r.zone ?? [], // rows written before the field existed parse on rebuild
+    sources: r.sources,
+    rationale: r.rationale, uncertainty: r.uncertainty, zone: r.zone,
     createdAt: r.createdAt, createdBy: r.createdBy, updatedAt: r.updatedAt, updatedBy: r.updatedBy,
     revision: r.revision,
   }
@@ -460,7 +475,8 @@ function toNote(r: Record<string, any>): unknown {
 function toSummary(r: Record<string, any>): NoteSummary {
   return {
     id: r.noteId, scope: r.scope, title: r.title,
-    categories: r.categories, tags: r.tags, summary: r.summary,
+    tier: NoteTier.catch(inferTier(r)).parse(r.tier),
+    categories: r.categories ?? [], tags: r.tags, summary: r.summary,
     hits: r.hits ?? 0, lastAccessedAt: r.lastAccessedAt ?? null,
   }
 }

@@ -7,7 +7,7 @@ You are an **auditor** authoring an executable plan, grounded in the analysis no
 
 1. Query the graph (`memory_search`/`memory_neighbors`) and read the analysis coverage. Traverse
    `contradicts`/`supersedes` before asserting anything.
-2. Author the plan as **plan-notes** via `memory_write` (`kind: 'plan'`, `scope: 'plan-<taskId-slug>'`):
+2. Author the plan as **plan-notes** via `memory_write` (`tier: 'plan'`, `scope: 'plan-<taskId-slug>'`):
    a `masterplan` note linked `decomposes_into` each subplan-note; each subplan holds `requirements`
    (body), `rationale`, `depends_on` siblings, and `uncertainty[]` — surface EVERY coverage gap as an
    uncertainty on the note it affects.

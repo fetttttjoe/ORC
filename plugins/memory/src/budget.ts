@@ -1,4 +1,4 @@
-import type { MemoryNote } from '@orc/contracts'
+import type { MemoryNote, NoteView } from '@orc/contracts'
 
 export const approxTokens = (s: string): number => Math.ceil(s.length / 4) // ponytail: chars/4; swap for a real tokenizer only if it misbudgets
 
@@ -21,14 +21,24 @@ const READ_NEXT = 'memory_read with a larger budget for the full note'
 // was dropped mid-note rather than mistaking the cut for the note's actual ending.
 export const TRIM_MARKER = '… [trimmed]'
 
-// The budget-fitted view of a note. truncated + next already shipped; TRIM_MARKER (new) makes
-// the cut visible INSIDE the field so a reader can tell prose was dropped mid-note.
-export interface FittedNote { note: MemoryNote; truncated: boolean; next?: string }
-const variableChars = (note: MemoryNote): number =>
-  note.summary.length + note.body.length + note.rationale.length
-  + [...note.categories, ...note.tags, ...note.paths, ...note.rules, ...note.uncertainty]
-    .reduce((sum, value) => sum + value.length, 0)
-  + note.links.reduce((sum, link) => sum + JSON.stringify(link).length, 0)
+// The fitted view of a note, plus whether anything was dropped. `next` tells the reader how to get
+// the rest. NoteView, not MemoryNote: trimming can empty fields a valid note requires.
+export interface FittedNote { note: NoteView; truncated: boolean; next?: string }
+
+const itemChars = (value: unknown): number =>
+  typeof value === 'string' ? value.length : JSON.stringify(value).length
+
+// The variable-cost fields of every tier. A field the note's tier does not have reads as
+// undefined and costs nothing, so one expression covers all three lanes. `sources` and `zone`
+// are counted here for the first time — before the tiers they escaped the cap entirely.
+function variableChars(note: MemoryNote): number {
+  const n: NoteView = note
+  const text = [n.summary, n.rationale, n.body].reduce((sum, s) => sum + (s ?? '').length, 0)
+  const lists: Array<ReadonlyArray<unknown> | undefined> =
+    [n.categories, n.tags, n.links, n.paths, n.rules, n.uncertainty, n.zone, n.sources]
+  return text + lists.reduce(
+    (sum, values) => sum + (values ?? []).reduce<number>((inner, value) => inner + itemChars(value), 0), 0)
+}
 
 export function fitMemoryNoteToBudget(note: MemoryNote, budget: number): FittedNote {
   const contentLimit = budget * 4
@@ -36,7 +46,8 @@ export function fitMemoryNoteToBudget(note: MemoryNote, budget: number): FittedN
   const full = { note, truncated: false }
   if (variableChars(note) <= contentLimit && JSON.stringify(full).length <= responseLimit) return full
 
-  const fitted: MemoryNote = {
+  const source: NoteView = note
+  const fitted: NoteView = {
     ...note,
     id: note.id.slice(0, 128),
     scope: note.scope.slice(0, 128),
@@ -46,16 +57,28 @@ export function fitMemoryNoteToBudget(note: MemoryNote, budget: number): FittedN
     createdBy: note.createdBy.slice(0, 200),
     updatedAt: note.updatedAt.slice(0, 128),
     updatedBy: note.updatedBy.slice(0, 200),
-    summary: '', categories: [], tags: [], links: [], paths: [], rules: [],
-    uncertainty: [], rationale: '', body: '',
   }
+  // Every variable field starts empty and is refilled in priority order, so the fields that matter
+  // most get the budget. Only fields the tier actually has are touched — an `undefined` source
+  // field stays absent rather than appearing as a hollow key the tier does not own.
+  const blankText = (key: 'summary' | 'rationale' | 'body'): void => {
+    if (source[key] !== undefined) fitted[key] = ''
+  }
+  blankText('summary'); blankText('rationale'); blankText('body')
+  if (source.categories) fitted.categories = []
+  if (source.tags) fitted.tags = []
+  if (source.links) fitted.links = []
+  if (source.paths) fitted.paths = []
+  if (source.rules) fitted.rules = []
+  if (source.uncertainty) fitted.uncertainty = []
+  if (source.zone) fitted.zone = []
+  if (source.sources) fitted.sources = []
   const result = { note: fitted, truncated: true, next: READ_NEXT }
   let contentUsed = 0
   const fits = () => JSON.stringify(result).length <= responseLimit
   // id and scope are NOT on this ladder: they are bounded at 128 chars each and are the only
   // fields that make the response actionable. Discarding them emits `next: memory_read with a
-  // larger budget` alongside no id to read — a hint the agent cannot follow — and yields an
-  // object that no longer satisfies MemoryNote (id regex, title.min(1)).
+  // larger budget` alongside no id to read — a hint the agent cannot follow.
   for (const discard of [
     () => { fitted.updatedBy = '' },
     () => { fitted.createdBy = '' },
@@ -67,7 +90,8 @@ export function fitMemoryNoteToBudget(note: MemoryNote, budget: number): FittedN
     if (fits()) break
     discard()
   }
-  const addString = (key: 'summary' | 'rationale' | 'body', value: string): void => {
+  const addString = (key: 'summary' | 'rationale' | 'body', value: string | undefined): void => {
+    if (value === undefined) return
     let low = 0
     let high = Math.min(value.length, contentLimit - contentUsed)
     while (low < high) {
@@ -100,17 +124,32 @@ export function fitMemoryNoteToBudget(note: MemoryNote, budget: number): FittedN
     contentUsed += low > 0 ? low + TRIM_MARKER.length : 0
   }
 
-  addString('summary', note.summary)
-  for (const key of ['categories', 'tags', 'links', 'paths', 'rules', 'uncertainty'] as const) {
-    for (const value of note[key]) {
-      const cost = typeof value === 'string' ? value.length : JSON.stringify(value).length
+  // Generic over the ELEMENT type so each list keeps its own: the setter closes over one concrete
+  // field, which is what makes this type-safe without a cast on a union-keyed index.
+  const addList = <T>(values: T[] | undefined, set: (kept: T[]) => void): void => {
+    if (values === undefined) return
+    const kept: T[] = []
+    for (const value of values) {
+      const cost = itemChars(value)
       if (contentUsed + cost > contentLimit) break
-      ;(fitted[key] as unknown[]).push(value)
-      if (!fits()) { (fitted[key] as unknown[]).pop(); break }
+      kept.push(value)
+      set(kept)
+      if (!fits()) { kept.pop(); set(kept); break }
       contentUsed += cost
     }
   }
-  addString('rationale', note.rationale)
-  addString('body', note.body)
+
+  // summary first — it is the retrieval surface — then the labels, then the long prose
+  addString('summary', source.summary)
+  addList(source.categories, kept => { fitted.categories = kept })
+  addList(source.tags, kept => { fitted.tags = kept })
+  addList(source.links, kept => { fitted.links = kept })
+  addList(source.paths, kept => { fitted.paths = kept })
+  addList(source.rules, kept => { fitted.rules = kept })
+  addList(source.uncertainty, kept => { fitted.uncertainty = kept })
+  addList(source.zone, kept => { fitted.zone = kept })
+  addList(source.sources, kept => { fitted.sources = kept })
+  addString('rationale', source.rationale)
+  addString('body', source.body)
   return result
 }
