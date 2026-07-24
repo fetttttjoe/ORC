@@ -18,7 +18,9 @@
     "@orc/provider-openai": "workspace:*",
     "@orc/provider-ollama": "workspace:*",
     "commander": "^12.1.0",
-    "@modelcontextprotocol/sdk": "^1.29.0"
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "ai": "^7.0.30",
+    "zod": "^4.4.3"
   },
   "devDependencies": {
     "surrealdb": "2.0.4"

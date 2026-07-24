@@ -7,6 +7,7 @@ import { agentAnalyzer } from '@orc/analyzer-agent'
 import { createMcpHub, type McpHub } from '@orc/mcp-client'
 import { createMemory, createMemoryLifecycle, unavailableMemoryTools, tierForRole, type MemoryLifecycle, type MemoryTier } from '@orc/memory'
 import { openMemory } from './memory-open'
+import { buildDistiller } from './consolidation-distiller'
 import { createVaultProjector } from '@orc/vault-projector'
 import { createDbosPort, createPluginHost, dbosSend, execTool, finalizePlanTool, isMcpTrusted, loadConfig, loadTrust, openStorage, readAnnotationsTool, reportCoverageTool, requireProject, splitTool, Kernel, type DbosPort, type PluginHost, type ProjectConfig, type Storage } from '@orc/kernel'
 
@@ -62,7 +63,9 @@ export async function buildRuntime(
     await memory.projector.start()
     // post-task memory maintenance (auto-consolidation) — a decoupled subscriber, started only in
     // the execution runtime (never in the one-shot CLI memory commands) and stopped at shutdown.
-    lifecycle = createMemoryLifecycle({ log, store: memory.store })
+    // `distill` (optional, memoryConsolidateModel) upgrades the note from extractive bullets to a
+    // coherent synthesis, off the agent turn budget; absent → extractive.
+    lifecycle = createMemoryLifecycle({ log, store: memory.store, distill: buildDistiller(host.providers, config.memoryConsolidateModel) })
     await lifecycle.start()
     buildMemoryTools = memory.buildTools
   } catch (err) {

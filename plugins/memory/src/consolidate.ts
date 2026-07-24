@@ -15,21 +15,30 @@ export interface ConsolidationInput {
 // Marks a note as a task-consolidation output — one place, so search/filters agree on the spelling.
 export const CONSOLIDATED_TAG = 'consolidated'
 
-// Distill a task's transient plan-scoped step notes into ONE durable, project-scoped note, linked
-// `derived_from` the project knowledge the task built on. Extractive by design: the step summaries
-// already ARE the model's distillation, so this spends no model call — it PROMOTES and interconnects
-// them, it does not re-summarise (which would risk the over-summarisation failure mode the memory
-// research warns of; the event log stays the verbatim anchor). Pure: same input → same draft.
-export function consolidatedNote(input: ConsolidationInput): MemoryNoteDraft {
+// The text of a consolidated note — what an optional distiller returns to replace the extractive
+// default (title/summary/body only; scope, id, kind, links stay owned by consolidatedNote).
+export interface DistilledText { title: string; summary: string; body: string }
+
+// A distiller turns a task's raw step outcomes into ONE coherent note's text — the LLM upgrade over
+// the extractive default. Optional and injected by the composition root (which owns the model), so
+// the memory plugin stays model-free and deterministic; a null return falls back to extractive.
+export type ConsolidationDistiller = (input: ConsolidationInput) => Promise<DistilledText | null>
+
+// Build a task's durable, project-scoped consolidation note, linked `derived_from` the project
+// knowledge it used. Without `distilled` it is EXTRACTIVE: the step summaries already ARE the model's
+// distillation, so it PROMOTES and interconnects them with no model call, keeping the event log as
+// the verbatim anchor. With `distilled` (an out-of-band LLM pass) the text is a coherent synthesis
+// instead of glued bullets — id/scope/links are unchanged, so the two are interchangeable. Pure.
+export function consolidatedNote(input: ConsolidationInput, distilled?: DistilledText): MemoryNoteDraft {
   const withSummary = input.steps.filter(s => s.summary.trim() !== '')
-  const body = withSummary.map(s => `- ${s.title}: ${s.summary}`).join('\n')
+  const body = distilled?.body ?? withSummary.map(s => `- ${s.title}: ${s.summary}`).join('\n')
   const links = [...new Set(input.derivedFrom)].map(id => ({ id, kind: LINK_KIND.derived_from }))
   return {
-    id: slugId(`outcome ${input.taskTitle}`),
+    id: slugId(`outcome ${input.taskTitle}`), // keyed on the task, distilled or not — stable + idempotent
     scope: MemoryScope.project, // durable knowledge — the whole point is promotion OUT of plan scope
     kind: NOTE_KIND.decision,
-    title: `Outcome: ${input.taskTitle}`.slice(0, 200),
-    summary: (withSummary[0]?.summary ?? input.taskTitle).slice(0, 500),
+    title: (distilled?.title ?? `Outcome: ${input.taskTitle}`).slice(0, 200),
+    summary: (distilled?.summary ?? withSummary[0]?.summary ?? input.taskTitle).slice(0, 500),
     body,
     tags: [CONSOLIDATED_TAG],
     links,
@@ -46,8 +55,9 @@ export function isSubstantive(input: { steps: StepOutcome[]; derivedFrom: string
 }
 
 // What consolidateTask reads from — the memory read model and the event log, nothing from the
-// execution kernel: memory-lifecycle work stays in the memory domain.
-export interface ConsolidationDeps { log: EventLog; store: MemoryStore }
+// execution kernel: memory-lifecycle work stays in the memory domain. `distill` is the optional LLM
+// upgrade, injected by the composition root; absent → extractive.
+export interface ConsolidationDeps { log: EventLog; store: MemoryStore; distill?: ConsolidationDistiller }
 
 // The task's title, folded from its task_created event; null if the task is unknown to the log.
 async function taskTitle(log: EventLog, taskId: string): Promise<string | null> {
@@ -85,8 +95,12 @@ export async function consolidateTask(
   const steps = (await deps.store.list({ scope: planScope(taskId) })).map(n => ({ title: n.title, summary: n.summary }))
   const derivedFrom = await accessedProjectIds(deps.log, taskId)
   if (!opts.force && !isSubstantive({ steps, derivedFrom })) return null
+  const input: ConsolidationInput = { taskTitle: title, steps, derivedFrom }
+  // distillation is best-effort — a model hiccup falls back to the extractive note rather than
+  // dropping the capture entirely.
+  const distilled = deps.distill ? await deps.distill(input).catch(() => null) : null
   // force (an explicit manual request) always REWRITES; the auto path keys by task so a redelivered
   // completion converges on one event instead of appending a duplicate memory_written.
   const writeOpts = opts.force ? {} : { idempotencyKey: `consolidate:${taskId}` }
-  return deps.store.write(consolidatedNote({ taskTitle: title, steps, derivedFrom }), { source: 'cli' }, writeOpts)
+  return deps.store.write(consolidatedNote(input, distilled ?? undefined), { source: 'cli' }, writeOpts)
 }

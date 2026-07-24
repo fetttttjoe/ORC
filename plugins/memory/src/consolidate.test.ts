@@ -32,6 +32,20 @@ describe('consolidatedNote', () => {
     expect(draft.summary).toBe('Empty task')
     expect(() => MemoryNoteInput.parse(draft)).not.toThrow()
   })
+
+  it('uses distilled text when provided, keeping the task-keyed id, scope, and links', () => {
+    const draft = consolidatedNote(
+      { taskTitle: 'Explain memory heat', steps: [{ title: 'a', summary: 'raw' }], derivedFrom: ['area-memory'] },
+      { title: 'How memory heat works', summary: 'Edges strengthen on use.', body: '- via records the edge' },
+    )
+    expect(draft.title).toBe('How memory heat works') // distilled, not "Outcome: …"
+    expect(draft.summary).toBe('Edges strengthen on use.')
+    expect(draft.body).toBe('- via records the edge') // distilled body, not the extractive bullet
+    expect(draft.id).toBe(slugId('outcome Explain memory heat')) // id stays task-keyed → idempotent
+    expect(draft.scope).toBe('project')
+    expect(draft.links).toEqual([{ id: 'area-memory', kind: LINK_KIND.derived_from }])
+    expect(() => MemoryNoteInput.parse(draft)).not.toThrow()
+  })
 })
 
 describe('isSubstantive', () => {

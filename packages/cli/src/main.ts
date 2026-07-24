@@ -7,6 +7,8 @@ import { openStorage, Kernel, fold, grantExtensionTrust, grantMcpTrust, initiali
 import { createVaultProjector, parsePlanFile } from '@orc/vault-projector'
 import { consolidateTask, probeMemory } from '@orc/memory'
 import { openMemory } from './memory-open'
+import { buildDistiller } from './consolidation-distiller'
+import { seedRegistries } from './runtime'
 import { buildModelDiscovery, buildOrcActions, singleStepDraft } from './actions'
 import { renderPlanHuman } from './plan-render'
 
@@ -688,16 +690,18 @@ export function buildProgram(
   mem
     .command('consolidate <taskId>')
     .description("distill a task's step notes into one durable project note, linked to the knowledge it used")
-    .action(async (taskId: string) => {
+    .option('--model <ref>', 'synthesise the note with this model instead of extractive bullets')
+    .action(async (taskId: string, opts: { model?: string }) => {
       const { config, log } = needPlugin()
       const memory = await openMemory({ log, config })
       try {
         await memory.projector.catchUp()
+        const distill = opts.model ? buildDistiller(seedRegistries(config).providers, opts.model) : undefined
         // force: an explicit manual request bypasses the salience gate the auto-lifecycle applies
-        const note = await consolidateTask({ log, store: memory.store }, taskId, { force: true })
+        const note = await consolidateTask({ log, store: memory.store, distill }, taskId, { force: true })
         if (!note) { console.log(`nothing to consolidate for '${taskId}' — unknown task or no step notes`); return }
         await memory.projector.catchUp()
-        console.log(`consolidated '${note.id}' with ${note.links.length} source link(s) — read it: orc memory cat ${note.id}`)
+        console.log(`consolidated '${note.id}'${opts.model ? ` (distilled by ${opts.model})` : ''} with ${note.links.length} source link(s) — read it: orc memory cat ${note.id}`)
       } finally {
         await memory.close()
       }

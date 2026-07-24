@@ -13,7 +13,7 @@ export { createMemoryProjector } from './projector'
 export { memoryTools, unavailableMemoryTools, MEMORY_READ_TOOLS, MEMORY_TIER, tierForRole, type MemoryTier } from './tools'
 export { renderMemoryIndex, rebuildVaultMemory } from './memory-index'
 export { orphanedNotes, type SweptNote } from './sweep'
-export { consolidatedNote, consolidateTask, isSubstantive, CONSOLIDATED_TAG, type ConsolidationInput, type ConsolidationDeps, type StepOutcome } from './consolidate'
+export { consolidatedNote, consolidateTask, isSubstantive, CONSOLIDATED_TAG, type ConsolidationInput, type ConsolidationDeps, type ConsolidationDistiller, type DistilledText, type StepOutcome } from './consolidate'
 export { createMemoryLifecycle, taskCompletedId, type MemoryLifecycle } from './lifecycle'
 export { renderNoteFile, noteRelPath } from './note-md'
 

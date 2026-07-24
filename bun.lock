@@ -12,6 +12,9 @@
     "packages/cli": {
       "name": "@orc/cli",
       "version": "0.0.0",
+      "bin": {
+        "orc": "./src/bin.ts",
+      },
       "dependencies": {
         "@modelcontextprotocol/sdk": "^1.29.0",
         "@orc/analyzer-agent": "workspace:*",
@@ -26,7 +29,9 @@
         "@orc/provider-openai": "workspace:*",
         "@orc/ui-core": "workspace:*",
         "@orc/vault-projector": "workspace:*",
+        "ai": "^7.0.30",
         "commander": "^12.1.0",
+        "zod": "^4.4.3",
       },
       "devDependencies": {
         "surrealdb": "2.0.4",

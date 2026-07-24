@@ -39,6 +39,11 @@ const settingsSchema = (dir: string) =>
     // — swap for any provider/model via config or ORC_MEMORY_EMBED_MODEL. A model change needs
     // `orc memory rebuild` to re-embed, since vectors from different models are not comparable.
     memoryEmbedModel: z.string().default('ollama/all-minilm'),
+    // the model that DISTILS a finished task's step outcomes into one durable note, as a
+    // 'provider/model' ref. '' (default) = extractive promotion (glued bullets, zero model calls);
+    // set it (e.g. 'anthropic/claude-haiku-4-5') to have the out-of-band lifecycle synthesise a
+    // coherent note instead. A per-task cost, deliberately opt-in — it runs off the agent turn budget.
+    memoryConsolidateModel: z.string().default(''),
     // ambient capture kill switch (Task 4): displaces the manual step-report protocol rule —
     // successful steps auto-persist their signal summary as an expirable plan note, at zero
     // model-call cost. z.stringbool(), NOT z.coerce.boolean(): coerce turns the env string
@@ -79,6 +84,7 @@ const envOverrides = (): Record<string, string> => {
     memoryHalfLifeDays: process.env.ORC_MEMORY_HALF_LIFE_DAYS,
     memoryPreloadTokens: process.env.ORC_MEMORY_PRELOAD_TOKENS,
     memoryEmbedModel: process.env.ORC_MEMORY_EMBED_MODEL,
+    memoryConsolidateModel: process.env.ORC_MEMORY_CONSOLIDATE_MODEL,
     ambientCapture: process.env.ORC_AMBIENT_CAPTURE,
     ollamaBaseUrl: process.env.OLLAMA_BASE_URL,
     projectDbUrl: process.env.ORC_PROJECT_DB_URL,
