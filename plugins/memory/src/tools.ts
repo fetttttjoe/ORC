@@ -1,5 +1,5 @@
 import { z } from 'zod'
-import { AccessVia, EDGE_DIRECTIONS, errorMessage, MEMORY_ACCESS, MEMORY_LIMITS, MEMORY_SOURCE_LIMITS, MEMORY_TOOL_NAME, MemoryWriteResult, NOTE_KINDS, LINK_KIND, LINK_KINDS, RETENTION_CLASSES, LinkKind, MemoryNoteDraftInput, slugId, type MemoryAuthor, type MemoryNote, type MemoryStore, type ResolvedTool } from '@orc/contracts'
+import { AccessVia, EDGE_DIRECTIONS, errorMessage, MEMORY_ACCESS, MEMORY_LIMITS, MEMORY_SOURCE_LIMITS, MEMORY_TOOL_NAME, MemorySearchResult, MemoryWriteResult, NOTE_KINDS, LINK_KIND, LINK_KINDS, RETENTION_CLASSES, LinkKind, MemoryNoteDraftInput, slugId, type MemoryAuthor, type MemoryNote, type MemoryStore, type ResolvedTool } from '@orc/contracts'
 import { applyBudget, fitMemoryNoteToBudget } from './budget'
 
 // Advisory note lint, echoed back in the memory_write result so the writing agent can improve
@@ -181,13 +181,13 @@ export function memoryTools(store: MemoryStore, author: MemoryAuthor, tier: Memo
           const q = SearchInput.parse(input)
           const limit = q.limit ?? (q.detail_level === 'minimal' ? 5 : 20)
           const r = applyBudget(await store.search(q.query, { category: q.category, tag: q.tag }), n => JSON.stringify(n), { limit, budget: q.budget })
-          return ok({
+          return ok(MemorySearchResult.parse({
             notes: r.items, truncated: r.truncated, omitted: r.omitted,
             ...(r.truncated && { next: 'refine the query, or memory_read/memory_neighbors a specific id' }),
             // absence epistemics (codebase-memory-mcp §5 amendment E-i): empty means "no note
             // matched", never "no such decision exists" — say so in the envelope.
             ...(r.items.length === 0 && { note: "no note matched — absence is not proof a decision doesn't exist" }),
-          })
+          }))
         } catch (e) { return err(e) }
       },
     },

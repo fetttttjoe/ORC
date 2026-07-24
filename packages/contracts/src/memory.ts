@@ -237,6 +237,17 @@ export const NoteSummary = z.object({
 })
 export type NoteSummary = z.infer<typeof NoteSummary>
 
+// memory_search's result envelope (tools.ts constructs it; the loop's Task 7 preload parses it —
+// no casts, same discipline as MemoryWriteResult).
+export const MemorySearchResult = z.object({
+  notes: z.array(NoteSummary),
+  truncated: z.boolean(),
+  omitted: z.number().int().nonnegative(),
+  next: z.string().optional(),
+  note: z.string().optional(),
+})
+export type MemorySearchResult = z.infer<typeof MemorySearchResult>
+
 // Traversal direction relative to the seed — a matched value, so it lives as a const map, never
 // scattered 'out'/'in' literals. 'out' = seed →(via)→ neighbour; 'in' = neighbour →(via)→ seed.
 // Disambiguates asymmetric kinds (e.g. supersedes) that reverse-traversal would otherwise flatten.

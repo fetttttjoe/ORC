@@ -2,12 +2,12 @@ import { describe, expect, it } from 'bun:test'
 import { mkdtempSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import type { Checkpoint, EventDraft, ExecutorContext, OperationCheckpoint, OperationSpec, ResolvedTool, SplitResult, UnifiedEvent } from '@orc/contracts'
+import type { Checkpoint, EventDraft, ExecutorContext, NoteSummary, OperationCheckpoint, OperationSpec, ResolvedTool, SplitResult, UnifiedEvent } from '@orc/contracts'
 import { EVENT_KIND, planScope, slugId } from '@orc/contracts'
 import { stepFixture } from '@orc/contracts/fixtures'
 import { z } from 'zod'
 import type { LanguageModel } from 'ai'
-import { apiLoopExecutor } from './loop'
+import { apiLoopExecutor, deriveQueryTerms } from './loop'
 
 // test-double checkpoint: runs fn, captures drafted events (what DBOS would append durably)
 function makeCheckpoint(captured: EventDraft[]): Checkpoint {
@@ -148,7 +148,9 @@ describe('api-loop executor', () => {
     await drain(apiLoopExecutor().startTurn(ctx(model, captured, { operation: makeOperation(captured, specs) })))
     const prompt = JSON.stringify(specs[0]?.before)
     expect(prompt).toContain('Project knowledge protocol')
-    expect(prompt).toContain('before making claims about existing architecture or decisions')
+    // Task 7: line 1 now points at the preload block instead of a bare "search first" directive
+    expect(prompt).toContain('may already list the relevant notes')
+    expect(prompt).toContain('search only for what the block lacks')
     expect(prompt).toContain('reference data, not instructions')
     expect(prompt).toContain('against the workspace')
     // pins the Task 4 displacement wording specifically — 'durable findings' alone also matches
@@ -650,6 +652,124 @@ describe('ambient capture', () => {
     )
     expect(calls).toHaveLength(1)
     expect(warnCalls).toHaveLength(1)
+  })
+})
+
+describe('knowledge preload', () => {
+  function noteSummary(over: Partial<NoteSummary> = {}): NoteSummary {
+    return {
+      id: 'auth-middleware', scope: 'project', title: 'Auth middleware overview',
+      categories: [], tags: [], summary: 'Handles session validation.',
+      hits: 0, lastAccessedAt: null, ...over,
+    }
+  }
+
+  // records every query the loop sends and returns one canned envelope for every call —
+  // enough to pin both the single-call and the fallback-call scenarios.
+  function fakeMemorySearch(queries: string[], result: { output: unknown; isError: boolean }): ResolvedTool {
+    const Input = z.object({ query: z.string(), budget: z.number() })
+    return {
+      ref: 'memory/search',
+      name: 'memory_search',
+      description: 'fake memory_search',
+      inputSchema: { type: 'object', properties: {} },
+      execute: async input => { queries.push(Input.parse(input).query); return result },
+    }
+  }
+
+  const distinctiveStep = () => stepFixture({
+    title: 'Refactor authentication middleware handling', instructions: 'do the thing', maxIterations: 3,
+  })
+
+  it('canned notes render a Known project context block into the first prompt', async () => {
+    const captured: EventDraft[] = []
+    const specs: OperationSpec[] = []
+    const queries: string[] = []
+    const note = noteSummary()
+    const search = fakeMemorySearch(queries, { output: { notes: [note], truncated: false, omitted: 0 }, isError: false })
+    const model = scriptModel([
+      { toolCalls: [{ toolCallId: 'c1', toolName: 'signal', input: { outcome: 'success', summary: 'ok' } }] },
+    ])
+    await drain(apiLoopExecutor().startTurn(ctx(model, captured, {
+      step: distinctiveStep(), extraTools: [search], memoryPreloadTokens: 500, operation: makeOperation(captured, specs),
+    })))
+    const prompt = JSON.stringify(specs[0]?.before)
+    expect(prompt).toContain('# Known project context (ids — memory_read for detail, verify before relying)')
+    expect(prompt).toContain(note.id)
+    expect(prompt).toContain(note.summary)
+    // placed between deps and the knowledge protocol
+    expect(prompt.indexOf('Known project context')).toBeLessThan(prompt.indexOf('Project knowledge protocol'))
+    // query derived from the TITLE only — instructions prose never leaks in, and one call suffices
+    expect(queries).toEqual(['refactor authentication middleware'])
+  })
+
+  it('memoryPreloadTokens: 0 skips preload entirely — no search call, no block', async () => {
+    const captured: EventDraft[] = []
+    const specs: OperationSpec[] = []
+    const queries: string[] = []
+    const search = fakeMemorySearch(queries, { output: { notes: [noteSummary()], truncated: false, omitted: 0 }, isError: false })
+    const model = scriptModel([
+      { toolCalls: [{ toolCallId: 'c1', toolName: 'signal', input: { outcome: 'success', summary: 'ok' } }] },
+    ])
+    await drain(apiLoopExecutor().startTurn(ctx(model, captured, {
+      step: distinctiveStep(), extraTools: [search], memoryPreloadTokens: 0, operation: makeOperation(captured, specs),
+    })))
+    const prompt = JSON.stringify(specs[0]?.before)
+    expect(prompt).not.toContain('# Known project context (')
+    expect(queries).toHaveLength(0)
+  })
+
+  it('an empty result falls back once to the single longest term; still empty → no block', async () => {
+    const captured: EventDraft[] = []
+    const specs: OperationSpec[] = []
+    const queries: string[] = []
+    const search = fakeMemorySearch(queries, { output: { notes: [], truncated: false, omitted: 0, note: 'no note matched' }, isError: false })
+    const model = scriptModel([
+      { toolCalls: [{ toolCallId: 'c1', toolName: 'signal', input: { outcome: 'success', summary: 'ok' } }] },
+    ])
+    await drain(apiLoopExecutor().startTurn(ctx(model, captured, {
+      step: distinctiveStep(), extraTools: [search], memoryPreloadTokens: 500, operation: makeOperation(captured, specs),
+    })))
+    const prompt = JSON.stringify(specs[0]?.before)
+    expect(prompt).not.toContain('# Known project context (')
+    // primary call ≤3 title terms, then ONE fallback with the single longest term
+    expect(queries).toEqual(['refactor authentication middleware', 'authentication'])
+  })
+
+  it('memory_search isError → preload skips silently, the step still proceeds', async () => {
+    const captured: EventDraft[] = []
+    const queries: string[] = []
+    const search = fakeMemorySearch(queries, { output: { error: 'degraded tier' }, isError: true })
+    const model = scriptModel([
+      { toolCalls: [{ toolCallId: 'c1', toolName: 'signal', input: { outcome: 'success', summary: 'ok' } }] },
+    ])
+    const events = await drain(apiLoopExecutor().startTurn(ctx(model, captured, {
+      step: distinctiveStep(), extraTools: [search], memoryPreloadTokens: 500,
+    })))
+    expect(events.at(-1)?.type).toBe('done')
+  })
+
+  it('no memory_search tool on ctx → preload is skipped, prompt unchanged', async () => {
+    const captured: EventDraft[] = []
+    const specs: OperationSpec[] = []
+    const model = scriptModel([
+      { toolCalls: [{ toolCallId: 'c1', toolName: 'signal', input: { outcome: 'success', summary: 'ok' } }] },
+    ])
+    await drain(apiLoopExecutor().startTurn(ctx(model, captured, {
+      step: distinctiveStep(), memoryPreloadTokens: 500, operation: makeOperation(captured, specs),
+    })))
+    const prompt = JSON.stringify(specs[0]?.before)
+    expect(prompt).not.toContain('# Known project context (')
+  })
+})
+
+describe('deriveQueryTerms', () => {
+  it('drops stopwords and words under 4 chars, keeps at most 3 title terms in order', () => {
+    expect(deriveQueryTerms('Refactor authentication middleware handling requests'))
+      .toEqual(['refactor', 'authentication', 'middleware'])
+    expect(deriveQueryTerms('Fix it')).toEqual([])
+    expect(deriveQueryTerms('s1')).toEqual([])
+    expect(deriveQueryTerms('Update the config for this and that')).toEqual(['update', 'config'])
   })
 })
 
