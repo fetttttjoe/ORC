@@ -16,5 +16,6 @@ export async function openKnowledge(config: ProjectConfig): Promise<Knowledge> {
     db: projectDatabaseName(config.projectDbName, config.projectId),
     username: config.projectDbUser,
     password: config.projectDbPassword,
+    connectTimeoutMs: config.projectDbConnectTimeoutMs,
   })
 }
