@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'bun:test'
 import { z } from 'zod'
-import { MEMORY_ACCESS, MEMORY_LIMITS, MemoryNoteInput, MemoryWriteResult, type MemoryAccessMode, type MemoryNote, type MemoryNoteDraft, type MemoryStore, type NoteSummary } from '@orc/contracts'
+import { LINK_KINDS, MEMORY_ACCESS, MEMORY_LIMITS, MemoryNoteInput, MemoryWriteResult, type AccessVia, type MemoryAccessMode, type MemoryNote, type MemoryNoteDraft, type MemoryStore, type NoteSummary } from '@orc/contracts'
 import { MEMORY_READ_TOOLS, memoryTools, tierForRole } from './tools'
 
 const toNote = (input: MemoryNoteDraft): MemoryNote =>
@@ -11,7 +11,7 @@ const summary = (id: string, title: string): NoteSummary =>
 
 const fakeStore = (over: Partial<MemoryStore> = {}) => {
   const written: { input: MemoryNoteDraft; author: unknown; idempotencyKey?: string }[] = []
-  const accessed: { id: string; scope?: string; mode: MemoryAccessMode; author: unknown }[] = []
+  const accessed: { id: string; scope?: string; mode: MemoryAccessMode; author: unknown; via?: AccessVia }[] = []
   const store: MemoryStore = {
     write: async (input, author, opts) => { written.push({ input, author, idempotencyKey: opts?.idempotencyKey }); return toNote(input) },
     remove: async () => {},
@@ -19,7 +19,7 @@ const fakeStore = (over: Partial<MemoryStore> = {}) => {
     list: async () => [],
     search: async () => [summary('auth', 'Auth')],
     neighbors: async () => [],
-    recordAccess: async (id, scope, mode, author) => { accessed.push({ id, scope, mode, author }) },
+    recordAccess: async (id, scope, mode, author, opts) => { accessed.push({ id, scope, mode, author, via: opts?.via }) },
     ...over,
   }
   return { store, written, accessed }
@@ -194,6 +194,14 @@ describe('memory tools', () => {
     expect(boom.accessed).toHaveLength(0)
   })
 
+  it('memory_read with via forwards opts.via — the traversed edge strengthens alongside the node', async () => {
+    const { store, accessed } = fakeStore()
+    const read = memoryTools(store, { source: 'cli' }).find(t => t.name === 'memory_read')!
+    const via: AccessVia = { seed: 'net-topology', kind: 'supersedes', direction: 'out' }
+    await read.execute({ id: 'auth', via })
+    expect(accessed).toEqual([{ id: 'auth', scope: undefined, mode: MEMORY_ACCESS.read, author: { source: 'cli' }, via }])
+  })
+
   it('memory_search records no access — a summary list is not a read', async () => {
     const { store, accessed } = fakeStore()
     await memoryTools(store, { source: 'cli' }).find(t => t.name === 'memory_search')!.execute({ query: 'auth' })
@@ -294,6 +302,26 @@ describe('memory tools', () => {
     expect(sources).toContain('queryable')
     expect(sources).toContain('every kind')       // not just research
     expect(sources).toContain('derived_from')     // note-to-note provenance has its own home
+  })
+
+  // The advertised schema is the ONLY place the model can discover the `via` parameter — it must
+  // mirror ReadInput's zod shape exactly (required trio seed/kind/direction).
+  it('memory_read advertises the via object the model builds from a memory_neighbors row', () => {
+    const { store } = fakeStore()
+    const read = memoryTools(store, { source: 'cli' }).find(t => t.name === 'memory_read')!
+    const props = WriteInputProps.parse(read.inputSchema).properties
+    const via = z.object({
+      type: z.literal('object'),
+      required: z.array(z.string()),
+      properties: z.object({
+        seed: z.object({ type: z.literal('string'), pattern: z.string() }),
+        kind: z.object({ type: z.literal('string'), enum: z.array(z.string()) }),
+        direction: z.object({ type: z.literal('string'), enum: z.array(z.string()) }),
+      }),
+    }).parse(props.via)
+    expect(via.required.sort()).toEqual(['direction', 'kind', 'seed'])
+    expect(via.properties.kind.enum.sort()).toEqual([...LINK_KINDS].sort())
+    expect(via.properties.direction.enum.sort()).toEqual(['in', 'out'])
   })
 
   it('memory_write advertises rationale/uncertainty so a model can discover and set them', () => {
