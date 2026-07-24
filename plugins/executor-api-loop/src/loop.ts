@@ -113,7 +113,8 @@ const KNOWLEDGE_PROTOCOL = `# Project knowledge protocol
 5. Use kind 'architecture_current' for observed implementation and 'architecture_target' for intent.
 6. Update only what changed — memory_write merges omitted fields; an explicit empty clears.
 7. Scope discipline: 'project' scope holds durable knowledge only; step reports and audit output belong in your plan scope.
-8. Hand off by reference: findings go into notes; your signal summary carries conclusions plus the note ids — never restate note bodies. Downstream steps pull them at their own budget.`
+8. Hand off by reference: findings go into notes; your signal summary carries conclusions plus the note ids — never restate note bodies. Downstream steps pull them at their own budget.
+9. When a memory_neighbors row leads you to memory_read a note, pass via {seed: row.from, kind: row.via, direction: row.direction} — connections you actually use must strengthen.`
 
 function buildPrompt(ctx: ExecutorContext<LanguageModel>): string {
   const skills = ctx.skills

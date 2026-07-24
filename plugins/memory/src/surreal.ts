@@ -212,7 +212,7 @@ export class SurrealMemory {
       const act = activation({ hits: row.hits ?? 0, lastAccessedAt: row.lastAccessedAt ?? null }, now, halfLife)
       out.push({
         id: n.id, title: row.title, summary: row.summary, via: n.via, depth: n.depth,
-        score: n.score * activationBoost(act), direction: n.direction, activation: act,
+        score: n.score * activationBoost(act), direction: n.direction, activation: act, from: n.from,
       })
     }
     // same total order rule as rankNeighbors, now over the boosted score

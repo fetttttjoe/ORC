@@ -71,7 +71,7 @@ export function createMemoryStore(opts: { log: EventLog; surreal: SurrealMemory;
         // turn a memory read into a tool error — normalize falsy to unbound instead
         taskId: author?.taskId || null, stepId: author?.stepId || null, runToken: author?.runToken || null,
         kind: EVENT_KIND.memory_accessed,
-        payload: { id, scope, mode, author },
+        payload: { id, scope, mode, author, ...(accessOpts?.via && { via: accessOpts.via }) },
         // at-least-once: a crash-retry of the surrounding operation must not append a second access
         idempotencyKey: accessOpts?.idempotencyKey ?? null,
       })

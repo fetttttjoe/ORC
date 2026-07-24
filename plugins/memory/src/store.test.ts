@@ -3,7 +3,7 @@ import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { z } from 'zod'
-import { MemoryAuthor } from '@orc/contracts'
+import { MemoryAccessedPayload, MemoryAuthor, type AccessVia } from '@orc/contracts'
 import { openStorage } from '@orc/kernel'
 import { createTestDb, TEST_PROJECT_ID } from '@orc/kernel/test-helpers'
 import { SurrealMemory } from './surreal'
@@ -42,6 +42,19 @@ describe('MemoryStore gateway', () => {
     expect(events[0]!.stepId).toBe('s1')
     expect(events[0]!.runToken).toBe('r1')
     expect(events[1]!.taskId).toBeNull() // cli access stays unbound
+    await log.close()
+  })
+
+  it('recordAccess with via appends a payload that parses MemoryAccessedPayload including via', async () => {
+    const pg = await createTestDb(); drops.push(pg.drop)
+    const ts = await createTestSurreal(); drops.push(ts.drop)
+    const log = (await openStorage(pg.url, { projectId: TEST_PROJECT_ID })).events
+    const store = createMemoryStore({ log, surreal: await SurrealMemory.open(ts) })
+    const via: AccessVia = { seed: 'net-topology', kind: 'supersedes', direction: 'out' }
+    await store.recordAccess('auth', 'project', 'read', { source: 'cli' }, { via })
+    const events = await log.all()
+    const payload = MemoryAccessedPayload.parse(events[0]!.payload)
+    expect(payload.via).toEqual(via)
     await log.close()
   })
 

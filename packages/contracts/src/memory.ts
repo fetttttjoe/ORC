@@ -252,6 +252,10 @@ export const NeighborResult = z.object({
   // read-time activation of this neighbor (0 = never accessed) — the score already includes
   // its boost; exposed so callers/UI can tell structure from heat
   activation: z.number().nonnegative(),
+  // the best-path predecessor node id (rank.ts RankedNeighbor.from) — at depth 1 this is the
+  // query seed; deeper rows name the node actually linked to this one. Optional so a row from
+  // before this field existed still parses.
+  from: z.string().optional(),
 })
 export type NeighborResult = z.infer<typeof NeighborResult>
 
@@ -291,11 +295,25 @@ export const MEMORY_ACCESS_MODES = ['read', 'neighbors'] as const
 export const MemoryAccessMode = z.enum(MEMORY_ACCESS_MODES)
 export type MemoryAccessMode = z.infer<typeof MemoryAccessMode>
 export const MEMORY_ACCESS = MemoryAccessMode.enum
+
+// The edge an access travelled: recorded when a memory_read follows a memory_neighbors
+// discovery, so the CONNECTION that proved load-bearing can strengthen — not just the node.
+// Additive + optional: old events keep parsing; accesses without provenance count node-only.
+// seed is the hop-SOURCE (NeighborResult.from) — at depth 1 that is the query seed; deeper
+// rows name the node actually linked to the read note, so provenance never fabricates edges.
+export const AccessVia = z.object({
+  seed: z.string().regex(MEMORY_ID_RE),
+  kind: LinkKind,
+  direction: EdgeDirection,
+})
+export type AccessVia = z.infer<typeof AccessVia>
+
 export const MemoryAccessedPayload = z.object({
   id: z.string().regex(MEMORY_ID_RE),
   scope: z.string().regex(MEMORY_ID_RE),
   mode: MemoryAccessMode,
   author: MemoryAuthor,
+  via: AccessVia.optional(),
 })
 export type MemoryAccessedPayload = z.infer<typeof MemoryAccessedPayload>
 
@@ -313,7 +331,9 @@ export interface MemoryStore {
   // idempotencyKey: like write(), a tool-driven access runs inside an at-least-once operation — a
   // key keeps a crash-retry from double-counting the activation signal the lifecycle is tuned on
   // (the CLI path has no retry machinery and stays keyless).
-  recordAccess(id: string, scope: string | undefined, mode: MemoryAccessMode, author: MemoryAuthor, opts?: { idempotencyKey?: string }): Promise<void>
+  // via: the edge a memory_neighbors row led the caller across, when this read follows one —
+  // recorded into the same event so the connection can strengthen alongside the node.
+  recordAccess(id: string, scope: string | undefined, mode: MemoryAccessMode, author: MemoryAuthor, opts?: { idempotencyKey?: string; via?: AccessVia }): Promise<void>
 }
 
 // Composed provenance string for createdBy/updatedBy (frontmatter + read model).
@@ -401,6 +421,30 @@ export function foldAccessCounts(
     const p = MemoryAccessedPayload.safeParse(e.payload)
     if (!p.success) continue
     const k = noteKey(p.data.scope, p.data.id)
+    acc.set(k, { hits: (acc.get(k)?.hits ?? 0) + 1, lastAccessedAt: e.ts })
+  }
+  return acc
+}
+
+export const edgeKey = (scope: string, from: string, to: string, kind: LinkKind): string =>
+  [scope, from, to, kind].join(' ')
+
+// Fold memory_accessed.via into per-edge stats — the connection-level twin of foldAccessCounts.
+// CANONICALIZATION: both traversal directions of one authored edge fold onto ONE key —
+// from = direction === 'out' ? via.seed : id;  to = direction === 'out' ? id : via.seed.
+// Merely omitting direction from the key does NOT unify them; normalize before keying.
+export function foldEdgeStats(
+  events: Array<Pick<EventRecord, 'kind' | 'payload'> & { ts?: string }>,
+): Map<string, AccessStats> {
+  const acc = new Map<string, AccessStats>()
+  for (const e of events) {
+    if (e.kind !== EVENT_KIND.memory_accessed || !e.ts) continue
+    const p = MemoryAccessedPayload.safeParse(e.payload)
+    if (!p.success || !p.data.via) continue
+    const { id, scope, via } = p.data
+    const from = via.direction === EDGE_DIRECTION.out ? via.seed : id
+    const to = via.direction === EDGE_DIRECTION.out ? id : via.seed
+    const k = edgeKey(scope, from, to, via.kind)
     acc.set(k, { hits: (acc.get(k)?.hits ?? 0) + 1, lastAccessedAt: e.ts })
   }
   return acc

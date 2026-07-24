@@ -43,6 +43,12 @@ describe('rankNeighbors', () => {
     expect(rankNeighbors([...oneNode].reverse(), ['a'])[0]).toMatchObject({ id: 'd', via: 'relates_to' })
   })
 
+  it('carries the best-path predecessor as `from` — the seed at depth 1, the intermediate node at depth 2', () => {
+    const r = rankNeighbors(edges, ['a'], { depth: 3 })
+    expect(r.find(n => n.id === 'b')).toMatchObject({ from: 'a', depth: 1 }) // depth 1: predecessor is the seed
+    expect(r.find(n => n.id === 'd')).toMatchObject({ from: 'b', depth: 2 }) // depth 2: predecessor is the intermediate hop
+  })
+
   it('prunes below the floor', () => {
     expect(rankNeighbors(edges, ['a'], { depth: 3, floor: 0.6 }).map(n => n.id)).toEqual(['b'])
   })
