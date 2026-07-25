@@ -8,6 +8,7 @@ import { EVENT_KIND, MemoryAccessedPayload, RUN_OUTCOME, isRecord, type Executio
 import { loadConfig, projectDatabaseName, requireProject, type ProjectConfig } from '@orc/kernel'
 import { createTestDb, TEST_PROJECT_ID } from '@orc/kernel/test-helpers'
 import { buildProgram, openKernel, runInit } from './main'
+import { CommandFailure } from './exit'
 
 // exitOverride must reach NESTED subcommands too (e.g. `memory neighbors`): commander only
 // copies the setting to children created afterwards, and buildProgram creates them all before
@@ -154,11 +155,14 @@ describe('orc CLI', () => {
     const first = events[0]!.seq
     const errors: string[] = []
     spyOn(console, 'error').mockImplementation((...a: unknown[]) => { errors.push(a.join(' ')) })
-    const prevExit = process.exitCode
-    await overrideExits(buildProgram(kernel)).parseAsync(['replay', t.id, '--at', String(first - 1)], { from: 'user' })
+    // The command reports the problem and FAILS — as a thrown outcome, not by writing
+    // process.exitCode. Running this test can no longer change the exit status of the test process,
+    // which is what used to make a 0-failure suite exit 1 in CI depending on file order.
+    await expect(overrideExits(buildProgram(kernel)).parseAsync(['replay', t.id, '--at', String(first - 1)], { from: 'user' }))
+      .rejects.toBeInstanceOf(CommandFailure)
     expect(errors.join('\n')).toContain('sequences are GLOBAL')
     expect(errors.join('\n')).toContain(`${first}..${events.at(-1)!.seq}`)
-    process.exitCode = prevExit // the out-of-range replay sets exitCode 1 by design — don't leak it to the test process
+    expect(process.exitCode ?? 0).toBe(0) // the global stays untouched — that is the point
     await log.close()
   })
 
@@ -486,7 +490,9 @@ describe('orc CLI', () => {
     })
 
     lines.length = 0
-    await run('run', taskId)
+    // cancelled is reported as the outcome it is, and the command exits non-zero for it — the same
+    // status it always produced, now visible as a value instead of a write to process.exitCode
+    await expect(run('run', taskId)).rejects.toBeInstanceOf(CommandFailure)
     expect(lines.join('\n')).toContain('run finished: cancelled')
     await log.close()
   })

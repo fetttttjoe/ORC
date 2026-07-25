@@ -190,8 +190,8 @@ describe('exec commands', () => {
     const analyze = stepFixture({ id: 'analyze', role: 'scout' })
     const analyzers = new Map<string, Analyzer>([['agent-analyzer', { id: 'agent-analyzer', analysisStep: () => analyze }]])
     const { kernel } = await openKernel(db.url, { projectId: TEST_PROJECT_ID, analyzers })
-    // 'done' (not 'blocked') deliberately — a 'blocked' outcome sets process.exitCode in this
-    // same test process (see the subprocess fixture above for why that path is tested there).
+    // a non-done outcome is a thrown CommandFailure now, not a write to process.exitCode, so this
+    // could assert either; 'done' keeps the test about the grounded bootstrap rather than exits.
     const { port, calls } = stubPort('done')
     const lines: string[] = []
     spyOn(console, 'log').mockImplementation((...a: unknown[]) => { lines.push(a.join(' ')) })

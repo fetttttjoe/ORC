@@ -14,13 +14,41 @@ import { z } from 'zod'
 
 const UA = 'orc-sim-web-mcp/0.0 (durable-workflow research simulation)'
 
-const stripHtml = (s: string): string =>
-  s.replace(/<script[\s\S]*?<\/script\s*>/gi, ' ')
-    .replace(/<style[\s\S]*?<\/style\s*>/gi, ' ')
-    .replace(/<[^>]+>/g, ' ')
-    .replace(/&[a-z]+;/gi, ' ')
-    .replace(/\s+/g, ' ')
-    .trim()
+// Elements whose CONTENT is not prose: script/style are code, and the raw-text elements below
+// would otherwise spill their unparsed markup into the extracted text.
+const NON_PROSE = 'script, style, noscript, template, textarea, svg'
+
+// The character references worth resolving: the five XML ones plus nbsp, and any numeric form.
+// Deliberately not a full HTML entity table — an unresolved `&eacute;` still reads as the word it
+// belongs to, whereas the regex this replaced deleted such entities and turned `café` into `caf`.
+const NAMED_REF: Record<string, string> = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ' }
+const decodeRefs = (s: string): string =>
+  s.replace(/&(#x?[0-9a-f]+|[a-z]+);/gi, (whole, ref: string) => {
+    if (ref.startsWith('#')) {
+      const code = Number(ref[1] === 'x' || ref[1] === 'X' ? `0${ref.slice(1)}` : ref.slice(1))
+      return Number.isInteger(code) && code > 0 && code <= 0x10ffff ? String.fromCodePoint(code) : whole
+    }
+    return NAMED_REF[ref.toLowerCase()] ?? whole
+  })
+
+// Extract readable text with the platform's real HTML parser rather than a regex. The regex this
+// replaces could not do it correctly and did not: `<[^>]+>` stopped at the first `>` INSIDE an
+// attribute, so `<div data-x="a>b">` leaked `b">` into the text, comments leaked their `-->`, and
+// the entity pass deleted accented characters outright. HTMLRewriter is Bun-native — no dependency,
+// and it is a parser, so none of those are expressible.
+async function stripHtml(html: string): Promise<string> {
+  const chunks: string[] = []
+  let insideNonProse = 0
+  await new HTMLRewriter()
+    .on(NON_PROSE, { element(el) { insideNonProse++; el.onEndTag(() => { insideNonProse-- }) } })
+    // onDocument, not .on('*'): an element selector only sees text INSIDE an element, and a
+    // Wikipedia snippet is a bare fragment ('<span class="searchmatch">x</span> and more'), whose
+    // top-level text would be dropped entirely. Verified — '*' returned '' for plain text.
+    .onDocument({ text(t) { if (insideNonProse === 0) chunks.push(t.text) } })
+    .transform(new Response(html))
+    .text()
+  return decodeRefs(chunks.join(' ')).replace(/\s+/g, ' ').trim()
+}
 
 // canonical article URL from a Wikipedia title — the citable page, not a search-results URL
 const wikiUrl = (title: string): string =>
@@ -75,15 +103,22 @@ async function search(query: string, limit: number): Promise<Array<{ title: stri
   const r = await fetch(api, { headers: { 'User-Agent': UA } })
   if (!r.ok) throw new Error(`search HTTP ${r.status}`)
   const j = (await r.json()) as { query?: { search?: Array<{ title: string; snippet: string }> } }
-  return (j.query?.search ?? []).map(s => ({ title: s.title, url: wikiUrl(s.title), snippet: stripHtml(s.snippet) }))
+  // stripHtml parses, so it is async now — the snippets are independent, so strip them together
+  return Promise.all((j.query?.search ?? []).map(async s =>
+    ({ title: s.title, url: wikiUrl(s.title), snippet: await stripHtml(s.snippet) })))
 }
 
 // offline self-check for the pure logic (no network): the two transforms a wrong edit would break
 if (process.argv.includes('--selftest')) {
   const assert = (c: boolean, m: string) => { if (!c) { console.error('FAIL:', m); process.exit(1) } }
-  assert(stripHtml('<b>Event</b> <span class="x">sourcing</span>') === 'Event sourcing', 'stripHtml tags')
-  assert(stripHtml('a<script>evil()</script>b') === 'a b', 'stripHtml drops script body')
-  assert(stripHtml('a<script>evil()</script >b') === 'a b', 'stripHtml drops script body with spaced end tag')
+  assert(await stripHtml('<b>Event</b> <span class="x">sourcing</span>') === 'Event sourcing', 'stripHtml tags')
+  assert(await stripHtml('a<script>evil()</script>b') === 'a b', 'stripHtml drops script body')
+  assert(await stripHtml('a<script>evil()</script >b') === 'a b', 'stripHtml drops script body with spaced end tag')
+  // the three the regex got wrong: an attribute containing '>', a comment, and a named entity
+  assert(await stripHtml('<div data-x="a>b">text</div>') === 'text', 'stripHtml attribute with gt')
+  assert(await stripHtml('a<!-- hidden <b>x</b> -->b') === 'a b', 'stripHtml comment')
+  assert(await stripHtml('caf&eacute; &amp; cr&egrave;me') === 'caf&eacute; & cr&egrave;me', 'stripHtml keeps unknown refs, decodes amp')
+  assert(await stripHtml('&#65;&#x42;') === 'AB', 'stripHtml numeric refs')
   assert(wikiUrl('Saga (computer science)') === 'https://en.wikipedia.org/wiki/Saga_(computer_science)', 'wikiUrl')
   // SSRF classifier: the exact ranges an agent-driven fetch must never reach
   for (const ip of ['127.0.0.1', '10.0.0.1', '172.16.0.1', '172.31.255.255', '192.168.1.1',
@@ -124,7 +159,7 @@ server.registerTool(
   async ({ url }) => {
     try {
       const r = await fetchPublic(url) // SSRF guard: protocol, credentials, private ranges, every redirect hop
-      const text = stripHtml(await r.text()).slice(0, 5000)
+      const text = (await stripHtml(await r.text())).slice(0, 5000)
       return { content: [{ type: 'text', text: `URL: ${url}\nHTTP ${r.status}\n\n${text}` }] }
     } catch (e) {
       return { content: [{ type: 'text', text: `fetch failed: ${errorMessage(e)}` }], isError: true }

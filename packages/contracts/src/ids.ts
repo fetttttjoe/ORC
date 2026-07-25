@@ -10,8 +10,21 @@ export const MEMORY_ID_RE = /^[a-z0-9][a-z0-9-]*$/
 // Deterministic MEMORY_ID_RE-safe id from a human title. Quick capture keys notes by title,
 // so re-noting the same title UPDATES the note (memory_write is an upsert) instead of forking
 // near-duplicates — deliberate: capture is idempotent, disambiguation is renaming the title.
+// Trim one repeated character off both ends by index. The regex this replaces (`/^-+|-+$/`) was
+// linear ONLY because the collapse below guarantees no repeated dashes — an invariant neither a
+// reader nor a scanner can see, and one an innocent edit could turn into quadratic backtracking on
+// a hostile title. Indexing carries no such footgun.
+function trimEdges(value: string, ch: string): string {
+  let start = 0
+  let end = value.length
+  while (start < end && value[start] === ch) start++
+  while (end > start && value[end - 1] === ch) end--
+  return value.slice(start, end)
+}
+
 export function slugId(title: string): string {
-  const s = title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 64).replace(/-+$/, '')
+  const collapsed = title.toLowerCase().replace(/[^a-z0-9]+/g, '-') // one pass, no backtracking
+  const s = trimEdges(trimEdges(collapsed, '-').slice(0, 64), '-')
   if (!MEMORY_ID_RE.test(s))
     throw new Error(`cannot derive a note id from '${title}' — use latin letters/digits, or 'orc memory add --id <id>'`)
   return s

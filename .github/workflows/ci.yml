@@ -5,6 +5,12 @@ on:
     branches: [main]
   pull_request:
 
+# least privilege: this workflow only reads the repo to build and test it. Without an explicit
+# block the job inherits the repository default, which can be write — an unnecessary standing
+# grant on a workflow that runs third-party code from the lockfile.
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-latest

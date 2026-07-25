@@ -2,6 +2,7 @@
 import { dbosSend, isConnectionRefused, loadConfig, requireProject, type Kernel } from '@orc/kernel'
 import { errorMessage, HOOK_NAME } from '@orc/contracts'
 import { buildProgram, openKernel, runInit, runMigrate } from './main'
+import { exitCodeFor } from './exit'
 import type { Command } from 'commander'
 import { buildPlugins, buildRuntime } from './runtime'
 
@@ -29,8 +30,11 @@ async function parse(program: Command, argv: string[]): Promise<number> {
   overrideExits(program)
   try {
     await program.parseAsync(argv)
-    return Number(process.exitCode ?? 0)
+    return 0
   } catch (error) {
+    // a command that finished unsuccessfully has already printed why — carry only its code
+    const failure = exitCodeFor(error)
+    if (failure !== null) return failure
     if (error && typeof error === 'object' && 'code' in error && 'exitCode' in error
       && String(error.code).startsWith('commander.') && typeof error.exitCode === 'number')
       return error.exitCode

@@ -12,6 +12,7 @@ import { seedRegistries } from './runtime'
 import { isLanguageModel } from './model-guard'
 import { buildModelDiscovery, buildOrcActions, singleStepDraft } from './actions'
 import { renderPlanHuman } from './plan-render'
+import { CommandFailure } from './exit'
 
 
 function buildCopilotConfig(discovery: ReturnType<typeof buildModelDiscovery>) {
@@ -395,8 +396,7 @@ export function buildProgram(
       if (events.length === 0 && all.length > 0) {
         // an empty fold here is a footgun, not data: --at is below this task's first event
         console.error(`no events for '${taskId}' at or before seq ${opts.at} — sequences are GLOBAL across the project log; this task's events span ${all[0]!.seq}..${all.at(-1)!.seq} (orc log ${taskId})`)
-        process.exitCode = 1
-        return
+        throw new CommandFailure(1) // already reported above — the entry point only sets the code
       }
       const state = fold(events)
       console.log(JSON.stringify(
@@ -436,7 +436,7 @@ export function buildProgram(
       return
     }
     console.log(`run finished: ${result.outcome}`)
-    process.exitCode = result.outcome === RUN_OUTCOME.done ? 0 : 1
+    if (result.outcome !== RUN_OUTCOME.done) throw new CommandFailure(1)
   }
 
   const execAction = (start: (port: ExecutionPort, taskId: string, cwd?: string) => Promise<RunHandle>, intro: (h: RunHandle, taskId: string) => string) =>
