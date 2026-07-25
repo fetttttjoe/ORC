@@ -202,6 +202,11 @@ export const PlanNoteInput = z.object({
   // into the child step's zone and the executor's write-fence enforces them. Parallel siblings
   // declare DISJOINT zones; empty = unfenced (paths is documentation, zone is policy).
   zone: stringOrList(z.string().min(1).max(MEMORY_LIMITS.detailChars), 16).default([]),
+  // capabilities this subplan needs, frozen into its step like zone is. SELECTION, not grant: a
+  // ref resolves only if the operator declared the MCP server in config AND trusted it, and
+  // refValidator rejects an unknown ref at propose time — before a human ever approves the plan.
+  skillRefs: stringOrList(z.string().min(1).max(MEMORY_LIMITS.labelChars), 16).default([]),
+  toolRefs: stringOrList(z.string().min(1).max(MEMORY_LIMITS.labelChars), 16).default([]),
 })
 export type PlanNoteInput = z.infer<typeof PlanNoteInput>
 
@@ -290,6 +295,8 @@ export const MemoryNoteDraftInput = z.object({
   rationale: optionalNoDefault(PlanNoteInput.shape.rationale),
   uncertainty: optionalNoDefault(PlanNoteInput.shape.uncertainty),
   zone: optionalNoDefault(PlanNoteInput.shape.zone),
+  skillRefs: optionalNoDefault(PlanNoteInput.shape.skillRefs),
+  toolRefs: optionalNoDefault(PlanNoteInput.shape.toolRefs),
 })
 // a field added to a tier but forgotten here is a compile error, not silent drift
 type TierFields =

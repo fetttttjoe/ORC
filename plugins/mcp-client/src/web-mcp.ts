@@ -41,6 +41,9 @@ server.registerTool(
   async ({ url }) => {
     try {
       const r = await fetchPublic(url) // SSRF guard: protocol, credentials, private ranges, every redirect hop
+      // A 404 body still reads like the page — Wikipedia's even carries the title — so returning it
+      // as content invites a citation to something that does not exist.
+      if (!r.ok) return { content: [{ type: 'text', text: `fetch failed: HTTP ${r.status} for ${url} — no content` }], isError: true }
       const text = (await stripHtml(await r.text())).slice(0, PAGE_TEXT_LIMIT)
       return { content: [{ type: 'text', text: `URL: ${url}\nHTTP ${r.status}\n\n${text}` }] }
     } catch (e) {

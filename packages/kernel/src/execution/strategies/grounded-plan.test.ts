@@ -92,6 +92,25 @@ describe('instantiateFrozenPlan (pure, deterministic)', () => {
 // FixE: the freeze is built from the EVENT LOG, not the async SurrealDB projection. foldPlanNotes
 // reconstructs the plan-note graph from memory_written/memory_deleted events — synchronously durable
 // at finalize time — so a lagging read model can never yield "no masterplan".
+
+  // a subplan's step gets only what its note declares — before this, toolRefs/skillRefs were
+  // hardcoded empty, so a grounded plan could decompose work but never grant the capability to do
+  // it: a research subplan reached execution with no way to search.
+  it('freezes the capabilities a subplan declares into its step', () => {
+    const notes: PlanNote[] = [
+      note({ id: 'masterplan', links: [link('research', LINK_KIND.decomposes_into), link('local', LINK_KIND.decomposes_into)] }),
+      note({ id: 'research', toolRefs: ['web/search', 'web/fetch'], skillRefs: ['web-research'] }),
+      note({ id: 'local' }),
+    ]
+    const steps = instantiateFrozenPlan('masterplan', notes).steps
+    const research = steps.find(s => s.id === 'research')
+    expect(research?.toolRefs).toEqual(['web/search', 'web/fetch'])
+    expect(research?.skillRefs).toEqual(['web-research'])
+    // a step that declares nothing gets nothing — capability is opt-in per subplan
+    expect(steps.find(s => s.id === 'local')?.toolRefs).toEqual([])
+    expect(steps.find(s => s.id === 'local')?.skillRefs).toEqual([])
+  })
+
 describe('foldPlanNotes (log-fold, projection-independent)', () => {
   let seq = 0
   const written = (note: Record<string, unknown>): EventRecord => ({

@@ -116,8 +116,9 @@ export function instantiateFrozenPlan(masterId: string, notes: PlanNote[]): Chil
         // the note's declared write-globs become the step's zone — the executor fence makes
         // "parallel siblings must not write the same files" mechanical instead of prose
         zone: n.zone,
-        skillRefs: [] as string[],
-        toolRefs: [] as string[],
+        // the planner decides what each subplan needs; the operator decided what exists at all
+        skillRefs: n.skillRefs,
+        toolRefs: n.toolRefs,
       }
     }),
   }

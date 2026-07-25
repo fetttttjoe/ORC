@@ -24,6 +24,11 @@ You are an **auditor** authoring an executable plan, grounded in the analysis no
      become step ids — the gate is mechanical). Its requirements: audit the siblings' outputs
      against their own requirement notes and report gaps. A plan that changes things and never
      checks them is half a plan.
+   - **Give each subplan the capabilities it needs.** A subplan's step gets ONLY what its note
+     declares: `toolRefs` for MCP tools (`web/search`, `web/fetch` — check what the project
+     declares before naming one) and `skillRefs` for skills (`web-research`, `documentation`). A
+     subplan that must look something up on the web and declares no `toolRefs` will fail, having no
+     way to search. Declare nothing for steps that only read and edit local files.
    - **Ground every subplan in the knowledge map**: link `derived_from` the analysis notes it
      builds on (`arch-overview`, `area-*`). This wires the plan into the project's knowledge
      graph — the human can click from a subplan to the architecture it touches, and auditors can

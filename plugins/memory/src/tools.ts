@@ -154,6 +154,8 @@ export function memoryTools(store: MemoryStore, author: MemoryAuthor, role: Memo
           rules: { type: 'array', maxItems: MEMORY_LIMITS.detailItems, items: { type: 'string', maxLength: MEMORY_LIMITS.detailChars } },
           rationale: { type: 'string', maxLength: MEMORY_LIMITS.rationaleChars, description: 'plan tier only: why this subplan exists' },
           uncertainty: { type: 'array', maxItems: MEMORY_LIMITS.detailItems, items: { type: 'string', maxLength: MEMORY_LIMITS.detailChars }, description: 'plan tier only: coverage gaps / assumptions to surface (RG7)' },
+          skillRefs: { type: 'array', maxItems: 16, items: { type: 'string', maxLength: MEMORY_LIMITS.labelChars }, description: 'plan tier only: skills this subplan\'s step should load (e.g. web-research). Selection from what the operator installed — an unknown ref fails the plan before approval.' },
+          toolRefs: { type: 'array', maxItems: 16, items: { type: 'string', maxLength: MEMORY_LIMITS.labelChars }, description: "plan tier only: MCP tools this subplan's step needs, as 'server/tool' (e.g. web/search, web/fetch). Selection from servers the operator declared AND trusted; a step that needs none declares none." },
           zone: { type: 'array', maxItems: 16, items: { type: 'string', minLength: 1, maxLength: MEMORY_LIMITS.detailChars }, description: "plan tier only: workspace-relative write globs this subplan may touch at execution (e.g. 'docs/**'), frozen into the step and enforced as a write-fence. Concurrent writes to one file are refused mechanically regardless — zone additionally scopes WHERE this step may write. Empty = unfenced." },
           scope: idSchema,
         },
