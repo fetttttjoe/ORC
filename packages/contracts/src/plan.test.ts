@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'bun:test'
-import { ChildPlanStep, Plan, PlanStep, validatePlan } from './plan'
+import { ChildPlanStep, Plan, PlanStep, planScope, validatePlan } from './plan'
+import { MEMORY_ID_RE } from './ids'
+import { MemoryNoteInput } from './memory'
 import { planFixture, stepFixture } from './fixtures'
 
 const step = (id: string, dependsOn: string[] = []): PlanStep => stepFixture({ id, title: id, dependsOn })
@@ -62,5 +64,23 @@ describe('validatePlan', () => {
     expect(s.toolRefs).toEqual([])
     expect(() => PlanStep.parse({ ...s, toolRefs: ['files/read_file'] })).not.toThrow()
     expect(() => PlanStep.parse({ ...s, toolRefs: ['noslash'] })).toThrow()
+  })
+})
+
+describe('planScope', () => {
+  // The bug this pins: a split child's task id carries dots, an underscore and mixed case, so the
+  // raw `plan-${taskId}` was not a legal scope — every ambient step note and the whole
+  // consolidation input for a child task were rejected at the schema boundary, silently.
+  const child = 'e07a0095-744a-4dee-a6e5-39a79c2e1689.plan.toolu_01Ajfz33bBkdmSoKah7qnxTH'
+
+  it('always yields a scope the memory schema accepts', () => {
+    expect(planScope(child)).toMatch(MEMORY_ID_RE)
+    expect(() => MemoryNoteInput.parse({ id: 'step-x', scope: planScope(child), title: 't' })).not.toThrow()
+  })
+
+  it('is identity-shaped for a root task id and stays collision-free per task', () => {
+    const root = 'e07a0095-744a-4dee-a6e5-39a79c2e1689'
+    expect(planScope(root)).toBe(`plan-${root}`)
+    expect(planScope(child)).not.toBe(planScope(root))
   })
 })

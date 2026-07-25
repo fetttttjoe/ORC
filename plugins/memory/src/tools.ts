@@ -140,7 +140,10 @@ export function memoryTools(store: MemoryStore, author: MemoryAuthor, role: Memo
           categories: { type: 'array', maxItems: MEMORY_LIMITS.labelItems, items: { type: 'string', maxLength: MEMORY_LIMITS.labelChars } },
           tags: { type: 'array', maxItems: MEMORY_LIMITS.labelItems, items: { type: 'string', maxLength: MEMORY_LIMITS.labelChars } },
           links: {
-            type: 'array', maxItems: MEMORY_LIMITS.detailItems, description: 'typed edges to related notes',
+            // spelled out because a bare `links: "other-note"` is the mistake models actually make
+            // here (three wasted iterations in one measured run), and unlike tags/paths this field
+            // does NOT accept the scalar shorthand — an edge without its kind is not the same edge.
+            type: 'array', maxItems: MEMORY_LIMITS.detailItems, description: "typed edges to related notes. Each item is an OBJECT — {\"id\": \"target-note\", \"kind\": \"derived_from\"} — never a bare id string and never a string array.",
             items: {
               type: 'object', required: ['id'],
               properties: {

@@ -51,7 +51,16 @@ export type StepRole = (typeof STEP_ROLE)[keyof typeof STEP_ROLE]
 
 // The per-task plan-note scope. The authoring agent, finalize_plan, and every UI view derive
 // it from the taskId — one format, one place (was duplicated as ui-core's planScopeName).
-export const planScope = (taskId: string): string => `plan-${taskId}`
+//
+// SANITIZED, because a scope is validated against MEMORY_ID_RE (`^[a-z0-9][a-z0-9-]*$`) and a split
+// child's task id is `<parentUuid>.<stepId>.<toolCallId>` — dots, underscores and mixed case, none
+// of which that pattern accepts. Raw interpolation meant every plan-scoped write below the root task
+// was REJECTED at the schema boundary: ambient step capture warned and dropped the note, and
+// consolidation then read an empty step list and promoted a contentless outcome note. A root task
+// (a bare uuid) is unaffected — the transform is identity on ids that were already safe.
+// ponytail: case is folded, so two ids differing only in case would share a scope. Not reachable
+// with a uuid + a random tool-call id; hash the tail if task ids ever become case-significant.
+export const planScope = (taskId: string): string => `plan-${taskId.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`
 
 export const Plan = z.object({
   taskId: z.string().min(1),
