@@ -371,6 +371,22 @@ export function buildProgram(
     })
 
   program
+    .command('delete <projectName>')
+    .description("delete this project entirely — history, knowledge and identity (purge keeps the identity; this does not)")
+    .requiredOption('--yes', 'confirm: this irreversibly deletes the project and its knowledge')
+    .action(async (projectName: string) => {
+      // named for the same reason purge is: the target comes from the cwd's config, so a script
+      // in the wrong directory would otherwise delete a project it never meant to touch
+      const actual = plugin?.config.projectName
+      if (!actual) throw new Error('deleting a project needs a project context')
+      if (projectName !== actual)
+        throw new Error(`refusing: this directory is project '${actual}' (${plugin!.config.dir}), not '${projectName}'`)
+      const r = await actions().deleteProject(plugin!.config.projectId)
+      console.log(`deleted '${actual}': ${r.events} event(s), ${r.operations} operation(s)`)
+      for (const w of r.warnings) console.log(`warning: ${w}`)
+    })
+
+  program
     .command('tasks')
     .description('list tasks')
     .action(async () => {

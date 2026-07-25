@@ -823,3 +823,31 @@ describe('normalizeUsage cache capture', () => {
     expect(Object.keys(normalizeUsage({ inputTokens: 1, outputTokens: 1 }))).not.toContain('cacheReadTokens')
   })
 })
+
+describe('repeated provider tool_call ids', () => {
+  // The failure this reproduces: one turn carrying the SAME toolCallId twice made messages.push
+  // emit two tool_result blocks for one tool_use, which the API rejects non-retryably
+  // ("each tool_use must have a single result") — killing the step and everything gated on it.
+  // The journal showed nothing, because the shared operationId memoised the repeat to one row.
+  it('answers a repeated call id exactly once', async () => {
+    const captured: EventDraft[] = []
+    const calls: Array<{ input: unknown; toolCallId: string | undefined }> = []
+    const echo: ResolvedTool = {
+      ref: 'test/echo', name: 'echo', description: 'echo', inputSchema: { type: 'object', properties: {} },
+      execute: async (input, toolCallId) => { calls.push({ input, toolCallId }); return { output: { ok: true }, isError: false } },
+    }
+    const dup = { toolCallId: 'toolu_dup', toolName: 'echo', input: { a: 1 } }
+    const model = scriptModel([
+      { toolCalls: [dup, dup] },                                                     // provider repeats one id
+      { toolCalls: [{ toolCallId: 'c2', toolName: 'signal', input: { outcome: 'success', summary: 'done' } }] },
+    ])
+    const events = await drain(apiLoopExecutor().startTurn(ctx(model, captured, {
+      extraTools: [echo], taskId: 'task-1', step: stepFixture({ id: 's1', title: 'S', instructions: 'do', maxIterations: 3 }),
+    })))
+
+    expect(events.at(-1)?.type).toBe('done')                       // the step survives instead of 400-ing
+    const results = events.filter(e => e.type === 'tool_result' && 'toolCallId' in e && e.toolCallId === 'toolu_dup')
+    expect(results).toHaveLength(1)                                // exactly one result per tool_use id
+    expect(calls.filter(c => c.toolCallId === 'toolu_dup')).toHaveLength(1) // and the effect ran once
+  })
+})

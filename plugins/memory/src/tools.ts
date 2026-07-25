@@ -1,6 +1,7 @@
 import { z } from 'zod'
 import { AccessVia, EDGE_DIRECTIONS, errorMessage, MEMORY_ACCESS, MEMORY_LIMITS, MEMORY_SOURCE_LIMITS, MEMORY_TOOL_NAME, MemorySearchResult, MemoryWriteResult, NOTE_KINDS, LINK_KIND, LINK_KINDS, RETENTION_CLASSES, SEARCH_MODES, SearchMode, LinkKind, MemoryNoteDraftInput, NOTE_TIER, NOTE_TIERS, slugId, type MemoryAuthor, type MemoryNote, type MemoryStore, type ResolvedTool } from '@orc/contracts'
 import { applyBudget, fitMemoryNoteToBudget } from './budget'
+import { noteHasDrifted, type ChangedSince } from './drift'
 
 // Advisory note lint, echoed back in the memory_write result so the writing agent can improve
 // the note in its next iteration — warnings, never rejections: a blocked write mid-run burns
@@ -103,11 +104,11 @@ export const MEMORY_READ_TOOLS = [MEMORY_TOOL_NAME.search, MEMORY_TOOL_NAME.read
 //    because a scout seeds the graph, it doesn't traverse a rich one yet. Provisional-epistemics
 //    fragment applies to all three tools.
 //  - auditor: the full surface, with the traverse-before-asserting fragment.
-export function memoryTools(store: MemoryStore, author: MemoryAuthor, role: MemoryRole = MEMORY_ROLE.verify): ResolvedTool[] {
+export function memoryTools(store: MemoryStore, author: MemoryAuthor, role: MemoryRole = MEMORY_ROLE.verify, changedSince?: ChangedSince): ResolvedTool[] {
   const tools: ResolvedTool[] = [
     {
       ref: 'memory/write', name: MEMORY_TOOL_NAME.write,
-      description: withRole('Create or update a project knowledge note (upsert by id — omitted fields keep their stored values; pass an explicit empty string/array to clear one). Record durable findings/decisions/conventions so later steps reuse them.', role),
+      description: withRole('Create or update a project knowledge note (upsert by id — omitted fields keep their stored values; pass an explicit empty string/array to clear one). Record durable findings/decisions/conventions so later steps reuse them. If a note you read came back drifted, CORRECT it: write the same id with what the code says now, rather than adding a second note — a graph carrying two contradictory claims is worse than one carrying neither.', role),
       inputSchema: {
         type: 'object', required: ['title'],
         properties: {
@@ -248,8 +249,21 @@ export function memoryTools(store: MemoryStore, author: MemoryAuthor, role: Memo
           // keyed like memory_write so an at-least-once retry doesn't double-count the access.
           const accessKey = author.runToken && toolCallId ? `${author.runToken}:tool:${toolCallId}:access:${q.id}` : undefined
           await store.recordAccess(q.id, q.scope, MEMORY_ACCESS.read, author, { idempotencyKey: accessKey, via: q.via })
+          // A note whose code moved is worse than no note — it reads as current and is not. Flag it
+          // HERE, at the one call site that hands a full note to a model about to act on it, and
+          // name the correction: memory_write is an upsert and the store re-stamps sourceRevision,
+          // so rewriting the same id both fixes the claim and clears the drift.
+          const paths = 'paths' in n && Array.isArray(n.paths) ? n.paths : []
+          const changed = changedSince && n.sourceRevision !== null ? await changedSince(n.sourceRevision) : null
+          const drifted = noteHasDrifted({ sourceRevision: n.sourceRevision, paths }, changed)
           // every pull tool honors its budget (spec RG5) — metadata cannot bypass body truncation.
-          return ok(fitMemoryNoteToBudget(n, q.budget))
+          return ok({
+            ...fitMemoryNoteToBudget(n, q.budget),
+            ...(drifted && {
+              drifted: true,
+              next: `the code this note describes changed since it was written (${n.sourceRevision?.slice(0, 8)}) — re-read ${paths.join(', ')} and, if the note is now wrong, memory_write the SAME id with the corrected content instead of adding a second note`,
+            }),
+          })
         } catch (e) { return err(e) }
       },
     },

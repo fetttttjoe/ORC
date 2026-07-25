@@ -12,11 +12,21 @@ const DistilledSchema = z.object({
   body: z.string().max(4000),
 })
 
-function distillPrompt(input: ConsolidationInput): string {
+export function distillPrompt(input: ConsolidationInput): string {
   const steps = input.steps.map(s => `- ${s.title}: ${s.summary}`).join('\n') || '(no step notes)'
+  // A step summary may describe work the step PLANNED for others, not work that happened. Without
+  // this the distiller promoted a plan into an accomplishment — "implemented, with test coverage and
+  // requirement verification" for a run whose test step crashed and whose verify step never ran.
+  const outcome = input.unfinished.length > 0
+    ? `\n\nIMPORTANT: this task's work is NOT complete — ${input.unfinished.length} sub-task(s) did not finish`
+      + ` (${input.unfinished.join(', ')}). Write what was decided, planned or learned. Do NOT state that`
+      + ` anything was implemented, tested or verified unless a summary below says it was DONE.`
+    : ''
   return `A task titled "${input.taskTitle}" just finished. Distil its step outcomes into ONE durable,`
     + ` reusable project-knowledge note a future agent would want to find. Capture the decision or`
     + ` finding, not the narration; be concise and factual; invent nothing beyond the outcomes below.`
+    + ` A summary describing intended work is a PLAN, not a result — never restate it as completed.`
+    + outcome
     + `\n\ntitle: a short noun phrase naming the finding.`
     + `\nsummary: 1-2 sentences, the retrieval surface.`
     + `\nbody: the key points as terse bullets.`

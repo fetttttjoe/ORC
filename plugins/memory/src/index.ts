@@ -5,6 +5,7 @@ import { openKnowledge, type Knowledge } from './knowledge'
 import { createMemoryStore } from './store'
 import { createMemoryProjector, KNOWLEDGE_KINDS, type MemoryProjector } from './projector'
 import { memoryTools, type MemoryRole } from './tools'
+import { createDriftProbe } from './drift'
 
 export { SurrealMemory } from './surreal'
 export { openKnowledge, type Knowledge } from './knowledge'
@@ -16,6 +17,7 @@ export { orphanedNotes, staleNotes, DEFAULT_SWEEP_DAYS, type SweptNote, type Sta
 export { consolidatedNote, consolidateTask, isSubstantive, CONSOLIDATED_TAG, type ConsolidationInput, type ConsolidationDeps, type ConsolidationDistiller, type DistilledText, type StepOutcome } from './consolidate'
 export { createMemoryLifecycle, consolidateBacklog, taskCompletedId, type MemoryLifecycle } from './lifecycle'
 export { renderNoteFile, noteRelPath } from './note-md'
+export { noteHasDrifted, createDriftProbe, type ChangedSince, type NoteDrift } from './drift'
 
 // the actual revision of the code the runtime is looking at — null outside Git
 export async function gitRevision(dir: string): Promise<string | null> {
@@ -39,9 +41,10 @@ export async function createMemory(opts: { log: EventLog; config: ProjectConfig;
   const knowledge = await openKnowledge(opts.config, opts.embedder)
   const store = createMemoryStore({ log: opts.log, surreal: knowledge, sourceRevision: await gitRevision(opts.config.dir), halfLifeDays: opts.config.memoryHalfLifeDays })
   const projector = createMemoryProjector({ log: opts.log, surreal: knowledge, vaultDir: opts.config.vaultDir })
+  const changedSince = createDriftProbe(opts.config.dir)
   return {
     store, projector,
-    buildTools: (author, role) => memoryTools(store, author, role),
+    buildTools: (author, role) => memoryTools(store, author, role, changedSince),
     close: async () => { await projector.close(); await knowledge.close() },
   }
 }

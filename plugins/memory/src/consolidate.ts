@@ -1,4 +1,4 @@
-import { EVENT_KIND, LINK_KIND, MemoryAccessedPayload, MemoryScope, NOTE_KIND, NOTE_TIER, PAYLOAD_SCHEMAS, RETENTION, planScope, slugId, type MemoryNote, type MemoryNoteDraft, type MemoryStore } from '@orc/contracts'
+import { EVENT_KIND, LINK_KIND, MemoryAccessedPayload, MemoryScope, NOTE_KIND, NOTE_TIER, PAYLOAD_SCHEMAS, RETENTION, TASK_STATUS, planScope, slugId, type MemoryNote, type MemoryNoteDraft, type MemoryStore } from '@orc/contracts'
 import type { EventLog } from '@orc/kernel'
 
 // One transient step outcome — the (title, summary) of a plan-scoped ambient note a task left behind.
@@ -10,6 +10,11 @@ export interface ConsolidationInput {
   taskTitle: string
   steps: StepOutcome[]
   derivedFrom: string[]
+  // Descendants that never reached done. A grounded parent finishes as soon as its plan is authored
+  // and split, so its step summaries describe INTENDED work — and a distiller handed only those
+  // renders them as accomplished ("implemented, tested and verified" for a run whose test step
+  // crashed and whose verify step never started). The outcome has to travel with the summaries.
+  unfinished: string[]
 }
 
 // Marks a note as a task-consolidation output — one place, so search/filters agree on the spelling.
@@ -82,6 +87,17 @@ async function accessedProjectIds(log: EventLog, taskId: string): Promise<string
   return [...ids]
 }
 
+// Descendants of `taskId` (child ids are `<parent>.<step>.<callId>`) whose latest status is not
+// `done`. Folded from the log rather than a projection: consolidation runs off the same events.
+async function unfinishedDescendants(log: EventLog, taskId: string): Promise<string[]> {
+  const status = new Map<string, string>()
+  for (const e of await log.after(0, [EVENT_KIND.task_status_changed])) {
+    const p = PAYLOAD_SCHEMAS.task_status_changed.safeParse(e.payload)
+    if (p.success && p.data.taskId.startsWith(`${taskId}.`)) status.set(p.data.taskId, p.data.to)
+  }
+  return [...status.entries()].filter(([, s]) => s !== TASK_STATUS.done).map(([id]) => id)
+}
+
 // Gather a finished task's transient step notes + provenance, gate on salience (unless forced), and
 // promote them into ONE durable project note. Event-first + idempotent by taskId, so a redelivered
 // completion never double-writes. Returns the note, or null when the task is unknown or the salience
@@ -97,7 +113,7 @@ export async function consolidateTask(
   const steps = (await deps.store.list({ scope: planScope(taskId) })).map(n => ({ title: n.title, summary: n.summary }))
   const derivedFrom = await accessedProjectIds(deps.log, taskId)
   if (!opts.force && !isSubstantive({ steps, derivedFrom })) return null
-  const input: ConsolidationInput = { taskTitle: title, steps, derivedFrom }
+  const input: ConsolidationInput = { taskTitle: title, steps, derivedFrom, unfinished: await unfinishedDescendants(deps.log, taskId) }
   // distillation is best-effort — a model hiccup falls back to the extractive note rather than
   // dropping the capture entirely.
   const distilled = deps.distill ? await deps.distill(input).catch(() => null) : null

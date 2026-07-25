@@ -8,6 +8,7 @@ describe('consolidatedNote', () => {
       taskTitle: 'Explain memory heat',
       steps: [{ title: 'Step A', summary: 'edges strengthen via memory_accessed' }, { title: 'Step B', summary: '   ' }],
       derivedFrom: ['area-memory', 'area-memory', 'projector-re-materialization'], // dup on purpose
+      unfinished: [],
     })
     expect(draft.id).toBe(slugId('outcome Explain memory heat'))
     expect(draft.scope).toBe('project')
@@ -26,7 +27,7 @@ describe('consolidatedNote', () => {
   })
 
   it('with no steps and no provenance still yields a valid (if thin) durable note', () => {
-    const draft = consolidatedNote({ taskTitle: 'Empty task', steps: [], derivedFrom: [] })
+    const draft = consolidatedNote({ taskTitle: 'Empty task', steps: [], derivedFrom: [], unfinished: [] })
     expect(draft.body).toBe('')
     expect(draft.links).toEqual([])
     expect(draft.summary).toBe('Empty task')
@@ -35,7 +36,7 @@ describe('consolidatedNote', () => {
 
   it('uses distilled text when provided, keeping the task-keyed id, scope, and links', () => {
     const draft = consolidatedNote(
-      { taskTitle: 'Explain memory heat', steps: [{ title: 'a', summary: 'raw' }], derivedFrom: ['area-memory'] },
+      { taskTitle: 'Explain memory heat', steps: [{ title: 'a', summary: 'raw' }], derivedFrom: ['area-memory'], unfinished: [] },
       { title: 'How memory heat works', summary: 'Edges strengthen on use.', body: '- via records the edge' },
     )
     expect(draft.title).toBe('How memory heat works') // distilled, not "Outcome: …"

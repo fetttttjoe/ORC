@@ -68,6 +68,25 @@ export function normalizeUsage(
   }
 }
 
+// A turn's call ids are the provider's, and a repeat is malformed: the API forbids answering one
+// tool_use twice, so the second entry cannot be honoured under any reading. Dropping it HERE — the
+// one boundary where provider output enters — is what keeps the four consumers below (signal
+// lookup, invalid-signal replay, the executed-tool filter, the operationId) reading one turn the
+// same way.
+//
+// It failed silently before: `${runToken}:tool:${iteration}:${callId}` made the repeat share an
+// operationId, so the journal memoised it to ONE row while messages.push emitted TWO tool_result
+// blocks for that id — a clean event log and a 400 that killed the step. Warn rather than swallow;
+// idempotency already hid this once.
+function uniqueByCallId<T extends { toolCallId: string; toolName: string }>(calls: T[]): T[] {
+  const seen = new Set<string>()
+  return calls.filter(c => {
+    if (!seen.has(c.toolCallId)) { seen.add(c.toolCallId); return true }
+    console.warn(`provider repeated tool_call id ${c.toolCallId} (${c.toolName}) in one turn — ignoring the repeat`)
+    return false
+  })
+}
+
 async function callModel(model: LanguageModel, messages: ModelMessage[], tools: ToolSet): Promise<TurnResult> {
   let result
   try {
@@ -80,7 +99,7 @@ async function callModel(model: LanguageModel, messages: ModelMessage[], tools: 
   }
   return {
     text: result.text,
-    toolCalls: result.toolCalls.map(c => ({ toolCallId: c.toolCallId, toolName: c.toolName, input: c.input })),
+    toolCalls: uniqueByCallId(result.toolCalls.map(c => ({ toolCallId: c.toolCallId, toolName: c.toolName, input: c.input }))),
     usage: normalizeUsage(result.usage),
     // ai@7's GenerateTextResult exposes the generated messages directly as `responseMessages`
     // (non-deprecated); the brief's `result.response.messages` is the same data but deprecated

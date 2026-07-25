@@ -708,3 +708,22 @@ describe('cancel-sweep wiring (real plugin, stub port)', () => {
     await log.close()
   })
 })
+
+describe('destructive commands name their target', () => {
+  // Both commands act on whatever project the cwd's config resolves to. A script that drifted into
+  // the wrong directory once destroyed a live project's history, so the name is a required argument
+  // and a mismatch must refuse rather than delete.
+  it('purge and delete refuse when the named project is not this one', async () => {
+    const { run } = await makeCli()
+    for (const cmd of ['purge', 'delete']) {
+      // no plugin context wired here: the guard must still refuse, never fall through to the wipe
+      await expect(run(cmd, 'some-other-project', '--yes')).rejects.toThrow()
+    }
+  })
+
+  it('both require --yes, so neither can fire from a bare invocation', async () => {
+    const { run } = await makeCli()
+    await expect(run('purge', 'orc-sim')).rejects.toThrow()
+    await expect(run('delete', 'orc-sim')).rejects.toThrow()
+  })
+})
