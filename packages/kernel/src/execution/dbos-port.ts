@@ -9,6 +9,7 @@ import {
   type ResolvedTool, type RunHandle, type RunOutcome, type Signal, type SplitResult, type ToolSource,
 } from '@orc/contracts'
 import { type Storage, type EventLogOps } from '../storage'
+import { acquireRuntimeLock, type RuntimeLock } from '../storage/runtime-lock'
 import { groundedPlanOmission } from './strategies/grounded-plan'
 import { verifyArtifacts } from './artifacts'
 import { fold, completedStepIds, nextAttempts, subtreeTaskIds, remainingBudget, inheritedCwd, type State } from '../projections'
@@ -542,8 +543,11 @@ export async function createDbosPort(opts: {
     })
   }
 
+  let runtimeLock: RuntimeLock | null = null
   const port: DbosPort = {
     launch: async () => {
+      // before DBOS: recovery is what makes a second runtime destructive, so refuse to become one
+      runtimeLock = await acquireRuntimeLock(config.databaseUrl, config.projectId)
       // DBOS__APPVERSION pinned from config BEFORE launch so recovery survives rebuilds (spec §4)
       process.env.DBOS__APPVERSION ??= config.appVersion
       DBOS.setConfig({
@@ -561,7 +565,15 @@ export async function createDbosPort(opts: {
     // deregister clears the workflow/queue registries so a fresh port can re-register in the
     // same process — required when >1 port is created per process (integration tests); a no-op
     // at real process exit. (DBOS docs: use deregister when re-registering functions.)
-    shutdown: async () => { await router.close(); await DBOS.shutdown({ deregister: true }) },
+    shutdown: async () => {
+      try {
+        await router.close()
+        await DBOS.shutdown({ deregister: true })
+      } finally {
+        await runtimeLock?.release()
+        runtimeLock = null
+      }
+    },
     startChildRun: async (childTaskId: string): Promise<void> => {
       const state = fold(await log.all())
       const task = state.tasks.get(childTaskId)
