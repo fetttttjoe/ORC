@@ -28,14 +28,23 @@ export function planMermaid(steps: DiagramStep[], states?: StepStatusLookup): st
 
 export interface DecompositionNote { id: string; title: string; links: Array<{ id: string; kind: string }> }
 
-export function decompositionMermaid(notes: DecompositionNote[]): string {
+// `states` keys on the SUBPLAN NOTE ID, which is the same key the executing step carries:
+// instantiateFrozenPlan freezes each child step with `id` = the note's id, unchanged. So a
+// decomposition colours from execution for free, exactly like planMermaid — it was pinned to
+// `pending` and stayed grey even after every subplan had finished. A note with no step yet (the
+// masterplan root, or an unapproved proposal) falls through to pending, which is then accurate.
+export function decompositionMermaid(notes: DecompositionNote[], states?: StepStatusLookup): string {
   const ids = new Set(notes.map(n => n.id))
   const lines = ['graph TD']
-  for (const n of notes) lines.push(`  ${n.id}["${mermaidLabel(n.title)}"]:::pending`)
+  for (const n of notes) lines.push(`  ${n.id}["${mermaidLabel(n.title)}"]:::${statusClass(states?.get(n.id)?.status)}`)
   for (const n of notes) for (const l of n.links) {
     if (!ids.has(l.id)) continue
     if (l.kind === 'decomposes_into') lines.push(`  ${n.id} --> ${l.id}`)
-    else if (l.kind === 'depends_on') lines.push(`  ${n.id} -.-> ${l.id}`)
+    // DEPENDENCY -> DEPENDENT, the same direction planMermaid draws (`${d} --> ${s.id}`), because
+    // both diagrams show the same plan and an arrow in them means "runs before". `n depends_on l`
+    // reads as l-then-n, so emitting `n -.-> l` pointed backwards: mermaid's TD layout hoisted the
+    // verify node ABOVE the subplans it waits for, drawing the run order inside out.
+    else if (l.kind === 'depends_on') lines.push(`  ${l.id} -.-> ${n.id}`)
   }
   lines.push(...THEME.map(l => `  ${l}`))
   return lines.join('\n')

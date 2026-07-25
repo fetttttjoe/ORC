@@ -173,7 +173,15 @@ export class Conversation {
     if (DECOMPOSITION_KINDS.has(row.kind) && row.taskId) void this.decompositionCard(row.taskId)
     // live progress: step events render the task's plan card — CREATING it if the plan events
     // fell outside the seed window (a long run's chat must still show current status)
-    if (STEP_KINDS.has(row.kind) && row.taskId) void this.planCard(row.taskId)
+    if (STEP_KINDS.has(row.kind) && row.taskId) {
+      void this.planCard(row.taskId)
+      // The decomposition's nodes carry step status too, and those steps run under the CHILD task —
+      // so a step event NEVER names the task whose decomposition card has to repaint, and the card
+      // sat grey through the entire run while the right-hand inspector showed it green. Refresh the
+      // open cards rather than deriving a parent from the child's id shape; each one re-renders only
+      // when its mermaid text actually changed (the `entry.key` guard).
+      for (const id of [...this.decoCards.keys()]) void this.decompositionCard(id)
+    }
     this.ripple(row)
     this.trim()
     this.scroll()
