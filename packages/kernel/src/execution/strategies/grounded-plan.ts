@@ -119,6 +119,8 @@ export function instantiateFrozenPlan(masterId: string, notes: PlanNote[]): Chil
         // the planner decides what each subplan needs; the operator decided what exists at all
         skillRefs: n.skillRefs,
         toolRefs: n.toolRefs,
+        // '' means the planner expressed no preference — omit the key so the expansion inherits
+        ...(n.modelRef ? { modelRef: n.modelRef } : {}),
       }
     }),
   }

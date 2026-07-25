@@ -140,9 +140,8 @@ export function memoryTools(store: MemoryStore, author: MemoryAuthor, role: Memo
           categories: { type: 'array', maxItems: MEMORY_LIMITS.labelItems, items: { type: 'string', maxLength: MEMORY_LIMITS.labelChars } },
           tags: { type: 'array', maxItems: MEMORY_LIMITS.labelItems, items: { type: 'string', maxLength: MEMORY_LIMITS.labelChars } },
           links: {
-            // spelled out because a bare `links: "other-note"` is the mistake models actually make
-            // here (three wasted iterations in one measured run), and unlike tags/paths this field
-            // does NOT accept the scalar shorthand — an edge without its kind is not the same edge.
+            // unlike tags/paths this takes no scalar shorthand, and `links: "other-note"` is the
+            // mistake models actually make (three wasted iterations in one measured run)
             type: 'array', maxItems: MEMORY_LIMITS.detailItems, description: "typed edges to related notes. Each item is an OBJECT — {\"id\": \"target-note\", \"kind\": \"derived_from\"} — never a bare id string and never a string array.",
             items: {
               type: 'object', required: ['id'],
@@ -160,6 +159,10 @@ export function memoryTools(store: MemoryStore, author: MemoryAuthor, role: Memo
           skillRefs: { type: 'array', maxItems: 16, items: { type: 'string', maxLength: MEMORY_LIMITS.labelChars }, description: 'plan tier only: skills this subplan\'s step should load (e.g. web-research). Selection from what the operator installed — an unknown ref fails the plan before approval.' },
           toolRefs: { type: 'array', maxItems: 16, items: { type: 'string', maxLength: MEMORY_LIMITS.labelChars }, description: "plan tier only: MCP tools this subplan's step needs, as 'server/tool' (e.g. web/search, web/fetch). Selection from servers the operator declared AND trusted; a step that needs none declares none." },
           zone: { type: 'array', maxItems: 16, items: { type: 'string', minLength: 1, maxLength: MEMORY_LIMITS.detailChars }, description: "plan tier only: workspace-relative write globs this subplan may touch at execution (e.g. 'docs/**'), frozen into the step and enforced as a write-fence. Concurrent writes to one file are refused mechanically regardless — zone additionally scopes WHERE this step may write. Empty = unfenced." },
+          modelRef: {
+            type: 'string', maxLength: MEMORY_LIMITS.labelChars,
+            description: "plan tier only: the model this subplan's step runs on, as 'provider/model' (e.g. a small fast model for a web lookup, a frontier model for cross-cutting code work). Omit to inherit the parent step's model. Choose per subplan by its difficulty, not uniformly.",
+          },
           scope: idSchema,
         },
       },

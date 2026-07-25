@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, it } from 'bun:test'
-import { ApprovalPolicy, EVENT_KIND, PAYLOAD_SCHEMAS, TASK_STATUS, type Analyzer, type PlanDraft, type PlanStep } from '@orc/contracts'
+import { ApprovalPolicy, EVENT_KIND, LINK_KIND, NOTE_TIER, PAYLOAD_SCHEMAS, TASK_STATUS, type Analyzer, type PlanDraft, type PlanStep } from '@orc/contracts'
 import { draftFixture, stepFixture } from '@orc/contracts/fixtures'
 import { openStorage } from './storage'
 import { KERNEL_ERROR_CODE, KernelError } from './errors'
@@ -531,5 +531,26 @@ describe('Kernel lifecycle', () => {
     expect(notes.map(n => n.id).sort()).toEqual(['db', 'masterplan'])
     expect(notes.find(n => n.id === 'masterplan')!.title).toBe('Web app')
     expect(instantiateFrozenPlan('masterplan', notes).steps.map(s => s.id)).toEqual(['db'])
+  })
+
+  it('freezes a subplan-declared modelRef, and omits the key when the planner left it empty', async () => {
+    const db = await createTestDb()
+    dbs.push(db)
+    const log = (await openStorage(db.url, { projectId: TEST_PROJECT_ID })).events
+    const k = new Kernel(log)
+    const scope = planScope('grounded-models')
+    const author = { source: 'agent' as const }
+    const note = (id: string, over: Record<string, unknown> = {}) => log.append({
+      taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_written,
+      payload: { note: { id, scope, tier: NOTE_TIER.plan, title: id, ...over }, author },
+    })
+    await note('masterplan', { links: [{ id: 'cheap', kind: LINK_KIND.decomposes_into }, { id: 'hard', kind: LINK_KIND.decomposes_into }] })
+    await note('cheap')
+    await note('hard', { modelRef: 'anthropic/claude-opus-5' })
+
+    const steps = instantiateFrozenPlan('masterplan', await k.listPlanNotes('grounded-models')).steps
+    // absent, not '': the expansion inherits via `?? parentStep.modelRef`, which '' would defeat
+    expect(steps.find(s => s.id === 'cheap')).not.toHaveProperty('modelRef')
+    expect(steps.find(s => s.id === 'hard')!.modelRef).toBe('anthropic/claude-opus-5')
   })
 })

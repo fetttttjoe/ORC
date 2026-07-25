@@ -207,6 +207,9 @@ export const PlanNoteInput = z.object({
   // refValidator rejects an unknown ref at propose time — before a human ever approves the plan.
   skillRefs: stringOrList(z.string().min(1).max(MEMORY_LIMITS.labelChars), 16).default([]),
   toolRefs: stringOrList(z.string().min(1).max(MEMORY_LIMITS.labelChars), 16).default([]),
+  // 'provider/model' for this subplan's step; '' inherits the parent's. Decomposition is the first
+  // point where model choice is knowable — a web lookup and a refactor need not share one model.
+  modelRef: z.string().max(MEMORY_LIMITS.labelChars).default(''),
 })
 export type PlanNoteInput = z.infer<typeof PlanNoteInput>
 
@@ -297,6 +300,7 @@ export const MemoryNoteDraftInput = z.object({
   zone: optionalNoDefault(PlanNoteInput.shape.zone),
   skillRefs: optionalNoDefault(PlanNoteInput.shape.skillRefs),
   toolRefs: optionalNoDefault(PlanNoteInput.shape.toolRefs),
+  modelRef: optionalNoDefault(PlanNoteInput.shape.modelRef),
 })
 // a field added to a tier but forgotten here is a compile error, not silent drift
 type TierFields =

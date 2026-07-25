@@ -158,7 +158,7 @@ export class Kernel {
       const expanded: PlanDraft = {
         strategyRef: STRATEGY.split, costEstimateUSD: null,
         steps: draft.steps.map(s => ({
-          ...s, executorRef: input.parentStep.executorRef, modelRef: input.parentStep.modelRef,
+          ...s, executorRef: input.parentStep.executorRef, modelRef: s.modelRef ?? input.parentStep.modelRef,
           // zone is the child's own declaration (write-fence) — parsed default [] = unfenced
           isolation: ISOLATION_TIER.local, zone: s.zone, maxIterations: input.parentStep.maxIterations,
         })),

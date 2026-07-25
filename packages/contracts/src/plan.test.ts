@@ -84,3 +84,17 @@ describe('planScope', () => {
     expect(planScope(child)).not.toBe(planScope(root))
   })
 })
+
+describe('ChildPlanStep.modelRef', () => {
+  const base = { id: 's1', role: 'r', title: 't', instructions: 'i', skillRefs: [], dependsOn: [] }
+
+  it('is optional, so an existing subplan still inherits the parent model', () => {
+    expect(ChildPlanStep.parse(base).modelRef).toBeUndefined()
+  })
+
+  it('carries an explicit override and rejects an empty one', () => {
+    expect(ChildPlanStep.parse({ ...base, modelRef: 'anthropic/claude-opus-5' }).modelRef).toBe('anthropic/claude-opus-5')
+    expect(() => ChildPlanStep.parse({ ...base, modelRef: '' })).toThrow()
+  })
+})
+

@@ -51,15 +51,10 @@ export type StepRole = (typeof STEP_ROLE)[keyof typeof STEP_ROLE]
 
 // The per-task plan-note scope. The authoring agent, finalize_plan, and every UI view derive
 // it from the taskId — one format, one place (was duplicated as ui-core's planScopeName).
-//
-// SANITIZED, because a scope is validated against MEMORY_ID_RE (`^[a-z0-9][a-z0-9-]*$`) and a split
-// child's task id is `<parentUuid>.<stepId>.<toolCallId>` — dots, underscores and mixed case, none
-// of which that pattern accepts. Raw interpolation meant every plan-scoped write below the root task
-// was REJECTED at the schema boundary: ambient step capture warned and dropped the note, and
-// consolidation then read an empty step list and promoted a contentless outcome note. A root task
-// (a bare uuid) is unaffected — the transform is identity on ids that were already safe.
-// ponytail: case is folded, so two ids differing only in case would share a scope. Not reachable
-// with a uuid + a random tool-call id; hash the tail if task ids ever become case-significant.
+// Sanitized because a split child's id (`<uuid>.<stepId>.<toolCallId>`) carries dots and mixed case,
+// which MEMORY_ID_RE rejects — every plan-scoped write below the root task was silently refused.
+// ponytail: case is folded, so ids differing only in case would collide; hash the tail if that
+// ever becomes reachable.
 export const planScope = (taskId: string): string => `plan-${taskId.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`
 
 export const Plan = z.object({
@@ -80,7 +75,10 @@ export type PlanDraft = z.infer<typeof PlanDraft>
 // zone is the child's OWN declaration (write-fence for parallel siblings) — default unfenced.
 export const ChildPlanStep = PlanStep.omit({
   executorRef: true, modelRef: true, isolation: true, zone: true, maxIterations: true,
-}).extend({ zone: z.array(z.string().min(1)).max(16).default([]) })
+}).extend({
+  zone: z.array(z.string().min(1)).max(16).default([]),
+  modelRef: z.string().min(1).optional(), // the one inherited ref a child may override; absent = inherit
+})
 export type ChildPlanStep = z.infer<typeof ChildPlanStep>
 
 export const ChildPlanDraft = z.object({ steps: z.array(ChildPlanStep).min(1) })
