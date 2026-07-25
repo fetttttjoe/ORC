@@ -177,10 +177,8 @@ export class EventLog implements EventLogOps {
   // Lossless stream (spec §5.4): NOTIFY is only a wake-up, catch-up queries are
   // authoritative; the cursor advances only after the handler succeeds; a dropped LISTEN
   // connection reconnects with bounded backoff and catches up first.
-  // `onReset` fires when the log turns out not to be the log this cursor came from (see
-  // rewindIfReplaced) — a stateful subscriber that folded the old history must throw that fold
-  // away, because delivery resumes from seq 1 of a DIFFERENT log. Omit it and the stream still
-  // self-heals; only the consumer's own cache would carry ghosts.
+  // `onReset` fires when delivery restarts from a DIFFERENT log (see rewindIfReplaced) — a
+  // subscriber caching a fold must drop it, or it carries ghosts from the old history.
   async subscribe(
     opts: { fromSeq?: number; onReset?: () => void | Promise<void> },
     handler: (e: EventRecord) => void | Promise<void>,
@@ -218,12 +216,9 @@ export class EventLog implements EventLogOps {
         if (!closed && pumpTimer === null) pumpTimer = setTimeout(() => { pumpTimer = null; pumpSafe() }, PUMP_RETRY_MS)
       })
     }
-    // A cursor only means anything against the log it was read from. If the log no longer reaches
-    // it, this is not that log any more — the database was dropped and re-created, restored from a
-    // backup, or pointed somewhere else — and every catch-up query (`seq > cursor`) matches nothing
-    // FOREVER: the stream goes quiet with no error and no dropped connection to notice. That is how
-    // a live graph UI kept serving a snapshot two runs stale across a `docker compose down -v`,
-    // recoverable only by restarting the process. Rewind to the start of whatever log this now is.
+    // A log that no longer reaches our cursor is a different log (dropped and re-created, restored,
+    // repointed). `seq > cursor` would then match nothing forever — silently, with no error and no
+    // dead connection to notice.
     const rewindIfReplaced = async (): Promise<void> => {
       if (cursor === 0 || (await this.latestSeq()) >= cursor) return
       cursor = 0
@@ -260,9 +255,7 @@ export class EventLog implements EventLogOps {
         c.once('end', () => {
           if (!closed) scheduleReconnect()
         })
-        // before catching up, make sure there is still a gap to catch up ON: a reconnect is exactly
-        // when the log underneath may have been replaced
-        await rewindIfReplaced()
+        await rewindIfReplaced() // a reconnect is exactly when the log underneath may have changed
         await pump() // catch-up closes the gap before live delivery resumes
         backoff = 0
       } catch (err) {

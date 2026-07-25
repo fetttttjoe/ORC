@@ -504,12 +504,8 @@ export async function createDbosPort(opts: {
     if (!approved || (task.status !== TASK_STATUS.approved && task.status !== TASK_STATUS.running && task.status !== TASK_STATUS.blocked))
       throw new KernelError(KERNEL_ERROR_CODE.invalid_transition, `task is '${task.status}' — approve a plan first (orc approve ${taskId})`)
     const workflowID = retryIndex === 0 ? `run:${taskId}:v${approved}` : `run:${taskId}:v${approved}:r${retryIndex}`
-    // A non-root task belongs on its depth's run queue — the SAME queue startChildRun enqueues it
-    // on. Without this, the two paths disagree: after a split the CLI follows the subtree and
-    // re-starts the child here, which DBOS reports as a queue mismatch ("already exists in queue
-    // runs:1, but the provided queue name is: undefined"), and a child the router never enqueued
-    // (`orc run <childId>` by hand, or a retry) would execute outside the concurrency cap entirely.
-    // Depth 0 stays unqueued on purpose: runQueue(0) is never registered (see the launch loop).
+    // Same queue startChildRun uses, or the two paths disagree and a child started here (subtree
+    // follow, manual run, retry) escapes the depth concurrency cap. runQueue(0) is never registered.
     const handle = await DBOS.startWorkflow(runWorkflow, {
       workflowID,
       ...(task.depth > 0 ? { queueName: runQueue(task.depth) } : {}),

@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'bun:test'
+import { LINK_KIND, STEP_RUN_STATUS } from '@orc/contracts'
 import { decompositionMermaid, planMermaid, todoWaves } from './diagram'
 
 // diamond: a → (b ∥ c) → d
@@ -47,15 +48,17 @@ describe('mermaid generators', () => {
     expect(text).not.toContain('ghost')
   })
 
-  // The subplan-note id IS the child step id (instantiateFrozenPlan), so a decomposition colours
-  // from execution. It used to be pinned `pending` and stayed grey even when the run had finished.
+  // the subplan-note id IS the child step id (instantiateFrozenPlan), so a decomposition colours
+  // from execution rather than sitting pinned at pending
   it('decompositionMermaid colours each subplan from the child step that carries its id', () => {
     const notes = [
-      { id: 'root', title: 'root', links: [{ id: 'a', kind: 'decomposes_into' }, { id: 'b', kind: 'decomposes_into' }] },
+      { id: 'root', title: 'root', links: [{ id: 'a', kind: LINK_KIND.decomposes_into }, { id: 'b', kind: LINK_KIND.decomposes_into }] },
       { id: 'a', title: 'a', links: [] },
       { id: 'b', title: 'b', links: [] },
     ]
-    const text = decompositionMermaid(notes, new Map([['a', { status: 'completed' }], ['b', { status: 'running' }]]))
+    const text = decompositionMermaid(notes, new Map([
+      ['a', { status: STEP_RUN_STATUS.completed }], ['b', { status: STEP_RUN_STATUS.running }],
+    ]))
     expect(text).toContain('a["a"]:::done')
     expect(text).toContain('b["b"]:::running')
     expect(text).toContain('root["root"]:::pending') // no step of its own — pending is accurate
