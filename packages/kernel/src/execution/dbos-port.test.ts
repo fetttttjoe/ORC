@@ -16,7 +16,7 @@ import { draftFixture, stepFixture } from '@orc/contracts/fixtures'
 import { openStorage, type EventLog } from '../storage'
 import { Kernel } from '../kernel'
 import { createTestDb, fakeProvider, testConfig, TEST_PROJECT_ID } from '../test-helpers'
-import { appendRunInit, createDbosPort, type DbosPort } from './dbos-port'
+import { appendRunInit, createDbosPort, runQueueOptions, type DbosPort } from './dbos-port'
 
 // One DBOS runtime per process: registerWorkflow throws on duplicate names, so the whole file
 // shares ONE port + DB. Per-task scripting isolates the scenarios (behavior keyed by taskId,
@@ -475,5 +475,16 @@ describe('DBOS execution port (integration)', () => {
     await kernel.approvePlan(t.id)
     expect(await (await port.startRun(t.id)).wait()).toBe('done')
     expect((await kernel.eventsFor(t.id)).some(e => e.kind === EVENT_KIND.step_failed)).toBe(false)
+  })
+})
+
+describe('runQueueOptions', () => {
+  // The regression this pins is two call sites deciding independently: startChildRun queued a child
+  // on runs:<depth> while startRunAt (subtree follow, `orc run <childId>`, retry) passed no queue,
+  // so the same run escaped the depth concurrency cap depending on who started it.
+  it('leaves a root run unqueued and puts every deeper run on its depth queue', () => {
+    expect(runQueueOptions(0)).toEqual({})            // runs:0 is never registered
+    expect(runQueueOptions(1)).toEqual({ queueName: 'runs:1' })
+    expect(runQueueOptions(3)).toEqual({ queueName: 'runs:3' })
   })
 })

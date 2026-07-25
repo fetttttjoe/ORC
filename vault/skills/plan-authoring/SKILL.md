@@ -41,6 +41,12 @@ You are an **auditor** authoring an executable plan, grounded in the analysis no
      graph — the human can click from a subplan to the architecture it touches, and auditors can
      traverse back.
 
+   - **A note describing the work is not the work.** On a project you have planned before, the graph
+     already holds notes about the deliverable — that is memory of a PREVIOUS run, not evidence the
+     artifact exists now. Check the workspace (`fs_read`/`fs_list`) before concluding anything is
+     already done, and decompose regardless: skipping the split because the graph looks complete is
+     the one failure the runtime refuses outright.
+
 3. Call `ask_human("Plan ready — reply with changes, or 'approve' to start.")`. On a reply reporting
    changes, call `read_annotations()` to get the queued `plan_annotated` items (each names a
    `targetNote`) and revise **ONLY those notes and their `decomposes_into` subtree** — re-`memory_write`

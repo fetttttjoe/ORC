@@ -353,12 +353,20 @@ export function buildProgram(
     })
 
   program
-    .command('purge')
-    .description("cancel running work and delete this project's events, operations, and memory read model — identity stays (clean slate for re-testing)")
+    .command('purge <projectName>')
+    .description("cancel running work and delete the named project's events, operations, and memory read model — identity stays (clean slate for re-testing)")
     .requiredOption('--yes', 'confirm: this irreversibly deletes the project history')
-    .action(async () => {
+    .action(async (projectName: string) => {
+      // The target comes from whatever .orc/config.json the cwd resolves to, so a script that
+      // drifts into another directory purges a project it never meant to touch — that is not
+      // hypothetical, it destroyed a live run's history. Naming the project makes the caller
+      // state its intent, and a drifted cwd fails loudly instead of deleting the wrong history.
+      const actual = plugin?.config.projectName
+      if (!actual) throw new Error('purging needs a project context')
+      if (projectName !== actual)
+        throw new Error(`refusing: this directory is project '${actual}' (${plugin!.config.dir}), not '${projectName}'`)
       const r = await actions().purgeProject()
-      console.log(`purged ${r.events} event(s), ${r.operations} operation(s)`)
+      console.log(`purged ${r.events} event(s), ${r.operations} operation(s) from '${actual}'`)
       for (const w of r.warnings) console.log(`warning: ${w}`)
     })
 

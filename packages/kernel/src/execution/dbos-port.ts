@@ -33,6 +33,13 @@ export interface DbosPort extends ExecutionPort {
 const agentQueue = (depth: number): string => `agents:${depth}`
 const runQueue = (depth: number): string => `runs:${depth}`
 
+// The startWorkflow option for a run at `depth`, so the two places that start one (startChildRun
+// via the router, startRunAt via the CLI/retry) cannot disagree about its queue — they did, which
+// left a child running outside the depth concurrency cap. Depth 0 is unqueued: runQueue(0) is
+// never registered (see the launch loop), so it must stay absent rather than name a missing queue.
+export const runQueueOptions = (depth: number): { queueName?: string } =>
+  depth > 0 ? { queueName: runQueue(depth) } : {}
+
 // How long one DBOS.recv waits before looping. Human gates park for hours, and every expiry
 // writes durable rows that recovery must replay in order — so this trades nothing but row
 // count. Cancellation responsiveness is independent of it (see the split gate).
@@ -504,12 +511,7 @@ export async function createDbosPort(opts: {
     if (!approved || (task.status !== TASK_STATUS.approved && task.status !== TASK_STATUS.running && task.status !== TASK_STATUS.blocked))
       throw new KernelError(KERNEL_ERROR_CODE.invalid_transition, `task is '${task.status}' — approve a plan first (orc approve ${taskId})`)
     const workflowID = retryIndex === 0 ? `run:${taskId}:v${approved}` : `run:${taskId}:v${approved}:r${retryIndex}`
-    // Same queue startChildRun uses, or the two paths disagree and a child started here (subtree
-    // follow, manual run, retry) escapes the depth concurrency cap. runQueue(0) is never registered.
-    const handle = await DBOS.startWorkflow(runWorkflow, {
-      workflowID,
-      ...(task.depth > 0 ? { queueName: runQueue(task.depth) } : {}),
-    })({
+    const handle = await DBOS.startWorkflow(runWorkflow, { workflowID, ...runQueueOptions(task.depth) })({
       // A run with no explicit cwd works on the PROJECT, not in an empty scratch dir. The old
       // per-step .orc/workspaces/ default gave every step a directory with nothing in it — a
       // workspace no repo task can succeed in (scenario-2 burned five verify attempts on it,
@@ -600,7 +602,7 @@ export async function createDbosPort(opts: {
       const cwd = inheritedCwd(task.parentId ? state.runs.get(task.parentId) : undefined, undefined, config.dir)
       await DBOS.startWorkflow(runWorkflow, {
         workflowID: `run:${childTaskId}:v${approved}`,
-        queueName: runQueue(task.depth),
+        ...runQueueOptions(task.depth),
       })({ taskId: childTaskId, planVersion: approved, retryIndex: 0, cwd })
     },
     startRun: (taskId, o) => startRunAt(taskId, 0, o?.cwd),
