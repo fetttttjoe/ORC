@@ -40,6 +40,19 @@ export const ModelCost = z.object({
 })
 export type ModelCost = z.infer<typeof ModelCost>
 
+// A model the operator can actually select, with what it costs. Discovery (live list ∪ priced
+// catalog) produces these; the plan step and the CLI renderer both consume them.
+export interface ModelOption { ref: string; cost: ModelCost | null }
+
+// null = unpriced, so callers render the ref bare rather than inventing a rate.
+export const formatModelRate = (c: ModelCost | null | undefined): string | null =>
+  c ? `$${c.inPerMTok}/M in · $${c.outPerMTok}/M out` : null
+
+export const formatModelOption = (o: ModelOption): string => {
+  const rate = formatModelRate(o.cost)
+  return rate ? `${o.ref} (${rate})` : o.ref
+}
+
 export function costUSDFor(
   costs: Record<string, ModelCost>,
   modelId: string,

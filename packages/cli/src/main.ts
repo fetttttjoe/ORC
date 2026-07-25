@@ -2,7 +2,7 @@ import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync } from '
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { Command, InvalidArgumentError } from 'commander'
-import { EDGE_DIRECTION, EVENT_KIND, LINK_KINDS, MEMORY_ACCESS, NOTE_TIERS, NoteTier, parseLinkSpec, PlanDraft, RUN_OUTCOME, STRATEGY, TASK_STATUS, TERMINAL_TASK_STATUS, LinkKind, slugId, type Analyzer, type RunOutcome, type EventRecord, type MemoryLink, type ExecutionPort, type Plan, type RunHandle } from '@orc/contracts'
+import { EDGE_DIRECTION, EVENT_KIND, LINK_KINDS, MEMORY_ACCESS, NOTE_TIERS, NoteTier, parseLinkSpec, PlanDraft, RUN_OUTCOME, STRATEGY, TASK_STATUS, TERMINAL_TASK_STATUS, LinkKind, slugId, type Analyzer, type RunOutcome, type EventRecord, type MemoryLink, type ExecutionPort, type Plan, type RunHandle, formatModelRate } from '@orc/contracts'
 import { openStorage, Kernel, fold, subtreeTaskIds, grantExtensionTrust, grantMcpTrust, initializeProject, isExtensionTrusted, isMcpTrusted, loadConfig, loadTrust, migrateDatabase, requireProject, taskUsage, type EventLog, type OrcConfig, type PluginHost, type ProjectConfig, type Storage } from '@orc/kernel'
 import { createVaultProjector, parsePlanFile } from '@orc/vault-projector'
 import { consolidateTask, probeMemory, staleNotes, DEFAULT_SWEEP_DAYS } from '@orc/memory'
@@ -236,7 +236,10 @@ export function buildProgram(
         return
       }
       if (!opts.model) throw new Error(`--model is required with --strategy ${STRATEGY.groundedPlan}`)
-      const t = await kernel.createGroundedTask({ title, spec: opts.spec, modelRef: opts.model, analyzerRef: opts.analyzer, budgetUSD: opts.budget ?? null })
+      const t = await kernel.createGroundedTask({
+        title, spec: opts.spec, modelRef: opts.model, analyzerRef: opts.analyzer, budgetUSD: opts.budget ?? null,
+        modelCatalog: await discovery?.listModelOptions().catch(() => []) ?? [],
+      })
       console.log(t.id)
       // auto-start: the grounded-plan template is policy-approved (its real gate is the
       // conversational one inside the plan step), so the analyze→plan conversation begins now
@@ -280,8 +283,7 @@ export function buildProgram(
     if (!discovery) return null
     try {
       const { p, modelId } = discovery.providerFor(ref)
-      const c = p.costs[modelId] ?? p.costs['*']
-      return c ? `$${c.inPerMTok}/M in · $${c.outPerMTok}/M out` : null
+      return formatModelRate(p.costs[modelId] ?? p.costs['*'])
     } catch { return null }
   }
 
@@ -408,7 +410,7 @@ export function buildProgram(
 
   // one shared implementation of every mutating command — the web adapter gets the same object.
   // (discovery is declared up top so the `plan` command's rate line can reach it too)
-  const actions = () => buildOrcActions({ kernel, needPort, plugin, listModels: discovery?.listModels })
+  const actions = () => buildOrcActions({ kernel, needPort, plugin, listModels: discovery?.listModels, listModelOptions: discovery?.listModelOptions })
 
   const needPort = async (): Promise<ExecutionPort> => {
     if (!portFactory) throw new Error('execution commands are unavailable in this context')

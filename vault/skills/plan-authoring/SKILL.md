@@ -29,6 +29,13 @@ You are an **auditor** authoring an executable plan, grounded in the analysis no
      declares before naming one) and `skillRefs` for skills (`web-research`, `documentation`). A
      subplan that must look something up on the web and declares no `toolRefs` will fail, having no
      way to search. Declare nothing for steps that only read and edit local files.
+   - **Match the model to the work.** Your instructions list the models you may name, with their
+     rates. Set `modelRef` per subplan from that list: a frontier model where the work is genuinely
+     hard (cross-cutting refactors, ambiguous requirements, design judgement, anything touching many
+     files), the cheapest capable model where it is mechanical (a web lookup, a doc edit, a rename,
+     reading something back to check it). Omit `modelRef` to inherit the planning model. A uniform
+     choice across every subplan means you did not decide — say why in the rationale if it is
+     deliberate. The human sees your choice at the gate and can change it.
    - **Ground every subplan in the knowledge map**: link `derived_from` the analysis notes it
      builds on (`arch-overview`, `area-*`). This wires the plan into the project's knowledge
      graph — the human can click from a subplan to the architecture it touches, and auditors can

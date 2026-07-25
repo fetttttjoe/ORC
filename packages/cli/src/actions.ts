@@ -1,4 +1,4 @@
-import { STEP_ROLE, errorMessage, EVENT_KIND, ISOLATION_TIER, STRATEGY, TASK_STATUS, costUSDFor, parseModelRef, type ExecutionPort, type PlanDraft } from '@orc/contracts'
+import { STEP_ROLE, errorMessage, EVENT_KIND, ISOLATION_TIER, STRATEGY, TASK_STATUS, costUSDFor, parseModelRef, type ExecutionPort, type ModelOption, type PlanDraft } from '@orc/contracts'
 import { deriveSystemUrl, initializeProject, loadConfig, openStorage, resetSystemDatabase, subtreeTaskIds, type EventLog, type Kernel, type ProjectConfig, type Storage } from '@orc/kernel'
 import { seedRegistries } from './runtime'
 import { createMemory, openKnowledge, orphanedNotes } from '@orc/memory'
@@ -82,8 +82,17 @@ export function buildModelDiscovery(config: ProjectConfig, log?: EventLog) {
     cache = { at: Date.now(), refs }
     return refs
   }
+  // discovery already knows both halves; pairing them here keeps every consumer off `p.costs`
+  const listModelOptions = async (): Promise<ModelOption[]> =>
+    (await listModels()).map(ref => {
+      try {
+        const { p, modelId } = providerFor(ref)
+        return { ref, cost: p.costs[modelId] ?? p.costs['*'] ?? null }
+      } catch { return { ref, cost: null } }
+    })
   return {
     listModels,
+    listModelOptions,
     providerFor,
     price: (ref: string, usage: { inputTokens?: number; outputTokens?: number; inputTokenDetails?: { cacheReadTokens?: number; cacheWriteTokens?: number } }) => {
       const { p, modelId } = providerFor(ref)
@@ -100,8 +109,9 @@ export function buildOrcActions(deps: {
   needPort: () => Promise<ExecutionPort>
   plugin?: { config: ProjectConfig; log: EventLog; storage?: Storage }
   listModels?: () => Promise<string[]>
+  listModelOptions?: () => Promise<ModelOption[]>
 }): OrcActions {
-  const { kernel, needPort, plugin, listModels } = deps
+  const { kernel, needPort, plugin, listModels, listModelOptions } = deps
 
   const requireTask = async (taskId: string) => {
     const task = await kernel.getTask(taskId)
@@ -138,6 +148,7 @@ export function buildOrcActions(deps: {
       const t = await kernel.createGroundedTask({
         title: input.title, spec: input.spec ?? '',
         modelRef: input.grounded.modelRef, analyzerRef: input.grounded.analyzerRef ?? 'agent-analyzer',
+        modelCatalog: await listModelOptions?.().catch(() => []) ?? [],
       })
       // the grounded template is policy-approved — the analyze→plan conversation starts now;
       // callers watch progress over the event stream, nothing tails here

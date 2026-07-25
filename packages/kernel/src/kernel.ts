@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { MASTERPLAN_NOTE_ID,
-  AnalysisCompletedPayload, ChildPlanDraft, EVENT_KIND, FeedbackProvidedPayload, ISOLATION_TIER, PAYLOAD_SCHEMAS, PlanAnnotatedPayload, PlanDraft, STRATEGY, TASK_STATUS, evaluateApproval, validatePlan, type ChildPlanDraftInput,
+  AnalysisCompletedPayload, ChildPlanDraft, EVENT_KIND, FeedbackProvidedPayload, ISOLATION_TIER, PAYLOAD_SCHEMAS, PlanAnnotatedPayload, PlanDraft, STRATEGY, TASK_STATUS, evaluateApproval, formatModelOption, validatePlan, type ChildPlanDraftInput, type ModelOption,
   type Analyzer, type ApprovalPolicy, type EventKind, type EventRecord,
   type PlanNote, type Plan, type PlanStep, type TaskNode, type TaskStatus,
 } from '@orc/contracts'
@@ -41,7 +41,7 @@ export class Kernel {
   // step is the resolved Analyzer's scout step; the plan step is an auditor api-loop step that
   // authors a plan-note graph and calls finalize_plan. Policy-approved because the human's real
   // gate is the conversational approve inside the plan step, not this scaffold.
-  async createGroundedTask(input: { title: string; spec: string; modelRef: string; analyzerRef: string; budgetUSD?: number | null }): Promise<TaskNode> {
+  async createGroundedTask(input: { title: string; spec: string; modelRef: string; analyzerRef: string; budgetUSD?: number | null; modelCatalog?: ModelOption[] }): Promise<TaskNode> {
     // the title is a LABEL, never the goal — a grounded run without intent would make the
     // analyze/plan agents guess (burning an analyze pass on "what did you mean?")
     const spec = input.spec.trim()
@@ -58,7 +58,11 @@ export class Kernel {
         id: PLAN_STEP_ID, role: PLAN_STEP_ROLE, title: 'Author the executable plan',
         // the concrete scope + root id, so the authoring agent (which never sees its taskId) and
         // finalize_plan agree on where the plan-note graph lives.
-        instructions: `Author the plan-note graph in memory scope '${planScope(task.id)}' with root note id '${MASTERPLAN_NOTE_ID}', iterate with the human via ask_human, then call finalize_plan. Follow the plan-authoring skill.`,
+        instructions: `Author the plan-note graph in memory scope '${planScope(task.id)}' with root note id '${MASTERPLAN_NOTE_ID}', iterate with the human via ask_human, then call finalize_plan. Follow the plan-authoring skill.`
+          // the planner cannot price a trade-off between models it has never heard of
+          + (input.modelCatalog?.length
+            ? ` Models you may set as a subplan's modelRef, with their rates: ${input.modelCatalog.map(formatModelOption).join('; ')}. Omit it to inherit '${input.modelRef}'.`
+            : ''),
         executorRef: 'api-loop', modelRef: input.modelRef, skillRefs: ['plan-authoring'], toolRefs: [],
         isolation: ISOLATION_TIER.local, zone: [], maxIterations: 30, dependsOn: [analyzeStep.id],
       }
