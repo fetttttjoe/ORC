@@ -5,7 +5,7 @@ import { Conversation } from './conversation'
 import { renderDetail, type NoteDetailActions } from './detail'
 import { LogView } from './log'
 import { current, navigate, onChange, type Selection, type Tab } from './nav'
-import { planScope, slugId, TASK_STATUS } from '@orc/contracts'
+import { MEMORY_HEALTH, planScope, slugId, TASK_STATUS } from '@orc/contracts'
 import { EDGE, NODE_PREFIX, noteNodeId, stepNodeId } from '@orc/ui-core/graph'
 import { parseLinkSpec } from '@orc/contracts'
 import { renderRequest, type OpenQuestion, type PlanNoteView, type PlansView, type TaskView } from './plan'
@@ -504,8 +504,10 @@ else if (!current().project) projectList.append(Empty('no projects yet'))
 async function pollHealth(): Promise<void> {
   const h = await api.health().catch(() => null)
   const m = h?.memory ?? null
-  if (m && !m.healthy) {
-    healthBadge.textContent = 'memory degraded'
+  // Only an unreachable store is a fault. A read model that is merely behind is a healthy system
+  // mid-write, and badging it 'degraded' cried wolf on every burst of note writes.
+  if (m && m.state === MEMORY_HEALTH.unreachable) {
+    healthBadge.textContent = 'memory unreachable'
     healthBadge.title = m.reason ?? ''
     healthBadge.classList.add('on')
   } else {

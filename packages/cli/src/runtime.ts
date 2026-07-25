@@ -108,8 +108,8 @@ export async function buildRuntime(
   host.skills.watch() // hot-index during long-lived runs (spec quality scenario: <1s)
   return {
     ...port,
-    shutdown: async () => {
-      await port.shutdown()
+    shutdown: async (opts?: { drain?: boolean }) => {
+      await port.shutdown(opts)
       if (lifecycle) await lifecycle.close()
       if (memory) await memory.close()
       await projector.close()

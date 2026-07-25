@@ -77,7 +77,8 @@ async function main(): Promise<number> {
     ), process.argv)
   } finally {
     try {
-      if (runtime.port) await runtime.port.shutdown()
+      // this process exits on the next line; a parked gate is resumed by recovery, not by waiting
+      if (runtime.port) await runtime.port.shutdown({ drain: false })
       else if (plugins) {
         try { await plugins.host.shutdown() }
         finally { await plugins.hub.close() }

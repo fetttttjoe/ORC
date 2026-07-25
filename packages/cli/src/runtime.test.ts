@@ -2,7 +2,7 @@ import { afterAll, describe, expect, it, mock, spyOn } from 'bun:test'
 import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import {
+import { MEMORY_HEALTH,
   EVENT_KIND, SIGNAL_OUTCOME,
   type AgentExecutor, type EventDraft, type ExecutorContext, type SplitResult, type UnifiedEvent,
 } from '@orc/contracts'
@@ -112,12 +112,12 @@ describe('status memory health', () => {
     }
 
     const t = await kernel.createTask({ title: 'health check' })
-    // healthy: derived database opens (auto-created) with cursor 0 and no memory events
+    // ok: derived database opens (auto-created) with cursor 0 and no memory events
     const memory = await createMemory({ log, config })
     await memory.close()
-    expect(await status(config, t.id)).toContain('memory: healthy')
+    expect(await status(config, t.id)).toContain(`memory: ${MEMORY_HEALTH.ok}`)
 
-    // one unapplied event → degraded with the pending count
+    // behind, not broken: a projector that has not drained yet is a healthy system mid-write
     await log.append({
       taskId: null, stepId: null, runToken: null, kind: 'memory_written',
       payload: {
@@ -125,11 +125,11 @@ describe('status memory health', () => {
         author: { source: 'cli' },
       },
     })
-    expect(await status(config, t.id)).toContain('memory: degraded (1 unapplied events)')
+    expect(await status(config, t.id)).toContain(`memory: ${MEMORY_HEALTH.catchingUp} (1 event(s) not yet projected)`)
 
-    // unreachable database → degraded, status still exits normally
+    // unreachable database → the one real fault, and status still exits normally
     const broken = testConfig(db.url, { ...config, projectDbUrl: 'not-a-url' })
-    expect(await status(broken, t.id)).toContain('memory: degraded (unreachable:')
+    expect(await status(broken, t.id)).toContain(`memory: ${MEMORY_HEALTH.unreachable}`)
 
     mock.restore()
     await hub.close()

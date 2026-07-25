@@ -30,6 +30,10 @@ export interface EventLogOps {
   byTask(taskId: string): Promise<EventRecord[]>
   byTaskSince(taskId: string, afterSeq: number): Promise<EventRecord[]>
   after(afterSeq: number, kinds?: EventKind[]): Promise<EventRecord[]>
+  // Oldest surviving seq for this project, or 0 when the log is empty. A cached reader compares it
+  // against what it still believes in: history only moves forward when it was TRUNCATED (purge,
+  // delete chat), which no event announces.
+  earliestSeq(): Promise<number>
   all(): Promise<EventRecord[]>
 }
 
@@ -94,6 +98,10 @@ const makeOps = (db: Queryable, ctx: LogContext): EventLogOps => {
         .orderBy(asc(events.seq))
       return rows.map(toRecord)
     },
+    async earliestSeq() {
+      const rows = await db.select({ seq: events.seq }).from(events).where(scoped).orderBy(asc(events.seq)).limit(1)
+      return rows[0]?.seq ?? 0
+    },
     async after(afterSeq, kinds) {
       const rows = await db.select().from(events)
         .where(and(scoped, gt(events.seq, afterSeq), kinds ? inArray(events.kind, kinds) : undefined))
@@ -139,6 +147,10 @@ export class EventLog implements EventLogOps {
   }
   after(afterSeq: number, kinds?: EventKind[]): Promise<EventRecord[]> {
     return this.ops.after(afterSeq, kinds)
+  }
+
+  earliestSeq(): Promise<number> {
+    return this.ops.earliestSeq()
   }
   all(): Promise<EventRecord[]> {
     return this.ops.all()

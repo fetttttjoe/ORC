@@ -2,8 +2,8 @@ import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync } from '
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { Command, InvalidArgumentError } from 'commander'
-import { EDGE_DIRECTION, EVENT_KIND, LINK_KINDS, MEMORY_ACCESS, NOTE_TIERS, NoteTier, parseLinkSpec, PlanDraft, RUN_OUTCOME, STRATEGY, TASK_STATUS, LinkKind, slugId, type Analyzer, type RunOutcome, type EventRecord, type MemoryLink, type ExecutionPort, type Plan, type RunHandle } from '@orc/contracts'
-import { openStorage, Kernel, fold, grantExtensionTrust, grantMcpTrust, initializeProject, isExtensionTrusted, isMcpTrusted, loadConfig, loadTrust, migrateDatabase, requireProject, taskUsage, type EventLog, type OrcConfig, type PluginHost, type ProjectConfig, type Storage } from '@orc/kernel'
+import { EDGE_DIRECTION, EVENT_KIND, LINK_KINDS, MEMORY_ACCESS, NOTE_TIERS, NoteTier, parseLinkSpec, PlanDraft, RUN_OUTCOME, STRATEGY, TASK_STATUS, TERMINAL_TASK_STATUS, LinkKind, slugId, type Analyzer, type RunOutcome, type EventRecord, type MemoryLink, type ExecutionPort, type Plan, type RunHandle } from '@orc/contracts'
+import { openStorage, Kernel, fold, subtreeTaskIds, grantExtensionTrust, grantMcpTrust, initializeProject, isExtensionTrusted, isMcpTrusted, loadConfig, loadTrust, migrateDatabase, requireProject, taskUsage, type EventLog, type OrcConfig, type PluginHost, type ProjectConfig, type Storage } from '@orc/kernel'
 import { createVaultProjector, parsePlanFile } from '@orc/vault-projector'
 import { consolidateTask, probeMemory, staleNotes, DEFAULT_SWEEP_DAYS } from '@orc/memory'
 import { openMemory } from './memory-open'
@@ -436,7 +436,26 @@ export function buildProgram(
       return
     }
     console.log(`run finished: ${result.outcome}`)
+    // A task that split is not done when ITS steps are: finalize_plan hands the work to child
+    // tasks whose runs were started by this process. Leaving now stranded them — the child sat
+    // `running` with no executor until someone ran `orc run <childId>` by hand. Follow the subtree.
+    for (const child of await unfinishedDescendants(taskId)) {
+      console.log(`following child run ${child}`)
+      await driveRun(child, await (await needPort()).startRun(child))
+      return
+    }
     if (result.outcome !== RUN_OUTCOME.done) throw new CommandFailure(1)
+  }
+
+  // Descendants of `taskId` that are not in a terminal state, nearest first.
+  const unfinishedDescendants = async (taskId: string): Promise<string[]> => {
+    const state = await kernel.state()
+    return subtreeTaskIds(state, taskId)
+      .filter(id => id !== taskId)
+      .filter(id => {
+        const status = state.tasks.get(id)?.status
+        return status !== undefined && !TERMINAL_TASK_STATUS.has(status)
+      })
   }
 
   const execAction = (start: (port: ExecutionPort, taskId: string, cwd?: string) => Promise<RunHandle>, intro: (h: RunHandle, taskId: string) => string) =>
@@ -512,7 +531,7 @@ export function buildProgram(
       if (plugin) {
         console.log(`project: ${plugin.config.projectName} (${plugin.config.projectId})`)
         const health = await probeMemory(plugin.config, plugin.log)
-        console.log(health.healthy ? 'memory: healthy' : `memory: degraded (${health.reason})`)
+        console.log(`memory: ${health.state}${health.reason ? ` (${health.reason})` : ''}`)
       }
       console.log(`${task.id}  ${task.status}  ${task.title}`)
       const plan = state.plans.get(taskId)?.versions.at(-1)

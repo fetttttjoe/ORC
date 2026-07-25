@@ -45,9 +45,13 @@ export function createMcpHub(
   isTrusted: (serverId: string, cfg: McpServerConfig) => boolean,
 ): McpHub {
   const clients = new Map<string, Client>()
+  let closed = false
   const toolCache = new Map<string, ToolInfo[]>()
 
   async function ensureClient(serverId: string): Promise<Client> {
+    // Without this, the per-call respawn would resurrect a server after shutdown and leak the
+    // process; resolve() clears the flag, so deliberate reuse still works.
+    if (closed) throw new Error('MCP hub is closed')
     const cfg = servers[serverId]
     if (!cfg) throw new Error(`undeclared MCP server '${serverId}' (declare it in .orc/config.json mcpServers)`)
     if (!isTrusted(serverId, cfg)) throw new Error(`MCP server '${serverId}' is not trusted (orc mcp trust ${serverId})`)
@@ -98,11 +102,14 @@ export function createMcpHub(
 
   return {
     async resolve(refs) {
+      // close() releases the servers; an explicit resolve is intent to use them again. The flag
+      // only stops a STALE tool handle from resurrecting a hub nobody asked to reopen.
+      closed = false
       const out: ResolvedTool[] = []
       const seen = new Set<string>()
       for (const ref of refs) {
         const { serverId, toolName } = parseToolRef(ref)
-        const client = await ensureClient(serverId) // bind the tool to this spawn generation
+        await ensureClient(serverId) // fail fast here if the server is undeclared or untrusted
         const tools = await toolsOf(serverId)
         const tool = tools.find(t => t.name === toolName)
         if (!tool)
@@ -115,16 +122,26 @@ export function createMcpHub(
           name,
           description: tool.description,
           inputSchema: tool.inputSchema,
+          // The client is fetched per CALL, never captured at resolve time. A step resolves its
+          // tools at the start and calls them minutes later; capturing meant a server that died in
+          // between left this closure holding a dead transport, so every later call returned
+          // "Not connected" — observed live on a research step's first web search. One respawn and
+          // retry turns that into a non-event; ensureClient re-checks the trust grant each time, so
+          // a respawn can never reach a server the operator has not declared and trusted.
           execute: async input => {
-            try {
-              const r = await client.callTool({ name: toolName, arguments: isRecord(input) ? input : {} })
-              return { output: r.content, isError: r.isError === true }
-            } catch (err) {
-              // transport death is a tool error the model can react to; drop the client
-              // so the next resolve lazily respawns (spec D9)
-              await dropClient(serverId)
-              return { output: { error: errorMessage(err) }, isError: true }
+            const args = isRecord(input) ? input : {}
+            let last: unknown
+            for (let attempt = 1; attempt <= 2; attempt++) {
+              try {
+                const client = await ensureClient(serverId)
+                const r = await client.callTool({ name: toolName, arguments: args })
+                return { output: r.content, isError: r.isError === true }
+              } catch (err) {
+                last = err
+                await dropClient(serverId) // a dead transport must never be reused
+              }
             }
+            return { output: { error: errorMessage(last) }, isError: true }
           },
         })
       }
@@ -134,6 +151,7 @@ export function createMcpHub(
       return (await toolsOf(serverId)).map(t => ({ name: t.name, description: t.description }))
     },
     async close() {
+      closed = true
       for (const id of [...clients.keys()]) await dropClient(id)
     },
   }

@@ -7,7 +7,7 @@ import { artifactNodeId, noteNodeId, stepNodeId } from '@orc/ui-core/graph'
 import type { NoteAuthoringDraft, NoteRef } from '@orc/contracts'
 import { el } from './ui/el'
 import { Badge, Btn, Card, Empty, KV, Link, openDialog, Pre, statusTone } from './ui/components'
-import { formatLinkSpec, parseLinkSpec } from '@orc/contracts'
+import { type MemoryNote, noteLabel, type NoteView, formatLinkSpec, parseLinkSpec } from '@orc/contracts'
 
 interface TaskDetail {
   task: { id: string; title: string; status: string; spec: string; createdAt: string; parentId: string | null }
@@ -19,8 +19,11 @@ interface StepDetail {
   step: { id: string; title: string; role: string; instructions: string; modelRef: string; maxIterations: number }
   run: { status: string; attempt: number; iterations: number; output: string | null; failure: { class: string; message: string } | null } | null
 }
+// `note` is the contract's own shape, not a hand-copied one. The copy this replaces declared
+// `kind`, `rules` and `sources` as always-present, which stopped being true when notes split into
+// tiers — so opening a plan or episodic note read `.length` off undefined and killed the view.
 interface NoteDetail {
-  note: { id: string; scope: string; title: string; kind: string; summary: string; body: string; tags: string[]; links: Array<{ id: string; kind: string }>; sources: Array<{ url: string; title?: string }>; rules: string[] }
+  note: MemoryNote
   author: { source: string; taskId?: string | null; model?: string }
   hits: number
   backlinks: Array<{ id: string; scope: string; title: string; kind: string }>
@@ -95,30 +98,34 @@ export function renderDetail(nodeId: string, d: unknown, go: Go, notes?: NoteDet
   }
   if (d !== null && typeof d === 'object' && 'note' in d) {
     const n = d as NoteDetail
-    return el('div', {}, Card([n.note.title, Badge(n.note.kind, 'purple'), Badge(`${n.hits} hits`, 'muted')],
+    const note = n.note
+    // core fields are guaranteed by the note itself; the tier-specific ones are read through the
+    // shared view, which is what makes their absence explicit instead of a crash
+    const tierFields: NoteView = note
+    return el('div', {}, Card([note.title, Badge(noteLabel(note), 'purple'), Badge(`${n.hits} hits`, 'muted')],
       KV([
-        ['id', `${n.note.scope}/${n.note.id}`],
+        ['id', `${note.scope}/${note.id}`],
         ['author', n.author.taskId
           ? links([`${n.author.model ?? 'agent'} · `, Link(`task ${n.author.taskId.slice(0, 8)}`, () => go(n.author.taskId!))])
           : n.author.source],
-        ...(n.note.tags.length ? [['tags', n.note.tags.join(', ')] as [string, string]] : []),
-        ...(n.note.links.length
-          ? [['links', links(n.note.links.map(l => Link(`${l.kind} → ${l.id}`, () => go(noteNodeId(n.note.scope, l.id)))))] as [string, HTMLElement]] : []),
+        ...(note.tags.length ? [['tags', note.tags.join(', ')] as [string, string]] : []),
+        ...(note.links.length
+          ? [['links', links(note.links.map(l => Link(`${l.kind} → ${l.id}`, () => go(noteNodeId(note.scope, l.id)))))] as [string, HTMLElement]] : []),
         ...(n.backlinks.length
           ? [['linked by', links(n.backlinks.map(b => Link(b.id, () => go(noteNodeId(b.scope, b.id)))))] as [string, HTMLElement]] : []),
       ]),
-      n.note.summary ? el('div', {}, n.note.summary) : null,
-      n.note.body ? Pre(n.note.body) : null,
-      n.note.rules.length ? Card(['rules'], KV(n.note.rules.map((r, i) => [`#${i + 1}`, r]))) : null,
-      n.note.sources.length ? Card(['sources'], KV(n.note.sources.map(s => [s.title ?? 'link', s.url]))) : null,
+      note.summary ? el('div', {}, note.summary) : null,
+      note.body ? Pre(note.body) : null,
+      tierFields.rules?.length ? Card(['rules'], KV(tierFields.rules.map((r, i) => [`#${i + 1}`, r]))) : null,
+      tierFields.sources?.length ? Card(['sources'], KV(tierFields.sources.map(s => [s.title ?? 'link', s.url]))) : null,
     ),
-      ...(notes && n.note.scope === 'project' ? [el('div', { class: 'row-split' },
-        Btn('edit', () => openDialog(`edit '${n.note.id}'`, [
-          { name: 'title', label: 'title', value: n.note.title },
-          { name: 'summary', label: 'summary', value: n.note.summary },
-          { name: 'body', label: 'body', kind: 'textarea', value: n.note.body },
-          { name: 'tags', label: 'tags', value: n.note.tags.join(', ') },
-          { name: 'links', label: 'links (kind:note-id, …)', value: formatLinkSpec(n.note.links) },
+      ...(notes && note.scope === 'project' ? [el('div', { class: 'row-split' },
+        Btn('edit', () => openDialog(`edit '${note.id}'`, [
+          { name: 'title', label: 'title', value: note.title },
+          { name: 'summary', label: 'summary', value: note.summary },
+          { name: 'body', label: 'body', kind: 'textarea', value: note.body },
+          { name: 'tags', label: 'tags', value: note.tags.join(', ') },
+          { name: 'links', label: 'links (kind:note-id, …)', value: formatLinkSpec(note.links) },
         ], 'save', async v => {
           if (!v.title?.trim()) throw new Error('title is required')
           // explicit ''/[] (not omission): an emptied field is an intentional CLEAR —

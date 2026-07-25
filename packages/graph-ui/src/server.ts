@@ -1,6 +1,6 @@
 import { stepCountIs, streamText, type LanguageModel } from 'ai'
 import { z } from 'zod'
-import { errorMessage, isRecord, NoteAuthoringDraft, NoteRef, PlanDraft, type CopilotExchangePayload, type Usage } from '@orc/contracts'
+import { MEMORY_HEALTH, type MemoryHealth, errorMessage, isRecord, NoteAuthoringDraft, NoteRef, PlanDraft, type CopilotExchangePayload, type Usage } from '@orc/contracts'
 import { buildCopilotTools, copilotSystemPrompt, createProjectSessions, emptyPatch, type CopilotMode, type OrcActions, type ProjectEntry, type ProjectSessions, type SessionUpdate } from '@orc/ui-core'
 import index from '../page/index.html'
 
@@ -92,7 +92,7 @@ export function startGraphUi(opts: {
   copilot?: CopilotConfig
   defaultCwd?: string
   // degraded-state probe (memory read model, projector lag) — absent = health unknown
-  health?: () => Promise<{ memory: { healthy: boolean; reason?: string } }>
+  health?: () => Promise<{ memory: MemoryHealth }>
   // P6 interaction journaling: append one copilot_exchange event per completed exchange — the
   // conversation that caused an action is part of the record. Absent = exchanges unrecorded.
   appendExchange?: (x: { payload: CopilotExchangePayload; usage: Usage | null }) => Promise<void>
@@ -242,7 +242,7 @@ export function startGraphUi(opts: {
       case '/api/health':
         // never throws: a probe failure IS the degraded signal, not a 500
         return Response.json(opts.health
-          ? await opts.health().catch(err => ({ memory: { healthy: false, reason: errorMessage(err) } }))
+          ? await opts.health().catch(err => ({ memory: { state: MEMORY_HEALTH.unreachable, pending: 0, reason: errorMessage(err) } }))
           : { memory: null })
       case '/api/models': {
         // the event-sourced catalog first (works read-only, no provider APIs in the request

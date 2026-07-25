@@ -1,4 +1,4 @@
-import { type EmbeddingProvider, type MemoryAuthor, type MemoryStore, type ResolvedTool } from '@orc/contracts'
+import { MEMORY_HEALTH, type EmbeddingProvider, type MemoryAuthor, type MemoryHealth, type MemoryStore, type ResolvedTool } from '@orc/contracts'
 import { errorMessage } from '@orc/contracts'
 import { EventLog, type ProjectConfig } from '@orc/kernel'
 import { openKnowledge, type Knowledge } from './knowledge'
@@ -47,18 +47,17 @@ export async function createMemory(opts: { log: EventLog; config: ProjectConfig;
 }
 
 // healthy = reachable AND caught up with the log's memory events
-export async function probeMemory(
-  config: ProjectConfig,
-  log: EventLog,
-): Promise<{ healthy: true } | { healthy: false; reason: string }> {
+export async function probeMemory(config: ProjectConfig, log: EventLog): Promise<MemoryHealth> {
   let knowledge: Knowledge | undefined
   try {
     knowledge = await openKnowledge(config)
     const cursor = await knowledge.getCursor()
     const pending = await log.countAfter(cursor, KNOWLEDGE_KINDS)
-    return pending === 0 ? { healthy: true } : { healthy: false, reason: `${pending} unapplied events` }
+    return pending === 0
+      ? { state: MEMORY_HEALTH.ok, pending }
+      : { state: MEMORY_HEALTH.catchingUp, pending, reason: `${pending} event(s) not yet projected` }
   } catch (err) {
-    return { healthy: false, reason: `unreachable: ${errorMessage(err)}` }
+    return { state: MEMORY_HEALTH.unreachable, pending: 0, reason: errorMessage(err) }
   } finally {
     // close even if getCursor/countAfter threw after a successful open (same leak class as open())
     await knowledge?.close().catch(() => {})

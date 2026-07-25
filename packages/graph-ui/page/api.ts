@@ -1,3 +1,4 @@
+import { type MemoryHealth } from '@orc/contracts'
 // The ONE http boundary of the page. Every request — reads, actions, streams — goes through
 // here: URL building, token handling, JSON parsing, and the error policy live in this file and
 // nowhere else. Consumers receive typed data or typed nulls; failures route through the
@@ -125,7 +126,7 @@ export const api = {
 
   projects: () => get<Project[]>('projects', {}),
   // memory: null = server has no probe (launched outside a project) — render nothing
-  health: () => get<{ memory: { healthy: boolean; reason?: string } | null }>('health', {}),
+  health: () => get<{ memory: MemoryHealth | null }>('health', {}),
   models: (project?: string) => get<string[]>('models', { project }),
   graph: (project: string) => get<GraphSnapshot>('graph', { project }),
   node: (project: string, id: string) => get<unknown | null>('node', { project, id }, { nullOn404: true }),

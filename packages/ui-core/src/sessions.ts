@@ -98,7 +98,27 @@ export function createProjectSessions(opts: {
     }
     // ponytail: refold-per-event is O(events) per event — swap in an incremental kernel
     // applyEvent behind this same interface when a log gets big
-    session.unsubscribe = await storage.events.subscribe({ fromSeq: session.seq }, e => {
+    // The cached log is append-only in memory, but the real one can be TRUNCATED out of band —
+    // `orc purge`, deleting a chat — and no event announces that. Without this the server keeps
+    // folding deleted history: the UI shows tasks and notes that no longer exist, and cannot
+    // recover until the process restarts. One indexed lookup per event, against the oldest row we
+    // still believe in; when it is gone, the cache is rebuilt from the log and the diff removes
+    // the ghosts like any other change.
+    const reload = async (): Promise<void> => {
+      session.events = await storage.events.all()
+      session.state = fold(session.events)
+      session.graph = buildGraph(session.state, session.events, { halfLifeDays: opts.halfLifeDays })
+      session.seq = session.events.at(-1)?.seq ?? 0
+    }
+    session.unsubscribe = await storage.events.subscribe({ fromSeq: session.seq }, async e => {
+      const oldest = session.events[0]?.seq ?? 0
+      if (oldest !== 0 && await storage.events.earliestSeq() !== oldest) {
+        const stale = session.graph
+        await reload()
+        const repair = diffGraphs(stale, session.graph)
+        for (const cb of session.subscribers) cb({ seq: session.seq, patch: repair, event: e, summary: summarizeEvent(e) })
+        return
+      }
       session.events.push(e)
       session.state = fold(session.events)
       const next = buildGraph(session.state, session.events, { halfLifeDays: opts.halfLifeDays })

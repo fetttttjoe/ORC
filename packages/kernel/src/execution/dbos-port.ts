@@ -20,7 +20,11 @@ import { projectSuffix, type ProjectConfig } from '../config'
 
 export interface DbosPort extends ExecutionPort {
   launch(): Promise<void>
-  shutdown(): Promise<void>
+  // `drain: false` skips waiting for DBOS to quiesce. A workflow parked at a human gate is not
+  // in-flight work — it is durable state waiting on a person — but DBOS cannot tell the difference
+  // and waits out the gate's poll. A process that is about to exit must not: recovery owns
+  // resumption, and the runtime lock is a session lock the connection releases either way.
+  shutdown(opts?: { drain?: boolean }): Promise<void>
   startChildRun(childTaskId: string): Promise<void>
 }
 
@@ -33,6 +37,7 @@ const runQueue = (depth: number): string => `runs:${depth}`
 // writes durable rows that recovery must replay in order — so this trades nothing but row
 // count. Cancellation responsiveness is independent of it (see the split gate).
 const GATE_POLL_SECONDS = 3_600
+
 
 interface RunArgs { taskId: string; planVersion: number; retryIndex: number; cwd: string | null }
 interface StepArgs { taskId: string; stepId: string; planVersion: number; attempt: number; cwd: string | null }
@@ -565,10 +570,14 @@ export async function createDbosPort(opts: {
     // deregister clears the workflow/queue registries so a fresh port can re-register in the
     // same process — required when >1 port is created per process (integration tests); a no-op
     // at real process exit. (DBOS docs: use deregister when re-registering functions.)
-    shutdown: async () => {
+    shutdown: async ({ drain = true } = {}) => {
       try {
         await router.close()
-        await DBOS.shutdown({ deregister: true })
+        // Draining means "wait for in-flight workflows". A workflow parked at a human gate looks
+        // in-flight to DBOS but is durable state waiting on a person, so draining waits out the
+        // gate's poll — an hour — while holding the runtime lock, which makes the gate unanswerable
+        // by anyone else. A long-lived server drains; a command that is exiting anyway does not.
+        if (drain) await DBOS.shutdown({ deregister: true })
       } finally {
         await runtimeLock?.release()
         runtimeLock = null

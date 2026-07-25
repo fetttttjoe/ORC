@@ -4,7 +4,7 @@ import type { Analyzer, ExecutionPort, OperationSpec, RunHandle, RunOutcome } fr
 import { stepFixture } from '@orc/contracts/fixtures'
 import { openStorage } from '@orc/kernel'
 import { createTestDb, TEST_PROJECT_ID } from '@orc/kernel/test-helpers'
-import { buildProgram, openKernel } from './main'
+import { buildProgram, openKernel, singleStepDraft } from './main'
 
 const dbs: Array<{ drop: () => Promise<void> }> = []
 afterAll(async () => { for (const d of dbs) await d.drop() })
@@ -174,6 +174,31 @@ describe('exec commands', () => {
     expect(lines.join('\n')).toContain('no open feedback question')
     expect(calls).toEqual([])
   })
+
+  // finalize_plan hands the work to a CHILD task whose run this process started. Returning when
+  // the parent's own steps finish stranded it: the child sat `running` with no executor until
+  // someone ran `orc run <childId>` by hand. Observed live on the capability run.
+  it('follows a child task the run spawned instead of leaving it stranded', async () => {
+    const db = await createTestDb()
+    dbs.push(db)
+    const { kernel, storage } = await openKernel(db.url, { projectId: TEST_PROJECT_ID })
+    db.onClose(() => storage.close())
+    const { port, calls } = stubPort('done')
+    const lines: string[] = []
+    spyOn(console, 'log').mockImplementation((...a: unknown[]) => { lines.push(a.join(' ')) })
+    const run = async (...args: string[]) => buildProgram(kernel, async () => port).parseAsync(args, { from: 'user' })
+    const parent = await approvedTask(run, lines)
+    // the split: a child task of the parent, still running when the parent's steps finish
+    const child = (await kernel.createTask({ title: 'split child', spec: '', parentId: parent })).id
+    await kernel.proposePlan(child, singleStepDraft({ title: 'child', spec: '' }, 'fake/m', []))
+    await kernel.approvePlan(child)
+    calls.length = 0
+    lines.length = 0
+
+    await run('run', parent)
+    expect(lines.join('\n')).toContain(`following child run ${child}`)
+    expect(calls.some(c => c.startsWith(`start:${child}`))).toBe(true)
+  }, 20_000)
 
   it('retry and cancel call through', async () => {
     const { run, lines, calls } = await makeCli('done')

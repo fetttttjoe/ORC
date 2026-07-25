@@ -480,6 +480,18 @@ export const MemoryAccessedPayload = z.object({
 })
 export type MemoryAccessedPayload = z.infer<typeof MemoryAccessedPayload>
 
+// Read-model health, as three distinct states rather than one boolean. A model that is BEHIND is a
+// healthy system mid-write — the projector catches up — while an UNREACHABLE store is a real fault.
+// Collapsing them lit the UI's degraded badge on every burst of note writes.
+export const MEMORY_HEALTH = { ok: 'ok', catchingUp: 'catching_up', unreachable: 'unreachable' } as const
+export type MemoryHealthState = (typeof MEMORY_HEALTH)[keyof typeof MEMORY_HEALTH]
+
+export interface MemoryHealth {
+  state: MemoryHealthState
+  pending: number // knowledge events not yet applied to the read model
+  reason?: string
+}
+
 export interface MemoryStore {
   // idempotencyKey: deterministic writers (tool-driven writes inside an operation) pass one so
   // a crash retry of the surrounding effect cannot append the note event twice
