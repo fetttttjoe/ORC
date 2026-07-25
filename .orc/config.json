@@ -1,6 +1,7 @@
 {
   "projectId": "e4c293ed-f341-43df-aaeb-abf3276c6331",
   "projectName": "orc-sim",
+  "memoryConsolidateModel": "anthropic/claude-haiku-4-5",
   "execAllowlist": [
     "bun test",
     "bun run typecheck"
