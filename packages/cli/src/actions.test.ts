@@ -19,10 +19,11 @@ const writtenNote = (payload: unknown): { id: string; title: string } => {
   return { id: payload.note.id, title: payload.note.title }
 }
 
-const stubPort: ExecutionPort = {
-  startRun: async () => ({ workflowId: 'w1', wait: async () => 'done' as const }),
-  retry: async () => { throw new Error('unused') },
-  cancelRun: async () => {},
+// The actions layer holds no execution port: it records asks and a supervisor executes them, so
+// what a test injects is the promise that one exists — counted, to prove every write path asks.
+function stubRuntime() {
+  const ensured = { count: 0 }
+  return { ensured, ensureRuntime: async () => { ensured.count++ } }
 }
 
 async function setup(listModels?: () => Promise<string[]>) {
@@ -30,8 +31,9 @@ async function setup(listModels?: () => Promise<string[]>) {
   dbs.push(db)
   const storage = await openStorage(db.url, { projectId: TEST_PROJECT_ID })
   const kernel = new Kernel(storage.events)
+  const { ensured, ensureRuntime } = stubRuntime()
   const actions = buildOrcActions({
-    kernel, needPort: async () => stubPort, listModels,
+    kernel, ensureRuntime, listModels,
     // newProject/renameProject/purge need only urls + storage from the plugin context; the
     // bogus surreal url makes purge's memory rebuild report instead of hang, and the derived
     // system-db url points at a never-created database (the common pre-first-run state)
@@ -47,7 +49,7 @@ async function setup(listModels?: () => Promise<string[]>) {
       log: storage.events, storage,
     },
   })
-  return { kernel, actions, url: db.url, close: () => storage.close() }
+  return { kernel, actions, ensured, url: db.url, close: () => storage.close() }
 }
 
 describe('model validation at the action boundary', () => {
@@ -79,7 +81,7 @@ describe('writeNote/deleteNote guards', () => {
     const { kernel, actions, close } = await setup() // setup() wires a real plugin behind actions
     await expect(actions.writeNote({ id: 'ui-project-name', title: 'x' })).rejects.toThrow(/reserved/)
     await expect(actions.deleteNote('ui-project-dir')).rejects.toThrow(/reserved/)
-    const bare = buildOrcActions({ kernel, needPort: async () => stubPort }) // no plugin
+    const bare = buildOrcActions({ kernel, ensureRuntime: stubRuntime().ensureRuntime }) // no plugin
     await expect(bare.writeNote({ id: 'x', title: 'x' })).rejects.toThrow(/project context/)
     await close()
   })
@@ -130,11 +132,34 @@ describe('purgeProject', () => {
 
 describe('cwd validation at the action boundary', () => {
   it('an invented cwd dies at creation/run — never 4 retries deep in the executor', async () => {
-    const { kernel, actions, close } = await setup()
+    const { kernel, actions, ensured, close } = await setup()
     await expect(actions.newTask({ title: 'g', spec: 'do it', grounded: { modelRef: 'any/model', cwd: '/workspace/orc-sim' } }))
       .rejects.toThrow(/cwd is not an existing directory: \/workspace\/orc-sim/)
     const t = await kernel.createTask({ title: 'q', spec: '' })
     await expect(actions.run(t.id, '/no/such/dir')).rejects.toThrow(/cwd is not an existing directory/)
+    // and it died before anything was recorded or spawned — a bad cwd must not become an ask
+    // every supervisor that boots picks up and fails on again
+    expect([ensured.count, (await kernel.eventsFor(t.id)).some(e => e.kind === EVENT_KIND.run_requested)]).toEqual([0, false])
+    await close()
+  })
+})
+
+describe('the MCP and web doors record the ask; the supervisor executes it', () => {
+  it('run guarantees a supervisor, then appends run_requested with the cwd it validated', async () => {
+    const { kernel, actions, ensured, close } = await setup()
+    const t = await kernel.createTask({ title: 'door', spec: '' })
+    expect(await actions.run(t.id, process.cwd())).toEqual({ requested: true })
+    expect(ensured.count).toBe(1)
+    const requested = (await kernel.eventsFor(t.id)).find(e => e.kind === EVENT_KIND.run_requested)
+    expect(requested?.payload).toEqual({ taskId: t.id, cwd: process.cwd(), retry: false })
+    await close()
+  })
+
+  it('retry refuses a task that is not blocked, before recording or spawning anything', async () => {
+    const { kernel, actions, ensured, close } = await setup()
+    const t = await kernel.createTask({ title: 'door', spec: '' })
+    await expect(actions.retry(t.id)).rejects.toThrow(/only a blocked task can be retried/)
+    expect([ensured.count, (await kernel.eventsFor(t.id)).some(e => e.kind === EVENT_KIND.run_requested)]).toEqual([0, false])
     await close()
   })
 })

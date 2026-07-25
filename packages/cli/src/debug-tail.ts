@@ -2,14 +2,13 @@
 // kinds). Lives here (not /tmp) so it resolves the @orc/kernel workspace dep. Separate process
 // from `orc run` — subscribes over the same event log via LISTEN/NOTIFY.
 //   Run: bun packages/cli/src/debug-tail.ts <taskId>
-import { readFileSync } from 'node:fs'
-import { openStorage } from '@orc/kernel'
+import { loadConfig, openStorage, requireProject } from '@orc/kernel'
 import { summarizeEvent } from '@orc/ui-core'
 import type { EventRecord } from '@orc/contracts'
 
 const taskId = process.argv[2]
 if (!taskId) { console.error('usage: debug-tail <taskId>'); process.exit(1) }
-const projectId = (JSON.parse(readFileSync('.orc/config.json', 'utf8')) as { projectId: string }).projectId
+const projectId = requireProject(loadConfig()).projectId
 const url = process.env.ORC_DATABASE_URL ?? 'postgresql://postgres:orc@localhost:5433/orc'
 const storage = await openStorage(url, { projectId })
 

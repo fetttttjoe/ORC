@@ -16,10 +16,11 @@ const link = (id: string, kind: MemoryLink['kind']): MemoryLink => ({ id, kind }
 // that still read the async read model could not possibly work.
 function fakeKernel(
   notes: PlanNote[], calls: unknown[] = [], approvedHash: string | null = planGraphHash(notes),
-): Pick<import('../kernel').Kernel, 'proposeSplit' | 'listPlanNotes' | 'approvedPlanHash'> {
+): Pick<import('../kernel').Kernel, 'proposeSplit' | 'listPlanNotes' | 'approvedPlanHash' | 'planNotesChangedSince'> {
   return {
     listPlanNotes: async () => notes,
-    approvedPlanHash: async () => approvedHash,
+    approvedPlanHash: async () => (approvedHash === null ? null : { hash: approvedHash, seq: 1 }),
+    planNotesChangedSince: async () => [],
     proposeSplit: async (input: unknown) => { calls.push(input); return { splitId: 'sp', childTaskId: 'c', gated: false } },
   }
 }
@@ -80,7 +81,7 @@ describe('finalize_plan tool', () => {
       ...base,
       approvedPlanHash: async (_taskId: string, runToken: string) => {
         seen.push(runToken)
-        return runToken.endsWith(':a2') ? planGraphHash(notes) : null
+        return runToken.endsWith(':a2') ? { hash: planGraphHash(notes), seq: 1 } : null
       },
     }
     const result = await finalizePlanTool({ kernel, config, p }).execute({}, 'call_1')
@@ -89,7 +90,7 @@ describe('finalize_plan tool', () => {
   })
 
   it('errors (never throws) when no masterplan note exists in scope', async () => {
-    const kernel = { listPlanNotes: async () => [], approvedPlanHash: async () => null, proposeSplit: async () => { throw new Error('should not be called') } }
+    const kernel = { listPlanNotes: async () => [], approvedPlanHash: async () => null, planNotesChangedSince: async () => [], proposeSplit: async () => { throw new Error('should not be called') } }
     const tool = finalizePlanTool({ kernel, config, p })
     const r = await tool.execute({}, 'call_x')
     expect(r.isError).toBe(true)
@@ -109,6 +110,22 @@ describe('finalize_plan tool', () => {
     expect(calls).toHaveLength(0)
   })
 
+  it('a post-approval edit names the notes that changed, not just that something did', async () => {
+    const notes = [
+      note({ id: 'masterplan', title: 'M', links: [link('a', 'decomposes_into')] }),
+      note({ id: 'a', title: 'A' }),
+    ]
+    const kernel = {
+      ...fakeKernel(notes),
+      approvedPlanHash: async () => ({ hash: 'a'.repeat(64), seq: 41 }), // stale: the graph moved on
+      planNotesChangedSince: async (_taskId: string, seq: number) => (seq === 41 ? ['a'] : []),
+    }
+    const r = await finalizePlanTool({ kernel, config, p }).execute({}, 'call_1')
+    expect(r.isError).toBe(true)
+    expect(JSON.stringify(r.output)).toContain('changed after approval')
+    expect(JSON.stringify(r.output)).toContain("'a'")
+  })
+
   it('surfaces a kernel rejection as isError, never a throw', async () => {
     const notes = [
       note({ id: 'masterplan', title: 'M', links: [link('a', 'decomposes_into')] }),
@@ -116,7 +133,8 @@ describe('finalize_plan tool', () => {
     ]
     const kernel = {
       listPlanNotes: async () => notes,
-      approvedPlanHash: async () => planGraphHash(notes),
+      approvedPlanHash: async () => ({ hash: planGraphHash(notes), seq: 1 }),
+      planNotesChangedSince: async () => [],
       proposeSplit: async () => { throw new Error('split exceeds max depth 3') },
     }
     const tool = finalizePlanTool({ kernel, config, p })

@@ -187,6 +187,18 @@ describe('Kernel lifecycle', () => {
     expect((await k.getTask(t.id))!.status).toBe(TASK_STATUS.approved)
   })
 
+  it('createGroundedTask applies the project iteration budget to BOTH steps — subplans inherit the plan step', async () => {
+    const db = await createTestDb()
+    dbs.push(db)
+    const analyze: PlanStep = stepFixture({ id: 'analyze', role: 'scout', maxIterations: 30 })
+    const analyzers = new Map<string, Analyzer>([['agent-analyzer', { id: 'agent-analyzer', analysisStep: () => analyze }]])
+    const storage = await openStorage(db.url, { projectId: TEST_PROJECT_ID })
+    db.onClose(() => storage.close())
+    const k = new Kernel(storage.events, undefined, analyzers)
+    const t = await k.createGroundedTask({ title: 'x', spec: 's', modelRef: 'fake/m', analyzerRef: 'agent-analyzer', maxIterations: 60 })
+    expect((await k.getPlan(t.id))!.steps.map(s => s.maxIterations)).toEqual([60, 60])
+  })
+
   it('createGroundedTask stores the spec verbatim and hands it to the analyzer — the title never substitutes', async () => {
     const db = await createTestDb()
     dbs.push(db)
@@ -263,6 +275,41 @@ describe('Kernel lifecycle', () => {
     const again = await k.proposeSplit(args)
     expect(again.childTaskId).toBe(r.childTaskId)
     expect((await k.listTasks()).filter(t => t.parentId === parent.id)).toHaveLength(1)
+  })
+
+  it('openFeedbackInSubtree finds a question parked on a DESCENDANT, not only on the root', async () => {
+    const { k, log } = await freshKernelAndLog()
+    const parent = await k.createTask({ title: 'P', spec: 'parent' })
+    await toRunning(log, parent.id)
+    const child = await k.proposeSplit({
+      parentTaskId: parent.id, stepId: 's1', runToken: `step:${parent.id}:s1:a1`, toolCallId: 'call_1',
+      title: 'C', spec: '',
+      plan: { steps: [{ id: 'w1', role: 'worker', title: 'w', instructions: 'do', dependsOn: [], skillRefs: [], toolRefs: [] }] },
+      parentStep: { executorRef: 'api-loop', modelRef: 'fake/m', maxIterations: 5 },
+      policy: ApprovalPolicy.parse({ default: 'auto' }), maxDepth: 3,
+    })
+    expect(await k.openFeedbackInSubtree(parent.id)).toBeNull()
+    await log.append({
+      taskId: child.childTaskId, stepId: 'w1', runToken: `step:${child.childTaskId}:w1:a1`,
+      kind: EVENT_KIND.feedback_requested, payload: { question: 'may I overwrite it?', topic: 'confirm' },
+    })
+    expect(await k.openFeedbackInSubtree(parent.id))
+      .toMatchObject({ taskId: child.childTaskId, question: 'may I overwrite it?', topic: 'confirm' })
+  })
+
+  it('gatedChildren names the descendants a manual policy parked, and only those', async () => {
+    const { k, log } = await freshKernelAndLog()
+    const parent = await k.createTask({ title: 'P', spec: 'parent' })
+    await toRunning(log, parent.id)
+    const base = {
+      parentTaskId: parent.id, stepId: 's1', runToken: `step:${parent.id}:s1:a1`, spec: '',
+      plan: { steps: [{ id: 'w1', role: 'worker', title: 'w', instructions: 'do', dependsOn: [], skillRefs: [], toolRefs: [] }] },
+      parentStep: { executorRef: 'api-loop', modelRef: 'fake/m', maxIterations: 5 },
+      maxDepth: 3,
+    }
+    const gated = await k.proposeSplit({ ...base, toolCallId: 'call_1', title: 'needs approval', policy: ApprovalPolicy.parse({}) })
+    await k.proposeSplit({ ...base, toolCallId: 'call_2', title: 'auto', policy: ApprovalPolicy.parse({ default: 'auto' }) })
+    expect(await k.gatedChildren(parent.id)).toEqual([{ id: gated.childTaskId, title: 'needs approval' }])
   })
 
   it('proposeSplit: rejects a cross-attempt childTaskId collision (same toolCallId, new runToken)', async () => {
@@ -394,8 +441,8 @@ describe('Kernel lifecycle', () => {
     await log.append({ taskId: task.id, stepId: 'plan', runToken: runA, kind: EVENT_KIND.feedback_provided, payload: { topic: 'a', text: 'approve', author: { source: 'cli' }, planHash: 'a'.repeat(64) } })
     await log.append({ taskId: task.id, stepId: 'plan', runToken: runB, kind: EVENT_KIND.feedback_provided, payload: { topic: 'b', text: 'approve', author: { source: 'cli' }, planHash: 'b'.repeat(64) } })
 
-    expect(await k.approvedPlanHash(task.id, runA)).toBe('a'.repeat(64))
-    expect(await k.approvedPlanHash(task.id, runB)).toBe('b'.repeat(64))
+    expect(await k.approvedPlanHash(task.id, runA)).toMatchObject({ hash: 'a'.repeat(64) })
+    expect(await k.approvedPlanHash(task.id, runB)).toMatchObject({ hash: 'b'.repeat(64) })
     expect(await k.approvedPlanHash(task.id, `step:${task.id}:plan:a3`)).toBeNull()
   })
 
@@ -552,5 +599,36 @@ describe('Kernel lifecycle', () => {
     // absent, not '': the expansion inherits via `?? parentStep.modelRef`, which '' would defeat
     expect(steps.find(s => s.id === 'cheap')).not.toHaveProperty('modelRef')
     expect(steps.find(s => s.id === 'hard')!.modelRef).toBe('anthropic/claude-opus-5')
+  })
+
+  it('requestRun records the ask, with the cwd override the supervisor cannot derive', async () => {
+    const k = await freshKernel()
+    const t = await k.createTask({ title: 'x', spec: 's' })
+    await k.proposePlan(t.id, draft())
+    await k.approvePlan(t.id)
+    await k.requestRun(t.id, { cwd: '/tree' })
+    const e = (await k.eventsFor(t.id)).find(x => x.kind === EVENT_KIND.run_requested)!
+    expect(PAYLOAD_SCHEMAS.run_requested.parse(e.payload)).toEqual({ taskId: t.id, cwd: '/tree', retry: false })
+  })
+
+  it('requestRun refuses a task that does not exist, so the event can never name a ghost', async () => {
+    const k = await freshKernel()
+    await expect(k.requestRun('ghost')).rejects.toThrow(/no task/)
+  })
+
+  it('cancelSubtree stamps the whole subtree cancelled, so a client can cancel without a port', async () => {
+    const { k, log } = await freshKernelAndLog()
+    const parent = await k.createTask({ title: 'P', spec: '' })
+    await toRunning(log, parent.id)
+    const child = await k.proposeSplit({
+      parentTaskId: parent.id, stepId: 's1', runToken: `step:${parent.id}:s1:a1`, toolCallId: 'call_1',
+      title: 'C', spec: '',
+      plan: { steps: [{ id: 'w1', role: 'worker', title: 'w', instructions: 'do', dependsOn: [], skillRefs: [], toolRefs: [] }] },
+      parentStep: { executorRef: 'api-loop', modelRef: 'fake/m', maxIterations: 5 },
+      policy: ApprovalPolicy.parse({ default: 'auto' }), maxDepth: 3,
+    })
+    expect((await k.cancelSubtree(parent.id)).sort()).toEqual([parent.id, child.childTaskId].sort())
+    expect((await k.getTask(parent.id))?.status).toBe(TASK_STATUS.cancelled)
+    expect((await k.getTask(child.childTaskId))?.status).toBe(TASK_STATUS.cancelled)
   })
 })

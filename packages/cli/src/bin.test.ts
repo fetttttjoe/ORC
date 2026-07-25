@@ -71,9 +71,8 @@ export default {
   },
 }
 `)
-    const configPath = path.join(cwd, '.orc', 'config.json')
-    const config = JSON.parse(readFileSync(configPath, 'utf8'))
-    writeFileSync(configPath, JSON.stringify({ ...config, extensions: ['slow-extension.ts'] }))
+    // settings only — `orc init` writes identity to .orc/identity.json and never touches this file
+    writeFileSync(path.join(cwd, '.orc', 'config.json'), JSON.stringify({ extensions: ['slow-extension.ts'] }))
     grantExtensionTrust('slow-extension.ts', cwd)
 
     const result = await runBin(cwd, ['new', 'hook task'], env)

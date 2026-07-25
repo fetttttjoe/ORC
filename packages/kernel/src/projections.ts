@@ -188,6 +188,10 @@ export function fold(events: EventRecord[]): State {
         if (t) state.tasks.set(p.data.taskId, { ...t, status: p.data.to })
         break
       }
+      case EVENT_KIND.run_requested:
+        // A run was explicitly requested. The actual run state (planVersion, workflowId, etc.)
+        // comes from run_started events; this event only carries the caller's overrides (cwd, retry).
+        break
       case EVENT_KIND.run_started: {
         const p = View.run_started.safeParse(e.payload)
         if (!p.success || !e.taskId) break
@@ -321,6 +325,19 @@ export function stepUsage(state: State, taskId: string, stepId: string): Usage {
   return state.stepUsage.get(`${taskId}\u0000${stepId}`) ?? ZERO_USAGE
 }
 
+// Descendants parked at the human approval gate. `task_split` honours the project's approvalPolicy,
+// so under the default (manual) the child sits here while the parent's join_splits recv's on it —
+// and nothing else in the system says so: no event, no output, no outcome. Pure, so the run tail
+// (which refolds anyway) and `orc status` (which already holds a fold) share one rule.
+export function gatedChildren(state: State, rootId: string): Array<{ id: string; title: string }> {
+  return subtreeTaskIds(state, rootId)
+    .filter(id => id !== rootId)
+    .flatMap(id => {
+      const task = state.tasks.get(id)
+      return task?.status === TaskStatus.enum.awaiting_approval ? [{ id, title: task.title }] : []
+    })
+}
+
 export function subtreeTaskIds(state: State, rootId: string): string[] {
   const children = new Map<string, string[]>()
   for (const t of state.tasks.values())
@@ -363,6 +380,14 @@ export function remainingBudget(state: State, taskId: string): number | null {
 // no run in the history ever had one. Shared by retry() and startChildRun() so the rule lives once.
 export function inheritedCwd(runs: RunRecord[] | undefined, override: string | undefined, fallback: string): string {
   return override ?? runs?.findLast(r => r.cwd)?.cwd ?? fallback
+}
+
+// The cwd a run STARTS in: an explicit override, else the world its parent ran in, else the project
+// dir. The router (on an approved child) and the CLI (following a finished parent's children) both
+// start the same child under the same deterministic workflow id, so whichever got there first used
+// to decide the directory — two rules for one thing. This is that one rule.
+export function runCwd(state: State, task: TaskNode, override: string | undefined, fallback: string): string {
+  return inheritedCwd(task.parentId ? state.runs.get(task.parentId) : undefined, override, fallback)
 }
 
 export function pendingSplitForChild(state: State, childTaskId: string): SplitState | undefined {

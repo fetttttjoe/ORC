@@ -215,7 +215,7 @@ async function bringUp() {
         { source: 'agent', taskId: p.taskId, stepId: p.stepId, runToken: p.runToken, executor: p.executor, model: p.model, role: p.role },
         memoryRoleFor(p.role),
       ),
-      splitTool({ kernel, config: { approvalPolicy: config.approvalPolicy, maxDepth: config.maxDepth }, p }),
+      ...splitTool({ kernel, config: { approvalPolicy: config.approvalPolicy, maxDepth: config.maxDepth }, p }),
       readAnnotationsTool({ kernel, p }),
       finalizePlanTool({ kernel, config: { maxDepth: config.maxDepth }, p }),
     ],

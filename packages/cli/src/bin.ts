@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-import { dbosSend, isConnectionRefused, loadConfig, requireProject, type Kernel } from '@orc/kernel'
+import { isConnectionRefused, loadConfig, requireProject, type Kernel } from '@orc/kernel'
 import { errorMessage, HOOK_NAME } from '@orc/contracts'
 import { buildProgram, openKernel, runInit, runMigrate } from './main'
 import { exitCodeFor } from './exit'
@@ -66,7 +66,10 @@ async function main(): Promise<number> {
       redactEnv: config.redactEnv,
       refValidator: plugins.host.refValidator,
       analyzers: plugins.host.analyzers,
-      send: dbosSend,
+      // No `send`: DBOS.send needs DBOS launched in THIS process, and a client command has no
+      // runtime. The supervisor's router already delivers every feedback_provided under the same
+      // idempotency key (the event's own seq), so this was a duplicate of the delivery that works
+      // in both modes — and the only one that could throw where there is nothing to send with.
       onAppend: e => plugins!.host.hooks.dispatch(HOOK_NAME.event_appended, e),
     })
     storage = opened.storage

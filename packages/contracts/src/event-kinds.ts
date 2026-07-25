@@ -8,7 +8,7 @@ import type { Usage } from './execution'
 // about: a payload schema and the kind that names it can be defined in either order.
 export const EventKind = z.enum([
   'task_created', 'plan_proposed', 'plan_edited', 'plan_approved', 'task_status_changed',
-  'run_started', 'step_started', 'skill_loaded', 'agent_call', 'tool_call', 'tool_result',
+  'run_requested', 'run_started', 'step_started', 'skill_loaded', 'agent_call', 'tool_call', 'tool_result',
   'signal_received', 'step_completed', 'step_failed', 'split_proposed', 'split_resolved',
   'operation_started', 'operation_completed', 'operation_failed', 'artifact_produced',
   'memory_written', 'memory_deleted', 'memory_accessed',

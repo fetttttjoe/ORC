@@ -90,4 +90,10 @@ describe('events', () => {
     expect(PAYLOAD_SCHEMAS.artifact_produced.safeParse({ ...good, sha256: 'abc' }).success).toBe(false)
     expect(PAYLOAD_SCHEMAS.artifact_produced.safeParse({ ...good, size: -1 }).success).toBe(false)
   })
+
+  it('run_requested carries the cwd override and the retry flag — what only the caller knows', () => {
+    const parsed = PAYLOAD_SCHEMAS.run_requested.parse({ taskId: 't1', cwd: null, retry: false })
+    expect(parsed).toEqual({ taskId: 't1', cwd: null, retry: false })
+    expect(PAYLOAD_SCHEMAS.run_requested.safeParse({ taskId: 't1' }).success).toBe(false)
+  })
 })

@@ -54,3 +54,19 @@ export const operations = pgTable(
     index('idx_operations_project_run_started').on(t.projectId, t.runToken, t.startedSeq),
   ],
 )
+
+// Which supervisors are alive, and since when. Presence is a heartbeat rather than an exclusive
+// lock because more than one supervisor is a design goal: an exclusive lock cannot express "two
+// are up and both healthy". Rows are per (project, executor); a supervisor refreshes its own.
+export const supervisors = pgTable(
+  'supervisors',
+  {
+    projectId: text('project_id').notNull(),
+    executorId: text('executor_id').notNull(),
+    pid: integer('pid').notNull(),
+    host: text('host').notNull(),
+    startedAt: timestamp('started_at', { withTimezone: true, mode: 'date' }).notNull().defaultNow(),
+    lastSeenAt: timestamp('last_seen_at', { withTimezone: true, mode: 'date' }).notNull().defaultNow(),
+  },
+  t => [primaryKey({ columns: [t.projectId, t.executorId] })],
+)

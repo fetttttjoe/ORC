@@ -18,13 +18,9 @@ export function seedRegistries(config = loadConfig()) {
     ['ollama', createOllamaProvider({ baseUrl: config.ollamaBaseUrl, costOverrides: config.costOverrides['ollama'] ?? {} })],
   ])
   const executors = new Map<string, AgentExecutor<unknown>>([['api-loop', apiLoopExecutor()]])
-  // config-driven iteration budget: the plugin keeps its own fallback; the project's
-  // maxIterations wins at plan-authoring time (approved plans stay frozen).
-  const base = agentAnalyzer()
-  const analyzers = new Map<string, Analyzer>([['agent-analyzer', {
-    ...base,
-    analysisStep: opts => ({ ...base.analysisStep(opts), maxIterations: config.maxIterations }),
-  }]])
+  // The config-driven iteration budget is applied by createGroundedTask, to BOTH template steps —
+  // wrapping only the analyzer here left the plan step (and every subplan that inherits it) at 30.
+  const analyzers = new Map<string, Analyzer>([['agent-analyzer', agentAnalyzer()]])
   return { providers, executors, analyzers }
 }
 
@@ -37,7 +33,7 @@ export async function buildPlugins(config = loadConfig()): Promise<{ host: Plugi
 }
 
 export async function buildRuntime(
-  shared?: { host: PluginHost; hub: McpHub; config?: ProjectConfig; storage?: Storage; kernel?: Kernel },
+  shared?: { host: PluginHost; hub: McpHub; config?: ProjectConfig; storage?: Storage; kernel?: Kernel; executorId?: string },
 ): Promise<DbosPort> {
   const config = shared?.config ?? requireProject(loadConfig())
   const { host, hub } = shared ?? (await buildPlugins(config))
@@ -77,7 +73,7 @@ export async function buildRuntime(
   }
 
   const port = await createDbosPort({
-    storage, config,
+    storage, config, executorId: shared?.executorId,
     providers: host.providers, executors: host.executors,
     skills: host.skills, tools: hub,
     stepTools: p => [
@@ -87,7 +83,9 @@ export async function buildRuntime(
         { source: 'agent', taskId: p.taskId, stepId: p.stepId, runToken: p.runToken, executor: p.executor, model: p.model, role: p.role },
         memoryRoleFor(p.role),
       ),
-      splitTool({ kernel, config: { approvalPolicy: config.approvalPolicy, maxDepth: config.maxDepth }, p }),
+      // registration-gated inside the factory (like report_coverage): a scout orients, the plan
+      // step decomposes — a scout that splits builds a second, unapproved decomposition.
+      ...splitTool({ kernel, config: { approvalPolicy: config.approvalPolicy, maxDepth: config.maxDepth }, p }),
       // read_annotations only needs the kernel (reads plan_annotated off the log) — unconditional,
       // like splitTool: harmless everywhere, returns an empty list for a task with no annotations.
       readAnnotationsTool({ kernel, p }),

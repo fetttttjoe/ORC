@@ -1,5 +1,5 @@
 import { STEP_ROLE, errorMessage, EVENT_KIND, ISOLATION_TIER, STRATEGY, TASK_STATUS, costUSDFor, parseModelRef, type ExecutionPort, type ModelOption, type PlanDraft } from '@orc/contracts'
-import { deriveSystemUrl, initializeProject, loadConfig, openStorage, resetSystemDatabase, subtreeTaskIds, type EventLog, type Kernel, type ProjectConfig, type Storage } from '@orc/kernel'
+import { DEFAULT_MAX_ITERATIONS, deriveSystemUrl, initializeProject, loadConfig, openStorage, resetSystemDatabase, subtreeTaskIds, type EventLog, type Kernel, type ProjectConfig, type Storage } from '@orc/kernel'
 import { seedRegistries } from './runtime'
 import { createMemory, openKnowledge, orphanedNotes } from '@orc/memory'
 import { openMemory } from './memory-open'
@@ -17,7 +17,7 @@ const uiNote = (id: string, title: string, summary: string) => ({
 const nameNote = (name: string) => uiNote(PROJECT_NAME_NOTE_ID, name, 'display name for the project chat')
 const dirNote = (dir: string) => uiNote(PROJECT_DIR_NOTE_ID, dir, 'working directory of the project')
 
-export function singleStepDraft(task: { title: string; spec: string }, modelRef: string, skillRefs: string[] = [], maxIterations = 30): PlanDraft {
+export function singleStepDraft(task: { title: string; spec: string }, modelRef: string, skillRefs: string[] = [], maxIterations = DEFAULT_MAX_ITERATIONS): PlanDraft {
   return {
     strategyRef: STRATEGY.single,
     costEstimateUSD: null,
@@ -106,12 +106,15 @@ export function buildModelDiscovery(config: ProjectConfig, log?: EventLog) {
 // adapter both call through here, so they cannot drift.
 export function buildOrcActions(deps: {
   kernel: Kernel
-  needPort: () => Promise<ExecutionPort>
+  // Guarantee something will drive what we are about to record — a live supervisor, one spawned
+  // for us, or (under --no-daemon) a runtime this process holds. This layer never touches an
+  // execution port itself: every door records the ask and lets the supervisor execute it.
+  ensureRuntime: () => Promise<unknown>
   plugin?: { config: ProjectConfig; log: EventLog; storage?: Storage }
   listModels?: () => Promise<string[]>
   listModelOptions?: () => Promise<ModelOption[]>
 }): OrcActions {
-  const { kernel, needPort, plugin, listModels, listModelOptions } = deps
+  const { kernel, ensureRuntime, plugin, listModels, listModelOptions } = deps
 
   const requireTask = async (taskId: string) => {
     const task = await kernel.getTask(taskId)
@@ -149,10 +152,12 @@ export function buildOrcActions(deps: {
         title: input.title, spec: input.spec ?? '',
         modelRef: input.grounded.modelRef, analyzerRef: input.grounded.analyzerRef ?? 'agent-analyzer',
         modelCatalog: await listModelOptions?.().catch(() => []) ?? [],
+        ...(plugin ? { maxIterations: plugin.config.maxIterations } : {}),
       })
       // the grounded template is policy-approved — the analyze→plan conversation starts now;
       // callers watch progress over the event stream, nothing tails here
-      await (await needPort()).startRun(t.id, { cwd })
+      await ensureRuntime()
+      await kernel.requestRun(t.id, { cwd })
       return { taskId: t.id }
     },
 
@@ -175,19 +180,28 @@ export function buildOrcActions(deps: {
     },
 
     async run(taskId, cwd) {
-      const handle = await (await needPort()).startRun(taskId, { cwd: assertRunnableCwd(cwd) })
-      return { workflowId: handle.workflowId }
+      // cwd is validated BEFORE the ask is recorded: an unrunnable directory must not become a
+      // request every supervisor that boots picks up and fails on again.
+      const resolved = assertRunnableCwd(cwd)
+      await ensureRuntime()
+      await kernel.requestRun(taskId, { cwd: resolved })
+      return { requested: true }
     },
 
     async reply(taskId, text) {
-      await needPort() // DBOS.send (behind kernel.send) requires DBOS launched in THIS process
+      // the answer only unblocks the step; a supervisor is what carries it into the parked
+      // workflow (its router reacts to feedback_provided) and keeps executing
+      await ensureRuntime()
       const topic = await kernel.replyFeedback(taskId, text)
       return { answered: topic !== null }
     },
 
     async retry(taskId) {
-      const handle = await (await needPort()).retry(taskId)
-      return { workflowId: handle.workflowId }
+      const status = (await requireTask(taskId)).status
+      if (status !== TASK_STATUS.blocked) throw new Error(`task is '${status}' — only a blocked task can be retried`)
+      await ensureRuntime()
+      await kernel.requestRun(taskId, { retry: true })
+      return { requested: true }
     },
 
     async annotate(taskId, noteId, text, refs) {
@@ -196,7 +210,7 @@ export function buildOrcActions(deps: {
     },
 
     async revise(taskId, text, scope) {
-      await needPort() // resuming the gate needs DBOS launched here, exactly like reply
+      await ensureRuntime() // resuming the gate needs a supervisor, exactly like reply
       for (const noteId of scope) await kernel.annotatePlan(taskId, { targetNote: noteId, refs: [], text })
       const topic = await kernel.replyFeedback(taskId, text)
       return { topic }
@@ -245,7 +259,7 @@ export function buildOrcActions(deps: {
       if (!existsSync(abs)) throw new Error(`directory does not exist: ${abs}`)
       // a directory that already holds an orc project is REUSED, never re-minted — "new chat"
       // on a known folder means "open that project", the name becomes its display name
-      const existing = existsSync(path.join(abs, '.orc', 'config.json')) ? loadConfig(abs).projectId : null
+      const existing = existsSync(path.join(abs, '.orc')) ? loadConfig(abs).projectId : null
       const projectId = existing ?? initializeProject(abs, name).projectId
       // first events = name + dir notes: listable, named, and locatable immediately
       const storage = await openStorage(plugin.config.databaseUrl, { projectId })
@@ -341,7 +355,10 @@ export function buildOrcActions(deps: {
     },
 
     async cancel(taskId) {
-      await (await needPort()).cancelRun(taskId)
+      // The append half only: stamping the subtree cancelled is what a client can do without a
+      // runtime, and the supervisor's router does the DBOS half off each cancelled status. With no
+      // supervisor up there is nothing running to cancel, and the next one to boot sweeps it.
+      await kernel.cancelSubtree(taskId)
       // Cancel is terminal — nothing will resume this subtree, so its still-owned, unreferenced
       // notes are garbage. Deterministic sweep (no agent): fold the memory log, keep adopted or
       // still-referenced ids. Each delete appends memory_deleted with the cancelled task as

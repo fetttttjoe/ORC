@@ -4,10 +4,10 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import type { Command } from 'commander'
 import { Surreal } from 'surrealdb'
-import { EVENT_KIND, MemoryAccessedPayload, RUN_OUTCOME, isRecord, type ExecutionPort, type OperationSpec } from '@orc/contracts'
-import { loadConfig, projectDatabaseName, requireProject, type ProjectConfig } from '@orc/kernel'
+import { ApprovalPolicy, EVENT_KIND, MemoryAccessedPayload, RUN_OUTCOME, TASK_STATUS, isRecord, type ExecutionPort, type OperationSpec, type RunOutcome, type TaskStatus } from '@orc/contracts'
+import { loadConfig, projectDatabaseName, requireProject, type EventLog, type ProjectConfig } from '@orc/kernel'
 import { createTestDb, TEST_PROJECT_ID } from '@orc/kernel/test-helpers'
-import { buildProgram, openKernel, runInit } from './main'
+import { buildProgram, openKernel, runInit, singleStepDraft, watchSubtree } from './main'
 import { CommandFailure } from './exit'
 
 // exitOverride must reach NESTED subcommands too (e.g. `memory neighbors`): commander only
@@ -367,7 +367,9 @@ describe('orc CLI', () => {
     expect((await log.byTask(taskId)).some(e => e.kind === EVENT_KIND.plan_annotated)).toBe(true)
 
     lines.length = 0
-    await run('reply', taskId, 'approve')
+    // The answer is what this asserts. Nothing in this harness holds a runtime, so the watch that
+    // follows reports the tree as it stands — stopped short of done — and exits non-zero for it.
+    await expect(run('reply', taskId, 'approve')).rejects.toBeInstanceOf(CommandFailure)
     expect(lines[0]).toContain('auth-1')
     expect(sent).toEqual([{ id: runToken, message: 'approve', topic: 'feedback:auth-1' }])
 
@@ -462,40 +464,304 @@ describe('orc CLI', () => {
   // `wait: async () => outcome`, so no test ever exercised the rejecting path — and `orc run`
   // only handled the resolve branch, printing a raw driver error and exit 1 for an advertised
   // action ("ctrl-c stops the run") while `orc status` correctly showed 'cancelled'.
-  it('run reports a cancelled workflow as cancelled, not as a crash', async () => {
+  it('run reports a cancelled run as cancelled, not as a crash', async () => {
     const db = await createTestDb()
     dbs.push(db)
     const { kernel, log } = await openKernel(db.url, { projectId: TEST_PROJECT_ID })
     const lines: string[] = []
     spyOn(console, 'log').mockImplementation((...a: unknown[]) => { lines.push(a.join(' ')) })
-    const cancellingPort: ExecutionPort = {
-      startRun: async () => ({
-        workflowId: 'wf-1',
-        wait: async () => { throw new Error('Workflow wf-1 was cancelled') },
-      }),
-      retry: async () => { throw new Error('unused') },
-      cancelRun: async () => {},
-    }
-    const run = (...args: string[]) => buildProgram(kernel, async () => cancellingPort).parseAsync(args, { from: 'user' })
+    const run = (...args: string[]) => buildProgram(kernel, async () => forbiddenPort()).parseAsync(args, { from: 'user' })
 
     await run('new', 'cancel me')
     const taskId = lines[0]!
     await run('propose', taskId)
     await run('approve', taskId)
-    // the cancel that raced the run: the task is already terminal when wait() rejects, which is
-    // exactly the state `orc cancel` leaves behind (it appends under the project lock)
+
+    lines.length = 0
+    // cancelled is reported as the outcome it is, and the command exits non-zero for it — the
+    // status `orc cancel` from another terminal leaves behind, read off the log rather than off a
+    // rejected getResult(), because the watcher no longer holds the workflow handle
+    let failure: unknown = null
+    const watched = run('run', taskId).catch((e: unknown) => { failure = e })
+    await watching(lines)
+    await stamp(log, taskId, TASK_STATUS.approved, TASK_STATUS.running)
+    await stamp(log, taskId, TASK_STATUS.running, TASK_STATUS.cancelled)
+    await watched
+    expect(failure).toBeInstanceOf(CommandFailure)
+    expect(lines.join('\n')).toContain(`run finished: ${RUN_OUTCOME.cancelled}`)
+    await log.close()
+  }, 15_000)
+
+  // one split child, shaped like the ones `task_split` proposes — the only variable is the policy
+  const splitArgs = (taskId: string, toolCallId: string, title: string, policy: ApprovalPolicy) => ({
+    parentTaskId: taskId, stepId: 's1', runToken: `step:${taskId}:s1:a1`, toolCallId, title, spec: '',
+    plan: { steps: [{ id: 'w1', role: 'worker', title: 'w', instructions: 'do', dependsOn: [], skillRefs: [], toolRefs: [] }] },
+    parentStep: { executorRef: 'api-loop', modelRef: 'fake/m', maxIterations: 5 },
+    policy, maxDepth: 3,
+  })
+
+  it('the run watch names a child the manual policy gated — the wait that emits no event', async () => {
+    const db = await createTestDb()
+    dbs.push(db)
+    const { kernel, log } = await openKernel(db.url, { projectId: TEST_PROJECT_ID })
+    const lines: string[] = []
+    spyOn(console, 'log').mockImplementation((...a: unknown[]) => { lines.push(a.join(' ')) })
+    const run = (...args: string[]) => buildProgram(kernel, async () => forbiddenPort()).parseAsync(args, { from: 'user' })
+
+    await run('new', 'parent')
+    const taskId = lines[0]!
+    await run('propose', taskId)
+    await run('approve', taskId)
+    const child = await kernel.proposeSplit(splitArgs(taskId, 'call_1', 'gated child', ApprovalPolicy.parse({})))
+
+    lines.length = 0
+    const watched = run('run', taskId)
+    await watching(lines)
+    await stamp(log, taskId, TASK_STATUS.approved, TASK_STATUS.running)
+    await stamp(log, taskId, TASK_STATUS.running, TASK_STATUS.done)
+    await watched
+    // a gated child is a stopping point, not a hang: the watch ends and names what unblocks it
+    expect(lines.join('\n')).toContain('gated child')
+    expect(lines.join('\n')).toContain(`orc approve ${child.childTaskId}`)
+    await log.close()
+  }, 15_000)
+
+  it('a split gated mid-run is named while the watch is still attached', async () => {
+    const db = await createTestDb()
+    dbs.push(db)
+    const { kernel, log } = await openKernel(db.url, { projectId: TEST_PROJECT_ID })
+    const lines: string[] = []
+    spyOn(console, 'log').mockImplementation((...a: unknown[]) => { lines.push(a.join(' ')) })
+    const run = (...args: string[]) => buildProgram(kernel, async () => forbiddenPort()).parseAsync(args, { from: 'user' })
+
+    await run('new', 'parent')
+    const taskId = lines[0]!
+    await run('propose', taskId)
+    await run('approve', taskId)
+
+    lines.length = 0
+    const watched = run('run', taskId)
+    await watching(lines)
+    await stamp(log, taskId, TASK_STATUS.approved, TASK_STATUS.running)
+    const child = await kernel.proposeSplit(splitArgs(taskId, 'call_1', 'gated child', ApprovalPolicy.parse({})))
+    // split_proposed arrives over LISTEN/NOTIFY, so the advisory lands a tick or two later
+    await until(() => lines.join('\n').includes('orc approve'))
+    await stamp(log, taskId, TASK_STATUS.running, TASK_STATUS.done)
+    await watched
+
+    expect(lines.join('\n')).toContain(`orc approve ${child.childTaskId}`)
+    await log.close()
+  }, 15_000)
+
+  it('a question parked on a child parks the parent tail, naming the CHILD to reply to', async () => {
+    const db = await createTestDb()
+    dbs.push(db)
+    const { kernel, log } = await openKernel(db.url, { projectId: TEST_PROJECT_ID })
+    const lines: string[] = []
+    spyOn(console, 'log').mockImplementation((...a: unknown[]) => { lines.push(a.join(' ')) })
+    // the parent is inside join_splits' recv while the child works: its own stream stays silent
+    const port: ExecutionPort = {
+      startRun: async () => ({ workflowId: 'wf-1', wait: () => new Promise<RunOutcome>(() => {}) }),
+      retry: async () => { throw new Error('unused') },
+      cancelRun: async () => {},
+    }
+    const run = (...args: string[]) => buildProgram(kernel, async () => port).parseAsync(args, { from: 'user' })
+
+    await run('new', 'parent')
+    const taskId = lines[0]!
+    await run('propose', taskId)
+    await run('approve', taskId)
+    const child = await kernel.proposeSplit(splitArgs(taskId, 'call_1', 'child', ApprovalPolicy.parse({ default: 'auto' })))
     await log.append({
-      taskId, stepId: null, runToken: null, kind: EVENT_KIND.task_status_changed,
-      payload: { taskId, from: 'running', to: 'cancelled' },
+      taskId: child.childTaskId, stepId: 'w1', runToken: `step:${child.childTaskId}:w1:a1`,
+      kind: EVENT_KIND.feedback_requested, payload: { question: 'may I overwrite it?', topic: 'confirm' },
     })
 
     lines.length = 0
-    // cancelled is reported as the outcome it is, and the command exits non-zero for it — the same
-    // status it always produced, now visible as a value instead of a write to process.exitCode
-    await expect(run('run', taskId)).rejects.toBeInstanceOf(CommandFailure)
-    expect(lines.join('\n')).toContain('run finished: cancelled')
+    await run('run', taskId)
+    expect(lines.join('\n')).toContain('may I overwrite it?')
+    expect(lines.join('\n')).toContain(`orc reply ${child.childTaskId} <text>`)
     await log.close()
+  }, 15_000)
+
+  it('orc run records the ask and watches — it never starts a workflow itself', async () => {
+    const db = await createTestDb()
+    dbs.push(db)
+    const { kernel, log } = await openKernel(db.url, { projectId: TEST_PROJECT_ID })
+    const lines: string[] = []
+    spyOn(console, 'log').mockImplementation((...a: unknown[]) => { lines.push(a.join(' ')) })
+    const run = (...args: string[]) => buildProgram(kernel, async () => forbiddenPort()).parseAsync(args, { from: 'user' })
+
+    await run('new', 'parent')
+    const taskId = lines[0]!
+    await run('propose', taskId)
+    await run('approve', taskId)
+
+    lines.length = 0
+    // forbiddenPort throws on startRun, so this completing at all is the assertion: the command
+    // reached its runtime only to hold one, never to drive with it
+    const watched = run('run', taskId)
+    await watching(lines)
+    await stamp(log, taskId, TASK_STATUS.approved, TASK_STATUS.running)
+    await stamp(log, taskId, TASK_STATUS.running, TASK_STATUS.done)
+    await watched
+
+    const requested = (await kernel.eventsFor(taskId)).filter(e => e.kind === EVENT_KIND.run_requested)
+    expect(requested).toHaveLength(1)
+    expect(requested[0]!.payload).toEqual({ taskId, cwd: null, retry: false })
+    await log.close()
+  }, 15_000)
+
+  it('orc run refuses an undrivable task before recording anything', async () => {
+    const { run, lines, kernel } = await makeCli()
+    await run('new', 'never approved')
+    const taskId = lines[0]!
+    await expect(run('run', taskId)).rejects.toThrow(/approve a plan first/)
+    expect((await kernel.eventsFor(taskId)).some(e => e.kind === EVENT_KIND.run_requested)).toBe(false)
   })
+
+  it('approving a split child watches the tree; approving a root still only approves', async () => {
+    const db = await createTestDb()
+    dbs.push(db)
+    const { kernel, log } = await openKernel(db.url, { projectId: TEST_PROJECT_ID })
+    const lines: string[] = []
+    spyOn(console, 'log').mockImplementation((...a: unknown[]) => { lines.push(a.join(' ')) })
+    const run = (...args: string[]) => buildProgram(kernel, async () => forbiddenPort()).parseAsync(args, { from: 'user' })
+
+    await run('new', 'parent')
+    const taskId = lines[0]!
+    await run('propose', taskId)
+    lines.length = 0
+    await run('approve', taskId)
+    // a root's approval is not a decision to run it — nothing is asked for, nothing is watched
+    expect((await kernel.eventsFor(taskId)).some(e => e.kind === EVENT_KIND.run_requested)).toBe(false)
+    expect(lines.join('\n')).not.toContain('watching the run')
+
+    await stamp(log, taskId, TASK_STATUS.approved, TASK_STATUS.running)
+    const child = await kernel.proposeSplit(splitArgs(taskId, 'call_1', 'gated child', ApprovalPolicy.parse({})))
+    lines.length = 0
+    // the run that is waiting is the ROOT — its join cannot resolve until the child runs, so the
+    // approval watches the root rather than asking for a second run of it
+    const watched = run('approve', child.childTaskId)
+    await until(() => lines.some(l => l.includes('watching the run at')))
+    await stamp(log, child.childTaskId, TASK_STATUS.approved, TASK_STATUS.done)
+    await stamp(log, taskId, TASK_STATUS.running, TASK_STATUS.done)
+    await watched
+    expect(lines.join('\n')).toContain(`watching the run at ${taskId}`)
+    expect((await kernel.eventsFor(taskId)).some(e => e.kind === EVENT_KIND.run_requested)).toBe(false)
+    await log.close()
+  }, 15_000)
+
+  it('status names the child awaiting plan approval, with the command that unblocks it', async () => {
+    const { run, lines, kernel } = await makeCli()
+    await run('new', 'parent')
+    const taskId = lines[0]!
+    const child = await kernel.proposeSplit(splitArgs(taskId, 'call_1', 'gated child', ApprovalPolicy.parse({})))
+
+    lines.length = 0
+    await run('status', taskId)
+    expect(lines.join('\n')).toContain(`orc approve ${child.childTaskId}`)
+  })
+
+  it('a watched run waits for EVERY outstanding child, not only the first', async () => {
+    const db = await createTestDb()
+    dbs.push(db)
+    const { kernel, log } = await openKernel(db.url, { projectId: TEST_PROJECT_ID })
+    const lines: string[] = []
+    spyOn(console, 'log').mockImplementation((...a: unknown[]) => { lines.push(a.join(' ')) })
+    const run = (...args: string[]) => buildProgram(kernel, async () => forbiddenPort()).parseAsync(args, { from: 'user' })
+
+    await run('new', 'parent')
+    const taskId = lines[0]!
+    await run('propose', taskId)
+    await run('approve', taskId)
+    const auto = ApprovalPolicy.parse({ default: 'auto' })
+    const first = await kernel.proposeSplit(splitArgs(taskId, 'call_1', 'A', auto))
+    const second = await kernel.proposeSplit(splitArgs(taskId, 'call_2', 'B', auto))
+
+    lines.length = 0
+    let settled = false
+    const watched = run('run', taskId).then(() => { settled = true })
+    await watching(lines)
+    await stamp(log, taskId, TASK_STATUS.approved, TASK_STATUS.running)
+    await stamp(log, taskId, TASK_STATUS.running, TASK_STATUS.done)
+    await stamp(log, first.childTaskId, TASK_STATUS.approved, TASK_STATUS.done)
+
+    // one finished sibling is not a finished tree — this used to leave the second child to nobody
+    await Bun.sleep(300)
+    expect(settled).toBe(false)
+
+    await stamp(log, second.childTaskId, TASK_STATUS.approved, TASK_STATUS.done)
+    await watched
+    expect(lines.join('\n')).toContain(`run finished: ${RUN_OUTCOME.done}`)
+    await log.close()
+  }, 15_000)
+
+  // The supervisor's half of a run, faked: nothing in this file holds a real runtime, so the
+  // status transitions a run would produce are stamped straight onto the log.
+  const stamp = (log: EventLog, taskId: string, from: TaskStatus, to: TaskStatus) =>
+    log.append({ taskId, stepId: null, runToken: null, kind: EVENT_KIND.task_status_changed, payload: { taskId, from, to } })
+
+  // The port a client must never reach for. Under the supervisor model the CLI records the ask and
+  // watches; anything that starts a workflow from here is the defect this phase removes, so make
+  // it loud rather than letting a silent stub hide it.
+  const forbiddenPort = (): ExecutionPort => ({
+    startRun: async () => { throw new Error('the CLI must not start runs') },
+    retry: async () => { throw new Error('the CLI must not start runs') },
+    cancelRun: async () => { throw new Error('the CLI must not cancel workflows') },
+  })
+
+  const until = async (ready: () => boolean) => { for (let i = 0; i < 300 && !ready(); i++) await Bun.sleep(20) }
+  const watching = (lines: string[]) => until(() => lines.some(l => l.includes('run requested for')))
+
+  it('a watched run resolves when the whole subtree is terminal, not when the root is', async () => {
+    const db = await createTestDb()
+    dbs.push(db)
+    const { kernel, log } = await openKernel(db.url, { projectId: TEST_PROJECT_ID })
+    spyOn(console, 'log').mockImplementation(() => {})
+
+    const parent = await kernel.createTask({ title: 'parent', spec: '' })
+    await kernel.proposePlan(parent.id, singleStepDraft({ title: 'p', spec: 'p' }, 'fake/m'))
+    await kernel.approvePlan(parent.id)
+    // the auto-policy child a split creates: approved, so somebody is still expected to run it
+    const child = await kernel.proposeSplit(splitArgs(parent.id, 'call_1', 'child', ApprovalPolicy.parse({ default: 'auto' })))
+
+    let settled = false
+    const watching = watchSubtree(kernel, parent.id).then(r => { settled = true; return r })
+    await stamp(log, parent.id, TASK_STATUS.approved, TASK_STATUS.running)
+    await stamp(log, parent.id, TASK_STATUS.running, TASK_STATUS.done)
+
+    // a terminal root is NOT a finished tree — the child still has nobody's answer
+    await Bun.sleep(300)
+    expect(settled).toBe(false)
+
+    await stamp(log, child.childTaskId, TASK_STATUS.approved, TASK_STATUS.running)
+    await stamp(log, child.childTaskId, TASK_STATUS.running, TASK_STATUS.done)
+    expect(await watching).toEqual({ parked: false, outcome: RUN_OUTCOME.done })
+    await log.close()
+  }, 15_000)
+
+  it('a watched run resolves parked when a gate is open anywhere in the subtree', async () => {
+    const db = await createTestDb()
+    dbs.push(db)
+    const { kernel, log } = await openKernel(db.url, { projectId: TEST_PROJECT_ID })
+    spyOn(console, 'log').mockImplementation(() => {})
+
+    const parent = await kernel.createTask({ title: 'parent', spec: '' })
+    await kernel.proposePlan(parent.id, singleStepDraft({ title: 'p', spec: 'p' }, 'fake/m'))
+    await kernel.approvePlan(parent.id)
+    const child = await kernel.proposeSplit(splitArgs(parent.id, 'call_1', 'child', ApprovalPolicy.parse({ default: 'auto' })))
+    // the parent sits in join_splits while the child asks: the parent's own stream stays silent, so
+    // a watch that read only the watched task would wait forever on a question already asked
+    await log.append({
+      taskId: child.childTaskId, stepId: 'w1', runToken: `step:${child.childTaskId}:w1:a1`,
+      kind: EVENT_KIND.feedback_requested, payload: { question: 'may I overwrite it?', topic: 'confirm' },
+    })
+
+    expect(await watchSubtree(kernel, parent.id))
+      .toEqual({ parked: true, taskId: child.childTaskId, question: 'may I overwrite it?' })
+    await log.close()
+  }, 15_000)
 
   it('memory add/rebuild/ls/search/cat/rm round-trip against an isolated throwaway SurrealDB db', async () => {
     const db = await createTestDb()

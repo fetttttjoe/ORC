@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'bun:test'
 import type { EventRecord, Plan, TaskNode } from '@orc/contracts'
 import { eventFixture, draftFixture, planFixture, stepFixture } from '@orc/contracts/fixtures'
-import { fold, completedStepIds, nextAttempts, crashDedupKey, stepUsage, subtreeTaskIds, subtreeUsage, pendingSplitForChild, remainingBudget, inheritedCwd } from './projections'
+import { fold, completedStepIds, nextAttempts, crashDedupKey, stepUsage, subtreeTaskIds, subtreeUsage, pendingSplitForChild, remainingBudget, inheritedCwd, runCwd } from './projections'
 
 const task: TaskNode = {
   id: 't1', parentId: null, type: 'generic', title: 'hello', spec: '',
@@ -273,6 +273,17 @@ describe('fold — execution kinds', () => {
     // no budget anywhere in the chain → unconstrained (null)
     const free = fold([t('x', null, null), t('y', 'x', null)].map((e, i) => ({ ...e, seq: i + 1 })))
     expect(remainingBudget(free, 'y')).toBeNull()
+  })
+
+  it('runCwd: a split child inherits its PARENT\'s run cwd; a root falls back to the project dir', () => {
+    const state = fold([
+      evt(1, 'task_created', { task: { ...task, id: 'p' } }),
+      evt(2, 'task_created', { task: { ...task, id: 'c', parentId: 'p', depth: 1 } }),
+      eventFixture({ seq: 3, ts: '2026-07-16T00:00:00.000Z', taskId: 'p', kind: 'run_started', payload: { planVersion: 1, retryIndex: 0, workflowId: 'w1', cwd: '/tree' } }),
+    ])
+    expect(runCwd(state, state.tasks.get('c')!, undefined, '/proj')).toBe('/tree')
+    expect(runCwd(state, state.tasks.get('p')!, undefined, '/proj')).toBe('/proj')
+    expect(runCwd(state, state.tasks.get('c')!, '/explicit', '/proj')).toBe('/explicit')
   })
 
   it('inheritedCwd: override wins; else the last run that HAD a cwd (skip null history); else fallback', () => {

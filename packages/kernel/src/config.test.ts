@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test'
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { deriveSystemUrl, initializeProject, loadConfig, projectDatabaseName, requireProject } from './config'
@@ -30,6 +30,31 @@ describe('loadConfig', () => {
     } finally {
       process.chdir(before)
     }
+  })
+
+  it('init writes identity to .orc/identity.json, never into the shareable settings file', () => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'orc-identity-'))
+    const { projectId } = initializeProject(dir, 'demo')
+    expect(JSON.parse(readFileSync(path.join(dir, '.orc', 'identity.json'), 'utf8')).projectId).toBe(projectId)
+    const settings = path.join(dir, '.orc', 'config.json')
+    if (existsSync(settings)) expect(JSON.parse(readFileSync(settings, 'utf8')).projectId).toBeUndefined()
+    expect(requireProject(loadConfig(dir)).projectId).toBe(projectId)
+  })
+
+  it('identity.json wins over a projectId left in the settings file — a checkout cannot repoint a project', () => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'orc-identity-win-'))
+    mkdirSync(path.join(dir, '.orc'))
+    // exactly what `git reset --hard` restores when the settings file is tracked and carries an id
+    writeFileSync(path.join(dir, '.orc', 'config.json'), JSON.stringify({ projectId: '00000000-0000-4000-8000-00000000000a', projectName: 'theirs' }))
+    writeFileSync(path.join(dir, '.orc', 'identity.json'), JSON.stringify({ projectId: '00000000-0000-4000-8000-00000000000b', projectName: 'ours' }))
+    expect(requireProject(loadConfig(dir))).toMatchObject({ projectId: '00000000-0000-4000-8000-00000000000b', projectName: 'ours' })
+  })
+
+  it('a project whose identity still lives in the settings file keeps loading (pre-split projects)', () => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'orc-identity-legacy-'))
+    mkdirSync(path.join(dir, '.orc'))
+    writeFileSync(path.join(dir, '.orc', 'config.json'), JSON.stringify({ projectId: '00000000-0000-4000-8000-00000000000c', projectName: 'legacy' }))
+    expect(requireProject(loadConfig(dir))).toMatchObject({ projectId: '00000000-0000-4000-8000-00000000000c', projectName: 'legacy' })
   })
 
   it('has sane defaults', () => {
@@ -208,10 +233,12 @@ describe('project-derived infrastructure boundaries', () => {
 })
 
 describe('initializeProject', () => {
-  it('merges identity into existing config without erasing settings', () => {
+  it('writes identity BESIDE the settings file, leaving the shared settings untouched', () => {
     const dir = tmpProject({ concurrency: 7 })
     initializeProject(dir, 'demo')
-    const cfg = JSON.parse(readFileSync(path.join(dir, '.orc', 'config.json'), 'utf8'))
+    const settings = JSON.parse(readFileSync(path.join(dir, '.orc', 'config.json'), 'utf8'))
+    expect(settings).toEqual({ concurrency: 7 }) // no identity smuggled into the tracked file
+    const cfg = requireProject(loadConfig(dir))
     expect(cfg.concurrency).toBe(7)
     expect(cfg.projectId).toMatch(/^[0-9a-f-]{36}$/)
     expect(cfg.projectName).toBe('demo')
@@ -220,13 +247,18 @@ describe('initializeProject', () => {
   it('refuses to overwrite identity unless forced; force keeps other settings', () => {
     const dir = tmpProject({ concurrency: 7 })
     initializeProject(dir, 'demo')
-    const first = JSON.parse(readFileSync(path.join(dir, '.orc', 'config.json'), 'utf8'))
+    const first = requireProject(loadConfig(dir))
     expect(() => initializeProject(dir, 'demo2')).toThrow(/already initialized/)
     initializeProject(dir, 'demo2', { force: true })
-    const second = JSON.parse(readFileSync(path.join(dir, '.orc', 'config.json'), 'utf8'))
+    const second = requireProject(loadConfig(dir))
     expect(second.projectId).not.toBe(first.projectId)
     expect(second.projectName).toBe('demo2')
     expect(second.concurrency).toBe(7)
+  })
+
+  it('refuses a pre-split project whose id is still in the settings file', () => {
+    const dir = tmpProject({ projectId: '00000000-0000-4000-8000-000000000001', projectName: 'legacy' })
+    expect(() => initializeProject(dir, 'again')).toThrow(/already initialized/)
   })
 
   it('initializes a bare directory with no .orc at all', () => {

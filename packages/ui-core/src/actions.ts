@@ -16,9 +16,11 @@ export interface OrcActions {
   // approvedBy: the web door omits it (human click → 'human'); the MCP door under
   // --autonomy full passes 'mcp' so replay shows exactly who approved (P7 attribution)
   approve(taskId: string, version?: number, approvedBy?: 'human' | 'mcp'): Promise<{ version: number }>
-  run(taskId: string, cwd: string): Promise<{ workflowId: string }>
+  // A run is REQUESTED, never started here: the supervisor holding the runtime turns the recorded
+  // ask into a workflow, so there is no handle to hand back — callers watch the event stream.
+  run(taskId: string, cwd: string): Promise<{ requested: true }>
   reply(taskId: string, text: string): Promise<{ answered: boolean }>
-  retry(taskId: string): Promise<{ workflowId: string }>
+  retry(taskId: string): Promise<{ requested: true }>
   // grounded-plan refinement: annotate queues feedback on one plan-note; revise annotates the
   // scoped notes AND wakes the parked plan agent (the conversational gate)
   annotate(taskId: string, noteId: string, text: string, refs?: string[]): Promise<{ noteId: string }>

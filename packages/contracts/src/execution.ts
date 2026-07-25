@@ -1,5 +1,6 @@
 import { z } from 'zod'
 import type { PlanStep } from './plan'
+import { TASK_STATUS, type TaskStatus } from './task'
 import type { EventKind } from './events'
 import type { OperationSpec } from './operations'
 import type { LoadedSkill, ResolvedTool } from './plugins'
@@ -94,6 +95,17 @@ export const FAILURE_CLASS = FailureClass.enum
 export const RunOutcome = z.enum(['done', 'blocked', 'cancelled'])
 export type RunOutcome = z.infer<typeof RunOutcome>
 export const RUN_OUTCOME = RunOutcome.enum
+
+// What a finished run looked like, read off the task it drove. Shared because two callers derive
+// it — the router composing a split result, and the CLI watch that no longer holds a run handle to
+// ask — and a second copy could disagree about a status the first has not seen. `failed` and every
+// non-terminal status surface as blocked: RunOutcome has no 'failed', and to a caller both mean the
+// same thing, the work stopped short of done.
+export function runOutcomeFor(status: TaskStatus | undefined): RunOutcome {
+  if (status === TASK_STATUS.done) return RUN_OUTCOME.done
+  if (status === TASK_STATUS.cancelled) return RUN_OUTCOME.cancelled
+  return RUN_OUTCOME.blocked
+}
 
 // The thin join payload (spec D5): what a parent gets back from a resolved split.
 // Same shape as the split_resolved event payload — the router composes it once.

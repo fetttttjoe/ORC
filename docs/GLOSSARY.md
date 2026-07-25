@@ -162,6 +162,8 @@ Key terms used throughout the orchestrator codebase and documentation. Many term
 
 **Storage service** — Data-access facade for one database/store (Postgres, SurrealDB, vault). Encapsulates connection, locking, redaction, migrations. See [storage service](docs/ARCHITECTURE.md#the-storage-service-—-read/write-boundary), [tier ②](docs/ARCHITECTURE.md#system-map-—-three-tiers).
 
+**Supervisor** — The process holding the execution runtime for a project (`orc serve`). Presence is a heartbeat row in `supervisors`, not a lock; identity is a claimed slot id used as the DBOS executor id, so recovery is per-supervisor. Every other command is a client: it appends the ask and watches. See [identity and isolation](docs/ARCHITECTURE.md#identity-and-isolation), [`serve.ts`](packages/cli/src/serve.ts), [supervisor storage](packages/kernel/src/storage/supervisors.ts).
+
 ---
 
 ## T

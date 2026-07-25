@@ -37,6 +37,17 @@ export type CopilotExchangePayload = z.infer<typeof CopilotExchangePayload>
 
 export { EventKind, EVENT_KIND, type EventRecord } from './event-kinds'
 
+// The explicit ask for a run. NOT inferred from "approved with no live run": `orc propose` +
+// `orc approve` deliberately does not start anything, and inference would silently change that.
+// It also carries what only the caller knows — a --cwd override, and whether this is a retry —
+// so a client holding no execution port can still express both.
+export const RunRequestedPayload = z.object({
+  taskId: z.string().min(1),
+  cwd: z.string().nullable(),
+  retry: z.boolean(),
+})
+export type RunRequestedPayload = z.infer<typeof RunRequestedPayload>
+
 export const PAYLOAD_SCHEMAS = {
   task_created: z.object({ task: TaskNode }),
   plan_proposed: z.object({ plan: Plan }),
@@ -49,6 +60,7 @@ export const PAYLOAD_SCHEMAS = {
     ruleIndex: z.number().int().nonnegative().optional(), // which ApprovalPolicy rule matched
   }),
   task_status_changed: z.object({ taskId: z.string().min(1), from: TaskStatus, to: TaskStatus }),
+  run_requested: RunRequestedPayload,
   run_started: z.object({
     taskId: z.string().min(1),
     planVersion: z.number().int().positive(),

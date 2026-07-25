@@ -12,13 +12,18 @@ import { type Storage, type EventLogOps } from '../storage'
 import { acquireRuntimeLock, type RuntimeLock } from '../storage/runtime-lock'
 import { groundedPlanOmission } from './strategies/grounded-plan'
 import { verifyArtifacts } from './artifacts'
-import { fold, completedStepIds, nextAttempts, subtreeTaskIds, remainingBudget, inheritedCwd, type State } from '../projections'
+import { fold, completedStepIds, nextAttempts, remainingBudget, inheritedCwd, runCwd, type State } from '../projections'
+import { Kernel } from '../kernel'
 import { KERNEL_ERROR_CODE, KernelError } from '../errors'
 import { readySteps, runOutcomeOf } from './interpreter'
 import { createSignalRouter } from './signal-router'
 import { projectSuffix, type ProjectConfig } from '../config'
 
 export interface DbosPort extends ExecutionPort {
+  /** The executor identity this port was booted with — passed to DBOS.setConfig({ executorID }),
+   *  the one channel DBOS actually reads it from (globalParams.executorID freezes at module
+   *  import, so writing DBOS__VMID inside launch() lands too late). The unit DBOS recovery scopes to. */
+  executorId: string
   launch(): Promise<void>
   // `drain: false` skips waiting for DBOS to quiesce. A workflow parked at a human gate is not
   // in-flight work — it is durable state waiting on a person — but DBOS cannot tell the difference
@@ -121,9 +126,13 @@ export async function createDbosPort(opts: {
     taskId: string; stepId: string; runToken: string; role: string; executor: string; model: string
     modelRef: string; maxIterations: number; workspaceDir: string
   }) => ResolvedTool[]
+  executorId?: string
 }): Promise<DbosPort> {
   const { config, providers, executors, skills, tools, stepTools } = opts
   const { events: log, operations: journal, redact } = opts.storage
+  // cancelSubtree's append half only — this port stays the DBOS half (cancelWorkflowsFor below).
+  // No refValidator/analyzers/send: those are propose/split/feedback concerns, untouched here.
+  const kernel = new Kernel(log)
 
   // DBOS serializes EVERY step's return value into its own operation_outputs table
   // (dbos-executor's recordOperationResult), in the DBOS system database — same Postgres
@@ -504,7 +513,8 @@ export async function createDbosPort(opts: {
   )
 
   async function startRunAt(taskId: string, retryIndex: number, cwd?: string): Promise<RunHandle> {
-    const state = await foldState(taskId)
+    // a child's cwd is derived from its PARENT's run history, which byTask(taskId) cannot see
+    const state = fold(await log.all())
     const task = state.tasks.get(taskId)
     if (!task) throw new KernelError(KERNEL_ERROR_CODE.task_not_found, `no task '${taskId}'`)
     const approved = state.plans.get(taskId)?.approvedVersion
@@ -515,20 +525,32 @@ export async function createDbosPort(opts: {
       // A run with no explicit cwd works on the PROJECT, not in an empty scratch dir. The old
       // per-step .orc/workspaces/ default gave every step a directory with nothing in it — a
       // workspace no repo task can succeed in (scenario-2 burned five verify attempts on it,
-      // each ENOENT-blind). Explicit --cwd still overrides; the recorded cwd feeds retry/child
-      // inheritance so the whole run tree stays in one world.
-      taskId, planVersion: approved, retryIndex, cwd: cwd ?? config.dir,
+      // each ENOENT-blind). Explicit --cwd still overrides; projections.runCwd is the ONE rule,
+      // shared with startChildRun, so the whole run tree stays in one world no matter which of
+      // the two paths reached the child's (deterministic, shared) workflow id first.
+      taskId, planVersion: approved, retryIndex, cwd: runCwd(state, task, cwd, config.dir),
     })
     return { workflowId: workflowID, wait: () => handle.getResult() }
   }
 
-  // one task's cancellation (spec §6.1): DBOS cancel does NOT cascade by default, so cancel
-  // EVERY non-completed step's deterministic workflow (catches enqueued-but-not-yet-dequeued
-  // steps too), then the run, then stamp the terminal status. Shared by cancelRun for both the
-  // target task and every running/blocked descendant in its subtree.
-  async function cancelOne(taskId: string, state: State): Promise<void> {
+  // The retry-index derivation (was inline in port.retry), shared with the router's
+  // onRunRequested reaction so a redelivered run_requested{retry:true} and a direct `orc retry`
+  // can never disagree about which index a retry lands at.
+  async function nextRetryIndex(taskId: string): Promise<number> {
+    const runs = (await foldState(taskId)).runs.get(taskId) ?? []
+    return runs.length === 0 ? 0 : Math.max(...runs.map(r => r.retryIndex)) + 1
+  }
+
+  // The DBOS half of ONE task's cancellation (spec §6.1): DBOS cancel does NOT cascade by
+  // default, so cancel EVERY non-completed step's deterministic workflow (catches
+  // enqueued-but-not-yet-dequeued steps too), then the run. No status append and no subtree walk
+  // — kernel.cancelSubtree owns both, appending across the whole subtree BEFORE this runs. Called
+  // for every task a cancel stamps, including ones that never ran (a gated child still at
+  // awaiting_approval), so "no run" is a clean no-op rather than a throw.
+  async function cancelWorkflowsFor(taskId: string): Promise<void> {
+    const state = await foldState(taskId)
     const latest = state.runs.get(taskId)?.at(-1)
-    if (!latest) throw new KernelError(KERNEL_ERROR_CODE.invalid_transition, `no run to cancel for '${taskId}'`)
+    if (!latest) return
     const approved = state.plans.get(taskId)?.approvedVersion
     const plan = state.plans.get(taskId)?.versions.find(p => p.version === approved)
     if (plan) {
@@ -539,24 +561,24 @@ export async function createDbosPort(opts: {
           // tolerated miss: an attempt that never started has no workflow row to cancel
           await DBOS.cancelWorkflow(stepWorkflowId(taskId, s.id, attempts[s.id]!)).catch(() => {})
     }
-    // the run workflow always exists (run_started recorded its id) — a cancel failure here
-    // must surface to the caller, NOT be recorded as a successful cancellation
+    // the run workflow always exists (run_started recorded its id) — a cancel failure here must
+    // surface to the caller, NOT be recorded as a successful cancellation. DBOS.cancelWorkflow on
+    // an already-cancelled or already-finished workflow is itself a no-op, which is what makes it
+    // safe for both the direct caller below AND the router's async onCancelled to land here.
     await DBOS.cancelWorkflow(latest.workflowId)
-    await log.transaction(async tx => {
-      // re-check under the log's write serialization: if the run finished in the meantime,
-      // leave its terminal status alone instead of stamping a cancellation that didn't happen
-      const status = fold(await tx.byTask(taskId)).tasks.get(taskId)?.status
-      if (status !== TASK_STATUS.running && status !== TASK_STATUS.blocked) return
-      await tx.append({
-        taskId, stepId: null, runToken: null,
-        kind: EVENT_KIND.task_status_changed,
-        payload: { taskId, from: status, to: TASK_STATUS.cancelled },
-      })
-    })
   }
+
+  // DBOS recovers pending workflows for its own executorID alone and defaults every process to
+  // 'local', so two runtimes recovered each other's in-flight steps and both ran them (see
+  // storage/runtime-lock.ts). setConfig is the ONLY channel that works: globalParams.executorID is
+  // computed at module-import time from DBOS__VMID, so assigning that env var inside launch() lands
+  // after DBOS has already frozen it — verified against workflow_status.executor_id, which stayed
+  // 'local' the whole way through a kill-9/respawn.
+  const executorId = opts.executorId ?? 'local'
 
   let runtimeLock: RuntimeLock | null = null
   const port: DbosPort = {
+    executorId,
     launch: async () => {
       // before DBOS: recovery is what makes a second runtime destructive, so refuse to become one
       runtimeLock = await acquireRuntimeLock(config.databaseUrl, config.projectId)
@@ -565,6 +587,7 @@ export async function createDbosPort(opts: {
       DBOS.setConfig({
         name: `orc-${projectSuffix(config.projectId).slice(0, 12)}`,
         systemDatabaseUrl: config.systemDatabaseUrl, logLevel: 'warn', runAdminServer: false,
+        executorID: executorId,
       })
       await DBOS.launch()
       // ADAPTATION: registerQueue requires DBOS already launched in @dbos-inc/dbos-sdk v4.23 (see report)
@@ -590,21 +613,11 @@ export async function createDbosPort(opts: {
         runtimeLock = null
       }
     },
-    startChildRun: async (childTaskId: string): Promise<void> => {
-      const state = fold(await log.all())
-      const task = state.tasks.get(childTaskId)
-      if (!task) throw new KernelError(KERNEL_ERROR_CODE.task_not_found, `no task '${childTaskId}'`)
-      const approved = state.plans.get(childTaskId)?.approvedVersion
-      if (!approved) throw new KernelError(KERNEL_ERROR_CODE.invalid_transition, `no approved plan for '${childTaskId}'`)
-      // deterministic id: the router may call this more than once (at-least-once delivery) — attaches idempotently
-      // parent cwd inherits by the shared rule (projections.inheritedCwd): the most recent parent run
-      // that HAD a cwd (findLast, skip null-cwd history), else the project dir — same as retry()
-      const cwd = inheritedCwd(task.parentId ? state.runs.get(task.parentId) : undefined, undefined, config.dir)
-      await DBOS.startWorkflow(runWorkflow, {
-        workflowID: `run:${childTaskId}:v${approved}`,
-        ...runQueueOptions(task.depth),
-      })({ taskId: childTaskId, planVersion: approved, retryIndex: 0, cwd })
-    },
+    // The router's entry point for an approved child. Deterministic workflow id: at-least-once
+    // delivery means this may be called more than once, and it attaches idempotently. It is
+    // startRunAt with no override — the same id, the same queue and, crucially, the same cwd rule
+    // as the CLI's child-follow, which races it for that id.
+    startChildRun: async (childTaskId: string): Promise<void> => { await startRunAt(childTaskId, 0) },
     startRun: (taskId, o) => startRunAt(taskId, 0, o?.cwd),
     retry: async (taskId, o) => {
       const state = await foldState(taskId)
@@ -617,36 +630,31 @@ export async function createDbosPort(opts: {
       // explicit override wins, else inherit the most recent run that HAD a cwd (not at(-1), so a
       // null-cwd retry from before the project-dir default cannot poison inheritance), else the project dir.
       const cwd = inheritedCwd(runs, o?.cwd, config.dir)
-      return startRunAt(taskId, runs.length === 0 ? 0 : Math.max(...runs.map(r => r.retryIndex)) + 1, cwd)
+      return startRunAt(taskId, await nextRetryIndex(taskId), cwd)
     },
     cancelRun: async taskId => {
-      const state = fold(await log.all()) // subtree spans tasks — byTask is not enough here
-      const task = state.tasks.get(taskId)
+      const task = (await foldState(taskId)).tasks.get(taskId)
       if (!task) throw new KernelError(KERNEL_ERROR_CODE.task_not_found, `no task '${taskId}'`)
       if (task.status !== TASK_STATUS.running && task.status !== TASK_STATUS.blocked)
         throw new KernelError(KERNEL_ERROR_CODE.invalid_transition, `task is '${task.status}' — only a running or blocked task can be cancelled`)
-      // children before parent, so a parent gate-waiting on a child sees the child resolve first
-      for (const id of subtreeTaskIds(state, taskId).reverse()) {
-        const t = state.tasks.get(id)!
-        if (t.status === TASK_STATUS.awaiting_approval || t.status === TASK_STATUS.approved || t.status === TASK_STATUS.draft) {
-          await log.transaction(async tx => {
-            const fresh = fold(await tx.byTask(id)).tasks.get(id)!.status
-            if (fresh === TASK_STATUS.awaiting_approval || fresh === TASK_STATUS.approved || fresh === TASK_STATUS.draft)
-              await tx.append({ taskId: id, stepId: null, runToken: null, kind: EVENT_KIND.task_status_changed, payload: { taskId: id, from: fresh, to: TASK_STATUS.cancelled } })
-          })
-          continue
-        }
-        if (t.status === TASK_STATUS.running || t.status === TASK_STATUS.blocked)
-          await cancelOne(id, state)
-      }
+      // kernel.cancelSubtree appends cancelled across the whole subtree (children before parent —
+      // see its own comment); this port then does the DBOS half itself for every task it stamped,
+      // rather than waiting on the live router to notice. The router's onCancelled reaction does
+      // the same idempotent work off the SAME events, so a cancel issued here is never double-charged.
+      const stamped = await kernel.cancelSubtree(taskId)
+      for (const id of stamped) await cancelWorkflowsFor(id)
     },
   }
 
-  // port-level: child-terminal events → split_resolved + DBOS.send; approved children → run start.
+  // port-level: child-terminal events → split_resolved + DBOS.send; approved children → run start;
+  // run_requested → start (Task 1's explicit ask); a cancelled status → finish the DBOS half a
+  // port-less client cannot do itself.
   // References port.startChildRun, so it is built after the port object.
   const router = createSignalRouter({
     log,
     onChildApproved: id => port.startChildRun(id),
+    onRunRequested: async (taskId, o) => { await startRunAt(taskId, o.retry ? await nextRetryIndex(taskId) : 0, o.cwd ?? undefined) },
+    onCancelled: cancelWorkflowsFor,
     send: (dest, result, topic, key) => DBOS.send(dest, result, topic, key),
     sendFeedback: dbosSend,
   })

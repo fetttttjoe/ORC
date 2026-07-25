@@ -1,14 +1,17 @@
-import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync } from 'node:fs'
+import { closeSync, copyFileSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, rmSync } from 'node:fs'
+import { spawn } from 'node:child_process'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { Command, InvalidArgumentError } from 'commander'
-import { EDGE_DIRECTION, EVENT_KIND, LINK_KINDS, MEMORY_ACCESS, NOTE_TIERS, NoteTier, parseLinkSpec, PlanDraft, RUN_OUTCOME, STRATEGY, TASK_STATUS, TERMINAL_TASK_STATUS, LinkKind, slugId, type Analyzer, type RunOutcome, type EventRecord, type MemoryLink, type ExecutionPort, type Plan, type RunHandle, formatModelRate } from '@orc/contracts'
-import { openStorage, Kernel, fold, subtreeTaskIds, grantExtensionTrust, grantMcpTrust, initializeProject, isExtensionTrusted, isMcpTrusted, loadConfig, loadTrust, migrateDatabase, requireProject, taskUsage, type EventLog, type OrcConfig, type PluginHost, type ProjectConfig, type Storage } from '@orc/kernel'
+import { EDGE_DIRECTION, EVENT_KIND, LINK_KINDS, MEMORY_ACCESS, NOTE_TIERS, NoteTier, parseLinkSpec, PlanDraft, RUN_OUTCOME, runOutcomeFor, STRATEGY, TASK_STATUS, LinkKind, slugId, type Analyzer, type TaskStatus, type RunOutcome, type EventRecord, type MemoryLink, type ExecutionPort, type Plan, formatModelRate } from '@orc/contracts'
+import { openStorage, Kernel, atomicWriteFileSync, claimSlot, fold, gatedChildren, liveSupervisors, subtreeTaskIds, grantExtensionTrust, grantMcpTrust, initializeProject, isExtensionTrusted, isMcpTrusted, loadConfig, loadTrust, migrateDatabase, requireProject, taskUsage, type EventLog, type OrcConfig, type PluginHost, type ProjectConfig, type Storage } from '@orc/kernel'
 import { createVaultProjector, parsePlanFile } from '@orc/vault-projector'
 import { consolidateTask, probeMemory, staleNotes, DEFAULT_SWEEP_DAYS } from '@orc/memory'
 import { openMemory } from './memory-open'
 import { buildDistiller } from './consolidation-distiller'
-import { seedRegistries } from './runtime'
+import { seedRegistries, buildRuntime } from './runtime'
+import { runSupervisor } from './serve'
+import { ensureSupervisor, SUPERVISOR_MODE, type SupervisorMode } from './supervisor-client'
 import { isLanguageModel } from './model-guard'
 import { buildModelDiscovery, buildOrcActions, singleStepDraft } from './actions'
 import { renderPlanHuman } from './plan-render'
@@ -57,7 +60,7 @@ const SHIPPED_SKILLS = ['codebase-analysis', 'plan-authoring', 'documentation', 
 // (bin.ts) and the same command inside buildProgram for help/unit visibility
 export function initCommand(dir?: string): Command {
   return new Command('init')
-    .description('initialize project identity (writes .orc/config.json — commit it)')
+    .description('initialize project identity (writes .orc/identity.json — local, never committed)')
     .requiredOption('--name <name>', 'project name')
     .option('--force', 'mint a new identity for a deliberate fork of an existing project')
     .action((opts: { name: string; force?: boolean }) => {
@@ -149,7 +152,7 @@ function resolveDraft(task: { title: string; spec: string }, opts: { file?: stri
 // which is indistinguishable at the terminal from a hang.
 type TailResult =
   | { parked: false; outcome: RunOutcome }
-  | { parked: true; question: string }
+  | { parked: true; taskId: string; question: string }
 
 // An open question means the run MIGHT be parked — not that it is. A step retry can be running
 // concurrently (the operation journal's stale-attempt fence produces exactly that: attempt 1 asks,
@@ -158,36 +161,102 @@ type TailResult =
 // and the tail keeps waiting. A run that is genuinely suspended emits nothing, so it settles fast.
 const PARK_QUIET_MS = 750
 
-// stream-driven tail (spec §5): no polling — LISTEN/NOTIFY pushes each event as it commits
-async function tailUntilDone(kernel: Kernel, taskId: string, handle: RunHandle): Promise<TailResult> {
+// The statuses startRun accepts — anything else is either terminal or waiting on a human, and
+// attaching to it throws. One set, so "can this be driven?" means the same thing everywhere.
+const DRIVABLE_TASK_STATUS: ReadonlySet<TaskStatus> =
+  new Set([TASK_STATUS.approved, TASK_STATUS.running, TASK_STATUS.blocked])
+
+// The statuses that mean somebody is still expected to move this task: a run is under way, or a
+// supervisor is about to start one. Every other status is a stopping point — terminal, blocked
+// awaiting a retry, or gated on a human — so a subtree with none of these has stopped.
+// Deliberately NOT DRIVABLE_TASK_STATUS: `blocked` is drivable by `orc retry`, but nothing drives
+// it unasked, and waiting for it to move would hang until the terminal is closed.
+const ACTIVE_TASK_STATUS: ReadonlySet<TaskStatus> =
+  new Set([TASK_STATUS.approved, TASK_STATUS.running])
+
+// Observe a run to its next stopping point (spec §5): stream-driven, no polling — LISTEN/NOTIFY
+// pushes each event as it commits. The CLI holds no handle to wait on any more, because the
+// supervisor owns the workflow, so "finished" is re-derived from the log instead: nothing anywhere
+// in the subtree is still expected to move. Subtree-wide, because a parent inside join_splits
+// emits nothing while its children work, and its own terminal status says nothing about theirs.
+//
+// `since` is the seq of the run_requested this watch belongs to, 0 when the caller asked for no
+// run. Without it `orc retry` settles instantly on the very status it is asking to leave: the
+// supervisor has not reacted yet, so the tree still looks stopped. Requiring one event later than
+// the ask closes that window — while a run that finished before the subscription opened still
+// settles at once, since its events are already later than the ask.
+export async function watchSubtree(kernel: Kernel, taskId: string, since = 0): Promise<TailResult> {
   const print = (e: EventRecord) => console.log(`${String(e.seq).padStart(4)}  ${e.kind}${e.stepId ? `  ${e.stepId}` : ''}`)
   let lastSeen = Math.max(0, ...(await kernel.eventsFor(taskId)).map(e => e.seq))
   let quiet: ReturnType<typeof setTimeout> | undefined
-  // assigned synchronously by the Promise executor below, before any subscriber can call it
+  // both assigned synchronously by the Promise executor below, before any subscriber can call them
   let confirmPark: () => void = () => {}
-  const parked = new Promise<TailResult>(resolve => {
-    // openFeedback is the one derivation the reply side uses too, so "open" can never mean two
-    // things — and re-reading it when the timer fires means an answer that arrived meanwhile wins.
+  let settle: (result: TailResult) => void = () => {}
+  const stopped = new Promise<TailResult>(resolve => {
+    settle = resolve
+    // openFeedbackInSubtree is the one derivation the reply side resolves against too, so "open"
+    // can never mean two things — and re-reading it when the timer fires means an answer that
+    // arrived meanwhile wins. Subtree-wide, because a step that joins its splits waits on a child
+    // whose question lands on the CHILD's stream: the parent emits nothing while it is blocked.
     confirmPark = () => {
       quiet = setTimeout(() => {
-        void kernel.openFeedback(taskId)
-          .then(open => { if (open) resolve({ parked: true, question: open.question }) })
+        void kernel.openFeedbackInSubtree(taskId)
+          .then(open => { if (open) resolve({ parked: true, taskId: open.taskId, question: open.question }) })
           .catch(() => {})
       }, PARK_QUIET_MS)
     }
   })
+
+  // Which tasks this watch listens to, AND whether any of them still has somebody expected to move
+  // it — one fold answers both, so membership and stopped-ness can never disagree about a task that
+  // appeared and finished between two events. Seeded at attach and refreshed on every event that
+  // can change either: split_proposed (a new child, on the parent's own stream, in the same
+  // transaction) and task_status_changed. Events outside the subtree belong to another run.
+  let subtree = new Set<string>()
+  const refreshSubtree = async (): Promise<void> => {
+    const state = await kernel.state()
+    subtree = new Set(subtreeTaskIds(state, taskId))
+    if (lastSeen <= since) return
+    for (const id of subtree)
+      if (ACTIVE_TASK_STATUS.has(state.tasks.get(id)?.status ?? TASK_STATUS.draft)) return
+    settle({ parked: false, outcome: runOutcomeFor(state.tasks.get(taskId)?.status) })
+  }
+
+  // The OTHER thing that stops a run, and the only one that announces nothing: `task_split` honours
+  // the project's approvalPolicy, so under the default (manual) the child parks at
+  // 'awaiting_approval' and the parent's join_splits recv's forever — no event, no output, no
+  // outcome. Observed live (events-pilot.log 161-188: three gated splits, then join, then silence).
+  //
+  // Advisory, NOT a park: a gated child is a stopping point for the tree, so this watch settles
+  // rather than hanging on a status only a human can change — and names the command that unblocks
+  // it. Triggered by split_proposed, which lands on the PARENT's stream in the same transaction
+  // that parks the child, so the status is already final — never by a timer, so a slow model call
+  // can never be mistaken for a gate.
+  const advised = new Set<string>()
+  const adviseGated = async (): Promise<void> => {
+    for (const child of await kernel.gatedChildren(taskId)) {
+      if (advised.has(child.id)) continue
+      advised.add(child.id)
+      console.log(`child awaits plan approval: ${child.title}  (orc approve ${child.id})`)
+    }
+  }
+
+  await refreshSubtree()
   const unsub = await kernel.subscribe({ fromSeq: lastSeen }, e => {
-    if (e.taskId !== taskId) return
-    print(e)
-    lastSeen = e.seq
-    clearTimeout(quiet) // the run is still moving: whatever we were about to conclude is stale
+    if (e.taskId === null || !subtree.has(e.taskId)) return
+    // only the tailed task's events are printed and tracked — lastSeen drives the final drain
+    if (e.taskId === taskId) { print(e); lastSeen = e.seq }
+    clearTimeout(quiet) // the tree is still moving: whatever we were about to conclude is stale
     if (e.kind === EVENT_KIND.feedback_requested) confirmPark()
+    if (e.kind === EVENT_KIND.split_proposed) void refreshSubtree().then(adviseGated).catch(() => {})
+    else if (e.kind === EVENT_KIND.task_status_changed) void refreshSubtree().catch(() => {})
   })
   try {
     // already at a gate when we attached — same quiet rule, so attaching to a busy run cannot
     // mistake an older unanswered question for a stopped one
-    if (await kernel.openFeedback(taskId)) confirmPark()
-    return await Promise.race([handle.wait().then(outcome => ({ parked: false as const, outcome })), parked])
+    if (await kernel.openFeedbackInSubtree(taskId)) confirmPark()
+    await adviseGated() // attaching to a tree that is already gated says so at once
+    return await stopped
   } finally {
     clearTimeout(quiet)
     await unsub()
@@ -196,6 +265,24 @@ async function tailUntilDone(kernel: Kernel, taskId: string, handle: RunHandle):
 }
 
 
+// Start a supervisor that survives this command. Detached on purpose: a supervisor left in the
+// CLI's process group would take the ctrl-c meant for the watch, which is the exact behaviour this
+// phase removes. node's spawn is what carries `detached` (setsid); Bun.spawn has no equivalent.
+function spawnSupervisor(config: ProjectConfig): void {
+  const logPath = path.join(config.dir, '.orc', 'serve.log')
+  mkdirSync(path.dirname(logPath), { recursive: true })
+  const log = openSync(logPath, 'a')
+  try {
+    // argv[1] is this CLI's own entry point — re-running it is what makes the child the same orc,
+    // whether it was reached through the bin shim, `bun run`, or a linked node_modules/.bin
+    spawn(process.execPath, [process.argv[1] ?? '', 'serve'], {
+      cwd: config.dir, detached: true, stdio: ['ignore', log, log],
+    }).unref()
+  } finally {
+    closeSync(log) // the child holds its own dup of the fd
+  }
+}
+
 export function buildProgram(
   kernel: Kernel,
   portFactory?: () => Promise<ExecutionPort>,
@@ -203,6 +290,7 @@ export function buildProgram(
 ): Command {
   const program = new Command('orc')
   program.description('multi-agent orchestrator')
+  program.option('--no-daemon', 'hold the execution runtime in this command instead of a background supervisor (tests, CI, benchmarks)')
   program.addCommand(initCommand(plugin?.config.dir))
   program.addCommand(databaseCommand(plugin?.config.dir))
 
@@ -239,13 +327,12 @@ export function buildProgram(
       const t = await kernel.createGroundedTask({
         title, spec: opts.spec, modelRef: opts.model, analyzerRef: opts.analyzer, budgetUSD: opts.budget ?? null,
         modelCatalog: await discovery?.listModelOptions().catch(() => []) ?? [],
+        ...(plugin ? { maxIterations: plugin.config.maxIterations } : {}),
       })
       console.log(t.id)
       // auto-start: the grounded-plan template is policy-approved (its real gate is the
       // conversational one inside the plan step), so the analyze→plan conversation begins now
-      const handle = await (await needPort()).startRun(t.id, { cwd: plugin?.config.dir ?? process.cwd() })
-      console.log(`run ${handle.workflowId} started — tailing events (ctrl-c stops the run; re-run orc run ${t.id} to resume)`)
-      await driveRun(t.id, handle)
+      await requestAndWatch(t.id, {})
     })
 
   const requireTask = async (taskId: string) => {
@@ -305,8 +392,21 @@ export function buildProgram(
     .description('approve the latest plan (the human gate)')
     .option('--version <n>', 'expected version (fails if stale)', parseNonNegativeInteger)
     .action(async (taskId: string, opts: { version?: number }) => {
+      // Approving only UNBLOCKS a split child — something still has to execute it, exactly as with
+      // `orc reply`, and a bare approval used to leave the parent parked inside join_splits while
+      // the child never started. A supervisor is what executes it (its router reacts to
+      // plan_approved), so make sure one exists BEFORE the approval it has to react to. A root's
+      // own approval stays a pure approval — running it is a separate decision (`orc run`).
+      const root = await rootOf(taskId)
+      if (root !== taskId) await ensureRuntime()
       const plan = await kernel.approvePlan(taskId, opts.version)
       console.log(`plan v${plan.version} approved`)
+      if (root === taskId) return
+      // Watch the ROOT, because that is the run whose join is waiting — and only while it is
+      // actually running: approving is never itself a decision to start a run.
+      if ((await kernel.getTask(root))?.status !== TASK_STATUS.running) return
+      console.log(`watching the run at ${root}`)
+      report(await watchSubtree(kernel, root))
     })
 
   program
@@ -322,21 +422,19 @@ export function buildProgram(
     .command('reply <taskId> <text>')
     .description("answer a task's open feedback question (e.g. 'orc reply <taskId> approve'), then drive the resumed run")
     .action(async (taskId: string, text: string) => {
-      // DBOS.send (behind kernel.send) requires DBOS launched in THIS process — reply typically
-      // runs in a fresh CLI invocation, separate from the `orc run` it's answering, so the port
-      // must be brought up here first, exactly like run/retry/cancel do.
-      const port = await needPort()
+      // Answering only UNBLOCKS the step — something still has to carry the answer into the parked
+      // workflow (the supervisor's router does, off feedback_provided) and then keep executing. A
+      // reply from a fresh terminal used to leave the answer sitting durable in DBOS's notification
+      // table with nobody to act on it; ensuring a supervisor first is what makes this command's
+      // promise true. No run is requested: the run already exists, parked on the question.
+      await ensureRuntime()
       const topic = await kernel.replyFeedback(taskId, text)
       if (!topic) {
         console.log(`no open feedback question for task '${taskId}'`)
         return
       }
       console.log(`answered feedback:${topic}`)
-      // Sending the answer only UNBLOCKS the step — something still has to execute it. Nothing in
-      // this system supervises runs: a run is driven by the process that attached to it, so a reply
-      // from a fresh terminal left the answer sitting durable in DBOS's notification table while the
-      // run stayed parked. Attaching here is what makes this command's promise true.
-      await driveRun(taskId, await port.startRun(taskId, { cwd: plugin?.config.dir ?? process.cwd() }))
+      report(await watchSubtree(kernel, taskId))
     })
 
   program
@@ -434,80 +532,105 @@ export function buildProgram(
 
   // one shared implementation of every mutating command — the web adapter gets the same object.
   // (discovery is declared up top so the `plan` command's rate line can reach it too)
-  const actions = () => buildOrcActions({ kernel, needPort, plugin, listModels: discovery?.listModels, listModelOptions: discovery?.listModelOptions })
+  const actions = () => buildOrcActions({ kernel, ensureRuntime, plugin, listModels: discovery?.listModels, listModelOptions: discovery?.listModelOptions })
 
   const needPort = async (): Promise<ExecutionPort> => {
     if (!portFactory) throw new Error('execution commands are unavailable in this context')
     return portFactory()
   }
 
-  // Drive an already-started run to its next stopping point and report what happened. The ONE place
-  // `new`, `run`, `retry` and `reply` share, so they cannot drift on what a terminal outcome, a
-  // cancellation, or a parked human gate means at the shell.
-  const driveRun = async (taskId: string, handle: RunHandle): Promise<void> => {
-    // A DBOS-cancelled workflow's getResult() REJECTS (split-run.test.ts:245 notes it may resolve
-    // or reject). `orc cancel` from another terminal is an advertised path — the intro line
-    // promises ctrl-c stops the run — so surfacing it as a raw driver error and exit 1 is
-    // indistinguishable from a crash, while `orc status` correctly reads 'cancelled'.
-    const result = await tailUntilDone(kernel, taskId, handle).catch(async (err): Promise<TailResult> => {
-      if ((await kernel.getTask(taskId))?.status === TASK_STATUS.cancelled)
-        return { parked: false, outcome: RUN_OUTCOME.cancelled }
-      throw err
+  // How long to wait for a freshly spawned supervisor's first heartbeat. A cold one pays a DBOS
+  // launch, a plugin load and a Surreal connect before it beats, so this is generous — but bounded,
+  // so a broken install reports where to look instead of hanging.
+  // ponytail: fixed, not configurable — make it a setting if a real deployment ever boots slower.
+  const SPAWN_WAIT_MS = 15_000
+
+  // commander maps `--no-daemon` to `daemon: false`. The env var is the same switch for callers
+  // that cannot pass flags (the bench harness invokes orc through a shell).
+  const noDaemon = (): boolean => program.opts().daemon === false || process.env.ORC_NO_DAEMON === '1'
+
+  // Guarantee something will drive what this command is about to ask for. In-process means THIS
+  // command supervises, so the port is built here: its signal router is what reacts to the ask.
+  // Without a project context (unit tests, embedded hosts) there is no heartbeat to read and
+  // nothing to spawn, so the command holds the runtime itself, exactly as it always did.
+  const ensureRuntime = async (): Promise<SupervisorMode> => {
+    const storage = plugin?.storage
+    const mode = await ensureSupervisor({
+      live: storage ? () => liveSupervisors(storage, new Date()) : async () => [],
+      spawn: () => spawnSupervisor(needPlugin().config),
+      waitMs: SPAWN_WAIT_MS,
+      noDaemon: noDaemon() || !storage,
+      sleep: ms => Bun.sleep(ms),
     })
+    if (mode === SUPERVISOR_MODE.inProcess) await needPort()
+    return mode
+  }
+
+  // What a watch's result means at the shell. The ONE place `new`, `run`, `retry`, `reply` and
+  // `approve` share, so they cannot drift on what a terminal outcome, a cancellation or a parked
+  // human gate prints and exits with.
+  const report = (result: TailResult): void => {
     // A parked run is not a failure: the work is durable and waiting on a person, so exit 0 and
     // name the one command that unparks it.
     if (result.parked) {
+      // the id names the task that ASKED, which after a split is the child, not the task being
+      // watched — replying to the wrong one resolves nothing and leaves the tree parked
       console.log(`run parked on a question: ${result.question}`)
-      console.log(`answer it to continue: orc reply ${taskId} <text>`)
+      console.log(`answer it to continue: orc reply ${result.taskId} <text>`)
       return
     }
     console.log(`run finished: ${result.outcome}`)
-    // A task that split is not done when ITS steps are: finalize_plan hands the work to child
-    // tasks whose runs were started by this process. Leaving now stranded them — the child sat
-    // `running` with no executor until someone ran `orc run <childId>` by hand. Follow the subtree.
-    for (const child of await unfinishedDescendants(taskId)) {
-      console.log(`following child run ${child}`)
-      await driveRun(child, await (await needPort()).startRun(child))
-      return
-    }
     if (result.outcome !== RUN_OUTCOME.done) throw new CommandFailure(1)
   }
 
-  // Descendants of `taskId` that are not in a terminal state, nearest first.
-  const unfinishedDescendants = async (taskId: string): Promise<string[]> => {
+  // The run a whole tree belongs to: a split child's work only ever resolves a gate held by an
+  // ancestor, so the root is the run to watch.
+  const rootOf = async (taskId: string): Promise<string> => {
     const state = await kernel.state()
-    return subtreeTaskIds(state, taskId)
-      .filter(id => id !== taskId)
-      .filter(id => {
-        const status = state.tasks.get(id)?.status
-        return status !== undefined && !TERMINAL_TASK_STATUS.has(status)
-      })
+    let id = taskId
+    for (let parent = state.tasks.get(id)?.parentId; parent; parent = state.tasks.get(id)?.parentId) id = parent
+    return id
   }
 
-  const execAction = (start: (port: ExecutionPort, taskId: string, cwd?: string) => Promise<RunHandle>, intro: (h: RunHandle, taskId: string) => string) =>
-    async (taskId: string, opts: { cwd?: string }) => {
-      const handle = await start(await needPort(), taskId, opts.cwd)
-      console.log(intro(handle, taskId))
-      await driveRun(taskId, handle)
-    }
+  // The admission `startRunAt` enforces, checked here so a request that could never be served is
+  // refused BEFORE it is recorded: a run_requested naming a draft task would sit in the log for
+  // good, and every supervisor that boots would pick it up and fail on it again.
+  const requireDrivable = async (taskId: string): Promise<void> => {
+    const task = await requireTask(taskId)
+    const approved = (await kernel.state()).plans.get(taskId)?.approvedVersion
+    if (!approved || !DRIVABLE_TASK_STATUS.has(task.status))
+      throw new Error(`task is '${task.status}' — approve a plan first (orc approve ${taskId})`)
+  }
+
+  // Ask for a run, then watch it. The command starts nothing: a supervisor turns the recorded ask
+  // into a workflow, which is why the run now outlives the terminal that asked for it.
+  const requestAndWatch = async (taskId: string, opts: { cwd?: string; retry?: boolean }): Promise<void> => {
+    await ensureRuntime()
+    const since = await kernel.requestRun(taskId, opts)
+    console.log(`run requested for ${taskId} — watching (ctrl-c stops watching, not the run: orc cancel ${taskId} stops it)`)
+    report(await watchSubtree(kernel, taskId, since))
+  }
 
   program
     .command('run <taskId>')
-    .description('execute the approved plan (durable; re-run attaches/resumes)')
+    .description('execute the approved plan (durable; the supervisor drives it, re-running attaches)')
     .option('--cwd <dir>', 'shared workspace for all steps (default: the project directory)')
-    .action(execAction(
-      (port, taskId, cwd) => port.startRun(taskId, { cwd }),
-      (h, taskId) => `run ${h.workflowId} started — tailing events (ctrl-c stops the run; re-run orc run ${taskId} to resume)`,
-    ))
+    .action(async (taskId: string, opts: { cwd?: string }) => {
+      await requireDrivable(taskId)
+      await requestAndWatch(taskId, { cwd: opts.cwd })
+    })
 
   program
     .command('retry <taskId>')
     .description('re-run failed steps of a blocked task as new attempts')
     .option('--cwd <dir>', "workspace override (default: the previous run's cwd, else the project directory)")
-    .action(execAction(
-      (port, taskId, cwd) => port.retry(taskId, { cwd }),
-      h => `retry ${h.workflowId} started`,
-    ))
+    .action(async (taskId: string, opts: { cwd?: string }) => {
+      // the same refusal port.retry made, kept client-side for the same reason as requireDrivable:
+      // an ask nobody can serve must not reach the log
+      const status = (await requireTask(taskId)).status
+      if (status !== TASK_STATUS.blocked) throw new Error(`task is '${status}' — only a blocked task can be retried`)
+      await requestAndWatch(taskId, { cwd: opts.cwd, retry: true })
+    })
 
   program
     .command('cancel <taskId>')
@@ -547,6 +670,66 @@ export function buildProgram(
       await new Promise(() => {}) // serve until Ctrl-C
     })
 
+  // Phase 1 keeps exactly one supervisor per project: the zone write-fence is still an in-process
+  // Map (plugins/executor-api-loop/src/tools.ts), so two live supervisors would last-write-wins
+  // over each other's files. Phase 2 moves claims to Postgres and raises this — presence is
+  // already a heartbeat, so nothing else has to change when it does.
+  const PHASE1_MAX_SLOTS = 1
+  const servePidFile = (dir: string) => path.join(dir, '.orc', 'serve.pid')
+  const SERVE_NEEDS_STORAGE = 'serve needs a live storage connection'
+
+  const serve = program.command('serve').description('run the project supervisor (holds the execution runtime)')
+  serve
+    .command('start', { isDefault: true })
+    .description('start the supervisor in the foreground (auto-spawned in the background by other commands)')
+    .option('--idle <minutes>', 'exit after this long with no live work', parsePositiveInteger, 30)
+    .action(async (opts: { idle: number }) => {
+      const { host, hub, config, storage } = needPlugin()
+      if (!storage) throw new Error(SERVE_NEEDS_STORAGE)
+      // Claiming the slot IS the admission decision (task brief "Slot claiming") — a null claim
+      // means a live heartbeat already holds every slot Phase 1 allows, not a separate check that
+      // could disagree with it.
+      const executorId = await claimSlot(storage, PHASE1_MAX_SLOTS)
+      if (!executorId) {
+        console.error(`another supervisor is already live for '${config.projectName}' — see: orc serve status`)
+        throw new CommandFailure(1)
+      }
+      const port = await buildRuntime({ host, hub, config, storage, executorId })
+      // for `serve status`/`serve stop` only — presence (admission, liveness) is decided by the
+      // heartbeat row alone, never by this file's existence
+      atomicWriteFileSync(servePidFile(config.dir), `${process.pid}\n`)
+      console.log(`orc serve: ${executorId}  pid ${process.pid}  idle exit after ${opts.idle}m — ctrl-c to stop`)
+      try {
+        await runSupervisor({ storage, port, idleMs: opts.idle * 60_000 })
+      } finally {
+        // about to exit either way — draining would block shutdown on an hour-long parked gate
+        // (dbos-port.ts's own `drain: false` rationale); recovery owns resumption on the next boot.
+        await port.shutdown({ drain: false })
+        rmSync(servePidFile(config.dir), { force: true })
+      }
+    })
+  serve
+    .command('status')
+    .description('list live supervisors')
+    .action(async () => {
+      const { storage } = needPlugin()
+      if (!storage) throw new Error(SERVE_NEEDS_STORAGE)
+      const rows = await liveSupervisors(storage, new Date())
+      if (rows.length === 0) { console.log('_no live supervisor_'); return }
+      for (const r of rows) console.log(`${r.executorId}  pid ${r.pid}  ${r.host}  since ${r.startedAt}  last seen ${r.lastSeenAt}`)
+    })
+  serve
+    .command('stop')
+    .description('stop the live supervisor')
+    .action(async () => {
+      const { storage } = needPlugin()
+      if (!storage) throw new Error(SERVE_NEEDS_STORAGE)
+      const rows = await liveSupervisors(storage, new Date())
+      if (rows.length === 0) { console.log('_no live supervisor_'); return }
+      for (const r of rows) process.kill(r.pid, 'SIGTERM')
+      console.log(`sent SIGTERM to ${rows.map(r => r.executorId).join(', ')}`)
+    })
+
   program
     .command('status <taskId>')
     .description('per-step state and cost totals')
@@ -575,6 +758,10 @@ export function buildProgram(
       // conversation isn't one-directional — the human sees the prompt, not just a blind reply target.
       const feedback = await kernel.openFeedback(taskId)
       if (feedback) console.log(`  awaiting reply: ${feedback.question}  (orc reply ${taskId} <text>)`)
+      // the other human gate: a split the manual approvalPolicy parked. Same surface, because the
+      // parent's join_splits waits on it just as durably as it waits on an answer.
+      for (const child of gatedChildren(state, taskId))
+        console.log(`  awaiting approval: ${child.title}  (orc approve ${child.id})`)
       const ops = [...state.operations.values()]
         .filter(o => o.taskId === taskId)
         .sort((a, b) => a.startedSeq - b.startedSeq)

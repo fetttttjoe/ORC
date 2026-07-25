@@ -16,7 +16,7 @@ const AUTO_APPROVE = ApprovalPolicy.parse({ default: 'auto' })
 // ponytail: one decomposition level per approve — a subplan that itself decomposes re-splits when
 // its child runs; recurse only when a real 3-level plan needs it.
 export function finalizePlanTool(opts: {
-  kernel: Pick<Kernel, 'proposeSplit' | 'listPlanNotes' | 'approvedPlanHash'>
+  kernel: Pick<Kernel, 'proposeSplit' | 'listPlanNotes' | 'approvedPlanHash' | 'planNotesChangedSince'>
   config: { maxDepth: number }
   p: { taskId: string; stepId: string; runToken: string; role: string; executor: string; modelRef: string; maxIterations: number }
 }): ResolvedTool {
@@ -41,11 +41,17 @@ export function finalizePlanTool(opts: {
         if (!notes.some(n => n.id === MASTERPLAN_NOTE_ID))
           return { output: { error: `no '${MASTERPLAN_NOTE_ID}' note in scope '${planScope(p.taskId)}' — author the plan-note graph first` }, isError: true }
         const currentHash = planGraphHash(notes)
-        const approvedHash = await kernel.approvedPlanHash(p.taskId, p.runToken)
-        if (!approvedHash)
+        const approved = await kernel.approvedPlanHash(p.taskId, p.runToken)
+        if (!approved)
           return { output: { error: 'finalize_plan requires human approval for this plan run' }, isError: true }
-        if (approvedHash !== currentHash)
-          return { output: { error: 'the plan-note graph changed after approval — ask the human to approve it again' }, isError: true }
+        if (approved.hash !== currentHash) {
+          // Naming the notes is the difference between a gate the human can clear in a glance and
+          // one they have to re-derive. Observed live: an agent retyped two link kinds after
+          // approval and spent a full round-trip re-asking, with nothing to say about what moved.
+          const changed = await kernel.planNotesChangedSince(p.taskId, approved.seq)
+          const what = changed.length > 0 ? ` (edited since: ${changed.map(id => `'${id}'`).join(', ')})` : ''
+          return { output: { error: `the plan-note graph changed after approval${what} — ask the human to approve it again, then call finalize_plan without editing in between` }, isError: true }
+        }
         const plan = instantiateFrozenPlan(MASTERPLAN_NOTE_ID, notes)
         const master = notes.find(n => n.id === MASTERPLAN_NOTE_ID)!
         const r = await kernel.proposeSplit({

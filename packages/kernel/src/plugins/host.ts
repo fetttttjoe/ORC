@@ -48,6 +48,14 @@ export async function createPluginHost(
   const extensions = new ExtensionHost(api)
   await extensions.load(config.extensions, decl => isExtensionTrusted(loadTrust(config.dir), decl, config.dir), config.dir)
   const skills = await SkillIndex.open(config.skillsDir)
+  // A caller that builds its own runtime outside the CLI's memoized port cache (`orc serve`,
+  // which needs a claimed slot id the shared no-arg factory cannot express) and that cache's own
+  // fallback cleanup can both reach this SAME host on the same process exit. Unlike
+  // extensions.shutdown()/skills.close()/HookBus.drain(), which are naturally idempotent,
+  // session_shutdown has no dedupe of its own — a second emit is a second "session ended"
+  // notification to every listener, not a no-op. Guard here, once, rather than in every caller
+  // that might race to be the one that tears down.
+  let shutDown = false
 
   return {
     providers, executors, analyzers, skills, hooks, extensions,
@@ -86,6 +94,8 @@ export async function createPluginHost(
       return errors
     },
     shutdown: async () => {
+      if (shutDown) return
+      shutDown = true
       await hooks.drain()
       await hooks.emit(HOOK_NAME.session_shutdown)
       await extensions.shutdown()

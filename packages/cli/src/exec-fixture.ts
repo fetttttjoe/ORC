@@ -15,6 +15,20 @@ const port: ExecutionPort = {
   retry: async () => handle,
   cancelRun: async () => {},
 }
+// The supervisor's half, faked: this fixture holds no runtime, so once the command has recorded
+// its ask, the statuses a real run would stamp are appended here. Without them the watch would
+// wait forever on a task nothing is driving — which is the point of a supervisor, not a bug.
+const stamp = (from: string, to: string) => log.append({
+  taskId, stepId: null, runToken: null, kind: 'task_status_changed', payload: { taskId, from, to },
+})
+const driving = (async () => {
+  for (let i = 0; i < 500; i++) {
+    if ((await log.byTask(taskId)).some(e => e.kind === 'run_requested')) break
+    await Bun.sleep(20)
+  }
+  await stamp('approved', 'running')
+  await stamp('running', outcome === 'done' ? 'done' : 'blocked')
+})()
 // mirrors bin.ts: a command states its outcome by throwing, the entry point turns it into the
 // process's exit status. This fixture exists to observe that status, so it must translate it the
 // same way the real binary does.
@@ -26,5 +40,6 @@ try {
   if (failure === null) throw error
   code = failure
 }
+await driving
 await log.close()
 process.exit(code)

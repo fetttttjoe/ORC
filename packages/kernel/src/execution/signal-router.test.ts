@@ -95,6 +95,8 @@ describe('createSignalRouter (integration, real EventLog)', () => {
     router = createSignalRouter({
       log,
       onChildApproved: async () => {},
+      onRunRequested: async () => {},
+      onCancelled: async () => {},
       send: async () => {},
       sendFeedback: async (dest, message, topic, key) => { sends.push({ dest, message, topic, key }) },
     })
@@ -123,7 +125,7 @@ describe('createSignalRouter (integration, real EventLog)', () => {
       })
     }
     router = createSignalRouter({
-      log, onChildApproved: async () => {}, send: async () => {},
+      log, onChildApproved: async () => {}, onRunRequested: async () => {}, onCancelled: async () => {}, send: async () => {},
       sendFeedback: async (dest, _message, _topic, key) => { sends.push({ dest, key }) },
     })
 
@@ -152,7 +154,7 @@ describe('createSignalRouter (integration, real EventLog)', () => {
 
     const sends: Array<{ dest: string; message: string; topic: string; key: string }> = []
     router = createSignalRouter({
-      log, onChildApproved: async () => {}, send: async () => {},
+      log, onChildApproved: async () => {}, onRunRequested: async () => {}, onCancelled: async () => {}, send: async () => {},
       sendFeedback: async (dest, message, topic, key) => { sends.push({ dest, message, topic, key }) },
     })
     await router.start()
@@ -164,7 +166,7 @@ describe('createSignalRouter (integration, real EventLog)', () => {
 
   it('route 1: terminal child appends split_resolved once and sends on split:<id> with idempotencyKey', async () => {
     const sends: { dest: string; result: SplitResult; topic: string; key: string }[] = []
-    router = createSignalRouter({ log, onChildApproved: async () => {}, send: async (dest, result, topic, key) => { sends.push({ dest, result, topic, key }) }, sendFeedback: async () => {} })
+    router = createSignalRouter({ log, onChildApproved: async () => {}, onRunRequested: async () => {}, onCancelled: async () => {}, send: async (dest, result, topic, key) => { sends.push({ dest, result, topic, key }) }, sendFeedback: async () => {} })
     await router.start()
     await seedSplit()
     await terminal(TASK_STATUS.done)
@@ -178,7 +180,7 @@ describe('createSignalRouter (integration, real EventLog)', () => {
     const sends: SplitResult[] = []
     await seedSplit()
     await terminal(TASK_STATUS.blocked) // lands with NO router subscribed
-    router = createSignalRouter({ log, onChildApproved: async () => {}, send: async (_d, result) => { sends.push(result) }, sendFeedback: async () => {} })
+    router = createSignalRouter({ log, onChildApproved: async () => {}, onRunRequested: async () => {}, onCancelled: async () => {}, send: async (_d, result) => { sends.push(result) }, sendFeedback: async () => {} })
     await router.start() // sweep runs synchronously before returning
     expect(await resolvedCount()).toBe(1)
     expect(sends).toHaveLength(1)
@@ -191,14 +193,14 @@ describe('createSignalRouter (integration, real EventLog)', () => {
     // child approved while the router was down — the plan_approved event will never be redelivered
     await log.append({ taskId: 'c', stepId: null, runToken: null, kind: EVENT_KIND.plan_approved, payload: { taskId: 'c', version: 1, approvedAt: 'T', approvedBy: 'policy' } })
     await log.append({ taskId: 'c', stepId: null, runToken: null, kind: EVENT_KIND.task_status_changed, payload: { taskId: 'c', from: TASK_STATUS.draft, to: TASK_STATUS.approved } })
-    router = createSignalRouter({ log, onChildApproved: async id => { approved.push(id) }, send: async () => {}, sendFeedback: async () => {} })
+    router = createSignalRouter({ log, onChildApproved: async id => { approved.push(id) }, onRunRequested: async () => {}, onCancelled: async () => {}, send: async () => {}, sendFeedback: async () => {} })
     await router.start() // sweep runs (and awaits onChildApproved) synchronously before returning
     expect(approved).toEqual(['c'])
   })
 
   it('route 2: plan_approved for a pending-split child calls onChildApproved', async () => {
     const approved: string[] = []
-    router = createSignalRouter({ log, onChildApproved: async id => { approved.push(id) }, send: async () => {}, sendFeedback: async () => {} })
+    router = createSignalRouter({ log, onChildApproved: async id => { approved.push(id) }, onRunRequested: async () => {}, onCancelled: async () => {}, send: async () => {}, sendFeedback: async () => {} })
     await router.start()
     await seedSplit()
     await log.append({ taskId: 'c', stepId: null, runToken: null, kind: EVENT_KIND.plan_approved, payload: { taskId: 'c', version: 1, approvedAt: 'T', approvedBy: 'policy' } })
@@ -208,7 +210,7 @@ describe('createSignalRouter (integration, real EventLog)', () => {
 
   it('redelivery: a second terminal status does not double-append split_resolved', async () => {
     const sends: SplitResult[] = []
-    router = createSignalRouter({ log, onChildApproved: async () => {}, send: async (_d, result) => { sends.push(result) }, sendFeedback: async () => {} })
+    router = createSignalRouter({ log, onChildApproved: async () => {}, onRunRequested: async () => {}, onCancelled: async () => {}, send: async (_d, result) => { sends.push(result) }, sendFeedback: async () => {} })
     await router.start()
     await seedSplit()
     await terminal(TASK_STATUS.done)
@@ -217,5 +219,79 @@ describe('createSignalRouter (integration, real EventLog)', () => {
     await Bun.sleep(200) // give the pump time to (not) re-resolve
     expect(await resolvedCount()).toBe(1)
     expect(sends).toHaveLength(1)
+  })
+
+  it('a run_requested event asks the runtime to start that run, with its recorded cwd', async () => {
+    const started: Array<{ taskId: string; cwd: string | null; retry: boolean }> = []
+    router = createSignalRouter({
+      log, onChildApproved: async () => {}, onCancelled: async () => {},
+      onRunRequested: async (taskId, o) => { started.push({ taskId, ...o }) },
+      send: async () => {}, sendFeedback: async () => {},
+    })
+    await router.start()
+    await log.append({ taskId: 't1', stepId: null, runToken: null, kind: EVENT_KIND.task_created, payload: { task: taskNode('t1', null) } })
+    await log.append({ taskId: 't1', stepId: null, runToken: null, kind: EVENT_KIND.run_requested, payload: { taskId: 't1', cwd: '/tree', retry: false } })
+    expect(await waitFor(async () => started.length > 0)).toBe(true)
+    expect(started).toEqual([{ taskId: 't1', cwd: '/tree', retry: false }])
+  })
+
+  it('sweep: a run_requested that landed before start still starts the run', async () => {
+    const started: string[] = []
+    await log.append({ taskId: 't1', stepId: null, runToken: null, kind: EVENT_KIND.task_created, payload: { task: taskNode('t1', null) } })
+    // lands with NO router subscribed — the pump never redelivers it, only start()'s sweep can catch it
+    await log.append({ taskId: 't1', stepId: null, runToken: null, kind: EVENT_KIND.run_requested, payload: { taskId: 't1', cwd: null, retry: false } })
+    router = createSignalRouter({
+      log, onChildApproved: async () => {}, onCancelled: async () => {},
+      onRunRequested: async taskId => { started.push(taskId) },
+      send: async () => {}, sendFeedback: async () => {},
+    })
+    await router.start() // sweep runs synchronously before returning
+    expect(started).toEqual(['t1'])
+  })
+
+  it('a task stamped cancelled asks the runtime to cancel its workflows', async () => {
+    const cancelled: string[] = []
+    router = createSignalRouter({
+      log, onChildApproved: async () => {}, onRunRequested: async () => {},
+      onCancelled: async id => { cancelled.push(id) },
+      send: async () => {}, sendFeedback: async () => {},
+    })
+    await router.start()
+    await log.append({ taskId: 't1', stepId: null, runToken: null, kind: EVENT_KIND.task_created, payload: { task: taskNode('t1', null) } })
+    await log.append({ taskId: 't1', stepId: null, runToken: null, kind: EVENT_KIND.task_status_changed, payload: { taskId: 't1', from: TASK_STATUS.running, to: TASK_STATUS.cancelled } })
+    expect(await waitFor(async () => cancelled.length > 0)).toBe(true)
+    expect(cancelled).toEqual(['t1'])
+  })
+
+  it('sweep: a retry request that landed after an earlier run still starts it', async () => {
+    const started: Array<{ taskId: string; retry: boolean }> = []
+    await log.append({ taskId: 't1', stepId: null, runToken: null, kind: EVENT_KIND.task_created, payload: { task: taskNode('t1', null) } })
+    // an earlier run already happened — the OLD "does this task have any run" gate would have
+    // wrongly treated the request below as already served
+    await log.append({ taskId: 't1', stepId: null, runToken: null, kind: EVENT_KIND.run_started, payload: { taskId: 't1', planVersion: 1, retryIndex: 0, workflowId: 'run:t1:v1', cwd: null } })
+    // the retry request lands AFTER that run, with no router subscribed
+    await log.append({ taskId: 't1', stepId: null, runToken: null, kind: EVENT_KIND.run_requested, payload: { taskId: 't1', cwd: null, retry: true } })
+    router = createSignalRouter({
+      log, onChildApproved: async () => {}, onCancelled: async () => {},
+      onRunRequested: async (taskId, o) => { started.push({ taskId, retry: o.retry }) },
+      send: async () => {}, sendFeedback: async () => {},
+    })
+    await router.start() // sweep runs synchronously before returning
+    expect(started).toEqual([{ taskId: 't1', retry: true }])
+  })
+
+  it('sweep: a cancelled task that landed before start still cancels its workflows', async () => {
+    const cancelled: string[] = []
+    await log.append({ taskId: 't1', stepId: null, runToken: null, kind: EVENT_KIND.task_created, payload: { task: taskNode('t1', null) } })
+    // lands with NO router subscribed — DBOS recovery on THIS boot would otherwise resume the
+    // workflow with nobody ever telling it to stop
+    await log.append({ taskId: 't1', stepId: null, runToken: null, kind: EVENT_KIND.task_status_changed, payload: { taskId: 't1', from: TASK_STATUS.running, to: TASK_STATUS.cancelled } })
+    router = createSignalRouter({
+      log, onChildApproved: async () => {}, onRunRequested: async () => {},
+      onCancelled: async id => { cancelled.push(id) },
+      send: async () => {}, sendFeedback: async () => {},
+    })
+    await router.start() // sweep runs synchronously before returning
+    expect(cancelled).toEqual(['t1'])
   })
 })

@@ -75,12 +75,13 @@ bun install && bun test
 export ANTHROPIC_API_KEY=...    # and/or run a local Ollama
 
 orc db migrate                  # explicit schema setup; works before project initialization
-orc init --name my-project      # identity + first-party skills; run once, commit .orc/config.json
+orc init --name my-project      # identity + first-party skills; run once per checkout (identity is local, never committed)
 orc new "write release notes" --spec "summarize changes since v1.2; declare the notes file as an output"
 orc propose <task-id> --model anthropic/claude-sonnet-5   # or ollama/<model>
 orc plan <task-id>              # review it
 orc approve <task-id>           # the human gate
 orc run <task-id> --cwd .       # durable execution against this working tree, with live event tail
+orc serve status                # the supervisor holding the runtime (the first executing command starts one)
 orc status <task-id>            # project, memory health, steps, operations, receipts, cost
 orc replay <task-id> --at <seq> # read-only audit replay at any event sequence
 orc log <task-id> --json        # full redacted event records
@@ -180,11 +181,14 @@ by the agent.
 
 ## Guarantees, stated precisely
 
-- **Project identity.** `orc init` writes `projectId`/`projectName` into the
-  committable `.orc/config.json`. Every event, journal row, DBOS system
-  database, and SurrealDB database is bound to that identity — two projects
-  sharing one deployment cannot read, project, recover, or render each
-  other's state.
+- **Project identity.** `orc init` writes `projectId`/`projectName` into
+  `.orc/identity.json`, which is git-ignored: identity belongs to a checkout,
+  settings (`.orc/config.json`) are shared. Committing the identity meant a
+  clone, a worktree or a `git reset --hard` silently repointed every command —
+  including `orc purge` — at someone else's project. Every event, journal row,
+  DBOS system database, and SurrealDB database is bound to that identity, so
+  two projects sharing one deployment cannot read, project, recover, or render
+  each other's state.
 - **Audit replay.** History is an append-only, redacted, idempotent event log.
   Folding it reconstructs task, execution, and lineage state at any sequence
   (`orc replay`). Replay never mutates history.
@@ -251,6 +255,14 @@ by the agent.
 
 ## Operational notes
 
+- Runs belong to a **supervisor**, not to the terminal that asked for one. The first executing
+  command (`run`, `retry`, `reply`, `approve` of a split child, grounded `new`) brings one up in
+  the background if none is beating; `orc serve status` shows it, `orc serve stop` stops it, and it
+  exits on its own after 30 minutes with no live work. So **ctrl-c stops watching, not the run** —
+  `orc cancel <task-id>` is what stops the work. Presence is a heartbeat row refreshed every 5s and
+  trusted for 30s, not an exclusive lock; Phase 1 admits exactly one supervisor per project.
+  `--no-daemon` (or `ORC_NO_DAEMON=1`) keeps the runtime inside the command instead, which is what
+  tests, CI and benchmarks want — there, ctrl-c does stop the run.
 - `ORC_DATABASE_URL` overrides the default `postgresql://postgres:orc@localhost:5433/orc`.
 - `maxIterations` in `.orc/config.json` (or `ORC_MAX_ITERATIONS`) sets the default agent-loop
   budget for authored steps (single-step template, grounded analyze) — default 30. Applies at

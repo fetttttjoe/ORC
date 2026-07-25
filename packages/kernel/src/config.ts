@@ -8,6 +8,10 @@ import { errorMessage, ApprovalPolicy, MCP_SERVER_ID_RE, McpServerConfig, ModelC
 // bump per release — pins DBOS__APPVERSION so recovery survives rebuilds (spec §4)
 export const APP_VERSION = 'orc-0.1.0'
 export const DEFAULT_DATABASE_URL = 'postgresql://postgres:orc@localhost:5433/orc'
+// The agent-loop budget an AUTHORED step gets when the project sets none. One constant, because
+// three places used to spell `30`: this schema, the grounded plan step, and singleStepDraft — so
+// raising the project ceiling left the other two behind.
+export const DEFAULT_MAX_ITERATIONS = 30
 
 // ONE zod schema resolves all settings — defaults live in .default(), never in ?? chains.
 // Input is file config merged with env overrides (env wins); everything orc's own code
@@ -24,7 +28,7 @@ const settingsSchema = (dir: string) =>
     maxDepth: z.coerce.number().int().positive().default(3),
     // default agent-loop budget for AUTHORED steps (single-step template, analyzer step) — plans
     // are frozen data, so this applies at plan-authoring time, never to already-approved plans.
-    maxIterations: z.coerce.number().int().positive().default(30),
+    maxIterations: z.coerce.number().int().positive().default(DEFAULT_MAX_ITERATIONS),
     // half-life for the memory activation derivation (days) — THE calibration knob the neuron
     // ranking needs once real hot/cold data exists. Read-time only: changing it re-ranks and
     // re-heats instantly, rewrites nothing. Threaded to BOTH consumers (store ranking, Task 8;
@@ -136,20 +140,48 @@ export function deriveSystemUrl(databaseUrl: string, projectId: string): string 
 // systemDatabaseUrl exists only here — DBOS recovery has no meaning without an identity.
 export type ProjectConfig = OrcConfig & { projectId: string; projectName: string; systemDatabaseUrl: string }
 
-// atomic identity merge into .orc/config.json — preserves every existing setting
+// Identity is LOCAL to a checkout; settings are SHAREABLE. They used to live in one file, and that
+// file is committed — so a clone, a `git worktree add`, or any `git reset --hard` restored ANOTHER
+// machine's projectId, and every command silently repointed at that project. `orc purge` acts on
+// whatever the resolved config names, so this is not cosmetic: it destroyed a live project's
+// history once, and the bench harness carries three separate workarounds for it.
+//
+// config.json (tracked) now carries settings only. identity.json is covered by the existing
+// `.orc/*` ignore, so it can never be committed and can never be restored over.
+const IDENTITY_FILE = 'identity.json'
+const SETTINGS_FILE = 'config.json'
+
+const readJson = (file: string): Record<string, unknown> => {
+  if (!existsSync(file)) return {}
+  try {
+    return JSON.parse(readFileSync(file, 'utf8'))
+  } catch (err) {
+    throw new Error(`invalid orc config: ${file} is not valid JSON (${errorMessage(err)})`)
+  }
+}
+
+// Only the identity keys, so a stray setting in identity.json cannot shadow the shared file.
+const identityOf = (dir: string): Record<string, unknown> => {
+  const { projectId, projectName } = readJson(path.join(dir, '.orc', IDENTITY_FILE))
+  return {
+    ...(projectId !== undefined && { projectId }),
+    ...(projectName !== undefined && { projectName }),
+  }
+}
+
 export function initializeProject(
   dir: string,
   name: string,
   opts: { force?: boolean } = {},
 ): { projectId: string; projectName: string } {
-  const file = path.join(dir, '.orc', 'config.json')
-  let current: Record<string, unknown> = {}
-  if (existsSync(file)) current = JSON.parse(readFileSync(file, 'utf8'))
-  if (current.projectId && !opts.force)
+  const file = path.join(dir, '.orc', IDENTITY_FILE)
+  // a pre-split project still carries its id in the settings file — that is an initialized project
+  const current = identityOf(dir).projectId ?? readJson(path.join(dir, '.orc', SETTINGS_FILE)).projectId
+  if (current && !opts.force)
     throw new Error(`project already initialized (${file}) — use --force to mint a new identity`)
-  const next = { ...current, projectId: randomUUID(), projectName: name }
-  atomicWriteFileSync(file, `${JSON.stringify(next, null, 2)}\n`)
-  return { projectId: next.projectId, projectName: name }
+  const identity = { projectId: randomUUID(), projectName: name }
+  atomicWriteFileSync(file, `${JSON.stringify(identity, null, 2)}\n`)
+  return identity
 }
 
 export function requireProject(config: OrcConfig): ProjectConfig {
@@ -162,7 +194,9 @@ export function requireProject(config: OrcConfig): ProjectConfig {
 function findProjectDir(start: string): string {
   let current = path.resolve(start)
   while (true) {
-    if (existsSync(path.join(current, '.orc', 'config.json'))) return current
+    // either file marks a project dir: identity alone after `orc init`, settings alone in a clone
+    if (existsSync(path.join(current, '.orc', IDENTITY_FILE)) || existsSync(path.join(current, '.orc', SETTINGS_FILE)))
+      return current
     const parent = path.dirname(current)
     if (parent === current) return path.resolve(start)
     current = parent
@@ -171,16 +205,10 @@ function findProjectDir(start: string): string {
 
 export function loadConfig(explicitDir?: string): OrcConfig {
   const dir = explicitDir ?? findProjectDir(process.cwd())
-  const file = path.join(dir, '.orc', 'config.json')
-  let fromFile: Record<string, unknown> = {}
-  if (existsSync(file)) {
-    try {
-      fromFile = JSON.parse(readFileSync(file, 'utf8'))
-    } catch (err) {
-      throw new Error(`invalid orc config: ${file} is not valid JSON (${errorMessage(err)})`)
-    }
-  }
-  const parsed = settingsSchema(dir).safeParse({ ...fromFile, ...envOverrides() })
+  const fromFile = readJson(path.join(dir, '.orc', SETTINGS_FILE))
+  // identity LAST of the two files: a projectId left behind in the tracked settings (pre-split
+  // projects, or one restored by a checkout) is a fallback, never an override.
+  const parsed = settingsSchema(dir).safeParse({ ...fromFile, ...identityOf(dir), ...envOverrides() })
   if (!parsed.success)
     throw new Error(
       `invalid orc config (env / .orc/config.json): ${parsed.error.issues.map(i => `${i.path.join('.')}: ${i.message}`).join('; ')}`,

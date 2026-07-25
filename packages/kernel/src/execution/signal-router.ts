@@ -1,12 +1,17 @@
 import {
   errorMessage,
-  EVENT_KIND, EventKind, FeedbackProvidedPayload, MemoryWrittenPayload, PAYLOAD_SCHEMAS, RUN_OUTCOME, SplitResult, TASK_STATUS,
+  EVENT_KIND, EventKind, FeedbackProvidedPayload, MemoryWrittenPayload, PAYLOAD_SCHEMAS, RUN_OUTCOME, RunRequestedPayload, runOutcomeFor, SplitResult, TASK_STATUS,
   type EventRecord, type TaskStatus,
 } from '@orc/contracts'
 import { EventLog } from '../storage'
 import { fold, pendingSplitForChild, subtreeTaskIds, type SplitState } from '../projections'
 
 const TERMINAL: Set<TaskStatus> = new Set([TASK_STATUS.done, TASK_STATUS.blocked, TASK_STATUS.cancelled, TASK_STATUS.failed])
+
+// ponytail: bounds the cancel catch-up sweep to the most-recently-cancelled tasks rather than a
+// project's entire cancellation history — see the sweep below for why unbounded is wasteful
+// (not unsafe). Raise it, or persist a per-project sweep watermark, if it ever proves too small.
+const CANCEL_SWEEP_LIMIT = 200
 
 // Everything split routing/composition needs — excludes the high-volume trace kinds
 // (agent/tool calls, operations, artifacts) so the router never scans the whole log.
@@ -15,7 +20,7 @@ const TERMINAL: Set<TaskStatus> = new Set([TASK_STATUS.done, TASK_STATUS.blocked
 const ROUTER_RELEVANT: Record<EventKind, boolean> = {
   task_created: true, task_status_changed: true,
   plan_proposed: true, plan_edited: true, plan_approved: true,
-  run_started: true, step_started: true, step_completed: true, step_failed: true,
+  run_requested: true, run_started: true, step_started: true, step_completed: true, step_failed: true,
   split_proposed: true, split_resolved: true,
   memory_written: true, // composeSplitResult collects subtree-authored notes
   skill_loaded: false, agent_call: false, tool_call: false, tool_result: false,
@@ -32,11 +37,7 @@ const ROUTER_KINDS = EventKind.options.filter(k => ROUTER_RELEVANT[k])
 // so the append is idempotency-keyed and conflicts recover by sending the STORED result.
 export function composeSplitResult(events: EventRecord[], split: SplitState): SplitResult {
   const state = fold(events)
-  const status = state.tasks.get(split.childTaskId)?.status
-  const outcome =
-    status === TASK_STATUS.done ? RUN_OUTCOME.done
-    : status === TASK_STATUS.cancelled ? RUN_OUTCOME.cancelled
-    : RUN_OUTCOME.blocked // blocked and failed both surface as blocked (RunOutcome has no 'failed')
+  const outcome = runOutcomeFor(state.tasks.get(split.childTaskId)?.status)
   const subtree = new Set(subtreeTaskIds(state, split.childTaskId))
 
   let summary = 'cancelled'
@@ -78,6 +79,12 @@ function storedResolution(events: EventRecord[], splitId: string): SplitResult |
 export function createSignalRouter(opts: {
   log: EventLog
   onChildApproved: (childTaskId: string) => Promise<void>
+  // The explicit ask (Task 1), turned into a workflow. The router is a dumb relay here — cwd and
+  // retry come straight off the recorded payload, no policy decisions made in this file.
+  onRunRequested: (taskId: string, opts: { cwd: string | null; retry: boolean }) => Promise<void>
+  // The DBOS half of a cancel, which a client with no execution port cannot do itself —
+  // kernel.cancelSubtree only appends the status; the running supervisor finishes the job.
+  onCancelled: (taskId: string) => Promise<void>
   send: (destinationId: string, result: SplitResult, topic: string, idempotencyKey: string) => Promise<void>
   sendFeedback: (destinationId: string, message: string, topic: string, idempotencyKey: string) => Promise<void>
 }): { start(): Promise<void>; close(): Promise<void> } {
@@ -129,6 +136,39 @@ export function createSignalRouter(opts: {
         await sendFeedback(event).catch(err =>
           console.warn(`signal router: re-send feedback seq ${event.seq}: ${errorMessage(err)}`))
       }
+      // catch-up mirrors route 2's shape below: serve the LATEST run_requested per task that has
+      // not yet been served — "served" means a run_started with a LATER seq exists. Comparing by
+      // seq (not "does this task have any run at all") is what a plain retry needs: a task that
+      // already ran once and is asking again must not be mistaken for one that was already served.
+      const lastRequested = new Map<string, EventRecord>()
+      const lastStartedSeq = new Map<string, number>()
+      for (const event of seed) {
+        if (event.kind === EVENT_KIND.run_requested && event.taskId) lastRequested.set(event.taskId, event)
+        else if (event.kind === EVENT_KIND.run_started && event.taskId) lastStartedSeq.set(event.taskId, event.seq)
+      }
+      for (const [taskId, event] of lastRequested) {
+        if ((lastStartedSeq.get(taskId) ?? -1) > event.seq) continue // a run already answered this request
+        const p = RunRequestedPayload.safeParse(event.payload)
+        if (p.success)
+          await opts.onRunRequested(taskId, { cwd: p.data.cwd, retry: p.data.retry }).catch(err =>
+            console.warn(`signal router: start run ${taskId}: ${errorMessage(err)}`))
+      }
+      // catch-up: a cancel that landed while no supervisor was up never got its DBOS half done —
+      // left alone, DBOS's OWN recovery (running as part of this very boot) resumes that workflow
+      // and runs it to completion, burning model calls, no matter what our event log says.
+      // Idempotent per task (cancelWorkflowsFor is a no-op once DBOS has already terminated the
+      // workflow), but capped (see CANCEL_SWEEP_LIMIT) to bound the cost of walking history.
+      const recentlyCancelled: string[] = []
+      const seenCancelled = new Set<string>()
+      for (let i = seed.length - 1; i >= 0 && recentlyCancelled.length < CANCEL_SWEEP_LIMIT; i--) {
+        const event = seed[i]!
+        if (event.kind !== EVENT_KIND.task_status_changed || !event.taskId || seenCancelled.has(event.taskId)) continue
+        const p = PAYLOAD_SCHEMAS.task_status_changed.safeParse(event.payload)
+        if (p.success && p.data.to === TASK_STATUS.cancelled) { seenCancelled.add(event.taskId); recentlyCancelled.push(event.taskId) }
+      }
+      for (const taskId of recentlyCancelled)
+        await opts.onCancelled(taskId).catch(err =>
+          console.warn(`signal router: cancel ${taskId}: ${errorMessage(err)}`))
       for (const split of state.splits.values()) {
         if (split.resolved) {
           // a crash between append and send leaves the parent waiting on a committed
@@ -158,6 +198,15 @@ export function createSignalRouter(opts: {
             console.warn(`signal router: send feedback seq ${e.seq}: ${errorMessage(err)}`))
           return
         }
+        // The explicit ask (Task 1). Deterministic workflow ids make a redelivered request an
+        // attach, not a second run, so at-least-once delivery is safe here.
+        if (e.kind === EVENT_KIND.run_requested && e.taskId) {
+          const p = RunRequestedPayload.safeParse(e.payload)
+          if (p.success)
+            await opts.onRunRequested(e.taskId, { cwd: p.data.cwd, retry: p.data.retry })
+              .catch(err => console.warn(`signal router: start run ${e.taskId}: ${errorMessage(err)}`))
+          return
+        }
         // route 2: an approved child with a pending split gets its run started (policy OR human)
         if (e.kind === EVENT_KIND.plan_approved && e.taskId) {
           if (pendingSplitForChild(fold(await opts.log.after(0, ROUTER_KINDS)), e.taskId))
@@ -170,6 +219,12 @@ export function createSignalRouter(opts: {
         if (e.kind !== EVENT_KIND.task_status_changed) return
         const p = PAYLOAD_SCHEMAS.task_status_changed.safeParse(e.payload)
         if (!p.success || !TERMINAL.has(p.data.to) || !e.taskId) return
+        // Cancelling the DBOS workflows is the half a client cannot do. kernel.cancelSubtree
+        // appended the status; this is the runtime completing it. Idempotent: cancelling an
+        // already-cancelled workflow is a no-op.
+        if (p.data.to === TASK_STATUS.cancelled && e.taskId)
+          await opts.onCancelled(e.taskId)
+            .catch(err => console.warn(`signal router: cancel ${e.taskId}: ${errorMessage(err)}`))
         const all = await opts.log.after(0, ROUTER_KINDS)
         const split = pendingSplitForChild(fold(all), e.taskId)
         if (split) await resolveSplit(all, split)

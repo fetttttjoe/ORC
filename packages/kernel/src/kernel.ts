@@ -1,12 +1,13 @@
 import { randomUUID } from 'node:crypto'
 import { MASTERPLAN_NOTE_ID,
-  AnalysisCompletedPayload, ChildPlanDraft, EVENT_KIND, FeedbackProvidedPayload, ISOLATION_TIER, PAYLOAD_SCHEMAS, PlanAnnotatedPayload, PlanDraft, STRATEGY, TASK_STATUS, evaluateApproval, formatModelOption, validatePlan, type ChildPlanDraftInput, type ModelOption,
+  AnalysisCompletedPayload, ChildPlanDraft, EVENT_KIND, FeedbackProvidedPayload, ISOLATION_TIER, MemoryDeletedPayload, MemoryWrittenPayload, NOTE_TIER, PAYLOAD_SCHEMAS, PlanAnnotatedPayload, PlanDraft, RunRequestedPayload, STRATEGY, TASK_STATUS, TERMINAL_TASK_STATUS, evaluateApproval, formatModelOption, validatePlan, type ChildPlanDraftInput, type ModelOption,
   type Analyzer, type ApprovalPolicy, type EventKind, type EventRecord,
   type PlanNote, type Plan, type PlanStep, type TaskNode, type TaskStatus,
 } from '@orc/contracts'
 import { foldPlanNotes, planGraphHash, planScope, PLAN_STEP_ID, PLAN_STEP_ROLE } from './execution/strategies/grounded-plan'
+import { DEFAULT_MAX_ITERATIONS } from './config'
 import { EventLog, type EventLogOps } from './storage'
-import { fold, subtreeUsage, type State } from './projections'
+import { fold, gatedChildren, subtreeTaskIds, subtreeUsage, type State } from './projections'
 import { KERNEL_ERROR_CODE, KernelError } from './errors'
 
 // D6 targeted re-plan (M5b): what listAnnotations hands back to the read_annotations tool — the
@@ -41,7 +42,11 @@ export class Kernel {
   // step is the resolved Analyzer's scout step; the plan step is an auditor api-loop step that
   // authors a plan-note graph and calls finalize_plan. Policy-approved because the human's real
   // gate is the conversational approve inside the plan step, not this scaffold.
-  async createGroundedTask(input: { title: string; spec: string; modelRef: string; analyzerRef: string; budgetUSD?: number | null; modelCatalog?: ModelOption[] }): Promise<TaskNode> {
+  // maxIterations is the PROJECT's agent-loop budget (config.maxIterations), applied here to both
+  // template steps rather than by each analyzer: the plan step hardcoded 30 and every subplan
+  // inherits it (proposeSplit expands with parentStep.maxIterations), so raising the project
+  // ceiling moved nothing below the analyze step. One override, one place, plans stay frozen data.
+  async createGroundedTask(input: { title: string; spec: string; modelRef: string; analyzerRef: string; budgetUSD?: number | null; modelCatalog?: ModelOption[]; maxIterations?: number }): Promise<TaskNode> {
     // the title is a LABEL, never the goal — a grounded run without intent would make the
     // analyze/plan agents guess (burning an analyze pass on "what did you mean?")
     const spec = input.spec.trim()
@@ -53,7 +58,8 @@ export class Kernel {
       throw new KernelError(KERNEL_ERROR_CODE.invalid_transition, `unknown analyzer '${input.analyzerRef}' — register it or pass a valid analyzerRef`)
     return this.log.transaction(async tx => {
       const task = await this.createTaskIn(tx, { title: input.title, spec, type: 'grounded', budgetUSD: input.budgetUSD })
-      const analyzeStep = analyzer.analysisStep({ modelRef: input.modelRef, taskSpec: spec })
+      const maxIterations = input.maxIterations ?? DEFAULT_MAX_ITERATIONS
+      const analyzeStep: PlanStep = { ...analyzer.analysisStep({ modelRef: input.modelRef, taskSpec: spec }), maxIterations }
       const planStep: PlanStep = {
         id: PLAN_STEP_ID, role: PLAN_STEP_ROLE, title: 'Author the executable plan',
         // the concrete scope + root id, so the authoring agent (which never sees its taskId) and
@@ -64,7 +70,7 @@ export class Kernel {
             ? ` Models you may set as a subplan's modelRef, with their rates: ${input.modelCatalog.map(formatModelOption).join('; ')}. Omit it to inherit '${input.modelRef}'.`
             : ''),
         executorRef: 'api-loop', modelRef: input.modelRef, skillRefs: ['plan-authoring'], toolRefs: [],
-        isolation: ISOLATION_TIER.local, zone: [], maxIterations: 30, dependsOn: [analyzeStep.id],
+        isolation: ISOLATION_TIER.local, zone: [], maxIterations, dependsOn: [analyzeStep.id],
       }
       const draft: PlanDraft = {
         strategyRef: STRATEGY.groundedPlan, analyzerRef: input.analyzerRef, costEstimateUSD: null,
@@ -257,15 +263,56 @@ export class Kernel {
     return { topic, question, ...(noteId ? { noteId } : {}) }
   }
 
-  async approvedPlanHash(taskId: string, runToken: string): Promise<string | null> {
+  // The OTHER human gate, and the one nothing ever announced — see projections.gatedChildren for
+  // why it is invisible. Observed live (events-pilot.log 161-188: three gated splits, then join,
+  // then never another event).
+  async gatedChildren(taskId: string): Promise<Array<{ id: string; title: string }>> {
+    return gatedChildren(await this.state(), taskId)
+  }
+
+  // The gate can be on a DESCENDANT. A step that task_splits and then joins sits inside recv while
+  // its child runs, so a child's ask_human lands on the CHILD's stream — and a tail scanning only
+  // the root saw no event, armed no park, and waited forever on a run that was waiting on a person.
+  // Nearest-first (subtreeTaskIds is breadth-first), so the human answers the shallowest live gate.
+  // ponytail: one byTask read per subtree task — fine for a project's trees; index by task if it costs.
+  async openFeedbackInSubtree(rootId: string): Promise<{ taskId: string; topic: string; question: string; noteId?: string } | null> {
+    for (const id of subtreeTaskIds(await this.state(), rootId)) {
+      const open = await this.openFeedback(id)
+      if (open) return { taskId: id, ...open }
+    }
+    return null
+  }
+
+  // The hash the human approved, and WHEN — the seq lets finalize_plan name the notes edited since,
+  // instead of reporting only that something moved. One derivation of "which approval", so the
+  // check and the explanation can never disagree about which one they mean.
+  async approvedPlanHash(taskId: string, runToken: string): Promise<{ hash: string; seq: number } | null> {
     for (const event of [...(await this.log.byTask(taskId))].reverse()) {
       if (event.kind !== EVENT_KIND.feedback_provided || event.runToken !== runToken) continue
       const parsed = FeedbackProvidedPayload.safeParse(event.payload)
       if (parsed.success && parsed.data.author.source === 'cli'
         && parsed.data.text.trim().toLowerCase() === 'approve' && parsed.data.planHash)
-        return parsed.data.planHash
+        return { hash: parsed.data.planHash, seq: event.seq }
     }
     return null
+  }
+
+  // Plan-tier note ids written or deleted after `seq` in this task's plan scope — what actually
+  // changed since the human approved. "The graph changed" alone sends the agent back to re-ask
+  // without knowing which edit cost it a human gate, and it re-edits and re-asks again.
+  async planNotesChangedSince(taskId: string, seq: number): Promise<string[]> {
+    const scope = planScope(taskId)
+    const ids = new Set<string>()
+    for (const e of await this.log.after(seq, [EVENT_KIND.memory_written, EVENT_KIND.memory_deleted])) {
+      if (e.kind === EVENT_KIND.memory_written) {
+        const p = MemoryWrittenPayload.safeParse(e.payload)
+        if (p.success && p.data.note.scope === scope && p.data.note.tier === NOTE_TIER.plan) ids.add(p.data.note.id)
+      } else {
+        const p = MemoryDeletedPayload.safeParse(e.payload)
+        if (p.success && p.data.scope === scope) ids.add(p.data.id)
+      }
+    }
+    return [...ids]
   }
 
   // D4 conversational gate, human side: answers the latest still-open feedback_requested and resumes
@@ -320,6 +367,46 @@ export class Kernel {
       const payload = AnalysisCompletedPayload.parse(coverage)
       await tx.append({ taskId: ctx.taskId, stepId: ctx.stepId, runToken: ctx.runToken, kind: EVENT_KIND.analysis_completed, payload })
     })
+  }
+
+  // The client half of starting a run: record the ask. A supervisor turns it into a workflow.
+  // The caller has already checked the task is drivable — this refuses an unknown task only, so
+  // the event can never name something that does not exist.
+  // Returns the recorded ask's seq: a client that then watches needs to tell "the supervisor has
+  // not reacted yet" from "the run is over", and the only difference between those two is whether
+  // anything happened after this event.
+  async requestRun(taskId: string, opts: { cwd?: string; retry?: boolean } = {}): Promise<number> {
+    return this.log.transaction(async tx => {
+      await this.requireTask(tx, taskId)
+      const requested = await tx.append({
+        taskId, stepId: null, runToken: null, kind: EVENT_KIND.run_requested,
+        payload: RunRequestedPayload.parse({ taskId, cwd: opts.cwd ?? null, retry: opts.retry ?? false }),
+      })
+      return requested.seq
+    })
+  }
+
+  // The append half of a cancel, split out of dbos-port.cancelRun so a client with no execution
+  // port can still stop a run: the supervisor sees each cancelled status and cancels the DBOS
+  // workflows behind it. Children before parents, so a parent gate-waiting on a child sees the
+  // child resolve first — the same order cancelRun already used. Re-checks under the write lock,
+  // so a run that finished in the meantime keeps its real terminal status.
+  async cancelSubtree(taskId: string): Promise<string[]> {
+    const state = await this.state()
+    const ids = subtreeTaskIds(state, taskId).reverse()
+    const stamped: string[] = []
+    for (const id of ids) {
+      await this.log.transaction(async tx => {
+        const status = fold(await tx.byTask(id)).tasks.get(id)?.status
+        if (status === undefined || TERMINAL_TASK_STATUS.has(status)) return
+        await tx.append({
+          taskId: id, stepId: null, runToken: null, kind: EVENT_KIND.task_status_changed,
+          payload: { taskId: id, from: status, to: TASK_STATUS.cancelled },
+        })
+        stamped.push(id)
+      })
+    }
+    return stamped
   }
 
   // ponytail: state() refolds the whole log on every call — add snapshots when it measurably slows

@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from 'bun:test'
 import { z } from 'zod'
 import { createHash } from 'node:crypto'
+import { DBOS, Error as DBOSError } from '@dbos-inc/dbos-sdk'
 import { mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
@@ -99,7 +100,7 @@ describe('DBOS execution port (integration)', () => {
     projectDir = mkdtempSync(path.join(tmpdir(), 'orc-project-'))
     const config = testConfig(db.url, { dir: projectDir })
     port = await createDbosPort({
-      storage, config,
+      storage, config, executorId: 'supervisor-test',
       providers: new Map([['fake', fakeProvider]]),
       executors: new Map([['api-loop', fakeExecutor()]]),
       skills: {
@@ -131,6 +132,13 @@ describe('DBOS execution port (integration)', () => {
     await kernel.approvePlan(t.id)
     return t
   }
+
+  it('boots under the identity it was given, so DBOS recovery is scoped to that supervisor', async () => {
+    // DBOS.executorID is the SDK's own view — process.env.DBOS__VMID is read at module load,
+    // long before launch(), so asserting on the env var would pass while DBOS still used 'local'.
+    expect(DBOS.executorID).toBe('supervisor-test')
+    expect(port.executorId).toBe('supervisor-test')
+  })
 
   it('runs a 2-step DAG to done, threading dep outputs, in order', async () => {
     const t = await approvedTask()
@@ -348,7 +356,15 @@ describe('DBOS execution port (integration)', () => {
       })
     }
     try {
-      await (await port.startRun(t.id)).wait()
+      // Task 5: the live router now really cancels the run's DBOS workflow on ANY cancelled
+      // status, not only ones cancelRun itself produced. That reaction races this run's own
+      // finish step for real, so DBOS may now refuse to record the run's success outcome —
+      // a DBOSWorkflowCancelledError here is the correct new result of that race, and orthogonal
+      // to what this test protects (asserted below: the event log never records a stale 'done'
+      // behind the injected cancel).
+      await (await port.startRun(t.id)).wait().catch(err => {
+        if (!(err instanceof DBOSError.DBOSWorkflowCancelledError)) throw err
+      })
     } finally {
       beforeTransaction = null
     }

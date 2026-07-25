@@ -427,10 +427,19 @@ Door discipline, stated precisely:
 
 ## Identity and isolation
 
-`orc init` mints `projectId` into the committable `.orc/config.json`. Everything derives:
+`orc init` mints `projectId` into the git-ignored `.orc/identity.json` (the committable
+`.orc/config.json` carries settings only). Everything derives:
 
 - events/operations rows carry `project_id`; every query filters on it
 - the per-project advisory lock serializes writers within a project only
+- execution belongs to a **supervisor** (`orc serve`), not to the command that asked for a run: a
+  client appends `run_requested` and watches the event stream, and the supervisor's signal router
+  turns that ask into a workflow. Presence is a heartbeat row in `supervisors` (beat every 5s,
+  trusted for 30s), not an exclusive lock, so "two are up and both healthy" stays expressible;
+  identity is the claimed slot id (`supervisor-1`, …), passed to `DBOS.setConfig({ executorID })`
+  so DBOS recovery is per-supervisor and a restart reclaims its own in-flight work. Phase 1 admits
+  one supervisor per project. Consequence at the terminal: ctrl-c ends the watch, `orc cancel` ends
+  the run; `--no-daemon` puts the runtime back inside the command for tests and benchmarks
 - DBOS system database name = `deriveSystemUrl(dbUrl, projectId)`
 - SurrealDB database name = `projectDatabaseName(base, projectId)`
 - `requireProject(config)` gates project commands; uninitialized directories can still run
