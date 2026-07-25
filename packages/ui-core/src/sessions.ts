@@ -110,7 +110,17 @@ export function createProjectSessions(opts: {
       session.graph = buildGraph(session.state, session.events, { halfLifeDays: opts.halfLifeDays })
       session.seq = session.events.at(-1)?.seq ?? 0
     }
-    session.unsubscribe = await storage.events.subscribe({ fromSeq: session.seq }, async e => {
+    // Truncation (below) is only detectable when an event ARRIVES. A log that was dropped and
+    // re-created is the case where nothing ever arrives — our cursor sits above every new row — so
+    // the log itself reports it instead, and the whole fold is rebuilt before delivery resumes.
+    // Subscribers are repaired by the same diff the truncation path uses; no reload of the page.
+    const onReset = async (): Promise<void> => {
+      const stale = session.graph
+      await reload()
+      const repair = diffGraphs(stale, session.graph)
+      for (const cb of session.subscribers) cb({ seq: session.seq, patch: repair, event: null, summary: null })
+    }
+    session.unsubscribe = await storage.events.subscribe({ fromSeq: session.seq, onReset }, async e => {
       const oldest = session.events[0]?.seq ?? 0
       if (oldest !== 0 && await storage.events.earliestSeq() !== oldest) {
         const stale = session.graph
@@ -306,7 +316,16 @@ export function createProjectSessions(opts: {
     async planNotes(projectId, taskId) {
       const s = await sessionFor(projectId)
       const notes = foldPlanNotes(s.events, planScope(taskId))
-      return { notes, mermaid: notes.length > 0 ? decompositionMermaid(notes) : null }
+      // A subplan does not execute on THIS task — finalize_plan splits it into a child whose steps
+      // carry the subplan note ids verbatim (instantiateFrozenPlan). Merging the children's step
+      // states is therefore the whole correlation, and it is what lets the decomposition card show
+      // progress instead of a permanently grey graph. Before the split there are no children and
+      // every node reads pending, which is the truth at that point.
+      const substeps = new Map<string, { status: string }>()
+      for (const [childId, t] of s.state.tasks)
+        if (t.parentId === taskId)
+          for (const [stepId, st] of s.state.steps.get(childId) ?? []) substeps.set(stepId, st)
+      return { notes, mermaid: notes.length > 0 ? decompositionMermaid(notes, substeps) : null }
     },
 
     async modelCatalog(projectId) {
