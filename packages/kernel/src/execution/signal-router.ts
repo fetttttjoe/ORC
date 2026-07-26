@@ -1,7 +1,7 @@
 import {
   errorMessage,
-  EVENT_KIND, EventKind, FeedbackProvidedPayload, MemoryWrittenPayload, PAYLOAD_SCHEMAS, RUN_OUTCOME, RunRequestedPayload, runOutcomeFor, SplitResult, TASK_STATUS,
-  type EventRecord, type TaskStatus,
+  EVENT_KIND, EventKind, FeedbackProvidedPayload, MemoryWrittenPayload, PAYLOAD_SCHEMAS, REACTION, ReactionFailedPayload, RUN_OUTCOME, RunRequestedPayload, runOutcomeFor, SplitResult, TASK_STATUS,
+  type EventRecord, type Reaction, type TaskStatus,
 } from '@orc/contracts'
 import { EventLog } from '../storage'
 import { fold, pendingSplitForChild, subtreeTaskIds, type SplitState } from '../projections'
@@ -29,6 +29,7 @@ const ROUTER_RELEVANT: Record<EventKind, boolean> = {
   feedback_requested: false, feedback_provided: true, plan_annotated: false, analysis_completed: false,
   models_discovered: false, // catalog metadata — nothing to route
   copilot_exchange: false, // conversation record — nothing to route
+  reaction_failed: false, // the router's OWN diagnosis — routing it would react to itself
 }
 const ROUTER_KINDS = EventKind.options.filter(k => ROUTER_RELEVANT[k])
 
@@ -90,6 +91,30 @@ export function createSignalRouter(opts: {
 }): { start(): Promise<void>; close(): Promise<void> } {
   let unsub: (() => Promise<void>) | null = null
 
+  // A reaction that throws is the runtime failing at its whole job, and it used to leave nothing but
+  // a line on the supervisor's stdout — the client had already been told its ask was recorded, and
+  // `orc status` showed a task that simply never moved. Recorded here so the failure is DATA.
+  // Keyed by the CAUSE's seq, so a catch-up sweep that retries the same event on every boot
+  // diagnoses it once rather than growing the log. The append is itself contained: a diagnosis that
+  // throws must never replace the failure it describes.
+  // `cause.id` is the idempotency discriminator: an event's seq where one triggered the reaction, a
+  // splitId where the trigger is a split's state rather than a single event.
+  const reactionFailed = async (
+    reaction: Reaction,
+    cause: { taskId: string | null; seq: number | null; id: string },
+    err: unknown,
+  ): Promise<void> => {
+    const message = errorMessage(err)
+    console.warn(`signal router: ${reaction} ${cause.taskId ?? ''} (${cause.id}): ${message}`)
+    await opts.log.append({
+      taskId: cause.taskId, stepId: null, runToken: null, kind: EVENT_KIND.reaction_failed,
+      payload: ReactionFailedPayload.parse({ reaction, taskId: cause.taskId, message, causeSeq: cause.seq }),
+      idempotencyKey: `${cause.id}:${reaction}:reaction_failed`,
+    }).catch(() => {})
+  }
+  const ofEvent = (e: EventRecord) => ({ taskId: e.taskId, seq: e.seq, id: String(e.seq) })
+  const ofSplit = (s: SplitState) => ({ taskId: s.taskId, seq: null, id: s.splitId })
+
   const sendResult = async (split: SplitState, result: SplitResult): Promise<void> => {
     await opts.send(split.runToken, result, `split:${split.splitId}`, split.splitId)
   }
@@ -119,7 +144,7 @@ export function createSignalRouter(opts: {
         await sendResult(split, committed)
       }
     } catch (err) {
-      console.warn(`signal router: resolve split ${split.splitId}: ${errorMessage(err)}`)
+      await reactionFailed(REACTION.splitResolve, ofSplit(split), err)
     }
   }
 
@@ -133,8 +158,7 @@ export function createSignalRouter(opts: {
       for (const event of seed) {
         if (event.kind !== EVENT_KIND.feedback_provided || !event.taskId
           || state.tasks.get(event.taskId)?.status !== TASK_STATUS.running) continue
-        await sendFeedback(event).catch(err =>
-          console.warn(`signal router: re-send feedback seq ${event.seq}: ${errorMessage(err)}`))
+        await sendFeedback(event).catch(err => reactionFailed(REACTION.feedback, ofEvent(event), err))
       }
       // catch-up mirrors route 2's shape below: serve the LATEST run_requested per task that has
       // not yet been served — "served" means a run_started with a LATER seq exists. Comparing by
@@ -150,8 +174,8 @@ export function createSignalRouter(opts: {
         if ((lastStartedSeq.get(taskId) ?? -1) > event.seq) continue // a run already answered this request
         const p = RunRequestedPayload.safeParse(event.payload)
         if (p.success)
-          await opts.onRunRequested(taskId, { cwd: p.data.cwd, retry: p.data.retry }).catch(err =>
-            console.warn(`signal router: start run ${taskId}: ${errorMessage(err)}`))
+          await opts.onRunRequested(taskId, { cwd: p.data.cwd, retry: p.data.retry })
+            .catch(err => reactionFailed(REACTION.runRequested, ofEvent(event), err))
       }
       // catch-up: a cancel that landed while no supervisor was up never got its DBOS half done —
       // left alone, DBOS's OWN recovery (running as part of this very boot) resumes that workflow
@@ -168,7 +192,7 @@ export function createSignalRouter(opts: {
       }
       for (const taskId of recentlyCancelled)
         await opts.onCancelled(taskId).catch(err =>
-          console.warn(`signal router: cancel ${taskId}: ${errorMessage(err)}`))
+          reactionFailed(REACTION.cancelled, { taskId, seq: null, id: `sweep:${taskId}` }, err))
       for (const split of state.splits.values()) {
         if (split.resolved) {
           // a crash between append and send leaves the parent waiting on a committed
@@ -176,7 +200,7 @@ export function createSignalRouter(opts: {
           if (state.tasks.get(split.taskId)?.status === TASK_STATUS.running) {
             const committed = storedResolution(seed, split.splitId)
             if (committed) await sendResult(split, committed).catch(err =>
-              console.warn(`signal router: re-send split ${split.splitId}: ${errorMessage(err)}`))
+              reactionFailed(REACTION.splitResolve, ofSplit(split), err))
           }
           continue
         }
@@ -186,7 +210,7 @@ export function createSignalRouter(opts: {
         // the router was down) still needs its run — same idempotent startChildRun as the live route.
         if (status === TASK_STATUS.approved && !state.runs.get(split.childTaskId)?.length)
           await opts.onChildApproved(split.childTaskId).catch(err =>
-            console.warn(`signal router: startChildRun ${split.childTaskId}: ${errorMessage(err)}`))
+            reactionFailed(REACTION.childApproved, ofSplit(split), err))
       }
       // resume the pump exactly where the sweep's seed ended (seq-exclusive), closing the gap for
       // events that landed between the sweep read and subscribe. Both routes are idempotent under replay.
@@ -194,8 +218,7 @@ export function createSignalRouter(opts: {
       // keep an incremental in-memory fold if task volume ever makes this hurt
       unsub = await opts.log.subscribe({ fromSeq: seed.at(-1)?.seq ?? 0 }, async e => {
         if (e.kind === EVENT_KIND.feedback_provided) {
-          await sendFeedback(e).catch(err =>
-            console.warn(`signal router: send feedback seq ${e.seq}: ${errorMessage(err)}`))
+          await sendFeedback(e).catch(err => reactionFailed(REACTION.feedback, ofEvent(e), err))
           return
         }
         // The explicit ask (Task 1). Deterministic workflow ids make a redelivered request an
@@ -204,14 +227,14 @@ export function createSignalRouter(opts: {
           const p = RunRequestedPayload.safeParse(e.payload)
           if (p.success)
             await opts.onRunRequested(e.taskId, { cwd: p.data.cwd, retry: p.data.retry })
-              .catch(err => console.warn(`signal router: start run ${e.taskId}: ${errorMessage(err)}`))
+              .catch(err => reactionFailed(REACTION.runRequested, ofEvent(e), err))
           return
         }
         // route 2: an approved child with a pending split gets its run started (policy OR human)
         if (e.kind === EVENT_KIND.plan_approved && e.taskId) {
           if (pendingSplitForChild(fold(await opts.log.after(0, ROUTER_KINDS)), e.taskId))
             await opts.onChildApproved(e.taskId).catch(err =>
-              console.warn(`signal router: startChildRun ${e.taskId}: ${errorMessage(err)}`))
+              reactionFailed(REACTION.childApproved, ofEvent(e), err))
           return
         }
         // route 1: a terminal child resolves its split (guarded by pendingSplitForChild — a
@@ -224,7 +247,7 @@ export function createSignalRouter(opts: {
         // already-cancelled workflow is a no-op.
         if (p.data.to === TASK_STATUS.cancelled && e.taskId)
           await opts.onCancelled(e.taskId)
-            .catch(err => console.warn(`signal router: cancel ${e.taskId}: ${errorMessage(err)}`))
+            .catch(err => reactionFailed(REACTION.cancelled, ofEvent(e), err))
         const all = await opts.log.after(0, ROUTER_KINDS)
         const split = pendingSplitForChild(fold(all), e.taskId)
         if (split) await resolveSplit(all, split)

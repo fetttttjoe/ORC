@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test'
-import { EVENT_KIND, TASK_STATUS, type EventRecord, type SplitResult, type TaskNode } from '@orc/contracts'
+import { EVENT_KIND, REACTION, ReactionFailedPayload, TASK_STATUS, type EventRecord, type SplitResult, type TaskNode } from '@orc/contracts'
 import { Kernel } from '../kernel'
+import { fold } from '../projections'
 import { openStorage, type EventLog } from '../storage'
 import { createTestDb, TEST_PROJECT_ID } from '../test-helpers'
 import { composeSplitResult, createSignalRouter } from './signal-router'
@@ -261,6 +262,51 @@ describe('createSignalRouter (integration, real EventLog)', () => {
     await log.append({ taskId: 't1', stepId: null, runToken: null, kind: EVENT_KIND.task_status_changed, payload: { taskId: 't1', from: TASK_STATUS.running, to: TASK_STATUS.cancelled } })
     expect(await waitFor(async () => cancelled.length > 0)).toBe(true)
     expect(cancelled).toEqual(['t1'])
+  })
+
+  // A reaction that throws is the runtime failing at its own job. It used to leave nothing but a
+  // console.warn on the supervisor's stdout: the client had been told its ask was recorded, and
+  // `orc status` showed a task that simply never moved — at the terminal, a hang.
+  it('a reaction that throws is recorded as data, naming the cause, once per cause', async () => {
+    router = createSignalRouter({
+      log, onChildApproved: async () => {}, onCancelled: async () => {},
+      onRunRequested: async () => { throw new Error('nothing can serve this') },
+      send: async () => {}, sendFeedback: async () => {},
+    })
+    await router.start()
+    await log.append({ taskId: 't1', stepId: null, runToken: null, kind: EVENT_KIND.task_created, payload: { task: taskNode('t1', null) } })
+    const asked = await log.append({ taskId: 't1', stepId: null, runToken: null, kind: EVENT_KIND.run_requested, payload: { taskId: 't1', cwd: null, retry: false } })
+
+    const failures = async () => (await log.byTask('t1')).filter(e => e.kind === EVENT_KIND.reaction_failed)
+    expect(await waitFor(async () => (await failures()).length > 0)).toBe(true)
+    const recorded = ReactionFailedPayload.parse((await failures())[0]!.payload)
+    expect(recorded).toEqual({
+      reaction: REACTION.runRequested, taskId: 't1', message: 'nothing can serve this', causeSeq: asked.seq,
+    })
+
+    // a fresh supervisor sweeps the same unserved request on every boot — the diagnosis is keyed by
+    // the CAUSE, so a permanently broken reaction cannot grow the log without bound
+    const second = createSignalRouter({
+      log, onChildApproved: async () => {}, onCancelled: async () => {},
+      onRunRequested: async () => { throw new Error('nothing can serve this') },
+      send: async () => {}, sendFeedback: async () => {},
+    })
+    await second.start()
+    await second.close()
+    expect(await failures()).toHaveLength(1)
+  })
+
+  it('the failure is folded onto the task, so status can say why it never moved', async () => {
+    router = createSignalRouter({
+      log, onChildApproved: async () => {}, onCancelled: async () => {},
+      onRunRequested: async () => { throw new Error('budget exhausted') },
+      send: async () => {}, sendFeedback: async () => {},
+    })
+    await router.start()
+    await log.append({ taskId: 't1', stepId: null, runToken: null, kind: EVENT_KIND.task_created, payload: { task: taskNode('t1', null) } })
+    await log.append({ taskId: 't1', stepId: null, runToken: null, kind: EVENT_KIND.run_requested, payload: { taskId: 't1', cwd: null, retry: false } })
+    expect(await waitFor(async () => fold(await log.all()).reactionFailures.has('t1'))).toBe(true)
+    expect(fold(await log.all()).reactionFailures.get('t1')?.map(f => f.message)).toEqual(['budget exhausted'])
   })
 
   it('sweep: a retry request that landed after an earlier run still starts it', async () => {

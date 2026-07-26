@@ -4,7 +4,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { Command, InvalidArgumentError } from 'commander'
 import { EDGE_DIRECTION, EVENT_KIND, LINK_KINDS, MEMORY_ACCESS, NOTE_TIERS, NoteTier, parseLinkSpec, PlanDraft, RUN_OUTCOME, runOutcomeFor, STRATEGY, TASK_STATUS, LinkKind, slugId, type Analyzer, type TaskStatus, type RunOutcome, type EventRecord, type MemoryLink, type ExecutionPort, type Plan, formatModelRate } from '@orc/contracts'
-import { openStorage, Kernel, atomicWriteFileSync, claimSlot, fold, gatedChildren, liveSupervisors, subtreeTaskIds, grantExtensionTrust, grantMcpTrust, initializeProject, isExtensionTrusted, isMcpTrusted, loadConfig, loadTrust, migrateDatabase, requireProject, taskUsage, type EventLog, type OrcConfig, type PluginHost, type ProjectConfig, type Storage } from '@orc/kernel'
+import { openStorage, Kernel, atomicWriteFileSync, claimSlot, fold, gatedChildren, liveSupervisors, staleSupervisors, subtreeTaskIds, grantExtensionTrust, grantMcpTrust, initializeProject, isExtensionTrusted, isMcpTrusted, loadConfig, loadTrust, migrateDatabase, requireProject, taskUsage, type EventLog, type OrcConfig, type PluginHost, type ProjectConfig, type Storage } from '@orc/kernel'
 import { createVaultProjector, parsePlanFile } from '@orc/vault-projector'
 import { consolidateTask, probeMemory, staleNotes, DEFAULT_SWEEP_DAYS } from '@orc/memory'
 import { openMemory } from './memory-open'
@@ -705,9 +705,16 @@ export function buildProgram(
     .action(async () => {
       const { storage } = needPlugin()
       if (!storage) throw new Error(SERVE_NEEDS_STORAGE)
-      const rows = await liveSupervisors(storage, new Date())
-      if (rows.length === 0) { console.log('_no live supervisor_'); return }
+      const now = new Date()
+      const rows = await liveSupervisors(storage, now)
+      if (rows.length === 0) console.log('_no live supervisor_')
       for (const r of rows) console.log(`${r.executorId}  pid ${r.pid}  ${r.host}  since ${r.startedAt}  last seen ${r.lastSeenAt}`)
+      // A stale row is a supervisor that died holding work. Phase 1 cannot adopt its workflows
+      // (that is Phase 2), and the design commits to SURFACING them rather than silently stranding
+      // them — so name the slot and what reclaims it, instead of leaving an empty listing that
+      // reads as "nothing was lost".
+      for (const r of await staleSupervisors(storage, now))
+        console.log(`${r.executorId}  STALE  pid ${r.pid}  ${r.host}  last seen ${r.lastSeenAt} — its in-flight work waits for a supervisor to reclaim this slot (orc serve)`)
     })
   serve
     .command('stop')
@@ -749,6 +756,12 @@ export function buildProgram(
       // conversation isn't one-directional — the human sees the prompt, not just a blind reply target.
       const feedback = await kernel.openFeedback(taskId)
       if (feedback) console.log(`  awaiting reply: ${feedback.question}  (orc reply ${taskId} <text>)`)
+      // The runtime failing at its own job. Printed LAST and unconditionally, because it is the one
+      // thing that explains a task which is not running, not parked, and not terminal either: a
+      // reaction threw, so nobody acted on something the log records as asked. It used to be
+      // invisible outside a supervisor's stdout, which read at the terminal as a hang.
+      for (const f of state.reactionFailures.get(taskId) ?? [])
+        console.log(`  runtime could not ${f.reaction}${f.causeSeq === null ? '' : ` (seq ${f.causeSeq})`}: ${f.message}`)
       // the other human gate: a split the manual approvalPolicy parked. Same surface, because the
       // parent's join_splits waits on it just as durably as it waits on an answer.
       for (const child of gatedChildren(state, taskId))

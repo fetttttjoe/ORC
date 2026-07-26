@@ -124,6 +124,21 @@ export const NOTE_TIER = NoteTier.enum
 // plan scopes are derived by planScope(taskId) in plan.ts.
 export enum MemoryScope { project = 'project' }
 
+// Where a link's target may live, in lookup order. THE one rule, because a MemoryLink names an id
+// and carries no scope, so something has to decide which scope that id means — and two places
+// decided independently, both landing on "the source's own scope": the projector pointed every edge
+// at `key(note.scope, l.id)` (surreal.ts) and traversal looked the target up there too. A note in a
+// transient plan scope referring to durable project knowledge therefore authored an edge that reads
+// as a connection in the payload and resolves to nothing on traversal. Measured on a real grounded
+// run: 7 of 23 edges dead that way, every one of them a plan note reaching for project knowledge —
+// exactly the link the whole carried-memory idea depends on.
+//
+// Own scope first (a plan's internal decomposition, where ids are local and may shadow), then the
+// project scope (the durable lane every transient scope is allowed to reference). Used by traversal,
+// by write-time link validation, and by the graph audit, so those three cannot drift apart again.
+export const linkLookupScopes = (fromScope: string): string[] =>
+  fromScope === MemoryScope.project ? [MemoryScope.project] : [fromScope, MemoryScope.project]
+
 // The memory tool surface by name — matched values, never scattered literals. Owned in
 // contracts so the executor loop (which cannot import the memory plugin) matches the same
 // spelling the plugin registers. tools.ts derives its registrations from this map.
@@ -413,6 +428,10 @@ export const NeighborResult = z.object({
   // query seed; deeper rows name the node actually linked to this one. Optional so a row from
   // before this field existed still parses.
   from: z.string().optional(),
+  // which scope this neighbour was actually found in — a traversal from a transient scope may
+  // resolve a link into the durable project lane (see linkLookupScopes), and a caller that then
+  // reads the note needs to know where it lives. Optional: rows predating the field still parse.
+  scope: z.string().optional(),
 })
 export type NeighborResult = z.infer<typeof NeighborResult>
 

@@ -2,7 +2,7 @@ import { z } from 'zod'
 import {
   ArtifactProducedPayload, EVENT_KIND, FAILURE_CLASS, FailureClass, OPERATION_STATUS, Plan,
   STEP_RUN_STATUS, TaskNode, TaskStatus, ZERO_USAGE, addUsage,
-  OperationCompletedPayload, OperationFailedPayload, OperationStartedPayload,
+  OperationCompletedPayload, OperationFailedPayload, OperationStartedPayload, ReactionFailedPayload,
 } from '@orc/contracts'
 import type { EventRecord, OperationRecord, StepRunStatus, Usage } from '@orc/contracts'
 
@@ -57,6 +57,10 @@ export interface State {
   splits: Map<string, SplitState>
   operations: Map<string, OperationRecord>
   artifacts: Map<string, ArtifactRecord[]>
+  // The runtime failing at its own job, per task, latest last: a reaction that threw means nobody
+  // acted on something the log already records as asked. Folded so `orc status` can SAY why a task
+  // never moved — the failure used to exist only as a line on a supervisor's stdout.
+  reactionFailures: Map<string, ReactionFailedPayload[]>
 }
 
 
@@ -141,7 +145,7 @@ const View = {
 // Lenient by design: fold must never throw on history — a malformed payload (from an
 // older schema or a poison event) skips its case rather than wedging every projection.
 export function fold(events: EventRecord[]): State {
-  const state: State = { tasks: new Map(), plans: new Map(), steps: new Map(), runs: new Map(), usage: new Map(), stepUsage: new Map(), splits: new Map(), operations: new Map(), artifacts: new Map() }
+  const state: State = { tasks: new Map(), plans: new Map(), steps: new Map(), runs: new Map(), usage: new Map(), stepUsage: new Map(), splits: new Map(), operations: new Map(), artifacts: new Map(), reactionFailures: new Map() }
   const seen = new Set<string>()
 
   const stepOf = (taskId: string, stepId: string): StepState | undefined => state.steps.get(taskId)?.get(stepId)
@@ -279,6 +283,16 @@ export function fold(events: EventRecord[]): State {
           s.status = STEP_RUN_STATUS.completed
           s.output = p.data.summary
         }
+        break
+      }
+      case EVENT_KIND.reaction_failed: {
+        // lenient like every other fold: an unparseable diagnosis is not a diagnosis, and must not
+        // throw away the history around it
+        const p = ReactionFailedPayload.safeParse(e.payload)
+        if (!p.success || !e.taskId) break
+        const list = state.reactionFailures.get(e.taskId) ?? []
+        list.push(p.data)
+        state.reactionFailures.set(e.taskId, list)
         break
       }
       case EVENT_KIND.step_failed: {

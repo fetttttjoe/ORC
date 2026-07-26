@@ -8,6 +8,7 @@ import {
   SEARCH_MODE, errorMessage, inferTier, noteKey, NoteTier,
   type EmbeddingProvider, type EventRecord, type NeighborQuery, type MemoryFilter, type NoteFields,
   type MemorySearchOpts, type NeighborResult, type NoteSummary,
+  linkLookupScopes,
 } from '@orc/contracts'
 import { rankNeighbors, rrfFuse, type Edge } from './rank'
 
@@ -283,13 +284,28 @@ export class SurrealMemory {
     // ponytail: rankNeighbors' cap applies pre-boost — a hot node outside the structural top-20
     // cannot boost in; widen the cap into an opts pass-through if that ever bites.
     const out: NeighborResult[] = []
+    // Resolve each neighbour by the ONE link rule (contracts linkLookupScopes), not by assuming the
+    // traversed scope: an edge authored in a plan scope may name a note that lives in the durable
+    // project lane, and looking it up only in the plan scope is what silently dropped it. Cross-scope
+    // neighbours are TERMINAL here — the edge set is still the traversed scope's own, so reaching a
+    // project note does not drag the whole project graph into a plan traversal.
+    const lookupScopes = linkLookupScopes(scope)
+    const findNote = async (id: string) => {
+      for (const s of lookupScopes) {
+        const found = (await this.db.select(Tb.Note, key(s, id)))[0]
+        if (found) return { row: found, scope: s }
+      }
+      return null
+    }
     for (const n of ranked) {
-      const row = (await this.db.select(Tb.Note, key(scope, n.id)))[0]
-      if (!row) continue
+      const hit = await findNote(n.id)
+      if (!hit) continue
+      const { row, scope: foundScope } = hit
       const act = activation({ hits: row.hits ?? 0, lastAccessedAt: row.lastAccessedAt ?? null }, now, halfLife)
       out.push({
         id: n.id, title: row.title, summary: row.summary, via: n.via, depth: n.depth,
         score: n.score * activationBoost(act), direction: n.direction, activation: act, from: n.from,
+        ...(foundScope !== undefined && { scope: foundScope }),
       })
     }
     // same total order rule as rankNeighbors, now over the boosted score

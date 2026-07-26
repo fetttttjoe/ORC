@@ -1,6 +1,6 @@
 import { afterAll, describe, expect, it } from 'bun:test'
 import { RecordId, Surreal } from 'surrealdb'
-import { EVENT_KIND, MEMORY_ACCESS, isRecord, type AccessVia, type EventKind, type EventRecord, type MemoryAccessMode, type MemoryAuthor, type MemoryNote, type NoteView } from '@orc/contracts'
+import { EVENT_KIND, LINK_KIND, MEMORY_ACCESS, MemoryScope, isRecord, type AccessVia, type EventKind, type EventRecord, type MemoryAccessMode, type MemoryAuthor, type MemoryNote, type NoteView } from '@orc/contracts'
 import { SurrealMemory } from './surreal'
 import { eventFixture } from '@orc/contracts/fixtures'
 import { createTestSurreal } from './test-helpers'
@@ -22,7 +22,10 @@ const accessed = (seq: number, id: string, mode: MemoryAccessMode = MEMORY_ACCES
   eventFixture({ seq, taskId: null, kind: 'memory_accessed', payload: { id, scope, mode, author: cli, ...(via && { via }) }, ts: `2026-07-18T0${Math.min(seq, 9)}:00:00Z` })
 
 const drops: (() => Promise<void>)[] = []
-afterAll(async () => { for (const d of drops) await d() })
+// One throwaway Surreal database per test. Serial drops blew bun's default 5s hook budget as soon
+// as the file grew another case (same fix and reason as main.test.ts's pg teardown) — the databases
+// are distinct, so drop them concurrently and give the hook a real budget.
+afterAll(async () => { await Promise.all(drops.map(d => d())) }, 30_000)
 
 describe('SurrealMemory.applyEvent', () => {
   it('applies a write, reads it back, and increments revision on update', async () => {
@@ -39,6 +42,32 @@ describe('SurrealMemory.applyEvent', () => {
     expect(got?.createdBy).toBe('cli')            // unchanged
     expect(got?.updatedBy).toBe('api-loop·opus·review')
     expect(got?.summary).toBe('rotate on use')
+    await m.close()
+  })
+
+  // A MemoryLink carries no scope, and both sides of the flow used to resolve it in the SOURCE's
+  // scope: the projector pointed the edge at key(note.scope, l.id), traversal looked it up there.
+  // So a plan note referring to durable project knowledge authored an edge that read as a
+  // connection and returned nothing — 7 of 23 edges on a real grounded run, every one of them the
+  // link carried memory actually depends on.
+  it('a transient-scope note reaches the project note it links to; the reverse stays scoped', async () => {
+    const t = await createTestSurreal(); drops.push(t.drop)
+    const m = await SurrealMemory.open(t)
+    await m.applyEvent(written(1, note({ id: 'arch-overview', scope: MemoryScope.project, title: 'Architecture' })))
+    await m.applyEvent(written(2, note({
+      id: 'masterplan', scope: 'plan-t1', title: 'Masterplan',
+      links: [{ id: 'arch-overview', kind: LINK_KIND.derived_from }],
+    })))
+
+    const reached = await m.neighbors('masterplan', { scope: 'plan-t1' })
+    expect(reached.map(n => n.id)).toEqual(['arch-overview'])
+    // the caller is told WHERE it was found, because reading it back needs the right scope
+    expect(reached[0]?.scope).toBe(MemoryScope.project)
+    expect(await m.get('arch-overview', reached[0]!.scope!)).not.toBeNull()
+
+    // and the project lane is not polluted in return: a project traversal sees only its own edges,
+    // so a transient plan's decomposition can never leak into durable recall
+    expect(await m.neighbors('arch-overview', { scope: MemoryScope.project })).toEqual([])
     await m.close()
   })
 

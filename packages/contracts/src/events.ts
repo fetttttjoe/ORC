@@ -37,6 +37,31 @@ export type CopilotExchangePayload = z.infer<typeof CopilotExchangePayload>
 
 export { EventKind, EVENT_KIND, type EventRecord } from './event-kinds'
 
+// A supervisor reaction that threw. The reactions are the runtime's whole job — turn a recorded ask
+// into a workflow, cancel what a client stamped cancelled, carry an answer into a parked step — and
+// a throw used to leave nothing but a console.warn on the supervisor's stdout: the client had
+// already been told its ask was recorded, `orc status` showed a task that simply never moved, and
+// the only evidence sat in a log nobody reads. Recorded instead, so "nobody could start this" is
+// DATA — visible in status, the graph, and a bench row — rather than a silence that reads as a hang.
+export const REACTION = {
+  runRequested: 'run_requested',
+  cancelled: 'cancelled',
+  childApproved: 'child_approved',
+  feedback: 'feedback',
+  splitResolve: 'split_resolve',
+} as const
+export type Reaction = (typeof REACTION)[keyof typeof REACTION]
+
+export const ReactionFailedPayload = z.object({
+  reaction: z.enum([REACTION.runRequested, REACTION.cancelled, REACTION.childApproved, REACTION.feedback, REACTION.splitResolve]),
+  taskId: z.string().min(1).nullable(),
+  message: z.string(),
+  // the seq of the event whose reaction failed, so the read side can point at the exact cause.
+  // Null when the trigger was a split's STATE rather than one event (an unresolved join).
+  causeSeq: z.number().int().nonnegative().nullable(),
+})
+export type ReactionFailedPayload = z.infer<typeof ReactionFailedPayload>
+
 // The explicit ask for a run. NOT inferred from "approved with no live run": `orc propose` +
 // `orc approve` deliberately does not start anything, and inference would silently change that.
 // It also carries what only the caller knows — a --cwd override, and whether this is a retry —
@@ -146,6 +171,7 @@ export const PAYLOAD_SCHEMAS = {
   analysis_completed: AnalysisCompletedPayload,
   models_discovered: ModelsDiscoveredPayload,
   copilot_exchange: CopilotExchangePayload,
+  reaction_failed: ReactionFailedPayload,
 } satisfies Record<EventKind, z.ZodType>
 
 export const EventInput = z.object({

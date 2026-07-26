@@ -1,5 +1,5 @@
 import { z } from 'zod'
-import { AccessVia, EDGE_DIRECTIONS, errorMessage, MEMORY_ACCESS, MEMORY_LIMITS, MEMORY_SOURCE_LIMITS, MEMORY_TOOL_NAME, MemorySearchResult, MemoryWriteResult, NOTE_KINDS, LINK_KIND, LINK_KINDS, RETENTION_CLASSES, SEARCH_MODES, SearchMode, LinkKind, MemoryNoteDraftInput, NOTE_TIER, NOTE_TIERS, slugId, type MemoryAuthor, type MemoryNote, type MemoryStore, type ResolvedTool } from '@orc/contracts'
+import { AccessVia, EDGE_DIRECTIONS, errorMessage, linkLookupScopes, MemoryScope, MEMORY_ACCESS, MEMORY_LIMITS, MEMORY_SOURCE_LIMITS, MEMORY_TOOL_NAME, MemorySearchResult, MemoryWriteResult, NOTE_KINDS, LINK_KIND, LINK_KINDS, RETENTION_CLASSES, SEARCH_MODES, SearchMode, LinkKind, MemoryNoteDraftInput, NOTE_TIER, NOTE_TIERS, slugId, type MemoryAuthor, type MemoryNote, type MemoryStore, type ResolvedTool } from '@orc/contracts'
 import { applyBudget, fitMemoryNoteToBudget } from './budget'
 import { noteHasDrifted, type ChangedSince } from './drift'
 
@@ -12,6 +12,25 @@ const BODY_SOFT_CAP = 1600
 // a live run, in 3 of 28 notes. Warned rather than stripped on purpose — silently repairing it
 // would hide a writer that is mis-encoding everything it sends, including the files it writes.
 const OVER_ESCAPED = /\\["`]/
+
+// The links this note claims that resolve to nothing, by the ONE lookup rule (contracts
+// linkLookupScopes) traversal uses — so what the writer is told matches what a reader will find.
+// Not part of noteLint, which is pure over the note; this one has to ask the store what exists.
+//
+// Reported, not refused: writing a hub before the notes it decomposes into is legitimate authoring
+// order, and refusing it would force agents to write leaves-first. The report is what makes the
+// difference between "I linked it" and "it is linked" visible — a real run left an arch-overview
+// hub claiming three area notes that were never written, and nothing said so.
+export async function unresolvedLinks(store: MemoryStore, note: MemoryNote): Promise<string[]> {
+  const scopes = linkLookupScopes(note.scope ?? MemoryScope.project)
+  const missing: string[] = []
+  for (const l of note.links) {
+    let found = false
+    for (const s of scopes) if (await store.get(l.id, s)) { found = true; break }
+    if (!found) missing.push(l.id)
+  }
+  return missing
+}
 
 export function noteLint(note: MemoryNote): string[] {
   const w: string[] = []
@@ -190,7 +209,13 @@ export function memoryTools(store: MemoryStore, author: MemoryAuthor, role: Memo
           // fabricates 1 when nothing is projected yet). Handing the model a number that was
           // never true for its own write is worse than omitting it — read the note for the
           // authoritative value.
-          const warnings = noteLint(n)
+          const dead = await unresolvedLinks(store, n)
+          const warnings = [
+            ...noteLint(n),
+            ...(dead.length
+              ? [`these links resolve to no note, so nothing can follow them: ${dead.join(', ')} — write those notes, or drop the links`]
+              : []),
+          ]
           return ok(MemoryWriteResult.parse(warnings.length ? { id: n.id, warnings } : { id: n.id }))
         } catch (e) { return err(e) }
       },

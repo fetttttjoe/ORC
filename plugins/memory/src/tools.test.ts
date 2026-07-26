@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'bun:test'
 import { z } from 'zod'
-import { LINK_KINDS, MEMORY_ACCESS, MEMORY_LIMITS, MemoryNoteInput, NOTE_TIER, MemoryWriteResult, type AccessVia, type MemoryAccessMode, type MemoryNote, type MemoryNoteDraft, type MemoryStore, type NoteSummary } from '@orc/contracts'
+import { LINK_KIND, LINK_KINDS, MEMORY_ACCESS, MEMORY_LIMITS, MemoryNoteInput, NOTE_KIND, NOTE_TIER, MemoryWriteResult, type AccessVia, type MemoryAccessMode, type MemoryNote, type MemoryNoteDraft, type MemoryStore, type NoteSummary } from '@orc/contracts'
 import { episodicNoteFixture, semanticNoteFixture } from '@orc/contracts/fixtures'
 import { MEMORY_READ_TOOLS, memoryTools, memoryRoleFor, noteLint } from './tools'
 
@@ -127,6 +127,33 @@ describe('memory tools', () => {
     const r = await write.execute({ title: '—' })
     expect(r.isError).toBe(true)
     expect(r.output).toMatchObject({ error: expect.stringMatching(/pass an explicit id/) })
+  })
+
+  // A hub that claims children nobody wrote is a graph that lies: the payload reads as structure and
+  // traversal returns nothing. Observed live — an arch-overview note decomposing into three area
+  // notes that were never authored. Reported, not refused, so hub-before-leaves stays writable.
+  it('memory_write names the links that resolve to no note, in the result the agent reads', async () => {
+    const { store } = fakeStore({ get: async id => (id === 'exists' ? toNote({ id: 'exists', title: 'E', body: 'b' }) : null) })
+    const write = memoryTools(store, { source: 'cli' }).find(t => t.name === 'memory_write')!
+    const r = await write.execute({
+      id: 'hub', title: 'Hub', summary: 'a hub', tier: NOTE_TIER.semantic, kind: NOTE_KIND.architecture_current,
+      categories: ['subsystem'],
+      links: [{ id: 'exists', kind: LINK_KIND.decomposes_into }, { id: 'ghost', kind: LINK_KIND.decomposes_into }],
+    })
+    expect(r.isError).toBe(false)
+    const warnings = MemoryWriteResult.parse(r.output).warnings ?? []
+    expect(warnings.join(' ')).toContain('ghost')
+    expect(warnings.join(' ')).not.toContain('exists') // the resolvable link is not complained about
+  })
+
+  it('memory_write stays quiet when every link resolves', async () => {
+    const { store } = fakeStore() // fakeStore.get always resolves
+    const write = memoryTools(store, { source: 'cli' }).find(t => t.name === 'memory_write')!
+    const r = await write.execute({
+      id: 'hub', title: 'Hub', summary: 'a hub', tier: NOTE_TIER.semantic, kind: NOTE_KIND.architecture_current,
+      categories: ['subsystem'], links: [{ id: 'auth', kind: LINK_KIND.decomposes_into }],
+    })
+    expect((MemoryWriteResult.parse(r.output).warnings ?? []).join(' ')).not.toContain('resolve to no note')
   })
 
   it('budgets search results and reports truncation with a next hint', async () => {
