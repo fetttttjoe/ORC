@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'bun:test'
 import { z } from 'zod'
-import { LINK_KIND, LINK_KINDS, MEMORY_ACCESS, MEMORY_LIMITS, MemoryNoteInput, NOTE_KIND, NOTE_TIER, MemoryWriteResult, type AccessVia, type MemoryAccessMode, type MemoryNote, type MemoryNoteDraft, type MemoryStore, type NoteSummary } from '@orc/contracts'
+import { claimId, LEGACY_CLAIMS_FIELD, LINK_KIND, LINK_KINDS, MEMORY_ACCESS, MEMORY_LIMITS, MemoryNoteInput, NOTE_KIND, NOTE_TIER, MemoryWriteResult, type AccessVia, type MemoryAccessMode, type MemoryNote, type MemoryNoteDraft, type MemoryStore, type NoteSummary } from '@orc/contracts'
 import { episodicNoteFixture, semanticNoteFixture } from '@orc/contracts/fixtures'
 import { MEMORY_READ_TOOLS, memoryTools, memoryRoleFor, noteLint } from './tools'
 
@@ -197,15 +197,34 @@ describe('memory tools', () => {
   })
 
   it('memory_read bounds the complete response, including historical oversized metadata', async () => {
+    // a row from when the caps were looser: past `claims`' own max, so it cannot re-parse — the
+    // fitter still has to bound it, because claims is a field it knows how to blank and refill
     const oversized = {
       ...toNote({ id: 'auth', title: 'Auth' }),
-      rules: Array.from({ length: 1_000 }, (_, i) => `rule-${i}-${'x'.repeat(100)}`),
+      claims: Array.from({ length: 1_000 }, (_, i) =>
+        ({ id: claimId(`c-${i}`), text: `claim-${i}-${'x'.repeat(100)}`, sourceRevision: null })),
     }
     const { store } = fakeStore({ get: async () => oversized })
     const read = memoryTools({ store, author: { source: 'cli' } }).find(t => t.name === 'memory_read')!
     const result = await read.execute({ id: 'auth', budget: 1 })
 
     expect(result.output).toMatchObject({ truncated: true })
+    expect(JSON.stringify(result.output).length).toBeLessThanOrEqual(1_024)
+  })
+
+  // The fitter blanks and refills only the fields it knows, so a key from a retired schema would
+  // otherwise ride the note spread straight out — unbounded, past every discard. The tier schema is
+  // the authority on which keys a note has, and re-parsing is what enforces that.
+  it('memory_read drops a retired schema key instead of passing it through unbounded', async () => {
+    const legacyRow: MemoryNote & Record<typeof LEGACY_CLAIMS_FIELD, string[]> = {
+      ...toNote({ id: 'auth', title: 'Auth' }),
+      [LEGACY_CLAIMS_FIELD]: Array.from({ length: 1_000 }, (_, i) => `rule-${i}-${'x'.repeat(100)}`),
+    }
+    const { store } = fakeStore({ get: async () => legacyRow })
+    const read = memoryTools({ store, author: { source: 'cli' } }).find(t => t.name === 'memory_read')!
+    const result = await read.execute({ id: 'auth', budget: 1 })
+
+    expect(JSON.stringify(result.output)).not.toContain(LEGACY_CLAIMS_FIELD)
     expect(JSON.stringify(result.output).length).toBeLessThanOrEqual(1_024)
   })
 
@@ -330,7 +349,7 @@ describe('memory tools', () => {
       items: { maxLength: MEMORY_LIMITS.labelChars },
     })
     expect(props.links).toMatchObject({ maxItems: MEMORY_LIMITS.detailItems })
-    for (const name of ['paths', 'rules', 'uncertainty'])
+    for (const name of ['paths', 'uncertainty'])
       expect(props[name]).toMatchObject({
         maxItems: MEMORY_LIMITS.detailItems,
         items: { maxLength: MEMORY_LIMITS.detailChars },

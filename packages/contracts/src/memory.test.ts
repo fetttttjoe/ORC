@@ -47,14 +47,17 @@ describe('note tiers', () => {
   })
 
   it('each tier keeps only its own fields', () => {
+    // rules is the legacy spelling of claims (see claim.test.ts) — still a valid way to author one
     const s = semantic({ id: 'a', title: 'A', rules: ['never do Y'] })
-    expect(s.rules).toEqual(['never do Y'])
+    expect(s.claims.map(c => c.text)).toEqual(['never do Y'])
     expect(s).not.toHaveProperty('zone')
     const p = plan({ id: 'b', title: 'B', zone: ['docs/**'], rules: ['never do Y'] })
     expect(p.zone).toEqual(['docs/**'])
     expect(p).not.toHaveProperty('rules')
+    expect(p).not.toHaveProperty('claims')
     const e = MemoryNoteInput.parse({ tier: 'episodic', id: 'c', scope: 'plan-t1', title: 'C', rules: ['x'], zone: ['y'] })
     expect(e).not.toHaveProperty('rules')
+    expect(e).not.toHaveProperty('claims')
     expect(e).not.toHaveProperty('zone')
   })
 })
@@ -67,7 +70,7 @@ describe('MemoryNoteInput', () => {
     expect(n.tags).toEqual([])
     expect(n.links).toEqual([])
     expect(n.paths).toEqual([])
-    expect(n.rules).toEqual([])
+    expect(n.claims).toEqual([])
     expect(n.summary).toBe('')
     expect(n.body).toBe('')
   })
@@ -136,23 +139,24 @@ describe('MemoryNoteInput', () => {
   // iterations — the scalar is the same intent, so it coerces instead of failing the write.
   // Object arrays (links/sources) stay strict: a bare string there is a shape mistake.
   it('accepts a bare string as a one-element list for string-array fields', () => {
-    const n = semantic({ id: 'coerce', title: 'Coerce', paths: 'src/x.ts', tags: 'Postgres', rules: 'never do Y', categories: 'arch' })
+    const n = semantic({ id: 'coerce', title: 'Coerce', paths: 'src/x.ts', tags: 'Postgres', categories: 'arch' })
     expect(n.paths).toEqual(['src/x.ts'])
     expect(n.tags).toEqual(['postgres']) // item normalization still applies
-    expect(n.rules).toEqual(['never do Y'])
     expect(n.categories).toEqual(['arch'])
     const p = plan({ id: 'coerce-plan', title: 'Coerce plan', uncertainty: 'untested', zone: 'docs/**' })
     expect(p.uncertainty).toEqual(['untested'])
     expect(p.zone).toEqual(['docs/**'])
     expect(MemoryNoteInput.safeParse({ id: 'x', title: 'X', links: 'other-note' }).success).toBe(false)
+    // unlike paths/tags/categories, a legacy rule is recognized only as an ARRAY (claim.test.ts) —
+    // a bare scalar isn't the shape any writer, old or new, ever produced for it, so it is dropped
+    expect(semantic({ id: 'coerce-rule-scalar', title: 'Coerce', rules: 'never do Y' }).claims).toEqual([])
   })
 
   it("collapses an explicit empty string to [] (the model's clear spelling), never a junk [''] entry", () => {
-    const n = semantic({ id: 'clear', title: 'Clear', categories: '', tags: '', paths: '', rules: '' })
+    const n = semantic({ id: 'clear', title: 'Clear', categories: '', tags: '', paths: '' })
     expect(n.categories).toEqual([])
     expect(n.tags).toEqual([])
     expect(n.paths).toEqual([])
-    expect(n.rules).toEqual([])
     expect(n.categories).not.toContain('') // the regression: '' → [''] would render junk in the vault
     expect(plan({ tier: 'plan', id: 'clear-plan', title: 'Clear plan', uncertainty: '' }).uncertainty).toEqual([])
     // zone keeps its own min(1) item, so '' still rejects there (an empty glob is meaningless)
@@ -169,8 +173,8 @@ describe('MemoryNoteInput', () => {
       { links: Array.from({ length: 101 }, (_, i) => ({ id: `n-${i}` })) },
       { paths: Array(101).fill('x') },
       { paths: ['x'.repeat(1001)] },
-      { rules: Array(101).fill('x') },
-      { rules: ['x'.repeat(1001)] },
+      // rules is no longer validated here: an over-limit legacy rules[] decodes into claims and is
+      // truncated rather than rejected — see claim.test.ts's claimsFromLegacyRules coverage
       { uncertainty: Array(101).fill('x') },
       { uncertainty: ['x'.repeat(1001)] },
       { body: 'x'.repeat(100_001) },

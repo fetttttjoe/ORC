@@ -1,29 +1,13 @@
 import { z } from 'zod'
+import { ClaimInput, claimsFromLegacyRules, ClaimWrite, LEGACY_CLAIMS_FIELD } from './claim'
 import { EVENT_KIND, type EventRecord } from './event-kinds'
 import { composeAuthor, MEMORY_ID_RE, MemoryAuthor } from './ids'
+import { MEMORY_LIMITS } from './limits'
 import { planScope } from './plan'
 
 // re-exported so every memory consumer keeps importing this vocabulary from one place
 export { MEMORY_ID_RE, slugId, MemoryAuthor, composeAuthor } from './ids'
-
-
-export const MEMORY_LIMITS = {
-  labelItems: 50,
-  labelChars: 64,
-  detailItems: 100,
-  detailChars: 1_000,
-  // What the STORE accepts. Deliberately far above the searchable ceiling: this bound is also
-  // applied when re-parsing history, so tightening it would make older notes fail to parse and
-  // vanish from every fold.
-  bodyChars: 100_000,
-  // What the EMBEDDER can see (embedWritten's slice, sized to the encoder's context). Text past it
-  // is stored and readable but invisible to semantic search — so this is the honest number to
-  // advertise to a writer, and the only length worth warning about. Leaves room for title+summary
-  // inside the same window.
-  searchableBodyChars: 7_000,
-  embedInputChars: 8_000,
-  rationaleChars: 20_000,
-} as const
+export * from './claim'
 
 const Id = z.string().regex(MEMORY_ID_RE).max(128)
 
@@ -123,7 +107,7 @@ export const NOTE_KIND = NoteKind.enum
 //   episodic — the per-task trail a run leaves behind. Expirable by construction, swept by TTL.
 //   plan     — one node of a task's decomposition: requirements, rationale, write-fence, deps.
 // The tier decides which FIELDS a note may carry, so the lanes are separated structurally rather
-// than by a soft rank penalty: a step note cannot grow rules[], and a claim cannot smuggle a zone.
+// than by a soft rank penalty: a step note cannot grow claims[], and a claim cannot smuggle a zone.
 export const NOTE_TIERS = ['semantic', 'episodic', 'plan'] as const
 export const NoteTier = z.enum(NOTE_TIERS)
 export type NoteTier = z.infer<typeof NoteTier>
@@ -209,14 +193,14 @@ const noteCore = {
 }
 
 // SEMANTIC — durable project knowledge. It alone owns the retrieval surface (kind/categories/
-// paths/rules) and citations, because it alone makes claims another agent will act on.
+// paths/claims) and citations, because it alone makes claims another agent will act on.
 export const SemanticNoteInput = z.object({
   ...noteCore,
   tier: z.literal(NOTE_TIER.semantic),
   kind: NoteKind.default(NOTE_KIND.fact),
   categories: stringOrList(z.string().max(MEMORY_LIMITS.labelChars), MEMORY_LIMITS.labelItems).default([]),
   paths: stringOrList(z.string().max(MEMORY_LIMITS.detailChars), MEMORY_LIMITS.detailItems).default([]), // pointers down to code
-  rules: stringOrList(z.string().max(MEMORY_LIMITS.detailChars), MEMORY_LIMITS.detailItems).default([]), // normative statements agents honor
+  claims: z.array(ClaimInput).max(MEMORY_LIMITS.detailItems).default([]), // the addressable facts it asserts
   retention: Retention.default(RETENTION.durable),                                 // may this ever be swept?
   sources: z.array(MemorySourceInput).max(MEMORY_SOURCE_LIMITS.items).default([]), // provenance for a web finding
 })
@@ -298,6 +282,27 @@ const withTier = (raw: unknown): unknown => {
   return { ...raw, tier: inferTier(raw) }
 }
 
+// A note written before claims existed carries its statements in `rules`. Decoding them here is how
+// HISTORY parses, not a write-surface shim: the log is immutable, so this path is permanent even
+// though `rules` is gone from every schema below (an unknown key, so zod strips it after this runs).
+// `sourceRevision` comes from the note itself — the legacy note was grounded at some commit, and
+// that is the honest value; `validFrom` is not set because ClaimInput has no such field, and the
+// event that actually fixes it is only visible to the projector (see surreal.ts).
+const withClaims = (raw: unknown): unknown => {
+  if (typeof raw !== 'object' || raw === null) return raw
+  const r = raw as Record<string, unknown>
+  const legacy = r[LEGACY_CLAIMS_FIELD]
+  if (r.claims !== undefined || !Array.isArray(legacy)) return raw
+  const rules = legacy.filter((v): v is string => typeof v === 'string')
+  const rev = typeof r.sourceRevision === 'string' ? r.sourceRevision : null
+  return { ...r, claims: claimsFromLegacyRules(rules, rev) }
+}
+
+// Both note schemas below re-parse raw history (MemoryNote for a stored row, MemoryNoteInput for
+// an authored draft), so both must decode a legacy rules[] the same way, ahead of tier inference —
+// withClaims never looks at `tier`, so running it first cannot change which lane a note lands in.
+const preprocessNote = (raw: unknown): unknown => withTier(withClaims(raw))
+
 // An AUTHORED note seen by a reader that does not care which tier it got: every tier's fields,
 // all optional, so one code path can render or project any of them and a field the tier does not
 // own simply reads as undefined. NoteView below is the same idea for a STORED note.
@@ -306,7 +311,7 @@ export interface NoteFields extends Partial<Omit<SemanticNoteInput, 'tier'> & Om
 }
 
 export const MemoryNoteInput = z.preprocess(
-  withTier,
+  preprocessNote,
   z.discriminatedUnion('tier', [SemanticNoteInput, EpisodicNoteInput, PlanNoteInput]),
 ).refine(
   n => !(n.scope === MemoryScope.project && n.id === 'index'),
@@ -340,7 +345,10 @@ export const MemoryNoteDraftInput = z.object({
   kind: optionalNoDefault(SemanticNoteInput.shape.kind),
   categories: optionalNoDefault(SemanticNoteInput.shape.categories),
   paths: optionalNoDefault(SemanticNoteInput.shape.paths),
-  rules: optionalNoDefault(SemanticNoteInput.shape.rules),
+  claims: optionalNoDefault(SemanticNoteInput.shape.claims),
+  // An additive INSTRUCTION, not a note field — the note parse strips it, and the store turns it
+  // into the resolved `claims` above. Here so `write` and the tool boundary share one shape.
+  addClaims: optionalNoDefault(ClaimWrite.shape.addClaims),
   retention: optionalNoDefault(SemanticNoteInput.shape.retention),
   sources: optionalNoDefault(SemanticNoteInput.shape.sources),
   rationale: optionalNoDefault(PlanNoteInput.shape.rationale),
@@ -366,7 +374,7 @@ export type MemoryNoteDraft = z.input<typeof MemoryNoteDraftInput>
 // A .pick of MemoryNoteDraftInput, so every field keeps its single-source constraint. Least
 // authority: only fields a human editor actually authors are exposed — `links` is here because
 // the note editor writes manual connections (the vision's hand-wired synapse); `kind`/`categories`
-// and the execution-plumbing fields (scope, retention, sources, paths, rules, rationale,
+// and the execution-plumbing fields (scope, retention, sources, paths, claims, rationale,
 // uncertainty, zone, sourceRevision) stay with the agent tools and CLI flags that own them, and
 // widen later only WITH a consumer. Human authoring always targets the durable project scope —
 // the callee fixes it; an attacker-supplied `scope` key is stripped by the schema parse.
@@ -404,7 +412,7 @@ export const PlanNote = PlanNoteInput.extend(noteProvenance)
 export type PlanNote = z.infer<typeof PlanNote>
 
 export const MemoryNote = z.preprocess(
-  withTier,
+  preprocessNote,
   z.discriminatedUnion('tier', [SemanticNote, EpisodicNote, PlanNote]),
 )
 export type MemoryNote = z.infer<typeof MemoryNote>
@@ -499,7 +507,13 @@ export interface MemoryFilter { scope?: string | string[]; category?: string; ta
 // write takes the raw draft — the gateway parses (defaults + validation), callers never cast.
 // typed event payloads — PAYLOAD_SCHEMAS entries and the memory projector parse through
 // these, so payload access never needs a cast
-export const MemoryWrittenPayload = z.object({ note: MemoryNoteInput, author: MemoryAuthor })
+export const MemoryWrittenPayload = z.object({
+  note: MemoryNoteInput,
+  author: MemoryAuthor,
+  // Claim ids this write supersedes. Stated, never inferred: the store merges on omit, so a claim
+  // the writer simply did not resend must carry forward — absence cannot mean deletion.
+  invalidates: z.array(z.string()).default([]),
+})
 export type MemoryWrittenPayload = z.infer<typeof MemoryWrittenPayload>
 export const MemoryDeletedPayload = z.object({
   // id AND scope must be MEMORY_ID_RE-safe: they flow into noteRelPath → the vault path guard,
@@ -557,7 +571,10 @@ export interface MemoryHealth {
 export interface MemoryStore {
   // idempotencyKey: deterministic writers (tool-driven writes inside an operation) pass one so
   // a crash retry of the surrounding effect cannot append the note event twice
-  write(input: MemoryNoteDraft, author: MemoryAuthor, opts?: { idempotencyKey?: string }): Promise<MemoryNote>
+  // invalidates: claim ids this write supersedes. On the OPTS, not the draft, because it is stated
+  // about the write rather than about the note — it lands on the event, and the note keeps live
+  // claims only. See ClaimWrite for why absence cannot mean deletion.
+  write(input: MemoryNoteDraft, author: MemoryAuthor, opts?: { idempotencyKey?: string; invalidates?: string[] }): Promise<MemoryNote>
   remove(id: string, scope?: string, author?: MemoryAuthor): Promise<void>
   get(id: string, scope?: string): Promise<MemoryNote | null>
   list(filter?: MemoryFilter): Promise<NoteSummary[]>

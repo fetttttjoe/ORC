@@ -1,14 +1,17 @@
 import { describe, expect, it } from 'bun:test'
-import type { SemanticNote } from '@orc/contracts'
+import { claimId, type SemanticNote } from '@orc/contracts'
 import { planNoteFixture, semanticNoteFixture } from '@orc/contracts/fixtures'
-import { noteRelPath, renderNoteFile } from './note-md'
+import { CLAIMS_HEADING, noteRelPath, renderNoteFile } from './note-md'
+
+const SINGLE_USE = 'Refresh tokens are single-use.'
 
 const note = (over: Partial<SemanticNote> & { id: string }): SemanticNote => semanticNoteFixture({
   sourceRevision: 'abc123def',
   title: 'Auth token refresh flow',
   categories: ['architecture', 'security'], tags: ['auth'],
   links: [{ id: 'session-model', kind: 'refines' }, { id: 'cookie-auth', kind: 'supersedes', confidence: 0.9 }],
-  paths: ['packages/kernel/src/auth.ts'], rules: ['Refresh tokens are single-use.'],
+  paths: ['packages/kernel/src/auth.ts'],
+  claims: [{ id: claimId(SINGLE_USE), text: SINGLE_USE, sourceRevision: 'abc123def' }],
   summary: 'Refresh tokens rotate on use.', body: '# Detail\nrotation logic',
   createdAt: '2026-07-18T09:12:04Z', createdBy: 'api-loop·sonnet-5·research',
   updatedAt: '2026-07-18T11:30:22Z', updatedBy: 'api-loop·opus·review', revision: 3,
@@ -33,6 +36,16 @@ describe('renderNoteFile', () => {
     expect(md).toContain('kind: supersedes')
     expect(md).toContain('confidence: 0.9')
   })
+  it('renders claims with their ids so a human can invalidate one by name', () => {
+    const md = renderNoteFile(note({ id: 'auth-token-refresh' }))
+    expect(md).toContain(CLAIMS_HEADING)
+    expect(md).toContain(`- [${claimId(SINGLE_USE)}] ${SINGLE_USE}`)
+    // the id is what `orc memory claims --invalidate` takes, so it has to be readable off the file
+    expect(md).toContain(claimId(SINGLE_USE))
+  })
+  it('omits the Claims section for a semantic note that asserts none', () => {
+    expect(renderNoteFile(note({ id: 'bare', claims: [] }))).not.toContain(CLAIMS_HEADING)
+  })
   it('paths under scope subdir only for non-project scopes', () => {
     expect(noteRelPath(note({ id: 'auth-token-refresh' }))).toBe('auth-token-refresh.md')
     expect(noteRelPath(note({ id: 'auth-token-refresh', scope: 'infra' }))).toBe('infra/auth-token-refresh.md')
@@ -43,7 +56,7 @@ describe('renderNoteFile', () => {
       uncertainty: ['schema unknown'], links: [{ id: 'db', kind: 'decomposes_into' }],
     }))
     expect(md).toContain('tier: plan')
-    expect(md).not.toContain('rules:') // a plan note has no retrieval surface to render
+    expect(md).not.toContain(CLAIMS_HEADING) // a plan note has no retrieval surface to render
     expect(md).toContain('decomposes_into')
     expect(md).toContain('schema unknown')
     expect(md).toContain('## Rationale')

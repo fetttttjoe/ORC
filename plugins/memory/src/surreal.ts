@@ -2,7 +2,7 @@ import { z } from 'zod'
 import { RecordId, Surreal } from 'surrealdb'
 import { edge, orm, table, t } from 'surqlize'
 import {
-  activation, activationBoost, bumpAccess, DEFAULT_HALF_LIFE_DAYS,
+  activation, activationBoost, bumpAccess, Claim, DEFAULT_HALF_LIFE_DAYS,
   deriveNoteProvenance, EDGE_DIRECTION, EVENT_KIND, LINK_KINDS, NOTE_KINDS, MemoryScope, viaEdge,
   MemoryAccessedPayload, MemoryDeletedPayload, MemoryNote, MemoryWrittenPayload,
   MEMORY_LIMITS, SEARCH_MODE, errorMessage, inferTier, isUiMetaNote, noteKey, NoteTier,
@@ -13,7 +13,7 @@ import {
 import { rankNeighbors, rrfFuse, type Edge } from './rank'
 
 // The read model's table names — single spelling for every builder call and RecordId.
-enum Tb { Note = 'note', Meta = 'meta', Link = 'link' }
+enum Tb { Note = 'note', Meta = 'meta', Link = 'link', Claim = 'claim' }
 
 // `noteId` holds the note's own string id (surqlize reserves `id` for the auto-added RecordId).
 // hits/lastAccessedAt are projected from memory_accessed like every other field — they survive a
@@ -29,14 +29,18 @@ const kindType = t.union(LINK_KINDS.map(k => t.literal(k)))
 const noteKindType = t.union(NOTE_KINDS.map(k => t.literal(k)))
 
 // Tier-specific columns are optional because a row only HAS the columns its tier owns — a plan
-// note has no `rules` column at all, not an empty one. `tier` itself is optional so a row
+// note has no `claims` column at all, not an empty one. `tier` itself is optional so a row
 // projected before the split still selects; `orc memory rebuild` re-derives it from the log.
 const noteTable = table(Tb.Note, {
   noteId: t.string(), scope: t.string(), title: t.string(), tier: t.option(t.string()),
   kind: t.option(noteKindType), sourceRevision: t.option(t.string()),
   categories: t.option(t.array(t.string())), tags: t.array(t.string()),
   links: t.array(t.object({ id: t.string(), kind: kindType, confidence: t.option(t.number()) })),
-  paths: t.option(t.array(t.string())), rules: t.option(t.array(t.string())),
+  paths: t.option(t.array(t.string())),
+  // stored on the note row like `links` is, and — like `links` — ALSO materialized into a derived
+  // per-claim table for retrieval. The row is the note's own live set (what a read returns); the
+  // derived table is what search matches statement-by-statement.
+  claims: t.option(t.array(t.object({ id: t.string(), text: t.string(), sourceRevision: t.option(t.string()) }))),
   summary: t.string(), body: t.string(),
   retention: t.string(),
   sources: t.option(t.array(t.object({ url: t.string(), title: t.option(t.string()), retrievedAt: t.string() }))),
@@ -48,6 +52,20 @@ const noteTable = table(Tb.Note, {
   embedding: t.option(t.array(t.number())),
 })
 const metaTable = table(Tb.Meta, { seq: t.number() })
+
+// Derived claim index, materialized from note.claims by the projector exactly as `link` is from
+// note.links — same delete-then-recreate on every write, same disposability. It exists so a claim
+// can carry its OWN embedding and its own activation: search matches a statement directly instead
+// of matching a document and making the reader find the sentence.
+// `validFrom` lives here and nowhere in the note payload: it is the ts of the first event that
+// carried the claim, which only a fold can know — so the projector is the only thing that can
+// honestly stamp it, and it is preserved across rewrites below.
+const claimTable = table(Tb.Claim, {
+  claimId: t.string(), noteId: t.string(), scope: t.string(), text: t.string(),
+  validFrom: t.string(), sourceRevision: t.option(t.string()),
+  embedding: t.option(t.array(t.number())),
+  hits: t.option(t.number()), lastAccessedAt: t.option(t.string()),
+})
 
 // Derived edge index (spec D2/D3): materialized from note.links by the projector, rebuilt on
 // replay. Explicit fromId/toId/scope string fields so fetch needs no RecordId parsing.
@@ -62,6 +80,9 @@ const linkTable = edge(Tb.Note, Tb.Link, Tb.Note, {
 // RecordId key = `${scope}:${id}` (scope/id are separately restricted to [a-z0-9-], so ':' is
 // an unambiguous separator); the table itself is always 'note'.
 const key = (scope: string, id: string) => `${scope}:${id}`
+// A claim row is identified by its OWNING note plus its content hash, not by the hash alone: the
+// same statement asserted on two notes is two claims, each with its own provenance and activation.
+const claimKey = (scope: string, noteId: string, claimId: string) => `${scope}:${noteId}:${claimId}`
 
 // Raw semantic-scan rows — the fields the cosine SELECT projects, parsed (never cast) at the
 // boundary like every other DB read. hits/lastAccessedAt are optional (a note may predate them).
@@ -96,7 +117,7 @@ async function withTimeout<T>(p: Promise<T>, ms: number, what: string): Promise<
 }
 
 function makeOrm(surreal: Surreal) {
-  return orm(surreal, noteTable, metaTable, linkTable)
+  return orm(surreal, noteTable, metaTable, linkTable, claimTable)
 }
 type Db = ReturnType<typeof makeOrm>
 
@@ -135,7 +156,7 @@ export class SurrealMemory {
       // write would fail on the very first write. Defining both tables up front avoids that.
       // `link` (default TYPE ANY, so RELATE works) is defined too: neighbors() SELECTs from it
       // even when no edge was ever materialized.
-      await surreal.query([Tb.Note, Tb.Meta, Tb.Link].map(tb => `DEFINE TABLE IF NOT EXISTS ${tb} SCHEMALESS;`).join(' '))
+      await surreal.query([Tb.Note, Tb.Meta, Tb.Link, Tb.Claim].map(tb => `DEFINE TABLE IF NOT EXISTS ${tb} SCHEMALESS;`).join(' '))
       return new SurrealMemory(surreal, makeOrm(surreal), embedder)
     } catch (err) {
       // connect() opens a live socket; if signin/use/DEFINE then throws, don't leak it
@@ -156,6 +177,7 @@ export class SurrealMemory {
     // redelivered event is harmless waste, not a correctness issue.
     // ponytail: re-embeds even a redelivered memory_written; gate behind the cursor if it bites.
     const embedding = e.kind === EVENT_KIND.memory_written ? await this.embedWritten(e) : undefined
+    const claimEmbeddings = e.kind === EVENT_KIND.memory_written ? await this.embedClaims(e) : new Map<string, number[]>()
     return this.db.transaction(async tx => {
       const cursor = (await tx.select(Tb.Meta, 'cursor'))[0]?.seq ?? 0
       if (e.seq <= cursor) return false
@@ -186,7 +208,10 @@ export class SurrealMemory {
           // materialize the optional confidence key: t.option infers `number | undefined`, required
           links: note.links.map(l => ({ id: l.id, kind: l.kind, confidence: l.confidence })),
           ...(n.paths !== undefined && { paths: n.paths }),
-          ...(n.rules !== undefined && { rules: n.rules }),
+          // materialize the optional sourceRevision key, same reason as links' confidence above
+          ...(n.claims !== undefined && {
+            claims: n.claims.map(c => ({ id: c.id, text: c.text, sourceRevision: c.sourceRevision ?? undefined })),
+          }),
           summary: note.summary, body: note.body,
           retention: note.retention,
           // ORM row wants the title key always present (OptionType); retrievedAt already stamped by deriveNoteProvenance
@@ -222,6 +247,32 @@ export class SurrealMemory {
             ...(exLink?.lastAccessedAt !== undefined && { lastAccessedAt: exLink.lastAccessedAt }),
           })
         }
+        // Claims re-materialize from the note's live set. Deliberately NOT the edges' clear-and-
+        // recreate above: a claim row has a DETERMINISTIC id (note + content hash), and a fixed
+        // record id deleted and re-created inside one Surreal transaction stays deleted at commit —
+        // measured, three claims upserted after the delete left only the two the delete had not
+        // touched. The edge path is immune because RELATE mints a fresh id per call rather than
+        // reusing a key. So retire only the rows this write actually dropped, and update the rest in
+        // place: a claim that SURVIVES keeps its earned hits and its original validFrom, because
+        // re-stating a fact does not make it new. A retired one goes with its stats — it is no
+        // longer live, and the log still holds it.
+        const existingClaims = await tx.select(Tb.Claim).where(c => c.noteId.eq(note.id).and(c.scope.eq(note.scope)))
+        const claimStats = new Map(existingClaims.map(c => [c.claimId, c]))
+        const liveClaims = n.claims ?? []
+        const liveIds = new Set(liveClaims.map(c => c.id))
+        for (const row of existingClaims) if (!liveIds.has(row.claimId)) await tx.delete(row.id)
+        for (const c of liveClaims) {
+          const prev = claimStats.get(c.id)
+          await tx.upsert(Tb.Claim, claimKey(note.scope, note.id, c.id)).set({
+            claimId: c.id, noteId: note.id, scope: note.scope, text: c.text,
+            // the payload carries no date — the FIRST event that carried this claim is its validFrom
+            validFrom: prev?.validFrom ?? e.ts,
+            sourceRevision: c.sourceRevision ?? undefined,
+            embedding: claimEmbeddings.get(c.id),
+            hits: prev?.hits ?? 0,
+            ...(prev?.lastAccessedAt !== undefined && { lastAccessedAt: prev.lastAccessedAt }),
+          })
+        }
       } else if (e.kind === EVENT_KIND.memory_accessed) {
         const parsed = MemoryAccessedPayload.safeParse(e.payload)
         if (!parsed.success) { console.warn(`[memory] skipping unparseable memory_accessed at seq ${e.seq}: ${parsed.error.message}`); await tx.upsert(Tb.Meta, 'cursor').set({ seq: e.seq }); return true }
@@ -247,6 +298,8 @@ export class SurrealMemory {
         await tx.delete(Tb.Note, key(p.scope, p.id))
         // drop the note's edges in both directions with it
         await tx.delete(Tb.Link).where(l => l.fromId.eq(p.id).or(l.toId.eq(p.id)).and(l.scope.eq(p.scope)))
+        // the derived claim rows go with the note, same as its edges
+        await tx.delete(Tb.Claim).where(c => c.noteId.eq(p.id).and(c.scope.eq(p.scope)))
       }
       await tx.upsert(Tb.Meta, 'cursor').set({ seq: e.seq })
       return true
@@ -398,6 +451,40 @@ export class SurrealMemory {
     catch (err) { console.warn(`[memory] embed failed at seq ${e.seq}: ${errorMessage(err)}`); return undefined }
   }
 
+  // A vector per claim, so semantic search can match a statement instead of a document. ONE batched
+  // round trip like embedWritten's, and outside the transaction for the same reason. Best-effort on
+  // the same terms too: a backend failure logs once and leaves the claims keyword-findable.
+  // ponytail: re-embeds every live claim on each write to the note; carry vectors forward from the
+  // rows read above if a hot note with many claims makes the embedder cost bite.
+  private async embedClaims(e: EventRecord): Promise<Map<string, number[]>> {
+    const out = new Map<string, number[]>()
+    if (!this.embedder) return out
+    const p = MemoryWrittenPayload.safeParse(e.payload)
+    if (!p.success) return out
+    const n: NoteFields = p.data.note
+    const claims = n.claims ?? []
+    if (claims.length === 0) return out
+    try {
+      const vecs = await this.embedder.embed(claims.map(c => c.text.slice(0, MEMORY_LIMITS.embedInputChars)))
+      claims.forEach((c, i) => {
+        const vec = vecs[i]
+        if (vec) out.set(c.id, vec)
+      })
+    } catch (err) {
+      console.warn(`[memory] claim embed failed at seq ${e.seq}: ${errorMessage(err)}`)
+    }
+    return out
+  }
+
+  // A note's live claims as the read model holds them — each stamped with the event that first
+  // carried it, which is why this reads the derived table rather than the note row.
+  async claimsFor(noteId: string, scope: string = MemoryScope.project): Promise<Claim[]> {
+    const rows = await this.db.select(Tb.Claim).where(c => c.noteId.eq(noteId).and(c.scope.eq(scope)))
+    return rows.map(r => Claim.parse({
+      id: r.claimId, text: r.text, validFrom: r.validFrom, sourceRevision: r.sourceRevision,
+    }))
+  }
+
   private async keywordSearch(query: string, filter: MemoryFilter = {}): Promise<NoteSummary[]> {
     // AND across whitespace-separated terms, each term matching ANY field — a whole-query
     // substring match made every multi-word query miss unless the exact phrase appeared.
@@ -477,6 +564,7 @@ export class SurrealMemory {
       await tx.delete(Tb.Note)
       await tx.delete(Tb.Meta)
       await tx.delete(Tb.Link)
+      await tx.delete(Tb.Claim)
     })
   }
   async close(): Promise<void> { await this.surreal.close() }
@@ -490,7 +578,7 @@ function toNote(r: Record<string, any>): unknown {
     tier: r.tier, id: r.noteId, scope: r.scope, title: r.title, kind: r.kind,
     sourceRevision: r.sourceRevision ?? null,
     categories: r.categories, tags: r.tags,
-    links: r.links, paths: r.paths, rules: r.rules, summary: r.summary, body: r.body,
+    links: r.links, paths: r.paths, claims: r.claims, summary: r.summary, body: r.body,
     // ?? fallbacks so a row written before these fields existed still parses on rebuild
     retention: r.retention ?? 'durable',
     sources: r.sources,

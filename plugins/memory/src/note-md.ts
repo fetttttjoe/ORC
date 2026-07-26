@@ -5,6 +5,10 @@ export function noteRelPath(note: Pick<MemoryNote, 'id' | 'scope'>): string {
   return note.scope === MemoryScope.project ? `${note.id}.md` : `${note.scope}/${note.id}.md`
 }
 
+// Exported because the vault is a read surface others assert against: a test spelling the heading
+// out again could drift from what the renderer emits and still pass.
+export const CLAIMS_HEADING = '## Claims'
+
 // decomposes_into/depends_on links as navigable body links — other link kinds stay frontmatter-only
 const linksOf = (links: MemoryLink[], kind: MemoryLink['kind']): string =>
   links.filter(l => l.kind === kind).map(l => `- [${l.id}](./${l.id}.md)`).join('\n')
@@ -23,7 +27,6 @@ export function renderNoteFile(note: MemoryNote): string {
     ...(n.categories !== undefined && { categories: n.categories }),
     tags: note.tags, links: note.links,
     ...(n.paths !== undefined && { paths: n.paths }),
-    ...(n.rules !== undefined && { rules: n.rules }),
     summary: note.summary,
     createdAt: note.createdAt, createdBy: note.createdBy,
     updatedAt: note.updatedAt, updatedBy: note.updatedBy, revision: note.revision,
@@ -35,7 +38,12 @@ export function renderNoteFile(note: MemoryNote): string {
   const sources = (n.sources ?? [])
     .map(s => `- [${s.title ?? s.url}](${s.url}) — retrieved ${s.retrievedAt}`)
     .join('\n')
+  // Claims render in the body, not frontmatter: a statement runs to a sentence, and block-style
+  // YAML for a list of three-key objects buries the text a reader came for. The leading [id] is
+  // load-bearing — it is the handle `invalidates` takes, so it has to be readable off the file.
+  const claims = (n.claims ?? []).map(c => `- [${c.id}] ${c.text}`).join('\n')
   const sections = [
+    claims ? `${CLAIMS_HEADING}\n\n${claims}` : '',
     n.rationale ? `## Rationale\n\n${n.rationale}` : '',
     n.uncertainty?.length ? `## Uncertainty\n\n${n.uncertainty.map(u => `- ${u}`).join('\n')}` : '',
     decomposesInto ? `## Decomposes into\n\n${decomposesInto}` : '',

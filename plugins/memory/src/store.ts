@@ -1,4 +1,4 @@
-import { EVENT_KIND, MemoryNoteInput, MemoryScope, MemoryWrittenPayload, NOTE_TIER, type MemoryAuthor, type MemoryFilter, type MemorySearchOpts, type MemoryNote, type MemoryStore, type NoteSummary } from '@orc/contracts'
+import { ClaimWrite, EVENT_KIND, MemoryNoteInput, MemoryScope, MemoryWrittenPayload, NOTE_TIER, resolveClaims, type MemoryAuthor, type MemoryFilter, type MemorySearchOpts, type MemoryNote, type MemoryStore, type NoteSummary } from '@orc/contracts'
 import { KERNEL_ERROR_CODE, KernelError, type EventLog } from '@orc/kernel'
 import type { SurrealMemory } from './surreal'
 
@@ -21,6 +21,11 @@ export function createMemoryStore(opts: { log: EventLog; surreal: SurrealMemory;
       // stripped by the schema parse.
       const supplied = Object.fromEntries(Object.entries(input).filter(([, v]) => v !== undefined))
       const scope = typeof supplied.scope === 'string' ? supplied.scope : MemoryScope.project
+      // Claims are additive. Both instructions are parsed off the one surface they arrive on, so
+      // neither needs a hand-rolled shape check; `addClaims` rides the draft and `invalidates` the
+      // opts, and the note parse below strips both as unknown keys — which is why an instruction
+      // can never reach the payload as a stored field.
+      const claimWrite = ClaimWrite.parse({ ...input, ...writeOpts })
       // resolved BEFORE the transaction: a git spawn must never run inside the project write lock
       const stampedRevision = await sourceRevision()
       // Merge base from the EVENT LOG inside the append transaction, never from the async
@@ -38,13 +43,21 @@ export function createMemoryStore(opts: { log: EventLog; surreal: SurrealMemory;
           ? MemoryWrittenPayload.safeParse(latest.payload)
           : null
         const existing = written?.success ? written.data.note : null
-        const parsed = MemoryNoteInput.parse(existing ? { ...existing, ...supplied } : input) // reject malformed BEFORE appending
+        // the live set the tier actually owns — a plan or episodic note has no claims to carry
+        const live = existing?.tier === NOTE_TIER.semantic ? existing.claims : []
+        const claims = resolveClaims(live, claimWrite.addClaims, claimWrite.invalidates, stampedRevision)
+        // reject malformed BEFORE appending. `claims` is passed explicitly rather than merged: it is
+        // already resolved against the live set, so merge-on-omit must not reach it.
+        const parsed = MemoryNoteInput.parse(existing ? { ...existing, ...supplied, claims } : { ...input, claims })
         // the gateway stamps the runtime's Git revision — agents cannot claim another one
         const merged = { ...parsed, sourceRevision: stampedRevision }
         try {
           await tx.append({
             taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_written,
-            payload: { note: merged, author }, idempotencyKey: writeOpts?.idempotencyKey ?? null,
+            // the tombstone is stated on the EVENT: the note carries live claims only, and folding
+            // the log is what recovers a retired claim and the write that retired it
+            payload: { note: merged, author, invalidates: claimWrite.invalidates },
+            idempotencyKey: writeOpts?.idempotencyKey ?? null,
           })
         } catch (err) {
           // A key identifies one tool call, so a keyed replay is that call arriving twice and the

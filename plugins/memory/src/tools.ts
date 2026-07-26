@@ -59,7 +59,7 @@ export function noteLint(note: MemoryNote): string[] {
   // Not a style rule: past the embedder's window the text simply cannot be found by meaning.
   if (note.body.length > MEMORY_LIMITS.searchableBodyChars)
     w.push(`body is ${note.body.length} chars — only the first ${MEMORY_LIMITS.searchableBodyChars} reach the embedder,`
-      + ` so the rest is stored and readable but invisible to semantic search; split it or move detail into paths/rules/links`)
+      + ` so the rest is stored and readable but invisible to semantic search; split it or move detail into paths/claims/links`)
   // the categories lint targets the retrieval surface, so it only fires on the tier that has one
   if (note.tier === NOTE_TIER.semantic && note.kind.startsWith('architecture') && note.categories.length === 0)
     w.push(`categories empty — set one of subsystem | cross-cutting | target so category-filtered search finds this`)
@@ -161,7 +161,7 @@ export function memoryTools(opts: {
           title: { type: 'string', minLength: 1, maxLength: 200 },
           tier: {
             type: 'string', enum: [...NOTE_TIERS],
-            description: "which memory this note belongs to (default semantic). semantic = durable project knowledge, and the only tier that takes kind/categories/paths/rules/sources. plan = one node of a task's decomposition, and the only tier that takes rationale/uncertainty/zone. episodic = a record of what one run did, expirable, title+summary+tags only. Fields outside the tier you name are dropped.",
+            description: "which memory this note belongs to (default semantic). semantic = durable project knowledge, and the only tier that takes kind/categories/paths/claims/sources. plan = one node of a task's decomposition, and the only tier that takes rationale/uncertainty/zone. episodic = a record of what one run did, expirable, title+summary+tags only. Fields outside the tier you name are dropped.",
           },
           kind: {
             type: 'string', enum: [...NOTE_KINDS],
@@ -199,7 +199,6 @@ export function memoryTools(opts: {
             },
           },
           paths: { type: 'array', maxItems: MEMORY_LIMITS.detailItems, items: { type: 'string', maxLength: MEMORY_LIMITS.detailChars }, description: 'code paths this note refers to' },
-          rules: { type: 'array', maxItems: MEMORY_LIMITS.detailItems, items: { type: 'string', maxLength: MEMORY_LIMITS.detailChars } },
           rationale: { type: 'string', maxLength: MEMORY_LIMITS.rationaleChars, description: 'plan tier only: why this subplan exists' },
           uncertainty: { type: 'array', maxItems: MEMORY_LIMITS.detailItems, items: { type: 'string', maxLength: MEMORY_LIMITS.detailChars }, description: 'plan tier only: coverage gaps / assumptions to surface (RG7)' },
           skillRefs: { type: 'array', maxItems: 16, items: { type: 'string', maxLength: MEMORY_LIMITS.labelChars }, description: 'plan tier only: skills this subplan\'s step should load (e.g. web-research). Selection from what the operator installed — an unknown ref fails the plan before approval.' },

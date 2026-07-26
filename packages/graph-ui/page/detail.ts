@@ -20,7 +20,7 @@ interface StepDetail {
   run: { status: string; attempt: number; iterations: number; output: string | null; failure: { class: string; message: string } | null } | null
 }
 // `note` is the contract's own shape, not a hand-copied one. The copy this replaces declared
-// `kind`, `rules` and `sources` as always-present, which stopped being true when notes split into
+// `kind`, `claims` and `sources` as always-present, which stopped being true when notes split into
 // tiers — so opening a plan or episodic note read `.length` off undefined and killed the view.
 interface NoteDetail {
   note: MemoryNote
@@ -118,7 +118,9 @@ export function renderDetail(nodeId: string, d: unknown, go: Go, notes?: NoteDet
       ]),
       note.summary ? el('div', {}, note.summary) : null,
       note.body ? Pre(note.body) : null,
-      tierFields.rules?.length ? Card(['rules'], KV(tierFields.rules.map((r, i) => [`#${i + 1}`, r]))) : null,
+      // keyed by claim id, not position: the id is the handle `invalidates` takes, and a positional
+      // label would shift under every retirement — which is exactly what content-hashed ids avoid
+      tierFields.claims?.length ? Card(['claims'], KV(tierFields.claims.map(c => [c.id, c.text]))) : null,
       tierFields.sources?.length ? Card(['sources'], KV(tierFields.sources.map(s => [s.title ?? 'link', s.url]))) : null,
     ),
       ...(notes && note.scope === 'project' ? [el('div', { class: 'row-split' },

@@ -1,4 +1,4 @@
-import type { MemoryNote, NoteView } from '@orc/contracts'
+import { MemoryNote, type NoteView } from '@orc/contracts'
 
 export const approxTokens = (s: string): number => Math.ceil(s.length / 4) // ponytail: chars/4; swap for a real tokenizer only if it misbudgets
 
@@ -28,19 +28,41 @@ export interface FittedNote { note: NoteView; truncated: boolean; next?: string 
 const itemChars = (value: unknown): number =>
   typeof value === 'string' ? value.length : JSON.stringify(value).length
 
+// Every key of a note, grouped by HOW this fitter bounds it. A field added to a tier but forgotten
+// here is a compile error rather than a response that quietly blows its budget — the same guard
+// MemoryNoteDraftInput's `DraftCoversTiers` applies to the write surface, applied to the thing that
+// actually enforces the read cap. Both leaks this file has had (a retired `rules[]`, and the plan
+// tier's own skillRefs/toolRefs/modelRef) were a field nobody remembered to add below.
+type BoundedField =
+  | 'id' | 'scope' | 'title' | 'sourceRevision'                        // clamped building `fitted`
+  | 'createdAt' | 'createdBy' | 'updatedAt' | 'updatedBy'              // dropped by the discard ladder
+  | 'tier' | 'kind' | 'retention' | 'revision'                         // fixed width, nothing to trim
+  | 'summary' | 'rationale' | 'body'                                   // bisected, cut marked
+  | 'modelRef'                                                         // kept whole or not at all
+  | 'categories' | 'tags' | 'links' | 'paths' | 'claims'               // refilled item by item
+  | 'uncertainty' | 'zone' | 'sources' | 'skillRefs' | 'toolRefs'
+type FitterCoversNote = Exclude<keyof NoteView, BoundedField> extends never ? true : never
+const fitterCoversNote: FitterCoversNote = true
+void fitterCoversNote
+
 // The variable-cost fields of every tier. A field the note's tier does not have reads as
-// undefined and costs nothing, so one expression covers all three lanes. `sources` and `zone`
-// are counted here for the first time — before the tiers they escaped the cap entirely.
+// undefined and costs nothing, so one expression covers all three lanes.
 function variableChars(note: MemoryNote): number {
   const n: NoteView = note
-  const text = [n.summary, n.rationale, n.body].reduce((sum, s) => sum + (s ?? '').length, 0)
+  const text = [n.summary, n.rationale, n.body, n.modelRef].reduce((sum, s) => sum + (s ?? '').length, 0)
   const lists: Array<ReadonlyArray<unknown> | undefined> =
-    [n.categories, n.tags, n.links, n.paths, n.rules, n.uncertainty, n.zone, n.sources]
+    [n.categories, n.tags, n.links, n.paths, n.claims, n.uncertainty, n.zone, n.sources, n.skillRefs, n.toolRefs]
   return text + lists.reduce(
     (sum, values) => sum + (values ?? []).reduce<number>((inner, value) => inner + itemChars(value), 0), 0)
 }
 
-export function fitMemoryNoteToBudget(note: MemoryNote, budget: number): FittedNote {
+export function fitMemoryNoteToBudget(stored: MemoryNote, budget: number): FittedNote {
+  // Re-parse before anything is measured or spread. The tier schema is the authority on which keys
+  // a note HAS, so this is what strips what history left behind — and `{...note}` below would
+  // otherwise carry an older schema's key through untouched: the fitter blanks only the fields it
+  // knows, so a retired unbounded array (`rules[]`, once) rode every discard out into the very
+  // response this exists to bound. Legacy statements survive the strip as claims, which ARE bounded.
+  const note = MemoryNote.safeParse(stored).data ?? stored
   const contentLimit = budget * 4
   const responseLimit = Math.max(1_024, contentLimit)
   const full = { note, truncated: false }
@@ -61,18 +83,20 @@ export function fitMemoryNoteToBudget(note: MemoryNote, budget: number): FittedN
   // Every variable field starts empty and is refilled in priority order, so the fields that matter
   // most get the budget. Only fields the tier actually has are touched — an `undefined` source
   // field stays absent rather than appearing as a hollow key the tier does not own.
-  const blankText = (key: 'summary' | 'rationale' | 'body'): void => {
+  const blankText = (key: 'summary' | 'rationale' | 'body' | 'modelRef'): void => {
     if (source[key] !== undefined) fitted[key] = ''
   }
-  blankText('summary'); blankText('rationale'); blankText('body')
+  blankText('summary'); blankText('rationale'); blankText('body'); blankText('modelRef')
   if (source.categories) fitted.categories = []
   if (source.tags) fitted.tags = []
   if (source.links) fitted.links = []
   if (source.paths) fitted.paths = []
-  if (source.rules) fitted.rules = []
+  if (source.claims) fitted.claims = []
   if (source.uncertainty) fitted.uncertainty = []
   if (source.zone) fitted.zone = []
   if (source.sources) fitted.sources = []
+  if (source.skillRefs) fitted.skillRefs = []
+  if (source.toolRefs) fitted.toolRefs = []
   const result = { note: fitted, truncated: true, next: READ_NEXT }
   let contentUsed = 0
   const fits = () => JSON.stringify(result).length <= responseLimit
@@ -139,16 +163,30 @@ export function fitMemoryNoteToBudget(note: MemoryNote, budget: number): FittedN
     }
   }
 
+  // A scalar that must not be half-kept: 'provider/model' cut in two is a wrong value, not a short
+  // one, and TRIM_MARKER inside it would be worse. Whole or absent — it is 64 chars either way.
+  const addWhole = (value: string | undefined, set: (v: string) => void): void => {
+    if (value === undefined || contentUsed + value.length > contentLimit) return
+    set(value)
+    if (!fits()) { set(''); return }
+    contentUsed += value.length
+  }
+
   // summary first — it is the retrieval surface — then the labels, then the long prose
   addString('summary', source.summary)
   addList(source.categories, kept => { fitted.categories = kept })
   addList(source.tags, kept => { fitted.tags = kept })
   addList(source.links, kept => { fitted.links = kept })
   addList(source.paths, kept => { fitted.paths = kept })
-  addList(source.rules, kept => { fitted.rules = kept })
+  addList(source.claims, kept => { fitted.claims = kept })
   addList(source.uncertainty, kept => { fitted.uncertainty = kept })
   addList(source.zone, kept => { fitted.zone = kept })
   addList(source.sources, kept => { fitted.sources = kept })
+  // execution plumbing last of the lists: a budgeted READ is for a human or a recall step, and
+  // neither dispatches from it — the step that runs this subplan reads the note in full.
+  addList(source.skillRefs, kept => { fitted.skillRefs = kept })
+  addList(source.toolRefs, kept => { fitted.toolRefs = kept })
+  addWhole(source.modelRef, v => { fitted.modelRef = v })
   addString('rationale', source.rationale)
   addString('body', source.body)
   return result

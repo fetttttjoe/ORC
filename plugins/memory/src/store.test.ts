@@ -3,8 +3,8 @@ import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { z } from 'zod'
-import { MemoryAccessedPayload, MemoryAuthor, type AccessVia } from '@orc/contracts'
-import { openStorage } from '@orc/kernel'
+import { claimId, MemoryAccessedPayload, MemoryAuthor, MemoryWrittenPayload, NOTE_TIER, type AccessVia } from '@orc/contracts'
+import { openStorage, type EventLog } from '@orc/kernel'
 import { createTestDb, TEST_PROJECT_ID } from '@orc/kernel/test-helpers'
 import { SurrealMemory } from './surreal'
 import { createTestSurreal } from './test-helpers'
@@ -186,6 +186,57 @@ describe('sourceRevision is resolved lazily', () => {
     await store.write({ id: 'n1', title: 'N1' }, { source: 'cli' })
     await store.write({ id: 'n2', title: 'N2' }, { source: 'cli' })
     expect(calls).toBe(1)
+    await log.close()
+  })
+})
+
+describe('additive claim writes', () => {
+  const openStore = async () => {
+    const pg = await createTestDb(); drops.push(pg.drop)
+    const ts = await createTestSurreal(); drops.push(ts.drop)
+    const log = (await openStorage(pg.url, { projectId: TEST_PROJECT_ID })).events
+    return { log, store: createMemoryStore({ log, surreal: await SurrealMemory.open(ts) }) }
+  }
+  const lastWrite = async (log: EventLog) => MemoryWrittenPayload.parse((await log.all()).at(-1)?.payload)
+  const claimsOf = (p: MemoryWrittenPayload) => p.note.tier === NOTE_TIER.semantic ? p.note.claims : []
+
+  it('adds one claim without the writer resending the others', async () => {
+    const { log, store } = await openStore()
+    await store.write({ id: 'n', title: 'N', addClaims: ['first'] }, { source: 'cli' })
+    await store.write({ id: 'n', title: 'N', addClaims: ['second'] }, { source: 'cli' })
+
+    expect(claimsOf(await lastWrite(log)).map(c => c.text)).toEqual(['first', 'second'])
+    await log.close()
+  })
+
+  it('invalidating drops a claim and records the tombstone on the EVENT, not the note', async () => {
+    const { log, store } = await openStore()
+    await store.write({ id: 'n', title: 'N', addClaims: ['first', 'second'] }, { source: 'cli' })
+    await store.write({ id: 'n', title: 'N' }, { source: 'cli' }, { invalidates: [claimId('first')] })
+
+    const last = await lastWrite(log)
+    expect(claimsOf(last).map(c => c.text)).toEqual(['second'])
+    expect(last.invalidates).toEqual([claimId('first')])
+    await log.close()
+  })
+
+  // The whole point of `invalidates` being STATED: the store merges on omit, so a write that simply
+  // does not mention a claim must carry it forward. Absence can never mean deletion.
+  it('a write that mentions no claims at all leaves the live set untouched', async () => {
+    const { log, store } = await openStore()
+    await store.write({ id: 'n', title: 'N', addClaims: ['first'] }, { source: 'cli' })
+    await store.write({ id: 'n', title: 'N', summary: 'unrelated edit' }, { source: 'cli' })
+
+    const last = await lastWrite(log)
+    expect(claimsOf(last).map(c => c.text)).toEqual(['first'])
+    expect(last.invalidates).toEqual([])
+    await log.close()
+  })
+
+  it('addClaims is an instruction, never stored: the payload carries resolved claims only', async () => {
+    const { log, store } = await openStore()
+    await store.write({ id: 'n', title: 'N', addClaims: ['first'] }, { source: 'cli' })
+    expect(JSON.stringify((await lastWrite(log)).note)).not.toContain('addClaims')
     await log.close()
   })
 })

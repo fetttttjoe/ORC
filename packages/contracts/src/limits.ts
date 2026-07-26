@@ -1,0 +1,23 @@
+// Size/count ceilings shared across the memory schemas, in a LEAF module on purpose: `claim.ts`
+// needs it for Claim's text bound, and `memory.ts` needs it for the note schemas — if either of
+// those imported it FROM the other, the cycle would break at module load (zod schemas evaluate
+// their bounds immediately, so the still-initializing side would read undefined). A leaf has no
+// such ordering.
+
+export const MEMORY_LIMITS = {
+  labelItems: 50,
+  labelChars: 64,
+  detailItems: 100,
+  detailChars: 1_000,
+  // What the STORE accepts. Deliberately far above the searchable ceiling: this bound is also
+  // applied when re-parsing history, so tightening it would make older notes fail to parse and
+  // vanish from every fold.
+  bodyChars: 100_000,
+  // What the EMBEDDER can see (embedWritten's slice, sized to the encoder's context). Text past it
+  // is stored and readable but invisible to semantic search — so this is the honest number to
+  // advertise to a writer, and the only length worth warning about. Leaves room for title+summary
+  // inside the same window.
+  searchableBodyChars: 7_000,
+  embedInputChars: 8_000,
+  rationaleChars: 20_000,
+} as const

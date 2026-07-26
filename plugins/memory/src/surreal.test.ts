@@ -1,6 +1,6 @@
 import { afterAll, describe, expect, it } from 'bun:test'
 import { RecordId, Surreal } from 'surrealdb'
-import { EVENT_KIND, LINK_KIND, MEMORY_ACCESS, MemoryScope, PROJECT_NAME_NOTE_ID, isRecord, type AccessVia, type EventKind, type EventRecord, type MemoryAccessMode, type MemoryAuthor, type MemoryNote, type NoteView } from '@orc/contracts'
+import { claimId, EVENT_KIND, LINK_KIND, MEMORY_ACCESS, MemoryScope, PROJECT_NAME_NOTE_ID, isRecord, type AccessVia, type EventKind, type EventRecord, type MemoryAccessMode, type MemoryAuthor, type MemoryNote, type NoteView } from '@orc/contracts'
 import { SurrealMemory } from './surreal'
 import { eventFixture } from '@orc/contracts/fixtures'
 import { createTestSurreal } from './test-helpers'
@@ -450,4 +450,75 @@ it('search never returns ui-metadata notes; get still resolves them by id', asyn
     expect((await mem.search('orc-sim')).map(n => n.id)).toEqual(['real-note'])
     expect((await mem.get(PROJECT_NAME_NOTE_ID))?.id).toBe(PROJECT_NAME_NOTE_ID)
   } finally { await mem.close(); await t.drop() }
+})
+
+describe('SurrealMemory claim projection', () => {
+  const claim = (text: string, sourceRevision: string | null = null) =>
+    ({ id: claimId(text), text, sourceRevision })
+
+  it('projects one row per live claim, stamped with the event ts', async () => {
+    const t = await createTestSurreal(); drops.push(t.drop)
+    const mem = await SurrealMemory.open(t)
+    await mem.applyEvent(written(1, note({ id: 'n', claims: [claim('a')] })))
+    const rows = await mem.claimsFor('n', 'project')
+    expect(rows.map(c => c.text)).toEqual(['a'])
+    // a writer cannot date its own claim: the event that carried it does
+    expect(rows[0]?.validFrom).toBe('2026-07-18T01:00:00Z')
+    await mem.close()
+  })
+
+  it('a rewrite re-materializes claims: retired ones disappear, survivors keep their validFrom', async () => {
+    const t = await createTestSurreal(); drops.push(t.drop)
+    const mem = await SurrealMemory.open(t)
+    await mem.applyEvent(written(1, note({ id: 'n', claims: [claim('a')] })))
+    await mem.applyEvent(written(2, note({ id: 'n', claims: [claim('a'), claim('b')] })))
+    let rows = await mem.claimsFor('n', 'project')
+    expect(rows.map(c => c.text).sort()).toEqual(['a', 'b'])
+    // re-stating a fact does not make it new — 'a' keeps the ts of the write that FIRST carried it
+    expect(rows.find(c => c.text === 'a')?.validFrom).toBe('2026-07-18T01:00:00Z')
+    expect(rows.find(c => c.text === 'b')?.validFrom).toBe('2026-07-18T02:00:00Z')
+
+    await mem.applyEvent(written(3, note({ id: 'n', claims: [claim('b')] })))
+    rows = await mem.claimsFor('n', 'project')
+    expect(rows.map(c => c.text)).toEqual(['b']) // retired 'a' is no longer live
+    expect(rows[0]?.validFrom).toBe('2026-07-18T02:00:00Z')
+    await mem.close()
+  })
+
+  it('carries a claim sourceRevision through the read model', async () => {
+    const t = await createTestSurreal(); drops.push(t.drop)
+    const mem = await SurrealMemory.open(t)
+    await mem.applyEvent(written(1, note({ id: 'n', claims: [claim('a', 'deadbeef'), claim('b')] })))
+    const rows = await mem.claimsFor('n', 'project')
+    expect(rows.find(c => c.text === 'a')?.sourceRevision).toBe('deadbeef')
+    expect(rows.find(c => c.text === 'b')?.sourceRevision).toBeNull()
+    await mem.close()
+  })
+
+  it('deleting a note drops its claim rows with it', async () => {
+    const t = await createTestSurreal(); drops.push(t.drop)
+    const mem = await SurrealMemory.open(t)
+    await mem.applyEvent(written(1, note({ id: 'n', claims: [claim('a')] })))
+    await mem.applyEvent(deleted(2, 'n'))
+    expect(await mem.claimsFor('n', 'project')).toEqual([])
+    await mem.close()
+  })
+
+  it('a claim is scoped to its owning note — same statement on two notes is two rows', async () => {
+    const t = await createTestSurreal(); drops.push(t.drop)
+    const mem = await SurrealMemory.open(t)
+    await mem.applyEvent(written(1, note({ id: 'n1', claims: [claim('shared')] })))
+    await mem.applyEvent(written(2, note({ id: 'n2', claims: [claim('shared')] })))
+    expect(await mem.claimsFor('n1', 'project')).toHaveLength(1)
+    expect(await mem.claimsFor('n2', 'project')).toHaveLength(1)
+    await mem.close()
+  })
+
+  it('a plan note contributes no claim rows — the tier has no such field', async () => {
+    const t = await createTestSurreal(); drops.push(t.drop)
+    const mem = await SurrealMemory.open(t)
+    await mem.applyEvent(written(1, note({ id: 'p', tier: 'plan', rationale: 'why', claims: [claim('a')] })))
+    expect(await mem.claimsFor('p', 'project')).toEqual([])
+    await mem.close()
+  })
 })

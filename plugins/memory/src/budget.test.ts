@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test'
-import type { SemanticNote } from '@orc/contracts'
+import { claimId, type SemanticNote } from '@orc/contracts'
 import { planNoteFixture, semanticNoteFixture } from '@orc/contracts/fixtures'
 import { applyBudget, approxTokens, fitMemoryNoteToBudget, TRIM_MARKER } from './budget'
 
@@ -22,6 +22,31 @@ describe('applyBudget', () => {
 })
 
 describe('fitMemoryNoteToBudget', () => {
+  // Claims are the retrieval surface and the body is the fidelity layer, so when only one of the two
+  // fits, the statements are what a reader can act on. Pinned because the ordering is implicit in
+  // the refill ladder — every list refills ahead of the long prose, and nothing else says so.
+  it('spends the budget on claims and makes the body pay', () => {
+    const claims = [{ id: claimId('keep me'), text: 'keep me', sourceRevision: null }]
+    const fitted = fitMemoryNoteToBudget(noteWith({ body: 'x'.repeat(5_000), claims }), 20).note
+    expect(fitted.claims).toEqual(claims)            // the retrieval surface survives intact
+    expect(fitted.body ?? '').toEndWith(TRIM_MARKER) // the fidelity layer is what got cut for it
+  })
+
+  // The plan tier's execution plumbing is bounded per-field by the schema but was exempt from the
+  // fitter entirely: 16 skillRefs + 16 toolRefs + a modelRef is ~2KB riding the note spread past
+  // every discard, against a 1KB floor. Same shape of leak a retired `rules[]` had.
+  it('bounds the plan tier’s execution plumbing — skillRefs/toolRefs/modelRef are not exempt', () => {
+    const note = planNoteFixture({
+      id: 'plumbing', title: 'P',
+      skillRefs: Array.from({ length: 16 }, (_, i) => `skill-${i}-${'s'.repeat(50)}`),
+      toolRefs: Array.from({ length: 16 }, (_, i) => `web/tool-${i}-${'t'.repeat(48)}`),
+      modelRef: `anthropic/${'m'.repeat(50)}`,
+    })
+    const result = fitMemoryNoteToBudget(note, 1)
+    expect(result.truncated).toBe(true)
+    expect(JSON.stringify(result).length).toBeLessThanOrEqual(1_024)
+  })
+
   it('keeps the complete response within the irreducible floor even with oversized provenance', () => {
     // a PLAN note: the only tier with all three trimmable text fields, so this exercises the
     // whole ladder in one case
