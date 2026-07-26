@@ -36,10 +36,15 @@ order:
 - **body** = bullet facts, ≤ 1200 chars, each bullet one verifiable claim. No essays, no
   restating the summary, no symbol dumps. End with one line: `Verified: <what you read
   line-by-line> / skimmed: <what you only listed>`.
-- **fields over prose**: code pointers go in `paths`, invariants agents must honor go in `rules`,
-  structure goes in typed `links`, lifecycle goes in `kind` (`architecture_current` for observed
-  code, `architecture_target` for documented intent not yet built). A fact stated in a field is
-  findable; the same fact buried in a paragraph is not.
+- **fields over prose**: code pointers go in `paths`, structure goes in typed `links`, lifecycle
+  goes in `kind` (`architecture_current` for observed code, `architecture_target` for documented
+  intent not yet built). A fact stated in a field is findable; the same fact buried in a paragraph
+  is not.
+- **addClaims** = the facts this note asserts, one statement each. These are what search RETURNS, so
+  write each as a standalone sentence that reads correctly on its own, out of the note's context.
+  Send only what is new — claims already on the note carry forward, so never resend them. To correct
+  a claim, add the new wording and pass the old claim's id in `invalidates`; a claim is identified by
+  its text, so a rewording IS a new claim rather than an edit of the old one.
 - **categories**: exactly one of `subsystem` | `cross-cutting` | `target`.
 
 A note nobody can reach from the hub is a defect: every note you write must be connected.

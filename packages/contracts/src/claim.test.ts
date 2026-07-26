@@ -1,7 +1,5 @@
 import { describe, expect, it } from 'bun:test'
-import { ClaimInput, claimId, claimsFromLegacyRules, resolveClaims } from './claim'
-import { MEMORY_LIMITS } from './limits'
-import { MemoryNoteInput } from './memory'
+import { ClaimInput, claimId, resolveClaims } from './claim'
 
 const REV = 'abc123'
 const claim = (text: string): ClaimInput => ClaimInput.parse({ id: claimId(text), text, sourceRevision: REV })
@@ -50,31 +48,4 @@ describe('resolveClaims', () => {
   it('a writer cannot supply validFrom — the input type has no such field', () => {
     expect(Object.keys(ClaimInput.shape).sort()).toEqual(['id', 'sourceRevision', 'text'])
   })
-})
-
-describe('claimsFromLegacyRules', () => {
-  it('maps each rule string to a claim, dated later by the projector', () => {
-    const out = claimsFromLegacyRules(['a rule', 'another'], REV)
-    expect(out.map(c => c.text)).toEqual(['a rule', 'another'])
-    expect(out[0]?.id).toBe(claimId('a rule'))
-    expect(out[0]?.sourceRevision).toBe(REV)
-  })
-
-  // History predates every limit this schema now enforces. A `.parse` inside a preprocess
-  // transform throws PAST `safeParse` (a plain function call, not a parse-issue accumulator) —
-  // the exact failure mode surreal.ts's projector comment calls out for memory_written: one
-  // unparseable legacy payload must cost its own revision, never wedge the whole read model.
-  it('a legacy rule past the text cap is truncated rather than crashing the decode, and a blank one is dropped', () => {
-    const long = 'x'.repeat(MEMORY_LIMITS.detailChars + 1)
-    const out = claimsFromLegacyRules([long, '   ', 'kept'], REV)
-    expect(out.map(c => c.text)).toEqual([long.slice(0, MEMORY_LIMITS.detailChars), 'kept'])
-  })
-})
-
-it('a note written before claims existed decodes its rules[] into claims', () => {
-  const n = MemoryNoteInput.parse({ tier: 'semantic', id: 'x', title: 'X', rules: ['old rule'], sourceRevision: 'deadbeef' })
-  if (n.tier !== 'semantic') throw new Error(`expected a semantic note, got '${n.tier}'`)
-  expect(n.claims.map(c => c.text)).toEqual(['old rule'])
-  // the legacy note was grounded at some commit; that is the honest revision for its claims
-  expect(n.claims[0]?.sourceRevision).toBe('deadbeef')
 })

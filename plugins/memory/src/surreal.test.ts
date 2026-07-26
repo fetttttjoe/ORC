@@ -522,3 +522,59 @@ describe('SurrealMemory claim projection', () => {
     await mem.close()
   })
 })
+
+describe('SurrealMemory.searchClaims', () => {
+  const claim = (text: string) => ({ id: claimId(text), text, sourceRevision: null })
+
+  it('returns the matched statement and its owning note, not the whole note', async () => {
+    const t = await createTestSurreal(); drops.push(t.drop)
+    const mem = await SurrealMemory.open(t)
+    await mem.applyEvent(written(1, note({
+      id: 'truth', title: 'Decision log', claims: [claim('the event log is the only truth'), claim('surreal is disposable')],
+    })))
+    const hits = await mem.searchClaims('event log truth')
+    expect(hits).toHaveLength(1)
+    expect(hits[0]).toMatchObject({ noteId: 'truth', title: 'Decision log', text: 'the event log is the only truth' })
+    expect(hits[0]?.validFrom).toBe('2026-07-18T01:00:00Z')
+    await mem.close()
+  })
+
+  it('one note cannot fill every slot — at most its best-ranked claim comes back', async () => {
+    const t = await createTestSurreal(); drops.push(t.drop)
+    const mem = await SurrealMemory.open(t)
+    await mem.applyEvent(written(1, note({
+      id: 'hoarder', title: 'H', claims: [claim('scope alpha'), claim('scope beta'), claim('scope gamma')],
+    })))
+    await mem.applyEvent(written(2, note({ id: 'other', title: 'O', claims: [claim('scope delta')] })))
+    const hits = await mem.searchClaims('scope')
+    expect(hits.map(h => h.noteId).sort()).toEqual(['hoarder', 'other'])
+    await mem.close()
+  })
+
+  it('honours the note-level scope filter a claim row cannot answer itself', async () => {
+    const t = await createTestSurreal(); drops.push(t.drop)
+    const mem = await SurrealMemory.open(t)
+    await mem.applyEvent(written(1, note({ id: 'p', scope: 'project', title: 'P', claims: [claim('shared statement')] })))
+    await mem.applyEvent(written(2, note({ id: 'i', scope: 'infra', title: 'I', claims: [claim('shared statement')] })))
+    expect((await mem.searchClaims('shared', { scope: 'infra' })).map(h => h.noteId)).toEqual(['i'])
+    await mem.close()
+  })
+
+  it('a retired claim stops being findable', async () => {
+    const t = await createTestSurreal(); drops.push(t.drop)
+    const mem = await SurrealMemory.open(t)
+    await mem.applyEvent(written(1, note({ id: 'n', title: 'N', claims: [claim('retire me later')] })))
+    expect(await mem.searchClaims('retire')).toHaveLength(1)
+    await mem.applyEvent(written(2, note({ id: 'n', title: 'N', claims: [] })))
+    expect(await mem.searchClaims('retire')).toEqual([])
+    await mem.close()
+  })
+
+  it('an empty query matches nothing rather than everything', async () => {
+    const t = await createTestSurreal(); drops.push(t.drop)
+    const mem = await SurrealMemory.open(t)
+    await mem.applyEvent(written(1, note({ id: 'n', title: 'N', claims: [claim('a statement')] })))
+    expect(await mem.searchClaims('   ')).toEqual([])
+    await mem.close()
+  })
+})

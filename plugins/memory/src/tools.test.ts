@@ -1,8 +1,13 @@
 import { describe, expect, it } from 'bun:test'
 import { z } from 'zod'
-import { claimId, LEGACY_CLAIMS_FIELD, LINK_KIND, LINK_KINDS, MEMORY_ACCESS, MEMORY_LIMITS, MemoryNoteInput, NOTE_KIND, NOTE_TIER, MemoryWriteResult, type AccessVia, type MemoryAccessMode, type MemoryNote, type MemoryNoteDraft, type MemoryStore, type NoteSummary } from '@orc/contracts'
+import { claimId, CLAIM_ID_RE, LINK_KIND, LINK_KINDS, MEMORY_ACCESS, MEMORY_LIMITS, MemoryNoteInput, NOTE_KIND, NOTE_TIER, MemoryWriteResult, type AccessVia, type MemoryAccessMode, type MemoryNote, type MemoryNoteDraft, type MemoryStore, type NoteSummary } from '@orc/contracts'
 import { episodicNoteFixture, semanticNoteFixture } from '@orc/contracts/fixtures'
 import { MEMORY_READ_TOOLS, memoryTools, memoryRoleFor, noteLint } from './tools'
+import type { ClaimHit } from './claim-search'
+
+// field names retired from the note schema — collected here, not as scattered literals, because
+// more will accrue as the schema evolves (surreal.ts's Tb enum is the same precedent)
+enum RetiredField { Rules = 'rules' }
 
 // the store gateway parses a draft into whichever tier it belongs to, then stamps provenance —
 // this mirrors that, so a fixture cannot invent a note the real write path could not produce
@@ -18,14 +23,16 @@ const summary = (id: string, title: string): NoteSummary =>
   ({ id, title, summary: 's', tier: NOTE_TIER.semantic, categories: [], tags: [], scope: 'project', hits: 0, lastAccessedAt: null })
 
 const fakeStore = (over: Partial<MemoryStore> = {}) => {
-  const written: { input: MemoryNoteDraft; author: unknown; idempotencyKey?: string }[] = []
+  const written: { input: MemoryNoteDraft; author: unknown; idempotencyKey?: string; invalidates?: string[] }[] = []
   const accessed: { id: string; scope?: string; mode: MemoryAccessMode; author: unknown; via?: AccessVia }[] = []
   const store: MemoryStore = {
-    write: async (input, author, opts) => { written.push({ input, author, idempotencyKey: opts?.idempotencyKey }); return toNote(input) },
+    write: async (input, author, opts) => { written.push({ input, author, idempotencyKey: opts?.idempotencyKey, invalidates: opts?.invalidates }); return toNote(input) },
     remove: async () => {},
     get: async () => toNote({ id: 'auth', title: 'Auth', body: 'b' }),
     list: async () => [],
     search: async () => [summary('auth', 'Auth')],
+    searchClaims: async () => [],
+    claimsFor: async () => [],
     neighbors: async () => [],
     recordAccess: async (id, scope, mode, author, opts) => { accessed.push({ id, scope, mode, author, via: opts?.via }) },
     ...over,
@@ -216,15 +223,15 @@ describe('memory tools', () => {
   // otherwise ride the note spread straight out — unbounded, past every discard. The tier schema is
   // the authority on which keys a note has, and re-parsing is what enforces that.
   it('memory_read drops a retired schema key instead of passing it through unbounded', async () => {
-    const legacyRow: MemoryNote & Record<typeof LEGACY_CLAIMS_FIELD, string[]> = {
+    const legacyRow: MemoryNote & Record<RetiredField.Rules, string[]> = {
       ...toNote({ id: 'auth', title: 'Auth' }),
-      [LEGACY_CLAIMS_FIELD]: Array.from({ length: 1_000 }, (_, i) => `rule-${i}-${'x'.repeat(100)}`),
+      [RetiredField.Rules]: Array.from({ length: 1_000 }, (_, i) => `rule-${i}-${'x'.repeat(100)}`),
     }
     const { store } = fakeStore({ get: async () => legacyRow })
     const read = memoryTools({ store, author: { source: 'cli' } }).find(t => t.name === 'memory_read')!
     const result = await read.execute({ id: 'auth', budget: 1 })
 
-    expect(JSON.stringify(result.output)).not.toContain(LEGACY_CLAIMS_FIELD)
+    expect(JSON.stringify(result.output)).not.toContain(RetiredField.Rules)
     expect(JSON.stringify(result.output).length).toBeLessThanOrEqual(1_024)
   })
 
@@ -507,5 +514,67 @@ describe('body length: advertised, not corrected', () => {
       memoryTools({ store: fakeStore().store, author: { source: 'cli' } }).find(t => t.name === 'memory_write')!.inputSchema,
     ).properties
     expect(props.body).toMatchObject({ maxLength: MEMORY_LIMITS.searchableBodyChars })
+  })
+})
+
+describe('claims through the tool surface', () => {
+  const claimHit = (over: Partial<ClaimHit> = {}): ClaimHit => ({
+    claimId: 'c1', noteId: 'n1', scope: 'project', title: 'N1',
+    text: 'the log is truth', validFrom: '2026-07-26T00:00:00.000Z', ...over,
+  })
+
+  it('memory_write forwards addClaims on the draft and invalidates on the opts', async () => {
+    const { store, written } = fakeStore()
+    const write = memoryTools({ store, author: { source: 'cli' } }).find(t => t.name === 'memory_write')!
+    await write.execute({ id: 'n', title: 'N', addClaims: ['a statement'], invalidates: ['deadbeef0000'] }, 'c1')
+    expect(written[0]?.input).toMatchObject({ addClaims: ['a statement'] })
+    // invalidates is stated about the WRITE, so it rides the opts and lands on the event
+    expect(written[0]?.invalidates).toEqual(['deadbeef0000'])
+    // and it is never smuggled onto the note draft
+    expect(written[0]?.input).not.toHaveProperty('invalidates')
+  })
+
+  it('memory_write advertises both, with the claim id pattern the parser actually enforces', async () => {
+    const { store } = fakeStore()
+    const write = memoryTools({ store, author: { source: 'cli' } }).find(t => t.name === 'memory_write')!
+    const props = WriteInputProps.parse(write.inputSchema).properties
+    expect(props.addClaims).toMatchObject({
+      maxItems: MEMORY_LIMITS.detailItems, items: { maxLength: MEMORY_LIMITS.detailChars },
+    })
+    expect(props.invalidates).toMatchObject({ items: { pattern: CLAIM_ID_RE.source } })
+    // the retired spelling is gone from the advertised surface entirely
+    expect(props[RetiredField.Rules]).toBeUndefined()
+  })
+
+  it('memory_search returns matched claims, not whole notes', async () => {
+    const { store } = fakeStore({ searchClaims: async () => [claimHit()] })
+    const search = memoryTools({ store, author: { source: 'cli' } }).find(t => t.name === 'memory_search')!
+    const r = await search.execute({ query: 'truth' })
+    const out = z.object({ claims: z.array(z.object({ text: z.string(), noteId: z.string() })) }).parse(r.output)
+    expect(out.claims[0]).toMatchObject({ text: 'the log is truth', noteId: 'n1' })
+  })
+
+  it('memory_search budgets claims by their text and reports what it dropped', async () => {
+    const many = Array.from({ length: 40 }, (_, i) =>
+      claimHit({ claimId: `c${i}`, noteId: `n${i}`, text: `statement ${i} ${'x'.repeat(200)}` }))
+    const { store } = fakeStore({ searchClaims: async () => many })
+    const search = memoryTools({ store, author: { source: 'cli' } }).find(t => t.name === 'memory_search')!
+    const r = await search.execute({ query: 'statement', budget: 100 })
+    const out = z.object({ claims: z.array(z.unknown()), truncated: z.boolean(), omitted: z.number() }).parse(r.output)
+    expect(out.claims.length).toBeLessThan(many.length)
+    expect(out.truncated).toBe(true)
+    expect(out.omitted).toBe(many.length - out.claims.length)
+  })
+
+  it('an empty claim result still says absence is not proof', async () => {
+    // BOTH arms empty — a note hit alone is still a match, so absence means neither found anything
+    const { store } = fakeStore({ searchClaims: async () => [], search: async () => [] })
+    const search = memoryTools({ store, author: { source: 'cli' } }).find(t => t.name === 'memory_search')!
+    const r = await search.execute({ query: 'nothing' })
+    expect(z.object({ note: z.string() }).parse(r.output).note).toContain('absence')
+    // a claim hit with no note hit is NOT absence
+    const { store: s2 } = fakeStore({ searchClaims: async () => [claimHit()], search: async () => [] })
+    const search2 = memoryTools({ store: s2, author: { source: 'cli' } }).find(t => t.name === 'memory_search')!
+    expect(z.object({ note: z.string().optional() }).parse((await search2.execute({ query: 'truth' })).output).note).toBeUndefined()
   })
 })

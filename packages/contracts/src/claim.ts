@@ -52,6 +52,19 @@ export function resolveClaims(
   return [...out.values()].slice(0, MEMORY_LIMITS.detailItems)
 }
 
+// A matched statement, carrying enough of its owner to be actionable: the reader gets the claim it
+// searched for AND the note to read for the surrounding fidelity. The title comes from the owning
+// note rather than being duplicated onto every claim row.
+export const ClaimHit = z.object({
+  claimId: z.string(),
+  noteId: z.string(),
+  scope: z.string(),
+  title: z.string(),
+  text: z.string(),
+  validFrom: z.string(),
+})
+export type ClaimHit = z.infer<typeof ClaimHit>
+
 // How a writer changes a note's claims: name what to ADD and name what to RETIRE. `claims` itself is
 // deliberately absent — supplying the array would REPLACE under the store's merge-on-omit rule,
 // which is the behaviour additive writes exist to avoid. Both arrive on the write call and are
@@ -62,21 +75,38 @@ export const ClaimWrite = z.object({
 })
 export type ClaimWrite = z.infer<typeof ClaimWrite>
 
-// The key a note written before claims existed carried its statements in. Named, not spelled out at
-// each use, for the same reason LEGACY_PLAN_KIND is: the decoder below and every test that pins it
-// have to mean the same field, and the log is immutable so this name can never be corrected.
-export const LEGACY_CLAIMS_FIELD = 'rules'
+// A claim's whole life, recovered by folding the log — the note payload carries live claims only, so
+// this is the ONLY way to see one that was retired and the write that retired it. `validFrom` here
+// is the ts of the event that FIRST carried the claim (the same rule the projector stamps by), and
+// `invalidatedAt` the ts of the write that named it in `invalidates`.
+export interface ClaimHistoryEntry {
+  id: string
+  text: string
+  sourceRevision: string | null
+  validFrom: string
+  invalidatedAt: string | null
+}
 
-// Legacy `rules[]` predates every bound ClaimInput now enforces (text length, non-empty). This runs
-// inside a z.preprocess (memory.ts's withClaims), where a thrown error is a plain function-call
-// exception, not a collected parse issue — it passes straight through `safeParse` uncaught. That is
-// the exact wedge surreal.ts's projector comment documents for memory_written: one unparseable
-// legacy payload must cost its own note revision, never abort the whole replay. So history is
-// reshaped to fit rather than validated and rejected: clamp an overlong rule, drop a blank one.
-export const claimsFromLegacyRules = (rules: readonly string[], sourceRevision: string | null): ClaimInput[] =>
-  resolveClaims(
-    [],
-    rules.map(r => normalize(r).slice(0, MEMORY_LIMITS.detailChars)).filter(r => r.length > 0),
-    [],
-    sourceRevision,
-  )
+// Folded in event order, so `events` MUST be ordered by seq. A claim re-added after being retired is
+// live again with its invalidatedAt cleared — the log says it came back, and pretending otherwise
+// would report a fact as dead while search returns it.
+export function claimHistory(
+  events: ReadonlyArray<{ ts?: string | null; claims: readonly ClaimInput[]; invalidates: readonly string[] }>,
+): ClaimHistoryEntry[] {
+  const seen = new Map<string, ClaimHistoryEntry>()
+  for (const e of events) {
+    const ts = e.ts ?? ''
+    for (const c of e.claims) {
+      const prev = seen.get(c.id)
+      // first sighting fixes validFrom; a survivor keeps it, and a revived claim loses its tombstone
+      if (prev) seen.set(c.id, { ...prev, text: c.text, sourceRevision: c.sourceRevision, invalidatedAt: null })
+      else seen.set(c.id, { id: c.id, text: c.text, sourceRevision: c.sourceRevision, validFrom: ts, invalidatedAt: null })
+    }
+    for (const id of e.invalidates) {
+      const prev = seen.get(id)
+      // a tombstone for a claim this log never carried is ignored, exactly as resolveClaims ignores it
+      if (prev) seen.set(id, { ...prev, invalidatedAt: ts })
+    }
+  }
+  return [...seen.values()]
+}

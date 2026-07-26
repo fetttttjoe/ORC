@@ -11,6 +11,7 @@ import {
   linkLookupScopes,
 } from '@orc/contracts'
 import { rankNeighbors, rrfFuse, type Edge } from './rank'
+import { dedupeByNote, type ClaimHit, type ClaimSearchOpts } from './claim-search'
 
 // The read model's table names — single spelling for every builder call and RecordId.
 enum Tb { Note = 'note', Meta = 'meta', Link = 'link', Claim = 'claim' }
@@ -53,10 +54,10 @@ const noteTable = table(Tb.Note, {
 })
 const metaTable = table(Tb.Meta, { seq: t.number() })
 
-// Derived claim index, materialized from note.claims by the projector exactly as `link` is from
-// note.links — same delete-then-recreate on every write, same disposability. It exists so a claim
-// can carry its OWN embedding and its own activation: search matches a statement directly instead
-// of matching a document and making the reader find the sentence.
+// Derived claim index, materialized from note.claims by the projector as `link` is from note.links
+// and just as disposable — though NOT by the same clear-and-recreate, see applyEvent. It exists so a
+// claim can carry its OWN embedding and its own activation: search matches a statement directly
+// instead of matching a document and making the reader find the sentence.
 // `validFrom` lives here and nowhere in the note payload: it is the ts of the first event that
 // carried the claim, which only a fold can know — so the projector is the only thing that can
 // honestly stamp it, and it is preserved across rewrites below.
@@ -83,6 +84,8 @@ const key = (scope: string, id: string) => `${scope}:${id}`
 // A claim row is identified by its OWNING note plus its content hash, not by the hash alone: the
 // same statement asserted on two notes is two claims, each with its own provenance and activation.
 const claimKey = (scope: string, noteId: string, claimId: string) => `${scope}:${noteId}:${claimId}`
+// Fusion key for a claim hit — the claim's own identity, which is note-scoped like its row id.
+const claimHitKey = (h: ClaimHit) => claimKey(h.scope, h.noteId, h.claimId)
 
 // Raw semantic-scan rows — the fields the cosine SELECT projects, parsed (never cast) at the
 // boundary like every other DB read. hits/lastAccessedAt are optional (a note may predate them).
@@ -96,6 +99,16 @@ const SemanticRow = z.object({
   hits: z.number().optional(), lastAccessedAt: z.string().nullable().optional(),
   score: z.number(),
 })
+
+// Raw claim rows from the cosine SELECT, parsed at the boundary like SemanticRow above.
+const ClaimRow = z.object({
+  claimId: z.string(), noteId: z.string(), scope: z.string(), text: z.string(),
+  validFrom: z.string(), score: z.number(),
+})
+
+// How many NOTES a claim search may return when the caller names no limit. Deliberately the same
+// order as the note search's own page: dedupeByNote counts notes, so this is comparable.
+const CLAIM_SEARCH_LIMIT = 10
 
 const CONNECT_TIMEOUT_MS = 5_000
 const CLOSE_TIMEOUT_MS = 2_000
@@ -390,6 +403,79 @@ export class SurrealMemory {
     for (const n of [...semantic, ...keyword]) byKey.set(noteKey(n.scope, n.id), n)
     const fused = rrfFuse([keyword.map(n => noteKey(n.scope, n.id)), semantic.map(n => noteKey(n.scope, n.id))])
     return fused.map(f => byKey.get(f.id)).filter((n): n is NoteSummary => n !== undefined)
+  }
+
+  // Claim-level retrieval: the same two arms and the same reciprocal-rank fusion as search() above,
+  // over `claim` instead of `note`. Deduped by owning note LAST, so the cap counts notes rather than
+  // statements — fusing first and deduping after is what makes the surviving claim per note its
+  // best-ranked one.
+  async searchClaims(query: string, filter: MemoryFilter = {}, opts: ClaimSearchOpts = {}): Promise<ClaimHit[]> {
+    const limit = opts.limit ?? CLAIM_SEARCH_LIMIT
+    const mode = this.embedder ? (opts.mode ?? SEARCH_MODE.hybrid) : SEARCH_MODE.keyword
+    const keyword = mode === SEARCH_MODE.semantic ? [] : await this.keywordClaims(query, filter)
+    const semantic = mode === SEARCH_MODE.keyword ? [] : await this.semanticClaims(query, filter)
+    if (mode !== SEARCH_MODE.hybrid) return dedupeByNote(mode === SEARCH_MODE.keyword ? keyword : semantic, limit)
+    const byKey = new Map<string, ClaimHit>()
+    for (const h of [...semantic, ...keyword]) byKey.set(claimHitKey(h), h)
+    const fused = rrfFuse([keyword.map(claimHitKey), semantic.map(claimHitKey)])
+    const ranked = fused.map(f => byKey.get(f.id)).filter((h): h is ClaimHit => h !== undefined)
+    return dedupeByNote(ranked, limit)
+  }
+
+  // Substring match over claim text, AND across terms — the same rule and the same term cap
+  // keywordSearch uses, for the same reason (each term deepens the WHERE AST, and extra terms only
+  // narrow). The first term seeds the reduce rather than a constant predicate, so the builder never
+  // needs a tautology. No relevance score: the WHERE already requires every term of every row, so
+  // newest-established wins the tiebreak and rrfFuse ranks the rest against the semantic arm.
+  private async keywordClaims(query: string, filter: MemoryFilter): Promise<ClaimHit[]> {
+    const [first, ...rest] = query.toLowerCase().split(/\s+/).filter(Boolean).slice(0, MAX_SEARCH_TERMS)
+    if (first === undefined) return []
+    const rows = await this.db.select(Tb.Claim)
+      .where(c => rest.reduce((acc, q) => acc.and(c.text.lowercase().contains(q)), c.text.lowercase().contains(first)))
+      .orderBy('validFrom', 'DESC')
+    return this.joinClaimOwners(rows, filter)
+  }
+
+  // Cosine over per-claim embeddings — same brute-force scan, same degrade-to-keyword contract as
+  // semanticSearch: a dimension mismatch or a malformed row must never fail the whole search.
+  private async semanticClaims(query: string, filter: MemoryFilter): Promise<ClaimHit[]> {
+    if (!this.embedder) return []
+    try {
+      const [qv] = await this.embedder.embed([query])
+      if (!qv) return []
+      const scopes = filter.scope === undefined ? [] : [filter.scope].flat()
+      const res = await this.surreal.query(
+        `SELECT claimId, noteId, scope, text, validFrom,`
+        + ` vector::similarity::cosine(embedding, $q) AS score`
+        + ` FROM ${Tb.Claim} WHERE embedding != NONE`
+        + (scopes.length > 0 ? ` AND scope IN $scopes` : '')
+        + ` ORDER BY score DESC LIMIT 50`,
+        { q: qv, ...(scopes.length > 0 && { scopes }) },
+      )
+      const rows = ClaimRow.array().parse(Array.isArray(res) ? res[0] : res)
+      return this.joinClaimOwners(rows, filter)
+    } catch (err) {
+      console.warn(`[memory] claim semantic search failed, falling back to keyword: ${errorMessage(err)}`)
+      return []
+    }
+  }
+
+  // A claim's title comes from its owning note, and so does every filter it cannot answer itself: a
+  // claim row deliberately does not duplicate tier/categories/tags. ONE note query, not one per hit
+  // — list() already applies the whole filter, so the notes that survive it ARE the allowed owners
+  // and a hit whose note is missing from the map is one the filter excluded, deleted, or never had.
+  private async joinClaimOwners(
+    rows: ReadonlyArray<{ claimId: string; noteId: string; scope: string; text: string; validFrom: string }>,
+    filter: MemoryFilter,
+  ): Promise<ClaimHit[]> {
+    const owners = new Map((await this.list(filter)).map(n => [noteKey(n.scope, n.id), n]))
+    const hits: ClaimHit[] = []
+    for (const r of rows) {
+      const owner = owners.get(noteKey(r.scope, r.noteId))
+      if (!owner) continue
+      hits.push({ claimId: r.claimId, noteId: r.noteId, scope: r.scope, title: owner.title, text: r.text, validFrom: r.validFrom })
+    }
+    return hits
   }
 
   // Vector cosine over stored embeddings — a linear scan, brute-force but exact; fine for a

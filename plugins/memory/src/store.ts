@@ -1,4 +1,4 @@
-import { ClaimWrite, EVENT_KIND, MemoryNoteInput, MemoryScope, MemoryWrittenPayload, NOTE_TIER, resolveClaims, type MemoryAuthor, type MemoryFilter, type MemorySearchOpts, type MemoryNote, type MemoryStore, type NoteSummary } from '@orc/contracts'
+import { ClaimWrite, EVENT_KIND, MemoryNoteInput, MemoryScope, MemoryWrittenPayload, NOTE_TIER, resolveClaims, type MemoryAuthor, type MemoryFilter, type MemorySearchOpts, type MemoryNote, type MemoryStore, type NoteSummary, type Claim, type ClaimHit } from '@orc/contracts'
 import { KERNEL_ERROR_CODE, KernelError, type EventLog } from '@orc/kernel'
 import type { SurrealMemory } from './surreal'
 
@@ -104,6 +104,8 @@ export function createMemoryStore(opts: { log: EventLog; surreal: SurrealMemory;
     },
     list: (filter?: MemoryFilter): Promise<NoteSummary[]> => surreal.list(filter),
     search: (query: string, filter?: MemoryFilter, opts?: MemorySearchOpts): Promise<NoteSummary[]> => surreal.search(query, filter, opts),
+    searchClaims: (query: string, filter?: MemoryFilter, opts?: MemorySearchOpts & { limit?: number }): Promise<ClaimHit[]> => surreal.searchClaims(query, filter, opts),
+    claimsFor: (noteId: string, scope?: string): Promise<Claim[]> => surreal.claimsFor(noteId, scope),
     neighbors: (seed, o) => surreal.neighbors(seed, { ...o, halfLifeDays: o?.halfLifeDays ?? opts.halfLifeDays }),
   }
 }

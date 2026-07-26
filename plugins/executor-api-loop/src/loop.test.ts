@@ -2,7 +2,7 @@ import { describe, expect, it } from 'bun:test'
 import { mkdtempSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import type { Checkpoint, EventDraft, ExecutorContext, NoteSummary, OperationCheckpoint, OperationSpec, ResolvedTool, SplitResult, UnifiedEvent } from '@orc/contracts'
+import type { ClaimHit, Checkpoint, EventDraft, ExecutorContext, NoteSummary, OperationCheckpoint, OperationSpec, ResolvedTool, SplitResult, UnifiedEvent } from '@orc/contracts'
 import { EVENT_KIND, LINK_KIND, MEMORY_ACCESS, NOTE_TIER, planScope, slugId } from '@orc/contracts'
 import { stepFixture } from '@orc/contracts/fixtures'
 import { z } from 'zod'
@@ -562,12 +562,16 @@ describe('step memory seam', () => {
   // The executor's whole memory responsibility is WHEN: recall before the first prompt, capture
   // after the signal. What gets searched, recorded, written and linked belongs to the memory
   // plugin (plugins/memory/src/step.ts) and is tested there.
-  function fakeMemory(log: { recalled: number[]; captured: unknown[] }, notes: NoteSummary[] = []) {
+  function fakeMemory(log: { recalled: number[]; captured: unknown[] }, notes: NoteSummary[] = [], claims: ClaimHit[] = []) {
     return {
-      recall: async (budget: number) => { log.recalled.push(budget); return notes },
+      recall: async (budget: number) => { log.recalled.push(budget); return { claims, notes } },
       capture: async (signal: unknown) => { log.captured.push(signal) },
     }
   }
+  const claim = (over: Partial<ClaimHit> = {}): ClaimHit => ({
+    claimId: 'abc123abc123', noteId: 'auth-middleware', scope: 'project', title: 'Auth middleware overview',
+    text: 'Refresh tokens are single-use.', validFrom: '2026-07-26T00:00:00.000Z', ...over,
+  })
   const note = (over: Partial<NoteSummary> = {}): NoteSummary => ({
     id: 'auth-middleware', scope: 'project', title: 'Auth middleware overview',
     tier: NOTE_TIER.semantic, categories: [], tags: [], summary: 'Handles session validation.',
@@ -588,6 +592,35 @@ describe('step memory seam', () => {
     expect(prompt).toContain('# Known project context (ids — memory_read for detail, pass scope where shown, verify before relying)')
     expect(prompt).toContain('auth-middleware — Auth middleware overview: Handles session validation.')
     expect(prompt.indexOf('Known project context')).toBeLessThan(prompt.indexOf('Project knowledge protocol'))
+  })
+
+  it('renders a recalled CLAIM as the statement itself, carrying its note id', async () => {
+    const captured: EventDraft[] = []
+    const specs: OperationSpec[] = []
+    const log = { recalled: [] as number[], captured: [] as unknown[] }
+    await drain(apiLoopExecutor().startTurn(ctx(signalled('success', 'ok'), captured, {
+      memory: fakeMemory(log, [], [claim(), claim({ claimId: 'def456def456', noteId: 'plan-n', scope: planScope('task-1'), text: 'Plan scoped fact.' })]),
+      memoryPreloadTokens: 500, operation: makeOperation(captured, specs),
+    })))
+    const prompt = JSON.stringify(specs[0]?.before)
+    // the FACT is in the prompt, not merely a pointer the step must spend a memory_read to follow
+    expect(prompt).toContain('- Refresh tokens are single-use. [auth-middleware]')
+    // a non-project claim carries its scope, same rule the note lines follow
+    expect(prompt).toContain(`- Plan scoped fact. [plan-n (scope: ${planScope('task-1')})]`)
+    // told not to re-add them: the writer must not restate what preload already showed it
+    expect(prompt).toContain('do not re-add these')
+  })
+
+  it('claims alone fill the block — no note hit is not an empty preload', async () => {
+    const captured: EventDraft[] = []
+    const specs: OperationSpec[] = []
+    const log = { recalled: [] as number[], captured: [] as unknown[] }
+    await drain(apiLoopExecutor().startTurn(ctx(signalled('success', 'ok'), captured, {
+      memory: fakeMemory(log, [], [claim()]), memoryPreloadTokens: 500, operation: makeOperation(captured, specs),
+    })))
+    const prompt = JSON.stringify(specs[0]?.before)
+    expect(prompt).toContain('Known project context')
+    expect(prompt).toContain('Refresh tokens are single-use.')
   })
 
   it('a non-project-scope note renders its id qualified with scope', async () => {

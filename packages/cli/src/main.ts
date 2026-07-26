@@ -3,7 +3,7 @@ import { spawn } from 'node:child_process'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { Command, InvalidArgumentError } from 'commander'
-import { EDGE_DIRECTION, errorMessage, EVENT_KIND, LINK_KINDS, MASTERPLAN_NOTE_ID, MEMORY_ACCESS, NOTE_TIERS, NoteTier, parseLinkSpec, PlanDraft, RUN_OUTCOME, STRATEGY, TASK_STATUS, TERMINAL_TASK_STATUS, LinkKind, slugId, type Analyzer, type TaskStatus, type RunOutcome, type EventRecord, type MemoryLink, type ExecutionPort, type Plan, formatModelRate } from '@orc/contracts'
+import { claimHistory, EDGE_DIRECTION, errorMessage, EVENT_KIND, LINK_KINDS, MASTERPLAN_NOTE_ID, MEMORY_ACCESS, MemoryScope, MemoryWrittenPayload, NOTE_TIERS, NoteTier, parseLinkSpec, PlanDraft, RUN_OUTCOME, STRATEGY, TASK_STATUS, TERMINAL_TASK_STATUS, LinkKind, slugId, type Analyzer, type TaskStatus, type RunOutcome, type EventRecord, type MemoryLink, type NoteFields, type ExecutionPort, type Plan, formatModelRate } from '@orc/contracts'
 import { openStorage, Kernel, atomicWriteFileSync, claimSlot, fold, gatedChildren, instantiateFrozenPlan, liveSupervisors, staleSupervisors, subtreeOutcome, subtreeTaskIds, grantExtensionTrust, grantMcpTrust, initializeProject, isExtensionTrusted, isMcpTrusted, loadConfig, loadTrust, migrateDatabase, requireProject, taskUsage, type EventLog, type OrcConfig, type PluginHost, type ProjectConfig, type Storage } from '@orc/kernel'
 import { createVaultProjector, parsePlanFile } from '@orc/vault-projector'
 import { consolidateTask, probeMemory, staleNotes, DEFAULT_SWEEP_DAYS } from '@orc/memory'
@@ -1026,6 +1026,38 @@ export function buildProgram(
       await memory.close()
       if (!n) throw new Error(`no note '${id}'`)
       console.log(JSON.stringify(n, null, 2))
+    })
+  mem
+    .command('claims <id>')
+    .description("list a note's live claims, or --history to include ones it has retired")
+    .option('--scope <s>', 'scope')
+    .option('--history', 'fold the log for retired claims and the write that retired each')
+    .action(async (id: string, o: { scope?: string; history?: boolean }) => {
+      const { config, log } = needPlugin()
+      const memory = await openMemory({ log, config })
+      const scope = o.scope ?? MemoryScope.project
+      try {
+        if (!o.history) {
+          const live = await memory.store.claimsFor(id, scope)
+          if (live.length === 0) throw new Error(`no claims on '${id}' (scope ${scope}) — 'orc memory cat ${id}' to see the note`)
+          for (const c of live) console.log(`${c.id}  ${c.validFrom}  ${c.text}`)
+          return
+        }
+        // History comes from the LOG, not the read model: the note payload carries live claims only,
+        // so a retired claim exists nowhere else. Ordered by seq, which claimHistory requires.
+        const events = (await log.all()).filter(e => e.kind === EVENT_KIND.memory_written)
+        const folded = claimHistory(events.flatMap(e => {
+          const p = MemoryWrittenPayload.safeParse(e.payload)
+          if (!p.success || p.data.note.id !== id || p.data.note.scope !== scope) return []
+          const n: NoteFields = p.data.note
+          return [{ ts: e.ts, claims: n.claims ?? [], invalidates: p.data.invalidates }]
+        }))
+        if (folded.length === 0) throw new Error(`no claims in the log for '${id}' (scope ${scope})`)
+        for (const c of folded)
+          console.log(`${c.id}  ${c.validFrom}  ${c.invalidatedAt ? `RETIRED ${c.invalidatedAt}` : 'live'}  ${c.text}`)
+      } finally {
+        await memory.close()
+      }
     })
   mem
     .command('neighbors <id>')

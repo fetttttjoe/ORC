@@ -47,16 +47,12 @@ describe('note tiers', () => {
   })
 
   it('each tier keeps only its own fields', () => {
-    // rules is the legacy spelling of claims (see claim.test.ts) — still a valid way to author one
-    const s = semantic({ id: 'a', title: 'A', rules: ['never do Y'] })
-    expect(s.claims.map(c => c.text)).toEqual(['never do Y'])
+    const s = semantic({ id: 'a', title: 'A' })
     expect(s).not.toHaveProperty('zone')
-    const p = plan({ id: 'b', title: 'B', zone: ['docs/**'], rules: ['never do Y'] })
+    const p = plan({ id: 'b', title: 'B', zone: ['docs/**'] })
     expect(p.zone).toEqual(['docs/**'])
-    expect(p).not.toHaveProperty('rules')
     expect(p).not.toHaveProperty('claims')
-    const e = MemoryNoteInput.parse({ tier: 'episodic', id: 'c', scope: 'plan-t1', title: 'C', rules: ['x'], zone: ['y'] })
-    expect(e).not.toHaveProperty('rules')
+    const e = MemoryNoteInput.parse({ tier: 'episodic', id: 'c', scope: 'plan-t1', title: 'C', zone: ['y'] })
     expect(e).not.toHaveProperty('claims')
     expect(e).not.toHaveProperty('zone')
   })
@@ -147,9 +143,6 @@ describe('MemoryNoteInput', () => {
     expect(p.uncertainty).toEqual(['untested'])
     expect(p.zone).toEqual(['docs/**'])
     expect(MemoryNoteInput.safeParse({ id: 'x', title: 'X', links: 'other-note' }).success).toBe(false)
-    // unlike paths/tags/categories, a legacy rule is recognized only as an ARRAY (claim.test.ts) —
-    // a bare scalar isn't the shape any writer, old or new, ever produced for it, so it is dropped
-    expect(semantic({ id: 'coerce-rule-scalar', title: 'Coerce', rules: 'never do Y' }).claims).toEqual([])
   })
 
   it("collapses an explicit empty string to [] (the model's clear spelling), never a junk [''] entry", () => {
@@ -173,8 +166,6 @@ describe('MemoryNoteInput', () => {
       { links: Array.from({ length: 101 }, (_, i) => ({ id: `n-${i}` })) },
       { paths: Array(101).fill('x') },
       { paths: ['x'.repeat(1001)] },
-      // rules is no longer validated here: an over-limit legacy rules[] decodes into claims and is
-      // truncated rather than rejected — see claim.test.ts's claimsFromLegacyRules coverage
       { uncertainty: Array(101).fill('x') },
       { uncertainty: ['x'.repeat(1001)] },
       { body: 'x'.repeat(100_001) },

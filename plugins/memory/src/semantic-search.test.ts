@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, it } from 'bun:test'
-import type { EmbeddingProvider, EventRecord, MemoryAuthor } from '@orc/contracts'
+import { claimId, type EmbeddingProvider, type EventRecord, type MemoryAuthor } from '@orc/contracts'
 import { eventFixture } from '@orc/contracts/fixtures'
 import { SurrealMemory } from './surreal'
 import { createTestSurreal } from './test-helpers'
@@ -116,6 +116,68 @@ describe('tier on the retrieval surface', () => {
     for (const mode of ['keyword', 'semantic', 'hybrid'] as const)
       expect((await m.search('alpha', { tier: 'semantic' }, { mode })).map(n => n.id)).toEqual(['claim'])
     expect((await m.list({ tier: 'episodic' })).map(n => n.id)).toEqual(['step-a'])
+    await m.close()
+  })
+})
+
+// The whole reason a claim carries its OWN vector: a note's embedding is title+summary+body, so a
+// single statement buried in a long note is diluted to nothing. These are the claim-arm equivalents
+// of the note tests above — same fake encoder, same synonym trick.
+describe('SurrealMemory claim semantic + hybrid search', () => {
+  const claim = (text: string) => ({ id: claimId(text), text, sourceRevision: null })
+
+  it('finds a CLAIM by meaning when the query shares no token with it', async () => {
+    const t = await createTestSurreal(); drops.push(t.drop)
+    const m = await SurrealMemory.open(t, fakeEmbedder)
+    await m.applyEvent(written(1, note({ id: 'na', title: 'A', claims: [claim('the alpha invariant holds')] })))
+    await m.applyEvent(written(2, note({ id: 'nb', title: 'B', claims: [claim('the beta invariant holds')] })))
+    // 'zeta' is in neither claim's text → the keyword arm cannot serve it…
+    expect(await m.searchClaims('zeta', {}, { mode: 'keyword' })).toEqual([])
+    // …but it maps to alpha's vector, so the claim arm surfaces the alpha STATEMENT
+    const hits = await m.searchClaims('zeta', {}, { mode: 'semantic' })
+    expect(hits[0]?.noteId).toBe('na')
+    expect(hits[0]?.text).toBe('the alpha invariant holds')
+    await m.close()
+  })
+
+  it('embeds each claim separately — two claims on ONE note rank independently', async () => {
+    const t = await createTestSurreal(); drops.push(t.drop)
+    const m = await SurrealMemory.open(t, fakeEmbedder)
+    // both statements live on the SAME note, so a note-level vector could not tell them apart
+    await m.applyEvent(written(1, note({ id: 'n', title: 'N', claims: [claim('alpha statement'), claim('beta statement')] })))
+    expect((await m.searchClaims('zeta', {}, { mode: 'semantic' }))[0]?.text).toBe('alpha statement')
+    expect((await m.searchClaims('beta', {}, { mode: 'semantic' }))[0]?.text).toBe('beta statement')
+    await m.close()
+  })
+
+  it('hybrid fuses both claim arms; agreement between them wins', async () => {
+    const t = await createTestSurreal(); drops.push(t.drop)
+    const m = await SurrealMemory.open(t, fakeEmbedder)
+    // 'both' matches 'alpha' by keyword AND vector; 'sem' only by vector (zeta ≈ alpha, no token)
+    await m.applyEvent(written(1, note({ id: 'both', title: 'B', claims: [claim('alpha holds here')] })))
+    await m.applyEvent(written(2, note({ id: 'sem', title: 'S', claims: [claim('zeta holds here')] })))
+    const ids = (await m.searchClaims('alpha', {}, { mode: 'hybrid' })).map(h => h.noteId)
+    expect(ids[0]).toBe('both')
+    expect(ids).toContain('sem') // the semantic-only claim survives the fuse; fails if mis-keyed
+    await m.close()
+  })
+
+  it('claim search degrades to keyword when no embedder is configured', async () => {
+    const t = await createTestSurreal(); drops.push(t.drop)
+    const m = await SurrealMemory.open(t) // no embedder
+    await m.applyEvent(written(1, note({ id: 'n', title: 'N', claims: [claim('tokens rotate on use')] })))
+    expect((await m.searchClaims('tokens', {}, { mode: 'semantic' })).map(h => h.text)).toEqual(['tokens rotate on use'])
+    expect(await m.searchClaims('zeta', {}, { mode: 'semantic' })).toEqual([]) // no vector path, no match
+    await m.close()
+  })
+
+  it('a retired claim loses its vector too — semantic cannot resurrect it', async () => {
+    const t = await createTestSurreal(); drops.push(t.drop)
+    const m = await SurrealMemory.open(t, fakeEmbedder)
+    await m.applyEvent(written(1, note({ id: 'n', title: 'N', claims: [claim('alpha was true once')] })))
+    expect(await m.searchClaims('zeta', {}, { mode: 'semantic' })).toHaveLength(1)
+    await m.applyEvent(written(2, note({ id: 'n', title: 'N', claims: [] })))
+    expect(await m.searchClaims('zeta', {}, { mode: 'semantic' })).toEqual([])
     await m.close()
   })
 })

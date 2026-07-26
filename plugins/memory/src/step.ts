@@ -1,9 +1,9 @@
 import {
   errorMessage, LINK_KIND, MEMORY_ACCESS, MEMORY_LIMITS, MemoryScope, NOTE_TIER, planScope, SIGNAL_OUTCOME, slugId, taskLaneScopes,
   type LinkKind, type MemoryAuthor, type MemoryStore, type NoteSummary, type ResolvedTool,
-  type SignalOutcome, type StepMemory,
+  type RecalledContext, type SignalOutcome, type StepMemory,
 } from '@orc/contracts'
-import { applyBudget } from './budget'
+import { applyBudget, approxTokens } from './budget'
 import { memoryTools, unavailableMemoryTools, MEMORY_ROLE, type MemoryRole } from './tools'
 import type { ChangedSince } from './drift'
 
@@ -98,9 +98,18 @@ export function bindStepMemory(opts: {
   }
 
   const scope = taskLaneScopes(taskId, opts.ancestorTaskIds)
-  const search = async (query: string, budget: number): Promise<NoteSummary[]> => {
-    const hits = await store.search(query, { scope }, {})
-    return applyBudget(hits, n => JSON.stringify(n), { limit: PRELOAD_MAX_NOTES, budget }).items
+  // Claims take their share of the budget FIRST — a matched statement is what the step can act on,
+  // where a note summary is a pointer it must spend a memory_read to follow. Notes get the
+  // remainder rather than a second full budget, so one preload costs what the caller allotted.
+  const search = async (query: string, budget: number): Promise<RecalledContext> => {
+    const claimHits = await store.searchClaims(query, { scope }, { limit: PRELOAD_MAX_NOTES })
+    const claims = applyBudget(claimHits, h => h.text, { limit: PRELOAD_MAX_NOTES, budget }).items
+    const spent = claims.reduce((sum, c) => sum + approxTokens(c.text), 0)
+    const noteHits = await store.search(query, { scope }, {})
+    const notes = applyBudget(noteHits, n => JSON.stringify(n), {
+      limit: PRELOAD_MAX_NOTES, budget: Math.max(0, budget - spent),
+    }).items
+    return { claims, notes }
   }
 
   return {
@@ -110,7 +119,7 @@ export function bindStepMemory(opts: {
       // terms (what keyword-only deployments need) → the single longest term. First non-empty wins.
       // A degraded store must never block the step, so every failure folds to "no notes".
       async recall(budget) {
-        if (budget <= 0) return []
+        if (budget <= 0) return { claims: [], notes: [] }
         const terms = deriveQueryTerms(step.title)
         // Ordered candidates, first non-empty wins: the full intent (hybrid search matches meaning),
         // then the distinctive title terms (what a keyword-only deployment needs, since prose ANDs
@@ -121,20 +130,25 @@ export function bindStepMemory(opts: {
           terms.length > 1 ? terms.reduce((a, b) => (b.length > a.length ? b : a)) : '',
         ].filter(Boolean)
         try {
-          let notes: NoteSummary[] = []
+          let found: RecalledContext = { claims: [], notes: [] }
           for (const query of candidates) {
-            notes = await search(query, budget)
-            if (notes.length > 0) break
+            found = await search(query, budget)
+            if (found.claims.length > 0 || found.notes.length > 0) break
           }
-          for (const n of notes)
+          // Access is recorded per NOTE, and a claim's access is its owner's: the activation signal
+          // the lifecycle is tuned on counts notes, so a claim hit must not double-count its note.
+          const touched = new Map(
+            [...found.claims.map(c => [`${c.scope} ${c.noteId}`, { id: c.noteId, scope: c.scope }] as const),
+             ...found.notes.map(n => [`${n.scope} ${n.id}`, { id: n.id, scope: n.scope }] as const)])
+          for (const n of touched.values())
             await tracking.recordAccess(n.id, n.scope, MEMORY_ACCESS.preload, author, {
               // keyed by note, not position: a replay that reorders results must still converge
               ...(author.runToken ? { idempotencyKey: `${author.runToken}:preload:${n.scope}:${n.id}` } : {}),
             })
-          return notes
+          return found
         } catch (err) {
           console.warn(`memory recall failed for step '${step.id}':`, errorMessage(err))
-          return []
+          return { claims: [], notes: [] }
         }
       },
 
@@ -173,5 +187,5 @@ export type BindStep = (p: Omit<Parameters<typeof bindStepMemory>[0], 'store' | 
 // recall/capture go quiet rather than erroring — neither is the model's call to make.
 export const unavailableStepMemory = (reason: string): StepMemoryBinding => ({
   tools: unavailableMemoryTools(reason),
-  memory: { recall: async () => [], capture: async () => {} },
+  memory: { recall: async () => ({ claims: [], notes: [] }), capture: async () => {} },
 })

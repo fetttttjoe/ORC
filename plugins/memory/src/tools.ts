@@ -1,6 +1,6 @@
 import { z } from 'zod'
-import { AccessVia, EDGE_DIRECTIONS, errorMessage, linkLookupScopes, MemoryScope, MEMORY_ACCESS, MEMORY_LIMITS, MEMORY_SOURCE_LIMITS, MEMORY_TOOL_NAME, MemorySearchResult, MemoryWriteResult, NOTE_KINDS, LINK_KIND, LINK_KINDS, RETENTION_CLASSES, SEARCH_MODES, SearchMode, LinkKind, MemoryNoteDraftInput, NOTE_TIER, NOTE_TIERS, slugId, type MemoryAuthor, type MemoryNote, type MemoryStore, type ResolvedTool } from '@orc/contracts'
-import { applyBudget, fitMemoryNoteToBudget } from './budget'
+import { AccessVia, CLAIM_ID_RE, ClaimWrite, EDGE_DIRECTIONS, errorMessage, linkLookupScopes, MemoryScope, MEMORY_ACCESS, MEMORY_LIMITS, MEMORY_SOURCE_LIMITS, MEMORY_TOOL_NAME, MemorySearchResult, MemoryWriteResult, NOTE_KINDS, LINK_KIND, LINK_KINDS, RETENTION_CLASSES, SEARCH_MODES, SearchMode, LinkKind, MemoryNoteDraftInput, NOTE_TIER, NOTE_TIERS, slugId, type MemoryAuthor, type MemoryNote, type MemoryStore, type ResolvedTool } from '@orc/contracts'
+import { applyBudget, approxTokens, fitMemoryNoteToBudget } from './budget'
 import { noteHasDrifted, type ChangedSince } from './drift'
 
 // Advisory note lint, echoed back in the memory_write result so the writing agent can improve
@@ -70,6 +70,11 @@ export function noteLint(note: MemoryNote): string[] {
   return w
 }
 
+// What the claim arm already spent, so the note arm gets the REMAINDER rather than a second full
+// budget — a reply carrying both surfaces must cost what the caller asked for, not double it.
+const claimTokens = (hits: ReadonlyArray<{ text: string }>): number =>
+  hits.reduce((sum, h) => sum + approxTokens(h.text), 0)
+
 const ok = (output: unknown) => ({ output, isError: false })
 const err = (e: unknown) => ({ output: { error: errorMessage(e) }, isError: true })
 
@@ -109,7 +114,13 @@ const NeighborsInput = z.object({
 })
 // Tool-boundary variant: agents may omit id — the title-derived slug makes the same finding
 // converge instead of forking (bench: note-id drift). Named top-level, not call-site.
-const MemoryWriteToolInput = MemoryNoteDraftInput.extend({ id: MemoryNoteDraftInput.shape.id.optional() })
+// `invalidates` is stated about the WRITE, not about the note, so it is parsed here and forwarded on
+// the store opts — merging it into the draft would let merge-on-omit carry a tombstone forward into
+// every later revision of the note.
+const MemoryWriteToolInput = MemoryNoteDraftInput.extend({
+  id: MemoryNoteDraftInput.shape.id.optional(),
+  invalidates: ClaimWrite.shape.invalidates.removeDefault().optional(),
+})
 
 // advertised JSON schemas mirror the zod parsers exactly, so the model can self-correct.
 const detailLevelSchema = { type: 'string', enum: ['minimal', 'standard'], description: 'minimal = top 5 + omitted count' }
@@ -121,7 +132,7 @@ const idSchema = { type: 'string', pattern: '^[a-z0-9][a-z0-9-]*$' }
 // silently losing its memory tools.
 export function unavailableMemoryTools(reason: string): ResolvedTool[] {
   const fail = async (): Promise<never> => { throw new Error(`memory unavailable: ${reason}`) }
-  const store: MemoryStore = { write: fail, remove: fail, get: fail, list: fail, search: fail, neighbors: fail, recordAccess: fail }
+  const store: MemoryStore = { write: fail, remove: fail, get: fail, list: fail, search: fail, searchClaims: fail, claimsFor: fail, neighbors: fail, recordAccess: fail }
   return memoryTools({ store, author: { source: 'agent' } })
 }
 
@@ -199,6 +210,17 @@ export function memoryTools(opts: {
             },
           },
           paths: { type: 'array', maxItems: MEMORY_LIMITS.detailItems, items: { type: 'string', maxLength: MEMORY_LIMITS.detailChars }, description: 'code paths this note refers to' },
+          addClaims: {
+            type: 'array', maxItems: MEMORY_LIMITS.detailItems,
+            items: { type: 'string', maxLength: MEMORY_LIMITS.detailChars },
+            description: 'statements to ADD to this note — send only what is new; existing claims carry forward untouched, so never resend them. One fact per statement: a claim is what search returns and what another agent acts on.',
+          },
+          invalidates: {
+            // the pattern the parser actually enforces, not a second spelling of it
+            type: 'array', maxItems: MEMORY_LIMITS.detailItems,
+            items: { type: 'string', pattern: CLAIM_ID_RE.source },
+            description: 'claim ids this write supersedes — a superseded claim stops being returned but stays in the log. State it: a claim you simply do not resend carries forward.',
+          },
           rationale: { type: 'string', maxLength: MEMORY_LIMITS.rationaleChars, description: 'plan tier only: why this subplan exists' },
           uncertainty: { type: 'array', maxItems: MEMORY_LIMITS.detailItems, items: { type: 'string', maxLength: MEMORY_LIMITS.detailChars }, description: 'plan tier only: coverage gaps / assumptions to surface (RG7)' },
           skillRefs: { type: 'array', maxItems: 16, items: { type: 'string', maxLength: MEMORY_LIMITS.labelChars }, description: 'plan tier only: skills this subplan\'s step should load (e.g. web-research). Selection from what the operator installed — an unknown ref fails the plan before approval.' },
@@ -216,7 +238,7 @@ export function memoryTools(opts: {
           // parse WITHOUT defaults: MemoryNoteInput here would fill body:'' etc. and turn every
           // omitted field into an explicit clear, defeating the store gateway's merge-on-omit.
           // The gateway parses the merged note fully — same validation, right order, no casts.
-          const parsed = MemoryWriteToolInput.parse(input)
+          const { invalidates, ...parsed } = MemoryWriteToolInput.parse(input)
           let id: string
           try {
             id = parsed.id ?? slugId(parsed.title)
@@ -233,7 +255,7 @@ export function memoryTools(opts: {
           const scope = parsed.scope ?? MemoryScope.project
           const forkRisk = parsed.id === undefined && !(await store.get(id, scope))
           const duplicates = forkRisk ? await duplicateSubjectWarning(store, scope, parsed.title, id) : []
-          const n = await store.write({ ...parsed, id }, author, { idempotencyKey })
+          const n = await store.write({ ...parsed, id }, author, { idempotencyKey, ...(invalidates && { invalidates }) })
           // No revision: the write is event-first and the projector is asynchronous, so within
           // the flush window store.write reports the revision from BEFORE this write (and
           // fabricates 1 when nothing is projected yet). Handing the model a number that was
@@ -253,7 +275,7 @@ export function memoryTools(opts: {
     },
     {
       ref: 'memory/search', name: MEMORY_TOOL_NAME.search,
-      description: withRole('Search project knowledge by meaning and keyword (hybrid). Returns note summaries (id, title, categories, tags, summary). Read the full note with memory_read.', role),
+      description: withRole('Search project knowledge by meaning and keyword (hybrid). Returns matched CLAIMS — individual statements, each with the note that asserts it — plus note summaries for notes that match without asserting a claim. Read the full note with memory_read.', role),
       inputSchema: {
         type: 'object', required: ['query'],
         properties: {
@@ -267,13 +289,24 @@ export function memoryTools(opts: {
           const q = SearchInput.parse(input)
           const limit = q.limit ?? (q.detail_level === 'minimal' ? 5 : 20)
           const filter = { category: q.category, tag: q.tag, ...(searchScope && { scope: [...searchScope] }) }
-          const r = applyBudget(await store.search(q.query, filter, { mode: q.mode }), n => JSON.stringify(n), { limit, budget: q.budget })
+          // Claims FIRST — a matched statement is the answer, where a note summary is a pointer to
+          // one. Notes still come back: a note asserting no claims (every episodic note, and any
+          // semantic note not yet restated as claims) would otherwise vanish from search entirely.
+          // Both arms share the ONE budget, claims taking theirs first, so the reply cannot double.
+          const [claimHits, noteHits] = await Promise.all([
+            store.searchClaims(q.query, filter, { mode: q.mode, limit }),
+            store.search(q.query, filter, { mode: q.mode }),
+          ])
+          const c = applyBudget(claimHits, h => h.text, { limit, budget: q.budget })
+          const r = applyBudget(noteHits, n => JSON.stringify(n), { limit, budget: Math.max(0, q.budget - claimTokens(c.items)) })
+          const empty = c.items.length === 0 && r.items.length === 0
+          const truncated = c.truncated || r.truncated
           return ok(MemorySearchResult.parse({
-            notes: r.items, truncated: r.truncated, omitted: r.omitted,
-            ...(r.truncated && { next: 'refine the query, or memory_read/memory_neighbors a specific id' }),
+            claims: c.items, notes: r.items, truncated, omitted: c.omitted + r.omitted,
+            ...(truncated && { next: 'refine the query, or memory_read/memory_neighbors a specific id' }),
             // absence epistemics (codebase-memory-mcp §5 amendment E-i): empty means "no note
             // matched", never "no such decision exists" — say so in the envelope.
-            ...(r.items.length === 0 && { note: "no note matched — absence is not proof a decision doesn't exist" }),
+            ...(empty && { note: "no note matched — absence is not proof a decision doesn't exist" }),
           }))
         } catch (e) { return err(e) }
       },

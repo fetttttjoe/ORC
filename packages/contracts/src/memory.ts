@@ -1,5 +1,5 @@
 import { z } from 'zod'
-import { ClaimInput, claimsFromLegacyRules, ClaimWrite, LEGACY_CLAIMS_FIELD } from './claim'
+import { Claim, ClaimHit, ClaimInput, ClaimWrite } from './claim'
 import { EVENT_KIND, type EventRecord } from './event-kinds'
 import { composeAuthor, MEMORY_ID_RE, MemoryAuthor } from './ids'
 import { MEMORY_LIMITS } from './limits'
@@ -282,27 +282,6 @@ const withTier = (raw: unknown): unknown => {
   return { ...raw, tier: inferTier(raw) }
 }
 
-// A note written before claims existed carries its statements in `rules`. Decoding them here is how
-// HISTORY parses, not a write-surface shim: the log is immutable, so this path is permanent even
-// though `rules` is gone from every schema below (an unknown key, so zod strips it after this runs).
-// `sourceRevision` comes from the note itself — the legacy note was grounded at some commit, and
-// that is the honest value; `validFrom` is not set because ClaimInput has no such field, and the
-// event that actually fixes it is only visible to the projector (see surreal.ts).
-const withClaims = (raw: unknown): unknown => {
-  if (typeof raw !== 'object' || raw === null) return raw
-  const r = raw as Record<string, unknown>
-  const legacy = r[LEGACY_CLAIMS_FIELD]
-  if (r.claims !== undefined || !Array.isArray(legacy)) return raw
-  const rules = legacy.filter((v): v is string => typeof v === 'string')
-  const rev = typeof r.sourceRevision === 'string' ? r.sourceRevision : null
-  return { ...r, claims: claimsFromLegacyRules(rules, rev) }
-}
-
-// Both note schemas below re-parse raw history (MemoryNote for a stored row, MemoryNoteInput for
-// an authored draft), so both must decode a legacy rules[] the same way, ahead of tier inference —
-// withClaims never looks at `tier`, so running it first cannot change which lane a note lands in.
-const preprocessNote = (raw: unknown): unknown => withTier(withClaims(raw))
-
 // An AUTHORED note seen by a reader that does not care which tier it got: every tier's fields,
 // all optional, so one code path can render or project any of them and a field the tier does not
 // own simply reads as undefined. NoteView below is the same idea for a STORED note.
@@ -311,7 +290,7 @@ export interface NoteFields extends Partial<Omit<SemanticNoteInput, 'tier'> & Om
 }
 
 export const MemoryNoteInput = z.preprocess(
-  preprocessNote,
+  withTier,
   z.discriminatedUnion('tier', [SemanticNoteInput, EpisodicNoteInput, PlanNoteInput]),
 ).refine(
   n => !(n.scope === MemoryScope.project && n.id === 'index'),
@@ -412,7 +391,7 @@ export const PlanNote = PlanNoteInput.extend(noteProvenance)
 export type PlanNote = z.infer<typeof PlanNote>
 
 export const MemoryNote = z.preprocess(
-  preprocessNote,
+  withTier,
   z.discriminatedUnion('tier', [SemanticNote, EpisodicNote, PlanNote]),
 )
 export type MemoryNote = z.infer<typeof MemoryNote>
@@ -442,6 +421,11 @@ export type NoteSummary = z.infer<typeof NoteSummary>
 // memory_search's result envelope (tools.ts constructs it; the loop's Task 7 preload parses it —
 // no casts, same discipline as MemoryWriteResult).
 export const MemorySearchResult = z.object({
+  // Claims are the retrieval surface: a matched STATEMENT is what a reader can act on. `notes` is
+  // kept alongside, not replaced — a note that asserts no claims (every episodic note, and any
+  // semantic note not yet restated as claims) is still findable, and dropping it would make most of
+  // an existing corpus invisible to search. Spec D3: the granularities coexist.
+  claims: z.array(ClaimHit).default([]),
   notes: z.array(NoteSummary),
   truncated: z.boolean(),
   omitted: z.number().int().nonnegative(),
@@ -579,6 +563,11 @@ export interface MemoryStore {
   get(id: string, scope?: string): Promise<MemoryNote | null>
   list(filter?: MemoryFilter): Promise<NoteSummary[]>
   search(query: string, filter?: MemoryFilter, opts?: MemorySearchOpts): Promise<NoteSummary[]>
+  // Statement-level retrieval over the derived claim table, deduped so one note cannot fill every
+  // slot. `limit` counts NOTES for that reason.
+  searchClaims(query: string, filter?: MemoryFilter, opts?: MemorySearchOpts & { limit?: number }): Promise<ClaimHit[]>
+  /** A note's LIVE claims, each stamped with the event that first carried it. */
+  claimsFor(noteId: string, scope?: string): Promise<Claim[]>
   neighbors(seed: string, opts?: NeighborQuery): Promise<NeighborResult[]>
   // called by the pull call sites (tools, CLI) rather than inside get(), so a traversal that
   // reads N notes internally records one access against its seed, not N against its neighbours.

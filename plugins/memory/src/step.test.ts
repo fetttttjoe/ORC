@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'bun:test'
 import {
   LINK_KIND, MEMORY_ACCESS, MemoryScope, NOTE_TIER, planScope, slugId,
-  type MemoryAuthor, type MemoryNote, type MemoryNoteDraft, type MemoryStore, type NoteSummary,
+  type ClaimHit, type MemoryAuthor, type MemoryNote, type MemoryNoteDraft, type MemoryStore, type NoteSummary,
 } from '@orc/contracts'
 import { bindStepMemory, deriveQueryTerms, preloadQuery } from './step'
 
@@ -19,13 +19,17 @@ interface Recorded { id: string; scope: string | undefined; mode: string }
 // ladder is observable; everything else is the minimum the binding touches.
 function fakeStore(opts: {
   search?: (query: string) => NoteSummary[]
+  searchClaims?: (query: string) => ClaimHit[]
   notes?: Record<string, MemoryNote>
 } = {}) {
   const accesses: Recorded[] = []
   const writes: MemoryNoteDraft[] = []
   const queries: string[] = []
+  const claimQueries: string[] = []
   const store: MemoryStore = {
     search: async query => { queries.push(query); return opts.search?.(query) ?? [] },
+    searchClaims: async query => { claimQueries.push(query); return opts.searchClaims?.(query) ?? [] },
+    claimsFor: async () => [],
     recordAccess: async (id, scope, mode) => { accesses.push({ id, scope, mode }) },
     write: async note => { writes.push(note); return note as unknown as MemoryNote },
     get: async id => opts.notes?.[id] ?? null,
@@ -33,7 +37,7 @@ function fakeStore(opts: {
     neighbors: async () => [],
     remove: async () => {},
   }
-  return { store, accesses, writes, queries }
+  return { store, accesses, writes, queries, claimQueries }
 }
 
 const bind = (f: ReturnType<typeof fakeStore>, over: Partial<Parameters<typeof bindStepMemory>[0]> = {}) =>
@@ -58,14 +62,17 @@ describe('preloadQuery / deriveQueryTerms', () => {
 describe('recall', () => {
   it('queries the full intent first and stops once it has hits', async () => {
     const f = fakeStore({ search: () => [summary()] })
-    const notes = await bind(f).memory.recall(500)
+    const { notes } = await bind(f).memory.recall(500)
     expect(notes.map(n => n.id)).toEqual(['area-memory'])
+    // one query string, asked of BOTH arms — the claim arm and the note arm see the same intent
     expect(f.queries).toEqual(['Refactor authentication middleware\ndo the thing'])
+    // the claim arm is asked the SAME intent, not a separate one
+    expect(f.claimQueries).toEqual(f.queries)
   })
 
   it('falls back to distinctive title terms, then to the single longest, when each comes up empty', async () => {
     const f = fakeStore({ search: q => (q === 'authentication' ? [summary()] : []) })
-    const notes = await bind(f).memory.recall(500)
+    const { notes } = await bind(f).memory.recall(500)
     expect(notes.map(n => n.id)).toEqual(['area-memory'])
     expect(f.queries).toEqual([
       'Refactor authentication middleware\ndo the thing',
@@ -87,14 +94,38 @@ describe('recall', () => {
 
   it('a zero budget searches nothing', async () => {
     const f = fakeStore({ search: () => [summary()] })
-    expect(await bind(f).memory.recall(0)).toEqual([])
+    expect(await bind(f).memory.recall(0)).toEqual({ claims: [], notes: [] })
     expect(f.queries).toEqual([])
+    expect(f.claimQueries).toEqual([])
+  })
+
+  it('recalls claims alongside notes, and records ONE access per owning note', async () => {
+    const hit = (claimId: string, noteId: string) =>
+      ({ claimId, noteId, scope: 'project', title: noteId, text: `statement ${claimId}`, validFrom: '2026-07-26T00:00:00.000Z' })
+    // two claims on ONE note plus a note-arm hit for the same note: the activation signal counts
+    // notes, so a preload must not charge that note three times
+    const f = fakeStore({ searchClaims: () => [hit('c1', 'area-memory'), hit('c2', 'area-memory')], search: () => [summary()] })
+    const { claims, notes } = await bind(f).memory.recall(500)
+    expect(claims.map(c => c.claimId)).toEqual(['c1', 'c2'])
+    expect(notes.map(n => n.id)).toEqual(['area-memory'])
+    expect(f.accesses.filter(a => a.mode === MEMORY_ACCESS.preload)).toHaveLength(1)
+  })
+
+  it('claims alone are enough — the fallback chain stops without any note hit', async () => {
+    const f = fakeStore({
+      searchClaims: () => [{ claimId: 'c1', noteId: 'n', scope: 'project', title: 'N', text: 'a statement', validFrom: '2026-07-26T00:00:00.000Z' }],
+      search: () => [],
+    })
+    const { claims, notes } = await bind(f).memory.recall(500)
+    expect(claims).toHaveLength(1)
+    expect(notes).toEqual([])
+    expect(f.claimQueries).toHaveLength(1) // stopped at the first candidate, did not degrade further
   })
 
   it('a throwing store degrades to no notes rather than failing the step', async () => {
     const f = fakeStore()
     f.store.search = async () => { throw new Error('surreal down') }
-    expect(await bind(f).memory.recall(500)).toEqual([])
+    expect(await bind(f).memory.recall(500)).toEqual({ claims: [], notes: [] })
   })
 })
 
@@ -234,7 +265,7 @@ describe('recall is a bounded hint', () => {
   it('keeps only the best-ranked few, however many the store returns', async () => {
     const many = Array.from({ length: 30 }, (_, i) => summary({ id: `note-${i}` }))
     const f = fakeStore({ search: () => many })
-    const notes = await bind(f).memory.recall(100_000) // budget far too large to bind
+    const { notes } = await bind(f).memory.recall(100_000) // budget far too large to bind
     expect(notes.map(n => n.id)).toEqual(['note-0', 'note-1', 'note-2', 'note-3', 'note-4'])
   })
 })

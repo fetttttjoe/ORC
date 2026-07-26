@@ -4,7 +4,7 @@ import { TASK_STATUS, type TaskStatus } from './task'
 import type { EventKind } from './events'
 import type { OperationSpec } from './operations'
 import type { LoadedSkill, ResolvedTool } from './plugins'
-import type { NoteSummary } from './memory'
+import type { ClaimHit, NoteSummary } from './memory'
 
 export const Usage = z.object({
   inputTokens: z.number().int().nonnegative(),
@@ -247,9 +247,19 @@ export interface ExecutorContext<LM = unknown> {
 // It exists because the executor was doing that job by reaching into extraTools, matching
 // 'memory_search'/'memory_write' by name and forging tool-call ids to drive them — which made the
 // executor a second writer of memory events alongside the store.
+/** One preload pull: matched statements plus the notes that matched without asserting one. */
+export interface RecalledContext {
+  claims: ClaimHit[]
+  notes: NoteSummary[]
+}
+
 export interface StepMemory {
-  /** Context for the first prompt. Recording the pull is the implementation's business. */
-  recall(budget: number): Promise<NoteSummary[]>
+  /**
+   * Context for the first prompt. Recording the pull is the implementation's business.
+   * Both surfaces come from ONE call so they share ONE budget and ONE replay checkpoint — two
+   * calls would record two values and could rebuild messages[0] differently on recovery.
+   */
+  recall(budget: number): Promise<RecalledContext>
   /** What the finished step leaves behind. Best-effort: never throws into the step. */
   capture(signal: { outcome: SignalOutcome; summary: string }): Promise<void>
 }
