@@ -53,11 +53,12 @@ const links = (parts: Array<HTMLElement | string>): HTMLElement => {
 export function renderDetail(nodeId: string, d: unknown, go: Go, notes?: NoteDetailActions | null): HTMLElement {
   if (d !== null && typeof d === 'object' && 'task' in d) {
     const t = d as TaskDetail
+    const parentId = t.task.parentId
     return el('div', {},
       Card([t.task.title, Badge(t.task.status, statusTone(t.task.status))],
         KV([
           ['id', t.task.id],
-          ...(t.task.parentId ? [['parent', Link(t.task.parentId.slice(0, 8), () => go(t.task.parentId!))] as [string, HTMLElement]] : []),
+          ...(parentId ? [['parent', Link(parentId.slice(0, 8), () => go(parentId))] as [string, HTMLElement]] : []),
           ['created', t.task.createdAt],
           ['tokens', `${t.usage.inputTokens} in / ${t.usage.outputTokens} out`],
           ...(t.usage.cacheReadTokens || t.usage.cacheWriteTokens
@@ -102,11 +103,12 @@ export function renderDetail(nodeId: string, d: unknown, go: Go, notes?: NoteDet
     // core fields are guaranteed by the note itself; the tier-specific ones are read through the
     // shared view, which is what makes their absence explicit instead of a crash
     const tierFields: NoteView = note
+    const authorTaskId = n.author.taskId
     return el('div', {}, Card([note.title, Badge(noteLabel(note), 'purple'), Badge(`${n.hits} hits`, 'muted')],
       KV([
         ['id', `${note.scope}/${note.id}`],
-        ['author', n.author.taskId
-          ? links([`${n.author.model ?? 'agent'} · `, Link(`task ${n.author.taskId.slice(0, 8)}`, () => go(n.author.taskId!))])
+        ['author', authorTaskId
+          ? links([`${n.author.model ?? 'agent'} · `, Link(`task ${authorTaskId.slice(0, 8)}`, () => go(authorTaskId))])
           : n.author.source],
         ...(note.tags.length ? [['tags', note.tags.join(', ')] as [string, string]] : []),
         ...(note.links.length
@@ -164,10 +166,11 @@ export function renderDetail(nodeId: string, d: unknown, go: Go, notes?: NoteDet
   if (d !== null && typeof d === 'object' && 'sha256' in d) {
     const a = d as ArtifactDetail
     const taskId = nodeId.split(':')[1] ?? ''
+    const stepId = a.stepId
     return el('div', {}, Card([a.path, Badge(`${a.size}B`, 'warn')],
       KV([
         ['sha256', a.sha256],
-        ['step', a.stepId ? Link(a.stepId, () => go(stepNodeId(taskId, a.stepId!))) : '?'],
+        ['step', stepId ? Link(stepId, () => go(stepNodeId(taskId, stepId))) : '?'],
       ])))
   }
   return el('div', {}, d === null ? Empty(`no detail for ${nodeId}`) : Pre(JSON.stringify(d, null, 2)))

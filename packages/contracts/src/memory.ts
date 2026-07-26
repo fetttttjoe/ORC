@@ -1,6 +1,7 @@
 import { z } from 'zod'
 import { EVENT_KIND, type EventRecord } from './event-kinds'
 import { composeAuthor, MEMORY_ID_RE, MemoryAuthor } from './ids'
+import { planScope } from './plan'
 
 // re-exported so every memory consumer keeps importing this vocabulary from one place
 export { MEMORY_ID_RE, slugId, MemoryAuthor, composeAuthor } from './ids'
@@ -124,6 +125,16 @@ export const NOTE_TIER = NoteTier.enum
 // plan scopes are derived by planScope(taskId) in plan.ts.
 export enum MemoryScope { project = 'project' }
 
+// Project-chat metadata stored as notes (display name, working directory) — infrastructure, not
+// knowledge. Hidden from the graph view AND excluded from the retrieval surface: a real run was
+// handed 'ui-project-name' as project context and then cited it as provenance. Still readable by
+// id, which is how the chats list resolves a project's name. Fully present in the log/replay.
+export const PROJECT_NAME_NOTE_ID = 'ui-project-name'
+export const PROJECT_DIR_NOTE_ID = 'ui-project-dir'
+const UI_META_NOTE_IDS: ReadonlySet<string> = new Set([PROJECT_NAME_NOTE_ID, PROJECT_DIR_NOTE_ID])
+export const isUiMetaNote = (scope: string, id: string): boolean =>
+  scope === MemoryScope.project && UI_META_NOTE_IDS.has(id)
+
 // Where a link's target may live, in lookup order. THE one rule, because a MemoryLink names an id
 // and carries no scope, so something has to decide which scope that id means — and two places
 // decided independently, both landing on "the source's own scope": the projector pointed every edge
@@ -138,6 +149,15 @@ export enum MemoryScope { project = 'project' }
 // by write-time link validation, and by the graph audit, so those three cannot drift apart again.
 export const linkLookupScopes = (fromScope: string): string[] =>
   fromScope === MemoryScope.project ? [MemoryScope.project] : [fromScope, MemoryScope.project]
+
+// The lanes a RUNNING STEP may be handed knowledge from, nearest first: its own plan scope, then
+// every ancestor's (a split child executes a decomposition its PARENT authored — `plan-<child>` and
+// `plan-<parent>` are different scopes), then the durable project lane.
+//
+// Sibling of linkLookupScopes, not the same rule: that one answers "where does this link id
+// resolve" from a scope; this answers "what may this step see" from a task. Both end at `project`.
+export const taskLaneScopes = (taskId: string, ancestorTaskIds: readonly string[] = []): string[] =>
+  [planScope(taskId), ...ancestorTaskIds.map(planScope), MemoryScope.project]
 
 // The memory tool surface by name — matched values, never scattered literals. Owned in
 // contracts so the executor loop (which cannot import the memory plugin) matches the same
@@ -456,7 +476,11 @@ export const SEARCH_MODE = SearchMode.enum
 
 export interface MemorySearchOpts { mode?: SearchMode }
 
-export interface MemoryFilter { scope?: string; category?: string; tag?: string; tier?: NoteTier }
+// `scope` takes a list when a caller may read across lanes (a step sees durable project knowledge
+// plus its own plan scope — contracts linkLookupScopes). It must reach the QUERY, never a post-filter:
+// the semantic arm ranks over the whole table and truncates, so filtering afterwards lets one busy
+// project's plan notes occupy every slot and starve the knowledge the filter was asking for.
+export interface MemoryFilter { scope?: string | string[]; category?: string; tag?: string; tier?: NoteTier }
 
 // The single-writer gateway (the wrapper). write/remove append events; reads hit SurrealDB.
 // write takes the raw draft — the gateway parses (defaults + validation), callers never cast.
@@ -477,7 +501,9 @@ export type MemoryDeletedPayload = z.infer<typeof MemoryDeletedPayload>
 // the only evidence of which knowledge is load-bearing, and a counter written outside the log is
 // erased by every rebuild. Emitted per successful pull (a miss records nothing) — id and scope
 // carry the same MEMORY_ID_RE guard as memory_deleted, since both index the read model by key.
-export const MEMORY_ACCESS_MODES = ['read', 'neighbors'] as const
+// 'read'/'neighbors' are the agent pulling; 'preload' is the executor injecting summaries into the
+// first prompt. Distinct so the log can tell a delivered summary from a delivered body.
+export const MEMORY_ACCESS_MODES = ['read', 'neighbors', 'preload'] as const
 export const MemoryAccessMode = z.enum(MEMORY_ACCESS_MODES)
 export type MemoryAccessMode = z.infer<typeof MemoryAccessMode>
 export const MEMORY_ACCESS = MemoryAccessMode.enum
@@ -567,25 +593,6 @@ export const noteLabel = (note: NoteFields): string => note.kind ?? note.tier
 
 export const noteKey = (scope: string, id: string): string => `${scope}\u0000${id}`
 
-// Last-write-wins fold of the memory event stream into the live note set. Lenient like fold():
-// an unparseable payload is skipped, never applied. Input needs only kind+payload so both
-// EventRecord[] and trimmed test fixtures work.
-export function foldLiveNotes(
-  events: Array<Pick<EventRecord, 'kind' | 'payload'>>,
-): Map<string, MemoryWrittenPayload> {
-  const live = new Map<string, MemoryWrittenPayload>()
-  for (const e of events) {
-    if (e.kind === EVENT_KIND.memory_written) {
-      const p = MemoryWrittenPayload.safeParse(e.payload)
-      if (p.success) live.set(noteKey(p.data.note.scope, p.data.note.id), p.data)
-    } else if (e.kind === EVENT_KIND.memory_deleted) {
-      const p = MemoryDeletedPayload.safeParse(e.payload)
-      if (p.success) live.delete(noteKey(p.data.scope, p.data.id))
-    }
-  }
-  return live
-}
-
 // ---- activation: the first consumer of the observed-use measurement ----
 // Read-time derivation, never stored: a pure function of the event-sourced hits/lastAccessedAt
 // plus the caller's clock — rebuild-safe by construction, and replay reproduces it exactly.
@@ -608,60 +615,70 @@ export function activation(stats: AccessStats, now: string, halfLifeDays: number
 
 export const activationBoost = (a: number): number => 1 + ACTIVATION_GAIN * Math.log1p(a)
 
-// Fold memory_accessed into per-note (hits, lastAccessedAt) — lenient like foldLiveNotes.
-// The graph view derives heat from this; the Surreal projector keeps its own incremental copy.
-// `ts` is optional so trimmed {kind, payload} fixtures keep working — a tsless access is skipped
-// (activation without a timestamp is undefined anyway).
-export function foldAccessCounts(
-  events: Array<Pick<EventRecord, 'kind' | 'payload'> & { ts?: string }>,
-): Map<string, AccessStats> {
-  const acc = new Map<string, AccessStats>()
-  for (const e of events) {
-    if (e.kind !== EVENT_KIND.memory_accessed || !e.ts) continue
-    const p = MemoryAccessedPayload.safeParse(e.payload)
-    if (!p.success) continue
-    const k = noteKey(p.data.scope, p.data.id)
-    acc.set(k, { hits: (acc.get(k)?.hits ?? 0) + 1, lastAccessedAt: e.ts })
-  }
-  return acc
-}
-
-// When each note was last WRITTEN, folded from the same stream foldLiveNotes reads. It is a
-// separate fold because foldLiveNotes' input is deliberately ts-free (trimmed fixtures parse
-// against it), while a lifecycle policy needs the clock: "untouched" means neither written nor
-// read for N days, so the write time is half the answer and foldAccessCounts is the other half.
-export function foldWriteTimes(
-  events: Array<Pick<EventRecord, 'kind' | 'payload'> & { ts?: string }>,
-): Map<string, string> {
-  const written = new Map<string, string>()
-  for (const e of events) {
-    if (e.kind !== EVENT_KIND.memory_written || !e.ts) continue
-    const p = MemoryWrittenPayload.safeParse(e.payload)
-    if (p.success) written.set(noteKey(p.data.note.scope, p.data.note.id), e.ts)
-  }
-  return written
-}
-
 export const edgeKey = (scope: string, from: string, to: string, kind: LinkKind): string =>
   [scope, from, to, kind].join(' ')
 
-// Fold memory_accessed.via into per-edge stats — the connection-level twin of foldAccessCounts.
-// CANONICALIZATION: both traversal directions of one authored edge fold onto ONE key —
-// from = direction === 'out' ? via.seed : id;  to = direction === 'out' ? id : via.seed.
-// Merely omitting direction from the key does NOT unify them; normalize before keying.
-export function foldEdgeStats(
-  events: Array<Pick<EventRecord, 'kind' | 'payload'> & { ts?: string }>,
-): Map<string, AccessStats> {
-  const acc = new Map<string, AccessStats>()
-  for (const e of events) {
-    if (e.kind !== EVENT_KIND.memory_accessed || !e.ts) continue
+// The ONE increment rule. The Surreal projector materializes the same counters incrementally into
+// its own columns, so it applies this too — otherwise the read model's ranking and a fold of the
+// log can drift apart on a rule nobody notices is written twice. A bump always HAS a timestamp,
+// so the result narrows to a non-null one (the projector's columns are `option`, not nullable).
+export const bumpAccess = (prev: { hits?: number | null } | undefined, ts: string): { hits: number; lastAccessedAt: string } =>
+  ({ hits: (prev?.hits ?? 0) + 1, lastAccessedAt: ts })
+
+// The authored edge an access's `via` provenance names. CANONICAL: both traversal directions of one
+// edge resolve to the same (from, to) pair — omitting direction from the key does NOT unify them.
+// Used by the log fold and by the Surreal projector, so the two cannot key one edge differently.
+export const viaEdge = (p: MemoryAccessedPayload): { scope: string; from: string; to: string; kind: LinkKind } | null => {
+  if (!p.via) return null
+  const out = p.via.direction === EDGE_DIRECTION.out
+  return { scope: p.scope, from: out ? p.via.seed : p.id, to: out ? p.id : p.via.seed, kind: p.via.kind }
+}
+
+const viaEdgeKey = (p: MemoryAccessedPayload): string | null => {
+  const e = viaEdge(p)
+  return e && edgeKey(e.scope, e.from, e.to, e.kind)
+}
+
+export interface MemoryFold {
+  notes: Map<string, MemoryWrittenPayload>
+  writes: Map<string, string>   // last write time per note
+  access: Map<string, AccessStats>
+  edges: Map<string, AccessStats>
+}
+
+export const emptyMemoryFold = (): MemoryFold =>
+  ({ notes: new Map(), writes: new Map(), access: new Map(), edges: new Map() })
+
+// `ts` is optional so trimmed {kind, payload} fixtures keep working — a tsless event contributes no
+// timing (activation without a timestamp is undefined anyway).
+type MemoryEvent = Pick<EventRecord, 'kind' | 'payload'> & { ts?: string }
+
+// Mutates and returns `acc`, so a long-lived reader (the UI session cache) can advance one event at
+// a time instead of re-walking history. Same shape as projections' foldInto.
+export function foldMemoryInto(acc: MemoryFold, e: MemoryEvent): MemoryFold {
+  if (e.kind === EVENT_KIND.memory_written) {
+    const p = MemoryWrittenPayload.safeParse(e.payload)
+    if (!p.success) return acc
+    const k = noteKey(p.data.note.scope, p.data.note.id)
+    acc.notes.set(k, p.data)
+    if (e.ts) acc.writes.set(k, e.ts)
+  } else if (e.kind === EVENT_KIND.memory_deleted) {
+    const p = MemoryDeletedPayload.safeParse(e.payload)
+    if (!p.success) return acc
+    const k = noteKey(p.data.scope, p.data.id)
+    acc.notes.delete(k)
+    acc.writes.delete(k)
+  } else if (e.kind === EVENT_KIND.memory_accessed && e.ts) {
     const p = MemoryAccessedPayload.safeParse(e.payload)
-    if (!p.success || !p.data.via) continue
-    const { id, scope, via } = p.data
-    const from = via.direction === EDGE_DIRECTION.out ? via.seed : id
-    const to = via.direction === EDGE_DIRECTION.out ? id : via.seed
-    const k = edgeKey(scope, from, to, via.kind)
-    acc.set(k, { hits: (acc.get(k)?.hits ?? 0) + 1, lastAccessedAt: e.ts })
+    if (!p.success) return acc
+    const k = noteKey(p.data.scope, p.data.id)
+    acc.access.set(k, bumpAccess(acc.access.get(k), e.ts))
+    const ek = viaEdgeKey(p.data)
+    if (ek) acc.edges.set(ek, bumpAccess(acc.edges.get(ek), e.ts))
   }
   return acc
 }
+
+// Every derivation over the memory stream, in ONE walk.
+export const foldMemory = (events: MemoryEvent[]): MemoryFold =>
+  events.reduce(foldMemoryInto, emptyMemoryFold())

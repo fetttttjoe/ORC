@@ -172,11 +172,11 @@ function mermaidGraph(nodes: { id: string; text: string }[], edges: { from: stri
 // deterministic recursive task-expansion graph: which task created which child, with live status
 function taskExpansionGraph(tasks: TaskNode[]): string {
   if (tasks.length === 0) return '_no tasks_'
-  const node = new Map(tasks.map((t, i) => [t.id, `t${i}`]))
-  const nodes = tasks.map(t => ({ id: node.get(t.id)!, text: `${t.title} · ${t.status}` }))
-  const edges = tasks
-    .filter(t => t.parentId && node.has(t.parentId))
-    .map(t => ({ from: node.get(t.parentId!)!, to: node.get(t.id)! }))
+  const node = new Map(tasks.map((t, i) => [t.id, `t${i}`] as const))
+  const idOf = (taskId: string): string => node.get(taskId) ?? taskId
+  const nodes = tasks.map(t => ({ id: idOf(t.id), text: `${t.title} · ${t.status}` }))
+  const edges = tasks.flatMap(t =>
+    t.parentId && node.has(t.parentId) ? [{ from: idOf(t.parentId), to: idOf(t.id) }] : [])
   return mermaidGraph(nodes, edges)
 }
 

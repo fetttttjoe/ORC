@@ -78,7 +78,7 @@ function yourMove(t: TaskView, open: OpenQuestion[], act: Act | null): Move | nu
     input.placeholder = 'your answer…'
     const offer = replyAffordance(Boolean(act), id)
     return {
-      text: `the agent is asking: “${open[0]!.question}”`, tone: 'warn',
+      text: `the agent is asking: “${open[0]?.question ?? ''}”`, tone: 'warn',
       cmd: offer.kind === REPLY_AFFORDANCE.command ? offer.cmd : null,
       button: act && el('div', { class: 'reply-row' }, input, Btn('reply', async () => {
         if (!input.value.trim()) return
@@ -224,10 +224,11 @@ export function renderRequest(ctx: RequestCtx): HTMLElement {
   if (deco) out.append(deco)
 
   // 4) the road of steps (approved plan by default, any version viewable)
-  if (ctx.plans && ctx.plans.versions.length > 0) {
+  const latest = ctx.plans?.versions.at(-1)
+  if (ctx.plans && latest) {
     const plans = ctx.plans
-    const active = ctx.shownVersion ?? plans.approvedVersion ?? plans.versions.at(-1)!.version
-    const plan = plans.versions.find(v => v.version === active) ?? plans.versions.at(-1)!
+    const active = ctx.shownVersion ?? plans.approvedVersion ?? latest.version
+    const plan = plans.versions.find(v => v.version === active) ?? latest
     const editable = ctx.act !== null && ctx.planNotes.length === 0
       && (t.task.status === 'draft' || t.task.status === 'awaiting_approval')
     out.append(el('div', { class: 'row-split' },

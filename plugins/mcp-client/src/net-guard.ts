@@ -15,7 +15,8 @@ export function isPrivateIp(ip: string): boolean {
     if (/^fe[89ab]/.test(v6)) return true            // fe80::/10 link-local
     if (v6.startsWith('fc') || v6.startsWith('fd')) return true // fc00::/7 ULA
     const mapped = v6.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/)
-    return mapped ? isPrivateIp(mapped[1]!) : false
+    const embedded = mapped?.[1]
+    return embedded === undefined ? false : isPrivateIp(embedded)
   }
   const parts = ip.split('.').map(Number)
   if (parts.length !== 4 || parts.some(n => !Number.isInteger(n) || n < 0 || n > 255)) return true

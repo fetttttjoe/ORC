@@ -47,7 +47,7 @@ const WriteInputDescriptions = z.object({ properties: z.record(z.string(), z.obj
 describe('memory tools', () => {
   it('declares four tools; memory_write routes to the store with the bound author', async () => {
     const { store, written } = fakeStore()
-    const tools = memoryTools(store, { source: 'agent', executor: 'api-loop', model: 'opus', role: 'review' })
+    const tools = memoryTools({ store, author: { source: 'agent', executor: 'api-loop', model: 'opus', role: 'review' } })
     expect(tools.map(t => t.name).sort()).toEqual(['memory_neighbors', 'memory_read', 'memory_search', 'memory_write'])
     // the exported read subset pins to the real surface — rename a tool and this fails HERE,
     // in the owning package, not silently in a consumer's filter (orc mcp serve)
@@ -82,7 +82,7 @@ describe('memory tools', () => {
 
   it('memory_write passes omissions through raw (no injected defaults) and surfaces lint warnings', async () => {
     const { store, written } = fakeStore()
-    const tools = memoryTools(store, { source: 'agent' })
+    const tools = memoryTools({ store, author: { source: 'agent' } })
     const write = tools.find(t => t.name === 'memory_write')!
     // an omitted body must reach the gateway as an OMISSION — a defaulted '' here would turn
     // every partial update into a destructive clear (the graph-refresh body-wipe, tool edition)
@@ -102,7 +102,7 @@ describe('memory tools', () => {
 
   it('memory_write derives an idempotency key from runToken + toolCallId; none without them', async () => {
     const { store, written } = fakeStore()
-    const bound = memoryTools(store, { source: 'agent', runToken: 'step:t1:s1:a1' })
+    const bound = memoryTools({ store, author: { source: 'agent', runToken: 'step:t1:s1:a1' } })
     const write = bound.find(t => t.name === 'memory_write')!
     await write.execute({ id: 'auth', title: 'Auth' }, 'call_9')
     expect(written[0]?.idempotencyKey).toBe('step:t1:s1:a1:tool:call_9:memory:auth')
@@ -113,7 +113,7 @@ describe('memory tools', () => {
 
   it('memory_write without id derives the title slug — same finding, one id', async () => {
     const { store } = fakeStore()
-    const write = memoryTools(store, { source: 'cli' }).find(t => t.name === 'memory_write')!
+    const write = memoryTools({ store, author: { source: 'cli' } }).find(t => t.name === 'memory_write')!
     const w1 = await write.execute({ title: 'Approval Gate Mechanism', summary: 'v1' })
     const w2 = await write.execute({ title: 'Approval Gate Mechanism!', summary: 'v2' })
     expect(w1.isError).toBe(false)
@@ -123,7 +123,7 @@ describe('memory tools', () => {
 
   it('memory_write without id and an unsluggable title fails naming the fix, not the CLI-flavored message', async () => {
     const { store } = fakeStore()
-    const write = memoryTools(store, { source: 'cli' }).find(t => t.name === 'memory_write')!
+    const write = memoryTools({ store, author: { source: 'cli' } }).find(t => t.name === 'memory_write')!
     const r = await write.execute({ title: '—' })
     expect(r.isError).toBe(true)
     expect(r.output).toMatchObject({ error: expect.stringMatching(/pass an explicit id/) })
@@ -134,7 +134,7 @@ describe('memory tools', () => {
   // notes that were never authored. Reported, not refused, so hub-before-leaves stays writable.
   it('memory_write names the links that resolve to no note, in the result the agent reads', async () => {
     const { store } = fakeStore({ get: async id => (id === 'exists' ? toNote({ id: 'exists', title: 'E', body: 'b' }) : null) })
-    const write = memoryTools(store, { source: 'cli' }).find(t => t.name === 'memory_write')!
+    const write = memoryTools({ store, author: { source: 'cli' } }).find(t => t.name === 'memory_write')!
     const r = await write.execute({
       id: 'hub', title: 'Hub', summary: 'a hub', tier: NOTE_TIER.semantic, kind: NOTE_KIND.architecture_current,
       categories: ['subsystem'],
@@ -148,7 +148,7 @@ describe('memory tools', () => {
 
   it('memory_write stays quiet when every link resolves', async () => {
     const { store } = fakeStore() // fakeStore.get always resolves
-    const write = memoryTools(store, { source: 'cli' }).find(t => t.name === 'memory_write')!
+    const write = memoryTools({ store, author: { source: 'cli' } }).find(t => t.name === 'memory_write')!
     const r = await write.execute({
       id: 'hub', title: 'Hub', summary: 'a hub', tier: NOTE_TIER.semantic, kind: NOTE_KIND.architecture_current,
       categories: ['subsystem'], links: [{ id: 'auth', kind: LINK_KIND.decomposes_into }],
@@ -158,7 +158,7 @@ describe('memory tools', () => {
 
   it('budgets search results and reports truncation with a next hint', async () => {
     const { store } = fakeStore({ search: async () => Array.from({ length: 8 }, (_, i) => summary(`n${i}`, `T${i}`)) })
-    const search = memoryTools(store, { source: 'cli' }).find(t => t.name === 'memory_search')!
+    const search = memoryTools({ store, author: { source: 'cli' } }).find(t => t.name === 'memory_search')!
     const r = await search.execute({ query: 'x', detail_level: 'minimal' })
     expect(r.output).toMatchObject({ truncated: true, omitted: 3 })
     const out = SearchOutput.parse(r.output)
@@ -172,7 +172,7 @@ describe('memory tools', () => {
       tags: Array(50).fill('x'.repeat(64)), hits: 0, lastAccessedAt: null,
     }))
     const { store } = fakeStore({ search: async () => bulky })
-    const search = memoryTools(store, { source: 'cli' }).find(t => t.name === 'memory_search')!
+    const search = memoryTools({ store, author: { source: 'cli' } }).find(t => t.name === 'memory_search')!
     const result = await search.execute({ query: 'x', budget: 10 })
     const output = BudgetOutput.parse(result.output)
     expect(output.notes).toHaveLength(1)
@@ -181,7 +181,7 @@ describe('memory tools', () => {
 
   it('memory_neighbors traverses from a seed and returns ranked neighbours', async () => {
     const { store } = fakeStore({ neighbors: async () => [{ id: 'b', title: 'B', summary: 's', via: 'supersedes', depth: 1, score: 1, direction: 'out', activation: 0 }] })
-    const nb = memoryTools(store, { source: 'cli' }).find(t => t.name === 'memory_neighbors')!
+    const nb = memoryTools({ store, author: { source: 'cli' } }).find(t => t.name === 'memory_neighbors')!
     const r = await nb.execute({ seed: 'a' })
     const out = NeighborsOutput.parse(r.output)
     expect(out.neighbors[0]?.via).toBe('supersedes')
@@ -189,7 +189,7 @@ describe('memory tools', () => {
 
   it('memory_read always truncates the body to the budget', async () => {
     const { store } = fakeStore({ get: async () => toNote({ id: 'auth', title: 'Auth', body: 'x'.repeat(400) }) })
-    const read = memoryTools(store, { source: 'cli' }).find(t => t.name === 'memory_read')!
+    const read = memoryTools({ store, author: { source: 'cli' } }).find(t => t.name === 'memory_read')!
     const r = await read.execute({ id: 'auth', budget: 10 })
     const out = ReadOutput.parse(r.output)
     expect(out.note.body.length).toBeLessThanOrEqual(40)
@@ -202,7 +202,7 @@ describe('memory tools', () => {
       rules: Array.from({ length: 1_000 }, (_, i) => `rule-${i}-${'x'.repeat(100)}`),
     }
     const { store } = fakeStore({ get: async () => oversized })
-    const read = memoryTools(store, { source: 'cli' }).find(t => t.name === 'memory_read')!
+    const read = memoryTools({ store, author: { source: 'cli' } }).find(t => t.name === 'memory_read')!
     const result = await read.execute({ id: 'auth', budget: 1 })
 
     expect(result.output).toMatchObject({ truncated: true })
@@ -212,7 +212,7 @@ describe('memory tools', () => {
   it('memory_neighbors passes scope through to the store', async () => {
     let seen: { scope?: string } | undefined
     const { store } = fakeStore({ neighbors: async (_seed, opts) => { seen = opts; return [] } })
-    const nb = memoryTools(store, { source: 'cli' }).find(t => t.name === 'memory_neighbors')!
+    const nb = memoryTools({ store, author: { source: 'cli' } }).find(t => t.name === 'memory_neighbors')!
     const r = await nb.execute({ seed: 'net-topology', scope: 'infra' })
     expect(seen?.scope).toBe('infra')
     // zero-result absence epistemics (E-i): empty is "no note matched", not "no such decision"
@@ -221,7 +221,7 @@ describe('memory tools', () => {
 
   it('memory_search with no matches includes the same absence-epistemics note', async () => {
     const { store } = fakeStore({ search: async () => [] })
-    const search = memoryTools(store, { source: 'cli' }).find(t => t.name === 'memory_search')!
+    const search = memoryTools({ store, author: { source: 'cli' } }).find(t => t.name === 'memory_search')!
     const r = await search.execute({ query: 'nope' })
     expect(r.output).toMatchObject({ note: "no note matched — absence is not proof a decision doesn't exist" })
   })
@@ -231,23 +231,23 @@ describe('memory tools', () => {
   // failure, or a search (which returns summaries the model may never read).
   it('a hit on memory_read records exactly one access; a miss and a failure record none', async () => {
     const { store, accessed } = fakeStore()
-    const read = memoryTools(store, { source: 'agent', executor: 'api-loop' }).find(t => t.name === 'memory_read')!
+    const read = memoryTools({ store, author: { source: 'agent', executor: 'api-loop' } }).find(t => t.name === 'memory_read')!
     await read.execute({ id: 'auth', scope: 'infra' })
     expect(accessed).toEqual([{ id: 'auth', scope: 'infra', mode: MEMORY_ACCESS.read, author: { source: 'agent', executor: 'api-loop' } }])
 
     const miss = fakeStore({ get: async () => null })
-    await memoryTools(miss.store, { source: 'cli' }).find(t => t.name === 'memory_read')!.execute({ id: 'nope' })
+    await memoryTools({ store: miss.store, author: { source: 'cli' } }).find(t => t.name === 'memory_read')!.execute({ id: 'nope' })
     expect(miss.accessed).toHaveLength(0)
 
     const boom = fakeStore({ get: async () => { throw new Error('surreal down') } })
-    const r = await memoryTools(boom.store, { source: 'cli' }).find(t => t.name === 'memory_read')!.execute({ id: 'auth' })
+    const r = await memoryTools({ store: boom.store, author: { source: 'cli' } }).find(t => t.name === 'memory_read')!.execute({ id: 'auth' })
     expect(r.isError).toBe(true)
     expect(boom.accessed).toHaveLength(0)
   })
 
   it('memory_read with via forwards opts.via — the traversed edge strengthens alongside the node', async () => {
     const { store, accessed } = fakeStore()
-    const read = memoryTools(store, { source: 'cli' }).find(t => t.name === 'memory_read')!
+    const read = memoryTools({ store, author: { source: 'cli' } }).find(t => t.name === 'memory_read')!
     const via: AccessVia = { seed: 'net-topology', kind: 'supersedes', direction: 'out' }
     await read.execute({ id: 'auth', via })
     expect(accessed).toEqual([{ id: 'auth', scope: undefined, mode: MEMORY_ACCESS.read, author: { source: 'cli' }, via }])
@@ -255,37 +255,37 @@ describe('memory tools', () => {
 
   it('memory_search records no access — a summary list is not a read', async () => {
     const { store, accessed } = fakeStore()
-    await memoryTools(store, { source: 'cli' }).find(t => t.name === 'memory_search')!.execute({ query: 'auth' })
+    await memoryTools({ store, author: { source: 'cli' } }).find(t => t.name === 'memory_search')!.execute({ query: 'auth' })
     expect(accessed).toHaveLength(0)
   })
 
   it('memory_neighbors records one traversal against the seed, and none when nothing came back', async () => {
     const hit = fakeStore({ neighbors: async () => [{ id: 'b', title: 'B', summary: 's', via: 'supersedes', depth: 1, score: 1, direction: 'out', activation: 0 }] })
-    await memoryTools(hit.store, { source: 'cli' }).find(t => t.name === 'memory_neighbors')!.execute({ seed: 'a' })
+    await memoryTools({ store: hit.store, author: { source: 'cli' } }).find(t => t.name === 'memory_neighbors')!.execute({ seed: 'a' })
     expect(hit.accessed).toEqual([{ id: 'a', scope: undefined, mode: MEMORY_ACCESS.neighbors, author: { source: 'cli' } }])
 
     const empty = fakeStore({ neighbors: async () => [] })
-    await memoryTools(empty.store, { source: 'cli' }).find(t => t.name === 'memory_neighbors')!.execute({ seed: 'a' })
+    await memoryTools({ store: empty.store, author: { source: 'cli' } }).find(t => t.name === 'memory_neighbors')!.execute({ seed: 'a' })
     expect(empty.accessed).toHaveLength(0)
   })
 
   it('scout tier narrows the tool surface (authors notes, but never traverses); auditor keeps the full set', () => {
     const { store } = fakeStore()
-    const scoutNames = memoryTools(store, { source: 'cli' }, 'scout').map(t => t.name).sort()
+    const scoutNames = memoryTools({ store, author: { source: 'cli' }, role: 'scout' }).map(t => t.name).sort()
     expect(scoutNames).toEqual(['memory_read', 'memory_search', 'memory_write'])
     expect(scoutNames).not.toContain('memory_neighbors') // deliberate narrowing: scout seeds the graph, doesn't traverse it
-    expect(memoryTools(store, { source: 'cli' }, 'auditor').map(t => t.name)).toContain('memory_neighbors')
+    expect(memoryTools({ store, author: { source: 'cli' }, role: 'auditor' }).map(t => t.name)).toContain('memory_neighbors')
   })
 
   it('scout tier appends the provisional-epistemics fragment to its three tools', () => {
     const { store } = fakeStore()
-    const tools = memoryTools(store, { source: 'cli' }, 'scout')
+    const tools = memoryTools({ store, author: { source: 'cli' }, role: 'scout' })
     for (const t of tools) expect(t.description).toContain('provisional')
   })
 
   it('auditor tier appends the traverse-before-asserting fragment to the full surface', () => {
     const { store } = fakeStore()
-    const tools = memoryTools(store, { source: 'cli' }, 'auditor')
+    const tools = memoryTools({ store, author: { source: 'cli' }, role: 'auditor' })
     expect(tools).toHaveLength(4)
     for (const t of tools) expect(t.description).toContain('contradicts/supersedes before asserting')
   })
@@ -297,7 +297,7 @@ describe('memory tools', () => {
   // changed tool surface to the model. Pin the surface against literals instead.
   it('verify tier carries the full tool set with NO epistemics fragment appended', () => {
     const { store } = fakeStore()
-    const tools = memoryTools(store, { source: 'cli' })
+    const tools = memoryTools({ store, author: { source: 'cli' } })
     expect(tools.map(t => t.name)).toEqual(['memory_write', 'memory_search', 'memory_read', 'memory_neighbors'])
     // the exact shipped descriptions — scout/auditor append to these, verify must not
     expect(tools.find(t => t.name === 'memory_write')?.description).toBe(
@@ -319,7 +319,7 @@ describe('memory tools', () => {
 
   it('memory_write advertises the same collection and text limits it enforces', () => {
     const { store } = fakeStore()
-    const write = memoryTools(store, { source: 'cli' }).find(t => t.name === 'memory_write')!
+    const write = memoryTools({ store, author: { source: 'cli' } }).find(t => t.name === 'memory_write')!
     const props = WriteInputProps.parse(write.inputSchema).properties
     expect(props.categories).toMatchObject({
       maxItems: MEMORY_LIMITS.labelItems,
@@ -346,7 +346,7 @@ describe('memory tools', () => {
   // so it has to say that the field is the ONLY queryable home for it, on every kind.
   it('memory_write tells the model to put citations in sources, not in the body prose', () => {
     const { store } = fakeStore()
-    const write = memoryTools(store, { source: 'cli' }).find(t => t.name === 'memory_write')!
+    const write = memoryTools({ store, author: { source: 'cli' } }).find(t => t.name === 'memory_write')!
     const props = WriteInputDescriptions.parse(write.inputSchema).properties
     const sources = props.sources?.description ?? ''
     expect(sources).toContain('not in a references section inside body')
@@ -359,7 +359,7 @@ describe('memory tools', () => {
   // mirror ReadInput's zod shape exactly (required trio seed/kind/direction).
   it('memory_read advertises the via object the model builds from a memory_neighbors row', () => {
     const { store } = fakeStore()
-    const read = memoryTools(store, { source: 'cli' }).find(t => t.name === 'memory_read')!
+    const read = memoryTools({ store, author: { source: 'cli' } }).find(t => t.name === 'memory_read')!
     const props = WriteInputProps.parse(read.inputSchema).properties
     const via = z.object({
       type: z.literal('object'),
@@ -377,7 +377,7 @@ describe('memory tools', () => {
 
   it('memory_write advertises rationale/uncertainty so a model can discover and set them', () => {
     const { store } = fakeStore()
-    const write = memoryTools(store, { source: 'cli' }).find(t => t.name === 'memory_write')!
+    const write = memoryTools({ store, author: { source: 'cli' } }).find(t => t.name === 'memory_write')!
     const props = WriteInputProps.parse(write.inputSchema).properties
     expect(props.rationale).toMatchObject({ type: 'string' })
     expect(props.uncertainty).toMatchObject({ type: 'array', items: { type: 'string' } })
@@ -388,7 +388,7 @@ describe('drift on memory_read', () => {
   const note = (over: Partial<MemoryNoteDraft> = {}): MemoryNote =>
     toNote({ id: 'auth', title: 'Auth', body: 'b', paths: ['src/auth.ts'], ...over })
   const readTool = (get: () => Promise<MemoryNote>, changed: ReadonlySet<string> | null) =>
-    memoryTools(fakeStore({ get: async () => await get() }).store, { source: 'agent' }, undefined, async () => changed)
+    memoryTools({ store: fakeStore({ get: async () => await get() }).store, author: { source: 'agent' }, changedSince: async () => changed })
       .find(t => t.name === 'memory_read')!
 
   const Read = z.object({ drifted: z.boolean().optional(), next: z.string().optional() })
@@ -411,7 +411,7 @@ describe('drift on memory_read', () => {
   })
 
   it('is absent entirely when no probe is wired, so existing callers are unchanged', async () => {
-    const tools = memoryTools(fakeStore().store, { source: 'agent' })
+    const tools = memoryTools({ store: fakeStore().store, author: { source: 'agent' } })
     const r = await tools.find(t => t.name === 'memory_read')!.execute({ id: 'auth' }, 'c1')
     expect(Read.parse(r.output).drifted).toBeUndefined()
   })

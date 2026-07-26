@@ -1,7 +1,7 @@
 import { isDeepStrictEqual } from 'node:util'
 import pg from 'pg'
 import { and, asc, count, desc, eq, gt, inArray, sql } from 'drizzle-orm'
-import { errorMessage, EventInput, PAYLOAD_SCHEMAS, type EventKind, type EventRecord } from '@orc/contracts'
+import { errorMessage, EVENT_KIND, EventInput, PAYLOAD_SCHEMAS, type EventKind, type EventRecord } from '@orc/contracts'
 import { events } from '../schema'
 import { KERNEL_ERROR_CODE, KernelError } from '../errors'
 import type { Redactor } from '../redact'
@@ -30,6 +30,10 @@ export interface EventLogOps {
   byTask(taskId: string): Promise<EventRecord[]>
   byTaskSince(taskId: string, afterSeq: number): Promise<EventRecord[]>
   after(afterSeq: number, kinds?: EventKind[]): Promise<EventRecord[]>
+  // The newest memory_written/memory_deleted naming this note, or null. A memory_written result is
+  // the note's current state; a memory_deleted means it has none. Indexed (0004), so a merge base
+  // costs one row instead of a fold of every memory event ever written.
+  latestNoteEvent(scope: string, id: string): Promise<EventRecord | null>
   // Oldest surviving seq for this project, or 0 when the log is empty. A cached reader compares it
   // against what it still believes in: history only moves forward when it was TRUNCATED (purge,
   // delete chat), which no event announces.
@@ -112,6 +116,16 @@ const makeOps = (db: Queryable, ctx: LogContext): EventLogOps => {
       const rows = await db.select().from(events).where(scoped).orderBy(asc(events.seq))
       return rows.map(toRecord)
     },
+    async latestNoteEvent(scope, id) {
+      // expressions mirror idx_events_note_seq exactly — see drizzle/0004
+      const rows = await db.select().from(events).where(and(
+        scoped,
+        inArray(events.kind, [EVENT_KIND.memory_written, EVENT_KIND.memory_deleted]),
+        sql`coalesce(${events.payload}->'note'->>'scope', ${events.payload}->>'scope') = ${scope}`,
+        sql`coalesce(${events.payload}->'note'->>'id', ${events.payload}->>'id') = ${id}`,
+      )).orderBy(desc(events.seq)).limit(1)
+      return rows[0] ? toRecord(rows[0]) : null
+    },
   }
 }
 
@@ -154,6 +168,9 @@ export class EventLog implements EventLogOps {
   }
   all(): Promise<EventRecord[]> {
     return this.ops.all()
+  }
+  latestNoteEvent(scope: string, id: string): Promise<EventRecord | null> {
+    return this.ops.latestNoteEvent(scope, id)
   }
 
   // events with seq > afterSeq, counted in SQL — health probes must not materialize payloads
@@ -226,7 +243,7 @@ export class EventLog implements EventLogOps {
     }
     const scheduleReconnect = (): void => {
       if (closed || reconnectTimer !== null) return
-      const delay = RECONNECT_DELAYS_MS[Math.min(backoff, RECONNECT_DELAYS_MS.length - 1)]!
+      const delay = RECONNECT_DELAYS_MS[Math.min(backoff, RECONNECT_DELAYS_MS.length - 1)] ?? RECONNECT_DELAYS_MS[0]
       backoff += 1
       reconnectTimer = setTimeout(() => {
         reconnectTimer = null

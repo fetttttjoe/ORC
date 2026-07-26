@@ -1,12 +1,16 @@
-import { EVENT_KIND, foldLiveNotes, MemoryNoteInput, MemoryScope, NOTE_TIER, noteKey, type MemoryAuthor, type MemoryFilter, type MemorySearchOpts, type MemoryNote, type MemoryStore, type NoteSummary } from '@orc/contracts'
+import { EVENT_KIND, MemoryNoteInput, MemoryScope, MemoryWrittenPayload, NOTE_TIER, type MemoryAuthor, type MemoryFilter, type MemorySearchOpts, type MemoryNote, type MemoryStore, type NoteSummary } from '@orc/contracts'
 import { KERNEL_ERROR_CODE, KernelError, type EventLog } from '@orc/kernel'
 import type { SurrealMemory } from './surreal'
 
 // The single writer (spec RM5). Writes are event-first appends — like every append they
 // serialize on the per-project advisory lock; the projector applies to SurrealDB. Reads
 // hit SurrealDB directly.
-export function createMemoryStore(opts: { log: EventLog; surreal: SurrealMemory; sourceRevision?: string | null; halfLifeDays?: number }): MemoryStore {
+// `sourceRevision` is a PROVIDER, not a value: resolving it shells out to git, and only a write
+// consumes it — every read path would otherwise pay a subprocess spawn for a field it never reads.
+export function createMemoryStore(opts: { log: EventLog; surreal: SurrealMemory; sourceRevision?: () => Promise<string | null>; halfLifeDays?: number }): MemoryStore {
   const { log, surreal } = opts
+  let revision: Promise<string | null> | undefined
+  const sourceRevision = (): Promise<string | null> => (revision ??= opts.sourceRevision?.() ?? Promise.resolve(null))
   return {
     async write(input, author, writeOpts) {
       // merge-on-omit upsert: fields the writer did not supply carry the previous revision's
@@ -17,29 +21,36 @@ export function createMemoryStore(opts: { log: EventLog; surreal: SurrealMemory;
       // stripped by the schema parse.
       const supplied = Object.fromEntries(Object.entries(input).filter(([, v]) => v !== undefined))
       const scope = typeof supplied.scope === 'string' ? supplied.scope : MemoryScope.project
-      // Author truth from truth: fold the merge base from the EVENT LOG inside the append
-      // transaction, never from the async projection. Two writes to one note inside the projector's
-      // flush window otherwise merge against a stale base and append REGRESSED field values into the
-      // canonical log itself — corruption every rebuild faithfully reproduces (the projection heals;
-      // the log does not). read + merge + append are atomic under the project advisory lock.
-      // ponytail: folds the whole memory-event history per write — fine for a hand-authored graph;
-      // add a (scope,id)-indexed read if the corpus ever makes this hot.
+      // resolved BEFORE the transaction: a git spawn must never run inside the project write lock
+      const stampedRevision = await sourceRevision()
+      // Merge base from the EVENT LOG inside the append transaction, never from the async
+      // projection. Two writes to one note inside the projector's flush window would otherwise merge
+      // against a stale base and append REGRESSED field values into the canonical log — corruption
+      // every rebuild faithfully reproduces (the projection heals; the log does not). read + merge +
+      // append are atomic under the project advisory lock.
+      //
+      // ONE indexed row, not a fold of every memory event: this runs while holding the per-project
+      // lock, which serializes every other writer in the project, and ambient capture now writes a
+      // note per step — so a scan here would grow with exactly the thing the graph is meant to do.
       const note = await log.transaction(async tx => {
-        const existing = typeof input.id === 'string'
-          ? foldLiveNotes(await tx.after(0, [EVENT_KIND.memory_written, EVENT_KIND.memory_deleted])).get(noteKey(scope, input.id))?.note ?? null
+        const latest = typeof input.id === 'string' ? await tx.latestNoteEvent(scope, input.id) : null
+        const written = latest?.kind === EVENT_KIND.memory_written
+          ? MemoryWrittenPayload.safeParse(latest.payload)
           : null
+        const existing = written?.success ? written.data.note : null
         const parsed = MemoryNoteInput.parse(existing ? { ...existing, ...supplied } : input) // reject malformed BEFORE appending
         // the gateway stamps the runtime's Git revision — agents cannot claim another one
-        const merged = { ...parsed, sourceRevision: opts.sourceRevision ?? null }
+        const merged = { ...parsed, sourceRevision: stampedRevision }
         try {
           await tx.append({
             taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_written,
             payload: { note: merged, author }, idempotencyKey: writeOpts?.idempotencyKey ?? null,
           })
         } catch (err) {
-          // A keyed replay whose payload differs only in the gateway stamp (a new HEAD after a
-          // restart) is still the SAME tool call: the first committed write stands, this one
-          // must not fail the surrounding operation.
+          // A key identifies one tool call, so a keyed replay is that call arriving twice and the
+          // FIRST committed write stands — whatever the replay's payload says. In practice they
+          // differ only by the gateway's HEAD stamp (a restart moved it), but the rule is the key,
+          // not the diff: this must not fail the surrounding operation either way.
           const conflicted = writeOpts?.idempotencyKey
             && err instanceof KernelError && err.code === KERNEL_ERROR_CODE.idempotency_conflict
           if (!conflicted) throw err

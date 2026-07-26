@@ -309,19 +309,29 @@ makes it worth keeping.
 
 ## Execution flow — one step, durably
 
+A client never starts a run. It **records the ask** and watches the stream; the supervisor's signal
+router turns that ask into a workflow. This is what lets a run outlive the terminal that asked for
+it (`ctrl-c` ends the watch, `orc cancel` ends the run).
+
 ```mermaid
 sequenceDiagram
-  participant U as User (CLI)
+  participant U as User (CLI / web / MCP)
   participant K as Kernel
+  participant L as EventLog (Postgres)
+  participant R as Signal router (supervisor)
   participant D as DBOS port
   participant X as api-loop executor
-  participant L as EventLog (Postgres)
+  participant Y as StepMemory
   participant M as Model/Tool
 
   U->>K: orc run <task>
-  K->>D: startRun (deterministic workflow id)
+  K->>L: run_requested (the ask, nothing more)
+  L-->>R: LISTEN/NOTIFY
+  R->>D: startRunAt (deterministic workflow id)
   D->>L: run_started + status→running (idempotent keys)
   D->>X: startTurn(ctx)
+  X->>Y: recall(budget) — inside ctx.checkpoint
+  Y->>L: memory_accessed{mode:preload} per surfaced note
   loop each iteration
     X->>D: ctx.operation(spec, fn)
     D->>L: beginOperation → operation_started + journal row (BEFORE the effect)
@@ -329,10 +339,35 @@ sequenceDiagram
     D->>L: completeOperation → operation_completed + agent_call/tool_* (ONE transaction)
   end
   X->>D: signal(success, outputs)
+  X->>Y: capture(signal)
+  Y->>L: memory_written (episodic step note, linked to deps + what it read)
   D->>D: verifyArtifacts(workspace, outputs)
   D->>L: artifact_produced* + step_completed (ONE transaction)
   L-->>U: live tail via LISTEN/NOTIFY subscription
 ```
+
+### Step memory — the one seam
+
+Everything a running step does to the knowledge graph goes through `StepMemory`
+(`contracts/execution.ts`), bound per step by the composition root from `plugins/memory`'s
+`bindStepMemory`. The executor decides only **when**: `recall` before the first prompt (wrapped in
+`ctx.checkpoint`, so a replay reuses the recorded notes), `capture` after the signal. What is
+searched, recorded, written and linked is the memory domain's business — the executor holds no store
+handle and never drives a model-facing memory tool itself.
+
+Two consequences the graph depends on:
+
+- **`recall` records what it surfaced** (`memory_accessed{mode: 'preload'}`). `memory_search` records
+  nothing by design, so without this the retrieval path that runs on *every* step earned no
+  activation and left no provenance for consolidation.
+- **`capture` writes edges, not just a node**: `depends_on` the ambient notes of the steps this one
+  consumed, `derived_from` every durable note it actually pulled. Both resolve under
+  `linkLookupScopes`, so a run wires itself into the graph instead of adding isolated nodes.
+
+`recall` is scoped to `linkLookupScopes(planScope(taskId))` — durable project knowledge plus this
+task's own plan scope — and that scope reaches the **query**, never a post-filter: the semantic arm
+ranks over the whole table and truncates, so filtering afterwards would let one busy project's plan
+notes occupy every slot.
 
 A crash between `operation_started` and completion leaves an **unresolved node** — visible in
 `orc status`, `orc replay`, and `vault/tasks/<id>/execution.md`. Recovery reuses completed
@@ -412,13 +447,14 @@ Door discipline, stated precisely:
 | `kernel/storage/operation-journal` | Durable before/after nodes (begin/complete/fail), rebuild-from-log; transitions append through the `EventLog` in the same locked transaction | Model/tool specifics; the checkpoint machinery (that's the port) |
 | `kernel/storage/migrate` | Explicit `migrateDatabase`; `assertMigrated` fails loudly when a database is behind | Migrating implicitly at open time |
 | `kernel/redact` | The single storage-boundary normalizer: NUL strip + secret redaction (keys and values) | Being called anywhere except append/journal storage |
-| `kernel/projections` | `fold(events) → State`, `applyOperationEvent` (shared by live journal and rebuild), crash dedup | Persisting anything |
+| `kernel/projections` | `fold(events) → State` as a reduce over `foldInto` (one event, one accumulator), `applyOperationEvent` (shared by live journal and rebuild), crash dedup | Persisting anything |
+| `kernel/live-state` | `openLiveState(log)` — a subscription-maintained `State` index, re-seeded when the log is truncated or replaced. Serves advisory reads (budget chain, "is anything running") | Reads that decide a write — those stay inside `log.transaction` |
 | `kernel/kernel.ts` | Atomic task/plan lifecycle, feedback outbox events, plan-hash-bound human approval over the log | Execution |
 | `kernel/dbos-port` | Durable run/step workflows, `ctx.checkpoint` and `ctx.operation` wrappers, retry policy, queue partitioning, cancellation cascade, output receipt commit | Model/tool specifics (executor's job), plan authoring |
 | `kernel/signal-router` | Resolving splits, starting approved children, and live/startup delivery of committed feedback | Composing plans, executing steps |
 | `kernel/plugins/*` | Registry + propose-time ref validation (`host`), fingerprint trust store (`trust`), SKILL.md indexing (`skills`), T2 extension loading | Runtime tool execution (that's the hub/executor) |
-| `plugins/executor-api-loop` | The model⇄tool loop, prompt assembly (incl. knowledge protocol), signal/output pre-flight, per-call operation journaling | Durability (delegates to ctx), trust, receipts |
-| `plugins/memory` | Event-first note store (gateway stamps git revision), transactional Surreal projection, per-project database boundary, knowledge tools + degraded variants, `vault/memory/**` rebuild | Being authoritative — Surreal and vault/memory are disposable |
+| `plugins/executor-api-loop` | The model⇄tool loop, prompt assembly (incl. knowledge protocol + the recalled-context block), signal/output pre-flight, per-call operation journaling | Durability (delegates to ctx), trust, receipts, **what to remember** (delegates to `ctx.memory`) |
+| `plugins/memory` | Event-first note store (gateway stamps git revision, resolved lazily), transactional Surreal projection + edge materialization, per-project database boundary, hybrid (vector⊕keyword) retrieval with activation re-ranking, the `StepMemory` binding (recall/capture, ambient edges), consolidation lifecycle, drift probe, TTL + cancel sweeps, `vault/memory/**` rebuild | Being authoritative — Surreal and vault/memory are disposable |
 | `packages/vault-projector` | Deterministic markdown/mermaid renders of tasks, execution, lineage, task expansion; coalesced live re-render | Truth of any kind; whole-log scans |
 | `packages/cli` | Pre-bootstrap help/init/migrate, command surface, project discovery, startup/shutdown order, degraded-memory wiring | Business rules (kernel's job) |
 | `packages/ui-core` | Transport-free UI core: `ProjectSessions` (live folds, graph patches, transcripts, log rows), `OrcActions` interface, the copilot toolset + `asResolvedTools` door-#2 bridge | Any transport (HTTP/SSE/stdio are adapters' jobs), any DOM |
@@ -430,6 +466,11 @@ Door discipline, stated precisely:
 `orc init` mints `projectId` into the git-ignored `.orc/identity.json` (the committable
 `.orc/config.json` carries settings only). Everything derives:
 
+- **parallelism ceiling** — three limits stack, and only the first is a setting: `concurrency`
+  (default 3) caps concurrent steps **per depth**; the run workflow schedules in dependency waves
+  and awaits each wave whole (DBOS binds child workflows positionally, so launch order must be a
+  pure function of `(plan, done, failed)`); and Phase 1 admits one supervisor per project because
+  the zone write-fence is an in-process map. `orc serve` prints all three at startup
 - events/operations rows carry `project_id`; every query filters on it
 - the per-project advisory lock serializes writers within a project only
 - execution belongs to a **supervisor** (`orc serve`), not to the command that asked for a run: a

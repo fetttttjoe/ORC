@@ -106,7 +106,7 @@ const idSchema = { type: 'string', pattern: '^[a-z0-9][a-z0-9-]*$' }
 export function unavailableMemoryTools(reason: string): ResolvedTool[] {
   const fail = async (): Promise<never> => { throw new Error(`memory unavailable: ${reason}`) }
   const store: MemoryStore = { write: fail, remove: fail, get: fail, list: fail, search: fail, neighbors: fail, recordAccess: fail }
-  return memoryTools(store, { source: 'agent' })
+  return memoryTools({ store, author: { source: 'agent' } })
 }
 
 // The read-only subset of the memory surface. Names now live in contracts (MEMORY_TOOL_NAME) —
@@ -123,7 +123,17 @@ export const MEMORY_READ_TOOLS = [MEMORY_TOOL_NAME.search, MEMORY_TOOL_NAME.read
 //    because a scout seeds the graph, it doesn't traverse a rich one yet. Provisional-epistemics
 //    fragment applies to all three tools.
 //  - auditor: the full surface, with the traverse-before-asserting fragment.
-export function memoryTools(store: MemoryStore, author: MemoryAuthor, role: MemoryRole = MEMORY_ROLE.verify, changedSince?: ChangedSince): ResolvedTool[] {
+export function memoryTools(opts: {
+  store: MemoryStore
+  author: MemoryAuthor
+  role?: MemoryRole
+  changedSince?: ChangedSince
+  // Lanes the model's own search is confined to (contracts taskLaneScopes). Undefined = the whole
+  // graph, which is what an external browser (orc mcp serve) wants and a running step does not.
+  searchScope?: readonly string[]
+}): ResolvedTool[] {
+  const { store, author, changedSince, searchScope } = opts
+  const role = opts.role ?? MEMORY_ROLE.verify
   const tools: ResolvedTool[] = [
     {
       ref: 'memory/write', name: MEMORY_TOOL_NAME.write,
@@ -235,7 +245,8 @@ export function memoryTools(store: MemoryStore, author: MemoryAuthor, role: Memo
         try {
           const q = SearchInput.parse(input)
           const limit = q.limit ?? (q.detail_level === 'minimal' ? 5 : 20)
-          const r = applyBudget(await store.search(q.query, { category: q.category, tag: q.tag }, { mode: q.mode }), n => JSON.stringify(n), { limit, budget: q.budget })
+          const filter = { category: q.category, tag: q.tag, ...(searchScope && { scope: [...searchScope] }) }
+          const r = applyBudget(await store.search(q.query, filter, { mode: q.mode }), n => JSON.stringify(n), { limit, budget: q.budget })
           return ok(MemorySearchResult.parse({
             notes: r.items, truncated: r.truncated, omitted: r.omitted,
             ...(r.truncated && { next: 'refine the query, or memory_read/memory_neighbors a specific id' }),

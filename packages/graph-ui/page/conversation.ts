@@ -295,8 +295,10 @@ export class Conversation {
         title: 'open in inspector',
       }, Badge('working', 'accent'), el('span', { class: 'sys-line' }, line), el('span', { class: 'sys-seq' }, `#${row.seq}`))
     } else {
-      this.ticker.querySelector('.sys-line')!.textContent = line
-      this.ticker.querySelector('.sys-seq')!.textContent = `#${row.seq}`
+      const lineEl = this.ticker.querySelector('.sys-line')
+      const seqEl = this.ticker.querySelector('.sys-seq')
+      if (lineEl) lineEl.textContent = line
+      if (seqEl) seqEl.textContent = `#${row.seq}`
     }
     this.list.append(this.ticker) // re-append keeps it below the newest card
     this.scroll()
@@ -376,7 +378,7 @@ export class Conversation {
     const diagram = el('div', { class: 'diagram' })
     void mermaidInto(diagram, v.mermaid)
     // a one-step template is not a decomposition — say so instead of dressing it up
-    const single = v.waves.length === 1 && v.waves[0]!.steps.length === 1
+    const single = v.waves.length === 1 && v.waves[0]?.steps.length === 1
     const content = [
       el('div', { class: 'card-title' }, `plan v${v.version}`,
         single ? Badge('single-step template', 'muted') : Badge(`${v.waves.length} wave(s)`, 'accent')),
@@ -507,7 +509,7 @@ export class Conversation {
   }
 
   private trim(): void {
-    while (this.list.childElementCount > 300) this.list.firstElementChild!.remove()
+    while (this.list.childElementCount > 300) this.list.firstElementChild?.remove()
   }
 
   private scroll(): void {

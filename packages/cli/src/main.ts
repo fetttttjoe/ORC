@@ -3,8 +3,8 @@ import { spawn } from 'node:child_process'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { Command, InvalidArgumentError } from 'commander'
-import { EDGE_DIRECTION, EVENT_KIND, LINK_KINDS, MEMORY_ACCESS, NOTE_TIERS, NoteTier, parseLinkSpec, PlanDraft, RUN_OUTCOME, runOutcomeFor, STRATEGY, TASK_STATUS, LinkKind, slugId, type Analyzer, type TaskStatus, type RunOutcome, type EventRecord, type MemoryLink, type ExecutionPort, type Plan, formatModelRate } from '@orc/contracts'
-import { openStorage, Kernel, atomicWriteFileSync, claimSlot, fold, gatedChildren, liveSupervisors, staleSupervisors, subtreeTaskIds, grantExtensionTrust, grantMcpTrust, initializeProject, isExtensionTrusted, isMcpTrusted, loadConfig, loadTrust, migrateDatabase, requireProject, taskUsage, type EventLog, type OrcConfig, type PluginHost, type ProjectConfig, type Storage } from '@orc/kernel'
+import { EDGE_DIRECTION, EVENT_KIND, LINK_KINDS, MEMORY_ACCESS, NOTE_TIERS, NoteTier, parseLinkSpec, PlanDraft, RUN_OUTCOME, STRATEGY, TASK_STATUS, LinkKind, slugId, type Analyzer, type TaskStatus, type RunOutcome, type EventRecord, type MemoryLink, type ExecutionPort, type Plan, formatModelRate } from '@orc/contracts'
+import { openStorage, Kernel, atomicWriteFileSync, claimSlot, fold, gatedChildren, liveSupervisors, staleSupervisors, subtreeOutcome, subtreeTaskIds, grantExtensionTrust, grantMcpTrust, initializeProject, isExtensionTrusted, isMcpTrusted, loadConfig, loadTrust, migrateDatabase, requireProject, taskUsage, type EventLog, type OrcConfig, type PluginHost, type ProjectConfig, type Storage } from '@orc/kernel'
 import { createVaultProjector, parsePlanFile } from '@orc/vault-projector'
 import { consolidateTask, probeMemory, staleNotes, DEFAULT_SWEEP_DAYS } from '@orc/memory'
 import { openMemory } from './memory-open'
@@ -214,7 +214,7 @@ export async function watchSubtree(kernel: Kernel, taskId: string, since = 0): P
     if (lastSeen <= since) return
     for (const id of subtree)
       if (ACTIVE_TASK_STATUS.has(state.tasks.get(id)?.status ?? TASK_STATUS.draft)) return
-    settle({ parked: false, outcome: runOutcomeFor(state.tasks.get(taskId)?.status) })
+    settle({ parked: false, outcome: subtreeOutcome(state, taskId) })
   }
 
   // The OTHER thing that stops a run, and the only one that announces nothing: `task_split` honours
@@ -454,10 +454,11 @@ export function buildProgram(
       // drifts into another directory purges a project it never meant to touch — that is not
       // hypothetical, it destroyed a live run's history. Naming the project makes the caller
       // state its intent, and a drifted cwd fails loudly instead of deleting the wrong history.
-      const actual = plugin?.config.projectName
-      if (!actual) throw new Error('purging needs a project context')
+      const cfg = plugin?.config
+      if (!cfg?.projectName) throw new Error('purging needs a project context')
+      const actual = cfg.projectName
       if (projectName !== actual)
-        throw new Error(`refusing: this directory is project '${actual}' (${plugin!.config.dir}), not '${projectName}'`)
+        throw new Error(`refusing: this directory is project '${actual}' (${cfg.dir}), not '${projectName}'`)
       const r = await actions().purgeProject()
       console.log(`purged ${r.events} event(s), ${r.operations} operation(s) from '${actual}'`)
       for (const w of r.warnings) console.log(`warning: ${w}`)
@@ -470,11 +471,12 @@ export function buildProgram(
     .action(async (projectName: string) => {
       // named for the same reason purge is: the target comes from the cwd's config, so a script
       // in the wrong directory would otherwise delete a project it never meant to touch
-      const actual = plugin?.config.projectName
-      if (!actual) throw new Error('deleting a project needs a project context')
+      const cfg = plugin?.config
+      if (!cfg?.projectName) throw new Error('deleting a project needs a project context')
+      const actual = cfg.projectName
       if (projectName !== actual)
-        throw new Error(`refusing: this directory is project '${actual}' (${plugin!.config.dir}), not '${projectName}'`)
-      const r = await actions().deleteProject(plugin!.config.projectId)
+        throw new Error(`refusing: this directory is project '${actual}' (${cfg.dir}), not '${projectName}'`)
+      const r = await actions().deleteProject(cfg.projectId)
       console.log(`deleted '${actual}': ${r.events} event(s), ${r.operations} operation(s)`)
       for (const w of r.warnings) console.log(`warning: ${w}`)
     })
@@ -512,9 +514,11 @@ export function buildProgram(
       const all = await kernel.eventsFor(taskId)
       const at = opts.at ?? Number.POSITIVE_INFINITY
       const events = all.filter(e => e.seq <= at)
-      if (events.length === 0 && all.length > 0) {
+      const [first] = all
+      const last = all.at(-1)
+      if (events.length === 0 && first && last) {
         // an empty fold here is a footgun, not data: --at is below this task's first event
-        console.error(`no events for '${taskId}' at or before seq ${opts.at} — sequences are GLOBAL across the project log; this task's events span ${all[0]!.seq}..${all.at(-1)!.seq} (orc log ${taskId})`)
+        console.error(`no events for '${taskId}' at or before seq ${opts.at} — sequences are GLOBAL across the project log; this task's events span ${first.seq}..${last.seq} (orc log ${taskId})`)
         throw new CommandFailure(1) // already reported above — the entry point only sets the code
       }
       const state = fold(events)
@@ -690,6 +694,11 @@ export function buildProgram(
       // heartbeat row alone, never by this file's existence
       atomicWriteFileSync(servePidFile(config.dir), `${process.pid}\n`)
       console.log(`orc serve: ${executorId}  pid ${process.pid}  idle exit after ${opts.idle}m — ctrl-c to stop`)
+      // The parallelism ceiling, stated where an operator can act on it: steps run in dependency
+      // waves and the whole wave is awaited before the next is scheduled, so `concurrency` is the
+      // cap PER DEPTH, not per run. PHASE1_MAX_SLOTS is 1 because the zone write-fence is still an
+      // in-process map (plugins/executor-api-loop/src/tools.ts).
+      console.log(`  parallelism: ${config.concurrency} concurrent steps per depth (waves are awaited whole) · max depth ${config.maxDepth} · ${PHASE1_MAX_SLOTS} supervisor`)
       try {
         await runSupervisor({ storage, port, idleMs: opts.idle * 60_000 })
       } finally {
@@ -787,7 +796,8 @@ export function buildProgram(
       const { host } = needPlugin()
       for (const e of host.skills.list()) {
         const mark = e.valid ? 'ok     ' : 'INVALID'
-        const desc = e.valid ? (e.manifest!.description.length > 80 ? `${e.manifest!.description.slice(0, 77)}...` : e.manifest!.description) : e.errors.join('; ')
+        const summary = e.manifest?.description ?? e.errors.join('; ')
+        const desc = summary.length > 80 ? `${summary.slice(0, 77)}...` : summary
         console.log(`${mark} ${e.name.padEnd(24)} ${desc}`)
       }
     })

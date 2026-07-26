@@ -1,4 +1,4 @@
-import { RETENTION, foldAccessCounts, foldLiveNotes, foldWriteTimes, noteKey, type EventRecord } from '@orc/contracts'
+import { RETENTION, foldMemory, noteKey, type EventRecord, type MemoryFold } from '@orc/contracts'
 
 export interface SweptNote { id: string; scope: string; title: string; summary: string }
 
@@ -6,8 +6,8 @@ export interface SweptNote { id: string; scope: string; title: string; summary: 
 // and its outbound links — which are what make it a PROTECTOR of the notes it points at.
 interface LiveNote extends SweptNote { links: string[]; taskId: string }
 
-const liveNotes = (events: EventRecord[]): LiveNote[] =>
-  [...foldLiveNotes(events).values()].map(({ note, author }) => ({
+const liveNotes = (m: MemoryFold): LiveNote[] =>
+  [...m.notes.values()].map(({ note, author }) => ({
     id: note.id, scope: note.scope, title: note.title, summary: note.summary,
     links: note.links.map(l => l.id), taskId: author.taskId ?? '',
   }))
@@ -31,7 +31,7 @@ function unreferenced<T extends LiveNote>(all: LiveNote[], going: T[]): T[] {
 // Adopted ids (re-written by a live writer) stay; cli/null-authored notes are never swept.
 // Deletion is a memory_deleted event, so content stays in the log for audit/replay.
 export function orphanedNotes(events: EventRecord[], cancelled: Set<string>): SweptNote[] {
-  const all = liveNotes(events)
+  const all = liveNotes(foldMemory(events))
   const going = unreferenced(all, all.filter(n => cancelled.has(n.taskId)))
   return going.map(({ id, scope, title, summary }) => ({ id, scope, title, summary }))
 }
@@ -55,22 +55,21 @@ export interface StaleNote { id: string; scope: string; title: string; hits: num
 //  - "untouched" is the later of last written and last read: a note read six months ago is stale,
 //    a note re-written yesterday is not. An unusable timestamp fails safe and is never swept.
 export function staleNotes(events: EventRecord[], opts: { now: string; days: number }): StaleNote[] {
-  const accessed = foldAccessCounts(events)
-  const written = foldWriteTimes(events)
+  const m = foldMemory(events)
   const expirable = new Set(
-    [...foldLiveNotes(events).values()]
+    [...m.notes.values()]
       .filter(({ note }) => note.retention === RETENTION.expirable)
       .map(({ note }) => noteKey(note.scope, note.id)),
   )
   const cutoff = Date.parse(opts.now) - opts.days * 86_400_000
-  const all = liveNotes(events)
+  const all = liveNotes(m)
   const candidates = all.flatMap(note => {
     const key = noteKey(note.scope, note.id)
     if (!expirable.has(key)) return []
-    const lastTouchedAt = latestStamp([written.get(key), accessed.get(key)?.lastAccessedAt])
+    const lastTouchedAt = latestStamp([m.writes.get(key), m.access.get(key)?.lastAccessedAt])
     // an unusable/absent timestamp means unknown age — fail safe and keep the note
     if (lastTouchedAt === null || Date.parse(lastTouchedAt) > cutoff) return []
-    return [{ ...note, lastTouchedAt, hits: accessed.get(key)?.hits ?? 0 }]
+    return [{ ...note, lastTouchedAt, hits: m.access.get(key)?.hits ?? 0 }]
   })
   return unreferenced(all, candidates)
     .map(({ id, scope, title, hits, lastTouchedAt }) => ({ id, scope, title, hits, lastTouchedAt }))

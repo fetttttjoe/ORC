@@ -1,4 +1,4 @@
-import { activation, DEFAULT_HALF_LIFE_DAYS, edgeKey, foldAccessCounts, foldEdgeStats, foldLiveNotes, noteKey, noteLabel, STEP_RUN_STATUS, type AccessStats, type EventRecord, type LinkKind } from '@orc/contracts'
+import { activation, DEFAULT_HALF_LIFE_DAYS, edgeKey, isUiMetaNote, noteKey, noteLabel, STEP_RUN_STATUS, type AccessStats, type LinkKind, type MemoryFold } from '@orc/contracts'
 import type { State } from '@orc/kernel'
 
 export interface GraphNode {
@@ -33,12 +33,8 @@ export type EdgeType = (typeof EDGE)[keyof typeof EDGE]
 
 export const NODE_PREFIX = { step: 'step:', artifact: 'artifact:', note: 'note:', model: 'model:' } as const
 
-// project-chat metadata notes (display name, working directory) — infrastructure, not
-// knowledge. Hidden from the graph and the chat narrative; fully present in the log/replay.
-export const PROJECT_NAME_NOTE_ID = 'ui-project-name'
-export const PROJECT_DIR_NOTE_ID = 'ui-project-dir'
-const UI_META_NOTE_IDS = new Set<string>([PROJECT_NAME_NOTE_ID, PROJECT_DIR_NOTE_ID])
-export const isUiMetaNote = (scope: string, id: string): boolean => scope === 'project' && UI_META_NOTE_IDS.has(id)
+// defined in contracts so retrieval obeys the same rule the graph view does
+export { PROJECT_NAME_NOTE_ID, PROJECT_DIR_NOTE_ID, isUiMetaNote } from '@orc/contracts'
 export const modelNodeId = (ref: string): string => `${NODE_PREFIX.model}${ref}`
 
 export const stepNodeId = (taskId: string, id: string): string => `${NODE_PREFIX.step}${taskId}:${id}`
@@ -54,7 +50,9 @@ export interface GraphBuildOptions { now?: string; halfLifeDays?: number }
 
 // The ONE events→graph projection. Every full load and (via diffGraphs) every patch comes from
 // here, so no consumer can ever see a graph this function would not produce.
-export function buildGraph(state: State, events: Array<Pick<EventRecord, 'kind' | 'payload'> & { ts?: string }>, opts: GraphBuildOptions = {}): Graph {
+// Takes the memory fold, not the events: the caller keeps it incrementally, so a rebuild is
+// O(graph) rather than O(every event ever appended).
+export function buildGraph(state: State, mem: MemoryFold, opts: GraphBuildOptions = {}): Graph {
   const now = opts.now ?? new Date().toISOString()
   const nodes: GraphNode[] = []
   const links: GraphLink[] = []
@@ -91,24 +89,21 @@ export function buildGraph(state: State, events: Array<Pick<EventRecord, 'kind' 
       links.push({ source: t.id, target: modelNodeId(ref), type: EDGE.uses })
     }
   }
-  const access = foldAccessCounts(events)
-  const edgeAccess = foldEdgeStats(events)
   // heat: log-scaled activation, saturating at ~50. Rounded to 2dp so closely-spaced rebuilds
   // don't churn the patch stream — slow drift across a long session still patches occasionally,
   // and that IS the fade (patches are idempotent, the cost is negligible). halfLifeDays arrives
   // from project config via the sessions layer — the same value the store's ranking uses.
-  // Shared by nodes and edges — foldAccessCounts/foldEdgeStats both yield AccessStats.
+  // Shared by nodes and edges — node and edge stats are the same AccessStats shape.
   const toHeat = (stats: AccessStats | undefined): number | undefined => {
     if (!stats) return undefined
     const act = activation(stats, now, opts.halfLifeDays ?? DEFAULT_HALF_LIFE_DAYS)
     if (act <= 0) return undefined
     return Math.round(Math.min(1, Math.log1p(act) / Math.log1p(50)) * 100) / 100
   }
-  const heatOf = (k: string): number | undefined => toHeat(access.get(k))
+  const heatOf = (k: string): number | undefined => toHeat(mem.access.get(k))
   const edgeHeatOf = (scope: string, from: string, to: string, kind: LinkKind): number | undefined =>
-    toHeat(edgeAccess.get(edgeKey(scope, from, to, kind)))
-  const live = foldLiveNotes(events)
-  for (const { note, author } of live.values()) {
+    toHeat(mem.edges.get(edgeKey(scope, from, to, kind)))
+  for (const { note, author } of mem.notes.values()) {
     if (isUiMetaNote(note.scope, note.id)) continue // chat metadata is not knowledge
     nodes.push({ id: noteNodeId(note.scope, note.id), type: 'note', label: note.title, detail: noteLabel(note), heat: heatOf(noteKey(note.scope, note.id)) })
     if (author.taskId && state.tasks.has(author.taskId))
@@ -118,8 +113,8 @@ export function buildGraph(state: State, events: Array<Pick<EventRecord, 'kind' 
       // unresolved link falls back to the project scope — plan subplans wire visibly into
       // the knowledge map (derived_from arch-overview/area-*) instead of dangling invisibly.
       // Agent traversal (memory_neighbors) keeps strict scoping.
-      const targetScope = live.has(noteKey(note.scope, l.id)) ? note.scope
-        : live.has(noteKey('project', l.id)) ? 'project' : null
+      const targetScope = mem.notes.has(noteKey(note.scope, l.id)) ? note.scope
+        : mem.notes.has(noteKey('project', l.id)) ? 'project' : null
       // edge stats key on note.scope (the persisted RELATE's own scope), not targetScope: the
       // cross-scope UI fallback above is a display-only convenience, not how the edge was stored.
       if (targetScope) links.push({ source: noteNodeId(note.scope, note.id), target: noteNodeId(targetScope, l.id), type: l.kind, heat: edgeHeatOf(note.scope, note.id, l.id, l.kind) })

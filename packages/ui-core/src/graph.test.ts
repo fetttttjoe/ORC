@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, it } from 'bun:test'
-import { EVENT_KIND, type EventRecord } from '@orc/contracts'
+import { EVENT_KIND, foldMemory, type EventRecord } from '@orc/contracts'
 import { draftFixture, eventFixture, stepFixture } from '@orc/contracts/fixtures'
 import { Kernel, fold, openStorage, type EventLog } from '@orc/kernel'
 import { createTestDb, TEST_PROJECT_ID } from '@orc/kernel/test-helpers'
@@ -42,7 +42,7 @@ describe('buildGraph', () => {
     const log = await freshLog()
     const { taskId } = await seed(log)
     const events = await log.all()
-    const g = buildGraph(fold(events), events)
+    const g = buildGraph(fold(events), foldMemory(events))
 
     const byId = new Map(g.nodes.map(n => [n.id, n]))
     expect(byId.get(taskId)?.detail).toBe('approved')
@@ -64,11 +64,11 @@ describe('buildGraph', () => {
     const t = await k.createTask({ title: 'build the thing', spec: 'spec' })
     await k.proposePlan(t.id, draftFixture([stepFixture({ title: 'build the thing' })]))
     await k.approvePlan(t.id)
-    const pending = buildGraph(fold(await log.all()), await log.all())
+    const pending = buildGraph(fold(await log.all()), foldMemory(await log.all()))
     expect(pending.nodes.find(n => n.id === stepNodeId(t.id, 's1'))?.label).toBe('build the thing · s1')
     await log.append({ taskId: t.id, stepId: 's1', runToken: 'r1', kind: EVENT_KIND.step_started, payload: { stepId: 's1', runToken: 'r1', attempt: 1 } })
     await log.append({ taskId: t.id, stepId: 's1', runToken: 'r1', kind: EVENT_KIND.agent_call, payload: { stepId: 's1', runToken: 'r1', iteration: 3, request: null, response: null } })
-    const running = buildGraph(fold(await log.all()), await log.all())
+    const running = buildGraph(fold(await log.all()), foldMemory(await log.all()))
     expect(running.nodes.find(n => n.id === stepNodeId(t.id, 's1'))?.label).toBe('build the thing · s1 · 3/5')
     await log.close()
   })
@@ -84,7 +84,7 @@ describe('buildGraph', () => {
     })
     await writeNote(log, 'sub-b', { scope: 'plan-t1' })
     const events = await log.all()
-    const g = buildGraph(fold(events), events)
+    const g = buildGraph(fold(events), foldMemory(events))
     // project-only target → falls back into the knowledge map
     expect(g.links).toContainEqual({ source: noteNodeId('plan-t1', 'sub-a'), target: noteNodeId('project', 'arch-overview'), type: 'derived_from' })
     // same-scope target resolves normally
@@ -101,7 +101,7 @@ describe('buildGraph', () => {
     await writeNote(log, 'ui-project-dir', { title: '/some/dir' })
     await writeNote(log, 'real-knowledge')
     const events = await log.all()
-    const g = buildGraph(fold(events), events)
+    const g = buildGraph(fold(events), foldMemory(events))
     const noteIds = g.nodes.filter(n => n.type === 'note').map(n => n.id)
     expect(noteIds).toEqual([noteNodeId('project', 'real-knowledge')])
     await log.close()
@@ -112,8 +112,8 @@ describe('buildGraph', () => {
     const written = { kind: EVENT_KIND.memory_written, ts, payload: { note: { id: 'hot', scope: 'project', title: 'hot' }, author: { source: 'cli' } } }
     const access = { kind: EVENT_KIND.memory_accessed, ts, payload: { id: 'hot', scope: 'project', mode: 'read', author: { source: 'cli' } } }
     const empty = fold([]) // no tasks — notes fold straight from the events
-    const cold = buildGraph(empty, [written], { now: ts })
-    const hot = buildGraph(empty, [written, access, access, access], { now: ts })
+    const cold = buildGraph(empty, foldMemory([written]), { now: ts })
+    const hot = buildGraph(empty, foldMemory([written, access, access, access]), { now: ts })
     const coldNode = cold.nodes.find(n => n.id === noteNodeId('project', 'hot'))!
     const hotNode = hot.nodes.find(n => n.id === noteNodeId('project', 'hot'))!
     expect(coldNode.heat).toBeUndefined()
@@ -137,7 +137,7 @@ describe('buildGraph', () => {
       // via-provenance access: the connection itself, not just the node, gets credit
       { kind: EVENT_KIND.memory_accessed, ts, payload: { id: 'ewalked', scope: 'project', mode: 'read', author: { source: 'cli' }, via: { seed: 'eseed', kind: 'relates_to', direction: 'out' } } },
     ]
-    const g = buildGraph(state, events, { now: ts })
+    const g = buildGraph(state, foldMemory(events), { now: ts })
     const edge = g.links.find(l => l.source === noteNodeId('project', 'eseed') && l.target === noteNodeId('project', 'ewalked'))!
     expect(edge.heat).toBeGreaterThan(0)
     expect(edge.heat).toBeLessThanOrEqual(1)
@@ -153,7 +153,7 @@ describe('buildGraph', () => {
     await writeNote(log, 'dangler', { links: [{ id: 'base-note' }, { id: 'never-written' }] })
     await log.append({ taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_deleted, payload: { id: 'base-note', scope: 'project', author: { source: 'cli' } } })
     const events = await log.all()
-    const g = buildGraph(fold(events), events)
+    const g = buildGraph(fold(events), foldMemory(events))
     const ids = new Set(g.nodes.map(n => n.id))
     for (const l of g.links) {
       expect(ids.has(l.source)).toBe(true)
@@ -164,7 +164,7 @@ describe('buildGraph', () => {
 })
 
 describe('diffGraphs', () => {
-  const at = (events: EventRecord[]) => buildGraph(fold(events), events)
+  const at = (events: EventRecord[]) => buildGraph(fold(events), foldMemory(events))
 
   it('one memory_written yields exactly that note node + its edge', async () => {
     const log = await freshLog()
@@ -206,8 +206,8 @@ describe('diffGraphs', () => {
     ]
     const access = { kind: EVENT_KIND.memory_accessed, ts, payload: { id: 'uewalked', scope: 'project', mode: 'read', author: { source: 'cli' }, via: { seed: 'ueseed', kind: 'relates_to', direction: 'out' } } }
     const empty = fold([])
-    const cold = buildGraph(empty, written, { now: ts })
-    const hot = buildGraph(empty, [...written, access], { now: ts })
+    const cold = buildGraph(empty, foldMemory(written), { now: ts })
+    const hot = buildGraph(empty, foldMemory([...written, access]), { now: ts })
     const patch = diffGraphs(cold, hot)
     const key = `${noteNodeId('project', 'ueseed')} ${noteNodeId('project', 'uewalked')} relates_to`
     expect(patch.updateLinks.some(l => `${l.source} ${l.target} ${l.type}` === key)).toBe(true)

@@ -4,6 +4,7 @@ import { TASK_STATUS, type TaskStatus } from './task'
 import type { EventKind } from './events'
 import type { OperationSpec } from './operations'
 import type { LoadedSkill, ResolvedTool } from './plugins'
+import type { NoteSummary } from './memory'
 
 export const Usage = z.object({
   inputTokens: z.number().int().nonnegative(),
@@ -235,8 +236,22 @@ export interface ExecutorContext<LM = unknown> {
   // reaches the loop as a frozen PlanStep field, wrong for a runtime knob). Optional so every
   // existing ctx constructor (tests, fixtures) keeps compiling untouched.
   taskId?: string // the plan this step belongs to — absent in bare test ctxs, which skip ambient capture
-  ambientCapture?: boolean // kill switch for Task 4's ambient step-note capture; undefined behaves as enabled
   memoryPreloadTokens?: number // Task 7's memory-preload budget: fed via dbos-port config, consumed by the loop's preload search
+  memory?: StepMemory
+}
+
+// The step's own memory, bound by the runtime from the memory plugin. The executor decides only
+// WHEN (before the first prompt, after the signal) and wraps each call for durability; what gets
+// searched, recorded, written and linked is the memory domain's business.
+//
+// It exists because the executor was doing that job by reaching into extraTools, matching
+// 'memory_search'/'memory_write' by name and forging tool-call ids to drive them — which made the
+// executor a second writer of memory events alongside the store.
+export interface StepMemory {
+  /** Context for the first prompt. Recording the pull is the implementation's business. */
+  recall(budget: number): Promise<NoteSummary[]>
+  /** What the finished step leaves behind. Best-effort: never throws into the step. */
+  capture(signal: { outcome: SignalOutcome; summary: string }): Promise<void>
 }
 
 export interface AgentExecutor<LM = unknown> {

@@ -102,10 +102,7 @@ describe('memory reuse over a real run (e2e): step B reads step A\'s note', () =
       storage, config,
       providers: new Map([['fake', fakeProvider]]),
       executors: new Map([['memory-fake', memoryExecutor()]]),
-      stepTools: p => memory.buildTools({
-        source: 'agent', taskId: p.taskId, stepId: p.stepId, runToken: p.runToken,
-        executor: p.executor, model: p.model, role: p.role,
-      }),
+      stepTools: p => memory.bindStep({ author: { source: 'agent', taskId: p.taskId, stepId: p.stepId, runToken: p.runToken, executor: p.executor, model: p.model, role: p.role }, step: p.step, taskId: p.taskId, ancestorTaskIds: p.ancestorTaskIds }),
     })
     await port.launch()
 

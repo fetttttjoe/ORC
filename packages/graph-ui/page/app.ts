@@ -447,7 +447,7 @@ async function loadProject(): Promise<void> {
 initApi({ onError: err => toast(`${err.endpoint}: ${err.message}`, 'danger') })
 await api.initSession()
 conversation = new Conversation(node => navigate({ node, tab: 'detail' }))
-app.children[1]!.replaceWith(conversation.root)
+app.children[1]?.replaceWith(conversation.root)
 renderNewRequest()
 refreshModels()
 projects = await api.projects()

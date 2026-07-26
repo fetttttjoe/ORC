@@ -1,10 +1,10 @@
-import { MEMORY_HEALTH, type EmbeddingProvider, type MemoryAuthor, type MemoryHealth, type MemoryStore, type ResolvedTool } from '@orc/contracts'
+import { MEMORY_HEALTH, type EmbeddingProvider, type MemoryHealth, type MemoryStore } from '@orc/contracts'
 import { errorMessage } from '@orc/contracts'
 import { EventLog, type ProjectConfig } from '@orc/kernel'
 import { openKnowledge, type Knowledge } from './knowledge'
 import { createMemoryStore } from './store'
 import { createMemoryProjector, KNOWLEDGE_KINDS, type MemoryProjector } from './projector'
-import { memoryTools, type MemoryRole } from './tools'
+import { bindStepMemory, unavailableStepMemory, type BindStep } from './step'
 import { createDriftProbe } from './drift'
 
 export { SurrealMemory } from './surreal'
@@ -12,6 +12,7 @@ export { openKnowledge, type Knowledge } from './knowledge'
 export { createMemoryStore } from './store'
 export { createMemoryProjector } from './projector'
 export { memoryTools, unavailableMemoryTools, MEMORY_READ_TOOLS, MEMORY_ROLE, memoryRoleFor, type MemoryRole } from './tools'
+export { bindStepMemory, unavailableStepMemory, ambientNoteId, ambientLinks, deriveQueryTerms, preloadQuery, type BindStep, type StepMemoryBinding } from './step'
 export { renderMemoryIndex, rebuildVaultMemory } from './memory-index'
 export { orphanedNotes, staleNotes, DEFAULT_SWEEP_DAYS, type SweptNote, type StaleNote } from './sweep'
 export { consolidatedNote, consolidateTask, isSubstantive, CONSOLIDATED_TAG, type ConsolidationInput, type ConsolidationDeps, type ConsolidationDistiller, type DistilledText, type StepOutcome } from './consolidate'
@@ -35,16 +36,16 @@ export async function gitRevision(dir: string): Promise<string | null> {
 export async function createMemory(opts: { log: EventLog; config: ProjectConfig; embedder?: EmbeddingProvider }): Promise<{
   store: MemoryStore
   projector: MemoryProjector
-  buildTools: (author: MemoryAuthor, role?: MemoryRole) => ResolvedTool[]
+  bindStep: BindStep
   close: () => Promise<void>
 }> {
   const knowledge = await openKnowledge(opts.config, opts.embedder)
-  const store = createMemoryStore({ log: opts.log, surreal: knowledge, sourceRevision: await gitRevision(opts.config.dir), halfLifeDays: opts.config.memoryHalfLifeDays })
+  const store = createMemoryStore({ log: opts.log, surreal: knowledge, sourceRevision: () => gitRevision(opts.config.dir), halfLifeDays: opts.config.memoryHalfLifeDays })
   const projector = createMemoryProjector({ log: opts.log, surreal: knowledge, vaultDir: opts.config.vaultDir })
   const changedSince = createDriftProbe(opts.config.dir)
   return {
     store, projector,
-    buildTools: (author, role) => memoryTools(store, author, role, changedSince),
+    bindStep: p => bindStepMemory({ ...p, store, changedSince }),
     close: async () => { await projector.close(); await knowledge.close() },
   }
 }

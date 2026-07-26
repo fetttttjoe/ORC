@@ -1,5 +1,5 @@
-import { EVENT_KIND, MemoryAccessedPayload, ModelsDiscoveredPayload, ZERO_USAGE, addUsage, errorMessage, foldLiveNotes, noteKey, noteLabel, type EventRecord, type Plan, type Usage } from '@orc/contracts'
-import { fold, foldPlanNotes, listProjectIds, openStorage, planScope, stepUsage, taskUsage, watchProjectIds, type ProjectIdsWatch, type State, type Storage } from '@orc/kernel'
+import { EVENT_KIND, ModelsDiscoveredPayload, ZERO_USAGE, addUsage, emptyMemoryFold, errorMessage, foldMemory, foldMemoryInto, noteKey, noteLabel, type EventRecord, type MemoryFold, type Plan, type Usage } from '@orc/contracts'
+import { emptyFold, fold, foldInto, foldPlanNotes, listProjectIds, openStorage, planScope, stepUsage, taskUsage, watchProjectIds, type FoldAcc, type ProjectIdsWatch, type Storage } from '@orc/kernel'
 import { NODE_PREFIX, PROJECT_DIR_NOTE_ID, PROJECT_NAME_NOTE_ID, buildGraph, diffGraphs, emptyPatch, type Graph, type GraphPatch } from './graph'
 import { decompositionMermaid, planMermaid, todoWaves, type TodoWave } from './diagram'
 
@@ -69,7 +69,8 @@ export interface ProjectSessions {
 interface Session {
   storage: Storage
   events: EventRecord[]
-  state: State
+  acc: FoldAcc
+  mem: MemoryFold
   graph: Graph
   seq: number
   subscribers: Set<(u: SessionUpdate) => void>
@@ -88,10 +89,11 @@ export function createProjectSessions(opts: {
   async function open(projectId: string): Promise<Session> {
     const storage = await openStorage(opts.url, { projectId })
     const events = await storage.events.all()
-    const state = fold(events)
+    const acc = events.reduce(foldInto, emptyFold())
+    const mem = events.reduce(foldMemoryInto, emptyMemoryFold())
     const session: Session = {
-      storage, events, state,
-      graph: buildGraph(state, events, { halfLifeDays: opts.halfLifeDays }),
+      storage, events, acc, mem,
+      graph: buildGraph(acc.state, mem, { halfLifeDays: opts.halfLifeDays }),
       seq: events.at(-1)?.seq ?? 0,
       subscribers: new Set(),
       unsubscribe: async () => {},
@@ -106,8 +108,9 @@ export function createProjectSessions(opts: {
     // the ghosts like any other change.
     const reload = async (): Promise<void> => {
       session.events = await storage.events.all()
-      session.state = fold(session.events)
-      session.graph = buildGraph(session.state, session.events, { halfLifeDays: opts.halfLifeDays })
+      session.acc = session.events.reduce(foldInto, emptyFold())
+      session.mem = session.events.reduce(foldMemoryInto, emptyMemoryFold())
+      session.graph = buildGraph(session.acc.state, session.mem, { halfLifeDays: opts.halfLifeDays })
       session.seq = session.events.at(-1)?.seq ?? 0
     }
     // The truncation check below needs an event to arrive; a re-created log never delivers one
@@ -128,8 +131,9 @@ export function createProjectSessions(opts: {
         return
       }
       session.events.push(e)
-      session.state = fold(session.events)
-      const next = buildGraph(session.state, session.events, { halfLifeDays: opts.halfLifeDays })
+      foldInto(session.acc, e)
+      foldMemoryInto(session.mem, e)
+      const next = buildGraph(session.acc.state, session.mem, { halfLifeDays: opts.halfLifeDays })
       const patch = diffGraphs(session.graph, next)
       session.graph = next
       session.seq = e.seq
@@ -161,7 +165,7 @@ export function createProjectSessions(opts: {
       const cached = sessions.get(id)
       if (cached) {
         const s = await cached.catch(() => null)
-        const live = s ? foldLiveNotes(s.events) : undefined
+        const live = s?.mem.notes
         const nameNote = live?.get(noteKey('project', PROJECT_NAME_NOTE_ID))
         if (nameNote) name = nameNote.note.title
         const dirNote = live?.get(noteKey('project', PROJECT_DIR_NOTE_ID))
@@ -217,7 +221,7 @@ export function createProjectSessions(opts: {
       const s = await sessionFor(projectId)
       if (fromSeq >= s.seq) return null
       const past = s.events.filter(e => e.seq <= fromSeq)
-      const patch = diffGraphs(buildGraph(fold(past), past, { halfLifeDays: opts.halfLifeDays }), s.graph)
+      const patch = diffGraphs(buildGraph(fold(past), foldMemory(past), { halfLifeDays: opts.halfLifeDays }), s.graph)
       return emptyPatch(patch) ? null : { seq: s.seq, patch, event: null, summary: null }
     },
 
@@ -226,16 +230,16 @@ export function createProjectSessions(opts: {
       if (nodeId.startsWith(NODE_PREFIX.step)) {
         const [, taskId, stepId] = nodeId.split(':')
         if (!taskId || !stepId) return null
-        const plans = s.state.plans.get(taskId)
+        const plans = s.acc.state.plans.get(taskId)
         const plan = plans?.approvedVersion != null ? plans.versions.find(v => v.version === plans.approvedVersion) : undefined
         const step = plan?.steps.find(st => st.id === stepId)
         if (!step) return null
-        return { step, run: s.state.steps.get(taskId)?.get(stepId) ?? null }
+        return { step, run: s.acc.state.steps.get(taskId)?.get(stepId) ?? null }
       }
       if (nodeId.startsWith(NODE_PREFIX.artifact)) {
         const [, taskId, ...pathParts] = nodeId.split(':')
         const path = pathParts.join(':') // artifact paths may contain ':'
-        return (s.state.artifacts.get(taskId ?? '') ?? []).find(a => a.path === path) ?? null
+        return (s.acc.state.artifacts.get(taskId ?? '') ?? []).find(a => a.path === path) ?? null
       }
       if (nodeId.startsWith(NODE_PREFIX.model)) {
         // performance lens: every task this model took over, with per-model usage summed from
@@ -243,8 +247,8 @@ export function createProjectSessions(opts: {
         const ref = nodeId.slice(NODE_PREFIX.model.length)
 
         const tasks: Array<{ taskId: string; title: string; status: string; calls: number; usage: Usage }> = []
-        for (const t of s.state.tasks.values()) {
-          const tp = s.state.plans.get(t.id)
+        for (const t of s.acc.state.tasks.values()) {
+          const tp = s.acc.state.plans.get(t.id)
           const plan = tp?.approvedVersion != null ? tp.versions.find(v => v.version === tp.approvedVersion) : undefined
           const stepIds = new Set((plan?.steps ?? []).filter(st => st.modelRef === ref).map(st => st.id))
           if (stepIds.size === 0) continue
@@ -262,30 +266,26 @@ export function createProjectSessions(opts: {
       }
       if (nodeId.startsWith(NODE_PREFIX.note)) {
         const key = nodeId.slice(NODE_PREFIX.note.length) // `${scope}\u0000${id}`
-        const live = foldLiveNotes(s.events)
+        const live = s.mem.notes
         const payload = live.get(key)
         if (!payload) return null
         const [scope, id] = key.split('\u0000')
-        const hits = s.events.filter(e => {
-          if (e.kind !== EVENT_KIND.memory_accessed) return false
-          const p = MemoryAccessedPayload.safeParse(e.payload)
-          return p.success && p.data.id === id && p.data.scope === scope
-        }).length
+        const hits = s.mem.access.get(key)?.hits ?? 0
         // backlinks: notes whose links target this note (links resolve same-scope)
         const backlinks = [...live.values()]
           .filter(({ note }) => note.scope === scope && note.links.some(l => l.id === id))
           .map(({ note }) => ({ id: note.id, scope: note.scope, title: note.title, kind: noteLabel(note) }))
         return { ...payload, hits, backlinks }
       }
-      const task = s.state.tasks.get(nodeId)
+      const task = s.acc.state.tasks.get(nodeId)
       if (!task) return null
       // artifacts dedup by (path, sha): a verify step re-declaring the same output is one
       // artifact, not two — the raw per-event list stays available on the artifact node itself
-      const arts = new Map((s.state.artifacts.get(nodeId) ?? []).map(a => [`${a.path}\u0000${a.sha256}`, a] as const))
+      const arts = new Map((s.acc.state.artifacts.get(nodeId) ?? []).map(a => [`${a.path}\u0000${a.sha256}`, a] as const))
       return {
         task,
-        usage: taskUsage(s.state, nodeId),
-        steps: [...(s.state.steps.get(nodeId)?.values() ?? [])].map(st => ({ ...st, usage: stepUsage(s.state, nodeId, st.stepId) })),
+        usage: taskUsage(s.acc.state, nodeId),
+        steps: [...(s.acc.state.steps.get(nodeId)?.values() ?? [])].map(st => ({ ...st, usage: stepUsage(s.acc.state, nodeId, st.stepId) })),
         artifacts: [...arts.values()],
         // token-economy made visible: how often this task pulled knowledge instead of re-reading
         // (memory_accessed envelopes are task-bound since the store threads author identity)
@@ -300,10 +300,10 @@ export function createProjectSessions(opts: {
 
     async taskPlans(projectId, taskId) {
       const s = await sessionFor(projectId)
-      const tp = s.state.plans.get(taskId)
+      const tp = s.acc.state.plans.get(taskId)
       if (!tp) return null
       const shown = (tp.approvedVersion != null ? tp.versions.find(v => v.version === tp.approvedVersion) : undefined) ?? tp.versions.at(-1)
-      const states = s.state.steps.get(taskId)
+      const states = s.acc.state.steps.get(taskId)
       return {
         versions: tp.versions,
         approvedVersion: tp.approvedVersion,
@@ -317,9 +317,9 @@ export function createProjectSessions(opts: {
       // Subplans execute as the CHILD's steps, which carry the note ids verbatim
       // (instantiateFrozenPlan) — so merging the children's step states is the whole correlation.
       const substeps = new Map<string, { status: string }>()
-      for (const [childId, t] of s.state.tasks)
+      for (const [childId, t] of s.acc.state.tasks)
         if (t.parentId === taskId)
-          for (const [stepId, st] of s.state.steps.get(childId) ?? []) substeps.set(stepId, st)
+          for (const [stepId, st] of s.acc.state.steps.get(childId) ?? []) substeps.set(stepId, st)
       return { notes, mermaid: notes.length > 0 ? decompositionMermaid(notes, substeps) : null }
     },
 

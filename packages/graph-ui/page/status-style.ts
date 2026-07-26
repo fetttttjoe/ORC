@@ -21,9 +21,7 @@ const STATUS_COLORS: Record<string, string> = {
 
 // only task/step carry a lifecycle in `detail`; note detail is its kind, artifact its size
 export const colorFor = (type: GraphNode['type'], detail: string): string =>
-  (type === 'task' || type === 'step') && STATUS_COLORS[detail] !== undefined
-    ? STATUS_COLORS[detail]!
-    : TYPE_COLORS[type]
+  ((type === 'task' || type === 'step') ? STATUS_COLORS[detail] : undefined) ?? TYPE_COLORS[type]
 
 export const isActive = (type: GraphNode['type'], detail: string): boolean =>
   (type === 'task' || type === 'step') && detail === STEP_RUN_STATUS.running

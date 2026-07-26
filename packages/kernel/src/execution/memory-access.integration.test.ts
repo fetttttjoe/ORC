@@ -61,10 +61,7 @@ describe('agent-side memory access recording (integration)', () => {
       storage, config,
       providers: new Map([['fake', { costs: {}, languageModel: () => model }]]),
       executors: new Map([['api-loop', apiLoopExecutor()]]),
-      stepTools: p => memory.buildTools({
-        source: 'agent', taskId: p.taskId, stepId: p.stepId, runToken: p.runToken,
-        executor: p.executor, model: p.model, role: p.role,
-      }),
+      stepTools: p => memory.bindStep({ author: { source: 'agent', taskId: p.taskId, stepId: p.stepId, runToken: p.runToken, executor: p.executor, model: p.model, role: p.role }, step: p.step, taskId: p.taskId, ancestorTaskIds: p.ancestorTaskIds }),
     })
     await port.launch()
     cleanup.push(() => port.shutdown())

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test'
-import { activation, activationBoost, foldAccessCounts, foldEdgeStats, edgeKey, noteKey, EVENT_KIND } from './index'
+import { activation, activationBoost, foldMemory, edgeKey, noteKey, EVENT_KIND } from './index'
 
 const T0 = '2026-07-01T00:00:00.000Z'
 const days = (n: number) => new Date(Date.parse(T0) + n * 86_400_000).toISOString()
@@ -32,28 +32,28 @@ describe('activationBoost', () => {
   })
 })
 
-describe('foldAccessCounts', () => {
+describe('foldMemory — node access', () => {
   it('counts hits per (scope,id) with the last event ts, skipping unparseable payloads', () => {
     const ev = (id: string, ts: string) => ({ kind: EVENT_KIND.memory_accessed, ts, payload: { id, scope: 'project', mode: 'read', author: { source: 'cli' } } })
-    const m = foldAccessCounts([ev('a', T0), ev('a', days(1)), ev('b', T0), { kind: EVENT_KIND.memory_accessed, ts: T0, payload: { junk: true } }])
+    const m = foldMemory([ev('a', T0), ev('a', days(1)), ev('b', T0), { kind: EVENT_KIND.memory_accessed, ts: T0, payload: { junk: true } }]).access
     expect(m.get(noteKey('project', 'a'))).toEqual({ hits: 2, lastAccessedAt: days(1) })
     expect(m.get(noteKey('project', 'b'))).toEqual({ hits: 1, lastAccessedAt: T0 })
     expect(m.size).toBe(2)
   })
 })
 
-// The connection-level twin of foldAccessCounts: folds memory_accessed.via into per-edge stats.
-describe('foldEdgeStats', () => {
+// The connection-level twin: folds memory_accessed.via into per-edge stats.
+describe('foldMemory — edge access', () => {
   it('counts hits per edge key with the last event ts, skipping unparseable and via-less payloads', () => {
     const via = { seed: 'a', kind: 'supersedes', direction: 'out' as const }
     const ev = (ts: string, extra: Record<string, unknown> = {}) =>
       ({ kind: EVENT_KIND.memory_accessed, ts, payload: { id: 'b', scope: 'project', mode: 'read', author: { source: 'cli' }, ...extra } })
-    const m = foldEdgeStats([
+    const m = foldMemory([
       ev(T0, { via }),
       ev(days(1), { via }),
       ev(T0), // via-less (a plain node access, or an old pre-provenance event) — node-only, skipped here
       { kind: EVENT_KIND.memory_accessed, ts: T0, payload: { junk: true } }, // unparseable
-    ])
+    ]).edges
     expect(m.get(edgeKey('project', 'a', 'b', 'supersedes'))).toEqual({ hits: 2, lastAccessedAt: days(1) })
     expect(m.size).toBe(1)
   })
@@ -63,8 +63,38 @@ describe('foldEdgeStats', () => {
     // Walking in from seed b lands on a (direction in, seed b) — the SAME authored edge, opposite hop.
     const outHop = { kind: EVENT_KIND.memory_accessed, ts: T0, payload: { id: 'b', scope: 'project', mode: 'read', author: { source: 'cli' }, via: { seed: 'a', kind: 'supersedes', direction: 'out' } } }
     const inHop = { kind: EVENT_KIND.memory_accessed, ts: days(1), payload: { id: 'a', scope: 'project', mode: 'read', author: { source: 'cli' }, via: { seed: 'b', kind: 'supersedes', direction: 'in' } } }
-    const m = foldEdgeStats([outHop, inHop])
+    const m = foldMemory([outHop, inHop]).edges
     expect(m.size).toBe(1)
     expect(m.get(edgeKey('project', 'a', 'b', 'supersedes'))).toEqual({ hits: 2, lastAccessedAt: days(1) })
+  })
+})
+
+// One pass, four derivations. They were four separate functions over the same array, which meant
+// staleNotes walked a project's whole memory history four times to answer one question.
+describe('foldMemory — one pass', () => {
+  const note = (id: string, ts: string, retention = 'durable') => ({
+    kind: EVENT_KIND.memory_written, ts,
+    payload: { note: { id, title: id, retention }, author: { source: 'cli' } },
+  })
+  const read = (id: string, ts: string) => ({
+    kind: EVENT_KIND.memory_accessed, ts,
+    payload: { id, scope: 'project', mode: 'read', author: { source: 'cli' } },
+  })
+
+  it('derives live notes, write times and access stats from a single walk', () => {
+    const m = foldMemory([note('a', T0), read('a', days(1)), note('a', days(2)), note('b', T0)])
+    expect([...m.notes.keys()].sort()).toEqual([noteKey('project', 'a'), noteKey('project', 'b')])
+    expect(m.writes.get(noteKey('project', 'a'))).toBe(days(2)) // last write wins
+    expect(m.access.get(noteKey('project', 'a'))).toEqual({ hits: 1, lastAccessedAt: days(1) })
+    expect(m.access.has(noteKey('project', 'b'))).toBe(false)
+  })
+
+  it('a deleted note leaves the live set but keeps no write time it no longer has', () => {
+    const m = foldMemory([
+      note('a', T0),
+      { kind: EVENT_KIND.memory_deleted, ts: days(1), payload: { id: 'a', scope: 'project', author: { source: 'cli' } } },
+    ])
+    expect(m.notes.size).toBe(0)
+    expect(m.writes.has(noteKey('project', 'a'))).toBe(false)
   })
 })

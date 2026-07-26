@@ -20,8 +20,7 @@ export function evaluateApproval(
   policy: ApprovalPolicy,
   ctx: { depth: number; costEstimateUSD: number | null; type: string },
 ): { then: 'auto' | 'manual'; ruleIndex?: number } {
-  for (let i = 0; i < policy.rules.length; i++) {
-    const r = policy.rules[i]!
+  for (const [i, r] of policy.rules.entries()) {
     if (r.maxDepth !== undefined && ctx.depth > r.maxDepth) continue
     if (r.maxCostUSD !== undefined && (ctx.costEstimateUSD === null || ctx.costEstimateUSD > r.maxCostUSD)) continue
     if (r.type !== undefined && r.type !== ctx.type) continue

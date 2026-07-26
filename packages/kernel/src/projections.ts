@@ -1,10 +1,10 @@
 import { z } from 'zod'
 import {
   ArtifactProducedPayload, EVENT_KIND, FAILURE_CLASS, FailureClass, OPERATION_STATUS, Plan,
-  STEP_RUN_STATUS, TaskNode, TaskStatus, ZERO_USAGE, addUsage,
+  RUN_OUTCOME, STEP_RUN_STATUS, TASK_STATUS, TaskNode, TaskStatus, ZERO_USAGE, addUsage, runOutcomeFor,
   OperationCompletedPayload, OperationFailedPayload, OperationStartedPayload, ReactionFailedPayload,
 } from '@orc/contracts'
-import type { EventRecord, OperationRecord, StepRunStatus, Usage } from '@orc/contracts'
+import type { EventRecord, OperationRecord, RunOutcome, StepRunStatus, Usage } from '@orc/contracts'
 
 export interface TaskPlans {
   versions: Plan[]
@@ -142,23 +142,36 @@ const View = {
   step_failed: z.object({ stepId: z.string(), class: FailureClass.catch(FAILURE_CLASS.agent_error), message: z.string() }),
 }
 
-// Lenient by design: fold must never throw on history — a malformed payload (from an
-// older schema or a poison event) skips its case rather than wedging every projection.
-export function fold(events: EventRecord[]): State {
-  const state: State = { tasks: new Map(), plans: new Map(), steps: new Map(), runs: new Map(), usage: new Map(), stepUsage: new Map(), splits: new Map(), operations: new Map(), artifacts: new Map(), reactionFailures: new Map() }
-  const seen = new Set<string>()
+const stepOf = (state: State, taskId: string, stepId: string): StepState | undefined =>
+  state.steps.get(taskId)?.get(stepId)
 
-  const stepOf = (taskId: string, stepId: string): StepState | undefined => state.steps.get(taskId)?.get(stepId)
-  const setStep = (taskId: string, s: StepState): void => {
-    const m = state.steps.get(taskId) ?? new Map<string, StepState>()
-    m.set(s.stepId, s)
-    state.steps.set(taskId, m)
-  }
+const setStep = (state: State, taskId: string, s: StepState): void => {
+  const m = state.steps.get(taskId) ?? new Map<string, StepState>()
+  m.set(s.stepId, s)
+  state.steps.set(taskId, m)
+}
 
-  for (const e of events) {
+// `seen` travels with the state because it is not recoverable from it: a suppressed duplicate
+// leaves no trace, so an incremental fold without it would double-count every replayed event.
+export interface FoldAcc {
+  state: State
+  seen: Set<string>
+}
+
+export const emptyFold = (): FoldAcc => ({
+  state: { tasks: new Map(), plans: new Map(), steps: new Map(), runs: new Map(), usage: new Map(), stepUsage: new Map(), splits: new Map(), operations: new Map(), artifacts: new Map(), reactionFailures: new Map() },
+  seen: new Set(),
+})
+
+// Mutates and returns `acc`: copy-per-event would be O(state) per event, which is the cost this
+// exists to remove. Lenient by design — a malformed payload skips its case rather than throwing,
+// or one poison event wedges every projection.
+export function foldInto(acc: FoldAcc, e: EventRecord): FoldAcc {
+  const { state, seen } = acc
+  {
     const key = crashDedupKey(e)
     if (key !== null) {
-      if (seen.has(key)) continue // crash-boundary duplicate (spec §6.2)
+      if (seen.has(key)) return acc // crash-boundary duplicate (spec §6.2)
       seen.add(key)
     }
     switch (e.kind) {
@@ -207,7 +220,7 @@ export function fold(events: EventRecord[]): State {
       case EVENT_KIND.step_started: {
         const p = View.step_started.safeParse(e.payload)
         if (!p.success || !e.taskId || !e.runToken) break
-        setStep(e.taskId, {
+        setStep(state, e.taskId, {
           stepId: p.data.stepId, runToken: e.runToken, attempt: p.data.attempt,
           status: STEP_RUN_STATUS.running, iterations: 0, output: null, failure: null,
         })
@@ -216,7 +229,7 @@ export function fold(events: EventRecord[]): State {
       case EVENT_KIND.agent_call: {
         const p = View.agent_call.safeParse(e.payload)
         if (!p.success || !e.taskId) break
-        const s = stepOf(e.taskId, p.data.stepId)
+        const s = stepOf(state, e.taskId, p.data.stepId)
         if (s && s.runToken === e.runToken) s.iterations = Math.max(s.iterations, p.data.iteration)
         if (e.usage) {
           state.usage.set(e.taskId, addUsage(state.usage.get(e.taskId) ?? ZERO_USAGE, e.usage))
@@ -278,7 +291,7 @@ export function fold(events: EventRecord[]): State {
       case EVENT_KIND.step_completed: {
         const p = View.step_completed.safeParse(e.payload)
         if (!p.success || !e.taskId) break
-        const s = stepOf(e.taskId, p.data.stepId)
+        const s = stepOf(state, e.taskId, p.data.stepId)
         if (s && s.runToken === e.runToken) {
           s.status = STEP_RUN_STATUS.completed
           s.output = p.data.summary
@@ -298,7 +311,7 @@ export function fold(events: EventRecord[]): State {
       case EVENT_KIND.step_failed: {
         const p = View.step_failed.safeParse(e.payload)
         if (!p.success || !e.taskId) break
-        const s = stepOf(e.taskId, p.data.stepId)
+        const s = stepOf(state, e.taskId, p.data.stepId)
         if (s && s.runToken === e.runToken) {
           s.status = STEP_RUN_STATUS.failed
           s.failure = { class: p.data.class, message: p.data.message }
@@ -312,7 +325,11 @@ export function fold(events: EventRecord[]): State {
       }
     }
   }
-  return state
+  return acc
+}
+
+export function fold(events: EventRecord[]): State {
+  return events.reduce(foldInto, emptyFold()).state
 }
 
 export function completedStepIds(state: State, taskId: string): Set<string> {
@@ -352,17 +369,45 @@ export function gatedChildren(state: State, rootId: string): Array<{ id: string;
     })
 }
 
+// A run's outcome is the TREE's, not the root task's. A grounded parent finishes as soon as its
+// plan step splits, so its own status reads `done` while the child doing the actual work sits
+// blocked — observed live, reported at the terminal as success with exit code 0.
+// `awaiting_approval` is deliberately NOT a failure here: a gated child is a stopping point the
+// watch already announces by name, not a run that went wrong.
+const FAILED_TASK_STATUS: ReadonlySet<TaskStatus> = new Set([TASK_STATUS.blocked, TASK_STATUS.failed])
+
+export function subtreeOutcome(state: State, rootId: string): RunOutcome {
+  const own = runOutcomeFor(state.tasks.get(rootId)?.status)
+  if (own !== RUN_OUTCOME.done) return own
+  const failed = subtreeTaskIds(state, rootId).some(id => {
+    const status = state.tasks.get(id)?.status
+    return status !== undefined && FAILED_TASK_STATUS.has(status)
+  })
+  return failed ? RUN_OUTCOME.blocked : RUN_OUTCOME.done
+}
+
 export function subtreeTaskIds(state: State, rootId: string): string[] {
   const children = new Map<string, string[]>()
-  for (const t of state.tasks.values())
-    if (t.parentId) (children.get(t.parentId) ?? children.set(t.parentId, []).get(t.parentId)!).push(t.id)
-  const out: string[] = []
-  const queue = [rootId]
-  while (queue.length) {
-    const id = queue.shift()!
-    out.push(id)
-    queue.push(...(children.get(id) ?? []))
+  for (const t of state.tasks.values()) {
+    if (!t.parentId) continue
+    const siblings = children.get(t.parentId) ?? []
+    siblings.push(t.id)
+    children.set(t.parentId, siblings)
   }
+  // breadth-first by appending while iterating: the array iterator reads by index, so ids pushed
+  // during the walk are visited in turn
+  const out: string[] = [rootId]
+  for (const id of out) out.push(...(children.get(id) ?? []))
+  return out
+}
+
+// The chain ABOVE a task, nearest first (parent, grandparent, …, root); excludes the task itself.
+// One walk, because three callers had their own: the budget envelope, the CLI's root-of-tree lookup,
+// and the memory lanes a step may read from.
+export function ancestorTaskIds(state: State, taskId: string): string[] {
+  const out: string[] = []
+  for (let id = state.tasks.get(taskId)?.parentId ?? null; id !== null; id = state.tasks.get(id)?.parentId ?? null)
+    out.push(id)
   return out
 }
 
@@ -379,7 +424,7 @@ export function subtreeUsage(state: State, rootId: string): Usage {
 // together overspending the parent's envelope.
 export function remainingBudget(state: State, taskId: string): number | null {
   let remaining: number | null = null
-  for (let id: string | undefined = taskId; id !== undefined; id = state.tasks.get(id)?.parentId ?? undefined) {
+  for (const id of [taskId, ...ancestorTaskIds(state, taskId)]) {
     const t = state.tasks.get(id)
     if (!t || t.budgetUSD === null) continue
     const r = t.budgetUSD - (subtreeUsage(state, id).costUSD ?? 0)

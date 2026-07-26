@@ -3,11 +3,11 @@ import { mkdtempSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import type { Checkpoint, EventDraft, ExecutorContext, NoteSummary, OperationCheckpoint, OperationSpec, ResolvedTool, SplitResult, UnifiedEvent } from '@orc/contracts'
-import { EVENT_KIND, NOTE_TIER, planScope, slugId } from '@orc/contracts'
+import { EVENT_KIND, LINK_KIND, MEMORY_ACCESS, NOTE_TIER, planScope, slugId } from '@orc/contracts'
 import { stepFixture } from '@orc/contracts/fixtures'
 import { z } from 'zod'
 import type { LanguageModel } from 'ai'
-import { apiLoopExecutor, deriveQueryTerms } from './loop'
+import { apiLoopExecutor } from './loop'
 
 // test-double checkpoint: runs fn, captures drafted events (what DBOS would append durably)
 function makeCheckpoint(captured: EventDraft[]): Checkpoint {
@@ -558,259 +558,87 @@ describe('memory lint nudge', () => {
   })
 })
 
-describe('ambient capture', () => {
-  // Named wire-shape subset this suite pins for the ambient note draft — parsed, never cast.
-  const AmbientDraft = z.object({
-    id: z.string(), scope: z.string(), title: z.string(), summary: z.string(),
-    tags: z.array(z.string()), tier: z.string(),
-  })
-
-  function fakeMemoryWrite(calls: Array<{ input: unknown; toolCallId: string | undefined }>, result: { output: unknown; isError: boolean } = { output: { id: 'x' }, isError: false }): ResolvedTool {
+describe('step memory seam', () => {
+  // The executor's whole memory responsibility is WHEN: recall before the first prompt, capture
+  // after the signal. What gets searched, recorded, written and linked belongs to the memory
+  // plugin (plugins/memory/src/step.ts) and is tested there.
+  function fakeMemory(log: { recalled: number[]; captured: unknown[] }, notes: NoteSummary[] = []) {
     return {
-      ref: 'memory/write',
-      name: 'memory_write',
-      description: 'fake memory_write',
-      inputSchema: { type: 'object', properties: {} },
-      execute: async (input, toolCallId) => { calls.push({ input, toolCallId }); return result },
+      recall: async (budget: number) => { log.recalled.push(budget); return notes },
+      capture: async (signal: unknown) => { log.captured.push(signal) },
     }
   }
-
-  function withWarnSpy<T>(fn: (warnCalls: unknown[][]) => Promise<T>): Promise<T> {
-    const warnCalls: unknown[][] = []
-    const original = console.warn
-    console.warn = (...args: unknown[]) => { warnCalls.push(args) }
-    return fn(warnCalls).finally(() => { console.warn = original })
-  }
-
-  it('captures a successful signal summary as an expirable plan-scoped note, zero model calls', async () => {
-    const captured: EventDraft[] = []
-    const calls: Array<{ input: unknown; toolCallId: string | undefined }> = []
-    const longSummary = 'x'.repeat(600)
-    const step = stepFixture({ id: 'step1', title: 'Distill findings', instructions: 'do', maxIterations: 3 })
-    const model = scriptModel([
-      { toolCalls: [{ toolCallId: 'c1', toolName: 'signal', input: { outcome: 'success', summary: longSummary } }] },
-    ])
-    const events = await drain(apiLoopExecutor().startTurn(ctx(model, captured, {
-      extraTools: [fakeMemoryWrite(calls)], taskId: 'task-1', step,
-    })))
-    expect(events.at(-1)?.type).toBe('done')
-    // zero model calls: the ambient write is a direct tool invocation, no generateText round trip
-    expect(model.doGenerateCalls).toHaveLength(1)
-    expect(calls).toHaveLength(1)
-    expect(calls[0]!.toolCallId).toBe(`ambient:${step.id}`)
-    const draft = AmbientDraft.parse(calls[0]!.input)
-    expect(draft.id).toBe(slugId(`step ${step.id}`))
-    expect(draft.scope).toBe(planScope('task-1'))
-    expect(draft.title).toBe(step.title)
-    expect(draft.tags).toEqual(['ambient'])
-    expect(draft.tier).toBe(NOTE_TIER.episodic)
-    expect(draft.summary).toBe(longSummary.slice(0, 500))
-    expect(draft.summary).toHaveLength(500)
+  const note = (over: Partial<NoteSummary> = {}): NoteSummary => ({
+    id: 'auth-middleware', scope: 'project', title: 'Auth middleware overview',
+    tier: NOTE_TIER.semantic, categories: [], tags: [], summary: 'Handles session validation.',
+    hits: 0, lastAccessedAt: null, ...over,
   })
+  const signalled = (outcome: 'success' | 'failure', summary: string) =>
+    scriptModel([{ toolCalls: [{ toolCallId: 'c1', toolName: 'signal', input: { outcome, summary } }] }])
 
-  it('captures a FAILURE signal as a distinct negative-knowledge note (own id, failure tag)', async () => {
-    const captured: EventDraft[] = []
-    const calls: Array<{ input: unknown; toolCallId: string | undefined }> = []
-    const step = stepFixture({ id: 'step1', title: 'Distill findings', instructions: 'do', maxIterations: 3 })
-    const model = scriptModel([
-      { toolCalls: [{ toolCallId: 'c1', toolName: 'signal', input: { outcome: 'failure', summary: 'blocked: the API returned 500' } }] },
-    ])
-    const events = await drain(apiLoopExecutor().startTurn(ctx(model, captured, {
-      extraTools: [fakeMemoryWrite(calls)], taskId: 'task-1', step,
-    })))
-    expect(events.at(-1)?.type).toBe('done')
-    expect(calls).toHaveLength(1)
-    expect(calls[0]!.toolCallId).toBe(`ambient-fail:${step.id}`)
-    const draft = AmbientDraft.parse(calls[0]!.input)
-    expect(draft.id).toBe(slugId(`failed step ${step.id}`)) // distinct from the success id → both can coexist
-    expect(draft.id).not.toBe(slugId(`step ${step.id}`))
-    expect(draft.tags).toEqual(['ambient', 'failure'])
-    expect(draft.summary).toBe('blocked: the API returned 500')
-    expect(draft.tier).toBe(NOTE_TIER.episodic)
-  })
-
-  it('ambientCapture: false skips the write entirely', async () => {
-    const captured: EventDraft[] = []
-    const calls: Array<{ input: unknown; toolCallId: string | undefined }> = []
-    const model = scriptModel([
-      { toolCalls: [{ toolCallId: 'c1', toolName: 'signal', input: { outcome: 'success', summary: 'ok' } }] },
-    ])
-    const events = await drain(apiLoopExecutor().startTurn(ctx(model, captured, {
-      extraTools: [fakeMemoryWrite(calls)], taskId: 'task-1', ambientCapture: false,
-    })))
-    expect(events.at(-1)?.type).toBe('done')
-    expect(calls).toHaveLength(0)
-  })
-
-  it('memory_write tool absent → capture is skipped silently, step still succeeds, zero warns', async () => {
-    const captured: EventDraft[] = []
-    const model = scriptModel([
-      { toolCalls: [{ toolCallId: 'c1', toolName: 'signal', input: { outcome: 'success', summary: 'ok' } }] },
-    ])
-    const warnCalls = await withWarnSpy(warns =>
-      drain(apiLoopExecutor().startTurn(ctx(model, captured, { taskId: 'task-1' }))).then(events => {
-        expect(events.at(-1)?.type).toBe('done')
-        return warns
-      }),
-    )
-    expect(warnCalls).toHaveLength(0)
-  })
-
-  it('memory_write returning isError never fails the step — warns once', async () => {
-    const captured: EventDraft[] = []
-    const calls: Array<{ input: unknown; toolCallId: string | undefined }> = []
-    const model = scriptModel([
-      { toolCalls: [{ toolCallId: 'c1', toolName: 'signal', input: { outcome: 'success', summary: 'ok' } }] },
-    ])
-    const warnCalls = await withWarnSpy(warns =>
-      drain(apiLoopExecutor().startTurn(ctx(model, captured, {
-        extraTools: [fakeMemoryWrite(calls, { output: { error: 'degraded tier' }, isError: true })], taskId: 'task-1',
-      }))).then(events => {
-        expect(events.at(-1)?.type).toBe('done')
-        return warns
-      }),
-    )
-    expect(calls).toHaveLength(1)
-    expect(warnCalls).toHaveLength(1)
-  })
-})
-
-describe('knowledge preload', () => {
-  function noteSummary(over: Partial<NoteSummary> = {}): NoteSummary {
-    return {
-      id: 'auth-middleware', scope: 'project', title: 'Auth middleware overview',
-      tier: NOTE_TIER.semantic, categories: [], tags: [], summary: 'Handles session validation.',
-      hits: 0, lastAccessedAt: null, ...over,
-    }
-  }
-
-  // records every query the loop sends and returns one canned envelope for every call —
-  // enough to pin both the single-call and the fallback-call scenarios.
-  function fakeMemorySearch(queries: string[], result: { output: unknown; isError: boolean }): ResolvedTool {
-    const Input = z.object({ query: z.string(), budget: z.number() })
-    return {
-      ref: 'memory/search',
-      name: 'memory_search',
-      description: 'fake memory_search',
-      inputSchema: { type: 'object', properties: {} },
-      execute: async input => { queries.push(Input.parse(input).query); return result },
-    }
-  }
-
-  const distinctiveStep = () => stepFixture({
-    title: 'Refactor authentication middleware handling', instructions: 'do the thing', maxIterations: 3,
-  })
-
-  it('canned notes render a Known project context block into the first prompt', async () => {
+  it('renders what recall returned into the first prompt, inside a checkpoint', async () => {
     const captured: EventDraft[] = []
     const specs: OperationSpec[] = []
-    const queries: string[] = []
-    const note = noteSummary()
-    const search = fakeMemorySearch(queries, { output: { notes: [note], truncated: false, omitted: 0 }, isError: false })
-    const model = scriptModel([
-      { toolCalls: [{ toolCallId: 'c1', toolName: 'signal', input: { outcome: 'success', summary: 'ok' } }] },
-    ])
-    await drain(apiLoopExecutor().startTurn(ctx(model, captured, {
-      step: distinctiveStep(), extraTools: [search], memoryPreloadTokens: 500, operation: makeOperation(captured, specs),
+    const log = { recalled: [] as number[], captured: [] as unknown[] }
+    await drain(apiLoopExecutor().startTurn(ctx(signalled('success', 'ok'), captured, {
+      memory: fakeMemory(log, [note()]), memoryPreloadTokens: 500, operation: makeOperation(captured, specs),
     })))
+    expect(log.recalled).toEqual([500])
     const prompt = JSON.stringify(specs[0]?.before)
     expect(prompt).toContain('# Known project context (ids — memory_read for detail, pass scope where shown, verify before relying)')
-    expect(prompt).toContain(note.id)
-    expect(prompt).toContain(note.summary)
-    // project-scope note (the default) renders its bare id — no scope qualifier
-    expect(prompt).toContain(`${note.id} — ${note.title}: ${note.summary}`)
-    // placed between deps and the knowledge protocol
+    expect(prompt).toContain('auth-middleware — Auth middleware overview: Handles session validation.')
     expect(prompt.indexOf('Known project context')).toBeLessThan(prompt.indexOf('Project knowledge protocol'))
-    // semantic-first: the primary query is the step's full intent (title + instructions); one non-empty call suffices
-    expect(queries).toEqual(['Refactor authentication middleware handling\ndo the thing'])
   })
 
-  it('a non-project-scope note renders its id qualified with scope; a project-scope note stays bare', async () => {
+  it('a non-project-scope note renders its id qualified with scope', async () => {
     const captured: EventDraft[] = []
     const specs: OperationSpec[] = []
-    const queries: string[] = []
-    const planNote = noteSummary({ id: 'plan-note', scope: planScope('task-1'), title: 'Plan-local finding', summary: 'Only relevant to this plan.' })
-    const projectNote = noteSummary({ id: 'project-note', scope: 'project', title: 'Durable fact', summary: 'True project-wide.' })
-    const search = fakeMemorySearch(queries, { output: { notes: [planNote, projectNote], truncated: false, omitted: 0 }, isError: false })
-    const model = scriptModel([
-      { toolCalls: [{ toolCallId: 'c1', toolName: 'signal', input: { outcome: 'success', summary: 'ok' } }] },
-    ])
-    await drain(apiLoopExecutor().startTurn(ctx(model, captured, {
-      step: distinctiveStep(), extraTools: [search], memoryPreloadTokens: 500, operation: makeOperation(captured, specs),
+    const log = { recalled: [] as number[], captured: [] as unknown[] }
+    await drain(apiLoopExecutor().startTurn(ctx(signalled('success', 'ok'), captured, {
+      memory: fakeMemory(log, [note({ id: 'plan-note', scope: planScope('task-1') }), note()]),
+      memoryPreloadTokens: 500, operation: makeOperation(captured, specs),
     })))
     const prompt = JSON.stringify(specs[0]?.before)
-    expect(prompt).toContain(`${planNote.id} (scope: ${planNote.scope}) — ${planNote.title}: ${planNote.summary}`)
-    expect(prompt).toContain(`${projectNote.id} — ${projectNote.title}: ${projectNote.summary}`)
-    expect(prompt).not.toContain(`${projectNote.id} (scope:`)
+    expect(prompt).toContain(`plan-note (scope: ${planScope('task-1')})`)
+    expect(prompt).not.toContain('auth-middleware (scope:')
   })
 
-  it('memoryPreloadTokens: 0 skips preload entirely — no search call, no block', async () => {
+  it('recall returning nothing leaves the prompt unchanged', async () => {
     const captured: EventDraft[] = []
     const specs: OperationSpec[] = []
-    const queries: string[] = []
-    const search = fakeMemorySearch(queries, { output: { notes: [noteSummary()], truncated: false, omitted: 0 }, isError: false })
-    const model = scriptModel([
-      { toolCalls: [{ toolCallId: 'c1', toolName: 'signal', input: { outcome: 'success', summary: 'ok' } }] },
-    ])
-    await drain(apiLoopExecutor().startTurn(ctx(model, captured, {
-      step: distinctiveStep(), extraTools: [search], memoryPreloadTokens: 0, operation: makeOperation(captured, specs),
+    const log = { recalled: [] as number[], captured: [] as unknown[] }
+    await drain(apiLoopExecutor().startTurn(ctx(signalled('success', 'ok'), captured, {
+      memory: fakeMemory(log), memoryPreloadTokens: 500, operation: makeOperation(captured, specs),
     })))
-    const prompt = JSON.stringify(specs[0]?.before)
-    expect(prompt).not.toContain('# Known project context (')
-    expect(queries).toHaveLength(0)
+    expect(JSON.stringify(specs[0]?.before)).not.toContain('# Known project context (')
   })
 
-  it('an empty result falls back once to the single longest term; still empty → no block', async () => {
+  it('memoryPreloadTokens 0 never calls recall', async () => {
     const captured: EventDraft[] = []
-    const specs: OperationSpec[] = []
-    const queries: string[] = []
-    const search = fakeMemorySearch(queries, { output: { notes: [], truncated: false, omitted: 0, note: 'no note matched' }, isError: false })
-    const model = scriptModel([
-      { toolCalls: [{ toolCallId: 'c1', toolName: 'signal', input: { outcome: 'success', summary: 'ok' } }] },
-    ])
-    await drain(apiLoopExecutor().startTurn(ctx(model, captured, {
-      step: distinctiveStep(), extraTools: [search], memoryPreloadTokens: 500, operation: makeOperation(captured, specs),
+    const log = { recalled: [] as number[], captured: [] as unknown[] }
+    await drain(apiLoopExecutor().startTurn(ctx(signalled('success', 'ok'), captured, {
+      memory: fakeMemory(log, [note()]), memoryPreloadTokens: 0,
     })))
-    const prompt = JSON.stringify(specs[0]?.before)
-    expect(prompt).not.toContain('# Known project context (')
-    // intent query first, then the ≤3 title terms, then the single longest term — all empty here
-    expect(queries).toEqual(['Refactor authentication middleware handling\ndo the thing', 'refactor authentication middleware', 'authentication'])
+    expect(log.recalled).toEqual([])
   })
 
-  it('memory_search isError → preload skips silently, the step still proceeds', async () => {
+  it('hands the signal to capture — success and failure alike', async () => {
+    for (const outcome of ['success', 'failure'] as const) {
+      const captured: EventDraft[] = []
+      const log = { recalled: [] as number[], captured: [] as unknown[] }
+      await drain(apiLoopExecutor().startTurn(ctx(signalled(outcome, 'what happened'), captured, {
+        memory: fakeMemory(log), taskId: 'task-1',
+      })))
+      expect(log.captured).toEqual([expect.objectContaining({ outcome, summary: 'what happened' })])
+    }
+  })
+
+  it('no memory on the context: the step runs to done and nothing is recalled or captured', async () => {
     const captured: EventDraft[] = []
-    const queries: string[] = []
-    const search = fakeMemorySearch(queries, { output: { error: 'degraded tier' }, isError: true })
-    const model = scriptModel([
-      { toolCalls: [{ toolCallId: 'c1', toolName: 'signal', input: { outcome: 'success', summary: 'ok' } }] },
-    ])
-    const events = await drain(apiLoopExecutor().startTurn(ctx(model, captured, {
-      step: distinctiveStep(), extraTools: [search], memoryPreloadTokens: 500,
+    const events = await drain(apiLoopExecutor().startTurn(ctx(signalled('success', 'ok'), captured, {
+      memoryPreloadTokens: 500,
     })))
     expect(events.at(-1)?.type).toBe('done')
-  })
-
-  it('no memory_search tool on ctx → preload is skipped, prompt unchanged', async () => {
-    const captured: EventDraft[] = []
-    const specs: OperationSpec[] = []
-    const model = scriptModel([
-      { toolCalls: [{ toolCallId: 'c1', toolName: 'signal', input: { outcome: 'success', summary: 'ok' } }] },
-    ])
-    await drain(apiLoopExecutor().startTurn(ctx(model, captured, {
-      step: distinctiveStep(), memoryPreloadTokens: 500, operation: makeOperation(captured, specs),
-    })))
-    const prompt = JSON.stringify(specs[0]?.before)
-    expect(prompt).not.toContain('# Known project context (')
-  })
-})
-
-describe('deriveQueryTerms', () => {
-  it('drops stopwords and words under 4 chars, keeps at most 3 title terms in order', () => {
-    expect(deriveQueryTerms('Refactor authentication middleware handling requests'))
-      .toEqual(['refactor', 'authentication', 'middleware'])
-    expect(deriveQueryTerms('Fix it')).toEqual([])
-    expect(deriveQueryTerms('s1')).toEqual([])
-    expect(deriveQueryTerms('Update the config for this and that')).toEqual(['update', 'config'])
   })
 })
 

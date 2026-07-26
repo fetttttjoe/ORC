@@ -35,8 +35,15 @@ describe('validatePlan', () => {
   it('accepts multi-step when any dependency exists', () => {
     expect(validatePlan(plan([step('a'), step('b', ['a'])]))).toEqual({ ok: true })
   })
-  it('accepts all-parallel steps when a verify step exists', () => {
-    expect(validatePlan(plan([step('a'), step('b'), step('verify')]))).toEqual({ ok: true })
+  // Was: an all-parallel plan was accepted whenever a step named 'verify' existed. That exemption
+  // is only reachable when the verify step is itself unordered — which is the defect, reproduced
+  // live on 2026-07-26. A verify step earns the plan nothing unless it DEPENDS on the work.
+  it('an unordered verify step does not rescue an all-parallel plan', () => {
+    const r = validatePlan(plan([step('a'), step('b'), step('verify')]))
+    expect(r.ok).toBe(false)
+  })
+  it('accepts a verify step that depends on the work it checks', () => {
+    expect(validatePlan(plan([step('a'), step('b'), step('verify', ['a', 'b'])]))).toEqual({ ok: true })
   })
   it('accepts a single dependency-free step', () => {
     expect(validatePlan(plan([step('only')]))).toEqual({ ok: true })
@@ -98,3 +105,36 @@ describe('ChildPlanStep.modelRef', () => {
   })
 })
 
+
+// Reproduced live 2026-07-26: a grounded plan froze `draft` and `verify` with no dependency and the
+// SAME zone. They ran in one wave, verify audited a file draft had not written yet, and the run
+// reported done. The all-parallel guard already existed but exempted any plan containing a step
+// named 'verify' — an exemption only reachable when that verify step is itself unordered.
+describe('plan shape defects that cause races', () => {
+  const step = (id: string, over: Partial<PlanStep> = {}): PlanStep =>
+    stepFixture({ id, title: id, instructions: 'x', dependsOn: [], zone: [], ...over })
+  const check = (steps: PlanStep[]) => validatePlan({ taskId: 't', version: 1, strategyRef: 'split', costEstimateUSD: null, steps })
+
+  it('an unordered verify step no longer exempts an all-parallel plan', () => {
+    const r = check([step('draft'), step('verify')])
+    expect(r.ok).toBe(false)
+    if (!r.ok) expect(r.errors.join(' ')).toMatch(/all parallel/)
+  })
+
+  it('two concurrent steps writing the same zone are refused', () => {
+    const r = check([
+      step('draft', { zone: ['docs/page.md'] }),
+      step('other', { dependsOn: ['draft'] }),
+      step('verify', { zone: ['docs/page.md'] }),
+    ])
+    expect(r.ok).toBe(false)
+    if (!r.ok) expect(r.errors.join(' ')).toMatch(/docs\/page\.md/)
+  })
+
+  it('the same zone is fine once one step depends on the other', () => {
+    expect(check([
+      step('draft', { zone: ['docs/page.md'] }),
+      step('verify', { zone: ['docs/page.md'], dependsOn: ['draft'] }),
+    ]).ok).toBe(true)
+  })
+})

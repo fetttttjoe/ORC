@@ -38,7 +38,8 @@ export function finalizePlanTool(opts: {
         return { output: { error: `finalize_plan is only valid for a grounded-plan's '${PLAN_STEP_ROLE}' step` }, isError: true }
       try {
         const notes = await kernel.listPlanNotes(p.taskId)
-        if (!notes.some(n => n.id === MASTERPLAN_NOTE_ID))
+        const master = notes.find(n => n.id === MASTERPLAN_NOTE_ID)
+        if (!master)
           return { output: { error: `no '${MASTERPLAN_NOTE_ID}' note in scope '${planScope(p.taskId)}' — author the plan-note graph first` }, isError: true }
         const currentHash = planGraphHash(notes)
         const approved = await kernel.approvedPlanHash(p.taskId, p.runToken)
@@ -53,7 +54,6 @@ export function finalizePlanTool(opts: {
           return { output: { error: `the plan-note graph changed after approval${what} — ask the human to approve it again, then call finalize_plan without editing in between` }, isError: true }
         }
         const plan = instantiateFrozenPlan(MASTERPLAN_NOTE_ID, notes)
-        const master = notes.find(n => n.id === MASTERPLAN_NOTE_ID)!
         const r = await kernel.proposeSplit({
           parentTaskId: p.taskId, stepId: p.stepId, runToken: p.runToken,
           toolCallId: toolCallId ?? randomUUID(),

@@ -47,7 +47,7 @@ export class SigmaRenderer implements GraphRenderer {
       edgeReducer: (edge, data) => {
         if (!this.focusSet) return data
         const [s, t] = this.graph.extremities(edge)
-        return this.focusSet.has(s!) && this.focusSet.has(t!) ? data : { ...data, color: '#1a1a20' }
+        return s !== undefined && t !== undefined && this.focusSet.has(s) && this.focusSet.has(t) ? data : { ...data, color: '#1a1a20' }
       },
     })
     this.sigma.on('clickNode', ({ node }) => this.clickCb?.(node))

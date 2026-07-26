@@ -1,6 +1,6 @@
 import { afterAll, describe, expect, it } from 'bun:test'
 import { RecordId, Surreal } from 'surrealdb'
-import { EVENT_KIND, LINK_KIND, MEMORY_ACCESS, MemoryScope, isRecord, type AccessVia, type EventKind, type EventRecord, type MemoryAccessMode, type MemoryAuthor, type MemoryNote, type NoteView } from '@orc/contracts'
+import { EVENT_KIND, LINK_KIND, MEMORY_ACCESS, MemoryScope, PROJECT_NAME_NOTE_ID, isRecord, type AccessVia, type EventKind, type EventRecord, type MemoryAccessMode, type MemoryAuthor, type MemoryNote, type NoteView } from '@orc/contracts'
 import { SurrealMemory } from './surreal'
 import { eventFixture } from '@orc/contracts/fixtures'
 import { createTestSurreal } from './test-helpers'
@@ -437,4 +437,17 @@ describe('SurrealMemory.applyEvent', () => {
     expect(ranked.find(n => n.id === 'act-b')!.activation).toBe(0)
     await m.close()
   })
+})
+
+// The project's display name and working directory are chat infrastructure stored as notes. They
+// are hidden from the graph view, but retrieval had never heard of them — so a real run handed an
+// agent 'ui-project-name' as context and then cited it as provenance.
+it('search never returns ui-metadata notes; get still resolves them by id', async () => {
+  const t = await createTestSurreal(); const mem = await SurrealMemory.open(t)
+  try {
+    await mem.applyEvent(written(1, note({ id: PROJECT_NAME_NOTE_ID, title: 'orc-sim', summary: 'display name for the project chat' })))
+    await mem.applyEvent(written(2, note({ id: 'real-note', title: 'orc-sim architecture', summary: 'display name and other things' })))
+    expect((await mem.search('orc-sim')).map(n => n.id)).toEqual(['real-note'])
+    expect((await mem.get(PROJECT_NAME_NOTE_ID))?.id).toBe(PROJECT_NAME_NOTE_ID)
+  } finally { await mem.close(); await t.drop() }
 })

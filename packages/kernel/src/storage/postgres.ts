@@ -10,7 +10,7 @@ export type Tx = Parameters<Parameters<NodePgDatabase['transaction']>[0]>[0]
 // The shared append wake-up channel and listener backoff — owned here (the Postgres owner)
 // so EventLog.subscribe and watchProjectIds speak through one declaration, never two literals.
 export const NOTIFY_CHANNEL = 'orc_events'
-export const RECONNECT_DELAYS_MS = [100, 200, 400, 800, 1600, 3000]
+export const RECONNECT_DELAYS_MS: readonly [number, ...number[]] = [100, 200, 400, 800, 1600, 3000]
 
 // The one Postgres owner: pool, project binding, redaction, write serialization.
 export class PostgresStore {
@@ -99,7 +99,7 @@ export async function watchProjectIds(url: string, onWake: (ids: string[]) => vo
   }
   const scheduleReconnect = (): void => {
     if (closed || reconnectTimer !== null) return
-    const delay = RECONNECT_DELAYS_MS[Math.min(backoff, RECONNECT_DELAYS_MS.length - 1)]!
+    const delay = RECONNECT_DELAYS_MS[Math.min(backoff, RECONNECT_DELAYS_MS.length - 1)] ?? RECONNECT_DELAYS_MS[0]
     backoff += 1
     reconnectTimer = setTimeout(() => { reconnectTimer = null; void connect(false) }, delay)
   }

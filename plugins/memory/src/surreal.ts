@@ -2,10 +2,10 @@ import { z } from 'zod'
 import { RecordId, Surreal } from 'surrealdb'
 import { edge, orm, table, t } from 'surqlize'
 import {
-  activation, activationBoost, DEFAULT_HALF_LIFE_DAYS,
-  deriveNoteProvenance, EDGE_DIRECTION, EVENT_KIND, LINK_KINDS, NOTE_KINDS, MemoryScope,
+  activation, activationBoost, bumpAccess, DEFAULT_HALF_LIFE_DAYS,
+  deriveNoteProvenance, EDGE_DIRECTION, EVENT_KIND, LINK_KINDS, NOTE_KINDS, MemoryScope, viaEdge,
   MemoryAccessedPayload, MemoryDeletedPayload, MemoryNote, MemoryWrittenPayload,
-  SEARCH_MODE, errorMessage, inferTier, noteKey, NoteTier,
+  SEARCH_MODE, errorMessage, inferTier, isUiMetaNote, noteKey, NoteTier,
   type EmbeddingProvider, type EventRecord, type NeighborQuery, type MemoryFilter, type NoteFields,
   type MemorySearchOpts, type NeighborResult, type NoteSummary,
   linkLookupScopes,
@@ -231,18 +231,14 @@ export class SurrealMemory {
         // since deleted) must not conjure a row carrying nothing but a counter. lastAccessedAt is
         // the event ts, so a replay lands on the same value the first pass did.
         const ex = (await tx.select(Tb.Note, k))[0]
-        if (ex) await tx.upsert(Tb.Note, k).set({ hits: (ex.hits ?? 0) + 1, lastAccessedAt: e.ts })
-        // the walked EDGE strengthens too, not just the node — same canonicalization as
-        // foldEdgeStats (contracts/memory.ts): direction 'out' means seed→id, so the stored
-        // (fromId, toId) pair is (seed, id); 'in' reverses it. No row matched (edge since
-        // removed, or this access carries no provenance) → no-op.
-        if (p.via) {
-          const { seed, kind, direction } = p.via
-          const fromId = direction === EDGE_DIRECTION.out ? seed : p.id
-          const toId = direction === EDGE_DIRECTION.out ? p.id : seed
+        if (ex) await tx.upsert(Tb.Note, k).set(bumpAccess(ex, e.ts))
+        // the walked EDGE strengthens too, not just the node. No row matched (edge since removed,
+        // or this access carries no provenance) → no-op.
+        const edge = viaEdge(p)
+        if (edge) {
           const link = (await tx.select(Tb.Link).where(l =>
-            l.scope.eq(p.scope).and(l.kind.eq(kind)).and(l.fromId.eq(fromId)).and(l.toId.eq(toId))))[0]
-          if (link) await tx.update(link.id).set({ hits: (link.hits ?? 0) + 1, lastAccessedAt: e.ts })
+            l.scope.eq(edge.scope).and(l.kind.eq(edge.kind)).and(l.fromId.eq(edge.from)).and(l.toId.eq(edge.to))))[0]
+          if (link) await tx.update(link.id).set(bumpAccess(link, e.ts))
         }
       } else if (e.kind === EVENT_KIND.memory_deleted) {
         const parsed = MemoryDeletedPayload.safeParse(e.payload)
@@ -327,14 +323,16 @@ export class SurrealMemory {
   }
 
   async search(query: string, filter: MemoryFilter = {}, opts: MemorySearchOpts = {}): Promise<NoteSummary[]> {
+    // ui-metadata is infrastructure, not knowledge — never a search hit, still readable by id
+    const knowledge = (ns: NoteSummary[]): NoteSummary[] => ns.filter(n => !isUiMetaNote(n.scope, n.id))
     // No embedder configured → keyword is the only mode that can run, whatever was requested.
     const mode = this.embedder ? (opts.mode ?? SEARCH_MODE.hybrid) : SEARCH_MODE.keyword
-    if (mode === SEARCH_MODE.keyword) return this.keywordSearch(query, filter)
-    const semantic = await this.semanticSearch(query, filter)
+    if (mode === SEARCH_MODE.keyword) return knowledge(await this.keywordSearch(query, filter))
+    const semantic = knowledge(await this.semanticSearch(query, filter))
     if (mode === SEARCH_MODE.semantic) return semantic
     // hybrid: fuse the two orderings by reciprocal rank, keyed by (scope,id) since ids repeat
     // across scopes. A note found by only one arm still ranks; agreement between arms wins.
-    const keyword = await this.keywordSearch(query, filter)
+    const keyword = knowledge(await this.keywordSearch(query, filter))
     const byKey = new Map<string, NoteSummary>()
     for (const n of [...semantic, ...keyword]) byKey.set(noteKey(n.scope, n.id), n)
     const fused = rrfFuse([keyword.map(n => noteKey(n.scope, n.id)), semantic.map(n => noteKey(n.scope, n.id))])
@@ -356,11 +354,15 @@ export class SurrealMemory {
       if (!qv) return []
       // raw query: surqlize has no vector::* select builder — the same escape hatch open() uses for
       // DEFINE TABLE. $q binds the query vector; rows without an embedding are excluded.
+      // the scope predicate belongs in the WHERE, ahead of ORDER BY/LIMIT — see MemoryFilter
+      const scopes = filter.scope === undefined ? [] : [filter.scope].flat()
       const res = await this.surreal.query(
         `SELECT noteId, scope, title, tier, categories, tags, summary, hits, lastAccessedAt,`
         + ` vector::similarity::cosine(embedding, $q) AS score`
-        + ` FROM ${Tb.Note} WHERE embedding != NONE ORDER BY score DESC LIMIT 50`,
-        { q: qv },
+        + ` FROM ${Tb.Note} WHERE embedding != NONE`
+        + (scopes.length > 0 ? ` AND scope IN $scopes` : '')
+        + ` ORDER BY score DESC LIMIT 50`,
+        { q: qv, ...(scopes.length > 0 && { scopes }) },
       )
       const rows = SemanticRow.array().parse(Array.isArray(res) ? res[0] : res)
       // use makes memory more findable: re-rank cosine by activation heat, mirroring neighbors() so a
@@ -372,8 +374,7 @@ export class SurrealMemory {
       const heat = (r: { hits?: number; lastAccessedAt?: string | null }): number =>
         activationBoost(activation({ hits: r.hits ?? 0, lastAccessedAt: r.lastAccessedAt ?? null }, now))
       return rows
-        .filter(r => (!filter.scope || r.scope === filter.scope)
-          && (!filter.tier || r.tier === filter.tier)
+        .filter(r => (!filter.tier || r.tier === filter.tier)
           && (!filter.category || (r.categories ?? []).includes(filter.category))
           && (!filter.tag || r.tags.includes(filter.tag)))
         .map(r => ({ r, s: (r.score + 1) * heat(r) }))
@@ -439,7 +440,9 @@ export class SurrealMemory {
     // always-true seed (SurrealQL needs a base predicate to `.and()` onto; `deleted` used to
     // serve this role, but there are no soft-deleted rows anymore — see applyDeleted).
     let cond = n.scope.eq(n.scope)
-    if (filter.scope) cond = cond.and(n.scope.eq(filter.scope))
+    const [firstScope, ...moreScopes] = filter.scope === undefined ? [] : [filter.scope].flat()
+    if (firstScope !== undefined)
+      cond = cond.and(moreScopes.reduce((acc, sc) => acc.or(n.scope.eq(sc)), n.scope.eq(firstScope)))
     // the stored column, never an inferred one: a row from before the split has no tier, and
     // `orc memory rebuild` is what gives it one — guessing here would answer a lane question
     // with a fabricated lane.

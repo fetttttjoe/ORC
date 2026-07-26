@@ -5,14 +5,15 @@ import {
   EVENT_KIND, FAILURE_CLASS, RUN_OUTCOME, SIGNAL_OUTCOME, TASK_STATUS, UNIFIED_EVENT_TYPE,
   classifiedError, errorMessage, failureClassOf, isTerminalError, resolveModel, costUSDFor,
   type AgentExecutor, type Checkpoint, type EventDraft, type ExecutionPort, type ExecutorContext,
-  type FailureClass, type LoadedSkill, type ModelProvider, type OperationCheckpoint, type Plan,
-  type ResolvedTool, type RunHandle, type RunOutcome, type Signal, type SplitResult, type ToolSource,
+  type FailureClass, type LoadedSkill, type ModelProvider, type OperationCheckpoint, type Plan, type PlanStep,
+  type ResolvedTool, type RunHandle, type RunOutcome, type Signal, type SplitResult, type StepMemory, type TaskStatus, type ToolSource,
 } from '@orc/contracts'
-import { type Storage, type EventLogOps } from '../storage'
+import { type EventLog, type Storage, type EventLogOps } from '../storage'
+import { openLiveState, type LiveState } from '../live-state'
 import { acquireRuntimeLock, type RuntimeLock } from '../storage/runtime-lock'
 import { groundedPlanOmission } from './strategies/grounded-plan'
 import { verifyArtifacts } from './artifacts'
-import { fold, completedStepIds, nextAttempts, remainingBudget, inheritedCwd, runCwd, type State } from '../projections'
+import { fold, ancestorTaskIds, completedStepIds, nextAttempts, remainingBudget, inheritedCwd, runCwd, type State } from '../projections'
 import { Kernel } from '../kernel'
 import { KERNEL_ERROR_CODE, KernelError } from '../errors'
 import { readySteps, runOutcomeOf } from './interpreter'
@@ -24,6 +25,8 @@ export interface DbosPort extends ExecutionPort {
    *  the one channel DBOS actually reads it from (globalParams.executorID freezes at module
    *  import, so writing DBOS__VMID inside launch() lands too late). The unit DBOS recovery scopes to. */
   executorId: string
+  /** Folded project state, served from the live index once launched. Advisory reads only — see LiveState. */
+  projectState(): Promise<State>
   launch(): Promise<void>
   // `drain: false` skips waiting for DBOS to quiesce. A workflow parked at a human gate is not
   // in-flight work — it is durable state waiting on a person — but DBOS cannot tell the difference
@@ -94,6 +97,22 @@ export async function appendRunInit(tx: EventLogOps, args: RunArgs, workflowId: 
     })
 }
 
+// Stamp `to` on a task that is still 'running', in ONE locked transaction. Reading the status in a
+// checkpoint's fn and appending from its toEvents would be TOCTOU: makeCheckpoint opens a SEPARATE
+// transaction for its drafts, so an `orc cancel` could commit running→cancelled in between and this
+// would append running→done on top of it (fold is last-seq-wins with no `from` check).
+async function stampIfRunning(log: EventLog, taskId: string, to: TaskStatus, workflowId: string, name: string): Promise<void> {
+  await log.transaction(async tx => {
+    const status = fold(await tx.byTask(taskId)).tasks.get(taskId)?.status
+    if (status !== TASK_STATUS.running) return // a cancel already stamped a terminal status
+    await tx.append({
+      taskId, stepId: null, runToken: workflowId, kind: EVENT_KIND.task_status_changed,
+      payload: { taskId, from: TASK_STATUS.running, to },
+      idempotencyKey: `${workflowId}:${name}:task_status_changed`,
+    })
+  })
+}
+
 // Drive an async generator to completion, GUARANTEEING gen.return() runs in a finally — so the
 // generator's own finally (e.g. loop.ts releaseWriteClaims) executes even when the driver throws
 // while the generator is suspended at a yield (a cancelled gate recv). onEvent returns the value to
@@ -122,10 +141,15 @@ export async function createDbosPort(opts: {
   executors: Map<string, AgentExecutor<unknown>>
   skills?: { load(name: string): Promise<LoadedSkill> }
   tools?: ToolSource
+  // The per-step plugin surface: the tools a step's model may call, plus the step's own memory
+  // (contracts StepMemory) when a memory backend is wired. `step` travels whole so a binding can
+  // read title/dependsOn without the port re-deriving them.
   stepTools?: (p: {
     taskId: string; stepId: string; runToken: string; role: string; executor: string; model: string
-    modelRef: string; maxIterations: number; workspaceDir: string
-  }) => ResolvedTool[]
+    modelRef: string; maxIterations: number; workspaceDir: string; step: PlanStep
+    // nearest first (parent, …, root) — a split child's decomposition lives in its PARENT's scopes
+    ancestorTaskIds: string[]
+  }) => ResolvedTool[] | { tools: ResolvedTool[]; memory?: StepMemory }
   executorId?: string
 }): Promise<DbosPort> {
   const { config, providers, executors, skills, tools, stepTools } = opts
@@ -135,15 +159,24 @@ export async function createDbosPort(opts: {
   const kernel = new Kernel(log)
 
   // DBOS serializes EVERY step's return value into its own operation_outputs table
-  // (dbos-executor's recordOperationResult), in the DBOS system database — same Postgres
-  // cluster and credentials as the event log, but NOT behind EventLog.append's redaction.
-  // Raw tool results and full model turns pass through here, so this is the one place they
-  // leave a step and must be scrubbed. Wrapping in an object routes arrays and primitives
-  // through the redactor's recursive walk while preserving the caller's shape.
-  const redactStepResult = <T>(r: T): T =>
-    r === null || typeof r !== 'object' ? r : (redact({ v: r } as Record<string, unknown>).v as T)
+  // (dbos-executor's recordOperationResult), in the DBOS system database — same Postgres cluster
+  // and credentials as the event log, but NOT behind EventLog.append's redaction. Raw tool results
+  // and full model turns pass through here, so this is the one place they leave a step.
+  const redactStepResult = <T>(r: T): T => redact.value(r)
 
   const foldState = async (taskId: string): Promise<State> => fold(await log.byTask(taskId))
+
+  // Whole-project reads that byTask cannot answer (ancestor chains, "is anything running").
+  // Advisory only — a few hundred ms of subscription lag is acceptable for a spend cap that is
+  // already checked before the spend it bounds, and ancestors always predate the task asking.
+  // Throws rather than falling back to a whole-log fold: every caller runs inside or after launch,
+  // so a null here is a wiring bug, and silently reverting to the scan this exists to remove would
+  // hide it as a slowdown instead of surfacing it.
+  let live: LiveState | null = null
+  const projectState = async (): Promise<State> => {
+    if (!live) throw new Error('projectState requires a launched port')
+    return live.current()
+  }
 
   // terminal errors (e.g. a 4xx model failure) must NOT retry — see terminalError in @orc/contracts
   const RETRY_POLICY = { retriesAllowed: true, maxAttempts: 4, intervalSeconds: 1, backoffRate: 2, shouldRetry: (e: unknown) => !isTerminalError(e) }
@@ -259,12 +292,18 @@ export async function createDbosPort(opts: {
         }
       }
 
-      if (stepTools)
-        extraTools = [...extraTools, ...stepTools({
+      let stepMemory: StepMemory | undefined
+      if (stepTools) {
+        const bound = stepTools({
           taskId: args.taskId, stepId: args.stepId, runToken,
           role: init.step.role, executor: init.step.executorRef, model: modelId,
           modelRef: init.step.modelRef, maxIterations: init.step.maxIterations, workspaceDir,
-        })]
+          step: init.step, ancestorTaskIds: ancestorTaskIds(await projectState(), args.taskId),
+        })
+        const { tools: stepScoped, memory } = Array.isArray(bound) ? { tools: bound, memory: undefined } : bound
+        extraTools = [...extraTools, ...stepScoped]
+        stepMemory = memory
+      }
 
       const ctx: ExecutorContext<unknown> = {
         step: init.step,
@@ -276,8 +315,8 @@ export async function createDbosPort(opts: {
         runToken,
         workspaceDir,
         taskId: args.taskId,
-        ambientCapture: config.ambientCapture,
         memoryPreloadTokens: config.memoryPreloadTokens,
+        ...(stepMemory && { memory: stepMemory }),
         // prices usage drafts on the way through: fill costUSD from the provider table
         checkpoint: (name, fn, toEvents) =>
           checkpoint(name, fn, toEvents ? r => toEvents(r).map(d => priceDraft(d, provider, modelId)) : undefined),
@@ -286,7 +325,7 @@ export async function createDbosPort(opts: {
         // Enforce spend at the point it happens across the whole ancestor chain (projections.remainingBudget):
         // grants are clamped at propose time but never reserved, so without an ancestor check N sibling splits
         // could each spend the full parent budget. min-over-ancestors shares it by construction.
-        budgetRemainingUSD: async () => remainingBudget(fold(await log.all()), args.taskId),
+        budgetRemainingUSD: async () => remainingBudget(await projectState(), args.taskId),
       }
 
       // a holder, not two `let`s: the callback below assigns these, and TS control-flow can't see a
@@ -453,36 +492,17 @@ export async function createDbosPort(opts: {
           for (const s of wave) {
             started.add(s.id)
             const handle = await DBOS.startWorkflow(stepWorkflow, {
-              workflowID: stepWorkflowId(args.taskId, s.id, init.attempts[s.id]!),
+              workflowID: stepWorkflowId(args.taskId, s.id, init.attempts[s.id] ?? 1),
               queueName: agentQueue(init.depth),
-            })({ taskId: args.taskId, stepId: s.id, planVersion: args.planVersion, attempt: init.attempts[s.id]!, cwd: args.cwd })
+            })({ taskId: args.taskId, stepId: s.id, planVersion: args.planVersion, attempt: init.attempts[s.id] ?? 1, cwd: args.cwd })
             results.push(handle.getResult())
           }
           for (const r of await Promise.all(results)) (r.ok ? done : failed).add(r.stepId)
         }
 
         const outcome = runOutcomeOf(plan, done)
-        // The status re-check and the terminal append happen in ONE transaction, deliberately not
-        // via the checkpoint's draft path: makeCheckpoint runs fn() and THEN opens a separate
-        // transaction for its drafts, so reading the status in fn and appending from toEvents is
-        // TOCTOU. An `orc cancel` landing in that window takes the project lock, re-checks, and
-        // appends running→cancelled — and this would then append running→done on top of it. fold
-        // is last-seq-wins with no `from` check (projections.ts), so the task would report done
-        // while the router had already told the parent it was cancelled. cancelOne reads and
-        // writes under one lock; this now matches it.
         await checkpoint('finish', async () => {
-          await log.transaction(async tx => {
-            const status = fold(await tx.byTask(args.taskId)).tasks.get(args.taskId)?.status ?? TASK_STATUS.running
-            if (status !== TASK_STATUS.running) return // a cancel already stamped a terminal status
-            await tx.append({
-              taskId: args.taskId, stepId: null, runToken: workflowId,
-              kind: EVENT_KIND.task_status_changed,
-              payload: { taskId: args.taskId, from: TASK_STATUS.running, to: outcome === RUN_OUTCOME.done ? TASK_STATUS.done : TASK_STATUS.blocked },
-              usage: null,
-              // same shape makeCheckpoint's drafts use, so a step retry cannot double-append
-              idempotencyKey: `${workflowId}:finish:0:${EVENT_KIND.task_status_changed}`,
-            })
-          })
+          await stampIfRunning(log, args.taskId, outcome === RUN_OUTCOME.done ? TASK_STATUS.done : TASK_STATUS.blocked, workflowId, 'finish')
           return { outcome }
         })
         return outcome
@@ -494,15 +514,7 @@ export async function createDbosPort(opts: {
         // cancelled), surface the original error and let cancelOne own the terminal status.
         try {
           await checkpoint('contain', async () => {
-            await log.transaction(async tx => {
-              const status = fold(await tx.byTask(args.taskId)).tasks.get(args.taskId)?.status
-              if (status === TASK_STATUS.running)
-                await tx.append({
-                  taskId: args.taskId, stepId: null, runToken: workflowId, kind: EVENT_KIND.task_status_changed,
-                  payload: { taskId: args.taskId, from: TASK_STATUS.running, to: TASK_STATUS.blocked },
-                  idempotencyKey: `${workflowId}:contain:task_status_changed`,
-                })
-            })
+            await stampIfRunning(log, args.taskId, TASK_STATUS.blocked, workflowId, 'contain')
             return { contained: true }
           })
         } catch { /* best-effort containment — original error still propagates */ }
@@ -513,10 +525,14 @@ export async function createDbosPort(opts: {
   )
 
   async function startRunAt(taskId: string, retryIndex: number, cwd?: string): Promise<RunHandle> {
-    // a child's cwd is derived from its PARENT's run history, which byTask(taskId) cannot see
-    const state = fold(await log.all())
+    // Admission is a decision, not an advisory read, so it must NOT come from the live index: an
+    // approve lands microseconds before the router asks, and a stale view refuses a run that is
+    // legitimately drivable. Both reads are byTask — indexed and bounded, never the whole log.
+    const state = await foldState(taskId)
     const task = state.tasks.get(taskId)
     if (!task) throw new KernelError(KERNEL_ERROR_CODE.task_not_found, `no task '${taskId}'`)
+    // a child's cwd is derived from its PARENT's run history, which byTask(taskId) cannot see
+    const cwdState = task.parentId ? await foldState(task.parentId) : state
     const approved = state.plans.get(taskId)?.approvedVersion
     if (!approved || (task.status !== TASK_STATUS.approved && task.status !== TASK_STATUS.running && task.status !== TASK_STATUS.blocked))
       throw new KernelError(KERNEL_ERROR_CODE.invalid_transition, `task is '${task.status}' — approve a plan first (orc approve ${taskId})`)
@@ -528,7 +544,7 @@ export async function createDbosPort(opts: {
       // each ENOENT-blind). Explicit --cwd still overrides; projections.runCwd is the ONE rule,
       // shared with startChildRun, so the whole run tree stays in one world no matter which of
       // the two paths reached the child's (deterministic, shared) workflow id first.
-      taskId, planVersion: approved, retryIndex, cwd: runCwd(state, task, cwd, config.dir),
+      taskId, planVersion: approved, retryIndex, cwd: runCwd(cwdState, task, cwd, config.dir),
     })
     return { workflowId: workflowID, wait: () => handle.getResult() }
   }
@@ -559,7 +575,7 @@ export async function createDbosPort(opts: {
       for (const s of plan.steps)
         if (!done.has(s.id))
           // tolerated miss: an attempt that never started has no workflow row to cancel
-          await DBOS.cancelWorkflow(stepWorkflowId(taskId, s.id, attempts[s.id]!)).catch(() => {})
+          await DBOS.cancelWorkflow(stepWorkflowId(taskId, s.id, attempts[s.id] ?? 1)).catch(() => {})
     }
     // the run workflow always exists (run_started recorded its id) — a cancel failure here must
     // surface to the caller, NOT be recorded as a successful cancellation. DBOS.cancelWorkflow on
@@ -579,9 +595,11 @@ export async function createDbosPort(opts: {
   let runtimeLock: RuntimeLock | null = null
   const port: DbosPort = {
     executorId,
+    projectState,
     launch: async () => {
       // before DBOS: recovery is what makes a second runtime destructive, so refuse to become one
       runtimeLock = await acquireRuntimeLock(config.databaseUrl, config.projectId)
+      live = await openLiveState(log)
       // DBOS__APPVERSION pinned from config BEFORE launch so recovery survives rebuilds (spec §4)
       process.env.DBOS__APPVERSION ??= config.appVersion
       DBOS.setConfig({
@@ -609,6 +627,8 @@ export async function createDbosPort(opts: {
         // by anyone else. A long-lived server drains; a command that is exiting anyway does not.
         if (drain) await DBOS.shutdown({ deregister: true })
       } finally {
+        await live?.close()
+        live = null
         await runtimeLock?.release()
         runtimeLock = null
       }

@@ -96,14 +96,34 @@ export function validatePlan(plan: Plan): { ok: true } | { ok: false; errors: st
   for (const s of plan.steps)
     for (const d of s.dependsOn)
       if (!ids.has(d)) errors.push(`step ${s.id} depends on unknown step: ${d}`)
-  // the kernel refuses what the planning skill forbids: a multi-step plan where EVERY step is
-  // parallel (no dependsOn anywhere) and nothing is a 'verify' step shipped once in live testing —
-  // its verification ran in parallel with the work it verified, in one shared worktree
-  if (plan.steps.length > 1
-    && plan.steps.every(s => s.dependsOn.length === 0)
-    && !plan.steps.some(s => s.id === VERIFY_STEP_ID))
+  // A multi-step plan where EVERY step is parallel shipped twice in live testing — verification
+  // running alongside the work it verifies. This once exempted plans containing a '<VERIFY>' step,
+  // but that exemption is only REACHABLE when the verify step is itself unordered, which is the
+  // very defect: a plan froze `draft` and `verify` with no dependency, they ran in one wave, and
+  // verify audited a file draft had not written yet.
+  if (plan.steps.length > 1 && plan.steps.every(s => s.dependsOn.length === 0))
     errors.push(
-      `malformed plan shape: ${plan.steps.length} steps, all parallel (every dependsOn empty) and no '${VERIFY_STEP_ID}' step — declare dependencies between steps or add a final '${VERIFY_STEP_ID}' step`)
+      `malformed plan shape: ${plan.steps.length} steps, all parallel (every dependsOn empty) — declare dependencies between steps, e.g. a final '${VERIFY_STEP_ID}' step that dependsOn the work it checks`)
+  // Concurrent writers to one path are refused mechanically at execution (the zone write-fence), so
+  // a plan that schedules them is a defect the freeze can catch first. Ordering is what makes a
+  // shared zone safe: if neither step transitively depends on the other, they can land in one wave.
+  const dependsOnAll = new Map(plan.steps.map(s => [s.id, new Set(s.dependsOn)] as const))
+  for (let changed = true; changed;) {
+    changed = false
+    for (const [, deps] of dependsOnAll)
+      for (const d of [...deps])
+        for (const t of dependsOnAll.get(d) ?? [])
+          if (!deps.has(t)) { deps.add(t); changed = true }
+  }
+  const ordered = (a: string, b: string): boolean =>
+    (dependsOnAll.get(a)?.has(b) ?? false) || (dependsOnAll.get(b)?.has(a) ?? false)
+  for (const [i, a] of plan.steps.entries())
+    for (const b of plan.steps.slice(i + 1)) {
+      if (ordered(a.id, b.id)) continue
+      const shared = a.zone.filter(z => b.zone.includes(z))
+      if (shared.length > 0)
+        errors.push(`steps '${a.id}' and '${b.id}' can run concurrently and both declare zone ${shared.join(', ')} — order them with dependsOn, or give them separate zones`)
+    }
   if (errors.length > 0) return { ok: false, errors }
 
   // ponytail: O(n^2) fixpoint cycle check — Kahn's with a real queue if plans get huge

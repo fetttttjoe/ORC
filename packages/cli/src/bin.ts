@@ -59,8 +59,9 @@ async function main(): Promise<number> {
       return parse(buildProgram({} as Kernel), process.argv)
 
     const config = requireProject(loadConfig())
-    plugins = await buildPlugins(config)
-    await plugins.host.hooks.emit(HOOK_NAME.session_start)
+    const loaded = await buildPlugins(config)
+    plugins = loaded
+    await loaded.host.hooks.emit(HOOK_NAME.session_start)
     const opened = await openKernel(config.databaseUrl, {
       projectId: config.projectId,
       redactEnv: config.redactEnv,
@@ -70,13 +71,13 @@ async function main(): Promise<number> {
       // runtime. The supervisor's router already delivers every feedback_provided under the same
       // idempotency key (the event's own seq), so this was a duplicate of the delivery that works
       // in both modes — and the only one that could throw where there is nothing to send with.
-      onAppend: e => plugins!.host.hooks.dispatch(HOOK_NAME.event_appended, e),
+      onAppend: e => loaded.host.hooks.dispatch(HOOK_NAME.event_appended, e),
     })
     storage = opened.storage
     return await parse(buildProgram(
       opened.kernel,
-      async () => (runtime.port ??= await buildRuntime({ ...plugins!, config, storage: opened.storage, kernel: opened.kernel })),
-      { host: plugins.host, hub: plugins.hub, config, log: opened.log, storage: opened.storage },
+      async () => (runtime.port ??= await buildRuntime({ ...loaded, config, storage: opened.storage, kernel: opened.kernel })),
+      { host: loaded.host, hub: loaded.hub, config, log: opened.log, storage: opened.storage },
     ), process.argv)
   } finally {
     try {

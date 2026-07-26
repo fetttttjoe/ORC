@@ -75,7 +75,10 @@ export function openPlanEditor(opts: {
     for (const link of graph.getLinks()) {
       const src = String(link.source().id ?? '')
       const tgt = String(link.target().id ?? '')
-      if (src && tgt) (incoming.get(tgt) ?? incoming.set(tgt, []).get(tgt)!).push(src)
+      if (!src || !tgt) continue
+      const preds = incoming.get(tgt) ?? []
+      preds.push(src)
+      incoming.set(tgt, preds)
     }
     for (const s of steps) s.dependsOn = [...new Set(incoming.get(s.id) ?? [])]
   }

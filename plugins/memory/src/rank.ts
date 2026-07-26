@@ -68,8 +68,8 @@ export function rankNeighbors(edges: Edge[], seeds: string[], opts: {
 export function rrfFuse(rankings: string[][], k: number = 60): { id: string; score: number }[] {
   const score = new Map<string, number>()
   for (const list of rankings)
-    for (let rank = 0; rank < list.length; rank++)
-      score.set(list[rank]!, (score.get(list[rank]!) ?? 0) + 1 / (k + rank))
+    for (const [rank, id] of list.entries())
+      score.set(id, (score.get(id) ?? 0) + 1 / (k + rank))
   return [...score.entries()]
     .map(([id, s]) => ({ id, score: s }))
     .sort((a, b) => b.score - a.score || a.id.localeCompare(b.id))

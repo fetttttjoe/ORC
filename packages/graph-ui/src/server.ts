@@ -125,14 +125,14 @@ export function startGraphUi(opts: {
       return Response.json({ error: errorMessage(err) }, { status: 400 })
     }
     const home = projectId === opts.cwdProject?.id
-    const name = home ? opts.cwdProject!.name : projectId.slice(0, 8)
+    const name = home && opts.cwdProject ? opts.cwdProject.name : projectId.slice(0, 8)
     // same fence as /api/actions: the copilot may only mutate the project it runs in
     const mode: CopilotMode = opts.actions === undefined ? 'read-only' : home ? 'act' : 'foreign-project'
     const result = streamText({
       model,
       system: copilotSystemPrompt(name, mode, opts.defaultCwd),
       messages,
-      tools: buildCopilotTools({ sessions, actions: mode === 'act' ? opts.actions! : null, projectId, listModels: cfg.listModels }),
+      tools: buildCopilotTools({ sessions, actions: mode === 'act' ? opts.actions ?? null : null, projectId, listModels: cfg.listModels }),
       stopWhen: stepCountIs(8),
     })
     const enc = new TextEncoder()

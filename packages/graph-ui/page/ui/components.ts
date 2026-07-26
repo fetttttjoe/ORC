@@ -75,7 +75,7 @@ export function toast(text: string, tone: Tone = 'default'): void {
   if (!host) { host = el('div', { class: 'toasts' }); document.body.append(host) }
   const t = el('div', { class: `toast ${tone}` }, text)
   host.append(t)
-  while (host.childElementCount > 4) host.firstElementChild!.remove()
+  while (host.childElementCount > 4) host.firstElementChild?.remove()
   setTimeout(() => t.remove(), 4_000)
 }
 

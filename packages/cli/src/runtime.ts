@@ -1,11 +1,11 @@
-import { errorMessage, HOOK_NAME, type AgentExecutor, type Analyzer, type MemoryAuthor, type ModelProvider, type ResolvedTool } from '@orc/contracts'
+import { errorMessage, HOOK_NAME, type AgentExecutor, type Analyzer, type ModelProvider } from '@orc/contracts'
 import { apiLoopExecutor } from '@orc/executor-api-loop'
 import { createAnthropicProvider } from '@orc/provider-anthropic'
 import { createOpenAIProvider } from '@orc/provider-openai'
 import { createOllamaProvider } from '@orc/provider-ollama'
 import { agentAnalyzer } from '@orc/analyzer-agent'
 import { createMcpHub, type McpHub } from '@orc/mcp-client'
-import { createMemory, createMemoryLifecycle, unavailableMemoryTools, memoryRoleFor, type MemoryLifecycle, type MemoryRole } from '@orc/memory'
+import { createMemory, createMemoryLifecycle, unavailableStepMemory, memoryRoleFor, type BindStep, type MemoryLifecycle } from '@orc/memory'
 import { openMemory } from './memory-open'
 import { buildDistiller } from './consolidation-distiller'
 import { createVaultProjector } from '@orc/vault-projector'
@@ -53,7 +53,7 @@ export async function buildRuntime(
   await projector.start()
   let memory: Awaited<ReturnType<typeof createMemory>> | null = null
   let lifecycle: MemoryLifecycle | null = null
-  let buildMemoryTools: (author: MemoryAuthor, role?: MemoryRole) => ResolvedTool[]
+  let bindStep: BindStep
   try {
     memory = await openMemory({ log, config })
     await memory.projector.start()
@@ -65,24 +65,27 @@ export async function buildRuntime(
     // projection before a consolidation reads the step notes.
     lifecycle = createMemoryLifecycle({ log, store: memory.store, distill: buildDistiller(host.providers, config.memoryConsolidateModel), catchUp: () => memoryProjector.catchUp() })
     await lifecycle.start()
-    buildMemoryTools = memory.buildTools
+    bindStep = memory.bindStep
   } catch (err) {
     const reason = errorMessage(err)
     console.warn(`memory unavailable; continuing in degraded mode: ${reason}`)
-    buildMemoryTools = () => unavailableMemoryTools(reason)
+    bindStep = () => unavailableStepMemory(reason)
   }
 
   const port = await createDbosPort({
     storage, config, executorId: shared?.executorId,
     providers: host.providers, executors: host.executors,
     skills: host.skills, tools: hub,
-    stepTools: p => [
+    stepTools: p => {
       // step role keys the memory role (Task 7): scout/auditor narrow or widen the tool surface
       // + epistemic posture; every other role (e.g. plain worker steps) gets today's verify role.
-      ...buildMemoryTools(
-        { source: 'agent', taskId: p.taskId, stepId: p.stepId, runToken: p.runToken, executor: p.executor, model: p.model, role: p.role },
-        memoryRoleFor(p.role),
-      ),
+      const bound = bindStep({
+        author: { source: 'agent', taskId: p.taskId, stepId: p.stepId, runToken: p.runToken, executor: p.executor, model: p.model, role: p.role },
+        step: p.step, taskId: p.taskId, ancestorTaskIds: p.ancestorTaskIds,
+        role: memoryRoleFor(p.role), ambientCapture: config.ambientCapture,
+      })
+      return { memory: bound.memory, tools: [
+      ...bound.tools,
       // registration-gated inside the factory (like report_coverage): a scout orients, the plan
       // step decomposes — a scout that splits builds a second, unapproved decomposition.
       ...splitTool({ kernel, config: { approvalPolicy: config.approvalPolicy, maxDepth: config.maxDepth }, p }),
@@ -100,7 +103,8 @@ export async function buildRuntime(
       // memory store — but it's still only offered when memory is healthy: with the memory tools
       // degraded the agent can't author a plan-note graph, so a grounded plan is pointless anyway.
       ...(memory ? [finalizePlanTool({ kernel, config: { maxDepth: config.maxDepth }, p })] : []),
-    ],
+      ] }
+    },
   })
   await port.launch()
   host.skills.watch() // hot-index during long-lived runs (spec quality scenario: <1s)

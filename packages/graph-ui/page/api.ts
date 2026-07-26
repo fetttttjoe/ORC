@@ -101,7 +101,8 @@ async function post<T>(endpoint: string, body: unknown): Promise<T> {
 
 // parse an SSE body stream, invoking onData per `data:` block until the stream ends
 async function readSse(res: Response, onData: (data: string) => void): Promise<void> {
-  const reader = res.body!.getReader()
+  if (!res.body) throw new Error(`${res.url}: response carried no body`)
+  const reader = res.body.getReader()
   const dec = new TextDecoder()
   let buf = ''
   for (;;) {

@@ -527,3 +527,49 @@ describe('OperationJournal', () => {
     await s2.close()
   })
 })
+
+// store.write needs ONE note as its merge base, and used to fold the project's entire memory
+// history to find it — inside the project advisory lock, which serializes every other writer.
+describe('latestNoteEvent', () => {
+  const wrote = (id: string, scope: string, body: string) => ({
+    taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_written,
+    payload: { note: { id, scope, title: id, body }, author: { source: 'cli' as const } },
+  })
+  const deleted = (id: string, scope: string) => ({
+    taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_deleted,
+    payload: { id, scope, author: { source: 'cli' as const } },
+  })
+
+  it('returns the newest event for that note, ignoring other notes and other scopes', async () => {
+    const log = await freshLog()
+    await log.append(wrote('auth', 'project', 'first'))
+    await log.append(wrote('other', 'project', 'noise'))
+    await log.append(wrote('auth', 'plan-t1', 'different lane'))
+    await log.append(wrote('auth', 'project', 'second'))
+    const found = await log.latestNoteEvent('project', 'auth')
+    expect(found?.kind).toBe(EVENT_KIND.memory_written)
+    expect(JSON.stringify(found?.payload)).toContain('second')
+  })
+
+  it('a delete is the newest event, so the caller sees no live base', async () => {
+    const log = await freshLog()
+    await log.append(wrote('auth', 'project', 'first'))
+    await log.append(deleted('auth', 'project'))
+    expect((await log.latestNoteEvent('project', 'auth'))?.kind).toBe(EVENT_KIND.memory_deleted)
+  })
+
+  it('a re-write after a delete wins again', async () => {
+    const log = await freshLog()
+    await log.append(wrote('auth', 'project', 'first'))
+    await log.append(deleted('auth', 'project'))
+    await log.append(wrote('auth', 'project', 'reborn'))
+    const found = await log.latestNoteEvent('project', 'auth')
+    expect(found?.kind).toBe(EVENT_KIND.memory_written)
+    expect(JSON.stringify(found?.payload)).toContain('reborn')
+  })
+
+  it('an unknown note is null', async () => {
+    const log = await freshLog()
+    expect(await log.latestNoteEvent('project', 'nope')).toBeNull()
+  })
+})

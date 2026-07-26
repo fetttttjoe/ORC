@@ -34,7 +34,7 @@ const trustPath = (dir: string): string => path.join(dir, '.orc', 'trust.json')
 // folded to a constant: inlining or rotating one neither writes a verifier for it into
 // trust.json nor invalidates consent.
 const envDeclaration = (env: Record<string, string> = {}): string[][] =>
-  Object.keys(env).sort().map(k => [k, env[k]!.startsWith('$') ? env[k]! : ''])
+  Object.entries(env).sort(([a], [b]) => a.localeCompare(b)).map(([k, v]) => [k, v.startsWith('$') ? v : ''])
 
 export function mcpFingerprint(cfg: McpServerConfig): string {
   const canonical = JSON.stringify([cfg.command, cfg.args ?? [], envDeclaration(cfg.env)])
@@ -51,8 +51,7 @@ const SCRIPT_LOADERS = {
 export function extensionFingerprint(entryFile: string, baseDir: string): string {
   const files = new Map<string, Buffer>()
   const pending = [realpathSync(entryFile)]
-  while (pending.length > 0) {
-    const file = pending.pop()!
+  for (let file = pending.pop(); file !== undefined; file = pending.pop()) {
     if (files.has(file)) continue
     const bytes = readFileSync(file)
     files.set(file, bytes)

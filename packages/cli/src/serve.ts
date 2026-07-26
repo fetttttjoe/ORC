@@ -1,6 +1,6 @@
 import { hostname } from 'node:os'
 import { errorMessage, TASK_STATUS } from '@orc/contracts'
-import { beat, claimSlot, fold, forget, SUPERVISOR_BEAT_MS, type DbosPort, type Storage } from '@orc/kernel'
+import { beat, claimSlot, forget, SUPERVISOR_BEAT_MS, type DbosPort, type Storage } from '@orc/kernel'
 
 // The admission rule this project keeps at Phase 1 (N=1): claiming re-exported from kernel's
 // storage layer, where the raw-SQL atomic statement belongs — storage/index.ts's `db`/`projectId`
@@ -19,8 +19,8 @@ export function nextIdle(busy: boolean, idleSince: number | null, nowMs: number,
   return { idleSince: since, timedOut: nowMs - since >= idleMs }
 }
 
-async function hasLiveWork(storage: Storage): Promise<boolean> {
-  const state = fold(await storage.events.all())
+async function hasLiveWork(port: DbosPort): Promise<boolean> {
+  const state = await port.projectState()
   for (const task of state.tasks.values()) if (task.status === TASK_STATUS.running) return true
   return false
 }
@@ -56,7 +56,7 @@ export async function runSupervisor(deps: SupervisorDeps): Promise<void> {
     const timer = setInterval(() => {
       void (async () => {
         await beat(deps.storage, executorId, process.pid, hostname())
-        const decision = nextIdle(await hasLiveWork(deps.storage), idleSince, now().getTime(), deps.idleMs)
+        const decision = nextIdle(await hasLiveWork(deps.port), idleSince, now().getTime(), deps.idleMs)
         idleSince = decision.idleSince
         if (decision.timedOut) stop()
       })().catch(err => console.warn(`supervisor heartbeat: ${errorMessage(err)}`))

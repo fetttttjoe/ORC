@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'bun:test'
-import { LINK_KIND, MemoryNoteInput, slugId } from '@orc/contracts'
-import { CONSOLIDATED_TAG, consolidatedNote, isSubstantive } from './consolidate'
+import { LINK_KIND, MEMORY_ACCESS, MemoryNoteInput, slugId, type EventRecord, type MemoryNoteDraft, type MemoryStore } from '@orc/contracts'
+import { eventFixture } from '@orc/contracts/fixtures'
+import type { EventLog } from '@orc/kernel'
+import { CONSOLIDATED_TAG, consolidateTask, consolidatedNote, isSubstantive } from './consolidate'
 
 describe('consolidatedNote', () => {
   it('promotes step outcomes into one durable project note, linked derived_from what the task read', () => {
@@ -55,5 +57,51 @@ describe('isSubstantive', () => {
     expect(isSubstantive({ steps: [{ title: 'a', summary: 'x' }, { title: 'b', summary: 'y' }], derivedFrom: [] })).toBe(true) // composed
     expect(isSubstantive({ steps: [{ title: 'a', summary: 'x' }], derivedFrom: [] })).toBe(false) // trivial single lookup
     expect(isSubstantive({ steps: [], derivedFrom: [] })).toBe(false)
+  })
+})
+
+describe('consolidateTask provenance', () => {
+  // Minimal fakes: consolidateTask reads three event slices off the log and one scoped note list off
+  // the store. Nothing here mocks the code under test — the fakes ARE the two collaborators.
+  const logOf = (events: EventRecord[]): Pick<EventLog, 'after'> => ({
+    after: async (_seq, kinds) => events.filter(e => !kinds || kinds.includes(e.kind)),
+  })
+  const storeOf = (written: MemoryNoteDraft[]): Pick<MemoryStore, 'list' | 'write'> => ({
+    list: async () => [],
+    write: async note => { written.push(note); return note as never },
+  })
+  const created = (taskId: string, title: string): EventRecord =>
+    eventFixture({
+      taskId, kind: 'task_created',
+      payload: { task: { id: taskId, parentId: null, type: 'generic', title, spec: '', status: 'draft', zone: [], budgetUSD: null, depth: 0, createdAt: '2026-07-26T00:00:00.000Z' } },
+    })
+  const accessed = (taskId: string, id: string, mode: string): EventRecord =>
+    eventFixture({ taskId, kind: 'memory_accessed', payload: { id, scope: 'project', mode, author: { source: 'agent', taskId } } })
+
+  const TASK = '11111111-1111-1111-1111-111111111111'
+
+  // The whole point of giving preload its own access mode: a step that leaned on injected context
+  // without ever calling memory_read must still record WHAT it stood on. Before preload was
+  // journaled this list came back empty, the salience gate declined, and the task left no note.
+  it('a preload access is provenance, exactly like a read', async () => {
+    const written: MemoryNoteDraft[] = []
+    const note = await consolidateTask(
+      { log: logOf([created(TASK, 'Explain heat'), accessed(TASK, 'area-memory', MEMORY_ACCESS.preload)]) as EventLog, store: storeOf(written) as MemoryStore },
+      TASK,
+    )
+    expect(note).not.toBeNull()
+    expect(written[0]?.links).toEqual([{ id: 'area-memory', kind: LINK_KIND.derived_from }])
+  })
+
+  it('an access belonging to a DIFFERENT task is not this task\'s provenance', async () => {
+    const written: MemoryNoteDraft[] = []
+    const other = '22222222-2222-2222-2222-222222222222'
+    const note = await consolidateTask(
+      { log: logOf([created(TASK, 'Explain heat'), accessed(other, 'area-memory', MEMORY_ACCESS.preload)]) as EventLog, store: storeOf(written) as MemoryStore },
+      TASK,
+    )
+    // no provenance and no second step -> the salience gate declines, nothing is written
+    expect(note).toBeNull()
+    expect(written).toEqual([])
   })
 })

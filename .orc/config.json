@@ -14,5 +14,6 @@
         "TAVILY_API_KEY": "$TAVILY_API_KEY"
       }
     }
-  }
+  },
+  "memoryEmbedModel": "ollama/nomic-embed-text"
 }

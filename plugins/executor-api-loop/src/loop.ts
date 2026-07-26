@@ -1,8 +1,8 @@
 import { generateText, type JSONValue, type LanguageModel, type ModelMessage, type ToolSet } from 'ai'
 import {
-  EVENT_KIND, FAILURE_CLASS, MEMORY_TOOL_NAME, MemoryScope, MemorySearchResult, MemoryWriteResult, NOTE_TIER, OPERATION_KIND, planScope, SIGNAL_OUTCOME,
-  slugId, UNIFIED_EVENT_TYPE, terminalError,
-  type AgentExecutor, type EventDraft, type ExecutorContext, type NoteSummary, type ResolvedTool, type Signal, type SignalOutcome,
+  EVENT_KIND, FAILURE_CLASS, MEMORY_TOOL_NAME, MemoryScope, MemoryWriteResult, OPERATION_KIND, SIGNAL_OUTCOME,
+  UNIFIED_EVENT_TYPE, terminalError,
+  type AgentExecutor, type EventDraft, type ExecutorContext, type NoteSummary, type Signal,
   type SplitResult, type UnifiedEvent, type Usage,
 } from '@orc/contracts'
 import { errorMessage, validateOutputPaths } from '@orc/contracts'
@@ -22,10 +22,13 @@ function invalidOutputs(workspaceDir: string, outputs: string[]): string | null 
 
 interface TurnResult {
   text: string
-  toolCalls: Array<{ toolCallId: string; toolName: string; input: unknown }>
+  toolCalls: ToolCall[]
   usage: Usage
   responseMessages: ModelMessage[]
 }
+
+type ToolCall = { toolCallId: string; toolName: string; input: unknown }
+type ToolOutcome = Awaited<ReturnType<typeof executeTool>>
 
 const TRANSIENT_STATUS = new Set([408, 409, 429, 500, 502, 503, 504])
 
@@ -166,64 +169,8 @@ function budgetNote(iteration: number, max: number): string | null {
     : `Budget: iteration ${iteration} of ${max} — ${remaining} model calls left. Stop exploring; finish pending writes and call 'signal'.`
 }
 
-// Task 7: knowledge preload — one journaled memory_search at step start, rendered into the
-// FIRST prompt, so the mandatory "search before you claim anything" turn the bench measured
-// as memory's cost is no longer mandatory: relevant notes are already there to be memory_read.
-//
-// Query strategy is SEMANTIC-FIRST now that memory_search defaults to hybrid (vector⊕keyword):
-// the primary query is the step's FULL INTENT (title + instructions) — embeddings match meaning,
-// so natural-language prose is an asset, not the liability it was under substring AND. The few-
-// distinctive-terms derivation stays as the keyword-only FALLBACK: with no embedder configured,
-// prose ANDs to nothing and a couple of rare title words are what still match.
-const STOPWORDS = new Set([
-  'this', 'that', 'with', 'from', 'into', 'your', 'have', 'will', 'were', 'been', 'being',
-  'their', 'about', 'after', 'before', 'which', 'while', 'where', 'there', 'these', 'those',
-  'when', 'what', 'then', 'than', 'over', 'under', 'onto', 'also', 'each', 'such', 'only',
-  'both', 'more', 'most', 'some', 'them', 'they', 'step', 'task',
-])
-export function deriveQueryTerms(title: string): string[] {
-  const words = title.toLowerCase().match(/[a-z0-9]+/g) ?? []
-  const terms: string[] = []
-  for (const w of words) {
-    if (w.length < 4 || STOPWORDS.has(w)) continue
-    terms.push(w)
-    if (terms.length === 3) break
-  }
-  return terms
-}
-
-// The step's intent as a natural-language query for the semantic arm — title plus its
-// instructions, bounded (the query is embedded, so length is cheap, but unbounded prose dilutes).
-export function preloadQuery(step: { title: string; instructions: string }): string {
-  return `${step.title}\n${step.instructions}`.trim().slice(0, 600)
-}
-
-// isError is folded to "no notes" here, not thrown — a degraded search tool must never block the
-// step, and the empty-result path already knows how to give up quietly.
-async function searchNotes(tool: ResolvedTool, query: string, budget: number): Promise<NoteSummary[]> {
-  const result = await tool.execute({ query, budget })
-  if (result.isError) return []
-  const parsed = MemorySearchResult.safeParse(result.output)
-  return parsed.success ? parsed.data.notes : []
-}
-// Semantic-first, then degrade: (1) the full-intent query — hybrid search matches it by meaning;
-// (2) on empty, the distinctive title terms — what a keyword-only deployment needs since prose
-// ANDs to nothing there; (3) on empty with >1 term, the single longest term (a rarer word narrows
-// less than an AND of several). The first non-empty result wins.
-async function preloadSearch(tool: ResolvedTool, intent: string, terms: string[], budget: number): Promise<NoteSummary[]> {
-  if (intent) {
-    const byIntent = await searchNotes(tool, intent, budget)
-    if (byIntent.length > 0) return byIntent
-  }
-  if (terms.length === 0) return []
-  const byTerms = await searchNotes(tool, terms.join(' '), budget)
-  if (byTerms.length > 0 || terms.length <= 1) return byTerms
-  const longest = terms.reduce((a, b) => (b.length > a.length ? b : a))
-  return searchNotes(tool, longest, budget)
-}
-
-// memory_read defaults to project scope — a plan-scoped (or other non-project) note id is
-// unreadable as a bare id, so it carries its scope inline; project-scope ids stay bare.
+// memory_read defaults to project scope — a non-project note id is unreadable as a bare id, so it
+// carries its scope inline; project-scope ids stay bare.
 const renderKnownContext = (notes: NoteSummary[]): string =>
   [
     '# Known project context (ids — memory_read for detail, pass scope where shown, verify before relying)',
@@ -232,74 +179,16 @@ const renderKnownContext = (notes: NoteSummary[]): string =>
       : `${n.id} (scope: ${n.scope}) — ${n.title}: ${n.summary}`),
   ].join('\n')
 
-// Runs before iteration 1. The search call(s) happen INSIDE ctx.checkpoint so a crash-recovery
-// replay reuses the RECORDED result instead of re-querying live — a live re-query could return
-// different notes and rebuild messages[0] differently than the persisted agent_call recorded,
-// breaking replay determinism (every other external effect in this loop is journaled the same way).
+// The knowledge block for the first prompt. Rendering is the executor's job; finding and recording
+// what goes in it is the memory domain's (ctx.memory). Inside ctx.checkpoint so a crash-recovery
+// replay reuses the RECORDED notes instead of re-querying live — a live re-query could rebuild
+// messages[0] differently than the persisted agent_call recorded, breaking replay determinism.
 async function preloadKnownContext(ctx: ExecutorContext<LanguageModel>): Promise<string> {
-  if (!ctx.memoryPreloadTokens || ctx.memoryPreloadTokens <= 0) return ''
-  const search = ctx.extraTools.find(t => t.name === MEMORY_TOOL_NAME.search)
-  if (!search) return ''
-  const intent = preloadQuery(ctx.step)
-  const terms = deriveQueryTerms(ctx.step.title)
-  if (!intent && terms.length === 0) return ''
-  const budget = ctx.memoryPreloadTokens
-  try {
-    const notes = await ctx.checkpoint('preload', () => preloadSearch(search, intent, terms, budget))
-    return notes.length > 0 ? renderKnownContext(notes) : ''
-  } catch (err) {
-    // never block the step over a preload failure — same posture as captureAmbientNote below
-    console.warn(`memory preload failed for step '${ctx.step.id}':`, errorMessage(err))
-    return ''
-  }
-}
-
-// Task 4 + Phase 2: ambient capture — every signalled step (success OR failure) leaves a note,
-// zero model calls. The signal summary already exists ("its summary is the only thing downstream
-// steps will see", buildPrompt above) and is journaled; persisting it as an episodic plan-scoped
-// note costs no model call and makes accumulation ambient instead of opt-in. A FAILURE summary is
-// negative knowledge ("tried X, it failed because Y") — higher-value than a success per the memory
-// research, and previously discarded. Displacement, not addition: KNOWLEDGE_PROTOCOL rule 4 stops
-// asking agents to spend a turn writing their own step report.
-// ponytail: bypasses the operation journal — safe because the synthetic idempotency key makes the
-// event append converge on replay; move inside ctx.operation if ambient notes ever carry
-// non-idempotent content.
-
-// Per-outcome capture parameters — matched values in ONE place, never scattered literals. Distinct
-// id prefixes so a later success cannot overwrite the failure lesson (both notes coexist), and
-// distinct synthetic tool-call-id prefixes so each stays independently idempotent on replay.
-interface AmbientSpec { idPrefix: string; tags: readonly string[]; callIdPrefix: string }
-const AMBIENT_CAPTURE: Record<SignalOutcome, AmbientSpec> = {
-  [SIGNAL_OUTCOME.success]: { idPrefix: 'step', tags: ['ambient'], callIdPrefix: 'ambient' },
-  [SIGNAL_OUTCOME.failure]: { idPrefix: 'failed step', tags: ['ambient', 'failure'], callIdPrefix: 'ambient-fail' },
-}
-
-async function captureAmbientNote(ctx: ExecutorContext<LanguageModel>, signal: Signal): Promise<void> {
-  if (ctx.ambientCapture === false || !signal.summary || !ctx.taskId) return
-  const memoryWrite = ctx.extraTools.find(t => t.name === MEMORY_TOOL_NAME.write)
-  if (!memoryWrite) return
-  const spec = AMBIENT_CAPTURE[signal.outcome]
-  const draft = {
-    id: slugId(`${spec.idPrefix} ${ctx.step.id}`), // keyed by step ID (unique in a plan), not the free-form title: two same-titled steps must not collide and lose one's lesson
-    scope: planScope(ctx.taskId),
-    title: ctx.step.title.slice(0, 200),
-    summary: signal.summary.slice(0, 500),
-    tags: [...spec.tags],
-    // the EPISODIC tier by name, not by convention: this is a record of what one run did, not a
-    // claim about the project, and the tier is what makes it expirable and sweepable by construction
-    tier: NOTE_TIER.episodic,
-  }
-  // the SYNTHETIC toolCallId matters: without it the write's idempotencyKey is undefined and a
-  // crash-recovery replay between the signal checkpoint and workflow completion appends a DUPLICATE
-  // memory_written event; with it the memory tool derives `${runToken}:tool:<callId>:memory:<id>`,
-  // which makes the replay append idempotent. A throwing tool must not turn an already-checkpointed
-  // signal into a failed step, so the call is wrapped the same way executeTool wraps every tool call.
-  try {
-    const result = await memoryWrite.execute(draft, `${spec.callIdPrefix}:${ctx.step.id}`)
-    if (result.isError) console.warn(`ambient capture failed for step '${ctx.step.id}':`, result.output)
-  } catch (err) {
-    console.warn(`ambient capture failed for step '${ctx.step.id}':`, errorMessage(err))
-  }
+  const budget = ctx.memoryPreloadTokens ?? 0
+  if (!ctx.memory || budget <= 0) return ''
+  const memory = ctx.memory
+  const notes = await ctx.checkpoint('preload', () => memory.recall(budget))
+  return notes.length > 0 ? renderKnownContext(notes) : ''
 }
 
 export function apiLoopExecutor(): AgentExecutor<LanguageModel> {
@@ -405,42 +294,44 @@ export function apiLoopExecutor(): AgentExecutor<LanguageModel> {
           if (toolCalls.length > 0) {
             // one operation per external tool effect: a crash retry re-runs only the interrupted
             // call, never already-completed siblings; result order stays the model's call order
-            const results: Awaited<ReturnType<typeof executeTool>>[] = []
+            const executed: Array<{ call: ToolCall; result: ToolOutcome }> = []
             for (const call of toolCalls)
-              results.push(await ctx.operation(
-                {
-                  operationId: `${ctx.runToken}:tool:${iteration}:${call.toolCallId}`,
-                  kind: OPERATION_KIND.tool,
-                  name: call.toolName,
-                  before: { input: call.input },
-                },
-                () => executeTool(call.toolName, call.input, ctx.workspaceDir, ctx.extraTools, call.toolCallId, { zone: ctx.step.zone, writer: ctx.runToken }),
-                (r): EventDraft[] => [
-                  { kind: EVENT_KIND.tool_call, payload: { ...base, iteration, toolCallId: call.toolCallId, toolName: call.toolName, input: call.input } },
-                  { kind: EVENT_KIND.tool_result, payload: { ...base, iteration, toolCallId: call.toolCallId, toolName: call.toolName, output: r.output, isError: r.isError } },
-                ],
-              ))
+              executed.push({
+                call,
+                result: await ctx.operation(
+                  {
+                    operationId: `${ctx.runToken}:tool:${iteration}:${call.toolCallId}`,
+                    kind: OPERATION_KIND.tool,
+                    name: call.toolName,
+                    before: { input: call.input },
+                  },
+                  () => executeTool(call.toolName, call.input, ctx.workspaceDir, ctx.extraTools, call.toolCallId, { zone: ctx.step.zone, writer: ctx.runToken }),
+                  (r): EventDraft[] => [
+                    { kind: EVENT_KIND.tool_call, payload: { ...base, iteration, toolCallId: call.toolCallId, toolName: call.toolName, input: call.input } },
+                    { kind: EVENT_KIND.tool_result, payload: { ...base, iteration, toolCallId: call.toolCallId, toolName: call.toolName, output: r.output, isError: r.isError } },
+                  ],
+                ),
+              })
 
-            for (let i = 0; i < toolCalls.length; i++) {
-              const call = toolCalls[i]!
+            for (const { call, result } of executed) {
               yield { type: UNIFIED_EVENT_TYPE.tool_call, toolCallId: call.toolCallId, toolName: call.toolName, input: call.input }
-              yield { type: UNIFIED_EVENT_TYPE.tool_result, toolCallId: call.toolCallId, toolName: call.toolName, output: results[i]!.output, isError: results[i]!.isError }
+              yield { type: UNIFIED_EVENT_TYPE.tool_result, toolCallId: call.toolCallId, toolName: call.toolName, output: result.output, isError: result.isError }
               // noteLint warnings (plugins/memory) are advisory and observed live to be ignored —
               // carry the first one into the next iteration's prompt instead of leaving it inert.
-              if (call.toolName === MEMORY_TOOL_NAME.write && !results[i]!.isError) {
-                const parsed = MemoryWriteResult.safeParse(results[i]!.output)
-                if (parsed.success && parsed.data.warnings?.length)
-                  pendingLintNudge = { id: parsed.data.id, warning: parsed.data.warnings[0]! }
+              if (call.toolName === MEMORY_TOOL_NAME.write && !result.isError) {
+                const parsed = MemoryWriteResult.safeParse(result.output)
+                const [warning] = parsed.success ? parsed.data.warnings ?? [] : []
+                if (parsed.success && warning) pendingLintNudge = { id: parsed.data.id, warning }
               }
             }
 
             messages.push({
               role: 'tool',
-              content: toolCalls.map((call, i) => ({
+              content: executed.map(({ call, result }) => ({
                 type: 'tool-result',
                 toolCallId: call.toolCallId,
                 toolName: call.toolName,
-                output: { type: 'json', value: toJson(results[i]!.output) },
+                output: { type: 'json', value: toJson(result.output) },
               })),
             })
           }
@@ -543,7 +434,7 @@ export function apiLoopExecutor(): AgentExecutor<LanguageModel> {
               (): EventDraft[] => [{ kind: EVENT_KIND.signal_received, payload: { ...base, signal } }],
             )
             yield { type: UNIFIED_EVENT_TYPE.signal, signal }
-            await captureAmbientNote(ctx, signal)
+            await ctx.memory?.capture(signal)
             yield { type: UNIFIED_EVENT_TYPE.done }
             return
           }

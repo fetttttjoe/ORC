@@ -167,10 +167,13 @@ async function bringUp(policy: 'auto' | 'manual', executor: AgentExecutor<unknow
     storage, config,
     providers: new Map([['fake', fakeProvider]]),
     executors: new Map([['split-fake', executor]]),
-    stepTools: p => [
-      ...memory.buildTools({ source: 'agent', taskId: p.taskId, stepId: p.stepId, runToken: p.runToken, executor: p.executor, model: p.model, role: p.role }),
-      ...splitTool({ kernel, config: { approvalPolicy: config.approvalPolicy, maxDepth: config.maxDepth }, p }),
-    ],
+    stepTools: p => {
+      const bound = memory.bindStep({ author: { source: 'agent', taskId: p.taskId, stepId: p.stepId, runToken: p.runToken, executor: p.executor, model: p.model, role: p.role }, step: p.step, taskId: p.taskId, ancestorTaskIds: p.ancestorTaskIds })
+      return { memory: bound.memory, tools: [
+        ...bound.tools,
+        ...splitTool({ kernel, config: { approvalPolicy: config.approvalPolicy, maxDepth: config.maxDepth }, p }),
+      ] }
+    },
   })
   await port.launch()
   const cleanup = async (): Promise<void> => {

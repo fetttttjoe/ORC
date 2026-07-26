@@ -34,7 +34,7 @@ export class LogView {
     const scroller = this.root.closest('.detail')
     const pinned = !scroller || scroller.scrollTop + scroller.clientHeight >= scroller.scrollHeight - 40
     this.root.append(this.row(r))
-    while (this.root.childElementCount > CLIENT_CAP) this.root.firstElementChild!.remove()
+    while (this.root.childElementCount > CLIENT_CAP) this.root.firstElementChild?.remove()
     if (pinned && scroller) scroller.scrollTop = scroller.scrollHeight
   }
 

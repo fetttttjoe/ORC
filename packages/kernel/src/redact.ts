@@ -24,7 +24,11 @@ const SECRET_ENV_RE = /(_KEY|_TOKEN|_SECRET|_PASSWORD)$/
 // short values are not globally string-replaced — they would corrupt ordinary text
 const MIN_SECRET_LENGTH = 8
 
-export type Redactor = (record: Record<string, unknown>) => Record<string, unknown>
+export interface Redactor {
+  (record: Record<string, unknown>): Record<string, unknown>
+  /** The same walk over ANY value. Shape-preserving: arrays stay arrays, primitives stay primitives. */
+  value<T>(v: T): T
+}
 
 export function buildRedactor(env: Record<string, string | undefined>, extraNames: string[]): Redactor {
   const names = new Set([...Object.keys(env).filter(n => SECRET_ENV_RE.test(n)), ...extraNames])
@@ -50,5 +54,9 @@ export function buildRedactor(env: Record<string, string | undefined>, extraName
     : v !== null && typeof v === 'object' ? Object.fromEntries(Object.entries(v).map(entry))
     : v
 
-  return r => Object.fromEntries(Object.entries(r).map(entry))
+  const redactor = (r: Record<string, unknown>): Record<string, unknown> =>
+    Object.fromEntries(Object.entries(r).map(entry))
+  // the walk is shape-preserving by construction (see `value` above), so the cast states a fact
+  // the type system cannot follow through Object.entries
+  return Object.assign(redactor, { value: <T>(v: T): T => value(v) as T })
 }

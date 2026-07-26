@@ -81,8 +81,8 @@ describe('MemoryStore gateway', () => {
     // same tool call replayed after a restart: identical draft, but a new Git HEAD stamp → the
     // memory_written payload DIFFERS. The event log throws KernelError(idempotency_conflict); the
     // gateway must recognize it by CODE and swallow it (the first write stands), not fail the op.
-    await createMemoryStore({ log, surreal, sourceRevision: 'sha-A' }).write({ id: 'auth', title: 'Auth' }, author, { idempotencyKey: key })
-    await createMemoryStore({ log, surreal, sourceRevision: 'sha-B' }).write({ id: 'auth', title: 'Auth' }, author, { idempotencyKey: key })
+    await createMemoryStore({ log, surreal, sourceRevision: async () => 'sha-A' }).write({ id: 'auth', title: 'Auth' }, author, { idempotencyKey: key })
+    await createMemoryStore({ log, surreal, sourceRevision: async () => 'sha-B' }).write({ id: 'auth', title: 'Auth' }, author, { idempotencyKey: key })
     expect(await log.all()).toHaveLength(1) // one event; the differing replay was tolerated, not thrown
     await log.close()
   })
@@ -91,7 +91,7 @@ describe('MemoryStore gateway', () => {
     const pg = await createTestDb(); drops.push(pg.drop)
     const ts = await createTestSurreal(); drops.push(ts.drop)
     const log = (await openStorage(pg.url, { projectId: TEST_PROJECT_ID })).events
-    const store = createMemoryStore({ log, surreal: await SurrealMemory.open(ts), sourceRevision: 'head-sha-42' })
+    const store = createMemoryStore({ log, surreal: await SurrealMemory.open(ts), sourceRevision: async () => 'head-sha-42' })
     await store.write({ id: 'auth', title: 'Auth', sourceRevision: 'invented-by-agent' }, { source: 'agent' })
     const [event] = await log.all()
     const { note } = z.object({ note: z.object({ sourceRevision: z.string().nullable() }) }).parse(event!.payload)
@@ -163,6 +163,29 @@ describe('MemoryStore gateway', () => {
     const store = createMemoryStore({ log, surreal: await SurrealMemory.open(ts) })
     await expect(store.write({ id: 'Bad Id', title: 'x' }, { source: 'cli' })).rejects.toThrow()
     expect(await log.all()).toHaveLength(0)
+    await log.close()
+  })
+})
+
+// The revision only ever stamps a WRITE, and resolving it shells out to git. Every `orc memory`
+// command opened a store, so every read paid a subprocess spawn for a value it never used.
+describe('sourceRevision is resolved lazily', () => {
+  it('is never asked for on a read path, and asked once across writes', async () => {
+    const pg = await createTestDb(); drops.push(pg.drop)
+    const ts = await createTestSurreal(); drops.push(ts.drop)
+    const log = (await openStorage(pg.url, { projectId: TEST_PROJECT_ID })).events
+    const surreal = await SurrealMemory.open(ts)
+    let calls = 0
+    const store = createMemoryStore({ log, surreal, sourceRevision: async () => { calls++; return 'abc123' } })
+
+    await store.get('nothing')
+    await store.list()
+    await store.search('x')
+    expect(calls).toBe(0)
+
+    await store.write({ id: 'n1', title: 'N1' }, { source: 'cli' })
+    await store.write({ id: 'n2', title: 'N2' }, { source: 'cli' })
+    expect(calls).toBe(1)
     await log.close()
   })
 })

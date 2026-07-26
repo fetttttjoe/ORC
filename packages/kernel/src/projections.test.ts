@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'bun:test'
 import type { EventRecord, Plan, TaskNode } from '@orc/contracts'
 import { eventFixture, draftFixture, planFixture, stepFixture } from '@orc/contracts/fixtures'
-import { fold, completedStepIds, nextAttempts, crashDedupKey, stepUsage, subtreeTaskIds, subtreeUsage, pendingSplitForChild, remainingBudget, inheritedCwd, runCwd } from './projections'
+import { emptyFold, fold, foldInto, subtreeOutcome, completedStepIds, nextAttempts, crashDedupKey, stepUsage, subtreeTaskIds, subtreeUsage, pendingSplitForChild, remainingBudget, inheritedCwd, runCwd } from './projections'
 
 const task: TaskNode = {
   id: 't1', parentId: null, type: 'generic', title: 'hello', spec: '',
@@ -359,5 +359,67 @@ describe('fold — execution kinds', () => {
     expect(state.operations.get(good)?.status).toBe('started') // the good event still applied
     expect(state.operations.has('orphan')).toBe(false)         // the poison one skipped
     expect(state.artifacts.get('t1')?.map(a => a.path)).toEqual(['ok.md']) // only the valid receipt
+  })
+})
+
+// The incremental fold. `fold` is the truth function every replay and audit path uses, so an
+// incremental applier is only safe if it is the SAME function driven one event at a time — the
+// equivalence below is the whole contract, and it is what lets a long-lived process (the DBOS port's
+// budget check, the supervisor's idle probe, the signal router) answer from a live accumulator
+// instead of re-reading and re-folding the entire project log per question.
+describe('foldInto / emptyFold', () => {
+  const lifecycle: EventRecord[] = [
+    evt(1, 'task_created', { task }),
+    evt(2, 'plan_proposed', { plan: planV(1) }),
+    evt(3, 'task_status_changed', { taskId: 't1', from: 'draft', to: 'awaiting_approval' }),
+    evt(4, 'plan_approved', { taskId: 't1', version: 1, approvedAt: '2026-07-16T01:00:00.000Z' }),
+    evt(5, 'task_status_changed', { taskId: 't1', from: 'awaiting_approval', to: 'approved' }),
+    eventFixture({ seq: 6, taskId: 't1', runToken: 'r1', kind: 'run_started', payload: { taskId: 't1', planVersion: 1, retryIndex: 0, workflowId: 'run:t1:v1', cwd: null } }),
+    eventFixture({ seq: 7, taskId: 't1', runToken: 'r1', kind: 'step_started', payload: { stepId: 's1', runToken: 'r1', attempt: 1 } }),
+    eventFixture({ seq: 8, taskId: 't1', stepId: 's1', runToken: 'r1', kind: 'agent_call', usage: { inputTokens: 10, outputTokens: 5, costUSD: 0.5, estimated: false }, payload: { stepId: 's1', runToken: 'r1', iteration: 1, request: {}, response: {} } }),
+    eventFixture({ seq: 9, taskId: 't1', runToken: 'r1', kind: 'step_completed', payload: { stepId: 's1', runToken: 'r1', summary: 'ok' } }),
+  ]
+
+  const asJson = (s: ReturnType<typeof fold>) =>
+    JSON.stringify(s, (_k, v) => (v instanceof Map ? Object.fromEntries(v) : v))
+
+  it('applying events one at a time equals folding them in one pass', () => {
+    const incremental = lifecycle.reduce(foldInto, emptyFold())
+    expect(asJson(incremental.state)).toEqual(asJson(fold(lifecycle)))
+  })
+
+  it('carries crash-boundary dedup ACROSS applications, not just within one batch', () => {
+    // the same tool_result delivered twice — the dedup key lives on the accumulator, so a
+    // duplicate arriving in a later application is still suppressed
+    const dup = eventFixture({ seq: 10, taskId: 't1', stepId: 's1', runToken: 'r1', kind: 'agent_call', usage: { inputTokens: 10, outputTokens: 5, costUSD: 0.5, estimated: false }, payload: { stepId: 's1', runToken: 'r1', iteration: 1, request: {}, response: {} } })
+    const acc = [...lifecycle, dup].reduce(foldInto, emptyFold())
+    expect(acc.state.usage.get('t1')?.costUSD).toBe(0.5) // not 1.0 — the replay folded once
+    expect(asJson(acc.state)).toEqual(asJson(fold([...lifecycle, dup])))
+  })
+
+  it('an empty accumulator is an empty state', () => {
+    expect(asJson(emptyFold().state)).toEqual(asJson(fold([])))
+  })
+})
+
+// Observed live: a grounded run's plan step finished, its split child blocked, and the CLI printed
+// "run finished: done" and exited 0. The root's own status is not the run's outcome.
+describe('subtreeOutcome', () => {
+  const t = (id: string, status: TaskNode['status'], parentId: string | null = null): EventRecord =>
+    evt(1, 'task_created', { task: { ...task, id, status, parentId, depth: parentId ? 1 : 0 } })
+
+  it('a blocked descendant makes the run blocked even when the root finished', () => {
+    const state = fold([t('root', 'done'), t('root.child', 'blocked', 'root')])
+    expect(subtreeOutcome(state, 'root')).toBe('blocked')
+  })
+
+  it('all done is done', () => {
+    const state = fold([t('root', 'done'), t('root.child', 'done', 'root')])
+    expect(subtreeOutcome(state, 'root')).toBe('done')
+  })
+
+  it("the root's own non-done outcome still wins", () => {
+    const state = fold([t('root', 'cancelled'), t('root.child', 'done', 'root')])
+    expect(subtreeOutcome(state, 'root')).toBe('cancelled')
   })
 })

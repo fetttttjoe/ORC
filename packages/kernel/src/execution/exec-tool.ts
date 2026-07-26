@@ -75,7 +75,9 @@ export function execTool(opts: { workspaceDir: string; allowlist: string[] }): R
           if (graceTimer) clearTimeout(graceTimer)
           resolve(r)
         }
-        const child = spawn(argv[0]!, argv.slice(1), { cwd: workspaceDir, env: childEnv() })
+        const [command, ...rest] = argv
+        if (command === undefined) return finish({ output: { error: 'empty command' }, isError: true })
+        const child = spawn(command, rest, { cwd: workspaceDir, env: childEnv() })
         let stdout = '', stderr = '', timedOut = false
         child.stdout.setEncoding('utf8')
         child.stderr.setEncoding('utf8')

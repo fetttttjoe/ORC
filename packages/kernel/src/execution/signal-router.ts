@@ -22,7 +22,9 @@ const ROUTER_RELEVANT: Record<EventKind, boolean> = {
   plan_proposed: true, plan_edited: true, plan_approved: true,
   run_requested: true, run_started: true, step_started: true, step_completed: true, step_failed: true,
   split_proposed: true, split_resolved: true,
-  memory_written: true, // composeSplitResult collects subtree-authored notes
+  // composeSplitResult needs these, but it runs once per split resolution — keeping note bodies out
+  // of ROUTER_KINDS means the per-event fetch below does not carry them.
+  memory_written: false,
   skill_loaded: false, agent_call: false, tool_call: false, tool_result: false,
   signal_received: false, operation_started: false, operation_completed: false,
   operation_failed: false, artifact_produced: false, memory_deleted: false, memory_accessed: false,
@@ -36,7 +38,7 @@ const ROUTER_KINDS = EventKind.options.filter(k => ROUTER_RELEVANT[k])
 // Pure composition of the thin join payload from the log (spec D5). Deterministic for a
 // fixed event set — but the set can differ between racing routers (late memory_written),
 // so the append is idempotency-keyed and conflicts recover by sending the STORED result.
-export function composeSplitResult(events: EventRecord[], split: SplitState): SplitResult {
+export function composeSplitResult(events: EventRecord[], noteEvents: EventRecord[], split: SplitState): SplitResult {
   const state = fold(events)
   const outcome = runOutcomeFor(state.tasks.get(split.childTaskId)?.status)
   const subtree = new Set(subtreeTaskIds(state, split.childTaskId))
@@ -57,7 +59,7 @@ export function composeSplitResult(events: EventRecord[], split: SplitState): Sp
 
   const notes: { id: string; scope: string }[] = []
   const seen = new Set<string>()
-  for (const e of events) {
+  for (const e of noteEvents) {
     if (e.kind !== EVENT_KIND.memory_written) continue
     const p = MemoryWrittenPayload.safeParse(e.payload)
     if (!p.success || !p.data.author.taskId || !subtree.has(p.data.author.taskId)) continue
@@ -130,7 +132,7 @@ export function createSignalRouter(opts: {
   // resolution — the parent always receives exactly the stored payload, never nothing.
   const resolveSplit = async (all: EventRecord[], split: SplitState): Promise<void> => {
     try {
-      const result = composeSplitResult(all, split)
+      const result = composeSplitResult(all, await opts.log.after(0, [EVENT_KIND.memory_written]), split)
       try {
         await opts.log.append({
           taskId: split.taskId, stepId: split.stepId, runToken: split.runToken,
@@ -184,8 +186,8 @@ export function createSignalRouter(opts: {
       // workflow), but capped (see CANCEL_SWEEP_LIMIT) to bound the cost of walking history.
       const recentlyCancelled: string[] = []
       const seenCancelled = new Set<string>()
-      for (let i = seed.length - 1; i >= 0 && recentlyCancelled.length < CANCEL_SWEEP_LIMIT; i--) {
-        const event = seed[i]!
+      for (const event of [...seed].reverse()) {
+        if (recentlyCancelled.length >= CANCEL_SWEEP_LIMIT) break
         if (event.kind !== EVENT_KIND.task_status_changed || !event.taskId || seenCancelled.has(event.taskId)) continue
         const p = PAYLOAD_SCHEMAS.task_status_changed.safeParse(event.payload)
         if (p.success && p.data.to === TASK_STATUS.cancelled) { seenCancelled.add(event.taskId); recentlyCancelled.push(event.taskId) }
