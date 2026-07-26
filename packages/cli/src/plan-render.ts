@@ -1,4 +1,4 @@
-import type { Plan } from '@orc/contracts'
+import type { ChildPlanDraft, Plan } from '@orc/contracts'
 
 // The review surface of a plan: exactly the fields a human weighs at the gate. A named subset
 // (not the full Plan) so tests construct it cast-free and callers state their dependency.
@@ -26,5 +26,21 @@ export function renderPlanHuman(plan: ReviewablePlan, rateFor?: ModelRate): stri
     const instr = s.instructions.length > 300 ? `${s.instructions.slice(0, 300)}…` : s.instructions
     for (const l of instr.split('\n')) lines.push(`      ${l}`)
   }
+  return lines.join('\n')
+}
+
+// What approving actually freezes. The gate used to show only the plan agent's prose, and the plan
+// hash then bound the human's approval to a note graph they had never seen — a run shipped where
+// the prose claimed a dependency the notes did not encode, and the steps raced.
+export function renderDerivedPlan(draft: ChildPlanDraft): string {
+  const lines = ['what approving freezes (derived from the plan notes, not from the text above):']
+  for (const s of draft.steps) {
+    const order = s.dependsOn.length > 0 ? `after ${s.dependsOn.join(', ')}` : 'no dependencies — starts immediately'
+    const zone = s.zone.length > 0 ? ` · writes ${s.zone.join(', ')}` : ''
+    lines.push(`  ${s.id.padEnd(16)} ${order}${zone}`)
+  }
+  if (draft.steps.length > 1 && draft.steps.every(s => s.dependsOn.length === 0))
+    lines.push(`  ! all ${draft.steps.length} steps are unordered and run at once`
+      + ` — if the description above implies a sequence, the notes do not encode it`)
   return lines.join('\n')
 }

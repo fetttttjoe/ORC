@@ -118,3 +118,46 @@ test('an episodic note is a sweep candidate without anyone declaring it expirabl
   })
   expect(swept([episodic])).toEqual(['step-a'])
 })
+
+// A decomposition is per-task by construction, so the plan tier is sweepable like the episodic one.
+// But a plan note is an APPROVED artifact: it must survive while its task can still be retried or
+// audited, so candidacy waits until the owning task is terminal.
+const planNote = (id: string, taskId: string, over: { ts?: string } = {}): EventRecord => eventFixture({
+  ts: over.ts ?? daysAgo(100), kind: 'memory_written',
+  payload: {
+    note: { tier: 'plan', id, scope: `plan-${taskId}`, title: id, rationale: 'why' },
+    author: { source: 'agent', taskId },
+  },
+})
+
+test('a plan note is swept only once its owning task is terminal', () => {
+  const events = [planNote('masterplan', 't1')]
+  expect(swept(events)).toEqual([])
+  expect(staleNotes(events, { now: NOW, days: 30, terminalTaskIds: new Set(['t1']) }).map(n => n.id)).toEqual(['masterplan'])
+})
+
+test('a terminal task’s plan notes still obey the TTL and the link protection', () => {
+  const terminalTaskIds = new Set(['t1'])
+  const fresh = staleNotes([planNote('masterplan', 't1', { ts: daysAgo(3) })], { now: NOW, days: 30, terminalTaskIds })
+  expect(fresh).toEqual([]) // inside the window
+  const linked = staleNotes(
+    [planNote('subplan', 't1'), noted('live-hub', { retention: 'durable', scope: 'plan-t1', links: ['subplan'] })],
+    { now: NOW, days: 30, terminalTaskIds },
+  )
+  expect(linked.map(n => n.id)).toEqual([]) // a surviving note links to it
+})
+
+// Plan notes written before the tier's retention default changed carry `retention: durable` in
+// their payload, so a retention-only candidacy rule would keep every existing decomposition forever.
+// The TIER is what makes a decomposition transient; retention records the author's intent.
+test('a plan note stamped durable is still swept once its task is terminal', () => {
+  const legacy = eventFixture({
+    ts: daysAgo(100), kind: 'memory_written',
+    payload: {
+      note: { tier: 'plan', id: 'masterplan', scope: 'plan-t1', title: 'M', retention: 'durable', rationale: 'why' },
+      author: { source: 'agent', taskId: 't1' },
+    },
+  })
+  expect(swept([legacy])).toEqual([])
+  expect(staleNotes([legacy], { now: NOW, days: 30, terminalTaskIds: new Set(['t1']) }).map(n => n.id)).toEqual(['masterplan'])
+})

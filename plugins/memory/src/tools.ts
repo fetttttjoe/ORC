@@ -6,7 +6,6 @@ import { noteHasDrifted, type ChangedSince } from './drift'
 // Advisory note lint, echoed back in the memory_write result so the writing agent can improve
 // the note in its next iteration — warnings, never rejections: a blocked write mid-run burns
 // more tokens than a mediocre note. Thresholds follow the codebase-analysis skill's skeleton.
-const BODY_SOFT_CAP = 1600
 // Text a writer double-escaped on its way in: a model that emits `\\"` inside a JSON tool argument
 // stores a literal backslash, and the note then reads wrong everywhere it is rendered. Observed on
 // a live run, in 3 of 28 notes. Warned rather than stripped on purpose — silently repairing it
@@ -32,6 +31,21 @@ export async function unresolvedLinks(store: MemoryStore, note: MemoryNote): Pro
   return missing
 }
 
+// A note the writer may have meant to UPDATE. `id ?? slugId(title)` forks on any rephrasing —
+// "Auth middleware" and "Authentication middleware" slug differently — and the graph then carries
+// two partial claims about one subject. Reported, never merged: near-identical titles are often
+// genuinely distinct notes, and silently folding them together destroys knowledge. Only consulted
+// when the writer gave no id and the derived one is new; an explicit id IS the answer to
+// "which note do you mean".
+const DUPLICATE_CANDIDATES = 3
+
+async function duplicateSubjectWarning(store: MemoryStore, scope: string, title: string, id: string): Promise<string[]> {
+  const near = (await store.search(title, { scope }, {})).filter(n => n.id !== id).slice(0, DUPLICATE_CANDIDATES)
+  if (near.length === 0) return []
+  return [`notes about a similar subject already exist: ${near.map(n => `'${n.id}' (${n.title})`).join(', ')}`
+    + ` — if one of them is this same subject, memory_write THAT id instead, so the graph carries one claim rather than two`]
+}
+
 export function noteLint(note: MemoryNote): string[] {
   const w: string[] = []
   if (note.summary.trim() === '')
@@ -42,8 +56,10 @@ export function noteLint(note: MemoryNote): string[] {
     w.push('no links — wire this into the graph (refines/depends_on/derived_from an existing note) or it is findable only by search')
   if (OVER_ESCAPED.test(`${note.title}\n${note.summary}\n${note.body}`))
     w.push('text contains backslash-escaped quotes or backticks — send the raw characters; the tool argument is already JSON, so escaping them again stores the backslash')
-  if (note.body.length > BODY_SOFT_CAP)
-    w.push(`body is ${note.body.length} chars — the skeleton caps at ~1200: move facts into paths/rules/links fields, keep bullets only`)
+  // Not a style rule: past the embedder's window the text simply cannot be found by meaning.
+  if (note.body.length > MEMORY_LIMITS.searchableBodyChars)
+    w.push(`body is ${note.body.length} chars — only the first ${MEMORY_LIMITS.searchableBodyChars} reach the embedder,`
+      + ` so the rest is stored and readable but invisible to semantic search; split it or move detail into paths/rules/links`)
   // the categories lint targets the retrieval surface, so it only fires on the tier that has one
   if (note.tier === NOTE_TIER.semantic && note.kind.startsWith('architecture') && note.categories.length === 0)
     w.push(`categories empty — set one of subsystem | cross-cutting | target so category-filtered search finds this`)
@@ -166,7 +182,7 @@ export function memoryTools(opts: {
               },
             },
           },
-          summary: { type: 'string', maxLength: 500 }, body: { type: 'string', maxLength: MEMORY_LIMITS.bodyChars },
+          summary: { type: 'string', maxLength: 500 }, body: { type: 'string', maxLength: MEMORY_LIMITS.searchableBodyChars, description: 'beyond this the text is stored but not semantically searchable' },
           categories: { type: 'array', maxItems: MEMORY_LIMITS.labelItems, items: { type: 'string', maxLength: MEMORY_LIMITS.labelChars } },
           tags: { type: 'array', maxItems: MEMORY_LIMITS.labelItems, items: { type: 'string', maxLength: MEMORY_LIMITS.labelChars } },
           links: {
@@ -213,6 +229,11 @@ export function memoryTools(opts: {
           const idempotencyKey = author.runToken && toolCallId
             ? `${author.runToken}:tool:${toolCallId}:memory:${id}`
             : undefined
+          // before the write: a fork is only possible when the writer named no id, and only when
+          // the derived one does not already exist (that case is an ordinary update)
+          const scope = parsed.scope ?? MemoryScope.project
+          const forkRisk = parsed.id === undefined && !(await store.get(id, scope))
+          const duplicates = forkRisk ? await duplicateSubjectWarning(store, scope, parsed.title, id) : []
           const n = await store.write({ ...parsed, id }, author, { idempotencyKey })
           // No revision: the write is event-first and the projector is asynchronous, so within
           // the flush window store.write reports the revision from BEFORE this write (and
@@ -221,6 +242,7 @@ export function memoryTools(opts: {
           // authoritative value.
           const dead = await unresolvedLinks(store, n)
           const warnings = [
+            ...duplicates,
             ...noteLint(n),
             ...(dead.length
               ? [`these links resolve to no note, so nothing can follow them: ${dead.join(', ')} — write those notes, or drop the links`]

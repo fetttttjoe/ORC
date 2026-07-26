@@ -1,15 +1,15 @@
-import { RETENTION, foldMemory, noteKey, type EventRecord, type MemoryFold } from '@orc/contracts'
+import { NOTE_TIER, RETENTION, foldMemory, noteKey, type EventRecord, type MemoryFold, type NoteTier } from '@orc/contracts'
 
 export interface SweptNote { id: string; scope: string; title: string; summary: string }
 
 // A live note reduced to what a sweep policy needs: its address, what the dry-run report shows,
 // and its outbound links — which are what make it a PROTECTOR of the notes it points at.
-interface LiveNote extends SweptNote { links: string[]; taskId: string }
+interface LiveNote extends SweptNote { links: string[]; taskId: string; tier: NoteTier }
 
 const liveNotes = (m: MemoryFold): LiveNote[] =>
   [...m.notes.values()].map(({ note, author }) => ({
     id: note.id, scope: note.scope, title: note.title, summary: note.summary,
-    links: note.links.map(l => l.id), taskId: author.taskId ?? '',
+    links: note.links.map(l => l.id), taskId: author.taskId ?? '', tier: note.tier,
   }))
 
 // The one topology rule every sweep obeys (docs/IDEAS.md entry 1, design fix 3): a candidate
@@ -54,18 +54,28 @@ export interface StaleNote { id: string; scope: string; title: string; hits: num
 //    `unreferenced` rule the cancel sweep uses.
 //  - "untouched" is the later of last written and last read: a note read six months ago is stale,
 //    a note re-written yesterday is not. An unusable timestamp fails safe and is never swept.
-export function staleNotes(events: EventRecord[], opts: { now: string; days: number }): StaleNote[] {
+export function staleNotes(
+  events: EventRecord[],
+  opts: { now: string; days: number; terminalTaskIds?: ReadonlySet<string> },
+): StaleNote[] {
+  const terminal = opts.terminalTaskIds ?? new Set<string>()
   const m = foldMemory(events)
-  const expirable = new Set(
+  // Candidacy is the author's `expirable` marking, OR the plan tier — a decomposition belongs to
+  // one task by construction, and notes written before that tier's default changed still carry
+  // `retention: durable` in their payload. Pinning the literal (as the episodic tier does) would
+  // make those older payloads fail to parse and vanish from the fold entirely.
+  const candidateLane = new Set(
     [...m.notes.values()]
-      .filter(({ note }) => note.retention === RETENTION.expirable)
+      .filter(({ note }) => note.retention === RETENTION.expirable || note.tier === NOTE_TIER.plan)
       .map(({ note }) => noteKey(note.scope, note.id)),
   )
   const cutoff = Date.parse(opts.now) - opts.days * 86_400_000
   const all = liveNotes(m)
   const candidates = all.flatMap(note => {
     const key = noteKey(note.scope, note.id)
-    if (!expirable.has(key)) return []
+    if (!candidateLane.has(key)) return []
+    // an approved decomposition stays while its task can still be retried or audited
+    if (note.tier === NOTE_TIER.plan && !terminal.has(note.taskId)) return []
     const lastTouchedAt = latestStamp([m.writes.get(key), m.access.get(key)?.lastAccessedAt])
     // an unusable/absent timestamp means unknown age — fail safe and keep the note
     if (lastTouchedAt === null || Date.parse(lastTouchedAt) > cutoff) return []

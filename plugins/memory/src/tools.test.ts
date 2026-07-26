@@ -317,7 +317,7 @@ describe('memory tools', () => {
     expect(memoryRoleFor('anything-else')).toBe('verify')
   })
 
-  it('memory_write advertises the same collection and text limits it enforces', () => {
+  it('memory_write never advertises a limit looser than the parser accepts', () => {
     const { store } = fakeStore()
     const write = memoryTools({ store, author: { source: 'cli' } }).find(t => t.name === 'memory_write')!
     const props = WriteInputProps.parse(write.inputSchema).properties
@@ -335,7 +335,12 @@ describe('memory tools', () => {
         maxItems: MEMORY_LIMITS.detailItems,
         items: { maxLength: MEMORY_LIMITS.detailChars },
       })
-    expect(props.body).toMatchObject({ maxLength: MEMORY_LIMITS.bodyChars })
+    // body is the ONE field where advertised < enforced, and that direction is the safe one: the
+    // store accepts up to bodyChars so re-parsing history can never reject an older note, while the
+    // writer is told the smaller number the embedder can actually see. Advertising MORE than the
+    // parser accepts is the dangerous inversion — that is what this now pins.
+    expect(props.body).toMatchObject({ maxLength: MEMORY_LIMITS.searchableBodyChars })
+    expect(MEMORY_LIMITS.searchableBodyChars).toBeLessThanOrEqual(MEMORY_LIMITS.bodyChars)
     expect(props.rationale).toMatchObject({ maxLength: MEMORY_LIMITS.rationaleChars })
   })
 
@@ -414,5 +419,74 @@ describe('drift on memory_read', () => {
     const tools = memoryTools({ store: fakeStore().store, author: { source: 'agent' } })
     const r = await tools.find(t => t.name === 'memory_read')!.execute({ id: 'auth' }, 'c1')
     expect(Read.parse(r.output).drifted).toBeUndefined()
+  })
+})
+
+// `id ?? slugId(title)` forks a note whenever an agent rephrases its title: "Auth middleware" and
+// "Authentication middleware" slug differently, leaving two partial claims about one subject.
+// Merging them automatically is not safe — near-identical titles can be genuinely distinct notes —
+// so the write SURFACES the candidates instead, through the same warnings channel the executor
+// already nudges into the next prompt.
+describe('duplicate-subject warning on an id-less write', () => {
+  const write = (store: MemoryStore) =>
+    memoryTools({ store, author: { source: 'cli' } }).find(t => t.name === 'memory_write')!
+
+  it('names an existing note that looks like the same subject', async () => {
+    // get -> null: the derived id is NEW, which is the only case a fork is possible
+    const { store, written } = fakeStore({
+      get: async () => null,
+      search: async () => [summary('auth-middleware', 'Auth middleware')],
+    })
+    const r = await write(store).execute({ title: 'Authentication middleware', summary: 'x' }, 'c1')
+    expect(written[0]?.input.id).toBe('authentication-middleware') // never merged silently
+    expect(MemoryWriteResult.parse(r.output).warnings?.join(' ')).toContain('auth-middleware')
+  })
+
+  it('says nothing when the id already exists — that write is an update, not a fork', async () => {
+    const { store } = fakeStore({
+      search: async () => [summary('auth-middleware', 'Auth middleware')],
+      list: async () => [summary('auth-middleware', 'Auth middleware')],
+    })
+    const r = await write(store).execute({ title: 'Auth middleware', summary: 'x' }, 'c1')
+    expect(MemoryWriteResult.parse(r.output).warnings?.join(' ') ?? '').not.toContain('already exist')
+  })
+
+  it('an explicit id is the author saying which note they mean — no search, no warning', async () => {
+    const { store, written } = fakeStore({ search: async () => { throw new Error('must not search') } })
+    const r = await write(store).execute({ id: 'chosen', title: 'Anything at all' }, 'c1')
+    expect(written[0]?.input.id).toBe('chosen')
+    expect(r.isError).toBe(false)
+  })
+
+  it('nothing similar means no warning', async () => {
+    const { store } = fakeStore({ get: async () => null, search: async () => [] })
+    const r = await write(store).execute({ title: 'Session store' }, 'c1')
+    expect(MemoryWriteResult.parse(r.output).warnings?.join(' ') ?? '').not.toContain('already exist')
+  })
+})
+
+// The advertised schema said body may be 100,000 chars; the lint punished anything over 1,600. A
+// live run wrote 2,079 and spent TWO model calls being corrected by a rule the tool never stated.
+// The only real ceiling is what the embedder can see — beyond it, text is stored and readable but
+// invisible to semantic search. That is a fact to advertise, not a style to enforce afterwards.
+describe('body length: advertised, not corrected', () => {
+  const linkedBody = (chars: number) =>
+    semanticNoteFixture({ summary: 's', links: [{ id: 'a', kind: 'refines' }], body: 'x'.repeat(chars) })
+
+  it('says nothing about a note the schema told the model it could write', () => {
+    expect(noteLint(linkedBody(2_079))).toEqual([])
+    expect(noteLint(linkedBody(MEMORY_LIMITS.searchableBodyChars))).toEqual([])
+  })
+
+  it('warns only past the embedding window, and says why', () => {
+    const w = noteLint(linkedBody(MEMORY_LIMITS.searchableBodyChars + 1)).join(' ')
+    expect(w).toMatch(/semantic search|embed/i)
+  })
+
+  it('the advertised cap is the searchable ceiling, not the storage ceiling', () => {
+    const props = WriteInputProps.parse(
+      memoryTools({ store: fakeStore().store, author: { source: 'cli' } }).find(t => t.name === 'memory_write')!.inputSchema,
+    ).properties
+    expect(props.body).toMatchObject({ maxLength: MEMORY_LIMITS.searchableBodyChars })
   })
 })

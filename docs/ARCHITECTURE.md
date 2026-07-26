@@ -283,6 +283,16 @@ audit trail (where it is evidence of what the server returned) and never reaches
 unchanged — MCP declaration plus `orc mcp trust` grant. The `web-research` skill is the posture,
 not the enforcement.
 
+Note length has two different limits, and conflating them cost real model calls. `MEMORY_LIMITS`
+names both: `bodyChars` (100,000) is what the **store** accepts — deliberately generous, because the
+same bound re-parses history and tightening it would make older notes fail to parse and vanish from
+every fold. `searchableBodyChars` (7,000) is what the **embedder** can see, sized to fit inside
+`embedInputChars` (8,000) alongside title and summary. The advertised JSON schema carries the
+*searchable* number, so a writer self-limits at generation time; the lint only fires past it, and
+states the fact (text beyond it is stored and readable but invisible to semantic search) rather than
+a style preference. Advertised is always ≤ enforced — promising more than the parser accepts is the
+dangerous inversion, and a test pins that direction.
+
 Citations are value objects on the note, not nodes: a cited URL creates no note row and no graph
 edge, so the graph stays a graph of *our* knowledge. `retrievedAt` is stamped by the projector
 from the canonical `memory_written` event timestamp — a writer cannot supply one, and a replay
@@ -346,6 +356,25 @@ sequenceDiagram
   L-->>U: live tail via LISTEN/NOTIFY subscription
 ```
 
+### Retrieval lanes — what a step may be handed
+
+Two sibling rules in `contracts/memory.ts`, deliberately not merged because they answer different
+questions:
+
+- **`linkLookupScopes(fromScope)`** — where does a link *id* resolve? Own scope, then `project`.
+- **`taskLaneScopes(taskId, ancestorTaskIds)`** — what may this *step* read? Its own plan scope,
+  then every ancestor's, then `project`.
+
+The ancestor half is load-bearing: a split child's id is `${parent}.${step}.${callId}`, so
+`plan-<child>` is a different scope from the `plan-<parent>` its subplan notes were authored in.
+Without the ancestor lanes a child cannot see its own decomposition. Both `recall` and the step's
+own `memory_search` take the same lanes, and the scope predicate reaches the **query** — the
+semantic arm ranks then truncates, so filtering afterwards would let one task's plan notes occupy
+every slot.
+
+`isUiMetaNote` excludes chat infrastructure (project display name, working directory) from the
+retrieval surface entirely; it stays readable by id, which is how the chats list resolves a name.
+
 ### Step memory — the one seam
 
 Everything a running step does to the knowledge graph goes through `StepMemory`
@@ -368,6 +397,12 @@ Two consequences the graph depends on:
 task's own plan scope — and that scope reaches the **query**, never a post-filter: the semantic arm
 ranks over the whole table and truncates, so filtering afterwards would let one busy project's plan
 notes occupy every slot.
+
+A run's outcome is the **tree's**, not the root task's (`projections.subtreeOutcome`). A grounded
+parent finishes the moment its plan step splits, so its own status reads `done` while the child
+doing the work may be `blocked` — observed live, reported at the terminal as success with exit
+code 0. `awaiting_approval` is deliberately not a failure there: a gated child is a stopping point
+the watch already announces by name.
 
 A crash between `operation_started` and completion leaves an **unresolved node** — visible in
 `orc status`, `orc replay`, and `vault/tasks/<id>/execution.md`. Recovery reuses completed
@@ -443,12 +478,13 @@ Door discipline, stated precisely:
 |---|---|---|
 | `contracts` | Zod schemas, event kinds + typed payloads, executor/port/store interfaces, the workspace containment guard | Any I/O, any storage, any policy |
 | `kernel/storage/postgres` | The one Postgres owner: pool, project-scoped advisory lock (`withProjectLock`), redaction wiring, schema verification | Deciding *what* to store; the DBOS system database |
-| `kernel/storage/event-log` | Project-bound append (jsonb-shape → redact → validate → insert → notify, one locked transaction), idempotency keys, lossless subscribe with reconnect, scoped queries + `countAfter` | Deciding *what* to append (callers do), projections |
+| `kernel/storage/event-log` | Project-bound append (jsonb-shape → redact → validate → insert → notify, one locked transaction), idempotency keys, lossless subscribe with reconnect, scoped queries + `countAfter`, `latestNoteEvent` (one indexed row per note — migration 0004) | Deciding *what* to append (callers do), projections |
 | `kernel/storage/operation-journal` | Durable before/after nodes (begin/complete/fail), rebuild-from-log; transitions append through the `EventLog` in the same locked transaction | Model/tool specifics; the checkpoint machinery (that's the port) |
 | `kernel/storage/migrate` | Explicit `migrateDatabase`; `assertMigrated` fails loudly when a database is behind | Migrating implicitly at open time |
 | `kernel/redact` | The single storage-boundary normalizer: NUL strip + secret redaction (keys and values) | Being called anywhere except append/journal storage |
 | `kernel/projections` | `fold(events) → State` as a reduce over `foldInto` (one event, one accumulator), `applyOperationEvent` (shared by live journal and rebuild), crash dedup | Persisting anything |
 | `kernel/live-state` | `openLiveState(log)` — a subscription-maintained `State` index, re-seeded when the log is truncated or replaced. Serves advisory reads (budget chain, "is anything running") | Reads that decide a write — those stay inside `log.transaction` |
+| `contracts/memory` folds | `foldMemory` / `foldMemoryInto` — every derivation over the memory stream (live notes, write times, node access, edge access) in ONE walk, batch or incremental. `bumpAccess` and `viaEdge` are the single increment and edge-canonicalization rules, applied by both the log fold and the Surreal projector | Deciding policy — the sweep and the graph do that |
 | `kernel/kernel.ts` | Atomic task/plan lifecycle, feedback outbox events, plan-hash-bound human approval over the log | Execution |
 | `kernel/dbos-port` | Durable run/step workflows, `ctx.checkpoint` and `ctx.operation` wrappers, retry policy, queue partitioning, cancellation cascade, output receipt commit | Model/tool specifics (executor's job), plan authoring |
 | `kernel/signal-router` | Resolving splits, starting approved children, and live/startup delivery of committed feedback | Composing plans, executing steps |

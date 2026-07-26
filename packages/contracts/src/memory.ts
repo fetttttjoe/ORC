@@ -12,7 +12,16 @@ export const MEMORY_LIMITS = {
   labelChars: 64,
   detailItems: 100,
   detailChars: 1_000,
+  // What the STORE accepts. Deliberately far above the searchable ceiling: this bound is also
+  // applied when re-parsing history, so tightening it would make older notes fail to parse and
+  // vanish from every fold.
   bodyChars: 100_000,
+  // What the EMBEDDER can see (embedWritten's slice, sized to the encoder's context). Text past it
+  // is stored and readable but invisible to semantic search — so this is the honest number to
+  // advertise to a writer, and the only length worth warning about. Leaves room for title+summary
+  // inside the same window.
+  searchableBodyChars: 7_000,
+  embedInputChars: 8_000,
   rationaleChars: 20_000,
 } as const
 
@@ -230,7 +239,11 @@ export type EpisodicNoteInput = z.infer<typeof EpisodicNoteInput>
 export const PlanNoteInput = z.object({
   ...noteCore,
   tier: z.literal(NOTE_TIER.plan),
-  retention: Retention.default(RETENTION.durable),
+  // A decomposition belongs to ONE task, like the episodic trail — so the lane is sweepable by
+  // default rather than kept forever. Not PINNED expirable the way episodic is: a planner may
+  // deliberately mark a decomposition durable. The sweep additionally waits for the owning task to
+  // reach a terminal status, so an approved plan cannot vanish while it can still be retried.
+  retention: Retention.default(RETENTION.expirable),
   rationale: z.string().max(MEMORY_LIMITS.rationaleChars).default(''),          // why this subplan exists
   uncertainty: stringOrList(z.string().max(MEMORY_LIMITS.detailChars), MEMORY_LIMITS.detailItems).default([]), // coverage gaps / assumptions (RG7)
   // workspace-relative write globs this subplan may touch at execution — the freezer carries them

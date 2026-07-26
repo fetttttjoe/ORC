@@ -5,7 +5,7 @@ import {
   activation, activationBoost, bumpAccess, DEFAULT_HALF_LIFE_DAYS,
   deriveNoteProvenance, EDGE_DIRECTION, EVENT_KIND, LINK_KINDS, NOTE_KINDS, MemoryScope, viaEdge,
   MemoryAccessedPayload, MemoryDeletedPayload, MemoryNote, MemoryWrittenPayload,
-  SEARCH_MODE, errorMessage, inferTier, isUiMetaNote, noteKey, NoteTier,
+  MEMORY_LIMITS, SEARCH_MODE, errorMessage, inferTier, isUiMetaNote, noteKey, NoteTier,
   type EmbeddingProvider, type EventRecord, type NeighborQuery, type MemoryFilter, type NoteFields,
   type MemorySearchOpts, type NeighborResult, type NoteSummary,
   linkLookupScopes,
@@ -393,7 +393,7 @@ export class SurrealMemory {
     const p = MemoryWrittenPayload.safeParse(e.payload)
     if (!p.success) return undefined
     const { note } = p.data
-    const text = [note.title, note.summary, note.body].filter(Boolean).join('\n').slice(0, 8_000)
+    const text = [note.title, note.summary, note.body].filter(Boolean).join('\n').slice(0, MEMORY_LIMITS.embedInputChars)
     try { const [vec] = await this.embedder.embed([text]); return vec }
     catch (err) { console.warn(`[memory] embed failed at seq ${e.seq}: ${errorMessage(err)}`); return undefined }
   }

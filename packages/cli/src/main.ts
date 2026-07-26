@@ -3,8 +3,8 @@ import { spawn } from 'node:child_process'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { Command, InvalidArgumentError } from 'commander'
-import { EDGE_DIRECTION, EVENT_KIND, LINK_KINDS, MEMORY_ACCESS, NOTE_TIERS, NoteTier, parseLinkSpec, PlanDraft, RUN_OUTCOME, STRATEGY, TASK_STATUS, LinkKind, slugId, type Analyzer, type TaskStatus, type RunOutcome, type EventRecord, type MemoryLink, type ExecutionPort, type Plan, formatModelRate } from '@orc/contracts'
-import { openStorage, Kernel, atomicWriteFileSync, claimSlot, fold, gatedChildren, liveSupervisors, staleSupervisors, subtreeOutcome, subtreeTaskIds, grantExtensionTrust, grantMcpTrust, initializeProject, isExtensionTrusted, isMcpTrusted, loadConfig, loadTrust, migrateDatabase, requireProject, taskUsage, type EventLog, type OrcConfig, type PluginHost, type ProjectConfig, type Storage } from '@orc/kernel'
+import { EDGE_DIRECTION, errorMessage, EVENT_KIND, LINK_KINDS, MASTERPLAN_NOTE_ID, MEMORY_ACCESS, NOTE_TIERS, NoteTier, parseLinkSpec, PlanDraft, RUN_OUTCOME, STRATEGY, TASK_STATUS, TERMINAL_TASK_STATUS, LinkKind, slugId, type Analyzer, type TaskStatus, type RunOutcome, type EventRecord, type MemoryLink, type ExecutionPort, type Plan, formatModelRate } from '@orc/contracts'
+import { openStorage, Kernel, atomicWriteFileSync, claimSlot, fold, gatedChildren, instantiateFrozenPlan, liveSupervisors, staleSupervisors, subtreeOutcome, subtreeTaskIds, grantExtensionTrust, grantMcpTrust, initializeProject, isExtensionTrusted, isMcpTrusted, loadConfig, loadTrust, migrateDatabase, requireProject, taskUsage, type EventLog, type OrcConfig, type PluginHost, type ProjectConfig, type Storage } from '@orc/kernel'
 import { createVaultProjector, parsePlanFile } from '@orc/vault-projector'
 import { consolidateTask, probeMemory, staleNotes, DEFAULT_SWEEP_DAYS } from '@orc/memory'
 import { openMemory } from './memory-open'
@@ -14,7 +14,7 @@ import { runSupervisor } from './serve'
 import { ensureSupervisor, SUPERVISOR_MODE, type SupervisorMode } from './supervisor-client'
 import { isLanguageModel } from './model-guard'
 import { assertDrivable, buildModelDiscovery, buildOrcActions, singleStepDraft } from './actions'
-import { renderPlanHuman } from './plan-render'
+import { renderDerivedPlan, renderPlanHuman } from './plan-render'
 import { CommandFailure } from './exit'
 
 
@@ -401,7 +401,7 @@ export function buildProgram(
       // actually running: approving is never itself a decision to start a run.
       if ((await kernel.getTask(root))?.status !== TASK_STATUS.running) return
       console.log(`watching the run at ${root}`)
-      report(await watchSubtree(kernel, root))
+      await report(await watchSubtree(kernel, root))
     })
 
   program
@@ -429,7 +429,7 @@ export function buildProgram(
         return
       }
       console.log(`answered feedback:${topic}`)
-      report(await watchSubtree(kernel, taskId))
+      await report(await watchSubtree(kernel, taskId))
     })
 
   program
@@ -568,13 +568,29 @@ export function buildProgram(
   // What a watch's result means at the shell. The ONE place `new`, `run`, `retry`, `reply` and
   // `approve` share, so they cannot drift on what a terminal outcome, a cancellation or a parked
   // human gate prints and exits with.
-  const report = (result: TailResult): void => {
+  // The executable plan the task's notes derive to, or '' when there is no note graph to derive
+  // from. A dangling decomposes_into makes instantiateFrozenPlan throw — that is precisely what the
+  // human needs to see at the gate, so it is reported rather than allowed to crash it.
+  const derivedPlanBlock = async (taskId: string): Promise<string> => {
+    try {
+      const notes = await kernel.listPlanNotes(taskId)
+      if (!notes.some(n => n.id === MASTERPLAN_NOTE_ID)) return ''
+      return renderDerivedPlan(instantiateFrozenPlan(MASTERPLAN_NOTE_ID, notes))
+    } catch (err) {
+      return `the plan notes do not derive a runnable plan: ${errorMessage(err)}`
+    }
+  }
+
+  const report = async (result: TailResult): Promise<void> => {
     // A parked run is not a failure: the work is durable and waiting on a person, so exit 0 and
     // name the one command that unparks it.
     if (result.parked) {
       // the id names the task that ASKED, which after a split is the child, not the task being
       // watched — replying to the wrong one resolves nothing and leaves the tree parked
       console.log(`run parked on a question: ${result.question}`)
+      // the human approves THIS, not the prose above it
+      const derived = await derivedPlanBlock(result.taskId)
+      if (derived) console.log(derived)
       console.log(`answer it to continue: orc reply ${result.taskId} <text>`)
       return
     }
@@ -603,7 +619,7 @@ export function buildProgram(
     await ensureRuntime()
     const since = await kernel.requestRun(taskId, opts)
     console.log(`run requested for ${taskId} — watching (ctrl-c stops watching, not the run: orc cancel ${taskId} stops it)`)
-    report(await watchSubtree(kernel, taskId, since))
+    await report(await watchSubtree(kernel, taskId, since))
   }
 
   program
@@ -764,7 +780,11 @@ export function buildProgram(
       // D4 gate, human side: a grounded-plan step parked on ask_human shows its question here, so the
       // conversation isn't one-directional — the human sees the prompt, not just a blind reply target.
       const feedback = await kernel.openFeedback(taskId)
-      if (feedback) console.log(`  awaiting reply: ${feedback.question}  (orc reply ${taskId} <text>)`)
+      if (feedback) {
+        console.log(`  awaiting reply: ${feedback.question}  (orc reply ${taskId} <text>)`)
+        const derived = await derivedPlanBlock(taskId)
+        for (const line of derived ? derived.split('\n') : []) console.log(`  ${line}`)
+      }
       // The runtime failing at its own job. Printed LAST and unconditionally, because it is the one
       // thing that explains a task which is not running, not parked, and not terminal either: a
       // reaction threw, so nobody acted on something the log records as asked. It used to be
@@ -934,7 +954,13 @@ export function buildProgram(
       const days = o.days ?? DEFAULT_SWEEP_DAYS
       // the policy is a pure fold of the log, so the dry run needs no read model at all
       const events = await log.after(0, [EVENT_KIND.memory_written, EVENT_KIND.memory_deleted, EVENT_KIND.memory_accessed])
-      const goes = staleNotes(events, { now: new Date().toISOString(), days })
+      // a plan note is an approved artifact — sweepable only once its task can no longer be retried
+      const terminalTaskIds = new Set(
+        [...(await kernel.state()).tasks.values()]
+          .filter(t => TERMINAL_TASK_STATUS.has(t.status))
+          .map(t => t.id),
+      )
+      const goes = staleNotes(events, { now: new Date().toISOString(), days, terminalTaskIds })
       for (const n of goes)
         console.log(`${n.scope}/${n.id}\t${n.title}\thits ${n.hits}\tlast touched ${n.lastTouchedAt}`)
       if (goes.length === 0) {
