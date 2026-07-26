@@ -1060,6 +1060,32 @@ export function buildProgram(
       }
     })
   mem
+    .command('topics [topicKey]')
+    .description("derived topics over project claims (statements grouped by meaning); pass a key to list that topic's claims")
+    .action(async (topicKey?: string) => {
+      const { config, log } = needPlugin()
+      const memory = await openMemory({ log, config })
+      try {
+        // topics are refreshed by the projector's drain — read after catching up, or the listing
+        // (and the keys it hands out) can reflect a stale partition.
+        await memory.projector.catchUp()
+        if (topicKey === undefined) {
+          const topics = await memory.store.topics()
+          // an empty listing is silence an operator can't act on; name the two likely causes —
+          // topics are derived from claim embeddings, so no claims or no embedder both land here.
+          if (topics.length === 0) throw new Error('no topics — write some claims, or check an embedder is configured')
+          for (const t of topics) console.log(`${t.topicKey}  ${String(t.size).padStart(3)}  ${t.label}`)
+          return
+        }
+        // topicClaims throws on an unknown key with a 'list topics again' message — surfaced as-is
+        // by the CLI's error path, not caught here.
+        for (const c of await memory.store.topicClaims(topicKey, { source: 'cli' }))
+          console.log(`${c.id}  ${c.validFrom}  ${c.text}`)
+      } finally {
+        await memory.close()
+      }
+    })
+  mem
     .command('neighbors <id>')
     .description('traverse typed links from a seed note (ranked blast radius)')
     .option('--kinds <k...>', 'only follow these link kinds')

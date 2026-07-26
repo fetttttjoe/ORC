@@ -1,4 +1,4 @@
-import { errorMessage, EVENT_KIND, MemoryDeletedPayload, MemoryWrittenPayload, type EventRecord } from '@orc/contracts'
+import { errorMessage, EVENT_KIND, MemoryDeletedPayload, MemoryWrittenPayload, type EventKind, type EventRecord } from '@orc/contracts'
 import type { EventLog } from '@orc/kernel'
 import { SurrealMemory } from './surreal'
 import { noteRelPath, renderNoteFile } from './note-md'
@@ -7,8 +7,9 @@ import { rebuildVaultMemory, renderMemoryIndex } from './memory-index'
 
 export interface MemoryProjector { start(): Promise<void>; close(): Promise<void>; rebuild(): Promise<void>; catchUp(): Promise<void> }
 
-// Everything the projector drains.
-export const MEMORY_KINDS = [EVENT_KIND.memory_written, EVENT_KIND.memory_deleted, EVENT_KIND.memory_accessed]
+// Everything the projector drains. Typed EventKind[] (not left to infer the narrower literal
+// union) so start()'s subscribe filter below can compare a live EventRecord's kind against it.
+export const MEMORY_KINDS: EventKind[] = [EVENT_KIND.memory_written, EVENT_KIND.memory_deleted, EVENT_KIND.memory_accessed]
 
 // What "the read model is behind" means for HEALTH — derived from the drained set so a fourth
 // kind is covered automatically, with the one exclusion stated rather than implied. An
@@ -45,10 +46,33 @@ export function createMemoryProjector(opts: { log: EventLog; surreal: SurrealMem
   // Reconcile by querying the log WHERE seq > cursor rather than trusting the subscribe
   // payload's ordering. Callers are responsible for serializing calls (see `serialize`
   // below) so revision/ordering stays deterministic.
-  const drainFrom = async (fromSeq: number): Promise<{ cursor: number; vaultChanged: number }> => {
+  //
+  // `force` skips the "did anything change" gate below. Stage 3 runs here, at the ONE place
+  // start/catchUp/rebuild all funnel through, so no caller can forget it — but "ran through here"
+  // and "must repartition" are different questions. start()/rebuild() pass force:true because they
+  // are the boot-time heal: the corpus may already hold claims from before this feature shipped, or
+  // from a run where refreshTopics kept failing, and that MUST get partitioned even though the
+  // cursor is already at head and zero events drain. catchUp() and the live reconcile leave it
+  // false: they run far more often than the corpus's claims actually change, and the point of this
+  // gate is that a drain carrying no memory_written/memory_deleted (redundant catch-up, or — before
+  // start()'s subscribe filter below — a task run's non-memory events) does no partition work at all.
+  const drainFrom = async (fromSeq: number, opts: { force?: boolean } = {}): Promise<{ cursor: number; vaultChanged: number }> => {
     const events = await log.after(fromSeq, MEMORY_KINDS)
     let vaultChanged = 0
     for (const e of events) if (await applyOne(e)) vaultChanged += 1
+    // vaultChanged counts an ACCEPTED memory_written/memory_deleted — the only events that can
+    // change which claims exist, so it is exactly "did this drain touch the claim set", not "did we
+    // drain anything": memory_accessed applies (bumps a counter) but never changes claims, and is
+    // deliberately excluded from vaultChanged for that same reason (see applyOne above).
+    if (vaultChanged > 0 || opts.force) {
+      // Best-effort: a grouping failure must never fail a drain — the previous topic table stays
+      // readable and the next drain retries.
+      try {
+        await surreal.refreshTopics()
+      } catch (err) {
+        console.warn(`[memory] topic refresh failed: ${errorMessage(err)}`)
+      }
+    }
     return { cursor: await surreal.getCursor(), vaultChanged }
   }
 
@@ -99,9 +123,21 @@ export function createMemoryProjector(opts: { log: EventLog; surreal: SurrealMem
       // subscribe BEFORE the initial drain: an event landing between the drain's read and a
       // later subscribe would fall below the subscription's start cursor and never arrive —
       // this order guarantees every event is covered by the drain or the live stream
-      unsub = await log.subscribe({}, () => enqueueReconcile())
+      //
+      // Filtered here, in the handler, because log.subscribe itself takes only `fromSeq` — no kind
+      // filter (packages/kernel/src/kernel.ts:439) — and wakes on EVERY event in the project, task
+      // and operation events included. A long task run appends hundreds of those; without this check
+      // each one would enqueue a reconcile that finds zero memory events and, before this fix,
+      // repartitioned anyway. Checking `e.kind` here means a non-memory event never even reaches
+      // enqueueReconcile, so it costs nothing beyond the array membership test.
+      unsub = await log.subscribe({}, e => { if (MEMORY_KINDS.includes(e.kind)) enqueueReconcile() })
       await serialize(async () => {
-        cursorCache = (await drainFrom(await surreal.getCursor())).cursor
+        // force: true — boot-time heal. The corpus may hold claims from before this feature
+        // shipped, or from a run where refreshTopics kept failing; those must get partitioned even
+        // though the cursor is already at head and drainFrom applies zero events. A plain "did we
+        // drain anything" check cannot tell that case apart from "nothing to do" — that is exactly
+        // why force is a separate, explicit signal rather than derived from the drain's own result.
+        cursorCache = (await drainFrom(await surreal.getCursor(), { force: true })).cursor
         await rebuildVaultMemory(surreal, vaultDir) // boot-time heal: replace vault/memory/** from Surreal
       })
     },
@@ -109,7 +145,7 @@ export function createMemoryProjector(opts: { log: EventLog; surreal: SurrealMem
     rebuild: async () => {
       await serialize(async () => {
         await surreal.clear()
-        cursorCache = (await drainFrom(0)).cursor
+        cursorCache = (await drainFrom(0, { force: true })).cursor // same boot-time-heal reasoning as start()
         await rebuildVaultMemory(surreal, vaultDir)
       })
     },

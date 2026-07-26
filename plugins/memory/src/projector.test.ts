@@ -2,7 +2,7 @@ import { afterAll, describe, expect, it, spyOn } from 'bun:test'
 import { mkdtempSync, existsSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import { EVENT_KIND, MEMORY_ACCESS, type EventKind } from '@orc/contracts'
+import { claimId, EVENT_KIND, MEMORY_ACCESS, TASK_STATUS, type EmbeddingProvider, type EventKind } from '@orc/contracts'
 import { openStorage } from '@orc/kernel'
 import { createTestDb, TEST_PROJECT_ID } from '@orc/kernel/test-helpers'
 import { SurrealMemory } from './surreal'
@@ -118,6 +118,57 @@ describe('memory projector', () => {
     expect(allSpy).not.toHaveBeenCalled()
     expect((await surreal.get('auth', 'project'))?.title).toBe('Auth')
     await surreal.close(); await log.close()
+  })
+
+  // Pins the two properties the topic-refresh gate exists for (see drainFrom's `force` in
+  // projector.ts): start() must partition a corpus that already has claims even when the cursor is
+  // already at head and zero events drain — the case a plain "did we drain anything" check cannot
+  // tell apart from "nothing to do" — while a drain that carries no memory events, or only a
+  // memory_accessed that cannot change which claims exist, must do no partition work at all.
+  it('start() partitions an already-caught-up corpus; a memory-less or claim-less drain never repartitions', async () => {
+    const pg = await createTestDb(); drops.push(pg.drop)
+    const ts = await createTestSurreal(); drops.push(ts.drop)
+    const log = (await openStorage(pg.url, { projectId: TEST_PROJECT_ID })).events
+    const fakeEmbedder: EmbeddingProvider = { embed: async texts => texts.map(() => [1, 0, 0]) }
+    const surreal = await SurrealMemory.open(ts, fakeEmbedder)
+    const vaultDir = mkdtempSync(path.join(tmpdir(), 'vault-topics-'))
+
+    // Simulate a corpus that already holds claims but was never partitioned — pre-feature data, or
+    // a run where refreshTopics kept failing: apply straight to Surreal, bypassing the projector
+    // entirely, so Surreal's cursor lands at this event's seq WITHOUT refreshTopics ever running.
+    const withClaims = { ...noteInput, id: 'topic-note', claims: [{ id: claimId('alpha holds'), text: 'alpha holds', sourceRevision: null }] }
+    const rec = await log.append({ taskId: null, stepId: null, runToken: null, kind: 'memory_written', payload: { note: withClaims, author: { source: 'cli' } } })
+    await surreal.applyEvent(rec)
+    expect(await surreal.topics()).toEqual([]) // sanity: claims exist, nothing partitioned yet
+
+    const refreshSpy = spyOn(surreal, 'refreshTopics')
+    const proj = createMemoryProjector({ log, surreal, vaultDir })
+    await proj.start() // cursor is already at rec.seq — drainFrom applies ZERO events this round
+    expect(refreshSpy).toHaveBeenCalledTimes(1)
+    expect(await surreal.topics()).not.toEqual([]) // yet start() still partitioned it (force: true)
+
+    // A non-memory event must never even wake the reconcile pipeline (the subscribe filter in
+    // start()) — spying on log.after from here on proves the pipeline was never ENTERED, not just
+    // that it entered and found nothing: no claim-table read, no topic transaction, no drain query.
+    const afterSpy = spyOn(log, 'after')
+    await log.append({ taskId: 't1', stepId: null, runToken: null, kind: 'task_status_changed', payload: { taskId: 't1', from: TASK_STATUS.draft, to: TASK_STATUS.running } })
+    await Bun.sleep(150)
+    expect(afterSpy).not.toHaveBeenCalled()
+    expect(refreshSpy).toHaveBeenCalledTimes(1)
+
+    // memory_accessed IS a MEMORY_KINDS member, so it DOES wake the reconcile (the trigger filter
+    // is by kind, not by "can this change claims") — but it cannot change which claims exist, so the
+    // internal vaultChanged gate must still suppress the refresh.
+    await log.append({ taskId: null, stepId: null, runToken: null, kind: 'memory_accessed', payload: { id: 'topic-note', scope: 'project', mode: MEMORY_ACCESS.read, author: { source: 'cli' } } })
+    await Bun.sleep(150)
+    expect(afterSpy).toHaveBeenCalled()
+    expect(refreshSpy).toHaveBeenCalledTimes(1)
+
+    // catchUp(), the CLI's one-shot path, is gated the same way: nothing pending, no repartition.
+    await proj.catchUp()
+    expect(refreshSpy).toHaveBeenCalledTimes(1)
+
+    await proj.close(); await surreal.close(); await log.close()
   })
 })
 

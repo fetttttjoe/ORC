@@ -1,5 +1,6 @@
 import { z } from 'zod'
 import { Claim, ClaimHit, ClaimInput, ClaimWrite } from './claim'
+import { Topic } from './cluster'
 import { EVENT_KIND, type EventRecord } from './event-kinds'
 import { composeAuthor, MEMORY_ID_RE, MemoryAuthor } from './ids'
 import { MEMORY_LIMITS } from './limits'
@@ -157,6 +158,7 @@ export const taskLaneScopes = (taskId: string, ancestorTaskIds: readonly string[
 // spelling the plugin registers. tools.ts derives its registrations from this map.
 export const MEMORY_TOOL_NAME = {
   write: 'memory_write', search: 'memory_search', read: 'memory_read', neighbors: 'memory_neighbors',
+  topics: 'memory_topics',
 } as const
 
 // memory_write's result envelope (tools.ts constructs it; the loop parses it — no casts).
@@ -577,6 +579,13 @@ export interface MemoryStore {
   // via: the edge a memory_neighbors row led the caller across, when this read follows one —
   // recorded into the same event so the connection can strengthen alongside the node.
   recordAccess(id: string, scope: string | undefined, mode: MemoryAccessMode, author: MemoryAuthor, opts?: { idempotencyKey?: string; via?: AccessVia }): Promise<void>
+  /** The derived topic inventory. A read, not a use: listing records nothing. */
+  topics(): Promise<Topic[]>
+  /**
+   * One topic's claims. Appends a memory_topic_accessed event — fetching a topic IS the tracked
+   * signal, and the log is where it is measured from. Throws on a key no current topic has.
+   */
+  topicClaims(topicKey: string, author: MemoryAuthor, opts?: { idempotencyKey?: string }): Promise<Claim[]>
 }
 
 

@@ -35,6 +35,8 @@ const fakeStore = (over: Partial<MemoryStore> = {}) => {
     claimsFor: async () => [],
     neighbors: async () => [],
     recordAccess: async (id, scope, mode, author, opts) => { accessed.push({ id, scope, mode, author, via: opts?.via }) },
+    topics: async () => [],
+    topicClaims: async () => [],
     ...over,
   }
   return { store, written, accessed }
@@ -52,10 +54,10 @@ const WriteInputProps = z.object({ properties: z.record(z.string(), z.unknown())
 const WriteInputDescriptions = z.object({ properties: z.record(z.string(), z.object({ description: z.string().optional() })) })
 
 describe('memory tools', () => {
-  it('declares four tools; memory_write routes to the store with the bound author', async () => {
+  it('declares five tools; memory_write routes to the store with the bound author', async () => {
     const { store, written } = fakeStore()
     const tools = memoryTools({ store, author: { source: 'agent', executor: 'api-loop', model: 'opus', role: 'review' } })
-    expect(tools.map(t => t.name).sort()).toEqual(['memory_neighbors', 'memory_read', 'memory_search', 'memory_write'])
+    expect(tools.map(t => t.name).sort()).toEqual(['memory_neighbors', 'memory_read', 'memory_search', 'memory_topics', 'memory_write'])
     // the exported read subset pins to the real surface — rename a tool and this fails HERE,
     // in the owning package, not silently in a consumer's filter (orc mcp serve)
     const names = new Set(tools.map(t => t.name))
@@ -298,12 +300,12 @@ describe('memory tools', () => {
   it('scout tier narrows the tool surface (authors notes, but never traverses); auditor keeps the full set', () => {
     const { store } = fakeStore()
     const scoutNames = memoryTools({ store, author: { source: 'cli' }, role: 'scout' }).map(t => t.name).sort()
-    expect(scoutNames).toEqual(['memory_read', 'memory_search', 'memory_write'])
+    expect(scoutNames).toEqual(['memory_read', 'memory_search', 'memory_topics', 'memory_write'])
     expect(scoutNames).not.toContain('memory_neighbors') // deliberate narrowing: scout seeds the graph, doesn't traverse it
     expect(memoryTools({ store, author: { source: 'cli' }, role: 'auditor' }).map(t => t.name)).toContain('memory_neighbors')
   })
 
-  it('scout tier appends the provisional-epistemics fragment to its three tools', () => {
+  it('scout tier appends the provisional-epistemics fragment to its four tools', () => {
     const { store } = fakeStore()
     const tools = memoryTools({ store, author: { source: 'cli' }, role: 'scout' })
     for (const t of tools) expect(t.description).toContain('provisional')
@@ -312,7 +314,7 @@ describe('memory tools', () => {
   it('auditor tier appends the traverse-before-asserting fragment to the full surface', () => {
     const { store } = fakeStore()
     const tools = memoryTools({ store, author: { source: 'cli' }, role: 'auditor' })
-    expect(tools).toHaveLength(4)
+    expect(tools).toHaveLength(5)
     for (const t of tools) expect(t.description).toContain('contradicts/supersedes before asserting')
   })
 
@@ -324,7 +326,7 @@ describe('memory tools', () => {
   it('verify tier carries the full tool set with NO epistemics fragment appended', () => {
     const { store } = fakeStore()
     const tools = memoryTools({ store, author: { source: 'cli' } })
-    expect(tools.map(t => t.name)).toEqual(['memory_write', 'memory_search', 'memory_read', 'memory_neighbors'])
+    expect(tools.map(t => t.name)).toEqual(['memory_write', 'memory_search', 'memory_read', 'memory_neighbors', 'memory_topics'])
     // the exact shipped descriptions — scout/auditor append to these, verify must not
     expect(tools.find(t => t.name === 'memory_write')?.description).toBe(
       'Create or update a project knowledge note (upsert by id — omitted fields keep their stored values; pass an explicit empty string/array to clear one). Record durable findings/decisions/conventions so later steps reuse them. If a note you read came back drifted, CORRECT it: write the same id with what the code says now, rather than adding a second note — a graph carrying two contradictory claims is worse than one carrying neither.')
@@ -576,5 +578,47 @@ describe('claims through the tool surface', () => {
     const { store: s2 } = fakeStore({ searchClaims: async () => [claimHit()], search: async () => [] })
     const search2 = memoryTools({ store: s2, author: { source: 'cli' } }).find(t => t.name === 'memory_search')!
     expect(z.object({ note: z.string().optional() }).parse((await search2.execute({ query: 'truth' })).output).note).toBeUndefined()
+  })
+})
+
+describe('memory_topics', () => {
+  const topic = (topicKey: string, label: string, size = 2) => ({ topicKey, label, size })
+
+  it('lists the inventory with keys the fetch form accepts', async () => {
+    const { store } = fakeStore({ topics: async () => [topic('aaaaaaaaaaa1', 'the log is truth')] })
+    const tool = memoryTools({ store, author: { source: 'cli' } }).find(t => t.name === 'memory_topics')!
+    const out = z.object({ topics: z.array(z.object({ topicKey: z.string(), label: z.string(), size: z.number() })) })
+      .parse((await tool.execute({})).output)
+    expect(out.topics[0]).toMatchObject({ topicKey: 'aaaaaaaaaaa1', label: 'the log is truth' })
+  })
+
+  it('fetches one topic’s claims', async () => {
+    const claims = [{ id: 'aaaaaaaaaaa1', text: 'the log is truth', validFrom: '2026-07-26T00:00:00.000Z', sourceRevision: null }]
+    const { store } = fakeStore({ topics: async () => [topic('aaaaaaaaaaa1', 'the log is truth')], topicClaims: async () => claims })
+    const tool = memoryTools({ store, author: { source: 'cli' } }).find(t => t.name === 'memory_topics')!
+    const out = z.object({ claims: z.array(z.object({ text: z.string() })) })
+      .parse((await tool.execute({ topic: 'aaaaaaaaaaa1' })).output)
+    expect(out.claims[0]?.text).toBe('the log is truth')
+  })
+
+  // an empty result is indistinguishable from a hallucinated key; an error is not
+  it('errors on a key no current topic has, rather than returning empty', async () => {
+    const { store } = fakeStore({
+      topics: async () => [topic('aaaaaaaaaaa1', 'the log is truth')],
+      topicClaims: async () => { throw new Error('no topic ‘deadbeef0000’ — list topics again') },
+    })
+    const tool = memoryTools({ store, author: { source: 'cli' } }).find(t => t.name === 'memory_topics')!
+    const r = await tool.execute({ topic: 'deadbeef0000' })
+    expect(r.isError).toBe(true)
+    expect(JSON.stringify(r.output)).toContain('list topics again')
+  })
+
+  it('bounds the inventory by budget like every other tool response', async () => {
+    const many = Array.from({ length: 200 }, (_, i) => topic(`k${i}`.padEnd(12, '0'), `topic ${i} ${'x'.repeat(200)}`))
+    const { store } = fakeStore({ topics: async () => many })
+    const tool = memoryTools({ store, author: { source: 'cli' } }).find(t => t.name === 'memory_topics')!
+    const out = z.object({ topics: z.array(z.unknown()), truncated: z.boolean() }).parse((await tool.execute({ budget: 100 })).output)
+    expect(out.topics.length).toBeLessThan(many.length)
+    expect(out.truncated).toBe(true)
   })
 })

@@ -11,7 +11,7 @@ export const EventKind = z.enum([
   'run_requested', 'run_started', 'step_started', 'skill_loaded', 'agent_call', 'tool_call', 'tool_result',
   'signal_received', 'step_completed', 'step_failed', 'split_proposed', 'split_resolved',
   'operation_started', 'operation_completed', 'operation_failed', 'artifact_produced',
-  'memory_written', 'memory_deleted', 'memory_accessed',
+  'memory_written', 'memory_deleted', 'memory_accessed', 'memory_topic_accessed',
   'feedback_requested', 'feedback_provided', 'plan_annotated', 'analysis_completed',
   'models_discovered', 'copilot_exchange', 'reaction_failed',
 ])

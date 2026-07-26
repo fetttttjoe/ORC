@@ -47,12 +47,15 @@ describe('note tiers', () => {
   })
 
   it('each tier keeps only its own fields', () => {
+    // a real claim, so 'not.toHaveProperty(claims)' below has something to actually strip —
+    // an absent field would make the assertion true no matter what the tier schema does
+    const aClaim = { id: 'a'.repeat(12), text: 'x', sourceRevision: null }
     const s = semantic({ id: 'a', title: 'A' })
     expect(s).not.toHaveProperty('zone')
-    const p = plan({ id: 'b', title: 'B', zone: ['docs/**'] })
+    const p = plan({ id: 'b', title: 'B', zone: ['docs/**'], claims: [aClaim] })
     expect(p.zone).toEqual(['docs/**'])
     expect(p).not.toHaveProperty('claims')
-    const e = MemoryNoteInput.parse({ tier: 'episodic', id: 'c', scope: 'plan-t1', title: 'C', zone: ['y'] })
+    const e = MemoryNoteInput.parse({ tier: 'episodic', id: 'c', scope: 'plan-t1', title: 'C', zone: ['y'], claims: [aClaim] })
     expect(e).not.toHaveProperty('claims')
     expect(e).not.toHaveProperty('zone')
   })

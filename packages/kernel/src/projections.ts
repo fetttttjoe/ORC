@@ -267,6 +267,9 @@ export function foldInto(acc: FoldAcc, e: EventRecord): FoldAcc {
       case EVENT_KIND.memory_written:
       case EVENT_KIND.memory_deleted:
       case EVENT_KIND.memory_accessed:
+      // reads derived knowledge (a topic listing or one topic's claims) — drives no task state,
+      // same as memory_accessed above
+      case EVENT_KIND.memory_topic_accessed:
       case EVENT_KIND.models_discovered:
       case EVENT_KIND.feedback_requested:
       case EVENT_KIND.feedback_provided:

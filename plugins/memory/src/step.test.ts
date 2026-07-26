@@ -30,6 +30,8 @@ function fakeStore(opts: {
     search: async query => { queries.push(query); return opts.search?.(query) ?? [] },
     searchClaims: async query => { claimQueries.push(query); return opts.searchClaims?.(query) ?? [] },
     claimsFor: async () => [],
+    topics: async () => [],
+    topicClaims: async () => [],
     recordAccess: async (id, scope, mode) => { accesses.push({ id, scope, mode }) },
     write: async note => { writes.push(note); return note as unknown as MemoryNote },
     get: async id => opts.notes?.[id] ?? null,

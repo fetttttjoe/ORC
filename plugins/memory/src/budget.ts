@@ -61,7 +61,7 @@ export function fitMemoryNoteToBudget(stored: MemoryNote, budget: number): Fitte
   // a note HAS, so this is what strips what history left behind — and `{...note}` below would
   // otherwise carry an older schema's key through untouched: the fitter blanks only the fields it
   // knows, so a retired unbounded array (`rules[]`, once) rode every discard out into the very
-  // response this exists to bound. Legacy statements survive the strip as claims, which ARE bounded.
+  // response this exists to bound.
   const note = MemoryNote.safeParse(stored).data ?? stored
   const contentLimit = budget * 4
   const responseLimit = Math.max(1_024, contentLimit)

@@ -5,6 +5,7 @@ import { FailureClass, RunOutcome, Signal, Usage } from './execution'
 import { EventKind } from './event-kinds'
 import { OperationCompletedPayload, OperationFailedPayload, OperationStartedPayload } from './operations'
 import { MemoryAccessedPayload, MemoryDeletedPayload, MemoryWrittenPayload } from './memory'
+import { MemoryTopicAccessedPayload } from './cluster'
 import { AnalysisCompletedPayload, FeedbackProvidedPayload, FeedbackRequestedPayload, PlanAnnotatedPayload } from './analysis'
 
 // typed so folds can parse receipts without casts
@@ -165,6 +166,7 @@ export const PAYLOAD_SCHEMAS = {
   memory_written: MemoryWrittenPayload,
   memory_deleted: MemoryDeletedPayload,
   memory_accessed: MemoryAccessedPayload,
+  memory_topic_accessed: MemoryTopicAccessedPayload,
   feedback_requested: FeedbackRequestedPayload,
   feedback_provided: FeedbackProvidedPayload,
   plan_annotated: PlanAnnotatedPayload,

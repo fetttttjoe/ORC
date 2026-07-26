@@ -38,6 +38,7 @@ const probeExecutor: AgentExecutor<unknown> = {
       memory_search: { query: 'x' },
       memory_read: { id: 'x' },
       memory_neighbors: { seed: 'x' },
+      memory_topics: {},
     }
     for (const t of ctx.extraTools.filter(t => t.name.startsWith('memory_'))) {
       const r = await t.execute(inputs[t.name])
@@ -79,9 +80,9 @@ describe('buildRuntime degraded memory', () => {
     await kernel.approvePlan(t.id)
     expect(await (await port.startRun(t.id)).wait()).toBe('done')
 
-    // all four memory tools exist and each returns an explicit isError result with the reason
+    // all five memory tools exist and each returns an explicit isError result with the reason
     expect(new Set(toolProbe.results.map(r => r.name))).toEqual(
-      new Set(['memory_write', 'memory_search', 'memory_read', 'memory_neighbors']))
+      new Set(['memory_write', 'memory_search', 'memory_read', 'memory_neighbors', 'memory_topics']))
     for (const r of toolProbe.results) {
       expect(r.isError).toBe(true)
       expect(JSON.stringify(r.output)).toContain('memory unavailable')

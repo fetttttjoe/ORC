@@ -3,7 +3,7 @@ import { RecordId, Surreal } from 'surrealdb'
 import { edge, orm, table, t } from 'surqlize'
 import {
   activation, activationBoost, bumpAccess, Claim, DEFAULT_HALF_LIFE_DAYS,
-  deriveNoteProvenance, EDGE_DIRECTION, EVENT_KIND, LINK_KINDS, NOTE_KINDS, MemoryScope, viaEdge,
+  deriveNoteProvenance, EDGE_DIRECTION, EVENT_KIND, LINK_KINDS, NOTE_KINDS, MemoryScope, Topic, viaEdge,
   MemoryAccessedPayload, MemoryDeletedPayload, MemoryNote, MemoryWrittenPayload,
   MEMORY_LIMITS, SEARCH_MODE, errorMessage, inferTier, isUiMetaNote, noteKey, NoteTier,
   type EmbeddingProvider, type EventRecord, type NeighborQuery, type MemoryFilter, type NoteFields,
@@ -12,9 +12,10 @@ import {
 } from '@orc/contracts'
 import { rankNeighbors, rrfFuse, type Edge } from './rank'
 import { dedupeByNote, type ClaimHit, type ClaimSearchOpts } from './claim-search'
+import { partition, type ClusterInput } from './cluster'
 
 // The read model's table names — single spelling for every builder call and RecordId.
-enum Tb { Note = 'note', Meta = 'meta', Link = 'link', Claim = 'claim' }
+enum Tb { Note = 'note', Meta = 'meta', Link = 'link', Claim = 'claim', Topic = 'topic' }
 
 // `noteId` holds the note's own string id (surqlize reserves `id` for the auto-added RecordId).
 // hits/lastAccessedAt are projected from memory_accessed like every other field — they survive a
@@ -68,6 +69,15 @@ const claimTable = table(Tb.Claim, {
   hits: t.option(t.number()), lastAccessedAt: t.option(t.string()),
 })
 
+// Stage 3 (see the claim-grouping spec): derived from claim embeddings. After a refresh the table
+// holds EXACTLY the new partition and nothing else — it needs no cursor because nothing in it is
+// meant to survive across one. Deliberately carries no `hits` column — topic use is measured from
+// the log, and a counter a rebuild erases is not a measurement.
+const topicTable = table(Tb.Topic, {
+  topicKey: t.string(), label: t.string(), medoidClaimId: t.string(),
+  members: t.array(t.string()),
+})
+
 // Derived edge index (spec D2/D3): materialized from note.links by the projector, rebuilt on
 // replay. Explicit fromId/toId/scope string fields so fetch needs no RecordId parsing.
 const linkTable = edge(Tb.Note, Tb.Link, Tb.Note, {
@@ -110,6 +120,11 @@ const ClaimRow = z.object({
 // order as the note search's own page: dedupeByNote counts notes, so this is comparable.
 const CLAIM_SEARCH_LIMIT = 10
 
+// Cosine similarity at or above which two claims group together. A GUESS, not a measured value: tens
+// of claims cannot distinguish a good split from luck. Settled from `memory_topic_accessed` events —
+// see the spec's "How it gets settled".
+export const MEMORY_CLUSTER_THRESHOLD = 0.75
+
 const CONNECT_TIMEOUT_MS = 5_000
 const CLOSE_TIMEOUT_MS = 2_000
 
@@ -130,7 +145,7 @@ async function withTimeout<T>(p: Promise<T>, ms: number, what: string): Promise<
 }
 
 function makeOrm(surreal: Surreal) {
-  return orm(surreal, noteTable, metaTable, linkTable, claimTable)
+  return orm(surreal, noteTable, metaTable, linkTable, claimTable, topicTable)
 }
 type Db = ReturnType<typeof makeOrm>
 
@@ -169,7 +184,7 @@ export class SurrealMemory {
       // write would fail on the very first write. Defining both tables up front avoids that.
       // `link` (default TYPE ANY, so RELATE works) is defined too: neighbors() SELECTs from it
       // even when no edge was ever materialized.
-      await surreal.query([Tb.Note, Tb.Meta, Tb.Link, Tb.Claim].map(tb => `DEFINE TABLE IF NOT EXISTS ${tb} SCHEMALESS;`).join(' '))
+      await surreal.query([Tb.Note, Tb.Meta, Tb.Link, Tb.Claim, Tb.Topic].map(tb => `DEFINE TABLE IF NOT EXISTS ${tb} SCHEMALESS;`).join(' '))
       return new SurrealMemory(surreal, makeOrm(surreal), embedder)
     } catch (err) {
       // connect() opens a live socket; if signin/use/DEFINE then throws, don't leak it
@@ -571,6 +586,64 @@ export class SurrealMemory {
     }))
   }
 
+  // Stage 3. Recomputes the partition from the current claim set and replaces the topic table — no
+  // cursor, nothing to resume: it either completes or the next drain redoes it. Runs OUTSIDE the
+  // event transaction on purpose; grouping is a whole-corpus derivation, not a per-event projection.
+  async refreshTopics(threshold: number = MEMORY_CLUSTER_THRESHOLD): Promise<void> {
+    // project scope only: claims are semantic-tier, durable knowledge is project-scoped, and a topic
+    // view over one task's transient trail is noise
+    const rows = await this.db.select(Tb.Claim).where(c => c.scope.eq(MemoryScope.project))
+    const claims: ClusterInput[] = rows.flatMap(r =>
+      r.embedding === undefined ? [] : [{ id: r.claimId, vector: r.embedding }])
+    const text = new Map(rows.map(r => [r.claimId, r.text]))
+    const groups = partition(claims, threshold)
+    await this.db.transaction(async tx => {
+      // Drop exactly the rows THIS refresh drops, in one statement that never reads a row — not a
+      // blanket delete-then-recreate (a topic key is a deterministic claim id, and deleting a fixed
+      // record id and upserting the SAME id inside one Surreal transaction leaves it deleted at
+      // commit, the same pitfall the claim re-materialization above works around), and not a
+      // read-then-filter either: selecting every row would parse each one against topicTable's
+      // shape, so one row left over from before a later required column existed throws and aborts
+      // the WHOLE refresh — caught by the projector's best-effort wrapper, which leaves the table
+      // stale until someone notices and runs a manual rebuild. An empty `liveKeys` correctly clears
+      // the table (every row is then "not inside" the empty set).
+      // `.notInside(...)`, NOT `.inside(...).not()`: surqlize's `not()` prefixes with bare `!`
+      // ahead of the whole comparison — `!$this["topicKey"] IN $_v1`, no parens — which SurrealQL
+      // parses as `(!topicKey) IN v`, not `!(topicKey IN v)`. Verified live: `.inside(v).not()`
+      // deletes nothing, ever, empty `v` or not. `.notInside` compiles straight to `NOT IN`, one
+      // operator, no precedence trap, confirmed against a real SurrealDB.
+      const liveKeys = groups.map(g => g.key)
+      await tx.delete(Tb.Topic).where(r => r.topicKey.notInside(liveKeys))
+      for (const g of groups)
+        await tx.upsert(Tb.Topic, g.key).set({
+          topicKey: g.key,
+          // the medoid claim's own text: already a standalone sentence, so a real fact not a guess
+          label: text.get(g.medoidClaimId) ?? '',
+          medoidClaimId: g.medoidClaimId,
+          members: g.members,
+        })
+    })
+  }
+
+  async topics(): Promise<Topic[]> {
+    const rows = await this.db.select(Tb.Topic)
+    return rows
+      .map(r => Topic.parse({ topicKey: r.topicKey, label: r.label, size: r.members.length }))
+      .sort((a, b) => b.size - a.size || a.topicKey.localeCompare(b.topicKey))
+  }
+
+  // The claims of one topic. An unknown key yields [] — the CALLER distinguishes "no such topic" from
+  // "an empty one" by consulting topics(), because only it knows how to phrase that to its audience.
+  async topicClaims(topicKey: string): Promise<Claim[]> {
+    const topic = (await this.db.select(Tb.Topic, topicKey))[0]
+    if (!topic) return []
+    const rows = await this.db.select(Tb.Claim).where(c => c.scope.eq(MemoryScope.project))
+    const members = new Set(topic.members)
+    return rows
+      .filter(r => members.has(r.claimId))
+      .map(r => Claim.parse({ id: r.claimId, text: r.text, validFrom: r.validFrom, sourceRevision: r.sourceRevision }))
+  }
+
   private async keywordSearch(query: string, filter: MemoryFilter = {}): Promise<NoteSummary[]> {
     // AND across whitespace-separated terms, each term matching ANY field — a whole-query
     // substring match made every multi-word query miss unless the exact phrase appeared.
@@ -651,6 +724,7 @@ export class SurrealMemory {
       await tx.delete(Tb.Meta)
       await tx.delete(Tb.Link)
       await tx.delete(Tb.Claim)
+      await tx.delete(Tb.Topic)
     })
   }
   async close(): Promise<void> { await this.surreal.close() }

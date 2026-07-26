@@ -28,6 +28,9 @@ const ROUTER_RELEVANT: Record<EventKind, boolean> = {
   skill_loaded: false, agent_call: false, tool_call: false, tool_result: false,
   signal_received: false, operation_started: false, operation_completed: false,
   operation_failed: false, artifact_produced: false, memory_deleted: false, memory_accessed: false,
+  // a topic access (list or fetch) reads DERIVED knowledge — it starts nothing, unblocks nothing,
+  // and changes no task state, same as its sibling memory_accessed
+  memory_topic_accessed: false,
   feedback_requested: false, feedback_provided: true, plan_annotated: false, analysis_completed: false,
   models_discovered: false, // catalog metadata — nothing to route
   copilot_exchange: false, // conversation record — nothing to route

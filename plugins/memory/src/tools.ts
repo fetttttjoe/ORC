@@ -112,6 +112,8 @@ const NeighborsInput = z.object({
   seed: z.string(), kinds: z.array(LinkKind).optional(), scope: z.string().optional(),
   depth: z.number().int().positive().optional(), budget: Budget,
 })
+// topic omitted lists the inventory; a topicKey from that listing fetches one topic's claims.
+const TopicsInput = z.object({ topic: z.string().optional(), budget: Budget })
 // Tool-boundary variant: agents may omit id — the title-derived slug makes the same finding
 // converge instead of forking (bench: note-id drift). Named top-level, not call-site.
 // `invalidates` is stated about the WRITE, not about the note, so it is parsed here and forwarded on
@@ -132,7 +134,7 @@ const idSchema = { type: 'string', pattern: '^[a-z0-9][a-z0-9-]*$' }
 // silently losing its memory tools.
 export function unavailableMemoryTools(reason: string): ResolvedTool[] {
   const fail = async (): Promise<never> => { throw new Error(`memory unavailable: ${reason}`) }
-  const store: MemoryStore = { write: fail, remove: fail, get: fail, list: fail, search: fail, searchClaims: fail, claimsFor: fail, neighbors: fail, recordAccess: fail }
+  const store: MemoryStore = { write: fail, remove: fail, get: fail, list: fail, search: fail, searchClaims: fail, claimsFor: fail, neighbors: fail, recordAccess: fail, topics: fail, topicClaims: fail }
   return memoryTools({ store, author: { source: 'agent' } })
 }
 
@@ -141,7 +143,7 @@ export function unavailableMemoryTools(reason: string): ResolvedTool[] {
 // here, next to the tool definitions, so a rename cannot drift a consumer's copy: external
 // drivers (orc mcp serve) expose exactly these — reading knowledge is theirs, authoring it
 // belongs to agents running inside plans. tools.test.ts pins every name to the actual surface.
-export const MEMORY_READ_TOOLS = [MEMORY_TOOL_NAME.search, MEMORY_TOOL_NAME.read, MEMORY_TOOL_NAME.neighbors] as const
+export const MEMORY_READ_TOOLS = [MEMORY_TOOL_NAME.search, MEMORY_TOOL_NAME.read, MEMORY_TOOL_NAME.neighbors, MEMORY_TOOL_NAME.topics] as const
 
 // Injected as ResolvedTool[] via the same channel MCP tools use. Author is bound per step.
 // role keys the tool surface + epistemic posture (default 'verify' = today's unchanged behavior):
@@ -384,6 +386,31 @@ export function memoryTools(opts: {
             ...(r.truncated && { next: 'memory_read an id for the full note' }),
             ...(r.items.length === 0 && { note: "no note matched — absence is not proof a decision doesn't exist" }),
           })
+        } catch (e) { return err(e) }
+      },
+    },
+    {
+      ref: 'memory/topics', name: MEMORY_TOOL_NAME.topics,
+      description: withRole('Derived topics over project knowledge — statements grouped by meaning, with no topic given call it lists them. Pass a topicKey from that list to read the topic’s claims. Keys come from the list, never from memory: they change as the corpus does.', role),
+      inputSchema: {
+        type: 'object',
+        properties: {
+          topic: { type: 'string', description: 'a topicKey from a previous listing; omit to list topics' },
+          budget: budgetSchema,
+        },
+      },
+      execute: async input => {
+        try {
+          const q = TopicsInput.parse(input)
+          if (q.topic === undefined) {
+            // listing records nothing: a call that surfaces N things records one access for what was
+            // ASKED, never N for what it happened to list (same rule memory_neighbors follows)
+            const r = applyBudget(await store.topics(), t => `${t.topicKey}${t.label}`, { limit: MEMORY_LIMITS.labelItems, budget: q.budget })
+            return ok({ topics: r.items, truncated: r.truncated, omitted: r.omitted })
+          }
+          const claims = await store.topicClaims(q.topic, author)
+          const r = applyBudget(claims, c => c.text, { limit: MEMORY_LIMITS.detailItems, budget: q.budget })
+          return ok({ topicKey: q.topic, claims: r.items, truncated: r.truncated, omitted: r.omitted })
         } catch (e) { return err(e) }
       },
     },
