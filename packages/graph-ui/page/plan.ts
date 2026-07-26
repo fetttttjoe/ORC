@@ -6,8 +6,9 @@ import { renderWaves } from './conversation'
 import { mermaidInto } from './mermaid'
 import { draftFromSteps, openPlanEditor } from './plan-editor'
 import { el } from './ui/el'
-import { Badge, Btn, Card, Dot, Empty, KV, Link, Pre, Tabs, statusTone, toast } from './ui/components'
+import { Badge, Btn, Card, CmdChip, Dot, Empty, KV, Link, Pre, Tabs, statusTone, toast } from './ui/components'
 
+import { REPLY_AFFORDANCE, replyAffordance } from './affordance'
 import type { PlanNoteView, PlansView, PlanStepView } from './api'
 export type { PlanNoteView, PlansView, PlanStepView } // view models re-export the api contract
 
@@ -60,8 +61,6 @@ function usageChip(u: { inputTokens: number; outputTokens: number; costUSD: numb
   return `${cost}${fmtTok(tok)} tok`
 }
 
-const cmdChip = (cmd: string): HTMLElement =>
-  el('code', { class: 'cmd', title: 'click to copy', onClick: () => void navigator.clipboard.writeText(cmd) }, cmd)
 
 interface Move { text: string; cmd: string | null; tone: 'danger' | 'warn' | 'accent' | 'ok'; button: HTMLElement | null }
 
@@ -77,9 +76,10 @@ function yourMove(t: TaskView, open: OpenQuestion[], act: Act | null): Move | nu
   if (open.length > 0) {
     const input = el('input', {})
     input.placeholder = 'your answer…'
+    const offer = replyAffordance(Boolean(act), id)
     return {
       text: `the agent is asking: “${open[0]!.question}”`, tone: 'warn',
-      cmd: act ? null : `orc reply ${id} "<your answer>"`,
+      cmd: offer.kind === REPLY_AFFORDANCE.command ? offer.cmd : null,
       button: act && el('div', { class: 'reply-row' }, input, Btn('reply', async () => {
         if (!input.value.trim()) return
         await act('reply', { taskId: id, text: input.value.trim() })
@@ -215,7 +215,7 @@ export function renderRequest(ctx: RequestCtx): HTMLElement {
       card.append(el('label', { class: 'field' }, el('span', {}, 'cwd'), cwdInput))
     }
     if (move.button) card.append(move.button)
-    else if (move.cmd) card.append(cmdChip(move.cmd))
+    else if (move.cmd) card.append(CmdChip(move.cmd))
     out.append(card)
   }
 

@@ -43,6 +43,11 @@ export const Empty = (text: string): HTMLElement => el('div', { class: 'empty' }
 export const Link = (label: string, onClick: () => void): HTMLElement =>
   el('a', { class: 'link', onClick }, label)
 
+// The click-to-copy CLI equivalent of a control this view cannot offer. Shared, because every
+// place the project fence withholds a button has to say what CAN be done instead.
+export const CmdChip = (cmd: string): HTMLElement =>
+  el('code', { class: 'cmd', title: 'click to copy', onClick: () => void navigator.clipboard.writeText(cmd) }, cmd)
+
 // action button: disables itself while the handler runs; failures surface as toasts.
 // type='button' — inside a <form>, the default type='submit' makes Enter "click" the first
 // button (implicit submission), which turned Enter-in-a-dialog into cancel.

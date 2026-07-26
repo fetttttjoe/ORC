@@ -8,7 +8,8 @@ import { isUiMetaNote, noteNodeId, stepNodeId } from '@orc/ui-core/graph'
 import { api, canAct, session, type CopilotPart } from './api'
 import { mermaidInto } from './mermaid'
 import { el } from './ui/el'
-import { Badge, Btn, Empty, Pre, toast, type Tone } from './ui/components'
+import { Badge, Btn, CmdChip, Empty, Pre, toast, type Tone } from './ui/components'
+import { REPLY_AFFORDANCE, replyAffordance } from './affordance'
 
 interface ChatMessage { role: 'user' | 'assistant'; content: string }
 
@@ -154,7 +155,7 @@ export class Conversation {
     // A plan-gate question comes with the decomposition DIAGRAM, not just prose: see, then answer.
     if (row.kind === EVENT_KIND.feedback_requested && row.taskId) {
       void this.decompositionCard(row.taskId)
-      if (canAct()) this.answerBox(row.taskId)
+      this.answerRow(row.taskId)
     }
     // answered elsewhere (inspector, copilot, CLI): retire this chat's open box
     if (row.kind === EVENT_KIND.feedback_provided && row.taskId) {
@@ -244,8 +245,23 @@ export class Conversation {
     this.scroll()
   }
 
-  // inline reply for an open agent question — same reply action as the inspector, one shot
+  // inline reply for an open agent question — same reply action as the inspector, one shot.
+  // When the fence withholds it (a project this UI was not started in) the question still gets a
+  // route: the CLI command that answers it. Silently rendering nothing made a parked run look like
+  // a dead end — you could see the question and had no way to answer it.
   private readonly answerRows = new Map<string, HTMLElement>()
+  private answerRow(taskId: string): void {
+    const offer = replyAffordance(canAct(), taskId)
+    if (offer.kind === REPLY_AFFORDANCE.box) { this.answerBox(taskId); return }
+    this.answerRows.get(taskId)?.remove()
+    const row = el('div', { class: 'conv-inputrow answer' },
+      el('span', { class: 'sys-line' }, 'answer it from this project’s own directory:'),
+      CmdChip(offer.cmd),
+    )
+    this.answerRows.set(taskId, row) // same map, so feedback_provided retires it either way
+    this.list.append(row)
+  }
+
   private answerBox(taskId: string): void {
     this.answerRows.get(taskId)?.remove() // one open box per task — the gate is serial
     const input = el('textarea', { class: 'conv-input' }) as HTMLTextAreaElement

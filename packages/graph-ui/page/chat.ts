@@ -2,7 +2,7 @@
 // step node → that step only. Live: app.ts re-renders on matching SSE summaries (debounced).
 import type { TranscriptItem } from '@orc/ui-core'
 import { el } from './ui/el'
-import { Badge, Btn, Card, Empty, Pre, statusTone } from './ui/components'
+import { Badge, Btn, Card, CmdChip, Empty, Pre, statusTone } from './ui/components'
 
 const iterDivider = (n: number): HTMLElement => el('div', { class: 'chat-iter' }, `iter ${n}`)
 
@@ -26,12 +26,17 @@ function item(i: TranscriptItem): HTMLElement[] {
         el('div', { class: 'card-title' }, 'Q: ' + i.question, i.answer === null ? Badge('waiting', 'warn') : ''),
         i.answer !== null ? el('div', {}, `A: ${i.answer}`) : null,
       )
-      if (i.answer === null && onReplyCb) {
-        const input = el('input', {})
-        input.placeholder = 'your answer…'
-        card.append(el('div', { class: 'reply-row' }, input, Btn('reply', async () => {
-          if (input.value.trim()) await onReplyCb!(input.value.trim())
-        })))
+      if (i.answer === null) {
+        if (onReplyCb) {
+          const input = el('input', {})
+          input.placeholder = 'your answer…'
+          card.append(el('div', { class: 'reply-row' }, input, Btn('reply', async () => {
+            if (input.value.trim()) await onReplyCb!(input.value.trim())
+          })))
+        } else if (replyCmdHint) {
+          // the fence withholds the box; the question still says how to answer it
+          card.append(el('div', { class: 'reply-row' }, CmdChip(replyCmdHint)))
+        }
       }
       return [card]
     }
@@ -44,9 +49,17 @@ function item(i: TranscriptItem): HTMLElement[] {
 }
 
 let onReplyCb: ((text: string) => Promise<void>) | null = null
+let replyCmdHint: string | null = null
 
-export function renderChat(items: TranscriptItem[], onReply: ((text: string) => Promise<void>) | null = null): HTMLElement {
+// `replyCmd` is what to show INSTEAD of the answer box when this UI may not act on the project —
+// without it an unanswered question renders as prose with no way out (see page/affordance.ts).
+export function renderChat(
+  items: TranscriptItem[],
+  onReply: ((text: string) => Promise<void>) | null = null,
+  replyCmd: string | null = null,
+): HTMLElement {
   onReplyCb = onReply
+  replyCmdHint = replyCmd
   if (items.length === 0) return Empty('no conversation yet — select a task or step with agent activity')
   const out = el('div', { class: 'chat' })
   let iter = 0

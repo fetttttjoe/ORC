@@ -3,7 +3,7 @@ import path from 'node:path'
 import { jsonSchema, tool } from 'ai'
 import { z } from 'zod'
 import type { ResolvedTool } from '@orc/contracts'
-import { errorMessage, SignalOutcome, assertInZone, resolveInWorkspace } from '@orc/contracts'
+import { errorMessage, SignalOutcome, assertInZone, doubleEncodedField, DOUBLE_ENCODED_HINT, resolveInWorkspace, unescapeSequences } from '@orc/contracts'
 
 export const TOOL_NAME = {
   signal: 'signal',
@@ -96,6 +96,14 @@ export async function executeTool(
   toolCallId?: string,
   guard: WriteGuard = {},
 ): Promise<{ output: unknown; isError: boolean }> {
+  // ONE gate for every tool, before any of them runs: an argument whose escapes were encoded twice
+  // corrupts whatever it touches, and it is the ARGUMENT that is wrong, not the tool. Checking it
+  // here means fs_write, memory_write and every tool added later inherit the diagnosis instead of
+  // each re-learning it — fs_edit's own check caught only the case where the file proved it.
+  const overEncoded = doubleEncodedField(input)
+  if (overEncoded)
+    return { output: { error: `'${overEncoded}' was rejected: ${DOUBLE_ENCODED_HINT}` }, isError: true }
+
   // Every write path — whole-file or surgical — passes the same two gates, in the same order, so a
   // new write tool cannot accidentally ship without the fence or the claim registry.
   // Returns an error envelope when the write is refused, or null when it may proceed.
@@ -158,8 +166,18 @@ export async function executeTool(
         // more than one means it cannot know which site it changed. Both are silent corruption if
         // guessed at, and both are cheap for the model to fix by widening the context it names.
         const occurrences = current.split(oldString).length - 1
-        if (occurrences === 0)
+        if (occurrences === 0) {
+          // The tool argument is ALREADY JSON, so a model that escapes its newlines again sends
+          // `\\n` — two characters, backslash and n — and the match can never succeed. noteLint
+          // warns about the same double-encoding on memory_write; here it is fatal, and "copy the
+          // exact text" sends the model back to re-read a file it copied correctly. Name what it
+          // actually did instead. Diagnosed, never auto-repaired: a writer mis-encoding its
+          // arguments is mis-encoding the file contents too, and silently fixing one hides that.
+          const unescaped = unescapeSequences(oldString)
+          if (unescaped !== oldString && current.includes(unescaped))
+            return { output: { error: `old_string not found in '${p}' because ${DOUBLE_ENCODED_HINT}` }, isError: true }
           return { output: { error: `old_string not found in '${p}' — fs_read it and copy the exact text, whitespace included` }, isError: true }
+        }
         if (occurrences > 1)
           return { output: { error: `old_string appears ${occurrences} times in '${p}' — include surrounding lines until it is unique` }, isError: true }
         writeFileAtomic(abs, current.replace(oldString, newString))

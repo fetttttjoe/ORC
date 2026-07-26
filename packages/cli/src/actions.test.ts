@@ -144,14 +144,49 @@ describe('cwd validation at the action boundary', () => {
   })
 })
 
+// Move a freshly created task to approved: propose a single-step template, then approve it. This
+// is the ONLY state actions.run() will now accept — a draft/unapproved task is refused at the door,
+// exactly as the CLI `run` (main.ts requireDrivable) and startRunAt (dbos-port.ts) refuse it.
+async function approvedTask(kernel: Kernel, actions: ReturnType<typeof buildOrcActions>, title = 'door') {
+  const t = await kernel.createTask({ title, spec: 'do it' })
+  const { version } = await actions.propose(t.id, { modelRef: 'any/model' })
+  await actions.approve(t.id, version)
+  return t
+}
+
 describe('the MCP and web doors record the ask; the supervisor executes it', () => {
   it('run guarantees a supervisor, then appends run_requested with the cwd it validated', async () => {
     const { kernel, actions, ensured, close } = await setup()
-    const t = await kernel.createTask({ title: 'door', spec: '' })
+    const t = await approvedTask(kernel, actions)
     expect(await actions.run(t.id, process.cwd())).toEqual({ requested: true })
     expect(ensured.count).toBe(1)
     const requested = (await kernel.eventsFor(t.id)).find(e => e.kind === EVENT_KIND.run_requested)
     expect(requested?.payload).toEqual({ taskId: t.id, cwd: process.cwd(), retry: false })
+    await close()
+  })
+
+  // Finding 1 of the Phase-1 audit: actions.run() (the web + MCP door) used to skip the
+  // drivable-status admission the CLI `run` enforces, so a draft/unapproved/terminal task silently
+  // became a run_requested nobody could serve — sat in the log, and every booting supervisor
+  // failed on it again. run() now mirrors retry()'s refusal: reject at the door, with the exact
+  // startRunAt message, before ensureRuntime or requestRun.
+  it('run refuses a draft task (no approved plan) — same message as CLI run, no ask, no supervisor', async () => {
+    const { kernel, actions, ensured, close } = await setup()
+    const t = await kernel.createTask({ title: 'draft', spec: '' })
+    await expect(actions.run(t.id, process.cwd()))
+      .rejects.toThrow(`task is 'draft' — approve a plan first (orc approve ${t.id})`)
+    // and it died before anything was recorded or a supervisor guaranteed — a request nobody can
+    // serve must never reach the log
+    expect([ensured.count, (await kernel.eventsFor(t.id)).some(e => e.kind === EVENT_KIND.run_requested)]).toEqual([0, false])
+    await close()
+  })
+
+  it('run refuses a proposed-but-unapproved task — no approvedVersion is not drivable', async () => {
+    const { kernel, actions, ensured, close } = await setup()
+    const t = await kernel.createTask({ title: 'proposed', spec: 'do it' })
+    await actions.propose(t.id, { modelRef: 'any/model' }) // proposed, NOT approved
+    await expect(actions.run(t.id, process.cwd())).rejects.toThrow(/approve a plan first/)
+    expect([ensured.count, (await kernel.eventsFor(t.id)).some(e => e.kind === EVENT_KIND.run_requested)]).toEqual([0, false])
     await close()
   })
 

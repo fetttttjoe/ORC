@@ -1,4 +1,4 @@
-import { STEP_ROLE, errorMessage, EVENT_KIND, ISOLATION_TIER, STRATEGY, TASK_STATUS, costUSDFor, parseModelRef, type ExecutionPort, type ModelOption, type PlanDraft } from '@orc/contracts'
+import { STEP_ROLE, errorMessage, EVENT_KIND, ISOLATION_TIER, STRATEGY, TASK_STATUS, costUSDFor, parseModelRef, type ExecutionPort, type ModelOption, type PlanDraft, type TaskStatus } from '@orc/contracts'
 import { DEFAULT_MAX_ITERATIONS, deriveSystemUrl, initializeProject, loadConfig, openStorage, resetSystemDatabase, subtreeTaskIds, type EventLog, type Kernel, type ProjectConfig, type Storage } from '@orc/kernel'
 import { seedRegistries } from './runtime'
 import { createMemory, openKnowledge, orphanedNotes } from '@orc/memory'
@@ -36,6 +36,26 @@ export function singleStepDraft(task: { title: string; spec: string }, modelRef:
       dependsOn: [],
     }],
   }
+}
+
+// The statuses startRunAt (dbos-port.ts) admits — anything else is terminal or waiting on a human,
+// so a run_requested naming it could never be served. ONE set, so "can this be driven?" means the
+// same thing at every door: the CLI `run`/`retry` guard (main.ts), the dbos port, and this actions
+// layer that the web + MCP doors call through.
+export const DRIVABLE_TASK_STATUS: ReadonlySet<TaskStatus> =
+  new Set([TASK_STATUS.approved, TASK_STATUS.running, TASK_STATUS.blocked])
+
+// The admission startRunAt enforces, checked at the boundary so a request that could never be
+// served is refused BEFORE it is recorded: a run_requested naming a draft/unapproved/terminal task
+// would sit in the log forever, and every supervisor that boots would pick it up and fail on it
+// again. This is the ONE implementation — main.ts's `requireDrivable` and actions.ts's `run()` both
+// call it, so the CLI door and the web/MCP doors cannot drift on the check or its message.
+export async function assertDrivable(kernel: Kernel, taskId: string): Promise<void> {
+  const task = await kernel.getTask(taskId)
+  if (!task) throw new Error(`no task '${taskId}'`)
+  const approved = (await kernel.state()).plans.get(taskId)?.approvedVersion
+  if (!approved || !DRIVABLE_TASK_STATUS.has(task.status))
+    throw new Error(`task is '${task.status}' — approve a plan first (orc approve ${taskId})`)
 }
 
 // A provider's valid model ids: live-discovered UNION cost-table. The API list omits aliases
@@ -183,6 +203,10 @@ export function buildOrcActions(deps: {
       // cwd is validated BEFORE the ask is recorded: an unrunnable directory must not become a
       // request every supervisor that boots picks up and fails on again.
       const resolved = assertRunnableCwd(cwd)
+      // …and the SAME drivable-status admission the CLI `run` enforces (main.ts) and startRunAt
+      // (dbos-port.ts) enforces: a draft/unapproved/terminal task can never be served, so the web
+      // and MCP doors must refuse it here too rather than silently logging a run nobody can run.
+      await assertDrivable(kernel, taskId)
       await ensureRuntime()
       await kernel.requestRun(taskId, { cwd: resolved })
       return { requested: true }

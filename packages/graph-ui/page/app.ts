@@ -12,6 +12,7 @@ import { renderRequest, type OpenQuestion, type PlanNoteView, type PlansView, ty
 import type { GraphRenderer } from './renderer'
 import { SigmaRenderer } from './sigma-renderer'
 import { Btn, Dot, Empty, NavItem, Section, Tabs, openDialog, toast } from './ui/components'
+import { REPLY_AFFORDANCE, replyAffordance } from './affordance'
 import { el } from './ui/el'
 
 // ---- shell v2: nav | conversation | resizer | dock(graph + inspector overlay) ----
@@ -310,10 +311,11 @@ async function renderInspector(): Promise<void> {
       if (!taskId) { inspectorBody.replaceChildren(Empty('select a task or step')); return }
       const step = sel.node?.startsWith(NODE_PREFIX.step) ? sel.node.split(':')[2] : undefined
       const items = await api.transcript(sel.project, taskId, step)
-      const onReply = canAct()
+      const offer = replyAffordance(canAct(), taskId)
+      const onReply = offer.kind === REPLY_AFFORDANCE.box
         ? async (text: string) => { await api.act('reply', { taskId, text }); toast('replied — step resuming', 'ok') }
         : null
-      inspectorBody.replaceChildren(renderChat(items, onReply))
+      inspectorBody.replaceChildren(renderChat(items, onReply, offer.kind === REPLY_AFFORDANCE.command ? offer.cmd : null))
       return
     }
     case 'request': {

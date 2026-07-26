@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test'
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, symlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { z } from 'zod'
@@ -210,5 +210,50 @@ describe('extra tools', () => {
     const capture = extraTool({ execute: async (_input, toolCallId) => { seen = toolCallId; return { output: {}, isError: false } } })
     await executeTool('mcp__srv__hello', {}, '/tmp', [capture], 'call_123')
     expect(seen).toBe('call_123')
+  })
+})
+
+describe('fs_edit diagnoses double-encoded arguments', () => {
+  // The tool argument is already JSON, so a model that escapes its newlines again sends `\\n` —
+  // backslash and n, two characters — and no match is ever possible. Observed live: an agent burned
+  // iterations re-reading a file it had copied correctly, because the error told it to do that.
+  it('names the double encoding instead of blaming the copy', async () => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'orc-edit-'))
+    writeFileSync(path.join(dir, 'f.ts'), 'const a = 1\nconst b = 2\n')
+    const r = await executeTool('fs_edit', { path: 'f.ts', old_string: 'const a = 1\\nconst b = 2', new_string: 'x' }, dir)
+    expect(r.isError).toBe(true)
+    expect(JSON.stringify(r.output)).toContain('encoded twice')
+  })
+
+  it('still gives the plain not-found message when the text is simply absent', async () => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'orc-edit-'))
+    writeFileSync(path.join(dir, 'f.ts'), 'const a = 1\n')
+    const r = await executeTool('fs_edit', { path: 'f.ts', old_string: 'nowhere', new_string: 'x' }, dir)
+    expect(r.isError).toBe(true)
+    expect(JSON.stringify(r.output)).toContain('copy the exact text')
+  })
+})
+
+// fs_edit could only catch this because the FILE proved it. The boundary check needs no such
+// evidence, which is what extends the diagnosis to fs_write — where a whole file arrives as one
+// line and there is nothing to compare it against.
+describe('every tool argument is checked for double encoding, not just fs_edit', () => {
+  const oneLineFile = `# Notes\\n\\n- first\\n- second\\n${'filler text '.repeat(20)}`
+
+  it('refuses an fs_write whose newlines are escape sequences — and writes nothing', async () => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'orc-write-'))
+    const r = await executeTool('fs_write', { path: 'notes.md', content: oneLineFile }, dir)
+    expect(r.isError).toBe(true)
+    expect(JSON.stringify(r.output)).toContain('encoded twice')
+    expect(JSON.stringify(r.output)).toContain('content') // names the argument to resend
+    expect(existsSync(path.join(dir, 'notes.md'))).toBe(false)
+  })
+
+  it('lets real source through — escaped quotes and \\n inside a line are valid text', async () => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'orc-write-'))
+    const source = `const greet = "say \\"hi\\""\nconst nl = "\\n"\n${'// filler\n'.repeat(40)}`
+    const r = await executeTool('fs_write', { path: 'a.ts', content: source }, dir)
+    expect(r.isError).toBe(false)
+    expect(readFileSync(path.join(dir, 'a.ts'), 'utf8')).toBe(source)
   })
 })

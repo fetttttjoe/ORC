@@ -19,3 +19,7 @@ test-results/
 # equivalent `claude mcp add`) and one-off review reports
 .mcp.json
 FOUNDATION-REVIEW-*.md
+# scratch experiments and the reports orc runs drop at the root — deliberately never committed
+# (the supervisor plan makes "never stage tmp-exp/" a rule; this is what enforces it)
+tmp-exp/
+verification-report.md

@@ -13,7 +13,7 @@ import { seedRegistries, buildRuntime } from './runtime'
 import { runSupervisor } from './serve'
 import { ensureSupervisor, SUPERVISOR_MODE, type SupervisorMode } from './supervisor-client'
 import { isLanguageModel } from './model-guard'
-import { buildModelDiscovery, buildOrcActions, singleStepDraft } from './actions'
+import { assertDrivable, buildModelDiscovery, buildOrcActions, singleStepDraft } from './actions'
 import { renderPlanHuman } from './plan-render'
 import { CommandFailure } from './exit'
 
@@ -160,11 +160,6 @@ type TailResult =
 // declared only once the stream goes QUIET: any event for this task cancels the pending decision
 // and the tail keeps waiting. A run that is genuinely suspended emits nothing, so it settles fast.
 const PARK_QUIET_MS = 750
-
-// The statuses startRun accepts — anything else is either terminal or waiting on a human, and
-// attaching to it throws. One set, so "can this be driven?" means the same thing everywhere.
-const DRIVABLE_TASK_STATUS: ReadonlySet<TaskStatus> =
-  new Set([TASK_STATUS.approved, TASK_STATUS.running, TASK_STATUS.blocked])
 
 // The statuses that mean somebody is still expected to move this task: a run is under way, or a
 // supervisor is about to start one. Every other status is a stopping point — terminal, blocked
@@ -594,13 +589,9 @@ export function buildProgram(
 
   // The admission `startRunAt` enforces, checked here so a request that could never be served is
   // refused BEFORE it is recorded: a run_requested naming a draft task would sit in the log for
-  // good, and every supervisor that boots would pick it up and fail on it again.
-  const requireDrivable = async (taskId: string): Promise<void> => {
-    const task = await requireTask(taskId)
-    const approved = (await kernel.state()).plans.get(taskId)?.approvedVersion
-    if (!approved || !DRIVABLE_TASK_STATUS.has(task.status))
-      throw new Error(`task is '${task.status}' — approve a plan first (orc approve ${taskId})`)
-  }
+  // good, and every supervisor that boots would pick it up and fail on it again. The shared
+  // implementation lives in actions.ts so this CLI door and the web/MCP doors cannot drift.
+  const requireDrivable = (taskId: string): Promise<void> => assertDrivable(kernel, taskId)
 
   // Ask for a run, then watch it. The command starts nothing: a supervisor turns the recorded ask
   // into a workflow, which is why the run now outlives the terminal that asked for it.
