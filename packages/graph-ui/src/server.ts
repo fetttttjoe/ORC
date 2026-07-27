@@ -224,7 +224,18 @@ export function startGraphUi(opts: {
     if (req.method === 'POST' && u.pathname === '/api/copilot') return copilot(req)
     if (req.method === 'POST' && u.pathname.startsWith('/api/actions/'))
       return act(req, u.pathname.slice('/api/actions/'.length))
-    const project = u.searchParams.get('project') ?? ''
+    // `project` is an UNTRUSTED query param on unauthenticated GETs (/api/graph, /api/stream carry
+    // no x-orc-token, and the Host allowlist checks Host, not Origin). It reaches sessionFor(),
+    // which caches a session PERMANENTLY — a Postgres pool plus a dedicated LISTEN client — keyed by
+    // whatever string arrived. So every distinct value leaked one of each, unbounded, from a request
+    // anyone on the machine could make in a loop.
+    //
+    // Resolved against the projects that actually exist rather than pattern-matched: a well-formed
+    // uuid for a project that was never created would allocate just as happily. One indexed query
+    // against a set the UI already fetches, and an unknown id is treated as "no project" — every
+    // consumer below already handles the empty string.
+    const requested = u.searchParams.get('project') ?? ''
+    const project = requested !== '' && (await sessions.projects()).some(p => p.id === requested) ? requested : ''
     switch (u.pathname) {
       case '/api/session':
         return Response.json({

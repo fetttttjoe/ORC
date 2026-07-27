@@ -201,11 +201,22 @@ export function bindStepMemory(opts: {
           const touched = new Map(
             [...found.claims.map(c => [noteKey(c.scope, c.noteId), { id: c.noteId, scope: c.scope }] as const),
              ...found.notes.map(n => [noteKey(n.scope, n.id), { id: n.id, scope: n.scope }] as const)])
-          for (const n of touched.values())
-            await tracking.recordAccess(n.id, n.scope, MEMORY_ACCESS.preload, author, {
-              // keyed by note, not position: a replay that reorders results must still converge
-              ...(author.runToken ? { idempotencyKey: `${author.runToken}:preload:${n.scope}:${n.id}` } : {}),
-            })
+          // Recorded BEST-EFFORT, one note at a time. recordAccess appends to Postgres under the
+          // per-project advisory lock, so live contention or a connection blip throws — and it threw
+          // INSIDE the try that wraps the whole recall, so one failed counter discarded a preload
+          // that had already been retrieved successfully. The step then ran with no knowledge at
+          // all, while the accesses appended before the failure claimed it had read notes it never
+          // saw. An activation counter is a signal; the knowledge is the product.
+          for (const n of touched.values()) {
+            try {
+              await tracking.recordAccess(n.id, n.scope, MEMORY_ACCESS.preload, author, {
+                // keyed by note, not position: a replay that reorders results must still converge
+                ...(author.runToken ? { idempotencyKey: `${author.runToken}:preload:${n.scope}:${n.id}` } : {}),
+              })
+            } catch (err) {
+              console.warn(`preload access not recorded for '${n.id}': ${errorMessage(err)}`)
+            }
+          }
           // measured on what is actually delivered, after the budget cut — a note that did not fit
           // is not knowledge this step was handed, so it must not move the reading either way
           const currency = await currencyOf(found)

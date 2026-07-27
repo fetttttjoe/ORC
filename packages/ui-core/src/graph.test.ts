@@ -1,7 +1,7 @@
 import { afterAll, describe, expect, it } from 'bun:test'
 import { EVENT_KIND, foldMemory, type EventRecord } from '@orc/contracts'
 import { draftFixture, eventFixture, stepFixture } from '@orc/contracts/fixtures'
-import { Kernel, fold, openStorage, type EventLog } from '@orc/kernel'
+import { Kernel, emptyFold, fold, openStorage, type EventLog } from '@orc/kernel'
 import { createTestDb, TEST_PROJECT_ID } from '@orc/kernel/test-helpers'
 import { buildGraph, diffGraphs, EDGE, noteNodeId, stepNodeId } from './graph'
 
@@ -36,6 +36,26 @@ async function seed(log: EventLog): Promise<{ taskId: string }> {
   await writeNote(log, 'task-note', { links: [{ id: 'base-note' }] }, { source: 'agent', taskId: t.id })
   return { taskId: t.id }
 }
+
+// state.artifacts is append-only and artifactNodeId keys on (taskId, path), so a path written twice
+// — every retried or re-run step — produced two nodes with the same id. diffGraphs then re-emitted
+// an updateNodes entry on EVERY event forever, and the stream never agreed with the snapshot again.
+describe('artifact node identity', () => {
+  it('emits one node per path, and diffing a graph against itself is empty', () => {
+    const st = emptyFold().state
+    st.tasks.set('t1', { id: 't1', parentId: null, type: 'generic', title: 'T', spec: '', status: 'running', zone: [], budgetUSD: null, depth: 0, createdAt: '2026-07-27T00:00:00.000Z' })
+    st.artifacts.set('t1', [
+      { path: 'out.md', sha256: 'a'.repeat(64), size: 10, stepId: null, runToken: null, seq: 1 },
+      { path: 'out.md', sha256: 'b'.repeat(64), size: 20, stepId: null, runToken: null, seq: 2 },
+    ])
+    const g = buildGraph(st, foldMemory([]))
+    const artifactNodes = g.nodes.filter(n => n.type === 'artifact')
+    expect(artifactNodes).toHaveLength(1)
+    expect(artifactNodes[0]?.detail).toBe('20B') // newest write wins
+    // the invariant that actually broke: a graph diffed against itself must produce no updates
+    expect(diffGraphs(g, buildGraph(st, foldMemory([]))).updateNodes ?? []).toEqual([])
+  })
+})
 
 describe('buildGraph', () => {
   it('projects tasks, steps, artifacts, notes and their edges', async () => {

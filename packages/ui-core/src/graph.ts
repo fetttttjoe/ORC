@@ -74,8 +74,15 @@ export function buildGraph(state: State, mem: MemoryFold, opts: GraphBuildOption
       links.push({ source: t.id, target: stepNodeId(t.id, s.id), type: EDGE.plan })
       for (const dep of s.dependsOn) links.push({ source: stepNodeId(t.id, dep), target: stepNodeId(t.id, s.id), type: EDGE.depends })
     }
-    for (const a of state.artifacts.get(t.id) ?? []) {
-      const id = artifactNodeId(t.id, a.path)
+    // Deduped by NODE ID, keeping the newest entry. state.artifacts is append-only (projections.ts
+    // `list.push`) and artifactNodeId keys on (taskId, path) alone — so a path written twice, which
+    // is every retried or re-run step, produced two nodes with the SAME id. diffGraphs then saw a
+    // node whose content differed from the one already sent and re-emitted it as an updateNodes
+    // entry on every single event, forever, leaving the stream permanently disagreeing with the
+    // snapshot. Last-wins because the newest write is the artifact's current state.
+    const artifacts = new Map<string, { path: string; size: number; stepId?: string | null }>()
+    for (const a of state.artifacts.get(t.id) ?? []) artifacts.set(artifactNodeId(t.id, a.path), a)
+    for (const [id, a] of artifacts) {
       nodes.push({ id, type: 'artifact', label: a.path, detail: `${a.size}B` })
       links.push({ source: a.stepId ? stepNodeId(t.id, a.stepId) : t.id, target: id, type: EDGE.out })
     }

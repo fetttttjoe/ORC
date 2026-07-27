@@ -102,6 +102,20 @@ async function readSse(res: Response, until: (msg: { id: number; data: string })
 }
 
 describe('graph-ui web adapter', () => {
+  // `project` is an untrusted query param on an UNAUTHENTICATED GET, and it reached sessionFor(),
+  // which caches a session permanently — a Postgres pool plus a dedicated LISTEN client — keyed by
+  // whatever string arrived. Every distinct value leaked one of each, from a request anyone on the
+  // machine could issue in a loop. Resolved against real projects now, so an unknown id is simply
+  // "no project" rather than an allocation.
+  it('an unknown ?project= is treated as no project, not opened as a session', async () => {
+    const { base } = await setup()
+    const res = await fetch(`${base}/api/graph?project=00000000-0000-4000-8000-00000000dead`)
+    expect(res.status).toBe(200)
+    const body = GraphView.parse(await res.json())
+    // the home project's seeded task must NOT appear — an unknown id resolves to nothing
+    expect(body.nodes.length).toBe(0)
+  })
+
   it('serves projects, graph snapshot, node detail, and 404s', async () => {
     const { storage, taskId, ui, base } = await setup()
     expect(await (await fetch(`${base}/api/projects`)).json()).toEqual([{ id: TEST_PROJECT_ID, name: 'test-proj', dir: null }])

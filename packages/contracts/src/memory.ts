@@ -497,7 +497,10 @@ export const SearchMode = z.enum(SEARCH_MODES)
 export type SearchMode = z.infer<typeof SearchMode>
 export const SEARCH_MODE = SearchMode.enum
 
-export interface MemorySearchOpts { mode?: SearchMode }
+// `halfLifeDays` tunes the SAME activation decay NeighborQuery's does — search re-ranks cosine by
+// activation heat, so a project that configured a half-life had it honoured in neighbors() and in
+// the graph but not in search, the one surface a running step actually reads through.
+export interface MemorySearchOpts { mode?: SearchMode; halfLifeDays?: number }
 
 // `scope` takes a list when a caller may read across lanes (a step sees durable project knowledge
 // plus its own plan scope — contracts linkLookupScopes). It must reach the QUERY, never a post-filter:

@@ -119,7 +119,12 @@ export function createMemoryStore(opts: { log: EventLog; surreal: SurrealMemory;
       })
     },
     list: (filter?: MemoryFilter): Promise<NoteSummary[]> => surreal.list(filter),
-    search: (query: string, filter?: MemoryFilter, opts?: MemorySearchOpts): Promise<NoteSummary[]> => surreal.search(query, filter, opts),
+    // halfLifeDays threaded like neighbors' below: search re-ranks by the SAME activation decay, so
+    // a project that configured a half-life had it honoured in the graph and in traversal but not in
+    // search — the one surface a step actually reads through — which silently decayed at the
+    // built-in 14 days instead.
+    search: (query: string, filter?: MemoryFilter, o?: MemorySearchOpts): Promise<NoteSummary[]> =>
+      surreal.search(query, filter, { ...o, halfLifeDays: o?.halfLifeDays ?? opts.halfLifeDays }),
     searchClaims: (query: string, filter?: MemoryFilter, opts?: MemorySearchOpts & { limit?: number }): Promise<ClaimHit[]> => surreal.searchClaims(query, filter, opts),
     claimsFor: (noteId: string, scope?: string): Promise<Claim[]> => surreal.claimsFor(noteId, scope),
     neighbors: (seed, o) => surreal.neighbors(seed, { ...o, halfLifeDays: o?.halfLifeDays ?? opts.halfLifeDays }),

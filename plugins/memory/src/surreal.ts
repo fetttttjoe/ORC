@@ -467,7 +467,7 @@ export class SurrealMemory {
     // No embedder configured → keyword is the only mode that can run, whatever was requested.
     const mode = this.embedder ? (opts.mode ?? SEARCH_MODE.hybrid) : SEARCH_MODE.keyword
     if (mode === SEARCH_MODE.keyword) return knowledge(await this.keywordSearch(query, filter))
-    const semantic = knowledge(await this.semanticSearch(query, filter))
+    const semantic = knowledge(await this.semanticSearch(query, filter, opts.halfLifeDays))
     if (mode === SEARCH_MODE.semantic) return semantic
     // hybrid: fuse the two orderings by reciprocal rank, keyed by (scope,id) since ids repeat
     // across scopes. A note found by only one arm still ranks; agreement between arms wins.
@@ -554,7 +554,7 @@ export class SurrealMemory {
   // Vector cosine over stored embeddings — a linear scan, brute-force but exact; fine for a
   // hand-authored corpus. Filters apply in TS, mirroring keywordSearch. ponytail: swap the scan for
   // a DEFINE INDEX ... HNSW + `<|K|>` KNN select when the corpus outgrows a full scan.
-  private async semanticSearch(query: string, filter: MemoryFilter): Promise<NoteSummary[]> {
+  private async semanticSearch(query: string, filter: MemoryFilter, halfLifeDays?: number): Promise<NoteSummary[]> {
     if (!this.embedder) return []
     // Everything after the embedder check is best-effort and guarded as ONE unit: a query-embed
     // reject, a cosine DIMENSION error (a note embedded under a different model width after a model
@@ -588,8 +588,9 @@ export class SurrealMemory {
       // cosine range — multiplying a negative cosine by ≥1 would otherwise sink a hotter note below
       // a colder one. ponytail: a hot note outside the cosine top-50 can't boost in — widen LIMIT if it bites.
       const now = new Date().toISOString()
+      const halfLife = halfLifeDays ?? DEFAULT_HALF_LIFE_DAYS
       const heat = (r: { hits?: number; lastAccessedAt?: string | null }): number =>
-        activationBoost(activation({ hits: r.hits ?? 0, lastAccessedAt: r.lastAccessedAt ?? null }, now))
+        activationBoost(activation({ hits: r.hits ?? 0, lastAccessedAt: r.lastAccessedAt ?? null }, now, halfLife))
       return rows
         .filter(r => (!filter.tier || r.tier === filter.tier)
           && (!filter.category || (r.categories ?? []).includes(filter.category))
