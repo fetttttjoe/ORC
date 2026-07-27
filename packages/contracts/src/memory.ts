@@ -183,7 +183,7 @@ const noteCore = {
   scope: z.string().regex(MEMORY_ID_RE).default(MemoryScope.project),
   // stamped by the store gateway from the runtime's Git HEAD — agents cannot invent one
   sourceRevision: z.string().nullable().default(null),
-  title: z.string().min(1).max(200),
+  title: z.string().min(1).max(MEMORY_LIMITS.titleChars),
   // lowercased at the boundary: search matches tags against a lowercased query while the
   // list/ls filter compares case-exactly, so an un-normalized 'Postgres' is silently
   // unreachable from one path and reachable from the other. Normalizing here also applies on

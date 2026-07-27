@@ -48,7 +48,17 @@ async function duplicateSubjectWarning(store: MemoryStore, scope: string, title:
 
 // A repo-relative source path in prose: at least one directory segment and a code-ish extension.
 // Deliberately narrow — a note mentioning 'README' or a bare word must not trip the paths lint.
-const CITES_SOURCE_FILE = /[\w.-]+\/[\w./-]+\.(ts|tsx|js|json|sql|md)\b/
+// ANCHORED, and tested per whitespace-token — never as one unanchored scan over the whole note.
+// Unanchored, `[\w.-]+\/…` cannot match a '/', so on a body with no slash the engine restarts at
+// every position and the match is quadratic in body length: measured, a 100 KB body (the schema's
+// own bodyChars cap, so a legal note) hung the write boundary past 5s. Per-token with ^…$ is linear
+// and cannot backtrack across tokens.
+const SOURCE_FILE_RE = /^[\w.-]+\/[\w./-]*\.(?:ts|tsx|js|json|sql|md)$/
+const TOKEN_SPLIT = /[\s,;:()[\]{}'"`]+/
+const citesSourceFile = (text: string): boolean => {
+  for (const token of text.split(TOKEN_SPLIT)) if (SOURCE_FILE_RE.test(token)) return true
+  return false
+}
 
 export function noteLint(note: MemoryNote): string[] {
   const w: string[] = []
@@ -75,7 +85,7 @@ export function noteLint(note: MemoryNote): string[] {
   // staleness detection: drift compares the note's stamped revision against what changed under its
   // DECLARED paths, and file names in prose are not read. Measured on a from-scratch build — 1 of 27
   // notes declared any, so 96% of the corpus could never be found stale and would rot silently.
-  if (note.tier === NOTE_TIER.semantic && note.paths.length === 0 && CITES_SOURCE_FILE.test(`${note.summary}\n${note.body}`))
+  if (note.tier === NOTE_TIER.semantic && note.paths.length === 0 && citesSourceFile(`${note.summary}\n${note.body}`))
     w.push('this note names source files but declares no `paths` — set them to the files or directories it describes,'
       + ' or staleness detection can never flag it when that code changes')
   return w
@@ -158,21 +168,102 @@ const TopicsInput = z.object({ topic: z.string().regex(CLAIM_ID_RE).optional(), 
 const MemoryWriteToolInput = MemoryNoteDraftInput.extend({
   id: MemoryNoteDraftInput.shape.id.optional(),
   title: MemoryNoteDraftInput.shape.title.optional(),
-  summary: z.string().default(''), // bounded by normalizeWrite below, which warns instead of throwing
+  // `.optional()`, NEVER `.default('')`: a default turns an OMITTED summary into an explicit empty
+  // string, and the store's merge-on-omit treats an explicit empty as a deliberate clear. So every
+  // partial update silently wiped the summary of the note it was updating — measured on a live
+  // 11-step run, 5 of 26 notes came out with their summary erased by a later links-only write. The
+  // call site's own comment already warned about exactly this ("MemoryNoteInput here would fill
+  // body:'' etc. and turn every omitted field into an explicit clear"); a per-field default is the
+  // same mistake retail. Length is handled by normalizeWrite, which trims and warns.
+  summary: MemoryNoteDraftInput.shape.summary,
   invalidates: ClaimWrite.shape.invalidates.removeDefault().optional(),
 })
 
-// Trim what only needs trimming, and say so. Runs on the RAW input so the schema never sees a
-// value it would reject; the warning rides the channel noteLint already uses, so the writer learns
-// without losing the write.
+// Trim what only needs trimming, and say so. Runs on the RAW input so the schema never sees a value
+// it would reject; warnings ride the channel noteLint already uses, so the writer learns without
+// losing the write.
+//
+// THE RULE: a write is an agent's work — often the only artifact of a long, expensive step — and
+// this boundary must never discard it over something it could have trimmed. A rejected write costs
+// the whole step's output plus the retry tokens; a trimmed one costs a line of prose. Measured: a
+// note carrying a full architecture map, 3 sourced claims and a body was rejected outright because
+// one citation's `url` was a repo path (`docs/IDEAS.md`) rather than http(s).
+//
+// Only IDENTITY still rejects — `id` and `scope` decide WHICH note is written, and coercing them
+// writes the right content to the wrong place, which is worse than failing loudly.
+const trimText = (v: unknown, cap: number): string | undefined =>
+  typeof v === 'string' && v.length > cap ? v.slice(0, cap) : undefined
+
+const trimList = (v: unknown, cap: number): unknown[] | undefined =>
+  Array.isArray(v) && v.length > cap ? v.slice(0, cap) : undefined
+
+// per-item string cap for the label/detail lists, applied only to the string members: a non-string
+// falls through untouched so the schema still reports it as the type error it is
+const trimItems = (v: unknown, cap: number): unknown[] | undefined => {
+  if (!Array.isArray(v) || !v.some(i => typeof i === 'string' && i.length > cap)) return undefined
+  return v.map(i => (typeof i === 'string' && i.length > cap ? i.slice(0, cap) : i))
+}
+
+const TEXT_CAPS: ReadonlyArray<readonly [string, number, string]> = [
+  ['title', MEMORY_LIMITS.titleChars, 'the name shown in every listing'],
+  ['summary', MEMORY_LIMITS.summaryChars, 'the one-line pointer shown in every listing; detail belongs in body'],
+  ['body', MEMORY_LIMITS.bodyChars, 'past this the store would reject the note outright'],
+]
+const LIST_CAPS: ReadonlyArray<readonly [string, number]> = [
+  ['tags', MEMORY_LIMITS.labelItems], ['categories', MEMORY_LIMITS.labelItems],
+  ['paths', MEMORY_LIMITS.detailItems], ['links', MEMORY_LIMITS.detailItems],
+  ['claims', MEMORY_LIMITS.detailItems], ['addClaims', MEMORY_LIMITS.detailItems],
+  ['sources', MEMORY_SOURCE_LIMITS.items],
+]
+const ITEM_CAPS: ReadonlyArray<readonly [string, number]> = [
+  ['tags', MEMORY_LIMITS.labelChars], ['categories', MEMORY_LIMITS.labelChars],
+  ['paths', MEMORY_LIMITS.detailChars], ['addClaims', MEMORY_LIMITS.detailChars],
+]
+
+// A citation whose url is not a credential-free http(s) URL — a repo path, a bare filename, a
+// `user:pw@host`. Dropped, not coerced: there is no honest http(s) form of `docs/IDEAS.md`, and
+// inventing one would put a fabricated provenance in the vault. The note keeps its `paths`, which
+// is where a file reference belongs.
+const isCitableUrl = (v: unknown): boolean => {
+  if (typeof v !== 'string' || v.length > MEMORY_SOURCE_LIMITS.urlChars) return false
+  try {
+    const u = new URL(v)
+    return (u.protocol === 'http:' || u.protocol === 'https:') && u.username === '' && u.password === ''
+  } catch { return false }
+}
+
 function normalizeWrite(input: unknown): { input: unknown; warnings: string[] } {
   if (!isRecord(input)) return { input, warnings: [] }
-  const summary = input.summary
-  if (typeof summary !== 'string' || summary.length <= MEMORY_LIMITS.summaryChars) return { input, warnings: [] }
-  return {
-    input: { ...input, summary: summary.slice(0, MEMORY_LIMITS.summaryChars) },
-    warnings: [`summary was ${summary.length} chars and has been truncated to ${MEMORY_LIMITS.summaryChars} — it is the one-line pointer shown in every listing; detail belongs in body`],
+  const out: Record<string, unknown> = { ...input }
+  const warnings: string[] = []
+
+  for (const [field, cap, why] of TEXT_CAPS) {
+    const trimmed = trimText(out[field], cap)
+    if (trimmed === undefined) continue
+    warnings.push(`${field} was ${(out[field] as string).length} chars and has been truncated to ${cap} — ${why}`)
+    out[field] = trimmed
   }
+  for (const [field, cap] of ITEM_CAPS) {
+    const trimmed = trimItems(out[field], cap)
+    if (trimmed === undefined) continue
+    warnings.push(`one or more ${field} entries were longer than ${cap} chars and have been truncated`)
+    out[field] = trimmed
+  }
+  for (const [field, cap] of LIST_CAPS) {
+    const trimmed = trimList(out[field], cap)
+    if (trimmed === undefined) continue
+    warnings.push(`${field} carried ${(out[field] as unknown[]).length} entries and has been cut to the first ${cap}`)
+    out[field] = trimmed
+  }
+
+  if (Array.isArray(out.sources)) {
+    const kept = out.sources.filter(sc => isRecord(sc) && isCitableUrl(sc.url))
+    if (kept.length !== out.sources.length) {
+      warnings.push(`${out.sources.length - kept.length} source citation(s) were dropped: a source url must be a credential-free http(s) URL — for a file in this repo use \`paths\`, which is what a reader follows to the code`)
+      out.sources = kept
+    }
+  }
+  return { input: out, warnings }
 }
 
 // advertised JSON schemas mirror the zod parsers exactly, so the model can self-correct.

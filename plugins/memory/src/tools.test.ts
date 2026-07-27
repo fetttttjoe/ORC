@@ -99,6 +99,68 @@ describe('memory tools', () => {
     expect(JSON.stringify(r.output)).toContain('truncated')         // and the writer is told
   })
 
+  // A write is an agent's WORK — often the only artifact of a long step. The boundary must trim,
+  // never discard. Each case here was observed on a live 11-step run.
+  describe('the write boundary never loses a write it could have trimmed', () => {
+    const writeTool = (f: ReturnType<typeof fakeStore>) =>
+      memoryTools({ store: f.store, author: { source: 'cli' } }).find(t => t.name === 'memory_write')!
+
+    // Measured: a note carrying a full architecture map, 3 sourced claims and a body was rejected
+    // outright because one citation's url was a repo path rather than http(s).
+    it('drops an uncitable source instead of rejecting the whole note', async () => {
+      const f = fakeStore()
+      const res = await writeTool(f).execute({
+        id: 'target-lifecycle', title: 'Target: memory lifecycle', summary: 's', body: 'b',
+        sources: [{ url: 'docs/IDEAS.md', title: 'idea bin' }, { url: 'https://example.com/x', title: 'real' }],
+      }, 'c1')
+      expect(f.written).toHaveLength(1)
+      expect(f.written[0]?.input.sources).toEqual([{ url: 'https://example.com/x', title: 'real' }])
+      expect(JSON.stringify(res)).toContain('source citation(s) were dropped')
+    })
+
+    it('never lets a credentialled url through while dropping it', async () => {
+      const f = fakeStore()
+      await writeTool(f).execute({
+        id: 'n', title: 'T', summary: 's', sources: [{ url: 'https://user:pw@host/x' }],
+      }, 'c1')
+      expect(f.written[0]?.input.sources).toEqual([])
+    })
+
+    it('truncates an over-long title and body rather than failing', async () => {
+      const f = fakeStore()
+      await writeTool(f).execute({
+        id: 'n', title: 'T'.repeat(MEMORY_LIMITS.titleChars + 50), summary: 's',
+        body: 'b'.repeat(MEMORY_LIMITS.bodyChars + 50),
+      }, 'c1')
+      expect(f.written[0]?.input.title).toHaveLength(MEMORY_LIMITS.titleChars)
+      expect(f.written[0]?.input.body).toHaveLength(MEMORY_LIMITS.bodyChars)
+    })
+
+    it('cuts an over-long list to its cap rather than failing', async () => {
+      const f = fakeStore()
+      await writeTool(f).execute({
+        id: 'n', title: 'T', summary: 's',
+        paths: Array.from({ length: MEMORY_LIMITS.detailItems + 10 }, (_, i) => `src/f${i}.ts`),
+      }, 'c1')
+      expect(f.written[0]?.input.paths).toHaveLength(MEMORY_LIMITS.detailItems)
+    })
+
+    // The regression that erased 5 of 26 notes' summaries on a live run: `summary` defaulted to ''
+    // at this boundary, so an omission arrived at the store as an explicit clear.
+    it('omitting summary leaves it ABSENT, so merge-on-omit carries the stored one forward', async () => {
+      const f = fakeStore()
+      await writeTool(f).execute({ id: 'n', links: [{ id: 'other', kind: 'relates_to' }] }, 'c1')
+      expect(f.written).toHaveLength(1)
+      expect('summary' in (f.written[0]?.input ?? {})).toBe(false)
+    })
+
+    it('an EXPLICIT empty summary still clears it — omission and erasure stay distinguishable', async () => {
+      const f = fakeStore()
+      await writeTool(f).execute({ id: 'n', summary: '' }, 'c1')
+      expect(f.written[0]?.input.summary).toBe('')
+    })
+  })
+
   it('declares five tools; memory_write routes to the store with the bound author', async () => {
     const { store, written } = fakeStore()
     const tools = memoryTools({ store, author: { source: 'agent', executor: 'api-loop', model: 'opus', role: 'review' } })

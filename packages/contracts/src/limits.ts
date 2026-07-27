@@ -12,6 +12,11 @@ export const MEMORY_LIMITS = {
   // A note's one-line pointer, shown in every listing and every preload — which is why it is short.
   // Named here rather than inlined at the schema so the boundary that ACCOMMODATES an over-long one
   // and the schema that stores it cannot drift on the number.
+  // A note's one-line name, spelled here because five call sites had it inline (budget.ts's fitter,
+  // consolidate.ts, step.ts's ambient capture, the schema, the write boundary's truncation) and a
+  // cap that disagrees between the thing that TRIMS and the thing that VALIDATES rejects writes
+  // nobody can explain.
+  titleChars: 200,
   summaryChars: 500,
   // A derived TOPIC label (cluster.ts topicLabel): one scannable index row, not the sentence it
   // was cut from. Sized against the row `orc memory topics` prints — a 12-char topicKey, two
