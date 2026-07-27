@@ -72,6 +72,8 @@ export function bindStepMemory(opts: {
   role?: MemoryRole
   // the drift probe: also what lets recall report how much of its own output still holds
   changedSince?: ChangedSince
+  // drains the projection before the step's own reads — see memoryTools' catchUp
+  catchUp?: () => Promise<void>
   ambientCapture?: boolean
   // nearest first (parent, grandparent, …, root) — a split child's decomposition lives in its
   // PARENT's plan scope, so without these it cannot see its own subplan
@@ -135,7 +137,7 @@ export function bindStepMemory(opts: {
   }
 
   return {
-    tools: memoryTools({ store: tracking, author, role: opts.role, changedSince: opts.changedSince, searchScope: scope }),
+    tools: memoryTools({ store: tracking, author, role: opts.role, changedSince: opts.changedSince, catchUp: opts.catchUp, searchScope: scope }),
     memory: {
       // KEYWORD arm only, deliberately: a path is a literal, and the semantic arm would return
       // claims that are merely about the same area — which is the opposite of what a retirement
@@ -229,7 +231,7 @@ export function bindStepMemory(opts: {
 }
 
 // What the composition root calls per step, with the store already bound.
-export type BindStep = (p: Omit<Parameters<typeof bindStepMemory>[0], 'store' | 'changedSince'>) => StepMemoryBinding
+export type BindStep = (p: Omit<Parameters<typeof bindStepMemory>[0], 'store' | 'changedSince' | 'catchUp'>) => StepMemoryBinding
 
 // Degraded mode (design §8.4): the tools still EXIST and every call returns an explicit isError
 // naming the reason, so the model learns context is unavailable instead of silently losing them.

@@ -302,8 +302,20 @@ export function memoryTools(opts: {
   // Lanes the model's own search is confined to (contracts taskLaneScopes). Undefined = the whole
   // graph, which is what an external browser (orc mcp serve) wants and a running step does not.
   searchScope?: readonly string[]
+  // Drains the read-model projection before a READ. The store's write is event-first — it appends
+  // and returns, and the projector materializes shortly after — so an agent that wrote a note and
+  // read it straight back saw the state BEFORE its own write. Two scouts on one run diagnosed that
+  // as "a persistence issue on update-only writes", retried writes that had already succeeded, and
+  // burned iterations doing it; one nearly wrote contradicting content believing the first had been
+  // lost. The CLI already awaits this before every read ("same rule every other read"), and so does
+  // consolidation — the agent-facing surface was the one place with the weaker guarantee, which is
+  // exactly backwards: an agent cannot inspect the projector to find out.
+  catchUp?: () => Promise<void>
 }): ResolvedTool[] {
   const { store, author, changedSince, searchScope } = opts
+  // never fails a read: a projector that cannot drain leaves the reader with a slightly stale view,
+  // which is the situation it was already in — throwing here would turn a lag into a failed step
+  const settled = async (): Promise<void> => { try { await opts.catchUp?.() } catch { /* stale beats failed */ } }
   const role = opts.role ?? MEMORY_ROLE.verify
   const tools: ResolvedTool[] = [
     {
@@ -437,6 +449,7 @@ export function memoryTools(opts: {
         },
       },
       execute: async input => {
+        await settled() // read-your-writes: see the note this step just wrote
         try {
           const q = SearchInput.parse(input)
           const limit = q.limit ?? (q.detail_level === 'minimal' ? 5 : 20)
@@ -480,6 +493,7 @@ export function memoryTools(opts: {
         },
       },
       execute: async (input, toolCallId) => {
+        await settled() // read-your-writes: see the note this step just wrote
         try {
           const q = ReadInput.parse(input)
           const n = await store.get(q.id, q.scope)
@@ -521,6 +535,7 @@ export function memoryTools(opts: {
         },
       },
       execute: async (input, toolCallId) => {
+        await settled() // read-your-writes: see the note this step just wrote
         try {
           const q = NeighborsInput.parse(input)
           const ranked = await store.neighbors(q.seed, { kinds: q.kinds, depth: q.depth, scope: q.scope })
@@ -549,6 +564,7 @@ export function memoryTools(opts: {
         },
       },
       execute: async (input, toolCallId) => {
+        await settled() // read-your-writes: see the note this step just wrote
         try {
           const q = TopicsInput.parse(input)
           if (q.topic === undefined) {

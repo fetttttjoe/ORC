@@ -161,6 +161,46 @@ describe('memory tools', () => {
     })
   })
 
+  // Two scouts on one live run reported "a persistence issue on update-only writes": they wrote a
+  // note, read it straight back, saw the pre-write state, and retried a write that had succeeded.
+  // The store is event-first, so a read must drain the projection — the rule the CLI and
+  // consolidation already followed, and the agent surface did not.
+  describe('reads drain the projection first', () => {
+    const readToolsWith = (catchUp: () => Promise<void>, f: ReturnType<typeof fakeStore>) =>
+      memoryTools({ store: f.store, author: { source: 'cli' }, catchUp })
+
+    it('memory_read, memory_search, memory_neighbors and memory_topics each catch up before reading', async () => {
+      const order: string[] = []
+      const f = fakeStore({
+        get: async id => { order.push(`get:${id}`); return toNote({ id: 'auth', title: 'Auth', body: 'b' }) },
+        search: async () => { order.push('search'); return [] },
+        neighbors: async () => { order.push('neighbors'); return [] },
+        topics: async () => { order.push('topics'); return [] },
+      })
+      const tools = readToolsWith(async () => { order.push('catchUp') }, f)
+      const call = async (name: string, input: unknown) =>
+        tools.find(t => t.name === name)!.execute(input, 'c1')
+      await call('memory_read', { id: 'auth' })
+      await call('memory_search', { query: 'x' })
+      await call('memory_neighbors', { id: 'auth' })
+      await call('memory_topics', {})
+      // every read tool drains, and its own drain comes FIRST — not one amortized across the batch,
+      // and never after the store call it is meant to make current
+      expect(order.filter(o => o === 'catchUp')).toHaveLength(4)
+      for (const [i, entry] of order.entries())
+        if (entry !== 'catchUp') expect(order[i - 1]).toBe('catchUp')
+    })
+
+    // A projector that cannot drain leaves a slightly stale view — the situation the reader was
+    // already in. Throwing would turn a lag into a failed step.
+    it('a failing catchUp leaves the read working rather than failing the step', async () => {
+      const f = fakeStore()
+      const tools = readToolsWith(async () => { throw new Error('surreal down') }, f)
+      const res = await tools.find(t => t.name === 'memory_read')!.execute({ id: 'auth' }, 'c1')
+      expect(JSON.stringify(res)).toContain('Auth')
+    })
+  })
+
   it('declares five tools; memory_write routes to the store with the bound author', async () => {
     const { store, written } = fakeStore()
     const tools = memoryTools({ store, author: { source: 'agent', executor: 'api-loop', model: 'opus', role: 'review' } })

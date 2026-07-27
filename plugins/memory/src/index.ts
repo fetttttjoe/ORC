@@ -45,7 +45,7 @@ export async function createMemory(opts: { log: EventLog; config: ProjectConfig;
   const changedSince = createDriftProbe(opts.config.dir)
   return {
     store, projector,
-    bindStep: p => bindStepMemory({ ...p, store, changedSince }),
+    bindStep: p => bindStepMemory({ ...p, store, changedSince, catchUp: projector.catchUp }),
     close: async () => { await projector.close(); await knowledge.close() },
   }
 }
