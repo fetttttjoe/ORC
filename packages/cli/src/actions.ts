@@ -1,5 +1,5 @@
 import { STEP_ROLE, errorMessage, EVENT_KIND, ISOLATION_TIER, STRATEGY, TASK_STATUS, costUSDFor, parseModelRef, type ExecutionPort, type ModelOption, type PlanDraft, type TaskStatus } from '@orc/contracts'
-import { DEFAULT_MAX_ITERATIONS, deriveSystemUrl, dropSystemDatabase, initializeProject, loadConfig, openStorage, resetSystemDatabase, subtreeTaskIds, type EventLog, type Kernel, type ProjectConfig, type Storage } from '@orc/kernel'
+import { DEFAULT_MAX_ITERATIONS, deriveSystemUrl, dropSystemDatabase, initializeProject, liveSupervisors, loadConfig, openStorage, resetSystemDatabase, subtreeTaskIds, type EventLog, type Kernel, type ProjectConfig, type Storage } from '@orc/kernel'
 import { seedRegistries } from './runtime'
 import { createMemory, openKnowledge, orphanedNotes } from '@orc/memory'
 import { openMemory } from './memory-open'
@@ -120,6 +120,30 @@ export function buildModelDiscovery(config: ProjectConfig, log?: EventLog) {
         { readTokens: usage.inputTokenDetails?.cacheReadTokens, writeTokens: usage.inputTokenDetails?.cacheWriteTokens })
     },
   }
+}
+
+// Wiping durable state under a LIVE runtime wedges it, silently. Both destructive paths truncate
+// the DBOS system database; a supervisor holding that database keeps in-memory accounting derived
+// from rows that no longer exist, so its queue believes the vanished workflows still occupy their
+// concurrency slots and never releases them. Observed: after a purge, four step workflows sat at
+// ENQUEUED with an empty `dbos.workflow_queue` while the supervisor heartbeat stayed healthy — no
+// error, no failed run, just a request that never started.
+//
+// So this REFUSES rather than warning. A warning in a return value is the wrong shape for a fault
+// whose symptom is silence: by the time the operator notices nothing is running, the cause is
+// fifteen minutes upstream. It clears itself — a supervisor that is genuinely gone stops beating and
+// its row falls outside the stale window within SUPERVISOR_STALE_MS, so the guard only blocks while
+// a runtime is actually alive to be broken.
+async function refuseWhileSupervised(storage: Storage, verb: string): Promise<void> {
+  const live = await liveSupervisors(storage, new Date())
+  if (live.length === 0) return
+  const who = live.map(s => `${s.executorId} (pid ${s.pid} on ${s.host})`).join(', ')
+  throw new Error(
+    `cannot ${verb} while a supervisor holds this project: ${who}. ` +
+    `Stop it first — ${verb === 'purge' ? 'purging' : 'deleting'} truncates the durable-execution ` +
+    'state it is running against, which leaves it live but wedged: new runs enqueue and never start. ' +
+    `Stop the supervisor, ${verb}, then let the next command start a fresh one.`,
+  )
 }
 
 // The ONE implementation of every mutating command — the CLI's commander actions and the web
@@ -298,6 +322,7 @@ export function buildOrcActions(deps: {
 
     async purgeProject() {
       if (!plugin?.storage) throw new Error('purging needs a project context')
+      await refuseWhileSupervised(plugin.storage, 'purge')
       const warnings: string[] = []
       // 1. stop the engine: truncating the DBOS system db erases pending workflows (crashed
       //    runs included) WITHOUT launching the runtime — a launch would start recovering
@@ -336,6 +361,9 @@ export function buildOrcActions(deps: {
 
     async deleteProject(projectId) {
       if (!plugin) throw new Error('deleting projects needs a project context')
+      // only the HOME project's supervisor is visible from here — deleting a foreign project cannot
+      // check its runtime, and does not need to: this guard exists for the tree you are sitting in
+      if (plugin.storage && projectId === plugin.config.projectId) await refuseWhileSupervised(plugin.storage, 'delete')
       const warnings: string[] = []
       // stop-then-wipe, same order as purge; no identity re-seed — deletion IS the point.
       // Deleting the HOME project is allowed too: full wipe, though it stays listed (empty)

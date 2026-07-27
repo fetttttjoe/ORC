@@ -8,21 +8,26 @@ export interface Cluster { key: string; members: string[]; medoidClaimId: string
 // Cosine similarity at or above which two claims group together. Lives HERE, with the algorithm it
 // tunes, rather than in the persistence module that happens to call it.
 //
-// MEASURED, no longer a guess. Swept 0.50→0.85 over a real 29-claim corpus (nomic-embed-text, 768d)
-// authored by an agent through addClaims; full table in the threshold-sweep report. The value was
-// 0.75, which split that corpus into 22 topics of which 16 were SINGLETONS — a browsable inventory
-// with one entry per claim is the thing topics exist to prevent.
+// MEASURED, and re-measured whenever the embedder changes — the two are ONE decision. A threshold
+// is a cut through a particular model's cosine distribution, so porting a number across models is
+// meaningless. Swept 0.50→0.90 over a real 52-claim corpus authored by agents through addClaims.
 //
-// 0.70 is chosen for STABILITY, not for grouping more: 0.700–0.735 is the one wide plateau on the
-// curve, producing an identical partition throughout, while 0.75 sits in its most unstable stretch.
-// Reading the groups agrees with the arithmetic — 0.675 fuses pipeline architecture with
-// topic-refresh scheduling, and 0.75 severs a claim-id's hash rule from its own text-normalization
-// rule. Below ~0.585 the whole corpus collapses into one blob; 0.585–0.600 degenerates into exactly
-// the three source notes, which is grouping that tells a reader nothing they did not already know.
+// Current: `ollama/mxbai-embed-large` (1024d) at 0.675, chosen from a genuine plateau — 0.670 and
+// 0.680 produce an identical partition — giving 19 topics over 52 claims with 4 singletons, a
+// largest group of 6, and 5 topics that span more than one note. Reading those groups confirms the
+// arithmetic: synthesis claims land beside the specific claims they generalise, which is the lateral
+// navigation topics exist for. Below ~0.55 the corpus collapses toward one blob; above ~0.72
+// singletons take over and the inventory degenerates into one entry per claim, which is the thing
+// topics exist to prevent.
 //
-// Limits of that evidence, so the next person does not over-trust it: n=29, a single subsystem, one
-// embedding model. `memory_topic_accessed` is the ongoing measurement — see the claim-grouping spec.
-export const MEMORY_CLUSTER_THRESHOLD = 0.7
+// Previously `nomic-embed-text` (768d) at 0.70 — on the SAME corpus that scored 22 topics, 6
+// singletons and only 3 cross-note groups, so the change is an improvement on every axis, not a
+// preference. Before that, 0.75 was a pure guess and produced 16 singletons out of 22 topics.
+//
+// Limits, so the next reader does not over-trust it: n=52 from one repository, and grouping quality
+// turned out to depend at least as much on how claims are PHRASED (claims that name their source
+// file group far better) as on the model. `memory_topic_accessed` is the ongoing measurement.
+export const MEMORY_CLUSTER_THRESHOLD = 0.675
 
 const dot = (a: readonly number[], b: readonly number[]): number =>
   a.reduce((sum, value, i) => sum + value * (b[i] ?? 0), 0)

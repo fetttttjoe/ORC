@@ -1,4 +1,13 @@
 {
+  "approvalPolicy": {
+    "default": "manual",
+    "rules": [
+      {
+        "maxDepth": 2,
+        "then": "auto"
+      }
+    ]
+  },
   "memoryConsolidateModel": "anthropic/claude-haiku-4-5",
   "execAllowlist": [
     "bun test",
@@ -15,5 +24,6 @@
       }
     }
   },
-  "memoryEmbedModel": "ollama/nomic-embed-text"
+  "memoryEmbedModel": "ollama/mxbai-embed-large",
+  "maxIterations": 60
 }

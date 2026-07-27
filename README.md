@@ -120,12 +120,15 @@ the failure mode of each looks like a bug rather than a missing setting.
 
 **An embedder, for semantic search and topics.** Without one, claim search is
 keyword-only and `orc memory topics` never produces a group — topics are derived
-from claim embeddings, so no vectors means no topics. Ollama needs no API key:
+from claim embeddings, so no vectors means no topics. Ollama needs no API key.
+Changing this model later means re-running `orc memory rebuild` (to re-embed every
+claim) AND re-measuring `MEMORY_CLUSTER_THRESHOLD`, which is a cut through one
+model's cosine distribution and does not port:
 
 ```bash
-ollama pull nomic-embed-text
+ollama pull mxbai-embed-large
 # .orc/config.json
-"memoryEmbedModel": "ollama/nomic-embed-text"
+"memoryEmbedModel": "ollama/mxbai-embed-large"
 ```
 
 **An approval rule, if you want tasks to decompose.** A step may split itself
