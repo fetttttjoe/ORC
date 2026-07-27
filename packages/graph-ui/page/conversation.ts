@@ -3,12 +3,13 @@
 // tokens). History (text messages only) persists per project in localStorage; the copilot
 // re-grounds itself from live state each exchange, so history is presentational context.
 import { EVENT_KIND, planScope } from '@orc/contracts'
-import type { LogRow, TodoWave } from '@orc/ui-core'
+import type { LogRow } from '@orc/ui-core'
 import { isUiMetaNote, noteNodeId, stepNodeId } from '@orc/ui-core/graph'
 import { api, canAct, session, type CopilotPart } from './api'
 import { mermaidInto } from './mermaid'
 import { el } from './ui/el'
 import { Badge, Btn, CmdChip, Empty, Pre, toast, type Tone } from './ui/components'
+import { planVisual, planVisualKey } from './plan-visual'
 import { REPLY_AFFORDANCE, replyAffordance } from './affordance'
 
 interface ChatMessage { role: 'user' | 'assistant'; content: string }
@@ -45,22 +46,6 @@ const STEP_KINDS = new Set<string>([
   EVENT_KIND.run_started, EVENT_KIND.step_started, EVENT_KIND.step_completed,
   EVENT_KIND.step_failed, EVENT_KIND.task_status_changed,
 ])
-
-// onStep makes each step chip a door into the graph: click → the step node's audit view
-// (attempts, run state, transcript) opens in the inspector
-export function renderWaves(waves: TodoWave[], onStep?: (stepId: string) => void): HTMLElement {
-  return el('div', { class: 'waves' }, ...waves.map(w =>
-    el('div', { class: 'wave' },
-      el('span', { class: 'wave-label' }, `wave ${w.wave}`, w.parallel ? Badge('parallel', 'accent') : ''),
-      ...w.steps.map(s => el('span', {
-        class: `wave-step ${s.status}${onStep ? ' link' : ''}`,
-        onClick: onStep ? () => onStep(s.id) : undefined,
-        title: onStep ? 'open step in inspector' : undefined,
-        data: { step: s.id },
-      },
-        s.status === 'completed' ? '✓ ' : s.status === 'failed' ? '✗ ' : s.status === 'running' ? '◔ ' : '○ ', s.title)),
-    )))
-}
 
 export class Conversation {
   readonly root = el('div', { class: 'conv' })
@@ -373,19 +358,9 @@ export class Conversation {
     if (!plans?.visual) { this.dropIfEmpty(this.planCards, taskId, entry); return }
     const v = plans.visual
     // skip re-renders that would change nothing (approval straight after proposal)
-    const key = `${v.version}:${v.waves.map(w => w.steps.map(s => s.status).join(',')).join('|')}`
+    const key = planVisualKey(v)
     if (entry.key === key) return
-    const diagram = el('div', { class: 'diagram' })
-    void mermaidInto(diagram, v.mermaid)
-    // a one-step template is not a decomposition — say so instead of dressing it up
-    const single = v.waves.length === 1 && v.waves[0]?.steps.length === 1
-    const content = [
-      el('div', { class: 'card-title' }, `plan v${v.version}`,
-        single ? Badge('single-step template', 'muted') : Badge(`${v.waves.length} wave(s)`, 'accent')),
-      ...(single ? [] : [diagram]),
-      renderWaves(v.waves, id => this.goNode(stepNodeId(taskId, id))),
-    ]
-    entry.root.replaceChildren(...content)
+    entry.root.replaceChildren(...planVisual(v, { onStep: id => this.goNode(stepNodeId(taskId, id)) }))
     entry.key = key
     this.scroll()
   }

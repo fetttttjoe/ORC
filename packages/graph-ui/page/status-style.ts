@@ -25,3 +25,17 @@ export const colorFor = (type: GraphNode['type'], detail: string): string =>
 
 export const isActive = (type: GraphNode['type'], detail: string): boolean =>
   (type === 'task' || type === 'step') && detail === STEP_RUN_STATUS.running
+
+// A plan's state, rolled up from its steps, so the chat card says done/failed/running WITHOUT the
+// reader opening the request. A one-step plan renders no diagram (nothing to lay out), so its only
+// state signal used to be one chip's text colour — invisible at a glance, which is the bug this
+// exists to fix. Failure dominates a mixed plan: one failed step is the thing a reader must see,
+// even when every other step finished.
+export type PlanState = 'done' | 'failed' | 'running' | 'pending'
+export const planState = (waves: ReadonlyArray<{ steps: ReadonlyArray<{ status: string }> }>): PlanState => {
+  const steps = waves.flatMap(w => [...w.steps])
+  if (steps.some(s => s.status === STEP_RUN_STATUS.failed)) return 'failed'
+  if (steps.some(s => s.status === STEP_RUN_STATUS.running)) return 'running'
+  // an empty plan has finished nothing — `every` on [] is true, which would read as done
+  return steps.length > 0 && steps.every(s => s.status === STEP_RUN_STATUS.completed) ? 'done' : 'pending'
+}

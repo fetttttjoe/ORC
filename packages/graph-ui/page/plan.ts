@@ -2,7 +2,7 @@
 // human action (buttons when the server has actions, command chips otherwise), the grounded
 // decomposition with refine controls, the road of steps, and the knowledge this request grew.
 import { artifactNodeId, noteNodeId, stepNodeId } from '@orc/ui-core/graph' // browser-safe subpath — never the ui-core index
-import { renderWaves } from './conversation'
+import { planVisual } from './plan-visual'
 import { mermaidInto } from './mermaid'
 import { draftFromSteps, openPlanEditor } from './plan-editor'
 import { el } from './ui/el'
@@ -246,11 +246,8 @@ export function renderRequest(ctx: RequestCtx): HTMLElement {
       }), 'muted') : null,
     ))
     if (active !== plans.approvedVersion) out.append(el('div', { class: 'empty' }, 'not the approved version'))
-    if (plans.visual && plans.visual.version === active) {
-      const diagram = el('div', { class: 'diagram' })
-      void mermaidInto(diagram, plans.visual.mermaid)
-      out.append(Card(['plan graph'], diagram, renderWaves(plans.visual.waves, id => ctx.go(stepNodeId(ctx.taskId, id)))))
-    }
+    if (plans.visual && plans.visual.version === active)
+      out.append(Card(['plan graph'], ...planVisual(plans.visual, { onStep: id => ctx.go(stepNodeId(ctx.taskId, id)) })))
     const runOf = new Map(t.steps.map(s => [s.stepId, s]))
     for (const s of topoOrder(plan.steps)) {
       const run = runOf.get(s.id)
