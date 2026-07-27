@@ -76,6 +76,38 @@ describe('fs tools', () => {
     releaseWriteClaims(b.writer)
   })
 
+  // A refused edit writes nothing, so it must not fence a sibling out of the path. The claim was
+  // taken before fs_edit validated anything, and none of the three refusal branches released it —
+  // so one bad old_string locked the file against every other step for the rest of the run.
+  it('a refused fs_edit does not leave the path claimed against a sibling', async () => {
+    const dir = ws()
+    const a = { writer: 'step:t:a:a1' }
+    const b = { writer: 'step:t:b:a1' }
+    writeFileSync(path.join(dir, 'shared.md'), 'hello world')
+
+    const refused = await executeTool(TOOL_NAME.fs_edit, { path: 'shared.md', old_string: 'nope', new_string: 'x' }, dir, [], undefined, a)
+    expect(refused.isError).toBe(true)
+
+    // b must still be able to take the path — a wrote nothing
+    const bWrite = await executeTool(TOOL_NAME.fs_write, { path: 'shared.md', content: 'B' }, dir, [], undefined, b)
+    expect(bWrite.isError).toBe(false)
+    releaseWriteClaims(a.writer)
+    releaseWriteClaims(b.writer)
+  })
+
+  it('a refused fs_edit does not release a claim an earlier successful write took', async () => {
+    const dir = ws()
+    const a = { writer: 'step:t:a:a1' }
+    const b = { writer: 'step:t:b:a1' }
+    expect((await executeTool(TOOL_NAME.fs_write, { path: 'shared.md', content: 'A' }, dir, [], undefined, a)).isError).toBe(false)
+    // a's own later edit refuses — but a legitimately still owns the path it wrote
+    expect((await executeTool(TOOL_NAME.fs_edit, { path: 'shared.md', old_string: 'nope', new_string: 'x' }, dir, [], undefined, a)).isError).toBe(true)
+    const clash = await executeTool(TOOL_NAME.fs_write, { path: 'shared.md', content: 'B' }, dir, [], undefined, b)
+    expect(clash.isError).toBe(true)
+    expect(JSON.stringify(clash.output)).toContain('concurrent write refused')
+    releaseWriteClaims(a.writer)
+  })
+
   it('fs_write is atomic: content lands whole and no temp files remain', async () => {
     const dir = ws()
     await executeTool(TOOL_NAME.fs_write, { path: 'out/f.txt', content: 'whole' }, dir)

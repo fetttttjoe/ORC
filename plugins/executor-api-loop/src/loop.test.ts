@@ -8,6 +8,7 @@ import { stepFixture } from '@orc/contracts/fixtures'
 import { z } from 'zod'
 import type { LanguageModel } from 'ai'
 import { apiLoopExecutor } from './loop'
+import { TOOL_NAME, executeTool, releaseWriteClaims } from './tools'
 
 // test-double checkpoint: runs fn, captures drafted events (what DBOS would append durably)
 function makeCheckpoint(captured: EventDraft[]): Checkpoint {
@@ -733,6 +734,30 @@ describe('step memory seam', () => {
       .filter((p): p is { type: string; toolCallId: string } => isRecord(p) && p.type === 'tool-result' && typeof p.toolCallId === 'string')
     // exactly one result for the id — this is the invariant a real provider enforces with a 400
     expect(results.filter(r => r.toolCallId === 'dup')).toHaveLength(1)
+  })
+
+  // A parked turn writes nothing, but it held every path it had written — and the join gate parks
+  // waiting on the very children those claims fence out, for up to GATE_POLL_SECONDS (3600) per
+  // poll. The child's refusal then reads as a concurrency error nobody caused.
+  it('releases its write claims while parked, so a sibling can take the path', async () => {
+    const captured: EventDraft[] = []
+    const dir = mkdtempSync(path.join(tmpdir(), 'orc-park-'))
+    const model = scriptModel([
+      { toolCalls: [{ toolCallId: 'w', toolName: 'fs_write', input: { path: 'shared.md', content: 'A' } }] },
+      { toolCalls: [{ toolCallId: 'q', toolName: 'ask_human', input: { question: 'proceed?' } }] },
+    ])
+    const gen = apiLoopExecutor().startTurn(ctx(model, captured, { workspaceDir: dir, runToken: 'step:t:parent:a1' }))[Symbol.asyncIterator]()
+    let ev = await gen.next()
+    while (!ev.done && ev.value.type !== 'feedback') ev = await gen.next()
+    expect(ev.done).toBe(false)
+
+    // suspended on ask_human: a sibling step must be able to write the path the parent wrote
+    const sibling = await executeTool(
+      TOOL_NAME.fs_write, { path: 'shared.md', content: 'B' }, dir, [], undefined, { writer: 'step:t:child:a1' },
+    )
+    expect(sibling.isError).toBe(false)
+    releaseWriteClaims('step:t:child:a1')
+    await gen.return?.(undefined)
   })
 
   it('renders a recalled CLAIM as the statement itself, carrying its note id', async () => {

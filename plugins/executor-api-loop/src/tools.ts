@@ -107,17 +107,59 @@ export async function executeTool(
   // Every write path — whole-file or surgical — passes the same two gates, in the same order, so a
   // new write tool cannot accidentally ship without the fence or the claim registry.
   // Returns an error envelope when the write is refused, or null when it may proceed.
-  const claimWrite = (p: string): { output: unknown; isError: boolean } | null => {
+  // Claims the path, or refuses. The claim is taken EAGERLY — before the write is attempted — so the
+  // check and the set are atomic against a sibling step racing in the same process; deferring the
+  // set until after a successful write would reopen exactly the window the claim exists to close.
+  //
+  // The cost of that is a claim held by an operation that then refuses (a missing file, an
+  // old_string that matches zero or many times) — a path locked against every sibling by a call
+  // that wrote nothing. So the handle carries `release`, and it frees the key ONLY if this call is
+  // what acquired it: a later refused edit must not release a claim an earlier successful write in
+  // the same step legitimately still holds.
+  type WriteClaim = { refusal: { output: unknown; isError: boolean } } | { release: () => void }
+  const claimWrite = (p: string): WriteClaim => {
     const abs = resolveInWorkspace(workspaceDir, p)
     assertInZone(workspaceDir, abs, guard.zone ?? []) // named fence error → the model can correct course
-    if (!guard.writer) return null
+    if (!guard.writer) return { release: () => {} }
     const key = `${workspaceDir}\u0000${abs}`
     const owner = writeClaims.get(key)
     if (owner !== undefined && owner !== guard.writer)
-      return { output: { error: `concurrent write refused: '${p}' is being written by a still-running sibling step — write elsewhere or order the steps with dependsOn` }, isError: true }
+      return { refusal: { output: { error: `concurrent write refused: '${p}' is being written by a still-running sibling step — write elsewhere or order the steps with dependsOn` }, isError: true } }
+    const acquired = owner === undefined
     writeClaims.set(key, guard.writer)
-    return null
+    return { release: () => { if (acquired) writeClaims.delete(key) } }
   }
+  // The edit itself, with no claim handling: separating them is what lets the caller release on a
+  // refusal without repeating that at each of the three refusal branches.
+  const editInPlace = (abs: string, p: string, oldString: string, newString: string): { output: unknown; isError: boolean } => {
+    let current: string
+    try {
+      current = readFileSync(abs, 'utf8')
+    } catch {
+      return { output: { error: `'${p}' does not exist — use fs_write to create it` }, isError: true }
+    }
+    // exactly once, or refuse: zero means the model is editing something it did not read, and
+    // more than one means it cannot know which site it changed. Both are silent corruption if
+    // guessed at, and both are cheap for the model to fix by widening the context it names.
+    const occurrences = current.split(oldString).length - 1
+    if (occurrences === 0) {
+      // The tool argument is ALREADY JSON, so a model that escapes its newlines again sends
+      // `\\n` — two characters, backslash and n — and the match can never succeed. noteLint
+      // warns about the same double-encoding on memory_write; here it is fatal, and "copy the
+      // exact text" sends the model back to re-read a file it copied correctly. Name what it
+      // actually did instead. Diagnosed, never auto-repaired: a writer mis-encoding its
+      // arguments is mis-encoding the file contents too, and silently fixing one hides that.
+      const unescaped = unescapeSequences(oldString)
+      if (unescaped !== oldString && current.includes(unescaped))
+        return { output: { error: `old_string not found in '${p}' because ${DOUBLE_ENCODED_HINT}` }, isError: true }
+      return { output: { error: `old_string not found in '${p}' — fs_read it and copy the exact text, whitespace included` }, isError: true }
+    }
+    if (occurrences > 1)
+      return { output: { error: `old_string appears ${occurrences} times in '${p}' — include surrounding lines until it is unique` }, isError: true }
+    writeFileAtomic(abs, current.replace(oldString, newString))
+    return { output: { edited: p }, isError: false }
+  }
+
   // atomic replace: same-directory temp + rename — a reader or a crash never sees a torn file
   const writeFileAtomic = (abs: string, content: string): void => {
     mkdirSync(path.dirname(abs), { recursive: true })
@@ -147,41 +189,26 @@ export async function executeTool(
       case TOOL_NAME.fs_write: {
         const { path: p, content } = WriteInput.parse(input)
         const claim = claimWrite(p)
-        if (claim) return claim
-        writeFileAtomic(resolveInWorkspace(workspaceDir, p), content)
+        if ('refusal' in claim) return claim.refusal
+        try {
+          writeFileAtomic(resolveInWorkspace(workspaceDir, p), content)
+        } catch (err) {
+          // nothing landed on disk, so the path must not stay locked against a sibling
+          claim.release()
+          throw err
+        }
         return { output: { written: p }, isError: false }
       }
       case TOOL_NAME.fs_edit: {
         const { path: p, old_string: oldString, new_string: newString } = EditInput.parse(input)
         const claim = claimWrite(p)
-        if (claim) return claim
-        const abs = resolveInWorkspace(workspaceDir, p)
-        let current: string
-        try {
-          current = readFileSync(abs, 'utf8')
-        } catch {
-          return { output: { error: `'${p}' does not exist — use fs_write to create it` }, isError: true }
-        }
-        // exactly once, or refuse: zero means the model is editing something it did not read, and
-        // more than one means it cannot know which site it changed. Both are silent corruption if
-        // guessed at, and both are cheap for the model to fix by widening the context it names.
-        const occurrences = current.split(oldString).length - 1
-        if (occurrences === 0) {
-          // The tool argument is ALREADY JSON, so a model that escapes its newlines again sends
-          // `\\n` — two characters, backslash and n — and the match can never succeed. noteLint
-          // warns about the same double-encoding on memory_write; here it is fatal, and "copy the
-          // exact text" sends the model back to re-read a file it copied correctly. Name what it
-          // actually did instead. Diagnosed, never auto-repaired: a writer mis-encoding its
-          // arguments is mis-encoding the file contents too, and silently fixing one hides that.
-          const unescaped = unescapeSequences(oldString)
-          if (unescaped !== oldString && current.includes(unescaped))
-            return { output: { error: `old_string not found in '${p}' because ${DOUBLE_ENCODED_HINT}` }, isError: true }
-          return { output: { error: `old_string not found in '${p}' — fs_read it and copy the exact text, whitespace included` }, isError: true }
-        }
-        if (occurrences > 1)
-          return { output: { error: `old_string appears ${occurrences} times in '${p}' — include surrounding lines until it is unique` }, isError: true }
-        writeFileAtomic(abs, current.replace(oldString, newString))
-        return { output: { edited: p }, isError: false }
+        if ('refusal' in claim) return claim.refusal
+        const out = editInPlace(resolveInWorkspace(workspaceDir, p), p, oldString, newString)
+        // Every branch below refused: the file was missing, or old_string matched zero or many
+        // times. None of them wrote a byte, so holding the path would fence out every sibling step
+        // over an edit that never happened.
+        if (out.isError) claim.release()
+        return out
       }
       case TOOL_NAME.fs_list: {
         const { path: p } = ListInput.parse(input)

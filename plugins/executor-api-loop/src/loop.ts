@@ -463,6 +463,13 @@ export function apiLoopExecutor(): AgentExecutor<LanguageModel> {
             // suspension point (spec D9): the port recv's in workflow context and resumes us.
             // resume is typed SplitResult[] | string | undefined (feedback shares the channel) —
             // a gate only ever resumes with SplitResult[], so narrow defensively.
+            // Claims are released BEFORE parking. They are held for the duration of the turn, but a
+            // suspended turn writes nothing — and this suspension in particular waits on the very
+            // steps that are refused by the claims: a parent that wrote a file and then joins its
+            // splits fenced its own children out of that path for as long as it waited on them.
+            // GATE_POLL_SECONDS is 3600, so "as long as it waited" is hours, and the child's refusal
+            // reads as a concurrency error nobody caused.
+            releaseWriteClaims(ctx.runToken)
             const resumed = yield {
               type: UNIFIED_EVENT_TYPE.gate,
               splitIds: parsedJoin.data.splitIds ?? [],
@@ -509,6 +516,9 @@ export function apiLoopExecutor(): AgentExecutor<LanguageModel> {
           // replay-safe `${runToken}:${toolCallId}`.
           if (askCall && parsedAsk?.success) {
             const topic = parsedAsk.data.topic ?? `${ctx.runToken}:${askCall.toolCallId}`
+            // same rule as the join gate above: a turn waiting on a human is not writing, and this
+            // one waits unbounded — holding a path across it fences siblings out indefinitely
+            releaseWriteClaims(ctx.runToken)
             const resumed = yield { type: UNIFIED_EVENT_TYPE.feedback, question: parsedAsk.data.question, topic, toolCallId: askCall.toolCallId }
             const answer = typeof resumed === 'string' ? resumed : ''
             yield { type: UNIFIED_EVENT_TYPE.tool_result, toolCallId: askCall.toolCallId, toolName: TOOL_NAME.ask_human, output: { answer }, isError: false }
