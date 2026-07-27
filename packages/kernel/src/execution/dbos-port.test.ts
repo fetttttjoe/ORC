@@ -165,6 +165,22 @@ describe('DBOS execution port (integration)', () => {
     expect(runs).toHaveLength(1)
   })
 
+  // runWorkflow returns RUN_OUTCOME.blocked as a NORMAL return, so DBOS marks the workflow SUCCESS
+  // and keeps its deterministic id. Re-running therefore re-attached to a FINISHED workflow and
+  // replayed its cached result: `orc run` on a blocked task was admitted at every door (blocked is
+  // drivable) and silently did nothing at all.
+  it('re-running a settled task starts a new run instead of replaying the finished one', async () => {
+    const behavior: Record<string, 'ok' | 'fail'> = { a: 'ok', b: 'fail' }
+    const t = await approvedTask(behavior)
+    const first = await port.startRun(t.id)
+    expect(await first.wait()).toBe('blocked')
+
+    behavior.b = 'ok' // the world is fixed; `orc run` must now actually run
+    const second = await port.startRun(t.id)
+    expect(second.workflowId).not.toBe(first.workflowId)
+    expect(await second.wait()).toBe('done')
+  })
+
   it('failed step blocks task; retry re-runs only the failed step to done', async () => {
     const behavior: Record<string, 'ok' | 'fail'> = { a: 'ok', b: 'fail' }
     const t = await approvedTask(behavior)

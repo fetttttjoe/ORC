@@ -524,6 +524,25 @@ export async function createDbosPort(opts: {
     { name: 'orcRun' },
   )
 
+  // Index 0 is the FIRST run of an approved plan, and its workflow id is deterministic — which is
+  // what makes `orc run` on a LIVE task attach to the run already in flight instead of starting a
+  // second one. But a run that ENDED keeps that id too: runWorkflow returns RUN_OUTCOME.blocked as
+  // a normal return, so DBOS marks the workflow SUCCESS. Re-running then re-attached to a finished
+  // workflow and replayed its cached result — `orc run` on a blocked task was admitted at every
+  // door (blocked is drivable) and silently did nothing.
+  //
+  // `running` is the only status where attaching is what the caller wants; `blocked` and a
+  // re-approved `approved` both mean the previous run settled, so the next one needs its own index.
+  // Read from the FOLD, not from DBOS: the log is the source of truth for whether a run is live,
+  // and nextRetryIndex is the derivation `orc retry` and the router already share.
+  async function runIndexFor(taskId: string, status: string): Promise<number> {
+    if (status === TASK_STATUS.running) {
+      const latest = (await foldState(taskId)).runs.get(taskId)?.at(-1)
+      if (latest) return latest.retryIndex
+    }
+    return nextRetryIndex(taskId)
+  }
+
   async function startRunAt(taskId: string, retryIndex: number, cwd?: string): Promise<RunHandle> {
     // Admission is a decision, not an advisory read, so it must NOT come from the live index: an
     // approve lands microseconds before the router asks, and a stale view refuses a run that is
@@ -638,7 +657,7 @@ export async function createDbosPort(opts: {
     // startRunAt with no override — the same id, the same queue and, crucially, the same cwd rule
     // as the CLI's child-follow, which races it for that id.
     startChildRun: async (childTaskId: string): Promise<void> => { await startRunAt(childTaskId, 0) },
-    startRun: (taskId, o) => startRunAt(taskId, 0, o?.cwd),
+    startRun: async (taskId, o) => startRunAt(taskId, await runIndexFor(taskId, (await foldState(taskId)).tasks.get(taskId)?.status ?? ''), o?.cwd),
     retry: async (taskId, o) => {
       const state = await foldState(taskId)
       const task = state.tasks.get(taskId)

@@ -19,6 +19,27 @@ const appendCreated = (log: EventLog, id: string) =>
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms))
 
 describe('EventLog.subscribe', () => {
+  // A throw during the INITIAL catch-up rejects subscribe(), so the caller never receives a
+  // disposer — and `closed` lives only inside that disposer. Meanwhile ending the client fires the
+  // 'end' handler, which schedules a reconnect. Nothing could ever stop it: the subscription
+  // reconnected and re-pumped forever, invisibly, against a caller that believed it had failed.
+  it('a handler throwing during initial catch-up leaves nothing running', async () => {
+    const db = await createTestDb(); dbs.push(db)
+    const log = (await openStorage(db.url, { projectId: TEST_PROJECT_ID })).events
+    await appendCreated(log, 'a')
+
+    let calls = 0
+    await expect(log.subscribe({ fromSeq: 0 }, () => { calls += 1; throw new Error('handler boom') }))
+      .rejects.toThrow('handler boom')
+    const afterFailure = calls
+
+    // longer than PUMP_RETRY_MS (250) and the first reconnect delays (100/200/400): a still-armed
+    // loop would have re-delivered by now
+    await appendCreated(log, 'b')
+    await sleep(900)
+    expect(calls).toBe(afterFailure)
+  })
+
   it('catches up from fromSeq then pushes new appends in order', async () => {
     const db = await createTestDb(); dbs.push(db)
     const log = (await openStorage(db.url, { projectId: TEST_PROJECT_ID })).events

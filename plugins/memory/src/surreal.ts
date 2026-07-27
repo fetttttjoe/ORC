@@ -375,8 +375,17 @@ export class SurrealMemory {
         if (!parsed.success) { console.warn(`[memory] skipping unparseable memory_deleted at seq ${e.seq}: ${parsed.error.message}`); await tx.upsert(Tb.Meta, 'cursor').set({ seq: e.seq }); return true }
         const p = parsed.data
         await tx.delete(Tb.Note, key(p.scope, p.id))
-        // drop the note's edges in both directions with it
-        await tx.delete(Tb.Link).where(l => l.fromId.eq(p.id).or(l.toId.eq(p.id)).and(l.scope.eq(p.scope)))
+        // Only the edges this note AUTHORED — one condition per side, dropping an `.or().and()`
+        // whose precedence was never pinned (the same class as the `.inside().not()` trap).
+        //
+        // This does NOT preserve the inbound edges other live notes authored toward this one, and
+        // narrowing the WHERE cannot: MEASURED against SurrealDB, deleting the `note` record removes
+        // every RELATE edge attached to it in both directions, ours or not. So a note that comes
+        // back under the same id has lost edges its neighbours still assert in their own `links`,
+        // and only `orc memory rebuild` restores them. Fixing that means re-materializing inbound
+        // edges on write, which is a scan of the note table on the hottest path — a deliberate
+        // trade, not a patch. See docs/superpowers/dataflow-audit-open-findings.md.
+        await tx.delete(Tb.Link).where(l => l.fromId.eq(p.id).and(l.scope.eq(p.scope)))
         // the derived claim rows go with the note, same as its edges
         await tx.delete(Tb.Claim).where(c => c.noteId.eq(p.id).and(c.scope.eq(p.scope)))
       }

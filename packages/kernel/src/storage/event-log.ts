@@ -273,11 +273,27 @@ export class EventLog implements EventLogOps {
           if (!closed) scheduleReconnect()
         })
         await rewindIfReplaced() // a reconnect is exactly when the log underneath may have changed
-        await pump() // catch-up closes the gap before live delivery resumes
+        // catch-up closes the gap before live delivery resumes. On the INITIAL connect it must
+        // throw — the caller is still waiting to learn whether the subscription came up. On a
+        // RECONNECT it must not: the connection-level catch below reacts to a failure here by
+        // ending a perfectly healthy LISTEN and backing off, so a handler that threw once cost the
+        // stream its socket and pinned the backoff, where the steady-state path (pumpSafe, wired to
+        // 'notification' above) would have warned and retried in 250ms with LISTEN intact.
+        if (initial) await pump()
+        else pumpSafe()
         backoff = 0
       } catch (err) {
         await c.end().catch(() => {})
-        if (initial) throw err
+        if (initial) {
+          // Nothing owns this subscription yet: the caller receives a throw and NO disposer, so
+          // `closed` can never be set and any timer still armed reconnects forever with no way to
+          // stop it. `c.end()` above fires the 'end' handler, which schedules exactly such a
+          // reconnect — so the teardown the disposer would have done has to happen here instead.
+          closed = true
+          if (pumpTimer !== null) { clearTimeout(pumpTimer); pumpTimer = null }
+          if (reconnectTimer !== null) { clearTimeout(reconnectTimer); reconnectTimer = null }
+          throw err
+        }
         console.warn(`event stream reconnect failed: ${errorMessage(err)}`)
         scheduleReconnect()
       }
