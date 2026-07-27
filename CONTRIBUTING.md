@@ -284,7 +284,7 @@ Every architectural change must be documented. Here's when and how.
 **Trigger**: New file in:
 - `docs/` (new .md file)
 - `docs/plans/` (new plan)
-- `docs/seams/` (new seam guide section)
+- `docs/seams-reference.md` (new seam scenario or debugging workflow)
 
 **Process**:
 

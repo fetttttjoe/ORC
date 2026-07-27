@@ -656,7 +656,7 @@ export function buildProgram(
 
   program
     .command('graph')
-    .description('serve the live project graph UI (read-only, 127.0.0.1)')
+    .description('serve the project web UI on 127.0.0.1 — drives runs and approvals, not read-only')
     .option('--port <n>', 'port', (v: string) => parseInt(v, 10), 7749)
     .action(async (opts: { port: number }) => {
       const { startGraphUi } = await import('@orc/graph-ui') // lazy: keep CLI startup lean

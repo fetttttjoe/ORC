@@ -67,7 +67,7 @@ Start here to navigate the codebase and understand the architectural foundations
 
 ### Visual Navigation
 
-- `orc graph [--port 7749]` — live WebGL graph of tasks, steps, artifacts, and memory notes (read-only, localhost only)
+- `orc graph [--port 7749]` — the web UI (door #1): a live WebGL graph of tasks, steps, artifacts and memory notes, and the pane you drive work from. It is **not** read-only — it proposes, approves, replies and runs, so it is defended like a control surface: bound to loopback, a `Host` check that a DNS-rebinding attacker cannot satisfy, a CSRF token minted per boot and required on every mutation, and a fence limiting it to the one project it was started in
 - `vault/` — filesystem projections: `index.md` (task tree + status), `tasks/<id>/execution.md` (steps + operations), `tasks/<id>/lineage.md` (artifact receipts), `memory/index.md` (knowledge graph)
 
 ## Stack
@@ -376,9 +376,8 @@ by the agent.
 - Environment: `orc` loads `<project>/.env` itself, resolved from the same walk-up that finds
   `.orc/`, so a command run from a subdirectory — or a supervisor spawned with a different cwd —
   gets the same credentials as one run from the project root. Bun's own `.env` pickup is
-  cwd-relative with no walk-up, which is why a supervisor started elsewhere used to die mid-run
-  with `[provider_error] Anthropic API key is missing`. Real environment variables always win over
-  the file.
+  cwd-relative with no walk-up, so it cannot be relied on for this. Real environment variables
+  always win over the file.
 - Never bundle the CLI (`bun build`): DBOS must run unbundled via `bun run`.
 - Upgrading orc: finish or `orc cancel` active runs first — DBOS recovery is
   keyed to the app version (`DBOS__APPVERSION`).

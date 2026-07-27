@@ -145,9 +145,27 @@ failure.
 **How resume actually triggers.** `port.launch()` calls `DBOS.launch()`
 (`packages/kernel/src/execution/dbos-port.ts`, wired from `packages/cli/src/runtime.ts`'s
 `buildRuntime`) — this is a DBOS SDK call, and DBOS's own recovery logic re-attaches to every
-pending workflow the moment it launches. There is no bespoke "resume" code in this repo; resume
-*is* what DBOS does at startup, on top of the checkpoint/operation primitives above making that
-resume safe (no double-billed model calls, no duplicated events).
+pending workflow **carrying its own `executorID`** the moment it launches. That qualifier is
+load-bearing: DBOS defaults every process to the executor id `local`, so two runtimes recovered each
+other's in-flight steps and both ran them. The id reaches DBOS through
+`DBOS.setConfig({ executorID })` — the only channel that works, because `globalParams.executorID` is
+computed at module-import time from `DBOS__VMID`, so setting that env var inside `launch()` lands
+after DBOS has frozen it. It is the supervisor's claimed slot id (`supervisor-1`, …), so recovery is
+per-supervisor and a restart reclaims its own in-flight work; `acquireRuntimeLock`
+(`packages/kernel/src/storage/runtime-lock.ts`) refuses to become a second runtime at all. There is
+no bespoke "resume" code in this repo; resume *is* what DBOS does at startup, on top of the
+checkpoint/operation primitives above making that resume safe (no double-billed model calls, no
+duplicated events).
+
+**Taking over a *dead* executor's work is a reboot under its slot id, not an API call** — and not
+because no API exists. `DBOS.resumeWorkflow(id)` does recover another executor's workflow: measured,
+a live executor took over a dead one's `PENDING` workflow and `executor_id` flipped. It is rejected
+because resume is **not recursive** — a resumed parent replays past its `startWorkflow` call without
+re-dispatching the child, then blocks forever on a gate nothing opens, which our run tree makes the
+common case — while ordinary launch recovery drained the identical tree in 270ms, preserved the
+child's depth-partitioned queue (resume dumps everything onto `_dbos_internal_queue`), and
+incremented `recovery_attempts`, the poison-pill guard resume zeroes. Evidence:
+`.superpowers/sdd/2026-07-26-claim-topics/dbos-resume-probe{,-2}.md`.
 
 **Wave scheduling replay determinism.** The run workflow launches every *ready* step of a wave,
 awaits the whole wave, then recomputes readiness — deliberately not a continuous

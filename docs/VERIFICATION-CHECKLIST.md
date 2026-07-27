@@ -113,9 +113,14 @@ Use these checks to ensure all architectural decisions are captured and linked.
 
 - [ ] **Memory notes are linked to code paths**
   - Spot check (sample 3 ADRs):
-    - Command: `orc memory read adr-0001-project-identity --format=json | jq '.paths | length'`
+    - Command: `orc memory cat adr-0001-project-identity | jq '.paths | length'` (`cat` already prints JSON; there is no `orc memory read` and no `--format` flag)
     - Expected: >0 (at least one code path per ADR)
     - Failure mode: Decisions disconnected from implementation
+
+- [ ] **Claims on architecture notes are live, not orphaned**
+  - Command: `orc memory claims adr-0001-project-identity`
+  - Expected: the note's live statements, each with a `validFrom`. Zero claims on a note written before claims existed is CORRECT — the legacy `rules[]` decoder was removed, so a rebuild will not conjure them
+  - Failure mode: A note that reads as authoritative asserts nothing an agent can match on
 
 - [ ] **No orphaned decision files in docs/**
   - Command: `find docs/ -name "*.md" -type f | xargs grep -l "decision\|ADR" | grep -v plans | grep -v ARCHITECTURE | sort`
@@ -145,8 +150,8 @@ Use these checks to ensure the seams guide is complete and linked to tests.
   - Failure mode: Undocumented boundaries → inconsistent extensions
 
 - [ ] **Each seam documents invariants and error handling**
-  - Sample check (Event Log seam):
-    - Command: `grep -A 50 "^## Event Log" docs/seams-reference.md | grep -E "Invariant|Error|Recovery" | head -3`
+  - Sample check (Event Log seam) — the headings are `### EventLog interface` / `### How the lock prevents corruption`, there is no `## Event Log`:
+    - Command: `grep -A 30 "^### EventLog interface" docs/seams-reference.md | grep -Ec "lock|transaction|idempot"`
     - Expected: At least 3 invariants and 2 error scenarios per seam
     - Failure mode: Developers don't know what can/cannot be violated
 
@@ -160,10 +165,12 @@ Use these checks to ensure the seams guide is complete and linked to tests.
   - Expected: Link is present
   - Failure mode: New contributors never find the seams guide
 
-- [ ] **docs/seams/ directory is organized**
-  - Command: `ls -la docs/seams/`
-  - Expected: At least seams/README.md and seams/reference.md present
-  - Failure mode: Seams documentation scattered
+- [ ] **The seams guide is the only copy**
+  - Command: `test ! -e docs/seams && echo "✓ no second copy"`
+  - Expected: `docs/seams-reference.md` exists and `docs/seams/` does not
+  - Failure mode: A second, unaudited copy drifts and outranks the canonical one — a reader who
+    follows the wrong link gets the fuller *and* wronger document. This is why the split was
+    collapsed: nothing linked to `docs/seams/` but its own README, so nothing corrected it either
 
 ---
 
@@ -186,13 +193,19 @@ Use these checks to keep architecture documentation synchronized with implementa
   - Failure mode: Code flow is undocumented
 
 - [ ] **No major code changes without doc updates**
-  - Code paths to monitor:
+  - Code paths to monitor (these are the real ones — `packages/plugins/`, `packages/memory/` and `packages/vault/` do not exist):
+    - `packages/contracts/src/` (the seam layer — every schema, event kind and limit)
     - `packages/kernel/src/` (execution & storage)
-    - `packages/plugins/` (plugin system)
-    - `packages/memory/` (knowledge graph)
-    - `packages/vault/` (projections)
+    - `plugins/memory/src/` (knowledge graph, claims, topics)
+    - `packages/vault-projector/` (projections)
+    - `packages/ui-core/` + `packages/graph-ui/` + `packages/cli/src/mcp-serve.ts` (the two doors)
   - Trigger: If any file in these paths changed, verify corresponding doc update
   - Failure mode: Code drifts from documentation
+
+- [ ] **Documented constants still match the code**
+  - A doc that quotes a tuned number goes stale silently — nothing fails, the sentence just becomes false. Real instance: `MEMORY_CLUSTER_THRESHOLD` moved 0.75 → 0.7 with measured reasoning, and `docs/ARCHITECTURE.md` still called it "0.75, currently a guess"
+  - Command: `grep -rEn '\b(0\.[0-9]+|[0-9]{3,})\b' docs/ARCHITECTURE.md | grep -vE '^\S+:[0-9]+:\s*\|' | head -20`, then check each against its `export const`
+  - Failure mode: A confident sentence that is no longer true — worse than no sentence
 
 - [ ] **EXTENDING.md documents current extension points**
   - Command: `grep -E "^## |^### " docs/EXTENDING.md | head -10`
@@ -231,21 +244,26 @@ Use these checks to prevent decisions from slipping into code without proper cap
 Use these checks to keep terminology consistent across docs.
 
 - [ ] **GLOSSARY.md is comprehensive and current**
-  - Command: `test -f docs/GLOSSARY.md && grep -c "^##\|^- \*\*" docs/GLOSSARY.md`
-  - Expected: File exists with 80+ terms
+  - Command: `grep -c '^\*\*' docs/GLOSSARY.md` — entries are `**Term** — …` at line start, with no leading dash
+  - Expected: 60+ terms (64 as of 2026-07-27)
   - Failure mode: Undefined jargon in documentation
 
 - [ ] **Key architectural terms are defined in glossary**
   - Terms to check:
-    - Event, Fold, Seam, Plugin, MCP, Approval, Artifact, Memory note, Research note, Project, Task, Plan, Split, Kernel, DBOS, Redaction
-  - Command: `for term in Event Fold Seam Plugin MCP Approval Artifact; do grep -q "^- \*\*$term\*\*" docs/GLOSSARY.md && echo "✓ $term" || echo "✗ $term"; done`
+    - Event, Fold, Seam, Plugin, MCP, Approval, Artifact, Memory note, Note tier, Claim, Topic, Research note, Project, Task, Plan, Split, Kernel, DBOS, Redaction, Supervisor
+  - Command: `for term in Event Fold Seam Plugin MCP Approval Artifact Claim Topic Supervisor; do grep -q "^\*\*$term\*\*" docs/GLOSSARY.md && echo "✓ $term" || echo "✗ $term"; done`
   - Expected: All key terms defined
   - Failure mode: Inconsistent terminology
 
 - [ ] **Glossary links to relevant docs**
-  - Command: `grep -c "^\[" docs/GLOSSARY.md` (count markdown links in glossary)
+  - Command: `grep -o '](' docs/GLOSSARY.md | wc -l` — links are inline inside definitions, never at line start
   - Expected: >20 cross-references
   - Failure mode: Definitions are isolated; no navigation
+
+- [ ] **A new term is added to its Cross-references topic list too**
+  - The `## Cross-references` section at the bottom is a second index, and it is the half that gets forgotten: Claim/Claim history/Topic were defined in one pass and left out of it in the same pass
+  - Command: `grep -A 4 "^\*\*Knowledge & Memory\*\*" docs/GLOSSARY.md`
+  - Failure mode: A term exists but is unreachable by browsing
 
 ---
 
@@ -254,7 +272,7 @@ Use these checks to keep terminology consistent across docs.
 Use these checks to track deferred work and emerging ideas.
 
 - [ ] **ideas.md exists and is indexed in memory**
-  - Command: `test -f docs/IDEAS.md && orc memory ls --query ideas`
+  - Command: `test -f docs/IDEAS.md && orc memory search ideas` (`ls` has no `--query`; its filters are `--category` / `--tag` / `--tier`)
   - Expected: File exists and has corresponding memory index
   - Failure mode: Ideas are forgotten instead of tracked
 
@@ -479,8 +497,10 @@ jobs:
       - name: Check plans/INDEX.md exists
         run: test -f docs/plans/INDEX.md || (echo "✗ plans/INDEX.md missing" && exit 1)
       
-      - name: Check seams/reference.md exists
-        run: test -f docs/seams-reference.md || (echo "✗ seams/reference.md missing" && exit 1)
+      - name: Check seams-reference.md exists and has no second copy
+        run: |
+          test -f docs/seams-reference.md || (echo "✗ docs/seams-reference.md missing" && exit 1)
+          test ! -e docs/seams || (echo "✗ docs/seams/ is back — one seams guide, not two" && exit 1)
       
       - name: Check for broken markdown links (optional)
         uses: gaurav-nelson/github-action-markdown-link-check@v1
@@ -549,6 +569,9 @@ exit 0
 
 ---
 
-**Last Updated:** 2026-07-21
-**Version:** 1.0 (initial version)
+**Last Updated:** 2026-07-27
+**Version:** 1.1 — commands corrected against the real CLI surface after an audit found several that
+could not run (`orc memory read`, `--format=json`, `ls --query`, a `## Event Log` heading that does
+not exist), and a constants-drift check added after `MEMORY_CLUSTER_THRESHOLD` went stale in
+ARCHITECTURE.md
 **Status:** Published, in use

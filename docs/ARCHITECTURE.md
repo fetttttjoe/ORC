@@ -24,7 +24,7 @@ graph TD
     OPS_C["operations.ts<br/>OperationSpec/Record, transitions"]
     EXEC_C["execution.ts<br/>ExecutorContext, Checkpoint, Signal"]
     WS["workspace.ts<br/>resolveInWorkspace guard"]
-    MEM_C["memory.ts<br/>note kinds, store interface"]
+    MEM_C["memory.ts · claim.ts · cluster.ts<br/>note tiers/kinds, claims, topics, store interface"]
   end
 
   subgraph KERNEL ["packages/kernel — policy-free core"]
@@ -308,8 +308,8 @@ split instead of a guessed half-life.
 
 ### Claims — the addressable unit of knowledge
 
-A semantic note used to carry a free-form `rules: string[]`. It now carries **claims**:
-individually addressable statements, each with a content-derived id. `claimId(text)` is the
+A semantic note carries **claims**: individually addressable statements, each with a
+content-derived id. `claimId(text)` is the
 sha256 of the whitespace-normalized text, first 12 hex chars — *the id IS the statement*. A
 positional index would shift the moment one claim retires, which the temporal model makes
 routine; a content hash is stable without counter state, self-deduplicating within a note, and
@@ -335,9 +335,12 @@ the live set from the read model.
 
 ### Topics — grouping that is derived, never authored
 
-Claims cluster by embedding cosine into **topics**: a browsable inventory, lateral navigation, and
-result diversification. A topic is explicitly *not* an agent-spelled filter — nobody writes one,
-and a `topicKey` is only ever handed out by the tool that listed it.
+Claims cluster by embedding cosine into **topics**: a browsable inventory and lateral navigation.
+A topic is explicitly *not* an agent-spelled filter — nobody writes one, and a `topicKey` is only
+ever handed out by the tool that listed it. Diversifying search results by topic is deliberately
+*not* built yet: `ClaimHit` carries no `topicKey`, so nothing round-robins — `dedupeByNote` already
+spreads a result set across notes, and spreading it across topics waits for a search observably
+dominated by one.
 
 `plugins/memory/src/cluster.ts` holds the algorithm and nothing else — zero imports, no database,
 no embedder, no clock — and is the designated extension seam. It is average-link agglomerative:
@@ -347,8 +350,14 @@ the same seq order, so an order-dependent algorithm would faithfully reproduce a
 drift could never be repaired.
 
 `memory_topics` is a tool rather than an implicit re-rank so that lateral navigation is **tracked**:
-fetching one topic appends `memory_topic_accessed` carrying the resolved label, which is the
-evidence `MEMORY_CLUSTER_THRESHOLD` (0.75, currently a guess) will eventually be calibrated from.
+fetching one topic appends `memory_topic_accessed` carrying the resolved label, which is the ongoing
+evidence `MEMORY_CLUSTER_THRESHOLD` keeps being calibrated against. That constant is **0.7, and
+measured** — it was 0.75 while it was still a guess. A sweep over a real 29-claim corpus put 0.75 in
+the curve's most unstable stretch, splitting it into 22 topics of which 16 were singletons; an
+inventory with one entry per claim is the thing topics exist to prevent. 0.700–0.735 is the one wide
+plateau, and stability is why it was picked, not more grouping. The limits of that evidence (n=29,
+one subsystem, one embedding model) are recorded on the constant itself, in
+`plugins/memory/src/cluster.ts`.
 
 ### Three stages, in order
 
@@ -369,21 +378,24 @@ Stage 3 may never be the only writer of a fact. Nothing carries a `topicKey` col
 table is derivable from the claim table, which is derivable from the log, and `clear()` drops both
 so a rebuild reproduces them.
 
-> **Upgrading onto claims requires a rebuild — and a rebuild alone is not enough.**
-> Claim rows are materialized by the projector, so an existing read model has none until
-> `orc memory rebuild` replays the log. But the legacy `rules[]` decoder that used to synthesise
-> claims from pre-claims notes was **removed outright**, so a corpus written before claims existed
-> will still report zero claims after a rebuild, and `orc memory topics` will correctly say "no
-> topics". That is not a broken embedder and not a broken pipeline — those notes assert no claims
-> until an agent states some. Run the rebuild anyway: it is what makes claims written *since* the
-> upgrade visible to `orc memory claims` and to the claim arm of search.
+> **Claim rows exist only after a projection.** The projector materializes them, so a read model
+> built before a note's claims were written has none until `orc memory rebuild` replays the log.
+> Nothing synthesises claims for a note that asserts none: such a note contributes zero claims and
+> `orc memory topics` correctly reports no topics. That is neither a broken embedder nor a broken
+> pipeline — it is a corpus that has not stated anything yet.
 
 ### Memory TTL sweep — retiring expirable notes
 
 `orc memory sweep` retires notes the author marked `expirable` that nobody has written or read for
-N days (a dry run until `--apply`, which commits the `memory_deleted` events — the content stays in
-the log). A candidate is protected by an authored inbound link from a note that itself **survives**
-the sweep, so deleting can never leave a live note's `links[]` pointing at a dead id. Candidates
+N days — "untouched" is the *later* of last written and last read, and an unusable timestamp means
+unknown age, so it fails safe and keeps the note. A dry run until `--apply`, which commits the
+`memory_deleted` events; the content stays in the log. Plan-tier notes are candidates too even when
+their stored payload says `durable`: a decomposition belongs to one task by construction, and
+pinning the literal the way the episodic tier does would make notes written before that tier's
+default changed fail to parse and vanish from every fold. They carry an extra guard — an approved
+decomposition stays while its task can still be retried or audited, so only a *terminal* task's plan
+notes are eligible. A candidate is protected by an authored inbound link from a note that itself
+**survives** the sweep, so deleting can never leave a live note's `links[]` pointing at a dead id. Candidates
 that link only to each other protect nobody and go together: mutual links between two cold notes
 would otherwise keep a dead chain alive forever. Traffic is deliberately not consulted for
 protection — three live notes may point at a note nobody has walked, and that topology is what
@@ -472,10 +484,9 @@ Two consequences the graph depends on:
   consumed, `derived_from` every durable note it actually pulled. Both resolve under
   `linkLookupScopes`, so a run wires itself into the graph instead of adding isolated nodes.
 
-`recall` is scoped to `linkLookupScopes(planScope(taskId))` — durable project knowledge plus this
-task's own plan scope — and that scope reaches the **query**, never a post-filter: the semantic arm
-ranks over the whole table and truncates, so filtering afterwards would let one busy project's plan
-notes occupy every slot.
+`recall` is scoped by `taskLaneScopes(taskId, ancestorTaskIds)` — the retrieval lanes above, so a
+split child sees the decomposition its parent authored and not only its own plan scope — and that
+scope reaches the **query**, never a post-filter, for the reason stated there.
 
 A run's outcome is the **tree's**, not the root task's (`projections.subtreeOutcome`). A grounded
 parent finishes the moment its plan step splits, so its own status reads `done` while the child
@@ -569,7 +580,7 @@ Door discipline, stated precisely:
 | `kernel/signal-router` | Resolving splits, starting approved children, and live/startup delivery of committed feedback | Composing plans, executing steps |
 | `kernel/plugins/*` | Registry + propose-time ref validation (`host`), fingerprint trust store (`trust`), SKILL.md indexing (`skills`), T2 extension loading | Runtime tool execution (that's the hub/executor) |
 | `plugins/executor-api-loop` | The model⇄tool loop, prompt assembly (incl. knowledge protocol + the recalled-context block), signal/output pre-flight, per-call operation journaling | Durability (delegates to ctx), trust, receipts, **what to remember** (delegates to `ctx.memory`) |
-| `plugins/memory` | Event-first note store (gateway stamps git revision, resolved lazily), transactional Surreal projection + edge materialization, per-project database boundary, hybrid (vector⊕keyword) retrieval with activation re-ranking, the `StepMemory` binding (recall/capture, ambient edges), consolidation lifecycle, drift probe, TTL + cancel sweeps, `vault/memory/**` rebuild | Being authoritative — Surreal and vault/memory are disposable |
+| `plugins/memory` | Event-first note store (gateway stamps git revision, resolved lazily), transactional Surreal projection of notes + edges + `claim` rows, stateless topic derivation (`refreshTopics`, stage 3, driven from the drain and only by drains that touched claims), per-project database boundary, hybrid (vector⊕keyword) retrieval with activation re-ranking over both notes and claims, the `StepMemory` binding (recall/capture, ambient edges), consolidation lifecycle, drift probe, TTL + cancel sweeps, `vault/memory/**` rebuild | Being authoritative — Surreal and vault/memory are disposable. Authoring a topic: stage 3 derives them, nobody writes one |
 | `packages/vault-projector` | Deterministic markdown/mermaid renders of tasks, execution, lineage, task expansion; coalesced live re-render | Truth of any kind; whole-log scans |
 | `packages/cli` | Pre-bootstrap help/init/migrate, command surface, project discovery, startup/shutdown order, degraded-memory wiring | Business rules (kernel's job) |
 | `packages/ui-core` | Transport-free UI core: `ProjectSessions` (live folds, graph patches, transcripts, log rows), `OrcActions` interface, the copilot toolset + `asResolvedTools` door-#2 bridge | Any transport (HTTP/SSE/stdio are adapters' jobs), any DOM |

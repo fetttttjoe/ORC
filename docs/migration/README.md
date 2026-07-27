@@ -196,7 +196,7 @@ M2+ requires a `docker-compose.yml`-managed Postgres. The provided stack is sing
 
 - [Architecture Overview](../ARCHITECTURE.md) — System design, module dependencies, data flows
 - [Glossary](../GLOSSARY.md) — Domain terminology, acronyms, key concepts
-- [Seams Reference Guide](../seams/) — Critical architectural boundaries, failure modes, troubleshooting
+- [Seams Reference Guide](../seams-reference.md) — Critical architectural boundaries, failure modes, troubleshooting
 - [Design Specifications](../superpowers/specs/) — Full design specs for each milestone
 - [Plans Directory](../plans/INDEX.md) — Implementation plans and approval status
 
