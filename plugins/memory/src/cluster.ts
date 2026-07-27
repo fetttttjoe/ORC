@@ -34,7 +34,19 @@ const dot = (a: readonly number[], b: readonly number[]): number =>
 
 // Zero-scale yields 0, not NaN: one degenerate embedding would otherwise poison every comparison it
 // took part in, and NaN fails every threshold test silently rather than visibly.
+//
+// A DIMENSION MISMATCH is a different failure and must not be quiet. `dot` zero-pads the shorter
+// vector, so comparing a 384d claim with a 1024d one returns a plausible number that is not a
+// similarity — every cross-model pair scores low, the partition splits along the model boundary
+// rather than along meaning, and the inventory looks merely "less clustered" instead of broken.
+// Reachable without doing anything wrong: change `memoryEmbedModel` and skip `orc memory rebuild`
+// (config.ts documents the rebuild as required; nothing enforces it), and claims re-embed only as
+// their notes are rewritten — so the corpus is mixed for as long as that takes.
+// Throwing names the real cause at the first comparison instead of letting a rebuild-shaped problem
+// masquerade as a threshold-shaped one.
 export function cosine(a: readonly number[], b: readonly number[]): number {
+  if (a.length !== b.length)
+    throw new Error(`cosine: ${a.length}d vs ${b.length}d — the corpus holds vectors from two embedding models; run 'orc memory rebuild' to re-embed everything with the configured one`)
   const scale = Math.sqrt(dot(a, a)) * Math.sqrt(dot(b, b))
   return scale === 0 ? 0 : dot(a, b) / scale
 }

@@ -518,11 +518,20 @@ export function memoryTools(opts: {
           const changed = changedSince && n.sourceRevision !== null ? await changedSince(n.sourceRevision) : null
           const drifted = noteHasDrifted({ sourceRevision: n.sourceRevision, paths }, changed)
           // every pull tool honors its budget (spec RG5) — metadata cannot bypass body truncation.
+          const fitted = fitMemoryNoteToBudget(n, q.budget)
+          // The hint names the paths the READER actually received. They used to be read off the
+          // stored note, and interpolated whole into a string spread on top of the fitter's result
+          // — after the fitter had emptied `fitted.paths` to make the budget. So the one field the
+          // fitter dropped to fit came straight back in prose, past the cap it had just enforced,
+          // and a note with many declared paths blew the budget by exactly what was reclaimed.
+          // When the fitter kept none, the note itself is the place to look.
+          const hintPaths = 'paths' in fitted && Array.isArray(fitted.paths) ? fitted.paths : []
+          const where = hintPaths.length > 0 ? hintPaths.join(', ') : 'the paths this note declares'
           return ok({
-            ...fitMemoryNoteToBudget(n, q.budget),
+            ...fitted,
             ...(drifted && {
               drifted: true,
-              next: `the code this note describes changed since it was written (${n.sourceRevision?.slice(0, 8)}) — re-read ${paths.join(', ')} and, if the note is now wrong, memory_write the SAME id with the corrected content instead of adding a second note`,
+              next: `the code this note describes changed since it was written (${n.sourceRevision?.slice(0, 8)}) — re-read ${where} and, if the note is now wrong, memory_write the SAME id with the corrected content instead of adding a second note`,
             }),
           })
         } catch (e) { return err(e) }
@@ -550,7 +559,7 @@ export function memoryTools(opts: {
           // and the neighbours are summaries the model may never read.
           const accessKey = author.runToken && toolCallId ? `${author.runToken}:tool:${toolCallId}:access:${q.seed}` : undefined
           if (ranked.length > 0) await store.recordAccess(q.seed, q.scope, MEMORY_ACCESS.neighbors, author, { idempotencyKey: accessKey })
-          const r = applyBudget(ranked, n => n.title + n.summary, { limit: 20, budget: q.budget })
+          const r = applyBudget(ranked, serialized, { limit: 20, budget: q.budget })
           return ok({
             neighbors: r.items, truncated: r.truncated, omitted: r.omitted,
             ...(r.truncated && { next: 'memory_read an id for the full note' }),
@@ -577,7 +586,7 @@ export function memoryTools(opts: {
           if (q.topic === undefined) {
             // listing records nothing: a call that surfaces N things records one access for what was
             // ASKED, never N for what it happened to list (same rule memory_neighbors follows)
-            const r = applyBudget(await store.topics(), t => `${t.topicKey}${t.label}`, { limit: MEMORY_LIMITS.labelItems, budget: q.budget })
+            const r = applyBudget(await store.topics(), serialized, { limit: MEMORY_LIMITS.labelItems, budget: q.budget })
             return ok({
               topics: r.items, truncated: r.truncated, omitted: r.omitted,
               // an empty inventory carries the same envelope every sibling read tool does — a corpus
@@ -591,7 +600,7 @@ export function memoryTools(opts: {
           // ever be settled from, and an inflated count corrupts it silently.
           const accessKey = author.runToken && toolCallId ? `${author.runToken}:tool:${toolCallId}:topic:${q.topic}` : undefined
           const claims = await store.topicClaims(q.topic, author, { idempotencyKey: accessKey })
-          const r = applyBudget(claims, c => c.text, { limit: MEMORY_LIMITS.detailItems, budget: q.budget })
+          const r = applyBudget(claims, serialized, { limit: MEMORY_LIMITS.detailItems, budget: q.budget })
           return ok({ topicKey: q.topic, claims: r.items, truncated: r.truncated, omitted: r.omitted })
         } catch (e) { return err(e) }
       },

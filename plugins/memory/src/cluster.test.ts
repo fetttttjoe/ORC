@@ -169,6 +169,23 @@ describe('topicLabel', () => {
   })
 })
 
+// A mixed-model corpus is reachable without doing anything wrong: change memoryEmbedModel and skip
+// the rebuild. Zero-padding returned a plausible number that was not a similarity, so the partition
+// split along the MODEL boundary and looked merely under-clustered.
+describe('cosine dimension mismatch', () => {
+  it('throws rather than scoring vectors from two embedding models', () => {
+    expect(() => cosine([1, 0, 0], [1, 0, 0, 0])).toThrow(/384d|3d vs 4d|embedding models/)
+  })
+
+  it('names the rebuild that fixes it', () => {
+    expect(() => cosine(new Array(384).fill(1), new Array(1024).fill(1))).toThrow(/orc memory rebuild/)
+  })
+
+  it('still returns 0 for a degenerate vector of the SAME width', () => {
+    expect(cosine([0, 0, 0], [1, 2, 3])).toBe(0)
+  })
+})
+
 describe('medoidOf', () => {
   it('picks the member most similar to the rest', () => {
     // A2 sits between A1 and A3, so it is the most representative of the three

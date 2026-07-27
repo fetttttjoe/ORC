@@ -652,6 +652,44 @@ export class SurrealMemory {
   // Stage 3. Recomputes the partition from the current claim set and replaces the topic table — no
   // cursor, nothing to resume: it either completes or the next drain redoes it. Runs OUTSIDE the
   // event transaction on purpose; grouping is a whole-corpus derivation, not a per-event projection.
+  // Stage 3 for EDGES, the peer of refreshTopics below. The link table is supposed to be a function
+  // of the live note set — each note asserts its own out-edges and the read model materializes them
+  // — and materializing per event does not deliver that:
+  //   * SurrealDB removes a RELATE edge when EITHER endpoint record is deleted (measured), so
+  //     deleting a note destroys edges its neighbours authored and never retracted. No WHERE clause
+  //     on our side can prevent it.
+  //   * Replay does not repair it: the edge is created when its OWNING note's event is applied, a
+  //     later delete of the target cascades it away, and the owner is never rewritten. Both notes
+  //     end live, the owner still asserting the edge, and no row exists — a fact the log holds,
+  //     permanently absent from the read model.
+  // Recomputing from the live notes restores the invariant by construction. Runs OUTSIDE the event
+  // transaction, gated by the projector on "did this drain touch the set", exactly as topics are.
+  //
+  // Delete-then-RELATE inside ONE transaction is safe HERE and would not be for claims: the pitfall
+  // at applyEvent is about a FIXED record id, which stays deleted at commit. Edge ids are generated,
+  // and this was measured before the code was written — 1 row in, delete + relate, 1 row out.
+  //
+  // Stats survive by (scope, from, to, kind) — the same survivor rule the per-note path used, now in
+  // one place instead of spread across two.
+  async refreshLinks(): Promise<void> {
+    const notes = await this.db.select(Tb.Note)
+    await this.db.transaction(async tx => {
+      const stats = new Map((await tx.select(Tb.Link))
+        .map(l => [`${l.scope}\u0000${l.fromId}\u0000${l.toId}\u0000${l.kind}`, l] as const))
+      await tx.delete(Tb.Link)
+      for (const n of notes)
+        for (const l of n.links) {
+          const prev = stats.get(`${n.scope}\u0000${n.noteId}\u0000${l.id}\u0000${l.kind}`)
+          await tx.relate(Tb.Link, new RecordId(Tb.Note, key(n.scope, n.noteId)), new RecordId(Tb.Note, key(n.scope, l.id))).set({
+            kind: l.kind, fromId: n.noteId, toId: l.id, scope: n.scope,
+            ...(l.confidence !== undefined && { confidence: l.confidence }),
+            hits: prev?.hits ?? 0,
+            ...(prev?.lastAccessedAt !== undefined && { lastAccessedAt: prev.lastAccessedAt }),
+          })
+        }
+    })
+  }
+
   async refreshTopics(threshold: number = MEMORY_CLUSTER_THRESHOLD): Promise<void> {
     // project scope only: claims are semantic-tier, durable knowledge is project-scoped, and a topic
     // view over one task's transient trail is noise. knowledge() for the same reason search() and
@@ -704,8 +742,10 @@ export class SurrealMemory {
       .map(r => Topic.parse({
         topicKey: r.topicKey,
         // topicKey is the group's lowest member id, so it is the standing fallback for the window
-        // between a medoid being retired and the next refresh re-partitioning without it.
-        label: topicLabel(text.get(r.medoidClaimId) ?? text.get(r.topicKey) ?? '', MEMORY_LIMITS.topicLabelChars),
+        // between a medoid being retired and the next refresh re-partitioning without it. If BOTH
+        // are gone the topic has no name to show: a row labelled '' is worse than no row, and it
+        // used to be appended to the immutable log as the topic's name via memory_topic_accessed.
+        label: topicLabel(text.get(r.medoidClaimId) ?? text.get(r.topicKey) ?? r.topicKey, MEMORY_LIMITS.topicLabelChars),
         size: r.members.length,
       }))
       // `ascending`, not localeCompare: the same rule cluster.ts breaks its own ties by, so the

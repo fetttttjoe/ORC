@@ -11,17 +11,15 @@ import { SurrealMemory } from './surreal'
 import { createTestSurreal } from './test-helpers'
 
 describe('typed-link traversal (e2e)', () => {
-  // MEASURED, twice, and worse than it first looked. (1) SurrealDB deletes every RELATE edge
-  // attached to a record when that record is deleted — both directions, regardless of what our own
-  // WHERE targets, so narrowing the delete cannot preserve inbound edges. (2) A rebuild does not
-  // repair it either: replay recreates A→B when A's event is applied and the later delete of B
-  // cascades it away, and A is never rewritten.
+  // The link table is a function of the LIVE NOTE SET, and stays one across a delete.
   //
-  // So the link index is NOT a pure function of the live note set, and no replay makes it one.
-  // This test pins that, deliberately, so the gap stays visible instead of being assumed fixed —
-  // the repair is a reconciliation derived from live notes (as topics are), which is a design
-  // decision, not a patch. See docs/superpowers/dataflow-audit-open-findings.md.
-  it('deleting a note drops inbound edges, and replay alone never restores them', async () => {
+  // Two measurements forced this out of the per-event path. (1) SurrealDB removes a RELATE edge
+  // when either endpoint record is deleted — both directions, whatever our own WHERE targets — so
+  // deleting a note destroys edges its neighbours authored and never retracted. (2) Replay did not
+  // repair it: the edge is created when its OWNING note's event applies, the later delete cascades
+  // it away, and the owner is never rewritten. Deriving edges wholesale after a drain
+  // (surreal.refreshLinks, the peer of refreshTopics) restores the invariant by construction.
+  it('a deleted-then-recreated note gets back the edges its neighbours still assert', async () => {
     const pg = await createTestDb()
     const ts = await createTestSurreal()
     const vaultDir = mkdtempSync(path.join(tmpdir(), 'orc-memory-inbound-'))
@@ -37,23 +35,22 @@ describe('typed-link traversal (e2e)', () => {
     }
     try {
       await store.write({ id: 'area-b', title: 'B' }, { source: 'cli' })
+      // A asserts the edge; B never says anything about A
       await store.write({ id: 'area-a', title: 'A', links: [{ id: 'area-b', kind: 'depends_on' }] }, { source: 'cli' })
       expect((await settle()).map(n => n.id)).toEqual(['area-b'])
 
+      // while B is gone the edge cannot resolve — A's statement stands, its target does not
       await store.remove('area-b', MemoryScope.project, { source: 'cli' })
       expect((await settle()).map(n => n.id)).toEqual([])
 
-      // back under the same id — A's edge stays dead, because the edge ROW went with B's record
+      // B returns under the same id: A never wrote again, so only a derivation from the live note
+      // set can bring this back — which is exactly the guarantee being pinned
       await store.write({ id: 'area-b', title: 'B again' }, { source: 'cli' })
-      expect((await settle()).map(n => n.id)).toEqual([])
+      expect((await settle()).map(n => n.id)).toEqual(['area-b'])
 
-      // …and NOT EVEN a rebuild restores it. Replay recreates A's edge when A's own event is
-      // applied, the later memory_deleted for B cascades it away again, and A is never rewritten —
-      // so the edge is gone for good while both notes are live and A still asserts it. The link
-      // index is therefore not reconstructable from the log by replay alone; making it whole needs
-      // a reconciliation derived from the live note set, the way topics are.
+      // and a rebuild reproduces the same graph rather than a thinner one
       await proj.rebuild()
-      expect((await store.neighbors('area-a')).map(n => n.id)).toEqual([])
+      expect((await store.neighbors('area-a')).map(n => n.id)).toEqual(['area-b'])
     } finally {
       await proj.close()
       await log.close()

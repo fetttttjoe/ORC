@@ -95,6 +95,13 @@ export function createMemoryProjector(opts: { log: EventLog; surreal: SurrealMem
         // readable and the next drain retries.
         const started = Date.now()
         try {
+          // edges first: topics read claims, but the graph reads edges, and a caller that drained
+          // and then traversed should see the edge set this drain implies
+          await surreal.refreshLinks()
+        } catch (err) {
+          console.warn(`[memory] link refresh failed: ${errorMessage(err)}`)
+        }
+        try {
           await surreal.refreshTopics()
         } catch (err) {
           console.warn(`[memory] topic refresh failed: ${errorMessage(err)}`)
