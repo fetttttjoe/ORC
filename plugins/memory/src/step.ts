@@ -1,6 +1,6 @@
 import {
   errorMessage, LINK_KIND, MEMORY_ACCESS, MEMORY_LIMITS, MemoryScope, noteKey, NOTE_TIER, planScope, SIGNAL_OUTCOME, slugId, taskLaneScopes,
-  type LinkKind, type MemoryAuthor, type MemoryStore, type NoteSummary, type ResolvedTool,
+  type ClaimHit, type LinkKind, type MemoryAuthor, type MemoryStore, type NoteSummary, type ResolvedTool,
   type RecalledContext, type SignalOutcome, type StepMemory,
 } from '@orc/contracts'
 import { applyBudget, approxTokens } from './budget'
@@ -118,6 +118,28 @@ export function bindStepMemory(opts: {
   return {
     tools: memoryTools({ store: tracking, author, role: opts.role, changedSince: opts.changedSince, searchScope: scope }),
     memory: {
+      // KEYWORD arm only, deliberately: a path is a literal, and the semantic arm would return
+      // claims that are merely about the same area — which is the opposite of what a retirement
+      // prompt needs. A false candidate costs the agent a judgement call it did not need to make,
+      // and enough of those teach it to skim the block.
+      //
+      // Degraded store folds to "nothing at risk": this is an advisory nudge, and failing the step
+      // because the read model is down would be worse than missing a retirement.
+      async claimsCiting(paths) {
+        const seen = new Map<string, ClaimHit>()
+        for (const path of paths) {
+          // the basename too: a claim commonly cites `cluster.ts` where the edit names the full
+          // path, and requiring an exact-string match would find neither
+          for (const term of [path, path.split('/').pop() ?? '']) {
+            if (term.length < 3) continue
+            try {
+              for (const hit of await store.searchClaims(term, { scope }, { limit: MEMORY_LIMITS.detailItems }))
+                if (hit.text.includes(term)) seen.set(hit.claimId, hit) // the store ranks; we require the literal
+            } catch { /* degraded: nothing at risk rather than a failed step */ }
+          }
+        }
+        return [...seen.values()].slice(0, MEMORY_LIMITS.detailItems)
+      },
       // Semantic-first, then degrade: full intent (hybrid matches meaning) → distinctive title
       // terms (what keyword-only deployments need) → the single longest term. First non-empty wins.
       // A degraded store must never block the step, so every failure folds to "no notes".
@@ -192,5 +214,7 @@ export type BindStep = (p: Omit<Parameters<typeof bindStepMemory>[0], 'store' | 
 // recall/capture go quiet rather than erroring — neither is the model's call to make.
 export const unavailableStepMemory = (reason: string): StepMemoryBinding => ({
   tools: unavailableMemoryTools(reason),
-  memory: { recall: async () => ({ claims: [], notes: [] }), capture: async () => {} },
+  // claimsCiting joins the same quiet set: with no read model there is nothing to put at risk, and
+  // an advisory nudge must never be the thing that fails a step.
+  memory: { recall: async () => ({ claims: [], notes: [] }), claimsCiting: async () => [], capture: async () => {} },
 })

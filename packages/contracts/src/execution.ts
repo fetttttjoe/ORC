@@ -260,6 +260,20 @@ export interface StepMemory {
    * calls would record two values and could rebuild messages[0] differently on recovery.
    */
   recall(budget: number): Promise<RecalledContext>
+  /**
+   * The claims a file edit puts at risk: every recorded claim that cites one of `paths`.
+   *
+   * A step that changes code falsifies the claims describing what that code used to do, and the
+   * knowledge protocol obliges it to retire them — but "remember to check" is the weakest possible
+   * enforcement, and it failed: a run added a CLI flag while a claim saying that command "accepts
+   * no options" stayed live, so one note asserted a thing and its opposite.
+   *
+   * The join is deterministic, not inferential: claims name their source file by convention, so
+   * citing text is a string match. Judging whether a cited claim is now FALSE is the agent's job —
+   * nothing here can know that, which is exactly why this surfaces candidates rather than retiring
+   * anything itself.
+   */
+  claimsCiting(paths: readonly string[]): Promise<ClaimHit[]>
   /** What the finished step leaves behind. Best-effort: never throws into the step. */
   capture(signal: { outcome: SignalOutcome; summary: string }): Promise<void>
 }

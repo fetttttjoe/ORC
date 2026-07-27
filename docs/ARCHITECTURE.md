@@ -331,13 +331,16 @@ The tombstone lives on the **event** (`MemoryWrittenPayload.invalidates`), never
 note payload carries live claims only. So the log is the only surface a retired claim survives on,
 and `orc memory claims <id> --history` folds it to recover both the claim and the write that
 retired it. Everything else (`orc memory claims <id>`, the `claims` arm of `memory_search`) reads
-the live set from the read model.
+the live set from the read model. Either form of the command takes `--json` for a script — the raw
+claim array, `[]` when there is none.
 
 ### Topics — grouping that is derived, never authored
 
 Claims cluster by embedding cosine into **topics**: a browsable inventory and lateral navigation.
 A topic is explicitly *not* an agent-spelled filter — nobody writes one, and a `topicKey` is only
-ever handed out by the tool that listed it. Diversifying search results by topic is deliberately
+ever handed out by the surface that listed it — the `memory_topics` tool for an agent, `orc memory
+topics` (with `--json` for a script) for a human. Diversifying search results by topic is
+deliberately
 *not* built yet: `ClaimHit` carries no `topicKey`, so nothing round-robins — `dedupeByNote` already
 spreads a result set across notes, and spreading it across topics waits for a search observably
 dominated by one.
@@ -381,7 +384,8 @@ so a rebuild reproduces them.
 > **Claim rows exist only after a projection.** The projector materializes them, so a read model
 > built before a note's claims were written has none until `orc memory rebuild` replays the log.
 > Nothing synthesises claims for a note that asserts none: such a note contributes zero claims and
-> `orc memory topics` correctly reports no topics. That is neither a broken embedder nor a broken
+> `orc memory topics` correctly reports no topics, and `--json` prints `[]`. That is neither a
+> broken embedder nor a broken
 > pipeline — it is a corpus that has not stated anything yet.
 
 ### Memory TTL sweep — retiring expirable notes

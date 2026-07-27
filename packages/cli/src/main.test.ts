@@ -1021,6 +1021,126 @@ describe('orc CLI', () => {
     await run('memory', 'claims', cliNote, '--history')
     expect(lines.find(l => l.includes('second from the cli'))).toContain('RETIRED')
   }, 30_000)
+
+  it('memory claims --json emits the raw claim array for both the live and the --history form', async () => {
+    const db = await createTestDb()
+    dbs.push(db)
+    const dir = mkdtempSync(path.join(tmpdir(), 'orc-memory-claims-json-cli-'))
+    const projectDbName = `t_${Math.random().toString(36).slice(2, 10)}`
+    // Keyword-only, same reason as the sibling claims test: nothing here needs an embedder, and
+    // leaving the default ollama one wired makes the test depend on whether a local Ollama runs.
+    const config = requireProject({ ...loadConfig(dir), projectDbName, projectId: TEST_PROJECT_ID, projectName: 'test', memoryEmbedModel: '' })
+    surrealConfigs.push(config)
+    const { kernel, log } = await openKernel(db.url, { projectId: TEST_PROJECT_ID })
+    const lines: string[] = []
+    spyOn(console, 'log').mockImplementation((...a: unknown[]) => { lines.push(a.join(' ')) })
+    const { host, hub } = await buildPlugins(config)
+    cleanup.push(() => log.close(), () => hub.close(), () => host.shutdown())
+    const run = (...args: string[]) =>
+      overrideExits(buildProgram(kernel, undefined, { host, hub, config, log })).parseAsync(args, { from: 'user' })
+
+    // Two writes, so the second retires what the first stated — the only shape in which the live
+    // form and the --history form return DIFFERENT arrays, which is what makes this test able to
+    // tell the two --json branches apart.
+    const noteId = 'claims-json-cli-note'
+    const liveText = 'json output is the raw domain value'
+    const retiredText = 'json output was wrapped in an envelope'
+    const write = (texts: string[], invalidates: string[] = []) => log.append({
+      taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_written,
+      payload: {
+        note: { id: noteId, title: 'claims json', claims: texts.map(t => ({ id: claimId(t), text: t })) },
+        author: { source: 'cli' }, invalidates,
+      },
+    })
+    await write([retiredText])
+    await write([liveText], [claimId(retiredText)])
+
+    // (a) live form: stdout is exactly one parseable JSON value — the raw Claim[], no envelope.
+    lines.length = 0
+    await run('memory', 'claims', noteId, '--json')
+    const live = JSON.parse(lines.join('\n'))
+    expect(Array.isArray(live)).toBe(true)
+    expect(live.map((c: { text: string }) => c.text)).toEqual([liveText]) // retired one is not live
+    expect(live[0].id).toBe(claimId(liveText))
+    expect(typeof live[0].validFrom).toBe('string')
+
+    // (b) --history --json folds the LOG: the retired claim survives, carrying its tombstone.
+    lines.length = 0
+    await run('memory', 'claims', noteId, '--history', '--json')
+    const history = JSON.parse(lines.join('\n'))
+    expect(history.map((c: { text: string }) => c.text).sort()).toEqual([liveText, retiredText].sort())
+    const retired = history.find((c: { text: string }) => c.text === retiredText)
+    expect(typeof retired.invalidatedAt).toBe('string') // RETIRED in the human form
+    expect(history.find((c: { text: string }) => c.text === liveText).invalidatedAt).toBeNull()
+
+    // (c) the human forms are UNCHANGED: tab-free `id  validFrom  text` rows, not JSON.
+    lines.length = 0
+    await run('memory', 'claims', noteId)
+    expect(lines.join('\n')).toContain(liveText)
+    expect(lines.join('\n').trim().startsWith('[')).toBe(false)
+    lines.length = 0
+    await run('memory', 'claims', noteId, '--history')
+    expect(lines.find(l => l.includes(retiredText))).toContain('RETIRED')
+    expect(lines.join('\n').trim().startsWith('[')).toBe(false)
+
+    // (d) absence is DATA under --json (the settled `topics --json` rule): [] and exit 0, so a
+    // script reads an empty array instead of parsing a thrown diagnostic. The no-flag form keeps
+    // the throw that names the note and the command a person can act on.
+    lines.length = 0
+    await run('memory', 'claims', 'no-such-note-at-all', '--json')
+    expect(JSON.parse(lines.join('\n'))).toEqual([])
+    lines.length = 0
+    await run('memory', 'claims', 'no-such-note-at-all', '--history', '--json')
+    expect(JSON.parse(lines.join('\n'))).toEqual([])
+    await expect(run('memory', 'claims', 'no-such-note-at-all')).rejects.toThrow(/no claims on/)
+    await expect(run('memory', 'claims', 'no-such-note-at-all', '--history')).rejects.toThrow(/no claims in the log/)
+  }, 30_000)
+
+  it('memory topics --json emits raw JSON, keeps the human throws, and rejects an unknown key', async () => {
+    const db = await createTestDb()
+    dbs.push(db)
+    const dir = mkdtempSync(path.join(tmpdir(), 'orc-memory-topics-cli-'))
+    const projectDbName = `t_${Math.random().toString(36).slice(2, 10)}`
+    // Keyword-only ON PURPOSE (same reason as the claims test): `topics` is derived from claim
+    // EMBEDDINGS, so leaving the default ollama embedder wired would make the empty-inventory
+    // assertions depend on whether a local Ollama happens to be running. With no embedder there
+    // are no claim vectors and thus no topics — the deterministic empty inventory this test needs.
+    const config = requireProject({ ...loadConfig(dir), projectDbName, projectId: TEST_PROJECT_ID, projectName: 'test', memoryEmbedModel: '' })
+    surrealConfigs.push(config)
+    const { kernel, log } = await openKernel(db.url, { projectId: TEST_PROJECT_ID })
+    const lines: string[] = []
+    spyOn(console, 'log').mockImplementation((...a: unknown[]) => { lines.push(a.join(' ')) })
+    const { host, hub } = await buildPlugins(config)
+    cleanup.push(() => log.close(), () => hub.close(), () => host.shutdown())
+    const run = (...args: string[]) =>
+      overrideExits(buildProgram(kernel, undefined, { host, hub, config, log })).parseAsync(args, { from: 'user' })
+
+    // (a) --json on the EMPTY inventory is [] and exit 0, not a throw. A script wants absence as
+    // data; stdout must be exactly one parseable JSON value.
+    lines.length = 0
+    await run('memory', 'topics', '--json')
+    expect(JSON.parse(lines.join('\n'))).toEqual([])
+
+    // (c) the human (no --json) form is UNCHANGED: the empty listing still throws the three-cause
+    // diagnostic, naming the legacy rules[] decoder cause an upgrading operator hits.
+    await expect(run('memory', 'topics')).rejects.toThrow(/legacy rules\[\] decoder/)
+
+    // (b) an unknown key still throws WITH --json — the store's own 'no topic' error, surfaced by
+    // the CLI rather than swallowed into an empty JSON document.
+    await expect(run('memory', 'topics', 'deadbeef1234', '--json')).rejects.toThrow(/no topic/)
+    // and without --json too, matching the sibling claims test
+    await expect(run('memory', 'topics', 'deadbeef1234')).rejects.toThrow(/no topic/)
+
+    // The per-topic --json path (a real key) would go through store.topicClaims and append exactly
+    // one memory_topic_accessed event. That assertion is UNREACHABLE from a CLI-level test: a
+    // non-empty topic inventory needs claim embeddings, and openMemory builds the embedder from
+    // config.memoryEmbedModel via buildEmbeddingProvider (ollama only) with no injection seam — so
+    // a real topicKey cannot be produced here without a live Ollama. That per-topic access-event
+    // assertion lives in plugins/memory, which constructs SurrealMemory directly. Asserted here:
+    // no topic access event is appended by any of the paths above (empty listing / unknown key).
+    const topicAccesses = (await log.all()).filter(e => e.kind === EVENT_KIND.memory_topic_accessed)
+    expect(topicAccesses).toHaveLength(0)
+  }, 30_000)
 })
 
 describe('cancel-sweep wiring (real plugin, stub port)', () => {

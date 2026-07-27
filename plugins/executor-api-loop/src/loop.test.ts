@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import type { ClaimHit, Checkpoint, EventDraft, ExecutorContext, NoteSummary, OperationCheckpoint, OperationSpec, ResolvedTool, SplitResult, UnifiedEvent } from '@orc/contracts'
-import { EVENT_KIND, LINK_KIND, MEMORY_ACCESS, NOTE_TIER, planScope, slugId } from '@orc/contracts'
+import { EVENT_KIND, LINK_KIND, MEMORY_ACCESS, NOTE_TIER, OPERATION_KIND, planScope, slugId } from '@orc/contracts'
 import { stepFixture } from '@orc/contracts/fixtures'
 import { z } from 'zod'
 import type { LanguageModel } from 'ai'
@@ -112,6 +112,30 @@ describe('api-loop executor', () => {
     expect(toolDrafts).toHaveLength(2)
   })
 
+  it('a repeated tool_use id is dropped from the REPLAYED assistant message, not just from execution', async () => {
+    // Killed a real step: the model repeated a tool_use id in one turn, uniqueByCallId deduped our
+    // execution (one tool_call + one tool_result in the log, clean journal) but the raw assistant
+    // message replayed BOTH tool_use blocks, so the next request died on `each tool_use must have a
+    // single result`. Both views must be deduped at the same boundary.
+    const captured: EventDraft[] = []
+    const specs: OperationSpec[] = []
+    const model = scriptModel([
+      { toolCalls: [
+        { toolCallId: 'dup', toolName: 'fs_write', input: { path: 'a.txt', content: '1' } },
+        { toolCallId: 'dup', toolName: 'fs_write', input: { path: 'a.txt', content: '2' } },
+      ] },
+      { toolCalls: [{ toolCallId: 'c2', toolName: 'signal', input: { outcome: 'success', summary: 'ok' } }] },
+    ])
+    await drain(apiLoopExecutor().startTurn(ctx(model, captured, { operation: makeOperation(captured, specs) })))
+    // executed once (the existing guarantee)
+    expect(captured.filter(d => d.kind === EVENT_KIND.tool_result)).toHaveLength(1)
+    // and the replayed history carries that id exactly twice — one tool-call part, one
+    // tool-result part. Three (two calls, one result) is the shape the provider rejects.
+    const prompts = specs.filter(sp => sp.kind === OPERATION_KIND.model).map(sp => JSON.stringify(sp.before))
+    const occurrences = (prompts[1] ?? '').split('"toolCallId":"dup"').length - 1
+    expect(occurrences).toBe(2)
+  })
+
   it('zone write-fence holds at the loop seam: a write outside step.zone is refused, inside succeeds', async () => {
     // pins the ONE seam that connects the fence — loop.ts passing `zone: ctx.step.zone` to executeTool.
     // Every other link (assertInZone, executeTool, plan-note zone) is tested in isolation, so dropping
@@ -158,6 +182,12 @@ describe('api-loop executor', () => {
     expect(prompt).toContain('captured automatically')
     expect(prompt).toContain('durable findings')
     expect(prompt).toContain("'architecture_current' for observed implementation and 'architecture_target' for intent")
+    // A step that EDITS code must retire the claims its edit falsified. Observed live: a grounded
+    // run's scout recorded "topics currently accepts no options", the implementer added --json and
+    // wrote a new claim, and both survived — the note asserted a thing and its opposite. Rule 6
+    // says HOW to retire a claim; this is the rule that says a code change OBLIGES it.
+    expect(prompt).toContain('retire every claim your change made false')
+    expect(prompt).toContain('does NOT retire the old one')
     expect(prompt).not.toContain('# Memory notes') // protocol only — no automatic note bodies
   })
 
@@ -562,9 +592,15 @@ describe('step memory seam', () => {
   // The executor's whole memory responsibility is WHEN: recall before the first prompt, capture
   // after the signal. What gets searched, recorded, written and linked belongs to the memory
   // plugin (plugins/memory/src/step.ts) and is tested there.
-  function fakeMemory(log: { recalled: number[]; captured: unknown[] }, notes: NoteSummary[] = [], claims: ClaimHit[] = []) {
+  function fakeMemory(
+    log: { recalled: number[]; captured: unknown[]; citedPaths?: string[][] },
+    notes: NoteSummary[] = [],
+    claims: ClaimHit[] = [],
+    atRisk: ClaimHit[] = [],
+  ) {
     return {
       recall: async (budget: number) => { log.recalled.push(budget); return { claims, notes } },
+      claimsCiting: async (paths: readonly string[]) => { log.citedPaths?.push([...paths]); return atRisk },
       capture: async (signal: unknown) => { log.captured.push(signal) },
     }
   }
@@ -579,6 +615,55 @@ describe('step memory seam', () => {
   })
   const signalled = (outcome: 'success' | 'failure', summary: string) =>
     scriptModel([{ toolCalls: [{ toolCallId: 'c1', toolName: 'signal', input: { outcome, summary } }] }])
+
+  // The mechanical half of knowledge-protocol rule 7. The prompt rule alone failed live: a run
+  // added a CLI flag while the claim saying that command "accepts no options" stayed live, so one
+  // note asserted a thing and its opposite. The executor finds the candidates deterministically;
+  // deciding which are now FALSE stays the model's job.
+  it('surfaces claims citing a file the step EDITED, once, and only after a successful write', async () => {
+    const captured: EventDraft[] = []
+    const specs: OperationSpec[] = []
+    const log = { recalled: [] as number[], captured: [] as unknown[], citedPaths: [] as string[][] }
+    const stale = claim({ claimId: 'aaaaaaaaaaaa', noteId: 'area-cli', text: 'orc memory topics accepts no options.' })
+    // turn 1 edits a file; turn 2 must carry the at-risk block; turn 3 signals. A second edit of the
+    // SAME path must not re-surface it — a block repeated every turn is one the model learns to skip.
+    const model = scriptModel([
+      { toolCalls: [{ toolCallId: 'c1', toolName: 'fs_write', input: { path: 'main.ts', content: 'x' } }] },
+      { toolCalls: [{ toolCallId: 'c2', toolName: 'fs_write', input: { path: 'main.ts', content: 'y' } }] },
+      { toolCalls: [{ toolCallId: 'c3', toolName: 'signal', input: { outcome: 'success', summary: 'ok' } }] },
+    ])
+    await drain(apiLoopExecutor().startTurn(ctx(model, captured, {
+      memory: fakeMemory(log, [], [], [stale]), memoryPreloadTokens: 0, operation: makeOperation(captured, specs),
+    })))
+    expect(log.citedPaths).toEqual([['main.ts']]) // asked once, for the path actually written
+    // specs interleaves model and tool operations — the prompts are the model ones
+    const prompts = specs.filter(sp => sp.kind === OPERATION_KIND.model).map(sp => JSON.stringify(sp.before))
+    const second = prompts[1] ?? ''
+    expect(second).toContain('You edited main.ts')
+    expect(second).toContain('[aaaaaaaaaaaa] orc memory topics accepts no options.')
+    expect(second).toContain('invalidates')
+    // the trap that produced the live contradiction, stated explicitly
+    expect(second).toContain('Adding the new claim alone leaves both live')
+    // and NOT repeated after the second edit of the same file
+    expect(prompts[2] ?? '').not.toContain('You edited main.ts')
+  })
+
+  it('says nothing when a read-only step touches no file', async () => {
+    const captured: EventDraft[] = []
+    const specs: OperationSpec[] = []
+    const log = { recalled: [] as number[], captured: [] as unknown[], citedPaths: [] as string[][] }
+    const model = scriptModel([
+      { toolCalls: [{ toolCallId: 'c1', toolName: 'fs_read', input: { path: 'main.ts' } }] },
+      { toolCalls: [{ toolCallId: 'c2', toolName: 'signal', input: { outcome: 'success', summary: 'ok' } }] },
+    ])
+    await drain(apiLoopExecutor().startTurn(ctx(model, captured, {
+      memory: fakeMemory(log, [], [], [claim()]), memoryPreloadTokens: 0, operation: makeOperation(captured, specs),
+    })))
+    // reading a file cannot falsify a claim about it — no query, no block
+    expect(log.citedPaths).toEqual([])
+    const prompts = specs.filter(sp => sp.kind === OPERATION_KIND.model).map(sp => JSON.stringify(sp.before))
+    expect(prompts[1] ?? '').not.toContain('These recorded claims cite')
+  })
 
   it('renders what recall returned into the first prompt, inside a checkpoint', async () => {
     const captured: EventDraft[] = []

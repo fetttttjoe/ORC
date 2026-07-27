@@ -1,6 +1,6 @@
 import { generateText, type JSONValue, type LanguageModel, type ModelMessage, type ToolSet } from 'ai'
 import {
-  EVENT_KIND, FAILURE_CLASS, MEMORY_TOOL_NAME, MemoryScope, MemoryWriteResult, OPERATION_KIND, SIGNAL_OUTCOME,
+  EVENT_KIND, FAILURE_CLASS, isRecord, MEMORY_TOOL_NAME, MemoryScope, MemoryWriteResult, OPERATION_KIND, SIGNAL_OUTCOME,
   UNIFIED_EVENT_TYPE, terminalError,
   type AgentExecutor, type EventDraft, type ExecutorContext, type RecalledContext, type Signal,
   type SplitResult, type UnifiedEvent, type Usage,
@@ -90,6 +90,32 @@ function uniqueByCallId<T extends { toolCallId: string; toolName: string }>(call
   })
 }
 
+// The OTHER half of that dedupe, and the half whose absence killed a real step. Filtering our
+// `toolCalls` view stops the double execution, but the assistant message we replay to the provider
+// is its own raw output — so a repeated id stayed in the history as two tool_use blocks answered by
+// the ONE tool_result we produced, and the next request died on
+// `each tool_use must have a single result. Found multiple tool_result blocks with id …`.
+// Observed live at iteration 11 of a real run: one tool_call and one tool_result in the event log,
+// a clean journal, and a terminal provider_error that blocked the step.
+//
+// Both views must be deduped at the SAME boundary or they disagree about what the turn contained.
+function dedupeToolUseParts(messages: ModelMessage[]): ModelMessage[] {
+  const seen = new Set<string>()
+  return messages.map(m => {
+    if (!Array.isArray(m.content)) return m
+    // the SDK's own discriminated union carries toolCallId on the tool-call variant — narrow on
+    // `type` rather than a structural guard, which collapses the union to never
+    const parts: unknown[] = m.content
+    const kept = parts.filter(part => {
+      if (!isRecord(part) || part.type !== 'tool-call' || typeof part.toolCallId !== 'string') return true
+      if (seen.has(part.toolCallId)) return false
+      seen.add(part.toolCallId)
+      return true
+    })
+    return kept.length === parts.length ? m : { ...m, content: kept } as ModelMessage
+  })
+}
+
 async function callModel(model: LanguageModel, messages: ModelMessage[], tools: ToolSet): Promise<TurnResult> {
   let result
   try {
@@ -107,9 +133,18 @@ async function callModel(model: LanguageModel, messages: ModelMessage[], tools: 
     // ai@7's GenerateTextResult exposes the generated messages directly as `responseMessages`
     // (non-deprecated); the brief's `result.response.messages` is the same data but deprecated
     // in favor of `finalStep.response` — see API-drift notes in the task report.
-    responseMessages: result.responseMessages,
+    responseMessages: dedupeToolUseParts(result.responseMessages),
   }
 }
+
+// The file tools that CHANGE a file. fs_read/fs_list are absent by design: reading a file cannot
+// falsify a claim about it, and a claim block after every read would bury the one that matters.
+const WRITING_FILE_TOOLS = new Set<string>([TOOL_NAME.fs_write, TOOL_NAME.fs_edit])
+
+// The path a write tool acted on. Both tools take it as `path`; anything else is a tool whose
+// shape changed, and guessing at an unknown shape would surface claims about the wrong file.
+const editedPath = (input: unknown): string | null =>
+  isRecord(input) && typeof input.path === 'string' && input.path.length > 0 ? input.path : null
 
 // A tool batched alongside the turn's suspension point (join_splits / ask_human) is deferred,
 // not executed — the suspension wins the turn (spec: one suspension point per turn). Every
@@ -134,11 +169,12 @@ const KNOWLEDGE_PROTOCOL = `# Project knowledge protocol
 4. Your signal summary is captured automatically as an expirable step note — memory_write only durable findings the summary does not carry (architecture, conventions, important code paths), updating by id.
 5. State each durable fact as a claim: pass addClaims with one standalone statement per fact. Claims are what memory_search RETURNS, so each must read correctly on its own, outside the note. Send only what is new — existing claims carry forward, so never resend them.
 6. To correct a claim, add the new wording and pass the OLD claim's id in invalidates. A claim is identified by its text, so a rewording is a new claim, not an edit — and a claim you simply omit carries forward rather than being retired.
-7. Use kind 'architecture_current' for observed implementation and 'architecture_target' for intent.
-8. Update only what changed — memory_write merges omitted fields; an explicit empty clears.
-9. Scope discipline: 'project' scope holds durable knowledge only; step reports and audit output belong in your plan scope.
-10. Hand off by reference: findings go into notes; your signal summary carries conclusions plus the note ids — never restate note bodies. Downstream steps pull them at their own budget.
-11. When a memory_neighbors row leads you to memory_read a note, pass via {seed: row.from, kind: row.via, direction: row.direction} — connections you actually use must strengthen.`
+7. If you CHANGE the code, retire every claim your change made false, in the same memory_write. A claim describing the code you just edited did not go stale by accident — you falsified it. Re-read the claims in the Known project context block and in any note you consulted, and pass the ids of the ones your edit contradicts in invalidates. Adding a claim about the new behaviour does NOT retire the old one: both survive, and the note ends up asserting a thing and its opposite.
+8. Use kind 'architecture_current' for observed implementation and 'architecture_target' for intent.
+9. Update only what changed — memory_write merges omitted fields; an explicit empty clears.
+10. Scope discipline: 'project' scope holds durable knowledge only; step reports and audit output belong in your plan scope.
+11. Hand off by reference: findings go into notes; your signal summary carries conclusions plus the note ids — never restate note bodies. Downstream steps pull them at their own budget.
+12. When a memory_neighbors row leads you to memory_read a note, pass via {seed: row.from, kind: row.via, direction: row.direction} — connections you actually use must strengthen.`
 
 // Task 7: preload block arg, default '' — kept minimal and named rather than folded into
 // ExecutorContext, since it is a per-call render input, not step/run state.
@@ -220,6 +256,11 @@ export function apiLoopExecutor(): AgentExecutor<LanguageModel> {
         // iteration's prompt then cleared — fires once per warning, at any point in the budget
         // (unlike budgetNote, this is NOT gated to the endgame window).
         let pendingLintNudge: { id: string; warning: string } | null = null
+        // Paths this step has WRITTEN, and the ones already put to the model as at-risk. A path is
+        // surfaced once: re-listing the same claims every turn after every edit is noise the model
+        // learns to skip, and the obligation only needs stating once per file.
+        const editedPaths = new Set<string>()
+        const riskChecked = new Set<string>()
 
         for (let iteration = 1; iteration <= ctx.step.maxIterations; iteration++) {
           const note = budgetNote(iteration, ctx.step.maxIterations)
@@ -230,6 +271,26 @@ export function apiLoopExecutor(): AgentExecutor<LanguageModel> {
               content: `memory lint on '${pendingLintNudge.id}': ${pendingLintNudge.warning}. Restructure that note before you signal — the warning is not optional.`,
             })
             pendingLintNudge = null
+          }
+          // Claims your edits may have falsified — the mechanical half of knowledge-protocol rule 7.
+          // The join is deterministic (claims cite their file); the JUDGEMENT stays the model's,
+          // because nothing here can know whether a cited claim is still true. Inside a checkpoint
+          // keyed by iteration so a crash-recovery replay reuses the recorded list rather than
+          // re-querying a corpus that has since moved — same rule the preload follows.
+          const fresh = [...editedPaths].filter(p => !riskChecked.has(p))
+          if (fresh.length > 0 && ctx.memory) {
+            const memory = ctx.memory
+            for (const p of fresh) riskChecked.add(p)
+            const atRisk = await ctx.checkpoint(`claims-at-risk:${iteration}`, () => memory.claimsCiting(fresh))
+            if (atRisk.length > 0)
+              messages.push({
+                role: 'user',
+                content: [
+                  `You edited ${fresh.join(', ')}. These recorded claims cite what you changed:`,
+                  ...atRisk.map(c => `- [${c.claimId}] ${c.text}`),
+                  'Retire the ones your edit made FALSE: memory_write on the owning note with their ids in `invalidates`, plus the corrected wording in `addClaims`. Adding the new claim alone leaves both live, so the note would assert a thing and its opposite. Leave the ones still true alone.',
+                ].join('\n'),
+              })
           }
           const remaining = await ctx.checkpoint(`budget:${iteration}`, ctx.budgetRemainingUSD)
           if (remaining !== null && remaining <= 0) {
@@ -336,6 +397,12 @@ export function apiLoopExecutor(): AgentExecutor<LanguageModel> {
                 const parsed = MemoryWriteResult.safeParse(result.output)
                 const [warning] = parsed.success ? parsed.data.warnings ?? [] : []
                 if (parsed.success && warning) pendingLintNudge = { id: parsed.data.id, warning }
+              }
+              // A SUCCESSFUL write is what puts a claim at risk — a rejected edit changed nothing,
+              // and prompting about it would train the model to ignore the block.
+              if (WRITING_FILE_TOOLS.has(call.toolName) && !result.isError) {
+                const p = editedPath(call.input)
+                if (p) editedPaths.add(p)
               }
             }
 

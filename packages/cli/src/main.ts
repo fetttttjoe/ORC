@@ -1039,7 +1039,8 @@ export function buildProgram(
     .description("list a note's live claims, or --history to include ones it has retired")
     .option('--scope <s>', 'scope')
     .option('--history', 'fold the log for retired claims and the write that retired each')
-    .action(async (id: string, o: { scope?: string; history?: boolean }) => {
+    .option('--json', 'raw live claims (scripts), or the raw folded history when --history is given')
+    .action(async (id: string, o: { scope?: string; history?: boolean; json?: boolean }) => {
       const { config, log } = needPlugin()
       const memory = await openMemory({ log, config })
       const scope = o.scope ?? MemoryScope.project
@@ -1050,6 +1051,11 @@ export function buildProgram(
           // which this branch reports as an ERROR rather than as staleness.
           await memory.projector.catchUp()
           const live = await memory.store.claimsFor(id, scope)
+          // --json is for scripts: emit the raw Claim[] and stop. An empty result is [] and exit 0
+          // here, the rule `topics --json` already settled — a script wants absence as DATA, not a
+          // thrown diagnostic it has to parse. Deliberately ahead of the human throw below, which
+          // stays exactly as it was because it names a note a person can go and read.
+          if (o.json) { console.log(JSON.stringify(live, null, 2)); return }
           if (live.length === 0) throw new Error(`no claims on '${id}' (scope ${scope}) — 'orc memory cat ${id}' to see the note`)
           for (const c of live) console.log(`${c.id}  ${c.validFrom}  ${c.text}`)
           return
@@ -1071,6 +1077,9 @@ export function buildProgram(
           const n: NoteFields = p.data.note
           return [{ ts: e.ts, claims: n.claims ?? [], invalidates: p.data.invalidates }]
         }))
+        // same rule on the history form: one parseable JSON value (the folded claims, tombstones
+        // and all), never JSON followed by human rows
+        if (o.json) { console.log(JSON.stringify(folded, null, 2)); return }
         if (folded.length === 0) throw new Error(`no claims in the log for '${id}' (scope ${scope})`)
         for (const c of folded)
           console.log(`${c.id}  ${c.validFrom}  ${c.invalidatedAt ? `RETIRED ${c.invalidatedAt}` : 'live'}  ${c.text}`)
@@ -1081,7 +1090,8 @@ export function buildProgram(
   mem
     .command('topics [topicKey]')
     .description("derived topics over project claims (statements grouped by meaning); pass a key to list that topic's claims")
-    .action(async (topicKey?: string) => {
+    .option('--json', 'raw topic inventory (scripts), or the raw claims of one topic when a key is given')
+    .action(async (topicKey: string | undefined, o: { json?: boolean }) => {
       const { config, log } = needPlugin()
       const memory = await openMemory({ log, config })
       try {
@@ -1090,6 +1100,10 @@ export function buildProgram(
         await memory.projector.catchUp()
         if (topicKey === undefined) {
           const topics = await memory.store.topics()
+          // --json is for scripts: emit the raw Topic[] and stop. An empty inventory is [] and
+          // exit 0 here (a script wants absence as data, not a thrown diagnostic) — deliberately
+          // NOT the human throw below, which names the causes a person can act on.
+          if (o.json) { console.log(JSON.stringify(topics, null, 2)); return }
           // an empty listing is silence an operator can't act on; name every cause — topics are
           // derived from claim embeddings, so no claims or no embedder both land here, and a
           // pre-claims corpus has no claim rows at all until something writes some (the legacy
@@ -1100,8 +1114,13 @@ export function buildProgram(
           return
         }
         // topicClaims throws on an unknown key with a 'list topics again' message — surfaced as-is
-        // by the CLI's error path, not caught here.
-        for (const c of await memory.store.topicClaims(topicKey, { source: 'cli' }))
+        // by the CLI's error path, not caught here. It also appends memory_topic_accessed exactly
+        // once, so the --json branch reads THROUGH it rather than around it: the access event is
+        // recorded whether the caller wants JSON or human rows.
+        const claims = await memory.store.topicClaims(topicKey, { source: 'cli' })
+        // --json: raw Claim[] and stop, no human rows (stdout stays one parseable JSON value).
+        if (o.json) { console.log(JSON.stringify(claims, null, 2)); return }
+        for (const c of claims)
           console.log(`${c.id}  ${c.validFrom}  ${c.text}`)
       } finally {
         await memory.close()

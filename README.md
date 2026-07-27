@@ -109,8 +109,8 @@ orc mcp trust <id>              # local consent, bound to the server's declarati
 orc mcp serve [--autonomy full] # serve THIS project to external agents over stdio (door #2)
 orc ext trust <path>            # local consent, bound to extension dependency closure + bun.lock
 orc retry <task-id>             # re-run failed steps after a block
-orc memory topics               # what this project knows, grouped — the browsable inventory
-orc memory claims <note-id>     # a note's live claims; --history folds the log for retired ones
+orc memory topics [key] [--json]  # what this project knows, grouped; --json for scripts
+orc memory claims <note-id> [--json]  # a note's live claims; --history folds the log for retired ones
 ```
 
 ### Two settings a new project usually wants
@@ -119,7 +119,7 @@ Neither is required to run a task, but both change what the system can do, and
 the failure mode of each looks like a bug rather than a missing setting.
 
 **An embedder, for semantic search and topics.** Without one, claim search is
-keyword-only and `orc memory topics` never produces a group — topics are derived
+keyword-only and `orc memory topics` never produces a group in either form — topics are derived
 from claim embeddings, so no vectors means no topics. Ollama needs no API key.
 Changing this model later means re-running `orc memory rebuild` (to re-embed every
 claim) AND re-measuring `MEMORY_CLUSTER_THRESHOLD`, which is a cut through one
@@ -163,7 +163,8 @@ Most confusing first-run behaviour is one of these, and none of them is a crash
   embedder, so there are no vectors to group. On an upgraded one, a corpus
   written *before* claims existed needs `orc memory rebuild` once, and even
   that will not invent claims for notes that never stated any (see
-  [Operational notes](#operational-notes)).
+  [Operational notes](#operational-notes)). With `--json`, an empty inventory
+  prints `[]` and exits 0; an unknown topicKey is an error either way.
 - **Memory is degraded** — SurrealDB is down. You get one warning and explicit
   `memory unavailable` tool results; everything else keeps running.
 - **A run died mid-step** — it resumes. `orc status <task-id>` shows
@@ -390,7 +391,8 @@ by the agent.
   the log is replayed, so `orc memory claims` and the claim arm of search stay empty until
   you rebuild. The rebuild is required but not sufficient: the legacy `rules[]` decoder was
   removed outright, so notes written *before* claims existed will still show zero claims
-  afterwards and `orc memory topics` will correctly report "no topics". That is the expected
+  afterwards and `orc memory topics` will correctly report "no topics" (`--json` prints `[]`
+  and exits 0 — a script wants absence as data). That is the expected
   state of a pre-claims corpus, not a broken embedder — those notes assert no claims until an
   agent states some.
 

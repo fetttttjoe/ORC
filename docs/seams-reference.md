@@ -97,8 +97,8 @@ a grep here comes back empty.
 **How to debug memory issues:**
 - `orc memory ls` lists all notes; `hits` column shows access count
 - `orc memory cat <id>` shows the full note
-- `orc memory claims <id>` shows a note's live claims; `--history` folds the log instead, which is the only way to see a RETIRED claim and the write that retired it (the tombstone lives on the event, never on the note)
-- `orc memory topics` lists the derived groups. "no topics" with claims present means stage 3 has not run or the embedder is down; "no topics" on a pre-claims corpus is correct — see the note under the pipeline above
+- `orc memory claims <id>` shows a note's live claims; `--history` folds the log instead, which is the only way to see a RETIRED claim and the write that retired it (the tombstone lives on the event, never on the note). `--json` prints the raw claim array of whichever form you asked for — pretty-printed, no envelope — and an empty result is `[]` with exit 0, so a script reads absence as data instead of parsing the human throw
+- `orc memory topics` lists the derived groups (as tab/space-separated human rows); `orc memory topics --json` prints the same inventory as pretty-printed JSON. "no topics" with claims present means stage 3 has not run or the embedder is down; with `--json` an empty inventory prints `[]`. "no topics" on a pre-claims corpus is correct — see the note under the pipeline above
 - SurrealDB down? → `memory_write` tool returns `memory unavailable` but the event still writes to Postgres; vault/memory rebuilds when SurrealDB comes back up
 - `orc status <task>` prints `memory: unreachable` if Surreal is down, and `memory: catching_up` while the projector is behind — those are different problems, and collapsing them used to light the degraded badge on every burst of note writes
 - Check `vault/memory/index.md` — if empty, SurrealDB projector has not run yet; restart the CLI
