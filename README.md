@@ -67,7 +67,7 @@ Start here to navigate the codebase and understand the architectural foundations
 
 ### Visual Navigation
 
-- `orc graph [--port 7749]` — the web UI (door #1): a live WebGL graph of tasks, steps, artifacts and memory notes, and the pane you drive work from. It is **not** read-only — it proposes, approves, replies and runs, so it is defended like a control surface: bound to loopback, a `Host` check that a DNS-rebinding attacker cannot satisfy, a CSRF token minted per boot and required on every mutation, and a fence limiting it to the one project it was started in
+- `orc graph [--port 7749]` — the web UI (door #1): a live WebGL graph of tasks, steps, artifacts and memory notes, and the pane you drive work from — it proposes, approves, replies and runs. Defended as the control surface it is: bound to loopback, a `Host` check that a DNS-rebinding attacker cannot satisfy, a CSRF token minted per boot and required on every mutation, and a fence limiting it to the one project it was started in
 - `vault/` — filesystem projections: `index.md` (task tree + status), `tasks/<id>/execution.md` (steps + operations), `tasks/<id>/lineage.md` (artifact receipts), `memory/index.md` (knowledge graph)
 
 ## Stack

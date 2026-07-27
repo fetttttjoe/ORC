@@ -64,7 +64,7 @@ Key terms used throughout the orchestrator codebase and documentation. Many term
 
 ## G
 
-**Graph UI** — Web-based interactive visualization of the task/execution/knowledge graph. Served by `orc graph` on `http://127.0.0.1:7749`, bound to localhost only. Not read-only: launched inside a project with a live runtime behind it, it also serves CSRF-token-guarded mutations and the copilot, both fenced to the home project. Door #1 of the two-doors model. See [`orc graph` command](../README.md#operational-notes), [adapters](ARCHITECTURE.md#adapters-—-two-doors-over-one-transport-free-core), [graph UI plan](plans/2026-07-20-graph-ui.md).
+**Graph UI** — Web-based interactive visualization of the task/execution/knowledge graph. Served by `orc graph` on `http://127.0.0.1:7749`, bound to localhost only. Launched inside a project with a live runtime behind it, it serves CSRF-token-guarded mutations and the copilot alongside the graph, both fenced to the home project. Door #1 of the two-doors model. See [`orc graph` command](../README.md#operational-notes), [adapters](ARCHITECTURE.md#adapters-—-two-doors-over-one-transport-free-core), [graph UI plan](plans/2026-07-20-graph-ui.md).
 
 ---
 

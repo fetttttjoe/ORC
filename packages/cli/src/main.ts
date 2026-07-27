@@ -656,7 +656,7 @@ export function buildProgram(
 
   program
     .command('graph')
-    .description('serve the project web UI on 127.0.0.1 — drives runs and approvals, not read-only')
+    .description('serve the project web UI on 127.0.0.1 — browse the graph, propose, approve and run')
     .option('--port <n>', 'port', (v: string) => parseInt(v, 10), 7749)
     .action(async (opts: { port: number }) => {
       const { startGraphUi } = await import('@orc/graph-ui') // lazy: keep CLI startup lean
@@ -921,13 +921,20 @@ export function buildProgram(
     // note landed isolated — reachable by search, invisible to traversal. Same shorthand the web
     // note editor uses, so a note wired from either surface is the same edge.
     .option('--links <spec>', "typed edges, comma-separated: 'refines:area-memory, other-note'", parseLinkSpec)
-    .action(async (o: { id: string; title: string; summary?: string; body?: string; tags?: string[]; categories?: string[]; links?: MemoryLink[] }) => {
+    // Claims were writable only by an agent through memory_write, so correcting one stale statement
+    // by hand meant running an agent. These are the same two fields that tool takes (`addClaims` /
+    // `invalidates`) — additive by design: state what to add and what to retire, never the whole
+    // array, because supplying the array would REPLACE under the store's merge-on-omit rule.
+    .option('--claim <text...>', 'state a claim on this note (addClaims) — repeatable')
+    .option('--invalidate <claimId...>', 'retire a claim by its 12-hex id (invalidates) — repeatable')
+    .action(async (o: { id: string; title: string; summary?: string; body?: string; tags?: string[]; categories?: string[]; links?: MemoryLink[]; claim?: string[]; invalidate?: string[] }) => {
       const { config, log } = needPlugin()
       const memory = await openMemory({ log, config })
       await memory.store.write({
         id: o.id, title: o.title, summary: o.summary, body: o.body,
         tags: o.tags, categories: o.categories, links: o.links,
-      }, { source: 'cli' })
+        ...(o.claim !== undefined && { addClaims: o.claim }),
+      }, { source: 'cli' }, { ...(o.invalidate !== undefined && { invalidates: o.invalidate }) })
       await memory.projector.catchUp() // one-shot: no live subscription in a CLI process, so project the append now
       await memory.close()
       console.log(`wrote memory '${o.id}'`)

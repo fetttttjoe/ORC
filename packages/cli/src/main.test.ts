@@ -995,6 +995,31 @@ describe('orc CLI', () => {
     await expect(run('memory', 'topics')).rejects.toThrow(/legacy rules\[\] decoder/)
     // an unknown key is the store's own error, surfaced by the CLI rather than swallowed
     await expect(run('memory', 'topics', 'deadbeef1234')).rejects.toThrow(/no topic/)
+
+    // `memory add --claim/--invalidate`: claims used to be authorable ONLY by an agent through
+    // memory_write, so correcting one stale statement by hand meant running an agent. The flags
+    // must be ADDITIVE like the tool they mirror — a later write states what to add and what to
+    // retire, and must not disturb the claims it did not name.
+    lines.length = 0
+    const cliNote = 'cli-authored-claims'
+    await run('memory', 'add', '--id', cliNote, '--title', 'CLI claims', '--claim', 'first from the cli', '--claim', 'second from the cli')
+    await run('memory', 'claims', cliNote)
+    const first = lines.find(l => l.includes('first from the cli'))
+    const secondId = lines.find(l => l.includes('second from the cli'))?.split(/\s+/)[0]
+    expect(first).toBeDefined()
+    expect(secondId).toMatch(/^[a-f0-9]{12}$/)
+
+    lines.length = 0
+    await run('memory', 'add', '--id', cliNote, '--title', 'CLI claims', '--claim', 'third from the cli', '--invalidate', secondId ?? '')
+    await run('memory', 'claims', cliNote)
+    const live = lines.join('\n')
+    expect(live).toContain('third from the cli')
+    expect(live).toContain('first from the cli')   // untouched by a write that never named it
+    expect(live).not.toContain('second from the cli') // retired by --invalidate
+    // and the retired one is still recoverable from the log, which is the only place it survives
+    lines.length = 0
+    await run('memory', 'claims', cliNote, '--history')
+    expect(lines.find(l => l.includes('second from the cli'))).toContain('RETIRED')
   }, 30_000)
 })
 
