@@ -56,3 +56,52 @@ export function createDriftProbe(dir: string): ChangedSince {
     return hit
   }
 }
+
+// ─── corpus-level drift ──────────────────────────────────────────────────────────────────────
+//
+// `noteHasDrifted` answers "is THIS note stale" for a reader pulling one. It cannot say that the
+// GRAPH has fallen behind — when the repo moves without orc (another editor, a merge, a refactor
+// landed elsewhere) every affected note is flagged individually, an agent works around them one at
+// a time, and nothing ever suggests re-grounding.
+//
+// UNDERCOUNTS by construction: `paths` are DECLARED, so a note naming none is uncheckable and
+// counts as not-drifted (the module's "fail toward not drifted" rule). Report "at least".
+export interface CorpusDrift {
+  checkable: number // notes carrying both a sourceRevision and at least one declared path
+  drifted: number
+  total: number
+  /** drifted / checkable, or null when nothing could be checked — never a fabricated 0. */
+  ratio: number | null
+}
+
+// Past this share of checkable notes, the graph has fallen far enough behind the tree that
+// re-grounding beats patching it one note at a time. A guess, and labelled as one: it is a prompt
+// for a human decision, never a trigger — a rebuild firing on its own because someone rebased would
+// cost more than the staleness it cures.
+export const CORPUS_DRIFT_ADVISORY = 0.34
+
+export async function corpusDrift(
+  notes: ReadonlyArray<{ sourceRevision: string | null; paths?: readonly string[] }>,
+  changedSince: ChangedSince,
+): Promise<CorpusDrift> {
+  let checkable = 0
+  let drifted = 0
+  for (const n of notes) {
+    const paths = n.paths ?? []
+    if (n.sourceRevision === null || paths.length === 0) continue
+    checkable += 1
+    // one git diff per DISTINCT revision — notes from one run share theirs, so this collapses
+    const changed = await changedSince(n.sourceRevision)
+    if (changed === null) { checkable -= 1; continue } // unreachable revision is unknown, not drifted
+    if (noteHasDrifted({ sourceRevision: n.sourceRevision, paths }, changed)) drifted += 1
+  }
+  return { checkable, drifted, total: notes.length, ratio: checkable === 0 ? null : drifted / checkable }
+}
+
+// Has the graph fallen far enough behind to be worth re-grounding wholesale? A verdict, not a
+// sentence: what to SAY about it, and which command to name, belongs to whoever is talking to a
+// human. This module measures.
+// Takes only what it reads, so a caller holding a narrower shape (MemoryHealth's drift field, which
+// has no use for `total`) does not have to fabricate the rest.
+export const needsReground = (d: Pick<CorpusDrift, 'ratio'>): boolean =>
+  d.ratio !== null && d.ratio >= CORPUS_DRIFT_ADVISORY

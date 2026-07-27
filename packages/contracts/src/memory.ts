@@ -555,6 +555,13 @@ export interface MemoryHealth {
   state: MemoryHealthState
   pending: number // knowledge events not yet applied to the read model
   reason?: string
+  // How far the graph has fallen behind the working tree. `pending` measures the read model
+  // catching up with the LOG — a lag orc creates and fixes by itself. This measures the corpus
+  // catching up with the CODE, which orc cannot fix by itself: when the repo moves without going
+  // through orc (another editor, a merge, a refactor landed elsewhere) nothing retires the claims
+  // that describe what used to be there. Absent when it could not be measured (no repo, no
+  // checkable notes) — never a fabricated zero, which would read as "healthy".
+  drift?: { checkable: number; drifted: number; ratio: number }
 }
 
 export interface MemoryStore {

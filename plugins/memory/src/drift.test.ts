@@ -2,7 +2,7 @@ import { describe, expect, it } from 'bun:test'
 import { mkdtempSync, writeFileSync, mkdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import { createDriftProbe, noteHasDrifted } from './drift'
+import { corpusDrift, createDriftProbe, needsReground, noteHasDrifted, CORPUS_DRIFT_ADVISORY, type ChangedSince } from './drift'
 
 const note = (over: Partial<{ sourceRevision: string | null; paths: string[] }> = {}) =>
   ({ sourceRevision: 'abc123', paths: ['packages/kernel/src/kernel.ts'], ...over })
@@ -65,5 +65,43 @@ describe('createDriftProbe', () => {
   it('returns null — never a false positive — for a revision git cannot reach', async () => {
     expect(await createDriftProbe(repo())('0'.repeat(40))).toBeNull()
     expect(await createDriftProbe(mkdtempSync(path.join(tmpdir(), 'orc-norepo-')))('abc123')).toBeNull()
+  })
+})
+
+describe('corpusDrift — the graph lagging the CODE, not the log', () => {
+  const probe = (changed: Record<string, string[] | null>): ChangedSince =>
+    async rev => (changed[rev] === null || changed[rev] === undefined ? null : new Set(changed[rev]))
+
+  it('counts only notes that CAN be checked, and reports the share that moved', async () => {
+    const d = await corpusDrift([
+      { sourceRevision: 'r1', paths: ['a.ts'] },   // changed → drifted
+      { sourceRevision: 'r1', paths: ['b.ts'] },   // untouched
+      { sourceRevision: null, paths: ['a.ts'] },   // never stamped — uncheckable
+      { sourceRevision: 'r1', paths: [] },         // declares nothing — uncheckable
+    ], probe({ r1: ['a.ts'] }))
+    expect(d).toEqual({ checkable: 2, drifted: 1, total: 4, ratio: 0.5 })
+  })
+
+  // The rule the whole module is built on: unknown is never drifted. A revision git cannot reach
+  // (rebased away, shallow clone) must not inflate the ratio, or a rebase reads as rot.
+  it('drops an unreachable revision from the denominator rather than counting it', async () => {
+    const d = await corpusDrift([
+      { sourceRevision: 'gone', paths: ['a.ts'] },
+      { sourceRevision: 'r1', paths: ['a.ts'] },
+    ], probe({ gone: null, r1: ['a.ts'] }))
+    expect(d.checkable).toBe(1)
+    expect(d.ratio).toBe(1)
+  })
+
+  it('reports null rather than 0 when nothing is checkable — 0 would read as healthy', async () => {
+    const d = await corpusDrift([{ sourceRevision: null, paths: [] }], probe({}))
+    expect(d.ratio).toBeNull()
+    expect(needsReground(d)).toBe(false) // unknown is never a reason to rebuild
+  })
+
+  it('calls for a re-ground only past the threshold', () => {
+    expect(needsReground({ ratio: CORPUS_DRIFT_ADVISORY - 0.01 })).toBe(false)
+    expect(needsReground({ ratio: CORPUS_DRIFT_ADVISORY })).toBe(true)
+    expect(needsReground({ ratio: 1 })).toBe(true)
   })
 })

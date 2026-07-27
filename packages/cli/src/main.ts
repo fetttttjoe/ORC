@@ -3,10 +3,10 @@ import { spawn } from 'node:child_process'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { Command, InvalidArgumentError } from 'commander'
-import { claimHistory, EDGE_DIRECTION, errorMessage, EVENT_KIND, LINK_KINDS, MASTERPLAN_NOTE_ID, MEMORY_ACCESS, MemoryDeletedPayload, MemoryScope, MemoryWrittenPayload, NOTE_TIERS, NoteTier, parseLinkSpec, PlanDraft, RUN_OUTCOME, STRATEGY, TASK_STATUS, TERMINAL_TASK_STATUS, LinkKind, slugId, type Analyzer, type TaskStatus, type RunOutcome, type EventRecord, type MemoryLink, type NoteFields, type ExecutionPort, type Plan, formatModelRate } from '@orc/contracts'
+import { claimHistory, EDGE_DIRECTION, errorMessage, EVENT_KIND, LINK_KINDS, MASTERPLAN_NOTE_ID, MEMORY_ACCESS, MemoryDeletedPayload, MemoryScope, MemoryWrittenPayload, NOTE_TIERS, NoteTier, parseLinkSpec, PlanDraft, RUN_OUTCOME, STRATEGY, TASK_STATUS, TERMINAL_TASK_STATUS, LinkKind, slugId, type Analyzer, type TaskStatus, type RunOutcome, type EventRecord, type MemoryLink, type NoteFields, type ExecutionPort, type MemoryHealth, type Plan, formatModelRate } from '@orc/contracts'
 import { openStorage, Kernel, atomicWriteFileSync, claimSlot, fold, gatedChildren, instantiateFrozenPlan, liveSupervisors, staleSupervisors, subtreeOutcome, subtreeTaskIds, grantExtensionTrust, grantMcpTrust, initializeProject, isExtensionTrusted, isMcpTrusted, loadConfig, loadTrust, migrateDatabase, requireProject, taskUsage, type EventLog, type OrcConfig, type PluginHost, type ProjectConfig, type Storage } from '@orc/kernel'
 import { createVaultProjector, parsePlanFile } from '@orc/vault-projector'
-import { consolidateTask, probeMemory, staleNotes, DEFAULT_SWEEP_DAYS } from '@orc/memory'
+import { consolidateTask, needsReground, probeMemory, staleNotes, DEFAULT_SWEEP_DAYS } from '@orc/memory'
 import { openMemory } from './memory-open'
 import { buildDistiller } from './consolidation-distiller'
 import { seedRegistries, buildRuntime } from './runtime'
@@ -51,6 +51,20 @@ export async function openKernel(
   const log = storage.events
   if (opts.onAppend) log.onAppend = opts.onAppend
   return { kernel: new Kernel(log, opts.refValidator, opts.analyzers, opts.send), log, storage }
+}
+
+// The committed plan that re-grounds a drifted graph. ONE spelling: the status line and the
+// supervisor banner both name it, and it is a real path a reader will paste.
+const REGROUND_PLAN = 'docs/kb-build-parallel.plan.json'
+
+// How a drift reading reads to a human. Lives here, not in the memory plugin: which command to
+// recommend is a CLI concern, and a measurement module that builds prose ends up shipping a
+// hardcoded path inside a pure function.
+const driftLine = (d: NonNullable<MemoryHealth['drift']>): string => {
+  const pct = Math.round(d.ratio * 100)
+  return needsReground(d)
+    ? `knowledge drift: at least ${d.drifted}/${d.checkable} checkable notes (${pct}%) describe code changed since they were written — something moved this repo without going through orc. Re-ground: orc propose <task> --file ${REGROUND_PLAN}`
+    : `knowledge drift: ${d.drifted}/${d.checkable} checkable notes (${pct}%) describe code that has since changed`
 }
 
 const SHIPPED_SKILLS_DIR = fileURLToPath(new URL('../../../vault/skills', import.meta.url))
@@ -715,6 +729,17 @@ export function buildProgram(
       // cap PER DEPTH, not per run. PHASE1_MAX_SLOTS is 1 because the zone write-fence is still an
       // in-process map (plugins/executor-api-loop/src/tools.ts).
       console.log(`  parallelism: ${config.concurrency} concurrent steps per depth (waves are awaited whole) · max depth ${config.maxDepth} · ${PHASE1_MAX_SLOTS} supervisor`)
+      // Boot is the one moment an operator is guaranteed to be reading, but only the re-ground
+      // case earns a line: a supervisor reporting a number every start teaches the reader to skip
+      // its output, and `orc status` has the number on demand.
+      try {
+        const { drift } = await probeMemory(config, storage.events)
+        if (drift && needsReground(drift)) console.log(`  ${driftLine(drift)}`)
+      } catch (err) {
+        // Never blocks boot — but say WHY it is missing, or a permanently broken probe reads as a
+        // clean graph, which is the failure this whole signal exists to prevent.
+        console.warn(`  knowledge drift not measured: ${errorMessage(err)}`)
+      }
       try {
         await runSupervisor({ storage, port, idleMs: opts.idle * 60_000 })
       } finally {
@@ -764,6 +789,11 @@ export function buildProgram(
         console.log(`project: ${plugin.config.projectName} (${plugin.config.projectId})`)
         const health = await probeMemory(plugin.config, plugin.log)
         console.log(`memory: ${health.state}${health.reason ? ` (${health.reason})` : ''}`)
+        // Two different lags, reported separately on purpose: `state`/`pending` is the read model
+        // catching up with the log, which orc fixes by itself; drift is the corpus lagging the CODE,
+        // which it cannot. Always print the ratio when measurable — a graph quietly 20% behind is
+        // worth knowing before the advisory threshold makes it loud.
+        if (health.drift) console.log(driftLine(health.drift))
       }
       console.log(`${task.id}  ${task.status}  ${task.title}`)
       const plan = state.plans.get(taskId)?.versions.at(-1)
