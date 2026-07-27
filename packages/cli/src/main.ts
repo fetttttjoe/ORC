@@ -4,7 +4,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { Command, InvalidArgumentError } from 'commander'
 import { claimHistory, EDGE_DIRECTION, errorMessage, EVENT_KIND, LINK_KINDS, MASTERPLAN_NOTE_ID, MEMORY_ACCESS, MemoryDeletedPayload, MemoryScope, MemoryWrittenPayload, NOTE_TIERS, NoteTier, parseLinkSpec, PlanDraft, RUN_OUTCOME, STRATEGY, TASK_STATUS, TERMINAL_TASK_STATUS, LinkKind, slugId, type Analyzer, type TaskStatus, type RunOutcome, type EventRecord, type MemoryLink, type NoteFields, type ExecutionPort, type MemoryHealth, type Plan, formatModelRate } from '@orc/contracts'
-import { openStorage, Kernel, atomicWriteFileSync, claimSlot, fold, gatedChildren, instantiateFrozenPlan, liveSupervisors, staleSupervisors, subtreeOutcome, subtreeTaskIds, grantExtensionTrust, grantMcpTrust, initializeProject, isExtensionTrusted, isMcpTrusted, loadConfig, loadTrust, migrateDatabase, requireProject, taskUsage, type EventLog, type OrcConfig, type PluginHost, type ProjectConfig, type Storage } from '@orc/kernel'
+import { openStorage, Kernel, atomicWriteFileSync, listProjectIds, claimSlot, fold, gatedChildren, instantiateFrozenPlan, liveSupervisors, staleSupervisors, subtreeOutcome, subtreeTaskIds, grantExtensionTrust, grantMcpTrust, initializeProject, isExtensionTrusted, isMcpTrusted, loadConfig, loadTrust, migrateDatabase, requireProject, taskUsage, type EventLog, type OrcConfig, type PluginHost, type ProjectConfig, type Storage } from '@orc/kernel'
 import { createVaultProjector, parsePlanFile } from '@orc/vault-projector'
 import { consolidateTask, needsReground, probeMemory, staleNotes, DEFAULT_SWEEP_DAYS } from '@orc/memory'
 import { openMemory } from './memory-open'
@@ -479,17 +479,53 @@ export function buildProgram(
     })
 
   program
-    .command('delete <projectName>')
-    .description("delete this project entirely — history, knowledge and identity (purge keeps the identity; this does not)")
+    .command('projects')
+    .description('every project this database holds, including ones whose identity file is gone')
+    .action(async () => {
+      // The CLI had no way to SEE a project other than the cwd's, which is how four abandoned
+      // ones accumulated 1128 events nobody could name or reach: an identity file is per-directory
+      // and `orc init` overwrites it, so a re-inited directory orphans its predecessor outright.
+      // The web UI listed them all along; this is the same list, from the same primitive.
+      //
+      // Names are NOT resolved here. A foreign project's name lives in a memory note inside its own
+      // read model, and reading that means opening its Surreal database — a listing must not do
+      // that for every row just to print a label. The cwd project knows its own name; the rest are
+      // exactly the ones you cannot name, which is the fact worth showing.
+      const cfg = plugin?.config
+      if (!cfg) throw new Error('listing projects needs a project context')
+      const ids = await listProjectIds(cfg.databaseUrl)
+      if (ids.length === 0) return console.log('_no projects_')
+      for (const id of ids)
+        console.log(id === cfg.projectId ? `${id}\t${cfg.projectName}\t<- this directory` : `${id}\t(no identity here — delete with: orc delete --id ${id} --yes)`)
+    })
+
+  program
+    .command('delete [projectName]')
+    .description("delete a project entirely — history, knowledge and durable-execution state (purge keeps the chat; this does not)")
+    .option('--id <projectId>', 'delete a FOREIGN project by id — for one whose identity file is gone, so no name exists to confirm against (see: orc projects)')
     .requiredOption('--yes', 'confirm: this irreversibly deletes the project and its knowledge')
-    .action(async (projectName: string) => {
+    .action(async (projectName: string | undefined, opts: { id?: string }) => {
+      const cfg = plugin?.config
+      if (!cfg) throw new Error('deleting a project needs a project context')
+      if (opts.id !== undefined) {
+        // An orphan has no name to confirm against — the id IS the confirmation, and it must not
+        // be the project you are standing in, which `delete <name>` already covers with a check
+        // that can actually verify what it is deleting.
+        if (projectName !== undefined)
+          throw new Error('pass a name or --id, not both: a name confirms the cwd project, --id targets a foreign one')
+        if (opts.id === cfg.projectId)
+          throw new Error(`refusing: ${opts.id} is THIS directory's project — delete it by name (orc delete ${cfg.projectName} --yes) so the name confirms the target`)
+        const r = await actions().deleteProject(opts.id)
+        console.log(`deleted ${opts.id}: ${r.events} event(s), ${r.operations} operation(s)`)
+        for (const w of r.warnings) console.log(`warning: ${w}`)
+        return
+      }
       // named for the same reason purge is: the target comes from the cwd's config, so a script
       // in the wrong directory would otherwise delete a project it never meant to touch
-      const cfg = plugin?.config
-      if (!cfg?.projectName) throw new Error('deleting a project needs a project context')
+      if (!cfg.projectName) throw new Error('deleting a project needs a project context')
       const actual = cfg.projectName
       if (projectName !== actual)
-        throw new Error(`refusing: this directory is project '${actual}' (${cfg.dir}), not '${projectName}'`)
+        throw new Error(`refusing: this directory is project '${actual}' (${cfg.dir}), not '${projectName}' — for a project with no identity file, use --id (see: orc projects)`)
       const r = await actions().deleteProject(cfg.projectId)
       console.log(`deleted '${actual}': ${r.events} event(s), ${r.operations} operation(s)`)
       for (const w of r.warnings) console.log(`warning: ${w}`)

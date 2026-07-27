@@ -181,6 +181,9 @@ export class SurrealMemory {
     private readonly surreal: Surreal,
     private readonly db: Db,
     private readonly embedder?: EmbeddingProvider,
+    // where this store lives — needed only by drop(), which removes the database object itself
+    // rather than its rows, and so cannot go through the ORM
+    private readonly at?: { ns: string; db: string },
   ) {}
 
   static async open(t: {
@@ -212,7 +215,7 @@ export class SurrealMemory {
       // `link` (default TYPE ANY, so RELATE works) is defined too: neighbors() SELECTs from it
       // even when no edge was ever materialized.
       await surreal.query([Tb.Note, Tb.Meta, Tb.Link, Tb.Claim, Tb.Topic].map(tb => `DEFINE TABLE IF NOT EXISTS ${tb} SCHEMALESS;`).join(' '))
-      return new SurrealMemory(surreal, makeOrm(surreal), embedder)
+      return new SurrealMemory(surreal, makeOrm(surreal), embedder, { ns: t.ns, db: t.db })
     } catch (err) {
       // connect() opens a live socket; if signin/use/DEFINE then throws, don't leak it
       // (symmetry with PostgresStore.open, which pool.end()s on an assertMigrated throw).
@@ -782,6 +785,20 @@ export class SurrealMemory {
   // normal paths: start()/catchUp() both drain zero and probeMemory honestly reports healthy,
   // because "no events after the cursor" is true. Atomicity makes that state unreachable
   // instead of merely unlikely.
+  // Removes the DATABASE, not its rows. `clear()` empties a database that is still in use — what
+  // purge needs, since the chat survives and the schema with it. Deletion has no runtime left to
+  // hold one, so the object itself must go: clearing left one empty database per deleted project
+  // that nothing ever collected, which is the same litter dropSystemDatabase already avoids on the
+  // Postgres side. Callable exactly once; the instance is unusable afterwards.
+  async drop(): Promise<void> {
+    if (!this.at) throw new Error('this store was opened without a database name — cannot drop it')
+    // `use` the NAMESPACE alone: a database cannot be removed while selected, and
+    // `type::database($db)` is not a valid function path (measured against SurrealDB v3.2.0 — it
+    // parses as a ValidationError). The name is derived from the project id, never external input.
+    await this.surreal.use({ namespace: this.at.ns })
+    await this.surreal.query(`REMOVE DATABASE IF EXISTS \`${this.at.db}\`;`)
+  }
+
   async clear(): Promise<void> {
     await this.db.transaction(async tx => {
       await tx.delete(Tb.Note)

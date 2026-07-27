@@ -1,5 +1,6 @@
 import { afterAll, describe, expect, it } from 'bun:test'
 import { claimId, MEMORY_LIMITS, MemoryScope, PROJECT_NAME_NOTE_ID, type EmbeddingProvider, type EventRecord, type MemoryAuthor } from '@orc/contracts'
+import { Surreal } from 'surrealdb'
 import { eventFixture } from '@orc/contracts/fixtures'
 import { topicLabel } from './cluster'
 import { SurrealMemory } from './surreal'
@@ -63,6 +64,38 @@ describe('SurrealMemory topic projection', () => {
     // detail is not lost, it moved: one call reaches the whole sentence verbatim
     expect((await m.topicClaims(topic?.topicKey ?? '')).map(c => c.text)).toEqual([long])
     await m.close()
+  })
+
+  // Deleting a project used to CLEAR its knowledge database, which empties the rows and leaves the
+  // database object behind — one per deleted project, collected by nothing. Four abandoned projects
+  // left four such shells in a namespace with no listing to notice them. drop() removes the object.
+  //
+  // Asserted through a namespace-level INFO, the same shape test-helpers' own cleanup uses: whether
+  // a DATABASE exists is not a question any store scoped INSIDE that database can answer.
+  it('drop() removes the database itself, not just its rows', async () => {
+    const t = await createTestSurreal(); drops.push(t.drop)
+    const m = await SurrealMemory.open(t, fakeEmbedder)
+    await m.applyEvent(written(1, note({ id: 'n1', claims: [claim('alpha holds')] })))
+    await m.refreshTopics(0.75)
+    expect(await m.topics()).toHaveLength(1)
+
+    const listDatabases = async (): Promise<string[]> => {
+      const s = new Surreal()
+      try {
+        await s.connect(t.url)
+        await s.signin({ username: t.username, password: t.password })
+        await s.use({ namespace: t.ns })
+        const [info] = await s.query<[{ databases: Record<string, unknown> }]>('INFO FOR NS;')
+        return Object.keys(info?.databases ?? {})
+      } finally {
+        await s.close()
+      }
+    }
+
+    expect(await listDatabases()).toContain(t.db)
+    await m.drop()
+    await m.close()
+    expect(await listDatabases()).not.toContain(t.db)
   })
 
   it('a refresh replaces the table wholesale and is idempotent on unchanged claims', async () => {

@@ -387,7 +387,10 @@ export function buildOrcActions(deps: {
         // to mean the data goes too, which is what anyone clicking delete already assumes.
         try {
           const knowledge = await openKnowledge({ ...plugin.config, projectId })
-          try { await knowledge.clear() } finally { await knowledge.close() }
+          // drop, not clear: the database object goes with the project. Clearing rows left one
+          // empty Surreal database per deleted project that nothing ever collected — the exact
+          // litter dropSystemDatabase above avoids on the Postgres side.
+          try { await knowledge.drop() } finally { await knowledge.close() }
         } catch (err) {
           warnings.push(`memory read model not cleared (${errorMessage(err)}) — its notes will vanish on the next rebuild`)
         }
