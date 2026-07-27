@@ -190,7 +190,7 @@ const noteCore = {
   // replay (the projector re-parses each payload), so a rebuild converges existing notes.
   tags: stringOrList(z.string().max(MEMORY_LIMITS.labelChars).toLowerCase(), MEMORY_LIMITS.labelItems).default([]),
   links: z.array(MemoryLink).max(MEMORY_LIMITS.detailItems).default([]), // clean typed graph edges — no string-id form
-  summary: z.string().max(500).default(''),
+  summary: z.string().max(MEMORY_LIMITS.summaryChars).default(''),
   body: z.string().max(MEMORY_LIMITS.bodyChars).default(''),
 }
 
@@ -349,7 +349,11 @@ const draftCoversTiers: DraftCoversTiers = true
 void draftCoversTiers
 
 // What callers hand the gateway: the draft's raw input, defaults not yet applied.
-export type MemoryNoteDraft = z.input<typeof MemoryNoteDraftInput>
+// `title` is optional on the DRAFT because write() is an upsert with merge-on-omit: an update
+// inherits the stored title. A new note still needs one — the store's non-existing branch parses
+// through MemoryNoteInput, which requires it, and says so. The type now matches that behaviour
+// instead of demanding a field the runtime would have supplied.
+export type MemoryNoteDraft = Omit<z.input<typeof MemoryNoteDraftInput>, 'title'> & { title?: string }
 
 // The HUMAN-authorable surface of a note draft — what the web UI and quick capture may write.
 // A .pick of MemoryNoteDraftInput, so every field keeps its single-source constraint. Least

@@ -54,6 +54,51 @@ const WriteInputProps = z.object({ properties: z.record(z.string(), z.unknown())
 const WriteInputDescriptions = z.object({ properties: z.record(z.string(), z.object({ description: z.string().optional() })) })
 
 describe('memory tools', () => {
+  // Both observed live on one assemble step: two writes rejected for a missing `title` while
+  // updating an existing note, and one 1.2k-char summary that discarded a whole note — body, ten
+  // links, four claims. The store never needed either restriction; the tool boundary invented them.
+  it('accepts an update with no title — the store merges the stored one forward', async () => {
+    // the shared fake does not implement merge-on-omit, so it stands in for the stored note here;
+    // what this pins is that the TOOL forwards the draft untouched instead of rejecting it
+    const seen: MemoryNoteDraft[] = []
+    const { store } = fakeStore({ write: async input => { seen.push(input); return toNote({ ...input, title: 'Stored Title' }) } })
+    const write = memoryTools({ store, author: { source: 'cli' } }).find(t => t.name === 'memory_write')!
+    const r = await write.execute({ id: 'existing-note', body: 'revised' }, 'c1')
+    expect(r.isError).toBeFalsy()
+    expect(seen[0]?.id).toBe('existing-note')
+    expect(seen[0]?.title).toBeUndefined() // omitted, not fabricated — the store fills it
+  })
+
+  it('still refuses a NEW note with no title, and says why', async () => {
+    const { store } = fakeStore()
+    const write = memoryTools({ store, author: { source: 'cli' } }).find(t => t.name === 'memory_write')!
+    const r = await write.execute({ body: 'orphan' }, 'c1')
+    expect(r.isError).toBe(true)
+    expect(JSON.stringify(r.output)).toContain('a new note needs a title')
+  })
+
+  it('warns when a note cites source files but declares no paths — the rot nobody can detect', () => {
+    const cites = toNote({ id: 'n', title: 'T', summary: 's', body: 'see packages/kernel/src/storage/postgres.ts for the pool' })
+    expect(noteLint(cites).join(' ')).toContain('declares no `paths`')
+    // declared → silent
+    const declared = toNote({ id: 'n', title: 'T', summary: 's', body: 'see packages/kernel/src/storage/postgres.ts', paths: ['packages/kernel/src/storage'] })
+    expect(noteLint(declared).join(' ')).not.toContain('declares no `paths`')
+    // prose that names no source file must NOT nag — the lint targets checkable notes only
+    const prose = toNote({ id: 'n', title: 'T', summary: 's', body: 'a decision about how we review PRs' })
+    expect(noteLint(prose).join(' ')).not.toContain('declares no `paths`')
+  })
+
+  it('truncates an over-long summary and WARNS, instead of discarding the write', async () => {
+    const { store, written } = fakeStore()
+    const write = memoryTools({ store, author: { source: 'cli' } }).find(t => t.name === 'memory_write')!
+    const long = 'x'.repeat(MEMORY_LIMITS.summaryChars + 700)
+    const r = await write.execute({ title: 'Big summary', summary: long, body: 'kept' }, 'c1')
+    expect(r.isError).toBeFalsy()                                   // the note survives
+    expect(written[0]?.input.body).toBe('kept')                     // …with everything else intact
+    expect(written[0]?.input.summary).toHaveLength(MEMORY_LIMITS.summaryChars)
+    expect(JSON.stringify(r.output)).toContain('truncated')         // and the writer is told
+  })
+
   it('declares five tools; memory_write routes to the store with the bound author', async () => {
     const { store, written } = fakeStore()
     const tools = memoryTools({ store, author: { source: 'agent', executor: 'api-loop', model: 'opus', role: 'review' } })

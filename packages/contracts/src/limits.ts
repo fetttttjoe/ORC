@@ -9,6 +9,10 @@ export const MEMORY_LIMITS = {
   labelChars: 64,
   detailItems: 100,
   detailChars: 1_000,
+  // A note's one-line pointer, shown in every listing and every preload — which is why it is short.
+  // Named here rather than inlined at the schema so the boundary that ACCOMMODATES an over-long one
+  // and the schema that stores it cannot drift on the number.
+  summaryChars: 500,
   // What the STORE accepts. Deliberately far above the searchable ceiling: this bound is also
   // applied when re-parsing history, so tightening it would make older notes fail to parse and
   // vanish from every fold.

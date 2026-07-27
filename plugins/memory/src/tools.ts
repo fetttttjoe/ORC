@@ -1,5 +1,5 @@
 import { z } from 'zod'
-import { AccessVia, CLAIM_ID_RE, ClaimWrite, EDGE_DIRECTIONS, errorMessage, linkLookupScopes, MemoryScope, MEMORY_ACCESS, MEMORY_LIMITS, MEMORY_SOURCE_LIMITS, MEMORY_TOOL_NAME, MemorySearchResult, MemoryWriteResult, NOTE_KINDS, LINK_KIND, LINK_KINDS, RETENTION_CLASSES, SEARCH_MODES, SearchMode, LinkKind, MemoryNoteDraftInput, NOTE_TIER, NOTE_TIERS, slugId, type ClaimHit, type MemoryAuthor, type MemoryNote, type MemoryStore, type ResolvedTool } from '@orc/contracts'
+import { AccessVia, CLAIM_ID_RE, ClaimWrite, isRecord, EDGE_DIRECTIONS, errorMessage, linkLookupScopes, MemoryScope, MEMORY_ACCESS, MEMORY_LIMITS, MEMORY_SOURCE_LIMITS, MEMORY_TOOL_NAME, MemorySearchResult, MemoryWriteResult, NOTE_KINDS, LINK_KIND, LINK_KINDS, RETENTION_CLASSES, SEARCH_MODES, SearchMode, LinkKind, MemoryNoteDraftInput, NOTE_TIER, NOTE_TIERS, slugId, type ClaimHit, type MemoryAuthor, type MemoryNote, type MemoryStore, type ResolvedTool } from '@orc/contracts'
 import { applyBudget, approxTokens, fitMemoryNoteToBudget } from './budget'
 import { noteHasDrifted, type ChangedSince } from './drift'
 
@@ -46,6 +46,10 @@ async function duplicateSubjectWarning(store: MemoryStore, scope: string, title:
     + ` — if one of them is this same subject, memory_write THAT id instead, so the graph carries one claim rather than two`]
 }
 
+// A repo-relative source path in prose: at least one directory segment and a code-ish extension.
+// Deliberately narrow — a note mentioning 'README' or a bare word must not trip the paths lint.
+const CITES_SOURCE_FILE = /[\w.-]+\/[\w./-]+\.(ts|tsx|js|json|sql|md)\b/
+
 export function noteLint(note: MemoryNote): string[] {
   const w: string[] = []
   if (note.summary.trim() === '')
@@ -67,6 +71,13 @@ export function noteLint(note: MemoryNote): string[] {
     w.push(`every edge is relates_to — type structural edges (decomposes_into for hub→area, depends_on for imports)`)
   if (note.summary && note.summary.toLowerCase().replace(/[^a-z0-9]/g, '').startsWith(note.title.toLowerCase().replace(/[^a-z0-9]/g, '')))
     w.push(`summary restates the title — it is the retrieval surface; spend it on what searches must find`)
+  // A note that cites source files in its TEXT but declares none in `paths` is invisible to
+  // staleness detection: drift compares the note's stamped revision against what changed under its
+  // DECLARED paths, and file names in prose are not read. Measured on a from-scratch build — 1 of 27
+  // notes declared any, so 96% of the corpus could never be found stale and would rot silently.
+  if (note.tier === NOTE_TIER.semantic && note.paths.length === 0 && CITES_SOURCE_FILE.test(`${note.summary}\n${note.body}`))
+    w.push('this note names source files but declares no `paths` — set them to the files or directories it describes,'
+      + ' or staleness detection can never flag it when that code changes')
   return w
 }
 
@@ -138,10 +149,31 @@ const TopicsInput = z.object({ topic: z.string().regex(CLAIM_ID_RE).optional(), 
 // `invalidates` is stated about the WRITE, not about the note, so it is parsed here and forwarded on
 // the store opts — merging it into the draft would let merge-on-omit carry a tombstone forward into
 // every later revision of the note.
+// Two accommodations the STORE does not need but an agent does. memory_write is an upsert with
+// merge-on-omit, so an update carries the previous title forward — requiring one here contradicted
+// that and rejected legitimate updates. And `summary` is a display cap, not a semantic rule: the
+// lint module's own header states the principle ("warnings, never rejections: a blocked write
+// mid-run burns more tokens than a mediocre note"), which a hard max violated by discarding an
+// entire note — body, links and claims — over one long line.
 const MemoryWriteToolInput = MemoryNoteDraftInput.extend({
   id: MemoryNoteDraftInput.shape.id.optional(),
+  title: MemoryNoteDraftInput.shape.title.optional(),
+  summary: z.string().default(''), // bounded by normalizeWrite below, which warns instead of throwing
   invalidates: ClaimWrite.shape.invalidates.removeDefault().optional(),
 })
+
+// Trim what only needs trimming, and say so. Runs on the RAW input so the schema never sees a
+// value it would reject; the warning rides the channel noteLint already uses, so the writer learns
+// without losing the write.
+function normalizeWrite(input: unknown): { input: unknown; warnings: string[] } {
+  if (!isRecord(input)) return { input, warnings: [] }
+  const summary = input.summary
+  if (typeof summary !== 'string' || summary.length <= MEMORY_LIMITS.summaryChars) return { input, warnings: [] }
+  return {
+    input: { ...input, summary: summary.slice(0, MEMORY_LIMITS.summaryChars) },
+    warnings: [`summary was ${summary.length} chars and has been truncated to ${MEMORY_LIMITS.summaryChars} — it is the one-line pointer shown in every listing; detail belongs in body`],
+  }
+}
 
 // advertised JSON schemas mirror the zod parsers exactly, so the model can self-correct.
 const detailLevelSchema = { type: 'string', enum: ['minimal', 'standard'], description: 'minimal = top 5 + omitted count' }
@@ -187,10 +219,10 @@ export function memoryTools(opts: {
       ref: 'memory/write', name: MEMORY_TOOL_NAME.write,
       description: withRole('Create or update a project knowledge note (upsert by id — omitted fields keep their stored values; pass an explicit empty string/array to clear one). Record durable findings/decisions/conventions so later steps reuse them. If a note you read came back drifted, CORRECT it: write the same id with what the code says now, rather than adding a second note — a graph carrying two contradictory claims is worse than one carrying neither.', role),
       inputSchema: {
-        type: 'object', required: ['title'],
+        type: 'object', required: [],
         properties: {
           id: { ...idSchema, description: 'omit id unless you are updating a note whose id you read — the title-derived slug makes the same finding converge instead of forking.' },
-          title: { type: 'string', minLength: 1, maxLength: 200 },
+          title: { type: 'string', minLength: 1, maxLength: 200, description: 'required for a NEW note (it derives the id); omit when updating by id — the stored title carries forward' },
           tier: {
             type: 'string', enum: [...NOTE_TIERS],
             description: "which memory this note belongs to (default semantic). semantic = durable project knowledge, and the only tier that takes kind/categories/paths/claims/sources. plan = one node of a task's decomposition, and the only tier that takes rationale/uncertainty/zone. episodic = a record of what one run did, expirable, title+summary+tags only. Fields outside the tier you name are dropped.",
@@ -214,7 +246,7 @@ export function memoryTools(opts: {
               },
             },
           },
-          summary: { type: 'string', maxLength: 500 }, body: { type: 'string', maxLength: MEMORY_LIMITS.searchableBodyChars, description: 'beyond this the text is stored but not semantically searchable' },
+          summary: { type: 'string', maxLength: MEMORY_LIMITS.summaryChars, description: 'one-line pointer shown in listings; a longer one is truncated with a warning, never rejected' }, body: { type: 'string', maxLength: MEMORY_LIMITS.searchableBodyChars, description: 'beyond this the text is stored but not semantically searchable' },
           categories: { type: 'array', maxItems: MEMORY_LIMITS.labelItems, items: { type: 'string', maxLength: MEMORY_LIMITS.labelChars } },
           tags: { type: 'array', maxItems: MEMORY_LIMITS.labelItems, items: { type: 'string', maxLength: MEMORY_LIMITS.labelChars } },
           links: {
@@ -259,10 +291,13 @@ export function memoryTools(opts: {
           // parse WITHOUT defaults: MemoryNoteInput here would fill body:'' etc. and turn every
           // omitted field into an explicit clear, defeating the store gateway's merge-on-omit.
           // The gateway parses the merged note fully — same validation, right order, no casts.
-          const { invalidates, ...parsed } = MemoryWriteToolInput.parse(input)
+          const normalized = normalizeWrite(input)
+          const { invalidates, ...parsed } = MemoryWriteToolInput.parse(normalized.input)
+          if (parsed.id === undefined && parsed.title === undefined)
+            throw new Error('a new note needs a title (it derives the id) — pass an id instead to update an existing note')
           let id: string
           try {
-            id = parsed.id ?? slugId(parsed.title)
+            id = parsed.id ?? slugId(parsed.title ?? '')
           } catch {
             // slugId's own error is CLI-flavored ("orc memory add --id ...") — this boundary
             // has no such command, so it gets tool-appropriate guidance instead.
@@ -275,7 +310,11 @@ export function memoryTools(opts: {
           // the derived one does not already exist (that case is an ordinary update)
           const scope = parsed.scope ?? MemoryScope.project
           const forkRisk = parsed.id === undefined && !(await store.get(id, scope))
-          const duplicates = forkRisk ? await duplicateSubjectWarning(store, scope, parsed.title, id) : []
+          // a fork check compares SUBJECTS, so it needs the title the writer supplied; an update by
+          // id carries none and cannot fork by construction
+          const duplicates = forkRisk && parsed.title !== undefined
+            ? await duplicateSubjectWarning(store, scope, parsed.title, id)
+            : []
           const n = await store.write({ ...parsed, id }, author, { idempotencyKey, ...(invalidates && { invalidates }) })
           // No revision: the write is event-first and the projector is asynchronous, so within
           // the flush window store.write reports the revision from BEFORE this write (and
@@ -284,6 +323,7 @@ export function memoryTools(opts: {
           // authoritative value.
           const dead = await unresolvedLinks(store, n)
           const warnings = [
+            ...normalized.warnings,
             ...duplicates,
             ...noteLint(n),
             ...(dead.length
