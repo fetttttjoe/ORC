@@ -24,6 +24,10 @@ const ExecInput = z.object({ command: z.string().min(1) })
 // ponytail: fixed caps — promote to config when a real suite outgrows them
 const TIMEOUT_MS = 10 * 60_000
 const KILL_GRACE_MS = 5_000 // SIGTERM → wait → SIGKILL, so a child that ignores SIGTERM still dies
+// How long after the child EXITS we still wait for its stdio to close. Long enough that the normal
+// path reports complete output through 'close'; short enough that an orphaned grandchild holding
+// the pipes cannot hang the tool. Not a tuning knob — a liveness floor.
+const EXIT_FLUSH_MS = 250
 const CLIP_CHARS = 8_000 // per stream, head + tail: typecheck errors lead, test summaries trail
 const MAX_BYTES = 64 * 1024 * 1024 // per stream, matches the old spawnSync maxBuffer
 
@@ -68,11 +72,13 @@ export function execTool(opts: { workspaceDir: string; allowlist: string[] }): R
       return await new Promise<{ output: Record<string, unknown>; isError: boolean }>(resolve => {
         let settled = false
         let graceTimer: ReturnType<typeof setTimeout> | undefined
+        let exitTimer: ReturnType<typeof setTimeout> | undefined
         const finish = (r: { output: Record<string, unknown>; isError: boolean }) => {
           if (settled) return
           settled = true
           clearTimeout(killTimer)
           if (graceTimer) clearTimeout(graceTimer)
+          if (exitTimer) clearTimeout(exitTimer)
           resolve(r)
         }
         const [command, ...rest] = argv
@@ -97,11 +103,24 @@ export function execTool(opts: { workspaceDir: string; allowlist: string[] }): R
           graceTimer = setTimeout(() => child.kill('SIGKILL'), KILL_GRACE_MS)
         }, TIMEOUT_MS)
         child.on('error', e => finish({ output: { error: errorMessage(e) }, isError: true }))
-        child.on('close', (code, signal) => {
+        const settle = (code: number | null, signal: NodeJS.Signals | null): void => {
           if (timedOut) return finish({ output: { error: `command timed out after ${TIMEOUT_MS / 1000}s (killed with ${signal ?? 'SIGKILL'})` }, isError: true })
           // an external signal (e.g. an OOM SIGKILL) is a real failure, but NOT a timeout — report it as itself
           if (signal) return finish({ output: { error: `command killed by ${signal}` }, isError: true })
           finish({ output: { exitCode: code ?? -1, stdout: clip(stdout), stderr: clip(stderr) }, isError: false })
+        }
+        child.on('close', settle)
+        // 'close' waits for the stdio STREAMS to end, not for the process to exit — so a command
+        // that leaves a grandchild holding the inherited pipes (a background server a test suite
+        // starts and does not reap) exits while the only resolution path never fires. The timeout
+        // could not rescue it either: it kills the CHILD, and the grandchild still holds the pipes,
+        // so the tool hung forever with `bun test` — which is on the default execAllowlist.
+        //
+        // 'exit' is the process-level truth. Give the streams a brief grace to flush so the normal
+        // path still reports full output via 'close' (finish's `settled` guard makes whichever
+        // lands first the winner), then settle on what we have.
+        child.on('exit', (code, signal) => {
+          exitTimer = setTimeout(() => settle(code, signal), EXIT_FLUSH_MS)
         })
       })
     },

@@ -4,6 +4,7 @@ import { seedRegistries } from './runtime'
 import { createMemory, openKnowledge, orphanedNotes } from '@orc/memory'
 import { openMemory } from './memory-open'
 import { PROJECT_DIR_NOTE_ID, PROJECT_NAME_NOTE_ID, type OrcActions } from '@orc/ui-core'
+import type { MemoryAuthor } from '@orc/contracts'
 import { createVaultProjector } from '@orc/vault-projector'
 import { existsSync, rmSync, statSync } from 'node:fs'
 import path from 'node:path'
@@ -154,6 +155,12 @@ export function buildOrcActions(deps: {
   // for us, or (under --no-daemon) a runtime this process holds. This layer never touches an
   // execution port itself: every door records the ask and lets the supervisor execute it.
   ensureRuntime: () => Promise<unknown>
+  // Which DOOR these actions belong to. Recorded on a feedback answer, because for a grounded task
+  // the conversational 'approve' IS the human gate: mcpApproveTool refuses under --autonomy gated
+  // and buildCopilotTools omits `approve` entirely "by design: the human gate is structural", but
+  // BOTH still ship `reply` and `revise`, which reach the same gate by a different name. Defaults
+  // to the terminal, so the CLI is unchanged and only a door that knows it is not a human says so.
+  via?: MemoryAuthor['source']
   plugin?: { config: ProjectConfig; log: EventLog; storage?: Storage }
   listModels?: () => Promise<string[]>
   listModelOptions?: () => Promise<ModelOption[]>
@@ -240,7 +247,7 @@ export function buildOrcActions(deps: {
       // the answer only unblocks the step; a supervisor is what carries it into the parked
       // workflow (its router reacts to feedback_provided) and keeps executing
       await ensureRuntime()
-      const topic = await kernel.replyFeedback(taskId, text)
+      const topic = await kernel.replyFeedback(taskId, text, deps.via)
       return { answered: topic !== null }
     },
 
@@ -260,7 +267,7 @@ export function buildOrcActions(deps: {
     async revise(taskId, text, scope) {
       await ensureRuntime() // resuming the gate needs a supervisor, exactly like reply
       for (const noteId of scope) await kernel.annotatePlan(taskId, { targetNote: noteId, refs: [], text })
-      const topic = await kernel.replyFeedback(taskId, text)
+      const topic = await kernel.replyFeedback(taskId, text, deps.via)
       return { topic }
     },
 

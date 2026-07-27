@@ -581,7 +581,7 @@ export function buildProgram(
 
   // one shared implementation of every mutating command — the web adapter gets the same object.
   // (discovery is declared up top so the `plan` command's rate line can reach it too)
-  const actions = () => buildOrcActions({ kernel, ensureRuntime, plugin, listModels: discovery?.listModels, listModelOptions: discovery?.listModelOptions })
+  const actions = (via?: 'cli' | 'mcp') => buildOrcActions({ kernel, ensureRuntime, plugin, via, listModels: discovery?.listModels, listModelOptions: discovery?.listModelOptions })
 
   const needPort = async (): Promise<ExecutionPort> => {
     if (!portFactory) throw new Error('execution commands are unavailable in this context')
@@ -914,7 +914,12 @@ export function buildProgram(
       const { startMcpServe } = await import('./mcp-serve') // lazy: the SDK loads only here
       await startMcpServe({
         config, log,
-        actions: portFactory ? actions() : null,
+        // 'mcp', so a feedback answer arriving through this door is RECORDED as arriving through
+        // it. For a grounded task the conversational 'approve' is the human gate, and
+        // approvedPlanHash only honours source 'cli' — so an agent answering 'approve' here now
+        // fails that gate honestly instead of satisfying it under a human's name. Operators who
+        // DO want the client approving still have the explicit, autonomy-gated `approve` tool.
+        actions: portFactory ? actions('mcp') : null,
         autonomy: opts.autonomy,
       })
     })

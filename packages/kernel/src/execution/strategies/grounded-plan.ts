@@ -99,6 +99,45 @@ export function foldPlanNotes(events: EventRecord[], scope: string): PlanNote[] 
 // master's decomposes_into children → steps; each child's depends_on links → dependsOn.
 // ponytail: one decomposition level per approve — a subplan that itself decomposes re-splits
 // when its child runs; recurse only when a real 3-level plan needs it.
+// The subplan's ordering, with ONE spelling and two different repairs.
+//
+// Ordering is the `dependsOn` FIELD. A `depends_on` LINK is knowledge ("this subplan builds on that
+// finding") and never schedules — that separation is the whole point: a link is a durable statement
+// about how facts relate, and ordering stops meaning anything the moment the plan is frozen.
+//
+// The two mistakes are not the same mistake, so they are not handled the same way:
+//
+//   * A depends_on LINK to a SIBLING means the author reached for the wrong one. It is a spelling
+//     error with an obvious correction, so it FAILS at the approval gate and says what to write.
+//     Silently honouring it would keep both spellings alive; silently ignoring it would drop the
+//     ordering and let a step run early, which is the race this all exists to prevent.
+//
+//   * A FIELD naming a step that no longer exists means the plan changed underneath it — the
+//     planner replaced `api` with api-read/api-write while `verify` kept dependsOn ['api'], because
+//     the skill tells it to leave untouched notes byte-stable. Nobody can know the right answer, so
+//     it widens to EVERY sibling. A missing dependency lets a step start too early (silent
+//     corruption); a surplus one only makes it start later. The safe direction is the ordered one,
+//     and the human sees it — a step that suddenly waits on everything is what the rendered plan shows.
+//
+// Returned in `kids` order and deduped, so identical notes always freeze identically.
+function healDependsOn(
+  stepId: string,
+  declared: readonly string[],
+  links: ReadonlyArray<{ id: string; kind: string }>,
+  kids: readonly string[],
+): string[] {
+  for (const l of links)
+    if (l.kind === LINK_KIND.depends_on && kids.includes(l.id))
+      throw new Error(`plan-note '${stepId}' links depends_on '${l.id}', which is a sibling — ordering is the \`dependsOn\` FIELD, not a link. Write dependsOn: ["${l.id}"] on '${stepId}' and remove the link (a depends_on link means knowledge, and never affects scheduling).`)
+  const out = new Set<string>()
+  for (const d of declared) {
+    if (kids.includes(d)) { out.add(d); continue }
+    for (const k of kids) if (k !== stepId) out.add(k)
+  }
+  out.delete(stepId)
+  return kids.filter(k => out.has(k))
+}
+
 export function instantiateFrozenPlan(masterId: string, notes: PlanNote[]): ChildPlanDraft {
   const byId = new Map(notes.map(n => [n.id, n]))
   const kids = (byId.get(masterId)?.links ?? []).filter(l => l.kind === LINK_KIND.decomposes_into).map(l => l.id)
@@ -112,7 +151,23 @@ export function instantiateFrozenPlan(masterId: string, notes: PlanNote[]): Chil
         id, role: id === VERIFY_STEP_ID ? STEP_ROLE.auditor : STEP_ROLE.implementer, title: n.title,
         instructions: (n.body || n.summary || n.title)
           + (id === VERIFY_STEP_ID ? `\n\n${AUDITOR_CONTRACT}` : ''),
-        dependsOn: n.links.filter(l => l.kind === LINK_KIND.depends_on).map(l => l.id).filter(d => kids.includes(d)),
+        // Ordering comes from the FIELD, never from links. A link is a durable statement about how
+        // facts relate; ordering is execution structure that stops meaning anything once the plan is
+        // frozen. Reading a field removes the guess entirely — there is no "was this target a
+        // sibling once?" question left to get wrong — and `depends_on` goes back to meaning exactly
+        // one thing in the knowledge graph.
+        //
+        // A target that is no longer a step HEALS TOWARD SAFETY rather than failing the freeze or
+        // being dropped. Reachable through the ordinary revise loop: the planner replaces `api` with
+        // api-read/api-write while `verify` keeps dependsOn ['api'], because the skill tells it to
+        // leave untouched notes byte-stable. Dropping the edge is the dangerous repair — it lets the
+        // step run EARLY, which is the "verify audited a file draft had not written yet" race. So an
+        // unresolvable target is replaced by every current sibling: strictly no looser than intended,
+        // never a race, and it costs only parallelism.
+        //
+        // It stays VISIBLE rather than silent: the human approves a rendered plan, and a step that
+        // suddenly waits on everything is exactly what that render shows.
+        dependsOn: healDependsOn(id, n.dependsOn, n.links, kids),
         // the note's declared write-globs become the step's zone — the executor fence makes
         // "parallel siblings must not write the same files" mechanical instead of prose
         zone: n.zone,

@@ -343,10 +343,21 @@ export function completedStepIds(state: State, taskId: string): Set<string> {
 
 export function nextAttempts(state: State, taskId: string, plan: Pick<Plan, 'steps'>): Record<string, number> {
   const out: Record<string, number> = {}
+  // A step folded `running` normally means a LIVE attempt, and reusing its number is what makes the
+  // deterministic workflowID re-attach instead of starting a duplicate. But that reading only holds
+  // while the RUN is live. Once the task has settled, no step of it can still be running: the fold
+  // says `running` only because the step died between its last checkpoint and step_failed — a
+  // Postgres blip inside the finish window exhausts the checkpoint's retries, and finishFailed's own
+  // append fails the same way, so the event that would have said "failed" was never written.
+  //
+  // Reusing the attempt then re-attached to a DEAD DBOS workflow, which replays its stored error, so
+  // every `orc retry` failed identically and forever with no way to move past it. A settled task is
+  // the log's own proof that the attempt is orphaned, so it gets a fresh one.
+  const settled = state.tasks.get(taskId)?.status !== TASK_STATUS.running
   for (const step of plan.steps) {
     const s = state.steps.get(taskId)?.get(step.id)
-    // running = orphaned/live attempt: reuse its number so the idempotent workflowID re-attaches
-    out[step.id] = s ? (s.status === STEP_RUN_STATUS.running ? s.attempt : s.attempt + 1) : 1
+    const live = s?.status === STEP_RUN_STATUS.running && !settled
+    out[step.id] = s ? (live ? s.attempt : s.attempt + 1) : 1
   }
   return out
 }

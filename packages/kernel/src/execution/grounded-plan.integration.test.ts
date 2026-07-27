@@ -102,7 +102,7 @@ function groundedFake(): AgentExecutor<unknown> {
         const notes: Record<string, MemoryNoteDraft> = {
           masterplan: { id: 'masterplan', title: 'Web app', tier: NOTE_TIER.plan, scope, body: 'build the whole web app', links: [{ id: 'db', kind: LINK_KIND.decomposes_into }, { id: 'api', kind: LINK_KIND.decomposes_into }] },
           db: { id: 'db', title: 'DB', tier: NOTE_TIER.plan, scope, body: 'create the schema', rationale: 'data model first', uncertainty: ['schema shape unverified — no analysis of existing tables'] },
-          api: { id: 'api', title: 'API', tier: NOTE_TIER.plan, scope, body: 'build the endpoints', rationale: 'consumers need a surface', links: [{ id: 'db', kind: LINK_KIND.depends_on }] },
+          api: { id: 'api', title: 'API', tier: NOTE_TIER.plan, scope, body: 'build the endpoints', rationale: 'consumers need a surface', dependsOn: ['db'] },
         }
         for (const id of ['masterplan', 'db', 'api']) await write(id, notes[id]!)
         const finalize = (checkpoint: string, toolCallId: string) =>

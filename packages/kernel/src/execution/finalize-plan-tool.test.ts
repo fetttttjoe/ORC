@@ -30,7 +30,7 @@ describe('finalize_plan tool', () => {
     const notes = [
       note({ id: 'masterplan', title: 'Web app', body: 'the whole thing', links: [link('db', 'decomposes_into'), link('api', 'decomposes_into')] }),
       note({ id: 'db', title: 'DB', body: 'schema' }),
-      note({ id: 'api', title: 'API', body: 'endpoints', links: [link('db', 'depends_on')] }),
+      note({ id: 'api', title: 'API', body: 'endpoints', dependsOn: ['db'] }),
     ]
     const calls: unknown[] = []
     const tool = finalizePlanTool({ kernel: fakeKernel(notes, calls), config, p })

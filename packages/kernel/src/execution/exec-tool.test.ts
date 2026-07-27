@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test'
-import { mkdtempSync, realpathSync } from 'node:fs'
+import { mkdtempSync, realpathSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { z } from 'zod'
@@ -12,6 +12,20 @@ const ws = () => mkdtempSync(path.join(tmpdir(), 'orc-exec-'))
 const tool = (allowlist: string[], dir = ws()) => execTool({ workspaceDir: dir, allowlist })[0]!
 
 describe('exec tool', () => {
+  // 'close' waits for the stdio STREAMS, not the process. A command that leaves a grandchild
+  // holding the inherited pipes exits while close never fires — and the timeout kills only the
+  // CHILD, so the grandchild keeps them open and the tool hangs forever. `bun test` is on the
+  // default allowlist, so a suite that starts a background server hit exactly this.
+  it('settles when the command exits even if a grandchild holds the pipes open', async () => {
+    // the script backgrounds a sleeper that INHERITS stdout and outlives sh, then sh exits at once
+    const dir = ws()
+    writeFileSync(path.join(dir, 'bg.sh'), 'sleep 30 &\necho done\n')
+    const res = await tool(['sh'], dir).execute({ command: 'sh bg.sh' })
+    const out = ExecOut.parse(res.output)
+    expect(out.exitCode).toBe(0)
+    expect(out.stdout).toContain('done')
+  }, 10_000)
+
   it('is not offered at all when the allowlist is empty — registration gate, not a runtime error', () => {
     expect(execTool({ workspaceDir: ws(), allowlist: [] })).toEqual([])
   })

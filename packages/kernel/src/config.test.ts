@@ -278,11 +278,6 @@ describe('initializeProject', () => {
     expect(second.concurrency).toBe(7)
   })
 
-  it('refuses a pre-split project whose id is still in the settings file', () => {
-    const dir = tmpProject({ projectId: '00000000-0000-4000-8000-000000000001', projectName: 'legacy' })
-    expect(() => initializeProject(dir, 'again')).toThrow(/already initialized/)
-  })
-
   it('initializes a bare directory with no .orc at all', () => {
     const dir = mkdtempSync(path.join(tmpdir(), 'orc-'))
     initializeProject(dir, 'fresh')

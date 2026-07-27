@@ -14,6 +14,32 @@ const planV = (version: number): Plan => planFixture({ version })
 const evt = (seq: number, kind: EventRecord['kind'], payload: Record<string, unknown>): EventRecord =>
   eventFixture({ seq, ts: '2026-07-16T00:00:00.000Z', kind, payload })
 
+// A step folded `running` is a LIVE attempt only while the run is live. Once the task settles, the
+// fold says `running` only because the step died between its last checkpoint and step_failed — so
+// reusing the attempt re-attached to a DEAD workflow, which replays its stored error and makes
+// every `orc retry` fail identically, forever.
+describe('nextAttempts and an orphaned running step', () => {
+  const plan = { steps: [{ id: 'a' }, { id: 'b' }] } as Parameters<typeof nextAttempts>[2]
+  const stateWith = (status: string, stepStatus: string) => {
+    const st = emptyFold().state
+    st.tasks.set('t1', { id: 't1', parentId: null, type: 'generic', title: 'T', spec: '', status, zone: [], budgetUSD: null, depth: 0, createdAt: '2026-07-27T00:00:00.000Z' } as never)
+    st.steps.set('t1', new Map([['a', { status: stepStatus, attempt: 2 } as never]]))
+    return st
+  }
+
+  it('reuses the attempt while the run is LIVE, so the workflow id re-attaches', () => {
+    expect(nextAttempts(stateWith('running', 'running'), 't1', plan).a).toBe(2)
+  })
+
+  it('gives a fresh attempt once the task has settled — the running step is orphaned', () => {
+    expect(nextAttempts(stateWith('blocked', 'running'), 't1', plan).a).toBe(3)
+  })
+
+  it('a step with no history starts at 1 either way', () => {
+    expect(nextAttempts(stateWith('blocked', 'running'), 't1', plan).b).toBe(1)
+  })
+})
+
 describe('fold', () => {
   it('replays a full lifecycle into consistent state', () => {
     const state = fold([

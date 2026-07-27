@@ -27,11 +27,11 @@ describe('planGraphHash', () => {
 })
 
 describe('instantiateFrozenPlan (pure, deterministic)', () => {
-  it('translates decomposes_into children into steps and depends_on into dependsOn', () => {
+  it('translates decomposes_into children into steps and the dependsOn field into ordering', () => {
     const notes: PlanNote[] = [
       note({ id: 'masterplan', links: [link('db', LINK_KIND.decomposes_into), link('api', LINK_KIND.decomposes_into)] }),
       note({ id: 'db', title: 'DB', body: 'create the schema' }),
-      note({ id: 'api', title: 'API', body: 'build the api', links: [link('db', LINK_KIND.depends_on)] }),
+      note({ id: 'api', title: 'API', body: 'build the api', dependsOn: ['db'] }),
     ]
     const draft = instantiateFrozenPlan('masterplan', notes)
     expect(draft.steps.map(s => s.id)).toEqual(['db', 'api'])
@@ -55,7 +55,7 @@ describe('instantiateFrozenPlan (pure, deterministic)', () => {
     const notes: PlanNote[] = [
       note({ id: 'masterplan', links: [link('work', LINK_KIND.decomposes_into), link('verify', LINK_KIND.decomposes_into)] }),
       note({ id: 'work', title: 'Work', body: 'do it' }),
-      note({ id: 'verify', title: 'Verify', body: 'audit it', links: [link('work', LINK_KIND.depends_on)] }),
+      note({ id: 'verify', title: 'Verify', body: 'audit it', dependsOn: ['work'] }),
     ]
     const draft = instantiateFrozenPlan('masterplan', notes)
     expect(draft.steps.find(s => s.id === 'verify')!.role).toBe('auditor')
@@ -82,6 +82,60 @@ describe('instantiateFrozenPlan (pure, deterministic)', () => {
       note({ id: 'a', title: 'A', links: [link('outsider', LINK_KIND.depends_on)] }),
     ]
     expect(instantiateFrozenPlan('masterplan', notes).steps[0]!.dependsOn).toEqual([])
+  })
+
+  // A depends_on LINK to a NON-sibling is knowledge ("builds on that finding") and never schedules.
+  it('a depends_on link outside the plan is knowledge, not ordering', () => {
+    const notes: PlanNote[] = [
+      note({ id: 'masterplan', links: [link('a', LINK_KIND.decomposes_into)] }),
+      note({ id: 'a', title: 'A', links: [link('outsider', LINK_KIND.depends_on)] }),
+    ]
+    expect(instantiateFrozenPlan('masterplan', notes).steps[0]!.dependsOn).toEqual([])
+  })
+
+  // A link to a SIBLING is a spelling error with an obvious correction: honouring it would keep two
+  // ways to say one thing, and ignoring it would drop the ordering and let the step run early.
+  it('rejects a depends_on link to a sibling and names the field to use instead', () => {
+    const notes: PlanNote[] = [
+      note({ id: 'masterplan', links: [link('a', LINK_KIND.decomposes_into), link('b', LINK_KIND.decomposes_into)] }),
+      note({ id: 'a', title: 'A' }),
+      note({ id: 'b', title: 'B', links: [link('a', LINK_KIND.depends_on)] }),
+    ]
+    expect(() => instantiateFrozenPlan('masterplan', notes)).toThrow(/dependsOn.*FIELD, not a link/s)
+  })
+
+  it('takes ordering from the dependsOn field', () => {
+    const notes: PlanNote[] = [
+      note({ id: 'masterplan', links: [link('a', LINK_KIND.decomposes_into), link('b', LINK_KIND.decomposes_into)] }),
+      note({ id: 'a', title: 'A' }),
+      note({ id: 'b', title: 'B', dependsOn: ['a'] }),
+    ]
+    expect(instantiateFrozenPlan('masterplan', notes).steps.find(s => s.id === 'b')!.dependsOn).toEqual(['a'])
+  })
+
+  // A missing dependency lets a step run EARLY — silent corruption. A surplus one only makes it run
+  // later. So an unresolvable target widens to every sibling rather than being dropped or throwing:
+  // the planner replaced `a` with a-read/a-write while `b` kept dependsOn ['a'].
+  it('heals a stale ordering target by waiting on every sibling, never by dropping it', () => {
+    const notes: PlanNote[] = [
+      note({ id: 'masterplan', links: [link('a-read', LINK_KIND.decomposes_into), link('a-write', LINK_KIND.decomposes_into), link('b', LINK_KIND.decomposes_into)] }),
+      note({ id: 'a-read', title: 'A read' }),
+      note({ id: 'a-write', title: 'A write' }),
+      note({ id: 'b', title: 'B', dependsOn: ['a'] }), // 'a' no longer exists
+    ]
+    const b = instantiateFrozenPlan('masterplan', notes).steps.find(s => s.id === 'b')!
+    expect(b.dependsOn).toEqual(['a-read', 'a-write']) // never [], never containing itself
+  })
+
+  it('the heal stays deterministic and never self-depends', () => {
+    const notes: PlanNote[] = [
+      note({ id: 'masterplan', links: [link('a', LINK_KIND.decomposes_into), link('b', LINK_KIND.decomposes_into)] }),
+      note({ id: 'a', title: 'A', dependsOn: ['gone'] }),
+      note({ id: 'b', title: 'B' }),
+    ]
+    const first = instantiateFrozenPlan('masterplan', notes)
+    expect(first.steps.find(s => s.id === 'a')!.dependsOn).toEqual(['b'])
+    expect(first).toEqual(instantiateFrozenPlan('masterplan', notes))
   })
 
   it('planScope derives the per-task plan-note scope', () => {
@@ -129,7 +183,7 @@ describe('foldPlanNotes (log-fold, projection-independent)', () => {
     const notes = foldPlanNotes([
       written({ id: 'masterplan', scope, tier: 'plan', title: 'Web app', body: 'whole thing', links: [{ id: 'db', kind: 'decomposes_into' }, { id: 'api', kind: 'decomposes_into' }] }),
       written({ id: 'db', scope, tier: 'plan', title: 'DB', body: 'schema' }),
-      written({ id: 'api', scope, tier: 'plan', title: 'API', body: 'endpoints', links: [{ id: 'db', kind: 'depends_on' }] }),
+      written({ id: 'api', scope, tier: 'plan', title: 'API', body: 'endpoints', dependsOn: ['db'] }),
     ], scope)
     expect(notes.map(n => n.id).sort()).toEqual(['api', 'db', 'masterplan'])
     const draft = instantiateFrozenPlan('masterplan', notes)

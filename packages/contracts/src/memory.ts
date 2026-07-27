@@ -235,6 +235,16 @@ export const PlanNoteInput = z.object({
   // workspace-relative write globs this subplan may touch at execution — the freezer carries them
   // into the child step's zone and the executor's write-fence enforces them. Parallel siblings
   // declare DISJOINT zones; empty = unfenced (paths is documentation, zone is policy).
+  // Sibling ids this subplan must run AFTER. A FIELD, not a link, and deliberately so: ordering is
+  // execution structure with no meaning once the plan is frozen — exactly what `zone` is — while a
+  // LINK is a durable statement about how facts relate. Carrying ordering as a `depends_on` link
+  // overloaded one kind with two meanings (plan-authoring said "order lives in depends_on", while
+  // codebase-analysis said "each area links depends_on: <area>" to mean an import), so the freeze
+  // had to GUESS which was meant from whether the target happened to be a sibling — and guessed
+  // wrong for a target that used to be one, silently un-ordering the plan.
+  // Nothing traverses it either: the graph draws step ordering from the frozen step's own
+  // dependsOn, so this was only ever an input to the freeze.
+  dependsOn: stringOrList(z.string().min(1).max(MEMORY_LIMITS.labelChars), MEMORY_LIMITS.detailItems).default([]),
   zone: stringOrList(z.string().min(1).max(MEMORY_LIMITS.detailChars), 16).default([]),
   // capabilities this subplan needs, frozen into its step like zone is. SELECTION, not grant: a
   // ref resolves only if the operator declared the MCP server in config AND trusted it, and
@@ -334,6 +344,7 @@ export const MemoryNoteDraftInput = z.object({
   sources: optionalNoDefault(SemanticNoteInput.shape.sources),
   rationale: optionalNoDefault(PlanNoteInput.shape.rationale),
   uncertainty: optionalNoDefault(PlanNoteInput.shape.uncertainty),
+  dependsOn: optionalNoDefault(PlanNoteInput.shape.dependsOn),
   zone: optionalNoDefault(PlanNoteInput.shape.zone),
   skillRefs: optionalNoDefault(PlanNoteInput.shape.skillRefs),
   toolRefs: optionalNoDefault(PlanNoteInput.shape.toolRefs),

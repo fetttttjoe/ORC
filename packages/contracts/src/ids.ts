@@ -34,7 +34,12 @@ export function slugId(title: string): string {
 // memory schemas because `analysis` and `events` both read it at module top level: from inside
 // the memory/events cycle that resolves to undefined depending on which module loaded first.
 export const MemoryAuthor = z.object({
-  source: z.enum(['agent', 'cli']),
+  // 'mcp' is a DOOR, not a person. It exists because plan_approved.approvedBy already carries
+  // enum(['human','policy','mcp']) "so replay shows exactly who approved (P7 attribution)", while
+  // this enum could not express the same thing — so a grounded task's conversational approve, which
+  // IS its human gate, was recorded as 'cli' whoever sent it. The log could not distinguish a human
+  // at a terminal from an agent driving the MCP surface.
+  source: z.enum(['agent', 'cli', 'mcp']),
   taskId: z.string().nullable().optional(),
   stepId: z.string().nullable().optional(),
   runToken: z.string().nullable().optional(),

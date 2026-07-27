@@ -3,6 +3,7 @@ import { MASTERPLAN_NOTE_ID,
   AnalysisCompletedPayload, ChildPlanDraft, EVENT_KIND, FeedbackProvidedPayload, ISOLATION_TIER, MemoryDeletedPayload, MemoryWrittenPayload, NOTE_TIER, PAYLOAD_SCHEMAS, PlanAnnotatedPayload, PlanDraft, RunRequestedPayload, STRATEGY, TASK_STATUS, TERMINAL_TASK_STATUS, evaluateApproval, formatModelOption, validatePlan, type ChildPlanDraftInput, type ModelOption,
   type Analyzer, type ApprovalPolicy, type EventKind, type EventRecord,
   type PlanNote, type Plan, type PlanStep, type TaskNode, type TaskStatus,
+  type MemoryAuthor,
 } from '@orc/contracts'
 import { foldPlanNotes, planGraphHash, planScope, PLAN_STEP_ID, PLAN_STEP_ROLE } from './execution/strategies/grounded-plan'
 import { DEFAULT_MAX_ITERATIONS } from './config'
@@ -319,7 +320,12 @@ export class Kernel {
   // the step workflow parked on DBOS.recv(`feedback:<topic>`, 60) — that workflow's id is the event's
   // own envelope runToken, recorded by the port from inside the step (never reconstructed here).
   // Returns the resolved topic, or null if the task has no open question (the CLI reports either).
-  async replyFeedback(taskId: string, text: string): Promise<string | null> {
+  // `via` names the DOOR the answer arrived through, and defaults to the terminal. It is recorded
+  // rather than assumed because for a GROUNDED task the conversational 'approve' answered here IS
+  // the human gate — createGroundedTask policy-approves the scaffold precisely because "the human's
+  // real gate is the conversational approve inside the plan step" — so who sent it decides whether
+  // a plan was approved by a person or by an agent driving the MCP surface.
+  async replyFeedback(taskId: string, text: string, via: MemoryAuthor['source'] = 'cli'): Promise<string | null> {
     const open = await this.log.transaction(async tx => {
       const task = await this.requireTask(tx, taskId)
       const requested = this.openRequest(await tx.byTask(taskId))
@@ -336,7 +342,7 @@ export class Kernel {
         ))
         : undefined
       const payload = FeedbackProvidedPayload.parse({
-        topic, text, author: { source: 'cli' }, ...(planHash && { planHash }),
+        topic, text, author: { source: via }, ...(planHash && { planHash }),
       })
       const provided = await tx.append({
         taskId, stepId: event.stepId, runToken: event.runToken,

@@ -40,7 +40,7 @@ type BoundedField =
   | 'summary' | 'rationale' | 'body'                                   // bisected, cut marked
   | 'modelRef'                                                         // kept whole or not at all
   | 'categories' | 'tags' | 'links' | 'paths' | 'claims'               // refilled item by item
-  | 'uncertainty' | 'zone' | 'sources' | 'skillRefs' | 'toolRefs'
+  | 'uncertainty' | 'zone' | 'sources' | 'skillRefs' | 'toolRefs' | 'dependsOn'
 type FitterCoversNote = Exclude<keyof NoteView, BoundedField> extends never ? true : never
 const fitterCoversNote: FitterCoversNote = true
 void fitterCoversNote
@@ -51,7 +51,7 @@ function variableChars(note: MemoryNote): number {
   const n: NoteView = note
   const text = [n.summary, n.rationale, n.body, n.modelRef].reduce((sum, s) => sum + (s ?? '').length, 0)
   const lists: Array<ReadonlyArray<unknown> | undefined> =
-    [n.categories, n.tags, n.links, n.paths, n.claims, n.uncertainty, n.zone, n.sources, n.skillRefs, n.toolRefs]
+    [n.categories, n.tags, n.links, n.paths, n.claims, n.uncertainty, n.zone, n.sources, n.skillRefs, n.toolRefs, n.dependsOn]
   return text + lists.reduce(
     (sum, values) => sum + (values ?? []).reduce<number>((inner, value) => inner + itemChars(value), 0), 0)
 }

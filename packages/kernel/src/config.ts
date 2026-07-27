@@ -176,8 +176,7 @@ export function initializeProject(
   opts: { force?: boolean } = {},
 ): { projectId: string; projectName: string } {
   const file = path.join(dir, '.orc', IDENTITY_FILE)
-  // a pre-split project still carries its id in the settings file — that is an initialized project
-  const current = identityOf(dir).projectId ?? readJson(path.join(dir, '.orc', SETTINGS_FILE)).projectId
+  const current = identityOf(dir).projectId
   if (current && !opts.force)
     throw new Error(`project already initialized (${file}) — use --force to mint a new identity`)
   const identity = { projectId: randomUUID(), projectName: name }
@@ -227,8 +226,8 @@ export function loadConfig(explicitDir?: string): OrcConfig {
   const dir = explicitDir ?? findProjectDir(process.cwd())
   loadProjectEnv(dir)
   const fromFile = readJson(path.join(dir, '.orc', SETTINGS_FILE))
-  // identity LAST of the two files: a projectId left behind in the tracked settings (pre-split
-  // projects, or one restored by a checkout) is a fallback, never an override.
+  // identity LAST: it is the one file that names WHICH project this directory is, so a projectId
+  // that somehow reached the tracked settings can never override the local identity.
   const parsed = settingsSchema(dir).safeParse({ ...fromFile, ...identityOf(dir), ...envOverrides() })
   if (!parsed.success)
     throw new Error(
