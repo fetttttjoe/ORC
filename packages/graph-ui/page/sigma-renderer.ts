@@ -52,9 +52,21 @@ export class SigmaRenderer implements GraphRenderer {
     })
     this.sigma.on('clickNode', ({ node }) => this.clickCb?.(node))
     // sigma only tracks WINDOW resizes; the container resizes without one (flex settling on
-    // initial load, the detail panel opening from a deep link, chat/split/graph mode switches)
-    // and sigma keeps rendering into stale dimensions — the reload-time clipped-graph bug.
-    this.resizeObserver = new ResizeObserver(() => this.sigma.resize())
+    // initial load, the detail panel opening from a deep link, chat/split/graph mode switches,
+    // dragging the dock resizer) and sigma keeps rendering into stale dimensions — the
+    // reload-time clipped-graph bug.
+    //
+    // resize() ALONE is not enough, and this is the graph-vanishes-while-you-drag bug: sigma's
+    // resize() sets the canvas dimensions, re-points the WebGL viewport and emits 'resize' — it
+    // never draws (checked against sigma 3.0.3's source). Assigning width/height to a canvas
+    // clears it, so every observer tick blanked the graph and left it blank until something else
+    // happened to trigger a frame. scheduleRender coalesces to the next frame, so a drag that
+    // fires the observer on every pointer move still costs one draw per frame; render, not
+    // refresh, because only the viewport changed — the graph data and its indices did not.
+    this.resizeObserver = new ResizeObserver(() => {
+      this.sigma.resize()
+      this.sigma.scheduleRender()
+    })
     this.resizeObserver.observe(container)
   }
 

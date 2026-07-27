@@ -5,11 +5,24 @@
 export interface ClusterInput { id: string; vector: readonly number[] }
 export interface Cluster { key: string; members: string[]; medoidClaimId: string }
 
-// Cosine similarity at or above which two claims group together. A GUESS, not a measured value: tens
-// of claims cannot distinguish a good split from luck. Settled from `memory_topic_accessed` events —
-// see the claim-grouping spec's "How it gets settled". Lives HERE, with the algorithm it tunes,
-// rather than in the persistence module that happens to call it.
-export const MEMORY_CLUSTER_THRESHOLD = 0.75
+// Cosine similarity at or above which two claims group together. Lives HERE, with the algorithm it
+// tunes, rather than in the persistence module that happens to call it.
+//
+// MEASURED, no longer a guess. Swept 0.50→0.85 over a real 29-claim corpus (nomic-embed-text, 768d)
+// authored by an agent through addClaims; full table in the threshold-sweep report. The value was
+// 0.75, which split that corpus into 22 topics of which 16 were SINGLETONS — a browsable inventory
+// with one entry per claim is the thing topics exist to prevent.
+//
+// 0.70 is chosen for STABILITY, not for grouping more: 0.700–0.735 is the one wide plateau on the
+// curve, producing an identical partition throughout, while 0.75 sits in its most unstable stretch.
+// Reading the groups agrees with the arithmetic — 0.675 fuses pipeline architecture with
+// topic-refresh scheduling, and 0.75 severs a claim-id's hash rule from its own text-normalization
+// rule. Below ~0.585 the whole corpus collapses into one blob; 0.585–0.600 degenerates into exactly
+// the three source notes, which is grouping that tells a reader nothing they did not already know.
+//
+// Limits of that evidence, so the next person does not over-trust it: n=29, a single subsystem, one
+// embedding model. `memory_topic_accessed` is the ongoing measurement — see the claim-grouping spec.
+export const MEMORY_CLUSTER_THRESHOLD = 0.7
 
 const dot = (a: readonly number[], b: readonly number[]): number =>
   a.reduce((sum, value, i) => sum + value * (b[i] ?? 0), 0)

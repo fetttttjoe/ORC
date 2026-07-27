@@ -24,7 +24,17 @@ export class PostgresStore {
 
   // verifies the schema instead of migrating — migration is an explicit step
   static async open(url: string, opts: { projectId: string; redactEnv?: string[] }): Promise<PostgresStore> {
-    const pool = new pg.Pool({ connectionString: url })
+    // Sized deliberately, not left at node-postgres's generic default of 10. Every writer here
+    // serializes on ONE per-project advisory lock (withProjectLock), so connections beyond a
+    // couple cannot buy write throughput — they only reserve server slots. Reads are short.
+    //
+    // The default cost real failures: a store that had ten concurrent queries kept ten idle
+    // connections for the default ten seconds, so sequential test files stacked their idle pools
+    // on top of each other and, with a live supervisor also holding one, the suite exhausted
+    // Postgres' 100-connection default and failed with `sorry, too many clients already` —
+    // tests that pass in isolation. Four is headroom for concurrent reads plus a transaction plus
+    // a spare; the short idle timeout returns slots quickly instead of hoarding them.
+    const pool = new pg.Pool({ connectionString: url, max: 4, idleTimeoutMillis: 2_000 })
     const db = drizzle(pool)
     try {
       await assertMigrated(db, url)

@@ -1,24 +1,46 @@
 # orchestrator
 
-A generic multi-agent orchestrator: recursive task splitting, human plan
-approval, multi-provider agent dispatch, plugin-first. Design spec:
-`docs/superpowers/specs/2026-07-16-orchestrator-design.md`. Adding anything
-(provider, executor, skill, tool, event kind, …): `docs/EXTENDING.md`.
+You describe a job. The system plans it, you approve the plan, and agents
+execute it — splitting into sub-tasks where the work is bigger than one agent,
+surviving crashes, and writing down what they learned so the next run starts
+smarter.
 
-## Status
+**→ [Quickstart](#quickstart)** to have it running.
 
-M4c + M5a + foundation hardening — recursion (task_split/join), committed
-project identity, project-scoped infrastructure, a durable model/tool operation
-journal with honest audit replay, verified output receipts, and a typed
-agent-maintained knowledge graph with current/target architecture views. The
-memory graph carries typed, confidence-weighted links (`RELATE` edges) with a
-graph-distance ranker and a `memory_neighbors` traverse tool, so a recursive
-agent can pull a bounded context slice instead of re-holding everything.
-Startup is degraded-memory tolerant. Findings pulled off the web land as
-cited `research` notes rather than pasted pages, and what memory actually gets
-read is event-sourced rather than guessed at. Every task is auditable,
-resumable, project-isolated, and visible through separate execution, lineage,
-and knowledge graphs.
+Four properties shape everything else:
+
+- **The event log is the truth.** Every task, plan, model call, tool call and
+  memory write is an append-only Postgres row. Nothing is derived state you
+  cannot rebuild — the knowledge graph and the markdown vault are both
+  disposable projections, regenerated from the log on demand.
+- **A human approves the plan.** Agents propose; a person approves; only then
+  does anything run. Approval can be delegated to a policy, but never assumed.
+- **Runs are durable.** `kill -9` mid-step and the work resumes where it left
+  off, without re-billing the model call that already completed.
+- **Memory is authored, not scraped.** Agents record atomic *claims* —
+  individually addressable statements — rather than prose blobs. A claim can be
+  superseded by name, and the log remembers every claim that ever existed, even
+  retired ones.
+
+Design spec: `docs/superpowers/specs/2026-07-16-orchestrator-design.md`.
+Adding anything (provider, executor, skill, tool, event kind, …):
+[`docs/EXTENDING.md`](docs/EXTENDING.md).
+
+## Where it stands
+
+Working today, in rough order of how much of the system each one touches:
+
+| | |
+|---|---|
+| **Recursion** | a step splits into child tasks (`task_split`) and rejoins them (`join_splits`); budget is debited from the parent, depth-bounded by policy |
+| **Durability** | DBOS Transact workflows over a project-scoped Postgres system database; a model or tool call is journalled before and after, so replay is honest rather than optimistic |
+| **Knowledge** | a typed, agent-maintained graph — atomic claims, confidence-weighted `RELATE` edges, a graph-distance ranker, and `memory_neighbors` so an agent pulls a bounded slice instead of re-reading everything |
+| **Topics** | claims cluster by embedding into a browsable inventory, derived and never authored, so knowledge sorts itself without anyone maintaining a taxonomy |
+| **Provenance** | web findings land as cited `research` notes rather than pasted pages, output artifacts carry verified receipts, and what memory was actually *read* is event-sourced rather than guessed |
+| **Isolation** | committed project identity, project-scoped databases, and a runtime lock — two projects on one machine cannot cross-recover each other's work |
+
+Degraded-memory tolerant: if SurrealDB is down you get one warning and explicit
+`memory unavailable` tool results, and everything else keeps working.
 
 ## Architecture & Documentation
 
@@ -48,14 +70,6 @@ Start here to navigate the codebase and understand the architectural foundations
 - `orc graph [--port 7749]` — live WebGL graph of tasks, steps, artifacts, and memory notes (read-only, localhost only)
 - `vault/` — filesystem projections: `index.md` (task tree + status), `tasks/<id>/execution.md` (steps + operations), `tasks/<id>/lineage.md` (artifact receipts), `memory/index.md` (knowledge graph)
 
-### Troubleshooting
-
-- **Degraded memory** — SurrealDB down? ⇒ one warning, explicit `memory unavailable` tool results, everything else keeps working
-- **No claims / no topics** — upgrading onto atomic claims needs `orc memory rebuild` once; a corpus written *before* claims existed stays empty even after it (see [Operational notes](#operational-notes))
-- **Crash recovery** — resumable at any step via DBOS journal; see `orc status <task>` for unresolved operations
-- **Audit trail** — `orc log <task> --json` for full redacted event record; `orc replay <task> --at <seq>` to freeze-frame any moment
-- See also: [Seams reference guide](docs/seams-reference.md) — detailed debugging strategies
-
 ## Stack
 
 TypeScript end-to-end on Bun (package manager, runtime, test runner).
@@ -73,7 +87,11 @@ docker compose up -d --wait     # Postgres :5433 + SurrealDB :8000, loopback-onl
 bun install && bun test
 
 (cd packages/cli && bun link)          # installs a global `orc` (Bun shim); alias works too
-export ANTHROPIC_API_KEY=...    # and/or run a local Ollama
+
+# Model auth. A `.env` in the PROJECT ROOT is loaded by every entry point (CLI, supervisor,
+# MCP server) no matter which directory you invoke from; the shell environment always wins.
+echo 'ANTHROPIC_API_KEY=sk-ant-...' >> .env    # or ORC_ANTHROPIC_AUTH=oauth for a Claude subscription
+                                               # and/or run a local Ollama — no key needed
 
 orc db migrate                  # explicit schema setup; works before project initialization
 orc init --name my-project      # identity + first-party skills; run once per checkout (identity is local, never committed)
@@ -91,7 +109,67 @@ orc mcp trust <id>              # local consent, bound to the server's declarati
 orc mcp serve [--autonomy full] # serve THIS project to external agents over stdio (door #2)
 orc ext trust <path>            # local consent, bound to extension dependency closure + bun.lock
 orc retry <task-id>             # re-run failed steps after a block
+orc memory topics               # what this project knows, grouped — the browsable inventory
+orc memory claims <note-id>     # a note's live claims; --history folds the log for retired ones
 ```
+
+### Two settings a new project usually wants
+
+Neither is required to run a task, but both change what the system can do, and
+the failure mode of each looks like a bug rather than a missing setting.
+
+**An embedder, for semantic search and topics.** Without one, claim search is
+keyword-only and `orc memory topics` never produces a group — topics are derived
+from claim embeddings, so no vectors means no topics. Ollama needs no API key:
+
+```bash
+ollama pull nomic-embed-text
+# .orc/config.json
+"memoryEmbedModel": "ollama/nomic-embed-text"
+```
+
+**An approval rule, if you want tasks to decompose.** A step may split itself
+into child tasks with `task_split`. Under the default `manual` policy every
+child stops at `awaiting_approval` and the parent waits on `join_splits`
+forever — which reads exactly like a hang. To let a tree build on its own:
+
+```jsonc
+// .orc/config.json
+"approvalPolicy": { "default": "manual", "rules": [{ "maxDepth": 2, "then": "auto" }] }
+```
+
+Deliberately no `maxCostUSD` on that rule: a null cost estimate never matches a
+cost bound (spec D8), and `task_split` children carry null estimates — so a
+cost-bounded rule silently gates every child. Cap spend with `orc new --budget
+<usd>` instead, which the kernel enforces by debiting each child from its
+parent's remaining budget.
+
+### When something looks wrong
+
+Most confusing first-run behaviour is one of these, and none of them is a crash
+— the system prefers to keep working and tell you what it could not do.
+
+- **`provider_error: API key is missing`** — the key lives in the project
+  root's `.env`, which is loaded from any working directory. A key exported in
+  one shell is invisible to a supervisor started in another.
+- **A split task looks hung** — its children are sitting at
+  `awaiting_approval` under the default `manual` policy while the parent waits
+  on `join_splits`. `orc tasks` shows them. Approve each, or set the approval
+  rule above.
+- **`orc memory topics` is empty** — on a fresh project, almost always no
+  embedder, so there are no vectors to group. On an upgraded one, a corpus
+  written *before* claims existed needs `orc memory rebuild` once, and even
+  that will not invent claims for notes that never stated any (see
+  [Operational notes](#operational-notes)).
+- **Memory is degraded** — SurrealDB is down. You get one warning and explicit
+  `memory unavailable` tool results; everything else keeps running.
+- **A run died mid-step** — it resumes. `orc status <task-id>` shows
+  unresolved operations, and a completed model call is not billed twice.
+
+To see exactly what happened rather than guess: `orc log <task-id> --json` for
+the full redacted event record, or `orc replay <task-id> --at <seq>` to
+freeze-frame the folded state at any point in history. Deeper call paths and
+debugging scenarios: [seams reference](docs/seams-reference.md).
 
 ### Documentation from the knowledge graph
 
