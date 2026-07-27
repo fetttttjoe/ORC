@@ -20,6 +20,10 @@ Key terms used throughout the orchestrator codebase and documentation. Many term
 
 **Citation** — URL + optional title on a `research` note, proving the finding came from external sources. Only note kind that requires citations. See [knowledge—raw evidence vs distilled note](docs/ARCHITECTURE.md#knowledge-—-raw-evidence-vs-distilled-note).
 
+**Claim** — One individually addressable statement asserted by a [semantic note](#note-tier), and the unit the claim arm of search returns. Its id IS its content: `claimId(text)` = sha256 of the whitespace-normalized text, first 12 hex chars. Replaces the free-form `rules[]` a note used to carry. Writers add and retire claims by name (`addClaims` / `invalidates`) — never by supplying the array. `validFrom` is stamped by the projector from the committed event, not by the writer. See [claims](docs/ARCHITECTURE.md#claims-—-the-addressable-unit-of-knowledge), [`claim.ts`](packages/contracts/src/claim.ts).
+
+**Claim history** — A claim's whole life, recovered by folding the event log (`orc memory claims <id> --history`). The tombstone lives on the `memory_written` event, never on the note, so the log is the only surface a retired claim survives on. See [claims](docs/ARCHITECTURE.md#claims-—-the-addressable-unit-of-knowledge).
+
 **Contracts** — `packages/contracts/` package containing only Zod schemas and interface definitions (no runtime I/O, no policy). Imported by kernel and plugins; kernel never imports plugins. See [dependency rule](docs/EXTENDING.md#invariants-—-the-rules-that-keep-changes-cheap).
 
 ---
@@ -98,9 +102,9 @@ Key terms used throughout the orchestrator codebase and documentation. Many term
 
 **Memory** — Durable knowledge graph (SurrealDB read model + vault projection). Event-first, degradation-tolerant, sourced-research-only. See [`vault/memory/`](README.md#vault-views), [memory system](docs/seams-reference.md#memory-subsystem-interaction).
 
-**Memory note** — Authored fact, decision, finding, or plan recorded in the knowledge graph. Has `id`, `scope`, `tier`, `links`, `body`, plus whatever else its [tier](#note-tier) allows. Only `research` kind requires citations. See [note tiers](packages/contracts/src/memory.ts), [`memory_write` tool](plugins/memory/).
+**Memory note** — Authored fact, decision, finding, or plan recorded in the knowledge graph. Has `id`, `scope`, `tier`, `links`, `title`, `summary`, `body`, plus whatever else its [tier](#note-tier) allows — for a semantic note that includes its [claims](#claim), the statements it asserts. Only `research` kind requires citations. Claims are written additively (`addClaims` / `invalidates`), never by supplying the array. See [note tiers](packages/contracts/src/memory.ts), [`memory_write` tool](plugins/memory/).
 
-**Note tier** — Which memory a note belongs to, and therefore which fields it may carry. `semantic` = durable project knowledge (a claim plus its retrieval surface: `kind`, `categories`, `paths`, `rules`, `sources`). `episodic` = the per-task trail a run leaves behind (title/summary/tags only, always `expirable`). `plan` = one node of a task's decomposition (`rationale`, `uncertainty`, `zone`). A note written without a tier is classified from its shape. See [NOTE_TIERS](packages/contracts/src/memory.ts).
+**Note tier** — Which memory a note belongs to, and therefore which fields it may carry. `semantic` = durable project knowledge (its [claims](#claim), plus the retrieval surface around them: `kind`, `categories`, `paths`, `sources`). `episodic` = the per-task trail a run leaves behind (title/summary/tags only, always `expirable`). `plan` = one node of a task's decomposition (`rationale`, `uncertainty`, `zone`). A note written without a tier is classified from its shape. See [NOTE_TIERS](packages/contracts/src/memory.ts).
 
 **MCP** — Model Context Protocol. External tool server. Declared in `.orc/config.json`, armed with `orc mcp trust` (fingerprint grant), referenced in plans via `toolRefs`. See [MCP server pattern](README.md#operational-notes), [`mcp-client` plugin](plugins/mcp-client/), [trust model](docs/EXTENDING.md#invariants-—-the-rules-that-keep-changes-cheap).
 
@@ -171,6 +175,8 @@ Key terms used throughout the orchestrator codebase and documentation. Many term
 **Task** — Top-level work unit. Created via `orc new`, approved via `orc approve`, run via `orc run`. Has a plan and execution state. See [`Task` type](packages/contracts/src/execution.ts), [`orc new` command](README.md#quickstart).
 
 **Tool** — External capability invoked during step execution (via MCP server or built-in skill). Opted-in via `toolRefs`. See [MCP server](#mcp), [tool references](packages/contracts/src/execution.ts#toolRefs), [`mcp-client` plugin](plugins/mcp-client/).
+
+**Topic** — A group of [claims](#claim) that mean roughly the same thing, DERIVED by clustering their embeddings — never authored, and not an agent-spelled filter. Recomputed wholesale by `refreshTopics` from the claim table (the third pipeline stage), so nothing about a topic lives only in the read model. Browsable via `orc memory topics` and the `memory_topics` tool; fetching one is a TRACKED event (`memory_topic_accessed`). See [topics](docs/ARCHITECTURE.md#topics-—-grouping-that-is-derived-never-authored), [`cluster.ts`](plugins/memory/src/cluster.ts).
 
 **Trust** — Fingerprint-based consent for plugins/MCP/extensions. Declared in `.orc/config.json`, granted via `orc mcp trust` / `orc ext trust`, stored in `.orc/trust.json` (mode 0600, never committed). See [trust model](README.md#operational-notes), [declare vs grant invariant](docs/EXTENDING.md#invariants-—-the-rules-that-keep-changes-cheap).
 

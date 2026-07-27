@@ -3,7 +3,7 @@ import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { z } from 'zod'
-import { claimId, MemoryAccessedPayload, MemoryAuthor, MemoryWrittenPayload, NOTE_TIER, type AccessVia } from '@orc/contracts'
+import { claimId, EVENT_KIND, MemoryAccessedPayload, MemoryAuthor, MemoryTopicAccessedPayload, MemoryWrittenPayload, NOTE_TIER, type AccessVia } from '@orc/contracts'
 import { openStorage, type EventLog } from '@orc/kernel'
 import { createTestDb, TEST_PROJECT_ID } from '@orc/kernel/test-helpers'
 import { SurrealMemory } from './surreal'
@@ -12,7 +12,10 @@ import { createMemoryStore } from './store'
 import { gitRevision } from './index'
 
 const drops: (() => Promise<void>)[] = []
-afterAll(async () => { for (const d of drops) await d() })
+// Concurrent drops with a real hook budget — the same fix and reason as surreal.test.ts's teardown:
+// serial drops blew bun's default 5s budget as soon as this file grew another describe block, and a
+// timed-out teardown leaves throwaway Postgres/Surreal databases behind.
+afterAll(async () => { await Promise.all(drops.map(d => d())) }, 30_000)
 
 describe('MemoryStore gateway', () => {
   it('write appends a memory_written event with stamped provenance and null taskId', async () => {
@@ -237,6 +240,69 @@ describe('additive claim writes', () => {
     const { log, store } = await openStore()
     await store.write({ id: 'n', title: 'N', addClaims: ['first'] }, { source: 'cli' })
     expect(JSON.stringify((await lastWrite(log)).note)).not.toContain('addClaims')
+    await log.close()
+  })
+})
+
+// Against the REAL store, not a fake: the operator's stated reason for making topics a tool rather
+// than an implicit re-rank was that the access be tracked ("let them ask via a tool so we cna
+// track"), and store.topicClaims is the only code that makes that true. A fake proves the tool
+// formats output; only this proves the event lands, once, with the label resolved.
+describe('topic fetches are tracked', () => {
+  const vec = (text: string): number[] => (/alpha|zeta/.test(text) ? [1, 0, 0] : [0, 1, 0])
+  const topicAccesses = async (log: EventLog) =>
+    (await log.all()).filter(e => e.kind === EVENT_KIND.memory_topic_accessed)
+
+  const openTopics = async () => {
+    const pg = await createTestDb(); drops.push(pg.drop)
+    const ts = await createTestSurreal(); drops.push(ts.drop)
+    const log = (await openStorage(pg.url, { projectId: TEST_PROJECT_ID })).events
+    const surreal = await SurrealMemory.open(ts, { embed: async texts => texts.map(vec) })
+    const store = createMemoryStore({ log, surreal })
+    await store.write({ id: 'n', title: 'N', addClaims: ['alpha holds', 'beta holds'] }, { source: 'cli' })
+    for (const e of await log.all()) await surreal.applyEvent(e)
+    await surreal.refreshTopics()
+    return { log, store }
+  }
+
+  it('one fetch appends exactly one memory_topic_accessed, carrying the resolved label', async () => {
+    const { log, store } = await openTopics()
+    const [topic] = await store.topics()
+    const claims = await store.topicClaims(topic!.topicKey, { source: 'agent', taskId: 't1', stepId: 's1', runToken: 'r1' })
+    expect(claims).toHaveLength(topic!.size)
+
+    const tracked = await topicAccesses(log)
+    expect(tracked).toHaveLength(1)
+    // the label rides the EVENT because the read model is disposable — a rebuild would erase it
+    expect(MemoryTopicAccessedPayload.parse(tracked[0]!.payload)).toMatchObject({ topicKey: topic!.topicKey, label: topic!.label })
+    // and the envelope binds it to the acting step, the same rule recordAccess follows: task-scoped
+    // views filter on the envelope, so an unbound append orphans the fetch from the run that made it
+    expect(tracked[0]).toMatchObject({ taskId: 't1', stepId: 's1', runToken: 'r1' })
+    await log.close()
+  })
+
+  it('a keyed replay of one fetch appends one event, not two', async () => {
+    const { log, store } = await openTopics()
+    const [topic] = await store.topics()
+    const author: MemoryAuthor = { source: 'agent', runToken: 'r1' }
+    const key = `r1:tool:c1:topic:${topic!.topicKey}`
+    await store.topicClaims(topic!.topicKey, author, { idempotencyKey: key })
+    await store.topicClaims(topic!.topicKey, author, { idempotencyKey: key })
+    expect(await topicAccesses(log)).toHaveLength(1)
+    await log.close()
+  })
+
+  it('listing the inventory records nothing — only a fetch is a signal', async () => {
+    const { log, store } = await openTopics()
+    expect((await store.topics()).length).toBeGreaterThan(0)
+    expect(await topicAccesses(log)).toEqual([])
+    await log.close()
+  })
+
+  it('an unknown key throws rather than returning empty, and records no signal for it', async () => {
+    const { log, store } = await openTopics()
+    await expect(store.topicClaims('deadbeef0000', { source: 'cli' })).rejects.toThrow(/list topics again/)
+    expect(await topicAccesses(log)).toEqual([])
     await log.close()
   })
 })

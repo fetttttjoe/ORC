@@ -10,7 +10,17 @@ import { createPluginHost } from './host'
 
 let dirs: string[] = []
 const temp = () => { const d = mkdtempSync(path.join(tmpdir(), 'orc-host-')); dirs.push(d); return d }
-afterEach(() => { for (const d of dirs) rmSync(d, { recursive: true, force: true }); dirs = [] })
+// Hosts are registered at CREATION, not shut down at the end of the it() body: a bare trailing
+// `await host.shutdown()` is skipped whenever an assertion above it throws, and the leaked host
+// then poisons every subsequent test in the process. Drained here, so a failing assertion costs
+// one failure instead of a cascade.
+const hosts: Array<{ shutdown: () => Promise<void> }> = []
+afterEach(async () => {
+  for (const h of hosts.reverse()) await h.shutdown()
+  hosts.length = 0
+  for (const d of dirs) rmSync(d, { recursive: true, force: true })
+  dirs = []
+})
 
 const fakeProvider: ModelProvider<unknown> = { costs: {}, languageModel: () => ({}) }
 
@@ -28,10 +38,12 @@ function writeSkill(root: string, name: string): void {
 }
 
 async function makeHost(d: string) {
-  return createPluginHost(loadConfig(d), {
+  const host = await createPluginHost(loadConfig(d), {
     providers: new Map([['fake', fakeProvider]]),
     executors: new Map([['api-loop', { id: 'api-loop', startTurn: async function* () {} }]]),
   })
+  hosts.push(host)
+  return host
 }
 
 describe('createPluginHost / refValidator', () => {
@@ -42,7 +54,6 @@ describe('createPluginHost / refValidator', () => {
     const host = await makeHost(d)
     const plan = planFixture({ steps: [stepFixture({ skillRefs: ['good-skill'], toolRefs: ['files/read_file'] })] })
     expect(await host.refValidator(plan)).toEqual([])
-    await host.shutdown()
   })
 
   it('collects one error per bad ref', async () => {
@@ -61,7 +72,6 @@ describe('createPluginHost / refValidator', () => {
     expect(errors.join('\n')).toContain(`not trusted`)
     expect(errors.join('\n')).toContain(`undeclared MCP server 'undeclared'`)
     expect(errors).toHaveLength(5)
-    await host.shutdown()
   })
 
   it('rejects isolation tiers that are not implemented', async () => {
@@ -69,7 +79,6 @@ describe('createPluginHost / refValidator', () => {
     const host = await makeHost(d)
     const plan = planFixture({ steps: [stepFixture({ isolation: 'worktree' })] })
     expect((await host.refValidator(plan)).join('\n')).toContain(`isolation 'worktree' is not implemented`)
-    await host.shutdown()
   })
 
   it('an invalid skill fails validation with its errors', async () => {
@@ -80,7 +89,6 @@ describe('createPluginHost / refValidator', () => {
     const host = await makeHost(d)
     const plan = planFixture({ steps: [stepFixture({ skillRefs: ['bad-skill'] })] })
     expect((await host.refValidator(plan)).join('\n')).toContain(`invalid skill 'bad-skill'`)
-    await host.shutdown()
   })
 
   it('loads trusted extensions and their registrations are visible to validation', async () => {
@@ -99,7 +107,6 @@ export default {
     expect(host.providers.has('extra')).toBe(true)
     const plan = planFixture({ steps: [stepFixture({ modelRef: 'extra/m' })] })
     expect(await host.refValidator(plan)).toEqual([])
-    await host.shutdown()
   })
 
   it('reload reads a newly granted extension fingerprint from disk', async () => {
@@ -126,18 +133,17 @@ export default {
     grantExtensionTrust('exts/reg.ts', d)
     await host.extensions.reload()
     expect(host.providers.has('extra-v2')).toBe(true)
-    await host.shutdown()
   })
 
   it('exposes a seeded analyzers registry, and refValidator rejects an unknown analyzerRef', async () => {
     const d = project()
     const a: Analyzer = { id: 'agent-analyzer', analysisStep: () => stepFixture({ id: 'analyze', role: 'scout' }) }
     const host = await createPluginHost(loadConfig(d), { analyzers: new Map([['agent-analyzer', a]]) })
+    hosts.push(host) // built directly rather than via makeHost — still register it for teardown
     expect(host.analyzers.has('agent-analyzer')).toBe(true)
     // analyzerRef is an optional Plan field; refValidator must reject an unknown one
     const plan = { ...planFixture(), analyzerRef: 'nope' }
     expect(await host.refValidator(plan)).toContain(`unknown analyzer 'nope'`)
-    await host.shutdown()
   })
 
   it('rejects config with a bad mcp server id', () => {

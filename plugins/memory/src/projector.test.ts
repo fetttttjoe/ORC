@@ -10,8 +10,24 @@ import { createTestSurreal } from './test-helpers'
 import { createMemoryProjector } from './projector'
 
 const drops: (() => Promise<void>)[] = []
-afterAll(async () => { for (const d of drops) await d() })
-const noteInput = { id: 'auth', scope: 'project', title: 'Auth', categories: [], tags: ['auth'], links: [], paths: [], rules: [], summary: 's', body: 'b' }
+// Concurrent, with a real hook budget — see surreal.test.ts's teardown: serial drops blow bun's
+// default 5s hook budget as the file grows, and the timeout leaves throwaway databases behind.
+afterAll(async () => { await Promise.all(drops.map(d => d())) }, 30_000)
+const noteInput = { id: 'auth', scope: 'project', title: 'Auth', categories: [], tags: ['auth'], links: [], paths: [], summary: 's', body: 'b' }
+
+// Wait for the SUBSCRIPTION to land rather than sleeping a guessed slice. A fixed `Bun.sleep(150)`
+// encodes an assumption about machine speed: measured, it fails reproducibly on a loaded box (three
+// runs out of three at load average 7) while passing on an idle one, which turns a green suite red
+// for a reason unrelated to the code under test. Bounded, so a genuine break still fails, and fast,
+// so the common case costs one poll.
+const until = async (cond: () => boolean | Promise<boolean>, ms = 5_000): Promise<void> => {
+  const deadline = Date.now() + ms
+  for (;;) {
+    if (await cond()) return
+    if (Date.now() >= deadline) return // let the caller's own expect() report the failure
+    await Bun.sleep(10)
+  }
+}
 
 describe('memory projector', () => {
   it('applies written/deleted from the stream to SurrealDB + vault, and rebuilds from the log', async () => {
@@ -22,20 +38,26 @@ describe('memory projector', () => {
     const vaultDir = mkdtempSync(path.join(tmpdir(), 'vault-'))
     const proj = createMemoryProjector({ log, surreal, vaultDir })
     await proj.start()
+    // teardown in a finally, like the sibling tests below: a bare close after the assertions leaks
+    // a live log subscription when one of them throws, and every later test file in the process then
+    // fails on the dropped database (observed: one flaky assertion here cascaded into four files).
+    try {
+      const noteFile = path.join(vaultDir, 'memory', 'auth.md')
+      await log.append({ taskId: null, stepId: null, runToken: null, kind: 'memory_written', payload: { note: noteInput, author: { source: 'cli' } } })
+      await until(() => existsSync(noteFile))
+      expect(existsSync(noteFile)).toBe(true)
+      expect((await surreal.get('auth', 'project'))?.title).toBe('Auth')
 
-    await log.append({ taskId: null, stepId: null, runToken: null, kind: 'memory_written', payload: { note: noteInput, author: { source: 'cli' } } })
-    await Bun.sleep(150)
-    expect(existsSync(path.join(vaultDir, 'memory', 'auth.md'))).toBe(true)
-    expect((await surreal.get('auth', 'project'))?.title).toBe('Auth')
+      await log.append({ taskId: null, stepId: null, runToken: null, kind: 'memory_deleted', payload: { id: 'auth', scope: 'project', author: { source: 'cli' } } })
+      await until(() => !existsSync(noteFile))
+      expect(existsSync(noteFile)).toBe(false)
+      expect(await surreal.get('auth', 'project')).toBeNull()
 
-    await log.append({ taskId: null, stepId: null, runToken: null, kind: 'memory_deleted', payload: { id: 'auth', scope: 'project', author: { source: 'cli' } } })
-    await Bun.sleep(150)
-    expect(existsSync(path.join(vaultDir, 'memory', 'auth.md'))).toBe(false)
-    expect(await surreal.get('auth', 'project')).toBeNull()
-
-    await proj.rebuild()   // replays memory_* from the log into a fresh store
-    expect(await surreal.get('auth', 'project')).toBeNull() // deleted stayed deleted after replay
-    await proj.close(); await surreal.close(); await log.close()
+      await proj.rebuild()   // replays memory_* from the log into a fresh store
+      expect(await surreal.get('auth', 'project')).toBeNull() // deleted stayed deleted after replay
+    } finally {
+      await proj.close(); await surreal.close(); await log.close()
+    }
   })
 
   // planGraphHash hashes authored content AND provenance (grounded-plan.ts), so a rebuild that
@@ -101,6 +123,45 @@ describe('memory projector', () => {
     }
   })
 
+  // Stage 3's half of "the read model is disposable". cluster.test.ts proves the ALGORITHM is
+  // order-independent; nothing proved the PIPELINE reproduces a partition end to end. A rebuild
+  // clears the claim and topic tables and replays from seq 0, so every topicKey, label, size and
+  // member has to come back identical — a topicKey is what an agent holds between two tool calls,
+  // and a rebuild that renamed one would make every held key start erroring.
+  it('a rebuild reproduces the same partition from the log', async () => {
+    const pg = await createTestDb(); drops.push(pg.drop)
+    const ts = await createTestSurreal(); drops.push(ts.drop)
+    const log = (await openStorage(pg.url, { projectId: TEST_PROJECT_ID })).events
+    // 'zeta' means what 'alpha' means while sharing no token with it, so a merge is proven by
+    // MEANING rather than by shared words (same fake encoder shape as topic-projection.test.ts)
+    const vec = (text: string): number[] =>
+      /alpha|zeta/.test(text) ? [1, 0, 0] : /beta/.test(text) ? [0, 1, 0] : [0, 0, 1]
+    const fakeEmbedder: EmbeddingProvider = { embed: async texts => texts.map(vec) }
+    const surreal = await SurrealMemory.open(ts, fakeEmbedder)
+    const vaultDir = mkdtempSync(path.join(tmpdir(), 'orc-vault-partition-'))
+    const proj = createMemoryProjector({ log, surreal, vaultDir })
+    try {
+      const withClaims = (id: string, texts: string[]) =>
+        ({ ...noteInput, id, claims: texts.map(text => ({ id: claimId(text), text, sourceRevision: null })) })
+      for (const [id, texts] of [['n1', ['alpha holds', 'beta holds']], ['n2', ['zeta holds']], ['n3', ['gamma holds']]] as const)
+        await log.append({ taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_written,
+          payload: { note: withClaims(id, [...texts]), author: { source: 'cli' } } })
+      await proj.catchUp()
+
+      const before = await surreal.topics()
+      expect(before).toHaveLength(3) // {alpha, zeta} merged; beta and gamma stand alone
+      expect(before[0]?.size).toBe(2)
+      const claimsBefore = await Promise.all(before.map(t => surreal.topicClaims(t.topicKey)))
+
+      await proj.rebuild()
+      expect(await surreal.topics()).toEqual(before)
+      // and each key still resolves to the same statements, with the same validFrom stamps
+      expect(await Promise.all(before.map(t => surreal.topicClaims(t.topicKey)))).toEqual(claimsBefore)
+    } finally {
+      await proj.close(); await surreal.close(); await log.close()
+    }
+  })
+
   it('never scans the whole log — catch-up uses the scoped kind query', async () => {
     const pg = await createTestDb(); drops.push(pg.drop)
     const ts = await createTestSurreal(); drops.push(ts.drop)
@@ -111,13 +172,16 @@ describe('memory projector', () => {
 
     const allSpy = spyOn(log, 'all')
     const proj = createMemoryProjector({ log, surreal, vaultDir })
-    await proj.start()
-    await proj.catchUp()
-    await proj.rebuild()
-    await proj.close()
-    expect(allSpy).not.toHaveBeenCalled()
-    expect((await surreal.get('auth', 'project'))?.title).toBe('Auth')
-    await surreal.close(); await log.close()
+    try {
+      await proj.start()
+      await proj.catchUp()
+      await proj.rebuild()
+      await proj.close()
+      expect(allSpy).not.toHaveBeenCalled()
+      expect((await surreal.get('auth', 'project'))?.title).toBe('Auth')
+    } finally {
+      await proj.close(); await surreal.close(); await log.close()
+    }
   })
 
   // Pins the two properties the topic-refresh gate exists for (see drainFrom's `force` in
@@ -143,32 +207,34 @@ describe('memory projector', () => {
 
     const refreshSpy = spyOn(surreal, 'refreshTopics')
     const proj = createMemoryProjector({ log, surreal, vaultDir })
-    await proj.start() // cursor is already at rec.seq — drainFrom applies ZERO events this round
-    expect(refreshSpy).toHaveBeenCalledTimes(1)
-    expect(await surreal.topics()).not.toEqual([]) // yet start() still partitioned it (force: true)
+    try {
+      await proj.start() // cursor is already at rec.seq — drainFrom applies ZERO events this round
+      expect(refreshSpy).toHaveBeenCalledTimes(1)
+      expect(await surreal.topics()).not.toEqual([]) // yet start() still partitioned it (force: true)
 
-    // A non-memory event must never even wake the reconcile pipeline (the subscribe filter in
-    // start()) — spying on log.after from here on proves the pipeline was never ENTERED, not just
-    // that it entered and found nothing: no claim-table read, no topic transaction, no drain query.
-    const afterSpy = spyOn(log, 'after')
-    await log.append({ taskId: 't1', stepId: null, runToken: null, kind: 'task_status_changed', payload: { taskId: 't1', from: TASK_STATUS.draft, to: TASK_STATUS.running } })
-    await Bun.sleep(150)
-    expect(afterSpy).not.toHaveBeenCalled()
-    expect(refreshSpy).toHaveBeenCalledTimes(1)
+      // A non-memory event must never even wake the reconcile pipeline (the subscribe filter in
+      // start()) — spying on log.after from here on proves the pipeline was never ENTERED, not just
+      // that it entered and found nothing: no claim-table read, no topic transaction, no drain query.
+      const afterSpy = spyOn(log, 'after')
+      await log.append({ taskId: 't1', stepId: null, runToken: null, kind: 'task_status_changed', payload: { taskId: 't1', from: TASK_STATUS.draft, to: TASK_STATUS.running } })
+      await Bun.sleep(150)
+      expect(afterSpy).not.toHaveBeenCalled()
+      expect(refreshSpy).toHaveBeenCalledTimes(1)
 
-    // memory_accessed IS a MEMORY_KINDS member, so it DOES wake the reconcile (the trigger filter
-    // is by kind, not by "can this change claims") — but it cannot change which claims exist, so the
-    // internal vaultChanged gate must still suppress the refresh.
-    await log.append({ taskId: null, stepId: null, runToken: null, kind: 'memory_accessed', payload: { id: 'topic-note', scope: 'project', mode: MEMORY_ACCESS.read, author: { source: 'cli' } } })
-    await Bun.sleep(150)
-    expect(afterSpy).toHaveBeenCalled()
-    expect(refreshSpy).toHaveBeenCalledTimes(1)
+      // memory_accessed IS a MEMORY_KINDS member, so it DOES wake the reconcile (the trigger filter
+      // is by kind, not by "can this change claims") — but it cannot change which claims exist, so the
+      // internal vaultChanged gate must still suppress the refresh.
+      await log.append({ taskId: null, stepId: null, runToken: null, kind: 'memory_accessed', payload: { id: 'topic-note', scope: 'project', mode: MEMORY_ACCESS.read, author: { source: 'cli' } } })
+      await Bun.sleep(150)
+      expect(afterSpy).toHaveBeenCalled()
+      expect(refreshSpy).toHaveBeenCalledTimes(1)
 
-    // catchUp(), the CLI's one-shot path, is gated the same way: nothing pending, no repartition.
-    await proj.catchUp()
-    expect(refreshSpy).toHaveBeenCalledTimes(1)
-
-    await proj.close(); await surreal.close(); await log.close()
+      // catchUp(), the CLI's one-shot path, is gated the same way: nothing pending, no repartition.
+      await proj.catchUp()
+      expect(refreshSpy).toHaveBeenCalledTimes(1)
+    } finally {
+      await proj.close(); await surreal.close(); await log.close()
+    }
   })
 })
 
@@ -199,15 +265,52 @@ describe('projector resilience', () => {
     const warns: string[] = []
     const warnSpy = spyOn(console, 'warn').mockImplementation((...a: unknown[]) => { warns.push(a.join(' ')) })
     const proj = createMemoryProjector({ log, surreal: stub, vaultDir })
-    await proj.start()
-    await log.append({ taskId: null, stepId: null, runToken: null, kind: 'memory_written', payload: { note: noteInput, author: { source: 'cli' } } })
-    await Bun.sleep(600) // subscription fires -> fail -> 250ms backoff -> retry succeeds
-    await proj.close(); await log.close()
-    warnSpy.mockRestore()
+    try {
+      await proj.start()
+      await log.append({ taskId: null, stepId: null, runToken: null, kind: 'memory_written', payload: { note: noteInput, author: { source: 'cli' } } })
+      await Bun.sleep(600) // subscription fires -> fail -> 250ms backoff -> retry succeeds
+    } finally {
+      // restore in the finally too: a throw above would otherwise leave console.warn mocked for
+      // every test that runs after this one, in this file and the next
+      await proj.close(); await log.close()
+      warnSpy.mockRestore()
+    }
     expect(applyCalls).toBeGreaterThanOrEqual(2) // the retry actually re-applied
     expect(warns.filter(w => w.includes('memory projector'))).toEqual([]) // silently healed
     expect(existsSync(path.join(vaultDir, 'memory', 'auth.md'))).toBe(true) // and the apply landed
   })
+  // refreshTopics used to be a straight-line call AFTER the drain loop. applyOne can throw once an
+  // event's Surreal side has already committed — the vault write happens outside that transaction —
+  // and the retry then drains ZERO events, so `vaultChanged` is 0 and the gate suppresses the
+  // refresh. The claims are in the read model and the topic table describes the corpus before them,
+  // indefinitely: nothing repartitions until the next memory write or a restart.
+  it('still repartitions when the drain throws after an event has committed', async () => {
+    const pg = await createTestDb(); drops.push(pg.drop)
+    const log = (await openStorage(pg.url, { projectId: TEST_PROJECT_ID })).events
+    const vaultDir = mkdtempSync(path.join(tmpdir(), 'orc-vault-stale-topics-'))
+    let applies = 0
+    let refreshes = 0
+    // ponytail: retained cast — see the SurrealMemory-is-a-class note above.
+    const stub = {
+      applyEvent: async () => { applies += 1; if (applies === 2) throw new Error('vault write failed'); return true },
+      get: async () => fullNote,
+      getCursor: async () => 0,
+      allNotes: async () => [],
+      refreshTopics: async () => { refreshes += 1 },
+    } as unknown as SurrealMemory
+    const warnSpy = spyOn(console, 'warn').mockImplementation(() => {})
+    const proj = createMemoryProjector({ log, surreal: stub, vaultDir })
+    try {
+      for (const id of ['first', 'second'])
+        await log.append({ taskId: null, stepId: null, runToken: null, kind: 'memory_written', payload: { note: { ...noteInput, id }, author: { source: 'cli' } } })
+      await proj.catchUp().catch(() => {}) // no start(): nothing forces a refresh, only the gate can
+    } finally {
+      await proj.close(); await log.close(); warnSpy.mockRestore()
+    }
+    expect(applies).toBe(2) // the second event is the one that threw
+    expect(refreshes).toBe(1) // and the first event's claims still got partitioned
+  })
+
   it('a persistent non-connection failure still warns once and does not reject unhandled', async () => {
     const pg = await createTestDb(); drops.push(pg.drop)
     const log = (await openStorage(pg.url, { projectId: TEST_PROJECT_ID })).events
@@ -222,12 +325,15 @@ describe('projector resilience', () => {
     const warns: string[] = []
     const warnSpy = spyOn(console, 'warn').mockImplementation((...a: unknown[]) => { warns.push(a.join(' ')) })
     const proj = createMemoryProjector({ log, surreal: stub, vaultDir })
-    // start()'s initial drain hits the failing stub too — tolerate it; the subscription is live after
-    await proj.start().catch(() => {})
-    await log.append({ taskId: null, stepId: null, runToken: null, kind: 'memory_written', payload: { note: noteInput, author: { source: 'cli' } } })
-    await Bun.sleep(400)
-    await proj.close(); await log.close()
-    warnSpy.mockRestore()
+    try {
+      // start()'s initial drain hits the failing stub too — tolerate it; the subscription is live after
+      await proj.start().catch(() => {})
+      await log.append({ taskId: null, stepId: null, runToken: null, kind: 'memory_written', payload: { note: noteInput, author: { source: 'cli' } } })
+      await Bun.sleep(400)
+    } finally {
+      await proj.close(); await log.close()
+      warnSpy.mockRestore()
+    }
     expect(warns.some(w => w.includes('memory projector: boom'))).toBe(true) // honest warning survives
   })
 })

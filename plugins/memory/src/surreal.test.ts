@@ -7,7 +7,7 @@ import { createTestSurreal } from './test-helpers'
 
 const note = (over = {}) => ({
   id: 'auth', scope: 'project', kind: 'fact', sourceRevision: null,
-  title: 'Auth', categories: ['security'], tags: ['auth'], links: [], paths: ['src/auth.ts'], rules: [],
+  title: 'Auth', categories: ['security'], tags: ['auth'], links: [], paths: ['src/auth.ts'],
   summary: 'tokens rotate', body: 'full text about auth tokens', ...over,
 })
 // tier-specific columns read through the shared view: these tests assert on what the read model
@@ -567,6 +567,19 @@ describe('SurrealMemory.searchClaims', () => {
     expect(await mem.searchClaims('retire')).toHaveLength(1)
     await mem.applyEvent(written(2, note({ id: 'n', title: 'N', claims: [] })))
     expect(await mem.searchClaims('retire')).toEqual([])
+    await mem.close()
+  })
+
+  // search() wraps both its arms in knowledge(); the claim arm resolved owners through list(),
+  // which has no such exclusion — so a claim asserted on a ui-metadata note came back from
+  // memory_search's claim arm while the note itself stayed hidden. ARCHITECTURE.md states the
+  // invariant as "excluded from the retrieval surface entirely", and the claim arm IS one.
+  it('never returns a claim asserted on a ui-metadata note, the same exclusion search() applies', async () => {
+    const t = await createTestSurreal(); drops.push(t.drop)
+    const mem = await SurrealMemory.open(t)
+    await mem.applyEvent(written(1, note({ id: PROJECT_NAME_NOTE_ID, title: 'orc-sim', claims: [claim('the project is called orc-sim')] })))
+    await mem.applyEvent(written(2, note({ id: 'real-note', title: 'R', claims: [claim('the project is called by its slug')] })))
+    expect((await mem.searchClaims('project is called')).map(h => h.noteId)).toEqual(['real-note'])
     await mem.close()
   })
 

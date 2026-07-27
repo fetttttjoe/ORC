@@ -20,4 +20,10 @@ export const MEMORY_LIMITS = {
   searchableBodyChars: 7_000,
   embedInputChars: 8_000,
   rationaleChars: 20_000,
+  // Ceiling on a model-supplied read budget, and on how many items a search may ask for. The budget
+  // IS the response ceiling on every memory tool — `applyBudget`/`fitMemoryNoteToBudget` bound the
+  // reply to it and to nothing else — and it arrived from the model unbounded, so `budget: 1e9` was
+  // a request for the whole corpus in one reply. bodyChars/4 (approxTokens is chars/4) is the
+  // smallest bound that can still return the largest storable note whole, so it costs nothing real.
+  budgetTokens: 25_000,
 } as const

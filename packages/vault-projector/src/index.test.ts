@@ -40,7 +40,7 @@ describe('createVaultProjector.renderAll', () => {
       taskId: null, stepId: null, runToken: null,
       kind: 'memory_written',
       payload: {
-        note: { id: 'note-x', title: 'X', scope: 'project', categories: [], tags: [], links: [], paths: [], rules: [], summary: '', body: '' },
+        note: { id: 'note-x', title: 'X', scope: 'project', categories: [], tags: [], links: [], paths: [], summary: '', body: '' },
         author: { source: 'cli' },
       },
     })
@@ -92,7 +92,7 @@ describe('createVaultProjector.renderAll', () => {
       taskId: null, stepId: null, runToken: null,
       kind: 'memory_written',
       payload: {
-        note: { id: 'note-y', title: 'Y', scope: 'project', categories: [], tags: [], links: [], paths: [], rules: [], summary: '', body: '' },
+        note: { id: 'note-y', title: 'Y', scope: 'project', categories: [], tags: [], links: [], paths: [], summary: '', body: '' },
         author: { source: 'cli' },
       },
     })

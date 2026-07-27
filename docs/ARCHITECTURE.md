@@ -306,6 +306,78 @@ is not a read. The counter is measurement, not policy — nothing ranks or expir
 so that a future decay/sweep (`docs/IDEAS.md` entry 1) can be tuned against an observed hot/cold
 split instead of a guessed half-life.
 
+### Claims — the addressable unit of knowledge
+
+A semantic note used to carry a free-form `rules: string[]`. It now carries **claims**:
+individually addressable statements, each with a content-derived id. `claimId(text)` is the
+sha256 of the whitespace-normalized text, first 12 hex chars — *the id IS the statement*. A
+positional index would shift the moment one claim retires, which the temporal model makes
+routine; a content hash is stable without counter state, self-deduplicating within a note, and
+gives a rewording the correct meaning (a new claim, with the old one invalidated rather than
+mutated).
+
+Two shapes, deliberately split. `ClaimInput` is what a writer supplies (`id`, `text`,
+`sourceRevision`); `Claim` adds `validFrom`, which the **projector** stamps from the committed
+event. An agent cannot date its own claim, and there is no placeholder to leak — the same rule a
+source's `retrievedAt` follows.
+
+Writes are **additive**. A writer names what to add (`addClaims`) and what to retire
+(`invalidates`); supplying the `claims` array wholesale is deliberately impossible, because under
+the store's merge-on-omit rule an array would REPLACE, which is exactly the behaviour additive
+writes exist to prevent. Invalidation wins over addition inside one write: stating both means the
+claim should be gone.
+
+The tombstone lives on the **event** (`MemoryWrittenPayload.invalidates`), never on the note — the
+note payload carries live claims only. So the log is the only surface a retired claim survives on,
+and `orc memory claims <id> --history` folds it to recover both the claim and the write that
+retired it. Everything else (`orc memory claims <id>`, the `claims` arm of `memory_search`) reads
+the live set from the read model.
+
+### Topics — grouping that is derived, never authored
+
+Claims cluster by embedding cosine into **topics**: a browsable inventory, lateral navigation, and
+result diversification. A topic is explicitly *not* an agent-spelled filter — nobody writes one,
+and a `topicKey` is only ever handed out by the tool that listed it.
+
+`plugins/memory/src/cluster.ts` holds the algorithm and nothing else — zero imports, no database,
+no embedder, no clock — and is the designated extension seam. It is average-link agglomerative:
+each round merges the globally best pair, which is what makes the partition independent of input
+order. Leader/threshold-join was rejected for the opposite property: `orc memory rebuild` replays
+the same seq order, so an order-dependent algorithm would faithfully reproduce any bad split and
+drift could never be repaired.
+
+`memory_topics` is a tool rather than an implicit re-rank so that lateral navigation is **tracked**:
+fetching one topic appends `memory_topic_accessed` carrying the resolved label, which is the
+evidence `MEMORY_CLUSTER_THRESHOLD` (0.75, currently a guess) will eventually be calibrated from.
+
+### Three stages, in order
+
+Claims and topics sit in different stages of one pipeline, and the boundary is what keeps the read
+model disposable:
+
+1. **Append to the log.** `memory_written` carries the note with its resolved live claims, plus the
+   event-level `invalidates`. This is the only durable writer; everything below is recomputable.
+2. **Project per event, inside one transaction.** `applyEvent` materializes the note row, its
+   edges, and its `claim` rows in the same Surreal transaction that advances the cursor. This is
+   where `validFrom` gets stamped. A claim that survives a rewrite is upserted **in place**, never
+   deleted and recreated: a fixed record id deleted and re-created inside one Surreal transaction
+   stays deleted at commit (measured), so a refresh must retire only genuinely-stale rows.
+3. **Derive by stateless recompute.** `refreshTopics` reads the `claim` table and rewrites the
+   `topic` table, outside the event transaction, from the drain rather than from `applyEvent`.
+
+Stage 3 may never be the only writer of a fact. Nothing carries a `topicKey` column; the topic
+table is derivable from the claim table, which is derivable from the log, and `clear()` drops both
+so a rebuild reproduces them.
+
+> **Upgrading onto claims requires a rebuild — and a rebuild alone is not enough.**
+> Claim rows are materialized by the projector, so an existing read model has none until
+> `orc memory rebuild` replays the log. But the legacy `rules[]` decoder that used to synthesise
+> claims from pre-claims notes was **removed outright**, so a corpus written before claims existed
+> will still report zero claims after a rebuild, and `orc memory topics` will correctly say "no
+> topics". That is not a broken embedder and not a broken pipeline — those notes assert no claims
+> until an agent states some. Run the rebuild anyway: it is what makes claims written *since* the
+> upgrade visible to `orc memory claims` and to the claim arm of search.
+
 ### Memory TTL sweep — retiring expirable notes
 
 `orc memory sweep` retires notes the author marked `expirable` that nobody has written or read for
@@ -386,9 +458,16 @@ handle and never drives a model-facing memory tool itself.
 
 Two consequences the graph depends on:
 
-- **`recall` records what it surfaced** (`memory_accessed{mode: 'preload'}`). `memory_search` records
-  nothing by design, so without this the retrieval path that runs on *every* step earned no
-  activation and left no provenance for consolidation.
+- **`recall` returns two surfaces from one call** (`RecalledContext`): matched **claims** and the
+  notes that matched without asserting one. Claims take their share of the budget first — a matched
+  statement is something the step can act on, where a note summary is a pointer it must spend a
+  `memory_read` to follow — and the notes arm gets the remainder, so one preload costs what the
+  caller allotted. Both come from one call so they share one budget and one replay checkpoint; two
+  calls could rebuild `messages[0]` differently on recovery.
+- **`recall` records what it surfaced** (`memory_accessed{mode: 'preload'}`), one access per owning
+  **note**, deduped by `(scope, id)` — a note that matched through three of its claims is not
+  charged three times. `memory_search` records nothing by design, so without this the retrieval path
+  that runs on *every* step earned no activation and left no provenance for consolidation.
 - **`capture` writes edges, not just a node**: `depends_on` the ambient notes of the steps this one
   consumed, `derived_from` every durable note it actually pulled. Both resolve under
   `linkLookupScopes`, so a run wires itself into the graph instead of adding isolated nodes.

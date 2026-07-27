@@ -51,6 +51,7 @@ Start here to navigate the codebase and understand the architectural foundations
 ### Troubleshooting
 
 - **Degraded memory** — SurrealDB down? ⇒ one warning, explicit `memory unavailable` tool results, everything else keeps working
+- **No claims / no topics** — upgrading onto atomic claims needs `orc memory rebuild` once; a corpus written *before* claims existed stays empty even after it (see [Operational notes](#operational-notes))
 - **Crash recovery** — resumable at any step via DBOS journal; see `orc status <task>` for unresolved operations
 - **Audit trail** — `orc log <task> --json` for full redacted event record; `orc replay <task> --at <seq>` to freeze-frame any moment
 - See also: [Seams reference guide](docs/seams-reference.md) — detailed debugging strategies
@@ -294,9 +295,24 @@ by the agent.
   drops and recreates Postgres (events, journal, DBOS) and SurrealDB; the vault re-renders
   and memory rebuilds from events on next use. Old pre-identity projects run
   `orc init` once; old string-only trust grants fail closed and must be granted again.
+- Environment: `orc` loads `<project>/.env` itself, resolved from the same walk-up that finds
+  `.orc/`, so a command run from a subdirectory — or a supervisor spawned with a different cwd —
+  gets the same credentials as one run from the project root. Bun's own `.env` pickup is
+  cwd-relative with no walk-up, which is why a supervisor started elsewhere used to die mid-run
+  with `[provider_error] Anthropic API key is missing`. Real environment variables always win over
+  the file.
 - Never bundle the CLI (`bun build`): DBOS must run unbundled via `bun run`.
 - Upgrading orc: finish or `orc cancel` active runs first — DBOS recovery is
   keyed to the app version (`DBOS__APPVERSION`).
+- **Upgrading onto atomic claims: run `orc memory rebuild` once.** A semantic note's
+  free-form `rules[]` became [claims](docs/ARCHITECTURE.md#claims-—-the-addressable-unit-of-knowledge),
+  which live in a new derived `claim` table — an existing read model has no claim rows until
+  the log is replayed, so `orc memory claims` and the claim arm of search stay empty until
+  you rebuild. The rebuild is required but not sufficient: the legacy `rules[]` decoder was
+  removed outright, so notes written *before* claims existed will still show zero claims
+  afterwards and `orc memory topics` will correctly report "no topics". That is the expected
+  state of a pre-claims corpus, not a broken embedder — those notes assert no claims until an
+  agent states some.
 
 ## License
 

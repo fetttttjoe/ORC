@@ -165,6 +165,28 @@ describe('loadConfig', () => {
     expect(c.redactEnv).toContain('NOTES_CREDENTIAL')  // $NAME ref harvested
     expect(c.redactEnv).not.toContain('PLAIN')         // literal env value is not a secret ref
   })
+  // Bun's own `.env` pickup is cwd-relative with no upward walk, so `orc` run from a subdirectory —
+  // or a supervisor spawned with a different cwd — used to lose every credential the project's .env
+  // holds, surfacing much later as `[provider_error] Anthropic API key is missing` inside a run.
+  it('loads the PROJECT dir .env, lets ORC_* in it reach config, and never overrides the real env', () => {
+    const dir = tmpProject({})
+    writeFileSync(path.join(dir, '.env'), '# a comment\nORC_ENVFILE_PROBE="from the file"\nORC_CONCURRENCY=9\n')
+    const clear = (): void => { delete process.env.ORC_ENVFILE_PROBE; delete process.env.ORC_CONCURRENCY }
+    clear()
+    try {
+      expect(loadConfig(dir).concurrency).toBe(9) // an ORC_* setting in the file reaches the schema
+      expect(process.env.ORC_ENVFILE_PROBE).toBe('from the file') // and a plain secret reaches process.env
+      // the shell wins: a value already exported is never clobbered by the file
+      clear()
+      withEnv({ ORC_ENVFILE_PROBE: 'from the shell', ORC_CONCURRENCY: '4' }, () => {
+        expect(loadConfig(dir).concurrency).toBe(4)
+        expect(process.env.ORC_ENVFILE_PROBE).toBe('from the shell')
+      })
+    } finally {
+      clear()
+    }
+  })
+
   it('maxDepth defaults to 3 and approvalPolicy defaults to manual/empty', () => {
     const c = loadConfig(mkdtempSync(path.join(tmpdir(), 'orc-')))
     expect(c.maxDepth).toBe(3)

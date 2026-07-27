@@ -12,7 +12,7 @@ import {
 } from '@orc/contracts'
 import { rankNeighbors, rrfFuse, type Edge } from './rank'
 import { dedupeByNote, type ClaimHit, type ClaimSearchOpts } from './claim-search'
-import { partition, type ClusterInput } from './cluster'
+import { ascending, MEMORY_CLUSTER_THRESHOLD, partition, type ClusterInput } from './cluster'
 
 // The read model's table names — single spelling for every builder call and RecordId.
 enum Tb { Note = 'note', Meta = 'meta', Link = 'link', Claim = 'claim', Topic = 'topic' }
@@ -57,16 +57,20 @@ const metaTable = table(Tb.Meta, { seq: t.number() })
 
 // Derived claim index, materialized from note.claims by the projector as `link` is from note.links
 // and just as disposable — though NOT by the same clear-and-recreate, see applyEvent. It exists so a
-// claim can carry its OWN embedding and its own activation: search matches a statement directly
-// instead of matching a document and making the reader find the sentence.
+// claim can carry its OWN embedding: search matches a statement directly instead of matching a
+// document and making the reader find the sentence.
 // `validFrom` lives here and nowhere in the note payload: it is the ts of the first event that
 // carried the claim, which only a fold can know — so the projector is the only thing that can
 // honestly stamp it, and it is preserved across rewrites below.
+// Deliberately carries NO hits/lastAccessedAt, unlike `note` and `link`: memory_accessed identifies
+// a note, so nothing could ever increment a claim's own counters, and semanticClaims has no
+// activation re-rank to read them. Two columns and a preservation branch that only ever copied
+// zero forward, advertising an activation feature that did not exist — the owning note already
+// records the access, which is what the heat re-rank is computed from.
 const claimTable = table(Tb.Claim, {
   claimId: t.string(), noteId: t.string(), scope: t.string(), text: t.string(),
   validFrom: t.string(), sourceRevision: t.option(t.string()),
   embedding: t.option(t.array(t.number())),
-  hits: t.option(t.number()), lastAccessedAt: t.option(t.string()),
 })
 
 // Stage 3 (see the claim-grouping spec): derived from claim embeddings. After a refresh the table
@@ -97,6 +101,29 @@ const claimKey = (scope: string, noteId: string, claimId: string) => `${scope}:$
 // Fusion key for a claim hit — the claim's own identity, which is note-scoped like its row id.
 const claimHitKey = (h: ClaimHit) => claimKey(h.scope, h.noteId, h.claimId)
 
+// ui-metadata is infrastructure, not knowledge — never a retrieval hit, still readable by id.
+// ONE spelling of the exclusion for every retrieval surface (note search, claim search, topics): it
+// drifted once already, and the reason it exists is that a real run was handed 'ui-project-name' as
+// project context and then cited it as provenance.
+const knowledge = <T extends { scope: string; id: string }>(ns: readonly T[]): T[] =>
+  ns.filter(n => !isUiMetaNote(n.scope, n.id))
+
+// The notes a claim hit is allowed to name, by noteKey — built once per search (see claimOwners).
+type OwnerMap = ReadonlyMap<string, NoteSummary>
+
+// Attach each claim row's owning note. A row whose owner is absent from the map is one the filter
+// excluded, one knowledge() excluded, or one whose note is gone — either way, not a hit.
+const joinClaimOwners = (
+  rows: ReadonlyArray<{ claimId: string; noteId: string; scope: string; text: string; validFrom: string }>,
+  owners: OwnerMap,
+): ClaimHit[] =>
+  rows.flatMap(r => {
+    const owner = owners.get(noteKey(r.scope, r.noteId))
+    return owner
+      ? [{ claimId: r.claimId, noteId: r.noteId, scope: r.scope, title: owner.title, text: r.text, validFrom: r.validFrom }]
+      : []
+  })
+
 // Raw semantic-scan rows — the fields the cosine SELECT projects, parsed (never cast) at the
 // boundary like every other DB read. hits/lastAccessedAt are optional (a note may predate them).
 const SemanticRow = z.object({
@@ -119,11 +146,6 @@ const ClaimRow = z.object({
 // How many NOTES a claim search may return when the caller names no limit. Deliberately the same
 // order as the note search's own page: dedupeByNote counts notes, so this is comparable.
 const CLAIM_SEARCH_LIMIT = 10
-
-// Cosine similarity at or above which two claims group together. A GUESS, not a measured value: tens
-// of claims cannot distinguish a good split from luck. Settled from `memory_topic_accessed` events —
-// see the spec's "How it gets settled".
-export const MEMORY_CLUSTER_THRESHOLD = 0.75
 
 const CONNECT_TIMEOUT_MS = 5_000
 const CLOSE_TIMEOUT_MS = 2_000
@@ -224,8 +246,11 @@ export class SurrealMemory {
         // the one place this is computed, so projector and log-side fold cannot disagree.
         const prov = deriveNoteProvenance(note, author, e.ts, ex)
         // read through NoteView so one write path covers every tier: a column the note's tier does
-        // not own is spread away, so the row carries the tier's real shape and a later tier change
-        // cannot leave a stale foreign column behind.
+        // not own is OMITTED from the SET rather than nulled. An omitted key survives `UPSERT … SET`
+        // untouched (that is exactly why the embedding fields use the same pattern), so a note that
+        // flips semantic→plan keeps a stale `claims` column on its row — harmless only because
+        // toNote() re-parses through the tier schema, which strips it. UNSET it here if that ever
+        // stops being true.
         const n: NoteFields = note
         await tx.upsert(Tb.Note, k).set({
           noteId: note.id, scope: note.scope, title: note.title, tier: note.tier,
@@ -281,24 +306,33 @@ export class SurrealMemory {
         // measured, three claims upserted after the delete left only the two the delete had not
         // touched. The edge path is immune because RELATE mints a fresh id per call rather than
         // reusing a key. So retire only the rows this write actually dropped, and update the rest in
-        // place: a claim that SURVIVES keeps its earned hits and its original validFrom, because
-        // re-stating a fact does not make it new. A retired one goes with its stats — it is no
-        // longer live, and the log still holds it.
+        // place: a claim that SURVIVES keeps its original validFrom, because re-stating a fact does
+        // not make it new. A retired one goes — it is no longer live, and the log still holds it.
         const existingClaims = await tx.select(Tb.Claim).where(c => c.noteId.eq(note.id).and(c.scope.eq(note.scope)))
-        const claimStats = new Map(existingClaims.map(c => [c.claimId, c]))
+        const prevClaims = new Map(existingClaims.map(c => [c.claimId, c]))
         const liveClaims = n.claims ?? []
         const liveIds = new Set(liveClaims.map(c => c.id))
         for (const row of existingClaims) if (!liveIds.has(row.claimId)) await tx.delete(row.id)
         for (const c of liveClaims) {
-          const prev = claimStats.get(c.id)
+          const prev = prevClaims.get(c.id)
+          const vec = claimEmbeddings.get(c.id)
           await tx.upsert(Tb.Claim, claimKey(note.scope, note.id, c.id)).set({
             claimId: c.id, noteId: note.id, scope: note.scope, text: c.text,
             // the payload carries no date — the FIRST event that carried this claim is its validFrom
             validFrom: prev?.validFrom ?? e.ts,
+            // `?? undefined` here is deliberate and NOT the omit-pattern below: resolveClaims carries
+            // a survivor's own revision forward, so this value always equals what is stored and a
+            // null only ever unsets a field whose absence already means null.
             sourceRevision: c.sourceRevision ?? undefined,
-            embedding: claimEmbeddings.get(c.id),
-            hits: prev?.hits ?? 0,
-            ...(prev?.lastAccessedAt !== undefined && { lastAccessedAt: prev.lastAccessedAt }),
+            // Omit-if-undefined, exactly like the note row's `embedding` above — a named key with an
+            // undefined value is emitted as `SET embedding = NONE`, which REMOVES the column, while
+            // an omitted key survives `UPSERT … SET` untouched. embedClaims is best-effort and
+            // returns an EMPTY map on any embedder failure, so writing it unconditionally let one
+            // Ollama blip erase the stored vectors of every surviving claim on the note: those
+            // statements drop out of semanticClaims and out of refreshTopics (collapsing their
+            // topics) with nothing but one warn line, and nothing re-embeds them until the note is
+            // written again or `orc memory rebuild` runs with the embedder up.
+            ...(vec !== undefined && { embedding: vec }),
           })
         }
       } else if (e.kind === EVENT_KIND.memory_accessed) {
@@ -404,8 +438,6 @@ export class SurrealMemory {
   }
 
   async search(query: string, filter: MemoryFilter = {}, opts: MemorySearchOpts = {}): Promise<NoteSummary[]> {
-    // ui-metadata is infrastructure, not knowledge — never a search hit, still readable by id
-    const knowledge = (ns: NoteSummary[]): NoteSummary[] => ns.filter(n => !isUiMetaNote(n.scope, n.id))
     // No embedder configured → keyword is the only mode that can run, whatever was requested.
     const mode = this.embedder ? (opts.mode ?? SEARCH_MODE.hybrid) : SEARCH_MODE.keyword
     if (mode === SEARCH_MODE.keyword) return knowledge(await this.keywordSearch(query, filter))
@@ -427,8 +459,12 @@ export class SurrealMemory {
   async searchClaims(query: string, filter: MemoryFilter = {}, opts: ClaimSearchOpts = {}): Promise<ClaimHit[]> {
     const limit = opts.limit ?? CLAIM_SEARCH_LIMIT
     const mode = this.embedder ? (opts.mode ?? SEARCH_MODE.hybrid) : SEARCH_MODE.keyword
-    const keyword = mode === SEARCH_MODE.semantic ? [] : await this.keywordClaims(query, filter)
-    const semantic = mode === SEARCH_MODE.keyword ? [] : await this.semanticClaims(query, filter)
+    // Resolved ONCE and shared by both arms: list() is a full in-scope note scan, and a hybrid
+    // claim search used to run it twice — on the hottest path there is, since searchClaims backs
+    // every memory_search and every step preload.
+    const owners = await this.claimOwners(filter)
+    const keyword = mode === SEARCH_MODE.semantic ? [] : await this.keywordClaims(query, owners)
+    const semantic = mode === SEARCH_MODE.keyword ? [] : await this.semanticClaims(query, filter, owners)
     if (mode !== SEARCH_MODE.hybrid) return dedupeByNote(mode === SEARCH_MODE.keyword ? keyword : semantic, limit)
     const byKey = new Map<string, ClaimHit>()
     for (const h of [...semantic, ...keyword]) byKey.set(claimHitKey(h), h)
@@ -442,18 +478,18 @@ export class SurrealMemory {
   // narrow). The first term seeds the reduce rather than a constant predicate, so the builder never
   // needs a tautology. No relevance score: the WHERE already requires every term of every row, so
   // newest-established wins the tiebreak and rrfFuse ranks the rest against the semantic arm.
-  private async keywordClaims(query: string, filter: MemoryFilter): Promise<ClaimHit[]> {
+  private async keywordClaims(query: string, owners: OwnerMap): Promise<ClaimHit[]> {
     const [first, ...rest] = query.toLowerCase().split(/\s+/).filter(Boolean).slice(0, MAX_SEARCH_TERMS)
     if (first === undefined) return []
     const rows = await this.db.select(Tb.Claim)
       .where(c => rest.reduce((acc, q) => acc.and(c.text.lowercase().contains(q)), c.text.lowercase().contains(first)))
       .orderBy('validFrom', 'DESC')
-    return this.joinClaimOwners(rows, filter)
+    return joinClaimOwners(rows, owners)
   }
 
   // Cosine over per-claim embeddings — same brute-force scan, same degrade-to-keyword contract as
   // semanticSearch: a dimension mismatch or a malformed row must never fail the whole search.
-  private async semanticClaims(query: string, filter: MemoryFilter): Promise<ClaimHit[]> {
+  private async semanticClaims(query: string, filter: MemoryFilter, owners: OwnerMap): Promise<ClaimHit[]> {
     if (!this.embedder) return []
     try {
       const [qv] = await this.embedder.embed([query])
@@ -468,7 +504,7 @@ export class SurrealMemory {
         { q: qv, ...(scopes.length > 0 && { scopes }) },
       )
       const rows = ClaimRow.array().parse(Array.isArray(res) ? res[0] : res)
-      return this.joinClaimOwners(rows, filter)
+      return joinClaimOwners(rows, owners)
     } catch (err) {
       console.warn(`[memory] claim semantic search failed, falling back to keyword: ${errorMessage(err)}`)
       return []
@@ -479,18 +515,10 @@ export class SurrealMemory {
   // claim row deliberately does not duplicate tier/categories/tags. ONE note query, not one per hit
   // — list() already applies the whole filter, so the notes that survive it ARE the allowed owners
   // and a hit whose note is missing from the map is one the filter excluded, deleted, or never had.
-  private async joinClaimOwners(
-    rows: ReadonlyArray<{ claimId: string; noteId: string; scope: string; text: string; validFrom: string }>,
-    filter: MemoryFilter,
-  ): Promise<ClaimHit[]> {
-    const owners = new Map((await this.list(filter)).map(n => [noteKey(n.scope, n.id), n]))
-    const hits: ClaimHit[] = []
-    for (const r of rows) {
-      const owner = owners.get(noteKey(r.scope, r.noteId))
-      if (!owner) continue
-      hits.push({ claimId: r.claimId, noteId: r.noteId, scope: r.scope, title: owner.title, text: r.text, validFrom: r.validFrom })
-    }
-    return hits
+  // knowledge() on top, the same exclusion search() applies: a claim asserted on a ui-metadata note
+  // must not reach the retrieval surface through the arm that skipped the check.
+  private async claimOwners(filter: MemoryFilter): Promise<OwnerMap> {
+    return new Map(knowledge(await this.list(filter)).map(n => [noteKey(n.scope, n.id), n]))
   }
 
   // Vector cosine over stored embeddings — a linear scan, brute-force but exact; fine for a
@@ -591,8 +619,12 @@ export class SurrealMemory {
   // event transaction on purpose; grouping is a whole-corpus derivation, not a per-event projection.
   async refreshTopics(threshold: number = MEMORY_CLUSTER_THRESHOLD): Promise<void> {
     // project scope only: claims are semantic-tier, durable knowledge is project-scoped, and a topic
-    // view over one task's transient trail is noise
-    const rows = await this.db.select(Tb.Claim).where(c => c.scope.eq(MemoryScope.project))
+    // view over one task's transient trail is noise. knowledge() for the same reason search() and
+    // the claim arm apply it — a topic is a retrieval surface, and ui-metadata is excluded from
+    // those entirely; without it a claim on 'ui-project-name' could become a topic member and come
+    // back from memory_topics while the note itself stays hidden.
+    const rows = (await this.db.select(Tb.Claim).where(c => c.scope.eq(MemoryScope.project)))
+      .filter(r => !isUiMetaNote(r.scope, r.noteId))
     const claims: ClusterInput[] = rows.flatMap(r =>
       r.embedding === undefined ? [] : [{ id: r.claimId, vector: r.embedding }])
     const text = new Map(rows.map(r => [r.claimId, r.text]))
@@ -629,19 +661,34 @@ export class SurrealMemory {
     const rows = await this.db.select(Tb.Topic)
     return rows
       .map(r => Topic.parse({ topicKey: r.topicKey, label: r.label, size: r.members.length }))
-      .sort((a, b) => b.size - a.size || a.topicKey.localeCompare(b.topicKey))
+      // `ascending`, not localeCompare: the same rule cluster.ts breaks its own ties by, so the
+      // listing order cannot disagree with the partition's over an ambient ICU locale
+      .sort((a, b) => b.size - a.size || ascending(a.topicKey, b.topicKey))
   }
 
   // The claims of one topic. An unknown key yields [] — the CALLER distinguishes "no such topic" from
   // "an empty one" by consulting topics(), because only it knows how to phrase that to its audience.
+  //
+  // Deduped by claimId, so the list agrees with `Topic.size`. A claim ROW is keyed (scope, noteId,
+  // claimId), so the same statement asserted on two notes is two rows — but a topic groups
+  // STATEMENTS, and `partition` already counts the id once. Returning both rows listed one statement
+  // twice under a size that said one, and since `Claim` carries no noteId the reader could not even
+  // tell they were the same fact: it read as two independent corroborations, the exact double
+  // counting this design exists to avoid. The EARLIEST validFrom wins — that is the honest first
+  // sighting of the statement, whichever note happened to state it first.
   async topicClaims(topicKey: string): Promise<Claim[]> {
     const topic = (await this.db.select(Tb.Topic, topicKey))[0]
     if (!topic) return []
     const rows = await this.db.select(Tb.Claim).where(c => c.scope.eq(MemoryScope.project))
     const members = new Set(topic.members)
-    return rows
-      .filter(r => members.has(r.claimId))
-      .map(r => Claim.parse({ id: r.claimId, text: r.text, validFrom: r.validFrom, sourceRevision: r.sourceRevision }))
+    const byClaim = new Map<string, Claim>()
+    for (const r of rows) {
+      if (!members.has(r.claimId)) continue
+      const claim = Claim.parse({ id: r.claimId, text: r.text, validFrom: r.validFrom, sourceRevision: r.sourceRevision })
+      const prev = byClaim.get(claim.id)
+      if (!prev || claim.validFrom < prev.validFrom) byClaim.set(claim.id, claim)
+    }
+    return [...byClaim.values()]
   }
 
   private async keywordSearch(query: string, filter: MemoryFilter = {}): Promise<NoteSummary[]> {

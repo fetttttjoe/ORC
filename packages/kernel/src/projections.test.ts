@@ -164,7 +164,7 @@ describe('fold — execution kinds', () => {
     const withMem = fold([{
       seq: 1, projectId: 'p1', idempotencyKey: null, taskId: null, stepId: null, runToken: null,
       kind: 'memory_written',
-      payload: { note: { id: 'x', title: 'X', scope: 'project', categories: [], tags: [], links: [], paths: [], rules: [], summary: '', body: '' }, author: { source: 'cli' } },
+      payload: { note: { id: 'x', title: 'X', scope: 'project', categories: [], tags: [], links: [], paths: [], summary: '', body: '' }, author: { source: 'cli' } },
       usage: null, ts: '2026-07-18T00:00:00Z',
     }])
     expect(withMem.tasks.size).toBe(base.tasks.size)

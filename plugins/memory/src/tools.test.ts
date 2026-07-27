@@ -237,6 +237,24 @@ describe('memory tools', () => {
     expect(JSON.stringify(result.output).length).toBeLessThanOrEqual(1_024)
   })
 
+  // The budget IS the ceiling on the reply — applyBudget and fitMemoryNoteToBudget bound the
+  // response to it and to nothing else — and it is supplied by the MODEL. Unbounded, `budget: 1e9`
+  // was a request for the whole corpus in one response, on every memory tool at once.
+  it('refuses a budget past the shared ceiling instead of honouring it', async () => {
+    const { store } = fakeStore()
+    const tools = memoryTools({ store, author: { source: 'cli' } })
+    const tooBig = MEMORY_LIMITS.budgetTokens + 1
+    for (const [name, input] of [
+      ['memory_search', { query: 'x', budget: tooBig }],
+      ['memory_read', { id: 'auth', budget: tooBig }],
+      ['memory_neighbors', { seed: 'auth', budget: tooBig }],
+      ['memory_topics', { budget: tooBig }],
+    ] as const)
+      expect((await tools.find(t => t.name === name)!.execute(input)).isError).toBe(true)
+    // and the ceiling itself still works, so the bound is a cap and not an off-by-one refusal
+    expect((await tools.find(t => t.name === 'memory_search')!.execute({ query: 'x', budget: MEMORY_LIMITS.budgetTokens })).isError).toBe(false)
+  })
+
   it('memory_neighbors passes scope through to the store', async () => {
     let seen: { scope?: string } | undefined
     const { store } = fakeStore({ neighbors: async (_seed, opts) => { seen = opts; return [] } })
@@ -556,16 +574,22 @@ describe('claims through the tool surface', () => {
     expect(out.claims[0]).toMatchObject({ text: 'the log is truth', noteId: 'n1' })
   })
 
-  it('memory_search budgets claims by their text and reports what it dropped', async () => {
-    const many = Array.from({ length: 40 }, (_, i) =>
-      claimHit({ claimId: `c${i}`, noteId: `n${i}`, text: `statement ${i} ${'x'.repeat(200)}` }))
-    const { store } = fakeStore({ searchClaims: async () => many })
+  // The budget must measure what is SERIALIZED, not the one field a reader cares about. Costing only
+  // `h.text` shipped 60 hits carrying 200-char titles — 21.7KB — as "60 tokens" against a 1500 budget,
+  // with truncated:false: the same class as the 112KB-into-1KB note leak the fitter was hardened for.
+  // Fat titles, one-char texts, so the assertion fails unless the whole hit is counted.
+  it('memory_search budgets claims by the whole hit, not just its text, and reports what it dropped', async () => {
+    const many = Array.from({ length: 60 }, (_, i) =>
+      claimHit({ claimId: `c${i}`, noteId: `n${i}`, title: 'T'.repeat(200), text: 'x' }))
+    const { store } = fakeStore({ searchClaims: async () => many, search: async () => [] })
     const search = memoryTools({ store, author: { source: 'cli' } }).find(t => t.name === 'memory_search')!
-    const r = await search.execute({ query: 'statement', budget: 100 })
+    const r = await search.execute({ query: 'x', budget: 100 })
     const out = z.object({ claims: z.array(z.unknown()), truncated: z.boolean(), omitted: z.number() }).parse(r.output)
     expect(out.claims.length).toBeLessThan(many.length)
     expect(out.truncated).toBe(true)
     expect(out.omitted).toBe(many.length - out.claims.length)
+    // and what actually goes out fits the budget it was measured against (approxTokens is chars/4)
+    expect(JSON.stringify(out.claims).length).toBeLessThanOrEqual(100 * 4)
   })
 
   it('an empty claim result still says absence is not proof', async () => {
@@ -611,6 +635,24 @@ describe('memory_topics', () => {
     const r = await tool.execute({ topic: 'deadbeef0000' })
     expect(r.isError).toBe(true)
     expect(JSON.stringify(r.output)).toContain('list topics again')
+  })
+
+  // memory_topic_accessed is the ONLY measurement MEMORY_CLUSTER_THRESHOLD will ever be settled
+  // from, and a tool call runs inside an at-least-once operation — so the fetch carries the same
+  // toolCallId-derived key memory_read and memory_neighbors use, or a crash-retry counts it twice.
+  it('keys the fetch by toolCallId so a retried call cannot double-count the signal', async () => {
+    const keys: (string | undefined)[] = []
+    const { store } = fakeStore({
+      topics: async () => [topic('aaaaaaaaaaa1', 'the log is truth')],
+      topicClaims: async (_key, _author, opts) => { keys.push(opts?.idempotencyKey); return [] },
+    })
+    const tool = memoryTools({ store, author: { source: 'agent', runToken: 'r1' } }).find(t => t.name === 'memory_topics')!
+    await tool.execute({ topic: 'aaaaaaaaaaa1' }, 'c1')
+    await tool.execute({ topic: 'aaaaaaaaaaa1' }, 'c1') // the same call arriving twice
+    expect(keys).toEqual(['r1:tool:c1:topic:aaaaaaaaaaa1', 'r1:tool:c1:topic:aaaaaaaaaaa1'])
+    // the listing form appends nothing at all, so it reaches topicClaims not at all
+    await tool.execute({}, 'c2')
+    expect(keys).toHaveLength(2)
   })
 
   it('bounds the inventory by budget like every other tool response', async () => {

@@ -33,12 +33,17 @@ const leaker: AgentExecutor<unknown> = {
 
 describe('redaction covers what DBOS persists', () => {
   const cleanup: (() => Promise<void>)[] = []
-  afterAll(async () => { for (const c of cleanup) await c() })
+  // LIFO: a resource is torn down before the one it was built on (the launched DBOS runtime and
+  // the storage pool before the database they live in). Everything registers at CREATION rather
+  // than at the end of the it() body — a bare trailing shutdown is skipped when an assertion above
+  // it throws, which leaks a live DBOS runtime into every later test file AND blocks db.drop().
+  afterAll(async () => { for (const c of cleanup.reverse()) await c() })
 
   it('a secret in a step result never reaches the DBOS system database in plaintext', async () => {
     const db = await createTestDb()
     cleanup.push(db.drop)
     const storage = await openStorage(db.url, { projectId: TEST_PROJECT_ID })
+    cleanup.push(() => storage.close())
     const kernel = new Kernel(storage.events)
     const t = await kernel.createTask({ title: 'leak probe', spec: 'return a secret from a step' })
     await kernel.proposePlan(t.id, draftFixture([stepFixture({ id: 's1', title: 's1' })]))
@@ -50,18 +55,17 @@ describe('redaction covers what DBOS persists', () => {
       executors: new Map([['api-loop', leaker]]),
     })
     await port.launch()
+    cleanup.push(() => port.shutdown())
     expect(await (await port.startRun(t.id)).wait()).toBe('done')
-    await port.shutdown()
 
     const sys = new pg.Client({ connectionString: deriveSystemUrl(db.url, TEST_PROJECT_ID) })
     await sys.connect()
+    cleanup.push(() => sys.end())
     const { rows } = await sys.query(`SELECT output, error FROM dbos.operation_outputs`)
-    await sys.end()
 
     expect(rows.length).toBeGreaterThan(0) // the step really did checkpoint
     const persisted = rows.map(r => `${r.output ?? ''}${r.error ?? ''}`).join('\n')
     expect(persisted).not.toContain(SECRET)
     expect(persisted).toContain('[REDACTED:ORC_REDACTION_PROBE_KEY]') // scrubbed, not merely dropped
-    await storage.close()
   }, 120_000)
 })

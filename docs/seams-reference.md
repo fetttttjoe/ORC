@@ -185,13 +185,22 @@ The memory system is **event-first**: the Postgres event log is the source of tr
 
 ```
 Event log (Postgres)
-    ↓ (memory_written, memory_deleted, memory_accessed events)
-SurrealDB (live notes + edges, project-scoped database)
+    ↓ (memory_written, memory_deleted, memory_accessed, memory_topic_accessed events)
+SurrealDB — per-event, in one transaction (note + link + claim tables, project-scoped database)
+    ↓ (stateless recompute from the claim table, outside the event transaction)
+SurrealDB — topic table (claims grouped by embedding cosine)
     ↓ (every note, every link, ranked by hits/updatedAt)
 vault/memory/index.md (deterministic markdown rendering)
     ↓ (mermaid graph, notes list)
 Human reader / future agent
 ```
+
+Three stages, in that order: append → project per event → derive by stateless recompute. Stage 3
+may never be the only writer of a fact — the `topic` table is derivable from the `claim` table,
+which is derivable from the log, and `orc memory rebuild` drops and reproduces both. Note that a
+corpus written before claims existed has no claim rows even after a rebuild: the legacy `rules[]`
+decoder that used to synthesise them was removed, so those notes assert nothing until an agent
+states a claim. See [claims and topics](ARCHITECTURE.md#claims-—-the-addressable-unit-of-knowledge).
 
 **Degraded mode:** If SurrealDB is down:
 - `memory_write` tool returns `memory unavailable`
@@ -358,7 +367,8 @@ The knowledge graph as a mermaid graph + a text list:
 |---|---|---|---|
 | Step execution | `operation_started`, `agent_call` / `tool_result`, `operation_completed` | all above (live status) | `EventLog`, `OperationJournal` |
 | Plan approval | `feedback_provided`, plan hash stored | `feedback_provided` for gating | `EventLog` |
-| Memory write | `memory_written`, `memory_accessed` | all above for projector + search | `EventLog`, Surreal |
+| Memory write | `memory_written` (note + live claims + `invalidates`), `memory_accessed` | all above for projector + search | `EventLog`, Surreal |
+| Topic fetch | `memory_topic_accessed` (topicKey + resolved label) | `memory_written` via the claim table | `EventLog`, Surreal |
 | Task split | `task_created`, `split_approved` | same + plan lookup | `EventLog` |
 | Artifact receipt | `artifact_produced` | same (for lineage) | `EventLog`, verify via filesystem |
 | Vault render | many reads, no writes | above (sink only) | `EventLog` (read-only) |

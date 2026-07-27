@@ -7,6 +7,36 @@ import pg from 'pg'
 // an already-launched runtime in this process.
 // ponytail: truncate-under-a-live-workflow kills it mid-step; purge is a test-reset tool and
 // accepts that — a coordinated drain would need the runtime we deliberately avoid.
+// Deleting a project takes its durable-execution state WITH it — the database, not just the rows.
+// Truncating is right for `purge`, which re-seeds identity and keeps the chat alive, but a DELETED
+// project has no runtime left to hold a schema for: the emptied database object just sits there, and
+// nothing ever collects it. Measured on a real machine: nine such shells at ~8MB each, for projects
+// whose directories were long gone.
+//
+// DROP cannot run from inside the database it removes, so this connects to the server's default one.
+// FORCE (Postgres 13+) evicts a connection still attached — the alternative is a drop that fails
+// whenever a runtime is mid-shutdown, leaving behind exactly the dangling resource this exists to
+// remove. 'absent' when there is nothing to drop, matching resetSystemDatabase: a project that never
+// ran is data, not an error.
+export async function dropSystemDatabase(url: string): Promise<'dropped' | 'absent'> {
+  const name = decodeURIComponent(new URL(url).pathname.slice(1))
+  const admin = new URL(url)
+  admin.pathname = '/postgres'
+  const client = new pg.Client({ connectionString: admin.toString() })
+  await client.connect()
+  try {
+    // existence decides the return value AND guards the interpolation below: the identifier is a
+    // name Postgres itself just confirmed, not the caller's string
+    const { rows } = await client.query<{ datname: string }>('select datname from pg_database where datname = $1', [name])
+    const found = rows[0]?.datname
+    if (found === undefined) return 'absent'
+    await client.query(`drop database "${found.replaceAll('"', '""')}" with (force)`)
+    return 'dropped'
+  } finally {
+    await client.end()
+  }
+}
+
 export async function resetSystemDatabase(url: string): Promise<'reset' | 'absent'> {
   const client = new pg.Client({ connectionString: url })
   try {

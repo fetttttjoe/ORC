@@ -14,7 +14,7 @@ export {
   SUPERVISOR_BEAT_MS, SUPERVISOR_STALE_MS, type SupervisorRow,
 } from './supervisors'
 export { assertMigrated, migrateDatabase } from './migrate'
-export { resetSystemDatabase } from './system-db'
+export { dropSystemDatabase, resetSystemDatabase } from './system-db'
 
 // Postgres facade: callers use `events`/`operations`, never pools/locks/migrations. The one
 // exception is `db`/`projectId`, exposed read-only for tables that don't warrant their own

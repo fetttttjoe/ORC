@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, it } from 'bun:test'
-import { claimId, MemoryScope, type EmbeddingProvider, type EventRecord, type MemoryAuthor } from '@orc/contracts'
+import { claimId, MemoryScope, PROJECT_NAME_NOTE_ID, type EmbeddingProvider, type EventRecord, type MemoryAuthor } from '@orc/contracts'
 import { eventFixture } from '@orc/contracts/fixtures'
 import { SurrealMemory } from './surreal'
 import { createTestSurreal } from './test-helpers'
@@ -81,6 +81,62 @@ describe('SurrealMemory topic projection', () => {
     const key = (await m.topics())[0]?.topicKey ?? ''
     expect((await m.topicClaims(key)).map(c => c.text).sort()).toEqual(['alpha holds', 'zeta holds'])
     expect(await m.topicClaims('deadbeef0000')).toEqual([])
+    await m.close()
+  })
+
+  // A claim ROW is keyed (scope, noteId, claimId), so one statement asserted on two notes is two
+  // rows — but a topic groups STATEMENTS and `size` counts the id once. The list used to return both
+  // rows under a size that said one, and `Claim` carries no noteId, so it read as two independent
+  // corroborations of the same fact.
+  it('a statement asserted on two notes is ONE claim in its topic, matching the topic’s size', async () => {
+    const m = await open()
+    await m.applyEvent(written(1, note({ id: 'n1', claims: [claim('alpha holds')] })))
+    await m.applyEvent(written(2, note({ id: 'n2', claims: [claim('alpha holds')] })))
+    await m.refreshTopics(0.75)
+    const [topic] = await m.topics()
+    expect(topic?.size).toBe(1)
+    const claims = await m.topicClaims(topic?.topicKey ?? '')
+    expect(claims).toHaveLength(1)
+    // the earliest sighting of the STATEMENT, not whichever row the select happened to return first
+    expect(claims[0]?.validFrom).toBe('2026-07-26T01:00:00Z')
+    await m.close()
+  })
+
+  // `embedding: map.get(id)` named the key unconditionally, and surqlize emits an assignment for
+  // every named key — so an absent vector became `SET embedding = NONE`, which REMOVES the column.
+  // embedClaims returns an EMPTY map on any embedder failure, so one Ollama blip while projecting a
+  // later write to the note erased the vectors of every claim already on it, silently and for good.
+  it('an embedder blip on a later write leaves the surviving claims’ vectors intact', async () => {
+    const t = await createTestSurreal(); drops.push(t.drop)
+    let up = true
+    const flaky: EmbeddingProvider = {
+      embed: async texts => { if (!up) throw new Error('embedder down (simulated)'); return texts.map(vec) },
+    }
+    const m = await SurrealMemory.open(t, flaky)
+    await m.applyEvent(written(1, note({ id: 'n1', claims: [claim('alpha holds'), claim('beta holds')] })))
+    await m.refreshTopics(0.75)
+    expect(await m.topics()).toHaveLength(2)
+
+    up = false
+    await m.applyEvent(written(2, note({ id: 'n1', claims: [claim('alpha holds'), claim('beta holds'), claim('gamma holds')] })))
+    await m.refreshTopics(0.75)
+    // the two already-embedded claims keep their vectors and their topics; only the NEW claim is
+    // left unembedded, so it is keyword-only until the next write or a rebuild with the embedder up
+    expect(await m.topics()).toHaveLength(2)
+    await m.close()
+  })
+
+  // A topic is a retrieval surface, so the same exclusion search() and the claim arm apply holds
+  // here: without it a claim on a ui-metadata note becomes a topic member and comes back from
+  // memory_topics while the note itself stays hidden.
+  it('excludes claims on ui-metadata notes from the partition', async () => {
+    const m = await open()
+    await m.applyEvent(written(1, note({ id: PROJECT_NAME_NOTE_ID, claims: [claim('alpha holds')] })))
+    expect(await m.topics()).toEqual([])
+    await m.applyEvent(written(2, note({ id: 'n2', claims: [claim('beta holds')] })))
+    await m.refreshTopics(0.75)
+    const claims = await m.topicClaims((await m.topics())[0]?.topicKey ?? '')
+    expect(claims.map(c => c.text)).toEqual(['beta holds'])
     await m.close()
   })
 

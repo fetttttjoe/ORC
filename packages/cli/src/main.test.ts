@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import type { Command } from 'commander'
 import { Surreal } from 'surrealdb'
-import { ApprovalPolicy, EVENT_KIND, MemoryAccessedPayload, RUN_OUTCOME, TASK_STATUS, isRecord, type ExecutionPort, type OperationSpec, type RunOutcome, type TaskStatus } from '@orc/contracts'
+import { ApprovalPolicy, EVENT_KIND, MemoryAccessedPayload, RUN_OUTCOME, TASK_STATUS, claimId, isRecord, type ExecutionPort, type OperationSpec, type RunOutcome, type TaskStatus } from '@orc/contracts'
 import { loadConfig, projectDatabaseName, requireProject, type EventLog, type ProjectConfig } from '@orc/kernel'
 import { createTestDb, TEST_PROJECT_ID } from '@orc/kernel/test-helpers'
 import { buildProgram, openKernel, runInit, singleStepDraft, watchSubtree } from './main'
@@ -38,11 +38,19 @@ const deletedAuthorTaskId = (payload: unknown): string | undefined => {
 
 const dbs: Array<{ drop: () => Promise<void> }> = []
 const surrealConfigs: ProjectConfig[] = []
+// Process-scoped resources (a real plugin host, an MCP hub, an event-log pool) registered the
+// moment they are created and drained LIFO. A bare `await host.shutdown()` as the last statement
+// of an it() is SKIPPED when an assertion above it throws, which leaks the host into every later
+// test file in the process — that is what turned one failed assertion on this branch into a
+// 22-failure mystery, and it is why the db.drop() below got skipped too. Same idiom as
+// kernel/src/execution/memory-access.integration.test.ts.
+const cleanup: Array<() => Promise<void> | void> = []
 // Teardown drops one Postgres DB per makeCli/openKernel (14+ here) plus each throwaway Surreal db.
 // Each pg drop runs its handle's registered closers first (createTestDb.onClose) and then DROPs on
 // its own admin connection; serial drops blew bun's default 5s hook budget under a contended pg
 // (same fix as kernel.test.ts) — the dbs are distinct, so drop them concurrently.
 afterAll(async () => {
+  for (const c of cleanup.reverse()) await c()
   await Promise.all([...dbs.map(d => d.drop()), ...surrealConfigs.map(c => dropSurrealDb(c))])
 }, 30_000)
 
@@ -118,6 +126,7 @@ describe('orc CLI', () => {
     const db = await createTestDb()
     dbs.push(db)
     const { kernel, log, storage } = await openKernel(db.url, { projectId: TEST_PROJECT_ID })
+    cleanup.push(() => log.close())
     const lines: string[] = []
     spyOn(console, 'log').mockImplementation((...a: unknown[]) => { lines.push(a.join(' ')) })
     const run = async (...args: string[]) => {
@@ -143,13 +152,13 @@ describe('orc CLI', () => {
     await expect(run('replay', t.id, '--at', 'x')).rejects.toThrow(/non-negative integer/)
     await expect(run('replay', t.id, '--at', '-1')).rejects.toThrow(/non-negative integer/)
     expect((await log.all()).length).toBe(countBefore) // replay never mutates history
-    await log.close()
   })
 
   it('replay --at below the task range explains that sequences are global', async () => {
     const db = await createTestDb()
     dbs.push(db)
     const { kernel, log } = await openKernel(db.url, { projectId: TEST_PROJECT_ID })
+    cleanup.push(() => log.close())
     const t = await kernel.createTask({ title: 'audit me', spec: '' })
     const events = await kernel.eventsFor(t.id)
     const first = events[0]!.seq
@@ -163,13 +172,13 @@ describe('orc CLI', () => {
     expect(errors.join('\n')).toContain('sequences are GLOBAL')
     expect(errors.join('\n')).toContain(`${first}..${events.at(-1)!.seq}`)
     expect(process.exitCode ?? 0).toBe(0) // the global stays untouched — that is the point
-    await log.close()
   })
 
   it('log --json prints the full stored envelope', async () => {
     const db = await createTestDb()
     dbs.push(db)
     const { kernel, log } = await openKernel(db.url, { projectId: TEST_PROJECT_ID })
+    cleanup.push(() => log.close())
     const lines: string[] = []
     spyOn(console, 'log').mockImplementation((...a: unknown[]) => { lines.push(a.join(' ')) })
     const run = async (...args: string[]) => buildProgram(kernel).parseAsync(args, { from: 'user' })
@@ -179,7 +188,6 @@ describe('orc CLI', () => {
     const records = JSON.parse(lines.join('\n'))
     expect(records[0]).toMatchObject({ kind: 'task_created', projectId: TEST_PROJECT_ID, idempotencyKey: null })
     expect(records[0].seq).toBeGreaterThan(0)
-    await log.close()
   })
 
   it('log and replay reject unknown task ids', async () => {
@@ -339,6 +347,7 @@ describe('orc CLI', () => {
       projectId: TEST_PROJECT_ID,
       send: async (id, message, topic) => { sent.push({ id, message, topic }) },
     })
+    cleanup.push(() => log.close())
     const lines: string[] = []
     spyOn(console, 'log').mockImplementation((...a: unknown[]) => { lines.push(a.join(' ')) })
     // `reply` calls needPort() before replyFeedback (DBOS.send needs DBOS launched in-process), and
@@ -376,8 +385,6 @@ describe('orc CLI', () => {
     lines.length = 0
     await run('reply', taskId, 'again')
     expect(lines[0]).toContain('no open feedback')
-
-    await log.close()
   })
 
   it('reply requires a live execution port (needPort gate, same as run/retry/cancel)', async () => {
@@ -389,6 +396,7 @@ describe('orc CLI', () => {
     const db = await createTestDb()
     dbs.push(db)
     const { kernel, log } = await openKernel(db.url, { projectId: TEST_PROJECT_ID })
+    cleanup.push(() => log.close())
     const lines: string[] = []
     spyOn(console, 'log').mockImplementation((...a: unknown[]) => { lines.push(a.join(' ')) })
     const run = async (...args: string[]) => buildProgram(kernel).parseAsync(args, { from: 'user' })
@@ -399,13 +407,13 @@ describe('orc CLI', () => {
     lines.length = 0
     await run('status', t.id)
     expect(lines.join('\n')).toContain('changes or approve?')
-    await log.close()
   })
 
   it('status shows the analysis coverage once the analyze step has reported it', async () => {
     const db = await createTestDb()
     dbs.push(db)
     const { kernel, log } = await openKernel(db.url, { projectId: TEST_PROJECT_ID })
+    cleanup.push(() => log.close())
     const lines: string[] = []
     spyOn(console, 'log').mockImplementation((...a: unknown[]) => { lines.push(a.join(' ')) })
     const run = async (...args: string[]) => buildProgram(kernel).parseAsync(args, { from: 'user' })
@@ -419,7 +427,6 @@ describe('orc CLI', () => {
     const out = lines.join('\n')
     expect(out).toContain('analysis')
     expect(out).toContain('no tests read') // the gap surfaces so the human sees what was NOT covered
-    await log.close()
   })
 
   it('plan-revise annotates each scoped note with the text, then resumes the open feedback', async () => {
@@ -430,6 +437,7 @@ describe('orc CLI', () => {
       projectId: TEST_PROJECT_ID,
       send: async (id, message, topic) => { sent.push({ id, message, topic }) },
     })
+    cleanup.push(() => log.close())
     const lines: string[] = []
     spyOn(console, 'log').mockImplementation((...a: unknown[]) => { lines.push(a.join(' ')) })
     const stubPort: ExecutionPort = {
@@ -452,7 +460,6 @@ describe('orc CLI', () => {
     expect(annotated.every(e => e.payload.text === 'use argon2')).toBe(true)
     // one send resumes the plan agent with the revise text — it reads the queued annotations on wake
     expect(sent).toEqual([{ id: runToken, message: 'use argon2', topic: 'feedback:auth-1' }])
-    await log.close()
   })
 
   // memory commands need `needPlugin()` to resolve, so this injects a plugin the way
@@ -468,6 +475,7 @@ describe('orc CLI', () => {
     const db = await createTestDb()
     dbs.push(db)
     const { kernel, log } = await openKernel(db.url, { projectId: TEST_PROJECT_ID })
+    cleanup.push(() => log.close())
     const lines: string[] = []
     spyOn(console, 'log').mockImplementation((...a: unknown[]) => { lines.push(a.join(' ')) })
     const run = (...args: string[]) => buildProgram(kernel, async () => forbiddenPort()).parseAsync(args, { from: 'user' })
@@ -489,7 +497,6 @@ describe('orc CLI', () => {
     await watched
     expect(failure).toBeInstanceOf(CommandFailure)
     expect(lines.join('\n')).toContain(`run finished: ${RUN_OUTCOME.cancelled}`)
-    await log.close()
   }, 15_000)
 
   // one split child, shaped like the ones `task_split` proposes — the only variable is the policy
@@ -504,6 +511,7 @@ describe('orc CLI', () => {
     const db = await createTestDb()
     dbs.push(db)
     const { kernel, log } = await openKernel(db.url, { projectId: TEST_PROJECT_ID })
+    cleanup.push(() => log.close())
     const lines: string[] = []
     spyOn(console, 'log').mockImplementation((...a: unknown[]) => { lines.push(a.join(' ')) })
     const run = (...args: string[]) => buildProgram(kernel, async () => forbiddenPort()).parseAsync(args, { from: 'user' })
@@ -523,13 +531,13 @@ describe('orc CLI', () => {
     // a gated child is a stopping point, not a hang: the watch ends and names what unblocks it
     expect(lines.join('\n')).toContain('gated child')
     expect(lines.join('\n')).toContain(`orc approve ${child.childTaskId}`)
-    await log.close()
   }, 15_000)
 
   it('a split gated mid-run is named while the watch is still attached', async () => {
     const db = await createTestDb()
     dbs.push(db)
     const { kernel, log } = await openKernel(db.url, { projectId: TEST_PROJECT_ID })
+    cleanup.push(() => log.close())
     const lines: string[] = []
     spyOn(console, 'log').mockImplementation((...a: unknown[]) => { lines.push(a.join(' ')) })
     const run = (...args: string[]) => buildProgram(kernel, async () => forbiddenPort()).parseAsync(args, { from: 'user' })
@@ -550,13 +558,13 @@ describe('orc CLI', () => {
     await watched
 
     expect(lines.join('\n')).toContain(`orc approve ${child.childTaskId}`)
-    await log.close()
   }, 15_000)
 
   it('a question parked on a child parks the parent tail, naming the CHILD to reply to', async () => {
     const db = await createTestDb()
     dbs.push(db)
     const { kernel, log } = await openKernel(db.url, { projectId: TEST_PROJECT_ID })
+    cleanup.push(() => log.close())
     const lines: string[] = []
     spyOn(console, 'log').mockImplementation((...a: unknown[]) => { lines.push(a.join(' ')) })
     // the parent is inside join_splits' recv while the child works: its own stream stays silent
@@ -581,13 +589,13 @@ describe('orc CLI', () => {
     await run('run', taskId)
     expect(lines.join('\n')).toContain('may I overwrite it?')
     expect(lines.join('\n')).toContain(`orc reply ${child.childTaskId} <text>`)
-    await log.close()
   }, 15_000)
 
   it('orc run records the ask and watches — it never starts a workflow itself', async () => {
     const db = await createTestDb()
     dbs.push(db)
     const { kernel, log } = await openKernel(db.url, { projectId: TEST_PROJECT_ID })
+    cleanup.push(() => log.close())
     const lines: string[] = []
     spyOn(console, 'log').mockImplementation((...a: unknown[]) => { lines.push(a.join(' ')) })
     const run = (...args: string[]) => buildProgram(kernel, async () => forbiddenPort()).parseAsync(args, { from: 'user' })
@@ -609,7 +617,6 @@ describe('orc CLI', () => {
     const requested = (await kernel.eventsFor(taskId)).filter(e => e.kind === EVENT_KIND.run_requested)
     expect(requested).toHaveLength(1)
     expect(requested[0]!.payload).toEqual({ taskId, cwd: null, retry: false })
-    await log.close()
   }, 15_000)
 
   it('orc run refuses an undrivable task before recording anything', async () => {
@@ -624,6 +631,7 @@ describe('orc CLI', () => {
     const db = await createTestDb()
     dbs.push(db)
     const { kernel, log } = await openKernel(db.url, { projectId: TEST_PROJECT_ID })
+    cleanup.push(() => log.close())
     const lines: string[] = []
     spyOn(console, 'log').mockImplementation((...a: unknown[]) => { lines.push(a.join(' ')) })
     const run = (...args: string[]) => buildProgram(kernel, async () => forbiddenPort()).parseAsync(args, { from: 'user' })
@@ -649,7 +657,6 @@ describe('orc CLI', () => {
     await watched
     expect(lines.join('\n')).toContain(`watching the run at ${taskId}`)
     expect((await kernel.eventsFor(taskId)).some(e => e.kind === EVENT_KIND.run_requested)).toBe(false)
-    await log.close()
   }, 15_000)
 
   it('status names the child awaiting plan approval, with the command that unblocks it', async () => {
@@ -667,6 +674,7 @@ describe('orc CLI', () => {
     const db = await createTestDb()
     dbs.push(db)
     const { kernel, log } = await openKernel(db.url, { projectId: TEST_PROJECT_ID })
+    cleanup.push(() => log.close())
     const lines: string[] = []
     spyOn(console, 'log').mockImplementation((...a: unknown[]) => { lines.push(a.join(' ')) })
     const run = (...args: string[]) => buildProgram(kernel, async () => forbiddenPort()).parseAsync(args, { from: 'user' })
@@ -694,7 +702,6 @@ describe('orc CLI', () => {
     await stamp(log, second.childTaskId, TASK_STATUS.approved, TASK_STATUS.done)
     await watched
     expect(lines.join('\n')).toContain(`run finished: ${RUN_OUTCOME.done}`)
-    await log.close()
   }, 15_000)
 
   // The supervisor's half of a run, faked: nothing in this file holds a real runtime, so the
@@ -718,6 +725,7 @@ describe('orc CLI', () => {
     const db = await createTestDb()
     dbs.push(db)
     const { kernel, log } = await openKernel(db.url, { projectId: TEST_PROJECT_ID })
+    cleanup.push(() => log.close())
     spyOn(console, 'log').mockImplementation(() => {})
 
     const parent = await kernel.createTask({ title: 'parent', spec: '' })
@@ -738,13 +746,13 @@ describe('orc CLI', () => {
     await stamp(log, child.childTaskId, TASK_STATUS.approved, TASK_STATUS.running)
     await stamp(log, child.childTaskId, TASK_STATUS.running, TASK_STATUS.done)
     expect(await watching).toEqual({ parked: false, outcome: RUN_OUTCOME.done })
-    await log.close()
   }, 15_000)
 
   it('a watched run resolves parked when a gate is open anywhere in the subtree', async () => {
     const db = await createTestDb()
     dbs.push(db)
     const { kernel, log } = await openKernel(db.url, { projectId: TEST_PROJECT_ID })
+    cleanup.push(() => log.close())
     spyOn(console, 'log').mockImplementation(() => {})
 
     const parent = await kernel.createTask({ title: 'parent', spec: '' })
@@ -760,7 +768,6 @@ describe('orc CLI', () => {
 
     expect(await watchSubtree(kernel, parent.id))
       .toEqual({ parked: true, taskId: child.childTaskId, question: 'may I overwrite it?' })
-    await log.close()
   }, 15_000)
 
   it('memory add/rebuild/ls/search/cat/rm round-trip against an isolated throwaway SurrealDB db', async () => {
@@ -774,6 +781,7 @@ describe('orc CLI', () => {
     const lines: string[] = []
     spyOn(console, 'log').mockImplementation((...a: unknown[]) => { lines.push(a.join(' ')) })
     const { host, hub } = await buildPlugins(config) // real plugin wiring — no stub casts
+    cleanup.push(() => log.close(), () => hub.close(), () => host.shutdown())
     const plugin = { host, hub, config, log }
     const run = (...args: string[]) => overrideExits(buildProgram(kernel, undefined, plugin)).parseAsync(args, { from: 'user' })
 
@@ -915,11 +923,79 @@ describe('orc CLI', () => {
     lines.length = 0
     await run('memory', 'cat', 'quick-capture-works')
     expect(lines.join('\n')).toContain('from the test')
+    // an explicit budget like every other slow test here: this one drives a real plugin host, a
+    // real Surreal db and ~20 CLI invocations, and bun's 5s default puts it one contended
+    // SurrealDB away from a timeout that reads as an assertion failure
+  }, 60_000)
 
-    await hub.close()
-    await host.shutdown()
-    await log.close()
-  })
+  it('memory claims drains before it reads, and --history recovers a retired claim', async () => {
+    const db = await createTestDb()
+    dbs.push(db)
+    const dir = mkdtempSync(path.join(tmpdir(), 'orc-memory-claims-cli-'))
+    const projectDbName = `t_${Math.random().toString(36).slice(2, 10)}`
+    // Keyword-only ON PURPOSE: `topics` is derived from claim EMBEDDINGS, so leaving the default
+    // ollama embedder wired would make the empty-inventory assertion below depend on whether a
+    // local Ollama happens to be running. The claims command itself never touches an embedder.
+    const config = requireProject({ ...loadConfig(dir), projectDbName, projectId: TEST_PROJECT_ID, projectName: 'test', memoryEmbedModel: '' })
+    surrealConfigs.push(config)
+    const { kernel, log } = await openKernel(db.url, { projectId: TEST_PROJECT_ID })
+    const lines: string[] = []
+    spyOn(console, 'log').mockImplementation((...a: unknown[]) => { lines.push(a.join(' ')) })
+    const { host, hub } = await buildPlugins(config)
+    cleanup.push(() => log.close(), () => hub.close(), () => host.shutdown())
+    const run = (...args: string[]) =>
+      overrideExits(buildProgram(kernel, undefined, { host, hub, config, log })).parseAsync(args, { from: 'user' })
+
+    // `memory add` has no claim flag, so state them the way the store's own payload does: the note
+    // carries the LIVE set and the EVENT carries the tombstone. Two writes, so the second retires
+    // what the first stated — the only shape from which --history has something to recover.
+    const noteId = 'claims-cli-note'
+    const liveText = 'the projector drains before every read'
+    const retiredText = 'the read model is the source of truth'
+    const write = (texts: string[], invalidates: string[] = []) => log.append({
+      taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_written,
+      payload: {
+        note: { id: noteId, title: 'claims', claims: texts.map(t => ({ id: claimId(t), text: t })) },
+        author: { source: 'cli' }, invalidates,
+      },
+    })
+    await write([retiredText])
+    await write([liveText], [claimId(retiredText)])
+
+    // REGRESSION: nothing has drained the projector yet, so the claim rows do not exist. The
+    // command only finds them if it catches up itself, the way every sibling read command does —
+    // and its empty case is a THROW, so the missing drain reads as "this note has no claims".
+    lines.length = 0
+    await run('memory', 'claims', noteId)
+    expect(lines.join('\n')).toContain(liveText)
+    expect(lines.join('\n')).not.toContain(retiredText) // retired: gone from the read model
+
+    // --history folds the LOG instead, which is the only surface a retired claim survives on
+    lines.length = 0
+    await run('memory', 'claims', noteId, '--history')
+    expect(lines.join('\n')).toContain(liveText)
+    expect(lines.join('\n')).toContain(retiredText)
+    expect(lines.find(l => l.includes(retiredText))).toContain('RETIRED')
+
+    // Deleting the note ends its claims' stretches too — the projector drops their rows with it, so
+    // a fold that saw only memory_written would keep reporting the live one as live forever.
+    await log.append({
+      taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_deleted,
+      payload: { id: noteId, scope: 'project', author: { source: 'cli' } },
+    })
+    lines.length = 0
+    await run('memory', 'claims', noteId, '--history')
+    expect(lines.find(l => l.includes(liveText))).toContain('RETIRED')
+
+    await expect(run('memory', 'claims', 'no-such-note-at-all')).rejects.toThrow(/no claims on/)
+
+    // No embedder → no claim vectors → no partition. The empty message must name the cause an
+    // operator upgrading onto claims actually hits (a corpus whose claims were all legacy-derived),
+    // not only the two it used to name.
+    await expect(run('memory', 'topics')).rejects.toThrow(/legacy rules\[\] decoder/)
+    // an unknown key is the store's own error, surfaced by the CLI rather than swallowed
+    await expect(run('memory', 'topics', 'deadbeef1234')).rejects.toThrow(/no topic/)
+  }, 30_000)
 })
 
 describe('cancel-sweep wiring (real plugin, stub port)', () => {
@@ -934,6 +1010,8 @@ describe('cancel-sweep wiring (real plugin, stub port)', () => {
     const lines: string[] = []
     spyOn(console, 'log').mockImplementation((...a: unknown[]) => { lines.push(a.join(' ')) })
     const { host, hub } = await buildPlugins(config)
+    // this describe never shut its host down at all — same leak, unconditional
+    cleanup.push(() => log.close(), () => hub.close(), () => host.shutdown())
     const stubPort: ExecutionPort = {
       startRun: async () => { throw new Error('unused') },
       retry: async () => { throw new Error('unused') },
@@ -971,7 +1049,6 @@ describe('cancel-sweep wiring (real plugin, stub port)', () => {
     expect(lines.join('\n')).toContain('cancelled')
     expect(warns.join('\n')).toContain('sweep skipped: surreal down')
     afterSpy.mockRestore(); warnSpy.mockRestore()
-    await log.close()
   })
 })
 

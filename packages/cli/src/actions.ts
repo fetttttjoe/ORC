@@ -1,5 +1,5 @@
 import { STEP_ROLE, errorMessage, EVENT_KIND, ISOLATION_TIER, STRATEGY, TASK_STATUS, costUSDFor, parseModelRef, type ExecutionPort, type ModelOption, type PlanDraft, type TaskStatus } from '@orc/contracts'
-import { DEFAULT_MAX_ITERATIONS, deriveSystemUrl, initializeProject, loadConfig, openStorage, resetSystemDatabase, subtreeTaskIds, type EventLog, type Kernel, type ProjectConfig, type Storage } from '@orc/kernel'
+import { DEFAULT_MAX_ITERATIONS, deriveSystemUrl, dropSystemDatabase, initializeProject, loadConfig, openStorage, resetSystemDatabase, subtreeTaskIds, type EventLog, type Kernel, type ProjectConfig, type Storage } from '@orc/kernel'
 import { seedRegistries } from './runtime'
 import { createMemory, openKnowledge, orphanedNotes } from '@orc/memory'
 import { openMemory } from './memory-open'
@@ -340,10 +340,13 @@ export function buildOrcActions(deps: {
       // stop-then-wipe, same order as purge; no identity re-seed — deletion IS the point.
       // Deleting the HOME project is allowed too: full wipe, though it stays listed (empty)
       // while this server runs from it.
+      // DROP, not truncate: purge keeps the chat and so needs the schema, but a deleted project has
+      // no runtime left to hold one. Truncating left an empty database object per deleted project
+      // that nothing ever collected.
       try {
-        await resetSystemDatabase(deriveSystemUrl(plugin.config.databaseUrl, projectId))
+        await dropSystemDatabase(deriveSystemUrl(plugin.config.databaseUrl, projectId))
       } catch (err) {
-        warnings.push(`durable-execution state not reset (${errorMessage(err)})`)
+        warnings.push(`durable-execution state not dropped (${errorMessage(err)})`)
       }
       const storage = await openStorage(plugin.config.databaseUrl, { projectId })
       try {

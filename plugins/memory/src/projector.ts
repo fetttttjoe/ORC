@@ -17,6 +17,10 @@ export const MEMORY_KINDS: EventKind[] = [EVENT_KIND.memory_written, EVENT_KIND.
 // graph an agent would read wrongly, and reporting it as degraded would cry wolf on every read.
 export const KNOWLEDGE_KINDS = MEMORY_KINDS.filter(k => k !== EVENT_KIND.memory_accessed)
 
+// The grouping spec's own scaling trigger, as a number something can actually compare against.
+// ponytail: one warn line, no metric — enough to notice; wire it to a real timer if it ever fires.
+const SLOW_REFRESH_MS = 1_000
+
 export function createMemoryProjector(opts: { log: EventLog; surreal: SurrealMemory; vaultDir: string }): MemoryProjector {
   const { log, surreal, vaultDir } = opts
   let unsub: (() => Promise<void>) | null = null
@@ -59,18 +63,32 @@ export function createMemoryProjector(opts: { log: EventLog; surreal: SurrealMem
   const drainFrom = async (fromSeq: number, opts: { force?: boolean } = {}): Promise<{ cursor: number; vaultChanged: number }> => {
     const events = await log.after(fromSeq, MEMORY_KINDS)
     let vaultChanged = 0
-    for (const e of events) if (await applyOne(e)) vaultChanged += 1
-    // vaultChanged counts an ACCEPTED memory_written/memory_deleted — the only events that can
-    // change which claims exist, so it is exactly "did this drain touch the claim set", not "did we
-    // drain anything": memory_accessed applies (bumps a counter) but never changes claims, and is
-    // deliberately excluded from vaultChanged for that same reason (see applyOne above).
-    if (vaultChanged > 0 || opts.force) {
-      // Best-effort: a grouping failure must never fail a drain — the previous topic table stays
-      // readable and the next drain retries.
-      try {
-        await surreal.refreshTopics()
-      } catch (err) {
-        console.warn(`[memory] topic refresh failed: ${errorMessage(err)}`)
+    // finally, not a straight-line call: applyOne can throw AFTER an event's Surreal side committed
+    // (the vault write is outside the transaction), and the retry then drains zero events and sees
+    // vaultChanged 0 — so without this the topic table stays stale until the next memory write or a
+    // restart, for claims that are already in the read model.
+    try {
+      for (const e of events) if (await applyOne(e)) vaultChanged += 1
+    } finally {
+      // vaultChanged counts an ACCEPTED memory_written/memory_deleted — the only events that can
+      // change which claims exist, so it is exactly "did this drain touch the claim set", not "did we
+      // drain anything": memory_accessed applies (bumps a counter) but never changes claims, and is
+      // deliberately excluded from vaultChanged for that same reason (see applyOne above).
+      if (vaultChanged > 0 || opts.force) {
+        // Best-effort: a grouping failure must never fail a drain — the previous topic table stays
+        // readable and the next drain retries.
+        const started = Date.now()
+        try {
+          await surreal.refreshTopics()
+        } catch (err) {
+          console.warn(`[memory] topic refresh failed: ${errorMessage(err)}`)
+        }
+        // The partition is O(n^2) cosines over the whole project corpus and it runs on interactive
+        // paths (catchUp is awaited by CLI commands), so the grouping spec's scaling trigger is a
+        // wall-clock one. Measuring it is what makes that trigger fire-able instead of theoretical.
+        const elapsed = Date.now() - started
+        if (elapsed > SLOW_REFRESH_MS)
+          console.warn(`[memory] topic refresh took ${elapsed}ms — past ${SLOW_REFRESH_MS}ms the claim corpus has outgrown the whole-corpus repartition; see cluster.ts's revisit trigger`)
       }
     }
     return { cursor: await surreal.getCursor(), vaultChanged }

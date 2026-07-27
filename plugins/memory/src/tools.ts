@@ -1,5 +1,5 @@
 import { z } from 'zod'
-import { AccessVia, CLAIM_ID_RE, ClaimWrite, EDGE_DIRECTIONS, errorMessage, linkLookupScopes, MemoryScope, MEMORY_ACCESS, MEMORY_LIMITS, MEMORY_SOURCE_LIMITS, MEMORY_TOOL_NAME, MemorySearchResult, MemoryWriteResult, NOTE_KINDS, LINK_KIND, LINK_KINDS, RETENTION_CLASSES, SEARCH_MODES, SearchMode, LinkKind, MemoryNoteDraftInput, NOTE_TIER, NOTE_TIERS, slugId, type MemoryAuthor, type MemoryNote, type MemoryStore, type ResolvedTool } from '@orc/contracts'
+import { AccessVia, CLAIM_ID_RE, ClaimWrite, EDGE_DIRECTIONS, errorMessage, linkLookupScopes, MemoryScope, MEMORY_ACCESS, MEMORY_LIMITS, MEMORY_SOURCE_LIMITS, MEMORY_TOOL_NAME, MemorySearchResult, MemoryWriteResult, NOTE_KINDS, LINK_KIND, LINK_KINDS, RETENTION_CLASSES, SEARCH_MODES, SearchMode, LinkKind, MemoryNoteDraftInput, NOTE_TIER, NOTE_TIERS, slugId, type ClaimHit, type MemoryAuthor, type MemoryNote, type MemoryStore, type ResolvedTool } from '@orc/contracts'
 import { applyBudget, approxTokens, fitMemoryNoteToBudget } from './budget'
 import { noteHasDrifted, type ChangedSince } from './drift'
 
@@ -70,13 +70,24 @@ export function noteLint(note: MemoryNote): string[] {
   return w
 }
 
+// What a budgeted item actually COSTS the reply: the serialized item, not the one field a reader
+// happens to care about. Measuring only `ClaimHit.text` shipped 21.7KB reported as 60 tokens against
+// a 1500 budget with `truncated: false` — a hit also carries claimId/noteId/scope/title/validFrom
+// and its JSON keys. Same class as the 112KB-into-1KB note leak the fitter was hardened for.
+const serialized = (item: unknown): string => JSON.stringify(item)
+
 // What the claim arm already spent, so the note arm gets the REMAINDER rather than a second full
 // budget — a reply carrying both surfaces must cost what the caller asked for, not double it.
-const claimTokens = (hits: ReadonlyArray<{ text: string }>): number =>
-  hits.reduce((sum, h) => sum + approxTokens(h.text), 0)
+const claimTokens = (hits: ReadonlyArray<ClaimHit>): number =>
+  hits.reduce((sum, h) => sum + approxTokens(serialized(h)), 0)
 
 const ok = (output: unknown) => ({ output, isError: false })
 const err = (e: unknown) => ({ output: { error: errorMessage(e) }, isError: true })
+
+// Absence epistemics (codebase-memory-mcp §5 amendment E-i): an empty result means "nothing matched",
+// never "no such decision exists" — say so in the envelope, on every read tool, in ONE wording.
+// memory_topics shipped without it, which is how the rule drifted; three spellings would be worse.
+const absenceNote = (what: string): string => `no ${what} matched — absence is not proof a decision doesn't exist`
 
 // matched values, never scattered literals: the step role → memory-role mapping (runtime.ts) keys off this.
 export const MEMORY_ROLE = { scout: 'scout', verify: 'verify', auditor: 'auditor' } as const
@@ -101,10 +112,16 @@ const withRole = (description: string, role: MemoryRole): string =>
 
 // Tool inputs come from the model — parse at the boundary, never cast.
 const DetailLevel = z.enum(['minimal', 'standard']).default('standard')
-const Budget = z.number().int().positive().default(1500)
+// The budget IS the ceiling on the reply — applyBudget and fitMemoryNoteToBudget bound it to this
+// and to nothing else — and it is supplied by the MODEL, so unbounded it was an open invitation to
+// ask for the whole corpus in one response. Bounded once, here, because every memory tool shares
+// this schema; `limit` is bounded on the same principle, though after the claim arm's cost function
+// was fixed it is applyBudget that actually holds the line.
+const Budget = z.number().int().positive().max(MEMORY_LIMITS.budgetTokens).default(1500)
 const SearchInput = z.object({
   query: z.string(), category: z.string().optional(), tag: z.string().optional(),
-  detail_level: DetailLevel, limit: z.number().int().positive().optional(), budget: Budget,
+  detail_level: DetailLevel,
+  limit: z.number().int().positive().max(MEMORY_LIMITS.detailItems).optional(), budget: Budget,
   mode: SearchMode.optional(),
 })
 const ReadInput = z.object({ id: z.string(), scope: z.string().optional(), budget: Budget, via: AccessVia.optional() })
@@ -112,8 +129,10 @@ const NeighborsInput = z.object({
   seed: z.string(), kinds: z.array(LinkKind).optional(), scope: z.string().optional(),
   depth: z.number().int().positive().optional(), budget: Budget,
 })
-// topic omitted lists the inventory; a topicKey from that listing fetches one topic's claims.
-const TopicsInput = z.object({ topic: z.string().optional(), budget: Budget })
+// topic omitted lists the inventory; a topicKey from that listing fetches one topic's claims. The
+// key IS a claim id, so it validates against CLAIM_ID_RE like every other one — a malformed key now
+// fails as a shape error the model can self-correct, not as "no such topic".
+const TopicsInput = z.object({ topic: z.string().regex(CLAIM_ID_RE).optional(), budget: Budget })
 // Tool-boundary variant: agents may omit id — the title-derived slug makes the same finding
 // converge instead of forking (bench: note-id drift). Named top-level, not call-site.
 // `invalidates` is stated about the WRITE, not about the note, so it is parsed here and forwarded on
@@ -126,7 +145,7 @@ const MemoryWriteToolInput = MemoryNoteDraftInput.extend({
 
 // advertised JSON schemas mirror the zod parsers exactly, so the model can self-correct.
 const detailLevelSchema = { type: 'string', enum: ['minimal', 'standard'], description: 'minimal = top 5 + omitted count' }
-const budgetSchema = { type: 'integer', minimum: 1, description: 'approx token budget for the result (default 1500)' }
+const budgetSchema = { type: 'integer', minimum: 1, maximum: MEMORY_LIMITS.budgetTokens, description: 'approx token budget for the result (default 1500)' }
 const idSchema = { type: 'string', pattern: '^[a-z0-9][a-z0-9-]*$' }
 
 // Degraded mode (design §8.4): the same four tools exist but every call returns an explicit
@@ -282,7 +301,7 @@ export function memoryTools(opts: {
         type: 'object', required: ['query'],
         properties: {
           query: { type: 'string' }, category: { type: 'string' }, tag: { type: 'string' },
-          detail_level: detailLevelSchema, limit: { type: 'integer', minimum: 1 }, budget: budgetSchema,
+          detail_level: detailLevelSchema, limit: { type: 'integer', minimum: 1, maximum: MEMORY_LIMITS.detailItems }, budget: budgetSchema,
           mode: { type: 'string', enum: [...SEARCH_MODES], description: 'keyword | semantic | hybrid (default hybrid; falls back to keyword when no embedder is configured)' },
         },
       },
@@ -299,16 +318,14 @@ export function memoryTools(opts: {
             store.searchClaims(q.query, filter, { mode: q.mode, limit }),
             store.search(q.query, filter, { mode: q.mode }),
           ])
-          const c = applyBudget(claimHits, h => h.text, { limit, budget: q.budget })
-          const r = applyBudget(noteHits, n => JSON.stringify(n), { limit, budget: Math.max(0, q.budget - claimTokens(c.items)) })
+          const c = applyBudget(claimHits, serialized, { limit, budget: q.budget })
+          const r = applyBudget(noteHits, serialized, { limit, budget: Math.max(0, q.budget - claimTokens(c.items)) })
           const empty = c.items.length === 0 && r.items.length === 0
           const truncated = c.truncated || r.truncated
           return ok(MemorySearchResult.parse({
             claims: c.items, notes: r.items, truncated, omitted: c.omitted + r.omitted,
             ...(truncated && { next: 'refine the query, or memory_read/memory_neighbors a specific id' }),
-            // absence epistemics (codebase-memory-mcp §5 amendment E-i): empty means "no note
-            // matched", never "no such decision exists" — say so in the envelope.
-            ...(empty && { note: "no note matched — absence is not proof a decision doesn't exist" }),
+            ...(empty && { note: absenceNote('note') }),
           }))
         } catch (e) { return err(e) }
       },
@@ -384,7 +401,7 @@ export function memoryTools(opts: {
           return ok({
             neighbors: r.items, truncated: r.truncated, omitted: r.omitted,
             ...(r.truncated && { next: 'memory_read an id for the full note' }),
-            ...(r.items.length === 0 && { note: "no note matched — absence is not proof a decision doesn't exist" }),
+            ...(r.items.length === 0 && { note: absenceNote('note') }),
           })
         } catch (e) { return err(e) }
       },
@@ -395,20 +412,31 @@ export function memoryTools(opts: {
       inputSchema: {
         type: 'object',
         properties: {
-          topic: { type: 'string', description: 'a topicKey from a previous listing; omit to list topics' },
+          // the pattern the parser actually enforces, not a second spelling of it
+          topic: { type: 'string', pattern: CLAIM_ID_RE.source, description: 'a topicKey from a previous listing; omit to list topics' },
           budget: budgetSchema,
         },
       },
-      execute: async input => {
+      execute: async (input, toolCallId) => {
         try {
           const q = TopicsInput.parse(input)
           if (q.topic === undefined) {
             // listing records nothing: a call that surfaces N things records one access for what was
             // ASKED, never N for what it happened to list (same rule memory_neighbors follows)
             const r = applyBudget(await store.topics(), t => `${t.topicKey}${t.label}`, { limit: MEMORY_LIMITS.labelItems, budget: q.budget })
-            return ok({ topics: r.items, truncated: r.truncated, omitted: r.omitted })
+            return ok({
+              topics: r.items, truncated: r.truncated, omitted: r.omitted,
+              // an empty inventory carries the same envelope every sibling read tool does — a corpus
+              // with no topics is not a corpus with no decisions
+              ...(r.items.length === 0 && { note: absenceNote('topic') }),
+            })
           }
-          const claims = await store.topicClaims(q.topic, author)
+          // keyed exactly like memory_read/memory_neighbors above: a tool call runs inside an
+          // at-least-once operation, so a crash-retry must not append a SECOND
+          // memory_topic_accessed. This event is the only measurement the cluster threshold will
+          // ever be settled from, and an inflated count corrupts it silently.
+          const accessKey = author.runToken && toolCallId ? `${author.runToken}:tool:${toolCallId}:topic:${q.topic}` : undefined
+          const claims = await store.topicClaims(q.topic, author, { idempotencyKey: accessKey })
           const r = applyBudget(claims, c => c.text, { limit: MEMORY_LIMITS.detailItems, budget: q.budget })
           return ok({ topicKey: q.topic, claims: r.items, truncated: r.truncated, omitted: r.omitted })
         } catch (e) { return err(e) }

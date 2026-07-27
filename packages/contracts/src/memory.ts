@@ -498,7 +498,10 @@ export const MemoryWrittenPayload = z.object({
   author: MemoryAuthor,
   // Claim ids this write supersedes. Stated, never inferred: the store merges on omit, so a claim
   // the writer simply did not resend must carry forward — absence cannot mean deletion.
-  invalidates: z.array(z.string()).default([]),
+  // The SAME shape and cap ClaimWrite.invalidates enforces, not a second spelling of it: the log
+  // side used to take an unbounded array of arbitrary strings, which claimHistory then folded.
+  // Nothing already in the log can fail it — every append routes through ClaimWrite first.
+  invalidates: ClaimWrite.shape.invalidates,
 })
 export type MemoryWrittenPayload = z.infer<typeof MemoryWrittenPayload>
 export const MemoryDeletedPayload = z.object({

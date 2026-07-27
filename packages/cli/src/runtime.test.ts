@@ -16,7 +16,15 @@ import { buildPlugins, buildRuntime } from './runtime'
 
 const dbs: Array<{ drop: () => Promise<void> }> = []
 const surrealBases: ProjectConfig[] = []
+// Registered the moment each resource exists, drained LIFO BEFORE the databases go. A bare
+// `await port.shutdown()` as the last statement of an it() is SKIPPED when an assertion above it
+// throws, leaking a launched DBOS runtime into every later test file in the process — that is
+// what turned one failed assertion on this branch into a 22-failure mystery, and it is why the
+// db.drop() below got skipped and left orc_test_* databases behind. Same idiom as
+// kernel/src/execution/memory-access.integration.test.ts.
+const cleanup: Array<() => Promise<void> | void> = []
 afterAll(async () => {
+  for (const c of cleanup.reverse()) await c()
   for (const d of dbs) await d.drop()
   for (const c of surrealBases) {
     const s = new Surreal()
@@ -72,6 +80,7 @@ describe('buildRuntime degraded memory', () => {
     const warns: string[] = []
     spyOn(console, 'warn').mockImplementation((...a: unknown[]) => { warns.push(a.join(' ')) })
     const port = await buildRuntime({ host, hub, config, storage, kernel })
+    cleanup.push(() => log.close(), () => port.shutdown())
     mock.restore()
     expect(warns.filter(w => w.includes('memory unavailable; continuing in degraded mode'))).toHaveLength(1)
 
@@ -87,9 +96,6 @@ describe('buildRuntime degraded memory', () => {
       expect(r.isError).toBe(true)
       expect(JSON.stringify(r.output)).toContain('memory unavailable')
     }
-
-    await port.shutdown()
-    await log.close()
   }, 60_000)
 })
 
@@ -104,6 +110,7 @@ describe('status memory health', () => {
     const log = (await openStorage(db.url, { projectId: TEST_PROJECT_ID })).events
     const kernel = new Kernel(log)
     const { host, hub } = await buildPlugins(config)
+    cleanup.push(() => log.close(), () => hub.close(), () => host.shutdown())
     const lines: string[] = []
     spyOn(console, 'log').mockImplementation((...a: unknown[]) => { lines.push(a.join(' ')) })
     const status = async (cfg: typeof config, taskId: string) => {
@@ -122,7 +129,7 @@ describe('status memory health', () => {
     await log.append({
       taskId: null, stepId: null, runToken: null, kind: 'memory_written',
       payload: {
-        note: { id: 'pending-note', title: 'P', scope: 'project', kind: 'fact', sourceRevision: null, categories: [], tags: [], links: [], paths: [], rules: [], summary: '', body: '' },
+        note: { id: 'pending-note', title: 'P', scope: 'project', kind: 'fact', sourceRevision: null, categories: [], tags: [], links: [], paths: [], summary: '', body: '' },
         author: { source: 'cli' },
       },
     })
@@ -133,8 +140,5 @@ describe('status memory health', () => {
     expect(await status(broken, t.id)).toContain(`memory: ${MEMORY_HEALTH.unreachable}`)
 
     mock.restore()
-    await hub.close()
-    await host.shutdown()
-    await log.close()
   }, 30_000)
 })

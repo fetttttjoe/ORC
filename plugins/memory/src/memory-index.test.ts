@@ -112,7 +112,7 @@ describe('rebuildVaultMemory', () => {
       payload: {
         note: {
           id, scope: 'project', kind: 'fact', sourceRevision: null, title: id,
-          categories: [], tags: [], links: [], paths: [], rules: [], summary: '', body: 'body',
+          categories: [], tags: [], links: [], paths: [], summary: '', body: 'body',
         },
         author: { source: 'cli' },
       },

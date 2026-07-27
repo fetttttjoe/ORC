@@ -240,6 +240,12 @@ export interface ExecutorContext<LM = unknown> {
   memory?: StepMemory
 }
 
+/** One preload pull: matched statements plus the notes that matched without asserting one. */
+export interface RecalledContext {
+  claims: ClaimHit[]
+  notes: NoteSummary[]
+}
+
 // The step's own memory, bound by the runtime from the memory plugin. The executor decides only
 // WHEN (before the first prompt, after the signal) and wraps each call for durability; what gets
 // searched, recorded, written and linked is the memory domain's business.
@@ -247,12 +253,6 @@ export interface ExecutorContext<LM = unknown> {
 // It exists because the executor was doing that job by reaching into extraTools, matching
 // 'memory_search'/'memory_write' by name and forging tool-call ids to drive them — which made the
 // executor a second writer of memory events alongside the store.
-/** One preload pull: matched statements plus the notes that matched without asserting one. */
-export interface RecalledContext {
-  claims: ClaimHit[]
-  notes: NoteSummary[]
-}
-
 export interface StepMemory {
   /**
    * Context for the first prompt. Recording the pull is the implementation's business.

@@ -1,5 +1,5 @@
 import {
-  errorMessage, LINK_KIND, MEMORY_ACCESS, MEMORY_LIMITS, MemoryScope, NOTE_TIER, planScope, SIGNAL_OUTCOME, slugId, taskLaneScopes,
+  errorMessage, LINK_KIND, MEMORY_ACCESS, MEMORY_LIMITS, MemoryScope, noteKey, NOTE_TIER, planScope, SIGNAL_OUTCOME, slugId, taskLaneScopes,
   type LinkKind, type MemoryAuthor, type MemoryStore, type NoteSummary, type ResolvedTool,
   type RecalledContext, type SignalOutcome, type StepMemory,
 } from '@orc/contracts'
@@ -103,8 +103,11 @@ export function bindStepMemory(opts: {
   // remainder rather than a second full budget, so one preload costs what the caller allotted.
   const search = async (query: string, budget: number): Promise<RecalledContext> => {
     const claimHits = await store.searchClaims(query, { scope }, { limit: PRELOAD_MAX_NOTES })
-    const claims = applyBudget(claimHits, h => h.text, { limit: PRELOAD_MAX_NOTES, budget }).items
-    const spent = claims.reduce((sum, c) => sum + approxTokens(c.text), 0)
+    // Measured on the SERIALIZED hit, like the note arm below: a ClaimHit ships
+    // claimId/noteId/scope/title/validFrom too, and costing only `text` undercounted the preload by
+    // several hundred chars per hit — the notes arm then spent a remainder that was never free.
+    const claims = applyBudget(claimHits, h => JSON.stringify(h), { limit: PRELOAD_MAX_NOTES, budget }).items
+    const spent = claims.reduce((sum, c) => sum + approxTokens(JSON.stringify(c)), 0)
     const noteHits = await store.search(query, { scope }, {})
     const notes = applyBudget(noteHits, n => JSON.stringify(n), {
       limit: PRELOAD_MAX_NOTES, budget: Math.max(0, budget - spent),
@@ -137,9 +140,11 @@ export function bindStepMemory(opts: {
           }
           // Access is recorded per NOTE, and a claim's access is its owner's: the activation signal
           // the lifecycle is tuned on counts notes, so a claim hit must not double-count its note.
+          // noteKey, not a hand-rolled `${scope} ${id}`: the same composite key claim-search's
+          // dedupeByNote and surreal's fusion maps use, so there is one spelling of the format
           const touched = new Map(
-            [...found.claims.map(c => [`${c.scope} ${c.noteId}`, { id: c.noteId, scope: c.scope }] as const),
-             ...found.notes.map(n => [`${n.scope} ${n.id}`, { id: n.id, scope: n.scope }] as const)])
+            [...found.claims.map(c => [noteKey(c.scope, c.noteId), { id: c.noteId, scope: c.scope }] as const),
+             ...found.notes.map(n => [noteKey(n.scope, n.id), { id: n.id, scope: n.scope }] as const)])
           for (const n of touched.values())
             await tracking.recordAccess(n.id, n.scope, MEMORY_ACCESS.preload, author, {
               // keyed by note, not position: a replay that reorders results must still converge

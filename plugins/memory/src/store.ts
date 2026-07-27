@@ -115,8 +115,13 @@ export function createMemoryStore(opts: { log: EventLog; surreal: SurrealMemory;
       if (!topic) throw new Error(`no topic '${topicKey}' — list topics again, keys change as the corpus does`)
       const claims = await surreal.topicClaims(topicKey)
       await log.append({
-        taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_topic_accessed,
+        // envelope bound to the acting step, same rule and same `|| null` normalization as
+        // recordAccess above: task-scoped views (recent_activity, task transcripts) filter on the
+        // envelope, so an unbound append orphans every topic fetch from the run that made it.
+        taskId: author?.taskId || null, stepId: author?.stepId || null, runToken: author?.runToken || null,
+        kind: EVENT_KIND.memory_topic_accessed,
         payload: { topicKey, label: topic.label, author },
+        // at-least-once: a crash-retry of the surrounding tool call must not append a second fetch
         idempotencyKey: topicOpts?.idempotencyKey ?? null,
       })
       return claims

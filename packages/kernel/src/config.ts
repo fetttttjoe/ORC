@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { existsSync, readFileSync } from 'node:fs'
 import path from 'node:path'
+import { parseEnv } from 'node:util'
 import { atomicWriteFileSync } from './atomic-file'
 import { z } from 'zod'
 import { errorMessage, ApprovalPolicy, MCP_SERVER_ID_RE, McpServerConfig, ModelCost } from '@orc/contracts'
@@ -203,8 +204,28 @@ function findProjectDir(start: string): string {
   }
 }
 
+// Bun auto-loads `.env` from process.cwd() ONLY — no walk upward (measured: a `.env` one directory
+// above is not read). So `orc` invoked from a subdirectory, or a supervisor spawned with a
+// different cwd, silently lost every credential the project's own `.env` holds — and nothing said
+// so, because auth is resolved lazily inside the executor step (provider-anthropic reads
+// ANTHROPIC_API_KEY / ORC_ANTHROPIC_AUTH off process.env at request time), so the failure surfaced
+// as `[provider_error] Anthropic API key is missing` in a run, not as a startup error.
+//
+// Loaded here rather than at each entry point because loadConfig is the ONE place that resolves
+// the project dir, and it runs before envOverrides() (so a project `.env` can set ORC_*) and
+// before openStorage snapshots process.env for redaction (so a secret from the file is redacted
+// like any other). The real environment always wins — a file must not override the shell.
+// ponytail: `.env` only; add `.env.local`/`.env.<mode>` if a deployment ever needs the split.
+const loadProjectEnv = (dir: string): void => {
+  const file = path.join(dir, '.env')
+  if (!existsSync(file)) return
+  for (const [k, v] of Object.entries(parseEnv(readFileSync(file, 'utf8'))))
+    if (process.env[k] === undefined && typeof v === 'string') process.env[k] = v
+}
+
 export function loadConfig(explicitDir?: string): OrcConfig {
   const dir = explicitDir ?? findProjectDir(process.cwd())
+  loadProjectEnv(dir)
   const fromFile = readJson(path.join(dir, '.orc', SETTINGS_FILE))
   // identity LAST of the two files: a projectId left behind in the tracked settings (pre-split
   // projects, or one restored by a checkout) is a fallback, never an override.

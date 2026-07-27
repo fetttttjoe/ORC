@@ -3,7 +3,7 @@ import { spawn } from 'node:child_process'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { Command, InvalidArgumentError } from 'commander'
-import { claimHistory, EDGE_DIRECTION, errorMessage, EVENT_KIND, LINK_KINDS, MASTERPLAN_NOTE_ID, MEMORY_ACCESS, MemoryScope, MemoryWrittenPayload, NOTE_TIERS, NoteTier, parseLinkSpec, PlanDraft, RUN_OUTCOME, STRATEGY, TASK_STATUS, TERMINAL_TASK_STATUS, LinkKind, slugId, type Analyzer, type TaskStatus, type RunOutcome, type EventRecord, type MemoryLink, type NoteFields, type ExecutionPort, type Plan, formatModelRate } from '@orc/contracts'
+import { claimHistory, EDGE_DIRECTION, errorMessage, EVENT_KIND, LINK_KINDS, MASTERPLAN_NOTE_ID, MEMORY_ACCESS, MemoryDeletedPayload, MemoryScope, MemoryWrittenPayload, NOTE_TIERS, NoteTier, parseLinkSpec, PlanDraft, RUN_OUTCOME, STRATEGY, TASK_STATUS, TERMINAL_TASK_STATUS, LinkKind, slugId, type Analyzer, type TaskStatus, type RunOutcome, type EventRecord, type MemoryLink, type NoteFields, type ExecutionPort, type Plan, formatModelRate } from '@orc/contracts'
 import { openStorage, Kernel, atomicWriteFileSync, claimSlot, fold, gatedChildren, instantiateFrozenPlan, liveSupervisors, staleSupervisors, subtreeOutcome, subtreeTaskIds, grantExtensionTrust, grantMcpTrust, initializeProject, isExtensionTrusted, isMcpTrusted, loadConfig, loadTrust, migrateDatabase, requireProject, taskUsage, type EventLog, type OrcConfig, type PluginHost, type ProjectConfig, type Storage } from '@orc/kernel'
 import { createVaultProjector, parsePlanFile } from '@orc/vault-projector'
 import { consolidateTask, probeMemory, staleNotes, DEFAULT_SWEEP_DAYS } from '@orc/memory'
@@ -1038,6 +1038,10 @@ export function buildProgram(
       const scope = o.scope ?? MemoryScope.project
       try {
         if (!o.history) {
+          // claims live in the derived read model, so drain first — same rule every other read
+          // command follows. Without it a claim written moments ago reads back as "no claims",
+          // which this branch reports as an ERROR rather than as staleness.
+          await memory.projector.catchUp()
           const live = await memory.store.claimsFor(id, scope)
           if (live.length === 0) throw new Error(`no claims on '${id}' (scope ${scope}) — 'orc memory cat ${id}' to see the note`)
           for (const c of live) console.log(`${c.id}  ${c.validFrom}  ${c.text}`)
@@ -1045,8 +1049,16 @@ export function buildProgram(
         }
         // History comes from the LOG, not the read model: the note payload carries live claims only,
         // so a retired claim exists nowhere else. Ordered by seq, which claimHistory requires.
-        const events = (await log.all()).filter(e => e.kind === EVENT_KIND.memory_written)
+        // memory_deleted travels with memory_written because deleting a note ends its claims'
+        // stretches too — the projector drops their rows, so a fold that saw only writes would
+        // report a deleted note's claims as live forever.
+        const events = (await log.all()).filter(e => e.kind === EVENT_KIND.memory_written || e.kind === EVENT_KIND.memory_deleted)
         const folded = claimHistory(events.flatMap(e => {
+          if (e.kind === EVENT_KIND.memory_deleted) {
+            const d = MemoryDeletedPayload.safeParse(e.payload)
+            if (!d.success || d.data.id !== id || d.data.scope !== scope) return []
+            return [{ ts: e.ts, claims: [], invalidates: [], deleted: true }]
+          }
           const p = MemoryWrittenPayload.safeParse(e.payload)
           if (!p.success || p.data.note.id !== id || p.data.note.scope !== scope) return []
           const n: NoteFields = p.data.note
@@ -1071,9 +1083,12 @@ export function buildProgram(
         await memory.projector.catchUp()
         if (topicKey === undefined) {
           const topics = await memory.store.topics()
-          // an empty listing is silence an operator can't act on; name the two likely causes —
-          // topics are derived from claim embeddings, so no claims or no embedder both land here.
-          if (topics.length === 0) throw new Error('no topics — write some claims, or check an embedder is configured')
+          // an empty listing is silence an operator can't act on; name every cause — topics are
+          // derived from claim embeddings, so no claims or no embedder both land here, and a
+          // pre-claims corpus has no claim rows at all until something writes some (the legacy
+          // rules[] decoder that used to synthesise them is gone, so a rebuild will not conjure
+          // them either — this is the cause an operator upgrading onto claims actually hits).
+          if (topics.length === 0) throw new Error('no topics — write some claims, or check an embedder is configured; a corpus written before claims existed has none until an agent states some via memory_write addClaims (the legacy rules[] decoder that used to synthesise them is gone, so `orc memory rebuild` will not produce them either)')
           for (const t of topics) console.log(`${t.topicKey}  ${String(t.size).padStart(3)}  ${t.label}`)
           return
         }

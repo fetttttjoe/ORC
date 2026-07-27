@@ -18,7 +18,7 @@ const fakeEmbedder: EmbeddingProvider = { embed: async texts => texts.map(vec) }
 const cli: MemoryAuthor = { source: 'cli' }
 const note = (over = {}) => ({
   id: 'n', scope: 'project', kind: 'fact', sourceRevision: null, title: 'T', categories: [], tags: [],
-  links: [], paths: [], rules: [], summary: '', body: '', ...over,
+  links: [], paths: [], summary: '', body: '', ...over,
 })
 const written = (seq: number, n: object): EventRecord =>
   eventFixture({ seq, taskId: null, kind: 'memory_written', payload: { note: n, author: cli }, ts: `2026-07-24T0${seq}:00:00Z` })
