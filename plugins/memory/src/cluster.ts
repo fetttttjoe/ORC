@@ -62,6 +62,46 @@ export function medoidOf(members: readonly ClusterInput[]): string {
   return best.id
 }
 
+// The topic's NAME, derived from the medoid claim above — an index entry, not the fact itself.
+//
+// A claim is a standalone sentence (several hundred characters is normal, the cap is 1000), and
+// using it whole made the label the entire visible row of `orc memory topics` and the whole of an
+// agent's memory_topics budget: one topic could eat the listing the inventory exists to provide.
+// The full sentence is one call away — `memory_topics <topicKey>` returns the members verbatim —
+// so the inventory's job is to let a reader TELL topics apart, and a head does that: this corpus's
+// claims lead with the source path or subject they are about (the paths lint pushes writers that
+// way), which is exactly the distinguishing part. Verified against ~20 real claims before settling.
+//
+// Pure and prefix-verbatim on purpose:
+//   * `cap` is passed IN, not imported — this file keeps zero imports so the partition stays
+//     unit-testable and rebuild-identical; the value lives with the other ceilings
+//     (MEMORY_LIMITS.topicLabelChars) where the contract bound and the CLI row agree on it.
+//   * whitespace is collapsed because a label is one terminal row, and a claim may carry newlines.
+//   * the cut lands on a word boundary at or before the cap, so no word is halved, and the result
+//     is a verbatim prefix — a reader can trust that the label is literally how the claim starts,
+//     rather than a paraphrase they then fail to find in the full text.
+//   * '…' marks that there IS more, and is counted inside the cap: the promise "never longer than
+//     the cap" is what the 80-column row arithmetic depends on.
+// No clock, no locale, no arrival order, no model: same claim in, same label out, so a wholesale
+// stage-3 rebuild reproduces the inventory byte-for-byte.
+//
+// If the heads ever stop distinguishing topics (many topics sharing one leading path, say), the
+// pre-registered upgrade is c-TF-IDF labels — the spec's deferral rests on the medoid already
+// being free, and it stays valid only while a head is legible. That upgrade brings tokenization,
+// stopwords and cross-cluster term statistics; it belongs in THIS file, whole, and not as a
+// stopword list sprinkled through the callers. An LLM label is not an option here: a model call
+// inside a stateless recompute breaks rebuild-identical derivation.
+export function topicLabel(claimText: string, cap: number): string {
+  const flat = claimText.replace(/\s+/g, ' ').trim()
+  if (flat.length <= cap) return flat
+  // one character of the budget belongs to the elision mark
+  const head = flat.slice(0, cap - 1)
+  const cut = head.lastIndexOf(' ')
+  // cut === -1 is a single token longer than the whole cap (a URL, a long path): bounded beats
+  // whole-word there, since an unbounded row breaks the surface the cap exists to protect.
+  return `${cut > 0 ? head.slice(0, cut) : head}…`
+}
+
 // Lexicographic order over components, zero-padding the shorter vector exactly as `dot` does. Only
 // used to pick between two vectors claiming the same id (see `partition`), where any total order
 // derived from the values will do — what matters is that it reads no position and no clock.

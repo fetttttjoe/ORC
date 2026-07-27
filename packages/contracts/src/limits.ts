@@ -13,6 +13,16 @@ export const MEMORY_LIMITS = {
   // Named here rather than inlined at the schema so the boundary that ACCOMMODATES an over-long one
   // and the schema that stores it cannot drift on the number.
   summaryChars: 500,
+  // A derived TOPIC label (cluster.ts topicLabel): one scannable index row, not the sentence it
+  // was cut from. Sized against the row `orc memory topics` prints — a 12-char topicKey, two
+  // spaces, a 3-wide size column, two spaces — so 12+2+3+2+60 = 79 fits an 80-column terminal
+  // with nothing to wrap. Named here, next to the other ceilings, so the contract bound
+  // (cluster.ts Topic.label), the derivation's caller (surreal.ts refreshTopics) and the tests
+  // cannot drift onto three different numbers.
+  // If it proves wrong: widen it here alone — the derivation takes the cap as an argument and has
+  // no opinion about the value. Widening past ~66 costs the 80-column guarantee; narrowing below
+  // ~40 starts cutting the leading source path that makes these labels distinguishable at all.
+  topicLabelChars: 60,
   // What the STORE accepts. Deliberately far above the searchable ceiling: this bound is also
   // applied when re-parsing history, so tightening it would make older notes fail to parse and
   // vanish from every fold.

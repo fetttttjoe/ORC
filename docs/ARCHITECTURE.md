@@ -354,11 +354,11 @@ drift could never be repaired.
 
 `memory_topics` is a tool rather than an implicit re-rank so that lateral navigation is **tracked**:
 fetching one topic appends `memory_topic_accessed` carrying the resolved label, which is the ongoing
-evidence `MEMORY_CLUSTER_THRESHOLD` keeps being calibrated against. That constant is **0.7, and
-measured** — it was 0.75 while it was still a guess. A sweep over a real 29-claim corpus put 0.75 in
-the curve's most unstable stretch, splitting it into 22 topics of which 16 were singletons; an
-inventory with one entry per claim is the thing topics exist to prevent. 0.700–0.735 is the one wide
-plateau, and stability is why it was picked, not more grouping. The limits of that evidence (n=29,
+evidence `MEMORY_CLUSTER_THRESHOLD` keeps being calibrated against. That constant is **0.675, and
+measured** — it was 0.75 while it was still a guess. A sweep over a real 52-claim corpus (with ollama/mxbai-embed-large)
+put 0.675 at a stable plateau where 0.670 and 0.680 produce identical partitions; an earlier sweep
+that yielded 22 topics with 16 singletons used a different model (nomic-embed-text, 768d) and showed why
+the model-vs-threshold coupling is load-bearing. The limits of that evidence (n=52,
 one subsystem, one embedding model) are recorded on the constant itself, in
 `plugins/memory/src/cluster.ts`.
 

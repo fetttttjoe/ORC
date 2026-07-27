@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'bun:test'
-import { cosine, medoidOf, partition } from './cluster'
+import { MEMORY_LIMITS } from '@orc/contracts'
+import { cosine, medoidOf, partition, topicLabel } from './cluster'
 
 // Hand-written vectors, no embedder: 'a*' point one way, 'b*' the other, 'z' sits alone.
 const v = (id: string, x: number, y: number, z: number) => ({ id, vector: [x, y, z] })
@@ -102,6 +103,69 @@ describe('partition', () => {
     const before = partition([A1, A2], 0.75)[0]?.key
     const A3 = v('aaaaaaaaaaa3', 0.97, 0.24, 0)
     expect(partition([A1, A2, A3], 0.75)[0]?.key).toBe(before)
+  })
+})
+
+// Real claim texts, copied verbatim out of this project's own corpus (memory_search over the
+// project scope) — the label has to be judged on what agents actually write, not on lorem ipsum.
+const REAL_CLAIMS = [
+  'plugins/memory/src/tools.ts memory_topics listing budgets the inventory with applyBudget over `t => `${t.topicKey}${t.label}`` at limit MEMORY_LIMITS.labelItems (50) and the shared Budget schema (default 1500, max MEMORY_LIMITS.budgetTokens), so long labels both burn the agent\'s budget and truncate the listing.',
+  'plugins/memory/src/surreal.ts refreshTopics() recomputes the whole project-scope partition outside the event transaction and replaces the `topic` table.',
+  'docs/superpowers/specs/2026-07-26-claim-grouping-design.md pre-registers BOTH label upgrades under the single trigger "The inventory reads badly as sentences".',
+  'packages/contracts/src/memory.ts\'s `MemoryStore` interface declares write/remove/get/list/search/searchClaims/claimsFor/neighbors/recordAccess/topics/topicClaims as the single-writer gateway contract every memory backend implements.',
+  'kernel.ts Kernel.proposeSplit() computes budgetUSD via subtreeUsage(state, input.parentTaskId) and clamps to the parent\'s remaining budget.',
+]
+
+describe('topicLabel', () => {
+  const CAP = MEMORY_LIMITS.topicLabelChars
+
+  it('returns a short claim unchanged — a label that fits IS the whole fact', () => {
+    expect(topicLabel('alpha holds', CAP)).toBe('alpha holds')
+  })
+
+  // The cap is the whole point: the row it renders into already carries a 12-char topicKey and a
+  // size column, so a label past this cannot be scanned on an 80-column terminal.
+  it('never emits a label longer than the cap, for any real claim', () => {
+    for (const c of REAL_CLAIMS) expect(topicLabel(c, CAP).length).toBeLessThanOrEqual(CAP)
+  })
+
+  it('cuts at a word boundary, never mid-word, and marks the elision', () => {
+    const long = 'plugins/memory/src/surreal.ts refreshTopics() recomputes the whole project-scope partition outside the event transaction'
+    const label = topicLabel(long, CAP)
+    expect(label.endsWith('…')).toBe(true)
+    const head = label.slice(0, -1)
+    // the label is a VERBATIM prefix of the claim — that is what makes "the full sentence is one
+    // memory_topics <topicKey> call away" an honest promise rather than a paraphrase
+    expect(long.startsWith(head)).toBe(true)
+    // the character the cut fell on is whitespace: the last word survives whole
+    expect(long[head.length]).toBe(' ')
+  })
+
+  // Stage 3 is recomputed wholesale, so a rebuild must reproduce the inventory byte-for-byte:
+  // no clock, no locale, no arrival order can reach this function.
+  it('is deterministic — same claim in, same label out', () => {
+    for (const c of REAL_CLAIMS) expect(topicLabel(c, CAP)).toBe(topicLabel(c, CAP))
+  })
+
+  it('never returns empty for a non-empty claim', () => {
+    for (const c of [...REAL_CLAIMS, 'x', '   spaced   ']) expect(topicLabel(c, CAP).length).toBeGreaterThan(0)
+  })
+
+  it('collapses newlines and runs of spaces — a label is one terminal row', () => {
+    expect(topicLabel('alpha\n\nholds   twice', CAP)).toBe('alpha holds twice')
+  })
+
+  // The one case where a word boundary does not exist: a single token longer than the cap (a URL,
+  // a long path). Bounded still wins over whole-word.
+  it('bounds a single over-long word rather than overflowing the row', () => {
+    const label = topicLabel('a'.repeat(CAP * 2), CAP)
+    expect(label.length).toBe(CAP)
+    expect(label.endsWith('…')).toBe(true)
+  })
+
+  it('distinguishes the project\'s real claims from one another', () => {
+    const labels = REAL_CLAIMS.map(c => topicLabel(c, CAP))
+    expect(new Set(labels).size).toBe(REAL_CLAIMS.length)
   })
 })
 

@@ -12,7 +12,7 @@ import {
 } from '@orc/contracts'
 import { rankNeighbors, rrfFuse, type Edge } from './rank'
 import { dedupeByNote, type ClaimHit, type ClaimSearchOpts } from './claim-search'
-import { ascending, MEMORY_CLUSTER_THRESHOLD, partition, type ClusterInput } from './cluster'
+import { ascending, MEMORY_CLUSTER_THRESHOLD, partition, topicLabel, type ClusterInput } from './cluster'
 
 // The read model's table names — single spelling for every builder call and RecordId.
 enum Tb { Note = 'note', Meta = 'meta', Link = 'link', Claim = 'claim', Topic = 'topic' }
@@ -77,8 +77,13 @@ const claimTable = table(Tb.Claim, {
 // holds EXACTLY the new partition and nothing else — it needs no cursor because nothing in it is
 // meant to survive across one. Deliberately carries no `hits` column — topic use is measured from
 // the log, and a counter a rebuild erases is not a measurement.
+// No `label` column: a topic's label is DERIVED from the medoid claim at read time (see topics()).
+// Storing it made the read model hold a second copy of a fact the claim table already owns, and the
+// copy is what broke — bounding contracts' Topic.label rejected all 54 rows a previous build had
+// written, so `orc memory topics` failed as a shape error until someone guessed at a rebuild.
+// Disposable is not the same as already-disposed: a read parses what is on disk NOW.
 const topicTable = table(Tb.Topic, {
-  topicKey: t.string(), label: t.string(), medoidClaimId: t.string(),
+  topicKey: t.string(), medoidClaimId: t.string(),
   members: t.array(t.string()),
 })
 
@@ -647,20 +652,32 @@ export class SurrealMemory {
       const liveKeys = groups.map(g => g.key)
       await tx.delete(Tb.Topic).where(r => r.topicKey.notInside(liveKeys))
       for (const g of groups)
+        // Identity only — which claims grouped, and which one represents them. How that renders is
+        // topics()' business, so changing the label rule (or its width) needs no rebuild.
         await tx.upsert(Tb.Topic, g.key).set({
           topicKey: g.key,
-          // the medoid claim's own text: already a standalone sentence, so a real fact not a guess
-          label: text.get(g.medoidClaimId) ?? '',
           medoidClaimId: g.medoidClaimId,
           members: g.members,
         })
     })
   }
 
+  // The label is derived HERE, from the medoid claim's live text — the one place it is decided, and
+  // the reason no stored row can carry a label that violates the bound contracts declares.
+  // Costs one claim scan, the same one topicClaims() already does per call.
   async topics(): Promise<Topic[]> {
     const rows = await this.db.select(Tb.Topic)
+    if (rows.length === 0) return []
+    const text = new Map((await this.db.select(Tb.Claim).where(c => c.scope.eq(MemoryScope.project)))
+      .map(r => [r.claimId, r.text]))
     return rows
-      .map(r => Topic.parse({ topicKey: r.topicKey, label: r.label, size: r.members.length }))
+      .map(r => Topic.parse({
+        topicKey: r.topicKey,
+        // topicKey is the group's lowest member id, so it is the standing fallback for the window
+        // between a medoid being retired and the next refresh re-partitioning without it.
+        label: topicLabel(text.get(r.medoidClaimId) ?? text.get(r.topicKey) ?? '', MEMORY_LIMITS.topicLabelChars),
+        size: r.members.length,
+      }))
       // `ascending`, not localeCompare: the same rule cluster.ts breaks its own ties by, so the
       // listing order cannot disagree with the partition's over an ambient ICU locale
       .sort((a, b) => b.size - a.size || ascending(a.topicKey, b.topicKey))

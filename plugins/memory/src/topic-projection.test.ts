@@ -1,6 +1,7 @@
 import { afterAll, describe, expect, it } from 'bun:test'
-import { claimId, MemoryScope, PROJECT_NAME_NOTE_ID, type EmbeddingProvider, type EventRecord, type MemoryAuthor } from '@orc/contracts'
+import { claimId, MEMORY_LIMITS, MemoryScope, PROJECT_NAME_NOTE_ID, type EmbeddingProvider, type EventRecord, type MemoryAuthor } from '@orc/contracts'
 import { eventFixture } from '@orc/contracts/fixtures'
+import { topicLabel } from './cluster'
 import { SurrealMemory } from './surreal'
 import { createTestSurreal } from './test-helpers'
 
@@ -41,7 +42,26 @@ describe('SurrealMemory topic projection', () => {
     const topics = await m.topics()
     expect(topics).toHaveLength(2)
     const big = topics.find(t => t.size === 2)
+    // the label is the DERIVED one (cluster.ts topicLabel), which for a claim shorter than the cap
+    // is the claim itself — the medoid is one of the two grouped statements
     expect(big?.label).toMatch(/alpha holds|zeta holds/)
+    await m.close()
+  })
+
+  // The case the two-word fixtures above cannot reach: a medoid longer than the label cap. The
+  // label used to be the medoid's full text, so a real 300-char claim became the whole CLI row and
+  // most of an agent's memory_topics budget. refreshTopics is the ONE place that is decided.
+  it('derives a bounded label from a medoid longer than the cap, and keeps the full text in topicClaims', async () => {
+    const m = await open()
+    const long = `alpha holds ${'and so does everything else about alpha '.repeat(20)}`.trim()
+    await m.applyEvent(written(1, note({ id: 'n1', claims: [claim(long)] })))
+    await m.refreshTopics(0.75)
+    const [topic] = await m.topics()
+    expect(long.length).toBeGreaterThan(MEMORY_LIMITS.topicLabelChars)
+    expect(topic?.label).toBe(topicLabel(long, MEMORY_LIMITS.topicLabelChars))
+    expect((topic?.label ?? '').length).toBeLessThanOrEqual(MEMORY_LIMITS.topicLabelChars)
+    // detail is not lost, it moved: one call reaches the whole sentence verbatim
+    expect((await m.topicClaims(topic?.topicKey ?? '')).map(c => c.text)).toEqual([long])
     await m.close()
   })
 
