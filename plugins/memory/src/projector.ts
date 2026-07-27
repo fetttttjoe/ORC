@@ -36,13 +36,22 @@ export function createMemoryProjector(opts: { log: EventLog; surreal: SurrealMem
   const applyOne = async (e: EventRecord): Promise<boolean> => {
     const applied = await surreal.applyEvent(e)
     if (!applied) return false
+    // safeParse, matching surreal.applyEvent's own skip-and-advance for an unparseable payload.
+    // A strict parse here re-threw on EXACTLY the events applyEvent had just decided to skip, and
+    // applyEvent returns `true` for a skip (the cursor advanced), so the throw landed after the
+    // Surreal commit: `orc memory rebuild` cleared the read model, replayed to that seq, threw, and
+    // did it again on every retry — one unparseable event in an immutable log wedging the rebuild
+    // permanently. The vault file is what is skipped here; the row is already projected.
     if (e.kind === EVENT_KIND.memory_written) {
-      const { note } = MemoryWrittenPayload.parse(e.payload)
+      const parsed = MemoryWrittenPayload.safeParse(e.payload)
+      if (!parsed.success) return false
+      const { note } = parsed.data
       const full = await surreal.get(note.id, note.scope)
       if (full) writeMemoryFile(vaultDir, noteRelPath(full), renderNoteFile(full))
     } else if (e.kind === EVENT_KIND.memory_deleted) {
-      const p = MemoryDeletedPayload.parse(e.payload)
-      deleteMemoryFile(vaultDir, noteRelPath(p))
+      const parsed = MemoryDeletedPayload.safeParse(e.payload)
+      if (!parsed.success) return false
+      deleteMemoryFile(vaultDir, noteRelPath(parsed.data))
     } else return false
     return true
   }
@@ -68,7 +77,14 @@ export function createMemoryProjector(opts: { log: EventLog; surreal: SurrealMem
     // vaultChanged 0 — so without this the topic table stays stale until the next memory write or a
     // restart, for claims that are already in the read model.
     try {
-      for (const e of events) if (await applyOne(e)) vaultChanged += 1
+      // counted per EVENT KIND, not per successful apply: applyOne's return says "the vault file
+      // changed", and a throw inside it (or a skipped payload) left the counter untouched — so a
+      // drain carrying exactly one memory_written, the common live case, skipped the topic refresh
+      // that this counter exists to trigger and left the partition stale while health reported ok.
+      for (const e of events) {
+        if (e.kind === EVENT_KIND.memory_written || e.kind === EVENT_KIND.memory_deleted) vaultChanged += 1
+        await applyOne(e)
+      }
     } finally {
       // vaultChanged counts an ACCEPTED memory_written/memory_deleted — the only events that can
       // change which claims exist, so it is exactly "did this drain touch the claim set", not "did we

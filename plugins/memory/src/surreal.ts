@@ -125,7 +125,13 @@ const joinClaimOwners = (
   rows.flatMap(r => {
     const owner = owners.get(noteKey(r.scope, r.noteId))
     return owner
-      ? [{ claimId: r.claimId, noteId: r.noteId, scope: r.scope, title: owner.title, text: r.text, validFrom: r.validFrom }]
+      ? [{
+          claimId: r.claimId, noteId: r.noteId, scope: r.scope, title: owner.title,
+          text: r.text, validFrom: r.validFrom,
+          // the owner's drift inputs ride along — already resolved here, and the only way a claim
+          // in the preload can be dated against the tree
+          sourceRevision: owner.sourceRevision, paths: owner.paths,
+        }]
       : []
   })
 
@@ -139,6 +145,9 @@ const SemanticRow = z.object({
   tier: NoteTier.optional(),
   categories: z.array(z.string()).optional(), tags: z.array(z.string()), summary: z.string(),
   hits: z.number().optional(), lastAccessedAt: z.string().nullable().optional(),
+  // the two drift inputs — optional because a row projected before either column existed still
+  // selects, and both fall back to the "uncheckable" value rather than a fabricated one
+  sourceRevision: z.string().nullable().optional(), paths: z.array(z.string()).optional(),
   score: z.number(),
 })
 
@@ -473,12 +482,16 @@ export class SurrealMemory {
     const owners = await this.claimOwners(filter)
     const keyword = mode === SEARCH_MODE.semantic ? [] : await this.keywordClaims(query, owners)
     const semantic = mode === SEARCH_MODE.keyword ? [] : await this.semanticClaims(query, filter, owners)
-    if (mode !== SEARCH_MODE.hybrid) return dedupeByNote(mode === SEARCH_MODE.keyword ? keyword : semantic, limit)
+    // 'all' skips the per-note collapse: the caller is enumerating a set, not ranking for a slot
+    // budget, and `limit` then caps CLAIMS rather than notes (see ClaimSearchOpts.perNote).
+    const cap = (hits: readonly ClaimHit[]): ClaimHit[] =>
+      opts.perNote === 'all' ? hits.slice(0, limit) : dedupeByNote(hits, limit)
+    if (mode !== SEARCH_MODE.hybrid) return cap(mode === SEARCH_MODE.keyword ? keyword : semantic)
     const byKey = new Map<string, ClaimHit>()
     for (const h of [...semantic, ...keyword]) byKey.set(claimHitKey(h), h)
     const fused = rrfFuse([keyword.map(claimHitKey), semantic.map(claimHitKey)])
     const ranked = fused.map(f => byKey.get(f.id)).filter((h): h is ClaimHit => h !== undefined)
-    return dedupeByNote(ranked, limit)
+    return cap(ranked)
   }
 
   // Substring match over claim text, AND across terms — the same rule and the same term cap
@@ -547,7 +560,12 @@ export class SurrealMemory {
       // the scope predicate belongs in the WHERE, ahead of ORDER BY/LIMIT — see MemoryFilter
       const scopes = filter.scope === undefined ? [] : [filter.scope].flat()
       const res = await this.surreal.query(
-        `SELECT noteId, scope, title, tier, categories, tags, summary, hits, lastAccessedAt,`
+        // sourceRevision/paths ride along because they are the ONLY two inputs the drift check
+        // has: a hit that omits them is silently uncheckable, drops out of corpusDrift's denominator,
+        // and the preload then prints "unchanged since they were written — trust them" over exactly
+        // the notes it could not check. They must ALSO be on SemanticRow below — zod strips unknown
+        // keys, so widening the SELECT alone changes nothing.
+        `SELECT noteId, scope, title, tier, categories, tags, summary, hits, lastAccessedAt, sourceRevision, paths,`
         + ` vector::similarity::cosine(embedding, $q) AS score`
         + ` FROM ${Tb.Note} WHERE embedding != NONE`
         + (scopes.length > 0 ? ` AND scope IN $scopes` : '')

@@ -103,7 +103,7 @@ describe('recall', () => {
 
   it('recalls claims alongside notes, and records ONE access per owning note', async () => {
     const hit = (claimId: string, noteId: string) =>
-      ({ claimId, noteId, scope: 'project', title: noteId, text: `statement ${claimId}`, validFrom: '2026-07-26T00:00:00.000Z' })
+      ({ claimId, noteId, scope: 'project', title: noteId, text: `statement ${claimId}`, validFrom: '2026-07-26T00:00:00.000Z', sourceRevision: null, paths: [] })
     // two claims on ONE note plus a note-arm hit for the same note: the activation signal counts
     // notes, so a preload must not charge that note three times
     const f = fakeStore({ searchClaims: () => [hit('c1', 'area-memory'), hit('c2', 'area-memory')], search: () => [summary()] })
@@ -115,7 +115,7 @@ describe('recall', () => {
 
   it('claims alone are enough — the fallback chain stops without any note hit', async () => {
     const f = fakeStore({
-      searchClaims: () => [{ claimId: 'c1', noteId: 'n', scope: 'project', title: 'N', text: 'a statement', validFrom: '2026-07-26T00:00:00.000Z' }],
+      searchClaims: () => [{ claimId: 'c1', noteId: 'n', scope: 'project', title: 'N', text: 'a statement', validFrom: '2026-07-26T00:00:00.000Z', sourceRevision: null, paths: [] }],
       search: () => [],
     })
     const { claims, notes } = await bind(f).memory.recall(500)
@@ -297,6 +297,31 @@ describe('recall reports currency through the shared drift verdict', () => {
     const got = await bind(f, { changedSince }).memory.recall(5000)
     expect(got.currency).toBeUndefined()
     expect(got.notes).toHaveLength(1) // the knowledge still arrives
+  })
+})
+
+// Claims take the budget FIRST, so at the default budget a preload is typically several claims and
+// one note. Currency computed from the notes arm alone put most of what the step was handed under a
+// verdict that never examined it.
+describe('currency covers the claims arm too', () => {
+  const claimHit = (noteId: string, path: string) => ({
+    claimId: `c-${noteId}`, noteId, scope: 'project', title: 'T', text: 'a statement',
+    validFrom: '2026-07-26T00:00:00.000Z', sourceRevision: 'rev-a', paths: [path],
+  })
+
+  it('counts a drifted claim owner even when the notes arm is empty', async () => {
+    const f = fakeStore({ search: () => [], searchClaims: () => [claimHit('n1', 'src/auth.ts')] })
+    const got = await bind(f, { changedSince: async () => new Set(['src/auth.ts']) }).memory.recall(5000)
+    expect(got.currency).toMatchObject({ checkable: 1, drifted: 1 })
+  })
+
+  // A claim's checkable unit IS its owning note, so several claims from one note must count once —
+  // otherwise a single drifted note drowns out every clean note in the ratio.
+  it('dedupes by owning note, so five claims from one note count once', async () => {
+    const hits = Array.from({ length: 5 }, (_, i) => ({ ...claimHit('n1', 'src/auth.ts'), claimId: `c${i}` }))
+    const f = fakeStore({ search: () => [summary({ id: 'n2', sourceRevision: 'rev-a', paths: ['src/clean.ts'] })], searchClaims: () => hits })
+    const got = await bind(f, { changedSince: async () => new Set(['src/auth.ts']) }).memory.recall(5000)
+    expect(got.currency).toMatchObject({ checkable: 2, drifted: 1 })
   })
 })
 

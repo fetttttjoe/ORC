@@ -391,6 +391,13 @@ export function memoryTools(opts: {
       },
       execute: async (input, toolCallId) => {
         try {
+          // The write arm READS too — duplicateSubjectWarning below, and unresolvedLinks after the
+          // append — so it needs the same drain as the four read tools. Without it a turn that
+          // writes `auth-flow` and then writes `arch-overview` linking to it checks that link
+          // against the read model from BEFORE the first write and answers "these links resolve to
+          // no note". loop.ts lifts that into a lint nudge worded "the warning is not optional",
+          // and the agent deletes an edge that is correct in the log.
+          await settled()
           // parse WITHOUT defaults: MemoryNoteInput here would fill body:'' etc. and turn every
           // omitted field into an explicit clear, defeating the store gateway's merge-on-omit.
           // The gateway parses the merged note fully — same validation, right order, no casts.

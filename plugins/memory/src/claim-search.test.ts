@@ -2,7 +2,7 @@ import { describe, expect, it } from 'bun:test'
 import { dedupeByNote, type ClaimHit } from './claim-search'
 
 const hit = (claimId: string, noteId: string, scope = 'project'): ClaimHit =>
-  ({ claimId, noteId, scope, title: noteId, text: claimId, validFrom: '2026-07-26T00:00:00.000Z' })
+  ({ claimId, noteId, scope, title: noteId, text: claimId, validFrom: '2026-07-26T00:00:00.000Z', sourceRevision: null, paths: [] })
 
 describe('dedupeByNote', () => {
   it('keeps the best-ranked claim per note, so one note cannot fill every slot', () => {

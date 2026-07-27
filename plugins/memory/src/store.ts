@@ -9,8 +9,15 @@ import type { SurrealMemory } from './surreal'
 // consumes it — every read path would otherwise pay a subprocess spawn for a field it never reads.
 export function createMemoryStore(opts: { log: EventLog; surreal: SurrealMemory; sourceRevision?: () => Promise<string | null>; halfLifeDays?: number }): MemoryStore {
   const { log, surreal } = opts
-  let revision: Promise<string | null> | undefined
-  const sourceRevision = (): Promise<string | null> => (revision ??= opts.sourceRevision?.() ?? Promise.resolve(null))
+  // Resolved PER WRITE, never memoized. Caching it across the store's lifetime looked like an
+  // obvious saving — only writes read it, and it shells out to git — but a supervisor is a
+  // long-lived process: `orc serve` booting at C0 stamped every note and every claim written for
+  // the next N hours with C0, in the immutable log, where no rebuild heals it. Everything built on
+  // this field then lies: drift reports moved code as current (the note claims a commit from before
+  // the change), the preload tells a step to trust it, and the rewrite loop that is supposed to
+  // clear drift re-stamps the same stale commit. The spawn is bounded by write frequency, and it
+  // already runs OUTSIDE the project write lock (see the call below), so it blocks nothing.
+  const sourceRevision = (): Promise<string | null> => opts.sourceRevision?.() ?? Promise.resolve(null)
   return {
     async write(input, author, writeOpts) {
       // merge-on-omit upsert: fields the writer did not supply carry the previous revision's
@@ -49,6 +56,15 @@ export function createMemoryStore(opts: { log: EventLog; surreal: SurrealMemory;
         // reject malformed BEFORE appending. `claims` is passed explicitly rather than merged: it is
         // already resolved against the live set, so merge-on-omit must not reach it.
         const parsed = MemoryNoteInput.parse(existing ? { ...existing, ...supplied, claims } : { ...input, claims })
+        // Only the semantic tier has a `claims` column, so the parse above SILENTLY DROPS a
+        // resolved claim set on a plan or episodic note — and the caller was told the write
+        // succeeded. Reachable without meaning to: inferTier returns `plan` for any non-empty
+        // `rationale`, and rationale sits beside addClaims in the same tool schema while the
+        // knowledge protocol tells every agent to state durable facts as claims. The statement then
+        // exists nowhere — not in the note, not in the claim table, not as an error.
+        // Thrown, not warned: a lost fact is not something the writer can discover later.
+        if (claims.length > 0 && parsed.tier !== NOTE_TIER.semantic)
+          throw new Error(`claims are a semantic-tier fact and this note resolved to tier '${parsed.tier}' — a plan note's reasoning belongs in \`rationale\`, and a durable statement belongs on a semantic note (drop \`rationale\`, or write the claims to a separate note)`)
         // the gateway stamps the runtime's Git revision — agents cannot claim another one
         const merged = { ...parsed, sourceRevision: stampedRevision }
         try {

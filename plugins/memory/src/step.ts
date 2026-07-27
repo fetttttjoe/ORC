@@ -1,5 +1,5 @@
 import {
-  errorMessage, LINK_KIND, MEMORY_ACCESS, MEMORY_LIMITS, MemoryScope, noteKey, NOTE_TIER, planScope, SIGNAL_OUTCOME, slugId, taskLaneScopes,
+  errorMessage, LINK_KIND, MEMORY_ACCESS, MEMORY_LIMITS, MemoryScope, noteKey, NOTE_TIER, planScope, SEARCH_MODE, SIGNAL_OUTCOME, slugId, taskLaneScopes,
   type ClaimHit, type LinkKind, type MemoryAuthor, type MemoryStore, type NoteSummary, type ResolvedTool,
   type RecalledContext, type SignalOutcome, type StepMemory,
 } from '@orc/contracts'
@@ -128,10 +128,18 @@ export function bindStepMemory(opts: {
   //
   // Every failure folds to undefined, matching the module's rule that unknown is never "drifted"
   // and never "current": a git probe that cannot answer must not produce a sentence.
-  const currencyOf = async (notes: readonly NoteSummary[]): Promise<CorpusDrift | undefined> => {
+  const currencyOf = async (found: RecalledContext): Promise<CorpusDrift | undefined> => {
     if (!opts.changedSince) return undefined
     try {
-      const d = await corpusDrift(notes, opts.changedSince)
+      // BOTH arms. Claims take the budget first, so at the default budget a block is typically
+      // several claims and one note — computing currency from the notes alone put most of what the
+      // step was handed under a verdict that never examined it. Deduped by owning note: a claim's
+      // checkable unit IS its note (a claim declares no paths of its own), so five claims from one
+      // note must not count that note five times and drown the notes arm.
+      const byNote = new Map<string, { sourceRevision: string | null; paths: readonly string[] }>()
+      for (const c of found.claims) byNote.set(noteKey(c.scope, c.noteId), { sourceRevision: c.sourceRevision, paths: c.paths })
+      for (const n of found.notes) byNote.set(noteKey(n.scope, n.id), { sourceRevision: n.sourceRevision, paths: n.paths })
+      const d = await corpusDrift([...byNote.values()], opts.changedSince)
       return d.ratio === null ? undefined : d
     } catch { return undefined }
   }
@@ -139,10 +147,15 @@ export function bindStepMemory(opts: {
   return {
     tools: memoryTools({ store: tracking, author, role: opts.role, changedSince: opts.changedSince, catchUp: opts.catchUp, searchScope: scope }),
     memory: {
-      // KEYWORD arm only, deliberately: a path is a literal, and the semantic arm would return
-      // claims that are merely about the same area — which is the opposite of what a retirement
-      // prompt needs. A false candidate costs the agent a judgement call it did not need to make,
-      // and enough of those teach it to skim the block.
+      // KEYWORD arm only, and now actually PASSED as such: a path is a literal, and the semantic
+      // arm returns claims merely about the same area — the opposite of what a retirement prompt
+      // needs. Omitting the mode meant every embedder-configured deployment silently ran hybrid,
+      // and the fused semantic winner then failed the literal `includes` filter below, so a genuinely
+      // citing note could contribute nothing at all.
+      //
+      // perNote 'all' because this ENUMERATES: the default collapses to the best claim per note, so
+      // a note asserting three claims about the edited file surfaced one and silently withheld two
+      // the same change had falsified.
       //
       // Degraded store folds to "nothing at risk": this is an advisory nudge, and failing the step
       // because the read model is down would be worse than missing a retirement.
@@ -154,7 +167,7 @@ export function bindStepMemory(opts: {
           for (const term of [path, path.split('/').pop() ?? '']) {
             if (term.length < 3) continue
             try {
-              for (const hit of await store.searchClaims(term, { scope }, { limit: MEMORY_LIMITS.detailItems }))
+              for (const hit of await store.searchClaims(term, { scope }, { limit: MEMORY_LIMITS.detailItems, mode: SEARCH_MODE.keyword, perNote: 'all' }))
                 if (hit.text.includes(term)) seen.set(hit.claimId, hit) // the store ranks; we require the literal
             } catch { /* degraded: nothing at risk rather than a failed step */ }
           }
@@ -195,7 +208,7 @@ export function bindStepMemory(opts: {
             })
           // measured on what is actually delivered, after the budget cut — a note that did not fit
           // is not knowledge this step was handed, so it must not move the reading either way
-          const currency = await currencyOf(found.notes)
+          const currency = await currencyOf(found)
           return { ...found, ...(currency && { currency }) }
         } catch (err) {
           console.warn(`memory recall failed for step '${step.id}':`, errorMessage(err))

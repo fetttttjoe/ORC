@@ -84,6 +84,7 @@ function unansweredToolCallIds(prompt: unknown): string[] {
 // Build mock models per scenario. See the step preamble: construct with the installed
 // 'ai/test' mock class; each doGenerate call pops the next scripted response.
 // scriptModel(responses: Array<{ text?: string; toolCalls?: Array<{toolCallId,toolName,input}> }>): LanguageModel
+import { isRecord } from '@orc/contracts'
 import { scriptModel } from './test-model'
 
 describe('api-loop executor', () => {
@@ -606,7 +607,7 @@ describe('step memory seam', () => {
   }
   const claim = (over: Partial<ClaimHit> = {}): ClaimHit => ({
     claimId: 'abc123abc123', noteId: 'auth-middleware', scope: 'project', title: 'Auth middleware overview',
-    text: 'Refresh tokens are single-use.', validFrom: '2026-07-26T00:00:00.000Z', ...over,
+    text: 'Refresh tokens are single-use.', validFrom: '2026-07-26T00:00:00.000Z', sourceRevision: null, paths: [], ...over,
   })
   const note = (over: Partial<NoteSummary> = {}): NoteSummary => ({
     id: 'auth-middleware', scope: 'project', title: 'Auth middleware overview',
@@ -714,6 +715,24 @@ describe('step memory seam', () => {
       memory: fakeMemory(log, [note()]), memoryPreloadTokens: 500, operation: makeOperation(captured, specs),
     })))
     expect(JSON.stringify(specs[0]?.before)).not.toContain('Currency:')
+  })
+
+  // ai@7 answers a schema-invalid tool call itself (parseToolCall catches InvalidToolInputError and
+  // writes an error tool-result into responseMessages). Ours must REPLACE it, not sit beside it:
+  // two results for one tool_use is the same 400 a duplicate tool_use causes, and the SDK's generic
+  // parse error is not something the model can act on.
+  it('answers a schema-invalid signal call exactly once, with the actionable error', async () => {
+    const captured: EventDraft[] = []
+    const model = scriptModel([
+      { toolCalls: [{ toolCallId: 'dup', toolName: 'signal', input: { outcome: 'maybe' } }] },
+      { toolCalls: [{ toolCallId: 'ok', toolName: 'signal', input: { outcome: 'success', summary: 'done' } }] },
+    ])
+    await drain(apiLoopExecutor().startTurn(ctx(model, captured, { step: stepFixture({ instructions: 'go', maxIterations: 10 }) })))
+    const second = AgentCallRequest.parse(captured.filter(d => d.kind === EVENT_KIND.agent_call)[1]!.payload).request.messages
+    const results = second.flatMap(m => (Array.isArray(m.content) ? m.content : []))
+      .filter((p): p is { type: string; toolCallId: string } => isRecord(p) && p.type === 'tool-result' && typeof p.toolCallId === 'string')
+    // exactly one result for the id — this is the invariant a real provider enforces with a 400
+    expect(results.filter(r => r.toolCallId === 'dup')).toHaveLength(1)
   })
 
   it('renders a recalled CLAIM as the statement itself, carrying its note id', async () => {

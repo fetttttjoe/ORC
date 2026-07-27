@@ -75,8 +75,25 @@ export const ClaimHit = z.object({
   title: z.string(),
   text: z.string(),
   validFrom: z.string(),
+  // The owner's two drift inputs, carried so a claim can be dated like a note can. Without them the
+  // preload's currency verdict was computed from the NOTES arm alone — and claims take the budget
+  // FIRST, so at the default budget a block is typically several claims and one note: most of what
+  // the step was handed sat under a confidence the checker never examined. Sourced from the owning
+  // note (a claim has its own sourceRevision but declares no paths, so the note is the unit that can
+  // be checked against the tree), which joinClaimOwners already has in hand.
+  sourceRevision: z.string().nullable(),
+  paths: z.array(z.string()),
 })
 export type ClaimHit = z.infer<typeof ClaimHit>
+
+// Options that belong to CLAIM retrieval specifically, which is why they are not on
+// MemorySearchOpts: the note search honours neither, and advertising them there would promise
+// behaviour it ignores.
+//   `limit` caps NOTES under the default perNote, and CLAIMS under 'all'.
+//   `perNote` picks the question. 'best' is retrieval — one note must not fill every slot. 'all' is
+//   enumeration ("which claims cite this path"), where the answer is a set and collapsing it to one
+//   per note silently withholds the siblings.
+export interface ClaimSearchOptions { limit?: number; perNote?: 'best' | 'all' }
 
 // How a writer changes a note's claims: name what to ADD and name what to RETIRE. `claims` itself is
 // deliberately absent — supplying the array would REPLACE under the store's merge-on-omit rule,

@@ -1,5 +1,5 @@
 import { z } from 'zod'
-import { Claim, ClaimHit, ClaimInput, ClaimWrite } from './claim'
+import { Claim, ClaimHit, ClaimInput, ClaimWrite, type ClaimSearchOptions } from './claim'
 import { Topic } from './cluster'
 import { EVENT_KIND, type EventRecord } from './event-kinds'
 import { composeAuthor, MEMORY_ID_RE, MemoryAuthor } from './ids'
@@ -593,7 +593,7 @@ export interface MemoryStore {
   search(query: string, filter?: MemoryFilter, opts?: MemorySearchOpts): Promise<NoteSummary[]>
   // Statement-level retrieval over the derived claim table, deduped so one note cannot fill every
   // slot. `limit` counts NOTES for that reason.
-  searchClaims(query: string, filter?: MemoryFilter, opts?: MemorySearchOpts & { limit?: number }): Promise<ClaimHit[]>
+  searchClaims(query: string, filter?: MemoryFilter, opts?: MemorySearchOpts & ClaimSearchOptions): Promise<ClaimHit[]>
   /** A note's LIVE claims, each stamped with the event that first carried it. */
   claimsFor(noteId: string, scope?: string): Promise<Claim[]>
   neighbors(seed: string, opts?: NeighborQuery): Promise<NeighborResult[]>
@@ -625,13 +625,20 @@ export function deriveNoteProvenance(
   note: MemoryNoteInput,
   author: MemoryAuthor,
   ts: string,
-  prev?: { createdAt?: string; createdBy?: string; revision?: number },
+  prev?: { createdAt?: string; createdBy?: string; revision?: number; sources?: readonly MemorySource[] },
 ): { sources?: MemorySource[]; createdAt: string; createdBy: string; updatedAt: string; updatedBy: string; revision: number } {
   const by = composeAuthor(author)
+  // A citation's retrievedAt is when THAT url was fetched, so it survives a rewrite keyed on the
+  // url — the same survivor rule claims use for validFrom. Stamping `ts` unconditionally meant any
+  // later write to a research note (a links-only correction, an addClaims, an ambient refresh)
+  // restamped every citation to today, and updatedAt moved with it so nothing looked wrong: a
+  // five-month-old web finding read as retrieved this morning. Only a url absent from `prev` is
+  // genuinely new and takes the current ts.
+  const seen = new Map((prev?.sources ?? []).map(s => [s.url, s.retrievedAt]))
   return {
     // only the semantic tier cites: spreading a sources key onto the others would be a field
     // their schema does not have, silently dropped rather than honestly absent
-    ...(note.tier === NOTE_TIER.semantic && { sources: note.sources.map(s => ({ ...s, retrievedAt: ts })) }),
+    ...(note.tier === NOTE_TIER.semantic && { sources: note.sources.map(s => ({ ...s, retrievedAt: seen.get(s.url) ?? ts })) }),
     createdAt: prev?.createdAt ?? ts,
     createdBy: prev?.createdBy ?? by,
     updatedAt: ts,

@@ -116,6 +116,31 @@ function dedupeToolUseParts(messages: ModelMessage[]): ModelMessage[] {
   })
 }
 
+// The THIRD way one tool_use ends up with two results, and the mirror of the dedupe above. A tool
+// whose input fails its own declared zod inputSchema never reaches our loop: ai@7's parseToolCall
+// catches InvalidToolInputError and puts an error tool-result straight into responseMessages. We
+// then pushed our own result for the same id, and the provider rejected the next request with the
+// same 400 a duplicate tool_use causes — "each tool_use must have a single result".
+//
+// OURS REPLACES THEIRS rather than yielding to it. Both are valid answers, but the SDK's is a
+// generic parse error while ours names the tool's contract ("Call signal again with {outcome:
+// 'success'|'failure', summary: string}") — and this message is the only thing the model gets to
+// act on. Dropping ours would trade a 400 for a recovery the model cannot follow.
+// A tool message left with no parts is removed entirely: an empty content array is not a message a
+// provider accepts.
+function withoutToolResults(messages: readonly ModelMessage[], ids: ReadonlySet<string>): ModelMessage[] {
+  const out: ModelMessage[] = []
+  for (const m of messages) {
+    if (!Array.isArray(m.content)) { out.push(m); continue }
+    const parts: unknown[] = m.content
+    const kept = parts.filter(part =>
+      !(isRecord(part) && part.type === 'tool-result' && typeof part.toolCallId === 'string' && ids.has(part.toolCallId)))
+    if (kept.length === parts.length) { out.push(m); continue }
+    if (kept.length > 0) out.push({ ...m, content: kept } as ModelMessage)
+  }
+  return out
+}
+
 async function callModel(model: LanguageModel, messages: ModelMessage[], tools: ToolSet): Promise<TurnResult> {
   let result
   try {
@@ -348,6 +373,8 @@ export function apiLoopExecutor(): AgentExecutor<LanguageModel> {
             // The assistant turn's tool_use (signal, plus any siblings) must be answered by a
             // matching tool result for EVERY call id, or a real provider rejects the next request
             // with a 400 (terminal) — a bare user-message push leaves the signal call unresolved.
+            const ids = new Set(turn.toolCalls.map(c => c.toolCallId))
+            messages.splice(0, messages.length, ...withoutToolResults(messages, ids))
             messages.push({
               role: 'tool',
               content: turn.toolCalls.map(call => ({
@@ -419,6 +446,8 @@ export function apiLoopExecutor(): AgentExecutor<LanguageModel> {
               }
             }
 
+            const ids = new Set(executed.map(({ call }) => call.toolCallId))
+            messages.splice(0, messages.length, ...withoutToolResults(messages, ids))
             messages.push({
               role: 'tool',
               content: executed.map(({ call, result }) => ({

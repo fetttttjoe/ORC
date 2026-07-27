@@ -201,6 +201,19 @@ describe('memory tools', () => {
     })
   })
 
+  // memory_write READS as well as writes — unresolvedLinks runs after the append. Without a drain,
+  // a turn that writes `auth-flow` then writes `arch-overview` linking to it checks that link
+  // against the pre-first-write read model and reports the edge dead.
+  it('memory_write drains before checking whether its links resolve', async () => {
+    const order: string[] = []
+    const f = fakeStore({ get: async id => { order.push(`get:${id}`); return null } })
+    const write = memoryTools({
+      store: f.store, author: { source: 'cli' }, catchUp: async () => { order.push('catchUp') },
+    }).find(t => t.name === 'memory_write')!
+    await write.execute({ id: 'arch-overview', title: 'Hub', summary: 's', links: [{ id: 'auth-flow', kind: 'relates_to' }] }, 'c1')
+    expect(order[0]).toBe('catchUp')
+  })
+
   it('declares five tools; memory_write routes to the store with the bound author', async () => {
     const { store, written } = fakeStore()
     const tools = memoryTools({ store, author: { source: 'agent', executor: 'api-loop', model: 'opus', role: 'review' } })
@@ -687,7 +700,7 @@ describe('body length: advertised, not corrected', () => {
 describe('claims through the tool surface', () => {
   const claimHit = (over: Partial<ClaimHit> = {}): ClaimHit => ({
     claimId: 'c1', noteId: 'n1', scope: 'project', title: 'N1',
-    text: 'the log is truth', validFrom: '2026-07-26T00:00:00.000Z', ...over,
+    text: 'the log is truth', validFrom: '2026-07-26T00:00:00.000Z', sourceRevision: null, paths: [], ...over,
   })
 
   it('memory_write forwards addClaims on the draft and invalidates on the opts', async () => {

@@ -172,8 +172,44 @@ describe('MemoryStore gateway', () => {
 
 // The revision only ever stamps a WRITE, and resolving it shells out to git. Every `orc memory`
 // command opened a store, so every read paid a subprocess spawn for a value it never used.
+// Only the semantic tier has a `claims` column, so MemoryNoteInput.parse silently dropped a
+// resolved claim set on any other tier — and the writer was told it worked. inferTier returns
+// `plan` for any non-empty rationale, and rationale sits beside addClaims in the same tool schema.
+describe('claims on a tier that cannot hold them', () => {
+  it('throws instead of dropping the statement and reporting success', async () => {
+    const pg = await createTestDb(); drops.push(pg.drop)
+    const ts = await createTestSurreal(); drops.push(ts.drop)
+    const log = (await openStorage(pg.url, { projectId: TEST_PROJECT_ID })).events
+    const surreal = await SurrealMemory.open(ts)
+    const store = createMemoryStore({ log, surreal })
+    try {
+      await expect(store.write(
+        { id: 'p1', title: 'A plan note', rationale: 'why this subplan exists', addClaims: ['a durable statement'] },
+        { source: 'cli' },
+      )).rejects.toThrow(/semantic-tier/)
+      // and nothing was appended — the failure is total, not a half-written note
+      expect(await store.get('p1')).toBeNull()
+    } finally {
+      await log.close()
+    }
+  })
+
+  it('still accepts claims on a semantic note', async () => {
+    const pg = await createTestDb(); drops.push(pg.drop)
+    const ts = await createTestSurreal(); drops.push(ts.drop)
+    const log = (await openStorage(pg.url, { projectId: TEST_PROJECT_ID })).events
+    const surreal = await SurrealMemory.open(ts)
+    const store = createMemoryStore({ log, surreal })
+    try {
+      await store.write({ id: 's1', title: 'A fact', addClaims: ['a durable statement'] }, { source: 'cli' })
+    } finally {
+      await log.close()
+    }
+  })
+})
+
 describe('sourceRevision is resolved lazily', () => {
-  it('is never asked for on a read path, and asked once across writes', async () => {
+  it('is never asked for on a read path, and re-resolved on EVERY write', async () => {
     const pg = await createTestDb(); drops.push(pg.drop)
     const ts = await createTestSurreal(); drops.push(ts.drop)
     const log = (await openStorage(pg.url, { projectId: TEST_PROJECT_ID })).events
@@ -186,9 +222,13 @@ describe('sourceRevision is resolved lazily', () => {
     await store.search('x')
     expect(calls).toBe(0)
 
+    // ONE PER WRITE, not one per store. This assertion used to read `toBe(1)` and locked in a
+    // memoization that made a supervisor stamp every note it ever wrote with the commit it booted
+    // at — in the immutable log, where no rebuild heals it, and under a drift check that then
+    // reported moved code as current. The saving was never real either: only writes resolve it.
     await store.write({ id: 'n1', title: 'N1' }, { source: 'cli' })
     await store.write({ id: 'n2', title: 'N2' }, { source: 'cli' })
-    expect(calls).toBe(1)
+    expect(calls).toBe(2)
     await log.close()
   })
 })
