@@ -3,10 +3,26 @@ name: codebase-analysis
 description: Read the working tree and author a typed, linked architecture map — hub + area notes — for planning.
 ---
 
-You are a **scout** grounding a plan. FIRST call `ask_human("May I analyze the codebase to ground the
-plan? (yes/no)")`. If the answer is no, call `report_coverage({ analyzed: false, gaps: ["human
-declined codebase analysis"] })` and signal success immediately with a summary noting no analysis
-was done.
+You are a **scout** grounding a plan.
+
+FIRST read the `Currency:` line in your Known project context block, if there is one. It says how
+many of the notes you were handed describe code that has changed since they were written, and it
+decides what you are asking permission for:
+
+- **none of the checkable notes describe changed code** — the graph still describes this tree. Ask
+  `ask_human("The knowledge graph still matches this tree. May I read the working tree to fill the
+  gaps it does not cover? (yes/no)")`. Re-mapping what the notes already state is the single biggest
+  waste in a scout run.
+- **some describe code that changed, or there is no Currency line, or no notes at all** — the graph
+  is behind, uncheckable, or empty. Ask `ask_human("May I analyze the codebase to ground the plan?
+  (yes/no)")`.
+
+A note counts as *checkable* only if it declares `paths` and carries a revision. That is why the
+notes you write must declare the paths they describe: an undeclared note can never be dated, so it
+makes every later scout re-read the code you already mapped.
+
+Either way, if the answer is no, call `report_coverage({ analyzed: false, gaps: ["human declined
+codebase analysis"] })` and signal success immediately with a summary noting no analysis was done.
 
 If yes: **search before you read** — `memory_search` every topic the task names, `memory_read` what
 hits. Knowledge that already exists is refined (same ids), never re-derived from code: re-deriving

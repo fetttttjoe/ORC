@@ -10,7 +10,7 @@ const AUTHOR: MemoryAuthor = { source: 'agent', taskId: 'task-1', stepId: 'imple
 const summary = (over: Partial<NoteSummary> = {}): NoteSummary => ({
   id: 'area-memory', scope: MemoryScope.project, title: 'Memory area',
   tier: NOTE_TIER.semantic, categories: [], tags: [], summary: 'How memory works.',
-  hits: 0, lastAccessedAt: null, ...over,
+  hits: 0, lastAccessedAt: null, sourceRevision: null, paths: [], ...over,
 })
 
 interface Recorded { id: string; scope: string | undefined; mode: string }
@@ -263,6 +263,43 @@ describe('provenance hygiene', () => {
 // Preload is a HINT, not a request: the knowledge protocol tells the agent to search for whatever
 // the block lacks. A real run surfaced every note in the project because the token budget was the
 // only limiter — which stops being harmless once the corpus is large.
+// Currency is the SAME verdict memory_read flags per note and `orc status` reports per corpus —
+// deliberately not a second, cheaper comparison. `sourceRevision === HEAD` was tried here and is
+// strictly worse: any commit anywhere invalidates every note at once, so the preload would tell
+// every step to re-derive everything, which is exactly the cost the preload exists to avoid.
+describe('recall reports currency through the shared drift verdict', () => {
+  const dated = (id: string, path: string) => summary({ id, sourceRevision: 'rev-a', paths: [path] })
+
+  it('counts a note as drifted when the code it declares has moved', async () => {
+    const f = fakeStore({ search: () => [dated('n1', 'src/auth.ts'), dated('n2', 'src/untouched.ts')] })
+    const changedSince = async () => new Set(['src/auth.ts'])
+    const got = await bind(f, { changedSince }).memory.recall(5000)
+    expect(got.currency).toMatchObject({ checkable: 2, drifted: 1 })
+  })
+
+  // A note with no declared paths cannot be dated at all, so it must not be counted as current —
+  // "nothing checkable" has to stay distinguishable from "checked and clean".
+  it('omits currency entirely when nothing could be checked', async () => {
+    const f = fakeStore({ search: () => [summary({ id: 'n1', sourceRevision: 'rev-a', paths: [] })] })
+    const got = await bind(f, { changedSince: async () => new Set(['src/auth.ts']) }).memory.recall(5000)
+    expect(got.currency).toBeUndefined()
+  })
+
+  it('omits currency when there is no drift probe at all', async () => {
+    const f = fakeStore({ search: () => [dated('n1', 'src/auth.ts')] })
+    expect((await bind(f).memory.recall(5000)).currency).toBeUndefined()
+  })
+
+  // The probe shells out to git; a step must never fail because a repo could not be read.
+  it('omits currency rather than failing the recall when the probe throws', async () => {
+    const f = fakeStore({ search: () => [dated('n1', 'src/auth.ts')] })
+    const changedSince = async () => { throw new Error('not a repo') }
+    const got = await bind(f, { changedSince }).memory.recall(5000)
+    expect(got.currency).toBeUndefined()
+    expect(got.notes).toHaveLength(1) // the knowledge still arrives
+  })
+})
+
 describe('recall is a bounded hint', () => {
   it('keeps only the best-ranked few, however many the store returns', async () => {
     const many = Array.from({ length: 30 }, (_, i) => summary({ id: `note-${i}` }))

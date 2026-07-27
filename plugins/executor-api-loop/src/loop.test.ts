@@ -611,7 +611,7 @@ describe('step memory seam', () => {
   const note = (over: Partial<NoteSummary> = {}): NoteSummary => ({
     id: 'auth-middleware', scope: 'project', title: 'Auth middleware overview',
     tier: NOTE_TIER.semantic, categories: [], tags: [], summary: 'Handles session validation.',
-    hits: 0, lastAccessedAt: null, ...over,
+    hits: 0, lastAccessedAt: null, sourceRevision: null, paths: [], ...over,
   })
   const signalled = (outcome: 'success' | 'failure', summary: string) =>
     scriptModel([{ toolCalls: [{ toolCallId: 'c1', toolName: 'signal', input: { outcome, summary } }] }])
@@ -677,6 +677,43 @@ describe('step memory seam', () => {
     expect(prompt).toContain('# Known project context (ids — memory_read for detail, pass scope where shown, verify before relying)')
     expect(prompt).toContain('auth-middleware — Auth middleware overview: Handles session validation.')
     expect(prompt.indexOf('Known project context')).toBeLessThan(prompt.indexOf('Project knowledge protocol'))
+  })
+
+  // The scout's most expensive decision — map the repo or fill gaps — was being made blind: the
+  // preload handed it knowledge with no way to date it against the tree. `drift.ts` answers that,
+  // and the block states its verdict.
+  it('states currency when no checkable note describes code that moved', async () => {
+    const captured: EventDraft[] = []
+    const specs: OperationSpec[] = []
+    const log = { recalled: [] as number[], captured: [] as unknown[] }
+    const memory = { ...fakeMemory(log, [note()]), recall: async () => ({ claims: [], notes: [note()], currency: { checkable: 3, drifted: 0, total: 3, ratio: 0 } }) }
+    await drain(apiLoopExecutor().startTurn(ctx(signalled('success', 'ok'), captured, {
+      memory, memoryPreloadTokens: 500, operation: makeOperation(captured, specs),
+    })))
+    expect(JSON.stringify(specs[0]?.before)).toContain('is unchanged since they were written — trust them')
+  })
+
+  it('names how many describe code that has since changed', async () => {
+    const captured: EventDraft[] = []
+    const specs: OperationSpec[] = []
+    const log = { recalled: [] as number[], captured: [] as unknown[] }
+    const memory = { ...fakeMemory(log, [note()]), recall: async () => ({ claims: [], notes: [note()], currency: { checkable: 4, drifted: 1, total: 4, ratio: 0.25 } }) }
+    await drain(apiLoopExecutor().startTurn(ctx(signalled('success', 'ok'), captured, {
+      memory, memoryPreloadTokens: 500, operation: makeOperation(captured, specs),
+    })))
+    expect(JSON.stringify(specs[0]?.before)).toContain('1 of 4 checkable note(s) describe code that has since changed')
+  })
+
+  // Nothing checkable is NOT "current": outside a repo, or with no note declaring paths, the block
+  // must say nothing rather than imply the knowledge matches the tree.
+  it('says nothing about currency when it cannot be known', async () => {
+    const captured: EventDraft[] = []
+    const specs: OperationSpec[] = []
+    const log = { recalled: [] as number[], captured: [] as unknown[] }
+    await drain(apiLoopExecutor().startTurn(ctx(signalled('success', 'ok'), captured, {
+      memory: fakeMemory(log, [note()]), memoryPreloadTokens: 500, operation: makeOperation(captured, specs),
+    })))
+    expect(JSON.stringify(specs[0]?.before)).not.toContain('Currency:')
   })
 
   it('renders a recalled CLAIM as the statement itself, carrying its note id', async () => {

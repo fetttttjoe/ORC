@@ -244,6 +244,16 @@ export interface ExecutorContext<LM = unknown> {
 export interface RecalledContext {
   claims: ClaimHit[]
   notes: NoteSummary[]
+  /**
+   * Of the delivered notes, how many could be checked against the tree at all, and how many
+   * describe code that has since moved — the same `drift.ts` verdict `memory_read` flags per note
+   * and `orc status` reports per corpus, so there is ONE definition of stale in the system.
+   *
+   * A step handed knowledge with no way to date it must re-derive everything to be safe, which is
+   * the most expensive thing a scout does. Absent when nothing could be checked (no repository,
+   * unreachable revision, no note declaring paths): unknown is never reported as current.
+   */
+  currency?: { checkable: number; drifted: number }
 }
 
 // The step's own memory, bound by the runtime from the memory plugin. The executor decides only

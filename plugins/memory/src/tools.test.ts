@@ -20,7 +20,7 @@ const toNote = (input: MemoryNoteDraft): MemoryNote => {
 }
 
 const summary = (id: string, title: string): NoteSummary =>
-  ({ id, title, summary: 's', tier: NOTE_TIER.semantic, categories: [], tags: [], scope: 'project', hits: 0, lastAccessedAt: null })
+  ({ id, title, summary: 's', tier: NOTE_TIER.semantic, categories: [], tags: [], scope: 'project', hits: 0, lastAccessedAt: null, sourceRevision: null, paths: [] })
 
 const fakeStore = (over: Partial<MemoryStore> = {}) => {
   const written: { input: MemoryNoteDraft; author: unknown; idempotencyKey?: string; invalidates?: string[] }[] = []
@@ -223,7 +223,7 @@ describe('memory tools', () => {
   it('search budgeting counts the complete serialized summaries', async () => {
     const bulky = Array.from({ length: 8 }, (_, i): NoteSummary => ({
       id: `n${i}`, scope: 'project', title: 'T', summary: '', tier: NOTE_TIER.semantic, categories: [],
-      tags: Array(50).fill('x'.repeat(64)), hits: 0, lastAccessedAt: null,
+      tags: Array(50).fill('x'.repeat(64)), hits: 0, lastAccessedAt: null, sourceRevision: null, paths: [],
     }))
     const { store } = fakeStore({ search: async () => bulky })
     const search = memoryTools({ store, author: { source: 'cli' } }).find(t => t.name === 'memory_search')!

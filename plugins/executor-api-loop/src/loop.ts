@@ -215,9 +215,22 @@ function budgetNote(iteration: number, max: number): string | null {
 const scoped = (id: string, scope: string): string =>
   scope === MemoryScope.project ? id : `${id} (scope: ${scope})`
 
-const renderKnownContext = ({ claims, notes }: RecalledContext): string =>
+// One line the scout's most expensive decision turns on: whether this knowledge describes the tree
+// in front of it. Stated only when it can be known — silence means undated, which is not the same as
+// current, and a reader must treat it as needing verification.
+// One line, and only when something was actually checkable: a step that cannot be told anything
+// true about currency is better off reading the code than reading a hedge.
+const currencyLine = (c: RecalledContext['currency']): string[] => {
+  if (!c || c.checkable === 0) return []
+  return c.drifted === 0
+    ? [`Currency: the code all ${c.checkable} checkable note(s) here describe is unchanged since they were written — trust them and read only what they do not cover.`]
+    : [`Currency: ${c.drifted} of ${c.checkable} checkable note(s) describe code that has since changed — re-read those paths before relying on them, and memory_write the SAME id to correct any that are now wrong.`]
+}
+
+const renderKnownContext = ({ claims, notes, currency }: RecalledContext): string =>
   [
     '# Known project context (ids — memory_read for detail, pass scope where shown, verify before relying)',
+    ...currencyLine(currency),
     ...(claims.length > 0
       ? ['## Claims (statements already recorded — do not re-add these)',
          ...claims.map(c => `- ${c.text} [${scoped(c.noteId, c.scope)}]`)]

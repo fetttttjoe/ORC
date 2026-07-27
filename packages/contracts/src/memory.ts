@@ -421,6 +421,18 @@ export const NoteSummary = z.object({
   // real data rather than a projection-local counter that any replay silently zeroes.
   hits: z.number().int().nonnegative(),
   lastAccessedAt: z.string().nullable(),
+  // The two inputs `noteHasDrifted` needs, carried on the SUMMARY and not just the full note,
+  // because the summary is what retrieval hands a reader — and a reader given knowledge with no way
+  // to date it against the tree in front of it has to re-derive everything to be safe. That is the
+  // single most expensive thing a scout does, and it was being decided blind.
+  //
+  // Both, together, deliberately: with `sourceRevision` alone a reader can only ask "was this
+  // written at the commit I am on", which is a different and far worse question — measured on this
+  // repo, two commits touching eight files put 0 of 42 notes "at HEAD" while only 11 of 18
+  // checkable ones described code that had actually moved. Whoever holds only half the inputs
+  // invents the cheap comparison; drift.ts is the one that answers it correctly.
+  sourceRevision: z.string().nullable(),
+  paths: z.array(z.string()).max(MEMORY_LIMITS.detailItems),
 })
 export type NoteSummary = z.infer<typeof NoteSummary>
 

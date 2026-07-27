@@ -5,7 +5,7 @@ import {
 } from '@orc/contracts'
 import { applyBudget, approxTokens } from './budget'
 import { memoryTools, unavailableMemoryTools, MEMORY_ROLE, type MemoryRole } from './tools'
-import type { ChangedSince } from './drift'
+import { corpusDrift, type ChangedSince, type CorpusDrift } from './drift'
 
 // Distinct id prefixes so a later success cannot overwrite a failure lesson — both notes coexist.
 interface AmbientSpec { idPrefix: string; tags: readonly string[] }
@@ -70,6 +70,7 @@ export function bindStepMemory(opts: {
   step: { id: string; title: string; instructions: string; dependsOn: readonly string[] }
   taskId: string
   role?: MemoryRole
+  // the drift probe: also what lets recall report how much of its own output still holds
   changedSince?: ChangedSince
   ambientCapture?: boolean
   // nearest first (parent, grandparent, …, root) — a split child's decomposition lives in its
@@ -113,6 +114,24 @@ export function bindStepMemory(opts: {
       limit: PRELOAD_MAX_NOTES, budget: Math.max(0, budget - spent),
     }).items
     return { claims, notes }
+  }
+
+  // How much of what we are about to hand over still describes the tree in front of the step —
+  // `corpusDrift`, the same verdict memory_read flags per note and `orc status` reports per corpus.
+  // Deliberately NOT a second, cheaper comparison: `sourceRevision === HEAD` was tried here and is
+  // strictly worse, because any commit anywhere invalidates every note at once (measured: two
+  // commits over eight files scored 0 of 42 "current" while only 11 of 18 checkable notes had
+  // actually moved), so the block would tell every step to re-derive everything — the exact cost
+  // the preload exists to avoid.
+  //
+  // Every failure folds to undefined, matching the module's rule that unknown is never "drifted"
+  // and never "current": a git probe that cannot answer must not produce a sentence.
+  const currencyOf = async (notes: readonly NoteSummary[]): Promise<CorpusDrift | undefined> => {
+    if (!opts.changedSince) return undefined
+    try {
+      const d = await corpusDrift(notes, opts.changedSince)
+      return d.ratio === null ? undefined : d
+    } catch { return undefined }
   }
 
   return {
@@ -172,7 +191,10 @@ export function bindStepMemory(opts: {
               // keyed by note, not position: a replay that reorders results must still converge
               ...(author.runToken ? { idempotencyKey: `${author.runToken}:preload:${n.scope}:${n.id}` } : {}),
             })
-          return found
+          // measured on what is actually delivered, after the budget cut — a note that did not fit
+          // is not knowledge this step was handed, so it must not move the reading either way
+          const currency = await currencyOf(found.notes)
+          return { ...found, ...(currency && { currency }) }
         } catch (err) {
           console.warn(`memory recall failed for step '${step.id}':`, errorMessage(err))
           return { claims: [], notes: [] }

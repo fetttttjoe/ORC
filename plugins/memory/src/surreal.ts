@@ -815,6 +815,8 @@ function toNote(r: Record<string, any>): unknown {
 function toSummary(r: Record<string, any>): NoteSummary {
   return {
     id: r.noteId, scope: r.scope, title: r.title,
+    // both drift inputs together — a reader holding only the revision invents the wrong comparison
+    sourceRevision: r.sourceRevision ?? null, paths: r.paths ?? [],
     tier: NoteTier.catch(inferTier(r)).parse(r.tier),
     categories: r.categories ?? [], tags: r.tags, summary: r.summary,
     hits: r.hits ?? 0, lastAccessedAt: r.lastAccessedAt ?? null,
