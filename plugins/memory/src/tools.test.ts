@@ -233,20 +233,33 @@ describe('memory tools', () => {
     expect(written[1]?.input).toMatchObject({ zone: ['docs/**'] })
   })
 
-  // Each of these was measured in the live graph before the lint existed: 2 notes with an empty
-  // summary, 2 project notes nothing linked to, and 3 carrying backslash-escaped text.
-  it('warns on the three shapes that made real notes unreachable or wrong', () => {
+  // Each was measured in the live graph before the lint existed: 2 notes with an empty summary and
+  // 3 carrying backslash-escaped text.
+  it('warns on the shapes that made real notes unreachable or wrong', () => {
     const clean = semanticNoteFixture({ summary: 'what searches must find', links: [{ id: 'area-memory', kind: 'refines' }] })
     expect(noteLint(clean)).toEqual([])
 
     expect(noteLint(semanticNoteFixture({ summary: '  ', links: [{ id: 'a', kind: 'refines' }] })).join(' '))
       .toContain('retrieval surface')
-    expect(noteLint(semanticNoteFixture({ summary: 's', links: [] })).join(' '))
-      .toContain('no links')
     expect(noteLint(semanticNoteFixture({ summary: 'quoting \\"this\\" thing', links: [{ id: 'a', kind: 'refines' }] })).join(' '))
       .toContain('escaped')
-    // an episodic step note is edgeless BY DESIGN — the link lint must not nag the ambient writer
+    // an episodic step note is edgeless BY DESIGN — no rule may nag the ambient writer
     expect(noteLint(episodicNoteFixture({ summary: 'did the thing' }))).toEqual([])
+  })
+
+  // THE BAR every remaining rule must clear: a note that is simply CORRECT triggers nothing. Two
+  // rules failed it and were removed — a leaf package has no outbound dependency to declare, and a
+  // cross-cutting note's relationships genuinely can all be relates_to. Measured cost of getting
+  // this wrong: a scout wrote depends_on edges at confidence 0.3 purely to clear the warning, then
+  // added a claim recording that the true direction was reversed.
+  it('a correct note with no outbound links and only relates_to edges is clean', () => {
+    // the dependency-free leaf: every real edge points AT it, so it has none of its own
+    expect(noteLint(semanticNoteFixture({ summary: 'the seam package everything imports', links: [], paths: ['packages/contracts/src'], categories: ['subsystem'] }))).toEqual([])
+    // a cross-cutting note whose relationships really are all relates_to
+    expect(noteLint(semanticNoteFixture({
+      summary: 'a mechanism spanning three areas', paths: ['packages/kernel/src'], categories: ['cross-cutting'],
+      links: [{ id: 'a', kind: 'relates_to' }, { id: 'b', kind: 'relates_to' }, { id: 'c', kind: 'relates_to' }],
+    }))).toEqual([])
   })
 
   it('memory_write passes omissions through raw (no injected defaults) and surfaces lint warnings', async () => {
@@ -258,14 +271,16 @@ describe('memory tools', () => {
     await write.execute({ id: 'auth', title: 'Auth' })
     expect('body' in written[0]!.input).toBe(false)
     expect('links' in written[0]!.input).toBe(false)
-    // lint: a flat relates_to star comes back as a warning the model can act on next iteration
+    // lint rides back as a warning the model can act on next iteration — and a flat relates_to star
+    // is NOT one of them: re-typing honest relates_to edges into decomposes_into/depends_on is
+    // structure the writer would be inventing.
     const linty = await write.execute({
       id: 'hub', title: 'Hub', kind: 'architecture_current',
       links: [{ id: 'a', kind: 'relates_to' }, { id: 'b', kind: 'relates_to' }, { id: 'c', kind: 'relates_to' }],
     })
     expect(linty.isError).toBe(false)
     const out = z.object({ id: z.string(), warnings: z.array(z.string()) }).parse(linty.output)
-    expect(out.warnings.some(w => w.includes('relates_to'))).toBe(true)
+    expect(out.warnings.some(w => w.includes('relates_to'))).toBe(false)
     expect(out.warnings.some(w => w.includes('categories'))).toBe(true)
   })
 

@@ -64,10 +64,14 @@ export function noteLint(note: MemoryNote): string[] {
   const w: string[] = []
   if (note.summary.trim() === '')
     w.push('summary is empty — it is the retrieval surface, so a note without one is reachable only by an exact id someone already knows')
-  // a claim nothing links to cannot be reached by traversal, only by search: it sits outside the
-  // graph the blast-radius queries walk. Measured: 2 of 24 project notes were isolated this way.
-  if (note.tier === NOTE_TIER.semantic && note.links.length === 0)
-    w.push('no links — wire this into the graph (refines/depends_on/derived_from an existing note) or it is findable only by search')
+  // NO "isolated note" LINT. It demanded an outbound edge from every semantic note, and a leaf has
+  // none to give honestly: `area-contracts` is the dependency-free package every other one imports,
+  // so every real edge points AT it. Measured on a live run — the scout wrote depends_on links to
+  // area-kernel and area-storage at confidence 0.3 purely to clear the warning, then added a claim
+  // saying the true direction is reversed. A rule that cannot be satisfied honestly gets satisfied
+  // dishonestly, and inverted dependency edges are exactly what a later reader would trust.
+  // Connectivity is a property of the GRAPH, not of one note; the notes that link TO a leaf are what
+  // make it reachable, and they are linted on their own edges already.
   if (OVER_ESCAPED.test(`${note.title}\n${note.summary}\n${note.body}`))
     w.push('text contains backslash-escaped quotes or backticks — send the raw characters; the tool argument is already JSON, so escaping them again stores the backslash')
   // Not a style rule: past the embedder's window the text simply cannot be found by meaning.
@@ -77,8 +81,10 @@ export function noteLint(note: MemoryNote): string[] {
   // the categories lint targets the retrieval surface, so it only fires on the tier that has one
   if (note.tier === NOTE_TIER.semantic && note.kind.startsWith('architecture') && note.categories.length === 0)
     w.push(`categories empty — set one of subsystem | cross-cutting | target so category-filtered search finds this`)
-  if (note.links.length >= 3 && note.links.every(l => l.kind === LINK_KIND.relates_to))
-    w.push(`every edge is relates_to — type structural edges (decomposes_into for hub→area, depends_on for imports)`)
+  // NO "all edges are relates_to" LINT either, and for the same reason as the isolated-note one: a
+  // cross-cutting note whose relationships genuinely ARE all relates_to is correct, and the warning
+  // asks it to re-type them into decomposes_into or depends_on — structure it would be inventing.
+  // Every rule left below can be satisfied by a note that is simply right; that is the bar.
   if (note.summary && note.summary.toLowerCase().replace(/[^a-z0-9]/g, '').startsWith(note.title.toLowerCase().replace(/[^a-z0-9]/g, '')))
     w.push(`summary restates the title — it is the retrieval surface; spend it on what searches must find`)
   // A note that cites source files in its TEXT but declares none in `paths` is invisible to
