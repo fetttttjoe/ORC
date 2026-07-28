@@ -8,26 +8,38 @@ export interface Cluster { key: string; members: string[]; medoidClaimId: string
 // Cosine similarity at or above which two claims group together. Lives HERE, with the algorithm it
 // tunes, rather than in the persistence module that happens to call it.
 //
-// MEASURED, and re-measured whenever the embedder changes — the two are ONE decision. A threshold
-// is a cut through a particular model's cosine distribution, so porting a number across models is
-// meaningless. Swept 0.50→0.90 over a real 52-claim corpus authored by agents through addClaims.
+// MEASURED, and re-measured whenever the embedder OR the corpus size changes — those are one
+// decision with the threshold. A cut through a model's cosine distribution does not port across
+// models, and it does not port across corpus sizes either: the same value that was well-tuned at 52
+// claims fragmented at 93.
 //
-// Current: `ollama/mxbai-embed-large` (1024d) at 0.675, chosen from a genuine plateau — 0.670 and
-// 0.680 produce an identical partition — giving 19 topics over 52 claims with 4 singletons, a
-// largest group of 6, and 5 topics that span more than one note. Reading those groups confirms the
-// arithmetic: synthesis claims land beside the specific claims they generalise, which is the lateral
-// navigation topics exist for. Below ~0.55 the corpus collapses toward one blob; above ~0.72
-// singletons take over and the inventory degenerates into one entry per claim, which is the thing
-// topics exist to prevent.
+// Current: `ollama/mxbai-embed-large` (1024d) at 0.65, swept over a live 93-claim corpus authored by
+// agents through addClaims. Chosen because it DOMINATES the previous 0.675 rather than trading
+// against it — identical group structure (23 multi-claim groups, largest 8) with 6 fewer isolated
+// claims and one more group spanning multiple notes:
 //
-// Previously `nomic-embed-text` (768d) at 0.70 — on the SAME corpus that scored 22 topics, 6
-// singletons and only 3 cross-note groups, so the change is an improvement on every axis, not a
-// preference. Before that, 0.75 was a pure guess and produced 16 singletons out of 22 topics.
+//   thresh  topics  single  multi  cross-note  largest
+//   0.600     18       4     14       10         20     one 20-claim blob; groups by package
+//   0.625     26       7     19       13         14     largest still package-shaped
+//   0.650     38      15     23       13          8     <- chosen
+//   0.675     44      21     23       12          8     same structure, 6 more singletons
+//   0.700     56      30     26       12          5     singletons take over
 //
-// Limits, so the next reader does not over-trust it: n=52 from one repository, and grouping quality
-// turned out to depend at least as much on how claims are PHRASED (claims that name their source
-// file group far better) as on the model. `memory_topic_accessed` is the ongoing measurement.
-export const MEMORY_CLUSTER_THRESHOLD = 0.675
+// The groups were READ, not just counted, which is what the numbers cannot tell you: at 0.65 the
+// multi-note groups are genuine themes — operation-journal completeOperation/rebuildOperations with
+// crashDedupKey and makeOperation (idempotency across storage/kernel/execution), and
+// releaseWriteClaims with claimWrite, the zone fence and verifyArtifacts. Below 0.65 the largest
+// group degenerates into "claims about the same package" rather than about the same subject.
+//
+// Previously 0.675, chosen on a 52-claim corpus where 0.670 and 0.680 produced an identical
+// partition. That plateau no longer exists at 93 claims — the curve degrades smoothly — which is
+// itself the finding: this constant needs re-sweeping as the corpus grows, not once.
+//
+// Limits, so the next reader does not over-trust it: n=93 from one repository, and grouping quality
+// still depends at least as much on how claims are PHRASED (claims naming their source file group
+// far better; 69% of this corpus does) as on the threshold. `memory_topic_accessed` is the ongoing
+// measurement.
+export const MEMORY_CLUSTER_THRESHOLD = 0.65
 
 const dot = (a: readonly number[], b: readonly number[]): number =>
   a.reduce((sum, value, i) => sum + value * (b[i] ?? 0), 0)

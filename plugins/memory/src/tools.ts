@@ -411,6 +411,7 @@ export function memoryTools(opts: {
           const { invalidates, ...parsed } = MemoryWriteToolInput.parse(normalized.input)
           if (parsed.id === undefined && parsed.title === undefined)
             throw new Error('a new note needs a title (it derives the id) — pass an id instead to update an existing note')
+          const scope = parsed.scope ?? MemoryScope.project
           let id: string
           try {
             id = parsed.id ?? slugId(parsed.title ?? '')
@@ -419,12 +420,26 @@ export function memoryTools(opts: {
             // has no such command, so it gets tool-appropriate guidance instead.
             throw new Error('title cannot be slugged — pass an explicit id')
           }
+          // An id-less write whose title EXACTLY matches an existing note IS that note. slugId
+          // derives its id from the title, so a first write that chose a short explicit id and a
+          // second that omitted one produced two byte-identical notes under different ids —
+          // measured on a live run: 'zone-write-fence' and
+          // 'zone-write-fence-declaration-freeze-and-enforcement-across-contr', same title, summary,
+          // paths, links and author. The fork warning below DID fire on the second write and the
+          // write proceeded anyway; a warning cannot stop a fork the writer does not act on.
+          //
+          // EXACT title only, and only when the derived id is free: a near-match is genuinely
+          // ambiguous and stays a warning, and an explicit id is already the writer's answer to
+          // "which note do you mean".
+          if (parsed.id === undefined && parsed.title !== undefined && !(await store.get(id, scope))) {
+            const sameSubject = (await store.search(parsed.title, { scope }, {})).find(n => n.title === parsed.title)
+            if (sameSubject) id = sameSubject.id
+          }
           const idempotencyKey = author.runToken && toolCallId
             ? `${author.runToken}:tool:${toolCallId}:memory:${id}`
             : undefined
           // before the write: a fork is only possible when the writer named no id, and only when
           // the derived one does not already exist (that case is an ordinary update)
-          const scope = parsed.scope ?? MemoryScope.project
           const forkRisk = parsed.id === undefined && !(await store.get(id, scope))
           // a fork check compares SUBJECTS, so it needs the title the writer supplied; an update by
           // id carries none and cannot fork by construction

@@ -214,6 +214,39 @@ describe('memory tools', () => {
     expect(order[0]).toBe('catchUp')
   })
 
+  // Measured on a live run: 'zone-write-fence' and its slugged twin, byte-identical in title,
+  // summary, paths, links and author. One write named a short id, a later one named none, and
+  // slugId derived a different id from the same title. The fork WARNING fired and the write went
+  // ahead — a warning cannot stop a fork the writer does not act on.
+  describe('an id-less write with an exact title match updates rather than forking', () => {
+    const existing = (id: string, title: string): NoteSummary =>
+      ({ id, title, summary: 's', tier: NOTE_TIER.semantic, categories: [], tags: [], scope: 'project', hits: 0, lastAccessedAt: null, sourceRevision: null, paths: [] })
+
+    it('reuses the existing id when the titles match exactly', async () => {
+      const f = fakeStore({ get: async () => null, search: async () => [existing('zone-write-fence', 'Zone write-fence: declaration and enforcement')] })
+      const write = memoryTools({ store: f.store, author: { source: 'cli' } }).find(t => t.name === 'memory_write')!
+      await write.execute({ title: 'Zone write-fence: declaration and enforcement', summary: 'updated' }, 'c1')
+      expect(f.written[0]?.input.id).toBe('zone-write-fence')
+    })
+
+    // a near-match is genuinely ambiguous — it stays a warning, and the new note is still created
+    it('still forks (with a warning) when the titles merely resemble each other', async () => {
+      const f = fakeStore({ get: async () => null, search: async () => [existing('zone-write-fence', 'Zone write-fence: something else entirely')] })
+      const write = memoryTools({ store: f.store, author: { source: 'cli' } }).find(t => t.name === 'memory_write')!
+      const res = await write.execute({ title: 'Zone write-fence: declaration and enforcement', summary: 's' }, 'c1')
+      expect(f.written[0]?.input.id).not.toBe('zone-write-fence')
+      expect(JSON.stringify(res)).toContain('similar subject')
+    })
+
+    // an explicit id IS the writer's answer to "which note do you mean"
+    it('never overrides an explicit id', async () => {
+      const f = fakeStore({ get: async () => null, search: async () => [existing('zone-write-fence', 'Same title')] })
+      const write = memoryTools({ store: f.store, author: { source: 'cli' } }).find(t => t.name === 'memory_write')!
+      await write.execute({ id: 'deliberately-separate', title: 'Same title', summary: 's' }, 'c1')
+      expect(f.written[0]?.input.id).toBe('deliberately-separate')
+    })
+  })
+
   it('declares five tools; memory_write routes to the store with the bound author', async () => {
     const { store, written } = fakeStore()
     const tools = memoryTools({ store, author: { source: 'agent', executor: 'api-loop', model: 'opus', role: 'review' } })
