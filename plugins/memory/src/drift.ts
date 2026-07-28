@@ -20,7 +20,11 @@ export interface NoteDrift { sourceRevision: string | null; paths: readonly stri
 export function noteHasDrifted(note: NoteDrift, changed: ReadonlySet<string> | null): boolean {
   if (changed === null || note.sourceRevision === null || note.paths.length === 0) return false
   for (const p of note.paths) {
-    const declared = p.replace(/\/+$/, '') // a note may declare 'packages/kernel/' or 'packages/kernel'
+    // linear scan rather than /\/+$/, which CodeQL flags as polynomial on agent-authored input.
+    // A note may declare 'packages/kernel/' or 'packages/kernel'.
+    let end = p.length
+    while (end > 0 && p[end - 1] === '/') end -= 1
+    const declared = p.slice(0, end)
     if (declared === '') continue
     for (const f of changed)
       // a note may point at a FILE or a directory; a directory drifts when anything under it does

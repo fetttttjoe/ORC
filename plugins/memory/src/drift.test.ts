@@ -7,6 +7,19 @@ import { corpusDrift, createDriftProbe, needsReground, noteHasDrifted, CORPUS_DR
 const note = (over: Partial<{ sourceRevision: string | null; paths: string[] }> = {}) =>
   ({ sourceRevision: 'abc123', paths: ['packages/kernel/src/kernel.ts'], ...over })
 
+describe('trailing-slash normalisation', () => {
+  const changed = new Set(['packages/kernel/config.ts'])
+  it('treats a trailing slash as the same directory', () => {
+    expect(noteHasDrifted({ sourceRevision: 'a', paths: ['packages/kernel/'] }, changed)).toBe(true)
+    expect(noteHasDrifted({ sourceRevision: 'a', paths: ['packages/kernel///'] }, changed)).toBe(true)
+    expect(noteHasDrifted({ sourceRevision: 'a', paths: ['packages/kernel'] }, changed)).toBe(true)
+  })
+
+  it('a path of only slashes normalises to empty and matches nothing', () => {
+    expect(noteHasDrifted({ sourceRevision: 'a', paths: ['///'] }, changed)).toBe(false)
+  })
+})
+
 describe('noteHasDrifted', () => {
   it('drifts when a declared file changed', () => {
     expect(noteHasDrifted(note(), new Set(['packages/kernel/src/kernel.ts']))).toBe(true)
