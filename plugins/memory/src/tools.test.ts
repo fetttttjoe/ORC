@@ -218,7 +218,7 @@ describe('memory tools', () => {
   // summary, paths, links and author. One write named a short id, a later one named none, and
   // slugId derived a different id from the same title. The fork WARNING fired and the write went
   // ahead — a warning cannot stop a fork the writer does not act on.
-  describe('an id-less write with an exact title match updates rather than forking', () => {
+  describe('a CREATE whose title repeats an existing note merges into it', () => {
     const existing = (id: string, title: string): NoteSummary =>
       ({ id, title, summary: 's', tier: NOTE_TIER.semantic, categories: [], tags: [], scope: 'project', hits: 0, lastAccessedAt: null, sourceRevision: null, paths: [] })
 
@@ -238,9 +238,23 @@ describe('memory tools', () => {
       expect(JSON.stringify(res)).toContain('similar subject')
     })
 
-    // an explicit id IS the writer's answer to "which note do you mean"
-    it('never overrides an explicit id', async () => {
-      const f = fakeStore({ get: async () => null, search: async () => [existing('zone-write-fence', 'Same title')] })
+    // The observed ordering, 35s apart and both rev=1: id-less FIRST (taking the long slug), then
+    // the same subject rewritten under a cleaner explicit id. A rule keyed on "id-less" closes only
+    // the other ordering, which is how the duplicate shipped twice.
+    it('merges an explicit NEW id into the note whose title it repeats', async () => {
+      const f = fakeStore({ get: async () => null, search: async () => [existing('zone-write-fence-step-scoped-fs-write', 'Zone write-fence: step-scoped confinement')] })
+      const write = memoryTools({ store: f.store, author: { source: 'cli' } }).find(t => t.name === 'memory_write')!
+      await write.execute({ id: 'zone-write-fence', title: 'Zone write-fence: step-scoped confinement', summary: 's' }, 'c1')
+      expect(f.written[0]?.input.id).toBe('zone-write-fence-step-scoped-fs-write')
+    })
+
+    // An explicit id IS the writer's answer to "which note do you mean" — but only once it NAMES
+    // one. An existing id is an update and never reroutes, whatever any other note is titled.
+    it('never reroutes an explicit id that already exists', async () => {
+      const f = fakeStore({
+        get: async () => toNote({ id: 'deliberately-separate', title: 'Same title', body: 'b' }),
+        search: async () => [existing('zone-write-fence', 'Same title')],
+      })
       const write = memoryTools({ store: f.store, author: { source: 'cli' } }).find(t => t.name === 'memory_write')!
       await write.execute({ id: 'deliberately-separate', title: 'Same title', summary: 's' }, 'c1')
       expect(f.written[0]?.input.id).toBe('deliberately-separate')

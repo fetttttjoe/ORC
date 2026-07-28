@@ -420,18 +420,21 @@ export function memoryTools(opts: {
             // has no such command, so it gets tool-appropriate guidance instead.
             throw new Error('title cannot be slugged — pass an explicit id')
           }
-          // An id-less write whose title EXACTLY matches an existing note IS that note. slugId
-          // derives its id from the title, so a first write that chose a short explicit id and a
-          // second that omitted one produced two byte-identical notes under different ids —
-          // measured on a live run: 'zone-write-fence' and
-          // 'zone-write-fence-declaration-freeze-and-enforcement-across-contr', same title, summary,
-          // paths, links and author. The fork warning below DID fire on the second write and the
-          // write proceeded anyway; a warning cannot stop a fork the writer does not act on.
+          // A note being CREATED whose title EXACTLY matches an existing one IS that note. Two
+          // notes cannot honestly carry the same subject line, so the title is the writer's own
+          // evidence of which note it means.
           //
-          // EXACT title only, and only when the derived id is free: a near-match is genuinely
-          // ambiguous and stays a warning, and an explicit id is already the writer's answer to
-          // "which note do you mean".
-          if (parsed.id === undefined && parsed.title !== undefined && !(await store.get(id, scope))) {
+          // The condition is "the target id does not exist yet", NOT "the writer gave no id". An
+          // explicit id is the answer to "which note do you mean" only when that id EXISTS — then
+          // it names a note and this never fires. When it does not exist, the write is a create,
+          // and a colliding title is a duplicate however the id was chosen.
+          //
+          // Measured across two live runs, in BOTH orderings. Run A: a short explicit id first,
+          // then an id-less write whose slugged title minted a second id. Run B (timestamps 35s
+          // apart, both rev=1): id-less FIRST, taking the long slug, then the same subject rewritten
+          // under a cleaner explicit id. An earlier fix keyed on "id-less" closed only run A's path
+          // and left run B's open — which is how this shipped a second time.
+          if (parsed.title !== undefined && !(await store.get(id, scope))) {
             const sameSubject = (await store.search(parsed.title, { scope }, {})).find(n => n.title === parsed.title)
             if (sameSubject) id = sameSubject.id
           }
