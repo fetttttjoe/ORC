@@ -8,7 +8,19 @@ import { noteNodeId, type OrcActions } from '@orc/ui-core'
 import { startGraphUi } from './server'
 
 const dbs: Array<{ drop: () => Promise<void> }> = []
-afterAll(async () => { await Promise.all(dbs.map(d => d.drop())) }, 30_000)
+// Everything setup() opens is torn down HERE, before its database is dropped, whether or not the
+// test remembered. startGraphUi holds an event stream AND a project watch, and a test that returned
+// early left both alive against a database afterAll then dropped: measured on CI, one leaked server
+// logged 116 reconnect failures into every LATER test file's output, burying the failures a reader
+// is scanning for. Ordered — servers and storage first, databases last — because the reverse is
+// exactly what produces the noise.
+const openServers: Array<{ stop: () => void | Promise<void> }> = []
+const openStores: Array<{ close: () => Promise<void> }> = []
+afterAll(async () => {
+  for (const u of openServers) await Promise.resolve(u.stop()).catch(() => {})
+  for (const st of openStores) await st.close().catch(() => {})
+  await Promise.all(dbs.map(d => d.drop()))
+}, 30_000)
 
 const noteEvent = (id: string) => ({
   taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_written,
@@ -63,8 +75,10 @@ async function setup() {
   const db = await createTestDb()
   dbs.push(db)
   const storage = await openStorage(db.url, { projectId: TEST_PROJECT_ID })
+  openStores.push(storage)
   const t = await new Kernel(storage.events).createTask({ title: 'seed task', spec: '' })
   const ui = startGraphUi({ url: db.url, port: 0, cwdProject: { id: TEST_PROJECT_ID, name: 'test-proj' } })
+  openServers.push(ui)
   const base = `http://127.0.0.1:${ui.port}`
   return { storage, taskId: t.id, ui, base, url: db.url }
 }

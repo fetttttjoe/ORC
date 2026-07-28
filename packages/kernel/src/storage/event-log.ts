@@ -5,7 +5,7 @@ import { errorMessage, EVENT_KIND, EventInput, PAYLOAD_SCHEMAS, type EventKind, 
 import { events } from '../schema'
 import { KERNEL_ERROR_CODE, KernelError } from '../errors'
 import type { Redactor } from '../redact'
-import { NOTIFY_CHANNEL, PostgresStore, RECONNECT_DELAYS_MS, type Tx } from './postgres'
+import { isGonePermanently, NOTIFY_CHANNEL, PostgresStore, RECONNECT_DELAYS_MS, type Tx } from './postgres'
 
 const PUMP_RETRY_MS = 250
 
@@ -293,6 +293,14 @@ export class EventLog implements EventLogOps {
           if (pumpTimer !== null) { clearTimeout(pumpTimer); pumpTimer = null }
           if (reconnectTimer !== null) { clearTimeout(reconnectTimer); reconnectTimer = null }
           throw err
+        }
+        // same rule as the project watch: a gone database or a rejected credential cannot be
+        // retried into working, and a loop that never gives up outlives whatever owned it
+        if (isGonePermanently(err)) {
+          closed = true
+          if (pumpTimer !== null) { clearTimeout(pumpTimer); pumpTimer = null }
+          console.warn(`event stream stopped: ${errorMessage(err)}`)
+          return
         }
         console.warn(`event stream reconnect failed: ${errorMessage(err)}`)
         scheduleReconnect()

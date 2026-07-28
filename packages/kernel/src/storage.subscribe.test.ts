@@ -19,6 +19,35 @@ const appendCreated = (log: EventLog, id: string) =>
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms))
 
 describe('EventLog.subscribe', () => {
+  // A dropped database is permanent: the reconnect loop cannot retry it into working, and left
+  // running it spins at the 3s backoff ceiling forever. Measured on CI — one file dropped its
+  // database and the orphaned loop logged into every LATER test file's output, burying real
+  // failures in noise.
+  it('stops reconnecting once the database is gone for good', async () => {
+    const db = await createTestDb()
+    const log = (await openStorage(db.url, { projectId: TEST_PROJECT_ID })).events
+    await appendCreated(log, 'a')
+    const seen: number[] = []
+    const unsub = await log.subscribe({ fromSeq: 0 }, e => { seen.push(e.seq) })
+    await sleep(50)
+    expect(seen.length).toBe(1)
+
+    const warnings: string[] = []
+    const realWarn = console.warn
+    console.warn = (...a: unknown[]) => { warnings.push(a.join(' ')) }
+    try {
+      await db.drop() // pulls the database out from under a LIVE subscription
+      await sleep(1200) // past several reconnect delays (100/200/400/800)
+    } finally {
+      console.warn = realWarn
+    }
+    // it gives up ONCE, rather than logging a fresh failure on every backoff tick
+    expect(warnings.filter(w => w.includes('event stream stopped')).length).toBe(1)
+    expect(warnings.filter(w => w.includes('reconnect failed')).length).toBe(0)
+    await unsub()
+    await log.close().catch(() => {})
+  }, 15000)
+
   // A throw during the INITIAL catch-up rejects subscribe(), so the caller never receives a
   // disposer — and `closed` lives only inside that disposer. Meanwhile ending the client fires the
   // 'end' handler, which schedules a reconnect. Nothing could ever stop it: the subscription

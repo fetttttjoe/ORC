@@ -12,6 +12,20 @@ export type Tx = Parameters<Parameters<NodePgDatabase['transaction']>[0]>[0]
 export const NOTIFY_CHANNEL = 'orc_events'
 export const RECONNECT_DELAYS_MS: readonly [number, ...number[]] = [100, 200, 400, 800, 1600, 3000]
 
+// A reconnect that can NEVER succeed, so retrying it is a leak rather than resilience.
+//   3D000 invalid_catalog_name — the database is gone. It is not coming back: a dropped project
+//     database, or a test database dropped while a subscription was still live.
+//   28P01/28000 — the credentials are wrong. A retry loop cannot fix a password.
+// Left running, these spin at the 3s backoff ceiling forever, logging on every attempt. Measured on
+// CI: one test file dropped its database and the orphaned loop then logged into every LATER file's
+// output, which is the same "poisons every later test file" shape unconditional teardown exists to
+// prevent — except here the noise also buries the failures a reader is looking for.
+const TERMINAL_PG_CODES = new Set(['3D000', '28P01', '28000'])
+export const isGonePermanently = (err: unknown): boolean =>
+  typeof err === 'object' && err !== null && 'code' in err
+  && typeof (err as { code: unknown }).code === 'string'
+  && TERMINAL_PG_CODES.has((err as { code: string }).code)
+
 // The one Postgres owner: pool, project binding, redaction, write serialization.
 export class PostgresStore {
   private constructor(
@@ -132,6 +146,12 @@ export async function watchProjectIds(url: string, onWake: (ids: string[]) => vo
     } catch (err) {
       await c.end().catch(() => {})
       if (initial) throw err
+      // a database that no longer exists never will again — stop, and say so once
+      if (isGonePermanently(err)) {
+        closed = true
+        console.warn(`project watch stopped: ${errorMessage(err)}`)
+        return
+      }
       console.warn(`project watch reconnect failed: ${errorMessage(err)}`)
       scheduleReconnect()
     }
