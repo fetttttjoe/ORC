@@ -1,5 +1,5 @@
-import { STEP_ROLE, errorMessage, EVENT_KIND, ISOLATION_TIER, STRATEGY, TASK_STATUS, costUSDFor, parseModelRef, type ExecutionPort, type ModelOption, type PlanDraft, type TaskStatus } from '@orc/contracts'
-import { DEFAULT_MAX_ITERATIONS, deriveSystemUrl, dropSystemDatabase, initializeProject, liveSupervisors, loadConfig, openStorage, resetSystemDatabase, subtreeTaskIds, type EventLog, type Kernel, type ProjectConfig, type Storage } from '@orc/kernel'
+import { STEP_ROLE, errorMessage, EVENT_KIND, ISOLATION_TIER, ModelsDiscoveredPayload, NOTE_KIND, STRATEGY, TASK_STATUS, costUSDFor, parseModelRef, type ExecutionPort, type ModelOption, type PlanDraft, type TaskStatus } from '@orc/contracts'
+import { DEFAULT_MAX_ITERATIONS, Kernel, deriveSystemUrl, dropSystemDatabase, initializeProject, liveSupervisors, loadConfig, openStorage, resetSystemDatabase, subtreeTaskIds, type EventLog, type ProjectConfig, type Storage } from '@orc/kernel'
 import { seedRegistries } from './runtime'
 import { createMemory, openKnowledge, orphanedNotes } from '@orc/memory'
 import { openMemory } from './memory-open'
@@ -13,7 +13,7 @@ import path from 'node:path'
 // Surreal read model is down (the projector catches up on its own)
 const uiNote = (id: string, title: string, summary: string) => ({
   taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_written,
-  payload: { note: { id, title, kind: 'fact', summary }, author: { source: 'cli' as const } },
+  payload: { note: { id, title, kind: NOTE_KIND.fact, summary }, author: { source: 'cli' as const } },
 })
 const nameNote = (name: string) => uiNote(PROJECT_NAME_NOTE_ID, name, 'display name for the project chat')
 const dirNote = (dir: string) => uiNote(PROJECT_DIR_NOTE_ID, dir, 'working directory of the project')
@@ -59,6 +59,16 @@ export async function assertDrivable(kernel: Kernel, taskId: string): Promise<vo
     throw new Error(`task is '${task.status}' — approve a plan first (orc approve ${taskId})`)
 }
 
+// Same boundary rule for retry, and the same ONE-implementation reason: the CLI `retry` and this
+// actions layer (web + MCP doors) both refuse a non-blocked task BEFORE the ask is recorded — the
+// refusal port.retry makes, kept client-side so an ask nobody can serve never reaches the log.
+export async function assertRetryable(kernel: Kernel, taskId: string): Promise<void> {
+  const task = await kernel.getTask(taskId)
+  if (!task) throw new Error(`no task '${taskId}'`)
+  if (task.status !== TASK_STATUS.blocked)
+    throw new Error(`task is '${task.status}' — only a blocked task can be retried`)
+}
+
 // A provider's valid model ids: live-discovered UNION cost-table. The API list omits aliases
 // the provider still serves (claude-haiku-4-5 vs …-20251001), and the cost table is exactly
 // the set we can price. Sorted for stable append-on-change comparison.
@@ -88,8 +98,8 @@ export function buildModelDiscovery(config: ProjectConfig, log?: EventLog) {
       // append-on-change: the latest event per provider IS the catalog
       const last = new Map<string, string>()
       for (const e of await log.after(0, [EVENT_KIND.models_discovered])) {
-        const p = e.payload as { providerId?: string; models?: string[] }
-        if (p.providerId) last.set(p.providerId, JSON.stringify(p.models ?? []))
+        const p = ModelsDiscoveredPayload.safeParse(e.payload)
+        if (p.success) last.set(p.data.providerId, JSON.stringify(p.data.models))
       }
       for (const { pid, ids } of perProvider) {
         if (ids.length === 0 || JSON.stringify(ids) === last.get(pid)) continue
@@ -200,7 +210,7 @@ export function buildOrcActions(deps: {
       await assertKnownModel(input.grounded.modelRef)
       const cwd = assertRunnableCwd(input.grounded.cwd)
       const t = await kernel.createGroundedTask({
-        title: input.title, spec: input.spec ?? '',
+        title: input.title, spec: input.spec ?? '', parentId: input.parentId,
         modelRef: input.grounded.modelRef, analyzerRef: input.grounded.analyzerRef ?? 'agent-analyzer',
         modelCatalog: await listModelOptions?.().catch(() => []) ?? [],
         ...(plugin ? { maxIterations: plugin.config.maxIterations } : {}),
@@ -243,17 +253,37 @@ export function buildOrcActions(deps: {
       return { requested: true }
     },
 
-    async reply(taskId, text) {
-      // the answer only unblocks the step; a supervisor is what carries it into the parked
-      // workflow (its router reacts to feedback_provided) and keeps executing
-      await ensureRuntime()
-      const topic = await kernel.replyFeedback(taskId, text, deps.via)
-      return { answered: topic !== null }
+    async reply(taskId, text, projectId) {
+      // this door's own project: the answer only unblocks the step; a supervisor is what carries it
+      // into the parked workflow (its router reacts to feedback_provided) and keeps executing, so
+      // guaranteeing one is what makes the answer's promise true.
+      if (!projectId || projectId === plugin?.config.projectId) {
+        await ensureRuntime()
+        const topic = await kernel.replyFeedback(taskId, text, deps.via)
+        return { answered: topic !== null, supervised: true }
+      }
+      // A FOREIGN project — the graph UI's chat switcher can see one, and a question it displays has
+      // to be answerable. This is an append into that project's own log and nothing else: no runtime
+      // is spawned, because EXECUTION is what stays bound to the directory orc was started in
+      // (ensureRuntime's spawn, the DBOS port, the in-process zone write-fence), and answering is
+      // not execution. Whether anything is live over there is reported, never assumed: with no
+      // supervisor the row simply waits, exactly as `orc reply` from a fresh terminal always did.
+      if (!plugin) throw new Error('answering another project needs a project context')
+      // ponytail: one short-lived pool per answered question (the newProject/deleteProject shape) —
+      // a human-rate action, so it is not worth reaching into the graph server's cached per-project
+      // sessions for. Doing that would also make the read-side session store a writer, and would
+      // only serve the web door; this serves every door that holds a project context.
+      const storage = await openStorage(plugin.config.databaseUrl, { projectId })
+      try {
+        const topic = await new Kernel(storage.events).replyFeedback(taskId, text, deps.via)
+        return { answered: topic !== null, supervised: (await liveSupervisors(storage, new Date())).length > 0 }
+      } finally {
+        await storage.close()
+      }
     },
 
     async retry(taskId) {
-      const status = (await requireTask(taskId)).status
-      if (status !== TASK_STATUS.blocked) throw new Error(`task is '${status}' — only a blocked task can be retried`)
+      await assertRetryable(kernel, taskId)
       await ensureRuntime()
       await kernel.requestRun(taskId, { retry: true })
       return { requested: true }

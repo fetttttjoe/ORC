@@ -10,17 +10,6 @@ import { buildPlugins, buildRuntime } from './runtime'
 // read-only commands never pay the DBOS launch, and new port commands need no registration here.
 const runtime: { port: Awaited<ReturnType<typeof buildRuntime>> | null } = { port: null }
 
-function formatCliError(error: unknown): string {
-  if (error && typeof error === 'object' && 'issues' in error && Array.isArray(error.issues))
-    return error.issues.map(issue => {
-      if (!issue || typeof issue !== 'object') return String(issue)
-      const value = issue as { path?: unknown[]; message?: unknown }
-      const path = value.path?.map(String).join('.') || 'input'
-      return `${path}: ${String(value.message ?? 'invalid value')}`
-    }).join('\n')
-  return errorMessage(error)
-}
-
 function overrideExits(command: Command): void {
   command.exitOverride()
   for (const child of command.commands) overrideExits(child)
@@ -99,6 +88,9 @@ try {
 } catch (error) {
   if (isConnectionRefused(error))
     console.error(`Postgres is not reachable at ${loadConfig().databaseUrl} — start it with: docker compose up -d`)
-  else console.error(formatCliError(error))
+  // errorMessage prettifies a ZodError (path + message, never the raw issue-JSON dump) — the
+  // same rendering every tool-result boundary uses, so a validation failure reads identically
+  // here and in a transcript
+  else console.error(errorMessage(error))
 }
 process.exit(exitCode)

@@ -4,10 +4,12 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import type { Command } from 'commander'
 import { Surreal } from 'surrealdb'
-import { ApprovalPolicy, EVENT_KIND, MemoryAccessedPayload, RUN_OUTCOME, TASK_STATUS, claimId, isRecord, type ExecutionPort, type OperationSpec, type RunOutcome, type TaskStatus } from '@orc/contracts'
+import { ApprovalPolicy, EVENT_KIND, MemoryAccessedPayload, MemoryDeletedPayload, MemoryWrittenPayload, RUN_OUTCOME, TASK_STATUS, claimId, type ExecutionPort, type OperationSpec, type RunOutcome, type TaskStatus } from '@orc/contracts'
 import { loadConfig, projectDatabaseName, requireProject, type EventLog, type ProjectConfig } from '@orc/kernel'
 import { createTestDb, TEST_PROJECT_ID } from '@orc/kernel/test-helpers'
-import { buildProgram, openKernel, runInit, singleStepDraft, watchSubtree } from './main'
+import { singleStepDraft } from './actions'
+import { buildProgram, openKernel, runInit, watchSubtree } from './main'
+import { withMemory } from './memory-open'
 import { CommandFailure } from './exit'
 
 // exitOverride must reach NESTED subcommands too (e.g. `memory neighbors`): commander only
@@ -24,17 +26,11 @@ const overrideExits = (program: ReturnType<typeof buildProgram>): ReturnType<typ
 }
 import { buildPlugins } from './runtime'
 
-// memory_written / memory_deleted payloads read at the boundary (cli has no zod — narrow
-// with isRecord instead of casting a lie about the payload shape).
-const notePayloadId = (payload: unknown): string => {
-  if (!isRecord(payload) || !isRecord(payload.note) || typeof payload.note.id !== 'string')
-    throw new Error('event payload has no note.id')
-  return payload.note.id
-}
-const deletedAuthorTaskId = (payload: unknown): string | undefined => {
-  if (!isRecord(payload) || !isRecord(payload.author)) throw new Error('event payload has no author')
-  return typeof payload.author.taskId === 'string' ? payload.author.taskId : undefined
-}
+// memory_written / memory_deleted payloads parsed through their owning schemas at the read
+// boundary, the same way main.ts's claims fold reads them.
+const notePayloadId = (payload: unknown): string => MemoryWrittenPayload.parse(payload).note.id
+const deletedAuthorTaskId = (payload: unknown): string | null | undefined =>
+  MemoryDeletedPayload.parse(payload).author.taskId
 
 const dbs: Array<{ drop: () => Promise<void> }> = []
 const surrealConfigs: ProjectConfig[] = []
@@ -257,6 +253,10 @@ describe('orc CLI', () => {
     await expect(parse('plan', 'missing', '--version', 'nope')).rejects.toThrow(/integer/)
     await expect(parse('approve', 'missing', '--version', '1.5')).rejects.toThrow(/integer/)
     await expect(parse('replay', 'missing', '--at', '1e2')).rejects.toThrow(/integer/)
+    // graph --port used a bare parseInt, so '--port 0' bound port 0 and '--port nope' fed NaN to
+    // the server; both must die at parse time like every other numeric option in this file
+    await expect(parse('graph', '--port', '0')).rejects.toThrow(/positive integer/)
+    await expect(parse('graph', '--port', 'nope')).rejects.toThrow(/integer/)
   })
 
   it('tasks makes an empty project explicit', async () => {
@@ -927,6 +927,33 @@ describe('orc CLI', () => {
     // real Surreal db and ~20 CLI invocations, and bun's 5s default puts it one contended
     // SurrealDB away from a timeout that reads as an assertion failure
   }, 60_000)
+
+  // Every one-shot memory command routes through withMemory, so this finally IS the guarantee
+  // that a body that throws (a Surreal query mid-flight, a missing note, a failed distill) does
+  // not leak the connection for the life of the process — seven commands used to close only
+  // after a successful body.
+  it('withMemory closes the Surreal connection even when the body throws', async () => {
+    const db = await createTestDb()
+    dbs.push(db)
+    const dir = mkdtempSync(path.join(tmpdir(), 'orc-memory-withmem-'))
+    const projectDbName = `t_${Math.random().toString(36).slice(2, 10)}`
+    // keyword-only, same reason as the claims tests: nothing here needs an embedder
+    const config = requireProject({ ...loadConfig(dir), projectDbName, projectId: TEST_PROJECT_ID, projectName: 'test', memoryEmbedModel: '' })
+    surrealConfigs.push(config)
+    const { log } = await openKernel(db.url, { projectId: TEST_PROJECT_ID })
+    cleanup.push(() => log.close())
+
+    let leaked: Parameters<Parameters<typeof withMemory>[1]>[0] | undefined
+    await expect(withMemory({ log, config }, async memory => {
+      leaked = memory
+      await memory.store.list() // the connection works while the body runs
+      throw new Error('body boom')
+    })).rejects.toThrow('body boom')
+    // close ran: the same read now fails because the connection is gone. Without the finally,
+    // this list() succeeds — the leaked handle stays live, which is exactly the defect.
+    expect(leaked).toBeDefined()
+    await expect(leaked!.store.list()).rejects.toThrow()
+  }, 15_000)
 
   it('memory claims drains before it reads, and --history recovers a retired claim', async () => {
     const db = await createTestDb()

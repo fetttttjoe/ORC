@@ -1,10 +1,11 @@
 import path from 'node:path'
 import { afterAll, afterEach, describe, expect, it, mock, spyOn } from 'bun:test'
-import type { Analyzer, ExecutionPort, OperationSpec, RunHandle, RunOutcome, TaskStatus } from '@orc/contracts'
+import { EVENT_KIND, TASK_STATUS, type Analyzer, type ExecutionPort, type OperationSpec, type RunHandle, type RunOutcome, type TaskStatus } from '@orc/contracts'
 import { stepFixture } from '@orc/contracts/fixtures'
 import { openStorage, type EventLog } from '@orc/kernel'
 import { createTestDb, TEST_PROJECT_ID } from '@orc/kernel/test-helpers'
-import { buildProgram, openKernel, singleStepDraft } from './main'
+import { singleStepDraft } from './actions'
+import { buildProgram, openKernel } from './main'
 
 const dbs: Array<{ drop: () => Promise<void> }> = []
 afterAll(async () => { for (const d of dbs) await d.drop() })
@@ -45,7 +46,7 @@ async function approvedTask(run: (...a: string[]) => Promise<unknown>, lines: st
 // The supervisor's half of a run, faked: no test here holds a real runtime, so the statuses a run
 // would stamp are appended straight onto the log.
 const stamp = (log: EventLog, taskId: string, from: TaskStatus, to: TaskStatus) =>
-  log.append({ taskId, stepId: null, runToken: null, kind: 'task_status_changed', payload: { taskId, from, to } })
+  log.append({ taskId, stepId: null, runToken: null, kind: EVENT_KIND.task_status_changed, payload: { taskId, from, to } })
 
 const until = async (ready: () => boolean) => { for (let i = 0; i < 300 && !ready(); i++) await Bun.sleep(20) }
 const watching = (lines: string[]) => until(() => lines.some(l => l.includes('run requested for')))
@@ -53,8 +54,8 @@ const watching = (lines: string[]) => until(() => lines.some(l => l.includes('ru
 // Watch a task through to `to`, driving it the way a supervisor would once the ask is recorded.
 const drive = async (log: EventLog, lines: string[], id: string, to: TaskStatus) => {
   await watching(lines)
-  await stamp(log, id, 'approved', 'running')
-  await stamp(log, id, 'running', to)
+  await stamp(log, id, TASK_STATUS.approved, TASK_STATUS.running)
+  await stamp(log, id, TASK_STATUS.running, to)
 }
 
 describe('exec commands', () => {
@@ -63,10 +64,10 @@ describe('exec commands', () => {
     const id = await approvedTask(run, lines)
     lines.length = 0
     const watched = run('run', id)
-    await drive(log, lines, id, 'done')
+    await drive(log, lines, id, TASK_STATUS.done)
     await watched
     expect(calls).toEqual([]) // the supervisor starts runs; this command only asked for one
-    expect((await kernel.eventsFor(id)).some(e => e.kind === 'run_requested')).toBe(true)
+    expect((await kernel.eventsFor(id)).some(e => e.kind === EVENT_KIND.run_requested)).toBe(true)
     expect(lines.join('\n')).toContain('run finished: done')
   }, 15_000)
 
@@ -92,9 +93,9 @@ describe('exec commands', () => {
     const id = await approvedTask(run, lines)
     lines.length = 0
     const watched = run('run', id, '--cwd', '/tmp/shared-ws')
-    await drive(log, lines, id, 'done')
+    await drive(log, lines, id, TASK_STATUS.done)
     await watched
-    const requested = (await kernel.eventsFor(id)).find(e => e.kind === 'run_requested')
+    const requested = (await kernel.eventsFor(id)).find(e => e.kind === EVENT_KIND.run_requested)
     expect(requested?.payload).toEqual({ taskId: id, cwd: '/tmp/shared-ws', retry: false })
   }, 15_000)
 
@@ -116,14 +117,14 @@ describe('exec commands', () => {
     try {
       const watched = run('run', id)
       await watching(lines)
-      await stamp(rawLog, id, 'approved', 'running')
+      await stamp(rawLog, id, TASK_STATUS.approved, TASK_STATUS.running)
       await rawLog.append({
-        taskId: id, stepId: 's1', runToken: 'r1', kind: 'step_failed',
+        taskId: id, stepId: 's1', runToken: 'r1', kind: EVENT_KIND.step_failed,
         payload: { stepId: 's1', runToken: 'r1', class: 'agent_error', message: 'blocked: boom' },
       })
-      await stamp(rawLog, id, 'running', 'done') // draining is under test, not exit semantics
+      await stamp(rawLog, id, TASK_STATUS.running, TASK_STATUS.done) // draining is under test, not exit semantics
       await watched
-      expect(lines.join('\n')).toContain('step_failed')
+      expect(lines.join('\n')).toContain(EVENT_KIND.step_failed)
     } finally {
       await rawLog.close()
     }
@@ -145,7 +146,7 @@ describe('exec commands', () => {
     const run = async (...args: string[]) => buildProgram(kernel, async () => port).parseAsync(args, { from: 'user' })
     const id = await approvedTask(run, lines)
     await log.append({
-      taskId: id, stepId: 's1', runToken: 'r1', kind: 'feedback_requested',
+      taskId: id, stepId: 's1', runToken: 'r1', kind: EVENT_KIND.feedback_requested,
       payload: { question: 'May I analyze the codebase?', topic: `${id}:s1:1` },
     })
     lines.length = 0
@@ -172,9 +173,9 @@ describe('exec commands', () => {
     spyOn(console, 'log').mockImplementation((...a: unknown[]) => { lines.push(a.join(' ')) })
     const run = async (...args: string[]) => buildProgram(kernel, async () => port).parseAsync(args, { from: 'user' })
     const id = await approvedTask(run, lines)
-    await stamp(log, id, 'approved', 'running') // the run this question is parked inside
+    await stamp(log, id, TASK_STATUS.approved, TASK_STATUS.running) // the run this question is parked inside
     await log.append({
-      taskId: id, stepId: 's1', runToken: 'r1', kind: 'feedback_requested',
+      taskId: id, stepId: 's1', runToken: 'r1', kind: EVENT_KIND.feedback_requested,
       payload: { question: 'proceed?', topic: `${id}:s1:1` },
     })
     calls.length = 0
@@ -182,7 +183,7 @@ describe('exec commands', () => {
 
     const watched = run('reply', id, 'yes')
     await until(() => lines.some(l => l.includes('answered feedback')))
-    await stamp(log, id, 'running', 'done')
+    await stamp(log, id, TASK_STATUS.running, TASK_STATUS.done)
     await watched
     expect(calls).toEqual([]) // the supervisor carries the answer in; this command never drives
     expect(lines.join('\n')).toContain('run finished: done')
@@ -222,11 +223,11 @@ describe('exec commands', () => {
 
     let settled = false
     const watched = run('run', parent).then(() => { settled = true })
-    await drive(log, lines, parent, 'done')
+    await drive(log, lines, parent, TASK_STATUS.done)
     await Bun.sleep(300)
     expect(settled).toBe(false) // the parent's own steps are done; the tree is not
 
-    await stamp(log, child, 'approved', 'done')
+    await stamp(log, child, TASK_STATUS.approved, TASK_STATUS.done)
     await watched
     expect(calls).toEqual([])
     expect(lines.join('\n')).toContain('run finished: done')
@@ -235,15 +236,15 @@ describe('exec commands', () => {
   it('retry records a retry ask; cancel stamps the subtree, both without a port', async () => {
     const { run, lines, calls, log, kernel } = await makeCli('done')
     const id = await approvedTask(run, lines)
-    await stamp(log, id, 'approved', 'blocked') // only a blocked task can be retried
+    await stamp(log, id, TASK_STATUS.approved, TASK_STATUS.blocked) // only a blocked task can be retried
     lines.length = 0
 
     const watched = run('retry', id)
     await watching(lines)
-    await stamp(log, id, 'blocked', 'running')
-    await stamp(log, id, 'running', 'done')
+    await stamp(log, id, TASK_STATUS.blocked, TASK_STATUS.running)
+    await stamp(log, id, TASK_STATUS.running, TASK_STATUS.done)
     await watched
-    const requested = (await kernel.eventsFor(id)).find(e => e.kind === 'run_requested')
+    const requested = (await kernel.eventsFor(id)).find(e => e.kind === EVENT_KIND.run_requested)
     expect(requested?.payload).toEqual({ taskId: id, cwd: null, retry: true })
 
     await run('cancel', id)
@@ -254,7 +255,7 @@ describe('exec commands', () => {
     const { run, lines, kernel } = await makeCli('done')
     const id = await approvedTask(run, lines)
     await expect(run('retry', id)).rejects.toThrow(/only a blocked task can be retried/)
-    expect((await kernel.eventsFor(id)).some(e => e.kind === 'run_requested')).toBe(false)
+    expect((await kernel.eventsFor(id)).some(e => e.kind === EVENT_KIND.run_requested)).toBe(false)
   })
 
   it('new --strategy grounded-plan bootstraps via createGroundedTask and auto-starts the run', async () => {
@@ -273,8 +274,8 @@ describe('exec commands', () => {
     const bootstrapping = run('new', 'grounded task', '--spec', 'analyze the repo and split the work', '--strategy', 'grounded-plan', '--model', 'anthropic/claude-sonnet-5')
     await watching(lines)
     const taskId = lines[0]!
-    await stamp(log, taskId, 'approved', 'running')
-    await stamp(log, taskId, 'running', 'done')
+    await stamp(log, taskId, TASK_STATUS.approved, TASK_STATUS.running)
+    await stamp(log, taskId, TASK_STATUS.running, TASK_STATUS.done)
     await bootstrapping
 
     const plan = await kernel.getPlan(taskId)
@@ -282,7 +283,7 @@ describe('exec commands', () => {
     expect(plan?.steps.map(s => s.id)).toEqual(['analyze', 'plan'])
     expect((await kernel.getTask(taskId))?.spec).toBe('analyze the repo and split the work')
     // auto-started (D9): the ask is recorded, and a supervisor — not this command — serves it
-    expect((await kernel.eventsFor(taskId)).some(e => e.kind === 'run_requested')).toBe(true)
+    expect((await kernel.eventsFor(taskId)).some(e => e.kind === EVENT_KIND.run_requested)).toBe(true)
     expect(calls).toEqual([])
     expect(lines.join('\n')).toContain('run finished: done')
     await log.close()
@@ -319,7 +320,7 @@ describe('exec commands', () => {
     await storage.operations.completeOperation(opContext, modelSpec, 1, { text: 'hi' })
     await storage.operations.beginOperation(opContext, toolSpec) // stays started — visible pending work
     await log.append({
-      taskId: id, stepId: 's1', runToken: opContext.runToken, kind: 'artifact_produced',
+      taskId: id, stepId: 's1', runToken: opContext.runToken, kind: EVENT_KIND.artifact_produced,
       payload: { path: 'report.md', sha256: 'a'.repeat(64), size: 5 },
     })
 

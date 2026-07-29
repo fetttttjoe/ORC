@@ -22,3 +22,19 @@ export function buildEmbeddingProvider(
 // command and the runtime share, so semantic retrieval is on everywhere or nowhere by one setting.
 export const openMemory = (opts: { log: EventLog; config: ProjectConfig }) =>
   createMemory({ log: opts.log, config: opts.config, embedder: buildEmbeddingProvider(opts.config) })
+
+// The ONE open → work → close bracket every one-shot memory command runs through. The close is
+// deliberately in a finally: seven commands (add, rm, sweep, ls, search, cat, rebuild) used to
+// close only after a successful body, so any throw mid-body leaked the Surreal connection for
+// the life of the process.
+export async function withMemory<T>(
+  opts: { log: EventLog; config: ProjectConfig },
+  body: (memory: Awaited<ReturnType<typeof openMemory>>) => Promise<T>,
+): Promise<T> {
+  const memory = await openMemory(opts)
+  try {
+    return await body(memory)
+  } finally {
+    await memory.close()
+  }
+}

@@ -11,7 +11,15 @@
   "memoryConsolidateModel": "anthropic/claude-haiku-4-5",
   "execAllowlist": [
     "bun test",
-    "bun run typecheck"
+    "bun run typecheck",
+    "git status",
+    "git diff",
+    "git log",
+    "git show",
+    "git grep",
+    "git ls-files",
+    "git rev-parse",
+    "grep"
   ],
   "mcpServers": {
     "web": {
@@ -25,5 +33,6 @@
     }
   },
   "memoryEmbedModel": "ollama/mxbai-embed-large",
-  "maxIterations": 60
+  "maxIterations": 60,
+  "autoCommit": true
 }

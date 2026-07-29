@@ -48,7 +48,10 @@ describe('orc bin bootstrap', () => {
 
     const result = await runBin(cwd, ['new', ''], env)
     expect(result.exitCode).toBe(1)
-    expect(result.stderr).toContain('task.title: Too small')
+    // the shared errorMessage/prettifyError rendering: the message and the offending path,
+    // never ZodError's raw issue-JSON dump (which starts with '[')
+    expect(result.stderr).toContain('Too small')
+    expect(result.stderr).toContain('at task.title')
     expect(result.stderr.trimStart().startsWith('[')).toBe(false)
   }, 30_000)
 

@@ -1,15 +1,15 @@
-import { errorMessage, HOOK_NAME, type AgentExecutor, type Analyzer, type ModelProvider } from '@orc/contracts'
+import { errorMessage, HOOK_NAME, type AgentExecutor, type Analyzer, type MemoryAuthor, type ModelProvider } from '@orc/contracts'
 import { apiLoopExecutor } from '@orc/executor-api-loop'
 import { createAnthropicProvider } from '@orc/provider-anthropic'
 import { createOpenAIProvider } from '@orc/provider-openai'
 import { createOllamaProvider } from '@orc/provider-ollama'
 import { agentAnalyzer } from '@orc/analyzer-agent'
 import { createMcpHub, type McpHub } from '@orc/mcp-client'
-import { createMemory, createMemoryLifecycle, unavailableStepMemory, memoryRoleFor, type BindStep, type MemoryLifecycle } from '@orc/memory'
+import { createMemory, createMemoryLifecycle, createGroundingSource, unavailableStepMemory, memoryRoleFor, type BindStep, type MemoryLifecycle } from '@orc/memory'
 import { openMemory } from './memory-open'
 import { buildDistiller } from './consolidation-distiller'
 import { createVaultProjector } from '@orc/vault-projector'
-import { createDbosPort, createPluginHost, dbosSend, execTool, finalizePlanTool, isMcpTrusted, loadConfig, loadTrust, openStorage, readAnnotationsTool, reportCoverageTool, requireProject, splitTool, Kernel, type DbosPort, type PluginHost, type ProjectConfig, type Storage } from '@orc/kernel'
+import { commitTool, createDbosPort, createPluginHost, dbosSend, execTool, finalizePlanTool, isMcpTrusted, loadConfig, loadTrust, openStorage, readAnnotationsTool, reportCoverageTool, requireProject, scopedChangesTool, splitTool, Kernel, type DbosPort, type PluginHost, type ProjectConfig, type Storage } from '@orc/kernel'
 
 export function seedRegistries(config = loadConfig()) {
   const providers = new Map<string, ModelProvider<unknown>>([
@@ -54,6 +54,12 @@ export async function buildRuntime(
   let memory: Awaited<ReturnType<typeof createMemory>> | null = null
   let lifecycle: MemoryLifecycle | null = null
   let bindStep: BindStep
+  // Read-only probe behind the grounded analyze step's freshness short-circuit (kernel
+  // strategies/grounding-freshness.ts). Built only on the memory-healthy path, from the same
+  // store + config.dir already in hand here — a runtime with no memory has no grounding notes
+  // to reuse, so it stays undefined and the port's branch (guarded on its presence) never fires:
+  // exactly today's behavior.
+  let groundingSource: ReturnType<typeof createGroundingSource> | undefined
   try {
     memory = await openMemory({ log, config })
     await memory.projector.start()
@@ -66,6 +72,7 @@ export async function buildRuntime(
     lifecycle = createMemoryLifecycle({ log, store: memory.store, distill: buildDistiller(host.providers, config.memoryConsolidateModel), catchUp: () => memoryProjector.catchUp() })
     await lifecycle.start()
     bindStep = memory.bindStep
+    groundingSource = createGroundingSource({ store: memory.store, dir: config.dir })
   } catch (err) {
     const reason = errorMessage(err)
     console.warn(`memory unavailable; continuing in degraded mode: ${reason}`)
@@ -75,15 +82,17 @@ export async function buildRuntime(
   const port = await createDbosPort({
     storage, config, executorId: shared?.executorId,
     providers: host.providers, executors: host.executors,
-    skills: host.skills, tools: hub,
+    skills: host.skills, tools: hub, groundingSource,
     stepTools: p => {
+      const author: MemoryAuthor = { source: 'agent', taskId: p.taskId, stepId: p.stepId, runToken: p.runToken, executor: p.executor, model: p.model, role: p.role }
       // step role keys the memory role (Task 7): scout/auditor narrow or widen the tool surface
       // + epistemic posture; every other role (e.g. plain worker steps) gets today's verify role.
       const bound = bindStep({
-        author: { source: 'agent', taskId: p.taskId, stepId: p.stepId, runToken: p.runToken, executor: p.executor, model: p.model, role: p.role },
+        author,
         step: p.step, taskId: p.taskId, ancestorTaskIds: p.ancestorTaskIds,
         role: memoryRoleFor(p.role), ambientCapture: config.ambientCapture,
       })
+      const memoryStore = memory?.store
       return { memory: bound.memory, tools: [
       ...bound.tools,
       // registration-gated inside the factory (like report_coverage): a scout orients, the plan
@@ -96,13 +105,28 @@ export async function buildRuntime(
       // scout analyze step — a tool that can only ever error must not be visible (scenario-2's
       // verify auditor burned one iteration per attempt calling it).
       ...reportCoverageTool({ kernel, p }),
+      // scoped_changes answers "which paths did MY task's steps change?" off the log, so the verify
+      // auditor stops reading sibling tasks' completed work out of the SHARED worktree as its own.
+      // Registration-gated inside the factory to the auditor VERIFY step (role alone would also hand
+      // it to the grounded `plan` step, which shares that role). Read-only, and a FLOOR — never a
+      // substitute for the test/typecheck gate, never a reason to dismiss an in-scope defect.
+      ...scopedChangesTool({ kernel, p }),
+      // The commit step's tool pair (autoCommit pipeline): preview the task's floor diff, commit,
+      // restamp its notes at the new HEAD. Registration is gated TWICE — on config.autoCommit here
+      // (the operator's runtime switch, so a stale frozen plan cannot commit after the flag is
+      // turned off) and on the kernel-set committer step inside the factory. The restamp write is
+      // the store's ordinary re-write (stamps HEAD per write); with memory degraded the tool still
+      // commits and says the restamp was skipped.
+      ...(config.autoCommit ? commitTool({ kernel, dir: config.dir, p,
+        ...(memoryStore ? { restamp: async (note: { id: string; scope: string }, idempotencyKey: string) => { await memoryStore.write({ id: note.id, scope: note.scope }, author, { idempotencyKey }) } } : {}),
+      }) : []),
       // exec runs operator-allowlisted commands (execAllowlist in .orc/config.json) in the step
       // workspace — the acceptance-gate tool. Empty allowlist = not offered.
       ...execTool({ workspaceDir: p.workspaceDir, allowlist: config.execAllowlist }),
       // finalize_plan reconstructs the plan-note graph from the log (kernel.listPlanNotes), not the
       // memory store — but it's still only offered when memory is healthy: with the memory tools
       // degraded the agent can't author a plan-note graph, so a grounded plan is pointless anyway.
-      ...(memory ? [finalizePlanTool({ kernel, config: { maxDepth: config.maxDepth }, p })] : []),
+      ...(memory ? [finalizePlanTool({ kernel, config: { maxDepth: config.maxDepth, autoCommit: config.autoCommit }, p })] : []),
       ] }
     },
   })

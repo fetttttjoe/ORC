@@ -12,10 +12,11 @@
 //      stderr — so when a mutation lazily boots DBOS, winston (which writes to
 //      process.stdout directly, past console) cannot corrupt the protocol channel.
 import { Writable } from 'node:stream'
+import { z } from 'zod'
 import { Server } from '@modelcontextprotocol/sdk/server/index.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js'
-import { errorMessage, type ResolvedTool } from '@orc/contracts'
+import { errorMessage, toolError, type ResolvedTool } from '@orc/contracts'
 import type { EventLog, ProjectConfig } from '@orc/kernel'
 import { MEMORY_READ_TOOLS, MEMORY_ROLE, createMemory, memoryTools as buildMemoryTools, unavailableMemoryTools } from '@orc/memory'
 import { openMemory } from './memory-open'
@@ -27,6 +28,11 @@ export type Autonomy = 'gated' | 'full'
 // there fails its own tests, and this import follows automatically); write stays with the
 // agents that run inside plans
 const READ_MEMORY = new Set<string>(MEMORY_READ_TOOLS)
+
+// The zod twin of the advertised JSON inputSchema below. The input crosses a trust boundary —
+// any MCP client can send any shape — and a typecast here once let a non-string taskId ride
+// straight into actions.approve; the advertised schema is documentation, never enforcement.
+const ApproveInput = z.object({ taskId: z.string().min(1), version: z.number().int().min(1).optional() })
 
 // The ONE approve tool for door #2 — exported for tests. Under `gated` it refuses with the
 // path forward; under `full` it approves with source attribution. It exists as a separate
@@ -47,12 +53,12 @@ export function mcpApproveTool(actions: OrcActions, autonomy: Autonomy): Resolve
           output: { error: 'human gate: this server runs --autonomy gated — approval happens in the orc UI or `orc approve <taskId>`. Relaunch with `orc mcp serve --autonomy full` for headless approval.' },
           isError: true,
         }
-      const { taskId, version } = (input ?? {}) as { taskId?: string; version?: number }
-      if (!taskId) return { output: { error: 'taskId is required' }, isError: true }
+      const parsed = ApproveInput.safeParse(input ?? {})
+      if (!parsed.success) return toolError(parsed.error)
       try {
-        return { output: await actions.approve(taskId, version, 'mcp'), isError: false }
+        return { output: await actions.approve(parsed.data.taskId, parsed.data.version, 'mcp'), isError: false }
       } catch (err) {
-        return { output: { error: errorMessage(err) }, isError: true }
+        return toolError(err)
       }
     },
   }

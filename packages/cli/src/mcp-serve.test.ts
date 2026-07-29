@@ -17,7 +17,8 @@ afterAll(async () => { for (const d of dbs) await d.drop() })
 
 const frame = (o: unknown): string => JSON.stringify(o) + '\n'
 
-// --- JSON-RPC / MCP wire shapes this read-slice pins (cli has no zod; narrow with isRecord) ---
+// --- JSON-RPC / MCP wire shapes read off a spawned subprocess's stdout: hand-narrowed with
+// isRecord ON PURPOSE, so the pinned shape stays this test's own and cannot drift with a schema ---
 interface RpcFrame { jsonrpc?: string; id?: number; result?: unknown }
 const asRpcFrame = (line: string): RpcFrame => {
   const v: unknown = JSON.parse(line)
@@ -174,5 +175,20 @@ describe('orc mcp serve (stdio, read slice)', () => {
     const full = await mcpApproveTool(actions, 'full').execute({ taskId: 't1', version: 2 }, undefined)
     expect(full.isError).toBe(false)
     expect(calls).toEqual([['t1', 2, 'mcp']])
+  })
+
+  // The input crosses a trust boundary: an external MCP client can send ANY shape, and the
+  // advertised JSON inputSchema is documentation, not enforcement. A typecast here once let a
+  // non-string taskId ride straight into actions.approve.
+  it('mcpApproveTool: malformed client input is a clean error, never a call into actions', async () => {
+    const calls: unknown[] = []
+    const actions = actionsStub({ approve: async (id, v, by) => { calls.push([id, v, by]); return { version: v ?? 1 } } })
+    const tool = mcpApproveTool(actions, 'full')
+    for (const bad of [undefined, {}, { taskId: 42 }, { taskId: '' }, { taskId: 't1', version: 0 }, { taskId: 't1', version: 1.5 }, { taskId: 't1', version: 'two' }]) {
+      const r = await tool.execute(bad, undefined)
+      expect(r.isError).toBe(true)
+      expect(isRecord(r.output) && typeof r.output.error === 'string').toBe(true)
+    }
+    expect(calls).toHaveLength(0)
   })
 })
