@@ -28,9 +28,13 @@ const written = (seq: number, n: object): EventRecord =>
 const drops: (() => Promise<void>)[] = []
 afterAll(async () => { await Promise.all(drops.map(d => d())) }, 30_000)
 
+// close is registered beside the drop, not awaited at the end of each test: a bare trailing
+// `await m.close()` is skipped the moment an expect throws, leaking the websocket past the file
 const open = async () => {
   const t = await createTestSurreal(); drops.push(t.drop)
-  return SurrealMemory.open(t, fakeEmbedder)
+  const m = await SurrealMemory.open(t, fakeEmbedder)
+  drops.push(() => m.close())
+  return m
 }
 
 describe('SurrealMemory topic projection', () => {
@@ -46,7 +50,6 @@ describe('SurrealMemory topic projection', () => {
     // the label is the DERIVED one (cluster.ts topicLabel), which for a claim shorter than the cap
     // is the claim itself — the medoid is one of the two grouped statements
     expect(big?.label).toMatch(/alpha holds|zeta holds/)
-    await m.close()
   })
 
   // The case the two-word fixtures above cannot reach: a medoid longer than the label cap. The
@@ -63,7 +66,6 @@ describe('SurrealMemory topic projection', () => {
     expect((topic?.label ?? '').length).toBeLessThanOrEqual(MEMORY_LIMITS.topicLabelChars)
     // detail is not lost, it moved: one call reaches the whole sentence verbatim
     expect((await m.topicClaims(topic?.topicKey ?? '')).map(c => c.text)).toEqual([long])
-    await m.close()
   })
 
   // Deleting a project used to CLEAR its knowledge database, which empties the rows and leaves the
@@ -75,6 +77,7 @@ describe('SurrealMemory topic projection', () => {
   it('drop() removes the database itself, not just its rows', async () => {
     const t = await createTestSurreal(); drops.push(t.drop)
     const m = await SurrealMemory.open(t, fakeEmbedder)
+    drops.push(() => m.close())
     await m.applyEvent(written(1, note({ id: 'n1', claims: [claim('alpha holds')] })))
     await m.refreshTopics(0.75)
     expect(await m.topics()).toHaveLength(1)
@@ -94,7 +97,6 @@ describe('SurrealMemory topic projection', () => {
 
     expect(await listDatabases()).toContain(t.db)
     await m.drop()
-    await m.close()
     expect(await listDatabases()).not.toContain(t.db)
   })
 
@@ -105,7 +107,6 @@ describe('SurrealMemory topic projection', () => {
     const first = await m.topics()
     await m.refreshTopics(0.75)
     expect(await m.topics()).toEqual(first)
-    await m.close()
   })
 
   it('drops a topic whose claims were retired', async () => {
@@ -116,7 +117,6 @@ describe('SurrealMemory topic projection', () => {
     await m.applyEvent(written(2, note({ id: 'n1', claims: [] })))
     await m.refreshTopics(0.75)
     expect(await m.topics()).toEqual([])
-    await m.close()
   })
 
   it('clusters the project scope only — a plan-scope claim is not grouped', async () => {
@@ -124,7 +124,6 @@ describe('SurrealMemory topic projection', () => {
     await m.applyEvent(written(1, note({ id: 'p', scope: 'plan-t1', claims: [claim('alpha holds')] })))
     await m.refreshTopics(0.75)
     expect(await m.topics()).toEqual([])
-    await m.close()
   })
 
   it('returns a topic’s claims, and nothing for a key from an older partition', async () => {
@@ -134,7 +133,6 @@ describe('SurrealMemory topic projection', () => {
     const key = (await m.topics())[0]?.topicKey ?? ''
     expect((await m.topicClaims(key)).map(c => c.text).sort()).toEqual(['alpha holds', 'zeta holds'])
     expect(await m.topicClaims('deadbeef0000')).toEqual([])
-    await m.close()
   })
 
   // A claim ROW is keyed (scope, noteId, claimId), so one statement asserted on two notes is two
@@ -152,7 +150,6 @@ describe('SurrealMemory topic projection', () => {
     expect(claims).toHaveLength(1)
     // the earliest sighting of the STATEMENT, not whichever row the select happened to return first
     expect(claims[0]?.validFrom).toBe('2026-07-26T01:00:00Z')
-    await m.close()
   })
 
   // `embedding: map.get(id)` named the key unconditionally, and surqlize emits an assignment for
@@ -166,6 +163,7 @@ describe('SurrealMemory topic projection', () => {
       embed: async texts => { if (!up) throw new Error('embedder down (simulated)'); return texts.map(vec) },
     }
     const m = await SurrealMemory.open(t, flaky)
+    drops.push(() => m.close())
     await m.applyEvent(written(1, note({ id: 'n1', claims: [claim('alpha holds'), claim('beta holds')] })))
     await m.refreshTopics(0.75)
     expect(await m.topics()).toHaveLength(2)
@@ -176,7 +174,6 @@ describe('SurrealMemory topic projection', () => {
     // the two already-embedded claims keep their vectors and their topics; only the NEW claim is
     // left unembedded, so it is keyword-only until the next write or a rebuild with the embedder up
     expect(await m.topics()).toHaveLength(2)
-    await m.close()
   })
 
   // A topic is a retrieval surface, so the same exclusion search() and the claim arm apply holds
@@ -190,16 +187,15 @@ describe('SurrealMemory topic projection', () => {
     await m.refreshTopics(0.75)
     const claims = await m.topicClaims((await m.topics())[0]?.topicKey ?? '')
     expect(claims.map(c => c.text)).toEqual(['beta holds'])
-    await m.close()
   })
 
   it('with no embedder there are no vectors, so no topics — claims stay findable', async () => {
     const t = await createTestSurreal(); drops.push(t.drop)
     const m = await SurrealMemory.open(t) // no embedder
+    drops.push(() => m.close())
     await m.applyEvent(written(1, note({ id: 'n1', claims: [claim('alpha holds')] })))
     await m.refreshTopics(0.75)
     expect(await m.topics()).toEqual([])
     expect(await m.searchClaims('alpha')).toHaveLength(1)
-    await m.close()
   })
 })

@@ -40,9 +40,9 @@ for (const id of ids) {
   cacheTok += u.cacheReadTokens ?? 0; cost += u.costUSD ?? 0
   console.log(`task ${id.slice(0, 40)}…  in=${fmt(u.inputTokens)} out=${fmt(u.outputTokens)} cacheRead=${fmt(u.cacheReadTokens ?? 0)} $${(u.costUSD ?? 0).toFixed(4)}`)
   for (const [key, su] of state.stepUsage) {
-    const [tid, sid] = key.split('\u0000')
+    const [tid, sid = '?'] = key.split('\u0000')
     if (tid !== id) continue
-    console.log(`  step ${sid!.padEnd(22)} in=${fmt(su.inputTokens)} out=${fmt(su.outputTokens)} cacheRead=${fmt(su.cacheReadTokens ?? 0)} $${(su.costUSD ?? 0).toFixed(4)}`)
+    console.log(`  step ${sid.padEnd(22)} in=${fmt(su.inputTokens)} out=${fmt(su.outputTokens)} cacheRead=${fmt(su.cacheReadTokens ?? 0)} $${(su.costUSD ?? 0).toFixed(4)}`)
   }
 }
 const mins = firstTs && lastTs ? (new Date(lastTs).getTime() - new Date(firstTs).getTime()) / 60_000 : 0

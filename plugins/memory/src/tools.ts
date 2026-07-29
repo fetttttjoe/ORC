@@ -1,7 +1,8 @@
 import { z } from 'zod'
-import { AccessVia, CLAIM_ID_RE, ClaimWrite, isRecord, EDGE_DIRECTIONS, errorMessage, linkLookupScopes, MemoryScope, MEMORY_ACCESS, MEMORY_LIMITS, MEMORY_SOURCE_LIMITS, MEMORY_TOOL_NAME, MemorySearchResult, MemoryWriteResult, NOTE_KINDS, LINK_KIND, LINK_KINDS, RETENTION_CLASSES, SEARCH_MODES, SearchMode, LinkKind, MemoryNoteDraftInput, NOTE_TIER, NOTE_TIERS, slugId, type ClaimHit, type MemoryAuthor, type MemoryNote, type MemoryStore, type ResolvedTool } from '@orc/contracts'
-import { applyBudget, approxTokens, fitMemoryNoteToBudget } from './budget'
+import { AccessVia, CLAIM_ID_RE, ClaimWrite, isRecord, EDGE_DIRECTIONS, linkLookupScopes, MASTERPLAN_NOTE_ID, MemoryScope, MEMORY_ACCESS, MEMORY_LIMITS, MEMORY_SOURCE_LIMITS, MEMORY_TOOL_NAME, MemorySearchResult, MemoryWriteResult, NOTE_KINDS, LINK_KIND, LINK_KINDS, RETENTION_CLASSES, SEARCH_MODES, SearchMode, siblingOrderingMisuse, LinkKind, MemoryNoteDraftInput, NOTE_TIER, NOTE_TIERS, slugId, toolError, type MemoryAuthor, type MemoryNote, type MemoryStore, type ResolvedTool } from '@orc/contracts'
+import { applyBudget, fitMemoryNoteToBudget } from './budget'
 import { noteHasDrifted, type ChangedSince } from './drift'
+import { NEAR_SUBJECT, trigramDice } from './title-similarity'
 
 // Advisory note lint, echoed back in the memory_write result so the writing agent can improve
 // the note in its next iteration — warnings, never rejections: a blocked write mid-run burns
@@ -31,6 +32,33 @@ export async function unresolvedLinks(store: MemoryStore, note: MemoryNote): Pro
   return missing
 }
 
+// Ordering written as a knowledge edge, caught where it happens instead of at the approval gate.
+// The rule and its wording are contracts' siblingOrderingMisuse — the grounded freeze throws on the
+// same predicate, and a validation rule spelled twice drifts worse than a literal.
+//
+// WARNED, never refused, and the severity is a judgement about what the two mistakes cost. A plan
+// note is often a long step's whole output — body, rationale, uncertainty, zone, skillRefs — and
+// this boundary's standing rule is that it must never discard that over something it can report.
+// The edge is also not always wrong: a plan-note may legitimately depend_on a note whose KNOWLEDGE
+// it builds on, which is why only a target that is itself a plan-note in this scope counts, and why
+// even that stays a report. It is placed FIRST among the warnings because loop.ts lifts warnings[0]
+// — and only warnings[0] — into the next iteration's prompt ("the warning is not optional"); this is
+// the one warning whose neglect fails the run outright, so it outranks the advisory ones.
+//
+// Costs nothing on a write that has no such link: the store is only asked about a depends_on link
+// on a plan-tier note. The masterplan is skipped — it is the parent, never a sibling.
+async function orderingLinkWarning(store: MemoryStore, note: MemoryNote): Promise<string[]> {
+  if (note.tier !== NOTE_TIER.plan) return []
+  const siblings: string[] = []
+  for (const l of note.links) {
+    if (l.kind !== LINK_KIND.depends_on || l.id === MASTERPLAN_NOTE_ID) continue
+    const target = await store.get(l.id, note.scope)
+    if (target?.tier === NOTE_TIER.plan) siblings.push(l.id)
+  }
+  const misuse = siblingOrderingMisuse(note.id, note.links, siblings)
+  return misuse ? [misuse] : []
+}
+
 // A note the writer may have meant to UPDATE. `id ?? slugId(title)` forks on any rephrasing —
 // "Auth middleware" and "Authentication middleware" slug differently — and the graph then carries
 // two partial claims about one subject. Reported, never merged: near-identical titles are often
@@ -40,7 +68,12 @@ export async function unresolvedLinks(store: MemoryStore, note: MemoryNote): Pro
 const DUPLICATE_CANDIDATES = 3
 
 async function duplicateSubjectWarning(store: MemoryStore, scope: string, title: string, id: string): Promise<string[]> {
-  const near = (await store.search(title, { scope }, {})).filter(n => n.id !== id).slice(0, DUPLICATE_CANDIDATES)
+  // Search RECALLS candidates; the threshold DECIDES. Without it this warned about the top 3 hits
+  // for every create, which in any non-empty corpus is every create — and a warning that always
+  // fires is one the writer learns to ignore (observed: loop.ts's lint nudge exists because of it).
+  const near = (await store.search(title, { scope }, {}))
+    .filter(n => n.id !== id && trigramDice(title, n.title) >= NEAR_SUBJECT)
+    .slice(0, DUPLICATE_CANDIDATES)
   if (near.length === 0) return []
   return [`notes about a similar subject already exist: ${near.map(n => `'${n.id}' (${n.title})`).join(', ')}`
     + ` — if one of them is this same subject, memory_write THAT id instead, so the graph carries one claim rather than two`]
@@ -103,13 +136,7 @@ export function noteLint(note: MemoryNote): string[] {
 // and its JSON keys. Same class as the 112KB-into-1KB note leak the fitter was hardened for.
 const serialized = (item: unknown): string => JSON.stringify(item)
 
-// What the claim arm already spent, so the note arm gets the REMAINDER rather than a second full
-// budget — a reply carrying both surfaces must cost what the caller asked for, not double it.
-const claimTokens = (hits: ReadonlyArray<ClaimHit>): number =>
-  hits.reduce((sum, h) => sum + approxTokens(serialized(h)), 0)
-
 const ok = (output: unknown) => ({ output, isError: false })
-const err = (e: unknown) => ({ output: { error: errorMessage(e) }, isError: true })
 
 // Absence epistemics (codebase-memory-mcp §5 amendment E-i): an empty result means "nothing matched",
 // never "no such decision exists" — say so in the envelope, on every read tool, in ONE wording.
@@ -277,6 +304,102 @@ const detailLevelSchema = { type: 'string', enum: ['minimal', 'standard'], descr
 const budgetSchema = { type: 'integer', minimum: 1, maximum: MEMORY_LIMITS.budgetTokens, description: 'approx token budget for the result (default 1500)' }
 const idSchema = { type: 'string', pattern: '^[a-z0-9][a-z0-9-]*$' }
 
+// memory_write's advertised input. Named rather than inline so the guard below can compare its keys
+// against the parser's — the schema is the ONLY place a model discovers a field exists.
+const WRITE_PROPERTIES = {
+  id: { ...idSchema, description: 'omit id unless you are updating a note whose id you read — the title-derived slug makes the same finding converge instead of forking.' },
+  title: { type: 'string', minLength: 1, maxLength: 200, description: 'required for a NEW note (it derives the id); omit when updating by id — the stored title carries forward' },
+  tier: {
+    type: 'string', enum: [...NOTE_TIERS],
+    description: "which memory this note belongs to (default semantic). semantic = durable project knowledge, and the only tier that takes kind/categories/paths/claims/sources. plan = one node of a task's decomposition, and the only tier that takes rationale/dependsOn/uncertainty/zone. episodic = a record of what one run did, expirable, title+summary+tags only. Fields outside the tier you name are dropped.",
+  },
+  kind: {
+    type: 'string', enum: [...NOTE_KINDS],
+    description: 'semantic only. architecture_current = observed implementation; architecture_target = intended design; research = a distilled web finding, which REQUIRES sources (default fact)',
+  },
+  retention: {
+    type: 'string', enum: [...RETENTION_CLASSES],
+    description: 'durable = keep indefinitely (default); expirable = a provisional finding that may be swept once stale. Choose deliberately: this is not recoverable later.',
+  },
+  sources: {
+    type: 'array', maxItems: MEMORY_SOURCE_LIMITS.items,
+    description: 'citations backing this note — put every URL you are citing HERE, not in a references section inside body: only this field is queryable, and a body that claims sources while this is empty is a note that reads as sourced but cannot be checked. Required for kind=research, allowed on every kind. Retrieval time is stamped by the system, not supplied. To credit another NOTE rather than a URL, use links with kind=derived_from.',
+    items: {
+      type: 'object', required: ['url'],
+      properties: {
+        url: { type: 'string', maxLength: MEMORY_SOURCE_LIMITS.urlChars, description: 'http(s) only, no embedded credentials' },
+        title: { type: 'string', maxLength: MEMORY_SOURCE_LIMITS.titleChars },
+      },
+    },
+  },
+  summary: { type: 'string', maxLength: MEMORY_LIMITS.summaryChars, description: 'one-line pointer shown in listings; a longer one is truncated with a warning, never rejected' },
+  body: { type: 'string', maxLength: MEMORY_LIMITS.searchableBodyChars, description: 'beyond this the text is stored but not semantically searchable' },
+  categories: { type: 'array', maxItems: MEMORY_LIMITS.labelItems, items: { type: 'string', maxLength: MEMORY_LIMITS.labelChars } },
+  tags: { type: 'array', maxItems: MEMORY_LIMITS.labelItems, items: { type: 'string', maxLength: MEMORY_LIMITS.labelChars } },
+  links: {
+    // unlike tags/paths this takes no scalar shorthand, and `links: "other-note"` is the
+    // mistake models actually make (three wasted iterations in one measured run)
+    //
+    // The ordering sentence is here rather than only on `dependsOn` because THIS is the field the
+    // confused author was already looking at: twice, in two independent runs, a plan-note carried
+    // ordering as a depends_on LINK to a sibling. A model reading `depends_on` in this enum has no
+    // reason to suspect it does not schedule unless the enum itself says so.
+    type: 'array', maxItems: MEMORY_LIMITS.detailItems, description: "typed edges to related notes. Each item is an OBJECT — {\"id\": \"target-note\", \"kind\": \"derived_from\"} — never a bare id string and never a string array. Links state KNOWLEDGE and never schedule anything: on a plan-tier note, run order is the `dependsOn` field, and a `depends_on` link to a sibling subplan is refused at the approval gate.",
+    items: {
+      type: 'object', required: ['id'],
+      properties: {
+        id: { ...idSchema, description: 'target note id' },
+        kind: { type: 'string', enum: [...LINK_KINDS], description: 'relationship kind (default relates_to). depends_on means "this knowledge builds on that" — it is NOT plan ordering.' },
+        confidence: { type: 'number', minimum: 0, maximum: 1 },
+      },
+    },
+  },
+  paths: { type: 'array', maxItems: MEMORY_LIMITS.detailItems, items: { type: 'string', maxLength: MEMORY_LIMITS.detailChars }, description: 'code paths this note refers to' },
+  addClaims: {
+    type: 'array', maxItems: MEMORY_LIMITS.detailItems,
+    items: { type: 'string', maxLength: MEMORY_LIMITS.detailChars },
+    description: 'statements to ADD to this note — send only what is new; existing claims carry forward untouched, so never resend them. One fact per statement: a claim is what search returns and what another agent acts on.',
+  },
+  invalidates: {
+    // the pattern the parser actually enforces, not a second spelling of it
+    type: 'array', maxItems: MEMORY_LIMITS.detailItems,
+    items: { type: 'string', pattern: CLAIM_ID_RE.source },
+    description: 'claim ids this write supersedes — a superseded claim stops being returned but stays in the log. State it: a claim you simply do not resend carries forward.',
+  },
+  rationale: { type: 'string', maxLength: MEMORY_LIMITS.rationaleChars, description: 'plan tier only: why this subplan exists' },
+  // The parser has always accepted this; the schema never named it, so a model looking for a way to
+  // order subplans found only the `depends_on` link kind and used that. Observed twice, in two
+  // independent runs of the same task on the same model, both on the 'verify' subplan.
+  dependsOn: {
+    type: 'array', maxItems: MEMORY_LIMITS.detailItems,
+    items: { type: 'string', maxLength: MEMORY_LIMITS.labelChars },
+    description: 'plan tier only: ids of the SIBLING subplan notes this one must run after — e.g. dependsOn: ["generate-doc"]. This field is the ONLY thing that orders the executable plan; everything whose dependencies are met runs in parallel. Never express order as a depends_on link.',
+  },
+  uncertainty: { type: 'array', maxItems: MEMORY_LIMITS.detailItems, items: { type: 'string', maxLength: MEMORY_LIMITS.detailChars }, description: 'plan tier only: coverage gaps / assumptions to surface (RG7)' },
+  skillRefs: { type: 'array', maxItems: 16, items: { type: 'string', maxLength: MEMORY_LIMITS.labelChars }, description: 'plan tier only: skills this subplan\'s step should load (e.g. web-research). Selection from what the operator installed — an unknown ref fails the plan before approval.' },
+  toolRefs: { type: 'array', maxItems: 16, items: { type: 'string', maxLength: MEMORY_LIMITS.labelChars }, description: "plan tier only: MCP tools this subplan's step needs, as 'server/tool' (e.g. web/search, web/fetch). Selection from servers the operator declared AND trusted; a step that needs none declares none." },
+  zone: { type: 'array', maxItems: 16, items: { type: 'string', minLength: 1, maxLength: MEMORY_LIMITS.detailChars }, description: "plan tier only: workspace-relative write globs this subplan may touch at execution (e.g. 'docs/**'), frozen into the step and enforced as a write-fence. Concurrent writes to one file are refused mechanically regardless — zone additionally scopes WHERE this step may write. Empty = unfenced." },
+  modelRef: {
+    type: 'string', maxLength: MEMORY_LIMITS.labelChars,
+    description: "plan tier only: the model this subplan's step runs on, as 'provider/model' (e.g. a small fast model for a web lookup, a frontier model for cross-cutting code work). Omit to inherit the parent step's model. Choose per subplan by its difficulty, not uniformly.",
+  },
+  scope: idSchema,
+}
+
+// A field the parser accepts but the schema never advertises is invisible to the model, which then
+// reaches for whatever IS advertised: `dependsOn` was accepted and unadvertised while `links` offered
+// a `depends_on` kind, and two independent runs expressed plan ordering as a link. Same shape as
+// contracts' DraftCoversTiers — the next field added to the parser fails the BUILD here rather than
+// shipping a surface the model cannot discover.
+// The two deliberate omissions: `claims` (addClaims is the agent-facing spelling, and resending a
+// whole claim set is exactly what it exists to prevent) and `sourceRevision` (stamped by the store,
+// never supplied by a writer).
+type UnadvertisedByDesign = 'claims' | 'sourceRevision'
+type WriteSchemaCoversInput =
+  Exclude<keyof typeof MemoryWriteToolInput.shape, keyof typeof WRITE_PROPERTIES | UnadvertisedByDesign> extends never ? true : never
+const writeSchemaCoversInput: WriteSchemaCoversInput = true
+void writeSchemaCoversInput
+
 // Degraded mode (design §8.4): the same four tools exist but every call returns an explicit
 // isError result naming the reason — the model learns context is unavailable instead of
 // silently losing its memory tools.
@@ -322,79 +445,24 @@ export function memoryTools(opts: {
   // never fails a read: a projector that cannot drain leaves the reader with a slightly stale view,
   // which is the situation it was already in — throwing here would turn a lag into a failed step
   const settled = async (): Promise<void> => { try { await opts.catchUp?.() } catch { /* stale beats failed */ } }
+  // Which of these notes describe code that CHANGED since the note was written — the same drift check
+  // memory_read runs, lifted to a result SET so a searcher acting on a matched CLAIM is warned too,
+  // not only a reader who pulls the full note. Deduped by id; one changedSince probe per distinct
+  // sourceRevision (the probe caches), so it stays bounded regardless of how many rows matched.
+  const driftedNoteIds = async (notes: readonly { id: string; sourceRevision: string | null; paths: readonly string[] }[]): Promise<string[]> => {
+    if (!changedSince) return []
+    const seen = new Map<string, { sourceRevision: string; paths: string[] }>()
+    for (const n of notes) if (n.sourceRevision !== null && !seen.has(n.id)) seen.set(n.id, { sourceRevision: n.sourceRevision, paths: [...n.paths] })
+    const drifted: string[] = []
+    for (const [id, n] of seen) if (noteHasDrifted(n, await changedSince(n.sourceRevision))) drifted.push(id)
+    return drifted
+  }
   const role = opts.role ?? MEMORY_ROLE.verify
   const tools: ResolvedTool[] = [
     {
       ref: 'memory/write', name: MEMORY_TOOL_NAME.write,
-      description: withRole('Create or update a project knowledge note (upsert by id — omitted fields keep their stored values; pass an explicit empty string/array to clear one). Record durable findings/decisions/conventions so later steps reuse them. If a note you read came back drifted, CORRECT it: write the same id with what the code says now, rather than adding a second note — a graph carrying two contradictory claims is worse than one carrying neither.', role),
-      inputSchema: {
-        type: 'object', required: [],
-        properties: {
-          id: { ...idSchema, description: 'omit id unless you are updating a note whose id you read — the title-derived slug makes the same finding converge instead of forking.' },
-          title: { type: 'string', minLength: 1, maxLength: 200, description: 'required for a NEW note (it derives the id); omit when updating by id — the stored title carries forward' },
-          tier: {
-            type: 'string', enum: [...NOTE_TIERS],
-            description: "which memory this note belongs to (default semantic). semantic = durable project knowledge, and the only tier that takes kind/categories/paths/claims/sources. plan = one node of a task's decomposition, and the only tier that takes rationale/uncertainty/zone. episodic = a record of what one run did, expirable, title+summary+tags only. Fields outside the tier you name are dropped.",
-          },
-          kind: {
-            type: 'string', enum: [...NOTE_KINDS],
-            description: 'semantic only. architecture_current = observed implementation; architecture_target = intended design; research = a distilled web finding, which REQUIRES sources (default fact)',
-          },
-          retention: {
-            type: 'string', enum: [...RETENTION_CLASSES],
-            description: 'durable = keep indefinitely (default); expirable = a provisional finding that may be swept once stale. Choose deliberately: this is not recoverable later.',
-          },
-          sources: {
-            type: 'array', maxItems: MEMORY_SOURCE_LIMITS.items,
-            description: 'citations backing this note — put every URL you are citing HERE, not in a references section inside body: only this field is queryable, and a body that claims sources while this is empty is a note that reads as sourced but cannot be checked. Required for kind=research, allowed on every kind. Retrieval time is stamped by the system, not supplied. To credit another NOTE rather than a URL, use links with kind=derived_from.',
-            items: {
-              type: 'object', required: ['url'],
-              properties: {
-                url: { type: 'string', maxLength: MEMORY_SOURCE_LIMITS.urlChars, description: 'http(s) only, no embedded credentials' },
-                title: { type: 'string', maxLength: MEMORY_SOURCE_LIMITS.titleChars },
-              },
-            },
-          },
-          summary: { type: 'string', maxLength: MEMORY_LIMITS.summaryChars, description: 'one-line pointer shown in listings; a longer one is truncated with a warning, never rejected' }, body: { type: 'string', maxLength: MEMORY_LIMITS.searchableBodyChars, description: 'beyond this the text is stored but not semantically searchable' },
-          categories: { type: 'array', maxItems: MEMORY_LIMITS.labelItems, items: { type: 'string', maxLength: MEMORY_LIMITS.labelChars } },
-          tags: { type: 'array', maxItems: MEMORY_LIMITS.labelItems, items: { type: 'string', maxLength: MEMORY_LIMITS.labelChars } },
-          links: {
-            // unlike tags/paths this takes no scalar shorthand, and `links: "other-note"` is the
-            // mistake models actually make (three wasted iterations in one measured run)
-            type: 'array', maxItems: MEMORY_LIMITS.detailItems, description: "typed edges to related notes. Each item is an OBJECT — {\"id\": \"target-note\", \"kind\": \"derived_from\"} — never a bare id string and never a string array.",
-            items: {
-              type: 'object', required: ['id'],
-              properties: {
-                id: { ...idSchema, description: 'target note id' },
-                kind: { type: 'string', enum: [...LINK_KINDS], description: 'relationship kind (default relates_to)' },
-                confidence: { type: 'number', minimum: 0, maximum: 1 },
-              },
-            },
-          },
-          paths: { type: 'array', maxItems: MEMORY_LIMITS.detailItems, items: { type: 'string', maxLength: MEMORY_LIMITS.detailChars }, description: 'code paths this note refers to' },
-          addClaims: {
-            type: 'array', maxItems: MEMORY_LIMITS.detailItems,
-            items: { type: 'string', maxLength: MEMORY_LIMITS.detailChars },
-            description: 'statements to ADD to this note — send only what is new; existing claims carry forward untouched, so never resend them. One fact per statement: a claim is what search returns and what another agent acts on.',
-          },
-          invalidates: {
-            // the pattern the parser actually enforces, not a second spelling of it
-            type: 'array', maxItems: MEMORY_LIMITS.detailItems,
-            items: { type: 'string', pattern: CLAIM_ID_RE.source },
-            description: 'claim ids this write supersedes — a superseded claim stops being returned but stays in the log. State it: a claim you simply do not resend carries forward.',
-          },
-          rationale: { type: 'string', maxLength: MEMORY_LIMITS.rationaleChars, description: 'plan tier only: why this subplan exists' },
-          uncertainty: { type: 'array', maxItems: MEMORY_LIMITS.detailItems, items: { type: 'string', maxLength: MEMORY_LIMITS.detailChars }, description: 'plan tier only: coverage gaps / assumptions to surface (RG7)' },
-          skillRefs: { type: 'array', maxItems: 16, items: { type: 'string', maxLength: MEMORY_LIMITS.labelChars }, description: 'plan tier only: skills this subplan\'s step should load (e.g. web-research). Selection from what the operator installed — an unknown ref fails the plan before approval.' },
-          toolRefs: { type: 'array', maxItems: 16, items: { type: 'string', maxLength: MEMORY_LIMITS.labelChars }, description: "plan tier only: MCP tools this subplan's step needs, as 'server/tool' (e.g. web/search, web/fetch). Selection from servers the operator declared AND trusted; a step that needs none declares none." },
-          zone: { type: 'array', maxItems: 16, items: { type: 'string', minLength: 1, maxLength: MEMORY_LIMITS.detailChars }, description: "plan tier only: workspace-relative write globs this subplan may touch at execution (e.g. 'docs/**'), frozen into the step and enforced as a write-fence. Concurrent writes to one file are refused mechanically regardless — zone additionally scopes WHERE this step may write. Empty = unfenced." },
-          modelRef: {
-            type: 'string', maxLength: MEMORY_LIMITS.labelChars,
-            description: "plan tier only: the model this subplan's step runs on, as 'provider/model' (e.g. a small fast model for a web lookup, a frontier model for cross-cutting code work). Omit to inherit the parent step's model. Choose per subplan by its difficulty, not uniformly.",
-          },
-          scope: idSchema,
-        },
-      },
+      description: withRole('Create or update a project knowledge note (upsert by id — omitted fields keep their stored values; pass an explicit empty string/array to clear one). Record durable findings/decisions/conventions so later steps reuse them. If a note you read came back drifted, CORRECT it: write the same id with what the code says now, rather than adding a second note — a graph carrying two contradictory claims is worse than one carrying neither. A correction covers the whole retrieval surface: pass an updated title and summary too, not only the body — searchers read the summary first, and merge-on-omit keeps a stale one verbatim.', role),
+      inputSchema: { type: 'object', required: [], properties: WRITE_PROPERTIES },
       execute: async (input, toolCallId) => {
         try {
           // The write arm READS too — duplicateSubjectWarning below, and unresolvedLinks after the
@@ -412,6 +480,14 @@ export function memoryTools(opts: {
           if (parsed.id === undefined && parsed.title === undefined)
             throw new Error('a new note needs a title (it derives the id) — pass an id instead to update an existing note')
           const scope = parsed.scope ?? MemoryScope.project
+          // Plan-scope writes are fenced to the step's own lanes: a planner once saved its
+          // masterplan into a near-miss scope string and every read of the right scope returned
+          // null until it noticed. The lanes already enumerate the only plan scopes this step
+          // can mean; project and other non-plan scopes stay free (re-grounding is legitimate).
+          if (scope.startsWith('plan-') && opts.searchScope !== undefined && !opts.searchScope.includes(scope)) {
+            const allowed = opts.searchScope.filter(s => s.startsWith('plan-'))
+            return { output: { error: `scope '${scope}' is not one of this step's plan lanes — plan notes belong in ${allowed.map(s => `'${s}'`).join(' or ') || 'no plan scope (this step has none)'}` }, isError: true }
+          }
           let id: string
           try {
             id = parsed.id ?? slugId(parsed.title ?? '')
@@ -457,6 +533,9 @@ export function memoryTools(opts: {
           // authoritative value.
           const dead = await unresolvedLinks(store, n)
           const warnings = [
+            // first on purpose — see orderingLinkWarning: only warnings[0] reaches the model's
+            // next turn, and this is the only one that predicts a refused plan
+            ...(await orderingLinkWarning(store, n)),
             ...normalized.warnings,
             ...duplicates,
             ...noteLint(n),
@@ -465,12 +544,12 @@ export function memoryTools(opts: {
               : []),
           ]
           return ok(MemoryWriteResult.parse(warnings.length ? { id: n.id, warnings } : { id: n.id }))
-        } catch (e) { return err(e) }
+        } catch (e) { return toolError(e) }
       },
     },
     {
       ref: 'memory/search', name: MEMORY_TOOL_NAME.search,
-      description: withRole('Search project knowledge by meaning and keyword (hybrid). Returns matched CLAIMS — individual statements, each with the note that asserts it — plus note summaries for notes that match without asserting a claim. Read the full note with memory_read.', role),
+      description: withRole('Search project knowledge by meaning and keyword (hybrid). Returns matched CLAIMS — individual statements, each with the note that asserts it — plus note summaries for notes that match without asserting a claim. Read the full note with memory_read. Any ids listed in `drifted` describe code that has CHANGED since the note was written — memory_read and correct them (write the same id) before you rely on them.', role),
       inputSchema: {
         type: 'object', required: ['query'],
         properties: {
@@ -494,15 +573,22 @@ export function memoryTools(opts: {
             store.search(q.query, filter, { mode: q.mode }),
           ])
           const c = applyBudget(claimHits, serialized, { limit, budget: q.budget })
-          const r = applyBudget(noteHits, serialized, { limit, budget: Math.max(0, q.budget - claimTokens(c.items)) })
+          const r = applyBudget(noteHits, serialized, { limit, budget: Math.max(0, q.budget - c.used) })
           const empty = c.items.length === 0 && r.items.length === 0
           const truncated = c.truncated || r.truncated
+          // flag any returned note whose declared paths moved — a matched claim reads as current and
+          // may not be, and search is where a stale claim gets acted on without ever being read in full
+          const drifted = await driftedNoteIds([
+            ...c.items.map(h => ({ id: h.noteId, sourceRevision: h.sourceRevision, paths: h.paths })),
+            ...r.items.map(n => ({ id: n.id, sourceRevision: n.sourceRevision, paths: n.paths })),
+          ])
           return ok(MemorySearchResult.parse({
             claims: c.items, notes: r.items, truncated, omitted: c.omitted + r.omitted,
+            ...(drifted.length > 0 && { drifted }),
             ...(truncated && { next: 'refine the query, or memory_read/memory_neighbors a specific id' }),
             ...(empty && { note: absenceNote('note') }),
           }))
-        } catch (e) { return err(e) }
+        } catch (e) { return toolError(e) }
       },
     },
     {
@@ -558,7 +644,7 @@ export function memoryTools(opts: {
               next: `the code this note describes changed since it was written (${n.sourceRevision?.slice(0, 8)}) — re-read ${where} and, if the note is now wrong, memory_write the SAME id with the corrected content instead of adding a second note`,
             }),
           })
-        } catch (e) { return err(e) }
+        } catch (e) { return toolError(e) }
       },
     },
     {
@@ -589,7 +675,7 @@ export function memoryTools(opts: {
             ...(r.truncated && { next: 'memory_read an id for the full note' }),
             ...(r.items.length === 0 && { note: absenceNote('note') }),
           })
-        } catch (e) { return err(e) }
+        } catch (e) { return toolError(e) }
       },
     },
     {
@@ -626,7 +712,7 @@ export function memoryTools(opts: {
           const claims = await store.topicClaims(q.topic, author, { idempotencyKey: accessKey })
           const r = applyBudget(claims, serialized, { limit: MEMORY_LIMITS.detailItems, budget: q.budget })
           return ok({ topicKey: q.topic, claims: r.items, truncated: r.truncated, omitted: r.omitted })
-        } catch (e) { return err(e) }
+        } catch (e) { return toolError(e) }
       },
     },
   ]

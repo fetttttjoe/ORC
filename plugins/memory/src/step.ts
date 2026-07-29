@@ -3,7 +3,7 @@ import {
   type ClaimHit, type LinkKind, type MemoryAuthor, type MemoryStore, type NoteSummary, type ResolvedTool,
   type RecalledContext, type SignalOutcome, type StepMemory,
 } from '@orc/contracts'
-import { applyBudget, approxTokens } from './budget'
+import { applyBudget } from './budget'
 import { memoryTools, unavailableMemoryTools, MEMORY_ROLE, type MemoryRole } from './tools'
 import { corpusDrift, type ChangedSince, type CorpusDrift } from './drift'
 
@@ -109,13 +109,12 @@ export function bindStepMemory(opts: {
     // Measured on the SERIALIZED hit, like the note arm below: a ClaimHit ships
     // claimId/noteId/scope/title/validFrom too, and costing only `text` undercounted the preload by
     // several hundred chars per hit — the notes arm then spent a remainder that was never free.
-    const claims = applyBudget(claimHits, h => JSON.stringify(h), { limit: PRELOAD_MAX_NOTES, budget }).items
-    const spent = claims.reduce((sum, c) => sum + approxTokens(JSON.stringify(c)), 0)
+    const claims = applyBudget(claimHits, h => JSON.stringify(h), { limit: PRELOAD_MAX_NOTES, budget })
     const noteHits = await store.search(query, { scope }, {})
     const notes = applyBudget(noteHits, n => JSON.stringify(n), {
-      limit: PRELOAD_MAX_NOTES, budget: Math.max(0, budget - spent),
+      limit: PRELOAD_MAX_NOTES, budget: Math.max(0, budget - claims.used),
     }).items
-    return { claims, notes }
+    return { claims: claims.items, notes }
   }
 
   // How much of what we are about to hand over still describes the tree in front of the step —

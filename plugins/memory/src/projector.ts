@@ -17,9 +17,40 @@ export const MEMORY_KINDS: EventKind[] = [EVENT_KIND.memory_written, EVENT_KIND.
 // graph an agent would read wrongly, and reporting it as degraded would cry wolf on every read.
 export const KNOWLEDGE_KINDS = MEMORY_KINDS.filter(k => k !== EVENT_KIND.memory_accessed)
 
-// The grouping spec's own scaling trigger, as a number something can actually compare against.
+// The grouping spec's own scaling trigger, as a number something can actually compare against —
+// split per STAGE, not one shared ceiling, because the two stages this warning used to cover
+// (refreshLinks then refreshTopics) have unrelated cost shapes: refreshLinks is Surreal I/O (one
+// RELATE round trip per note-link inside its transaction — see relateLinks in surreal.ts), while
+// refreshTopics runs the pure, import-free partition() from cluster.ts plus its own delete+upsert
+// transaction. A single `elapsed` spanning both, which is what shipped originally, cannot tell a
+// reader which one to look at — that ambiguity is exactly what produced the mis-attributed "see
+// cluster.ts" pointer this comment replaces (see area-topic-clustering / attribute-refresh-cost).
+//
+// ponytail: refreshLinks' ceiling is a placeholder — one warn line, no metric — until a workload
+// with many note-links per note is actually measured. If it fires, the upgrade is batching
+// relateLinks' per-link awaits (Surreal I/O), not anything in cluster.ts: this stage never touches
+// a cosine.
+const SLOW_LINK_REFRESH_MS = 1_000
 // ponytail: one warn line, no metric — enough to notice; wire it to a real timer if it ever fires.
-const SLOW_REFRESH_MS = 1_000
+// This is the partition-COST ceiling: if it fires, the pre-registered upgrade is the claim-grouping
+// spec's L1 cosine-matrix cache + L2 heap/Lance-Williams merge (both documented order-independence-
+// preserving, byte-identical-output). It is NOT cluster.ts's HDBSCAN revisit trigger — that trigger
+// fires on a different condition entirely (~1,000 claims AND visible mis-splitting, a quality
+// signal) and is spelled out at cluster.ts's `partition` doc comment; a wall-clock stall here is a
+// cost signal and does not by itself mean the ALGORITHM needs replacing.
+const SLOW_TOPIC_REFRESH_MS = 1_000
+
+// Coalesce the whole-corpus derivations on the LIVE path: a drain marks the model dirty and (re)arms
+// a trailing timer instead of refreshing inline, so a burst — a grounded analyze that writes dozens
+// — collapses to ONE refresh after activity settles, not one multi-second freeze per write. The
+// interactive/boot paths (catchUp, start, rebuild) bypass it and refresh synchronously, because a CLI
+// command that just drained expects fresh topics on return.
+const DERIVED_REFRESH_DEBOUNCE_MS = 5_000
+// The debounce is TRAILING, so it must be bounded: a sustained write stream (a note per step) would
+// otherwise clear+re-arm the timer on every drain and starve refreshTopics / the delete-repair
+// refreshLinks forever. This caps how long the coalesced refresh can be deferred from the FIRST
+// still-unrefreshed write, so repartition/link-repair stays on a bounded cadence under load.
+const DERIVED_REFRESH_MAX_WAIT_MS = 30_000
 
 export function createMemoryProjector(opts: { log: EventLog; surreal: SurrealMemory; vaultDir: string }): MemoryProjector {
   const { log, surreal, vaultDir } = opts
@@ -69,52 +100,71 @@ export function createMemoryProjector(opts: { log: EventLog; surreal: SurrealMem
   // false: they run far more often than the corpus's claims actually change, and the point of this
   // gate is that a drain carrying no memory_written/memory_deleted (redundant catch-up, or — before
   // start()'s subscribe filter below — a task run's non-memory events) does no partition work at all.
-  const drainFrom = async (fromSeq: number, opts: { force?: boolean } = {}): Promise<{ cursor: number; vaultChanged: number }> => {
+  // The PER-EVENT projection: apply the drained memory events to the read model. Always fast — each
+  // note materializes its own claims and out-edges inside applyOne — and always on the hot path. It
+  // runs NO whole-corpus derivation itself; on a drain that moved the claim set it hands off to the
+  // caller's `reconcile` strategy (see refreshDerived / scheduleDerivedRefresh). `vaultChanged` counts
+  // accepted memory_written/deleted (the only events that change which claims exist — memory_accessed
+  // bumps a counter but never claims, so it is excluded); `deletedCount` is the subset that can
+  // cascade edges away.
+  const drainFrom = async (fromSeq: number, reconcile: (c: { deletedCount: number }) => void | Promise<void>): Promise<{ cursor: number; vaultChanged: number; deletedCount: number }> => {
     const events = await log.after(fromSeq, MEMORY_KINDS)
     let vaultChanged = 0
-    // finally, not a straight-line call: applyOne can throw AFTER an event's Surreal side committed
-    // (the vault write is outside the transaction), and the retry then drains zero events and sees
-    // vaultChanged 0 — so without this the topic table stays stale until the next memory write or a
-    // restart, for claims that are already in the read model.
+    let deletedCount = 0
     try {
-      // counted per EVENT KIND, not per successful apply: applyOne's return says "the vault file
-      // changed", and a throw inside it (or a skipped payload) left the counter untouched — so a
-      // drain carrying exactly one memory_written, the common live case, skipped the topic refresh
-      // that this counter exists to trigger and left the partition stale while health reported ok.
       for (const e of events) {
         if (e.kind === EVENT_KIND.memory_written || e.kind === EVENT_KIND.memory_deleted) vaultChanged += 1
+        if (e.kind === EVENT_KIND.memory_deleted) deletedCount += 1
         await applyOne(e)
       }
     } finally {
-      // vaultChanged counts an ACCEPTED memory_written/memory_deleted — the only events that can
-      // change which claims exist, so it is exactly "did this drain touch the claim set", not "did we
-      // drain anything": memory_accessed applies (bumps a counter) but never changes claims, and is
-      // deliberately excluded from vaultChanged for that same reason (see applyOne above).
-      if (vaultChanged > 0 || opts.force) {
-        // Best-effort: a grouping failure must never fail a drain — the previous topic table stays
-        // readable and the next drain retries.
-        const started = Date.now()
-        try {
-          // edges first: topics read claims, but the graph reads edges, and a caller that drained
-          // and then traversed should see the edge set this drain implies
-          await surreal.refreshLinks()
-        } catch (err) {
-          console.warn(`[memory] link refresh failed: ${errorMessage(err)}`)
-        }
-        try {
-          await surreal.refreshTopics()
-        } catch (err) {
-          console.warn(`[memory] topic refresh failed: ${errorMessage(err)}`)
-        }
-        // The partition is O(n^2) cosines over the whole project corpus and it runs on interactive
-        // paths (catchUp is awaited by CLI commands), so the grouping spec's scaling trigger is a
-        // wall-clock one. Measuring it is what makes that trigger fire-able instead of theoretical.
+      // In a finally, not a straight-line call: applyOne can throw AFTER an event's Surreal side
+      // committed (the vault write is outside the transaction), and the caller's retry then reads the
+      // advanced cursor and drains zero events — so the reconcile of the claims ALREADY in the read
+      // model has to happen here, on the drain that applied them, or the derived views stay stale
+      // until the next write or a restart. `reconcile` is the caller's strategy — synchronous on the
+      // interactive/boot paths, a debounced schedule on the live path — gated on the claim set moving.
+      if (vaultChanged > 0) await reconcile({ deletedCount })
+    }
+    return { cursor: await surreal.getCursor(), vaultChanged, deletedCount }
+  }
+
+  // The WHOLE-CORPUS derivations, split OFF the per-event apply so callers can COALESCE them and keep
+  // them off the hot path. Re-running BOTH on every single write used to freeze the supervisor's one
+  // event loop — task admission included — for seconds each time, once the corpus grew.
+  //
+  //   * refreshLinks re-RELATEs every note's out-edges one-by-one: O(all notes) Surreal round trips.
+  //     A plain WRITE already materialized its own edges in applyOne, so it does NOT need this. Only a
+  //     DELETE does — Surreal drops a RELATE when either endpoint record is deleted, so a delete
+  //     cascades away edges a NEIGHBOUR authored and never retracted, and only recomputing from the
+  //     live note set restores them. Hence `hadDelete`: writes skip the global re-link entirely.
+  //   * refreshTopics re-partitions the whole claim set — cluster.ts's partition() is O(n^2)–O(n^3)
+  //     agglomerative clustering with no per-event shortcut, so it runs whenever the claim set moved.
+  //
+  // ponytail: partition() is the remaining ceiling — synchronous and superlinear, so ONE refresh can
+  //   still stall the loop for seconds at a large corpus. The debounce below makes that RARE (one
+  //   refresh per burst, not per write); if it still bites, the next step is a worker thread or
+  //   incremental re-clustering — cluster.ts is a pure, import-free function precisely so it can move
+  //   off-thread untouched. Each stage is timed separately so the slow-warning names WHICH stage.
+  const refreshDerived = async (hadDelete: boolean): Promise<void> => {
+    if (hadDelete) {
+      const started = Date.now()
+      try { await surreal.refreshLinks() }
+      catch (err) { console.warn(`[memory] link refresh failed: ${errorMessage(err)}`) }
+      finally {
         const elapsed = Date.now() - started
-        if (elapsed > SLOW_REFRESH_MS)
-          console.warn(`[memory] topic refresh took ${elapsed}ms — past ${SLOW_REFRESH_MS}ms the claim corpus has outgrown the whole-corpus repartition; see cluster.ts's revisit trigger`)
+        if (elapsed > SLOW_LINK_REFRESH_MS)
+          console.warn(`[memory] link refresh took ${elapsed}ms — past ${SLOW_LINK_REFRESH_MS}ms; this stage is Surreal I/O (per-note-link RELATE round trips in refreshLinks), not clustering`)
       }
     }
-    return { cursor: await surreal.getCursor(), vaultChanged }
+    const started = Date.now()
+    try { await surreal.refreshTopics() }
+    catch (err) { console.warn(`[memory] topic refresh failed: ${errorMessage(err)}`) }
+    finally {
+      const elapsed = Date.now() - started
+      if (elapsed > SLOW_TOPIC_REFRESH_MS)
+        console.warn(`[memory] topic refresh took ${elapsed}ms — past ${SLOW_TOPIC_REFRESH_MS}ms; the claim corpus may have outgrown the whole-corpus repartition (cluster.ts's partition()) — see SLOW_TOPIC_REFRESH_MS's comment for the upgrade path`)
+    }
   }
 
   // Every drain/clear goes through this so two passes (e.g. a subscribe notification firing
@@ -137,13 +187,37 @@ export function createMemoryProjector(opts: { log: EventLog; surreal: SurrealMem
     // auth-shaped errors heal the same way: the connect-option auth provider re-authenticates
     // on the driver's session renewal, so the retry lands on a fresh authenticated session
     /connect|connection|socket|websocket|transaction not found|anonymous access|not enough permissions/i.test(errorMessage(err))
+  // Live-path coalescing: state + a trailing debounce that runs the whole-corpus refresh ONCE after
+  // writes settle. `pendingDelete` accumulates across the window so the coalesced refresh still
+  // re-links if ANY drain in it deleted a note. Serialized with drains so it never reads a
+  // half-applied state, and it folds in refreshIndex so the vault index coalesces too.
+  let refreshTimer: ReturnType<typeof setTimeout> | null = null
+  let pendingDelete = false
+  let firstDirtyAt: number | null = null // when the current un-refreshed window opened, for the max-wait cap
+  const scheduleDerivedRefresh = (hadDelete: boolean): void => {
+    pendingDelete = pendingDelete || hadDelete
+    if (firstDirtyAt === null) firstDirtyAt = Date.now()
+    if (refreshTimer) clearTimeout(refreshTimer)
+    // trailing debounce, bounded: the wait shrinks as the window ages, so the coalesced refresh fires
+    // by DERIVED_REFRESH_MAX_WAIT_MS after the first still-unrefreshed write at the latest — a steady
+    // write stream can defer it but never starve it.
+    const wait = Math.max(0, Math.min(DERIVED_REFRESH_DEBOUNCE_MS, DERIVED_REFRESH_MAX_WAIT_MS - (Date.now() - firstDirtyAt)))
+    refreshTimer = setTimeout(() => {
+      refreshTimer = null
+      firstDirtyAt = null
+      const del = pendingDelete
+      pendingDelete = false
+      void serialize(async () => { await refreshIndex(); await refreshDerived(del) })
+    }, wait)
+  }
+
   const enqueueReconcile = (): void => {
     void serialize(async () => {
       for (let attempt = 1; ; attempt++) {
         try {
-          const r = await drainFrom(cursorCache)
-          cursorCache = r.cursor
-          if (r.vaultChanged > 0) await refreshIndex()
+          // reconcile arms the debounce (via scheduleDerivedRefresh) INSIDE drainFrom's finally, so a
+          // burst coalesces to one refresh and a partial-apply throw still schedules what landed.
+          cursorCache = (await drainFrom(cursorCache, c => scheduleDerivedRefresh(c.deletedCount > 0))).cursor
           return
         } catch (err) {
           if (closed) return // shutdown race: the socket is gone because we are — expected, not a warning
@@ -173,20 +247,21 @@ export function createMemoryProjector(opts: { log: EventLog; surreal: SurrealMem
       // enqueueReconcile, so it costs nothing beyond the array membership test.
       unsub = await log.subscribe({}, e => { if (MEMORY_KINDS.includes(e.kind)) enqueueReconcile() })
       await serialize(async () => {
-        // force: true — boot-time heal. The corpus may hold claims from before this feature
-        // shipped, or from a run where refreshTopics kept failing; those must get partitioned even
-        // though the cursor is already at head and drainFrom applies zero events. A plain "did we
-        // drain anything" check cannot tell that case apart from "nothing to do" — that is exactly
-        // why force is a separate, explicit signal rather than derived from the drain's own result.
-        cursorCache = (await drainFrom(await surreal.getCursor(), { force: true })).cursor
+        // boot-time heal, done unconditionally (not gated on the drain's count): the corpus may hold
+        // claims from before this feature shipped, or from a run where refreshTopics kept failing, so
+        // topics must be partitioned even though the cursor is already at head and zero events drain;
+        // and refreshDerived(true) rebuilds edges too, repairing any RELATE a delete cascaded away.
+        cursorCache = (await drainFrom(await surreal.getCursor(), () => {})).cursor
+        await refreshDerived(true)
         await rebuildVaultMemory(surreal, vaultDir) // boot-time heal: replace vault/memory/** from Surreal
       })
     },
-    close: async () => { closed = true; if (unsub) { await unsub(); unsub = null } await applying },
+    close: async () => { closed = true; if (refreshTimer) { clearTimeout(refreshTimer); refreshTimer = null } if (unsub) { await unsub(); unsub = null } await applying },
     rebuild: async () => {
       await serialize(async () => {
         await surreal.clear()
-        cursorCache = (await drainFrom(0, { force: true })).cursor // same boot-time-heal reasoning as start()
+        cursorCache = (await drainFrom(0, () => {})).cursor
+        await refreshDerived(true) // same boot-time-heal reasoning as start()
         await rebuildVaultMemory(surreal, vaultDir)
       })
     },
@@ -194,9 +269,9 @@ export function createMemoryProjector(opts: { log: EventLog; surreal: SurrealMem
     // projection path. O(applied), not O(notes): the full vault reconcile stays on start/rebuild.
     catchUp: async () => {
       await serialize(async () => {
-        const r = await drainFrom(await surreal.getCursor())
-        cursorCache = r.cursor
-        if (r.vaultChanged > 0) await refreshIndex()
+        // synchronous reconcile, NOT debounced: catchUp is the CLI's projection path, and a command
+        // that awaits it (search, consolidate) expects fresh topics/edges on return, not 5s later.
+        cursorCache = (await drainFrom(await surreal.getCursor(), async c => { await refreshIndex(); await refreshDerived(c.deletedCount > 0) })).cursor
       })
     },
   }

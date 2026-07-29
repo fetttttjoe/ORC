@@ -106,6 +106,9 @@ describe('rebuildVaultMemory', () => {
   it('repairs deleted files, removes stale files, and writes a deterministic index', async () => {
     const t = await createTestSurreal(); drops.push(t.drop)
     const m = await SurrealMemory.open(t)
+    // registered, not awaited after the assertions: a trailing close is skipped the moment an
+    // expect throws, and the leaked websocket outlives the file
+    drops.push(() => m.close())
     const vaultDir = mkdtempSync(path.join(tmpdir(), 'orc-memidx-'))
     const written = (seq: number, id: string): EventRecord => eventFixture({
       seq, taskId: null, kind: 'memory_written',
@@ -136,6 +139,5 @@ describe('rebuildVaultMemory', () => {
     const first = readFileSync(path.join(vaultDir, 'memory', 'index.md'), 'utf8')
     await rebuildVaultMemory(m, vaultDir)
     expect(readFileSync(path.join(vaultDir, 'memory', 'index.md'), 'utf8')).toBe(first) // byte-identical
-    await m.close()
   })
 })

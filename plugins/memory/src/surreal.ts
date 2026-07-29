@@ -3,16 +3,18 @@ import { RecordId, Surreal } from 'surrealdb'
 import { edge, orm, table, t } from 'surqlize'
 import {
   activation, activationBoost, bumpAccess, Claim, DEFAULT_HALF_LIFE_DAYS,
-  deriveNoteProvenance, EDGE_DIRECTION, EVENT_KIND, LINK_KINDS, NOTE_KINDS, MemoryScope, Topic, viaEdge,
+  deriveNoteProvenance, EDGE_DIRECTION, edgeKey, EVENT_KIND, LINK_KINDS, NOTE_KINDS, MemoryScope, Topic, viaEdge,
+  type LinkKind,
   MemoryAccessedPayload, MemoryDeletedPayload, MemoryNote, MemoryWrittenPayload,
   MEMORY_LIMITS, SEARCH_MODE, errorMessage, inferTier, isUiMetaNote, noteKey, NoteTier,
-  type EmbeddingProvider, type EventRecord, type NeighborQuery, type MemoryFilter, type NoteFields,
+  type EmbeddingProvider, type EventRecord, type NeighborQuery, type MemoryFilter, type NoteFields, type NoteView,
   type MemorySearchOpts, type NeighborResult, type NoteSummary,
   linkLookupScopes,
 } from '@orc/contracts'
 import { rankNeighbors, rrfFuse, type Edge } from './rank'
 import { dedupeByNote, type ClaimHit, type ClaimSearchOpts } from './claim-search'
 import { ascending, MEMORY_CLUSTER_THRESHOLD, partition, topicLabel, type ClusterInput } from './cluster'
+import { foldRow, ftsQuery, keywordCompare, keywordTerms, meetsMargin, meetsQuorum } from './keyword'
 
 // The read model's table names — single spelling for every builder call and RecordId.
 enum Tb { Note = 'note', Meta = 'meta', Link = 'link', Claim = 'claim', Topic = 'topic' }
@@ -23,9 +25,42 @@ enum Tb { Note = 'note', Meta = 'meta', Link = 'link', Claim = 'claim', Topic = 
 // shape (they belong to the summary, not to the authored note). Both are optional in the row
 // type so a note projected before the counter existed still selects without a rebuild.
 // literal-typed link kind, derived from the contract's LINK_KINDS — rows come back as LinkKind.
-// search-term cap: bounds the WHERE expression depth (see search()); 8 terms is far past the
-// point where AND-matching returns anything on a note corpus
-const MAX_SEARCH_TERMS = 8
+
+// The full-text analyzer both keyword arms match through, and the searchable field of each table
+// with what a match there is worth. ONE spelling: the schema setup below builds a DEFINE INDEX per
+// entry, and the arms build their match clauses from the same list in the same order (foldRow pairs
+// weights with fields positionally).
+//
+// An analyzer is REQUIRED, not an optimisation. The arms OR across terms now (see keyword.ts), and
+// without token boundaries every note containing the substring 'a' would match every query; without
+// stemming a question phrased 'declared' would miss a note that wrote 'declare'. `class` splits on
+// character-class changes so 'write-fence' yields both words; `snowball(english)` stems both the
+// stored text and the query term (measured: 'glob' matches a note that stored 'globs').
+const FTS_ANALYZER = 'orc_en'
+// `keyof typeof noteTable.type` / `claimTable.type`, not `string`: these names become DEFINE INDEX
+// ... FIELDS <name> below, and SurrealDB does not reject an index over a column that does not
+// exist — it defines the index, the column just never receives it, and that field silently stops
+// matching forever, with no build failure and no test failure. Typing `name` against the table's
+// own inferred row shape turns a column rename that forgets to update this list into a compile
+// error instead. (noteTable/claimTable are defined below; a `typeof` type query may forward-
+// reference a value declared later in the same module — this is resolved by the type checker, not
+// evaluated at runtime.)
+type NoteColumn = keyof typeof noteTable.type
+type ClaimColumn = keyof typeof claimTable.type
+const NOTE_SEARCH_FIELDS: readonly { name: NoteColumn; weight: number }[] = [
+  { name: 'title', weight: 3 }, { name: 'summary', weight: 2 },
+  { name: 'body', weight: 1 },
+  // FULLTEXT over an ARRAY field works and matches per element — measured against 3.2.0. Tags were
+  // searchable under the substring arm at body's weight; keeping them costs one index.
+  { name: 'tags', weight: 1 },
+] as const
+const CLAIM_SEARCH_FIELDS: readonly { name: ClaimColumn; weight: number }[] = [{ name: 'text', weight: 1 }] as const
+const weightsOf = (fields: readonly { weight: number }[]): number[] => fields.map(f => f.weight)
+const namesOf = (fields: readonly { name: string }[]): string[] => fields.map(f => f.name)
+// SurrealDB 3.2.0 takes ONE field per FULLTEXT index (the 2.x field-list form is gone), so the
+// index name is derived from the pair rather than spelled — a second spelling would drift.
+const ftsIndexes = (tb: Tb, fields: readonly { name: string }[]): string =>
+  fields.map(f => `DEFINE INDEX IF NOT EXISTS ${tb}_${f.name}_fts ON ${tb} FIELDS ${f.name} FULLTEXT ANALYZER ${FTS_ANALYZER} BM25;`).join(' ')
 
 const kindType = t.union(LINK_KINDS.map(k => t.literal(k)))
 const noteKindType = t.union(NOTE_KINDS.map(k => t.literal(k)))
@@ -47,6 +82,8 @@ const noteTable = table(Tb.Note, {
   retention: t.string(),
   sources: t.option(t.array(t.object({ url: t.string(), title: t.option(t.string()), retrievedAt: t.string() }))),
   rationale: t.option(t.string()), uncertainty: t.option(t.array(t.string())), zone: t.option(t.array(t.string())),
+  dependsOn: t.option(t.array(t.string())), skillRefs: t.option(t.array(t.string())),
+  toolRefs: t.option(t.array(t.string())), modelRef: t.option(t.string()),
   createdAt: t.string(), createdBy: t.string(), updatedAt: t.string(), updatedBy: t.string(),
   revision: t.number(), hits: t.option(t.number()), lastAccessedAt: t.option(t.string()),
   // the note's dense vector (embedder-derived, Tier-2 like hits) — set only when an embedder was
@@ -135,9 +172,9 @@ const joinClaimOwners = (
       : []
   })
 
-// Raw semantic-scan rows — the fields the cosine SELECT projects, parsed (never cast) at the
-// boundary like every other DB read. hits/lastAccessedAt are optional (a note may predate them).
-const SemanticRow = z.object({
+// Raw rows from the two RAW selects (cosine and full-text), parsed (never cast) at the boundary
+// like every other DB read. hits/lastAccessedAt are optional (a note may predate them).
+const SummaryRow = z.object({
   noteId: z.string(), scope: z.string(), title: z.string(),
   // projected like every other summary field: without it toSummary would fall back to shape
   // inference over a row that carries none of the columns inference reads, and label every
@@ -148,18 +185,163 @@ const SemanticRow = z.object({
   // the two drift inputs — optional because a row projected before either column existed still
   // selects, and both fall back to the "uncheckable" value rather than a fabricated one
   sourceRevision: z.string().nullable().optional(), paths: z.array(z.string()).optional(),
-  score: z.number(),
 })
+// the SELECT list derived from SummaryRow's own keys, so widening the row shape widens the
+// projection in the same edit. It used to be a hand-kept second spelling of the list, and zod
+// strips unknown keys, so half a change was silent.
+//
+// It is a NARROWING for the keyword arm, which used to select the whole row through the builder:
+// toSummary falls back to `inferTier(r)` for a row with no stored `tier`, and inference reads
+// kind/zone/uncertainty/rationale/retention — none of which are projected here. So a tier-less row
+// is now labelled `semantic` by both arms rather than by neither, and drops out of a `filter.tier`
+// search entirely. MEASURED on the live corpus: 37 notes, ZERO without a stored tier, so the
+// fallback is currently dead code and this costs nothing today. It is only reachable on a read model
+// that has not been rebuilt since the tier split, which `orc memory rebuild` is the answer to (see
+// the `tier` field on noteTable). Widen this list rather than re-adding a full-row select if that
+// ever stops being true — five more columns on the hottest path is the smaller price.
+const SUMMARY_COLUMNS = Object.keys(SummaryRow.shape).join(', ')
+const SemanticRow = SummaryRow.extend({ score: z.number() })
 
-// Raw claim rows from the cosine SELECT, parsed at the boundary like SemanticRow above.
-const ClaimRow = z.object({
+// `search::score` is parsed as a plain number, NOT `nullable()`: MEASURED against SurrealDB 3.2.0,
+// a match clause that did not match yields 0, not NONE, so the `?? 0` this pattern is usually
+// written with is dead code here. Nothing about the SCORING depends on that — kwMatches carries
+// which terms matched, so a coalesced NONE could not have been mistaken for a hit.
+//
+// What DOES depend on it is failure shape, and it is asymmetric: semanticSearch wraps its whole
+// select in a catch and degrades to the other arm, keywordSearch has no catch at all. So on a
+// server that returned NONE, the semantic arm would keep working and the keyword arm would take
+// hybrid search down with it — a throw out of search(), not a degraded result. That asymmetry
+// predates this change (the substring arm had no catch either) and SHOULD be closed, in the
+// direction of giving the keyword arm the same degrade-to-the-other-arm guard; deliberately not
+// done here, because "both arms failed" and "one arm failed" want different logging and that is a
+// contract question, not a comment fix.
+const ftsColumns = z.object({ kwScores: z.array(z.number()), kwMatches: z.array(z.boolean()) })
+// updatedAt rides along as the LAST tiebreak, preserving the recency order the substring arm got
+// from its `ORDER BY updatedAt DESC` for rows the relevance keys cannot separate.
+const KeywordRow = SummaryRow.extend({ updatedAt: z.string() }).extend(ftsColumns.shape)
+
+// Raw claim rows, from the cosine select and the full-text one.
+const ClaimRowBase = z.object({
   claimId: z.string(), noteId: z.string(), scope: z.string(), text: z.string(),
-  validFrom: z.string(), score: z.number(),
+  validFrom: z.string(),
 })
+// derived like SUMMARY_COLUMNS above: the parse's keys are the projection, one edit widens both
+const CLAIM_COLUMNS = Object.keys(ClaimRowBase.shape).join(', ')
+const ClaimRow = ClaimRowBase.extend({ score: z.number() })
+const KeywordClaimRow = ClaimRowBase.extend(ftsColumns.shape)
+
+// The filter fields a RAW select cannot push into matchFilter's builder. Applied in TS by both raw
+// arms, from one spelling, so semantic and keyword cannot disagree about what a filter means.
+const matchesRow = (
+  r: { tier?: string; categories?: string[]; tags: string[] }, filter: MemoryFilter,
+): boolean =>
+  (!filter.tier || r.tier === filter.tier)
+  && (!filter.category || (r.categories ?? []).includes(filter.category))
+  && (!filter.tag || r.tags.includes(filter.tag))
 
 // How many NOTES a claim search may return when the caller names no limit. Deliberately the same
 // order as the note search's own page: dedupeByNote counts notes, so this is comparable.
 const CLAIM_SEARCH_LIMIT = 10
+
+// Cosine below which a hit is not evidence of anything. Without it the ranker always answers: both
+// arms take the top 50 by cosine with no minimum, so a query about a subject this project has never
+// touched still returns its least-unlike notes, and memory_search's own "absence is not proof"
+// wording (tools.ts) described a behaviour the code did not have.
+//
+// MEASURED over bench/probes.json against the live corpus (37 notes carrying embeddings),
+// `ollama/mxbai-embed-large` (1024d), raw cosine before the re-rank. Rows are post-knowledge(): a
+// ui-metadata note is never returnable, so counting one measures a distribution the floor does not
+// act on. It bites — the android probe's raw top is ui-project-name @0.4731, its real top is
+// outcome-embedding-interfaces @0.4416, and that gap is the whole of the 0.46 row below: post-
+// knowledge that probe is the ONE negative 0.46 silences, raw it would silence none.
+//
+//   probe class            n    min      median   max
+//   positive (correct)    19    0.4336   0.5742   0.7689
+//   negative (top hit)     7    0.4416   0.5403   0.5922
+//
+// THE TWO DISTRIBUTIONS OVERLAP — not a separating threshold, and cannot be made into one. Silencing
+// every negative needs > 0.5922 ("stripe cli"); keeping every positive needs < 0.4336 ("x" →
+// area-ui). No value does both, and 0.495 is not at the recall end of that range: IT COSTS TWO
+// POSITIVES — "x" @0.4336 and "rrfFuse" @0.4725, both one-identifier queries — while silencing two
+// of the seven negatives and leaving five answering. The keyword arm carries both lost positives
+// (exact-token matching is what a one-word identifier query wants), so the FUSED surface loses
+// neither and this arm alone does. This block used to say "0.495 costs no positive": true at the 15
+// positives it was swept on, false since the identifier probes were added, and nothing re-ran it.
+//
+// Chosen as the midpoint of a measured PLATEAU, not of a gap. `bun bench/graph-bench.ts` grades the
+// FUSED surface, so the table is a property of BOTH arms. Re-swept 2026-07-28 over the current
+// 26-probe file, semantic arm replicated at each floor and fused through the real rrfFuse against
+// the real keyword arm; the shipping row reproduces graph-bench's own output exactly.
+//
+//   floor   derived     synonym partial cross negative  fused   fused@1  sem 0-res
+//   0.00    13/14 12@1    2/2     1/2    1/1    0/7      17/26   16/19     0/26   floor off: always answers
+//   0.46    13/14 11@1    2/2     1/2    1/1    1/7      18/26   15/19     1/26
+//   0.485   13/14 11@1    2/2     1/2    1/1    2/7      19/26   15/19     3/26  <-\
+//   0.49    13/14 11@1    2/2     1/2    1/1    2/7      19/26   15/19     3/26    |
+//   0.495   13/14 12@1    2/2     1/2    1/1    2/7      19/26   16/19     4/26  <-- shipping
+//   0.50    13/14 12@1    2/2     1/2    1/1    2/7      19/26   16/19     4/26  <-/
+//   0.505   13/14 12@1    1/2     1/2    1/1    2/7      18/26   15/19     5/26   synonym falls off
+//   0.53    13/14 10@1    1/2     2/2    1/1    3/7      20/26   13/19     7/26   top-1 collapses
+//   0.60    14/14 13@1    1/2     1/2    1/1    5/7      22/26   16/19    15/26   see below
+//
+// The plateau holds at 26 probes — 0.485-0.50 all score 19/26, 0.505 degrades, and 0.495/0.50 are
+// strictly better on top-1 (16/19) than 0.485/0.49 — and that plateau is the whole justification.
+// It is a property of THIS corpus, not of the constant: swept against a second, single-subject
+// corpus (8 knowledge notes, 22 probes) there is no plateau at all — 0.485/0.49/0.50 score 15/22
+// and 0.495 dips to 14/22, one probe wide — and there the floor costs three positives, two of them
+// the natural-language synonym probes an embedder exists to serve. The overlap above is also worse
+// on the narrow corpus (67% of positives inside the negative range, against 53% here), which is the
+// predicted single-topic effect. Evidence, both sweeps:
+// .superpowers/sdd/2026-07-28-retrieval-quality/corpus-comparison-report.md.
+//
+// 0.60 IS NOT AN IMPROVEMENT AND MUST NOT BE ADOPTED. This was recorded here as an open decision
+// ("scores one better, someone decide") and is now settled, measured on both corpora: 0.60 wins the
+// scoreboard by SILENCING THE SEMANTIC ARM — zero-result on 15 of 26 probes here and 20 of 22 on
+// the second corpus — and at 0.60 the fused row is numerically identical to the keyword arm's own
+// (22/26 top-3, 16/19 top-1, zero-result 5/26 here; 16/22 there). The benchmark's negative column is
+// worth 7 of 26 points, so switching an arm off outscores what that arm contributes. The metric was
+// rewarding an absent arm, never a better floor. "Raise the floor to 0.60" means "run keyword-only",
+// which is a MODE (search already has one), not a threshold.
+//
+// It DE-NOISES, it does not only refuse: a low-cosine but much-read note outranks a better match
+// once heat applies, and the floor removes those bystanders before they crowd the fused top-3. No
+// probe's PASS is attributable to it, though — the positive columns at 0.00 and at 0.495 are
+// identical, because the keyword arm answers those probes on its own. Its whole measurable
+// contribution is the negative column.
+//
+// CALIBRATED ON THE NOTE ARM, applied to both — and NO LONGER INERT on the claim arm, which it was
+// when tuned. Claim cosines still run higher (one sentence is a tighter match unit: positives median
+// 0.6452 against the note arm's 0.5742) and all seven claim-arm negatives are still above it
+// (0.4984 … 0.5814, so it buys nothing there), but one claim positive now falls below at 0.4752
+// (n=19). It is pure cost on that arm today. Re-tuning against the table above moves the claim arm
+// blind; re-measure both.
+//
+// MUST STAY >= 0, and the filter must stay AHEAD of the re-rank — see semanticSearch's re-rank
+// comment, which owns the formula and this coupling.
+//
+// Limits: n=19 positives, n=7 negatives, ONE corpus and ONE model. IN `mode: 'semantic'` a genuine
+// question phrased worse than any probe here WILL be silenced, and now demonstrably is, on two. The
+// default mode is hybrid, where the fused surface is silent only when BOTH arms are and the keyword
+// arm has no score floor at all (its zero-result rate is 5/26, and all five are negatives — 0/19 on
+// positives), so this constant bounds one arm's confidence, not the system's willingness to answer.
+// Re-measure when the embedder changes (a cut through one model's cosine distribution does not port,
+// exactly as cluster.ts's MEMORY_CLUSTER_THRESHOLD does not) and as the corpus grows: every number
+// above went stale between 27 notes and 37 without anything failing.
+//
+// The five negatives above the floor are NOT fixable by any scalar: they need a margin rule (return
+// nothing when the top COSINE is not meaningfully above the candidate set's median cosine — raw
+// cosine, not the re-ranked score, or a hot bystander widens the very gap the rule checks for).
+// This constant is the free half of that fix, not the whole of it. THE OTHER HALF NOW EXISTS and is
+// applied in semanticSearch below, ahead of this filter: keyword.ts's meetsMargin / SEMANTIC_MARGIN,
+// swept 2026-07-29 on both corpora. It takes two of those five here and two on the second corpus;
+// the two it cannot take ("graphql resolver schema stitching", "stripe cli") are the ones the
+// KEYWORD arm answers, which no rule inside this arm can reach.
+//
+// AND THIS ARM'S NEGATIVE COUNT DOES NOT SURVIVE FUSION. The keyword arm silences 5 of 7 negatives,
+// this arm 2, and the fused surface lands on the LOWER of the two — structurally, not by luck; see
+// search()'s fusion comment, which owns that finding, and keyword.ts's meetsQuorum, which owns the
+// other half of the coupling.
+export const SEMANTIC_FLOOR = 0.495
 
 const CONNECT_TIMEOUT_MS = 5_000
 const CLOSE_TIMEOUT_MS = 2_000
@@ -184,6 +366,33 @@ function makeOrm(surreal: Surreal) {
   return orm(surreal, noteTable, metaTable, linkTable, claimTable, topicTable)
 }
 type Db = ReturnType<typeof makeOrm>
+// ReturnType picks the last overload, which is the no-callback one returning the tx itself.
+type Tx = Awaited<ReturnType<Db['transaction']>>
+
+// The ONE stats-preserving edge materialization. Both writers of the link table — applyEvent's
+// per-note rewrite and refreshLinks' global derivation — route through here, so the survivor rule
+// cannot drift between them (it was spelled twice, with two different stats keys, while claiming to
+// live in one place). Stats key by the canonical edgeKey from contracts, the same identity the log
+// fold uses. Delete-then-RELATE is safe for edges because RELATE mints a fresh record id per call;
+// a FIXED id deleted and re-created inside one Surreal transaction stays deleted at commit —
+// measured, which is why the claim re-materialization in applyEvent upserts in place instead.
+const linkStatsOf = (rows: ReadonlyArray<{ scope: string; fromId: string; toId: string; kind: LinkKind; hits?: number; lastAccessedAt?: string }>) =>
+  new Map(rows.map(l => [edgeKey(l.scope, l.fromId, l.toId, l.kind), l] as const))
+async function relateLinks(
+  tx: Tx, scope: string, fromId: string,
+  links: ReadonlyArray<{ id: string; kind: LinkKind; confidence?: number }>,
+  stats: ReadonlyMap<string, { hits?: number; lastAccessedAt?: string }>,
+): Promise<void> {
+  for (const l of links) {
+    const prev = stats.get(edgeKey(scope, fromId, l.id, l.kind))
+    await tx.relate(Tb.Link, new RecordId(Tb.Note, key(scope, fromId)), new RecordId(Tb.Note, key(scope, l.id))).set({
+      kind: l.kind, fromId, toId: l.id, scope,
+      ...(l.confidence !== undefined && { confidence: l.confidence }),
+      hits: prev?.hits ?? 0,
+      ...(prev?.lastAccessedAt !== undefined && { lastAccessedAt: prev.lastAccessedAt }),
+    })
+  }
+}
 
 export class SurrealMemory {
   private constructor(
@@ -223,7 +432,45 @@ export class SurrealMemory {
       // write would fail on the very first write. Defining both tables up front avoids that.
       // `link` (default TYPE ANY, so RELATE works) is defined too: neighbors() SELECTs from it
       // even when no edge was ever materialized.
-      await surreal.query([Tb.Note, Tb.Meta, Tb.Link, Tb.Claim, Tb.Topic].map(tb => `DEFINE TABLE IF NOT EXISTS ${tb} SCHEMALESS;`).join(' '))
+      // ONE batched statement, executed in order: the analyzer must exist before an index names it,
+      // and the tables before either. `IF NOT EXISTS` throughout because this runs on EVERY open.
+      //
+      // THIS SETS THE SERVER VERSION FLOOR: `FULLTEXT ANALYZER` is SurrealDB 3.x syntax (2.x spelled
+      // it `SEARCH ANALYZER` and took a field LIST per index). docker-compose pins v3.2.0, which is
+      // what every measurement in this file was taken against. Against a 2.x server this batch is a
+      // parse error and open() throws — loud and immediate, which is the right failure, but it is a
+      // floor a reader would otherwise have to discover by hitting it. Note the CLIENT dependency in
+      // plugins/memory/package.json is still declared at 2.0.4; the driver spans both, the SERVER
+      // does not.
+      // MEASURED against the live project database: warm, the whole batch is 0.2-0.6 ms (a metadata
+      // check) out of a ~20 ms open(); cold, DEFINE INDEX BACKFILLS the rows already present — 4
+      // indexes over 27 notes / 42 KB of text in 12 ms — so an existing project becomes searchable
+      // on its next command, with no `orc memory rebuild`. The cold path is linear in corpus text;
+      // move it off open() if a project ever makes that 12 ms a visible pause.
+      //
+      // THE CEILING `IF NOT EXISTS` BUYS: it makes the analyzer and the indexes IMMUTABLE on a
+      // database that already has them. Changing FTS_ANALYZER's filters here would then apply to
+      // new databases only, silently, and every existing project would keep matching under the old
+      // rules — the worst kind of drift, because search still works and just answers differently
+      // per machine. MEASURED: after re-sending this batch with `snowball(english)` added, a query
+      // for 'declare' still missed a stored 'declared'; `DEFINE ANALYZER OVERWRITE` alone did NOT
+      // fix it either (the index holds tokens produced by the OLD analyzer) — only re-sending
+      // `DEFINE INDEX OVERWRITE`, which rebuilds it, did. So the upgrade path for any analyzer
+      // change is BOTH statements as OVERWRITE, paying the cold build again. A versioned name
+      // (`orc_en_v2`) is the alternative and costs the same rebuild, since every index definition
+      // below names the analyzer. Field WEIGHTS are exempt: they live in NOTE_SEARCH_FIELDS and are
+      // applied in TS by foldRow, never in the index, so changing one takes effect immediately.
+      //
+      // The indexes outlive a rebuild: `clear()` DELETEs rows and never touches the table, so the
+      // definitions and their maintenance survive the replay (measured: delete-all, re-create, the
+      // row is matchable again). Only `drop()` removes them, by removing the database — and open()
+      // is what re-creates it.
+      await surreal.query([
+        [Tb.Note, Tb.Meta, Tb.Link, Tb.Claim, Tb.Topic].map(tb => `DEFINE TABLE IF NOT EXISTS ${tb} SCHEMALESS;`).join(' '),
+        `DEFINE ANALYZER IF NOT EXISTS ${FTS_ANALYZER} TOKENIZERS class FILTERS lowercase, snowball(english);`,
+        ftsIndexes(Tb.Note, NOTE_SEARCH_FIELDS),
+        ftsIndexes(Tb.Claim, CLAIM_SEARCH_FIELDS),
+      ].join(' '))
       return new SurrealMemory(surreal, makeOrm(surreal), embedder, { ns: t.ns, db: t.db })
     } catch (err) {
       // connect() opens a live socket; if signin/use/DEFINE then throws, don't leak it
@@ -289,6 +536,10 @@ export class SurrealMemory {
           ...(n.rationale !== undefined && { rationale: n.rationale }),
           ...(n.uncertainty !== undefined && { uncertainty: n.uncertainty }),
           ...(n.zone !== undefined && { zone: n.zone }),
+          ...(n.dependsOn !== undefined && { dependsOn: n.dependsOn }),
+          ...(n.skillRefs !== undefined && { skillRefs: n.skillRefs }),
+          ...(n.toolRefs !== undefined && { toolRefs: n.toolRefs }),
+          ...(n.modelRef !== undefined && { modelRef: n.modelRef }),
           createdAt: prov.createdAt, createdBy: prov.createdBy,
           updatedAt: prov.updatedAt, updatedBy: prov.updatedBy, revision: prov.revision,
           hits: ex?.hits ?? 0,
@@ -298,25 +549,15 @@ export class SurrealMemory {
           // a keyword-only deployment simply never sets it, and a rebuild re-derives it)
           ...(embedding && { embedding }),
         })
-        // Re-materialize this note's out-edges (delete-then-RELATE) — deterministic on replay.
-        // PRESERVE stats first: read the existing out-edges before the delete wipes them, keyed
-        // by (toId, kind), so a link that SURVIVES the rewrite carries its earned hits/
-        // lastAccessedAt into the re-RELATE below (same omit-if-undefined pattern as the note row
-        // above, surreal.ts:154-156). A link the update REMOVES loses its stats with it — correct,
-        // the connection no longer exists. Skipping this read is the blocker T6 was named for:
-        // every note UPDATE would otherwise silently wipe its edges' accumulated activation.
+        // Re-materialize this note's out-edges (delete-then-RELATE, relateLinks owns the survivor
+        // rule) — deterministic on replay. PRESERVE stats first: read the existing out-edges before
+        // the delete wipes them, so a link that SURVIVES the rewrite carries its earned hits/
+        // lastAccessedAt into the re-RELATE. A link the update REMOVES loses its stats with it —
+        // correct, the connection no longer exists. Skipping this read is the blocker T6 was named
+        // for: every note UPDATE would otherwise silently wipe its edges' accumulated activation.
         const existingLinks = await tx.select(Tb.Link).where(l => l.fromId.eq(note.id).and(l.scope.eq(note.scope)))
-        const linkStats = new Map(existingLinks.map(l => [`${l.toId} ${l.kind}`, l]))
         await tx.delete(Tb.Link).where(l => l.fromId.eq(note.id).and(l.scope.eq(note.scope)))
-        for (const l of note.links) {
-          const exLink = linkStats.get(`${l.id} ${l.kind}`)
-          await tx.relate(Tb.Link, new RecordId(Tb.Note, k), new RecordId(Tb.Note, key(note.scope, l.id))).set({
-            kind: l.kind, fromId: note.id, toId: l.id, scope: note.scope,
-            ...(l.confidence !== undefined && { confidence: l.confidence }),
-            hits: exLink?.hits ?? 0,
-            ...(exLink?.lastAccessedAt !== undefined && { lastAccessedAt: exLink.lastAccessedAt }),
-          })
-        }
+        await relateLinks(tx, note.scope, note.id, note.links, linkStatsOf(existingLinks))
         // Claims re-materialize from the note's live set. Deliberately NOT the edges' clear-and-
         // recreate above: a claim row has a DETERMINISTIC id (note + content hash), and a fixed
         // record id deleted and re-created inside one Surreal transaction stays deleted at commit —
@@ -402,8 +643,7 @@ export class SurrealMemory {
     // fetch is a later optimisation (spec §4.2). Both directions (spec RG4): "what supersedes
     // this note" must be reachable from the superseded seed, so each edge is added reversed too.
     const rows = await this.db.select(Tb.Link).where(l => l.scope.eq(scope))
-    // each stored edge is traversed both ways (spec RG4), but tagged with direction so an asymmetric
-    // kind stays unambiguous: the authored A→B edge is 'out' from A / 'in' from B.
+    // tagged with direction so an asymmetric kind stays unambiguous: A→B is 'out' from A, 'in' from B
     const edges: Edge[] = rows.flatMap(r => {
       // edge heat folds into confidence: one multiplication, rank stays purely structural.
       // ponytail: promote to an explicit Edge field if rank ever needs raw confidence.
@@ -460,7 +700,7 @@ export class SurrealMemory {
     const rows = await this.db.select(Tb.Note)
       .where(n => this.matchFilter(n, filter))
       .orderBy('updatedAt', 'DESC')
-    return rows.map(toSummary)
+    return rows.filter(r => matchesRow(r, filter)).map(toSummary)
   }
 
   async search(query: string, filter: MemoryFilter = {}, opts: MemorySearchOpts = {}): Promise<NoteSummary[]> {
@@ -471,6 +711,17 @@ export class SurrealMemory {
     if (mode === SEARCH_MODE.semantic) return semantic
     // hybrid: fuse the two orderings by reciprocal rank, keyed by (scope,id) since ids repeat
     // across scopes. A note found by only one arm still ranks; agreement between arms wins.
+    //
+    // THE COST OF THAT IS STRUCTURAL AND MEASURED ON TWO CORPORA: a union cannot preserve SILENCE.
+    // If either arm answers, the fused surface answers, so an arm refusing a query — which is
+    // information, and the only thing meetsQuorum and SEMANTIC_FLOOR buy — is discarded whenever the
+    // other arm speaks. Every fusion loss on the benchmark is that shape: 3 of 4 losses on this
+    // corpus and 5 of 5 on the second are negative probes where the keyword arm was correctly
+    // silent and the semantic arm was not. Fusion is not therefore bad — fused top-1 ties or beats
+    // both arms and fused zero-result is the lowest of the three — but no threshold in either arm
+    // can fix the negative column, because the fix belongs HERE (a negative-consensus rule: stay
+    // silent when the arm that CAN refuse did). Evidence:
+    // .superpowers/sdd/2026-07-28-retrieval-quality/corpus-comparison-report.md.
     const keyword = knowledge(await this.keywordSearch(query, filter))
     const byKey = new Map<string, NoteSummary>()
     for (const n of [...semantic, ...keyword]) byKey.set(noteKey(n.scope, n.id), n)
@@ -503,18 +754,38 @@ export class SurrealMemory {
     return cap(ranked)
   }
 
-  // Substring match over claim text, AND across terms — the same rule and the same term cap
-  // keywordSearch uses, for the same reason (each term deepens the WHERE AST, and extra terms only
-  // narrow). The first term seeds the reduce rather than a constant predicate, so the builder never
-  // needs a tautology. No relevance score: the WHERE already requires every term of every row, so
-  // newest-established wins the tiebreak and rrfFuse ranks the rest against the semantic arm.
+  // Full-text match over claim text, OR across terms under the same quorum rule keywordSearch
+  // applies — ONE spelling of both, in keyword.ts, because two arms disagreeing about what counts as
+  // a hit is exactly the drift that rule exists to prevent. A claim row has one searchable field, so
+  // its coverage is just how many query terms the statement carries; newest-established still breaks
+  // a tie, as it did when this arm had no relevance score at all.
+  //
+  // THE RULE IS CALIBRATED ON THE NOTE ARM AND INHERITED HERE UNMEASURED — bench/probes.json grades
+  // notes, so nothing in that sweep saw a claim. What IS measured here is recall: this arm's
+  // zero-result rate over the same 20 probes went 16/20 to 8/20. Its top-k quality is unverified.
+  // See keyword.ts's meetsQuorum, which owns that disclosure and the numbers.
+  //
+  // ponytail: no LIMIT, same unbounded fetch and same upgrade path as keywordSearch above — and
+  // worse here, since claims outnumber notes.
   private async keywordClaims(query: string, owners: OwnerMap): Promise<ClaimHit[]> {
-    const [first, ...rest] = query.toLowerCase().split(/\s+/).filter(Boolean).slice(0, MAX_SEARCH_TERMS)
-    if (first === undefined) return []
-    const rows = await this.db.select(Tb.Claim)
-      .where(c => rest.reduce((acc, q) => acc.and(c.text.lowercase().contains(q)), c.text.lowercase().contains(first)))
-      .orderBy('validFrom', 'DESC')
-    return joinClaimOwners(rows, owners)
+    const terms = keywordTerms(query)
+    if (terms.length === 0) return []
+    const fts = ftsQuery(terms, namesOf(CLAIM_SEARCH_FIELDS))
+    const res = await this.surreal.query(
+      `SELECT ${CLAIM_COLUMNS}, [${fts.scores}] AS kwScores, [${fts.matches}] AS kwMatches`
+      + ` FROM ${Tb.Claim} WHERE (${fts.where})`,
+      fts.vars,
+    )
+    const rows = KeywordClaimRow.array().parse(Array.isArray(res) ? res[0] : res)
+    const weights = weightsOf(CLAIM_SEARCH_FIELDS)
+    return joinClaimOwners(
+      rows
+        .map(r => ({ r, k: foldRow(r.kwMatches, r.kwScores, weights) }))
+        .filter(({ k }) => meetsQuorum(k.matched, terms.length))
+        .sort((a, b) => keywordCompare(a.k, b.k) || ascending(b.r.validFrom, a.r.validFrom))
+        .map(({ r }) => r),
+      owners,
+    )
   }
 
   // Cosine over per-claim embeddings — same brute-force scan, same degrade-to-keyword contract as
@@ -526,7 +797,7 @@ export class SurrealMemory {
       if (!qv) return []
       const scopes = filter.scope === undefined ? [] : [filter.scope].flat()
       const res = await this.surreal.query(
-        `SELECT claimId, noteId, scope, text, validFrom,`
+        `SELECT ${CLAIM_COLUMNS},`
         + ` vector::similarity::cosine(embedding, $q) AS score`
         + ` FROM ${Tb.Claim} WHERE embedding != NONE`
         + (scopes.length > 0 ? ` AND scope IN $scopes` : '')
@@ -534,7 +805,16 @@ export class SurrealMemory {
         { q: qv, ...(scopes.length > 0 && { scopes }) },
       )
       const rows = ClaimRow.array().parse(Array.isArray(res) ? res[0] : res)
-      return joinClaimOwners(rows, owners)
+      // Same margin rule as the note arm, spelled once in keyword.ts and applied here for the same
+      // reason SEMANTIC_FLOOR is — one arm's confidence rule cannot mean two different things
+      // depending on whether the match unit is a note or a statement. MEASURED as scoreboard-
+      // neutral on the claim probes of both corpora (3 and 3): it silences only the "stripe cli"
+      // claim negative, which the keyword arm answers on corpus A anyway and which already passed
+      // on corpus B. Claim cosines run higher and were never graded at depth — see meetsQuorum's
+      // note on inheriting a note-calibrated rule; this is the same risk, taken knowingly.
+      const candidates = rows.filter(r => !isUiMetaNote(r.scope, r.noteId))
+      if (!meetsMargin(candidates.map(r => r.score))) return []
+      return joinClaimOwners(candidates.filter(r => r.score >= SEMANTIC_FLOOR), owners)
     } catch (err) {
       console.warn(`[memory] claim semantic search failed, falling back to keyword: ${errorMessage(err)}`)
       return []
@@ -569,12 +849,13 @@ export class SurrealMemory {
       // the scope predicate belongs in the WHERE, ahead of ORDER BY/LIMIT — see MemoryFilter
       const scopes = filter.scope === undefined ? [] : [filter.scope].flat()
       const res = await this.surreal.query(
-        // sourceRevision/paths ride along because they are the ONLY two inputs the drift check
-        // has: a hit that omits them is silently uncheckable, drops out of corpusDrift's denominator,
-        // and the preload then prints "unchanged since they were written — trust them" over exactly
-        // the notes it could not check. They must ALSO be on SemanticRow below — zod strips unknown
-        // keys, so widening the SELECT alone changes nothing.
-        `SELECT noteId, scope, title, tier, categories, tags, summary, hits, lastAccessedAt, sourceRevision, paths,`
+        // SUMMARY_COLUMNS, not an inline list: it is derived from SummaryRow, so the projection and
+        // the parse of this row cannot drift (zod strips unknown keys, so a hand-kept list widened
+        // alone was silent). sourceRevision and paths are why that matters — they are the ONLY two
+        // inputs the drift check has, and a hit that omits them is silently uncheckable, drops out
+        // of corpusDrift's denominator, and makes the preload print "unchanged since they were
+        // written — trust them" over exactly the notes it could not check.
+        `SELECT ${SUMMARY_COLUMNS},`
         + ` vector::similarity::cosine(embedding, $q) AS score`
         + ` FROM ${Tb.Note} WHERE embedding != NONE`
         + (scopes.length > 0 ? ` AND scope IN $scopes` : '')
@@ -582,20 +863,63 @@ export class SurrealMemory {
         { q: qv, ...(scopes.length > 0 && { scopes }) },
       )
       const rows = SemanticRow.array().parse(Array.isArray(res) ? res[0] : res)
+      // THE WITHIN-QUERY MARGIN RULE (keyword.ts's meetsMargin owns it and the sweep behind its
+      // constant). Whole-arm, not per-row: the question is whether THIS QUERY found anything that
+      // stands out, so the answer is all rows or none. It runs on the RAW cosines, ahead of both
+      // the floor and the re-rank — cos × heat would let a much-read bystander widen the very gap
+      // being measured.
+      //
+      // knowledge() FIRST, for the same reason SEMANTIC_FLOOR's table is measured post-knowledge:
+      // a ui-metadata note is never returnable, so letting one sit in the window measures a
+      // distribution the rule does not act on. search() applies knowledge() again on the way out;
+      // this is the same predicate, moved early, and changes nothing else about what is returned.
+      const candidates = rows.filter(r => !isUiMetaNote(r.scope, r.noteId))
+      if (!meetsMargin(candidates.map(r => r.score))) return []
       // use makes memory more findable: re-rank cosine by activation heat, mirroring neighbors() so a
-      // note agents keep reading rises in search (and thus preload) as it does in the graph. Shift
-      // cosine into [0,2] BEFORE boosting so the heat factor (≥1) stays monotonic across the WHOLE
-      // cosine range — multiplying a negative cosine by ≥1 would otherwise sink a hotter note below
-      // a colder one. ponytail: a hot note outside the cosine top-50 can't boost in — widen LIMIT if it bites.
+      // note agents keep reading rises in search (and thus preload) as it does in the graph.
+      //
+      // Heat MODULATES the cosine — it must never overrule it. This used to score
+      // `(score + 1) * heat`, shifting cosine into [0,2] first so the heat factor (≥1) stayed
+      // monotonic across the whole cosine range: multiplying a NEGATIVE cosine by ≥1 sinks a hotter
+      // note below a colder one, which is a real inversion. That reasoning was correct when written
+      // and is obsolete now for one reason: the SEMANTIC_FLOOR filter runs first, so every row
+      // reaching this line has cosine ≥ 0 and the case the shift defended against cannot arise.
+      //
+      // THE COUPLING, stated once (SEMANTIC_FLOOR's comment points here). heat = 1 + 0.25*log1p(a)
+      // ≥ 1, so `c * h` is increasing in h for c > 0, FLAT at c = 0, and decreasing only for c < 0.
+      // The invariant is therefore: SEMANTIC_FLOOR ≥ 0, and this .map stays BELOW the filter. A
+      // floor of exactly 0 is safe — `>=` still drops every negative cosine and ties the rest at 0
+      // — it just stops being a useful floor, which the floor's own test catches, not this one.
+      //
+      // The shift had to go because it destroyed the signal's dynamic range. MEASURED on the live
+      // corpus (~27 embedded notes, ollama/mxbai-embed-large):
+      //   term                  observed span        ratio
+      //   cosine, shifted       1.417 .. 1.769       1.25x   <- the signal, after +1
+      //   cosine, unshifted     0.417 .. 0.769       1.84x
+      //   heat                  1.00  .. 1.57        1.57x   <- the modulator (hottest note: 9 hits)
+      // A 1.25x signal cannot survive a 1.57x modulator: 9 hits outweighed the ENTIRE cosine range.
+      // It cost positive queries, not just negatives — "mermaid vault markdown render" put area-vault
+      // (cosine 0.769, the best match in the corpus) at rank 3 behind area-contracts at 0.502 × 1.57,
+      // and still passed top-3, which is why it went unseen until the benchmark grew a top-1 column.
+      //
+      // All 15 non-negative probes in bench/probes.json, semantic arm alone (search() is hybrid, and
+      // RRF fuses by RANK — it discards these magnitudes, so the end-to-end benchmark cannot see this
+      // change), both formulas measured with the floor active:
+      //   (cos+1) × heat (old)    7/15 top-1   10/15 top-3
+      //   cos × heat     (this)   9/15 top-1   12/15 top-3   <- chosen
+      // Three probes moved, all forward, none lost: "durable execution workflow" miss→@1, "mermaid
+      // vault markdown render" top3→@1, "write zone" miss→top3.
+      // Note ACTIVATION_GAIN is untouched: 0.25 only looked too large because the shift left the
+      // cosine term nothing to compete with. ponytail: a hot note outside the cosine top-50 can't
+      // boost in — widen LIMIT if it bites.
       const now = new Date().toISOString()
       const halfLife = halfLifeDays ?? DEFAULT_HALF_LIFE_DAYS
       const heat = (r: { hits?: number; lastAccessedAt?: string | null }): number =>
         activationBoost(activation({ hits: r.hits ?? 0, lastAccessedAt: r.lastAccessedAt ?? null }, now, halfLife))
-      return rows
-        .filter(r => (!filter.tier || r.tier === filter.tier)
-          && (!filter.category || (r.categories ?? []).includes(filter.category))
-          && (!filter.tag || r.tags.includes(filter.tag)))
-        .map(r => ({ r, s: (r.score + 1) * heat(r) }))
+      return candidates
+        .filter(r => r.score >= SEMANTIC_FLOOR)
+        .filter(r => matchesRow(r, filter))
+        .map(r => ({ r, s: r.score * heat(r) }))
         .sort((a, b) => b.s - a.s)
         .map(({ r }) => toSummary(r))
     } catch (err) {
@@ -650,9 +974,6 @@ export class SurrealMemory {
     }))
   }
 
-  // Stage 3. Recomputes the partition from the current claim set and replaces the topic table — no
-  // cursor, nothing to resume: it either completes or the next drain redoes it. Runs OUTSIDE the
-  // event transaction on purpose; grouping is a whole-corpus derivation, not a per-event projection.
   // Stage 3 for EDGES, the peer of refreshTopics below. The link table is supposed to be a function
   // of the live note set — each note asserts its own out-edges and the read model materializes them
   // — and materializing per event does not deliver that:
@@ -670,27 +991,21 @@ export class SurrealMemory {
   // at applyEvent is about a FIXED record id, which stays deleted at commit. Edge ids are generated,
   // and this was measured before the code was written — 1 row in, delete + relate, 1 row out.
   //
-  // Stats survive by (scope, from, to, kind) — the same survivor rule the per-note path used, now in
-  // one place instead of spread across two.
+  // Stats survive by (scope, from, to, kind) — the survivor rule itself lives in relateLinks,
+  // shared with the per-note rewrite in applyEvent, so the two writers cannot drift.
   async refreshLinks(): Promise<void> {
     const notes = await this.db.select(Tb.Note)
     await this.db.transaction(async tx => {
-      const stats = new Map((await tx.select(Tb.Link))
-        .map(l => [`${l.scope}\u0000${l.fromId}\u0000${l.toId}\u0000${l.kind}`, l] as const))
+      const stats = linkStatsOf(await tx.select(Tb.Link))
       await tx.delete(Tb.Link)
-      for (const n of notes)
-        for (const l of n.links) {
-          const prev = stats.get(`${n.scope}\u0000${n.noteId}\u0000${l.id}\u0000${l.kind}`)
-          await tx.relate(Tb.Link, new RecordId(Tb.Note, key(n.scope, n.noteId)), new RecordId(Tb.Note, key(n.scope, l.id))).set({
-            kind: l.kind, fromId: n.noteId, toId: l.id, scope: n.scope,
-            ...(l.confidence !== undefined && { confidence: l.confidence }),
-            hits: prev?.hits ?? 0,
-            ...(prev?.lastAccessedAt !== undefined && { lastAccessedAt: prev.lastAccessedAt }),
-          })
-        }
+      for (const n of notes) await relateLinks(tx, n.scope, n.noteId, n.links, stats)
     })
   }
 
+  // Stage 3 for TOPICS. Recomputes the partition from the current claim set and replaces the topic
+  // table — no cursor, nothing to resume: it either completes or the next drain redoes it. Runs
+  // OUTSIDE the event transaction, because grouping is a whole-corpus derivation rather than a
+  // per-event projection.
   async refreshTopics(threshold: number = MEMORY_CLUSTER_THRESHOLD): Promise<void> {
     // project scope only: claims are semantic-tier, durable knowledge is project-scoped, and a topic
     // view over one task's transient trail is noise. knowledge() for the same reason search() and
@@ -701,7 +1016,6 @@ export class SurrealMemory {
       .filter(r => !isUiMetaNote(r.scope, r.noteId))
     const claims: ClusterInput[] = rows.flatMap(r =>
       r.embedding === undefined ? [] : [{ id: r.claimId, vector: r.embedding }])
-    const text = new Map(rows.map(r => [r.claimId, r.text]))
     const groups = partition(claims, threshold)
     await this.db.transaction(async tx => {
       // Drop exactly the rows THIS refresh drops, in one statement that never reads a row — not a
@@ -779,37 +1093,55 @@ export class SurrealMemory {
     return [...byClaim.values()]
   }
 
+  // OR across terms over the FULLTEXT indexes, kept honest by keyword.ts's quorum rule. This
+  // replaced an AND over case-insensitive SUBSTRING matches, which had two defects that only look
+  // like one: AND made the arm silent on every query of 5+ terms (13 of 20 bench probes returned
+  // nothing), and `contains` has no token boundary, so it could not simply be switched to OR — the
+  // term 'a' would have matched every note in the corpus.
+  //
+  // RAW query, like semanticSearch's cosine select: surqlize has no builder for the `@N@` match
+  // operator or for search::score. That costs the builder's filter push-down, so — again exactly as
+  // semanticSearch does — scope goes into the WHERE and the remaining filter fields are applied in
+  // TS by matchesRow.
+  //
+  // ponytail: NO LIMIT, unlike semanticSearch's `LIMIT 50`. This fetches EVERY matching note —
+  // summary text plus a 32-element score array and a 32-element match array each — and ranks in TS.
+  // OR-across-terms makes that set much larger than the AND arm's was: a query containing 'the'
+  // matches essentially every note, because the analyzer indexes stop-words and nothing filters
+  // them (see keywordTerms' note on why dropping them was measured and rejected). At 27 notes the
+  // whole fetch is inside one round trip and invisible; it is linear in corpus size, so the
+  // ceiling is real and unmeasured beyond this corpus.
+  //
+  // Capping it is NOT free, which is why it is named rather than done: the primary rank key is
+  // `coverage`, a field-weighted count of matched clauses, and SurrealQL cannot ORDER BY it — the
+  // match predicates are booleans, not addable. The upgrade is `ORDER BY <the search::score sum>
+  // DESC LIMIT n` and accepting that the candidate window is then chosen by BM25 while the ranking
+  // inside it stays coverage-first, i.e. an approximation of the key that was measured (BM25 alone
+  // scored 12/15 top-3 against coverage's 13/15 — see keyword.ts). Adding it blind would have
+  // silently traded measured quality for an unmeasured constant.
   private async keywordSearch(query: string, filter: MemoryFilter = {}): Promise<NoteSummary[]> {
-    // AND across whitespace-separated terms, each term matching ANY field — a whole-query
-    // substring match made every multi-word query miss unless the exact phrase appeared.
-    // text fields: case-insensitive substring match; tags: membership on the lowercased
-    // term, since tags are stored lowercase by convention here.
-    // Term count is CAPPED: each term adds ~5 nested binary nodes to the WHERE expression and
-    // SurrealDB rejects deep ASTs ("Exceeded query recursion depth limit"); under AND
-    // semantics extra terms only narrow, so the first MAX_SEARCH_TERMS carry the query.
-    const terms = query.toLowerCase().split(/\s+/).filter(Boolean).slice(0, MAX_SEARCH_TERMS)
-    const rows = await this.db.select(Tb.Note)
-      .where(n => terms.reduce((acc, q) => acc.and(
-        n.title.lowercase().contains(q)
-          .or(n.summary.lowercase().contains(q))
-          .or(n.body.lowercase().contains(q))
-          .or(n.tags.contains(q)),
-      ), this.matchFilter(n, filter)))
-      .orderBy('updatedAt', 'DESC')
-    // relevance over recency: field-weighted term score, +1 for durable project scope so
-    // transient plan-scope notes don't bury the knowledge base; updatedAt breaks ties.
-    // ponytail: substring scoring — swap for a Surreal FTS index if this plateaus.
-    const score = (r: Record<string, any>): number => {
-      let s = r.scope === MemoryScope.project ? 1 : 0
-      for (const q of terms) {
-        if (r.title.toLowerCase().includes(q)) s += 3
-        if (r.summary.toLowerCase().includes(q)) s += 2
-        if (r.body.toLowerCase().includes(q) || r.tags.includes(q)) s += 1
-      }
-      return s
-    }
-    return rows.map(r => ({ r, s: score(r) }))
-      .sort((a, b) => b.s - a.s)
+    const terms = keywordTerms(query)
+    if (terms.length === 0) return []
+    const fts = ftsQuery(terms, namesOf(NOTE_SEARCH_FIELDS))
+    const scopes = filter.scope === undefined ? [] : [filter.scope].flat()
+    const res = await this.surreal.query(
+      `SELECT ${SUMMARY_COLUMNS}, updatedAt, [${fts.scores}] AS kwScores, [${fts.matches}] AS kwMatches`
+      + ` FROM ${Tb.Note} WHERE (${fts.where})`
+      + (scopes.length > 0 ? ` AND scope IN $scopes` : ''),
+      { ...fts.vars, ...(scopes.length > 0 && { scopes }) },
+    )
+    const rows = KeywordRow.array().parse(Array.isArray(res) ? res[0] : res)
+    const weights = weightsOf(NOTE_SEARCH_FIELDS)
+    return rows
+      .filter(r => matchesRow(r, filter))
+      .map(r => {
+        const k = foldRow(r.kwMatches, r.kwScores, weights)
+        // +1 for durable project scope, folded into the SAME key it has always been part of, so a
+        // transient plan-scope note cannot bury the knowledge base at equal coverage.
+        return { r, k: { ...k, coverage: k.coverage + (r.scope === MemoryScope.project ? 1 : 0) } }
+      })
+      .filter(({ k }) => meetsQuorum(k.matched, terms.length))
+      .sort((a, b) => keywordCompare(a.k, b.k) || ascending(b.r.updatedAt, a.r.updatedAt))
       .map(({ r }) => toSummary(r))
   }
 
@@ -824,12 +1156,10 @@ export class SurrealMemory {
     const [firstScope, ...moreScopes] = filter.scope === undefined ? [] : [filter.scope].flat()
     if (firstScope !== undefined)
       cond = cond.and(moreScopes.reduce((acc, sc) => acc.or(n.scope.eq(sc)), n.scope.eq(firstScope)))
-    // the stored column, never an inferred one: a row from before the split has no tier, and
-    // `orc memory rebuild` is what gives it one — guessing here would answer a lane question
-    // with a fabricated lane.
-    if (filter.tier) cond = cond.and(n.tier.eq(filter.tier))
-    if (filter.category) cond = cond.and(n.categories.contains(filter.category))
-    if (filter.tag) cond = cond.and(n.tags.contains(filter.tag))
+    // scope ONLY — tier/category/tag are answered by matchesRow in TS. `.contains` on an
+    // option-wrapped array column (categories) resolves on the builder proxy as a nested FIELD
+    // access, not the array method, so the category predicate crashed every `ls --category`;
+    // one row-level spelling also keeps list() and the raw search arms agreeing on filter meaning.
     return cond
   }
 
@@ -845,14 +1175,6 @@ export class SurrealMemory {
       .map(r => MemoryNote.parse(toNote(r)))
       .sort((a, b) => a.scope.localeCompare(b.scope) || a.id.localeCompare(b.id))
   }
-  // ESCAPE HATCH: delete-all is expressible via the builder too (`db.delete('note')` with no id
-  // deletes the whole table), so no raw `surreal.query` is used here either.
-  //
-  // ONE transaction, not three statements. applyEvent gates replay on `e.seq <= cursor`, so a
-  // clear that drops content while leaving the cursor ahead of it is unrecoverable through the
-  // normal paths: start()/catchUp() both drain zero and probeMemory honestly reports healthy,
-  // because "no events after the cursor" is true. Atomicity makes that state unreachable
-  // instead of merely unlikely.
   // Removes the DATABASE, not its rows. `clear()` empties a database that is still in use — what
   // purge needs, since the chat survives and the schema with it. Deletion has no runtime left to
   // hold one, so the object itself must go: clearing left one empty database per deleted project
@@ -867,6 +1189,14 @@ export class SurrealMemory {
     await this.surreal.query(`REMOVE DATABASE IF EXISTS \`${this.at.db}\`;`)
   }
 
+  // ESCAPE HATCH: delete-all is expressible via the builder (`db.delete('note')` with no id deletes
+  // the whole table), so no raw `surreal.query` is needed here.
+  //
+  // ONE transaction, not one statement per table. applyEvent gates replay on `e.seq <= cursor`, so
+  // a clear that drops content while leaving the cursor ahead of it is unrecoverable through the
+  // normal paths: start()/catchUp() both drain zero and probeMemory honestly reports healthy,
+  // because "no events after the cursor" is true. Atomicity makes that state unreachable instead of
+  // merely unlikely.
   async clear(): Promise<void> {
     await this.db.transaction(async tx => {
       await tx.delete(Tb.Note)
@@ -880,7 +1210,7 @@ export class SurrealMemory {
 }
 
 // map the stored row back to the MemoryNote shape (noteId → id; drop RecordId + Tier-2 fields).
-function toNote(r: Record<string, any>): unknown {
+function toNote(r: Record<string, any>) {
   return {
     // an absent tier (a row projected before the split) is classified by MemoryNote's own decoder
     // from the columns below, so a read model that has not been rebuilt still parses
@@ -892,10 +1222,24 @@ function toNote(r: Record<string, any>): unknown {
     retention: r.retention ?? 'durable',
     sources: r.sources,
     rationale: r.rationale, uncertainty: r.uncertainty, zone: r.zone,
+    dependsOn: r.dependsOn, skillRefs: r.skillRefs, toolRefs: r.toolRefs, modelRef: r.modelRef,
     createdAt: r.createdAt, createdBy: r.createdBy, updatedAt: r.updatedAt, updatedBy: r.updatedBy,
     revision: r.revision,
   }
 }
+
+// A tier field with no stored column or no toNote() mapping does not FAIL — MemoryNote.parse fills
+// the tier's default over it, so the authored value reads back as []/'' while the log still holds
+// it. That is exactly how the plan tier's dependsOn/skillRefs/toolRefs/modelRef were lost (the same
+// four budget.ts's FitterCoversNote names leaking on the read cap). These aliases turn the next
+// forgotten field into a compile error: every NoteView key must have a note-table column AND a
+// toNote() key. `id` is the one exclusion — surqlize reserves it, so it is stored as `noteId`.
+type ProjectionCoversTiers = Exclude<keyof NoteView, NoteColumn | 'id'> extends never ? true : never
+const projectionCoversTiers: ProjectionCoversTiers = true
+void projectionCoversTiers
+type ToNoteCoversTiers = Exclude<keyof NoteView, keyof ReturnType<typeof toNote>> extends never ? true : never
+const toNoteCoversTiers: ToNoteCoversTiers = true
+void toNoteCoversTiers
 
 function toSummary(r: Record<string, any>): NoteSummary {
   return {

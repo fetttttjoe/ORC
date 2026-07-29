@@ -13,10 +13,10 @@ export interface Cluster { key: string; members: string[]; medoidClaimId: string
 // models, and it does not port across corpus sizes either: the same value that was well-tuned at 52
 // claims fragmented at 93.
 //
-// Current: `ollama/mxbai-embed-large` (1024d) at 0.65, swept over a live 93-claim corpus authored by
-// agents through addClaims. Chosen because it DOMINATES the previous 0.675 rather than trading
-// against it — identical group structure (23 multi-claim groups, largest 8) with 6 fewer isolated
-// claims and one more group spanning multiple notes:
+// Current: `ollama/mxbai-embed-large` (1024d) at 0.65, chosen on a 93-claim sweep of a corpus
+// authored by agents through addClaims, because there it DOMINATED the previous 0.675 rather than
+// trading against it — identical group structure (23 multi-claim groups, largest 8) with 6 fewer
+// isolated claims and one more group spanning multiple notes:
 //
 //   thresh  topics  single  multi  cross-note  largest
 //   0.600     18       4     14       10         20     one 20-claim blob; groups by package
@@ -30,6 +30,24 @@ export interface Cluster { key: string; members: string[]; medoidClaimId: string
 // crashDedupKey and makeOperation (idempotency across storage/kernel/execution), and
 // releaseWriteClaims with claimWrite, the zone fence and verifyArtifacts. Below 0.65 the largest
 // group degenerates into "claims about the same package" rather than about the same subject.
+//
+// THE DOMINATION IS GONE AT 113 CLAIMS. Re-swept 2026-07-28, same bands, same embedder, live corpus:
+//
+//   thresh  topics  single  multi  cross-note  largest
+//   0.600     18       5     13       11         21
+//   0.625     29       8     21       15         12
+//   0.650     34      11     23       16          9     <- shipping
+//   0.675     48      16     32       19          5
+//   0.700     60      31     29       16          5
+//
+// 0.675 no longer produces "the same structure with more singletons": it now yields 32 multi-claim
+// groups against 0.65's 23 and 19 cross-note against 16, i.e. it splits 0.65's coarser groups into
+// more of them. So the choice is a TRADE again — 0.65 keeps 5 fewer claims isolated, 0.675 finds
+// more distinct themes — and the argument written above no longer selects it. Left at 0.65
+// deliberately: the numbers cannot say whether 0.675's extra groups are themes or splinters, and
+// only reading them can, which is what chose 0.65 the last time and has not been redone. This is
+// the second time this constant's justification has expired with corpus growth (52 → 93 → 113); it
+// is a re-sweep schedule, not a one-time cut.
 //
 // Previously 0.675, chosen on a 52-claim corpus where 0.670 and 0.680 produced an identical
 // partition. That plateau no longer exists at 93 claims — the curve degrades smoothly — which is
@@ -142,10 +160,43 @@ const lowerVector = (a: readonly number[], b: readonly number[]): boolean => {
 // point as it arrives and is documented to produce different partitions for different arrival orders;
 // that also made "re-cluster on rebuild" a no-op, since a rebuild replays the same order.
 //
-// Cost: one n(n-1)/2 cosine matrix, then at most n merge rounds over the surviving group pairs. At the
-// corpus this is sized for (tens of claims) that is microseconds.
-// ponytail: naive O(n^3) worst case in the merge loop — fine to a few thousand claims; past that,
-// see the spec's HDBSCAN revisit trigger.
+// Cost: one n(n-1)/2 cosine matrix, then at most n merge rounds, each RESCANNING every surviving
+// group pair and recomputing each pair's average link from scratch — naive O(n^3), and the merge
+// loop, not the matrix, is what dominates.
+//
+// MEASURED [sourced], cluster-bench.test.ts, 1024d synthetic vectors shaped to the live corpus's
+// own 2026-07-28 sweep (~3.3 claims/topic), threshold 0.65, two independent runs on different
+// machines — the spread between them is machine variance, not noise within a run:
+//
+//   n=100  ->  34 groups   ~100-170ms
+//   n=250  ->  84 groups   ~0.8-1.5s
+//   n=500  -> 167 groups   ~6-13s
+//
+// So "microseconds at tens of claims" and "fine to a few thousand claims", which this comment used
+// to say, were both wrong by orders of magnitude. At the live corpus (113 claims) a partition costs
+// ~150-250ms [derived, interpolated from n=100]; the near-cubic curve crosses the projector's
+// 1000ms SLOW_TOPIC_REFRESH_MS ceiling at roughly n≈200-250 claims [derived, interpolated], not at
+// the n≈1,000 the grouping spec's own cost table suggested — that table priced the cosine MATRIX
+// (~500k pairs ≈ 0.5s at n=1,000) and not this merge loop.
+//
+// ponytail: CEILING — this stays adequate while the project-scope claim corpus is under ~200 claims
+// (currently 113). Past that, the pre-registered upgrade path is, in order:
+//   L1  reusable cosine memo keyed by sorted id pair — a new claim costs O(n) cosines, not O(n^2);
+//   L2  priority queue + Lance-Williams update, deriving a merged cluster's average link
+//       arithmetically from the two pre-merge linkages — O(n^2 log n) instead of this O(n^3).
+// Both preserve order-independence and are specified to produce BYTE-IDENTICAL output, so they are
+// pure speed and need no re-tuning of MEMORY_CLUSTER_THRESHOLD. Only past those does approximation
+// start: kNN sparsification (~10k claims), then HDBSCAN.
+//
+// NOT YET BUILT, deliberately: L1+L2 were gated at plan approval on first attributing the observed
+// >1000ms refresh, and the attribution (see the `attribute-refresh-cost` finding) landed on Surreal
+// I/O rather than on cosines at THIS corpus size — the numbers above are exactly why. Build them
+// when the corpus approaches ~200 claims or when SLOW_TOPIC_REFRESH_MS fires with partition() itself
+// timed as the cost, whichever comes first.
+//
+// The HDBSCAN pointer this comment used to carry was a mis-aimed reference: HDBSCAN is a separate,
+// LATER lever with a different trigger (visibly mis-split groups at ~1,000 claims) and it is a
+// behaviour change, not a speed-up. It is not the answer to a slow partition.
 export function partition(claims: readonly ClusterInput[], threshold: number): Cluster[] {
   // Dedupe by id first, then build the matrix and the group list from that map — not from `claims`
   // directly — so a claim id that appears twice (e.g. re-embedded mid-corpus) can't make the matrix

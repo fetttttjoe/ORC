@@ -311,6 +311,39 @@ describe('projector resilience', () => {
     expect(refreshes).toBe(1) // and the first event's claims still got partitioned
   })
 
+  it('a WRITE repartitions topics but skips the O(n) link rebuild — only a DELETE re-links', async () => {
+    const pg = await createTestDb(); drops.push(pg.drop)
+    const log = (await openStorage(pg.url, { projectId: TEST_PROJECT_ID })).events
+    const vaultDir = mkdtempSync(path.join(tmpdir(), 'orc-vault-link-gate-'))
+    let links = 0
+    let topics = 0
+    // ponytail: retained cast — see the SurrealMemory-is-a-class note above.
+    const stub = {
+      applyEvent: async () => true,
+      get: async () => fullNote,
+      getCursor: async () => 0, // always re-drains from 0, so the 2nd catchUp re-applies write+delete
+      allNotes: async () => [],
+      refreshLinks: async () => { links += 1 },
+      refreshTopics: async () => { topics += 1 },
+    } as unknown as SurrealMemory
+    const proj = createMemoryProjector({ log, surreal: stub, vaultDir })
+    try {
+      // a plain WRITE materializes its own edges per-note in applyEvent, so the global O(all-notes)
+      // re-link is wasteful work it must skip. Topics still repartition (no per-event shortcut).
+      await log.append({ taskId: null, stepId: null, runToken: null, kind: 'memory_written', payload: { note: { ...noteInput }, author: { source: 'cli' } } })
+      await proj.catchUp()
+      expect(topics).toBe(1)
+      expect(links).toBe(0)
+      // a DELETE cascades away edges a NEIGHBOUR authored (Surreal drops a RELATE when either endpoint
+      // is deleted), so only here does recomputing the whole edge set earn its cost.
+      await log.append({ taskId: null, stepId: null, runToken: null, kind: 'memory_deleted', payload: { id: noteInput.id, scope: 'project', author: { source: 'cli' } } })
+      await proj.catchUp()
+      expect(links).toBe(1)
+    } finally {
+      await proj.close(); await log.close()
+    }
+  })
+
   it('a persistent non-connection failure still warns once and does not reject unhandled', async () => {
     const pg = await createTestDb(); drops.push(pg.drop)
     const log = (await openStorage(pg.url, { projectId: TEST_PROJECT_ID })).events

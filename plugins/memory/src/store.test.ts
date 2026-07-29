@@ -5,7 +5,7 @@ import path from 'node:path'
 import { z } from 'zod'
 import { claimId, EVENT_KIND, MemoryAccessedPayload, MemoryAuthor, MemoryTopicAccessedPayload, MemoryWrittenPayload, NOTE_TIER, type AccessVia } from '@orc/contracts'
 import { openStorage, type EventLog } from '@orc/kernel'
-import { createTestDb, TEST_PROJECT_ID } from '@orc/kernel/test-helpers'
+import { createTestDb, TEST_PROJECT_ID, type TestDb } from '@orc/kernel/test-helpers'
 import { SurrealMemory } from './surreal'
 import { createTestSurreal } from './test-helpers'
 import { createMemoryStore } from './store'
@@ -17,11 +17,21 @@ const drops: (() => Promise<void>)[] = []
 // timed-out teardown leaves throwaway Postgres/Surreal databases behind.
 afterAll(async () => { await Promise.all(drops.map(d => d())) }, 30_000)
 
+// Teardown must be unconditional: a bare `await log.close()` after the assertions is skipped the
+// moment an expect above it throws, and the leaked pool's backends get FORCE-terminated by the
+// database drop instead of closing cleanly. TestDb.onClose is the seam built for exactly this —
+// it runs the close BEFORE the drop, and a throwing closer never masks the test's own failure.
+const openLog = async (pg: TestDb): Promise<EventLog> => {
+  const log = (await openStorage(pg.url, { projectId: TEST_PROJECT_ID })).events
+  pg.onClose(() => log.close())
+  return log
+}
+
 describe('MemoryStore gateway', () => {
   it('write appends a memory_written event with stamped provenance and null taskId', async () => {
     const pg = await createTestDb(); drops.push(pg.drop)
     const ts = await createTestSurreal(); drops.push(ts.drop)
-    const log = (await openStorage(pg.url, { projectId: TEST_PROJECT_ID })).events
+    const log = await openLog(pg)
     const store = createMemoryStore({ log, surreal: await SurrealMemory.open(ts) })
     await store.write({ id: 'auth', title: 'Auth' }, { source: 'agent', executor: 'api-loop', model: 'opus', role: 'review' })
     const events = await log.all()
@@ -30,13 +40,12 @@ describe('MemoryStore gateway', () => {
     expect(events[0]!.taskId).toBeNull()
     const { author } = z.object({ author: MemoryAuthor }).parse(events[0]!.payload)
     expect(author.executor).toBe('api-loop')
-    await log.close()
   })
 
   it('recordAccess binds the event envelope to the author task identity', async () => {
     const pg = await createTestDb(); drops.push(pg.drop)
     const ts = await createTestSurreal(); drops.push(ts.drop)
-    const log = (await openStorage(pg.url, { projectId: TEST_PROJECT_ID })).events
+    const log = await openLog(pg)
     const store = createMemoryStore({ log, surreal: await SurrealMemory.open(ts) })
     await store.recordAccess('auth', 'project', 'read', { source: 'agent', taskId: 't1', stepId: 's1', runToken: 'r1' })
     await store.recordAccess('auth', 'project', 'read', { source: 'cli' })
@@ -45,39 +54,36 @@ describe('MemoryStore gateway', () => {
     expect(events[0]!.stepId).toBe('s1')
     expect(events[0]!.runToken).toBe('r1')
     expect(events[1]!.taskId).toBeNull() // cli access stays unbound
-    await log.close()
   })
 
   it('recordAccess with via appends a payload that parses MemoryAccessedPayload including via', async () => {
     const pg = await createTestDb(); drops.push(pg.drop)
     const ts = await createTestSurreal(); drops.push(ts.drop)
-    const log = (await openStorage(pg.url, { projectId: TEST_PROJECT_ID })).events
+    const log = await openLog(pg)
     const store = createMemoryStore({ log, surreal: await SurrealMemory.open(ts) })
     const via: AccessVia = { seed: 'net-topology', kind: 'supersedes', direction: 'out' }
     await store.recordAccess('auth', 'project', 'read', { source: 'cli' }, { via })
     const events = await log.all()
     const payload = MemoryAccessedPayload.parse(events[0]!.payload)
     expect(payload.via).toEqual(via)
-    await log.close()
   })
 
   it('replaying a write under one idempotency key leaves one memory_written event', async () => {
     const pg = await createTestDb(); drops.push(pg.drop)
     const ts = await createTestSurreal(); drops.push(ts.drop)
-    const log = (await openStorage(pg.url, { projectId: TEST_PROJECT_ID })).events
+    const log = await openLog(pg)
     const store = createMemoryStore({ log, surreal: await SurrealMemory.open(ts) })
     const author: MemoryAuthor = { source: 'agent', runToken: 'step:t1:s1:a1' }
     const key = 'step:t1:s1:a1:tool:c1:memory:auth'
     await store.write({ id: 'auth', title: 'Auth' }, author, { idempotencyKey: key })
     await store.write({ id: 'auth', title: 'Auth' }, author, { idempotencyKey: key })
     expect(await log.all()).toHaveLength(1)
-    await log.close()
   })
 
   it('tolerates a keyed replay whose payload changed only by the gateway stamp (typed conflict, not a throw)', async () => {
     const pg = await createTestDb(); drops.push(pg.drop)
     const ts = await createTestSurreal(); drops.push(ts.drop)
-    const log = (await openStorage(pg.url, { projectId: TEST_PROJECT_ID })).events
+    const log = await openLog(pg)
     const surreal = await SurrealMemory.open(ts)
     const author: MemoryAuthor = { source: 'agent', runToken: 'step:t1:s1:a1' }
     const key = 'step:t1:s1:a1:tool:c1:memory:auth'
@@ -87,19 +93,17 @@ describe('MemoryStore gateway', () => {
     await createMemoryStore({ log, surreal, sourceRevision: async () => 'sha-A' }).write({ id: 'auth', title: 'Auth' }, author, { idempotencyKey: key })
     await createMemoryStore({ log, surreal, sourceRevision: async () => 'sha-B' }).write({ id: 'auth', title: 'Auth' }, author, { idempotencyKey: key })
     expect(await log.all()).toHaveLength(1) // one event; the differing replay was tolerated, not thrown
-    await log.close()
   })
 
   it('stamps the gateway sourceRevision — agent-supplied values are overwritten', async () => {
     const pg = await createTestDb(); drops.push(pg.drop)
     const ts = await createTestSurreal(); drops.push(ts.drop)
-    const log = (await openStorage(pg.url, { projectId: TEST_PROJECT_ID })).events
+    const log = await openLog(pg)
     const store = createMemoryStore({ log, surreal: await SurrealMemory.open(ts), sourceRevision: async () => 'head-sha-42' })
     await store.write({ id: 'auth', title: 'Auth', sourceRevision: 'invented-by-agent' }, { source: 'agent' })
     const [event] = await log.all()
     const { note } = z.object({ note: z.object({ sourceRevision: z.string().nullable() }) }).parse(event!.payload)
     expect(note.sourceRevision).toBe('head-sha-42')
-    await log.close()
   })
 
   it('gitRevision returns HEAD inside a repo and null outside', async () => {
@@ -114,7 +118,7 @@ describe('MemoryStore gateway', () => {
   it('upsert merges omitted fields from the existing note; explicit empty clears', async () => {
     const pg = await createTestDb(); drops.push(pg.drop)
     const ts = await createTestSurreal(); drops.push(ts.drop)
-    const log = (await openStorage(pg.url, { projectId: TEST_PROJECT_ID })).events
+    const log = await openLog(pg)
     const surreal = await SurrealMemory.open(ts)
     const store = createMemoryStore({ log, surreal })
     const notePayload = z.object({ note: z.object({ title: z.string(), summary: z.string(), body: z.string(), tags: z.array(z.string()), links: z.array(z.object({ id: z.string(), kind: z.string() })) }) })
@@ -136,13 +140,12 @@ describe('MemoryStore gateway', () => {
     note = notePayload.parse(events[2]!.payload).note
     expect(note.body).toBe('')
     expect(note.summary).toBe('tokens rotate')
-    await log.close()
   })
 
   it('merge base folds from the log, not the projection: a stalled projector cannot regress fields', async () => {
     const pg = await createTestDb(); drops.push(pg.drop)
     const ts = await createTestSurreal(); drops.push(ts.drop)
-    const log = (await openStorage(pg.url, { projectId: TEST_PROJECT_ID })).events
+    const log = await openLog(pg)
     const surreal = await SurrealMemory.open(ts)
     const store = createMemoryStore({ log, surreal })
     const notePayload = z.object({ note: z.object({ title: z.string(), body: z.string(), tags: z.array(z.string()) }) })
@@ -156,17 +159,15 @@ describe('MemoryStore gateway', () => {
     expect(note.title).toBe('Auth v2')       // supplied → replaced
     expect(note.body).toBe('long body')       // omitted → preserved despite the un-projected first write
     expect(note.tags).toEqual(['auth'])
-    await log.close()
   })
 
   it('rejects a malformed note without appending', async () => {
     const pg = await createTestDb(); drops.push(pg.drop)
     const ts = await createTestSurreal(); drops.push(ts.drop)
-    const log = (await openStorage(pg.url, { projectId: TEST_PROJECT_ID })).events
+    const log = await openLog(pg)
     const store = createMemoryStore({ log, surreal: await SurrealMemory.open(ts) })
     await expect(store.write({ id: 'Bad Id', title: 'x' }, { source: 'cli' })).rejects.toThrow()
     expect(await log.all()).toHaveLength(0)
-    await log.close()
   })
 })
 
@@ -179,32 +180,24 @@ describe('claims on a tier that cannot hold them', () => {
   it('throws instead of dropping the statement and reporting success', async () => {
     const pg = await createTestDb(); drops.push(pg.drop)
     const ts = await createTestSurreal(); drops.push(ts.drop)
-    const log = (await openStorage(pg.url, { projectId: TEST_PROJECT_ID })).events
+    const log = await openLog(pg)
     const surreal = await SurrealMemory.open(ts)
     const store = createMemoryStore({ log, surreal })
-    try {
-      await expect(store.write(
-        { id: 'p1', title: 'A plan note', rationale: 'why this subplan exists', addClaims: ['a durable statement'] },
-        { source: 'cli' },
-      )).rejects.toThrow(/semantic-tier/)
-      // and nothing was appended — the failure is total, not a half-written note
-      expect(await store.get('p1')).toBeNull()
-    } finally {
-      await log.close()
-    }
+    await expect(store.write(
+      { id: 'p1', title: 'A plan note', rationale: 'why this subplan exists', addClaims: ['a durable statement'] },
+      { source: 'cli' },
+    )).rejects.toThrow(/semantic-tier/)
+    // and nothing was appended — the failure is total, not a half-written note
+    expect(await store.get('p1')).toBeNull()
   })
 
   it('still accepts claims on a semantic note', async () => {
     const pg = await createTestDb(); drops.push(pg.drop)
     const ts = await createTestSurreal(); drops.push(ts.drop)
-    const log = (await openStorage(pg.url, { projectId: TEST_PROJECT_ID })).events
+    const log = await openLog(pg)
     const surreal = await SurrealMemory.open(ts)
     const store = createMemoryStore({ log, surreal })
-    try {
-      await store.write({ id: 's1', title: 'A fact', addClaims: ['a durable statement'] }, { source: 'cli' })
-    } finally {
-      await log.close()
-    }
+    await store.write({ id: 's1', title: 'A fact', addClaims: ['a durable statement'] }, { source: 'cli' })
   })
 })
 
@@ -212,7 +205,7 @@ describe('sourceRevision is resolved lazily', () => {
   it('is never asked for on a read path, and re-resolved on EVERY write', async () => {
     const pg = await createTestDb(); drops.push(pg.drop)
     const ts = await createTestSurreal(); drops.push(ts.drop)
-    const log = (await openStorage(pg.url, { projectId: TEST_PROJECT_ID })).events
+    const log = await openLog(pg)
     const surreal = await SurrealMemory.open(ts)
     let calls = 0
     const store = createMemoryStore({ log, surreal, sourceRevision: async () => { calls++; return 'abc123' } })
@@ -229,7 +222,6 @@ describe('sourceRevision is resolved lazily', () => {
     await store.write({ id: 'n1', title: 'N1' }, { source: 'cli' })
     await store.write({ id: 'n2', title: 'N2' }, { source: 'cli' })
     expect(calls).toBe(2)
-    await log.close()
   })
 })
 
@@ -237,7 +229,7 @@ describe('additive claim writes', () => {
   const openStore = async () => {
     const pg = await createTestDb(); drops.push(pg.drop)
     const ts = await createTestSurreal(); drops.push(ts.drop)
-    const log = (await openStorage(pg.url, { projectId: TEST_PROJECT_ID })).events
+    const log = await openLog(pg)
     return { log, store: createMemoryStore({ log, surreal: await SurrealMemory.open(ts) }) }
   }
   const lastWrite = async (log: EventLog) => MemoryWrittenPayload.parse((await log.all()).at(-1)?.payload)
@@ -249,7 +241,6 @@ describe('additive claim writes', () => {
     await store.write({ id: 'n', title: 'N', addClaims: ['second'] }, { source: 'cli' })
 
     expect(claimsOf(await lastWrite(log)).map(c => c.text)).toEqual(['first', 'second'])
-    await log.close()
   })
 
   it('invalidating drops a claim and records the tombstone on the EVENT, not the note', async () => {
@@ -260,7 +251,6 @@ describe('additive claim writes', () => {
     const last = await lastWrite(log)
     expect(claimsOf(last).map(c => c.text)).toEqual(['second'])
     expect(last.invalidates).toEqual([claimId('first')])
-    await log.close()
   })
 
   // The whole point of `invalidates` being STATED: the store merges on omit, so a write that simply
@@ -273,14 +263,12 @@ describe('additive claim writes', () => {
     const last = await lastWrite(log)
     expect(claimsOf(last).map(c => c.text)).toEqual(['first'])
     expect(last.invalidates).toEqual([])
-    await log.close()
   })
 
   it('addClaims is an instruction, never stored: the payload carries resolved claims only', async () => {
     const { log, store } = await openStore()
     await store.write({ id: 'n', title: 'N', addClaims: ['first'] }, { source: 'cli' })
     expect(JSON.stringify((await lastWrite(log)).note)).not.toContain('addClaims')
-    await log.close()
   })
 })
 
@@ -296,7 +284,7 @@ describe('topic fetches are tracked', () => {
   const openTopics = async () => {
     const pg = await createTestDb(); drops.push(pg.drop)
     const ts = await createTestSurreal(); drops.push(ts.drop)
-    const log = (await openStorage(pg.url, { projectId: TEST_PROJECT_ID })).events
+    const log = await openLog(pg)
     const surreal = await SurrealMemory.open(ts, { embed: async texts => texts.map(vec) })
     const store = createMemoryStore({ log, surreal })
     await store.write({ id: 'n', title: 'N', addClaims: ['alpha holds', 'beta holds'] }, { source: 'cli' })
@@ -318,7 +306,6 @@ describe('topic fetches are tracked', () => {
     // and the envelope binds it to the acting step, the same rule recordAccess follows: task-scoped
     // views filter on the envelope, so an unbound append orphans the fetch from the run that made it
     expect(tracked[0]).toMatchObject({ taskId: 't1', stepId: 's1', runToken: 'r1' })
-    await log.close()
   })
 
   it('a keyed replay of one fetch appends one event, not two', async () => {
@@ -329,20 +316,17 @@ describe('topic fetches are tracked', () => {
     await store.topicClaims(topic!.topicKey, author, { idempotencyKey: key })
     await store.topicClaims(topic!.topicKey, author, { idempotencyKey: key })
     expect(await topicAccesses(log)).toHaveLength(1)
-    await log.close()
   })
 
   it('listing the inventory records nothing — only a fetch is a signal', async () => {
     const { log, store } = await openTopics()
     expect((await store.topics()).length).toBeGreaterThan(0)
     expect(await topicAccesses(log)).toEqual([])
-    await log.close()
   })
 
   it('an unknown key throws rather than returning empty, and records no signal for it', async () => {
     const { log, store } = await openTopics()
     await expect(store.topicClaims('deadbeef0000', { source: 'cli' })).rejects.toThrow(/list topics again/)
     expect(await topicAccesses(log)).toEqual([])
-    await log.close()
   })
 })

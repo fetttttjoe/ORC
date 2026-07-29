@@ -7,18 +7,18 @@ import { createMemoryProjector, KNOWLEDGE_KINDS, type MemoryProjector } from './
 import { bindStepMemory, unavailableStepMemory, type BindStep } from './step'
 import { corpusDrift, createDriftProbe } from './drift'
 
-export { SurrealMemory } from './surreal'
-export { openKnowledge, type Knowledge } from './knowledge'
-export { createMemoryStore } from './store'
-export { createMemoryProjector } from './projector'
-export { memoryTools, unavailableMemoryTools, MEMORY_READ_TOOLS, MEMORY_ROLE, memoryRoleFor, type MemoryRole } from './tools'
-export { bindStepMemory, unavailableStepMemory, ambientNoteId, ambientLinks, deriveQueryTerms, preloadQuery, type BindStep, type StepMemoryBinding } from './step'
-export { renderMemoryIndex, rebuildVaultMemory } from './memory-index'
-export { orphanedNotes, staleNotes, DEFAULT_SWEEP_DAYS, type SweptNote, type StaleNote } from './sweep'
-export { consolidatedNote, consolidateTask, isSubstantive, CONSOLIDATED_TAG, type ConsolidationInput, type ConsolidationDeps, type ConsolidationDistiller, type DistilledText, type StepOutcome } from './consolidate'
-export { createMemoryLifecycle, consolidateBacklog, taskCompletedId, type MemoryLifecycle } from './lifecycle'
-export { renderNoteFile, noteRelPath } from './note-md'
-export { noteHasDrifted, createDriftProbe, corpusDrift, needsReground, CORPUS_DRIFT_ADVISORY, type ChangedSince, type NoteDrift, type CorpusDrift } from './drift'
+// Only names something outside plugins/memory/src actually imports — everything else stays a
+// module-internal export of its own file (a re-export nobody imports is API surface to keep
+// compatible for no consumer; eighteen of them accumulated here before this was checked).
+export { openKnowledge } from './knowledge'
+export { memoryTools, unavailableMemoryTools, MEMORY_READ_TOOLS, MEMORY_ROLE, memoryRoleFor } from './tools'
+export { unavailableStepMemory, type BindStep } from './step'
+export { orphanedNotes, staleNotes, DEFAULT_SWEEP_DAYS } from './sweep'
+export { frontier } from './frontier'
+export { consolidateTask, type ConsolidationInput, type ConsolidationDistiller } from './consolidate'
+export { createMemoryLifecycle, type MemoryLifecycle } from './lifecycle'
+export { needsReground, restampableNotes } from './drift'
+export { createGroundingSource } from './grounding-source'
 
 // the actual revision of the code the runtime is looking at — null outside Git
 export async function gitRevision(dir: string): Promise<string | null> {

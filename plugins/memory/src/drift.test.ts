@@ -2,7 +2,7 @@ import { describe, expect, it } from 'bun:test'
 import { mkdtempSync, writeFileSync, mkdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import { corpusDrift, createDriftProbe, needsReground, noteHasDrifted, CORPUS_DRIFT_ADVISORY, type ChangedSince } from './drift'
+import { corpusDrift, createDriftProbe, needsReground, noteHasDrifted, restampableNotes, CORPUS_DRIFT_ADVISORY, type ChangedSince } from './drift'
 
 const note = (over: Partial<{ sourceRevision: string | null; paths: string[] }> = {}) =>
   ({ sourceRevision: 'abc123', paths: ['packages/kernel/src/kernel.ts'], ...over })
@@ -78,6 +78,44 @@ describe('createDriftProbe', () => {
   it('returns null — never a false positive — for a revision git cannot reach', async () => {
     expect(await createDriftProbe(repo())('0'.repeat(40))).toBeNull()
     expect(await createDriftProbe(mkdtempSync(path.join(tmpdir(), 'orc-norepo-')))('abc123')).toBeNull()
+  })
+})
+
+describe('restampableNotes — catching a healed note up to HEAD after commit', () => {
+  const run = (dir: string, ...args: string[]) => Bun.spawnSync(['git', '-C', dir, ...args], { stdout: 'ignore', stderr: 'ignore' })
+  const head = (dir: string) => Bun.spawnSync(['git', '-C', dir, 'rev-parse', 'HEAD'], { stdout: 'pipe' }).stdout.toString().trim()
+  function repo(): string {
+    const dir = mkdtempSync(path.join(tmpdir(), 'orc-restamp-'))
+    run(dir, 'init', '-q'); run(dir, 'config', 'user.email', 't@t.t'); run(dir, 'config', 'user.name', 't')
+    mkdirSync(path.join(dir, 'src'), { recursive: true })
+    writeFileSync(path.join(dir, 'src', 'a.ts'), 'export const a = 1\n')
+    writeFileSync(path.join(dir, 'src', 'b.ts'), 'export const b = 1\n')
+    run(dir, 'add', '-A'); run(dir, 'commit', '-qm', 'base')
+    return dir
+  }
+
+  it('restamps a note whose paths CHANGED in a commit and have no uncommitted edits left', async () => {
+    const dir = repo(); const rev0 = head(dir)
+    writeFileSync(path.join(dir, 'src', 'a.ts'), 'export const a = 2\n')
+    run(dir, 'add', '-A'); run(dir, 'commit', '-qm', 'change a') // a.ts committed → note-a is behind + clean
+    const targets = await restampableNotes([
+      { id: 'note-a', scope: 'project', sourceRevision: rev0, paths: ['src/a.ts'] }, // behind + clean → restamp
+      { id: 'note-b', scope: 'project', sourceRevision: rev0, paths: ['src/b.ts'] }, // b.ts untouched → no
+    ], dir)
+    expect(targets.map(t => t.id)).toEqual(['note-a'])
+  })
+
+  it('does NOT restamp while paths still have UNCOMMITTED changes — HEAD is not their final state', async () => {
+    const dir = repo(); const rev0 = head(dir)
+    writeFileSync(path.join(dir, 'src', 'a.ts'), 'export const a = 2\n')
+    run(dir, 'add', '-A'); run(dir, 'commit', '-qm', 'change a')
+    writeFileSync(path.join(dir, 'src', 'a.ts'), 'export const a = 3 // still unstaged\n') // more, uncommitted
+    expect(await restampableNotes([{ id: 'note-a', scope: 'project', sourceRevision: rev0, paths: ['src/a.ts'] }], dir)).toEqual([])
+  })
+
+  it('does NOT restamp a note already at HEAD — nothing to catch up', async () => {
+    const dir = repo()
+    expect(await restampableNotes([{ id: 'note-a', scope: 'project', sourceRevision: head(dir), paths: ['src/a.ts'] }], dir)).toEqual([])
   })
 })
 

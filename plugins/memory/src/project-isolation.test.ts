@@ -27,6 +27,11 @@ describe('project isolation (SurrealDB native database boundary)', () => {
       })
       const log = (await openStorage(pg.url, { projectId })).events
       const memory = await createMemory({ log, config })
+      // registered, not awaited at the end of the test body — trailing closes are skipped the
+      // moment an expect throws. onClose runs LIFO, so memory closes before the log, before the
+      // database drops, keeping the pg pool from being FORCE-terminated by the drop.
+      pg.onClose(() => log.close())
+      pg.onClose(() => memory.close())
       return { log, memory }
     }
 
@@ -44,10 +49,5 @@ describe('project isolation (SurrealDB native database boundary)', () => {
     expect(await b.memory.store.get('only-a')).toBeNull()
     expect(await a.memory.store.search('beta')).toEqual([])
     expect(await b.memory.store.search('alpha')).toEqual([])
-
-    await a.memory.close()
-    await b.memory.close()
-    await a.log.close()
-    await b.log.close()
   })
 })

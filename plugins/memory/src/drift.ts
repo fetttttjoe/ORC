@@ -109,3 +109,62 @@ export async function corpusDrift(
 // has no use for `total`) does not have to fabricate the rest.
 export const needsReground = (d: Pick<CorpusDrift, 'ratio'>): boolean =>
   d.ratio !== null && d.ratio >= CORPUS_DRIFT_ADVISORY
+
+// ─── restamp: catch a HEALED note's revision up to HEAD once its change is committed ──────────────
+//
+// The heal fixes a note's CONTENT (memory_write against the working tree, re-stamped at write-time
+// HEAD). But while its declared paths differ from that stamp — including after a COMMIT moves HEAD
+// past it — the gate keeps reading it drifted, so it re-heals on every consumption and never settles.
+// A note here is CAUGHT UP to HEAD when its paths (a) CHANGED in commits since its stamp — it is
+// behind — and (b) have NO uncommitted change left — the commit is their final state — so stamping it
+// at HEAD makes it read current. Run it right after committing a change whose notes were healed.
+//
+// CEILING: this verifies the REVISION, not the prose — it TRUSTS the content was refreshed to match
+// the committed code. A note whose committed code changed but was never re-written would be wrongly
+// marked current. Safe pattern: heal → commit → restamp. The stricter version exists: the autoCommit
+// pipeline's commit step stamps only the notes the log shows the task actually wrote. This
+// corpus-wide guess remains the MANUAL-commit fallback.
+export async function restampableNotes(
+  notes: ReadonlyArray<{ id: string; scope: string; sourceRevision: string | null; paths?: readonly string[] }>,
+  dir: string,
+): Promise<{ id: string; scope: string }[]> {
+  const head = await gitRun(dir, ['rev-parse', 'HEAD'])
+  if (head === null) return []
+  const out: { id: string; scope: string }[] = []
+  for (const n of notes) {
+    const paths = n.paths ?? []
+    const rev = n.sourceRevision
+    if (rev === null || paths.length === 0 || rev === head) continue
+    if (!(await isAncestor(dir, rev, head))) continue // only move a note FORWARD from an ancestor
+    const committed = await gitDiffNames(dir, `${rev}..${head}`, paths)   // (a) behind on commits?
+    const uncommitted = await gitDiffNames(dir, head, paths)              // (b) nothing left unstaged?
+    if (committed === null || uncommitted === null) continue // git could not answer → leave it
+    if (committed.length > 0 && uncommitted.length === 0) out.push({ id: n.id, scope: n.scope })
+  }
+  return out
+}
+
+const gitRun = async (dir: string, args: string[]): Promise<string | null> => {
+  try {
+    const proc = Bun.spawn(['git', '-C', dir, ...args], { stdout: 'pipe', stderr: 'ignore' })
+    const out = await new Response(proc.stdout).text()
+    return (await proc.exited) === 0 ? out.trim() : null
+  } catch { return null }
+}
+
+const isAncestor = async (dir: string, rev: string, head: string): Promise<boolean> => {
+  try {
+    const proc = Bun.spawn(['git', '-C', dir, 'merge-base', '--is-ancestor', rev, head], { stdout: 'ignore', stderr: 'ignore' })
+    return (await proc.exited) === 0
+  } catch { return false }
+}
+
+// `range` is a git diff spec: `rev..HEAD` (committed history) or `HEAD` (HEAD vs working tree).
+const gitDiffNames = async (dir: string, range: string, paths: readonly string[]): Promise<string[] | null> => {
+  try {
+    const proc = Bun.spawn(['git', '-C', dir, 'diff', '--name-only', range, '--', ...paths], { stdout: 'pipe', stderr: 'ignore' })
+    const out = await new Response(proc.stdout).text()
+    if ((await proc.exited) !== 0) return null
+    return out.split('\n').map(l => l.trim()).filter(l => l !== '')
+  } catch { return null }
+}

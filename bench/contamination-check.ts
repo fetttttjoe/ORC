@@ -4,6 +4,13 @@
 // ponytail: relative imports — bench/ is not a workspace package and doesn't need to be
 import { PAYLOAD_SCHEMAS } from '../packages/contracts/src/index.ts'
 import { loadConfig, openStorage, requireProject } from '../packages/kernel/src/index.ts'
+import { z } from 'zod'
+
+// tool_call's `input` is z.unknown() in contracts (it records whatever the model sent), and the
+// executor's own ReadInput/ListInput schemas are not exported — so the audit parses the one field
+// it grades here. `path` defaults to '' because fs_list may legally omit it (the tool defaults
+// to '.'); anything else malformed throws rather than silently counting as clean.
+const FsPathInput = z.object({ path: z.string().default('') })
 
 const [prefix, ...patterns] = process.argv.slice(2)
 if (!prefix) { console.error('usage: bun bench/contamination-check.ts <taskId-prefix> [pattern...]'); process.exit(2) }
@@ -20,8 +27,7 @@ for (const e of evs) {
   const p = PAYLOAD_SCHEMAS.tool_call.parse(e.payload)
   if (p.toolName !== 'fs_read' && p.toolName !== 'fs_list') continue
   reads += 1
-  const input = typeof p.input === 'object' && p.input !== null ? p.input : {}
-  const path = 'path' in input && typeof input.path === 'string' ? input.path : ''
+  const { path } = FsPathInput.parse(p.input)
   if (forbidden.some(f => path.includes(f))) hits.push(`${p.toolName} ${path} (step ${e.stepId})`)
 }
 

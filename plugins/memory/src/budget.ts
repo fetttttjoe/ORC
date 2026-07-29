@@ -2,8 +2,11 @@ import { MemoryNote, type NoteView } from '@orc/contracts'
 
 export const approxTokens = (s: string): number => Math.ceil(s.length / 4) // ponytail: chars/4; swap for a real tokenizer only if it misbudgets
 
+// `used` is what the kept items cost, returned so a caller splitting one budget across two arms
+// (search's claims-then-notes, the preload's same split) subtracts the number this loop counted
+// rather than re-deriving it — two spellings of the sum drift.
 export function applyBudget<T>(items: T[], text: (t: T) => string, opts: { limit: number; budget: number }):
-  { items: T[]; truncated: boolean; omitted: number } {
+  { items: T[]; used: number; truncated: boolean; omitted: number } {
   const kept: T[] = []
   let used = 0
   for (const it of items) {
@@ -13,7 +16,7 @@ export function applyBudget<T>(items: T[], text: (t: T) => string, opts: { limit
     used += cost
     kept.push(it)
   }
-  return { items: kept, truncated: kept.length < items.length, omitted: items.length - kept.length }
+  return { items: kept, used, truncated: kept.length < items.length, omitted: items.length - kept.length }
 }
 
 const READ_NEXT = 'memory_read with a larger budget for the full note'
@@ -31,8 +34,11 @@ const itemChars = (value: unknown): number =>
 // Every key of a note, grouped by HOW this fitter bounds it. A field added to a tier but forgotten
 // here is a compile error rather than a response that quietly blows its budget — the same guard
 // MemoryNoteDraftInput's `DraftCoversTiers` applies to the write surface, applied to the thing that
-// actually enforces the read cap. Both leaks this file has had (a retired `rules[]`, and the plan
-// tier's own skillRefs/toolRefs/modelRef) were a field nobody remembered to add below.
+// actually enforces the read cap. Every leak this file has had (a retired `rules[]`, the plan
+// tier's skillRefs/toolRefs/modelRef, then its dependsOn) was a field the blank-and-refill ladder
+// below skipped. The guard only proves each field is ENUMERATED here — dependsOn was listed and
+// still leaked, because nothing had blanked or refilled it — so each group member also needs a
+// blank + refill pair, and a test that feeds it oversized.
 type BoundedField =
   | 'id' | 'scope' | 'title' | 'sourceRevision'                        // clamped building `fitted`
   | 'createdAt' | 'createdBy' | 'updatedAt' | 'updatedBy'              // dropped by the discard ladder
@@ -97,6 +103,7 @@ export function fitMemoryNoteToBudget(stored: MemoryNote, budget: number): Fitte
   if (source.sources) fitted.sources = []
   if (source.skillRefs) fitted.skillRefs = []
   if (source.toolRefs) fitted.toolRefs = []
+  if (source.dependsOn) fitted.dependsOn = []
   const result = { note: fitted, truncated: true, next: READ_NEXT }
   let contentUsed = 0
   const fits = () => JSON.stringify(result).length <= responseLimit
@@ -186,6 +193,7 @@ export function fitMemoryNoteToBudget(stored: MemoryNote, budget: number): Fitte
   // neither dispatches from it — the step that runs this subplan reads the note in full.
   addList(source.skillRefs, kept => { fitted.skillRefs = kept })
   addList(source.toolRefs, kept => { fitted.toolRefs = kept })
+  addList(source.dependsOn, kept => { fitted.dependsOn = kept })
   addWhole(source.modelRef, v => { fitted.modelRef = v })
   addString('rationale', source.rationale)
   addString('body', source.body)

@@ -1,4 +1,4 @@
-import { ClaimWrite, EVENT_KIND, MemoryNoteInput, MemoryScope, MemoryWrittenPayload, NOTE_TIER, resolveClaims, type MemoryAuthor, type MemoryFilter, type MemorySearchOpts, type MemoryNote, type MemoryStore, type NoteSummary, type Claim, type ClaimHit, type Topic } from '@orc/contracts'
+import { ClaimWrite, EVENT_KIND, MemoryNoteInput, MemoryScope, MemoryWrittenPayload, NOTE_TIER, resolveClaims, type ClaimSearchOptions, type MemoryAuthor, type MemoryFilter, type MemorySearchOpts, type MemoryNote, type MemoryStore, type NoteSummary, type Claim, type ClaimHit, type Topic } from '@orc/contracts'
 import { KERNEL_ERROR_CODE, KernelError, type EventLog } from '@orc/kernel'
 import type { SurrealMemory } from './surreal'
 
@@ -125,7 +125,9 @@ export function createMemoryStore(opts: { log: EventLog; surreal: SurrealMemory;
     // built-in 14 days instead.
     search: (query: string, filter?: MemoryFilter, o?: MemorySearchOpts): Promise<NoteSummary[]> =>
       surreal.search(query, filter, { ...o, halfLifeDays: o?.halfLifeDays ?? opts.halfLifeDays }),
-    searchClaims: (query: string, filter?: MemoryFilter, opts?: MemorySearchOpts & { limit?: number }): Promise<ClaimHit[]> => surreal.searchClaims(query, filter, opts),
+    // the contract's own opts type, never a local respell: a hand-written `& { limit?: number }`
+    // here dropped `perNote`, which step.ts's claimsCiting passes
+    searchClaims: (query: string, filter?: MemoryFilter, opts?: MemorySearchOpts & ClaimSearchOptions): Promise<ClaimHit[]> => surreal.searchClaims(query, filter, opts),
     claimsFor: (noteId: string, scope?: string): Promise<Claim[]> => surreal.claimsFor(noteId, scope),
     neighbors: (seed, o) => surreal.neighbors(seed, { ...o, halfLifeDays: o?.halfLifeDays ?? opts.halfLifeDays }),
     topics: (): Promise<Topic[]> => surreal.topics(),

@@ -27,6 +27,13 @@ export function renderNoteFile(note: MemoryNote): string {
     ...(n.categories !== undefined && { categories: n.categories }),
     tags: note.tags, links: note.links,
     ...(n.paths !== undefined && { paths: n.paths }),
+    // the plan tier's execution payload — structured refs like paths/links, so frontmatter, not
+    // prose. Empty defaults are omitted (every plan note has all four): a hollow `modelRef: ""` on
+    // every subplan would drown the one that actually pinned a model.
+    ...(n.dependsOn?.length ? { dependsOn: n.dependsOn } : {}),
+    ...(n.skillRefs?.length ? { skillRefs: n.skillRefs } : {}),
+    ...(n.toolRefs?.length ? { toolRefs: n.toolRefs } : {}),
+    ...(n.modelRef ? { modelRef: n.modelRef } : {}),
     summary: note.summary,
     createdAt: note.createdAt, createdBy: note.createdBy,
     updatedAt: note.updatedAt, updatedBy: note.updatedBy, revision: note.revision,

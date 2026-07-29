@@ -47,6 +47,19 @@ describe('fitMemoryNoteToBudget', () => {
     expect(JSON.stringify(result).length).toBeLessThanOrEqual(1_024)
   })
 
+  // dependsOn was the one refilled-group field with neither a blank nor an addList: it rode the
+  // `{...note}` spread through every discard whole. At the contracts max (100 ids × 64 chars) that
+  // is ~6.6KB against the 1KB response floor — same leak class as skillRefs/toolRefs above.
+  it('bounds the plan tier’s dependsOn — the ordering list is not exempt', () => {
+    const note = planNoteFixture({
+      id: 'ordering', title: 'P',
+      dependsOn: Array.from({ length: 100 }, (_, i) => `dep-${i}-${'d'.repeat(55)}`.slice(0, 64)),
+    })
+    const result = fitMemoryNoteToBudget(note, 1)
+    expect(result.truncated).toBe(true)
+    expect(JSON.stringify(result).length).toBeLessThanOrEqual(1_024)
+  })
+
   it('keeps the complete response within the irreducible floor even with oversized provenance', () => {
     // a PLAN note: the only tier with all three trimmable text fields, so this exercises the
     // whole ladder in one case
