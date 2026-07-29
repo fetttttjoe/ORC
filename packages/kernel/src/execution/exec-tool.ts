@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process'
 import { z } from 'zod'
-import { errorMessage, type ResolvedTool } from '@orc/contracts'
+import { errorMessage, toolError, type ResolvedTool } from '@orc/contracts'
 
 // exec (post-scenario-2): the acceptance-gate tool. Plans routinely demand "typecheck clean,
 // tests green", but no step could RUN anything — implementers shipped unexecuted (red) suites
@@ -53,7 +53,7 @@ export function execTool(opts: { workspaceDir: string; allowlist: string[] }): R
   return [{
     ref: 'kernel/exec', name: 'exec',
     description:
-      `Run one allowlisted command in the step workspace and get {exitCode, stdout, stderr} back. Allowed: ${allowlist.map(a => `'${a}'`).join(', ')} — arguments may be appended. A non-zero exitCode is a result to read and report, not a tool failure. Use this to actually execute acceptance gates (tests, typecheck) instead of deferring them downstream.`,
+      `Run one allowlisted command in the step workspace and get {exitCode, stdout, stderr} back. Allowed: ${allowlist.map(a => `'${a}'`).join(', ')} — arguments may be appended. There is NO shell: one command, run from the workspace root — no cd, no pipes, no && chaining; pass paths as arguments (e.g. 'bun test packages/x/src/y.test.ts'). A non-zero exitCode is a result to read and report, not a tool failure. Use this to actually execute acceptance gates (tests, typecheck) instead of deferring them downstream.`,
     inputSchema: {
       type: 'object', required: ['command'],
       properties: { command: { type: 'string', description: 'an allowlisted command, optionally extended with arguments' } },
@@ -63,8 +63,16 @@ export function execTool(opts: { workspaceDir: string; allowlist: string[] }): R
       if (!parsed.success)
         return { output: { error: `invalid exec input: ${errorMessage(parsed.error)}` }, isError: true }
       const { command } = parsed.data
-      if (!allowlist.some(a => command === a || command.startsWith(`${a} `)))
-        return { output: { error: `command not allowlisted: '${command}' — allowed: ${allowlist.join(', ')} (operator-set: execAllowlist in .orc/config.json)` }, isError: true }
+      if (!allowlist.some(a => command === a || command.startsWith(`${a} `))) {
+        // a compound refusal teaches the rule, not just the list: agents raised in shells try
+        // `cd X && bun test … | tail` (observed live) and should learn in ONE iteration that
+        // exec spawns argv directly from the workspace root
+        const compound = /(^|\s)cd\s|&&|\|\|?|;|>|</.test(command)
+        const hint = compound
+          ? ' — this tool has no shell: one command, run from the workspace root; no cd, no pipes, no chaining; pass paths as arguments'
+          : ''
+        return { output: { error: `command not allowlisted: '${command}'${hint} — allowed: ${allowlist.join(', ')} (operator-set: execAllowlist in .orc/config.json)` }, isError: true }
+      }
       const argv = command.split(/\s+/).filter(Boolean)
       // async spawn (not spawnSync): the whole orchestrator is one process running DBOS, the event
       // pump, the projectors and every parallel step's model loop — a synchronous wait would freeze
@@ -92,7 +100,7 @@ export function execTool(opts: { workspaceDir: string; allowlist: string[] }): R
         // a stream 'error' with no listener throws as an UNHANDLED error (e.g. EPIPE when we SIGKILL
         // a child mid-write) — funnel it to finish so it can never crash the process; the 'close'
         // handler still wins on the normal path via the `settled` guard.
-        const onStreamError = (e: Error): void => finish({ output: { error: errorMessage(e) }, isError: true })
+        const onStreamError = (e: Error): void => finish(toolError(e))
         child.stdout.on('error', onStreamError)
         child.stderr.on('error', onStreamError)
         // enforceable timeout: SIGTERM, then SIGKILL after a grace — spawnSync's timeout only sent
@@ -102,7 +110,7 @@ export function execTool(opts: { workspaceDir: string; allowlist: string[] }): R
           child.kill('SIGTERM')
           graceTimer = setTimeout(() => child.kill('SIGKILL'), KILL_GRACE_MS)
         }, TIMEOUT_MS)
-        child.on('error', e => finish({ output: { error: errorMessage(e) }, isError: true }))
+        child.on('error', e => finish(toolError(e)))
         const settle = (code: number | null, signal: NodeJS.Signals | null): void => {
           if (timedOut) return finish({ output: { error: `command timed out after ${TIMEOUT_MS / 1000}s (killed with ${signal ?? 'SIGKILL'})` }, isError: true })
           // an external signal (e.g. an OOM SIGKILL) is a real failure, but NOT a timeout — report it as itself

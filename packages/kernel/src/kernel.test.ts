@@ -1,27 +1,23 @@
 import { afterAll, describe, expect, it } from 'bun:test'
-import { ApprovalPolicy, EVENT_KIND, LINK_KIND, NOTE_TIER, PAYLOAD_SCHEMAS, TASK_STATUS, type Analyzer, type PlanDraft, type PlanStep } from '@orc/contracts'
+import { APPROVAL_ANSWER, ApprovalPolicy, EVENT_KIND, LINK_KIND, NOTE_TIER, PAYLOAD_SCHEMAS, STEP_ROLE, TASK_STATUS, type Analyzer, type PlanDraft, type PlanStep } from '@orc/contracts'
 import { draftFixture, stepFixture } from '@orc/contracts/fixtures'
-import { openStorage } from './storage'
+import { openStorage, type EventLogOps } from './storage'
 import { KERNEL_ERROR_CODE, KernelError } from './errors'
-import { Kernel } from './kernel'
+import { Kernel, SPLIT_ORIGIN } from './kernel'
 import { instantiateFrozenPlan, planGraphHash, planScope } from './execution/strategies/grounded-plan'
 import { createTestDb, TEST_PROJECT_ID } from './test-helpers'
 
 const dbs: Array<{ drop: () => Promise<void> }> = []
-// Teardown drops one DB per freshKernel (14+ here), each a pg_database scan + DROP DATABASE on its
-// own admin connection. Each handle closes its registered pool first (createTestDb.onClose), so
-// DROP no longer has to terminate live backends — but the DBs are still distinct, so drop them
-// concurrently with headroom for a loaded box.
+// Teardown drops one DB per test (every test goes through freshKernelAndLog), each a pg_database
+// scan + DROP DATABASE on its own admin connection. Each handle closes its registered pool first
+// (createTestDb.onClose), so DROP no longer has to terminate live backends — but the DBs are still
+// distinct, so drop them concurrently with headroom for a loaded box.
 afterAll(async () => {
   await Promise.all(dbs.map(d => d.drop()))
 }, 30_000)
 
 async function freshKernel(): Promise<Kernel> {
-  const db = await createTestDb()
-  dbs.push(db)
-  const storage = await openStorage(db.url, { projectId: TEST_PROJECT_ID })
-  db.onClose(() => storage.close()) // pool closes before the database is dropped
-  return new Kernel(storage.events)
+  return (await freshKernelAndLog()).k
 }
 
 // proposeSplit only ever fires from a LIVE step, so its parent is running — expose the log so the
@@ -130,21 +126,15 @@ describe('Kernel lifecycle', () => {
   })
 
   it('propose fails with plan_validation_failed when the refValidator reports errors', async () => {
-    const db = await createTestDb()
-    dbs.push(db)
-    const storage = await openStorage(db.url, { projectId: TEST_PROJECT_ID })
-    db.onClose(() => storage.close())
-    const k = new Kernel(storage.events, async () => [`unknown executor 'nope'`])
+    const { log } = await freshKernelAndLog()
+    const k = new Kernel(log, async () => [`unknown executor 'nope'`])
     const t = await k.createTask({ title: 'x' })
     await expect(k.proposePlan(t.id, draft())).rejects.toThrow(/unknown executor 'nope'/)
   })
 
   it('propose succeeds when the refValidator returns no errors', async () => {
-    const db = await createTestDb()
-    dbs.push(db)
-    const storage = await openStorage(db.url, { projectId: TEST_PROJECT_ID })
-    db.onClose(() => storage.close())
-    const k = new Kernel(storage.events, async () => [])
+    const { log } = await freshKernelAndLog()
+    const k = new Kernel(log, async () => [])
     const t = await k.createTask({ title: 'x' })
     await expect(k.proposePlan(t.id, draft())).resolves.toBeDefined()
   })
@@ -169,14 +159,11 @@ describe('Kernel lifecycle', () => {
   })
 
   it('createGroundedTask seeds an auto-approved [analyze, plan] template', async () => {
-    const db = await createTestDb()
-    dbs.push(db)
+    const { log } = await freshKernelAndLog()
     // fake analyzer stub: analysisStep returns the scout analyze step (agent-analyzer's real shape)
     const analyze: PlanStep = stepFixture({ id: 'analyze', role: 'scout', skillRefs: ['codebase-analysis'] })
     const analyzers = new Map<string, Analyzer>([['agent-analyzer', { id: 'agent-analyzer', analysisStep: () => analyze }]])
-    const storage = await openStorage(db.url, { projectId: TEST_PROJECT_ID })
-    db.onClose(() => storage.close())
-    const k = new Kernel(storage.events, undefined, analyzers)
+    const k = new Kernel(log, undefined, analyzers)
     const t = await k.createGroundedTask({ title: 'build web', spec: 's', modelRef: 'anthropic/claude-sonnet-5', analyzerRef: 'agent-analyzer' })
     const plan = (await k.getPlan(t.id))!
     expect(plan.strategyRef).toBe('grounded-plan')
@@ -188,21 +175,28 @@ describe('Kernel lifecycle', () => {
   })
 
   it('createGroundedTask applies the project iteration budget to BOTH steps — subplans inherit the plan step', async () => {
-    const db = await createTestDb()
-    dbs.push(db)
+    const { log } = await freshKernelAndLog()
     const analyze: PlanStep = stepFixture({ id: 'analyze', role: 'scout', maxIterations: 30 })
     const analyzers = new Map<string, Analyzer>([['agent-analyzer', { id: 'agent-analyzer', analysisStep: () => analyze }]])
-    const storage = await openStorage(db.url, { projectId: TEST_PROJECT_ID })
-    db.onClose(() => storage.close())
-    const k = new Kernel(storage.events, undefined, analyzers)
+    const k = new Kernel(log, undefined, analyzers)
     const t = await k.createGroundedTask({ title: 'x', spec: 's', modelRef: 'fake/m', analyzerRef: 'agent-analyzer', maxIterations: 60 })
     expect((await k.getPlan(t.id))!.steps.map(s => s.maxIterations)).toEqual([60, 60])
   })
 
+  it('createGroundedTask forwards parentId — a grounded task can be a child, not only a root', async () => {
+    const { log } = await freshKernelAndLog()
+    const analyze: PlanStep = stepFixture({ id: 'analyze', role: 'scout' })
+    const analyzers = new Map<string, Analyzer>([['agent-analyzer', { id: 'agent-analyzer', analysisStep: () => analyze }]])
+    const k = new Kernel(log, undefined, analyzers)
+    const parent = await k.createTask({ title: 'parent' })
+    const t = await k.createGroundedTask({ title: 'child', spec: 's', modelRef: 'fake/m', analyzerRef: 'agent-analyzer', parentId: parent.id })
+    const stored = (await k.getTask(t.id))!
+    expect(stored.parentId).toBe(parent.id)
+    expect(stored.depth).toBe(1)
+  })
+
   it('createGroundedTask stores the spec verbatim and hands it to the analyzer — the title never substitutes', async () => {
-    const db = await createTestDb()
-    dbs.push(db)
-    const log = (await openStorage(db.url, { projectId: TEST_PROJECT_ID })).events
+    const { log } = await freshKernelAndLog()
     let analyzedSpec = ''
     const analyzers = new Map<string, Analyzer>([['agent-analyzer', {
       id: 'agent-analyzer',
@@ -222,9 +216,7 @@ describe('Kernel lifecycle', () => {
   })
 
   it('createGroundedTask rolls back the task when plan reference validation fails', async () => {
-    const db = await createTestDb()
-    dbs.push(db)
-    const log = (await openStorage(db.url, { projectId: TEST_PROJECT_ID })).events
+    const { log } = await freshKernelAndLog()
     const analyze: PlanStep = stepFixture({ id: 'analyze', role: 'scout', skillRefs: ['codebase-analysis'] })
     const analyzers = new Map<string, Analyzer>([['agent-analyzer', { id: 'agent-analyzer', analysisStep: () => analyze }]])
     const k = new Kernel(log, async () => [`unknown skill 'codebase-analysis'`], analyzers)
@@ -238,9 +230,8 @@ describe('Kernel lifecycle', () => {
   })
 
   it('createGroundedTask rejects an unknown analyzerRef', async () => {
-    const db = await createTestDb()
-    dbs.push(db)
-    const k = new Kernel((await openStorage(db.url, { projectId: TEST_PROJECT_ID })).events, undefined, new Map())
+    const { log } = await freshKernelAndLog()
+    const k = new Kernel(log, undefined, new Map())
     expect(await codeOf(k.createGroundedTask({ title: 'x', spec: '', modelRef: 'fake/m', analyzerRef: 'ghost' }))).toBe(KERNEL_ERROR_CODE.invalid_transition)
   })
 
@@ -275,6 +266,26 @@ describe('Kernel lifecycle', () => {
     const again = await k.proposeSplit(args)
     expect(again.childTaskId).toBe(r.childTaskId)
     expect((await k.listTasks()).filter(t => t.parentId === parent.id)).toHaveLength(1)
+  })
+
+  it('proposeSplit: refuses a model-authored committer step — the role is kernel-set only', async () => {
+    const { k, log } = await freshKernelAndLog()
+    const parent = await k.createTask({ title: 'P', spec: 'parent' })
+    await toRunning(log, parent.id)
+    const base = {
+      parentTaskId: parent.id, stepId: 's1', runToken: `step:${parent.id}:s1:a1`, toolCallId: 'call_1',
+      title: 'C', spec: '',
+      // an auto-approved child whose only step claims the committer role would arm git_commit
+      // with no verify step anywhere — the exact bypass the reserved-role refusal closes
+      plan: { steps: [{ id: 'commit', role: STEP_ROLE.committer, title: 'sneak', instructions: 'commit it', dependsOn: [], skillRefs: [], toolRefs: [] }] },
+      parentStep: { executorRef: 'api-loop', modelRef: 'fake/m', maxIterations: 5 },
+      policy: ApprovalPolicy.parse({ default: 'auto' }), maxDepth: 3,
+    }
+    expect(await codeOf(k.proposeSplit(base))).toBe(KERNEL_ERROR_CODE.invalid_transition)
+    expect((await k.listTasks()).filter(t => t.parentId === parent.id)).toEqual([]) // no child minted
+    // the kernel's own freeze stays open: the same draft with origin 'freeze' is accepted
+    const ok = await k.proposeSplit({ ...base, toolCallId: 'call_2', origin: SPLIT_ORIGIN.freeze })
+    expect((await k.getPlan(ok.childTaskId))?.steps[0]?.role).toBe(STEP_ROLE.committer)
   })
 
   it('openFeedbackInSubtree finds a question parked on a DESCENDANT, not only on the root', async () => {
@@ -364,9 +375,7 @@ describe('Kernel lifecycle', () => {
   })
 
   it('annotatePlan appends plan_annotated; replyFeedback resolves and answers the open feedback topic', async () => {
-    const db = await createTestDb()
-    dbs.push(db)
-    const log = (await openStorage(db.url, { projectId: TEST_PROJECT_ID })).events
+    const { log } = await freshKernelAndLog()
     const sent: Array<{ runToken: string; message: string; topic: string; key?: string }> = []
     const k = new Kernel(log, undefined, undefined, async (runToken, message, topic, key) => { sent.push({ runToken, message, topic, key }) })
     const t = await k.createTask({ title: 'grounded task' })
@@ -394,10 +403,7 @@ describe('Kernel lifecycle', () => {
   })
 
   it('replyFeedback binds exact grounded plan approval to the current graph hash', async () => {
-    const db = await createTestDb()
-    dbs.push(db)
-    const log = (await openStorage(db.url, { projectId: TEST_PROJECT_ID })).events
-    const k = new Kernel(log)
+    const { k, log } = await freshKernelAndLog()
     const t = await k.createTask({ title: 'grounded', type: 'grounded' })
     const scope = planScope(t.id)
     const author = { source: 'agent' as const }
@@ -412,12 +418,27 @@ describe('Kernel lifecycle', () => {
     expect(provided.payload.planHash).toBe(planGraphHash(await k.listPlanNotes(t.id)))
   })
 
+  // A human answered "agree" and the gate silently read it as ordinary feedback: the plan never
+  // froze and the agent re-asked. The gate is the vocabulary now, not one magic word.
+  it('replyFeedback stamps for any word in APPROVAL_ANSWERS, not just the canonical one', async () => {
+    const { k, log } = await freshKernelAndLog()
+    for (const text of ['agree', 'Agreed', ' LGTM ', 'yes', APPROVAL_ANSWER]) {
+      const task = await k.createTask({ title: text, type: 'grounded' })
+      await log.append({
+        taskId: task.id, stepId: 'plan', runToken: `step:${task.id}:plan:a1`,
+        kind: EVENT_KIND.feedback_requested, payload: { question: 'approve?', topic: 'plan-1' },
+      })
+      await k.replyFeedback(task.id, text)
+      const provided = (await log.byTask(task.id)).find(e => e.kind === EVENT_KIND.feedback_provided)!
+      expect(provided.payload).toHaveProperty('planHash')
+    }
+  })
+
   it('replyFeedback does not stamp ordinary or non-approve replies', async () => {
-    const db = await createTestDb()
-    dbs.push(db)
-    const log = (await openStorage(db.url, { projectId: TEST_PROJECT_ID })).events
-    const k = new Kernel(log)
-    for (const [type, text] of [['generic', 'approve'], ['grounded', 'yes']] as const) {
+    const { k, log } = await freshKernelAndLog()
+    // 'not yet' / 'approve later' are the near-misses that matter: whole-string only, so an answer
+    // that merely CONTAINS an approval word is still ordinary feedback.
+    for (const [type, text] of [['generic', 'approve'], ['grounded', 'not yet'], ['grounded', 'approve later']] as const) {
       const task = await k.createTask({ title: type, type })
       await log.append({
         taskId: task.id, stepId: 'plan', runToken: `step:${task.id}:plan:a1`,
@@ -430,11 +451,7 @@ describe('Kernel lifecycle', () => {
   })
 
   it('approvedPlanHash is scoped to the exact run attempt', async () => {
-    const db = await createTestDb()
-    dbs.push(db)
-    const log = (await openStorage(db.url, { projectId: TEST_PROJECT_ID })).events
-    const k = new Kernel(log)
-    expect(typeof k.approvedPlanHash).toBe('function')
+    const { k, log } = await freshKernelAndLog()
     const task = await k.createTask({ title: 'grounded', type: 'grounded' })
     const runA = `step:${task.id}:plan:a1`
     const runB = `step:${task.id}:plan:a2`
@@ -446,11 +463,31 @@ describe('Kernel lifecycle', () => {
     expect(await k.approvedPlanHash(task.id, `step:${task.id}:plan:a3`)).toBeNull()
   })
 
+  // The approval approvedPlanHash THROWS AWAY, kept readable so finalize_plan can tell a human who
+  // never approved from an agent that approved through the MCP door — the log records those two
+  // identically apart from author.source. This is a read only: the last two assertions pin that
+  // what SATISFIES the gate did not move.
+  it('nonHumanPlanApproval surfaces a non-cli approve for this run, and nothing else', async () => {
+    const { k, log } = await freshKernelAndLog()
+    const task = await k.createTask({ title: 'grounded', type: 'grounded' })
+    const runA = `step:${task.id}:plan:a1`
+    const runB = `step:${task.id}:plan:a2`
+    const provided = (runToken: string, topic: string, source: 'cli' | 'mcp' | 'agent') => log.append({
+      taskId: task.id, stepId: 'plan', runToken, kind: EVENT_KIND.feedback_provided,
+      payload: { topic, text: 'approve', author: { source }, planHash: 'a'.repeat(64) },
+    })
+    await provided(runA, 'a', 'mcp')
+    await provided(runB, 'b', 'cli')
+
+    expect(await k.nonHumanPlanApproval(task.id, runA)).toEqual({ source: 'mcp' })
+    expect(await k.nonHumanPlanApproval(task.id, runB)).toBeNull()                        // a human approve is not one
+    expect(await k.nonHumanPlanApproval(task.id, `step:${task.id}:plan:a3`)).toBeNull()   // nor another attempt's
+    expect(await k.approvedPlanHash(task.id, runA)).toBeNull()                            // the gate is unchanged:
+    expect(await k.approvedPlanHash(task.id, runB)).toMatchObject({ hash: 'a'.repeat(64) }) // mcp still fails, cli still passes
+  })
+
   it('replyFeedback appends feedback_provided and returns the topic even without an injected send', async () => {
-    const db = await createTestDb()
-    dbs.push(db)
-    const log = (await openStorage(db.url, { projectId: TEST_PROJECT_ID })).events
-    const k = new Kernel(log) // no send wired — matches read-only CLI / most-tests construction
+    const { k, log } = await freshKernelAndLog() // no send wired — matches read-only CLI / most-tests construction
     const t = await k.createTask({ title: 'x' })
     const runToken = `step:${t.id}:s1:a1`
     await log.append({ taskId: t.id, stepId: 's1', runToken, kind: EVENT_KIND.feedback_requested, payload: { question: 'q', topic: 'topic-1' } })
@@ -461,9 +498,7 @@ describe('Kernel lifecycle', () => {
   })
 
   it('replyFeedback targets the later still-open topic when an earlier one is already answered', async () => {
-    const db = await createTestDb()
-    dbs.push(db)
-    const log = (await openStorage(db.url, { projectId: TEST_PROJECT_ID })).events
+    const { log } = await freshKernelAndLog()
     const sent: Array<{ runToken: string; topic: string }> = []
     const k = new Kernel(log, undefined, undefined, async (runToken, _message, topic) => { sent.push({ runToken, topic }) })
     const t = await k.createTask({ title: 'x' })
@@ -479,10 +514,7 @@ describe('Kernel lifecycle', () => {
   })
 
   it('openFeedback surfaces the latest unanswered feedback_requested, then null once answered', async () => {
-    const db = await createTestDb()
-    dbs.push(db)
-    const log = (await openStorage(db.url, { projectId: TEST_PROJECT_ID })).events
-    const k = new Kernel(log)
+    const { k, log } = await freshKernelAndLog()
     const t = await k.createTask({ title: 'x' })
     expect(await k.openFeedback(t.id)).toBeNull() // nothing pending
     const runToken = `step:${t.id}:plan:a1`
@@ -493,10 +525,7 @@ describe('Kernel lifecycle', () => {
   })
 
   it('reportCoverage appends analysis_completed carrying the parsed CoverageReport (defaults + provenance)', async () => {
-    const db = await createTestDb()
-    dbs.push(db)
-    const log = (await openStorage(db.url, { projectId: TEST_PROJECT_ID })).events
-    const k = new Kernel(log)
+    const { k, log } = await freshKernelAndLog()
     const t = await k.createTask({ title: 'x' })
     const runToken = `step:${t.id}:analyze:a1`
     await k.reportCoverage({ taskId: t.id, stepId: 'analyze', runToken }, { analyzed: true, gaps: ['no tests read'] })
@@ -510,10 +539,7 @@ describe('Kernel lifecycle', () => {
   })
 
   it('latestCoverage returns the most recent analysis_completed, or null before any', async () => {
-    const db = await createTestDb()
-    dbs.push(db)
-    const log = (await openStorage(db.url, { projectId: TEST_PROJECT_ID })).events
-    const k = new Kernel(log)
+    const k = await freshKernel()
     const t = await k.createTask({ title: 'x' })
     expect(await k.latestCoverage(t.id)).toBeNull()
     const ctx = { taskId: t.id, stepId: 'analyze', runToken: `step:${t.id}:analyze:a1` }
@@ -524,10 +550,7 @@ describe('Kernel lifecycle', () => {
   })
 
   it('annotatePlan rejects once the task is done, cancelled, or failed', async () => {
-    const db = await createTestDb()
-    dbs.push(db)
-    const log = (await openStorage(db.url, { projectId: TEST_PROJECT_ID })).events
-    const k = new Kernel(log)
+    const { k, log } = await freshKernelAndLog()
     // Kernel has no public "mark done"/"mark failed" mutator (that's the execution port's job,
     // out of scope here) — append the status change directly, the way the port's run-finish
     // checkpoint does.
@@ -561,10 +584,7 @@ describe('Kernel lifecycle', () => {
   // memory projector runs, so the read model is empty — pre-fix finalize (store.list/get) would see
   // "no masterplan"; listPlanNotes folds the memory_written events straight off the log and succeeds.
   it('listPlanNotes reconstructs the plan-note graph from the log with no projection running', async () => {
-    const db = await createTestDb()
-    dbs.push(db)
-    const log = (await openStorage(db.url, { projectId: TEST_PROJECT_ID })).events
-    const k = new Kernel(log)
+    const { k, log } = await freshKernelAndLog()
     const taskId = 'grounded-1'
     const scope = planScope(taskId)
     const author = { source: 'agent' as const }
@@ -581,10 +601,7 @@ describe('Kernel lifecycle', () => {
   })
 
   it('freezes a subplan-declared modelRef, and omits the key when the planner left it empty', async () => {
-    const db = await createTestDb()
-    dbs.push(db)
-    const log = (await openStorage(db.url, { projectId: TEST_PROJECT_ID })).events
-    const k = new Kernel(log)
+    const { k, log } = await freshKernelAndLog()
     const scope = planScope('grounded-models')
     const author = { source: 'agent' as const }
     const note = (id: string, over: Record<string, unknown> = {}) => log.append({
@@ -630,5 +647,75 @@ describe('Kernel lifecycle', () => {
     expect((await k.cancelSubtree(parent.id)).sort()).toEqual([parent.id, child.childTaskId].sort())
     expect((await k.getTask(parent.id))?.status).toBe(TASK_STATUS.cancelled)
     expect((await k.getTask(child.childTaskId))?.status).toBe(TASK_STATUS.cancelled)
+  })
+
+  // A task_split committed between cancel's subtree snapshot and its stamp sweep used to create a
+  // child the sweep never saw — auto-approved, so the router admitted the orphan's run AFTER the
+  // cancel finished. The proxied log commits a split at the latest instant before the sweep's own
+  // transaction takes the project lock: the closest deterministic seam to that race.
+  // The audit scoped change set: paths THIS task's steps wrote, folded from the log. It must cover
+  // the task AND its descendant split tasks (a sibling step may delegate its writes to a child), and
+  // must NOT bleed an unrelated sibling task's writes in.
+  it('listTaskChangedPaths covers a descendant split task and excludes an unrelated sibling', async () => {
+    const { k, log } = await freshKernelAndLog()
+    const parent = await k.createTask({ title: 'P', spec: '' })
+    await toRunning(log, parent.id)
+    const child = await k.proposeSplit({
+      parentTaskId: parent.id, stepId: 's1', runToken: `step:${parent.id}:s1:a1`, toolCallId: 'call_1',
+      title: 'C', spec: '',
+      plan: { steps: [{ id: 'w1', role: 'worker', title: 'w', instructions: 'do', dependsOn: [], skillRefs: [], toolRefs: [] }] },
+      parentStep: { executorRef: 'api-loop', modelRef: 'fake/m', maxIterations: 5 },
+      policy: ApprovalPolicy.parse({ default: 'auto' }), maxDepth: 3,
+    })
+    // an unrelated sibling task with its OWN write — must never appear in the parent's set
+    const sibling = await k.createTask({ title: 'unrelated', spec: '' })
+
+    // helper: a confirmed write (tool_call + isError:false tool_result on the same toolCallId)
+    const write = async (taskId: string, stepId: string, toolCallId: string, path: string) => {
+      const runToken = `step:${taskId}:${stepId}:a1`
+      await log.append({ taskId, stepId, runToken, kind: EVENT_KIND.tool_call, payload: { stepId, runToken, iteration: 1, toolCallId, toolName: 'fs_write', input: { path } } })
+      await log.append({ taskId, stepId, runToken, kind: EVENT_KIND.tool_result, payload: { stepId, runToken, iteration: 1, toolCallId, toolName: 'fs_write', output: {}, isError: false } })
+    }
+    await write(parent.id, 's1', 'p1', 'src/parent.ts')
+    await write(child.childTaskId, 'w1', 'w1c', './src/child.ts') // delegated write, normalizes to src/child.ts
+    await write(sibling.id, 's1', 's1x', 'src/sibling.ts')
+
+    const rows = await k.listTaskChangedPaths(parent.id)
+    const paths = rows.map(r => r.path).sort()
+    expect(paths).toEqual(['src/child.ts', 'src/parent.ts']) // descendant included, sibling excluded
+    // each path is attributed to its OWNING task id
+    expect(rows.find(r => r.path === 'src/child.ts')!.taskId).toBe(child.childTaskId)
+    expect(rows.find(r => r.path === 'src/parent.ts')!.taskId).toBe(parent.id)
+    expect(rows.find(r => r.path === 'src/child.ts')!.steps).toEqual([{ stepId: 'w1', tool: 'fs_write', seq: expect.any(Number) }])
+
+    // the sibling's own set sees only its write, never the parent/child ones
+    expect((await k.listTaskChangedPaths(sibling.id)).map(r => r.path)).toEqual(['src/sibling.ts'])
+  })
+
+  it('cancelSubtree stamps a child whose split commits after the snapshot, before the sweep', async () => {
+    const { k, log } = await freshKernelAndLog()
+    const parent = await k.createTask({ title: 'P', spec: '' })
+    await toRunning(log, parent.id)
+    let injected = false
+    const inject = () => k.proposeSplit({
+      parentTaskId: parent.id, stepId: 's1', runToken: `step:${parent.id}:s1:a1`, toolCallId: 'call_1',
+      title: 'late child', spec: '',
+      plan: { steps: [{ id: 'w1', role: 'worker', title: 'w', instructions: 'do', dependsOn: [], skillRefs: [], toolRefs: [] }] },
+      parentStep: { executorRef: 'api-loop', modelRef: 'fake/m', maxIterations: 5 },
+      policy: ApprovalPolicy.parse({ default: 'auto' }), maxDepth: 3,
+    })
+    const racingLog = new Proxy(log, {
+      get(target, prop, receiver) {
+        if (prop !== 'transaction') return Reflect.get(target, prop, receiver)
+        return async (fn: (tx: EventLogOps) => Promise<unknown>) => {
+          if (!injected) { injected = true; await inject() }
+          return target.transaction(fn)
+        }
+      },
+    })
+    const stamped = await new Kernel(racingLog).cancelSubtree(parent.id)
+    const childId = `${parent.id}.s1.call_1`
+    expect(stamped.sort()).toEqual([parent.id, childId].sort())
+    expect((await k.getTask(childId))?.status).toBe(TASK_STATUS.cancelled)
   })
 })

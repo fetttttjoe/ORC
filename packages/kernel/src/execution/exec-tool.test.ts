@@ -54,6 +54,15 @@ describe('exec tool', () => {
     expect(JSON.stringify(r.output)).toContain('bun test')
   })
 
+  it('a refused compound command teaches the one-command rule', async () => {
+    // observed live (#31697): an agent tried `cd packages/ui-core && bun test … | tail -60` and
+    // burned an iteration learning by refusal that exec has no shell. The refusal should say so.
+    const r = await tool(['bun test']).execute({ command: 'cd packages/ui-core && bun test src/x.test.ts 2>&1 | tail -60' })
+    expect(r.isError).toBe(true)
+    expect(JSON.stringify(r.output)).toContain('no shell')
+    expect(JSON.stringify(r.output)).toContain('workspace root')
+  })
+
   it('allowlist entries extend at token boundaries only', async () => {
     const t = tool(['echo hi'])
     expect((await t.execute({ command: 'echo hi there' })).isError).toBe(false) // extra args ok

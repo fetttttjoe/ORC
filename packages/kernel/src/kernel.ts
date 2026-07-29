@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { MASTERPLAN_NOTE_ID,
-  AnalysisCompletedPayload, ChildPlanDraft, EVENT_KIND, FeedbackProvidedPayload, ISOLATION_TIER, MemoryDeletedPayload, MemoryWrittenPayload, NOTE_TIER, PAYLOAD_SCHEMAS, PlanAnnotatedPayload, PlanDraft, RunRequestedPayload, STRATEGY, TASK_STATUS, TERMINAL_TASK_STATUS, evaluateApproval, formatModelOption, validatePlan, type ChildPlanDraftInput, type ModelOption,
+  AnalysisCompletedPayload, ChildPlanDraft, EVENT_KIND, FeedbackProvidedPayload, ISOLATION_TIER, MemoryDeletedPayload, MemoryWrittenPayload, NOTE_TIER, PAYLOAD_SCHEMAS, PlanAnnotatedPayload, PlanDraft, RunRequestedPayload, STEP_ROLE, STRATEGY, TASK_STATUS, TERMINAL_TASK_STATUS, evaluateApproval, formatModelOption, isApprovalAnswer, validatePlan, type ChildPlanDraftInput, type ModelOption,
   type Analyzer, type ApprovalPolicy, type EventKind, type EventRecord,
   type PlanNote, type Plan, type PlanStep, type TaskNode, type TaskStatus,
   type MemoryAuthor,
@@ -8,12 +8,17 @@ import { MASTERPLAN_NOTE_ID,
 import { foldPlanNotes, planGraphHash, planScope, PLAN_STEP_ID, PLAN_STEP_ROLE } from './execution/strategies/grounded-plan'
 import { DEFAULT_MAX_ITERATIONS } from './config'
 import { EventLog, type EventLogOps } from './storage'
-import { fold, gatedChildren, subtreeTaskIds, subtreeUsage, type State } from './projections'
+import { fold, gatedChildren, subtreeTaskIds, subtreeUsage, taskChangedPaths, taskNoteWrites, type State, type TaskNoteWrite } from './projections'
 import { KERNEL_ERROR_CODE, KernelError } from './errors'
 
 // D6 targeted re-plan (M5b): what listAnnotations hands back to the read_annotations tool — the
 // plan_annotated payload plus the event's own seq, so the agent can order/dedupe across rounds.
 export type PlanAnnotation = PlanAnnotatedPayload & { seq: number }
+
+// Who authored a split's plan draft. Omitted = 'agent' (fail closed): only the kernel's own freeze
+// (finalize_plan → withCommitStep) may claim it, and only that origin may carry the committer role.
+export const SPLIT_ORIGIN = { agent: 'agent', freeze: 'freeze' } as const
+export type SplitOrigin = (typeof SPLIT_ORIGIN)[keyof typeof SPLIT_ORIGIN]
 
 // One open feedback question, already parsed. The raw event travels with it because the reply path
 // resumes the step/run envelope the question was asked from.
@@ -47,7 +52,7 @@ export class Kernel {
   // template steps rather than by each analyzer: the plan step hardcoded 30 and every subplan
   // inherits it (proposeSplit expands with parentStep.maxIterations), so raising the project
   // ceiling moved nothing below the analyze step. One override, one place, plans stay frozen data.
-  async createGroundedTask(input: { title: string; spec: string; modelRef: string; analyzerRef: string; budgetUSD?: number | null; modelCatalog?: ModelOption[]; maxIterations?: number }): Promise<TaskNode> {
+  async createGroundedTask(input: { title: string; spec: string; modelRef: string; analyzerRef: string; parentId?: string; budgetUSD?: number | null; modelCatalog?: ModelOption[]; maxIterations?: number }): Promise<TaskNode> {
     // the title is a LABEL, never the goal — a grounded run without intent would make the
     // analyze/plan agents guess (burning an analyze pass on "what did you mean?")
     const spec = input.spec.trim()
@@ -58,9 +63,9 @@ export class Kernel {
     if (!analyzer)
       throw new KernelError(KERNEL_ERROR_CODE.invalid_transition, `unknown analyzer '${input.analyzerRef}' — register it or pass a valid analyzerRef`)
     return this.log.transaction(async tx => {
-      const task = await this.createTaskIn(tx, { title: input.title, spec, type: 'grounded', budgetUSD: input.budgetUSD })
+      const task = await this.createTaskIn(tx, { title: input.title, spec, type: 'grounded', parentId: input.parentId, budgetUSD: input.budgetUSD })
       const maxIterations = input.maxIterations ?? DEFAULT_MAX_ITERATIONS
-      const analyzeStep: PlanStep = { ...analyzer.analysisStep({ modelRef: input.modelRef, taskSpec: spec }), maxIterations }
+      const analyzeStep: PlanStep = { ...analyzer.analysisStep({ modelRef: input.modelRef, taskSpec: spec }), maxIterations, readOnlySource: true }
       const planStep: PlanStep = {
         id: PLAN_STEP_ID, role: PLAN_STEP_ROLE, title: 'Author the executable plan',
         // the concrete scope + root id, so the authoring agent (which never sees its taskId) and
@@ -71,7 +76,7 @@ export class Kernel {
             ? ` Models you may set as a subplan's modelRef, with their rates: ${input.modelCatalog.map(formatModelOption).join('; ')}. Omit it to inherit '${input.modelRef}'.`
             : ''),
         executorRef: 'api-loop', modelRef: input.modelRef, skillRefs: ['plan-authoring'], toolRefs: [],
-        isolation: ISOLATION_TIER.local, zone: [], maxIterations, dependsOn: [analyzeStep.id],
+        isolation: ISOLATION_TIER.local, zone: [], maxIterations, dependsOn: [analyzeStep.id], readOnlySource: true,
       }
       const draft: PlanDraft = {
         strategyRef: STRATEGY.groundedPlan, analyzerRef: input.analyzerRef, costEstimateUSD: null,
@@ -118,6 +123,7 @@ export class Kernel {
     title: string; spec: string; plan: ChildPlanDraftInput; budgetUSD?: number
     parentStep: Pick<PlanStep, 'executorRef' | 'modelRef' | 'maxIterations'>
     policy: ApprovalPolicy; maxDepth: number
+    origin?: SplitOrigin
   }): Promise<{ splitId: string; childTaskId: string; gated: boolean }> {
     const splitId = `split:${input.runToken}:${input.toolCallId}`
     const childTaskId = `${input.parentTaskId}.${input.stepId}.${input.toolCallId}`
@@ -155,6 +161,15 @@ export class Kernel {
       }
 
       const draft = ChildPlanDraft.parse(input.plan)
+      // The committer role arms git_commit (commit-tool's registration gate), so only the kernel's
+      // own freeze may set it. Without this, any implementer could split off an auto-approved child
+      // claiming the role and commit unreviewed work — with autoCommit off, and no verify anywhere.
+      if (input.origin !== SPLIT_ORIGIN.freeze) {
+        const reserved = draft.steps.find(s => s.role === STEP_ROLE.committer)
+        if (reserved)
+          throw new KernelError(KERNEL_ERROR_CODE.invalid_transition,
+            `step '${reserved.id}' claims role '${STEP_ROLE.committer}', which only the kernel's autoCommit freeze may set — remove it from the split; the commit step is appended for you when the pipeline commits`)
+      }
       const child: TaskNode = {
         id: childTaskId, parentId: parent.id, type: 'split', title: input.title, spec: input.spec,
         status: TASK_STATUS.draft, zone: [], budgetUSD, depth: parent.depth + 1,
@@ -218,6 +233,31 @@ export class Kernel {
         const p = PAYLOAD_SCHEMAS.plan_annotated.safeParse(e.payload)
         return p.success ? [{ ...p.data, seq: e.seq }] : []
       })
+  }
+
+  // Audit scoped change set (log-derived): the paths THIS task's steps wrote, folded purely from
+  // the event log so the auditor never has to trust git. Covers the task AND its descendant split
+  // tasks — a sibling step may delegate its writes to a child task, and those writes are still this
+  // task's changes — by reading log.byTask per subtree id and merging. Each result carries the
+  // owning taskId plus the contributing steps (stepId/tool/seq).
+  // This is a MEMBERSHIP projection with exactly ONE use: distinguishing this task's declared-zone
+  // changes from sibling-task pollution in the scope-cleanliness check. It is a FLOOR (exec-driven
+  // writes are uncaptured), never a complete diff, and NEVER a substitute for the full bun test /
+  // bun run typecheck gate — AUDITOR_CONTRACT's "any defect ⇒ signal failure" stays unqualified.
+  async listTaskChangedPaths(taskId: string): Promise<Array<{ path: string; taskId: string; steps: Array<{ stepId: string | null; tool: string; seq: number }> }>> {
+    const ids = subtreeTaskIds(await this.state(), taskId)
+    const out: Array<{ path: string; taskId: string; steps: Array<{ stepId: string | null; tool: string; seq: number }> }> = []
+    for (const id of ids)
+      for (const changed of taskChangedPaths(await this.log.byTask(id)))
+        out.push({ path: changed.path, taskId: id, steps: changed.steps })
+    return out
+  }
+
+  // The restamp set for git_commit: semantic notes this task's subtree wrote, from the log (same
+  // memory-kind read as listPlanNotes — memory events carry taskId:null, byTask can't see them).
+  async listTaskNoteWrites(taskId: string): Promise<TaskNoteWrite[]> {
+    const subtree = new Set(subtreeTaskIds(await this.state(), taskId))
+    return taskNoteWrites(await this.log.after(0, [EVENT_KIND.memory_written, EVENT_KIND.memory_deleted]), subtree)
   }
 
   // FixE freeze-from-log (M5b): reconstruct the task's plan-note graph from the event log — the
@@ -286,14 +326,35 @@ export class Kernel {
 
   // The hash the human approved, and WHEN — the seq lets finalize_plan name the notes edited since,
   // instead of reporting only that something moved. One derivation of "which approval", so the
-  // check and the explanation can never disagree about which one they mean.
+  // check and the explanation can never disagree about which one they mean. What counts as an
+  // approving answer comes from isApprovalAnswer (contracts/approval-answer.ts) — it must be the
+  // SAME predicate replyFeedback stamped with, or this read finds nothing the writer left.
   async approvedPlanHash(taskId: string, runToken: string): Promise<{ hash: string; seq: number } | null> {
     for (const event of [...(await this.log.byTask(taskId))].reverse()) {
       if (event.kind !== EVENT_KIND.feedback_provided || event.runToken !== runToken) continue
       const parsed = FeedbackProvidedPayload.safeParse(event.payload)
       if (parsed.success && parsed.data.author.source === 'cli'
-        && parsed.data.text.trim().toLowerCase() === 'approve' && parsed.data.planHash)
+        && isApprovalAnswer(parsed.data.text) && parsed.data.planHash)
         return { hash: parsed.data.planHash, seq: event.seq }
+    }
+    return null
+  }
+
+  // The approval approvedPlanHash THREW AWAY, and which door it came through. Same scan, same
+  // parse, same isApprovalAnswer + planHash requirements — inverted on exactly one term:
+  // author.source !== 'cli'. Deliberately a SIBLING read rather than a widened return on
+  // approvedPlanHash: that function IS the gate, and a refusal message must never be a reason to
+  // touch what satisfies it. Nothing here decides anything — finalize_plan calls it only after
+  // approvedPlanHash already said no, to tell "nobody approved" from "an agent approved through
+  // the MCP door", which the log records identically apart from this field. Reports the source it
+  // actually found, so the message can name the door instead of guessing 'mcp'.
+  async nonHumanPlanApproval(taskId: string, runToken: string): Promise<{ source: string } | null> {
+    for (const event of [...(await this.log.byTask(taskId))].reverse()) {
+      if (event.kind !== EVENT_KIND.feedback_provided || event.runToken !== runToken) continue
+      const parsed = FeedbackProvidedPayload.safeParse(event.payload)
+      if (parsed.success && parsed.data.author.source !== 'cli'
+        && isApprovalAnswer(parsed.data.text) && parsed.data.planHash)
+        return { source: parsed.data.author.source }
     }
     return null
   }
@@ -321,10 +382,13 @@ export class Kernel {
   // own envelope runToken, recorded by the port from inside the step (never reconstructed here).
   // Returns the resolved topic, or null if the task has no open question (the CLI reports either).
   // `via` names the DOOR the answer arrived through, and defaults to the terminal. It is recorded
-  // rather than assumed because for a GROUNDED task the conversational 'approve' answered here IS
+  // rather than assumed because for a GROUNDED task the conversational approval answered here IS
   // the human gate — createGroundedTask policy-approves the scaffold precisely because "the human's
   // real gate is the conversational approve inside the plan step" — so who sent it decides whether
   // a plan was approved by a person or by an agent driving the MCP surface.
+  // Which answers count is isApprovalAnswer's alone (contracts/approval-answer.ts): the word used to
+  // be a bare literal here AND a second copy in the browser bundle, and a human who typed "agree"
+  // was silently given ordinary feedback instead of the gate they meant to open.
   async replyFeedback(taskId: string, text: string, via: MemoryAuthor['source'] = 'cli'): Promise<string | null> {
     const open = await this.log.transaction(async tx => {
       const task = await this.requireTask(tx, taskId)
@@ -334,7 +398,7 @@ export class Kernel {
       if (!event.stepId || !event.runToken)
         throw new KernelError(KERNEL_ERROR_CODE.invalid_transition, `feedback_requested for topic '${topic}' has no step/run envelope to resume`)
       const approvingPlan = task.type === 'grounded' && event.stepId === PLAN_STEP_ID
-        && text.trim().toLowerCase() === 'approve'
+        && isApprovalAnswer(text)
       const planHash = approvingPlan
         ? planGraphHash(foldPlanNotes(
           await tx.after(0, [EVENT_KIND.memory_written, EVENT_KIND.memory_deleted]),
@@ -395,24 +459,29 @@ export class Kernel {
   // The append half of a cancel, split out of dbos-port.cancelRun so a client with no execution
   // port can still stop a run: the supervisor sees each cancelled status and cancels the DBOS
   // workflows behind it. Children before parents, so a parent gate-waiting on a child sees the
-  // child resolve first — the same order cancelRun already used. Re-checks under the write lock,
+  // child resolve first — the same order cancelRun already used. Folded inside the transaction,
   // so a run that finished in the meantime keeps its real terminal status.
+  // ONE transaction, not one per task: the sweep used to snapshot the subtree first and stamp in
+  // separate transactions, and a task_split committed mid-sweep by a still-running ancestor step
+  // created an auto-approved child the stale snapshot never saw — the router started the orphan's
+  // run AFTER the cancel completed. Under the project write lock a split lands either before the
+  // sweep (its child is in the fold, so it gets stamped) or after commit, where proposeSplit's
+  // terminal-parent guard refuses it — every subtree task is terminal by then.
   async cancelSubtree(taskId: string): Promise<string[]> {
-    const state = await this.state()
-    const ids = subtreeTaskIds(state, taskId).reverse()
-    const stamped: string[] = []
-    for (const id of ids) {
-      await this.log.transaction(async tx => {
-        const status = fold(await tx.byTask(id)).tasks.get(id)?.status
-        if (status === undefined || TERMINAL_TASK_STATUS.has(status)) return
+    return this.log.transaction(async tx => {
+      const state = await this.stateOf(tx)
+      const stamped: string[] = []
+      for (const id of subtreeTaskIds(state, taskId).reverse()) {
+        const status = state.tasks.get(id)?.status
+        if (status === undefined || TERMINAL_TASK_STATUS.has(status)) continue
         await tx.append({
           taskId: id, stepId: null, runToken: null, kind: EVENT_KIND.task_status_changed,
           payload: { taskId: id, from: status, to: TASK_STATUS.cancelled },
         })
         stamped.push(id)
-      })
-    }
-    return stamped
+      }
+      return stamped
+    })
   }
 
   // ponytail: state() refolds the whole log on every call — add snapshots when it measurably slows

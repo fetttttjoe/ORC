@@ -42,11 +42,7 @@ describe('kill -9 resume (spec §10/§11 — the crown jewel)', () => {
 
     // First run: spawn, wait for the marker (executor is now stalled mid-step), kill -9
     const first = Bun.spawn(['bun', FIXTURE, db.url, t.id, marker], { stdout: 'pipe', stderr: 'pipe' })
-    const deadline = Date.now() + 30_000
-    while (!existsSync(marker)) {
-      if (Date.now() > deadline) throw new Error('fixture never reached the stall point')
-      await new Promise(r => setTimeout(r, 100))
-    }
+    await waitForFile(marker, 30_000, 'fixture never reached the stall point')
     first.kill(9)
     await first.exited
 

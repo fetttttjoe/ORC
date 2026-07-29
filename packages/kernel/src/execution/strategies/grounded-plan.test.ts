@@ -1,8 +1,7 @@
 import { describe, expect, it } from 'bun:test'
-import { EVENT_KIND, LINK_KIND, type EventRecord, type MemoryLink, type PlanNote } from '@orc/contracts'
+import { COMMIT_STEP_ID, EVENT_KIND, LINK_KIND, STEP_ROLE, type EventRecord, type MemoryLink, type PlanNote } from '@orc/contracts'
 import { planNoteFixture, stepFixture } from '@orc/contracts/fixtures'
-import { AUDITOR_CONTRACT, foldPlanNotes, groundedPlanOmission, instantiateFrozenPlan, planScope } from './grounded-plan'
-import * as groundedPlan from './grounded-plan'
+import { AUDITOR_CONTRACT, COMMIT_CONTRACT, HEAL_CONTRACT, foldPlanNotes, groundedPlanOmission, instantiateFrozenPlan, planGraphHash, planScope, withCommitStep } from './grounded-plan'
 
 const note = (over: Partial<PlanNote> & { id: string }): PlanNote =>
   planNoteFixture({ scope: 'plan-t', title: over.id, ...over })
@@ -10,8 +9,7 @@ const link = (id: string, kind: MemoryLink['kind']): MemoryLink => ({ id, kind }
 
 describe('planGraphHash', () => {
   it('is canonical across note order and changes with reviewed graph content/order', () => {
-    expect(typeof groundedPlan.planGraphHash).toBe('function')
-    const hash = groundedPlan.planGraphHash
+    const hash = planGraphHash
     const notes = [
       note({ id: 'masterplan', links: [link('a', LINK_KIND.decomposes_into), link('b', LINK_KIND.decomposes_into)] }),
       note({ id: 'a', body: 'A', uncertainty: ['verify A'] }),
@@ -60,10 +58,23 @@ describe('instantiateFrozenPlan (pure, deterministic)', () => {
     const draft = instantiateFrozenPlan('masterplan', notes)
     expect(draft.steps.find(s => s.id === 'verify')!.role).toBe('auditor')
     expect(draft.steps.find(s => s.id === 'work')!.role).toBe('implementer')
-    // the auditor contract is frozen into the verify step's instructions — plan-approved, not
-    // injected as executor policy; implementer siblings never carry it
-    expect(draft.steps.find(s => s.id === 'verify')!.instructions).toBe(`audit it\n\n${AUDITOR_CONTRACT}`)
+    // the auditor + heal contracts are frozen into the verify step's instructions — plan-approved,
+    // not injected as executor policy; implementer siblings never carry them
+    expect(draft.steps.find(s => s.id === 'verify')!.instructions).toBe(`audit it\n\n${AUDITOR_CONTRACT}\n\n${HEAL_CONTRACT}`)
     expect(draft.steps.find(s => s.id === 'work')!.instructions).toBe('do it')
+  })
+
+  // The scope narrowing must never become a licence. Asserted on the constant itself so a future
+  // edit that softens the defect rule (or drops the scoped set's limits) fails here.
+  it('keeps the defect rule unqualified while pointing SCOPE at the scoped_changes tool', () => {
+    expect(AUDITOR_CONTRACT).toContain("if your audit finds ANY defect, signal outcome 'failure'")
+    expect(AUDITOR_CONTRACT).toContain('Success means zero defects.')
+    expect(AUDITOR_CONTRACT).toContain('scoped_changes')
+    expect(AUDITOR_CONTRACT).toContain('not from a working-tree diff')
+    // the limit travels in the same breath as the permission
+    expect(AUDITOR_CONTRACT).toContain('never licenses skipping the test/typecheck gate')
+    expect(AUDITOR_CONTRACT).toContain('never excuses a defect in a file that IS in scope')
+    expect(AUDITOR_CONTRACT).toContain('empty set is not evidence of success')
   })
 
   it('is a pure function of the notes: same input → identical output', () => {
@@ -76,16 +87,8 @@ describe('instantiateFrozenPlan (pure, deterministic)', () => {
     expect(instantiateFrozenPlan('masterplan', notes).steps[0]!.instructions).toBe('sum')
   })
 
-  it('drops depends_on edges to non-siblings (only sibling subplans become dependsOn)', () => {
-    const notes: PlanNote[] = [
-      note({ id: 'masterplan', links: [link('a', LINK_KIND.decomposes_into)] }),
-      note({ id: 'a', title: 'A', links: [link('outsider', LINK_KIND.depends_on)] }),
-    ]
-    expect(instantiateFrozenPlan('masterplan', notes).steps[0]!.dependsOn).toEqual([])
-  })
-
   // A depends_on LINK to a NON-sibling is knowledge ("builds on that finding") and never schedules.
-  it('a depends_on link outside the plan is knowledge, not ordering', () => {
+  it('drops depends_on edges to non-siblings (only sibling subplans become dependsOn)', () => {
     const notes: PlanNote[] = [
       note({ id: 'masterplan', links: [link('a', LINK_KIND.decomposes_into)] }),
       note({ id: 'a', title: 'A', links: [link('outsider', LINK_KIND.depends_on)] }),
@@ -292,5 +295,45 @@ describe('groundedPlanOmission', () => {
     // same step id, but the task is not a grounded-plan task
     const authored = grounded({ payload: { plan: { taskId: 't1', version: 1, strategyRef: 'single-step', costEstimateUSD: null, steps: [stepFixture({ id: 'plan' })] } } })
     expect(groundedPlanOmission([authored], 'plan', runToken)).toBeNull()
+  })
+})
+
+describe('withCommitStep', () => {
+  const frozen = () => instantiateFrozenPlan('masterplan', [
+    note({ id: 'masterplan', links: [link('db', LINK_KIND.decomposes_into), link('verify', LINK_KIND.decomposes_into)] }),
+    note({ id: 'db', body: 'do it' }),
+    note({ id: 'verify', body: 'check it', dependsOn: ['db'] }),
+  ])
+
+  it('appends the kernel-owned trailing commit step, ordered after every sibling', () => {
+    const draft = withCommitStep(frozen())
+    expect(draft.steps.map(s => s.id)).toEqual(['db', 'verify', 'commit'])
+    const commit = draft.steps.at(-1)!
+    expect(commit).toEqual({
+      id: COMMIT_STEP_ID, role: STEP_ROLE.committer, title: 'Commit',
+      instructions: COMMIT_CONTRACT, dependsOn: ['db', 'verify'],
+      skillRefs: [], toolRefs: [], zone: [], readOnlySource: true,
+    })
+  })
+
+  it('refuses a plan that already carries a step named commit — loud, never a silent shadow', () => {
+    const clash = { steps: [...frozen().steps, { ...frozen().steps[0]!, id: 'commit', dependsOn: [] }] }
+    expect(() => withCommitStep(clash)).toThrow(/commit/)
+  })
+
+  // The sim run's one imperfection: an agent healed body+claims but left the SUMMARY in
+  // bug-present phrasing — and the summary is what every searcher reads first. The contract must
+  // demand the whole retrieval surface.
+  it('the heal clause demands the whole retrieval surface, summary and title included', () => {
+    expect(HEAL_CONTRACT).toContain('title and summary')
+    expect(HEAL_CONTRACT).toContain('retrieval surface')
+  })
+
+  it('the frozen verify step carries the heal clause after the auditor contract', () => {
+    const verify = frozen().steps.find(s => s.id === 'verify')!
+    expect(verify.instructions).toContain(AUDITOR_CONTRACT)
+    expect(verify.instructions).toContain(HEAL_CONTRACT)
+    // implementers never carry either
+    expect(frozen().steps.find(s => s.id === 'db')!.instructions).not.toContain(HEAL_CONTRACT)
   })
 })

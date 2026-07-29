@@ -22,10 +22,12 @@ describe('MCP + skills through a durable run (integration)', () => {
   let port: DbosPort
   let log: EventLog
   let storage: Storage
+  let dbUrl: string
   let teardown: () => Promise<void>
 
   beforeAll(async () => {
     const db = await createTestDb()
+    dbUrl = db.url
     storage = await openStorage(db.url, { projectId: TEST_PROJECT_ID })
     log = storage.events
     kernel = new Kernel(log)
@@ -86,8 +88,15 @@ describe('MCP + skills through a durable run (integration)', () => {
     const agentCall = events.find(e => e.kind === EVENT_KIND.agent_call)!
     expect(JSON.stringify(agentCall.payload)).toContain('Always answer in haiku.')
 
-    // replay identity: fold(events) twice gives identical JSON (golden-replay style)
+    // replay identity (golden-replay style): a fresh storage handle re-reads the durable log and
+    // must fold to the same state — folding one in-memory array twice is tautological and passes
+    // even when nothing was durably stored.
     const snap = (x: unknown) => JSON.stringify(x, (_k, v) => (v instanceof Map ? [...v.entries()] : v))
-    expect(snap(fold(events))).toBe(snap(fold(events)))
+    const reopened = await openStorage(dbUrl, { projectId: TEST_PROJECT_ID })
+    try {
+      expect(snap(fold(await reopened.events.byTask(t.id)))).toBe(snap(fold(events)))
+    } finally {
+      await reopened.close()
+    }
   })
 })

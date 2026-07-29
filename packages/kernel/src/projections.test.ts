@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'bun:test'
-import type { EventRecord, Plan, TaskNode } from '@orc/contracts'
+import { EVENT_KIND, type EventRecord, type Plan, type TaskNode } from '@orc/contracts'
 import { eventFixture, draftFixture, planFixture, stepFixture } from '@orc/contracts/fixtures'
-import { emptyFold, fold, foldInto, subtreeOutcome, completedStepIds, nextAttempts, crashDedupKey, stepUsage, subtreeTaskIds, subtreeUsage, pendingSplitForChild, remainingBudget, inheritedCwd, runCwd } from './projections'
+import { emptyFold, fold, foldInto, subtreeOutcome, completedStepIds, nextAttempts, crashDedupKey, stepUsage, subtreeTaskIds, subtreeUsage, pendingSplitForChild, remainingBudget, inheritedCwd, runCwd, taskChangedPaths, taskNoteWrites } from './projections'
 
 const task: TaskNode = {
   id: 't1', parentId: null, type: 'generic', title: 'hello', spec: '',
@@ -180,7 +180,7 @@ describe('fold — execution kinds', () => {
   })
 
   it('copilot_exchange is traceability-only: folds to no state', () => {
-    const state = fold([eventFixture({ kind: 'copilot_exchange', payload: { user: 'u', assistant: 'a', toolCalls: [], modelRef: 'm/x' } })])
+    const state = fold([eventFixture({ kind: EVENT_KIND.copilot_exchange, payload: { user: 'u', assistant: 'a', toolCalls: [], modelRef: 'm/x' } })])
     expect(state.tasks.size).toBe(0)
     expect(state.usage.size).toBe(0)
   })
@@ -447,5 +447,161 @@ describe('subtreeOutcome', () => {
   it("the root's own non-done outcome still wins", () => {
     const state = fold([t('root', 'cancelled'), t('root.child', 'done', 'root')])
     expect(subtreeOutcome(state, 'root')).toBe('cancelled')
+  })
+})
+
+// The scoped change set (audit): the paths a task's steps WROTE, derived purely from the log so the
+// auditor never has to trust git. It pairs each fs_write/fs_edit/fs_delete tool_call with the SAME
+// toolCallId's tool_result, keeps only isError===false, and folds artifact_produced receipts in as a
+// floor. It is a MEMBERSHIP projection — never a diff, never a substitute for the full test/typecheck
+// gate. See AUDITOR_CONTRACT: any defect in an in-zone file still fails the signal.
+describe('taskChangedPaths', () => {
+  // one tool_call event
+  const call = (seq: number, toolCallId: string, toolName: string, input: unknown, stepId = 's1'): EventRecord =>
+    eventFixture({ seq, ts: 'T', stepId, runToken: rt(stepId), kind: 'tool_call',
+      payload: { stepId, runToken: rt(stepId), iteration: 1, toolCallId, toolName, input } })
+  // its paired tool_result
+  const result = (seq: number, toolCallId: string, toolName: string, isError: boolean, stepId = 's1'): EventRecord =>
+    eventFixture({ seq, ts: 'T', stepId, runToken: rt(stepId), kind: 'tool_result',
+      payload: { stepId, runToken: rt(stepId), iteration: 1, toolCallId, toolName, output: {}, isError } })
+  const artifact = (seq: number, path: string, stepId = 's1'): EventRecord =>
+    eventFixture({ seq, ts: 'T', stepId, runToken: rt(stepId), kind: 'artifact_produced',
+      payload: { path, sha256: 'a'.repeat(64), size: 1 } })
+
+  const paths = (rows: ReturnType<typeof taskChangedPaths>): string[] => rows.map(r => r.path)
+
+  it('includes a successful fs_write (call paired with an isError:false result)', () => {
+    const rows = taskChangedPaths([
+      call(1, 'c1', 'fs_write', { path: 'src/a.ts' }),
+      result(2, 'c1', 'fs_write', false),
+    ])
+    expect(paths(rows)).toEqual(['src/a.ts'])
+    expect(rows[0]!.steps).toEqual([{ stepId: 's1', tool: 'fs_write', seq: 1 }])
+  })
+
+  it('EXCLUDES a write whose tool_result isError === true', () => {
+    const rows = taskChangedPaths([
+      call(1, 'c1', 'fs_write', { path: 'src/a.ts' }),
+      result(2, 'c1', 'fs_write', true),
+    ])
+    expect(paths(rows)).toEqual([])
+  })
+
+  it('EXCLUDES a tool_call with no matching tool_result (crash before result is not a write)', () => {
+    const rows = taskChangedPaths([call(1, 'c1', 'fs_write', { path: 'src/a.ts' })])
+    expect(paths(rows)).toEqual([])
+  })
+
+  it('includes fs_edit and fs_delete', () => {
+    const rows = taskChangedPaths([
+      call(1, 'c1', 'fs_edit', { path: 'e.ts' }), result(2, 'c1', 'fs_edit', false),
+      call(3, 'c2', 'fs_delete', { path: 'd.ts' }), result(4, 'c2', 'fs_delete', false),
+    ])
+    expect(paths(rows)).toEqual(['e.ts', 'd.ts'])
+  })
+
+  it('excludes non-write tools (fs_read, memory_write, exec) even when paired', () => {
+    const rows = taskChangedPaths([
+      call(1, 'c1', 'fs_read', { path: 'r.ts' }), result(2, 'c1', 'fs_read', false),
+      call(3, 'c2', 'memory_write', { path: 'm.ts' }), result(4, 'c2', 'memory_write', false),
+      call(5, 'c3', 'exec', { path: 'x.ts' }), result(6, 'c3', 'exec', false),
+    ])
+    expect(paths(rows)).toEqual([])
+  })
+
+  it('skips a malformed write input (no path / path not a string) without throwing', () => {
+    let rows!: ReturnType<typeof taskChangedPaths>
+    expect(() => {
+      rows = taskChangedPaths([
+        call(1, 'c1', 'fs_write', { nope: true }), result(2, 'c1', 'fs_write', false),
+        call(3, 'c2', 'fs_write', { path: 42 }), result(4, 'c2', 'fs_write', false),
+        call(5, 'c3', 'fs_write', { path: '' }), result(6, 'c3', 'fs_write', false),
+        call(7, 'c4', 'fs_write', 'not-a-record'), result(8, 'c4', 'fs_write', false),
+      ])
+    }).not.toThrow()
+    expect(paths(rows)).toEqual([])
+  })
+
+  it("normalizes './x.ts' and 'x.ts' to one deduped entry keeping every contributing step", () => {
+    const rows = taskChangedPaths([
+      call(1, 'c1', 'fs_write', { path: './x.ts' }, 's1'), result(2, 'c1', 'fs_write', false, 's1'),
+      call(3, 'c2', 'fs_edit', { path: 'x.ts' }, 's2'), result(4, 'c2', 'fs_edit', false, 's2'),
+    ])
+    expect(paths(rows)).toEqual(['x.ts'])
+    expect(rows[0]!.steps).toEqual([
+      { stepId: 's1', tool: 'fs_write', seq: 1 },
+      { stepId: 's2', tool: 'fs_edit', seq: 3 },
+    ])
+  })
+
+  it('collapses duplicate slashes and a leading ./ on normalization', () => {
+    const rows = taskChangedPaths([
+      call(1, 'c1', 'fs_write', { path: './a//b/c.ts' }), result(2, 'c1', 'fs_write', false),
+    ])
+    expect(paths(rows)).toEqual(['a/b/c.ts'])
+  })
+
+  it('folds an artifact_produced receipt into the set as a contributing path', () => {
+    const rows = taskChangedPaths([artifact(1, 'out/report.md')])
+    expect(paths(rows)).toEqual(['out/report.md'])
+    expect(rows[0]!.steps).toEqual([{ stepId: 's1', tool: 'artifact_produced', seq: 1 }])
+  })
+
+  it('orders deterministically by first seq, then path', () => {
+    // written out of seq order in the array; first-contributing seq decides order
+    const rows = taskChangedPaths([
+      call(5, 'c2', 'fs_write', { path: 'b.ts' }), result(6, 'c2', 'fs_write', false),
+      call(1, 'c1', 'fs_write', { path: 'a.ts' }), result(2, 'c1', 'fs_write', false),
+    ])
+    expect(paths(rows)).toEqual(['a.ts', 'b.ts']) // a.ts first-seen at seq 1, b.ts at seq 5
+  })
+})
+
+describe('taskNoteWrites', () => {
+  const write = (seq: number, note: Record<string, unknown>, taskId: string | undefined): EventRecord =>
+    eventFixture({ seq, ts: 'T', kind: 'memory_written',
+      payload: { note, author: { source: 'agent', ...(taskId ? { taskId } : {}) } } })
+  const del = (seq: number, id: string, scope = 'project'): EventRecord =>
+    eventFixture({ seq, ts: 'T', kind: 'memory_deleted',
+      payload: { id, scope, author: { source: 'cli' } } })
+  const semantic = (id: string, paths: string[]): Record<string, unknown> =>
+    ({ id, scope: 'project', title: id, tier: 'semantic', paths })
+  const subtree = new Set(['t1', 't1.c1'])
+
+  it('collects a semantic note written by a subtree task, latest write supplying the paths', () => {
+    const rows = taskNoteWrites([
+      write(1, semantic('area-x', ['src/old.ts']), 't1'),
+      write(2, semantic('area-x', ['src/new.ts']), 't1'),
+    ], subtree)
+    expect(rows).toEqual([{ id: 'area-x', scope: 'project', paths: ['src/new.ts'] }])
+  })
+
+  it('a later write by an OUTSIDE author updates paths but membership stays (the task touched it)', () => {
+    const rows = taskNoteWrites([
+      write(1, semantic('area-x', ['a.ts']), 't1.c1'),
+      write(2, semantic('area-x', ['b.ts']), 'other-task'),
+    ], subtree)
+    expect(rows).toEqual([{ id: 'area-x', scope: 'project', paths: ['b.ts'] }])
+  })
+
+  it('excludes notes only ever written outside the subtree, or with no author task', () => {
+    expect(taskNoteWrites([
+      write(1, semantic('theirs', ['a.ts']), 'other-task'),
+      write(2, semantic('manual', ['b.ts']), undefined),
+    ], subtree)).toEqual([])
+  })
+
+  it('a memory_deleted after the write drops the note', () => {
+    expect(taskNoteWrites([
+      write(1, semantic('gone', ['a.ts']), 't1'),
+      del(2, 'gone'),
+    ], subtree)).toEqual([])
+  })
+
+  it('excludes non-semantic tiers and pathless semantic notes', () => {
+    expect(taskNoteWrites([
+      write(1, { id: 'step-a', scope: 'plan-t1', title: 's', tier: 'episodic' }, 't1'),
+      write(2, semantic('no-paths', []), 't1'),
+    ], subtree)).toEqual([])
   })
 })

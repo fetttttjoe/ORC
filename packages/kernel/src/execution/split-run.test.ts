@@ -13,7 +13,7 @@ import { createMemory } from '@orc/memory'
 import { createTestSurreal } from '@orc/memory/test-helpers'
 import { openStorage } from '../storage'
 import { Kernel } from '../kernel'
-import { createTestDb, fakeProvider, testConfig, TEST_PROJECT_ID } from '../test-helpers'
+import { createTestDb, fakeProvider, testConfig, TEST_PROJECT_ID, waitFor } from '../test-helpers'
 import { createDbosPort } from './dbos-port'
 import { splitTool } from './split-tool'
 
@@ -27,11 +27,6 @@ const ReadBody = z.object({ note: z.object({ body: z.string() }).nullable() })
 const CHILD_PLAN = { steps: [{ id: 'w1', role: 'worker', title: 'w', instructions: 'do', dependsOn: [], skillRefs: [] }] }
 const CHILD_NOTE = { id: 'child-finding', title: 'CF', body: 'from the child' }
 
-const waitFor = async (pred: () => Promise<boolean>, ms = 15_000): Promise<boolean> => {
-  const start = Date.now()
-  while (Date.now() - start < ms) { if (await pred()) return true; await Bun.sleep(50) }
-  return false
-}
 
 // ONE scripted executor drives BOTH the parent step (s1) and the split child step (w1),
 // branching on ctx.step.id — the child inherits executorRef='split-fake' at expansion.
@@ -268,7 +263,7 @@ describe('recursion e2e: split, gate, join, manual approve, queue partition', ()
       // the live router resolves the still-pending split off the child's cancelled terminal status
       expect(await waitFor(async () =>
         (await log.all()).some(e => e.kind === EVENT_KIND.split_resolved && PAYLOAD_SCHEMAS.split_resolved.parse(e.payload).outcome === RUN_OUTCOME.cancelled),
-      )).toBe(true)
+      15_000)).toBe(true)
     } finally {
       await cleanup()
     }

@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { errorMessage } from '@orc/contracts'
+import { errorMessage, SHA256_HEX_RE } from '@orc/contracts'
 import { existsSync, readFileSync, realpathSync } from 'node:fs'
 import path from 'node:path'
 import { atomicWriteFileSync } from '../atomic-file'
@@ -11,7 +11,7 @@ import type { McpServerConfig } from '@orc/contracts'
 // A grant binds to a FINGERPRINT of what was consented to: change the declaration
 // (MCP command/args/env keys) or the content (extension entry bytes) and the old
 // grant is invalid — consent must be given again.
-const TrustRecord = z.object({ id: z.string().min(1), fingerprint: z.string().regex(/^[a-f0-9]{64}$/) })
+const TrustRecord = z.object({ id: z.string().min(1), fingerprint: z.string().regex(SHA256_HEX_RE) })
 const TrustFile = z.object({
   mcp: z.array(TrustRecord).default([]),
   extensions: z.array(TrustRecord).default([]),

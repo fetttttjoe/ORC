@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { z } from 'zod'
-import { errorMessage, ChildPlanDraft, TOOL_REF_RE, type ApprovalPolicy, type ResolvedTool } from '@orc/contracts'
+import { ChildPlanDraft, TOOL_REF_RE, toolError, type ApprovalPolicy, type ResolvedTool } from '@orc/contracts'
 import type { Kernel } from '../kernel'
 import { ANALYZE_STEP_ROLE } from './strategies/grounded-plan'
 
@@ -76,7 +76,7 @@ export function splitTool(opts: {
         })
         return { output: r, isError: false }
       } catch (e) {
-        return { output: { error: errorMessage(e) }, isError: true }
+        return toolError(e)
       }
     },
   }]

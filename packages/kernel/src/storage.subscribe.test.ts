@@ -55,6 +55,7 @@ describe('EventLog.subscribe', () => {
   it('a handler throwing during initial catch-up leaves nothing running', async () => {
     const db = await createTestDb(); dbs.push(db)
     const log = (await openStorage(db.url, { projectId: TEST_PROJECT_ID })).events
+    db.onClose(() => log.close())
     await appendCreated(log, 'a')
 
     let calls = 0
@@ -72,11 +73,13 @@ describe('EventLog.subscribe', () => {
   it('catches up from fromSeq then pushes new appends in order', async () => {
     const db = await createTestDb(); dbs.push(db)
     const log = (await openStorage(db.url, { projectId: TEST_PROJECT_ID })).events
+    db.onClose(() => log.close())
     await appendCreated(log, 'a')
     await appendCreated(log, 'b')
 
     const seen: number[] = []
     const unsub = await log.subscribe({ fromSeq: 0 }, e => { seen.push(e.seq) })
+    db.onClose(unsub)
     await sleep(50)
     expect(seen).toEqual([1, 2])              // catch-up
 
@@ -84,13 +87,12 @@ describe('EventLog.subscribe', () => {
     await sleep(100)
     expect(seen).toEqual([1, 2, 3])           // pushed, no poll
 
-    await unsub()
-    await log.close()
   })
 
   it('retries a failed handler from the same cursor — the event is not lost', async () => {
     const db = await createTestDb(); dbs.push(db)
     const log = (await openStorage(db.url, { projectId: TEST_PROJECT_ID })).events
+    db.onClose(() => log.close())
     const attempts: number[] = []
     let failedOnce = false
     const unsub = await log.subscribe({ fromSeq: 0 }, e => {
@@ -100,20 +102,21 @@ describe('EventLog.subscribe', () => {
         throw new Error('handler boom')
       }
     })
+    db.onClose(unsub)
     await appendCreated(log, 'a')
     await appendCreated(log, 'b')
     const deadline = Date.now() + 5000
     while (attempts.length < 3 && Date.now() < deadline) await sleep(50)
     expect(attempts).toEqual([1, 1, 2]) // seq 1 retried before seq 2 — cursor never skipped it
-    await unsub()
-    await log.close()
   })
 
   it('reconnects after the LISTEN backend dies and catches up without a gap', async () => {
     const db = await createTestDb(); dbs.push(db)
     const log = (await openStorage(db.url, { projectId: TEST_PROJECT_ID })).events
+    db.onClose(() => log.close())
     const seen: number[] = []
     const unsub = await log.subscribe({ fromSeq: 0 }, e => { seen.push(e.seq) })
+    db.onClose(unsub)
     await appendCreated(log, 'a')
     let deadline = Date.now() + 5000
     while (!seen.includes(1) && Date.now() < deadline) await sleep(50)
@@ -131,21 +134,19 @@ describe('EventLog.subscribe', () => {
     expect(seen).toContain(1)
     expect(seen).toContain(2)
     expect([...seen]).toEqual([...seen].sort((a, b) => a - b)) // in increasing order
-    await unsub()
-    await log.close()
   }, 15_000)
 
   it('delivers nothing for a rolled-back transaction (commit-only)', async () => {
     const db = await createTestDb(); dbs.push(db)
     const log = (await openStorage(db.url, { projectId: TEST_PROJECT_ID })).events
+    db.onClose(() => log.close())
     const seen: number[] = []
     const unsub = await log.subscribe({ fromSeq: 0 }, e => { seen.push(e.seq) })
+    db.onClose(unsub)
     await sleep(30)
     await log.transaction(async tx => { await tx.append({ taskId: 'x', stepId: null, runToken: null, kind: EVENT_KIND.task_created, payload: { task: task('x') } }); throw new Error('rollback') }).catch(() => {})
     await sleep(100)
     expect(seen).toEqual([])
-    await unsub()
-    await log.close()
   })
 
   // A cursor outlives the log it came from: `docker compose down -v`, a restore, a repointed
@@ -155,11 +156,13 @@ describe('EventLog.subscribe', () => {
   it('rewinds and announces a reset when the log no longer reaches its cursor', async () => {
     const db = await createTestDb(); dbs.push(db)
     const log = (await openStorage(db.url, { projectId: TEST_PROJECT_ID })).events
+    db.onClose(() => log.close())
     await appendCreated(log, 'a')
     await appendCreated(log, 'b')
     const seen: number[] = []
     let resets = 0
     const unsub = await log.subscribe({ fromSeq: 0, onReset: () => { resets += 1 } }, e => { seen.push(e.seq) })
+    db.onClose(unsub)
     let deadline = Date.now() + 5000
     while (seen.length < 2 && Date.now() < deadline) await sleep(50)
     expect(seen).toEqual([1, 2]) // cursor now sits at 2
@@ -177,7 +180,5 @@ describe('EventLog.subscribe', () => {
     while (!(resets > 0 && seen.length > 2) && Date.now() < deadline) await sleep(50)
     expect(resets).toBe(1)         // the fold-holder is told to throw its cache away
     expect(seen).toEqual([1, 2, 1]) // and the new log's first event is delivered, not skipped
-    await unsub()
-    await log.close()
   }, 20_000)
 })

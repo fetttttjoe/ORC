@@ -24,11 +24,15 @@ export async function migrateDatabase(url: string): Promise<void> {
   }
 }
 
-function isMissingMigrationTable(error: unknown): boolean {
-  if (!error || typeof error !== 'object') return false
-  const value = error as { code?: unknown; cause?: unknown; errors?: unknown[] }
-  if (value.code === '42P01' || value.code === '3F000') return true
-  return isMissingMigrationTable(value.cause) || (value.errors ?? []).some(isMissingMigrationTable)
+// Same shape probing as errors.ts' isConnectionRefused: 'in' checks, no casts. The
+// `cause !== error` guard is load-bearing — error-wrapping libraries can hand back a chain
+// that loops on itself, and the unguarded walk recursed to stack overflow.
+export function isMissingMigrationTable(error: unknown): boolean {
+  if (typeof error !== 'object' || error === null) return false
+  if ('code' in error && (error.code === '42P01' || error.code === '3F000')) return true
+  if ('errors' in error && Array.isArray(error.errors) && error.errors.some(isMissingMigrationTable)) return true
+  const cause = 'cause' in error ? error.cause : undefined
+  return cause !== undefined && cause !== error && isMissingMigrationTable(cause)
 }
 
 // credential-free database identity for error messages — WHICH database was checked is the

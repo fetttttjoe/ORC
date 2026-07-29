@@ -24,10 +24,6 @@ function writeSkill(root: string, name: string, content?: string): void {
   mkdirSync(path.join(root, name), { recursive: true })
   writeFileSync(path.join(root, name, 'SKILL.md'), content ?? SKILL(name))
 }
-const open = async (d: string) => {
-  const idx = await SkillIndex.open(d)
-  return idx
-}
 afterEach(() => {
   for (const d of dirs) rmSync(d, { recursive: true, force: true })
   dirs = []
@@ -80,12 +76,12 @@ describe('SkillIndex', () => {
     writeSkill(root, 'good-skill')
     writeSkill(root, 'bad-skill', `---\nname: MISMATCH\ndescription: d\n---\nb`)
     mkdirSync(path.join(root, 'no-skill-md')) // dir without SKILL.md → ignored
-    const idx = await open(root)
+    const idx = await SkillIndex.open(root)
     const entries = idx.list()
     expect(entries.map(e => [e.name, e.valid])).toEqual([['bad-skill', false], ['good-skill', true]])
     expect(entries[0]!.errors.length).toBeGreaterThan(0)
 
-    const empty = await open(path.join(root, 'does-not-exist'))
+    const empty = await SkillIndex.open(path.join(root, 'does-not-exist'))
     expect(empty.list()).toEqual([])
   })
 
@@ -93,7 +89,7 @@ describe('SkillIndex', () => {
     const root = tempSkills()
     writeSkill(root, 'good-skill')
     writeSkill(root, 'bad-skill', `---\nname: nope\ndescription: d\n---\nb`)
-    const idx = await open(root)
+    const idx = await SkillIndex.open(root)
     const s = await idx.load('good-skill')
     expect(s.body).toContain('# Body of good-skill')
     expect(s.hash).toMatch(/^[0-9a-f]{64}$/)
@@ -103,7 +99,7 @@ describe('SkillIndex', () => {
 
   it('watch() indexes a NEW skill dir created after watch start within 1s', async () => {
     const root = tempSkills()
-    const idx = await open(root)
+    const idx = await SkillIndex.open(root)
     idx.watch(50) // fast interval for the test; production default 500
     try {
       writeSkill(root, 'late-skill')
@@ -119,7 +115,7 @@ describe('SkillIndex', () => {
   it('watch() picks up edits and deletions', async () => {
     const root = tempSkills()
     writeSkill(root, 'evolving')
-    const idx = await open(root)
+    const idx = await SkillIndex.open(root)
     idx.watch(50)
     try {
       // edit: description changes (force distinct mtime content-wise; size changes too)

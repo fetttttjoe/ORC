@@ -7,8 +7,8 @@ import { z } from 'zod'
 import { errorMessage, ApprovalPolicy, MCP_SERVER_ID_RE, McpServerConfig, ModelCost } from '@orc/contracts'
 
 // bump per release — pins DBOS__APPVERSION so recovery survives rebuilds (spec §4)
-export const APP_VERSION = 'orc-0.1.0'
-export const DEFAULT_DATABASE_URL = 'postgresql://postgres:orc@localhost:5433/orc'
+const APP_VERSION = 'orc-0.1.0'
+const DEFAULT_DATABASE_URL = 'postgresql://postgres:orc@localhost:5433/orc'
 // The agent-loop budget an AUTHORED step gets when the project sets none. One constant, because
 // three places used to spell `30`: this schema, the grounded plan step, and singleStepDraft — so
 // raising the project ceiling left the other two behind.
@@ -40,10 +40,12 @@ const settingsSchema = (dir: string) =>
     // entirely, prompt unchanged) — same escape hatch shape as ambientCapture below.
     memoryPreloadTokens: z.coerce.number().int().nonnegative().default(800),
     // the embedding model for SEMANTIC memory retrieval, as a 'provider/model' ref. '' disables it
-    // (keyword-only, the prior behaviour). Default is a tiny local Ollama encoder (all-minilm, 384d)
-    // — swap for any provider/model via config or ORC_MEMORY_EMBED_MODEL. A model change needs
-    // `orc memory rebuild` to re-embed, since vectors from different models are not comparable.
-    memoryEmbedModel: z.string().default('ollama/all-minilm'),
+    // (keyword-only, the prior behaviour). Default is the LARGE local Ollama encoder: the retrieval
+    // floor (SEMANTIC_FLOOR, 0.495) was tuned on mxbai vectors, and under the smaller all-minilm a
+    // known-good probe measured best cosine 0.4015 — below the floor, so the semantic arm silently
+    // returned nothing on a default config. Swap via config or ORC_MEMORY_EMBED_MODEL. A model
+    // change needs `orc memory rebuild` to re-embed; vectors from different models don't compare.
+    memoryEmbedModel: z.string().default('ollama/mxbai-embed-large'),
     // the model that DISTILS a finished task's step outcomes into one durable note, as a
     // 'provider/model' ref. '' (default) = extractive promotion (glued bullets, zero model calls);
     // set it (e.g. 'anthropic/claude-haiku-4-5') to have the out-of-band lifecycle synthesise a
@@ -61,6 +63,10 @@ const settingsSchema = (dir: string) =>
     // criteria like "tests green" are structurally unverifiable by every step: implementers
     // ship unexecuted tests and an honest auditor can only refuse to certify.
     execAllowlist: z.array(z.string().min(1)).default([]),
+    // append the commit step to every frozen grounded plan: the run commits its own diff and
+    // restamps the notes it wrote (the truthful-stamp pipeline). Default off like every capability
+    // gate here — committing an operator's repo is an outward action they opt into.
+    autoCommit: z.union([z.boolean(), z.stringbool()]).default(false),
     ollamaBaseUrl: z.url().default('http://localhost:11434'),
     projectDbUrl: z.string().default('ws://127.0.0.1:8000/rpc'),
     // ceiling for the surreal driver's initial dial — the driver does not reject unreachable
@@ -91,6 +97,7 @@ const envOverrides = (): Record<string, string> => {
     memoryEmbedModel: process.env.ORC_MEMORY_EMBED_MODEL,
     memoryConsolidateModel: process.env.ORC_MEMORY_CONSOLIDATE_MODEL,
     ambientCapture: process.env.ORC_AMBIENT_CAPTURE,
+    autoCommit: process.env.ORC_AUTO_COMMIT,
     ollamaBaseUrl: process.env.OLLAMA_BASE_URL,
     projectDbUrl: process.env.ORC_PROJECT_DB_URL,
     projectDbConnectTimeoutMs: process.env.ORC_PROJECT_DB_CONNECT_TIMEOUT_MS,
@@ -122,7 +129,7 @@ export const projectDatabaseName = (base: string, id: string): string =>
 // suffix heuristic — the operator consented to the server RECEIVING the secret, not to it landing
 // in the log if a hostile/buggy/injected server echoes it back in a tool result. Seeded into
 // redactEnv so the redactor value-redacts every consented MCP secret automatically.
-export function mcpSecretEnvNames(mcpServers: Record<string, { env?: Record<string, string> }>): string[] {
+function mcpSecretEnvNames(mcpServers: Record<string, { env?: Record<string, string> }>): string[] {
   const names = new Set<string>()
   for (const cfg of Object.values(mcpServers))
     for (const v of Object.values(cfg.env ?? {}))

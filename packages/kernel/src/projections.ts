@@ -1,7 +1,8 @@
 import { z } from 'zod'
 import {
-  ArtifactProducedPayload, EVENT_KIND, FAILURE_CLASS, FailureClass, OPERATION_STATUS, Plan,
+  ArtifactProducedPayload, EVENT_KIND, FAILURE_CLASS, FailureClass, NOTE_TIER, OPERATION_STATUS, Plan,
   RUN_OUTCOME, STEP_RUN_STATUS, TASK_STATUS, TaskNode, TaskStatus, ZERO_USAGE, addUsage, runOutcomeFor,
+  MemoryDeletedPayload, MemoryWrittenPayload, noteKey,
   OperationCompletedPayload, OperationFailedPayload, OperationStartedPayload, ReactionFailedPayload,
 } from '@orc/contracts'
 import type { EventRecord, OperationRecord, RunOutcome, StepRunStatus, Usage } from '@orc/contracts'
@@ -466,4 +467,137 @@ export function runCwd(state: State, task: TaskNode, override: string | undefine
 export function pendingSplitForChild(state: State, childTaskId: string): SplitState | undefined {
   for (const s of state.splits.values()) if (s.childTaskId === childTaskId && !s.resolved) return s
   return undefined
+}
+
+// ── Scoped change set (audit) ────────────────────────────────────────────────────────────────
+// The paths a task's steps WROTE, derived purely from EventRecord[] so the auditor never has to
+// trust git. This is a MEMBERSHIP projection with exactly one permitted use: telling this task's
+// declared-zone changes apart from sibling-task pollution in the scope-cleanliness check. It is a
+// FLOOR, not a complete diff — exec-driven writes (formatters, codegen) are uncaptured — and it
+// NEVER substitutes for the full bun test / bun run typecheck gate, nor dismisses a real defect in
+// an in-zone file (AUDITOR_CONTRACT: any defect ⇒ signal failure, unqualified).
+
+// The file tools that CHANGE a file (mirrors loop.ts's WRITING_FILE_TOOLS). No contracts-level
+// constant is reachable from the kernel, and loop.ts's TOOL_NAME.fs_* resolve to exactly these
+// literals; fs_read/fs_list are absent by design — reading a file is not a write.
+const WRITE_TOOL_NAMES: ReadonlySet<string> = new Set(['fs_write', 'fs_edit', 'fs_delete'])
+
+// The path a write tool acted on — exactly loop.ts's editedPath rule: input is a record, input.path
+// is a non-empty string, or it is skipped rather than guessed at.
+const writeInputPath = (input: unknown): string | null =>
+  typeof input === 'object' && input !== null && !Array.isArray(input)
+    && typeof (input as Record<string, unknown>).path === 'string'
+    && ((input as Record<string, unknown>).path as string).length > 0
+    ? ((input as Record<string, unknown>).path as string)
+    : null
+
+// Read-side path normalization (do NOT call realpath/fs/git — a hand-built event array must fold):
+// forward slashes, strip a leading './', collapse duplicate slashes.
+const normalizePath = (p: string): string =>
+  p.replace(/\\/g, '/').replace(/^\.\//, '').replace(/\/{2,}/g, '/')
+
+// One step's contribution to a changed path: the id, the tool that produced it, and the seq of the
+// contributing event (the tool_call seq for a write, the receipt seq for an artifact).
+export interface PathContributor {
+  stepId: string | null
+  tool: string
+  seq: number
+}
+
+export interface ChangedPath {
+  path: string
+  steps: PathContributor[]
+}
+
+// Pure derivation of a task's change set from its events. Rules:
+//  • only fs_write/fs_edit/fs_delete tool_calls whose input.path is a non-empty string;
+//  • each paired with the tool_result carrying the SAME toolCallId, kept only when isError===false
+//    (an unpaired tool_call — a crash before the result — is NOT a write);
+//  • artifact_produced receipts folded in too (declared outputs count even if produced outside a
+//    write tool), as a floor;
+//  • normalized, deduped by path (keeping every contributing step), ordered by first seq then path.
+export function taskChangedPaths(events: EventRecord[]): ChangedPath[] {
+  // tool_result outcomes by toolCallId — pass one: a result present with isError===false is what
+  // turns a tool_call into a confirmed write. A call id counts only when it saw at least one success
+  // AND never an error (once failed, stays failed — a stray success replay cannot resurrect it).
+  const sawSuccess = new Set<string>()
+  const sawError = new Set<string>()
+  for (const e of events) {
+    if (e.kind !== EVENT_KIND.tool_result) continue
+    const id = e.payload.toolCallId
+    if (typeof id !== 'string') continue
+    if (e.payload.isError === true) sawError.add(id)
+    else sawSuccess.add(id)
+  }
+  const resultOk = (id: string): boolean => sawSuccess.has(id) && !sawError.has(id)
+
+  // path → contributors, first-seen seq tracked for deterministic ordering
+  const byPath = new Map<string, { firstSeq: number; steps: PathContributor[] }>()
+  const add = (rawPath: string, contributor: PathContributor): void => {
+    const path = normalizePath(rawPath)
+    if (path.length === 0) return
+    const existing = byPath.get(path)
+    if (existing) {
+      existing.steps.push(contributor)
+      if (contributor.seq < existing.firstSeq) existing.firstSeq = contributor.seq
+    } else {
+      byPath.set(path, { firstSeq: contributor.seq, steps: [contributor] })
+    }
+  }
+
+  for (const e of events) {
+    if (e.kind === EVENT_KIND.tool_call) {
+      const p = e.payload
+      const toolName = p.toolName
+      const id = p.toolCallId
+      if (typeof toolName !== 'string' || !WRITE_TOOL_NAMES.has(toolName)) continue
+      if (typeof id !== 'string' || !resultOk(id)) continue // unpaired or errored → not a write
+      const path = writeInputPath(p.input)
+      if (path === null) continue // malformed input — skipped, never guessed at
+      add(path, { stepId: e.stepId, tool: toolName, seq: e.seq })
+    } else if (e.kind === EVENT_KIND.artifact_produced) {
+      const p = e.payload
+      const path = p.path
+      if (typeof path !== 'string' || path.length === 0) continue
+      add(path, { stepId: e.stepId, tool: EVENT_KIND.artifact_produced, seq: e.seq })
+    }
+  }
+
+  return [...byPath.entries()]
+    .map(([path, v]) => ({ path, firstSeq: v.firstSeq, steps: v.steps }))
+    .sort((a, b) => a.firstSeq - b.firstSeq || (a.path < b.path ? -1 : a.path > b.path ? 1 : 0))
+    .map(({ path, steps }) => ({ path, steps }))
+}
+
+export interface TaskNoteWrite { id: string; scope: string; paths: string[] }
+
+// The semantic notes a task subtree wrote — the restamp set: git_commit stamps exactly these,
+// never a corpus-wide guess (drift.ts restampableNotes' documented ceiling). Membership is sticky
+// across later outside-author rewrites (the task still touched it; paths follow the latest write),
+// cleared by memory_deleted. Semantic-with-paths only: the freshness gate reads nothing else, so
+// stamping a pathless or episodic note buys nothing.
+export function taskNoteWrites(events: EventRecord[], subtree: ReadonlySet<string>): TaskNoteWrite[] {
+  const notes = new Map<string, TaskNoteWrite>()
+  const touched = new Set<string>()
+  for (const e of events) {
+    if (e.kind === EVENT_KIND.memory_written) {
+      const p = MemoryWrittenPayload.safeParse(e.payload)
+      if (!p.success) continue // lenient fold, like every projection
+      const { note, author } = p.data
+      if (note.tier !== NOTE_TIER.semantic) continue
+      const key = noteKey(note.scope, note.id)
+      notes.set(key, { id: note.id, scope: note.scope, paths: [...note.paths] })
+      if (author.taskId && subtree.has(author.taskId)) touched.add(key)
+    } else if (e.kind === EVENT_KIND.memory_deleted) {
+      const p = MemoryDeletedPayload.safeParse(e.payload)
+      if (!p.success) continue
+      const key = noteKey(p.data.scope, p.data.id)
+      notes.delete(key)
+      touched.delete(key)
+    }
+  }
+  return [...touched].flatMap(key => {
+    const n = notes.get(key)
+    return n && n.paths.length > 0 ? [n] : []
+  })
 }

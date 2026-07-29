@@ -28,7 +28,7 @@ const createTask = (log: EventLog, t: TaskNode) =>
 
 // `settled` waits for the subscription to have applied everything committed so far. The stream is
 // push-based and the handler is async, so a test that asserts immediately after an append races it.
-const settled = async (live: { current(): { tasks: Map<string, unknown> } }, until: () => boolean): Promise<void> => {
+const settled = async (until: () => boolean): Promise<void> => {
   for (let i = 0; i < 200; i++) {
     if (until()) return
     await Bun.sleep(10)
@@ -53,14 +53,14 @@ describe('openLiveState', () => {
     const live = await openLiveState(storage.events)
     try {
       await createTask(storage.events, task('t2'))
-      await settled(live, () => live.current().tasks.has('t2'))
+      await settled(() => live.current().tasks.has('t2'))
       expect(live.current().tasks.get('t2')?.status).toBe('draft')
 
       await storage.events.append({
         taskId: 't2', stepId: null, runToken: null, kind: EVENT_KIND.task_status_changed,
         payload: { taskId: 't2', from: 'draft', to: 'awaiting_approval' },
       })
-      await settled(live, () => live.current().tasks.get('t2')?.status === 'awaiting_approval')
+      await settled(() => live.current().tasks.get('t2')?.status === 'awaiting_approval')
     } finally {
       await live.close()
     }
@@ -78,7 +78,7 @@ describe('openLiveState', () => {
         taskId: 'a', stepId: null, runToken: null, kind: EVENT_KIND.task_status_changed,
         payload: { taskId: 'a', from: 'draft', to: 'awaiting_approval' },
       })
-      await settled(live, () => live.current().tasks.get('a')?.status === 'awaiting_approval')
+      await settled(() => live.current().tasks.get('a')?.status === 'awaiting_approval')
       const { fold } = await import('./projections')
       const batch = fold(await storage.events.all())
       const asJson = (v: unknown) => JSON.stringify(v, (_k, x) => (x instanceof Map ? Object.fromEntries(x) : x))
@@ -99,7 +99,7 @@ describe('openLiveState', () => {
       expect(live.current().tasks.has('ghost')).toBe(true)
       await storage.purge()
       await createTask(storage.events, task('fresh'))
-      await settled(live, () => live.current().tasks.has('fresh'))
+      await settled(() => live.current().tasks.has('fresh'))
       expect(live.current().tasks.has('ghost')).toBe(false)
     } finally {
       await live.close()

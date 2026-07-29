@@ -250,7 +250,7 @@ export function createSignalRouter(opts: {
         // Cancelling the DBOS workflows is the half a client cannot do. kernel.cancelSubtree
         // appended the status; this is the runtime completing it. Idempotent: cancelling an
         // already-cancelled workflow is a no-op.
-        if (p.data.to === TASK_STATUS.cancelled && e.taskId)
+        if (p.data.to === TASK_STATUS.cancelled)
           await opts.onCancelled(e.taskId)
             .catch(err => reactionFailed(REACTION.cancelled, ofEvent(e), err))
         const all = await opts.log.after(0, ROUTER_KINDS)

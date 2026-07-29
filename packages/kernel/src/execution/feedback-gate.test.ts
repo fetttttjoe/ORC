@@ -6,7 +6,7 @@ import {
 import { draftFixture, stepFixture } from '@orc/contracts/fixtures'
 import { openStorage } from '../storage'
 import { Kernel } from '../kernel'
-import { createTestDb, fakeProvider, testConfig, TEST_PROJECT_ID } from '../test-helpers'
+import { createTestDb, fakeProvider, testConfig, TEST_PROJECT_ID, waitFor } from '../test-helpers'
 import { createDbosPort, dbosSend, type DbosPort } from './dbos-port'
 
 // what the executor observed as the resumed value of the feedback yield
@@ -31,11 +31,6 @@ function feedbackFake(): AgentExecutor<unknown> {
   }
 }
 
-const waitFor = async (pred: () => Promise<boolean>, ms = 10_000): Promise<boolean> => {
-  const start = Date.now()
-  while (Date.now() - start < ms) { if (await pred()) return true; await Bun.sleep(50) }
-  return false
-}
 
 describe('durable conversational gate (feedback)', () => {
   let kernel: Kernel
@@ -68,7 +63,7 @@ describe('durable conversational gate (feedback)', () => {
     // DBOS.recv destination for the feedback topic, mirroring the split gate's `split:<id>` send.
     const runToken = `step:${t.id}:s1:a1`
 
-    expect(await waitFor(async () => (await kernel.eventsFor(t.id)).some(e => e.kind === EVENT_KIND.feedback_requested))).toBe(true)
+    expect(await waitFor(async () => (await kernel.eventsFor(t.id)).some(e => e.kind === EVENT_KIND.feedback_requested), 10_000)).toBe(true)
     const requested = (await kernel.eventsFor(t.id)).find(e => e.kind === EVENT_KIND.feedback_requested)
     expect(requested?.payload).toEqual({ question: 'analyze the codebase?', topic: 'consent' })
 

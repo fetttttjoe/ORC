@@ -9,7 +9,7 @@ import { migrate } from 'drizzle-orm/node-postgres/migrator'
 import { jsonb, pgTable, text } from 'drizzle-orm/pg-core'
 import { EVENT_KIND, isRecord, isTerminalError, type EventInput, type OperationSpec } from '@orc/contracts'
 import { listProjectIds, openStorage, type EventLog, type Storage } from './storage'
-import { migrateDatabase } from './storage/migrate'
+import { isMissingMigrationTable, migrateDatabase } from './storage/migrate'
 import { events } from './schema'
 import { createTestDb, TEST_PROJECT_ID } from './test-helpers'
 
@@ -21,7 +21,11 @@ afterAll(async () => {
 async function freshStorage(): Promise<Storage> {
   const db = await createTestDb()
   dbs.push(db)
-  return openStorage(db.url, { projectId: TEST_PROJECT_ID })
+  const storage = await openStorage(db.url, { projectId: TEST_PROJECT_ID })
+  // registered, not left to the test body: a bare close after assertions dies with the first
+  // failing expect and leaks the pool into every later file
+  db.onClose(() => storage.close())
+  return storage
 }
 async function freshLog(): Promise<EventLog> {
   return (await freshStorage()).events
@@ -32,13 +36,14 @@ describe('listProjectIds', () => {
     const db = await createTestDb()
     dbs.push(db)
     const s1 = await openStorage(db.url, { projectId: TEST_PROJECT_ID })
+    db.onClose(() => s1.close())
     const other = '99999999-9999-9999-9999-999999999999'
     const s2 = await openStorage(db.url, { projectId: other })
+    db.onClose(() => s2.close())
     const draft = { taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_written, payload: { note: { id: 'p', title: 'p' }, author: { source: 'cli' } } } as const
     await s1.events.append(draft)
     await s2.events.append(draft)
     expect(await listProjectIds(db.url)).toEqual([other, TEST_PROJECT_ID]) // s2 wrote last
-    await s1.close(); await s2.close()
   })
 })
 
@@ -73,6 +78,16 @@ describe('schema migration', () => {
     expect(err.message).toContain(new URL(db.url).host) // host:port is shown
     expect(err.message).not.toContain('@')              // no user/password ever reaches the message
   })
+
+  // error-wrapping libraries can hand back a chain that loops on itself; an unguarded cause walk
+  // recurses to stack overflow instead of classifying the error
+  it('classifies a self-referential cause chain without recursing forever', () => {
+    const looped: { code: string; cause?: unknown } = { code: 'XX000' }
+    looped.cause = looped
+    expect(isMissingMigrationTable(looped)).toBe(false)
+    // the chain walk itself must keep working — a wrapped missing-table code is still found
+    expect(isMissingMigrationTable({ cause: { code: '42P01' } })).toBe(true)
+  }, 1000)
 })
 
 const statusEvent = (taskId = 't1'): EventInput => ({
@@ -89,14 +104,12 @@ describe('EventLog (postgres)', () => {
     expect(a.seq).toBe(1)
     expect(b.seq).toBe(2)
     expect(a.ts).toMatch(/^\d{4}-\d{2}-\d{2}T/)
-    await log.close()
   })
 
   it('rejects payloads that do not match the kind schema', async () => {
     const log = await freshLog()
     await expect(log.append({ ...statusEvent(), payload: { wrong: true } })).rejects.toThrow()
     expect(await log.all()).toHaveLength(0)
-    await log.close()
   })
 
   it('filters by task and orders by seq', async () => {
@@ -106,7 +119,6 @@ describe('EventLog (postgres)', () => {
     await log.append(statusEvent('t1'))
     expect((await log.byTask('t1')).map(e => e.seq)).toEqual([1, 3])
     expect((await log.byTaskSince('t1', 1)).map(e => e.seq)).toEqual([3])
-    await log.close()
   })
 
   it('strips \\u0000 from payload strings (jsonb cannot store them)', async () => {
@@ -123,7 +135,6 @@ describe('EventLog (postgres)', () => {
     expect(JSON.stringify(rec.payload)).not.toContain('\\u0000')
     const [stored] = await log.byTask('t1')
     expect(JSON.stringify(stored!.payload)).toContain('binarydata')
-    await log.close()
   })
 
   it('transaction rolls back atomically on error', async () => {
@@ -135,7 +146,6 @@ describe('EventLog (postgres)', () => {
       }),
     ).rejects.toThrow('boom')
     expect(await log.all()).toHaveLength(0)
-    await log.close()
   })
 
   it('transaction reads see writes made inside the same transaction', async () => {
@@ -145,7 +155,6 @@ describe('EventLog (postgres)', () => {
       return (await tx.all()).length
     })
     expect(count).toBe(1)
-    await log.close()
   })
 
   it('persists across reopen (migrations are idempotent)', async () => {
@@ -153,10 +162,10 @@ describe('EventLog (postgres)', () => {
     dbs.push(db)
     const log = (await openStorage(db.url, { projectId: TEST_PROJECT_ID })).events
     await log.append(statusEvent())
-    await log.close()
+    await log.close() // deliberate mid-test close — the reopen IS the test
     const reopened = (await openStorage(db.url, { projectId: TEST_PROJECT_ID })).events
+    db.onClose(() => reopened.close())
     expect(await reopened.all()).toHaveLength(1)
-    await reopened.close()
   })
 
   it('migration 0002 assigns pre-existing rows to the unreachable legacy project', async () => {
@@ -174,6 +183,7 @@ describe('EventLog (postgres)', () => {
       copyFileSync(path.join(migrations, `${entry.tag}.sql`), path.join(stage, `${entry.tag}.sql`))
 
     const pool = new pg.Pool({ connectionString: db.url })
+    db.onClose(() => pool.end())
     const raw = drizzle(pool)
     await migrate(raw, { migrationsFolder: stage })
     // one row written against the old schema — no project_id column exists yet
@@ -190,11 +200,10 @@ describe('EventLog (postgres)', () => {
     // applying the remaining migration backfills project_id on the pre-existing rows
     await migrateDatabase(db.url)
     const log = (await openStorage(db.url, { projectId: TEST_PROJECT_ID })).events
+    db.onClose(() => log.close())
     expect(await log.all()).toHaveLength(0) // legacy rows are unreachable from any project
     const [row] = await raw.select().from(events)
     expect(row!.projectId).toBe('legacy')
-    await pool.end()
-    await log.close()
   })
 
   it('isolates projects sharing one database: each log reads only its own events', async () => {
@@ -202,14 +211,14 @@ describe('EventLog (postgres)', () => {
     dbs.push(db)
     const other = '00000000-0000-4000-8000-000000000002'
     const p1 = (await openStorage(db.url, { projectId: TEST_PROJECT_ID })).events
+    db.onClose(() => p1.close())
     const p2 = (await openStorage(db.url, { projectId: other })).events
+    db.onClose(() => p2.close())
     await p1.append(statusEvent('t1'))
     await p2.append(statusEvent('t1'))
     expect((await p1.all()).map(e => e.projectId)).toEqual([TEST_PROJECT_ID])
     expect((await p2.all()).map(e => e.projectId)).toEqual([other])
     expect(await p1.byTask('t1')).toHaveLength(1)
-    await p1.close()
-    await p2.close()
   })
 
   it('after() filters by sequence and kinds in the query, not in JavaScript', async () => {
@@ -223,7 +232,6 @@ describe('EventLog (postgres)', () => {
     expect((await log.after(0, ['task_created'])).map(e => e.seq)).toEqual([2])
     expect((await log.after(1)).map(e => e.seq)).toEqual([2, 3])
     expect((await log.after(0, ['task_created', 'task_status_changed'])).map(e => e.seq)).toEqual([1, 2, 3])
-    await log.close()
   })
 
   it('idempotency: same key + same input returns the original seq and stores one row', async () => {
@@ -232,7 +240,6 @@ describe('EventLog (postgres)', () => {
     const replay = await log.append({ ...statusEvent(), idempotencyKey: 'r1:status:0' })
     expect(replay.seq).toBe(first.seq)
     expect(await log.all()).toHaveLength(1)
-    await log.close()
   })
 
   it('idempotency: same key + different payload rejects instead of silently overwriting', async () => {
@@ -245,14 +252,15 @@ describe('EventLog (postgres)', () => {
       }),
     ).rejects.toThrow(/idempotency key/)
     expect(await log.all()).toHaveLength(1)
-    await log.close()
   })
 
   it('concurrent transactions serialize per project; unrelated projects stay concurrent', async () => {
     const db = await createTestDb()
     dbs.push(db)
     const log = (await openStorage(db.url, { projectId: TEST_PROJECT_ID })).events
+    db.onClose(() => log.close())
     const other = (await openStorage(db.url, { projectId: '00000000-0000-4000-8000-000000000002' })).events
+    db.onClose(() => other.close())
 
     let releaseA = () => {}
     const gate = new Promise<void>(r => { releaseA = r })
@@ -285,8 +293,6 @@ describe('EventLog (postgres)', () => {
     await txB
     expect(bDone).toBe(true)
     expect(order).toEqual(['B still waiting', 'A commits'])
-    await log.close()
-    await other.close()
   })
 
   it('redacts sensitive keys and configured env secrets before storage', async () => {
@@ -299,6 +305,7 @@ describe('EventLog (postgres)', () => {
         projectId: TEST_PROJECT_ID,
         redactEnv: ['ORC_TEST_CUSTOM_CREDS'],
       })).events
+      db.onClose(() => log.close())
       await log.append({
         taskId: 't1', stepId: 's1', runToken: 'r1', kind: 'tool_result',
         payload: {
@@ -336,7 +343,6 @@ describe('EventLog (postgres)', () => {
       expect(stored).toContain('[REDACTED]')
       expect(stored).toContain('[REDACTED:ORC_TEST_FAKE_SECRET]')
       expect(stored).toContain('[REDACTED:ORC_TEST_CUSTOM_CREDS]')
-      await log.close()
     } finally {
       delete process.env.ORC_TEST_FAKE_SECRET
       delete process.env.ORC_TEST_CUSTOM_CREDS
@@ -356,7 +362,6 @@ describe('EventLog (postgres)', () => {
       await log.transaction(async tx => { await tx.append(statusEvent()) })
       expect(seen.length).toBe(2)
       expect(seen[0]).toBe(`${a.seq}:task_status_changed`)
-      await log.close()
     } finally {
       mock.restore()
     }
@@ -377,7 +382,6 @@ describe('OperationJournal', () => {
     expect(op!.name).toBe('fake/m')
     const kinds = (await log.byTask('t1')).map(e => e.kind)
     expect(kinds).toEqual(['operation_started'])
-    await log.close()
   })
 
   it('completeOperation stores after and appends completion plus drafts atomically', async () => {
@@ -392,7 +396,6 @@ describe('OperationJournal', () => {
     expect(op!.finishedSeq).not.toBeNull()
     const kinds = (await log.byTask('t1')).map(e => e.kind)
     expect(kinds).toEqual(['operation_started', 'operation_completed', 'agent_call'])
-    await log.close()
   })
 
   it('beginOperation after completion reuses the stored value without another attempt', async () => {
@@ -402,7 +405,6 @@ describe('OperationJournal', () => {
     const again = await journal.beginOperation(OP_CONTEXT, OP_SPEC)
     expect(again).toEqual({ reused: true, attempt: 1, value: { text: 'answer' } })
     expect((await log.byTask('t1')).filter(e => e.kind === 'operation_started')).toHaveLength(1)
-    await log.close()
   })
 
   it('beginOperation on a still-started node records the ambiguous retry as attempt 2', async () => {
@@ -414,7 +416,6 @@ describe('OperationJournal', () => {
     expect(op!.attempts).toBe(2)
     expect(op!.status).toBe('started')
     expect((await log.byTask('t1')).filter(e => e.kind === 'operation_started')).toHaveLength(2)
-    await log.close()
   })
 
   it('a failed completion draft rolls back the whole completion', async () => {
@@ -428,7 +429,6 @@ describe('OperationJournal', () => {
     const [op] = await journal.operationsFor('t1')
     expect(op!.status).toBe('started') // update rolled back with the event
     expect((await log.byTask('t1')).map(e => e.kind)).toEqual(['operation_started'])
-    await log.close()
   })
 
   it('failOperation records the error and a stale attempt is rejected', async () => {
@@ -439,7 +439,6 @@ describe('OperationJournal', () => {
     expect(op!.status).toBe('failed')
     expect(op!.error).toEqual({ message: 'boom' })
     await expect(journal.completeOperation(OP_CONTEXT, OP_SPEC, 2, {})).rejects.toThrow(/stale/)
-    await log.close()
   })
 
   it('redacts secrets in before, after, and error — in the row and the transitions', async () => {
@@ -448,6 +447,7 @@ describe('OperationJournal', () => {
     process.env.ORC_TEST_OP_SECRET = 'operation-secret-value-7'
     try {
       const { events: log, operations: journal } = await openStorage(db.url, { projectId: TEST_PROJECT_ID })
+      db.onClose(() => log.close())
       const spec = {
         ...OP_SPEC,
         before: {
@@ -468,7 +468,6 @@ describe('OperationJournal', () => {
         'raw-key-1', 'raw-op-client-secret', 'raw-op-private-key',
         'raw-op-credentials', 'operation-secret-value-7',
       ]) expect(stored).not.toContain(secret)
-      await log.close()
     } finally {
       delete process.env.ORC_TEST_OP_SECRET
     }
@@ -483,7 +482,6 @@ describe('OperationJournal', () => {
     const first = await log.append({ taskId: 't1', stepId: 's1', runToken: 'r1', kind: 'signal_received', payload, idempotencyKey: 'r1:signal' })
     const replay = await log.append({ taskId: 't1', stepId: 's1', runToken: 'r1', kind: 'signal_received', payload, idempotencyKey: 'r1:signal' })
     expect(replay.seq).toBe(first.seq) // jsonb drops the key; the comparison must agree
-    await log.close()
   })
 
   it('failOperation never regresses a completed node; complete re-entry is idempotent; stale is terminal', async () => {
@@ -501,14 +499,15 @@ describe('OperationJournal', () => {
     // a stale attempt must be terminal — the durable-step wrapper must not re-fire the effect
     const stale = await journal.completeOperation(OP_CONTEXT, OP_SPEC, 7, {}).catch(e => e)
     expect(isTerminalError(stale)).toBe(true)
-    await log.close()
   })
 
   it('rebuildOperations reproduces the journal byte-for-byte from transitions, per project', async () => {
     const db = await createTestDb()
     dbs.push(db)
     const s1 = await openStorage(db.url, { projectId: TEST_PROJECT_ID })
+    db.onClose(() => s1.close())
     const s2 = await openStorage(db.url, { projectId: '00000000-0000-4000-8000-000000000002' })
+    db.onClose(() => s2.close())
     const journal = s1.operations
     const spec2: OperationSpec = { ...OP_SPEC, operationId: 'step:t1:s1:a1:tool:1:c1', kind: 'tool', name: 'echo' }
     await journal.beginOperation(OP_CONTEXT, OP_SPEC)
@@ -523,8 +522,6 @@ describe('OperationJournal', () => {
     expect(wiped).toBe(2)
     expect(await journal.operationsFor('t1')).toEqual(before)
     expect(await s2.operations.operationsFor('t1')).toHaveLength(1) // untouched
-    await s1.close()
-    await s2.close()
   })
 })
 

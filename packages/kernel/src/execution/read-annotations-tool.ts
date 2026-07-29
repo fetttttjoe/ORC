@@ -1,5 +1,5 @@
 import type { ResolvedTool } from '@orc/contracts'
-import { errorMessage } from '@orc/contracts'
+import { toolError } from '@orc/contracts'
 import type { Kernel } from '../kernel'
 
 // read_annotations (M5b, D6 targeted re-plan): the plan-authoring agent's ONLY channel to read
@@ -21,7 +21,7 @@ export function readAnnotationsTool(opts: {
         const annotations = await kernel.listAnnotations(p.taskId)
         return { output: { annotations }, isError: false }
       } catch (e) {
-        return { output: { error: errorMessage(e) }, isError: true }
+        return toolError(e)
       }
     },
   }

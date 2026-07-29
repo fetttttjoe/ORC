@@ -2,7 +2,7 @@ import { describe, expect, it } from 'bun:test'
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import { deriveSystemUrl, initializeProject, loadConfig, projectDatabaseName, requireProject } from './config'
+import { deriveSystemUrl, initializeProject, loadConfig, projectDatabaseName, requireProject, type OrcConfig } from './config'
 
 describe('loadConfig', () => {
   it('reads .orc/config.json overrides', () => {
@@ -110,36 +110,25 @@ describe('loadConfig', () => {
     expect(c.vaultDir).toBe(path.join(d, 'kb'))
     expect(c.skillsDir).toBe(path.join(d, 'kb', 'skills'))
   })
-  it('defaults projectDbUrl and honors the env override', () => {
-    expect(loadConfig('/tmp/x').projectDbUrl).toBe('ws://127.0.0.1:8000/rpc')
-    withEnv({ ORC_PROJECT_DB_URL: 'ws://db:8000/rpc' }, () => {
-      expect(loadConfig('/tmp/x').projectDbUrl).toBe('ws://db:8000/rpc')
+  const projectDbCases: Array<{ key: keyof OrcConfig; dflt: string; env: string; override: string }> = [
+    // memoryEmbedModel defaults to the LARGE local encoder: SEMANTIC_FLOOR (0.495) was tuned on
+    // mxbai vectors, and under all-minilm a known-good probe measured best cosine 0.4015 — the
+    // semantic arm silently returned nothing on the out-of-the-box config.
+    { key: 'memoryEmbedModel', dflt: 'ollama/mxbai-embed-large', env: 'ORC_MEMORY_EMBED_MODEL', override: 'ollama/nomic-embed-text' },
+    { key: 'projectDbUrl', dflt: 'ws://127.0.0.1:8000/rpc', env: 'ORC_PROJECT_DB_URL', override: 'ws://db:8000/rpc' },
+    { key: 'projectDbName', dflt: 'memory', env: 'ORC_PROJECT_DB_NAME', override: 't_isolated' },
+    { key: 'projectDbNamespace', dflt: 'orc', env: 'ORC_PROJECT_DB_NAMESPACE', override: 't_ns' },
+    { key: 'projectDbUser', dflt: 'root', env: 'ORC_PROJECT_DB_USER', override: 'admin' },
+    { key: 'projectDbPassword', dflt: 'orc', env: 'ORC_PROJECT_DB_PASSWORD', override: 'secret' },
+  ]
+  for (const { key, dflt, env, override } of projectDbCases) {
+    it(`defaults ${key} and honors the ${env} override`, () => {
+      expect(loadConfig('/tmp/x')[key]).toBe(dflt)
+      withEnv({ [env]: override }, () => {
+        expect(loadConfig('/tmp/x')[key]).toBe(override)
+      })
     })
-  })
-  it('defaults projectDbName and honors the env override', () => {
-    expect(loadConfig('/tmp/x').projectDbName).toBe('memory')
-    withEnv({ ORC_PROJECT_DB_NAME: 't_isolated' }, () => {
-      expect(loadConfig('/tmp/x').projectDbName).toBe('t_isolated')
-    })
-  })
-  it('defaults projectDbNamespace and honors the env override', () => {
-    expect(loadConfig('/tmp/x').projectDbNamespace).toBe('orc')
-    withEnv({ ORC_PROJECT_DB_NAMESPACE: 't_ns' }, () => {
-      expect(loadConfig('/tmp/x').projectDbNamespace).toBe('t_ns')
-    })
-  })
-  it('defaults projectDbUser and honors the env override', () => {
-    expect(loadConfig('/tmp/x').projectDbUser).toBe('root')
-    withEnv({ ORC_PROJECT_DB_USER: 'admin' }, () => {
-      expect(loadConfig('/tmp/x').projectDbUser).toBe('admin')
-    })
-  })
-  it('defaults projectDbPassword and honors the env override', () => {
-    expect(loadConfig('/tmp/x').projectDbPassword).toBe('orc')
-    withEnv({ ORC_PROJECT_DB_PASSWORD: 'secret' }, () => {
-      expect(loadConfig('/tmp/x').projectDbPassword).toBe('secret')
-    })
-  })
+  }
   it('maxIterations defaults to 30; file and env override it (env wins)', () => {
     expect(loadConfig(mkdtempSync(path.join(tmpdir(), 'orc-'))).maxIterations).toBe(30)
     const dir = tmpProject({ maxIterations: 12 })

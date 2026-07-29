@@ -88,9 +88,7 @@ export async function createPluginHost(
           }
         }
       }
-      // analyzerRef is added to Plan in Task 4; inert cast until then
-      const analyzerRef = (plan as { analyzerRef?: string }).analyzerRef
-      if (analyzerRef && !analyzers.has(analyzerRef)) errors.push(`unknown analyzer '${analyzerRef}'`)
+      if (plan.analyzerRef && !analyzers.has(plan.analyzerRef)) errors.push(`unknown analyzer '${plan.analyzerRef}'`)
       return errors
     },
     shutdown: async () => {

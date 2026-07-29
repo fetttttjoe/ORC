@@ -93,11 +93,10 @@ export async function listProjectIds(url: string): Promise<string[]> {
 // re-query happens here, debounced so an append burst costs one query. Emits the fresh id list
 // on EVERY wake — subscribers own change detection, because names resolve above this layer and
 // a rename wakes without changing membership. Row-DELETING operations (project deletion) send
-// no NOTIFY; callers with such a path invoke refresh() explicitly. Reconnects with the same
-// bounded backoff as EventLog.subscribe and re-queries on every reconnect, so a dropped LISTEN
-// delays a membership change but never loses it.
+// no NOTIFY; the layer above pushes those changes through its own channel. Reconnects with the
+// same bounded backoff as EventLog.subscribe and re-queries on every reconnect, so a dropped
+// LISTEN delays a membership change but never loses it.
 export interface ProjectIdsWatch {
-  refresh(): Promise<void>
   close(): Promise<void>
 }
 
@@ -158,7 +157,6 @@ export async function watchProjectIds(url: string, onWake: (ids: string[]) => vo
   }
   await connect(true)
   return {
-    refresh,
     async close() {
       closed = true
       if (debounce) clearTimeout(debounce)

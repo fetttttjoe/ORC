@@ -3,7 +3,7 @@ import { EVENT_KIND, REACTION, ReactionFailedPayload, TASK_STATUS, type EventRec
 import { Kernel } from '../kernel'
 import { fold } from '../projections'
 import { openStorage, type EventLog } from '../storage'
-import { createTestDb, TEST_PROJECT_ID } from '../test-helpers'
+import { createTestDb, TEST_PROJECT_ID, waitFor } from '../test-helpers'
 import { composeSplitResult, createSignalRouter } from './signal-router'
 import { eventFixture } from '@orc/contracts/fixtures'
 
@@ -89,11 +89,6 @@ describe('createSignalRouter (integration, real EventLog)', () => {
     kind: EVENT_KIND.task_status_changed, payload: { taskId: 'c', from: TASK_STATUS.running, to },
   })
   const resolvedCount = async (): Promise<number> => (await log.all()).filter(e => e.kind === EVENT_KIND.split_resolved).length
-  const waitFor = async (pred: () => Promise<boolean>, ms = 3000): Promise<boolean> => {
-    const start = Date.now()
-    while (Date.now() - start < ms) { if (await pred()) return true; await Bun.sleep(50) }
-    return false
-  }
 
   it('routes live feedback_provided with the committed event idempotency key', async () => {
     const sends: Array<{ dest: string; message: string; topic: string; key: string }> = []

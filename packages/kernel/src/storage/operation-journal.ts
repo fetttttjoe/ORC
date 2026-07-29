@@ -11,20 +11,7 @@ import type { EventLog } from './event-log'
 type OperationRow = typeof operations.$inferSelect
 
 const toOperation = (r: OperationRow): OperationRecord => ({
-  projectId: r.projectId,
-  operationId: r.operationId,
-  taskId: r.taskId,
-  stepId: r.stepId,
-  runToken: r.runToken,
-  kind: r.kind,
-  name: r.name,
-  status: r.status,
-  attempts: r.attempts,
-  before: r.before,
-  after: r.after,
-  error: r.error,
-  startedSeq: r.startedSeq,
-  finishedSeq: r.finishedSeq,
+  ...r,
   startedAt: r.startedAt.toISOString(),
   finishedAt: r.finishedAt?.toISOString() ?? null,
 })

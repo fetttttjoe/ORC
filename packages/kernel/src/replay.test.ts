@@ -52,20 +52,6 @@ describe('replay guarantee (spec §10)', () => {
     }
   })
 
-  it('fold twice over the same log yields equal states (pure replay)', async () => {
-    const db = await createTestDb()
-    try {
-      const storage = await openStorage(db.url, { projectId: TEST_PROJECT_ID })
-      const log = storage.events
-      const k = new Kernel(log)
-      const t = await k.createTask({ title: 'x' })
-      await k.proposePlan(t.id, draft())
-      expect(fold(await log.all())).toEqual(fold(await log.all()))
-    } finally {
-      await db.drop()
-    }
-  })
-
   it('journal rows, folded state, replay-at-sequence, and reopen all agree on one history', async () => {
     const db = await createTestDb()
     try {

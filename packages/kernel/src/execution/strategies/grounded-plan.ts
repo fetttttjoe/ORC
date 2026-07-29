@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { deriveNoteProvenance, EVENT_KIND, LINK_KIND, MemoryDeletedPayload, MemoryNote, MemoryWrittenPayload, MASTERPLAN_NOTE_ID, NOTE_TIER, PAYLOAD_SCHEMAS, STEP_ID, STEP_ROLE, STRATEGY, VERIFY_STEP_ID, planScope, type ChildPlanDraft, type EventRecord, type PlanNote } from '@orc/contracts'
+import { COMMIT_STEP_ID, deriveNoteProvenance, EVENT_KIND, LINK_KIND, MemoryDeletedPayload, MemoryNote, MemoryWrittenPayload, MASTERPLAN_NOTE_ID, NOTE_TIER, PAYLOAD_SCHEMAS, siblingOrderingMisuse, STEP_ID, STEP_ROLE, STRATEGY, VERIFY_STEP_ID, planScope, type ChildPlanDraft, type EventRecord, type PlanNote } from '@orc/contracts'
 
 // planScope moved to contracts (one format, one place); re-exported so kernel callers keep working
 export { planScope }
@@ -50,8 +50,27 @@ export const ANALYZE_STEP_ROLE = STEP_ROLE.scout
 // part of the plan-hash-approved artifact (not executor policy). Without it an auditor that finds
 // defects can signal success with the defects buried in the summary — downstream only reads the
 // outcome, so a defect-carrying success is indistinguishable from a clean pass.
+// The SCOPE sentence (second) is a narrowing of one question only — which paths are this task's —
+// and carries its own limit in the same breath, because an auditor handed a shorter list will
+// otherwise treat the list as the audit. The workspace is shared with sibling tasks, so a
+// working-tree diff reports their completed work as this task's; scoped_changes is log-derived and
+// task-attributed. It is a FLOOR (exec-driven writes are uncaptured), so it can never license
+// skipping the gate or excusing a defect in a file that IS in scope — and the first sentence stays
+// unqualified: any defect ⇒ failure.
 export const AUDITOR_CONTRACT =
   "Auditor rule: if your audit finds ANY defect, signal outcome 'failure' and list every defect in the summary — never 'success' with defects noted inside it. Success means zero defects."
+  + ' Scope rule: judge SCOPE from the scoped_changes tool — the paths this task\'s own steps changed, derived from the event log — not from a working-tree diff, which is shared with sibling tasks and will show unrelated completed work as yours. That set decides scope MEMBERSHIP only: it excludes exec-driven writes (formatters, codegen), so it never licenses skipping the test/typecheck gate, never excuses a defect in a file that IS in scope, and an empty set is not evidence of success. Read the files; the path list is not a verdict.'
+
+// Appended to the verify step alongside AUDITOR_CONTRACT: the reviewer heals the graph's PROSE;
+// the commit step afterwards makes the STAMP truthful. Split this way because a stamp is only
+// safe on content someone verified against the tree.
+export const HEAL_CONTRACT =
+  'Heal rule: once your audit finds zero defects, make the knowledge graph tell the truth about this change before you signal. Take the changed paths from scoped_changes, find the notes and claims citing them (memory_search / memory_read — drifted flags mark the candidates), and re-write any whose prose the change falsified: memory_write with the SAME id, stating what the code says now. A correction rewrites the WHOLE retrieval surface — title and summary included, not only body and claims: the summary is what every searcher reads first, and a healed body under a bug-present summary ships the retired claim to everyone who never opens the note. A correction is a rewrite, never a second note. When the pipeline commits afterwards, only notes whose content is already true of the tree get their revision stamp caught up; prose you leave stale keeps reading drifted.'
+
+// The commit step's whole instruction set — kernel-owned, appended at the freeze like
+// AUDITOR_CONTRACT, so no planner authors or edits it.
+export const COMMIT_CONTRACT =
+  "You are the commit step. Write this task's changes into repository history, then let the note stamps tell the truth. First call commit_preview and READ the diff it returns — that diff is what you are committing, and the message must describe it (the upstream step summaries in your inputs are context, never a substitute). Then call git_commit with your message; it refuses whenever the tree no longer matches the diff you last saw and hands you the current one — read it and call again. It commits only the previewed paths and restamps the notes this task wrote whose declared paths are fully committed — a note about paths left dirty stays drifted on purpose. Then signal success carrying the commit hash and what was committed and restamped. 'Nothing to commit' is a valid outcome (a child task may have committed already) — but STILL call git_commit once: the note restamp runs on that path too and catches stamps up to a HEAD someone else moved. Report it as the tool returned it."
 
 export function planGraphHash(notes: PlanNote[]): string {
   const canonical = [...notes]
@@ -126,9 +145,10 @@ function healDependsOn(
   links: ReadonlyArray<{ id: string; kind: string }>,
   kids: readonly string[],
 ): string[] {
-  for (const l of links)
-    if (l.kind === LINK_KIND.depends_on && kids.includes(l.id))
-      throw new Error(`plan-note '${stepId}' links depends_on '${l.id}', which is a sibling — ordering is the \`dependsOn\` FIELD, not a link. Write dependsOn: ["${l.id}"] on '${stepId}' and remove the link (a depends_on link means knowledge, and never affects scheduling).`)
+  // the rule and its wording live in contracts (siblingOrderingMisuse) because memory_write warns
+  // about the same edge the moment it is written; here, at the freeze, it is fatal
+  const misuse = siblingOrderingMisuse(stepId, links, kids)
+  if (misuse) throw new Error(misuse)
   const out = new Set<string>()
   for (const d of declared) {
     if (kids.includes(d)) { out.add(d); continue }
@@ -150,7 +170,7 @@ export function instantiateFrozenPlan(masterId: string, notes: PlanNote[]): Chil
         // and prompt framing follow from the role automatically
         id, role: id === VERIFY_STEP_ID ? STEP_ROLE.auditor : STEP_ROLE.implementer, title: n.title,
         instructions: (n.body || n.summary || n.title)
-          + (id === VERIFY_STEP_ID ? `\n\n${AUDITOR_CONTRACT}` : ''),
+          + (id === VERIFY_STEP_ID ? `\n\n${AUDITOR_CONTRACT}\n\n${HEAL_CONTRACT}` : ''),
         // Ordering comes from the FIELD, never from links. A link is a durable statement about how
         // facts relate; ordering is execution structure that stops meaning anything once the plan is
         // frozen. Reading a field removes the guess entirely — there is no "was this target a
@@ -178,5 +198,28 @@ export function instantiateFrozenPlan(masterId: string, notes: PlanNote[]): Chil
         ...(n.modelRef ? { modelRef: n.modelRef } : {}),
       }
     }),
+  }
+}
+
+// The ONE derivation of "what finalize_plan will freeze": the approval render (orc's derived-plan
+// block) and the freeze itself both call this, so a human can never approve a shape the freeze
+// then silently changes.
+export function freezePlan(masterId: string, notes: PlanNote[], opts: { autoCommit?: boolean }): ChildPlanDraft {
+  const frozen = instantiateFrozenPlan(masterId, notes)
+  return opts.autoCommit ? withCommitStep(frozen) : frozen
+}
+
+// The trailing commit step (config autoCommit; freezePlan applies it after the freeze).
+// dependsOn EVERY sibling, not just verify: a plan is not required to have one, and last-by-
+// construction is what makes the stamp truthful — nothing moves the tree after it.
+export function withCommitStep(draft: ChildPlanDraft): ChildPlanDraft {
+  if (draft.steps.some(s => s.id === COMMIT_STEP_ID))
+    throw new Error(`the plan already carries a step named '${COMMIT_STEP_ID}' — that id belongs to the kernel-appended commit step; rename the subplan`)
+  return {
+    steps: [...draft.steps, {
+      id: COMMIT_STEP_ID, role: STEP_ROLE.committer, title: 'Commit',
+      instructions: COMMIT_CONTRACT, dependsOn: draft.steps.map(s => s.id),
+      skillRefs: [], toolRefs: [], zone: [], readOnlySource: true,
+    }],
   }
 }

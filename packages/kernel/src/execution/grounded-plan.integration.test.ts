@@ -13,7 +13,7 @@ import { createMemory, memoryRoleFor } from '@orc/memory'
 import { createTestSurreal } from '@orc/memory/test-helpers'
 import { openStorage } from '../storage'
 import { Kernel } from '../kernel'
-import { createTestDb, fakeProvider, testConfig, TEST_PROJECT_ID } from '../test-helpers'
+import { createTestDb, fakeProvider, testConfig, TEST_PROJECT_ID, waitFor as poll } from '../test-helpers'
 import { createDbosPort, dbosSend } from './dbos-port'
 import { finalizePlanTool } from './finalize-plan-tool'
 import { readAnnotationsTool } from './read-annotations-tool'
@@ -172,11 +172,8 @@ function groundedFake(): AgentExecutor<unknown> {
   }
 }
 
-const waitFor = async (pred: () => Promise<boolean>, ms = 20_000): Promise<boolean> => {
-  const start = Date.now()
-  while (Date.now() - start < ms) { if (await pred()) return true; await Bun.sleep(50) }
-  return false
-}
+// the shared loop with this file's own ceiling: full drive-generator runs need more than the 3s default
+const waitFor = (pred: () => Promise<boolean>, ms = 20_000): Promise<boolean> => poll(pred, ms)
 
 async function bringUp() {
   const pg = await createTestDb()
