@@ -1,6 +1,6 @@
 import { createAnthropic } from '@ai-sdk/anthropic'
 import type { LanguageModel } from 'ai'
-import { isRecord, type ModelCost, type ModelProvider } from '@orc/contracts'
+import { modelIdsFrom, type ModelCost, type ModelProvider } from '@orc/contracts'
 import { cachingFetch } from './cache'
 import { loadOAuthToken, oauthFetch } from './oauth'
 
@@ -8,6 +8,7 @@ import { loadOAuthToken, oauthFetch } from './oauth'
 // cache rates: reads 0.1× input, 5m-TTL writes 1.25× input (platform.claude.com/docs pricing)
 const COSTS: Record<string, ModelCost> = {
   'claude-fable-5': { inPerMTok: 10, outPerMTok: 50, cacheReadPerMTok: 1, cacheWritePerMTok: 12.5 },
+  'claude-opus-5': { inPerMTok: 5, outPerMTok: 25, cacheReadPerMTok: 0.5, cacheWritePerMTok: 6.25 },
   'claude-opus-4-8': { inPerMTok: 5, outPerMTok: 25, cacheReadPerMTok: 0.5, cacheWritePerMTok: 6.25 },
   'claude-sonnet-5': { inPerMTok: 3, outPerMTok: 15, cacheReadPerMTok: 0.3, cacheWritePerMTok: 3.75 },
   'claude-haiku-4-5': { inPerMTok: 1, outPerMTok: 5, cacheReadPerMTok: 0.1, cacheWritePerMTok: 1.25 },
@@ -35,9 +36,7 @@ export async function listAnthropicModels(fetchImpl: (input: RequestInfo | URL, 
     }
     const res = await fetchImpl('https://api.anthropic.com/v1/models?limit=100', { headers })
     if (!res.ok) return Object.keys(COSTS)
-    const body: unknown = await res.json()
-    const data: unknown[] = isRecord(body) && Array.isArray(body.data) ? body.data : []
-    const ids = data.map(m => (isRecord(m) ? m.id : undefined)).filter((id): id is string => typeof id === 'string')
+    const ids = modelIdsFrom(await res.json(), 'data', 'id')
     return ids.length > 0 ? ids : Object.keys(COSTS)
   } catch {
     return Object.keys(COSTS)

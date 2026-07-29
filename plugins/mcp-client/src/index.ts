@@ -2,7 +2,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StdioClientTransport, getDefaultEnvironment } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { ToolListChangedNotificationSchema } from '@modelcontextprotocol/sdk/types.js'
 import {
-  errorMessage,
+  errorMessage, toolError,
   isRecord, mcpToolName, parseToolRef,
   type McpServerConfig, type ResolvedTool, type ToolSource,
 } from '@orc/contracts'
@@ -141,7 +141,7 @@ export function createMcpHub(
                 await dropClient(serverId) // a dead transport must never be reused
               }
             }
-            return { output: { error: errorMessage(last) }, isError: true }
+            return toolError(last)
           },
         })
       }

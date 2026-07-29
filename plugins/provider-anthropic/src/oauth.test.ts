@@ -36,16 +36,12 @@ describe('loadOAuthToken', () => {
     process.env.CLAUDE_CODE_OAUTH_TOKEN = 'env-token'
     expect(await loadOAuthToken()).toBe('env-token')
   })
-  it('reads a valid token from a credentials file shape', async () => {
+  it('reads a valid token from a credentials file', async () => {
     delete process.env.CLAUDE_CODE_OAUTH_TOKEN
-    // exercise the parse/expiry logic directly against a temp file via a thin re-read
     const dir = mkdtempSync(join(tmpdir(), 'orc-oauth-'))
     const path = join(dir, '.credentials.json')
-    const future = Date.now() + 3_600_000
-    writeFileSync(path, JSON.stringify({ claudeAiOauth: { accessToken: 'file-token', expiresAt: future } }))
-    const oauth = JSON.parse(await Bun.file(path).text()).claudeAiOauth
-    expect(oauth.accessToken).toBe('file-token')
-    expect(oauth.expiresAt > Date.now()).toBe(true)
+    writeFileSync(path, JSON.stringify({ claudeAiOauth: { accessToken: 'file-token', expiresAt: Date.now() + 3_600_000 } }))
+    expect(await loadOAuthToken(Date.now(), path)).toBe('file-token')
   })
 })
 

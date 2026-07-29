@@ -1,10 +1,10 @@
 import { describe, expect, it } from 'bun:test'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, symlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { z } from 'zod'
 import type { ResolvedTool } from '@orc/contracts'
-import { resolveInWorkspace } from '@orc/contracts'
+import { resolveInWorkspace, STEP_ROLE } from '@orc/contracts'
 import { TOOL_NAME, executeTool, releaseWriteClaims, toolSet } from './tools'
 
 const ws = () => mkdtempSync(path.join(tmpdir(), 'orc-ws-'))
@@ -95,6 +95,29 @@ describe('fs tools', () => {
     releaseWriteClaims(b.writer)
   })
 
+  // Same rule when the write itself THROWS (ENOSPC, EACCES) rather than refusing: the outer catch
+  // returns the error envelope, and the path must not stay fenced against siblings over an edit
+  // that never landed. A read-only parent directory makes the atomic temp-file write throw EACCES.
+  it('an fs_edit whose write throws does not leave the path claimed against a sibling', async () => {
+    const dir = ws()
+    const a = { writer: 'step:t:a:a1' }
+    const b = { writer: 'step:t:b:a1' }
+    mkdirSync(path.join(dir, 'ro'))
+    writeFileSync(path.join(dir, 'ro', 'f.md'), 'hello')
+    chmodSync(path.join(dir, 'ro'), 0o555)
+    try {
+      const threw = await executeTool(TOOL_NAME.fs_edit, { path: 'ro/f.md', old_string: 'hello', new_string: 'bye' }, dir, [], undefined, a)
+      expect(threw.isError).toBe(true)
+      chmodSync(path.join(dir, 'ro'), 0o755)
+      const bWrite = await executeTool(TOOL_NAME.fs_write, { path: 'ro/f.md', content: 'B' }, dir, [], undefined, b)
+      expect(bWrite.isError).toBe(false)
+    } finally {
+      chmodSync(path.join(dir, 'ro'), 0o755)
+      releaseWriteClaims(a.writer)
+      releaseWriteClaims(b.writer)
+    }
+  })
+
   it('a refused fs_edit does not release a claim an earlier successful write took', async () => {
     const dir = ws()
     const a = { writer: 'step:t:a:a1' }
@@ -160,6 +183,16 @@ describe('fs_edit', () => {
     expect(readFileSync(path.join(dir, 'doc.md'), 'utf8')).toBe('line one\nsubgraph CLI ["packages/cli"]\nline three\nline four\n')
   })
 
+  // String.prototype.replace treats $$, $&, $` and $' in the replacement as patterns — a
+  // new_string containing shell or Makefile text ('$$HOME') lands corrupted with no error.
+  it('writes new_string verbatim — $ replacement patterns are not interpreted', async () => {
+    const dir = ws()
+    writeFileSync(path.join(dir, 'mk'), 'echo OLD\n')
+    const r = await executeTool(TOOL_NAME.fs_edit, { path: 'mk', old_string: 'OLD', new_string: '$$HOME and $& kept' }, dir)
+    expect(r.isError).toBe(false)
+    expect(readFileSync(path.join(dir, 'mk'), 'utf8')).toBe('echo $$HOME and $& kept\n')
+  })
+
   it('refuses an ambiguous match instead of guessing which site to change', async () => {
     const dir = ws()
     writeFileSync(path.join(dir, 'doc.md'), 'x\nsame\ny\nsame\n')
@@ -196,11 +229,11 @@ describe('fs_edit', () => {
 })
 
 describe('toolSet', () => {
-  it('declares all four tools and none has execute', () => {
+  it('declares every TOOL_NAME entry and none has execute', () => {
     const tools = toolSet()
     for (const name of Object.values(TOOL_NAME)) {
       expect(tools[name]).toBeDefined()
-      expect(tools[name].execute).toBeUndefined()
+      expect(tools[name]?.execute).toBeUndefined()
     }
   })
 })
@@ -212,6 +245,96 @@ const extraTool = (over: Partial<ResolvedTool> = {}): ResolvedTool => ({
   inputSchema: { type: 'object', properties: { who: { type: 'string' } } },
   execute: async input => ({ output: { hi: HelloToolInput.parse(input).who }, isError: false }),
   ...over,
+})
+
+describe('fs_read line range', () => {
+  // agents reach for `sed -n '10,20p' file` via exec (blocked) because fs_read read whole files;
+  // a 1-indexed inclusive line range removes that whole class of exec friction
+  const withFile = async () => {
+    const dir = ws()
+    await executeTool(TOOL_NAME.fs_write, { path: 'f.txt', content: 'a\nb\nc\nd\ne' }, dir)
+    return dir
+  }
+  it('returns the inclusive 1-indexed line span when start and end are given', async () => {
+    const r = await executeTool(TOOL_NAME.fs_read, { path: 'f.txt', start: 2, end: 4 }, await withFile())
+    expect(r.isError).toBe(false)
+    expect(r.output).toEqual({ content: 'b\nc\nd' })
+  })
+  it('reads from start to end-of-file when only start is given', async () => {
+    const r = await executeTool(TOOL_NAME.fs_read, { path: 'f.txt', start: 4 }, await withFile())
+    expect(r.output).toEqual({ content: 'd\ne' })
+  })
+  it('reads the whole file when no range is given (unchanged behaviour)', async () => {
+    const r = await executeTool(TOOL_NAME.fs_read, { path: 'f.txt' }, await withFile())
+    expect(r.output).toEqual({ content: 'a\nb\nc\nd\ne' })
+  })
+  it('a start past end-of-file is a readable error, not a crash', async () => {
+    const r = await executeTool(TOOL_NAME.fs_read, { path: 'f.txt', start: 99 }, await withFile())
+    expect(r.isError).toBe(true)
+    expect(JSON.stringify(r.output)).toContain('5 lines')
+  })
+})
+
+describe('fs_delete', () => {
+  // Observed live: a step was REQUIRED to remove its own scratch file and had no tool that could —
+  // fs_write/fs_edit cannot delete, and git writes are not (and must not be) allowlisted.
+  it('deletes a file inside the workspace and reports it', async () => {
+    const dir = ws()
+    writeFileSync(path.join(dir, 'scratch.md'), 'probe')
+    const r = await executeTool(TOOL_NAME.fs_delete, { path: 'scratch.md' }, dir)
+    expect(r.isError).toBe(false)
+    expect(existsSync(path.join(dir, 'scratch.md'))).toBe(false)
+  })
+  it('a missing file is an error to read, not a crash', async () => {
+    const dir = ws()
+    const r = await executeTool(TOOL_NAME.fs_delete, { path: 'ghost.md' }, dir)
+    expect(r.isError).toBe(true)
+    expect(JSON.stringify(r.output)).toContain('ghost.md')
+  })
+  it('the zone write-fence applies to deletion', async () => {
+    const dir = ws()
+    mkdirSync(path.join(dir, 'src'), { recursive: true })
+    writeFileSync(path.join(dir, 'src', 'x.ts'), 'code')
+    const denied = await executeTool(TOOL_NAME.fs_delete, { path: 'src/x.ts' }, dir, [], undefined, { zone: ['docs/**'] })
+    expect(denied.isError).toBe(true)
+    expect(existsSync(path.join(dir, 'src', 'x.ts'))).toBe(true)
+  })
+  it('scouts do not get it', () => {
+    expect(Object.keys(toolSet([], { role: STEP_ROLE.scout }))).not.toContain(TOOL_NAME.fs_delete)
+  })
+})
+
+describe('scout role', () => {
+  // Observed live: an analyze-step scout edited tracked source files before any plan existed,
+  // bypassing the plan gate. Scouts ground plans — they read, run gates, and write memory notes;
+  // the file-writing tools are not offered to them at all (registration gate, not runtime error).
+  it('a scout toolSet has no file-writing tools; reads stay', () => {
+    const set = toolSet([], { role: STEP_ROLE.scout })
+    expect(Object.keys(set)).not.toContain(TOOL_NAME.fs_write)
+    expect(Object.keys(set)).not.toContain(TOOL_NAME.fs_edit)
+    expect(Object.keys(set)).toContain(TOOL_NAME.fs_read)
+    expect(Object.keys(set)).toContain(TOOL_NAME.signal)
+  })
+  it('every other role keeps the full set', () => {
+    const set = toolSet([], { role: STEP_ROLE.worker })
+    expect(Object.keys(set)).toContain(TOOL_NAME.fs_write)
+    expect(Object.keys(set)).toContain(TOOL_NAME.fs_edit)
+  })
+  it('a readOnlySource step (the plan step) has no file-writing tools regardless of role', () => {
+    // the grounded plan step is role=auditor — same role as child verify steps, which legitimately
+    // write+delete scratch — so it is fenced by the explicit flag, not the role. It authors memory
+    // notes and reads code; editing source during PLANNING would bypass the approval gate.
+    const set = toolSet([], { role: STEP_ROLE.auditor, readOnlySource: true })
+    expect(Object.keys(set)).not.toContain(TOOL_NAME.fs_write)
+    expect(Object.keys(set)).not.toContain(TOOL_NAME.fs_edit)
+    expect(Object.keys(set)).not.toContain(TOOL_NAME.fs_delete)
+    expect(Object.keys(set)).toContain(TOOL_NAME.fs_read)
+  })
+  it('an auditor WITHOUT the flag (a verify step) keeps write+delete for scratch', () => {
+    const set = toolSet([], { role: STEP_ROLE.auditor })
+    expect(Object.keys(set)).toContain(TOOL_NAME.fs_write)
+    expect(Object.keys(set)).toContain(TOOL_NAME.fs_delete)
+  })
 })
 
 describe('extra tools', () => {

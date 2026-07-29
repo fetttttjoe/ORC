@@ -1,15 +1,13 @@
 import { createOllama } from 'ai-sdk-ollama'
 import type { LanguageModel } from 'ai'
-import { isRecord, type EmbeddingProvider, type ModelCost, type ModelProvider } from '@orc/contracts'
+import { isRecord, modelIdsFrom, type EmbeddingProvider, type ModelCost, type ModelProvider } from '@orc/contracts'
 
 // live model discovery from the local daemon — [] when it is not running (fetch injectable for tests)
 export async function listOllamaModels(baseUrl: string, fetchImpl: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response> = fetch): Promise<string[]> {
   try {
     const res = await fetchImpl(`${baseUrl}/api/tags`)
     if (!res.ok) return []
-    const body: unknown = await res.json()
-    const models: unknown[] = isRecord(body) && Array.isArray(body.models) ? body.models : []
-    return models.map(m => (isRecord(m) ? m.name : undefined)).filter((n): n is string => typeof n === 'string')
+    return modelIdsFrom(await res.json(), 'models', 'name')
   } catch {
     return []
   }

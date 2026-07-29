@@ -1,11 +1,10 @@
 import { generateText, type JSONValue, type LanguageModel, type ModelMessage, type ToolSet } from 'ai'
 import {
   EVENT_KIND, FAILURE_CLASS, isRecord, MEMORY_TOOL_NAME, MemoryScope, MemoryWriteResult, OPERATION_KIND, SIGNAL_OUTCOME,
-  UNIFIED_EVENT_TYPE, terminalError,
+  UNIFIED_EVENT_TYPE, errorMessage, terminalError, validateOutputPaths,
   type AgentExecutor, type EventDraft, type ExecutorContext, type RecalledContext, type Signal,
   type SplitResult, type UnifiedEvent, type Usage,
 } from '@orc/contracts'
-import { errorMessage, validateOutputPaths } from '@orc/contracts'
 import { AskHumanInput, JoinSplitsInput, SignalInput, TOOL_NAME, executeTool, releaseWriteClaims, toolSet } from './tools'
 
 // Pre-flight for declared outputs, so the model can fix a bad declaration instead of the
@@ -164,7 +163,7 @@ async function callModel(model: LanguageModel, messages: ModelMessage[], tools: 
 
 // The file tools that CHANGE a file. fs_read/fs_list are absent by design: reading a file cannot
 // falsify a claim about it, and a claim block after every read would bury the one that matters.
-const WRITING_FILE_TOOLS = new Set<string>([TOOL_NAME.fs_write, TOOL_NAME.fs_edit])
+const WRITING_FILE_TOOLS = new Set<string>([TOOL_NAME.fs_write, TOOL_NAME.fs_edit, TOOL_NAME.fs_delete])
 
 // The path a write tool acted on. Both tools take it as `path`; anything else is a tool whose
 // shape changed, and guessing at an unknown shape would surface claims about the wrong file.
@@ -287,7 +286,7 @@ export function apiLoopExecutor(): AgentExecutor<LanguageModel> {
       try {
         const knownContext = await preloadKnownContext(ctx)
         const messages: ModelMessage[] = [{ role: 'user', content: buildPrompt(ctx, knownContext) }]
-        const tools = toolSet(ctx.extraTools)
+        const tools = toolSet(ctx.extraTools, { role: ctx.step.role, readOnlySource: ctx.step.readOnlySource })
         const base = { stepId: ctx.step.id, runToken: ctx.runToken }
         let persistedThrough = 0 // messages[0..persistedThrough) are already in an agent_call event
         // set right after a memory_write result lints with a warning; nudged into the very next

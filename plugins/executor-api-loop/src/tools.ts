@@ -3,18 +3,18 @@ import path from 'node:path'
 import { jsonSchema, tool } from 'ai'
 import { z } from 'zod'
 import type { ResolvedTool } from '@orc/contracts'
-import { errorMessage, SignalOutcome, assertInZone, doubleEncodedField, DOUBLE_ENCODED_HINT, resolveInWorkspace, unescapeSequences } from '@orc/contracts'
+import { toolError, errorMessage, SignalOutcome, STEP_ROLE, assertInZone, doubleEncodedField, DOUBLE_ENCODED_HINT, resolveInWorkspace, unescapeSequences } from '@orc/contracts'
 
 export const TOOL_NAME = {
   signal: 'signal',
   fs_read: 'fs_read',
   fs_write: 'fs_write',
   fs_edit: 'fs_edit',
+  fs_delete: 'fs_delete',
   fs_list: 'fs_list',
   join_splits: 'join_splits',
   ask_human: 'ask_human',
 } as const
-export type ToolName = (typeof TOOL_NAME)[keyof typeof TOOL_NAME]
 
 export const SignalInput = z.object({
   outcome: SignalOutcome,
@@ -24,31 +24,51 @@ export const SignalInput = z.object({
 })
 export const JoinSplitsInput = z.object({ splitIds: z.array(z.string()).optional() })
 export const AskHumanInput = z.object({ question: z.string().min(1), topic: z.string().min(1).optional() })
-const ReadInput = z.object({ path: z.string().min(1) })
+// start/end are 1-indexed inclusive line numbers. Both optional: none = whole file; start alone =
+// to EOF. Exists so agents read a slice with the tool instead of reaching for `sed -n` via exec.
+// start/end are COERCED (z.coerce): agents routinely pass a numeric STRING ("300") for a line number
+// — observed live on the codebase-map task, where fs_read('…', start:"300") died on the raw zod
+// "expected number, received string" instead of reading. Coercion turns the common case into a read.
+const ReadInput = z.object({ path: z.string().min(1), start: z.coerce.number().int().positive().optional(), end: z.coerce.number().int().positive().optional() })
 const WriteInput = z.object({ path: z.string().min(1), content: z.string() })
 const EditInput = z.object({ path: z.string().min(1), old_string: z.string().min(1), new_string: z.string() })
+const DeleteInput = z.object({ path: z.string().min(1) })
 const ListInput = z.object({ path: z.string().default('.') })
 
 // Declared WITHOUT execute — the SDK returns tool calls; execution is ours, inside a durable step (spec §6.2).
 // Extra (MCP) tools are neutral ResolvedTool[] (spec seam D1) — their JSON Schema travels as-is via jsonSchema().
-export function toolSet(extra: ResolvedTool[] = []) {
-  return {
+export function toolSet(extra: ResolvedTool[] = [], opts: { role?: string; readOnlySource?: boolean } = {}) {
+  // Steps that ground a plan — the analyze scout and the plan step — read, run gates, and write
+  // MEMORY notes, never source files. A scout once edited tracked code before any plan existed,
+  // and the plan step (role=auditor, shared with child verify steps that DO write scratch) tried
+  // the same during planning: both bypass the approval gate. The scout is caught by role; the plan
+  // step by an explicit readOnlySource flag the kernel sets on it, since role alone can't tell it
+  // from a verify step. Registration gate, same reason as exec's: a tool a step must not use is
+  // not offered.
+  const scout = opts.role === STEP_ROLE.scout || opts.readOnlySource === true
+  const set = {
     [TOOL_NAME.signal]: tool({
       description:
         'End this step and report the outcome. Your summary is the ONLY output downstream steps see — put your conclusions and the ids of notes you wrote in it; do not restate note bodies (downstream pulls notes at its own budget). Declare files you produced in `outputs` (workspace-relative paths) so they are verified and receipted. Call this exactly once, when the work is done or cannot proceed.',
       inputSchema: SignalInput,
     }),
     [TOOL_NAME.fs_read]: tool({
-      description: 'Read a UTF-8 text file inside the step workspace.',
+      description: 'Read a UTF-8 text file inside the step workspace (path relative to the workspace root). Optional `start`/`end` are 1-indexed inclusive line numbers for a slice — use them to read a range instead of shelling out to sed/head/tail.',
       inputSchema: ReadInput,
     }),
-    [TOOL_NAME.fs_write]: tool({
-      description: 'Write a UTF-8 text file inside the step workspace (parent directories are created). Use fs_edit to change part of an existing file — rewriting a whole file to change a few lines corrupts the rest.',
-      inputSchema: WriteInput,
-    }),
-    [TOOL_NAME.fs_edit]: tool({
-      description: 'Replace an exact string in an existing file inside the step workspace. `old_string` must appear EXACTLY ONCE — include enough surrounding context to make it unique. Prefer this over fs_write for any change to a file that already exists: it touches only what you name, so the rest of the file cannot be altered by accident.',
-      inputSchema: EditInput,
+    ...(scout ? {} : {
+      [TOOL_NAME.fs_write]: tool({
+        description: 'Write a UTF-8 text file inside the step workspace (parent directories are created). Paths are relative to the workspace root. Use fs_edit to change part of an existing file — rewriting a whole file to change a few lines corrupts the rest.',
+        inputSchema: WriteInput,
+      }),
+      [TOOL_NAME.fs_edit]: tool({
+        description: 'Replace an exact string in an existing file inside the step workspace (paths relative to the workspace root). `old_string` must appear EXACTLY ONCE — include enough surrounding context to make it unique. Prefer this over fs_write for any change to a file that already exists: it touches only what you name, so the rest of the file cannot be altered by accident.',
+        inputSchema: EditInput,
+      }),
+      [TOOL_NAME.fs_delete]: tool({
+        description: 'Delete a file inside the step workspace (path relative to the workspace root). Subject to the same zone write-fence as fs_write/fs_edit. Use for scratch files you created and no longer need — there is no undo.',
+        inputSchema: DeleteInput,
+      }),
     }),
     [TOOL_NAME.fs_list]: tool({
       description: 'List directory entries inside the step workspace.',
@@ -69,6 +89,7 @@ export function toolSet(extra: ResolvedTool[] = []) {
       tool({ description: t.description, inputSchema: jsonSchema(t.inputSchema as Parameters<typeof jsonSchema>[0]) }),
     ])),
   }
+  return set
 }
 
 // In-process write-claim registry — the enforcement the plan-authoring skill can only ask
@@ -156,7 +177,9 @@ export async function executeTool(
     }
     if (occurrences > 1)
       return { output: { error: `old_string appears ${occurrences} times in '${p}' — include surrounding lines until it is unique` }, isError: true }
-    writeFileAtomic(abs, current.replace(oldString, newString))
+    // replacer function: a bare string replacement interprets $$, $&, $` and $' as patterns,
+    // silently corrupting any new_string carrying shell/Makefile text like '$$HOME'
+    writeFileAtomic(abs, current.replace(oldString, () => newString))
     return { output: { edited: p }, isError: false }
   }
 
@@ -176,9 +199,16 @@ export async function executeTool(
   try {
     switch (name) {
       case TOOL_NAME.fs_read: {
-        const { path: p } = ReadInput.parse(input)
+        const { path: p, start, end } = ReadInput.parse(input)
         try {
-          return { output: { content: readFileSync(resolveInWorkspace(workspaceDir, p), 'utf8') }, isError: false }
+          const content = readFileSync(resolveInWorkspace(workspaceDir, p), 'utf8')
+          if (start === undefined && end === undefined)
+            return { output: { content }, isError: false }
+          const lines = content.split('\n')
+          if (start !== undefined && start > lines.length)
+            return { output: { error: `'${p}' has ${lines.length} lines — start ${start} is past end of file` }, isError: true }
+          // 1-indexed inclusive → 0-indexed half-open; end defaults to EOF
+          return { output: { content: lines.slice((start ?? 1) - 1, end ?? lines.length).join('\n') }, isError: false }
         } catch (err) {
           // a raw EISDIR errno reads like a crash — name the correction instead
           if (typeof err === 'object' && err !== null && 'code' in err && err.code === 'EISDIR')
@@ -199,14 +229,36 @@ export async function executeTool(
         }
         return { output: { written: p }, isError: false }
       }
+      case TOOL_NAME.fs_delete: {
+        const { path: p } = DeleteInput.parse(input)
+        const abs = resolveInWorkspace(workspaceDir, p)
+        assertInZone(workspaceDir, abs, guard.zone ?? []) // deletion is a write — same fence
+        try {
+          unlinkSync(abs)
+        } catch (err) {
+          // a missing file / a directory / EACCES — nothing was removed, so this is a result to
+          // read, not a crash (mirrors fs_write's error envelope)
+          return { output: { error: `could not delete '${p}': ${errorMessage(err)}` }, isError: true }
+        }
+        return { output: { deleted: p }, isError: false }
+      }
       case TOOL_NAME.fs_edit: {
         const { path: p, old_string: oldString, new_string: newString } = EditInput.parse(input)
         const claim = claimWrite(p)
         if ('refusal' in claim) return claim.refusal
-        const out = editInPlace(resolveInWorkspace(workspaceDir, p), p, oldString, newString)
-        // Every branch below refused: the file was missing, or old_string matched zero or many
-        // times. None of them wrote a byte, so holding the path would fence out every sibling step
-        // over an edit that never happened.
+        let out: { output: unknown; isError: boolean }
+        try {
+          out = editInPlace(resolveInWorkspace(workspaceDir, p), p, oldString, newString)
+        } catch (err) {
+          // the write itself threw (ENOSPC, EACCES) — same as fs_write: nothing landed on disk,
+          // so the path must not stay locked against a sibling
+          claim.release()
+          throw err
+        }
+        // Every refusal branch (missing file, old_string matched zero or many times) wrote no
+        // byte, so holding the path would fence out every sibling step over an edit that never
+        // happened. A SUCCESSFUL edit keeps the claim — the step owns what it wrote until its
+        // turn ends.
         if (out.isError) claim.release()
         return out
       }
@@ -221,6 +273,6 @@ export async function executeTool(
       }
     }
   } catch (err) {
-    return { output: { error: errorMessage(err) }, isError: true }
+    return toolError(err)
   }
 }

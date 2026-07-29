@@ -15,10 +15,11 @@ import { readFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { isRecord } from '@orc/contracts'
+import { asFetch, type MinimalFetch } from './fetch-shim'
 
 export const CLAUDE_CODE_IDENTITY = "You are Claude Code, Anthropic's official CLI for Claude."
 const OAUTH_BETA = 'oauth-2025-04-20'
-export const CRED_PATH = join(homedir(), '.claude', '.credentials.json')
+const CRED_PATH = join(homedir(), '.claude', '.credentials.json')
 
 // A usable bearer token: the CLAUDE_CODE_OAUTH_TOKEN env override wins (headless/CI, same var
 // Claude Code honours), else Claude Code's on-disk credential store.
@@ -89,8 +90,6 @@ export function prependClaudeCodeIdentity(system: unknown): unknown[] {
   return [identity]
 }
 
-type MinimalFetch = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>
-
 // Wraps the model's fetch: swap key auth for the OAuth bearer + beta flag, inject the identity
 // system block. baseFetch is injectable for tests.
 export function oauthFetch(getToken: () => Promise<string>, baseFetch: MinimalFetch = fetch): typeof fetch {
@@ -117,7 +116,5 @@ export function oauthFetch(getToken: () => Promise<string>, baseFetch: MinimalFe
     }
     return baseFetch(input, { ...init, headers, body })
   }
-  // createAnthropic's fetch type is the full global signature (incl. preconnect); the SDK only
-  // ever invokes the call signature, so a noop preconnect satisfies the type honestly.
-  return Object.assign(wrapped, { preconnect: () => {} })
+  return asFetch(wrapped)
 }

@@ -5,8 +5,7 @@
 // instead of full-price input. Anthropic allows 4 breakpoints; we use 2. Requests below the
 // model's minimum cacheable prefix are unaffected (the marker is ignored server-side).
 import { isRecord } from '@orc/contracts'
-
-type MinimalFetch = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>
+import { asFetch, type MinimalFetch } from './fetch-shim'
 
 export function markCacheBreakpoints(json: Record<string, unknown>): void {
   const sys = json.system
@@ -43,5 +42,5 @@ export function cachingFetch(baseFetch: MinimalFetch = fetch): typeof fetch {
     }
     return baseFetch(input, init)
   }
-  return Object.assign(wrapped, { preconnect: () => {} })
+  return asFetch(wrapped)
 }

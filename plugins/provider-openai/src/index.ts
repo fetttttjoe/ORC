@@ -1,6 +1,6 @@
 import { createOpenAI } from '@ai-sdk/openai'
 import type { LanguageModel } from 'ai'
-import { isRecord, type ModelCost, type ModelProvider } from '@orc/contracts'
+import { modelIdsFrom, type ModelCost, type ModelProvider } from '@orc/contracts'
 
 // live model discovery — [] when the key is missing or the API is down (fetch injectable for tests)
 export async function listOpenAIModels(fetchImpl: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response> = fetch): Promise<string[]> {
@@ -9,9 +9,7 @@ export async function listOpenAIModels(fetchImpl: (input: RequestInfo | URL, ini
   try {
     const res = await fetchImpl('https://api.openai.com/v1/models', { headers: { authorization: `Bearer ${key}` } })
     if (!res.ok) return []
-    const body: unknown = await res.json()
-    const data: unknown[] = isRecord(body) && Array.isArray(body.data) ? body.data : []
-    return data.map(m => (isRecord(m) ? m.id : undefined)).filter((id): id is string => typeof id === 'string')
+    return modelIdsFrom(await res.json(), 'data', 'id')
   } catch {
     return []
   }
