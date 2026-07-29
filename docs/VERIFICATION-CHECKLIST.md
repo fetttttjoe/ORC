@@ -76,14 +76,12 @@ Use these checks to keep the plans catalog current and approval status clear.
   - Expected: Cross-references and dependency notes present
   - Failure mode: Hidden blockers; surprises during execution
 
-- [ ] **Phase 2 status is accurate**
-  - Checks:
-    - Phase 2.1: README Enhancement — ✅ Complete
-    - Phase 2.2: Plans Index — ✅ Complete
-    - Phase 2.3: ADR Formalization — ✅ Complete
-    - Phase 2.4: Seams Guide — ✅ Complete
-  - Command: `grep -A 5 "Phase 2" docs/plans/INDEX.md | grep -E "✅|📋"`
-  - Expected: All Phase 2 items marked ✅ Complete
+- [ ] **Phase status markers match what is on disk**
+  - A phase is ✅ only when its deliverable (named in the same row) exists and is current;
+    a phase whose deliverable is absent stays 📋 — as of 2026-07-28, Phase 2.3's ADR memory
+    notes are the one open Phase 2 item
+  - Command: `grep -E "Phase 2\.[1-5]" docs/plans/INDEX.md`
+  - Expected: Every ✅ row's deliverable exists; no ✅ on an absent deliverable
   - Failure mode: Incorrect project status in communication
 
 ---
@@ -281,13 +279,9 @@ Use these checks to track deferred work and emerging ideas.
   - Expected: Every idea has one or more conditions for when to ship
   - Failure mode: Backlog grows without focus
 
-- [ ] **Phase 3 plans are documented and linked**
-  - Expected Phase 3 items:
-    - Phase 3.1: Glossary extraction
-    - Phase 3.2: Migration guides
-    - Phase 3.3: Verification cadence (this step)
-  - Command: `grep "Phase 3" docs/plans/INDEX.md | wc -l`
-  - Expected: ≥3 Phase 3 entries
+- [ ] **Future documentation work is documented in the index**
+  - Command: `grep -c "Phase 3" docs/plans/INDEX.md`
+  - Expected: ≥1 — the index names the remaining advanced-documentation work and its status
   - Failure mode: Future work is unclear
 
 ---
@@ -569,7 +563,7 @@ exit 0
 
 ---
 
-**Last Updated:** 2026-07-27
+**Last Updated:** 2026-07-28
 **Version:** 1.1 — commands corrected against the real CLI surface after an audit found several that
 could not run (`orc memory read`, `--format=json`, `ls --query`, a `## Event Log` heading that does
 not exist), and a constants-drift check added after `MEMORY_CLUSTER_THRESHOLD` went stale in

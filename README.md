@@ -54,7 +54,7 @@ Start here to navigate the codebase and understand the architectural foundations
 | **Extension points** | How to add providers, executors, tools, skills, events | [`docs/EXTENDING.md`](docs/EXTENDING.md) — seam map with invariants |
 | **Decisions & roadmap** | 18+ plans and architectural decision records | [`docs/plans/INDEX.md`](docs/plans/INDEX.md) — approval status, purpose, dependencies |
 | **Seams reference** | Component interactions, call paths, debugging | [`docs/seams-reference.md`](docs/seams-reference.md) — 5 scenarios, troubleshooting workflows |
-| **Glossary** | Key terms with definitions and links | [`docs/GLOSSARY.md`](docs/GLOSSARY.md) — 80+ architectural terms |
+| **Glossary** | Key terms with definitions and links | [`docs/GLOSSARY.md`](docs/GLOSSARY.md) — the architectural vocabulary, A–Z |
 | **Ideas & backlog** | Deferred features with triggers | [`docs/IDEAS.md`](docs/IDEAS.md) (spec) and [`docs/IDEAS-MEMORY-INDEX.md`](docs/IDEAS-MEMORY-INDEX.md) (memory-indexed) — future optimizations with conditions to ship |
 
 ### Component Areas
@@ -375,8 +375,9 @@ by the agent.
   the output, or write a reviewed SQL migration by hand.
 - Resetting development state: `docker compose down -v && docker compose up -d --wait && orc db migrate`
   drops and recreates Postgres (events, journal, DBOS) and SurrealDB; the vault re-renders
-  and memory rebuilds from events on next use. Old pre-identity projects run
-  `orc init` once; old string-only trust grants fail closed and must be granted again.
+  and memory rebuilds from events on next use. A checkout without `.orc/identity.json` needs
+  `orc init` once before project commands work; a trust grant whose fingerprint no longer
+  matches fails closed until re-granted.
 - Environment: `orc` loads `<project>/.env` itself, resolved from the same walk-up that finds
   `.orc/`, so a command run from a subdirectory — or a supervisor spawned with a different cwd —
   gets the same credentials as one run from the project root. Bun's own `.env` pickup is
@@ -385,15 +386,14 @@ by the agent.
 - Never bundle the CLI (`bun build`): DBOS must run unbundled via `bun run`.
 - Upgrading orc: finish or `orc cancel` active runs first — DBOS recovery is
   keyed to the app version (`DBOS__APPVERSION`).
-- **Upgrading onto atomic claims: run `orc memory rebuild` once.** A semantic note's
-  free-form `rules[]` became [claims](docs/ARCHITECTURE.md#claims-—-the-addressable-unit-of-knowledge),
-  which live in a new derived `claim` table — an existing read model has no claim rows until
-  the log is replayed, so `orc memory claims` and the claim arm of search stay empty until
-  you rebuild. The rebuild is required but not sufficient: the legacy `rules[]` decoder was
-  removed outright, so notes written *before* claims existed will still show zero claims
-  afterwards and `orc memory topics` will correctly report "no topics" (`--json` prints `[]`
-  and exits 0 — a script wants absence as data). That is the expected
-  state of a pre-claims corpus, not a broken embedder — those notes assert no claims until an
+- **Claim rows exist only in the derived read model.** The projector materializes
+  [claims](docs/ARCHITECTURE.md#claims-—-the-addressable-unit-of-knowledge) into the `claim`
+  table, so a read model built before a note's claims were written has none until
+  `orc memory rebuild` replays the log — until then `orc memory claims` and the claim arm of
+  search stay empty. Nothing synthesises claims for a note that asserts none: such notes show
+  zero claims even after a rebuild, and `orc memory topics` correctly reports "no topics"
+  (`--json` prints `[]` and exits 0 — a script wants absence as data). That is a corpus that
+  has not stated any claims yet, not a broken embedder — those notes assert no claims until an
   agent states some.
 
 ## License

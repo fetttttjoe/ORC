@@ -204,10 +204,9 @@ M2+ requires a `docker-compose.yml`-managed Postgres. The provided stack is sing
 
 If a guide is unclear or you encounter an issue not covered:
 
-1. Search the project knowledge graph (memory notes) for related decisions
+1. Search the project knowledge graph (memory notes) for related decisions and known issues
 2. Review the design spec for the relevant milestone
-3. Check the [review findings](../../review-findings.md) for known issues
-4. Open an issue with the guide version and your error
+3. Open an issue with the guide version and your error
 
 ---
 

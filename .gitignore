@@ -11,6 +11,8 @@ review-findings.md
 *.db-wal
 *.db-shm
 .superpowers/
+# specs/plans/research live locally only — the working docs carry session history no commit should
+docs/superpowers/
 .claude/skills/
 skills-lock.json
 .agents/
@@ -23,3 +25,4 @@ FOUNDATION-REVIEW-*.md
 # (the supervisor plan makes "never stage tmp-exp/" a rule; this is what enforces it)
 tmp-exp/
 verification-report.md
+embedding-interfaces.md

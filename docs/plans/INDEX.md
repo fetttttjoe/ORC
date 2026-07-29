@@ -11,10 +11,10 @@ The orchestrator has mature, stable architecture (proven by 8 durable ADRs and c
 | Plan | Status | Purpose | Deliverables | Dependencies |
 |---|---|---|---|---|
 | **Phase 2.1: README Enhancement** | ✅ APPROVED | Add architecture navigation index and glossary links to README | README with navigation table, component area descriptions, glossary link, seams guide link | — |
-| **Phase 2.2: Plans Directory Index** | ✅ IN PROGRESS | Create this index with approval status and purpose for all 14 plans | `docs/plans/INDEX.md` with status, purpose, dependencies | Phase 2.1 (README links here) |
+| **Phase 2.2: Plans Directory Index** | ✅ COMPLETE | Create this index with approval status and purpose for all 14 plans | `docs/plans/INDEX.md` with status, purpose, dependencies | Phase 2.1 (README links here) |
 | **Phase 2.3: ADR Formalization** | 📋 PLANNED | Formalize all 8 architectural decision records as durable memory notes with proper links | 8 memory notes in `vault/memory/` with `kind=decision`, all searchable, cross-linked | Phase 2.1 (glossary foundation) |
 | **Phase 2.4: Seams Reference Guide** | ✅ COMPLETE | Comprehensive guide to component interactions, call paths, debugging strategies | `docs/seams-reference.md` with scenarios, call paths, storage layer details, troubleshooting | Phase 2.1 (README links here) |
-| **Phase 2.5: Glossary Extraction** | 📋 PLANNED | Extract key terms from codebase, specs, and memory into centralized glossary | `docs/GLOSSARY.md` with terms, definitions, and links to usage locations | Phase 2.3 (ADRs first) |
+| **Phase 2.5: Glossary Extraction** | ✅ COMPLETE | Extract key terms from codebase, specs, and memory into centralized glossary | `docs/GLOSSARY.md` with terms, definitions, and links to usage locations | Phase 2.3 (ADRs first; shipped ahead of it) |
 
 ## Approved Plans (Completed)
 
@@ -77,11 +77,11 @@ The orchestrator has mature, stable architecture (proven by 8 durable ADRs and c
 - ✅ `docs/EXTENDING.md` — Seam map for adding providers, executors, skills, tools, events
 - ✅ `docs/seams-reference.md` — Component interactions, call paths, debugging strategies
 - ✅ `README.md` — Updated with architecture navigation and links to all above
+- ✅ `docs/plans/INDEX.md` (this file) — Approval status and purpose for all plans
+- ✅ `docs/GLOSSARY.md` — Key terms with definitions and usage links
 
 ### In Progress / Planned
 
-- 📋 `docs/plans/INDEX.md` (this file) — Approval status and purpose for all plans
-- 📋 `docs/GLOSSARY.md` — Key terms with definitions and usage links
 - 📋 `vault/memory/` — Formalized ADR notes (durable, searchable)
 
 ### Deprecated / Archived

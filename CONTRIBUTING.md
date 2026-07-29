@@ -65,8 +65,12 @@ orc status
   - `ORC_DATABASE_URL`: Override default Postgres connection (default: `postgresql://postgres:orc@localhost:5433/orc`)
   - `ORC_MAX_ITERATIONS`: Default agent loop budget (default: 30)
 
-- **Project config** (`.orc/config.json`): Created by `orc init`, contains:
-  - `projectId` and `projectName` (committed, provides project isolation)
+- **Project identity** (`.orc/identity.json`): Written by `orc init`, git-ignored — never
+  commit it. Holds `projectId` and `projectName`; every event, journal row, and database is
+  bound to that identity. Identity belongs to a checkout: committed, a clone or a worktree
+  would silently repoint every command — including `orc purge` — at someone else's project.
+
+- **Project config** (`.orc/config.json`): Committed, shareable settings only:
   - `maxIterations`: Agent loop budget (approved at plan time)
   - `redactEnv`: List of env var names to redact in vault (e.g., `ANTHROPIC_API_KEY`)
   - `mcpServers`: MCP server declarations (name, command, args, env names)
@@ -318,9 +322,9 @@ Every architectural change must be documented. Here's when and how.
 
 2. If idea involves architectural change, formalize as a note in memory:
    ```bash
-   orc memory write --id idea-short-name \
+   orc memory add --id idea-short-name \
      --title "Idea: [Full Title]" \
-     --kind idea \
+     --tags idea \
      --body "..."
    ```
 
@@ -639,25 +643,27 @@ Write an ADR when you're making a decision that:
 
 ### ADRs in Memory
 
-ADRs are also stored as memory notes for searchability:
+ADRs are also stored as memory notes for searchability (`--tags` and `--categories` take
+space-separated values):
 
 ```bash
-orc memory write \
+orc memory add \
   --id adr-0006-surrealdb-knowledge-graph \
   --title "ADR-0006: SurrealDB for Knowledge Graph" \
-  --kind decision \
-  --categories architecture,memory,tooling \
-  --tags adr,database,knowledge-graph \
+  --categories architecture memory tooling \
+  --tags adr database knowledge-graph \
   --body "[Full ADR text here]"
 ```
 
-Then link from other notes:
+Then link from other notes — `--links` takes comma-separated `kind:target-id` entries (bare
+`target-id` defaults to `relates_to`), and fields you omit merge on, so re-adding a note to
+wire a link does not erase its body:
 
 ```bash
-orc memory write \
+orc memory add \
   --id architecture-current \
-  --link adr-0006-surrealdb-knowledge-graph:depends_on \
-  # ... updates architecture note with a link to the ADR
+  --title "Current architecture" \
+  --links 'depends_on:adr-0006-surrealdb-knowledge-graph'
 ```
 
 ---
@@ -807,7 +813,7 @@ curl http://localhost:8000/health
 ### Getting Help
 
 1. **Check existing issues**: https://github.com/[org]/orchestrator/issues
-2. **Search memory notes**: `orc memory ls --query "your question"`
+2. **Search memory notes**: `orc memory search "your question"`
 3. **Read seams guide**: `docs/seams-reference.md` (troubleshooting section)
 4. **Ask on Slack/Discord**: Link to this guide + reproduction steps
 5. **File an issue**: Include:
@@ -832,7 +838,7 @@ curl http://localhost:8000/health
 
 ---
 
-**Last Updated**: 2026-07-21
+**Last Updated**: 2026-07-28
 **Maintained By**: Architecture Team
 **See Also**: `docs/VERIFICATION-CHECKLIST.md` (complete verification guide)
 

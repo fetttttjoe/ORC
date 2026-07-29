@@ -357,12 +357,17 @@ fetching one topic appends `memory_topic_accessed` carrying the resolved label, 
 evidence `MEMORY_CLUSTER_THRESHOLD` keeps being calibrated against. That constant is **0.65, and
 measured** — it was 0.75 while it was still a guess. It is re-swept whenever the embedder OR the
 corpus size changes, because both are one decision with it: 0.675 was well-tuned on a 52-claim
-corpus and fragmented at 93, where it left 21 of 44 topics as singletons. A sweep at that size put
-0.65 strictly ahead — the same 23 multi-claim groups and the same largest group, with six fewer
-isolated claims — and the groups were read, not just counted, to confirm they are subjects rather
-than packages. An earlier sweep with a different model (nomic-embed-text, 768d) landed elsewhere
-again, which is why the model-vs-threshold coupling is load-bearing. The limits of that evidence
-(n=93, one repository, one embedding model) are recorded on the constant itself, in
+corpus and fragmented at 93, where it left 21 of 44 topics as singletons, and a sweep at that size
+put 0.65 strictly ahead. The 2026-07-28 re-sweep at 113 claims shows that domination gone: 0.675
+now yields more multi-claim groups (32 vs 23) and more cross-note groups (19 vs 16) rather than
+merely adding singletons, so the choice is a trade — 0.65 keeps five fewer claims isolated, 0.675
+splits its coarser groups into more of them. 0.65 ships deliberately: the numbers cannot say
+whether the extra groups are themes or splinters, and reading the groups — what settled the choice
+at 93 — has not been redone at 113. Twice now the justification has expired with corpus growth
+(52 → 93 → 113); the threshold is on a re-sweep schedule, not a one-time cut. An earlier sweep
+with a different model (nomic-embed-text, 768d) landed elsewhere again, which is why the
+model-vs-threshold coupling is load-bearing. The full sweep tables and the limits of the evidence
+(one repository, one embedding model) are recorded on the constant itself, in
 `plugins/memory/src/cluster.ts`.
 
 ### Three stages, in order
@@ -513,8 +518,10 @@ idempotency key. The live router handles new events, and startup replays replies
 tasks, healing a crash after append but before send.
 
 For a grounded plan step, an exact normalized `approve` reply also stores SHA-256 of the canonical
-plan-note graph. `finalize_plan` recomputes that hash and accepts only a human approval from the same
-run token. Missing, cross-attempt, or stale approval returns a tool error before any child split.
+plan-note graph — a record of what was approved, not a value the gate compares. `finalize_plan`
+accepts only a human approval from the same run token, and refuses the freeze if anything was written
+to the task's plan scope after that approval's seq, naming the note ids. Missing, cross-attempt, or
+stale approval returns a tool error before any child split.
 
 ## Adapters — two doors over one transport-free core
 
@@ -582,7 +589,7 @@ Door discipline, stated precisely:
 | `kernel/projections` | `fold(events) → State` as a reduce over `foldInto` (one event, one accumulator), `applyOperationEvent` (shared by live journal and rebuild), crash dedup | Persisting anything |
 | `kernel/live-state` | `openLiveState(log)` — a subscription-maintained `State` index, re-seeded when the log is truncated or replaced. Serves advisory reads (budget chain, "is anything running") | Reads that decide a write — those stay inside `log.transaction` |
 | `contracts/memory` folds | `foldMemory` / `foldMemoryInto` — every derivation over the memory stream (live notes, write times, node access, edge access) in ONE walk, batch or incremental. `bumpAccess` and `viaEdge` are the single increment and edge-canonicalization rules, applied by both the log fold and the Surreal projector | Deciding policy — the sweep and the graph do that |
-| `kernel/kernel.ts` | Atomic task/plan lifecycle, feedback outbox events, plan-hash-bound human approval over the log | Execution |
+| `kernel/kernel.ts` | Atomic task/plan lifecycle, feedback outbox events, seq-bound human approval over the log | Execution |
 | `kernel/dbos-port` | Durable run/step workflows, `ctx.checkpoint` and `ctx.operation` wrappers, retry policy, queue partitioning, cancellation cascade, output receipt commit | Model/tool specifics (executor's job), plan authoring |
 | `kernel/signal-router` | Resolving splits, starting approved children, and live/startup delivery of committed feedback | Composing plans, executing steps |
 | `kernel/plugins/*` | Registry + propose-time ref validation (`host`), fingerprint trust store (`trust`), SKILL.md indexing (`skills`), T2 extension loading | Runtime tool execution (that's the hub/executor) |

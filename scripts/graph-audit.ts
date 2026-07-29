@@ -11,19 +11,19 @@
 // scope then project — so this report and the runtime can never disagree about whether an edge can
 // be followed. A target that exists in NO scope is called out separately from one that resolves
 // outside the lookup path, because the two have different causes and different fixes.
-import { loadConfig, openStorage } from '../packages/kernel/src/index'
+import { loadConfig, openStorage, requireProject } from '../packages/kernel/src/index'
 import { createMemory } from '../plugins/memory/src/index'
-import { linkLookupScopes, noteKey } from '../packages/contracts/src/index'
+import { linkLookupScopes, noteKey, type MemoryNote } from '../packages/contracts/src/index'
 
 const EDGE_VERDICT = { reachable: 'reachable', crossScope: 'cross-scope', dead: 'dead' } as const
 type EdgeVerdict = (typeof EDGE_VERDICT)[keyof typeof EDGE_VERDICT]
 
-const config = loadConfig()
+const config = requireProject(loadConfig())
 const storage = await openStorage(config.databaseUrl, { projectId: config.projectId })
 const memory = await createMemory({ log: storage.events, config })
 
 const summaries = await memory.store.list()
-const notes = []
+const notes: Array<{ note: MemoryNote; hits: number }> = []
 for (const s of summaries) {
   const n = await memory.store.get(s.id, s.scope)
   if (n) notes.push({ note: n, hits: s.hits })

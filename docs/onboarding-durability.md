@@ -164,8 +164,8 @@ because resume is **not recursive** — a resumed parent replays past its `start
 re-dispatching the child, then blocks forever on a gate nothing opens, which our run tree makes the
 common case — while ordinary launch recovery drained the identical tree in 270ms, preserved the
 child's depth-partitioned queue (resume dumps everything onto `_dbos_internal_queue`), and
-incremented `recovery_attempts`, the poison-pill guard resume zeroes. Evidence:
-`.superpowers/sdd/2026-07-26-claim-topics/dbos-resume-probe{,-2}.md`.
+incremented `recovery_attempts`, the poison-pill guard resume zeroes. The full trade-off is
+recorded in `docs/superpowers/specs/2026-07-25-supervisor-runtime-design.md`.
 
 **Wave scheduling replay determinism.** The run workflow launches every *ready* step of a wave,
 awaits the whole wave, then recomputes readiness — deliberately not a continuous

@@ -51,10 +51,10 @@ a grep here comes back empty.
 **Tier ① (application — signal router):**
 3. `packages/kernel/src/execution/signal-router.ts` sees `plan_approved` for a task with a pending split and calls `port.startChildRun(childTaskId)`. Approving only *unblocks* a child — something still has to execute it, which is why the CLI ensures a supervisor exists before appending the approval that supervisor has to react to
 
-**Gate B — `orc reply <taskId> approve`, the grounded-plan gate. This is the hashed one.**
+**Gate B — `orc reply <taskId> approve`, the grounded-plan gate. This one is bound to a point in the log.**
 
-4. `kernel.replyFeedback` answers the open `feedback_requested`. When the task is `grounded` and the reply is exactly `approve` on the plan step, it stamps `planHash` — `planGraphHash(foldPlanNotes(...))`, SHA-256 over the canonical plan-note graph — onto the `feedback_provided` payload
-5. The plan-authoring agent then calls `finalize_plan`, which recomputes that hash and compares it against `kernel.approvedPlanHash(taskId, runToken)`. A mismatch is refused *and names the plan-note ids edited since* (`planNotesChangedSince`), so the agent learns which edit cost it the gate instead of only that something moved. Missing, cross-run, or stale approval fails before any child split
+4. `kernel.replyFeedback` answers the open `feedback_requested`. When the task is `grounded` and the reply is exactly `approve` on the plan step, it stamps `planHash` — `planGraphHash(foldPlanNotes(...))`, SHA-256 over the canonical plan-note graph — onto the `feedback_provided` payload. That hash is the audit record of what was approved, and the marker `approvedPlanHash` uses to tell a plan approval from any other `approve`; the gate itself does not compare it. Its value is reproducible only by the build that stamped it, so it attests *that an approval happened over some graph*, never *that it was this graph* — do not compare it against a freshly computed one
+5. The plan-authoring agent then calls `finalize_plan`, which locates the approval with `kernel.approvedPlanHash(taskId, runToken)` and refuses the freeze when `kernel.planNotesChangedSince(taskId, approvedSeq)` is non-empty — any plan-tier write or any delete in the task's plan scope after the approval — *naming the ids*, so the agent learns which edit cost it the gate instead of only that something moved. That is equivalent to "the graph is unchanged", since `foldPlanNotes` reads exactly those events, and unlike comparing two content hashes it cannot disagree with itself when the approving process and the executor are different builds. Missing, cross-run, or stale approval fails before any child split
 
 **How to debug approval issues:**
 - Ordinary gate: `orc log <task> --json | jq '.[] | select(.kind == "plan_approved")'` — check `approvedBy`
@@ -453,7 +453,7 @@ still works when nothing else does.
 |---|---|---|---|
 | Step execution | `operation_started`, `agent_call` / `tool_result`, `operation_completed` | all above (live status) | `EventLog`, `OperationJournal` |
 | Plan approval (ordinary) | `plan_approved`, `task_status_changed` | `plan_approved` for routing | `EventLog` |
-| Plan approval (grounded) | `feedback_provided` carrying `planHash` | `feedback_provided` for `finalize_plan`'s hash check | `EventLog` |
+| Plan approval (grounded) | `feedback_provided` carrying `planHash` | `feedback_provided` for the approval + its seq, then `memory_written` / `memory_deleted` after it for `finalize_plan`'s gate | `EventLog` |
 | Memory write | `memory_written` only (note + live claims, plus event-level `invalidates`). NOT `memory_accessed` — a write is not a read | `memory_written` / `memory_deleted` / `memory_accessed` for the projector + search | `EventLog`, Surreal |
 | Memory read | `memory_accessed` — on a HIT only, from `memory_read`, `memory_neighbors` (against its seed), `recall` (`mode: preload`, one per owning note) and `orc memory cat`. `memory_search` records nothing | — | `EventLog`, Surreal |
 | Topic fetch | `memory_topic_accessed` (topicKey + resolved label). Fetch only — listing records nothing. Projected by nothing; it lives in the log as measurement | the `topic`/`claim` tables | `EventLog`, Surreal |

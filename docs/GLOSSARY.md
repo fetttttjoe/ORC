@@ -6,7 +6,7 @@ Key terms used throughout the orchestrator codebase and documentation. Many term
 
 ## A
 
-**Approval** — Human gate that permits execution to proceed. Two of them, writing different events: the ordinary gate (`orc approve <taskId>`) appends `plan_approved` and hashes nothing; the grounded-plan gate (`orc reply <taskId> approve`) additionally stamps a SHA-256 of the canonical plan-note graph onto `feedback_provided`, which `finalize_plan` recomputes before it will freeze the plan. See [feedback delivery and grounded approval](ARCHITECTURE.md#feedback-delivery-and-grounded-approval), [both gates side by side](seams-reference.md#scenario-2-a-plan-is-approved-by-a-human).
+**Approval** — Human gate that permits execution to proceed. Two of them, writing different events: the ordinary gate (`orc approve <taskId>`) appends `plan_approved` and hashes nothing; the grounded-plan gate (`orc reply <taskId> approve`) additionally stamps a SHA-256 of the canonical plan-note graph onto `feedback_provided`, recording what was approved and when. `finalize_plan` freezes the plan only if nothing was written to the task's plan scope after that approval's seq. See [feedback delivery and grounded approval](ARCHITECTURE.md#feedback-delivery-and-grounded-approval), [both gates side by side](seams-reference.md#scenario-2-a-plan-is-approved-by-a-human).
 
 **Artifact** — Output file produced by a step (declared in the step's `signal(success, outputs: [...])` call). Verified via SHA-256 receipt at the storage boundary. See [output lineage](ARCHITECTURE.md#responsibilities), [`artifact_produced` event](ARCHITECTURE.md#execution-flow-—-one-step-durably), [`vault/tasks/<id>/lineage.md`](../README.md#vault-views).
 
@@ -36,7 +36,7 @@ Key terms used throughout the orchestrator codebase and documentation. Many term
 
 **Decision** — Architectural choice recorded as a `kind=decision` note in the knowledge graph. See [`vault/memory/index.md`](../README.md#vault-views), [ADR formalization](plans/INDEX.md#phase-2-documentation-roadmap).
 
-**Deterministic** — Guaranteed to produce identical output given identical inputs. Applied to vault projections (same events → same markdown), event-log fold (same events → same state), approval hash (same plan → same hash). See [vault projections](seams-reference.md#vault-projections-—-read-only-human-views).
+**Deterministic** — Guaranteed to produce identical output given identical inputs, *for a given build*. Applied to vault projections (same events → same markdown), event-log fold (same events → same state), the plan freeze (same plan-notes → same executable plan). A derivation that serializes parsed records is deterministic with respect to its inputs AND the schema the running build parses them with, so two processes on different builds may disagree — which is why nothing compares such a value across a process boundary. See [vault projections](seams-reference.md#vault-projections-—-read-only-human-views).
 
 **DBOS** — Database-backed OS (durable workflow framework). Orc uses it for operation journaling, checkpoints, and retry-safe execution. See [DBOS Transact](../README.md#stack), [operation journal](ARCHITECTURE.md#operation-journal), [workflow recovery](../README.md#guarantees-stated-precisely).
 
@@ -130,7 +130,7 @@ Key terms used throughout the orchestrator codebase and documentation. Many term
 
 ## P
 
-**Plan** — Structured task decomposition: list of steps, each with role, title, instructions, skill/tool refs, executor, model, dependencies. Frozen at approval (SHA-256 hash). See [plan schema](../packages/contracts/src/execution.ts), [grounded planning](superpowers/specs/2026-07-19-m5b-grounded-plan-strategy-design.md).
+**Plan** — Structured task decomposition: list of steps, each with role, title, instructions, skill/tool refs, executor, model, dependencies. Derived from the approved plan-notes at the freeze, which is refused if they moved after the approval. See [plan schema](../packages/contracts/src/execution.ts), [grounded planning](superpowers/specs/2026-07-19-m5b-grounded-plan-strategy-design.md).
 
 **Plugin** — Replaceable behavior: executor, provider, skill, tool server, extension. Registered via `seedRegistries`, opted-in via plan refs. See [plugins design](superpowers/specs/2026-07-17-m3-plugins-design.md), [plugin registry](../packages/kernel/src/plugins/host.ts).
 

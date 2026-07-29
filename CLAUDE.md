@@ -2,9 +2,9 @@
 
 ## Never
 
-- **Never `git add` a file that is currently untracked under `docs/superpowers/`.** Most docs there
-  are tracked; a handful are deliberately not, and they exist nowhere else. If a doc looks like it
-  should be committed, ask.
+- **Never `git add` anything under `docs/superpowers/`.** The whole folder is gitignored — specs,
+  plans and research live locally only, and they exist nowhere else. If a doc looks like it should
+  be committed, ask.
 - **Never run `git stash`, `git checkout -- <path>`, `git restore`, `git reset`, or `git clean`**
   against uncommitted work, and never instruct a subagent to. A subagent ignored this once and came
   within one command of destroying six irreplaceable files.
@@ -27,6 +27,10 @@
   names the upgrade path.
 - **Reference docs describe the system as it is.** `README.md` and `docs/*.md` must not narrate
   migrations or name milestones — specs and plans carry the history.
+- **A spec or plan tags its claims.** A number, formula or named pattern is `[sourced]` (cite it),
+  `[derived]` (say from what), or `[conjecture]` (say what would settle it). Untagged prose reads as
+  editorial. Three confidently-documented claims here turned out false under measurement; a reader
+  cannot tell which third without the tags.
 - **Prefer the smallest thing that works** — stdlib over a dependency, one line over fifty, deletion
   over addition. This never shortens the *reading*: trace the whole flow first. Where it conflicts
   with the design rules below, the design rules win — brevity is not an excuse for a bad seam.
