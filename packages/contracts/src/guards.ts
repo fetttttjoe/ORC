@@ -13,6 +13,12 @@ export const errorMessage = (err: unknown): string =>
   : err instanceof Error ? err.message
   : String(err)
 
+// The one tool-result error envelope. `output` is `unknown` in the tool contract, so the inner
+// `error` key is protocol only by convention — the LLM reading the result greps for it, and it
+// was hand-spelled at 12 catch sites across 6 workspaces where a drifted key would fail silently.
+export const toolError = (err: unknown): { output: { error: string }; isError: true } =>
+  ({ output: { error: errorMessage(err) }, isError: true })
+
 // mermaid labels: double quotes end the label, a newline ends the STATEMENT — an agent-authored
 // title carrying one escapes the graph and renders as live markdown in human-facing views.
 // The ONE escaper for every mermaid-producing view (vault, ui-core diagrams, memory index).

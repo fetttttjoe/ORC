@@ -7,6 +7,11 @@ import { z } from 'zod'
 
 export const MEMORY_ID_RE = /^[a-z0-9][a-z0-9-]*$/
 
+// The one spelling of a sha256-hex digest. It was spelled inline at three sites (artifact
+// receipts, plan hashes, kernel trust fingerprints) — a widened or typo'd copy would admit
+// digests the other two reject.
+export const SHA256_HEX_RE = /^[a-f0-9]{64}$/
+
 // Deterministic MEMORY_ID_RE-safe id from a human title. Quick capture keys notes by title,
 // so re-noting the same title UPDATES the note (memory_write is an upsert) instead of forking
 // near-duplicates — deliberate: capture is idempotent, disambiguation is renaming the title.

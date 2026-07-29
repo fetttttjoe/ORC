@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test'
-import { MemoryNoteInput, MemoryNote, MEMORY_ID_RE, LINK_KINDS, NOTE_TIER, inferTier, type PlanNoteInput, type SemanticNoteInput } from './memory'
+import { MemoryNoteInput, MemoryNote, MEMORY_ID_RE, LINK_KINDS, NOTE_TIER, inferTier, parseLinkSpec, formatLinkSpec, type PlanNoteInput, type SemanticNoteInput } from './memory'
 import { PAYLOAD_SCHEMAS } from './events'
 
 // The tier discriminates the union, so a test that asserts tier-specific fields has to say which
@@ -231,5 +231,23 @@ describe('MemoryNoteInput', () => {
   it("reserves project-scope note id 'index' (collides with vault/memory/index.md)", () => {
     expect(MemoryNoteInput.safeParse({ id: 'index', title: 'X' }).success).toBe(false)
     expect(MemoryNoteInput.safeParse({ id: 'index', scope: 'other', title: 'X' }).success).toBe(true)
+  })
+})
+
+describe('parseLinkSpec', () => {
+  it('parses bare ids and kind:id entries, defaulting kind by omission', () => {
+    expect(parseLinkSpec('other-note')).toEqual([{ id: 'other-note' }])
+    expect(parseLinkSpec('supersedes:old-note, other-note')).toEqual([
+      { id: 'old-note', kind: 'supersedes' }, { id: 'other-note' },
+    ])
+    expect(parseLinkSpec('  ')).toEqual([])
+  })
+  it('rejects unknown kinds and malformed ids, naming the bad entry', () => {
+    expect(() => parseLinkSpec('replaces:x')).toThrow(/unknown link kind 'replaces'/)
+    expect(() => parseLinkSpec('supersedes:Bad Id')).toThrow(/not a valid note id/)
+  })
+  it('round-trips through formatLinkSpec', () => {
+    const spec = 'supersedes:old-note, relates_to:other'
+    expect(formatLinkSpec(parseLinkSpec(spec).map(l => ({ id: l.id, kind: l.kind ?? 'relates_to' })))).toBe(spec)
   })
 })

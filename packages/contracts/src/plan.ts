@@ -20,6 +20,11 @@ export const PlanStep = z.object({
   zone: z.array(z.string()),
   maxIterations: z.number().int().positive(),
   dependsOn: z.array(z.string()),
+  // kernel-set on the grounded template's analyze+plan steps: they author memory notes and read
+  // code but must not write source before the plan is approved. Optional (no default) so it adds
+  // no key to the many steps that never set it. Not exposed on the plan-note write path, so an
+  // agent cannot grant itself source writes — only the template sets it.
+  readOnlySource: z.boolean().optional(),
 })
 export type PlanStep = z.infer<typeof PlanStep>
 
@@ -34,8 +39,10 @@ export const STRATEGY = { groundedPlan: 'grounded-plan', split: 'split', single:
 //
 // VERIFY_STEP_ID: validatePlan accepts it as the alternative to explicit dependencies, and the
 // grounded freezer maps it to the auditor role.
-export const STEP_ID = { analyze: 'analyze', plan: 'plan', verify: 'verify' } as const
+// COMMIT_STEP_ID: appended by the kernel's withCommitStep; the only step git_commit registers for.
+export const STEP_ID = { analyze: 'analyze', plan: 'plan', verify: 'verify', commit: 'commit' } as const
 export const VERIFY_STEP_ID = STEP_ID.verify
+export const COMMIT_STEP_ID = STEP_ID.commit
 
 // The root of a grounded plan-note graph — what the authoring agent names, finalize_plan looks up,
 // and the freezer decomposes from.
@@ -46,8 +53,10 @@ export const MASTERPLAN_NOTE_ID = 'masterplan'
 // surface — so this is the KNOWN set, not a closed enum.
 export const STEP_ROLE = {
   scout: 'scout', implementer: 'implementer', auditor: 'auditor', worker: 'worker',
+  // kernel-set only (withCommitStep): a planner note named 'commit' freezes as implementer, so the
+  // git_commit gate's role term keeps it unarmed.
+  committer: 'committer',
 } as const
-export type StepRole = (typeof STEP_ROLE)[keyof typeof STEP_ROLE]
 
 // The per-task plan-note scope. The authoring agent, finalize_plan, and every UI view derive
 // it from the taskId — one format, one place (was duplicated as ui-core's planScopeName).

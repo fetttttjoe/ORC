@@ -1,17 +1,18 @@
 import { z } from 'zod'
 import { TaskNode, TaskStatus } from './task'
 import { Plan } from './plan'
-import { FailureClass, RunOutcome, Signal, Usage } from './execution'
+import { FailureClass, Signal, SplitResult, Usage } from './execution'
 import { EventKind } from './event-kinds'
 import { OperationCompletedPayload, OperationFailedPayload, OperationStartedPayload } from './operations'
 import { MemoryAccessedPayload, MemoryDeletedPayload, MemoryWrittenPayload } from './memory'
 import { MemoryTopicAccessedPayload } from './cluster'
+import { SHA256_HEX_RE } from './ids'
 import { AnalysisCompletedPayload, FeedbackProvidedPayload, FeedbackRequestedPayload, PlanAnnotatedPayload } from './analysis'
 
 // typed so folds can parse receipts without casts
 export const ArtifactProducedPayload = z.object({
   path: z.string().min(1),
-  sha256: z.string().regex(/^[a-f0-9]{64}$/),
+  sha256: z.string().regex(SHA256_HEX_RE),
   size: z.number().int().nonnegative(),
 })
 export type ArtifactProducedPayload = z.infer<typeof ArtifactProducedPayload>
@@ -54,7 +55,9 @@ export const REACTION = {
 export type Reaction = (typeof REACTION)[keyof typeof REACTION]
 
 export const ReactionFailedPayload = z.object({
-  reaction: z.enum([REACTION.runRequested, REACTION.cancelled, REACTION.childApproved, REACTION.feedback, REACTION.splitResolve]),
+  // derives from the map — a sixth reaction added to REACTION must not first surface as a
+  // parse failure on the failure-RECORDING path when that reaction first fails
+  reaction: z.enum(REACTION),
   taskId: z.string().min(1).nullable(),
   message: z.string(),
   // the seq of the event whose reaction failed, so the read side can point at the exact cause.
@@ -152,13 +155,7 @@ export const PAYLOAD_SCHEMAS = {
     runToken: z.string().min(1),    // parent step workflow id = DBOS.send target
     childTaskId: z.string().min(1),
   }),
-  split_resolved: z.object({
-    splitId: z.string().min(1),
-    childTaskId: z.string().min(1),
-    outcome: RunOutcome,            // done | blocked | cancelled — NOT SignalOutcome (spec D5)
-    summary: z.string(),
-    notes: z.array(z.object({ id: z.string(), scope: z.string() })),
-  }),
+  split_resolved: SplitResult,      // the join payload IS the event payload (spec D5) — composed, not re-spelled
   operation_started: OperationStartedPayload,
   operation_completed: OperationCompletedPayload,
   operation_failed: OperationFailedPayload,

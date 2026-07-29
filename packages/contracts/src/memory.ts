@@ -460,6 +460,10 @@ export const MemorySearchResult = z.object({
   omitted: z.number().int().nonnegative(),
   next: z.string().optional(),
   note: z.string().optional(),
+  // note ids among the results whose declared paths have CHANGED since the note was written — the
+  // same drift check memory_read runs, lifted to the result SET so a searcher acting on a matched
+  // CLAIM is warned, not only a reader who pulls the full note. Empty/absent = nothing stale.
+  drifted: z.array(z.string()).optional(),
 })
 export type MemorySearchResult = z.infer<typeof MemorySearchResult>
 

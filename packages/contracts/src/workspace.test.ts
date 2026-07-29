@@ -2,9 +2,48 @@ import { describe, expect, it } from 'bun:test'
 import { mkdtempSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import { assertInZone, resolveInWorkspace } from './workspace'
+import { assertInZone, pathInZone, resolveInWorkspace } from './workspace'
 
 const ws = () => mkdtempSync(path.join(tmpdir(), 'orc-ws-'))
+
+describe('pathInZone (pure zone predicate)', () => {
+  it('matches a path inside a single glob', () => {
+    expect(pathInZone('src/index.ts', ['src/**'])).toBe(true)
+  })
+
+  it('does not match a path outside every glob', () => {
+    expect(pathInZone('docs/readme.md', ['src/**'])).toBe(false)
+  })
+
+  it('matches a nested path via packages/kernel/**', () => {
+    expect(pathInZone('packages/kernel/src/execution/foo-tool.ts', ['packages/kernel/**'])).toBe(true)
+  })
+
+  it('treats a "./"-prefixed path the same as its bare form', () => {
+    expect(pathInZone('./packages/kernel/src/index.ts', ['packages/kernel/**'])).toBe(true)
+    expect(pathInZone('packages/kernel/src/index.ts', ['packages/kernel/**'])).toBe(true)
+  })
+
+  it('empty or undefined zone is unrestricted, matching assertInZone semantics', () => {
+    expect(pathInZone('anything/at/all.ts', [])).toBe(true)
+    expect(pathInZone('anything/at/all.ts', undefined)).toBe(true)
+  })
+
+  it('rejects a path with a ".." segment (returns false, does not throw)', () => {
+    expect(pathInZone('../outside.txt', ['**'])).toBe(false)
+    expect(pathInZone('src/../../outside.txt', ['**'])).toBe(false)
+  })
+
+  it('classifies a path that does not exist on disk — no fs access required', () => {
+    expect(pathInZone('packages/nope/does/not/exist-9182.ts', ['packages/nope/**'])).toBe(true)
+    expect(pathInZone('packages/nope/does/not/exist-9182.ts', ['packages/other/**'])).toBe(false)
+  })
+
+  it('collapses duplicate slashes and normalizes backslashes', () => {
+    expect(pathInZone('packages//kernel///src/index.ts', ['packages/kernel/**'])).toBe(true)
+    expect(pathInZone('packages\\kernel\\src\\index.ts', ['packages/kernel/**'])).toBe(true)
+  })
+})
 
 describe('assertInZone (write-fence)', () => {
   it('empty zone is unrestricted; matching globs pass; outside throws a named fence', () => {
@@ -20,7 +59,9 @@ describe('assertInZone (write-fence)', () => {
 describe('resolveInWorkspace (trust boundary)', () => {
   it('rejects .. traversal and absolute escapes; resolves relative paths', () => {
     const dir = ws()
-    expect(() => resolveInWorkspace(dir, '../outside.txt')).toThrow(/escapes workspace/)
+    // the error names the path convention: an agent that assumed file-relative paths (../plugins
+    // from inside packages/cli, observed live as #31863) must learn the rule from the refusal
+    expect(() => resolveInWorkspace(dir, '../outside.txt')).toThrow(/relative to the workspace root/)
     expect(() => resolveInWorkspace(dir, '/etc/passwd')).toThrow(/escapes workspace/)
     expect(resolveInWorkspace(dir, 'sub/file.txt')).toBe(path.join(dir, 'sub', 'file.txt'))
   })

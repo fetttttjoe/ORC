@@ -109,11 +109,12 @@ export function runOutcomeFor(status: TaskStatus | undefined): RunOutcome {
 }
 
 // The thin join payload (spec D5): what a parent gets back from a resolved split.
-// Same shape as the split_resolved event payload — the router composes it once.
+// Also THE split_resolved event payload schema (PAYLOAD_SCHEMAS composes it) — a re-spelled
+// copy there had already been one field-comment away from drifting.
 export const SplitResult = z.object({
   splitId: z.string().min(1),
   childTaskId: z.string().min(1),
-  outcome: RunOutcome,
+  outcome: RunOutcome, // done | blocked | cancelled — NOT SignalOutcome (spec D5)
   summary: z.string(),
   notes: z.array(z.object({ id: z.string(), scope: z.string() })),
 })
@@ -147,6 +148,21 @@ export interface ModelProvider<LM = unknown> {
   // fall back to the cost-table keys. Implementations must resolve (never reject) with [] or a
   // static fallback when the API is unreachable: discovery is a convenience, not a dependency.
   listModels?(): Promise<string[]>
+}
+
+// the ONE parse of a provider's model-list JSON — the three providers differed only in the list
+// key ('data' vs 'models') and the id key ('id' vs 'name'), and the extraction was spelled three
+// times. Anything malformed degrades to fewer ids, never a throw: discovery is a convenience,
+// and listModels implementations must not reject.
+export function modelIdsFrom(body: unknown, listKey: string, idKey: string): string[] {
+  const parsed = z.record(z.string(), z.unknown()).safeParse(body)
+  const list = z.array(z.unknown()).safeParse(parsed.success ? parsed.data[listKey] : undefined)
+  if (!list.success) return []
+  return list.data.flatMap(m => {
+    const entry = z.record(z.string(), z.unknown()).safeParse(m)
+    const id = z.string().safeParse(entry.success ? entry.data[idKey] : undefined)
+    return id.success ? [id.data] : []
+  })
 }
 
 // The embedding seam — a plugin-provided text→vector encoder, mirroring ModelProvider so any

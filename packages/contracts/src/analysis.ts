@@ -1,6 +1,6 @@
 import { z } from 'zod'
 import type { PlanStep } from './plan'
-import { MEMORY_ID_RE, MemoryAuthor } from './ids'
+import { MEMORY_ID_RE, MemoryAuthor, SHA256_HEX_RE } from './ids'
 
 // analyzed+gaps are load-bearing (RG7 degradation, RG3 uncertainty). scope/confidence/notesWritten
 // are reserved forward-looking (cbm epistemics ideas #2/#7 + future hot-paths/churn telemetry).
@@ -26,7 +26,7 @@ export const FeedbackProvidedPayload = z.object({
   topic: z.string().min(1),
   text: z.string(),
   author: MemoryAuthor,
-  planHash: z.string().regex(/^[a-f0-9]{64}$/).optional(),
+  planHash: z.string().regex(SHA256_HEX_RE).optional(),
 })
 export type FeedbackProvidedPayload = z.infer<typeof FeedbackProvidedPayload>
 
