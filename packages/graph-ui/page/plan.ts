@@ -8,7 +8,7 @@ import { draftFromSteps, openPlanEditor } from './plan-editor'
 import { el } from './ui/el'
 import { Badge, Btn, Card, CmdChip, Dot, Empty, KV, Link, Pre, Tabs, statusTone, toast } from './ui/components'
 
-import { REPLY_AFFORDANCE, replyAffordance } from './affordance'
+import { REPLY_AFFORDANCE, replyAffordance, replyReceipt, type ReplyResult } from './affordance'
 import type { PlanNoteView, PlansView, PlanStepView } from './api'
 export type { PlanNoteView, PlansView, PlanStepView } // view models re-export the api contract
 
@@ -35,6 +35,11 @@ export interface RequestCtx {
   go: (node: string) => void
   showVersion: (v: number) => void
   act: Act | null
+  // Answering is fenced apart from acting on purpose: `act` needs the runtime that lives in the
+  // directory orc graph was started in, while an answer is an append into the log of whichever
+  // project asked. This view is rendered for every chat in the sidebar, so a question it shows must
+  // be answerable — it used to display the CLI command instead, for a row the server could write.
+  answer: Act | null
   onFocus: (on: boolean) => void
 }
 
@@ -65,7 +70,7 @@ function usageChip(u: { inputTokens: number; outputTokens: number; costUSD: numb
 interface Move { text: string; cmd: string | null; tone: 'danger' | 'warn' | 'accent' | 'ok'; button: HTMLElement | null }
 
 // the single "what should the human do now" decision — precedence: failure > question > gates
-function yourMove(t: TaskView, open: OpenQuestion[], act: Act | null): Move | null {
+function yourMove(t: TaskView, open: OpenQuestion[], act: Act | null, answer: Act | null): Move | null {
   const id = t.task.id
   const failed = t.steps.find(s => s.status === 'failed')
   if (failed) return {
@@ -76,14 +81,14 @@ function yourMove(t: TaskView, open: OpenQuestion[], act: Act | null): Move | nu
   if (open.length > 0) {
     const input = el('input', {})
     input.placeholder = 'your answer…'
-    const offer = replyAffordance(Boolean(act), id)
+    const offer = replyAffordance(Boolean(answer), id)
     return {
       text: `the agent is asking: “${open[0]?.question ?? ''}”`, tone: 'warn',
       cmd: offer.kind === REPLY_AFFORDANCE.command ? offer.cmd : null,
-      button: act && el('div', { class: 'reply-row' }, input, Btn('reply', async () => {
+      button: answer && el('div', { class: 'reply-row' }, input, Btn('reply', async () => {
         if (!input.value.trim()) return
-        await act('reply', { taskId: id, text: input.value.trim() })
-        toast('replied — step resuming', 'ok')
+        const receipt = replyReceipt(await answer<ReplyResult>('reply', { taskId: id, text: input.value.trim() }))
+        toast(receipt.text, receipt.tone)
       }, 'warn')),
     }
   }
@@ -100,6 +105,13 @@ function yourMove(t: TaskView, open: OpenQuestion[], act: Act | null): Move | nu
         })),
       }
     }
+    // A DIFFERENT approval from the conversation pane's one-click approve, despite the shared word.
+    // This is the structural one: kernel.approvePlan sets the task's approvedVersion and emits
+    // plan_approved, and it exists for a task that already HAS a proposed plan version. The pane's
+    // button answers an open feedback_requested on a grounded task's plan step with an
+    // APPROVAL_ANSWER, which stamps planHash so finalize_plan can freeze the note graph — no
+    // approvedVersion involved, and no plan version exists yet at that point. Do not route one
+    // through the other: an APPROVAL_ANSWER means nothing to this endpoint.
     case 'awaiting_approval': return {
       text: 'a plan is waiting for your approval — review the steps below', tone: 'warn',
       cmd: act ? null : `orc approve ${id}`,
@@ -205,7 +217,7 @@ export function renderRequest(ctx: RequestCtx): HTMLElement {
 
   // 2) your move (buttons when the server can act, chips otherwise)
   cwdInput = el('input', {})
-  const move = yourMove(t, ctx.open, ctx.act)
+  const move = yourMove(t, ctx.open, ctx.act, ctx.answer)
   if (move) {
     const card = el('div', { class: `card move ${move.tone}` },
       el('div', { class: 'card-title' }, Badge('your move', move.tone), move.text))

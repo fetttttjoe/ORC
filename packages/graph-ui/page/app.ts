@@ -1,18 +1,18 @@
 import type { GraphLink, GraphNode, LogRow } from '@orc/ui-core'
-import { api, canAct, initApi, session, setApiProject, type Project } from './api'
+import { api, canAct, canAnswer, initApi, session, setApiProject, type Project } from './api'
 import { renderChat } from './chat'
 import { Conversation } from './conversation'
 import { renderDetail, type NoteDetailActions } from './detail'
 import { LogView } from './log'
 import { current, navigate, onChange, type Selection, type Tab } from './nav'
-import { MEMORY_HEALTH, planScope, slugId, TASK_STATUS } from '@orc/contracts'
-import { EDGE, NODE_PREFIX, noteNodeId, stepNodeId } from '@orc/ui-core/graph'
+import { errorMessage, MEMORY_HEALTH, planScope, slugId, TASK_STATUS } from '@orc/contracts'
+import { EDGE, NODE_PREFIX, linkKey, noteNodeId, stepNodeId } from '@orc/ui-core/graph'
 import { parseLinkSpec } from '@orc/contracts'
 import { renderRequest, type OpenQuestion, type PlanNoteView, type PlansView, type TaskView } from './plan'
 import type { GraphRenderer } from './renderer'
 import { SigmaRenderer } from './sigma-renderer'
 import { Btn, Dot, Empty, NavItem, Section, Tabs, openDialog, toast } from './ui/components'
-import { REPLY_AFFORDANCE, replyAffordance } from './affordance'
+import { REPLY_AFFORDANCE, replyAffordance, replyReceipt, type ReplyResult } from './affordance'
 import { el } from './ui/el'
 
 // ---- shell v2: nav | conversation | resizer | dock(graph + inspector overlay) ----
@@ -77,8 +77,7 @@ let stream: { close: () => void } | undefined
 let seq = 0
 let projects: Project[] = []
 const nodes = new Map<string, GraphNode>()
-const links = new Map<string, GraphLink>() // client-side edge index: feeds focus mode + knowledge
-const linkKey = (l: GraphLink): string => `${l.source}\u0000${l.target}\u0000${l.type}`
+const links = new Map<string, GraphLink>() // client-side edge index: feeds focus mode + knowledge, keyed by ui-core's linkKey
 let chatTimer: ReturnType<typeof setTimeout> | undefined
 let shownPlanVersion: number | null = null
 let focusedTask: string | null = null
@@ -311,9 +310,14 @@ async function renderInspector(): Promise<void> {
       if (!taskId) { inspectorBody.replaceChildren(Empty('select a task or step')); return }
       const step = sel.node?.startsWith(NODE_PREFIX.step) ? sel.node.split(':')[2] : undefined
       const items = await api.transcript(sel.project, taskId, step)
-      const offer = replyAffordance(canAct(), taskId)
+      // canAnswer, not canAct: this transcript is served for every chat in the sidebar, so every
+      // chat's open question is answerable — the receipt says whether a supervisor took it
+      const offer = replyAffordance(canAnswer(), taskId)
       const onReply = offer.kind === REPLY_AFFORDANCE.box
-        ? async (text: string) => { await api.act('reply', { taskId, text }); toast('replied — step resuming', 'ok') }
+        ? async (text: string) => {
+          const receipt = replyReceipt(await api.act<ReplyResult>('reply', { taskId, text }))
+          toast(receipt.text, receipt.tone)
+        }
         : null
       inspectorBody.replaceChildren(renderChat(items, onReply, offer.kind === REPLY_AFFORDANCE.command ? offer.cmd : null))
       return
@@ -345,14 +349,19 @@ async function renderInspector(): Promise<void> {
         go: node => navigate({ node, tab: 'detail' }),
         showVersion: v => { shownPlanVersion = v; void renderInspector() },
         act: canAct() ? api.act : null,
+        // separate capability: running work needs the runtime in this server's own directory,
+        // answering a question needs only the log of the project that asked
+        answer: canAnswer() ? api.act : null,
         onFocus: on => { focusedTask = on ? taskId : null; applyFocus(); void renderInspector() },
       }))
       return
     }
     case 'log': {
       const rows = await api.log(sel.project, { task: taskId ?? undefined })
-      logView.setRows(rows, taskId)
+      // mount FIRST: setRows pins the panel via closest('.inspector'), which resolves nothing
+      // until the root is attached — the old order left the log opening scrolled to the top
       inspectorBody.replaceChildren(logView.root)
+      logView.setRows(rows, taskId)
       return
     }
   }
@@ -446,7 +455,7 @@ async function loadProject(): Promise<void> {
 // touches must already exist. A null conversation here once swallowed the chat seed silently.
 initApi({ onError: err => toast(`${err.endpoint}: ${err.message}`, 'danger') })
 await api.initSession()
-conversation = new Conversation(node => navigate({ node, tab: 'detail' }))
+conversation = new Conversation(node => navigate({ node, tab: 'detail' }), taskId => nodes.get(taskId)?.detail)
 app.children[1]?.replaceWith(conversation.root)
 renderNewRequest()
 refreshModels()
@@ -485,7 +494,7 @@ async function loadProjectOrRetry(): Promise<void> {
   try {
     await loadProject()
   } catch (err) {
-    setStatus(false, `snapshot failed — retrying: ${err instanceof Error ? err.message : String(err)}`)
+    setStatus(false, `snapshot failed — retrying: ${errorMessage(err)}`)
     await new Promise(resolve => setTimeout(resolve, SNAPSHOT_RETRY_MS))
     await loadProject()
   }
@@ -494,7 +503,7 @@ async function loadProjectOrRetry(): Promise<void> {
 onChange(s => {
   void applyNavigation(s).catch(err => {
     // last resort: the API layer already toasts, so this is about not dying silently
-    setStatus(false, `view failed to load: ${err instanceof Error ? err.message : String(err)}`)
+    setStatus(false, `view failed to load: ${errorMessage(err)}`)
   })
 })
 

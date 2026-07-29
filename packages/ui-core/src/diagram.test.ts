@@ -65,4 +65,49 @@ describe('mermaid generators', () => {
     // no states at all (proposal not yet split) is the old behaviour, unchanged
     expect(decompositionMermaid(notes)).toContain('a["a"]:::pending')
   })
+
+  // Between a subplan's approval and its first step starting there is no run status yet, so the
+  // ONLY signal is the approved bit the fold carries — it must render as its own armed state, not
+  // pending (indistinguishable from an unapproved proposal).
+  it('decompositionMermaid classes an approved-but-not-yet-running subplan as armed', () => {
+    const notes = [
+      { id: 'root', title: 'root', links: [{ id: 'a', kind: LINK_KIND.decomposes_into }] },
+      { id: 'a', title: 'a', links: [] },
+    ]
+    const text = decompositionMermaid(notes, new Map([['a', { approved: true }]]))
+    expect(text).toContain('a["a"]:::armed')
+    expect(text).not.toContain('a["a"]:::pending')
+    expect(text).not.toContain('a["a"]:::done')
+    expect(text).not.toContain('a["a"]:::running')
+    expect(text).not.toContain('a["a"]:::failed')
+    // the armed classDef is present in the theme so the class resolves
+    expect(text).toContain('classDef armed')
+  })
+
+  // planMermaid shares the SAME statusClass/THEME path, so the fix is one mechanism: an approved
+  // step with no run yet arms there too.
+  it('planMermaid classes an approved-but-not-yet-running step as armed (shared mechanism)', () => {
+    const text = planMermaid(
+      [{ id: 's1', title: 'step one', dependsOn: [] }],
+      new Map([['s1', { approved: true }]]),
+    )
+    expect(text).toContain('s1["step one"]:::armed')
+    expect(text).not.toContain('s1["step one"]:::pending')
+    expect(text).toContain('classDef armed')
+  })
+
+  // a real run status still wins over the armed bit, and an entry that is neither approved nor a
+  // recognized status still falls through to pending.
+  it('running/done win over the armed bit; an unrecognized entry stays pending', () => {
+    const running = planMermaid(
+      [{ id: 's1', title: 'x', dependsOn: [] }],
+      new Map([['s1', { status: STEP_RUN_STATUS.running, approved: true }]]),
+    )
+    expect(running).toContain('s1["x"]:::running')
+    const stray = planMermaid(
+      [{ id: 's1', title: 'x', dependsOn: [] }],
+      new Map([['s1', { status: 'bogus' }]]),
+    )
+    expect(stray).toContain('s1["x"]:::pending')
+  })
 })

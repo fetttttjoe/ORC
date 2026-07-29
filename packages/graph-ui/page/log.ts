@@ -1,10 +1,17 @@
 // Log tab — the live event feed. Initial rows from /api/log, then appended from SSE summaries
 // by app.ts. Rows navigate: task events → their task node, memory events → the note node.
-import type { LogRow } from '@orc/ui-core'
+// the sub-path, not the barrel: a VALUE import of '@orc/ui-core' resolves sessions.ts → @orc/kernel
+// → node builtins and breaks the browser bundle (type-only barrel imports are erased and safe)
+import { shouldAdmitLogRow, type LogRow } from '@orc/ui-core/summarize'
 import { el } from './ui/el'
 import { Badge, type Tone } from './ui/components'
 
 const CLIENT_CAP = 500
+
+// The scrolling container: .log has no overflow of its own — the inspector overlay scrolls
+// (theme.css). Was '.detail' from before the shell-v2 rename, so closest() found nothing and
+// neither the initial render nor live rows ever moved the panel.
+const SCROLLER_SELECTOR = '.inspector'
 
 const toneFor = (kind: string): Tone =>
   kind.startsWith('memory_') ? 'purple'
@@ -22,16 +29,23 @@ export class LogView {
     this.go = go
   }
 
+  // callers mount `root` BEFORE calling this — closest() resolves the panel only once attached
   setRows(rows: LogRow[], taskFilter: string | null): void {
     this.taskFilter = taskFilter
     this.root.replaceChildren(...rows.map(r => this.row(r)))
-    this.root.scrollTop = this.root.scrollHeight
+    const scroller = this.root.closest(SCROLLER_SELECTOR)
+    if (scroller) scroller.scrollTop = scroller.scrollHeight
   }
 
   append(r: LogRow): void {
-    if (this.taskFilter && r.taskId !== null && r.taskId !== this.taskFilter) return
+    // ONE admit/reject rule with the server-side initial batch (sessions.ts log()) — same
+    // shouldAdmitLogRow — so the initial task-filtered rows and the live SSE tail cannot drift.
+    // A sibling task's project-scoped memory row (envelope taskId null) is now rejected unless it
+    // was AUTHORED by this task (row.authorTaskId === taskFilter), where the old rule blanket-let
+    // every null-taskId row through.
+    if (!shouldAdmitLogRow(r, this.taskFilter)) return
     // pin-to-bottom unless the user scrolled up to read (scrolling container is the panel)
-    const scroller = this.root.closest('.detail')
+    const scroller = this.root.closest(SCROLLER_SELECTOR)
     const pinned = !scroller || scroller.scrollTop + scroller.clientHeight >= scroller.scrollHeight - 40
     this.root.append(this.row(r))
     while (this.root.childElementCount > CLIENT_CAP) this.root.firstElementChild?.remove()

@@ -4,7 +4,7 @@
 // is gated). @joint/core draws; our draft object stays the single source of truth.
 import { dia, shapes } from '@joint/core'
 import { DirectedGraph } from '@joint/layout-directed-graph'
-import { STEP_ROLE, STRATEGY } from '@orc/contracts'
+import { ISOLATION_TIER, STEP_ROLE, STRATEGY } from '@orc/contracts'
 import type { PlanStepView } from './api'
 import { el } from './ui/el'
 import { Badge, Btn, KV, toast } from './ui/components'
@@ -157,9 +157,12 @@ export function openPlanEditor(opts: {
   paper.on('blank:pointerdblclick', (_evt, x, y) => {
     let n = steps.length + 1
     while (byId().has(`s${n}`)) n++
+    // the editor exposes no fields for the execution plumbing — new steps get the same
+    // sanctioned defaults draftFromSteps stamps on save, so the two can never disagree
     const s: EditorStep = {
       id: `s${n}`, role: STEP_ROLE.worker, title: `step ${n}`, instructions: 'describe the work',
       modelRef: 'anthropic/claude-haiku-4-5', skillRefs: [], maxIterations: 10, dependsOn: [],
+      executorRef: 'api-loop', toolRefs: [], isolation: ISOLATION_TIER.local, zone: [],
     }
     steps.push(s)
     const node = nodeFor(s)
@@ -200,7 +203,7 @@ export function draftFromSteps(steps: PlanStepView[]): Record<string, unknown> {
     steps: steps.map(s => ({
       id: s.id, role: s.role, title: s.title, instructions: s.instructions,
       executorRef: 'api-loop', modelRef: s.modelRef, skillRefs: s.skillRefs, toolRefs: [],
-      isolation: 'local', zone: [], maxIterations: s.maxIterations, dependsOn: s.dependsOn,
+      isolation: ISOLATION_TIER.local, zone: [], maxIterations: s.maxIterations, dependsOn: s.dependsOn,
     })),
   }
 }

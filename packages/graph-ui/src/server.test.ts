@@ -36,6 +36,10 @@ const WriteEnvelope = z.object({ patch: AddNodesPatch, summary: WriteSummary })
 const HeatNodeView = z.object({ id: z.string(), heat: z.number().optional() })
 const HeatEnvelope = z.object({ patch: z.object({ updateNodes: z.array(HeatNodeView) }), summary: z.object({ line: z.string() }) })
 const CatchUpEnvelope = z.object({ patch: AddNodesPatch })
+// the pane's feed row = ui-core's summary plus the failure this adapter lifts off the raw event
+const FailureEnvelope = z.object({
+  summary: z.object({ kind: z.string(), failure: z.object({ toolName: z.string(), error: z.string() }) }),
+})
 
 // Asserted subsets of the JSON the web endpoints return — parsed at the read boundary so a
 // contract drift fails the parse here instead of a cast silently lying about the shape.
@@ -181,6 +185,34 @@ describe('graph-ui web adapter', () => {
     await ui.stop(); await storage.close()
   })
 
+  // A broken approval gate rejected eight consecutive "approve" answers and the pane showed none
+  // of it: the rejection was a tool_result, and the LogRow summary the pane consumes carries no
+  // isError flag, so the only surface that knew was the log. This adapter has the raw event —
+  // it lifts the failure onto the feed row so the pane can render the reason.
+  it('a failed tool result rides the stream as a failure on the summary; a successful one does not', async () => {
+    const { storage, taskId, ui, base } = await setup()
+    const g = GraphView.parse(await (await fetch(`${base}/api/graph?project=${TEST_PROJECT_ID}`)).json())
+    const stream = await fetch(`${base}/api/stream?project=${TEST_PROJECT_ID}&fromSeq=${g.seq}`)
+    const toolResult = (toolCallId: string, isError: boolean, output: unknown) => ({
+      taskId, stepId: 'plan', runToken: 'r1', kind: EVENT_KIND.tool_result,
+      payload: { stepId: 'plan', runToken: 'r1', iteration: 1, toolCallId, toolName: 'finalize_plan', output, isError },
+    })
+    await storage.events.append(toolResult('c1', false, 'plan frozen'))
+    await storage.events.append(toolResult('c2', true, 'the plan graph changed since you approved'))
+
+    const frames: string[] = []
+    const failed = await readSse(stream, m => m.data.includes('"failure"'), m => frames.push(m.data))
+    expect(failed).not.toBeNull()
+    const env = FailureEnvelope.parse(JSON.parse(failed!.data))
+    expect(env.summary.kind).toBe(EVENT_KIND.tool_result)
+    expect(env.summary.failure).toEqual({ toolName: 'finalize_plan', error: 'the plan graph changed since you approved' })
+    // the successful result streamed first and carried no failure — errors are the signal, not
+    // every tool result (the pane would drown)
+    expect(frames.some(f => f.includes('plan frozen') && f.includes('"failure"'))).toBe(false)
+
+    await ui.stop(); await storage.close()
+  })
+
   it('pushes the chats list over the stream: seed on connect, update when a foreign project appears', async () => {
     const { storage, ui, base, url } = await setup()
     const stream = await fetch(`${base}/api/stream?project=${TEST_PROJECT_ID}&fromSeq=0`)
@@ -189,6 +221,7 @@ describe('graph-ui web adapter', () => {
     // list to this already-open stream — the sidebar learns of chats this tab never touched
     const other = crypto.randomUUID()
     const foreign = await openStorage(url, { projectId: other })
+    openStores.push(foreign)
     await foreign.events.append(noteEvent('foreign-born'))
 
     // one reader pass: collect every frame until the growth frame lands
@@ -214,6 +247,7 @@ describe('graph-ui web adapter', () => {
     const calls: unknown[] = []
     const actions = stubActions({ approve: async (taskId: string, version?: number) => { calls.push([taskId, version]); return { version: version ?? 1 } } })
     const ui = startGraphUi({ url: db.url, port: 0, actions })
+    openServers.push(ui)
     const base = `http://127.0.0.1:${ui.port}`
 
     const session = SessionView.parse(await (await fetch(`${base}/api/session`)).json())
@@ -238,6 +272,7 @@ describe('graph-ui web adapter', () => {
 
     // read-only server (no actions) -> 501 regardless of token
     const ro = startGraphUi({ url: db.url, port: 0 })
+    openServers.push(ro)
     const roSession = SessionView.parse(await (await fetch(`http://127.0.0.1:${ro.port}/api/session`)).json())
     expect(roSession.actions).toBe(false)
     const blocked = await fetch(`http://127.0.0.1:${ro.port}/api/actions/approve`, {
@@ -247,16 +282,22 @@ describe('graph-ui web adapter', () => {
     await ro.stop()
   })
 
-  it('refuses cross-project mutations; newProject stays project-free', async () => {
+  it('refuses cross-project mutations; newProject and reply name their own project', async () => {
     const db = await createTestDb()
     dbs.push(db)
     const calls: string[] = []
     const actions = stubActions({
       approve: async (taskId: string) => { calls.push(`approve:${taskId}`); return { version: 1 } },
+      // the chat the request came from, NOT this server's own project — see CROSS_PROJECT_ACTIONS
+      reply: async (taskId: string, text: string, projectId?: string) => {
+        calls.push(`reply:${projectId}:${taskId}:${text}`)
+        return { answered: true, supervised: false }
+      },
       newProject: async (dir: string, name: string) => { calls.push(`newProject:${name}`); return { projectId: 'p2', reused: false } },
       deleteProject: async (projectId: string) => { calls.push(`deleteProject:${projectId}`); return { events: 0, operations: 0, warnings: [] } },
     })
     const ui = startGraphUi({ url: db.url, port: 0, cwdProject: { id: TEST_PROJECT_ID, name: 'home' }, actions })
+    openServers.push(ui)
     const base = `http://127.0.0.1:${ui.port}`
     const session = SessionView.parse(await (await fetch(`${base}/api/session`)).json())
     expect(session.projectId).toBe(TEST_PROJECT_ID)
@@ -273,11 +314,21 @@ describe('graph-ui web adapter', () => {
     expect(ErrorView.parse(await blocked.json()).error).toContain('home')
     expect(calls).toEqual([])
 
+    // …but answering an open question is a pure append, so it is dispatched INTO the foreign chat.
+    // The pane used to render the question and refuse to let the user answer it, sending them to a
+    // terminal for a row this server already had that project's log to write.
+    expect((await post('reply', 'some-other-project', { taskId: 't1', text: 'yes' })).status).toBe(200)
+
     // home chat → dispatched; newProject/deleteProject allowed from ANY chat (project-free)
     expect(ApproveResultView.parse(await (await post('approve', TEST_PROJECT_ID, { taskId: 't1' })).json()).version).toBe(1)
     expect((await post('newProject', 'some-other-project', { dir: '/tmp', name: 'fresh' })).status).toBe(200)
     expect((await post('deleteProject', 'some-other-project', { projectId: 'doomed' })).status).toBe(200)
-    expect(calls).toEqual(['approve:t1', 'newProject:fresh', 'deleteProject:doomed'])
+    // …and the home chat's reply names the home project, so one action serves both
+    expect((await post('reply', TEST_PROJECT_ID, { taskId: 't2', text: 'ok' })).status).toBe(200)
+    expect(calls).toEqual([
+      'reply:some-other-project:t1:yes', 'approve:t1', 'newProject:fresh', 'deleteProject:doomed',
+      `reply:${TEST_PROJECT_ID}:t2:ok`,
+    ])
     await ui.stop()
   })
 
@@ -285,11 +336,13 @@ describe('graph-ui web adapter', () => {
     const db = await createTestDb()
     dbs.push(db)
     const storage = await openStorage(db.url, { projectId: TEST_PROJECT_ID })
+    openStores.push(storage)
     await new Kernel(storage.events).createTask({ title: 'doomed', spec: '' })
     const actions = stubActions({
       purgeProject: async () => ({ ...(await storage.purge()), warnings: [] }),
     })
     const ui = startGraphUi({ url: db.url, port: 0, cwdProject: { id: TEST_PROJECT_ID, name: 'home' }, actions })
+    openServers.push(ui)
     const base = `http://127.0.0.1:${ui.port}`
     const session = SessionView.parse(await (await fetch(`${base}/api/session`)).json())
 
@@ -315,6 +368,7 @@ describe('graph-ui web adapter', () => {
     const db = await createTestDb()
     dbs.push(db)
     const storage = await openStorage(db.url, { projectId: TEST_PROJECT_ID })
+    openStores.push(storage)
     await new Kernel(storage.events).createTask({ title: 'seed', spec: '' })
     // provider-level scripted stream (shapes from @ai-sdk/provider LanguageModelV4StreamPart)
     const model = new MockLanguageModelV4({
@@ -342,6 +396,7 @@ describe('graph-ui web adapter', () => {
       url: db.url, port: 0,
       copilot: { resolveModel: () => model, defaultModelRef: 'mock/m', price: () => 0.001 },
     })
+    openServers.push(ui)
     const base = `http://127.0.0.1:${ui.port}`
     const session = SessionView.parse(await (await fetch(`${base}/api/session`)).json())
     expect(session.copilot).toBe(true)
@@ -360,6 +415,7 @@ describe('graph-ui web adapter', () => {
 
     // no copilot config -> 501
     const ro = startGraphUi({ url: db.url, port: 0 })
+    openServers.push(ro)
     const roSession = SessionView.parse(await (await fetch(`http://127.0.0.1:${ro.port}/api/session`)).json())
     expect(roSession.copilot).toBe(false)
     expect((await fetch(`http://127.0.0.1:${ro.port}/api/copilot`, {

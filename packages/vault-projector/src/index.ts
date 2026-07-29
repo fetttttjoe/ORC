@@ -4,9 +4,7 @@ import { renderRootIndex, renderTaskFiles } from './render'
 import { writeVaultFiles } from './write'
 
 export { frontmatter } from './frontmatter'
-export { parsePlanFile, renderPlanFile } from './plan-md'
-export { renderRootIndex, renderTaskFiles, type VaultFiles } from './render'
-export { writeVaultFiles } from './write'
+export { parsePlanFile } from './plan-md'
 
 export interface VaultProjector {
   renderTask(taskId: string): Promise<void>

@@ -9,5 +9,4 @@ export interface GraphRenderer {
   flash(nodeIds: string[]): void // transient activity ripple — unknown ids are ignored
   focus(nodeIds: Set<string> | null): void // dim everything outside the set; null restores
   onNodeClick(cb: (nodeId: string) => void): void
-  destroy(): void
 }

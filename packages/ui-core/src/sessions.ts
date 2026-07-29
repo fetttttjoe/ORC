@@ -1,7 +1,7 @@
 import { EVENT_KIND, ModelsDiscoveredPayload, ZERO_USAGE, addUsage, emptyMemoryFold, errorMessage, foldMemory, foldMemoryInto, noteKey, noteLabel, type EventRecord, type MemoryFold, type Plan, type Usage } from '@orc/contracts'
 import { emptyFold, fold, foldInto, foldPlanNotes, listProjectIds, openStorage, planScope, stepUsage, taskUsage, watchProjectIds, type FoldAcc, type ProjectIdsWatch, type Storage } from '@orc/kernel'
 import { NODE_PREFIX, PROJECT_DIR_NOTE_ID, PROJECT_NAME_NOTE_ID, buildGraph, diffGraphs, emptyPatch, type Graph, type GraphPatch } from './graph'
-import { decompositionMermaid, planMermaid, todoWaves, type TodoWave } from './diagram'
+import { decompositionMermaid, planMermaid, todoWaves, type StepStatusEntry, type TodoWave } from './diagram'
 
 // the project's display name / working directory live in memory notes — event-sourced,
 // rebuild-safe, no schema; ids + view filtering live in graph.ts (imported below)
@@ -16,7 +16,7 @@ export function foldModelCatalog(events: Array<Pick<EventRecord, 'kind' | 'paylo
   }
   return catalog
 }
-import { summarizeEvent, type LogRow } from './summarize'
+import { shouldAdmitLogRow, summarizeEvent, type LogRow } from './summarize'
 import { foldTranscript, type TranscriptItem } from './transcript'
 
 export interface SessionSnapshot { seq: number; graph: Graph }
@@ -303,7 +303,13 @@ export function createProjectSessions(opts: {
       const tp = s.acc.state.plans.get(taskId)
       if (!tp) return null
       const shown = (tp.approvedVersion != null ? tp.versions.find(v => v.version === tp.approvedVersion) : undefined) ?? tp.versions.at(-1)
-      const states = s.acc.state.steps.get(taskId)
+      const runStates = s.acc.state.steps.get(taskId)
+      // Once the plan is approved, every step is armed to run; a run-status entry (once a step
+      // starts) always wins in statusClass. Fresh Map, so the raw run-status fold is never mutated.
+      const approved = tp.approvedVersion != null
+      const states = new Map<string, StepStatusEntry>()
+      if (shown) for (const step of shown.steps) states.set(step.id, { approved })
+      for (const [id, st] of runStates ?? []) states.set(id, { status: st.status, approved })
       return {
         versions: tp.versions,
         approvedVersion: tp.approvedVersion,
@@ -316,10 +322,21 @@ export function createProjectSessions(opts: {
       const notes = foldPlanNotes(s.events, planScope(taskId))
       // Subplans execute as the CHILD's steps, which carry the note ids verbatim
       // (instantiateFrozenPlan) — so merging the children's step states is the whole correlation.
-      const substeps = new Map<string, { status: string }>()
-      for (const [childId, t] of s.acc.state.tasks)
-        if (t.parentId === taskId)
-          for (const [stepId, st] of s.acc.state.steps.get(childId) ?? []) substeps.set(stepId, st)
+      // A child whose plan is approved (approvedVersion != null) but has not started any step yet
+      // contributes an `approved` bit for every step id in its shown plan version, so the subplan
+      // renders 'armed' between approval and first-step-start instead of an indistinguishable
+      // pending. A child stuck at approvedVersion===null leaves all its step ids unmarked (pending).
+      const substeps = new Map<string, StepStatusEntry>()
+      for (const [childId, t] of s.acc.state.tasks) {
+        if (t.parentId !== taskId) continue
+        const cp = s.acc.state.plans.get(childId)
+        const approved = cp != null && cp.approvedVersion != null
+        if (approved) {
+          const shown = cp.versions.find(v => v.version === cp.approvedVersion)
+          for (const step of shown?.steps ?? []) substeps.set(step.id, { approved })
+        }
+        for (const [stepId, st] of s.acc.state.steps.get(childId) ?? []) substeps.set(stepId, { status: st.status, approved })
+      }
       return { notes, mermaid: notes.length > 0 ? decompositionMermaid(notes, substeps) : null }
     },
 
@@ -339,10 +356,14 @@ export function createProjectSessions(opts: {
     async log(projectId, opts = {}) {
       const s = await sessionFor(projectId)
       const limit = opts.limit ?? 200
-      // memory events are project-scoped (taskId null) — always included in a task view
-      const rows = (opts.taskId ? s.events.filter(e => e.taskId === opts.taskId || e.taskId === null) : s.events)
-        .slice(-limit).map(summarizeEvent)
-      return rows
+      // Untargeted (opts.taskId undefined = whole-project Conversation view): every event,
+      // unfiltered — slice then summarize, exactly as before. Task-scoped: summarize, then route
+      // through shouldAdmitLogRow — the SAME predicate the live SSE tail (log.ts) uses — so a
+      // project-scoped memory row is admitted only when payload.author.taskId matches the filter,
+      // never blanket-admitted by null taskId. Filter must precede slice to return the last
+      // `limit` MATCHING rows, not the last `limit` events of which few may match.
+      if (opts.taskId === undefined) return s.events.slice(-limit).map(summarizeEvent)
+      return s.events.map(summarizeEvent).filter(r => shouldAdmitLogRow(r, opts.taskId!)).slice(-limit)
     },
 
     async close() {

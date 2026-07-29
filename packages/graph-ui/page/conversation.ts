@@ -2,15 +2,14 @@
 // visible cards) interleaved with system cards narrating the event stream (zero copilot
 // tokens). History (text messages only) persists per project in localStorage; the copilot
 // re-grounds itself from live state each exchange, so history is presentational context.
-import { EVENT_KIND, planScope } from '@orc/contracts'
-import type { LogRow } from '@orc/ui-core'
+import { APPROVAL_ANSWER, EVENT_KIND, planScope } from '@orc/contracts'
 import { isUiMetaNote, noteNodeId, stepNodeId } from '@orc/ui-core/graph'
-import { api, canAct, session, type CopilotPart } from './api'
+import { api, canAct, canAnswer, session, type CopilotPart, type FeedRow, type ToolFailure } from './api'
 import { mermaidInto } from './mermaid'
 import { el } from './ui/el'
 import { Badge, Btn, CmdChip, Empty, Pre, toast, type Tone } from './ui/components'
 import { planVisual, planVisualKey } from './plan-visual'
-import { REPLY_AFFORDANCE, replyAffordance } from './affordance'
+import { REPLY_AFFORDANCE, isApprovalGate, replyAffordance, replyReceipt, type ReplyResult } from './affordance'
 
 interface ChatMessage { role: 'user' | 'assistant'; content: string }
 
@@ -31,6 +30,9 @@ const CARD_KINDS: Record<string, { label: string; tone: Tone }> = {
   [EVENT_KIND.task_status_changed]: { label: 'status', tone: 'muted' },
   [EVENT_KIND.analysis_completed]: { label: 'analysis done', tone: 'purple' },
 }
+// The ONE tool result that gets a card of its own — not in CARD_KINDS, because that map is keyed
+// by event kind and every tool_result would qualify. See failureCard for why this one does.
+const FAILURE_CARD = { label: 'tool failed', tone: 'danger' as Tone, class: 'card failure' }
 // agent work between lifecycle cards — rendered as ONE in-place updating ticker line, so a
 // minutes-long step never looks frozen (and never floods the chat with per-call cards)
 const WORKING_KINDS = new Set<string>([
@@ -56,9 +58,14 @@ export class Conversation {
   private abort: AbortController | null = null
   private readonly sendBtn = Btn('send', () => this.sendOrStop())
   private readonly goNode: (node: string) => void
+  // live task status, sourced from app.ts's SSE-kept `nodes` map — undefined when unknown.
+  // Threaded in so answerRow can render a terminal task's still-open question as inert history
+  // instead of a live answer box that could never resume anything.
+  private readonly taskStatus: (taskId: string) => string | undefined
 
-  constructor(goNode: (node: string) => void) {
+  constructor(goNode: (node: string) => void, taskStatus: (taskId: string) => string | undefined) {
     this.goNode = goNode
+    this.taskStatus = taskStatus
     this.input.placeholder = 'ask the copilot — it can read state, create requests, propose, run… (approval stays yours)  (/new starts a fresh chat)'
     this.input.rows = 2
     this.input.addEventListener('keydown', ev => {
@@ -111,10 +118,18 @@ export class Conversation {
   }
 
   // system narration from the SSE envelope — no tokens spent
-  addSystemRow(row: LogRow): void {
+  addSystemRow(row: FeedRow): void {
+    // A tool call that FAILED gets a card before anything else looks at this row. The motivating
+    // failure: a broken approval gate rejected eight consecutive "approve" answers, and the pane
+    // rendered none of them — the rejection was a tool_result, which falls into WORKING_KINDS and
+    // flashes past in the one-line ticker before the next event overwrites it. The user saw eight
+    // near-identical questions, concluded the system was running in circles, and had no way to
+    // learn otherwise: the reason existed only in the event log. An answer that does not take is
+    // indistinguishable from one nobody asked for unless the pane says why.
+    if (row.failure) { this.failureCard(row, row.failure); return }
     // chat-metadata notes (project name/dir, e.g. the post-purge identity re-seed) are
     // infrastructure — they'd read as "notes written" right after purging
-    if (row.noteRef?.startsWith('note:project\u0000') && isUiMetaNote('project', row.noteRef.split('\u0000')[1] ?? '')) return
+    if (row.noteRef?.startsWith(noteNodeId('project', '')) && isUiMetaNote('project', row.noteRef.split('\u0000')[1] ?? '')) return
     // copilot exchanges: seeded rows rebuild real bubbles (the log is the record); live rows
     // are skipped — this tab already rendered the exchange as it streamed (localhost, one user)
     if (row.kind === EVENT_KIND.copilot_exchange) {
@@ -140,7 +155,7 @@ export class Conversation {
     // A plan-gate question comes with the decomposition DIAGRAM, not just prose: see, then answer.
     if (row.kind === EVENT_KIND.feedback_requested && row.taskId) {
       void this.decompositionCard(row.taskId)
-      this.answerRow(row.taskId)
+      this.answerRow(row.taskId, row.stepId)
     }
     // answered elsewhere (inspector, copilot, CLI): retire this chat's open box
     if (row.kind === EVENT_KIND.feedback_provided && row.taskId) {
@@ -170,9 +185,33 @@ export class Conversation {
     this.scroll()
   }
 
+  // Why an answer did not take. Its own card kind, deliberately unlike a question card: the tool
+  // that refused, the error verbatim, and a door into the inspector for the full result. It
+  // supersedes the ticker the way a lifecycle card does, so the failure is the last thing on
+  // screen and not a line that scrolls away under the next working event.
+  private failureCard(row: FeedRow, failure: ToolFailure): void {
+    this.ticker?.remove()
+    this.ticker = null
+    const target = row.taskId
+    this.list.append(el('div', {
+      class: FAILURE_CARD.class,
+      onClick: target ? () => this.goNode(target) : undefined,
+      title: target ? 'open in inspector' : undefined,
+    },
+      el('div', { class: 'card-title' },
+        Badge(FAILURE_CARD.label, FAILURE_CARD.tone),
+        el('span', { class: 'sys-line' }, failure.toolName),
+        el('span', { class: 'sys-seq' }, `#${row.seq}`),
+      ),
+      Pre(failure.error),
+    ))
+    this.trim()
+    this.scroll()
+  }
+
   // event ripple: the chip the SSE handler just processed pulses for a moment — the chat's
   // plan/decomposition cards show WHERE work is happening, not just that it happened
-  private ripple(row: LogRow): void {
+  private ripple(row: FeedRow): void {
     if (!row.taskId) return
     const chips: Element[] = []
     if (row.stepId) {
@@ -231,37 +270,59 @@ export class Conversation {
   }
 
   // inline reply for an open agent question — same reply action as the inspector, one shot.
-  // When the fence withholds it (a project this UI was not started in) the question still gets a
-  // route: the CLI command that answers it. Silently rendering nothing made a parked run look like
-  // a dead end — you could see the question and had no way to answer it.
+  // Every chat gets the box, foreign ones included: this pane streams the question live, so refusing
+  // to let the user answer it was a dead end with nothing behind it (the answer is an append into
+  // that project's log, not a run). Only a server started outside any project cannot write at all,
+  // and there the question still gets a route: the CLI command that answers it.
   private readonly answerRows = new Map<string, HTMLElement>()
-  private answerRow(taskId: string): void {
-    const offer = replyAffordance(canAct(), taskId)
-    if (offer.kind === REPLY_AFFORDANCE.box) { this.answerBox(taskId); return }
+  private answerRow(taskId: string, stepId: string | null): void {
+    const offer = replyAffordance(canAnswer(), taskId, this.taskStatus(taskId))
+    if (offer.kind === REPLY_AFFORDANCE.box) { this.answerBox(taskId, stepId); return }
     this.answerRows.get(taskId)?.remove()
-    const row = el('div', { class: 'conv-inputrow answer' },
-      el('span', { class: 'sys-line' }, 'answer it from this project’s own directory:'),
-      CmdChip(offer.cmd),
-    )
+    // A terminal task's still-open question is inert history: no box, no command, no handler —
+    // answering it could never resume anything. The question card itself already rendered above
+    // (addSystemRow's sys-card); this is just a muted marker where the control would have gone.
+    // Still tracked in answerRows so a later feedback_provided retires it the same as any other.
+    const row = offer.kind === REPLY_AFFORDANCE.closed
+      ? el('div', { class: 'conv-inputrow answer' },
+          el('span', { class: 'sys-line muted' }, `task ${offer.status} — question expired`))
+      : el('div', { class: 'conv-inputrow answer' },
+          el('span', { class: 'sys-line' }, 'this server cannot write — answer it from the project’s own directory:'),
+          CmdChip(offer.cmd),
+        )
     this.answerRows.set(taskId, row) // same map, so feedback_provided retires it either way
     this.list.append(row)
   }
 
-  private answerBox(taskId: string): void {
+  private answerBox(taskId: string, stepId: string | null): void {
     this.answerRows.get(taskId)?.remove() // one open box per task — the gate is serial
     const input = el('textarea', { class: 'conv-input' }) as HTMLTextAreaElement
     input.rows = 1
     input.placeholder = 'answer the agent…'
-    const row = el('div', { class: 'conv-inputrow answer' }, input, Btn('answer', async () => {
-      const text = input.value.trim()
+    const send = async (text: string): Promise<void> => {
       if (!text) return
-      await api.act('reply', { taskId, text }) // throws → Btn toasts (e.g. already answered elsewhere)
+      // throws → Btn toasts (e.g. already answered elsewhere)
+      const receipt = replyReceipt(await api.act<ReplyResult>('reply', { taskId, text }))
+      // …and when it lands, WHERE it landed: a project with no supervisor of its own running holds
+      // the answer until one starts. The feedback_provided card arrives via the stream either way,
+      // which is exactly why silence here would read as "the run resumed".
+      toast(receipt.text, receipt.tone)
       row.remove()
-      this.answerRows.delete(taskId) // the feedback_provided card lands via the stream as the receipt
-    }))
+      this.answerRows.delete(taskId)
+    }
+    // One-click approve on the plan gate. It is only a typing shortcut — it sends the exact word
+    // through the same reply action — and it earns its place ONLY because a rejected approval now
+    // renders as a failure card above: a button that silently re-arms a gate the user cannot see
+    // failing just makes an unsatisfiable loop spin faster.
+    const answerBtn = Btn('answer', () => send(input.value.trim())) as HTMLButtonElement
+    const row = el('div', { class: 'conv-inputrow answer' }, input,
+      ...(isApprovalGate(stepId) ? [Btn('approve', () => send(APPROVAL_ANSWER), 'ok')] : []),
+      answerBtn)
     this.answerRows.set(taskId, row)
     input.addEventListener('keydown', ev => {
-      if (ev.key === 'Enter' && !ev.shiftKey) { ev.preventDefault(); (row.querySelector('button.btn') as HTMLButtonElement).click() }
+      // the button by reference, not `querySelector('button.btn')` — the approve button is now
+      // first in the row, and Enter must still send what the user actually typed
+      if (ev.key === 'Enter' && !ev.shiftKey) { ev.preventDefault(); answerBtn.click() }
     })
     this.list.append(row)
     input.focus()
@@ -269,7 +330,7 @@ export class Conversation {
 
   // the single live-activity line: latest agent/tool event, updated in place, kept last
   private ticker: HTMLElement | null = null
-  private tick(row: LogRow): void {
+  private tick(row: FeedRow): void {
     if (!WORKING_KINDS.has(row.kind)) return
     this.ripple(row) // working events are exactly the "currently processing" signal
     const line = `${row.kind.replace(/_/g, ' ')}  ${row.line}`.trim()
@@ -381,7 +442,7 @@ export class Conversation {
 
   // one journaled exchange → user bubble, collapsed tool summaries, assistant bubble — the
   // same shapes the live stream renders, so a reloaded pane is indistinguishable from live
-  private renderExchange(row: LogRow): void {
+  private renderExchange(row: FeedRow): void {
     const x = row.exchange
     if (!x) return
     if (x.user) this.bubble('user', x.user)

@@ -19,7 +19,15 @@ export interface OrcActions {
   // A run is REQUESTED, never started here: the supervisor holding the runtime turns the recorded
   // ask into a workflow, so there is no handle to hand back — callers watch the event stream.
   run(taskId: string, cwd: string): Promise<{ requested: true }>
-  reply(taskId: string, text: string): Promise<{ answered: boolean }>
+  // `projectId` names the project to answer IN; omitted means this door's own. Answering is the one
+  // human action that is not execution: the append only unblocks the parked step, and a supervisor's
+  // router carries it into the workflow off feedback_provided — so unlike run/retry/propose it binds
+  // to no runtime and no started directory. The graph UI lists and streams every project in the
+  // database; fencing this to its home project made it show a question it then refused to let the
+  // user answer, sending them to a terminal for a row it already had that project's log to write.
+  // `supervised` is false when nothing is live in that project right now: the answer is durable and
+  // the next supervisor picks it up, but the human who typed it must be told it is only queued.
+  reply(taskId: string, text: string, projectId?: string): Promise<{ answered: boolean; supervised: boolean }>
   retry(taskId: string): Promise<{ requested: true }>
   // grounded-plan refinement: annotate queues feedback on one plan-note; revise annotates the
   // scoped notes AND wakes the parked plan agent (the conversational gate)

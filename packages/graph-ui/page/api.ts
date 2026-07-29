@@ -1,9 +1,12 @@
-import { type MemoryHealth } from '@orc/contracts'
+import { type MemoryHealth, type Plan, type PlanNote, type PlanStep } from '@orc/contracts'
 // The ONE http boundary of the page. Every request — reads, actions, streams — goes through
 // here: URL building, token handling, JSON parsing, and the error policy live in this file and
 // nowhere else. Consumers receive typed data or typed nulls; failures route through the
 // configured onError exactly once.
 import type { Graph, GraphNode, GraphLink, GraphPatch, LogRow, TodoWave, TranscriptItem } from '@orc/ui-core'
+// type-only, so the browser bundle never pulls the server in: the shape is DECLARED where it is
+// derived (src/tool-failure.ts) and read here, rather than spelled twice and drifting
+import type { ToolFailure } from '../src/tool-failure'
 
 // ---- response shapes (the API contract as the page sees it) ----
 export interface Session {
@@ -17,25 +20,27 @@ export interface Session {
 }
 export interface Project { id: string; name: string | null; dir: string | null }
 export interface GraphSnapshot extends Graph { seq: number }
-export interface PlanStepView {
-  id: string; title: string; role: string; instructions: string
-  modelRef: string; skillRefs: string[]; maxIterations: number; dependsOn: string[]
-}
+// The wire carries the contracts shapes verbatim (sessions.taskPlans serves Plan[]; planNotes
+// serves PlanNote[]) — aliased under the page's View names, never re-spelled, so a contract
+// field change reaches every consumer instead of drifting past a local copy (the ToolFailure
+// precedent above).
+export type PlanStepView = PlanStep
+export type PlanNoteView = PlanNote
 export interface PlansView {
-  versions: Array<{ version: number; steps: PlanStepView[] }>
+  versions: Plan[]
   approvedVersion: number | null
   visual: { version: number; mermaid: string; waves: TodoWave[] } | null
-}
-export interface PlanNoteView {
-  id: string; title: string; summary: string; rationale: string
-  uncertainty: string[]
-  links: Array<{ id: string; kind: string }>
 }
 export interface PlanNotesView { notes: PlanNoteView[]; mermaid: string | null }
 // `projects` frames are membership/name pushes riding the same stream (no SSE id — they never
 // advance the resume cursor); present only when the chats list actually changed, plus one seed
 // frame on connect.
-export interface StreamEnvelope { patch: GraphPatch | null; summary: LogRow | null; projects?: Project[] }
+// The pane's feed row: ui-core's summary plus what this UI's server lifted off the raw event.
+// `failure` is present only on the live stream — /api/log replays summaries alone, so a reload
+// does not resurrect past error cards.
+// ponytail: live-only is the whole gap; give LogRow an isError field if replayed failures matter.
+export interface FeedRow extends LogRow { failure?: ToolFailure }
+export interface StreamEnvelope { patch: GraphPatch | null; summary: FeedRow | null; projects?: Project[] }
 export type CopilotPart =
   | { type: 'text'; text: string }
   | { type: 'tool-call'; toolName: string; input: unknown }
@@ -61,9 +66,16 @@ export let session: Session = { actions: false, copilot: false, copilotModel: nu
 // cross-project writes instead of silently landing them in its own project
 let activeProject = ''
 export function setApiProject(projectId: string): void { activeProject = projectId }
-// mutations are allowed only in the server's own project chat — the page fences its buttons
-// with this, the server enforces the same rule on x-orc-project
+// Work RUNS in the server's own project chat only — the page fences those buttons with this, and
+// the server enforces the same rule on x-orc-project. It is about execution: the runtime, the DBOS
+// port and the in-process zone write-fence all live in the directory orc graph was started in.
 export const canAct = (): boolean => session.actions && activeProject === session.projectId
+// Answering is not execution. A reply is an append the server makes in whichever project asked the
+// question, so what this UI can SEE it can answer — every chat in the sidebar, not just home. Only a
+// server launched outside any project can write nothing at all, and only there does the affordance
+// fall back to the CLI command. The old rule (home-only) meant the pane streamed a question live and
+// then refused to let the user answer it, for a row the server already had that project's log to write.
+export const canAnswer = (): boolean => session.actions && activeProject !== ''
 
 // ---- plumbing ----
 const query = (params: Record<string, string | number | undefined>): string => {
@@ -171,4 +183,4 @@ export const api = {
   },
 }
 
-export type { Graph, GraphLink, GraphNode, GraphPatch, LogRow, TodoWave, TranscriptItem }
+export type { Graph, GraphLink, GraphNode, GraphPatch, LogRow, ToolFailure, TodoWave, TranscriptItem }

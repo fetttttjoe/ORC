@@ -1,5 +1,5 @@
 import { z } from 'zod'
-import { EVENT_KIND, LINK_KIND, NOTE_KIND, OPERATION_STATUS, PAYLOAD_SCHEMAS, STEP_RUN_STATUS, TASK_STATUS, mermaidLabel, type EventRecord, type MemoryNote, type Plan, type TaskNode } from '@orc/contracts'
+import { EVENT_KIND, OPERATION_STATUS, PAYLOAD_SCHEMAS, STEP_RUN_STATUS, TASK_STATUS, mermaidLabel, type EventRecord, type Plan, type TaskNode } from '@orc/contracts'
 import { fold, stepUsage, taskUsage, type State, type StepState } from '@orc/kernel'
 import type { Usage } from '@orc/contracts'
 import { frontmatter } from './frontmatter'
@@ -16,24 +16,41 @@ const statusClass = (s: StepState | undefined): 'done' | 'running' | 'failed' | 
     : s.status === STEP_RUN_STATUS.failed ? 'failed'
     : 'running'
 
-function mermaidDag(plan: Plan, steps: Map<string, StepState> | undefined): string {
-  const lines = ['```mermaid', 'graph TD']
-  for (const st of plan.steps) {
-    const s = steps?.get(st.id)
-    const iter = s && s.status === STEP_RUN_STATUS.running ? ` · iter ${s.iterations}` : ''
-    lines.push(`  ${st.id}["${st.id} · ${st.executorRef} · ${st.modelRef}${iter}"]:::${statusClass(s)}`)
-  }
-  for (const st of plan.steps) for (const d of st.dependsOn) lines.push(`  ${d} --> ${st.id}`)
-  lines.push('  classDef done fill:#1a7f37,color:#fff')
-  lines.push('  classDef running fill:#bf8700,color:#fff')
-  lines.push('  classDef failed fill:#cf222e,color:#fff')
-  lines.push('  classDef pending fill:#6e7781,color:#fff')
-  lines.push('```')
-  return lines.join('\n')
-}
-
 // the one mermaid escaper lives in contracts (guards) — every producing view shares it
 const label = mermaidLabel
+
+// the status classDefs both step DAGs close with — one copy, so a colour tweak cannot
+// leave the index and execution views disagreeing about what "running" looks like
+const STEP_CLASS_DEFS = [
+  '  classDef done fill:#1a7f37,color:#fff',
+  '  classDef running fill:#bf8700,color:#fff',
+  '  classDef failed fill:#cf222e,color:#fff',
+  '  classDef pending fill:#6e7781,color:#fff',
+]
+
+// step nodes + dependency edges, shared by the index DAG and the execution graph — the two
+// views differ only in label text (and the extra nodes/classDefs a caller appends)
+function stepNodesAndEdges(
+  plan: Plan,
+  steps: Map<string, StepState> | undefined,
+  text: (st: Plan['steps'][number], s: StepState | undefined) => string,
+): string[] {
+  const lines: string[] = []
+  for (const st of plan.steps) {
+    const s = steps?.get(st.id)
+    lines.push(`  ${st.id}["${label(text(st, s))}"]:::${statusClass(s)}`)
+  }
+  for (const st of plan.steps) for (const d of st.dependsOn) lines.push(`  ${d} --> ${st.id}`)
+  return lines
+}
+
+function mermaidDag(plan: Plan, steps: Map<string, StepState> | undefined): string {
+  const nodes = stepNodesAndEdges(plan, steps, (st, s) => {
+    const iter = s && s.status === STEP_RUN_STATUS.running ? ` · iter ${s.iterations}` : ''
+    return `${st.id} · ${st.executorRef} · ${st.modelRef}${iter}`
+  })
+  return ['```mermaid', 'graph TD', ...nodes, ...STEP_CLASS_DEFS, '```'].join('\n')
+}
 
 // nullable cost renders as a single placeholder — pinned in the render suite; consistent
 // between per-step rows and the totals row so the same events always yield the same bytes.
@@ -58,9 +75,7 @@ function renderExecution(task: TaskNode, plan: Plan | undefined, state: State): 
   const head = { type: 'execution', task: task.id }
   if (!plan) return fm(head, `# Execution: ${task.title}\n\n_no plan yet_`)
   const steps = state.steps.get(task.id)
-  const lines = ['```mermaid', 'graph TD']
-  for (const st of plan.steps) lines.push(`  ${st.id}["${label(`${st.id} · ${st.executorRef}`)}"]:::${statusClass(steps?.get(st.id))}`)
-  for (const st of plan.steps) for (const d of st.dependsOn) lines.push(`  ${d} --> ${st.id}`)
+  const lines = ['```mermaid', 'graph TD', ...stepNodesAndEdges(plan, steps, st => `${st.id} · ${st.executorRef}`)]
   const ops = [...state.operations.values()]
     .filter(o => o.taskId === task.id)
     .sort((a, b) => a.startedSeq - b.startedSeq)
@@ -69,10 +84,7 @@ function renderExecution(task: TaskNode, plan: Plan | undefined, state: State): 
     lines.push(`  op${i}["${label(`${o.kind} ${o.name} · ${o.status} · attempts ${o.attempts}`)}"]:::${cls}`)
     lines.push(`  ${o.stepId} --> op${i}`)
   })
-  lines.push('  classDef done fill:#1a7f37,color:#fff')
-  lines.push('  classDef running fill:#bf8700,color:#fff')
-  lines.push('  classDef failed fill:#cf222e,color:#fff')
-  lines.push('  classDef pending fill:#6e7781,color:#fff')
+  lines.push(...STEP_CLASS_DEFS)
   lines.push('  classDef unresolved fill:#bf8700,color:#fff,stroke-dasharray: 5 5') // visually distinct: attempt began, outcome unknown
   lines.push('```')
   return fm(head, `# Execution: ${task.title}\n\n${lines.join('\n')}`)
@@ -160,24 +172,16 @@ export function renderTaskFiles(taskId: string, events: EventRecord[]): VaultFil
   return files
 }
 
-// shared node+edge mermaid builder — used by the task-expansion graph and the masterplan DAG
-function mermaidGraph(nodes: { id: string; text: string }[], edges: { from: string; to: string; dashed?: boolean }[]): string {
-  const lines = ['```mermaid', 'graph TD']
-  for (const n of nodes) lines.push(`  ${n.id}["${label(n.text)}"]`)
-  for (const e of edges) lines.push(`  ${e.from} ${e.dashed ? '-.->' : '-->'} ${e.to}`)
-  lines.push('```')
-  return lines.join('\n')
-}
-
 // deterministic recursive task-expansion graph: which task created which child, with live status
 function taskExpansionGraph(tasks: TaskNode[]): string {
   if (tasks.length === 0) return '_no tasks_'
   const node = new Map(tasks.map((t, i) => [t.id, `t${i}`] as const))
   const idOf = (taskId: string): string => node.get(taskId) ?? taskId
-  const nodes = tasks.map(t => ({ id: idOf(t.id), text: `${t.title} · ${t.status}` }))
-  const edges = tasks.flatMap(t =>
-    t.parentId && node.has(t.parentId) ? [{ from: idOf(t.parentId), to: idOf(t.id) }] : [])
-  return mermaidGraph(nodes, edges)
+  const lines = ['```mermaid', 'graph TD']
+  for (const t of tasks) lines.push(`  ${idOf(t.id)}["${label(`${t.title} · ${t.status}`)}"]`)
+  for (const t of tasks) if (t.parentId && node.has(t.parentId)) lines.push(`  ${idOf(t.parentId)} --> ${idOf(t.id)}`)
+  lines.push('```')
+  return lines.join('\n')
 }
 
 

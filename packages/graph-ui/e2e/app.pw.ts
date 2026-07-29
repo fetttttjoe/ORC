@@ -4,7 +4,7 @@ import { z } from 'zod'
 // Named response contracts — the asserted subsets of the page's API types (page/api.ts
 // Session / GraphSnapshot). Runtime-parsed because e2e reads raw HTTP, never the typed
 // api layer; shapes are declared HERE, never inline at a call site.
-const SessionResponse = z.object({ projectId: z.string() })
+const SessionResponse = z.object({ projectId: z.string(), token: z.string() })
 const GraphNodeView = z.object({ label: z.string() })
 const GraphResponse = z.object({ nodes: z.array(GraphNodeView) })
 
@@ -41,7 +41,9 @@ test('copilot exchange streams into the conversation', async ({ page }) => {
   // the pane binds its project asynchronously (setProject → reload renders the placeholder);
   // typing before that is a silent no-op by design — wait for the ready signal
   await expect(page.locator('.conv-list .empty')).toBeVisible()
-  const input = page.locator('.conv-input')
+  // the composer, not an inline answer box: an open question puts a second .conv-input in the
+  // feed, and only the composer is a direct child row of .conv
+  const input = page.locator('.conv > .conv-inputrow .conv-input')
   await input.fill('what is going on?')
   await input.press('Enter')
   await expect(page.locator('.bubble.user')).toContainText('what is going on?')
@@ -80,6 +82,23 @@ test('note authoring: create, link, edit, delete from the page', async ({ page }
   }, { timeout: 10_000 }).toBe(false)
 })
 
+// The failure this pair of fixes exists for: a broken gate rejected eight consecutive approvals
+// and the pane showed none of it, because the rejection lived only in the event log. One click
+// answers the gate; the rejection that follows must land on screen as its own card.
+test('approving the plan gate: one click, and a rejected approval says why', async ({ page }) => {
+  await page.goto('/')
+  const answerRow = page.locator('.conv-inputrow.answer')
+  await expect(answerRow).toBeVisible({ timeout: 10_000 })
+  await answerRow.locator('button', { hasText: 'approve' }).click()
+  // the receipt lands…
+  await expect(page.locator('.sys-card', { hasText: 'answered' })).toBeVisible({ timeout: 10_000 })
+  // …and so does the reason it did not take — tool name and error text, not a question card
+  const failure = page.locator('.card.failure')
+  await expect(failure).toBeVisible({ timeout: 10_000 })
+  await expect(failure).toContainText('finalize_plan')
+  await expect(failure).toContainText('the plan graph changed since the approval')
+})
+
 test('approve from the road advances the request live', async ({ page }) => {
   await page.goto('/')
   await page.locator('.navitem', { hasText: 'hello world request' }).click()
@@ -87,4 +106,29 @@ test('approve from the road advances the request live', async ({ page }) => {
   // SSE-driven repaint: stage moves to execute, system card lands in the conversation
   await expect(page.locator('.inspector .rail-stage.now')).toContainText('execute', { timeout: 10_000 })
   await expect(page.locator('.sys-card', { hasText: 'plan approved' })).toBeVisible()
+})
+
+// The scrolling container is the .inspector overlay — .log has no overflow of its own. This pins
+// the shell-v2 regression where the pin-to-bottom logic still targeted the pre-rename '.detail'
+// class: closest() found nothing, so neither the initial render nor live rows ever scrolled the
+// panel, and the newest row sat below the fold exactly when the log was busiest.
+test('log tab pins to the newest row, and live rows keep it pinned', async ({ page }) => {
+  await page.goto('/')
+  await page.locator('.navitem', { hasText: 'hello world request' }).click()
+  await page.locator('.inspector .tab', { hasText: 'Log' }).click()
+  const inspector = page.locator('.inspector')
+  await expect(page.locator('.log-row').first()).toBeVisible()
+  // the 60 seeded tool calls overflow the panel — without overflow "pinned" is trivially true
+  await expect.poll(() => inspector.evaluate(n => n.scrollHeight > n.clientHeight)).toBe(true)
+  // same tolerance the pin logic uses: within 40px of the bottom counts as pinned
+  const pinned = () => inspector.evaluate(n => n.scrollTop + n.clientHeight >= n.scrollHeight - 40)
+  await expect.poll(pinned).toBe(true)
+  // a live event streams a new row in — the panel follows it instead of staying put
+  const { projectId, token } = SessionResponse.parse(await (await page.request.get('/api/session')).json())
+  await page.request.post('/api/actions/writeNote', {
+    headers: { 'x-orc-token': token, 'x-orc-project': projectId },
+    data: { id: 'live-pin-note', title: 'live pin note' },
+  })
+  await expect(page.locator('.log-row', { hasText: 'live-pin-note' })).toBeVisible({ timeout: 10_000 })
+  await expect.poll(pinned).toBe(true)
 })

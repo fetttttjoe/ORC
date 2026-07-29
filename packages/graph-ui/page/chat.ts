@@ -6,7 +6,7 @@ import { Badge, Btn, Card, CmdChip, Empty, Pre, statusTone } from './ui/componen
 
 const iterDivider = (n: number): HTMLElement => el('div', { class: 'chat-iter' }, `iter ${n}`)
 
-function item(i: TranscriptItem): HTMLElement[] {
+function item(i: TranscriptItem, onReply: ((text: string) => Promise<void>) | null, replyCmd: string | null): HTMLElement[] {
   switch (i.kind) {
     case 'message':
       return [el('div', { class: 'card msg' }, i.text)]
@@ -27,15 +27,15 @@ function item(i: TranscriptItem): HTMLElement[] {
         i.answer !== null ? el('div', {}, `A: ${i.answer}`) : null,
       )
       if (i.answer === null) {
-        if (onReplyCb) {
+        if (onReply) {
           const input = el('input', {})
           input.placeholder = 'your answer…'
           card.append(el('div', { class: 'reply-row' }, input, Btn('reply', async () => {
-            if (input.value.trim()) await onReplyCb!(input.value.trim())
+            if (input.value.trim()) await onReply(input.value.trim())
           })))
-        } else if (replyCmdHint) {
+        } else if (replyCmd) {
           // the fence withholds the box; the question still says how to answer it
-          card.append(el('div', { class: 'reply-row' }, CmdChip(replyCmdHint)))
+          card.append(el('div', { class: 'reply-row' }, CmdChip(replyCmd)))
         }
       }
       return [card]
@@ -48,9 +48,6 @@ function item(i: TranscriptItem): HTMLElement[] {
   }
 }
 
-let onReplyCb: ((text: string) => Promise<void>) | null = null
-let replyCmdHint: string | null = null
-
 // `replyCmd` is what to show INSTEAD of the answer box when this UI may not act on the project —
 // without it an unanswered question renders as prose with no way out (see page/affordance.ts).
 export function renderChat(
@@ -58,15 +55,13 @@ export function renderChat(
   onReply: ((text: string) => Promise<void>) | null = null,
   replyCmd: string | null = null,
 ): HTMLElement {
-  onReplyCb = onReply
-  replyCmdHint = replyCmd
   if (items.length === 0) return Empty('no conversation yet — select a task or step with agent activity')
   const out = el('div', { class: 'chat' })
   let iter = 0
   for (const i of items) {
     const itemIter = 'iteration' in i ? i.iteration : iter
     if (itemIter !== iter) { iter = itemIter; out.append(iterDivider(iter)) }
-    out.append(...item(i))
+    out.append(...item(i, onReply, replyCmd))
   }
   return out
 }

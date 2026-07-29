@@ -34,6 +34,23 @@ describe('renderTaskFiles', () => {
   })
 })
 
+describe('renderTaskFiles — mermaid label escaping', () => {
+  it('escapes mermaid-hostile executor/model refs in the index DAG node labels', () => {
+    seq = 0
+    const plan = planFixture({
+      taskId: 't1', version: 1,
+      steps: [stepFixture({ id: 's1', executorRef: 'api"loop', modelRef: 'fake/"m"' })],
+    })
+    const events: EventRecord[] = [
+      ev({ kind: EVENT_KIND.task_created, payload: { task: task() } }),
+      ev({ kind: EVENT_KIND.plan_proposed, payload: { plan } }),
+    ]
+    const md = renderTaskFiles('t1', events)['tasks/t1/index.md']!
+    // a raw double quote inside ["…"] ends the label and leaks the rest as live mermaid
+    expect(md).toContain(`s1["s1 · api'loop · fake/'m'"]`)
+  })
+})
+
 describe('renderTaskFiles — ## Usage table', () => {
   // a plan-step step, plus an agent_call carrying envelope usage bound to that step
   // per-step runTokens, as production issues them: the fold dedupes usage by

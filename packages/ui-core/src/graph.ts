@@ -130,7 +130,10 @@ export function buildGraph(state: State, mem: MemoryFold, opts: GraphBuildOption
   return { nodes, links }
 }
 
-const linkKey = (l: GraphLink): string => `${l.source}\u0000${l.target}\u0000${l.type}`
+// The ONE spelling of a link's identity. Exported because three consumers must agree on it —
+// the diff below, the page's client-side edge index (app.ts), and the sigma renderer's edge
+// keys — and two of them had re-spelled the format inline.
+export const linkKey = (l: GraphLink): string => `${l.source}\u0000${l.target}\u0000${l.type}`
 
 // Pure id-keyed diff between two projections — the ONE way patches are derived, so the patch
 // stream can never drift from what a fresh full load would return.

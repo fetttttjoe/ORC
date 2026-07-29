@@ -3,6 +3,7 @@ import { z } from 'zod'
 import { MEMORY_HEALTH, type MemoryHealth, errorMessage, isRecord, NoteAuthoringDraft, NoteRef, PlanDraft, type CopilotExchangePayload, type Usage } from '@orc/contracts'
 import { buildCopilotTools, copilotSystemPrompt, createProjectSessions, emptyPatch, type CopilotMode, type OrcActions, type ProjectEntry, type ProjectSessions, type SessionUpdate } from '@orc/ui-core'
 import index from '../page/index.html'
+import { toolFailure } from './tool-failure'
 
 export interface CopilotConfig {
   resolveModel: (ref: string) => LanguageModel // throws for unknown provider/model
@@ -20,13 +21,15 @@ const CopilotBody = z.object({
 // Every mutating route: its body schema and its dispatch, tied together in one closure so the
 // parsed type flows into the handler with no casts — zod IS the validation and the typing.
 // The web boundary is a trust boundary even on localhost.
-type ActionHandler = (a: OrcActions, body: unknown) => Promise<Response>
+// `project` is the chat the request came from (the x-orc-project header, defaulting to this
+// server's own). Routes that act on ONE named project read it; the rest ignore it.
+type ActionHandler = (a: OrcActions, body: unknown, project: string | undefined) => Promise<Response>
 
-const route = <S extends z.ZodType>(schema: S, run: (a: OrcActions, input: z.output<S>) => Promise<unknown>): ActionHandler =>
-  async (a, body) => {
+const route = <S extends z.ZodType>(schema: S, run: (a: OrcActions, input: z.output<S>, project: string | undefined) => Promise<unknown>): ActionHandler =>
+  async (a, body, project) => {
     const parsed = schema.safeParse(body)
     if (!parsed.success) return Response.json({ error: parsed.error.message }, { status: 400 })
-    return Response.json(await run(a, parsed.data))
+    return Response.json(await run(a, parsed.data, project))
   }
 
 const id = z.string().min(1)
@@ -49,7 +52,9 @@ const ACTION_ROUTES: Record<string, ActionHandler> = {
     (a, d) => a.approve(d.taskId, d.version),
   ),
   run: route(z.object({ taskId: id, cwd: id }), (a, d) => a.run(d.taskId, d.cwd)),
-  reply: route(z.object({ taskId: id, text: z.string().min(1) }), (a, d) => a.reply(d.taskId, d.text)),
+  // answers the chat the user is LOOKING at, not this server's own project — a reply is a pure
+  // append, so it belongs to whichever project asked the question (see CROSS_PROJECT_ACTIONS)
+  reply: route(z.object({ taskId: id, text: z.string().min(1) }), (a, d, project) => a.reply(d.taskId, d.text, project)),
   retry: route(z.object({ taskId: id }), (a, d) => a.retry(d.taskId)),
   cancel: route(z.object({ taskId: id }), (a, d) => a.cancel(d.taskId)),
   annotate: route(
@@ -68,12 +73,19 @@ const ACTION_ROUTES: Record<string, ActionHandler> = {
   deleteProject: route(z.object({ projectId: id }), (a, d) => a.deleteProject(d.projectId)),
 }
 
-// actions execute against the ONE project this server was started in — except creating a new
-// project, which touches no existing state. Everything else in a foreign chat is a silent
-// cross-project write and must die loudly at this boundary.
+// Actions that EXECUTE run against the ONE project this server was started in — they need the
+// runtime that lives there (ensureRuntime's spawn, the DBOS port, the in-process zone write-fence),
+// so from a foreign chat they would be a silent cross-project write and must die loudly here.
 // ponytail: fence, not feature — per-project kernels/DBOS runtimes would lift it.
-// deleteProject targets an explicit FOREIGN project by design (the action refuses home).
-const PROJECT_FREE_ACTIONS = new Set(['newProject', 'deleteProject'])
+//
+// These three name their own target project instead, and none of them executes anything:
+// newProject touches no existing state, deleteProject targets an explicit FOREIGN project by design
+// (the action refuses home), and `reply` is a pure append — the answer unblocks a parked step and
+// the supervisor's router carries it in off feedback_provided. Fencing reply was a UX defect with no
+// safety behind it: the sidebar lists and streams every project, so the pane showed a question and
+// then refused to let the user answer it, sending them to a terminal for a row this server already
+// had that project's log to write.
+const CROSS_PROJECT_ACTIONS = new Set(['newProject', 'deleteProject', 'reply'])
 
 // Thin web adapter: JSON + SSE over ProjectSessions. Nothing here knows how graphs are
 // computed; a TUI adapter imports @orc/ui-core directly and never touches this file.
@@ -190,13 +202,13 @@ export function startGraphUi(opts: {
     const handler: ActionHandler | undefined = ACTION_ROUTES[name]
     if (!handler) return Response.json({ error: `unknown action '${name}'` }, { status: 404 })
     const claimed = req.headers.get('x-orc-project')
-    if (claimed && opts.cwdProject && claimed !== opts.cwdProject.id && !PROJECT_FREE_ACTIONS.has(name))
+    if (claimed && opts.cwdProject && claimed !== opts.cwdProject.id && !CROSS_PROJECT_ACTIONS.has(name))
       return Response.json({
-        error: `this chat is read-only — actions run in "${opts.cwdProject.name}" (where orc graph was started). Switch to that chat, or restart orc graph in this project's directory.`,
+        error: `answering works from any chat, but running work does not: it happens in "${opts.cwdProject.name}" (where orc graph was started). Switch to that chat, or restart orc graph in this project's directory.`,
       }, { status: 409 })
     try {
       const body: unknown = await req.json().catch(() => null)
-      const res = await handler(opts.actions, body)
+      const res = await handler(opts.actions, body, claimed ?? opts.cwdProject?.id)
       // purge/delete rewrote history behind a cached session — drop it so reads refold; both
       // change the chats list without an append NOTIFY (deletion removes rows outright), so
       // the push must be told explicitly
@@ -312,7 +324,13 @@ export function startGraphUi(opts: {
             const buffered: SessionUpdate[] = []
             const deliver = (up: SessionUpdate): void => {
               const patch = emptyPatch(up.patch) ? null : up.patch
-              try { send(up.seq, { patch, summary: up.summary }) } catch { unsub?.(); dropFeed() }
+              // A failed tool call rides ALONG the summary row rather than in a channel of its
+              // own: the row already reaches every feed consumer, and the pane's question cards
+              // are rendered from the same row — the reason an answer did not take has to land
+              // next to the question that was re-asked, not somewhere else.
+              const failure = toolFailure(up.event)
+              const summary = up.summary && failure ? { ...up.summary, failure } : up.summary
+              try { send(up.seq, { patch, summary }) } catch { unsub?.(); dropFeed() }
             }
             unsub = await sessions.subscribe(project, up => {
               if (liveNow) deliver(up)

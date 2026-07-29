@@ -113,9 +113,6 @@ input, textarea, select, button { font: var(--font) }
 .dot.live { background: var(--ok); box-shadow: 0 0 9px var(--ok) }
 .dot.task { background: var(--accent) }
 .dot.step { background: var(--ok) }
-.dot.artifact { background: var(--warn) }
-.dot.note { background: var(--purple) }
-.dot.model { background: #89dceb }
 
 .empty { color: var(--muted); padding: 26px 8px; text-align: center; font-size: 12.5px }
 
@@ -210,6 +207,11 @@ input, textarea, select, button { font: var(--font) }
 .sys-card:hover { background: var(--surface-2); border-color: var(--border) }
 .sys-card .sys-line { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); flex: 1 }
 .sys-card .sys-seq { color: #4a4a56; font-size: 10px; flex: none }
+
+/* why an answer did not take — a card, not a ticker line, and unmistakably not a question */
+.card.failure { border-color: color-mix(in srgb, var(--danger) 45%, var(--border)); cursor: pointer }
+.card.failure .sys-line { color: var(--text); flex: 1 }
+.card.failure .pre { max-height: 180px; overflow: auto; margin-top: 6px; color: var(--danger) }
 
 .conv .tool-row { align-self: stretch; max-width: 74% }
 .conv-usage { align-self: flex-start; color: #4a4a56; font-size: 10.5px; padding: 0 6px }
@@ -341,6 +343,3 @@ input, textarea, select, button { font: var(--font) }
 .editor-inspector { border-left: 1px solid var(--border-soft); padding: 16px; overflow-y: auto; display: flex; flex-direction: column; gap: 11px; background: var(--bg-raise) }
 .row-split { display: flex; align-items: center; gap: 6px; justify-content: space-between; flex-wrap: wrap }
 .row-split > .btn { flex: 1 1 auto; min-width: 0; padding-inline: 8px; white-space: nowrap }
-
-.detail-head { display: flex; align-items: center; gap: 6px }
-.detail-head .grow { flex: 1 }

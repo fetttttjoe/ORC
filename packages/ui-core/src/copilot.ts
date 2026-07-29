@@ -8,7 +8,7 @@ import type { ProjectSessions } from './sessions'
 
 import { snip } from './summarize'
 import type { ResolvedTool } from '@orc/contracts'
-import { errorMessage } from '@orc/contracts'
+import { toolError } from '@orc/contracts'
 
 // Why a session can't act: 'read-only' = server started outside a project; 'foreign-project'
 // = the user is viewing a chat other than the one this server runs in.
@@ -54,7 +54,7 @@ export function asResolvedTools(tools: ToolSet): ResolvedTool[] {
             input ?? {}, { toolCallId: 'mcp', messages: [] })
           return { output: out, isError: false }
         } catch (err) {
-          return { output: { error: errorMessage(err) }, isError: true }
+          return toolError(err)
         }
       },
     }

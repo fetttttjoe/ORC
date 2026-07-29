@@ -24,7 +24,7 @@ export const isSingleStep = (waves: readonly TodoWave[]): boolean =>
 
 // The step chips: the compact, always-present progress row. `onStep` makes each one a door into
 // the graph — click → that step's audit view (attempts, run state, transcript).
-export function renderWaves(waves: readonly TodoWave[], onStep?: (stepId: string) => void): HTMLElement {
+function renderWaves(waves: readonly TodoWave[], onStep?: (stepId: string) => void): HTMLElement {
   return el('div', { class: 'waves' }, ...waves.map(w =>
     el('div', { class: 'wave' },
       el('span', { class: 'wave-label' }, `wave ${w.wave}`, w.parallel ? Badge('parallel', 'accent') : ''),
@@ -39,9 +39,8 @@ export function renderWaves(waves: readonly TodoWave[], onStep?: (stepId: string
 }
 
 // The title row: state first, because whether the plan finished is what a reader scanning either
-// surface wants before anything else. Exported separately so a caller that supplies its own
-// heading (the inspector's Card) can still show the same badges in the same order.
-export function planTitle(v: PlanVisual): HTMLElement {
+// surface wants before anything else.
+function planTitle(v: PlanVisual): HTMLElement {
   const state = planState(v.waves)
   return el('div', { class: 'card-title' }, `plan v${v.version}`,
     Badge(state, statusTone(state)),
@@ -51,13 +50,10 @@ export function planTitle(v: PlanVisual): HTMLElement {
 // The whole visualisation, in the order every surface shows it: title, diagram (when there is one
 // worth drawing), chips. Returns the nodes rather than a wrapper so a caller can drop them into
 // its own card without a redundant div.
-export function planVisual(v: PlanVisual, opts: { onStep?: (stepId: string) => void; title?: boolean } = {}): HTMLElement[] {
-  const out: HTMLElement[] = []
-  if (opts.title !== false) out.push(planTitle(v))
+export function planVisual(v: PlanVisual, opts: { onStep?: (stepId: string) => void } = {}): HTMLElement[] {
   const diagram = el('div', { class: 'diagram' })
   void mermaidInto(diagram, v.mermaid) // async by design: the card renders now, the SVG lands later
-  out.push(diagram, renderWaves(v.waves, opts.onStep))
-  return out
+  return [planTitle(v), diagram, renderWaves(v.waves, opts.onStep)]
 }
 
 // The identity of what is currently drawn — version plus every step status. A surface that caches
