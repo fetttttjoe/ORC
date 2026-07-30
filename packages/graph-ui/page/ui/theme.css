@@ -97,7 +97,11 @@ input, textarea, select, button { font: var(--font) }
   box-shadow: var(--shadow-1);
 }
 .card + .card { margin-top: 10px }
-.card-title { font-weight: 600; font-size: 13px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap }
+/* flex-wrap alone doesn't stop a long unbroken token overflowing a row-flex container: the
+   anonymous text-node child still contributes its min-content width. overflow-wrap:anywhere
+   (not word-break:break-word — that isn't a break opportunity for flex-item min-content sizing)
+   is the shared-seam fix, applied here so every Card()-based message kind wraps. */
+.card-title { font-weight: 600; font-size: 13px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; overflow-wrap: anywhere }
 
 .kv { display: grid; grid-template-columns: 96px 1fr; gap: 5px 12px; font-size: 12px }
 .kv .k { color: var(--muted) }
@@ -250,7 +254,8 @@ input, textarea, select, button { font: var(--font) }
 .tool-row { background: var(--surface-2); border: 1px solid var(--border-soft); border-radius: var(--radius-sm) }
 .tool-row summary {
   padding: 7px 11px; cursor: pointer; font: var(--mono); color: var(--muted);
-  display: flex; align-items: center; gap: 8px; list-style: none; transition: color .14s var(--ease);
+  display: flex; align-items: center; gap: 8px; list-style: none;
+  overflow-wrap: anywhere; transition: color .14s var(--ease);
 }
 .tool-row summary:hover { color: var(--text) }
 .tool-row summary::before { content: '▸'; font-size: 10px }
