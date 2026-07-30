@@ -8,7 +8,7 @@ import type { Redactor } from '../redact'
 
 export { PostgresStore, listProjectIds, watchProjectIds, type ProjectIdsWatch, type Tx } from './postgres'
 export { EventLog, type EventLogOps } from './event-log'
-export { OperationJournal, type OperationContext } from './operation-journal'
+export { OperationJournal } from './operation-journal'
 export {
   beat, claimSlot, forget, liveSupervisors, staleSupervisors,
   SUPERVISOR_BEAT_MS, SUPERVISOR_STALE_MS, type SupervisorRow,

@@ -5,7 +5,7 @@ import { MASTERPLAN_NOTE_ID,
   type PlanNote, type Plan, type PlanStep, type TaskNode, type TaskStatus,
   type MemoryAuthor,
 } from '@orc/contracts'
-import { foldPlanNotes, planGraphHash, planScope, PLAN_STEP_ID, PLAN_STEP_ROLE } from './execution/strategies/grounded-plan'
+import { foldPlanNotes, planApprovalStamp, planGraphHash, planScope, PLAN_STEP_ID, PLAN_STEP_ROLE } from './execution/strategies/grounded-plan'
 import { DEFAULT_MAX_ITERATIONS } from './config'
 import { EventLog, type EventLogOps } from './storage'
 import { fold, gatedChildren, subtreeTaskIds, subtreeUsage, taskChangedPaths, taskNoteWrites, type State, type TaskNoteWrite } from './projections'
@@ -397,8 +397,7 @@ export class Kernel {
       const { topic, event } = requested
       if (!event.stepId || !event.runToken)
         throw new KernelError(KERNEL_ERROR_CODE.invalid_transition, `feedback_requested for topic '${topic}' has no step/run envelope to resume`)
-      const approvingPlan = task.type === 'grounded' && event.stepId === PLAN_STEP_ID
-        && isApprovalAnswer(text)
+      const approvingPlan = planApprovalStamp(task, event, text)
       const planHash = approvingPlan
         ? planGraphHash(foldPlanNotes(
           await tx.after(0, [EVENT_KIND.memory_written, EVENT_KIND.memory_deleted]),

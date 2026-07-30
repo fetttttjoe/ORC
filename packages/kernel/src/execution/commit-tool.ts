@@ -5,6 +5,7 @@ import path from 'node:path'
 import { z } from 'zod'
 import { COMMIT_STEP_ID, STEP_ROLE, errorMessage, toolError, type ResolvedTool } from '@orc/contracts'
 import type { Kernel } from '../kernel'
+import { clipMiddle } from './clip'
 
 // The commit step's tool pair. commit_preview computes the exact content a commit would contain
 // (against a TEMPORARY index — a preview is a look, never a stage) and returns its real diff;
@@ -31,10 +32,7 @@ const COMMIT_DESCRIPTION =
 // per stream, head + tail, like exec-tool's clip: enough diff to write an honest message, never an
 // unbounded prompt
 const CLIP_CHARS = 12_000
-const clip = (s: string): string =>
-  s.length <= 2 * CLIP_CHARS
-    ? s
-    : `${s.slice(0, CLIP_CHARS)}\n… [${s.length - 2 * CLIP_CHARS} chars omitted] …\n${s.slice(-CLIP_CHARS)}`
+const clip = (s: string): string => clipMiddle(s, CLIP_CHARS)
 
 interface Git { code: number; stdout: string; stderr: string }
 

@@ -827,7 +827,7 @@ export async function createDbosPort(opts: {
 // most. What marks it as a skip instead is notesWritten:0, the leading gaps entry, and confidence
 // 'medium' rather than 'high' — the evidence is real but indirect (git says the declared paths are
 // quiet), so it is honestly one notch below a scan performed against the tree this run.
-export function groundingSkipDrafts(v: GroundingVerdict, stepId: string, runToken: string): EventDraft[] {
+function groundingSkipDrafts(v: GroundingVerdict, stepId: string, runToken: string): EventDraft[] {
   const ids = v.current.map(c => c.id)
   const summary =
     `Reused existing grounding — the deep codebase scan was SKIPPED because these notes are current at HEAD ${v.head}: `

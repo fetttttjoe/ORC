@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process'
 import { z } from 'zod'
 import { errorMessage, toolError, type ResolvedTool } from '@orc/contracts'
+import { clipMiddle } from './clip'
 
 // exec (post-scenario-2): the acceptance-gate tool. Plans routinely demand "typecheck clean,
 // tests green", but no step could RUN anything — implementers shipped unexecuted (red) suites
@@ -31,10 +32,7 @@ const EXIT_FLUSH_MS = 250
 const CLIP_CHARS = 8_000 // per stream, head + tail: typecheck errors lead, test summaries trail
 const MAX_BYTES = 64 * 1024 * 1024 // per stream, matches the old spawnSync maxBuffer
 
-const clip = (s: string): string =>
-  s.length <= 2 * CLIP_CHARS
-    ? s
-    : `${s.slice(0, CLIP_CHARS)}\n… [${s.length - 2 * CLIP_CHARS} chars omitted] …\n${s.slice(-CLIP_CHARS)}`
+const clip = (s: string): string => clipMiddle(s, CLIP_CHARS)
 
 // Never the orchestrator's full process.env: provider API keys and DB credentials live there and
 // must not reach model-authored code the command executes. A minimal surface (PATH to find the

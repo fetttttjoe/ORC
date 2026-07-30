@@ -1,6 +1,22 @@
 import { existsSync, realpathSync, statSync } from 'node:fs'
 import path from 'node:path'
 
+// The fs tools that CHANGE a file — matched values, never scattered literals (mirrors
+// MEMORY_TOOL_NAME's shape). Owned here because kernel's audit projection (taskChangedPaths) and
+// the executor's tool registration/write fence must agree on exactly this set: a fourth writing
+// tool that only one side knew about would silently escape taskChangedPaths. fs_read/fs_list are
+// absent by design — reading a file is not a write.
+export const FS_WRITE_TOOL_NAME = { write: 'fs_write', edit: 'fs_edit', delete: 'fs_delete' } as const
+export const FS_WRITE_TOOL_NAMES: ReadonlySet<string> = new Set(Object.values(FS_WRITE_TOOL_NAME))
+
+// Read-side path normalization (do NOT call realpath/fs/git — a hand-built event array or an
+// already-relative path must fold without touching disk): forward slashes, strip a leading './',
+// collapse duplicate slashes. Shared by pathInZone below and the kernel's audit projection
+// (taskChangedPaths) so the zone fence and the audit can never classify the same path differently.
+export function normalizeRelPath(p: string): string {
+  return p.replace(/\\/g, '/').replace(/^\.\//, '').replace(/\/{2,}/g, '/')
+}
+
 // Trust boundary (spec §6.3): resolved path — symlinks included — must stay inside the
 // workspace. The ONE containment guard: file tools and signal-output verification share it.
 export function resolveInWorkspace(workspaceDir: string, p: string): string {
@@ -36,9 +52,7 @@ export function resolveInWorkspace(workspaceDir: string, p: string): string {
 // Empty or undefined zone means "unrestricted" — matches assertInZone's behaviour for an empty
 // zone list (returns immediately without restriction) — so an unfenced path is IN zone (true).
 export function pathInZone(relPath: string, zone: string[] | undefined): boolean {
-  let p = relPath.replace(/\\/g, '/')
-  if (p.startsWith('./')) p = p.slice(2)
-  p = p.replace(/\/{2,}/g, '/')
+  const p = normalizeRelPath(relPath)
   if (p.startsWith('/')) return false
   if (p.split('/').some(seg => seg === '..')) return false
   if (!zone || zone.length === 0) return true

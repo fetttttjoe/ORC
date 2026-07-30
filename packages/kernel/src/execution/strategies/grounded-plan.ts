@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { COMMIT_STEP_ID, deriveNoteProvenance, EVENT_KIND, LINK_KIND, MemoryDeletedPayload, MemoryNote, MemoryWrittenPayload, MASTERPLAN_NOTE_ID, NOTE_TIER, PAYLOAD_SCHEMAS, siblingOrderingMisuse, STEP_ID, STEP_ROLE, STRATEGY, VERIFY_STEP_ID, planScope, type ChildPlanDraft, type EventRecord, type PlanNote } from '@orc/contracts'
+import { COMMIT_STEP_ID, deriveNoteProvenance, EVENT_KIND, LINK_KIND, MemoryDeletedPayload, MemoryNote, MemoryWrittenPayload, MASTERPLAN_NOTE_ID, NOTE_TIER, PAYLOAD_SCHEMAS, siblingOrderingMisuse, STEP_ID, STEP_ROLE, STRATEGY, VERIFY_STEP_ID, isApprovalAnswer, planScope, type ChildPlanDraft, type EventRecord, type PlanNote, type TaskNode } from '@orc/contracts'
 
 // planScope moved to contracts (one format, one place); re-exported so kernel callers keep working
 export { planScope }
@@ -11,6 +11,14 @@ export const PLAN_STEP_ROLE = STEP_ROLE.auditor
 // Its step id, stamped by createGroundedTask — one source, so the step that must produce a plan and
 // the check that it did cannot drift apart.
 export const PLAN_STEP_ID = STEP_ID.plan
+
+// True when a feedback answer IS the grounded-plan approval: sent to this strategy's plan step, on
+// a grounded task, using the approval word (isApprovalAnswer, contracts/approval-answer.ts). Named
+// so the generic conversational-feedback path (Kernel.replyFeedback, which runs for every task
+// type) asks this strategy the question instead of re-deriving its step/task shape inline.
+export function planApprovalStamp(task: TaskNode, event: EventRecord, text: string): boolean {
+  return task.type === 'grounded' && event.stepId === PLAN_STEP_ID && isApprovalAnswer(text)
+}
 
 // A grounded plan step's whole job is to PRODUCE a plan: a decomposition the human approved, which
 // finalize_plan freezes into a split. Signalling success without one means the agent did the work

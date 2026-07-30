@@ -1,8 +1,8 @@
 import { z } from 'zod'
 import {
-  ArtifactProducedPayload, EVENT_KIND, FAILURE_CLASS, FailureClass, NOTE_TIER, OPERATION_STATUS, Plan,
+  ArtifactProducedPayload, EVENT_KIND, FAILURE_CLASS, FailureClass, FS_WRITE_TOOL_NAMES, NOTE_TIER, OPERATION_STATUS, Plan,
   RUN_OUTCOME, STEP_RUN_STATUS, TASK_STATUS, TaskNode, TaskStatus, ZERO_USAGE, addUsage, runOutcomeFor,
-  MemoryDeletedPayload, MemoryWrittenPayload, noteKey,
+  MemoryDeletedPayload, MemoryWrittenPayload, noteKey, normalizeRelPath,
   OperationCompletedPayload, OperationFailedPayload, OperationStartedPayload, ReactionFailedPayload,
 } from '@orc/contracts'
 import type { EventRecord, OperationRecord, RunOutcome, StepRunStatus, Usage } from '@orc/contracts'
@@ -477,24 +477,17 @@ export function pendingSplitForChild(state: State, childTaskId: string): SplitSt
 // NEVER substitutes for the full bun test / bun run typecheck gate, nor dismisses a real defect in
 // an in-zone file (AUDITOR_CONTRACT: any defect ⇒ signal failure, unqualified).
 
-// The file tools that CHANGE a file (mirrors loop.ts's WRITING_FILE_TOOLS). No contracts-level
-// constant is reachable from the kernel, and loop.ts's TOOL_NAME.fs_* resolve to exactly these
-// literals; fs_read/fs_list are absent by design — reading a file is not a write.
-const WRITE_TOOL_NAMES: ReadonlySet<string> = new Set(['fs_write', 'fs_edit', 'fs_delete'])
+// Which tool_calls are writes: contracts' FS_WRITE_TOOL_NAMES, so this audit projection and the
+// executor's fence (loop.ts's WRITING_FILE_TOOLS, tools.ts's TOOL_NAME) read the same set — a
+// fourth writing tool that only one side knew about would silently escape taskChangedPaths.
 
 // The path a write tool acted on — exactly loop.ts's editedPath rule: input is a record, input.path
 // is a non-empty string, or it is skipped rather than guessed at.
-const writeInputPath = (input: unknown): string | null =>
-  typeof input === 'object' && input !== null && !Array.isArray(input)
-    && typeof (input as Record<string, unknown>).path === 'string'
-    && ((input as Record<string, unknown>).path as string).length > 0
-    ? ((input as Record<string, unknown>).path as string)
-    : null
-
-// Read-side path normalization (do NOT call realpath/fs/git — a hand-built event array must fold):
-// forward slashes, strip a leading './', collapse duplicate slashes.
-const normalizePath = (p: string): string =>
-  p.replace(/\\/g, '/').replace(/^\.\//, '').replace(/\/{2,}/g, '/')
+const WriteToolInput = z.object({ path: z.string().min(1) }).loose()
+const writeInputPath = (input: unknown): string | null => {
+  const parsed = WriteToolInput.safeParse(input)
+  return parsed.success ? parsed.data.path : null
+}
 
 // One step's contribution to a changed path: the id, the tool that produced it, and the seq of the
 // contributing event (the tool_call seq for a write, the receipt seq for an artifact).
@@ -534,7 +527,7 @@ export function taskChangedPaths(events: EventRecord[]): ChangedPath[] {
   // path → contributors, first-seen seq tracked for deterministic ordering
   const byPath = new Map<string, { firstSeq: number; steps: PathContributor[] }>()
   const add = (rawPath: string, contributor: PathContributor): void => {
-    const path = normalizePath(rawPath)
+    const path = normalizeRelPath(rawPath)
     if (path.length === 0) return
     const existing = byPath.get(path)
     if (existing) {
@@ -550,7 +543,7 @@ export function taskChangedPaths(events: EventRecord[]): ChangedPath[] {
       const p = e.payload
       const toolName = p.toolName
       const id = p.toolCallId
-      if (typeof toolName !== 'string' || !WRITE_TOOL_NAMES.has(toolName)) continue
+      if (typeof toolName !== 'string' || !FS_WRITE_TOOL_NAMES.has(toolName)) continue
       if (typeof id !== 'string' || !resultOk(id)) continue // unpaired or errored → not a write
       const path = writeInputPath(p.input)
       if (path === null) continue // malformed input — skipped, never guessed at
