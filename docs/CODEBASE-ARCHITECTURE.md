@@ -42,7 +42,7 @@ auto-migrating it: the log's shape is a deliberate act, never a boot side effect
 |---|---|
 | `contracts` (`@orc/contracts`) | The seam layer: zod schemas + extension-point interfaces + pure helpers; the leaf of the dependency DAG, zod its only dependency. |
 | `kernel` (`@orc/kernel`) | The event-log writer, the Postgres storage cluster, the fold/projection layer, the plugin host, config, and the DBOS-durable execution engine. |
-| `cli` (`@orc/cli`) | The composition root: wires kernel + plugin host + DBOS port + memory into one process and exposes the three doors (CLI / web / MCP). |
+| `cli` (`@orc/cli`) | The composition root: wires kernel + plugin host + DBOS port + memory into one process and exposes two doors (web / MCP) plus the CLI itself. |
 | `ui-core` (`@orc/ui-core`) | The transport-free `ProjectSessions` read API — snapshots, patches, graph/diagram/copilot derivations — over the log fold + memory fold. |
 | `graph-ui` (`@orc/graph-ui`) | The one shipped UI adapter: a Bun HTTP+SSE server plus a sigma.js WebGL browser bundle over `ui-core`. |
 | `vault-projector` (`@orc/vault-projector`) | Folds the log into a git-friendly markdown vault (task index/log/execution/lineage/plan/session files). |
@@ -103,7 +103,7 @@ of them can be swapped without the others knowing. The concrete plugins implemen
 
 ---
 
-## 4. Key entry points & the three doors
+## 4. Key entry points & the two doors
 
 **Composition root — `packages/cli/src/bin.ts` `main()`.** The one file that calls `buildPlugins`
 *and* `openKernel` *and* `buildProgram` together, standing up a `Kernel`, a plugin host
@@ -113,8 +113,8 @@ subsystem into one running process. Every other CLI file receives an already-bui
 (runtime.port ??= await buildRuntime(...))`): read-only commands never pay a DBOS launch; every
 command that needs execution shares one port instance per invocation.
 
-**The three doors → one mutation surface.** Task/plan state is mutated through exactly one object,
-`buildOrcActions` (`packages/cli/src/actions.ts`), no matter which door a request enters:
+**One mutation surface, two doors plus the CLI.** Task/plan state is mutated through exactly one object,
+`buildOrcActions` (`packages/cli/src/actions.ts`), no matter which entry point a request enters:
 
 - **The `orc` commander CLI** (`packages/cli/src/main.ts`): `new`/`propose`/`plan`/
   `approve`/`run`/`retry`/`reply`/`cancel`/… each mutating command calls `actions(via?)`.
@@ -126,8 +126,8 @@ command that needs execution shares one port instance per invocation.
 
 Because all three call into the same `assertDrivable`/`assertRetryable`/`assertKnownModel`/
 `assertRunnableCwd` functions, the admission check (`DRIVABLE_TASK_STATUS = {approved, running,
-blocked}`) means the same thing at every door — it is *literally* the same function, not a parallel
-re-implementation.
+blocked}`) means the same thing at every entry point — it is *literally* the same function, not a
+parallel re-implementation.
 
 **The DBOS run/step engine — `packages/kernel/src/execution/dbos-port.ts`.** `createDbosPort`
 registers two DBOS workflows: `orcRun` (the dependency-wave scheduler) and `orcStep` (one step
@@ -1070,9 +1070,9 @@ Constructs one `ProjectSessions` for the whole server process, then:
 
 Every row can be discarded and reconstructed from the one Postgres event log with no information loss (modulo debounce/heat-rounding, deliberately lossy for stability).
 
-### 7.7 CLI (`packages/cli`) — composition root, three doors, one mutation surface
+### 7.7 CLI (`packages/cli`) — composition root, two doors plus a CLI, one mutation surface
 
-`packages/cli` is orc's **composition root**: the only package that wires a `Kernel`, a plugin host, a DBOS execution port, and a memory subsystem into one running process, and the only package that exposes that wiring through exactly **three doors** — the `orc` commander CLI (`main.ts`), the embedded web/graph-ui adapter (`orc graph`), and the stdio MCP server (`mcp-serve.ts`, `orc mcp serve`). Every door that *mutates* task/plan state does so through **one shared object**, `buildOrcActions` (`actions.ts`): **three doors, one action surface, one admission check.**
+`packages/cli` is orc's **composition root**: the only package that wires a `Kernel`, a plugin host, a DBOS execution port, and a memory subsystem into one running process, and the only package that exposes that wiring through exactly **two doors plus the CLI entry point** — the `orc` commander CLI (`main.ts`), the embedded web/graph-ui adapter (`orc graph`), and the stdio MCP server (`mcp-serve.ts`, `orc mcp serve`). Every entry point that *mutates* task/plan state does so through **one shared object**, `buildOrcActions` (`actions.ts`): **two doors plus a CLI, one action surface, one admission check.**
 
 ```
 bin.ts (process entry)
@@ -1122,7 +1122,7 @@ A script (`#!/usr/bin/env bun`) whose top-level `async function main(): Promise<
 
 #### 4. `actions.ts` — `buildOrcActions`, the single mutation surface
 
-The **one** implementation of every task/plan mutation, called by all three doors. None contains its own copy of admission logic.
+The **one** implementation of every task/plan mutation, called by all three entry points. None contains its own copy of admission logic.
 
 - **`DRIVABLE_TASK_STATUS = new Set([approved, running, blocked])`** — the statuses `startRunAt` (§7.3) actually admits. One set; "can this be driven?" means the same at every door.
 - **`assertDrivable(kernel, taskId)`** — `getTask` + `approvedVersion` + `DRIVABLE_TASK_STATUS.has(status)`. Called from `main.ts`'s `requireDrivable` **and** this file's own `run()` — literally the same function.
@@ -1149,7 +1149,7 @@ The **one** implementation of every task/plan mutation, called by all three door
 #### 6. Cross-cutting notes
 
 - **The composition-root property is structural**: `bin.ts` is the only file that calls `buildPlugins` *and* `openKernel` *and* `buildProgram` together. A new door gets a shared mutation surface "for free" by calling `buildOrcActions`.
-- **The three doors differ only in exposure surface, never in mutation semantics** — all three run the same `assertDrivable`/`assertRetryable`/`assertKnownModel`/`assertRunnableCwd` checks because they call into the same `actions.ts` functions.
+- **The two doors and the CLI differ only in exposure surface, never in mutation semantics** — all three run the same `assertDrivable`/`assertRetryable`/`assertKnownModel`/`assertRunnableCwd` checks because they call into the same `actions.ts` functions.
 - **`ensureRuntime` is the seam between "recording an ask" and "something executing it"** — it does not build a port itself except under `SUPERVISOR_MODE.inProcess`, so a healthy project has a *detached, out-of-process* supervisor driving work.
 - **`groundingSource` degrading to `undefined` (not a stub)** is the load-bearing detail: the port's grounding branch checks *presence*, so a degraded-memory runtime skips freshness checking (§7.8) rather than calling a broken source.
 

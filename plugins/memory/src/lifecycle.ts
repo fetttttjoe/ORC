@@ -58,9 +58,8 @@ function completedTaskIds(events: EventRecord[]): string[] {
 // already has its note appends nothing.
 // ponytail: rescans every finished task at startup — fine for a project's worth of tasks; give the
 // lifecycle a persisted cursor if a long history ever makes this slow.
-// Not exported: only createMemoryLifecycle's start() below calls it (grepped workspace-wide, incl.
-// tests) — see memory/src/index.ts's rule that a re-export nobody imports is compatibility debt for
-// no consumer.
+// Not exported: only createMemoryLifecycle's start() below calls it — see memory/src/index.ts's rule
+// that a re-export nobody imports is compatibility debt for no consumer.
 async function consolidateBacklog(deps: LifecycleDeps): Promise<void> {
   await deps.catchUp?.()
   for (const taskId of completedTaskIds(await deps.log.after(0, [EVENT_KIND.task_status_changed]))) {

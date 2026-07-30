@@ -7,7 +7,7 @@ export const DEFAULT_LINK_WEIGHTS: Record<LinkKind, number> = {
 }
 // Not exported: opts.floor/opts.cap ARE part of rankNeighbors' surface (rank.test.ts exercises
 // both — prune-below-floor, cap-result-count), but no external module imports these three fallback
-// values by name (grepped workspace-wide, incl. tests), so they stay module-internal.
+// values by name, so they stay module-internal.
 const DEFAULT_DECAY = 0.6
 const DEFAULT_FLOOR = 0.05
 const DEFAULT_CAP = 20
