@@ -43,15 +43,22 @@ export function copilotSystemPrompt(projectName: string, mode: CopilotMode, defa
 // schemas become JSON Schema natively (zod v4), execute wraps into {output, isError}.
 export function asResolvedTools(tools: ToolSet): ResolvedTool[] {
   return Object.entries(tools).map(([name, t]) => {
-    const { $schema: _drop, ...inputSchema } = z.toJSONSchema(t.inputSchema as z.ZodType)
+    const schema = t.inputSchema as z.ZodType
+    const { $schema: _drop, ...inputSchema } = z.toJSONSchema(schema)
     return {
       ref: `orc/${name}`, name,
       description: typeof t.description === 'string' ? t.description : name, // ai v7 allows fn descriptions; ours are strings
       inputSchema: inputSchema as Record<string, unknown>,
       execute: async (input: unknown) => {
+        // On the web door the ai SDK safeParses against inputSchema before this execute ever
+        // runs; the MCP door calls this execute directly with raw client JSON. Every mutating
+        // tool below destructures assuming parsed args (e.g. run's `{ taskId: id, cwd }`) — a
+        // numeric taskId or object cwd from an MCP client reached actions.run unvalidated.
+        const parsed = schema.safeParse(input ?? {})
+        if (!parsed.success) return toolError(parsed.error)
         try {
           const out = await (t.execute as (i: unknown, o: unknown) => Promise<unknown>)(
-            input ?? {}, { toolCallId: 'mcp', messages: [] })
+            parsed.data, { toolCallId: 'mcp', messages: [] })
           return { output: out, isError: false }
         } catch (err) {
           return toolError(err)

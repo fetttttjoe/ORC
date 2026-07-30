@@ -191,4 +191,23 @@ describe('orc mcp serve (stdio, read slice)', () => {
     }
     expect(calls).toHaveLength(0)
   })
+
+  // The same trust boundary as approve, but for the copilot-bridge tools (P1 of the foundation
+  // audit): asResolvedTools wraps `run`'s execute, which destructures { taskId, cwd } assuming
+  // parsed args — a numeric taskId rode straight into actions.run unvalidated before the bridge
+  // safeParsed against the tool's own zod inputSchema.
+  it('bridged mutating tool (run): malformed client input is a clean error, never a call into actions', async () => {
+    const calls: unknown[] = []
+    const actions = actionsStub({ run: async (id, cwd) => { calls.push([id, cwd]); return { requested: true } } })
+    const sessions = sessionsStub()
+    const memoryTools = unavailableMemoryTools('parity-check')
+    const served = buildServeTools({ sessions, projectId: 'p1', memoryTools, actions, autonomy: 'gated' })
+    const run = served.find(t => t.name === 'run')!
+    for (const bad of [undefined, {}, { taskId: 42, cwd: '/tmp' }, { taskId: 't1', cwd: { evil: true } }, { taskId: '', cwd: '/tmp' }]) {
+      const r = await run.execute(bad, undefined)
+      expect(r.isError).toBe(true)
+      expect(isRecord(r.output) && typeof r.output.error === 'string').toBe(true)
+    }
+    expect(calls).toHaveLength(0)
+  })
 })
