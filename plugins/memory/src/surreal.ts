@@ -15,6 +15,10 @@ import { rankNeighbors, rrfFuse, type Edge } from './rank'
 import { dedupeByNote, type ClaimHit, type ClaimSearchOpts } from './claim-search'
 import { ascending, MEMORY_CLUSTER_THRESHOLD, partition, topicLabel, type ClusterInput } from './cluster'
 import { foldRow, ftsQuery, keywordCompare, keywordTerms, meetsMargin, meetsQuorum } from './keyword'
+// type-only, and the shape is DEFINED there: drift.ts owns the citation/currency domain (notesCiting
+// is its exported entry point) and must stay DB-free, so the query body lives here and the shape
+// there — one declaration, no runtime edge in either direction.
+import type { CitingNote } from './drift'
 
 // The read model's table names — single spelling for every builder call and RecordId.
 enum Tb { Note = 'note', Meta = 'meta', Link = 'link', Claim = 'claim', Topic = 'topic' }
@@ -201,6 +205,20 @@ const SummaryRow = z.object({
 // ever stops being true — five more columns on the hottest path is the smaller price.
 const SUMMARY_COLUMNS = Object.keys(SummaryRow.shape).join(', ')
 const SemanticRow = SummaryRow.extend({ score: z.number() })
+
+// The path-intersection read's row: exactly what a heal-or-confirm caller acts on — which note
+// (noteId + scope address it; `id` is the record id), what it claims to be about, and the revision
+// its currency is measured against. Narrow on purpose: this runs over the whole corpus on every
+// audited change, and nothing downstream reads a body from it.
+// `sourceRevision` is optional like SummaryRow's, so a row projected before that column existed
+// still parses, falling back to the uncheckable value rather than a fabricated one.
+const CitingRow = z.object({
+  noteId: z.string(), scope: z.string(), title: z.string(),
+  sourceRevision: z.string().nullable().optional(),
+})
+// derived from the parse's own keys, like SUMMARY_COLUMNS/CLAIM_COLUMNS: one edit widens both the
+// projection and the parse (zod strips unknown keys, so a hand-kept second list went stale silently)
+const CITING_COLUMNS = Object.keys(CitingRow.shape).join(', ')
 
 // `search::score` is parsed as a plain number, NOT `nullable()`: MEASURED against SurrealDB 3.2.0,
 // a match clause that did not match yields 0, not NONE, so the `?? 0` this pattern is usually
@@ -701,6 +719,36 @@ export class SurrealMemory {
       .where(n => this.matchFilter(n, filter))
       .orderBy('updatedAt', 'DESC')
     return rows.filter(r => matchesRow(r, filter)).map(toSummary)
+  }
+
+  // Which notes DECLARE one of these paths — any tier, any scope, whatever their drift flags say.
+  //
+  // WHY it exists: post-commit drift read 4/7 twice in one day. The heal candidates were taken from
+  // drift FLAGS, which are measured against committed revisions and so lag the uncommitted work an
+  // auditor has just looked at, while the commit restamp only covers the notes the task itself
+  // wrote. A note somebody else authored that cites a changed path was in neither set. This read is
+  // that middle: citation, not staleness.
+  //
+  // A raw select, not a builder predicate: `paths` is an option-wrapped array column, and surqlize
+  // resolves `.contains` on one as a FIELD access rather than the array method — the crash list()'s
+  // `categories` filter hit. CONTAINSANY is SurrealQL's array intersection, one operator, evaluated
+  // server-side; no negation anywhere, so none of the `!x IN v` precedence trap below applies.
+  async notesCitingPaths(paths: readonly string[]): Promise<CitingNote[]> {
+    // No paths means no citations to find. Short-circuited HERE as well as in notesCiting, because
+    // an empty `$paths` is a full-corpus scan whose every row CONTAINSANY-fails — cost for nothing.
+    if (paths.length === 0) return []
+    const res = await this.surreal.query(
+      `SELECT ${CITING_COLUMNS} FROM ${Tb.Note} WHERE paths CONTAINSANY $paths`,
+      { paths: [...paths] },
+    )
+    const rows = CitingRow.array().parse(Array.isArray(res) ? res[0] : res)
+    // dedupe by scope:id — the same note matching several of the input paths is one candidate
+    const byKey = new Map<string, CitingNote>()
+    for (const r of rows)
+      byKey.set(key(r.scope, r.noteId), {
+        id: r.noteId, scope: r.scope, title: r.title, sourceRevision: r.sourceRevision ?? null,
+      })
+    return [...byKey.values()]
   }
 
   async search(query: string, filter: MemoryFilter = {}, opts: MemorySearchOpts = {}): Promise<NoteSummary[]> {

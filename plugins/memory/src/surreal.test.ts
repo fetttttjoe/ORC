@@ -657,3 +657,27 @@ describe('SurrealMemory.searchClaims', () => {
     expect(await mem.searchClaims('   ')).toEqual([])
   })
 })
+
+// Post-commit drift read 4/7 twice in one day: the heal candidates came from drift FLAGS (measured
+// against committed revisions, so they lag the uncommitted work just audited) while the restamp is
+// scoped to the notes the task itself wrote — a note somebody else authored that cites a changed
+// path fell between the two. This is the read that covers that gap: which notes DECLARE a path this
+// change touched, whoever wrote them and whatever their flags say.
+describe('SurrealMemory.notesCitingPaths', () => {
+  it('returns only the notes whose declared paths intersect the input, with the four fields a caller needs', async () => {
+    const t = await createTestSurreal(); drops.push(t.drop)
+    const m = await openMemory(t)
+    await m.applyEvent(written(1, note({ id: 'cites-a', title: 'Cites A', paths: ['packages/a.ts'], sourceRevision: 'rev-a' })))
+    await m.applyEvent(written(2, note({ id: 'cites-b', title: 'Cites B', paths: ['packages/b.ts'], sourceRevision: 'rev-b' })))
+    expect(await m.notesCitingPaths(['packages/a.ts'])).toEqual([
+      { id: 'cites-a', scope: 'project', title: 'Cites A', sourceRevision: 'rev-a' },
+    ])
+  })
+
+  it('an empty path list matches nothing rather than every note in the corpus', async () => {
+    const t = await createTestSurreal(); drops.push(t.drop)
+    const m = await openMemory(t)
+    await m.applyEvent(written(1, note({ id: 'cites-a', title: 'Cites A', paths: ['packages/a.ts'] })))
+    expect(await m.notesCitingPaths([])).toEqual([])
+  })
+})

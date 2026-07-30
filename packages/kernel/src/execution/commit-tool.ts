@@ -5,6 +5,7 @@ import path from 'node:path'
 import { z } from 'zod'
 import { COMMIT_STEP_ID, STEP_ROLE, errorMessage, toolError, type ResolvedTool } from '@orc/contracts'
 import type { Kernel } from '../kernel'
+import type { CitingNotes } from './scoped-changes-tool'
 import { clipMiddle } from './clip'
 
 // The commit step's tool pair. commit_preview computes the exact content a commit would contain
@@ -27,7 +28,7 @@ const PREVIEW_DESCRIPTION =
   "Compute THIS task's pending commit and return {paths, diff, skippedIgnored}: exactly what git_commit will commit (the scoped_changes floor — sibling tasks' work is excluded, gitignored paths are skipped and listed). Read the diff — your commit message must describe it. A file changed only by exec commands (formatters, codegen) is not in the floor and will be missing; say so in your summary if you know of one."
 
 const COMMIT_DESCRIPTION =
-  'Commit the previewed changes with your message, then restamp the notes this task wrote whose declared paths are fully committed. If the working tree no longer matches the diff you last saw (or you never looked), it refuses and returns the current diff — read it and call again. Commits by pathspec, so content someone else staged never rides along. Returns {commit, created, committedPaths, restamped, skippedDirty, restampFailed, skippedIgnored}: created:false means nothing was left to commit (e.g. a child task already committed) and the restamp still ran. A note under skippedDirty cites paths not provably committed (pending edits, untracked content, or nothing at HEAD) and stays drifted on purpose.'
+  'Commit the previewed changes with your message, then restamp the notes this task wrote whose declared paths are fully committed. If the working tree no longer matches the diff you last saw (or you never looked), it refuses and returns the current diff — read it and call again. Commits by pathspec, so content someone else staged never rides along. Returns {commit, created, committedPaths, restamped, skippedDirty, restampFailed, skippedIgnored, stillDrifted}: created:false means nothing was left to commit (e.g. a child task already committed) and the restamp still ran. A note under skippedDirty cites paths not provably committed (pending edits, untracked content, or nothing at HEAD) and stays drifted on purpose. stillDrifted lists notes citing committed paths that no step of this task verified — carry it into your summary verbatim.'
 
 // per stream, head + tail, like exec-tool's clip: enough diff to write an honest message, never an
 // unbounded prompt
@@ -70,9 +71,13 @@ export function commitTool(opts: {
   kernel: Pick<Kernel, 'listTaskChangedPaths' | 'listTaskNoteWrites'>
   dir: string
   restamp?: RestampNote
+  // The citing-notes join (scoped-changes-tool's CitingNotes, injected in runtime.ts like restamp):
+  // powers the receipt's stillDrifted honesty line — notes citing committed paths that no step of
+  // this task verified, which would otherwise sit stale-stamped and silent until the next drift scan.
+  citing?: CitingNotes
   p: { taskId: string; stepId: string; role: string; runToken: string }
 }): ResolvedTool[] {
-  const { kernel, dir, restamp, p } = opts
+  const { kernel, dir, restamp, citing, p } = opts
   // both terms, like scoped_changes: the committer role is kernel-set (withCommitStep, enforced by
   // proposeSplit's reserved-role refusal), so a planner-authored step named 'commit' never arms this
   if (p.stepId !== COMMIT_STEP_ID || p.role !== STEP_ROLE.committer) return []
@@ -244,9 +249,15 @@ export function commitTool(opts: {
         if (head.code !== 0) return { output: { error: `cannot resolve HEAD: ${head.stderr.trim()}` }, isError: true }
 
         const notes = await restampTouched()
+        // Leftovers = citing notes minus every task-written set (restamped ∪ skippedDirty ∪
+        // restampFailed — those are already reported under their own keys). null when the join is
+        // absent: a missing measurement must never read as a clean zero.
+        const own = new Set([...notes.restamped, ...notes.skippedDirty, ...notes.restampFailed].map(n => `${n.scope}:${n.id}`))
+        const cited = citing ? await citing(committedPaths) : null
+        const stillDrifted = cited ? cited.filter(n => !own.has(`${n.scope}:${n.id}`)).map(n => ({ id: n.id, scope: n.scope })) : null
         return {
           output: {
-            commit: head.stdout.trim(), created, committedPaths, skippedIgnored: fresh.skippedIgnored, ...notes,
+            commit: head.stdout.trim(), created, committedPaths, skippedIgnored: fresh.skippedIgnored, ...notes, stillDrifted,
             ...(restamp ? {} : { restampUnavailable: 'memory is degraded — no note was restamped; run `orc memory restamp` once memory is back' }),
           }, isError: false,
         }

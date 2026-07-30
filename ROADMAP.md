@@ -70,11 +70,7 @@ plugins/mcp-client/src/index.ts]
    takes the terminal step's summary, which is now the commit receipt; the verify verdict travels
    only because the commit contract says to carry it. Consider composing both terminal summaries
    into the split resolution. When: a parent visibly loses an audit verdict.
-2. **Parent-authored heals vs the child's restamp scope** — *open, edge.* The commit step restamps
-   notes the CHILD subtree wrote; a heal authored by the parent's analyze step is outside that set.
-   Immaterial while restamp only matters after a new commit (the parent's scout edits no files),
-   but revisit if analyze-time heals start citing committed changes.
-3. **Exec tool flakiness under agents** — *open, investigate.* A live run reported `grep`/`git grep`
+2. **Exec tool flakiness under agents** — *open, investigate.* A live run reported `grep`/`git grep`
    via exec intermittently returning 0 matches on lines that provably exist (fs_read/git show
    agreed). Reproduce, then fix or document. [sourced: task c5e9cb50 confirm-and-correct summary,
    2026-07-29]

@@ -31,6 +31,11 @@ describe('shipped skills', () => {
     expect(body).toContain('empty set is not evidence of success')
     expect(body).toContain('title and summary')
     expect(body).toContain('retrieval surface')
+    // heal-or-confirm: candidates come from scoped_changes' citingNotes (drift flags lag
+    // uncommitted work — observed twice as post-commit drift), and a still-true note gets a
+    // confirm write so the commit restamp can reach it
+    expect(body).toContain('citingNotes')
+    expect(body).toContain('CONFIRM — memory_write with the SAME id and the content unchanged')
   })
 
   test('role-committer pins the commit contract sentences', () => {
@@ -40,5 +45,7 @@ describe('shipped skills', () => {
     expect(body).toContain('refuses whenever the tree no longer matches')
     expect(body).toContain("'Nothing to commit' is a valid outcome")
     expect(body).toContain('STILL call git_commit once')
+    // the receipt's honesty line: leftovers the auditor did not verify travel in the summary
+    expect(body).toContain('stillDrifted')
   })
 })

@@ -18,6 +18,9 @@ export { frontier } from './frontier'
 export { consolidateTask, type ConsolidationInput, type ConsolidationDistiller } from './consolidate'
 export { createMemoryLifecycle, type MemoryLifecycle } from './lifecycle'
 export { needsReground, restampableNotes } from './drift'
+// consumer: packages/cli/src/runtime.ts, which binds it to the knowledge handle below and injects it
+// into the step tools — the kernel never imports this plugin, so the query crosses as a callback.
+export { notesCiting, type CitingNote } from './drift'
 export { createGroundingSource } from './grounding-source'
 
 // the actual revision of the code the runtime is looking at — null outside Git
@@ -37,6 +40,11 @@ export async function createMemory(opts: { log: EventLog; config: ProjectConfig;
   store: MemoryStore
   projector: MemoryProjector
   bindStep: BindStep
+  // The handle itself, not just the services built on it: the composition root has read queries to
+  // wire that are NOT part of the store contract (notesCiting, injected into the step tools), and
+  // with the handle closed over by close() alone it had nothing to pass them. Still owned here —
+  // close() shuts it down, callers only read through it.
+  knowledge: Knowledge
   close: () => Promise<void>
 }> {
   const knowledge = await openKnowledge(opts.config, opts.embedder)
@@ -44,7 +52,7 @@ export async function createMemory(opts: { log: EventLog; config: ProjectConfig;
   const projector = createMemoryProjector({ log: opts.log, surreal: knowledge, vaultDir: opts.config.vaultDir })
   const changedSince = createDriftProbe(opts.config.dir)
   return {
-    store, projector,
+    store, projector, knowledge,
     bindStep: p => bindStepMemory({ ...p, store, changedSince, catchUp: projector.catchUp }),
     close: async () => { await projector.close(); await knowledge.close() },
   }

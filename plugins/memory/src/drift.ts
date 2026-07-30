@@ -110,6 +110,35 @@ export async function corpusDrift(
 export const needsReground = (d: Pick<CorpusDrift, 'ratio'>): boolean =>
   d.ratio !== null && d.ratio >= CORPUS_DRIFT_ADVISORY
 
+// ─── citation: which notes are ABOUT the paths a change touched ───────────────────────────────────
+//
+// Drift answers "has this note fallen behind", measured against the note's stamped revision — so it
+// is blind to uncommitted work by construction (a diff against a committed revision cannot see an
+// edit that has not landed) and it only ever speaks about notes that carry both a stamp and a path.
+// CITATION is the other question: which notes DECLARE a path this change touched, whoever wrote them
+// and whatever their flags say. That set is the heal-or-confirm candidate list.
+//
+// WHY the distinction is worth a second query: post-commit drift read 4/7 twice in one day. Heal
+// candidates were taken from the drift flags — lagging the very work just audited — while the commit
+// restamp is scoped to the notes the task itself wrote. A note authored by someone else that cites a
+// changed path was in neither set, so it was never healed and never confirmed, and kept reading
+// drifted forever.
+export interface CitingNote { id: string; scope: string; title: string; sourceRevision: string | null }
+
+// Structural, deliberately: the store handle satisfies it, and this module stays pure — no DB import,
+// no connection to test against. `corpusDrift`/`restampableNotes` above take plain note arrays for
+// the same reason; the ONE thing this needs that they do not is a query, so it asks for exactly that.
+export interface CitingSource {
+  notesCitingPaths(paths: readonly string[]): Promise<readonly CitingNote[]>
+}
+
+export async function notesCiting(k: CitingSource, paths: readonly string[]): Promise<CitingNote[]> {
+  // Empty in, empty out, WITHOUT a query: a commit that created nothing has no committed paths, and
+  // "no paths" must never widen into "every note in the corpus".
+  if (paths.length === 0) return []
+  return [...(await k.notesCitingPaths(paths))]
+}
+
 // ─── restamp: catch a HEALED note's revision up to HEAD once its change is committed ──────────────
 //
 // The heal fixes a note's CONTENT (memory_write against the working tree, re-stamped at write-time

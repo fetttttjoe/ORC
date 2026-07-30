@@ -30,7 +30,16 @@ const DESCRIPTION =
   + 'worktree — a working-tree diff is NOT scoped to your task. It EXCLUDES files changed by exec commands '
   + '(formatters, codegen, build steps), so it is a floor, not a complete diff: a file you changed can be missing '
   + 'from it. It reports paths, never verdicts. It NEVER licenses skipping the test/typecheck gate and NEVER '
-  + 'excuses a defect in a file that is in scope. An empty list is not evidence of success.'
+  + 'excuses a defect in a file that is in scope. An empty list is not evidence of success. '
+  + 'citingNotes lists every memory note citing a path this task changed — your heal-or-confirm candidates; '
+  + 'drift flags lag uncommitted work and are NOT the candidate list.'
+
+// The citing-notes join, injected by the composition root (runtime.ts) because the kernel may not
+// import plugins/memory — same seam shape as commit-tool's RestampNote. Powers the auditor's
+// heal-or-confirm candidate list: drift flags are measured against COMMITTED revisions, so at
+// verify time (pre-commit) they lag the very work being audited — observed twice as 4/7
+// post-commit drift before this existed.
+export type CitingNotes = (paths: string[]) => Promise<Array<{ id: string; scope: string; title: string; sourceRevision: string | null }>>
 
 // One classified path, flattened per contributing step so each row names exactly who wrote it.
 export interface ScopedChange {
@@ -68,9 +77,10 @@ function zonesFor(steps: PlanStep[], ownTaskId: string, row: { taskId: string; s
 
 export function scopedChangesTool(opts: {
   kernel: Pick<Kernel, 'listTaskChangedPaths' | 'getPlan'>
+  citing?: CitingNotes
   p: { taskId: string; stepId: string; role: string }
 }): ResolvedTool[] {
-  const { kernel, p } = opts
+  const { kernel, citing, p } = opts
   // Registration gate, not an execute-time rejection: a visible tool that can only ever error gets
   // called anyway and burns an iteration per attempt (report_coverage learned this live).
   // Both terms are required. PLAN_STEP_ROLE === STEP_ROLE.auditor, so a bare role check would also
@@ -98,7 +108,13 @@ export function scopedChangesTool(opts: {
               inZone, ...(zoneMatched ? { zoneMatched } : {}),
             }
           }))
-        return { output: { paths, floor: FLOOR_NOTE }, isError: false }
+        // deduped: multiple steps writing one file is one candidate lookup, not several
+        const uniquePaths = [...new Set(changed.map(r => r.path))]
+        const citingNotes = citing ? await citing(uniquePaths) : null
+        const floor = citing
+          ? FLOOR_NOTE
+          : FLOOR_NOTE + ' citingNotes unavailable (memory degraded) — name that loudly in your summary.'
+        return { output: { paths, citingNotes, floor }, isError: false }
       } catch (e) {
         return toolError(e)
       }

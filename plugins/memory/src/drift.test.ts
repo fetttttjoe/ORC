@@ -2,7 +2,7 @@ import { describe, expect, it } from 'bun:test'
 import { mkdtempSync, writeFileSync, mkdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import { corpusDrift, createDriftProbe, needsReground, noteHasDrifted, restampableNotes, CORPUS_DRIFT_ADVISORY, type ChangedSince } from './drift'
+import { corpusDrift, createDriftProbe, needsReground, noteHasDrifted, notesCiting, restampableNotes, CORPUS_DRIFT_ADVISORY, type ChangedSince, type CitingNote } from './drift'
 
 const note = (over: Partial<{ sourceRevision: string | null; paths: string[] }> = {}) =>
   ({ sourceRevision: 'abc123', paths: ['packages/kernel/src/kernel.ts'], ...over })
@@ -44,6 +44,32 @@ describe('noteHasDrifted', () => {
     expect(noteHasDrifted(note({ sourceRevision: null }), new Set(['packages/kernel/src/kernel.ts']))).toBe(false)
     expect(noteHasDrifted(note({ paths: [] }), new Set(['anything']))).toBe(false)
     expect(noteHasDrifted(note({ paths: [''] }), new Set(['anything']))).toBe(false)
+  })
+})
+
+// DB-free half: notesCiting is a thin delegation, so a fake handle proves the two properties that
+// matter to its callers — the empty-input short circuit (a commit that created nothing hands it []),
+// and that the paths reach the query unaltered.
+describe('notesCiting', () => {
+  const rows: CitingNote[] = [{ id: 'area-x', scope: 'project', title: 'Area X', sourceRevision: 'abc123' }]
+  const fake = () => {
+    const calls: string[][] = []
+    return {
+      calls,
+      notesCitingPaths: async (paths: readonly string[]) => { calls.push([...paths]); return rows },
+    }
+  }
+
+  it('returns [] for an empty path list WITHOUT querying', async () => {
+    const k = fake()
+    expect(await notesCiting(k, [])).toEqual([])
+    expect(k.calls).toEqual([]) // git_commit passes [] whenever it created no commit — never a full scan
+  })
+
+  it('passes the paths through and returns the rows as CitingNotes', async () => {
+    const k = fake()
+    expect(await notesCiting(k, ['packages/a.ts', 'packages/b.ts'])).toEqual(rows)
+    expect(k.calls).toEqual([['packages/a.ts', 'packages/b.ts']])
   })
 })
 

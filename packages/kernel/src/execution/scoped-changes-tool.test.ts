@@ -70,6 +70,55 @@ const run = async (kernel = fakeKernel([THIS_TASK, CHILD_TASK], PLAN)) => {
   return r
 }
 
+// The heal-or-confirm candidate list: citing notes ride the OUTPUT because drift flags are
+// measured against committed revisions and lag the uncommitted work verify just audited —
+// observed twice as post-commit drift (4/7 corpus) before this existed.
+describe('citingNotes (heal-or-confirm candidates)', () => {
+  const NOTE = { id: 'area-x', scope: 'project', title: 'X', sourceRevision: 'abc' }
+
+  it('carries the citing callback result, called once with the deduped changed paths', async () => {
+    const seen: string[][] = []
+    const [tool] = scopedChangesTool({
+      kernel: fakeKernel([THIS_TASK, CHILD_TASK], PLAN), p: verifyP,
+      citing: async paths => { seen.push(paths); return [NOTE] },
+    })
+    const r = await tool!.execute({})
+    expect(r.isError).toBe(false)
+    expect((r.output as { citingNotes: unknown }).citingNotes).toEqual([NOTE])
+    expect(seen).toHaveLength(1)
+    expect([...seen[0]!].sort()).toEqual([
+      'docs/unrelated-note.md',
+      'packages/kernel/src/child.ts',
+      'packages/kernel/src/execution/scoped-changes-tool.ts',
+    ])
+  })
+
+  it('deduplicates: the same path written by two steps reaches the callback once', async () => {
+    // the shared fixture has no duplicate paths, so the deduped-list test above cannot pin the
+    // dedupe itself — a stub kernel returning one path from two contributors does
+    const seen: string[][] = []
+    const [tool] = scopedChangesTool({
+      kernel: {
+        listTaskChangedPaths: async () => [
+          { path: 'packages/kernel/src/dup.ts', taskId: THIS_TASK, steps: [{ stepId: 's1', tool: 'fs_write' }] },
+          { path: 'packages/kernel/src/dup.ts', taskId: CHILD_TASK, steps: [{ stepId: 'kid', tool: 'fs_write' }] },
+        ],
+        getPlan: async () => PLAN,
+      },
+      p: verifyP,
+      citing: async paths => { seen.push(paths); return [] },
+    })
+    await tool!.execute({})
+    expect(seen).toEqual([['packages/kernel/src/dup.ts']])
+  })
+
+  it('without the callback the field is null and the floor names the gap loudly', async () => {
+    const o = (await run()).output as { citingNotes: unknown; floor: string }
+    expect(o.citingNotes).toBeNull()
+    expect(o.floor).toContain('citingNotes unavailable')
+  })
+})
+
 describe('scoped_changes tool', () => {
   it("excludes a sibling task's write from this task's scoped set (the false positive)", async () => {
     const r = await run()

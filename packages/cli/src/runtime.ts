@@ -5,7 +5,7 @@ import { createOpenAIProvider } from '@orc/provider-openai'
 import { createOllamaProvider } from '@orc/provider-ollama'
 import { agentAnalyzer } from '@orc/analyzer-agent'
 import { createMcpHub, type McpHub } from '@orc/mcp-client'
-import { createMemory, createMemoryLifecycle, createGroundingSource, unavailableStepMemory, memoryRoleFor, type BindStep, type MemoryLifecycle } from '@orc/memory'
+import { createMemory, createMemoryLifecycle, createGroundingSource, notesCiting, unavailableStepMemory, memoryRoleFor, type BindStep, type MemoryLifecycle } from '@orc/memory'
 import { openMemory } from './memory-open'
 import { buildDistiller } from './consolidation-distiller'
 import { createVaultProjector } from '@orc/vault-projector'
@@ -95,6 +95,14 @@ export async function buildRuntime(
         role: memoryRoleFor(p.role), ambientCapture: config.ambientCapture,
       })
       const memoryStore = memory?.store
+      // The citing-notes join both audit-side tools ride: candidates for the auditor's
+      // heal-or-confirm pass (scoped_changes) and leftovers for the receipt's stillDrifted line
+      // (git_commit). Injected here because the kernel may not import plugins/memory — the same
+      // seam as the restamp write below. Absent when memory is degraded; the tools say so loudly.
+      const knowledge = memory?.knowledge
+      const citing = knowledge
+        ? (paths: string[]) => notesCiting(knowledge, paths)
+        : undefined
       return { memory: bound.memory, tools: [
       ...bound.tools,
       // registration-gated inside the factory (like report_coverage): a scout orients, the plan
@@ -112,7 +120,7 @@ export async function buildRuntime(
       // Registration-gated inside the factory to the auditor VERIFY step (role alone would also hand
       // it to the grounded `plan` step, which shares that role). Read-only, and a FLOOR — never a
       // substitute for the test/typecheck gate, never a reason to dismiss an in-scope defect.
-      ...scopedChangesTool({ kernel, p }),
+      ...scopedChangesTool({ kernel, p, ...(citing ? { citing } : {}) }),
       // The commit step's tool pair (autoCommit pipeline): preview the task's floor diff, commit,
       // restamp its notes at the new HEAD. Registration is gated TWICE — on config.autoCommit here
       // (the operator's runtime switch, so a stale frozen plan cannot commit after the flag is
@@ -121,6 +129,7 @@ export async function buildRuntime(
       // commits and says the restamp was skipped.
       ...(config.autoCommit ? commitTool({ kernel, dir: config.dir, p,
         ...(memoryStore ? { restamp: async (note: { id: string; scope: string }, idempotencyKey: string) => { await memoryStore.write({ id: note.id, scope: note.scope }, author, { idempotencyKey }) } } : {}),
+        ...(citing ? { citing } : {}),
       }) : []),
       // exec runs operator-allowlisted commands (execAllowlist in .orc/config.json) in the step
       // workspace — the acceptance-gate tool. Empty allowlist = not offered.

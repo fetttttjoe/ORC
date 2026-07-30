@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { COMMIT_STEP_ID, STEP_ROLE, type ResolvedTool } from '@orc/contracts'
 import { commitTool, type RestampNote } from './commit-tool'
+import type { CitingNotes } from './scoped-changes-tool'
 
 const run = (dir: string, ...args: string[]) => Bun.spawnSync(['git', '-C', dir, ...args], { stdout: 'ignore', stderr: 'ignore' })
 const out = (dir: string, ...args: string[]) => Bun.spawnSync(['git', '-C', dir, '-c', 'core.quotePath=false', ...args], { stdout: 'pipe' }).stdout.toString().trim()
@@ -24,6 +25,7 @@ function build(dir: string, opts: {
   paths?: string[]
   notes?: { id: string; scope: string; paths: string[] }[]
   restamp?: RestampNote | null
+  citing?: CitingNotes
   p?: typeof p
 }) {
   const stamped: { id: string; scope: string; key: string }[] = []
@@ -34,7 +36,7 @@ function build(dir: string, opts: {
       listTaskChangedPaths: async () => changed(...(opts.paths ?? [])),
       listTaskNoteWrites: async () => opts.notes ?? [],
     },
-    dir, restamp, p: opts.p ?? p,
+    dir, restamp, ...(opts.citing ? { citing: opts.citing } : {}), p: opts.p ?? p,
   })
   const tool = (name: string): ResolvedTool => tools.find(t => t.name === name)!
   // the ordinary flow: read the diff, then commit — what every test not ABOUT the gate uses
@@ -192,6 +194,61 @@ describe('git_commit', () => {
     const { tool } = build(repo(), { paths: ['a.ts'] })
     expect((await tool('git_commit').execute({})).isError).toBe(true)
     expect((await tool('git_commit').execute({ message: '' })).isError).toBe(true)
+  })
+})
+
+// The receipt's honesty line: citing notes nobody in this task verified must be NAMED, not
+// silently left stale-stamped — the gap that produced 4/7 post-commit drift twice in one day.
+describe('stillDrifted', () => {
+  it('lists citing notes outside every task-written set; excludes restamped ones', async () => {
+    const dir = repo()
+    writeFileSync(path.join(dir, 'a.ts'), 'a2\n')
+    const foreign = { id: 'area-foreign', scope: 'project', title: 'F', sourceRevision: 'old' }
+    const own = { id: 'area-own', scope: 'project', title: 'O', sourceRevision: 'old' }
+    const built = build(dir, {
+      paths: ['a.ts'],
+      notes: [{ id: 'area-own', scope: 'project', paths: ['a.ts'] }], // task-written → restamped
+      citing: async () => [foreign, own],
+    })
+    const r = await built.commit('feat: change a')
+    expect(r.isError).toBe(false)
+    expect((r.output as Record<string, unknown>).stillDrifted).toEqual([{ id: 'area-foreign', scope: 'project' }])
+    expect(built.stamped.map(s => s.id)).toEqual(['area-own'])
+  })
+
+  it('excludes ALL task-written sets: restamped, skippedDirty, and restampFailed', async () => {
+    const dir = repo()
+    writeFileSync(path.join(dir, 'a.ts'), 'a2\n')
+    writeFileSync(path.join(dir, 'dirty.ts'), 'uncommitted\n') // keeps note-dirty dirty
+    const citing = async () => [
+      { id: 'note-clean', scope: 'project', title: 'C', sourceRevision: 'old' },
+      { id: 'note-dirty', scope: 'project', title: 'D', sourceRevision: 'old' },
+      { id: 'note-throws', scope: 'project', title: 'T', sourceRevision: 'old' },
+      { id: 'note-foreign', scope: 'project', title: 'F', sourceRevision: 'old' },
+    ]
+    const built = build(dir, {
+      paths: ['a.ts'],
+      notes: [
+        { id: 'note-clean', scope: 'project', paths: ['a.ts'] },       // restamped
+        { id: 'note-dirty', scope: 'project', paths: ['dirty.ts'] },   // skippedDirty
+        { id: 'note-throws', scope: 'project', paths: ['a.ts'] },      // restampFailed
+      ],
+      restamp: async note => { if (note.id === 'note-throws') throw new Error('surreal down') },
+      citing,
+    })
+    const r = await built.commit('feat: change a')
+    expect(r.isError).toBe(false)
+    // only the foreign note is a leftover — every task-written note is already reported under
+    // its own key (restamped / skippedDirty / restampFailed), never double-counted here
+    expect((r.output as Record<string, unknown>).stillDrifted).toEqual([{ id: 'note-foreign', scope: 'project' }])
+  })
+
+  it('is null when the callback is absent (memory degraded) — loud, never an empty lie', async () => {
+    const dir = repo()
+    writeFileSync(path.join(dir, 'a.ts'), 'a2\n')
+    const r = await build(dir, { paths: ['a.ts'] }).commit('feat: change a')
+    expect(r.isError).toBe(false)
+    expect((r.output as Record<string, unknown>).stillDrifted).toBeNull()
   })
 })
 
