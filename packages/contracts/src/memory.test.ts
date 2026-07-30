@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'bun:test'
-import { MemoryNoteInput, MemoryNote, MEMORY_ID_RE, LINK_KINDS, NOTE_TIER, inferTier, parseLinkSpec, formatLinkSpec, type PlanNoteInput, type SemanticNoteInput } from './memory'
+import { MemoryNoteDraftInput, MemoryNoteInput, MemoryNote, MEMORY_ID_RE, LINK_KINDS, NOTE_TIER, VerifiedStamp, deriveNoteProvenance, inferTier, noteContentKey, parseLinkSpec, formatLinkSpec, type PlanNoteInput, type SemanticNoteInput } from './memory'
+import { EVENT_KIND } from './event-kinds'
 import { PAYLOAD_SCHEMAS } from './events'
 
 // The tier discriminates the union, so a test that asserts tier-specific fields has to say which
@@ -249,5 +250,84 @@ describe('parseLinkSpec', () => {
   it('round-trips through formatLinkSpec', () => {
     const spec = 'supersedes:old-note, relates_to:other'
     expect(formatLinkSpec(parseLinkSpec(spec).map(l => ({ id: l.id, kind: l.kind ?? 'relates_to' })))).toBe(spec)
+  })
+})
+
+// ─── the verification stamp ───────────────────────────────────────────────────────────────────
+//
+// The rule the whole feature rests on: verification is DECLARED by an explicit act (memory_verify →
+// a memory_verified event), never INFERRED from authorship. A write can only carry an existing
+// stamp forward or destroy it, so these pin both directions — a heal that carried a stale "checked"
+// forward would be exactly the false confidence the stamp exists to prevent.
+describe('VerifiedStamp on note provenance', () => {
+  const author = { source: 'cli' } as const
+  const stamp = { revision: 'c0ffee1', at: '2026-07-01T00:00:00.000Z', by: 'cli' }
+  const draft = { id: 'auth-flow', title: 'Auth flow', summary: 's', body: 'b', paths: ['src/auth.ts'] }
+  // `prev` is what a projected row hands deriveNoteProvenance: the note's content plus the
+  // provenance columns, sources already stamped with the retrievedAt the projector derived.
+  const note = MemoryNoteInput.parse(draft)
+  const stored = { ...note, sources: [], createdAt: 't0', createdBy: 'cli', revision: 3 }
+
+  it('carries an existing verified forward when the write changes no content', () => {
+    // the motivating case: the commit restamp writes the note back with NO fields supplied, purely
+    // to move sourceRevision to the new HEAD. That must not destroy the auditor's verification.
+    const prev = { ...stored, verified: stamp }
+    const restamped = MemoryNoteInput.parse({ ...draft, sourceRevision: 'newhead' })
+    expect(deriveNoteProvenance(restamped, author, 't1', prev).verified).toEqual(stamp)
+  })
+
+  it('CLEARS verified when any content field changed — a heal never carries a stale check forward', () => {
+    const prev = { ...stored, verified: stamp }
+    for (const changed of [{ body: 'rewritten' }, { summary: 'new' }, { title: 'Renamed' }, { paths: ['src/other.ts'] }, { tags: ['x'] }]) {
+      const next = MemoryNoteInput.parse({ ...draft, ...changed })
+      expect(deriveNoteProvenance(next, author, 't1', prev)).not.toHaveProperty('verified')
+    }
+  })
+
+  it('NO write path ever SETS verified — only memory_verify declares one', () => {
+    // no previous stamp in, no stamp out: the field is absent, not defaulted, so a note that was
+    // never verified cannot read as verified on any surface.
+    expect(deriveNoteProvenance(note, author, 't1')).not.toHaveProperty('verified')
+    expect(deriveNoteProvenance(note, author, 't1', stored)).not.toHaveProperty('verified')
+  })
+
+  it('is not authorable: `verified` is absent from the write draft surface', () => {
+    // DraftCoversTiers stays satisfied because `verified` is PROVENANCE, not a tier field — an
+    // agent that could pass it would be inferring its own verification.
+    expect(Object.keys(MemoryNoteDraftInput.shape)).not.toContain('verified')
+    expect(MemoryNoteInput.parse({ ...draft, verified: stamp })).not.toHaveProperty('verified')
+  })
+
+  it('parses onto a stored note of every tier, and rejects an empty revision', () => {
+    expect(VerifiedStamp.safeParse({ revision: '', at: 't', by: 'cli' }).success).toBe(false)
+    const stored = { createdAt: 't', createdBy: 'cli', updatedAt: 't', updatedBy: 'cli', revision: 1 }
+    for (const d of [draft, { id: 'x', title: 'X', scope: 'plan-a', retention: 'expirable' }, { id: 'y', title: 'Y', rationale: 'why' }])
+      expect(MemoryNote.parse({ ...MemoryNoteInput.parse(d), ...stored, verified: stamp })).toHaveProperty('verified', stamp)
+  })
+
+  it('noteContentKey ignores provenance and address, and moves with what the note SAYS', () => {
+    const key = (d: unknown) => noteContentKey(MemoryNoteInput.parse(d))
+    // sourceRevision is re-stamped from HEAD on every write, so it cannot be content
+    expect(key({ ...draft, sourceRevision: 'aaa' })).toBe(key({ ...draft, sourceRevision: 'bbb' }))
+    expect(key(draft)).not.toBe(key({ ...draft, body: 'different' }))
+    // a citation's retrievedAt is provenance the projector stamps; the URL is content
+    const cited = { id: 'r', title: 'R', kind: 'research', sources: [{ url: 'https://x.test/a' }] }
+    expect(noteContentKey({ ...MemoryNoteInput.parse(cited), sources: [{ url: 'https://x.test/a', retrievedAt: 't9' }] }))
+      .toBe(key(cited))
+    expect(key({ ...cited, sources: [{ url: 'https://x.test/b' }] })).not.toBe(key(cited))
+  })
+})
+
+describe('memory_verified event', () => {
+  it('has a payload schema keyed by its own event kind', () => {
+    const payload = {
+      id: 'auth-flow', scope: 'project',
+      stamp: { revision: 'c0ffee1', at: '2026-07-01T00:00:00.000Z', by: 'cli' },
+      author: { source: 'cli' },
+    }
+    expect(PAYLOAD_SCHEMAS[EVENT_KIND.memory_verified].safeParse(payload).success).toBe(true)
+    // id/scope index the read model by key, same MEMORY_ID_RE guard memory_deleted carries
+    expect(PAYLOAD_SCHEMAS[EVENT_KIND.memory_verified].safeParse({ ...payload, id: '../x' }).success).toBe(false)
+    expect(PAYLOAD_SCHEMAS[EVENT_KIND.memory_verified].safeParse({ ...payload, stamp: { at: 't', by: 'cli' } }).success).toBe(false)
   })
 })

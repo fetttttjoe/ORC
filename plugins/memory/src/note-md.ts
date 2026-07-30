@@ -28,7 +28,7 @@ type RenderedField =
   | 'paths'                                                            // spread when present
   | 'dependsOn' | 'skillRefs' | 'toolRefs' | 'modelRef'                // plan tier's execution payload
   | 'summary'
-  | 'createdAt' | 'createdBy' | 'updatedAt' | 'updatedBy' | 'revision'
+  | 'createdAt' | 'createdBy' | 'updatedAt' | 'updatedBy' | 'revision' | 'verified'
   | 'sources' | 'claims' | 'rationale' | 'uncertainty'                 // body sections
   | 'body'
 type RenderCoversNote = Exclude<keyof NoteView, RenderedField | 'zone'> extends never ? true : never
@@ -59,6 +59,9 @@ export function renderNoteFile(note: MemoryNote): string {
     summary: note.summary,
     createdAt: note.createdAt, createdBy: note.createdBy,
     updatedAt: note.updatedAt, updatedBy: note.updatedBy, revision: note.revision,
+    // Omitted on the notes nobody has checked, which is most of them: a `verified: null` on every
+    // file would read as a claim about them ("checked, found nothing") rather than as silence.
+    ...(n.verified && { verified: n.verified }),
   })
   const decomposesInto = linksOf(note.links, LINK_KIND.decomposes_into)
   const dependsOn = linksOf(note.links, LINK_KIND.depends_on)

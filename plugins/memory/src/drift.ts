@@ -37,6 +37,32 @@ export function noteHasDrifted(note: NoteDrift, changed: ReadonlySet<string> | n
 // describes what was on disk when it was written and an uncommitted edit has already invalidated it.
 export type ChangedSince = (rev: string) => Promise<ReadonlySet<string> | null>
 
+// The EITHER-CLEAN rule, and the one function every drift verdict should go through.
+//
+// A note carries two INDEPENDENT answers to "when was this last known true": `sourceRevision`, which
+// the store stamps at write time, and `verified.revision`, which an auditor declared by calling
+// memory_verify. The fresher one governs — a note whose code moved after it was written but before
+// an auditor read it against the tree is not stale, and flagging it sends the next agent to re-derive
+// knowledge that was just confirmed. That was the observed loop: the heal pass re-verified notes
+// nothing had changed, because a verification could not clear anything.
+//
+// Composed HERE rather than inside noteHasDrifted so that stays the single-set primitive both terms
+// call — and every rule it already commits to carries through unchanged. In particular the
+// fail-toward-not-drifted rule applies to the verified stamp too: an unreachable verified revision
+// (changedSince → null) is UNKNOWN, and unknown is never evidence of rot.
+export async function noteDrifted(
+  note: NoteDrift & { verified?: { revision: string } },
+  changedSince: ChangedSince,
+): Promise<boolean> {
+  if (note.sourceRevision === null || note.paths.length === 0) return false
+  if (!noteHasDrifted(note, await changedSince(note.sourceRevision))) return false
+  if (!note.verified) return true
+  const v = note.verified.revision
+  // one git diff per DISTINCT revision — createDriftProbe caches, so the second probe is free
+  // whenever a run's notes share a verification revision (they do: one commit, one auditor pass)
+  return noteHasDrifted({ sourceRevision: v, paths: note.paths }, await changedSince(v))
+}
+
 // One `git diff` per distinct revision per process. Notes written in the same run share a revision,
 // so this collapses to a single call in practice.
 export function createDriftProbe(dir: string): ChangedSince {
@@ -85,7 +111,7 @@ export interface CorpusDrift {
 export const CORPUS_DRIFT_ADVISORY = 0.34
 
 export async function corpusDrift(
-  notes: ReadonlyArray<{ sourceRevision: string | null; paths?: readonly string[] }>,
+  notes: ReadonlyArray<{ sourceRevision: string | null; paths?: readonly string[]; verified?: { revision: string } }>,
   changedSince: ChangedSince,
 ): Promise<CorpusDrift> {
   let checkable = 0
@@ -97,7 +123,10 @@ export async function corpusDrift(
     // one git diff per DISTINCT revision — notes from one run share theirs, so this collapses
     const changed = await changedSince(n.sourceRevision)
     if (changed === null) { checkable -= 1; continue } // unreachable revision is unknown, not drifted
-    if (noteHasDrifted({ sourceRevision: n.sourceRevision, paths }, changed)) drifted += 1
+    // the SOURCE stamp alone decides CHECKABILITY (a verification cannot make an unstamped or
+    // path-less note checkable), then noteDrifted's either-clean rule decides the verdict — one
+    // spelling of that rule, so the corpus ratio and the per-note flag cannot answer differently
+    if (await noteDrifted({ sourceRevision: n.sourceRevision, paths, ...(n.verified && { verified: n.verified }) }, changedSince)) drifted += 1
   }
   return { checkable, drifted, total: notes.length, ratio: checkable === 0 ? null : drifted / checkable }
 }

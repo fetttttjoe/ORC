@@ -3,7 +3,7 @@ import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { z } from 'zod'
-import { claimId, EVENT_KIND, MemoryAccessedPayload, MemoryAuthor, MemoryTopicAccessedPayload, MemoryWrittenPayload, NOTE_TIER, type AccessVia } from '@orc/contracts'
+import { claimId, EVENT_KIND, MemoryAccessedPayload, MemoryAuthor, MemoryTopicAccessedPayload, MemoryVerifiedPayload, MemoryWrittenPayload, NOTE_TIER, type AccessVia } from '@orc/contracts'
 import { openStorage, type EventLog } from '@orc/kernel'
 import { createTestDb, TEST_PROJECT_ID, type TestDb } from '@orc/kernel/test-helpers'
 import { SurrealMemory } from './surreal'
@@ -328,5 +328,68 @@ describe('topic fetches are tracked', () => {
     const { log, store } = await openTopics()
     await expect(store.topicClaims('deadbeef0000', { source: 'cli' })).rejects.toThrow(/list topics again/)
     expect(await topicAccesses(log)).toEqual([])
+  })
+})
+
+// ─── store.verify: the single writer of the verification stamp ─────────────────────────────────
+describe('MemoryStore.verify', () => {
+  const HEAD = 'c0ffee1234567890'
+  const open = async (sourceRevision: () => Promise<string | null> = async () => HEAD) => {
+    const pg = await createTestDb(); drops.push(pg.drop)
+    const ts = await createTestSurreal(); drops.push(ts.drop)
+    const log = await openLog(pg)
+    return { log, store: createMemoryStore({ log, surreal: await SurrealMemory.open(ts), sourceRevision }) }
+  }
+
+  it('appends exactly one memory_verified stamped with the SAME HEAD a write stamps sourceRevision from', async () => {
+    const { log, store } = await open()
+    await store.write({ id: 'auth', title: 'Auth' }, { source: 'cli' })
+    const stamp = await store.verify('auth', undefined, { source: 'agent', taskId: 't1', stepId: 'verify', runToken: 'r1' })
+    expect(stamp.revision).toBe(HEAD)
+    expect(stamp.by).toBe('agent')
+    const events = await log.all()
+    // the act writes NO note: one write, one verification, and nothing else
+    expect(events.map(e => e.kind)).toEqual([EVENT_KIND.memory_written, EVENT_KIND.memory_verified])
+    const p = MemoryVerifiedPayload.parse(events[1]!.payload)
+    expect(p).toMatchObject({ id: 'auth', scope: 'project', stamp })
+    // envelope bound to the acting step, same rule recordAccess follows — an unbound append would
+    // orphan the verification from the run that made it
+    expect(events[1]!.taskId).toBe('t1')
+    expect(events[1]!.runToken).toBe('r1')
+  })
+
+  it('refuses an id the LOG has no live note for, naming it', async () => {
+    const { log, store } = await open()
+    await expect(store.verify('never-written', undefined, { source: 'cli' })).rejects.toThrow(/never-written/)
+    expect(await log.all()).toEqual([])
+    // a deleted note cannot be verified back into existence
+    await store.write({ id: 'gone', title: 'Gone' }, { source: 'cli' })
+    await store.remove('gone')
+    await expect(store.verify('gone', undefined, { source: 'cli' })).rejects.toThrow(/gone/)
+    expect((await log.all()).map(e => e.kind)).toEqual([EVENT_KIND.memory_written, EVENT_KIND.memory_deleted])
+  })
+
+  // A stamp whose revision nothing can be compared against reads as confirmation while proving
+  // nothing — worse than no stamp at all, and unrecoverable once it is in an immutable log.
+  it('refuses to stamp at all when the runtime has no readable HEAD', async () => {
+    const { log, store } = await open(async () => null)
+    await store.write({ id: 'auth', title: 'Auth' }, { source: 'cli' })
+    await expect(store.verify('auth', undefined, { source: 'cli' })).rejects.toThrow(/source revision/)
+    expect((await log.all()).map(e => e.kind)).toEqual([EVENT_KIND.memory_written])
+  })
+
+  // A keyed replay is the SAME declaration arriving twice, so it must RESOLVE — the surrounding
+  // operation is at-least-once, and a DBOS re-execution of a tool step whose append already
+  // committed would otherwise hand the auditor a tool error for work that succeeded.
+  // The payload conflicts by construction here, unlike write's: `stamp.at` is a fresh clock read per
+  // attempt, so the log's identical-payload reuse path can never fire for a verification.
+  it('is idempotent under a keyed crash-retry of the surrounding tool call', async () => {
+    const { log, store } = await open()
+    await store.write({ id: 'auth', title: 'Auth' }, { source: 'cli' })
+    const author: MemoryAuthor = { source: 'agent', runToken: 'r1' }
+    const first = await store.verify('auth', undefined, author, { idempotencyKey: 'r1:tool:c1:verify:auth' })
+    const replay = await store.verify('auth', undefined, author, { idempotencyKey: 'r1:tool:c1:verify:auth' })
+    expect(replay.revision).toBe(first.revision)
+    expect((await log.all()).filter(e => e.kind === EVENT_KIND.memory_verified)).toHaveLength(1)
   })
 })

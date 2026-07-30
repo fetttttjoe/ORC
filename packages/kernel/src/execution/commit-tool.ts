@@ -3,7 +3,7 @@ import { existsSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { z } from 'zod'
-import { COMMIT_STEP_ID, STEP_ROLE, errorMessage, toolError, type ResolvedTool } from '@orc/contracts'
+import { COMMIT_STEP_ID, STEP_ROLE, errorMessage, noteKey, toolError, type ResolvedTool } from '@orc/contracts'
 import type { Kernel } from '../kernel'
 import type { CitingNotes } from './scoped-changes-tool'
 import { clipMiddle } from './clip'
@@ -12,23 +12,38 @@ import { clipMiddle } from './clip'
 // (against a TEMPORARY index — a preview is a look, never a stage) and returns its real diff;
 // git_commit refuses whenever the tree no longer matches the last diff the agent saw, handing back
 // the fresh one — so the message is proposed from the changes by construction, not by contract
-// prose. After committing it restamps the notes this task wrote whose declared paths are fully
-// committed at the new HEAD — the truthful replacement for drift.ts restampableNotes' corpus-wide
-// guess. Not stampable = tracked changes pending, OR untracked content, OR a declared path with no
-// content at HEAD at all; every git failure also falls toward NOT stamping, the opposite of
-// drift's read-side rule, because a false current-stamp poisons the freshness gate while a skipped
-// stamp costs one re-heal.
+// prose. After committing it advances the stamps this task EARNED at the new HEAD — the truthful
+// replacement for drift.ts restampableNotes' corpus-wide guess. Earned, not written: a note the
+// task healed (rewrote prose that already existed) gets its source stamp restamped, a note a step
+// declared verified gets its verification stamp advanced, and a note the task merely authored gets
+// neither — it is named in stillDrifted instead. Not stampable = tracked changes pending, OR
+// untracked content, OR a declared path with no content at HEAD at all; every git failure also
+// falls toward NOT stamping, the opposite of drift's read-side rule, because a false current-stamp
+// poisons the freshness gate while a skipped stamp costs one re-heal.
 const CommitInput = z.object({ message: z.string().min(1).max(5000) })
 
-// The write half of the restamp, injected by the composition root (memory's store.write with the
-// step author) so this file never imports the memory plugin. Undefined = memory degraded.
-export type RestampNote = (note: { id: string; scope: string }, idempotencyKey: string) => Promise<void>
+// The write half of a stamp pass, injected by the composition root so this file never imports the
+// memory plugin: `restamp` is memory's store.write with the step author, `reverify` its store.verify.
+// One type because the seam is identical — a note ref plus an idempotency key, because both run
+// inside an at-least-once operation. Undefined = memory degraded.
+export type StampNote = (note: { id: string; scope: string }, idempotencyKey: string) => Promise<void>
+
+// The `degraded` convention: an absent measurement is `null` in its own field PLUS a reason here,
+// and the `degraded` key itself is omitted from the receipt when everything measured — never a
+// one-off bespoke key per absence (this file used to mint one just for the missing restamp) and
+// never prose folded into another field (scoped-changes-tool's `floor` did that). Motivating
+// failure: a consumer grepping for "degraded" must never miss an absence spelled a different way.
+const RESTAMP_DEGRADED = 'restamp unavailable — memory is degraded; run `orc memory restamp` once memory is back'
+// Its own reason, not folded into the restamp's: the repairs differ. A missed restamp is fixed by
+// re-running the restamp; a missed reverify needs an auditor to declare the note verified again.
+const REVERIFY_DEGRADED = 'reverify unavailable — memory is degraded; notes this task verified keep their pre-commit stamp'
+const STILL_DRIFTED_DEGRADED = 'stillDrifted unmeasured — citing-notes join unavailable (memory degraded)'
 
 const PREVIEW_DESCRIPTION =
   "Compute THIS task's pending commit and return {paths, diff, skippedIgnored}: exactly what git_commit will commit (the scoped_changes floor — sibling tasks' work is excluded, gitignored paths are skipped and listed). Read the diff — your commit message must describe it. A file changed only by exec commands (formatters, codegen) is not in the floor and will be missing; say so in your summary if you know of one."
 
 const COMMIT_DESCRIPTION =
-  'Commit the previewed changes with your message, then restamp the notes this task wrote whose declared paths are fully committed. If the working tree no longer matches the diff you last saw (or you never looked), it refuses and returns the current diff — read it and call again. Commits by pathspec, so content someone else staged never rides along. Returns {commit, created, committedPaths, restamped, skippedDirty, restampFailed, skippedIgnored, stillDrifted}: created:false means nothing was left to commit (e.g. a child task already committed) and the restamp still ran. A note under skippedDirty cites paths not provably committed (pending edits, untracked content, or nothing at HEAD) and stays drifted on purpose. stillDrifted lists notes citing committed paths that no step of this task verified — carry it into your summary verbatim.'
+  'Commit the previewed changes with your message, then advance the note stamps this task earned: notes it HEALED (rewrote prose that already existed) are restamped, notes a step DECLARED verified are reverified at the new commit — both only when their declared paths are fully committed. A note the task merely wrote for the first time earns no stamp; it appears in stillDrifted. If the working tree no longer matches the diff you last saw (or you never looked), it refuses and returns the current diff — read it and call again. Commits by pathspec, so content someone else staged never rides along. Returns {commit, created, committedPaths, restamped, skippedDirty, restampFailed, reverified, reverifyFailed, skippedIgnored, stillDrifted, degraded}: created:false means nothing was left to commit (e.g. a child task already committed) and the stamp pass still ran. A note under skippedDirty cites paths not provably committed (pending edits, untracked content, or nothing at HEAD) and stays drifted on purpose. stillDrifted lists notes citing committed paths that no step of this task verified — carry it into your summary verbatim. degraded lists why a measurement could not be made (memory unavailable for a stamp write or the citing join) and is present ONLY when something is degraded — carry it into your summary verbatim too.'
 
 // per stream, head + tail, like exec-tool's clip: enough diff to write an honest message, never an
 // unbounded prompt
@@ -68,16 +83,31 @@ const sha256 = (s: string): string => createHash('sha256').update(s).digest('hex
 interface Staged { addable: string[]; paths: string[]; staged: string[]; diff: string; digest: string; skippedIgnored: string[] }
 
 export function commitTool(opts: {
-  kernel: Pick<Kernel, 'listTaskChangedPaths' | 'listTaskNoteWrites'>
+  kernel: Pick<Kernel, 'listTaskChangedPaths' | 'listTaskNoteWrites' | 'listTaskVerifiedNotes'>
   dir: string
-  restamp?: RestampNote
+  restamp?: StampNote
+  // The verification half: advances the verified stamp of the notes a step of this task DECLARED
+  // verified (memory_verify) to the new HEAD. Within ONE task this completes a provisional stamp
+  // truthfully — the auditor checked the worktree, the stamp named the old HEAD, and the commit is
+  // what makes the two the same tree.
+  // CEILING: across a subtree it says less than it looks like. listTaskVerifiedNotes scopes to
+  // subtreeTaskIds, and the dirty gate proves the note's paths are COMMITTED, never that they are
+  // UNCHANGED SINCE THE AUDIT. So: child A's auditor verifies note X citing a.ts; sibling B then
+  // changes a.ts while X's own content stays put (so taskVerifiedNotes' carry rule correctly keeps
+  // the stamp); the parent's commit reverifies X at the new HEAD and excludes it from stillDrifted —
+  // X reads fresh against code nobody re-read. Not a regression: confirm-by-write reached the same
+  // outcome through sourceRevision, which is the piggyback this task removed on the other half.
+  // UPGRADE: the memory_verified payload carries stamp.revision and taskVerifiedNotes drops it
+  // today. Keeping it, and reverifying only when no commit between stamp.revision and HEAD touched
+  // the note's declared paths, is the strict version — same dirty-gate machinery, one git range-diff.
+  reverify?: StampNote
   // The citing-notes join (scoped-changes-tool's CitingNotes, injected in runtime.ts like restamp):
   // powers the receipt's stillDrifted honesty line — notes citing committed paths that no step of
   // this task verified, which would otherwise sit stale-stamped and silent until the next drift scan.
   citing?: CitingNotes
   p: { taskId: string; stepId: string; role: string; runToken: string }
 }): ResolvedTool[] {
-  const { kernel, dir, restamp, citing, p } = opts
+  const { kernel, dir, restamp, reverify, citing, p } = opts
   // both terms, like scoped_changes: the committer role is kernel-set (withCommitStep, enforced by
   // proposeSplit's reserved-role refusal), so a planner-authored step named 'commit' never arms this
   if (p.stepId !== COMMIT_STEP_ID || p.role !== STEP_ROLE.committer) return []
@@ -166,28 +196,67 @@ export function commitTool(opts: {
     return dirty
   }
 
-  const restampTouched = async (): Promise<{
+  // What this task DECLARED about each note it touched, and the stamp each declaration earns.
+  // Authorship is not one of them: writing a note says who typed it, never that it is true.
+  interface Declared { id: string; scope: string; paths: string[]; healed: boolean; verified: boolean }
+
+  const stampDeclared = async (): Promise<{
     restamped: { id: string; scope: string }[]
     skippedDirty: { id: string; scope: string; dirtyPaths: string[] }[]
     restampFailed: { id: string; scope: string; error: string }[]
+    reverified: { id: string; scope: string }[]
+    reverifyFailed: { id: string; scope: string; error: string }[]
   }> => {
     const restamped: { id: string; scope: string }[] = []
     const skippedDirty: { id: string; scope: string; dirtyPaths: string[] }[] = []
     const restampFailed: { id: string; scope: string; error: string }[] = []
+    const reverified: { id: string; scope: string }[] = []
+    const reverifyFailed: { id: string; scope: string; error: string }[] = []
+
+    // Merged by note, so a note this task both healed and verified is dirty-checked ONCE (four git
+    // calls per note) and reported once per stamp it actually earned, never twice under skippedDirty.
+    const declared = new Map<string, Declared>()
     for (const n of await kernel.listTaskNoteWrites(p.taskId)) {
+      // THE RULE: only a heal — a write to a note that already existed — earns a restamp. A note
+      // this task CREATED gets nothing: the write proved nothing about its truth, and stamping it
+      // anyway is what let every ambient step note read verified-fresh without a reader. Such a
+      // note is not silently dropped: it falls into stillDrifted below, which is the honest answer.
+      if (!n.preexisting) continue
+      declared.set(noteKey(n.scope, n.id), { id: n.id, scope: n.scope, paths: n.paths, healed: true, verified: false })
+    }
+    for (const n of await kernel.listTaskVerifiedNotes(p.taskId)) {
+      const key = noteKey(n.scope, n.id)
+      const seen = declared.get(key)
+      if (seen) seen.verified = true
+      else declared.set(key, { id: n.id, scope: n.scope, paths: n.paths, healed: false, verified: true })
+    }
+
+    for (const n of declared.values()) {
       const dirty = await notStampable(n.paths)
       if (dirty === null) continue
+      // A verified note citing dirty paths must NOT be reverified either: the auditor checked a
+      // worktree the commit did not capture, so a stamp at the new HEAD would name a tree nobody read.
       if (dirty.length > 0) { skippedDirty.push({ id: n.id, scope: n.scope, dirtyPaths: dirty }); continue }
-      if (!restamp) continue
-      try {
-        await restamp({ id: n.id, scope: n.scope }, `${p.runToken}:restamp:${n.scope}:${n.id}`)
-        restamped.push({ id: n.id, scope: n.scope })
-      } catch (err) {
-        // the commit already exists; a read-model hiccup on one note must not report it as failed
-        restampFailed.push({ id: n.id, scope: n.scope, error: errorMessage(err) })
+      const ref = { id: n.id, scope: n.scope }
+      if (n.healed && restamp) {
+        try {
+          await restamp(ref, `${p.runToken}:restamp:${n.scope}:${n.id}`)
+          restamped.push(ref)
+        } catch (err) {
+          // the commit already exists; a read-model hiccup on one note must not report it as failed
+          restampFailed.push({ ...ref, error: errorMessage(err) })
+        }
+      }
+      if (n.verified && reverify) {
+        try {
+          await reverify(ref, `${p.runToken}:reverify:${n.scope}:${n.id}`)
+          reverified.push(ref)
+        } catch (err) {
+          reverifyFailed.push({ ...ref, error: errorMessage(err) })
+        }
       }
     }
-    return { restamped, skippedDirty, restampFailed }
+    return { restamped, skippedDirty, restampFailed, reverified, reverifyFailed }
   }
 
   return [{
@@ -200,8 +269,8 @@ export function commitTool(opts: {
         if ('error' in s) return { output: { error: s.error }, isError: true }
         seenDigest = s.digest
         // observed live: an agent read the empty preview as license to skip git_commit entirely,
-        // silently skipping the restamp pass that the created:false path exists to run
-        return { output: { paths: s.staged, diff: s.diff || '(no pending changes — nothing left to commit; STILL call git_commit with a message so the note restamp runs)', skippedIgnored: s.skippedIgnored }, isError: false }
+        // silently skipping the stamp pass (restamp AND reverify) that the created:false path exists to run
+        return { output: { paths: s.staged, diff: s.diff || '(no pending changes — nothing left to commit; STILL call git_commit with a message so the note stamps run)', skippedIgnored: s.skippedIgnored }, isError: false }
       } catch (err) {
         return toolError(err)
       }
@@ -248,17 +317,26 @@ export function commitTool(opts: {
         const head = await git(dir, ['rev-parse', 'HEAD'])
         if (head.code !== 0) return { output: { error: `cannot resolve HEAD: ${head.stderr.trim()}` }, isError: true }
 
-        const notes = await restampTouched()
-        // Leftovers = citing notes minus every task-written set (restamped ∪ skippedDirty ∪
-        // restampFailed — those are already reported under their own keys). null when the join is
-        // absent: a missing measurement must never read as a clean zero.
-        const own = new Set([...notes.restamped, ...notes.skippedDirty, ...notes.restampFailed].map(n => `${n.scope}:${n.id}`))
+        const notes = await stampDeclared()
+        // Leftovers = citing notes minus every note this task DECLARED something about (restamped ∪
+        // skippedDirty ∪ restampFailed ∪ reverified ∪ reverifyFailed — each already reported under
+        // its own key). The two *Failed sets belong here: the declaration happened, only the stamp
+        // write did not, and naming the note twice would read as two different problems. A note this
+        // task merely WROTE is NOT here — that is the point of the honesty line. null when the join
+        // is absent: a missing measurement must never read as a clean zero.
+        const own = new Set([...notes.restamped, ...notes.skippedDirty, ...notes.restampFailed,
+          ...notes.reverified, ...notes.reverifyFailed].map(n => noteKey(n.scope, n.id)))
         const cited = citing ? await citing(committedPaths) : null
-        const stillDrifted = cited ? cited.filter(n => !own.has(`${n.scope}:${n.id}`)).map(n => ({ id: n.id, scope: n.scope })) : null
+        const stillDrifted = cited ? cited.filter(n => !own.has(noteKey(n.scope, n.id))).map(n => ({ id: n.id, scope: n.scope })) : null
+        const degraded: string[] = [
+          ...(restamp ? [] : [RESTAMP_DEGRADED]),
+          ...(reverify ? [] : [REVERIFY_DEGRADED]),
+          ...(citing ? [] : [STILL_DRIFTED_DEGRADED]),
+        ]
         return {
           output: {
             commit: head.stdout.trim(), created, committedPaths, skippedIgnored: fresh.skippedIgnored, ...notes, stillDrifted,
-            ...(restamp ? {} : { restampUnavailable: 'memory is degraded — no note was restamped; run `orc memory restamp` once memory is back' }),
+            ...(degraded.length > 0 ? { degraded } : {}),
           }, isError: false,
         }
       } catch (err) {

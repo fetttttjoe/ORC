@@ -1,12 +1,23 @@
 import { z } from 'zod'
-import { AccessVia, CLAIM_ID_RE, ClaimWrite, isRecord, EDGE_DIRECTIONS, linkLookupScopes, MASTERPLAN_NOTE_ID, MemoryScope, MEMORY_ACCESS, MEMORY_LIMITS, MEMORY_SOURCE_LIMITS, MEMORY_TOOL_NAME, MemorySearchResult, MemoryWriteResult, NOTE_KINDS, LINK_KIND, LINK_KINDS, RETENTION_CLASSES, SEARCH_MODES, SearchMode, siblingOrderingMisuse, zoneEntryMisuse, LinkKind, MemoryNoteDraftInput, NOTE_TIER, NOTE_TIERS, slugId, toolError, type MemoryAuthor, type MemoryNote, type MemoryStore, type ResolvedTool } from '@orc/contracts'
+import { AccessVia, CLAIM_ID_RE, ClaimWrite, isRecord, EDGE_DIRECTIONS, inferTier, linkLookupScopes, MASTERPLAN_NOTE_ID, MemoryScope, MEMORY_ACCESS, MEMORY_ID_RE, MEMORY_LIMITS, MEMORY_SOURCE_LIMITS, MEMORY_TOOL_NAME, MemorySearchResult, MemoryWriteResult, NOTE_KINDS, LINK_KIND, LINK_KINDS, planFieldViolations, RETENTION_CLASSES, SEARCH_MODES, SearchMode, STEP_ROLE, VERIFY_STEP_ID, LinkKind, MemoryNoteDraftInput, NOTE_TIER, NOTE_TIERS, slugId, toolError, type MemoryAuthor, type MemoryNote, type MemoryStore, type ResolvedTool, type VerifiedStamp } from '@orc/contracts'
 import { applyBudget, fitMemoryNoteToBudget } from './budget'
-import { noteHasDrifted, type ChangedSince } from './drift'
+import { noteDrifted, type ChangedSince } from './drift'
 import { NEAR_SUBJECT, trigramDice } from './title-similarity'
 
-// Advisory note lint, echoed back in the memory_write result so the writing agent can improve
-// the note in its next iteration — warnings, never rejections: a blocked write mid-run burns
-// more tokens than a mediocre note. Thresholds follow the codebase-analysis skill's skeleton.
+// Advisory note lint, echoed back in the memory_write result. Two severities now, not one — see
+// contracts' plan-rules.ts RULE_SEVERITY: a plan-field SHAPE mistake (an ordering edge where
+// scheduling never reads it, a zone entry that is not one glob) REFUSES before the write lands;
+// everything below this file's own noteLint/normalizeWrite/duplicate checks still only WARNS — a
+// blocked write mid-run burns more tokens than a mediocre note. Two failures motivate the split,
+// not one: [sourced] plugins/executor-api-loop/src/loop.ts's
+// `const [warning] = parsed.success ? parsed.data.warnings ?? [] : []` lifts ONLY warnings[0] into
+// the next turn, so a shape mistake landed second (behind an advisory lint) was never seen by the
+// model that made it; and a zone entry joining several globs into one string passed every gate as a
+// warning, froze into a step's write-fence matching no real path, and left two steps refused every
+// write to their own files with no repair path (the incident contracts' zoneEntryMisuse documents).
+// A warning can be corrected on the NEXT write; a frozen fence cannot — that asymmetry is why shape
+// rules refuse and judgment rules don't. Thresholds below follow the codebase-analysis skill's
+// skeleton.
 // Text a writer double-escaped on its way in: a model that emits `\\"` inside a JSON tool argument
 // stores a literal backslash, and the note then reads wrong everywhere it is rendered. Observed on
 // a live run, in 3 of 28 notes. Warned rather than stripped on purpose — silently repairing it
@@ -32,47 +43,24 @@ export async function unresolvedLinks(store: MemoryStore, note: MemoryNote): Pro
   return missing
 }
 
-// Ordering written as a knowledge edge, caught where it happens instead of at the approval gate.
-// The rule and its wording are contracts' siblingOrderingMisuse — the grounded freeze throws on the
-// same predicate, and a validation rule spelled twice drifts worse than a literal.
+// The depends_on link targets that are themselves plan-tier notes — the ONE store lookup
+// contracts' siblingOrderingMisuse needs but cannot do itself (that predicate is pure/IO-free, so
+// the CALLER resolves who counts as a sibling). Extracted out of the write's pre-write shape check
+// below so it has exactly one caller; a second inline copy is how this would drift from what the
+// grounded freeze means by "sibling" for the same predicate.
 //
-// WARNED, never refused, and the severity is a judgement about what the two mistakes cost. A plan
-// note is often a long step's whole output — body, rationale, uncertainty, zone, skillRefs — and
-// this boundary's standing rule is that it must never discard that over something it can report.
-// The edge is also not always wrong: a plan-note may legitimately depend_on a note whose KNOWLEDGE
-// it builds on, which is why only a target that is itself a plan-note in this scope counts, and why
-// even that stays a report. It is placed FIRST among the warnings because loop.ts lifts warnings[0]
-// — and only warnings[0] — into the next iteration's prompt ("the warning is not optional"); this is
-// the one warning whose neglect fails the run outright, so it outranks the advisory ones.
-//
-// Costs nothing on a write that has no such link: the store is only asked about a depends_on link
-// on a plan-tier note. The masterplan is skipped — it is the parent, never a sibling.
-async function orderingLinkWarning(store: MemoryStore, note: MemoryNote): Promise<string[]> {
-  if (note.tier !== NOTE_TIER.plan) return []
+// Not always a sibling: a plan-note may legitimately depends_on a note whose KNOWLEDGE it builds
+// on, which is why only a target that is itself plan-tier in this scope counts. Costs nothing on a
+// write with no depends_on link — the caller checks `links.length` before calling this — and the
+// masterplan is skipped: it is the parent, never a sibling.
+async function planSiblings(store: MemoryStore, scope: string, links: ReadonlyArray<{ id: string; kind: string }>): Promise<string[]> {
   const siblings: string[] = []
-  for (const l of note.links) {
+  for (const l of links) {
     if (l.kind !== LINK_KIND.depends_on || l.id === MASTERPLAN_NOTE_ID) continue
-    const target = await store.get(l.id, note.scope)
+    const target = await store.get(l.id, scope)
     if (target?.tier === NOTE_TIER.plan) siblings.push(l.id)
   }
-  const misuse = siblingOrderingMisuse(note.id, note.links, siblings)
-  return misuse ? [misuse] : []
-}
-
-// A zone entry that is not ONE glob, caught while the author can still fix it for free.
-// A planner joined several globs with newlines into a single entry; the write succeeded, the plan
-// gate passed, and the frozen fence then matched no real path — two steps were refused every write
-// to their own files, with no repair path. The wording is contracts' zoneEntryMisuse, the same
-// predicate the plan freeze refuses with, so the author hears one sentence, not two versions of it.
-//
-// Tier-gated exactly like orderingLinkWarning: `zone` only means anything on a plan note, where it
-// is frozen into a step's write-fence. Pure — no store lookup, so it costs nothing on any write.
-// WARNED, never refused: the note (body, rationale, uncertainty, zone) is stored and the author is
-// told, which is the whole point of authorable-then-refused rather than a schema rejection.
-function zoneEntryWarning(note: MemoryNote): string[] {
-  if (note.tier !== NOTE_TIER.plan) return []
-  const misuse = zoneEntryMisuse(note.zone)
-  return misuse ? [misuse] : []
+  return siblings
 }
 
 // A note the writer may have meant to UPDATE. `id ?? slugId(title)` forks on any rephrasing —
@@ -210,10 +198,10 @@ const TopicsInput = z.object({ topic: z.string().regex(CLAIM_ID_RE).optional(), 
 // every later revision of the note.
 // Two accommodations the STORE does not need but an agent does. memory_write is an upsert with
 // merge-on-omit, so an update carries the previous title forward — requiring one here contradicted
-// that and rejected legitimate updates. And `summary` is a display cap, not a semantic rule: the
-// lint module's own header states the principle ("warnings, never rejections: a blocked write
-// mid-run burns more tokens than a mediocre note"), which a hard max violated by discarding an
-// entire note — body, links and claims — over one long line.
+// that and rejected legitimate updates. And `summary` is a display cap, not a plan-field shape rule:
+// it stays on the WARN side of this module's shape/judgment split (module header above) — a hard max
+// here would discard an entire note — body, links and claims — over one long line, exactly the cost
+// a blocked write mid-run is never worth.
 const MemoryWriteToolInput = MemoryNoteDraftInput.extend({
   id: MemoryNoteDraftInput.shape.id.optional(),
   title: MemoryNoteDraftInput.shape.title.optional(),
@@ -421,8 +409,79 @@ void writeSchemaCoversInput
 // silently losing its memory tools.
 export function unavailableMemoryTools(reason: string): ResolvedTool[] {
   const fail = async (): Promise<never> => { throw new Error(`memory unavailable: ${reason}`) }
-  const store: MemoryStore = { write: fail, remove: fail, get: fail, list: fail, search: fail, searchClaims: fail, claimsFor: fail, neighbors: fail, recordAccess: fail, topics: fail, topicClaims: fail }
+  const store: MemoryStore = { write: fail, remove: fail, get: fail, list: fail, search: fail, searchClaims: fail, claimsFor: fail, neighbors: fail, recordAccess: fail, topics: fail, topicClaims: fail, verify: fail }
   return memoryTools({ store, author: { source: 'agent' } })
+}
+
+// ─── memory_verify: the ONLY writer of the verification stamp ─────────────────────────────────
+//
+// Verification is DECLARED, never inferred. Nothing anywhere derives "this note is checked" from
+// who wrote it or when — an auditor that has read a note against the tree says so by calling this,
+// and the log records the declaration as its own fact. That is what makes the stamp worth trusting:
+// it names a step that actually looked.
+//
+// NOT part of the role-keyed surface memoryTools() builds, and gated on the STEP rather than the
+// memory role, because both terms are needed and memoryTools sees neither — see the gate below.
+//
+// CEILING, and it matters for what a consumer may claim: a stamp taken at verify time is
+// PROVISIONAL. The auditor checked the WORKTREE; `revision` is HEAD, which does not yet contain
+// that work. The two converge only after the commit, so a post-commit reverify is what completes
+// the claim. Nothing here can detect the gap — it is stated, not enforced.
+const VerifyInput = z.object({
+  id: z.string().regex(MEMORY_ID_RE),
+  // omitted means the durable project scope, the same defaulting MemoryStore.verify applies —
+  // NOT defaulted here, so the store keeps the one spelling of that rule
+  scope: z.string().regex(MEMORY_ID_RE).optional(),
+})
+
+const VERIFY_DESCRIPTION =
+  'Declare that you have READ this knowledge note against the code in front of you and found it TRUE. '
+  + 'Records a verification stamped with the revision you checked at — it writes NOTHING else, so the note\'s '
+  + 'text, summary and authorship are untouched. Use it on a note that is already correct: that is what tells '
+  + 'later readers the note was CHECKED rather than merely re-saved, and it is the only thing that clears a '
+  + 'drift flag without rewriting prose. A note you found WRONG is not a verify — memory_write the same id with '
+  + 'what the code says now. Never verify a note you did not read.'
+
+export function memoryVerifyTool(opts: {
+  store: MemoryStore
+  author: MemoryAuthor
+  p: { stepId: string; role: string }
+}): ResolvedTool[] {
+  const { store, author, p } = opts
+  // The SAME predicate scoped_changes uses, and for the same measured reason. Both terms are
+  // required: PLAN_STEP_ROLE === STEP_ROLE.auditor, so a bare role check would also hand this to the
+  // grounded task's `plan` step, which has verified nothing; and a bare stepId check would hand it
+  // to any step a planner happened to name 'verify'. A registration gate rather than an
+  // execute-time refusal — report_coverage learned live that a visible tool which can only ever
+  // error gets called anyway, one wasted iteration per attempt.
+  if (p.role !== STEP_ROLE.auditor || p.stepId !== VERIFY_STEP_ID) return []
+  return [{
+    ref: 'memory/verify', name: MEMORY_TOOL_NAME.verify,
+    description: VERIFY_DESCRIPTION,
+    inputSchema: {
+      type: 'object', required: ['id'],
+      properties: {
+        id: { type: 'string', description: 'the note id you read and found correct' },
+        scope: { type: 'string', description: 'omit for the durable project scope' },
+      },
+    },
+    execute: async (input, toolCallId) => {
+      try {
+        const { id, scope } = VerifyInput.parse(input)
+        // at-least-once: the surrounding operation can crash-retry, and a second verification of
+        // the same note in one tool call is the same declaration, not a new one. Same key shape
+        // memory_write builds.
+        const idempotencyKey = author.runToken && toolCallId
+          ? `${author.runToken}:tool:${toolCallId}:verify:${id}`
+          : undefined
+        const verified = await store.verify(id, scope, author, { ...(idempotencyKey && { idempotencyKey }) })
+        // the stamp is RETURNED rather than read back: the append is event-first and the projector
+        // is asynchronous, so a read-back inside the flush window would report the state from
+        // before this very call — the same trap memory_write's omitted `revision` avoids
+        return ok({ id, verified })
+      } catch (e) { return toolError(e) }
+    },
+  }]
 }
 
 // The read-only subset of the memory surface. Names now live in contracts (MEMORY_TOOL_NAME) —
@@ -465,12 +524,14 @@ export function memoryTools(opts: {
   // memory_read runs, lifted to a result SET so a searcher acting on a matched CLAIM is warned too,
   // not only a reader who pulls the full note. Deduped by id; one changedSince probe per distinct
   // sourceRevision (the probe caches), so it stays bounded regardless of how many rows matched.
-  const driftedNoteIds = async (notes: readonly { id: string; sourceRevision: string | null; paths: readonly string[] }[]): Promise<string[]> => {
+  const driftedNoteIds = async (notes: readonly { id: string; sourceRevision: string | null; paths: readonly string[]; verified?: VerifiedStamp }[]): Promise<string[]> => {
     if (!changedSince) return []
-    const seen = new Map<string, { sourceRevision: string; paths: string[] }>()
-    for (const n of notes) if (n.sourceRevision !== null && !seen.has(n.id)) seen.set(n.id, { sourceRevision: n.sourceRevision, paths: [...n.paths] })
+    const seen = new Map<string, { sourceRevision: string; paths: string[]; verified?: VerifiedStamp }>()
+    for (const n of notes) if (n.sourceRevision !== null && !seen.has(n.id)) seen.set(n.id, { sourceRevision: n.sourceRevision, paths: [...n.paths], ...(n.verified && { verified: n.verified }) })
     const drifted: string[] = []
-    for (const [id, n] of seen) if (noteHasDrifted(n, await changedSince(n.sourceRevision))) drifted.push(id)
+    // noteDrifted, not noteHasDrifted: a note an auditor verified AFTER the code moved is not stale,
+    // and flagging it here sends the next reader to re-derive what was just confirmed
+    for (const [id, n] of seen) if (await noteDrifted(n, changedSince)) drifted.push(id)
     return drifted
   }
   const role = opts.role ?? MEMORY_ROLE.verify
@@ -541,6 +602,34 @@ export function memoryTools(opts: {
           const duplicates = forkRisk && parsed.title !== undefined
             ? await duplicateSubjectWarning(store, scope, parsed.title, id)
             : []
+          // Plan-field SHAPE mistakes refuse HERE, before store.write — contracts' planFieldViolations,
+          // the same table the plan freeze sweeps at approval (see the module header above for why
+          // shape refuses and judgment warns). Checked against what THIS draft carries (parsed.zone,
+          // parsed.links), never the merged/stored note: merge-on-omit means an omitted field
+          // introduces no new mistake, so re-validating stored state here would refuse an unrelated
+          // update for a defect it never restated.
+          //
+          // zone-entry-wellformed stays UNGATED by tier on purpose: inferTier itself infers 'plan'
+          // from a filled zone, so a tier gate on THAT check would only ever agree with the ungated
+          // one. sibling-ordering-link is different — `links` carries no such signal (inferTier never
+          // reads it) — so an ungated check false-positived on a semantic note's depends_on link to a
+          // note that only HAPPENS to be plan-tier: the codebase-analysis area-note pattern links
+          // sibling area notes depends_on each other, and a semantic note has no dependsOn FIELD to
+          // redirect that into. Gated on this note's EFFECTIVE tier: explicit parsed.tier, else the
+          // STORED note's tier (merge-on-omit means a plan-note update adding a link may not restate
+          // tier), else the draft's own inferred tier (contracts' inferTier, the same classifier the
+          // store gateway itself falls back to).
+          const zone = parsed.zone ?? []
+          const links = parsed.links ?? []
+          let siblings: string[] = []
+          if (links.length) {
+            const effectiveTier = parsed.tier ?? (await store.get(id, scope))?.tier ?? inferTier(parsed)
+            if (effectiveTier === NOTE_TIER.plan) siblings = await planSiblings(store, scope, links)
+          }
+          const v = planFieldViolations({ id, zone, links, siblings })
+          // first message only: one-at-a-time teaching, same as the predicates already commit to —
+          // a list of every violation would read as one wall of text and get fixed no faster.
+          if (v.shape.length) return { output: { error: v.shape[0] }, isError: true }
           const n = await store.write({ ...parsed, id }, author, { idempotencyKey, ...(invalidates && { invalidates }) })
           // No revision: the write is event-first and the projector is asynchronous, so within
           // the flush window store.write reports the revision from BEFORE this write (and
@@ -549,14 +638,12 @@ export function memoryTools(opts: {
           // authoritative value.
           const dead = await unresolvedLinks(store, n)
           const warnings = [
-            // first on purpose — see orderingLinkWarning: only warnings[0] reaches the model's
-            // next turn, and this is the only one that predicts a refused plan
-            ...(await orderingLinkWarning(store, n)),
-            // second: also predicts a refused plan, and unlike the ordering link a bad zone entry
-            // ALSO breaks the frozen step's write-fence if it somehow reaches execution. Below the
-            // ordering warning only because that one is the older, more frequently observed misuse;
-            // both outrank every advisory lint below.
-            ...zoneEntryWarning(n),
+            // EXTENSION SLOT: a judgment-severity plan-field rule lands here, first, ahead of every
+            // advisory lint — loop.ts lifts only warnings[0] into the next turn, so this is the one
+            // warning whose neglect fails the run outright. PLAN_FIELD_RULES (contracts/plan-rules.ts)
+            // has no judgment row yet — both current rows are 'shape' and refused above — so this is
+            // always [] today; it occupies the slot orderingLinkWarning's warn-path used to.
+            ...v.judgment,
             ...normalized.warnings,
             ...duplicates,
             ...noteLint(n),
@@ -599,9 +686,17 @@ export function memoryTools(opts: {
           const truncated = c.truncated || r.truncated
           // flag any returned note whose declared paths moved — a matched claim reads as current and
           // may not be, and search is where a stale claim gets acted on without ever being read in full
+          // NOTES arm first, claims second: the dedupe keeps the FIRST row per id, and only a note
+          // summary carries the verification stamp. Behaviour-neutral for the other two inputs —
+          // joinClaimOwners copies both off the owning note — so the ordering costs nothing and
+          // stops a verified note from reading drifted just because a claim of it also matched.
+          // ponytail: a claim-only hit (its note absent from the notes arm) still has no stamp and
+          // can read drifted. Upgrade when that shows up: carry `verified` on ClaimHit, which
+          // joinClaimOwners already has in hand — it needs VerifiedStamp to move to a leaf module,
+          // since claim.ts cannot import memory.ts.
           const drifted = await driftedNoteIds([
+            ...r.items.map(n => ({ id: n.id, sourceRevision: n.sourceRevision, paths: n.paths, ...(n.verified && { verified: n.verified }) })),
             ...c.items.map(h => ({ id: h.noteId, sourceRevision: h.sourceRevision, paths: h.paths })),
-            ...r.items.map(n => ({ id: n.id, sourceRevision: n.sourceRevision, paths: n.paths })),
           ])
           return ok(MemorySearchResult.parse({
             claims: c.items, notes: r.items, truncated, omitted: c.omitted + r.omitted,
@@ -646,8 +741,11 @@ export function memoryTools(opts: {
           // name the correction: memory_write is an upsert and the store re-stamps sourceRevision,
           // so rewriting the same id both fixes the claim and clears the drift.
           const paths = 'paths' in n && Array.isArray(n.paths) ? n.paths : []
-          const changed = changedSince && n.sourceRevision !== null ? await changedSince(n.sourceRevision) : null
-          const drifted = noteHasDrifted({ sourceRevision: n.sourceRevision, paths }, changed)
+          // the either-clean rule: the note's own verification is the second, independent answer to
+          // "is this still true", and the fresher stamp governs (drift.ts noteDrifted)
+          const drifted = changedSince
+            ? await noteDrifted({ sourceRevision: n.sourceRevision, paths, ...(n.verified && { verified: n.verified }) }, changedSince)
+            : false
           // every pull tool honors its budget (spec RG5) — metadata cannot bypass body truncation.
           const fitted = fitMemoryNoteToBudget(n, q.budget)
           // The hint names the paths the READER actually received. They used to be read off the

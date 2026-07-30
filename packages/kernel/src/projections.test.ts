@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'bun:test'
 import { EVENT_KIND, type EventRecord, type Plan, type TaskNode } from '@orc/contracts'
 import { eventFixture, draftFixture, planFixture, stepFixture } from '@orc/contracts/fixtures'
-import { emptyFold, fold, foldInto, subtreeOutcome, completedStepIds, nextAttempts, crashDedupKey, stepUsage, subtreeTaskIds, subtreeUsage, pendingSplitForChild, remainingBudget, inheritedCwd, runCwd, taskChangedPaths, taskNoteWrites } from './projections'
+import { emptyFold, fold, foldInto, subtreeOutcome, completedStepIds, nextAttempts, crashDedupKey, stepUsage, subtreeTaskIds, subtreeUsage, pendingSplitForChild, remainingBudget, inheritedCwd, runCwd, taskChangedPaths, taskNoteWrites, taskVerifiedNotes } from './projections'
 
 const task: TaskNode = {
   id: 't1', parentId: null, type: 'generic', title: 'hello', spec: '',
@@ -557,23 +557,28 @@ describe('taskChangedPaths', () => {
   })
 })
 
-describe('taskNoteWrites', () => {
-  const write = (seq: number, note: Record<string, unknown>, taskId: string | undefined): EventRecord =>
-    eventFixture({ seq, ts: 'T', kind: 'memory_written',
-      payload: { note, author: { source: 'agent', ...(taskId ? { taskId } : {}) } } })
-  const del = (seq: number, id: string, scope = 'project'): EventRecord =>
-    eventFixture({ seq, ts: 'T', kind: 'memory_deleted',
-      payload: { id, scope, author: { source: 'cli' } } })
-  const semantic = (id: string, paths: string[]): Record<string, unknown> =>
-    ({ id, scope: 'project', title: id, tier: 'semantic', paths })
-  const subtree = new Set(['t1', 't1.c1'])
+const write = (seq: number, note: Record<string, unknown>, taskId: string | undefined): EventRecord =>
+  eventFixture({ seq, ts: 'T', kind: 'memory_written',
+    payload: { note, author: { source: 'agent', ...(taskId ? { taskId } : {}) } } })
+const del = (seq: number, id: string, scope = 'project'): EventRecord =>
+  eventFixture({ seq, ts: 'T', kind: 'memory_deleted',
+    payload: { id, scope, author: { source: 'cli' } } })
+const verified = (seq: number, id: string, taskId: string | undefined, scope = 'project'): EventRecord =>
+  eventFixture({ seq, ts: 'T', kind: 'memory_verified',
+    payload: { id, scope, stamp: { revision: 'head1', at: 'T', by: 'exec·m·auditor' },
+      author: { source: 'agent', ...(taskId ? { taskId } : {}) } } })
+const semantic = (id: string, paths: string[]): Record<string, unknown> =>
+  ({ id, scope: 'project', title: id, tier: 'semantic', paths })
+const subtree = new Set(['t1', 't1.c1'])
 
+describe('taskNoteWrites', () => {
   it('collects a semantic note written by a subtree task, latest write supplying the paths', () => {
     const rows = taskNoteWrites([
       write(1, semantic('area-x', ['src/old.ts']), 't1'),
       write(2, semantic('area-x', ['src/new.ts']), 't1'),
     ], subtree)
-    expect(rows).toEqual([{ id: 'area-x', scope: 'project', paths: ['src/new.ts'] }])
+    // the subtree created it — a fresh note, never a heal, however many times it rewrote it
+    expect(rows).toEqual([{ id: 'area-x', scope: 'project', paths: ['src/new.ts'], preexisting: false }])
   })
 
   it('a later write by an OUTSIDE author updates paths but membership stays (the task touched it)', () => {
@@ -581,7 +586,33 @@ describe('taskNoteWrites', () => {
       write(1, semantic('area-x', ['a.ts']), 't1.c1'),
       write(2, semantic('area-x', ['b.ts']), 'other-task'),
     ], subtree)
-    expect(rows).toEqual([{ id: 'area-x', scope: 'project', paths: ['b.ts'] }])
+    expect(rows).toEqual([{ id: 'area-x', scope: 'project', paths: ['b.ts'], preexisting: false }])
+  })
+
+  // preexisting is the HEAL test: a write to a note that already existed corrects standing prose,
+  // which is what earns a restamp. A write that CREATED the note proves nothing about its truth —
+  // the piggyback that let every ambient step note ride the commit stamp out of the auditor's reach.
+  it('a note that existed before the subtree first wrote it is preexisting — a HEAL', () => {
+    expect(taskNoteWrites([
+      write(1, semantic('area-x', ['a.ts']), 'other-task'), // someone else wrote it first
+      write(2, semantic('area-x', ['a.ts']), 't1'),         // the subtree corrected it
+    ], subtree)).toEqual([{ id: 'area-x', scope: 'project', paths: ['a.ts'], preexisting: true }])
+  })
+
+  it('preexisting is decided at the subtree FIRST write, not the last', () => {
+    expect(taskNoteWrites([
+      write(1, semantic('area-x', ['a.ts']), 't1'),         // created here → fresh
+      write(2, semantic('area-x', ['a.ts']), 'other-task'),
+      write(3, semantic('area-x', ['b.ts']), 't1'),         // a later rewrite cannot make it a heal
+    ], subtree)).toEqual([{ id: 'area-x', scope: 'project', paths: ['b.ts'], preexisting: false }])
+  })
+
+  it('a re-write after a delete is fresh — the note it would have healed is gone', () => {
+    expect(taskNoteWrites([
+      write(1, semantic('area-x', ['a.ts']), 'other-task'),
+      del(2, 'area-x'),
+      write(3, semantic('area-x', ['a.ts']), 't1'),
+    ], subtree)).toEqual([{ id: 'area-x', scope: 'project', paths: ['a.ts'], preexisting: false }])
   })
 
   it('excludes notes only ever written outside the subtree, or with no author task', () => {
@@ -602,6 +633,86 @@ describe('taskNoteWrites', () => {
     expect(taskNoteWrites([
       write(1, { id: 'step-a', scope: 'plan-t1', title: 's', tier: 'episodic' }, 't1'),
       write(2, semantic('no-paths', []), 't1'),
+    ], subtree)).toEqual([])
+  })
+})
+
+// The other half of the post-commit stamp set: notes a step of this subtree DECLARED verified.
+// Verification is never inferred from a write, so it needs its own fold — the note's paths still
+// come from its latest write, because the post-commit dirty gate can only judge declared paths.
+describe('taskVerifiedNotes', () => {
+  it('returns a note verified by a subtree task, with the paths its latest write declared', () => {
+    expect(taskVerifiedNotes([
+      write(1, semantic('area-x', ['a.ts']), 'other-task'), // written by anyone
+      write(2, semantic('area-x', ['b.ts']), 'other-task'),
+      verified(3, 'area-x', 't1.c1'),                       // verified by us → ours to reverify
+    ], subtree)).toEqual([{ id: 'area-x', scope: 'project', paths: ['b.ts'] }])
+  })
+
+  it('excludes a verification by a task outside the subtree, or with no author task', () => {
+    expect(taskVerifiedNotes([
+      write(1, semantic('theirs', ['a.ts']), 't1'),  // OUR write does not make it verified
+      verified(2, 'theirs', 'other-task'),
+      write(3, semantic('manual', ['b.ts']), 't1'),
+      verified(4, 'manual', undefined),
+    ], subtree)).toEqual([])
+  })
+
+  it('dedupes repeated verifications of the same note', () => {
+    expect(taskVerifiedNotes([
+      write(1, semantic('area-x', ['a.ts']), 'other-task'),
+      verified(2, 'area-x', 't1'),
+      verified(3, 'area-x', 't1.c1'),
+    ], subtree)).toEqual([{ id: 'area-x', scope: 'project', paths: ['a.ts'] }])
+  })
+
+  // deriveNoteProvenance CARRIES a stamp across a byte-identical rewrite and CLEARS it on any
+  // change to what the note says. This fold must agree: reverifying a note whose stamp the log
+  // already destroyed would mint a check that never happened — the false confidence the whole
+  // declared-verification design exists to prevent.
+  it('a later write that CHANGES the note drops the verification, whoever wrote it', () => {
+    expect(taskVerifiedNotes([
+      write(1, semantic('area-x', ['a.ts']), 'other-task'),
+      verified(2, 'area-x', 't1'),
+      write(3, { ...semantic('area-x', ['a.ts']), body: 'rewritten after the audit' }, 'other-task'),
+    ], subtree)).toEqual([])
+  })
+
+  it('a byte-identical rewrite (the commit restamp) keeps the verification', () => {
+    expect(taskVerifiedNotes([
+      write(1, semantic('area-x', ['a.ts']), 'other-task'),
+      verified(2, 'area-x', 't1'),
+      write(3, semantic('area-x', ['a.ts']), 't1'), // same fields, rewritten by us — the restamp
+    ], subtree)).toEqual([{ id: 'area-x', scope: 'project', paths: ['a.ts'] }])
+  })
+
+  // A TIER FLIP is a content change like any other — `tier` is one of noteContentKey's CONTENT_FIELDS
+  // — so deriveNoteProvenance clears the stored row's stamp. This fold ran its tier gate BEFORE the
+  // content compare, so the flipped note stayed in the verified set: the commit step reverified it at
+  // the new HEAD, minting a stamp for text nobody audited, on a row the read model had already
+  // un-stamped. The two carry/clear implementations must agree or the stamp resurrects.
+  it('a later write that flips the note off the semantic tier drops the verification', () => {
+    expect(taskVerifiedNotes([
+      write(1, semantic('area-x', ['a.ts']), 'other-task'),
+      verified(2, 'area-x', 't1'),
+      write(3, { id: 'area-x', scope: 'project', title: 'area-x', tier: 'episodic', body: 'now a step note' }, 'other-task'),
+    ], subtree)).toEqual([])
+  })
+
+  it('a memory_deleted after the verification drops the note', () => {
+    expect(taskVerifiedNotes([
+      write(1, semantic('gone', ['a.ts']), 'other-task'),
+      verified(2, 'gone', 't1'),
+      del(3, 'gone'),
+    ], subtree)).toEqual([])
+  })
+
+  it('excludes non-semantic tiers and pathless notes — nothing for the dirty gate to judge', () => {
+    expect(taskVerifiedNotes([
+      write(1, { id: 'step-a', scope: 'plan-t1', title: 's', tier: 'episodic' }, 'other-task'),
+      verified(2, 'step-a', 't1', 'plan-t1'),
+      write(3, semantic('no-paths', []), 'other-task'),
+      verified(4, 'no-paths', 't1'),
     ], subtree)).toEqual([])
   })
 })

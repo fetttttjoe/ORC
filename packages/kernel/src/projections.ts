@@ -2,7 +2,7 @@ import { z } from 'zod'
 import {
   ArtifactProducedPayload, EVENT_KIND, FAILURE_CLASS, FailureClass, FS_WRITE_TOOL_NAMES, NOTE_TIER, OPERATION_STATUS, Plan,
   RUN_OUTCOME, STEP_RUN_STATUS, TASK_STATUS, TaskNode, TaskStatus, ZERO_USAGE, addUsage, runOutcomeFor,
-  MemoryDeletedPayload, MemoryWrittenPayload, noteKey, normalizeRelPath,
+  MemoryDeletedPayload, MemoryVerifiedPayload, MemoryWrittenPayload, noteContentKey, noteKey, normalizeRelPath,
   OperationCompletedPayload, OperationFailedPayload, OperationStartedPayload, ReactionFailedPayload,
 } from '@orc/contracts'
 import type { EventRecord, OperationRecord, RunOutcome, StepRunStatus, Usage } from '@orc/contracts'
@@ -271,6 +271,11 @@ export function foldInto(acc: FoldAcc, e: EventRecord): FoldAcc {
       // reads derived knowledge (a topic listing or one topic's claims) — drives no task state,
       // same as memory_accessed above
       case EVENT_KIND.memory_topic_accessed:
+      // an auditor declaring a note checked — traceability, and the memory read model's own
+      // projection. Which notes THIS task verified IS derived from it, by taskVerifiedNotes below
+      // (the commit-step reverify set) — a stateless per-consumer derivation over the log, not task
+      // state: nothing in State reads it, and a fold entry no consumer reads is state that rots.
+      case EVENT_KIND.memory_verified:
       case EVENT_KIND.models_discovered:
       case EVENT_KIND.feedback_requested:
       case EVENT_KIND.feedback_provided:
@@ -562,16 +567,28 @@ export function taskChangedPaths(events: EventRecord[]): ChangedPath[] {
     .map(({ path, steps }) => ({ path, steps }))
 }
 
-export interface TaskNoteWrite { id: string; scope: string; paths: string[] }
+// A note a task subtree touched, carrying the paths its LATEST write declared — the unit both
+// post-commit stamp passes act on, because the dirty gate can only judge declared paths.
+export interface TaskNoteRef { id: string; scope: string; paths: string[] }
 
-// The semantic notes a task subtree wrote — the restamp set: git_commit stamps exactly these,
+// preexisting = the note ALREADY EXISTED when the subtree first wrote it (a prior memory_written
+// for the same scope:id, from any author, including outside the subtree). That is the definition of
+// a HEAL: the write corrected standing prose, so the commit may advance its stamp. A write that
+// CREATED the note proves nothing about the note's truth — and stamping it anyway was the piggyback
+// that let every ambient step note read verified-fresh forever without one reader checking it
+// against the tree. Decided at the FIRST subtree write and never revised: a later rewrite of a note
+// this subtree authored is still authorship. A delete clears membership, so a re-write after one
+// reads fresh — the note it would have healed is gone.
+export interface TaskNoteWrite extends TaskNoteRef { preexisting: boolean }
+
+// The semantic notes a task subtree wrote — half the restamp set: git_commit stamps exactly these,
 // never a corpus-wide guess (drift.ts restampableNotes' documented ceiling). Membership is sticky
 // across later outside-author rewrites (the task still touched it; paths follow the latest write),
 // cleared by memory_deleted. Semantic-with-paths only: the freshness gate reads nothing else, so
 // stamping a pathless or episodic note buys nothing.
 export function taskNoteWrites(events: EventRecord[], subtree: ReadonlySet<string>): TaskNoteWrite[] {
-  const notes = new Map<string, TaskNoteWrite>()
-  const touched = new Set<string>()
+  const notes = new Map<string, TaskNoteRef>()
+  const touched = new Map<string, boolean>() // key → preexisting at the subtree's first write
   for (const e of events) {
     if (e.kind === EVENT_KIND.memory_written) {
       const p = MemoryWrittenPayload.safeParse(e.payload)
@@ -579,8 +596,9 @@ export function taskNoteWrites(events: EventRecord[], subtree: ReadonlySet<strin
       const { note, author } = p.data
       if (note.tier !== NOTE_TIER.semantic) continue
       const key = noteKey(note.scope, note.id)
+      const existed = notes.has(key) // read BEFORE the set: this write is the one being classified
       notes.set(key, { id: note.id, scope: note.scope, paths: [...note.paths] })
-      if (author.taskId && subtree.has(author.taskId)) touched.add(key)
+      if (author.taskId && subtree.has(author.taskId) && !touched.has(key)) touched.set(key, existed)
     } else if (e.kind === EVENT_KIND.memory_deleted) {
       const p = MemoryDeletedPayload.safeParse(e.payload)
       if (!p.success) continue
@@ -589,7 +607,58 @@ export function taskNoteWrites(events: EventRecord[], subtree: ReadonlySet<strin
       touched.delete(key)
     }
   }
-  return [...touched].flatMap(key => {
+  return [...touched].flatMap(([key, preexisting]) => {
+    const n = notes.get(key)
+    return n && n.paths.length > 0 ? [{ ...n, preexisting }] : []
+  })
+}
+
+// The other half of the post-commit stamp set: notes a step of this subtree DECLARED verified
+// (memory_verified — the auditor's CONFIRM). Verification is never inferred from a write, so it
+// needs its own fold; the paths still come from the note's latest write, because that is the only
+// place they exist and the reverify runs the same dirty gate as the restamp. Same shape rules as
+// taskNoteWrites: deduped, semantic-with-paths only, membership cleared by memory_deleted.
+export function taskVerifiedNotes(events: EventRecord[], subtree: ReadonlySet<string>): TaskNoteRef[] {
+  const notes = new Map<string, TaskNoteRef>()
+  const content = new Map<string, string>() // EVERY write's content key, whatever tier it carried
+  const verified = new Set<string>()
+  for (const e of events) {
+    if (e.kind === EVENT_KIND.memory_written) {
+      const p = MemoryWrittenPayload.safeParse(e.payload)
+      if (!p.success) continue
+      const { note } = p.data
+      const key = noteKey(note.scope, note.id)
+      const k = noteContentKey(note)
+      // The SAME carry-or-clear rule deriveNoteProvenance applies to the stored stamp, read off the
+      // same log: a rewrite that changed what the note SAYS destroyed the auditor's verification,
+      // whoever wrote it, so reverifying it post-commit would mint a check nobody performed. A
+      // byte-identical rewrite (the restamp itself) keeps it — nothing the auditor read changed.
+      //
+      // Runs on every parseable write, BEFORE the tier gate, and off its own map: deriveNoteProvenance
+      // has no tier gate, so a write that flipped a verified note off the semantic tier cleared the
+      // stored stamp while this fold — gating first — kept the note in the verified set and had the
+      // commit step reverify it at the new HEAD, minting a stamp for text nobody audited. The tier
+      // gate belongs to the PATHS below (only a semantic note has `paths` for the dirty gate to
+      // judge), never to the compare.
+      const prev = content.get(key)
+      if (prev !== undefined && prev !== k) verified.delete(key)
+      content.set(key, k)
+      if (note.tier !== NOTE_TIER.semantic) continue
+      notes.set(key, { id: note.id, scope: note.scope, paths: [...note.paths] })
+    } else if (e.kind === EVENT_KIND.memory_verified) {
+      const p = MemoryVerifiedPayload.safeParse(e.payload)
+      if (!p.success) continue
+      if (p.data.author.taskId && subtree.has(p.data.author.taskId)) verified.add(noteKey(p.data.scope, p.data.id))
+    } else if (e.kind === EVENT_KIND.memory_deleted) {
+      const p = MemoryDeletedPayload.safeParse(e.payload)
+      if (!p.success) continue
+      const key = noteKey(p.data.scope, p.data.id)
+      notes.delete(key)
+      content.delete(key)
+      verified.delete(key)
+    }
+  }
+  return [...verified].flatMap(key => {
     const n = notes.get(key)
     return n && n.paths.length > 0 ? [n] : []
   })

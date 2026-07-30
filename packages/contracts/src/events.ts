@@ -4,7 +4,7 @@ import { Plan } from './plan'
 import { FailureClass, Signal, SplitResult, Usage } from './execution'
 import { EventKind } from './event-kinds'
 import { OperationCompletedPayload, OperationFailedPayload, OperationStartedPayload } from './operations'
-import { MemoryAccessedPayload, MemoryDeletedPayload, MemoryWrittenPayload } from './memory'
+import { MemoryAccessedPayload, MemoryDeletedPayload, MemoryVerifiedPayload, MemoryWrittenPayload } from './memory'
 import { MemoryTopicAccessedPayload } from './cluster'
 import { SHA256_HEX_RE } from './ids'
 import { AnalysisCompletedPayload, FeedbackProvidedPayload, FeedbackRequestedPayload, PlanAnnotatedPayload } from './analysis'
@@ -164,6 +164,7 @@ export const PAYLOAD_SCHEMAS = {
   memory_deleted: MemoryDeletedPayload,
   memory_accessed: MemoryAccessedPayload,
   memory_topic_accessed: MemoryTopicAccessedPayload,
+  memory_verified: MemoryVerifiedPayload,
   feedback_requested: FeedbackRequestedPayload,
   feedback_provided: FeedbackProvidedPayload,
   plan_annotated: PlanAnnotatedPayload,

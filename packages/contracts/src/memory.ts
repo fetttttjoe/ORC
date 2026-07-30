@@ -159,6 +159,9 @@ export const taskLaneScopes = (taskId: string, ancestorTaskIds: readonly string[
 export const MEMORY_TOOL_NAME = {
   write: 'memory_write', search: 'memory_search', read: 'memory_read', neighbors: 'memory_neighbors',
   topics: 'memory_topics',
+  // Not part of the role-keyed surface memoryTools() builds: it is registration-gated to the
+  // auditor's verify step at the composition root, exactly like the kernel's scoped_changes.
+  verify: 'memory_verify',
 } as const
 
 // memory_write's result envelope (tools.ts constructs it; the loop parses it — no casts).
@@ -390,12 +393,34 @@ export type NoteRef = z.infer<typeof NoteRef>
 // The stored/rendered note: the tier's input shape plus the provenance the projector derives from
 // events. Semantic notes also swap `sources` for the stored shape — same citations, plus the
 // retrieval time the projector stamps from the event.
+//
+// VERIFICATION is a DECLARED act, never an inferred one. `verified` says an auditor read this note
+// against the tree at `revision` and found it true — which is a different fact from "someone wrote
+// it at that revision", and the only one worth trusting. Nothing derives it from authorship: it is
+// set by exactly one event (memory_verified, appended by memory_verify) and a write can only carry
+// it forward or destroy it (see deriveNoteProvenance).
+//
+// `revision` is the same HEAD the store stamps `sourceRevision` from, so drift can compare the two
+// against the same tree. CEILING: a stamp taken before the work is committed is PROVISIONAL — the
+// checked content is the worktree, the stamped revision is HEAD, and the two only converge once the
+// commit lands. The post-commit reverify is what completes it.
+export const VerifiedStamp = z.object({
+  revision: z.string().min(1),
+  at: z.string(),
+  by: z.string(),   // composed identity, same spelling as createdBy
+})
+export type VerifiedStamp = z.infer<typeof VerifiedStamp>
+
 const noteProvenance = {
   createdAt: z.string(),
   createdBy: z.string(),   // composed identity: "executor·model·role" or "cli"
   updatedAt: z.string(),
   updatedBy: z.string(),
   revision: z.number().int().positive(),
+  // On the SHARED provenance object, not just the semantic tier: an episodic or plan note is
+  // never verified in practice, but a stamp that only some tiers could hold would need a second
+  // rule at every consumer, and "absent" already says the same thing on the tiers that never get one.
+  verified: VerifiedStamp.optional(),
 }
 export const SemanticNote = SemanticNoteInput.extend({
   ...noteProvenance,
@@ -444,6 +469,11 @@ export const NoteSummary = z.object({
   // invents the cheap comparison; drift.ts is the one that answers it correctly.
   sourceRevision: z.string().nullable(),
   paths: z.array(z.string()).max(MEMORY_LIMITS.detailItems),
+  // The THIRD drift input, and the one that can clear a flag the other two raise: a note whose code
+  // moved after its write but before an auditor checked it is not stale. Carried on the summary for
+  // the same reason the other two are — the summary is what retrieval hands a reader, and a reader
+  // who cannot see the verification re-derives knowledge that was just confirmed.
+  verified: VerifiedStamp.optional(),
 })
 export type NoteSummary = z.infer<typeof NoteSummary>
 
@@ -547,6 +577,22 @@ export const MemoryDeletedPayload = z.object({
 })
 export type MemoryDeletedPayload = z.infer<typeof MemoryDeletedPayload>
 
+// The verification ACT, as its own event — the whole point of the design. A note is verified
+// because someone declared it verified, so that declaration is a fact in the log, replayable and
+// attributable, rather than something a reader infers from who wrote the note and when.
+// Deliberately NOT a memory_written: the act changes nothing the note SAYS, and folding it as a
+// write would bump the revision, move updatedBy to the auditor and re-stamp sourceRevision — three
+// lies about a step that only read.
+// id AND scope carry the same MEMORY_ID_RE guard as memory_deleted, for the same reason: both
+// index the read model by key.
+export const MemoryVerifiedPayload = z.object({
+  id: z.string().regex(MEMORY_ID_RE),
+  scope: z.string().regex(MEMORY_ID_RE),
+  stamp: VerifiedStamp,
+  author: MemoryAuthor,
+})
+export type MemoryVerifiedPayload = z.infer<typeof MemoryVerifiedPayload>
+
 // An access is a first-class fact, not projection bookkeeping: what an agent actually pulled is
 // the only evidence of which knowledge is load-bearing, and a counter written outside the log is
 // erased by every rebuild. Emitted per successful pull (a miss records nothing) — id and scope
@@ -606,6 +652,15 @@ export interface MemoryStore {
   // claims only. See ClaimWrite for why absence cannot mean deletion.
   write(input: MemoryNoteDraft, author: MemoryAuthor, opts?: { idempotencyKey?: string; invalidates?: string[] }): Promise<MemoryNote>
   remove(id: string, scope?: string, author?: MemoryAuthor): Promise<void>
+  /**
+   * Declare a note VERIFIED at the runtime's current HEAD — appends memory_verified and nothing
+   * else, so body/summary/authorship stay byte-stable. Throws on an id the LOG has no live note
+   * for (checked against the log, not the eventually-consistent read model, so a note verified in
+   * the same turn it was written is not refused), and on a runtime with no readable HEAD: a stamp
+   * with no revision cannot be checked against anything later, which makes it worse than none.
+   * Returns the stamp it wrote, so a caller can report what it declared without a read-back race.
+   */
+  verify(id: string, scope: string | undefined, author: MemoryAuthor, opts?: { idempotencyKey?: string }): Promise<VerifiedStamp>
   get(id: string, scope?: string): Promise<MemoryNote | null>
   list(filter?: MemoryFilter): Promise<NoteSummary[]>
   search(query: string, filter?: MemoryFilter, opts?: MemorySearchOpts): Promise<NoteSummary[]>
@@ -633,6 +688,49 @@ export interface MemoryStore {
 }
 
 
+// What a verification COVERS: what the note SAYS. One string, so "did this write change the note"
+// is one comparison and not a field-by-field walk that a new tier field would silently escape.
+//
+// The field list is derived from the tier schemas' OWN shapes rather than hand-kept, because the
+// failure of forgetting one is invisible: a stale "verified" would survive the very edit that
+// invalidated it, and nothing would look wrong. (`DraftCoversTiers` and `FitterCoversNote` guard
+// their hand-kept lists at compile time; this one needs no list to guard.)
+//
+// EXCLUDED, deliberately:
+//  • id/scope — the address. A row and the write updating it always share it.
+//  • sourceRevision — re-stamped from HEAD on EVERY write, including the commit restamp that
+//    supplies no fields at all. Treating it as content would make the carry rule dead code.
+//  • a citation's retrievedAt and a claim's sourceRevision — per-item provenance the projector and
+//    resolveClaims stamp. The url and the claim TEXT are content; when they were fetched is not.
+const CONTENT_FIELDS = [...new Set([
+  ...Object.keys(SemanticNoteInput.shape),
+  ...Object.keys(EpisodicNoteInput.shape),
+  ...Object.keys(PlanNoteInput.shape),
+])].filter(k => k !== 'id' && k !== 'scope' && k !== 'sourceRevision').sort()
+
+// The three object-array fields, re-parsed so the two sides of the comparison canonicalize: a zod
+// object emits its keys in SHAPE order (a projected Surreal row's come back in storage order) and
+// strips the per-item provenance above. `.nullish().transform` collapses the two spellings of
+// "absent" — a note omits the key, a row that stored NONE reads it back as null.
+const ContentLinks = z.array(z.object({ id: z.string(), kind: z.string(), confidence: z.number().nullish().transform(v => v ?? null) }))
+const ContentSources = z.array(z.object({ url: z.string(), title: z.string().nullish().transform(v => v ?? null) }))
+const ContentClaims = z.array(z.object({ id: z.string(), text: z.string() }))
+const CONTENT_NORMALIZERS: Record<string, z.ZodType> = { links: ContentLinks, sources: ContentSources, claims: ContentClaims }
+
+// `unknown` in: the two callers hold different shapes of the same thing — a freshly parsed
+// MemoryNoteInput and a projected note row — and zod is what makes them comparable without a cast.
+export function noteContentKey(note: unknown): string {
+  const n = z.record(z.string(), z.unknown()).safeParse(note).data ?? {}
+  return JSON.stringify(CONTENT_FIELDS.map(k => {
+    const v = n[k]
+    if (v === undefined || v === null) return null
+    const normalizer = CONTENT_NORMALIZERS[k]
+    // an unparseable list reads as null on BOTH sides only if it is malformed on both — otherwise
+    // the keys differ and the stamp clears, which is the safe direction
+    return normalizer ? normalizer.safeParse(v).data ?? null : v
+  }))
+}
+
 // The ONE derivation of a stored note's event-derived fields from a memory_written event: sources
 // stamped with retrievedAt (from the event ts, never the writer), provenance preserved/advanced.
 // Every fold of the memory stream — the Surreal projector, the kernel plan-note fold, any future
@@ -643,8 +741,8 @@ export function deriveNoteProvenance(
   note: MemoryNoteInput,
   author: MemoryAuthor,
   ts: string,
-  prev?: { createdAt?: string; createdBy?: string; revision?: number; sources?: readonly MemorySource[] },
-): { sources?: MemorySource[]; createdAt: string; createdBy: string; updatedAt: string; updatedBy: string; revision: number } {
+  prev?: { createdAt?: string; createdBy?: string; revision?: number; sources?: readonly MemorySource[]; verified?: VerifiedStamp },
+): { sources?: MemorySource[]; createdAt: string; createdBy: string; updatedAt: string; updatedBy: string; revision: number; verified?: VerifiedStamp } {
   const by = composeAuthor(author)
   // A citation's retrievedAt is when THAT url was fetched, so it survives a rewrite keyed on the
   // url — the same survivor rule claims use for validFrom. Stamping `ts` unconditionally meant any
@@ -662,6 +760,14 @@ export function deriveNoteProvenance(
     updatedAt: ts,
     updatedBy: by,
     revision: (prev?.revision ?? 0) + 1,
+    // CARRY or CLEAR — never SET. A write is not a verification, so no write path may mint a stamp;
+    // this only decides whether an existing one survives. Byte-identical content keeps it (the
+    // commit restamp supplies no fields and moves only sourceRevision, and destroying the auditor's
+    // verification for that would make the loop re-verify what nothing changed). Any change to what
+    // the note SAYS drops it: the stamp asserts an auditor read THAT text, so a heal carrying it
+    // forward would report a check that never happened — the exact false confidence this exists to
+    // prevent. Omitted, not undefined: an optional field set to undefined ERASES the stored column.
+    ...(prev?.verified !== undefined && noteContentKey(prev) === noteContentKey(note) && { verified: prev.verified }),
   }
 }
 

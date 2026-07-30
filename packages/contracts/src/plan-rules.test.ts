@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test'
-import { siblingOrderingMisuse, zoneEntryMisuse } from './plan-ordering'
+import { PLAN_FIELD_RULES, planFieldViolations, RULE_SEVERITY, siblingOrderingMisuse, zoneEntryMisuse } from './plan-rules'
 import { LINK_KIND } from './memory'
 
 describe('siblingOrderingMisuse', () => {
@@ -62,5 +62,28 @@ describe('zoneEntryMisuse', () => {
   it('rejects the whole C0 range and DEL, not only the four named escapes', () => {
     for (const code of [0x01, 0x0b, 0x0c, 0x1b, 0x1f, 0x7f])
       expect(zoneEntryMisuse([`a/${String.fromCharCode(code)}b`])).toBeString()
+  })
+})
+
+const clean = { id: 'verify', zone: ['packages/**'], links: [], siblings: [] }
+
+describe('planFieldViolations', () => {
+  it('routes a zone misuse to shape with the pinned wording', () => {
+    const v = planFieldViolations({ ...clean, zone: ['a/**\nb.ts'] })
+    expect(v.shape).toHaveLength(1)
+    expect(v.shape[0]).toContain('one glob per array entry')
+    expect(v.shape[0]).toContain('\\n') // escapes rendered, not reproduced
+    expect(v.judgment).toEqual([])
+  })
+  it('routes a sibling depends_on link to shape with the pinned wording', () => {
+    const v = planFieldViolations({ ...clean, links: [{ id: 'generate-doc', kind: LINK_KIND.depends_on }], siblings: ['generate-doc'] })
+    expect(v.shape[0]).toContain("ordering is the `dependsOn` FIELD, not a link")
+  })
+  it('returns empty sets for a clean note', () => {
+    expect(planFieldViolations(clean)).toEqual({ shape: [], judgment: [] })
+  })
+  it('every rule has a unique id and a declared severity', () => {
+    expect(new Set(PLAN_FIELD_RULES.map(r => r.id)).size).toBe(PLAN_FIELD_RULES.length)
+    for (const r of PLAN_FIELD_RULES) expect(Object.values(RULE_SEVERITY)).toContain(r.severity)
   })
 })

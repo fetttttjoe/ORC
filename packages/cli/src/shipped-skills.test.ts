@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import { readFileSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { ROLE_SKILL } from '@orc/contracts'
+import { PlanDraft, ROLE_SKILL, STEP_ROLE, validatePlan, VERIFY_STEP_ID } from '@orc/contracts'
 import { parseSkillMd } from '@orc/kernel'
 import { SHIPPED_SKILLS } from './main'
 
@@ -32,10 +32,11 @@ describe('shipped skills', () => {
     expect(body).toContain('title and summary')
     expect(body).toContain('retrieval surface')
     // heal-or-confirm: candidates come from scoped_changes' citingNotes (drift flags lag
-    // uncommitted work — observed twice as post-commit drift), and a still-true note gets a
-    // confirm write so the commit restamp can reach it
+    // uncommitted work — observed twice as post-commit drift). A still-true note is CONFIRMED by
+    // DECLARING it verified, never by rewriting it: a rewrite is authorship, and authorship is
+    // exactly what used to buy a free stamp for prose nobody checked.
     expect(body).toContain('citingNotes')
-    expect(body).toContain('CONFIRM — memory_write with the SAME id and the content unchanged')
+    expect(body).toContain('CONFIRM — call `memory_verify`')
   })
 
   test('role-committer pins the commit contract sentences', () => {
@@ -55,5 +56,26 @@ describe('shipped skills', () => {
   test('plan-authoring pins the one-glob-per-zone-entry rule', () => {
     const { body } = read('plan-authoring')
     expect(body).toContain('one glob per entry')
+  })
+})
+
+// P5 (boundary-contracts spec): driftLine could only ever recommend the full kb-build REBUILD —
+// healing a handful of drifted notes had no targeted instrument. This is that instrument's other
+// tracked data file (docs/, not vault/skills/), so it gets the same "stays valid" home. Parses the
+// draft, validates it, and pins the ONE thing the runtime tool gate actually reads: role===auditor
+// AND id===VERIFY_STEP_ID is what earns memory_verify/scoped_changes registration
+// (plugins/memory/src/tools.ts memoryVerifyTool, packages/kernel/src/execution/scoped-changes-tool.ts) —
+// a plan file that drifts off either term silently loses the tools it needs to do its job.
+describe('reground-heal plan file', () => {
+  const DOCS_DIR = fileURLToPath(new URL('../../../docs', import.meta.url))
+
+  test('stays a valid, single-step auditor plan that earns the verify-step tools', () => {
+    const raw = JSON.parse(readFileSync(path.join(DOCS_DIR, 'reground-heal.plan.json'), 'utf8'))
+    const draft = PlanDraft.parse(raw)
+    const plan = { taskId: 'reground-heal-check', version: 1, ...draft }
+    expect(validatePlan(plan)).toEqual({ ok: true })
+    expect(plan.steps).toHaveLength(1)
+    expect(plan.steps[0]?.role).toBe(STEP_ROLE.auditor)
+    expect(plan.steps[0]?.id).toBe(VERIFY_STEP_ID)
   })
 })

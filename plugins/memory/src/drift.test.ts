@@ -2,7 +2,7 @@ import { describe, expect, it } from 'bun:test'
 import { mkdtempSync, writeFileSync, mkdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import { corpusDrift, createDriftProbe, needsReground, noteHasDrifted, notesCiting, restampableNotes, CORPUS_DRIFT_ADVISORY, type ChangedSince, type CitingNote } from './drift'
+import { corpusDrift, createDriftProbe, needsReground, noteDrifted, noteHasDrifted, notesCiting, restampableNotes, CORPUS_DRIFT_ADVISORY, type ChangedSince, type CitingNote } from './drift'
 
 const note = (over: Partial<{ sourceRevision: string | null; paths: string[] }> = {}) =>
   ({ sourceRevision: 'abc123', paths: ['packages/kernel/src/kernel.ts'], ...over })
@@ -180,5 +180,74 @@ describe('corpusDrift — the graph lagging the CODE, not the log', () => {
     expect(needsReground({ ratio: CORPUS_DRIFT_ADVISORY - 0.01 })).toBe(false)
     expect(needsReground({ ratio: CORPUS_DRIFT_ADVISORY })).toBe(true)
     expect(needsReground({ ratio: 1 })).toBe(true)
+  })
+})
+
+// ─── the either-clean rule ────────────────────────────────────────────────────────────────────
+//
+// A note carries TWO independent answers to "when was this last known true": the revision the store
+// stamped at write time, and the revision an auditor declared it verified at. The fresher one
+// governs, so a note whose code moved after it was written but BEFORE it was checked is not stale.
+// Without this the auditor's own verification never cleared anything and the heal loop re-verified
+// what nothing had changed.
+describe('noteDrifted — source-clean OR verified-clean', () => {
+  const probe = (changed: Record<string, string[] | null>): ChangedSince =>
+    async rev => (changed[rev] === null || changed[rev] === undefined ? null : new Set(changed[rev]))
+  const paths = ['src/auth.ts']
+  // a real VerifiedStamp, bound to a const so TS's excess-property check does not force the test to
+  // pretend the stamp is narrower than what a note actually carries
+  const at = (revision: string) => ({ revision, at: '2026-07-30T00:00:00.000Z', by: 'cli' })
+
+  it('is NOT drifted when the source stamp is dirty but the verification is clean', async () => {
+    // written at r1 (a.ts moved since), verified at r2 (nothing moved since) → an auditor has
+    // already looked at the current code and said so
+    expect(await noteDrifted(
+      { sourceRevision: 'r1', paths, verified: at('r2') },
+      probe({ r1: paths, r2: [] }),
+    )).toBe(false)
+  })
+
+  it('IS drifted when both stamps are behind the tree', async () => {
+    expect(await noteDrifted(
+      { sourceRevision: 'r1', paths, verified: at('r2') },
+      probe({ r1: paths, r2: paths }),
+    )).toBe(true)
+  })
+
+  it('keeps the fail-toward-not-drifted rule for an unreachable verified revision', async () => {
+    // a verification stamped at a revision git cannot reach (rebased away) is UNKNOWN, and unknown
+    // is never evidence of rot — the same rule the source stamp already follows
+    expect(await noteDrifted(
+      { sourceRevision: 'r1', paths, verified: at('gone') },
+      probe({ r1: paths, gone: null }),
+    )).toBe(false)
+  })
+
+  it('behaves byte-for-byte as noteHasDrifted for a note carrying NO verification', async () => {
+    // every old note in the corpus is this case: the stamp must change nothing for them
+    for (const n of [
+      { sourceRevision: 'r1', paths },
+      { sourceRevision: 'r1', paths: [] },
+      { sourceRevision: null, paths },
+      { sourceRevision: 'gone', paths },
+    ]) {
+      const changed = n.sourceRevision === null ? null : await probe({ r1: paths, gone: null })(n.sourceRevision)
+      expect(await noteDrifted(n, probe({ r1: paths, gone: null }))).toBe(noteHasDrifted(n, changed))
+    }
+  })
+})
+
+describe('corpusDrift honours the verification stamp', () => {
+  const probe = (changed: Record<string, string[] | null>): ChangedSince =>
+    async rev => (changed[rev] === null || changed[rev] === undefined ? null : new Set(changed[rev]))
+
+  const stamp = { revision: 'r2', at: '2026-07-30T00:00:00.000Z', by: 'cli' }
+
+  it('does not count a verified-clean note as drifted, but keeps it checkable', async () => {
+    const d = await corpusDrift([
+      { sourceRevision: 'r1', paths: ['a.ts'], verified: stamp },
+      { sourceRevision: 'r1', paths: ['a.ts'] },
+    ], probe({ r1: ['a.ts'], r2: [] }))
+    expect(d).toEqual({ checkable: 2, drifted: 1, total: 2, ratio: 0.5 })
   })
 })

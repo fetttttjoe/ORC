@@ -41,7 +41,7 @@ const itemChars = (value: unknown): number =>
 // blank + refill pair, and a test that feeds it oversized.
 type BoundedField =
   | 'id' | 'scope' | 'title' | 'sourceRevision'                        // clamped building `fitted`
-  | 'createdAt' | 'createdBy' | 'updatedAt' | 'updatedBy'              // dropped by the discard ladder
+  | 'createdAt' | 'createdBy' | 'updatedAt' | 'updatedBy' | 'verified' // dropped by the discard ladder
   | 'tier' | 'kind' | 'retention' | 'revision'                         // fixed width, nothing to trim
   | 'summary' | 'rationale' | 'body'                                   // bisected, cut marked
   | 'modelRef'                                                         // kept whole or not at all
@@ -85,6 +85,13 @@ export function fitMemoryNoteToBudget(stored: MemoryNote, budget: number): Fitte
     createdBy: note.createdBy.slice(0, 200),
     updatedAt: note.updatedAt.slice(0, 128),
     updatedBy: note.updatedBy.slice(0, 200),
+    // clamped like the identity fields it sits beside — `by` is a composed author string and
+    // `revision` a git rev, both agent-adjacent input, so neither is trusted to be short
+    ...(note.verified && { verified: {
+      revision: note.verified.revision.slice(0, 128),
+      at: note.verified.at.slice(0, 128),
+      by: note.verified.by.slice(0, 200),
+    } }),
   }
   // Every variable field starts empty and is refilled in priority order, so the fields that matter
   // most get the budget. Only fields the tier actually has are touched — an `undefined` source
@@ -111,6 +118,10 @@ export function fitMemoryNoteToBudget(stored: MemoryNote, budget: number): Fitte
   // fields that make the response actionable. Discarding them emits `next: memory_read with a
   // larger budget` alongside no id to read — a hint the agent cannot follow.
   for (const discard of [
+    // First off the ladder: it is provenance ABOUT the note, and a reader who blew the budget needs
+    // the note's words before it needs to know who last checked them. `delete`, not `= undefined`:
+    // a hollow `verified: undefined` would serialize away anyway but reads as a field the note has.
+    () => { delete fitted.verified },
     () => { fitted.updatedBy = '' },
     () => { fitted.createdBy = '' },
     () => { fitted.sourceRevision = null },

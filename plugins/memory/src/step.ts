@@ -1,6 +1,6 @@
 import {
   errorMessage, LINK_KIND, MEMORY_ACCESS, MEMORY_LIMITS, MemoryScope, noteKey, NOTE_TIER, planScope, SEARCH_MODE, SIGNAL_OUTCOME, slugId, taskLaneScopes,
-  type ClaimHit, type LinkKind, type MemoryAuthor, type MemoryStore, type NoteSummary, type ResolvedTool,
+  type ClaimHit, type VerifiedStamp, type LinkKind, type MemoryAuthor, type MemoryStore, type NoteSummary, type ResolvedTool,
   type RecalledContext, type SignalOutcome, type StepMemory,
 } from '@orc/contracts'
 import { applyBudget } from './budget'
@@ -138,9 +138,12 @@ export function bindStepMemory(opts: {
       // step was handed under a verdict that never examined it. Deduped by owning note: a claim's
       // checkable unit IS its note (a claim declares no paths of its own), so five claims from one
       // note must not count that note five times and drown the notes arm.
-      const byNote = new Map<string, { sourceRevision: string | null; paths: readonly string[] }>()
+      // NOTES second, so a note that appears in both arms wins the key: only the note summary
+      // carries `verified`, and dropping it here would leave the preload's verdict blind to every
+      // verification an auditor ever declared (the same slip tools.ts's search flagging had).
+      const byNote = new Map<string, { sourceRevision: string | null; paths: readonly string[]; verified?: VerifiedStamp }>()
       for (const c of found.claims) byNote.set(noteKey(c.scope, c.noteId), { sourceRevision: c.sourceRevision, paths: c.paths })
-      for (const n of found.notes) byNote.set(noteKey(n.scope, n.id), { sourceRevision: n.sourceRevision, paths: n.paths })
+      for (const n of found.notes) byNote.set(noteKey(n.scope, n.id), { sourceRevision: n.sourceRevision, paths: n.paths, ...(n.verified && { verified: n.verified }) })
       const d = await corpusDrift([...byNote.values()], opts.changedSince)
       return d.ratio === null ? undefined : d
     } catch { return undefined }

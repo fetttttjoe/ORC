@@ -38,6 +38,7 @@ function fakeStore(opts: {
     list: async () => [],
     neighbors: async () => [],
     remove: async () => {},
+    verify: async () => ({ revision: 'headrev', at: '2026-07-30T00:00:00.000Z', by: 'cli' }),
   }
   return { store, accesses, writes, queries, claimQueries }
 }
@@ -279,6 +280,16 @@ describe('recall reports currency through the shared drift verdict', () => {
 
   // A note with no declared paths cannot be dated at all, so it must not be counted as current —
   // "nothing checkable" has to stay distinguishable from "checked and clean".
+  // The either-clean rule reaches the preload, or it reaches nothing a step actually sees: this is
+  // the verdict the block prints, and a note an auditor confirmed AFTER the code moved is current.
+  it('does not count a note whose verification is newer than the change', async () => {
+    const stamp = { revision: 'rev-b', at: '2026-07-30T00:00:00.000Z', by: 'cli' }
+    const f = fakeStore({ search: () => [summary({ id: 'n1', sourceRevision: 'rev-a', paths: ['src/auth.ts'], verified: stamp })] })
+    const changedSince = async (rev: string) => new Set(rev === 'rev-a' ? ['src/auth.ts'] : [])
+    const got = await bind(f, { changedSince }).memory.recall(5000)
+    expect(got.currency).toMatchObject({ checkable: 1, drifted: 0 })
+  })
+
   it('omits currency entirely when nothing could be checked', async () => {
     const f = fakeStore({ search: () => [summary({ id: 'n1', sourceRevision: 'rev-a', paths: [] })] })
     const got = await bind(f, { changedSince: async () => new Set(['src/auth.ts']) }).memory.recall(5000)

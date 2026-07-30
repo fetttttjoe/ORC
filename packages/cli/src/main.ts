@@ -62,6 +62,14 @@ export async function openKernel(
 // supervisor banner both name it, and it is a real path a reader will paste.
 const REGROUND_PLAN = 'docs/kb-build-parallel.plan.json'
 
+// P5: driftLine could only ever recommend REGROUND_PLAN's full remap, even for a handful of stale
+// notes — healing ~10 drifted notes had no targeted instrument, only "re-derive all ten area notes
+// from scratch". This is the cheaper tier-3 instrument: one auditor step that walks the notes
+// memory_search already flags drifted and heals/confirms each via memory_write/memory_verify,
+// writing no source files. Below the reground threshold (needsReground), a handful of stale notes
+// doesn't justify redoing the whole graph, so the advisory now names this instead of REGROUND_PLAN.
+const REGROUND_HEAL_PLAN = 'docs/reground-heal.plan.json'
+
 // How a drift reading reads to a human. Lives here, not in the memory plugin: which command to
 // recommend is a CLI concern, and a measurement module that builds prose ends up shipping a
 // hardcoded path inside a pure function.
@@ -69,7 +77,7 @@ const driftLine = (d: NonNullable<MemoryHealth['drift']>): string => {
   const pct = Math.round(d.ratio * 100)
   return needsReground(d)
     ? `knowledge drift: at least ${d.drifted}/${d.checkable} checkable notes (${pct}%) describe code changed since they were written — something moved this repo without going through orc. Re-ground: orc propose <task> --file ${REGROUND_PLAN}`
-    : `knowledge drift: ${d.drifted}/${d.checkable} checkable notes (${pct}%) describe code that has since changed`
+    : `knowledge drift: ${d.drifted}/${d.checkable} checkable notes (${pct}%) describe code that has since changed — heal: orc propose <task> --file ${REGROUND_HEAL_PLAN}`
 }
 
 const SHIPPED_SKILLS_DIR = fileURLToPath(new URL('../../../vault/skills', import.meta.url))

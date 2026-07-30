@@ -5,7 +5,7 @@ import { createOpenAIProvider } from '@orc/provider-openai'
 import { createOllamaProvider } from '@orc/provider-ollama'
 import { agentAnalyzer } from '@orc/analyzer-agent'
 import { createMcpHub, type McpHub } from '@orc/mcp-client'
-import { createMemory, createMemoryLifecycle, createGroundingSource, notesCiting, unavailableStepMemory, memoryRoleFor, type BindStep, type MemoryLifecycle } from '@orc/memory'
+import { createMemory, createMemoryLifecycle, createGroundingSource, memoryVerifyTool, notesCiting, unavailableStepMemory, memoryRoleFor, type BindStep, type MemoryLifecycle } from '@orc/memory'
 import { openMemory } from './memory-open'
 import { buildDistiller } from './consolidation-distiller'
 import { createVaultProjector } from '@orc/vault-projector'
@@ -121,14 +121,26 @@ export async function buildRuntime(
       // it to the grounded `plan` step, which shares that role). Read-only, and a FLOOR — never a
       // substitute for the test/typecheck gate, never a reason to dismiss an in-scope defect.
       ...scopedChangesTool({ kernel, p, ...(citing ? { citing } : {}) }),
+      // memory_verify is scoped_changes' write-side counterpart on the same step: that tool hands the
+      // auditor its heal-or-confirm candidates, this one is how it records a CONFIRM. Gated inside
+      // the factory on the identical predicate (auditor role AND the verify step), and only offered
+      // when memory is healthy — with no store there is nothing to append to, and a tool that can
+      // only ever error is one the model calls anyway, an iteration per attempt.
+      ...(memoryStore ? memoryVerifyTool({ store: memoryStore, author, p }) : []),
       // The commit step's tool pair (autoCommit pipeline): preview the task's floor diff, commit,
-      // restamp its notes at the new HEAD. Registration is gated TWICE — on config.autoCommit here
-      // (the operator's runtime switch, so a stale frozen plan cannot commit after the flag is
-      // turned off) and on the kernel-set committer step inside the factory. The restamp write is
-      // the store's ordinary re-write (stamps HEAD per write); with memory degraded the tool still
-      // commits and says the restamp was skipped.
+      // advance the note stamps this task earned at the new HEAD. Registration is gated TWICE — on
+      // config.autoCommit here (the operator's runtime switch, so a stale frozen plan cannot commit
+      // after the flag is turned off) and on the kernel-set committer step inside the factory. Two
+      // stamp writes, because the two stamps mean different things: `restamp` is the store's
+      // ordinary re-write (stamps sourceRevision from HEAD per write) for notes the task HEALED;
+      // `reverify` is store.verify, which advances the verified stamp of notes a step DECLARED
+      // verified and touches nothing the note says. With memory degraded the tool still commits and
+      // says which stamp pass was skipped.
       ...(config.autoCommit ? commitTool({ kernel, dir: config.dir, p,
-        ...(memoryStore ? { restamp: async (note: { id: string; scope: string }, idempotencyKey: string) => { await memoryStore.write({ id: note.id, scope: note.scope }, author, { idempotencyKey }) } } : {}),
+        ...(memoryStore ? {
+          restamp: async (note: { id: string; scope: string }, idempotencyKey: string) => { await memoryStore.write({ id: note.id, scope: note.scope }, author, { idempotencyKey }) },
+          reverify: async (note: { id: string; scope: string }, idempotencyKey: string) => { await memoryStore.verify(note.id, note.scope, author, { idempotencyKey }) },
+        } : {}),
         ...(citing ? { citing } : {}),
       }) : []),
       // exec runs operator-allowlisted commands (execAllowlist in .orc/config.json) in the step

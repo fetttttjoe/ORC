@@ -5,7 +5,7 @@ import {
   activation, activationBoost, bumpAccess, Claim, DEFAULT_HALF_LIFE_DAYS,
   deriveNoteProvenance, EDGE_DIRECTION, edgeKey, EVENT_KIND, LINK_KINDS, NOTE_KINDS, MemoryScope, Topic, viaEdge,
   type LinkKind,
-  MemoryAccessedPayload, MemoryDeletedPayload, MemoryNote, MemoryWrittenPayload,
+  MemoryAccessedPayload, MemoryDeletedPayload, MemoryNote, MemoryVerifiedPayload, MemoryWrittenPayload, VerifiedStamp,
   MEMORY_LIMITS, SEARCH_MODE, errorMessage, inferTier, isUiMetaNote, noteKey, NoteTier,
   type EmbeddingProvider, type EventRecord, type NeighborQuery, type MemoryFilter, type NoteFields, type NoteView,
   type MemorySearchOpts, type NeighborResult, type NoteSummary,
@@ -90,6 +90,10 @@ const noteTable = table(Tb.Note, {
   toolRefs: t.option(t.array(t.string())), modelRef: t.option(t.string()),
   createdAt: t.string(), createdBy: t.string(), updatedAt: t.string(), updatedBy: t.string(),
   revision: t.number(), hits: t.option(t.number()), lastAccessedAt: t.option(t.string()),
+  // Set by memory_verified and by nothing else — the only note column no memory_written can
+  // originate (a write can carry it forward or drop it; see deriveNoteProvenance). Optional so
+  // every row projected before the stamp existed still selects, without a rebuild.
+  verified: t.option(t.object({ revision: t.string(), at: t.string(), by: t.string() })),
   // the note's dense vector (embedder-derived, Tier-2 like hits) — set only when an embedder was
   // configured at write/rebuild; the semantic scan reads it raw, toNote/toSummary drop it.
   embedding: t.option(t.array(t.number())),
@@ -189,6 +193,9 @@ const SummaryRow = z.object({
   // the two drift inputs — optional because a row projected before either column existed still
   // selects, and both fall back to the "uncheckable" value rather than a fabricated one
   sourceRevision: z.string().nullable().optional(), paths: z.array(z.string()).optional(),
+  // the third drift input (see NoteSummary.verified): a summary without it makes every consumer of
+  // the either-clean rule fall back to the source stamp alone, which is what it exists to correct
+  verified: VerifiedStamp.optional(),
 })
 // the SELECT list derived from SummaryRow's own keys, so widening the row shape widens the
 // projection in the same edit. It used to be a hand-kept second spelling of the list, and zod
@@ -560,6 +567,12 @@ export class SurrealMemory {
           ...(n.modelRef !== undefined && { modelRef: n.modelRef }),
           createdAt: prov.createdAt, createdBy: prov.createdBy,
           updatedAt: prov.updatedAt, updatedBy: prov.updatedBy, revision: prov.revision,
+          // CARRY-or-CLEAR, and the one place a write may touch the stamp. Omit-if-absent is NOT
+          // available here, unlike every other optional column above: clearing is the whole point
+          // when content moved, and an omitted key survives `UPSERT … SET` untouched — which would
+          // leave a stale "verified" on a note the write just rewrote. `undefined` is what UNSETs
+          // the column, so this names the key unconditionally.
+          verified: prov.verified,
           hits: ex?.hits ?? 0,
           // OptionType fields validate against `undefined`, not `null` — omit rather than null it out.
           ...(ex?.lastAccessedAt !== undefined && { lastAccessedAt: ex.lastAccessedAt }),
@@ -629,6 +642,20 @@ export class SurrealMemory {
             l.scope.eq(edge.scope).and(l.kind.eq(edge.kind)).and(l.fromId.eq(edge.from)).and(l.toId.eq(edge.to))))[0]
           if (link) await tx.update(link.id).set(bumpAccess(link, e.ts))
         }
+      } else if (e.kind === EVENT_KIND.memory_verified) {
+        const parsed = MemoryVerifiedPayload.safeParse(e.payload)
+        if (!parsed.success) { console.warn(`[memory] skipping unparseable memory_verified at seq ${e.seq}: ${parsed.error.message}`); await tx.upsert(Tb.Meta, 'cursor').set({ seq: e.seq }); return true }
+        const p = parsed.data
+        const k = key(p.scope, p.id)
+        // read-then-write, the same rule memory_accessed follows: a stamp for a note that was never
+        // projected (or has since been deleted) must not conjure a row carrying nothing but a
+        // verification. The store refuses an unknown id before appending, so this only catches the
+        // deleted-since case and a replay against a partially rebuilt model.
+        const ex = (await tx.select(Tb.Note, k))[0]
+        // ONLY this column: the act declares a note checked and asserts nothing about its content,
+        // so revision/updatedAt/updatedBy stay exactly where the last write left them. A verify that
+        // moved `updatedBy` would report the auditor as the note's author.
+        if (ex) await tx.upsert(Tb.Note, k).set({ verified: p.stamp })
       } else if (e.kind === EVENT_KIND.memory_deleted) {
         const parsed = MemoryDeletedPayload.safeParse(e.payload)
         if (!parsed.success) { console.warn(`[memory] skipping unparseable memory_deleted at seq ${e.seq}: ${parsed.error.message}`); await tx.upsert(Tb.Meta, 'cursor').set({ seq: e.seq }); return true }
@@ -1273,6 +1300,9 @@ function toNote(r: Record<string, any>) {
     dependsOn: r.dependsOn, skillRefs: r.skillRefs, toolRefs: r.toolRefs, modelRef: r.modelRef,
     createdAt: r.createdAt, createdBy: r.createdBy, updatedAt: r.updatedAt, updatedBy: r.updatedBy,
     revision: r.revision,
+    // absent on every note nobody has verified, which is most of them — MemoryNote leaves the key
+    // off rather than defaulting it, because a defaulted stamp would be a claim nobody made
+    verified: r.verified,
   }
 }
 
@@ -1297,5 +1327,8 @@ function toSummary(r: Record<string, any>): NoteSummary {
     tier: NoteTier.catch(inferTier(r)).parse(r.tier),
     categories: r.categories ?? [], tags: r.tags, summary: r.summary,
     hits: r.hits ?? 0, lastAccessedAt: r.lastAccessedAt ?? null,
+    // conditional spread, not `?? undefined`: an explicit undefined key would parse fine here but
+    // reads as a hollow field on every unverified note in every rendered summary
+    ...(r.verified && { verified: r.verified }),
   }
 }

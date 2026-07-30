@@ -5,13 +5,16 @@ import { openKnowledge, type Knowledge } from './knowledge'
 import { createMemoryStore } from './store'
 import { createMemoryProjector, KNOWLEDGE_KINDS, type MemoryProjector } from './projector'
 import { bindStepMemory, unavailableStepMemory, type BindStep } from './step'
-import { corpusDrift, createDriftProbe } from './drift'
+import { corpusDrift, createDriftProbe, type ChangedSince } from './drift'
 
 // Only names something outside plugins/memory/src actually imports — everything else stays a
 // module-internal export of its own file (a re-export nobody imports is API surface to keep
 // compatible for no consumer; eighteen of them accumulated here before this was checked).
 export { openKnowledge } from './knowledge'
-export { memoryTools, unavailableMemoryTools, MEMORY_READ_TOOLS, MEMORY_ROLE, memoryRoleFor } from './tools'
+// memoryVerifyTool is registered by the composition root (runtime.ts stepTools), not by
+// bindStepMemory: the gate needs the STEP role and step id, which the per-step memory binding
+// never sees — the same seam scoped_changes uses.
+export { memoryTools, unavailableMemoryTools, memoryVerifyTool, MEMORY_READ_TOOLS, MEMORY_ROLE, memoryRoleFor } from './tools'
 export { unavailableStepMemory, type BindStep } from './step'
 export { orphanedNotes, staleNotes, DEFAULT_SWEEP_DAYS } from './sweep'
 export { frontier } from './frontier'
@@ -64,13 +67,20 @@ export async function createMemory(opts: { log: EventLog; config: ProjectConfig;
 // NEVER THROWS. A drift reading is advisory, so every failure — no repo, unreadable tree, nothing
 // checkable — returns undefined, which callers render as "not measured". That is deliberately
 // distinct from a measured zero: absent means we do not know, zero would claim the graph is current.
-async function measureDrift(config: ProjectConfig, knowledge: Knowledge): Promise<MemoryHealth['drift']> {
+// Takes only what it reads — the probe and a note source — so the measurement is testable without a
+// Surreal connection or a repo on disk, the same narrowing `corpusDrift`/`needsReground` already
+// commit to. The probe is built by the caller because `config.dir` is the caller's business.
+export async function measureDrift(
+  changedSince: ChangedSince,
+  knowledge: Pick<Knowledge, 'allNotes'>,
+): Promise<MemoryHealth['drift']> {
   try {
-    const notes = await knowledge.allNotes()
-    const d = await corpusDrift(
-      notes.map(n => ({ sourceRevision: n.sourceRevision ?? null, paths: 'paths' in n && Array.isArray(n.paths) ? n.paths : [] })),
-      createDriftProbe(config.dir),
-    )
+    // Handed to corpusDrift WHOLE, no re-mapping. A stored note already satisfies what the check
+    // reads — `paths` is optional there because only the semantic tier declares any — and the map
+    // that used to narrow it here silently dropped `verified` the moment the stamp shipped: the
+    // either-clean rule kept passing its own tests while no production caller could reach it.
+    // Narrowing a shape by hand at a call site is how a new field goes missing; do not restore it.
+    const d = await corpusDrift(await knowledge.allNotes(), changedSince)
     if (d.ratio === null) return undefined
     return { checkable: d.checkable, drifted: d.drifted, ratio: d.ratio }
   } catch {
@@ -87,7 +97,7 @@ export async function probeMemory(config: ProjectConfig, log: EventLog): Promise
     const pending = await log.countAfter(cursor, KNOWLEDGE_KINDS)
     // Two different lags: `pending` is the read model behind the LOG (orc's own, self-healing);
     // drift is the corpus behind the CODE, which orc cannot fix alone.
-    const drift = await measureDrift(config, knowledge)
+    const drift = await measureDrift(createDriftProbe(config.dir), knowledge)
     return pending === 0
       ? { state: MEMORY_HEALTH.ok, pending, ...(drift && { drift }) }
       : { state: MEMORY_HEALTH.catchingUp, pending, reason: `${pending} event(s) not yet projected`, ...(drift && { drift }) }

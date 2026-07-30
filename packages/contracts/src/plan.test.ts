@@ -160,4 +160,17 @@ describe('plan shape defects that cause races', () => {
     expect(r.ok).toBe(false)
     if (!r.ok) expect(r.errors.join(' ')).toContain('one glob per array entry')
   })
+
+  // Pin: validatePlan's zone sweep now routes through planFieldViolations (the shared rule table
+  // in plan-rules.ts) instead of calling zoneEntryMisuse directly. The wording is unchanged, so this
+  // is a message-parity pin, not a new-behavior test — it passes against the pre-sweep code too.
+  it('a malformed zone entry is refused with the step id and the pinned wording', () => {
+    const r = check([step('x', { zone: ['a/**\nb.ts'] })])
+    expect(r.ok).toBe(false)
+    if (!r.ok) {
+      const joined = r.errors.join(' ')
+      expect(joined).toContain("step 'x':")
+      expect(joined).toContain('one glob per array entry')
+    }
+  })
 })

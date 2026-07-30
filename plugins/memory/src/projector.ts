@@ -1,4 +1,4 @@
-import { errorMessage, EVENT_KIND, MemoryDeletedPayload, MemoryWrittenPayload, type EventKind, type EventRecord } from '@orc/contracts'
+import { errorMessage, EVENT_KIND, MemoryDeletedPayload, MemoryVerifiedPayload, MemoryWrittenPayload, type EventKind, type EventRecord } from '@orc/contracts'
 import type { EventLog } from '@orc/kernel'
 import { SurrealMemory } from './surreal'
 import { noteRelPath, renderNoteFile } from './note-md'
@@ -9,7 +9,7 @@ export interface MemoryProjector { start(): Promise<void>; close(): Promise<void
 
 // Everything the projector drains. Typed EventKind[] (not left to infer the narrower literal
 // union) so start()'s subscribe filter below can compare a live EventRecord's kind against it.
-export const MEMORY_KINDS: EventKind[] = [EVENT_KIND.memory_written, EVENT_KIND.memory_deleted, EVENT_KIND.memory_accessed]
+export const MEMORY_KINDS: EventKind[] = [EVENT_KIND.memory_written, EVENT_KIND.memory_deleted, EVENT_KIND.memory_accessed, EVENT_KIND.memory_verified]
 
 // What "the read model is behind" means for HEALTH — derived from the drained set so a fourth
 // kind is covered automatically, with the one exclusion stated rather than implied. An
@@ -73,11 +73,15 @@ export function createMemoryProjector(opts: { log: EventLog; surreal: SurrealMem
     // Surreal commit: `orc memory rebuild` cleared the read model, replayed to that seq, threw, and
     // did it again on every retry — one unparseable event in an immutable log wedging the rebuild
     // permanently. The vault file is what is skipped here; the row is already projected.
-    if (e.kind === EVENT_KIND.memory_written) {
-      const parsed = MemoryWrittenPayload.safeParse(e.payload)
+    if (e.kind === EVENT_KIND.memory_written || e.kind === EVENT_KIND.memory_verified) {
+      // Both re-render the file from the projected row, because both change what the frontmatter
+      // says: a write changes the note, a verification stamps it. Re-rendering on the stamp is not
+      // cosmetic — the vault is the human read surface, and a file that omits a verification the
+      // read model holds is the two disagreeing about the same note.
+      const parsed = (e.kind === EVENT_KIND.memory_written ? MemoryWrittenPayload.safeParse(e.payload) : MemoryVerifiedPayload.safeParse(e.payload))
       if (!parsed.success) return false
-      const { note } = parsed.data
-      const full = await surreal.get(note.id, note.scope)
+      const ref = 'note' in parsed.data ? parsed.data.note : parsed.data
+      const full = await surreal.get(ref.id, ref.scope)
       if (full) writeMemoryFile(vaultDir, noteRelPath(full), renderNoteFile(full))
     } else if (e.kind === EVENT_KIND.memory_deleted) {
       const parsed = MemoryDeletedPayload.safeParse(e.payload)

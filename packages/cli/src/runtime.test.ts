@@ -89,7 +89,10 @@ describe('buildRuntime degraded memory', () => {
     await kernel.approvePlan(t.id)
     expect(await (await port.startRun(t.id)).wait()).toBe('done')
 
-    // all five memory tools exist and each returns an explicit isError result with the reason
+    // all five memory tools exist and each returns an explicit isError result with the reason.
+    // FIVE, deliberately: memory_verify is NOT one of them and must not be added here. It is gated
+    // twice — to the auditor's verify step (this run's fixture step is neither) and to a healthy
+    // memory (this run has none) — so a sixth name appearing in this set means a gate came off.
     expect(new Set(toolProbe.results.map(r => r.name))).toEqual(
       new Set(['memory_write', 'memory_search', 'memory_read', 'memory_neighbors', 'memory_topics']))
     for (const r of toolProbe.results) {

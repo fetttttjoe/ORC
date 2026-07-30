@@ -3,7 +3,7 @@ import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { COMMIT_STEP_ID, STEP_ROLE, type ResolvedTool } from '@orc/contracts'
-import { commitTool, type RestampNote } from './commit-tool'
+import { commitTool, type StampNote } from './commit-tool'
 import type { CitingNotes } from './scoped-changes-tool'
 
 const run = (dir: string, ...args: string[]) => Bun.spawnSync(['git', '-C', dir, ...args], { stdout: 'ignore', stderr: 'ignore' })
@@ -23,20 +23,29 @@ const changed = (...paths: string[]) => paths.map(path => ({ path, taskId: 't1',
 
 function build(dir: string, opts: {
   paths?: string[]
-  notes?: { id: string; scope: string; paths: string[] }[]
-  restamp?: RestampNote | null
+  // preexisting defaults to TRUE: these fixtures are about the dirty gate, not the heal gate, and
+  // a heal is what a restamp is for. The fresh-write case (preexisting: false) is stated explicitly
+  // where it is the point.
+  notes?: { id: string; scope: string; paths: string[]; preexisting?: boolean }[]
+  verified?: { id: string; scope: string; paths: string[] }[]
+  restamp?: StampNote | null
+  reverify?: StampNote | null
   citing?: CitingNotes
   p?: typeof p
 }) {
   const stamped: { id: string; scope: string; key: string }[] = []
-  const restamp: RestampNote | undefined = opts.restamp === null ? undefined
+  const restamp: StampNote | undefined = opts.restamp === null ? undefined
     : opts.restamp ?? (async (note, key) => { stamped.push({ ...note, key }) })
+  const restated: { id: string; scope: string; key: string }[] = []
+  const reverify: StampNote | undefined = opts.reverify === null ? undefined
+    : opts.reverify ?? (async (note, key) => { restated.push({ ...note, key }) })
   const tools = commitTool({
     kernel: {
       listTaskChangedPaths: async () => changed(...(opts.paths ?? [])),
-      listTaskNoteWrites: async () => opts.notes ?? [],
+      listTaskNoteWrites: async () => (opts.notes ?? []).map(n => ({ preexisting: true, ...n })),
+      listTaskVerifiedNotes: async () => opts.verified ?? [],
     },
-    dir, restamp, ...(opts.citing ? { citing: opts.citing } : {}), p: opts.p ?? p,
+    dir, restamp, reverify, ...(opts.citing ? { citing: opts.citing } : {}), p: opts.p ?? p,
   })
   const tool = (name: string): ResolvedTool => tools.find(t => t.name === name)!
   // the ordinary flow: read the diff, then commit — what every test not ABOUT the gate uses
@@ -44,7 +53,7 @@ function build(dir: string, opts: {
     await tool('commit_preview').execute({})
     return tool('git_commit').execute({ message })
   }
-  return { tools, tool, commit, stamped }
+  return { tools, tool, commit, stamped, restated }
 }
 
 describe('commitTool registration gate', () => {
@@ -248,7 +257,148 @@ describe('stillDrifted', () => {
     writeFileSync(path.join(dir, 'a.ts'), 'a2\n')
     const r = await build(dir, { paths: ['a.ts'] }).commit('feat: change a')
     expect(r.isError).toBe(false)
-    expect((r.output as Record<string, unknown>).stillDrifted).toBeNull()
+    const o = r.output as Record<string, unknown>
+    expect(o.stillDrifted).toBeNull()
+    expect(o.degraded).toEqual(['stillDrifted unmeasured — citing-notes join unavailable (memory degraded)'])
+  })
+})
+
+// The `degraded` convention: an absent measurement is null in its own field PLUS a reason string
+// in `degraded: string[]`, and `degraded` itself is ABSENT (not an empty array) when everything
+// measured — never a one-off bespoke key per absence, never prose smuggled into another field.
+// Motivating failure: a consumer grepping for "degraded" must never miss an absence because it
+// was spelled a different way (or given its own key entirely).
+describe('degraded convention', () => {
+  it('the stamp writes absent: degraded names both, and the receipt carries no bespoke absence key', async () => {
+    const dir = repo()
+    writeFileSync(path.join(dir, 'a.ts'), 'a2\n')
+    // citing supplied so this isolates the stamp-write gap — the citing gap is covered separately
+    // above. Both writes go absent together in production: one degraded memory store injects both.
+    const r = await build(dir, { paths: ['a.ts'], restamp: null, reverify: null, citing: async () => [] }).commit('feat: change a')
+    expect(r.isError).toBe(false)
+    const o = r.output as Record<string, unknown>
+    expect(o.degraded).toEqual([
+      'restamp unavailable — memory is degraded; run `orc memory restamp` once memory is back',
+      'reverify unavailable — memory is degraded; notes this task verified keep their pre-commit stamp',
+    ])
+    // exact key set (never loosened to a length check or toContain): a one-off absence key for
+    // the missing restamp — the shape this convention forbids — would show up here as an extra
+    // key, not merely go unasserted
+    expect(Object.keys(o).sort()).toEqual(
+      ['commit', 'committedPaths', 'created', 'degraded', 'restampFailed', 'restamped', 'reverified', 'reverifyFailed', 'skippedDirty', 'skippedIgnored', 'stillDrifted'],
+    )
+  })
+
+  it('both restamp and citing present: degraded is absent entirely, not an empty array', async () => {
+    const dir = repo()
+    writeFileSync(path.join(dir, 'a.ts'), 'a2\n')
+    const r = await build(dir, { paths: ['a.ts'], citing: async () => [] }).commit('feat: change a')
+    expect(r.isError).toBe(false)
+    expect(r.output as Record<string, unknown>).not.toHaveProperty('degraded')
+  })
+})
+
+// The stamp reads the DECLARED state, never authorship. Writing a note is not evidence it is
+// true — the piggyback that let every ambient step note ride the commit stamp: a task wrote a note
+// about its own change, the commit restamped it at the new HEAD, and it read verified-fresh
+// forever without one reader ever checking it against the tree.
+describe('verification is declared, never inferred from the write', () => {
+  it('a note the task CREATED is not restamped, and lands in stillDrifted honestly', async () => {
+    const dir = repo()
+    writeFileSync(path.join(dir, 'a.ts'), 'a2\n')
+    const built = build(dir, {
+      paths: ['a.ts'],
+      notes: [{ id: 'area-fresh', scope: 'project', paths: ['a.ts'], preexisting: false }],
+      citing: async () => [{ id: 'area-fresh', scope: 'project', title: 'F', sourceRevision: 'old' }],
+    })
+    const r = await built.commit('feat: change a')
+    expect(r.isError).toBe(false)
+    const o = r.output as Record<string, unknown>
+    expect(built.stamped).toEqual([]) // clean paths, still no stamp — the write proved nothing
+    expect(o.restamped).toEqual([])
+    expect(o.skippedDirty).toEqual([]) // not dirty either: it was never a stamp candidate
+    expect(o.stillDrifted).toEqual([{ id: 'area-fresh', scope: 'project' }])
+  })
+
+  it('a HEALED note (it already existed) advances its stamp exactly as before', async () => {
+    const dir = repo()
+    writeFileSync(path.join(dir, 'a.ts'), 'a2\n')
+    const built = build(dir, {
+      paths: ['a.ts'],
+      notes: [{ id: 'area-healed', scope: 'project', paths: ['a.ts'], preexisting: true }],
+      citing: async () => [{ id: 'area-healed', scope: 'project', title: 'H', sourceRevision: 'old' }],
+    })
+    const r = await built.commit('feat: change a')
+    const o = r.output as Record<string, unknown>
+    expect(built.stamped).toEqual([{ id: 'area-healed', scope: 'project', key: 'rt1:restamp:project:area-healed' }])
+    expect(o.restamped).toEqual([{ id: 'area-healed', scope: 'project' }])
+    expect(o.stillDrifted).toEqual([])
+  })
+
+  it('a VERIFIED note is reverified at the new HEAD and excluded from stillDrifted', async () => {
+    const dir = repo()
+    writeFileSync(path.join(dir, 'a.ts'), 'a2\n')
+    const built = build(dir, {
+      paths: ['a.ts'],
+      notes: [], // the auditor confirmed it with memory_verify — no write at all
+      verified: [{ id: 'area-confirmed', scope: 'project', paths: ['a.ts'] }],
+      citing: async () => [{ id: 'area-confirmed', scope: 'project', title: 'C', sourceRevision: 'old' }],
+    })
+    const r = await built.commit('feat: change a')
+    expect(r.isError).toBe(false)
+    const o = r.output as Record<string, unknown>
+    expect(built.restated).toEqual([{ id: 'area-confirmed', scope: 'project', key: 'rt1:reverify:project:area-confirmed' }])
+    expect(o.reverified).toEqual([{ id: 'area-confirmed', scope: 'project' }])
+    expect(built.stamped).toEqual([]) // a verification is not a write
+    expect(o.stillDrifted).toEqual([])
+  })
+
+  it('a verified note citing DIRTY paths is not reverified — the same truthfulness rule as the restamp', async () => {
+    const dir = repo()
+    writeFileSync(path.join(dir, 'a.ts'), 'a2\n')
+    writeFileSync(path.join(dir, 'sibling.ts'), 's2\n') // stays uncommitted
+    const built = build(dir, {
+      paths: ['a.ts'],
+      verified: [{ id: 'area-sib', scope: 'project', paths: ['sibling.ts'] }],
+    })
+    const r = await built.commit('feat: change a')
+    const o = r.output as Record<string, unknown>
+    expect(built.restated).toEqual([])
+    expect(o.reverified).toEqual([])
+    expect(o.skippedDirty).toEqual([{ id: 'area-sib', scope: 'project', dirtyPaths: ['sibling.ts'] }])
+  })
+
+  it('one throwing reverify is reported apart from restampFailed, and still counts as this task\'s', async () => {
+    const dir = repo()
+    writeFileSync(path.join(dir, 'a.ts'), 'a2\n')
+    const built = build(dir, {
+      paths: ['a.ts'],
+      verified: [{ id: 'area-v', scope: 'project', paths: ['a.ts'] }],
+      reverify: async () => { throw new Error('surreal hiccup') },
+      citing: async () => [{ id: 'area-v', scope: 'project', title: 'V', sourceRevision: 'old' }],
+    })
+    const r = await built.commit('feat: change a')
+    expect(r.isError).toBe(false) // the commit EXISTS
+    const o = r.output as Record<string, unknown>
+    expect(o.reverifyFailed).toEqual([{ id: 'area-v', scope: 'project', error: 'surreal hiccup' }])
+    expect(o.restampFailed).toEqual([]) // a failed verification stamp is NOT a failed restamp: the
+    // repair differs (re-verify vs `orc memory restamp`), and one key for both would hide which
+    expect(o.stillDrifted).toEqual([]) // a step of this task DID verify it — only the stamp write failed
+  })
+
+  it('a note both healed and verified by the task gets both stamps, and one dirty check', async () => {
+    const dir = repo()
+    writeFileSync(path.join(dir, 'a.ts'), 'a2\n')
+    const built = build(dir, {
+      paths: ['a.ts'],
+      notes: [{ id: 'area-both', scope: 'project', paths: ['a.ts'], preexisting: true }],
+      verified: [{ id: 'area-both', scope: 'project', paths: ['a.ts'] }],
+      citing: async () => [],
+    })
+    const r = await built.commit('feat: change a')
+    const o = r.output as Record<string, unknown>
+    expect(o.restamped).toEqual([{ id: 'area-both', scope: 'project' }])
+    expect(o.reverified).toEqual([{ id: 'area-both', scope: 'project' }])
   })
 })
 

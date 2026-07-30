@@ -20,6 +20,8 @@ const deleted = (seq: number, id: string, scope = 'project'): EventRecord =>
   eventFixture({ seq, taskId: null, kind: 'memory_deleted', payload: { id, scope, author: cli }, ts: `2026-07-18T0${Math.min(seq, 9)}:00:00Z` })
 const accessed = (seq: number, id: string, mode: MemoryAccessMode = MEMORY_ACCESS.read, scope = 'project', via?: AccessVia): EventRecord =>
   eventFixture({ seq, taskId: null, kind: 'memory_accessed', payload: { id, scope, mode, author: cli, ...(via && { via }) }, ts: `2026-07-18T0${Math.min(seq, 9)}:00:00Z` })
+const verified = (seq: number, id: string, revision: string, scope = 'project'): EventRecord =>
+  eventFixture({ seq, taskId: null, kind: 'memory_verified', payload: { id, scope, stamp: { revision, at: `2026-07-18T0${Math.min(seq, 9)}:00:00Z`, by: 'cli' }, author: cli }, ts: `2026-07-18T0${Math.min(seq, 9)}:00:00Z` })
 
 const drops: (() => Promise<void>)[] = []
 // One throwaway Surreal database per test. Serial drops blew bun's default 5s hook budget as soon
@@ -679,5 +681,83 @@ describe('SurrealMemory.notesCitingPaths', () => {
     const m = await openMemory(t)
     await m.applyEvent(written(1, note({ id: 'cites-a', title: 'Cites A', paths: ['packages/a.ts'] })))
     expect(await m.notesCitingPaths([])).toEqual([])
+  })
+})
+
+// The verification stamp, folded end to end. These run against a REAL projected row on purpose:
+// the carry rule compares a fresh note's content key against a row's, and those are two different
+// shapes of the same thing (a citation's retrievedAt, an option column read back as null, key order
+// out of storage). A note-vs-note unit test cannot see a mismatch there — it would report a carry
+// that never happens in production, which is the exact class of "confidently documented, false under
+// measurement" this repo has been burned by.
+describe('memory_verified folds onto the note row', () => {
+  it('stamps the note WITHOUT touching its content, authorship or revision', async () => {
+    const t = await createTestSurreal(); drops.push(t.drop)
+    const m = await openMemory(t)
+    await m.applyEvent(written(1))
+    const before = await m.get('auth', 'project')
+    expect(before?.verified).toBeUndefined()   // absent until DECLARED — never inferred from the write
+
+    expect(await m.applyEvent(verified(2, 'auth', 'rev-a'))).toBe(true)
+    const after = await m.get('auth', 'project')
+    expect(after?.verified).toEqual({ revision: 'rev-a', at: '2026-07-18T02:00:00Z', by: 'cli' })
+    // the act declares a note CHECKED and asserts nothing about its content: everything the write
+    // stamped must come back byte-identical, or the log is claiming the auditor edited the note
+    expect({ ...after, verified: undefined }).toEqual({ ...before, verified: undefined })
+  })
+
+  it('a byte-identical rewrite CARRIES the stamp — the commit restamp must not destroy it', async () => {
+    const t = await createTestSurreal(); drops.push(t.drop)
+    const m = await openMemory(t)
+    await m.applyEvent(written(1, note({ sourceRevision: 'rev-a' })))
+    await m.applyEvent(verified(2, 'auth', 'rev-a'))
+    // exactly what commit-tool's restamp produces: the same note, re-stamped at the new HEAD
+    await m.applyEvent(written(3, note({ sourceRevision: 'rev-b' })))
+    const got = await m.get('auth', 'project')
+    expect(got?.revision).toBe(2)                                   // it really was a second write
+    expect(got?.sourceRevision).toBe('rev-b')
+    expect(got?.verified).toEqual({ revision: 'rev-a', at: '2026-07-18T02:00:00Z', by: 'cli' })
+  })
+
+  it('a rewrite that CHANGES content clears the stamp — no heal carries a stale check forward', async () => {
+    const t = await createTestSurreal(); drops.push(t.drop)
+    const m = await openMemory(t)
+    await m.applyEvent(written(1))
+    await m.applyEvent(verified(2, 'auth', 'rev-a'))
+    await m.applyEvent(written(3, note({ body: 'rewritten after the refactor' })))
+    expect((await m.get('auth', 'project'))?.verified).toBeUndefined()
+  })
+
+  it('carries the stamp across a rewrite of a note that CITES — retrievedAt is provenance, not content', async () => {
+    // the row stores sources as {url,title,retrievedAt} and a fresh note as {url,title}: if the
+    // content key did not normalize that, every research note would lose its verification on any
+    // rewrite, and the carry rule would be dead code nobody noticed
+    const t = await createTestSurreal(); drops.push(t.drop)
+    const m = await openMemory(t)
+    // built through note() each time (not spread off one value) so every fixture keeps the helper's
+    // own shape — the same reason the fixtures above do
+    const cited = { id: 'finding', kind: 'research', sources: [{ url: 'https://example.test/a', title: 'A' }] }
+    await m.applyEvent(written(1, note(cited)))
+    await m.applyEvent(verified(2, 'finding', 'rev-a'))
+    await m.applyEvent(written(3, note({ ...cited, sourceRevision: 'rev-b' })))
+    expect((await m.get('finding', 'project'))?.verified?.revision).toBe('rev-a')
+    // a NEW citation is content, and drops it
+    await m.applyEvent(written(4, note({ ...cited, sources: [{ url: 'https://example.test/b' }] })))
+    expect((await m.get('finding', 'project'))?.verified).toBeUndefined()
+  })
+
+  it('ignores a stamp for a note the read model does not hold, and never conjures a row', async () => {
+    const t = await createTestSurreal(); drops.push(t.drop)
+    const m = await openMemory(t)
+    expect(await m.applyEvent(verified(1, 'never-written', 'rev-a'))).toBe(true)  // cursor still advances
+    expect(await m.get('never-written', 'project')).toBeNull()
+  })
+
+  it('skips an unparseable payload and advances the cursor rather than wedging the drain', async () => {
+    const t = await createTestSurreal(); drops.push(t.drop)
+    const m = await openMemory(t)
+    const bad = eventFixture({ seq: 1, taskId: null, kind: 'memory_verified', payload: { id: 'auth' }, ts: '2026-07-18T01:00:00Z' })
+    expect(await m.applyEvent(bad)).toBe(true)
+    expect(await m.getCursor()).toBe(1)
   })
 })

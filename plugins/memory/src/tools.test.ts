@@ -2,7 +2,7 @@ import { describe, expect, it } from 'bun:test'
 import { z } from 'zod'
 import { claimId, CLAIM_ID_RE, LINK_KIND, LINK_KINDS, MEMORY_ACCESS, MEMORY_LIMITS, MemoryNoteInput, NOTE_KIND, NOTE_TIER, MemoryWriteResult, type AccessVia, type MemoryAccessMode, type MemoryNote, type MemoryNoteDraft, type MemoryStore, type NoteSummary } from '@orc/contracts'
 import { episodicNoteFixture, semanticNoteFixture } from '@orc/contracts/fixtures'
-import { MEMORY_READ_TOOLS, memoryTools, memoryRoleFor, noteLint } from './tools'
+import { MEMORY_READ_TOOLS, memoryTools, memoryRoleFor, memoryVerifyTool, noteLint } from './tools'
 import type { ClaimHit } from './claim-search'
 
 // field names retired from the note schema — collected here, not as scattered literals, because
@@ -25,6 +25,7 @@ const summary = (id: string, title: string): NoteSummary =>
 const fakeStore = (over: Partial<MemoryStore> = {}) => {
   const written: { input: MemoryNoteDraft; author: unknown; idempotencyKey?: string; invalidates?: string[] }[] = []
   const accessed: { id: string; scope?: string; mode: MemoryAccessMode; author: unknown; via?: AccessVia }[] = []
+  const verified: { id: string; scope?: string; author: unknown; idempotencyKey?: string }[] = []
   const store: MemoryStore = {
     write: async (input, author, opts) => { written.push({ input, author, idempotencyKey: opts?.idempotencyKey, invalidates: opts?.invalidates }); return toNote(input) },
     remove: async () => {},
@@ -37,9 +38,10 @@ const fakeStore = (over: Partial<MemoryStore> = {}) => {
     recordAccess: async (id, scope, mode, author, opts) => { accessed.push({ id, scope, mode, author, via: opts?.via }) },
     topics: async () => [],
     topicClaims: async () => [],
+    verify: async (id, scope, author, opts) => { verified.push({ id, scope, author, idempotencyKey: opts?.idempotencyKey }); return { revision: 'headrev', at: '2026-07-30T00:00:00.000Z', by: 'cli' } },
     ...over,
   }
-  return { store, written, accessed }
+  return { store, written, accessed, verified }
 }
 
 // Tool-result subsets each assertion pins — execute() returns { output: unknown }, parsed here.
@@ -47,6 +49,11 @@ const SearchOutput = z.object({ notes: z.array(z.unknown()), next: z.string() })
 const BudgetOutput = z.object({ notes: z.array(z.unknown()), truncated: z.boolean() })
 const NeighborsOutput = z.object({ neighbors: z.array(z.object({ via: z.string() })) })
 const ReadOutput = z.object({ note: z.object({ body: z.string() }), truncated: z.boolean() })
+// A refused write's error message, parsed rather than read off JSON.stringify(r.output) — a message
+// that names a control character (the zone tests below) is itself full of backslashes, and
+// JSON.stringify would double-escape them, so a plain toContain on the RAW string is what actually
+// pins the wording.
+const ErrorOutput = z.object({ error: z.string() })
 // JSON-Schema view of memory_write's advertised input (inputSchema is Record<string, unknown>).
 // Property values stay z.unknown() so the raw defs (maxItems/maxLength/type) survive toMatchObject;
 // the description projection is a separate named schema because it deliberately strips to that field.
@@ -707,67 +714,98 @@ describe('memory tools', () => {
 // agent wrote its 'verify' subplan with a depends_on LINK to a sibling ('synthesize-map' in one run,
 // 'generate-doc' in the other) where scheduling reads the `dependsOn` FIELD. Both writes SUCCEEDED
 // and the graph was refused much later, at finalize_plan — costing a rejection, a re-read and a
-// rewrite each, charged against maxIterations in a grounded run.
+// rewrite each, charged against maxIterations in a grounded run. sibling-ordering-link is now a
+// 'shape' row in contracts' PLAN_FIELD_RULES, so the write itself refuses — that finalize_plan round
+// trip is exactly what the refusal (below) exists to skip.
 describe('plan ordering expressed as a link', () => {
   const planNote = (id: string, over: Partial<MemoryNoteDraft> = {}): MemoryNote =>
     toNote({ tier: NOTE_TIER.plan, id, scope: 'plan-t1', title: id, ...over })
 
   const writeInto = (notes: Record<string, MemoryNote>) => {
-    const { store } = fakeStore({ get: async id => notes[id] ?? null })
-    return memoryTools({ store, author: { source: 'cli' } }).find(t => t.name === 'memory_write')!
+    const { store, written } = fakeStore({ get: async id => notes[id] ?? null })
+    return { write: memoryTools({ store, author: { source: 'cli' } }).find(t => t.name === 'memory_write')!, written }
   }
 
-  it('warns on the write itself, ahead of every other warning', async () => {
-    const write = writeInto({ 'generate-doc': planNote('generate-doc') })
+  // FLIPPED from a warn-and-store pin to a refusal pin — compile-time-blame: catch the mistake
+  // where it is made, while its maker can still fix it. sibling-ordering-link moved to plan-rules'
+  // shape table (Task 1), and the whole point of a shape row is that the mistake never lands.
+  it('refuses on the write itself — the sibling ordering mistake never lands', async () => {
+    const { write, written } = writeInto({ 'generate-doc': planNote('generate-doc') })
     const r = await write.execute({
       tier: NOTE_TIER.plan, id: 'verify', scope: 'plan-t1', title: 'Verify',
       links: [{ id: 'generate-doc', kind: LINK_KIND.depends_on }],
     }, 'c1')
-    const warnings = MemoryWriteResult.parse(r.output).warnings ?? []
-    // FIRST, not merely present: loop.ts lifts warnings[0] — and only warnings[0] — into the next
-    // iteration's prompt. A warning further down the list is one the model never reads.
-    expect(warnings[0]).toContain("plan-note 'verify' links depends_on 'generate-doc'")
-    expect(warnings[0]).toContain('FIELD, not a link')
-    // warned, never refused: a plan note carries body, rationale, uncertainty, zone and skillRefs,
-    // and discarding all of it costs the round-trip this check exists to save
-    expect(r.isError).toBeFalsy()
+    expect(r.isError).toBe(true)
+    expect(JSON.stringify(r.output)).toContain("plan-note 'verify' links depends_on 'generate-doc'")
+    expect(JSON.stringify(r.output)).toContain('FIELD, not a link')
+    expect(written).toHaveLength(0)   // refused: the note never lands
   })
 
   // The legitimate reading of the same edge: a plan-note whose knowledge derives from a note that is
   // not part of this decomposition. Rejecting the write would block this author outright.
   it('says nothing about a depends_on link to a note outside the plan tier', async () => {
-    const write = writeInto({ 'auth-flow': toNote({ id: 'auth-flow', title: 'Auth flow' }) })
+    const { write } = writeInto({ 'auth-flow': toNote({ id: 'auth-flow', title: 'Auth flow' }) })
     const r = await write.execute({
       tier: NOTE_TIER.plan, id: 'verify', scope: 'plan-t1', title: 'Verify', summary: 'audit the siblings',
       links: [{ id: 'auth-flow', kind: LINK_KIND.depends_on }],
     }, 'c1')
     expect(MemoryWriteResult.parse(r.output).warnings ?? []).toEqual([])
   })
+
+  // task-2 review fix (IMPORTANT): the sibling-ordering check must NOT run unconditionally like the
+  // zone check does — `links` carries no plan-tier signal (inferTier never reads it, unlike zone/
+  // rationale/uncertainty), so an ungated check false-positives on a semantic note whose depends_on
+  // target only HAPPENS to resolve as plan-tier. The codebase-analysis area-note pattern does exactly
+  // this: sibling area notes link depends_on each other, and a semantic note has no dependsOn FIELD
+  // to redirect that into — refusing it would block a legitimate author with no repair path.
+  it('does not refuse a non-plan note whose depends_on target happens to be plan-tier', async () => {
+    const { write } = writeInto({ 'generate-doc': planNote('generate-doc') })
+    const r = await write.execute({
+      id: 'area-x', title: 'Area X', summary: 'an area note',
+      links: [{ id: 'generate-doc', kind: LINK_KIND.depends_on }],
+    }, 'c1')
+    expect(r.isError).toBeFalsy()
+  })
+
+  // The gate is on EFFECTIVE tier, not merely "did this draft say tier: plan" — merge-on-omit means
+  // an update to an EXISTING plan note may add a sibling link without restating tier at all. The
+  // gate has to consult the STORED note's tier in that case, or this exact mistake (the ordering
+  // link this whole describe block exists to catch) would slip through unrefused on every update.
+  it('still refuses when a plan-note UPDATE adds a sibling link without restating tier', async () => {
+    const { write, written } = writeInto({ 'generate-doc': planNote('generate-doc'), verify: planNote('verify') })
+    const r = await write.execute({ id: 'verify', scope: 'plan-t1', links: [{ id: 'generate-doc', kind: LINK_KIND.depends_on }] }, 'c1')
+    expect(r.isError).toBe(true)
+    expect(JSON.stringify(r.output)).toContain("plan-note 'verify' links depends_on 'generate-doc'")
+    expect(written).toHaveLength(0)
+  })
 })
 
 // A planner authored `zone: ["a/**\nb.ts"]` — several globs joined with newlines into ONE entry.
 // The write succeeded, every gate passed, and the frozen fence then matched no real path: two steps
 // were refused every write to their own files, with no repair path, and the slice was cancelled.
-// Warned here (the note, with its body/rationale/uncertainty, is still worth keeping) and refused at
-// the freeze — one predicate, one wording.
+// zone-entry-wellformed is a 'shape' row in contracts' PLAN_FIELD_RULES (Task 1), so this now
+// refuses at the write, before the fence can ever be frozen wrong — one predicate, one wording,
+// enforced at the earliest point the author can still fix it for free.
 describe('malformed zone entry on a plan note', () => {
   const writeTool = () => {
     const { store, written } = fakeStore()
     return { write: memoryTools({ store, author: { source: 'cli' } }).find(t => t.name === 'memory_write')!, written }
   }
 
-  it('warns with the teaching message and still persists the note', async () => {
+  // FLIPPED from a warn-and-store pin to a refusal pin — compile-time-blame: catch the mistake
+  // where it is made, while its maker can still fix it. A malformed zone entry has no honest
+  // meaning to store, so keeping the note around no longer buys anything a refusal doesn't.
+  it('refuses the write and names the offending entry — the note is never stored', async () => {
     const { write, written } = writeTool()
     const r = await write.execute({
       tier: NOTE_TIER.plan, id: 'draft', scope: 'plan-t1', title: 'Draft',
       zone: ['packages/a/**\npackages/b.ts'],
     }, 'c1')
-    const warnings = MemoryWriteResult.parse(r.output).warnings ?? []
-    expect(warnings.join(' ')).toContain('packages/a/**\\npackages/b.ts') // visible escapes
-    expect(warnings.join(' ')).toContain('one glob per array entry')
-    expect(r.isError).toBeFalsy()
-    expect(written).toHaveLength(1)                     // authorable: the note IS stored
-    expect(written[0]!.input.id).toBe('draft')
+    expect(r.isError).toBe(true)
+    const error = ErrorOutput.parse(r.output).error
+    expect(error).toContain('packages/a/**\\npackages/b.ts') // visible escapes
+    expect(error).toContain('one glob per array entry')
+    expect(written).toHaveLength(0)                     // refused: the note never lands
   })
 
   it('says nothing about well-formed zone entries', async () => {
@@ -776,6 +814,7 @@ describe('malformed zone entry on a plan note', () => {
       tier: NOTE_TIER.plan, id: 'draft', scope: 'plan-t1', title: 'Draft', summary: 'the work',
       zone: ['packages/a/**', 'packages/b.ts'],
     }, 'c1')
+    expect(r.isError).toBeFalsy()
     const warnings = MemoryWriteResult.parse(r.output).warnings ?? []
     expect(warnings.join(' ')).not.toContain('one glob per array entry')
   })
@@ -783,7 +822,32 @@ describe('malformed zone entry on a plan note', () => {
   it('leaves a semantic note alone — the rule is about frozen fences', async () => {
     const { write } = writeTool()
     const r = await write.execute({ id: 'auth', title: 'Auth', summary: 's', body: 'b' }, 'c1')
+    expect(r.isError).toBeFalsy()
     expect((MemoryWriteResult.parse(r.output).warnings ?? []).join(' ')).not.toContain('one glob per array entry')
+  })
+})
+
+// P1/P2 regression pins (2026-07-30 boundary-contracts task 2): a plan-field SHAPE mistake must
+// refuse the write outright, and that refusal must not ride the lossy warnings[] channel where
+// loop.ts lifts only warnings[0] into the next turn — a shape mistake buried behind another
+// warning would never be seen. Distinct fixtures from the two describes above (fresh ids, an
+// isolated fakeStore) so this pins the boundary's OWN behavior, not a rename of the older tests.
+describe('plan-field shape violations refuse the write', () => {
+  it('refuses a write whose zone entry is not one glob — the write never lands', async () => {
+    const f = fakeStore({ get: async () => null, search: async () => [] })
+    const write = memoryTools({ store: f.store, author: { source: 'cli' } }).find(t => t.name === 'memory_write')!
+    const r = await write.execute({ id: 'sub-a', title: 'Sub A', summary: 's', zone: ['a/**\nb.ts'] }, 'c1')
+    expect(r.isError).toBe(true)
+    expect(JSON.stringify(r.output)).toContain('one glob per array entry')
+    expect(f.written).toHaveLength(0)   // the write did NOT land — the whole point
+  })
+
+  it('shape violation refuses even when other warnings accrued — warnings[0] is the only warning a model ever sees', async () => {
+    const f = fakeStore({ get: async () => null, search: async () => [] })
+    const write = memoryTools({ store: f.store, author: { source: 'cli' } }).find(t => t.name === 'memory_write')!
+    const r = await write.execute({ id: 'sub-a', title: 'Sub A', summary: 'x'.repeat(5000), zone: ['   '] }, 'c1')
+    expect(r.isError).toBe(true)
+    expect(JSON.stringify(r.output)).toContain('one glob per array entry')
   })
 })
 
@@ -1025,5 +1089,59 @@ describe('memory_topics', () => {
     const out = z.object({ topics: z.array(z.unknown()), truncated: z.boolean() }).parse((await tool.execute({ budget: 100 })).output)
     expect(out.topics.length).toBeLessThan(many.length)
     expect(out.truncated).toBe(true)
+  })
+})
+
+// ─── memory_verify: the one writer of the verification stamp ──────────────────────────────────
+describe('memory_verify', () => {
+  const p = { taskId: 't1', stepId: 'verify', role: 'auditor' }
+  const StampOutput = z.object({ verified: z.object({ revision: z.string(), at: z.string(), by: z.string() }), id: z.string() })
+
+  // Registration gate, not an execute-time refusal — the same rule (and the same predicate) the
+  // kernel's scoped_changes commits to: a visible tool that can only ever error gets called anyway
+  // and burns an iteration per attempt.
+  it('registers ONLY for the auditor role on the verify step', () => {
+    const { store } = fakeStore()
+    const names = (over: Partial<typeof p>) => memoryVerifyTool({ store, author: { source: 'cli' }, p: { ...p, ...over } }).map(t => t.name)
+    expect(names({})).toEqual(['memory_verify'])
+    // both terms required: PLAN_STEP_ROLE === auditor, so role alone would hand it to the grounded
+    // `plan` step; stepId alone would hand it to any step a planner happened to name 'verify'
+    expect(names({ role: 'implementer' })).toEqual([])
+    expect(names({ stepId: 'analyze' })).toEqual([])
+  })
+
+  it('appends ONLY a verification — no write — and returns the stamp it recorded', async () => {
+    const f = fakeStore()
+    const tool = memoryVerifyTool({ store: f.store, author: { source: 'cli' }, p })[0]!
+    const r = await tool.execute({ id: 'auth-flow' }, 'call-1')
+    expect(r.isError).toBe(false)
+    expect(StampOutput.parse(r.output)).toEqual({ id: 'auth-flow', verified: { revision: 'headrev', at: '2026-07-30T00:00:00.000Z', by: 'cli' } })
+    expect(f.verified).toEqual([{ id: 'auth-flow', scope: undefined, author: { source: 'cli' }, idempotencyKey: undefined }])
+    // the act must leave the note byte-stable: a memory_written here would bump the revision, move
+    // updatedBy to the auditor and re-stamp sourceRevision — three lies about a step that only read
+    expect(f.written).toHaveLength(0)
+  })
+
+  it('passes an explicit scope through, and keys the append when the author carries a run token', async () => {
+    const f = fakeStore()
+    const tool = memoryVerifyTool({ store: f.store, author: { source: 'agent', runToken: 'r1' }, p })[0]!
+    await tool.execute({ id: 'auth-flow', scope: 'plan-t1' }, 'call-9')
+    expect(f.verified[0]?.scope).toBe('plan-t1')
+    expect(f.verified[0]?.idempotencyKey).toContain('r1')
+  })
+
+  it('reports an unknown id as a tool error that NAMES the id', async () => {
+    const f = fakeStore({ verify: async (id: string) => { throw new Error(`no note '${id}' in scope 'project'`) } })
+    const tool = memoryVerifyTool({ store: f.store, author: { source: 'cli' }, p })[0]!
+    const r = await tool.execute({ id: 'never-written' }, 'call-2')
+    expect(r.isError).toBe(true)
+    expect(JSON.stringify(r.output)).toContain('never-written')
+  })
+
+  it('rejects a malformed id at the boundary rather than appending one', async () => {
+    const f = fakeStore()
+    const tool = memoryVerifyTool({ store: f.store, author: { source: 'cli' }, p })[0]!
+    expect((await tool.execute({ id: '../etc/passwd' }, 'call-3')).isError).toBe(true)
+    expect(f.verified).toHaveLength(0)
   })
 })

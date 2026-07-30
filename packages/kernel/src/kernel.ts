@@ -8,7 +8,7 @@ import { MASTERPLAN_NOTE_ID,
 import { foldPlanNotes, planApprovalStamp, planGraphHash, planScope, PLAN_STEP_ID, PLAN_STEP_ROLE } from './execution/strategies/grounded-plan'
 import { DEFAULT_MAX_ITERATIONS } from './config'
 import { EventLog, type EventLogOps } from './storage'
-import { fold, gatedChildren, subtreeTaskIds, subtreeUsage, taskChangedPaths, taskNoteWrites, type State, type TaskNoteWrite } from './projections'
+import { fold, gatedChildren, subtreeTaskIds, subtreeUsage, taskChangedPaths, taskNoteWrites, taskVerifiedNotes, type State, type TaskNoteRef, type TaskNoteWrite } from './projections'
 import { KERNEL_ERROR_CODE, KernelError } from './errors'
 
 // D6 targeted re-plan (M5b): what listAnnotations hands back to the read_annotations tool — the
@@ -271,9 +271,20 @@ export class Kernel {
 
   // The restamp set for git_commit: semantic notes this task's subtree wrote, from the log (same
   // memory-kind read as listPlanNotes — memory events carry taskId:null, byTask can't see them).
+  // Each row says whether the write HEALED an existing note; only those earn a stamp.
   async listTaskNoteWrites(taskId: string): Promise<TaskNoteWrite[]> {
     const subtree = new Set(subtreeTaskIds(await this.state(), taskId))
     return taskNoteWrites(await this.log.after(0, [EVENT_KIND.memory_written, EVENT_KIND.memory_deleted]), subtree)
+  }
+
+  // The reverify set for git_commit: notes a step of this task's subtree DECLARED verified. Reads
+  // memory_written too, for the declared paths the post-commit dirty gate judges — a memory_verified
+  // carries none, and the note it names always has a write behind it (store.verify refuses an id
+  // the log has no live note for).
+  async listTaskVerifiedNotes(taskId: string): Promise<TaskNoteRef[]> {
+    const subtree = new Set(subtreeTaskIds(await this.state(), taskId))
+    const kinds = [EVENT_KIND.memory_written, EVENT_KIND.memory_verified, EVENT_KIND.memory_deleted]
+    return taskVerifiedNotes(await this.log.after(0, kinds), subtree)
   }
 
   // FixE freeze-from-log (M5b): reconstruct the task's plan-note graph from the event log — the

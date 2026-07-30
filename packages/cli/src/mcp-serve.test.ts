@@ -164,6 +164,10 @@ describe('orc mcp serve (stdio, read slice)', () => {
       expect(served).toContain(name) // whitelist names must still exist in the memory plugin
     expect(served).toContain('approve')
     expect(served).not.toContain('memory_write')
+    // nor memory_verify: verification is an AUDITOR's declaration about a step's own work, gated to
+    // the verify step inside a plan (runtime.ts stepTools), so it is not part of the memory tool
+    // surface this door composes at all — same reason the kernel's scoped_changes never reaches here
+    expect(served).not.toContain('memory_verify')
   })
 
   // The serve door drives agents over MCP that must never invent a model ref (the copilot

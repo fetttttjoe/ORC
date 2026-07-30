@@ -1,4 +1,4 @@
-import { ClaimWrite, EVENT_KIND, MemoryNoteInput, MemoryScope, MemoryWrittenPayload, NOTE_TIER, resolveClaims, type ClaimSearchOptions, type MemoryAuthor, type MemoryFilter, type MemorySearchOpts, type MemoryNote, type MemoryStore, type NoteSummary, type Claim, type ClaimHit, type Topic } from '@orc/contracts'
+import { ClaimWrite, composeAuthor, EVENT_KIND, MemoryNoteInput, MemoryScope, MemoryWrittenPayload, NOTE_TIER, resolveClaims, type ClaimSearchOptions, type MemoryAuthor, type MemoryFilter, type MemorySearchOpts, type MemoryNote, type MemoryStore, type NoteSummary, type Claim, type ClaimHit, type Topic } from '@orc/contracts'
 import { KERNEL_ERROR_CODE, KernelError, type EventLog } from '@orc/kernel'
 import type { SurrealMemory } from './surreal'
 
@@ -97,6 +97,60 @@ export function createMemoryStore(opts: { log: EventLog; surreal: SurrealMemory;
       return note.tier === NOTE_TIER.semantic
         ? { ...note, ...stamped, sources: note.sources.map(s => ({ ...s, retrievedAt: '' })) }
         : { ...note, ...stamped }
+    },
+    // The verification act. Appends memory_verified and NOTHING else — no memory_written — so the
+    // note's body, summary, revision and authorship come out byte-stable: the auditor read the note,
+    // it did not write it, and a log that records otherwise is the inference this design removes.
+    async verify(id, scope = MemoryScope.project, author, verifyOpts) {
+      // The SAME HEAD the write path stamps sourceRevision from, resolved the same way (per call,
+      // outside the write lock) — a second git read here would let the two stamps disagree about
+      // which tree they were compared against, which is the one thing drift's either-clean rule
+      // cannot tolerate.
+      const revision = await sourceRevision()
+      // Refused, not stamped with a placeholder: `verified.revision` is what every later check
+      // diffs against, and a stamp nothing can be compared to is worse than no stamp — it reads
+      // as confirmation while proving nothing.
+      if (revision === null) throw new Error('cannot record a verification without a source revision — this runtime has no readable Git HEAD, so nothing could date the check afterwards')
+      const stamp = { revision, at: new Date().toISOString(), by: composeAuthor(author) }
+      await log.transaction(async tx => {
+        // Existence is checked against the LOG, the source of truth, not the read model: the
+        // projection is asynchronous, so a note verified in the same turn it was written would be
+        // refused against a view that has not caught up. Same read the write path's merge base uses.
+        const latest = await tx.latestNoteEvent(scope, id)
+        if (latest?.kind !== EVENT_KIND.memory_written)
+          throw new Error(`no note '${id}' in scope '${scope}' — verify a note that exists (a deleted note cannot be verified back into existence)`)
+        try {
+          await tx.append({
+            // `|| null`, not `?? null` — recordAccess's rule and its reason: an empty-string id would
+            // fail the envelope's min(1) and turn a tool call into an error, so falsy normalizes to
+            // unbound. Bound to the acting step so task-scoped views can ask which notes THIS run
+            // verified without payload archaeology.
+            taskId: author.taskId || null, stepId: author.stepId || null, runToken: author.runToken || null,
+            kind: EVENT_KIND.memory_verified,
+            payload: { id, scope, stamp, author },
+            // at-least-once: a crash-retry of the surrounding tool call must not append a second
+            // verification, same rule recordAccess and write already follow
+            idempotencyKey: verifyOpts?.idempotencyKey ?? null,
+          })
+        } catch (err) {
+          // The SAME rule write commits to above: a key identifies ONE tool call, so a keyed replay
+          // is that call arriving twice and the FIRST committed verification stands.
+          //
+          // Load-bearing here in a way it is not for write. The log reuses a stored event silently
+          // only when the replayed payload is BYTE-IDENTICAL — and `stamp.at` is a fresh clock read
+          // per attempt, so a verification conflicts on EVERY replay by construction. Without this
+          // catch, a DBOS re-execution of a tool step whose append had already committed handed the
+          // auditor an isError for work that succeeded.
+          //
+          // CEILING: the stamp returned below is then this attempt's, not the one in the log — they
+          // differ by the retry gap in `at`, and by `revision` only if HEAD moved between attempts
+          // (it cannot within one step). Same imprecision write documents; the log holds the truth.
+          const conflicted = verifyOpts?.idempotencyKey
+            && err instanceof KernelError && err.code === KERNEL_ERROR_CODE.idempotency_conflict
+          if (!conflicted) throw err
+        }
+      })
+      return stamp
     },
     // optional author: cancel-sweep passes the cancelled task's identity as provenance
     async remove(id, scope = MemoryScope.project, author?: MemoryAuthor) {

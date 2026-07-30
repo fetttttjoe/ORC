@@ -112,10 +112,21 @@ describe('citingNotes (heal-or-confirm candidates)', () => {
     expect(seen).toEqual([['packages/kernel/src/dup.ts']])
   })
 
-  it('without the callback the field is null and the floor names the gap loudly', async () => {
-    const o = (await run()).output as { citingNotes: unknown; floor: string }
+  it('without the callback citingNotes is null and degraded names the gap (never smuggled into floor)', async () => {
+    const o = (await run()).output as { citingNotes: unknown; floor: string; degraded?: string[] }
     expect(o.citingNotes).toBeNull()
-    expect(o.floor).toContain('citingNotes unavailable')
+    expect(o.floor).not.toContain('unavailable')
+    expect(o.degraded).toEqual(['citingNotes unavailable (memory degraded) — name that loudly in your summary.'])
+  })
+
+  it('with the callback present, degraded is absent entirely (not an empty array)', async () => {
+    const [tool] = scopedChangesTool({
+      kernel: fakeKernel([THIS_TASK, CHILD_TASK], PLAN), p: verifyP,
+      citing: async () => [],
+    })
+    const r = await tool!.execute({})
+    expect(r.isError).toBe(false)
+    expect(r.output as Record<string, unknown>).not.toHaveProperty('degraded')
   })
 })
 

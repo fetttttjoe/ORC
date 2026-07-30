@@ -32,10 +32,11 @@ const DESCRIPTION =
   + 'from it. It reports paths, never verdicts. It NEVER licenses skipping the test/typecheck gate and NEVER '
   + 'excuses a defect in a file that is in scope. An empty list is not evidence of success. '
   + 'citingNotes lists every memory note citing a path this task changed — your heal-or-confirm candidates; '
-  + 'drift flags lag uncommitted work and are NOT the candidate list.'
+  + 'drift flags lag uncommitted work and are NOT the candidate list. degraded lists why citingNotes came back '
+  + 'null (memory unavailable) and is present ONLY when that measurement could not be made.'
 
 // The citing-notes join, injected by the composition root (runtime.ts) because the kernel may not
-// import plugins/memory — same seam shape as commit-tool's RestampNote. Powers the auditor's
+// import plugins/memory — same seam shape as commit-tool's StampNote. Powers the auditor's
 // heal-or-confirm candidate list: drift flags are measured against COMMITTED revisions, so at
 // verify time (pre-commit) they lag the very work being audited — observed twice as 4/7
 // post-commit drift before this existed.
@@ -111,10 +112,12 @@ export function scopedChangesTool(opts: {
         // deduped: multiple steps writing one file is one candidate lookup, not several
         const uniquePaths = [...new Set(changed.map(r => r.path))]
         const citingNotes = citing ? await citing(uniquePaths) : null
-        const floor = citing
-          ? FLOOR_NOTE
-          : FLOOR_NOTE + ' citingNotes unavailable (memory degraded) — name that loudly in your summary.'
-        return { output: { paths, citingNotes, floor }, isError: false }
+        // The `degraded` convention (shared with commit-tool.ts): an absent measurement is `null`
+        // in its own field (citingNotes above) PLUS a reason in `degraded`, omitted when nothing
+        // is degraded. This sentence used to be appended straight into `floor` — prose smuggled
+        // into another field, the shape this convention forbids — so a consumer reading `floor`
+        // for its own (unrelated) exec-writes caveat could miss the absence note riding along.
+        return { output: { paths, citingNotes, floor: FLOOR_NOTE, ...(citing ? {} : { degraded: [CITING_DEGRADED] }) }, isError: false }
       } catch (e) {
         return toolError(e)
       }
@@ -127,3 +130,8 @@ export function scopedChangesTool(opts: {
 const FLOOR_NOTE =
   'Floor, not a diff: exec-driven writes (formatters, codegen) are not captured, so a changed file can be missing. '
   + 'Scope membership only — never a reason to skip bun test / bun run typecheck, and never a reason to dismiss a defect.'
+
+// The `degraded` reason when the citing-notes join is absent. FLOOR_NOTE describes a real property
+// of the measurement itself (exec writes are never captured) and stays as-is regardless of memory
+// state; this describes an ABSENCE, so it belongs only in `degraded`, never merged into FLOOR_NOTE.
+const CITING_DEGRADED = 'citingNotes unavailable (memory degraded) — name that loudly in your summary.'
