@@ -100,8 +100,8 @@ describe('citingNotes (heal-or-confirm candidates)', () => {
     const [tool] = scopedChangesTool({
       kernel: {
         listTaskChangedPaths: async () => [
-          { path: 'packages/kernel/src/dup.ts', taskId: THIS_TASK, steps: [{ stepId: 's1', tool: 'fs_write' }] },
-          { path: 'packages/kernel/src/dup.ts', taskId: CHILD_TASK, steps: [{ stepId: 'kid', tool: 'fs_write' }] },
+          { path: 'packages/kernel/src/dup.ts', taskId: THIS_TASK, steps: [{ stepId: 's1', tool: 'fs_write', seq: 1 }] },
+          { path: 'packages/kernel/src/dup.ts', taskId: CHILD_TASK, steps: [{ stepId: 'kid', tool: 'fs_write', seq: 2 }] },
         ],
         getPlan: async () => PLAN,
       },
