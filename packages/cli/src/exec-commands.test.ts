@@ -157,7 +157,6 @@ describe('exec commands', () => {
     expect(out).toContain('May I analyze the codebase?')
     expect(out).toContain(`orc reply ${id}`)
     expect(out).not.toContain('run finished')
-    await log.close()
   }, 15_000)
 
   // `orc reply` used to send the DBOS message and exit, so the answer sat durable while the run
@@ -187,7 +186,6 @@ describe('exec commands', () => {
     await watched
     expect(calls).toEqual([]) // the supervisor carries the answer in; this command never drives
     expect(lines.join('\n')).toContain('run finished: done')
-    await log.close()
   }, 15_000)
 
   it('reply without an open question says so and attaches nothing', async () => {
@@ -264,6 +262,7 @@ describe('exec commands', () => {
     const analyze = stepFixture({ id: 'analyze', role: 'scout' })
     const analyzers = new Map<string, Analyzer>([['agent-analyzer', { id: 'agent-analyzer', analysisStep: () => analyze }]])
     const { kernel, log } = await openKernel(db.url, { projectId: TEST_PROJECT_ID, analyzers })
+    db.onClose(() => log.close())
     // a non-done outcome is a thrown CommandFailure now, not a write to process.exitCode, so this
     // could assert either; 'done' keeps the test about the grounded bootstrap rather than exits.
     const { port, calls } = stubPort('done')
@@ -286,7 +285,6 @@ describe('exec commands', () => {
     expect((await kernel.eventsFor(taskId)).some(e => e.kind === EVENT_KIND.run_requested)).toBe(true)
     expect(calls).toEqual([])
     expect(lines.join('\n')).toContain('run finished: done')
-    await log.close()
   }, 15_000)
 
   it('new --strategy grounded-plan without --model is a clear error', async () => {
@@ -307,6 +305,7 @@ describe('exec commands', () => {
     const db = await createTestDb()
     dbs.push(db)
     const { kernel, log, storage } = await openKernel(db.url, { projectId: TEST_PROJECT_ID })
+    db.onClose(() => storage.close())
     const { port } = stubPort()
     const lines: string[] = []
     spyOn(console, 'log').mockImplementation((...a: unknown[]) => { lines.push(a.join(' ')) })
@@ -330,6 +329,5 @@ describe('exec commands', () => {
     expect(out).toMatch(/op {2}model {2}fake\/m\s+completed/)
     expect(out).toMatch(/op {2}tool {3}fs_write\s+started/)
     expect(out).toContain('report.md · sha256:aaaaaaaaaaaa… · 5B')
-    await log.close()
   })
 })

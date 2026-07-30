@@ -13,15 +13,27 @@ const TaskDetailView = z.object({ task: z.object({ title: z.string() }) })
 const NoteHitsView = z.object({ hits: z.number() })
 
 const dbs: Array<{ drop: () => Promise<void> }> = []
-afterAll(async () => { await Promise.all(dbs.map(d => d.drop())) }, 30_000)
+// Everything setup() opens is torn down HERE, before its database is dropped, whether or not the
+// test remembered — same idiom as graph-ui's server.test.ts. createProjectSessions holds an event
+// stream AND a project watch; a test that returned early on a failed expect used to leave both
+// alive against a database this afterAll then dropped.
+const openSessions: Array<{ close: () => Promise<void> }> = []
+const openStores: Array<{ close: () => Promise<void> }> = []
+afterAll(async () => {
+  for (const s of openSessions) await s.close().catch(() => {})
+  for (const st of openStores) await st.close().catch(() => {})
+  await Promise.all(dbs.map(d => d.drop()))
+}, 30_000)
 
 async function setup() {
   const db = await createTestDb()
   dbs.push(db)
   const storage = await openStorage(db.url, { projectId: TEST_PROJECT_ID })
+  openStores.push(storage)
   const k = new Kernel(storage.events)
   const t = await k.createTask({ title: 'seed task', spec: '' })
   const sessions = createProjectSessions({ url: db.url, cwdProject: { id: TEST_PROJECT_ID, name: 'test-proj' } })
+  openSessions.push(sessions)
   return { storage, taskId: t.id, sessions }
 }
 
@@ -52,8 +64,8 @@ describe('ProjectSessions', () => {
     const db = await createTestDb()
     dbs.push(db)
     const sessions = createProjectSessions({ url: db.url, cwdProject: { id: 'deleted-project', name: 'ghost' } })
+    openSessions.push(sessions)
     expect(await sessions.projects()).toEqual([])
-    await sessions.close()
   })
 
   it('projects() names the cwd project; snapshot holds the seeded task', async () => {
@@ -62,7 +74,6 @@ describe('ProjectSessions', () => {
     const snap = await sessions.snapshot(TEST_PROJECT_ID)
     expect(snap.seq).toBeGreaterThan(0)
     expect(snap.graph.nodes.map(n => n.id)).toContain(taskId)
-    await sessions.close(); await storage.close()
   })
 
   it('a subscriber receives a patch adding exactly a newly appended note', async () => {
@@ -76,7 +87,6 @@ describe('ProjectSessions', () => {
     expect(updates[0]!.patch.addNodes.map(n => n.id)).toEqual([noteNodeId('project', 'live-note')])
     expect(updates[0]!.event?.kind).toBe(EVENT_KIND.memory_written)
     unsub()
-    await sessions.close(); await storage.close()
   })
 
   it('since(oldSeq) returns the missed note in one cumulative patch; null when current', async () => {
@@ -88,7 +98,6 @@ describe('ProjectSessions', () => {
     const u = await sessions.since(TEST_PROJECT_ID, seq)
     expect(u?.patch.addNodes.map(n => n.id)).toEqual([noteNodeId('project', 'missed-note')])
     expect(await sessions.since(TEST_PROJECT_ID, u!.seq)).toBeNull()
-    await sessions.close(); await storage.close()
   })
 
   it('an empty-patch event (task_status_changed-like) still notifies with a summary', async () => {
@@ -108,7 +117,6 @@ describe('ProjectSessions', () => {
     expect(updates[1]!.summary?.noteRef).toBe(noteNodeId('project', 'hit-note'))
     expect(updates[1]!.patch.addNodes).toEqual([])
     unsub()
-    await sessions.close(); await storage.close()
   })
 
   it('transcript, taskPlans, and log read from the cached session', async () => {
@@ -125,7 +133,6 @@ describe('ProjectSessions', () => {
     const rows = await sessions.log(TEST_PROJECT_ID, { taskId })
     expect(rows.at(-1)!.line).toContain('hello there')
     expect(await sessions.log(TEST_PROJECT_ID, { limit: 1 })).toHaveLength(1)
-    await sessions.close(); await storage.close()
   })
 
   it('log(taskId) attributes each task its own step rows + its author.taskId memory rows, and no sibling/ownerless memory row', async () => {
@@ -165,8 +172,6 @@ describe('ProjectSessions', () => {
     expect(bLines.some(l => l.includes('sa'))).toBe(false)
     expect(bLines.some(l => l.includes('note-by-a'))).toBe(false)
     expect(bLines.some(l => l.includes('ownerless-note'))).toBe(false)
-
-    await sessions.close(); await storage.close()
   })
 
   it('planNotes marks an approved-but-not-yet-running child subplan as armed, not pending', async () => {
@@ -195,7 +200,6 @@ describe('ProjectSessions', () => {
     const pn = await sessions.planNotes(TEST_PROJECT_ID, taskId)
     expect(pn.mermaid).toContain('sub["sub"]:::armed')
     expect(pn.mermaid).not.toContain('sub["sub"]:::pending')
-    await sessions.close(); await storage.close()
   })
 
   it('planNotes keeps a manual/awaiting-approval child (approvedVersion null) at pending', async () => {
@@ -215,7 +219,6 @@ describe('ProjectSessions', () => {
     const pn = await sessions.planNotes(TEST_PROJECT_ID, taskId)
     expect(pn.mermaid).toContain('sub["sub"]:::pending')
     expect(pn.mermaid).not.toContain('sub["sub"]:::armed')
-    await sessions.close(); await storage.close()
   })
 
   it('taskPlans marks an approved-but-not-yet-running plan as armed on every step', async () => {
@@ -233,7 +236,6 @@ describe('ProjectSessions', () => {
     const tp = await sessions.taskPlans(TEST_PROJECT_ID, taskId)
     expect(tp?.visual?.mermaid).toContain('own["own"]:::armed')
     expect(tp?.visual?.mermaid).not.toContain('own["own"]:::pending')
-    await sessions.close(); await storage.close()
   })
 
   it('note backlinks list notes that link to it', async () => {
@@ -245,7 +247,6 @@ describe('ProjectSessions', () => {
     })
     const d = BacklinksView.parse(await sessions.nodeDetail(TEST_PROJECT_ID, noteNodeId('project', 'target')))
     expect(d.backlinks.map(b => b.id)).toEqual(['pointer'])
-    await sessions.close(); await storage.close()
   })
 
   it('nodeDetail resolves task and note (with access hits); unknown ids are null', async () => {
@@ -260,6 +261,5 @@ describe('ProjectSessions', () => {
     const note = NoteHitsView.parse(await sessions.nodeDetail(TEST_PROJECT_ID, noteNodeId('project', 'detail-note')))
     expect(note.hits).toBe(1)
     expect(await sessions.nodeDetail(TEST_PROJECT_ID, 'nope')).toBeNull()
-    await sessions.close(); await storage.close()
   })
 })

@@ -32,6 +32,7 @@ async function makeCli(dir: string) {
     executors: new Map([['api-loop', { id: 'api-loop', startTurn: async function* () {} }]]),
   })
   const hub = createMcpHub(config.mcpServers, (id, cfg) => isMcpTrusted(loadTrust(dir), id, cfg))
+  db.onClose(() => hub.close())
   const { kernel, log } = await openKernel(db.url, { projectId: TEST_PROJECT_ID, refValidator: host.refValidator })
   const lines: string[] = []
   spyOn(console, 'log').mockImplementation((...a: unknown[]) => { lines.push(a.join(' ')) })
@@ -68,11 +69,10 @@ describe('plugin commands', () => {
   it('orc mcp tools spawns a trusted server and lists tools with a vetting warning', async () => {
     const dir = project({ mcpServers: { fixture: { command: 'bun', args: [FIXTURE] } } })
     grantMcpTrust('fixture', { command: 'bun', args: [FIXTURE] }, dir)
-    const { run, lines, hub } = await makeCli(dir)
+    const { run, lines } = await makeCli(dir)
     await run('mcp', 'tools', 'fixture')
     expect(lines.join('\n')).toContain('echo')
     expect(lines.join('\n').toLowerCase()).toContain('vet')
-    await hub.close()
   })
 
   it('orc ext trust grants content-bound trust; list shows state; changed bytes untrust', async () => {
