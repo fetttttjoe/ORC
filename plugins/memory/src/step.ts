@@ -15,11 +15,14 @@ const AMBIENT: Record<SignalOutcome, AmbientSpec> = {
 }
 
 // ONE derivation: the id a step writes and the id a sibling links to must match or the edge is dead.
-export const ambientNoteId = (stepId: string): string => slugId(`${AMBIENT[SIGNAL_OUTCOME.success].idPrefix} ${stepId}`)
+// Not exported: only this file's own ambientLinks/capture call it (grepped workspace-wide, incl.
+// tests) — see index.ts's rule that a re-export nobody imports is compatibility debt for no consumer.
+const ambientNoteId = (stepId: string): string => slugId(`${AMBIENT[SIGNAL_OUTCOME.success].idPrefix} ${stepId}`)
 
 // Both kinds resolve under contracts/linkLookupScopes: a sibling's ambient note shares this note's
 // plan scope, and a project note is reachable from any scope. Capped at the schema's own limit.
-export function ambientLinks(dependsOn: readonly string[], readProjectIds: readonly string[]): Array<{ id: string; kind: LinkKind }> {
+// Not exported: only capture() below calls it (grepped workspace-wide, incl. tests).
+function ambientLinks(dependsOn: readonly string[], readProjectIds: readonly string[]): Array<{ id: string; kind: LinkKind }> {
   return [
     ...dependsOn.map(id => ({ id: ambientNoteId(id), kind: LINK_KIND.depends_on })),
     ...readProjectIds.map(id => ({ id, kind: LINK_KIND.derived_from })),

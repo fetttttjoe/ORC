@@ -5,9 +5,12 @@ export const DEFAULT_LINK_WEIGHTS: Record<LinkKind, number> = {
   decomposes_into: 0.8, // structural plan-graph edge, same weight class as depends_on
   derived_from: 0.7, example_of: 0.6, relates_to: 0.5,
 }
-export const DEFAULT_DECAY = 0.6
-export const DEFAULT_FLOOR = 0.05
-export const DEFAULT_CAP = 20
+// Not exported: opts.floor/opts.cap ARE part of rankNeighbors' surface (rank.test.ts exercises
+// both — prune-below-floor, cap-result-count), but no external module imports these three fallback
+// values by name (grepped workspace-wide, incl. tests), so they stay module-internal.
+const DEFAULT_DECAY = 0.6
+const DEFAULT_FLOOR = 0.05
+const DEFAULT_CAP = 20
 
 // direction is relative to the SEED: 'out' = the seed points at this neighbour via `kind`; 'in' =
 // this neighbour points at the seed. Without it an asymmetric kind (supersedes/contradicts/refines/

@@ -13,6 +13,28 @@ export const CLAIMS_HEADING = '## Claims'
 const linksOf = (links: MemoryLink[], kind: MemoryLink['kind']): string =>
   links.filter(l => l.kind === kind).map(l => `- [${l.id}](./${l.id}.md)`).join('\n')
 
+// Every NoteView key this renderer puts somewhere in the vault file (frontmatter or a body
+// section) — the same guard budget.ts's FitterCoversNote applies to the read cap, applied here to
+// the other hand-enumerated NoteView serialization: a field added to a tier but forgotten in this
+// list is a compile error rather than a vault file that quietly omits it. `zone` is the one
+// exclusion (mirrors ProjectionCoversTiers' `'id'`): it is freeze-time write-fence input the
+// executor enforces off the projected note table directly (surreal.ts's toNote), never a
+// human-facing field — the vault projection has never rendered it.
+type RenderedField =
+  | 'id' | 'scope' | 'title' | 'tier'                                  // frontmatter identity
+  | 'kind' | 'categories'                                              // semantic tier, spread when present
+  | 'retention' | 'sourceRevision'                                     // frontmatter provenance
+  | 'tags' | 'links'                                                   // frontmatter + the body link sections
+  | 'paths'                                                            // spread when present
+  | 'dependsOn' | 'skillRefs' | 'toolRefs' | 'modelRef'                // plan tier's execution payload
+  | 'summary'
+  | 'createdAt' | 'createdBy' | 'updatedAt' | 'updatedBy' | 'revision'
+  | 'sources' | 'claims' | 'rationale' | 'uncertainty'                 // body sections
+  | 'body'
+type RenderCoversNote = Exclude<keyof NoteView, RenderedField | 'zone'> extends never ? true : never
+const renderCoversNote: RenderCoversNote = true
+void renderCoversNote
+
 // One shared frontmatter builder across the vault (block-style YAML — see frontmatter.ts).
 // The note is read through NoteView so one renderer covers every tier: a field the note's tier
 // does not have reads as undefined, and is spread away rather than written out as a hollow key —

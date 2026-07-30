@@ -2,8 +2,10 @@ import { createOpenAI } from '@ai-sdk/openai'
 import type { LanguageModel } from 'ai'
 import { modelIdsFrom, type ModelCost, type ModelProvider } from '@orc/contracts'
 
-// live model discovery — [] when the key is missing or the API is down (fetch injectable for tests)
-export async function listOpenAIModels(fetchImpl: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response> = fetch): Promise<string[]> {
+// live model discovery — [] when the key is missing or the API is down (fetch injectable for tests,
+// but nothing injects one: unlike its ollama/anthropic siblings, this has no test, so not exported —
+// grepped workspace-wide, zero external hits)
+async function listOpenAIModels(fetchImpl: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response> = fetch): Promise<string[]> {
   const key = process.env.OPENAI_API_KEY
   if (!key) return []
   try {

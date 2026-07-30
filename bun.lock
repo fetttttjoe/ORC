@@ -52,7 +52,6 @@
         "@joint/core": "^4.3.0",
         "@joint/layout-directed-graph": "^4.3.0",
         "@orc/contracts": "workspace:*",
-        "@orc/kernel": "workspace:*",
         "@orc/ui-core": "workspace:*",
         "ai": "^7.0.30",
         "graphology": "^0.26.0",
@@ -62,6 +61,7 @@
         "zod": "^4.4.3",
       },
       "devDependencies": {
+        "@orc/kernel": "workspace:*",
         "@playwright/test": "^1.61.1",
       },
     },
@@ -150,6 +150,7 @@
         "@ai-sdk/anthropic": "^4.0.15",
         "@orc/contracts": "workspace:*",
         "ai": "^7.0.30",
+        "zod": "^4.4.3",
       },
     },
     "plugins/provider-ollama": {

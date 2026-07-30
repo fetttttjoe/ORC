@@ -14,6 +14,7 @@
 import { readFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
+import { z } from 'zod'
 import { isRecord } from '@orc/contracts'
 import { asFetch, type MinimalFetch } from './fetch-shim'
 
@@ -30,8 +31,15 @@ const CRED_PATH = join(homedir(), '.claude', '.credentials.json')
 // 401 — treat anything expiring within the buffer as already expired.
 const EXPIRY_BUFFER_MS = 60_000
 
-// the slice of ~/.claude/.credentials.json's claudeAiOauth that gates a request
-type OAuthCred = { accessToken?: string; expiresAt?: number }
+// the slice of ~/.claude/.credentials.json's claudeAiOauth that gates a request. `.catch(undefined)`
+// per field, not a plain `.optional()`: the old typeof narrowing dropped a wrong-typed field to
+// undefined without rejecting the other one, and a strict schema would fail the WHOLE parse on one
+// bad field — losing a perfectly good accessToken next to a corrupt expiresAt.
+const OAuthCred = z.object({
+  accessToken: z.string().optional().catch(undefined),
+  expiresAt: z.number().optional().catch(undefined),
+})
+type OAuthCred = z.infer<typeof OAuthCred>
 
 export async function loadOAuthToken(now: number = Date.now(), credPath: string = CRED_PATH): Promise<string> {
   const fromEnv = process.env.CLAUDE_CODE_OAUTH_TOKEN
@@ -49,12 +57,7 @@ export async function loadOAuthToken(now: number = Date.now(), credPath: string 
   try {
     const parsed: unknown = JSON.parse(raw)
     const cred = isRecord(parsed) ? parsed.claudeAiOauth : undefined
-    if (isRecord(cred)) {
-      oauth = {
-        accessToken: typeof cred.accessToken === 'string' ? cred.accessToken : undefined,
-        expiresAt: typeof cred.expiresAt === 'number' ? cred.expiresAt : undefined,
-      }
-    }
+    oauth = isRecord(cred) ? OAuthCred.parse(cred) : undefined
   } catch {
     throw new Error(`Malformed JSON in ${credPath} — log in with Claude Code again.`)
   }
