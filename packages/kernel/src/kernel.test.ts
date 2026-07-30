@@ -662,6 +662,23 @@ describe('Kernel lifecycle', () => {
     expect(instantiateFrozenPlan('masterplan', notes).steps.map(s => s.id)).toEqual(['db'])
   })
 
+  // Pins the kinds array listTaskVerifiedNotes reads off the log (kernel.ts): memory_verified alone
+  // carries no paths, so a note comes back verified-but-pathless — and pathless is exactly what the
+  // commit step's dirty gate treats as nothing to judge (taskVerifiedNotes drops it) — unless
+  // memory_written is read alongside it for the paths and the fold's carry/clear rule. Mutation-only
+  // pin: dropping EVENT_KIND.memory_written from the kinds array is a silent regression no type
+  // ever catches, so this cannot RED honestly against correct code.
+  it('listTaskVerifiedNotes returns a verified note WITH paths and stampRevision, reading memory_written alongside memory_verified', async () => {
+    const { k, log } = await freshKernelAndLog()
+    const taskId = 'verify-1'
+    const author = { source: 'agent' as const, taskId }
+    await log.append({ taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_written, payload: { note: { id: 'area-x', scope: 'project', tier: NOTE_TIER.semantic, title: 'area-x', paths: ['a.ts'] }, author } })
+    await log.append({ taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_verified, payload: { id: 'area-x', scope: 'project', stamp: { revision: 'rev-1', at: 'T', by: 'exec·m·auditor' }, author } })
+
+    const notes = await k.listTaskVerifiedNotes(taskId)
+    expect(notes).toEqual([{ id: 'area-x', scope: 'project', paths: ['a.ts'], stampRevision: 'rev-1' }])
+  })
+
   it('freezes a subplan-declared modelRef, and omits the key when the planner left it empty', async () => {
     const { k, log } = await freshKernelAndLog()
     const scope = planScope('grounded-models')

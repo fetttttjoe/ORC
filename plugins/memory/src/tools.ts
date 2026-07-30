@@ -619,11 +619,22 @@ export function memoryTools(opts: {
           // STORED note's tier (merge-on-omit means a plan-note update adding a link may not restate
           // tier), else the draft's own inferred tier (contracts' inferTier, the same classifier the
           // store gateway itself falls back to).
+          //
+          // Compound-update hole (found in the boundary-contracts Task 2 re-review, deferred here):
+          // the STORED-tier fallback reads the tier the note has TODAY, not the tier the MERGED note
+          // is about to land as. One write that adds `zone` (plan evidence — inferTier reads zone/
+          // rationale/uncertainty, never `links`) AND a sibling-resolving depends_on link to a
+          // STORED semantic note read the stale stored tier, skipped this check, and the merged note
+          // landed plan-tier carrying the exact ordering misuse this whole check exists to catch. So
+          // draft-inferred plan evidence must outrank a stale stored tier: only when the draft itself
+          // infers to non-plan do we fall back to the stored tier (a links-only draft, inferTier never
+          // reads `links`, still correctly defers to it — the pin above stays green).
           const zone = parsed.zone ?? []
           const links = parsed.links ?? []
           let siblings: string[] = []
           if (links.length) {
-            const effectiveTier = parsed.tier ?? (await store.get(id, scope))?.tier ?? inferTier(parsed)
+            const draftTier = inferTier(parsed)
+            const effectiveTier = parsed.tier ?? (draftTier === NOTE_TIER.plan ? NOTE_TIER.plan : (await store.get(id, scope))?.tier ?? draftTier)
             if (effectiveTier === NOTE_TIER.plan) siblings = await planSiblings(store, scope, links)
           }
           const v = planFieldViolations({ id, zone, links, siblings })

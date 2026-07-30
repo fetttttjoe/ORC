@@ -136,8 +136,10 @@ function healDependsOn(
   links: ReadonlyArray<{ id: string; kind: string }>,
   kids: readonly string[],
 ): string[] {
-  // the rule and its wording live in contracts (siblingOrderingMisuse) because memory_write warns
-  // about the same edge the moment it is written; here, at the freeze, it is fatal
+  // the rule and its wording live in contracts (siblingOrderingMisuse) because this is `shape` in
+  // PLAN_FIELD_RULES: memory_write already REFUSES this same edge at authoring (isError before
+  // store.write, the note never lands), and the freeze refuses it again here — one spelling in
+  // contracts so the two boundaries cannot drift apart
   const misuse = siblingOrderingMisuse(stepId, links, kids)
   if (misuse) throw new Error(misuse)
   const out = new Set<string>()

@@ -15,11 +15,12 @@ import { clipMiddle } from './clip'
 // prose. After committing it advances the stamps this task EARNED at the new HEAD — the truthful
 // replacement for drift.ts restampableNotes' corpus-wide guess. Earned, not written: a note the
 // task healed (rewrote prose that already existed) gets its source stamp restamped, a note a step
-// declared verified gets its verification stamp advanced, and a note the task merely authored gets
-// neither — it is named in stillDrifted instead. Not stampable = tracked changes pending, OR
-// untracked content, OR a declared path with no content at HEAD at all; every git failure also
-// falls toward NOT stamping, the opposite of drift's read-side rule, because a false current-stamp
-// poisons the freshness gate while a skipped stamp costs one re-heal.
+// declared verified gets its verification stamp advanced — but only while no commit has touched its
+// cited paths since that audit — and a note the task merely authored gets neither: it is named in
+// stillDrifted instead. Not stampable = tracked changes pending, OR untracked content, OR a declared
+// path with no content at HEAD at all; every git failure also falls toward NOT stamping, the
+// opposite of drift's read-side rule, because a false current-stamp poisons the freshness gate while
+// a skipped stamp costs one re-heal.
 const CommitInput = z.object({ message: z.string().min(1).max(5000) })
 
 // The write half of a stamp pass, injected by the composition root so this file never imports the
@@ -43,7 +44,7 @@ const PREVIEW_DESCRIPTION =
   "Compute THIS task's pending commit and return {paths, diff, skippedIgnored}: exactly what git_commit will commit (the scoped_changes floor — sibling tasks' work is excluded, gitignored paths are skipped and listed). Read the diff — your commit message must describe it. A file changed only by exec commands (formatters, codegen) is not in the floor and will be missing; say so in your summary if you know of one."
 
 const COMMIT_DESCRIPTION =
-  'Commit the previewed changes with your message, then advance the note stamps this task earned: notes it HEALED (rewrote prose that already existed) are restamped, notes a step DECLARED verified are reverified at the new commit — both only when their declared paths are fully committed. A note the task merely wrote for the first time earns no stamp; it appears in stillDrifted. If the working tree no longer matches the diff you last saw (or you never looked), it refuses and returns the current diff — read it and call again. Commits by pathspec, so content someone else staged never rides along. Returns {commit, created, committedPaths, restamped, skippedDirty, restampFailed, reverified, reverifyFailed, skippedIgnored, stillDrifted, degraded}: created:false means nothing was left to commit (e.g. a child task already committed) and the stamp pass still ran. A note under skippedDirty cites paths not provably committed (pending edits, untracked content, or nothing at HEAD) and stays drifted on purpose. stillDrifted lists notes citing committed paths that no step of this task verified — carry it into your summary verbatim. degraded lists why a measurement could not be made (memory unavailable for a stamp write or the citing join) and is present ONLY when something is degraded — carry it into your summary verbatim too.'
+  'Commit the previewed changes with your message, then advance the note stamps this task earned: notes it HEALED (rewrote prose that already existed) are restamped, notes a step DECLARED verified are reverified at the new commit — both only when their declared paths are fully committed, and a verification only while no commit has touched those paths since the audit. A note the task merely wrote for the first time earns no stamp; it appears in stillDrifted. If the working tree no longer matches the diff you last saw (or you never looked), it refuses and returns the current diff — read it and call again. Commits by pathspec, so content someone else staged never rides along. Returns {commit, created, committedPaths, restamped, skippedDirty, restampFailed, reverified, reverifyFailed, reverifyStale, skippedIgnored, stillDrifted, degraded}: created:false means nothing was left to commit (e.g. a child task already committed) and the stamp pass still ran. A note under skippedDirty cites paths not provably committed (pending edits, untracked content, or nothing at HEAD) and stays drifted on purpose. A note under reverifyStale was verified against a tree that has since moved — a commit touched its cited paths after the audit (or the audited revision is unreachable) — so its verification was NOT advanced and an auditor must read it again. stillDrifted lists notes citing committed paths that no step of this task verified — carry it into your summary verbatim. degraded lists why a measurement could not be made (memory unavailable for a stamp write or the citing join) and is present ONLY when something is degraded — carry it into your summary verbatim too.'
 
 // per stream, head + tail, like exec-tool's clip: enough diff to write an honest message, never an
 // unbounded prompt
@@ -76,6 +77,12 @@ const trimSlashes = (p: string): string => {
   return p.slice(0, end)
 }
 
+// What git can be ASKED about a note's declared paths: a note may cite 'src/' or 'src'. An empty
+// entry is not a pathspec (git rejects one, and an argv slot that vanished would silently widen the
+// question to the whole tree), so every path gate — the dirty check and the reverify range diff —
+// resolves its pathspecs through here rather than each trimming its own way.
+const checkable = (declared: readonly string[]): string[] => declared.map(trimSlashes).filter(p => p !== '')
+
 const sha256 = (s: string): string => createHash('sha256').update(s).digest('hex')
 
 // What one staging pass concluded. `digest` fingerprints the UNCLIPPED diff — clip() could mask a
@@ -90,16 +97,19 @@ export function commitTool(opts: {
   // verified (memory_verify) to the new HEAD. Within ONE task this completes a provisional stamp
   // truthfully — the auditor checked the worktree, the stamp named the old HEAD, and the commit is
   // what makes the two the same tree.
-  // CEILING: across a subtree it says less than it looks like. listTaskVerifiedNotes scopes to
-  // subtreeTaskIds, and the dirty gate proves the note's paths are COMMITTED, never that they are
-  // UNCHANGED SINCE THE AUDIT. So: child A's auditor verifies note X citing a.ts; sibling B then
-  // changes a.ts while X's own content stays put (so taskVerifiedNotes' carry rule correctly keeps
-  // the stamp); the parent's commit reverifies X at the new HEAD and excludes it from stillDrifted —
-  // X reads fresh against code nobody re-read. Not a regression: confirm-by-write reached the same
-  // outcome through sourceRevision, which is the piggyback this task removed on the other half.
-  // UPGRADE: the memory_verified payload carries stamp.revision and taskVerifiedNotes drops it
-  // today. Keeping it, and reverifying only when no commit between stamp.revision and HEAD touched
-  // the note's declared paths, is the strict version — same dirty-gate machinery, one git range-diff.
+  // GATED, because across a subtree the dirty check says less than it looks like: it proves a note's
+  // paths are COMMITTED, never that they are UNCHANGED SINCE THE AUDIT. The failure that motivates
+  // the gate, observed: child A's auditor verifies note X citing a.ts; sibling B then changes a.ts
+  // while X's own content stays put (so taskVerifiedNotes' carry rule correctly keeps the stamp);
+  // the parent's commit reverified X at the new HEAD and excluded it from stillDrifted — X read
+  // fresh against code nobody re-read. So the stamp advances only when NO commit between the stamp's
+  // own revision and the revision this step's commit was built on — the tree the audit's worktree
+  // became — touched the note's declared paths; anything else lands in reverifyStale (movedSinceAudit
+  // below).
+  // What the gate still cannot see: a WORKTREE edit made after the audit and swept into any later
+  // commit of this task — git keeps no history for it, so it rides the stamp, exactly as the
+  // provisional-stamp design already accepted. Closing that needs the audit to record a content
+  // digest of the cited paths rather than a revision.
   reverify?: StampNote
   // The citing-notes join (scoped-changes-tool's CitingNotes, injected in runtime.ts like restamp):
   // powers the receipt's stillDrifted honesty line — notes citing committed paths that no step of
@@ -182,7 +192,7 @@ export function commitTool(opts: {
   // tracked change, no untracked content, and actual content at HEAD (a typo'd or never-committed
   // path must read dirty forever, not clean forever). Returns the dirty evidence per skipped note.
   const notStampable = async (declared: readonly string[]): Promise<string[] | null> => {
-    const paths = declared.map(trimSlashes).filter(p => p !== '')
+    const paths = checkable(declared)
     if (paths.length === 0) return [...declared] // nothing checkable — never stamp
     const pending = await git(dir, ['diff', '--name-only', 'HEAD', '--', ...paths])
     if (pending.code !== 0) return null // git cannot answer → unknown → not stamped
@@ -198,20 +208,36 @@ export function commitTool(opts: {
 
   // What this task DECLARED about each note it touched, and the stamp each declaration earns.
   // Authorship is not one of them: writing a note says who typed it, never that it is true.
-  interface Declared { id: string; scope: string; paths: string[]; healed: boolean; verified: boolean }
+  // `verified` carries the stamp's own revision rather than a flag, so the strict gate below cannot
+  // be reached without the tree the auditor actually read.
+  interface Declared { id: string; scope: string; paths: string[]; healed: boolean; verified: { stampRevision: string } | null }
 
-  const stampDeclared = async (): Promise<{
+  // Has anything COMMITTED moved the note's cited paths since the auditor read them? `audited` is
+  // the revision this step's commit was built on — the tree the audit's worktree became — so the
+  // range covers exactly the commits the auditor never saw.
+  // Every failure answers YES: a git that cannot resolve the stamp's revision (rebased away, shallow
+  // clone) or cannot name the audited tree has not cleared the note, and a verification stamp is a
+  // POSITIVE claim — an unanswerable question must never mint one.
+  const movedSinceAudit = async (audited: string | null, stampRevision: string, paths: readonly string[]): Promise<boolean> => {
+    if (audited === null) return true
+    const moved = await git(dir, ['diff', '--name-only', `${stampRevision}..${audited}`, '--', ...checkable(paths)])
+    return moved.code !== 0 || lines(moved.stdout).length > 0
+  }
+
+  const stampDeclared = async (audited: string | null): Promise<{
     restamped: { id: string; scope: string }[]
     skippedDirty: { id: string; scope: string; dirtyPaths: string[] }[]
     restampFailed: { id: string; scope: string; error: string }[]
     reverified: { id: string; scope: string }[]
     reverifyFailed: { id: string; scope: string; error: string }[]
+    reverifyStale: { id: string; scope: string }[]
   }> => {
     const restamped: { id: string; scope: string }[] = []
     const skippedDirty: { id: string; scope: string; dirtyPaths: string[] }[] = []
     const restampFailed: { id: string; scope: string; error: string }[] = []
     const reverified: { id: string; scope: string }[] = []
     const reverifyFailed: { id: string; scope: string; error: string }[] = []
+    const reverifyStale: { id: string; scope: string }[] = []
 
     // Merged by note, so a note this task both healed and verified is dirty-checked ONCE (four git
     // calls per note) and reported once per stamp it actually earned, never twice under skippedDirty.
@@ -222,13 +248,14 @@ export function commitTool(opts: {
       // anyway is what let every ambient step note read verified-fresh without a reader. Such a
       // note is not silently dropped: it falls into stillDrifted below, which is the honest answer.
       if (!n.preexisting) continue
-      declared.set(noteKey(n.scope, n.id), { id: n.id, scope: n.scope, paths: n.paths, healed: true, verified: false })
+      declared.set(noteKey(n.scope, n.id), { id: n.id, scope: n.scope, paths: n.paths, healed: true, verified: null })
     }
     for (const n of await kernel.listTaskVerifiedNotes(p.taskId)) {
       const key = noteKey(n.scope, n.id)
       const seen = declared.get(key)
-      if (seen) seen.verified = true
-      else declared.set(key, { id: n.id, scope: n.scope, paths: n.paths, healed: false, verified: true })
+      const verified = { stampRevision: n.stampRevision }
+      if (seen) seen.verified = verified
+      else declared.set(key, { id: n.id, scope: n.scope, paths: n.paths, healed: false, verified })
     }
 
     for (const n of declared.values()) {
@@ -248,6 +275,9 @@ export function commitTool(opts: {
         }
       }
       if (n.verified && reverify) {
+        // The strict gate, AFTER the dirty gate on purpose: a dirty note is already reported under
+        // skippedDirty, and one note under two keys reads as two different problems.
+        if (await movedSinceAudit(audited, n.verified.stampRevision, n.paths)) { reverifyStale.push(ref); continue }
         try {
           await reverify(ref, `${p.runToken}:reverify:${n.scope}:${n.id}`)
           reverified.push(ref)
@@ -256,7 +286,7 @@ export function commitTool(opts: {
         }
       }
     }
-    return { restamped, skippedDirty, restampFailed, reverified, reverifyFailed }
+    return { restamped, skippedDirty, restampFailed, reverified, reverifyFailed, reverifyStale }
   }
 
   return [{
@@ -301,6 +331,20 @@ export function commitTool(opts: {
           }
         }
 
+        // The tree the auditor READ, named BEFORE this step moves HEAD. A verification stamp is
+        // PROVISIONAL by construction (contracts' VerifiedStamp): the auditor checked the WORKTREE
+        // while the stamp could only name HEAD, and this commit is what turns that worktree into a
+        // tree. So the commits an auditor never saw are exactly the ones between their stamp and
+        // this point — which is what the strict gate diffs against.
+        // MEASURED, not assumed: ending the range at the POST-commit HEAD counts this task's own
+        // commit as movement, so every note verified about the change being committed lands in
+        // reverifyStale and `reverified` becomes unreachable — three pinned cases flipped. That gate
+        // would have deleted the feature instead of tightening it.
+        // Unborn HEAD (code !== 0) → null → nothing is reverified: no stamp can exist in a repo with
+        // no commit (store.verify refuses without a readable HEAD), and unknown never stamps.
+        const before = await git(dir, ['rev-parse', 'HEAD'])
+        const audited = before.code === 0 ? before.stdout.trim() : null
+
         let created = false
         let committedPaths: string[] = []
         if (fresh.staged.length > 0) {
@@ -317,15 +361,18 @@ export function commitTool(opts: {
         const head = await git(dir, ['rev-parse', 'HEAD'])
         if (head.code !== 0) return { output: { error: `cannot resolve HEAD: ${head.stderr.trim()}` }, isError: true }
 
-        const notes = await stampDeclared()
+        const notes = await stampDeclared(audited)
         // Leftovers = citing notes minus every note this task DECLARED something about (restamped ∪
-        // skippedDirty ∪ restampFailed ∪ reverified ∪ reverifyFailed — each already reported under
-        // its own key). The two *Failed sets belong here: the declaration happened, only the stamp
-        // write did not, and naming the note twice would read as two different problems. A note this
+        // skippedDirty ∪ restampFailed ∪ reverified ∪ reverifyFailed ∪ reverifyStale — each already
+        // reported under its own key). The two *Failed sets belong here: the declaration happened,
+        // only the stamp write did not, and naming the note twice would read as two different
+        // problems. reverifyStale belongs for the same reason skippedDirty does: a reader of the
+        // receipt already sees the note there, and knows something sharper than "still drifted" —
+        // that a named audit went stale under a later commit. A note this
         // task merely WROTE is NOT here — that is the point of the honesty line. null when the join
         // is absent: a missing measurement must never read as a clean zero.
         const own = new Set([...notes.restamped, ...notes.skippedDirty, ...notes.restampFailed,
-          ...notes.reverified, ...notes.reverifyFailed].map(n => noteKey(n.scope, n.id)))
+          ...notes.reverified, ...notes.reverifyFailed, ...notes.reverifyStale].map(n => noteKey(n.scope, n.id)))
         const cited = citing ? await citing(committedPaths) : null
         const stillDrifted = cited ? cited.filter(n => !own.has(noteKey(n.scope, n.id))).map(n => ({ id: n.id, scope: n.scope })) : null
         const degraded: string[] = [

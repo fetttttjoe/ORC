@@ -8,7 +8,7 @@ import { MASTERPLAN_NOTE_ID,
 import { foldPlanNotes, planApprovalStamp, planGraphHash, planScope, PLAN_STEP_ID, PLAN_STEP_ROLE } from './execution/strategies/grounded-plan'
 import { DEFAULT_MAX_ITERATIONS } from './config'
 import { EventLog, type EventLogOps } from './storage'
-import { fold, gatedChildren, subtreeTaskIds, subtreeUsage, taskChangedPaths, taskNoteWrites, taskVerifiedNotes, type State, type TaskNoteRef, type TaskNoteWrite } from './projections'
+import { fold, gatedChildren, subtreeTaskIds, subtreeUsage, taskChangedPaths, taskNoteWrites, taskVerifiedNotes, type State, type TaskNoteWrite, type TaskVerifiedNote } from './projections'
 import { KERNEL_ERROR_CODE, KernelError } from './errors'
 
 // D6 targeted re-plan (M5b): what listAnnotations hands back to the read_annotations tool — the
@@ -280,8 +280,9 @@ export class Kernel {
   // The reverify set for git_commit: notes a step of this task's subtree DECLARED verified. Reads
   // memory_written too, for the declared paths the post-commit dirty gate judges — a memory_verified
   // carries none, and the note it names always has a write behind it (store.verify refuses an id
-  // the log has no live note for).
-  async listTaskVerifiedNotes(taskId: string): Promise<TaskNoteRef[]> {
+  // the log has no live note for). Each row also carries the stamp's own revision — the tree the
+  // auditor read — which is what the commit step's strict reverify gate diffs the cited paths against.
+  async listTaskVerifiedNotes(taskId: string): Promise<TaskVerifiedNote[]> {
     const subtree = new Set(subtreeTaskIds(await this.state(), taskId))
     const kinds = [EVENT_KIND.memory_written, EVENT_KIND.memory_verified, EVENT_KIND.memory_deleted]
     return taskVerifiedNotes(await this.log.after(0, kinds), subtree)

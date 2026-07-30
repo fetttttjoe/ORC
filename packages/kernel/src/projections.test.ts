@@ -563,9 +563,9 @@ const write = (seq: number, note: Record<string, unknown>, taskId: string | unde
 const del = (seq: number, id: string, scope = 'project'): EventRecord =>
   eventFixture({ seq, ts: 'T', kind: 'memory_deleted',
     payload: { id, scope, author: { source: 'cli' } } })
-const verified = (seq: number, id: string, taskId: string | undefined, scope = 'project'): EventRecord =>
+const verified = (seq: number, id: string, taskId: string | undefined, scope = 'project', revision = 'head1'): EventRecord =>
   eventFixture({ seq, ts: 'T', kind: 'memory_verified',
-    payload: { id, scope, stamp: { revision: 'head1', at: 'T', by: 'exec·m·auditor' },
+    payload: { id, scope, stamp: { revision, at: 'T', by: 'exec·m·auditor' },
       author: { source: 'agent', ...(taskId ? { taskId } : {}) } } })
 const semantic = (id: string, paths: string[]): Record<string, unknown> =>
   ({ id, scope: 'project', title: id, tier: 'semantic', paths })
@@ -646,7 +646,21 @@ describe('taskVerifiedNotes', () => {
       write(1, semantic('area-x', ['a.ts']), 'other-task'), // written by anyone
       write(2, semantic('area-x', ['b.ts']), 'other-task'),
       verified(3, 'area-x', 't1.c1'),                       // verified by us → ours to reverify
-    ], subtree)).toEqual([{ id: 'area-x', scope: 'project', paths: ['b.ts'] }])
+    ], subtree)).toEqual([{ id: 'area-x', scope: 'project', paths: ['b.ts'], stampRevision: 'head1' }])
+  })
+
+  // The commit step's reverify gate diffs the note's cited paths between the stamp's revision and
+  // the tree it is about to stamp, so the fold must CARRY that revision. Dropping it is what let a
+  // commit advance a verification across a sibling's change to the same file — the note read fresh
+  // against code nobody re-read. Latest verify wins, the same last-write-wins `paths` already follow:
+  // the commit-step reverify appends its own memory_verified at the new HEAD, and that newer stamp
+  // is what the NEXT commit in the subtree must measure from.
+  it('carries the stamp revision, and the LATEST verification wins', () => {
+    expect(taskVerifiedNotes([
+      write(1, semantic('area-x', ['a.ts']), 'other-task'),
+      verified(2, 'area-x', 't1', 'project', 'rev-old'),
+      verified(3, 'area-x', 't1.c1', 'project', 'rev-new'),
+    ], subtree)).toEqual([{ id: 'area-x', scope: 'project', paths: ['a.ts'], stampRevision: 'rev-new' }])
   })
 
   it('excludes a verification by a task outside the subtree, or with no author task', () => {
@@ -663,7 +677,7 @@ describe('taskVerifiedNotes', () => {
       write(1, semantic('area-x', ['a.ts']), 'other-task'),
       verified(2, 'area-x', 't1'),
       verified(3, 'area-x', 't1.c1'),
-    ], subtree)).toEqual([{ id: 'area-x', scope: 'project', paths: ['a.ts'] }])
+    ], subtree)).toEqual([{ id: 'area-x', scope: 'project', paths: ['a.ts'], stampRevision: 'head1' }])
   })
 
   // deriveNoteProvenance CARRIES a stamp across a byte-identical rewrite and CLEARS it on any
@@ -683,7 +697,7 @@ describe('taskVerifiedNotes', () => {
       write(1, semantic('area-x', ['a.ts']), 'other-task'),
       verified(2, 'area-x', 't1'),
       write(3, semantic('area-x', ['a.ts']), 't1'), // same fields, rewritten by us — the restamp
-    ], subtree)).toEqual([{ id: 'area-x', scope: 'project', paths: ['a.ts'] }])
+    ], subtree)).toEqual([{ id: 'area-x', scope: 'project', paths: ['a.ts'], stampRevision: 'head1' }])
   })
 
   // A TIER FLIP is a content change like any other — `tier` is one of noteContentKey's CONTENT_FIELDS

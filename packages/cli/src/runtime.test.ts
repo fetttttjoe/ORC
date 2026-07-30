@@ -3,7 +3,7 @@ import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { MEMORY_HEALTH,
-  EVENT_KIND, SIGNAL_OUTCOME,
+  EVENT_KIND, SIGNAL_OUTCOME, STEP_ROLE, VERIFY_STEP_ID,
   type AgentExecutor, type EventDraft, type ExecutorContext, type SplitResult, type UnifiedEvent,
 } from '@orc/contracts'
 import { Surreal } from 'surrealdb'
@@ -59,6 +59,70 @@ const probeExecutor: AgentExecutor<unknown> = {
     yield { type: 'done' }
   },
 }
+
+// records the extraTools names each step actually receives, keyed by step id — the mirror image
+// of toolProbe above (which only cares about memory_* execute() results): this one never calls a
+// tool, it just proves whether stepTools registered it, since memory_verify appending an event
+// nobody asked for would be a second, unrelated way this test could fail.
+const toolNamesByStep: Record<string, string[]> = {}
+const toolNameExecutor: AgentExecutor<unknown> = {
+  id: 'api-loop',
+  async *startTurn(ctx: ExecutorContext<unknown>): AsyncGenerator<UnifiedEvent, void, SplitResult[] | undefined> {
+    toolNamesByStep[ctx.step.id] = ctx.extraTools.map(t => t.name)
+    const signal = { stepId: ctx.step.id, runToken: ctx.runToken, outcome: SIGNAL_OUTCOME.success, summary: 'probed' }
+    await ctx.checkpoint('signal:1', async () => signal,
+      (): EventDraft[] => [{ kind: EVENT_KIND.signal_received, payload: { stepId: ctx.step.id, runToken: ctx.runToken, signal } }])
+    yield { type: 'signal', signal }
+    yield { type: 'done' }
+  },
+}
+
+// C.5: memory_verify is gated on the SAME predicate scoped_changes uses (role===auditor AND
+// stepId===VERIFY_STEP_ID) — see plugins/memory/src/tools.ts memoryVerifyTool. 'buildRuntime
+// degraded memory' below pins the negative half against a BROKEN store (no memoryStore, so the
+// tool is absent regardless of role); this pins the positive half against a HEALTHY one, so the
+// registration line itself (runtime.ts stepTools, `...(memoryStore ? memoryVerifyTool(...) : [])`)
+// is what is on test. Declared FIRST, ahead of that test, for a DBOS reason, not an ordering
+// preference: see the teardown comment inside the `it` below.
+describe('stepTools memory_verify registration', () => {
+  it('offers memory_verify to a healthy store\'s auditor verify step, and withholds it from a plain worker step', async () => {
+    const db = await createTestDb()
+    dbs.push(db)
+    const vaultDir = mkdtempSync(path.join(tmpdir(), 'orc-rt-verify-'))
+    const projectDbName = `t_${Math.random().toString(36).slice(2, 10)}`
+    const config = testConfig(db.url, { vaultDir, skillsDir: path.join(vaultDir, 'skills'), projectDbName })
+    surrealBases.push(config)
+    const storage = await openStorage(db.url, { projectId: TEST_PROJECT_ID })
+    const log = storage.events
+    const kernel = new Kernel(log)
+    const { host, hub } = await buildPlugins(config)
+    host.providers.set('fake', fakeProvider)
+    host.executors.set('api-loop', toolNameExecutor)
+    const port = await buildRuntime({ host, hub, config, storage, kernel })
+    // Torn down HERE, not via the shared `cleanup` array: DBOS registration is process-global (one
+    // `DBOS.launch()` per process), and `cleanup` only drains at the file's afterAll — the NEXT
+    // test's buildRuntime() call ('buildRuntime degraded memory' below) would collide with this
+    // port still being "launched". Shutting it down immediately, in `finally` so a thrown
+    // assertion cannot skip it, is what lets the two coexist in one file.
+    try {
+      const verifyTask = await kernel.createTask({ title: 'verify step', spec: 'audits' })
+      await kernel.proposePlan(verifyTask.id, draftFixture([stepFixture({ id: VERIFY_STEP_ID, role: STEP_ROLE.auditor })]))
+      await kernel.approvePlan(verifyTask.id)
+      expect(await (await port.startRun(verifyTask.id)).wait()).toBe('done')
+
+      const workerTask = await kernel.createTask({ title: 'worker step', spec: 'implements' })
+      await kernel.proposePlan(workerTask.id, draftFixture([stepFixture({ id: 's1', role: STEP_ROLE.worker })]))
+      await kernel.approvePlan(workerTask.id)
+      expect(await (await port.startRun(workerTask.id)).wait()).toBe('done')
+
+      expect(toolNamesByStep[VERIFY_STEP_ID]).toContain('memory_verify')
+      expect(toolNamesByStep['s1']).not.toContain('memory_verify')
+    } finally {
+      await port.shutdown()
+      await log.close()
+    }
+  }, 60_000)
+})
 
 describe('buildRuntime degraded memory', () => {
   it('a broken Surreal config yields one warning + explicit unavailable tools; execution still completes', async () => {

@@ -8,6 +8,7 @@ import type { CitingNotes } from './scoped-changes-tool'
 
 const run = (dir: string, ...args: string[]) => Bun.spawnSync(['git', '-C', dir, ...args], { stdout: 'ignore', stderr: 'ignore' })
 const out = (dir: string, ...args: string[]) => Bun.spawnSync(['git', '-C', dir, '-c', 'core.quotePath=false', ...args], { stdout: 'pipe' }).stdout.toString().trim()
+const head = (dir: string) => out(dir, 'rev-parse', 'HEAD')
 function repo(): string {
   const dir = mkdtempSync(path.join(tmpdir(), 'orc-commit-'))
   run(dir, 'init', '-q'); run(dir, 'config', 'user.email', 't@t.t'); run(dir, 'config', 'user.name', 't')
@@ -27,12 +28,19 @@ function build(dir: string, opts: {
   // a heal is what a restamp is for. The fresh-write case (preexisting: false) is stated explicitly
   // where it is the point.
   notes?: { id: string; scope: string; paths: string[]; preexisting?: boolean }[]
-  verified?: { id: string; scope: string; paths: string[] }[]
+  // stampRevision defaults to the CURRENT HEAD: that is what an auditor's stamp names in the
+  // ordinary flow (verify runs before the commit step, against the worktree, stamping HEAD), and it
+  // is the case the strict gate must leave alone. Tests about the gate pass an older revision.
+  verified?: { id: string; scope: string; paths: string[]; stampRevision?: string }[]
   restamp?: StampNote | null
   reverify?: StampNote | null
   citing?: CitingNotes
   p?: typeof p
 }) {
+  // read EAGERLY, at build time: this is the HEAD an auditor step would have stamped, i.e. before
+  // the commit under test moves it. Reading it lazily inside the callback would hand the gate the
+  // POST-commit HEAD and invert every range.
+  const auditedHead = head(dir)
   const stamped: { id: string; scope: string; key: string }[] = []
   const restamp: StampNote | undefined = opts.restamp === null ? undefined
     : opts.restamp ?? (async (note, key) => { stamped.push({ ...note, key }) })
@@ -43,7 +51,7 @@ function build(dir: string, opts: {
     kernel: {
       listTaskChangedPaths: async () => changed(...(opts.paths ?? [])),
       listTaskNoteWrites: async () => (opts.notes ?? []).map(n => ({ preexisting: true, ...n })),
-      listTaskVerifiedNotes: async () => opts.verified ?? [],
+      listTaskVerifiedNotes: async () => (opts.verified ?? []).map(n => ({ stampRevision: auditedHead, ...n })),
     },
     dir, restamp, reverify, ...(opts.citing ? { citing: opts.citing } : {}), p: opts.p ?? p,
   })
@@ -285,7 +293,7 @@ describe('degraded convention', () => {
     // the missing restamp — the shape this convention forbids — would show up here as an extra
     // key, not merely go unasserted
     expect(Object.keys(o).sort()).toEqual(
-      ['commit', 'committedPaths', 'created', 'degraded', 'restampFailed', 'restamped', 'reverified', 'reverifyFailed', 'skippedDirty', 'skippedIgnored', 'stillDrifted'],
+      ['commit', 'committedPaths', 'created', 'degraded', 'restampFailed', 'restamped', 'reverified', 'reverifyFailed', 'reverifyStale', 'skippedDirty', 'skippedIgnored', 'stillDrifted'],
     )
   })
 
@@ -399,6 +407,87 @@ describe('verification is declared, never inferred from the write', () => {
     const o = r.output as Record<string, unknown>
     expect(o.restamped).toEqual([{ id: 'area-both', scope: 'project' }])
     expect(o.reverified).toEqual([{ id: 'area-both', scope: 'project' }])
+  })
+})
+
+// The strict gate on the reverify half. A verification stamp says an auditor read the CITED PATHS
+// and found the note true of them; advancing it is only honest while nothing has changed those paths
+// since. The observed failure it closes: child A's auditor verifies note X citing a.ts; sibling B
+// then commits a change to a.ts while X's own prose stays put (so the fold's carry rule correctly
+// keeps the verification); the parent's commit reverified X at the new HEAD and excluded it from
+// stillDrifted — X read fresh against code nobody re-read.
+describe('the strict reverify gate', () => {
+  it('a verified note whose cited path a LATER COMMIT touched is stale, never reverified', async () => {
+    const dir = repo()
+    const audited = head(dir)                                    // the tree child A's auditor read
+    writeFileSync(path.join(dir, 'a.ts'), 'a2-sibling\n')
+    run(dir, 'add', '-A'); run(dir, 'commit', '-qm', 'sibling B changes a.ts') // after the audit
+    writeFileSync(path.join(dir, 'other.ts'), 'o\n')             // this task's own change
+    const built = build(dir, {
+      paths: ['other.ts'],
+      verified: [{ id: 'area-x', scope: 'project', paths: ['a.ts'], stampRevision: audited }],
+      citing: async () => [{ id: 'area-x', scope: 'project', title: 'X', sourceRevision: 'old' }],
+    })
+    const r = await built.commit('feat: other')
+    expect(r.isError).toBe(false)
+    const o = r.output as Record<string, unknown>
+    expect(built.restated).toEqual([])   // the callback never fired: no stamp was minted at all
+    expect(o.reverified).toEqual([])
+    expect(o.reverifyStale).toEqual([{ id: 'area-x', scope: 'project' }])
+    expect(o.skippedDirty).toEqual([])   // a.ts IS committed and clean — this is not the dirty gate
+    expect(o.stillDrifted).toEqual([])   // already reported under its own key, like skippedDirty
+  })
+
+  it('a verified note whose cited paths NO commit touched since the stamp is reverified', async () => {
+    const dir = repo()
+    const audited = head(dir)
+    writeFileSync(path.join(dir, 'sibling.ts'), 's2\n')
+    run(dir, 'add', '-A'); run(dir, 'commit', '-qm', 'a sibling commit elsewhere') // moves HEAD, not a.ts
+    writeFileSync(path.join(dir, 'other.ts'), 'o\n')
+    const built = build(dir, {
+      paths: ['other.ts'],
+      verified: [{ id: 'area-x', scope: 'project', paths: ['a.ts'], stampRevision: audited }],
+    })
+    const r = await built.commit('feat: other')
+    expect(r.isError).toBe(false)
+    const o = r.output as Record<string, unknown>
+    expect(built.restated.map(s => s.id)).toEqual(['area-x'])
+    expect(o.reverified).toEqual([{ id: 'area-x', scope: 'project' }])
+    expect(o.reverifyStale).toEqual([])
+  })
+
+  it('an unreachable stamp revision is stale — an unanswerable question mints no stamp', async () => {
+    const dir = repo()
+    writeFileSync(path.join(dir, 'a.ts'), 'a2\n')
+    const built = build(dir, {
+      paths: ['a.ts'],
+      verified: [{ id: 'area-x', scope: 'project', paths: ['a.ts'], stampRevision: '0'.repeat(40) }],
+    })
+    const r = await built.commit('feat: change a')
+    expect(r.isError).toBe(false)
+    const o = r.output as Record<string, unknown>
+    expect(built.restated).toEqual([])
+    expect(o.reverifyStale).toEqual([{ id: 'area-x', scope: 'project' }])
+  })
+
+  it('a note both HEALED and stale-verified keeps its restamp — only the verification is refused', async () => {
+    const dir = repo()
+    const audited = head(dir)
+    writeFileSync(path.join(dir, 'a.ts'), 'a2-sibling\n')
+    run(dir, 'add', '-A'); run(dir, 'commit', '-qm', 'sibling changes a.ts')
+    writeFileSync(path.join(dir, 'other.ts'), 'o\n')
+    const built = build(dir, {
+      paths: ['other.ts'],
+      notes: [{ id: 'area-x', scope: 'project', paths: ['a.ts'], preexisting: true }],
+      verified: [{ id: 'area-x', scope: 'project', paths: ['a.ts'], stampRevision: audited }],
+    })
+    const r = await built.commit('feat: other')
+    const o = r.output as Record<string, unknown>
+    // the heal rewrote the prose against the tree in front of it — that is a different claim from
+    // the auditor's, and the gate that refuses the stale verification must not touch it
+    expect(o.restamped).toEqual([{ id: 'area-x', scope: 'project' }])
+    expect(o.reverified).toEqual([])
+    expect(o.reverifyStale).toEqual([{ id: 'area-x', scope: 'project' }])
   })
 })
 

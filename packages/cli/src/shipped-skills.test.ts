@@ -4,7 +4,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { PlanDraft, ROLE_SKILL, STEP_ROLE, validatePlan, VERIFY_STEP_ID } from '@orc/contracts'
 import { parseSkillMd } from '@orc/kernel'
-import { SHIPPED_SKILLS } from './main'
+import { driftLine, REGROUND_HEAL_PLAN, REGROUND_PLAN, SHIPPED_SKILLS } from './main'
 
 // The tracked shipped-skill sources (exceptions inside gitignored vault/). The role skills carry
 // contract prose the freeze used to inline as kernel constants (grounded-plan.ts); these pin the
@@ -48,6 +48,10 @@ describe('shipped skills', () => {
     expect(body).toContain('STILL call git_commit once')
     // the receipt's honesty line: leftovers the auditor did not verify travel in the summary
     expect(body).toContain('stillDrifted')
+    // C.7: the strict reverify gate's own honesty line — a stamp the gate withheld because a
+    // foreign commit moved the note's paths after the audit must read the same way stillDrifted
+    // does: carried into the summary, not silently dropped on the floor.
+    expect(body).toContain('reverifyStale')
   })
 
   // A planner froze a newline-joined zone entry (zone: ["a/**\nb.ts"]); the fence then matched no
@@ -67,15 +71,36 @@ describe('shipped skills', () => {
 // (plugins/memory/src/tools.ts memoryVerifyTool, packages/kernel/src/execution/scoped-changes-tool.ts) —
 // a plan file that drifts off either term silently loses the tools it needs to do its job.
 describe('reground-heal plan file', () => {
-  const DOCS_DIR = fileURLToPath(new URL('../../../docs', import.meta.url))
+  // Repo root, not docs/: REGROUND_HEAL_PLAN already carries the 'docs/' prefix (it is the same
+  // string driftLine hands the operator to paste into `orc propose --file`), so joining it under
+  // DOCS_DIR a second time would double the segment. Reading the path through the constant, not a
+  // second 'reground-heal.plan.json' literal, closes the rename direction: renaming the file in
+  // main.ts alone used to leave this test pointed at the old name until someone remembered to edit
+  // both spellings.
+  const ROOT_DIR = fileURLToPath(new URL('../../../', import.meta.url))
 
   test('stays a valid, single-step auditor plan that earns the verify-step tools', () => {
-    const raw = JSON.parse(readFileSync(path.join(DOCS_DIR, 'reground-heal.plan.json'), 'utf8'))
+    const raw = JSON.parse(readFileSync(path.join(ROOT_DIR, REGROUND_HEAL_PLAN), 'utf8'))
     const draft = PlanDraft.parse(raw)
     const plan = { taskId: 'reground-heal-check', version: 1, ...draft }
     expect(validatePlan(plan)).toEqual({ ok: true })
     expect(plan.steps).toHaveLength(1)
     expect(plan.steps[0]?.role).toBe(STEP_ROLE.auditor)
     expect(plan.steps[0]?.id).toBe(VERIFY_STEP_ID)
+  })
+})
+
+// C.4: driftLine names the command whose plan file matches the branch it took — the ≥34%
+// (needsReground) branch recommends the full REGROUND_PLAN remap, the below-threshold branch
+// recommends the cheaper REGROUND_HEAL_PLAN instrument. Exact-substring pins on both paths, so a
+// swap between the two (recommending the wrong instrument for the wrong severity) fails the build
+// instead of shipping a human the wrong command.
+describe('driftLine', () => {
+  test('at/above the reground threshold (34%) names REGROUND_PLAN', () => {
+    expect(driftLine({ checkable: 10, drifted: 4, ratio: 0.4 })).toContain(REGROUND_PLAN)
+  })
+
+  test('below the reground threshold names REGROUND_HEAL_PLAN', () => {
+    expect(driftLine({ checkable: 10, drifted: 2, ratio: 0.2 })).toContain(REGROUND_HEAL_PLAN)
   })
 })

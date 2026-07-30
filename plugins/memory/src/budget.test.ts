@@ -81,6 +81,26 @@ describe('fitMemoryNoteToBudget', () => {
     expect(JSON.stringify(result.note)).not.toContain(TRIM_MARKER)
   })
 
+  // `verified` is agent-adjacent input (a composed `by`, a git `revision`) with no schema max —
+  // same leak class as the plan tier's skillRefs/toolRefs/dependsOn before those got bounded here.
+  // The response-byte cap alone does NOT pin the clamp: the discard ladder's `delete fitted.verified`
+  // rung already guarantees the cap by nuking the field outright once anything doesn't fit, so an
+  // unclamped stamp still respects the cap — it just loses the auditor's revision/at/by entirely
+  // instead of keeping a usefully-bounded one. Asserting the fields survive, clamped, is what
+  // actually pins the build-time clamp (the block right after `fitted` is constructed) rather than
+  // the ladder's unconditional fallback.
+  it('clamps an oversized verified stamp instead of letting the ladder drop it entirely', () => {
+    const note = noteWith({
+      verified: { revision: 'r'.repeat(5_000), at: 'a'.repeat(5_000), by: 'b'.repeat(5_000) },
+    })
+    const result = fitMemoryNoteToBudget(note, 1)
+    expect(result.truncated).toBe(true)
+    expect(JSON.stringify(result).length).toBeLessThanOrEqual(1_024)
+    expect(result.note.verified?.revision.length).toBeLessThanOrEqual(128)
+    expect(result.note.verified?.at.length).toBeLessThanOrEqual(128)
+    expect(result.note.verified?.by.length).toBeLessThanOrEqual(200)
+  })
+
   it('trims at a whitespace boundary and marks the cut — never a silent mid-word slice', () => {
     const long = Array.from({ length: 400 }, (_, i) => `word${i}`).join(' ')
     const { note: fitted, truncated } = fitMemoryNoteToBudget(noteWith({ body: long }), 200)

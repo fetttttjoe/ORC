@@ -59,8 +59,10 @@ export async function openKernel(
 }
 
 // The committed plan that re-grounds a drifted graph. ONE spelling: the status line and the
-// supervisor banner both name it, and it is a real path a reader will paste.
-const REGROUND_PLAN = 'docs/kb-build-parallel.plan.json'
+// supervisor banner both name it, and it is a real path a reader will paste. Exported so
+// shipped-skills.test.ts's driftLine pins assert against the same string driftLine actually
+// prints, rather than a second copy of the path that could drift from this one.
+export const REGROUND_PLAN = 'docs/kb-build-parallel.plan.json'
 
 // P5: driftLine could only ever recommend REGROUND_PLAN's full remap, even for a handful of stale
 // notes — healing ~10 drifted notes had no targeted instrument, only "re-derive all ten area notes
@@ -68,12 +70,16 @@ const REGROUND_PLAN = 'docs/kb-build-parallel.plan.json'
 // memory_search already flags drifted and heals/confirms each via memory_write/memory_verify,
 // writing no source files. Below the reground threshold (needsReground), a handful of stale notes
 // doesn't justify redoing the whole graph, so the advisory now names this instead of REGROUND_PLAN.
-const REGROUND_HEAL_PLAN = 'docs/reground-heal.plan.json'
+// Exported for the same reason as REGROUND_PLAN: shipped-skills.test.ts reads the tracked plan
+// file at this path and pins driftLine's below-threshold wording against it — one spelling, so a
+// rename here cannot leave either check pointed at a path that no longer exists.
+export const REGROUND_HEAL_PLAN = 'docs/reground-heal.plan.json'
 
 // How a drift reading reads to a human. Lives here, not in the memory plugin: which command to
 // recommend is a CLI concern, and a measurement module that builds prose ends up shipping a
-// hardcoded path inside a pure function.
-const driftLine = (d: NonNullable<MemoryHealth['drift']>): string => {
+// hardcoded path inside a pure function. Exported so shipped-skills.test.ts can pin each branch's
+// wording without re-typing REGROUND_PLAN/REGROUND_HEAL_PLAN as a second literal.
+export const driftLine = (d: NonNullable<MemoryHealth['drift']>): string => {
   const pct = Math.round(d.ratio * 100)
   return needsReground(d)
     ? `knowledge drift: at least ${d.drifted}/${d.checkable} checkable notes (${pct}%) describe code changed since they were written — something moved this repo without going through orc. Re-ground: orc propose <task> --file ${REGROUND_PLAN}`

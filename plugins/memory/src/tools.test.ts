@@ -778,6 +778,28 @@ describe('plan ordering expressed as a link', () => {
     expect(JSON.stringify(r.output)).toContain("plan-note 'verify' links depends_on 'generate-doc'")
     expect(written).toHaveLength(0)
   })
+
+  // Compound-update hole, found in the boundary-contracts Task 2 re-review and deliberately deferred
+  // to this task: the STORED-tier fallback above reads the tier the note has TODAY, not the tier the
+  // MERGED note is about to land as. A single UPDATE that adds `zone` (plan evidence — inferTier
+  // reads zone/rationale/uncertainty, never `links`) AND a sibling-resolving depends_on link in the
+  // SAME write read the stale stored tier ('semantic'), skipped the sibling check, and the merged
+  // note landed plan-tier carrying the exact ordering misuse this describe block exists to catch.
+  // The gate has to key on the tier the merge produces: draft-inferred plan evidence beats a stale
+  // stored tier, even though `links` alone (the previous pin, above) still defers to it.
+  it('refuses a compound update: one write adds zone AND a sibling link to a stored semantic note', async () => {
+    const { write, written } = writeInto({
+      'generate-doc': planNote('generate-doc'),
+      verify: toNote({ id: 'verify', scope: 'plan-t1', title: 'Verify' }), // stored tier: semantic
+    })
+    const r = await write.execute({
+      id: 'verify', scope: 'plan-t1', title: 'Verify', zone: ['docs/**'],
+      links: [{ id: 'generate-doc', kind: LINK_KIND.depends_on }],
+    }, 'c1')
+    expect(r.isError).toBe(true)
+    expect(JSON.stringify(r.output)).toContain("plan-note 'verify' links depends_on 'generate-doc'")
+    expect(written).toHaveLength(0)
+  })
 })
 
 // A planner authored `zone: ["a/**\nb.ts"]` — several globs joined with newlines into ONE entry.

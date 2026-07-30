@@ -581,6 +581,12 @@ export interface TaskNoteRef { id: string; scope: string; paths: string[] }
 // reads fresh — the note it would have healed is gone.
 export interface TaskNoteWrite extends TaskNoteRef { preexisting: boolean }
 
+// A note a subtree step DECLARED verified, carrying the revision its stamp named — the tree the
+// auditor read the cited paths against. The commit step's reverify gate diffs those paths between
+// this revision and the tree it is about to stamp, so dropping it (which this fold used to do) is
+// what let a commit advance a verification across ANOTHER task's change to the same file.
+export interface TaskVerifiedNote extends TaskNoteRef { stampRevision: string }
+
 // The semantic notes a task subtree wrote — half the restamp set: git_commit stamps exactly these,
 // never a corpus-wide guess (drift.ts restampableNotes' documented ceiling). Membership is sticky
 // across later outside-author rewrites (the task still touched it; paths follow the latest write),
@@ -618,10 +624,15 @@ export function taskNoteWrites(events: EventRecord[], subtree: ReadonlySet<strin
 // needs its own fold; the paths still come from the note's latest write, because that is the only
 // place they exist and the reverify runs the same dirty gate as the restamp. Same shape rules as
 // taskNoteWrites: deduped, semantic-with-paths only, membership cleared by memory_deleted.
-export function taskVerifiedNotes(events: EventRecord[], subtree: ReadonlySet<string>): TaskNoteRef[] {
+//
+// The stamp REVISION comes along, latest verification winning — the same last-write-wins rule the
+// paths follow. It has to be the latest: the commit step's reverify appends its own memory_verified
+// at the new HEAD, and that newer stamp is the tree the NEXT commit in the subtree must measure
+// from. Reading an older one would re-open the window the newer verification already closed.
+export function taskVerifiedNotes(events: EventRecord[], subtree: ReadonlySet<string>): TaskVerifiedNote[] {
   const notes = new Map<string, TaskNoteRef>()
   const content = new Map<string, string>() // EVERY write's content key, whatever tier it carried
-  const verified = new Set<string>()
+  const verified = new Map<string, string>() // key → the LATEST verification's stamp revision
   for (const e of events) {
     if (e.kind === EVENT_KIND.memory_written) {
       const p = MemoryWrittenPayload.safeParse(e.payload)
@@ -648,7 +659,8 @@ export function taskVerifiedNotes(events: EventRecord[], subtree: ReadonlySet<st
     } else if (e.kind === EVENT_KIND.memory_verified) {
       const p = MemoryVerifiedPayload.safeParse(e.payload)
       if (!p.success) continue
-      if (p.data.author.taskId && subtree.has(p.data.author.taskId)) verified.add(noteKey(p.data.scope, p.data.id))
+      if (p.data.author.taskId && subtree.has(p.data.author.taskId))
+        verified.set(noteKey(p.data.scope, p.data.id), p.data.stamp.revision)
     } else if (e.kind === EVENT_KIND.memory_deleted) {
       const p = MemoryDeletedPayload.safeParse(e.payload)
       if (!p.success) continue
@@ -658,8 +670,8 @@ export function taskVerifiedNotes(events: EventRecord[], subtree: ReadonlySet<st
       verified.delete(key)
     }
   }
-  return [...verified].flatMap(key => {
+  return [...verified].flatMap(([key, stampRevision]) => {
     const n = notes.get(key)
-    return n && n.paths.length > 0 ? [n] : []
+    return n && n.paths.length > 0 ? [{ ...n, stampRevision }] : []
   })
 }
