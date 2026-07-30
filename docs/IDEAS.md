@@ -13,8 +13,7 @@ version rather than the original sketch.
 
 ## 1. Neuron-like memory lifecycle (decay, sweep, archive, restore)
 
-**Source:** `docs/superpowers/specs/2026-07-19-neuron-memory-web-research-design.md`
-(full design, 19-slice plan) — deferred 2026-07-20 in favour of the four-slice
+**Source:** a full design (19-slice plan) — deferred 2026-07-20 in favour of the four-slice
 sourced-research plan.
 
 **What it was:** notes and traversed links accumulate activation strength when
@@ -125,8 +124,7 @@ adapter, never a second copy of the rules.
 
 ## 4. MCP grants bind the process, not the tool surface
 
-**Source:** repo-wide audit 2026-07-20. Split out of
-`docs/superpowers/plans/2026-07-20-system-hardening.md`.
+**Source:** repo-wide audit 2026-07-20, split out of a broader system-hardening plan.
 
 `mcpFingerprint` (`trust.ts:25-28`) covers `command`, `args`, and env
 names/values — the *invocation*, not what the server exposes. `refValidator`

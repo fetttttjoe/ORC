@@ -22,7 +22,6 @@ Four properties shape everything else:
   superseded by name, and the log remembers every claim that ever existed, even
   retired ones.
 
-Design spec: `docs/superpowers/specs/2026-07-16-orchestrator-design.md`.
 Adding anything (provider, executor, skill, tool, event kind, …):
 [`docs/EXTENDING.md`](docs/EXTENDING.md).
 
@@ -51,6 +50,8 @@ Start here to navigate the codebase and understand the architectural foundations
 | Topic | Purpose | Where to Find |
 |---|---|---|
 | **Architecture overview** | System map, data flow, seams, invariants | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — modules, tiers, storage service, execution flow |
+| **Codebase architecture reference** | Exhaustive per-subsystem catalogue: files, symbols, signatures | [`docs/CODEBASE-ARCHITECTURE.md`](docs/CODEBASE-ARCHITECTURE.md) — companion to ARCHITECTURE.md; every load-bearing file, symbol and data flow, by subsystem |
+| **MCP integration** | How `orc mcp serve` and the MCP client plugin work | [`docs/mcp-overview.md`](docs/mcp-overview.md) — both directions: orc as an MCP server, orc as an MCP client |
 | **Extension points** | How to add providers, executors, tools, skills, events | [`docs/EXTENDING.md`](docs/EXTENDING.md) — seam map with invariants |
 | **Decisions & roadmap** | 18+ plans and architectural decision records | [`docs/plans/INDEX.md`](docs/plans/INDEX.md) — approval status, purpose, dependencies |
 | **Seams reference** | Component interactions, call paths, debugging | [`docs/seams-reference.md`](docs/seams-reference.md) — 5 scenarios, troubleshooting workflows |
@@ -118,16 +119,23 @@ orc memory claims <note-id> [--json]  # a note's live claims; --history folds th
 Neither is required to run a task, but both change what the system can do, and
 the failure mode of each looks like a bug rather than a missing setting.
 
-**An embedder, for semantic search and topics.** Without one, claim search is
-keyword-only and `orc memory topics` never produces a group in either form — topics are derived
-from claim embeddings, so no vectors means no topics. Ollama needs no API key.
-Changing this model later means re-running `orc memory rebuild` (to re-embed every
-claim) AND re-measuring `MEMORY_CLUSTER_THRESHOLD`, which is a cut through one
-model's cosine distribution and does not port:
+**Ollama, for semantic search and topics.** `memoryEmbedModel` defaults to
+`ollama/mxbai-embed-large` and is wired in automatically — a new project needs Ollama running
+and the model pulled, not a config edit:
 
 ```bash
 ollama pull mxbai-embed-large
-# .orc/config.json
+```
+
+When the embedder is unreachable, claim search falls back to keyword-only and `orc memory
+topics` never produces a group in either form — topics are derived from claim embeddings, so no
+vectors means no topics. Ollama needs no API key. Changing the configured model later means
+re-running `orc memory rebuild` (to re-embed every claim) AND re-measuring
+`MEMORY_CLUSTER_THRESHOLD`, which is a cut through one model's cosine distribution and does not
+port:
+
+```jsonc
+// .orc/config.json — only needed to point at a different model
 "memoryEmbedModel": "ollama/mxbai-embed-large"
 ```
 
@@ -216,7 +224,7 @@ Tools served (project-bound, same `OrcActions` validation as the web):
 | Kind | Tools |
 |---|---|
 | Read | `project_status`, `task_plan`, `task_transcript`, `plan_notes`, `recent_activity` |
-| Knowledge (degraded-tolerant) | `memory_search`, `memory_read`, `memory_neighbors` |
+| Knowledge (degraded-tolerant) | `memory_search`, `memory_read`, `memory_neighbors`, `memory_topics` (statements grouped by meaning; list them, then read one's claims) |
 | Mutate | `new_request` (quick/grounded), `propose`, `run`, `reply`, `retry`, `cancel`, `annotate`, `revise` |
 | The gate | `approve` — refuses under the default `--autonomy gated` (the human approves in the UI or `orc approve`); approves under `--autonomy full`, recorded as `approvedBy: mcp` |
 

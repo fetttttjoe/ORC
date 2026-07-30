@@ -49,24 +49,27 @@ The orchestrator has mature, stable architecture (proven by 8 durable ADRs and c
 
 ### Foundation & Core Architecture
 
-| File | Date | Status | Scope |
+The design specs behind these milestones are local planning docs (gitignored, not in the repo) —
+named here for traceability, not linked.
+
+| Design | Date | Status | Scope |
 |---|---|---|---|
-| `docs/superpowers/specs/2026-07-16-orchestrator-design.md` | 2026-07-16 | ✅ SHIPPED | Core system design, invariants, event log, execution model |
-| `docs/superpowers/specs/2026-07-17-m2-execution-design.md` | 2026-07-17 | ✅ SHIPPED | Durable execution via DBOS Transact, operation journal, retry policy |
-| `docs/superpowers/specs/2026-07-17-m3-plugins-design.md` | 2026-07-17 | ✅ SHIPPED | Plugin registry, model providers, executors, MCP servers, zero-trust model |
-| `docs/superpowers/specs/2026-07-17-m4a-vault-projector-design.md` | 2026-07-17 | ✅ SHIPPED | Vault as deterministic markdown projections of tasks, execution, lineage |
-| `docs/superpowers/specs/2026-07-18-foundation-hardening-design.md` | 2026-07-18 | ✅ SHIPPED | Redaction, degraded memory, storage service abstraction, error handling |
-| `docs/superpowers/specs/2026-07-18-m4b-knowledge-graph-memory-design.md` | 2026-07-18 | ✅ SHIPPED | Event-first knowledge graph, SurrealDB read model, sourced research notes |
-| `docs/superpowers/specs/2026-07-19-m4c-memory-graph-recursive-mas-design.md` | 2026-07-19 | ✅ SHIPPED | Multi-agent memory sharing, ranked traversal, bounded context slicing |
-| `docs/superpowers/specs/2026-07-19-m5a-recursion-core-design.md` | 2026-07-19 | ✅ SHIPPED | Recursive task splitting, plan finalization, approval flow |
-| `docs/superpowers/specs/2026-07-19-m5b-grounded-plan-strategy-design.md` | 2026-07-19 | ✅ SHIPPED | Grounded planning strategy for complex tasks, iterative refinement |
-| `docs/superpowers/specs/2026-07-19-review-remediation-design.md` | 2026-07-19 | ✅ SHIPPED | Finding categorization, bulk remediation, step retrying |
+| Orchestrator design (M1) | 2026-07-16 | ✅ SHIPPED | Core system design, invariants, event log, execution model |
+| M2 execution design | 2026-07-17 | ✅ SHIPPED | Durable execution via DBOS Transact, operation journal, retry policy |
+| M3 plugins design | 2026-07-17 | ✅ SHIPPED | Plugin registry, model providers, executors, MCP servers, zero-trust model |
+| M4a vault projector design | 2026-07-17 | ✅ SHIPPED | Vault as deterministic markdown projections of tasks, execution, lineage |
+| Foundation hardening design | 2026-07-18 | ✅ SHIPPED | Redaction, degraded memory, storage service abstraction, error handling |
+| M4b knowledge graph memory design | 2026-07-18 | ✅ SHIPPED | Event-first knowledge graph, SurrealDB read model, sourced research notes |
+| M4c memory graph recursive MAS design | 2026-07-19 | ✅ SHIPPED | Multi-agent memory sharing, ranked traversal, bounded context slicing |
+| M5a recursion core design | 2026-07-19 | ✅ SHIPPED | Recursive task splitting, plan finalization, approval flow |
+| M5b grounded plan strategy design | 2026-07-19 | ✅ SHIPPED | Grounded planning strategy for complex tasks, iterative refinement |
+| Review remediation design | 2026-07-19 | ✅ SHIPPED | Finding categorization, bulk remediation, step retrying |
 
 ### Deferred Work & Research
 
-| File | Date | Status | Scope |
+| Design | Date | Status | Scope |
 |---|---|---|---|
-| `docs/superpowers/specs/2026-07-19-neuron-memory-web-research-design.md` | 2026-07-19 | 📋 DEFERRED | Memory lifecycle (decay, sweep, archive, restore) — trigger: knowledge graph grows and hits show clear hot/cold split |
+| Neuron memory + web research design (local spec, gitignored) | 2026-07-19 | 📋 DEFERRED | Memory lifecycle (decay, sweep, archive, restore) — trigger: knowledge graph grows and hits show clear hot/cold split |
 | `docs/IDEAS.md` | ongoing | 📋 ACTIVE | Deferred ideas with reasoning intact; entries graduate when a trigger fires |
 
 ## Documentation Status
@@ -126,7 +129,7 @@ The orchestrator has mature, stable architecture (proven by 8 durable ADRs and c
 ### To find the ADRs
 **Status:** Phase 2.3 (planned)
 - **When ready:** Search `vault/memory/` for `kind=decision` or search for specific ADR terms
-- **For now:** Read `docs/superpowers/specs/` files (ADRs embedded in spec documents)
+- **For now:** ADRs are embedded in the local design specs (gitignored, not in the repo) — ask if you need one
 
 ### To understand how components interact
 **Status:** Phase 2.4 (complete)
@@ -136,7 +139,7 @@ The orchestrator has mature, stable architecture (proven by 8 durable ADRs and c
 ### To add a new feature / extension
 **Status:** Always current
 - **Start:** `docs/EXTENDING.md` seam map (which layer to touch)
-- **Then:** Relevant spec in `docs/superpowers/specs/` (e.g., m3-plugins for a new provider)
+- **Then:** the relevant local design spec for that milestone (e.g., the M3 plugins design, for a new provider)
 - **Verify:** Invariants section of `docs/EXTENDING.md`
 
 ### To onboard a new contributor

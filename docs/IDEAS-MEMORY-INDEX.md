@@ -6,7 +6,7 @@ This file links to the memory-indexed version of all deferred ideas, decisions, 
 
 - **Master Index** → Search: `ideas-index` in memory
 - **All Ideas** → Search: `idea-` prefix in memory
-- **By Domain** → Filter memory notes by tag: `idea-neuron-memory-lifecycle`, `idea-mcp-grants`, `idea-scheduled-maintenance`, `idea-index-performance`, `idea-buildruntime-leak`, `idea-retention-field`, `idea-test-pool-leak`, `idea-code-review-graph-techniques`
+- **By Domain** → Filter memory notes by tag: `idea-neuron-memory-lifecycle`, `idea-mcp-grants`, `idea-scheduled-maintenance`, `idea-index-performance`, `idea-buildruntime-leak`, `idea-retention-field`, `idea-test-pool-leak`, `idea-code-review-graph-techniques`, `idea-rule-notes`, `idea-knowledge-zones`
 
 ## Ideas Catalog (Memory Nodes)
 
@@ -16,7 +16,7 @@ This file links to the memory-indexed version of all deferred ideas, decisions, 
 
 1. **idea-neuron-memory-lifecycle** — Neuron-like memory lifecycle (decay, sweep, archive, restore)
    - **Domain:** memory, architecture
-   - **Status:** proposed, scale-triggered (~600 notes)
+   - **Status:** proposed, scale-triggered (hot/cold access split, no fixed note count)
    - **Effort:** high (19-slice design exists)
    - **Blocks:** idea-scheduled-maintenance
    - **Key insight:** activation ranks (not filters), retirement must protect authored inbound links
@@ -50,11 +50,32 @@ This file links to the memory-indexed version of all deferred ideas, decisions, 
    - **Current state:** invisible in CLI (process.exit force-kills); impacts embedders/long-lived processes
    - **Fix:** try/catch around port construction, close resources before rethrow
 
+#### Low Priority
+
+9. **idea-rule-notes** — First-class rule notes with a violation trail
+   - **Domain:** memory, knowledge-graph, governance
+   - **Status:** proposed, evidence-triggered
+   - **Effort:** medium (new `rule` NOTE_KIND + enforcement tiers)
+   - **Key insight:** reuse `contradicts` for the violation edge and `expirable` for the trail's
+     lifecycle — no new link kind, no new retention class; three enforcement tiers (code-enforced,
+     auditor-checked, advisory)
+   - **Trigger:** an agent repeats an approach a human already rejected, or a rule-coverage bench
+     probe fails
+
+10. **idea-knowledge-zones** — Knowledge zones: per-agent note ownership for parallel subplans
+    - **Domain:** memory, knowledge-graph, parallel-execution
+    - **Status:** proposed, convention-sufficient-for-now
+    - **Effort:** low (reuses the file write-fence's zone machinery end-to-end)
+    - **Key insight:** memory analog of the file write-fence (`noteZone`); ownership binds writes
+      only — reads stay global
+    - **Trigger:** two parallel subplans write the same note id in one run, or a scout re-derives a
+      topic an existing note already covers
+
 ### Completed Ideas (Shipped/Fixed)
 
 6. **idea-retention-field** — `retention: durable | expirable` on notes (SHIPPED 2026-07-20)
    - **Status:** shipped
-   - **Key lesson:** \"no reader yet\" defers behavior, never defers judgment capture
+   - **Key lesson:** "no reader yet" defers behavior, never defers judgment capture
    - **Why decision reversed immediately:** data capture only possible at creation time; retroactive defaulting is backwards
    - **Solution:** default to durable (fail-safe); authors supply intent at write time
 
@@ -82,24 +103,27 @@ This file links to the memory-indexed version of all deferred ideas, decisions, 
 - **Critical:** none currently (all critical ideas would be filed as issues)
 - **High:** idea-neuron-memory-lifecycle, idea-mcp-grants
 - **Medium:** idea-scheduled-maintenance, idea-index-performance, idea-buildruntime-leak
-- **Low:** idea-code-review-graph-techniques
+- **Low:** idea-code-review-graph-techniques, idea-rule-notes, idea-knowledge-zones
 - **Shipped:** idea-retention-field, idea-test-pool-leak
 
 ### By Domain
 
 | Domain | Ideas |
 |---|---|
-| **memory** | neuron-lifecycle, scheduled-maintenance, index-performance, retention-field |
+| **memory** | neuron-lifecycle, scheduled-maintenance, index-performance, retention-field, rule-notes, knowledge-zones |
 | **security/plugins** | mcp-grants |
 | **reliability** | buildruntime-leak, test-pool-leak |
 | **research** | code-review-graph-techniques |
+| **governance** | rule-notes |
+| **parallel-execution** | knowledge-zones |
 
 ### By Trigger Type
 
-- **Scale-triggered:** neuron-lifecycle (~600 notes), index-performance (~200 notes)
+- **Scale-triggered:** neuron-lifecycle (hot/cold access split observed), index-performance (~200 notes)
 - **Adoption-triggered:** mcp-grants (auto approval, third-party MCP)
 - **Time-based:** none (all have explicit trigger conditions)
 - **Dependency-triggered:** scheduled-maintenance (depends on lifecycle), buildruntime-leak (affects embedders)
+- **Evidence-triggered:** rule-notes (a rejected approach repeats, or a rule-coverage bench probe fails), knowledge-zones (parallel subplans collide on a note id, or a topic is re-derived)
 
 ## Status Definitions
 
@@ -150,9 +174,9 @@ All ideas are memory notes with:
 
 Use memory graph search to find ideas by:
 ```
-orc memory search \"idea-\" --limit 10     # all ideas
-orc memory search \"high-priority\" --tag    # by priority tag
-orc memory search \"memory\" --category     # by domain
+orc memory search "idea-" --limit 10     # all ideas
+orc memory search "high-priority" --tag    # by priority tag
+orc memory search "memory" --category     # by domain
 ```
 
 ## Keeping Ideas Fresh
@@ -174,4 +198,3 @@ When an idea is rejected (never ships):
 - `ideas-index` — master memory note
 - `docs/plans/INDEX.md` — approved plans with implementations (cross-reference when idea becomes task)
 - `docs/ARCHITECTURE.md` — current system design
-"

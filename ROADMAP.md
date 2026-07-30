@@ -45,7 +45,7 @@ Adopted shape, when 1.2 lands:
 
 ## Track 2 — MCP surface (easier to consume)
 
-Both MCP directions are stdio-only today: `orc mcp serve` exposes 17 tools over stdio, and
+Both MCP directions are stdio-only today: `orc mcp serve` exposes 18 tools over stdio, and
 `plugins/mcp-client`'s hub lazy-spawns stdio servers. [sourced: packages/cli/src/mcp-serve.ts,
 plugins/mcp-client/src/index.ts]
 

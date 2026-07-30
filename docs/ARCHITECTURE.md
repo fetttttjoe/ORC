@@ -354,20 +354,13 @@ drift could never be repaired.
 
 `memory_topics` is a tool rather than an implicit re-rank so that lateral navigation is **tracked**:
 fetching one topic appends `memory_topic_accessed` carrying the resolved label, which is the ongoing
-evidence `MEMORY_CLUSTER_THRESHOLD` keeps being calibrated against. That constant is **0.65, and
-measured** — it was 0.75 while it was still a guess. It is re-swept whenever the embedder OR the
-corpus size changes, because both are one decision with it: 0.675 was well-tuned on a 52-claim
-corpus and fragmented at 93, where it left 21 of 44 topics as singletons, and a sweep at that size
-put 0.65 strictly ahead. The 2026-07-28 re-sweep at 113 claims shows that domination gone: 0.675
-now yields more multi-claim groups (32 vs 23) and more cross-note groups (19 vs 16) rather than
-merely adding singletons, so the choice is a trade — 0.65 keeps five fewer claims isolated, 0.675
-splits its coarser groups into more of them. 0.65 ships deliberately: the numbers cannot say
-whether the extra groups are themes or splinters, and reading the groups — what settled the choice
-at 93 — has not been redone at 113. Twice now the justification has expired with corpus growth
-(52 → 93 → 113); the threshold is on a re-sweep schedule, not a one-time cut. An earlier sweep
-with a different model (nomic-embed-text, 768d) landed elsewhere again, which is why the
-model-vs-threshold coupling is load-bearing. The full sweep tables and the limits of the evidence
-(one repository, one embedding model) are recorded on the constant itself, in
+evidence `MEMORY_CLUSTER_THRESHOLD` keeps being calibrated against. That constant is **0.65,
+measured** — the cosine cut above which two claims group together. It is re-swept whenever the
+embedder OR the corpus size changes, because both are one decision with it: a cut through one
+model's cosine distribution does not port to another model, and it does not port across corpus
+sizes either — the same value that was well-tuned at one corpus size fragmented at another. The full
+sweep tables, the domination/trade-off reasoning behind the current value, and the limits of the
+evidence (one repository, one embedding model) are recorded on the constant itself, in
 `plugins/memory/src/cluster.ts`.
 
 ### Three stages, in order

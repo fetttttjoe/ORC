@@ -100,7 +100,8 @@ Use these checks to ensure all architectural decisions are captured and linked.
     6. SurrealDB for knowledge graph (ADR-0006)
     7. Zero-trust plugins (ADR-0007)
     8. Degraded memory tolerance (ADR-0008)
-  - Command: `grep -r "ADR\|Architectural Decision" docs/superpowers/specs/ | wc -l`
+  - Command: none — the specs that originally defined these ADRs are local planning docs
+    (gitignored, not in the repo); verify via the memory-note check below instead
   - Expected: All 8 mentioned
   - Failure mode: Decisions lost to tribal knowledge
 
@@ -201,7 +202,7 @@ Use these checks to keep architecture documentation synchronized with implementa
   - Failure mode: Code drifts from documentation
 
 - [ ] **Documented constants still match the code**
-  - A doc that quotes a tuned number goes stale silently — nothing fails, the sentence just becomes false. Real instance: `MEMORY_CLUSTER_THRESHOLD` moved 0.75 → 0.7 with measured reasoning, and `docs/ARCHITECTURE.md` still called it "0.75, currently a guess"
+  - A doc that quotes a tuned number goes stale silently — nothing fails, the sentence just becomes false. Real instance: `MEMORY_CLUSTER_THRESHOLD` has moved through several measured re-sweeps since shipping as an unmeasured 0.75 guess; current value is **0.65** (`plugins/memory/src/cluster.ts`), and `docs/ARCHITECTURE.md` has previously lagged a re-sweep
   - Command: `grep -rEn '\b(0\.[0-9]+|[0-9]{3,})\b' docs/ARCHITECTURE.md | grep -vE '^\S+:[0-9]+:\s*\|' | head -20`, then check each against its `export const`
   - Failure mode: A confident sentence that is no longer true — worse than no sentence
 
@@ -560,12 +561,3 @@ exit 0
 | 9. Links | Quarterly | Auditor | Yes |
 | 10. Full Audit | Quarterly | Auditor | No |
 | 11. CI/CD Hooks | Per release | DevOps | Yes |
-
----
-
-**Last Updated:** 2026-07-28
-**Version:** 1.1 — commands corrected against the real CLI surface after an audit found several that
-could not run (`orc memory read`, `--format=json`, `ls --query`, a `## Event Log` heading that does
-not exist), and a constants-drift check added after `MEMORY_CLUSTER_THRESHOLD` went stale in
-ARCHITECTURE.md
-**Status:** Published, in use

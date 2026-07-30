@@ -133,36 +133,26 @@ git checkout -b feat/your-feature-name
 <type>(<scope>): <subject>
 
 <body>
-
-<footer>
 ```
 
 - **type**: `feat`, `fix`, `docs`, `refactor`, `test`, `chore`
 - **scope**: component affected (`storage`, `execution`, `memory`, `plugins`, `cli`, `ui`, etc.)
 - **subject**: Imperative mood, lowercase, no period (50 chars max)
-- **body**: Explain what and why, not how (optional, wrapped at 72 chars)
-- **footer**: Reference issues: `Fixes #123` or `Relates to docs#456` (optional)
+- **body**: At most one line, explaining what and why, not how (optional). No footer, no issue
+  trailer, no AI mention.
 
 **Examples**:
 
 ```
 feat(execution): implement output receipt verification
 
-Adds artifact_produced events that verify each declared output:
-- Read file from workspace
-- Compute SHA-256 receipt
-- Commit atomically with step_completed
-
-Fixes #234
+Adds artifact_produced events that verify each declared output against its SHA-256 receipt.
 ```
 
 ```
 docs(architecture): update ADR-0005 for DBOS upgrade
 
-DBOS 2.0 now supports custom handlers. Updated ADR to reflect
-current implementation and updated seams guide with new call paths.
-
-Relates to task-xyz
+DBOS 2.0 now supports custom handlers; updated the ADR and the seams guide to match.
 ```
 
 ### Creating a Pull Request
@@ -199,7 +189,8 @@ Every architectural change must be documented. Here's when and how.
 
 **Process**:
 
-1. Create a new ADR in `docs/superpowers/specs/` or architecture notes:
+1. Write down the design reasoning where the change itself lives — the PR/change description —
+   or, if it changes a standing invariant, in `docs/ARCHITECTURE.md`:
    ```markdown
    # ADR-XXXX: [Decision Title]
    
@@ -447,7 +438,8 @@ When you open a PR, expect reviewers to ask about:
 
 2. **Is there a test for this?**
    - Test files live alongside source in `.test.ts` files
-   - Expect >80% code coverage
+   - No coverage percentage is enforced by CI (`ci.yml` runs typecheck, test, and audit — no
+     coverage gate); reviewers check that new logic and new seams have tests, by reading the diff
    - New features should add tests
 
 3. **Does this implement an ADR?**
@@ -540,10 +532,16 @@ describe('Storage: Event Log', () => {
 
 ### Test Coverage Expectations
 
-- **New code**: Expect >80% coverage in PR
-- **Seam code**: 100% coverage required (invariants are tested)
-- **Exception paths**: Coverage for error cases required
-- **Refactoring**: Coverage should improve or stay same (not decrease)
+No coverage percentage is measured or gated in CI — `ci.yml` runs `bun run typecheck`, `bun test`,
+and `bun audit`, nothing else. What's actually enforced is reviewer judgment against these
+expectations:
+
+- **New code**: add `.test.ts` coverage for the logic being added
+- **Seam code**: invariants get explicit tests — an exact-set assertion where the seam defines a
+  fixed set (e.g. the degraded-mode tool-name set in `packages/cli/src/runtime.test.ts`)
+- **Exception paths**: error cases get a test, not just the happy path
+- **Refactoring**: existing tests keep passing unchanged in behavior; a refactor that needs a test
+  rewritten to pass is a behavior change wearing a refactor's name
 
 ### Linking Tests to Documentation
 
@@ -676,9 +674,9 @@ Follow the format below for clarity and consistency:
 <type>(<scope>): <subject>
 
 <body>
-
-<footer>
 ```
+
+`<body>` is at most one line (optional); see [Code style (binding)](#code-style-binding).
 
 ### Types
 
@@ -711,29 +709,19 @@ Component or module affected:
 ```
 feat(storage): add artifact receipt verification
 
-Adds artifact_produced event that verifies each declared output:
-- Read file from workspace and compute SHA-256
-- Verify against declared outputs
-- Commit atomically with step_completed
-
-Fixes #456
+Adds artifact_produced event that verifies each declared output against its SHA-256 receipt.
 ```
 
 ```
 docs(arch): update ADR-0002 for event retention policy
 
-Changed retention from 7 days to 90 days after analysis showed
-performance impact of frequent log rotations. Updated seams guide
-with new query patterns for auditing.
-
-Relates to #789
+Changed retention from 7 days to 90 days after analysis showed performance impact of frequent log rotations.
 ```
 
 ```
 refactor(memory): extract citation validation to separate module
 
-No behavior change; improves testability and reduces complexity
-of the note-write path.
+No behavior change; improves testability and reduces complexity of the note-write path.
 ```
 
 ---
@@ -812,11 +800,10 @@ curl http://localhost:8000/health
 
 ### Getting Help
 
-1. **Check existing issues**: https://github.com/[org]/orchestrator/issues
+1. **Check existing issues**: https://github.com/fetttttjoe/ORC/issues
 2. **Search memory notes**: `orc memory search "your question"`
 3. **Read seams guide**: `docs/seams-reference.md` (troubleshooting section)
-4. **Ask on Slack/Discord**: Link to this guide + reproduction steps
-5. **File an issue**: Include:
+4. **File an issue**: Include:
    - `bun --version`
    - `orc status`
    - Error message (full output)

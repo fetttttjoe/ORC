@@ -10,7 +10,7 @@ Key terms used throughout the orchestrator codebase and documentation. Many term
 
 **Artifact** — Output file produced by a step (declared in the step's `signal(success, outputs: [...])` call). Verified via SHA-256 receipt at the storage boundary. See [output lineage](ARCHITECTURE.md#responsibilities), [`artifact_produced` event](ARCHITECTURE.md#execution-flow-—-one-step-durably), [`vault/tasks/<id>/lineage.md`](../README.md#vault-views).
 
-**Audit replay** — Deterministic reconstruction of any historical state by folding events up to a given sequence. See [`orc replay` command](../README.md#quickstart), [audit replay guarantee](../README.md#guarantees-stated-precisely), [`docs/ARCHITECTURE.md` audit replay section](ARCHITECTURE.md#audit-replay).
+**Audit replay** — Deterministic reconstruction of any historical state by folding events up to a given sequence. See [`orc replay` command](../README.md#quickstart), [audit replay guarantee](../README.md#guarantees-stated-precisely), [execution flow](ARCHITECTURE.md#execution-flow-—-one-step-durably).
 
 ---
 
@@ -38,15 +38,15 @@ Key terms used throughout the orchestrator codebase and documentation. Many term
 
 **Deterministic** — Guaranteed to produce identical output given identical inputs, *for a given build*. Applied to vault projections (same events → same markdown), event-log fold (same events → same state), the plan freeze (same plan-notes → same executable plan). A derivation that serializes parsed records is deterministic with respect to its inputs AND the schema the running build parses them with, so two processes on different builds may disagree — which is why nothing compares such a value across a process boundary. See [vault projections](seams-reference.md#vault-projections-—-read-only-human-views).
 
-**DBOS** — Database-backed OS (durable workflow framework). Orc uses it for operation journaling, checkpoints, and retry-safe execution. See [DBOS Transact](../README.md#stack), [operation journal](ARCHITECTURE.md#operation-journal), [workflow recovery](../README.md#guarantees-stated-precisely).
+**DBOS** — Database-backed OS (durable workflow framework). Orc uses it for operation journaling, checkpoints, and retry-safe execution. See [DBOS Transact](../README.md#stack), [operation journal](ARCHITECTURE.md#the-storage-service-—-read/write-boundary), [workflow recovery](../README.md#guarantees-stated-precisely).
 
 ---
 
 ## E
 
-**Event** — Immutable fact appended to the event log. Has a `kind` (enum), a `payload` (Zod-validated JSON), and a sequence number. Folds to state; never mutated; survives replays. See [event log as sole truth](ARCHITECTURE.md#), [`EventKind` enum](../packages/contracts/src/events.ts), [fold function](../packages/kernel/src/projections.ts).
+**Event** — Immutable fact appended to the event log. Has a `kind` (enum), a `payload` (Zod-validated JSON), and a sequence number. Folds to state; never mutated; survives replays. See [event log as sole truth](ARCHITECTURE.md), [`EventKind` enum](../packages/contracts/src/events.ts), [fold function](../packages/kernel/src/projections.ts).
 
-**Event log** — Postgres `events` table (project-scoped). The one source of truth. Appended via `EventLog.append()` under the per-project advisory lock; read by subscriptions, replay, vault projector, memory projector. See [sole truth](ARCHITECTURE.md#), [storage service](ARCHITECTURE.md#the-storage-service-—-read/write-boundary).
+**Event log** — Postgres `events` table (project-scoped). The one source of truth. Appended via `EventLog.append()` under the per-project advisory lock; read by subscriptions, replay, vault projector, memory projector. See [sole truth](ARCHITECTURE.md), [storage service](ARCHITECTURE.md#the-storage-service-—-read/write-boundary).
 
 **Executor** — Agent framework that loops model/tool calls until `signal(success)` or a terminal error. Injected at `createDbosPort()`. Default: `executor-api-loop`. See [executor interface](../packages/contracts/src/execution.ts), [`executor-api-loop` plugin](../plugins/executor-api-loop/), [how to add one](EXTENDING.md#where-a-change-goes).
 
@@ -76,7 +76,7 @@ Key terms used throughout the orchestrator codebase and documentation. Many term
 
 ## I
 
-**Idempotency key** — Deterministic, unique identifier for an operation (command + args + optional payload hash). DBOS uses it to safely retry: a crash mid-operation can re-attempt using the same key without duplication. See [resume guarantee](../README.md#guarantees-stated-precisely), [operation journal](ARCHITECTURE.md#operation-journal).
+**Idempotency key** — Deterministic, unique identifier for an operation (command + args + optional payload hash). DBOS uses it to safely retry: a crash mid-operation can re-attempt using the same key without duplication. See [resume guarantee](../README.md#guarantees-stated-precisely), [operation journal](ARCHITECTURE.md#the-storage-service-—-read/write-boundary).
 
 **Index** — Human projection (markdown file in vault) summarizing a data structure. E.g., `vault/index.md` (task tree), `vault/memory/index.md` (knowledge graph). Deterministic, rebuilt on data changes. Not a database index. See [vault projections](seams-reference.md#vault-projections-—-read-only-human-views).
 
@@ -122,17 +122,17 @@ Key terms used throughout the orchestrator codebase and documentation. Many term
 
 ## O
 
-**Operation** — External call (model, tool, side effect) with a durable before/after journal record. Distinct from `checkpoint` (DBOS-managed state). See [operation journal](ARCHITECTURE.md#operation-journal), [operation responsibilities](ARCHITECTURE.md#responsibilities), [`ctx.operation` in dbos-port](../packages/kernel/src/execution/dbos-port.ts).
+**Operation** — External call (model, tool, side effect) with a durable before/after journal record. Distinct from `checkpoint` (DBOS-managed state). See [operation journal](ARCHITECTURE.md#the-storage-service-—-read/write-boundary), [operation responsibilities](ARCHITECTURE.md#responsibilities), [`ctx.operation` in dbos-port](../packages/kernel/src/execution/dbos-port.ts).
 
-**Operation journal** — Postgres `operations` table (rebuildable from events). Records `operation_started` BEFORE the external call and completion/failure AFTER. Crash leaves an unresolved node. See [operation journal](ARCHITECTURE.md#operation-journal), [`orc status` command](../README.md#quickstart).
+**Operation journal** — Postgres `operations` table (rebuildable from events). Records `operation_started` BEFORE the external call and completion/failure AFTER. Crash leaves an unresolved node. See [operation journal](ARCHITECTURE.md#the-storage-service-—-read/write-boundary), [`orc status` command](../README.md#quickstart).
 
 ---
 
 ## P
 
-**Plan** — Structured task decomposition: list of steps, each with role, title, instructions, skill/tool refs, executor, model, dependencies. Derived from the approved plan-notes at the freeze, which is refused if they moved after the approval. See [plan schema](../packages/contracts/src/execution.ts), [grounded planning](superpowers/specs/2026-07-19-m5b-grounded-plan-strategy-design.md).
+**Plan** — Structured task decomposition: list of steps, each with role, title, instructions, skill/tool refs, executor, model, dependencies. Derived from the approved plan-notes at the freeze, which is refused if they moved after the approval. See [plan schema](../packages/contracts/src/execution.ts).
 
-**Plugin** — Replaceable behavior: executor, provider, skill, tool server, extension. Registered via `seedRegistries`, opted-in via plan refs. See [plugins design](superpowers/specs/2026-07-17-m3-plugins-design.md), [plugin registry](../packages/kernel/src/plugins/host.ts).
+**Plugin** — Replaceable behavior: executor, provider, skill, tool server, extension. Registered via `seedRegistries`, opted-in via plan refs. See [plugin registry](../packages/kernel/src/plugins/host.ts).
 
 **Project** — Isolated execution context with its own identity, event log, operations, vault, and memory. Set via `orc init --name`. See [project identity](ARCHITECTURE.md#identity-and-isolation), [`projectId` + `projectName` in config](../README.md#quickstart).
 
@@ -162,7 +162,7 @@ Key terms used throughout the orchestrator codebase and documentation. Many term
 
 **Skill** — Agent knowledge/procedures (no code). Defined in `vault/skills/<name>/SKILL.md`. Hot-indexed, force-loaded via `skillRefs`. See [skills pattern](EXTENDING.md#where-a-change-goes), [skill indexing](../packages/kernel/src/plugins/skills.ts).
 
-**Split** — Recursive task decomposition via the `task_split` tool. One transaction appends `task_created`, `split_proposed` (on the parent's stream) and `plan_proposed` — plus `plan_approved` when the project's `approvalPolicy` auto-approves, otherwise the child parks at the human gate. The router starts an approved child; `split_resolved` carries its outcome back to the parent's `join_splits`. There is no `split_approved` event. See [task split](seams-reference.md#scenario-4-task-splits-into-children), [recursion core design](superpowers/specs/2026-07-19-m5a-recursion-core-design.md).
+**Split** — Recursive task decomposition via the `task_split` tool. One transaction appends `task_created`, `split_proposed` (on the parent's stream) and `plan_proposed` — plus `plan_approved` when the project's `approvalPolicy` auto-approves, otherwise the child parks at the human gate. The router starts an approved child; `split_resolved` carries its outcome back to the parent's `join_splits`. There is no `split_approved` event. See [task split](seams-reference.md#scenario-4-task-splits-into-children).
 
 **Storage service** — Data-access facade for one database/store (Postgres, SurrealDB, vault). Encapsulates connection, locking, redaction, migrations. See [storage service](ARCHITECTURE.md#the-storage-service-—-read/write-boundary), [tier ②](ARCHITECTURE.md#system-map-—-three-tiers).
 
