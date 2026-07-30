@@ -243,7 +243,7 @@ export class Kernel {
   // This is a MEMBERSHIP projection with exactly ONE use: distinguishing this task's declared-zone
   // changes from sibling-task pollution in the scope-cleanliness check. It is a FLOOR (exec-driven
   // writes are uncaptured), never a complete diff, and NEVER a substitute for the full bun test /
-  // bun run typecheck gate — AUDITOR_CONTRACT's "any defect ⇒ signal failure" stays unqualified.
+  // bun run typecheck gate — the role-auditor skill contract's "any defect ⇒ signal failure" stays unqualified.
   async listTaskChangedPaths(taskId: string): Promise<Array<{ path: string; taskId: string; steps: Array<{ stepId: string | null; tool: string; seq: number }> }>> {
     const ids = subtreeTaskIds(await this.state(), taskId)
     const out: Array<{ path: string; taskId: string; steps: Array<{ stepId: string | null; tool: string; seq: number }> }> = []

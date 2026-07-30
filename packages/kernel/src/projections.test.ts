@@ -454,7 +454,7 @@ describe('subtreeOutcome', () => {
 // auditor never has to trust git. It pairs each fs_write/fs_edit/fs_delete tool_call with the SAME
 // toolCallId's tool_result, keeps only isError===false, and folds artifact_produced receipts in as a
 // floor. It is a MEMBERSHIP projection — never a diff, never a substitute for the full test/typecheck
-// gate. See AUDITOR_CONTRACT: any defect in an in-zone file still fails the signal.
+// gate. See the role-auditor skill contract: any defect in an in-zone file still fails the signal.
 describe('taskChangedPaths', () => {
   // one tool_call event
   const call = (seq: number, toolCallId: string, toolName: string, input: unknown, stepId = 's1'): EventRecord =>

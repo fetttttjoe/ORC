@@ -58,6 +58,14 @@ export const STEP_ROLE = {
   committer: 'committer',
 } as const
 
+// The shipped skills carrying each kernel-appended role contract: auditor+heal prose on the
+// verify step, the commit contract on the commit step. Named here because the freeze (kernel)
+// appends the refs and `orc init` (cli) seeds the files — a literal spelled twice would drift.
+// The PROSE lives in vault/skills/<name>/SKILL.md, operator-editable and audited via
+// skill_loaded content-hash events; the kernel owns only WHICH steps carry them, so a planner
+// can neither author nor remove a role contract.
+export const ROLE_SKILL = { auditor: 'role-auditor', committer: 'role-committer' } as const
+
 // The per-task plan-note scope. The authoring agent, finalize_plan, and every UI view derive
 // it from the taskId — one format, one place (was duplicated as ui-core's planScopeName).
 // Sanitized because a split child's id (`<uuid>.<stepId>.<toolCallId>`) carries dots and mixed case,

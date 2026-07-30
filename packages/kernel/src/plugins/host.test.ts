@@ -69,6 +69,7 @@ describe('createPluginHost / refValidator', () => {
     expect(errors.join('\n')).toContain(`unknown executor 'nope'`)
     expect(errors.join('\n')).toContain(`unknown provider 'ghost'`)
     expect(errors.join('\n')).toContain(`unknown skill 'missing-skill'`)
+    expect(errors.join('\n')).toContain('`orc init` seeds the shipped set')
     expect(errors.join('\n')).toContain(`not trusted`)
     expect(errors.join('\n')).toContain(`undeclared MCP server 'undeclared'`)
     expect(errors).toHaveLength(5)

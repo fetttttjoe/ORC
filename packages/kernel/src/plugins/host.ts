@@ -74,7 +74,7 @@ export async function createPluginHost(
           errors.push(`step ${step.id}: isolation '${step.isolation}' is not implemented yet (only 'local')`)
         for (const ref of step.skillRefs) {
           const entry = byName.get(ref)
-          if (!entry) errors.push(`step ${step.id}: unknown skill '${ref}'`)
+          if (!entry) errors.push(`step ${step.id}: unknown skill '${ref}' — \`orc skills\` lists the index; \`orc init\` seeds the shipped set`)
           else if (!entry.valid) errors.push(`step ${step.id}: invalid skill '${ref}' (${entry.errors.join('; ')})`)
         }
         for (const ref of step.toolRefs) {

@@ -18,7 +18,7 @@ import type { Kernel } from '../kernel'
 //    before, and an empty scoped set is not evidence of success.
 //  • NOT a gate exemption. It never licenses skipping `bun test` / `bun run typecheck`, and
 //    "not in my scoped set" is never a reason to dismiss a defect in a file that IS in scope.
-// AUDITOR_CONTRACT's "any defect ⇒ signal failure" stays intact and unqualified.
+// The role-auditor skill contract's "any defect ⇒ signal failure" stays intact and unqualified.
 //
 // Read-only: no writes, no shelling out, no git. taskId/stepId come from the injected step context
 // `p`, never from model input, so the model cannot aim it at another task. Failures come back as

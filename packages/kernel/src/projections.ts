@@ -475,7 +475,7 @@ export function pendingSplitForChild(state: State, childTaskId: string): SplitSt
 // declared-zone changes apart from sibling-task pollution in the scope-cleanliness check. It is a
 // FLOOR, not a complete diff — exec-driven writes (formatters, codegen) are uncaptured — and it
 // NEVER substitutes for the full bun test / bun run typecheck gate, nor dismisses a real defect in
-// an in-zone file (AUDITOR_CONTRACT: any defect ⇒ signal failure, unqualified).
+// an in-zone file (the role-auditor skill contract: any defect ⇒ signal failure, unqualified).
 
 // Which tool_calls are writes: contracts' FS_WRITE_TOOL_NAMES, so this audit projection and the
 // executor's fence (loop.ts's WRITING_FILE_TOOLS, tools.ts's TOOL_NAME) read the same set — a

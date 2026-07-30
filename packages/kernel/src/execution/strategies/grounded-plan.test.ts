@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'bun:test'
-import { COMMIT_STEP_ID, EVENT_KIND, LINK_KIND, STEP_ROLE, type EventRecord, type MemoryLink, type PlanNote } from '@orc/contracts'
+import { COMMIT_STEP_ID, EVENT_KIND, LINK_KIND, ROLE_SKILL, STEP_ROLE, type EventRecord, type MemoryLink, type PlanNote } from '@orc/contracts'
 import { planNoteFixture, stepFixture } from '@orc/contracts/fixtures'
-import { AUDITOR_CONTRACT, COMMIT_CONTRACT, HEAL_CONTRACT, foldPlanNotes, groundedPlanOmission, instantiateFrozenPlan, planGraphHash, planScope, withCommitStep } from './grounded-plan'
+import { foldPlanNotes, groundedPlanOmission, instantiateFrozenPlan, planGraphHash, planScope, withCommitStep } from './grounded-plan'
 
 const note = (over: Partial<PlanNote> & { id: string }): PlanNote =>
   planNoteFixture({ scope: 'plan-t', title: over.id, ...over })
@@ -58,23 +58,21 @@ describe('instantiateFrozenPlan (pure, deterministic)', () => {
     const draft = instantiateFrozenPlan('masterplan', notes)
     expect(draft.steps.find(s => s.id === 'verify')!.role).toBe('auditor')
     expect(draft.steps.find(s => s.id === 'work')!.role).toBe('implementer')
-    // the auditor + heal contracts are frozen into the verify step's instructions — plan-approved,
-    // not injected as executor policy; implementer siblings never carry them
-    expect(draft.steps.find(s => s.id === 'verify')!.instructions).toBe(`audit it\n\n${AUDITOR_CONTRACT}\n\n${HEAL_CONTRACT}`)
+    // the auditor + heal contracts ride as the kernel-appended role skill — the REF is frozen
+    // into the plan (planner can't remove it); implementer siblings never carry it
+    expect(draft.steps.find(s => s.id === 'verify')!.instructions).toBe('audit it')
+    expect(draft.steps.find(s => s.id === 'verify')!.skillRefs).toEqual([ROLE_SKILL.auditor])
     expect(draft.steps.find(s => s.id === 'work')!.instructions).toBe('do it')
+    expect(draft.steps.find(s => s.id === 'work')!.skillRefs).toEqual([])
   })
 
-  // The scope narrowing must never become a licence. Asserted on the constant itself so a future
-  // edit that softens the defect rule (or drops the scoped set's limits) fails here.
-  it('keeps the defect rule unqualified while pointing SCOPE at the scoped_changes tool', () => {
-    expect(AUDITOR_CONTRACT).toContain("if your audit finds ANY defect, signal outcome 'failure'")
-    expect(AUDITOR_CONTRACT).toContain('Success means zero defects.')
-    expect(AUDITOR_CONTRACT).toContain('scoped_changes')
-    expect(AUDITOR_CONTRACT).toContain('not from a working-tree diff')
-    // the limit travels in the same breath as the permission
-    expect(AUDITOR_CONTRACT).toContain('never licenses skipping the test/typecheck gate')
-    expect(AUDITOR_CONTRACT).toContain('never excuses a defect in a file that IS in scope')
-    expect(AUDITOR_CONTRACT).toContain('empty set is not evidence of success')
+  it('freezes a verify note that already names the role skill without duplication', () => {
+    const notes: PlanNote[] = [
+      note({ id: 'masterplan', links: [link('work', LINK_KIND.decomposes_into), link('verify', LINK_KIND.decomposes_into)] }),
+      note({ id: 'work', title: 'Work', body: 'do it' }),
+      note({ id: 'verify', title: 'Verify', body: 'audit it', dependsOn: ['work'], skillRefs: [ROLE_SKILL.auditor] }),
+    ]
+    expect(instantiateFrozenPlan('masterplan', notes).steps.find(s => s.id === 'verify')!.skillRefs).toEqual([ROLE_SKILL.auditor])
   })
 
   it('is a pure function of the notes: same input → identical output', () => {
@@ -311,8 +309,8 @@ describe('withCommitStep', () => {
     const commit = draft.steps.at(-1)!
     expect(commit).toEqual({
       id: COMMIT_STEP_ID, role: STEP_ROLE.committer, title: 'Commit',
-      instructions: COMMIT_CONTRACT, dependsOn: ['db', 'verify'],
-      skillRefs: [], toolRefs: [], zone: [], readOnlySource: true,
+      instructions: "Commit this task's changes; the 'role-committer' skill is your contract.", dependsOn: ['db', 'verify'],
+      skillRefs: [ROLE_SKILL.committer], toolRefs: [], zone: [], readOnlySource: true,
     })
   })
 
@@ -321,19 +319,9 @@ describe('withCommitStep', () => {
     expect(() => withCommitStep(clash)).toThrow(/commit/)
   })
 
-  // The sim run's one imperfection: an agent healed body+claims but left the SUMMARY in
-  // bug-present phrasing — and the summary is what every searcher reads first. The contract must
-  // demand the whole retrieval surface.
-  it('the heal clause demands the whole retrieval surface, summary and title included', () => {
-    expect(HEAL_CONTRACT).toContain('title and summary')
-    expect(HEAL_CONTRACT).toContain('retrieval surface')
-  })
-
-  it('the frozen verify step carries the heal clause after the auditor contract', () => {
+  it('the frozen verify step carries the role-auditor skill; implementers never do', () => {
     const verify = frozen().steps.find(s => s.id === 'verify')!
-    expect(verify.instructions).toContain(AUDITOR_CONTRACT)
-    expect(verify.instructions).toContain(HEAL_CONTRACT)
-    // implementers never carry either
-    expect(frozen().steps.find(s => s.id === 'db')!.instructions).not.toContain(HEAL_CONTRACT)
+    expect(verify.skillRefs).toEqual([ROLE_SKILL.auditor])
+    expect(frozen().steps.find(s => s.id === 'db')!.skillRefs).toEqual([])
   })
 })

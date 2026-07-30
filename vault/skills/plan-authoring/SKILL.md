@@ -43,6 +43,19 @@ You are an **auditor** authoring an executable plan, grounded in the analysis no
      ONE subplan. If a change is small and sequential, it is ONE subplan — decomposing it costs more
      than it saves. Decompose when parts are genuinely independent, then add the wiring subplan that
      `dependsOn` them.
+   - **A measuring subplan gates; a gate runs first.** When a subplan's rationale is "measure,
+     then decide whether to build", every subplan whose work that decision could cancel MUST
+     `dependsOn` the measuring subplan — never run beside it as a wave sibling. A gate that runs
+     parallel to the build it gates decides nothing: the build has already happened when the
+     answer arrives.
+   - **Verify never uses a tool this task introduces.** A step-tool added by this task exists
+     only in uncommitted code the running supervisor never loaded, so a verify instructed to
+     call it fails with "unknown tool". Have verify test the new tool AS CODE — run its tests,
+     read its wiring — never invoke it live.
+   - **Every subplan states its check.** End each subplan's requirements with a success
+     criterion the verify step can check mechanically, and name how: the test file to run, the
+     command, or the exact observable (a passing test name beats "works correctly"). A criterion
+     verify cannot check is a hope, not a requirement.
    - **Match the model to the work.** Your instructions list the models you may name, with their
      rates. Set `modelRef` per subplan from that list: a frontier model where the work is genuinely
      hard (cross-cutting refactors, ambiguous requirements, design judgement, anything touching many

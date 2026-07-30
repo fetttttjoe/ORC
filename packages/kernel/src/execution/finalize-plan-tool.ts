@@ -95,7 +95,7 @@ export function finalizePlanTool(opts: {
           const what = changed.map(id => `'${id}'`).join(', ')
           return { output: { error: `the plan-note graph changed after approval (edited since: ${what}) — ask the human to approve it again, then call finalize_plan without editing in between` }, isError: true }
         }
-        // autoCommit's tail rides the freeze, not the approval: kernel-owned like AUDITOR_CONTRACT
+        // autoCommit's tail rides the freeze, not the approval: kernel-owned like the role-skill refs the freeze appends
         const plan = freezePlan(MASTERPLAN_NOTE_ID, notes, { autoCommit: config.autoCommit })
         const r = await kernel.proposeSplit({
           parentTaskId: p.taskId, stepId: p.stepId, runToken: p.runToken,
