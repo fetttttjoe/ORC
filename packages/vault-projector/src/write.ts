@@ -1,8 +1,12 @@
 import { createHash } from 'node:crypto'
 import { existsSync, readFileSync } from 'node:fs'
 import path from 'node:path'
+import { z } from 'zod'
 import { atomicWriteFileSync } from '@orc/kernel'
 import type { VaultFiles } from './render'
+
+// the on-disk shape this file's own writes always produce (rel path → content sha256)
+const Manifest = z.record(z.string(), z.string())
 
 const sha = (s: string): string => createHash('sha256').update(s).digest('hex')
 const isPlanFile = (rel: string): boolean => /\/plan-v\d+\.md$/.test(rel)
@@ -11,8 +15,12 @@ const isPlanFile = (rel: string): boolean => /\/plan-v\d+\.md$/.test(rel)
 // write-once for plan versions, warn-then-overwrite for hand-edited projection files.
 export function writeVaultFiles(vaultDir: string, files: VaultFiles): void {
   const manifestPath = path.join(vaultDir, '.orc-manifest.json')
+  // Missing file, broken JSON, or the right JSON shaped wrong (someone's own edit, a half-written
+  // manifest from a crashed run) all fold to the SAME fallback: an empty manifest reads every file
+  // below as never-before-tracked, so the warn-then-overwrite path is skipped and the write proceeds
+  // silently — the safe choice when there's no trustworthy prior hash to compare against.
   let manifest: Record<string, string> = {}
-  try { manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) } catch { manifest = {} }
+  try { manifest = Manifest.parse(JSON.parse(readFileSync(manifestPath, 'utf8'))) } catch { manifest = {} }
 
   const root = path.resolve(vaultDir)
   for (const [rel, content] of Object.entries(files)) {
