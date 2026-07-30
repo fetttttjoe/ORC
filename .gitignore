@@ -4,7 +4,11 @@ dist/
 .env.local
 .orc/*
 !.orc/config.json
-vault/
+# the vault is the disposable OKF projection (memory/, tasks/, index.md — rebuilt from the log),
+# but vault/skills/ is authored content: shipped skills were tracked-by-exception force-adds
+# until the pipeline's commit step hit the ignore rule on a NEW skill file and hard-blocked
+vault/*
+!vault/skills/
 review-findings.md
 *.db
 *.db-journal
