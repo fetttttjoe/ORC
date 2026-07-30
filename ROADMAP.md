@@ -123,7 +123,18 @@ agents-and-skills-as-markdown surface, mapped onto the existing loader rather th
    frontmatter (unknown keys are hard validation errors today, so external skill packs need
    trimming before they drop into `vault/skills/`). When: a plan step cannot know at authoring
    time which skill it needs, or the skill set outgrows force-loading.
-4. **Interactive plan canvas** — *open.* Today the human reviews the rendered plan and revises it
+4. **Boundary contracts consolidation** — *next (designed).* Runtime blame with compile-like
+   placement, round-wide: one plan-field rule table (shape = refused at the producing
+   memory_write itself; judgment = warn, human decides) driving write + validatePlan from one
+   source; one `degraded` absent-measurement convention across tool outputs; verification as a
+   first-class note stamp (`verified{revision,at,by}`, `memory_verify`) replacing
+   authorship-inference in restamp/stillDrifted; then zones as `@area` references resolved at
+   the freeze (registry = the drift-checked area notes; feeds Track 1.1); then a UI-parity sweep
+   (edit-on-blocked reachable, subtree questions surfaced via openFeedbackInSubtree, terminal
+   tasks never offer an answer box). Named frontier deliberately out: `depOutputs` are the one
+   uncontracted agent→agent boundary. [derived: five incident-driven slices on 2026-07-30
+   accreting per-incident fixes — this round consolidates them into one boundary story]
+5. **Interactive plan canvas** — *open.* Today the human reviews the rendered plan and revises it
    only by annotating and waking the plan agent; there is no direct manipulation. A browser plan
    canvas (graph-ui or a dedicated view) would let the human edit subplans in place — reorder
    `dependsOn`, adjust `zone` globs, swap `modelRef`, rewrite requirements — with each edit
