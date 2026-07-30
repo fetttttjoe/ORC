@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, it } from 'bun:test'
-import { APPROVAL_ANSWER, ApprovalPolicy, EVENT_KIND, GROUNDED_APPROVAL_DOOR, LINK_KIND, NOTE_TIER, PAYLOAD_SCHEMAS, STEP_ROLE, TASK_STATUS, type Analyzer, type PlanDraft, type PlanStep } from '@orc/contracts'
+import { APPROVAL_ANSWER, ApprovalPolicy, EVENT_KIND, GROUNDED_APPROVAL_DOOR, LINK_KIND, NOTE_TIER, PAYLOAD_SCHEMAS, STEP_ROLE, TASK_STATUS, TaskStatus, type Analyzer, type PlanDraft, type PlanStep } from '@orc/contracts'
 import { draftFixture, stepFixture } from '@orc/contracts/fixtures'
 import { openStorage, type EventLogOps } from './storage'
 import { KERNEL_ERROR_CODE, KernelError } from './errors'
@@ -32,6 +32,10 @@ async function freshKernelAndLog(): Promise<{ k: Kernel; log: TestLog }> {
 }
 const toRunning = (log: TestLog, taskId: string): Promise<unknown> =>
   log.append({ taskId, stepId: null, runToken: null, kind: EVENT_KIND.task_status_changed, payload: { taskId, from: TASK_STATUS.draft, to: TASK_STATUS.running } })
+// Same trick for an arbitrary status: the from-status matrix below needs a task parked in each one,
+// and only the fold's view of status gates editPlan.
+const toStatus = (log: TestLog, taskId: string, to: TaskStatus): Promise<unknown> =>
+  log.append({ taskId, stepId: null, runToken: null, kind: EVENT_KIND.task_status_changed, payload: { taskId, from: TASK_STATUS.draft, to } })
 
 const draft = (): PlanDraft => draftFixture()
 
@@ -103,6 +107,28 @@ describe('Kernel lifecycle', () => {
     const t = await k.createTask({ title: 'x' })
     expect(await codeOf(k.editPlan(t.id, draft()))).toBe(KERNEL_ERROR_CODE.invalid_transition)
   })
+
+  // A frozen plan whose zone entry could match no path bricked its own steps: two steps could not
+  // write the files they were spawned to write, the task settled blocked, and the operator had no
+  // door to CORRECT the plan — editPlan refused every from-status but awaiting_approval, so the only
+  // exit was cancelling the task and losing the work already completed. `blocked` is admitted now.
+  // The matrix is asserted as an exact set on purpose: a new TaskStatus must be classified here
+  // deliberately, never inherit "editable" by default.
+  it("a blocked task's plan can be edited, and editPlan stays refused from every other non-awaiting status", async () => {
+    const { k, log } = await freshKernelAndLog()
+    const editable: ReadonlySet<TaskStatus> = new Set([TASK_STATUS.awaiting_approval, TASK_STATUS.blocked])
+    const outcomes: Record<string, string> = {}
+    for (const status of TaskStatus.options) {
+      // one task per status on a shared log — status is per-task, so a DB per case buys nothing
+      const t = await k.createTask({ title: `edit from ${status}` })
+      await k.proposePlan(t.id, draft()) // a plan must exist before editing is even meaningful
+      if (status !== TASK_STATUS.awaiting_approval) await toStatus(log, t.id, status)
+      outcomes[status] = await codeOf(k.editPlan(t.id, draft()))
+      if (editable.has(status)) expect((await k.getTask(t.id))?.status).toBe(TASK_STATUS.awaiting_approval)
+    }
+    expect(outcomes).toEqual(Object.fromEntries(TaskStatus.options.map(s =>
+      [s, editable.has(s) ? 'no_error' : KERNEL_ERROR_CODE.invalid_transition])))
+  }, 20_000)
 
   it('rejects approving a stale version', async () => {
     const k = await freshKernel()

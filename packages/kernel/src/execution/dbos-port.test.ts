@@ -289,6 +289,43 @@ describe('DBOS execution port (integration)', () => {
     expect((await kernel.state()).runs.get(t.id)?.at(-1)?.cwd).toBe(projectDir)
   }, 15_000)
 
+  // The blocking failure this repair path exists for: a plan froze a step whose zone entry could
+  // match no path, so the step could not write its own files, and the task settled blocked with a
+  // DEFECTIVE frozen plan. Retrying re-ran the same broken plan, and editPlan refused a blocked
+  // task — the only exit was cancelling the task and discarding the steps that had succeeded.
+  // Repair is now: edit while blocked → approve → `orc run` (port.startRun; port.retry stays
+  // blocked-only, so approved resumes through the run door). The run must pick up the REPAIRED
+  // version, not the one the blocked run froze, and must not re-run what already completed.
+  it("a blocked task's plan can be edited and the repaired plan is what the resumed run uses", async () => {
+    const behavior: Record<string, 'ok' | 'fail'> = { a: 'ok', b: 'fail' }
+    const t = await approvedTask(behavior)
+    expect(await (await port.startRun(t.id)).wait()).toBe('blocked')
+    expect((await kernel.getTask(t.id))?.status).toBe(TASK_STATUS.blocked)
+
+    // the correction: same DAG, but step b now carries a marker the frozen v1 does not have, so
+    // the resumed step's own output proves WHICH version was instantiated
+    const repaired = await kernel.editPlan(t.id, draftFixture([
+      stepFixture({ id: 'a', title: 'a', instructions: 'first' }),
+      stepFixture({ id: 'b', title: 'b', instructions: 'second', dependsOn: ['a'], skillRefs: ['repaired-skill'] }),
+    ]))
+    expect(repaired.version).toBe(2)
+    expect((await kernel.getTask(t.id))?.status).toBe(TASK_STATUS.awaiting_approval)
+    await kernel.approvePlan(t.id)
+    expect((await kernel.state()).plans.get(t.id)?.approvedVersion).toBe(2)
+
+    behavior.b = 'ok'
+    const resumed = await port.startRun(t.id)
+    expect(resumed.workflowId).toContain(':v2') // the LATEST approved version, not the blocked run's v1
+    expect(await resumed.wait()).toBe('done')
+
+    const state = await kernel.state()
+    expect(state.runs.get(t.id)?.at(-1)?.planVersion).toBe(2)
+    expect(state.steps.get(t.id)?.get('b')?.output).toContain('skills=[repaired-skill]') // ran the CORRECTED step
+    expect(state.steps.get(t.id)?.get('a')?.attempt).toBe(1) // a completed under v1 and is not re-run
+    expect(state.steps.get(t.id)?.get('b')?.attempt).toBe(2) // the step that never completed re-runs
+    expect((await kernel.getTask(t.id))?.status).toBe(TASK_STATUS.done)
+  }, 20_000)
+
   // A retry must re-enter the world the run failed in. Inheritance skips null-cwd runs: histories
   // from before the project-dir default carry bare retries (scenario-2's log is exactly
   // [repo, null, null, null]) that would poison plain last-run inheritance.

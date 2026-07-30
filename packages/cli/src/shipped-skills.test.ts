@@ -48,4 +48,12 @@ describe('shipped skills', () => {
     // the receipt's honesty line: leftovers the auditor did not verify travel in the summary
     expect(body).toContain('stillDrifted')
   })
+
+  // A planner froze a newline-joined zone entry (zone: ["a/**\nb.ts"]); the fence then matched no
+  // real path and two steps could not write their own files, with no repair path. This pins the
+  // STRUCTURE RULES bullet that tells planners a zone entry is one glob, never a joined string.
+  test('plan-authoring pins the one-glob-per-zone-entry rule', () => {
+    const { body } = read('plan-authoring')
+    expect(body).toContain('one glob per entry')
+  })
 })

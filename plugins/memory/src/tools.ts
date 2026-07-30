@@ -1,5 +1,5 @@
 import { z } from 'zod'
-import { AccessVia, CLAIM_ID_RE, ClaimWrite, isRecord, EDGE_DIRECTIONS, linkLookupScopes, MASTERPLAN_NOTE_ID, MemoryScope, MEMORY_ACCESS, MEMORY_LIMITS, MEMORY_SOURCE_LIMITS, MEMORY_TOOL_NAME, MemorySearchResult, MemoryWriteResult, NOTE_KINDS, LINK_KIND, LINK_KINDS, RETENTION_CLASSES, SEARCH_MODES, SearchMode, siblingOrderingMisuse, LinkKind, MemoryNoteDraftInput, NOTE_TIER, NOTE_TIERS, slugId, toolError, type MemoryAuthor, type MemoryNote, type MemoryStore, type ResolvedTool } from '@orc/contracts'
+import { AccessVia, CLAIM_ID_RE, ClaimWrite, isRecord, EDGE_DIRECTIONS, linkLookupScopes, MASTERPLAN_NOTE_ID, MemoryScope, MEMORY_ACCESS, MEMORY_LIMITS, MEMORY_SOURCE_LIMITS, MEMORY_TOOL_NAME, MemorySearchResult, MemoryWriteResult, NOTE_KINDS, LINK_KIND, LINK_KINDS, RETENTION_CLASSES, SEARCH_MODES, SearchMode, siblingOrderingMisuse, zoneEntryMisuse, LinkKind, MemoryNoteDraftInput, NOTE_TIER, NOTE_TIERS, slugId, toolError, type MemoryAuthor, type MemoryNote, type MemoryStore, type ResolvedTool } from '@orc/contracts'
 import { applyBudget, fitMemoryNoteToBudget } from './budget'
 import { noteHasDrifted, type ChangedSince } from './drift'
 import { NEAR_SUBJECT, trigramDice } from './title-similarity'
@@ -56,6 +56,22 @@ async function orderingLinkWarning(store: MemoryStore, note: MemoryNote): Promis
     if (target?.tier === NOTE_TIER.plan) siblings.push(l.id)
   }
   const misuse = siblingOrderingMisuse(note.id, note.links, siblings)
+  return misuse ? [misuse] : []
+}
+
+// A zone entry that is not ONE glob, caught while the author can still fix it for free.
+// A planner joined several globs with newlines into a single entry; the write succeeded, the plan
+// gate passed, and the frozen fence then matched no real path — two steps were refused every write
+// to their own files, with no repair path. The wording is contracts' zoneEntryMisuse, the same
+// predicate the plan freeze refuses with, so the author hears one sentence, not two versions of it.
+//
+// Tier-gated exactly like orderingLinkWarning: `zone` only means anything on a plan note, where it
+// is frozen into a step's write-fence. Pure — no store lookup, so it costs nothing on any write.
+// WARNED, never refused: the note (body, rationale, uncertainty, zone) is stored and the author is
+// told, which is the whole point of authorable-then-refused rather than a schema rejection.
+function zoneEntryWarning(note: MemoryNote): string[] {
+  if (note.tier !== NOTE_TIER.plan) return []
+  const misuse = zoneEntryMisuse(note.zone)
   return misuse ? [misuse] : []
 }
 
@@ -536,6 +552,11 @@ export function memoryTools(opts: {
             // first on purpose — see orderingLinkWarning: only warnings[0] reaches the model's
             // next turn, and this is the only one that predicts a refused plan
             ...(await orderingLinkWarning(store, n)),
+            // second: also predicts a refused plan, and unlike the ordering link a bad zone entry
+            // ALSO breaks the frozen step's write-fence if it somehow reaches execution. Below the
+            // ordering warning only because that one is the older, more frequently observed misuse;
+            // both outrank every advisory lint below.
+            ...zoneEntryWarning(n),
             ...normalized.warnings,
             ...duplicates,
             ...noteLint(n),

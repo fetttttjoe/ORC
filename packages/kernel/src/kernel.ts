@@ -111,7 +111,16 @@ export class Kernel {
   async editPlan(taskId: string, draft: PlanDraft): Promise<Plan> {
     return this.log.transaction(async tx => {
       const task = await this.requireTask(tx, taskId)
-      if (task.status !== TASK_STATUS.awaiting_approval)
+      // `blocked` is editable, not just `awaiting_approval`: a plan froze a step whose zone entry
+      // could match no path, so the step could not write the files it was spawned to write, and the
+      // task settled blocked holding a DEFECTIVE plan. Retrying re-ran the same broken plan and this
+      // guard refused the only correction, so the sole exit was cancelling the task and discarding
+      // the steps that had already succeeded. Repair is now edit → approve → run: appendPlanVersion
+      // stamps blocked → awaiting_approval, the next run resolves the newly approved version, and
+      // completed steps are skipped. Every OTHER status stays refused with this same error — a
+      // draft has nothing to edit, and a running or terminal task must not have the plan under it
+      // swapped mid-flight.
+      if (task.status !== TASK_STATUS.awaiting_approval && task.status !== TASK_STATUS.blocked)
         throw new KernelError(KERNEL_ERROR_CODE.invalid_transition, `cannot edit a plan while task is '${task.status}'`)
       return this.appendPlanVersion(tx, taskId, draft, EVENT_KIND.plan_edited, task.status)
     })

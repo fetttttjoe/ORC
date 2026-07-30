@@ -137,4 +137,27 @@ describe('plan shape defects that cause races', () => {
       step('verify', { zone: ['docs/page.md'], dependsOn: ['draft'] }),
     ]).ok).toBe(true)
   })
+
+  // A planner joined several globs with newlines into ONE zone entry (`["a/**\nb.ts"]`). It passed
+  // every gate, the frozen fence then matched no real path, and two steps were refused every write
+  // to their own files with no repair path — the slice's pipeline was cancelled.
+  it('refuses a step whose zone entry is several globs joined into one string', () => {
+    const r = check([
+      step('draft', { zone: ['packages/a/**\npackages/b.ts'] }),
+      step('verify', { dependsOn: ['draft'] }),
+    ])
+    expect(r.ok).toBe(false)
+    if (!r.ok) {
+      const joined = r.errors.join(' ')
+      expect(joined).toContain("step 'draft'")
+      expect(joined).toContain('packages/a/**\\npackages/b.ts') // rendered with visible escapes
+      expect(joined).toContain('one glob per array entry')
+    }
+  })
+
+  it('refuses a whitespace-only zone entry, which fences a step out of every file', () => {
+    const r = check([step('draft', { zone: ['   '] }), step('verify', { dependsOn: ['draft'] })])
+    expect(r.ok).toBe(false)
+    if (!r.ok) expect(r.errors.join(' ')).toContain('one glob per array entry')
+  })
 })

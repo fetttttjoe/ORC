@@ -745,6 +745,48 @@ describe('plan ordering expressed as a link', () => {
   })
 })
 
+// A planner authored `zone: ["a/**\nb.ts"]` — several globs joined with newlines into ONE entry.
+// The write succeeded, every gate passed, and the frozen fence then matched no real path: two steps
+// were refused every write to their own files, with no repair path, and the slice was cancelled.
+// Warned here (the note, with its body/rationale/uncertainty, is still worth keeping) and refused at
+// the freeze — one predicate, one wording.
+describe('malformed zone entry on a plan note', () => {
+  const writeTool = () => {
+    const { store, written } = fakeStore()
+    return { write: memoryTools({ store, author: { source: 'cli' } }).find(t => t.name === 'memory_write')!, written }
+  }
+
+  it('warns with the teaching message and still persists the note', async () => {
+    const { write, written } = writeTool()
+    const r = await write.execute({
+      tier: NOTE_TIER.plan, id: 'draft', scope: 'plan-t1', title: 'Draft',
+      zone: ['packages/a/**\npackages/b.ts'],
+    }, 'c1')
+    const warnings = MemoryWriteResult.parse(r.output).warnings ?? []
+    expect(warnings.join(' ')).toContain('packages/a/**\\npackages/b.ts') // visible escapes
+    expect(warnings.join(' ')).toContain('one glob per array entry')
+    expect(r.isError).toBeFalsy()
+    expect(written).toHaveLength(1)                     // authorable: the note IS stored
+    expect(written[0]!.input.id).toBe('draft')
+  })
+
+  it('says nothing about well-formed zone entries', async () => {
+    const { write } = writeTool()
+    const r = await write.execute({
+      tier: NOTE_TIER.plan, id: 'draft', scope: 'plan-t1', title: 'Draft', summary: 'the work',
+      zone: ['packages/a/**', 'packages/b.ts'],
+    }, 'c1')
+    const warnings = MemoryWriteResult.parse(r.output).warnings ?? []
+    expect(warnings.join(' ')).not.toContain('one glob per array entry')
+  })
+
+  it('leaves a semantic note alone — the rule is about frozen fences', async () => {
+    const { write } = writeTool()
+    const r = await write.execute({ id: 'auth', title: 'Auth', summary: 's', body: 'b' }, 'c1')
+    expect((MemoryWriteResult.parse(r.output).warnings ?? []).join(' ')).not.toContain('one glob per array entry')
+  })
+})
+
 describe('drift on memory_read', () => {
   const note = (over: Partial<MemoryNoteDraft> = {}): MemoryNote =>
     toNote({ id: 'auth', title: 'Auth', body: 'b', paths: ['src/auth.ts'], ...over })

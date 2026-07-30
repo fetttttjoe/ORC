@@ -67,6 +67,15 @@ You are an **auditor** authoring an executable plan, grounded in the analysis no
      builds on (`arch-overview`, `area-*`). This wires the plan into the project's knowledge
      graph — the human can click from a subplan to the architecture it touches, and auditors can
      traverse back.
+   - **`zone` is a JSON array, one glob per entry.** `zone: ["a/**", "b.ts"]`, never
+     `zone: ["a/**\nb.ts"]` — an entry with an embedded newline (or any control character) can
+     match no real path, so the fence refuses every write and the step is bricked. The gate
+     refuses such a plan; fix the entry, never work around the fence.
+   - **Never instruct a step to rely on tool fields the running build does not return.** Skills
+     hot-reload but tool builds do not: prose shipped in the SAME task that adds a tool field
+     reaches agents whose tools predate it. If a subplan's instructions depend on a new tool
+     capability this task introduces, say so explicitly ("the running build may not return X —
+     fall back to Y").
 
    - **A note describing the work is not the work.** On a project you have planned before, the graph
      already holds notes about the deliverable — that is memory of a PREVIOUS run, not evidence the

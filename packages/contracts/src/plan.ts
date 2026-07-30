@@ -1,5 +1,6 @@
 import { z } from 'zod'
 import { TOOL_REF_RE } from './plugins'
+import { zoneEntryMisuse } from './plan-ordering'
 
 export const IsolationTier = z.enum(['local', 'worktree', 'docker'])
 export type IsolationTier = z.infer<typeof IsolationTier>
@@ -125,6 +126,16 @@ export function validatePlan(plan: Plan): { ok: true } | { ok: false; errors: st
   for (const s of plan.steps)
     for (const d of s.dependsOn)
       if (!ids.has(d)) errors.push(`step ${s.id} depends on unknown step: ${d}`)
+  // A zone entry that is not ONE glob. A planner joined several globs with newlines into a single
+  // entry; it passed every gate, the frozen fence then matched no real path, and two steps were
+  // refused every write to their own files with no repair path. This is the ONE fatal chokepoint —
+  // every plan version, from every entry point, is validated here before it is appended — and the
+  // wording is contracts' zoneEntryMisuse, the same predicate memory_write warns with at authoring
+  // time, so the author is told once in advance and once in the refusal, identically.
+  for (const s of plan.steps) {
+    const zoneMisuse = zoneEntryMisuse(s.zone)
+    if (zoneMisuse) errors.push(`step '${s.id}': ${zoneMisuse}`)
+  }
   // A multi-step plan where EVERY step is parallel shipped twice in live testing — verification
   // running alongside the work it verifies. This once exempted plans containing a '<VERIFY>' step,
   // but that exemption is only REACHABLE when the verify step is itself unordered, which is the
