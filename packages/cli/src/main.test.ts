@@ -8,9 +8,10 @@ import { ApprovalPolicy, EVENT_KIND, MemoryAccessedPayload, MemoryDeletedPayload
 import { loadConfig, projectDatabaseName, requireProject, type EventLog, type ProjectConfig } from '@orc/kernel'
 import { createTestDb, TEST_PROJECT_ID } from '@orc/kernel/test-helpers'
 import { singleStepDraft } from './actions'
-import { buildProgram, openKernel, runInit, watchSubtree } from './main'
+import { buildProgram, openKernel, runInit } from './main'
 import { withMemory } from './memory-open'
 import { CommandFailure } from './exit'
+import { watchSubtree } from './watch'
 
 // exitOverride must reach NESTED subcommands too (e.g. `memory neighbors`): commander only
 // copies the setting to children created afterwards, and buildProgram creates them all before

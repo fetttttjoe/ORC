@@ -8,6 +8,7 @@ import type { NoteAuthoringDraft, NoteRef } from '@orc/contracts'
 import { el } from './ui/el'
 import { Badge, Btn, Card, Empty, KV, Link, openDialog, Pre, statusTone } from './ui/components'
 import { type MemoryNote, noteLabel, type NoteView, formatLinkSpec, parseLinkSpec } from '@orc/contracts'
+import type { ModelDetailView } from './api'
 
 interface TaskDetail {
   task: { id: string; title: string; status: string; spec: string; createdAt: string; parentId: string | null }
@@ -151,7 +152,7 @@ export function renderDetail(nodeId: string, d: unknown, go: Go, notes?: NoteDet
     )
   }
   if (d !== null && typeof d === 'object' && 'ref' in d && 'totals' in d) {
-    const m = d as { ref: string; tasks: Array<{ taskId: string; title: string; status: string; calls: number; usage: { inputTokens: number; outputTokens: number; costUSD: number | null } }>; totals: { inputTokens: number; outputTokens: number; costUSD: number | null } }
+    const m = d as ModelDetailView
     return el('div', {}, Card([m.ref, Badge(`${m.tasks.length} task(s)`, 'accent')],
       KV([
         ['total tokens', `${m.totals.inputTokens} in / ${m.totals.outputTokens} out`],

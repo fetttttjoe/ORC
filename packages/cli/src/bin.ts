@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-import { isConnectionRefused, loadConfig, requireProject, type Kernel } from '@orc/kernel'
+import { isConnectionRefused, loadConfig, requireProject } from '@orc/kernel'
 import { errorMessage, HOOK_NAME } from '@orc/contracts'
 import { buildProgram, openKernel, runInit, runMigrate } from './main'
 import { exitCodeFor } from './exit'
@@ -45,7 +45,7 @@ async function main(): Promise<number> {
     if (args[0] === 'init') { await runInit(args.slice(1)); return 0 }
     if (args[0] === 'db' && args[1] === 'migrate') { await runMigrate(args.slice(1)); return 0 }
     if (args.includes('--help') || args.includes('-h') || args[0] === 'help')
-      return parse(buildProgram({} as Kernel), process.argv)
+      return parse(buildProgram(null), process.argv)
 
     const config = requireProject(loadConfig())
     const loaded = await buildPlugins(config)

@@ -29,7 +29,6 @@ export const emptyPatch = (p: GraphPatch): boolean =>
 export const EDGE = {
   child: 'child', plan: 'plan', depends: 'depends', out: 'out', wrote: 'wrote', uses: 'uses',
 } as const
-export type EdgeType = (typeof EDGE)[keyof typeof EDGE]
 
 export const NODE_PREFIX = { step: 'step:', artifact: 'artifact:', note: 'note:', model: 'model:' } as const
 

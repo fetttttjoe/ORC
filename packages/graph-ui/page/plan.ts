@@ -1,6 +1,7 @@
 // Request tab — the journey view: where this request stands (lifecycle rail), the single next
 // human action (buttons when the server has actions, command chips otherwise), the grounded
 // decomposition with refine controls, the road of steps, and the knowledge this request grew.
+import { LINK_KIND } from '@orc/contracts'
 import { artifactNodeId, noteNodeId, stepNodeId } from '@orc/ui-core/graph' // browser-safe subpath — never the ui-core index
 import { planVisual } from './plan-visual'
 import { mermaidInto } from './mermaid'
@@ -152,14 +153,14 @@ function decomposition(ctx: RequestCtx): HTMLElement | null {
   if (ctx.planNotes.length === 0) return null
   const byId = new Map(ctx.planNotes.map(n => [n.id, n]))
   const children = (id: string): PlanNoteView[] =>
-    byId.get(id)?.links.filter(l => l.kind === 'decomposes_into').map(l => byId.get(l.id)).filter((n): n is PlanNoteView => n !== undefined) ?? []
-  const childIds = new Set(ctx.planNotes.flatMap(n => n.links.filter(l => l.kind === 'decomposes_into').map(l => l.id)))
+    byId.get(id)?.links.filter(l => l.kind === LINK_KIND.decomposes_into).map(l => byId.get(l.id)).filter((n): n is PlanNoteView => n !== undefined) ?? []
+  const childIds = new Set(ctx.planNotes.flatMap(n => n.links.filter(l => l.kind === LINK_KIND.decomposes_into).map(l => l.id)))
   const roots = ctx.planNotes.filter(n => !childIds.has(n.id))
   const checked = new Set<string>()
 
   const noteRow = (n: PlanNoteView): HTMLElement => {
     const row = el('div', { class: 'tree-node' })
-    const deps = n.links.filter(l => l.kind === 'depends_on')
+    const deps = n.links.filter(l => l.kind === LINK_KIND.depends_on)
     const head = el('div', { class: 'card-title' },
       Link(n.title, () => ctx.go(noteNodeId(ctx.planScopeName, n.id))),
       n.uncertainty.length ? Badge(`${n.uncertainty.length} uncertain`, 'warn') : null,

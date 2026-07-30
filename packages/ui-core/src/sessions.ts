@@ -7,7 +7,7 @@ import { decompositionMermaid, planMermaid, todoWaves, type StepStatusEntry, typ
 // rebuild-safe, no schema; ids + view filtering live in graph.ts (imported below)
 
 // latest models_discovered per provider IS the catalog (append-on-change upstream)
-export function foldModelCatalog(events: Array<Pick<EventRecord, 'kind' | 'payload'>>): Map<string, string[]> {
+function foldModelCatalog(events: Array<Pick<EventRecord, 'kind' | 'payload'>>): Map<string, string[]> {
   const catalog = new Map<string, string[]>()
   for (const e of events) {
     if (e.kind !== EVENT_KIND.models_discovered) continue
@@ -27,6 +27,15 @@ export type Unsubscribe = () => void
 // One chats-list entry: id always; name/dir resolve from the project's identity notes and are
 // null until that project's session has been opened (foreign, never-viewed projects).
 export interface ProjectEntry { id: string; name: string | null; dir: string | null }
+
+// nodeDetail's model-node shape — exported so the page aliases it (page/api.ts's ModelDetailView)
+// instead of re-spelling the fields by hand at the cast site, the same PlanStepView/PlanNoteView
+// posture api.ts already states for the plan shapes.
+export interface ModelDetail {
+  ref: string
+  tasks: Array<{ taskId: string; title: string; status: string; calls: number; usage: Usage }>
+  totals: Usage
+}
 
 // The one live store every adapter (web server, future TUI) subscribes to. Transport-free:
 // callers get snapshots, per-event patches, catch-up patches, and node detail — never SQL,
@@ -246,7 +255,7 @@ export function createProjectSessions(opts: {
         // the agent_call events of exactly the steps that ran on it
         const ref = nodeId.slice(NODE_PREFIX.model.length)
 
-        const tasks: Array<{ taskId: string; title: string; status: string; calls: number; usage: Usage }> = []
+        const tasks: ModelDetail['tasks'] = []
         for (const t of s.acc.state.tasks.values()) {
           const tp = s.acc.state.plans.get(t.id)
           const plan = tp?.approvedVersion != null ? tp.versions.find(v => v.version === tp.approvedVersion) : undefined
@@ -262,7 +271,8 @@ export function createProjectSessions(opts: {
           tasks.push({ taskId: t.id, title: t.title, status: t.status, calls, usage })
         }
         if (tasks.length === 0) return null
-        return { ref, tasks, totals: tasks.reduce((acc, t) => addUsage(acc, t.usage), ZERO_USAGE) }
+        const detail: ModelDetail = { ref, tasks, totals: tasks.reduce((acc, t) => addUsage(acc, t.usage), ZERO_USAGE) }
+        return detail
       }
       if (nodeId.startsWith(NODE_PREFIX.note)) {
         const key = nodeId.slice(NODE_PREFIX.note.length) // `${scope}\u0000${id}`
@@ -362,8 +372,9 @@ export function createProjectSessions(opts: {
       // project-scoped memory row is admitted only when payload.author.taskId matches the filter,
       // never blanket-admitted by null taskId. Filter must precede slice to return the last
       // `limit` MATCHING rows, not the last `limit` events of which few may match.
-      if (opts.taskId === undefined) return s.events.slice(-limit).map(summarizeEvent)
-      return s.events.map(summarizeEvent).filter(r => shouldAdmitLogRow(r, opts.taskId!)).slice(-limit)
+      const { taskId } = opts
+      if (taskId === undefined) return s.events.slice(-limit).map(summarizeEvent)
+      return s.events.map(summarizeEvent).filter(r => shouldAdmitLogRow(r, taskId)).slice(-limit)
     },
 
     async close() {

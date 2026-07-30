@@ -3,8 +3,8 @@ import { spawn } from 'node:child_process'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { Command, InvalidArgumentError } from 'commander'
-import { claimHistory, EDGE_DIRECTION, errorMessage, EVENT_KIND, foldMemory, LINK_KINDS, MASTERPLAN_NOTE_ID, MEMORY_ACCESS, MemoryDeletedPayload, MemoryScope, MemoryWrittenPayload, noteKey, NOTE_TIER, NOTE_TIERS, NoteTier, parseLinkSpec, PlanDraft, RUN_OUTCOME, STRATEGY, TASK_STATUS, TERMINAL_TASK_STATUS, LinkKind, slugId, type Analyzer, type TaskStatus, type RunOutcome, type EventRecord, type MemoryLink, type NoteFields, type ExecutionPort, type MemoryHealth, type Plan, formatModelRate } from '@orc/contracts'
-import { openStorage, Kernel, atomicWriteFileSync, listProjectIds, claimSlot, fold, gatedChildren, freezePlan, liveSupervisors, staleSupervisors, subtreeOutcome, subtreeTaskIds, grantExtensionTrust, grantMcpTrust, initializeProject, isExtensionTrusted, isMcpTrusted, loadConfig, loadTrust, migrateDatabase, requireProject, taskUsage, type EventLog, type OrcConfig, type PluginHost, type ProjectConfig, type Storage } from '@orc/kernel'
+import { claimHistory, EDGE_DIRECTION, errorMessage, EVENT_KIND, foldMemory, LINK_KINDS, MASTERPLAN_NOTE_ID, MEMORY_ACCESS, MemoryDeletedPayload, MemoryScope, MemoryWrittenPayload, noteKey, NOTE_TIER, NOTE_TIERS, NoteTier, parseLinkSpec, PlanDraft, RUN_OUTCOME, STRATEGY, TASK_STATUS, TERMINAL_TASK_STATUS, LinkKind, slugId, type Analyzer, type EventRecord, type MemoryLink, type NoteFields, type ExecutionPort, type MemoryHealth, type Plan, formatModelRate } from '@orc/contracts'
+import { openStorage, Kernel, atomicWriteFileSync, listProjectIds, claimSlot, fold, gatedChildren, freezePlan, liveSupervisors, staleSupervisors, grantExtensionTrust, grantMcpTrust, initializeProject, isExtensionTrusted, isMcpTrusted, loadConfig, loadTrust, migrateDatabase, requireProject, taskUsage, type EventLog, type OrcConfig, type PluginHost, type ProjectConfig, type Storage } from '@orc/kernel'
 import { createVaultProjector, parsePlanFile } from '@orc/vault-projector'
 import { consolidateTask, frontier, needsReground, probeMemory, restampableNotes, staleNotes, DEFAULT_SWEEP_DAYS } from '@orc/memory'
 import { withMemory } from './memory-open'
@@ -16,6 +16,7 @@ import { isLanguageModel } from './model-guard'
 import { assertDrivable, assertRetryable, buildModelDiscovery, buildOrcActions, singleStepDraft } from './actions'
 import { renderDerivedPlan, renderPlanHuman } from './plan-render'
 import { CommandFailure } from './exit'
+import { watchSubtree, type TailResult } from './watch'
 
 
 function buildCopilotConfig(discovery: ReturnType<typeof buildModelDiscovery>) {
@@ -157,121 +158,6 @@ function resolveDraft(task: { title: string; spec: string }, opts: { file?: stri
     : singleStepDraft(task, opts.model, opts.skill ?? [], config?.maxIterations)
 }
 
-// A tail ends one of two ways: the run reaches a terminal outcome, or it PARKS on a human gate and
-// cannot move again until someone answers. Parking is not an outcome — the run is alive, durable and
-// resumable — so it is its own case rather than a fake outcome. Before this existed, every driver
-// (`run`, `retry`, `new --strategy grounded-plan`) waited forever on a result that could not arrive,
-// which is indistinguishable at the terminal from a hang.
-type TailResult =
-  | { parked: false; outcome: RunOutcome }
-  | { parked: true; taskId: string; question: string }
-
-// An open question means the run MIGHT be parked — not that it is. A step retry can be running
-// concurrently (the operation journal's stale-attempt fence produces exactly that: attempt 1 asks,
-// attempt 2 works on), and returning then tears the runtime down under live work. So the park is
-// declared only once the stream goes QUIET: any event for this task cancels the pending decision
-// and the tail keeps waiting. A run that is genuinely suspended emits nothing, so it settles fast.
-const PARK_QUIET_MS = 750
-
-// The statuses that mean somebody is still expected to move this task: a run is under way, or a
-// supervisor is about to start one. Every other status is a stopping point — terminal, blocked
-// awaiting a retry, or gated on a human — so a subtree with none of these has stopped.
-// Deliberately NOT DRIVABLE_TASK_STATUS: `blocked` is drivable by `orc retry`, but nothing drives
-// it unasked, and waiting for it to move would hang until the terminal is closed.
-const ACTIVE_TASK_STATUS: ReadonlySet<TaskStatus> =
-  new Set([TASK_STATUS.approved, TASK_STATUS.running])
-
-// Observe a run to its next stopping point (spec §5): stream-driven, no polling — LISTEN/NOTIFY
-// pushes each event as it commits. The CLI holds no handle to wait on any more, because the
-// supervisor owns the workflow, so "finished" is re-derived from the log instead: nothing anywhere
-// in the subtree is still expected to move. Subtree-wide, because a parent inside join_splits
-// emits nothing while its children work, and its own terminal status says nothing about theirs.
-//
-// `since` is the seq of the run_requested this watch belongs to, 0 when the caller asked for no
-// run. Without it `orc retry` settles instantly on the very status it is asking to leave: the
-// supervisor has not reacted yet, so the tree still looks stopped. Requiring one event later than
-// the ask closes that window — while a run that finished before the subscription opened still
-// settles at once, since its events are already later than the ask.
-export async function watchSubtree(kernel: Kernel, taskId: string, since = 0): Promise<TailResult> {
-  const print = (e: EventRecord) => console.log(`${String(e.seq).padStart(4)}  ${e.kind}${e.stepId ? `  ${e.stepId}` : ''}`)
-  let lastSeen = Math.max(0, ...(await kernel.eventsFor(taskId)).map(e => e.seq))
-  let quiet: ReturnType<typeof setTimeout> | undefined
-  // both assigned synchronously by the Promise executor below, before any subscriber can call them
-  let confirmPark: () => void = () => {}
-  let settle: (result: TailResult) => void = () => {}
-  const stopped = new Promise<TailResult>(resolve => {
-    settle = resolve
-    // openFeedbackInSubtree is the one derivation the reply side resolves against too, so "open"
-    // can never mean two things — and re-reading it when the timer fires means an answer that
-    // arrived meanwhile wins. Subtree-wide, because a step that joins its splits waits on a child
-    // whose question lands on the CHILD's stream: the parent emits nothing while it is blocked.
-    confirmPark = () => {
-      quiet = setTimeout(() => {
-        void kernel.openFeedbackInSubtree(taskId)
-          .then(open => { if (open) resolve({ parked: true, taskId: open.taskId, question: open.question }) })
-          .catch(() => {})
-      }, PARK_QUIET_MS)
-    }
-  })
-
-  // Which tasks this watch listens to, AND whether any of them still has somebody expected to move
-  // it — one fold answers both, so membership and stopped-ness can never disagree about a task that
-  // appeared and finished between two events. Seeded at attach and refreshed on every event that
-  // can change either: split_proposed (a new child, on the parent's own stream, in the same
-  // transaction) and task_status_changed. Events outside the subtree belong to another run.
-  let subtree = new Set<string>()
-  const refreshSubtree = async (): Promise<void> => {
-    const state = await kernel.state()
-    subtree = new Set(subtreeTaskIds(state, taskId))
-    if (lastSeen <= since) return
-    for (const id of subtree)
-      if (ACTIVE_TASK_STATUS.has(state.tasks.get(id)?.status ?? TASK_STATUS.draft)) return
-    settle({ parked: false, outcome: subtreeOutcome(state, taskId) })
-  }
-
-  // The OTHER thing that stops a run, and the only one that announces nothing: `task_split` honours
-  // the project's approvalPolicy, so under the default (manual) the child parks at
-  // 'awaiting_approval' and the parent's join_splits recv's forever — no event, no output, no
-  // outcome. Observed live (events-pilot.log 161-188: three gated splits, then join, then silence).
-  //
-  // Advisory, NOT a park: a gated child is a stopping point for the tree, so this watch settles
-  // rather than hanging on a status only a human can change — and names the command that unblocks
-  // it. Triggered by split_proposed, which lands on the PARENT's stream in the same transaction
-  // that parks the child, so the status is already final — never by a timer, so a slow model call
-  // can never be mistaken for a gate.
-  const advised = new Set<string>()
-  const adviseGated = async (): Promise<void> => {
-    for (const child of await kernel.gatedChildren(taskId)) {
-      if (advised.has(child.id)) continue
-      advised.add(child.id)
-      console.log(`child awaits plan approval: ${child.title}  (orc approve ${child.id})`)
-    }
-  }
-
-  await refreshSubtree()
-  const unsub = await kernel.subscribe({ fromSeq: lastSeen }, e => {
-    if (e.taskId === null || !subtree.has(e.taskId)) return
-    // only the tailed task's events are printed and tracked — lastSeen drives the final drain
-    if (e.taskId === taskId) { print(e); lastSeen = e.seq }
-    clearTimeout(quiet) // the tree is still moving: whatever we were about to conclude is stale
-    if (e.kind === EVENT_KIND.feedback_requested) confirmPark()
-    if (e.kind === EVENT_KIND.split_proposed) void refreshSubtree().then(adviseGated).catch(() => {})
-    else if (e.kind === EVENT_KIND.task_status_changed) void refreshSubtree().catch(() => {})
-  })
-  try {
-    // already at a gate when we attached — same quiet rule, so attaching to a busy run cannot
-    // mistake an older unanswered question for a stopped one
-    if (await kernel.openFeedbackInSubtree(taskId)) confirmPark()
-    await adviseGated() // attaching to a tree that is already gated says so at once
-    return await stopped
-  } finally {
-    clearTimeout(quiet)
-    await unsub()
-    for (const e of await kernel.eventsSince(taskId, lastSeen)) print(e) // drain final window
-  }
-}
-
-
 // Start a supervisor that survives this command. Detached on purpose: a supervisor left in the
 // CLI's process group would take the ctrl-c meant for the watch, which is the exact behaviour this
 // phase removes. node's spawn is what carries `detached` (setsid); Bun.spawn has no equivalent.
@@ -291,7 +177,10 @@ function spawnSupervisor(config: ProjectConfig): void {
 }
 
 export function buildProgram(
-  kernel: Kernel,
+  // null only for bin.ts's --help/-h path: commander prints help and exits before any action
+  // runs, so no handler below ever actually calls requireKernel() in that mode — but the type says
+  // so honestly instead of a `{} as Kernel` handed to every command as if it could serve one.
+  kernel: Kernel | null,
   portFactory?: () => Promise<ExecutionPort>,
   plugin?: { host: PluginHost; hub: McpHub; config: ProjectConfig; log: EventLog; storage?: Storage },
 ): Command {
@@ -304,6 +193,14 @@ export function buildProgram(
   const needPlugin = () => {
     if (!plugin) throw new Error('plugin commands are unavailable in this context')
     return plugin
+  }
+
+  // same shape as needPlugin: every command handler that touches the kernel goes through this,
+  // so a handler that somehow ran under --help fails with an actionable message instead of a bare
+  // null-reference TypeError.
+  const requireKernel = (): Kernel => {
+    if (!kernel) throw new Error('this command needs a project context (only --help works without one)')
+    return kernel
   }
 
   // Discovery-backed model validation rejects invented refs at creation time on every surface;
@@ -326,12 +223,12 @@ export function buildProgram(
       if (opts.strategy !== undefined && !(Object.values(STRATEGY) as string[]).includes(opts.strategy))
         throw new Error(`unknown --strategy '${opts.strategy}' — valid strategies: ${Object.values(STRATEGY).join(', ')}`)
       if (opts.strategy !== STRATEGY.groundedPlan) {
-        const t = await kernel.createTask({ title, spec: opts.spec, parentId: opts.parent, budgetUSD: opts.budget ?? null })
+        const t = await requireKernel().createTask({ title, spec: opts.spec, parentId: opts.parent, budgetUSD: opts.budget ?? null })
         console.log(t.id)
         return
       }
       if (!opts.model) throw new Error(`--model is required with --strategy ${STRATEGY.groundedPlan}`)
-      const t = await kernel.createGroundedTask({
+      const t = await requireKernel().createGroundedTask({
         title, spec: opts.spec, modelRef: opts.model, analyzerRef: opts.analyzer, parentId: opts.parent, budgetUSD: opts.budget ?? null,
         modelCatalog: await discovery?.listModelOptions().catch(() => []) ?? [],
         ...(plugin ? { maxIterations: plugin.config.maxIterations } : {}),
@@ -343,7 +240,7 @@ export function buildProgram(
     })
 
   const requireTask = async (taskId: string) => {
-    const task = await kernel.getTask(taskId)
+    const task = await requireKernel().getTask(taskId)
     if (!task) throw new Error(`no task '${taskId}'`)
     return task
   }
@@ -360,7 +257,7 @@ export function buildProgram(
     .option('--file <path>', 'plan draft JSON file')
     .option('--model <ref>', 'model for template steps', 'anthropic/claude-sonnet-5')
     .option('--skill <names...>', 'force-load skills for the template step (e.g. documentation)')
-    .action(planAction((id, draft) => kernel.proposePlan(id, draft), plan => `proposed (${plan.steps.length} steps)`))
+    .action(planAction((id, draft) => requireKernel().proposePlan(id, draft), plan => `proposed (${plan.steps.length} steps)`))
 
   program
     .command('edit <taskId>')
@@ -369,7 +266,7 @@ export function buildProgram(
     .option('--model <ref>', 'model for template steps', 'anthropic/claude-sonnet-5')
     .option('--skill <names...>', 'force-load skills for the template step (e.g. documentation)')
     .option('--from-vault', 'read the edited plan markdown from the vault')
-    .action(planAction((id, draft) => kernel.editPlan(id, draft), () => 'edited'))
+    .action(planAction((id, draft) => requireKernel().editPlan(id, draft), () => 'edited'))
 
   // per-MTok rate for the gate: the human weighs spend BEFORE approving. Best-effort —
   // no provider/discovery (read-only context, unknown ref) renders without a rate.
@@ -387,7 +284,7 @@ export function buildProgram(
     .option('--version <n>', 'plan version', parseNonNegativeInteger)
     .option('--json', 'raw plan JSON (scripts; the full field set)')
     .action(async (taskId: string, opts: { version?: number; json?: boolean }) => {
-      const plan = await kernel.getPlan(taskId, opts.version)
+      const plan = await requireKernel().getPlan(taskId, opts.version)
       if (!plan) throw new Error(`no plan for task '${taskId}'`)
       if (opts.json) { console.log(JSON.stringify(plan, null, 2)); return }
       console.log(renderPlanHuman(plan, rateFor))
@@ -406,14 +303,14 @@ export function buildProgram(
       // own approval stays a pure approval — running it is a separate decision (`orc run`).
       const root = await rootOf(taskId)
       if (root !== taskId) await ensureRuntime()
-      const plan = await kernel.approvePlan(taskId, opts.version)
+      const plan = await requireKernel().approvePlan(taskId, opts.version)
       console.log(`plan v${plan.version} approved`)
       if (root === taskId) return
       // Watch the ROOT, because that is the run whose join is waiting — and only while it is
       // actually running: approving is never itself a decision to start a run.
-      if ((await kernel.getTask(root))?.status !== TASK_STATUS.running) return
+      if ((await requireKernel().getTask(root))?.status !== TASK_STATUS.running) return
       console.log(`watching the run at ${root}`)
-      await report(await watchSubtree(kernel, root))
+      await report(await watchSubtree(requireKernel(), root))
     })
 
   program
@@ -421,7 +318,7 @@ export function buildProgram(
     .description('annotate a plan-note (grounded-plan) — the plan-authoring agent reads it on its next revise')
     .option('--ref <ids...>', 'related plan-note ids')
     .action(async (taskId: string, noteId: string, text: string, opts: { ref?: string[] }) => {
-      await kernel.annotatePlan(taskId, { targetNote: noteId, refs: opts.ref ?? [], text })
+      await requireKernel().annotatePlan(taskId, { targetNote: noteId, refs: opts.ref ?? [], text })
       console.log(`noted on '${noteId}'`)
     })
 
@@ -435,13 +332,13 @@ export function buildProgram(
       // table with nobody to act on it; ensuring a supervisor first is what makes this command's
       // promise true. No run is requested: the run already exists, parked on the question.
       await ensureRuntime()
-      const topic = await kernel.replyFeedback(taskId, text)
+      const topic = await requireKernel().replyFeedback(taskId, text)
       if (!topic) {
         console.log(`no open feedback question for task '${taskId}'`)
         return
       }
       console.log(`answered feedback:${topic}`)
-      await report(await watchSubtree(kernel, taskId))
+      await report(await watchSubtree(requireKernel(), taskId))
     })
 
   program
@@ -533,7 +430,7 @@ export function buildProgram(
     .command('tasks')
     .description('list tasks')
     .action(async () => {
-      const tasks = await kernel.listTasks()
+      const tasks = await requireKernel().listTasks()
       if (tasks.length === 0) console.log('_no tasks_')
       for (const t of tasks) console.log(`${t.id}  ${t.status.padEnd(17)} ${t.title}`)
     })
@@ -544,7 +441,7 @@ export function buildProgram(
     .option('--json', 'full redacted event records as JSON')
     .action(async (taskId: string, opts: { json?: boolean }) => {
       await requireTask(taskId)
-      const events = await kernel.eventsFor(taskId)
+      const events = await requireKernel().eventsFor(taskId)
       if (opts.json) {
         console.log(JSON.stringify(events, null, 2))
         return
@@ -559,7 +456,7 @@ export function buildProgram(
     .option('--at <seq>', "replay up to and including this GLOBAL event sequence — sequences span the whole project log, not one task; see 'orc log <taskId>' for the task's range", parseNonNegativeInteger)
     .action(async (taskId: string, opts: { at?: number }) => {
       await requireTask(taskId)
-      const all = await kernel.eventsFor(taskId)
+      const all = await requireKernel().eventsFor(taskId)
       const at = opts.at ?? Number.POSITIVE_INFINITY
       const events = all.filter(e => e.seq <= at)
       const [first] = all
@@ -579,7 +476,7 @@ export function buildProgram(
 
   // one shared implementation of every mutating command — the web adapter gets the same object.
   // (discovery is declared up top so the `plan` command's rate line can reach it too)
-  const actions = (via?: 'cli' | 'mcp') => buildOrcActions({ kernel, ensureRuntime, plugin, via, listModels: discovery?.listModels, listModelOptions: discovery?.listModelOptions })
+  const actions = (via?: 'cli' | 'mcp') => buildOrcActions({ kernel: requireKernel(), ensureRuntime, plugin, via, listModels: discovery?.listModels, listModelOptions: discovery?.listModelOptions })
 
   const needPort = async (): Promise<ExecutionPort> => {
     if (!portFactory) throw new Error('execution commands are unavailable in this context')
@@ -621,7 +518,7 @@ export function buildProgram(
   // human needs to see at the gate, so it is reported rather than allowed to crash it.
   const derivedPlanBlock = async (taskId: string): Promise<string> => {
     try {
-      const notes = await kernel.listPlanNotes(taskId)
+      const notes = await requireKernel().listPlanNotes(taskId)
       if (!notes.some(n => n.id === MASTERPLAN_NOTE_ID)) return ''
       // the freeze's own derivation, so the human sees EXACTLY what finalize_plan will freeze —
       // with autoCommit that includes the kernel-appended commit tail
@@ -651,7 +548,7 @@ export function buildProgram(
   // The run a whole tree belongs to: a split child's work only ever resolves a gate held by an
   // ancestor, so the root is the run to watch.
   const rootOf = async (taskId: string): Promise<string> => {
-    const state = await kernel.state()
+    const state = await requireKernel().state()
     let id = taskId
     for (let parent = state.tasks.get(id)?.parentId; parent; parent = state.tasks.get(id)?.parentId) id = parent
     return id
@@ -661,15 +558,15 @@ export function buildProgram(
   // refused BEFORE it is recorded: a run_requested naming a draft task would sit in the log for
   // good, and every supervisor that boots would pick it up and fail on it again. The shared
   // implementation lives in actions.ts so this CLI door and the web/MCP doors cannot drift.
-  const requireDrivable = (taskId: string): Promise<void> => assertDrivable(kernel, taskId)
+  const requireDrivable = (taskId: string): Promise<void> => assertDrivable(requireKernel(), taskId)
 
   // Ask for a run, then watch it. The command starts nothing: a supervisor turns the recorded ask
   // into a workflow, which is why the run now outlives the terminal that asked for it.
   const requestAndWatch = async (taskId: string, opts: { cwd?: string; retry?: boolean }): Promise<void> => {
     await ensureRuntime()
-    const since = await kernel.requestRun(taskId, opts)
+    const since = await requireKernel().requestRun(taskId, opts)
     console.log(`run requested for ${taskId} — watching (ctrl-c stops watching, not the run: orc cancel ${taskId} stops it)`)
-    await report(await watchSubtree(kernel, taskId, since))
+    await report(await watchSubtree(requireKernel(), taskId, since))
   }
 
   program
@@ -688,7 +585,7 @@ export function buildProgram(
     .action(async (taskId: string, opts: { cwd?: string }) => {
       // the same refusal port.retry made, kept client-side for the same reason as requireDrivable:
       // an ask nobody can serve must not reach the log — one implementation, shared with the doors
-      await assertRetryable(kernel, taskId)
+      await assertRetryable(requireKernel(), taskId)
       await requestAndWatch(taskId, { cwd: opts.cwd, retry: true })
     })
 
@@ -817,7 +714,7 @@ export function buildProgram(
     .command('status <taskId>')
     .description('per-step state and cost totals')
     .action(async (taskId: string) => {
-      const state = await kernel.state()
+      const state = await requireKernel().state()
       const task = state.tasks.get(taskId)
       if (!task) throw new Error(`no task '${taskId}'`)
       if (plugin) {
@@ -839,12 +736,12 @@ export function buildProgram(
         console.log(`  ${step.id.padEnd(12)} ${status.padEnd(10)} attempt ${s?.attempt ?? 0}${detail}`)
       }
       // D3: a grounded task shows what its analysis covered — and the gaps it did NOT (RG7 honesty).
-      const coverage = await kernel.latestCoverage(taskId)
+      const coverage = await requireKernel().latestCoverage(taskId)
       if (coverage)
         console.log(`  analysis: ${coverage.analyzed ? `${coverage.notesWritten} notes, confidence ${coverage.confidence}` : 'not analyzed'}${coverage.gaps.length ? `  gaps: ${coverage.gaps.join(', ')}` : ''}`)
       // D4 gate, human side: a grounded-plan step parked on ask_human shows its question here, so the
       // conversation isn't one-directional — the human sees the prompt, not just a blind reply target.
-      const feedback = await kernel.openFeedback(taskId)
+      const feedback = await requireKernel().openFeedback(taskId)
       if (feedback) {
         console.log(`  awaiting reply: ${feedback.question}  (orc reply ${taskId} <text>)`)
         const derived = await derivedPlanBlock(taskId)
@@ -893,7 +790,7 @@ export function buildProgram(
     .description('render the vault from the event log (all tasks if omitted)')
     .action(async (taskId?: string) => {
       const { config, log } = needPlugin()
-      if (taskId && !(await kernel.getTask(taskId))) throw new Error(`no task '${taskId}'`)
+      if (taskId && !(await requireKernel().getTask(taskId))) throw new Error(`no task '${taskId}'`)
       const projector = createVaultProjector({ log, config })
       if (taskId) await projector.renderTask(taskId)
       else await projector.renderAll()
@@ -1033,7 +930,7 @@ export function buildProgram(
       const events = await log.after(0, [EVENT_KIND.memory_written, EVENT_KIND.memory_deleted, EVENT_KIND.memory_accessed])
       // a plan note is an approved artifact — sweepable only once its task can no longer be retried
       const terminalTaskIds = new Set(
-        [...(await kernel.state()).tasks.values()]
+        [...(await requireKernel().state()).tasks.values()]
           .filter(t => TERMINAL_TASK_STATUS.has(t.status))
           .map(t => t.id),
       )

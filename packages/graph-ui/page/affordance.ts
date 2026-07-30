@@ -18,7 +18,6 @@ import type { OrcActions } from '@orc/ui-core' // type-only: never pulls the ser
 import type { Tone } from './ui/components'
 
 export const REPLY_AFFORDANCE = { box: 'box', command: 'command', closed: 'closed' } as const
-export type ReplyAffordanceKind = (typeof REPLY_AFFORDANCE)[keyof typeof REPLY_AFFORDANCE]
 
 export type ReplyAffordance =
   | { kind: typeof REPLY_AFFORDANCE.box }

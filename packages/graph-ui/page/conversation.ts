@@ -2,6 +2,7 @@
 // visible cards) interleaved with system cards narrating the event stream (zero copilot
 // tokens). History (text messages only) persists per project in localStorage; the copilot
 // re-grounds itself from live state each exchange, so history is presentational context.
+import { z } from 'zod'
 import { APPROVAL_ANSWER, EVENT_KIND, planScope } from '@orc/contracts'
 import { isUiMetaNote, noteNodeId, stepNodeId } from '@orc/ui-core/graph'
 import { api, canAct, canAnswer, session, type CopilotPart, type FeedRow, type ToolFailure } from './api'
@@ -11,7 +12,12 @@ import { Badge, Btn, CmdChip, Empty, Pre, toast, type Tone } from './ui/componen
 import { planVisual, planVisualKey } from './plan-visual'
 import { REPLY_AFFORDANCE, isApprovalGate, replyAffordance, replyReceipt, type ReplyResult } from './affordance'
 
-interface ChatMessage { role: 'user' | 'assistant'; content: string }
+const ChatMessage = z.object({ role: z.enum(['user', 'assistant']), content: z.string() })
+type ChatMessage = z.infer<typeof ChatMessage>
+// localStorage is user-writable and cross-version (an older/newer tab shape can land here) —
+// `.catch([])` on a shape mismatch so garbage falls back to empty history instead of flowing
+// into the copilot's context or crashing the render
+const ChatHistory = z.array(ChatMessage).catch([])
 
 const HISTORY_LIMIT = 20
 const CARD_KINDS: Record<string, { label: string; tone: Tone }> = {
@@ -427,7 +433,9 @@ export class Conversation {
   }
 
   private history(): ChatMessage[] {
-    try { return JSON.parse(localStorage.getItem(`chat:${this.projectId}`) ?? '[]') as ChatMessage[] } catch { return [] }
+    // the outer try/catch is for malformed JSON (JSON.parse throws); ChatHistory's own .catch([])
+    // is for validly-parsed JSON of the wrong shape — both are "someone else wrote this key"
+    try { return ChatHistory.parse(JSON.parse(localStorage.getItem(`chat:${this.projectId}`) ?? '[]')) } catch { return [] }
   }
 
   private saveHistory(messages: ChatMessage[]): void {

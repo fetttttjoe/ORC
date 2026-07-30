@@ -3,7 +3,7 @@ export {
   type Graph, type GraphLink, type GraphNode, type GraphPatch,
 } from './graph'
 export type { TodoWave } from './diagram'
-export { createProjectSessions, type ProjectEntry, type ProjectSessions, type SessionUpdate } from './sessions'
+export { createProjectSessions, type ModelDetail, type ProjectEntry, type ProjectSessions, type SessionUpdate } from './sessions'
 export type { TranscriptItem } from './transcript'
 export type { OrcActions } from './actions'
 export { asResolvedTools, buildCopilotTools, copilotSystemPrompt, type CopilotMode } from './copilot'

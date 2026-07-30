@@ -8,7 +8,6 @@
   "dependencies": {
     "@orc/ui-core": "workspace:*",
     "@orc/contracts": "workspace:*",
-    "@orc/kernel": "workspace:*",
     "graphology": "^0.26.0",
     "graphology-layout-forceatlas2": "^0.10.1",
     "sigma": "^3.0.3",
@@ -19,6 +18,7 @@
     "ai": "^7.0.30"
   },
   "devDependencies": {
+    "@orc/kernel": "workspace:*",
     "@playwright/test": "^1.61.1"
   }
 }

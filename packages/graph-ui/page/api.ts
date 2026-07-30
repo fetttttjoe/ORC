@@ -3,7 +3,7 @@ import { type MemoryHealth, type Plan, type PlanNote, type PlanStep } from '@orc
 // here: URL building, token handling, JSON parsing, and the error policy live in this file and
 // nowhere else. Consumers receive typed data or typed nulls; failures route through the
 // configured onError exactly once.
-import type { Graph, GraphNode, GraphLink, GraphPatch, LogRow, TodoWave, TranscriptItem } from '@orc/ui-core'
+import type { Graph, GraphNode, GraphLink, GraphPatch, LogRow, ModelDetail, TodoWave, TranscriptItem } from '@orc/ui-core'
 // type-only, so the browser bundle never pulls the server in: the shape is DECLARED where it is
 // derived (src/tool-failure.ts) and read here, rather than spelled twice and drifting
 import type { ToolFailure } from '../src/tool-failure'
@@ -26,6 +26,7 @@ export interface GraphSnapshot extends Graph { seq: number }
 // precedent above).
 export type PlanStepView = PlanStep
 export type PlanNoteView = PlanNote
+export type ModelDetailView = ModelDetail
 export interface PlansView {
   versions: Plan[]
   approvedVersion: number | null
