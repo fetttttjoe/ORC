@@ -97,3 +97,44 @@ plugins/mcp-client/src/index.ts]
   routine again.
 - **Retrieval negatives** — the weakest bench axis: the system still answers questions the corpus
   cannot answer. Bench-driven; measure before/after on both probe sets.
+
+## Track 5 — roles and skills as operator-editable documents
+
+Skills are force-loaded per step by ref and hash-audited via `skill_loaded` events; the per-role
+contracts (auditor/heal/commit) are kernel constants inlined at the freeze, invisible to the
+operator. [sourced: packages/kernel/src/plugins/skills.ts,
+packages/kernel/src/execution/strategies/grounded-plan.ts] Direction borrowed from ECC's
+agents-and-skills-as-markdown surface, mapped onto the existing loader rather than ported.
+[sourced: github.com/affaan-m/ECC]
+
+1. **Role contracts become shipped skills** — *next (designed).* `role-auditor` (absorbs the
+   auditor + heal contracts verbatim) and `role-committer` (the commit contract) join
+   `SHIPPED_SKILLS`; the freeze appends the role skillRef, deduped — position-gated exactly as
+   the constants were (verify step / commit step), still un-authorable by the planner — and the
+   constants are deleted. Accepted trade: the contract prose leaves the plan-hash-approved
+   artifact and is audited by `skill_loaded` content hashes instead; a vault missing a role
+   skill refuses `finalize_plan` with a message naming `orc init`.
+2. **Plan-authoring gains the plan-done bar** — *next (designed).* Three STRUCTURE RULES: a
+   measure-then-decide subplan must order before what it gates, never beside it; a verify never
+   *uses* a step-tool its own task introduces (test it as code — the plan-level mitigation of
+   the Track 4 verify/step-tool item); every subplan states a verifiable success criterion and
+   names its check. [derived: two live-run findings — a measure subplan ran wave-parallel to the
+   build it should have gated; a verify called a just-built step-tool the supervisor never
+   loaded — plus the done-bar of ECC's planner agent]
+3. **Agent-elective skill consumption** — *open.* `skill_search`/`skill_load` step-tools so an
+   agent can pull a skill mid-run (bounded pulls, the KNOWLEDGE_PROTOCOL stance); read a skill's
+   `references/` subdirectory (today only the SKILL.md body injects); tolerate third-party
+   frontmatter (unknown keys are hard validation errors today, so external skill packs need
+   trimming before they drop into `vault/skills/`). When: a plan step cannot know at authoring
+   time which skill it needs, or the skill set outgrows force-loading.
+4. **Interactive plan canvas** — *open.* Today the human reviews the rendered plan and revises it
+   only by annotating and waking the plan agent; there is no direct manipulation. A browser plan
+   canvas (graph-ui or a dedicated view) would let the human edit subplans in place — reorder
+   `dependsOn`, adjust `zone` globs, swap `modelRef`, rewrite requirements — with each edit
+   written as an ordinary plan-note through the one mutation surface, so the approval gate, the
+   changed-since-approval refusal, and the deterministic freeze all apply to human edits exactly
+   as they do to agent edits. The planner's prose behavior is already operator-configurable via
+   the plan-authoring skill (5.2); this item is the missing interaction layer. [derived: ECC's
+   Plan Canvas — browser plan review with annotation and approval gates — is its strongest UX
+   idea; its plan substrate underneath is plain markdown, weaker than the frozen-note pipeline
+   here] When: annotate-and-wake round-trips visibly cost more than typing the edit would.
