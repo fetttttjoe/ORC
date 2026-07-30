@@ -66,6 +66,18 @@ export const STEP_ROLE = {
 // can neither author nor remove a role contract.
 export const ROLE_SKILL = { auditor: 'role-auditor', committer: 'role-committer' } as const
 
+// Which `author.source` values satisfy the grounded plan-approval gate (Kernel.approvedPlanHash).
+// OPERATOR-owned, and deliberately a file edit in .orc/config.json rather than anything a prompt
+// can reach: with 'mcp' accepted, the agent driving the MCP surface can approve the very plans it
+// authored — the same self-approval the toolset avoids structurally by shipping no approve tool.
+// The default keeps 'cli' alone, which is what the gate has always accepted.
+// There is deliberately NO 'web' member: a web-UI reply rides the actions layer's via-default and
+// is recorded as 'cli', so a 'web' entry would name a door the log never stamps. If that
+// attribution ever changes, this enum grows then — never before.
+export const GROUNDED_APPROVAL_DOOR = { cli: 'cli', mcp: 'mcp' } as const
+export type GroundedApprovalDoorValue = (typeof GROUNDED_APPROVAL_DOOR)[keyof typeof GROUNDED_APPROVAL_DOOR]
+export const GroundedApprovalDoor = z.enum([GROUNDED_APPROVAL_DOOR.cli, GROUNDED_APPROVAL_DOOR.mcp])
+
 // The per-task plan-note scope. The authoring agent, finalize_plan, and every UI view derive
 // it from the taskId — one format, one place (was duplicated as ui-core's planScopeName).
 // Sanitized because a split child's id (`<uuid>.<stepId>.<toolCallId>`) carries dots and mixed case,

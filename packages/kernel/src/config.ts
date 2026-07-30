@@ -4,7 +4,7 @@ import path from 'node:path'
 import { parseEnv } from 'node:util'
 import { atomicWriteFileSync } from './atomic-file'
 import { z } from 'zod'
-import { errorMessage, ApprovalPolicy, MCP_SERVER_ID_RE, McpServerConfig, ModelCost } from '@orc/contracts'
+import { errorMessage, ApprovalPolicy, GROUNDED_APPROVAL_DOOR, GroundedApprovalDoor, MCP_SERVER_ID_RE, McpServerConfig, ModelCost } from '@orc/contracts'
 
 // bump per release — pins DBOS__APPVERSION so recovery survives rebuilds (spec §4)
 const APP_VERSION = 'orc-0.1.0'
@@ -57,6 +57,12 @@ const settingsSchema = (dir: string) =>
     // 'false' into `true` (any non-empty string is truthy), which would make the switch inoperable.
     ambientCapture: z.union([z.boolean(), z.stringbool()]).default(true),
     approvalPolicy: ApprovalPolicy.prefault({}), // {} isn't the full output shape — prefault reparses it, applying ApprovalPolicy's own field defaults
+    // which doors' approvals satisfy the grounded plan gate (Kernel.approvedPlanHash). Default
+    // ['cli'] is today's exact behaviour and covers the web UI too (its replies record 'cli').
+    // Nonempty because an empty list would make the gate unsatisfiable through every door at once.
+    // Adding 'mcp' lets the agent driving that door approve plans it authored — an operator's
+    // decision, taken here in the config FILE, never through anything a model can say.
+    groundedApprovalDoors: z.array(GroundedApprovalDoor).nonempty().default([GROUNDED_APPROVAL_DOOR.cli]),
     workspaceRoot: z.string().default(path.join(dir, '.orc', 'workspaces')),
     // operator-allowlisted commands steps may run via the `exec` tool (e.g. "bun test",
     // "bun run typecheck"). Empty = the tool is not offered at all. Without this, acceptance

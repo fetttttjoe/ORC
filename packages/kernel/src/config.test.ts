@@ -2,6 +2,7 @@ import { describe, expect, it } from 'bun:test'
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
+import { GROUNDED_APPROVAL_DOOR } from '@orc/contracts'
 import { deriveSystemUrl, initializeProject, loadConfig, projectDatabaseName, requireProject, type OrcConfig } from './config'
 
 describe('loadConfig', () => {
@@ -180,6 +181,23 @@ describe('loadConfig', () => {
     const c = loadConfig(mkdtempSync(path.join(tmpdir(), 'orc-')))
     expect(c.maxDepth).toBe(3)
     expect(c.approvalPolicy).toEqual({ default: 'manual', rules: [] })
+  })
+  // The default IS the invariant: only the cli door (which the web UI's reply also records as)
+  // satisfies the plan gate unless an operator edits this file. A project that never touches
+  // config must behave exactly as it did before the knob existed.
+  it('groundedApprovalDoors defaults to [cli] and rejects a door the log never stamps', () => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'orc-'))
+    expect(loadConfig(dir).groundedApprovalDoors).toEqual([GROUNDED_APPROVAL_DOOR.cli])
+
+    const widened = mkdtempSync(path.join(tmpdir(), 'orc-'))
+    mkdirSync(path.join(widened, '.orc'), { recursive: true })
+    writeFileSync(path.join(widened, '.orc', 'config.json'), JSON.stringify({ groundedApprovalDoors: ['cli', 'mcp'] }))
+    expect(loadConfig(widened).groundedApprovalDoors).toEqual([GROUNDED_APPROVAL_DOOR.cli, GROUNDED_APPROVAL_DOOR.mcp])
+
+    const bogus = mkdtempSync(path.join(tmpdir(), 'orc-'))
+    mkdirSync(path.join(bogus, '.orc'), { recursive: true })
+    writeFileSync(path.join(bogus, '.orc', 'config.json'), JSON.stringify({ groundedApprovalDoors: ['web'] }))
+    expect(() => loadConfig(bogus)).toThrow()
   })
   it('ambientCapture defaults true; ORC_AMBIENT_CAPTURE=false disables it (the kill switch)', () => {
     expect(loadConfig(mkdtempSync(path.join(tmpdir(), 'orc-'))).ambientCapture).toBe(true)

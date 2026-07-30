@@ -174,6 +174,40 @@ describe('ProjectSessions', () => {
     expect(bLines.some(l => l.includes('ownerless-note'))).toBe(false)
   })
 
+  it('log(sinceSeq/kinds) filters BEFORE the limit slice, keeping the newest matching rows', async () => {
+    const { storage, taskId, sessions } = await setup()
+    const step = (id: string) => storage.events.append({
+      taskId, stepId: id, runToken: 'r1', kind: EVENT_KIND.step_started,
+      payload: { stepId: id, runToken: 'r1', attempt: 1 },
+    })
+    const ask = (topic: string) => storage.events.append({
+      taskId, stepId: 's1', runToken: 'r1', kind: EVENT_KIND.feedback_requested,
+      payload: { question: `q-${topic}`, topic },
+    })
+    const s1 = await step('s1')
+    const q1 = await ask('one')
+    const s2 = await step('s2')
+    const q2 = await ask('two')
+
+    // sinceSeq is EXCLUSIVE: the row a poller already saw must not come back
+    const since = await sessions.log(TEST_PROJECT_ID, { taskId, sinceSeq: s1.seq })
+    expect(since.map(r => r.seq)).toEqual([q1.seq, s2.seq, q2.seq])
+    expect(since.every(r => r.seq > s1.seq)).toBe(true)
+
+    const asked = await sessions.log(TEST_PROJECT_ID, { taskId, kinds: [EVENT_KIND.feedback_requested] })
+    expect(asked.map(r => r.seq)).toEqual([q1.seq, q2.seq])
+    expect(asked.every(r => r.kind === EVENT_KIND.feedback_requested)).toBe(true)
+
+    // composed with limit: the newest MATCHING row, not the newest event (which is q2's neighbour)
+    expect((await sessions.log(TEST_PROJECT_ID, { taskId, kinds: [EVENT_KIND.step_started], limit: 1 })).map(r => r.seq))
+      .toEqual([s2.seq])
+    expect((await sessions.log(TEST_PROJECT_ID, { taskId, sinceSeq: q1.seq, limit: 1 })).map(r => r.seq)).toEqual([q2.seq])
+    // whole-project (untargeted) reads take the same filters
+    expect((await sessions.log(TEST_PROJECT_ID, { sinceSeq: q2.seq })).map(r => r.seq)).toEqual([])
+    expect((await sessions.log(TEST_PROJECT_ID, { kinds: [EVENT_KIND.feedback_requested] })).map(r => r.seq))
+      .toEqual([q1.seq, q2.seq])
+  })
+
   it('planNotes marks an approved-but-not-yet-running child subplan as armed, not pending', async () => {
     const { storage, taskId, sessions } = await setup()
     const childId = `${taskId}.plan.tc1`

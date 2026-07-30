@@ -1,8 +1,11 @@
 import { describe, expect, it } from 'bun:test'
 import { generateText, stepCountIs } from 'ai'
 import { MockLanguageModelV4 } from 'ai/test'
+import type { ToolSet } from 'ai'
+import { planNoteFixture } from '@orc/contracts/fixtures'
 import type { OrcActions } from './actions'
 import type { ProjectSessions } from './sessions'
+import type { TranscriptItem } from './transcript'
 import { asResolvedTools, buildCopilotTools, copilotSystemPrompt } from './copilot'
 
 // Honest stubs for the ui-core ports this suite drives: every member throws unless overridden,
@@ -136,5 +139,116 @@ describe('copilot tools', () => {
     })
     expect(calls).toEqual([{ title: 'demo request' }])
     expect(result.text).toContain('t-new')
+  })
+})
+
+// Door #2 shape: call through asResolvedTools so the assertions run against the SAME
+// safeParse-then-execute path an MCP client hits with raw JSON.
+const callTool = async (tools: ToolSet, name: string, input: unknown) =>
+  asResolvedTools(tools).find(t => t.name === name)!.execute(input, undefined)
+
+const toolItem = (over: Partial<Extract<TranscriptItem, { kind: 'tool' }>> = {}): TranscriptItem => ({
+  kind: 'tool', iteration: 1, stepId: 's1', toolName: 'fs_read',
+  input: { path: 'p'.repeat(600) }, output: { content: 'c'.repeat(900) }, isError: false, ...over,
+})
+const QUESTION: TranscriptItem = { kind: 'question', stepId: 's1', question: 'which cwd?'.repeat(80), answer: null }
+const SIGNAL: TranscriptItem = { kind: 'signal', stepId: 's1', outcome: 'success', summary: 'done '.repeat(120) }
+
+describe('task_transcript (bounded for the MCP door)', () => {
+  it('snips tool input/output to strings and leaves questions/signals verbatim', async () => {
+    const items = [toolItem(), QUESTION, SIGNAL]
+    const tools = buildCopilotTools({
+      sessions: sessionsStub({ transcript: async () => items }), actions: null, projectId: 'p1',
+    })
+    const r = await callTool(tools, 'task_transcript', { taskId: 't1' })
+    expect(r.isError).toBe(false)
+    const out = r.output as TranscriptItem[]
+    const mappedTool = out[0] as { input: unknown; output: unknown }
+    expect(typeof mappedTool.input).toBe('string')
+    expect(typeof mappedTool.output).toBe('string')
+    expect((mappedTool.input as string).length).toBeLessThanOrEqual(401)
+    expect((mappedTool.output as string).length).toBeLessThanOrEqual(401)
+    // a driver must read a question and a signal EXACTLY — no snip, no reshape
+    expect(out[1]).toEqual(QUESTION)
+    expect(out[2]).toEqual(SIGNAL)
+  })
+
+  it('limit returns the LAST n items', async () => {
+    const items = [1, 2, 3, 4, 5].map(i => toolItem({ toolName: `t${i}`, input: {}, output: null }))
+    const tools = buildCopilotTools({
+      sessions: sessionsStub({ transcript: async () => items }), actions: null, projectId: 'p1',
+    })
+    const r = await callTool(tools, 'task_transcript', { taskId: 't1', limit: 2 })
+    expect((r.output as Array<{ toolName: string }>).map(i => i.toolName)).toEqual(['t4', 't5'])
+  })
+})
+
+describe('plan_notes (mechanical fields)', () => {
+  it('carries dependsOn/zone/skillRefs/toolRefs/modelRef and a snipped body', async () => {
+    const note = planNoteFixture({
+      id: 'sub-a', title: 'Sub A', body: 'b'.repeat(900),
+      dependsOn: ['generate-doc'], zone: ['docs/**'], skillRefs: ['role-auditor'], toolRefs: ['web/search'],
+      modelRef: 'anthropic/claude-haiku-4-5',
+    })
+    const tools = buildCopilotTools({
+      sessions: sessionsStub({ planNotes: async () => ({ notes: [note], mermaid: null }) }),
+      actions: null, projectId: 'p1',
+    })
+    const r = await callTool(tools, 'plan_notes', { taskId: 't1' })
+    const [out] = r.output as Array<Record<string, unknown>>
+    expect(out).toMatchObject({
+      id: 'sub-a', dependsOn: ['generate-doc'], zone: ['docs/**'],
+      skillRefs: ['role-auditor'], toolRefs: ['web/search'], modelRef: 'anthropic/claude-haiku-4-5',
+    })
+    expect(typeof out!.body).toBe('string')
+    expect((out!.body as string).length).toBeLessThanOrEqual(401)
+  })
+
+  it('omits modelRef entirely when the subplan inherits the parent model', async () => {
+    const tools = buildCopilotTools({
+      sessions: sessionsStub({ planNotes: async () => ({ notes: [planNoteFixture({ modelRef: '' })], mermaid: null }) }),
+      actions: null, projectId: 'p1',
+    })
+    const [out] = (await callTool(tools, 'plan_notes', { taskId: 't1' })).output as Array<Record<string, unknown>>
+    expect(out).not.toHaveProperty('modelRef')
+  })
+})
+
+describe('recent_activity (pollable)', () => {
+  const row = (seq: number, kind: string) => ({
+    seq, ts: '2026-07-30T00:00:00.000Z', kind, taskId: 't1', stepId: null,
+    line: `${kind} ${seq}`, authorTaskId: null, noteRef: null,
+  })
+
+  it('returns { rows, maxSeq } and passes sinceSeq/kinds through to the log read', async () => {
+    const seen: unknown[] = []
+    const tools = buildCopilotTools({
+      sessions: sessionsStub({
+        log: async (_p, opts) => { seen.push(opts); return [row(7, 'step_started'), row(9, 'step_completed')] },
+      }),
+      actions: null, projectId: 'p1',
+    })
+    const r = await callTool(tools, 'recent_activity', { sinceSeq: 5, kinds: ['step_started', 'step_completed'], limit: 3 })
+    expect(r.output).toEqual({ rows: [row(7, 'step_started'), row(9, 'step_completed')], maxSeq: 9 })
+    expect(seen).toEqual([{ taskId: undefined, limit: 3, sinceSeq: 5, kinds: ['step_started', 'step_completed'] }])
+  })
+
+  it('maxSeq is null when nothing is new; sinceSeq/kinds are absent (not undefined) when unset', async () => {
+    const seen: unknown[] = []
+    const tools = buildCopilotTools({
+      sessions: sessionsStub({ log: async (_p, opts) => { seen.push(opts); return [] } }),
+      actions: null, projectId: 'p1',
+    })
+    const r = await callTool(tools, 'recent_activity', {})
+    expect(r.output).toEqual({ rows: [], maxSeq: null })
+    expect(Object.keys(seen[0] as object).sort()).toEqual(['limit', 'taskId'])
+  })
+
+  it('rejects a kind that is not in the EventKind vocabulary', async () => {
+    const tools = buildCopilotTools({
+      sessions: sessionsStub({ log: async () => [] }), actions: null, projectId: 'p1',
+    })
+    const r = await callTool(tools, 'recent_activity', { kinds: ['not_a_kind'] })
+    expect(r.isError).toBe(true)
   })
 })

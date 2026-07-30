@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { MASTERPLAN_NOTE_ID,
-  AnalysisCompletedPayload, ChildPlanDraft, EVENT_KIND, FeedbackProvidedPayload, ISOLATION_TIER, MemoryDeletedPayload, MemoryWrittenPayload, NOTE_TIER, PAYLOAD_SCHEMAS, PlanAnnotatedPayload, PlanDraft, RunRequestedPayload, STEP_ROLE, STRATEGY, TASK_STATUS, TERMINAL_TASK_STATUS, evaluateApproval, formatModelOption, isApprovalAnswer, validatePlan, type ChildPlanDraftInput, type ModelOption,
+  AnalysisCompletedPayload, ChildPlanDraft, EVENT_KIND, FeedbackProvidedPayload, GROUNDED_APPROVAL_DOOR, ISOLATION_TIER, MemoryDeletedPayload, MemoryWrittenPayload, NOTE_TIER, PAYLOAD_SCHEMAS, PlanAnnotatedPayload, PlanDraft, RunRequestedPayload, STEP_ROLE, STRATEGY, TASK_STATUS, TERMINAL_TASK_STATUS, evaluateApproval, formatModelOption, isApprovalAnswer, validatePlan, type ChildPlanDraftInput, type ModelOption,
   type Analyzer, type ApprovalPolicy, type EventKind, type EventRecord,
   type PlanNote, type Plan, type PlanStep, type TaskNode, type TaskStatus,
   type MemoryAuthor,
@@ -42,6 +42,13 @@ export class Kernel {
     // construction. Optional so most tests / read-only CLI contexts construct without it —
     // replyFeedback still appends feedback_provided and returns the topic when it's absent.
     private readonly send?: (workflowId: string, message: string, topic: string, idempotencyKey: string) => Promise<void>,
+    // OPERATOR-owned: the author.source values that satisfy the grounded plan-approval gate, from
+    // config.groundedApprovalDoors (contracts' GROUNDED_APPROVAL_DOOR). Default = today's exact
+    // behaviour, 'cli' alone, which also covers the web UI (its replies record 'cli'). Public and
+    // readonly because the refusal message has to name the SAME list the gate tests — a message
+    // built from its own copy is a message that can advise a door the gate rejects. Widening this
+    // lets the driving agent approve plans it authored, which is why it is a config file edit.
+    readonly approvalDoors: readonly string[] = [GROUNDED_APPROVAL_DOOR.cli],
   ) {}
 
   // The grounded-plan bootstrap (M5b): an auto-approved [analyze, plan] template. The analyze
@@ -333,7 +340,7 @@ export class Kernel {
     for (const event of [...(await this.log.byTask(taskId))].reverse()) {
       if (event.kind !== EVENT_KIND.feedback_provided || event.runToken !== runToken) continue
       const parsed = FeedbackProvidedPayload.safeParse(event.payload)
-      if (parsed.success && parsed.data.author.source === 'cli'
+      if (parsed.success && this.approvalDoors.includes(parsed.data.author.source)
         && isApprovalAnswer(parsed.data.text) && parsed.data.planHash)
         return { hash: parsed.data.planHash, seq: event.seq }
     }
@@ -341,8 +348,10 @@ export class Kernel {
   }
 
   // The approval approvedPlanHash THREW AWAY, and which door it came through. Same scan, same
-  // parse, same isApprovalAnswer + planHash requirements — inverted on exactly one term:
-  // author.source !== 'cli'. Deliberately a SIBLING read rather than a widened return on
+  // parse, same isApprovalAnswer + planHash requirements — inverted on exactly one term: the
+  // author.source is NOT in this.approvalDoors, the very list the gate accepts, so a door an
+  // operator opened can never be both accepted and reported as the reason for a refusal.
+  // Deliberately a SIBLING read rather than a widened return on
   // approvedPlanHash: that function IS the gate, and a refusal message must never be a reason to
   // touch what satisfies it. Nothing here decides anything — finalize_plan calls it only after
   // approvedPlanHash already said no, to tell "nobody approved" from "an agent approved through
@@ -352,7 +361,7 @@ export class Kernel {
     for (const event of [...(await this.log.byTask(taskId))].reverse()) {
       if (event.kind !== EVENT_KIND.feedback_provided || event.runToken !== runToken) continue
       const parsed = FeedbackProvidedPayload.safeParse(event.payload)
-      if (parsed.success && parsed.data.author.source !== 'cli'
+      if (parsed.success && !this.approvalDoors.includes(parsed.data.author.source)
         && isApprovalAnswer(parsed.data.text) && parsed.data.planHash)
         return { source: parsed.data.author.source }
     }

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test'
-import type { MemoryLink, PlanNote } from '@orc/contracts'
+import { GROUNDED_APPROVAL_DOOR, type MemoryLink, type PlanNote } from '@orc/contracts'
 import { planNoteFixture } from '@orc/contracts/fixtures'
 import { finalizePlanTool } from './finalize-plan-tool'
 import { instantiateFrozenPlan, planGraphHash } from './strategies/grounded-plan'
@@ -17,8 +17,10 @@ const link = (id: string, kind: MemoryLink['kind']): MemoryLink => ({ id, kind }
 function fakeKernel(
   notes: PlanNote[], calls: unknown[] = [], approvedHash: string | null = planGraphHash(notes),
   nonHuman: { source: string } | null = null,
-): Pick<import('../kernel').Kernel, 'proposeSplit' | 'listPlanNotes' | 'approvedPlanHash' | 'planNotesChangedSince' | 'nonHumanPlanApproval'> {
+  doors: readonly string[] = [GROUNDED_APPROVAL_DOOR.cli],
+): Pick<import('../kernel').Kernel, 'proposeSplit' | 'listPlanNotes' | 'approvedPlanHash' | 'planNotesChangedSince' | 'nonHumanPlanApproval' | 'approvalDoors'> {
   return {
+    approvalDoors: doors,
     listPlanNotes: async () => notes,
     approvedPlanHash: async () => (approvedHash === null ? null : { hash: approvedHash, seq: 1 }),
     planNotesChangedSince: async () => [],
@@ -70,11 +72,12 @@ describe('finalize_plan tool', () => {
     const calls: unknown[] = []
     const r = await finalizePlanTool({ kernel: fakeKernel(notes, calls, null), config, p }).execute({}, 'call_1')
     expect(r.isError).toBe(true)
-    const msg = JSON.stringify(r.output)
-    expect(msg).toContain('approval')
-    // the literal invocation, placeholder and all — taskId must never reach a model prompt
-    expect(msg).toContain('orc reply <taskId> approve')
-    expect(msg).toContain('web UI')
+    // exact text: the message names the ACCEPTED door set (default 'cli') and the human doors that
+    // set implies. `orc reply <taskId> approve` is verbatim, placeholder and all — the real taskId
+    // must never reach a model prompt.
+    expect((r.output as { error: string }).error).toBe(
+      "finalize_plan requires human approval for this plan run (accepted approval doors: 'cli'), and none is recorded — ask the human to approve via `orc reply <taskId> approve` in a terminal, or in the web UI, then call finalize_plan again",
+    )
     expect(calls).toHaveLength(0)
   })
 
@@ -89,11 +92,9 @@ describe('finalize_plan tool', () => {
     const calls: unknown[] = []
     const r = await finalizePlanTool({ kernel: fakeKernel(notes, calls, null, { source: 'mcp' }), config, p }).execute({}, 'call_1')
     expect(r.isError).toBe(true)
-    const msg = JSON.stringify(r.output)
-    expect(msg).toContain('approval')
-    expect(msg).toContain('mcp')
-    expect(msg).toContain('orc reply <taskId> approve')
-    expect(msg).toContain('web UI')
+    expect((r.output as { error: string }).error).toBe(
+      "an approval for this plan run WAS recorded, but it arrived through the 'mcp' door, which is not among this project's accepted approval doors ('cli') — do not retry: ask the human to approve via `orc reply <taskId> approve` in a terminal, or in the web UI",
+    )
     expect(calls).toHaveLength(0)
 
     // the source is READ FROM THE EVENT, not a hardcoded 'mcp' in the message builder
@@ -102,6 +103,25 @@ describe('finalize_plan tool', () => {
     expect(JSON.stringify(agent.output)).toContain('agent')
     expect(JSON.stringify(agent.output)).not.toContain('mcp')
     expect(calls).toHaveLength(0)
+  })
+
+  // The refusal quotes the kernel's CONFIGURED door set, not a literal: an operator who opened the
+  // mcp door must not be told by the refusal to go type in a terminal for a gate that no longer
+  // requires it. Same list the gate tests, so advice and gate cannot disagree.
+  it('the refusal names the operator-configured door set, not a hardcoded one', async () => {
+    const notes = [
+      note({ id: 'masterplan', title: 'M', links: [link('a', 'decomposes_into')] }),
+      note({ id: 'a', title: 'A' }),
+    ]
+    const doors = [GROUNDED_APPROVAL_DOOR.cli, GROUNDED_APPROVAL_DOOR.mcp]
+    const none = await finalizePlanTool({ kernel: fakeKernel(notes, [], null, null, doors), config, p }).execute({}, 'call_1')
+    expect((none.output as { error: string }).error).toBe(
+      "finalize_plan requires human approval for this plan run (accepted approval doors: 'cli', 'mcp'), and none is recorded — ask the human to approve via `orc reply <taskId> approve` in a terminal, or in the web UI, or the 'mcp' door, then call finalize_plan again",
+    )
+    const other = await finalizePlanTool({ kernel: fakeKernel(notes, [], null, { source: 'agent' }, doors), config, p }).execute({}, 'call_2')
+    expect((other.output as { error: string }).error).toBe(
+      "an approval for this plan run WAS recorded, but it arrived through the 'agent' door, which is not among this project's accepted approval doors ('cli', 'mcp') — do not retry: ask the human to approve via `orc reply <taskId> approve` in a terminal, or in the web UI, or the 'mcp' door",
+    )
   })
 
   // The gate is "nothing was written to the plan scope since the human approved" — NOT "two builds
@@ -146,7 +166,7 @@ describe('finalize_plan tool', () => {
   })
 
   it('errors (never throws) when no masterplan note exists in scope', async () => {
-    const kernel = { listPlanNotes: async () => [], approvedPlanHash: async () => null, nonHumanPlanApproval: async () => null, planNotesChangedSince: async () => [], proposeSplit: async () => { throw new Error('should not be called') } }
+    const kernel = { approvalDoors: [GROUNDED_APPROVAL_DOOR.cli], listPlanNotes: async () => [], approvedPlanHash: async () => null, nonHumanPlanApproval: async () => null, planNotesChangedSince: async () => [], proposeSplit: async () => { throw new Error('should not be called') } }
     const tool = finalizePlanTool({ kernel, config, p })
     const r = await tool.execute({}, 'call_x')
     expect(r.isError).toBe(true)
@@ -188,6 +208,7 @@ describe('finalize_plan tool', () => {
       note({ id: 'a', title: 'A' }),
     ]
     const kernel = {
+      approvalDoors: [GROUNDED_APPROVAL_DOOR.cli],
       listPlanNotes: async () => notes,
       approvedPlanHash: async () => ({ hash: planGraphHash(notes), seq: 1 }),
       nonHumanPlanApproval: async () => null,

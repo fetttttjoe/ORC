@@ -73,8 +73,13 @@ export function buildServeTools(deps: {
   autonomy: Autonomy
 }): ResolvedTool[] {
   return [
-    // one tool definition, two doors: the copilot set (read + mutate-without-approve, P2)
-    ...asResolvedTools(buildCopilotTools({ sessions: deps.sessions, actions: deps.actions, projectId: deps.projectId })),
+    // one tool definition, two doors: the copilot set (read + mutate-without-approve, P2).
+    // listModels is wired here too — this door drives agents that must never invent a model
+    // ref, and modelCatalog (already a sessions dep) is all buildCopilotTools needs to serve it.
+    ...asResolvedTools(buildCopilotTools({
+      sessions: deps.sessions, actions: deps.actions, projectId: deps.projectId,
+      listModels: () => deps.sessions.modelCatalog(deps.projectId),
+    })),
     ...deps.memoryTools.filter(t => READ_MEMORY.has(t.name)),
     ...(deps.actions ? [mcpApproveTool(deps.actions, deps.autonomy)] : []),
   ]

@@ -1,4 +1,4 @@
-import { EVENT_KIND, ModelsDiscoveredPayload, ZERO_USAGE, addUsage, emptyMemoryFold, errorMessage, foldMemory, foldMemoryInto, noteKey, noteLabel, type EventRecord, type MemoryFold, type Plan, type Usage } from '@orc/contracts'
+import { EVENT_KIND, ModelsDiscoveredPayload, ZERO_USAGE, addUsage, emptyMemoryFold, errorMessage, foldMemory, foldMemoryInto, noteKey, noteLabel, type EventKind, type EventRecord, type MemoryFold, type Plan, type Usage } from '@orc/contracts'
 import { emptyFold, fold, foldInto, foldPlanNotes, listProjectIds, openStorage, planScope, stepUsage, taskUsage, watchProjectIds, type FoldAcc, type ProjectIdsWatch, type Storage } from '@orc/kernel'
 import { NODE_PREFIX, PROJECT_DIR_NOTE_ID, PROJECT_NAME_NOTE_ID, buildGraph, diffGraphs, emptyPatch, type Graph, type GraphPatch } from './graph'
 import { decompositionMermaid, planMermaid, todoWaves, type StepStatusEntry, type TodoWave } from './diagram'
@@ -71,7 +71,11 @@ export interface ProjectSessions {
   // grounded decomposition: the plan-note graph living in the task's plan memory scope,
   // plus its rendered mermaid (client bundles must not import the diagram deps' server chain)
   planNotes(projectId: string, taskId: string): Promise<{ notes: ReturnType<typeof foldPlanNotes>; mermaid: string | null }>
-  log(projectId: string, opts?: { taskId?: string; limit?: number }): Promise<LogRow[]>
+  // sinceSeq/kinds make the log incrementally POLLABLE: a reader that remembers the last seq it
+  // saw asks only for what came after it (and only the kinds it cares about) instead of
+  // re-reading the whole tail. Both filters apply BEFORE the limit slice, so the result is the
+  // newest `limit` MATCHING rows.
+  log(projectId: string, opts?: { taskId?: string; limit?: number; sinceSeq?: number; kinds?: EventKind[] }): Promise<LogRow[]>
   close(): Promise<void>
 }
 
@@ -372,9 +376,17 @@ export function createProjectSessions(opts: {
       // project-scoped memory row is admitted only when payload.author.taskId matches the filter,
       // never blanket-admitted by null taskId. Filter must precede slice to return the last
       // `limit` MATCHING rows, not the last `limit` events of which few may match.
-      const { taskId } = opts
-      if (taskId === undefined) return s.events.slice(-limit).map(summarizeEvent)
-      return s.events.map(summarizeEvent).filter(r => shouldAdmitLogRow(r, taskId)).slice(-limit)
+      // sinceSeq/kinds narrow the SAME rows before the slice, for the same reason the taskId
+      // filter does: a poller asking for "everything after seq N" must get the newest matching
+      // rows, not the newest `limit` events of which few (or none) are new.
+      const { taskId, sinceSeq, kinds } = opts
+      const kindSet = kinds && kinds.length > 0 ? new Set<string>(kinds) : null
+      const narrow = (rows: LogRow[]) => rows.filter(r =>
+        (sinceSeq === undefined || r.seq > sinceSeq) && (kindSet === null || kindSet.has(r.kind)))
+      // unfiltered whole-project tail: slice first, summarize only what is returned (unchanged)
+      if (taskId === undefined && sinceSeq === undefined && kindSet === null) return s.events.slice(-limit).map(summarizeEvent)
+      if (taskId === undefined) return narrow(s.events.map(summarizeEvent)).slice(-limit)
+      return narrow(s.events.map(summarizeEvent).filter(r => shouldAdmitLogRow(r, taskId))).slice(-limit)
     },
 
     async close() {

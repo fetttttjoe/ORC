@@ -47,11 +47,15 @@ export async function openKernel(
     onAppend?: (e: EventRecord) => void
   } = {},
 ): Promise<{ kernel: Kernel; log: EventLog; storage: Storage }> {
-  const projectId = opts.projectId ?? requireProject(loadConfig()).projectId
+  // one config read for both the project binding and the approval doors: the gate's accepted-door
+  // set is operator config, so every kernel this factory hands out must already carry it — a
+  // kernel built on the default list would silently refuse approvals the operator opened a door for.
+  const config = loadConfig()
+  const projectId = opts.projectId ?? requireProject(config).projectId
   const storage = await openStorage(url, { projectId, redactEnv: opts.redactEnv })
   const log = storage.events
   if (opts.onAppend) log.onAppend = opts.onAppend
-  return { kernel: new Kernel(log, opts.refValidator, opts.analyzers, opts.send), log, storage }
+  return { kernel: new Kernel(log, opts.refValidator, opts.analyzers, opts.send, config.groundedApprovalDoors), log, storage }
 }
 
 // The committed plan that re-grounds a drifted graph. ONE spelling: the status line and the

@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, it } from 'bun:test'
-import { APPROVAL_ANSWER, ApprovalPolicy, EVENT_KIND, LINK_KIND, NOTE_TIER, PAYLOAD_SCHEMAS, STEP_ROLE, TASK_STATUS, type Analyzer, type PlanDraft, type PlanStep } from '@orc/contracts'
+import { APPROVAL_ANSWER, ApprovalPolicy, EVENT_KIND, GROUNDED_APPROVAL_DOOR, LINK_KIND, NOTE_TIER, PAYLOAD_SCHEMAS, STEP_ROLE, TASK_STATUS, type Analyzer, type PlanDraft, type PlanStep } from '@orc/contracts'
 import { draftFixture, stepFixture } from '@orc/contracts/fixtures'
 import { openStorage, type EventLogOps } from './storage'
 import { KERNEL_ERROR_CODE, KernelError } from './errors'
@@ -484,6 +484,42 @@ describe('Kernel lifecycle', () => {
     expect(await k.nonHumanPlanApproval(task.id, `step:${task.id}:plan:a3`)).toBeNull()   // nor another attempt's
     expect(await k.approvedPlanHash(task.id, runA)).toBeNull()                            // the gate is unchanged:
     expect(await k.approvedPlanHash(task.id, runB)).toMatchObject({ hash: 'a'.repeat(64) }) // mcp still fails, cli still passes
+  })
+
+  // The gate's accepted-door set is OPERATOR-owned, and its default is today's exact behaviour.
+  // This pair is the pin-then-widen: the first test states what a default kernel refuses, the
+  // second states what an operator who edited .orc/config.json buys — over the SAME event, so a
+  // regression in either direction shows up as one of these two flipping.
+  const mcpApproval = async (log: TestLog, taskId: string, runToken: string): Promise<unknown> =>
+    log.append({
+      taskId, stepId: 'plan', runToken, kind: EVENT_KIND.feedback_provided,
+      payload: { topic: 'a', text: 'approve', author: { source: 'mcp' }, planHash: 'a'.repeat(64) },
+    })
+
+  it('by default only the cli door satisfies the plan gate — an mcp approve is refused and reported', async () => {
+    const { k, log } = await freshKernelAndLog()
+    const task = await k.createTask({ title: 'grounded', type: 'grounded' })
+    const runToken = `step:${task.id}:plan:a1`
+    await mcpApproval(log, task.id, runToken)
+
+    expect(await k.approvedPlanHash(task.id, runToken)).toBeNull()
+    expect(await k.nonHumanPlanApproval(task.id, runToken)).toEqual({ source: 'mcp' })
+  })
+
+  it('a kernel configured with the mcp door accepts that same approve, and stops calling it non-human', async () => {
+    const { k, log } = await freshKernelAndLog()
+    const task = await k.createTask({ title: 'grounded', type: 'grounded' })
+    const runToken = `step:${task.id}:plan:a1`
+    await mcpApproval(log, task.id, runToken)
+    const widened = new Kernel(log, undefined, undefined, undefined, [GROUNDED_APPROVAL_DOOR.cli, GROUNDED_APPROVAL_DOOR.mcp])
+
+    expect(await widened.approvedPlanHash(task.id, runToken)).toMatchObject({ hash: 'a'.repeat(64) })
+    // the inverted sibling reads the SAME list, so an accepted door is never also reported as the
+    // door that failed — the refusal message and the gate cannot disagree
+    expect(await widened.nonHumanPlanApproval(task.id, runToken)).toBeNull()
+    // attribution is never rewritten: the event still records the door it came through
+    const provided = (await log.byTask(task.id)).find(e => e.kind === EVENT_KIND.feedback_provided)!
+    expect((provided.payload as { author: { source: string } }).author.source).toBe('mcp')
   })
 
   it('replyFeedback appends feedback_provided and returns the topic even without an injected send', async () => {

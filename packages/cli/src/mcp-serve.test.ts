@@ -130,7 +130,7 @@ describe('orc mcp serve (stdio, read slice)', () => {
 
     const names = toolNames(parsed.find(p => p.id === 2)!.result)
     for (const expected of ['project_status', 'task_plan', 'task_transcript', 'recent_activity',
-      'memory_search', 'memory_read', 'memory_neighbors', 'memory_topics', 'new_request', 'propose', 'run', 'retry', 'cancel', 'approve'])
+      'memory_search', 'memory_read', 'memory_neighbors', 'memory_topics', 'new_request', 'propose', 'run', 'retry', 'cancel', 'approve', 'available_models'])
       expect(names).toContain(expected)
     expect(names).not.toContain('memory_write') // agents inside plans write; the driver does not
 
@@ -164,6 +164,21 @@ describe('orc mcp serve (stdio, read slice)', () => {
       expect(served).toContain(name) // whitelist names must still exist in the memory plugin
     expect(served).toContain('approve')
     expect(served).not.toContain('memory_write')
+  })
+
+  // The serve door drives agents over MCP that must never invent a model ref (the copilot
+  // system prompt says as much) — available_models is the copilot tool's own catalog lookup,
+  // wired through deps.sessions.modelCatalog exactly as the graph-ui door already does.
+  it('available_models is served and returns the project\'s live model catalog', async () => {
+    const refs = ['anthropic/claude-opus-4', 'openai/gpt-5']
+    const sessions = sessionsStub({ modelCatalog: async () => refs })
+    const actions = actionsStub()
+    const memoryTools = unavailableMemoryTools('parity-check')
+    const served = buildServeTools({ sessions, projectId: 'p1', memoryTools, actions, autonomy: 'gated' })
+    const tool = served.find(t => t.name === 'available_models')!
+    const result = await tool.execute({}, undefined)
+    expect(result.isError).toBe(false)
+    expect(result.output).toEqual({ refs })
   })
 
   it('mcpApproveTool: gated refuses without touching actions; full approves attributed as mcp', async () => {

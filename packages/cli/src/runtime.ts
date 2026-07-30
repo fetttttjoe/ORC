@@ -43,7 +43,9 @@ export async function buildRuntime(
   // reuse the caller's kernel (bin passes the one wired to its refValidator + analyzers) so
   // task_split's expanded child plans go through the same toolRef/skillRef validation as
   // `orc propose`, and createGroundedTask can resolve its analyzer.
-  const kernel = shared?.kernel ?? new Kernel(log, host.refValidator, host.analyzers, dbosSend)
+  // approval doors are operator config, so the kernel this port builds tools against must carry
+  // the configured set — finalize_plan's refusal text reads it straight off the kernel
+  const kernel = shared?.kernel ?? new Kernel(log, host.refValidator, host.analyzers, dbosSend, config.groundedApprovalDoors)
   log.onAppend = e => host.hooks.dispatch(HOOK_NAME.event_appended, e)
 
   // Startup order (design §8.4): projections FIRST — DBOS recovery may emit events the

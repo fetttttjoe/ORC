@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import { APPROVAL_ANSWER, MASTERPLAN_NOTE_ID, toolError, ApprovalPolicy, type ResolvedTool } from '@orc/contracts'
+import { APPROVAL_ANSWER, GROUNDED_APPROVAL_DOOR, MASTERPLAN_NOTE_ID, toolError, ApprovalPolicy, type ResolvedTool } from '@orc/contracts'
 import { SPLIT_ORIGIN, type Kernel } from '../kernel'
 import { freezePlan, planScope, PLAN_STEP_ROLE } from './strategies/grounded-plan'
 
@@ -16,11 +16,23 @@ const AUTO_APPROVE = ApprovalPolicy.parse({ default: 'auto' })
 // ponytail: one decomposition level per approve — a subplan that itself decomposes re-splits when
 // its child runs; recurse only when a real 3-level plan needs it.
 export function finalizePlanTool(opts: {
-  kernel: Pick<Kernel, 'proposeSplit' | 'listPlanNotes' | 'approvedPlanHash' | 'planNotesChangedSince' | 'nonHumanPlanApproval'>
+  kernel: Pick<Kernel, 'proposeSplit' | 'listPlanNotes' | 'approvedPlanHash' | 'planNotesChangedSince' | 'nonHumanPlanApproval' | 'approvalDoors'>
   config: { maxDepth: number; autoCommit?: boolean }
   p: { taskId: string; stepId: string; runToken: string; role: string; executor: string; modelRef: string; maxIterations: number }
 }): ResolvedTool {
   const { kernel, config, p } = opts
+  // Both refusals below quote the SAME list the gate tests (kernel.approvalDoors), never a literal:
+  // the previous message hardcoded the human doors, so an operator who widened the accepted set
+  // would have been told to go type in a terminal by a gate that had already stopped requiring it.
+  const acceptedDoors = (): string => kernel.approvalDoors.map(d => `'${d}'`).join(', ')
+  // What a HUMAN can actually do, per accepted door. 'cli' names both human doors on purpose: a web
+  // UI reply rides the actions layer's default and is recorded as 'cli' (contracts has no 'web'
+  // door for exactly that reason). Any other door is named, not instructed — only the operator who
+  // opened it knows how it is driven.
+  const doorAdvice = (): string =>
+    kernel.approvalDoors
+      .map(d => d === GROUNDED_APPROVAL_DOOR.cli ? '`orc reply <taskId> approve` in a terminal, or in the web UI' : `the '${d}' door`)
+      .join(', or ')
   return {
     ref: 'kernel/finalize_plan', name: 'finalize_plan',
     description:
@@ -47,8 +59,9 @@ export function finalizePlanTool(opts: {
         if (!approved) {
           // Two very different states reach here, and the old single message described only one of
           // them. Observed: an agent driving the MCP surface replied 'approve', the log recorded it
-          // with a planHash and author.source 'mcp', approvedPlanHash (cli-only, deliberately)
-          // returned null, and the refusal said "requires human approval" — indistinguishable from
+          // with a planHash and author.source 'mcp', approvedPlanHash (whose accepted door set the
+          // operator owns, and which defaults to 'cli' alone) returned null, and the refusal said
+          // "requires human approval" — indistinguishable from
           // nobody having approved. So the agent retried the one thing that cannot work.
           // nonHumanPlanApproval reads exactly the approval this gate discarded; the gate itself is
           // unchanged. `<taskId>` stays a LITERAL placeholder: the force-auto-approve above is safe
@@ -56,8 +69,8 @@ export function finalizePlanTool(opts: {
           // human reading the relayed message has their task id already.
           const other = await kernel.nonHumanPlanApproval(p.taskId, p.runToken)
           if (other)
-            return { output: { error: `an approval for this plan run WAS recorded, but it arrived through the '${other.source}' door, which cannot satisfy the human approval gate — do not retry: ask the human to approve via \`orc reply <taskId> approve\` in a terminal, or in the web UI` }, isError: true }
-          return { output: { error: 'finalize_plan requires human approval for this plan run, and none is recorded — ask the human to approve via `orc reply <taskId> approve` in a terminal, or in the web UI, then call finalize_plan again' }, isError: true }
+            return { output: { error: `an approval for this plan run WAS recorded, but it arrived through the '${other.source}' door, which is not among this project's accepted approval doors (${acceptedDoors()}) — do not retry: ask the human to approve via ${doorAdvice()}` }, isError: true }
+          return { output: { error: `finalize_plan requires human approval for this plan run (accepted approval doors: ${acceptedDoors()}), and none is recorded — ask the human to approve via ${doorAdvice()}, then call finalize_plan again` }, isError: true }
         }
         // THE gate: nothing was written to this task's plan scope after the human approved. That is
         // equivalent to "the graph is unchanged" by construction — foldPlanNotes is a pure function

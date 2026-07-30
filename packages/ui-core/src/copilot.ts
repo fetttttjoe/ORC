@@ -8,7 +8,7 @@ import type { ProjectSessions } from './sessions'
 
 import { snip } from './summarize'
 import type { ResolvedTool } from '@orc/contracts'
-import { toolError } from '@orc/contracts'
+import { EventKind, toolError } from '@orc/contracts'
 
 // Why a session can't act: 'read-only' = server started outside a project; 'foreign-project'
 // = the user is viewing a chat other than the one this server runs in.
@@ -104,25 +104,55 @@ export function buildCopilotTools(deps: {
       execute: async ({ taskId: id }) => (await sessions.taskPlans(projectId, id)) ?? { error: 'no plan proposed yet' },
     }),
     task_transcript: tool({
-      description: 'Read a task’s agent conversation (messages, tool calls, questions, signal). Recent items only.',
-      inputSchema: z.object({ taskId, stepId: z.string().optional() }),
-      execute: async ({ taskId: id, stepId }) =>
-        (await sessions.transcript(projectId, id, stepId)).slice(-30).map(i =>
-          i.kind === 'message' ? { ...i, text: snip(i.text, 400) } : i),
+      description: 'Read a task’s agent conversation (messages, tool calls, questions, signal). Recent items only; tool payloads are truncated — read an artifact or the file itself for the full text.',
+      inputSchema: z.object({ taskId, stepId: z.string().optional(), limit: z.number().int().min(1).max(50).optional() }),
+      // Every payload is bounded because an unbounded one is not a readable answer: one single
+      // tool result came back as 88KB through this door, burying the conversation it was meant
+      // to explain. Tool input/output become snipped STRINGS (they are arbitrary JSON — a
+      // file read, a search hit list); messages keep their existing text snip. QUESTIONS AND
+      // SIGNALS PASS THROUGH VERBATIM: a driver has to answer the exact question that was asked
+      // and read the exact summary that was signalled — a truncated one is a wrong one.
+      execute: async ({ taskId: id, stepId, limit }) =>
+        (await sessions.transcript(projectId, id, stepId)).slice(-(limit ?? 30)).map(i =>
+          i.kind === 'message' ? { ...i, text: snip(i.text, 400) }
+          : i.kind === 'tool' ? { ...i, input: snip(JSON.stringify(i.input), 400), output: snip(JSON.stringify(i.output), 400) }
+          : i),
     }),
     plan_notes: tool({
-      description: 'Read a grounded task’s decomposition plan-notes (the split-up: subplans, dependencies, uncertainty).',
+      description: 'Read a grounded task’s decomposition plan-notes (the split-up: subplans, dependencies, zones, skills/tools, models, uncertainty).',
       inputSchema: z.object({ taskId }),
+      // The mechanics — dependsOn (the ONLY thing that orders the frozen plan), zone (the write
+      // fence), skillRefs/toolRefs/modelRef — are what a driver has to see to judge or revise a
+      // decomposition; mapping only the prose left it reviewing a plan it could not read.
+      // modelRef is conditional: '' means "inherit the parent's", and an empty string reads as a
+      // model choice that was made.
       execute: async ({ taskId: id }) =>
         (await sessions.planNotes(projectId, id)).notes.map(n => ({
           id: n.id, title: n.title, summary: snip(n.summary, 400), rationale: snip(n.rationale, 400),
-          uncertainty: n.uncertainty, links: n.links,
+          body: snip(n.body, 400), uncertainty: n.uncertainty, links: n.links,
+          dependsOn: n.dependsOn, zone: n.zone, skillRefs: n.skillRefs, toolRefs: n.toolRefs,
+          ...(n.modelRef ? { modelRef: n.modelRef } : {}),
         })),
     }),
     recent_activity: tool({
-      description: 'The latest events in this project (one line each) — what just happened.',
-      inputSchema: z.object({ taskId: taskId.optional(), limit: z.number().int().min(1).max(50).optional() }),
-      execute: async ({ taskId: id, limit }) => sessions.log(projectId, { taskId: id, limit: limit ?? 15 }),
+      description: 'The latest events in this project (one line each) — what just happened. Pass the previous call’s maxSeq as sinceSeq to read only what is new, and kinds to watch specific event kinds.',
+      inputSchema: z.object({
+        taskId: taskId.optional(), limit: z.number().int().min(1).max(50).optional(),
+        sinceSeq: z.number().int().nonnegative().optional(),
+        // the event vocabulary itself, never hand-typed kind strings
+        kinds: z.array(EventKind).optional(),
+      }),
+      // maxSeq is the poll cursor: without one a driver had no way to ask "what happened since?"
+      // and re-read the whole tail every time, paying for (and re-reasoning about) rows it had
+      // already seen. sinceSeq/kinds are spread conditionally — an explicit `undefined` field is
+      // not a no-op for a caller that checks `'sinceSeq' in opts`.
+      execute: async ({ taskId: id, limit, sinceSeq, kinds }) => {
+        const rows = await sessions.log(projectId, {
+          taskId: id, limit: limit ?? 15,
+          ...(sinceSeq !== undefined && { sinceSeq }), ...(kinds && { kinds }),
+        })
+        return { rows, maxSeq: rows.at(-1)?.seq ?? null } // log rows are ascending by seq
+      },
     }),
   }
 
@@ -143,7 +173,10 @@ export function buildCopilotTools(deps: {
       execute: async ({ taskId: id, ...opts }) => actions.propose(id, opts),
     }),
     // no `approve` tool by design: the human gate is structural — a prompt line is not a gate
-    // (observed live: create→propose→approve→run in 600ms with no human in the loop)
+    // (observed live: create→propose→approve→run in 600ms with no human in the loop). The one
+    // deliberate exception is operator-owned, not prompt-owned: groundedApprovalDoors in
+    // .orc/config.json can add 'mcp' to the sources the grounded gate accepts — a config-file
+    // edit the operator makes, which no tool here can perform.
     run: tool({
       description: 'Start the approved plan running in the given working directory.',
       inputSchema: z.object({ taskId, cwd: z.string().min(1) }),
