@@ -95,6 +95,16 @@ plugins/mcp-client/src/index.ts]
    state alongside `drifted`. The full verdict flip is already recorded under Track 1 (worktrees).
    [sourced: plugins/memory/src/drift.ts — createDriftProbe returns null on unreachable revisions,
    and noteDrifted folds null into "not drifted"]
+6. **Cost is measured but not carried** — *next, small.* Usage (tokens in/out, cache split, USD)
+   is already summed per task and rendered by `orc status` [sourced: packages/cli/src/main.ts —
+   status command's `tokens in/out` line; packages/contracts/src/execution.ts — Usage/addUsage],
+   but it stops there: step lines carry no per-step split, the plan-approval door always renders
+   "cost estimate: none provided" (costEstimateUSD is never informed by measured history), and
+   terminal summaries/commit receipts carry no cost — so an operator approving a plan or comparing
+   runs reasons blind. Carry it three places: per-step usage under each step line in status,
+   a measured-history estimate at the approval door, and the task total in the terminal summary.
+   [derived: live comparison 2026-07-31 — the overflow-fix pipeline's $2.22 total was only
+   recoverable by querying two task ids after the fact]
 
 ## Track 4 — carried operator items
 
