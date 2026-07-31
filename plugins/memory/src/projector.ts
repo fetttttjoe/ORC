@@ -1,11 +1,19 @@
-import { errorMessage, EVENT_KIND, MemoryDeletedPayload, MemoryVerifiedPayload, MemoryWrittenPayload, type EventKind, type EventRecord } from '@orc/contracts'
+import { errorMessage, EVENT_KIND, foldMemory, MemoryDeletedPayload, MemoryVerifiedPayload, MemoryWrittenPayload, noteKey, type EventKind, type EventRecord } from '@orc/contracts'
 import type { EventLog } from '@orc/kernel'
 import { SurrealMemory } from './surreal'
 import { noteRelPath, renderNoteFile } from './note-md'
 import { deleteMemoryFile, writeMemoryFile } from './write-note'
 import { rebuildVaultMemory, renderMemoryIndex } from './memory-index'
 
-export interface MemoryProjector { start(): Promise<void>; close(): Promise<void>; rebuild(): Promise<void>; catchUp(): Promise<void> }
+// rebuild()'s per-id accounting result. A projection that silently drops a note (a skip, a
+// dropped write, anything) must report DEGRADED, not a bare success — a count/ratio comparison
+// would pass exactly when only a few notes vanish, which is the failure mode this exists to
+// close. `missing` names the exact note keys (`noteKey(scope, id)`) the log's fold says are live
+// but that never landed in Surreal after replay, so a caller can act on the specific ids, not
+// just "something is missing".
+export interface RebuildResult { degraded: boolean; missing: string[] }
+
+export interface MemoryProjector { start(): Promise<void>; close(): Promise<void>; rebuild(): Promise<RebuildResult>; catchUp(): Promise<void> }
 
 // Everything the projector drains. Typed EventKind[] (not left to infer the narrower literal
 // union) so start()'s subscribe filter below can compare a live EventRecord's kind against it.
@@ -261,14 +269,30 @@ export function createMemoryProjector(opts: { log: EventLog; surreal: SurrealMem
       })
     },
     close: async () => { closed = true; if (refreshTimer) { clearTimeout(refreshTimer); refreshTimer = null } if (unsub) { await unsub(); unsub = null } await applying },
-    rebuild: async () => {
-      await serialize(async () => {
+    rebuild: async (): Promise<RebuildResult> =>
+      serialize(async (): Promise<RebuildResult> => {
         await surreal.clear()
         cursorCache = (await drainFrom(0, () => {})).cursor
         await refreshDerived(true) // same boot-time-heal reasoning as start()
         await rebuildVaultMemory(surreal, vaultDir)
-      })
-    },
+
+        // Per-id accounting: a rebuild that silently DROPS a note (a skip, a dropped write,
+        // anything) must not report success. Scoped query (log.after with KNOWLEDGE_KINDS), never
+        // log.all() — see MEMORY_KINDS/KNOWLEDGE_KINDS's own doc comment and the 'never scans the
+        // whole log' test. `expected` is the fold's live note set (tombstones already excluded by
+        // foldMemoryInto's delete-on-memory_deleted — same idiom as sweep.ts's liveNotes); `actual`
+        // is what actually landed in Surreal after the replay above. The diff is a literal set
+        // difference over ids, not a count/ratio — a ratio check passes exactly when only a FEW
+        // notes vanish, the precise failure mode this exists to close.
+        const events = await log.after(0, KNOWLEDGE_KINDS)
+        const expected = foldMemory(events).notes.keys()
+        const actual = new Set((await surreal.allNotes()).map(n => noteKey(n.scope, n.id)))
+        const missing = [...expected].filter(k => !actual.has(k))
+        const degraded = missing.length > 0
+        if (degraded)
+          console.warn(`[memory] rebuild missing ${missing.length} note(s) present in the log but absent from the read model: ${missing.join(', ')}`)
+        return { degraded, missing }
+      }),
     // one-shot drain from the persisted cursor (no clear, no subscription) — the CLI's
     // projection path. O(applied), not O(notes): the full vault reconcile stays on start/rebuild.
     catchUp: async () => {

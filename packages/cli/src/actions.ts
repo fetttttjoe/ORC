@@ -387,7 +387,10 @@ export function buildOrcActions(deps: {
       let memory: Awaited<ReturnType<typeof createMemory>> | undefined
       try {
         memory = await openMemory({ log: plugin.log, config: plugin.config })
-        await memory.projector.rebuild()
+        const { degraded } = await memory.projector.rebuild()
+        if (degraded) {
+          warnings.push('memory read model rebuilt after purge but is degraded — some notes did not reproject')
+        }
       } catch (err) {
         warnings.push(`memory read model not cleared (${errorMessage(err)}) — run 'orc memory rebuild' once it is reachable`)
       } finally {

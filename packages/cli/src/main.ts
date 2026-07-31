@@ -1172,8 +1172,12 @@ export function buildProgram(
     .description('rebuild the memory read model from the event log')
     .action(async () => {
       const { config, log } = needPlugin()
-      await withMemory({ log, config }, memory => memory.projector.rebuild())
-      console.log('memory read model rebuilt from the log')
+      const { degraded } = await withMemory({ log, config }, memory => memory.projector.rebuild())
+      if (degraded) {
+        console.warn('memory read model rebuilt from the log but is degraded — some notes did not reproject')
+      } else {
+        console.log('memory read model rebuilt from the log')
+      }
     })
   mem
     .command('restamp')

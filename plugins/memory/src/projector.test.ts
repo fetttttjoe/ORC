@@ -2,7 +2,7 @@ import { afterAll, describe, expect, it, spyOn } from 'bun:test'
 import { mkdtempSync, existsSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import { claimId, EVENT_KIND, MEMORY_ACCESS, TASK_STATUS, type EmbeddingProvider, type EventKind } from '@orc/contracts'
+import { claimId, EVENT_KIND, MEMORY_ACCESS, noteKey, TASK_STATUS, type EmbeddingProvider, type EventKind } from '@orc/contracts'
 import { openStorage } from '@orc/kernel'
 import { createTestDb, TEST_PROJECT_ID } from '@orc/kernel/test-helpers'
 import { SurrealMemory } from './surreal'
@@ -41,6 +41,8 @@ describe('memory projector', () => {
     // teardown in a finally, like the sibling tests below: a bare close after the assertions leaks
     // a live log subscription when one of them throws, and every later test file in the process then
     // fails on the dropped database (observed: one flaky assertion here cascaded into four files).
+    const warns: string[] = []
+    const warnSpy = spyOn(console, 'warn').mockImplementation((...a: unknown[]) => { warns.push(a.join(' ')) })
     try {
       const noteFile = path.join(vaultDir, 'memory', 'auth.md')
       await log.append({ taskId: null, stepId: null, runToken: null, kind: 'memory_written', payload: { note: noteInput, author: { source: 'cli' } } })
@@ -53,9 +55,15 @@ describe('memory projector', () => {
       expect(existsSync(noteFile)).toBe(false)
       expect(await surreal.get('auth', 'project')).toBeNull()
 
-      await proj.rebuild()   // replays memory_* from the log into a fresh store
+      const result = await proj.rebuild()   // replays memory_* from the log into a fresh store
       expect(await surreal.get('auth', 'project')).toBeNull() // deleted stayed deleted after replay
+      // clean rebuild: every live note the log's fold expects landed back in Surreal, so the
+      // per-id accounting check reports success, not a silent drop.
+      expect(result.degraded).toBe(false)
+      expect(result.missing).toEqual([])
+      expect(warns.some(w => w.includes('[memory] rebuild missing'))).toBe(false)
     } finally {
+      warnSpy.mockRestore()
       await proj.close(); await surreal.close(); await log.close()
     }
   })
@@ -341,6 +349,50 @@ describe('projector resilience', () => {
       expect(links).toBe(1)
     } finally {
       await proj.close(); await log.close()
+    }
+  })
+
+  // A real replay can never itself drop a live note — applyOne either applies an event or skips it
+  // deterministically from the payload — so exercising rebuild()'s per-id accounting branch needs a
+  // fault-injecting stub whose applyEvent legitimately fails to persist ONE specific note id while
+  // applying every other event normally, which is what a genuinely dropped write looks like.
+  it('rebuild reports degraded and warns the specific id when one note is dropped during replay', async () => {
+    const pg = await createTestDb(); drops.push(pg.drop)
+    const log = (await openStorage(pg.url, { projectId: TEST_PROJECT_ID })).events
+    const vaultDir = mkdtempSync(path.join(tmpdir(), 'orc-vault-rebuild-degraded-'))
+    const droppedId = 'dropped-note'
+    const persisted = new Map<string, typeof fullNote>()
+    // ponytail: retained cast — see the SurrealMemory-is-a-class note above.
+    const stub = {
+      clear: async () => { persisted.clear() },
+      applyEvent: async (e: { kind: string; payload: unknown }) => {
+        if (e.kind !== 'memory_written') return true
+        const note = (e.payload as { note: { id: string; scope: string } }).note
+        if (note.id === droppedId) return false // simulate a write that never lands, for any reason
+        persisted.set(noteKey(note.scope, note.id), { ...fullNote, id: note.id, scope: note.scope })
+        return true
+      },
+      get: async () => fullNote,
+      getCursor: async () => 0,
+      allNotes: async () => [...persisted.values()],
+      refreshLinks: async () => {},
+      refreshTopics: async () => {},
+    } as unknown as SurrealMemory
+    const warns: string[] = []
+    const warnSpy = spyOn(console, 'warn').mockImplementation((...a: unknown[]) => { warns.push(a.join(' ')) })
+    const proj = createMemoryProjector({ log, surreal: stub, vaultDir })
+    try {
+      await log.append({ taskId: null, stepId: null, runToken: null, kind: 'memory_written', payload: { note: { ...noteInput, id: droppedId }, author: { source: 'cli' } } })
+      await log.append({ taskId: null, stepId: null, runToken: null, kind: 'memory_written', payload: { note: { ...noteInput, id: 'kept-note' }, author: { source: 'cli' } } })
+
+      const result = await proj.rebuild()
+
+      expect(result.degraded).toBe(true)
+      // per-id, not just "something is missing": the dropped id itself is named
+      expect(result.missing.some(k => k.includes(droppedId))).toBe(true)
+      expect(warns.some(w => w.includes(droppedId))).toBe(true)
+    } finally {
+      await proj.close(); await log.close(); warnSpy.mockRestore()
     }
   })
 
