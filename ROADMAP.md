@@ -74,6 +74,27 @@ plugins/mcp-client/src/index.ts]
    via exec intermittently returning 0 matches on lines that provably exist (fs_read/git show
    agreed). Reproduce, then fix or document. [sourced: task c5e9cb50 confirm-and-correct summary,
    2026-07-29]
+3. **`orc memory rebuild` gains per-id accounting** — *next, small.* Rebuild is clear → replay →
+   refresh with no post-replay check, and unparseable events are skipped rather than wedging the
+   replay — so a silently broken projection reports success. [sourced:
+   plugins/memory/src/projector.ts — rebuild()] After replay, diff projected note ids against the
+   distinct non-tombstoned `memory_written` ids in the log; any unexplained absence warns and
+   marks the rebuild degraded. Per-id accounting, not a count ratio — a ratio passes exactly when
+   a few notes vanish. [derived: graphify's shrink guard, which refuses a rebuild unless every
+   lost node is accounted for by a re-extracted source — github.com/Graphify-Labs/graphify]
+4. **Memory reads fail loud on unknown filters** — *next, small.* `memory_search` with an unknown
+   `category`/`tag` silently filters to an empty result indistinguishable from "no matching
+   notes"; validate against the known sets and refuse naming them, the discipline
+   `orc memory neighbors --kinds` already applies. Same pass: extend the absence note ("absence
+   is not proof") to the two envelopes that lack it — `memory_read`'s `{note: null}` and keyed
+   `memory_topics`. [sourced: plugins/memory/src/tools.ts — SearchInput, absenceNote call sites]
+5. **Unknown drift is surfaced, not silently clean** — *next, small.* An unreachable
+   `sourceRevision` yields null from the drift probe and reads as clean in every envelope and the
+   step preload's currency line, so a reader cannot tell "checked, clean" from "could not check".
+   Keep the fail-toward-not-drifted verdict (right for one tree) but surface `unknown` as its own
+   state alongside `drifted`. The full verdict flip is already recorded under Track 1 (worktrees).
+   [sourced: plugins/memory/src/drift.ts — createDriftProbe returns null on unreachable revisions,
+   and noteDrifted folds null into "not drifted"]
 
 ## Track 4 — carried operator items
 
@@ -145,3 +166,30 @@ agents-and-skills-as-markdown surface, mapped onto the existing loader rather th
    Plan Canvas — browser plan review with annotation and approval gates — is its strongest UX
    idea; its plan substrate underneath is plain markdown, weaker than the frozen-note pipeline
    here] When: annotate-and-wake round-trips visibly cost more than typing the edit would.
+
+## Track 6 — memory learns from use
+
+Notes record *access* (hits, activation decay) but not *outcome*: nothing distinguishes a note
+that answered a step from one that wasted it, so dead ends get re-derived and the only quality
+signals are author estimate and the auditor's verify stamp. [sourced:
+packages/contracts/src/memory.ts — activation; plugins/memory/src/store.ts — recordAccess]
+Direction borrowed from graphify's deterministic learning loop (outcome-tagged use records →
+LLM-free aggregation with half-life decay → display-only verdicts), mapped onto the event log
+rather than ported. [sourced: github.com/Graphify-Labs/graphify — save-result/reflect]
+
+1. **Outcome events → derived use-verdicts** — *deferred (designed).* A use-outcome event
+   (`useful | dead_end`; a correction is a heal or a `supersedes`/`contradicts` link, never a
+   score) appended by the store beside `memory_written`; a pure derivation folds outcomes with
+   half-life decay and a ≥2-record corroboration floor into `preferred / tentative / contested`,
+   contested always showing both counts, never a net. Verdicts surface in read envelopes the way
+   `drifted` does and **never enter rank scoring**: the bounded activation boost already occupies
+   the use→rank channel, and an unbounded verdict loop (returned → used → marked useful → ranked
+   up → returned) needs propensity correction nobody has — graphify defers it for exactly this
+   reason. Design out its three measured defects: caps the aggregator can't see, full weight for
+   undated records, corrections double-counted as score and provenance. An outcome record is
+   evidence, never a verification — `memory_verify` stays auditor-gated. When: a live run
+   re-derives a dead end memory already recorded, or note-count growth outpaces what verify
+   stamps alone can triage.
+2. **Lessons ride the step preload** — *deferred.* Derive a small lessons block (top dead ends,
+   contested notes) from 6.1's events, watermark-gated so an already-fresh derivation costs
+   nothing, injected beside the preload's currency line. When: 6.1 lands.
