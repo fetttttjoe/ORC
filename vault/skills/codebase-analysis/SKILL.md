@@ -6,35 +6,30 @@ description: Read the working tree and author a typed, linked architecture map �
 You are a **scout** grounding a plan.
 
 FIRST read the `Currency:` line in your Known project context block, if there is one. It states
-counts only — how many of the notes you were handed are checkable, and how many of those describe
-code that has changed since they were written (see `currencyLine` in
-`plugins/executor-api-loop/src/loop.ts`: it only ever reports counts, never a percentage). Compute
-drifted ÷ checkable yourself and weigh it against the wholesale-remap advisory — the
-`CORPUS_DRIFT_ADVISORY` constant in `plugins/memory/src/drift.ts` — the point past which the graph
-has fallen behind far enough that a full re-read beats patching it note by note. That decides what
-you do next:
+counts only — checkable notes, and how many of those describe code changed since they were written
+(`currencyLine` in `plugins/executor-api-loop/src/loop.ts` never reports a percentage). Compute
+drifted ÷ checkable and weigh it against the wholesale-remap advisory — `CORPUS_DRIFT_ADVISORY` in
+`plugins/memory/src/drift.ts`, the point past which a full re-read beats patching note by note.
+That decides what you do next:
 
-- **Below the advisory** — zero notes drifted, or any small residual drift well under the advisory
-  — proceed without asking. Three consecutive grounded requests used to interrupt the operator over
-  cheap, incremental scouts whose knowledge graph was barely behind the tree, when nothing expensive
-  was ever on the table. The door belongs on the expensive decision — a wholesale re-read of the
-  whole tree — not on every grounded request. Go straight into memory-first grounding below.
-- **At or above the advisory, or there is no Currency line, or there are no notes at all** — the
-  graph is behind by enough, uncheckable, or empty that a genuinely costly wholesale re-read is on
-  the table, so this is the one case worth a door. Ask `ask_human("May I analyze the codebase to
-  ground the plan? (yes/no)")`. If the answer is no, call `report_coverage({ analyzed: false, gaps:
-  ["human declined codebase analysis"] })` and signal success immediately with a summary noting no
-  analysis was done.
+- **Below the advisory** — zero drifted, or a small residual — proceed without asking. Three
+  consecutive grounded requests once interrupted the operator over cheap, incremental scouts barely
+  behind the tree; the door belongs on the expensive decision — a wholesale re-read — not on every
+  request. Go straight into memory-first grounding below.
+- **At or above the advisory, or there is no Currency line, or there are no notes at all** — a
+  genuinely costly wholesale re-read is on the table; this is the one case worth a door. Ask
+  `ask_human("May I analyze the codebase to ground the plan? (yes/no)")`. If the answer is no, call
+  `report_coverage({ analyzed: false, gaps: ["human declined codebase analysis"] })` and signal
+  success immediately with a summary noting no analysis was done.
 
 A note counts as *checkable* only if it declares `paths` and carries a revision. That is why the
 notes you write must declare the paths they describe: an undeclared note can never be dated, so it
 makes every later scout re-read the code you already mapped.
 
-If you are proceeding — below the advisory, or the human said yes — **search before you read** —
-`memory_search` every topic the task names, `memory_read` what
-hits. Knowledge that already exists is refined (same ids), never re-derived from code: re-deriving
-what a note already states is the single biggest waste in a scout run. Only the GAPS earn
-working-tree reading.
+If you are proceeding — below the advisory, or the human said yes — **search before you read**:
+`memory_search` every topic the task names, `memory_read` what hits. Existing knowledge is refined
+(same ids), never re-derived from code — re-derivation is the single biggest waste in a scout run.
+Only the GAPS earn working-tree reading.
 
 Then build a **connected knowledge map** via `memory_write` — a graph, not a pile. Write in this
 order:
