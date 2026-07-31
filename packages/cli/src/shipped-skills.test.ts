@@ -68,6 +68,40 @@ describe('shipped skills', () => {
   })
 })
 
+// The scout skill used to ask_human on EVERY grounded request (even zero-drift, "the graph still
+// matches this tree") — three consecutive cheap, incremental scouts interrupted the operator when
+// nothing expensive was ever on the table. The door belongs on the one decision that IS expensive:
+// a wholesale re-read when the corpus has drifted past plugins/memory/src/drift.ts's
+// CORPUS_DRIFT_ADVISORY. Pinned failing-first against the pre-edit two-ask_human-branches SKILL.md.
+describe('codebase-analysis pins the drift-advisory two-branch protocol', () => {
+  const { body } = read('codebase-analysis')
+
+  test('keys the branches on the wholesale-remap advisory, not a literal percentage', () => {
+    expect(body).toContain('CORPUS_DRIFT_ADVISORY')
+    expect(body).toContain('plugins/memory/src/drift.ts')
+    expect(body).not.toContain('34%')
+  })
+
+  test('below-advisory branch proceeds without asking', () => {
+    expect(body).toContain('proceed without asking')
+  })
+
+  test('states the why: interruptions over cheap scouts, door belongs on the expensive decision', () => {
+    expect(body).toContain('cheap, incremental scouts')
+    expect(body).toContain('door belongs on the expensive decision')
+  })
+
+  test('retains ask_human for at/above-advisory, no Currency line, or no notes at all', () => {
+    expect(body).toContain('At or above the advisory, or there is no Currency line, or there are no notes at all')
+    expect(body).toContain('ask_human(')
+  })
+
+  test('the memory-first paragraph survives untouched', () => {
+    expect(body).toContain('search before you read')
+    expect(body).toContain('never re-derived')
+  })
+})
+
 // P5 (boundary-contracts spec): driftLine could only ever recommend the full kb-build REBUILD —
 // healing a handful of drifted notes had no targeted instrument. This is that instrument's other
 // tracked data file (docs/, not vault/skills/), so it gets the same "stays valid" home. Parses the
