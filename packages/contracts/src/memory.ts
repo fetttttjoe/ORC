@@ -101,6 +101,19 @@ export const NoteKind = z.enum(NOTE_KINDS)
 export type NoteKind = z.infer<typeof NoteKind>
 export const NOTE_KIND = NoteKind.enum
 
+// The retrieval-surface vocabulary for `categories` (SemanticNoteInput.categories, below): a
+// FIXED three-value set, unlike `tags`, which is deliberately open and corpus-derived (see
+// tools.ts's memory_search — it validates `tag` against what the corpus actually carries, never
+// against an invented list here). noteLint's own advisory message and the codebase-analysis
+// skill already state these three in prose; this is the one real exported enum for them, matched
+// values rather than a hand-rolled literal array wherever a category is validated (memory_search's
+// `category` filter, same discipline as NOTE_TIER/NOTE_TIERS above and packages/cli/src/main.ts's
+// parseNoteTier).
+export const NOTE_CATEGORIES = ['subsystem', 'cross-cutting', 'target'] as const
+export const NoteCategory = z.enum(NOTE_CATEGORIES)
+export type NoteCategory = z.infer<typeof NoteCategory>
+export const NOTE_CATEGORY = NoteCategory.enum
+
 // Every agent-memory system worth copying separates a cheap, lossless EPISODIC trail from a
 // distilled, linked SEMANTIC tier. orc adds a third, PLAN, because a decomposition is neither: it
 // is executable structure a human approves and the freezer turns into steps.

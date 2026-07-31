@@ -1,5 +1,5 @@
 import { z } from 'zod'
-import { AccessVia, CLAIM_ID_RE, ClaimWrite, isRecord, EDGE_DIRECTIONS, inferTier, linkLookupScopes, MASTERPLAN_NOTE_ID, MemoryScope, MEMORY_ACCESS, MEMORY_ID_RE, MEMORY_LIMITS, MEMORY_SOURCE_LIMITS, MEMORY_TOOL_NAME, MemorySearchResult, MemoryWriteResult, NOTE_KINDS, LINK_KIND, LINK_KINDS, planFieldViolations, RETENTION_CLASSES, SEARCH_MODES, SearchMode, STEP_ROLE, VERIFY_STEP_ID, LinkKind, MemoryNoteDraftInput, NOTE_TIER, NOTE_TIERS, slugId, toolError, type MemoryAuthor, type MemoryNote, type MemoryStore, type ResolvedTool, type VerifiedStamp } from '@orc/contracts'
+import { AccessVia, CLAIM_ID_RE, ClaimWrite, isRecord, EDGE_DIRECTIONS, inferTier, linkLookupScopes, MASTERPLAN_NOTE_ID, MemoryScope, MEMORY_ACCESS, MEMORY_ID_RE, MEMORY_LIMITS, MEMORY_SOURCE_LIMITS, MEMORY_TOOL_NAME, MemorySearchResult, MemoryWriteResult, NoteCategory, NOTE_CATEGORIES, NOTE_KINDS, LINK_KIND, LINK_KINDS, planFieldViolations, RETENTION_CLASSES, SEARCH_MODES, SearchMode, STEP_ROLE, VERIFY_STEP_ID, LinkKind, MemoryNoteDraftInput, NOTE_TIER, NOTE_TIERS, slugId, toolError, type MemoryAuthor, type MemoryNote, type MemoryStore, type ResolvedTool, type VerifiedStamp } from '@orc/contracts'
 import { applyBudget, fitMemoryNoteToBudget } from './budget'
 import { noteDrifted, type ChangedSince } from './drift'
 import { NEAR_SUBJECT, trigramDice } from './title-similarity'
@@ -146,6 +146,39 @@ const ok = (output: unknown) => ({ output, isError: false })
 // never "no such decision exists" — say so in the envelope, on every read tool, in ONE wording.
 // memory_topics shipped without it, which is how the rule drifted; three spellings would be worse.
 const absenceNote = (what: string): string => `no ${what} matched — absence is not proof a decision doesn't exist`
+
+// category is a FIXED three-value vocabulary (contracts' NOTE_CATEGORIES) — safeParse against the
+// real exported enum, never a hand-rolled literal array here, the same discipline
+// packages/cli/src/main.ts's parseNoteTier and the `mem neighbors --kinds` option already apply
+// to NOTE_TIERS/LINK_KINDS: reject an unknown value at the boundary, naming the real set, rather
+// than letting a typo silently filter everything out and read as "this category is empty".
+const unknownCategoryError = (value: string): string =>
+  `unknown category '${value}' — valid categories: ${NOTE_CATEGORIES.join(', ')}`
+
+// tag has NO fixed vocabulary — unlike category, inventing one would be a guess, so the known set
+// is derived from the corpus itself, at request time, client-side: same small-corpus approach
+// drift.ts's notesCitingPaths uses (pull the scope's notes, derive the answer in memory) rather
+// than asking the store for a distinct-tag query it does not have (MemoryStore has none).
+// Bounded in the MESSAGE, not in what is collected — a corpus with thousands of tags must not
+// blow the refusal past a model's context, but the membership check itself still checks the whole
+// derived set.
+const KNOWN_TAGS_SHOWN = 50
+
+async function knownTags(store: MemoryStore, scope?: readonly string[]): Promise<Set<string>> {
+  const notes = await store.list(scope ? { scope: [...scope] } : {})
+  const tags = new Set<string>()
+  for (const n of notes) for (const t of n.tags) tags.add(t)
+  return tags
+}
+
+const unknownTagError = (value: string, known: ReadonlySet<string>): string => {
+  const sorted = [...known].sort()
+  const shown = sorted.slice(0, KNOWN_TAGS_SHOWN)
+  const rest = sorted.length - shown.length
+  const set = shown.length === 0 ? '(no tags exist in this corpus yet)'
+    : rest > 0 ? `${shown.join(', ')}, and ${rest} more` : shown.join(', ')
+  return `unknown tag '${value}' — known tags: ${set}`
+}
 
 // matched values, never scattered literals: the step role → memory-role mapping (runtime.ts) keys off this.
 export const MEMORY_ROLE = { scout: 'scout', verify: 'verify', auditor: 'auditor' } as const
@@ -672,7 +705,9 @@ export function memoryTools(opts: {
       inputSchema: {
         type: 'object', required: ['query'],
         properties: {
-          query: { type: 'string' }, category: { type: 'string' }, tag: { type: 'string' },
+          query: { type: 'string' },
+          category: { type: 'string', enum: [...NOTE_CATEGORIES] },
+          tag: { type: 'string', description: 'a tag an existing note already carries — an unknown one is refused, naming what the corpus does carry' },
           detail_level: detailLevelSchema, limit: { type: 'integer', minimum: 1, maximum: MEMORY_LIMITS.detailItems }, budget: budgetSchema,
           mode: { type: 'string', enum: [...SEARCH_MODES], description: 'keyword | semantic | hybrid (default hybrid; falls back to keyword when no embedder is configured)' },
         },
@@ -681,6 +716,15 @@ export function memoryTools(opts: {
         await settled() // read-your-writes: see the note this step just wrote
         try {
           const q = SearchInput.parse(input)
+          // Refused BEFORE either store call: an unknown category/tag would otherwise pass
+          // straight into the filter and come back as an empty result indistinguishable from a
+          // genuinely empty search (the exact E-i confusion absenceNote exists to prevent).
+          if (q.category !== undefined && !NoteCategory.safeParse(q.category).success)
+            return { output: { error: unknownCategoryError(q.category) }, isError: true }
+          if (q.tag !== undefined) {
+            const known = await knownTags(store, searchScope)
+            if (!known.has(q.tag)) return { output: { error: unknownTagError(q.tag, known) }, isError: true }
+          }
           const limit = q.limit ?? (q.detail_level === 'minimal' ? 5 : 20)
           const filter = { category: q.category, tag: q.tag, ...(searchScope && { scope: [...searchScope] }) }
           // Claims FIRST — a matched statement is the answer, where a note summary is a pointer to
@@ -741,7 +785,7 @@ export function memoryTools(opts: {
         try {
           const q = ReadInput.parse(input)
           const n = await store.get(q.id, q.scope)
-          if (!n) return ok({ note: null })
+          if (!n) return ok({ note: null, absence: absenceNote('note') })
           // recorded here rather than in store.get: this is the call site that knows a pull
           // actually delivered a note to a model. A miss above records nothing — nothing was read.
           // keyed like memory_write so an at-least-once retry doesn't double-count the access.
@@ -841,7 +885,10 @@ export function memoryTools(opts: {
           const accessKey = author.runToken && toolCallId ? `${author.runToken}:tool:${toolCallId}:topic:${q.topic}` : undefined
           const claims = await store.topicClaims(q.topic, author, { idempotencyKey: accessKey })
           const r = applyBudget(claims, serialized, { limit: MEMORY_LIMITS.detailItems, budget: q.budget })
-          return ok({ topicKey: q.topic, claims: r.items, truncated: r.truncated, omitted: r.omitted })
+          return ok({
+            topicKey: q.topic, claims: r.items, truncated: r.truncated, omitted: r.omitted,
+            ...(r.items.length === 0 && { note: absenceNote('topic') }),
+          })
         } catch (e) { return toolError(e) }
       },
     },

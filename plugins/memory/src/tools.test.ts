@@ -460,6 +460,17 @@ describe('memory tools', () => {
     expect(out.neighbors[0]?.via).toBe('supersedes')
   })
 
+  // A null-note miss is the SAME absence epistemics memory_search/memory_neighbors already carry
+  // (E-i): nothing found is not proof nothing exists. The null itself is untouched — readers
+  // checking `note === null` keep working — the message rides alongside it.
+  it('memory_read carries the same absence note alongside a null note miss', async () => {
+    const { store } = fakeStore({ get: async () => null })
+    const read = memoryTools({ store, author: { source: 'cli' } }).find(t => t.name === 'memory_read')!
+    const r = await read.execute({ id: 'nope' })
+    expect((r.output as { note: null }).note).toBeNull()
+    expect(JSON.stringify(r.output)).toContain("no note matched — absence is not proof a decision doesn't exist")
+  })
+
   it('memory_read always truncates the body to the budget', async () => {
     const { store } = fakeStore({ get: async () => toNote({ id: 'auth', title: 'Auth', body: 'x'.repeat(400) }) })
     const read = memoryTools({ store, author: { source: 'cli' } }).find(t => t.name === 'memory_read')!
@@ -534,6 +545,42 @@ describe('memory tools', () => {
     const search = memoryTools({ store, author: { source: 'cli' } }).find(t => t.name === 'memory_search')!
     const r = await search.execute({ query: 'nope' })
     expect(r.output).toMatchObject({ note: "no note matched — absence is not proof a decision doesn't exist" })
+  })
+
+  // category is a FIXED three-value vocabulary (contracts' NOTE_CATEGORIES) — an unknown value is
+  // refused at the boundary, naming the real set, the same discipline packages/cli/src/main.ts's
+  // parseNoteTier and the `mem neighbors --kinds` option already apply to their own enums.
+  it('memory_search refuses an unknown category, naming the known set', async () => {
+    const { store } = fakeStore()
+    const search = memoryTools({ store, author: { source: 'cli' } }).find(t => t.name === 'memory_search')!
+    const r = await search.execute({ query: 'x', category: 'bogus' })
+    expect(r.isError).toBe(true)
+    const error = ErrorOutput.parse(r.output).error
+    expect(error).toContain("unknown category 'bogus'")
+    expect(error).toContain('subsystem')
+    expect(error).toContain('cross-cutting')
+    expect(error).toContain('target')
+  })
+
+  // tag has no fixed vocabulary — unlike category, the known set is derived from the corpus
+  // itself (client-side, over store.list — the same small-corpus approach drift.ts's
+  // notesCitingPaths uses). A tag no note currently carries is refused, naming what does exist.
+  it('memory_search refuses an unknown tag, naming the corpus-derived known set', async () => {
+    const notes: NoteSummary[] = [
+      { ...summary('n1', 'N1'), tags: ['auth', 'db'] },
+      { ...summary('n2', 'N2'), tags: ['auth'] },
+    ]
+    const { store } = fakeStore({ list: async () => notes })
+    const search = memoryTools({ store, author: { source: 'cli' } }).find(t => t.name === 'memory_search')!
+    const r = await search.execute({ query: 'x', tag: 'bogus' })
+    expect(r.isError).toBe(true)
+    const error = ErrorOutput.parse(r.output).error
+    expect(error).toContain("unknown tag 'bogus'")
+    expect(error).toContain('auth')
+    expect(error).toContain('db')
+    // and a tag the corpus DOES carry is never refused
+    const good = await search.execute({ query: 'x', tag: 'auth' })
+    expect(good.isError).toBeFalsy()
   })
 
   // Access counts are the measurement that decides whether a decay/sweep is ever worth building,
@@ -1111,6 +1158,19 @@ describe('memory_topics', () => {
     const out = z.object({ topics: z.array(z.unknown()), truncated: z.boolean() }).parse((await tool.execute({ budget: 100 })).output)
     expect(out.topics.length).toBeLessThan(many.length)
     expect(out.truncated).toBe(true)
+  })
+
+  // The keyed branch shipped without the same absence-epistemics wording the list branch (above)
+  // and memory_search/memory_neighbors already carry — an empty claims result reads the same as
+  // "topic doesn't exist" without it. Same noun the list branch uses ('topic'), same helper.
+  it('a topic that resolves with no claims carries the same absence note the listing carries', async () => {
+    const { store } = fakeStore({
+      topics: async () => [topic('aaaaaaaaaaa1', 'the log is truth')],
+      topicClaims: async () => [],
+    })
+    const tool = memoryTools({ store, author: { source: 'cli' } }).find(t => t.name === 'memory_topics')!
+    const r = await tool.execute({ topic: 'aaaaaaaaaaa1' })
+    expect(r.output).toMatchObject({ note: "no topic matched — absence is not proof a decision doesn't exist" })
   })
 })
 
