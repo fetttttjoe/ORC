@@ -200,6 +200,62 @@ describe('Kernel lifecycle', () => {
     expect((await k.getTask(t.id))!.status).toBe(TASK_STATUS.approved)
   })
 
+  // The plan-approval door showed 'cost estimate: none provided' for every plan ever proposed,
+  // because both draft literals hardcoded null. The estimate is now MEASURED: what comparable
+  // past tasks actually cost (projections.estimateCostUSD).
+  it('createGroundedTask carries a measured cost estimate once a comparable grounded task has settled', async () => {
+    const { log } = await freshKernelAndLog()
+    const analyze: PlanStep = stepFixture({ id: 'analyze', role: 'scout' })
+    const analyzers = new Map<string, Analyzer>([['agent-analyzer', { id: 'agent-analyzer', analysisStep: () => analyze }]])
+    const kg = new Kernel(log, undefined, analyzers)
+
+    const first = await kg.createGroundedTask({ title: 'first', spec: 's', modelRef: 'fake/m', analyzerRef: 'agent-analyzer' })
+    // nothing comparable has settled yet — no history means no number, never a fabricated $0
+    expect((await kg.getPlan(first.id))!.costEstimateUSD).toBeNull()
+
+    const runToken = `step:${first.id}:analyze:a1`
+    await log.append({
+      taskId: first.id, stepId: 'analyze', runToken, kind: EVENT_KIND.agent_call,
+      payload: { stepId: 'analyze', runToken, iteration: 1, request: {}, response: {} },
+      usage: { inputTokens: 500, outputTokens: 100, costUSD: 0.42, estimated: false },
+    })
+    await log.append({
+      taskId: first.id, stepId: null, runToken: null, kind: EVENT_KIND.task_status_changed,
+      payload: { taskId: first.id, from: TASK_STATUS.approved, to: TASK_STATUS.done },
+    })
+
+    const second = await kg.createGroundedTask({ title: 'second', spec: 's', modelRef: 'fake/m', analyzerRef: 'agent-analyzer' })
+    expect((await kg.getPlan(second.id))!.costEstimateUSD).toBeCloseTo(0.42, 10)
+  })
+
+  it('proposeSplit carries a measured cost estimate from prior split history', async () => {
+    const { k, log } = await freshKernelAndLog()
+    const parent = await k.createTask({ title: 'P', spec: 'parent' })
+    await toRunning(log, parent.id)
+    const base = {
+      parentTaskId: parent.id, stepId: 's1', runToken: `step:${parent.id}:s1:a1`, spec: '', title: 'C',
+      plan: { steps: [{ id: 'w1', role: 'worker', title: 'w', instructions: 'do', dependsOn: [], skillRefs: [], toolRefs: [] }] },
+      parentStep: { executorRef: 'api-loop', modelRef: 'fake/m', maxIterations: 5 },
+      policy: ApprovalPolicy.parse({ default: 'auto' }), maxDepth: 3,
+    }
+    const one = await k.proposeSplit({ ...base, toolCallId: 'call_1' })
+    expect((await k.getPlan(one.childTaskId))!.costEstimateUSD).toBeNull() // no split has settled yet
+
+    const runToken = `step:${one.childTaskId}:w1:a1`
+    await log.append({
+      taskId: one.childTaskId, stepId: 'w1', runToken, kind: EVENT_KIND.agent_call,
+      payload: { stepId: 'w1', runToken, iteration: 1, request: {}, response: {} },
+      usage: { inputTokens: 200, outputTokens: 40, costUSD: 0.25, estimated: false },
+    })
+    await log.append({
+      taskId: one.childTaskId, stepId: null, runToken: null, kind: EVENT_KIND.task_status_changed,
+      payload: { taskId: one.childTaskId, from: TASK_STATUS.approved, to: TASK_STATUS.done },
+    })
+
+    const two = await k.proposeSplit({ ...base, toolCallId: 'call_2' })
+    expect((await k.getPlan(two.childTaskId))!.costEstimateUSD).toBeCloseTo(0.25, 10)
+  })
+
   it('createGroundedTask applies the project iteration budget to BOTH steps — subplans inherit the plan step', async () => {
     const { log } = await freshKernelAndLog()
     const analyze: PlanStep = stepFixture({ id: 'analyze', role: 'scout', maxIterations: 30 })

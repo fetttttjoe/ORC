@@ -4,7 +4,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { Command, InvalidArgumentError } from 'commander'
 import { claimHistory, EDGE_DIRECTION, errorMessage, EVENT_KIND, foldMemory, LINK_KINDS, MASTERPLAN_NOTE_ID, MEMORY_ACCESS, MemoryDeletedPayload, MemoryScope, MemoryWrittenPayload, noteKey, NOTE_TIER, NOTE_TIERS, NoteTier, parseLinkSpec, PlanDraft, ROLE_SKILL, RUN_OUTCOME, STRATEGY, TASK_STATUS, TERMINAL_TASK_STATUS, LinkKind, slugId, type Analyzer, type EventRecord, type MemoryLink, type NoteFields, type ExecutionPort, type MemoryHealth, type Plan, formatModelRate } from '@orc/contracts'
-import { openStorage, Kernel, atomicWriteFileSync, listProjectIds, claimSlot, fold, gatedChildren, freezePlan, liveSupervisors, staleSupervisors, grantExtensionTrust, grantMcpTrust, initializeProject, isExtensionTrusted, isMcpTrusted, loadConfig, loadTrust, migrateDatabase, requireProject, taskUsage, type EventLog, type OrcConfig, type PluginHost, type ProjectConfig, type Storage } from '@orc/kernel'
+import { openStorage, Kernel, atomicWriteFileSync, listProjectIds, claimSlot, fold, gatedChildren, freezePlan, liveSupervisors, staleSupervisors, grantExtensionTrust, grantMcpTrust, initializeProject, isExtensionTrusted, isMcpTrusted, loadConfig, loadTrust, migrateDatabase, requireProject, stepUsage, subtreeUsage, taskUsage, type EventLog, type OrcConfig, type PluginHost, type ProjectConfig, type Storage } from '@orc/kernel'
 import { createVaultProjector, parsePlanFile } from '@orc/vault-projector'
 import { consolidateTask, frontier, needsReground, probeMemory, restampableNotes, staleNotes, DEFAULT_SWEEP_DAYS } from '@orc/memory'
 import { withMemory } from './memory-open'
@@ -16,6 +16,7 @@ import { isLanguageModel } from './model-guard'
 import { assertDrivable, assertRetryable, buildModelDiscovery, buildOrcActions, singleStepDraft } from './actions'
 import { renderDerivedPlan, renderPlanHuman } from './plan-render'
 import { CommandFailure } from './exit'
+import { formatUsageLine } from './usage-render'
 import { watchSubtree, type TailResult } from './watch'
 
 
@@ -328,7 +329,7 @@ export function buildProgram(
       // actually running: approving is never itself a decision to start a run.
       if ((await requireKernel().getTask(root))?.status !== TASK_STATUS.running) return
       console.log(`watching the run at ${root}`)
-      await report(await watchSubtree(requireKernel(), root))
+      await report(await watchSubtree(requireKernel(), root), root)
     })
 
   program
@@ -356,7 +357,9 @@ export function buildProgram(
         return
       }
       console.log(`answered feedback:${topic}`)
-      await report(await watchSubtree(requireKernel(), taskId))
+      // the answered task may itself be a split child — the join it unblocks belongs to an
+      // ancestor, so the cost line sums from the ROOT of the tree, not from this task alone
+      await report(await watchSubtree(requireKernel(), taskId), await rootOf(taskId))
     })
 
   program
@@ -546,7 +549,10 @@ export function buildProgram(
     }
   }
 
-  const report = async (result: TailResult): Promise<void> => {
+  // rootId: the ROOT of the tree that was watched (never a split child) — subtreeUsage sums the
+  // whole tree from there, so a caller that named a child would silently undercount everything
+  // above it. Every call site below passes rootOf(taskId) (or a root it already computed).
+  const report = async (result: TailResult, rootId: string): Promise<void> => {
     // A parked run is not a failure: the work is durable and waiting on a person, so exit 0 and
     // name the one command that unparks it.
     if (result.parked) {
@@ -559,6 +565,12 @@ export function buildProgram(
       console.log(`answer it to continue: orc reply ${result.taskId} <text>`)
       return
     }
+    // The terminal summary used to print only 'tokens in/out' or nothing at all — a run's cost is
+    // the thing a human actually weighs it against, and hiding where the money goes was the
+    // roadmap's explicit complaint. subtreeUsage, not taskUsage: the run's cost is the WHOLE
+    // tree's, including every split child, not just the root task's own agent_call events.
+    const state = await requireKernel().state()
+    console.log(formatUsageLine(subtreeUsage(state, rootId)))
     console.log(`run finished: ${result.outcome}`)
     if (result.outcome !== RUN_OUTCOME.done) throw new CommandFailure(1)
   }
@@ -584,7 +596,8 @@ export function buildProgram(
     await ensureRuntime()
     const since = await requireKernel().requestRun(taskId, opts)
     console.log(`run requested for ${taskId} — watching (ctrl-c stops watching, not the run: orc cancel ${taskId} stops it)`)
-    await report(await watchSubtree(requireKernel(), taskId, since))
+    const root = await rootOf(taskId)
+    await report(await watchSubtree(requireKernel(), taskId, since), root)
   }
 
   program
@@ -752,6 +765,7 @@ export function buildProgram(
         const status = s?.status ?? 'pending'
         const detail = s?.failure ? `  [${s.failure.class}] ${s.failure.message}` : (s?.output ? `  → ${s.output}` : '')
         console.log(`  ${step.id.padEnd(12)} ${status.padEnd(10)} attempt ${s?.attempt ?? 0}${detail}`)
+        console.log(`    ${formatUsageLine(stepUsage(state, taskId, step.id))}`)
       }
       // D3: a grounded task shows what its analysis covered — and the gaps it did NOT (RG7 honesty).
       const coverage = await requireKernel().latestCoverage(taskId)
@@ -782,11 +796,7 @@ export function buildProgram(
         console.log(`  op  ${o.kind.padEnd(6)} ${o.name.padEnd(24)} ${o.status.padEnd(10)} attempts ${o.attempts}`)
       for (const a of state.artifacts.get(taskId) ?? [])
         console.log(`  out ${(a.stepId ?? '?').padEnd(12)} ${a.path} · sha256:${a.sha256.slice(0, 12)}… · ${a.size}B`)
-      const u = taskUsage(state, taskId)
-      const cache = u.cacheReadTokens || u.cacheWriteTokens
-        ? `  cache r/w: ${u.cacheReadTokens ?? 0}/${u.cacheWriteTokens ?? 0}`
-        : '' // no cache split recorded for this task
-      console.log(`  tokens in/out: ${u.inputTokens}/${u.outputTokens}${cache}  cost: ${u.costUSD === null ? 'n/a' : `$${u.costUSD.toFixed(4)}${u.estimated ? ' (est)' : ''}`}`)
+      console.log(`  ${formatUsageLine(taskUsage(state, taskId))}`)
     })
 
   program

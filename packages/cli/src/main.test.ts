@@ -430,6 +430,36 @@ describe('orc CLI', () => {
     expect(out).toContain('no tests read') // the gap surfaces so the human sees what was NOT covered
   })
 
+  it('status prints a per-step usage/cost line for a step with recorded agent_call usage', async () => {
+    const db = await createTestDb()
+    dbs.push(db)
+    const { kernel, log } = await openKernel(db.url, { projectId: TEST_PROJECT_ID })
+    cleanup.push(() => log.close())
+    const lines: string[] = []
+    spyOn(console, 'log').mockImplementation((...a: unknown[]) => { lines.push(a.join(' ')) })
+    const run = async (...args: string[]) => buildProgram(kernel).parseAsync(args, { from: 'user' })
+
+    await run('new', 'usage task')
+    const taskId = lines[0]!
+    await run('propose', taskId) // singleStepDraft's one step, id 's1'
+
+    const runToken = `step:${taskId}:s1:a1`
+    await log.append({
+      taskId, stepId: 's1', runToken, kind: EVENT_KIND.agent_call,
+      payload: { stepId: 's1', runToken, iteration: 1, request: {}, response: {} },
+      usage: { inputTokens: 111, outputTokens: 22, costUSD: 0.0123, estimated: false },
+    })
+
+    lines.length = 0
+    await run('status', taskId)
+    const stepLineIdx = lines.findIndex(l => l.includes('s1') && l.includes('pending'))
+    expect(stepLineIdx).toBeGreaterThanOrEqual(0)
+    // the usage line lives directly under the step's own row — a per-step render, not a reuse of
+    // the trailing task-total line further down
+    expect(lines[stepLineIdx + 1]).toContain('tokens in/out: 111/22')
+    expect(lines[stepLineIdx + 1]).toContain('cost: $0.0123')
+  })
+
   it('plan-revise annotates each scoped note with the text, then resumes the open feedback', async () => {
     const db = await createTestDb()
     dbs.push(db)
@@ -703,6 +733,40 @@ describe('orc CLI', () => {
     await stamp(log, second.childTaskId, TASK_STATUS.approved, TASK_STATUS.done)
     await watched
     expect(lines.join('\n')).toContain(`run finished: ${RUN_OUTCOME.done}`)
+  }, 15_000)
+
+  it('the terminal summary after a watched run includes a cost line, not just run finished', async () => {
+    const db = await createTestDb()
+    dbs.push(db)
+    const { kernel, log } = await openKernel(db.url, { projectId: TEST_PROJECT_ID })
+    cleanup.push(() => log.close())
+    const lines: string[] = []
+    spyOn(console, 'log').mockImplementation((...a: unknown[]) => { lines.push(a.join(' ')) })
+    const run = (...args: string[]) => buildProgram(kernel, async () => forbiddenPort()).parseAsync(args, { from: 'user' })
+
+    await run('new', 'cost summary')
+    const taskId = lines[0]!
+    await run('propose', taskId)
+    await run('approve', taskId)
+
+    const runToken = `step:${taskId}:s1:a1`
+    await log.append({
+      taskId, stepId: 's1', runToken, kind: EVENT_KIND.agent_call,
+      payload: { stepId: 's1', runToken, iteration: 1, request: {}, response: {} },
+      usage: { inputTokens: 40, outputTokens: 10, costUSD: 0.0055, estimated: false },
+    })
+
+    lines.length = 0
+    const watched = run('run', taskId)
+    await watching(lines)
+    await stamp(log, taskId, TASK_STATUS.approved, TASK_STATUS.running)
+    await stamp(log, taskId, TASK_STATUS.running, TASK_STATUS.done)
+    await watched
+
+    const out = lines.join('\n')
+    expect(out).toContain(`run finished: ${RUN_OUTCOME.done}`)
+    // not just 'tokens in/out' — the terminal summary must show where the money went
+    expect(out).toContain('cost: $0.0055')
   }, 15_000)
 
   // The supervisor's half of a run, faked: nothing in this file holds a real runtime, so the

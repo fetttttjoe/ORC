@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'bun:test'
 import { EVENT_KIND, type EventRecord, type Plan, type TaskNode } from '@orc/contracts'
 import { eventFixture, draftFixture, planFixture, stepFixture } from '@orc/contracts/fixtures'
-import { emptyFold, fold, foldInto, subtreeOutcome, completedStepIds, nextAttempts, crashDedupKey, stepUsage, subtreeTaskIds, subtreeUsage, pendingSplitForChild, remainingBudget, inheritedCwd, runCwd, taskChangedPaths, taskNoteWrites, taskVerifiedNotes } from './projections'
+import { emptyFold, estimateCostUSD, fold, foldInto, subtreeOutcome, completedStepIds, nextAttempts, crashDedupKey, stepUsage, subtreeTaskIds, subtreeUsage, pendingSplitForChild, remainingBudget, inheritedCwd, runCwd, taskChangedPaths, taskNoteWrites, taskVerifiedNotes } from './projections'
 
 const task: TaskNode = {
   id: 't1', parentId: null, type: 'generic', title: 'hello', spec: '',
@@ -728,5 +728,77 @@ describe('taskVerifiedNotes', () => {
       write(3, semantic('no-paths', []), 'other-task'),
       verified(4, 'no-paths', 't1'),
     ], subtree)).toEqual([])
+  })
+})
+
+// The plan-approval door's estimate: measured history only. A fabricated zero would be worse than
+// no number at all — the human would approve against a figure nothing measured.
+describe('estimateCostUSD', () => {
+  let seq = 0
+  const ev = (over: Partial<EventRecord>): EventRecord => eventFixture({ seq: ++seq, ts: '2026-08-01T00:00:00.000Z', ...over })
+
+  // one past task: created, planned, charged (maybe), settled
+  const past = (id: string, o: {
+    strategyRef: string; analyzerRef?: string; status?: TaskNode['status']; costUSD?: number | null
+    parentId?: string
+  }): EventRecord[] => {
+    const status = o.status ?? 'done'
+    const runToken = `step:${id}:s1:a1`
+    return [
+      ev({ taskId: id, kind: EVENT_KIND.task_created, payload: { task: { ...task, id, parentId: o.parentId ?? null, status: 'draft' } } }),
+      ev({ taskId: id, kind: EVENT_KIND.plan_proposed, payload: { plan: planFixture({ taskId: id, strategyRef: o.strategyRef, ...(o.analyzerRef === undefined ? {} : { analyzerRef: o.analyzerRef }) }) } }),
+      ...(o.costUSD === undefined ? [] : [ev({
+        taskId: id, stepId: 's1', runToken, kind: EVENT_KIND.agent_call,
+        payload: { stepId: 's1', runToken, iteration: 1, request: {}, response: {} },
+        usage: { inputTokens: 100, outputTokens: 20, costUSD: o.costUSD, estimated: false },
+      })]),
+      ev({ taskId: id, kind: EVENT_KIND.task_status_changed, payload: { taskId: id, from: 'draft', to: status } }),
+    ]
+  }
+
+  it('returns null when no comparable task has ever settled — never a fabricated zero', () => {
+    expect(estimateCostUSD(fold([]), { strategyRef: 'grounded-plan' })).toBeNull()
+    // a matching plan that has NOT settled measures nothing yet
+    const running = fold(past('t-run', { strategyRef: 'grounded-plan', status: 'running', costUSD: 0.4 }))
+    expect(estimateCostUSD(running, { strategyRef: 'grounded-plan' })).toBeNull()
+  })
+
+  it('averages the measured subtree cost of matching terminal tasks', () => {
+    const state = fold([
+      ...past('t-a', { strategyRef: 'grounded-plan', costUSD: 0.1 }),
+      ...past('t-b', { strategyRef: 'grounded-plan', costUSD: 0.3 }),
+    ])
+    expect(estimateCostUSD(state, { strategyRef: 'grounded-plan' })).toBeCloseTo(0.2, 10)
+  })
+
+  // subtree, not task: a grounded parent's real cost is the children its plan step split off
+  it('counts the whole subtree of a matching task, children included', () => {
+    const state = fold([
+      ...past('t-root', { strategyRef: 'grounded-plan', costUSD: 0.1 }),
+      ...past('t-kid', { strategyRef: 'split', costUSD: 0.5, parentId: 't-root' }),
+    ])
+    expect(estimateCostUSD(state, { strategyRef: 'grounded-plan' })).toBeCloseTo(0.6, 10)
+  })
+
+  it('excludes a matching task whose cost was never measured — an unpriced run is not a $0 run', () => {
+    const state = fold([
+      ...past('t-a', { strategyRef: 'grounded-plan', costUSD: 0.2 }),
+      ...past('t-null', { strategyRef: 'grounded-plan', costUSD: null }), // priced nothing (no cost table)
+      ...past('t-none', { strategyRef: 'grounded-plan' }),                // never charged at all
+    ])
+    expect(estimateCostUSD(state, { strategyRef: 'grounded-plan' })).toBeCloseTo(0.2, 10)
+  })
+
+  it('excludes a different strategyRef, and a different analyzerRef when one is named', () => {
+    const state = fold([
+      ...past('t-grounded', { strategyRef: 'grounded-plan', analyzerRef: 'agent-analyzer', costUSD: 0.2 }),
+      ...past('t-split', { strategyRef: 'split', costUSD: 9 }),
+      ...past('t-other-analyzer', { strategyRef: 'grounded-plan', analyzerRef: 'other-analyzer', costUSD: 9 }),
+    ])
+    expect(estimateCostUSD(state, { strategyRef: 'grounded-plan', analyzerRef: 'agent-analyzer' })).toBeCloseTo(0.2, 10)
+    expect(estimateCostUSD(state, { strategyRef: 'split' })).toBeCloseTo(9, 10)
+    expect(estimateCostUSD(state, { strategyRef: 'grounded-plan', analyzerRef: 'ghost' })).toBeNull()
+    // no analyzerRef named → the analyzer is not part of the comparison
+    expect(estimateCostUSD(state, { strategyRef: 'grounded-plan' })).toBeCloseTo(4.6, 10)
   })
 })

@@ -8,7 +8,7 @@ import { MASTERPLAN_NOTE_ID,
 import { foldPlanNotes, planApprovalStamp, planGraphHash, planScope, PLAN_STEP_ID, PLAN_STEP_ROLE } from './execution/strategies/grounded-plan'
 import { DEFAULT_MAX_ITERATIONS } from './config'
 import { EventLog, type EventLogOps } from './storage'
-import { fold, gatedChildren, subtreeTaskIds, subtreeUsage, taskChangedPaths, taskNoteWrites, taskVerifiedNotes, type State, type TaskNoteWrite, type TaskVerifiedNote } from './projections'
+import { estimateCostUSD, fold, gatedChildren, subtreeTaskIds, subtreeUsage, taskChangedPaths, taskNoteWrites, taskVerifiedNotes, type State, type TaskNoteWrite, type TaskVerifiedNote } from './projections'
 import { KERNEL_ERROR_CODE, KernelError } from './errors'
 
 // D6 targeted re-plan (M5b): what listAnnotations hands back to the read_annotations tool — the
@@ -85,8 +85,14 @@ export class Kernel {
         executorRef: 'api-loop', modelRef: input.modelRef, skillRefs: ['plan-authoring'], toolRefs: [],
         isolation: ISOLATION_TIER.local, zone: [], maxIterations, dependsOn: [analyzeStep.id], readOnlySource: true,
       }
+      // What this grounded task is likely to cost, from what comparable grounded tasks ACTUALLY
+      // cost (projections.estimateCostUSD) — the plan-approval door printed 'none provided' for
+      // every plan because this literal was null. Null still means null: no comparable history
+      // yet, and the door says so rather than showing a made-up figure.
+      const state = await this.stateOf(tx)
       const draft: PlanDraft = {
-        strategyRef: STRATEGY.groundedPlan, analyzerRef: input.analyzerRef, costEstimateUSD: null,
+        strategyRef: STRATEGY.groundedPlan, analyzerRef: input.analyzerRef,
+        costEstimateUSD: estimateCostUSD(state, { strategyRef: STRATEGY.groundedPlan, analyzerRef: input.analyzerRef }),
         steps: [analyzeStep, planStep],
       }
       const plan = await this.appendPlanVersion(tx, task.id, draft, EVENT_KIND.plan_proposed, task.status)
@@ -198,7 +204,11 @@ export class Kernel {
 
       // expand the trimmed draft with inherited refs (spec D3) and propose+maybe-approve
       const expanded: PlanDraft = {
-        strategyRef: STRATEGY.split, costEstimateUSD: null,
+        // measured history for splits, same rule as the grounded door (estimateCostUSD): the mean
+        // subtree cost of past terminal split tasks, or null when none has settled yet. Feeds the
+        // human's plan-approval render AND evaluateApproval's maxCostUSD rules below, which could
+        // never fire while this was hardcoded null.
+        strategyRef: STRATEGY.split, costEstimateUSD: estimateCostUSD(state, { strategyRef: STRATEGY.split }),
         steps: draft.steps.map(s => ({
           ...s, executorRef: input.parentStep.executorRef, modelRef: s.modelRef ?? input.parentStep.modelRef,
           // zone is the child's own declaration (write-fence) — parsed default [] = unfenced

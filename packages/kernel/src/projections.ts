@@ -1,7 +1,7 @@
 import { z } from 'zod'
 import {
   ArtifactProducedPayload, EVENT_KIND, FAILURE_CLASS, FailureClass, FS_WRITE_TOOL_NAMES, NOTE_TIER, OPERATION_STATUS, Plan,
-  RUN_OUTCOME, STEP_RUN_STATUS, TASK_STATUS, TaskNode, TaskStatus, ZERO_USAGE, addUsage, runOutcomeFor,
+  RUN_OUTCOME, STEP_RUN_STATUS, TASK_STATUS, TERMINAL_TASK_STATUS, TaskNode, TaskStatus, ZERO_USAGE, addUsage, runOutcomeFor,
   MemoryDeletedPayload, MemoryVerifiedPayload, MemoryWrittenPayload, noteContentKey, noteKey, normalizeRelPath,
   OperationCompletedPayload, OperationFailedPayload, OperationStartedPayload, ReactionFailedPayload,
 } from '@orc/contracts'
@@ -434,6 +434,35 @@ export function ancestorTaskIds(state: State, taskId: string): string[] {
 // ponytail: whole-subtree sum on every call — cache per fold if it measurably slows
 export function subtreeUsage(state: State, rootId: string): Usage {
   return subtreeTaskIds(state, rootId).reduce((acc, id) => addUsage(acc, taskUsage(state, id)), ZERO_USAGE)
+}
+
+// What a plan about to be approved is likely to COST, from measured history alone.
+//
+// The comparable-past-task rule, stated once so the door and its tests agree: a task counts when
+// (1) its status is TERMINAL (done/failed/cancelled — it has spent everything it is going to spend),
+// (2) its LATEST plan version's strategyRef equals the one being estimated, and
+// (3) when the caller names an analyzerRef, that plan's analyzerRef matches too (a grounded plan
+//     seeded by a different analyzer is a different shape of work).
+// The estimate is the mean of subtreeUsage(costUSD) over those tasks — subtree, not task, because a
+// grounded parent's real cost is the split children it spawns.
+//
+// Only tasks whose subtree cost is non-null are averaged: an unpriced model measured nothing, and
+// folding it in as 0 would quietly halve the number the human approves against. No comparable
+// history at all → null, which the render turns into 'none provided'. Never a fabricated zero —
+// the same discipline drift/degraded measurements already follow.
+// ponytail: O(matching tasks × subtree walk) per call, once per plan proposal — cache if it slows.
+export function estimateCostUSD(state: State, opts: { strategyRef: string; analyzerRef?: string }): number | null {
+  const measured: number[] = []
+  for (const task of state.tasks.values()) {
+    if (!TERMINAL_TASK_STATUS.has(task.status)) continue
+    const plan = state.plans.get(task.id)?.versions.at(-1)
+    if (!plan || plan.strategyRef !== opts.strategyRef) continue
+    if (opts.analyzerRef !== undefined && plan.analyzerRef !== opts.analyzerRef) continue
+    const costUSD = subtreeUsage(state, task.id).costUSD
+    if (costUSD !== null) measured.push(costUSD)
+  }
+  if (measured.length === 0) return null
+  return measured.reduce((a, b) => a + b, 0) / measured.length
 }
 
 // The budget a task may still spend: the TIGHTEST remaining envelope over its whole ancestor chain

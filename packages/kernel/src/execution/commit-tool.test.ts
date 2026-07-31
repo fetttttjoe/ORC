@@ -2,7 +2,8 @@ import { describe, expect, it } from 'bun:test'
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import { COMMIT_STEP_ID, STEP_ROLE, type ResolvedTool } from '@orc/contracts'
+import { COMMIT_STEP_ID, STEP_ROLE, ZERO_USAGE, type ResolvedTool, type Usage } from '@orc/contracts'
+import { emptyFold, subtreeUsage, type State } from '../projections'
 import { commitTool, type StampNote } from './commit-tool'
 import type { CitingNotes } from './scoped-changes-tool'
 
@@ -36,6 +37,7 @@ function build(dir: string, opts: {
   reverify?: StampNote | null
   citing?: CitingNotes
   p?: typeof p
+  state?: State
 }) {
   // read EAGERLY, at build time: this is the HEAD an auditor step would have stamped, i.e. before
   // the commit under test moves it. Reading it lazily inside the callback would hand the gate the
@@ -52,6 +54,8 @@ function build(dir: string, opts: {
       listTaskChangedPaths: async () => changed(...(opts.paths ?? [])),
       listTaskNoteWrites: async () => (opts.notes ?? []).map(n => ({ preexisting: true, ...n })),
       listTaskVerifiedNotes: async () => (opts.verified ?? []).map(n => ({ stampRevision: auditedHead, ...n })),
+      // no usage recorded by default — subtreeUsage(emptyFold().state, taskId) reads back ZERO_USAGE
+      state: async () => opts.state ?? emptyFold().state,
     },
     dir, restamp, reverify, ...(opts.citing ? { citing: opts.citing } : {}), p: opts.p ?? p,
   })
@@ -293,7 +297,7 @@ describe('degraded convention', () => {
     // the missing restamp — the shape this convention forbids — would show up here as an extra
     // key, not merely go unasserted
     expect(Object.keys(o).sort()).toEqual(
-      ['commit', 'committedPaths', 'created', 'degraded', 'restampFailed', 'restamped', 'reverified', 'reverifyFailed', 'reverifyStale', 'skippedDirty', 'skippedIgnored', 'stillDrifted'],
+      ['commit', 'committedPaths', 'created', 'degraded', 'restampFailed', 'restamped', 'reverified', 'reverifyFailed', 'reverifyStale', 'skippedDirty', 'skippedIgnored', 'stillDrifted', 'usage'],
     )
   })
 
@@ -488,6 +492,36 @@ describe('the strict reverify gate', () => {
     expect(o.restamped).toEqual([{ id: 'area-x', scope: 'project' }])
     expect(o.reverified).toEqual([])
     expect(o.reverifyStale).toEqual([{ id: 'area-x', scope: 'project' }])
+  })
+})
+
+// Cost carriage (fail-first before commit-tool.ts computed a usage field at all): the receipt
+// names a total for the task subtree via projections' subtreeUsage, the same read model the
+// per-step status line and the approval-door estimate draw from — never a hand-rolled shape.
+describe('usage in the receipt', () => {
+  it('carries the task subtree\'s usage total, from the injected kernel.state()', async () => {
+    const dir = repo()
+    writeFileSync(path.join(dir, 'a.ts'), 'a2\n')
+    const st = emptyFold().state
+    const measured: Usage = {
+      inputTokens: 1200, outputTokens: 340, cacheReadTokens: 50, cacheWriteTokens: 20,
+      costUSD: 0.087, estimated: false,
+    }
+    st.usage.set('t1', measured)
+    const expected = subtreeUsage(st, 't1')
+    const r = await build(dir, { paths: ['a.ts'], state: st }).commit('feat: change a')
+    expect(r.isError).toBe(false)
+    const o = r.output as Record<string, unknown>
+    expect(o.usage).toEqual(expected)
+    expect(o.usage).toEqual(measured)
+  })
+
+  it('is ZERO_USAGE when the task subtree recorded no agent_call usage', async () => {
+    const dir = repo()
+    writeFileSync(path.join(dir, 'a.ts'), 'a2\n')
+    const r = await build(dir, { paths: ['a.ts'] }).commit('feat: change a')
+    expect(r.isError).toBe(false)
+    expect((r.output as Record<string, unknown>).usage).toEqual(ZERO_USAGE)
   })
 })
 

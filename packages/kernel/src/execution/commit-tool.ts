@@ -5,6 +5,7 @@ import path from 'node:path'
 import { z } from 'zod'
 import { COMMIT_STEP_ID, STEP_ROLE, errorMessage, noteKey, toolError, type ResolvedTool } from '@orc/contracts'
 import type { Kernel } from '../kernel'
+import { subtreeUsage } from '../projections'
 import type { CitingNotes } from './scoped-changes-tool'
 import { clipMiddle } from './clip'
 
@@ -44,7 +45,7 @@ const PREVIEW_DESCRIPTION =
   "Compute THIS task's pending commit and return {paths, diff, skippedIgnored}: exactly what git_commit will commit (the scoped_changes floor — sibling tasks' work is excluded, gitignored paths are skipped and listed). Read the diff — your commit message must describe it. A file changed only by exec commands (formatters, codegen) is not in the floor and will be missing; say so in your summary if you know of one."
 
 const COMMIT_DESCRIPTION =
-  'Commit the previewed changes with your message, then advance the note stamps this task earned: notes it HEALED (rewrote prose that already existed) are restamped, notes a step DECLARED verified are reverified at the new commit — both only when their declared paths are fully committed, and a verification only while no commit has touched those paths since the audit. A note the task merely wrote for the first time earns no stamp; it appears in stillDrifted. If the working tree no longer matches the diff you last saw (or you never looked), it refuses and returns the current diff — read it and call again. Commits by pathspec, so content someone else staged never rides along. Returns {commit, created, committedPaths, restamped, skippedDirty, restampFailed, reverified, reverifyFailed, reverifyStale, skippedIgnored, stillDrifted, degraded}: created:false means nothing was left to commit (e.g. a child task already committed) and the stamp pass still ran. A note under skippedDirty cites paths not provably committed (pending edits, untracked content, or nothing at HEAD) and stays drifted on purpose. A note under reverifyStale was verified against a tree that has since moved — a commit touched its cited paths after the audit (or the audited revision is unreachable) — so its verification was NOT advanced and an auditor must read it again. stillDrifted lists notes citing committed paths that no step of this task verified — carry it into your summary verbatim. degraded lists why a measurement could not be made (memory unavailable for a stamp write or the citing join) and is present ONLY when something is degraded — carry it into your summary verbatim too.'
+  'Commit the previewed changes with your message, then advance the note stamps this task earned: notes it HEALED (rewrote prose that already existed) are restamped, notes a step DECLARED verified are reverified at the new commit — both only when their declared paths are fully committed, and a verification only while no commit has touched those paths since the audit. A note the task merely wrote for the first time earns no stamp; it appears in stillDrifted. If the working tree no longer matches the diff you last saw (or you never looked), it refuses and returns the current diff — read it and call again. Commits by pathspec, so content someone else staged never rides along. Returns {commit, created, committedPaths, restamped, skippedDirty, restampFailed, reverified, reverifyFailed, reverifyStale, skippedIgnored, stillDrifted, degraded, usage}: created:false means nothing was left to commit (e.g. a child task already committed) and the stamp pass still ran. A note under skippedDirty cites paths not provably committed (pending edits, untracked content, or nothing at HEAD) and stays drifted on purpose. A note under reverifyStale was verified against a tree that has since moved — a commit touched its cited paths after the audit (or the audited revision is unreachable) — so its verification was NOT advanced and an auditor must read it again. stillDrifted lists notes citing committed paths that no step of this task verified — carry it into your summary verbatim. degraded lists why a measurement could not be made (memory unavailable for a stamp write or the citing join) and is present ONLY when something is degraded — carry it into your summary verbatim too. usage is this task subtree\'s total cost so far (tokens in/out, cache read/write, costUSD) — carry it into your summary too.'
 
 // per stream, head + tail, like exec-tool's clip: enough diff to write an honest message, never an
 // unbounded prompt
@@ -90,7 +91,7 @@ const sha256 = (s: string): string => createHash('sha256').update(s).digest('hex
 interface Staged { addable: string[]; paths: string[]; staged: string[]; diff: string; digest: string; skippedIgnored: string[] }
 
 export function commitTool(opts: {
-  kernel: Pick<Kernel, 'listTaskChangedPaths' | 'listTaskNoteWrites' | 'listTaskVerifiedNotes'>
+  kernel: Pick<Kernel, 'listTaskChangedPaths' | 'listTaskNoteWrites' | 'listTaskVerifiedNotes' | 'state'>
   dir: string
   restamp?: StampNote
   // The verification half: advances the verified stamp of the notes a step of this task DECLARED
@@ -362,6 +363,14 @@ export function commitTool(opts: {
         if (head.code !== 0) return { output: { error: `cannot resolve HEAD: ${head.stderr.trim()}` }, isError: true }
 
         const notes = await stampDeclared(audited)
+        // This task subtree's total spend so far, carried alongside the stamp results — additive,
+        // never folded into `degraded`: a usage read failing is not one of that key's documented
+        // absence cases (a stamp write or the citing join being unavailable), and coercing a failed
+        // read to ZERO_USAGE would read as "this commit cost nothing", which is a lie a `null` would
+        // not tell. So this is left UNGUARDED, same as every other kernel read in this function
+        // (listTaskNoteWrites, listTaskVerifiedNotes above): if kernel.state() throws, the whole
+        // tool call fails honestly via the try/catch below rather than reporting a false zero.
+        const usage = subtreeUsage(await kernel.state(), p.taskId)
         // Leftovers = citing notes minus every note this task DECLARED something about (restamped ∪
         // skippedDirty ∪ restampFailed ∪ reverified ∪ reverifyFailed ∪ reverifyStale — each already
         // reported under its own key). The two *Failed sets belong here: the declaration happened,
@@ -383,7 +392,7 @@ export function commitTool(opts: {
         return {
           output: {
             commit: head.stdout.trim(), created, committedPaths, skippedIgnored: fresh.skippedIgnored, ...notes, stillDrifted,
-            ...(degraded.length > 0 ? { degraded } : {}),
+            ...(degraded.length > 0 ? { degraded } : {}), usage,
           }, isError: false,
         }
       } catch (err) {
