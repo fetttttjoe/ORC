@@ -1,7 +1,7 @@
 import { z } from 'zod'
-import { AccessVia, CLAIM_ID_RE, ClaimWrite, isRecord, EDGE_DIRECTIONS, inferTier, linkLookupScopes, MASTERPLAN_NOTE_ID, MemoryScope, MEMORY_ACCESS, MEMORY_ID_RE, MEMORY_LIMITS, MEMORY_SOURCE_LIMITS, MEMORY_TOOL_NAME, MemorySearchResult, MemoryWriteResult, NoteCategory, NOTE_CATEGORIES, NOTE_KINDS, LINK_KIND, LINK_KINDS, planFieldViolations, RETENTION_CLASSES, SEARCH_MODES, SearchMode, STEP_ROLE, VERIFY_STEP_ID, LinkKind, MemoryNoteDraftInput, NOTE_TIER, NOTE_TIERS, slugId, toolError, type MemoryAuthor, type MemoryNote, type MemoryStore, type ResolvedTool, type VerifiedStamp } from '@orc/contracts'
+import { AccessVia, CLAIM_ID_RE, ClaimWrite, isRecord, DRIFT_STATE, EDGE_DIRECTIONS, inferTier, linkLookupScopes, MASTERPLAN_NOTE_ID, MemoryScope, MEMORY_ACCESS, MEMORY_ID_RE, MEMORY_LIMITS, MEMORY_SOURCE_LIMITS, MEMORY_TOOL_NAME, MemorySearchResult, MemoryWriteResult, NoteCategory, NOTE_CATEGORIES, NOTE_KINDS, LINK_KIND, LINK_KINDS, planFieldViolations, RETENTION_CLASSES, SEARCH_MODES, SearchMode, STEP_ROLE, VERIFY_STEP_ID, LinkKind, MemoryNoteDraftInput, NOTE_TIER, NOTE_TIERS, slugId, toolError, type MemoryAuthor, type MemoryNote, type MemoryStore, type ResolvedTool, type VerifiedStamp } from '@orc/contracts'
 import { applyBudget, fitMemoryNoteToBudget } from './budget'
-import { noteDrifted, type ChangedSince } from './drift'
+import { noteDriftState, type ChangedSince } from './drift'
 import { NEAR_SUBJECT, trigramDice } from './title-similarity'
 
 // Advisory note lint, echoed back in the memory_write result. Two severities now, not one — see
@@ -557,15 +557,23 @@ export function memoryTools(opts: {
   // memory_read runs, lifted to a result SET so a searcher acting on a matched CLAIM is warned too,
   // not only a reader who pulls the full note. Deduped by id; one changedSince probe per distinct
   // sourceRevision (the probe caches), so it stays bounded regardless of how many rows matched.
-  const driftedNoteIds = async (notes: readonly { id: string; sourceRevision: string | null; paths: readonly string[]; verified?: VerifiedStamp }[]): Promise<string[]> => {
-    if (!changedSince) return []
+  // Tri-state: `drifted` (checked, moved) and `unknown` (revision unreachable, could not be checked)
+  // are reported separately — collapsing them would tell a searcher a note is fine when it is
+  // actually un-auditable, exactly the conflation noteDriftState exists to avoid.
+  const noteDriftIds = async (notes: readonly { id: string; sourceRevision: string | null; paths: readonly string[]; verified?: VerifiedStamp }[]): Promise<{ drifted: string[]; unknown: string[] }> => {
+    if (!changedSince) return { drifted: [], unknown: [] }
     const seen = new Map<string, { sourceRevision: string; paths: string[]; verified?: VerifiedStamp }>()
     for (const n of notes) if (n.sourceRevision !== null && !seen.has(n.id)) seen.set(n.id, { sourceRevision: n.sourceRevision, paths: [...n.paths], ...(n.verified && { verified: n.verified }) })
     const drifted: string[] = []
-    // noteDrifted, not noteHasDrifted: a note an auditor verified AFTER the code moved is not stale,
-    // and flagging it here sends the next reader to re-derive what was just confirmed
-    for (const [id, n] of seen) if (await noteDrifted(n, changedSince)) drifted.push(id)
-    return drifted
+    const unknown: string[] = []
+    // noteDriftState, not noteHasDrifted: a note an auditor verified AFTER the code moved is not
+    // stale, and flagging it here sends the next reader to re-derive what was just confirmed
+    for (const [id, n] of seen) {
+      const state = await noteDriftState(n, changedSince)
+      if (state === DRIFT_STATE.drifted) drifted.push(id)
+      else if (state === DRIFT_STATE.unknown) unknown.push(id)
+    }
+    return { drifted, unknown }
   }
   const role = opts.role ?? MEMORY_ROLE.verify
   const tools: ResolvedTool[] = [
@@ -749,13 +757,14 @@ export function memoryTools(opts: {
           // can read drifted. Upgrade when that shows up: carry `verified` on ClaimHit, which
           // joinClaimOwners already has in hand — it needs VerifiedStamp to move to a leaf module,
           // since claim.ts cannot import memory.ts.
-          const drifted = await driftedNoteIds([
+          const { drifted, unknown } = await noteDriftIds([
             ...r.items.map(n => ({ id: n.id, sourceRevision: n.sourceRevision, paths: n.paths, ...(n.verified && { verified: n.verified }) })),
             ...c.items.map(h => ({ id: h.noteId, sourceRevision: h.sourceRevision, paths: h.paths })),
           ])
           return ok(MemorySearchResult.parse({
             claims: c.items, notes: r.items, truncated, omitted: c.omitted + r.omitted,
             ...(drifted.length > 0 && { drifted }),
+            ...(unknown.length > 0 && { unknown }),
             ...(truncated && { next: 'refine the query, or memory_read/memory_neighbors a specific id' }),
             ...(empty && { note: absenceNote('note') }),
           }))
@@ -797,10 +806,10 @@ export function memoryTools(opts: {
           // so rewriting the same id both fixes the claim and clears the drift.
           const paths = 'paths' in n && Array.isArray(n.paths) ? n.paths : []
           // the either-clean rule: the note's own verification is the second, independent answer to
-          // "is this still true", and the fresher stamp governs (drift.ts noteDrifted)
-          const drifted = changedSince
-            ? await noteDrifted({ sourceRevision: n.sourceRevision, paths, ...(n.verified && { verified: n.verified }) }, changedSince)
-            : false
+          // "is this still true", and the fresher stamp governs (drift.ts noteDriftState)
+          const state = changedSince
+            ? await noteDriftState({ sourceRevision: n.sourceRevision, paths, ...(n.verified && { verified: n.verified }) }, changedSince)
+            : DRIFT_STATE.clean
           // every pull tool honors its budget (spec RG5) — metadata cannot bypass body truncation.
           const fitted = fitMemoryNoteToBudget(n, q.budget)
           // The hint names the paths the READER actually received. They used to be read off the
@@ -813,9 +822,13 @@ export function memoryTools(opts: {
           const where = hintPaths.length > 0 ? hintPaths.join(', ') : 'the paths this note declares'
           return ok({
             ...fitted,
-            ...(drifted && {
+            ...(state === DRIFT_STATE.drifted && {
               drifted: true,
               next: `the code this note describes changed since it was written (${n.sourceRevision?.slice(0, 8)}) — re-read ${where} and, if the note is now wrong, memory_write the SAME id with the corrected content instead of adding a second note`,
+            }),
+            ...(state === DRIFT_STATE.unknown && {
+              unknown: true,
+              next: `the code this note describes could not be checked — its revision (${n.sourceRevision?.slice(0, 8)}) is unreachable (rebased away, or a shallow clone) — re-read ${where} yourself if you need certainty; this is not evidence the note is wrong`,
             }),
           })
         } catch (e) { return toolError(e) }

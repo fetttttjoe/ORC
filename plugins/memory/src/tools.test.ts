@@ -439,6 +439,19 @@ describe('memory tools', () => {
     expect(out.drifted).toEqual(['area-x'])
   })
 
+  it('memory_search reports unknown (not drifted) when a note\'s revision is unreachable', async () => {
+    const unreachable = { ...summary('area-x', 'Area X'), sourceRevision: 'deadbee', paths: ['src/x.ts'] }
+    const { store } = fakeStore({ search: async () => [unreachable], searchClaims: async () => [] })
+    // changedSince resolves null for every revision here — rebased away / shallow clone — so the
+    // note's drift verdict cannot be judged at all, distinct from a note checked and found clean.
+    const changedSince = async () => null
+    const search = memoryTools({ store, author: { source: 'cli' }, changedSince }).find(t => t.name === 'memory_search')!
+    const out = z.object({ drifted: z.array(z.string()).optional(), unknown: z.array(z.string()).optional() })
+      .parse((await search.execute({ query: 'x' })).output)
+    expect(out.unknown).toEqual(['area-x'])
+    expect(out.drifted).toBeUndefined()
+  })
+
   it('search budgeting counts the complete serialized summaries', async () => {
     const bulky = Array.from({ length: 8 }, (_, i): NoteSummary => ({
       id: `n${i}`, scope: 'project', title: 'T', summary: '', tier: NOTE_TIER.semantic, categories: [],
@@ -927,23 +940,34 @@ describe('drift on memory_read', () => {
     memoryTools({ store: fakeStore({ get: async () => await get() }).store, author: { source: 'agent' }, changedSince: async () => changed })
       .find(t => t.name === 'memory_read')!
 
-  const Read = z.object({ drifted: z.boolean().optional(), next: z.string().optional() })
+  const Read = z.object({ drifted: z.boolean().optional(), unknown: z.boolean().optional(), next: z.string().optional() })
 
   it('flags a note whose declared path changed, and names the correction', async () => {
     const r = await readTool(async () => ({ ...note(), sourceRevision: 'abc1234567' }), new Set(['src/auth.ts'])).execute({ id: 'auth' }, 'c1')
     const out = Read.parse(r.output)
     expect(out.drifted).toBe(true)
+    expect(out.unknown).toBeUndefined()
     expect(out.next).toContain('memory_write the SAME id')  // correction, not a second note
     expect(r.isError).toBe(false)                            // drift is information, never a failure
   })
 
-  it('stays silent when the code did not move, or when drift cannot be judged', async () => {
+  it('stays silent when the code did not move, or when there is nothing to check', async () => {
     const untouched = await readTool(async () => ({ ...note(), sourceRevision: 'abc' }), new Set(['docs/x.md'])).execute({ id: 'auth' }, 'c1')
     expect(Read.parse(untouched.output).drifted).toBeUndefined()
-    const unknown = await readTool(async () => ({ ...note(), sourceRevision: 'abc' }), null).execute({ id: 'auth' }, 'c1')
-    expect(Read.parse(unknown.output).drifted).toBeUndefined()
+    expect(Read.parse(untouched.output).unknown).toBeUndefined()
     const unstamped = await readTool(async () => ({ ...note(), sourceRevision: null }), new Set(['src/auth.ts'])).execute({ id: 'auth' }, 'c1')
     expect(Read.parse(unstamped.output).drifted).toBeUndefined()
+    expect(Read.parse(unstamped.output).unknown).toBeUndefined()
+  })
+
+  it('reports unknown (NOT silent) when the revision is unreachable and drift cannot be judged', async () => {
+    const r = await readTool(async () => ({ ...note(), sourceRevision: 'abc' }), null).execute({ id: 'auth' }, 'c1')
+    const out = Read.parse(r.output)
+    expect(out.unknown).toBe(true)
+    expect(out.drifted).toBeUndefined()
+    expect(out.next).toBeDefined()
+    expect(out.next).not.toContain('correct') // nothing is known to be wrong — do not say so
+    expect(out.next?.toLowerCase()).toContain('could not be checked')
   })
 
   it('is absent entirely when no probe is wired, so existing callers are unchanged', async () => {

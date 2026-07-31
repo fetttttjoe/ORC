@@ -688,7 +688,7 @@ describe('step memory seam', () => {
     const captured: EventDraft[] = []
     const specs: OperationSpec[] = []
     const log = { recalled: [] as number[], captured: [] as unknown[] }
-    const memory = { ...fakeMemory(log, [note()]), recall: async () => ({ claims: [], notes: [note()], currency: { checkable: 3, drifted: 0, total: 3, ratio: 0 } }) }
+    const memory = { ...fakeMemory(log, [note()]), recall: async () => ({ claims: [], notes: [note()], currency: { checkable: 3, drifted: 0, unknown: 0, total: 3, ratio: 0 } }) }
     await drain(apiLoopExecutor().startTurn(ctx(signalled('success', 'ok'), captured, {
       memory, memoryPreloadTokens: 500, operation: makeOperation(captured, specs),
     })))
@@ -699,11 +699,25 @@ describe('step memory seam', () => {
     const captured: EventDraft[] = []
     const specs: OperationSpec[] = []
     const log = { recalled: [] as number[], captured: [] as unknown[] }
-    const memory = { ...fakeMemory(log, [note()]), recall: async () => ({ claims: [], notes: [note()], currency: { checkable: 4, drifted: 1, total: 4, ratio: 0.25 } }) }
+    const memory = { ...fakeMemory(log, [note()]), recall: async () => ({ claims: [], notes: [note()], currency: { checkable: 4, drifted: 1, unknown: 0, total: 4, ratio: 0.25 } }) }
     await drain(apiLoopExecutor().startTurn(ctx(signalled('success', 'ok'), captured, {
       memory, memoryPreloadTokens: 500, operation: makeOperation(captured, specs),
     })))
     expect(JSON.stringify(specs[0]?.before)).toContain('1 of 4 checkable note(s) describe code that has since changed')
+  })
+
+  // Unreachable-revision notes are neither "current" nor silently absent: when nothing else is
+  // checkable, the block must say so explicitly rather than fold into the same silence as a
+  // genuinely-nothing-to-check preload.
+  it('names how many notes could not be checked when nothing else is checkable', async () => {
+    const captured: EventDraft[] = []
+    const specs: OperationSpec[] = []
+    const log = { recalled: [] as number[], captured: [] as unknown[] }
+    const memory = { ...fakeMemory(log, [note()]), recall: async () => ({ claims: [], notes: [note()], currency: { checkable: 0, drifted: 0, unknown: 2, total: 2, ratio: null } }) }
+    await drain(apiLoopExecutor().startTurn(ctx(signalled('success', 'ok'), captured, {
+      memory, memoryPreloadTokens: 500, operation: makeOperation(captured, specs),
+    })))
+    expect(JSON.stringify(specs[0]?.before)).toContain('2 note(s) here could not be checked against the tree')
   })
 
   // Nothing checkable is NOT "current": outside a repo, or with no note declaring paths, the block

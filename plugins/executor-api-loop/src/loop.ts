@@ -247,10 +247,14 @@ const scoped = (id: string, scope: string): string =>
 // One line, and only when something was actually checkable: a step that cannot be told anything
 // true about currency is better off reading the code than reading a hedge.
 const currencyLine = (c: RecalledContext['currency']): string[] => {
-  if (!c || c.checkable === 0) return []
+  if (!c || (c.checkable === 0 && c.unknown === 0)) return []
+  if (c.checkable === 0) {
+    return [`Currency: ${c.unknown} note(s) here could not be checked against the tree (unreachable revision) — treat them as unknown, not current.`]
+  }
+  const unknownClause = c.unknown > 0 ? ` (${c.unknown} more could not be checked — unreachable revision, treat as unknown)` : ''
   return c.drifted === 0
-    ? [`Currency: the code all ${c.checkable} checkable note(s) here describe is unchanged since they were written — trust them and read only what they do not cover.`]
-    : [`Currency: ${c.drifted} of ${c.checkable} checkable note(s) describe code that has since changed — re-read those paths before relying on them, and memory_write the SAME id to correct any that are now wrong.`]
+    ? [`Currency: the code all ${c.checkable} checkable note(s) here describe is unchanged since they were written — trust them and read only what they do not cover.${unknownClause}`]
+    : [`Currency: ${c.drifted} of ${c.checkable} checkable note(s) describe code that has since changed — re-read those paths before relying on them, and memory_write the SAME id to correct any that are now wrong.${unknownClause}`]
 }
 
 const renderKnownContext = ({ claims, notes, currency }: RecalledContext): string =>

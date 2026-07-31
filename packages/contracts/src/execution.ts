@@ -268,8 +268,11 @@ export interface RecalledContext {
    * A step handed knowledge with no way to date it must re-derive everything to be safe, which is
    * the most expensive thing a scout does. Absent when nothing could be checked (no repository,
    * unreachable revision, no note declaring paths): unknown is never reported as current.
+   *
+   * `unknown` counts notes carrying a sourceRevision and declared paths whose revision was
+   * UNREACHABLE — they are no longer folded into `checkable`/`drifted`, they get their own count.
    */
-  currency?: { checkable: number; drifted: number }
+  currency?: { checkable: number; drifted: number; unknown: number }
 }
 
 // The step's own memory, bound by the runtime from the memory plugin. The executor decides only

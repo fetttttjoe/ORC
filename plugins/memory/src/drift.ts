@@ -11,6 +11,8 @@
 // so an agent that re-grounds a drifted note and writes it back under the SAME id clears the drift.
 // Correcting a note is the same call as writing one.
 
+import { DRIFT_STATE, type DriftState } from '@orc/contracts'
+
 // Every check fails toward "not drifted". A note we cannot check is not evidence of rot, and
 // treating unknown as drifted collapses the graph back into re-read-everything — the exact cost
 // the graph exists to avoid.
@@ -56,17 +58,48 @@ export type ChangedSince = (rev: string) => Promise<ReadonlySet<string> | null>
 // call — and every rule it already commits to carries through unchanged. In particular the
 // fail-toward-not-drifted rule applies to the verified stamp too: an unreachable verified revision
 // (changedSince → null) is UNKNOWN, and unknown is never evidence of rot.
+// The tri-state verdict, and the one function every drift answer now goes through. Same either-clean
+// rule as the boolean noteDrifted always applied, but it no longer collapses "could not check" into
+// "clean": a note carrying a real sourceRevision and declared paths whose revision the probe cannot
+// reach is UNKNOWN, distinct from a note that was checked and found unmoved.
+//
+// The UNCHECKABLE case — no sourceRevision, or no declared paths — stays `clean`, unchanged from the
+// boolean surface and OUT of `unknown`'s scope: `unknown` is specifically an UNREACHABLE revision, a
+// probe that returned null, not a missing stamp. The two causes must not be conflated.
+export async function noteDriftState(
+  note: NoteDrift & { verified?: { revision: string } },
+  changedSince: ChangedSince,
+): Promise<DriftState> {
+  if (note.sourceRevision === null || note.paths.length === 0) return DRIFT_STATE.clean
+  const changed = await changedSince(note.sourceRevision)
+  // null source probe returns early WITHOUT consulting `verified` — mirrors the boolean noteDrifted,
+  // whose noteHasDrifted(null) short-circuit meant it never looked at the verified stamp on an
+  // unreachable source revision. Preserving that order is what keeps the wrapper byte-identical.
+  if (changed === null) return DRIFT_STATE.unknown
+  // source stamp CLEAN → not drifted, regardless of any verification (matches the boolean's early
+  // `if (!noteHasDrifted(...)) return false`)
+  if (!noteHasDrifted(note, changed)) return DRIFT_STATE.clean
+  // source stamp DIRTY, no verification to clear it → drifted
+  if (!note.verified) return DRIFT_STATE.drifted
+  // source DIRTY but a verification exists — the fresher stamp governs (either-clean rule): a note
+  // an auditor checked against the tree AFTER its code moved is not stale.
+  const v = note.verified.revision
+  // one git diff per DISTINCT revision — createDriftProbe caches, so the second probe is free
+  // whenever a run's notes share a verification revision (they do: one commit, one auditor pass)
+  const vChanged = await changedSince(v)
+  // an unreachable VERIFIED revision is UNKNOWN, never rot — same fail-toward rule as the source
+  if (vChanged === null) return DRIFT_STATE.unknown
+  return noteHasDrifted({ sourceRevision: v, paths: note.paths }, vChanged) ? DRIFT_STATE.drifted : DRIFT_STATE.clean
+}
+
+// Thin boolean wrapper over the tri-state verdict — the historical surface. `unknown` and `clean`
+// both read as "not drifted" here, exactly as they did when this WAS the implementation, so every
+// caller and test asserting a boolean is unaffected.
 export async function noteDrifted(
   note: NoteDrift & { verified?: { revision: string } },
   changedSince: ChangedSince,
 ): Promise<boolean> {
-  if (note.sourceRevision === null || note.paths.length === 0) return false
-  if (!noteHasDrifted(note, await changedSince(note.sourceRevision))) return false
-  if (!note.verified) return true
-  const v = note.verified.revision
-  // one git diff per DISTINCT revision — createDriftProbe caches, so the second probe is free
-  // whenever a run's notes share a verification revision (they do: one commit, one auditor pass)
-  return noteHasDrifted({ sourceRevision: v, paths: note.paths }, await changedSince(v))
+  return (await noteDriftState(note, changedSince)) === DRIFT_STATE.drifted
 }
 
 // One `git diff` per distinct revision per process. Notes written in the same run share a revision,
@@ -105,6 +138,11 @@ export function createDriftProbe(dir: string): ChangedSince {
 export interface CorpusDrift {
   checkable: number // notes carrying both a sourceRevision and at least one declared path
   drifted: number
+  /** notes carrying a sourceRevision AND declared paths whose revision the probe could not reach
+   *  (rebased away, shallow clone). Previously dropped silently from checkable; now counted. It is
+   *  NOT part of `checkable` (nothing could be checked) and NOT part of the ratio's denominator, so
+   *  every existing clean/drifted scenario keeps its old checkable/drifted/ratio numbers. */
+  unknown: number
   total: number
   /** drifted / checkable, or null when nothing could be checked — never a fabricated 0. */
   ratio: number | null
@@ -122,19 +160,22 @@ export async function corpusDrift(
 ): Promise<CorpusDrift> {
   let checkable = 0
   let drifted = 0
+  let unknown = 0
   for (const n of notes) {
     const paths = n.paths ?? []
+    // The SOURCE stamp alone decides CHECKABILITY (a verification cannot make an unstamped or
+    // path-less note checkable): those notes are the `clean`-uncheckable case, counted as neither
+    // checkable nor unknown — the same silent skip as before.
     if (n.sourceRevision === null || paths.length === 0) continue
+    // One spelling of the verdict, via noteDriftState, so the corpus counts and the per-note flag
+    // cannot answer differently. An unreachable revision is now COUNTED as `unknown` instead of
+    // being decremented back out of checkable and dropped — every other case keeps its old numbers.
+    const state = await noteDriftState({ sourceRevision: n.sourceRevision, paths, ...(n.verified && { verified: n.verified }) }, changedSince)
+    if (state === DRIFT_STATE.unknown) { unknown += 1; continue } // unreachable revision, not checkable
     checkable += 1
-    // one git diff per DISTINCT revision — notes from one run share theirs, so this collapses
-    const changed = await changedSince(n.sourceRevision)
-    if (changed === null) { checkable -= 1; continue } // unreachable revision is unknown, not drifted
-    // the SOURCE stamp alone decides CHECKABILITY (a verification cannot make an unstamped or
-    // path-less note checkable), then noteDrifted's either-clean rule decides the verdict — one
-    // spelling of that rule, so the corpus ratio and the per-note flag cannot answer differently
-    if (await noteDrifted({ sourceRevision: n.sourceRevision, paths, ...(n.verified && { verified: n.verified }) }, changedSince)) drifted += 1
+    if (state === DRIFT_STATE.drifted) drifted += 1
   }
-  return { checkable, drifted, total: notes.length, ratio: checkable === 0 ? null : drifted / checkable }
+  return { checkable, drifted, unknown, total: notes.length, ratio: checkable === 0 ? null : drifted / checkable }
 }
 
 // Has the graph fallen far enough behind to be worth re-grounding wholesale? A verdict, not a

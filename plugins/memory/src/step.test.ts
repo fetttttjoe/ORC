@@ -296,6 +296,31 @@ describe('recall reports currency through the shared drift verdict', () => {
     expect(got.currency).toBeUndefined()
   })
 
+  // An unreachable revision is UNKNOWN, not silently dropped: it must surface currency (not fold
+  // into the same undefined a genuinely-uncheckable preload produces) and must be counted apart
+  // from checkable/drifted, not inside either.
+  it('surfaces currency and reports an unreachable revision under unknown, alongside checkable notes', async () => {
+    const f = fakeStore({ search: () => [
+      dated('n1', 'src/auth.ts'), // checkable, clean
+      summary({ id: 'n2', sourceRevision: 'rev-unreachable', paths: ['src/gone.ts'] }), // unreachable
+    ] })
+    const changedSince = async (rev: string) => (rev === 'rev-unreachable' ? null : new Set<string>())
+    const got = await bind(f, { changedSince }).memory.recall(5000)
+    expect(got.currency).toBeDefined()
+    expect(got.currency).toMatchObject({ checkable: 1, drifted: 0, unknown: 1 })
+  })
+
+  // The behavioural flip: when EVERY declared-path note's revision is unreachable (checkable 0,
+  // unknown > 0), currency must now be DEFINED — distinct from the 'omits currency entirely' case
+  // above, whose note declares no paths at all and is genuinely uncheckable.
+  it('surfaces currency when every note has an unreachable revision (checkable 0, unknown > 0)', async () => {
+    const f = fakeStore({ search: () => [summary({ id: 'n1', sourceRevision: 'rev-unreachable', paths: ['src/gone.ts'] })] })
+    const changedSince = async () => null
+    const got = await bind(f, { changedSince }).memory.recall(5000)
+    expect(got.currency).toBeDefined()
+    expect(got.currency).toMatchObject({ checkable: 0, drifted: 0, unknown: 1 })
+  })
+
   it('omits currency when there is no drift probe at all', async () => {
     const f = fakeStore({ search: () => [dated('n1', 'src/auth.ts')] })
     expect((await bind(f).memory.recall(5000)).currency).toBeUndefined()

@@ -507,6 +507,11 @@ export const MemorySearchResult = z.object({
   // same drift check memory_read runs, lifted to the result SET so a searcher acting on a matched
   // CLAIM is warned, not only a reader who pulls the full note. Empty/absent = nothing stale.
   drifted: z.array(z.string()).optional(),
+  // note ids among the results whose `sourceRevision` was UNREACHABLE — the drift check could not
+  // be made at all (rebased-away or shallow-clone revision), distinct both from clean (checked,
+  // unmoved) and from drifted (checked, moved). Empty/absent = nothing unknown, same discipline as
+  // `drifted`.
+  unknown: z.array(z.string()).optional(),
 })
 export type MemorySearchResult = z.infer<typeof MemorySearchResult>
 
@@ -554,6 +559,16 @@ export const SEARCH_MODES = ['keyword', 'semantic', 'hybrid'] as const
 export const SearchMode = z.enum(SEARCH_MODES)
 export type SearchMode = z.infer<typeof SearchMode>
 export const SEARCH_MODE = SearchMode.enum
+
+// The drift verdict, tri-state. clean = checked against the tree and unmoved (also the uncheckable
+// case: no sourceRevision, or no declared paths); drifted = checked and the declared code moved;
+// unknown = the sourceRevision could not be reached (rebased away, shallow clone), so no check could
+// be made. Follows the SEARCH_MODE convention (array + z.enum + `.enum`), not the plain-object
+// MEMORY_HEALTH one, deliberately.
+export const DRIFT_STATES = ['clean', 'drifted', 'unknown'] as const
+export const DriftState = z.enum(DRIFT_STATES)
+export type DriftState = z.infer<typeof DriftState>
+export const DRIFT_STATE = DriftState.enum
 
 // `halfLifeDays` tunes the SAME activation decay NeighborQuery's does — search re-ranks cosine by
 // activation heat, so a project that configured a half-life had it honoured in neighbors() and in

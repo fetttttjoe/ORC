@@ -2,7 +2,8 @@ import { describe, expect, it } from 'bun:test'
 import { mkdtempSync, writeFileSync, mkdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import { corpusDrift, createDriftProbe, needsReground, noteDrifted, noteHasDrifted, notesCiting, restampableNotes, CORPUS_DRIFT_ADVISORY, type ChangedSince, type CitingNote } from './drift'
+import { corpusDrift, createDriftProbe, needsReground, noteDrifted, noteDriftState, noteHasDrifted, notesCiting, restampableNotes, CORPUS_DRIFT_ADVISORY, type ChangedSince, type CitingNote } from './drift'
+import { DRIFT_STATE } from '@orc/contracts'
 
 const note = (over: Partial<{ sourceRevision: string | null; paths: string[] }> = {}) =>
   ({ sourceRevision: 'abc123', paths: ['packages/kernel/src/kernel.ts'], ...over })
@@ -156,7 +157,7 @@ describe('corpusDrift — the graph lagging the CODE, not the log', () => {
       { sourceRevision: null, paths: ['a.ts'] },   // never stamped — uncheckable
       { sourceRevision: 'r1', paths: [] },         // declares nothing — uncheckable
     ], probe({ r1: ['a.ts'] }))
-    expect(d).toEqual({ checkable: 2, drifted: 1, total: 4, ratio: 0.5 })
+    expect(d).toEqual({ checkable: 2, drifted: 1, unknown: 0, total: 4, ratio: 0.5 })
   })
 
   // The rule the whole module is built on: unknown is never drifted. A revision git cannot reach
@@ -248,6 +249,62 @@ describe('corpusDrift honours the verification stamp', () => {
       { sourceRevision: 'r1', paths: ['a.ts'], verified: stamp },
       { sourceRevision: 'r1', paths: ['a.ts'] },
     ], probe({ r1: ['a.ts'], r2: [] }))
-    expect(d).toEqual({ checkable: 2, drifted: 1, total: 2, ratio: 0.5 })
+    expect(d).toEqual({ checkable: 2, drifted: 1, unknown: 0, total: 2, ratio: 0.5 })
+  })
+})
+
+// ─── the tri-state verdict: clean / drifted / UNKNOWN ─────────────────────────────────────────────
+//
+// The boolean noteDrifted folded "could not check" into "not drifted" — safe for its callers, but it
+// erased the difference between a note checked-and-unmoved and a note whose revision git cannot
+// reach. noteDriftState surfaces that third state. The two "unreachable" causes are NOT conflated: a
+// null-revision or path-less note is uncheckable and stays `clean` (out of scope here); only a real
+// stamp whose PROBE returns null is `unknown`.
+describe('noteDriftState — the tri-state verdict', () => {
+  const probe = (changed: Record<string, string[] | null>): ChangedSince =>
+    async rev => (changed[rev] === null || changed[rev] === undefined ? null : new Set(changed[rev]))
+  const paths = ['src/auth.ts']
+
+  it('is UNKNOWN — not clean/falsy — when the probe cannot reach a stamped, path-bearing note', async () => {
+    // real sourceRevision, real declared paths, but the revision is gone (rebased away / shallow):
+    // the check could not be MADE, which is distinct from "checked and clean"
+    expect(await noteDriftState({ sourceRevision: 'gone', paths }, probe({ gone: null }))).toBe(DRIFT_STATE.unknown)
+  })
+
+  it('is CLEAN — not unknown — for the uncheckable case (no revision, or no paths)', async () => {
+    // proves the two causes are NOT conflated: a MISSING stamp is `clean` (uncheckable, out of this
+    // task's scope), only an UNREACHABLE stamp is `unknown`
+    expect(await noteDriftState({ sourceRevision: null, paths }, probe({}))).toBe(DRIFT_STATE.clean)
+    expect(await noteDriftState({ sourceRevision: 'r1', paths: [] }, probe({ r1: paths }))).toBe(DRIFT_STATE.clean)
+  })
+
+  it('is CLEAN when checked and unmoved, DRIFTED when checked and moved', async () => {
+    expect(await noteDriftState({ sourceRevision: 'r1', paths }, probe({ r1: [] }))).toBe(DRIFT_STATE.clean)
+    expect(await noteDriftState({ sourceRevision: 'r1', paths }, probe({ r1: paths }))).toBe(DRIFT_STATE.drifted)
+  })
+
+  it('the boolean wrapper stays false for the unreachable-revision case', async () => {
+    // the pre-existing boolean surface is UNCHANGED even though the tri-state function now says more:
+    // `unknown` reads as "not drifted" to noteDrifted, exactly as it did before this widening
+    expect(await noteDrifted({ sourceRevision: 'gone', paths }, probe({ gone: null }))).toBe(false)
+  })
+})
+
+describe('corpusDrift counts the unknown, no longer drops it', () => {
+  const probe = (changed: Record<string, string[] | null>): ChangedSince =>
+    async rev => (changed[rev] === null || changed[rev] === undefined ? null : new Set(changed[rev]))
+
+  it('reports {checkable:2, drifted:1, unknown:1, total:3} over clean+drifted+unreachable', async () => {
+    // the unreachable-revision note is now COUNTED as unknown, not silently discarded — while the
+    // clean/drifted arithmetic (checkable/drifted/ratio) is numerically unchanged from before
+    const d = await corpusDrift([
+      { sourceRevision: 'r1', paths: ['a.ts'] },   // changed → drifted
+      { sourceRevision: 'r1', paths: ['b.ts'] },   // untouched → clean
+      { sourceRevision: 'gone', paths: ['c.ts'] }, // unreachable → unknown (was dropped before)
+    ], probe({ r1: ['a.ts'], gone: null }))
+    expect(d.checkable).toBe(2)
+    expect(d.drifted).toBe(1)
+    expect(d.unknown).toBe(1)
+    expect(d.total).toBe(3)
   })
 })

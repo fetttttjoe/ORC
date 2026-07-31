@@ -145,7 +145,7 @@ export function bindStepMemory(opts: {
       for (const c of found.claims) byNote.set(noteKey(c.scope, c.noteId), { sourceRevision: c.sourceRevision, paths: c.paths })
       for (const n of found.notes) byNote.set(noteKey(n.scope, n.id), { sourceRevision: n.sourceRevision, paths: n.paths, ...(n.verified && { verified: n.verified }) })
       const d = await corpusDrift([...byNote.values()], opts.changedSince)
-      return d.ratio === null ? undefined : d
+      return (d.checkable === 0 && d.unknown === 0) ? undefined : d
     } catch { return undefined }
   }
 
