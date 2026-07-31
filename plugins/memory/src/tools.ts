@@ -117,7 +117,7 @@ export function noteLint(note: MemoryNote): string[] {
       + ` so the rest is stored and readable but invisible to semantic search; split it or move detail into paths/claims/links`)
   // the categories lint targets the retrieval surface, so it only fires on the tier that has one
   if (note.tier === NOTE_TIER.semantic && note.kind.startsWith('architecture') && note.categories.length === 0)
-    w.push(`categories empty — set one of subsystem | cross-cutting | target so category-filtered search finds this`)
+    w.push(`categories empty — set one of ${NOTE_CATEGORIES.join(' | ')} so category-filtered search finds this`)
   // NO "all edges are relates_to" LINT either, and for the same reason as the isolated-note one: a
   // cross-cutting note whose relationships genuinely ARE all relates_to is correct, and the warning
   // asks it to re-type them into decomposes_into or depends_on — structure it would be inventing.
