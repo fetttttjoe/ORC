@@ -16,20 +16,26 @@
 // the graph exists to avoid.
 export interface NoteDrift { sourceRevision: string | null; paths: readonly string[] }
 
+// One spelling of "does this DECLARED path cover this candidate file" — a note (or a citation
+// query) may name a FILE or a DIRECTORY, and a directory covers anything nested under it. Shared by
+// noteHasDrifted below (candidate = a changed file) and surreal.ts's notesCitingPaths (candidate = a
+// path a commit touched), so the two callers cannot quietly diverge on what "covers" means.
+export function pathCovers(declaredRaw: string, candidate: string): boolean {
+  // linear scan rather than /\/+$/, which CodeQL flags as polynomial on agent-authored input.
+  // A note may declare 'packages/kernel/' or 'packages/kernel'.
+  let end = declaredRaw.length
+  while (end > 0 && declaredRaw[end - 1] === '/') end -= 1
+  const declared = declaredRaw.slice(0, end)
+  if (declared === '') return false
+  return candidate === declared || candidate.startsWith(`${declared}/`)
+}
+
 // `changed` is null when the comparison could not be made at all (no repo, unreachable revision).
 export function noteHasDrifted(note: NoteDrift, changed: ReadonlySet<string> | null): boolean {
   if (changed === null || note.sourceRevision === null || note.paths.length === 0) return false
-  for (const p of note.paths) {
-    // linear scan rather than /\/+$/, which CodeQL flags as polynomial on agent-authored input.
-    // A note may declare 'packages/kernel/' or 'packages/kernel'.
-    let end = p.length
-    while (end > 0 && p[end - 1] === '/') end -= 1
-    const declared = p.slice(0, end)
-    if (declared === '') continue
+  for (const p of note.paths)
     for (const f of changed)
-      // a note may point at a FILE or a directory; a directory drifts when anything under it does
-      if (f === declared || f.startsWith(`${declared}/`)) return true
-  }
+      if (pathCovers(p, f)) return true
   return false
 }
 

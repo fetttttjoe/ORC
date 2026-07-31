@@ -682,6 +682,23 @@ describe('SurrealMemory.notesCitingPaths', () => {
     await m.applyEvent(written(1, note({ id: 'cites-a', title: 'Cites A', paths: ['packages/a.ts'] })))
     expect(await m.notesCitingPaths([])).toEqual([])
   })
+
+  // The defect this guards: CONTAINSANY is array-element EQUALITY, so a note declaring a DIRECTORY
+  // was never returned for a changed FILE nested under it — observed live (commit e275fc6/task
+  // af86a1e6), citingNotes came back empty for a note that plainly cited the touched area, even
+  // though drift.ts's noteHasDrifted (a directory-prefix rule) correctly flagged the same note
+  // drifted. notesCitingPaths must implement the SAME rule noteHasDrifted does, via drift.ts's
+  // shared `pathCovers` predicate — not a second, narrower spelling of "cites".
+  it('returns a note that declares a DIRECTORY covering a changed FILE nested under it', async () => {
+    const t = await createTestSurreal(); drops.push(t.drop)
+    const m = await openMemory(t)
+    await m.applyEvent(written(1, note({ id: 'dir-note', title: 'Dir note', paths: ['packages/graph-ui'], sourceRevision: 'rev-d' })))
+    expect(await m.notesCitingPaths(['packages/graph-ui/page/ui/theme.css'])).toEqual([
+      { id: 'dir-note', scope: 'project', title: 'Dir note', sourceRevision: 'rev-d' },
+    ])
+    // a sibling that merely shares the prefix string is NOT under the declared directory
+    expect(await m.notesCitingPaths(['packages/graph-ui-extra/x.ts'])).toEqual([])
+  })
 })
 
 // The verification stamp, folded end to end. These run against a REAL projected row on purpose:

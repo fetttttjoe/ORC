@@ -15,10 +15,13 @@ import { rankNeighbors, rrfFuse, type Edge } from './rank'
 import { dedupeByNote, type ClaimHit, type ClaimSearchOpts } from './claim-search'
 import { ascending, MEMORY_CLUSTER_THRESHOLD, partition, topicLabel, type ClusterInput } from './cluster'
 import { foldRow, ftsQuery, keywordCompare, keywordTerms, meetsMargin, meetsQuorum } from './keyword'
-// type-only, and the shape is DEFINED there: drift.ts owns the citation/currency domain (notesCiting
-// is its exported entry point) and must stay DB-free, so the query body lives here and the shape
-// there — one declaration, no runtime edge in either direction.
-import type { CitingNote } from './drift'
+// The shape is DEFINED there: drift.ts owns the citation/currency domain (notesCiting is its
+// exported entry point) and must stay DB-free, so the query body lives here and the shape there —
+// one declaration, no runtime edge in either direction for the TYPE. `pathCovers` IS a runtime
+// import, deliberately: it is the one spelling of "does this declared path cover this candidate
+// file", shared with noteHasDrifted, so notesCitingPaths below cannot silently diverge from what
+// drift already means by "covers".
+import { pathCovers, type CitingNote } from './drift'
 
 // The read model's table names — single spelling for every builder call and RecordId.
 enum Tb { Note = 'note', Meta = 'meta', Link = 'link', Claim = 'claim', Topic = 'topic' }
@@ -222,6 +225,10 @@ const SemanticRow = SummaryRow.extend({ score: z.number() })
 const CitingRow = z.object({
   noteId: z.string(), scope: z.string(), title: z.string(),
   sourceRevision: z.string().nullable().optional(),
+  // the note's OWN declared paths — needed client-side by pathCovers below, since a directory
+  // declaration ('packages/graph-ui') covering a changed FILE under it ('packages/graph-ui/x.css')
+  // is not expressible as SurrealQL array equality (CONTAINSANY), only as string-prefix matching.
+  paths: z.array(z.string()).optional(),
 })
 // derived from the parse's own keys, like SUMMARY_COLUMNS/CLAIM_COLUMNS: one edit widens both the
 // projection and the parse (zod strips unknown keys, so a hand-kept second list went stale silently)
@@ -758,23 +765,35 @@ export class SurrealMemory {
   //
   // A raw select, not a builder predicate: `paths` is an option-wrapped array column, and surqlize
   // resolves `.contains` on one as a FIELD access rather than the array method — the crash list()'s
-  // `categories` filter hit. CONTAINSANY is SurrealQL's array intersection, one operator, evaluated
-  // server-side; no negation anywhere, so none of the `!x IN v` precedence trap below applies.
+  // `categories` filter hit.
+  //
+  // NOT CONTAINSANY: that operator is array-element EQUALITY, so a note declaring the DIRECTORY
+  // 'packages/graph-ui' was never returned for a changed FILE under it, e.g.
+  // 'packages/graph-ui/page/ui/theme.css' — observed live (commit e275fc6/task af86a1e6),
+  // citingNotes came back empty for exactly that commit even though drift.ts's noteHasDrifted
+  // correctly flags the same note drifted, because CONTAINSANY does not implement noteHasDrifted's
+  // directory-prefix rule. Expressing that prefix rule IN SurrealQL is possible but not simple
+  // (STARTS WITH per declared path, one comparison per row per path, with no index to drive it);
+  // since the corpus is small (~100 notes), this instead pulls every note that declares AT LEAST
+  // ONE path and filters client-side through `pathCovers` — the exact predicate noteHasDrifted
+  // already uses, so a citation and a drift verdict can never disagree about what "covers" means.
   async notesCitingPaths(paths: readonly string[]): Promise<CitingNote[]> {
     // No paths means no citations to find. Short-circuited HERE as well as in notesCiting, because
-    // an empty `$paths` is a full-corpus scan whose every row CONTAINSANY-fails — cost for nothing.
+    // an empty `$paths` would otherwise pull the whole path-bearing corpus for nothing.
     if (paths.length === 0) return []
     const res = await this.surreal.query(
-      `SELECT ${CITING_COLUMNS} FROM ${Tb.Note} WHERE paths CONTAINSANY $paths`,
-      { paths: [...paths] },
+      `SELECT ${CITING_COLUMNS} FROM ${Tb.Note} WHERE paths != NONE AND array::len(paths) > 0`,
     )
     const rows = CitingRow.array().parse(Array.isArray(res) ? res[0] : res)
     // dedupe by scope:id — the same note matching several of the input paths is one candidate
     const byKey = new Map<string, CitingNote>()
-    for (const r of rows)
+    for (const r of rows) {
+      const declared = r.paths ?? []
+      if (!declared.some(d => paths.some(f => pathCovers(d, f)))) continue
       byKey.set(key(r.scope, r.noteId), {
         id: r.noteId, scope: r.scope, title: r.title, sourceRevision: r.sourceRevision ?? null,
       })
+    }
     return [...byKey.values()]
   }
 

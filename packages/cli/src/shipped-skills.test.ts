@@ -52,6 +52,11 @@ describe('shipped skills', () => {
     // foreign commit moved the note's paths after the audit must read the same way stillDrifted
     // does: carried into the summary, not silently dropped on the floor.
     expect(body).toContain('reverifyStale')
+    // C.8: commit messages must follow Conventional Commits format with a concrete example
+    // showing the type(scope): subject pattern for clarity and consistency in the message history.
+    expect(body).toContain('Conventional Commits format')
+    // C.9: guidance on type/scope fields and the importance of message clarity for the historical record
+    expect(body).toContain('Type is one of fix, feat, refactor, docs, or test')
   })
 
   // A planner froze a newline-joined zone entry (zone: ["a/**\nb.ts"]); the fence then matched no
