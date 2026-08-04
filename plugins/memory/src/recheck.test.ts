@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test'
-import { DRIFT_STATE, EVENT_KIND, MemoryScope, NOTE_KIND, NOTE_TIER, type EventRecord } from '@orc/contracts'
+import { DRIFT_STATE, EVENT_KIND, MEMORY_USE, MemoryScope, NOTE_KIND, NOTE_TIER, type EventRecord } from '@orc/contracts'
 import { recheckNotes, summarize } from './recheck'
 
 // One spelling of the fixture corpus. The two drift-verdict cases below each name the note, its
@@ -40,7 +40,27 @@ const movedSinceWrite = {
 
 const drifting = { id: NOTE_ID, title: NOTE_ID, paths: [DECLARED_PATH], sourceRevision: WRITTEN_AT }
 
+const used = (id: string, outcome: string): EventRecord => ({
+  seq: ++seq, ts: AT, taskId: null, stepId: null, runToken: null,
+  kind: EVENT_KIND.memory_outcome, id: `e${seq}`,
+  payload: { id, scope: MemoryScope.project, outcome, author: { source: 'agent' } },
+} as unknown as EventRecord)
+
 describe('recheckNotes', () => {
+  // The fold's outcome tallies reach the retirement rule as flat counts — and only when evidence
+  // exists, so the common no-evidence corpus keeps `use` absent rather than zero-filled.
+  it('threads observed-use outcome counts onto the facts archive.ts rules on', async () => {
+    const out = await recheckNotes([
+      write({ id: 'cited', title: 'cited' }),
+      write({ id: 'quiet', title: 'quiet' }),
+      used('cited', MEMORY_USE.useful),
+      used('cited', MEMORY_USE.dead_end),
+      used('cited', MEMORY_USE.dead_end),
+    ], deps)
+    expect(out.find(n => n.id === 'cited')?.use).toEqual({ useful: 1, deadEnd: 2 })
+    expect(out.find(n => n.id === 'quiet')?.use).toBeUndefined()
+  })
+
   /**
    * An archived note is still a memory_written, so it stays in the fold — that is what makes a
    * restore possible. But it must not come back as a CANDIDATE: it would be re-reported and

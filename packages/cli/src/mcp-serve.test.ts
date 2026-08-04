@@ -130,7 +130,7 @@ describe('orc mcp serve (stdio, read slice)', () => {
 
     const names = toolNames(parsed.find(p => p.id === 2)!.result)
     for (const expected of ['project_status', 'task_plan', 'task_transcript', 'recent_activity',
-      'memory_search', 'memory_read', 'memory_neighbors', 'memory_topics', 'new_request', 'propose', 'run', 'retry', 'cancel', 'approve', 'available_models'])
+      'memory_search', 'memory_read', 'memory_neighbors', 'memory_topics', 'memory_recheck', 'new_request', 'propose', 'run', 'retry', 'cancel', 'approve', 'available_models'])
       expect(names).toContain(expected)
     expect(names).not.toContain('memory_write') // agents inside plans write; the driver does not
 
@@ -160,7 +160,7 @@ describe('orc mcp serve (stdio, read slice)', () => {
     const served = buildServeTools({ sessions, projectId: 'p1', memoryTools, actions, autonomy: 'gated' }).map(t => t.name)
     for (const name of Object.keys(buildCopilotTools({ sessions, actions, projectId: 'p1' })))
       expect(served).toContain(name)
-    for (const name of ['memory_search', 'memory_read', 'memory_neighbors', 'memory_topics'])
+    for (const name of ['memory_search', 'memory_read', 'memory_neighbors', 'memory_topics', 'memory_recheck'])
       expect(served).toContain(name) // whitelist names must still exist in the memory plugin
     expect(served).toContain('approve')
     expect(served).not.toContain('memory_write')

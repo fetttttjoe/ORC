@@ -1,5 +1,6 @@
 // every fetch goes through get/post: one error surface, one URL builder, one schema check
 import type { z } from 'zod'
+import { LOG_PARAM } from '@orc/ui-core/graph-wire'
 import type { GraphSnapshot, Health, LogRow, NodeDetail, PlanNotesView, PlansView, ProjectEntry, SessionInfo, TranscriptItem } from './types'
 import * as S from './schemas'
 
@@ -92,8 +93,14 @@ export const api = {
   projects: () => get<ProjectEntry[]>('projects', S.ProjectList),
   graph: (project: string) => get<GraphSnapshot>('graph', S.GraphSnapshot, { project }),
   health: () => get<Health>('health', S.Health),
-  log: (project: string, opts: { task?: string; limit?: number; sinceSeq?: number } = {}) =>
-    get<LogRow[]>('log', S.LogRows, { project, task: opts.task, limit: opts.limit, since: opts.sinceSeq }),
+  log: (project: string, opts: { task?: string; limit?: number; sinceSeq?: number; beforeSeq?: number } = {}) =>
+    get<LogRow[]>('log', S.LogRows, {
+      project,
+      [LOG_PARAM.task]: opts.task,
+      [LOG_PARAM.limit]: opts.limit,
+      [LOG_PARAM.since]: opts.sinceSeq,
+      [LOG_PARAM.before]: opts.beforeSeq,
+    }),
   node: (project: string, node: string) => get<NodeDetail>('node', S.NodeDetail, { project, id: node }),
   transcript: (project: string, task: string, step?: string) => get<TranscriptItem[]>('transcript', S.Transcript, { project, task, step }),
   plans: (project: string, task: string) => get<PlansView | null>('plans', S.PlansView, { project, task }, { nullOn404: true }),

@@ -3,7 +3,7 @@ import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { z } from 'zod'
-import { claimId, EVENT_KIND, MemoryAccessedPayload, MemoryAuthor, MemoryTopicAccessedPayload, MemoryVerifiedPayload, MemoryWrittenPayload, NOTE_TIER, type AccessVia } from '@orc/contracts'
+import { claimId, EVENT_KIND, MEMORY_USE, MemoryAccessedPayload, MemoryAuthor, MemoryOutcomePayload, MemoryTopicAccessedPayload, MemoryVerifiedPayload, MemoryWrittenPayload, NOTE_TIER, type AccessVia } from '@orc/contracts'
 import { openStorage, type EventLog } from '@orc/kernel'
 import { createTestDb, TEST_PROJECT_ID, type TestDb } from '@orc/kernel/test-helpers'
 import { SurrealMemory } from './surreal'
@@ -54,6 +54,26 @@ describe('MemoryStore gateway', () => {
     expect(events[0]!.stepId).toBe('s1')
     expect(events[0]!.runToken).toBe('r1')
     expect(events[1]!.taskId).toBeNull() // cli access stays unbound
+  })
+
+  it('recordOutcomes appends one bound memory_outcome event per entry, idempotent under a key base', async () => {
+    const pg = await createTestDb(); drops.push(pg.drop)
+    const ts = await createTestSurreal(); drops.push(ts.drop)
+    const log = await openLog(pg)
+    const store = createMemoryStore({ log, surreal: await SurrealMemory.open(ts) })
+    const author = { source: 'agent', taskId: 't1', stepId: 's1', runToken: 'r1' } as const
+    await store.recordOutcomes(
+      [{ id: 'auth', outcome: MEMORY_USE.useful }, { id: 'net', outcome: MEMORY_USE.dead_end }],
+      author, { idempotencyKeyBase: 'r1:knowledge' },
+    )
+    // an at-least-once retry of the capturing step must not double-count the evidence
+    await store.recordOutcomes([{ id: 'auth', outcome: MEMORY_USE.useful }], author, { idempotencyKeyBase: 'r1:knowledge' })
+    const events = await log.all()
+    expect(events).toHaveLength(2)
+    expect(events.map(e => e.kind)).toEqual(['memory_outcome', 'memory_outcome'])
+    expect(events[0]!.taskId).toBe('t1') // bound to the acting step, recordAccess's rule
+    const payload = MemoryOutcomePayload.parse(events[0]!.payload)
+    expect(payload).toMatchObject({ id: 'auth', scope: 'project', outcome: MEMORY_USE.useful })
   })
 
   it('recordAccess with via appends a payload that parses MemoryAccessedPayload including via', async () => {

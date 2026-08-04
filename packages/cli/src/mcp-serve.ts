@@ -18,7 +18,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js'
 import { errorMessage, toolError, type ResolvedTool, type SupervisorHealth } from '@orc/contracts'
 import type { EventLog, ProjectConfig } from '@orc/kernel'
-import { MEMORY_READ_TOOLS, MEMORY_ROLE, createMemory, memoryTools as buildMemoryTools, probeMemory, unavailableMemoryTools } from '@orc/memory'
+import { MEMORY_READ_TOOLS, MEMORY_ROLE, createDriftProbe, createMemory, memoryTools as buildMemoryTools, probeMemory, unavailableMemoryTools } from '@orc/memory'
 import { openMemory } from './memory-open'
 import { asResolvedTools, buildCopilotTools, createProjectSessions, type OrcActions } from '@orc/ui-core'
 
@@ -116,7 +116,16 @@ export async function startMcpServe(opts: {
   let memoryTools: ResolvedTool[]
   try {
     memory = await openMemory({ log, config })
-    memoryTools = buildMemoryTools({ store: memory.store, author: { source: 'agent', executor: 'mcp-serve' }, role: MEMORY_ROLE.verify })
+    // changedSince is what turns the read tools' drift machinery on: without it memory_recheck
+    // answered "135 uncheckable" through this door while the CLI saw the real list, and
+    // memory_search/memory_read shipped no drifted/unknown flags at all (observed 2026-08-03,
+    // first live probe of memory_recheck). One probe per process; it caches per revision.
+    memoryTools = buildMemoryTools({
+      store: memory.store,
+      author: { source: 'agent', executor: 'mcp-serve' },
+      role: MEMORY_ROLE.verify,
+      changedSince: createDriftProbe(config.dir),
+    })
   } catch (err) {
     memoryTools = unavailableMemoryTools(errorMessage(err))
   }

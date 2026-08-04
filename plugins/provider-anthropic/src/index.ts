@@ -23,24 +23,24 @@ function useOAuth(): boolean {
   return Boolean(process.env.CLAUDE_CODE_OAUTH_TOKEN)
 }
 
-// live model discovery — works on both auth paths; falls back to the cost-table ids offline.
-// fetch is injectable for tests.
+// live model discovery — works on both auth paths; THROWS when it cannot answer (network failure,
+// bad status, unparseable body, missing credentials), per the listModels contract; [] means the
+// API answered and nothing usable exists. The old swallow-to-COSTS made `reachable` lie in
+// discovery. The offline claude set still serves: buildModelDiscovery's modelUniverse unions the
+// cost-table ids either way — that union stays there, not here. fetch is injectable for tests.
 export async function listAnthropicModels(fetchImpl: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response> = fetch): Promise<string[]> {
-  try {
-    const headers: Record<string, string> = { 'anthropic-version': '2023-06-01' }
-    if (useOAuth()) {
-      headers.authorization = `Bearer ${await loadOAuthToken()}`
-      headers['anthropic-beta'] = 'oauth-2025-04-20'
-    } else {
-      headers['x-api-key'] = process.env.ANTHROPIC_API_KEY ?? ''
-    }
-    const res = await fetchImpl('https://api.anthropic.com/v1/models?limit=100', { headers })
-    if (!res.ok) return Object.keys(COSTS)
-    const ids = modelIdsFrom(await res.json(), 'data', 'id')
-    return ids.length > 0 ? ids : Object.keys(COSTS)
-  } catch {
-    return Object.keys(COSTS)
+  const headers: Record<string, string> = { 'anthropic-version': '2023-06-01' }
+  if (useOAuth()) {
+    headers.authorization = `Bearer ${await loadOAuthToken()}` // throws when no token is available
+    headers['anthropic-beta'] = 'oauth-2025-04-20'
+  } else {
+    const key = process.env.ANTHROPIC_API_KEY
+    if (!key) throw new Error('ANTHROPIC_API_KEY is not set — cannot ask the anthropic models API')
+    headers['x-api-key'] = key
   }
+  const res = await fetchImpl('https://api.anthropic.com/v1/models?limit=100', { headers })
+  if (!res.ok) throw new Error(`anthropic /v1/models answered ${res.status}`)
+  return modelIdsFrom(await res.json(), 'data', 'id')
 }
 
 export function createAnthropicProvider(

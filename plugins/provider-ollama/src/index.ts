@@ -1,16 +1,33 @@
 import { createOllama } from 'ai-sdk-ollama'
 import type { LanguageModel } from 'ai'
-import { isRecord, modelIdsFrom, type EmbeddingProvider, type ModelCost, type ModelProvider } from '@orc/contracts'
+import { z } from 'zod'
+import { isRecord, type EmbeddingProvider, type ModelCost, type ModelProvider } from '@orc/contracts'
 
-// live model discovery from the local daemon — [] when it is not running (fetch injectable for tests)
+// /api/tags entries, loosely: only the fields this filter reads. capabilities is what the daemon
+// itself says a model can do; absent on older daemons, so absence must never exclude a model.
+const TagsResponse = z.object({
+  models: z.array(z.object({ name: z.string(), capabilities: z.array(z.string()).optional() }).loose()),
+})
+const EMBEDDING_CAPABILITY = 'embedding'
+
+// Live model discovery from the local daemon (fetch injectable for tests). Embedding-only models
+// are dropped here, at the seam every picker and catalog event flows through: the memory
+// subsystem's encoders (nomic-embed-text, mxbai-embed-large, …) sit in the same daemon, and
+// unfiltered they were offered as task executors, which cannot work.
+//
+// THROWS when the daemon cannot answer; [] means it answered and nothing usable is installed.
+// The distinction is what lets discovery's append-on-change record an EMPTIED catalog: with []
+// meaning both, its empty-list guard skipped the write and the retired encoders stayed in the
+// served catalog after the filter shipped (observed 2026-08-03). Discovery isolates the throw
+// per provider and keeps the last recorded catalog — silence is not a catalog.
 export async function listOllamaModels(baseUrl: string, fetchImpl: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response> = fetch): Promise<string[]> {
-  try {
-    const res = await fetchImpl(`${baseUrl}/api/tags`)
-    if (!res.ok) return []
-    return modelIdsFrom(await res.json(), 'models', 'name')
-  } catch {
-    return []
-  }
+  const res = await fetchImpl(`${baseUrl}/api/tags`)
+  if (!res.ok) throw new Error(`ollama /api/tags answered ${res.status}`)
+  const parsed = TagsResponse.safeParse(await res.json())
+  if (!parsed.success) throw new Error('ollama /api/tags answered an unexpected shape')
+  return parsed.data.models
+    .filter(m => !m.capabilities?.includes(EMBEDDING_CAPABILITY))
+    .map(m => m.name)
 }
 
 export function createOllamaProvider(
@@ -29,7 +46,7 @@ const isNumberArray = (v: unknown): v is number[] => Array.isArray(v) && v.every
 
 // The embedding half of the Ollama provider — a text→vector encoder over the local daemon's
 // /api/embed, behind the shared EmbeddingProvider seam. No SDK, no new dep: one fetch, parsed at
-// the boundary (isRecord/isNumberArray, never a cast) exactly like listOllamaModels.
+// the boundary (isRecord/isNumberArray, never a cast).
 export function createOllamaEmbeddingProvider(
   opts: { model: string; baseUrl?: string },
 ): EmbeddingProvider {

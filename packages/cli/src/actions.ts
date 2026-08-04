@@ -88,6 +88,20 @@ export async function assertRetryable(kernel: Kernel, taskId: string): Promise<v
 export const modelUniverse = (live: string[], costs: Record<string, unknown>): string[] =>
   [...new Set([...live, ...Object.keys(costs).filter(k => k !== '*')])].sort()
 
+// One fetch attempt per provider: `reachable` is whether it ANSWERED — a provider that answered
+// with nothing usable carries ids: [] and reachable: true, which are different facts.
+export interface DiscoveredProvider { pid: string; ids: string[]; reachable: boolean }
+
+// Which catalogs deserve a models_discovered event this fetch — pure, so the rule is testable
+// without providers or a log. Gated on REACHABILITY, not emptiness: an empty catalog from a
+// provider that answered is a fact worth recording (the embedding filter made [] ollama's
+// legitimate steady state, and the old `ids.length === 0` guard pinned the served catalog to
+// the pre-filter event — observed 2026-08-03); silence from one that did not answer is not.
+export const catalogAppends = (perProvider: readonly DiscoveredProvider[], last: ReadonlyMap<string, string>): { providerId: string; models: string[] }[] =>
+  perProvider
+    .filter(({ ids, reachable, pid }) => reachable && JSON.stringify(ids) !== last.get(pid))
+    .map(({ pid, ids }) => ({ providerId: pid, models: ids }))
+
 // Model discovery + resolution + pricing over the provider registry — shared by the actions
 // layer (validation), the copilot (available_models), and the web model picker. Cached briefly.
 // With a log, each fetch persists changed catalogs as models_discovered events (append-on-
@@ -103,9 +117,15 @@ export function buildModelDiscovery(config: ProjectConfig, log?: EventLog) {
   let cache: { at: number; refs: string[] } | null = null
   const listModels = async (): Promise<string[]> => {
     if (cache && Date.now() - cache.at < 300_000) return cache.refs
-    const perProvider = await Promise.all([...providers.entries()].map(async ([pid, p]) => {
-      const live = p.listModels ? await p.listModels() : []
-      return { pid, ids: modelUniverse(live, p.costs) }
+    const perProvider: DiscoveredProvider[] = await Promise.all([...providers.entries()].map(async ([pid, p]) => {
+      // a throwing provider is UNREACHABLE, isolated here so one napping daemon neither
+      // rejects the whole fetch nor masquerades as "this provider serves nothing"
+      try {
+        const live = p.listModels ? await p.listModels() : []
+        return { pid, ids: modelUniverse(live, p.costs), reachable: true }
+      } catch {
+        return { pid, ids: modelUniverse([], p.costs), reachable: false }
+      }
     }))
     if (log) {
       // append-on-change: the latest event per provider IS the catalog
@@ -114,11 +134,10 @@ export function buildModelDiscovery(config: ProjectConfig, log?: EventLog) {
         const p = ModelsDiscoveredPayload.safeParse(e.payload)
         if (p.success) last.set(p.data.providerId, JSON.stringify(p.data.models))
       }
-      for (const { pid, ids } of perProvider) {
-        if (ids.length === 0 || JSON.stringify(ids) === last.get(pid)) continue
+      for (const payload of catalogAppends(perProvider, last)) {
         await log.append({
           taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.models_discovered,
-          payload: { providerId: pid, models: ids },
+          payload,
         }).catch(() => {}) // catalog persistence is best-effort, discovery still returns live data
       }
     }

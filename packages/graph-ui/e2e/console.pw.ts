@@ -17,6 +17,23 @@ const ledger = (page: Page) => page.getByRole('region', { name: 'ledger' })
 const inspector = (page: Page) => page.getByRole('complementary', { name: 'inspector' })
 const copilot = (page: Page) => page.getByRole('region', { name: 'copilot' })
 
+// A node is only truly on screen when its CENTER lands inside the canvas box: toBeVisible is
+// satisfied by any non-zero box, including one the canvas transform has pushed outside the
+// clipped container — the empty-box-until-manual-fit failure renders every node "visible" while
+// the operator sees nothing. Shared by every flow-canvas test so each drawing carries the same
+// guarantee, not only the one that caught the bug.
+type Boxed = { boundingBox(): Promise<{ x: number; y: number; width: number; height: number } | null> }
+async function expectCenteredInside(canvas: Boxed, node: Boxed): Promise<void> {
+  await expect(async () => {
+    const [box, n] = [await canvas.boundingBox(), await node.boundingBox()]
+    if (!box || !n) throw new Error('no bounding box yet')
+    const cx = n.x + n.width / 2
+    const cy = n.y + n.height / 2
+    if (cx < box.x || cx > box.x + box.width || cy < box.y || cy > box.y + box.height)
+      throw new Error(`node center (${cx},${cy}) outside canvas box (${box.x},${box.y} ${box.width}x${box.height})`)
+  }).toPass({ timeout: 5_000 })
+}
+
 async function open(page: Page): Promise<void> {
   await page.goto('/')
   await expect(rail(page).getByRole('button', { name: new RegExp(SEEDED_REQUEST) })).toBeVisible()
@@ -170,7 +187,10 @@ test('the plan graph draws its steps inside wave containers, and collapses on de
   await expect(graph.getByText(/^wave 1$/)).toBeVisible()
   // and the seeded plan's step drawn INSIDE it — proof the child resolved against its parent
   // rather than landing at the canvas origin, which is how a broken subflow fails
-  await expect(graph.getByText('s1', { exact: true }).first()).toBeVisible()
+  const step = graph.getByText('s1', { exact: true }).first()
+  await expect(step).toBeVisible()
+  // ...and inside the viewport once the initial fit settles — see expectCenteredInside
+  await expectCenteredInside(graph, step)
 
   const toggle = inspector(page).getByRole('button', { name: /dependency graph/ })
   await toggle.click()
@@ -244,7 +264,9 @@ test('the plan graph draws a diamond across three wave containers', async ({ pag
   await expect(graph.getByText('2 in parallel')).toBeVisible()
 
   for (const step of ['analyze', 'left', 'right', 'join']) {
-    await expect(graph.getByText(step, { exact: true }).first()).toBeVisible()
+    const node = graph.getByText(step, { exact: true }).first()
+    await expect(node).toBeVisible()
+    await expectCenteredInside(graph, node)
   }
 })
 
@@ -264,6 +286,7 @@ test('the plan graph opens full size and draws the same plan', async ({ page }) 
   const big = dialog.getByRole('group', { name: 'plan dependency graph' })
   await expect(big).toBeVisible()
   await expect(big.getByText('join', { exact: true }).first()).toBeVisible()
+  await expectCenteredInside(big, big.getByText('join', { exact: true }).first())
   // and it is genuinely bigger than the inline one
   const box = await big.boundingBox()
   expect(box?.height ?? 0).toBeGreaterThan(460)

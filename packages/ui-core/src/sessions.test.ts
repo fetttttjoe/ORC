@@ -206,6 +206,16 @@ describe('ProjectSessions', () => {
     expect((await sessions.log(TEST_PROJECT_ID, { sinceSeq: q2.seq })).map(r => r.seq)).toEqual([])
     expect((await sessions.log(TEST_PROJECT_ID, { kinds: [EVENT_KIND.feedback_requested] })).map(r => r.seq))
       .toEqual([q1.seq, q2.seq])
+
+    // beforeSeq is EXCLUSIVE and pages BACKWARD: the ledger asks for what precedes its oldest
+    // row, and with limit it must get the rows nearest the cursor, not the start of the log
+    // (the head of the unlimited read is the task's own task_created row, so assert the tail)
+    const before = await sessions.log(TEST_PROJECT_ID, { taskId, beforeSeq: q2.seq })
+    expect(before.every(r => r.seq < q2.seq)).toBe(true)
+    expect(before.map(r => r.seq).slice(-3)).toEqual([s1.seq, q1.seq, s2.seq])
+    expect((await sessions.log(TEST_PROJECT_ID, { taskId, beforeSeq: q2.seq, limit: 2 })).map(r => r.seq))
+      .toEqual([q1.seq, s2.seq])
+    expect((await sessions.log(TEST_PROJECT_ID, { beforeSeq: s1.seq, limit: 5 })).every(r => r.seq < s1.seq)).toBe(true)
   })
 
   // The 'armed' colouring these three cases used to assert lived only in the mermaid strings

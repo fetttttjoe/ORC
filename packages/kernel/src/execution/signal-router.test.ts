@@ -331,6 +331,67 @@ describe('createSignalRouter (integration, real EventLog)', () => {
     expect(await failures()).toHaveLength(1)
   })
 
+  // The reactor route (knowledge provenance plan T2): a hand-made commit's hook event reaches an
+  // injected handler, so the composition root can run the free restamp/heal reaction the operator
+  // ran by hand twice on 2026-08-03 (commit → restamp → drift 0, ~1 min, zero LLM cost each time).
+  describe('commit_recorded routing', () => {
+    const commit = (sha: string, paths: string[]) =>
+      log.append({ taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.commit_recorded, payload: { sha, paths } })
+
+    it('a live commit_recorded event reaches onCommitRecorded with its payload', async () => {
+      const seen: Array<{ sha: string; paths: string[] }> = []
+      router = createSignalRouter({
+        log, onChildApproved: async () => {}, onRunRequested: async () => {}, onCancelled: async () => {},
+        onCommitRecorded: async p => { seen.push({ sha: p.sha, paths: [...p.paths] }) },
+        send: async () => {}, sendFeedback: async () => {},
+      })
+      await router.start()
+      await commit('a'.repeat(40), ['src/x.ts'])
+      expect(await waitFor(async () => seen.length > 0)).toBe(true)
+      expect(seen).toEqual([{ sha: 'a'.repeat(40), paths: ['src/x.ts'] }])
+    })
+
+    it('sweep: only the LATEST commit that landed while down is served on start()', async () => {
+      // the reaction is idempotent corpus-wide (restamp covers everything behind), so serving
+      // every historical commit on every boot would be pure duplicate work
+      await commit('b'.repeat(40), ['a.ts'])
+      await commit('c'.repeat(40), ['b.ts'])
+      const seen: string[] = []
+      router = createSignalRouter({
+        log, onChildApproved: async () => {}, onRunRequested: async () => {}, onCancelled: async () => {},
+        onCommitRecorded: async p => { seen.push(p.sha) },
+        send: async () => {}, sendFeedback: async () => {},
+      })
+      await router.start()
+      expect(seen).toEqual(['c'.repeat(40)])
+    })
+
+    it('without a handler the event is ignored, not an error', async () => {
+      router = createSignalRouter({
+        log, onChildApproved: async () => {}, onRunRequested: async () => {}, onCancelled: async () => {},
+        send: async () => {}, sendFeedback: async () => {},
+      })
+      await router.start()
+      await commit('d'.repeat(40), [])
+      await Bun.sleep(200)
+      expect((await log.all()).filter(e => e.kind === EVENT_KIND.reaction_failed)).toHaveLength(0)
+    })
+
+    it('a throwing handler is contained as reaction_failed naming the commit reaction', async () => {
+      router = createSignalRouter({
+        log, onChildApproved: async () => {}, onRunRequested: async () => {}, onCancelled: async () => {},
+        onCommitRecorded: async () => { throw new Error('memory down') },
+        send: async () => {}, sendFeedback: async () => {},
+      })
+      await router.start()
+      const c = await commit('e'.repeat(40), ['x.ts'])
+      const failures = async () => (await log.all()).filter(e => e.kind === EVENT_KIND.reaction_failed)
+      expect(await waitFor(async () => (await failures()).length > 0)).toBe(true)
+      const recorded = ReactionFailedPayload.parse((await failures())[0]!.payload)
+      expect(recorded).toEqual({ reaction: REACTION.commitRecorded, taskId: null, message: 'memory down', causeSeq: c.seq })
+    })
+  })
+
   it('the failure is folded onto the task, so status can say why it never moved', async () => {
     router = createSignalRouter({
       log, onChildApproved: async () => {}, onCancelled: async () => {},

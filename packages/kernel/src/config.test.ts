@@ -64,6 +64,9 @@ describe('loadConfig', () => {
     expect(c.databaseUrl).toContain('5433')
     expect(c.appVersion).toMatch(/^orc-/)
     expect(c.execAllowlist).toEqual([]) // no allowlist → exec tool is not offered
+    // draft-sweep by default is deliberate: the reactor's free half runs silently and its LLM
+    // half only ever appears as a DRAFTED task — the default spends nothing on its own
+    expect(c.autoHeal).toBe('draft-sweep')
   })
   it('rejects malformed ORC_CONCURRENCY loudly — orc env is zod-validated', () => {
     withEnv({ ORC_CONCURRENCY: 'abc' }, () => {

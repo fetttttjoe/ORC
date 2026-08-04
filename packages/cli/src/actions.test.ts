@@ -6,7 +6,7 @@ import { EVENT_KIND, MemoryWrittenPayload, TASK_STATUS, type ExecutionPort } fro
 import { Kernel, initializeProject, openStorage } from '@orc/kernel'
 import { createTestDb, TEST_PROJECT_ID, testConfig, type TestDb } from '@orc/kernel/test-helpers'
 import { PROJECT_DIR_NOTE_ID } from '@orc/ui-core'
-import { buildOrcActions, modelUniverse } from './actions'
+import { buildOrcActions, catalogAppends, modelUniverse } from './actions'
 
 const dbs: Array<{ drop: () => Promise<void> }> = []
 afterAll(async () => { await Promise.all(dbs.map(d => d.drop())) }, 30_000)
@@ -87,6 +87,30 @@ describe('modelUniverse', () => {
     expect(modelUniverse(['claude-haiku-4-5-20251001'], { 'claude-haiku-4-5': {}, '*': {} }))
       .toEqual(['claude-haiku-4-5', 'claude-haiku-4-5-20251001'])
     expect(modelUniverse([], { '*': {} })).toEqual([]) // wildcard-only providers discover nothing
+  })
+})
+
+describe('catalogAppends', () => {
+  const last = new Map([['ollama', JSON.stringify(['all-minilm:latest', 'nomic-embed-text:latest'])]])
+
+  it('records an EMPTIED catalog from a reachable provider — the stale-encoder case', () => {
+    // observed 2026-08-03: the embedding filter emptied ollama's live list, and the old
+    // empty-list guard skipped the append, so the served catalog kept offering the encoders
+    expect(catalogAppends([{ pid: 'ollama', ids: [], reachable: true }], last))
+      .toEqual([{ providerId: 'ollama', models: [] }])
+  })
+
+  it('records nothing for an UNREACHABLE provider — silence is not a catalog', () => {
+    expect(catalogAppends([{ pid: 'ollama', ids: [], reachable: false }], last)).toEqual([])
+  })
+
+  it('records nothing when the catalog is unchanged', () => {
+    expect(catalogAppends([{ pid: 'ollama', ids: ['all-minilm:latest', 'nomic-embed-text:latest'], reachable: true }], last)).toEqual([])
+  })
+
+  it('records a first sighting for a provider with no prior event', () => {
+    expect(catalogAppends([{ pid: 'anthropic', ids: ['claude-opus-5'], reachable: true }], last))
+      .toEqual([{ providerId: 'anthropic', models: ['claude-opus-5'] }])
   })
 })
 

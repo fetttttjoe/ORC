@@ -92,7 +92,7 @@ a grep here comes back empty.
 - Note is in Postgres (canonical)
 - Note and its claims are queryable in Surreal (read model); topics are repartitioned
 - `vault/memory/index.md` is updated (human projection)
-- Next `memory_search` (both arms), `memory_neighbors` or `memory_topics` sees it
+- Next `memory_search` (both arms), `memory_neighbors`, `memory_topics` or `memory_recheck` sees it
 
 **How to debug memory issues:**
 - `orc memory ls` lists all notes; `hits` column shows access count
@@ -268,7 +268,7 @@ The **tier** decides which further fields a note may carry, structurally — a s
 
 **Claims** are the addressable unit on a semantic note: each is a statement whose id IS its content (`claimId(text)` = sha256 of the whitespace-normalized text, first 12 hex chars). Writers add and retire them by name (`addClaims` / `invalidates`) — supplying the array is deliberately impossible. `validFrom` is stamped by the projector. **Topics** group claims by embedding cosine and are derived, never authored.
 
-**Access pattern:** `memory_search(query, category, tag, mode, limit, budget)` is hybrid (vector ⊕ keyword, falling back to keyword with no embedder) and returns TWO arms — matched claims first, then summaries of notes that matched without asserting one; `memory_neighbors(seed, kinds, depth, scope)` does a graph traversal; `memory_read(id)` fetches one note; `memory_topics()` lists the derived groups and `memory_topics(topic)` fetches one group's claims.
+**Access pattern:** `memory_search(query, category, tag, mode, limit, budget)` is hybrid (vector ⊕ keyword, falling back to keyword with no embedder) and returns TWO arms — matched claims first, then summaries of notes that matched without asserting one; `memory_neighbors(seed, kinds, depth, scope)` does a graph traversal; `memory_read(id)` fetches one note; `memory_topics()` lists the derived groups and `memory_topics(topic)` fetches one group's claims; `memory_recheck(limit, budget)` returns the corpus drift verdict — exact counts plus the drifted/unknown note lists.
 
 ---
 

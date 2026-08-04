@@ -4,7 +4,7 @@ import { DBOS } from '@dbos-inc/dbos-sdk'
 import {
   EVENT_KIND, FAILURE_CLASS, RUN_OUTCOME, SIGNAL_OUTCOME, STEP_ID, STEP_ROLE, TASK_STATUS, UNIFIED_EVENT_TYPE,
   classifiedError, errorMessage, failureClassOf, isTerminalError, resolveModel, costUSDFor,
-  type AgentExecutor, type Checkpoint, type EventDraft, type ExecutionPort, type ExecutorContext,
+  type AgentExecutor, type Checkpoint, type CommitRecordedPayload, type EventDraft, type ExecutionPort, type ExecutorContext,
   type FailureClass, type LoadedSkill, type ModelProvider, type OperationCheckpoint, type Plan, type PlanStep,
   type ResolvedTool, type RunHandle, type RunOutcome, type Signal, type SplitResult, type StepMemory, type TaskStatus, type ToolSource,
 } from '@orc/contracts'
@@ -162,6 +162,10 @@ export async function createDbosPort(opts: {
   // Read-only probe behind the grounded analyze step's freshness short-circuit. Optional: a port
   // built without it behaves exactly as before, because the branch is guarded on its presence.
   groundingSource?: GroundingSource
+  // The auto-heal reactor for out-of-task commits, injected because the kernel may not import
+  // plugins/memory (same seam as the commit tool's restamp callback). Optional: absent, the
+  // router leaves commit_recorded a traceability record, as before.
+  onCommitRecorded?: (payload: CommitRecordedPayload) => Promise<void>
   executorId?: string
 }): Promise<DbosPort> {
   const { config, providers, executors, skills, tools, stepTools, groundingSource } = opts
@@ -838,6 +842,7 @@ export async function createDbosPort(opts: {
     onChildApproved: id => port.startChildRun(id),
     onRunRequested: async (taskId, o) => { await startRunAt(taskId, o.retry ? await nextRetryIndex(taskId) : 0, o.cwd ?? undefined) },
     onCancelled: cancelWorkflowsFor,
+    ...(opts.onCommitRecorded && { onCommitRecorded: opts.onCommitRecorded }),
     send: (dest, result, topic, key) => DBOS.send(dest, result, topic, key),
     sendFeedback: dbosSend,
   })

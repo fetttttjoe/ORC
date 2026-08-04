@@ -1,5 +1,5 @@
 import { z } from 'zod'
-import { AccessVia, CLAIM_ID_RE, ClaimWrite, isRecord, DRIFT_STATE, EDGE_DIRECTIONS, inferTier, linkLookupScopes, MASTERPLAN_NOTE_ID, MemoryScope, MEMORY_ACCESS, MEMORY_ID_RE, MEMORY_LIMITS, MEMORY_SOURCE_LIMITS, MEMORY_TOOL_NAME, MemorySearchResult, MemoryWriteResult, NoteCategory, NOTE_CATEGORIES, NOTE_KINDS, LINK_KIND, LINK_KINDS, planFieldViolations, RETENTION_CLASSES, SEARCH_MODES, SearchMode, stepMayVerify, LinkKind, MemoryNoteDraftInput, NOTE_TIER, NOTE_TIERS, slugId, toolError, type MemoryAuthor, type MemoryNote, type MemoryStore, type ResolvedTool, type VerifiedStamp } from '@orc/contracts'
+import { AccessVia, CLAIM_ID_RE, ClaimWrite, isRecord, DRIFT_STATE, EDGE_DIRECTIONS, inferTier, linkLookupScopes, MASTERPLAN_NOTE_ID, MemoryScope, MEMORY_ACCESS, MEMORY_ID_RE, MEMORY_LIMITS, MEMORY_SOURCE_LIMITS, MEMORY_TOOL_NAME, MemorySearchResult, MemoryWriteResult, NoteCategory, NOTE_CATEGORIES, NOTE_KINDS, LINK_KIND, LINK_KINDS, planFieldViolations, RETENTION_CLASSES, SEARCH_MODES, SearchMode, stepMayVerify, LinkKind, MemoryNoteDraftInput, NOTE_TIER, NOTE_TIERS, emptyUseStats, slugId, toolError, useLine, type MemoryAuthor, type MemoryNote, type MemoryStore, type ResolvedTool, type VerifiedStamp } from '@orc/contracts'
 import { applyBudget, fitMemoryNoteToBudget } from './budget'
 import { noteDriftState, type ChangedSince } from './drift'
 import { NEAR_SUBJECT, trigramDice } from './title-similarity'
@@ -261,6 +261,12 @@ const NeighborsInput = z.object({
 // key IS a claim id, so it validates against CLAIM_ID_RE like every other one — a malformed key now
 // fails as a shape error the model can self-correct, not as "no such topic".
 const TopicsInput = z.object({ topic: z.string().regex(CLAIM_ID_RE).optional(), budget: Budget })
+// limit bounds the drifted/unknown LISTINGS only, never the counts — the verdict must stay
+// authoritative however tight the reply. Same shared Budget every read tool takes.
+const RecheckInput = z.object({
+  limit: z.number().int().positive().max(MEMORY_LIMITS.detailItems).optional(),
+  budget: Budget,
+})
 // Tool-boundary variant: agents may omit id — the title-derived slug makes the same finding
 // converge instead of forking (bench: note-id drift). Named top-level, not call-site.
 // `invalidates` is stated about the WRITE, not about the note, so it is parsed here and forwarded on
@@ -477,12 +483,12 @@ type WriteSchemaCoversInput =
 const writeSchemaCoversInput: WriteSchemaCoversInput = true
 void writeSchemaCoversInput
 
-// Degraded mode (design §8.4): the same four tools exist but every call returns an explicit
+// Degraded mode (design §8.4): the same six tools exist but every call returns an explicit
 // isError result naming the reason — the model learns context is unavailable instead of
 // silently losing its memory tools.
 export function unavailableMemoryTools(reason: string): ResolvedTool[] {
   const fail = async (): Promise<never> => { throw new Error(`memory unavailable: ${reason}`) }
-  const store: MemoryStore = { write: fail, remove: fail, setArchived: fail, setArchivedAll: fail, get: fail, list: fail, search: fail, searchClaims: fail, claimsFor: fail, neighbors: fail, recordAccess: fail, topics: fail, topicClaims: fail, verify: fail }
+  const store: MemoryStore = { write: fail, remove: fail, setArchived: fail, setArchivedAll: fail, get: fail, useStats: fail, recordOutcomes: fail, list: fail, search: fail, searchClaims: fail, claimsFor: fail, neighbors: fail, recordAccess: fail, topics: fail, topicClaims: fail, verify: fail }
   return memoryTools({ store, author: { source: 'agent' } })
 }
 
@@ -560,7 +566,7 @@ export function memoryVerifyTool(opts: {
 // here, next to the tool definitions, so a rename cannot drift a consumer's copy: external
 // drivers (orc mcp serve) expose exactly these — reading knowledge is theirs, authoring it
 // belongs to agents running inside plans. tools.test.ts pins every name to the actual surface.
-export const MEMORY_READ_TOOLS = [MEMORY_TOOL_NAME.search, MEMORY_TOOL_NAME.read, MEMORY_TOOL_NAME.neighbors, MEMORY_TOOL_NAME.topics] as const
+export const MEMORY_READ_TOOLS = [MEMORY_TOOL_NAME.search, MEMORY_TOOL_NAME.read, MEMORY_TOOL_NAME.neighbors, MEMORY_TOOL_NAME.topics, MEMORY_TOOL_NAME.recheck] as const
 
 // Injected as ResolvedTool[] via the same channel MCP tools use. Author is bound per step.
 // role keys the tool surface + epistemic posture (default 'verify' = today's unchanged behavior):
@@ -622,7 +628,7 @@ export function memoryTools(opts: {
       execute: async (input, toolCallId) => {
         try {
           // The write arm READS too — duplicateSubjectWarning below, and unresolvedLinks after the
-          // append — so it needs the same drain as the four read tools. Without it a turn that
+          // append — so it needs the same drain as the five read tools. Without it a turn that
           // writes `auth-flow` and then writes `arch-overview` linking to it checks that link
           // against the read model from BEFORE the first write and answers "these links resolve to
           // no note". loop.ts lifts that into a lint nudge worded "the warning is not optional",
@@ -854,6 +860,9 @@ export function memoryTools(opts: {
           const state = changedSince
             ? await noteDriftState({ sourceRevision: n.sourceRevision, paths, ...(n.verified && { verified: n.verified }) }, changedSince)
             : DRIFT_STATE.clean
+          // Display epistemics beside the note, never a rank input: the reader about to act on a
+          // contested note is exactly who needs both counts in view. useLine is the one spelling.
+          const use = useLine(await store.useStats(q.id, q.scope) ?? emptyUseStats())
           // every pull tool honors its budget (spec RG5) — metadata cannot bypass body truncation.
           const fitted = fitMemoryNoteToBudget(n, q.budget)
           // The hint names the paths the READER actually received — off `fitted.note`, which is
@@ -868,6 +877,7 @@ export function memoryTools(opts: {
           const where = hintPaths.length > 0 ? hintPaths.join(', ') : 'the paths this note declares'
           return ok({
             ...fitted,
+            ...(use !== null && { use }),
             ...(state === DRIFT_STATE.drifted && {
               drifted: true,
               next: `the code this note describes changed since it was written (${n.sourceRevision?.slice(0, 8)}) — re-read ${where} and, if the note is now wrong, memory_write the SAME id with the corrected content instead of adding a second note`,
@@ -965,8 +975,74 @@ export function memoryTools(opts: {
         } catch (e) { return toolError(e) }
       },
     },
+    {
+      // The AUTHORITATIVE drifted-note list — the corpus-level answer `orc memory recheck` computes,
+      // reachable from inside a plan and over MCP. Why discovery must not go through search: a live
+      // heal sweep (2026-08-03) found its candidates via four memory_search queries, healed/confirmed
+      // 20 notes, and still left 8 drifted — a drifted note only surfaces when a query happens to
+      // match it, while the drift probe already knows the whole list; only the CLI could reach it.
+      // Not built on the noteDriftIds helper above: that dedupes mixed note/claim rows down to bare
+      // id lists, and recheck also owes counts of clean-checked vs uncheckable. One loop below, one
+      // verdict function (noteDriftState), and corpusDrift's exact checkability rule (drift.ts): no
+      // sourceRevision or no declared paths = uncheckable, unreachable revision = unknown, neither
+      // ever counted as checkable.
+      ref: 'memory/recheck', name: MEMORY_TOOL_NAME.recheck,
+      description: withRole('The authoritative drift list for the whole corpus — the same per-note verdict memory_read and memory_search report, lifted to every note at once, so staleness discovery cannot miss what the drift probe already knows (search-based discovery does). Heal each `drifted` note by memory_write-ing the SAME id with what the code says now; `unknown` means the note\'s stamped revision is unreachable and it could not be judged — re-verify it against the tree rather than rewriting it. Counts are exact even when the listings are truncated.', role),
+      inputSchema: {
+        type: 'object',
+        properties: {
+          limit: { type: 'integer', minimum: 1, maximum: MEMORY_LIMITS.detailItems, description: `max drifted/unknown rows listed (default ${MEMORY_LIMITS.detailItems}); counts are never truncated` },
+          budget: budgetSchema,
+        },
+      },
+      execute: async input => {
+        await settled() // read-your-writes: a note this turn just healed must not re-list as drifted
+        try {
+          const q = RecheckInput.parse(input)
+          const notes = await store.list(searchScope ? { scope: [...searchScope] } : {})
+          if (!changedSince) {
+            // absence prose, never an error: no git probe means no verdict is possible, and a
+            // missing verdict is not evidence of rot (drift.ts's fail-toward-not-drifted rule) —
+            // same epistemics as memory_read's null and memory_topics' empty inventory
+            return ok({
+              counts: { total: notes.length, checkable: 0, drifted: 0, unknown: 0, uncheckable: notes.length },
+              drifted: [], unknown: [], truncated: false, omitted: 0,
+              absenceNote: 'drift cannot be checked without a git probe — no repository revision is available to compare against, so nothing here is evidence for or against rot',
+            })
+          }
+          const driftedRows: { id: string; scope: string; title: string; paths: string[] }[] = []
+          const unknownRows: { id: string; scope: string; title: string }[] = []
+          let checkable = 0
+          let uncheckable = 0
+          for (const n of notes) {
+            // corpusDrift's checkability rule, verbatim: the SOURCE stamp alone decides it
+            if (n.sourceRevision === null || n.paths.length === 0) { uncheckable += 1; continue }
+            const state = await noteDriftState({ sourceRevision: n.sourceRevision, paths: n.paths, ...(n.verified && { verified: n.verified }) }, changedSince)
+            if (state === DRIFT_STATE.unknown) { unknownRows.push({ id: n.id, scope: n.scope, title: n.title }); continue }
+            checkable += 1
+            if (state === DRIFT_STATE.drifted) driftedRows.push({ id: n.id, scope: n.scope, title: n.title, paths: [...n.paths] })
+          }
+          const limit = q.limit ?? MEMORY_LIMITS.detailItems
+          // one budget across both listings, drifted taking its share first (it is the actionable
+          // arm), measured over the SERIALIZED row — never one field (see `serialized` above)
+          const d = applyBudget(driftedRows, serialized, { limit, budget: q.budget })
+          const u = applyBudget(unknownRows, serialized, { limit, budget: Math.max(0, q.budget - d.used) })
+          return ok({
+            // counts come from the full rows, before any budget cut — the verdict is authoritative
+            // even when the listing is not
+            counts: { total: notes.length, checkable, drifted: driftedRows.length, unknown: unknownRows.length, uncheckable },
+            drifted: d.items, unknown: u.items,
+            truncated: d.truncated || u.truncated, omitted: d.omitted + u.omitted,
+            ...(driftedRows.length === 0 && unknownRows.length === 0 && checkable > 0 && {
+              absenceNote: 'nothing drifted — every checkable note describes the tree as it is',
+            }),
+          })
+        } catch (e) { return toolError(e) }
+      },
+    },
   ]
   // scout narrows off memory_neighbors only — it authors notes (memory_write) but doesn't yet
-  // have a rich graph to traverse.
+  // have a rich graph to traverse. memory_recheck stays on the scout surface deliberately: it is
+  // cheap and read-only, and a scout re-grounding the corpus is exactly who needs the drifted list.
   return role === MEMORY_ROLE.scout ? tools.filter(t => t.name !== MEMORY_TOOL_NAME.neighbors) : tools
 }

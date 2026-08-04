@@ -12,6 +12,7 @@
   import { api } from '$lib/api/client'
   import { EVENT_KIND } from '$lib/event-kinds'
   import { fmtCost, fmtTokens } from '$lib/features/inspector/node-head'
+  import { restoredRows, type CopilotRow as Row } from './copilot-rows'
 
   /**
    * The copilot strip. Bubbles persist per chat in localStorage: the ledger records the exchange
@@ -24,11 +25,9 @@
   // how far back to look for journaled exchanges when the pane opens
   const HISTORY_WINDOW = 400
 
-  type Row =
-    | { kind: 'message'; id: number; role: 'user' | 'assistant'; text: string }
-    | { kind: 'tool'; id: number; toolName: string; state: 'running' | 'done' | 'error'; detail: string }
-
+  // live rows carry their own namespace so they can never collide with a journal seq
   let nextId = 0
+  const liveId = (): string => `live:${nextId++}`
   let input = $state('')
   let busy = $state(false)
   let usage = $state<{ inputTokens: number; outputTokens: number; costUSD: number | null } | null>(null)
@@ -51,16 +50,14 @@
     placeholderData: keepPreviousData,
   }))
 
-  const restored = $derived.by(() => {
-    const out: Row[] = []
-    for (const row of history.data ?? []) {
-      if (row.kind !== EVENT_KIND.copilot_exchange || !row.exchange) continue
-      out.push({ kind: 'message', id: row.seq * 2, role: 'user', text: row.exchange.user })
-      for (const call of row.exchange.toolCalls) out.push({ kind: 'tool', id: row.seq * 2 + 1, toolName: call.toolName, state: 'done', detail: call.summary })
-      if (row.exchange.assistant !== '') out.push({ kind: 'message', id: row.seq * 2 + 2, role: 'assistant', text: row.exchange.assistant })
-    }
-    return out.slice(-HISTORY_CAP * 2)
-  })
+  const restored = $derived(
+    restoredRows(
+      (history.data ?? []).flatMap(row =>
+        row.kind === EVENT_KIND.copilot_exchange && row.exchange ? [{ seq: row.seq, ...row.exchange }] : [],
+      ),
+      HISTORY_CAP * 2,
+    ),
+  )
 
   // live turns append to whatever the log restored; clearing drops only what this pane shows
   let live = $state<Row[]>([])
@@ -95,9 +92,9 @@
     usage = null
     abort = new AbortController()
     input = ''
-    live = [...live, { kind: 'message', id: nextId++, role: 'user', text }]
+    live = [...live, { kind: 'message', id: liveId(), role: 'user', text }]
     const wire: CopilotMessage[] = messages.map(m => ({ role: m.role, content: m.text }))
-    const answerId = nextId++
+    const answerId = liveId()
     live = [...live, { kind: 'message', id: answerId, role: 'assistant', text: '' }]
 
     const appendToAnswer = (delta: string): void => {
@@ -112,7 +109,7 @@
         onPart: part => {
           if (part.type === 'text') appendToAnswer(part.text)
           else if (part.type === 'tool-call')
-            live = [...live, { kind: 'tool', id: nextId++, toolName: part.toolName, state: 'running', detail: JSON.stringify(part.input ?? {}) }]
+            live = [...live, { kind: 'tool', id: liveId(), toolName: part.toolName, state: 'running', detail: JSON.stringify(part.input ?? {}) }]
           else if (part.type === 'tool-result')
             live = live.map(r =>
               r.kind === 'tool' && r.toolName === part.toolName && r.state === 'running' ? { ...r, state: 'done', detail: JSON.stringify(part.output ?? {}) } : r,

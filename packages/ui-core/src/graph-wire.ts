@@ -59,3 +59,8 @@ export const linkKey = (l: GraphLink): string => `${l.source}\u0000${l.target}\u
 
 export const emptyPatch = (p: GraphPatch): boolean =>
   !p.addNodes.length && !p.updateNodes.length && !p.removeNodeIds.length && !p.addLinks.length && !p.removeLinks.length && !p.updateLinks.length
+
+// /api/log's query vocabulary — one spelling for the server (searchParams.get) and the browser's
+// query builder. Same rule as linkKey above: both sides speak it and neither may import the
+// other, so the names live at the wire. `since`/`before` are the log's two paging directions.
+export const LOG_PARAM = { task: 'task', limit: 'limit', since: 'since', before: 'before' } as const

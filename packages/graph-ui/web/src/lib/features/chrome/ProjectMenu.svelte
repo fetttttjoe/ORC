@@ -68,7 +68,7 @@
 <DropdownMenu.Root>
   <DropdownMenu.Trigger>
     {#snippet child({ props })}
-      <Button {...props} variant="ghost" size="icon" class="size-6" title="chat actions"><EllipsisIcon /></Button>
+      <Button {...props} variant="ghost" size="icon" class="size-6" title="chat actions" aria-label="chat actions"><EllipsisIcon /></Button>
     {/snippet}
   </DropdownMenu.Trigger>
   <DropdownMenu.Content align="start" class="w-44">

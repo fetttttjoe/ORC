@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'bun:test'
 import { EventKind, PAYLOAD_SCHEMAS } from './events'
 import {
-  addUsage, classifiedError, costUSDFor, failureClassOf, isTerminalError, resolveModel, terminalError,
+  addUsage, classifiedError, costUSDFor, failureClassOf, isTerminalError, modelIdsFrom, resolveModel, terminalError,
   Signal, UnifiedEvent, FAILURE_CLASS, SIGNAL_OUTCOME,
   type EventDraft, type ModelProvider, type OperationCheckpoint, type Usage,
 } from './execution'
@@ -116,5 +116,18 @@ describe('costUSDFor cache pricing', () => {
   it('without cache info or rates, all input prices at inPerMTok', () => {
     expect(costUSDFor(costs, 'm', 1_000_000, 0)).toBe(1)
     expect(costUSDFor({ m: { inPerMTok: 1, outPerMTok: 5 } }, 'm', 1_000_000, 0, { readTokens: 900_000 })).toBe(1)
+  })
+})
+
+describe('modelIdsFrom', () => {
+  it('extracts ids and degrades a malformed ENTRY to fewer ids — the API answered', () => {
+    expect(modelIdsFrom({ data: [{ id: 'a' }, { broken: true }, { id: 'b' }] }, 'data', 'id')).toEqual(['a', 'b'])
+    expect(modelIdsFrom({ data: [] }, 'data', 'id')).toEqual([]) // positively empty
+  })
+  it('THROWS when the list key is missing or not an array — an unparseable body is not an answer', () => {
+    // [] here would flow into discovery as "reachable and empty" and append models: [] over the
+    // real catalog — the silence-vs-empty confusion the listModels contract exists to kill.
+    expect(() => modelIdsFrom({ nope: true }, 'data', 'id')).toThrow('data')
+    expect(() => modelIdsFrom('not even a record', 'data', 'id')).toThrow('data')
   })
 })

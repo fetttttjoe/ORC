@@ -31,6 +31,8 @@ const fakeStore = (over: Partial<MemoryStore> = {}) => {
     remove: async () => {},
     setArchived: async () => {}, setArchivedAll: async () => {},
     get: async () => toNote({ id: 'auth', title: 'Auth', body: 'b' }),
+    useStats: async () => null,
+    recordOutcomes: async () => {},
     list: async () => [],
     search: async () => [summary('auth', 'Auth')],
     searchClaims: async () => [],
@@ -75,6 +77,26 @@ describe('memory tools', () => {
     expect(r.isError).toBeFalsy()
     expect(seen[0]?.id).toBe('existing-note')
     expect(seen[0]?.title).toBeUndefined() // omitted, not fabricated — the store fills it
+  })
+
+  // Display epistemics beside the note, from the ONE spelling (contracts useLine): the reader
+  // about to act on a contested note is exactly who needs to see both counts. Never a rank input.
+  it('memory_read surfaces the use-verdict line beside a note that has outcome evidence', async () => {
+    const { store } = fakeStore({
+      useStats: async () => ({ useful: { hits: 2, lastAccessedAt: 't1' }, deadEnd: { hits: 1, lastAccessedAt: 't2' } }),
+    })
+    const read = memoryTools({ store, author: { source: 'cli' } }).find(t => t.name === MEMORY_TOOL_NAME.read)!
+    const r = await read.execute({ id: 'auth' }, 'c1')
+    expect(r.isError).toBeFalsy()
+    expect(z.object({ use: z.string() }).parse(r.output).use).toBe('contested (useful 2 / dead-end 1)')
+  })
+
+  it('a note with no outcome evidence carries no use line — absence stays silent', async () => {
+    const { store } = fakeStore()
+    const read = memoryTools({ store, author: { source: 'cli' } }).find(t => t.name === MEMORY_TOOL_NAME.read)!
+    const r = await read.execute({ id: 'auth' }, 'c1')
+    expect(r.isError).toBeFalsy()
+    expect(Object.keys(z.record(z.string(), z.unknown()).parse(r.output))).not.toContain('use')
   })
 
   it('still refuses a NEW note with no title, and says why', async () => {
@@ -200,13 +222,14 @@ describe('memory tools', () => {
     const readToolsWith = (catchUp: () => Promise<void>, f: ReturnType<typeof fakeStore>) =>
       memoryTools({ store: f.store, author: { source: 'cli' }, catchUp })
 
-    it('memory_read, memory_search, memory_neighbors and memory_topics each catch up before reading', async () => {
+    it('memory_read, memory_search, memory_neighbors, memory_topics and memory_recheck each catch up before reading', async () => {
       const order: string[] = []
       const f = fakeStore({
         get: async id => { order.push(`get:${id}`); return toNote({ id: 'auth', title: 'Auth', body: 'b' }) },
         search: async () => { order.push('search'); return [] },
         neighbors: async () => { order.push('neighbors'); return [] },
         topics: async () => { order.push('topics'); return [] },
+        list: async () => { order.push('list'); return [] },
       })
       const tools = readToolsWith(async () => { order.push('catchUp') }, f)
       const call = async (name: string, input: unknown) =>
@@ -215,9 +238,10 @@ describe('memory tools', () => {
       await call('memory_search', { query: 'x' })
       await call('memory_neighbors', { id: 'auth' })
       await call('memory_topics', {})
+      await call('memory_recheck', {})
       // every read tool drains, and its own drain comes FIRST — not one amortized across the batch,
       // and never after the store call it is meant to make current
-      expect(order.filter(o => o === 'catchUp')).toHaveLength(4)
+      expect(order.filter(o => o === 'catchUp')).toHaveLength(5)
       for (const [i, entry] of order.entries())
         if (entry !== 'catchUp') expect(order[i - 1]).toBe('catchUp')
     })
@@ -292,10 +316,10 @@ describe('memory tools', () => {
     })
   })
 
-  it('declares five tools; memory_write routes to the store with the bound author', async () => {
+  it('declares six tools; memory_write routes to the store with the bound author', async () => {
     const { store, written } = fakeStore()
     const tools = memoryTools({ store, author: { source: 'agent', executor: 'api-loop', model: 'opus', role: 'review' } })
-    expect(tools.map(t => t.name).sort()).toEqual(['memory_neighbors', 'memory_read', 'memory_search', 'memory_topics', 'memory_write'])
+    expect(tools.map(t => t.name).sort()).toEqual(['memory_neighbors', 'memory_read', 'memory_recheck', 'memory_search', 'memory_topics', 'memory_write'])
     // the exported read subset pins to the real surface — rename a tool and this fails HERE,
     // in the owning package, not silently in a consumer's filter (orc mcp serve)
     const names = new Set(tools.map(t => t.name))
@@ -453,6 +477,108 @@ describe('memory tools', () => {
     expect(out.drifted).toBeUndefined()
   })
 
+  // The gap memory_recheck closes: a live heal sweep (2026-08-03) discovered its candidates via
+  // four memory_search queries, healed/confirmed 20 notes, and still left 8 drifted — search-based
+  // discovery misses notes the drift probe already knows about. The tool is the corpus-level list
+  // `orc memory recheck` already computes, reachable from inside a plan and over MCP.
+  describe('memory_recheck — the authoritative corpus drift list', () => {
+    const RecheckOutput = z.object({
+      counts: z.object({ total: z.number(), checkable: z.number(), drifted: z.number(), unknown: z.number(), uncheckable: z.number() }),
+      drifted: z.array(z.object({ id: z.string(), scope: z.string(), title: z.string(), paths: z.array(z.string()) })),
+      unknown: z.array(z.object({ id: z.string(), scope: z.string(), title: z.string() })),
+      absenceNote: z.string().optional(),
+    })
+    const corpus: NoteSummary[] = [
+      { ...summary('area-clean', 'Clean area'), sourceRevision: 'abc1234', paths: ['src/y.ts'] },
+      { ...summary('area-drifted', 'Drifted area'), sourceRevision: 'abc1234', paths: ['src/x.ts'] },
+      { ...summary('area-pathless', 'Pathless area'), sourceRevision: 'abc1234', paths: [] },
+    ]
+
+    it('counts clean/drifted/uncheckable over the whole corpus and lists the drifted notes', async () => {
+      const { store } = fakeStore({ list: async () => corpus })
+      // only src/x.ts moved since abc1234 → area-drifted is stale, area-clean checked out,
+      // area-pathless declares nothing and can never be checked (fail-toward-not-drifted)
+      const changedSince = async () => new Set(['src/x.ts'])
+      const recheck = memoryTools({ store, author: { source: 'cli' }, changedSince }).find(t => t.name === 'memory_recheck')!
+      const r = await recheck.execute({})
+      expect(r.isError).toBeFalsy()
+      const out = RecheckOutput.parse(r.output)
+      expect(out.counts).toEqual({ total: 3, checkable: 2, drifted: 1, unknown: 0, uncheckable: 1 })
+      expect(out.drifted).toEqual([{ id: 'area-drifted', scope: 'project', title: 'Drifted area', paths: ['src/x.ts'] }])
+      expect(out.unknown).toEqual([])
+      expect(out.absenceNote).toBeUndefined() // something drifted — no affirmative absence
+    })
+
+    it('an unreachable revision lists under unknown, never drifted', async () => {
+      const { store } = fakeStore({ list: async () => [corpus[1]!] })
+      const changedSince = async () => null // rebased away / shallow clone
+      const recheck = memoryTools({ store, author: { source: 'cli' }, changedSince }).find(t => t.name === 'memory_recheck')!
+      const out = RecheckOutput.parse((await recheck.execute({})).output)
+      expect(out.counts).toEqual({ total: 1, checkable: 0, drifted: 0, unknown: 1, uncheckable: 0 })
+      expect(out.unknown).toEqual([{ id: 'area-drifted', scope: 'project', title: 'Drifted area' }])
+      expect(out.drifted).toEqual([])
+    })
+
+    it('a verification newer than the moved code clears the verdict — the either-clean rule', async () => {
+      // pins the `verified` pass-through to noteDriftState: dropping that spread would flip this
+      // note to drifted and send the next sweep to re-derive knowledge an auditor just confirmed
+      const verified: NoteSummary = {
+        ...summary('area-verified', 'Verified area'),
+        sourceRevision: 'old1234', paths: ['src/x.ts'],
+        verified: { revision: 'new5678', at: '2026-08-03T00:00:00Z', by: 'auditor' },
+      }
+      const { store } = fakeStore({ list: async () => [verified] })
+      // src/x.ts moved since the SOURCE stamp but not since the VERIFIED one
+      const changedSince = async (rev: string) => (rev === 'old1234' ? new Set(['src/x.ts']) : new Set<string>())
+      const recheck = memoryTools({ store, author: { source: 'cli' }, changedSince }).find(t => t.name === 'memory_recheck')!
+      const out = RecheckOutput.parse((await recheck.execute({})).output)
+      expect(out.counts).toEqual({ total: 1, checkable: 1, drifted: 0, unknown: 0, uncheckable: 0 })
+      expect(out.drifted).toEqual([])
+    })
+
+    it('without a git probe it reports everything uncheckable with absence prose, not an error', async () => {
+      const { store } = fakeStore({ list: async () => corpus })
+      const recheck = memoryTools({ store, author: { source: 'cli' } }).find(t => t.name === 'memory_recheck')!
+      const r = await recheck.execute({})
+      expect(r.isError).toBeFalsy()
+      const out = RecheckOutput.parse(r.output)
+      expect(out.counts).toEqual({ total: 3, checkable: 0, drifted: 0, unknown: 0, uncheckable: 3 })
+      expect(out.absenceNote).toContain('git probe')
+    })
+
+    it('a clean checkable corpus says so affirmatively — silence is not trust', async () => {
+      const { store } = fakeStore({ list: async () => [corpus[0]!] })
+      const changedSince = async () => new Set(['src/elsewhere.ts'])
+      const recheck = memoryTools({ store, author: { source: 'cli' }, changedSince }).find(t => t.name === 'memory_recheck')!
+      const out = RecheckOutput.parse((await recheck.execute({})).output)
+      expect(out.counts.drifted).toBe(0)
+      expect(out.absenceNote).toBe('nothing drifted — every checkable note describes the tree as it is')
+    })
+
+    it('confines the listing to the step lanes when searchScope is bound', async () => {
+      let seenFilter: unknown
+      const { store } = fakeStore({ list: async filter => { seenFilter = filter; return [] } })
+      const lanes = ['plan-task-a', 'project'] as const
+      const recheck = memoryTools({ store, author: { source: 'cli' }, searchScope: lanes, changedSince: async () => new Set<string>() }).find(t => t.name === 'memory_recheck')!
+      await recheck.execute({})
+      expect(seenFilter).toEqual({ scope: ['plan-task-a', 'project'] })
+    })
+
+    it('budgets the drifted listing with the serialized measure — counts stay authoritative', async () => {
+      const many: NoteSummary[] = Array.from({ length: 30 }, (_, i) =>
+        ({ ...summary(`stale-${i}`, `Stale ${i}`), sourceRevision: 'abc1234', paths: ['src/x.ts'] }))
+      const { store } = fakeStore({ list: async () => many })
+      const changedSince = async () => new Set(['src/x.ts'])
+      const recheck = memoryTools({ store, author: { source: 'cli' }, changedSince }).find(t => t.name === 'memory_recheck')!
+      const out = z.object({
+        counts: z.object({ drifted: z.number() }), drifted: z.array(z.unknown()), truncated: z.boolean(),
+      }).parse((await recheck.execute({ budget: 30 })).output)
+      expect(out.counts.drifted).toBe(30)          // the verdict is never truncated…
+      expect(out.drifted.length).toBeLessThan(30)  // …only the listing is
+      expect(out.truncated).toBe(true)
+    })
+  })
+
   it('search budgeting counts the complete serialized summaries', async () => {
     const bulky = Array.from({ length: 8 }, (_, i): NoteSummary => ({
       id: `n${i}`, scope: 'project', title: 'T', summary: '', tier: NOTE_TIER.semantic, categories: [],
@@ -538,6 +664,7 @@ describe('memory tools', () => {
       ['memory_read', { id: 'auth', budget: tooBig }],
       ['memory_neighbors', { seed: 'auth', budget: tooBig }],
       ['memory_topics', { budget: tooBig }],
+      ['memory_recheck', { budget: tooBig }],
     ] as const)
       expect((await tools.find(t => t.name === name)!.execute(input)).isError).toBe(true)
     // and the ceiling itself still works, so the bound is a cap and not an off-by-one refusal
@@ -643,7 +770,9 @@ describe('memory tools', () => {
   it('scout tier narrows the tool surface (authors notes, but never traverses); auditor keeps the full set', () => {
     const { store } = fakeStore()
     const scoutNames = memoryTools({ store, author: { source: 'cli' }, role: 'scout' }).map(t => t.name).sort()
-    expect(scoutNames).toEqual(['memory_read', 'memory_search', 'memory_topics', 'memory_write'])
+    // memory_recheck stays: it is cheap, read-only, and a scout re-grounding the corpus is exactly
+    // who needs the authoritative drifted list — only traversal (neighbors) is withheld
+    expect(scoutNames).toEqual(['memory_read', 'memory_recheck', 'memory_search', 'memory_topics', 'memory_write'])
     expect(scoutNames).not.toContain('memory_neighbors') // deliberate narrowing: scout seeds the graph, doesn't traverse it
     expect(memoryTools({ store, author: { source: 'cli' }, role: 'auditor' }).map(t => t.name)).toContain('memory_neighbors')
   })
@@ -657,7 +786,7 @@ describe('memory tools', () => {
   it('auditor tier appends the traverse-before-asserting fragment to the full surface', () => {
     const { store } = fakeStore()
     const tools = memoryTools({ store, author: { source: 'cli' }, role: 'auditor' })
-    expect(tools).toHaveLength(5)
+    expect(tools).toHaveLength(6)
     for (const t of tools) expect(t.description).toContain('contradicts/supersedes before asserting')
   })
 
@@ -669,7 +798,7 @@ describe('memory tools', () => {
   it('verify tier carries the full tool set with NO epistemics fragment appended', () => {
     const { store } = fakeStore()
     const tools = memoryTools({ store, author: { source: 'cli' } })
-    expect(tools.map(t => t.name)).toEqual(['memory_write', 'memory_search', 'memory_read', 'memory_neighbors', 'memory_topics'])
+    expect(tools.map(t => t.name)).toEqual(['memory_write', 'memory_search', 'memory_read', 'memory_neighbors', 'memory_topics', 'memory_recheck'])
     // the exact shipped descriptions — scout/auditor append to these, verify must not
     expect(tools.find(t => t.name === 'memory_write')?.description).toBe(
       'Create or update a project knowledge note (upsert by id — omitted fields keep their stored values; pass an explicit empty string/array to clear one). Record durable findings/decisions/conventions so later steps reuse them. If a note you read came back drifted, CORRECT it: write the same id with what the code says now, rather than adding a second note — a graph carrying two contradictory claims is worse than one carrying neither. A correction covers the whole retrieval surface: pass an updated title and summary too, not only the body — searchers read the summary first, and merge-on-omit keeps a stale one verbatim.')

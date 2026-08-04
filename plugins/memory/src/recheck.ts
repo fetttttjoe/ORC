@@ -1,6 +1,15 @@
-import { DRIFT_STATE, LINK_KIND, NOTE_TIER, foldMemory, noteKey, type EventRecord } from '@orc/contracts'
+import { DRIFT_STATE, EVENT_KIND, LINK_KIND, NOTE_TIER, foldMemory, noteKey, type EventKind, type EventRecord } from '@orc/contracts'
 import { noteDriftState, type ChangedSince } from './drift'
+import { KNOWLEDGE_KINDS } from './projector'
 import type { NoteFacts, Verdict } from './archive'
+
+// What recheckNotes folds: the knowledge kinds PLUS the outcome evidence the retirement rule
+// reads — memory_outcome sits outside KNOWLEDGE_KINDS (a lagging counter is not degraded
+// knowledge), so a caller fetching that set alone would starve the used-but-useless rule of its
+// only input. Named here, beside the function that folds it, so no call site hand-spells the sum.
+// Deliberately NOT memory_accessed: recheck reads no activation, and access is the log's
+// highest-volume memory kind.
+export const RECHECK_KINDS: EventKind[] = [...KNOWLEDGE_KINDS, EVENT_KIND.memory_outcome]
 
 // Gathers the facts archive.ts rules on: one pass over the knowledge log plus the tree, turning
 // every live note into a NoteFacts. This is the "recalculate all the nodes" half — drift is
@@ -71,6 +80,8 @@ export async function recheckNotes(events: EventRecord[], deps: RecheckDeps): Pr
       deps.changedSince,
     )
     const taskId = author.taskId ?? ''
+    // the fold's outcome tallies, flattened to the counts archive.ts rules on (it takes no dates)
+    const use = fold.outcomes.get(key)
     out.push({
       key, id: note.id, scope: note.scope, title: note.title, tier: note.tier, paths: declared,
       sourceRevision: withPaths.sourceRevision,
@@ -79,6 +90,7 @@ export async function recheckNotes(events: EventRecord[], deps: RecheckDeps): Pr
       // self-links would otherwise make a note its own protector
       inboundFrom: (inboundFrom.get(key) ?? []).filter(k => k !== key),
       taskSettled: TASK_BOUND.has(note.tier) && taskId !== '' && deps.terminalTaskIds.has(taskId),
+      ...(use && { use: { useful: use.useful.hits, deadEnd: use.deadEnd.hits } }),
     })
   }
   return out

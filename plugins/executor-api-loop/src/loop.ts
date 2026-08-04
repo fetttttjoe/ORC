@@ -182,7 +182,8 @@ const KNOWLEDGE_PROTOCOL = `# Project knowledge protocol
 9. Update only what changed — memory_write merges omitted fields; an explicit empty clears.
 10. Scope discipline: 'project' scope holds durable knowledge only; step reports and audit output belong in your plan scope.
 11. Hand off by reference: findings go into notes; your signal summary carries conclusions plus the note ids — never restate note bodies. Downstream steps pull them at their own budget.
-12. When a memory_neighbors row leads you to memory_read a note, pass via {seed: row.from, kind: row.via, direction: row.direction} — connections you actually use must strengthen.`
+12. When a memory_neighbors row leads you to memory_read a note, pass via {seed: row.from, kind: row.via, direction: row.direction} — connections you actually use must strengthen.
+13. When you call signal, report the notes you pulled: knowledge.useful = ids that answered your question, knowledge.deadEnd = ids that wasted the step. Future readers see these verdicts beside each note — report honestly, dead ends included.`
 
 // Task 7: preload block arg, default '' — kept minimal and named rather than folded into
 // ExecutorContext, since it is a per-call render input, not step/run state.
@@ -547,7 +548,13 @@ export function apiLoopExecutor(): AgentExecutor<LanguageModel> {
               })
               continue
             }
-            const signal: Signal = { ...base, outcome: parsedSignal.data.outcome, summary: parsedSignal.data.summary, ...(declared ? { outputs: declared } : {}) }
+            const signal: Signal = {
+              ...base, outcome: parsedSignal.data.outcome, summary: parsedSignal.data.summary,
+              ...(declared ? { outputs: declared } : {}),
+              // the knowledge self-report rides the signal into signal_received AND into
+              // ctx.memory.capture below — one seam, recorded once, no extra tool calls
+              ...(parsedSignal.data.knowledge ? { knowledge: parsedSignal.data.knowledge } : {}),
+            }
             await ctx.checkpoint(
               `signal:${iteration}`,
               async () => signal,

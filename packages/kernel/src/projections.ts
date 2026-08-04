@@ -276,6 +276,8 @@ export function foldInto(acc: FoldAcc, e: EventRecord): FoldAcc {
       // (the commit-step reverify set) — a stateless per-consumer derivation over the log, not task
       // state: nothing in State reads it, and a fold entry no consumer reads is state that rots.
       case EVENT_KIND.memory_verified:
+      // an agent's self-reported use outcome — evidence for the memory read model, no task state
+      case EVENT_KIND.memory_outcome:
       case EVENT_KIND.models_discovered:
       case EVENT_KIND.feedback_requested:
       case EVENT_KIND.feedback_provided:

@@ -18,13 +18,14 @@ export interface MemoryProjector { start(): Promise<void>; close(): Promise<void
 
 // Everything the projector drains. Typed EventKind[] (not left to infer the narrower literal
 // union) so start()'s subscribe filter below can compare a live EventRecord's kind against it.
-export const MEMORY_KINDS: EventKind[] = [EVENT_KIND.memory_written, EVENT_KIND.memory_deleted, EVENT_KIND.memory_accessed, EVENT_KIND.memory_verified]
+export const MEMORY_KINDS: EventKind[] = [EVENT_KIND.memory_written, EVENT_KIND.memory_deleted, EVENT_KIND.memory_accessed, EVENT_KIND.memory_verified, EVENT_KIND.memory_outcome]
 
-// What "the read model is behind" means for HEALTH — derived from the drained set so a fourth
-// kind is covered automatically, with the one exclusion stated rather than implied. An
-// unprojected access leaves `hits` briefly stale; that is a lagging counter, not a knowledge
-// graph an agent would read wrongly, and reporting it as degraded would cry wolf on every read.
-export const KNOWLEDGE_KINDS = MEMORY_KINDS.filter(k => k !== EVENT_KIND.memory_accessed)
+// What "the read model is behind" means for HEALTH — derived from the drained set so a new
+// kind is covered automatically, with the exclusions stated rather than implied. An unprojected
+// access or use-outcome leaves a counter briefly stale; that is lagging bookkeeping, not a
+// knowledge graph an agent would read wrongly, and reporting it as degraded would cry wolf on
+// every read.
+export const KNOWLEDGE_KINDS = MEMORY_KINDS.filter(k => k !== EVENT_KIND.memory_accessed && k !== EVENT_KIND.memory_outcome)
 
 // The grouping spec's own scaling trigger, as a number something can actually compare against —
 // split per STAGE, not one shared ceiling, because the two stages this warning used to cover

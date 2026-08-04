@@ -1,6 +1,8 @@
 <script lang="ts">
   import { SvelteFlow, Background, Controls, type Edge, type EdgeTypes, type Node, type NodeTypes } from '@xyflow/svelte'
   import '@xyflow/svelte/dist/base.css'
+  import type { Attachment } from 'svelte/attachments'
+  import FlowFit from './FlowFit.svelte'
 
   /**
    * A Svelte Flow canvas with this console's chrome on it, and NOTHING about what it draws. It
@@ -43,6 +45,26 @@
     empty = 'nothing to draw',
     label,
   }: Props = $props()
+
+  const FIT_PADDING = 0.12
+
+  // What FlowFit refits on: the node SET's identity, not its length — an equal-count swap (same
+  // number of steps, different plan) reshapes the drawing just as much as a growth does, and a
+  // count key left the old viewport framing nodes that no longer exist. NUL-joined for the
+  // same reason graph-wire's linkKey is — a printable separator can occur inside an id — and
+  // as the ESCAPE, never the raw byte, which reads as a binary file to git.
+  const shape = $derived(nodes.map(n => n.id).join('\u0000'))
+
+  // whether the wrapper has real dimensions — FlowFit refits on the 0→measurable transition,
+  // which is the state the one-shot `fitView` prop computes garbage in (see FlowFit's header)
+  let measurable = $state(false)
+  const measure: Attachment<HTMLDivElement> = (el) => {
+    const ro = new ResizeObserver(() => {
+      measurable = el.clientWidth > 0 && el.clientHeight > 0
+    })
+    ro.observe(el)
+    return () => ro.disconnect()
+  }
 </script>
 
 {#if nodes.length === 0}
@@ -53,6 +75,7 @@
     style:height
     role="group"
     aria-label={label}
+    {@attach measure}
   >
     <SvelteFlow
       {nodes}
@@ -61,7 +84,7 @@
       {edgeTypes}
       colorMode="dark"
       fitView
-      fitViewOptions={{ padding: 0.12 }}
+      fitViewOptions={{ padding: FIT_PADDING }}
       nodesConnectable={connectable}
       elementsSelectable={connectable}
       nodesDraggable={false}
@@ -76,6 +99,7 @@
     >
       <Background gap={18} />
       <Controls showLock={false} position="bottom-right" />
+      <FlowFit {shape} {measurable} padding={FIT_PADDING} />
     </SvelteFlow>
   </div>
 {/if}

@@ -45,6 +45,7 @@ How a call flows: the client sends `tools/call` over stdio → the handler looks
 | | `memory_read` | One full note by id, token-budgeted |
 | | `memory_neighbors` | Typed-link graph walk from a seed note, ranked by weight × confidence × depth-decay |
 | | `memory_topics` | Derived topics over project knowledge; list them, or pass a topicKey to read its claims |
+| | `memory_recheck` | The authoritative corpus drift verdict: exact counts plus the drifted/unknown note lists — the heal-sweep worklist |
 | **Mutate** (only when actions ≠ null) | `new_request` | Create a task; `grounded` triggers repo analysis + decomposition |
 | | `propose` | Propose a single-step plan for a draft task |
 | | `run` | Start the approved plan in a cwd |
@@ -57,8 +58,8 @@ Key behaviors:
 
 - **Autonomy is launch-time, never the agent's choice.** Under the default `--autonomy gated`, `approve` is still *listed* but always refuses at call time, pointing to the orc UI or `orc approve <taskId>`. Only `--autonomy full` approves, and every approval is attributed `approvedBy: mcp` in the event log. There is deliberately no approve tool in the copilot set itself — the human gate is structural.
 - **Read-only degradation is one mechanism, three triggers**: no port factory (CLI), and on the UI door, out-of-project or foreign-project chats — all just pass `actions: null` into the same `buildCopilotTools`.
-- **`available_models` never appears on the MCP door** — `mcp-serve.ts` doesn't pass `listModels`, only the web copilot does. So an MCP client must already know a valid `modelRef` for `propose`/grounded `new_request`.
-- **Memory degrades, never blocks**: if SurrealDB is unreachable, the 4 read tools stay listed but each call returns `memory unavailable: <reason>` instead of the tools silently vanishing.
+- **`available_models` is served on the MCP door too** — `mcp-serve.ts` wires `listModels` to the projected model catalog (the latest `models_discovered` event per provider), so an MCP client can discover a valid `modelRef` before `propose`/grounded `new_request`.
+- **Memory degrades, never blocks**: if SurrealDB is unreachable, the 5 read tools stay listed but each call returns `memory unavailable: <reason>` instead of the tools silently vanishing.
 - `memory_write` exists in the plugin but is filtered out of MCP serve — authoring stays with agents inside plan runs.
 
 ## Direction 2: orc as an MCP client (tools *for* agents)

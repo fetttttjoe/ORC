@@ -156,8 +156,11 @@
 
     if (mem?.state === MEMORY_HEALTH.catchingUp && mem.pending > 0)
       return {
-        title: `knowledge graph catching up · ${mem.pending} events behind`,
-        detail: 'runs execute normally; notes and drift readings lag until it lands.',
+        // The count rides in the DETAIL, not the title: the uppercase tracking-widest title wraps
+        // one word per line when the inspector squeezes this pane (observed live at ~240px), and
+        // a six-line banner buries the ledger it sits above. The detail line wraps like prose.
+        title: 'knowledge graph catching up',
+        detail: `${mem.pending} ${mem.pending === 1 ? 'event' : 'events'} behind — runs execute normally; notes and drift readings lag until it lands.`,
         temp: 'machine',
         // pending only ever shrinks toward zero, so its own peak is the honest denominator
         percent: peak > 0 ? Math.min(100, Math.round(((peak - mem.pending) / peak) * 100)) : null,

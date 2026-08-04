@@ -1,11 +1,12 @@
-import { errorMessage, HOOK_NAME, type AgentExecutor, type Analyzer, type MemoryAuthor, type ModelProvider } from '@orc/contracts'
+import { AUTO_HEAL_MODE, errorMessage, HOOK_NAME, NOTE_TIER, TERMINAL_TASK_STATUS, type AgentExecutor, type Analyzer, type MemoryAuthor, type ModelProvider } from '@orc/contracts'
 import { apiLoopExecutor } from '@orc/executor-api-loop'
 import { createAnthropicProvider } from '@orc/provider-anthropic'
 import { createOpenAIProvider } from '@orc/provider-openai'
 import { createOllamaProvider } from '@orc/provider-ollama'
 import { agentAnalyzer } from '@orc/analyzer-agent'
 import { createMcpHub, type McpHub } from '@orc/mcp-client'
-import { createMemory, createMemoryLifecycle, createGroundingSource, memoryVerifyTool, notesCiting, unavailableStepMemory, memoryRoleFor, type BindStep, type MemoryLifecycle } from '@orc/memory'
+import { corpusDrift, createDriftProbe, createMemory, createMemoryLifecycle, createGroundingSource, memoryVerifyTool, notesCiting, restampToHead, unavailableStepMemory, memoryRoleFor, type BindStep, type MemoryLifecycle } from '@orc/memory'
+import { AUTO_HEAL_DEBOUNCE_MS, AUTO_SWEEP_TITLE, createAutoHeal } from './auto-heal'
 import { openMemory } from './memory-open'
 import { buildDistiller } from './consolidation-distiller'
 import { createVaultProjector } from '@orc/vault-projector'
@@ -107,9 +108,42 @@ export async function buildRuntime(
     bindStep = () => unavailableStepMemory(reason)
   }
 
+  // The auto-heal reactor (knowledge provenance plan T2): the router relays commit_recorded here;
+  // this side owns the debounce, the free restamp, and — under draft-sweep — DRAFTING (never
+  // approving) a heal task. Composed here because it crosses the two domains the kernel keeps
+  // apart: the memory store and the kernel. Absent when memory is degraded or the knob is off —
+  // the port's callback is optional and the router then leaves commits as records, as before.
+  const memoryStore = memory?.store
+  const autoHeal = memoryStore && config.autoHeal !== AUTO_HEAL_MODE.off
+    ? createAutoHeal({
+      mode: config.autoHeal,
+      debounceMs: AUTO_HEAL_DEBOUNCE_MS,
+      schedule: (fn, ms) => { const t = setTimeout(fn, ms); return () => clearTimeout(t) },
+      restamp: async () => (await restampToHead(memoryStore, config.dir)).length,
+      // a FRESH probe per pass: createDriftProbe caches per revision, and the tree this pass
+      // must judge is the one the commit just changed — a reactor-lifetime probe would answer
+      // from the previous commit's diffs
+      drifted: async () => (await corpusDrift(await memoryStore.list({ tier: NOTE_TIER.semantic }), createDriftProbe(config.dir))).drifted,
+      hasOpenSweep: async () => (await kernel.listTasks()).some(t => t.title === AUTO_SWEEP_TITLE && !TERMINAL_TASK_STATUS.has(t.status)),
+      draftSweep: async drifted => {
+        await kernel.createTask({
+          title: AUTO_SWEEP_TITLE,
+          spec: `Auto-drafted by the commit reactor: ${drifted} note(s) still read drifted after the free restamp pass. `
+            + 'Call memory_recheck FIRST — it returns the authoritative worklist; never discover candidates via memory_search. '
+            + 'For every listed note: memory_read it, check its claims against the current working tree, then re-write it '
+            + '(memory_write, SAME id) with corrected content, or with a re-verified claim when its statements still hold. '
+            + 'Memory tools and read-only filesystem access only — never edit repository files, never run git commands. '
+            + 'Finish by calling memory_recheck again and reporting both counts verbatim.',
+        })
+      },
+      warn: m => console.warn(m),
+    })
+    : null
+
   const port = await createDbosPort({
     storage, config, executorId: shared?.executorId,
     providers: host.providers, executors: host.executors,
+    ...(autoHeal && { onCommitRecorded: async () => { autoHeal.onCommitRecorded() } }),
     skills: host.skills, tools: hub, groundingSource,
     stepTools: p => {
       const author: MemoryAuthor = { source: 'agent', taskId: p.taskId, stepId: p.stepId, runToken: p.runToken, executor: p.executor, model: p.model, role: p.role }
@@ -187,6 +221,7 @@ export async function buildRuntime(
     ...port,
     shutdown: async (opts?: { drain?: boolean }) => {
       await port.shutdown(opts)
+      autoHeal?.close() // disarm a pending debounce window — a timer firing into closed stores warns, but why let it
       if (lifecycle) await lifecycle.close()
       if (memory) await memory.close()
       await projector.close()

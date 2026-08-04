@@ -73,9 +73,10 @@ export interface ProjectSessions {
   planNotes(projectId: string, taskId: string): Promise<{ notes: ReturnType<typeof foldPlanNotes> }>
   // sinceSeq/kinds make the log incrementally POLLABLE: a reader that remembers the last seq it
   // saw asks only for what came after it (and only the kinds it cares about) instead of
-  // re-reading the whole tail. Both filters apply BEFORE the limit slice, so the result is the
-  // newest `limit` MATCHING rows.
-  log(projectId: string, opts?: { taskId?: string; limit?: number; sinceSeq?: number; kinds?: EventKind[] }): Promise<LogRow[]>
+  // re-reading the whole tail. beforeSeq pages the OTHER way — the ledger asks for what precedes
+  // its oldest row. All filters apply BEFORE the limit slice, so the result is the newest
+  // `limit` MATCHING rows. sinceSeq and beforeSeq are both exclusive.
+  log(projectId: string, opts?: { taskId?: string; limit?: number; sinceSeq?: number; beforeSeq?: number; kinds?: EventKind[] }): Promise<LogRow[]>
   close(): Promise<void>
 }
 
@@ -365,12 +366,12 @@ export function createProjectSessions(opts: {
       // sinceSeq/kinds narrow the SAME rows before the slice, for the same reason the taskId
       // filter does: a poller asking for "everything after seq N" must get the newest matching
       // rows, not the newest `limit` events of which few (or none) are new.
-      const { taskId, sinceSeq, kinds } = opts
+      const { taskId, sinceSeq, beforeSeq, kinds } = opts
       const kindSet = kinds && kinds.length > 0 ? new Set<string>(kinds) : null
       const narrow = (rows: LogRow[]) => rows.filter(r =>
-        (sinceSeq === undefined || r.seq > sinceSeq) && (kindSet === null || kindSet.has(r.kind)))
+        (sinceSeq === undefined || r.seq > sinceSeq) && (beforeSeq === undefined || r.seq < beforeSeq) && (kindSet === null || kindSet.has(r.kind)))
       // unfiltered whole-project tail: slice first, summarize only what is returned (unchanged)
-      if (taskId === undefined && sinceSeq === undefined && kindSet === null) return s.events.slice(-limit).map(summarizeEvent)
+      if (taskId === undefined && sinceSeq === undefined && beforeSeq === undefined && kindSet === null) return s.events.slice(-limit).map(summarizeEvent)
       if (taskId === undefined) return narrow(s.events.map(summarizeEvent)).slice(-limit)
       return narrow(s.events.map(summarizeEvent).filter(r => shouldAdmitLogRow(r, taskId))).slice(-limit)
     },

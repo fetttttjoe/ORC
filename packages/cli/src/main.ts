@@ -6,7 +6,7 @@ import { Command, InvalidArgumentError } from 'commander'
 import { SUPERVISOR_HEALTH, claimHistory, EDGE_DIRECTION, errorMessage, EVENT_KIND, foldMemory, LINK_KINDS, MASTERPLAN_NOTE_ID, MEMORY_ACCESS, MemoryDeletedPayload, MemoryScope, MemoryWrittenPayload, noteKey, NOTE_TIER, NOTE_TIERS, NoteTier, parseLinkSpec, PlanDraft, ROLE_SKILL, RUN_OUTCOME, STRATEGY, TASK_STATUS, TERMINAL_TASK_STATUS, LinkKind, slugId, type Analyzer, type EventRecord, type MemoryLink, type NoteFields, type ExecutionPort, type MemoryHealth, type Plan, formatModelRate } from '@orc/contracts'
 import { openStorage, Kernel, atomicWriteFileSync, listProjectIds, claimSlot, fold, gatedChildren, freezePlan, liveSupervisors, staleSupervisors, grantExtensionTrust, grantMcpTrust, initializeProject, isExtensionTrusted, isMcpTrusted, loadConfig, loadTrust, migrateDatabase, requireProject, runtimeLockHeld, stepUsage, subtreeUsage, taskUsage, type EventLog, type OrcConfig, type PluginHost, type ProjectConfig, type Storage } from '@orc/kernel'
 import { createVaultProjector, parsePlanFile } from '@orc/vault-projector'
-import { archiveCandidates, consolidateTask, createDriftProbe, frontier, KNOWLEDGE_KINDS, needsReground, probeMemory, recheckNotes, restampableNotes, summarize } from '@orc/memory'
+import { archiveCandidates, consolidateTask, createDriftProbe, frontier, needsReground, probeMemory, RECHECK_KINDS, recheckNotes, restampToHead, summarize } from '@orc/memory'
 import { withMemory } from './memory-open'
 import { buildDistiller } from './consolidation-distiller'
 import { seedRegistries, buildRuntime } from './runtime'
@@ -988,9 +988,10 @@ export function buildProgram(
     .option('--apply', 'archive the retirable notes (default: report only)')
     .action(async (o: { candidates?: boolean; apply?: boolean }) => {
       const { config, log } = needPlugin()
-      // KNOWLEDGE_KINDS, not a hand-spelled list: the previous one omitted memory_verified, so a
+      // RECHECK_KINDS, not a hand-spelled list: a previous one omitted memory_verified, so a
       // note an auditor had confirmed still counted as drifted here while health called it clean.
-      const events = await log.after(0, KNOWLEDGE_KINDS)
+      // The named set also carries memory_outcome — the used-but-useless rule's only input.
+      const events = await log.after(0, RECHECK_KINDS)
       const terminalTaskIds = new Set(
         [...(await requireKernel().state()).tasks.values()]
           .filter(t => TERMINAL_TASK_STATUS.has(t.status))
@@ -1282,10 +1283,8 @@ export function buildProgram(
     .action(async () => {
       const { config, log } = needPlugin()
       await withMemory({ log, config }, async memory => {
-        // NoteSummary already carries {id, scope, sourceRevision, paths} — exactly restampableNotes' shape
-        const targets = await restampableNotes(await memory.store.list({ tier: NOTE_TIER.semantic }), config.dir)
-        // a plain re-write re-stamps the note at current HEAD (store.ts: sourceRevision resolved per write)
-        for (const t of targets) await memory.store.write({ id: t.id, scope: t.scope }, { source: 'cli' })
+        // one spelling with the auto-heal reactor — restampToHead is the whole pass
+        const targets = await restampToHead(memory.store, config.dir)
         console.log(targets.length === 0
           ? 'nothing to restamp — no note has fully-committed drift to catch up'
           : `restamped ${targets.length} note(s) to HEAD: ${targets.map(t => t.id).join(', ')}`)
@@ -1301,10 +1300,12 @@ export function buildProgram(
         await memory.projector.catchUp()
         const distill = opts.model ? buildDistiller(seedRegistries(config).providers, opts.model) : undefined
         // force: an explicit manual request bypasses the salience gate the auto-lifecycle applies
-        const note = await consolidateTask({ log, store: memory.store, distill }, taskId, { force: true })
-        if (!note) { console.log(`nothing to consolidate for '${taskId}' — unknown task or no step notes`); return }
+        const notes = await consolidateTask({ log, store: memory.store, distill }, taskId, { force: true })
+        if (!notes || notes.length === 0) { console.log(`nothing to consolidate for '${taskId}' — unknown task, planning child, or no step notes`); return }
         await memory.projector.catchUp()
-        console.log(`consolidated '${note.id}'${opts.model ? ` (distilled by ${opts.model})` : ''} with ${note.links.length} source link(s) — read it: orc memory cat ${note.id}`)
+        // one line per note: a multi-area task consolidates into one anchored note per area
+        for (const note of notes)
+          console.log(`consolidated '${note.id}'${opts.model ? ` (distilled by ${opts.model})` : ''} with ${note.links.length} source link(s) — read it: orc memory cat ${note.id}`)
       })
     })
 

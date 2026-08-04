@@ -1,4 +1,6 @@
 import { z } from 'zod'
+import { MEMORY_ID_RE } from './ids'
+import { MEMORY_LIMITS } from './limits'
 import type { PlanStep } from './plan'
 import { TASK_STATUS, type TaskStatus } from './task'
 import type { EventKind } from './events'
@@ -87,6 +89,18 @@ export const SignalOutcome = z.enum(['success', 'failure'])
 export type SignalOutcome = z.infer<typeof SignalOutcome>
 export const SIGNAL_OUTCOME = SignalOutcome.enum
 
+// The agent's self-report of which pulled notes ANSWERED the step and which wasted it — the
+// capture seam for memory_outcome events: one field on the signal the step already sends, no
+// extra tool calls. EVIDENCE, never verification — memory_verify stays auditor-gated and
+// separate, and nothing here may mint a stamp. Ids are project-scope note ids (plan-lane notes
+// are expirable run trail, not verdict targets). Bounded per REPORT only — see
+// MEMORY_LIMITS.outcomeIds for why the cap cannot hide evidence from the aggregator.
+export const KnowledgeReport = z.object({
+  useful: z.array(z.string().regex(MEMORY_ID_RE)).max(MEMORY_LIMITS.outcomeIds).default([]),
+  deadEnd: z.array(z.string().regex(MEMORY_ID_RE)).max(MEMORY_LIMITS.outcomeIds).default([]),
+})
+export type KnowledgeReport = z.infer<typeof KnowledgeReport>
+
 export const Signal = z.object({
   stepId: z.string().min(1),
   runToken: z.string().min(1),
@@ -94,6 +108,8 @@ export const Signal = z.object({
   summary: z.string().min(1),
   // workspace-relative paths this step declares as produced outputs — verified by the runtime
   outputs: z.array(z.string().min(1)).optional(),
+  // optional: a step that pulled no knowledge has nothing to report, and absence must cost nothing
+  knowledge: KnowledgeReport.optional(),
 })
 export type Signal = z.infer<typeof Signal>
 
@@ -171,19 +187,26 @@ export interface ModelProvider<LM = unknown> {
   costs: Record<string, ModelCost>
   languageModel(modelId: string): LM
   // live model discovery, plugin-driven: each provider queries its own API. Optional — callers
-  // fall back to the cost-table keys. Implementations must resolve (never reject) with [] or a
-  // static fallback when the API is unreachable: discovery is a convenience, not a dependency.
+  // fall back to the cost-table keys. An implementation REJECTS when it cannot answer — network
+  // failure, bad status, unparseable body, missing credentials; [] means it ANSWERED and nothing
+  // usable exists. The split is load-bearing for discovery's append-on-change, which must tell
+  // "positively empty" from silence: with [] meaning both, an emptied catalog could never be
+  // recorded (ollama's embedding filter left retired encoders in the served catalog, observed
+  // 2026-08-03), and a swallowed openai blip would append models: [] over the real catalog.
+  // Callers isolate the rejection per provider — buildModelDiscovery already does, marking the
+  // provider reachable: false and keeping its last recorded catalog.
   listModels?(): Promise<string[]>
 }
 
-// the ONE parse of a provider's model-list JSON — the three providers differed only in the list
-// key ('data' vs 'models') and the id key ('id' vs 'name'), and the extraction was spelled three
-// times. Anything malformed degrades to fewer ids, never a throw: discovery is a convenience,
-// and listModels implementations must not reject.
+// the ONE parse of a provider's model-list JSON — the providers differed only in the list key
+// ('data' vs 'models') and the id key ('id' vs 'name'), and the extraction was spelled three
+// times. A malformed ENTRY degrades to fewer ids (the API answered; one odd row is not silence),
+// but a body without the list array THROWS: per the listModels contract above, an unparseable
+// body is a failure to answer, not an empty catalog.
 export function modelIdsFrom(body: unknown, listKey: string, idKey: string): string[] {
   const parsed = z.record(z.string(), z.unknown()).safeParse(body)
   const list = z.array(z.unknown()).safeParse(parsed.success ? parsed.data[listKey] : undefined)
-  if (!list.success) return []
+  if (!list.success) throw new Error(`model-list body has no '${listKey}' array`)
   return list.data.flatMap(m => {
     const entry = z.record(z.string(), z.unknown()).safeParse(m)
     const id = z.string().safeParse(entry.success ? entry.data[idKey] : undefined)
@@ -330,7 +353,7 @@ export interface StepMemory {
    */
   claimsCiting(paths: readonly string[]): Promise<ClaimHit[]>
   /** What the finished step leaves behind. Best-effort: never throws into the step. */
-  capture(signal: { outcome: SignalOutcome; summary: string }): Promise<void>
+  capture(signal: { outcome: SignalOutcome; summary: string; knowledge?: KnowledgeReport }): Promise<void>
 }
 
 export interface AgentExecutor<LM = unknown> {

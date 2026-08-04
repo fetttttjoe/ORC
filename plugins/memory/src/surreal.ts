@@ -3,11 +3,11 @@ import { RecordId, Surreal } from 'surrealdb'
 import { edge, orm, table, t } from 'surqlize'
 import {
   activation, activationBoost, bumpAccess, Claim, DEFAULT_HALF_LIFE_DAYS,
-  deriveNoteProvenance, EDGE_DIRECTION, edgeKey, EVENT_KIND, LINK_KINDS, NOTE_KINDS, MemoryScope, Topic, viaEdge,
+  decodeMemoryEvent, deriveNoteProvenance, EDGE_DIRECTION, edgeKey, LINK_KINDS, MEMORY_USE, NOTE_KINDS, MemoryScope, MutationOp, Topic, viaEdge,
   type LinkKind,
-  MemoryAccessedPayload, MemoryDeletedPayload, MemoryNote, MemoryVerifiedPayload, MemoryWrittenPayload, VerifiedStamp,
+  MemoryNote, VerifiedStamp, type MemoryWrittenPayload,
   MEMORY_LIMITS, SEARCH_MODE, errorMessage, inferTier, isUiMetaNote, noteKey, NoteTier,
-  type EmbeddingProvider, type EventRecord, type NeighborQuery, type MemoryFilter, type NoteFields, type NoteView,
+  type EmbeddingProvider, type EventRecord, type NeighborQuery, type MemoryFilter, type NoteFields, type NoteView, type UseStats,
   type MemorySearchOpts, type NeighborResult, type NoteSummary,
   linkLookupScopes,
 } from '@orc/contracts'
@@ -93,6 +93,11 @@ const noteTable = table(Tb.Note, {
   toolRefs: t.option(t.array(t.string())), modelRef: t.option(t.string()),
   createdAt: t.string(), createdBy: t.string(), updatedAt: t.string(), updatedBy: t.string(),
   revision: t.number(), hits: t.option(t.number()), lastAccessedAt: t.option(t.string()),
+  // observed-use OUTCOMES (memory_outcome), Tier-2 like hits: two separate counters, never one
+  // signed score — contested displays BOTH. Optional so rows projected before the kind existed
+  // still select without a rebuild.
+  usefulHits: t.option(t.number()), lastUsefulAt: t.option(t.string()),
+  deadEndHits: t.option(t.number()), lastDeadEndAt: t.option(t.string()),
   // Set by memory_verified and by nothing else — the only note column no memory_written can
   // originate (a write can carry it forward or drop it; see deriveNoteProvenance). Optional so
   // every row projected before the stamp existed still selects, without a rebuild.
@@ -206,6 +211,9 @@ const SummaryRow = z.object({
   tier: NoteTier.optional(),
   categories: z.array(z.string()).optional(), tags: z.array(z.string()), summary: z.string(),
   hits: z.number().optional(), lastAccessedAt: z.string().nullable().optional(),
+  // observed-use outcomes — optional like hits, a row may predate the columns
+  usefulHits: z.number().optional(), lastUsefulAt: z.string().nullable().optional(),
+  deadEndHits: z.number().optional(), lastDeadEndAt: z.string().nullable().optional(),
   // the two drift inputs — optional because a row projected before either column existed still
   // selects, and both fall back to the "uncheckable" value rather than a fabricated one
   sourceRevision: z.string().nullable().optional(), paths: z.array(z.string()).optional(),
@@ -530,191 +538,226 @@ export class SurrealMemory {
   // The ONE apply path (design §8.2): note/edges/cursor commit in a single Surreal
   // transaction, gated by the ordered cursor — redelivery of any memory event is a no-op,
   // and revision counts distinct accepted writes, never delivery attempts.
+  //
+  // The DECODE is shared with foldMemoryInto (contracts' decodeMemoryEvent) — only the apply lives
+  // here, and the switch's `never` default makes a mutation this side forgets a compile error: the
+  // divergence class that once dropped memory_verified from the fold while this side honoured it.
   async applyEvent(e: EventRecord): Promise<boolean> {
+    const m = decodeMemoryEvent(e)
     // Embed BEFORE opening the transaction: an embedder round-trip must never be held inside a
     // Surreal tx. Embedding is derived data (recomputed on every rebuild), so re-embedding a
-    // redelivered event is harmless waste, not a correctness issue.
+    // redelivered event is harmless waste, not a correctness issue. Upserts only: an archive
+    // deletes the note's rows, so a vector for it would be computed and thrown away.
     // ponytail: re-embeds even a redelivered memory_written; gate behind the cursor if it bites.
-    const embedding = e.kind === EVENT_KIND.memory_written ? await this.embedWritten(e) : undefined
-    const claimEmbeddings = e.kind === EVENT_KIND.memory_written ? await this.embedClaims(e) : new Map<string, number[]>()
+    const embedding = m?.op === MutationOp.upsert ? await this.embedWritten(m.payload, e.seq) : undefined
+    const claimEmbeddings = m?.op === MutationOp.upsert ? await this.embedClaims(m.payload, e.seq) : new Map<string, number[]>()
     return this.db.transaction(async tx => {
       const cursor = (await tx.select(Tb.Meta, 'cursor'))[0]?.seq ?? 0
       if (e.seq <= cursor) return false
-      if (e.kind === EVENT_KIND.memory_written) {
-        // skip-and-advance: an unparseable/legacy payload costs this ONE note revision, never the
-        // whole read model. Strict .parse used to abort drainFrom at this seq and re-hit it on every
-        // reconcile AND every rebuild(), permanently wedging memory — the log is immutable, so the
-        // wedge could never be operated away. The cursor advances at the end regardless.
-        const parsed = MemoryWrittenPayload.safeParse(e.payload)
-        if (!parsed.success) { console.warn(`[memory] skipping unparseable memory_written at seq ${e.seq}: ${parsed.error.message}`); await tx.upsert(Tb.Meta, 'cursor').set({ seq: e.seq }); return true }
-        const { note, author } = parsed.data
-        const k = key(note.scope, note.id)
-        // ARCHIVED notes leave the read model entirely rather than sitting in it behind a filter.
-        // Deleting the rows is what makes archival free at every read site — search, neighbours,
-        // ranking, topics and `ls` exclude it with no query change and no chance of one path
-        // forgetting the filter. It stays fully recoverable: every revision is in the event log,
-        // so writing the same id with archived:false re-upserts it on the next drain. Surreal drops
-        // a note's RELATE edges when its record goes, so only the claim rows need saying.
-        if (note.archived) {
-          await tx.delete(Tb.Note, k)
-          // The CLAIM rows go too, exactly as the memory_deleted branch does it. Dropping only the
+      if (m !== null) switch (m.op) {
+        case MutationOp.skip:
+          // skip-and-advance: an unparseable/legacy payload costs this ONE event, never the whole
+          // read model. Strict .parse used to abort drainFrom at this seq and re-hit it on every
+          // reconcile AND every rebuild(), permanently wedging memory — the log is immutable, so
+          // the wedge could never be operated away. The cursor still advances below.
+          console.warn(`[memory] skipping unparseable ${e.kind} at seq ${e.seq}: ${m.reason}`)
+          break
+        case MutationOp.archive: {
+          // ARCHIVED notes leave the read model entirely rather than sitting in it behind a filter.
+          // Deleting the rows is what makes archival free at every read site — search, neighbours,
+          // ranking, topics and `ls` exclude it with no query change and no chance of one path
+          // forgetting the filter. It stays fully recoverable: every revision is in the event log,
+          // so writing the same id with archived:false re-upserts it on the next drain. Surreal drops
+          // a note's RELATE edges when its record goes, so only the claim rows need saying.
+          const { note } = m.payload
+          await tx.delete(Tb.Note, key(note.scope, note.id))
+          // The CLAIM rows go too, exactly as the 'delete' case does it. Dropping only the
           // note left its statements in the claim table, and refreshTopics/topicClaims select
           // claims by scope with no owner join — so a retired note kept clustering into topics and
           // memory_topics returned its statements verbatim, while memory_read said it was gone.
           // Measured after this comment first claimed topics were excluded; they were not.
           await tx.delete(Tb.Claim).where(c => c.noteId.eq(note.id).and(c.scope.eq(note.scope)))
-          await tx.upsert(Tb.Meta, 'cursor').set({ seq: e.seq })
-          return true
+          break
         }
-        // read-then-write: createdAt/By + hits/lastAccessedAt preserved; updated/rev advance
-        const ex = (await tx.select(Tb.Note, k))[0]
-        // provenance + retrievedAt stamping shared with the kernel plan-note fold (deriveNoteProvenance):
-        // the one place this is computed, so projector and log-side fold cannot disagree.
-        const prov = deriveNoteProvenance(note, author, e.ts, ex)
-        // read through NoteView so one write path covers every tier: a column the note's tier does
-        // not own is OMITTED from the SET rather than nulled. An omitted key survives `UPSERT … SET`
-        // untouched (that is exactly why the embedding fields use the same pattern), so a note that
-        // flips semantic→plan keeps a stale `claims` column on its row — harmless only because
-        // toNote() re-parses through the tier schema, which strips it. UNSET it here if that ever
-        // stops being true.
-        const n: NoteFields = note
-        await tx.upsert(Tb.Note, k).set({
-          noteId: note.id, scope: note.scope, title: note.title, tier: note.tier,
-          ...(n.kind !== undefined && { kind: n.kind }),
-          ...(note.sourceRevision !== null && { sourceRevision: note.sourceRevision }),
-          ...(n.categories !== undefined && { categories: n.categories }),
-          tags: note.tags,
-          // materialize the optional confidence key: t.option infers `number | undefined`, required
-          links: note.links.map(l => ({ id: l.id, kind: l.kind, confidence: l.confidence })),
-          ...(n.paths !== undefined && { paths: n.paths }),
-          // materialize the optional sourceRevision key, same reason as links' confidence above
-          ...(n.claims !== undefined && {
-            claims: n.claims.map(c => ({ id: c.id, text: c.text, sourceRevision: c.sourceRevision ?? undefined })),
-          }),
-          summary: note.summary, body: note.body,
-          retention: note.retention,
-          // ORM row wants the title key always present (OptionType); retrievedAt already stamped by deriveNoteProvenance
-          ...(prov.sources !== undefined && { sources: prov.sources.map(s => ({ url: s.url, title: s.title, retrievedAt: s.retrievedAt })) }),
-          ...(n.rationale !== undefined && { rationale: n.rationale }),
-          ...(n.uncertainty !== undefined && { uncertainty: n.uncertainty }),
-          ...(n.zone !== undefined && { zone: n.zone }),
-          ...(n.dependsOn !== undefined && { dependsOn: n.dependsOn }),
-          ...(n.skillRefs !== undefined && { skillRefs: n.skillRefs }),
-          ...(n.toolRefs !== undefined && { toolRefs: n.toolRefs }),
-          ...(n.modelRef !== undefined && { modelRef: n.modelRef }),
-          createdAt: prov.createdAt, createdBy: prov.createdBy,
-          updatedAt: prov.updatedAt, updatedBy: prov.updatedBy, revision: prov.revision,
-          // CARRY-or-CLEAR, and the one place a write may touch the stamp. Omit-if-absent is NOT
-          // available here, unlike every other optional column above: clearing is the whole point
-          // when content moved, and an omitted key survives `UPSERT … SET` untouched — which would
-          // leave a stale "verified" on a note the write just rewrote. `undefined` is what UNSETs
-          // the column, so this names the key unconditionally.
-          verified: prov.verified,
-          hits: ex?.hits ?? 0,
-          // OptionType fields validate against `undefined`, not `null` — omit rather than null it out.
-          ...(ex?.lastAccessedAt !== undefined && { lastAccessedAt: ex.lastAccessedAt }),
-          // the embedder-derived vector when configured (omit-if-undefined like the fields above —
-          // a keyword-only deployment simply never sets it, and a rebuild re-derives it)
-          ...(embedding && { embedding }),
-        })
-        // Re-materialize this note's out-edges (delete-then-RELATE, relateLinks owns the survivor
-        // rule) — deterministic on replay. PRESERVE stats first: read the existing out-edges before
-        // the delete wipes them, so a link that SURVIVES the rewrite carries its earned hits/
-        // lastAccessedAt into the re-RELATE. A link the update REMOVES loses its stats with it —
-        // correct, the connection no longer exists. Skipping this read is the blocker T6 was named
-        // for: every note UPDATE would otherwise silently wipe its edges' accumulated activation.
-        const existingLinks = await tx.select(Tb.Link).where(l => l.fromId.eq(note.id).and(l.scope.eq(note.scope)))
-        await tx.delete(Tb.Link).where(l => l.fromId.eq(note.id).and(l.scope.eq(note.scope)))
-        await relateLinks(tx, note.scope, note.id, note.links, linkStatsOf(existingLinks))
-        // Claims re-materialize from the note's live set. Deliberately NOT the edges' clear-and-
-        // recreate above: a claim row has a DETERMINISTIC id (note + content hash), and a fixed
-        // record id deleted and re-created inside one Surreal transaction stays deleted at commit —
-        // measured, three claims upserted after the delete left only the two the delete had not
-        // touched. The edge path is immune because RELATE mints a fresh id per call rather than
-        // reusing a key. So retire only the rows this write actually dropped, and update the rest in
-        // place: a claim that SURVIVES keeps its original validFrom, because re-stating a fact does
-        // not make it new. A retired one goes — it is no longer live, and the log still holds it.
-        const existingClaims = await tx.select(Tb.Claim).where(c => c.noteId.eq(note.id).and(c.scope.eq(note.scope)))
-        const prevClaims = new Map(existingClaims.map(c => [c.claimId, c]))
-        const liveClaims = n.claims ?? []
-        const liveIds = new Set(liveClaims.map(c => c.id))
-        for (const row of existingClaims) if (!liveIds.has(row.claimId)) await tx.delete(row.id)
-        for (const c of liveClaims) {
-          const prev = prevClaims.get(c.id)
-          const vec = claimEmbeddings.get(c.id)
-          await tx.upsert(Tb.Claim, claimKey(note.scope, note.id, c.id)).set({
-            claimId: c.id, noteId: note.id, scope: note.scope, text: c.text,
-            // the payload carries no date — the FIRST event that carried this claim is its validFrom
-            validFrom: prev?.validFrom ?? e.ts,
-            // `?? undefined` here is deliberate and NOT the omit-pattern below: resolveClaims carries
-            // a survivor's own revision forward, so this value always equals what is stored and a
-            // null only ever unsets a field whose absence already means null.
-            sourceRevision: c.sourceRevision ?? undefined,
-            // Omit-if-undefined, exactly like the note row's `embedding` above — a named key with an
-            // undefined value is emitted as `SET embedding = NONE`, which REMOVES the column, while
-            // an omitted key survives `UPSERT … SET` untouched. embedClaims is best-effort and
-            // returns an EMPTY map on any embedder failure, so writing it unconditionally let one
-            // Ollama blip erase the stored vectors of every surviving claim on the note: those
-            // statements drop out of semanticClaims and out of refreshTopics (collapsing their
-            // topics) with nothing but one warn line, and nothing re-embeds them until the note is
-            // written again or `orc memory rebuild` runs with the embedder up.
-            ...(vec !== undefined && { embedding: vec }),
+        case MutationOp.upsert: {
+          const { note, author } = m.payload
+          const k = key(note.scope, note.id)
+          // read-then-write: createdAt/By + hits/lastAccessedAt preserved; updated/rev advance
+          const ex = (await tx.select(Tb.Note, k))[0]
+          // provenance + retrievedAt stamping shared with the kernel plan-note fold (deriveNoteProvenance):
+          // the one place this is computed, so projector and log-side fold cannot disagree.
+          const prov = deriveNoteProvenance(note, author, e.ts, ex)
+          // read through NoteView so one write path covers every tier: a column the note's tier does
+          // not own is OMITTED from the SET rather than nulled. An omitted key survives `UPSERT … SET`
+          // untouched (that is exactly why the embedding fields use the same pattern), so a note that
+          // flips semantic→plan keeps a stale `claims` column on its row — harmless only because
+          // toNote() re-parses through the tier schema, which strips it. UNSET it here if that ever
+          // stops being true.
+          const n: NoteFields = note
+          await tx.upsert(Tb.Note, k).set({
+            noteId: note.id, scope: note.scope, title: note.title, tier: note.tier,
+            ...(n.kind !== undefined && { kind: n.kind }),
+            ...(note.sourceRevision !== null && { sourceRevision: note.sourceRevision }),
+            ...(n.categories !== undefined && { categories: n.categories }),
+            tags: note.tags,
+            // materialize the optional confidence key: t.option infers `number | undefined`, required
+            links: note.links.map(l => ({ id: l.id, kind: l.kind, confidence: l.confidence })),
+            ...(n.paths !== undefined && { paths: n.paths }),
+            // materialize the optional sourceRevision key, same reason as links' confidence above
+            ...(n.claims !== undefined && {
+              claims: n.claims.map(c => ({ id: c.id, text: c.text, sourceRevision: c.sourceRevision ?? undefined })),
+            }),
+            summary: note.summary, body: note.body,
+            retention: note.retention,
+            // ORM row wants the title key always present (OptionType); retrievedAt already stamped by deriveNoteProvenance
+            ...(prov.sources !== undefined && { sources: prov.sources.map(s => ({ url: s.url, title: s.title, retrievedAt: s.retrievedAt })) }),
+            ...(n.rationale !== undefined && { rationale: n.rationale }),
+            ...(n.uncertainty !== undefined && { uncertainty: n.uncertainty }),
+            ...(n.zone !== undefined && { zone: n.zone }),
+            ...(n.dependsOn !== undefined && { dependsOn: n.dependsOn }),
+            ...(n.skillRefs !== undefined && { skillRefs: n.skillRefs }),
+            ...(n.toolRefs !== undefined && { toolRefs: n.toolRefs }),
+            ...(n.modelRef !== undefined && { modelRef: n.modelRef }),
+            createdAt: prov.createdAt, createdBy: prov.createdBy,
+            updatedAt: prov.updatedAt, updatedBy: prov.updatedBy, revision: prov.revision,
+            // CARRY-or-CLEAR, and the one place a write may touch the stamp. Omit-if-absent is NOT
+            // available here, unlike every other optional column above: clearing is the whole point
+            // when content moved, and an omitted key survives `UPSERT … SET` untouched — which would
+            // leave a stale "verified" on a note the write just rewrote. `undefined` is what UNSETs
+            // the column, so this names the key unconditionally.
+            verified: prov.verified,
+            hits: ex?.hits ?? 0,
+            // OptionType fields validate against `undefined`, not `null` — omit rather than null it out.
+            ...(ex?.lastAccessedAt !== undefined && { lastAccessedAt: ex.lastAccessedAt }),
+            // the embedder-derived vector when configured (omit-if-undefined like the fields above —
+            // a keyword-only deployment simply never sets it, and a rebuild re-derives it)
+            ...(embedding && { embedding }),
           })
+          // Re-materialize this note's out-edges (delete-then-RELATE, relateLinks owns the survivor
+          // rule) — deterministic on replay. PRESERVE stats first: read the existing out-edges before
+          // the delete wipes them, so a link that SURVIVES the rewrite carries its earned hits/
+          // lastAccessedAt into the re-RELATE. A link the update REMOVES loses its stats with it —
+          // correct, the connection no longer exists. Skipping this read is the blocker T6 was named
+          // for: every note UPDATE would otherwise silently wipe its edges' accumulated activation.
+          const existingLinks = await tx.select(Tb.Link).where(l => l.fromId.eq(note.id).and(l.scope.eq(note.scope)))
+          await tx.delete(Tb.Link).where(l => l.fromId.eq(note.id).and(l.scope.eq(note.scope)))
+          await relateLinks(tx, note.scope, note.id, note.links, linkStatsOf(existingLinks))
+          // Claims re-materialize from the note's live set. Deliberately NOT the edges' clear-and-
+          // recreate above: a claim row has a DETERMINISTIC id (note + content hash), and a fixed
+          // record id deleted and re-created inside one Surreal transaction stays deleted at commit —
+          // measured, three claims upserted after the delete left only the two the delete had not
+          // touched. The edge path is immune because RELATE mints a fresh id per call rather than
+          // reusing a key. So retire only the rows this write actually dropped, and update the rest in
+          // place: a claim that SURVIVES keeps its original validFrom, because re-stating a fact does
+          // not make it new. A retired one goes — it is no longer live, and the log still holds it.
+          const existingClaims = await tx.select(Tb.Claim).where(c => c.noteId.eq(note.id).and(c.scope.eq(note.scope)))
+          const prevClaims = new Map(existingClaims.map(c => [c.claimId, c]))
+          const liveClaims = n.claims ?? []
+          const liveIds = new Set(liveClaims.map(c => c.id))
+          for (const row of existingClaims) if (!liveIds.has(row.claimId)) await tx.delete(row.id)
+          for (const c of liveClaims) {
+            const prev = prevClaims.get(c.id)
+            const vec = claimEmbeddings.get(c.id)
+            await tx.upsert(Tb.Claim, claimKey(note.scope, note.id, c.id)).set({
+              claimId: c.id, noteId: note.id, scope: note.scope, text: c.text,
+              // the payload carries no date — the FIRST event that carried this claim is its validFrom
+              validFrom: prev?.validFrom ?? e.ts,
+              // `?? undefined` here is deliberate and NOT the omit-pattern below: resolveClaims carries
+              // a survivor's own revision forward, so this value always equals what is stored and a
+              // null only ever unsets a field whose absence already means null.
+              sourceRevision: c.sourceRevision ?? undefined,
+              // Omit-if-undefined, exactly like the note row's `embedding` above — a named key with an
+              // undefined value is emitted as `SET embedding = NONE`, which REMOVES the column, while
+              // an omitted key survives `UPSERT … SET` untouched. embedClaims is best-effort and
+              // returns an EMPTY map on any embedder failure, so writing it unconditionally let one
+              // Ollama blip erase the stored vectors of every surviving claim on the note: those
+              // statements drop out of semanticClaims and out of refreshTopics (collapsing their
+              // topics) with nothing but one warn line, and nothing re-embeds them until the note is
+              // written again or `orc memory rebuild` runs with the embedder up.
+              ...(vec !== undefined && { embedding: vec }),
+            })
+          }
+          break
         }
-      } else if (e.kind === EVENT_KIND.memory_accessed) {
-        const parsed = MemoryAccessedPayload.safeParse(e.payload)
-        if (!parsed.success) { console.warn(`[memory] skipping unparseable memory_accessed at seq ${e.seq}: ${parsed.error.message}`); await tx.upsert(Tb.Meta, 'cursor').set({ seq: e.seq }); return true }
-        const p = parsed.data
-        const k = key(p.scope, p.id)
-        // read-then-write, not a blind upsert: an access whose note was never projected (or was
-        // since deleted) must not conjure a row carrying nothing but a counter. lastAccessedAt is
-        // the event ts, so a replay lands on the same value the first pass did.
-        const ex = (await tx.select(Tb.Note, k))[0]
-        if (ex) await tx.upsert(Tb.Note, k).set(bumpAccess(ex, e.ts))
-        // the walked EDGE strengthens too, not just the node. No row matched (edge since removed,
-        // or this access carries no provenance) → no-op.
-        const edge = viaEdge(p)
-        if (edge) {
-          const link = (await tx.select(Tb.Link).where(l =>
-            l.scope.eq(edge.scope).and(l.kind.eq(edge.kind)).and(l.fromId.eq(edge.from)).and(l.toId.eq(edge.to))))[0]
-          if (link) await tx.update(link.id).set(bumpAccess(link, e.ts))
+        case MutationOp.access: {
+          const p = m.payload
+          const k = key(p.scope, p.id)
+          // read-then-write, not a blind upsert: an access whose note was never projected (or was
+          // since deleted) must not conjure a row carrying nothing but a counter. lastAccessedAt is
+          // the event ts, so a replay lands on the same value the first pass did.
+          const ex = (await tx.select(Tb.Note, k))[0]
+          if (ex) await tx.upsert(Tb.Note, k).set(bumpAccess(ex, e.ts))
+          // the walked EDGE strengthens too, not just the node. No row matched (edge since removed,
+          // or this access carries no provenance) → no-op.
+          const edge = viaEdge(p)
+          if (edge) {
+            const link = (await tx.select(Tb.Link).where(l =>
+              l.scope.eq(edge.scope).and(l.kind.eq(edge.kind)).and(l.fromId.eq(edge.from)).and(l.toId.eq(edge.to))))[0]
+            if (link) await tx.update(link.id).set(bumpAccess(link, e.ts))
+          }
+          break
         }
-      } else if (e.kind === EVENT_KIND.memory_verified) {
-        const parsed = MemoryVerifiedPayload.safeParse(e.payload)
-        if (!parsed.success) { console.warn(`[memory] skipping unparseable memory_verified at seq ${e.seq}: ${parsed.error.message}`); await tx.upsert(Tb.Meta, 'cursor').set({ seq: e.seq }); return true }
-        const p = parsed.data
-        const k = key(p.scope, p.id)
-        // read-then-write, the same rule memory_accessed follows: a stamp for a note that was never
-        // projected (or has since been deleted) must not conjure a row carrying nothing but a
-        // verification. The store refuses an unknown id before appending, so this only catches the
-        // deleted-since case and a replay against a partially rebuilt model.
-        const ex = (await tx.select(Tb.Note, k))[0]
-        // ONLY this column: the act declares a note checked and asserts nothing about its content,
-        // so revision/updatedAt/updatedBy stay exactly where the last write left them. A verify that
-        // moved `updatedBy` would report the auditor as the note's author.
-        if (ex) await tx.upsert(Tb.Note, k).set({ verified: p.stamp })
-      } else if (e.kind === EVENT_KIND.memory_deleted) {
-        const parsed = MemoryDeletedPayload.safeParse(e.payload)
-        if (!parsed.success) { console.warn(`[memory] skipping unparseable memory_deleted at seq ${e.seq}: ${parsed.error.message}`); await tx.upsert(Tb.Meta, 'cursor').set({ seq: e.seq }); return true }
-        const p = parsed.data
-        await tx.delete(Tb.Note, key(p.scope, p.id))
-        // Only the edges this note AUTHORED — one condition per side, dropping an `.or().and()`
-        // whose precedence was never pinned (the same class as the `.inside().not()` trap).
-        //
-        // This does NOT preserve the inbound edges other live notes authored toward this one, and
-        // narrowing the WHERE cannot: MEASURED against SurrealDB, deleting the `note` record removes
-        // every RELATE edge attached to it in both directions, ours or not. So a note that comes
-        // back under the same id has lost edges its neighbours still assert in their own `links`,
-        // and only `orc memory rebuild` restores them. Fixing that means re-materializing inbound
-        // edges on write, which is a scan of the note table on the hottest path — a deliberate
-        // trade, not a patch. See docs/superpowers/dataflow-audit-open-findings.md.
-        await tx.delete(Tb.Link).where(l => l.fromId.eq(p.id).and(l.scope.eq(p.scope)))
-        // the derived claim rows go with the note, same as its edges
-        await tx.delete(Tb.Claim).where(c => c.noteId.eq(p.id).and(c.scope.eq(p.scope)))
+        case MutationOp.outcome: {
+          const p = m.payload
+          const k = key(p.scope, p.id)
+          // read-then-write like access: an outcome for a note never projected (or archived since)
+          // must not conjure a row carrying nothing but a counter. The FOLD keeps the stats
+          // regardless, so a restored note sees its history on the next rebuild.
+          const ex = (await tx.select(Tb.Note, k))[0]
+          // same increment rule as bumpAccess (+1, stamp the event ts), applied to the outcome's
+          // own column pair so the two sides can never net
+          if (ex) await tx.upsert(Tb.Note, k).set(p.outcome === MEMORY_USE.useful
+            ? { usefulHits: (ex.usefulHits ?? 0) + 1, lastUsefulAt: e.ts }
+            : { deadEndHits: (ex.deadEndHits ?? 0) + 1, lastDeadEndAt: e.ts })
+          break
+        }
+        case MutationOp.verify: {
+          const p = m.payload
+          const k = key(p.scope, p.id)
+          // read-then-write, the same rule memory_accessed follows: a stamp for a note that was never
+          // projected (or has since been deleted) must not conjure a row carrying nothing but a
+          // verification. The store refuses an unknown id before appending, so this only catches the
+          // deleted-since case and a replay against a partially rebuilt model.
+          const ex = (await tx.select(Tb.Note, k))[0]
+          // ONLY this column: the act declares a note checked and asserts nothing about its content,
+          // so revision/updatedAt/updatedBy stay exactly where the last write left them. A verify that
+          // moved `updatedBy` would report the auditor as the note's author.
+          if (ex) await tx.upsert(Tb.Note, k).set({ verified: p.stamp })
+          break
+        }
+        case MutationOp.delete: {
+          const p = m.payload
+          await tx.delete(Tb.Note, key(p.scope, p.id))
+          // Only the edges this note AUTHORED — one condition per side, dropping an `.or().and()`
+          // whose precedence was never pinned (the same class as the `.inside().not()` trap).
+          //
+          // This does NOT preserve the inbound edges other live notes authored toward this one, and
+          // narrowing the WHERE cannot: MEASURED against SurrealDB, deleting the `note` record removes
+          // every RELATE edge attached to it in both directions, ours or not. So a note that comes
+          // back under the same id has lost edges its neighbours still assert in their own `links`,
+          // and only `orc memory rebuild` restores them. Fixing that means re-materializing inbound
+          // edges on write, which is a scan of the note table on the hottest path — a deliberate
+          // trade, not a patch. See docs/superpowers/dataflow-audit-open-findings.md.
+          await tx.delete(Tb.Link).where(l => l.fromId.eq(p.id).and(l.scope.eq(p.scope)))
+          // the derived claim rows go with the note, same as its edges
+          await tx.delete(Tb.Claim).where(c => c.noteId.eq(p.id).and(c.scope.eq(p.scope)))
+          break
+        }
+        default: {
+          const unhandled: never = m
+          void unhandled
+        }
       }
       await tx.upsert(Tb.Meta, 'cursor').set({ seq: e.seq })
       return true
     })
+  }
+
+  // The read-path twin of toSummary's `use` field, for one id: memory_read surfaces the verdict
+  // beside the full note, and the full-note shape (toNote) deliberately strips every counter.
+  async useStats(id: string, scope: string = MemoryScope.project): Promise<UseStats | null> {
+    const ex = (await this.db.select(Tb.Note, key(scope, id)))[0]
+    return ex ? useOf(ex) : null
   }
 
   async neighbors(seed: string, opts: NeighborQuery = {}): Promise<NeighborResult[]> {
@@ -1053,15 +1096,14 @@ export class SurrealMemory {
   }
 
   // Compute a note's vector from its retrieval-bearing text. Best-effort: a backend failure logs
-  // once and yields undefined (the note still stores, keyword still finds it).
-  private async embedWritten(e: EventRecord): Promise<number[] | undefined> {
+  // once and yields undefined (the note still stores, keyword still finds it). Takes the payload
+  // decodeMemoryEvent already parsed — no second decode of the same event.
+  private async embedWritten(p: MemoryWrittenPayload, seq: number): Promise<number[] | undefined> {
     if (!this.embedder) return undefined
-    const p = MemoryWrittenPayload.safeParse(e.payload)
-    if (!p.success) return undefined
-    const { note } = p.data
+    const { note } = p
     const text = [note.title, note.summary, note.body].filter(Boolean).join('\n').slice(0, MEMORY_LIMITS.embedInputChars)
     try { const [vec] = await this.embedder.embed([text]); return vec }
-    catch (err) { console.warn(`[memory] embed failed at seq ${e.seq}: ${errorMessage(err)}`); return undefined }
+    catch (err) { console.warn(`[memory] embed failed at seq ${seq}: ${errorMessage(err)}`); return undefined }
   }
 
   // A vector per claim, so semantic search can match a statement instead of a document. ONE batched
@@ -1069,12 +1111,10 @@ export class SurrealMemory {
   // the same terms too: a backend failure logs once and leaves the claims keyword-findable.
   // ponytail: re-embeds every live claim on each write to the note; carry vectors forward from the
   // rows read above if a hot note with many claims makes the embedder cost bite.
-  private async embedClaims(e: EventRecord): Promise<Map<string, number[]>> {
+  private async embedClaims(p: MemoryWrittenPayload, seq: number): Promise<Map<string, number[]>> {
     const out = new Map<string, number[]>()
     if (!this.embedder) return out
-    const p = MemoryWrittenPayload.safeParse(e.payload)
-    if (!p.success) return out
-    const n: NoteFields = p.data.note
+    const n: NoteFields = p.note
     const claims = n.claims ?? []
     if (claims.length === 0) return out
     try {
@@ -1084,7 +1124,7 @@ export class SurrealMemory {
         if (vec) out.set(c.id, vec)
       })
     } catch (err) {
-      console.warn(`[memory] claim embed failed at seq ${e.seq}: ${errorMessage(err)}`)
+      console.warn(`[memory] claim embed failed at seq ${seq}: ${errorMessage(err)}`)
     }
     return out
   }
@@ -1399,6 +1439,7 @@ const toNoteCoversTiers: ToNoteCoversTiers = true
 void toNoteCoversTiers
 
 function toSummary(r: Record<string, any>): NoteSummary {
+  const u = useOf(r)
   return {
     id: r.noteId, scope: r.scope, title: r.title,
     // both drift inputs together — a reader holding only the revision invents the wrong comparison
@@ -1409,5 +1450,17 @@ function toSummary(r: Record<string, any>): NoteSummary {
     // conditional spread, not `?? undefined`: an explicit undefined key would parse fine here but
     // reads as a hollow field on every unverified note in every rendered summary
     ...(r.verified && { verified: r.verified }),
+    // present only when evidence exists — the common no-evidence case must not widen every envelope
+    ...(u && { use: u }),
+  }
+}
+
+// The ONE construction of UseStats from a note row's counter columns: toSummary's `use` field and
+// useStats() must agree on when evidence exists (any nonzero counter) and how absence reads (null).
+function useOf(r: { usefulHits?: number | null; lastUsefulAt?: string | null; deadEndHits?: number | null; lastDeadEndAt?: string | null }): UseStats | null {
+  if (!r.usefulHits && !r.deadEndHits) return null
+  return {
+    useful: { hits: r.usefulHits ?? 0, lastAccessedAt: r.lastUsefulAt ?? null },
+    deadEnd: { hits: r.deadEndHits ?? 0, lastAccessedAt: r.lastDeadEndAt ?? null },
   }
 }

@@ -101,6 +101,21 @@ describe('api-loop executor', () => {
     expect(kinds).toContain(EVENT_KIND.signal_received)
   })
 
+  // The knowledge self-report rides the signal into BOTH sinks from one seam: the drafted
+  // signal_received payload (durable) and the yielded signal (what ctx.memory.capture receives).
+  it('signal knowledge passes through to the signal_received draft and the yielded signal', async () => {
+    const captured: EventDraft[] = []
+    const knowledge = { useful: ['area-auth'], deadEnd: ['old-map'] }
+    const model = scriptModel([
+      { toolCalls: [{ toolCallId: 'c1', toolName: 'signal', input: { outcome: 'success', summary: 'done', knowledge } }] },
+    ])
+    const events = await drain(apiLoopExecutor().startTurn(ctx(model, captured)))
+    const signalled = events.find(e => e.type === 'signal')
+    expect(signalled && 'signal' in signalled ? signalled.signal.knowledge : undefined).toEqual(knowledge)
+    const draft = captured.find(d => d.kind === EVENT_KIND.signal_received)
+    expect(z.object({ signal: z.object({ knowledge: z.unknown() }) }).parse(draft?.payload).signal.knowledge).toEqual(knowledge)
+  })
+
   it('tool call → executes → feeds result back → signal on turn 2', async () => {
     const captured: EventDraft[] = []
     const model = scriptModel([

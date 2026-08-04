@@ -4,7 +4,7 @@ import { Plan } from './plan'
 import { FailureClass, Signal, SplitResult, Usage } from './execution'
 import { EventKind } from './event-kinds'
 import { OperationCompletedPayload, OperationFailedPayload, OperationStartedPayload } from './operations'
-import { MemoryAccessedPayload, MemoryDeletedPayload, MemoryVerifiedPayload, MemoryWrittenPayload } from './memory'
+import { MemoryAccessedPayload, MemoryDeletedPayload, MemoryOutcomePayload, MemoryVerifiedPayload, MemoryWrittenPayload } from './memory'
 import { MemoryTopicAccessedPayload } from './cluster'
 import { SHA256_HEX_RE } from './ids'
 import { AnalysisCompletedPayload, FeedbackProvidedPayload, FeedbackRequestedPayload, PlanAnnotatedPayload } from './analysis'
@@ -51,6 +51,9 @@ export const REACTION = {
   childApproved: 'child_approved',
   feedback: 'feedback',
   splitResolve: 'split_resolve',
+  // the auto-heal reactor: a recorded out-of-task commit triggers the restamp/heal pass the
+  // operator otherwise runs by hand (knowledge provenance plan T2)
+  commitRecorded: 'commit_recorded',
 } as const
 export type Reaction = (typeof REACTION)[keyof typeof REACTION]
 
@@ -175,6 +178,7 @@ export const PAYLOAD_SCHEMAS = {
   memory_accessed: MemoryAccessedPayload,
   memory_topic_accessed: MemoryTopicAccessedPayload,
   memory_verified: MemoryVerifiedPayload,
+  memory_outcome: MemoryOutcomePayload,
   feedback_requested: FeedbackRequestedPayload,
   feedback_provided: FeedbackProvidedPayload,
   plan_annotated: PlanAnnotatedPayload,

@@ -21,7 +21,7 @@ export { memoryTools, unavailableMemoryTools, memoryVerifyTool, MEMORY_READ_TOOL
 export { unavailableStepMemory, type BindStep } from './step'
 export { orphanedNotes } from './sweep'
 // the evidence-based lifecycle: recheck gathers the facts, archive rules on them (no clock in either)
-export { recheckNotes, summarize } from './recheck'
+export { recheckNotes, summarize, RECHECK_KINDS } from './recheck'
 // The event kinds a KNOWLEDGE fold needs, exported because a caller that hand-lists them drops one:
 // `orc memory recheck` spelled its own [written, deleted, accessed] and so never fetched
 // memory_verified, which left every verification invisible to the recheck and the archive rules
@@ -31,7 +31,8 @@ export { archiveCandidates } from './archive'
 export { frontier } from './frontier'
 export { consolidateTask, type ConsolidationInput, type ConsolidationDistiller } from './consolidate'
 export { createMemoryLifecycle, type MemoryLifecycle } from './lifecycle'
-export { needsReground, restampableNotes, createDriftProbe } from './drift'
+export { corpusDrift, needsReground, restampableNotes, createDriftProbe } from './drift'
+export { restampToHead } from './restamp'
 // consumer: packages/cli/src/runtime.ts, which binds it to the knowledge handle below and injects it
 // into the step tools — the kernel never imports this plugin, so the query crosses as a callback.
 export { notesCiting, type CitingNote } from './drift'

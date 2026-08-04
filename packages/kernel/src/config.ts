@@ -4,7 +4,7 @@ import path from 'node:path'
 import { parseEnv } from 'node:util'
 import { atomicWriteFileSync } from './atomic-file'
 import { z } from 'zod'
-import { errorMessage, ApprovalPolicy, GROUNDED_APPROVAL_DOOR, GroundedApprovalDoor, MCP_SERVER_ID_RE, McpServerConfig, ModelCost } from '@orc/contracts'
+import { errorMessage, ApprovalPolicy, AUTO_HEAL_MODE, AutoHealMode, GROUNDED_APPROVAL_DOOR, GroundedApprovalDoor, MCP_SERVER_ID_RE, McpServerConfig, ModelCost } from '@orc/contracts'
 
 // bump per release — pins DBOS__APPVERSION so recovery survives rebuilds (spec §4)
 const APP_VERSION = 'orc-0.1.0'
@@ -73,6 +73,11 @@ const settingsSchema = (dir: string) =>
     // restamps the notes it wrote (the truthful-stamp pipeline). Default off like every capability
     // gate here — committing an operator's repo is an outward action they opt into.
     autoCommit: z.union([z.boolean(), z.stringbool()]).default(false),
+    // React to a recorded out-of-task commit (the auto-heal reactor). Default 'draft-sweep':
+    // the restamp half is free and silent; the LLM half only ever appears as a DRAFTED task the
+    // human approves — so the default spends nothing on its own, unlike autoCommit above whose
+    // default-off gates an outward git action. 'off' restores commits-as-records-only.
+    autoHeal: AutoHealMode.default(AUTO_HEAL_MODE.draftSweep),
     ollamaBaseUrl: z.url().default('http://localhost:11434'),
     projectDbUrl: z.string().default('ws://127.0.0.1:8000/rpc'),
     // ceiling for the surreal driver's initial dial — the driver does not reject unreachable
@@ -104,6 +109,7 @@ const envOverrides = (): Record<string, string> => {
     memoryConsolidateModel: process.env.ORC_MEMORY_CONSOLIDATE_MODEL,
     ambientCapture: process.env.ORC_AMBIENT_CAPTURE,
     autoCommit: process.env.ORC_AUTO_COMMIT,
+    autoHeal: process.env.ORC_AUTO_HEAL,
     ollamaBaseUrl: process.env.OLLAMA_BASE_URL,
     projectDbUrl: process.env.ORC_PROJECT_DB_URL,
     projectDbConnectTimeoutMs: process.env.ORC_PROJECT_DB_CONNECT_TIMEOUT_MS,

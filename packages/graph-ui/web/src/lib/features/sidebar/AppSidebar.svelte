@@ -84,7 +84,7 @@
       <Dialog.Root bind:open={noteOpen}>
         <Dialog.Trigger>
           {#snippet child({ props })}
-            <Button {...props} variant="outline" size="icon" class="size-8 shrink-0" title="capture a knowledge note by hand">
+            <Button {...props} variant="outline" size="icon" class="size-8 shrink-0" title="capture a knowledge note by hand" aria-label="capture a knowledge note by hand">
               <NoteIcon />
             </Button>
           {/snippet}

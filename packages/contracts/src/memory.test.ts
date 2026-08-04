@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test'
-import { MemoryNoteDraftInput, MemoryNoteInput, MemoryNote, MEMORY_ID_RE, LINK_KINDS, MemoryScope, NOTE_TIER, VerifiedStamp, deriveNoteProvenance, foldMemory, inferTier, noteContentKey, noteKey, parseLinkSpec, type PlanNoteInput, type SemanticNoteInput } from './memory'
+import { MemoryNoteDraftInput, MemoryNoteInput, MemoryNote, MEMORY_ID_RE, MEMORY_USE, USE_VERDICT, LINK_KINDS, MemoryScope, NOTE_TIER, VerifiedStamp, deriveNoteProvenance, foldMemory, inferTier, noteContentKey, noteKey, parseLinkSpec, useLine, useVerdict, type MemoryUseOutcome, type PlanNoteInput, type SemanticNoteInput, type UseStats } from './memory'
 import { EVENT_KIND } from './event-kinds'
 import { PAYLOAD_SCHEMAS } from './events'
 
@@ -355,5 +355,76 @@ describe('memory_verified event', () => {
     // id/scope index the read model by key, same MEMORY_ID_RE guard memory_deleted carries
     expect(PAYLOAD_SCHEMAS[EVENT_KIND.memory_verified].safeParse({ ...payload, id: '../x' }).success).toBe(false)
     expect(PAYLOAD_SCHEMAS[EVENT_KIND.memory_verified].safeParse({ ...payload, stamp: { at: 't', by: 'cli' } }).success).toBe(false)
+  })
+})
+
+describe('memory_outcome event', () => {
+  const author = { source: 'agent', taskId: 't-1' }
+  const note = { id: 'auth-flow', title: 'Auth', summary: 's', body: 'b' }
+  const KEY = noteKey(MemoryScope.project, note.id)
+  const wrote = (ts: string) => ({ kind: EVENT_KIND.memory_written, ts, payload: { note, author, invalidates: [] } })
+  const used = (id: string, outcome: MemoryUseOutcome, ts?: string) =>
+    ({ kind: EVENT_KIND.memory_outcome, ...(ts !== undefined && { ts }), payload: { id, scope: MemoryScope.project, outcome, author } })
+
+  it('has a payload schema keyed by its own event kind', () => {
+    const payload = { id: 'auth-flow', scope: 'project', outcome: MEMORY_USE.useful, author: { source: 'agent' } }
+    expect(PAYLOAD_SCHEMAS[EVENT_KIND.memory_outcome].safeParse(payload).success).toBe(true)
+    expect(PAYLOAD_SCHEMAS[EVENT_KIND.memory_outcome].safeParse({ ...payload, outcome: MEMORY_USE.dead_end }).success).toBe(true)
+    // no third value: a correction is a heal or a link, never a score — 'corrected' is spelled raw
+    // here precisely because it must never exist in the vocabulary
+    expect(PAYLOAD_SCHEMAS[EVENT_KIND.memory_outcome].safeParse({ ...payload, outcome: 'corrected' }).success).toBe(false)
+    // id/scope index the read model by key, same MEMORY_ID_RE guard memory_deleted carries
+    expect(PAYLOAD_SCHEMAS[EVENT_KIND.memory_outcome].safeParse({ ...payload, id: '../x' }).success).toBe(false)
+  })
+
+  it('folds per-note use stats, the two outcomes never netted into one score', () => {
+    const fold = foldMemory([wrote('t0'), used(note.id, MEMORY_USE.useful, 't1'), used(note.id, MEMORY_USE.useful, 't2'), used(note.id, MEMORY_USE.dead_end, 't3')])
+    expect(fold.outcomes.get(KEY)).toEqual({
+      useful: { hits: 2, lastAccessedAt: 't2' },
+      deadEnd: { hits: 1, lastAccessedAt: 't3' },
+    })
+  })
+
+  it('an undated outcome contributes nothing — zero weight, never full weight', () => {
+    // the reference implementation gave an unparseable-date record decay weight 1.0 FOREVER,
+    // letting one malformed doc outrank every real signal; we fail the other way, like access
+    expect(foldMemory([wrote('t0'), used(note.id, MEMORY_USE.useful)]).outcomes.size).toBe(0)
+  })
+
+  it('an outcome for a note nothing wrote still folds — evidence keyed independently, like access', () => {
+    // read-then-write guards the read model; the fold keeps the stats so a later restore sees them
+    expect(foldMemory([used('ghost', MEMORY_USE.dead_end, 't1')]).outcomes.get(noteKey(MemoryScope.project, 'ghost')))
+      .toEqual({ useful: { hits: 0, lastAccessedAt: null }, deadEnd: { hits: 1, lastAccessedAt: 't1' } })
+  })
+})
+
+describe('useVerdict', () => {
+  const stats = (useful: number, deadEnd: number): UseStats => ({
+    useful: { hits: useful, lastAccessedAt: useful > 0 ? 't1' : null },
+    deadEnd: { hits: deadEnd, lastAccessedAt: deadEnd > 0 ? 't2' : null },
+  })
+
+  it('one useful record is an anecdote, two are corroboration', () => {
+    expect(useVerdict(stats(1, 0))).toBe(USE_VERDICT.tentative)
+    expect(useVerdict(stats(2, 0))).toBe(USE_VERDICT.preferred)
+    expect(useVerdict(stats(5, 0))).toBe(USE_VERDICT.preferred)
+  })
+
+  it('any disagreement is contested — corroboration never outvotes a dead-end report', () => {
+    expect(useVerdict(stats(5, 1))).toBe(USE_VERDICT.contested)
+    expect(useVerdict(stats(1, 1))).toBe(USE_VERDICT.contested)
+  })
+
+  it('no useful evidence yields no verdict — dead-end-only is counts, never a status', () => {
+    expect(useVerdict(stats(0, 0))).toBeNull()
+    expect(useVerdict(stats(0, 3))).toBeNull()
+  })
+
+  it('useLine spells contested as BOTH counts, never a net score', () => {
+    expect(useLine(stats(2, 1))).toBe('contested (useful 2 / dead-end 1)')
+    expect(useLine(stats(3, 0))).toBe('preferred (3 useful)')
+    expect(useLine(stats(1, 0))).toBe('tentative (1 useful)')
+    expect(useLine(stats(0, 2))).toBe('dead-end reported (2)')
+    expect(useLine(stats(0, 0))).toBeNull()
   })
 })

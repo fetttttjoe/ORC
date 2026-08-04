@@ -162,12 +162,25 @@ export const linkLookupScopes = (fromScope: string): string[] =>
 export const taskLaneScopes = (taskId: string, ancestorTaskIds: readonly string[] = []): string[] =>
   [planScope(taskId), ...ancestorTaskIds.map(planScope), MemoryScope.project]
 
+// How the runtime reacts to a recorded out-of-task commit (the auto-heal reactor, knowledge
+// provenance plan T2). Owned in contracts so kernel config and the composition root's reactor
+// speak one spelling. 'off' = the pre-reactor behavior (commits stay traceability records);
+// 'restamp' = the free no-LLM catch-up pass only; 'draft-sweep' = restamp, then when drift
+// survives DRAFT a heal task for the human to approve — the spend stays behind the gate.
+export const AUTO_HEAL_MODE = { off: 'off', restamp: 'restamp', draftSweep: 'draft-sweep' } as const
+export const AutoHealMode = z.enum([AUTO_HEAL_MODE.off, AUTO_HEAL_MODE.restamp, AUTO_HEAL_MODE.draftSweep])
+export type AutoHealMode = z.infer<typeof AutoHealMode>
+
 // The memory tool surface by name — matched values, never scattered literals. Owned in
 // contracts so the executor loop (which cannot import the memory plugin) matches the same
 // spelling the plugin registers. tools.ts derives its registrations from this map.
 export const MEMORY_TOOL_NAME = {
   write: 'memory_write', search: 'memory_search', read: 'memory_read', neighbors: 'memory_neighbors',
   topics: 'memory_topics',
+  // the corpus-level drift list `orc memory recheck` computes, as a tool — a live heal sweep
+  // (2026-08-03) discovered candidates via four memory_search queries and still left 8 drifted
+  // notes; only the CLI could reach the authoritative list until this existed
+  recheck: 'memory_recheck',
   // Not part of the role-keyed surface memoryTools() builds: it is registration-gated to the
   // auditor's verify step at the composition root, exactly like the kernel's scoped_changes.
   verify: 'memory_verify',
@@ -469,6 +482,13 @@ export interface NoteView extends Partial<Omit<SemanticNote, 'tier'> & Omit<Plan
   tier: NoteTier
 }
 
+// The zod twin of the fold's UseStats (activation section below): structurally identical, so a
+// summary's `use` field and a fold entry pass to useVerdict() interchangeably — one derivation,
+// two sources, no re-spelling.
+const UseSide = z.object({ hits: z.number().int().nonnegative(), lastAccessedAt: z.string().nullable() })
+export const NoteUseStats = z.object({ useful: UseSide, deadEnd: UseSide })
+export type NoteUseStats = z.infer<typeof NoteUseStats>
+
 export const NoteSummary = z.object({
   id: z.string(), scope: z.string(), title: z.string(),
   // which lane the hit came from: a reader has to be able to tell durable project knowledge from
@@ -496,6 +516,11 @@ export const NoteSummary = z.object({
   // the same reason the other two are — the summary is what retrieval hands a reader, and a reader
   // who cannot see the verification re-derives knowledge that was just confirmed.
   verified: VerifiedStamp.optional(),
+  // Observed-use OUTCOMES (memory_outcome events), the same shape the fold accumulates (UseStats)
+  // so useVerdict() reads a summary and a fold entry identically. Optional and absent when no
+  // evidence exists — the common case must not widen every envelope. Two counter pairs, never one
+  // net score: contested is displayed as BOTH counts.
+  use: NoteUseStats.optional(),
 })
 export type NoteSummary = z.infer<typeof NoteSummary>
 
@@ -662,6 +687,29 @@ export const MemoryAccessedPayload = z.object({
 })
 export type MemoryAccessedPayload = z.infer<typeof MemoryAccessedPayload>
 
+// The OUTCOME of a use: did the pulled knowledge answer the question, or waste the step. Distinct
+// from memory_accessed (which only says something was pulled) and STRICTLY WEAKER than
+// memory_verified: an outcome record is the agent's unverified self-assessment — evidence, never a
+// verification, so it must never mint or carry a VerifiedStamp. Two values only, deliberately:
+// a correction is a HEAL (memory_write to the same id) or a supersedes/contradicts link, never a
+// score — the reference implementation's third `corrected` value scored −1 yet recorded positive
+// provenance, and a corrected-only node dropped out of its display entirely.
+export const MEMORY_USE_OUTCOMES = ['useful', 'dead_end'] as const
+export const MemoryUseOutcome = z.enum(MEMORY_USE_OUTCOMES)
+export type MemoryUseOutcome = z.infer<typeof MemoryUseOutcome>
+export const MEMORY_USE = MemoryUseOutcome.enum
+
+// One event per (note, outcome) — id and scope carry the same MEMORY_ID_RE guard as
+// memory_accessed, since both index the read model by key. Attribution (which task/step reported)
+// rides `author`, same as every other memory payload.
+export const MemoryOutcomePayload = z.object({
+  id: z.string().regex(MEMORY_ID_RE),
+  scope: z.string().regex(MEMORY_ID_RE),
+  outcome: MemoryUseOutcome,
+  author: MemoryAuthor,
+})
+export type MemoryOutcomePayload = z.infer<typeof MemoryOutcomePayload>
+
 // Read-model health, as three distinct states rather than one boolean. A model that is BEHIND is a
 // healthy system mid-write — the projector catches up — while an UNREACHABLE store is a real fault.
 // Collapsing them lit the UI's degraded badge on every burst of note writes.
@@ -701,6 +749,13 @@ export interface MemoryStore {
    */
   verify(id: string, scope: string | undefined, author: MemoryAuthor, opts?: { idempotencyKey?: string }): Promise<VerifiedStamp>
   get(id: string, scope?: string): Promise<MemoryNote | null>
+  /**
+   * A note's observed-use outcome stats, or null when no evidence exists. Separate from get()
+   * because MemoryNote is the AUTHORED shape — hits and outcomes belong to the summary/read-model
+   * side (see toNote), and widening the note would let a write path round-trip counters it must
+   * never own. Display epistemics only: feed useVerdict/useLine, never rank.
+   */
+  useStats(id: string, scope?: string): Promise<UseStats | null>
   list(filter?: MemoryFilter): Promise<NoteSummary[]>
   search(query: string, filter?: MemoryFilter, opts?: MemorySearchOpts): Promise<NoteSummary[]>
   // Statement-level retrieval over the derived claim table, deduped so one note cannot fill every
@@ -717,6 +772,15 @@ export interface MemoryStore {
   // via: the edge a memory_neighbors row led the caller across, when this read follows one —
   // recorded into the same event so the connection can strengthen alongside the node.
   recordAccess(id: string, scope: string | undefined, mode: MemoryAccessMode, author: MemoryAuthor, opts?: { idempotencyKey?: string; via?: AccessVia }): Promise<void>
+  /**
+   * Record an agent's self-reported use outcomes — one memory_outcome event per entry, project
+   * scope (plan-lane notes are expirable run trail, not verdict targets). Evidence, never a
+   * verification, and never a write: nothing here touches the note or its stamp. Unknown ids are
+   * recorded as-is — the fold keys them independently and the read model's read-then-write skips
+   * them, the same tolerance recordAccess relies on. idempotencyKeyBase: keyed per (base, outcome,
+   * id) so an at-least-once retry of the capturing step cannot double-count the evidence.
+   */
+  recordOutcomes(entries: ReadonlyArray<{ id: string; outcome: MemoryUseOutcome }>, author: MemoryAuthor, opts?: { idempotencyKeyBase?: string }): Promise<void>
   /** The derived topic inventory. A read, not a use: listing records nothing. */
   topics(): Promise<Topic[]>
   /**
@@ -882,69 +946,196 @@ export interface FoldedWrite extends Omit<MemoryWrittenPayload, 'note'> {
   note: MemoryWrittenPayload['note'] & { verified?: VerifiedStamp }
 }
 
+// Per-note use OUTCOMES, folded from memory_outcome events. Two separate AccessStats, never one
+// signed score: contested is displayed as BOTH counts, and a net average is exactly the shape the
+// pinned design refuses (a −1 that erases a +1 hides the disagreement a reader needs to see).
+export interface UseStats { useful: AccessStats; deadEnd: AccessStats }
+export const emptyUseStats = (): UseStats =>
+  ({ useful: { hits: 0, lastAccessedAt: null }, deadEnd: { hits: 0, lastAccessedAt: null } })
+
+// ---- use verdicts: DISPLAY EPISTEMICS ONLY, never a rank.ts input ----
+// The use→rank channel is already occupied by the bounded activation boost above; letting verdicts
+// rank too builds the loop nobody has propensity-corrected — returned → used → marked useful →
+// ranked higher → returned. Verdicts surface beside a note (envelope lines, the Currency slot),
+// exactly like the drifted flag: the reader weighs them, the ranker never sees them.
+
+// One record is an anecdote; ≥2 is corroboration. Counts are raw event counts, not decayed:
+// staleness of the evidence enters through retirement (which reads the lastAt timestamps via
+// activation), not by silently un-preferring a note — a verdict that fades with no event to
+// explain it would be the drift-with-no-cause problem all over again.
+export const MIN_CORROBORATION = 2
+
+export const USE_VERDICTS = ['preferred', 'tentative', 'contested'] as const
+export const UseVerdict = z.enum(USE_VERDICTS)
+export type UseVerdict = z.infer<typeof UseVerdict>
+export const USE_VERDICT = UseVerdict.enum
+
+// Contested FIRST and unconditional: corroboration never outvotes a dead-end report — hiding the
+// disagreement behind a majority is the net-score shape in different clothes. Dead-end-only yields
+// NO verdict (a status would read as settled; the counts still show via useLine and feed
+// retirement's used-but-useless evidence).
+export function useVerdict(u: UseStats): UseVerdict | null {
+  if (u.useful.hits > 0 && u.deadEnd.hits > 0) return USE_VERDICT.contested
+  if (u.useful.hits >= MIN_CORROBORATION) return USE_VERDICT.preferred
+  if (u.useful.hits === 1) return USE_VERDICT.tentative
+  return null
+}
+
+// The ONE spelling of the verdict for a human/agent-facing line — envelope, CLI and web derive
+// from here so they cannot phrase the same evidence differently. Null = no line (no evidence).
+export function useLine(u: UseStats): string | null {
+  const v = useVerdict(u)
+  if (v === USE_VERDICT.contested) return `contested (useful ${u.useful.hits} / dead-end ${u.deadEnd.hits})`
+  if (v === USE_VERDICT.preferred) return `preferred (${u.useful.hits} useful)`
+  if (v === USE_VERDICT.tentative) return `tentative (1 useful)`
+  return u.deadEnd.hits > 0 ? `dead-end reported (${u.deadEnd.hits})` : null
+}
+
 export interface MemoryFold {
   notes: Map<string, FoldedWrite>
   writes: Map<string, string>   // last write time per note
   access: Map<string, AccessStats>
   edges: Map<string, AccessStats>
+  outcomes: Map<string, UseStats>
 }
 
 export const emptyMemoryFold = (): MemoryFold =>
-  ({ notes: new Map(), writes: new Map(), access: new Map(), edges: new Map() })
+  ({ notes: new Map(), writes: new Map(), access: new Map(), edges: new Map(), outcomes: new Map() })
 
 // `ts` is optional so trimmed {kind, payload} fixtures keep working — a tsless event contributes no
 // timing (activation without a timestamp is undefined anyway).
-type MemoryEvent = Pick<EventRecord, 'kind' | 'payload'> & { ts?: string }
+export type MemoryEvent = Pick<EventRecord, 'kind' | 'payload'> & { ts?: string }
+
+// ---- the mutation algebra: ONE decode, two applies ----
+// The log has two interpreters — foldMemoryInto below and the Surreal projector's applyEvent —
+// and each used to decode the four knowledge kinds independently, so every kind was implemented
+// twice with nothing enforcing agreement. They diverged once: the fold dropped memory_verified
+// entirely, discarding 14 verification events, and `orc memory recheck` reported 30 drifted where
+// health reported 29 on the same corpus at the same instant. decodeMemoryEvent is now the single
+// decode — parse the payload, name what changed — and only the APPLY differs per side (a Map vs a
+// Surreal transaction). Both appliers switch exhaustively with a `never` default (the
+// DraftCoversTiers shape applied to the event stream), so a mutation one side forgets to handle is
+// a compile error, not a silent drop.
+export enum MutationOp {
+  upsert = 'upsert',
+  archive = 'archive',
+  delete = 'delete',
+  verify = 'verify',
+  access = 'access',
+  outcome = 'outcome',
+  skip = 'skip',
+}
+
+export type MemoryMutation =
+  | { op: MutationOp.upsert; payload: MemoryWrittenPayload; at?: string }
+  // a memory_written carrying archived: true. Split from upsert so the ONE decode owns the
+  // distinction: the fold keeps the note with its flag readable (restore and every "is this
+  // live" filter depend on it), while the read model deletes the rows outright.
+  | { op: MutationOp.archive; payload: MemoryWrittenPayload; at?: string }
+  | { op: MutationOp.delete; payload: MemoryDeletedPayload }
+  | { op: MutationOp.verify; payload: MemoryVerifiedPayload }
+  | { op: MutationOp.access; payload: MemoryAccessedPayload; at?: string }
+  | { op: MutationOp.outcome; payload: MemoryOutcomePayload; at?: string }
+  // a knowledge kind whose payload does not parse — costs that one event, never the stream.
+  // Carries the zod message so the projector's warn line still says what was wrong.
+  | { op: MutationOp.skip; reason: string }
+
+// Pure, and returns null for a kind that is not a knowledge event at all (both appliers pass it
+// through untouched — the projector still advances its cursor past one).
+export function decodeMemoryEvent(e: MemoryEvent): MemoryMutation | null {
+  const at = e.ts !== undefined ? { at: e.ts } : {}
+  if (e.kind === EVENT_KIND.memory_written) {
+    const p = MemoryWrittenPayload.safeParse(e.payload)
+    if (!p.success) return { op: MutationOp.skip, reason: p.error.message }
+    return { op: p.data.note.archived ? MutationOp.archive : MutationOp.upsert, payload: p.data, ...at }
+  }
+  if (e.kind === EVENT_KIND.memory_verified) {
+    const p = MemoryVerifiedPayload.safeParse(e.payload)
+    return p.success ? { op: MutationOp.verify, payload: p.data } : { op: MutationOp.skip, reason: p.error.message }
+  }
+  if (e.kind === EVENT_KIND.memory_deleted) {
+    const p = MemoryDeletedPayload.safeParse(e.payload)
+    return p.success ? { op: MutationOp.delete, payload: p.data } : { op: MutationOp.skip, reason: p.error.message }
+  }
+  if (e.kind === EVENT_KIND.memory_accessed) {
+    const p = MemoryAccessedPayload.safeParse(e.payload)
+    return p.success ? { op: MutationOp.access, payload: p.data, ...at } : { op: MutationOp.skip, reason: p.error.message }
+  }
+  if (e.kind === EVENT_KIND.memory_outcome) {
+    const p = MemoryOutcomePayload.safeParse(e.payload)
+    return p.success ? { op: MutationOp.outcome, payload: p.data, ...at } : { op: MutationOp.skip, reason: p.error.message }
+  }
+  return null
+}
 
 // Mutates and returns `acc`, so a long-lived reader (the UI session cache) can advance one event at
 // a time instead of re-walking history. Same shape as projections' foldInto.
 export function foldMemoryInto(acc: MemoryFold, e: MemoryEvent): MemoryFold {
-  if (e.kind === EVENT_KIND.memory_written) {
-    const p = MemoryWrittenPayload.safeParse(e.payload)
-    if (!p.success) return acc
-    const k = noteKey(p.data.note.scope, p.data.note.id)
-    // CARRY or CLEAR — the same rule deriveNoteProvenance applies on the read-model side, keyed on
-    // the same content hash so the two cannot answer differently. A contentless rewrite (the commit
-    // restamp supplies no fields and moves only sourceRevision) keeps the auditor's check; any edit
-    // to what the note SAYS drops it, because the stamp asserts someone read THAT text.
-    const prior = acc.notes.get(k)?.note
-    const carried = prior?.verified !== undefined && noteContentKey(prior) === noteContentKey(p.data.note)
-      ? { verified: prior.verified }
-      : {}
-    acc.notes.set(k, { ...p.data, note: { ...p.data.note, ...carried } })
-    if (e.ts) acc.writes.set(k, e.ts)
-  } else if (e.kind === EVENT_KIND.memory_verified) {
-    // The fold half of the verification act. Without this branch the event was dropped entirely, so
-    // every fold-based consumer — `orc memory recheck`, archiveCandidates via recheckNotes — was
-    // blind to verification while the read model honoured it. Measured live on an 84-note corpus:
-    // recheck reported 30 drifted where health reported 29, the gap being the single note an auditor
-    // had just confirmed. That is the loop noteDriftState's either-clean rule already fixed for the
-    // read model; it was never fixed here.
-    const p = MemoryVerifiedPayload.safeParse(e.payload)
-    if (!p.success) return acc
-    const k = noteKey(p.data.scope, p.data.id)
-    const held = acc.notes.get(k)
-    // a verification of a note nothing ever wrote is not a note — never materialize one from it
-    if (!held) return acc
-    // `writes` is deliberately untouched: a verification is not a write. Stamping it would bump the
-    // note's last-write time and hand every activation/staleness reader a lie about a step that
-    // only read — the same three lies MemoryVerifiedPayload's comment refuses for revision/author.
-    acc.notes.set(k, { ...held, note: { ...held.note, verified: p.data.stamp } })
-  } else if (e.kind === EVENT_KIND.memory_deleted) {
-    const p = MemoryDeletedPayload.safeParse(e.payload)
-    if (!p.success) return acc
-    const k = noteKey(p.data.scope, p.data.id)
-    acc.notes.delete(k)
-    acc.writes.delete(k)
-  } else if (e.kind === EVENT_KIND.memory_accessed && e.ts) {
-    const p = MemoryAccessedPayload.safeParse(e.payload)
-    if (!p.success) return acc
-    const k = noteKey(p.data.scope, p.data.id)
-    acc.access.set(k, bumpAccess(acc.access.get(k), e.ts))
-    const ek = viaEdgeKey(p.data)
-    if (ek) acc.edges.set(ek, bumpAccess(acc.edges.get(ek), e.ts))
+  const m = decodeMemoryEvent(e)
+  if (m === null) return acc
+  switch (m.op) {
+    // an archive applies here exactly as a write: the note STAYS in the map carrying
+    // archived: true — the fold is what restore reads the flag back off
+    case MutationOp.upsert:
+    case MutationOp.archive: {
+      const { note } = m.payload
+      const k = noteKey(note.scope, note.id)
+      // CARRY or CLEAR — the same rule deriveNoteProvenance applies on the read-model side, keyed on
+      // the same content hash so the two cannot answer differently. A contentless rewrite (the commit
+      // restamp supplies no fields and moves only sourceRevision) keeps the auditor's check; any edit
+      // to what the note SAYS drops it, because the stamp asserts someone read THAT text.
+      const prior = acc.notes.get(k)?.note
+      const carried = prior?.verified !== undefined && noteContentKey(prior) === noteContentKey(note)
+        ? { verified: prior.verified }
+        : {}
+      acc.notes.set(k, { ...m.payload, note: { ...note, ...carried } })
+      if (m.at !== undefined) acc.writes.set(k, m.at)
+      return acc
+    }
+    case MutationOp.verify: {
+      const k = noteKey(m.payload.scope, m.payload.id)
+      const held = acc.notes.get(k)
+      // a verification of a note nothing ever wrote is not a note — never materialize one from it
+      if (!held) return acc
+      // `writes` is deliberately untouched: a verification is not a write. Stamping it would bump the
+      // note's last-write time and hand every activation/staleness reader a lie about a step that
+      // only read — the same three lies MemoryVerifiedPayload's comment refuses for revision/author.
+      acc.notes.set(k, { ...held, note: { ...held.note, verified: m.payload.stamp } })
+      return acc
+    }
+    case MutationOp.delete: {
+      const k = noteKey(m.payload.scope, m.payload.id)
+      acc.notes.delete(k)
+      acc.writes.delete(k)
+      return acc
+    }
+    case MutationOp.access: {
+      if (m.at === undefined) return acc // a tsless fixture access contributes no timing
+      const k = noteKey(m.payload.scope, m.payload.id)
+      acc.access.set(k, bumpAccess(acc.access.get(k), m.at))
+      const ek = viaEdgeKey(m.payload)
+      if (ek) acc.edges.set(ek, bumpAccess(acc.edges.get(ek), m.at))
+      return acc
+    }
+    case MutationOp.outcome: {
+      // undated evidence gets ZERO weight, never full: the reference implementation weighted an
+      // unparseable-date record 1.0 forever, letting one malformed row outrank every real signal
+      if (m.at === undefined) return acc
+      const k = noteKey(m.payload.scope, m.payload.id)
+      const prev = acc.outcomes.get(k) ?? emptyUseStats()
+      acc.outcomes.set(k, m.payload.outcome === MEMORY_USE.useful
+        ? { ...prev, useful: bumpAccess(prev.useful, m.at) }
+        : { ...prev, deadEnd: bumpAccess(prev.deadEnd, m.at) })
+      return acc
+    }
+    case MutationOp.skip:
+      return acc
+    default: {
+      const unhandled: never = m
+      void unhandled
+      return acc
+    }
   }
-  return acc
 }
 
 // Every derivation over the memory stream, in ONE walk.

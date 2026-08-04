@@ -45,4 +45,9 @@ export const MEMORY_LIMITS = {
   // a request for the whole corpus in one reply. bodyChars/4 (approxTokens is chars/4) is the
   // smallest bound that can still return the largest storable note whole, so it costs nothing real.
   budgetTokens: 25_000,
+  // Ceiling on ONE signal's knowledge report (ids per side), not on the evidence itself: the fold
+  // reads every recorded memory_outcome event, so this cap can never hide records from the
+  // aggregator — capping the record below what the aggregator reads was a measured defect in the
+  // reference implementation this design banks (citations 11+ silently never scored).
+  outcomeIds: 20,
 } as const

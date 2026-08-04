@@ -3,7 +3,7 @@ import path from 'node:path'
 import { jsonSchema, tool } from 'ai'
 import { z } from 'zod'
 import type { ResolvedTool } from '@orc/contracts'
-import { toolError, errorMessage, FS_WRITE_TOOL_NAME, SignalOutcome, STEP_ROLE, assertInZone, doubleEncodedField, DOUBLE_ENCODED_HINT, resolveInWorkspace, unescapeSequences } from '@orc/contracts'
+import { toolError, errorMessage, FS_WRITE_TOOL_NAME, KnowledgeReport, SignalOutcome, STEP_ROLE, assertInZone, doubleEncodedField, DOUBLE_ENCODED_HINT, resolveInWorkspace, unescapeSequences } from '@orc/contracts'
 
 export const TOOL_NAME = {
   signal: 'signal',
@@ -21,6 +21,9 @@ export const SignalInput = z.object({
   summary: z.string().min(1),
   // workspace-relative files this step produced — verified and receipted by the runtime
   outputs: z.array(z.string().min(1)).optional(),
+  // the agent's self-report of which pulled notes answered vs wasted the step — contracts owns
+  // the shape (id regex + report cap); this is the capture seam for memory_outcome events
+  knowledge: KnowledgeReport.optional(),
 })
 export const JoinSplitsInput = z.object({ splitIds: z.array(z.string()).optional() })
 export const AskHumanInput = z.object({ question: z.string().min(1), topic: z.string().min(1).optional() })
@@ -49,7 +52,7 @@ export function toolSet(extra: ResolvedTool[] = [], opts: { role?: string; readO
   const set = {
     [TOOL_NAME.signal]: tool({
       description:
-        'End this step and report the outcome. Your summary is the ONLY output downstream steps see — put your conclusions and the ids of notes you wrote in it; do not restate note bodies (downstream pulls notes at its own budget). Declare files you produced in `outputs` (workspace-relative paths) so they are verified and receipted. Call this exactly once, when the work is done or cannot proceed.',
+        'End this step and report the outcome. Your summary is the ONLY output downstream steps see — put your conclusions and the ids of notes you wrote in it; do not restate note bodies (downstream pulls notes at its own budget). Declare files you produced in `outputs` (workspace-relative paths) so they are verified and receipted. If you pulled memory notes, report them in `knowledge`: note ids that ANSWERED your question in `useful`, ids that wasted the step in `deadEnd` — future retrieval learns from this. Call this exactly once, when the work is done or cannot proceed.',
       inputSchema: SignalInput,
     }),
     [TOOL_NAME.fs_read]: tool({

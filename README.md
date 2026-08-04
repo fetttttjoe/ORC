@@ -224,7 +224,7 @@ Tools served (project-bound, same `OrcActions` validation as the web):
 | Kind | Tools |
 |---|---|
 | Read | `project_status`, `task_plan`, `task_transcript`, `plan_notes`, `recent_activity` |
-| Knowledge (degraded-tolerant) | `memory_search`, `memory_read`, `memory_neighbors`, `memory_topics` (statements grouped by meaning; list them, then read one's claims) |
+| Knowledge (degraded-tolerant) | `memory_search`, `memory_read`, `memory_neighbors`, `memory_topics` (statements grouped by meaning; list them, then read one's claims), `memory_recheck` (the corpus drift verdict: counts plus the drifted/unknown lists) |
 | Mutate | `new_request` (quick/grounded), `propose`, `run`, `reply`, `retry`, `cancel`, `annotate`, `revise` |
 | The gate | `approve` — refuses under the default `--autonomy gated` (the human approves in the UI or `orc approve`); approves under `--autonomy full`, recorded as `approvedBy: mcp` |
 

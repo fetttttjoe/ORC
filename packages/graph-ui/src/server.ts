@@ -1,7 +1,7 @@
 import { stepCountIs, streamText, type LanguageModel } from 'ai'
 import { z } from 'zod'
 import { MEMORY_HEALTH, type MemoryHealth, type SupervisorHealth, errorMessage, isRecord, NoteAuthoringDraft, NoteRef, PlanDraft, type CopilotExchangePayload, type Usage } from '@orc/contracts'
-import { buildCopilotTools, copilotSystemPrompt, createProjectSessions, emptyPatch, type CopilotMode, type OrcActions, type ProjectEntry, type ProjectSessions, type SessionUpdate } from '@orc/ui-core'
+import { LOG_PARAM, buildCopilotTools, copilotSystemPrompt, createProjectSessions, emptyPatch, type CopilotMode, type OrcActions, type ProjectEntry, type ProjectSessions, type SessionUpdate } from '@orc/ui-core'
 import path from 'node:path'
 import { toolFailure } from './tool-failure'
 
@@ -297,14 +297,17 @@ export function startGraphUi(opts: {
       case '/api/plan-notes':
         return Response.json(await sessions.planNotes(project, u.searchParams.get('task') ?? ''))
       case '/api/log': {
-        const limitRaw = Number(u.searchParams.get('limit'))
+        const limitRaw = Number(u.searchParams.get(LOG_PARAM.limit))
         // `since` exposes sessions.log's incremental seam: the page backfills the narrative
-        // window a catch-up patch skipped (summaries are per-event; since()'s patch is not)
-        const sinceRaw = Number(u.searchParams.get('since'))
+        // window a catch-up patch skipped (summaries are per-event; since()'s patch is not).
+        // `before` is the same seam pointed backward — the ledger paging into history.
+        const sinceRaw = Number(u.searchParams.get(LOG_PARAM.since))
+        const beforeRaw = Number(u.searchParams.get(LOG_PARAM.before))
         return Response.json(await sessions.log(project, {
-          taskId: u.searchParams.get('task') ?? undefined,
+          taskId: u.searchParams.get(LOG_PARAM.task) ?? undefined,
           limit: Number.isFinite(limitRaw) && limitRaw > 0 ? limitRaw : undefined,
           sinceSeq: Number.isFinite(sinceRaw) && sinceRaw > 0 ? sinceRaw : undefined,
+          beforeSeq: Number.isFinite(beforeRaw) && beforeRaw > 0 ? beforeRaw : undefined,
         }))
       }
       case '/api/stream': {

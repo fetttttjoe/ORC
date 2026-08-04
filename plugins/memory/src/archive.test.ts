@@ -51,9 +51,38 @@ describe('rule — obsolescence is evidence, never age', () => {
   })
 
   it('does not treat coldness as evidence — there is no hits or recency input at all', () => {
-    // the whole NoteFacts surface, spelled out: nothing here can express "cold"
+    // The required NoteFacts surface, spelled out: nothing here can express "cold". The optional
+    // `use` field carries outcome COUNTS — affirmative dead-end reports, a different axis than
+    // access frequency or recency, which stay inexpressible by design.
     expect(Object.keys(note({ key: 'n' })).sort())
       .toEqual(['inboundFrom', 'key', 'retiredBy', 'taskSettled', 'verdict'])
+  })
+
+  /**
+   * The used-but-useless signal: agents pulled this note and REPORTED it wasted their step,
+   * repeatedly, with nobody ever reporting it answered anything. That is affirmative evidence of
+   * uselessness — a different axis than currency, so even a `clean` note retires on it: an
+   * unchanged path proves the note still TRUE, not still WORTH RETRIEVING.
+   */
+  it('retires a note repeatedly reported dead-end that nothing ever found useful', () => {
+    const r = rule(note({ key: 'n', use: { useful: 0, deadEnd: 2 } }))
+    expect(r).toMatchObject({ archive: true, reason: ARCHIVE_REASON.deadEnd })
+    expect(r).toHaveProperty('evidence', 'reported dead-end 2 times, useful never')
+  })
+
+  it('one dead-end report is an anecdote — the same corroboration bar preferred requires', () => {
+    expect(rule(note({ key: 'n', use: { useful: 0, deadEnd: 1 } })))
+      .toEqual({ archive: false, kept: KEPT_BECAUSE.current })
+  })
+
+  it('any useful report makes the disagreement contested — heal resolves it, retirement never does', () => {
+    expect(rule(note({ key: 'n', use: { useful: 1, deadEnd: 5 } })))
+      .toEqual({ archive: false, kept: KEPT_BECAUSE.current })
+  })
+
+  it('a protector outranks dead-end evidence like everything else', () => {
+    expect(rule(note({ key: 'n', use: { useful: 0, deadEnd: 9 }, inboundFrom: ['live'] })))
+      .toEqual({ archive: false, kept: KEPT_BECAUSE.protected })
   })
 })
 

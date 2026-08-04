@@ -1,6 +1,6 @@
 import { afterAll, describe, expect, it } from 'bun:test'
 import { RecordId, Surreal } from 'surrealdb'
-import { claimId, EVENT_KIND, LINK_KIND, MEMORY_ACCESS, MemoryScope, PROJECT_NAME_NOTE_ID, isRecord, type AccessVia, type EventKind, type EventRecord, type MemoryAccessMode, type MemoryAuthor, type MemoryNote, type NoteView } from '@orc/contracts'
+import { claimId, EVENT_KIND, LINK_KIND, MEMORY_ACCESS, MEMORY_USE, MemoryScope, PROJECT_NAME_NOTE_ID, isRecord, type AccessVia, type EventKind, type EventRecord, type MemoryAccessMode, type MemoryAuthor, type MemoryNote, type MemoryUseOutcome, type NoteView } from '@orc/contracts'
 import { SurrealMemory } from './surreal'
 import { eventFixture } from '@orc/contracts/fixtures'
 import { createTestSurreal } from './test-helpers'
@@ -22,6 +22,8 @@ const accessed = (seq: number, id: string, mode: MemoryAccessMode = MEMORY_ACCES
   eventFixture({ seq, taskId: null, kind: 'memory_accessed', payload: { id, scope, mode, author: cli, ...(via && { via }) }, ts: `2026-07-18T0${Math.min(seq, 9)}:00:00Z` })
 const verified = (seq: number, id: string, revision: string, scope = 'project'): EventRecord =>
   eventFixture({ seq, taskId: null, kind: 'memory_verified', payload: { id, scope, stamp: { revision, at: `2026-07-18T0${Math.min(seq, 9)}:00:00Z`, by: 'cli' }, author: cli }, ts: `2026-07-18T0${Math.min(seq, 9)}:00:00Z` })
+const outcome = (seq: number, id: string, use: MemoryUseOutcome, scope = 'project'): EventRecord =>
+  eventFixture({ seq, taskId: null, kind: 'memory_outcome', payload: { id, scope, outcome: use, author: cli }, ts: `2026-07-18T0${Math.min(seq, 9)}:00:00Z` })
 
 const drops: (() => Promise<void>)[] = []
 // One throwaway Surreal database per test. Serial drops blew bun's default 5s hook budget as soon
@@ -327,8 +329,8 @@ describe('SurrealMemory.applyEvent', () => {
     await raw.connect(t.url)
     await raw.signin({ username: t.username, password: t.password })
     await raw.use({ namespace: t.ns, database: t.db })
-    const [rows] = await raw.query<[{ hits?: number; lastAccessedAt?: string }[]]>(
-      'SELECT hits, lastAccessedAt FROM $rid', { rid: new RecordId('note', 'project:auth') },
+    const [rows] = await raw.query<[{ hits?: number; lastAccessedAt?: string; usefulHits?: number; lastUsefulAt?: string; deadEndHits?: number; lastDeadEndAt?: string }[]]>(
+      'SELECT hits, lastAccessedAt, usefulHits, lastUsefulAt, deadEndHits, lastDeadEndAt FROM $rid', { rid: new RecordId('note', 'project:auth') },
     )
     await raw.close()
     return rows[0]
@@ -444,6 +446,36 @@ describe('SurrealMemory.applyEvent', () => {
     const row = await rawRow(t)
     expect(row?.hits).toBe(2)
     expect(row?.lastAccessedAt).toBe('2026-07-18T03:00:00Z') // the event ts, not wall-clock
+  })
+
+  // The read-model half of the memory_outcome kind: each outcome bumps ITS OWN counter pair —
+  // the two sides never net into one score (contested must display both). A rewrite preserves
+  // them the same way it preserves hits (an omitted key survives UPSERT … SET untouched), and an
+  // outcome for a note never projected conjures no row, same rule as access and verify.
+  it('memory_outcome bumps its own counter pair; a rewrite preserves them; unknown ids conjure nothing', async () => {
+    const t = await createTestSurreal(); drops.push(t.drop)
+    const m = await openMemory(t)
+    await m.applyEvent(written(1))
+    await m.applyEvent(outcome(2, 'auth', MEMORY_USE.useful))
+    await m.applyEvent(outcome(3, 'auth', MEMORY_USE.useful))
+    await m.applyEvent(outcome(4, 'auth', MEMORY_USE.dead_end))
+
+    const row = await rawRow(t)
+    expect(row?.usefulHits).toBe(2)
+    expect(row?.lastUsefulAt).toBe('2026-07-18T03:00:00Z') // the event ts, not wall-clock
+    expect(row?.deadEndHits).toBe(1)
+    expect(row?.lastDeadEndAt).toBe('2026-07-18T04:00:00Z')
+    expect(row?.hits).toBe(0) // an outcome is not an access — the access counter must not move
+
+    // an outcome for a note nothing projected must not conjure a row
+    await m.applyEvent(outcome(5, 'ghost', MEMORY_USE.useful))
+    expect(await m.get('ghost', 'project')).toBeNull()
+
+    // a rewrite keeps earned outcome stats, exactly as it keeps hits
+    await m.applyEvent(written(6, note({ summary: 'revised' })))
+    const after = await rawRow(t)
+    expect(after?.usefulHits).toBe(2)
+    expect(after?.deadEndHits).toBe(1)
   })
 
   it('get() performs no write — reading is not an access, only the event is', async () => {

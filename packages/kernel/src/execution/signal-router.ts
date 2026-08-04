@@ -1,5 +1,6 @@
 import {
   errorMessage,
+  CommitRecordedPayload,
   EVENT_KIND, EventKind, FeedbackProvidedPayload, MemoryWrittenPayload, PAYLOAD_SCHEMAS, REACTION, ReactionFailedPayload, RUN_OUTCOME, RunRequestedPayload, runOutcomeFor, SplitResult, TASK_STATUS, TERMINAL_TASK_STATUS,
   type EventRecord, type Reaction, type TaskStatus,
 } from '@orc/contracts'
@@ -33,11 +34,16 @@ const ROUTER_RELEVANT: Record<EventKind, boolean> = {
   memory_topic_accessed: false,
   // a verification stamps a note; it starts nothing, unblocks nothing, and changes no task state
   memory_verified: false,
+  // an agent's self-reported use outcome — evidence the memory fold aggregates, nothing to route
+  memory_outcome: false,
   feedback_requested: false, feedback_provided: true, plan_annotated: false, analysis_completed: false,
   models_discovered: false, // catalog metadata — nothing to route
   copilot_exchange: false, // conversation record — nothing to route
   reaction_failed: false, // the router's OWN diagnosis — routing it would react to itself
-  commit_recorded: false, // taskless traceability record — nothing to route
+  // the auto-heal trigger: an out-of-task commit moves the tree under the knowledge graph's
+  // stamps, and the free restamp/heal reaction (onCommitRecorded) is how drift settles without
+  // an operator running `orc memory restamp` by hand — proven live twice on 2026-08-03
+  commit_recorded: true,
 }
 const ROUTER_KINDS = EventKind.options.filter(k => ROUTER_RELEVANT[k])
 
@@ -94,6 +100,10 @@ export function createSignalRouter(opts: {
   // The DBOS half of a cancel, which a client with no execution port cannot do itself —
   // kernel.cancelSubtree only appends the status; the running supervisor finishes the job.
   onCancelled: (taskId: string) => Promise<void>
+  // The auto-heal reactor (optional — the kernel may not import plugins/memory, so the actual
+  // restamp/heal lives behind this callback at the composition root; absent = the old behavior,
+  // commits stay traceability records and nothing reacts).
+  onCommitRecorded?: (payload: CommitRecordedPayload) => Promise<void>
   send: (destinationId: string, result: SplitResult, topic: string, idempotencyKey: string) => Promise<void>
   sendFeedback: (destinationId: string, message: string, topic: string, idempotencyKey: string) => Promise<void>
 }): { start(): Promise<void>; close(): Promise<void> } {
@@ -211,6 +221,18 @@ export function createSignalRouter(opts: {
       for (const taskId of recentlyCancelled)
         await opts.onCancelled(taskId).catch(err =>
           reactionFailed(REACTION.cancelled, { taskId, seq: null, id: `sweep:${taskId}` }, err))
+      // catch-up: a commit that landed while no supervisor was up still deserves its heal
+      // reaction. The LATEST one only: the reaction is corpus-wide and idempotent (a restamp
+      // covers every commit behind it), so serving history would be pure duplicate work.
+      if (opts.onCommitRecorded) {
+        const latest = [...seed].reverse().find(e => e.kind === EVENT_KIND.commit_recorded)
+        if (latest) {
+          const p = CommitRecordedPayload.safeParse(latest.payload)
+          if (p.success)
+            await opts.onCommitRecorded(p.data)
+              .catch(err => reactionFailed(REACTION.commitRecorded, ofEvent(latest), err))
+        }
+      }
       for (const split of state.splits.values()) {
         if (split.resolved) {
           // a crash between append and send leaves the parent waiting on a committed
@@ -246,6 +268,17 @@ export function createSignalRouter(opts: {
           if (p.success)
             await opts.onRunRequested(e.taskId, { cwd: p.data.cwd, retry: p.data.retry })
               .catch(err => reactionFailed(REACTION.runRequested, ofEvent(e), err))
+          return
+        }
+        // the auto-heal reactor: an out-of-task commit's hook event, relayed to the composition
+        // root's debounced restamp/heal — the router stays a dumb relay, exactly like run_requested
+        if (e.kind === EVENT_KIND.commit_recorded) {
+          if (opts.onCommitRecorded) {
+            const p = CommitRecordedPayload.safeParse(e.payload)
+            if (p.success)
+              await opts.onCommitRecorded(p.data)
+                .catch(err => reactionFailed(REACTION.commitRecorded, ofEvent(e), err))
+          }
           return
         }
         // route 2: an approved child with a pending split gets its run started (policy OR human)

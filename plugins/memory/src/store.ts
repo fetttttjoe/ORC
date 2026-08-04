@@ -215,6 +215,7 @@ export function createMemoryStore(opts: { log: EventLog; surreal: SurrealMemory;
       await log.append({ taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_deleted, payload: { id, scope, author: author ?? { source: 'cli' } } })
     },
     get: (id, scope = MemoryScope.project) => surreal.get(id, scope),
+    useStats: (id, scope = MemoryScope.project) => surreal.useStats(id, scope),
     // The access counter is event-sourced like everything else, so this is an append, not a
     // Surreal write — the projector is still the only thing that touches the read model.
     async recordAccess(id, scope = MemoryScope.project, mode, author, accessOpts) {
@@ -229,6 +230,23 @@ export function createMemoryStore(opts: { log: EventLog; surreal: SurrealMemory;
         // at-least-once: a crash-retry of the surrounding operation must not append a second access
         idempotencyKey: accessOpts?.idempotencyKey ?? null,
       })
+    },
+    // The signal seam's writer half: evidence records, never writes — nothing here touches the
+    // note, its revision or its stamp. Project scope by design (plan-lane notes are expirable run
+    // trail, not verdict targets). Sequential appends, not Promise.all: the log assigns seq per
+    // append and a report is at most 2×MEMORY_LIMITS.outcomeIds events.
+    async recordOutcomes(entries, author, outcomeOpts) {
+      for (const { id, outcome } of entries) {
+        await log.append({
+          // envelope bound to the acting step, recordAccess's rule and reason
+          taskId: author?.taskId || null, stepId: author?.stepId || null, runToken: author?.runToken || null,
+          kind: EVENT_KIND.memory_outcome,
+          payload: { id, scope: MemoryScope.project, outcome, author },
+          // keyed per (base, outcome, id): an at-least-once retry of the capturing step must not
+          // double-count evidence, while one id honestly reported both ways stays two events
+          idempotencyKey: outcomeOpts?.idempotencyKeyBase ? `${outcomeOpts.idempotencyKeyBase}:${outcome}:${id}` : null,
+        })
+      }
     },
     list: (filter?: MemoryFilter): Promise<NoteSummary[]> => surreal.list(filter),
     // halfLifeDays threaded like neighbors' below: search re-ranks by the SAME activation decay, so

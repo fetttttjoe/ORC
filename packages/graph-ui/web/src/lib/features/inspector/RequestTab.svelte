@@ -4,6 +4,8 @@
   import { FAILURE_CLASS } from '@orc/contracts/execution'
   import { createQuery, keepPreviousData } from '@tanstack/svelte-query'
   import { SvelteSet } from 'svelte/reactivity'
+  import InboxIcon from '@lucide/svelte/icons/inbox'
+  import * as Empty from '$lib/components/ui/empty'
   import Chip from '$lib/components/Chip.svelte'
   import { Button } from '$lib/components/ui/button'
   import { Skeleton } from '$lib/components/ui/skeleton'
@@ -105,7 +107,14 @@
 </script>
 
 {#if taskId === null}
-  <p class="px-4 py-6 text-xs text-fog">this node belongs to no task — nothing to request here</p>
+  <!-- the same Empty treatment the chat and detail tabs use — one vocabulary for "nothing here" -->
+  <Empty.Root class="py-10">
+    <Empty.Header>
+      <Empty.Media variant="icon"><InboxIcon /></Empty.Media>
+      <Empty.Title>no request</Empty.Title>
+      <Empty.Description>this node belongs to no task, so there is no plan or lifecycle to show.</Empty.Description>
+    </Empty.Header>
+  </Empty.Root>
 {:else}
   {#if head?.status !== undefined}
     <LifecycleRail status={head.status} />

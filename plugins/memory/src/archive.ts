@@ -12,7 +12,9 @@
 // round number rather than a measurement. Nothing here reads a clock.
 //
 // The rule that makes it age-independent: a note whose declared paths have NOT moved is still
-// true, so a `clean` verdict is never a candidate at any age. `unknown` fails safe the same way.
+// true, so a `clean` verdict is never a candidate on any STALENESS ground, at any age. `unknown`
+// fails safe the same way. The one thing that can retire a clean note is affirmative dead-end
+// evidence (see the used-but-useless rule below) — truth and retrieval-worth are different axes.
 
 /** the drift verdict, as DRIFT_STATE's values — a string union so this file imports nothing */
 export type Verdict = 'clean' | 'drifted' | 'unknown'
@@ -27,11 +29,19 @@ export interface NoteFacts {
   inboundFrom: readonly string[]
   /** a note bound to ONE task (plan/episodic tier) whose task has settled */
   taskSettled: boolean
+  /** observed-use outcome counts (memory_outcome events), when any exist — counts only, no dates */
+  use?: { useful: number; deadEnd: number }
 }
+
+// Same corroboration bar as contracts' MIN_CORROBORATION gives `preferred` — one report is an
+// anecdote in either direction. A second spelling because this file imports nothing (the
+// protector-rule comment below states the same trade for sweep.ts); change either and read both.
+const DEAD_END_CORROBORATION = 2
 
 export const ARCHIVE_REASON = {
   superseded: 'superseded',
   taskSettled: 'task-settled',
+  deadEnd: 'dead-end',
 } as const
 export type ArchiveReason = (typeof ARCHIVE_REASON)[keyof typeof ARCHIVE_REASON]
 
@@ -83,6 +93,15 @@ export function rule(n: NoteFacts): Ruling {
 
   if (n.taskSettled)
     return { archive: true, reason: ARCHIVE_REASON.taskSettled, evidence: 'its task has settled and nothing links to it' }
+
+  // The used-but-useless signal: agents PULLED this note and reported it wasted the step,
+  // corroborated, with no useful report ever. Affirmative evidence, not coldness — a note nobody
+  // pulls has use undefined/zeroes and can never match. Deliberately not gated on `verdict`: an
+  // unchanged path proves a note still TRUE, and these reports say it is not worth RETRIEVING —
+  // different axes, and truth without worth is the standing-hub disease. Any useful report makes
+  // the disagreement contested, which is the heal loop's work, never retirement's.
+  if (n.use && n.use.useful === 0 && n.use.deadEnd >= DEAD_END_CORROBORATION)
+    return { archive: true, reason: ARCHIVE_REASON.deadEnd, evidence: `reported dead-end ${n.use.deadEnd} times, useful never` }
 
   // DRIFT IS NOT GROUNDS FOR RETIREMENT. It was, in an earlier draft of this file, and that was
   // wrong: drift is the INPUT to self-healing. The auditor's Heal rule reads every drifted note

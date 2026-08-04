@@ -73,7 +73,7 @@ re-stamps it current. Every other path is one-way.
 ### Where knowledge goes stale, and what closes it
 
 A change reaching the tree without passing through this loop leaves notes describing code that
-moved. Three mechanisms close that gap, and only the first is automatic:
+moved. Both paths now close — in-task at commit time, out-of-task through the commit reactor:
 
 ```mermaid
 flowchart LR
@@ -86,15 +86,22 @@ flowchart LR
   commit -->|"restamp healed · reverify confirmed"| done["notes current at the new commit"]
   commit -.->|"stillDrifted receipt"| gap["cited paths nobody verified"]
 
-  outside["an edit made OUTSIDE orc"] -.->|"no step, no candidates"| never["nothing closes this<br/>until a heal pass is run by hand"]
+  outside["an edit made OUTSIDE orc"] -->|"post-commit hook<br/>commit_recorded"| reactor["auto-heal reactor<br/>debounce → restampToHead (free)"]
+  reactor -.->|"drift survives, autoHeal: draft-sweep"| draft["DRAFTED sweep task<br/>the human approves the spend"]
 ```
 
 `scoped_changes` and `memory_verify` register on the same predicate — `stepMayVerify`: any auditor
 step except the grounded planner, which shares the role but has audited nothing. `git_commit` then
 advances the stamps the task earned and reports `stillDrifted`: notes citing committed paths that
-no step verified. The corpus-level drift ratio is an **advisory** at every door — a prompt for a
-human decision, never a trigger, because a rebuild firing on its own costs more than the staleness
-it cures.
+no step verified.
+
+The out-of-orc path: the post-commit hook records `commit_recorded`, the signal router relays it,
+and the reactor (config `autoHeal`, default `draft-sweep`) debounces a commit burst into one
+reaction — the free restamp pass always, and when drift survives it, a **drafted** heal task
+carrying the `memory_recheck` worklist instructions. The corpus-level drift ratio stays an
+**advisory** at every door and the reactor keeps that rule: it never approves its own sweep — a
+model pass firing on its own would cost more than the staleness it cures, so the spend waits at
+the human gate.
 
 ## System map — modules
 

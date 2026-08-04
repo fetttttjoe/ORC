@@ -74,8 +74,8 @@ describe('consolidateTask (integration)', () => {
     expect(await consolidateTask({ log, store }, 'no-such-task')).toBeNull()      // no task_created
     expect(await consolidateTask({ log, store }, 't2')).toBeNull()                // 1 step, no provenance → not substantive
     // force bypasses the gate; a distiller that throws is caught → the extractive note, not null/rejection
-    const note = await consolidateTask({ log, store, distill: async () => { throw new Error('model down') } }, 't2', { force: true })
-    expect(note?.title).toBe('Outcome: Trivial task')
+    const notes = await consolidateTask({ log, store, distill: async () => { throw new Error('model down') } }, 't2', { force: true })
+    expect(notes?.[0]?.title).toBe('Outcome: Trivial task')
   })
 })
 

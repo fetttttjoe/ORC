@@ -1,5 +1,5 @@
 import {
-  claimHitKey, errorMessage, LINK_KIND, MEMORY_ACCESS, MEMORY_LIMITS, MemoryScope, noteKey, NOTE_TIER, planScope, SEARCH_MODE, SIGNAL_OUTCOME, slugId, taskLaneScopes,
+  claimHitKey, errorMessage, LINK_KIND, MEMORY_ACCESS, MEMORY_LIMITS, MEMORY_USE, MemoryScope, noteKey, NOTE_TIER, planScope, SEARCH_MODE, SIGNAL_OUTCOME, slugId, taskLaneScopes,
   type ClaimHit, type VerifiedStamp, type LinkKind, type MemoryAuthor, type MemoryStore, type NoteSummary, type ResolvedTool,
   type RecalledContext, type SignalOutcome, type StepMemory,
 } from '@orc/contracts'
@@ -236,6 +236,22 @@ export function bindStepMemory(opts: {
       },
 
       async capture(signal) {
+        // Knowledge FIRST and unconditionally: outcome evidence is a different concern than the
+        // ambient step note, so the ambientCapture knob must not silence it. Deduped per side —
+        // an agent restating an id is one report, not two — while an id honestly reported on BOTH
+        // sides stays two events (contested is the truthful reading). Contained like the ambient
+        // write below: advisory evidence must never fail the step that volunteered it.
+        const k = signal.knowledge
+        if (k && (k.useful.length > 0 || k.deadEnd.length > 0)) {
+          try {
+            await store.recordOutcomes([
+              ...[...new Set(k.useful)].map(id => ({ id, outcome: MEMORY_USE.useful })),
+              ...[...new Set(k.deadEnd)].map(id => ({ id, outcome: MEMORY_USE.dead_end })),
+            ], author, author.runToken ? { idempotencyKeyBase: `${author.runToken}:knowledge` } : {})
+          } catch (err) {
+            console.warn(`knowledge capture failed for step '${step.id}':`, errorMessage(err))
+          }
+        }
         if (opts.ambientCapture === false || !signal.summary) return
         const spec = AMBIENT[signal.outcome]
         try {

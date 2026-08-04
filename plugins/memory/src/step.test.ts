@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'bun:test'
 import {
-  LINK_KIND, MEMORY_ACCESS, MemoryScope, NOTE_TIER, planScope, slugId,
+  LINK_KIND, MEMORY_ACCESS, MEMORY_USE, MemoryScope, NOTE_TIER, planScope, slugId,
   type ClaimHit, type MemoryAuthor, type MemoryNote, type MemoryNoteDraft, type MemoryStore, type NoteSummary,
 } from '@orc/contracts'
 import { bindStepMemory, deriveQueryTerms, preloadQuery } from './step'
@@ -26,6 +26,7 @@ function fakeStore(opts: {
   const writes: MemoryNoteDraft[] = []
   const queries: string[] = []
   const claimQueries: string[] = []
+  const outcomes: { entries: ReadonlyArray<{ id: string; outcome: string }>; base?: string }[] = []
   const store: MemoryStore = {
     search: async query => { queries.push(query); return opts.search?.(query) ?? [] },
     searchClaims: async query => { claimQueries.push(query); return opts.searchClaims?.(query) ?? [] },
@@ -36,12 +37,14 @@ function fakeStore(opts: {
     recordAccess: async (id, scope, mode) => { accesses.push({ id, scope, mode }) },
     write: async note => { writes.push(note); return note as unknown as MemoryNote },
     get: async id => opts.notes?.[id] ?? null,
+    useStats: async () => null,
+    recordOutcomes: async (entries, _author, o) => { outcomes.push({ entries, ...(o?.idempotencyKeyBase && { base: o.idempotencyKeyBase }) }) },
     list: async () => [],
     neighbors: async () => [],
     remove: async () => {},
     verify: async () => ({ revision: 'headrev', at: '2026-07-30T00:00:00.000Z', by: 'cli' }),
   }
-  return { store, accesses, writes, queries, claimQueries }
+  return { store, accesses, writes, queries, claimQueries, outcomes }
 }
 
 const bind = (f: ReturnType<typeof fakeStore>, over: Partial<Parameters<typeof bindStepMemory>[0]> = {}) =>
@@ -155,6 +158,40 @@ describe('capture', () => {
     expect(note?.tier).toBe(NOTE_TIER.episodic)
     expect(note?.tags).toEqual(['ambient'])
     expect(note?.summary).toHaveLength(500)
+  })
+
+  // The signal's knowledge report becomes memory_outcome events through the store — the one seam,
+  // no extra tool calls. Deduped per side (an agent restating an id must not double-count), keyed
+  // on the run so an at-least-once retry cannot either.
+  it('records the signal knowledge as outcome events, deduped and keyed on the run', async () => {
+    const f = fakeStore()
+    await bind(f).memory.capture({
+      outcome: 'success', summary: 'done',
+      knowledge: { useful: ['area-auth', 'area-auth', 'area-net'], deadEnd: ['old-map'] },
+    })
+    expect(f.outcomes).toEqual([{
+      entries: [
+        { id: 'area-auth', outcome: MEMORY_USE.useful },
+        { id: 'area-net', outcome: MEMORY_USE.useful },
+        { id: 'old-map', outcome: MEMORY_USE.dead_end },
+      ],
+      base: 'rt-1:knowledge',
+    }])
+  })
+
+  it('knowledge records survive ambientCapture: false — evidence is a different concern than step notes', async () => {
+    const f = fakeStore()
+    await bind(f, { ambientCapture: false }).memory.capture({
+      outcome: 'success', summary: 'done', knowledge: { useful: ['area-auth'], deadEnd: [] },
+    })
+    expect(f.outcomes).toHaveLength(1)
+    expect(f.writes).toHaveLength(0) // the knob still silences the ambient note itself
+  })
+
+  it('a signal with no knowledge records nothing — absence costs nothing', async () => {
+    const f = fakeStore()
+    await bind(f).memory.capture({ outcome: 'success', summary: 'done' })
+    expect(f.outcomes).toEqual([])
   })
 
   it('a failure gets its OWN id so a later success cannot overwrite the lesson', async () => {
