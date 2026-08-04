@@ -331,8 +331,8 @@ describe('projector resilience', () => {
     const stub = {
       applyEvent: async () => true,
       get: async () => fullNote,
-      getCursor: async () => 0,
-      setStage: async () => {}, // always re-drains from 0, so the 2nd catchUp re-applies write+delete
+      getCursor: async () => 0, // always re-drains from 0, so the 2nd catchUp re-applies write+delete
+      setStage: async () => {},
       allNotes: async () => [],
       refreshLinks: async () => { links += 1 },
       refreshTopics: async () => { topics += 1 },
@@ -409,6 +409,7 @@ describe('projector resilience', () => {
       applyEvent: async () => { throw new Error('boom') },
       get: async () => fullNote,
       getCursor: async () => { throw new Error('boom too') }, // catch-path cursor read also fails
+      setStage: async () => {},
       allNotes: async () => [],
     } as unknown as SurrealMemory
     const warns: string[] = []
@@ -436,5 +437,47 @@ describe('catchUpProgressLine (visibility for the big drain only)', () => {
     expect(catchUpProgressLine(25, 200)).toBe('[memory] catch-up: 25/200 events projected')
     expect(catchUpProgressLine(26, 200)).toBeNull()
     expect(catchUpProgressLine(200, 200)).toBe('[memory] catch-up: 200/200 events projected')
+  })
+})
+
+/**
+ * The boot-stage publication. It exists because `pending` only measures the event replay — the
+ * linking and clustering stages run with pending already at zero, so a boot spent minutes in the
+ * embedder showed one unchanging sentence.
+ *
+ * Asserted in BOTH directions on purpose. This has failed twice, each time silently: once because
+ * the meta row could not be READ back (a required `seq` column the stage row does not carry, thrown
+ * inside a caller's catch), and once because the clear was dropped in an edit, leaving a stale
+ * "clustering" on screen for as long as the process lived. A stage that is set but never cleared
+ * reports work that is not happening, which is worse than reporting nothing.
+ */
+describe('projector stage publication', () => {
+  it('names each refresh stage while it runs, and clears when idle', async () => {
+    const pg = await createTestDb(); drops.push(pg.drop)
+    const log = (await openStorage(pg.url, { projectId: TEST_PROJECT_ID })).events
+    const vaultDir = mkdtempSync(path.join(tmpdir(), 'orc-vault-stage-'))
+    const stages: Array<string | null> = []
+    // ponytail: retained cast — see the SurrealMemory-is-a-class note above.
+    const stub = {
+      applyEvent: async () => true,
+      // null: this test asserts the STAGE calls, not the vault render — a missing row simply means
+      // the projector removes the file, which is the archived-note path and irrelevant here
+      get: async () => null,
+      getCursor: async () => 0,
+      allNotes: async () => [],
+      setStage: async (s: { name: string } | null) => { stages.push(s?.name ?? null) },
+      refreshLinks: async () => {},
+      refreshTopics: async () => {},
+    } as unknown as SurrealMemory
+    const proj = createMemoryProjector({ log, surreal: stub, vaultDir })
+    try {
+      // a DELETE is what makes both stages run — a plain write skips the global re-link
+      await log.append({ taskId: null, stepId: null, runToken: null, kind: 'memory_written', payload: { note: { ...noteInput }, author: { source: 'cli' } } })
+      await log.append({ taskId: null, stepId: null, runToken: null, kind: 'memory_deleted', payload: { id: noteInput.id, scope: 'project', author: { source: 'cli' } } })
+      await proj.catchUp()
+    } finally {
+      await proj.close(); await log.close()
+    }
+    expect(stages).toEqual(['linking', 'clustering', null])
   })
 })

@@ -233,11 +233,18 @@ export async function executeTool(
         const { path: p } = DeleteInput.parse(input)
         const abs = resolveInWorkspace(workspaceDir, p)
         assertInZone(workspaceDir, abs, guard.zone ?? []) // deletion is a write — same fence
+        // ...and the same CLAIM. fs_delete went through the zone fence but not the claim registry,
+        // so a sibling could unlink a file another sibling had claimed and was still writing: no
+        // refusal, no record, the file simply gone. FS_WRITE_TOOL_NAME lists delete as a write and
+        // loop.ts tracks it as one for claims-at-risk — only this branch disagreed.
+        const claim = claimWrite(p)
+        if ('refusal' in claim) return claim.refusal
         try {
           unlinkSync(abs)
         } catch (err) {
-          // a missing file / a directory / EACCES — nothing was removed, so this is a result to
-          // read, not a crash (mirrors fs_write's error envelope)
+          // nothing was removed, so the path must not stay locked against a sibling
+          claim.release()
+          // a missing file / a directory / EACCES — a result to read, not a crash (mirrors fs_write)
           return { output: { error: `could not delete '${p}': ${errorMessage(err)}` }, isError: true }
         }
         return { output: { deleted: p }, isError: false }

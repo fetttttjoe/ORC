@@ -4,7 +4,7 @@
 // into lifecycle.ts, the seam that already names "decay/sweep" as a future peer of consolidation.
 //
 // WHY NOT AGE — the design change this file exists for.
-// sweep.ts's staleNotes retires on ELAPSED TIME (DEFAULT_SWEEP_DAYS), and that axis is wrong for
+// The TTL sweep this replaces retired on ELAPSED TIME, and that axis is wrong for
 // archival: age measures neither correctness nor relevance. A note recording "Postgres listens on
 // :5433" is correct for years, consulted rarely, and never changes — a TTL retires it precisely
 // BECAUSE it is stable, which punishes the notes most worth keeping. docs/IDEAS.md entry 1 assumed
@@ -21,8 +21,6 @@ export interface NoteFacts {
   key: string
   /** currency of the note's declared paths against the tree */
   verdict: Verdict
-  /** every path the note declares is gone from the tree — its subject was deleted */
-  subjectMissing: boolean
   /** keys of notes asserting supersedes/contradicts over this one */
   retiredBy: readonly string[]
   /** keys of notes that authored an inbound link to this one — its protectors */
@@ -33,7 +31,6 @@ export interface NoteFacts {
 
 export const ARCHIVE_REASON = {
   superseded: 'superseded',
-  subjectDeleted: 'subject-deleted',
   taskSettled: 'task-settled',
 } as const
 export type ArchiveReason = (typeof ARCHIVE_REASON)[keyof typeof ARCHIVE_REASON]
@@ -62,10 +59,17 @@ export type Ruling =
  *  1. A protector wins over everything, including an explicit supersedes. Retiring a note that a
  *     surviving note links to leaves that link dangling at a dead id, and repairing authored links
  *     is a stated non-goal (IDEAS entry 1, design fix 3) — so nothing may outrank it.
- *  2. `subjectMissing` and `taskSettled` are facts about the WORLD rather than about currency: a
- *     note whose files no longer exist, or a decomposition whose task is over, is obsolete however
- *     current its remaining paths read.
- *  3. Currency decides last, and only `drifted` qualifies.
+ *     sweep.ts's orphanedNotes states this same rule for the cancel sweep, and states it
+ *     DIFFERENTLY: it counts every link, where the caller here excludes supersedes/contradicts (a
+ *     superseding note links to what it replaces, and would otherwise protect it forever). Two
+ *     spellings because this module imports nothing — change either and read both.
+ *  2. `taskSettled` is a fact about the WORLD rather than about currency: a decomposition whose
+ *     task is over is obsolete however current its steps' paths read.
+ *
+ * A third rule, `subject-deleted` (every declared path gone from the tree), was removed rather
+ * than kept: notes declare DIRECTORIES and globs, which do not vanish, so it never once fired on a
+ * real corpus while implying a coverage this file does not have. Proving a pattern matches nothing
+ * is not something a cheap existence check can do, and a rule that cannot fire is worse than none.
  *
  * Note what is absent: hits, recency, and any clock. Coldness must never be candidacy — IDEAS
  * entry 1 fix 2, "activation ranks, it does not filter" — or a correct note untouched for 90 days
@@ -76,9 +80,6 @@ export function rule(n: NoteFacts): Ruling {
 
   if (n.retiredBy.length > 0)
     return { archive: true, reason: ARCHIVE_REASON.superseded, evidence: `retired by ${n.retiredBy.join(', ')}` }
-
-  if (n.subjectMissing)
-    return { archive: true, reason: ARCHIVE_REASON.subjectDeleted, evidence: 'every declared path is gone from the tree' }
 
   if (n.taskSettled)
     return { archive: true, reason: ARCHIVE_REASON.taskSettled, evidence: 'its task has settled and nothing links to it' }
@@ -112,7 +113,7 @@ export interface Candidate {
  * Protection resolves against SURVIVORS, so this iterates to a fixed point: retiring a note takes
  * its outbound links with it, which can expose notes it was the last protector of. A single pass
  * would retire a chain's head and leave its tail protected by a corpse — the same reasoning
- * sweep.ts's `unreferenced` applies, restated here because this file may not import it.
+ * sweep.ts's orphanedNotes applies, restated here because this file may not import it.
  */
 export function archiveCandidates(notes: readonly NoteFacts[]): Candidate[] {
   const doomed = new Map<string, Candidate>()

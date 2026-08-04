@@ -109,7 +109,7 @@ const noteTable = table(Tb.Note, {
 // no stage, 'stage' carries the stage pair and no seq. A required `seq` made reading the stage row
 // throw "Expected number but found undefined" on every call — silently, because the caller wrapped
 // it in a catch, so the whole boot-stage feature was dead and looked merely idle.
-const metaTable = table(Tb.Meta, { seq: t.option(t.number()), stage: t.option(t.string()), stageAt: t.option(t.number()) })
+const metaTable = table(Tb.Meta, { seq: t.option(t.number()), stage: t.option(t.string()), stageAt: t.option(t.number()), stagePid: t.option(t.number()) })
 
 // Derived claim index, materialized from note.claims by the projector as `link` is from note.links
 // and just as disposable — though NOT by the same clear-and-recreate, see applyEvent. It exists so a
@@ -545,12 +545,19 @@ export class SurrealMemory {
         const { note, author } = parsed.data
         const k = key(note.scope, note.id)
         // ARCHIVED notes leave the read model entirely rather than sitting in it behind a filter.
-        // Deleting the row is what makes archival free at every read site — search, neighbours,
+        // Deleting the rows is what makes archival free at every read site — search, neighbours,
         // ranking, topics and `ls` exclude it with no query change and no chance of one path
         // forgetting the filter. It stays fully recoverable: every revision is in the event log,
-        // so writing the same id with archived:false re-upserts this row on the next drain.
+        // so writing the same id with archived:false re-upserts it on the next drain. Surreal drops
+        // a note's RELATE edges when its record goes, so only the claim rows need saying.
         if (note.archived) {
           await tx.delete(Tb.Note, k)
+          // The CLAIM rows go too, exactly as the memory_deleted branch does it. Dropping only the
+          // note left its statements in the claim table, and refreshTopics/topicClaims select
+          // claims by scope with no owner join — so a retired note kept clustering into topics and
+          // memory_topics returned its statements verbatim, while memory_read said it was gone.
+          // Measured after this comment first claimed topics were excluded; they were not.
+          await tx.delete(Tb.Claim).where(c => c.noteId.eq(note.id).and(c.scope.eq(note.scope)))
           await tx.upsert(Tb.Meta, 'cursor').set({ seq: e.seq })
           return true
         }
@@ -1282,17 +1289,19 @@ export class SurrealMemory {
 
   // Its own row, NOT the cursor row: writing the stage onto 'cursor' would put a presentation
   // field inside the one record whose integrity the whole projection depends on.
-  async setStage(stage: { name: string; startedAt: number } | null): Promise<void> {
+  async setStage(stage: { name: string; startedAt: number; pid: number } | null): Promise<void> {
     // Clearing DELETES the row rather than setting the columns undefined: "no row" is unambiguous,
     // where an undefined column depends on whether the driver omits the key or erases it — and
     // getting that wrong leaves a stale stage on screen forever, which is exactly what happened.
     if (stage === null) { await this.db.delete(Tb.Meta, 'stage'); return }
-    await this.db.upsert(Tb.Meta, 'stage').set({ stage: stage.name, stageAt: stage.startedAt })
+    await this.db.upsert(Tb.Meta, 'stage').set({ stage: stage.name, stageAt: stage.startedAt, stagePid: stage.pid })
   }
 
-  async getStage(): Promise<{ name: string; startedAt: number } | null> {
+  async getStage(): Promise<{ name: string; startedAt: number; pid: number } | null> {
     const row = (await this.db.select(Tb.Meta, 'stage'))[0]
-    return row?.stage !== undefined && row.stageAt !== undefined ? { name: row.stage, startedAt: row.stageAt } : null
+    return row?.stage !== undefined && row.stageAt !== undefined && row.stagePid !== undefined
+      ? { name: row.stage, startedAt: row.stageAt, pid: row.stagePid }
+      : null
   }
 
   // every note across scopes, in deterministic (scope, id) order — the vault rebuild input

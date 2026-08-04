@@ -7,6 +7,7 @@ export interface StepOutcome { title: string; summary: string }
 // What consolidation needs, all gathered by the caller from the log: the task's identity, its step
 // outcomes, and the ids of the DURABLE project notes the task actually read (its provenance).
 export interface ConsolidationInput {
+  taskId: string
   taskTitle: string
   steps: StepOutcome[]
   derivedFrom: string[]
@@ -39,7 +40,13 @@ export function consolidatedNote(input: ConsolidationInput, distilled?: Distille
   const body = distilled?.body ?? withSummary.map(s => `- ${s.title}: ${s.summary}`).join('\n')
   const links = [...new Set(input.derivedFrom)].map(id => ({ id, kind: LINK_KIND.derived_from }))
   return {
-    id: slugId(`outcome ${input.taskTitle}`), // keyed on the task, distilled or not — stable + idempotent
+    // Keyed on the task ID, distilled or not — stable + idempotent. NOT the title: two tasks may
+    // carry the same one (a re-run, a recurring chore), and keying on it made the second silently
+    // OVERWRITE the first task's outcome, since the idempotency key is per-task so both writes land.
+    // The human-readable handle is `title` below; an id is only a handle.
+    // ponytail: slugId truncates at 64 chars, so a split child (`<uuid>.<step>.<callId>`) keeps only
+    // the head of its call id — hash the tail if ids that long ever collide in practice.
+    id: slugId(`outcome ${input.taskId}`),
     // promotion is the whole point: an episodic per-task trail becomes ONE semantic project claim
     tier: NOTE_TIER.semantic,
     scope: MemoryScope.project,
@@ -113,7 +120,7 @@ export async function consolidateTask(
   const steps = (await deps.store.list({ scope: planScope(taskId) })).map(n => ({ title: n.title, summary: n.summary }))
   const derivedFrom = await accessedProjectIds(deps.log, taskId)
   if (!opts.force && !isSubstantive({ steps, derivedFrom })) return null
-  const input: ConsolidationInput = { taskTitle: title, steps, derivedFrom, unfinished: await unfinishedDescendants(deps.log, taskId) }
+  const input: ConsolidationInput = { taskId, taskTitle: title, steps, derivedFrom, unfinished: await unfinishedDescendants(deps.log, taskId) }
   // distillation is best-effort — a model hiccup falls back to the extractive note rather than
   // dropping the capture entirely.
   const distilled = deps.distill ? await deps.distill(input).catch(() => null) : null

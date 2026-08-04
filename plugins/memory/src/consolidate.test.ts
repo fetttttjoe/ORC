@@ -7,12 +7,13 @@ import { CONSOLIDATED_TAG, consolidateTask, consolidatedNote, isSubstantive } fr
 describe('consolidatedNote', () => {
   it('promotes step outcomes into one durable project note, linked derived_from what the task read', () => {
     const draft = consolidatedNote({
+      taskId: 'a1b2c3d4-0000-4000-8000-000000000001',
       taskTitle: 'Explain memory heat',
       steps: [{ title: 'Step A', summary: 'edges strengthen via memory_accessed' }, { title: 'Step B', summary: '   ' }],
       derivedFrom: ['area-memory', 'area-memory', 'projector-re-materialization'], // dup on purpose
       unfinished: [],
     })
-    expect(draft.id).toBe(slugId('outcome Explain memory heat'))
+    expect(draft.id).toBe(slugId('outcome a1b2c3d4-0000-4000-8000-000000000001'))
     expect(draft.scope).toBe('project')
     expect(draft.retention).toBe('durable')
     expect(draft.tags).toEqual([CONSOLIDATED_TAG])
@@ -28,8 +29,19 @@ describe('consolidatedNote', () => {
     expect(() => MemoryNoteInput.parse(draft)).not.toThrow()
   })
 
+  // Titles are not unique — a re-run, a recurring chore, or two operators phrasing the same request
+  // produce the same one. Keyed on the title, the second task's note landed on the first task's id
+  // and overwrote its outcome; the per-task idempotency key means both writes go through, so the
+  // first task's record was simply gone.
+  it('two tasks sharing a title get two notes, not one overwriting the other', () => {
+    const of = (taskId: string): MemoryNoteDraft =>
+      consolidatedNote({ taskId, taskTitle: 'Fix the auth bug', steps: [{ title: 'a', summary: 'x' }], derivedFrom: [], unfinished: [] })
+    expect(of('run-one').id).not.toBe(of('run-two').id)
+    expect(of('run-one').id).toBe(of('run-one').id) // still idempotent for the SAME task
+  })
+
   it('with no steps and no provenance still yields a valid (if thin) durable note', () => {
-    const draft = consolidatedNote({ taskTitle: 'Empty task', steps: [], derivedFrom: [], unfinished: [] })
+    const draft = consolidatedNote({ taskId: 'empty-1', taskTitle: 'Empty task', steps: [], derivedFrom: [], unfinished: [] })
     expect(draft.body).toBe('')
     expect(draft.links).toEqual([])
     expect(draft.summary).toBe('Empty task')
@@ -38,13 +50,13 @@ describe('consolidatedNote', () => {
 
   it('uses distilled text when provided, keeping the task-keyed id, scope, and links', () => {
     const draft = consolidatedNote(
-      { taskTitle: 'Explain memory heat', steps: [{ title: 'a', summary: 'raw' }], derivedFrom: ['area-memory'], unfinished: [] },
+      { taskId: 'a1b2c3d4-0000-4000-8000-000000000001', taskTitle: 'Explain memory heat', steps: [{ title: 'a', summary: 'raw' }], derivedFrom: ['area-memory'], unfinished: [] },
       { title: 'How memory heat works', summary: 'Edges strengthen on use.', body: '- via records the edge' },
     )
     expect(draft.title).toBe('How memory heat works') // distilled, not "Outcome: …"
     expect(draft.summary).toBe('Edges strengthen on use.')
     expect(draft.body).toBe('- via records the edge') // distilled body, not the extractive bullet
-    expect(draft.id).toBe(slugId('outcome Explain memory heat')) // id stays task-keyed → idempotent
+    expect(draft.id).toBe(slugId('outcome a1b2c3d4-0000-4000-8000-000000000001')) // id stays task-keyed → idempotent
     expect(draft.scope).toBe('project')
     expect(draft.links).toEqual([{ id: 'area-memory', kind: LINK_KIND.derived_from }])
     expect(() => MemoryNoteInput.parse(draft)).not.toThrow()

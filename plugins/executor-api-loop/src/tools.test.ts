@@ -412,3 +412,28 @@ describe('every tool argument is checked for double encoding, not just fs_edit',
     expect(readFileSync(path.join(dir, 'a.ts'), 'utf8')).toBe(source)
   })
 })
+
+/**
+ * fs_delete is a WRITE. It passed the zone fence but not the claim registry, so a sibling step
+ * could unlink a file another sibling had claimed and was still writing — no refusal, no record,
+ * the file simply gone. FS_WRITE_TOOL_NAME lists delete as a write and loop.ts tracks it as one for
+ * claims-at-risk; only the tool's own branch disagreed.
+ */
+describe('fs_delete takes a write claim like every other write tool', () => {
+  it('refuses to delete a path a sibling step has claimed, and leaves the file intact', async () => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'orc-claim-del-'))
+    const a = { writer: 'step:t:a:a1' }
+    const b = { writer: 'step:t:b:a1' }
+    expect((await executeTool(TOOL_NAME.fs_write, { path: 'shared.md', content: 'A' }, dir, [], undefined, a)).isError).toBe(false)
+
+    const clash = await executeTool(TOOL_NAME.fs_delete, { path: 'shared.md' }, dir, [], undefined, b)
+    expect(clash.isError).toBe(true)
+    expect(JSON.stringify(clash.output)).toContain('concurrent write refused')
+    expect(existsSync(path.join(dir, 'shared.md'))).toBe(true)
+
+    // once A ends, the successor may delete it — the claim gates ordering, it does not forbid
+    releaseWriteClaims(a.writer)
+    expect((await executeTool(TOOL_NAME.fs_delete, { path: 'shared.md' }, dir, [], undefined, b)).isError).toBe(false)
+    releaseWriteClaims(b.writer)
+  })
+})

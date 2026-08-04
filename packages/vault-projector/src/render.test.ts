@@ -14,6 +14,39 @@ const task = (over: Partial<TaskNode> = {}): TaskNode => ({
 })
 
 describe('renderTaskFiles', () => {
+  // The index used to list a session link per PLAN step, but a session file is written only for a
+  // step that left events. Every unstarted step therefore got a link to a file that was never
+  // emitted — and in Obsidian a dead link is indistinguishable from an empty note.
+  it('links only the sessions it actually emits, never the steps that have not started', () => {
+    seq = 0
+    const plan = planFixture({ taskId: 't1', version: 1, steps: [stepFixture({ id: 's1' }), stepFixture({ id: 's2' })] })
+    const files = renderTaskFiles('t1', [
+      ev({ kind: EVENT_KIND.task_created, payload: { task: task() } }),
+      ev({ kind: EVENT_KIND.plan_proposed, payload: { plan } }),
+      ev({ kind: EVENT_KIND.step_started, stepId: 's1', runToken: 'r', payload: { stepId: 's1', runToken: 'r', attempt: 1 } }),
+    ])
+    expect(files['tasks/t1/sessions/s1.md']).toBeDefined()
+    expect(files['tasks/t1/sessions/s2.md']).toBeUndefined() // never started → no file
+    expect(files['tasks/t1/index.md']).toContain('[Session: s1](sessions/s1.md)')
+    expect(files['tasks/t1/index.md']).not.toContain('sessions/s2.md')
+  })
+
+  // Mermaid node ids share ONE namespace, and PlanStep.id is only constrained to `^[\w-]+$` — so a
+  // step named `op0` collided with the first operation node, merging the boxes and turning the edge
+  // between them into a self-loop.
+  it('a step named like a generated node keeps its own box', () => {
+    seq = 0
+    const plan = planFixture({ taskId: 't1', version: 1, steps: [stepFixture({ id: 'op0' })] })
+    const md = renderTaskFiles('t1', [
+      ev({ kind: EVENT_KIND.task_created, payload: { task: task() } }),
+      ev({ kind: EVENT_KIND.plan_proposed, payload: { plan } }),
+      ev({ kind: EVENT_KIND.operation_started, stepId: 'op0', runToken: 'r', payload: { operationId: 'o1', operationKind: 'tool', name: 'fs_write', attempt: 1, before: {} } }),
+    ])['tasks/t1/execution.md']!
+    // the step's node and the operation's node are distinct, and the edge runs between them
+    expect(md).toContain('s_op0 --> op_0')
+    expect(md).not.toContain('op0 --> op0')
+  })
+
   it('emits task index with a mermaid DAG, a plan file, log, and a session', () => {
     seq = 0
     const plan = planFixture({ taskId: 't1', version: 1, steps: [stepFixture({ id: 's1' })] })
@@ -47,7 +80,7 @@ describe('renderTaskFiles — mermaid label escaping', () => {
     ]
     const md = renderTaskFiles('t1', events)['tasks/t1/index.md']!
     // a raw double quote inside ["…"] ends the label and leaks the rest as live mermaid
-    expect(md).toContain(`s1["s1 · api'loop · fake/'m'"]`)
+    expect(md).toContain(`s_s1["s1 · api'loop · fake/'m'"]`)
   })
 })
 
@@ -127,11 +160,11 @@ describe('renderTaskFiles — execution and lineage graphs', () => {
     expect(md).toContain('type: execution')
     expect(md).toContain('model fake/m · completed · attempts 1')
     expect(md).toContain('tool fs_write · started · attempts 2')
-    expect(md).toMatch(/op1\[[^\]]*\]:::unresolved/)
-    expect(md).toMatch(/op0\[[^\]]*\]:::done/)
+    expect(md).toMatch(/op_1\[[^\]]*\]:::unresolved/)
+    expect(md).toMatch(/op_0\[[^\]]*\]:::done/)
     expect(md).toContain('stroke-dasharray') // unresolved is visually distinct
-    // deterministic node/edge order: op0 (earlier startedSeq) renders before op1
-    expect(md.indexOf('op0[')).toBeLessThan(md.indexOf('op1['))
+    // deterministic node/edge order: op_0 (earlier startedSeq) renders before op_1
+    expect(md.indexOf('op_0[')).toBeLessThan(md.indexOf('op_1['))
   })
 
   it('renders step → artifact lineage edges with hash prefix and size', () => {
@@ -144,7 +177,7 @@ describe('renderTaskFiles — execution and lineage graphs', () => {
     const md = renderTaskFiles('t1', events)['tasks/t1/lineage.md']!
     expect(md).toContain('type: lineage')
     expect(md).toContain('report.md · sha256:abababababab… · 42B')
-    expect(md).toContain('s1 --> art0')
+    expect(md).toContain('s_s1 --> art_0')
     // no receipts → explicit empty view, deterministic
     const empty = renderTaskFiles('t1', [ev({ kind: EVENT_KIND.task_created, payload: { task: task() } })])['tasks/t1/lineage.md']!
     expect(empty).toContain('_no declared outputs_')

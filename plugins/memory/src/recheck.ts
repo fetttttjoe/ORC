@@ -1,5 +1,3 @@
-import { existsSync } from 'node:fs'
-import path from 'node:path'
 import { DRIFT_STATE, LINK_KIND, NOTE_TIER, foldMemory, noteKey, type EventRecord } from '@orc/contracts'
 import { noteDriftState, type ChangedSince } from './drift'
 import type { NoteFacts, Verdict } from './archive'
@@ -19,20 +17,13 @@ import type { NoteFacts, Verdict } from './archive'
  */
 const RETIRING_LINK: ReadonlySet<string> = new Set([LINK_KIND.supersedes, LINK_KIND.contradicts])
 
-// glob metacharacters: a declared path carrying any of these names a PATTERN, not a file
-const GLOB_CHAR = /[*?[\]{}]/
-
 /** task-bound tiers: a plan or episodic note belongs to ONE task and dies with it */
 const TASK_BOUND: ReadonlySet<string> = new Set([NOTE_TIER.plan, NOTE_TIER.episodic])
 
 export interface RecheckDeps {
-  /** repo root, for resolving a note's declared paths */
-  dir: string
   changedSince: ChangedSince
   /** tasks that can no longer run — a task-bound note outlives its task only while it may be retried */
   terminalTaskIds: ReadonlySet<string>
-  /** injected for tests; defaults to the real filesystem */
-  exists?: (absPath: string) => boolean
 }
 
 export interface RecheckedNote extends NoteFacts {
@@ -40,12 +31,11 @@ export interface RecheckedNote extends NoteFacts {
   scope: string
   title: string
   tier: string
-  /** what the note declares it describes — echoed so a report can show WHY subjectMissing is true */
+  /** what the note declares it describes — echoed so a report can show what a verdict was measured against */
   paths: readonly string[]
 }
 
 export async function recheckNotes(events: EventRecord[], deps: RecheckDeps): Promise<RecheckedNote[]> {
-  const exists = deps.exists ?? ((p: string) => existsSync(p))
   const fold = foldMemory(events)
   // Already-archived notes stay in the FOLD — that is what makes a restore possible — but they are
   // not live knowledge and must never be re-offered as candidates: they would be re-reported and
@@ -78,23 +68,10 @@ export async function recheckNotes(events: EventRecord[], deps: RecheckDeps): Pr
       { sourceRevision: withPaths.sourceRevision, paths: declared, ...(withPaths.verified && { verified: withPaths.verified }) },
       deps.changedSince,
     )
-    // A note declaring NO paths cannot have a deleted subject — absence of a claim is not evidence
-    // that the claim's subject is gone, and treating it as such would retire every pathless note.
-    //
-    // Only LITERAL paths can prove deletion. A declared path may be a glob (`plugins/memory/**`
-    // occurs in this corpus) and existsSync on one is always false, so counting globs here would
-    // retire live notes describing code that is very much present. A note carrying any glob is
-    // therefore never judged missing: we cannot cheaply prove a pattern matches nothing, and the
-    // safe direction is to keep it.
-    const literal = declared.filter((p: string) => !GLOB_CHAR.test(p))
-    const subjectMissing = literal.length === declared.length
-      && literal.length > 0
-      && literal.every((p: string) => !exists(path.resolve(deps.dir, p)))
     const taskId = author.taskId ?? ''
     out.push({
       key, id: note.id, scope: note.scope, title: note.title, tier: note.tier, paths: declared,
       verdict: verdictOf(state),
-      subjectMissing,
       retiredBy: retiredBy.get(key) ?? [],
       // self-links would otherwise make a note its own protector
       inboundFrom: (inboundFrom.get(key) ?? []).filter(k => k !== key),
@@ -114,7 +91,6 @@ export interface RecheckSummary {
   clean: number
   drifted: number
   unknown: number
-  subjectMissing: number
 }
 
 export const summarize = (notes: readonly RecheckedNote[]): RecheckSummary => ({
@@ -122,5 +98,4 @@ export const summarize = (notes: readonly RecheckedNote[]): RecheckSummary => ({
   clean: notes.filter(n => n.verdict === 'clean').length,
   drifted: notes.filter(n => n.verdict === 'drifted').length,
   unknown: notes.filter(n => n.verdict === 'unknown').length,
-  subjectMissing: notes.filter(n => n.subjectMissing).length,
 })

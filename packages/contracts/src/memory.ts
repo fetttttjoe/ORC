@@ -52,10 +52,6 @@ export function parseLinkSpec(input: string): Array<{ id: string; kind?: LinkKin
     })
 }
 
-// Inverse, for pre-filling the edit dialog: 'supersedes:old-note, relates_to:other'.
-export const formatLinkSpec = (links: ReadonlyArray<{ id: string; kind: string }>): string =>
-  links.map(l => `${l.kind}:${l.id}`).join(', ')
-
 // Citations. A URL is checked structurally, not by regex: only http(s), and never with embedded
 // credentials — a `https://user:pw@host` citation would put a secret in the vault and in every
 // projection of it. Bounded so one note cannot carry an unbounded blob of provenance.
@@ -818,6 +814,13 @@ export function deriveNoteProvenance(
 export const noteLabel = (note: NoteFields): string => note.kind ?? note.tier
 
 export const noteKey = (scope: string, id: string): string => `${scope}\u0000${id}`
+
+// A claim id is a hash of the claim's TEXT, so it names a statement, not an occurrence of one: two
+// notes asserting the same sentence share it. Anything ENUMERATING claim hits must key by this
+// instead — deduping on claimId alone silently dropped one of the two notes a change had falsified,
+// the exact failure `perNote: 'all'` was introduced to prevent.
+export const claimHitKey = (hit: { scope: string; noteId: string; claimId: string }): string =>
+  `${noteKey(hit.scope, hit.noteId)}\u0000${hit.claimId}`
 
 // ---- activation: the first consumer of the observed-use measurement ----
 // Read-time derivation, never stored: a pure function of the event-sourced hits/lastAccessedAt

@@ -1,7 +1,7 @@
 // E2E fixture server (run by playwright's webServer): real Postgres test db, seeded state,
 // scripted copilot, kernel-backed newTask — everything else read-only-stubbed.
 import { MockLanguageModelV4 } from 'ai/test'
-import { EVENT_KIND, STEP_ID, TASK_STATUS } from '@orc/contracts'
+import { EVENT_KIND, FAILURE_CLASS, STEP_ID, TASK_STATUS } from '@orc/contracts'
 import { stepFixture } from '@orc/contracts/fixtures'
 import { draftFixture } from '@orc/contracts/fixtures'
 
@@ -91,6 +91,29 @@ await storage.events.append({
   payload: { stepId: LIVE_STEP_ID, runToken: LIVE_RUN_TOKEN, iteration: 4, request: {}, response: {} },
 })
 
+// A run an AUDITOR REJECTED. The pane must offer replan, never retry: retry re-runs only what did
+// not complete, so the rejecting step would meet the same completed siblings and reach the same
+// verdict. Seeded because nothing else in this fixture produces a `rejected` failure, and the
+// affordance shipped once as a button that silently did nothing.
+const REJECT_RUN_TOKEN = 'e2e-reject-run'
+const REJECT_STEP_ID = stepFixture().id
+const rejected = await kernel.createTask({ title: 'rejected plan request', spec: 'work an auditor judged unacceptable' })
+await kernel.proposePlan(rejected.id, draftFixture())
+await kernel.approvePlan(rejected.id)
+const rejectEnvelope = { taskId: rejected.id, stepId: REJECT_STEP_ID, runToken: REJECT_RUN_TOKEN }
+await storage.events.append({
+  ...rejectEnvelope, kind: EVENT_KIND.step_started,
+  payload: { stepId: REJECT_STEP_ID, runToken: REJECT_RUN_TOKEN, attempt: 1 },
+})
+await storage.events.append({
+  ...rejectEnvelope, kind: EVENT_KIND.step_failed,
+  payload: { stepId: REJECT_STEP_ID, runToken: REJECT_RUN_TOKEN, class: FAILURE_CLASS.rejected, message: 'three placement defects; content sound' },
+})
+await storage.events.append({
+  taskId: rejected.id, stepId: null, runToken: null, kind: EVENT_KIND.task_status_changed,
+  payload: { taskId: rejected.id, from: TASK_STATUS.approved, to: TASK_STATUS.blocked },
+})
+
 const copilotModel = new MockLanguageModelV4({
   doStream: async () => ({
     stream: new ReadableStream({
@@ -117,7 +140,10 @@ const unsupported = (name: string) => async (): Promise<never> => { throw new Er
 const actions: OrcActions = {
   newTask: async input => ({ taskId: (await kernel.createTask({ title: input.title, spec: input.spec ?? '' })).id }),
   propose: unsupported('propose'),
-  edit: unsupported('edit'),
+  // kernel-backed, not stubbed: `edit` is the documented repair path for a BLOCKED task
+  // (kernel.editPlan stamps blocked -> awaiting_approval), and the console's reopen button is its
+  // only caller. Stubbing it unsupported would let that button be tested without being exercised.
+  edit: async (taskId, draft) => ({ version: (await kernel.editPlan(taskId, draft)).version }),
   approve: async taskId => ({ version: (await kernel.approvePlan(taskId)).version }),
   run: unsupported('run'),
   // The measured bug, scripted: the answer lands, and then finalize_plan rejects it. Before this

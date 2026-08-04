@@ -3,7 +3,7 @@ import { spawn } from 'node:child_process'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { Command, InvalidArgumentError } from 'commander'
-import { claimHistory, EDGE_DIRECTION, errorMessage, EVENT_KIND, foldMemory, LINK_KINDS, MASTERPLAN_NOTE_ID, MEMORY_ACCESS, MemoryDeletedPayload, MemoryScope, MemoryWrittenPayload, noteKey, NOTE_TIER, NOTE_TIERS, NoteTier, parseLinkSpec, PlanDraft, ROLE_SKILL, RUN_OUTCOME, STRATEGY, TASK_STATUS, TERMINAL_TASK_STATUS, LinkKind, slugId, type Analyzer, type EventRecord, type MemoryLink, type NoteFields, type ExecutionPort, type MemoryHealth, type Plan, formatModelRate } from '@orc/contracts'
+import { SUPERVISOR_HEALTH, claimHistory, EDGE_DIRECTION, errorMessage, EVENT_KIND, foldMemory, LINK_KINDS, MASTERPLAN_NOTE_ID, MEMORY_ACCESS, MemoryDeletedPayload, MemoryScope, MemoryWrittenPayload, noteKey, NOTE_TIER, NOTE_TIERS, NoteTier, parseLinkSpec, PlanDraft, ROLE_SKILL, RUN_OUTCOME, STRATEGY, TASK_STATUS, TERMINAL_TASK_STATUS, LinkKind, slugId, type Analyzer, type EventRecord, type MemoryLink, type NoteFields, type ExecutionPort, type MemoryHealth, type Plan, formatModelRate } from '@orc/contracts'
 import { openStorage, Kernel, atomicWriteFileSync, listProjectIds, claimSlot, fold, gatedChildren, freezePlan, liveSupervisors, staleSupervisors, grantExtensionTrust, grantMcpTrust, initializeProject, isExtensionTrusted, isMcpTrusted, loadConfig, loadTrust, migrateDatabase, requireProject, stepUsage, subtreeUsage, taskUsage, type EventLog, type OrcConfig, type PluginHost, type ProjectConfig, type Storage } from '@orc/kernel'
 import { createVaultProjector, parsePlanFile } from '@orc/vault-projector'
 import { archiveCandidates, consolidateTask, createDriftProbe, frontier, needsReground, probeMemory, recheckNotes, restampableNotes, summarize } from '@orc/memory'
@@ -162,6 +162,10 @@ function parsePositiveInteger(value: string): number {
 }
 
 function resolveDraft(task: { title: string; spec: string }, opts: { file?: string; model: string; skill?: string[]; fromVault?: boolean }, taskId: string, config?: OrcConfig): PlanDraft {
+  // Two sources for one draft. The vault arm used to win silently, so an operator who passed both
+  // watched their authored --file draft be ignored and the vault markdown applied under its name.
+  if (opts.fromVault && opts.file)
+    throw new Error('--file and --from-vault name two different drafts — pass exactly one')
   if (opts.fromVault) {
     if (!config) throw new Error('--from-vault is unavailable in this context')
     const dir = path.join(config.vaultDir, 'tasks', taskId)
@@ -650,10 +654,15 @@ export function buildProgram(
         // degraded-memory + supervisor visibility: the footer badge polls this — probe per call,
         // no cache. Supervisor state answers "is anything driving?" (2026-08-01's recurring blind
         // spot) from the heartbeat rows + the pid file serve writes only once its runtime is ready.
-        health: plugin ? async () => ({
-          memory: await probeMemory(plugin.config, plugin.log),
-          ...(plugin.storage && { supervisor: await probeSupervisor(plugin.storage, plugin.config.dir) }),
-        }) : undefined,
+        health: plugin ? async () => {
+          // The supervisor's pid gates the stage: probeMemory reports one only when the process
+          // that published it is the one driving now. See its comment for why pid beats an age.
+          const supervisor = plugin.storage ? await probeSupervisor(plugin.storage, plugin.config.dir) : undefined
+          return {
+            memory: await probeMemory(plugin.config, plugin.log, supervisor?.pid),
+            ...(supervisor && { supervisor }),
+          }
+        } : undefined,
         // P6: copilot exchanges are events — the log is the record, the browser is a cache
         appendExchange: plugin ? async x => {
           await plugin.log.append({ taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.copilot_exchange, payload: x.payload, usage: x.usage })
@@ -982,9 +991,9 @@ export function buildProgram(
           .filter(t => TERMINAL_TASK_STATUS.has(t.status))
           .map(t => t.id),
       )
-      const notes = await recheckNotes(events, { dir: config.dir, changedSince: createDriftProbe(config.dir), terminalTaskIds })
+      const notes = await recheckNotes(events, { changedSince: createDriftProbe(config.dir), terminalTaskIds })
       const s = summarize(notes)
-      console.log(`${s.total} note(s): ${s.clean} current, ${s.drifted} drifted, ${s.unknown} uncheckable, ${s.subjectMissing} describing paths that no longer exist`)
+      console.log(`${s.total} note(s): ${s.clean} current, ${s.drifted} drifted, ${s.unknown} uncheckable`)
 
       const goes = archiveCandidates(notes)
       const byKey = new Map(notes.map(n => [n.key, n]))
@@ -994,9 +1003,9 @@ export function buildProgram(
           console.log(`${c.key}\t${c.reason}\t${c.evidence}\t${n?.title ?? ''}`)
         }
       }
-      // No clock anywhere in this verdict: candidacy is superseded / subject-deleted / drifted-and-
-      // unhealed / task-settled. A note whose declared paths have not moved is still true and is
-      // never listed, however old or cold — see plugins/memory/src/archive.ts.
+      // No clock anywhere in this verdict: candidacy is `superseded` or `task-settled`, both facts
+      // rather than durations. A drifted note is the HEAL loop's work, not this one's, and a note
+      // whose paths have not moved is still true however old or cold — see archive.ts.
       if (goes.length === 0) {
         console.log('_nothing is retirable — every note is current, protected, or uncheckable_')
         return
@@ -1016,6 +1025,21 @@ export function buildProgram(
         await memory.projector.catchUp()
       })
       console.log(`archived ${goes.length} note(s) — restore any with: orc memory restore <id> --scope <scope>`)
+    })
+  mem
+    .command('archive <id>')
+    .description('retire ONE note by id — the escape hatch when evidence cannot reach it')
+    .option('--scope <scope>', 'the note\'s scope (default: project)')
+    .action(async (id: string, o: { scope?: string }) => {
+      const { config, log } = needPlugin()
+      // `recheck --apply` archives what the EVIDENCE reaches; this reaches the rest. A note whose
+      // provenance was damaged (an old archive/restore that overwrote its author before that was
+      // fixed) has no evidence left to retire it by, and without this it could never be retired.
+      await withMemory({ log, config }, async memory => {
+        await memory.store.setArchived(id, o.scope ?? 'project', true, { source: 'cli' })
+        await memory.projector.catchUp()
+      })
+      console.log(`archived '${id}' — restore with: orc memory restore ${id} --scope ${o.scope ?? 'project'}`)
     })
   mem
     .command('restore <id>')

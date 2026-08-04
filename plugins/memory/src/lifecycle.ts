@@ -71,15 +71,35 @@ async function consolidateBacklog(deps: LifecycleDeps): Promise<void> {
   }
 }
 
+/**
+ * Tracks every promise handed to it so ONE await drains them all.
+ *
+ * A single `inflight` slot is not enough: it holds only the most recent work, and the lifecycle has
+ * two producers — the backlog pass and the live subscription — that overlap between `subscribe()`
+ * returning and the backlog being assigned. A completion arriving in that window had its promise
+ * overwritten, so close() returned while its write was still in flight and the store was torn out
+ * from under it. Settlement is all the chain records; failures stay the caller's to surface, since
+ * the subscriber must still see them to hold its cursor.
+ */
+export function createDrain(): { track: <T>(work: Promise<T>) => Promise<T>; drain: () => Promise<void> } {
+  let chain: Promise<void> = Promise.resolve()
+  return {
+    track: work => {
+      chain = chain.then(() => work.then(() => {}, () => {}))
+      return work
+    },
+    drain: () => chain,
+  }
+}
+
 export function createMemoryLifecycle(deps: LifecycleDeps): MemoryLifecycle {
   let unsub: (() => Promise<void>) | null = null
-  let inflight: Promise<void> = Promise.resolve()
+  const { track, drain } = createDrain()
   // subscribe delivers events losslessly and awaits the handler (the cursor advances only on
-  // success), so consolidating INLINE serializes naturally. `inflight` is tracked so close() drains
-  // a consolidation still running at shutdown.
+  // success), so consolidating INLINE serializes naturally. Every consolidation is tracked so
+  // close() drains any still running at shutdown — see createDrain for why one slot was not enough.
   const handle = async (e: EventRecord): Promise<void> => {
-    inflight = consolidateOnCompletion(deps, e)
-    await inflight
+    await track(consolidateOnCompletion(deps, e))
   }
   return {
     // Subscribe FIRST, then catch up: a completion landing between the two is seen by the
@@ -87,9 +107,8 @@ export function createMemoryLifecycle(deps: LifecycleDeps): MemoryLifecycle {
     // fromSeq defaults to the latest seq, so the subscription itself only carries live completions.
     start: async () => {
       unsub = await deps.log.subscribe({}, handle)
-      inflight = consolidateBacklog(deps)
-      await inflight
+      await track(consolidateBacklog(deps))
     },
-    close: async () => { if (unsub) { await unsub(); unsub = null } await inflight },
+    close: async () => { if (unsub) { await unsub(); unsub = null } await drain() },
   }
 }

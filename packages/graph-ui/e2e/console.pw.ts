@@ -290,3 +290,28 @@ test('the ledger never scrolls horizontally, however narrow the pane', async ({ 
   expect(overflows).toBe(false)
   await expect(scroller.or(ledger(page))).toBeVisible()
 })
+
+/**
+ * A REJECTED run offers replan, never retry. Retry re-runs only what did not complete, so the
+ * rejecting auditor would meet the same completed siblings and reach the same verdict — the loop
+ * that ran three identical audit passes before the failure class existed.
+ *
+ * The whole click-path is exercised because the first attempt at this affordance shipped a button
+ * wired to `revise`, which resumes an open feedback gate; a finished run has none, so it succeeded
+ * silently and did nothing. Asserting the control exists would have passed against that.
+ */
+test('a rejected run offers a replan and no retry, and reopening yields a new version', async ({ page }) => {
+  await open(page)
+  await rail(page).getByRole('button', { name: /rejected plan request/ }).click()
+
+  const move = inspector(page).getByRole('region', { name: 'your move' }).or(inspector(page))
+  await expect(move.getByText(/rejected the work/)).toBeVisible()
+  await expect(inspector(page).getByRole('button', { name: /retry/i })).toHaveCount(0)
+
+  const reopen = inspector(page).getByRole('button', { name: /reopen plan for editing/ })
+  await expect(reopen).toBeVisible()
+  await reopen.click()
+
+  // edit appends a NEW plan version and stamps blocked -> awaiting_approval (kernel.editPlan)
+  await expect(inspector(page).getByRole('button', { name: /^v2/ })).toBeVisible({ timeout: 10_000 })
+})

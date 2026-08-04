@@ -1,5 +1,7 @@
 import { stepRanks, type LayerableStep } from '@orc/contracts/plan-layering'
 
+export type { LayerableStep }
+
 /**
  * Where each step sits in a layered drawing: `rank` is the column, `lane` the row within it.
  *
@@ -8,8 +10,6 @@ import { stepRanks, type LayerableStep } from '@orc/contracts/plan-layering'
  * could render with different steps in the rail than in the graph. This file now decides only the
  * one thing the layering does not: which row a step takes inside its column.
  */
-export type LayoutStep = LayerableStep
-
 export interface PlacedStep {
   id: string
   rank: number
@@ -24,7 +24,7 @@ export interface PlanLayout {
   cyclic: Set<string>
 }
 
-export function planLayout(steps: readonly LayoutStep[]): PlanLayout {
+export function planLayout(steps: readonly LayerableStep[]): PlanLayout {
   const ids = new Set(steps.map(s => s.id))
   const { rank, cyclic } = stepRanks(steps)
   const rankOf = (id: string): number => rank.get(id) ?? 0

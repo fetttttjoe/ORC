@@ -12,20 +12,6 @@ const liveNotes = (m: MemoryFold): LiveNote[] =>
     links: note.links.map(l => l.id), taskId: author.taskId ?? '', tier: note.tier,
   }))
 
-// The one topology rule every sweep obeys (docs/IDEAS.md entry 1, design fix 3): a candidate
-// survives if any note that ITSELF survives authored a link to it. Traffic is deliberately not
-// consulted — three live notes can point at a candidate nobody has walked, and deleting it leaves
-// their links[] dangling at a dead id, which nothing repairs (rewriting authored links is a
-// non-goal). Candidates linking only to each other protect nobody: they all go together.
-function unreferenced<T extends LiveNote>(all: LiveNote[], going: T[]): T[] {
-  const doomed = new Set(going.map(n => noteKey(n.scope, n.id)))
-  const referenced = new Set(
-    all.filter(n => !doomed.has(noteKey(n.scope, n.id)))
-      .flatMap(n => n.links.map(id => noteKey(n.scope, id))),
-  )
-  return going.filter(n => !referenced.has(noteKey(n.scope, n.id)))
-}
-
 // Deterministic cancel-time GC — the orchestrator decides what stays vs goes, not an agent.
 //
 // This file used to also hold a TTL sweep (staleNotes, DEFAULT_SWEEP_DAYS): retirement after N
@@ -39,6 +25,22 @@ function unreferenced<T extends LiveNote>(all: LiveNote[], going: T[]): T[] {
 // Deletion is a memory_deleted event, so content stays in the log for audit/replay.
 export function orphanedNotes(events: EventRecord[], cancelled: Set<string>): SweptNote[] {
   const all = liveNotes(foldMemory(events))
-  const going = unreferenced(all, all.filter(n => cancelled.has(n.taskId)))
-  return going.map(({ id, scope, title, summary }) => ({ id, scope, title, summary }))
+  const doomed = new Set(all.filter(n => cancelled.has(n.taskId)).map(n => noteKey(n.scope, n.id)))
+  // The topology rule (docs/IDEAS.md entry 1, design fix 3): a candidate survives if any note that
+  // ITSELF survives authored a link to it. Traffic is deliberately not consulted — three live notes
+  // can point at a candidate nobody has walked, and DELETING it leaves their links[] dangling at a
+  // dead id, which nothing repairs (rewriting authored links is a non-goal). Candidates linking
+  // only to each other protect nobody: they all go together.
+  //
+  // archive.ts states this rule a second time, and deliberately differently: it excludes
+  // supersedes/contradicts edges, because a note that supersedes another necessarily links to it
+  // and would otherwise protect the very note it replaces. It also cannot share this helper — that
+  // module is zero-import by design. Two spellings, one on purpose; change either and read both.
+  const protectedKeys = new Set(
+    all.filter(n => !doomed.has(noteKey(n.scope, n.id)))
+      .flatMap(n => n.links.map(id => noteKey(n.scope, id))),
+  )
+  return all
+    .filter(n => doomed.has(noteKey(n.scope, n.id)) && !protectedKeys.has(noteKey(n.scope, n.id)))
+    .map(({ id, scope, title, summary }) => ({ id, scope, title, summary }))
 }

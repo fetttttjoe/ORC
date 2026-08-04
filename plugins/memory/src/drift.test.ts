@@ -2,7 +2,7 @@ import { describe, expect, it } from 'bun:test'
 import { mkdtempSync, writeFileSync, mkdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import { corpusDrift, createDriftProbe, needsReground, noteDrifted, noteDriftState, noteHasDrifted, notesCiting, restampableNotes, CORPUS_DRIFT_ADVISORY, type ChangedSince, type CitingNote } from './drift'
+import { corpusDrift, createDriftProbe, needsReground, noteDriftState, noteHasDrifted, notesCiting, restampableNotes, CORPUS_DRIFT_ADVISORY, type ChangedSince, type CitingNote } from './drift'
 import { DRIFT_STATE } from '@orc/contracts'
 
 const note = (over: Partial<{ sourceRevision: string | null; paths: string[] }> = {}) =>
@@ -191,7 +191,7 @@ describe('corpusDrift — the graph lagging the CODE, not the log', () => {
 // governs, so a note whose code moved after it was written but BEFORE it was checked is not stale.
 // Without this the auditor's own verification never cleared anything and the heal loop re-verified
 // what nothing had changed.
-describe('noteDrifted — source-clean OR verified-clean', () => {
+describe('noteDriftState — the verification stamp can clear a dirty source stamp', () => {
   const probe = (changed: Record<string, string[] | null>): ChangedSince =>
     async rev => (changed[rev] === null || changed[rev] === undefined ? null : new Set(changed[rev]))
   const paths = ['src/auth.ts']
@@ -199,32 +199,32 @@ describe('noteDrifted — source-clean OR verified-clean', () => {
   // pretend the stamp is narrower than what a note actually carries
   const at = (revision: string) => ({ revision, at: '2026-07-30T00:00:00.000Z', by: 'cli' })
 
-  it('is NOT drifted when the source stamp is dirty but the verification is clean', async () => {
+  it('is CLEAN when the source stamp is dirty but the verification is clean', async () => {
     // written at r1 (a.ts moved since), verified at r2 (nothing moved since) → an auditor has
     // already looked at the current code and said so
-    expect(await noteDrifted(
+    expect(await noteDriftState(
       { sourceRevision: 'r1', paths, verified: at('r2') },
       probe({ r1: paths, r2: [] }),
-    )).toBe(false)
+    )).toBe(DRIFT_STATE.clean)
   })
 
-  it('IS drifted when both stamps are behind the tree', async () => {
-    expect(await noteDrifted(
+  it('is DRIFTED when both stamps are behind the tree', async () => {
+    expect(await noteDriftState(
       { sourceRevision: 'r1', paths, verified: at('r2') },
       probe({ r1: paths, r2: paths }),
-    )).toBe(true)
+    )).toBe(DRIFT_STATE.drifted)
   })
 
-  it('keeps the fail-toward-not-drifted rule for an unreachable verified revision', async () => {
+  it('an unreachable verified revision is UNKNOWN, never rot', async () => {
     // a verification stamped at a revision git cannot reach (rebased away) is UNKNOWN, and unknown
     // is never evidence of rot — the same rule the source stamp already follows
-    expect(await noteDrifted(
+    expect(await noteDriftState(
       { sourceRevision: 'r1', paths, verified: at('gone') },
       probe({ r1: paths, gone: null }),
-    )).toBe(false)
+    )).toBe(DRIFT_STATE.unknown)
   })
 
-  it('behaves byte-for-byte as noteHasDrifted for a note carrying NO verification', async () => {
+  it('agrees with noteHasDrifted for a note carrying NO verification', async () => {
     // every old note in the corpus is this case: the stamp must change nothing for them
     for (const n of [
       { sourceRevision: 'r1', paths },
@@ -233,7 +233,8 @@ describe('noteDrifted — source-clean OR verified-clean', () => {
       { sourceRevision: 'gone', paths },
     ]) {
       const changed = n.sourceRevision === null ? null : await probe({ r1: paths, gone: null })(n.sourceRevision)
-      expect(await noteDrifted(n, probe({ r1: paths, gone: null }))).toBe(noteHasDrifted(n, changed))
+      const state = await noteDriftState(n, probe({ r1: paths, gone: null }))
+      expect(state === DRIFT_STATE.drifted).toBe(noteHasDrifted(n, changed))
     }
   })
 })
@@ -281,12 +282,6 @@ describe('noteDriftState — the tri-state verdict', () => {
   it('is CLEAN when checked and unmoved, DRIFTED when checked and moved', async () => {
     expect(await noteDriftState({ sourceRevision: 'r1', paths }, probe({ r1: [] }))).toBe(DRIFT_STATE.clean)
     expect(await noteDriftState({ sourceRevision: 'r1', paths }, probe({ r1: paths }))).toBe(DRIFT_STATE.drifted)
-  })
-
-  it('the boolean wrapper stays false for the unreachable-revision case', async () => {
-    // the pre-existing boolean surface is UNCHANGED even though the tri-state function now says more:
-    // `unknown` reads as "not drifted" to noteDrifted, exactly as it did before this widening
-    expect(await noteDrifted({ sourceRevision: 'gone', paths }, probe({ gone: null }))).toBe(false)
   })
 })
 

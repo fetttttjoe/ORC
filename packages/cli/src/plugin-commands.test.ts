@@ -134,6 +134,17 @@ describe('plugin commands', () => {
     await expect(run('vault', 'render', '00000000-0000-0000-0000-000000000000')).rejects.toThrow(/no task/)
   })
 
+  it('orc edit rejects --file together with --from-vault instead of silently preferring one', async () => {
+    // The vault arm returned before --file was ever read, so an operator who passed both watched
+    // their authored draft be ignored and the vault markdown applied under its name.
+    const dir = project({})
+    const { run, lines } = await makeCli(dir)
+    await run('new', 'both sources task')
+    const taskId = lines[0]!
+    await expect(run('edit', taskId, '--file', path.join(dir, 'draft.json'), '--from-vault'))
+      .rejects.toThrow(/pass exactly one/)
+  })
+
   it('orc edit --from-vault picks the numerically highest plan version, not the lexicographic one', async () => {
     const dir = project({})
     const { run, lines, config } = await makeCli(dir)

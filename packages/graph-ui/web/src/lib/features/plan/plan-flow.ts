@@ -1,5 +1,5 @@
 import type { Edge, Node } from '@xyflow/svelte'
-import { planLayout, type LayoutStep } from './plan-layout'
+import { planLayout, type LayerableStep } from './plan-layout'
 import { DEFAULT_GEOMETRY, planGeometry, type GeometrySpec } from './plan-geometry'
 import { STEP_STATUS, waveState, type WaveState } from './plan-status'
 
@@ -12,7 +12,7 @@ import { STEP_STATUS, waveState, type WaveState } from './plan-status'
  * extent:'parent'). That is what makes "these three run together" visible as a band instead of
  * something the reader has to infer from three nodes happening to share a column.
  */
-export interface FlowStep extends LayoutStep {
+export interface FlowStep extends LayerableStep {
   title: string
 }
 
@@ -51,12 +51,8 @@ export function planToFlow(steps: readonly FlowStep[], opts: PlanFlowOptions = {
   const geometry = planGeometry(layout.steps, spec)
   const titleOf = new Map(steps.map(s => [s.id, s.title]))
 
-  const statusesInRank = new Map<number, string[]>()
-  for (const p of layout.steps) {
-    const bucket = statusesInRank.get(p.rank)
-    if (bucket) bucket.push(status(p.id))
-    else statusesInRank.set(p.rank, [status(p.id)])
-  }
+  const inRank = Map.groupBy(layout.steps, p => p.rank)
+  const statusesInRank = new Map([...inRank].map(([r, ps]) => [r, ps.map(p => status(p.id))]))
 
   // Containers first. Svelte Flow resolves parentId against nodes EARLIER in the array, so a child
   // listed before its group renders at the canvas origin instead of inside it — order is load-
@@ -88,7 +84,7 @@ export function planToFlow(steps: readonly FlowStep[], opts: PlanFlowOptions = {
   return {
     nodes: [...groups, ...children],
     edges: layout.edges.map(e => ({
-      id: edgeId(e.from, e.to),
+      id: `${e.from}->${e.to}`,
       source: e.from,
       target: e.to,
       type: 'smoothstep',
@@ -100,6 +96,3 @@ export function planToFlow(steps: readonly FlowStep[], opts: PlanFlowOptions = {
     height: geometry.height,
   }
 }
-
-/** the ONE spelling of an edge's identity, so a rebuild and a reconnect agree on which edge moved */
-export const edgeId = (from: string, to: string): string => `${from}->${to}`

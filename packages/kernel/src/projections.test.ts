@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'bun:test'
-import { EVENT_KIND, FAILURE_CLASS, STEP_RUN_STATUS, type EventRecord, type Plan, type TaskNode } from '@orc/contracts'
+import { EVENT_KIND, FAILURE_CLASS, STEP_RUN_STATUS, TASK_STATUS, type EventRecord, type Plan, type TaskNode } from '@orc/contracts'
 import { eventFixture, draftFixture, planFixture, stepFixture } from '@orc/contracts/fixtures'
-import { blockingVerdicts, retryIsFutile, type State, emptyFold, estimateCostUSD, fold, foldInto, subtreeOutcome, completedStepIds, nextAttempts, crashDedupKey, stepUsage, subtreeTaskIds, subtreeUsage, pendingSplitForChild, remainingBudget, inheritedCwd, runCwd, taskChangedPaths, taskNoteWrites, taskVerifiedNotes } from './projections'
+import { blockingVerdicts, retryIsFutile, startedAttempts, type State, emptyFold, estimateCostUSD, fold, foldInto, subtreeOutcome, completedStepIds, nextAttempts, crashDedupKey, stepUsage, subtreeTaskIds, subtreeUsage, pendingSplitForChild, remainingBudget, inheritedCwd, runCwd, taskChangedPaths, taskNoteWrites, taskVerifiedNotes } from './projections'
 
 const task: TaskNode = {
   id: 't1', parentId: null, type: 'generic', title: 'hello', spec: '',
@@ -865,5 +865,42 @@ describe('rejected is an AUDITOR verdict, not any signalled failure', () => {
 
   it('refuses retry only for the verdict class', () => {
     expect(retryIsFutile(stateWith(failed('verify', FAILURE_CLASS.rejected)), 't1')).toBe(true)
+  })
+})
+
+/**
+ * The two attempt derivations answer OPPOSITE questions, and conflating them broke cancel.
+ *
+ * nextAttempts: "which attempt should the next run start?" — deliberately attempt+1 once the task
+ * is settled, so a retry gets a fresh workflow id instead of re-attaching to a dead one.
+ * startedAttempts: "which attempt is running right now?" — what a cancel must target.
+ *
+ * cancelSubtree stamps `cancelled` BEFORE cancelWorkflowsFor runs, so `settled` is always true by
+ * then: cancel asked nextAttempts and got an id one ahead of the live workflow, every time.
+ */
+describe('startedAttempts vs nextAttempts — cancel targets the running attempt', () => {
+  const plan = { steps: [{ id: 'a' }, { id: 'b' }] } as unknown as Plan
+  const running = (attempt: number) => ({
+    stepId: 'a', runToken: 'rt', attempt, status: STEP_RUN_STATUS.running,
+    iterations: 1, output: null, failure: null,
+  })
+  const stateOf = (status: string): State => {
+    const s = fold([])
+    s.tasks.set('t1', { id: 't1', status } as unknown as TaskNode)
+    s.steps.set('t1', new Map([['a', running(1)]]))
+    return s
+  }
+
+  it('targets the CURRENT attempt even after the task is stamped cancelled', () => {
+    const state = stateOf(TASK_STATUS.cancelled)
+    expect(startedAttempts(state, 't1', plan)).toEqual({ a: 1 })
+    // the trap: the derivation cancel used to call returns the NEXT one
+    expect(nextAttempts(state, 't1', plan).a).toBe(2)
+  })
+
+  it('omits a step that never started, so cancel never invents a workflow id', () => {
+    expect(startedAttempts(stateOf(TASK_STATUS.running), 't1', plan)).not.toHaveProperty('b')
+    // nextAttempts fills it with 1 — right for starting, wrong for cancelling
+    expect(nextAttempts(stateOf(TASK_STATUS.running), 't1', plan).b).toBe(1)
   })
 })

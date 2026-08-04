@@ -115,6 +115,18 @@ describe('recall', () => {
     expect(f.accesses.filter(a => a.mode === MEMORY_ACCESS.preload)).toHaveLength(1)
   })
 
+  it('claimsCiting keeps one row per NOTE asserting a shared statement', async () => {
+    // A claim id hashes the claim's text, so two notes stating the same sentence about the same
+    // file share it. Deduping on that id alone surfaced one note and silently withheld the other —
+    // the retirement nudge then named half the notes the edit had falsified.
+    const same = 'cluster.ts owns the pure algorithm'
+    const shared = (noteId: string): ClaimHit =>
+      ({ claimId: 'dup12', noteId, scope: 'project', title: noteId, text: same, validFrom: '2026-07-26T00:00:00.000Z', sourceRevision: null, paths: [] })
+    const f = fakeStore({ searchClaims: () => [shared('area-memory'), shared('area-cluster')] })
+    const at = await bind(f).memory.claimsCiting(['plugins/memory/src/cluster.ts'])
+    expect(at.map(h => h.noteId).sort()).toEqual(['area-cluster', 'area-memory'])
+  })
+
   it('claims alone are enough — the fallback chain stops without any note hit', async () => {
     const f = fakeStore({
       searchClaims: () => [{ claimId: 'c1', noteId: 'n', scope: 'project', title: 'N', text: 'a statement', validFrom: '2026-07-26T00:00:00.000Z', sourceRevision: null, paths: [] }],

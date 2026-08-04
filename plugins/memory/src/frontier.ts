@@ -54,7 +54,10 @@ export function frontier(
   for (const n of scoreable)
     // distinct targets, and only targets that EXIST: a link to a note nobody wrote is a dangling
     // edge, which unresolvedLinks already reports — counting it here would report one defect twice.
+    // a self-link is not a citation: counted, it gave a note the one inbound edge that "reached by
+    // the graph" requires, so an island could vouch for its own membership in the frontier
     for (const t of new Set(n.links)) {
+      if (t === n.id) continue
       const k = key(n.scope, t)
       if (live.has(k)) inbound.set(k, (inbound.get(k) ?? 0) + 1)
     }
@@ -62,7 +65,7 @@ export function frontier(
   const nowMs = Date.parse(now)
   const hits: FrontierHit[] = []
   for (const n of scoreable) {
-    const out = [...new Set(n.links)].filter(t => live.has(key(n.scope, t))).length
+    const out = [...new Set(n.links)].filter(t => t !== n.id && live.has(key(n.scope, t))).length
     const inn = inbound.get(key(n.scope, n.id)) ?? 0
     // The frontier is the EDGE of the connected graph, not its outside. A note only reaches that
     // edge if something in the graph reaches IT — in >= 1 is part of what "edge" means, not a
@@ -75,7 +78,7 @@ export function frontier(
     // tool exists to surface, and it is invisible here until something else links to it. This
     // formula cannot tell the two shapes apart from degree alone, so it discards both rather than
     // guess. The question "does anything reference this note at all" is answered elsewhere, from
-    // the opposite direction — sweep.ts's `unreferenced` already asks it, for deletion candidacy —
+    // the opposite direction — sweep.ts's orphanedNotes already asks it, for deletion candidacy —
     // but that is a different question (should this go) from this one (is this thin), and nothing
     // here re-derives it. A brand-new unlinked note stays invisible to `frontier` until it earns an
     // inbound link or is checked by hand.

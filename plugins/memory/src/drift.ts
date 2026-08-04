@@ -92,16 +92,6 @@ export async function noteDriftState(
   return noteHasDrifted({ sourceRevision: v, paths: note.paths }, vChanged) ? DRIFT_STATE.drifted : DRIFT_STATE.clean
 }
 
-// Thin boolean wrapper over the tri-state verdict — the historical surface. `unknown` and `clean`
-// both read as "not drifted" here, exactly as they did when this WAS the implementation, so every
-// caller and test asserting a boolean is unaffected.
-export async function noteDrifted(
-  note: NoteDrift & { verified?: { revision: string } },
-  changedSince: ChangedSince,
-): Promise<boolean> {
-  return (await noteDriftState(note, changedSince)) === DRIFT_STATE.drifted
-}
-
 // One `git diff` per distinct revision per process. Notes written in the same run share a revision,
 // so this collapses to a single call in practice.
 export function createDriftProbe(dir: string): ChangedSince {

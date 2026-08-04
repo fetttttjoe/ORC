@@ -10,11 +10,16 @@ export function invalidations(
   if (!STATE_CHANGE.has(row.kind)) return []
   const out: string[][] = []
   if (row.taskId) {
-    out.push([...qk.task(row.taskId)])
+    // A task is addressed by TWO key families: `task` (plans, transcript, log) and `node` (the
+    // graph row the inspector and the run monitor read). Emitting only the first left a live run's
+    // step statuses, iteration count and spend frozen at mount — nothing threw, the numbers just
+    // stopped moving. Both spellings mean the same task, so both refetch together.
+    const touch = (id: string): void => void out.push([...qk.task(id)], [...qk.node(id)])
+    touch(row.taskId)
     // the parent's rendered plan carries its children's step states, so a child's change
     // invalidates the parent too — parentage comes from the graph's child edge, not the id string
     const parent = parentOf(row.taskId)
-    if (parent) out.push([...qk.task(parent)])
+    if (parent) touch(parent)
   }
   if (row.noteRef) out.push([...qk.node(row.noteRef)])
   if (row.kind === EVENT_KIND.models_discovered) out.push(['models'])

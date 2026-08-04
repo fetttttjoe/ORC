@@ -3,7 +3,7 @@ import { ARCHIVE_REASON, KEPT_BECAUSE, archiveCandidates, rule, type NoteFacts }
 import { MemoryNoteInput } from '@orc/contracts'
 
 const note = (over: Partial<NoteFacts> & { key: string }): NoteFacts => ({
-  verdict: 'clean', subjectMissing: false, retiredBy: [], inboundFrom: [], taskSettled: false, ...over,
+  verdict: 'clean', retiredBy: [], inboundFrom: [], taskSettled: false, ...over,
 })
 
 describe('rule — obsolescence is evidence, never age', () => {
@@ -31,11 +31,6 @@ describe('rule — obsolescence is evidence, never age', () => {
     expect(rule(note({ key: 'n', verdict: 'drifted' }))).toEqual({ archive: false, kept: KEPT_BECAUSE.healable })
   })
 
-  it('retires a note whose subject was deleted, even while its currency reads clean', () => {
-    const r = rule(note({ key: 'n', verdict: 'clean', subjectMissing: true }))
-    expect(r).toMatchObject({ archive: true, reason: ARCHIVE_REASON.subjectDeleted })
-  })
-
   it('retires a note a live note explicitly superseded, and names which', () => {
     const r = rule(note({ key: 'old', retiredBy: ['new-note'] }))
     expect(r).toMatchObject({ archive: true, reason: ARCHIVE_REASON.superseded })
@@ -58,7 +53,7 @@ describe('rule — obsolescence is evidence, never age', () => {
   it('does not treat coldness as evidence — there is no hits or recency input at all', () => {
     // the whole NoteFacts surface, spelled out: nothing here can express "cold"
     expect(Object.keys(note({ key: 'n' })).sort())
-      .toEqual(['inboundFrom', 'key', 'retiredBy', 'subjectMissing', 'taskSettled', 'verdict'])
+      .toEqual(['inboundFrom', 'key', 'retiredBy', 'taskSettled', 'verdict'])
   })
 })
 

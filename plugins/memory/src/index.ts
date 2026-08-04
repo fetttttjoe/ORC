@@ -93,7 +93,14 @@ export async function measureDrift(
 }
 
 // healthy = reachable AND caught up with the log's memory events
-export async function probeMemory(config: ProjectConfig, log: EventLog): Promise<MemoryHealth> {
+/**
+ * `livePid` is the supervisor currently driving, when there is one. The stage row is published by
+ * the projector and cleared only by it, so a supervisor killed mid-refresh leaves one behind that
+ * no reader can clear — observed live at 35 minutes stale, and shown again during the NEXT boot
+ * because "booting" looked live. Matching on pid is exact where an age threshold would be a guess:
+ * a stage belongs to one process, and any other process's stage is history.
+ */
+export async function probeMemory(config: ProjectConfig, log: EventLog, livePid?: number): Promise<MemoryHealth> {
   let knowledge: Knowledge | undefined
   try {
     knowledge = await openKnowledge(config)
@@ -108,7 +115,7 @@ export async function probeMemory(config: ProjectConfig, log: EventLog): Promise
     // Written by the projector in ANOTHER process, so it is parsed at the door: an unrecognised or
     // half-written row yields no stage rather than an unknown label reaching the UI.
     const published = MemoryStage.safeParse(await knowledge.getStage().catch(() => null))
-    const stage = published.success
+    const stage = published.success && livePid !== undefined && published.data.pid === livePid
       ? { name: published.data.name, sinceMs: Math.max(0, Date.now() - published.data.startedAt) }
       : undefined
     return pending === 0

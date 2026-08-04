@@ -2,7 +2,7 @@ import { describe, expect, it } from 'bun:test'
 import { distillPrompt } from './consolidation-distiller'
 
 describe('distillPrompt', () => {
-  const base = { taskTitle: 'Add a subcommand', steps: [{ title: 'plan', summary: 'three subplans: implement, test, verify' }], derivedFrom: [] }
+  const base = { taskId: 't-distil', taskTitle: 'Add a subcommand', steps: [{ title: 'plan', summary: 'three subplans: implement, test, verify' }], derivedFrom: [] }
 
   // The note this prevents: "implemented, with test coverage and requirement verification" for a run
   // whose test step crashed and whose verify step never started. The step summary described a PLAN.

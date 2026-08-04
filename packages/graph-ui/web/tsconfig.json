@@ -1,9 +1,12 @@
 {
   "compilerOptions": {
+    // ES2024, not ES2022: @orc/contracts is compiled at ESNext and its code is BUNDLED into this
+    // app, so the browser already has to run whatever it uses (Map.groupBy today). A lower `lib`
+    // here does not make the output safer — it only hides from the typechecker what ships anyway.
     "target": "ES2022",
     "module": "ESNext",
     "moduleResolution": "bundler",
-    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "lib": ["ES2024", "DOM", "DOM.Iterable"],
     "strict": true,
     "noUncheckedIndexedAccess": true,
     "exactOptionalPropertyTypes": true,

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test'
-import { MemoryNoteDraftInput, MemoryNoteInput, MemoryNote, MEMORY_ID_RE, LINK_KINDS, NOTE_TIER, VerifiedStamp, deriveNoteProvenance, inferTier, noteContentKey, parseLinkSpec, formatLinkSpec, type PlanNoteInput, type SemanticNoteInput } from './memory'
+import { MemoryNoteDraftInput, MemoryNoteInput, MemoryNote, MEMORY_ID_RE, LINK_KINDS, NOTE_TIER, VerifiedStamp, deriveNoteProvenance, inferTier, noteContentKey, parseLinkSpec, type PlanNoteInput, type SemanticNoteInput } from './memory'
 import { EVENT_KIND } from './event-kinds'
 import { PAYLOAD_SCHEMAS } from './events'
 
@@ -246,10 +246,6 @@ describe('parseLinkSpec', () => {
   it('rejects unknown kinds and malformed ids, naming the bad entry', () => {
     expect(() => parseLinkSpec('replaces:x')).toThrow(/unknown link kind 'replaces'/)
     expect(() => parseLinkSpec('supersedes:Bad Id')).toThrow(/not a valid note id/)
-  })
-  it('round-trips through formatLinkSpec', () => {
-    const spec = 'supersedes:old-note, relates_to:other'
-    expect(formatLinkSpec(parseLinkSpec(spec).map(l => ({ id: l.id, kind: l.kind ?? 'relates_to' })))).toBe(spec)
   })
 })
 

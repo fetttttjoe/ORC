@@ -105,12 +105,18 @@ export const PlansView = z.object({
       strategyRef: z.string(),
       analyzerRef: z.string().optional(),
       costEstimateUSD: z.number().nullable(),
+      // Every field PlanDraft REQUIRES must survive this parse, not just the ones the read views
+      // render: `reopen plan for editing` posts these steps straight back as a new version, and a
+      // schema that dropped executorRef/isolation made the server refuse the draft — a replan
+      // button that looked wired and could never succeed.
       steps: z.array(
         z.object({
           id: z.string(),
           role: z.string(),
           title: z.string(),
           instructions: z.string(),
+          executorRef: z.string(),
+          isolation: z.string(),
           modelRef: z.string().optional(),
           dependsOn: z.array(z.string()).default([]),
           zone: z.array(z.string()).default([]),

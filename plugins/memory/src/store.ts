@@ -1,6 +1,7 @@
-import { ClaimWrite, composeAuthor, EVENT_KIND, MemoryNoteInput, MemoryScope, MemoryWrittenPayload, NOTE_TIER, resolveClaims, type ClaimSearchOptions, type MemoryAuthor, type MemoryFilter, type MemorySearchOpts, type MemoryNote, type MemoryStore, type NoteSummary, type Claim, type ClaimHit, type Topic } from '@orc/contracts'
+import { ClaimWrite, composeAuthor, EVENT_KIND, foldMemory, noteKey, MemoryNoteInput, MemoryScope, MemoryWrittenPayload, NOTE_TIER, resolveClaims, type ClaimSearchOptions, type MemoryAuthor, type MemoryFilter, type MemorySearchOpts, type MemoryNote, type MemoryStore, type NoteSummary, type Claim, type ClaimHit, type Topic } from '@orc/contracts'
 import { KERNEL_ERROR_CODE, KernelError, type EventLog } from '@orc/kernel'
 import type { SurrealMemory } from './surreal'
+import { KNOWLEDGE_KINDS } from './projector'
 
 // The single writer (spec RM5). Writes are event-first appends — like every append they
 // serialize on the per-project advisory lock; the projector applies to SurrealDB. Reads
@@ -86,13 +87,24 @@ export function createMemoryStore(opts: { log: EventLog; surreal: SurrealMemory;
         }
         return merged
       })
-      // event-first: the record materializes via the projector shortly; return a best-effort
-      // read (may be null within the flush window — callers treat write as fire-and-forget).
-      // retrievedAt is blank here for the same reason createdAt is: the projector stamps it from
-      // the committed event, and within the flush window this shape has no event to read.
+      // event-first: the record materializes via the projector shortly, so the projected row is
+      // read for PROVENANCE ONLY — createdAt/createdBy/updatedAt/revision, the fields only the
+      // projector derives — and the just-written content is returned over it.
+      //
+      // Returning that row wholesale returned the PREVIOUS revision on every update: this read
+      // happens after the append but before the projector has drained it. memory_write lints what
+      // write() hands back, so an update that introduced a dangling link or a paths-warning body
+      // was linted against the note's OLD content and came back clean. Content is what gets judged,
+      // so content is what must be fresh; provenance may lag one revision inside the flush window.
+      //
+      // `verified` is deliberately NOT carried over: whether a stamp survives a rewrite is
+      // deriveNoteProvenance's decision from the content key, and asserting one here could report a
+      // verification of text the write just replaced.
       const projected = await surreal.get(note.id, note.scope)
-      if (projected) return projected
-      const stamped = { createdAt: '', createdBy: '', updatedAt: '', updatedBy: '', revision: 1 }
+      const stamped = projected
+        ? { createdAt: projected.createdAt, createdBy: projected.createdBy, updatedAt: projected.updatedAt, updatedBy: projected.updatedBy, revision: projected.revision }
+        : { createdAt: '', createdBy: '', updatedAt: '', updatedBy: '', revision: 1 }
+      // retrievedAt is blank for the same reason: the projector stamps it from the committed event
       // only the semantic tier cites; the other two have no sources field to stamp
       return note.tier === NOTE_TIER.semantic
         ? { ...note, ...stamped, sources: note.sources.map(s => ({ ...s, retrievedAt: '' })) }
@@ -154,16 +166,26 @@ export function createMemoryStore(opts: { log: EventLog; surreal: SurrealMemory;
     },
     // optional author: cancel-sweep passes the cancelled task's identity as provenance
     async setArchived(id, scope = MemoryScope.project, archived, author?: MemoryAuthor) {
-      const existing = await surreal.get(id, scope)
+      // From the LOG, not the read model. Archiving DELETES the note's row, so an archived note
+      // reads as absent through surreal.get — restore then found nothing and silently no-opped,
+      // which made archival a one-way door while reporting success. The fold is the only view that
+      // still holds an archived note, which is exactly what makes the archive reversible.
+      const fold = foldMemory(await log.after(0, KNOWLEDGE_KINDS))
+      const held = fold.notes.get(noteKey(scope, id))
+      const existing = held?.note
       // Nothing to retire, or already in the asked-for state — a no-op keeps `--apply` idempotent.
       if (!existing || existing.archived === archived) return
       // NOTE the absent sourceRevision() call: this re-appends what is stored, flag moved and
       // nothing else. `archived` is excluded from CONTENT_FIELDS, so the content key is unchanged
       // and deriveNoteProvenance carries the verification stamp across too.
       const note = MemoryNoteInput.parse({ ...existing, archived })
+      // The note keeps ITS author, not the operator's. Authorship is who wrote the content; moving
+      // a lifecycle flag is not writing. Stamping `{source:'cli'}` here erased the taskId every
+      // task-bound note carries, so a restored plan note lost the binding `taskSettled` reads and
+      // could never be archived again — measured: three restored notes went permanently unretirable.
       await log.append({
         taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_written,
-        payload: { note, author: author ?? { source: 'cli' } },
+        payload: { note, author: held?.author ?? author ?? { source: 'cli' } },
       })
     },
 

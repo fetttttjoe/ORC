@@ -1,5 +1,5 @@
 import {
-  errorMessage, LINK_KIND, MEMORY_ACCESS, MEMORY_LIMITS, MemoryScope, noteKey, NOTE_TIER, planScope, SEARCH_MODE, SIGNAL_OUTCOME, slugId, taskLaneScopes,
+  claimHitKey, errorMessage, LINK_KIND, MEMORY_ACCESS, MEMORY_LIMITS, MemoryScope, noteKey, NOTE_TIER, planScope, SEARCH_MODE, SIGNAL_OUTCOME, slugId, taskLaneScopes,
   type ClaimHit, type VerifiedStamp, type LinkKind, type MemoryAuthor, type MemoryStore, type NoteSummary, type ResolvedTool,
   type RecalledContext, type SignalOutcome, type StepMemory,
 } from '@orc/contracts'
@@ -173,7 +173,10 @@ export function bindStepMemory(opts: {
             if (term.length < 3) continue
             try {
               for (const hit of await store.searchClaims(term, { scope }, { limit: MEMORY_LIMITS.detailItems, mode: SEARCH_MODE.keyword, perNote: 'all' }))
-                if (hit.text.includes(term)) seen.set(hit.claimId, hit) // the store ranks; we require the literal
+                // keyed by (scope, note, claim), not claimId alone: that id hashes the claim's TEXT,
+                // so two notes asserting the same sentence share it and one of them vanished here —
+                // the same silent withholding `perNote: 'all'` above exists to prevent
+                if (hit.text.includes(term)) seen.set(claimHitKey(hit), hit) // the store ranks; we require the literal
             } catch { /* degraded: nothing at risk rather than a failed step */ }
           }
         }

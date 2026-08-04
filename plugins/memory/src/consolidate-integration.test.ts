@@ -35,7 +35,7 @@ it('consolidates a task that finished while no lifecycle was attached', async ()
   await live.store.write({ id: 'sb', scope: planScope('t9'), title: 'Step B', summary: 'did B' }, { source: 'cli' })
   // the completion lands with NOBODY subscribed — exactly the case that used to vanish
   await live.log.append({ taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.task_status_changed, payload: { taskId: 't9', from: 'running', to: 'done' } })
-  const outcomeId = slugId('outcome Detached task')
+  const outcomeId = slugId('outcome t9')
   await live.projector.catchUp()
   expect(await live.store.get(outcomeId)).toBeNull()
 
@@ -52,7 +52,7 @@ describe('consolidateTask (integration)', () => {
     const { log, store, projector } = await harness('t1', 'My task')
     await store.write({ id: 'sa', scope: planScope('t1'), title: 'Step A', summary: 'did A' }, { source: 'cli' })
     await store.recordAccess('area-x', 'project', 'read', { source: 'agent', taskId: 't1' }) // provenance → substantive
-    const outcomeId = slugId('outcome My task')
+    const outcomeId = slugId('outcome t1')
     const rev = async (): Promise<number> => { await projector.catchUp(); return (await store.get(outcomeId))?.revision ?? 0 }
 
     // reads a project note → substantive → the auto (non-force) path writes
@@ -85,7 +85,7 @@ describe('consolidateOnCompletion (subscriber action)', () => {
     await store.write({ id: 'sc', scope: planScope('t3'), title: 'Step C', summary: 'did C' }, { source: 'cli' })
     await store.recordAccess('area-y', 'project', 'read', { source: 'agent', taskId: 't3' })
     const deps = { log, store, catchUp: () => projector.catchUp() }
-    const outcomeId = slugId('outcome Subscribed task')
+    const outcomeId = slugId('outcome t3')
     // a non-done transition → the classifier gates it → no note
     await consolidateOnCompletion(deps, eventFixture({ kind: EVENT_KIND.task_status_changed, payload: { taskId: 't3', from: 'running', to: 'blocked' } }))
     await projector.catchUp()

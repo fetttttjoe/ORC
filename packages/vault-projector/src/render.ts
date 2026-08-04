@@ -30,6 +30,15 @@ const STEP_CLASS_DEFS = [
 
 // step nodes + dependency edges, shared by the index DAG and the execution graph — the two
 // views differ only in label text (and the extra nodes/classDefs a caller appends)
+// Mermaid node ids share ONE namespace per graph, and a plan step id is only constrained to
+// `^[\w-]+$` — so a step legitimately named `op0` collided with the first operation node: the two
+// merged into one box and the edge between them rendered as a self-loop. Prefixing BOTH families
+// makes the mapping injective, because a step named `op_0` becomes `s_op_0`, which nothing
+// generated here can spell.
+const stepNode = (stepId: string): string => `s_${stepId}`
+const opNode = (i: number): string => `op_${i}`
+const artNode = (i: number): string => `art_${i}`
+
 function stepNodesAndEdges(
   plan: Plan,
   steps: Map<string, StepState> | undefined,
@@ -38,9 +47,9 @@ function stepNodesAndEdges(
   const lines: string[] = []
   for (const st of plan.steps) {
     const s = steps?.get(st.id)
-    lines.push(`  ${st.id}["${label(text(st, s))}"]:::${statusClass(s)}`)
+    lines.push(`  ${stepNode(st.id)}["${label(text(st, s))}"]:::${statusClass(s)}`)
   }
-  for (const st of plan.steps) for (const d of st.dependsOn) lines.push(`  ${d} --> ${st.id}`)
+  for (const st of plan.steps) for (const d of st.dependsOn) lines.push(`  ${stepNode(d)} --> ${stepNode(st.id)}`)
   return lines
 }
 
@@ -81,8 +90,8 @@ function renderExecution(task: TaskNode, plan: Plan | undefined, state: State): 
     .sort((a, b) => a.startedSeq - b.startedSeq)
   ops.forEach((o, i) => {
     const cls = o.status === OPERATION_STATUS.completed ? 'done' : o.status === OPERATION_STATUS.failed ? 'failed' : 'unresolved'
-    lines.push(`  op${i}["${label(`${o.kind} ${o.name} · ${o.status} · attempts ${o.attempts}`)}"]:::${cls}`)
-    lines.push(`  ${o.stepId} --> op${i}`)
+    lines.push(`  ${opNode(i)}["${label(`${o.kind} ${o.name} · ${o.status} · attempts ${o.attempts}`)}"]:::${cls}`)
+    lines.push(`  ${stepNode(o.stepId)} --> ${opNode(i)}`)
   })
   lines.push(...STEP_CLASS_DEFS)
   lines.push('  classDef unresolved fill:#bf8700,color:#fff,stroke-dasharray: 5 5') // visually distinct: attempt began, outcome unknown
@@ -97,22 +106,26 @@ function renderLineage(task: TaskNode, state: State): string {
   if (artifacts.length === 0) return fm(head, `# Lineage: ${task.title}\n\n_no declared outputs_`)
   const lines = ['```mermaid', 'graph LR']
   const steps = [...new Set(artifacts.map(a => a.stepId ?? 'unknown'))]
-  for (const s of steps) lines.push(`  ${s}["${label(s)}"]`)
+  for (const s of steps) lines.push(`  ${stepNode(s)}["${label(s)}"]`)
   artifacts.forEach((a, i) => {
-    lines.push(`  art${i}["${label(`${a.path} · sha256:${a.sha256.slice(0, 12)}… · ${a.size}B`)}"]`)
-    lines.push(`  ${a.stepId ?? 'unknown'} --> art${i}`)
+    lines.push(`  ${artNode(i)}["${label(`${a.path} · sha256:${a.sha256.slice(0, 12)}… · ${a.size}B`)}"]`)
+    lines.push(`  ${stepNode(a.stepId ?? 'unknown')} --> ${artNode(i)}`)
   })
   lines.push('```')
   return fm(head, `# Lineage: ${task.title}\n\n${lines.join('\n')}`)
 }
 
-function renderTaskIndex(task: TaskNode, plan: Plan | undefined, steps: Map<string, StepState> | undefined, state: State): string {
+function renderTaskIndex(task: TaskNode, plan: Plan | undefined, steps: Map<string, StepState> | undefined, state: State, sessions: ReadonlySet<string>): string {
   const links = [
     plan ? `- [Plan v${plan.version}](plan-v${plan.version}.md)` : '',
     '- [Log](log.md)',
     '- [Execution](execution.md)',
     '- [Lineage](lineage.md)',
-    ...(plan?.steps ?? []).map(s => `- [Session: ${s.id}](sessions/${s.id}.md)`),
+    // only steps that actually left events: a session file is written per step WITH events, so
+    // listing every plan step put a dead link in the index for each step that had not started —
+    // the vault is read in Obsidian, where a link to a missing file is indistinguishable from a
+    // link to an empty one
+    ...(plan?.steps ?? []).filter(s => sessions.has(s.id)).map(s => `- [Session: ${s.id}](sessions/${s.id}.md)`),
   ].filter(Boolean).join('\n')
   const dag = plan ? mermaidDag(plan, steps) : '_no plan yet_'
   const usage = plan ? usageTable(task, plan, state) : '_no plan yet_'
@@ -159,15 +172,16 @@ export function renderTaskFiles(taskId: string, events: EventRecord[]): VaultFil
   const base = `tasks/${taskId}`
   const plans = state.plans.get(taskId)
   const steps = state.steps.get(taskId)
+  // folded BEFORE the index so the index can link only the session files this render actually emits
+  const byStep = new Map<string, EventRecord[]>()
+  for (const e of events) if (e.stepId) { const a = byStep.get(e.stepId) ?? []; a.push(e); byStep.set(e.stepId, a) }
   const files: VaultFiles = {
-    [`${base}/index.md`]: renderTaskIndex(task, plans?.versions.at(-1), steps, state),
+    [`${base}/index.md`]: renderTaskIndex(task, plans?.versions.at(-1), steps, state, new Set(byStep.keys())),
     [`${base}/log.md`]: renderLog(events),
     [`${base}/execution.md`]: renderExecution(task, plans?.versions.at(-1), state),
     [`${base}/lineage.md`]: renderLineage(task, state),
   }
   for (const p of plans?.versions ?? []) files[`${base}/plan-v${p.version}.md`] = renderPlanFile(p)
-  const byStep = new Map<string, EventRecord[]>()
-  for (const e of events) if (e.stepId) { const a = byStep.get(e.stepId) ?? []; a.push(e); byStep.set(e.stepId, a) }
   for (const [stepId, evs] of byStep) files[`${base}/sessions/${stepId}.md`] = renderSession(stepId, evs, steps?.get(stepId))
   return files
 }

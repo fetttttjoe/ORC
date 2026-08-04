@@ -49,12 +49,7 @@ export interface PlanGeometry {
 export const groupIdFor = (rank: number): string => `wave:${rank}`
 
 export function planGeometry(placed: readonly PlacedStep[], spec: GeometrySpec = DEFAULT_GEOMETRY): PlanGeometry {
-  const byRank = new Map<number, PlacedStep[]>()
-  for (const p of placed) {
-    const bucket = byRank.get(p.rank)
-    if (bucket) bucket.push(p)
-    else byRank.set(p.rank, [p])
-  }
+  const byRank = Map.groupBy(placed, p => p.rank)
 
   const groups: GroupBox[] = []
   const steps: StepBox[] = []

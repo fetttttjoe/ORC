@@ -6,6 +6,7 @@
   import { api } from '$lib/api/client'
   import { taskIdOf } from '$lib/node-id'
   import { session } from '$lib/stores/session.svelte'
+  import { qk } from '$lib/query-keys'
 
   const LOG_LIMIT = 200
 
@@ -15,7 +16,7 @@
   const taskId = $derived(taskIdOf(nodeId))
 
   const log = createQuery(() => ({
-    queryKey: ['task', taskId ?? '', 'log'],
+    queryKey: qk.taskLog(taskId ?? ''),
     queryFn: () => api.log(project, { ...(taskId !== null && { task: taskId }), limit: LOG_LIMIT }),
     enabled: taskId !== null && project !== '',
     // keep the last good answer on screen while a refetch runs

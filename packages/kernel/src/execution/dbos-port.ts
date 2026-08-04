@@ -18,7 +18,7 @@ import {
   type GroundingScope, type StalePathAnswer,
 } from './strategies/grounding-scope'
 import { verifyArtifacts } from './artifacts'
-import { fold, ancestorTaskIds, blockingVerdicts, retryIsFutile, completedStepIds, nextAttempts, remainingBudget, inheritedCwd, runCwd, type State } from '../projections'
+import { fold, ancestorTaskIds, blockingVerdicts, retryIsFutile, completedStepIds, nextAttempts, startedAttempts, remainingBudget, inheritedCwd, runCwd, type State } from '../projections'
 import { Kernel } from '../kernel'
 import { KERNEL_ERROR_CODE, KernelError } from '../errors'
 import { readySteps, runOutcomeOf } from './interpreter'
@@ -706,22 +706,34 @@ export async function createDbosPort(opts: {
   async function cancelWorkflowsFor(taskId: string): Promise<void> {
     const state = await foldState(taskId)
     const latest = state.runs.get(taskId)?.at(-1)
-    if (!latest) return
     const approved = state.plans.get(taskId)?.approvedVersion
     const plan = state.plans.get(taskId)?.versions.find(p => p.version === approved)
     if (plan) {
       const done = completedStepIds(state, taskId)
-      const attempts = nextAttempts(state, taskId, plan)
-      for (const s of plan.steps)
-        if (!done.has(s.id))
-          // tolerated miss: an attempt that never started has no workflow row to cancel
-          await DBOS.cancelWorkflow(stepWorkflowId(taskId, s.id, attempts[s.id] ?? 1)).catch(() => {})
+      // startedAttempts, NOT nextAttempts: cancel targets the attempt that is RUNNING. nextAttempts
+      // answers "which attempt starts next" and returns attempt+1 once the task is settled — and
+      // cancelSubtree has already stamped `cancelled` by the time this runs, so every id it gave
+      // was one ahead of the live workflow and the cancel silently missed.
+      const attempts = startedAttempts(state, taskId, plan)
+      for (const s of plan.steps) {
+        const attempt = attempts[s.id]
+        // a step that never started has no workflow to cancel — omitted rather than guessed at
+        if (done.has(s.id) || attempt === undefined) continue
+        await DBOS.cancelWorkflow(stepWorkflowId(taskId, s.id, attempt)).catch(() => {})
+      }
     }
-    // the run workflow always exists (run_started recorded its id) — a cancel failure here must
-    // surface to the caller, NOT be recorded as a successful cancellation. DBOS.cancelWorkflow on
-    // an already-cancelled or already-finished workflow is itself a no-op, which is what makes it
+    // A run that is still ENQUEUED has no run_started — that event is written from INSIDE the
+    // workflow — so reading the id out of the log missed exactly the runs a cancel most needs to
+    // stop: past the depth concurrency cap, a queued child would later dequeue and execute its
+    // whole plan against a task already stamped cancelled. The id is deterministic, so derive it
+    // (retryIndex 0: a run with no recorded start is by definition the first).
+    const workflowId = latest?.workflowId ?? (approved ? `run:${taskId}:v${approved}` : null)
+    if (!workflowId) return
+    // a cancel failure here must surface to the caller, NOT be recorded as a successful
+    // cancellation. DBOS.cancelWorkflow on an already-cancelled or already-finished workflow is
+    // itself a no-op, which is what makes it
     // safe for both the direct caller below AND the router's async onCancelled to land here.
-    await DBOS.cancelWorkflow(latest.workflowId)
+    await DBOS.cancelWorkflow(workflowId)
   }
 
   // DBOS recovers pending workflows for its own executorID alone and defaults every process to

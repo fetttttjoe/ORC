@@ -46,6 +46,19 @@ describe('frontier', () => {
     expect(hits.map(h => h.id)).not.toContain('root')
   })
 
+  it('a self-link neither reaches a note nor counts as coverage', () => {
+    // The exclusion above is what makes this matter: counted as inbound, a note's link to itself
+    // supplied the very in>=1 that "something in the graph reaches it" requires, so an island
+    // vouched for its own membership in the frontier.
+    const hits = frontier([n('root', ['root', 'leaf-a', 'leaf-b']), n('leaf-a', []), n('leaf-b', [])], NOW)
+    expect(hits.map(h => h.id)).not.toContain('root')
+    // and with a real inbound edge it qualifies, but out counts the two others — never itself
+    const reached = frontier([n('root', ['root', 'leaf-a', 'leaf-b']), n('leaf-a', ['root']), n('leaf-b', [])], NOW)
+    expect(reached[0]?.id).toBe('root')
+    expect(reached[0]?.out).toBe(2)
+    expect(reached[0]?.in).toBe(1)
+  })
+
   it('ignores notes outside the semantic tier', () => {
     const plan: FrontierNote = { ...n('plan-node', ['leaf']), tier: 'plan' }
     expect(frontier([plan, n('leaf', [])], NOW)).toEqual([])

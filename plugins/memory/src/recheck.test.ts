@@ -9,12 +9,7 @@ const write = (note: Record<string, unknown>): EventRecord => ({
   payload: { note: { tier: 'semantic', kind: 'fact', scope: 'project', ...note }, author: { source: 'cli' } },
 } as unknown as EventRecord)
 
-const deps = {
-  dir: '/repo',
-  changedSince: async () => new Set<string>(),
-  terminalTaskIds: new Set<string>(),
-  exists: (p: string) => p === '/repo/src/live.ts',
-}
+const deps = { changedSince: async () => new Set<string>(), terminalTaskIds: new Set<string>() }
 
 describe('recheckNotes', () => {
   /**
@@ -31,24 +26,6 @@ describe('recheckNotes', () => {
     expect(out.map(n => n.id)).toEqual(['live'])
   })
 
-  /**
-   * A declared path may be a GLOB (`plugins/memory/**` appears in this corpus). existsSync on one
-   * is always false, so treating that as "the subject was deleted" would archive a live note
-   * describing code that is very much there. Absence of a literal file is not evidence about a
-   * pattern — fail safe.
-   */
-  it('never calls a glob path missing — that would retire notes about existing code', async () => {
-    const out = await recheckNotes([write({ id: 'globbed', title: 'g', paths: ['plugins/memory/**'] })], deps)
-    expect(out[0]?.subjectMissing).toBe(false)
-  })
 
-  it('still detects a genuinely deleted subject from literal paths', async () => {
-    const out = await recheckNotes([write({ id: 'dead', title: 'd', paths: ['src/deleted.ts'] })], deps)
-    expect(out[0]?.subjectMissing).toBe(true)
-  })
 
-  it('does not call a note missing when one of its literal paths still exists', async () => {
-    const out = await recheckNotes([write({ id: 'partly', title: 'p', paths: ['src/live.ts', 'src/deleted.ts'] })], deps)
-    expect(out[0]?.subjectMissing).toBe(false)
-  })
 })

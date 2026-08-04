@@ -183,11 +183,19 @@ export function createMemoryProjector(opts: { log: EventLog; surreal: SurrealMem
   // sentence while ollama re-embedded the corpus for minutes. Advisory only.
   let stage: { name: MemoryStageName; startedAt: number } | null = null
 
+  // Publishing is ADVISORY and must never fail the work it describes. `.catch()` alone was not
+  // enough: it handles a rejected promise, but a surreal double missing the method throws
+  // SYNCHRONOUSLY, past the catch, and took the whole refresh with it — twice. Going through
+  // Promise.resolve().then turns either failure into the same rejection.
+  const publishStage = (s: { name: MemoryStageName; startedAt: number } | null): void => {
+    void Promise.resolve().then(() => surreal.setStage(s === null ? null : { ...s, pid: process.pid })).catch(() => {})
+  }
+
   const refreshDerived = async (hadDelete: boolean): Promise<void> => {
     if (hadDelete) {
       const started = Date.now()
       stage = { name: MEMORY_STAGE.linking, startedAt: started }
-      void surreal.setStage(stage).catch(() => {}) // advisory: a failed publish must not fail the refresh
+      publishStage(stage)
       try { await surreal.refreshLinks() }
       catch (err) { console.warn(`[memory] link refresh failed: ${errorMessage(err)}`) }
       finally {
@@ -198,7 +206,7 @@ export function createMemoryProjector(opts: { log: EventLog; surreal: SurrealMem
     }
     const started = Date.now()
     stage = { name: MEMORY_STAGE.clustering, startedAt: started }
-    void surreal.setStage(stage).catch(() => {})
+    publishStage(stage)
     try { await surreal.refreshTopics() }
     catch (err) { console.warn(`[memory] topic refresh failed: ${errorMessage(err)}`) }
     finally {
@@ -209,7 +217,7 @@ export function createMemoryProjector(opts: { log: EventLog; surreal: SurrealMem
       // activity that is not happening, and the banner then shows "clustering (101s so far)" at a
       // supervisor that has been ready for minutes — worse than showing nothing at all.
       stage = null
-      void surreal.setStage(null).catch(() => {})
+      publishStage(null)
     }
   }
 
@@ -281,6 +289,12 @@ export function createMemoryProjector(opts: { log: EventLog; surreal: SurrealMem
 
   return {
     start: async () => {
+      // A leftover stage from a process that DIED mid-refresh. The finally-clear covers a throw but
+      // not a kill, so a supervisor killed while clustering leaves the row set and the banner then
+      // reports work nobody is doing — observed live at 30 minutes stale. A projector that is only
+      // now starting knows no refresh of its own is in flight, so clearing here is exact and needs
+      // no staleness threshold to guess at.
+      publishStage(null)
       // subscribe BEFORE the initial drain: an event landing between the drain's read and a
       // later subscribe would fall below the subscription's start cursor and never arrive —
       // this order guarantees every event is covered by the drain or the live stream

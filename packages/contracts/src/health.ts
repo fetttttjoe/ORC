@@ -37,7 +37,7 @@ export type MemoryStageName = z.infer<typeof MemoryStageName>
 export const MEMORY_STAGE = MemoryStageName.enum
 
 /** the published row, parsed rather than trusted — an unrecognised stage is simply absent */
-export const MemoryStage = z.object({ name: MemoryStageName, startedAt: z.number() })
+export const MemoryStage = z.object({ name: MemoryStageName, startedAt: z.number(), pid: z.number() })
 
 // Whether anything can DRIVE a run right now — the question every silent project raises first.
 // Derived from the supervisor heartbeat row plus the pid file the serve process writes only once

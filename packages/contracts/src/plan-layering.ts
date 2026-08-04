@@ -60,13 +60,7 @@ export interface Layer<T> {
 /** The ranks above, grouped into waves. Declaration order is kept inside a wave, so one plan always draws the same way. */
 export function layerSteps<T extends LayerableStep>(steps: readonly T[]): { layers: Layer<T>[]; cyclic: Set<string> } {
   const { rank, cyclic } = stepRanks(steps)
-  const byRank = new Map<number, T[]>()
-  for (const s of steps) {
-    const r = rank.get(s.id) ?? 0
-    const bucket = byRank.get(r)
-    if (bucket) bucket.push(s)
-    else byRank.set(r, [s])
-  }
+  const byRank = Map.groupBy(steps, s => rank.get(s.id) ?? 0)
   const layers = [...byRank.keys()]
     .sort((a, b) => a - b)
     .map((r, i) => {

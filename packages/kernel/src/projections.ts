@@ -397,6 +397,28 @@ export function nextAttempts(state: State, taskId: string, plan: Pick<Plan, 'ste
   return out
 }
 
+/**
+ * The attempt each step is CURRENTLY on — what a cancel must target. Distinct from nextAttempts,
+ * which answers the opposite question ("which attempt should the next run start?") and deliberately
+ * returns attempt+1 for a settled task so a retry gets a fresh workflow id.
+ *
+ * Cancel used nextAttempts and was therefore always one ahead: cancelSubtree stamps `cancelled`
+ * BEFORE cancelWorkflowsFor runs, so `settled` is true, every started step resolves to attempt+1,
+ * and DBOS.cancelWorkflow was handed an id that does not exist — swallowed by its own .catch(). The
+ * live step kept running its model loop to completion against a cancelled task.
+ *
+ * A step with no recorded start has nothing to cancel and is omitted, so the caller cancels only
+ * ids that were actually created.
+ */
+export function startedAttempts(state: State, taskId: string, plan: Pick<Plan, 'steps'>): Record<string, number> {
+  const out: Record<string, number> = {}
+  for (const step of plan.steps) {
+    const s = state.steps.get(taskId)?.get(step.id)
+    if (s) out[step.id] = s.attempt
+  }
+  return out
+}
+
 export function taskUsage(state: State, taskId: string): Usage {
   return state.usage.get(taskId) ?? ZERO_USAGE
 }
