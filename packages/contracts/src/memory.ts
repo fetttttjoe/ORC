@@ -656,21 +656,8 @@ export type MemoryAccessedPayload = z.infer<typeof MemoryAccessedPayload>
 // Read-model health, as three distinct states rather than one boolean. A model that is BEHIND is a
 // healthy system mid-write — the projector catches up — while an UNREACHABLE store is a real fault.
 // Collapsing them lit the UI's degraded badge on every burst of note writes.
-export const MEMORY_HEALTH = { ok: 'ok', catchingUp: 'catching_up', unreachable: 'unreachable' } as const
-export type MemoryHealthState = (typeof MEMORY_HEALTH)[keyof typeof MEMORY_HEALTH]
-
-export interface MemoryHealth {
-  state: MemoryHealthState
-  pending: number // knowledge events not yet applied to the read model
-  reason?: string
-  // How far the graph has fallen behind the working tree. `pending` measures the read model
-  // catching up with the LOG — a lag orc creates and fixes by itself. This measures the corpus
-  // catching up with the CODE, which orc cannot fix by itself: when the repo moves without going
-  // through orc (another editor, a merge, a refactor landed elsewhere) nothing retires the claims
-  // that describe what used to be there. Absent when it could not be measured (no repo, no
-  // checkable notes) — never a fabricated zero, which would read as "healthy".
-  drift?: { checkable: number; drifted: number; ratio: number }
-}
+// health vocabulary lives in health.ts (zero-import: the browser needs it too)
+export { MEMORY_HEALTH, type MemoryHealth, type MemoryHealthState } from './health'
 
 export interface MemoryStore {
   // idempotencyKey: deterministic writers (tool-driven writes inside an operation) pass one so

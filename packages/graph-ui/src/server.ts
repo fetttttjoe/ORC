@@ -1,8 +1,8 @@
 import { stepCountIs, streamText, type LanguageModel } from 'ai'
 import { z } from 'zod'
-import { MEMORY_HEALTH, type MemoryHealth, errorMessage, isRecord, NoteAuthoringDraft, NoteRef, PlanDraft, type CopilotExchangePayload, type Usage } from '@orc/contracts'
+import { MEMORY_HEALTH, type MemoryHealth, type SupervisorHealth, errorMessage, isRecord, NoteAuthoringDraft, NoteRef, PlanDraft, type CopilotExchangePayload, type Usage } from '@orc/contracts'
 import { buildCopilotTools, copilotSystemPrompt, createProjectSessions, emptyPatch, type CopilotMode, type OrcActions, type ProjectEntry, type ProjectSessions, type SessionUpdate } from '@orc/ui-core'
-import index from '../page/index.html'
+import path from 'node:path'
 import { toolFailure } from './tool-failure'
 
 export interface CopilotConfig {
@@ -103,8 +103,9 @@ export function startGraphUi(opts: {
   actions?: OrcActions // absent = read-only server (launched outside a project)
   copilot?: CopilotConfig
   defaultCwd?: string
-  // degraded-state probe (memory read model, projector lag) — absent = health unknown
-  health?: () => Promise<{ memory: MemoryHealth }>
+  // degraded-state probe (memory read model, projector lag, supervisor liveness) — absent =
+  // health unknown; supervisor absent = the composition has no storage to ask
+  health?: () => Promise<{ memory: MemoryHealth; supervisor?: SupervisorHealth }>
   // P6 interaction journaling: append one copilot_exchange event per completed exchange — the
   // conversation that caused an action is part of the record. Absent = exchanges unrecorded.
   appendExchange?: (x: { payload: CopilotExchangePayload; usage: Usage | null }) => Promise<void>
@@ -144,7 +145,12 @@ export function startGraphUi(opts: {
       model,
       system: copilotSystemPrompt(name, mode, opts.defaultCwd),
       messages,
-      tools: buildCopilotTools({ sessions, actions: mode === 'act' ? opts.actions ?? null : null, projectId, listModels: cfg.listModels }),
+      tools: buildCopilotTools({
+        sessions, actions: mode === 'act' ? opts.actions ?? null : null, projectId, listModels: cfg.listModels,
+        // the same probe the footer badge polls (/api/health) — the copilot must see a
+        // rebuilding read model too, or it narrates a silent project as healthy
+        ...(opts.health && { health: opts.health }),
+      }),
       stopWhen: stepCountIs(8),
     })
     const enc = new TextEncoder()
@@ -292,9 +298,13 @@ export function startGraphUi(opts: {
         return Response.json(await sessions.planNotes(project, u.searchParams.get('task') ?? ''))
       case '/api/log': {
         const limitRaw = Number(u.searchParams.get('limit'))
+        // `since` exposes sessions.log's incremental seam: the page backfills the narrative
+        // window a catch-up patch skipped (summaries are per-event; since()'s patch is not)
+        const sinceRaw = Number(u.searchParams.get('since'))
         return Response.json(await sessions.log(project, {
           taskId: u.searchParams.get('task') ?? undefined,
           limit: Number.isFinite(limitRaw) && limitRaw > 0 ? limitRaw : undefined,
+          sinceSeq: Number.isFinite(sinceRaw) && sinceRaw > 0 ? sinceRaw : undefined,
         }))
       }
       case '/api/stream': {
@@ -366,11 +376,23 @@ export function startGraphUi(opts: {
     hostname: '127.0.0.1',
     port: opts.port,
     idleTimeout: 0, // SSE connections are idle by design — the default 10s would sever them
-    // production by default: the page is bundled once at startup with content-hashed asset
-    // URLs, so a reload can never serve a stale bundle. ORC_GRAPH_DEV=1 restores HMR.
     development: process.env.ORC_GRAPH_DEV === '1',
-    routes: { '/': index },
-    fetch: api,
+    // the UI is the Vite-built SPA in web/dist (content-hashed assets); non-API paths fall back
+    // to index.html so hash-router deep links survive a reload. `bun run build` in web/ rebuilds.
+    fetch: async req => {
+      const u = new URL(req.url)
+      if (u.pathname.startsWith('/api')) return api(req)
+      const dist = path.resolve(import.meta.dir, '../web/dist')
+      const target = path.normalize(path.join(dist, u.pathname === '/' ? 'index.html' : u.pathname))
+      if (target.startsWith(dist)) {
+        const f = Bun.file(target)
+        if (await f.exists()) return new Response(f)
+      }
+      const fallback = Bun.file(path.join(dist, 'index.html'))
+      return (await fallback.exists())
+        ? new Response(fallback)
+        : new Response('ui not built — run `bun run build` in packages/graph-ui/web', { status: 503 })
+    },
   })
 
   return {

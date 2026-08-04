@@ -1,0 +1,96 @@
+<script lang="ts">
+  import { slide } from 'svelte/transition'
+  import { APPROVAL_ANSWER } from '@orc/contracts/approval-answer'
+  import { STEP_ID } from '@orc/contracts/step-ids'
+  import CopyChip from '$lib/components/CopyChip.svelte'
+  import TaskChip from '$lib/components/TaskChip.svelte'
+  import { Button } from '$lib/components/ui/button'
+  import { Textarea } from '$lib/components/ui/textarea'
+  import { createQuery, keepPreviousData } from '@tanstack/svelte-query'
+  import { actions, replyReceipt } from '$lib/api/actions'
+  import { api } from '$lib/api/client'
+  import { qk } from '$lib/query-keys'
+  import { notify } from '$lib/notify'
+  import { session } from '$lib/stores/session.svelte'
+  import type { OpenGate } from '$lib/stores/ledger.svelte'
+
+  let { gate }: { gate: OpenGate } = $props()
+
+  let text = $state('')
+  let busy = $state(false)
+
+  // The ledger line is a 120-char summary with a "Q: " prefix; the full question is in the
+  // transcript. Answering a truncated question is answering the wrong one, so the gate reads
+  // the verbatim text and only falls back to the summary while that is in flight.
+  const transcript = createQuery(() => ({
+    queryKey: qk.taskTranscript(gate.taskId, gate.stepId),
+    queryFn: () => api.transcript(session.sel.project, gate.taskId, gate.stepId ?? undefined),
+    enabled: session.sel.project !== '',
+    // keep the last good answer on screen while a refetch runs
+    placeholderData: keepPreviousData,
+  }))
+  const verbatim = $derived.by(() => {
+    const items = transcript.data ?? []
+    for (let i = items.length - 1; i >= 0; i -= 1) {
+      const item = items[i]
+      if (item?.kind === 'question' && item.answer === null) return item.question
+    }
+    return gate.question.replace(/^Q:\s*/, '')
+  })
+
+  // only the grounded plan step's question earns one-click approve: it is the one place the
+  // kernel reads the answer as more than plain text (it freezes the plan the human just saw)
+  const isApprovalGate = $derived(gate.stepId === STEP_ID.plan)
+
+  async function send(answer: string): Promise<void> {
+    if (!answer || busy) return
+    busy = true
+    try {
+      const receipt = replyReceipt(await actions.reply(gate.taskId, answer))
+      notify(receipt.text, receipt.tone)
+      text = ''
+    } catch (err) {
+      notify(err instanceof Error ? err.message : String(err), 'error')
+    } finally {
+      busy = false
+    }
+  }
+</script>
+
+<section class="border-y border-human/45 bg-human/8 px-4 py-3" aria-label="open question" transition:slide={{ duration: 180 }}>
+  <div class="mb-1.5 flex items-center gap-2">
+    <span class="font-mono text-label tracking-widest text-human uppercase">waiting on you</span>
+    <TaskChip taskId={gate.taskId} />
+    <span class="grow"></span>
+    <span class="font-mono text-label text-human/70">#{gate.seq}</span>
+  </div>
+
+  <p class="mb-2.5 text-[13px] leading-relaxed break-words whitespace-pre-wrap text-paper">{verbatim}</p>
+
+  {#if session.canAnswer()}
+    <div class="flex items-start gap-2">
+      <Textarea
+        bind:value={text}
+        rows={1}
+        disabled={busy}
+        placeholder="answer the agent…"
+        class="min-h-8 grow resize-y border-human/35 bg-ink/60 text-xs focus-visible:border-human"
+        onkeydown={(e: KeyboardEvent) => {
+          if (e.key === 'Enter' && !e.shiftKey) {
+            e.preventDefault()
+            void send(text.trim())
+          }
+        }}
+      />
+      {#if isApprovalGate}
+        <Button size="sm" disabled={busy} onclick={() => void send(APPROVAL_ANSWER)}>approve</Button>
+      {/if}
+      <Button variant="outline" size="sm" disabled={busy || text.trim() === ''} onclick={() => void send(text.trim())}>answer</Button>
+    </div>
+  {:else}
+    <div class="flex flex-wrap items-center gap-2 text-row text-mist">
+      <span>this server cannot write — answer it from the project's own directory:</span>
+      <CopyChip text={`orc reply ${gate.taskId} "your answer"`} />
+    </div>
+  {/if}
+</section>

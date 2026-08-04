@@ -11,10 +11,11 @@ export default defineConfig({
     baseURL: `http://127.0.0.1:${PORT}`,
     viewport: { width: 1440, height: 900 },
   },
+  // startGraphUi serves web/dist, so the SPA must be built before the fixture boots
   webServer: {
-    command: 'bun e2e/server.ts',
+    command: 'bun run --cwd web build && bun e2e/server.ts',
     url: `http://127.0.0.1:${PORT}/api/session`,
     reuseExistingServer: false,
-    timeout: 30_000,
+    timeout: 120_000,
   },
 })

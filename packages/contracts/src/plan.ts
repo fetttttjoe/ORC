@@ -32,22 +32,9 @@ export type PlanStep = z.infer<typeof PlanStep>
 // matched values, never scattered literals: routing keys the runtime and M5a split path share.
 export const STRATEGY = { groundedPlan: 'grounded-plan', split: 'split', single: 'template:single' } as const
 
-// The well-known ids and roles of a plan, in ONE place. They live in contracts rather than beside
-// the grounded-plan strategy because both sides of the seam need them: the kernel stamps them, and
-// plugins (the analyzer, the executor) match on them without being allowed to import the kernel.
-// Splitting them was why 'masterplan', 'analyze', 'scout' and 'implementer' ended up as scattered
-// literals — a plugin that cannot import the constant retypes the string.
-//
-// VERIFY_STEP_ID: validatePlan accepts it as the alternative to explicit dependencies, and the
-// grounded freezer maps it to the auditor role.
-// COMMIT_STEP_ID: appended by the kernel's withCommitStep; the only step git_commit registers for.
-export const STEP_ID = { analyze: 'analyze', plan: 'plan', verify: 'verify', commit: 'commit' } as const
-export const VERIFY_STEP_ID = STEP_ID.verify
-export const COMMIT_STEP_ID = STEP_ID.commit
-
-// The root of a grounded plan-note graph — what the authoring agent names, finalize_plan looks up,
-// and the freezer decomposes from.
-export const MASTERPLAN_NOTE_ID = 'masterplan'
+// step-id vocabulary lives in step-ids.ts (zero-import: the browser and every plugin need it)
+export { STEP_ID, VERIFY_STEP_ID, COMMIT_STEP_ID, MASTERPLAN_NOTE_ID, type StepId } from './step-ids'
+import { STEP_ID, VERIFY_STEP_ID, MASTERPLAN_NOTE_ID } from './step-ids'
 
 // Step roles the system gives meaning to. `PlanStep.role` stays an open string on purpose — an
 // extension may introduce its own role, and memoryRoleFor maps an unknown one to the default

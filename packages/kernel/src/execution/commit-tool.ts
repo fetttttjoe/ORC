@@ -22,7 +22,16 @@ import { clipMiddle } from './clip'
 // path with no content at HEAD at all; every git failure also falls toward NOT stamping, the
 // opposite of drift's read-side rule, because a false current-stamp poisons the freshness gate while
 // a skipped stamp costs one re-heal.
-const CommitInput = z.object({ message: z.string().min(1).max(5000) })
+// Two non-empty lines is the operator's history rule (subject + at most one body line). Enforced
+// here, not just in the committer skill's prose: a live committer wrote a three-line message whose
+// body broke off mid-sentence (79303eb, 2026-08-01) — the refusal names the rule, so the agent
+// repairs in one iteration, and a truncated essay can never reach `git commit` again.
+const CommitInput = z.object({
+  message: z.string().min(1).max(5000).refine(
+    m => m.split('\n').filter(l => l.trim() !== '').length <= 2,
+    'commit message is at most two lines: a conventional-commit subject, plus one body line only when the subject cannot carry the WHY',
+  ),
+})
 
 // The write half of a stamp pass, injected by the composition root so this file never imports the
 // memory plugin: `restamp` is memory's store.write with the step author, `reverify` its store.verify.

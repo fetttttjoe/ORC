@@ -1,36 +1,9 @@
 import { activation, DEFAULT_HALF_LIFE_DAYS, edgeKey, isUiMetaNote, noteKey, noteLabel, STEP_RUN_STATUS, type AccessStats, type LinkKind, type MemoryFold } from '@orc/contracts'
 import type { State } from '@orc/kernel'
 
-export interface GraphNode {
-  id: string
-  type: 'task' | 'step' | 'artifact' | 'note' | 'model'
-  label: string
-  detail: string // task: status; step: run status or 'pending'; artifact: size; note: kind; model: provider
-  heat?: number // notes only: 0–1 activation heat (2dp) — recently-pulled knowledge renders hot; absent = cold
-}
-export interface GraphLink {
-  source: string; target: string; type: string
-  heat?: number // note-link edges only: 0–1 edge activation heat (2dp) — walked connections render hot; absent = cold
-}
-export interface Graph { nodes: GraphNode[]; links: GraphLink[] }
-
-export interface GraphPatch {
-  addNodes: GraphNode[]
-  updateNodes: GraphNode[] // same id, changed label/detail (e.g. step status flip)
-  removeNodeIds: string[]
-  addLinks: GraphLink[]
-  removeLinks: GraphLink[]
-  updateLinks: GraphLink[] // same-key link, heat changed — the edge twin of updateNodes; NOT remove+add (would churn the renderer)
-}
-export const emptyPatch = (p: GraphPatch): boolean =>
-  !p.addNodes.length && !p.updateNodes.length && !p.removeNodeIds.length && !p.addLinks.length && !p.removeLinks.length && !p.updateLinks.length
-
-// The graph vocabulary — every producer and consumer speaks through these, never literals.
-export const EDGE = {
-  child: 'child', plan: 'plan', depends: 'depends', out: 'out', wrote: 'wrote', uses: 'uses',
-} as const
-
-export const NODE_PREFIX = { step: 'step:', artifact: 'artifact:', note: 'note:', model: 'model:' } as const
+// wire shapes + vocabulary live in graph-wire.ts (zero-import, shared with the browser)
+export { EDGE, NODE_PREFIX, emptyPatch, type EdgeType, type Graph, type GraphLink, type GraphNode, type GraphPatch } from './graph-wire'
+import { EDGE, NODE_PREFIX, type Graph, type GraphLink, type GraphNode, type GraphPatch } from './graph-wire'
 
 // defined in contracts so retrieval obeys the same rule the graph view does
 export { PROJECT_NAME_NOTE_ID, PROJECT_DIR_NOTE_ID, isUiMetaNote } from '@orc/contracts'

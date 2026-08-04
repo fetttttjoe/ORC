@@ -6,6 +6,14 @@ import type { OperationSpec } from './operations'
 import type { LoadedSkill, ResolvedTool } from './plugins'
 import type { ClaimHit, NoteSummary } from './memory'
 
+// Whether anything can DRIVE a run right now — the question every silent project raises first.
+// Derived from the supervisor heartbeat row plus the pid file the serve process writes only once
+// its runtime is ready: heartbeat+pidfile = ready, heartbeat alone = booting (projection catch-up
+// beats through boot since 601bca7), a stale row = it died without cleanup, no row = nothing will
+// run until `orc serve`. Lives in contracts because the CLI derives it and both UI doors render it.
+// [derived: 2026-08-01 live session — every incident began as "is anything actually driving?"]
+export { SUPERVISOR_HEALTH, type SupervisorHealth, type SupervisorHealthState } from './health'
+
 export const Usage = z.object({
   inputTokens: z.number().int().nonnegative(),
   outputTokens: z.number().int().nonnegative(),

@@ -4,7 +4,16 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
-    "./fixtures": "./src/fixtures.ts"
+    "./fixtures": "./src/fixtures.ts",
+    "./task": "./src/task.ts",
+    "./event-kinds": "./src/event-kinds.ts",
+    "./memory": "./src/memory.ts",
+    "./execution": "./src/execution.ts",
+    "./approval-answer": "./src/approval-answer.ts",
+    "./plan": "./src/plan.ts",
+    "./ids": "./src/ids.ts",
+    "./step-ids": "./src/step-ids.ts",
+    "./health": "./src/health.ts"
   },
   "dependencies": {
     "zod": "^4.4.3"

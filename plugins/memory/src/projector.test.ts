@@ -7,7 +7,7 @@ import { openStorage } from '@orc/kernel'
 import { createTestDb, TEST_PROJECT_ID } from '@orc/kernel/test-helpers'
 import { SurrealMemory } from './surreal'
 import { createTestSurreal } from './test-helpers'
-import { createMemoryProjector } from './projector'
+import { catchUpProgressLine, createMemoryProjector } from './projector'
 
 const drops: (() => Promise<void>)[] = []
 // Concurrent, with a real hook budget — see surreal.test.ts's teardown: serial drops blow bun's
@@ -420,5 +420,17 @@ describe('projector resilience', () => {
       warnSpy.mockRestore()
     }
     expect(warns.some(w => w.includes('memory projector: boom'))).toBe(true) // honest warning survives
+  })
+})
+
+describe('catchUpProgressLine (visibility for the big drain only)', () => {
+  it('stays silent for a routine drain below the reporting floor', () => {
+    expect(catchUpProgressLine(25, 49)).toBeNull()
+  })
+
+  it('reports at each interval of a large drain and stays quiet between', () => {
+    expect(catchUpProgressLine(25, 200)).toBe('[memory] catch-up: 25/200 events projected')
+    expect(catchUpProgressLine(26, 200)).toBeNull()
+    expect(catchUpProgressLine(200, 200)).toBe('[memory] catch-up: 200/200 events projected')
   })
 })

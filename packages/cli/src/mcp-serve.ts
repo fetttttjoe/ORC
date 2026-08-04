@@ -16,9 +16,9 @@ import { z } from 'zod'
 import { Server } from '@modelcontextprotocol/sdk/server/index.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js'
-import { errorMessage, toolError, type ResolvedTool } from '@orc/contracts'
+import { errorMessage, toolError, type ResolvedTool, type SupervisorHealth } from '@orc/contracts'
 import type { EventLog, ProjectConfig } from '@orc/kernel'
-import { MEMORY_READ_TOOLS, MEMORY_ROLE, createMemory, memoryTools as buildMemoryTools, unavailableMemoryTools } from '@orc/memory'
+import { MEMORY_READ_TOOLS, MEMORY_ROLE, createMemory, memoryTools as buildMemoryTools, probeMemory, unavailableMemoryTools } from '@orc/memory'
 import { openMemory } from './memory-open'
 import { asResolvedTools, buildCopilotTools, createProjectSessions, type OrcActions } from '@orc/ui-core'
 
@@ -71,6 +71,7 @@ export function buildServeTools(deps: {
   memoryTools: ResolvedTool[]
   actions: OrcActions | null
   autonomy: Autonomy
+  health?: Parameters<typeof buildCopilotTools>[0]['health']
 }): ResolvedTool[] {
   return [
     // one tool definition, two doors: the copilot set (read + mutate-without-approve, P2).
@@ -79,6 +80,7 @@ export function buildServeTools(deps: {
     ...asResolvedTools(buildCopilotTools({
       sessions: deps.sessions, actions: deps.actions, projectId: deps.projectId,
       listModels: () => deps.sessions.modelCatalog(deps.projectId),
+      ...(deps.health && { health: deps.health }),
     })),
     ...deps.memoryTools.filter(t => READ_MEMORY.has(t.name)),
     ...(deps.actions ? [mcpApproveTool(deps.actions, deps.autonomy)] : []),
@@ -90,8 +92,11 @@ export async function startMcpServe(opts: {
   log: EventLog
   actions: OrcActions | null // null = read-only server (no port factory available)
   autonomy: Autonomy
+  // "is anything driving?" for project_status — injected because the heartbeat table and pid
+  // file live behind the caller's storage; absent = the field is omitted, never fabricated
+  supervisor?: () => Promise<SupervisorHealth>
 }): Promise<void> {
-  const { config, log, actions, autonomy } = opts
+  const { config, log, actions, autonomy, supervisor } = opts
 
   // stdout hardening layer 2: the transport keeps the real stdout; everything else — winston
   // when DBOS boots for run/retry/cancel, any stray library print — lands on stderr.
@@ -115,7 +120,15 @@ export async function startMcpServe(opts: {
   } catch (err) {
     memoryTools = unavailableMemoryTools(errorMessage(err))
   }
-  const tools = buildServeTools({ sessions, projectId: config.projectId, memoryTools, actions, autonomy })
+  // the same probe `orc status` and graph-ui's /api/health read — an MCP driver watching a silent
+  // project must be able to see "the read model is rebuilding" without opening the databases
+  const tools = buildServeTools({
+    sessions, projectId: config.projectId, memoryTools, actions, autonomy,
+    health: async () => ({
+      memory: await probeMemory(config, log),
+      ...(supervisor && { supervisor: await supervisor() }),
+    }),
+  })
   const byName = new Map(tools.map(t => [t.name, t]))
 
   const server = new Server({ name: 'orc', version: '0.0.0' }, { capabilities: { tools: {} } })

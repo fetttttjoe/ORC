@@ -57,10 +57,7 @@ plugins/mcp-client/src/index.ts]
 2. **Remote MCP clients in the hub** — *open.* Let `.orc/config.json` declare URL-based (SSE /
    streamable-HTTP) servers alongside stdio commands; trust fingerprints extend to URL + declared
    headers. When: the first external tool a plan needs is only reachable over the network.
-3. **`available_models` on the MCP door** — *next, small.* The serve door omits it (only the web
-   copilot lists models), so MCP clients must guess a valid `modelRef` for `propose`/grounded
-   `new_request`. List it read-only.
-4. **Resources capability** — *open.* Expose read-only project state (status, plans, notes) as MCP
+3. **Resources capability** — *open.* Expose read-only project state (status, plans, notes) as MCP
    resources so clients can subscribe rather than poll tools. When: a client actually wants
    subscription semantics.
 
@@ -70,41 +67,30 @@ plugins/mcp-client/src/index.ts]
    takes the terminal step's summary, which is now the commit receipt; the verify verdict travels
    only because the commit contract says to carry it. Consider composing both terminal summaries
    into the split resolution. When: a parent visibly loses an audit verdict.
-2. **Exec tool flakiness under agents** — *open, investigate.* A live run reported `grep`/`git grep`
-   via exec intermittently returning 0 matches on lines that provably exist (fs_read/git show
-   agreed). Reproduce, then fix or document. [sourced: task c5e9cb50 confirm-and-correct summary,
-   2026-07-29]
-3. **`orc memory rebuild` gains per-id accounting** — *next, small.* Rebuild is clear → replay →
-   refresh with no post-replay check, and unparseable events are skipped rather than wedging the
-   replay — so a silently broken projection reports success. [sourced:
-   plugins/memory/src/projector.ts — rebuild()] After replay, diff projected note ids against the
-   distinct non-tombstoned `memory_written` ids in the log; any unexplained absence warns and
-   marks the rebuild degraded. Per-id accounting, not a count ratio — a ratio passes exactly when
-   a few notes vanish. [derived: graphify's shrink guard, which refuses a rebuild unless every
-   lost node is accounted for by a re-extracted source — github.com/Graphify-Labs/graphify]
-4. **Memory reads fail loud on unknown filters** — *next, small.* `memory_search` with an unknown
-   `category`/`tag` silently filters to an empty result indistinguishable from "no matching
-   notes"; validate against the known sets and refuse naming them, the discipline
-   `orc memory neighbors --kinds` already applies. Same pass: extend the absence note ("absence
-   is not proof") to the two envelopes that lack it — `memory_read`'s `{note: null}` and keyed
-   `memory_topics`. [sourced: plugins/memory/src/tools.ts — SearchInput, absenceNote call sites]
-5. **Unknown drift is surfaced, not silently clean** — *next, small.* An unreachable
-   `sourceRevision` yields null from the drift probe and reads as clean in every envelope and the
-   step preload's currency line, so a reader cannot tell "checked, clean" from "could not check".
-   Keep the fail-toward-not-drifted verdict (right for one tree) but surface `unknown` as its own
-   state alongside `drifted`. The full verdict flip is already recorded under Track 1 (worktrees).
-   [sourced: plugins/memory/src/drift.ts — createDriftProbe returns null on unreachable revisions,
-   and noteDrifted folds null into "not drifted"]
-6. **Cost is measured but not carried** — *next, small.* Usage (tokens in/out, cache split, USD)
-   is already summed per task and rendered by `orc status` [sourced: packages/cli/src/main.ts —
-   status command's `tokens in/out` line; packages/contracts/src/execution.ts — Usage/addUsage],
-   but it stops there: step lines carry no per-step split, the plan-approval door always renders
-   "cost estimate: none provided" (costEstimateUSD is never informed by measured history), and
-   terminal summaries/commit receipts carry no cost — so an operator approving a plan or comparing
-   runs reasons blind. Carry it three places: per-step usage under each step line in status,
-   a measured-history estimate at the approval door, and the task total in the terminal summary.
-   [derived: live comparison 2026-07-31 — the overflow-fix pipeline's $2.22 total was only
-   recoverable by querying two task ids after the fact]
+2. **Exec tool quoting: multi-word arguments are split on whitespace** — *open, root-caused.* The
+   2026-07-29 "grep flakiness" is not intermittent: exec tokenizes the command string by
+   whitespace with no shell quoting, so any quoted multi-word pattern (`grep "run finished" f`)
+   becomes three arguments and matches nothing — single-word patterns work. [derived: three
+   independent reproductions 2026-07-31 — two grounding scouts and one heal auditor each confirmed
+   fs_read-present/grep-absent on multi-word patterns only] Fix or document: either real
+   shell-quote parsing in the exec tokenizer, or a tool-description warning telling agents to use
+   single-word patterns and fs_read for exact strings.
+3. **A falsely-done task has no repair path** — *open.* `plan-revise`/`plan-note` refuse on
+   status `done` (only `blocked` admits repair), so a task that terminated wrongly-successful —
+   e.g. the empty split above — cannot be corrected in place; the whole grounding is re-bought.
+   [sourced: kernel's editPlan from-status guard; live failure 2026-07-31 — "cannot annotate a
+   plan while task is 'done'"] Either admit `done` into the repair path behind an explicit
+   operator flag, or let a terminal task be reopened to `blocked`. When: the next wrongly-done
+   terminal state — the empty-split gate (landed 79303eb, 2026-08-01) removes the known
+   producer, but any step that lies about success recreates it.
+4. **Outcome notes consolidate before the execution child finishes** — *open.* Root-task
+   consolidation fires at root-done, which precedes the spawned execution child's completion, so
+   durable outcome notes freeze mid-flight claims — two consecutive tasks' notes carry
+   "implementation sub-task did not finish" while the sub-task went on to land its commit.
+   [sourced: outcome-orc-memory-rebuild-gains-per-id-accounting and
+   outcome-scout-asks-permission-only-when-a-wholesale-re-map-is-on, both 2026-07-31; the latter's
+   implementation shipped as 2eeec6b] Defer consolidation to pipeline end, or update the outcome
+   note on child completion. Outcome notes carry no sources, so nothing ever flags them stale.
 
 ## Track 4 — carried operator items
 
@@ -165,7 +151,16 @@ agents-and-skills-as-markdown surface, mapped onto the existing loader rather th
    tasks never offer an answer box). Named frontier deliberately out: `depOutputs` are the one
    uncontracted agent→agent boundary. [derived: five incident-driven slices on 2026-07-30
    accreting per-incident fixes — this round consolidates them into one boundary story]
-5. **Interactive plan canvas** — *open.* Today the human reviews the rendered plan and revises it
+5. **UI moves to a component framework** — *next (decision made, migration incremental).* The
+   hand-rolled DOM layer has outgrown itself: the 2026-08-01 audits attribute the recurring UI
+   defects (frozen panes, input loss on re-render, triplicated graph state, three copies of the
+   reply widget, app.ts's ~16 responsibilities) to manually synchronized DOM — the exact class a
+   declarative framework + query cache removes structurally. Shape: mount a React root inside
+   the existing shell and migrate pane by pane (inspector → feed → sidebar), shadcn/Radix for
+   primitives, TanStack Query over the existing /api endpoints + SSE. Precondition for 5.6 (the
+   plan canvas), which should never be built on `el()`. [derived: two Explore-agent audits,
+   2026-08-01 — live-sync coverage and simplification-targets reports]
+6. **Interactive plan canvas** — *open.* Today the human reviews the rendered plan and revises it
    only by annotating and waking the plan agent; there is no direct manipulation. A browser plan
    canvas (graph-ui or a dedicated view) would let the human edit subplans in place — reorder
    `dependsOn`, adjust `zone` globs, swap `modelRef`, rewrite requirements — with each edit
@@ -203,3 +198,58 @@ rather than ported. [sourced: github.com/Graphify-Labs/graphify — save-result/
 2. **Lessons ride the step preload** — *deferred.* Derive a small lessons block (top dead ends,
    contested notes) from 6.1's events, watermark-gated so an already-fresh derivation costs
    nothing, injected beside the preload's currency line. When: 6.1 lands.
+
+## Track 7 — projection cost and boot honesty
+
+A read-model rebuild re-embeds every `memory_written` event through the configured embedder, and
+the supervisor boots behind that drain with no signal. [derived: 2026-08-01 live incident — a
+Docker restart of the then-in-memory SurrealDB forced a full 65,728-event replay; four concurrent
+processes raced the shared cursor, wall time per embed rose from 88ms warm/solo to 7–13s, drain
+throughput fell to ~2.5 events/min, and `orc serve` sat pre-banner with a claimed-but-never-
+heartbeaten slot that `orc serve status` reported STALE on a live pid]
+
+1. **Boot progress + honest slot state** — *next, small.* Print one line per N projected events
+   during `projector.start()` ("memory catch-up: K events behind, ~Xs"), and either start the
+   heartbeat before buildRuntime or claim the slot after it — a supervisor that is hours into a
+   legitimate boot must be distinguishable from a hung one, for both the operator and the next
+   `orc serve`.
+2. **One projector at a time** — *next.* Catch-up across processes is unfenced: applyEvent's
+   transaction dedupes the write, but every racer pays the embedding before losing the race
+   (embeds are computed outside the transaction by design). Add a cross-process advisory lock
+   around catch-up (the runtime-lock pattern, scoped to projection) so CLI one-shots and servers
+   defer to a live drainer instead of multiplying embedder load.
+3. **Embeddings survive replay** — *open.* An embedding is a pure function of (model, text);
+   re-buying 376 notes' vectors from a CPU embedder on every rebuild is the single dominant
+   rebuild cost. Either persist vectors beside the log keyed by content hash, or accept rocksdb
+   persistence (landed 2026-08-01) as sufficient until the next forced rebuild. When: the next
+   `orc memory rebuild` visibly hurts.
+4. **Cancelling a task must cancel its workflow** — *next.* A cancelled task leaves its in-flight
+   DBOS workflow `PENDING`, and every later supervisor boot recovers it: the step re-executes (a
+   real model call, real spend) and the boot blocks behind it until it settles. Measured
+   2026-08-01: a workflow from 2026-07-30 — step `kernel-tools-and-wiring` of a task cancelled two
+   days earlier, parked on an unanswered question — was still being resurrected on every start,
+   and the operator saw only "supervisor booting" for minutes. `cancel` should cancel the DBOS
+   workflow alongside the task, and recovery should skip workflows whose task is terminal.
+   [derived: dbos.workflow_status PENDING row vs the task's cancelled status in the event log]
+5. **A grounded task refuses to run on a degraded memory tier** — *next.* runtime.ts degrades
+   memory to unavailable and continues — right for read-mostly commands, wrong for a
+   grounded-plan run whose entire deliverable is plan-notes: it admitted and drove analyze+plan
+   to guaranteed failure ($1.64, zero notes written, blocked). Gate at admission or first
+   memory_write refusal, and re-probe the memory handle instead of freezing "unavailable" for
+   the process lifetime — the DB was healthy again minutes into the doomed run. [derived:
+   2026-08-01 task 989fabea — "namespace 'orc' does not exist" on every memory call while
+   SurrealDB was being re-seeded]
+6. **Task creation is idempotent across the no-supervisor window** — *next.* One `orc new`
+   yielded two identical tasks 73s apart when no supervisor was live (task_created 65717 +
+   65723, 2026-08-01): the creation retried without an idempotency key, and both lineages ran —
+   the duplicate spent real tokens before recovery fenced it. Key the creation (the events
+   table already carries idempotency_key) so a retry lands on the same task.
+7. **A fenced task points at its successor; timelines label foreign events** — *next (ui).*
+   The operator watched the fenced duplicate's static chat while the live retry streamed on the
+   sibling; a sibling's status line rendered unlabeled inside the wrong task's timeline. Fenced/
+   superseded tasks link forward; cross-task lines name their task. [derived: 2026-08-01 live
+   session — "nothing is moving" while everything was]
+8. **`catching_up` names its magnitude** — *next, small.* The health line counts memory-kind
+   events past the cursor; mid-rebuild it read "~350" while the cursor was 14,700 seqs behind
+   head. Say "rebuilding from seq K of H" when the gap spans more than one session, so an
+   operator can tell seconds-behind from rebuilding-the-world.

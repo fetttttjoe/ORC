@@ -91,6 +91,42 @@ describe('copilot tools', () => {
     expect(r.output).toHaveProperty('tasks')
   })
 
+  it('project_status carries memory health when the probe is wired — a rebuilding read model must be visible at the door, not only in the DB', async () => {
+    const health = async () => ({ memory: { state: 'catching_up' as const, pending: 372, reason: '372 event(s) not yet projected' } })
+    const tools = asResolvedTools(buildCopilotTools({ sessions: stubSessions, actions: null, projectId: 'p1', health }))
+    const r = await tools.find(t => t.name === 'project_status')!.execute({}, undefined)
+    expect(r.isError).toBe(false)
+    expect(r.output).toHaveProperty('memory', { state: 'catching_up', pending: 372, reason: '372 event(s) not yet projected' })
+
+    // probe absent → field omitted, never a fabricated "ok"
+    const bare = asResolvedTools(buildCopilotTools({ sessions: stubSessions, actions: null, projectId: 'p1' }))
+    const r2 = await bare.find(t => t.name === 'project_status')!.execute({}, undefined)
+    expect(r2.output).not.toHaveProperty('memory')
+
+    // probe failure → unreachable with the reason, mirroring graph-ui's /api/health posture
+    const failing = asResolvedTools(buildCopilotTools({
+      sessions: stubSessions, actions: null, projectId: 'p1',
+      health: async () => { throw new Error('surreal is down') },
+    }))
+    const r3 = await failing.find(t => t.name === 'project_status')!.execute({}, undefined)
+    expect(r3.isError).toBe(false)
+    expect(r3.output).toHaveProperty('memory', { state: 'unreachable', pending: 0, reason: 'surreal is down' })
+  })
+
+  it('task_plan projects the mermaid text away — a diagram serialization is not driver data', async () => {
+    const withPlan = sessionsStub({
+      taskPlans: async () => ({
+        versions: [{ taskId: 't1', version: 1, strategyRef: 's', costEstimateUSD: null, steps: [] }], approvedVersion: 1,
+        visual: { version: 1, mermaid: 'graph TD\n a-->b', waves: [{ wave: 1, parallel: false, steps: [] }] },
+      }),
+    })
+    const tools = asResolvedTools(buildCopilotTools({ sessions: withPlan, actions: null, projectId: 'p1' }))
+    const r = await tools.find(t => t.name === 'task_plan')!.execute({ taskId: 't1' }, undefined)
+    expect(r.isError).toBe(false)
+    expect(JSON.stringify(r.output)).not.toContain('graph TD')
+    expect(JSON.stringify(r.output)).toContain('"waves"')
+  })
+
   it('the human gate is structural: no approve tool even with actions wired', () => {
     const acting = buildCopilotTools({ sessions: stubSessions, actions: actionsStub(), projectId: 'p1' })
     expect(Object.keys(acting)).toContain('run')

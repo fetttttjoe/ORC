@@ -10,6 +10,8 @@ dist/
 vault/*
 !vault/skills/
 review-findings.md
+review-backlog.md
+review-2026-07-30.md
 *.db
 *.db-journal
 *.db-wal
@@ -30,3 +32,8 @@ FOUNDATION-REVIEW-*.md
 tmp-exp/
 verification-report.md
 embedding-interfaces.md
+orc-findings.md
+packages/graph-ui/web/.svelte-check/
+packages/graph-ui/web/dist/
+packages/graph-ui/test-results/
+packages/graph-ui/playwright-report/

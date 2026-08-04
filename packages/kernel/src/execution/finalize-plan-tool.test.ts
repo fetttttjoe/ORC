@@ -173,6 +173,20 @@ describe('finalize_plan tool', () => {
     expect(JSON.stringify(r.output)).toContain('masterplan')
   })
 
+  // The silent-failure bug (incidents c4bc1d38, 8b5e1034): a masterplan note EXISTS but its
+  // decomposes_into links were dropped during a warning fix-up, so the freeze yields steps: [] and
+  // (with autoCommit) a commit-only pipeline that reports done having written no code. finalize_plan
+  // must refuse it as an actionable error, never throw, and never propose a split.
+  it('errors (never throws) when the masterplan note has zero decomposes_into links', async () => {
+    const notes = [note({ id: 'masterplan', title: 'M', links: [] })]
+    const calls: unknown[] = []
+    const tool = finalizePlanTool({ kernel: fakeKernel(notes, calls), config, p })
+    const r = await tool.execute({}, 'call_x')
+    expect(r.isError).toBe(true)
+    expect(JSON.stringify(r.output)).toContain('decomposes_into')
+    expect(calls).toHaveLength(0)
+  })
+
   // M3 defense-in-depth: finalize_plan force-auto-approves the derived split, so it is gated to the
   // grounded plan-authoring (auditor) step. A future change exposing taskId in a prompt must not let
   // any other step call it and bypass the approval policy.

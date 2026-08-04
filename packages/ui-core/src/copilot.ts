@@ -7,8 +7,8 @@ import type { OrcActions } from './actions'
 import type { ProjectSessions } from './sessions'
 
 import { snip } from './summarize'
-import type { ResolvedTool } from '@orc/contracts'
-import { EventKind, toolError } from '@orc/contracts'
+import type { MemoryHealth, ResolvedTool, SupervisorHealth } from '@orc/contracts'
+import { errorMessage, EventKind, MEMORY_HEALTH, toolError } from '@orc/contracts'
 
 // Why a session can't act: 'read-only' = server started outside a project; 'foreign-project'
 // = the user is viewing a chat other than the one this server runs in.
@@ -73,8 +73,14 @@ export function buildCopilotTools(deps: {
   actions: OrcActions | null
   projectId: string
   listModels?: () => Promise<string[]>
+  // Read-model health for project_status (same probe graph-ui's /api/health serves). Optional
+  // because not every composition has a memory plugin; absent means the field is OMITTED — a
+  // fabricated "ok" would tell a driver the graph is current while it is mid-rebuild, which is
+  // how a rebuilding read model stayed invisible at this door on 2026-08-01 (operators had to
+  // read SurrealDB/Postgres directly to learn why nothing was running).
+  health?: () => Promise<{ memory: MemoryHealth; supervisor?: SupervisorHealth }>
 }): ToolSet {
-  const { sessions, actions, projectId, listModels } = deps
+  const { sessions, actions, projectId, listModels, health } = deps
   const taskId = z.string().min(1)
 
   const read: ToolSet = {
@@ -86,22 +92,39 @@ export function buildCopilotTools(deps: {
       }),
     } : {}),
     project_status: tool({
-      description: 'List every request (task) in this project with its status, plus graph counts. Start here.',
+      description: 'List every request (task) in this project with its status, plus graph counts and memory (read model) health. Start here.',
       inputSchema: z.object({}),
       execute: async () => {
         const { graph } = await sessions.snapshot(projectId)
         const counts = { task: 0, step: 0, artifact: 0, note: 0, model: 0 }
         for (const n of graph.nodes) counts[n.type]++
+        // a failed probe reports unreachable-with-reason (graph-ui's /api/health posture) —
+        // health must never take project_status down with it, and never read as silently ok
+        const h = health
+          ? await health()
+            .catch((err: unknown) => ({ memory: { state: MEMORY_HEALTH.unreachable, pending: 0, reason: errorMessage(err) } }))
+          : undefined
         return {
           tasks: graph.nodes.filter(n => n.type === 'task').map(n => ({ taskId: n.id, title: n.label, status: n.detail })),
           counts,
+          ...(h && { memory: h.memory }),
+          // "is anything driving?" — a driver seeing every task idle needs this before anything else
+          ...(h && 'supervisor' in h && h.supervisor && { supervisor: h.supervisor }),
         }
       },
     }),
     task_plan: tool({
       description: 'Read a task’s plan versions (steps, models, dependencies) and which version is approved.',
       inputSchema: z.object({ taskId }),
-      execute: async ({ taskId: id }) => (await sessions.taskPlans(projectId, id)) ?? { error: 'no plan proposed yet' },
+      // visual.mermaid is projected AWAY (plan_notes' field-by-field precedent): it is a diagram
+      // serialization for the browser renderer, and passing it through was the only cross-surface
+      // consumer of the mermaid TEXT — tokens spent re-telling the model what `waves` already says
+      execute: async ({ taskId: id }) => {
+        const plans = await sessions.taskPlans(projectId, id)
+        if (!plans) return { error: 'no plan proposed yet' }
+        const { visual, ...rest } = plans
+        return { ...rest, ...(visual && { visual: { version: visual.version, waves: visual.waves } }) }
+      },
     }),
     task_transcript: tool({
       description: 'Read a task’s agent conversation (messages, tool calls, questions, signal). Recent items only; tool payloads are truncated — read an artifact or the file itself for the full text.',

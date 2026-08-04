@@ -84,7 +84,7 @@ describe('summarizeEvent', () => {
 })
 
 // shouldAdmitLogRow is the ONE predicate shared by sessions.ts log() (initial batch) and
-// graph-ui/page/log.ts LogView.append (live SSE tail). bun test has no DOM here, so this pure
+// the web app's ledger (live SSE tail). bun test has no DOM here, so this pure
 // function is the only unit-testable seam for the log.ts side — same pattern as page/affordance.
 describe('shouldAdmitLogRow', () => {
   const row = (over: Partial<LogRow>): LogRow => ({

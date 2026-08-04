@@ -139,6 +139,27 @@ describe('instantiateFrozenPlan (pure, deterministic)', () => {
     expect(first).toEqual(instantiateFrozenPlan('masterplan', notes))
   })
 
+  // A masterplan with NO decomposes_into links freezes to steps: [] — and with autoCommit on,
+  // withCommitStep then appends a trailing commit step, yielding a commit-only pipeline that reports
+  // done having written no code. This is the silent-failure bug (incidents c4bc1d38, 8b5e1034): the
+  // plan agent dropped the links rewriting the masterplan during warning fix-ups (memory_write
+  // replaces links wholesale). Refuse at the freeze — the ONE derivation — naming the fix.
+  it('refuses a masterplan with zero decomposes_into links, naming the fix', () => {
+    const notes: PlanNote[] = [
+      note({ id: 'masterplan', title: 'M', links: [] }),
+    ]
+    expect(() => instantiateFrozenPlan('masterplan', notes)).toThrow(/decomposes_into/)
+  })
+
+  it('refuses a masterplan whose only links are not decomposes_into (e.g. depends_on / relates_to)', () => {
+    const notes: PlanNote[] = [
+      note({ id: 'masterplan', title: 'M', links: [link('other', LINK_KIND.relates_to), link('again', LINK_KIND.depends_on)] }),
+      note({ id: 'other', title: 'Other' }),
+      note({ id: 'again', title: 'Again' }),
+    ]
+    expect(() => instantiateFrozenPlan('masterplan', notes)).toThrow(/decomposes_into/)
+  })
+
   it('planScope derives the per-task plan-note scope', () => {
     expect(planScope('abc-123')).toBe('plan-abc-123')
   })

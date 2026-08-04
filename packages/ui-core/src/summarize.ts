@@ -146,7 +146,7 @@ export function summarizeEvent(e: EventRecord): LogRow {
 }
 
 // The ONE admit/reject rule for a per-task Log filter, shared by the server-side initial batch
-// (sessions.ts log()) and the live SSE tail (graph-ui/page/log.ts LogView.append), so the two
+// (sessions.ts log()) and the live SSE tail (the web app's ledger), so the two
 // can never drift. `taskFilter` is the task whose Log tab is open (null = whole-project view,
 // which admits everything).
 //

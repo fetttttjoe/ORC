@@ -10,7 +10,7 @@ import { consolidateTask, frontier, needsReground, probeMemory, restampableNotes
 import { withMemory } from './memory-open'
 import { buildDistiller } from './consolidation-distiller'
 import { seedRegistries, buildRuntime } from './runtime'
-import { runSupervisor } from './serve'
+import { runSupervisor, startBootHeartbeat, supervisorHealth } from './serve'
 import { ensureSupervisor, SUPERVISOR_MODE, type SupervisorMode } from './supervisor-client'
 import { isLanguageModel } from './model-guard'
 import { assertDrivable, assertRetryable, buildModelDiscovery, buildOrcActions, singleStepDraft } from './actions'
@@ -647,8 +647,13 @@ export function buildProgram(
         actions: portFactory && plugin ? actions() : undefined,
         copilot: portFactory && plugin && discovery ? buildCopilotConfig(discovery) : undefined,
         defaultCwd: cfg?.dir ?? process.cwd(),
-        // degraded-memory visibility (P3): the footer badge polls this — probe per call, no cache
-        health: plugin ? async () => ({ memory: await probeMemory(plugin.config, plugin.log) }) : undefined,
+        // degraded-memory + supervisor visibility: the footer badge polls this — probe per call,
+        // no cache. Supervisor state answers "is anything driving?" (2026-08-01's recurring blind
+        // spot) from the heartbeat rows + the pid file serve writes only once its runtime is ready.
+        health: plugin ? async () => ({
+          memory: await probeMemory(plugin.config, plugin.log),
+          ...(plugin.storage && { supervisor: await probeSupervisor(plugin.storage, plugin.config.dir) }),
+        }) : undefined,
         // P6: copilot exchanges are events — the log is the record, the browser is a cache
         appendExchange: plugin ? async x => {
           await plugin.log.append({ taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.copilot_exchange, payload: x.payload, usage: x.usage })
@@ -664,6 +669,12 @@ export function buildProgram(
   // already a heartbeat, so nothing else has to change when it does.
   const PHASE1_MAX_SLOTS = 1
   const servePidFile = (dir: string) => path.join(dir, '.orc', 'serve.pid')
+  // one derivation of supervisor health for every door that reports it (graph /api/health, the
+  // MCP project_status) — heartbeat rows + the ready-only pid file, classified by supervisorHealth
+  const probeSupervisor = async (storage: Storage, dir: string) => {
+    const now = new Date()
+    return supervisorHealth(await liveSupervisors(storage, now), await staleSupervisors(storage, now), existsSync(servePidFile(dir)))
+  }
   const SERVE_NEEDS_STORAGE = 'serve needs a live storage connection'
 
   const serve = program.command('serve').description('run the project supervisor (holds the execution runtime)')
@@ -682,11 +693,22 @@ export function buildProgram(
         console.error(`another supervisor is already live for '${config.projectName}' — see: orc serve status`)
         throw new CommandFailure(1)
       }
-      const port = await buildRuntime({ host, hub, config, storage, executorId })
+      // Say something BEFORE buildRuntime, and beat through it: the build blocks on projection
+      // catch-up, which is unbounded (a wiped read model replays the whole log — measured
+      // 2026-08-01: ~an hour), and a silent, never-beating boot is indistinguishable from a hang
+      // for both the operator and the next `orc serve`, which could steal the slot mid-boot.
+      console.log(`orc serve: ${executorId}  pid ${process.pid}  booting — projections catch up first ("ready" follows)`)
+      const stopBootBeat = startBootHeartbeat(storage, executorId)
+      let port: Awaited<ReturnType<typeof buildRuntime>>
+      try {
+        port = await buildRuntime({ host, hub, config, storage, executorId })
+      } finally {
+        stopBootBeat() // runSupervisor's own beat takes over from here
+      }
       // for `serve status`/`serve stop` only — presence (admission, liveness) is decided by the
       // heartbeat row alone, never by this file's existence
       atomicWriteFileSync(servePidFile(config.dir), `${process.pid}\n`)
-      console.log(`orc serve: ${executorId}  pid ${process.pid}  idle exit after ${opts.idle}m — ctrl-c to stop`)
+      console.log(`orc serve: ready  idle exit after ${opts.idle}m — ctrl-c to stop`)
       // The parallelism ceiling, stated where an operator can act on it: steps run in dependency
       // waves and the whole wave is awaited before the next is scheduled, so `concurrency` is the
       // cap PER DEPTH, not per run. PHASE1_MAX_SLOTS is 1 because the zone write-fence is still an
@@ -834,7 +856,7 @@ export function buildProgram(
     .action(async (opts: { autonomy: string }) => {
       if (opts.autonomy !== 'gated' && opts.autonomy !== 'full')
         throw new Error(`--autonomy must be 'gated' or 'full', got '${opts.autonomy}'`)
-      const { config, log } = needPlugin()
+      const { config, log, storage } = needPlugin()
       const { startMcpServe } = await import('./mcp-serve') // lazy: the SDK loads only here
       await startMcpServe({
         config, log,
@@ -845,6 +867,7 @@ export function buildProgram(
         // DO want the client approving still have the explicit, autonomy-gated `approve` tool.
         actions: portFactory ? actions('mcp') : null,
         autonomy: opts.autonomy,
+        ...(storage && { supervisor: () => probeSupervisor(storage, config.dir) }),
       })
     })
   mcp

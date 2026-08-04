@@ -11,14 +11,14 @@
     "graphology": "^0.26.0",
     "graphology-layout-forceatlas2": "^0.10.1",
     "sigma": "^3.0.3",
-    "mermaid": "^11.12.2",
-    "@joint/core": "^4.3.0",
-    "@joint/layout-directed-graph": "^4.3.0",
     "zod": "^4.4.3",
     "ai": "^7.0.30"
   },
   "devDependencies": {
     "@orc/kernel": "workspace:*",
     "@playwright/test": "^1.61.1"
+  },
+  "scripts": {
+    "e2e": "bun run --cwd web build && bunx playwright test"
   }
 }

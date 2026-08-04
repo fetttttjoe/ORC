@@ -1,7 +1,7 @@
 import { afterAll, describe, expect, it } from 'bun:test'
 import { liveSupervisors, openStorage, supervisors, SUPERVISOR_STALE_MS } from '@orc/kernel'
 import { createTestDb, TEST_PROJECT_ID } from '@orc/kernel/test-helpers'
-import { claimSlot, nextIdle } from './serve'
+import { claimSlot, nextIdle, startBootHeartbeat, supervisorHealth } from './serve'
 
 const dbs: Array<{ drop: () => Promise<void> }> = []
 afterAll(async () => { await Promise.all(dbs.map(d => d.drop())) }, 30_000)
@@ -67,6 +67,42 @@ describe('claimSlot (admission IS slot claiming, not a second rule)', () => {
 
     expect(live).toHaveLength(1) // reclaimed the SAME row — a second INSERT would show up here too
     expect(new Date(live[0]!.startedAt).getTime()).toBeGreaterThan(new Date(before.startedAt).getTime()) // DO UPDATE genuinely fired, not a no-op
+  })
+})
+
+describe('startBootHeartbeat (the slot stays live while buildRuntime blocks on catch-up)', () => {
+  it('advances lastSeenAt while running and stops advancing once stopped', async () => {
+    const storage = await fresh()
+    expect(await claimSlot(storage, 1)).toBe('supervisor-1')
+    const claimed = (await liveSupervisors(storage, new Date()))[0]!
+
+    const stop = startBootHeartbeat(storage, 'supervisor-1', 25)
+    try {
+      await Bun.sleep(120)
+    } finally {
+      stop()
+    }
+    await Bun.sleep(60) // let any beat already in flight at stop() land before sampling
+    const afterStop = (await liveSupervisors(storage, new Date()))[0]!
+    expect(new Date(afterStop.lastSeenAt).getTime()).toBeGreaterThan(new Date(claimed.lastSeenAt).getTime())
+
+    await Bun.sleep(100) // four would-be intervals: a live timer would beat again in this window
+    const later = (await liveSupervisors(storage, new Date()))[0]!
+    expect(later.lastSeenAt).toEqual(afterStop.lastSeenAt)
+  })
+})
+
+describe('supervisorHealth (the "is anything driving?" classifier)', () => {
+  const row = { executorId: 'supervisor-1', pid: 42, host: 'h', startedAt: 't0', lastSeenAt: 't1' }
+  it('heartbeat + pid file = ready; heartbeat alone = booting', () => {
+    expect(supervisorHealth([row], [], true)).toEqual({ state: 'ready', pid: 42, lastSeenAt: 't1' })
+    expect(supervisorHealth([row], [], false)).toEqual({ state: 'booting', pid: 42, lastSeenAt: 't1' })
+  })
+  it('a stale row is a crash, not a boot; nothing at all means nothing will run', () => {
+    expect(supervisorHealth([], [row], false)).toEqual({ state: 'stale', pid: 42, lastSeenAt: 't1' })
+    expect(supervisorHealth([], [], false)).toEqual({ state: 'none' })
+    // the pid file alone proves nothing — liveness is the heartbeat row, never the file
+    expect(supervisorHealth([], [], true)).toEqual({ state: 'none' })
   })
 })
 

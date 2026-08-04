@@ -142,6 +142,21 @@ describe('diff-first flow', () => {
 })
 
 describe('git_commit', () => {
+  it('refuses a message over two non-empty lines with the rule in the error', async () => {
+    // the operator's history rule: subject + at most one body line. A live committer wrote a
+    // three-line message whose body broke off mid-sentence (79303eb) — the cap makes the next
+    // one impossible instead of hoping the next agent writes better.
+    const dir = repo()
+    const b = build(dir, { paths: ['a.ts'] })
+    await b.tool('commit_preview').execute({})
+    const r = await b.tool('git_commit').execute({ message: 'fix(kernel): subject\n\nbody line one\nbody line two' })
+    expect(r.isError).toBe(true)
+    expect(JSON.stringify(r.output)).toContain('two lines')
+    // subject + one body line commits fine
+    const ok = await b.tool('git_commit').execute({ message: 'fix(kernel): subject\n\none body line' })
+    expect(ok.isError).toBe(false)
+  })
+
   it('commits ONLY the task-recorded paths; sibling work stays uncommitted', async () => {
     const dir = repo()
     writeFileSync(path.join(dir, 'a.ts'), 'a2\n')          // this task's edit

@@ -1,0 +1,127 @@
+@import 'tailwindcss';
+@import '@fontsource/ibm-plex-sans/400.css';
+@import '@fontsource/ibm-plex-sans/500.css';
+@import '@fontsource/ibm-plex-sans/600.css';
+@import '@fontsource/ibm-plex-mono/400.css';
+@import '@fontsource/ibm-plex-mono/500.css';
+
+/*
+ * The two-temperature system: everything AUTONOMOUS is cool (machine/steel on ink), everything
+ * that waits on a HUMAN is warm (amber). Temperature is semantics, not decoration — an operator
+ * should know from across the room whether the system needs them. The ledger's material is mono
+ * (seqs, kinds, hashes); prose and controls are Plex Sans on warm paper-white.
+ */
+@theme {
+  --font-sans: 'IBM Plex Sans', system-ui, sans-serif;
+  --font-mono: 'IBM Plex Mono', ui-monospace, monospace;
+
+  /* ground */
+  --color-ink: #0e1116; /* page */
+  --color-bureau: #161b22; /* raised surface */
+  --color-desk: #1d242e; /* hover / second raise */
+  --color-line: #232a33; /* soft border */
+  --color-rule: #2e3742; /* emphasized border */
+
+  /* text */
+  --color-paper: #e6e1d6; /* primary — warm on cold ground */
+  --color-mist: #8b93a1; /* secondary */
+  --color-fog: #5c6472; /* tertiary / seq spine */
+
+  /* temperature */
+  --color-human: #e8a33d; /* gates, approvals, anything awaiting the operator */
+  --color-human-deep: #8a5a17;
+  --color-machine: #6fa8b5; /* autonomous activity, running */
+  --color-moss: #7fa65a; /* done / ok */
+  --color-rust: #c4573b; /* failed / blocked / stale */
+
+  --radius-card: 6px;
+  --radius-chip: 4px;
+
+  /* the type scale, named. Hand-spelled sizes had drifted into four near-identical values;
+     these three cover everything: a label, the body of a dense row, and a payload/mono line. */
+  --text-label: 9.5px;
+  --text-label--line-height: 1.4;
+  --text-row: 11px;
+  --text-row--line-height: 1.45;
+
+  /* shadcn semantic layer, mapped onto the palette above — vendored components read ONLY these,
+   * so restyling stays a token edit, never a component edit */
+  --color-background: var(--color-ink);
+  --color-foreground: var(--color-paper);
+  --color-card: var(--color-bureau);
+  --color-card-foreground: var(--color-paper);
+  --color-popover: var(--color-bureau);
+  --color-popover-foreground: var(--color-paper);
+  --color-primary: var(--color-machine);
+  --color-primary-foreground: var(--color-ink);
+  --color-secondary: var(--color-desk);
+  --color-secondary-foreground: var(--color-paper);
+  --color-muted: var(--color-desk);
+  --color-muted-foreground: var(--color-mist);
+  --color-accent: var(--color-desk);
+  --color-accent-foreground: var(--color-paper);
+  --color-destructive: var(--color-rust);
+  --color-destructive-foreground: var(--color-paper);
+  --color-border: var(--color-line);
+  --color-input: var(--color-rule);
+  --color-ring: var(--color-machine);
+  --radius-lg: 8px;
+  --radius-md: 6px;
+  --radius-sm: 4px;
+  --radius-xl: 12px;
+}
+
+/* The base size lives on BODY, never on html: every rem-based utility (w-72, h-8, gap-2, the
+ * whole spacing scale) is anchored to the ROOT font size, so shrinking html silently scaled the
+ * entire layout to 84% — which is why panes measured narrower than declared and their contents
+ * spilled out. */
+html {
+  height: 100%;
+  background: var(--color-ink);
+}
+
+body {
+  height: 100%;
+  color: var(--color-paper);
+  font-family: var(--font-sans);
+  font-size: 13.5px;
+  -webkit-font-smoothing: antialiased;
+}
+
+#app {
+  height: 100%;
+}
+
+::selection {
+  background: color-mix(in srgb, var(--color-human) 30%, transparent);
+}
+
+/* focus is visible, always — keyboard operators exist */
+:focus-visible {
+  outline: 1.5px solid var(--color-machine);
+  outline-offset: 1px;
+  border-radius: 2px;
+}
+
+/* the one ambient motion: a running dot breathes; still under reduced motion */
+@keyframes breathe {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+.breathe {
+  animation: breathe 1.8s ease-in-out infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .breathe {
+    animation: none;
+  }
+  * {
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+  }
+}

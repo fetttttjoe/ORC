@@ -1,8 +1,12 @@
 // E2E fixture server (run by playwright's webServer): real Postgres test db, seeded state,
 // scripted copilot, kernel-backed newTask — everything else read-only-stubbed.
 import { MockLanguageModelV4 } from 'ai/test'
-import { EVENT_KIND, STEP_ID } from '@orc/contracts'
+import { EVENT_KIND, STEP_ID, TASK_STATUS } from '@orc/contracts'
+import { stepFixture } from '@orc/contracts/fixtures'
 import { draftFixture } from '@orc/contracts/fixtures'
+
+/** the one step draftFixture ships with — the monitor keys its ceiling off this id */
+const LIVE_STEP_ID = stepFixture().id
 import { Kernel, openStorage } from '@orc/kernel'
 import { createTestDb, TEST_PROJECT_ID } from '@orc/kernel/test-helpers'
 import type { OrcActions } from '@orc/ui-core'
@@ -15,6 +19,9 @@ const storage = await openStorage(db.url, { projectId: TEST_PROJECT_ID })
 const kernel = new Kernel(storage.events)
 const seeded = await kernel.createTask({ title: 'hello world request', spec: 'write hello.txt' })
 await kernel.proposePlan(seeded.id, draftFixture())
+// approved, so the projection emits STEP nodes: without them the contract test can only ever
+// see one node kind, and the step/artifact shapes go unchecked
+await kernel.approvePlan(seeded.id)
 
 // The approval-gate scenario, on its own task so the seeded request's journey stays untouched:
 // a plan-step question is OPEN, so the pane offers the one-click approve. Answering it drives
@@ -37,6 +44,40 @@ for (let i = 1; i <= 60; i++) {
     payload: { stepId: STEP_ID.analyze, runToken: 'e2e-log-run', iteration: i, toolCallId: `log-${i}`, toolName: 'fs_read', input: { seq: i } },
   })
 }
+
+// A gate whose question is a whole plan. Tall on purpose: an unbounded gate block used to grow
+// past the pane and paint over the copilot beneath it, and the layout test needs its own task so
+// the answer-refusal scenario above cannot retire it first.
+const tall = await kernel.createTask({ title: 'tall gate request', spec: 'a plan with many waves' })
+await storage.events.append({
+  taskId: tall.id, stepId: STEP_ID.plan, runToken: 'e2e-tall-run', kind: EVENT_KIND.feedback_requested,
+  payload: {
+    topic: 'plan-gate',
+    question: ['plan ready — approve to start:', ...Array.from({ length: 40 }, (_, i) => `wave ${i + 1} — a subplan line long enough to make this question tall`)].join('\n'),
+  },
+})
+
+// A task mid-run. The run monitor only exists while something executes, so without a seeded
+// running step it would ship unexercised — and a panel that renders nothing is exactly the
+// failure mode the wire-shape bugs took four rounds to surface. Iteration 4 of a ceiling of 5
+// also puts the bar in its near-ceiling branch.
+const LIVE_RUN_TOKEN = 'e2e-live-run'
+const live = await kernel.createTask({ title: 'live run request', spec: 'work that is still going' })
+await kernel.proposePlan(live.id, draftFixture())
+await kernel.approvePlan(live.id)
+await storage.events.append({
+  taskId: live.id, stepId: null, runToken: null, kind: EVENT_KIND.task_status_changed,
+  payload: { taskId: live.id, from: TASK_STATUS.approved, to: TASK_STATUS.running },
+})
+const liveEnvelope = { taskId: live.id, stepId: LIVE_STEP_ID, runToken: LIVE_RUN_TOKEN }
+await storage.events.append({
+  ...liveEnvelope, kind: EVENT_KIND.step_started,
+  payload: { stepId: LIVE_STEP_ID, runToken: LIVE_RUN_TOKEN, attempt: 1 },
+})
+await storage.events.append({
+  ...liveEnvelope, kind: EVENT_KIND.agent_call,
+  payload: { stepId: LIVE_STEP_ID, runToken: LIVE_RUN_TOKEN, iteration: 4, request: {}, response: {} },
+})
 
 const copilotModel = new MockLanguageModelV4({
   doStream: async () => ({
@@ -110,6 +151,8 @@ startGraphUi({
   actions,
   copilot: { resolveModel: () => copilotModel, defaultModelRef: 'mock/e2e', price: () => 0.0001 },
   defaultCwd: '/tmp',
+  // no supervisor runs behind the fixture, and the console must SAY that rather than look idle
+  health: async () => ({ memory: { state: 'ok' as const, pending: 0 }, supervisor: { state: 'none' as const } }),
   appendExchange: async x => {
     await storage.events.append({ taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.copilot_exchange, payload: x.payload, usage: x.usage })
   },

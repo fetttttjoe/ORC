@@ -154,6 +154,19 @@ function healDependsOn(
 export function instantiateFrozenPlan(masterId: string, notes: PlanNote[]): ChildPlanDraft {
   const byId = new Map(notes.map(n => [n.id, n]))
   const kids = (byId.get(masterId)?.links ?? []).filter(l => l.kind === LINK_KIND.decomposes_into).map(l => l.id)
+  // A masterplan with NO decomposes_into children freezes to steps: [] — and withCommitStep (when
+  // autoCommit is on) then appends the trailing commit step, producing a commit-only pipeline that
+  // reports done having written no code. Observed live twice (incidents c4bc1d38, 8b5e1034): the
+  // plan agent dropped the links rewriting the masterplan during warning fix-ups (memory_write
+  // replaces links wholesale) while the door's prose render still read correctly. Refuse HERE, in
+  // the ONE derivation (see freezePlan below), so both finalize_plan (via finalize-plan-tool.ts's
+  // try/catch → toolError) and the CLI door render (main.ts derivedPlanBlock) reject it with an
+  // actionable message instead of the old silent blank/commit-only render. This does NOT touch the
+  // door's blank-render path for an in-progress draft with no masterplan note yet: derivedPlanBlock
+  // returns '' before ever calling freezePlan when the masterplan note is absent, so this throw is
+  // only reachable once the masterplan note exists — which is exactly the silent-failure case.
+  if (kids.length === 0)
+    throw new Error(`masterplan '${masterId}' has no decomposes_into links — write links: [{id: '<subplan-id>', kind: 'decomposes_into'}] on the masterplan note (one per subplan) before finalizing`)
   return {
     steps: kids.map(id => {
       const n = byId.get(id)

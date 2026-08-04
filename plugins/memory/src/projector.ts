@@ -48,6 +48,19 @@ const SLOW_LINK_REFRESH_MS = 1_000
 // cost signal and does not by itself mean the ALGORITHM needs replacing.
 const SLOW_TOPIC_REFRESH_MS = 1_000
 
+// Progress for the BIG drain only. A wiped or long-idle read model replays hundreds of
+// embed-bearing events through the configured embedder — measured 2026-08-01: ~376 memory_written
+// events ≈ an hour on a CPU ollama — and the supervisor boot blocks on that drain with nothing on
+// stdout, indistinguishable from a hang. One line per CATCHUP_REPORT_EVERY applied events says it
+// is working; the CATCHUP_REPORT_MIN floor keeps routine drains (a task's handful of writes)
+// silent so the line keeps meaning "this is a rebuild", not boot noise an operator learns to skip.
+const CATCHUP_REPORT_MIN = 50
+const CATCHUP_REPORT_EVERY = 25
+export const catchUpProgressLine = (applied: number, total: number): string | null =>
+  total >= CATCHUP_REPORT_MIN && applied % CATCHUP_REPORT_EVERY === 0
+    ? `[memory] catch-up: ${applied}/${total} events projected`
+    : null
+
 // Coalesce the whole-corpus derivations on the LIVE path: a drain marks the model dirty and (re)arms
 // a trailing timer instead of refreshing inline, so a burst — a grounded analyze that writes dozens
 // — collapses to ONE refresh after activity settles, not one multi-second freeze per write. The
@@ -124,10 +137,12 @@ export function createMemoryProjector(opts: { log: EventLog; surreal: SurrealMem
     let vaultChanged = 0
     let deletedCount = 0
     try {
-      for (const e of events) {
+      for (const [i, e] of events.entries()) {
         if (e.kind === EVENT_KIND.memory_written || e.kind === EVENT_KIND.memory_deleted) vaultChanged += 1
         if (e.kind === EVENT_KIND.memory_deleted) deletedCount += 1
         await applyOne(e)
+        const progress = catchUpProgressLine(i + 1, events.length)
+        if (progress) console.log(progress)
       }
     } finally {
       // In a finally, not a straight-line call: applyOne can throw AFTER an event's Surreal side

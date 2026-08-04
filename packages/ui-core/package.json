@@ -6,7 +6,8 @@
     ".": "./src/index.ts",
     "./graph": "./src/graph.ts",
     "./palette": "./src/palette.ts",
-    "./summarize": "./src/summarize.ts"
+    "./summarize": "./src/summarize.ts",
+    "./graph-wire": "./src/graph-wire.ts"
   },
   "dependencies": {
     "@orc/contracts": "workspace:*",
