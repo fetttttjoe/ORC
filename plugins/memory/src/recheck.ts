@@ -31,6 +31,8 @@ export interface RecheckedNote extends NoteFacts {
   scope: string
   title: string
   tier: string
+  /** the stamp the verdict was measured from — null means nothing could be compared */
+  sourceRevision: string | null
   /** what the note declares it describes — echoed so a report can show what a verdict was measured against */
   paths: readonly string[]
 }
@@ -71,6 +73,7 @@ export async function recheckNotes(events: EventRecord[], deps: RecheckDeps): Pr
     const taskId = author.taskId ?? ''
     out.push({
       key, id: note.id, scope: note.scope, title: note.title, tier: note.tier, paths: declared,
+      sourceRevision: withPaths.sourceRevision,
       verdict: verdictOf(state),
       retiredBy: retiredBy.get(key) ?? [],
       // self-links would otherwise make a note its own protector
@@ -85,17 +88,30 @@ export async function recheckNotes(events: EventRecord[], deps: RecheckDeps): Pr
 const verdictOf = (s: string): Verdict =>
   s === DRIFT_STATE.drifted ? 'drifted' : s === DRIFT_STATE.unknown ? 'unknown' : 'clean'
 
-/** the corpus-level read-out a `recheck` prints, and what health can report without re-walking */
+/**
+ * The corpus-level read-out a `recheck` prints, and what health can report without re-walking.
+ *
+ * `clean` counts notes whose declared paths were COMPARED and had not moved. It is not the whole of
+ * `verdict === 'clean'`: noteDriftState also returns clean for a note carrying no sourceRevision or
+ * no declared paths (the fail-toward-not-drifted rule), where nothing was compared at all. Those are
+ * `uncheckable` — reporting them as current claims a verification nobody performed, which on the
+ * live corpus meant 49 of 84 notes printed "current" against 5 actually checked.
+ */
 export interface RecheckSummary {
   total: number
   clean: number
   drifted: number
   unknown: number
+  uncheckable: number
 }
+
+/** what the drift check needs to have anything to compare — the same pair corpusDrift requires */
+const isCheckable = (n: RecheckedNote): boolean => n.sourceRevision !== null && n.paths.length > 0
 
 export const summarize = (notes: readonly RecheckedNote[]): RecheckSummary => ({
   total: notes.length,
-  clean: notes.filter(n => n.verdict === 'clean').length,
+  clean: notes.filter(n => n.verdict === 'clean' && isCheckable(n)).length,
   drifted: notes.filter(n => n.verdict === 'drifted').length,
   unknown: notes.filter(n => n.verdict === 'unknown').length,
+  uncheckable: notes.filter(n => n.verdict === 'clean' && !isCheckable(n)).length,
 })

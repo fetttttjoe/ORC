@@ -84,6 +84,10 @@ export function buildGraph(state: State, mem: MemoryFold, opts: GraphBuildOption
     toHeat(mem.edges.get(edgeKey(scope, from, to, kind)))
   for (const { note, author } of mem.notes.values()) {
     if (isUiMetaNote(note.scope, note.id)) continue // chat metadata is not knowledge
+    // Retired notes stay in the FOLD — that is what makes a restore possible — but they are not
+    // live knowledge. The read model drops their rows so search/neighbours/topics exclude them with
+    // no query change; the graph derives from the fold, so it is the one surface that has to say so.
+    if (note.archived === true) continue
     nodes.push({ id: noteNodeId(note.scope, note.id), type: 'note', label: note.title, detail: noteLabel(note), heat: heatOf(noteKey(note.scope, note.id)) })
     if (author.taskId && state.tasks.has(author.taskId))
       links.push({ source: author.taskId, target: noteNodeId(note.scope, note.id), type: EDGE.wrote })

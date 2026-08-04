@@ -1,4 +1,8 @@
 import { z } from 'zod'
+// the health vocabulary comes from contracts, never a second spelling: health.ts is zero-import
+// precisely so the browser can take it, and a re-typed enum here silently accepts a state the
+// server stopped sending (or rejects one it started sending)
+import { MEMORY_HEALTH_STATES, MemoryStageName, SUPERVISOR_HEALTH_STATES } from '@orc/contracts/health'
 // relative, not the $lib alias: the e2e contract test imports this file from the graph-ui
 // package, whose tsconfig knows nothing about the web app's path aliases
 import { ArtifactDetail, ModelDetail, NoteDetail, StepDetail, TaskDetail } from '../features/inspector/detail-view'
@@ -43,7 +47,7 @@ export const SessionInfo = z.object({
 export const ProjectList = z.array(z.object({ id: z.string(), name: z.string().nullable(), dir: z.string().nullable().optional() }))
 
 const MemoryHealth = z.object({
-  state: z.enum(['ok', 'catching_up', 'unreachable']),
+  state: z.enum(MEMORY_HEALTH_STATES),
   pending: z.number(),
   reason: z.string().optional(),
   drift: z.object({ checkable: z.number(), drifted: z.number(), ratio: z.number() }).optional(),
@@ -51,14 +55,14 @@ const MemoryHealth = z.object({
   // replay, so the slow stages after it (linking, ollama re-clustering) report through this.
   // `progress` rides the replaying stage alone — the other two have no countable unit.
   stage: z.object({
-    name: z.string(),
+    name: MemoryStageName,
     sinceMs: z.number(),
     progress: z.object({ applied: z.number(), total: z.number() }).optional(),
   }).optional(),
 })
 export const Health = z.object({
   memory: MemoryHealth.nullable(),
-  supervisor: z.object({ state: z.enum(['ready', 'booting', 'stale', 'none']), pid: z.number().optional(), lastSeenAt: z.string().optional() }).optional(),
+  supervisor: z.object({ state: z.enum(SUPERVISOR_HEALTH_STATES), pid: z.number().optional(), lastSeenAt: z.string().optional() }).optional(),
 })
 
 const CopilotExchange = z.object({

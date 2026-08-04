@@ -13,6 +13,12 @@ afterAll(async () => { await Promise.all(dbs.map(d => d.drop())) }, 30_000)
 
 const SHA = 'a'.repeat(64)
 
+// An archived note leaves the READ MODEL entirely (applyEvent deletes its rows) so no query can
+// forget to exclude it — but the graph builds from the FOLD, which keeps archived notes because a
+// restore depends on them. Measured on the live corpus: 155 archived notes drawn as live nodes
+// against 82 live ones.
+
+
 async function freshLog(): Promise<EventLog> {
   const db = await createTestDb()
   dbs.push(db)
@@ -233,5 +239,18 @@ describe('diffGraphs', () => {
     expect(patch.updateLinks.some(l => `${l.source} ${l.target} ${l.type}` === key)).toBe(true)
     expect(patch.addLinks).toEqual([])
     expect(patch.removeLinks).toEqual([])
+  })
+})
+
+describe('buildGraph excludes archived notes', () => {
+  it('draws the live note and not the retired one', async () => {
+    const log = await freshLog()
+    await writeNote(log, 'live')
+    await writeNote(log, 'gone', { archived: true })
+    const g = buildGraph(fold([]), foldMemory(await log.all()), {})
+    const noteIds = g.nodes.filter(n => n.type === 'note').map(n => n.id)
+    expect(noteIds).toContain(noteNodeId('project', 'live'))
+    expect(noteIds).not.toContain(noteNodeId('project', 'gone'))
+    await log.close()
   })
 })

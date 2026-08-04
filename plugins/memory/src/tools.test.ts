@@ -29,7 +29,7 @@ const fakeStore = (over: Partial<MemoryStore> = {}) => {
   const store: MemoryStore = {
     write: async (input, author, opts) => { written.push({ input, author, idempotencyKey: opts?.idempotencyKey, invalidates: opts?.invalidates }); return toNote(input) },
     remove: async () => {},
-    setArchived: async () => {},
+    setArchived: async () => {}, setArchivedAll: async () => {},
     get: async () => toNote({ id: 'auth', title: 'Auth', body: 'b' }),
     list: async () => [],
     search: async () => [summary('auth', 'Auth')],
@@ -943,6 +943,14 @@ describe('drift on memory_read', () => {
 
   const Read = z.object({ drifted: z.boolean().optional(), unknown: z.boolean().optional(), current: z.boolean().optional(), next: z.string().optional() })
 
+  it('names the DECLARED PATHS in the hint, not a category', async () => {
+    // `hintPaths` read `'paths' in fitted`, but the fitter returns an ENVELOPE ({note,truncated}),
+    // so the guard was always false and every hint said "the paths this note declares" instead of
+    // naming them. An agent told which file to re-read acts; one told a category re-derives.
+    const r = await readTool(async () => ({ ...note(), sourceRevision: 'abc1234567' }), new Set(['src/auth.ts'])).execute({ id: 'auth' }, 'c1')
+    expect(Read.parse(r.output).next).toContain('src/auth.ts')
+  })
+
   it('flags a note whose declared path changed, and names the correction', async () => {
     const r = await readTool(async () => ({ ...note(), sourceRevision: 'abc1234567' }), new Set(['src/auth.ts'])).execute({ id: 'auth' }, 'c1')
     const out = Read.parse(r.output)
@@ -966,9 +974,7 @@ describe('drift on memory_read', () => {
     expect(out.current).toBe(true)
     expect(out.drifted).toBeUndefined()
     expect(out.unknown).toBeUndefined()
-    // names the paths it checked — generically here, because the budget fitter drops `paths` from
-    // the returned note and `where` deliberately reports what the READER received, not the stored set
-    expect(out.next).toContain('paths this note declares')
+    expect(out.next).toContain('src/auth.ts')   // names what it checked, not a category
     expect(out.next).toContain('abc12345')      // and the stamp it checked from
     expect(out.next).toContain('do not need to re-read')
   })

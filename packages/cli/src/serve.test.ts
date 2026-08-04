@@ -104,6 +104,30 @@ describe('supervisorHealth (the "is anything driving?" classifier)', () => {
     // the pid file alone proves nothing — liveness is the heartbeat row, never the file
     expect(supervisorHealth([], [], true)).toEqual({ state: 'none' })
   })
+
+  /**
+   * The heartbeat answers "is a SUPERVISOR beating"; the runtime lock answers "is anything
+   * DRIVING" — which may be a `--no-daemon` command or the graph server. Reporting `none` on the
+   * absence of the first alone told the operator "nothing will run" while a task was running:
+   * observed live during the memory A/B, where arm B ran under --no-daemon and the console showed
+   * the supervisor offline throughout.
+   */
+  it('a held runtime lock with no supervisor is a client driving, not nothing', () => {
+    expect(supervisorHealth([], [], false, true)).toEqual({ state: 'client' })
+  })
+
+  it('a live supervisor still reports as itself — it holds the lock too', () => {
+    expect(supervisorHealth([row], [], true, true)).toEqual({ state: 'ready', pid: 42, lastSeenAt: 't1' })
+  })
+
+  it('a held lock outranks a stale row — something IS driving, whatever died earlier', () => {
+    expect(supervisorHealth([], [row], false, true)).toEqual({ state: 'client' })
+  })
+
+  it('defaults to the old answer when the lock could not be read', () => {
+    // an unreadable lock must never manufacture a driver
+    expect(supervisorHealth([], [], false)).toEqual({ state: 'none' })
+  })
 })
 
 describe('nextIdle (the idle-exit decision, without waiting through it)', () => {

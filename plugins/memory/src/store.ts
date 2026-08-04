@@ -19,6 +19,45 @@ export function createMemoryStore(opts: { log: EventLog; surreal: SurrealMemory;
   // clear drift re-stamps the same stale commit. The spawn is bounded by write frequency, and it
   // already runs OUTSIDE the project write lock (see the call below), so it blocks nothing.
   const sourceRevision = (): Promise<string | null> => opts.sourceRevision?.() ?? Promise.resolve(null)
+
+  /**
+   * Retire or restore MANY notes with ONE pass over the log.
+   *
+   * From the LOG, not the read model. Archiving DELETES the note's row, so an archived note reads
+   * as absent through surreal.get — restore then found nothing and silently no-opped, which made
+   * archival a one-way door while reporting success. The fold is the only view that still holds an
+   * archived note, which is exactly what makes the archive reversible.
+   *
+   * Batched because `recheck --apply` retires every candidate at once, and folding per note is N
+   * full log reads and N folds against a log past 70k events.
+   *
+   * Declared HERE rather than as a member so neither door depends on `this`: MemoryStore is an
+   * interface, and a consumer that destructures a method off it would get `this === undefined`.
+   */
+  const setArchivedAll: MemoryStore['setArchivedAll'] = async (entries, archived, author) => {
+    if (entries.length === 0) return // no ids, no reason to read the log at all
+    const fold = foldMemory(await log.after(0, KNOWLEDGE_KINDS))
+    for (const { id, scope } of entries) {
+      const held = fold.notes.get(noteKey(scope, id))
+      const existing = held?.note
+      // Nothing to retire, or already in the asked-for state — a no-op keeps `--apply` idempotent,
+      // and an id the log never carried is skipped rather than treated as a fault.
+      if (!existing || existing.archived === archived) continue
+      // NOTE the absent sourceRevision() call: this re-appends what is stored, flag moved and
+      // nothing else. `archived` is excluded from CONTENT_FIELDS, so the content key is unchanged
+      // and deriveNoteProvenance carries the verification stamp across too.
+      const note = MemoryNoteInput.parse({ ...existing, archived })
+      // The note keeps ITS author, not the operator's. Authorship is who wrote the content; moving
+      // a lifecycle flag is not writing. Stamping `{source:'cli'}` here erased the taskId every
+      // task-bound note carries, so a restored plan note lost the binding `taskSettled` reads and
+      // could never be archived again — measured: three restored notes went permanently unretirable.
+      await log.append({
+        taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_written,
+        payload: { note, author: held?.author ?? author ?? { source: 'cli' } },
+      })
+    }
+  }
+
   return {
     async write(input, author, writeOpts) {
       // merge-on-omit upsert: fields the writer did not supply carry the previous revision's
@@ -165,30 +204,13 @@ export function createMemoryStore(opts: { log: EventLog; surreal: SurrealMemory;
       return stamp
     },
     // optional author: cancel-sweep passes the cancelled task's identity as provenance
-    async setArchived(id, scope = MemoryScope.project, archived, author?: MemoryAuthor) {
-      // From the LOG, not the read model. Archiving DELETES the note's row, so an archived note
-      // reads as absent through surreal.get — restore then found nothing and silently no-opped,
-      // which made archival a one-way door while reporting success. The fold is the only view that
-      // still holds an archived note, which is exactly what makes the archive reversible.
-      const fold = foldMemory(await log.after(0, KNOWLEDGE_KINDS))
-      const held = fold.notes.get(noteKey(scope, id))
-      const existing = held?.note
-      // Nothing to retire, or already in the asked-for state — a no-op keeps `--apply` idempotent.
-      if (!existing || existing.archived === archived) return
-      // NOTE the absent sourceRevision() call: this re-appends what is stored, flag moved and
-      // nothing else. `archived` is excluded from CONTENT_FIELDS, so the content key is unchanged
-      // and deriveNoteProvenance carries the verification stamp across too.
-      const note = MemoryNoteInput.parse({ ...existing, archived })
-      // The note keeps ITS author, not the operator's. Authorship is who wrote the content; moving
-      // a lifecycle flag is not writing. Stamping `{source:'cli'}` here erased the taskId every
-      // task-bound note carries, so a restored plan note lost the binding `taskSettled` reads and
-      // could never be archived again — measured: three restored notes went permanently unretirable.
-      await log.append({
-        taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_written,
-        payload: { note, author: held?.author ?? author ?? { source: 'cli' } },
-      })
-    },
+    // The single-note case of the batch door, delegating to the hoisted function rather than
+    // `this.setArchivedAll`: MemoryStore is an interface, and a consumer that destructures a method
+    // off it would get `this === undefined` and a runtime throw.
+    setArchived: (id, scope = MemoryScope.project, archived, author) => setArchivedAll([{ id, scope }], archived, author),
+    setArchivedAll,
 
+    // optional author: cancel-sweep passes the cancelled task's identity as provenance
     async remove(id, scope = MemoryScope.project, author?: MemoryAuthor) {
       await log.append({ taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_deleted, payload: { id, scope, author: author ?? { source: 'cli' } } })
     },

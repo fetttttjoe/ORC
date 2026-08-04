@@ -21,6 +21,38 @@ export class RuntimeBusyError extends Error {
   }
 }
 
+// Is a runtime holding the lock RIGHT NOW — asked without taking it. Read from pg_locks rather
+// than probed with pg_try_advisory_lock: a try-then-release cannot evict the holder, but on a
+// polled path (health asks every 3s) it would make a legitimate acquirer fail spuriously in the
+// window it is held. Advisory keys live in pg_locks as classid/objid — the high and low 32 bits of
+// the bigint key, objsubid 1 for the single-bigint form.
+//
+// Answers a DIFFERENT question from the supervisor heartbeat: that row says "a supervisor is
+// beating", this says "something is driving" — which may be a supervisor, a `--no-daemon` command,
+// or the graph server. The banner claimed "nothing will run" on the absence of the first alone,
+// while a --no-daemon task was running.
+const RUNTIME_LOCK_HELD_SQL = `
+  SELECT EXISTS (
+    SELECT 1 FROM pg_locks
+    WHERE locktype = 'advisory' AND objsubid = 1
+      AND classid = ((hashtextextended($1, 0) >> 32) & 4294967295)::bigint::oid
+      AND objid   = ( hashtextextended($1, 0)        & 4294967295)::bigint::oid
+  ) AS held`
+
+export async function runtimeLockHeld(url: string, projectId: string): Promise<boolean> {
+  const client = new pg.Client({ connectionString: url })
+  try {
+    await client.connect()
+    const r = await client.query<{ held: boolean }>(RUNTIME_LOCK_HELD_SQL, [runtimeLockKey(projectId)])
+    return r.rows[0]?.held === true
+  } catch {
+    // advisory only: a probe that cannot reach Postgres must not claim the runtime is idle
+    return false
+  } finally {
+    await client.end().catch(() => {})
+  }
+}
+
 export async function acquireRuntimeLock(url: string, projectId: string): Promise<RuntimeLock> {
   const client = new pg.Client({ connectionString: url })
   await client.connect()

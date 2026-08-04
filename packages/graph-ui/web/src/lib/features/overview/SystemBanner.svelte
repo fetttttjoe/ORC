@@ -1,7 +1,7 @@
 <script lang="ts">
   import { createQuery } from '@tanstack/svelte-query'
   import { MEMORY_HEALTH } from '@orc/contracts/health'
-  import { SUPERVISOR_HEALTH } from '@orc/contracts/health'
+  import { MEMORY_STAGE, SUPERVISOR_HEALTH, type MemoryStageName } from '@orc/contracts/health'
   import { Progress } from '$lib/components/ui/progress'
   import { api } from '$lib/api/client'
   import { qk } from '$lib/query-keys'
@@ -67,10 +67,12 @@
   // What it is ACTUALLY doing. `pending` covers the event replay only — the stages after it
   // (re-linking every note's edges, re-partitioning the claim corpus through ollama) run with
   // pending already at zero, which is why a long boot used to show one unchanging sentence.
-  const STAGE_SAID: Record<string, string> = {
-    replaying: 'replaying knowledge events',
-    linking: 're-linking the knowledge graph',
-    clustering: 're-clustering claims through the embedder',
+  // keyed by the contract's own stage names, and Record<MemoryStageName,...> makes a stage added
+  // there a compile error here rather than a raw enum value leaking onto the screen
+  const STAGE_SAID: Record<MemoryStageName, string> = {
+    [MEMORY_STAGE.replaying]: 'replaying knowledge events',
+    [MEMORY_STAGE.linking]: 're-linking the knowledge graph',
+    [MEMORY_STAGE.clustering]: 're-clustering claims through the embedder',
   }
   // The replaying stage carries its own count, and saying it matters: a stage line WITHOUT one
   // ("replaying knowledge events (40s so far)") replaced the quantitative "N events left to
@@ -124,6 +126,16 @@
               : `it replays the projection and recovers any interrupted work before accepting runs — a long boot means it found work to finish, not that it hung.${work}`,
         temp: beatAge !== null && beatAge > STALE_BEAT_MS ? 'rust' : 'human',
         percent: bootPercent,
+      }
+
+    // A client holds the execution runtime — a `--no-daemon` command or the graph server. Work IS
+    // running, so this must not read like the two rust states below it.
+    if (sup?.state === SUPERVISOR_HEALTH.client)
+      return {
+        title: 'a client is driving this project',
+        detail: 'no background supervisor, but something holds the execution runtime — a foreground `orc` command or this graph server. Runs execute while it lives.',
+        temp: 'machine',
+        percent: null,
       }
 
     if (sup?.state === SUPERVISOR_HEALTH.stale)

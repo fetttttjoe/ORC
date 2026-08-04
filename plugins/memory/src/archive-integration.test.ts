@@ -88,3 +88,49 @@ it('returns the content just written, not the previous revision', async () => {
   // provenance still comes from the projected row, which is what it is there for
   expect(back.createdBy).toBe('cli')
 })
+
+/**
+ * `recheck --apply` archives every retirable note, and each setArchived call opened with a full
+ * `log.after(0, KNOWLEDGE_KINDS)` + fold — N log reads and N folds against a log already past 70k
+ * events. The batch door folds once.
+ *
+ * Counting log reads rather than timing: a wall-clock assertion would pass on a fast machine with
+ * the quadratic intact.
+ */
+it('archives many notes with ONE pass over the log, not one per note', async () => {
+  const live = await createLiveMemory()
+  drops.push(live.close)
+
+  const ids = ['a', 'b', 'c']
+  for (const id of ids) await live.store.write({ id, title: id, summary: id }, { source: 'cli' })
+  await live.projector.catchUp()
+
+  let reads = 0
+  const realAfter = live.log.after.bind(live.log)
+  live.log.after = ((...args: Parameters<typeof realAfter>) => { reads += 1; return realAfter(...args) }) as typeof realAfter
+
+  await live.store.setArchivedAll(ids.map(id => ({ id, scope: 'project' })), true, { source: 'cli' })
+  // asserted BEFORE catchUp: the projector reads the log too, and counting its pass would hide
+  // whether the store made one or three
+  expect(reads).toBe(1)
+  await live.projector.catchUp()
+  for (const id of ids) expect(await live.store.get(id)).toBeNull()
+})
+
+it('the batch door is idempotent and skips ids the log never had', async () => {
+  const live = await createLiveMemory()
+  drops.push(live.close)
+
+  await live.store.write({ id: 'real', title: 'Real', summary: 's' }, { source: 'cli' })
+  await live.projector.catchUp()
+  // a ghost id alongside a real one must not throw — retiring twice is not a fault, and neither is
+  // naming something the log never carried
+  await live.store.setArchivedAll([{ id: 'real', scope: 'project' }, { id: 'ghost', scope: 'project' }], true, { source: 'cli' })
+  await live.store.setArchivedAll([{ id: 'real', scope: 'project' }], true, { source: 'cli' })
+  await live.projector.catchUp()
+  expect(await live.store.get('real')).toBeNull()
+
+  await live.store.setArchivedAll([{ id: 'real', scope: 'project' }], false, { source: 'cli' })
+  await live.projector.catchUp()
+  expect((await live.store.get('real'))?.title).toBe('Real')
+})

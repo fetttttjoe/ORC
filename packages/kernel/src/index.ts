@@ -12,6 +12,8 @@ export * from './execution/dbos-port'
 export * from './execution/split-tool'
 export * from './execution/commit-tool'
 export * from './execution/exec-tool'
+// tree identity, shared with the memory plugin's drift cache — one spelling of "has the tree moved"
+export * from './execution/tree-fingerprint'
 export * from './execution/finalize-plan-tool'
 export * from './execution/read-annotations-tool'
 export * from './execution/report-coverage-tool'

@@ -1,12 +1,14 @@
 import { describe, expect, it } from 'bun:test'
 import { DRIFT_STATE, EVENT_KIND, MemoryScope, NOTE_KIND, NOTE_TIER, type EventRecord } from '@orc/contracts'
-import { recheckNotes } from './recheck'
+import { recheckNotes, summarize } from './recheck'
 
 // One spelling of the fixture corpus. The two drift-verdict cases below each name the note, its
 // declared path and BOTH revisions, so a literal repeated per test is the drift this file's own
 // subject matter is about — a probe keyed on 'old' while a stamp says 'olde' would pass silently.
 const NOTE_ID = 'n'
 const DECLARED_PATH = 'src/a.ts'
+/** a second path the probe reports unmoved, so one note is genuinely checked-and-clean */
+const OTHER_PATH = 'src/b.ts'
 /** the revision the note was WRITTEN at — its declared path has moved since */
 const WRITTEN_AT = 'old'
 /** the revision an auditor CHECKED it at — nothing has moved since */
@@ -80,5 +82,24 @@ describe('recheckNotes', () => {
       movedSinceWrite,
     )
     expect(out[0].verdict).toBe(DRIFT_STATE.drifted)
+  })
+
+  /**
+   * `clean` is not `checked`. noteDriftState returns clean for a note with no stamp OR no declared
+   * paths (fail-toward-not-drifted), so counting it as current reports a verification nobody did —
+   * measured on the live corpus: 49 of 84 notes declared zero paths and were printed "current"
+   * while only 5 had actually been checked.
+   */
+  it('counts a never-checkable note apart from one that was checked and is current', async () => {
+    const out = await recheckNotes([
+      write({ ...drifting, id: 'checked-clean', paths: [OTHER_PATH] }),
+      write(drifting),
+      write({ id: 'pathless', title: 'pathless' }),
+    ], movedSinceWrite)
+    const s = summarize(out)
+    expect(s.total).toBe(3)
+    expect(s.drifted).toBe(1)
+    expect(s.clean).toBe(1)        // only the one whose declared paths were actually compared
+    expect(s.uncheckable).toBe(1)  // no stamp / no paths — nothing was compared at all
   })
 })

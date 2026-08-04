@@ -445,7 +445,7 @@ void writeSchemaCoversInput
 // silently losing its memory tools.
 export function unavailableMemoryTools(reason: string): ResolvedTool[] {
   const fail = async (): Promise<never> => { throw new Error(`memory unavailable: ${reason}`) }
-  const store: MemoryStore = { write: fail, remove: fail, setArchived: fail, get: fail, list: fail, search: fail, searchClaims: fail, claimsFor: fail, neighbors: fail, recordAccess: fail, topics: fail, topicClaims: fail, verify: fail }
+  const store: MemoryStore = { write: fail, remove: fail, setArchived: fail, setArchivedAll: fail, get: fail, list: fail, search: fail, searchClaims: fail, claimsFor: fail, neighbors: fail, recordAccess: fail, topics: fail, topicClaims: fail, verify: fail }
   return memoryTools({ store, author: { source: 'agent' } })
 }
 
@@ -813,13 +813,15 @@ export function memoryTools(opts: {
             : DRIFT_STATE.clean
           // every pull tool honors its budget (spec RG5) — metadata cannot bypass body truncation.
           const fitted = fitMemoryNoteToBudget(n, q.budget)
-          // The hint names the paths the READER actually received. They used to be read off the
-          // stored note, and interpolated whole into a string spread on top of the fitter's result
-          // — after the fitter had emptied `fitted.paths` to make the budget. So the one field the
-          // fitter dropped to fit came straight back in prose, past the cap it had just enforced,
-          // and a note with many declared paths blew the budget by exactly what was reclaimed.
-          // When the fitter kept none, the note itself is the place to look.
-          const hintPaths = 'paths' in fitted && Array.isArray(fitted.paths) ? fitted.paths : []
+          // The hint names the paths the READER actually received — off `fitted.note`, which is
+          // where they live: fitMemoryNoteToBudget returns an ENVELOPE ({note,truncated}), so the
+          // `'paths' in fitted` guard this replaced was always false and every hint fell back to
+          // naming a category instead of a file. The `in` operator was doing the type system's job
+          // and admitting a key the type does not have; reading through `.note` lets the compiler
+          // check it. Still the FITTED note, not the stored one: a path the fitter dropped to make
+          // budget must not come back in prose past the cap it just enforced.
+          const fittedPaths = fitted.note.paths
+          const hintPaths = Array.isArray(fittedPaths) ? fittedPaths : []
           const where = hintPaths.length > 0 ? hintPaths.join(', ') : 'the paths this note declares'
           return ok({
             ...fitted,

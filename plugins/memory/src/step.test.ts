@@ -30,7 +30,7 @@ function fakeStore(opts: {
     search: async query => { queries.push(query); return opts.search?.(query) ?? [] },
     searchClaims: async query => { claimQueries.push(query); return opts.searchClaims?.(query) ?? [] },
     claimsFor: async () => [],
-    setArchived: async () => {},
+    setArchived: async () => {}, setArchivedAll: async () => {},
     topics: async () => [],
     topicClaims: async () => [],
     recordAccess: async (id, scope, mode) => { accesses.push({ id, scope, mode }) },

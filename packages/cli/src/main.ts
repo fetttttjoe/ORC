@@ -4,7 +4,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { Command, InvalidArgumentError } from 'commander'
 import { SUPERVISOR_HEALTH, claimHistory, EDGE_DIRECTION, errorMessage, EVENT_KIND, foldMemory, LINK_KINDS, MASTERPLAN_NOTE_ID, MEMORY_ACCESS, MemoryDeletedPayload, MemoryScope, MemoryWrittenPayload, noteKey, NOTE_TIER, NOTE_TIERS, NoteTier, parseLinkSpec, PlanDraft, ROLE_SKILL, RUN_OUTCOME, STRATEGY, TASK_STATUS, TERMINAL_TASK_STATUS, LinkKind, slugId, type Analyzer, type EventRecord, type MemoryLink, type NoteFields, type ExecutionPort, type MemoryHealth, type Plan, formatModelRate } from '@orc/contracts'
-import { openStorage, Kernel, atomicWriteFileSync, listProjectIds, claimSlot, fold, gatedChildren, freezePlan, liveSupervisors, staleSupervisors, grantExtensionTrust, grantMcpTrust, initializeProject, isExtensionTrusted, isMcpTrusted, loadConfig, loadTrust, migrateDatabase, requireProject, stepUsage, subtreeUsage, taskUsage, type EventLog, type OrcConfig, type PluginHost, type ProjectConfig, type Storage } from '@orc/kernel'
+import { openStorage, Kernel, atomicWriteFileSync, listProjectIds, claimSlot, fold, gatedChildren, freezePlan, liveSupervisors, staleSupervisors, grantExtensionTrust, grantMcpTrust, initializeProject, isExtensionTrusted, isMcpTrusted, loadConfig, loadTrust, migrateDatabase, requireProject, runtimeLockHeld, stepUsage, subtreeUsage, taskUsage, type EventLog, type OrcConfig, type PluginHost, type ProjectConfig, type Storage } from '@orc/kernel'
 import { createVaultProjector, parsePlanFile } from '@orc/vault-projector'
 import { archiveCandidates, consolidateTask, createDriftProbe, frontier, KNOWLEDGE_KINDS, needsReground, probeMemory, recheckNotes, restampableNotes, summarize } from '@orc/memory'
 import { withMemory } from './memory-open'
@@ -657,7 +657,7 @@ export function buildProgram(
         health: plugin ? async () => {
           // The supervisor's pid gates the stage: probeMemory reports one only when the process
           // that published it is the one driving now. See its comment for why pid beats an age.
-          const supervisor = plugin.storage ? await probeSupervisor(plugin.storage, plugin.config.dir) : undefined
+          const supervisor = plugin.storage ? await probeSupervisor(plugin.storage, plugin.config.dir, plugin.config) : undefined
           return {
             memory: await probeMemory(plugin.config, plugin.log, supervisor?.pid),
             ...(supervisor && { supervisor }),
@@ -680,9 +680,12 @@ export function buildProgram(
   const servePidFile = (dir: string) => path.join(dir, '.orc', 'serve.pid')
   // one derivation of supervisor health for every door that reports it (graph /api/health, the
   // MCP project_status) — heartbeat rows + the ready-only pid file, classified by supervisorHealth
-  const probeSupervisor = async (storage: Storage, dir: string) => {
+  const probeSupervisor = async (storage: Storage, dir: string, config?: { databaseUrl: string; projectId: string }) => {
     const now = new Date()
-    return supervisorHealth(await liveSupervisors(storage, now), await staleSupervisors(storage, now), existsSync(servePidFile(dir)))
+    // the runtime lock answers "is anything DRIVING", which the heartbeat cannot: a --no-daemon
+    // command or the graph server holds it without ever writing a supervisor row
+    const held = config ? await runtimeLockHeld(config.databaseUrl, config.projectId) : false
+    return supervisorHealth(await liveSupervisors(storage, now), await staleSupervisors(storage, now), existsSync(servePidFile(dir)), held)
   }
   const SERVE_NEEDS_STORAGE = 'serve needs a live storage connection'
 
@@ -876,7 +879,7 @@ export function buildProgram(
         // DO want the client approving still have the explicit, autonomy-gated `approve` tool.
         actions: portFactory ? actions('mcp') : null,
         autonomy: opts.autonomy,
-        ...(storage && { supervisor: () => probeSupervisor(storage, config.dir) }),
+        ...(storage && { supervisor: () => probeSupervisor(storage, config.dir, config) }),
       })
     })
   mcp
@@ -995,7 +998,10 @@ export function buildProgram(
       )
       const notes = await recheckNotes(events, { changedSince: createDriftProbe(config.dir), terminalTaskIds })
       const s = summarize(notes)
-      console.log(`${s.total} note(s): ${s.clean} current, ${s.drifted} drifted, ${s.unknown} uncheckable`)
+      // "current" means CHECKED and unmoved. A note with no stamp or no declared paths was never
+      // compared to anything, so it is reported as never-checked rather than folded into current —
+      // that conflation printed 49 of 84 notes "current" against 5 genuinely checked.
+      console.log(`${s.total} note(s): ${s.clean} current, ${s.drifted} drifted, ${s.uncheckable} never checked, ${s.unknown} unreachable`)
 
       const goes = archiveCandidates(notes)
       const byKey = new Map(notes.map(n => [n.key, n]))
@@ -1020,10 +1026,13 @@ export function buildProgram(
       // other field forward untouched and the log keeps every revision — `orc memory restore <id>`
       // brings it back. Nothing is deleted.
       await withMemory({ log, config }, async memory => {
-        for (const c of goes) {
+        // ONE pass over the log for the whole batch: the per-note door folded the entire knowledge
+        // log each time, so archiving N notes cost N reads and N folds.
+        const retiring = goes.flatMap(c => {
           const n = byKey.get(c.key)
-          if (n) await memory.store.setArchived(n.id, n.scope, true, { source: 'cli' })
-        }
+          return n ? [{ id: n.id, scope: n.scope }] : []
+        })
+        await memory.store.setArchivedAll(retiring, true, { source: 'cli' })
         await memory.projector.catchUp()
       })
       console.log(`archived ${goes.length} note(s) — restore any with: orc memory restore <id> --scope <scope>`)

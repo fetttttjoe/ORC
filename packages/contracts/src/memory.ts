@@ -686,6 +686,12 @@ export interface MemoryStore {
    */
   setArchived(id: string, scope: string, archived: boolean, author?: MemoryAuthor): Promise<void>
   /**
+   * The same transition for MANY notes, with one pass over the log. `recheck --apply` retires every
+   * candidate at once, and the per-note door folded the whole knowledge log each time.
+   * Ids the log never carried are skipped, not faulted — the same tolerance setArchived has.
+   */
+  setArchivedAll(entries: ReadonlyArray<{ id: string; scope: string }>, archived: boolean, author?: MemoryAuthor): Promise<void>
+  /**
    * Declare a note VERIFIED at the runtime's current HEAD — appends memory_verified and nothing
    * else, so body/summary/authorship stay byte-stable. Throws on an id the LOG has no live note
    * for (checked against the log, not the eventually-consistent read model, so a note verified in

@@ -27,6 +27,7 @@
     [SUPERVISOR_HEALTH.ready]: { text: 'supervisor ready', temp: 'moss', hint: 'a supervisor holds the runtime — runs execute' },
     [SUPERVISOR_HEALTH.booting]: { text: 'supervisor booting', temp: 'human', hint: 'projections catching up — runs start when it reports ready' },
     [SUPERVISOR_HEALTH.stale]: { text: 'supervisor stale', temp: 'rust', hint: 'its heartbeat stopped without cleanup — start `orc serve` to reclaim' },
+    [SUPERVISOR_HEALTH.client]: { text: 'client driving', temp: 'machine', hint: 'no supervisor, but a foreground command or the graph server holds the runtime — runs execute' },
     [SUPERVISOR_HEALTH.none]: { text: 'no supervisor', temp: 'rust', hint: 'nothing will run — start `orc serve`' },
   }
   const supervisor = $derived(sup ? (SUPERVISOR[sup.state] ?? SUPERVISOR[SUPERVISOR_HEALTH.none]) : null)

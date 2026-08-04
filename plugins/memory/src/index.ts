@@ -7,6 +7,8 @@ import { createMemoryStore } from './store'
 import { createMemoryProjector, KNOWLEDGE_KINDS, type MemoryProjector } from './projector'
 import { bindStepMemory, unavailableStepMemory, type BindStep } from './step'
 import { corpusDrift, createDriftProbe, type ChangedSince } from './drift'
+import { createDriftCache } from './drift-cache'
+import { treeFingerprint } from '@orc/kernel'
 
 // Only names something outside plugins/memory/src actually imports — everything else stays a
 // module-internal export of its own file (a re-export nobody imports is API surface to keep
@@ -97,6 +99,18 @@ export async function measureDrift(
   }
 }
 
+// One cache per project directory, so two projects probed from one process cannot serve each
+// other's verdict. Module-scoped deliberately: the point is to outlive a single probe, which is
+// where the previous per-call `createDriftProbe` lost every result it computed.
+const driftCaches = new Map<string, ReturnType<typeof createDriftCache<MemoryHealth['drift']>>>()
+const driftCacheFor = (dir: string): ReturnType<typeof createDriftCache<MemoryHealth['drift']>> => {
+  const hit = driftCaches.get(dir)
+  if (hit) return hit
+  const made = createDriftCache<MemoryHealth['drift']>(() => treeFingerprint(dir))
+  driftCaches.set(dir, made)
+  return made
+}
+
 // healthy = reachable AND caught up with the log's memory events
 /**
  * `livePid` is the supervisor currently driving, when there is one. The stage row is published by
@@ -109,11 +123,27 @@ export async function probeMemory(config: ProjectConfig, log: EventLog, livePid?
   let knowledge: Knowledge | undefined
   try {
     knowledge = await openKnowledge(config)
-    const cursor = await knowledge.getCursor()
+    // captured so the deferred compute closure below reads the handle THIS probe opened, rather
+    // than the outer `let` whose narrowing does not survive the closure
+    const k = knowledge
+    const cursor = await k.getCursor()
     const pending = await log.countAfter(cursor, KNOWLEDGE_KINDS)
     // Two different lags: `pending` is the read model behind the LOG (orc's own, self-healing);
     // drift is the corpus behind the CODE, which orc cannot fix alone.
-    const drift = await measureDrift(createDriftProbe(config.dir), knowledge)
+    //
+    // Cached on (cursor, tree fingerprint) because this sits on a POLLED path — the console's
+    // banner asks every 3s. Exact invalidation, not a TTL: every way the verdict could change moves
+    // one half of the key.
+    //
+    // MEASURED on a 112-note corpus, 2026-08-02: a full probe was 433-553ms, of which ~336ms was
+    // per-revision `git diff` (13 distinct revisions) against ~10ms for the fingerprint. With the
+    // cache: 553ms cold, 116-141ms warm.
+    //
+    // The remaining ~120ms is NOT drift — allNotes no longer runs on a hit. It is the Surreal
+    // connection this function opens per probe (~68ms) plus its cursor/count queries. That is the
+    // next lever if this path is ever hot again; it needs a connection whose lifetime outlives one
+    // probe, which is a change to who owns the handle, not to this cache.
+    const drift = await driftCacheFor(config.dir)(cursor, () => measureDrift(createDriftProbe(config.dir), k))
     // What the projector is doing RIGHT NOW, published by it into a shared meta row. `pending`
     // only covers the event replay; the linking and clustering stages run with pending already at
     // zero, which is why a boot could sit in ollama for minutes with nothing on screen to say so.

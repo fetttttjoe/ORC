@@ -35,9 +35,15 @@ export function supervisorHealth(
   live: ReadonlyArray<Pick<SupervisorRow, 'pid' | 'lastSeenAt'>>,
   stale: ReadonlyArray<Pick<SupervisorRow, 'pid' | 'lastSeenAt'>>,
   pidFilePresent: boolean,
+  // "is anything DRIVING" — a different fact from the heartbeat, and the one that decides whether
+  // work can run. Defaults false so an unreadable lock never manufactures a driver.
+  runtimeHeld = false,
 ): SupervisorHealth {
   const l = live[0]
   if (l) return { state: pidFilePresent ? SUPERVISOR_HEALTH.ready : SUPERVISOR_HEALTH.booting, pid: l.pid, lastSeenAt: l.lastSeenAt }
+  // BEFORE stale on purpose: a stale row says a supervisor died without cleaning up, but a held
+  // lock says something is driving right now. The second is what the operator can act on.
+  if (runtimeHeld) return { state: SUPERVISOR_HEALTH.client }
   const s = stale[0]
   if (s) return { state: SUPERVISOR_HEALTH.stale, pid: s.pid, lastSeenAt: s.lastSeenAt }
   return { state: SUPERVISOR_HEALTH.none }

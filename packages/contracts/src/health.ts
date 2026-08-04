@@ -3,6 +3,11 @@ import { z } from 'zod'
 // door's project_status, and the browser header. Zero imports so the browser bundle can take it
 // without pulling the memory domain (and node:crypto with it).
 
+// The tuple is the definition and the map is derived from it, so a state is added in ONE place and
+// every consumer — including the browser's zod schemas, which parse the wire — follows. Spelled as
+// a second literal list in the web app, adding `client` meant editing two files and svelte-check
+// caught only the one it happened to compare.
+export const MEMORY_HEALTH_STATES = ['ok', 'catching_up', 'unreachable'] as const
 export const MEMORY_HEALTH = { ok: 'ok', catchingUp: 'catching_up', unreachable: 'unreachable' } as const
 export type MemoryHealthState = (typeof MEMORY_HEALTH)[keyof typeof MEMORY_HEALTH]
 
@@ -57,7 +62,11 @@ export const MemoryStage = z.object({
 // Derived from the supervisor heartbeat row plus the pid file the serve process writes only once
 // its runtime is ready: heartbeat+pidfile = ready, heartbeat alone = booting, a stale row = it
 // died without cleanup, no row = nothing will run until `orc serve`.
-export const SUPERVISOR_HEALTH = { ready: 'ready', booting: 'booting', stale: 'stale', none: 'none' } as const
+// `client` is not a supervisor at all: the execution runtime is held by a `--no-daemon` command or
+// the graph server. It exists because `none` was rendered as "nothing will run" on the absence of a
+// heartbeat alone, which is false whenever something else holds the lock.
+export const SUPERVISOR_HEALTH_STATES = ['ready', 'booting', 'stale', 'client', 'none'] as const
+export const SUPERVISOR_HEALTH = { ready: 'ready', booting: 'booting', stale: 'stale', client: 'client', none: 'none' } as const
 export type SupervisorHealthState = (typeof SUPERVISOR_HEALTH)[keyof typeof SUPERVISOR_HEALTH]
 export interface SupervisorHealth {
   state: SupervisorHealthState

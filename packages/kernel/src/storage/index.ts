@@ -14,6 +14,8 @@ export {
   SUPERVISOR_BEAT_MS, SUPERVISOR_STALE_MS, type SupervisorRow,
 } from './supervisors'
 export { assertMigrated, migrateDatabase } from './migrate'
+// runtimeLockHeld is the READ side: health asks whether anything is driving without taking the lock
+export { runtimeLockHeld } from './runtime-lock'
 export { dropSystemDatabase, resetSystemDatabase } from './system-db'
 
 // Postgres facade: callers use `events`/`operations`, never pools/locks/migrations. The one
