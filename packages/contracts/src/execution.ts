@@ -85,9 +85,21 @@ export function costUSDFor(
   ) / 1_000_000
 }
 
-export const SignalOutcome = z.enum(['success', 'failure'])
+// `partial` is the honest third state exhaustion used to hide: the step is neither done nor
+// broken — the agent ran out of iterations mid-job and REPORTS what remains instead of dying as
+// an agent_error whose retry forgets everything but the workspace. The AGENT only ever reports;
+// the RUNTIME grants: continuation rounds are auto-granted while budget and the round cap allow,
+// then escalate to the human gate (feedback_requested — the ask_human machinery). An agent asked
+// "do you want more budget" always says yes, which is why there is no request_iterations tool.
+export const SignalOutcome = z.enum(['success', 'failure', 'partial'])
 export type SignalOutcome = z.infer<typeof SignalOutcome>
 export const SIGNAL_OUTCOME = SignalOutcome.enum
+
+// Auto-granted continuation rounds per step attempt before the human gate takes over. The USD
+// budget stays the true ceiling (checked per grant); this cap only bounds how long a step can
+// re-run itself when NO budget is configured. [conjecture — no corpus of partial-signalling
+// steps exists yet; revisit against real runs, and make it a config knob if one size proves wrong]
+export const MAX_AUTO_CONTINUATIONS = 3
 
 // The agent's self-report of which pulled notes ANSWERED the step and which wasted it — the
 // capture seam for memory_outcome events: one field on the signal the step already sends, no
@@ -303,6 +315,11 @@ export interface ExecutorContext<LM = unknown> {
   taskId?: string // the plan this step belongs to — absent in bare test ctxs, which skip ambient capture
   memoryPreloadTokens?: number // Task 7's memory-preload budget: fed via dbos-port config, consumed by the loop's preload search
   memory?: StepMemory
+  // Set by the port on a continuation round (a previous round signalled `partial`): the previous
+  // round's summary IS the handoff — the same "your summary is the only output downstream sees"
+  // seam, pointed at your own successor. The loop renders it into the first prompt; nothing else
+  // changes shape, so round 0 constructors (tests, fixtures) keep compiling untouched.
+  continuation?: { round: number; summary: string }
 }
 
 /** One preload pull: matched statements plus the notes that matched without asserting one. */

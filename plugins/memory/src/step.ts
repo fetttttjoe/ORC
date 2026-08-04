@@ -8,16 +8,24 @@ import { memoryTools, unavailableMemoryTools, MEMORY_ROLE, type MemoryRole } fro
 import { corpusDrift, type ChangedSince, type CorpusDrift } from './drift'
 
 // Distinct id prefixes so a later success cannot overwrite a failure lesson — both notes coexist.
+// `partial` is null — NO ambient note: continuation rounds share a runToken, so the ambient
+// idempotency key (`${runToken}:ambient:${prefix}:${stepId}`) would collide across rounds and the
+// interim summary would swallow the terminal one. The final signal writes the durable note; a
+// partial's summary travels to the next round via the port's continuation ctx, not the graph.
 interface AmbientSpec { idPrefix: string; tags: readonly string[] }
-const AMBIENT: Record<SignalOutcome, AmbientSpec> = {
-  [SIGNAL_OUTCOME.success]: { idPrefix: 'step', tags: ['ambient'] },
-  [SIGNAL_OUTCOME.failure]: { idPrefix: 'failed step', tags: ['ambient', 'failure'] },
+// the success prefix, spelled once: AMBIENT uses it for the note the step writes, ambientNoteId
+// for the id a SIBLING links to — one drifting from the other is a dead edge
+const STEP_NOTE_PREFIX = 'step'
+const AMBIENT: Record<SignalOutcome, AmbientSpec | null> = {
+  [SIGNAL_OUTCOME.success]: { idPrefix: STEP_NOTE_PREFIX, tags: ['ambient'] },
+  [SIGNAL_OUTCOME.failure]: { idPrefix: `failed ${STEP_NOTE_PREFIX}`, tags: ['ambient', 'failure'] },
+  [SIGNAL_OUTCOME.partial]: null,
 }
 
 // ONE derivation: the id a step writes and the id a sibling links to must match or the edge is dead.
 // Not exported: only this file's own ambientLinks/capture call it — see index.ts's rule that a
 // re-export nobody imports is compatibility debt for no consumer.
-const ambientNoteId = (stepId: string): string => slugId(`${AMBIENT[SIGNAL_OUTCOME.success].idPrefix} ${stepId}`)
+const ambientNoteId = (stepId: string): string => slugId(`${STEP_NOTE_PREFIX} ${stepId}`)
 
 // Both kinds resolve under contracts/linkLookupScopes: a sibling's ambient note shares this note's
 // plan scope, and a project note is reachable from any scope. Capped at the schema's own limit.
@@ -254,6 +262,7 @@ export function bindStepMemory(opts: {
         }
         if (opts.ambientCapture === false || !signal.summary) return
         const spec = AMBIENT[signal.outcome]
+        if (spec === null) return // partial: interim state, no durable note (see AMBIENT's comment)
         try {
           await store.write({
             // keyed by step id (unique in a plan), not the free-form title: two same-titled steps

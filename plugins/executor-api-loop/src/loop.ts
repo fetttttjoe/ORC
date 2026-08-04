@@ -199,6 +199,12 @@ function buildPrompt(ctx: ExecutorContext<LanguageModel>, knownContextBlock = ''
     `# Your step: ${ctx.step.title} (role: ${ctx.step.role})\n${ctx.step.instructions}`,
     skills, // force-loaded plan data — never model-elective (spec §6)
     deps ? `# Upstream outputs\n${deps}` : '',
+    // The continuation handoff: the previous round's signal summary is the ONLY context that
+    // survives a round boundary (the conversation does not), so it renders as its own block —
+    // after the upstream outputs it complements, before the protocol.
+    ctx.continuation
+      ? `# Continuing your own previous work (round ${ctx.continuation.round + 1})\nA previous round of THIS step ended with outcome 'partial' and reported:\n${ctx.continuation.summary}\nContinue from there. Do not redo work the report says is done — verify cheaply where you must, then finish what remains.`
+      : '',
     knownContextBlock, // between deps and the protocol (design: retrieval without a turn)
     KNOWLEDGE_PROTOCOL,
     `You have file tools scoped to your workspace. Iteration budget: ${ctx.step.maxIterations} model calls — plan to finish within it. When finished (or stuck), call the 'signal' tool — its summary is the only thing downstream steps will see.`,
@@ -212,7 +218,7 @@ function budgetNote(iteration: number, max: number): string | null {
   const remaining = max - iteration + 1
   if (remaining > 3) return null
   return remaining === 1
-    ? `FINAL iteration (${iteration}/${max}): call 'signal' THIS turn. Summarize what you have; put unfinished work in the summary.`
+    ? `FINAL iteration (${iteration}/${max}): call 'signal' THIS turn. Done → outcome 'success'. Genuinely unfinished → outcome 'partial' with a summary stating exactly what is done and what remains — a continuation round may be granted and your summary is ALL it gets.`
     : `Budget: iteration ${iteration} of ${max} — ${remaining} model calls left. Stop exploring; finish pending writes and call 'signal'.`
 }
 

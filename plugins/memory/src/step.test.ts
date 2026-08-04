@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'bun:test'
 import {
-  LINK_KIND, MEMORY_ACCESS, MEMORY_USE, MemoryScope, NOTE_TIER, planScope, slugId,
+  LINK_KIND, MEMORY_ACCESS, MEMORY_USE, MemoryScope, NOTE_TIER, SIGNAL_OUTCOME, planScope, slugId,
   type ClaimHit, type MemoryAuthor, type MemoryNote, type MemoryNoteDraft, type MemoryStore, type NoteSummary,
 } from '@orc/contracts'
 import { bindStepMemory, deriveQueryTerms, preloadQuery } from './step'
@@ -186,6 +186,20 @@ describe('capture', () => {
     })
     expect(f.outcomes).toHaveLength(1)
     expect(f.writes).toHaveLength(0) // the knob still silences the ambient note itself
+  })
+
+  // A partial round's knowledge is evidence like any other (per-id idempotency keys make a later
+  // round's repeat of the same id a dedupe, not a double-count) — but its ambient note is SKIPPED:
+  // rounds share a runToken, so the ambient idempotency key collides and the interim summary would
+  // swallow the final one. The final signal writes the durable note.
+  it('a partial signal records knowledge but writes no ambient note', async () => {
+    const f = fakeStore()
+    await bind(f).memory.capture({
+      outcome: SIGNAL_OUTCOME.partial, summary: 'healed 14/26 — remaining ids in worklist',
+      knowledge: { useful: ['area-auth'], deadEnd: [] },
+    })
+    expect(f.outcomes).toHaveLength(1)
+    expect(f.writes).toHaveLength(0)
   })
 
   it('a signal with no knowledge records nothing — absence costs nothing', async () => {

@@ -116,6 +116,32 @@ describe('api-loop executor', () => {
     expect(z.object({ signal: z.object({ knowledge: z.unknown() }) }).parse(draft?.payload).signal.knowledge).toEqual(knowledge)
   })
 
+  // The continuation seam: a partial signal ends the round like any other (the port owns the
+  // grant), and a continuation ctx renders the previous round's summary into the first prompt —
+  // it is the ONLY context that survives a round boundary.
+  it('a partial signal ends the round as a signal, not an error', async () => {
+    const model = scriptModel([
+      { toolCalls: [{ toolCallId: 'c1', toolName: 'signal', input: { outcome: 'partial', summary: 'done 3/9, remaining: x y z' } }] },
+    ])
+    const events = await drain(apiLoopExecutor().startTurn(ctx(model, [])))
+    expect(events.map(e => e.type)).toEqual(['usage', 'signal', 'done'])
+    const signalled = events.find(e => e.type === 'signal')
+    expect(signalled && 'signal' in signalled ? signalled.signal.outcome : undefined).toBe('partial')
+  })
+
+  it('a continuation ctx renders the previous summary into the first prompt', async () => {
+    const captured: EventDraft[] = []
+    const model = scriptModel([
+      { toolCalls: [{ toolCallId: 'c1', toolName: 'signal', input: { outcome: 'success', summary: 'finished' } }] },
+    ])
+    const base = ctx(model, captured)
+    await drain(apiLoopExecutor().startTurn({ ...base, continuation: { round: 1, summary: 'healed 14 of 26; remaining ids: a, b' } }))
+    const call = captured.find(d => d.kind === EVENT_KIND.agent_call)
+    const prompt = JSON.stringify(RequestPayload.parse(call?.payload).request)
+    expect(prompt).toContain('Continuing your own previous work (round 2)')
+    expect(prompt).toContain('healed 14 of 26; remaining ids: a, b')
+  })
+
   it('tool call → executes → feeds result back → signal on turn 2', async () => {
     const captured: EventDraft[] = []
     const model = scriptModel([

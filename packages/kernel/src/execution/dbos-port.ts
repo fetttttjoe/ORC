@@ -2,8 +2,8 @@ import { mkdirSync } from 'node:fs'
 import path from 'node:path'
 import { DBOS } from '@dbos-inc/dbos-sdk'
 import {
-  EVENT_KIND, FAILURE_CLASS, RUN_OUTCOME, SIGNAL_OUTCOME, STEP_ID, STEP_ROLE, TASK_STATUS, UNIFIED_EVENT_TYPE,
-  classifiedError, errorMessage, failureClassOf, isTerminalError, resolveModel, costUSDFor,
+  EVENT_KIND, FAILURE_CLASS, MAX_AUTO_CONTINUATIONS, RUN_OUTCOME, SIGNAL_OUTCOME, STEP_ID, STEP_ROLE, TASK_STATUS, UNIFIED_EVENT_TYPE,
+  classifiedError, errorMessage, failureClassOf, isApprovalAnswer, isTerminalError, resolveModel, costUSDFor,
   type AgentExecutor, type Checkpoint, type CommitRecordedPayload, type EventDraft, type ExecutionPort, type ExecutorContext,
   type FailureClass, type LoadedSkill, type ModelProvider, type OperationCheckpoint, type Plan, type PlanStep,
   type ResolvedTool, type RunHandle, type RunOutcome, type Signal, type SplitResult, type StepMemory, type TaskStatus, type ToolSource,
@@ -438,13 +438,34 @@ export async function createDbosPort(opts: {
         budgetRemainingUSD: async () => remainingBudget(await projectState(), args.taskId),
       }
 
+      // splitIds already handed to a previous gate in THIS workflow. Rebuilds correctly on
+      // replay because each gate:targets checkpoint replays its recorded value in order. Shared
+      // across continuation rounds: a split consumed in round 0 must not be re-offered in round 1.
+      const consumed = new Set<string>()
+      // the runtime's continuation verdict, recorded per round — an enum, not bare strings, so
+      // the checkpoint value and every comparison spell it once
+      enum ContinuationGrant { auto = 'auto', ask = 'ask' }
+      // one spelling of the gate's topic: the ask below and any reader tracing a feedback event
+      // back to its round derive it identically
+      const continuationTopic = (stepId: string, round: number): string => `continue:${stepId}:${round}`
+      // ONE round of the executor: drive a fresh generator to its signal/error. Rounds exist
+      // because `partial` ends a round without ending the step — the runtime then grants (or the
+      // human gate allows) another. Round > 0 gets the previous round's summary as its whole
+      // context (ExecutorContext.continuation), and its checkpoint/operation names carry a round
+      // prefix: the loop names them by ITERATION, which restarts at 1 every round, and a reused
+      // name would replay round 0's recorded model call as round 1's answer.
+      const driveRound = async (round: number, prevSummary: string | null): Promise<{ signal: Signal | null; error: { class: string; message: string } | null }> => {
       // a holder, not two `let`s: the callback below assigns these, and TS control-flow can't see a
       // closure assignment — a plain `let signal` would narrow to `null` at the reads after the drive
       const collected: { signal: Signal | null; error: { class: string; message: string } | null } = { signal: null, error: null }
-      const gen = executor.startTurn(ctx)
-      // splitIds already handed to a previous gate in THIS workflow. Rebuilds correctly on
-      // replay because each gate:targets checkpoint replays its recorded value in order.
-      const consumed = new Set<string>()
+      const roundName = (name: string): string => round === 0 ? name : `r${round}:${name}`
+      const roundCtx: typeof ctx = round === 0 ? ctx : {
+        ...ctx,
+        checkpoint: (name, fn, toEvents) => ctx.checkpoint(roundName(name), fn, toEvents),
+        operation: (spec, fn, toEvents) => ctx.operation({ ...spec, name: roundName(spec.name) }, fn, toEvents),
+        continuation: { round, summary: prevSummary ?? '' },
+      }
+      const gen = executor.startTurn(roundCtx)
       // driveGenerator guarantees gen.return() in a finally, so loop.ts's OWN finally
       // (releaseWriteClaims) runs even when the PORT throws while the generator is suspended at a
       // gate (a cancelled recv, a checkpoint failure). An abandoned async generator's finally never
@@ -498,8 +519,54 @@ export async function createDbosPort(opts: {
         }
         return undefined
       })
-      const signal = collected.signal
-      const error = collected.error
+      return collected
+      }
+
+      // The continuation loop (the A+B synthesis): the agent REPORTS `partial`, the runtime
+      // GRANTS. Auto-continue while the ancestor budget has room and the round cap allows;
+      // past either, the ask escalates to the standing human gate (feedback_requested — the
+      // same machinery ask_human parks on, answered by `orc reply`, the web console or MCP).
+      // There is deliberately no request_iterations tool: an agent asked whether it wants more
+      // budget always says yes, so the grant lives where spend is already enforced.
+      let round = 0
+      let { signal, error } = await driveRound(round, null)
+      while (signal?.outcome === SIGNAL_OUTCOME.partial) {
+        const partialSummary = signal.summary
+        // Grant in a checkpoint: the budget read folds the log, which moves between run and
+        // replay — an unrecorded verdict could auto-continue live and gate on recovery, forking
+        // the workflow's history at the exact seam this file exists to keep deterministic.
+        const grant = await checkpoint(`continue:grant:${round}`, async (): Promise<ContinuationGrant> => {
+          if (round + 1 > MAX_AUTO_CONTINUATIONS) return ContinuationGrant.ask
+          const remaining = await ctx.budgetRemainingUSD()
+          // null = no budget configured anywhere in the chain — the round cap is the only brake
+          return remaining === null || remaining > 0 ? ContinuationGrant.auto : ContinuationGrant.ask
+        })
+        if (grant !== ContinuationGrant.auto) {
+          const topic = continuationTopic(args.stepId, round)
+          await checkpoint(`continue:ask:${round}`, async () => 0, () => [{
+            kind: EVENT_KIND.feedback_requested,
+            payload: {
+              question: `step '${args.stepId}' signalled 'partial' after ${round + 1} round(s) and its auto-continue allowance is exhausted (${round + 1 > MAX_AUTO_CONTINUATIONS ? 'round cap reached' : 'budget spent'}). It reports: ${partialSummary} — reply 'approve' to grant another round; anything else stops the step here.`,
+              topic,
+            },
+          }])
+          // same long-poll shape as the ask_human gate above, same reasons
+          let answer: string | null = null
+          while (answer === null) answer = await DBOS.recv<string>(`feedback:${topic}`, GATE_POLL_SECONDS)
+          if (!isApprovalAnswer(answer)) {
+            // The HUMAN stopped it — a decision, not a malfunction, so it must not read as one:
+            // human_abort routes the operator to the summary (which says what remains), never to
+            // a retry loop that would re-ask the same question.
+            await checkpoint('finish', async () => answer, () => [{
+              kind: EVENT_KIND.step_failed,
+              payload: { stepId: args.stepId, runToken, class: FAILURE_CLASS.human_abort, message: `continuation declined: ${answer}. Last partial report: ${partialSummary}` },
+            }])
+            return { stepId: args.stepId, ok: false }
+          }
+        }
+        round += 1
+        ;({ signal, error } = await driveRound(round, partialSummary))
+      }
 
       if (signal?.outcome === SIGNAL_OUTCOME.success) {
         const success = signal // closures below see the narrowed binding

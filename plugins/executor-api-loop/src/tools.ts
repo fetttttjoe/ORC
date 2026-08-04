@@ -52,7 +52,7 @@ export function toolSet(extra: ResolvedTool[] = [], opts: { role?: string; readO
   const set = {
     [TOOL_NAME.signal]: tool({
       description:
-        'End this step and report the outcome. Your summary is the ONLY output downstream steps see — put your conclusions and the ids of notes you wrote in it; do not restate note bodies (downstream pulls notes at its own budget). Declare files you produced in `outputs` (workspace-relative paths) so they are verified and receipted. If you pulled memory notes, report them in `knowledge`: note ids that ANSWERED your question in `useful`, ids that wasted the step in `deadEnd` — future retrieval learns from this. Call this exactly once, when the work is done or cannot proceed.',
+        "End this step and report the outcome. Your summary is the ONLY output downstream steps see — put your conclusions and the ids of notes you wrote in it; do not restate note bodies (downstream pulls notes at its own budget). Declare files you produced in `outputs` (workspace-relative paths) so they are verified and receipted. If you pulled memory notes, report them in `knowledge`: note ids that ANSWERED your question in `useful`, ids that wasted the step in `deadEnd` — future retrieval learns from this. Outcome 'partial' means the work is going well but needs another round: state precisely what is DONE and what REMAINS — the runtime may grant a continuation whose only context is that summary. Never 'partial' for work that is blocked or wrong; that is 'failure'. Call this exactly once per round, when the work is done, needs another round, or cannot proceed.",
       inputSchema: SignalInput,
     }),
     [TOOL_NAME.fs_read]: tool({
