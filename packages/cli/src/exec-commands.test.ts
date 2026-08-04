@@ -4,7 +4,7 @@ import { EVENT_KIND, TASK_STATUS, type Analyzer, type ExecutionPort, type Operat
 import { stepFixture } from '@orc/contracts/fixtures'
 import { openStorage, type EventLog } from '@orc/kernel'
 import { createTestDb, TEST_PROJECT_ID } from '@orc/kernel/test-helpers'
-import { singleStepDraft } from './actions'
+import { singleStepDraft } from './plan-template'
 import { buildProgram, openKernel } from './main'
 
 const dbs: Array<{ drop: () => Promise<void> }> = []

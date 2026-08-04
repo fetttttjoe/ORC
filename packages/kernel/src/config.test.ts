@@ -133,6 +133,15 @@ describe('loadConfig', () => {
       })
     })
   }
+  it('memorySweepIterations defaults lean (15) and honors ORC_MEMORY_SWEEP_ITERATIONS', () => {
+    // deliberately far below maxIterations: the sweep is the one recurring auto-drafted spend,
+    // and a sweep that genuinely needs more signals 'partial' and continues under runtime grants
+    expect(loadConfig(mkdtempSync(path.join(tmpdir(), 'orc-'))).memorySweepIterations).toBe(15)
+    withEnv({ ORC_MEMORY_SWEEP_ITERATIONS: '25' }, () => {
+      expect(loadConfig('/tmp/x').memorySweepIterations).toBe(25)
+    })
+  })
+
   it('maxIterations defaults to 30; file and env override it (env wins)', () => {
     expect(loadConfig(mkdtempSync(path.join(tmpdir(), 'orc-'))).maxIterations).toBe(30)
     const dir = tmpProject({ maxIterations: 12 })

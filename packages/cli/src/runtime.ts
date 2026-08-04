@@ -6,7 +6,7 @@ import { createOllamaProvider } from '@orc/provider-ollama'
 import { agentAnalyzer } from '@orc/analyzer-agent'
 import { createMcpHub, type McpHub } from '@orc/mcp-client'
 import { corpusDrift, createDriftProbe, createMemory, createMemoryLifecycle, createGroundingSource, memoryVerifyTool, notesCiting, restampToHead, unavailableStepMemory, memoryRoleFor, type BindStep, type MemoryLifecycle } from '@orc/memory'
-import { AUTO_HEAL_DEBOUNCE_MS, AUTO_SWEEP_TITLE, createAutoHeal } from './auto-heal'
+import { AUTO_HEAL_DEBOUNCE_MS, AUTO_SWEEP_TITLE, createAutoHeal, sweepPlanDraft } from './auto-heal'
 import { openMemory } from './memory-open'
 import { buildDistiller } from './consolidation-distiller'
 import { createVaultProjector } from '@orc/vault-projector'
@@ -130,15 +130,19 @@ export async function buildRuntime(
       drifted: async () => (await corpusDrift(await memoryStore.list({ tier: NOTE_TIER.semantic }), createDriftProbe(config.dir))).drifted,
       hasOpenSweep: async () => (await kernel.listTasks()).some(t => t.title === AUTO_SWEEP_TITLE && !TERMINAL_TASK_STATUS.has(t.status)),
       draftSweep: async drifted => {
-        await kernel.createTask({
+        const task = await kernel.createTask({
           title: AUTO_SWEEP_TITLE,
           spec: `Auto-drafted by the commit reactor: ${drifted} note(s) still read drifted after the free restamp pass. `
             + 'Call memory_recheck FIRST — it returns the authoritative worklist; never discover candidates via memory_search. '
             + 'For every listed note: memory_read it, check its claims against the current working tree, then re-write it '
             + '(memory_write, SAME id) with corrected content, or with a re-verified claim when its statements still hold. '
             + 'Memory tools and read-only filesystem access only — never edit repository files, never run git commands. '
-            + 'Finish by calling memory_recheck again and reporting both counts verbatim.',
+            + 'Finish by calling memory_recheck again and reporting both counts verbatim. '
+            + "If the worklist outgrows your iteration budget, signal outcome 'partial' naming the healed and remaining ids.",
         })
+        // Proposing is still not approving — the human gate and the spend stay exactly where
+        // they were; see sweepPlanDraft for why the draft now carries its plan and lean budget.
+        await kernel.proposePlan(task.id, sweepPlanDraft(task.spec, config.memorySweepIterations))
       },
       warn: m => console.warn(m),
     })

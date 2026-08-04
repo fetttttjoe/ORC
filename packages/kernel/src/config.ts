@@ -46,6 +46,12 @@ const settingsSchema = (dir: string) =>
     // returned nothing on a default config. Swap via config or ORC_MEMORY_EMBED_MODEL. A model
     // change needs `orc memory rebuild` to re-embed; vectors from different models don't compare.
     memoryEmbedModel: z.string().default('ollama/mxbai-embed-large'),
+    // Agent-loop budget for the REACTOR-DRAFTED heal sweep, deliberately far below maxIterations:
+    // the sweep is the one recurring auto-drafted spend, and the measured 9-note sweep used well
+    // under 20 iterations of the 60 the general default granted (2026-08-04). A sweep that
+    // genuinely needs more signals `partial` and continues through the runtime's continuation
+    // grants — lean by default, self-extending under evidence, never silently over-provisioned.
+    memorySweepIterations: z.coerce.number().int().positive().default(15),
     // the model that DISTILS a finished task's step outcomes into one durable note, as a
     // 'provider/model' ref. '' (default) = extractive promotion (glued bullets, zero model calls);
     // set it (e.g. 'anthropic/claude-haiku-4-5') to have the out-of-band lifecycle synthesise a
@@ -106,6 +112,7 @@ const envOverrides = (): Record<string, string> => {
     memoryHalfLifeDays: process.env.ORC_MEMORY_HALF_LIFE_DAYS,
     memoryPreloadTokens: process.env.ORC_MEMORY_PRELOAD_TOKENS,
     memoryEmbedModel: process.env.ORC_MEMORY_EMBED_MODEL,
+    memorySweepIterations: process.env.ORC_MEMORY_SWEEP_ITERATIONS,
     memoryConsolidateModel: process.env.ORC_MEMORY_CONSOLIDATE_MODEL,
     ambientCapture: process.env.ORC_AMBIENT_CAPTURE,
     autoCommit: process.env.ORC_AUTO_COMMIT,

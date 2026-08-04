@@ -1,4 +1,5 @@
-import { AUTO_HEAL_MODE, type AutoHealMode } from '@orc/contracts'
+import { AUTO_HEAL_MODE, type AutoHealMode, type PlanDraft } from '@orc/contracts'
+import { DEFAULT_TEMPLATE_MODEL, singleStepDraft } from './plan-template'
 
 /**
  * The auto-heal reactor (knowledge provenance plan T2): what happens after the signal router
@@ -29,6 +30,14 @@ export interface AutoHealDeps {
 // The drafted task's title — the dedupe key hasOpenSweep matches on, so it is a constant, not
 // prose composed at the call site.
 export const AUTO_SWEEP_TITLE = 'auto-heal: sweep drifted knowledge'
+
+// The drafted sweep's PLAN, built beside the title it belongs to: reactor drafts arrive
+// plan-ready so the human's approve is genuinely one click (the operator used to have to
+// `orc propose` the draft by hand first — observed 2026-08-04). `maxIterations` comes from
+// config.memorySweepIterations, deliberately lean: a sweep that genuinely needs more signals
+// `partial` and continues under the runtime's own continuation grants.
+export const sweepPlanDraft = (spec: string, maxIterations: number): PlanDraft =>
+  singleStepDraft({ title: AUTO_SWEEP_TITLE, spec }, DEFAULT_TEMPLATE_MODEL, [], maxIterations)
 
 // Starting point, not a measurement: the log carries too few commit_recorded events to derive a
 // cadence yet (2 as of 2026-08-03). The window's job is to make a rebase land as ONE reaction

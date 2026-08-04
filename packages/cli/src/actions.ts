@@ -1,6 +1,7 @@
-import { STEP_ROLE, errorMessage, EVENT_KIND, ISOLATION_TIER, ModelsDiscoveredPayload, NOTE_KIND, STRATEGY, TASK_STATUS, costUSDFor, parseModelRef, type ExecutionPort, type ModelOption, type PlanDraft, type TaskStatus } from '@orc/contracts'
-import { DEFAULT_MAX_ITERATIONS, Kernel, blockingVerdicts, retryIsFutile, deriveSystemUrl, dropSystemDatabase, initializeProject, liveSupervisors, loadConfig, openStorage, resetSystemDatabase, subtreeTaskIds, type EventLog, type ProjectConfig, type Storage } from '@orc/kernel'
+import { errorMessage, EVENT_KIND, ModelsDiscoveredPayload, NOTE_KIND, TASK_STATUS, costUSDFor, parseModelRef, type ExecutionPort, type ModelOption, type TaskStatus } from '@orc/contracts'
+import { Kernel, blockingVerdicts, retryIsFutile, deriveSystemUrl, dropSystemDatabase, initializeProject, liveSupervisors, loadConfig, openStorage, resetSystemDatabase, subtreeTaskIds, type EventLog, type ProjectConfig, type Storage } from '@orc/kernel'
 import { seedRegistries } from './runtime'
+import { singleStepDraft } from './plan-template'
 import { createMemory, openKnowledge, orphanedNotes } from '@orc/memory'
 import { openMemory } from './memory-open'
 import { PROJECT_DIR_NOTE_ID, PROJECT_NAME_NOTE_ID, type OrcActions } from '@orc/ui-core'
@@ -18,26 +19,6 @@ const uiNote = (id: string, title: string, summary: string) => ({
 const nameNote = (name: string) => uiNote(PROJECT_NAME_NOTE_ID, name, 'display name for the project chat')
 const dirNote = (dir: string) => uiNote(PROJECT_DIR_NOTE_ID, dir, 'working directory of the project')
 
-export function singleStepDraft(task: { title: string; spec: string }, modelRef: string, skillRefs: string[] = [], maxIterations = DEFAULT_MAX_ITERATIONS): PlanDraft {
-  return {
-    strategyRef: STRATEGY.single,
-    costEstimateUSD: null,
-    steps: [{
-      id: 's1',
-      role: STEP_ROLE.worker,
-      title: task.title,
-      instructions: task.spec === '' ? task.title : task.spec,
-      executorRef: 'api-loop',
-      modelRef,
-      skillRefs,
-      toolRefs: [],
-      isolation: ISOLATION_TIER.local, // the only implemented tier — worktree/docker come with sandbox plugins
-      zone: [],
-      maxIterations,
-      dependsOn: [],
-    }],
-  }
-}
 
 // The statuses startRunAt (dbos-port.ts) admits — anything else is terminal or waiting on a human,
 // so a run_requested naming it could never be served. ONE set, so "can this be driven?" means the

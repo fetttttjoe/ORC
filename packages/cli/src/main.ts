@@ -8,12 +8,13 @@ import { openStorage, Kernel, atomicWriteFileSync, listProjectIds, claimSlot, fo
 import { createVaultProjector, parsePlanFile } from '@orc/vault-projector'
 import { archiveCandidates, consolidateTask, createDriftProbe, frontier, needsReground, probeMemory, RECHECK_KINDS, recheckNotes, restampToHead, summarize } from '@orc/memory'
 import { withMemory } from './memory-open'
+import { DEFAULT_TEMPLATE_MODEL, singleStepDraft } from './plan-template'
 import { buildDistiller } from './consolidation-distiller'
 import { seedRegistries, buildRuntime } from './runtime'
 import { runSupervisor, startBootHeartbeat, supervisorHealth } from './serve'
 import { ensureSupervisor, SUPERVISOR_MODE, type SupervisorMode } from './supervisor-client'
 import { isLanguageModel } from './model-guard'
-import { assertDrivable, assertRetryable, buildModelDiscovery, buildOrcActions, singleStepDraft } from './actions'
+import { assertDrivable, assertRetryable, buildModelDiscovery, buildOrcActions } from './actions'
 import { renderDerivedPlan, renderPlanHuman } from './plan-render'
 import { CommandFailure } from './exit'
 import { formatUsageLine } from './usage-render'
@@ -278,7 +279,7 @@ export function buildProgram(
     .command('propose <taskId>')
     .description('stamp a plan for review (default: a single-step template of your spec — NO model call; --file supplies an authored multi-step draft)')
     .option('--file <path>', 'plan draft JSON file')
-    .option('--model <ref>', 'model for template steps', 'anthropic/claude-sonnet-5')
+    .option('--model <ref>', 'model for template steps', DEFAULT_TEMPLATE_MODEL)
     .option('--skill <names...>', 'force-load skills for the template step (e.g. documentation)')
     .action(planAction((id, draft) => requireKernel().proposePlan(id, draft), plan => `proposed (${plan.steps.length} steps)`))
 
@@ -286,7 +287,7 @@ export function buildProgram(
     .command('edit <taskId>')
     .description('edit a plan (default: single-step template)')
     .option('--file <path>', 'plan draft JSON file')
-    .option('--model <ref>', 'model for template steps', 'anthropic/claude-sonnet-5')
+    .option('--model <ref>', 'model for template steps', DEFAULT_TEMPLATE_MODEL)
     .option('--skill <names...>', 'force-load skills for the template step (e.g. documentation)')
     .option('--from-vault', 'read the edited plan markdown from the vault')
     .action(planAction((id, draft) => requireKernel().editPlan(id, draft), () => 'edited'))

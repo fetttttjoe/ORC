@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'bun:test'
 import { AUTO_HEAL_MODE } from '@orc/contracts'
-import { AUTO_SWEEP_TITLE, createAutoHeal, type AutoHealDeps } from './auto-heal'
+import { AUTO_SWEEP_TITLE, createAutoHeal, sweepPlanDraft, type AutoHealDeps } from './auto-heal'
 
 // A hand-cranked scheduler: the debounce contract is about WHICH calls collapse, not wall-clock,
 // so the tests own the clock the way loop tests own their fake ports.
@@ -102,5 +102,18 @@ describe('createAutoHeal', () => {
 
   it('the sweep title is a stable constant — dedupe keys on it', () => {
     expect(AUTO_SWEEP_TITLE.length).toBeGreaterThan(0)
+  })
+})
+
+describe('sweepPlanDraft', () => {
+  it('builds the one-click plan: sweep title, the drafted spec verbatim, and the LEAN budget', () => {
+    const draft = sweepPlanDraft('heal 9 notes: recheck first', 15)
+    expect(draft.steps).toHaveLength(1)
+    const s = draft.steps[0]!
+    expect(s.title).toBe(AUTO_SWEEP_TITLE) // the dedupe key hasOpenSweep matches on
+    expect(s.instructions).toBe('heal 9 notes: recheck first')
+    // the knob is the whole point: the general default (60) over-provisioned every sweep, and a
+    // sweep that genuinely needs more signals 'partial' and continues under runtime grants
+    expect(s.maxIterations).toBe(15)
   })
 })

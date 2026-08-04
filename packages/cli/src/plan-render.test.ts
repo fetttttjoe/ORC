@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'bun:test'
 import { renderDerivedPlan, renderPlanHuman } from './plan-render'
-import { singleStepDraft } from './actions'
+import { singleStepDraft } from './plan-template'
 
 const plan = { version: 2, ...singleStepDraft({ title: 'summarize notes', spec: 'read notes.txt, write summary.md' }, 'anthropic/claude-haiku-4-5') }
 
