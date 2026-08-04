@@ -1,7 +1,7 @@
 <script lang="ts">
   import { createQuery } from '@tanstack/svelte-query'
   import { MEMORY_HEALTH } from '@orc/contracts/health'
-  import { MEMORY_STAGE, SUPERVISOR_HEALTH, type MemoryStageName } from '@orc/contracts/health'
+  import { MEMORY_STAGE, MemoryStageName, SUPERVISOR_HEALTH } from '@orc/contracts/health'
   import { Progress } from '$lib/components/ui/progress'
   import { api } from '$lib/api/client'
   import { qk } from '$lib/query-keys'
@@ -73,6 +73,25 @@
     [MEMORY_STAGE.replaying]: 'replaying knowledge events',
     [MEMORY_STAGE.linking]: 're-linking the knowledge graph',
     [MEMORY_STAGE.clustering]: 're-clustering claims through the embedder',
+  }
+  // The boot pipeline as a SEGMENTED track: replay → link → cluster, in the contract's own stage
+  // order (one spelling — MemoryStageName.options is the sequence the projector actually runs).
+  // Rendered only while BOOTING with a live stage: during a live-path refresh the earlier
+  // segments did not run, and a track showing them "done" would be a lie about work nobody did.
+  const STAGE_ORDER = MemoryStageName.options
+  const SEGMENT_LABEL: Record<MemoryStageName, string> = {
+    [MEMORY_STAGE.replaying]: 'replay',
+    [MEMORY_STAGE.linking]: 'link',
+    [MEMORY_STAGE.clustering]: 'cluster',
+  }
+  const activeIdx = $derived(mem?.stage ? STAGE_ORDER.indexOf(mem.stage.name) : -1)
+  const bootTrack = $derived(sup?.state === SUPERVISOR_HEALTH.booting && activeIdx >= 0)
+  /** a segment's fill: 100 behind the active stage, the replay's own count inside it, null = active-indeterminate */
+  const segmentPct = (i: number): number | null => {
+    if (i < activeIdx) return 100
+    if (i > activeIdx) return 0
+    const c = counted
+    return c && c.total > 0 ? Math.min(100, Math.round((c.applied / c.total) * 100)) : null
   }
   // The replaying stage carries its own count, and saying it matters: a stage line WITHOUT one
   // ("replaying knowledge events (40s so far)") replaced the quantitative "N events left to
@@ -186,11 +205,31 @@
         </span>
       {/if}
     </div>
-    <Progress
-      value={banner.percent ?? undefined}
-      class={cn('h-1', banner.percent === null && 'animate-pulse')}
-      aria-label={banner.title}
-    />
+    {#if bootTrack}
+      <!-- the whole boot at a glance: done segments full, the active one filled by its own count
+           (or pulsing where the stage has no unit), the rest waiting — an operator sees WHERE the
+           boot is, not just that one exists -->
+      <div class="flex items-center gap-1" role="progressbar" aria-label="boot pipeline">
+        {#each STAGE_ORDER as name, i (name)}
+          {@const pct = segmentPct(i)}
+          <div class="flex grow flex-col gap-0.5">
+            <div class="h-1 overflow-hidden rounded-full bg-line">
+              <div
+                class={cn('h-full rounded-full bg-moss', pct === null && 'w-full animate-pulse opacity-50')}
+                style={pct === null ? undefined : `width: ${pct}%`}
+              ></div>
+            </div>
+            <span class={cn('font-mono text-label', i === activeIdx ? 'text-mist' : 'text-fog')}>{SEGMENT_LABEL[name]}</span>
+          </div>
+        {/each}
+      </div>
+    {:else}
+      <Progress
+        value={banner.percent ?? undefined}
+        class={cn('h-1', banner.percent === null && 'animate-pulse')}
+        aria-label={banner.title}
+      />
+    {/if}
     <p class="text-row leading-relaxed text-mist">{banner.detail}</p>
   </section>
 {/if}

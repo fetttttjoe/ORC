@@ -10,7 +10,7 @@ import { AUTO_HEAL_DEBOUNCE_MS, AUTO_SWEEP_TITLE, createAutoHeal } from './auto-
 import { openMemory } from './memory-open'
 import { buildDistiller } from './consolidation-distiller'
 import { createVaultProjector } from '@orc/vault-projector'
-import { commitTool, createDbosPort, createPluginHost, dbosSend, execTool, finalizePlanTool, isMcpTrusted, loadConfig, loadTrust, openStorage, readAnnotationsTool, reportCoverageTool, requireProject, scopedChangesTool, splitTool, Kernel, type DbosPort, type PluginHost, type ProjectConfig, type Storage } from '@orc/kernel'
+import { commitTool, createDbosPort, createPluginHost, dbosSend, execTool, finalizePlanTool, isMcpTrusted, loadConfig, loadTrust, openStorage, projectorLease, readAnnotationsTool, reportCoverageTool, requireProject, scopedChangesTool, splitTool, Kernel, type DbosPort, type PluginHost, type ProjectConfig, type Storage } from '@orc/kernel'
 
 export function seedRegistries(config = loadConfig()) {
   const providers = new Map<string, ModelProvider<unknown>>([
@@ -90,7 +90,11 @@ export async function buildRuntime(
   // exactly today's behavior.
   let groundingSource: ReturnType<typeof createGroundingSource> | undefined
   try {
-    memory = await openMemory({ log, config })
+    // The projector LEASE: one live projector per project. Every buildRuntime caller (serve, the
+    // graph server, mcp serve) used to run the full standing machinery; three of them against one
+    // SurrealDB starved a supervisor boot's drain for 18 minutes. Losers follow the holder's
+    // cursor — see createMemoryProjector's follower mode.
+    memory = await openMemory({ log, config, lease: projectorLease(config.databaseUrl, config.projectId) })
     await bootPhase('memory-projection', () => memory!.projector.start(), phases)
     const memoryProjector = memory.projector // captured for the lifecycle closure (memory is narrowed non-null here)
     // post-task memory maintenance (auto-consolidation) — a decoupled subscriber, started only in

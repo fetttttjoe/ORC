@@ -525,4 +525,117 @@ describe('projector stage publication', () => {
       'replaying', 'replaying', 'replaying', null, 'clustering', null,
     ])
   })
+
+  /**
+   * The BOOT drain announces itself at ANY size, and reports per event below the floor. The floor
+   * exists so an ordinary live write does not flicker a stage into the UI — but a boot is not
+   * ordinary: a small drain that STARVES (three projectors contending on one SurrealDB, measured
+   * 18 minutes on 2026-08-04) rendered as an unchanging "supervisor starting" pulse precisely
+   * because nothing was published below the floor. An operator watching 0/2 freeze for minutes
+   * has the honest signal; an operator watching nothing has a guess.
+   */
+  it('a boot announces the replay even below the big-drain floor', async () => {
+    const pg = await createTestDb(); drops.push(pg.drop)
+    const log = (await openStorage(pg.url, { projectId: TEST_PROJECT_ID })).events
+    const vaultDir = mkdtempSync(path.join(tmpdir(), 'orc-vault-boot-'))
+    const published: Array<{ name: string; progress?: { applied: number; total: number } } | null> = []
+    // ponytail: retained cast — see the SurrealMemory-is-a-class note above.
+    const stub = {
+      applyEvent: async () => true,
+      get: async () => null,
+      getCursor: async () => 0,
+      allNotes: async () => [],
+      setStage: async (s: { name: string; progress?: { applied: number; total: number } } | null) => { published.push(s) },
+      refreshLinks: async () => {},
+      refreshTopics: async () => {},
+    } as unknown as SurrealMemory
+    const proj = createMemoryProjector({ log, surreal: stub, vaultDir })
+    try {
+      await log.append({ taskId: null, stepId: null, runToken: null, kind: 'memory_written', payload: { note: { ...noteInput, id: 'b1' }, author: { source: 'cli' } } })
+      await log.append({ taskId: null, stepId: null, runToken: null, kind: 'memory_written', payload: { note: { ...noteInput, id: 'b2' }, author: { source: 'cli' } } })
+      await proj.start()
+    } finally {
+      await proj.close(); await log.close()
+    }
+    const replays = published.filter((s): s is { name: string; progress: { applied: number; total: number } } => s?.name === 'replaying')
+    expect(replays.map(r => r.progress)).toEqual([
+      { applied: 0, total: 2 }, { applied: 1, total: 2 }, { applied: 2, total: 2 },
+    ])
+  })
+})
+
+// ONE live projector per project. Three long-lived processes each ran a full projector against
+// one SurrealDB — every event woke three subscriptions, each debounce re-ran the ~13s
+// whole-corpus repartition, and a supervisor boot's initial drain starved behind them for 18
+// minutes (boot line: memory-projection 1073669ms, measured 2026-08-04). The lease makes the
+// read model's one-writer rule true for its refresh machinery, not just its rows.
+describe('projector lease', () => {
+  const heldElsewhere = { tryAcquire: async () => false, release: async () => {} }
+
+  it('a follower starts NO standing machinery — no subscription, no boot refresh', async () => {
+    const pg = await createTestDb(); drops.push(pg.drop)
+    const ts = await createTestSurreal(); drops.push(ts.drop)
+    const log = (await openStorage(pg.url, { projectId: TEST_PROJECT_ID })).events
+    const surreal = await SurrealMemory.open(ts)
+    const subscribes = spyOn(log, 'subscribe')
+    const vaultDir = mkdtempSync(path.join(tmpdir(), 'vault-'))
+    const proj = createMemoryProjector({ log, surreal, vaultDir, lease: heldElsewhere, followerWaitMs: 300 })
+    try {
+      await proj.start()
+      expect(subscribes).not.toHaveBeenCalled()
+    } finally {
+      subscribes.mockRestore()
+      await proj.close()
+      await surreal.close()
+    }
+  })
+
+  it("a follower's catchUp waits on the holder's cursor, and drains itself only when the holder never covers the log", async () => {
+    const pg = await createTestDb(); drops.push(pg.drop)
+    const ts = await createTestSurreal(); drops.push(ts.drop)
+    const log = (await openStorage(pg.url, { projectId: TEST_PROJECT_ID })).events
+    const surreal = await SurrealMemory.open(ts)
+    const vaultDir = mkdtempSync(path.join(tmpdir(), 'vault-'))
+    const proj = createMemoryProjector({ log, surreal, vaultDir, lease: heldElsewhere, followerWaitMs: 300 })
+    try {
+      await proj.start()
+      // no holder is actually projecting, so the bounded wait must expire and the fallback drain
+      // must cover the note — a dead holder degrades to slower reads, never to no reads
+      await log.append({ taskId: null, stepId: null, runToken: null, kind: 'memory_written', payload: { note: noteInput, author: { source: 'cli' } } })
+      await proj.catchUp()
+      expect((await surreal.get('auth', 'project'))?.title).toBe('Auth')
+      // now the read model covers the log: the next catchUp is the cheap path — no re-apply
+      const applies = spyOn(surreal, 'applyEvent')
+      try {
+        await proj.catchUp()
+        expect(applies).not.toHaveBeenCalled()
+      } finally { applies.mockRestore() }
+    } finally {
+      await proj.close()
+      await surreal.close()
+    }
+  })
+
+  it('the leader path acquires, runs the standing machinery, and releases on close', async () => {
+    const pg = await createTestDb(); drops.push(pg.drop)
+    const ts = await createTestSurreal(); drops.push(ts.drop)
+    const log = (await openStorage(pg.url, { projectId: TEST_PROJECT_ID })).events
+    const surreal = await SurrealMemory.open(ts)
+    const vaultDir = mkdtempSync(path.join(tmpdir(), 'vault-'))
+    let held = false
+    const lease = { tryAcquire: async () => { held = true; return true }, release: async () => { held = false } }
+    const subscribes = spyOn(log, 'subscribe')
+    const proj = createMemoryProjector({ log, surreal, vaultDir, lease })
+    try {
+      await proj.start()
+      expect(held).toBe(true)
+      expect(subscribes).toHaveBeenCalled()
+      await proj.close()
+      expect(held).toBe(false)
+    } finally {
+      subscribes.mockRestore()
+      await proj.close()
+      await surreal.close()
+    }
+  })
 })

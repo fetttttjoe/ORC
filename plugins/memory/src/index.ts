@@ -1,7 +1,7 @@
 import { MEMORY_HEALTH, type EmbeddingProvider, type MemoryHealth, type MemoryStore } from '@orc/contracts'
 import { errorMessage } from '@orc/contracts'
 import { MemoryStage } from '@orc/contracts/health'
-import { EventLog, type ProjectConfig } from '@orc/kernel'
+import { EventLog, type ProjectConfig, type ProjectorLease } from '@orc/kernel'
 import { openKnowledge, type Knowledge } from './knowledge'
 import { createMemoryStore } from './store'
 import { createMemoryProjector, KNOWLEDGE_KINDS, type MemoryProjector } from './projector'
@@ -51,7 +51,7 @@ export async function gitRevision(dir: string): Promise<string | null> {
 
 // the orchestrator: assembles the knowledge service + event log into the memory domain
 // services (gateway, projector, tools) — the business logic never opens Surreal itself
-export async function createMemory(opts: { log: EventLog; config: ProjectConfig; embedder?: EmbeddingProvider }): Promise<{
+export async function createMemory(opts: { log: EventLog; config: ProjectConfig; embedder?: EmbeddingProvider; lease?: ProjectorLease }): Promise<{
   store: MemoryStore
   projector: MemoryProjector
   bindStep: BindStep
@@ -64,7 +64,7 @@ export async function createMemory(opts: { log: EventLog; config: ProjectConfig;
 }> {
   const knowledge = await openKnowledge(opts.config, opts.embedder)
   const store = createMemoryStore({ log: opts.log, surreal: knowledge, sourceRevision: () => gitRevision(opts.config.dir), halfLifeDays: opts.config.memoryHalfLifeDays })
-  const projector = createMemoryProjector({ log: opts.log, surreal: knowledge, vaultDir: opts.config.vaultDir })
+  const projector = createMemoryProjector({ log: opts.log, surreal: knowledge, vaultDir: opts.config.vaultDir, ...(opts.lease && { lease: opts.lease }) })
   const changedSince = createDriftProbe(opts.config.dir)
   return {
     store, projector, knowledge,

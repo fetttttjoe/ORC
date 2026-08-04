@@ -1,6 +1,6 @@
 import { errorMessage, EVENT_KIND, foldMemory, MemoryDeletedPayload, MemoryVerifiedPayload, MemoryWrittenPayload, noteKey, type EventKind, type EventRecord } from '@orc/contracts'
 import { MEMORY_STAGE, type MemoryStageName, type StageProgress } from '@orc/contracts/health'
-import type { EventLog } from '@orc/kernel'
+import type { EventLog, ProjectorLease } from '@orc/kernel'
 import { SurrealMemory } from './surreal'
 import { noteRelPath, renderNoteFile } from './note-md'
 import { deleteMemoryFile, writeMemoryFile } from './write-note'
@@ -82,10 +82,22 @@ const DERIVED_REFRESH_DEBOUNCE_MS = 5_000
 // still-unrefreshed write, so repartition/link-repair stays on a bounded cadence under load.
 const DERIVED_REFRESH_MAX_WAIT_MS = 30_000
 
-export function createMemoryProjector(opts: { log: EventLog; surreal: SurrealMemory; vaultDir: string }): MemoryProjector {
+export function createMemoryProjector(opts: {
+  log: EventLog
+  surreal: SurrealMemory
+  vaultDir: string
+  // ONE live projector per project (see kernel's projectorLease). Absent = unconditional leader,
+  // which is what one-shot CLI commands and tests want: they never start() the standing machinery.
+  lease?: ProjectorLease
+  // follower catch-up bound before the drain fallback — injectable so tests need not wait 5s
+  followerWaitMs?: number
+}): MemoryProjector {
   const { log, surreal, vaultDir } = opts
   let unsub: (() => Promise<void>) | null = null
   let applying: Promise<void> = Promise.resolve()
+  // FOLLOWER: another process holds the projector lease and owns the standing machinery. This one
+  // runs no subscription and no refresh loop; its catchUp waits on the holder's cursor instead.
+  let follower = false
 
   // Surreal commits note+edges+cursor in ONE transaction (applyEvent); the vault file is
   // written only after an accepted apply. A crash between the two heals on the next
@@ -145,17 +157,23 @@ export function createMemoryProjector(opts: { log: EventLog; surreal: SurrealMem
   // accepted memory_written/deleted (the only events that change which claims exist — memory_accessed
   // bumps a counter but never claims, so it is excluded); `deletedCount` is the subset that can
   // cascade edges away.
-  const drainFrom = async (fromSeq: number, reconcile: (c: { deletedCount: number }) => void | Promise<void>): Promise<{ cursor: number; vaultChanged: number; deletedCount: number }> => {
+  const drainFrom = async (fromSeq: number, reconcile: (c: { deletedCount: number }) => void | Promise<void>, drainOpts: { announce?: boolean } = {}): Promise<{ cursor: number; vaultChanged: number; deletedCount: number }> => {
     const events = await log.after(fromSeq, MEMORY_KINDS)
     let vaultChanged = 0
     let deletedCount = 0
     // The replay is the boot's LONGEST stage and was the only one publishing nothing: `replaying`
     // sat in the contract unused while the browser showed a static "supervisor booting" through a
-    // drain the stdout line was already narrating. Announced only for a big drain (isBigDrain), and
-    // tracked in a local flag rather than read back off the module `stage`, because the clear below
-    // must not wipe a stage some OTHER path published — a live drain can overlap the debounced
-    // clustering refresh, and clearing that would put the UI back to the lie this all replaced.
-    const announce = isBigDrain(events.length)
+    // drain the stdout line was already narrating. Announced for a big drain (isBigDrain) — or
+    // unconditionally when the CALLER says so: start/rebuild force it, because a small BOOT drain
+    // that starves (three projectors contending, measured 18 minutes 2026-08-04) rendered as an
+    // unchanging pulse precisely because nothing was published below the floor. Tracked in a local
+    // flag rather than read back off the module `stage`, because the clear below must not wipe a
+    // stage some OTHER path published — a live drain can overlap the debounced clustering refresh,
+    // and clearing that would put the UI back to the lie this all replaced.
+    const announce = drainOpts.announce === true || isBigDrain(events.length)
+    // Below the floor a forced announce reports per EVENT (the stdout cadence would publish
+    // nothing before the end): a boot showing 0/2 frozen for minutes is the honest signal.
+    const perEvent = announce && !isBigDrain(events.length)
     const startedAt = Date.now()
     if (announce) publishStage({ name: MEMORY_STAGE.replaying, startedAt, progress: { applied: 0, total: events.length } })
     try {
@@ -164,10 +182,9 @@ export function createMemoryProjector(opts: { log: EventLog; surreal: SurrealMem
         if (e.kind === EVENT_KIND.memory_deleted) deletedCount += 1
         await applyOne(e)
         const progress = catchUpProgressLine(i + 1, events.length)
-        if (progress) {
-          console.log(progress)
+        if (progress) console.log(progress)
+        if (progress || perEvent)
           publishStage({ name: MEMORY_STAGE.replaying, startedAt, progress: { applied: i + 1, total: events.length } })
-        }
       }
     } finally {
       // Cleared HERE, before reconcile, and only when this drain announced: refreshDerived publishes
@@ -312,8 +329,37 @@ export function createMemoryProjector(opts: { log: EventLog; surreal: SurrealMem
     })
   }
 
+  // A follower does not project — it waits for the LEASE HOLDER's projection to cover the log,
+  // which keeps read-your-writes without a second refresh loop. Bounded: a dead or wedged holder
+  // must not hang every read forever, so on timeout this drains once itself. Safe to race a
+  // slow-but-live holder: applyEvent is cursor-gated and idempotent, so the overlap costs
+  // duplicate work, never a wrong row.
+  const followerWaitMs = opts.followerWaitMs ?? 5_000
+  const followerCatchUp = async (): Promise<void> => {
+    const deadline = Date.now() + followerWaitMs
+    for (;;) {
+      if ((await log.after(await surreal.getCursor(), MEMORY_KINDS)).length === 0) return
+      if (Date.now() >= deadline) break
+      await new Promise(r => setTimeout(r, 200))
+    }
+    console.warn(`[memory] projector lease holder has not covered the log in ${followerWaitMs}ms — draining once in this process`)
+    await serialize(async () => {
+      cursorCache = (await drainFrom(await surreal.getCursor(), async c => { await refreshIndex(); await refreshDerived(c.deletedCount > 0) })).cursor
+    })
+  }
+
   return {
     start: async () => {
+      // ONE live projector per project: the lease decides whether THIS process runs the standing
+      // machinery (subscription, debounced whole-corpus refreshes, boot heal) or follows the
+      // holder. Three processes each running the full loop against one SurrealDB starved a
+      // supervisor boot's drain for 18 minutes — the read model has one writer; its refresh
+      // machinery now has one owner too.
+      if (opts.lease && !(await opts.lease.tryAcquire())) {
+        follower = true
+        console.log("[memory] projector lease held by another process — following (reads wait on the holder's cursor)")
+        return
+      }
       // A leftover stage from a process that DIED mid-refresh. The finally-clear covers a throw but
       // not a kill, so a supervisor killed while clustering leaves the row set and the banner then
       // reports work nobody is doing — observed live at 30 minutes stale. A projector that is only
@@ -336,16 +382,20 @@ export function createMemoryProjector(opts: { log: EventLog; surreal: SurrealMem
         // claims from before this feature shipped, or from a run where refreshTopics kept failing, so
         // topics must be partitioned even though the cursor is already at head and zero events drain;
         // and refreshDerived(true) rebuilds edges too, repairing any RELATE a delete cascaded away.
-        cursorCache = (await drainFrom(await surreal.getCursor(), () => {})).cursor
+        cursorCache = (await drainFrom(await surreal.getCursor(), () => {}, { announce: true })).cursor
         await refreshDerived(true)
         await rebuildVaultMemory(surreal, vaultDir) // boot-time heal: replace vault/memory/** from Surreal
       })
     },
-    close: async () => { closed = true; if (refreshTimer) { clearTimeout(refreshTimer); refreshTimer = null } if (unsub) { await unsub(); unsub = null } await applying },
+    close: async () => { closed = true; if (refreshTimer) { clearTimeout(refreshTimer); refreshTimer = null } if (unsub) { await unsub(); unsub = null } await applying; await opts.lease?.release() },
     rebuild: async (): Promise<RebuildResult> =>
       serialize(async (): Promise<RebuildResult> => {
+        // A follower clearing the read model would wipe rows under the lease holder's feet and
+        // race its live drain over the rubble. One-shot CLI processes never start(), so they are
+        // never followers — this only refuses a rebuild from a live secondary process.
+        if (follower) throw new Error('the projector lease is held by another process — rebuild there, or stop it and retry')
         await surreal.clear()
-        cursorCache = (await drainFrom(0, () => {})).cursor
+        cursorCache = (await drainFrom(0, () => {}, { announce: true })).cursor
         await refreshDerived(true) // same boot-time-heal reasoning as start()
         await rebuildVaultMemory(surreal, vaultDir)
 
@@ -369,6 +419,7 @@ export function createMemoryProjector(opts: { log: EventLog; surreal: SurrealMem
     // one-shot drain from the persisted cursor (no clear, no subscription) — the CLI's
     // projection path. O(applied), not O(notes): the full vault reconcile stays on start/rebuild.
     catchUp: async () => {
+      if (follower) return followerCatchUp()
       await serialize(async () => {
         // synchronous reconcile, NOT debounced: catchUp is the CLI's projection path, and a command
         // that awaits it (search, consolidate) expects fresh topics/edges on return, not 5s later.

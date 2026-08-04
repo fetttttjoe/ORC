@@ -1,6 +1,6 @@
 import { afterAll, describe, expect, it } from 'bun:test'
 import { createTestDb, TEST_PROJECT_ID } from '../test-helpers'
-import { RuntimeBusyError, acquireRuntimeLock } from './runtime-lock'
+import { RuntimeBusyError, acquireRuntimeLock, projectorLease } from './runtime-lock'
 
 const dbs: Array<{ drop: () => Promise<void> }> = []
 afterAll(async () => { for (const d of dbs) await d.drop() })
@@ -34,5 +34,32 @@ describe('acquireRuntimeLock', () => {
     const b = await acquireRuntimeLock(db.url, 'some-other-project')
     await a.release()
     await b.release()
+  })
+})
+
+// The projector lease is the runtime lock's non-throwing twin: losing the race is the normal
+// follower path, so it answers false instead of raising, and it is idempotent per handle.
+describe('projectorLease', () => {
+  it('one holder per project; the loser is told no, not thrown at', async () => {
+    const db = await createTestDb()
+    dbs.push(db)
+    const leader = projectorLease(db.url, TEST_PROJECT_ID)
+    const follower = projectorLease(db.url, TEST_PROJECT_ID)
+    expect(await leader.tryAcquire()).toBe(true)
+    expect(await leader.tryAcquire()).toBe(true) // idempotent for the holder
+    expect(await follower.tryAcquire()).toBe(false)
+    await leader.release()
+    expect(await follower.tryAcquire()).toBe(true) // release frees it for the next process
+    await follower.release()
+  })
+
+  it('is distinct from the execution-runtime lock — holding one never blocks the other', async () => {
+    const db = await createTestDb()
+    dbs.push(db)
+    const runtime = await acquireRuntimeLock(db.url, TEST_PROJECT_ID)
+    const lease = projectorLease(db.url, TEST_PROJECT_ID)
+    expect(await lease.tryAcquire()).toBe(true)
+    await lease.release()
+    await runtime.release()
   })
 })

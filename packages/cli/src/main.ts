@@ -942,7 +942,11 @@ export function buildProgram(
     .command('add')
     .description('write or update a memory note')
     .requiredOption('--id <id>', 'note id')
-    .requiredOption('--title <title>', 'note title')
+    // optional, matching the TOOL boundary: the store merges the stored title forward on an
+    // update (merge-on-omit, store.ts's undefined-is-omission rule), so requiring it here made
+    // this door reject updates the same write accepts from an agent — observed live adding one
+    // supersedes link, which demanded the title be retyped verbatim to not change anything.
+    .option('--title <title>', 'note title (required for a NEW note; an update keeps the stored one)')
     .option('--summary <s>', 'short summary')
     .option('--body <b>', 'note body (markdown)')
     .option('--tags <tags...>', 'tags')
@@ -957,9 +961,18 @@ export function buildProgram(
     // array, because supplying the array would REPLACE under the store's merge-on-omit rule.
     .option('--claim <text...>', 'state a claim on this note (addClaims) — repeatable')
     .option('--invalidate <claimId...>', 'retire a claim by its 12-hex id (invalidates) — repeatable')
-    .action(async (o: { id: string; title: string; summary?: string; body?: string; tags?: string[]; categories?: string[]; links?: MemoryLink[]; claim?: string[]; invalidate?: string[] }) => {
+    .action(async (o: { id: string; title?: string; summary?: string; body?: string; tags?: string[]; categories?: string[]; links?: MemoryLink[]; claim?: string[]; invalidate?: string[] }) => {
       const { config, log } = needPlugin()
       await withMemory({ log, config }, async memory => {
+        // the tool boundary's own refusal, at this door too: a NEW note without a title fails the
+        // schema anyway, but with a zod trace where the writer needs the one-line rule. Drain
+        // first so the existence check reads the log's present, not the last projection — a
+        // refusal must never hinge on a lagging read model.
+        if (o.title === undefined) {
+          await memory.projector.catchUp()
+          if (await memory.store.get(o.id) === null)
+            throw new Error('a new note needs a title (it derives the id) — pass an id instead to update an existing note')
+        }
         await memory.store.write({
           id: o.id, title: o.title, summary: o.summary, body: o.body,
           tags: o.tags, categories: o.categories, links: o.links,

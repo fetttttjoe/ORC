@@ -1,7 +1,7 @@
 import { createOllamaEmbeddingProvider } from '@orc/provider-ollama'
 import { parseModelRef, type EmbeddingProvider } from '@orc/contracts'
 import { createMemory } from '@orc/memory'
-import type { EventLog, ProjectConfig } from '@orc/kernel'
+import type { EventLog, ProjectConfig, ProjectorLease } from '@orc/kernel'
 
 // Build the configured embedding provider (memoryEmbedModel), or undefined for keyword-only. The
 // composition root owns this wiring so the memory plugin stays provider-agnostic behind the seam.
@@ -20,8 +20,10 @@ export function buildEmbeddingProvider(
 
 // createMemory with the configured embedder injected — the ONE construction path every CLI memory
 // command and the runtime share, so semantic retrieval is on everywhere or nowhere by one setting.
-export const openMemory = (opts: { log: EventLog; config: ProjectConfig }) =>
-  createMemory({ log: opts.log, config: opts.config, embedder: buildEmbeddingProvider(opts.config) })
+// `lease`: passed by the RUNTIME path only (serve, graph, mcp — anything that projector.start()s),
+// so one process owns the standing refresh machinery. One-shot commands never start() and need none.
+export const openMemory = (opts: { log: EventLog; config: ProjectConfig; lease?: ProjectorLease }) =>
+  createMemory({ log: opts.log, config: opts.config, embedder: buildEmbeddingProvider(opts.config), ...(opts.lease && { lease: opts.lease }) })
 
 // The ONE open → work → close bracket every one-shot memory command runs through. The close is
 // deliberately in a finally: seven commands (add, rm, sweep, ls, search, cat, rebuild) used to
