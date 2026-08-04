@@ -327,6 +327,10 @@ export function foldInto(acc: FoldAcc, e: EventRecord): FoldAcc {
         }
         break
       }
+      case EVENT_KIND.models_discovered:
+      case EVENT_KIND.copilot_exchange:
+      case EVENT_KIND.commit_recorded:
+        break // traceability only; no state derivation
       default: {
         const unhandled: never = e.kind
         void unhandled

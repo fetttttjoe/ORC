@@ -1,0 +1,41 @@
+// The DETACHED half of scripts/hooks/post-commit (see that file's header for the detach
+// mechanism and why: git's post-commit hook runs synchronously, so the bun-startup + Postgres
+// round-trip this file does can never sit on a `git commit`'s critical path — the sh hook spawns
+// this with `nohup … &` and does not wait for it).
+//
+// Silent degrade: ANY failure here — no `.orc` project (requireProject throws), the database
+// unreachable, a malformed sha — is swallowed with nothing printed, mirroring
+// packages/cli/src/actions.ts's buildModelDiscovery taskless append (`.catch(() => {})`). A
+// hand-made commit that could not be recorded is still a commit; this is a courtesy to the log,
+// never a gate.
+//
+// Relative imports, not `@orc/kernel`/`@orc/contracts`: scripts/ is not a workspace package (see
+// scripts/graph-audit.ts, which does the same), so the bare specifiers do not resolve here.
+import { loadConfig, openStorage, requireProject } from '../../packages/kernel/src/index'
+import { EVENT_KIND } from '../../packages/contracts/src/index'
+import { parseChangedPaths } from './post-commit-paths'
+
+async function main(): Promise<void> {
+  const sha = process.argv[2]
+  if (!sha) return
+  const rawPaths = process.argv[3] ?? ''
+  const paths = parseChangedPaths(rawPaths)
+
+  const config = requireProject(loadConfig())
+  const storage = await openStorage(config.databaseUrl, { projectId: config.projectId, redactEnv: config.redactEnv })
+  try {
+    // idempotencyKey = sha: a retried/duplicated hook invocation for the same commit (e.g. the
+    // sh wrapper's detached spawn racing a second one) cannot double-append — same conflict
+    // resolution as every other deterministic writer (event-log.ts's onConflictDoNothing).
+    await storage.events.append({
+      taskId: null, stepId: null, runToken: null,
+      kind: EVENT_KIND.commit_recorded,
+      payload: { sha, paths },
+      idempotencyKey: sha,
+    })
+  } finally {
+    await storage.close()
+  }
+}
+
+main().catch(() => {})

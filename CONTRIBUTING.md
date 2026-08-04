@@ -45,6 +45,11 @@ bun install
 # Point git at the tracked hooks (one time, per clone — git never does this for you)
 git config core.hooksPath scripts/hooks
 
+# Make the hook dispatchers executable (git execs them directly; a hook without the bit
+# silently never runs). Only needed after adding a new hook NAME — the tracked ones keep
+# their mode through a clone.
+bun run hooks:install
+
 # Run migrations
 bun run packages/cli/src/bin.ts db migrate
 
@@ -681,7 +686,7 @@ Follow the format below for clarity and consistency:
 
 `<body>` is at most one line (optional); see [Code style (binding)](#code-style-binding).
 
-`scripts/hooks/commit-msg` enforces this, and it **refuses** — it never edits your message. If it
+`scripts/hooks/commit-msg.sh` enforces this (reached through the generic `commit-msg` dispatcher beside it), and it **refuses** — it never edits your message. If it
 rejects a commit, the message file is exactly as you wrote it: shorten it and commit again. The
 same rule is enforced on the agent door by `git_commit`'s input schema, so both doors agree.
 Run `git config core.hooksPath scripts/hooks` once per clone or the hook does not run at all.

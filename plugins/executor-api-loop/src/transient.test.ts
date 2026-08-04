@@ -86,3 +86,28 @@ describe('isTransient — wrapper shapes that hide the real fault', () => {
     expect(isTransient(selfref)).toBe(false)
   })
 })
+
+describe('a cyclic error chain terminates', () => {
+  /**
+   * `lastError` and `cause` are followed blind. The guards catch a DIRECT self-reference
+   * (`x.cause === x`) but not a two-step cycle, which recursed until the stack gave out — and a
+   * classifier that throws turns a retryable model failure into a crashed step.
+   */
+  it('does not recurse forever on a.cause = b, b.cause = a', () => {
+    const a: Record<string, unknown> = {}
+    const b: Record<string, unknown> = { cause: a }
+    a.cause = b
+    expect(isTransient(a)).toBe(false)
+  })
+
+  it('still unwraps a legitimately deep chain to the retryable error inside it', () => {
+    // three layers is ordinary: RetryError wrapping APICallError wrapping a fetch TypeError
+    expect(isTransient({ cause: { cause: { code: 'ECONNRESET' } } })).toBe(true)
+  })
+
+  it('gives up past the cap rather than trusting an absurd chain', () => {
+    let deep: Record<string, unknown> = { code: 'ECONNRESET' }
+    for (let i = 0; i < 12; i += 1) deep = { cause: deep }
+    expect(isTransient(deep)).toBe(false)
+  })
+})

@@ -1,0 +1,19 @@
+#!/bin/sh
+# Generic hook dispatcher. git requires the file it invokes to be EXECUTABLE, and it execs that file
+# directly rather than through a shell — so a hook missing its mode bit silently never runs.
+#
+# That bit is the whole reason this file exists separately from the logic beside it. An agent writes
+# file CONTENT; it has no way to set a mode (fs_write creates 0644 by design, and granting it more
+# would let it plant an executable under .git/hooks and escape the exec allowlist entirely). So the
+# executable half is this dispatcher — committed once, generic, never edited again — and every hook's
+# BEHAVIOUR lives in a plain sibling file that anyone, human or agent, can author freely.
+#
+# Dispatches on its own name, so the same three lines serve every hook: `<name>.sh` runs under sh,
+# `<name>.ts` under bun. A hook with no sibling is a no-op, which is what makes adding one safe.
+# Regenerate the set for a new hook name with `bun run hooks:install`.
+d=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd) || exit 0
+n=$(basename -- "$0")
+
+[ -f "$d/$n.sh" ] && exec sh "$d/$n.sh" "$@"
+[ -f "$d/$n.ts" ] && exec bun "$d/$n.ts" "$@"
+exit 0

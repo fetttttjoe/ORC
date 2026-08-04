@@ -40,6 +40,14 @@ export const EDGE = {
 } as const
 export type EdgeType = (typeof EDGE)[keyof typeof EDGE]
 
+// The node vocabulary, spelled ONCE. It was spelled four times — this module's consumers each
+// re-typed it: the canvas colour map, the browser's wire schema, buildGraph's literals and the
+// copilot's counts. A `model` node that gained a colour in one of them and not the others is the
+// shape of bug that produces: nothing fails, the picture is just wrong. Derived types below make a
+// new kind a compile error at every render site instead.
+export const NODE_TYPES = ['task', 'step', 'artifact', 'note', 'model'] as const
+export type NodeType = (typeof NODE_TYPES)[number]
+
 export const NODE_PREFIX = { step: 'step:', artifact: 'artifact:', note: 'note:', model: 'model:' } as const
 
 // The ONE spelling of a link's identity. It lives here, not beside diffGraphs, because BOTH sides

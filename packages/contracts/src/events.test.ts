@@ -96,4 +96,13 @@ describe('events', () => {
     expect(parsed).toEqual({ taskId: 't1', cwd: null, retry: false })
     expect(PAYLOAD_SCHEMAS.run_requested.safeParse({ taskId: 't1' }).success).toBe(false)
   })
+
+  it('commit_recorded parses valid sha and paths, rejects missing sha or non-hex', () => {
+    const good = { sha: '0123456789abcdef0123456789abcdef01234567', paths: ['file.ts', 'dir/other.md'] }
+    expect(PAYLOAD_SCHEMAS.commit_recorded.safeParse(good).success).toBe(true)
+    expect(PAYLOAD_SCHEMAS.commit_recorded.safeParse({ sha: 'abc123', paths: [] }).success).toBe(true) // paths MAY be empty
+    expect(PAYLOAD_SCHEMAS.commit_recorded.safeParse({ paths: ['file.ts'] }).success).toBe(false) // missing sha
+    expect(PAYLOAD_SCHEMAS.commit_recorded.safeParse({ sha: 'not-hex!', paths: [] }).success).toBe(false) // non-hex sha
+    expect(PAYLOAD_SCHEMAS.commit_recorded.safeParse({ sha: '', paths: [] }).success).toBe(false) // empty sha
+  })
 })

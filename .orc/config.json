@@ -19,6 +19,7 @@
     "git grep",
     "git ls-files",
     "git rev-parse",
+    "git merge-base",
     "grep"
   ],
   "mcpServers": {

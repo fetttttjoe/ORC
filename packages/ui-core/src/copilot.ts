@@ -2,6 +2,7 @@
 // it can never bypass the action layer, and every call it makes is streamed to the client as a
 // visible card. Transport-free: the web server (or a TUI) supplies the model and runs the loop.
 import { tool, type ToolSet } from 'ai'
+import type { NodeType } from './graph-wire'
 import { z } from 'zod'
 import type { OrcActions } from './actions'
 import type { ProjectSessions } from './sessions'
@@ -96,7 +97,11 @@ export function buildCopilotTools(deps: {
       inputSchema: z.object({}),
       execute: async () => {
         const { graph } = await sessions.snapshot(projectId)
-        const counts = { task: 0, step: 0, artifact: 0, note: 0, model: 0 }
+        // Typed against NodeType rather than free-floating: this was the fourth hand-spelled copy
+        // of the node vocabulary, and a kind added to the wire counted as undefined here. Still
+        // written out — Record<NodeType, number> makes a MISSING key a compile error, which is the
+        // guarantee wanted, and building it from the tuple would need a cast on the seed object.
+        const counts: Record<NodeType, number> = { task: 0, step: 0, artifact: 0, note: 0, model: 0 }
         for (const n of graph.nodes) counts[n.type]++
         // a failed probe reports unreachable-with-reason (graph-ui's /api/health posture) —
         // health must never take project_status down with it, and never read as silently ok

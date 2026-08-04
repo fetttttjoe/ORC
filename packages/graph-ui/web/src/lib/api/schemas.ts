@@ -3,6 +3,8 @@ import { z } from 'zod'
 // precisely so the browser can take it, and a re-typed enum here silently accepts a state the
 // server stopped sending (or rejects one it started sending)
 import { MEMORY_HEALTH_STATES, MemoryStageName, SUPERVISOR_HEALTH_STATES } from '@orc/contracts/health'
+// the node vocabulary comes from the wire module, never a second spelling
+import { NODE_TYPES } from '@orc/ui-core/graph-wire'
 // relative, not the $lib alias: the e2e contract test imports this file from the graph-ui
 // package, whose tsconfig knows nothing about the web app's path aliases
 import { ArtifactDetail, ModelDetail, NoteDetail, StepDetail, TaskDetail } from '../features/inspector/detail-view'
@@ -25,7 +27,7 @@ export { ArtifactDetail, ModelDetail, NoteDetail, StepDetail, TaskDetail }
 
 const GraphNode = z.object({
   id: z.string(),
-  type: z.enum(['task', 'step', 'artifact', 'note', 'model']),
+  type: z.enum(NODE_TYPES),
   label: z.string(),
   detail: z.string(),
   heat: z.number().optional(),

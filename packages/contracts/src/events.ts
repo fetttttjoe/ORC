@@ -66,6 +66,16 @@ export const ReactionFailedPayload = z.object({
 })
 export type ReactionFailedPayload = z.infer<typeof ReactionFailedPayload>
 
+// A hand-made commit recorded outside any task by a post-commit hook, captured for log traceability
+// and drift healing. sha is the commit's 40-hex SHA-1 (or other VCS sha), paths are the changed files.
+// paths MAY be empty — an empty commit touches nothing.
+const HEX_RE = /^[a-f0-9]+$/i
+export const CommitRecordedPayload = z.object({
+  sha: z.string().min(1).regex(HEX_RE, 'sha must be hex digits'),
+  paths: z.array(z.string().min(1)),
+})
+export type CommitRecordedPayload = z.infer<typeof CommitRecordedPayload>
+
 // The explicit ask for a run. NOT inferred from "approved with no live run": `orc propose` +
 // `orc approve` deliberately does not start anything, and inference would silently change that.
 // It also carries what only the caller knows — a --cwd override, and whether this is a retry —
@@ -172,6 +182,7 @@ export const PAYLOAD_SCHEMAS = {
   models_discovered: ModelsDiscoveredPayload,
   copilot_exchange: CopilotExchangePayload,
   reaction_failed: ReactionFailedPayload,
+  commit_recorded: CommitRecordedPayload,
 } satisfies Record<EventKind, z.ZodType>
 
 export const EventInput = z.object({

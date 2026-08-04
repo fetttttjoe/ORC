@@ -66,9 +66,26 @@ export function pathInZone(relPath: string, zone: string[] | undefined): boolean
 // Delegates the actual glob match to pathInZone; the realpath-based resolution of `rel` from
 // `abs` stays here since that part is inherently fs-touching and out of scope for the pure
 // predicate.
+/**
+ * The repository's own metadata, fenced off from every write regardless of zone.
+ *
+ * `.git` is not source. A write there can plant a hook git executes on the next commit — outside
+ * the exec allowlist entirely — rewrite refs, or corrupt the repository. The zone check below
+ * returns early for an UNFENCED step, so nothing else stood in the way: the only accidental
+ * protection was that fs_write cannot set an executable bit, which is a property of the write tool
+ * rather than a decision anyone made.
+ *
+ * Matched as a path SEGMENT, so `docs/.gitignore` and `src/gitlab.ts` stay writable — it is the
+ * directory that is off limits, not the letters.
+ */
+const isRepoMetadata = (rel: string): boolean =>
+  rel.split(path.sep).includes('.git')
+
 export function assertInZone(workspaceDir: string, abs: string, zone: string[]): void {
-  if (zone.length === 0) return
   const rel = path.relative(realpathSync(workspaceDir), abs)
+  if (isRepoMetadata(rel))
+    throw new Error(`'${rel}' is inside .git — the repository's own metadata is never writable, in any zone`)
+  if (zone.length === 0) return
   if (!pathInZone(rel, zone))
     throw new Error(`zone fence: '${rel}' is outside this step's zone [${zone.join(', ')}]`)
 }

@@ -27,11 +27,19 @@ const TRANSIENT_NAME = new Set(['TimeoutError'])
 const errField = (err: unknown, key: string): unknown =>
   typeof err === 'object' && err !== null && key in err ? Reflect.get(err, key) : undefined
 
-export function isTransient(err: unknown): boolean {
+// An error chain is attacker-shaped data as far as this file is concerned: `lastError` and `cause`
+// are followed blind, and a cycle (a.cause = b, b.cause = a) recursed until the stack gave out. The
+// direct self-reference guards below catch `x.cause === x` and nothing else. A depth cap is enough:
+// no real provider wraps an error more than a few layers deep, and past that the answer is the same
+// as for an error with no fields at all — not transient.
+const MAX_CAUSE_DEPTH = 8
+
+export function isTransient(err: unknown, depth = 0): boolean {
+  if (depth >= MAX_CAUSE_DEPTH) return false
   // ai@7 exhausts its internal retries on retryable errors and throws RetryError, which carries
   // no status fields itself — classify by the underlying provider error instead
   const lastError = errField(err, 'lastError')
-  if (lastError !== undefined && lastError !== err) return isTransient(lastError)
+  if (lastError !== undefined && lastError !== err) return isTransient(lastError, depth + 1)
   // The timeout verdict is read BEFORE the SDK's own: a provider wrapper that saw a socket time
   // out has no way to know the request was survivable, and its default verdict is "not retryable".
   const name = errField(err, 'name')
@@ -48,5 +56,5 @@ export function isTransient(err: unknown): boolean {
   // `TypeError: fetch failed` hides the real fault in `cause` — undici's shape, and the one that
   // makes an otherwise fieldless error look permanent. Unwrapped last so nothing above is skipped.
   const cause = errField(err, 'cause')
-  return cause !== undefined && cause !== err ? isTransient(cause) : false
+  return cause !== undefined && cause !== err ? isTransient(cause, depth + 1) : false
 }

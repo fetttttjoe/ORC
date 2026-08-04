@@ -37,6 +37,7 @@ const ROUTER_RELEVANT: Record<EventKind, boolean> = {
   models_discovered: false, // catalog metadata — nothing to route
   copilot_exchange: false, // conversation record — nothing to route
   reaction_failed: false, // the router's OWN diagnosis — routing it would react to itself
+  commit_recorded: false, // taskless traceability record — nothing to route
 }
 const ROUTER_KINDS = EventKind.options.filter(k => ROUTER_RELEVANT[k])
 

@@ -1008,7 +1008,10 @@ export function buildProgram(
       if (o.candidates || goes.length > 0) {
         for (const c of goes) {
           const n = byKey.get(c.key)
-          console.log(`${c.key}\t${c.reason}\t${c.evidence}\t${n?.title ?? ''}`)
+          // `scope/id`, never the raw composite key: noteKey joins the two with a NUL, which reads
+          // as a space in a terminal and makes the whole line BINARY to grep — a retirable list
+          // nobody can pipe into anything is a list nobody can act on in bulk.
+          console.log(`${n ? `${n.scope}/${n.id}` : c.key}\t${c.reason}\t${c.evidence}\t${n?.title ?? ''}`)
         }
       }
       // No clock anywhere in this verdict: candidacy is `superseded` or `task-settled`, both facts

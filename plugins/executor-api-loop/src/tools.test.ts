@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test'
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, symlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { z } from 'zod'
@@ -44,6 +44,85 @@ describe('workspace scoping (trust boundary)', () => {
     const r = await executeTool(TOOL_NAME.fs_write, { path: 'sneaky/a/b/new.txt', content: 'x' }, dir)
     expect(r.isError).toBe(true)
     expect(readdirSync(outside)).toEqual([])
+  })
+})
+
+describe('the write fence refuses .git, zone or no zone', () => {
+  /**
+   * `.git` is not source. A write there can plant a hook git will execute on the next commit —
+   * outside the exec allowlist entirely — rewrite refs, or corrupt the repository. assertInZone
+   * returns early for an UNFENCED step, so before this the only thing standing between an agent
+   * and `.git/hooks/pre-commit` was that fs_write cannot set an executable bit.
+   */
+  it('refuses a write under .git even with no zone declared', async () => {
+    const dir = ws()
+    mkdirSync(path.join(dir, '.git', 'hooks'), { recursive: true })
+    const r = await executeTool(TOOL_NAME.fs_write, { path: '.git/hooks/pre-commit', content: '#!/bin/sh\necho pwned\n' }, dir)
+    expect(r.isError).toBe(true)
+    expect(JSON.stringify(r.output)).toContain('.git')
+    expect(existsSync(path.join(dir, '.git', 'hooks', 'pre-commit'))).toBe(false)
+  })
+
+  it('refuses fs_edit and fs_delete under .git too — a fence with a hole is not a fence', async () => {
+    const dir = ws()
+    mkdirSync(path.join(dir, '.git'), { recursive: true })
+    writeFileSync(path.join(dir, '.git', 'config'), '[core]\n')
+    expect((await executeTool(TOOL_NAME.fs_edit, { path: '.git/config', old_string: 'core', new_string: 'x' }, dir)).isError).toBe(true)
+    expect((await executeTool(TOOL_NAME.fs_delete, { path: '.git/config' }, dir)).isError).toBe(true)
+    expect(existsSync(path.join(dir, '.git', 'config'))).toBe(true)
+  })
+
+  it('a path merely CONTAINING .git in a name is fine — only the directory is fenced', async () => {
+    const dir = ws()
+    expect((await executeTool(TOOL_NAME.fs_write, { path: 'docs/.gitignore', content: 'node_modules\n' }, dir)).isError).toBe(false)
+    expect((await executeTool(TOOL_NAME.fs_write, { path: 'src/gitlab.ts', content: 'x' }, dir)).isError).toBe(false)
+  })
+})
+
+describe('a write preserves what a file IS, not just what it says', () => {
+  /**
+   * writeFileAtomic writes a temp file and renames it over the target, which REPLACES the inode —
+   * so everything about the file that is not its bytes goes with the old one. Mode is the half that
+   * bites: measured live, an orc run edited packages/cli/src/bin.ts and it landed as 100644 having
+   * been 100755, and nothing failed because the file still worked when invoked as `bun bin.ts`.
+   *
+   * A git hook is where it stops being cosmetic: git executes the hook file directly, so a hook
+   * that loses its bit silently never runs again.
+   */
+  const mode = (p: string): number => statSync(p).mode & 0o777
+
+  it('fs_write keeps an executable file executable', async () => {
+    const dir = ws()
+    const abs = path.join(dir, 'run.sh')
+    writeFileSync(abs, '#!/bin/sh\necho one\n')
+    chmodSync(abs, 0o755)
+    expect((await executeTool(TOOL_NAME.fs_write, { path: 'run.sh', content: '#!/bin/sh\necho two\n' }, dir)).isError).toBe(false)
+    expect(mode(abs)).toBe(0o755)
+  })
+
+  it('fs_edit keeps an executable file executable', async () => {
+    const dir = ws()
+    const abs = path.join(dir, 'run.sh')
+    writeFileSync(abs, '#!/bin/sh\necho one\n')
+    chmodSync(abs, 0o755)
+    expect((await executeTool(TOOL_NAME.fs_edit, { path: 'run.sh', old_string: 'one', new_string: 'two' }, dir)).isError).toBe(false)
+    expect(mode(abs)).toBe(0o755)
+  })
+
+  it('a NEW file is created plain — a write never grants a bit nobody asked for', async () => {
+    const dir = ws()
+    await executeTool(TOOL_NAME.fs_write, { path: 'fresh.txt', content: 'x' }, dir)
+    expect(mode(path.join(dir, 'fresh.txt')) & 0o111).toBe(0)
+  })
+
+  it('a read-only file keeps its mode too — this is about identity, not just the x bit', async () => {
+    const dir = ws()
+    const abs = path.join(dir, 'locked.txt')
+    writeFileSync(abs, 'a')
+    chmodSync(abs, 0o640)
+    await executeTool(TOOL_NAME.fs_write, { path: 'locked.txt', content: 'b' }, dir)
+    expect(mode(abs)).toBe(0o640)
+    expect(readFileSync(abs, 'utf8')).toBe('b')
   })
 })
 

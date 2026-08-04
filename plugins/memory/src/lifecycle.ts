@@ -1,4 +1,4 @@
-import { EVENT_KIND, PAYLOAD_SCHEMAS, TASK_STATUS, errorMessage, type EventRecord } from '@orc/contracts'
+import { EVENT_KIND, NOTE_TIER, PAYLOAD_SCHEMAS, TASK_STATUS, errorMessage, planScope, type EventRecord } from '@orc/contracts'
 import { consolidateTask, type ConsolidationDeps } from './consolidate'
 
 // The memory-lifecycle seam — a subscriber PEER to the projector that runs out-of-band, post-task
@@ -32,9 +32,44 @@ export async function consolidateOnCompletion(deps: LifecycleDeps, e: EventRecor
   try {
     await deps.catchUp?.()
     await consolidateTask(deps, taskId)
+    // AFTER consolidation, and the order is the guarantee — not the timing. consolidateTask reads
+    // this task's step notes out of the projected note table, and archiving deletes those rows.
+    // Today a flipped order still happens to work, because setArchivedAll is event-first and the
+    // projector has not drained by the time consolidation reads: measured, reversing these two
+    // changes nothing observable. That is an accident of projection lag, not a design. One catchUp
+    // added between them, or a synchronous projector, and the flipped order silently distils an
+    // empty corpus into a note about nothing.
+    await retireStepTrail(deps, taskId)
   } catch (err) {
     console.warn(`memory lifecycle: consolidate '${taskId}' failed:`, errorMessage(err))
   }
+}
+
+/**
+ * Retire the EPISODIC step trail of a task that just finished — and nothing else.
+ *
+ * Deliberately narrower than what `orc memory recheck --apply` will retire. That door rules on
+ * evidence and treats both task-bound tiers alike (archive.ts's TASK_BOUND = plan + episodic); an
+ * operator choosing it is making a judgement. This fires on its own, so it may only take what is
+ * unambiguously spent: measured on this corpus, the 23 live episodic notes carry ZERO body
+ * characters, no rationale and no uncertainty — they are one run's trail, and consolidation has
+ * just distilled whatever they were worth into a durable note.
+ *
+ * The 18 plan-tier notes in the same scopes carry 42,596 characters of body, 12 rationales and 11
+ * uncertainty lists — the record of WHY each decomposition looked the way it did, which
+ * `orc plan-notes` still reads for a settled task. Automatic housekeeping must not delete a design
+ * record to reclaim empty rows, and it costs nothing to keep them: a step's search is confined to
+ * its own lane plus project (taskLaneScopes), so another task's plan notes are already invisible.
+ *
+ * Reversible either way — archiving leaves every revision in the log, and `orc memory restore`
+ * brings a note back.
+ */
+async function retireStepTrail(deps: LifecycleDeps, taskId: string): Promise<void> {
+  const scope = planScope(taskId)
+  const spent = (await deps.store.list({ scope })).filter(n => n.tier === NOTE_TIER.episodic)
+  if (spent.length === 0) return
+  // one pass over the log for the whole trail, not one per note
+  await deps.store.setArchivedAll(spent.map(n => ({ id: n.id, scope: n.scope })), true, { source: 'cli' })
 }
 
 // Every task the log says is finished, newest status wins — a pure fold, so "which tasks are done"

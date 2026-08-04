@@ -13,7 +13,7 @@ export const EventKind = z.enum([
   'operation_started', 'operation_completed', 'operation_failed', 'artifact_produced',
   'memory_written', 'memory_deleted', 'memory_accessed', 'memory_topic_accessed', 'memory_verified',
   'feedback_requested', 'feedback_provided', 'plan_annotated', 'analysis_completed',
-  'models_discovered', 'copilot_exchange', 'reaction_failed',
+  'models_discovered', 'copilot_exchange', 'reaction_failed', 'commit_recorded',
 ])
 export type EventKind = z.infer<typeof EventKind>
 

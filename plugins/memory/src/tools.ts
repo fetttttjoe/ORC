@@ -97,6 +97,43 @@ const citesSourceFile = (text: string): boolean => {
   return false
 }
 
+/**
+ * A rewrite that guts a note, reported at the moment it happens.
+ *
+ * `body` and `summary` are FULL REPLACEMENTS, and an agent that means to CONFIRM a note but has no
+ * verify tool reaches for memory_write instead. Measured: one such pass replaced a 6235-character
+ * hub body with a 46-character placeholder, and three more notes lost 55-75% of their prose. Every
+ * revision survives in the log, so nothing was unrecoverable — but nothing SAID so either, and the
+ * loss was found by going looking days later.
+ *
+ * A warning, never a refusal: a genuine correction is often shorter, and blocking one would push
+ * agents into writing a second note, which is worse than a terse one. The threshold is deliberately
+ * loud-but-rare — only a collapse, not ordinary tightening.
+ */
+const SHRINK_RATIO = 0.5
+const SHRINK_FLOOR = 200 // below this a note is too small for a ratio to mean anything
+
+export function shrinkWarnings(
+  prev: { body?: string; summary?: string } | null,
+  next: { body?: string; summary?: string },
+): string[] {
+  if (prev === null) return []
+  const out: string[] = []
+  for (const field of ['body', 'summary'] as const) {
+    const before = prev[field] ?? ''
+    const after = next[field] ?? ''
+    // an OMITTED field is not a shrink: merge-on-omit carries it forward untouched
+    if (after === '' || before.length < SHRINK_FLOOR) continue
+    if (after.length <= before.length * SHRINK_RATIO)
+      out.push(
+        `this write cut ${field} from ${before.length} to ${after.length} characters — ${field} is a full replacement, not a merge. `
+        + 'If you meant to CONFIRM the note rather than rewrite it, use memory_verify and send no content; '
+        + 'if the correction really is this much shorter, ignore this. The previous revision is in the log.',
+      )
+  }
+  return out
+}
+
 export function noteLint(note: MemoryNote): string[] {
   const w: string[] = []
   if (note.summary.trim() === '')
@@ -683,6 +720,9 @@ export function memoryTools(opts: {
           // first message only: one-at-a-time teaching, same as the predicates already commit to —
           // a list of every violation would read as one wall of text and get fixed no faster.
           if (v.shape.length) return { output: { error: v.shape[0] }, isError: true }
+          // read BEFORE the write, so a rewrite that guts a note can be reported at the moment it
+          // happens rather than found days later. One extra read on the write path, paid only here.
+          const prior = await store.get(id, scope)
           const n = await store.write({ ...parsed, id }, author, { idempotencyKey, ...(invalidates && { invalidates }) })
           // No revision: the write is event-first and the projector is asynchronous, so within
           // the flush window store.write reports the revision from BEFORE this write (and
@@ -697,6 +737,9 @@ export function memoryTools(opts: {
             // has no judgment row yet — both current rows are 'shape' and refused above — so this is
             // always [] today; it occupies the slot orderingLinkWarning's warn-path used to.
             ...v.judgment,
+            // ahead of the advisory lints: loop.ts lifts only warnings[0] into the next turn, and a
+            // note the writer just gutted is the one thing it must see before anything stylistic
+            ...shrinkWarnings(prior, parsed),
             ...normalized.warnings,
             ...duplicates,
             ...noteLint(n),

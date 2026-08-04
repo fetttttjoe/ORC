@@ -243,12 +243,12 @@
         const heat = l.heat ?? 0
         if (knownLinks.has(key)) {
           // heat-only update: in-place merge, NOT drop+re-add — dropping resets live edge state
-          const color = edgeColorFor(heat)
+          const color = edgeColorFor(heat, l.type)
           if (g.getEdgeAttribute(key, 'color') !== color)
             g.mergeEdgeAttributes(key, { color, size: EDGE_BASE_SIZE + heat * EDGE_HEAT_SIZE_SCALE })
         } else if (g.hasNode(l.source) && g.hasNode(l.target)) {
           g.addEdgeWithKey(key, l.source, l.target, {
-            color: edgeColorFor(heat),
+            color: edgeColorFor(heat, l.type),
             size: EDGE_BASE_SIZE + heat * EDGE_HEAT_SIZE_SCALE,
           })
           knownLinks.add(key)

@@ -33,6 +33,10 @@
   --color-machine: #6fa8b5; /* autonomous activity, running */
   --color-moss: #7fa65a; /* done / ok */
   --color-rust: #c4573b; /* failed / blocked / stale */
+  /* the WORKER that ran a step — outside the two-temperature axis, like a note: it carries no
+     lifecycle, it is an actor. Was --color-mist, i.e. the same grey as chrome, so the thing
+     actually doing the work sank into the background of the graph. */
+  --color-worker: #bd82a8;
 
   /* The sidebar's own token set. shadcn's sidebar primitives style themselves entirely through
      these (bg-sidebar, data-active:bg-sidebar-accent, ring-sidebar-ring). None of them existed

@@ -91,7 +91,7 @@ describe('the hardcoded canvas colors still equal their app.css tokens', () => {
     ['STATUS_COLORS.blocked', STATUS_COLORS.blocked ?? '', 'rust'],
     ['STATUS_COLORS.running', STATUS_COLORS.running ?? '', 'machine'],
     ['STATUS_COLORS.cancelled', STATUS_COLORS.cancelled ?? '', 'fog'],
-    ['TYPE_COLORS.model', TYPE_COLORS.model, 'mist'],
+    ['TYPE_COLORS.model', TYPE_COLORS.model, 'worker'],
     ['EDGE_COLOR', EDGE_COLOR, 'rule'],
     ['LABEL_COLOR', LABEL_COLOR, 'paper'],
     ['FLASH_COLOR', FLASH_COLOR, 'human'],
@@ -111,5 +111,38 @@ describe('the hardcoded canvas colors still equal their app.css tokens', () => {
   it('dim() fades toward --color-ink, the page ground', () => {
     // dim(x, 1) is the ground itself; the mix constants 0x0e/0x11/0x16 are ink spelled as numbers
     expect(dim('#ffffff', 1)).toBe(tokens.get('ink'))
+  })
+})
+
+describe('the worker reads as a worker', () => {
+  /**
+   * A model node is the thing that actually ran the step, and it was --color-mist — the same grey
+   * as ordinary chrome — so it sank into the background. It sits outside the two-temperature axis
+   * for the same reason notes do: it carries no lifecycle, it is an actor.
+   */
+  it('is its own hue, not shared with any other node type', () => {
+    const others = (Object.entries(TYPE_COLORS) as [string, string][]).filter(([t]) => t !== 'model')
+    for (const [type, hex] of others)
+      expect(TYPE_COLORS.model, `model must not share a colour with ${type}`).not.toBe(hex)
+    expect(TYPE_COLORS.model).not.toBe('#8b93a1') // --color-mist, the chrome it used to be
+  })
+
+  it('never takes a lifecycle override — a model is not running or failed, it is used', () => {
+    for (const status of Object.keys(STATUS_COLORS))
+      expect(colorFor('model', status)).toBe(TYPE_COLORS.model)
+    expect(isActive('model', 'running')).toBe(false)
+  })
+
+  it('the `uses` edge is drawn in the worker family, every other edge in the shared chrome', () => {
+    expect(edgeColorFor(0, 'uses')).not.toBe(edgeColorFor(0))
+    for (const other of ['child', 'plan', 'depends', 'out', 'wrote'])
+      expect(edgeColorFor(0, other), `${other} must stay chrome`).toBe(edgeColorFor(0))
+    // an unknown edge type falls back rather than rendering undefined
+    expect(edgeColorFor(0, 'not-a-real-edge')).toBe(edgeColorFor(0))
+  })
+
+  it('heat still lifts a uses edge toward paper, so walked connections read as lit', () => {
+    expect(edgeColorFor(1, 'uses')).toBe(edgeColorFor(1))  // both reach paper at full heat
+    expect(edgeColorFor(0.5, 'uses')).not.toBe(edgeColorFor(0.5, 'child'))
   })
 })

@@ -19,7 +19,8 @@
     "db:up": "docker compose up -d --wait",
     "web": "cd packages/graph-ui/web && bun run dev",
     "web:build": "cd packages/graph-ui/web && bun run build",
-    "e2e": "cd packages/graph-ui && bun run e2e"
+    "e2e": "cd packages/graph-ui && bun run e2e",
+    "hooks:install": "bun scripts/hooks-install.ts"
   },
   "devDependencies": {
     "@types/bun": "^1.3.14",

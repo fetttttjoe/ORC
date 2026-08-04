@@ -1,4 +1,4 @@
-import { mkdirSync, readdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import { jsonSchema, tool } from 'ai'
 import { z } from 'zod'
@@ -183,12 +183,27 @@ export async function executeTool(
     return { output: { edited: p }, isError: false }
   }
 
-  // atomic replace: same-directory temp + rename — a reader or a crash never sees a torn file
+  // atomic replace: same-directory temp + rename — a reader or a crash never sees a torn file.
+  //
+  // The rename REPLACES THE INODE, so everything about the target that is not its bytes belongs to
+  // the old one and is discarded. Mode is the half that bites: an edit to an executable landed it
+  // at 0644 and nothing failed, because the file still worked when invoked as `bun <file>` —
+  // measured, packages/cli/src/bin.ts went 100755 to 100644 that way. A git hook is where it stops
+  // being cosmetic: git execs the hook file directly, so one that loses the bit silently never runs.
+  //
+  // So the temp inherits the target's mode before the swap. A NEW file is deliberately left at the
+  // default: a write must never GRANT a bit nobody asked for — creating executables is not this
+  // tool's job (see scripts/hooks, where the executable dispatcher is committed once and the logic
+  // beside it is plain).
   const writeFileAtomic = (abs: string, content: string): void => {
     mkdirSync(path.dirname(abs), { recursive: true })
     const tmp = `${abs}.${process.pid}.${Math.random().toString(36).slice(2, 10)}.tmp`
     try {
       writeFileSync(tmp, content)
+      // statSync, not existsSync+stat: one syscall, and ENOENT is the "new file" answer
+      let inherited: number | null = null
+      try { inherited = statSync(abs).mode & 0o7777 } catch { inherited = null }
+      if (inherited !== null) chmodSync(tmp, inherited)
       renameSync(tmp, abs)
     } catch (err) {
       try { unlinkSync(tmp) } catch { /* best effort */ }

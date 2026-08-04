@@ -104,3 +104,66 @@ describe('consolidateOnCompletion (subscriber action)', () => {
     await expect(consolidateOnCompletion(deps, done('t4'))).resolves.toBeUndefined()
   })
 })
+
+describe('the step trail retires with the task, the design record does not', () => {
+  /**
+   * Every finished task leaves ~5-6 plan-scope notes behind for good. Measured on this corpus: 23
+   * live EPISODIC notes carrying zero body characters, and 18 PLAN-tier notes carrying 42,596 —
+   * every rationale and uncertainty behind those decompositions. archive.ts's task-settled rule
+   * treats both alike, which is a fine judgement for an operator running `recheck --apply` and the
+   * wrong one for something that fires on its own.
+   */
+  it('archives the empty step trail and keeps the plan notes', async () => {
+    const live = await harness('t20', 'Trail task')
+    await live.store.write({ id: 'step-a', scope: planScope('t20'), title: 'Step A', summary: 'did A', tier: 'episodic', retention: 'expirable' }, { source: 'cli' })
+    await live.store.write({ id: 'step-b', scope: planScope('t20'), title: 'Step B', summary: 'did B', tier: 'episodic', retention: 'expirable' }, { source: 'cli' })
+    await live.store.write({ id: 'masterplan', scope: planScope('t20'), title: 'Masterplan', summary: 'the split', rationale: 'why it was split this way' }, { source: 'cli' })
+    await live.projector.catchUp()
+
+    await consolidateOnCompletion({ log: live.log, store: live.store, catchUp: live.projector.catchUp }, done('t20'))
+    await live.projector.catchUp()
+
+    expect(await live.store.get('step-a', planScope('t20'))).toBeNull()
+    expect(await live.store.get('step-b', planScope('t20'))).toBeNull()
+    // the reasoning survives — `orc plan-notes` still reads this for a settled task.
+    // Narrowed by tier rather than reached for: `rationale` is a plan-tier field, and the union
+    // store.get returns is exactly what stops a semantic note from pretending to have one.
+    const kept = await live.store.get('masterplan', planScope('t20'))
+    expect(kept?.tier).toBe('plan')
+    expect(kept?.tier === 'plan' ? kept.rationale : '').toContain('why it was split')
+  })
+
+  /**
+   * ORDER, asserted directly rather than through a side effect.
+   *
+   * The obvious test — archive first, expect an empty outcome note — PASSES either way, because
+   * setArchivedAll is event-first and the projector has not drained when consolidation reads. The
+   * rows are still there. So the wrong order is invisible today by accident of projection lag, and
+   * a test resting on that observation guards nothing (verified: flipping the calls kept it green).
+   * Recording the call sequence is what actually pins the contract.
+   */
+  it('consolidates BEFORE it retires — asserted on call order, not on a side effect', async () => {
+    const live = await harness('t21', 'Ordering task')
+    // two steps: consolidation is salience-gated, and a single trail note does not clear it
+    await live.store.write({ id: 'step-a', scope: planScope('t21'), title: 'Step A', summary: 'a real finding worth keeping', tier: 'episodic', retention: 'expirable' }, { source: 'cli' })
+    await live.store.write({ id: 'step-b', scope: planScope('t21'), title: 'Step B', summary: 'a second real finding', tier: 'episodic', retention: 'expirable' }, { source: 'cli' })
+    await live.projector.catchUp()
+
+    const calls: string[] = []
+    const spy = new Proxy(live.store, {
+      get(target, prop, receiver) {
+        const v = Reflect.get(target, prop, receiver)
+        if (typeof v !== 'function') return v
+        return (...args: unknown[]) => {
+          // the outcome write is consolidation's observable act; setArchivedAll is the retire's
+          if (prop === 'write' && (args[0] as { id?: string })?.id === slugId('outcome t21')) calls.push('consolidate')
+          if (prop === 'setArchivedAll') calls.push('retire')
+          return (v as (...a: unknown[]) => unknown).apply(target, args)
+        }
+      },
+    })
+
+    await consolidateOnCompletion({ log: live.log, store: spy, catchUp: live.projector.catchUp }, done('t21'))
+    expect(calls).toEqual(['consolidate', 'retire'])
+  })
+})

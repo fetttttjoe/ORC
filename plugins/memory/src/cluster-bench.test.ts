@@ -94,17 +94,27 @@ function syntheticCorpus(n: number, seed: number): ClusterInput[] {
 // which is the opposite of what a regression-guarding test suite should do. Run explicitly with
 // `MEMORY_BENCH_1000=1 bun test plugins/memory/src/cluster-bench.test.ts` to reproduce the n=1,000
 // point of the BEFORE curve.
+// A measurement, never a gate: correctness lives in cluster.test.ts (ordering, determinism,
+// conflict handling), and this file exists to report a curve for the claim-grouping spec. Run it
+// deliberately:  MEMORY_BENCH=1 bun test plugins/memory/src/cluster-bench.test.ts
+const RUN_BENCH = process.env.MEMORY_BENCH === '1'
 const RUN_1000 = process.env.MEMORY_BENCH_1000 === '1'
+// One bound, and it detects a HANG — not slowness. Nothing here is sized from expected duration.
+const HANG_MS = 300_000
 
-describe('cluster partition() bench — BEFORE curve (attribute-refresh-cost)', () => {
-  // [n, timeoutMs] — timeoutMs is generous headroom for a loaded CI box, not a target; the actual
-  // measured wall-clock is what gets reported to memory, not a pass/fail assertion on speed. The
-  // test's only functional assertion is that partition() still returns a partition of the input
-  // (sanity: bench inputs stay valid `ClusterInput[]`), matching cluster.test.ts's own style of
-  // never asserting timing itself in a way that makes the suite flaky on a slow machine.
-  const sizes: [number, number][] = [[100, 5_000], [250, 10_000], [500, 20_000]]
+describe.skipIf(!RUN_BENCH)('cluster partition() bench — BEFORE curve (attribute-refresh-cost)', () => {
+  // Sizes only — no per-size timeout table. Those numbers were sized from expected DURATION, which
+  // makes them a timing assertion through the back door: n=500 measured 7.0s idle and 21.0s with
+  // the supervisor, ollama, Postgres and SurrealDB running (the load this project normally carries),
+  // and the 20s bound failed the whole suite on a correct result. Retrying with backoff would not
+  // help either — a run that is slow because the box is busy is slow again on the retry; backoff
+  // answers TRANSIENT faults (see the executor's isTransient), not wall-clock variance.
+  //
+  // The real fix is that a measurement does not belong in a gate. This whole file is opt-in now, so
+  // one generous bound is enough and it means only one thing: the run did not terminate.
+  const sizes = [100, 250, 500]
 
-  for (const [n, timeoutMs] of sizes) {
+  for (const n of sizes) {
     it(`partitions n=${n} synthetic claims and reports wall-clock`, () => {
       const claims = syntheticCorpus(n, 1_000_003 + n)
       const started = performance.now()
@@ -114,7 +124,7 @@ describe('cluster partition() bench — BEFORE curve (attribute-refresh-cost)', 
       expect(groups.flatMap(g => g.members)).toHaveLength(n)
       // [sourced] measured here, this run, this machine — not a portable absolute number.
       console.log(`[cluster-bench] n=${n} dim=${DIM} threshold=${MEMORY_CLUSTER_THRESHOLD} groups=${groups.length} elapsed=${elapsed.toFixed(1)}ms`)
-    }, timeoutMs)
+    }, HANG_MS)
   }
 
   it.skipIf(!RUN_1000)('partitions n=1000 synthetic claims and reports wall-clock (opt-in, see RUN_1000)', () => {
