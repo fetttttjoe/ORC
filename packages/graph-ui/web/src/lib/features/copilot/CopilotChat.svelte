@@ -131,12 +131,22 @@
       live = live.filter(r => !(r.kind === 'message' && r.id === answerId && r.text === ''))
       busy = false
       abort = null
-      void history.refetch() // the exchange is journaled now; take the durable copy
+      // Take the durable copy AND drop the optimistic one. Refetching alone left both on screen:
+      // `rows` concatenates restored + live, so every question and answer rendered twice and
+      // stayed that way (measured: still 2 copies 3s after the turn). Only when the refetch
+      // actually succeeded — a failed one leaves `restored` without this turn, and a duplicate is
+      // a far better failure than a vanished answer. `cleared` (/new) hides `restored` on purpose,
+      // so there the optimistic rows ARE the pane and must survive.
+      const refreshed = await history.refetch()
+      if (!cleared && refreshed.isSuccess) live = []
     }
   }
 </script>
 
-<section aria-label="copilot" class="flex max-h-80 shrink-0 flex-col border-t border-line bg-ink">
+<!-- The cap is viewport-relative, not a fixed 20rem: on a short window a fixed cap ate the ledger
+     above it, and on a tall one it wasted the space it could have used. The rem term still bounds
+     it on very tall screens, where a chat half the page high reads as the whole console. -->
+<section aria-label="copilot" class="flex max-h-[min(20rem,45vh)] shrink-0 flex-col border-t border-line bg-ink">
   {#if rows.length > 0}
     <div bind:this={list} class="flex min-h-0 grow flex-col gap-1.5 overflow-y-auto px-3 py-2">
       {#each rows as row (row.id)}
@@ -150,12 +160,14 @@
             {row.text}{#if busy && row.id === rows.at(-1)?.id && row.role === 'assistant'}<span class="breathe">▍</span>{/if}
           </div>
         {:else}
-          <details class="self-start rounded-(--radius-chip) border border-line bg-desk/40 px-2 py-1">
+          <!-- min-w-0 + max-w-full: a tool payload is arbitrary text (paths, ids, JSON), and without
+               these a single long line stretched the flex column and pushed the composer sideways -->
+          <details class="min-w-0 max-w-full self-start rounded-(--radius-chip) border border-line bg-desk/40 px-2 py-1">
             <summary class="flex cursor-pointer items-center gap-1.5 select-none">
               <Chip mono temp={row.state === 'error' ? 'rust' : row.state === 'running' ? 'machine' : 'neutral'}>{row.toolName}</Chip>
               <span class="font-mono text-label text-fog">{row.state}</span>
             </summary>
-            <div class="mt-1">
+            <div class="mt-1 overflow-x-auto">
               <Payload label={row.state === 'error' ? 'error' : row.state === 'running' ? 'called with' : 'returned'} value={row.detail} temp={row.state === 'error' ? 'rust' : row.state === 'done' ? 'machine' : 'neutral'} />
             </div>
           </details>

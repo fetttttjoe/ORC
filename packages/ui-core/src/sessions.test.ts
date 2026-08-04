@@ -208,68 +208,23 @@ describe('ProjectSessions', () => {
       .toEqual([q1.seq, q2.seq])
   })
 
-  it('planNotes marks an approved-but-not-yet-running child subplan as armed, not pending', async () => {
+  // The 'armed' colouring these three cases used to assert lived only in the mermaid strings
+  // planNotes/taskPlans no longer emit. What replaces them is the guard below: the wire must not
+  // grow the field back, because a projection nothing renders is paid for on every request.
+  it('the plan wire carries waves and notes only — no rendered diagram', async () => {
     const { storage, taskId, sessions } = await setup()
-    const childId = `${taskId}.plan.tc1`
-    // the decomposition note lives in the PARENT's plan scope; its id is the child step id
     await storage.events.append(planNoteEvent(taskId, 'sub'))
-    // an approved child task whose plan has a step id 'sub', but no step has started yet
-    await storage.events.append({
-      taskId: childId, stepId: null, runToken: null, kind: EVENT_KIND.task_created,
-      payload: { task: { id: childId, parentId: taskId, type: 'split', title: 'sub', spec: '', status: TASK_STATUS.draft, zone: [], budgetUSD: null, depth: 1, createdAt: new Date().toISOString() } },
-    })
-    await storage.events.append({
-      taskId: childId, stepId: null, runToken: null, kind: EVENT_KIND.plan_proposed,
-      payload: { plan: { taskId: childId, version: 1, strategyRef: 'split', costEstimateUSD: null, steps: [childStep('sub')] } },
-    })
-    await storage.events.append({
-      taskId: childId, stepId: null, runToken: null, kind: EVENT_KIND.plan_approved,
-      payload: { taskId: childId, version: 1, approvedAt: new Date().toISOString(), approvedBy: 'policy' },
-    })
-    await storage.events.append({
-      taskId: childId, stepId: null, runToken: null, kind: EVENT_KIND.task_status_changed,
-      payload: { taskId: childId, from: TASK_STATUS.awaiting_approval, to: TASK_STATUS.approved },
-    })
-    for (let i = 0; i < 40 && (await sessions.snapshot(TEST_PROJECT_ID)).seq < 6; i++) await Bun.sleep(50)
-    const pn = await sessions.planNotes(TEST_PROJECT_ID, taskId)
-    expect(pn.mermaid).toContain('sub["sub"]:::armed')
-    expect(pn.mermaid).not.toContain('sub["sub"]:::pending')
-  })
-
-  it('planNotes keeps a manual/awaiting-approval child (approvedVersion null) at pending', async () => {
-    const { storage, taskId, sessions } = await setup()
-    const childId = `${taskId}.plan.tc2`
-    await storage.events.append(planNoteEvent(taskId, 'sub'))
-    await storage.events.append({
-      taskId: childId, stepId: null, runToken: null, kind: EVENT_KIND.task_created,
-      payload: { task: { id: childId, parentId: taskId, type: 'split', title: 'sub', spec: '', status: TASK_STATUS.awaiting_approval, zone: [], budgetUSD: null, depth: 1, createdAt: new Date().toISOString() } },
-    })
-    // proposed but NOT approved — approvedVersion stays null, so the subplan must render pending
-    await storage.events.append({
-      taskId: childId, stepId: null, runToken: null, kind: EVENT_KIND.plan_proposed,
-      payload: { plan: { taskId: childId, version: 1, strategyRef: 'split', costEstimateUSD: null, steps: [childStep('sub')] } },
-    })
-    for (let i = 0; i < 40 && (await sessions.snapshot(TEST_PROJECT_ID)).seq < 4; i++) await Bun.sleep(50)
-    const pn = await sessions.planNotes(TEST_PROJECT_ID, taskId)
-    expect(pn.mermaid).toContain('sub["sub"]:::pending')
-    expect(pn.mermaid).not.toContain('sub["sub"]:::armed')
-  })
-
-  it('taskPlans marks an approved-but-not-yet-running plan as armed on every step', async () => {
-    const { storage, taskId, sessions } = await setup()
-    // the seed task's own plan: proposed + approved, no step started yet
     await storage.events.append({
       taskId, stepId: null, runToken: null, kind: EVENT_KIND.plan_proposed,
       payload: { plan: { taskId, version: 1, strategyRef: 'split', costEstimateUSD: null, steps: [childStep('own')] } },
     })
-    await storage.events.append({
-      taskId, stepId: null, runToken: null, kind: EVENT_KIND.plan_approved,
-      payload: { taskId, version: 1, approvedAt: new Date().toISOString(), approvedBy: 'human' },
-    })
-    for (let i = 0; i < 40 && (await sessions.snapshot(TEST_PROJECT_ID)).seq < 3; i++) await Bun.sleep(50)
+    for (let i = 0; i < 40 && (await sessions.snapshot(TEST_PROJECT_ID)).seq < 2; i++) await Bun.sleep(50)
+
     const tp = await sessions.taskPlans(TEST_PROJECT_ID, taskId)
-    expect(tp?.visual?.mermaid).toContain('own["own"]:::armed')
-    expect(tp?.visual?.mermaid).not.toContain('own["own"]:::pending')
+    expect(tp?.visual?.waves.flatMap(w => w.steps.map(s => s.id))).toEqual(['own'])
+    expect(Object.keys(tp?.visual ?? {}).sort()).toEqual(['version', 'waves'])
+
+    expect(Object.keys(await sessions.planNotes(TEST_PROJECT_ID, taskId))).toEqual(['notes'])
   })
 
   it('note backlinks list notes that link to it', async () => {

@@ -23,9 +23,15 @@ import { clipMiddle } from './clip'
 // opposite of drift's read-side rule, because a false current-stamp poisons the freshness gate while
 // a skipped stamp costs one re-heal.
 // Two non-empty lines is the operator's history rule (subject + at most one body line). Enforced
-// here, not just in the committer skill's prose: a live committer wrote a three-line message whose
-// body broke off mid-sentence (79303eb, 2026-08-01) — the refusal names the rule, so the agent
-// repairs in one iteration, and a truncated essay can never reach `git commit` again.
+// here, not just in the committer skill's prose: the refusal names the rule, so the agent repairs
+// in one iteration instead of guessing.
+//
+// Correction to what this comment used to claim: 79303eb's mid-sentence body was NOT a committer
+// writing a truncated essay. The repo's commit-msg hook rewrote long messages instead of refusing
+// them, keeping the first two content lines and dropping the rest — twenty commits in that stretch
+// end at a 62–88 character wrap boundary. The hook now refuses too (scripts/hooks/commit-msg), and
+// `git commit` here does not pass --no-verify, so both rules apply to this call and the hook's
+// refusal text is surfaced verbatim in the `git commit failed: …` error below.
 const CommitInput = z.object({
   message: z.string().min(1).max(5000).refine(
     m => m.split('\n').filter(l => l.trim() !== '').length <= 2,

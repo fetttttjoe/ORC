@@ -532,7 +532,7 @@ graph TD
   end
   subgraph WEB ["door #1 — packages/graph-ui (web)"]
     SRV["src/server.ts<br/>JSON + SSE · /api/health · copilot stream"]
-    PAGE["page/* (browser)"]
+    PAGE["web/* — Svelte 5 SPA (browser)"]
   end
   subgraph MCPD ["door #2 — packages/cli/src/mcp-serve.ts (stdio MCP)"]
     MSRV["Server + StdioServerTransport<br/>--autonomy gated|full"]

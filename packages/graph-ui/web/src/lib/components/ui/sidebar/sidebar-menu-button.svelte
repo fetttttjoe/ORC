@@ -59,7 +59,11 @@
 		"data-slot": "sidebar-menu-button",
 		"data-sidebar": "menu-button",
 		"data-size": size,
-		"data-active": isActive,
+		// PRESENT ONLY WHEN ACTIVE. Svelte renders data-active={false} as the literal string "false",
+		// and every `data-active:` utility in the variants above is a PRESENCE selector — so an
+		// inactive row matched them all and the whole rail rendered as if it were selected. That is
+		// why the highlighted row was indistinguishable rather than missing.
+		"data-active": isActive ? true : undefined,
 		...restProps,
 	});
 </script>

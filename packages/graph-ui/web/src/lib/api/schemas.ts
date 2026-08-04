@@ -47,6 +47,9 @@ const MemoryHealth = z.object({
   pending: z.number(),
   reason: z.string().optional(),
   drift: z.object({ checkable: z.number(), drifted: z.number(), ratio: z.number() }).optional(),
+  // what the projector is doing right now; absent when idle. `pending` covers only the event
+  // replay, so the slow stages after it (linking, ollama re-clustering) report through this.
+  stage: z.object({ name: z.string(), sinceMs: z.number() }).optional(),
 })
 export const Health = z.object({
   memory: MemoryHealth.nullable(),
@@ -93,7 +96,7 @@ export const Transcript = z.array(
   ]),
 )
 
-const WaveStep = z.object({ id: z.string(), title: z.string(), status: z.string() })
+const WaveStep = z.object({ id: z.string(), title: z.string(), status: z.string(), failureClass: z.string().optional() })
 export const PlansView = z.object({
   versions: z.array(
     z.object({
@@ -122,7 +125,6 @@ export const PlansView = z.object({
   visual: z
     .object({
       version: z.number(),
-      mermaid: z.string().nullable().optional(),
       waves: z.array(z.object({ wave: z.number(), parallel: z.boolean(), steps: z.array(WaveStep) })),
     })
     .nullable(),
@@ -143,7 +145,6 @@ export const PlanNotesView = z.object({
       modelRef: z.string().optional(),
     }),
   ),
-  mermaid: z.string().nullable().optional(),
 })
 
 /** the models catalog is a BARE array of refs — the `{refs}` wrapper it never had cost a flow */

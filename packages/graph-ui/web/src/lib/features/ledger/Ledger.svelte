@@ -26,12 +26,16 @@
   <!-- gates stay pinned above the ledger, but BOUNDED: an unbounded block grew past the pane on
        a long question and painted over the copilot below it. Half the height at most, and its
        own scroll for the rest. -->
-  <div id="open-gates" class="max-h-[50%] shrink-0 overflow-y-auto">
+  <div id="open-gates" class="max-h-[50%] shrink-0 overflow-x-hidden overflow-y-auto">
     {#each ledger.gates as gate (gate.taskId)}
       <GateCard {gate} />
     {/each}
   </div>
-  <div bind:this={list} {onscroll} class="min-h-0 grow overflow-y-auto">
+  <!-- overflow-x-HIDDEN, not auto: a log scrolls in time, never sideways. Without it a single
+       long id or summary widened the whole column and every row gained a horizontal scrollbar,
+       which moves the seq spine off-screen and hides the one thing the ledger is read by. Rows
+       truncate instead (each carries min-w-0 + truncate), so width is bounded by the pane. -->
+  <div bind:this={list} {onscroll} class="min-h-0 grow overflow-x-hidden overflow-y-auto">
     {#if ledger.rows.length === 0}
       <p class="px-4 py-6 text-xs text-fog">the ledger fills as the project moves — every event lands here in log order</p>
     {/if}

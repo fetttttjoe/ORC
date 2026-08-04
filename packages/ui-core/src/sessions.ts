@@ -1,7 +1,7 @@
 import { EVENT_KIND, ModelsDiscoveredPayload, ZERO_USAGE, addUsage, emptyMemoryFold, errorMessage, foldMemory, foldMemoryInto, noteKey, noteLabel, type EventKind, type EventRecord, type MemoryFold, type Plan, type Usage } from '@orc/contracts'
 import { emptyFold, fold, foldInto, foldPlanNotes, listProjectIds, openStorage, planScope, stepUsage, taskUsage, watchProjectIds, type FoldAcc, type ProjectIdsWatch, type Storage } from '@orc/kernel'
 import { NODE_PREFIX, PROJECT_DIR_NOTE_ID, PROJECT_NAME_NOTE_ID, buildGraph, diffGraphs, emptyPatch, type Graph, type GraphPatch } from './graph'
-import { decompositionMermaid, planMermaid, todoWaves, type StepStatusEntry, type TodoWave } from './diagram'
+import { todoWaves, type StepStatusEntry, type TodoWave } from './diagram'
 
 // the project's display name / working directory live in memory notes — event-sourced,
 // rebuild-safe, no schema; ids + view filtering live in graph.ts (imported below)
@@ -65,12 +65,12 @@ export interface ProjectSessions {
   taskPlans(projectId: string, taskId: string): Promise<{
     versions: Plan[]
     approvedVersion: number | null
-    // rendered for the approved (else latest) version — conversation cards + request view
-    visual: { version: number; mermaid: string; waves: TodoWave[] } | null
+    // the wave layering of the approved (else latest) version — conversation cards + request view
+    visual: { version: number; waves: TodoWave[] } | null
   } | null>
-  // grounded decomposition: the plan-note graph living in the task's plan memory scope,
-  // plus its rendered mermaid (client bundles must not import the diagram deps' server chain)
-  planNotes(projectId: string, taskId: string): Promise<{ notes: ReturnType<typeof foldPlanNotes>; mermaid: string | null }>
+  // grounded decomposition: the plan-note graph living in the task's plan memory scope. The notes
+  // carry their own decomposes_into/depends_on links, so a client draws the graph from these.
+  planNotes(projectId: string, taskId: string): Promise<{ notes: ReturnType<typeof foldPlanNotes> }>
   // sinceSeq/kinds make the log incrementally POLLABLE: a reader that remembers the last seq it
   // saw asks only for what came after it (and only the kinds it cares about) instead of
   // re-reading the whole tail. Both filters apply BEFORE the limit slice, so the result is the
@@ -317,41 +317,26 @@ export function createProjectSessions(opts: {
       const tp = s.acc.state.plans.get(taskId)
       if (!tp) return null
       const shown = (tp.approvedVersion != null ? tp.versions.find(v => v.version === tp.approvedVersion) : undefined) ?? tp.versions.at(-1)
-      const runStates = s.acc.state.steps.get(taskId)
-      // Once the plan is approved, every step is armed to run; a run-status entry (once a step
-      // starts) always wins in statusClass. Fresh Map, so the raw run-status fold is never mutated.
-      const approved = tp.approvedVersion != null
-      const states = new Map<string, StepStatusEntry>()
-      if (shown) for (const step of shown.steps) states.set(step.id, { approved })
-      for (const [id, st] of runStates ?? []) states.set(id, { status: st.status, approved })
+      // Fresh Map, so the raw run-status fold is never mutated. A step with no run entry yet has
+      // no status, and todoWaves reports it 'pending'.
+      const states = new Map<string, StepStatusEntry>(
+        [...(s.acc.state.steps.get(taskId) ?? [])].map(([id, st]) =>
+          [id, { status: st.status, ...(st.failure && { failureClass: st.failure.class }) }]),
+      )
       return {
         versions: tp.versions,
         approvedVersion: tp.approvedVersion,
-        visual: shown ? { version: shown.version, mermaid: planMermaid(shown.steps, states), waves: todoWaves(shown.steps, states) } : null,
+        visual: shown ? { version: shown.version, waves: todoWaves(shown.steps, states) } : null,
       }
     },
 
     async planNotes(projectId, taskId) {
       const s = await sessionFor(projectId)
-      const notes = foldPlanNotes(s.events, planScope(taskId))
-      // Subplans execute as the CHILD's steps, which carry the note ids verbatim
-      // (instantiateFrozenPlan) — so merging the children's step states is the whole correlation.
-      // A child whose plan is approved (approvedVersion != null) but has not started any step yet
-      // contributes an `approved` bit for every step id in its shown plan version, so the subplan
-      // renders 'armed' between approval and first-step-start instead of an indistinguishable
-      // pending. A child stuck at approvedVersion===null leaves all its step ids unmarked (pending).
-      const substeps = new Map<string, StepStatusEntry>()
-      for (const [childId, t] of s.acc.state.tasks) {
-        if (t.parentId !== taskId) continue
-        const cp = s.acc.state.plans.get(childId)
-        const approved = cp != null && cp.approvedVersion != null
-        if (approved) {
-          const shown = cp.versions.find(v => v.version === cp.approvedVersion)
-          for (const step of shown?.steps ?? []) substeps.set(step.id, { approved })
-        }
-        for (const [stepId, st] of s.acc.state.steps.get(childId) ?? []) substeps.set(stepId, { status: st.status, approved })
-      }
-      return { notes, mermaid: notes.length > 0 ? decompositionMermaid(notes, substeps) : null }
+      // The child-step status correlation that used to live here fed decompositionMermaid alone,
+      // and went with it: it walked every child task and its plan versions on each call to colour
+      // a diagram no surface drew. The notes themselves already carry the decomposition links, so
+      // a client that wants to draw it has everything it needs.
+      return { notes: foldPlanNotes(s.events, planScope(taskId)) }
     },
 
     async modelCatalog(projectId) {
@@ -372,8 +357,9 @@ export function createProjectSessions(opts: {
       const limit = opts.limit ?? 200
       // Untargeted (opts.taskId undefined = whole-project Conversation view): every event,
       // unfiltered — slice then summarize, exactly as before. Task-scoped: summarize, then route
-      // through shouldAdmitLogRow — the SAME predicate the live SSE tail (log.ts) uses — so a
-      // project-scoped memory row is admitted only when payload.author.taskId matches the filter,
+      // through shouldAdmitLogRow — the ONE per-task admission rule, and server-side on purpose:
+      // the browser asks for a task's rows rather than filtering a whole-project tail itself, so
+      // a project-scoped memory row is admitted only when payload.author.taskId matches the filter,
       // never blanket-admitted by null taskId. Filter must precede slice to return the last
       // `limit` MATCHING rows, not the last `limit` events of which few may match.
       // sinceSeq/kinds narrow the SAME rows before the slice, for the same reason the taskId

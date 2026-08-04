@@ -66,14 +66,61 @@
     if (session.sel.project) await loadProject(session.sel.project)
   })()
 
-  let dockWidth = $state(Math.round(window.innerWidth * 0.38))
+  /**
+   * The graph dock's width. It stays a PIXEL width because a drag has to land exactly where the
+   * pointer left it — but a pixel width computed ONCE from innerWidth stops responding the moment
+   * the window changes, and the dock is `shrink-0`, so the ledger (which only has `grow`) is what
+   * gets crushed: at 1920px with the dock dragged wide, the ledger fell to ~470px and truncated
+   * every task title, event summary and the retry row. So the width is clamped against the CURRENT
+   * viewport on every resize, not just while dragging, and the operator's choice survives a reload.
+   */
+  const DOCK_MIN = 280
+  const MAIN_MIN = 420 // the narrowest ledger that still reads without truncating its chips
+  const SIDEBAR_W = 288 // w-72, the sidebar's fixed track
+  const DOCK_KEY = 'orc:dockWidth'
+
+  // never let the dock take so much that the ledger drops under MAIN_MIN — but DOCK_MIN wins if
+  // the viewport is too small for both, because a dock thinner than that renders nothing useful
+  const clampDock = (w: number): number =>
+    Math.max(DOCK_MIN, Math.min(w, Math.max(DOCK_MIN, window.innerWidth - SIDEBAR_W - MAIN_MIN)))
+
+  // a browser that refuses storage (private mode) must not take the console down with it
+  const readStored = (): number | null => {
+    try {
+      const raw = Number(localStorage.getItem(DOCK_KEY))
+      return Number.isFinite(raw) && raw > 0 ? raw : null
+    } catch {
+      return null
+    }
+  }
+  const writeStored = (w: number): void => {
+    try {
+      localStorage.setItem(DOCK_KEY, String(w))
+    } catch {
+      /* the dock still works this session; only the memory of it is lost */
+    }
+  }
+
+  let dockWidth = $state(clampDock(readStored() ?? Math.round(window.innerWidth * 0.38)))
+
+  // Re-clamp on viewport change. The handler is registered once — `dockWidth` is read inside the
+  // closure, never during tracking, so this effect does not re-subscribe on every drag frame.
+  $effect(() => {
+    const onResize = (): void => {
+      dockWidth = clampDock(dockWidth)
+    }
+    window.addEventListener('resize', onResize)
+    return () => window.removeEventListener('resize', onResize)
+  })
+
   function startResize(e: PointerEvent): void {
     const startX = e.clientX
     const startW = dockWidth
     const move = (ev: PointerEvent): void => {
-      dockWidth = Math.min(window.innerWidth * 0.7, Math.max(280, startW + (startX - ev.clientX)))
+      dockWidth = clampDock(startW + (startX - ev.clientX))
     }
     const up = (): void => {
+      writeStored(dockWidth) // on release, not per frame — a drag is ~60 writes a second otherwise
       window.removeEventListener('pointermove', move)
       window.removeEventListener('pointerup', up)
     }

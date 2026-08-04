@@ -2,7 +2,8 @@
 // status override precedence failed > blocked > running > type default, and note/artifact/model
 // are NEVER recolored by a coincidental detail string.
 import { describe, expect, it } from 'bun:test'
-import { colorFor, EDGE_COLOR, edgeColorFor, isActive, STATUS_COLORS, TYPE_COLORS } from './colors'
+import { readFileSync } from 'node:fs'
+import { colorFor, dim, EDGE_COLOR, edgeColorFor, FLASH_COLOR, isActive, LABEL_COLOR, STATUS_COLORS, TYPE_COLORS } from './colors'
 
 describe('status override precedence', () => {
   it('overrides task/step color for live statuses', () => {
@@ -65,5 +66,50 @@ describe('edgeColorFor — heat lerps the rule chrome toward paper', () => {
   it('clamps out-of-range heat instead of extrapolating', () => {
     expect(edgeColorFor(-1)).toBe(edgeColorFor(0))
     expect(edgeColorFor(2)).toBe(edgeColorFor(1))
+  })
+})
+
+/**
+ * The WebGL copies must equal the CSS tokens they name.
+ *
+ * colors.ts hardcodes hexes because a canvas cannot read CSS custom properties, and it names the
+ * source token in a comment beside each one. That comment was the whole enforcement: "change a
+ * token there, grep the name here" — the same silent-drift shape CLAUDE.md warns about for tuned
+ * constants quoted in docs. Nothing failed when they diverged; the graph just stopped matching the
+ * rest of the console. This reads app.css and makes the divergence a test failure.
+ *
+ * Only EXACT copies are listed. TYPE_COLORS.task/step/artifact/note are deliberately derived
+ * (dimmed, or mixed toward another token) and have no token to equal.
+ */
+describe('the hardcoded canvas colors still equal their app.css tokens', () => {
+  const css = readFileSync(new URL('../../../app.css', import.meta.url), 'utf8')
+  const TOKEN = /--color-([a-z-]+):\s*(#[0-9a-f]{6})/g
+  const tokens = new Map([...css.matchAll(TOKEN)].map(m => [m[1] ?? '', m[2] ?? '']))
+
+  const EXACT: ReadonlyArray<readonly [label: string, hex: string, token: string]> = [
+    ['STATUS_COLORS.failed', STATUS_COLORS.failed ?? '', 'rust'],
+    ['STATUS_COLORS.blocked', STATUS_COLORS.blocked ?? '', 'rust'],
+    ['STATUS_COLORS.running', STATUS_COLORS.running ?? '', 'machine'],
+    ['STATUS_COLORS.cancelled', STATUS_COLORS.cancelled ?? '', 'fog'],
+    ['TYPE_COLORS.model', TYPE_COLORS.model, 'mist'],
+    ['EDGE_COLOR', EDGE_COLOR, 'rule'],
+    ['LABEL_COLOR', LABEL_COLOR, 'paper'],
+    ['FLASH_COLOR', FLASH_COLOR, 'human'],
+  ]
+
+  it('parses the @theme block at all — a rename here must not silently pass everything', () => {
+    expect(tokens.get('ink')).toMatch(/^#[0-9a-f]{6}$/)
+    expect(tokens.size).toBeGreaterThan(8)
+  })
+
+  for (const [label, hex, token] of EXACT) {
+    it(`${label} === --color-${token}`, () => {
+      expect(hex).toBe(tokens.get(token) ?? `--color-${token} is not declared in app.css`)
+    })
+  }
+
+  it('dim() fades toward --color-ink, the page ground', () => {
+    // dim(x, 1) is the ground itself; the mix constants 0x0e/0x11/0x16 are ink spelled as numbers
+    expect(dim('#ffffff', 1)).toBe(tokens.get('ink'))
   })
 })

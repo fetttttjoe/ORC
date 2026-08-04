@@ -34,6 +34,21 @@
   --color-moss: #7fa65a; /* done / ok */
   --color-rust: #c4573b; /* failed / blocked / stale */
 
+  /* The sidebar's own token set. shadcn's sidebar primitives style themselves entirely through
+     these (bg-sidebar, data-active:bg-sidebar-accent, ring-sidebar-ring). None of them existed
+     here, so every one resolved to nothing: the rail only had a background because AppSidebar
+     passes bg-bureau by hand, and the SELECTED request row set data-active="true" and then
+     rendered identically to every other row. Mapped onto the palette above rather than invented,
+     so the rail cannot drift away from the rest of the console. */
+  --color-sidebar: var(--color-bureau);
+  --color-sidebar-foreground: var(--color-mist);
+  --color-sidebar-accent: var(--color-desk);
+  --color-sidebar-accent-foreground: var(--color-paper);
+  --color-sidebar-primary: var(--color-machine);
+  --color-sidebar-primary-foreground: var(--color-ink);
+  --color-sidebar-border: var(--color-line);
+  --color-sidebar-ring: var(--color-machine);
+
   --radius-card: 6px;
   --radius-chip: 4px;
 
@@ -124,4 +139,28 @@ body {
     transition-duration: 0.01ms !important;
     animation-duration: 0.01ms !important;
   }
+}
+
+/* Scrollbars, themed and always visible on a scrollable pane.
+   The rail, the ledger and the inspector all scroll, but with the platform's overlay scrollbar
+   there was nothing to say so: a request rail holding 20+ settled items read as a list that had
+   simply been cut off, and the way back was invisible. A thin permanent track costs 8px and tells
+   the truth. `scrollbar-gutter: stable` keeps content from shifting as it appears. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-rule) transparent;
+}
+*::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+*::-webkit-scrollbar-thumb {
+  background-color: var(--color-rule);
+  border-radius: 4px;
+}
+*::-webkit-scrollbar-thumb:hover {
+  background-color: var(--color-mist);
 }

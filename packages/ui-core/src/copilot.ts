@@ -116,9 +116,11 @@ export function buildCopilotTools(deps: {
     task_plan: tool({
       description: 'Read a task’s plan versions (steps, models, dependencies) and which version is approved.',
       inputSchema: z.object({ taskId }),
-      // visual.mermaid is projected AWAY (plan_notes' field-by-field precedent): it is a diagram
-      // serialization for the browser renderer, and passing it through was the only cross-surface
-      // consumer of the mermaid TEXT — tokens spent re-telling the model what `waves` already says
+      // `visual` is rebuilt field-by-field rather than spread: this is an ALLOWLIST, so a field
+      // added to taskPlans for the browser's benefit cannot silently start costing model tokens on
+      // every call. It caught exactly that once — visual.mermaid was a diagram serialization for a
+      // renderer, re-telling the model what `waves` already says. That field is gone now, which
+      // makes the projection an identity TODAY; it stays because the next added field will not be.
       execute: async ({ taskId: id }) => {
         const plans = await sessions.taskPlans(projectId, id)
         if (!plans) return { error: 'no plan proposed yet' }

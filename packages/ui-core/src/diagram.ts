@@ -1,80 +1,41 @@
-// Mermaid text + todo-wave layering for plans and decompositions — pure, shared by the web
-// conversation cards, the request view, and any future TUI. Labels go through the ONE
-// mermaidLabel escaper (contracts) — agent-authored titles must never escape the graph.
-import { LINK_KIND, STEP_RUN_STATUS, mermaidLabel } from '@orc/contracts'
-import { PALETTE } from './palette'
+// The wave layering the request view and the conversation cards render, in the shape those
+// surfaces want (ids, titles and run statuses per wave).
+//
+// The LAYERING itself is not decided here — contracts/plan-layering owns it, because the browser's
+// dependency graph positions by the same ranks and the two used to compute them separately. They
+// disagreed on cyclic plans: this file used to drop those steps, the graph parked them, so one
+// plan rendered with different steps depending on the surface. One algorithm, two presentations.
+//
+// This file also used to emit mermaid text (planMermaid / decompositionMermaid). Both went when
+// the console stopped rendering them — the browser dropped the mermaid dependency and now draws
+// the plan itself, so the strings were built and shipped on every request with no reader. The
+// vault's DAGs are a SEPARATE renderer (vault-projector/src/render.ts) and are unaffected: it
+// emits mermaid into markdown, which is the only thing that renders in a vault.
+import { layerSteps } from '@orc/contracts/plan-layering'
 
 export interface DiagramStep { id: string; title: string; dependsOn: string[] }
-// `status` is the step-RUN status (from the run fold); `approved` is the orthogonal plan-approval
-// bit (approvedVersion != null on the owning task) — a step/subplan that is armed to run but whose
-// run has not started yet. Kept separate from STEP_RUN_STATUS because approval is not a run status.
-export interface StepStatusEntry { status?: string; approved?: boolean }
+// `status` is the step-RUN status (from the run fold). The `approved` bit that used to sit beside
+// it existed only to give mermaid an 'armed' class; nothing reads it now, and a field kept "just
+// in case" is a field that quietly stops being maintained.
+export interface StepStatusEntry { status?: string; failureClass?: string }
 export interface StepStatusLookup { get(id: string): StepStatusEntry | undefined }
 
-// A real run status always wins; else an approved-but-not-yet-running entry is 'armed'; else
-// 'pending'. This ONE function is the shared mechanism behind both plan and decomposition diagrams.
-const statusClass = (e: StepStatusEntry | undefined): string =>
-  e?.status === STEP_RUN_STATUS.completed ? 'done'
-    : e?.status === STEP_RUN_STATUS.failed ? 'failed'
-      : e?.status === STEP_RUN_STATUS.running ? 'running'
-        : e?.approved ? 'armed'
-          : 'pending'
-
-const THEME = [
-  `classDef done fill:${PALETTE.doneFill},stroke:${PALETTE.step},color:${PALETTE.text}`,
-  `classDef running fill:${PALETTE.runningFill},stroke:${PALETTE.running},color:${PALETTE.text}`,
-  `classDef failed fill:${PALETTE.failedFill},stroke:${PALETTE.danger},color:${PALETTE.text}`,
-  `classDef armed fill:${PALETTE.armedFill},stroke:${PALETTE.armed},color:${PALETTE.text}`,
-  `classDef pending fill:${PALETTE.surface},stroke:${PALETTE.edge},color:${PALETTE.textDim}`,
-]
-
-export function planMermaid(steps: DiagramStep[], states?: StepStatusLookup): string {
-  const lines = ['graph TD']
-  for (const s of steps)
-    lines.push(`  ${s.id}["${mermaidLabel(s.title)}"]:::${statusClass(states?.get(s.id))}`)
-  for (const s of steps) for (const d of s.dependsOn) lines.push(`  ${d} --> ${s.id}`)
-  lines.push(...THEME.map(l => `  ${l}`))
-  return lines.join('\n')
+export interface TodoWave {
+  wave: number
+  parallel: boolean
+  // `failureClass` travels with the status because "it failed" and "why" are one fact to every
+  // surface that renders it: a REJECTED step offers replan, a broken one offers retry, and a rail
+  // carrying only `status` forces each consumer to go re-fetch the reason separately.
+  steps: Array<{ id: string; title: string; status: string; failureClass?: string }>
 }
 
-export interface DecompositionNote { id: string; title: string; links: Array<{ id: string; kind: string }> }
-
-// `states` keys on the subplan note id, which is also the child step's id (instantiateFrozenPlan).
-// A note with no run yet stays pending UNLESS its owning child task's plan is approved, in which
-// case it renders 'armed' — so an approved-but-not-started subplan is visibly distinct from an
-// unapproved proposal (which carries no approved bit) and from the masterplan root.
-export function decompositionMermaid(notes: DecompositionNote[], states?: StepStatusLookup): string {
-  const ids = new Set(notes.map(n => n.id))
-  const lines = ['graph TD']
-  for (const n of notes) lines.push(`  ${n.id}["${mermaidLabel(n.title)}"]:::${statusClass(states?.get(n.id))}`)
-  for (const n of notes) for (const l of n.links) {
-    if (!ids.has(l.id)) continue
-    if (l.kind === LINK_KIND.decomposes_into) lines.push(`  ${n.id} --> ${l.id}`)
-    // dependency -> dependent, matching planMermaid: in both diagrams an arrow means "runs before"
-    else if (l.kind === LINK_KIND.depends_on) lines.push(`  ${l.id} -.-> ${n.id}`)
-  }
-  lines.push(...THEME.map(l => `  ${l}`))
-  return lines.join('\n')
-}
-
-export interface TodoWave { wave: number; parallel: boolean; steps: Array<{ id: string; title: string; status: string }> }
-
-// Kahn layering: wave N = every step whose dependencies all sit in earlier waves. Steps sharing
-// a wave can run in parallel — exactly how the run scheduler launches them.
 export function todoWaves(steps: DiagramStep[], states?: StepStatusLookup): TodoWave[] {
-  const waves: TodoWave[] = []
-  const placed = new Set<string>()
-  let rest = steps
-  for (let n = 1; rest.length > 0; n++) {
-    const ready = rest.filter(s => s.dependsOn.every(d => placed.has(d) || !steps.some(x => x.id === d)))
-    if (ready.length === 0) break // cycle/dangling: stop layering rather than loop
-    for (const s of ready) placed.add(s.id)
-    waves.push({
-      wave: n,
-      parallel: ready.length > 1,
-      steps: ready.map(s => ({ id: s.id, title: s.title, status: states?.get(s.id)?.status ?? 'pending' })),
-    })
-    rest = rest.filter(s => !placed.has(s.id))
-  }
-  return waves
+  return layerSteps(steps).layers.map(l => ({
+    wave: l.wave,
+    parallel: l.parallel,
+    steps: l.steps.map(s => {
+      const st = states?.get(s.id)
+      return { id: s.id, title: s.title, status: st?.status ?? 'pending', ...(st?.failureClass !== undefined && { failureClass: st.failureClass }) }
+    }),
+  }))
 }

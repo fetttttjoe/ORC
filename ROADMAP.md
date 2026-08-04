@@ -151,23 +151,16 @@ agents-and-skills-as-markdown surface, mapped onto the existing loader rather th
    tasks never offer an answer box). Named frontier deliberately out: `depOutputs` are the one
    uncontracted agent→agent boundary. [derived: five incident-driven slices on 2026-07-30
    accreting per-incident fixes — this round consolidates them into one boundary story]
-5. **UI moves to a component framework** — *next (decision made, migration incremental).* The
-   hand-rolled DOM layer has outgrown itself: the 2026-08-01 audits attribute the recurring UI
-   defects (frozen panes, input loss on re-render, triplicated graph state, three copies of the
-   reply widget, app.ts's ~16 responsibilities) to manually synchronized DOM — the exact class a
-   declarative framework + query cache removes structurally. Shape: mount a React root inside
-   the existing shell and migrate pane by pane (inspector → feed → sidebar), shadcn/Radix for
-   primitives, TanStack Query over the existing /api endpoints + SSE. Precondition for 5.6 (the
-   plan canvas), which should never be built on `el()`. [derived: two Explore-agent audits,
-   2026-08-01 — live-sync coverage and simplification-targets reports]
-6. **Interactive plan canvas** — *open.* Today the human reviews the rendered plan and revises it
+5. **Interactive plan canvas** — *open.* Today the human reviews the rendered plan and revises it
    only by annotating and waking the plan agent; there is no direct manipulation. A browser plan
    canvas (graph-ui or a dedicated view) would let the human edit subplans in place — reorder
    `dependsOn`, adjust `zone` globs, swap `modelRef`, rewrite requirements — with each edit
    written as an ordinary plan-note through the one mutation surface, so the approval gate, the
    changed-since-approval refusal, and the deterministic freeze all apply to human edits exactly
    as they do to agent edits. The planner's prose behavior is already operator-configurable via
-   the plan-authoring skill (5.2); this item is the missing interaction layer. [derived: ECC's
+   the plan-authoring skill (5.2); this item is the missing interaction layer. Its precondition is
+   met — the console is Svelte 5 + shadcn-svelte with a query cache, so a canvas is components and
+   mutations rather than hand-synchronized DOM. [derived: ECC's
    Plan Canvas — browser plan review with annotation and approval gates — is its strongest UX
    idea; its plan substrate underneath is plain markdown, weaker than the frozen-note pipeline
    here] When: annotate-and-wake round-trips visibly cost more than typing the edit would.
@@ -208,22 +201,17 @@ processes raced the shared cursor, wall time per embed rose from 88ms warm/solo 
 throughput fell to ~2.5 events/min, and `orc serve` sat pre-banner with a claimed-but-never-
 heartbeaten slot that `orc serve status` reported STALE on a live pid]
 
-1. **Boot progress + honest slot state** — *next, small.* Print one line per N projected events
-   during `projector.start()` ("memory catch-up: K events behind, ~Xs"), and either start the
-   heartbeat before buildRuntime or claim the slot after it — a supervisor that is hours into a
-   legitimate boot must be distinguishable from a hung one, for both the operator and the next
-   `orc serve`.
-2. **One projector at a time** — *next.* Catch-up across processes is unfenced: applyEvent's
+1. **One projector at a time** — *next.* Catch-up across processes is unfenced: applyEvent's
    transaction dedupes the write, but every racer pays the embedding before losing the race
    (embeds are computed outside the transaction by design). Add a cross-process advisory lock
    around catch-up (the runtime-lock pattern, scoped to projection) so CLI one-shots and servers
    defer to a live drainer instead of multiplying embedder load.
-3. **Embeddings survive replay** — *open.* An embedding is a pure function of (model, text);
+2. **Embeddings survive replay** — *open.* An embedding is a pure function of (model, text);
    re-buying 376 notes' vectors from a CPU embedder on every rebuild is the single dominant
    rebuild cost. Either persist vectors beside the log keyed by content hash, or accept rocksdb
    persistence (landed 2026-08-01) as sufficient until the next forced rebuild. When: the next
    `orc memory rebuild` visibly hurts.
-4. **Cancelling a task must cancel its workflow** — *next.* A cancelled task leaves its in-flight
+3. **Cancelling a task must cancel its workflow** — *next.* A cancelled task leaves its in-flight
    DBOS workflow `PENDING`, and every later supervisor boot recovers it: the step re-executes (a
    real model call, real spend) and the boot blocks behind it until it settles. Measured
    2026-08-01: a workflow from 2026-07-30 — step `kernel-tools-and-wiring` of a task cancelled two
@@ -231,7 +219,7 @@ heartbeaten slot that `orc serve status` reported STALE on a live pid]
    and the operator saw only "supervisor booting" for minutes. `cancel` should cancel the DBOS
    workflow alongside the task, and recovery should skip workflows whose task is terminal.
    [derived: dbos.workflow_status PENDING row vs the task's cancelled status in the event log]
-5. **A grounded task refuses to run on a degraded memory tier** — *next.* runtime.ts degrades
+4. **A grounded task refuses to run on a degraded memory tier** — *next.* runtime.ts degrades
    memory to unavailable and continues — right for read-mostly commands, wrong for a
    grounded-plan run whose entire deliverable is plan-notes: it admitted and drove analyze+plan
    to guaranteed failure ($1.64, zero notes written, blocked). Gate at admission or first
@@ -239,17 +227,17 @@ heartbeaten slot that `orc serve status` reported STALE on a live pid]
    the process lifetime — the DB was healthy again minutes into the doomed run. [derived:
    2026-08-01 task 989fabea — "namespace 'orc' does not exist" on every memory call while
    SurrealDB was being re-seeded]
-6. **Task creation is idempotent across the no-supervisor window** — *next.* One `orc new`
+5. **Task creation is idempotent across the no-supervisor window** — *next.* One `orc new`
    yielded two identical tasks 73s apart when no supervisor was live (task_created 65717 +
    65723, 2026-08-01): the creation retried without an idempotency key, and both lineages ran —
    the duplicate spent real tokens before recovery fenced it. Key the creation (the events
    table already carries idempotency_key) so a retry lands on the same task.
-7. **A fenced task points at its successor; timelines label foreign events** — *next (ui).*
+6. **A fenced task points at its successor; timelines label foreign events** — *next (ui).*
    The operator watched the fenced duplicate's static chat while the live retry streamed on the
    sibling; a sibling's status line rendered unlabeled inside the wrong task's timeline. Fenced/
    superseded tasks link forward; cross-task lines name their task. [derived: 2026-08-01 live
    session — "nothing is moving" while everything was]
-8. **`catching_up` names its magnitude** — *next, small.* The health line counts memory-kind
+7. **`catching_up` names its magnitude** — *next, small.* The health line counts memory-kind
    events past the cursor; mid-rebuild it read "~350" while the cursor was 14,700 seqs behind
    head. Say "rebuilding from seq K of H" when the gap spans more than one session, so an
    operator can tell seconds-behind from rebuilding-the-world.

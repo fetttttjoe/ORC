@@ -21,6 +21,18 @@
    * and disappears the moment the system is ready — a permanent banner teaches people to skip it.
    */
   const POLL_MS = 3_000
+  // A boot writes its heartbeat well inside this; past it, silence is the story worth telling.
+  const STALE_BEAT_MS = 20_000
+  const TICK_MS = 1_000
+
+  /** a clock that advances between polls, so the heartbeat age counts up instead of stepping */
+  let now = $state(Date.now())
+  $effect(() => {
+    const t = setInterval(() => (now = Date.now()), TICK_MS)
+    return () => clearInterval(t)
+  })
+
+  const ago = (ms: number): string => (ms < 60_000 ? `${Math.floor(ms / 1000)}s` : `${Math.floor(ms / 60_000)}m`)
 
   const health = createQuery(() => ({
     queryKey: qk.health(),
@@ -31,6 +43,43 @@
 
   const sup = $derived(health.data?.supervisor)
   const mem = $derived(health.data?.memory)
+
+  // remember the deepest backlog seen so the bar measures progress against where it started
+  let peak = $state(0)
+  $effect(() => {
+    const pending = mem?.state === MEMORY_HEALTH.catchingUp ? mem.pending : 0
+    if (pending > peak) peak = pending
+    if (pending === 0) peak = 0
+  })
+
+  // How long since the supervisor last said it was alive. Null when it has never reported one —
+  // absent evidence, which must not render as "0s ago" and claim a heartbeat that never arrived.
+  const beatAge = $derived.by<number | null>(() => {
+    const at = sup?.lastSeenAt === undefined ? NaN : Date.parse(sup.lastSeenAt)
+    return Number.isFinite(at) ? Math.max(0, now - at) : null
+  })
+
+  // The boot's real work is replaying the projection, and `pending` is how much of it is left —
+  // the same number the catch-up banner below charts, surfaced during boot where it answers
+  // "is this moving?" rather than only after the supervisor is already up.
+  const backlog = $derived(mem?.state === MEMORY_HEALTH.catchingUp && mem.pending > 0 ? mem.pending : null)
+
+  // What it is ACTUALLY doing. `pending` covers the event replay only — the stages after it
+  // (re-linking every note's edges, re-partitioning the claim corpus through ollama) run with
+  // pending already at zero, which is why a long boot used to show one unchanging sentence.
+  const STAGE_SAID: Record<string, string> = {
+    replaying: 'replaying knowledge events',
+    linking: 're-linking the knowledge graph',
+    clustering: 're-clustering claims through the embedder',
+  }
+  const work = $derived(
+    mem?.stage
+      ? ` Currently ${STAGE_SAID[mem.stage.name] ?? mem.stage.name} (${ago(mem.stage.sinceMs)} so far).`
+      : backlog === null ? '' : ` ${backlog} events left to replay.`,
+  )
+  const bootPercent = $derived(
+    backlog !== null && peak > 0 ? Math.min(100, Math.round(((peak - backlog) / peak) * 100)) : null,
+  )
 
   interface Banner {
     title: string
@@ -52,9 +101,18 @@
     if (sup?.state === SUPERVISOR_HEALTH.booting)
       return {
         title: 'supervisor starting',
-        detail: 'it replays the projection and recovers any interrupted work before accepting runs — a long boot means it found work to finish, not that it hung.',
-        temp: 'human',
-        percent: null,
+        // The banner's whole job is telling a long boot from a hang, and the sentence alone could
+        // not: it read identically at second 2 and minute 5. The heartbeat is the evidence — it is
+        // written by the boot loop itself, so an advancing age proves the process is still working
+        // and a frozen one is the first thing an operator can act on.
+        detail:
+          beatAge === null
+            ? 'it replays the projection and recovers any interrupted work before accepting runs.'
+            : beatAge > STALE_BEAT_MS
+              ? `it replays the projection before accepting runs — but its heartbeat has not moved for ${ago(beatAge)}, which is longer than a healthy boot goes silent. Check the supervisor process${sup.pid === undefined ? '' : ` (pid ${sup.pid})`}.`
+              : `it replays the projection and recovers any interrupted work before accepting runs — a long boot means it found work to finish, not that it hung.${work}`,
+        temp: beatAge !== null && beatAge > STALE_BEAT_MS ? 'rust' : 'human',
+        percent: bootPercent,
       }
 
     if (sup?.state === SUPERVISOR_HEALTH.stale)
@@ -85,13 +143,6 @@
     return null
   })
 
-  // remember the deepest backlog seen so the bar measures progress against where it started
-  let peak = $state(0)
-  $effect(() => {
-    const pending = mem?.state === MEMORY_HEALTH.catchingUp ? mem.pending : 0
-    if (pending > peak) peak = pending
-    if (pending === 0) peak = 0
-  })
 </script>
 
 {#if banner}
@@ -99,6 +150,15 @@
     <div class="flex items-baseline gap-2">
       <span class={cn('font-mono text-label tracking-widest uppercase', TEMP_TEXT[banner.temp])}>{banner.title}</span>
       {#if banner.percent !== null}<span class="font-mono text-label text-fog">{banner.percent}%</span>{/if}
+      <span class="grow"></span>
+      <!-- the liveness tell: an age that counts up every second is a process still running, and a
+           frozen one is the difference between a slow boot and a dead one -->
+      {#if beatAge !== null && banner.temp !== 'rust'}
+        <span class="flex shrink-0 items-center gap-1 font-mono text-label text-fog tabular-nums">
+          <span class={cn('size-1 rounded-full', beatAge > STALE_BEAT_MS ? 'bg-rust' : 'bg-moss breathe')}></span>
+          heartbeat {ago(beatAge)} ago
+        </span>
+      {/if}
     </div>
     <Progress
       value={banner.percent ?? undefined}

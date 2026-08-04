@@ -96,7 +96,7 @@ export function finalizePlanTool(opts: {
         // episodic note inside the plan scope leaves the fold identical while making the changed-set
         // non-empty: this gate re-asks where the old one passed. Unreachable by any agent or
         // automatic path (agents have no delete tool, the cancel GC does not touch a live task's
-        // notes, staleNotes needs 30 days AND --apply), so it costs only a deliberate human delete
+        // notes, archival needs evidence of obsolescence AND --apply), so it costs only a deliberate human delete
         // mid-approval, and it self-clears — re-approving moves approved.seq past the delete.
         // Upgrade path if that ever bites: diff foldPlanNotes at approved.seq against now, both
         // folds computed in ONE process, which stays build-independent.

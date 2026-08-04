@@ -1,6 +1,7 @@
 <script lang="ts">
   // the task as a request: plan versions, the approved plan's waves, grounded plan notes,
   // and (when this server can act) the revise gate
+  import { FAILURE_CLASS } from '@orc/contracts/execution'
   import { createQuery, keepPreviousData } from '@tanstack/svelte-query'
   import { SvelteSet } from 'svelte/reactivity'
   import Chip from '$lib/components/Chip.svelte'
@@ -11,7 +12,7 @@
   import StatusPill from '$lib/components/StatusPill.svelte'
   import LifecycleRail from './LifecycleRail.svelte'
   import StepRoad from './StepRoad.svelte'
-  import PlanBoard from '$lib/features/plan/PlanBoard.svelte'
+  import PlanPanel from '$lib/features/plan/PlanPanel.svelte'
   import YourMoveCard from './YourMoveCard.svelte'
   import { yourMove } from './your-move'
   import { TaskArtifacts } from './detail-view'
@@ -20,7 +21,7 @@
   import { notify } from '$lib/notify'
   import { qk } from '$lib/query-keys'
   import { ledger } from '$lib/stores/ledger.svelte'
-  import { taskIdOf } from '$lib/node-id'
+  import { stepNodeId, taskIdOf } from '$lib/node-id'
   import { session } from '$lib/stores/session.svelte'
   import { fmtCost, fmtTokens, nodeHead } from './node-head'
 
@@ -66,7 +67,10 @@
   const openQuestion = $derived(ledger.gates.find(g => g.taskId === taskId)?.question ?? null)
   // the task payload already carries them — the completion line used to claim zero regardless
   const artifacts = $derived(TaskArtifacts.safeParse(node.data).data?.artifacts ?? [])
-  const failedStep = $derived(waves?.flatMap(w => w.steps).find(st => st.status === 'failed')?.id ?? null)
+  const failed = $derived(waves?.flatMap(w => w.steps).find(st => st.status === 'failed') ?? null)
+  const failedStep = $derived(failed?.id ?? null)
+  // a REJECTED step judged the work; retrying repeats it unchanged, so the pane offers revise
+  const rejected = $derived(failed?.failureClass === FAILURE_CLASS.rejected)
   const move = $derived(
     taskId === null
       ? null
@@ -74,6 +78,7 @@
           taskId,
           status: head?.status ?? '',
           failedStepId: failedStep,
+          rejected,
           openQuestion,
           artifactCount: artifacts.length,
         }),
@@ -106,7 +111,7 @@
     <LifecycleRail status={head.status} />
   {/if}
   {#if move !== null && move.kind !== 'none'}
-    <YourMoveCard {move} taskId={taskId} />
+    <YourMoveCard {move} taskId={taskId} plan={shownPlan} />
   {/if}
 
   <div class="flex items-center gap-2 border-b border-line px-3 pb-2">
@@ -161,8 +166,15 @@
           {/each}
         </div>
 
-        {#if waves !== null}
-          <div class="mb-3"><PlanBoard taskId={taskId} waves={waves} /></div>
+        {#if shownPlan}
+          <div class="mb-3">
+            <PlanPanel
+              {taskId}
+              steps={shownPlan.steps}
+              {waves}
+              onstepclick={id => session.navigate({ node: stepNodeId(taskId, id), tab: 'detail' })}
+            />
+          </div>
         {/if}
         {#if shownPlan}
           <StepRoad taskId={taskId} steps={shownPlan.steps} states={waves?.flatMap(w => w.steps) ?? []} />

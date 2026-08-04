@@ -113,11 +113,15 @@ describe('copilot tools', () => {
     expect(r3.output).toHaveProperty('memory', { state: 'unreachable', pending: 0, reason: 'surreal is down' })
   })
 
-  it('task_plan projects the mermaid text away — a diagram serialization is not driver data', async () => {
+  // `visual` is an ALLOWLIST, not a spread. The field it was built for (a mermaid diagram string)
+  // is gone, so the stub below smuggles an unknown one in its place: the point was never mermaid
+  // specifically, it is that a field added to taskPlans for the BROWSER must not silently start
+  // costing model tokens on every task_plan call.
+  it('task_plan passes only the visual fields a driver can act on, dropping any other', async () => {
     const withPlan = sessionsStub({
       taskPlans: async () => ({
         versions: [{ taskId: 't1', version: 1, strategyRef: 's', costEstimateUSD: null, steps: [] }], approvedVersion: 1,
-        visual: { version: 1, mermaid: 'graph TD\n a-->b', waves: [{ wave: 1, parallel: false, steps: [] }] },
+        visual: { version: 1, renderedForTheBrowser: 'graph TD\n a-->b', waves: [{ wave: 1, parallel: false, steps: [] }] },
       }),
     })
     const tools = asResolvedTools(buildCopilotTools({ sessions: withPlan, actions: null, projectId: 'p1' }))

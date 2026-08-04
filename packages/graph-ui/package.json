@@ -8,9 +8,6 @@
   "dependencies": {
     "@orc/ui-core": "workspace:*",
     "@orc/contracts": "workspace:*",
-    "graphology": "^0.26.0",
-    "graphology-layout-forceatlas2": "^0.10.1",
-    "sigma": "^3.0.3",
     "zod": "^4.4.3",
     "ai": "^7.0.30"
   },

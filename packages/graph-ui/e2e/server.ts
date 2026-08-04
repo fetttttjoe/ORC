@@ -57,6 +57,18 @@ await storage.events.append({
   },
 })
 
+// A plan with REAL topology: a diamond over three waves (analyze -> left ∥ right -> join). The
+// single-step draftFixture cannot exercise the dependency graph's subflows at all — one wave, one
+// node, no edges — so multi-wave rendering shipped unproven until this existed.
+const shaped = await kernel.createTask({ title: 'shaped plan request', spec: 'a diamond plan' })
+await kernel.proposePlan(shaped.id, draftFixture([
+  stepFixture({ id: 'analyze', title: 'analyze', dependsOn: [] }),
+  stepFixture({ id: 'left', title: 'left', dependsOn: ['analyze'] }),
+  stepFixture({ id: 'right', title: 'right', dependsOn: ['analyze'] }),
+  stepFixture({ id: 'join', title: 'join', dependsOn: ['left', 'right'] }),
+]))
+await kernel.approvePlan(shaped.id)
+
 // A task mid-run. The run monitor only exists while something executes, so without a seeded
 // running step it would ship unexercised — and a panel that renders nothing is exactly the
 // failure mode the wire-shape bugs took four rounds to surface. Iteration 4 of a ceiling of 5

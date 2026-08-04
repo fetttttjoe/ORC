@@ -13,7 +13,8 @@
     "./plan": "./src/plan.ts",
     "./ids": "./src/ids.ts",
     "./step-ids": "./src/step-ids.ts",
-    "./health": "./src/health.ts"
+    "./health": "./src/health.ts",
+    "./plan-layering": "./src/plan-layering.ts"
   },
   "dependencies": {
     "zod": "^4.4.3"

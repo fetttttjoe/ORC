@@ -2,8 +2,8 @@ import { activation, DEFAULT_HALF_LIFE_DAYS, edgeKey, isUiMetaNote, noteKey, not
 import type { State } from '@orc/kernel'
 
 // wire shapes + vocabulary live in graph-wire.ts (zero-import, shared with the browser)
-export { EDGE, NODE_PREFIX, emptyPatch, type EdgeType, type Graph, type GraphLink, type GraphNode, type GraphPatch } from './graph-wire'
-import { EDGE, NODE_PREFIX, type Graph, type GraphLink, type GraphNode, type GraphPatch } from './graph-wire'
+export { EDGE, NODE_PREFIX, emptyPatch, linkKey, type EdgeType, type Graph, type GraphLink, type GraphNode, type GraphPatch } from './graph-wire'
+import { EDGE, linkKey, NODE_PREFIX, type Graph, type GraphLink, type GraphNode, type GraphPatch } from './graph-wire'
 
 // defined in contracts so retrieval obeys the same rule the graph view does
 export { PROJECT_NAME_NOTE_ID, PROJECT_DIR_NOTE_ID, isUiMetaNote } from '@orc/contracts'
@@ -102,10 +102,8 @@ export function buildGraph(state: State, mem: MemoryFold, opts: GraphBuildOption
   return { nodes, links }
 }
 
-// The ONE spelling of a link's identity. Exported because three consumers must agree on it —
-// the diff below, the page's client-side edge index (app.ts), and the sigma renderer's edge
-// keys — and two of them had re-spelled the format inline.
-export const linkKey = (l: GraphLink): string => `${l.source}\u0000${l.target}\u0000${l.type}`
+// linkKey — the ONE spelling of link identity — is declared in graph-wire.ts and re-exported
+// above: the browser's graph store keys by it too and cannot import this module.
 
 // Pure id-keyed diff between two projections — the ONE way patches are derived, so the patch
 // stream can never drift from what a fresh full load would return.

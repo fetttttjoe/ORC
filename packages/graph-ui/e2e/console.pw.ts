@@ -78,8 +78,17 @@ test('the copilot streams an answer and reports what it cost', async ({ page }) 
   await open(page)
   await copilot(page).getByPlaceholder('ask the copilot…').fill('what is going on?')
   await page.keyboard.press('Enter')
-  await expect(copilot(page).getByText('e2e copilot reply')).toBeVisible({ timeout: 15_000 })
+  await expect(copilot(page).getByText('e2e copilot reply').first()).toBeVisible({ timeout: 15_000 })
   await expect(copilot(page).getByText(/\d+ in ·/)).toBeVisible({ timeout: 15_000 })
+
+  // ONE copy, not two. The pane renders the journaled history plus the optimistic rows of the turn
+  // in flight; when the post-send refetch pulled the exchange back, nothing dropped the optimistic
+  // copy, so every question and answer sat on screen twice — permanently, measured at 2 copies
+  // still there 3s later. It surfaced as an intermittent strict-mode violation on the assertion
+  // above (whether the refetch beat the assertion decided it), which read as a flaky test rather
+  // than the user-visible duplication it was.
+  await expect(copilot(page).getByText('what is going on?')).toHaveCount(1)
+  await expect(copilot(page).getByText('e2e copilot reply')).toHaveCount(1)
 })
 
 test('the transcript renders tool payloads as readable JSON, not [object Object]', async ({ page }) => {
@@ -143,4 +152,141 @@ test('a live run says how far it has got and how close to its ceiling', async ({
   await expect(monitor).toContainText('0/1')
   // iterations against the ceiling the plan was frozen with: the number a looping agent runs into
   await expect(monitor.getByTitle(/ceiling this step was frozen with/)).toHaveText('4/5')
+})
+
+/**
+ * The plan's dependency graph actually DRAWS. Asserting the toggle exists would have passed while
+ * the canvas rendered nothing — Svelte Flow needs a sized container and resolves parentId against
+ * node order, and both fail silently into an empty box. So this reaches inside the canvas for a
+ * step's own title and for its wave container.
+ */
+test('the plan graph draws its steps inside wave containers, and collapses on demand', async ({ page }) => {
+  await open(page)
+  await rail(page).getByRole('button', { name: new RegExp(SEEDED_REQUEST) }).click()
+
+  const graph = inspector(page).getByRole('group', { name: 'plan dependency graph' })
+  await expect(graph).toBeVisible()
+  // a wave container: the subflow, not just a node sitting in a column
+  await expect(graph.getByText(/^wave 1$/)).toBeVisible()
+  // and the seeded plan's step drawn INSIDE it — proof the child resolved against its parent
+  // rather than landing at the canvas origin, which is how a broken subflow fails
+  await expect(graph.getByText('s1', { exact: true }).first()).toBeVisible()
+
+  const toggle = inspector(page).getByRole('button', { name: /dependency graph/ })
+  await toggle.click()
+  await expect(graph).toBeHidden()
+  await toggle.click()
+  await expect(graph).toBeVisible()
+})
+
+/**
+ * The rail must stay usable once a project has history. It renders every request in four groups;
+ * with the settled pile expanded that overflows any laptop viewport, and a rail that grows instead
+ * of scrolling puts "new request" and the live work off-screen with no way back.
+ */
+test('the request rail scrolls instead of growing, and keeps the selection highlighted', async ({ page }) => {
+  // A short viewport reproduces what 20+ settled requests do on a normal one: content taller than
+  // the rail's own box. The bug this pins is a rail that GROWS to fit — pushing "new request" and
+  // the live work off-screen with no scrollbar to get back.
+  await page.setViewportSize({ width: 1440, height: 420 })
+  await open(page)
+  const nav = rail(page)
+
+  // the settled pile is the one group collapsed by default; expanding it is what overflows
+  const settled = nav.getByRole('button', { name: /settled/ })
+  if (await settled.count()) await settled.first().click()
+
+  const scroller = nav.locator('[data-sidebar="content"]')
+  await expect(scroller).toBeVisible()
+
+  // it must never extend past the window — that is the "grows instead of scrolls" failure
+  expect(await scroller.evaluate(el => el.getBoundingClientRect().bottom > window.innerHeight + 1)).toBe(false)
+
+  // and when the content IS taller than the box, it must actually move
+  if (await scroller.evaluate(el => el.scrollHeight > el.clientHeight + 1)) {
+    await scroller.evaluate(el => { el.scrollTop = 150 })
+    expect(await scroller.evaluate(el => el.scrollTop)).toBeGreaterThan(0)
+  }
+
+  // selecting a STEP inside a request keeps that request's row highlighted
+  await page.setViewportSize({ width: 1440, height: 900 })
+  const row = nav.getByRole('button', { name: new RegExp(SEEDED_REQUEST) })
+  await row.click()
+  await expect(row).toHaveAttribute('data-active', 'true')
+  await inspector(page).getByRole('group', { name: 'plan dependency graph' }).getByText('s1', { exact: true }).first().click()
+  await expect(row).toHaveAttribute('data-active', 'true')
+
+  // ...and the selection must be VISIBLE, not merely attributed. data-active was set correctly all
+  // along while --color-sidebar-accent was undefined, so the styled row rendered identically to
+  // every other one — an assertion on the attribute alone passed straight through that.
+  const other = nav.getByRole('button', { name: /gated plan request/ })
+  const bgOf = (l: typeof row) => l.evaluate(el => getComputedStyle(el).backgroundColor)
+  expect(await bgOf(row)).not.toBe(await bgOf(other))
+})
+
+/**
+ * Multi-wave topology, which the single-step fixture cannot reach: three wave containers, four
+ * steps distributed across them, and the two parallel steps sharing a container. A subflow that
+ * fails to resolve its children drops them all at the canvas origin — visible here as steps
+ * appearing outside their wave, or wave 2 holding the wrong count.
+ */
+test('the plan graph draws a diamond across three wave containers', async ({ page }) => {
+  await open(page)
+  await rail(page).getByRole('button', { name: /shaped plan request/ }).click()
+
+  const graph = inspector(page).getByRole('group', { name: 'plan dependency graph' })
+  await expect(graph).toBeVisible()
+
+  for (const wave of ['wave 1', 'wave 2', 'wave 3']) {
+    await expect(graph.getByText(new RegExp(`^${wave}$`))).toBeVisible()
+  }
+  // wave 2 is the parallel one — the rail and the graph must agree on that
+  await expect(graph.getByText('2 in parallel')).toBeVisible()
+
+  for (const step of ['analyze', 'left', 'right', 'join']) {
+    await expect(graph.getByText(step, { exact: true }).first()).toBeVisible()
+  }
+})
+
+/**
+ * The expanded canvas. It renders the SAME PlanGraph in a bigger box — so the assertion that
+ * matters is that the dialog's canvas actually draws the plan, not merely that a dialog opened.
+ * This is where plan editing will live, and an empty full-size canvas would be worse than none.
+ */
+test('the plan graph opens full size and draws the same plan', async ({ page }) => {
+  await open(page)
+  await rail(page).getByRole('button', { name: /shaped plan request/ }).click()
+
+  await inspector(page).getByRole('button', { name: 'expand plan graph' }).click()
+  const dialog = page.getByRole('dialog').filter({ hasText: 'plan dependencies' })
+  await expect(dialog).toBeVisible()
+
+  const big = dialog.getByRole('group', { name: 'plan dependency graph' })
+  await expect(big).toBeVisible()
+  await expect(big.getByText('join', { exact: true }).first()).toBeVisible()
+  // and it is genuinely bigger than the inline one
+  const box = await big.boundingBox()
+  expect(box?.height ?? 0).toBeGreaterThan(460)
+
+  await page.keyboard.press('Escape')
+  await expect(dialog).toBeHidden()
+  // closing the dialog must not collapse the inline panel
+  await expect(inspector(page).getByRole('group', { name: 'plan dependency graph' })).toBeVisible()
+})
+
+/**
+ * A log scrolls in TIME, never sideways. One long id or summary used to widen the whole column,
+ * and the horizontal scrollbar that appeared moved the seq spine — the thing the ledger is read by
+ * — off screen. Checked at a narrow viewport because that is where it showed up.
+ */
+test('the ledger never scrolls horizontally, however narrow the pane', async ({ page }) => {
+  await page.setViewportSize({ width: 900, height: 800 })
+  await open(page)
+  const scroller = ledger(page).locator('div').filter({ has: page.locator('[data-seq]') }).first()
+  const overflows = await ledger(page).evaluate(el => {
+    for (const d of el.querySelectorAll('div')) if (d.scrollWidth > d.clientWidth + 1) return true
+    return false
+  })
+  expect(overflows).toBe(false)
+  await expect(scroller.or(ledger(page))).toBeVisible()
 })

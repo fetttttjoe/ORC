@@ -4,6 +4,7 @@
   import { statusTemperature, TEMP_BORDER, TEMP_DOT, TEMP_TEXT } from '$lib/temperature'
   import { stepNodeId } from '$lib/node-id'
   import { session } from '$lib/stores/session.svelte'
+  import { STEP_STATUS, waveState } from './plan-status'
   import type { WaveStep } from '$lib/api/types'
 
   /**
@@ -26,17 +27,12 @@
     compact?: boolean
   } = $props()
 
-  const RUNNING = 'running'
-  const DONE = new Set(['completed', 'done'])
-
-  /** a wave is done when every step is, running when any step has started */
-  const waveState = (steps: readonly WaveStep[]): string =>
-    steps.every(s => DONE.has(s.status)) ? 'completed' : steps.some(s => s.status === RUNNING) ? RUNNING : steps.some(s => s.status === 'failed') ? 'failed' : 'pending'
+  const RUNNING = STEP_STATUS.running
 </script>
 
 <ol class="flex flex-col">
   {#each waves as wave, i (wave.wave)}
-    {@const state = waveState(wave.steps)}
+    {@const state = waveState(wave.steps.map(s => s.status))}
     {@const temp = statusTemperature(state)}
     <li class="flex gap-2">
       <!-- the rail: filled as far as the run has got, so progress reads vertically -->

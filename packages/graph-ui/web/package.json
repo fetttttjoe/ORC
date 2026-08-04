@@ -9,11 +9,12 @@
     "check": "svelte-check --tsconfig ./tsconfig.json --tsgo --threshold error"
   },
   "dependencies": {
-    "@orc/contracts": "workspace:*",
     "@fontsource/ibm-plex-mono": "^5.3.0",
     "@fontsource/ibm-plex-sans": "^5.3.0",
     "@lucide/svelte": "^1.28.0",
+    "@orc/contracts": "workspace:*",
     "@tanstack/svelte-query": "^6.1.38",
+    "@xyflow/svelte": "^1.6.2",
     "bits-ui": "^2.18.1",
     "clsx": "^2.1.1",
     "graphology": "^0.26.0",

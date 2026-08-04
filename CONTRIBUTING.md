@@ -42,6 +42,9 @@ docker compose up -d --wait
 # Install dependencies
 bun install
 
+# Point git at the tracked hooks (one time, per clone — git never does this for you)
+git config core.hooksPath scripts/hooks
+
 # Run migrations
 bun run packages/cli/src/bin.ts db migrate
 
@@ -677,6 +680,11 @@ Follow the format below for clarity and consistency:
 ```
 
 `<body>` is at most one line (optional); see [Code style (binding)](#code-style-binding).
+
+`scripts/hooks/commit-msg` enforces this, and it **refuses** — it never edits your message. If it
+rejects a commit, the message file is exactly as you wrote it: shorten it and commit again. The
+same rule is enforced on the agent door by `git_commit`'s input schema, so both doors agree.
+Run `git config core.hooksPath scripts/hooks` once per clone or the hook does not run at all.
 
 ### Types
 

@@ -83,9 +83,10 @@ describe('summarizeEvent', () => {
   })
 })
 
-// shouldAdmitLogRow is the ONE predicate shared by sessions.ts log() (initial batch) and
-// the web app's ledger (live SSE tail). bun test has no DOM here, so this pure
-// function is the only unit-testable seam for the log.ts side — same pattern as page/affordance.
+// shouldAdmitLogRow is the ONE per-task admission rule behind sessions.ts log(). It is pure and
+// tested here rather than through the endpoint because the interesting cases are attribution
+// cases — a project-scoped memory row belongs to the task that WROTE it — and those are decided
+// by payload shape, not by anything a request can vary.
 describe('shouldAdmitLogRow', () => {
   const row = (over: Partial<LogRow>): LogRow => ({
     seq: 1, ts: 't', kind: 'x', taskId: null, stepId: null, line: '', authorTaskId: null, noteRef: null, ...over,
