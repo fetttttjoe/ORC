@@ -34,6 +34,8 @@
   <p class="px-4 py-6 text-xs text-fog">no events for this task yet</p>
 {:else}
   {#each log.data ?? [] as row (row.seq)}
-    <LedgerRow {row} />
+    <!-- showTask=false: this slice is already ONE task, so the chip repeated the same id on
+         every row and spent width the line needs in a narrow panel -->
+    <LedgerRow {row} showTask={false} />
   {/each}
 {/if}

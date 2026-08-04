@@ -6,7 +6,7 @@ import { Command, InvalidArgumentError } from 'commander'
 import { SUPERVISOR_HEALTH, claimHistory, EDGE_DIRECTION, errorMessage, EVENT_KIND, foldMemory, LINK_KINDS, MASTERPLAN_NOTE_ID, MEMORY_ACCESS, MemoryDeletedPayload, MemoryScope, MemoryWrittenPayload, noteKey, NOTE_TIER, NOTE_TIERS, NoteTier, parseLinkSpec, PlanDraft, ROLE_SKILL, RUN_OUTCOME, STRATEGY, TASK_STATUS, TERMINAL_TASK_STATUS, LinkKind, slugId, type Analyzer, type EventRecord, type MemoryLink, type NoteFields, type ExecutionPort, type MemoryHealth, type Plan, formatModelRate } from '@orc/contracts'
 import { openStorage, Kernel, atomicWriteFileSync, listProjectIds, claimSlot, fold, gatedChildren, freezePlan, liveSupervisors, staleSupervisors, grantExtensionTrust, grantMcpTrust, initializeProject, isExtensionTrusted, isMcpTrusted, loadConfig, loadTrust, migrateDatabase, requireProject, stepUsage, subtreeUsage, taskUsage, type EventLog, type OrcConfig, type PluginHost, type ProjectConfig, type Storage } from '@orc/kernel'
 import { createVaultProjector, parsePlanFile } from '@orc/vault-projector'
-import { archiveCandidates, consolidateTask, createDriftProbe, frontier, needsReground, probeMemory, recheckNotes, restampableNotes, summarize } from '@orc/memory'
+import { archiveCandidates, consolidateTask, createDriftProbe, frontier, KNOWLEDGE_KINDS, needsReground, probeMemory, recheckNotes, restampableNotes, summarize } from '@orc/memory'
 import { withMemory } from './memory-open'
 import { buildDistiller } from './consolidation-distiller'
 import { seedRegistries, buildRuntime } from './runtime'
@@ -985,7 +985,9 @@ export function buildProgram(
     .option('--apply', 'archive the retirable notes (default: report only)')
     .action(async (o: { candidates?: boolean; apply?: boolean }) => {
       const { config, log } = needPlugin()
-      const events = await log.after(0, [EVENT_KIND.memory_written, EVENT_KIND.memory_deleted, EVENT_KIND.memory_accessed])
+      // KNOWLEDGE_KINDS, not a hand-spelled list: the previous one omitted memory_verified, so a
+      // note an auditor had confirmed still counted as drifted here while health called it clean.
+      const events = await log.after(0, KNOWLEDGE_KINDS)
       const terminalTaskIds = new Set(
         [...(await requireKernel().state()).tasks.values()]
           .filter(t => TERMINAL_TASK_STATUS.has(t.status))

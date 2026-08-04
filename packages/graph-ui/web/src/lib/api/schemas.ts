@@ -49,7 +49,12 @@ const MemoryHealth = z.object({
   drift: z.object({ checkable: z.number(), drifted: z.number(), ratio: z.number() }).optional(),
   // what the projector is doing right now; absent when idle. `pending` covers only the event
   // replay, so the slow stages after it (linking, ollama re-clustering) report through this.
-  stage: z.object({ name: z.string(), sinceMs: z.number() }).optional(),
+  // `progress` rides the replaying stage alone — the other two have no countable unit.
+  stage: z.object({
+    name: z.string(),
+    sinceMs: z.number(),
+    progress: z.object({ applied: z.number(), total: z.number() }).optional(),
+  }).optional(),
 })
 export const Health = z.object({
   memory: MemoryHealth.nullable(),

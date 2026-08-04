@@ -34,7 +34,22 @@ describe('invalidations (SSE summary → query-cache keys)', () => {
   })
 
   it('a note write touches the note node; model discovery touches the catalog', () => {
-    expect(invalidations({ kind: 'memory_written', taskId: null, noteRef: 'note:project x' }, noParent)).toEqual([['node', 'note:project x']])
+    expect(invalidations({ kind: 'memory_written', taskId: null, noteRef: 'note:project x' }, noParent)).toContainEqual(['node', 'note:project x'])
     expect(invalidations({ kind: 'models_discovered', taskId: null, noteRef: null }, noParent)).toEqual([['models']])
+  })
+
+  // A heal rewrites a note and CLEARS its drift, but the drift chip reads corpus health, not the
+  // note — so emitting only qk.node left the ratio the write just improved stale until
+  // ConsoleHeader's 15s poll came round. The SSE stream already carries these events; the reading
+  // they change has to ride it.
+  it('an event that changes the read model refreshes corpus health', () => {
+    for (const kind of ['memory_written', 'memory_verified', 'memory_deleted'])
+      expect(invalidations({ kind, taskId: null, noteRef: null }, noParent)).toContainEqual(['health'])
+  })
+
+  // A read moves `hits`, never currency — refetching health on every preload would put the whole
+  // corpus probe on the agent-loop's cadence, which is the one thing STATE_CHANGE exists to avoid.
+  it('a memory READ leaves corpus health alone', () => {
+    expect(invalidations({ kind: 'memory_accessed', taskId: null, noteRef: 'note:project x' }, noParent)).not.toContainEqual(['health'])
   })
 })

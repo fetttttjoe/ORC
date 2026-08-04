@@ -20,6 +20,11 @@ export { unavailableStepMemory, type BindStep } from './step'
 export { orphanedNotes } from './sweep'
 // the evidence-based lifecycle: recheck gathers the facts, archive rules on them (no clock in either)
 export { recheckNotes, summarize } from './recheck'
+// The event kinds a KNOWLEDGE fold needs, exported because a caller that hand-lists them drops one:
+// `orc memory recheck` spelled its own [written, deleted, accessed] and so never fetched
+// memory_verified, which left every verification invisible to the recheck and the archive rules
+// even after the fold learned to apply it.
+export { KNOWLEDGE_KINDS } from './projector'
 export { archiveCandidates } from './archive'
 export { frontier } from './frontier'
 export { consolidateTask, type ConsolidationInput, type ConsolidationDistiller } from './consolidate'
@@ -116,7 +121,13 @@ export async function probeMemory(config: ProjectConfig, log: EventLog, livePid?
     // half-written row yields no stage rather than an unknown label reaching the UI.
     const published = MemoryStage.safeParse(await knowledge.getStage().catch(() => null))
     const stage = published.success && livePid !== undefined && published.data.pid === livePid
-      ? { name: published.data.name, sinceMs: Math.max(0, Date.now() - published.data.startedAt) }
+      ? {
+          name: published.data.name,
+          sinceMs: Math.max(0, Date.now() - published.data.startedAt),
+          // carried only when the publisher counted something — the replay does, the two
+          // whole-corpus passes have no unit to count and omit it rather than invent a denominator
+          ...(published.data.progress && { progress: published.data.progress }),
+        }
       : undefined
     return pending === 0
       ? { state: MEMORY_HEALTH.ok, pending, ...(drift && { drift }), ...(stage && { stage }) }

@@ -32,13 +32,39 @@ export async function buildPlugins(config = loadConfig()): Promise<{ host: Plugi
   return { host, hub }
 }
 
+// Boot is unbounded and blocks every run, and the banner could only ever say "starting": the
+// memory projector publishes its own stages, but a drain under the report floor announces nothing
+// and the remaining phases (DBOS launch and its recovery of interrupted workflows) had no
+// vocabulary at all. Timing every phase is what turns "it hung" into "it is in recovery".
+// Exported so callers that open storage themselves (bin.ts's openKernel path, which threads an
+// already-open storage into buildRuntime below) can time that open with the SAME instrument and
+// hand the result back in as `storageMs` — otherwise that phase is invisible to the boot line.
+export const bootPhase = async <T>(label: string, run: () => Promise<T>, into: Array<[string, number]>): Promise<T> => {
+  const at = Date.now()
+  try { return await run() } finally { into.push([label, Date.now() - at]) }
+}
+
+/**
+ * The phases list buildRuntime starts from. A caller that opened storage itself (bin.ts, the real
+ * `orc serve` path) times it and hands the duration back, so 'storage' leads the line; otherwise
+ * buildRuntime times its own open and this starts empty. Pure and exported so the rule is testable
+ * without launching DBOS — buildRuntime does not expose `phases`, and the only other observation
+ * seam is parsing the printed line, which would pin formatting rather than behaviour.
+ */
+export const seedPhases = (hasSharedStorage: boolean, storageMs: number | undefined): Array<[string, number]> =>
+  hasSharedStorage && storageMs !== undefined ? [['storage', storageMs]] : []
+
 export async function buildRuntime(
-  shared?: { host: PluginHost; hub: McpHub; config?: ProjectConfig; storage?: Storage; kernel?: Kernel; executorId?: string },
+  shared?: { host: PluginHost; hub: McpHub; config?: ProjectConfig; storage?: Storage; storageMs?: number; kernel?: Kernel; executorId?: string },
 ): Promise<DbosPort> {
   const config = shared?.config ?? requireProject(loadConfig())
   const { host, hub } = shared ?? (await buildPlugins(config))
-  // reuse the caller's storage (bin passes the kernel's) — one pool, one lifecycle
-  const storage = shared?.storage ?? (await openStorage(config.databaseUrl, { projectId: config.projectId, redactEnv: config.redactEnv }))
+  // reuse the caller's storage (bin passes the kernel's) — one pool, one lifecycle. When the
+  // caller already timed that open (bin.ts's openKernel path), seed the phases list with it so
+  // the boot line still names 'storage' instead of the phase silently vanishing whenever
+  // shared.storage is provided (which on the real `orc serve` path is always).
+  const phases = seedPhases(shared?.storage !== undefined, shared?.storageMs)
+  const storage = shared?.storage ?? (await bootPhase('storage', () => openStorage(config.databaseUrl, { projectId: config.projectId, redactEnv: config.redactEnv }), phases))
   const log = storage.events
   // reuse the caller's kernel (bin passes the one wired to its refValidator + analyzers) so
   // task_split's expanded child plans go through the same toolRef/skillRef validation as
@@ -52,7 +78,7 @@ export async function buildRuntime(
   // moment it launches, and they must already be observed. Surreal failure degrades memory
   // (explicit unavailable tools) but never blocks history, execution, or the vault trace.
   const projector = createVaultProjector({ log, config })
-  await projector.start()
+  await bootPhase('vault-projection', () => projector.start(), phases)
   let memory: Awaited<ReturnType<typeof createMemory>> | null = null
   let lifecycle: MemoryLifecycle | null = null
   let bindStep: BindStep
@@ -64,7 +90,7 @@ export async function buildRuntime(
   let groundingSource: ReturnType<typeof createGroundingSource> | undefined
   try {
     memory = await openMemory({ log, config })
-    await memory.projector.start()
+    await bootPhase('memory-projection', () => memory!.projector.start(), phases)
     const memoryProjector = memory.projector // captured for the lifecycle closure (memory is narrowed non-null here)
     // post-task memory maintenance (auto-consolidation) — a decoupled subscriber, started only in
     // the execution runtime (never in the one-shot CLI memory commands) and stopped at shutdown.
@@ -153,7 +179,9 @@ export async function buildRuntime(
       ] }
     },
   })
-  await port.launch()
+  await bootPhase('dbos-launch', () => port.launch(), phases)
+  // one line, at the moment an operator is guaranteed to be reading: which phase owned the boot
+  console.log(`orc serve: boot ${phases.map(([l, ms]) => `${l} ${ms}ms`).join(' · ')}`)
   host.skills.watch() // hot-index during long-lived runs (spec quality scenario: <1s)
   return {
     ...port,

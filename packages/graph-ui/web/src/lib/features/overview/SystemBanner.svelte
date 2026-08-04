@@ -72,13 +72,24 @@
     linking: 're-linking the knowledge graph',
     clustering: 're-clustering claims through the embedder',
   }
+  // The replaying stage carries its own count, and saying it matters: a stage line WITHOUT one
+  // ("replaying knowledge events (40s so far)") replaced the quantitative "N events left to
+  // replay" this banner used to show, trading the one number that answers "is it moving?" for a
+  // label. Where the publisher counted, the count is shown.
+  const counted = $derived(mem?.stage?.progress ?? null)
   const work = $derived(
     mem?.stage
-      ? ` Currently ${STAGE_SAID[mem.stage.name] ?? mem.stage.name} (${ago(mem.stage.sinceMs)} so far).`
+      ? ` Currently ${STAGE_SAID[mem.stage.name] ?? mem.stage.name}${counted ? ` — ${counted.applied}/${counted.total}` : ''} (${ago(mem.stage.sinceMs)} so far).`
       : backlog === null ? '' : ` ${backlog} events left to replay.`,
   )
+  // Prefer the REPLAY's own applied/total over the pending-vs-peak estimate: `peak` is the largest
+  // backlog this tab happened to observe, so a tab opened mid-drain starts its denominator low and
+  // reads far too optimistic. The published pair is the projector's own count of the drain it is
+  // actually running, and it needs no observation history to be right.
   const bootPercent = $derived(
-    backlog !== null && peak > 0 ? Math.min(100, Math.round(((peak - backlog) / peak) * 100)) : null,
+    counted && counted.total > 0 ? Math.min(100, Math.round((counted.applied / counted.total) * 100))
+      : backlog !== null && peak > 0 ? Math.min(100, Math.round(((peak - backlog) / peak) * 100))
+        : null,
   )
 
   interface Banner {

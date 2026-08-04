@@ -868,8 +868,16 @@ const viaEdgeKey = (p: MemoryAccessedPayload): string | null => {
   return e && edgeKey(e.scope, e.from, e.to, e.kind)
 }
 
+// What the fold holds per note: the write's payload, plus the verification a later memory_verified
+// attached to it. `verified` sits OUTSIDE MemoryNoteInput deliberately — no write path may mint a
+// stamp (deriveNoteProvenance's CARRY-or-CLEAR rule), and MemoryNoteInput strips it from any draft
+// that tries, so it can only ever arrive here from the verify event itself.
+export interface FoldedWrite extends Omit<MemoryWrittenPayload, 'note'> {
+  note: MemoryWrittenPayload['note'] & { verified?: VerifiedStamp }
+}
+
 export interface MemoryFold {
-  notes: Map<string, MemoryWrittenPayload>
+  notes: Map<string, FoldedWrite>
   writes: Map<string, string>   // last write time per note
   access: Map<string, AccessStats>
   edges: Map<string, AccessStats>
@@ -889,8 +897,33 @@ export function foldMemoryInto(acc: MemoryFold, e: MemoryEvent): MemoryFold {
     const p = MemoryWrittenPayload.safeParse(e.payload)
     if (!p.success) return acc
     const k = noteKey(p.data.note.scope, p.data.note.id)
-    acc.notes.set(k, p.data)
+    // CARRY or CLEAR — the same rule deriveNoteProvenance applies on the read-model side, keyed on
+    // the same content hash so the two cannot answer differently. A contentless rewrite (the commit
+    // restamp supplies no fields and moves only sourceRevision) keeps the auditor's check; any edit
+    // to what the note SAYS drops it, because the stamp asserts someone read THAT text.
+    const prior = acc.notes.get(k)?.note
+    const carried = prior?.verified !== undefined && noteContentKey(prior) === noteContentKey(p.data.note)
+      ? { verified: prior.verified }
+      : {}
+    acc.notes.set(k, { ...p.data, note: { ...p.data.note, ...carried } })
     if (e.ts) acc.writes.set(k, e.ts)
+  } else if (e.kind === EVENT_KIND.memory_verified) {
+    // The fold half of the verification act. Without this branch the event was dropped entirely, so
+    // every fold-based consumer — `orc memory recheck`, archiveCandidates via recheckNotes — was
+    // blind to verification while the read model honoured it. Measured live on an 84-note corpus:
+    // recheck reported 30 drifted where health reported 29, the gap being the single note an auditor
+    // had just confirmed. That is the loop noteDriftState's either-clean rule already fixed for the
+    // read model; it was never fixed here.
+    const p = MemoryVerifiedPayload.safeParse(e.payload)
+    if (!p.success) return acc
+    const k = noteKey(p.data.scope, p.data.id)
+    const held = acc.notes.get(k)
+    // a verification of a note nothing ever wrote is not a note — never materialize one from it
+    if (!held) return acc
+    // `writes` is deliberately untouched: a verification is not a write. Stamping it would bump the
+    // note's last-write time and hand every activation/staleness reader a lie about a step that
+    // only read — the same three lies MemoryVerifiedPayload's comment refuses for revision/author.
+    acc.notes.set(k, { ...held, note: { ...held.note, verified: p.data.stamp } })
   } else if (e.kind === EVENT_KIND.memory_deleted) {
     const p = MemoryDeletedPayload.safeParse(e.payload)
     if (!p.success) return acc

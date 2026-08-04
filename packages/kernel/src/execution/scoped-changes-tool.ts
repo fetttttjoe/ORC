@@ -1,5 +1,5 @@
 import type { PlanStep, ResolvedTool } from '@orc/contracts'
-import { pathInZone, STEP_ROLE, toolError, VERIFY_STEP_ID } from '@orc/contracts'
+import { pathInZone, stepMayVerify, toolError } from '@orc/contracts'
 import type { Kernel } from '../kernel'
 
 // scoped_changes: the paths THIS task's own steps recorded writing, derived purely from the event
@@ -84,10 +84,8 @@ export function scopedChangesTool(opts: {
   const { kernel, citing, p } = opts
   // Registration gate, not an execute-time rejection: a visible tool that can only ever error gets
   // called anyway and burns an iteration per attempt (report_coverage learned this live).
-  // Both terms are required. PLAN_STEP_ROLE === STEP_ROLE.auditor, so a bare role check would also
-  // hand this to the grounded task's `plan` step, which has no scope to check and no changes of its
-  // own; and a bare stepId check would hand it to any step a planner happened to name 'verify'.
-  if (p.role !== STEP_ROLE.auditor || p.stepId !== VERIFY_STEP_ID) return []
+  // stepMayVerify (contracts) is the one spelling, shared with memory_verify's gate.
+  if (!stepMayVerify(p)) return []
   return [{
     ref: 'kernel/scoped_changes', name: 'scoped_changes',
     description: DESCRIPTION,

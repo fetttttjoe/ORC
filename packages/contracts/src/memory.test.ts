@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test'
-import { MemoryNoteDraftInput, MemoryNoteInput, MemoryNote, MEMORY_ID_RE, LINK_KINDS, NOTE_TIER, VerifiedStamp, deriveNoteProvenance, inferTier, noteContentKey, parseLinkSpec, type PlanNoteInput, type SemanticNoteInput } from './memory'
+import { MemoryNoteDraftInput, MemoryNoteInput, MemoryNote, MEMORY_ID_RE, LINK_KINDS, MemoryScope, NOTE_TIER, VerifiedStamp, deriveNoteProvenance, foldMemory, inferTier, noteContentKey, noteKey, parseLinkSpec, type PlanNoteInput, type SemanticNoteInput } from './memory'
 import { EVENT_KIND } from './event-kinds'
 import { PAYLOAD_SCHEMAS } from './events'
 
@@ -299,6 +299,36 @@ describe('VerifiedStamp on note provenance', () => {
     const stored = { createdAt: 't', createdBy: 'cli', updatedAt: 't', updatedBy: 'cli', revision: 1 }
     for (const d of [draft, { id: 'x', title: 'X', scope: 'plan-a', retention: 'expirable' }, { id: 'y', title: 'Y', rationale: 'why' }])
       expect(MemoryNote.parse({ ...MemoryNoteInput.parse(d), ...stored, verified: stamp })).toHaveProperty('verified', stamp)
+  })
+
+  // The FOLD half of the same rule. The read model applied memory_verified (surreal.ts) while the
+  // fold ignored the event entirely, so `orc memory recheck` and `archiveCandidates` — both of which
+  // rule off foldMemory — could never see a verification. Measured live on a 84-note corpus: recheck
+  // reported 30 drifted where health reported 29, the gap being the one note an auditor had just
+  // confirmed. Two spellings of one verdict is exactly what deriveNoteProvenance exists to prevent.
+  // `draft.id` and MemoryScope.project address the SAME note in the write, the verify and the
+  // lookup — spelled once, because a fold keyed on a mistyped scope returns undefined and every
+  // assertion below would read as "the stamp did not arrive" rather than "the test is wrong".
+  const KEY = noteKey(MemoryScope.project, draft.id)
+  const wrote = (d: unknown, ts: string) => ({ kind: EVENT_KIND.memory_written, ts, payload: { note: d, author, invalidates: [] } })
+  const checked = (id: string, ts: string) => ({ kind: EVENT_KIND.memory_verified, ts, payload: { id, scope: MemoryScope.project, stamp, author } })
+  const foldedNote = (evs: Parameters<typeof foldMemory>[0]) => foldMemory(evs).notes.get(KEY)?.note
+
+  it('a memory_verified event stamps the folded note', () => {
+    expect(foldedNote([wrote(draft, 't0'), checked(draft.id, 't1')])).toHaveProperty('verified', stamp)
+  })
+
+  it('the fold carries a stamp across a contentless rewrite and clears it on a real edit', () => {
+    // the commit restamp: only sourceRevision moves, so the auditor's check survives
+    expect(foldedNote([wrote(draft, 't0'), checked(draft.id, 't1'), wrote({ ...draft, sourceRevision: 'newhead' }, 't2')]))
+      .toHaveProperty('verified', stamp)
+    // a heal rewrites the body — the stamp asserts an auditor read THAT text, so it must not survive
+    expect(foldedNote([wrote(draft, 't0'), checked(draft.id, 't1'), wrote({ ...draft, body: 'rewritten' }, 't2')]))
+      .not.toHaveProperty('verified')
+  })
+
+  it('a verification of a note the fold never saw written creates nothing', () => {
+    expect(foldMemory([checked('ghost', 't1')]).notes.size).toBe(0)
   })
 
   it('noteContentKey ignores provenance and address, and moves with what the note SAYS', () => {

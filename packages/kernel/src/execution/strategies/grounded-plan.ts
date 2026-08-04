@@ -151,6 +151,18 @@ function healDependsOn(
   return kids.filter(k => out.has(k))
 }
 
+// A subplan's derived instructions text: body||summary||title, unchanged, PLUS any reviewed
+// uncertainty entries the human approved along with the note — appended under an unambiguous
+// heading so the executing agent treats them as load-bearing, not decorative. Empty/absent
+// uncertainty (the schema default `[]`) leaves the result byte-identical to the base text: no
+// heading, nothing appended, so every note ever frozen before uncertainty existed freezes the
+// same way today.
+function instructionsFor(n: PlanNote): string {
+  const base = n.body || n.summary || n.title
+  if (n.uncertainty.length === 0) return base
+  return [base, '', 'Unresolved uncertainty (reviewed at approval — act on these, do not skip):', ...n.uncertainty.map(u => `- ${u}`)].join('\n')
+}
+
 export function instantiateFrozenPlan(masterId: string, notes: PlanNote[]): ChildPlanDraft {
   const byId = new Map(notes.map(n => [n.id, n]))
   const kids = (byId.get(masterId)?.links ?? []).filter(l => l.kind === LINK_KIND.decomposes_into).map(l => l.id)
@@ -175,7 +187,12 @@ export function instantiateFrozenPlan(masterId: string, notes: PlanNote[]): Chil
         // role mapping at the freeze (P2): the verify subplan runs as auditor — memory tier
         // and prompt framing follow from the role automatically
         id, role: id === VERIFY_STEP_ID ? STEP_ROLE.auditor : STEP_ROLE.implementer, title: n.title,
-        instructions: n.body || n.summary || n.title,
+        // Reviewed uncertainty (PlanNote.uncertainty) is load-bearing material the human approved
+        // alongside the rest of the note — dropping it here means the executing agent never sees
+        // what the reviewer flagged as unresolved. Appended, never substituted, so the base
+        // body||summary||title precedence is untouched when there is nothing to append (the
+        // default `uncertainty: []` produces byte-identical instructions to before this existed).
+        instructions: instructionsFor(n),
         // Ordering comes from the FIELD, never from links. A link is a durable statement about how
         // facts relate; ordering is execution structure that stops meaning anything once the plan is
         // frozen. Reading a field removes the guess entirely — there is no "was this target a

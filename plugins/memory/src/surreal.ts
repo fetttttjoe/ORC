@@ -109,7 +109,12 @@ const noteTable = table(Tb.Note, {
 // no stage, 'stage' carries the stage pair and no seq. A required `seq` made reading the stage row
 // throw "Expected number but found undefined" on every call — silently, because the caller wrapped
 // it in a catch, so the whole boot-stage feature was dead and looked merely idle.
-const metaTable = table(Tb.Meta, { seq: t.option(t.number()), stage: t.option(t.string()), stageAt: t.option(t.number()), stagePid: t.option(t.number()) })
+const metaTable = table(Tb.Meta, {
+  seq: t.option(t.number()), stage: t.option(t.string()), stageAt: t.option(t.number()), stagePid: t.option(t.number()),
+  // Replay progress, flat like the rest of this row rather than a nested object — the pair is
+  // re-nested at getStage's typed boundary, where "both or neither" is enforced once.
+  stageApplied: t.option(t.number()), stageTotal: t.option(t.number()),
+})
 
 // Derived claim index, materialized from note.claims by the projector as `link` is from note.links
 // and just as disposable — though NOT by the same clear-and-recreate, see applyEvent. It exists so a
@@ -1289,19 +1294,29 @@ export class SurrealMemory {
 
   // Its own row, NOT the cursor row: writing the stage onto 'cursor' would put a presentation
   // field inside the one record whose integrity the whole projection depends on.
-  async setStage(stage: { name: string; startedAt: number; pid: number } | null): Promise<void> {
+  async setStage(stage: { name: string; startedAt: number; pid: number; progress?: { applied: number; total: number } } | null): Promise<void> {
     // Clearing DELETES the row rather than setting the columns undefined: "no row" is unambiguous,
     // where an undefined column depends on whether the driver omits the key or erases it — and
     // getting that wrong leaves a stale stage on screen forever, which is exactly what happened.
     if (stage === null) { await this.db.delete(Tb.Meta, 'stage'); return }
-    await this.db.upsert(Tb.Meta, 'stage').set({ stage: stage.name, stageAt: stage.startedAt, stagePid: stage.pid })
+    // The progress pair is written UNCONDITIONALLY, undefined included, and that is the point: an
+    // upsert MERGES, so a conditional spread would leave the replay's last 240/376 sitting on the
+    // clustering stage that followed it. Here the documented "undefined erases the column" behaviour
+    // is exactly what a stage carrying no count wants.
+    await this.db.upsert(Tb.Meta, 'stage').set({
+      stage: stage.name, stageAt: stage.startedAt, stagePid: stage.pid,
+      stageApplied: stage.progress?.applied, stageTotal: stage.progress?.total,
+    })
   }
 
-  async getStage(): Promise<{ name: string; startedAt: number; pid: number } | null> {
+  async getStage(): Promise<{ name: string; startedAt: number; pid: number; progress?: { applied: number; total: number } } | null> {
     const row = (await this.db.select(Tb.Meta, 'stage'))[0]
-    return row?.stage !== undefined && row.stageAt !== undefined && row.stagePid !== undefined
-      ? { name: row.stage, startedAt: row.stageAt, pid: row.stagePid }
-      : null
+    if (row?.stage === undefined || row.stageAt === undefined || row.stagePid === undefined) return null
+    // both halves or neither — a half-written pair is dropped rather than rendered as "240/"
+    const progress = row.stageApplied !== undefined && row.stageTotal !== undefined
+      ? { applied: row.stageApplied, total: row.stageTotal }
+      : undefined
+    return { name: row.stage, startedAt: row.stageAt, pid: row.stagePid, ...(progress && { progress }) }
   }
 
   // every note across scopes, in deterministic (scope, id) order — the vault rebuild input

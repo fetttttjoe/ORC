@@ -163,6 +163,31 @@ describe('instantiateFrozenPlan (pure, deterministic)', () => {
   it('planScope derives the per-task plan-note scope', () => {
     expect(planScope('abc-123')).toBe('plan-abc-123')
   })
+
+  // A reviewed uncertainty entry is load-bearing material the human approved along with the rest
+  // of the plan note — dropping it silently at the freeze means the executing agent never sees it.
+  it('appends reviewed uncertainty entries to the derived instructions', () => {
+    const notes: PlanNote[] = [
+      note({ id: 'masterplan', links: [link('a', LINK_KIND.decomposes_into)] }),
+      note({ id: 'a', title: 'A', body: 'do the thing', uncertainty: ['unresolved: does X handle Y?', 'second gap: Z is unverified'] }),
+    ]
+    const instructions = instantiateFrozenPlan('masterplan', notes).steps[0]!.instructions
+    expect(instructions).toContain('unresolved: does X handle Y?')
+    expect(instructions).toContain('second gap: Z is unverified')
+  })
+
+  // The default `uncertainty: []` must leave the derived instructions byte-identical to what
+  // `n.body || n.summary || n.title` alone produces — no heading, nothing appended.
+  it('leaves instructions byte-identical to body||summary||title when uncertainty is empty', () => {
+    const notes: PlanNote[] = [
+      note({ id: 'masterplan', links: [link('a', LINK_KIND.decomposes_into)] }),
+      note({ id: 'a', title: 'A', body: 'do the thing' }),
+    ]
+    const n = notes.find(x => x.id === 'a')!
+    const instructions = instantiateFrozenPlan('masterplan', notes).steps[0]!.instructions
+    expect(instructions).toBe(n.body || n.summary || n.title)
+    expect(instructions).toBe('do the thing')
+  })
 })
 
 // FixE: the freeze is built from the EVENT LOG, not the async SurrealDB projection. foldPlanNotes

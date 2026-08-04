@@ -1,5 +1,5 @@
 import { errorMessage, EVENT_KIND, foldMemory, MemoryDeletedPayload, MemoryVerifiedPayload, MemoryWrittenPayload, noteKey, type EventKind, type EventRecord } from '@orc/contracts'
-import { MEMORY_STAGE, type MemoryStageName } from '@orc/contracts/health'
+import { MEMORY_STAGE, type MemoryStageName, type StageProgress } from '@orc/contracts/health'
 import type { EventLog } from '@orc/kernel'
 import { SurrealMemory } from './surreal'
 import { noteRelPath, renderNoteFile } from './note-md'
@@ -57,10 +57,17 @@ const SLOW_TOPIC_REFRESH_MS = 1_000
 // silent so the line keeps meaning "this is a rebuild", not boot noise an operator learns to skip.
 const CATCHUP_REPORT_MIN = 50
 const CATCHUP_REPORT_EVERY = 25
+/**
+ * ONE rule for "is this drain worth narrating", shared by the stdout line and the published stage
+ * so the console and the browser can never disagree about whether a rebuild is happening. A drain
+ * under the floor is over in milliseconds; announcing it would make the browser flicker a stage on
+ * every ordinary write, which is the same noise the floor was introduced to keep off stdout.
+ */
+export const isBigDrain = (total: number): boolean => total >= CATCHUP_REPORT_MIN
+const isReportPoint = (applied: number, total: number): boolean =>
+  isBigDrain(total) && applied % CATCHUP_REPORT_EVERY === 0
 export const catchUpProgressLine = (applied: number, total: number): string | null =>
-  total >= CATCHUP_REPORT_MIN && applied % CATCHUP_REPORT_EVERY === 0
-    ? `[memory] catch-up: ${applied}/${total} events projected`
-    : null
+  isReportPoint(applied, total) ? `[memory] catch-up: ${applied}/${total} events projected` : null
 
 // Coalesce the whole-corpus derivations on the LIVE path: a drain marks the model dirty and (re)arms
 // a trailing timer instead of refreshing inline, so a burst — a grounded analyze that writes dozens
@@ -141,15 +148,32 @@ export function createMemoryProjector(opts: { log: EventLog; surreal: SurrealMem
     const events = await log.after(fromSeq, MEMORY_KINDS)
     let vaultChanged = 0
     let deletedCount = 0
+    // The replay is the boot's LONGEST stage and was the only one publishing nothing: `replaying`
+    // sat in the contract unused while the browser showed a static "supervisor booting" through a
+    // drain the stdout line was already narrating. Announced only for a big drain (isBigDrain), and
+    // tracked in a local flag rather than read back off the module `stage`, because the clear below
+    // must not wipe a stage some OTHER path published — a live drain can overlap the debounced
+    // clustering refresh, and clearing that would put the UI back to the lie this all replaced.
+    const announce = isBigDrain(events.length)
+    const startedAt = Date.now()
+    if (announce) publishStage({ name: MEMORY_STAGE.replaying, startedAt, progress: { applied: 0, total: events.length } })
     try {
       for (const [i, e] of events.entries()) {
         if (e.kind === EVENT_KIND.memory_written || e.kind === EVENT_KIND.memory_deleted) vaultChanged += 1
         if (e.kind === EVENT_KIND.memory_deleted) deletedCount += 1
         await applyOne(e)
         const progress = catchUpProgressLine(i + 1, events.length)
-        if (progress) console.log(progress)
+        if (progress) {
+          console.log(progress)
+          publishStage({ name: MEMORY_STAGE.replaying, startedAt, progress: { applied: i + 1, total: events.length } })
+        }
       }
     } finally {
+      // Cleared HERE, before reconcile, and only when this drain announced: refreshDerived publishes
+      // its own stages immediately after, and a replay left standing would race them. A throw mid-
+      // drain lands here too — a stage outliving its work is the failure the unconditional clear in
+      // refreshDerived's finally already exists to prevent.
+      if (announce) publishStage(null)
       // In a finally, not a straight-line call: applyOne can throw AFTER an event's Surreal side
       // committed (the vault write is outside the transaction), and the caller's retry then reads the
       // advanced cursor and drains zero events — so the reconcile of the claims ALREADY in the read
@@ -187,7 +211,7 @@ export function createMemoryProjector(opts: { log: EventLog; surreal: SurrealMem
   // enough: it handles a rejected promise, but a surreal double missing the method throws
   // SYNCHRONOUSLY, past the catch, and took the whole refresh with it — twice. Going through
   // Promise.resolve().then turns either failure into the same rejection.
-  const publishStage = (s: { name: MemoryStageName; startedAt: number } | null): void => {
+  const publishStage = (s: { name: MemoryStageName; startedAt: number; progress?: StageProgress } | null): void => {
     void Promise.resolve().then(() => surreal.setStage(s === null ? null : { ...s, pid: process.pid })).catch(() => {})
   }
 

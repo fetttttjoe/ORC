@@ -21,8 +21,15 @@ export interface MemoryHealth {
   // replay; the stages after it — re-linking every note's edges, and re-partitioning the whole claim
   // corpus through the embedder — run with pending already at 0, so a boot spent minutes in ollama
   // with nothing on screen to say so. Absent when idle: a permanent label would stop meaning work.
-  stage?: { name: MemoryStageName; sinceMs: number }
+  //
+  // `progress` is carried by the REPLAYING stage alone, and it is not decoration: a reader shown
+  // only "replaying (40s so far)" has lost the one number that says whether it is moving. The other
+  // two stages have no countable unit — they are one whole-corpus pass each — so they omit it
+  // rather than fake a denominator.
+  stage?: { name: MemoryStageName; sinceMs: number; progress?: StageProgress }
 }
+
+export interface StageProgress { applied: number; total: number }
 
 // The slow derived stages, named. Both run after the replay and neither is reflected in `pending`.
 // A zod enum rather than a const map because this value crosses a PROCESS boundary — the projector
@@ -37,7 +44,14 @@ export type MemoryStageName = z.infer<typeof MemoryStageName>
 export const MEMORY_STAGE = MemoryStageName.enum
 
 /** the published row, parsed rather than trusted — an unrecognised stage is simply absent */
-export const MemoryStage = z.object({ name: MemoryStageName, startedAt: z.number(), pid: z.number() })
+export const MemoryStage = z.object({
+  name: MemoryStageName,
+  startedAt: z.number(),
+  pid: z.number(),
+  // Both halves or neither: a lone `applied` renders as "240/" and a lone `total` says nothing about
+  // movement, so the pair is one field. Optional because only `replaying` counts anything.
+  progress: z.object({ applied: z.number(), total: z.number() }).optional(),
+})
 
 // Whether anything can DRIVE a run right now — the question every silent project raises first.
 // Derived from the supervisor heartbeat row plus the pid file the serve process writes only once

@@ -5,6 +5,97 @@ store — the operations journal, SurrealDB, the vault, DBOS's system database �
 rebuildable index over that log or a disposable projection of it. All state is `fold(events)`.
 Everything below is arranged around protecting that invariant.
 
+## Data flow — one write, every consequence
+
+Where a fact enters, what derives from it, and which direction each arrow may run. Every edge out
+of the log is a *rebuild*; no arrow ever points back into it except an append.
+
+```mermaid
+flowchart TB
+  subgraph write["WRITE PATH — the only durable writer"]
+    agent["agent step<br/>(executor-api-loop)"]
+    cli["CLI / MCP / web door"]
+    store["memory store<br/>plugins/memory/src/store.ts"]
+    log[("Postgres event log<br/>THE ONLY TRUTH")]
+    agent -->|"memory_write · memory_verify"| store
+    cli -->|"orc note · orc memory add"| store
+    store -->|"append memory_written<br/>memory_verified · memory_deleted"| log
+    agent -->|"tool_call · signal · step_completed"| log
+  end
+
+  subgraph derive["DERIVED — all disposable, all rebuildable"]
+    surreal[("SurrealDB read model<br/>notes · claims · edges · topics")]
+    fold["foldMemory / fold<br/>contracts + kernel"]
+    vault["vault markdown<br/>vault-projector"]
+    dbos[("DBOS system db<br/>durable execution")]
+  end
+
+  log -->|"projector.applyEvent<br/>(per event, one txn)"| surreal
+  log -->|"in-process walk"| fold
+  log -->|"renderTask (debounced)"| vault
+  log -.->|"run_requested drives"| dbos
+
+  subgraph read["READ SURFACES"]
+    tools["memory_search / memory_read<br/>+ currency verdict"]
+    health["probeMemory<br/>pending · drift · stage"]
+    graphui["browser graph + ledger"]
+  end
+
+  surreal --> tools
+  surreal --> health
+  fold --> graphui
+  fold -->|"recheck · archive rules"| arch["archiveCandidates"]
+  log ==>|"SSE stream"| graphui
+
+  subgraph tree["THE TREE — outside the log"]
+    git[["git working tree"]]
+  end
+  git -->|"changedSince(sourceRevision)"| drift{"noteDriftState<br/>clean / drifted / unknown"}
+  surreal --> drift
+  drift --> tools
+  drift --> health
+
+  tools -->|"drifted → heal · clean → trust"| agent
+```
+
+**The one rule the diagram encodes:** every box outside `write` can be deleted and rebuilt from the
+log. Nothing may live only in a derived stage, and no derived stage may be the sole writer of a
+fact. `orc memory rebuild` and `orc vault rebuild` exist to prove it.
+
+**Two inputs, not one.** Currency is the only judgement that reads something the log does not
+contain — the git working tree. That is why drift can move without any event being appended, and
+why a repo edited outside orc accumulates staleness no projection can repair on its own.
+
+**The one loop that closes.** `tools → agent → store → log → surreal → drift → tools` is the
+self-healing cycle: a reader is told a note is stale, corrects it under the same id, and the write
+re-stamps it current. Every other path is one-way.
+
+### Where knowledge goes stale, and what closes it
+
+A change reaching the tree without passing through this loop leaves notes describing code that
+moved. Three mechanisms close that gap, and only the first is automatic:
+
+```mermaid
+flowchart LR
+  change["a step changes files"] --> sc["scoped_changes<br/>citingNotes = heal-or-confirm candidates"]
+  sc --> judge{"still true?"}
+  judge -->|yes| verify["memory_verify<br/>one call, body untouched"]
+  judge -->|no| heal["memory_write same id<br/>full replacement prose"]
+  verify --> commit["git_commit"]
+  heal --> commit
+  commit -->|"restamp healed · reverify confirmed"| done["notes current at the new commit"]
+  commit -.->|"stillDrifted receipt"| gap["cited paths nobody verified"]
+
+  outside["an edit made OUTSIDE orc"] -.->|"no step, no candidates"| never["nothing closes this<br/>until a heal pass is run by hand"]
+```
+
+`scoped_changes` and `memory_verify` register on the same predicate — `stepMayVerify`: any auditor
+step except the grounded planner, which shares the role but has audited nothing. `git_commit` then
+advances the stamps the task earned and reports `stillDrifted`: notes citing committed paths that
+no step verified. The corpus-level drift ratio is an **advisory** at every door — a prompt for a
+human decision, never a trigger, because a rebuild firing on its own costs more than the staleness
+it cures.
+
 ## System map — modules
 
 Every first-party module, its package, and how the calls flow. The data-access services live
@@ -389,22 +480,48 @@ so a rebuild reproduces them.
 > broken embedder nor a broken
 > pipeline — it is a corpus that has not stated anything yet.
 
-### Memory TTL sweep — retiring expirable notes
+### Note lifecycle — currency, healing, retirement
 
-`orc memory sweep` retires notes the author marked `expirable` that nobody has written or read for
-N days — "untouched" is the *later* of last written and last read, and an unusable timestamp means
-unknown age, so it fails safe and keeps the note. A dry run until `--apply`, which commits the
-`memory_deleted` events; the content stays in the log. Plan-tier notes are candidates too even when
-their stored payload says `durable`: a decomposition belongs to one task by construction, and
-pinning the literal the way the episodic tier does would make notes written before that tier's
-default changed fail to parse and vanish from every fold. They carry an extra guard — an approved
-decomposition stays while its task can still be retried or audited, so only a *terminal* task's plan
-notes are eligible. A candidate is protected by an authored inbound link from a note that itself
-**survives** the sweep, so deleting can never leave a live note's `links[]` pointing at a dead id. Candidates
-that link only to each other protect nobody and go together: mutual links between two cold notes
-would otherwise keep a dead chain alive forever. Traffic is deliberately not consulted for
-protection — three live notes may point at a note nobody has walked, and that topology is what
-makes it worth keeping.
+Age is not the axis. A note about a file nobody has touched is still true after six months; a note
+about a file refactored ten minutes ago is not. Every judgement below reads `sourceRevision` — the
+commit a note was stamped with at write time — never a clock.
+
+**Currency** is decided by `noteDriftState` (`plugins/memory/src/drift.ts`), against the **working
+tree**, not `HEAD`: an uncommitted edit has already invalidated a note that describes the file. It
+is tri-state, and each state means something a reader can act on:
+
+| state | meaning | what a reader is told |
+| --- | --- | --- |
+| `clean` | declared paths unmoved since the stamp | `current: true` — trust it, do not re-read those paths |
+| `drifted` | a declared path changed since the stamp | re-read them; correct the note by writing the **same id** |
+| `unknown` | the stamped revision is unreachable | re-read if you need certainty; this is not evidence of error |
+
+A note carrying **no** `sourceRevision` or **no** declared paths is uncheckable. It folds to `clean`
+(the fail-toward-not-drifted rule) but nothing was checked, so no surface may claim it is current.
+
+**Two independent stamps, fresher wins.** `sourceRevision` is set by the store on every write;
+`verified.revision` is set only by `memory_verify`, and by nothing else. A note whose code moved
+after it was written but before an auditor read it against the tree is *not* stale — without that
+either-clean rule a verification could never clear anything, and heal passes re-derived notes that
+had just been confirmed.
+
+**Healing is the same call as writing.** `memory_write` is an upsert that re-stamps
+`sourceRevision`, so correcting a drifted note under its own id clears the drift. A correction
+covers the whole retrieval surface — title and summary too, since searchers read the summary first
+and merge-on-omit keeps a stale one verbatim. `body` and `summary` are **full replacements**: a
+partial write is a truncation, not a merge.
+
+**Retirement is decided by evidence, never by elapsed time or coldness** (`archive.ts`, a pure
+zero-import rule table). A note is archivable only when it is superseded by a surviving note, or is
+task-scaffolding whose task has settled. Drift is explicitly *not* grounds for retirement — it is
+the input to healing, and archiving a drifted note discards exactly the knowledge the heal loop
+exists to repair. An inbound link from a survivor protects a note against both, because nothing
+repairs a link left dangling at a dead id.
+
+Archiving **deletes the note's rows from the read model** rather than filtering them at each query,
+so search, neighbours, ranking, topics and `ls` exclude it with no query change and no path able to
+forget the filter. It stays fully reversible: every revision is in the log, and writing the same id
+with `archived: false` re-projects it.
 
 ## Execution flow — one step, durably
 
@@ -581,13 +698,13 @@ Door discipline, stated precisely:
 | `kernel/redact` | The single storage-boundary normalizer: NUL strip + secret redaction (keys and values) | Being called anywhere except append/journal storage |
 | `kernel/projections` | `fold(events) → State` as a reduce over `foldInto` (one event, one accumulator), `applyOperationEvent` (shared by live journal and rebuild), crash dedup | Persisting anything |
 | `kernel/live-state` | `openLiveState(log)` — a subscription-maintained `State` index, re-seeded when the log is truncated or replaced. Serves advisory reads (budget chain, "is anything running") | Reads that decide a write — those stay inside `log.transaction` |
-| `contracts/memory` folds | `foldMemory` / `foldMemoryInto` — every derivation over the memory stream (live notes, write times, node access, edge access) in ONE walk, batch or incremental. `bumpAccess` and `viaEdge` are the single increment and edge-canonicalization rules, applied by both the log fold and the Surreal projector | Deciding policy — the sweep and the graph do that |
+| `contracts/memory` folds | `foldMemory` / `foldMemoryInto` — every derivation over the memory stream (live notes, write times, node access, edge access) in ONE walk, batch or incremental. `bumpAccess` and `viaEdge` are the single increment and edge-canonicalization rules, applied by both the log fold and the Surreal projector | Deciding policy — `archive.ts`'s rule table and the graph do that |
 | `kernel/kernel.ts` | Atomic task/plan lifecycle, feedback outbox events, seq-bound human approval over the log | Execution |
 | `kernel/dbos-port` | Durable run/step workflows, `ctx.checkpoint` and `ctx.operation` wrappers, retry policy, queue partitioning, cancellation cascade, output receipt commit | Model/tool specifics (executor's job), plan authoring |
 | `kernel/signal-router` | Resolving splits, starting approved children, and live/startup delivery of committed feedback | Composing plans, executing steps |
 | `kernel/plugins/*` | Registry + propose-time ref validation (`host`), fingerprint trust store (`trust`), SKILL.md indexing (`skills`), T2 extension loading | Runtime tool execution (that's the hub/executor) |
 | `plugins/executor-api-loop` | The model⇄tool loop, prompt assembly (incl. knowledge protocol + the recalled-context block), signal/output pre-flight, per-call operation journaling | Durability (delegates to ctx), trust, receipts, **what to remember** (delegates to `ctx.memory`) |
-| `plugins/memory` | Event-first note store (gateway stamps git revision, resolved lazily), transactional Surreal projection of notes + edges + `claim` rows, stateless topic derivation (`refreshTopics`, stage 3, driven from the drain and only by drains that touched claims), per-project database boundary, hybrid (vector⊕keyword) retrieval with activation re-ranking over both notes and claims, the `StepMemory` binding (recall/capture, ambient edges), consolidation lifecycle, drift probe, TTL + cancel sweeps, `vault/memory/**` rebuild | Being authoritative — Surreal and vault/memory are disposable. Authoring a topic: stage 3 derives them, nobody writes one |
+| `plugins/memory` | Event-first note store (gateway stamps git revision, resolved lazily), transactional Surreal projection of notes + edges + `claim` rows, stateless topic derivation (`refreshTopics`, stage 3, driven from the drain and only by drains that touched claims), per-project database boundary, hybrid (vector⊕keyword) retrieval with activation re-ranking over both notes and claims, the `StepMemory` binding (recall/capture, ambient edges), consolidation lifecycle, tri-state drift probe, evidence-based archival + cancel-time sweep, `vault/memory/**` rebuild | Being authoritative — Surreal and vault/memory are disposable. Authoring a topic: stage 3 derives them, nobody writes one |
 | `packages/vault-projector` | Deterministic markdown/mermaid renders of tasks, execution, lineage, task expansion; coalesced live re-render | Truth of any kind; whole-log scans |
 | `packages/cli` | Pre-bootstrap help/init/migrate, command surface, project discovery, startup/shutdown order, degraded-memory wiring | Business rules (kernel's job) |
 | `packages/ui-core` | Transport-free UI core: `ProjectSessions` (live folds, graph patches, transcripts, log rows), `OrcActions` interface, the copilot toolset + `asResolvedTools` door-#2 bridge | Any transport (HTTP/SSE/stdio are adapters' jobs), any DOM |

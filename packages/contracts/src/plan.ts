@@ -46,6 +46,18 @@ export const STEP_ROLE = {
   committer: 'committer',
 } as const
 
+/**
+ * May this step record a confirmation — `memory_verify`, and the `scoped_changes` list feeding it?
+ * Any auditor may, except the grounded planner, which shares the role (PLAN_STEP_ROLE ===
+ * STEP_ROLE.auditor) and has audited nothing.
+ *
+ * Excludes the planner by identity rather than requiring the id `verify`: under that older rule an
+ * auditor step named anything else silently lost the tool and fell back to memory_write, whose
+ * `body` is a full replace — a confirm is not a rewrite. Shared by both gates so they cannot drift.
+ */
+export const stepMayVerify = (p: { stepId: string; role: string }): boolean =>
+  p.role === STEP_ROLE.auditor && p.stepId !== STEP_ID.plan
+
 // The shipped skills carrying each kernel-appended role contract: auditor+heal prose on the
 // verify step, the commit contract on the commit step. Named here because the freeze (kernel)
 // appends the refs and `orc init` (cli) seeds the files — a literal spelled twice would drift.

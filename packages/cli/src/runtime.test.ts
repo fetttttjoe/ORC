@@ -3,7 +3,7 @@ import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { MEMORY_HEALTH,
-  EVENT_KIND, SIGNAL_OUTCOME, STEP_ROLE, VERIFY_STEP_ID,
+  EVENT_KIND, MEMORY_TOOL_NAME, SIGNAL_OUTCOME, STEP_ROLE, VERIFY_STEP_ID,
   type AgentExecutor, type EventDraft, type ExecutorContext, type SplitResult, type UnifiedEvent,
 } from '@orc/contracts'
 import { Surreal } from 'surrealdb'
@@ -12,7 +12,7 @@ import { createTestDb, fakeProvider, testConfig, TEST_PROJECT_ID } from '@orc/ke
 import { draftFixture, stepFixture } from '@orc/contracts/fixtures'
 import { createMemory } from '@orc/memory'
 import { buildProgram } from './main'
-import { buildPlugins, buildRuntime } from './runtime'
+import { buildPlugins, buildRuntime, seedPhases } from './runtime'
 
 const dbs: Array<{ drop: () => Promise<void> }> = []
 const surrealBases: ProjectConfig[] = []
@@ -77,13 +77,33 @@ const toolNameExecutor: AgentExecutor<unknown> = {
   },
 }
 
-// C.5: memory_verify is gated on the SAME predicate scoped_changes uses (role===auditor AND
-// stepId===VERIFY_STEP_ID) — see plugins/memory/src/tools.ts memoryVerifyTool. 'buildRuntime
-// degraded memory' below pins the negative half against a BROKEN store (no memoryStore, so the
-// tool is absent regardless of role); this pins the positive half against a HEALTHY one, so the
-// registration line itself (runtime.ts stepTools, `...(memoryStore ? memoryVerifyTool(...) : [])`)
-// is what is on test. Declared FIRST, ahead of that test, for a DBOS reason, not an ordering
-// preference: see the teardown comment inside the `it` below.
+// C.5: memory_verify is gated on contracts' stepMayVerify — the same predicate scoped_changes uses.
+// 'buildRuntime degraded memory' below pins the negative half against a BROKEN store (no
+// memoryStore, so the tool is absent regardless of role); this pins the positive half against a
+// HEALTHY one, so the registration line itself (runtime.ts stepTools) is what is on test. Declared
+// FIRST for a DBOS reason, not an ordering preference: see the teardown comment inside the `it`.
+// any auditor step earns the tool, whatever a plan calls it — named once rather than inline
+const AUDITOR_STEP_NAMED_FOR_ITS_JOB = 'heal'
+
+// The boot line must account for the storage open, and on the real `orc serve` path bin.ts opens
+// storage BEFORE buildRuntime — so buildRuntime's own bootPhase('storage', ...) never runs there
+// and the phase silently vanished from the line. Seeding is the fix; these pin the rule.
+describe('seedPhases (the boot line accounts for a storage open it did not perform)', () => {
+  it("leads with 'storage' when the caller opened it and timed it", () => {
+    expect(seedPhases(true, 1360)).toEqual([['storage', 1360]])
+  })
+
+  it('stays empty when buildRuntime will time its own open — no invented phase', () => {
+    // no shared storage: buildRuntime opens it itself and bootPhase records the real duration
+    expect(seedPhases(false, undefined)).toEqual([])
+    // shared storage but the caller did not time it: reporting a number nobody measured is worse
+    // than omitting the phase, so absence wins over a fabricated zero
+    expect(seedPhases(true, undefined)).toEqual([])
+    // a duration with no shared storage is not this path's business — buildRuntime times its own
+    expect(seedPhases(false, 1360)).toEqual([])
+  })
+})
+
 describe('stepTools memory_verify registration', () => {
   it('offers memory_verify to a healthy store\'s auditor verify step, and withholds it from a plain worker step', async () => {
     const db = await createTestDb()
@@ -115,8 +135,15 @@ describe('stepTools memory_verify registration', () => {
       await kernel.approvePlan(workerTask.id)
       expect(await (await port.startRun(workerTask.id)).wait()).toBe('done')
 
-      expect(toolNamesByStep[VERIFY_STEP_ID]).toContain('memory_verify')
-      expect(toolNamesByStep['s1']).not.toContain('memory_verify')
+      // an auditor step named for its JOB, not for this gate — the case that silently lost the tool
+      const healTask = await kernel.createTask({ title: 'heal step', spec: 'confirms notes' })
+      await kernel.proposePlan(healTask.id, draftFixture([stepFixture({ id: AUDITOR_STEP_NAMED_FOR_ITS_JOB, role: STEP_ROLE.auditor })]))
+      await kernel.approvePlan(healTask.id)
+      expect(await (await port.startRun(healTask.id)).wait()).toBe('done')
+
+      expect(toolNamesByStep[VERIFY_STEP_ID]).toContain(MEMORY_TOOL_NAME.verify)
+      expect(toolNamesByStep[AUDITOR_STEP_NAMED_FOR_ITS_JOB]).toContain(MEMORY_TOOL_NAME.verify)
+      expect(toolNamesByStep['s1']).not.toContain(MEMORY_TOOL_NAME.verify)
     } finally {
       await port.shutdown()
       await log.close()

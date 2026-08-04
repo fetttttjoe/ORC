@@ -11,6 +11,7 @@
   import { stepIdOf, taskIdOf } from '$lib/node-id'
   import { ledger } from '$lib/stores/ledger.svelte'
   import { session } from '$lib/stores/session.svelte'
+  import { toolPreview } from './tool-preview'
 
   /**
    * The agent's transcript, scoped to one step when a step node is selected. Questions and
@@ -71,12 +72,19 @@
           <p class="text-xs leading-relaxed break-words whitespace-pre-wrap text-paper">{item.text}</p>
         </article>
       {:else if item.kind === 'tool'}
+        <!-- what this call did, so sixty fs_read rows are told apart without expanding sixty times -->
+        {@const preview = toolPreview(item.input)}
         <details class={['rounded-(--radius-chip) border', item.isError ? 'border-rust/40 bg-rust/5' : 'border-line bg-desk/30']}>
           <summary class="flex cursor-pointer items-center gap-2 px-2 py-1 select-none">
             <Chip mono temp={item.isError ? 'rust' : 'neutral'}>{item.toolName}</Chip>
             {#if item.isError}<span class="font-mono text-label text-rust">error</span>{/if}
-            <span class="grow"></span>
-            <span class="font-mono text-label text-fog">iteration {item.iteration}</span>
+            <!-- min-w-0 + truncate: the preview yields the line, never widens the panel -->
+            {#if preview !== ''}
+              <span class="min-w-0 grow truncate font-mono text-label text-mist" title={preview}>{preview}</span>
+            {:else}
+              <span class="grow"></span>
+            {/if}
+            <span class="shrink-0 font-mono text-label text-fog">iteration {item.iteration}</span>
           </summary>
           <div class="flex flex-col gap-1.5 border-t border-line/50 p-2">
             <Payload label="input" value={item.input} />

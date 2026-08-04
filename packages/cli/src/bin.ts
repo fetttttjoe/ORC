@@ -4,7 +4,7 @@ import { errorMessage, HOOK_NAME } from '@orc/contracts'
 import { buildProgram, openKernel, runInit, runMigrate } from './main'
 import { exitCodeFor } from './exit'
 import type { Command } from 'commander'
-import { buildPlugins, buildRuntime } from './runtime'
+import { bootPhase, buildPlugins, buildRuntime } from './runtime'
 
 // The DBOS port is built lazily, once, only when a command actually asks for it —
 // read-only commands never pay the DBOS launch, and new port commands need no registration here.
@@ -51,21 +51,27 @@ async function main(): Promise<number> {
     const loaded = await buildPlugins(config)
     plugins = loaded
     await loaded.host.hooks.emit(HOOK_NAME.session_start)
-    const opened = await openKernel(config.databaseUrl, {
+    // Timed with the SAME instrument buildRuntime uses for its own phases: this open (via
+    // openKernel) happens before buildRuntime ever runs and threads its storage in already, so
+    // buildRuntime's own bootPhase('storage', ...) call is always skipped on this path — without
+    // this, the storage open (part of the boot window) never appears in the printed boot line.
+    const openTiming: Array<[string, number]> = []
+    const opened = await bootPhase('storage', () => openKernel(config.databaseUrl, {
       projectId: config.projectId,
       redactEnv: config.redactEnv,
-      refValidator: plugins.host.refValidator,
-      analyzers: plugins.host.analyzers,
+      refValidator: loaded.host.refValidator,
+      analyzers: loaded.host.analyzers,
       // No `send`: DBOS.send needs DBOS launched in THIS process, and a client command has no
       // runtime. The supervisor's router already delivers every feedback_provided under the same
       // idempotency key (the event's own seq), so this was a duplicate of the delivery that works
       // in both modes — and the only one that could throw where there is nothing to send with.
       onAppend: e => loaded.host.hooks.dispatch(HOOK_NAME.event_appended, e),
-    })
+    }), openTiming)
     storage = opened.storage
+    const storageMs = openTiming[0]?.[1]
     return await parse(buildProgram(
       opened.kernel,
-      async () => (runtime.port ??= await buildRuntime({ ...loaded, config, storage: opened.storage, kernel: opened.kernel })),
+      async () => (runtime.port ??= await buildRuntime({ ...loaded, config, storage: opened.storage, storageMs, kernel: opened.kernel })),
       { host: loaded.host, hub: loaded.hub, config, log: opened.log, storage: opened.storage },
     ), process.argv)
   } finally {

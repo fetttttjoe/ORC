@@ -480,4 +480,49 @@ describe('projector stage publication', () => {
     }
     expect(stages).toEqual(['linking', 'clustering', null])
   })
+
+  /**
+   * The replay is the boot's longest stage and published NOTHING: `replaying` sat in the contract
+   * while the browser showed a static "supervisor booting" line through a drain the stdout line was
+   * already narrating. It carries progress because a stage line without a count replaced the
+   * quantitative "N events left to replay" the banner used to show.
+   *
+   * The floor is the same one the stdout line uses (isBigDrain), so an ordinary write does not
+   * flicker a stage into the UI — asserted by the test above, whose two-event drain publishes only
+   * the refresh stages.
+   */
+  it('announces the replay with its progress on a big drain, and clears it before the refresh', async () => {
+    const pg = await createTestDb(); drops.push(pg.drop)
+    const log = (await openStorage(pg.url, { projectId: TEST_PROJECT_ID })).events
+    const vaultDir = mkdtempSync(path.join(tmpdir(), 'orc-vault-replay-'))
+    const published: Array<{ name: string; progress?: { applied: number; total: number } } | null> = []
+    // ponytail: retained cast — see the SurrealMemory-is-a-class note above.
+    const stub = {
+      applyEvent: async () => true,
+      get: async () => null,
+      getCursor: async () => 0,
+      allNotes: async () => [],
+      setStage: async (s: { name: string; progress?: { applied: number; total: number } } | null) => { published.push(s) },
+      refreshLinks: async () => {},
+      refreshTopics: async () => {},
+    } as unknown as SurrealMemory
+    const proj = createMemoryProjector({ log, surreal: stub, vaultDir })
+    const TOTAL = 50 // the isBigDrain floor exactly — below it nothing is announced
+    try {
+      for (let i = 0; i < TOTAL; i += 1)
+        await log.append({ taskId: null, stepId: null, runToken: null, kind: 'memory_written', payload: { note: { ...noteInput, id: `n${i}` }, author: { source: 'cli' } } })
+      await proj.catchUp()
+    } finally {
+      await proj.close(); await log.close()
+    }
+    const replays = published.filter((s): s is { name: string; progress: { applied: number; total: number } } => s?.name === 'replaying')
+    // opens at 0 so the UI has a denominator immediately, then reports on the same cadence as stdout
+    expect(replays.map(r => r.progress)).toEqual([
+      { applied: 0, total: TOTAL }, { applied: 25, total: TOTAL }, { applied: 50, total: TOTAL },
+    ])
+    // and it does not outlive the drain: cleared before the refresh stage that follows it
+    expect(published.map(s => s?.name ?? null)).toEqual([
+      'replaying', 'replaying', 'replaying', null, 'clustering', null,
+    ])
+  })
 })
