@@ -31,7 +31,9 @@ type RenderedField =
   | 'createdAt' | 'createdBy' | 'updatedAt' | 'updatedBy' | 'revision' | 'verified'
   | 'sources' | 'claims' | 'rationale' | 'uncertainty'                 // body sections
   | 'body'
-type RenderCoversNote = Exclude<keyof NoteView, RenderedField | 'zone'> extends never ? true : never
+// `archived` is unrenderable by construction: an archived note's vault file is DELETED, so there
+// is never a document to carry the flag. Excluded like `zone` rather than rendered as `false`.
+type RenderCoversNote = Exclude<keyof NoteView, RenderedField | 'zone' | 'archived'> extends never ? true : never
 const renderCoversNote: RenderCoversNote = true
 void renderCoversNote
 

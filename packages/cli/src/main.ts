@@ -6,7 +6,7 @@ import { Command, InvalidArgumentError } from 'commander'
 import { claimHistory, EDGE_DIRECTION, errorMessage, EVENT_KIND, foldMemory, LINK_KINDS, MASTERPLAN_NOTE_ID, MEMORY_ACCESS, MemoryDeletedPayload, MemoryScope, MemoryWrittenPayload, noteKey, NOTE_TIER, NOTE_TIERS, NoteTier, parseLinkSpec, PlanDraft, ROLE_SKILL, RUN_OUTCOME, STRATEGY, TASK_STATUS, TERMINAL_TASK_STATUS, LinkKind, slugId, type Analyzer, type EventRecord, type MemoryLink, type NoteFields, type ExecutionPort, type MemoryHealth, type Plan, formatModelRate } from '@orc/contracts'
 import { openStorage, Kernel, atomicWriteFileSync, listProjectIds, claimSlot, fold, gatedChildren, freezePlan, liveSupervisors, staleSupervisors, grantExtensionTrust, grantMcpTrust, initializeProject, isExtensionTrusted, isMcpTrusted, loadConfig, loadTrust, migrateDatabase, requireProject, stepUsage, subtreeUsage, taskUsage, type EventLog, type OrcConfig, type PluginHost, type ProjectConfig, type Storage } from '@orc/kernel'
 import { createVaultProjector, parsePlanFile } from '@orc/vault-projector'
-import { consolidateTask, frontier, needsReground, probeMemory, restampableNotes, staleNotes, DEFAULT_SWEEP_DAYS } from '@orc/memory'
+import { archiveCandidates, consolidateTask, createDriftProbe, frontier, needsReground, probeMemory, recheckNotes, restampableNotes, summarize } from '@orc/memory'
 import { withMemory } from './memory-open'
 import { buildDistiller } from './consolidation-distiller'
 import { seedRegistries, buildRuntime } from './runtime'
@@ -970,38 +970,64 @@ export function buildProgram(
       console.log(`deleted '${id}'`)
     })
   mem
-    .command('sweep')
-    .description('retire expirable notes nobody has touched (dry run; --apply deletes)')
-    .option('--days <n>', `untouched for at least this many days (default ${DEFAULT_SWEEP_DAYS})`, parsePositiveInteger)
-    .option('--apply', 'append the deletions (default: report only)')
-    .action(async (o: { days?: number; apply?: boolean }) => {
+    .command('recheck')
+    .description('recompute every note\'s currency against HEAD and report what the graph could retire')
+    .option('--candidates', 'list only what is retirable, with the evidence for each')
+    .option('--apply', 'archive the retirable notes (default: report only)')
+    .action(async (o: { candidates?: boolean; apply?: boolean }) => {
       const { config, log } = needPlugin()
-      const days = o.days ?? DEFAULT_SWEEP_DAYS
-      // the policy is a pure fold of the log, so the dry run needs no read model at all
       const events = await log.after(0, [EVENT_KIND.memory_written, EVENT_KIND.memory_deleted, EVENT_KIND.memory_accessed])
-      // a plan note is an approved artifact — sweepable only once its task can no longer be retried
       const terminalTaskIds = new Set(
         [...(await requireKernel().state()).tasks.values()]
           .filter(t => TERMINAL_TASK_STATUS.has(t.status))
           .map(t => t.id),
       )
-      const goes = staleNotes(events, { now: new Date().toISOString(), days, terminalTaskIds })
-      for (const n of goes)
-        console.log(`${n.scope}/${n.id}\t${n.title}\thits ${n.hits}\tlast touched ${n.lastTouchedAt}`)
+      const notes = await recheckNotes(events, { dir: config.dir, changedSince: createDriftProbe(config.dir), terminalTaskIds })
+      const s = summarize(notes)
+      console.log(`${s.total} note(s): ${s.clean} current, ${s.drifted} drifted, ${s.unknown} uncheckable, ${s.subjectMissing} describing paths that no longer exist`)
+
+      const goes = archiveCandidates(notes)
+      const byKey = new Map(notes.map(n => [n.key, n]))
+      if (o.candidates || goes.length > 0) {
+        for (const c of goes) {
+          const n = byKey.get(c.key)
+          console.log(`${c.key}\t${c.reason}\t${c.evidence}\t${n?.title ?? ''}`)
+        }
+      }
+      // No clock anywhere in this verdict: candidacy is superseded / subject-deleted / drifted-and-
+      // unhealed / task-settled. A note whose declared paths have not moved is still true and is
+      // never listed, however old or cold — see plugins/memory/src/archive.ts.
       if (goes.length === 0) {
-        console.log(`_nothing expirable has gone untouched for ${days} days_`)
+        console.log('_nothing is retirable — every note is current, protected, or uncheckable_')
         return
       }
       if (!o.apply) {
-        console.log(`${goes.length} note(s) would be retired — re-run with --apply to delete`)
+        console.log(`${goes.length} note(s) are retirable on evidence (not age) — re-run with --apply to archive`)
         return
       }
+      // Archiving is a WRITE of the same note with archived:true, so merge-on-omit carries every
+      // other field forward untouched and the log keeps every revision — `orc memory restore <id>`
+      // brings it back. Nothing is deleted.
       await withMemory({ log, config }, async memory => {
-        // each delete is a memory_deleted event: the content stays in the log for audit/replay
-        for (const n of goes) await memory.store.remove(n.id, n.scope, { source: 'cli' })
+        for (const c of goes) {
+          const n = byKey.get(c.key)
+          if (n) await memory.store.setArchived(n.id, n.scope, true, { source: 'cli' })
+        }
         await memory.projector.catchUp()
       })
-      console.log(`retired ${goes.length} note(s)`)
+      console.log(`archived ${goes.length} note(s) — restore any with: orc memory restore <id> --scope <scope>`)
+    })
+  mem
+    .command('restore <id>')
+    .description('bring an archived note back into the read model')
+    .option('--scope <scope>', 'the note\'s scope (default: project)')
+    .action(async (id: string, o: { scope?: string }) => {
+      const { config, log } = needPlugin()
+      await withMemory({ log, config }, async memory => {
+        await memory.store.setArchived(id, o.scope ?? 'project', false, { source: 'cli' })
+        await memory.projector.catchUp()
+      })
+      console.log(`restored '${id}'`)
     })
   mem
     .command('frontier')

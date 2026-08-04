@@ -42,7 +42,7 @@ const itemChars = (value: unknown): number =>
 type BoundedField =
   | 'id' | 'scope' | 'title' | 'sourceRevision'                        // clamped building `fitted`
   | 'createdAt' | 'createdBy' | 'updatedAt' | 'updatedBy' | 'verified' // dropped by the discard ladder
-  | 'tier' | 'kind' | 'retention' | 'revision'                         // fixed width, nothing to trim
+  | 'tier' | 'kind' | 'retention' | 'revision' | 'archived'            // fixed width, nothing to trim
   | 'summary' | 'rationale' | 'body'                                   // bisected, cut marked
   | 'modelRef'                                                         // kept whole or not at all
   | 'categories' | 'tags' | 'links' | 'paths' | 'claims'               // refilled item by item

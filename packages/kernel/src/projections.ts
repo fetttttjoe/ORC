@@ -347,6 +347,35 @@ export function completedStepIds(state: State, taskId: string): Set<string> {
   return out
 }
 
+/**
+ * The VERDICTS holding a task back: failed steps that judged the work unacceptable rather than
+ * malfunctioning (FAILURE_CLASS.rejected). Empty when the task failed for ordinary reasons.
+ *
+ * This is the ONE derivation behind "may this be retried?", shared by the CLI/web door
+ * (assertRetryable) and the execution port (port.retry) — the same pairing completedStepIds and
+ * nextAttempts already have, so the two cannot disagree about whether a retry is worth offering.
+ */
+export function blockingVerdicts(state: State, taskId: string): Array<{ stepId: string; message: string }> {
+  const out: Array<{ stepId: string; message: string }> = []
+  for (const [id, s] of state.steps.get(taskId) ?? [])
+    if (s.status === STEP_RUN_STATUS.failed && s.failure?.class === FAILURE_CLASS.rejected)
+      out.push({ stepId: id, message: s.failure.message })
+  return out
+}
+
+/**
+ * Whether re-running would be pointless. True only when the task HAS failures and every one of
+ * them is a verdict: a retry re-runs nothing that already completed, so identical siblings feed
+ * the rejecting step identical inputs and it can only reach the identical conclusion.
+ *
+ * A mixed run (one verdict, one provider timeout) stays retryable — clearing the timeout may
+ * change what the verdict sees, so refusing there would withhold a recovery that could work.
+ */
+export function retryIsFutile(state: State, taskId: string): boolean {
+  const steps = [...(state.steps.get(taskId) ?? []).values()].filter(s => s.status === STEP_RUN_STATUS.failed)
+  return steps.length > 0 && steps.every(s => s.failure?.class === FAILURE_CLASS.rejected)
+}
+
 export function nextAttempts(state: State, taskId: string, plan: Pick<Plan, 'steps'>): Record<string, number> {
   const out: Record<string, number> = {}
   // A step folded `running` normally means a LIVE attempt, and reusing its number is what makes the

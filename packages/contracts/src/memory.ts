@@ -208,6 +208,16 @@ const noteCore = {
   links: z.array(MemoryLink).max(MEMORY_LIMITS.detailItems).default([]), // clean typed graph edges — no string-id form
   summary: z.string().max(MEMORY_LIMITS.summaryChars).default(''),
   body: z.string().max(MEMORY_LIMITS.bodyChars).default(''),
+  // RETIRED, but not forgotten. An archived note leaves the read model entirely — search,
+  // neighbours, ranking and the vault stop seeing it — while every revision of it stays in the
+  // event log, which is what makes this reversible: writing the same id with archived:false
+  // restores the row from the fold. It is a plain note field rather than a new event kind so the
+  // merge-on-omit write path, the projector and replay all carry it with no special case.
+  //
+  // Never set from age. Candidacy is decided in plugins/memory/src/archive.ts from evidence of
+  // obsolescence (superseded / subject deleted / drifted-and-unhealed / task settled); a note whose
+  // declared paths have not moved is still true and is never archived, however old or cold.
+  archived: z.boolean().default(false),
 }
 
 // SEMANTIC — durable project knowledge. It alone owns the retrieval surface (kind/categories/
@@ -349,6 +359,9 @@ export const MemoryNoteDraftInput = z.object({
   links: optionalNoDefault(noteCore.links),
   summary: optionalNoDefault(noteCore.summary),
   body: optionalNoDefault(noteCore.body),
+  // omitted by every ordinary writer, so merge-on-omit keeps an archived note archived across an
+  // unrelated update; `orc memory recheck --apply` and `restore` are what set it either way
+  archived: optionalNoDefault(noteCore.archived),
   kind: optionalNoDefault(SemanticNoteInput.shape.kind),
   categories: optionalNoDefault(SemanticNoteInput.shape.categories),
   paths: optionalNoDefault(SemanticNoteInput.shape.paths),
@@ -668,6 +681,15 @@ export interface MemoryStore {
   write(input: MemoryNoteDraft, author: MemoryAuthor, opts?: { idempotencyKey?: string; invalidates?: string[] }): Promise<MemoryNote>
   remove(id: string, scope?: string, author?: MemoryAuthor): Promise<void>
   /**
+   * Retire a note from the read model, or bring it back. A LIFECYCLE transition, deliberately not
+   * `write({archived})`: a write re-stamps `sourceRevision` from the runtime's HEAD, so archiving a
+   * DRIFTED note would silently re-date it to now — and restoring it later would read as current
+   * while its text is stale, the exact false confidence the verification stamp exists to prevent.
+   * This re-appends the stored note with only the flag moved, so provenance survives the round trip.
+   * Absent (or already-archived) notes are a no-op, never an error: retiring twice is not a fault.
+   */
+  setArchived(id: string, scope: string, archived: boolean, author?: MemoryAuthor): Promise<void>
+  /**
    * Declare a note VERIFIED at the runtime's current HEAD — appends memory_verified and nothing
    * else, so body/summary/authorship stay byte-stable. Throws on an id the LOG has no live note
    * for (checked against the log, not the eventually-consistent read model, so a note verified in
@@ -717,11 +739,15 @@ export interface MemoryStore {
 //    supplies no fields at all. Treating it as content would make the carry rule dead code.
 //  • a citation's retrievedAt and a claim's sourceRevision — per-item provenance the projector and
 //    resolveClaims stamp. The url and the claim TEXT are content; when they were fetched is not.
+//  • archived — a LIFECYCLE flag, not something the note says. Counting it as content cleared the
+//    verification stamp on every rewrite (the fresh note carries `false`, the stored row carries no
+//    such column, so the two keys never matched), and would also mean archiving-then-restoring a
+//    note destroyed an audit that is still true of text nobody touched.
 const CONTENT_FIELDS = [...new Set([
   ...Object.keys(SemanticNoteInput.shape),
   ...Object.keys(EpisodicNoteInput.shape),
   ...Object.keys(PlanNoteInput.shape),
-])].filter(k => k !== 'id' && k !== 'scope' && k !== 'sourceRevision').sort()
+])].filter(k => k !== 'id' && k !== 'scope' && k !== 'sourceRevision' && k !== 'archived').sort()
 
 // The three object-array fields, re-parsed so the two sides of the comparison canonicalize: a zod
 // object emits its keys in SHAPE order (a projected Surreal row's come back in storage order) and

@@ -101,7 +101,15 @@ const noteTable = table(Tb.Note, {
   // configured at write/rebuild; the semantic scan reads it raw, toNote/toSummary drop it.
   embedding: t.option(t.array(t.number())),
 })
-const metaTable = table(Tb.Meta, { seq: t.number() })
+// `seq` is the projection cursor. `stage`/`stageAt` publish WHAT the projector is doing, and exist
+// because the health probe runs in a DIFFERENT PROCESS from the projector (the graph server opens
+// its own connection; the projector lives in the supervisor). A shared row is the only channel the
+// two already have. Advisory presentation state — never read back into a decision.
+// Every column is OPTIONAL because this table holds two DIFFERENT rows: 'cursor' carries `seq` and
+// no stage, 'stage' carries the stage pair and no seq. A required `seq` made reading the stage row
+// throw "Expected number but found undefined" on every call — silently, because the caller wrapped
+// it in a catch, so the whole boot-stage feature was dead and looked merely idle.
+const metaTable = table(Tb.Meta, { seq: t.option(t.number()), stage: t.option(t.string()), stageAt: t.option(t.number()) })
 
 // Derived claim index, materialized from note.claims by the projector as `link` is from note.links
 // and just as disposable — though NOT by the same clear-and-recreate, see applyEvent. It exists so a
@@ -536,6 +544,16 @@ export class SurrealMemory {
         if (!parsed.success) { console.warn(`[memory] skipping unparseable memory_written at seq ${e.seq}: ${parsed.error.message}`); await tx.upsert(Tb.Meta, 'cursor').set({ seq: e.seq }); return true }
         const { note, author } = parsed.data
         const k = key(note.scope, note.id)
+        // ARCHIVED notes leave the read model entirely rather than sitting in it behind a filter.
+        // Deleting the row is what makes archival free at every read site — search, neighbours,
+        // ranking, topics and `ls` exclude it with no query change and no chance of one path
+        // forgetting the filter. It stays fully recoverable: every revision is in the event log,
+        // so writing the same id with archived:false re-upserts this row on the next drain.
+        if (note.archived) {
+          await tx.delete(Tb.Note, k)
+          await tx.upsert(Tb.Meta, 'cursor').set({ seq: e.seq })
+          return true
+        }
         // read-then-write: createdAt/By + hits/lastAccessedAt preserved; updated/rev advance
         const ex = (await tx.select(Tb.Note, k))[0]
         // provenance + retrievedAt stamping shared with the kernel plan-note fold (deriveNoteProvenance):
@@ -1262,6 +1280,21 @@ export class SurrealMemory {
     return rows[0]?.seq ?? 0
   }
 
+  // Its own row, NOT the cursor row: writing the stage onto 'cursor' would put a presentation
+  // field inside the one record whose integrity the whole projection depends on.
+  async setStage(stage: { name: string; startedAt: number } | null): Promise<void> {
+    // Clearing DELETES the row rather than setting the columns undefined: "no row" is unambiguous,
+    // where an undefined column depends on whether the driver omits the key or erases it — and
+    // getting that wrong leaves a stale stage on screen forever, which is exactly what happened.
+    if (stage === null) { await this.db.delete(Tb.Meta, 'stage'); return }
+    await this.db.upsert(Tb.Meta, 'stage').set({ stage: stage.name, stageAt: stage.startedAt })
+  }
+
+  async getStage(): Promise<{ name: string; startedAt: number } | null> {
+    const row = (await this.db.select(Tb.Meta, 'stage'))[0]
+    return row?.stage !== undefined && row.stageAt !== undefined ? { name: row.stage, startedAt: row.stageAt } : null
+  }
+
   // every note across scopes, in deterministic (scope, id) order — the vault rebuild input
   async allNotes(): Promise<MemoryNote[]> {
     const rows = await this.db.select(Tb.Note)
@@ -1331,10 +1364,13 @@ function toNote(r: Record<string, any>) {
 // four budget.ts's FitterCoversNote names leaking on the read cap). These aliases turn the next
 // forgotten field into a compile error: every NoteView key must have a note-table column AND a
 // toNote() key. `id` is the one exclusion — surqlize reserves it, so it is stored as `noteId`.
-type ProjectionCoversTiers = Exclude<keyof NoteView, NoteColumn | 'id'> extends never ? true : never
+// `archived` joins `id` as an exclusion, for the opposite reason: an archived note has NO ROW at
+// all (applyEvent deletes it), so the flag can never be read back off one. A row that exists is by
+// definition not archived, which is why nothing here stores or maps it.
+type ProjectionCoversTiers = Exclude<keyof NoteView, NoteColumn | 'id' | 'archived'> extends never ? true : never
 const projectionCoversTiers: ProjectionCoversTiers = true
 void projectionCoversTiers
-type ToNoteCoversTiers = Exclude<keyof NoteView, keyof ReturnType<typeof toNote>> extends never ? true : never
+type ToNoteCoversTiers = Exclude<keyof NoteView, keyof ReturnType<typeof toNote> | 'archived'> extends never ? true : never
 const toNoteCoversTiers: ToNoteCoversTiers = true
 void toNoteCoversTiers
 

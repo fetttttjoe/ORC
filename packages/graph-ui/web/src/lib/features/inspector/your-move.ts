@@ -9,7 +9,7 @@ import type { Temperature } from '$lib/temperature'
  * Ordering is the point — a failed step outranks an open question outranks the status, because
  * that is the order an operator must deal with them.
  */
-export type MoveKind = 'retry' | 'answer' | 'propose' | 'approve' | 'run' | 'watch' | 'none'
+export type MoveKind = 'retry' | 'replan' | 'answer' | 'propose' | 'approve' | 'run' | 'watch' | 'none'
 
 export interface Move {
   kind: MoveKind
@@ -24,11 +24,27 @@ export interface MoveInput {
   taskId: string
   status: string
   failedStepId: string | null
+  /**
+   * The step failed because it JUDGED the work unacceptable, not because it broke. Retrying it is
+   * provably useless — a retry re-runs only what did not complete, so the rejecting step meets the
+   * same sibling outputs and reaches the same conclusion. The plan is what has to change.
+   */
+  rejected?: boolean | undefined
   openQuestion: string | null
   artifactCount: number
 }
 
 export function yourMove(t: MoveInput): Move {
+  if (t.failedStepId && t.rejected === true)
+    return {
+      kind: 'replan',
+      // No retry offered and no model call implied: reopening costs nothing, and re-running a plan
+      // whose verdict cannot change is what wastes money.
+      text: `step '${t.failedStepId}' rejected the work — a retry would repeat it unchanged, so reopen the plan and change it`,
+      temp: 'human',
+      cmd: `orc edit ${t.taskId} --file plan.json`,
+    }
+
   if (t.failedStepId)
     return {
       kind: 'retry',

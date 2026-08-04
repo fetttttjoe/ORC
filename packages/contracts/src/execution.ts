@@ -97,9 +97,27 @@ export const Signal = z.object({
 })
 export type Signal = z.infer<typeof Signal>
 
-export const FailureClass = z.enum(['provider_error', 'agent_error', 'validation_error', 'budget_exceeded', 'human_abort'])
+/**
+ * Why a step stopped. Every class but `rejected` is a MALFUNCTION — something went wrong, and
+ * running it again may well work.
+ *
+ * `rejected` is the odd one and the reason this enum grew: the step ran correctly and CONCLUDED
+ * that the work is not acceptable (an auditor signalling `failure`, a verifier refusing a result).
+ * That used to be filed as `agent_error`, which made a considered verdict indistinguishable from a
+ * crash — so the operator was offered a retry. But a retry only re-runs what did not complete
+ * (see completedStepIds), so the rejecting step re-ran over identical sibling outputs and
+ * reproduced the identical verdict, forever. Measured: three consecutive audit passes, same three
+ * defects, same failure. A verdict is answered by changing the PLAN, never by repeating the step.
+ */
+export const FailureClass = z.enum(['provider_error', 'agent_error', 'validation_error', 'budget_exceeded', 'human_abort', 'rejected'])
 export type FailureClass = z.infer<typeof FailureClass>
 export const FAILURE_CLASS = FailureClass.enum
+
+/** Classes a rerun could plausibly clear. `rejected` is absent by definition — see above. */
+export const RETRYABLE_FAILURE: ReadonlySet<FailureClass> = new Set([
+  FAILURE_CLASS.provider_error, FAILURE_CLASS.agent_error, FAILURE_CLASS.validation_error,
+  FAILURE_CLASS.budget_exceeded, FAILURE_CLASS.human_abort,
+])
 
 export const RunOutcome = z.enum(['done', 'blocked', 'cancelled'])
 export type RunOutcome = z.infer<typeof RunOutcome>

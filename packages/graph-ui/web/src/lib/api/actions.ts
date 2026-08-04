@@ -26,6 +26,15 @@ export const actions = {
   newTask: async (input: { title: string; spec?: string; parentId?: string; grounded?: GroundedSpec }): Promise<string> =>
     (await api.act<{ taskId: string }>('newTask', input, S.TaskCreated)).taskId,
 
+  /**
+   * Reopen a plan as a NEW editable version. The server's `edit` accepts a `blocked` task and
+   * stamps it blocked → awaiting_approval, which is the documented repair path (kernel.editPlan):
+   * edit → approve → run, with completed steps skipped. Costs no model call — the draft is the one
+   * already on screen — so reopening a rejected plan wastes nothing.
+   */
+  edit: (taskId: string, draft: { strategyRef: string; costEstimateUSD: number | null; steps: unknown[] }): Promise<{ version: number }> =>
+    api.act<{ version: number }>('edit', { taskId, draft }, S.ApprovedVersion),
+
   propose: (taskId: string, modelRef: string, skillRefs?: string[]): Promise<unknown> =>
     api.act('propose', { taskId, modelRef, ...(skillRefs?.length ? { skillRefs } : {}) }),
 

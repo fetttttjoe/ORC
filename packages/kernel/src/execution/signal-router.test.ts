@@ -249,6 +249,42 @@ describe('createSignalRouter (integration, real EventLog)', () => {
     expect(started).toEqual(['t1'])
   })
 
+  // A request nothing can ever serve must not be retried forever. startRunAt admits only
+  // approved/running/blocked, so a run_requested left over from before a task settled was
+  // re-attempted and re-refused on EVERY boot — three done tasks did exactly that on all 18
+  // supervisor starts recorded in .orc/serve.log.
+  it('sweep: a run_requested for a task that has since settled is NOT re-served', async () => {
+    const started: string[] = []
+    await log.append({ taskId: 't1', stepId: null, runToken: null, kind: EVENT_KIND.task_created, payload: { task: taskNode('t1', null) } })
+    await log.append({ taskId: 't1', stepId: null, runToken: null, kind: EVENT_KIND.run_requested, payload: { taskId: 't1', cwd: null, retry: false } })
+    // the task finished afterwards — the ask is answered by the outcome, not by another run
+    await log.append({ taskId: 't1', stepId: null, runToken: null, kind: EVENT_KIND.task_status_changed, payload: { taskId: 't1', from: TASK_STATUS.running, to: TASK_STATUS.done } })
+    router = createSignalRouter({
+      log, onChildApproved: async () => {}, onCancelled: async () => {},
+      onRunRequested: async taskId => { started.push(taskId) },
+      send: async () => {}, sendFeedback: async () => {},
+    })
+    await router.start()
+    expect(started).toEqual([])
+  })
+
+  // The other half of the same rule, and the reason the skip uses TERMINAL_TASK_STATUS rather than
+  // this file's local TERMINAL (which also holds `blocked`): blocked is the state a retry resumes
+  // FROM, so an unserved retry MUST still be redelivered by the sweep.
+  it('sweep: a run_requested for a BLOCKED task is still served — that is what retry resumes from', async () => {
+    const started: string[] = []
+    await log.append({ taskId: 't1', stepId: null, runToken: null, kind: EVENT_KIND.task_created, payload: { task: taskNode('t1', null) } })
+    await log.append({ taskId: 't1', stepId: null, runToken: null, kind: EVENT_KIND.task_status_changed, payload: { taskId: 't1', from: TASK_STATUS.running, to: TASK_STATUS.blocked } })
+    await log.append({ taskId: 't1', stepId: null, runToken: null, kind: EVENT_KIND.run_requested, payload: { taskId: 't1', cwd: null, retry: true } })
+    router = createSignalRouter({
+      log, onChildApproved: async () => {}, onCancelled: async () => {},
+      onRunRequested: async taskId => { started.push(taskId) },
+      send: async () => {}, sendFeedback: async () => {},
+    })
+    await router.start()
+    expect(started).toEqual(['t1'])
+  })
+
   it('a task stamped cancelled asks the runtime to cancel its workflows', async () => {
     const cancelled: string[] = []
     router = createSignalRouter({

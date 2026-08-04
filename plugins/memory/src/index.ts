@@ -1,5 +1,6 @@
 import { MEMORY_HEALTH, type EmbeddingProvider, type MemoryHealth, type MemoryStore } from '@orc/contracts'
 import { errorMessage } from '@orc/contracts'
+import { MemoryStage } from '@orc/contracts/health'
 import { EventLog, type ProjectConfig } from '@orc/kernel'
 import { openKnowledge, type Knowledge } from './knowledge'
 import { createMemoryStore } from './store'
@@ -16,11 +17,14 @@ export { openKnowledge } from './knowledge'
 // never sees — the same seam scoped_changes uses.
 export { memoryTools, unavailableMemoryTools, memoryVerifyTool, MEMORY_READ_TOOLS, MEMORY_ROLE, memoryRoleFor } from './tools'
 export { unavailableStepMemory, type BindStep } from './step'
-export { orphanedNotes, staleNotes, DEFAULT_SWEEP_DAYS } from './sweep'
+export { orphanedNotes } from './sweep'
+// the evidence-based lifecycle: recheck gathers the facts, archive rules on them (no clock in either)
+export { recheckNotes, summarize } from './recheck'
+export { archiveCandidates } from './archive'
 export { frontier } from './frontier'
 export { consolidateTask, type ConsolidationInput, type ConsolidationDistiller } from './consolidate'
 export { createMemoryLifecycle, type MemoryLifecycle } from './lifecycle'
-export { needsReground, restampableNotes } from './drift'
+export { needsReground, restampableNotes, createDriftProbe } from './drift'
 // consumer: packages/cli/src/runtime.ts, which binds it to the knowledge handle below and injects it
 // into the step tools — the kernel never imports this plugin, so the query crosses as a callback.
 export { notesCiting, type CitingNote } from './drift'
@@ -98,9 +102,18 @@ export async function probeMemory(config: ProjectConfig, log: EventLog): Promise
     // Two different lags: `pending` is the read model behind the LOG (orc's own, self-healing);
     // drift is the corpus behind the CODE, which orc cannot fix alone.
     const drift = await measureDrift(createDriftProbe(config.dir), knowledge)
+    // What the projector is doing RIGHT NOW, published by it into a shared meta row. `pending`
+    // only covers the event replay; the linking and clustering stages run with pending already at
+    // zero, which is why a boot could sit in ollama for minutes with nothing on screen to say so.
+    // Written by the projector in ANOTHER process, so it is parsed at the door: an unrecognised or
+    // half-written row yields no stage rather than an unknown label reaching the UI.
+    const published = MemoryStage.safeParse(await knowledge.getStage().catch(() => null))
+    const stage = published.success
+      ? { name: published.data.name, sinceMs: Math.max(0, Date.now() - published.data.startedAt) }
+      : undefined
     return pending === 0
-      ? { state: MEMORY_HEALTH.ok, pending, ...(drift && { drift }) }
-      : { state: MEMORY_HEALTH.catchingUp, pending, reason: `${pending} event(s) not yet projected`, ...(drift && { drift }) }
+      ? { state: MEMORY_HEALTH.ok, pending, ...(drift && { drift }), ...(stage && { stage }) }
+      : { state: MEMORY_HEALTH.catchingUp, pending, reason: `${pending} event(s) not yet projected`, ...(drift && { drift }), ...(stage && { stage }) }
   } catch (err) {
     return { state: MEMORY_HEALTH.unreachable, pending: 0, reason: errorMessage(err) }
   } finally {

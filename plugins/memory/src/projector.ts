@@ -1,4 +1,5 @@
 import { errorMessage, EVENT_KIND, foldMemory, MemoryDeletedPayload, MemoryVerifiedPayload, MemoryWrittenPayload, noteKey, type EventKind, type EventRecord } from '@orc/contracts'
+import { MEMORY_STAGE, type MemoryStageName } from '@orc/contracts/health'
 import type { EventLog } from '@orc/kernel'
 import { SurrealMemory } from './surreal'
 import { noteRelPath, renderNoteFile } from './note-md'
@@ -103,7 +104,11 @@ export function createMemoryProjector(opts: { log: EventLog; surreal: SurrealMem
       if (!parsed.success) return false
       const ref = 'note' in parsed.data ? parsed.data.note : parsed.data
       const full = await surreal.get(ref.id, ref.scope)
+      // An archived note has no row (applyEvent deleted it), so `full` is null and its vault file
+      // must go with it — the vault is the human read surface, and a file for a note the graph has
+      // retired is the two disagreeing. A restore re-upserts the row and re-renders the file.
       if (full) writeMemoryFile(vaultDir, noteRelPath(full), renderNoteFile(full))
+      else deleteMemoryFile(vaultDir, noteRelPath(ref))
     } else if (e.kind === EVENT_KIND.memory_deleted) {
       const parsed = MemoryDeletedPayload.safeParse(e.payload)
       if (!parsed.success) return false
@@ -173,9 +178,16 @@ export function createMemoryProjector(opts: { log: EventLog; surreal: SurrealMem
   //   refresh per burst, not per write); if it still bites, the next step is a worker thread or
   //   incremental re-clustering — cluster.ts is a pure, import-free function precisely so it can move
   //   off-thread untouched. Each stage is timed separately so the slow-warning names WHICH stage.
+  // What the projector is doing right now, published to a shared meta row because the health probe
+  // runs in a DIFFERENT PROCESS (see surreal.setStage). The banner otherwise showed one static
+  // sentence while ollama re-embedded the corpus for minutes. Advisory only.
+  let stage: { name: MemoryStageName; startedAt: number } | null = null
+
   const refreshDerived = async (hadDelete: boolean): Promise<void> => {
     if (hadDelete) {
       const started = Date.now()
+      stage = { name: MEMORY_STAGE.linking, startedAt: started }
+      void surreal.setStage(stage).catch(() => {}) // advisory: a failed publish must not fail the refresh
       try { await surreal.refreshLinks() }
       catch (err) { console.warn(`[memory] link refresh failed: ${errorMessage(err)}`) }
       finally {
@@ -185,12 +197,19 @@ export function createMemoryProjector(opts: { log: EventLog; surreal: SurrealMem
       }
     }
     const started = Date.now()
+    stage = { name: MEMORY_STAGE.clustering, startedAt: started }
+    void surreal.setStage(stage).catch(() => {})
     try { await surreal.refreshTopics() }
     catch (err) { console.warn(`[memory] topic refresh failed: ${errorMessage(err)}`) }
     finally {
       const elapsed = Date.now() - started
       if (elapsed > SLOW_TOPIC_REFRESH_MS)
         console.warn(`[memory] topic refresh took ${elapsed}ms — past ${SLOW_TOPIC_REFRESH_MS}ms; the claim corpus may have outgrown the whole-corpus repartition (cluster.ts's partition()) — see SLOW_TOPIC_REFRESH_MS's comment for the upgrade path`)
+      // Idle again. UNCONDITIONAL and in the finally: a stage that outlives its work reports
+      // activity that is not happening, and the banner then shows "clustering (101s so far)" at a
+      // supervisor that has been ready for minutes — worse than showing nothing at all.
+      stage = null
+      void surreal.setStage(null).catch(() => {})
     }
   }
 

@@ -1,6 +1,6 @@
 import {
   errorMessage,
-  EVENT_KIND, EventKind, FeedbackProvidedPayload, MemoryWrittenPayload, PAYLOAD_SCHEMAS, REACTION, ReactionFailedPayload, RUN_OUTCOME, RunRequestedPayload, runOutcomeFor, SplitResult, TASK_STATUS,
+  EVENT_KIND, EventKind, FeedbackProvidedPayload, MemoryWrittenPayload, PAYLOAD_SCHEMAS, REACTION, ReactionFailedPayload, RUN_OUTCOME, RunRequestedPayload, runOutcomeFor, SplitResult, TASK_STATUS, TERMINAL_TASK_STATUS,
   type EventRecord, type Reaction, type TaskStatus,
 } from '@orc/contracts'
 import { EventLog } from '../storage'
@@ -179,6 +179,16 @@ export function createSignalRouter(opts: {
       }
       for (const [taskId, event] of lastRequested) {
         if ((lastStartedSeq.get(taskId) ?? -1) > event.seq) continue // a run already answered this request
+        // A SETTLED task can never serve one. startRunAt admits approved/running/blocked only, so a
+        // request left in the log from before the task finished is re-attempted and re-refused on
+        // every single boot, forever — measured: three done tasks logging "task is 'done' — approve
+        // a plan first" on all 18 supervisor starts in .orc/serve.log.
+        //
+        // TERMINAL_TASK_STATUS (done/failed/cancelled), NOT this file's local TERMINAL, which also
+        // holds `blocked` for split resolution. Blocked is the state a retry resumes FROM, so
+        // skipping it here would break the catch-up that redelivers an unserved retry.
+        const status = state.tasks.get(taskId)?.status
+        if (status !== undefined && TERMINAL_TASK_STATUS.has(status)) continue
         const p = RunRequestedPayload.safeParse(event.payload)
         if (p.success)
           await opts.onRunRequested(taskId, { cwd: p.data.cwd, retry: p.data.retry })

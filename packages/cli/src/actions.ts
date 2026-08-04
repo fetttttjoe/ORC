@@ -1,5 +1,5 @@
 import { STEP_ROLE, errorMessage, EVENT_KIND, ISOLATION_TIER, ModelsDiscoveredPayload, NOTE_KIND, STRATEGY, TASK_STATUS, costUSDFor, parseModelRef, type ExecutionPort, type ModelOption, type PlanDraft, type TaskStatus } from '@orc/contracts'
-import { DEFAULT_MAX_ITERATIONS, Kernel, deriveSystemUrl, dropSystemDatabase, initializeProject, liveSupervisors, loadConfig, openStorage, resetSystemDatabase, subtreeTaskIds, type EventLog, type ProjectConfig, type Storage } from '@orc/kernel'
+import { DEFAULT_MAX_ITERATIONS, Kernel, blockingVerdicts, retryIsFutile, deriveSystemUrl, dropSystemDatabase, initializeProject, liveSupervisors, loadConfig, openStorage, resetSystemDatabase, subtreeTaskIds, type EventLog, type ProjectConfig, type Storage } from '@orc/kernel'
 import { seedRegistries } from './runtime'
 import { createMemory, openKnowledge, orphanedNotes } from '@orc/memory'
 import { openMemory } from './memory-open'
@@ -67,6 +67,19 @@ export async function assertRetryable(kernel: Kernel, taskId: string): Promise<v
   if (!task) throw new Error(`no task '${taskId}'`)
   if (task.status !== TASK_STATUS.blocked)
     throw new Error(`task is '${task.status}' — only a blocked task can be retried`)
+  // A task blocked purely on VERDICTS cannot be moved by repeating itself: retry re-runs only what
+  // did not complete, so the rejecting step would see the same sibling outputs and reach the same
+  // conclusion. Refuse here, at the door, and name the action that does work — otherwise the
+  // operator is handed a button that provably cannot succeed (measured: three identical passes).
+  const state = await kernel.state()
+  if (retryIsFutile(state, taskId)) {
+    const verdicts = blockingVerdicts(state, taskId)
+    throw new Error(
+      `this run was REJECTED, not broken — ${verdicts.map(v => `'${v.stepId}'`).join(', ')} judged the work unacceptable, `
+      + `and a retry re-runs only that step against the same completed siblings, so it would reach the same verdict. `
+      + `Revise the plan instead (orc revise ${taskId}), then approve the new version. Verdict: ${verdicts[0]?.message ?? ''}`,
+    )
+  }
 }
 
 // A provider's valid model ids: live-discovered UNION cost-table. The API list omits aliases

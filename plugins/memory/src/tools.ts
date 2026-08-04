@@ -431,7 +431,10 @@ const WRITE_PROPERTIES = {
 // The two deliberate omissions: `claims` (addClaims is the agent-facing spelling, and resending a
 // whole claim set is exactly what it exists to prevent) and `sourceRevision` (stamped by the store,
 // never supplied by a writer).
-type UnadvertisedByDesign = 'claims' | 'sourceRevision'
+// `archived` is a THIRD deliberate omission, and the most load-bearing: retiring knowledge is an
+// operator decision made from evidence (`orc memory recheck --apply`), never something an agent
+// mid-task can do to a note it dislikes. Leaving it off the tool schema is what enforces that.
+type UnadvertisedByDesign = 'claims' | 'sourceRevision' | 'archived'
 type WriteSchemaCoversInput =
   Exclude<keyof typeof MemoryWriteToolInput.shape, keyof typeof WRITE_PROPERTIES | UnadvertisedByDesign> extends never ? true : never
 const writeSchemaCoversInput: WriteSchemaCoversInput = true
@@ -442,7 +445,7 @@ void writeSchemaCoversInput
 // silently losing its memory tools.
 export function unavailableMemoryTools(reason: string): ResolvedTool[] {
   const fail = async (): Promise<never> => { throw new Error(`memory unavailable: ${reason}`) }
-  const store: MemoryStore = { write: fail, remove: fail, get: fail, list: fail, search: fail, searchClaims: fail, claimsFor: fail, neighbors: fail, recordAccess: fail, topics: fail, topicClaims: fail, verify: fail }
+  const store: MemoryStore = { write: fail, remove: fail, setArchived: fail, get: fail, list: fail, search: fail, searchClaims: fail, claimsFor: fail, neighbors: fail, recordAccess: fail, topics: fail, topicClaims: fail, verify: fail }
   return memoryTools({ store, author: { source: 'agent' } })
 }
 

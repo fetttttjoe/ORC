@@ -1,7 +1,7 @@
 // Has the code a note describes moved since the note was written?
 //
-// Distinct from sweep.ts's `staleNotes`, which retires EXPIRABLE notes nobody has touched in N days
-// — that axis is age and access. This one is correctness: a six-month-old note about an untouched
+// This module answers CORRECTNESS; archive.ts answers whether a note should still exist at all,
+// and consumes the verdict computed here. A six-month-old note about an untouched
 // file is still true, a ten-minute-old note about a file just refactored is not. Age would rank
 // both backwards, which is why this reads `sourceRevision` (the commit each note was stamped with
 // at write time) instead of a timestamp.

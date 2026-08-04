@@ -29,6 +29,7 @@ const fakeStore = (over: Partial<MemoryStore> = {}) => {
   const store: MemoryStore = {
     write: async (input, author, opts) => { written.push({ input, author, idempotencyKey: opts?.idempotencyKey, invalidates: opts?.invalidates }); return toNote(input) },
     remove: async () => {},
+    setArchived: async () => {},
     get: async () => toNote({ id: 'auth', title: 'Auth', body: 'b' }),
     list: async () => [],
     search: async () => [summary('auth', 'Auth')],

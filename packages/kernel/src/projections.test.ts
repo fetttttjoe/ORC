@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'bun:test'
-import { EVENT_KIND, type EventRecord, type Plan, type TaskNode } from '@orc/contracts'
+import { EVENT_KIND, FAILURE_CLASS, STEP_RUN_STATUS, type EventRecord, type Plan, type TaskNode } from '@orc/contracts'
 import { eventFixture, draftFixture, planFixture, stepFixture } from '@orc/contracts/fixtures'
-import { emptyFold, estimateCostUSD, fold, foldInto, subtreeOutcome, completedStepIds, nextAttempts, crashDedupKey, stepUsage, subtreeTaskIds, subtreeUsage, pendingSplitForChild, remainingBudget, inheritedCwd, runCwd, taskChangedPaths, taskNoteWrites, taskVerifiedNotes } from './projections'
+import { blockingVerdicts, retryIsFutile, type State, emptyFold, estimateCostUSD, fold, foldInto, subtreeOutcome, completedStepIds, nextAttempts, crashDedupKey, stepUsage, subtreeTaskIds, subtreeUsage, pendingSplitForChild, remainingBudget, inheritedCwd, runCwd, taskChangedPaths, taskNoteWrites, taskVerifiedNotes } from './projections'
 
 const task: TaskNode = {
   id: 't1', parentId: null, type: 'generic', title: 'hello', spec: '',
@@ -800,5 +800,70 @@ describe('estimateCostUSD', () => {
     expect(estimateCostUSD(state, { strategyRef: 'grounded-plan', analyzerRef: 'ghost' })).toBeNull()
     // no analyzerRef named → the analyzer is not part of the comparison
     expect(estimateCostUSD(state, { strategyRef: 'grounded-plan' })).toBeCloseTo(4.6, 10)
+  })
+})
+
+describe('blockingVerdicts / retryIsFutile — a verdict is not a malfunction', () => {
+  const failedStep = (id: string, cls: string) => ({
+    stepId: id, runToken: `rt-${id}`, attempt: 1, status: STEP_RUN_STATUS.failed,
+    iterations: 1, output: null, failure: { class: cls as never, message: `${id} says no` },
+  })
+  const stateWith = (...steps: ReturnType<typeof failedStep>[]): State => {
+    const s = fold([])
+    s.steps.set('t1', new Map(steps.map(x => [x.stepId, x])))
+    return s
+  }
+
+  it('lists only the steps that REJECTED, with their verdict text', () => {
+    const state = stateWith(failedStep('verify', FAILURE_CLASS.rejected), failedStep('build', FAILURE_CLASS.provider_error))
+    expect(blockingVerdicts(state, 't1')).toEqual([{ stepId: 'verify', message: 'verify says no' }])
+  })
+
+  it('calls a retry futile when EVERY failure is a verdict', () => {
+    expect(retryIsFutile(stateWith(failedStep('verify', FAILURE_CLASS.rejected)), 't1')).toBe(true)
+  })
+
+  /**
+   * The case that must stay retryable. Clearing the provider error may change what the verdict
+   * sees on the next pass, so refusing here would withhold a recovery that could genuinely work.
+   */
+  it('keeps a MIXED failure retryable — the error may be what the verdict is reacting to', () => {
+    const state = stateWith(failedStep('verify', FAILURE_CLASS.rejected), failedStep('build', FAILURE_CLASS.provider_error))
+    expect(retryIsFutile(state, 't1')).toBe(false)
+  })
+
+  it('is not futile when nothing failed at all', () => {
+    expect(retryIsFutile(fold([]), 'nobody')).toBe(false)
+    expect(blockingVerdicts(fold([]), 'nobody')).toEqual([])
+  })
+})
+
+/**
+ * The distinction that decides whether retry is offered, pinned because getting it wrong is
+ * expensive in BOTH directions and the first attempt got it wrong one way.
+ *
+ * A worker signalling failure has done its own work badly — a fresh attempt re-does that work and
+ * may well succeed, which is exactly what retry is for. An auditor signalling failure has JUDGED
+ * work other steps produced; retry re-runs only what did not complete, so it meets the same
+ * completed siblings and reaches the same verdict forever.
+ */
+describe('rejected is an AUDITOR verdict, not any signalled failure', () => {
+  const failed = (id: string, cls: string) => ({
+    stepId: id, runToken: `rt-${id}`, attempt: 1, status: STEP_RUN_STATUS.failed,
+    iterations: 1, output: null, failure: { class: cls as never, message: `${id} failed` },
+  })
+  const stateWith = (...steps: ReturnType<typeof failed>[]): State => {
+    const s = fold([])
+    s.steps.set('t1', new Map(steps.map(x => [x.stepId, x])))
+    return s
+  }
+
+  it('keeps a worker failure retryable — its next attempt re-does the work', () => {
+    expect(retryIsFutile(stateWith(failed('build', FAILURE_CLASS.agent_error)), 't1')).toBe(false)
+    expect(blockingVerdicts(stateWith(failed('build', FAILURE_CLASS.agent_error)), 't1')).toEqual([])
+  })
+
+  it('refuses retry only for the verdict class', () => {
+    expect(retryIsFutile(stateWith(failed('verify', FAILURE_CLASS.rejected)), 't1')).toBe(true)
   })
 })

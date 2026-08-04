@@ -18,7 +18,7 @@ import {
   type GroundingScope, type StalePathAnswer,
 } from './strategies/grounding-scope'
 import { verifyArtifacts } from './artifacts'
-import { fold, ancestorTaskIds, completedStepIds, nextAttempts, remainingBudget, inheritedCwd, runCwd, type State } from '../projections'
+import { fold, ancestorTaskIds, blockingVerdicts, retryIsFutile, completedStepIds, nextAttempts, remainingBudget, inheritedCwd, runCwd, type State } from '../projections'
 import { Kernel } from '../kernel'
 import { KERNEL_ERROR_CODE, KernelError } from '../errors'
 import { readySteps, runOutcomeOf } from './interpreter'
@@ -537,7 +537,18 @@ export async function createDbosPort(opts: {
         ])
         return { stepId: args.stepId, ok: true }
       }
-      const failClass = signal ? FAILURE_CLASS.agent_error : (error?.class ?? FAILURE_CLASS.agent_error)
+      // A signalled failure from an AUDITOR is a VERDICT, not a malfunction: that role judges work
+      // OTHER steps produced, and retry re-runs only what did not complete — so it would meet the
+      // same completed siblings and reach the same conclusion, forever (measured: three identical
+      // audit passes). `rejected` routes the operator to replan instead of a retry that cannot win.
+      //
+      // The role test is load-bearing, not decoration. Any step signals `failure` when it does not
+      // succeed, and for a WORKER a fresh attempt genuinely re-does its own work — a different
+      // outcome is exactly what retry is for. Treating every signalled failure as a verdict broke
+      // that: it refused the retry of a worker that would have succeeded on its next attempt.
+      const failClass = signal
+        ? (init.step.role === STEP_ROLE.auditor ? FAILURE_CLASS.rejected : FAILURE_CLASS.agent_error)
+        : (error?.class ?? FAILURE_CLASS.agent_error)
       const message = signal ? signal.summary : (error?.message ?? 'executor ended without signal')
       await checkpoint('finish', async () => message, () => [
         { kind: EVENT_KIND.step_failed, payload: { stepId: args.stepId, runToken, class: failClass, message } },
@@ -774,6 +785,17 @@ export async function createDbosPort(opts: {
       if (!task) throw new KernelError(KERNEL_ERROR_CODE.task_not_found, `no task '${taskId}'`)
       if (task.status !== TASK_STATUS.blocked)
         throw new KernelError(KERNEL_ERROR_CODE.invalid_transition, `task is '${task.status}' — only a blocked task can be retried`)
+      // The port half of assertRetryable's refusal, off the SAME derivation — a verdict cannot be
+      // argued with by repeating the step that reached it. Enforced here too because the router
+      // reaches startRunAt without passing the actions layer at all.
+      if (retryIsFutile(state, taskId)) {
+        const verdicts = blockingVerdicts(state, taskId)
+        throw new KernelError(
+          KERNEL_ERROR_CODE.invalid_transition,
+          `this run was rejected, not broken — ${verdicts.map(v => `'${v.stepId}'`).join(', ')} judged the work unacceptable. `
+          + `Revise the plan and approve a new version; a retry would reach the same verdict.`,
+        )
+      }
       const runs = state.runs.get(taskId) ?? []
       // A retry re-enters the world the run failed in: shared rule (projections.inheritedCwd) — an
       // explicit override wins, else inherit the most recent run that HAD a cwd (not at(-1), so a

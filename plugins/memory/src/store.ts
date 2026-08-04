@@ -153,6 +153,20 @@ export function createMemoryStore(opts: { log: EventLog; surreal: SurrealMemory;
       return stamp
     },
     // optional author: cancel-sweep passes the cancelled task's identity as provenance
+    async setArchived(id, scope = MemoryScope.project, archived, author?: MemoryAuthor) {
+      const existing = await surreal.get(id, scope)
+      // Nothing to retire, or already in the asked-for state — a no-op keeps `--apply` idempotent.
+      if (!existing || existing.archived === archived) return
+      // NOTE the absent sourceRevision() call: this re-appends what is stored, flag moved and
+      // nothing else. `archived` is excluded from CONTENT_FIELDS, so the content key is unchanged
+      // and deriveNoteProvenance carries the verification stamp across too.
+      const note = MemoryNoteInput.parse({ ...existing, archived })
+      await log.append({
+        taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_written,
+        payload: { note, author: author ?? { source: 'cli' } },
+      })
+    },
+
     async remove(id, scope = MemoryScope.project, author?: MemoryAuthor) {
       await log.append({ taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_deleted, payload: { id, scope, author: author ?? { source: 'cli' } } })
     },

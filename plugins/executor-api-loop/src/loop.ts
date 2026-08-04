@@ -6,6 +6,7 @@ import {
   type SplitResult, type UnifiedEvent, type Usage,
 } from '@orc/contracts'
 import { AskHumanInput, JoinSplitsInput, SignalInput, TOOL_NAME, executeTool, releaseWriteClaims, toolSet } from './tools'
+import { isTransient } from './transient'
 
 // Pre-flight for declared outputs, so the model can fix a bad declaration instead of the
 // step failing at the runtime's trusted verification. Same rule set as the runtime
@@ -29,28 +30,9 @@ interface TurnResult {
 type ToolCall = { toolCallId: string; toolName: string; input: unknown }
 type ToolOutcome = Awaited<ReturnType<typeof executeTool>>
 
-const TRANSIENT_STATUS = new Set([408, 409, 429, 500, 502, 503, 504])
-
 // tool outputs are JSON-shaped by construction; the round-trip proves it to the type system
 // (and normalizes undefined/Date exactly as the wire format would)
 const toJson = (v: unknown): JSONValue => JSON.parse(JSON.stringify(v ?? null))
-
-const errField = (err: unknown, key: string): unknown =>
-  typeof err === 'object' && err !== null && key in err ? Reflect.get(err, key) : undefined
-
-function isTransient(err: unknown): boolean {
-  // ai@7 exhausts its internal retries on retryable errors and throws RetryError, which carries
-  // no status fields itself — classify by the underlying provider error instead
-  const lastError = errField(err, 'lastError')
-  if (lastError !== undefined && lastError !== err) return isTransient(lastError)
-  // APICallError/GatewayError expose the SDK's own retryability verdict — trust it first
-  const isRetryable = errField(err, 'isRetryable')
-  if (typeof isRetryable === 'boolean') return isRetryable
-  const status = errField(err, 'statusCode') ?? errField(err, 'status')
-  if (typeof status === 'number') return TRANSIENT_STATUS.has(status)
-  const code = errField(err, 'code')
-  return code === 'ECONNRESET' || code === 'ECONNREFUSED' || code === 'ETIMEDOUT' || code === 'ENOTFOUND'
-}
 
 export function normalizeUsage(
   u: { inputTokens?: number; outputTokens?: number; inputTokenDetails?: { cacheReadTokens?: number; cacheWriteTokens?: number } } | undefined,

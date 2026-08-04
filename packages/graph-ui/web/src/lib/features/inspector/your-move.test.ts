@@ -30,3 +30,28 @@ describe('yourMove (the single next human action)', () => {
     expect(yourMove({ ...base, status: 'running' }).cmd).toBeNull()
   })
 })
+
+describe('yourMove — a verdict is answered by replanning, never by repeating', () => {
+  const base = { taskId: 't1', status: 'blocked', openQuestion: null, artifactCount: 0 }
+
+  it('offers retry when a step BROKE', () => {
+    const m = yourMove({ ...base, failedStepId: 'verify' })
+    expect(m.kind).toBe('retry')
+  })
+
+  /**
+   * The loop this exists to end: retry re-runs only what did not complete, so a rejecting step
+   * meets the same completed siblings and reaches the same verdict — three identical audit passes
+   * were observed before this distinction existed.
+   */
+  it('offers REPLAN when the step rejected the work, and never retry', () => {
+    const m = yourMove({ ...base, failedStepId: 'verify', rejected: true })
+    expect(m.kind).toBe('replan')
+    expect(m.kind).not.toBe('retry')
+    expect(m.text).toContain('rejected')
+  })
+
+  it('still lets an open question outrank neither — a failure is dealt with first', () => {
+    expect(yourMove({ ...base, failedStepId: 'verify', rejected: true, openQuestion: 'which one?' }).kind).toBe('replan')
+  })
+})

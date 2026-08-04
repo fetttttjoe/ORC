@@ -268,6 +268,7 @@ describe('projector resilience', () => {
       },
       get: async () => fullNote,
       getCursor: async () => 0,
+      setStage: async () => {},
       allNotes: async () => [fullNote],
     } as unknown as SurrealMemory
     const warns: string[] = []
@@ -303,6 +304,7 @@ describe('projector resilience', () => {
       applyEvent: async () => { applies += 1; if (applies === 2) throw new Error('vault write failed'); return true },
       get: async () => fullNote,
       getCursor: async () => 0,
+      setStage: async () => {},
       allNotes: async () => [],
       refreshTopics: async () => { refreshes += 1 },
     } as unknown as SurrealMemory
@@ -329,7 +331,8 @@ describe('projector resilience', () => {
     const stub = {
       applyEvent: async () => true,
       get: async () => fullNote,
-      getCursor: async () => 0, // always re-drains from 0, so the 2nd catchUp re-applies write+delete
+      getCursor: async () => 0,
+      setStage: async () => {}, // always re-drains from 0, so the 2nd catchUp re-applies write+delete
       allNotes: async () => [],
       refreshLinks: async () => { links += 1 },
       refreshTopics: async () => { topics += 1 },
@@ -374,6 +377,7 @@ describe('projector resilience', () => {
       },
       get: async () => fullNote,
       getCursor: async () => 0,
+      setStage: async () => {},
       allNotes: async () => [...persisted.values()],
       refreshLinks: async () => {},
       refreshTopics: async () => {},

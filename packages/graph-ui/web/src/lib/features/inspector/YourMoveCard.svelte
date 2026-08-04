@@ -9,7 +9,10 @@
   import { TEMP_BORDER, TEMP_TEXT } from '$lib/temperature'
   import type { Move } from './your-move'
 
-  let { move, taskId }: { move: Move; taskId: string } = $props()
+  /** the shown plan version — required only by the `replan` move, which reopens it for editing */
+  interface PlanDraftish { strategyRef: string; costEstimateUSD: number | null; steps: unknown[] }
+
+  let { move, taskId, plan }: { move: Move; taskId: string; plan?: PlanDraftish | undefined } = $props()
 
   let busy = $state(false)
   let answer = $state('')
@@ -31,6 +34,21 @@
     } finally {
       busy = false
     }
+  }
+
+  /**
+   * The answer to a REJECTED run. `revise` would be wrong here and was: it resumes an open
+   * feedback gate, and a finished run has none — replyFeedback returns null and the click does
+   * nothing. `edit` is the documented repair path (see kernel.editPlan's `blocked` branch):
+   * it appends the current steps as a new version and stamps blocked → awaiting_approval, so the
+   * plan becomes editable and approvable instead of re-runnable.
+   */
+  async function reopen(): Promise<{ version: number }> {
+    const draft = plan
+    // the template gates the control on `plan`, so this only fires if the prop went missing —
+    // a thrown message beats silently reopening an empty plan
+    if (!draft) throw new Error('no plan version on screen to reopen')
+    return actions.edit(taskId, { strategyRef: draft.strategyRef, costEstimateUSD: draft.costEstimateUSD, steps: draft.steps })
   }
 
   async function sendAnswer(): Promise<void> {
@@ -55,6 +73,13 @@
 
   {#if move.kind === 'retry' && canRun}
     <Button size="sm" variant="destructive" disabled={busy} onclick={() => void perform('retry started', () => actions.retry(taskId))}>retry failed steps</Button>
+  {:else if move.kind === 'replan' && canRun && plan}
+    <!-- Reopens the approved plan as a new EDITABLE version (kernel.editPlan admits `blocked` and
+         stamps it awaiting_approval). No model call, so a rejected plan costs nothing to reopen —
+         what costs money is re-running one whose verdict cannot change. -->
+    <Button size="sm" disabled={busy} onclick={() => void perform('plan reopened for editing', reopen)}>
+      reopen plan for editing
+    </Button>
   {:else if move.kind === 'answer' && canAnswer}
     <div class="flex items-center gap-2">
       <Input
