@@ -3,7 +3,7 @@ import path from 'node:path'
 import { DBOS } from '@dbos-inc/dbos-sdk'
 import {
   EVENT_KIND, FAILURE_CLASS, MAX_AUTO_CONTINUATIONS, RUN_OUTCOME, SIGNAL_OUTCOME, STEP_ID, STEP_ROLE, TASK_STATUS, UNIFIED_EVENT_TYPE,
-  classifiedError, errorMessage, failureClassOf, isApprovalAnswer, isTerminalError, resolveModel, costUSDFor,
+  classifiedError, continuationTopic, errorMessage, failureClassOf, isApprovalAnswer, isTerminalError, resolveModel, costUSDFor,
   type AgentExecutor, type Checkpoint, type CommitRecordedPayload, type EventDraft, type ExecutionPort, type ExecutorContext,
   type FailureClass, type LoadedSkill, type ModelProvider, type OperationCheckpoint, type Plan, type PlanStep,
   type ResolvedTool, type RunHandle, type RunOutcome, type Signal, type SplitResult, type StepMemory, type TaskStatus, type ToolSource,
@@ -445,9 +445,6 @@ export async function createDbosPort(opts: {
       // the runtime's continuation verdict, recorded per round — an enum, not bare strings, so
       // the checkpoint value and every comparison spell it once
       enum ContinuationGrant { auto = 'auto', ask = 'ask' }
-      // one spelling of the gate's topic: the ask below and any reader tracing a feedback event
-      // back to its round derive it identically
-      const continuationTopic = (stepId: string, round: number): string => `continue:${stepId}:${round}`
       // ONE round of the executor: drive a fresh generator to its signal/error. Rounds exist
       // because `partial` ends a round without ending the step — the runtime then grants (or the
       // human gate allows) another. Round > 0 gets the previous round's summary as its whole

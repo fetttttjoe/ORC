@@ -17,14 +17,17 @@ export interface ScriptedTurn {
   toolCalls?: Array<{ toolCallId: string; toolName: string; input: unknown }>
 }
 
-export function scriptModel(turns: ScriptedTurn[]) {
+// `seenTools` (optional): receives the ADVERTISED tool names per call — the loop narrows the
+// toolset on the final iteration, and only the request the mock actually received can prove it.
+export function scriptModel(turns: ScriptedTurn[], seenTools?: string[][]) {
   let i = 0
   return new MockLanguageModelV4({
-    doGenerate: async () => {
+    doGenerate: async (options: { tools?: Array<{ name: string }> }) => {
+      seenTools?.push((options.tools ?? []).map(t => t.name).sort())
       const turn = turns[i++] ?? { text: '' }
       const isToolCall = (turn.toolCalls?.length ?? 0) > 0
       return {
-        finishReason: { unified: isToolCall ? 'tool-calls' : 'stop', raw: undefined },
+        finishReason: { unified: isToolCall ? 'tool-calls' as const : 'stop' as const, raw: undefined },
         usage: {
           inputTokens: { total: 10, noCache: undefined, cacheRead: undefined, cacheWrite: undefined },
           outputTokens: { total: 5, text: undefined, reasoning: undefined },

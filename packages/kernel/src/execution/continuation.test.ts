@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from 'bun:test'
 import {
   EVENT_KIND, FAILURE_CLASS, MAX_AUTO_CONTINUATIONS, PAYLOAD_SCHEMAS, SIGNAL_OUTCOME, TASK_STATUS,
+  continuationTopic,
   type AgentExecutor, type EventDraft, type ExecutorContext, type SplitResult, type UnifiedEvent,
 } from '@orc/contracts'
 import { draftFixture, stepFixture } from '@orc/contracts/fixtures'
@@ -117,7 +118,7 @@ describe('partial-signal continuation', () => {
     const handle = await port.startRun(t.id)
 
     expect(await waitFor(async () => (await kernel.eventsFor(t.id)).some(e => e.kind === EVENT_KIND.feedback_requested), 15_000)).toBe(true)
-    expect(await kernel.replyFeedback(t.id, 'approve')).toContain('continue:')
+    expect(await kernel.replyFeedback(t.id, 'approve')).toBe(continuationTopic('s1', MAX_AUTO_CONTINUATIONS))
 
     expect(await handle.wait()).toBe('done')
     expect(continuations.get(t.id)).toHaveLength(MAX_AUTO_CONTINUATIONS + 2)

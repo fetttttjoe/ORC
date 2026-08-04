@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import type { ClaimHit, Checkpoint, EventDraft, ExecutorContext, NoteSummary, OperationCheckpoint, OperationSpec, ResolvedTool, SplitResult, UnifiedEvent } from '@orc/contracts'
-import { EVENT_KIND, LINK_KIND, MEMORY_ACCESS, NOTE_TIER, OPERATION_KIND, planScope, slugId } from '@orc/contracts'
+import { EVENT_KIND, LINK_KIND, MEMORY_ACCESS, NOTE_TIER, OPERATION_KIND, SIGNAL_OUTCOME, planScope, slugId } from '@orc/contracts'
 import { stepFixture } from '@orc/contracts/fixtures'
 import { z } from 'zod'
 import type { LanguageModel } from 'ai'
@@ -107,7 +107,7 @@ describe('api-loop executor', () => {
     const captured: EventDraft[] = []
     const knowledge = { useful: ['area-auth'], deadEnd: ['old-map'] }
     const model = scriptModel([
-      { toolCalls: [{ toolCallId: 'c1', toolName: 'signal', input: { outcome: 'success', summary: 'done', knowledge } }] },
+      { toolCalls: [{ toolCallId: 'c1', toolName: TOOL_NAME.signal, input: { outcome: SIGNAL_OUTCOME.success, summary: 'done', knowledge } }] },
     ])
     const events = await drain(apiLoopExecutor().startTurn(ctx(model, captured)))
     const signalled = events.find(e => e.type === 'signal')
@@ -121,18 +121,18 @@ describe('api-loop executor', () => {
   // it is the ONLY context that survives a round boundary.
   it('a partial signal ends the round as a signal, not an error', async () => {
     const model = scriptModel([
-      { toolCalls: [{ toolCallId: 'c1', toolName: 'signal', input: { outcome: 'partial', summary: 'done 3/9, remaining: x y z' } }] },
+      { toolCalls: [{ toolCallId: 'c1', toolName: TOOL_NAME.signal, input: { outcome: SIGNAL_OUTCOME.partial, summary: 'done 3/9, remaining: x y z' } }] },
     ])
     const events = await drain(apiLoopExecutor().startTurn(ctx(model, [])))
     expect(events.map(e => e.type)).toEqual(['usage', 'signal', 'done'])
     const signalled = events.find(e => e.type === 'signal')
-    expect(signalled && 'signal' in signalled ? signalled.signal.outcome : undefined).toBe('partial')
+    expect(signalled && 'signal' in signalled ? signalled.signal.outcome : undefined).toBe(SIGNAL_OUTCOME.partial)
   })
 
   it('a continuation ctx renders the previous summary into the first prompt', async () => {
     const captured: EventDraft[] = []
     const model = scriptModel([
-      { toolCalls: [{ toolCallId: 'c1', toolName: 'signal', input: { outcome: 'success', summary: 'finished' } }] },
+      { toolCalls: [{ toolCallId: 'c1', toolName: TOOL_NAME.signal, input: { outcome: SIGNAL_OUTCOME.success, summary: 'finished' } }] },
     ])
     const base = ctx(model, captured)
     await drain(apiLoopExecutor().startTurn({ ...base, continuation: { round: 1, summary: 'healed 14 of 26; remaining ids: a, b' } }))
@@ -140,6 +140,24 @@ describe('api-loop executor', () => {
     const prompt = JSON.stringify(RequestPayload.parse(call?.payload).request)
     expect(prompt).toContain('Continuing your own previous work (round 2)')
     expect(prompt).toContain('healed 14 of 26; remaining ids: a, b')
+  })
+
+  // The final-iteration trap, measured live (continuation smoke, both attempts): told "call
+  // signal THIS turn" while still offered fs_read, the model spent its last call finishing work
+  // and no turn remained to signal from. The final iteration therefore advertises ONLY signal —
+  // the report becomes the last turn's single legal move.
+  it('the final iteration offers only the signal tool', async () => {
+    const seenTools: string[][] = []
+    const model = scriptModel([
+      { toolCalls: [{ toolCallId: 'c1', toolName: TOOL_NAME.fs_read, input: { path: 'a.txt' } }] },
+      { toolCalls: [{ toolCallId: 'c2', toolName: TOOL_NAME.fs_read, input: { path: 'b.txt' } }] },
+      { toolCalls: [{ toolCallId: 'c3', toolName: TOOL_NAME.signal, input: { outcome: SIGNAL_OUTCOME.partial, summary: 'read 2, more remain' } }] },
+    ], seenTools)
+    const events = await drain(apiLoopExecutor().startTurn(ctx(model, []))) // maxIterations: 3
+    expect(events.at(-1)?.type).toBe('done')
+    expect(seenTools).toHaveLength(3)
+    expect(seenTools[0]).toContain(TOOL_NAME.fs_read) // ordinary iterations keep the full set
+    expect(seenTools[2]).toEqual([TOOL_NAME.signal]) // the last turn can only report
   })
 
   it('tool call → executes → feeds result back → signal on turn 2', async () => {

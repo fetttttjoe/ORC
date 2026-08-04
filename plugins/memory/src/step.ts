@@ -89,6 +89,11 @@ export function bindStepMemory(opts: {
   // nearest first (parent, grandparent, …, root) — a split child's decomposition lives in its
   // PARENT's plan scope, so without these it cannot see its own subplan
   ancestorTaskIds?: readonly string[]
+  // Bound on the advisory read paths (recall, claimsCiting). The degrade contract ("never block
+  // the step") only held against THROWS — a dead SurrealDB socket pends forever (measured:
+  // connect() still pending after 400s), and a step recovered mid-boot wedged in recall with
+  // zero events for 10+ minutes, live 2026-08-04. Injectable so the tests need not wait it out.
+  recallTimeoutMs?: number
 }): StepMemoryBinding {
   const { store, author, step, taskId } = opts
   // Every durable note this step pulled. Collected by decorating the ONE method that already means
@@ -157,6 +162,17 @@ export function bindStepMemory(opts: {
     } catch { return undefined }
   }
 
+  // A generous ceiling: a healthy recall is three searches plus a drift probe, seconds even on a
+  // CPU embedder — this exists for the pending-forever socket, not for slow-but-alive.
+  // [conjecture — sized from observed healthy recalls well under 5s; grep this name before tuning]
+  const recallTimeoutMs = opts.recallTimeoutMs ?? 30_000
+  // The hang-shaped half of the degrade contract: a promise that never settles cannot be caught,
+  // so the advisory paths race a timer and the CALLER's own catch turns the timeout into the same
+  // "no notes / nothing at risk" the throwing store already gets. The loser keeps running to
+  // nowhere — acceptable for a read; the step is what must not wedge.
+  const bounded = <T>(p: Promise<T>, what: string): Promise<T> =>
+    Promise.race([p, new Promise<never>((_, reject) => setTimeout(() => reject(new Error(`${what} still pending after ${recallTimeoutMs}ms — degraded store treated as absent`)), recallTimeoutMs).unref?.())])
+
   return {
     tools: memoryTools({ store: tracking, author, role: opts.role, changedSince: opts.changedSince, catchUp: opts.catchUp, searchScope: scope }),
     memory: {
@@ -173,22 +189,32 @@ export function bindStepMemory(opts: {
       // Degraded store folds to "nothing at risk": this is an advisory nudge, and failing the step
       // because the read model is down would be worse than missing a retirement.
       async claimsCiting(paths) {
-        const seen = new Map<string, ClaimHit>()
-        for (const path of paths) {
-          // the basename too: a claim commonly cites `cluster.ts` where the edit names the full
-          // path, and requiring an exact-string match would find neither
-          for (const term of [path, path.split('/').pop() ?? '']) {
-            if (term.length < 3) continue
-            try {
-              for (const hit of await store.searchClaims(term, { scope }, { limit: MEMORY_LIMITS.detailItems, mode: SEARCH_MODE.keyword, perNote: 'all' }))
-                // keyed by (scope, note, claim), not claimId alone: that id hashes the claim's TEXT,
-                // so two notes asserting the same sentence share it and one of them vanished here —
-                // the same silent withholding `perNote: 'all'` above exists to prevent
-                if (hit.text.includes(term)) seen.set(claimHitKey(hit), hit) // the store ranks; we require the literal
-            } catch { /* degraded: nothing at risk rather than a failed step */ }
+        // ONE bound around the whole walk, not per term: a dead store would otherwise pay the
+        // timeout once per (path × term) and a four-path edit would stall the iteration for minutes
+        const walk = async (): Promise<ClaimHit[]> => {
+          const seen = new Map<string, ClaimHit>()
+          for (const path of paths) {
+            // the basename too: a claim commonly cites `cluster.ts` where the edit names the full
+            // path, and requiring an exact-string match would find neither
+            for (const term of [path, path.split('/').pop() ?? '']) {
+              if (term.length < 3) continue
+              try {
+                for (const hit of await store.searchClaims(term, { scope }, { limit: MEMORY_LIMITS.detailItems, mode: SEARCH_MODE.keyword, perNote: 'all' }))
+                  // keyed by (scope, note, claim), not claimId alone: that id hashes the claim's TEXT,
+                  // so two notes asserting the same sentence share it and one of them vanished here —
+                  // the same silent withholding `perNote: 'all'` above exists to prevent
+                  if (hit.text.includes(term)) seen.set(claimHitKey(hit), hit) // the store ranks; we require the literal
+              } catch { /* degraded: nothing at risk rather than a failed step */ }
+            }
           }
+          return [...seen.values()].slice(0, MEMORY_LIMITS.detailItems)
         }
-        return [...seen.values()].slice(0, MEMORY_LIMITS.detailItems)
+        try {
+          return await bounded(walk(), `claimsCiting for step '${step.id}'`)
+        } catch (err) {
+          console.warn(errorMessage(err))
+          return []
+        }
       },
       // Semantic-first, then degrade: full intent (hybrid matches meaning) → distinctive title
       // terms (what keyword-only deployments need) → the single longest term. First non-empty wins.
@@ -205,6 +231,7 @@ export function bindStepMemory(opts: {
           terms.length > 1 ? terms.reduce((a, b) => (b.length > a.length ? b : a)) : '',
         ].filter(Boolean)
         try {
+          return await bounded((async () => {
           let found: RecalledContext = { claims: [], notes: [] }
           for (const query of candidates) {
             found = await search(query, budget)
@@ -237,6 +264,7 @@ export function bindStepMemory(opts: {
           // is not knowledge this step was handed, so it must not move the reading either way
           const currency = await currencyOf(found)
           return { ...found, ...(currency && { currency }) }
+          })(), `memory recall for step '${step.id}'`)
         } catch (err) {
           console.warn(`memory recall failed for step '${step.id}':`, errorMessage(err))
           return { claims: [], notes: [] }

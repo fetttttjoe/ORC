@@ -101,6 +101,10 @@ export const SIGNAL_OUTCOME = SignalOutcome.enum
 // steps exists yet; revisit against real runs, and make it a config knob if one size proves wrong]
 export const MAX_AUTO_CONTINUATIONS = 3
 
+// ONE spelling of the continuation gate's feedback topic: the port's ask, the recv it parks on,
+// and any reader tracing a feedback event back to its round all derive it here.
+export const continuationTopic = (stepId: string, round: number): string => `continue:${stepId}:${round}`
+
 // The agent's self-report of which pulled notes ANSWERED the step and which wasted it — the
 // capture seam for memory_outcome events: one field on the signal the step already sends, no
 // extra tool calls. EVIDENCE, never verification — memory_verify stays auditor-gated and

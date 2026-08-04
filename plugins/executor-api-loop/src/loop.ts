@@ -203,7 +203,7 @@ function buildPrompt(ctx: ExecutorContext<LanguageModel>, knownContextBlock = ''
     // survives a round boundary (the conversation does not), so it renders as its own block —
     // after the upstream outputs it complements, before the protocol.
     ctx.continuation
-      ? `# Continuing your own previous work (round ${ctx.continuation.round + 1})\nA previous round of THIS step ended with outcome 'partial' and reported:\n${ctx.continuation.summary}\nContinue from there. Do not redo work the report says is done — verify cheaply where you must, then finish what remains.`
+      ? `# Continuing your own previous work (round ${ctx.continuation.round + 1})\nA previous round of THIS step ended with outcome 'partial' and reported:\n${ctx.continuation.summary}\nTrust that report: work it says is done IS done — do not re-read or re-verify it (measured: a continuation that re-verified spent every call re-proving old work and never advanced). Spend every call on what the report says REMAINS.`
       : '',
     knownContextBlock, // between deps and the protocol (design: retrieval without a turn)
     KNOWLEDGE_PROTOCOL,
@@ -330,6 +330,15 @@ export function apiLoopExecutor(): AgentExecutor<LanguageModel> {
             return
           }
 
+          // The FINAL iteration offers ONLY the signal tool. Telling the model "call signal THIS
+          // turn" while offering fs_read hands it a trap it walked into live (measured, both
+          // attempts of the continuation smoke): it spent the last call finishing work, the loop
+          // fed the result back, and no turn remained to signal from — exhaustion, with a partial
+          // summary it was never structurally able to send. Withholding the work tools makes the
+          // report the only legal move; `partial` is what makes that honest (unfinished work goes
+          // to a continuation round instead of dying in a summary field). One cache miss on the
+          // last call is the cost — the prompt prefix survives, the tool block does not.
+          const finalIteration = iteration === ctx.step.maxIterations
           let turn: TurnResult
           try {
             turn = await ctx.operation(
@@ -339,7 +348,7 @@ export function apiLoopExecutor(): AgentExecutor<LanguageModel> {
                 name: ctx.step.modelRef,
                 before: { messages: messages.slice(persistedThrough) },
               },
-              () => callModel(ctx.model, messages, tools),
+              () => callModel(ctx.model, messages, finalIteration ? { [TOOL_NAME.signal]: tools[TOOL_NAME.signal]! } : tools),
               (r): EventDraft[] => [{
                 kind: EVENT_KIND.agent_call,
                 // persist only the DELTA since the previous agent_call — the full cumulative

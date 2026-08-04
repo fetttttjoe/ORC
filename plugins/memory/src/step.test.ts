@@ -146,6 +146,32 @@ describe('recall', () => {
     f.store.search = async () => { throw new Error('surreal down') }
     expect(await bind(f).memory.recall(500)).toEqual({ claims: [], notes: [] })
   })
+
+  // A HANGING store is not a throwing store: the catch above never fires on a promise that stays
+  // pending, and a dead SurrealDB socket pends forever (measured: connect() still pending after
+  // 400s; live 2026-08-04, a step recovered mid-boot wedged in recall with zero events for 10+
+  // minutes). The degrade contract must hold against hangs too — bounded, then no notes.
+  it('a hanging store degrades to no notes instead of wedging the step forever', async () => {
+    const f = fakeStore()
+    f.store.searchClaims = () => new Promise(() => {}) // pending forever
+    const b = bindStepMemory({
+      store: f.store, author: AUTHOR, taskId: 'task-1',
+      step: { id: 'implement', title: 'Refactor authentication middleware', instructions: 'do the thing', dependsOn: [] },
+      recallTimeoutMs: 50,
+    })
+    expect(await b.memory.recall(500)).toEqual({ claims: [], notes: [] })
+  })
+
+  it('claimsCiting is bounded the same way — a hang folds to nothing-at-risk', async () => {
+    const f = fakeStore()
+    f.store.searchClaims = () => new Promise(() => {})
+    const b = bindStepMemory({
+      store: f.store, author: AUTHOR, taskId: 'task-1',
+      step: { id: 'implement', title: 'Refactor authentication middleware', instructions: 'do the thing', dependsOn: [] },
+      recallTimeoutMs: 50,
+    })
+    expect(await b.memory.claimsCiting(['plugins/memory/src/cluster.ts'])).toEqual([])
+  })
 })
 
 describe('capture', () => {
