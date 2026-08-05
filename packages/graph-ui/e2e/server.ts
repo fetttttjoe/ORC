@@ -1,7 +1,7 @@
 // E2E fixture server (run by playwright's webServer): real Postgres test db, seeded state,
 // scripted copilot, kernel-backed newTask — everything else read-only-stubbed.
 import { MockLanguageModelV4 } from 'ai/test'
-import { EVENT_KIND, FAILURE_CLASS, STEP_ID, TASK_STATUS } from '@orc/contracts'
+import { AUTHOR_SOURCE, EVENT_KIND, FAILURE_CLASS, STEP_ID, TASK_STATUS } from '@orc/contracts'
 import { stepFixture } from '@orc/contracts/fixtures'
 import { draftFixture } from '@orc/contracts/fixtures'
 
@@ -152,7 +152,7 @@ const actions: OrcActions = {
   reply: async (taskId, text) => {
     await storage.events.append({
       ...gateEnvelope, taskId, kind: EVENT_KIND.feedback_provided,
-      payload: { topic: 'plan-gate', text, author: { source: 'cli' } },
+      payload: { topic: 'plan-gate', text, author: { source: AUTHOR_SOURCE.cli } },
     })
     await storage.events.append({
       ...gateEnvelope, taskId, kind: EVENT_KIND.tool_result,
@@ -169,11 +169,11 @@ const actions: OrcActions = {
   annotate: unsupported('annotate'),
   revise: unsupported('revise'),
   writeNote: async note => {
-    await storage.events.append({ taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_written, payload: { note, author: { source: 'cli' } } })
+    await storage.events.append({ taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_written, payload: { note, author: { source: AUTHOR_SOURCE.cli } } })
     return { id: note.id, scope: 'project' }
   },
   deleteNote: async (id, scope) => {
-    await storage.events.append({ taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_deleted, payload: { id, scope: scope ?? 'project', author: { source: 'cli' } } })
+    await storage.events.append({ taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_deleted, payload: { id, scope: scope ?? 'project', author: { source: AUTHOR_SOURCE.cli } } })
     return { id }
   },
   renameProject: unsupported('renameProject'),

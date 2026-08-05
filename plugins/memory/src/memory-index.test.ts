@@ -47,7 +47,10 @@ describe('renderMemoryIndex', () => {
     expect(md).toContain("Event 'envelope'") // quotes sanitized out of mermaid labels
     expect(md).toContain('Team server')
     expect(md).toContain('Why Postgres')
-    expect(md).toContain('_Not yet documented: Research._') // the one section with no notes
+    // the sections this fixture has no notes for — named in order, so a reader can tell an empty
+    // section from a missing one. Both are empty here because the fixture carries neither an
+    // outcome nor a research note.
+    expect(md).toContain('_Not yet documented: Task outcomes, Research._')
     expect(md).toBe(renderMemoryIndex(notes)) // deterministic
   })
 

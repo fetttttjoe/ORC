@@ -68,6 +68,78 @@ describe('shipped skills', () => {
   })
 })
 
+// The planner had no clarify phase and no way to record WHY a decomposition looked the way it did
+// past the owning task: a plan-note's `rationale` is task-bound, and archive.ts's taskSettled rule
+// retires it out of the retrieval surface the moment the task ends unless something links to it.
+// So every decision a plan committed to was readable only through `orc plan-notes <taskId>`, by
+// someone who already knew which task to open. This pins the two-phase protocol that fixes it —
+// ask once before authoring, propose the decisions inside the approval ask, write them on approve.
+// Pinned failing-first against the pre-edit SKILL.md, which had neither phase.
+describe('plan-authoring pins the ask-then-record-decisions protocol', () => {
+  const { body } = read('plan-authoring')
+
+  test('the clarify ask is batched into one call and skipped when nothing is ambiguous', () => {
+    expect(body).toContain('batch EVERY such question into ONE')
+    expect(body).toContain('ask nothing and author')
+  })
+
+  // The two-way gate this replaces ("answered in step 2, OR contradicts a recorded decision") had
+  // no path for a decision that is still mostly right but now partly wrong — the common case, and
+  // the one that silently accumulates contradictions when it has nowhere to go.
+  test('every candidate is classified against the existing set, and all-false writes nothing', () => {
+    expect(body).toContain('**collides**')
+    expect(body).toContain('**needs rewrite**')
+    expect(body).toContain('**new**')
+    expect(body).toContain('If all three are false, write nothing')
+  })
+
+  test('the scarcity rule survives the rewrite', () => {
+    expect(body).toContain('was not a decision, it was the obvious move')
+  })
+
+  // The decision set is read by `kind`, NOT by a tag. memory_search refuses a tag no note carries
+  // (tools.ts's unknownTagError), so a tag-keyed read reported "no decisions recorded yet" as a
+  // tool failure on every corpus until someone had already recorded one. A closed enum cannot
+  // fail that way — an empty result is a real answer.
+  test('the decision set is read by kind, not by tag', () => {
+    expect(body).toContain("`memory_search` with `kind: 'decision'`")
+    expect(body).not.toContain("tags: ['adr']")
+  })
+
+  test('the decisions ride the approval ask rather than a second gate', () => {
+    expect(body).toContain('SAME `ask_human` that asks for approval')
+    expect(body).toContain('a gate that asks twice gets skimmed')
+  })
+
+  test('the written decision is a pathless, project-scoped semantic note', () => {
+    expect(body).toContain("kind: 'decision'")
+    expect(body).toContain('No `paths`')
+  })
+
+  // One decision is one note, rewritten in place. A second note for the same subject leaves the
+  // next planner unable to tell which is current — and the agent cannot retire the loser, because
+  // `archived` is off the memory_write schema BY DESIGN (tools.ts:477: retiring knowledge is an
+  // operator decision from evidence, never something an agent mid-task does to a note it dislikes).
+  test('a changed decision rewrites the existing note by id rather than minting a second', () => {
+    expect(body).toContain('Re-`memory_write` that note under its OWN id')
+    expect(body).toContain('two notes that half-agree')
+  })
+
+  test('it links back to the reasoning and forward over what it replaces', () => {
+    // Both words already appear in the STRUCTURE RULES (subplans link derived_from the analysis
+    // notes; step 1 traverses supersedes), so a bare toContain on either passes against the
+    // pre-edit file and pins nothing. These two sentences exist only in the decision step.
+    // The inbound derived_from is also what keeps the plan-note out of archive.ts's taskSettled
+    // rule (inboundFrom protects), so the reasoning survives alongside the one-line decision.
+    expect(body).toContain('keeps that plan-note out of the archive')
+    expect(body).toContain('leaves two live notes disagreeing')
+  })
+
+  test('the write happens BEFORE finalize_plan', () => {
+    expect(body).toContain('FIRST write each confirmed decision, THEN call `finalize_plan()`')
+  })
+})
+
 // The scout skill used to ask_human on EVERY grounded request (even zero-drift, "the graph still
 // matches this tree") — three consecutive cheap, incremental scouts interrupted the operator when
 // nothing expensive was ever on the table. The door belongs on the one decision that IS expensive:

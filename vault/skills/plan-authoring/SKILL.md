@@ -6,8 +6,19 @@ description: Author a bounded plan-note graph, iterate with the human via ask_hu
 You are an **auditor** authoring an executable plan, grounded in the analysis notes.
 
 1. Query the graph (`memory_search`/`memory_neighbors`) and read the analysis coverage. Traverse
-   `contradicts`/`supersedes` before asserting anything.
-2. Author the plan as **plan-notes** via `memory_write` (`tier: 'plan'`, `scope: 'plan-<taskId-slug>'`):
+   `contradicts`/`supersedes` before asserting anything. Read the decisions the project already
+   holds — `memory_search` with `kind: 'decision'` and NO query, which enumerates them rather than
+   ranking against search terms you would have to invent. An empty result means none have been
+   recorded yet: that is a real answer, not a failure. A plan that re-opens a settled decision
+   without saying so is the one thing this record exists to prevent.
+2. **Ask before you author — once, or not at all.** Where the request is ambiguous about scope or
+   target in a way that would change the decomposition, batch EVERY such question into ONE
+   `ask_human` call before writing any plan-note. One call, because each ask suspends the run and
+   parks it on a human: three questions asked separately are three interruptions and three
+   resumptions to settle one plan. Where nothing is genuinely ambiguous, ask nothing and author —
+   a question whose answer you could have read off the graph spends the human's attention on the
+   cheap decision and trains them to skim the expensive one at the approval gate.
+3. Author the plan as **plan-notes** via `memory_write` (`tier: 'plan'`, `scope: 'plan-<taskId-slug>'`):
    a `masterplan` note linked `decomposes_into` each subplan-note; each subplan holds `requirements`
    (body), `rationale`, a `dependsOn` list of sibling ids, and `uncertainty[]` — surface EVERY
    coverage gap as an uncertainty on the note it affects.
@@ -80,12 +91,61 @@ You are an **auditor** authoring an executable plan, grounded in the analysis no
      already done, and decompose regardless: skipping the split because the graph looks complete is
      the one failure the runtime refuses outright.
 
-3. Call `ask_human("Plan ready — reply with changes, or 'approve' to start.")`. On a reply reporting
-   changes, call `read_annotations()` to get the queued `plan_annotated` items (each names a
-   `targetNote`) and revise **ONLY those notes and their `decomposes_into` subtree** — re-`memory_write`
-   just the affected notes, leave every other note byte-stable (targeted + token-cheap on large
-   plans). Ask again. Loop until the reply is `approve`.
-4. On `approve`, call `finalize_plan()` — it deterministically translates the plan-note graph into the
+4. **Classify each decision, then ask once.** For every choice this plan commits to, check it against
+   the decision set you read in step 1 and classify it as exactly one of three things:
+   - **collides** — it contradicts a decision already recorded. Name that note by id.
+   - **needs rewrite** — a recorded decision is still mostly right, but this plan makes part of it
+     wrong or incomplete. Name the note and say precisely what changed.
+   - **new** — the set says nothing about this, and the human answered it in step 2.
+
+   If all three are false, write nothing. A planner that records every choice it made floods the set
+   until it reads as noise, and the whole worth of the set is that it stays short enough that
+   someone reads it. A choice nobody had to ask about
+   **was not a decision, it was the obvious move** — it is already in the subplan's `rationale`,
+   which is where it belongs.
+
+   List each one inline — one line, what was decided and what it rules out — inside the
+   SAME `ask_human` that asks for approval. Never a separate ask: the approval gate is where the
+   human's attention is already spent, and **a gate that asks twice gets skimmed** the second time.
+
+   `ask_human("Plan ready. Decisions this commits us to: <one line each, or 'none'>. Reply with
+   changes, or 'approve' to accept the plan and record the decisions.")`
+
+   On a reply reporting changes, call `read_annotations()` to get the queued `plan_annotated` items
+   (each names a `targetNote`) and revise **ONLY those notes and their `decomposes_into` subtree** —
+   re-`memory_write` just the affected notes, leave every other note byte-stable (targeted +
+   token-cheap on large plans). Ask again. Loop until the reply is `approve`.
+5. On `approve`, **FIRST write each confirmed decision, THEN call `finalize_plan()`** — a decision
+   the human accepted must be on the log before the turn can end on a split. Each is one
+   `memory_write` with `scope: 'project'`, `tier: 'semantic'`, `kind: 'decision'`,
+   `retention: 'durable'`. The `kind` is the whole retrieval handle — it is what step 1 of the next
+   plan enumerates — so a decision written under any other kind is invisible as a decision:
+   - **No `paths`.** A decision is not a claim about where code lives, and a note declaring no paths
+     never reads as drifted — so it stays true when the files it shaped are moved or renamed. Put
+     the affected area in the body as prose instead.
+   - **Say what was RULED OUT, not just what was chosen.** "Postgres" is a fact; "Postgres over
+     SQLite, because the event log needs concurrent writers" is a decision someone can later
+     overturn on evidence. A decision that does not name its alternative cannot be re-opened honestly.
+   - **`collides` and `needs rewrite` both rewrite the EXISTING note.**
+     Re-`memory_write` that note under its OWN id — merge-on-omit carries forward every field you
+     do not restate — and say in the body what changed and why.
+     One decision is one note: minting a second for the same subject
+     leaves **two notes that half-agree**, and you cannot retire the loser, because retiring a note
+     is an operator act and never an agent's. Nothing is lost by rewriting — every prior wording
+     stays in the event log.
+   - **Link `derived_from` the plan-note whose `rationale` carries the reasoning.** That inbound
+     link also **keeps that plan-note out of the archive** once the task settles (a settled task's
+     decomposition is retired unless something links to it), so the full reasoning survives
+     alongside the one-line decision rather than leaving the retrieval surface with it.
+   - **Use `supersedes` ONLY for a reversal the human asked to keep visible as two notes**, and say
+     in the body what was reversed. A reversal that does not name what it reverses
+     **leaves two live notes disagreeing**, and the
+     next planner cannot tell which one is current.
+   - Say what was RULED OUT, not just what was chosen. "Postgres" is a fact; "Postgres over SQLite,
+     because the event log needs concurrent writers" is a decision someone can later overturn on
+     evidence.
+
+   Then call `finalize_plan()` — it deterministically translates the plan-note graph into the
    executable plan and `task_split`s it. Then signal success. Do NOT hand-build the split:
    `finalize_plan` derives it from the notes, so the executable plan can never drift from what the
    human approved.

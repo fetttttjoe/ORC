@@ -333,3 +333,92 @@ observed to fail.
 **Trigger:** two parallel subplans write the same note id in one run, or a
 scout re-derives a topic an existing note already covered (contamination-check
 style audit can detect both from the event log).
+
+---
+
+## 11. Human note authoring by kind, and delete/archive, in the web UI
+
+**Source:** ADR decision-records session, 2026-08-04.
+
+**What it is:** the web note form (`NewNoteForm.svelte`) takes a title and a
+body and nothing else, so every note it produces is `kind: 'fact'`. This is a
+kind selector, a `sources` field so `kind: 'research'` can validate, and
+per-note delete + archive in the inspector.
+
+**Why deferred:** the recording protocol came first. `orc memory add --kind`
+now covers the human door well enough to use, and a decision set nobody writes
+to does not need a second authoring surface yet.
+
+**Design fixes already known** (all verified against the tree on 2026-08-04, so
+the build starts from the corrected version):
+
+1. `NoteAuthoringDraft` must gain `kind` **and** `sources` together.
+   `MemoryNoteInput` refuses a semantic `research` note with no citations, so a
+   kind picker offered without a sources field ships a dropdown entry whose
+   every submission fails validation.
+2. `deleteNote` is already wired end to end — `OrcActions.deleteNote`, the
+   server route, and the web client method — with **zero call sites**. Only the
+   button is missing.
+3. Archive has no web path at all. It needs a new
+   `OrcActions.archiveNote(id, scope, archived)` over `store.setArchived`, plus
+   a route. `archived` is a PARAMETER, not two methods: `orc memory archive`
+   and `restore` are already one call with a flag.
+4. Three fixtures implement `OrcActions` exhaustively and will fail to compile
+   until updated (`ui-core/src/copilot.test.ts`, `cli/src/mcp-serve.test.ts`,
+   `graph-ui/e2e/server.ts`). That is the compile-time guard working, not
+   breakage.
+5. Copy the Select idiom from `NewRequestForm.svelte` — module-level `as const`
+   options, `<Select.Root type="single" bind:value>`, a `$derived` label lookup
+   (the trigger renders no value itself). The destructive-action pattern is
+   `ProjectMenu.svelte`'s DropdownMenu plus `ConfirmDialog`; there is no
+   per-node action menu anywhere in the app yet, so a note menu would be first.
+6. There is **no component test harness** — no testing-library, no jsdom. The
+   form is coverable by Playwright only. The e2e fixture already implements both
+   note handlers and no test has ever exercised them. Select options portal to
+   `page`, not to the dialog, so drive them with `page.getByRole('option', …)`.
+7. Two pre-existing defects to fix while in there: `NewNoteForm`'s `error` state
+   is set on failure but rendered nowhere (failures are visible only via the
+   global toast), and its `import * as Field` is unused. Separately,
+   `RequestTab.svelte`'s revise call bypasses the actions client, violating the
+   rule that file's own header states.
+8. `deleteNote`'s `scope` is required in the web client but optional in both
+   `NoteRef` and `OrcActions` — three spellings that disagree.
+
+**Trigger:** someone wants to correct a recorded decision and reaches for the
+browser instead of `orc memory add --kind`.
+
+---
+
+## 12. `author.source` cannot express "a human"
+
+**Source:** ADR decision-records session, 2026-08-04.
+
+**What it is:** `AuthorSource` is `agent | cli | mcp`. None of those means a
+person: `cli` means "came through a terminal", and a machine writer passing it
+is indistinguishable from someone typing. Task consolidation did exactly that
+until 2026-08-04, which is why every outcome note written before then still
+reads `createdBy: cli`. The fix is a source that names a human, the way
+`plan_approved.approvedBy` already carries `enum(['human','policy','mcp'])`
+"so replay shows exactly who approved".
+
+**Why deferred:** the corrosive half was the machine claiming `cli`, and that
+is fixed at the writer. What remains is a genuine widening of an enum every
+memory event carries, and nothing yet needs to PROVE a note was human-authored.
+
+**Design fixes already known:**
+
+1. `createdBy` is sticky across rewrites (`deriveNoteProvenance` carries the
+   first author forward), so no migration can retroactively correct existing
+   notes. Whatever ships is forward-only, and the honest framing is "notes
+   written before X cannot be attributed", not a backfill.
+2. `plan_approved.approvedBy` is the precedent to copy, not a new vocabulary —
+   and the operator-owned `groundedApprovalDoors` config is the precedent for
+   deciding which sources satisfy a human gate, deliberately a file edit rather
+   than anything a prompt can set.
+3. The enum now has one spelling (`AUTHOR_SOURCES`/`AUTHOR_SOURCE` in
+   `contracts/src/ids.ts`), so widening it is a single edit rather than the
+   two dozen scattered literals it used to be.
+
+**Trigger:** someone needs to prove a decision was human-authored rather than
+machine-written — an audit, a disputed decision, or a policy that only lets
+humans record certain kinds.

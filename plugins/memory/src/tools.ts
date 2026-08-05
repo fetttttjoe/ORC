@@ -1,5 +1,5 @@
 import { z } from 'zod'
-import { AccessVia, CLAIM_ID_RE, ClaimWrite, isRecord, DRIFT_STATE, EDGE_DIRECTIONS, inferTier, linkLookupScopes, MASTERPLAN_NOTE_ID, MemoryScope, MEMORY_ACCESS, MEMORY_ID_RE, MEMORY_LIMITS, MEMORY_SOURCE_LIMITS, MEMORY_TOOL_NAME, MemorySearchResult, MemoryWriteResult, NoteCategory, NOTE_CATEGORIES, NOTE_KINDS, LINK_KIND, LINK_KINDS, planFieldViolations, RETENTION_CLASSES, SEARCH_MODES, SearchMode, stepMayVerify, LinkKind, MemoryNoteDraftInput, NOTE_TIER, NOTE_TIERS, emptyUseStats, slugId, toolError, useLine, type MemoryAuthor, type MemoryNote, type MemoryStore, type ResolvedTool, type VerifiedStamp } from '@orc/contracts'
+import { AccessVia, AUTHOR_SOURCE, CLAIM_ID_RE, ClaimWrite, isRecord, DRIFT_STATE, EDGE_DIRECTIONS, inferTier, linkLookupScopes, MASTERPLAN_NOTE_ID, MemoryScope, MEMORY_ACCESS, MEMORY_ID_RE, MEMORY_LIMITS, MEMORY_SOURCE_LIMITS, MEMORY_TOOL_NAME, MemorySearchResult, MemoryWriteResult, NoteCategory, NOTE_CATEGORIES, NoteKind, NOTE_KINDS, LINK_KIND, LINK_KINDS, planFieldViolations, RETENTION_CLASSES, SEARCH_MODES, SearchMode, stepMayVerify, LinkKind, MemoryNoteDraftInput, NOTE_TIER, NOTE_TIERS, emptyUseStats, slugId, toolError, useLine, type MemoryAuthor, type MemoryNote, type MemoryStore, type ResolvedTool, type VerifiedStamp } from '@orc/contracts'
 import { applyBudget, fitMemoryNoteToBudget } from './budget'
 import { noteDriftState, type ChangedSince } from './drift'
 import { NEAR_SUBJECT, trigramDice } from './title-similarity'
@@ -192,6 +192,13 @@ const absenceNote = (what: string): string => `no ${what} matched — absence is
 const unknownCategoryError = (value: string): string =>
   `unknown category '${value}' — valid categories: ${NOTE_CATEGORIES.join(', ')}`
 
+// kind is closed like category, so the same boundary refusal applies — but ONLY to a value outside
+// the enum. A real kind no note carries is NOT an error: it is an empty corpus, which is the first
+// thing anyone reading a whole class of knowledge ('which decisions exist?') will meet.
+// 'adr' is the near-miss this exists to name: it is a tag, never a kind.
+const unknownKindError = (value: string): string =>
+  `unknown kind '${value}' — valid kinds: ${NOTE_KINDS.join(', ')}`
+
 // tag has NO fixed vocabulary — unlike category, inventing one would be a guess, so the known set
 // is derived from the corpus itself, at request time, client-side: same small-corpus approach
 // drift.ts's notesCitingPaths uses (pull the scope's notes, derive the answer in memory) rather
@@ -246,8 +253,13 @@ const DetailLevel = z.enum(['minimal', 'standard']).default('standard')
 // this schema; `limit` is bounded on the same principle, though after the claim arm's cost function
 // was fixed it is applyBudget that actually holds the line.
 const Budget = z.number().int().positive().max(MEMORY_LIMITS.budgetTokens).default(1500)
+// `query` is OPTIONAL so a filter alone can ENUMERATE. Ranking needs something to rank against;
+// "which decisions does this project hold" has no such thing, and forcing a query there made the
+// caller invent search terms and hope they matched every member of the set. A query-less call is
+// routed to list() below, not to search().
 const SearchInput = z.object({
-  query: z.string(), category: z.string().optional(), tag: z.string().optional(),
+  query: z.string().optional(), category: z.string().optional(), tag: z.string().optional(),
+  kind: z.string().optional(),
   detail_level: DetailLevel,
   limit: z.number().int().positive().max(MEMORY_LIMITS.detailItems).optional(), budget: Budget,
   mode: SearchMode.optional(),
@@ -489,7 +501,7 @@ void writeSchemaCoversInput
 export function unavailableMemoryTools(reason: string): ResolvedTool[] {
   const fail = async (): Promise<never> => { throw new Error(`memory unavailable: ${reason}`) }
   const store: MemoryStore = { write: fail, remove: fail, setArchived: fail, setArchivedAll: fail, get: fail, useStats: fail, recordOutcomes: fail, list: fail, search: fail, searchClaims: fail, claimsFor: fail, neighbors: fail, recordAccess: fail, topics: fail, topicClaims: fail, verify: fail }
-  return memoryTools({ store, author: { source: 'agent' } })
+  return memoryTools({ store, author: { source: AUTHOR_SOURCE.agent } })
 }
 
 // ─── memory_verify: the ONLY writer of the verification stamp ─────────────────────────────────
@@ -761,11 +773,15 @@ export function memoryTools(opts: {
       ref: 'memory/search', name: MEMORY_TOOL_NAME.search,
       description: withRole('Search project knowledge by meaning and keyword (hybrid). Returns matched CLAIMS — individual statements, each with the note that asserts it — plus note summaries for notes that match without asserting a claim. Read the full note with memory_read. Any ids listed in `drifted` describe code that has CHANGED since the note was written — memory_read and correct them (write the same id) before you rely on them. Every other id here was CHECKED against the working tree and is current: its declared paths have not moved since it was stamped, so trust it and do not re-read those files to confirm what it already says — read them only for detail the note does not carry.', role),
       inputSchema: {
-        type: 'object', required: ['query'],
+        type: 'object',
         properties: {
-          query: { type: 'string' },
+          query: { type: 'string', description: 'what to search for. OMIT it to enumerate instead — with a filter and no query you get every note the filter matches, unranked, which is how you read a whole class of knowledge (e.g. every decision). A call with neither a query nor a filter is refused.' },
           category: { type: 'string', enum: [...NOTE_CATEGORIES] },
           tag: { type: 'string', description: 'a tag an existing note already carries — an unknown one is refused, naming what the corpus does carry' },
+          kind: {
+            type: 'string', enum: [...NOTE_KINDS],
+            description: "only notes of this kind. Unlike `tag`, a kind nothing currently carries returns EMPTY rather than refusing — NOTE_KINDS is a closed set, so 'none recorded yet' is a real answer. Combine with no `query` to enumerate, e.g. {kind: 'decision'} for every decision this project has recorded.",
+          },
           detail_level: detailLevelSchema, limit: { type: 'integer', minimum: 1, maximum: MEMORY_LIMITS.detailItems }, budget: budgetSchema,
           mode: { type: 'string', enum: [...SEARCH_MODES], description: 'keyword | semantic | hybrid (default hybrid; falls back to keyword when no embedder is configured)' },
         },
@@ -783,16 +799,38 @@ export function memoryTools(opts: {
             const known = await knownTags(store, searchScope)
             if (!known.has(q.tag)) return { output: { error: unknownTagError(q.tag, known) }, isError: true }
           }
+          // kind validates like category (closed enum, refuse an unknown) and NOT like tag (which
+          // also refuses a value no note carries). The difference is the whole point: a planner
+          // asking for decisions on a corpus that has none must get an empty answer, not an error.
+          if (q.kind !== undefined && !NoteKind.safeParse(q.kind).success)
+            return { output: { error: unknownKindError(q.kind) }, isError: true }
+          // Neither a query nor a filter is "return the whole corpus" — a dropped argument rather
+          // than an intent, and one no budget can honour. Refused with the two ways forward.
+          const filtering = q.category !== undefined || q.tag !== undefined || q.kind !== undefined
+          if (q.query === undefined && !filtering)
+            return { output: { error: 'memory_search needs a `query`, or a filter (kind/category/tag) to enumerate — a call with neither would return the whole corpus' }, isError: true }
           const limit = q.limit ?? (q.detail_level === 'minimal' ? 5 : 20)
-          const filter = { category: q.category, tag: q.tag, ...(searchScope && { scope: [...searchScope] }) }
-          // Claims FIRST — a matched statement is the answer, where a note summary is a pointer to
-          // one. Notes still come back: a note asserting no claims (every episodic note, and any
-          // semantic note not yet restated as claims) would otherwise vanish from search entirely.
-          // Both arms share the ONE budget, claims taking theirs first, so the reply cannot double.
-          const [claimHits, noteHits] = await Promise.all([
-            store.searchClaims(q.query, filter, { mode: q.mode, limit }),
-            store.search(q.query, filter, { mode: q.mode }),
-          ])
+          const filter = {
+            category: q.category, tag: q.tag,
+            ...(q.kind !== undefined && { kind: NoteKind.parse(q.kind) }),
+            ...(searchScope && { scope: [...searchScope] }),
+          }
+          // ENUMERATE vs SEARCH. With no query there is nothing to rank against: the semantic arm
+          // would score the whole table against an empty string and the keyword arm would tokenize
+          // to nothing, so both return a ranking that means nothing. list() is the read that
+          // already means "every note matching this filter", and it applies the same matchesRow.
+          // The claims arm is skipped entirely for the same reason — a claim search with no query
+          // has nothing to match, and returning every claim in the corpus is not what was asked.
+          const [claimHits, noteHits] = q.query === undefined
+            ? [[], await store.list(filter)]
+            // Claims FIRST — a matched statement is the answer, where a note summary is a pointer to
+            // one. Notes still come back: a note asserting no claims (every episodic note, and any
+            // semantic note not yet restated as claims) would otherwise vanish from search entirely.
+            // Both arms share the ONE budget, claims taking theirs first, so the reply cannot double.
+            : await Promise.all([
+              store.searchClaims(q.query, filter, { mode: q.mode, limit }),
+              store.search(q.query, filter, { mode: q.mode }),
+            ])
           const c = applyBudget(claimHits, serialized, { limit, budget: q.budget })
           const r = applyBudget(noteHits, serialized, { limit, budget: Math.max(0, q.budget - c.used) })
           const empty = c.items.length === 0 && r.items.length === 0

@@ -16,7 +16,7 @@ import { z } from 'zod'
 import { Server } from '@modelcontextprotocol/sdk/server/index.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js'
-import { errorMessage, toolError, type ResolvedTool, type SupervisorHealth } from '@orc/contracts'
+import { AUTHOR_SOURCE, errorMessage, toolError, type ResolvedTool, type SupervisorHealth } from '@orc/contracts'
 import type { EventLog, ProjectConfig } from '@orc/kernel'
 import { MEMORY_READ_TOOLS, MEMORY_ROLE, createDriftProbe, createMemory, memoryTools as buildMemoryTools, probeMemory, unavailableMemoryTools } from '@orc/memory'
 import { openMemory } from './memory-open'
@@ -122,7 +122,7 @@ export async function startMcpServe(opts: {
     // first live probe of memory_recheck). One probe per process; it caches per revision.
     memoryTools = buildMemoryTools({
       store: memory.store,
-      author: { source: 'agent', executor: 'mcp-serve' },
+      author: { source: AUTHOR_SOURCE.agent, executor: 'mcp-serve' },
       role: MEMORY_ROLE.verify,
       changedSince: createDriftProbe(config.dir),
     })

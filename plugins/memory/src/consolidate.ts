@@ -1,5 +1,5 @@
 import { z } from 'zod'
-import { EVENT_KIND, FS_WRITE_TOOL_NAME, LINK_KIND, MemoryAccessedPayload, MemoryScope, NOTE_KIND, NOTE_TIER, PAYLOAD_SCHEMAS, RETENTION, STEP_ID, TASK_STATUS, planScope, slugId, type MemoryNote, type MemoryNoteDraft, type MemoryStore } from '@orc/contracts'
+import { AUTHOR_SOURCE, EVENT_KIND, FS_WRITE_TOOL_NAME, LINK_KIND, MemoryAccessedPayload, MemoryScope, NOTE_KIND, NOTE_TIER, PAYLOAD_SCHEMAS, RETENTION, STEP_ID, TASK_STATUS, planScope, slugId, type MemoryNote, type MemoryNoteDraft, type MemoryStore } from '@orc/contracts'
 import type { EventLog } from '@orc/kernel'
 
 // One transient step outcome — the (title, summary) of a plan-scoped ambient note a task left behind.
@@ -78,7 +78,9 @@ export function consolidatedNote(input: ConsolidationInput, distilled?: Distille
     // promotion is the whole point: an episodic per-task trail becomes ONE semantic project claim
     tier: NOTE_TIER.semantic,
     scope: MemoryScope.project,
-    kind: NOTE_KIND.decision,
+    // OUTCOME, not decision: this records what a task did, which is a different question from what
+    // the project chose — see the NOTE_KINDS comment for the 42-notes measurement that separated them.
+    kind: NOTE_KIND.outcome,
     title: (distilled?.title ?? `Outcome: ${input.taskTitle}`).slice(0, 200),
     summary: (distilled?.summary ?? withSummary[0]?.summary ?? input.taskTitle).slice(0, 500),
     body,
@@ -222,7 +224,13 @@ export async function consolidateTask(
     // taskId for a single-area note, taskId+area for the split — so a redelivered completion
     // converges on the same events instead of appending duplicates.
     const writeOpts = opts.force ? {} : { idempotencyKey: `consolidate:${taskId}:${draft.id}` }
-    written.push(await deps.store.write(draft, { source: 'cli' }, writeOpts))
+    // NOT `{source:'cli'}`. 'cli' means a human at a terminal — it is what every packages/cli
+    // memory command passes — and claiming it made every outcome note in the vault read
+    // `createdBy: cli`, indistinguishable from a note somebody actually typed. Naming the writer
+    // through `executor` is the shape mcp-serve.ts already uses for its own door, and composeAuthor
+    // renders it as 'consolidate'. Note this only fixes attribution GOING FORWARD: createdBy is
+    // sticky across rewrites (deriveNoteProvenance), so notes written before this keep saying 'cli'.
+    written.push(await deps.store.write(draft, { source: AUTHOR_SOURCE.agent, executor: 'consolidate' }, writeOpts))
   }
   return written
 }

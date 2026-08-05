@@ -1,4 +1,4 @@
-import { AUTO_HEAL_MODE, errorMessage, HOOK_NAME, NOTE_TIER, TERMINAL_TASK_STATUS, type AgentExecutor, type Analyzer, type MemoryAuthor, type ModelProvider } from '@orc/contracts'
+import { AUTHOR_SOURCE, AUTO_HEAL_MODE, errorMessage, HOOK_NAME, NOTE_TIER, TERMINAL_TASK_STATUS, type AgentExecutor, type Analyzer, type MemoryAuthor, type ModelProvider } from '@orc/contracts'
 import { apiLoopExecutor } from '@orc/executor-api-loop'
 import { createAnthropicProvider } from '@orc/provider-anthropic'
 import { createOpenAIProvider } from '@orc/provider-openai'
@@ -154,7 +154,7 @@ export async function buildRuntime(
     ...(autoHeal && { onCommitRecorded: async () => { autoHeal.onCommitRecorded() } }),
     skills: host.skills, tools: hub, groundingSource,
     stepTools: p => {
-      const author: MemoryAuthor = { source: 'agent', taskId: p.taskId, stepId: p.stepId, runToken: p.runToken, executor: p.executor, model: p.model, role: p.role }
+      const author: MemoryAuthor = { source: AUTHOR_SOURCE.agent, taskId: p.taskId, stepId: p.stepId, runToken: p.runToken, executor: p.executor, model: p.model, role: p.role }
       // step role keys the memory role (Task 7): scout/auditor narrow or widen the tool surface
       // + epistemic posture; every other role (e.g. plain worker steps) gets today's verify role.
       const bound = bindStep({

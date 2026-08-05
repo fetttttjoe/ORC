@@ -92,7 +92,14 @@ export const RETENTION = Retention.enum
 // `research` is a distilled web finding — it is the one kind that MUST carry a citation.
 // A kind classifies a CLAIM, so it belongs to the semantic tier alone: 'plan' is not a kind of
 // claim, it is a different memory system, and it lives in NOTE_TIERS below.
-export const NOTE_KINDS = ['fact', 'decision', 'architecture_current', 'architecture_target', 'documentation', 'research'] as const
+// `outcome` vs `decision` is the one distinction here that was learned the hard way. A
+// consolidation — what one task DID — used to be written as a decision, and on the live vault that
+// meant all 42 notes carrying `decision` were outcome-<uuid> consolidations and not one was an
+// architectural choice. So "which decisions has this project made" was unanswerable: the kind that
+// should have named a short, human-approved set instead named the highest-volume machine output in
+// the system. They also have different lifetimes — an outcome is true forever about a run that is
+// over, while a decision stays live until something overturns it.
+export const NOTE_KINDS = ['fact', 'decision', 'outcome', 'architecture_current', 'architecture_target', 'documentation', 'research'] as const
 export const NoteKind = z.enum(NOTE_KINDS)
 export type NoteKind = z.infer<typeof NoteKind>
 export const NOTE_KIND = NoteKind.enum
@@ -412,6 +419,11 @@ export type MemoryNoteDraft = Omit<z.input<typeof MemoryNoteDraftInput>, 'title'
 // uncertainty, zone, sourceRevision) stay with the agent tools and CLI flags that own them, and
 // widen later only WITH a consumer. Human authoring always targets the durable project scope —
 // the callee fixes it; an attacker-supplied `scope` key is stripped by the schema parse.
+//
+// `kind` is the next one to widen, but it must arrive WITH `sources`, not before: MemoryNoteInput
+// refuses a semantic `research` note carrying no citations, so a kind picker offered without a
+// sources field ships a choice whose every submission fails validation. `orc memory add --kind`
+// is the door that exists today. See docs/IDEAS.md on human note authoring.
 export const NoteAuthoringDraft = MemoryNoteDraftInput.pick({
   id: true, title: true, summary: true, body: true, tags: true, links: true,
 })
@@ -613,7 +625,12 @@ export interface MemorySearchOpts { mode?: SearchMode; halfLifeDays?: number }
 // plus its own plan scope — contracts linkLookupScopes). It must reach the QUERY, never a post-filter:
 // the semantic arm ranks over the whole table and truncates, so filtering afterwards lets one busy
 // project's plan notes occupy every slot and starve the knowledge the filter was asking for.
-export interface MemoryFilter { scope?: string | string[]; category?: string; tag?: string; tier?: NoteTier }
+// `kind` is the retrieval handle for a CLASS of knowledge — "which decisions does this project
+// hold" was previously answerable only by tag, and a tag is refused when no note carries it yet
+// (tools.ts's unknownTagError), so the question read as a tool failure on every corpus until
+// someone had already answered it once. A closed enum cannot fail that way: an empty result is a
+// real answer. Semantic-tier only, like the field itself.
+export interface MemoryFilter { scope?: string | string[]; category?: string; tag?: string; tier?: NoteTier; kind?: NoteKind }
 
 // The single-writer gateway (the wrapper). write/remove append events; reads hit SurrealDB.
 // write takes the raw draft — the gateway parses (defaults + validation), callers never cast.

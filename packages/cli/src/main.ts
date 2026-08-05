@@ -3,7 +3,7 @@ import { spawn } from 'node:child_process'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { Command, InvalidArgumentError } from 'commander'
-import { SUPERVISOR_HEALTH, claimHistory, EDGE_DIRECTION, errorMessage, EVENT_KIND, foldMemory, LINK_KINDS, MASTERPLAN_NOTE_ID, MEMORY_ACCESS, MemoryDeletedPayload, MemoryScope, MemoryWrittenPayload, noteKey, NOTE_TIER, NOTE_TIERS, NoteTier, parseLinkSpec, PlanDraft, ROLE_SKILL, RUN_OUTCOME, STRATEGY, TASK_STATUS, TERMINAL_TASK_STATUS, LinkKind, slugId, type Analyzer, type EventRecord, type MemoryLink, type NoteFields, type ExecutionPort, type MemoryHealth, type Plan, formatModelRate } from '@orc/contracts'
+import { AUTHOR_SOURCE, SUPERVISOR_HEALTH, claimHistory, EDGE_DIRECTION, errorMessage, EVENT_KIND, foldMemory, LINK_KINDS, MASTERPLAN_NOTE_ID, MEMORY_ACCESS, MemoryDeletedPayload, MemoryScope, MemoryWrittenPayload, noteKey, NOTE_KINDS, NoteKind, NOTE_TIER, NOTE_TIERS, NoteTier, parseLinkSpec, PlanDraft, ROLE_SKILL, RUN_OUTCOME, STRATEGY, TASK_STATUS, TERMINAL_TASK_STATUS, LinkKind, slugId, type Analyzer, type EventRecord, type MemoryLink, type NoteFields, type ExecutionPort, type MemoryHealth, type Plan, formatModelRate } from '@orc/contracts'
 import { openStorage, Kernel, atomicWriteFileSync, listProjectIds, claimSlot, fold, gatedChildren, freezePlan, liveSupervisors, staleSupervisors, grantExtensionTrust, grantMcpTrust, initializeProject, isExtensionTrusted, isMcpTrusted, loadConfig, loadTrust, migrateDatabase, requireProject, runtimeLockHeld, stepUsage, subtreeUsage, taskUsage, type EventLog, type OrcConfig, type PluginHost, type ProjectConfig, type Storage } from '@orc/kernel'
 import { createVaultProjector, parsePlanFile } from '@orc/vault-projector'
 import { archiveCandidates, consolidateTask, createDriftProbe, frontier, needsReground, probeMemory, RECHECK_KINDS, recheckNotes, restampToHead, summarize } from '@orc/memory'
@@ -145,13 +145,26 @@ function parsePositiveNumber(value: string): number {
   return parsed
 }
 
-// Same discipline as `neighbors --kinds`: reject an unknown lane at parse time with the valid set,
-// rather than letting a typo silently filter everything out and read as "this lane is empty".
-function parseNoteTier(value: string): NoteTier {
-  const parsed = NoteTier.safeParse(value)
-  if (!parsed.success) throw new InvalidArgumentError(`unknown tier '${value}' — valid tiers: ${NOTE_TIERS.join(', ')}`)
-  return parsed.data
+// ONE spelling of "reject a value outside a closed vocabulary, naming the set" — the alternative is
+// a typo silently filtering everything out and reading as "this lane is empty". Three call sites had
+// grown their own version of it (the tier lane, `neighbors --kinds`, and now `memory add --kind`),
+// each with a different error shape for the identical mistake, and the --kinds one additionally
+// re-parsed the value through zod afterwards purely to avoid a cast.
+// `.find` returns the MEMBER type, so this needs neither a cast nor a second parse.
+function enumArg<T extends string>(label: string, valid: readonly T[]): (value: string) => T {
+  return (value: string): T => {
+    const hit = valid.find(v => v === value)
+    if (hit === undefined)
+      throw new InvalidArgumentError(`unknown ${label} '${value}' — valid: ${valid.join(', ')}`)
+    return hit
+  }
 }
+
+const parseNoteTier = enumArg<NoteTier>('tier', NOTE_TIERS)
+// Without this a human could not record a DECISION at any door: `memory add` had no kind flag, so
+// every note either human door produced defaulted to 'fact' and only an agent mid-step could mint
+// a decision. 'adr' is the near-miss it catches — that is a tag, never a kind.
+const parseNoteKind = enumArg<NoteKind>('kind', NOTE_KINDS)
 
 // neighbors --depth must be >= 1: the store default is 2 and rankNeighbors requires a positive
 // hop count (depth 0 traverses nothing and silently returns []), so reject it at parse time with
@@ -952,6 +965,10 @@ export function buildProgram(
     .option('--body <b>', 'note body (markdown)')
     .option('--tags <tags...>', 'tags')
     .option('--categories <categories...>', 'categories')
+    // The human door for a DECISION. Omitted keeps the schema default ('fact') on a new note and,
+    // under merge-on-omit, the stored kind on an update — so adding a link to an existing decision
+    // does not silently demote it to a fact.
+    .option('--kind <k>', `what kind of knowledge: ${NOTE_KINDS.join(' | ')}`, parseNoteKind)
     // Without this the CLI could create knowledge but never wire it in, so every human-authored
     // note landed isolated — reachable by search, invisible to traversal. Same shorthand the web
     // note editor uses, so a note wired from either surface is the same edge.
@@ -962,7 +979,7 @@ export function buildProgram(
     // array, because supplying the array would REPLACE under the store's merge-on-omit rule.
     .option('--claim <text...>', 'state a claim on this note (addClaims) — repeatable')
     .option('--invalidate <claimId...>', 'retire a claim by its 12-hex id (invalidates) — repeatable')
-    .action(async (o: { id: string; title?: string; summary?: string; body?: string; tags?: string[]; categories?: string[]; links?: MemoryLink[]; claim?: string[]; invalidate?: string[] }) => {
+    .action(async (o: { id: string; title?: string; summary?: string; body?: string; tags?: string[]; categories?: string[]; kind?: NoteKind; links?: MemoryLink[]; claim?: string[]; invalidate?: string[] }) => {
       const { config, log } = needPlugin()
       await withMemory({ log, config }, async memory => {
         // the tool boundary's own refusal, at this door too: a NEW note without a title fails the
@@ -977,8 +994,11 @@ export function buildProgram(
         await memory.store.write({
           id: o.id, title: o.title, summary: o.summary, body: o.body,
           tags: o.tags, categories: o.categories, links: o.links,
+          // conditional spread, not a bare `kind: o.kind`: an optional field set to undefined
+          // ERASES the stored column, so an unflagged update would wipe the note's kind
+          ...(o.kind !== undefined && { kind: o.kind }),
           ...(o.claim !== undefined && { addClaims: o.claim }),
-        }, { source: 'cli' }, { ...(o.invalidate !== undefined && { invalidates: o.invalidate }) })
+        }, { source: AUTHOR_SOURCE.cli }, { ...(o.invalidate !== undefined && { invalidates: o.invalidate }) })
         await memory.projector.catchUp() // one-shot: no live subscription in a CLI process, so project the append now
       })
       console.log(`wrote memory '${o.id}'`)
@@ -1050,7 +1070,7 @@ export function buildProgram(
           const n = byKey.get(c.key)
           return n ? [{ id: n.id, scope: n.scope }] : []
         })
-        await memory.store.setArchivedAll(retiring, true, { source: 'cli' })
+        await memory.store.setArchivedAll(retiring, true, { source: AUTHOR_SOURCE.cli })
         await memory.projector.catchUp()
       })
       console.log(`archived ${goes.length} note(s) — restore any with: orc memory restore <id> --scope <scope>`)
@@ -1065,7 +1085,7 @@ export function buildProgram(
       // provenance was damaged (an old archive/restore that overwrote its author before that was
       // fixed) has no evidence left to retire it by, and without this it could never be retired.
       await withMemory({ log, config }, async memory => {
-        await memory.store.setArchived(id, o.scope ?? 'project', true, { source: 'cli' })
+        await memory.store.setArchived(id, o.scope ?? 'project', true, { source: AUTHOR_SOURCE.cli })
         await memory.projector.catchUp()
       })
       console.log(`archived '${id}' — restore with: orc memory restore ${id} --scope ${o.scope ?? 'project'}`)
@@ -1077,7 +1097,7 @@ export function buildProgram(
     .action(async (id: string, o: { scope?: string }) => {
       const { config, log } = needPlugin()
       await withMemory({ log, config }, async memory => {
-        await memory.store.setArchived(id, o.scope ?? 'project', false, { source: 'cli' })
+        await memory.store.setArchived(id, o.scope ?? 'project', false, { source: AUTHOR_SOURCE.cli })
         await memory.projector.catchUp()
       })
       console.log(`restored '${id}'`)
@@ -1160,7 +1180,7 @@ export function buildProgram(
         // a human read counts the same as an agent read — but only on a hit, and only after the
         // note was actually produced (same rule the memory_read tool follows). No catchUp: the
         // append is durable, and every read path already drains before it reads.
-        if (note) await memory.store.recordAccess(id, o.scope, MEMORY_ACCESS.read, { source: 'cli' })
+        if (note) await memory.store.recordAccess(id, o.scope, MEMORY_ACCESS.read, { source: AUTHOR_SOURCE.cli })
         return note
       })
       if (!n) throw new Error(`no note '${id}'`)
@@ -1245,7 +1265,7 @@ export function buildProgram(
         // by the CLI's error path, not caught here. It also appends memory_topic_accessed exactly
         // once, so the --json branch reads THROUGH it rather than around it: the access event is
         // recorded whether the caller wants JSON or human rows.
-        const claims = await memory.store.topicClaims(topicKey, { source: 'cli' })
+        const claims = await memory.store.topicClaims(topicKey, { source: AUTHOR_SOURCE.cli })
         // --json: raw Claim[] and stop, no human rows (stdout stays one parseable JSON value).
         if (o.json) { console.log(JSON.stringify(claims, null, 2)); return }
         for (const c of claims)
@@ -1259,20 +1279,17 @@ export function buildProgram(
     .option('--depth <n>', 'max hops (default 2)', parsePositiveInteger)
     .option('--scope <s>', 'scope')
     .action(async (id: string, o: { kinds?: string[]; depth?: number; scope?: string }) => {
-      // validate --kinds against the known link kinds the way `new --strategy` does — a friendly
-      // error beats the store silently ignoring an unknown kind (which reads as "no neighbors").
-      if (o.kinds) for (const k of o.kinds)
-        if (!(LINK_KINDS as readonly string[]).includes(k))
-          throw new Error(`unknown --kinds '${k}' — valid kinds: ${LINK_KINDS.join(', ')}`)
-      // parse at the boundary, never cast — the loop above guarantees this cannot throw
-      const kinds = o.kinds?.map(k => LinkKind.parse(k))
+      // One pass through the shared enumArg: validates AND narrows, where this used to check in a
+      // loop and then re-parse through zod to get the type without a cast. A friendly error beats
+      // the store silently ignoring an unknown kind, which reads as "no neighbors".
+      const kinds = o.kinds?.map(k => enumArg<LinkKind>('--kinds', LINK_KINDS)(k))
       const { config, log } = needPlugin()
       await withMemory({ log, config }, async memory => {
         await memory.projector.catchUp()
         const ranked = await memory.store.neighbors(id, { kinds, depth: o.depth, scope: o.scope })
         // mirror the memory_neighbors MCP tool: one access against the SEED, only on a hit —
         // the neighbours are summaries the caller may never read.
-        if (ranked.length > 0) await memory.store.recordAccess(id, o.scope, MEMORY_ACCESS.neighbors, { source: 'cli' })
+        if (ranked.length > 0) await memory.store.recordAccess(id, o.scope, MEMORY_ACCESS.neighbors, { source: AUTHOR_SOURCE.cli })
         // empty prints a sentinel (like ls/search's `_no notes_`) so a human isn't shown zero bytes.
         if (ranked.length === 0) { console.log('_no neighbors_'); return }
         // direction disambiguates asymmetric kinds: '→ supersedes' = seed supersedes n; '← supersedes' = n supersedes seed
@@ -1333,7 +1350,7 @@ export function buildProgram(
       const { config, log } = needPlugin()
       await withMemory({ log, config }, async memory => {
         const id = slugId(title)
-        await memory.store.write({ id, title, summary: o.summary, body: o.body, tags: o.tags }, { source: 'cli' })
+        await memory.store.write({ id, title, summary: o.summary, body: o.body, tags: o.tags }, { source: AUTHOR_SOURCE.cli })
         await memory.projector.catchUp() // one-shot CLI process: project the append now
         console.log(`noted '${id}' — read it back: orc memory cat ${id}`)
       })

@@ -1,4 +1,4 @@
-import { EVENT_KIND, NOTE_TIER, PAYLOAD_SCHEMAS, TASK_STATUS, errorMessage, planScope, type EventRecord } from '@orc/contracts'
+import { AUTHOR_SOURCE, EVENT_KIND, NOTE_TIER, PAYLOAD_SCHEMAS, TASK_STATUS, errorMessage, planScope, type EventRecord } from '@orc/contracts'
 import { consolidateTask, type ConsolidationDeps } from './consolidate'
 
 // The memory-lifecycle seam — a subscriber PEER to the projector that runs out-of-band, post-task
@@ -69,7 +69,7 @@ async function retireStepTrail(deps: LifecycleDeps, taskId: string): Promise<voi
   const spent = (await deps.store.list({ scope })).filter(n => n.tier === NOTE_TIER.episodic)
   if (spent.length === 0) return
   // one pass over the log for the whole trail, not one per note
-  await deps.store.setArchivedAll(spent.map(n => ({ id: n.id, scope: n.scope })), true, { source: 'cli' })
+  await deps.store.setArchivedAll(spent.map(n => ({ id: n.id, scope: n.scope })), true, { source: AUTHOR_SOURCE.cli })
 }
 
 // Every task the log says is finished, newest status wins — a pure fold, so "which tasks are done"

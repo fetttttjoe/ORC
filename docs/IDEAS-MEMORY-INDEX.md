@@ -6,7 +6,7 @@ This file links to the memory-indexed version of all deferred ideas, decisions, 
 
 - **Master Index** → Search: `ideas-index` in memory
 - **All Ideas** → Search: `idea-` prefix in memory
-- **By Domain** → Filter memory notes by tag: `idea-neuron-memory-lifecycle`, `idea-mcp-grants`, `idea-scheduled-maintenance`, `idea-index-performance`, `idea-buildruntime-leak`, `idea-retention-field`, `idea-test-pool-leak`, `idea-code-review-graph-techniques`, `idea-rule-notes`, `idea-knowledge-zones`
+- **By Domain** → Filter memory notes by tag: `idea-neuron-memory-lifecycle`, `idea-mcp-grants`, `idea-scheduled-maintenance`, `idea-index-performance`, `idea-buildruntime-leak`, `idea-retention-field`, `idea-test-pool-leak`, `idea-code-review-graph-techniques`, `idea-rule-notes`, `idea-knowledge-zones`, `idea-human-note-authoring`, `idea-human-attribution`
 
 ## Ideas Catalog (Memory Nodes)
 
@@ -70,6 +70,27 @@ This file links to the memory-indexed version of all deferred ideas, decisions, 
       only — reads stay global
     - **Trigger:** two parallel subplans write the same note id in one run, or a scout re-derives a
       topic an existing note already covers
+
+11. **idea-human-note-authoring** — Human note authoring by kind, and delete/archive, in the web UI
+    - **Domain:** memory, web-ui, knowledge-authoring
+    - **Status:** proposed, deferred behind the CLI door (`orc memory add --kind` ships today)
+    - **Effort:** medium (contract widening + Select/menu wiring + Playwright coverage; no component
+      test harness exists, so e2e is the only route)
+    - **Key insight:** `kind` and `sources` must widen TOGETHER — a `research` note with no
+      citations is refused, so a kind picker without a sources field ships a failing choice.
+      `deleteNote` is already wired end to end with zero call sites; archive has no web path at all
+    - **Trigger:** someone wants to correct a recorded decision and reaches for the browser instead
+      of the CLI
+
+12. **idea-human-attribution** — `author.source` cannot express "a human"
+    - **Domain:** memory, provenance, audit
+    - **Status:** proposed, corrosive half already fixed at the writer
+    - **Effort:** low (one enum, now single-spelled as `AUTHOR_SOURCE` in contracts)
+    - **Key insight:** `cli` means "came through a terminal", never "a person" — and `createdBy` is
+      sticky across rewrites, so any fix is forward-only and cannot backfill existing notes.
+      `plan_approved.approvedBy` is the precedent to copy
+    - **Trigger:** someone needs to PROVE a decision was human-authored — an audit, a disputed
+      decision, or a policy that only lets humans record certain kinds
 
 ### Completed Ideas (Shipped/Fixed)
 

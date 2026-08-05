@@ -16,6 +16,11 @@ export const SECTIONS: { title: string; kinds: NoteKind[] }[] = [
   { title: 'Current architecture', kinds: [NOTE_KIND.architecture_current] },
   { title: 'Target architecture', kinds: [NOTE_KIND.architecture_target] },
   { title: 'Decisions and facts', kinds: [NOTE_KIND.decision, NOTE_KIND.fact, NOTE_KIND.documentation] },
+  // Task outcomes get their OWN section, below decisions rather than inside them. They are the
+  // highest-volume kind in the system (one or more per completed task), so folding them into
+  // "Decisions and facts" buried the handful of notes a reader actually opens that section for —
+  // measured: 42 outcomes against zero real decisions.
+  { title: 'Task outcomes', kinds: [NOTE_KIND.outcome] },
   { title: 'Research', kinds: [NOTE_KIND.research] },
 ]
 

@@ -1,4 +1,4 @@
-import { ClaimWrite, composeAuthor, EVENT_KIND, foldMemory, noteKey, MemoryNoteInput, MemoryScope, MemoryWrittenPayload, NOTE_TIER, resolveClaims, type ClaimSearchOptions, type MemoryAuthor, type MemoryFilter, type MemorySearchOpts, type MemoryNote, type MemoryStore, type NoteSummary, type Claim, type ClaimHit, type Topic } from '@orc/contracts'
+import { AUTHOR_SOURCE, ClaimWrite, composeAuthor, EVENT_KIND, foldMemory, noteKey, MemoryNoteInput, MemoryScope, MemoryWrittenPayload, NOTE_TIER, resolveClaims, type ClaimSearchOptions, type MemoryAuthor, type MemoryFilter, type MemorySearchOpts, type MemoryNote, type MemoryStore, type NoteSummary, type Claim, type ClaimHit, type Topic } from '@orc/contracts'
 import { KERNEL_ERROR_CODE, KernelError, type EventLog } from '@orc/kernel'
 import type { SurrealMemory } from './surreal'
 import { KNOWLEDGE_KINDS } from './projector'
@@ -53,7 +53,7 @@ export function createMemoryStore(opts: { log: EventLog; surreal: SurrealMemory;
       // could never be archived again — measured: three restored notes went permanently unretirable.
       await log.append({
         taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_written,
-        payload: { note, author: held?.author ?? author ?? { source: 'cli' } },
+        payload: { note, author: held?.author ?? author ?? { source: AUTHOR_SOURCE.cli } },
       })
     }
   }
@@ -212,7 +212,7 @@ export function createMemoryStore(opts: { log: EventLog; surreal: SurrealMemory;
 
     // optional author: cancel-sweep passes the cancelled task's identity as provenance
     async remove(id, scope = MemoryScope.project, author?: MemoryAuthor) {
-      await log.append({ taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_deleted, payload: { id, scope, author: author ?? { source: 'cli' } } })
+      await log.append({ taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_deleted, payload: { id, scope, author: author ?? { source: AUTHOR_SOURCE.cli } } })
     },
     get: (id, scope = MemoryScope.project) => surreal.get(id, scope),
     useStats: (id, scope = MemoryScope.project) => surreal.useStats(id, scope),

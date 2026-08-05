@@ -35,16 +35,30 @@ export function slugId(title: string): string {
   return s
 }
 
+// The doors a write can come through — MATCHED VALUES, never scattered literals, the same
+// discipline NOTE_KIND/LINK_KIND/MEMORY_ACCESS/EVENT_KIND already apply. These were inline in the
+// schema below and spelled as bare `'cli'` at two dozen production call sites, which is precisely
+// the shape that drifts: nothing connects the spelling at a call site to the enum that defines it,
+// so a renamed door fails at runtime in whichever path is exercised last.
+//
+// 'mcp' is a DOOR, not a person. It exists because plan_approved.approvedBy already carries
+// enum(['human','policy','mcp']) "so replay shows exactly who approved (P7 attribution)", while
+// this enum could not express the same thing — so a grounded task's conversational approve, which
+// IS its human gate, was recorded as 'cli' whoever sent it. The log could not distinguish a human
+// at a terminal from an agent driving the MCP surface.
+//
+// CEILING: 'cli' still means "came through a terminal", NOT "a human". A machine writer that
+// passes it is indistinguishable from a person typing — see docs/IDEAS.md on human attribution.
+export const AUTHOR_SOURCES = ['agent', 'cli', 'mcp'] as const
+export const AuthorSource = z.enum(AUTHOR_SOURCES)
+export type AuthorSource = z.infer<typeof AuthorSource>
+export const AUTHOR_SOURCE = AuthorSource.enum
+
 // Who wrote a note, a plan annotation, or a feedback reply. It lives here rather than with the
 // memory schemas because `analysis` and `events` both read it at module top level: from inside
 // the memory/events cycle that resolves to undefined depending on which module loaded first.
 export const MemoryAuthor = z.object({
-  // 'mcp' is a DOOR, not a person. It exists because plan_approved.approvedBy already carries
-  // enum(['human','policy','mcp']) "so replay shows exactly who approved (P7 attribution)", while
-  // this enum could not express the same thing — so a grounded task's conversational approve, which
-  // IS its human gate, was recorded as 'cli' whoever sent it. The log could not distinguish a human
-  // at a terminal from an agent driving the MCP surface.
-  source: z.enum(['agent', 'cli', 'mcp']),
+  source: AuthorSource,
   taskId: z.string().nullable().optional(),
   stepId: z.string().nullable().optional(),
   runToken: z.string().nullable().optional(),

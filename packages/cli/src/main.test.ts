@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import type { Command } from 'commander'
 import { Surreal } from 'surrealdb'
-import { ApprovalPolicy, EVENT_KIND, MemoryAccessedPayload, MemoryDeletedPayload, MemoryWrittenPayload, RUN_OUTCOME, TASK_STATUS, claimId, type ExecutionPort, type OperationSpec, type RunOutcome, type TaskStatus } from '@orc/contracts'
+import { ApprovalPolicy, EVENT_KIND, MemoryAccessedPayload, MemoryDeletedPayload, MemoryWrittenPayload, NOTE_TIER, RUN_OUTCOME, TASK_STATUS, claimId, type ExecutionPort, type OperationSpec, type RunOutcome, type TaskStatus } from '@orc/contracts'
 import { loadConfig, projectDatabaseName, requireProject, type EventLog, type ProjectConfig } from '@orc/kernel'
 import { createTestDb, TEST_PROJECT_ID } from '@orc/kernel/test-helpers'
 import { singleStepDraft } from './plan-template'
@@ -30,6 +30,12 @@ import { buildPlugins } from './runtime'
 // memory_written / memory_deleted payloads parsed through their owning schemas at the read
 // boundary, the same way main.ts's claims fold reads them.
 const notePayloadId = (payload: unknown): string => MemoryWrittenPayload.parse(payload).note.id
+// Read the kind off the LOG rather than through `memory cat`, which would record a memory_accessed
+// event and throw off the access-count assertions this same test makes.
+const notePayloadKind = (payload: unknown): string | undefined => {
+  const note = MemoryWrittenPayload.parse(payload).note
+  return note.tier === NOTE_TIER.semantic ? note.kind : undefined
+}
 const deletedAuthorTaskId = (payload: unknown): string | null | undefined =>
   MemoryDeletedPayload.parse(payload).author.taskId
 
@@ -873,6 +879,30 @@ describe('orc CLI', () => {
     expect(note.title).toBe('T')
     expect(note.summary).toBe('S')
     expect(note.body).toBe('B')
+    // Unflagged notes still take the schema default — unchanged behaviour, pinned so --kind cannot
+    // accidentally become required.
+    expect(note.kind).toBe('fact')
+
+    // --kind is what makes a human-authored DECISION possible at all. Without it every note either
+    // human door produced landed as 'fact', so only an agent mid-step could mint a decision, and a
+    // human who disagreed with a recorded one had no way to correct it.
+    // Asserted off the LOG, not via `memory cat` — cat records an access, and the access-count
+    // assertions further down this test count exactly one.
+    const decisionId = `${id}-decision`
+    await run('memory', 'add', '--id', decisionId, '--title', 'A real decision', '--kind', 'decision')
+    const decisionWrite = (await log.all())
+      .filter(e => e.kind === EVENT_KIND.memory_written)
+      .find(e => notePayloadId(e.payload) === decisionId)
+    expect(decisionWrite).toBeDefined()
+    expect(notePayloadKind(decisionWrite!.payload)).toBe('decision')
+    // removed immediately: the end of this test asserts `ls` reads '_no notes_', so a note left
+    // behind here would fail an assertion that has nothing to do with kinds
+    await run('memory', 'rm', decisionId)
+
+    // An unknown kind is a friendly parse-time error naming the valid set, never a silent default
+    // to 'fact' — the discipline --tier and `neighbors --kinds` already apply. 'adr' is the exact
+    // near-miss this catches: it is a tag, never a kind.
+    await expect(run('memory', 'add', '--id', 'k1', '--title', 'K', '--kind', 'adr')).rejects.toThrow(/unknown kind/)
 
     lines.length = 0
     await run('memory', 'search', 'x') // matches the 'x' tag

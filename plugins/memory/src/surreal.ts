@@ -6,7 +6,7 @@ import {
   decodeMemoryEvent, deriveNoteProvenance, EDGE_DIRECTION, edgeKey, LINK_KINDS, MEMORY_USE, NOTE_KINDS, MemoryScope, MutationOp, Topic, viaEdge,
   type LinkKind,
   MemoryNote, VerifiedStamp, type MemoryWrittenPayload,
-  MEMORY_LIMITS, SEARCH_MODE, errorMessage, inferTier, isUiMetaNote, noteKey, NoteTier,
+  MEMORY_LIMITS, SEARCH_MODE, errorMessage, inferTier, isUiMetaNote, noteKey, NoteKind, NoteTier,
   type EmbeddingProvider, type EventRecord, type NeighborQuery, type MemoryFilter, type NoteFields, type NoteView, type UseStats,
   type MemorySearchOpts, type NeighborResult, type NoteSummary,
   linkLookupScopes,
@@ -209,6 +209,11 @@ const SummaryRow = z.object({
   // inference over a row that carries none of the columns inference reads, and label every
   // vector hit 'semantic' — including the plan and episodic notes it surfaced.
   tier: NoteTier.optional(),
+  // Projected so a `kind` FILTER works on this arm too. matchesRow reads it off the row, and the
+  // raw selects project exactly SUMMARY_COLUMNS — so without it here every kind-filtered search
+  // matched nothing (r.kind undefined), while the same filter worked on list(), which selects the
+  // whole row. Optional like `tier`: a row projected before the column existed still parses.
+  kind: NoteKind.optional(),
   categories: z.array(z.string()).optional(), tags: z.array(z.string()), summary: z.string(),
   hits: z.number().optional(), lastAccessedAt: z.string().nullable().optional(),
   // observed-use outcomes — optional like hits, a row may predate the columns
@@ -286,9 +291,10 @@ const KeywordClaimRow = ClaimRowBase.extend(ftsColumns.shape)
 // The filter fields a RAW select cannot push into matchFilter's builder. Applied in TS by both raw
 // arms, from one spelling, so semantic and keyword cannot disagree about what a filter means.
 const matchesRow = (
-  r: { tier?: string; categories?: string[]; tags: string[] }, filter: MemoryFilter,
+  r: { tier?: string; kind?: string; categories?: string[]; tags: string[] }, filter: MemoryFilter,
 ): boolean =>
   (!filter.tier || r.tier === filter.tier)
+  && (!filter.kind || r.kind === filter.kind)
   && (!filter.category || (r.categories ?? []).includes(filter.category))
   && (!filter.tag || r.tags.includes(filter.tag))
 

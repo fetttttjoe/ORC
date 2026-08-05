@@ -1,4 +1,4 @@
-import { errorMessage, EVENT_KIND, ModelsDiscoveredPayload, NOTE_KIND, TASK_STATUS, costUSDFor, parseModelRef, type ExecutionPort, type ModelOption, type TaskStatus } from '@orc/contracts'
+import { AUTHOR_SOURCE, errorMessage, EVENT_KIND, ModelsDiscoveredPayload, NOTE_KIND, TASK_STATUS, costUSDFor, parseModelRef, type ExecutionPort, type ModelOption, type TaskStatus } from '@orc/contracts'
 import { Kernel, blockingVerdicts, retryIsFutile, deriveSystemUrl, dropSystemDatabase, initializeProject, liveSupervisors, loadConfig, openStorage, resetSystemDatabase, subtreeTaskIds, type EventLog, type ProjectConfig, type Storage } from '@orc/kernel'
 import { seedRegistries } from './runtime'
 import { singleStepDraft } from './plan-template'
@@ -14,7 +14,7 @@ import path from 'node:path'
 // Surreal read model is down (the projector catches up on its own)
 const uiNote = (id: string, title: string, summary: string) => ({
   taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_written,
-  payload: { note: { id, title, kind: NOTE_KIND.fact, summary }, author: { source: 'cli' as const } },
+  payload: { note: { id, title, kind: NOTE_KIND.fact, summary }, author: { source: AUTHOR_SOURCE.cli } },
 })
 const nameNote = (name: string) => uiNote(PROJECT_NAME_NOTE_ID, name, 'display name for the project chat')
 const dirNote = (dir: string) => uiNote(PROJECT_DIR_NOTE_ID, dir, 'working directory of the project')
@@ -321,7 +321,7 @@ export function buildOrcActions(deps: {
       let memory: Awaited<ReturnType<typeof createMemory>> | undefined
       try {
         memory = await openMemory({ log: plugin.log, config: plugin.config })
-        const written = await memory.store.write(note, { source: 'cli' })
+        const written = await memory.store.write(note, { source: AUTHOR_SOURCE.cli })
         // event committed — the read model heals on the next drain if this catch-up fails
         await memory.projector.catchUp().catch(() => {})
         return { id: written.id, scope: written.scope }
@@ -337,7 +337,7 @@ export function buildOrcActions(deps: {
       let memory: Awaited<ReturnType<typeof createMemory>> | undefined
       try {
         memory = await openMemory({ log: plugin.log, config: plugin.config })
-        await memory.store.remove(id, scope, { source: 'cli' })
+        await memory.store.remove(id, scope, { source: AUTHOR_SOURCE.cli })
         await memory.projector.catchUp().catch(() => {})
         return { id }
       } finally {
@@ -483,7 +483,7 @@ export function buildOrcActions(deps: {
         const goes = orphanedNotes(await plugin.log.after(0, [EVENT_KIND.memory_written, EVENT_KIND.memory_deleted]), cancelled)
         if (goes.length === 0) return { swept: [], sweepError: null }
         memory = await openMemory({ log: plugin.log, config: plugin.config })
-        for (const n of goes) await memory.store.remove(n.id, n.scope, { source: 'cli', taskId })
+        for (const n of goes) await memory.store.remove(n.id, n.scope, { source: AUTHOR_SOURCE.cli, taskId })
         // deletes are committed (event-first) — the read-model catch-up is best-effort; the
         // projector self-heals on the next invocation
         await memory.projector.catchUp().catch(() => {})

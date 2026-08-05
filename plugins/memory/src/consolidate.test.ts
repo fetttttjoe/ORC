@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test'
-import { LINK_KIND, MEMORY_ACCESS, MemoryNoteInput, slugId, type EventRecord, type MemoryNoteDraft, type MemoryStore } from '@orc/contracts'
+import { LINK_KIND, MEMORY_ACCESS, MemoryNoteInput, NOTE_KIND, slugId, type EventRecord, type MemoryNoteDraft, type MemoryStore } from '@orc/contracts'
 import { eventFixture } from '@orc/contracts/fixtures'
 import type { EventLog } from '@orc/kernel'
 import { AREA_ROOT, CONSOLIDATED_TAG, areaOf, consolidateTask, consolidatedNote, consolidatedNotes, isPlanChild, isSubstantive } from './consolidate'
@@ -28,6 +28,20 @@ describe('consolidatedNote', () => {
     expect(draft.summary).toBe('edges strengthen via memory_accessed')
     // validates as a real note draft — no surprises at the store boundary
     expect(() => MemoryNoteInput.parse(draft)).not.toThrow()
+  })
+
+  // A consolidation used to claim kind:'decision'. Measured on the live vault 2026-08-04: ALL 42
+  // notes carrying that kind were outcome-<uuid> consolidations and not one was an architectural
+  // decision — so "read the decisions this project holds" returned 42 task outcomes and zero
+  // decisions, which makes a decision record unusable as a record. A note saying what one run DID
+  // is not a choice the project committed to; they are different questions with different lifetimes.
+  it('is an OUTCOME, never a decision — the two are different questions', () => {
+    const draft = consolidatedNote({
+      taskId: 'k1', taskTitle: 'Something happened', steps: [{ title: 'a', summary: 'x' }],
+      derivedFrom: [], unfinished: [], paths: [],
+    })
+    expect(draft.kind).toBe(NOTE_KIND.outcome)
+    expect(draft.kind).not.toBe(NOTE_KIND.decision)
   })
 
   // Titles are not unique — a re-run, a recurring chore, or two operators phrasing the same request
@@ -171,6 +185,25 @@ describe('consolidateTask provenance', () => {
     )
     expect(note).not.toBeNull()
     expect(written[0]?.links).toEqual([{ id: 'area-memory', kind: LINK_KIND.derived_from }])
+  })
+
+  // 'cli' is what a HUMAN at a terminal writes as — every packages/cli memory command passes it,
+  // and store.ts defaults to it. A consolidation is machine output, so claiming 'cli' made every
+  // outcome note in the vault read `createdBy: cli`, indistinguishable from one a person typed.
+  // That is corrosive exactly where it matters most: a knowledge base whose decisions are supposed
+  // to carry "a human approved this" cannot tell those apart from what the machine wrote itself.
+  it('is attributed to the machine, never to a person at a terminal', async () => {
+    const authors: unknown[] = []
+    const store: Pick<MemoryStore, 'list' | 'write'> = {
+      list: async () => [],
+      write: async (note, author) => { authors.push(author); return note as never },
+    }
+    const note = await consolidateTask(
+      { log: logOf([created(TASK, 'Explain heat'), accessed(TASK, 'area-memory', MEMORY_ACCESS.preload)]) as EventLog, store: store as MemoryStore },
+      TASK,
+    )
+    expect(note).not.toBeNull()
+    expect(authors[0]).not.toEqual({ source: 'cli' })
   })
 
   it('an access belonging to a DIFFERENT task is not this task\'s provenance', async () => {

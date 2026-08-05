@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'bun:test'
 import { z } from 'zod'
-import { claimId, CLAIM_ID_RE, LINK_KIND, LINK_KINDS, MEMORY_ACCESS, MEMORY_LIMITS, MemoryNoteInput, NOTE_KIND, NOTE_TIER, MemoryWriteResult, MEMORY_TOOL_NAME, STEP_ID, STEP_ROLE, VERIFY_STEP_ID, type AccessVia, type MemoryAccessMode, type MemoryNote, type MemoryNoteDraft, type MemoryStore, type NoteSummary } from '@orc/contracts'
+import { claimId, CLAIM_ID_RE, LINK_KIND, LINK_KINDS, MEMORY_ACCESS, MEMORY_LIMITS, MemoryNoteInput, NOTE_KIND, NOTE_TIER, MemoryWriteResult, MEMORY_TOOL_NAME, STEP_ID, STEP_ROLE, VERIFY_STEP_ID, type AccessVia, type MemoryAccessMode, type MemoryFilter, type MemoryNote, type MemoryNoteDraft, type MemoryStore, type NoteSummary } from '@orc/contracts'
 import { episodicNoteFixture, semanticNoteFixture } from '@orc/contracts/fixtures'
 import { MEMORY_READ_TOOLS, memoryTools, memoryRoleFor, memoryVerifyTool, noteLint } from './tools'
 import type { ClaimHit } from './claim-search'
@@ -722,6 +722,53 @@ describe('memory tools', () => {
     // and a tag the corpus DOES carry is never refused
     const good = await search.execute({ query: 'x', tag: 'auth' })
     expect(good.isError).toBeFalsy()
+  })
+
+  // kind is a FIXED vocabulary (contracts' NOTE_KINDS), so it validates like `category` and NOT
+  // like `tag`: an unknown value is refused naming the real set, but a real kind the corpus does
+  // not currently carry returns EMPTY. That difference is load-bearing — a planner reading "which
+  // decisions does this project hold" meets the empty corpus on its very first run, and `tag`'s
+  // refusal semantics would report that as a broken tool rather than as "none recorded yet".
+  it('memory_search refuses an unknown kind, naming the valid set', async () => {
+    const { store } = fakeStore()
+    const search = memoryTools({ store, author: { source: 'cli' } }).find(t => t.name === 'memory_search')!
+    const r = await search.execute({ query: 'x', kind: 'adr' })
+    expect(r.isError).toBe(true)
+    const error = ErrorOutput.parse(r.output).error
+    expect(error).toContain("unknown kind 'adr'")
+    expect(error).toContain('decision')
+  })
+
+  it('memory_search returns empty for a real kind nothing carries — never an error', async () => {
+    const { store } = fakeStore({ search: async () => [], list: async () => [] })
+    const search = memoryTools({ store, author: { source: 'cli' } }).find(t => t.name === 'memory_search')!
+    const r = await search.execute({ query: 'x', kind: NOTE_KIND.decision })
+    expect(r.isError).toBeFalsy()
+  })
+
+  // ENUMERATION: the decision set is read by filter, with nothing to rank against. search would
+  // rank the whole table against an empty string, so a query-less call must route to store.list —
+  // the read that already means "every note matching this filter".
+  it('memory_search with a filter and no query enumerates via list, not search', async () => {
+    const seen: MemoryFilter[] = []
+    let searched = false
+    const { store } = fakeStore({
+      list: async filter => { seen.push(filter ?? {}); return [summary('d1', 'A decision')] },
+      search: async () => { searched = true; return [] },
+    })
+    const search = memoryTools({ store, author: { source: 'cli' } }).find(t => t.name === 'memory_search')!
+    const r = await search.execute({ kind: NOTE_KIND.decision })
+    expect(r.isError).toBeFalsy()
+    expect(searched).toBe(false)
+    expect(seen[0]?.kind).toBe(NOTE_KIND.decision)
+  })
+
+  it('memory_search refuses a call with neither a query nor a filter', async () => {
+    const { store } = fakeStore()
+    const search = memoryTools({ store, author: { source: 'cli' } }).find(t => t.name === 'memory_search')!
+    // no query AND no filter is "return the whole corpus" — a request the budget cannot honour
+    // and that no caller means; it is a dropped argument, not an intent.
+    expect((await search.execute({})).isError).toBe(true)
   })
 
   // Access counts are the measurement that decides whether a decay/sweep is ever worth building,
