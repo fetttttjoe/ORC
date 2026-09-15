@@ -2,13 +2,16 @@
 // see packages/cli/src/actions.ts). Adapters (web server, future TUI) receive this interface;
 // ui-core itself never constructs one. Implementations return data and never print: each
 // adapter renders results its own way (CLI lines, web toasts).
-import type { NoteAuthoringDraft, PlanDraft } from '@orc/contracts'
+import type { NoteAuthoringDraft, PlanDraft, Workspace, WorkspaceWithHealth } from '@orc/contracts'
 
 export interface OrcActions {
   newTask(input: {
     title: string
     spec?: string
     parentId?: string
+    // Omitted = the workspace the serving process's own checkout is (the CLI door's default too).
+    // Never null: a task without a workspace is refused by the kernel, not stored unbound.
+    workspaceId?: string
     grounded?: { modelRef: string; cwd: string; analyzerRef?: string }
   }): Promise<{ taskId: string }>
   propose(taskId: string, opts: { modelRef: string; skillRefs?: string[] }): Promise<{ version: number; steps: number }>
@@ -18,7 +21,25 @@ export interface OrcActions {
   approve(taskId: string, version?: number, approvedBy?: 'human' | 'mcp'): Promise<{ version: number }>
   // A run is REQUESTED, never started here: the supervisor holding the runtime turns the recorded
   // ask into a workflow, so there is no handle to hand back — callers watch the event stream.
-  run(taskId: string, cwd: string): Promise<{ requested: true }>
+  // Omitted cwd = the task's own workspace, resolved by the kernel (requestRun). A door that filled
+  // it in with the directory the serving process happens to sit in would drag a task created in one
+  // worktree back into another checkout; an explicit cwd is the deliberate override.
+  run(taskId: string, cwd?: string): Promise<{ requested: true }>
+  // The ACTIVE workspaces of this project — an archived record is finished business (the operator
+  // archived that path on purpose) and is not listed.
+  //
+  // Each record comes WITH its health, from the one derivation `orc ws ls` prints: a driver asking
+  // "which checkout is this in" and a human reading the terminal must not be handed two readings of
+  // the same workspace. Ordered attention-first (dangling → waiting → active → idle → merged), so a
+  // caller that renders the list in order is already showing what needs a person.
+  listWorkspaces(): Promise<WorkspaceWithHealth[]>
+  // One request, one checkout: creates the git worktree + branch under the project's .orc/worktrees,
+  // records it as a managed workspace, and drafts the request as its first task. `base` defaults to
+  // the HEAD of the checkout this door serves. taskId is nullable because a workspace can exist
+  // WITHOUT a request — the terminal's `orc ws new --no-task`, for a human about to work the tree
+  // themselves. This door has no such flag (a driver asking for a workspace is asking for a
+  // request), so the shape is shared with that path rather than a case this one produces.
+  newWorkspace(input: { title: string; spec?: string; base?: string }): Promise<{ workspace: Workspace; taskId: string | null }>
   // `projectId` names the project to answer IN; omitted means this door's own. Answering is the one
   // human action that is not execution: the append only unblocks the parked step, and a supervisor's
   // router carries it into the workflow off feedback_provided — so unlike run/retry/propose it binds

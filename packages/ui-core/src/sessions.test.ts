@@ -2,7 +2,7 @@ import { afterAll, describe, expect, it } from 'bun:test'
 import { z } from 'zod'
 import { EVENT_KIND, ISOLATION_TIER, TASK_STATUS } from '@orc/contracts'
 import { Kernel, openStorage } from '@orc/kernel'
-import { createTestDb, TEST_PROJECT_ID } from '@orc/kernel/test-helpers'
+import { createTestDb, seedTestWorkspace, TEST_PROJECT_ID, TEST_WORKSPACE_ID } from '@orc/kernel/test-helpers'
 import { noteNodeId } from './graph'
 import { createProjectSessions, type SessionUpdate } from './sessions'
 
@@ -31,7 +31,9 @@ async function setup() {
   const storage = await openStorage(db.url, { projectId: TEST_PROJECT_ID })
   openStores.push(storage)
   const k = new Kernel(storage.events)
-  const t = await k.createTask({ title: 'seed task', spec: '' })
+  // a task must name a workspace the fold has seen — one seeded record, then tasks as before
+  await seedTestWorkspace(storage.events)
+  const t = await k.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'seed task', spec: '' })
   const sessions = createProjectSessions({ url: db.url, cwdProject: { id: TEST_PROJECT_ID, name: 'test-proj' } })
   openSessions.push(sessions)
   return { storage, taskId: t.id, sessions }
@@ -39,7 +41,7 @@ async function setup() {
 
 const noteEvent = (id: string) => ({
   taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_written,
-  payload: { note: { id, title: id }, author: { source: 'cli' as const } },
+  payload: { note: { id, title: id }, author: { source: 'cli' as const, workspaceId: TEST_WORKSPACE_ID } },
 })
 
 // a plan-note in the parent's plan scope; its id IS the child step id (instantiateFrozenPlan),
@@ -48,7 +50,7 @@ const planNoteEvent = (taskId: string, id: string, links: Array<{ id: string; ki
   taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_written,
   payload: {
     note: { id, title: id, scope: `plan-${taskId.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`, tier: 'plan' as const, links },
-    author: { source: 'cli' as const },
+    author: { source: 'cli' as const, workspaceId: TEST_WORKSPACE_ID },
   },
 })
 
@@ -109,7 +111,7 @@ describe('ProjectSessions', () => {
     await storage.events.append(noteEvent('hit-note'))
     await storage.events.append({
       taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_accessed,
-      payload: { id: 'hit-note', scope: 'project', mode: 'read', author: { source: 'cli' } },
+      payload: { id: 'hit-note', scope: 'project', mode: 'read', author: { source: 'cli', workspaceId: TEST_WORKSPACE_ID } },
     })
     for (let i = 0; i < 40 && updates.length < 2; i++) await Bun.sleep(50)
     expect(updates).toHaveLength(2)
@@ -139,7 +141,8 @@ describe('ProjectSessions', () => {
     const { storage, taskId: taskA, sessions } = await setup()
     // a second task in the same project — its step rows must never leak into A's log and vice versa
     const k = new Kernel(storage.events)
-    const taskB = (await k.createTask({ title: 'task B', spec: '' })).id
+    // setup() already seeded TEST_WORKSPACE into this same log — this kernel reads the same fold
+    const taskB = (await k.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'task B', spec: '' })).id
 
     // each task's own step_started (envelope taskId carries the real owner)
     await storage.events.append({ taskId: taskA, stepId: 'sa', runToken: 'ra', kind: EVENT_KIND.step_started, payload: { stepId: 'sa', runToken: 'ra', attempt: 1 } })
@@ -148,11 +151,11 @@ describe('ProjectSessions', () => {
     // project-scoped memory rows (envelope taskId null) authored by A, by B, and ownerless (cli)
     await storage.events.append({
       taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_written,
-      payload: { note: { id: 'note-by-a', title: 'note-by-a' }, author: { source: 'agent', taskId: taskA } },
+      payload: { note: { id: 'note-by-a', title: 'note-by-a' }, author: { source: 'agent', workspaceId: TEST_WORKSPACE_ID, taskId: taskA } },
     })
     await storage.events.append({
       taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_written,
-      payload: { note: { id: 'note-by-b', title: 'note-by-b' }, author: { source: 'agent', taskId: taskB } },
+      payload: { note: { id: 'note-by-b', title: 'note-by-b' }, author: { source: 'agent', workspaceId: TEST_WORKSPACE_ID, taskId: taskB } },
     })
     await storage.events.append(noteEvent('ownerless-note')) // author.source 'cli', no taskId
 
@@ -242,7 +245,7 @@ describe('ProjectSessions', () => {
     await storage.events.append(noteEvent('target'))
     await storage.events.append({
       taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_written,
-      payload: { note: { id: 'pointer', title: 'pointer', links: [{ id: 'target' }] }, author: { source: 'cli' } },
+      payload: { note: { id: 'pointer', title: 'pointer', links: [{ id: 'target' }] }, author: { source: 'cli', workspaceId: TEST_WORKSPACE_ID } },
     })
     const d = BacklinksView.parse(await sessions.nodeDetail(TEST_PROJECT_ID, noteNodeId('project', 'target')))
     expect(d.backlinks.map(b => b.id)).toEqual(['pointer'])
@@ -253,7 +256,7 @@ describe('ProjectSessions', () => {
     await storage.events.append(noteEvent('detail-note'))
     await storage.events.append({
       taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_accessed,
-      payload: { id: 'detail-note', scope: 'project', mode: 'read', author: { source: 'cli' } },
+      payload: { id: 'detail-note', scope: 'project', mode: 'read', author: { source: 'cli', workspaceId: TEST_WORKSPACE_ID } },
     })
     const task = TaskDetailView.parse(await sessions.nodeDetail(TEST_PROJECT_ID, taskId))
     expect(task.task.title).toBe('seed task')

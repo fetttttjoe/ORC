@@ -1,4 +1,4 @@
-import { AUTHOR_SOURCE, ClaimWrite, composeAuthor, EVENT_KIND, foldMemory, noteKey, MemoryNoteInput, MemoryScope, MemoryWrittenPayload, NOTE_TIER, resolveClaims, type ClaimSearchOptions, type MemoryAuthor, type MemoryFilter, type MemorySearchOpts, type MemoryNote, type MemoryStore, type NoteSummary, type Claim, type ClaimHit, type Topic } from '@orc/contracts'
+import { ClaimWrite, composeAuthor, EVENT_KIND, foldMemory, noteKey, MemoryNoteInput, MemoryScope, MemoryWrittenPayload, NOTE_TIER, resolveClaims, type ClaimSearchOptions, type MemoryFilter, type MemorySearchOpts, type MemoryNote, type MemoryStore, type NoteSummary, type Claim, type ClaimHit, type Topic } from '@orc/contracts'
 import { KERNEL_ERROR_CODE, KernelError, type EventLog } from '@orc/kernel'
 import type { SurrealMemory } from './surreal'
 import { KNOWLEDGE_KINDS } from './projector'
@@ -53,7 +53,7 @@ export function createMemoryStore(opts: { log: EventLog; surreal: SurrealMemory;
       // could never be archived again — measured: three restored notes went permanently unretirable.
       await log.append({
         taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_written,
-        payload: { note, author: held?.author ?? author ?? { source: AUTHOR_SOURCE.cli } },
+        payload: { note, author: held?.author ?? author },
       })
     }
   }
@@ -140,9 +140,14 @@ export function createMemoryStore(opts: { log: EventLog; surreal: SurrealMemory;
       // deriveNoteProvenance's decision from the content key, and asserting one here could report a
       // verification of text the write just replaced.
       const projected = await surreal.get(note.id, note.scope)
+      // `workspaceId` is the one provenance field NOT read back off the projected row: the row may
+      // still be the PREVIOUS revision inside the flush window, and this write's author is the
+      // authority on which checkout THIS content came from. Reading it back would report the
+      // previous writer's workspace as the new content's — the same one-revision lag the comment
+      // above describes, but on a field whose whole job is to be about the latest write.
       const stamped = projected
-        ? { createdAt: projected.createdAt, createdBy: projected.createdBy, updatedAt: projected.updatedAt, updatedBy: projected.updatedBy, revision: projected.revision }
-        : { createdAt: '', createdBy: '', updatedAt: '', updatedBy: '', revision: 1 }
+        ? { createdAt: projected.createdAt, createdBy: projected.createdBy, updatedAt: projected.updatedAt, updatedBy: projected.updatedBy, revision: projected.revision, workspaceId: author.workspaceId }
+        : { createdAt: '', createdBy: '', updatedAt: '', updatedBy: '', revision: 1, workspaceId: author.workspaceId }
       // retrievedAt is blank for the same reason: the projector stamps it from the committed event
       // only the semantic tier cites; the other two have no sources field to stamp
       return note.tier === NOTE_TIER.semantic
@@ -203,16 +208,16 @@ export function createMemoryStore(opts: { log: EventLog; surreal: SurrealMemory;
       })
       return stamp
     },
-    // optional author: cancel-sweep passes the cancelled task's identity as provenance
     // The single-note case of the batch door, delegating to the hoisted function rather than
     // `this.setArchivedAll`: MemoryStore is an interface, and a consumer that destructures a method
     // off it would get `this === undefined` and a runtime throw.
     setArchived: (id, scope = MemoryScope.project, archived, author) => setArchivedAll([{ id, scope }], archived, author),
     setArchivedAll,
 
-    // optional author: cancel-sweep passes the cancelled task's identity as provenance
-    async remove(id, scope = MemoryScope.project, author?: MemoryAuthor) {
-      await log.append({ taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_deleted, payload: { id, scope, author: author ?? { source: AUTHOR_SOURCE.cli } } })
+    // author is the CALLER's — cancel-sweep passes the cancelled task's identity as provenance,
+    // and a removal with no nameable author is a wiring bug, not a `cli` default.
+    async remove(id, scope = MemoryScope.project, author) {
+      await log.append({ taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_deleted, payload: { id, scope, author } })
     },
     get: (id, scope = MemoryScope.project) => surreal.get(id, scope),
     useStats: (id, scope = MemoryScope.project) => surreal.useStats(id, scope),

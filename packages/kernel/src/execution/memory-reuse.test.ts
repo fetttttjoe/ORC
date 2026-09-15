@@ -13,7 +13,7 @@ import { createMemory } from '@orc/memory'
 import { createTestSurreal } from '@orc/memory/test-helpers'
 import { openStorage } from '../storage'
 import { Kernel } from '../kernel'
-import { createTestDb, fakeProvider, testConfig, TEST_PROJECT_ID } from '../test-helpers'
+import { createTestDb, fakeProvider, seedTestWorkspace, TEST_PROJECT_ID, TEST_WORKSPACE_ID, testConfig } from '../test-helpers'
 import { createDbosPort, type DbosPort } from './dbos-port'
 
 // memory_read's tool output is `{ note: <full note | null> }` (tool output is contract-`unknown`).
@@ -91,6 +91,8 @@ describe('memory reuse over a real run (e2e): step B reads step A\'s note', () =
     const storage = await openStorage(pg.url, { projectId: TEST_PROJECT_ID })
     const log = storage.events
     const kernel = new Kernel(log)
+    // a task must name a workspace the fold has seen — one seeded record, then tasks as before
+    await seedTestWorkspace(log)
     const config = testConfig(pg.url, {
       vaultDir,
       projectDbUrl: ts.url, projectDbNamespace: ts.ns, projectDbName: ts.db,
@@ -102,12 +104,12 @@ describe('memory reuse over a real run (e2e): step B reads step A\'s note', () =
       storage, config,
       providers: new Map([['fake', fakeProvider]]),
       executors: new Map([['memory-fake', memoryExecutor()]]),
-      stepTools: p => memory.bindStep({ author: { source: 'agent', taskId: p.taskId, stepId: p.stepId, runToken: p.runToken, executor: p.executor, model: p.model, role: p.role }, step: p.step, taskId: p.taskId, ancestorTaskIds: p.ancestorTaskIds }),
+      stepTools: p => memory.bindStep({ author: { source: 'agent', workspaceId: p.workspaceId, taskId: p.taskId, stepId: p.stepId, runToken: p.runToken, executor: p.executor, model: p.model, role: p.role }, step: p.step, taskId: p.taskId, ancestorTaskIds: p.ancestorTaskIds }),
     })
     await port.launch()
 
     try {
-      const t = await kernel.createTask({ title: 'memory reuse e2e', spec: 'write then reuse a finding' })
+      const t = await kernel.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'memory reuse e2e', spec: 'write then reuse a finding' })
       await kernel.proposePlan(t.id, draftFixture([
         stepFixture({ id: 's1', role: 'worker', executorRef: 'memory-fake', modelRef: 'fake/m' }),
         stepFixture({ id: 's2', role: 'worker', executorRef: 'memory-fake', modelRef: 'fake/m', dependsOn: ['s1'] }),

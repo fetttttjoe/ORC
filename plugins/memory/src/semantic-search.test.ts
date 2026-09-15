@@ -1,6 +1,6 @@
 import { afterAll, describe, expect, it } from 'bun:test'
 import { claimId, type EmbeddingProvider, type EventRecord, type MemoryAuthor } from '@orc/contracts'
-import { eventFixture } from '@orc/contracts/fixtures'
+import { TEST_WORKSPACE_ID, eventFixture } from '@orc/contracts/fixtures'
 import { SEMANTIC_FLOOR, SurrealMemory } from './surreal'
 import { createTestSurreal } from './test-helpers'
 
@@ -23,7 +23,7 @@ const vec = (text: string): number[] => {
 }
 const fakeEmbedder: EmbeddingProvider = { embed: async texts => texts.map(vec) }
 
-const cli: MemoryAuthor = { source: 'cli' }
+const cli: MemoryAuthor = { source: 'cli', workspaceId: TEST_WORKSPACE_ID }
 const note = (over = {}) => ({
   id: 'n', scope: 'project', kind: 'fact', sourceRevision: null, title: 'T', categories: [], tags: [],
   links: [], paths: [], summary: '', body: '', ...over,

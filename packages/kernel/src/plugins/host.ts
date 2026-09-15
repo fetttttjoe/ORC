@@ -46,7 +46,9 @@ export async function createPluginHost(
     on: (hook, handler) => hooks.on(hook, handler),
   }
   const extensions = new ExtensionHost(api)
-  await extensions.load(config.extensions, decl => isExtensionTrusted(loadTrust(config.dir), decl, config.dir), config.dir)
+  // extensions are declared in the tracked settings and resolved relative to the PROJECT, so a
+  // worktree loads (and trusts) the same set the main checkout declared, not a per-checkout copy
+  await extensions.load(config.extensions, decl => isExtensionTrusted(loadTrust(config.projectRoot), decl, config.projectRoot), config.projectRoot)
   const skills = await SkillIndex.open(config.skillsDir)
   // A caller that builds its own runtime outside the CLI's memoized port cache (`orc serve`,
   // which needs a claimed slot id the shared no-arg factory cannot express) and that cache's own
@@ -63,7 +65,7 @@ export async function createPluginHost(
       const errors: string[] = []
       // read fresh per validation: a grant revoked (or a declaration edited) since process start
       // must be seen here, the way every other trust check in the codebase already does it
-      const trust = loadTrust(config.dir)
+      const trust = loadTrust(config.projectRoot)
       const byName = new Map(skills.list().map(e => [e.name, e]))
       for (const step of plan.steps) {
         if (!executors.has(step.executorRef)) errors.push(`step ${step.id}: unknown executor '${step.executorRef}'`)

@@ -18,14 +18,35 @@ export type { GraphNode, GraphLink, GraphPatch } from '@orc/ui-core/graph-wire'
  * (the browser must not drag the projection's dependencies in through it), so the two cannot be
  * one declaration — these guards are the substitute: widen or rename either side and the build
  * fails here rather than in a pane that renders nothing.
+ *
+ * TWO guards, because `Exact` alone has a hole that cost us a field. Mutual assignability holds in
+ * BOTH directions when one side gains an OPTIONAL property — a value lacking it is assignable to
+ * the type that declares it optional, and the extra key is not rejected by assignability either —
+ * so when the wire's task node gained `workspaceId?`, this file still compiled while the parser
+ * below STRIPPED the field out of every node the browser reads. That is exactly the "a new field
+ * could be silently dropped" case, so it gets a guard that fails the build rather than a review
+ * that might catch it: `SameKeys` compares `keyof`, which counts optional keys, so a property on
+ * one side and not the other is now an error.
+ *
+ * What each still owns: `Exact` catches a field whose TYPE diverges (heat as string, a widened
+ * union of node types); `SameKeys` catches a field added or removed on either side. Neither can see
+ * a schema whose RUNTIME parse is narrower than the type it infers — `z.string().min(1)` and
+ * `z.string()` both infer `string` — so a rejected-at-parse value stays a runtime concern.
  */
 type Exact<A, B> = [A] extends [B] ? ([B] extends [A] ? true : never) : never
+type SameKeys<A, B> = [keyof A] extends [keyof B] ? ([keyof B] extends [keyof A] ? true : never) : never
 const _nodeMatchesWire: Exact<z.infer<typeof S.GraphSnapshot>['nodes'][number], WireNode> = true
 const _linkMatchesWire: Exact<z.infer<typeof S.GraphSnapshot>['links'][number], WireLink> = true
 const _patchMatchesWire: Exact<NonNullable<z.infer<typeof S.Envelope>['patch']>, WirePatch> = true
+const _nodeKeysMatchWire: SameKeys<z.infer<typeof S.GraphSnapshot>['nodes'][number], WireNode> = true
+const _linkKeysMatchWire: SameKeys<z.infer<typeof S.GraphSnapshot>['links'][number], WireLink> = true
+const _patchKeysMatchWire: SameKeys<NonNullable<z.infer<typeof S.Envelope>['patch']>, WirePatch> = true
 void _nodeMatchesWire
 void _linkMatchesWire
 void _patchMatchesWire
+void _nodeKeysMatchWire
+void _linkKeysMatchWire
+void _patchKeysMatchWire
 
 export type GraphSnapshot = z.infer<typeof S.GraphSnapshot>
 export type LogRow = z.infer<typeof S.LogRows>[number]

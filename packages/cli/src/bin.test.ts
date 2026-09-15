@@ -1,10 +1,12 @@
 import { afterAll, describe, expect, it } from 'bun:test'
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { grantExtensionTrust } from '@orc/kernel'
-import { createTestDb } from '@orc/kernel/test-helpers'
+import { WORKSPACE_KIND } from '@orc/contracts'
+import { grantExtensionTrust, IDENTITY_FILE } from '@orc/kernel'
+import { createTestDb, tmpGitRepo } from '@orc/kernel/test-helpers'
+import { openKernel } from './main'
 
 const databases: Array<{ drop(): Promise<void> }> = []
 afterAll(async () => { await Promise.all(databases.map(database => database.drop())) }, 30_000)
@@ -82,6 +84,26 @@ export default {
     expect(result.exitCode).toBe(0)
     expect(existsSync(marker)).toBe(true)
     expect(readFileSync(marker, 'utf8')).toBe('finished')
+  }, 30_000)
+
+  it('adopts the checkout it boots in as a workspace, once however many commands run there', async () => {
+    const database = await createTestDb()
+    databases.push(database)
+    const { main } = tmpGitRepo()
+    const env = { ORC_DATABASE_URL: database.url }
+    expect((await runBin(main, ['init', '--name', 'demo'], env)).exitCode).toBe(0)
+    // two ordinary read commands: adoption is a boot-time fact, so the SECOND boot must find the
+    // record the first one wrote rather than mint a second workspace at the same path
+    expect((await runBin(main, ['tasks'], env)).exitCode).toBe(0)
+    expect((await runBin(main, ['tasks'], env)).exitCode).toBe(0)
+
+    const { projectId } = JSON.parse(readFileSync(path.join(main, '.orc', IDENTITY_FILE), 'utf8'))
+    const { kernel, storage } = await openKernel(database.url, { projectId })
+    database.onClose(() => storage.close())
+    const workspaces = await kernel.listWorkspaces()
+    expect(workspaces.length).toBe(1)
+    // no origin in a throwaway repo: the trunk falls back to DEFAULT_TRUNK, which `main` is on
+    expect(workspaces[0]).toMatchObject({ cwd: realpathSync(main), kind: WORKSPACE_KIND.checkout, branch: 'main', onTrunk: true })
   }, 30_000)
 
   it('migrates a fresh database before project initialization', async () => {

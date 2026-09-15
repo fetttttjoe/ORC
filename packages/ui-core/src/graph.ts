@@ -29,7 +29,7 @@ export function buildGraph(state: State, mem: MemoryFold, opts: GraphBuildOption
   const nodes: GraphNode[] = []
   const links: GraphLink[] = []
   for (const t of state.tasks.values()) {
-    nodes.push({ id: t.id, type: 'task', label: t.title, detail: t.status })
+    nodes.push({ id: t.id, type: 'task', label: t.title, detail: t.status, workspaceId: t.workspaceId })
     if (t.parentId && state.tasks.has(t.parentId)) links.push({ source: t.parentId, target: t.id, type: EDGE.child })
     const plans = state.plans.get(t.id)
     // versions are stored push-ordered and matched by their own version field (see fold's

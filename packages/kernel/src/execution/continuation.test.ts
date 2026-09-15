@@ -7,7 +7,7 @@ import {
 import { draftFixture, stepFixture } from '@orc/contracts/fixtures'
 import { openStorage } from '../storage'
 import { Kernel } from '../kernel'
-import { createTestDb, fakeProvider, testConfig, TEST_PROJECT_ID, waitFor } from '../test-helpers'
+import { createTestDb, fakeProvider, seedTestWorkspace, TEST_PROJECT_ID, TEST_WORKSPACE_ID, testConfig, waitFor } from '../test-helpers'
 import { createDbosPort, dbosSend, type DbosPort } from './dbos-port'
 
 // The continuation contract under test: the agent REPORTS `partial`, the runtime GRANTS.
@@ -54,6 +54,8 @@ describe('partial-signal continuation', () => {
     const storage = await openStorage(db.url, { projectId: TEST_PROJECT_ID })
     const log = storage.events
     kernel = new Kernel(log, undefined, undefined, dbosSend)
+    // a task must name a workspace the fold has seen — one seeded record, then tasks as before
+    await seedTestWorkspace(log)
     const config = testConfig(db.url)
     port = await createDbosPort({
       storage, config,
@@ -66,7 +68,7 @@ describe('partial-signal continuation', () => {
   afterAll(async () => { await teardown() })
 
   const newTask = async (partials: number) => {
-    const t = await kernel.createTask({ title: `continuation x${partials}`, spec: 'finish the job' })
+    const t = await kernel.createTask({ workspaceId: TEST_WORKSPACE_ID, title: `continuation x${partials}`, spec: 'finish the job' })
     partialsByTask.set(t.id, partials)
     await kernel.proposePlan(t.id, draftFixture([stepFixture({ executorRef: 'continuation-fake' })]))
     await kernel.approvePlan(t.id)

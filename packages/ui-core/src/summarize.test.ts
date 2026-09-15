@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'bun:test'
 import { EVENT_KIND } from '@orc/contracts'
-import { eventFixture } from '@orc/contracts/fixtures'
+import { TEST_WORKSPACE_ID, eventFixture } from '@orc/contracts/fixtures'
 import { shouldAdmitLogRow, summarizeEvent, type LogRow } from './summarize'
 
 describe('summarizeEvent', () => {
@@ -18,7 +18,7 @@ describe('summarizeEvent', () => {
   it('memory events resolve a noteRef for direct navigation', () => {
     const row = summarizeEvent(eventFixture({
       kind: EVENT_KIND.memory_written,
-      payload: { note: { id: 'auth-map', title: 'Auth map', scope: 'project', kind: 'fact', links: [{ id: 'other-note' }], sources: [] }, author: { source: 'cli' } },
+      payload: { note: { id: 'auth-map', title: 'Auth map', scope: 'project', kind: 'fact', links: [{ id: 'other-note' }], sources: [] }, author: { source: 'cli', workspaceId: TEST_WORKSPACE_ID } },
     }))
     expect(row.line).toContain('auth-map')
     expect(row.noteRef).toBe('note:project\u0000auth-map')
@@ -55,7 +55,7 @@ describe('summarizeEvent', () => {
   it('memory_written surfaces payload.author.taskId as authorTaskId (the writing task)', () => {
     const row = summarizeEvent(eventFixture({
       kind: EVENT_KIND.memory_written, taskId: null,
-      payload: { note: { id: 'auth-map', title: 'Auth map', scope: 'project', kind: 'fact', links: [], sources: [] }, author: { source: 'agent', taskId: 'task-A' } },
+      payload: { note: { id: 'auth-map', title: 'Auth map', scope: 'project', kind: 'fact', links: [], sources: [] }, author: { source: 'agent', workspaceId: TEST_WORKSPACE_ID, taskId: 'task-A' } },
     }))
     expect(row.authorTaskId).toBe('task-A')
   })
@@ -63,7 +63,7 @@ describe('summarizeEvent', () => {
   it('memory_deleted surfaces payload.author.taskId as authorTaskId', () => {
     const row = summarizeEvent(eventFixture({
       kind: EVENT_KIND.memory_deleted, taskId: null,
-      payload: { id: 'gone', scope: 'project', author: { source: 'agent', taskId: 'task-B' } },
+      payload: { id: 'gone', scope: 'project', author: { source: 'agent', workspaceId: TEST_WORKSPACE_ID, taskId: 'task-B' } },
     }))
     expect(row.authorTaskId).toBe('task-B')
   })
@@ -71,7 +71,7 @@ describe('summarizeEvent', () => {
   it('an ownerless (cli/human) memory row has authorTaskId null', () => {
     const row = summarizeEvent(eventFixture({
       kind: EVENT_KIND.memory_written, taskId: null,
-      payload: { note: { id: 'global', title: 'Global', scope: 'project', kind: 'fact', links: [], sources: [] }, author: { source: 'cli' } },
+      payload: { note: { id: 'global', title: 'Global', scope: 'project', kind: 'fact', links: [], sources: [] }, author: { source: 'cli', workspaceId: TEST_WORKSPACE_ID } },
     }))
     expect(row.authorTaskId).toBeNull()
   })

@@ -1,6 +1,7 @@
 import { afterAll, describe, expect, it } from 'bun:test'
 import { EVENT_KIND, MemoryScope, foldMemory, noteContentKey, noteKey, type VerifiedStamp } from '@orc/contracts'
 import { createLiveMemory, type LiveMemory } from './test-helpers'
+import { TEST_WORKSPACE_ID } from '@orc/contracts/fixtures'
 
 /**
  * The log has TWO independent interpreters — `foldMemoryInto` (contracts) and `applyEvent` (the
@@ -17,7 +18,7 @@ import { createLiveMemory, type LiveMemory } from './test-helpers'
 const cleanup: LiveMemory[] = []
 afterAll(async () => { for (const m of cleanup) await m.close() }, 30_000)
 
-const author = { source: 'cli' } as const
+const author = { source: 'cli', workspaceId: TEST_WORKSPACE_ID } as const
 
 describe('fold and read model agree on every knowledge event kind', () => {
   it('projects the same live notes, with the same content, verification and lifecycle', async () => {

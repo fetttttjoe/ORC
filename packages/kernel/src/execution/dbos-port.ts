@@ -156,6 +156,12 @@ export async function createDbosPort(opts: {
   stepTools?: (p: {
     taskId: string; stepId: string; runToken: string; role: string; executor: string; model: string
     modelRef: string; maxIterations: number; workspaceDir: string; step: PlanStep
+    // The workspace the TASK belongs to, off the TaskNode this run already folds. Here rather than
+    // looked up by the composition root because only the port knows which task is running: a
+    // supervisor serves every workspace at once, so deriving it from the supervisor's own cwd would
+    // stamp every worktree's knowledge as trunk knowledge. MemoryAuthor.workspaceId is captured at
+    // write time and never recoverable afterwards, so a wrong value here is permanent.
+    workspaceId: string
     // nearest first (parent, …, root) — a split child's decomposition lives in its PARENT's scopes
     ancestorTaskIds: string[]
   }) => ResolvedTool[] | { tools: ResolvedTool[]; memory?: StepMemory }
@@ -275,7 +281,10 @@ export async function createDbosPort(opts: {
             throw classifiedError(FAILURE_CLASS.validation_error, `skill '${ref}': ${errorMessage(err)}`)
           }
         }
-        return { step, taskSpec: task.spec, budgetUSD: task.budgetUSD, depOutputs, skills: loadedSkills }
+        // workspaceId travels with the spec because the task is only in hand HERE: the workflow
+        // body below builds the step's tool surface and cannot fold the log again (event-log reads
+        // are non-deterministic and must stay inside a checkpoint).
+        return { step, taskSpec: task.spec, workspaceId: task.workspaceId, budgetUSD: task.budgetUSD, depOutputs, skills: loadedSkills }
       }, r => [
         { kind: EVENT_KIND.step_started, payload: { stepId: args.stepId, runToken, attempt: args.attempt } },
         ...r.skills.map((s): EventDraft => ({
@@ -399,7 +408,7 @@ export async function createDbosPort(opts: {
       let stepMemory: StepMemory | undefined
       if (stepTools) {
         const bound = stepTools({
-          taskId: args.taskId, stepId: args.stepId, runToken,
+          taskId: args.taskId, stepId: args.stepId, runToken, workspaceId: init.workspaceId,
           role: init.step.role, executor: init.step.executorRef, model: modelId,
           modelRef: init.step.modelRef, maxIterations: init.step.maxIterations, workspaceDir,
           step: init.step, ancestorTaskIds: ancestorTaskIds(await projectState(), args.taskId),

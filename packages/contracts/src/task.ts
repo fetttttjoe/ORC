@@ -16,6 +16,10 @@ export const TERMINAL_TASK_STATUS: ReadonlySet<TaskStatus> =
 export const TaskNode = z.object({
   id: z.string().min(1),
   parentId: z.string().min(1).nullable(),
+  // The workspace (checkout) this task belongs to. REQUIRED: every boot adopts its cwd before a
+  // task can be created, so a missing value is a wiring bug and the schema is the guard that
+  // catches it. No legacy decoder — the operator asked for none, and the log is reset with PR2.
+  workspaceId: z.string().min(1),
   type: z.string().min(1),
   title: z.string().min(1),
   spec: z.string(),

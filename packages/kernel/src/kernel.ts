@@ -1,19 +1,33 @@
 import { randomUUID } from 'node:crypto'
+import path from 'node:path'
 import { MASTERPLAN_NOTE_ID,
-  AnalysisCompletedPayload, ChildPlanDraft, EVENT_KIND, FeedbackProvidedPayload, GROUNDED_APPROVAL_DOOR, ISOLATION_TIER, MemoryDeletedPayload, MemoryWrittenPayload, NOTE_TIER, PAYLOAD_SCHEMAS, PlanAnnotatedPayload, PlanDraft, RunRequestedPayload, STEP_ROLE, STRATEGY, TASK_STATUS, TERMINAL_TASK_STATUS, evaluateApproval, formatModelOption, isApprovalAnswer, validatePlan, type ChildPlanDraftInput, type ModelOption,
+  AnalysisCompletedPayload, ChildPlanDraft, EVENT_KIND, FeedbackProvidedPayload, GROUNDED_APPROVAL_DOOR, ISOLATION_TIER, MemoryDeletedPayload, MemoryWrittenPayload, NOTE_TIER, PAYLOAD_SCHEMAS, PlanAnnotatedPayload, PlanDraft, RunRequestedPayload, STEP_ROLE, STRATEGY, TASK_STATUS, TERMINAL_TASK_STATUS, WORKSPACE_TITLE_MAX, Workspace, WorkspaceArchivedPayload, WorkspaceMergedPayload, WorkspaceRetitledPayload, evaluateApproval, formatModelOption, isApprovalAnswer, validatePlan, type ChildPlanDraftInput, type ModelOption,
   type Analyzer, type ApprovalPolicy, type EventKind, type EventRecord,
   type PlanNote, type Plan, type PlanStep, type TaskNode, type TaskStatus,
-  type MemoryAuthor,
+  type MemoryAuthor, type WorkspaceKind,
 } from '@orc/contracts'
 import { foldPlanNotes, planApprovalStamp, planGraphHash, planScope, PLAN_STEP_ID, PLAN_STEP_ROLE } from './execution/strategies/grounded-plan'
 import { DEFAULT_MAX_ITERATIONS } from './config'
+import { feedbackKey, openFeedbackTopics } from './feedback-open'
 import { EventLog, type EventLogOps } from './storage'
 import { estimateCostUSD, fold, gatedChildren, subtreeTaskIds, subtreeUsage, taskChangedPaths, taskNoteWrites, taskVerifiedNotes, type State, type TaskNoteWrite, type TaskVerifiedNote } from './projections'
+import { applyArchived, applyRetitle, workspaceByCwd, workspaceCwdFor } from './workspaces'
 import { KERNEL_ERROR_CODE, KernelError } from './errors'
 
 // D6 targeted re-plan (M5b): what listAnnotations hands back to the read_annotations tool — the
 // plan_annotated payload plus the event's own seq, so the agent can order/dedupe across rounds.
 export type PlanAnnotation = PlanAnnotatedPayload & { seq: number }
+
+// `cwd` is the workspace's NATURAL KEY, so both mint points normalize it through here: '/repo' and
+// '/repo/' are one directory, and two live records for it make workspaceByCwd answer whichever was
+// minted first (and the duplicate guard wave the second one through). Normalization is SYNTACTIC
+// only — resolving symlinks needs the filesystem, and stays with the adopting caller, which already
+// realpaths the directory before it gets here. An empty cwd would resolve to the PROCESS's own
+// directory, minting a record for a directory nobody named, so it is refused instead.
+const workspaceCwdKey = (cwd: string): string => {
+  if (cwd.trim() === '') throw new KernelError(KERNEL_ERROR_CODE.invalid_transition, 'a workspace needs a cwd')
+  return path.resolve(cwd)
+}
 
 // Who authored a split's plan draft. Omitted = 'agent' (fail closed): only the kernel's own freeze
 // (finalize_plan → withCommitStep) may claim it, and only that origin may carry the committer role.
@@ -59,7 +73,8 @@ export class Kernel {
   // template steps rather than by each analyzer: the plan step hardcoded 30 and every subplan
   // inherits it (proposeSplit expands with parentStep.maxIterations), so raising the project
   // ceiling moved nothing below the analyze step. One override, one place, plans stay frozen data.
-  async createGroundedTask(input: { title: string; spec: string; modelRef: string; analyzerRef: string; parentId?: string; budgetUSD?: number | null; modelCatalog?: ModelOption[]; maxIterations?: number }): Promise<TaskNode> {
+  // `workspaceId`: same rule as createTask — optional in the type only so a child inherits.
+  async createGroundedTask(input: { title: string; spec: string; modelRef: string; analyzerRef: string; parentId?: string; budgetUSD?: number | null; workspaceId?: string; modelCatalog?: ModelOption[]; maxIterations?: number }): Promise<TaskNode> {
     // the title is a LABEL, never the goal — a grounded run without intent would make the
     // analyze/plan agents guess (burning an analyze pass on "what did you mean?")
     const spec = input.spec.trim()
@@ -70,7 +85,7 @@ export class Kernel {
     if (!analyzer)
       throw new KernelError(KERNEL_ERROR_CODE.invalid_transition, `unknown analyzer '${input.analyzerRef}' — register it or pass a valid analyzerRef`)
     return this.log.transaction(async tx => {
-      const task = await this.createTaskIn(tx, { title: input.title, spec, type: 'grounded', parentId: input.parentId, budgetUSD: input.budgetUSD })
+      const task = await this.createTaskIn(tx, { title: input.title, spec, type: 'grounded', parentId: input.parentId, budgetUSD: input.budgetUSD, workspaceId: input.workspaceId })
       const maxIterations = input.maxIterations ?? DEFAULT_MAX_ITERATIONS
       const analyzeStep: PlanStep = { ...analyzer.analysisStep({ modelRef: input.modelRef, taskSpec: spec }), maxIterations, readOnlySource: true }
       const planStep: PlanStep = {
@@ -101,7 +116,9 @@ export class Kernel {
     })
   }
 
-  async createTask(input: { title: string; spec?: string; type?: string; parentId?: string; budgetUSD?: number | null }): Promise<TaskNode> {
+  // `workspaceId` is required in practice and optional in the type only so a child can inherit its
+  // parent's (createTaskIn). Omitting it without a parentId is a KernelError, not a default.
+  async createTask(input: { title: string; spec?: string; type?: string; parentId?: string; budgetUSD?: number | null; workspaceId?: string }): Promise<TaskNode> {
     return this.log.transaction(tx => this.createTaskIn(tx, input))
   }
 
@@ -193,7 +210,9 @@ export class Kernel {
             `step '${reserved.id}' claims role '${STEP_ROLE.committer}', which only the kernel's autoCommit freeze may set — remove it from the split; the commit step is appended for you when the pipeline commits`)
       }
       const child: TaskNode = {
-        id: childTaskId, parentId: parent.id, type: 'split', title: input.title, spec: input.spec,
+        // a split runs in the same checkout its parent step is running in — inherited, never
+        // re-derived, so a subtree can never straddle two working directories
+        id: childTaskId, parentId: parent.id, workspaceId: parent.workspaceId, type: 'split', title: input.title, spec: input.spec,
         status: TASK_STATUS.draft, zone: [], budgetUSD, depth: parent.depth + 1,
         createdAt: new Date().toISOString(),
       }
@@ -315,18 +334,22 @@ export class Kernel {
   // The ONE derivation shared by openFeedback (read side) and replyFeedback (write side) — so the
   // question a human sees and the topic a reply resolves can never drift apart. byTask is seq-ordered.
   private openRequest(events: EventRecord[]): OpenRequest | null {
-    const answers = events.flatMap(e => {
-      if (e.kind !== EVENT_KIND.feedback_provided) return []
-      const p = PAYLOAD_SCHEMAS.feedback_provided.safeParse(e.payload)
-      return p.success ? [{ seq: e.seq, topic: p.data.topic }] : []
-    })
+    // WHICH questions are still open is feedback-open.ts's rule, shared with the workspace health
+    // rung so the gate a human sees in `ws ls` and the gate a reply resolves cannot disagree. What
+    // stays here is the part only this caller needs: the LATEST open one, with its event, because a
+    // reply resumes that event's step/run envelope.
+    const open = openFeedbackTopics(events)
     for (const event of [...events].reverse()) {
       if (event.kind !== EVENT_KIND.feedback_requested) continue
       // lenient like every other fold: a payload that does not parse is not a question anyone can
       // answer, so it must not present itself as the open gate and wedge the task
       const p = PAYLOAD_SCHEMAS.feedback_requested.safeParse(event.payload)
       if (!p.success) continue
-      if (answers.some(a => a.seq > event.seq && a.topic === p.data.topic)) continue
+      // A project-level event names no task and can hold no question. Unreachable through both
+      // callers (byTask returns one task's stream), so it is a guard rather than an assertion —
+      // narrowing the type is what removes the non-null assertion the key would otherwise need.
+      if (event.taskId === null) continue
+      if (!open.has(feedbackKey(event.taskId, p.data.topic))) continue
       return { event, ...p.data }
     }
     return null
@@ -445,7 +468,10 @@ export class Kernel {
         ))
         : undefined
       const payload = FeedbackProvidedPayload.parse({
-        topic, text, author: { source: via }, ...(planHash && { planHash }),
+        // workspaceId off the TASK, which requireTask above already has in hand: an answer belongs
+        // to the checkout the task is being worked in, not to wherever the person answering happens
+        // to be sitting — the web and MCP doors can both reply to a task in another worktree.
+        topic, text, author: { source: via, workspaceId: task.workspaceId }, ...(planHash && { planHash }),
       })
       const provided = await tx.append({
         taskId, stepId: event.stepId, runToken: event.runToken,
@@ -486,10 +512,21 @@ export class Kernel {
   // anything happened after this event.
   async requestRun(taskId: string, opts: { cwd?: string; retry?: boolean } = {}): Promise<number> {
     return this.log.transaction(async tx => {
-      await this.requireTask(tx, taskId)
+      const state = await this.stateOf(tx)
+      const task = this.requireTaskIn(state, taskId)
+      // Resolved HERE, not in the port: the port folds per task (byTask) and never sees the
+      // project-level workspace events, so the workspace's cwd is recorded into the request and
+      // the port's own chain (override → inherited → project dir) stays exactly as it was.
+      const cwd = opts.cwd ?? workspaceCwdFor(task, state.workspaces)
+      // null means ORPHAN — the task names a workspace the log never recorded. Recording null
+      // would send the run to the project directory as if nothing were wrong; the operator needs
+      // to see that the workspace record is missing.
+      if (cwd === null)
+        throw new KernelError(KERNEL_ERROR_CODE.workspace_not_found,
+          `task '${taskId}' names workspace '${task.workspaceId}', which is not in the log — pass --cwd to run it anyway`)
       const requested = await tx.append({
         taskId, stepId: null, runToken: null, kind: EVENT_KIND.run_requested,
-        payload: RunRequestedPayload.parse({ taskId, cwd: opts.cwd ?? null, retry: opts.retry ?? false }),
+        payload: RunRequestedPayload.parse({ taskId, cwd, retry: opts.retry ?? false }),
       })
       return requested.seq
     })
@@ -520,6 +557,132 @@ export class Kernel {
         stamped.push(id)
       }
       return stamped
+    })
+  }
+
+  // ── Workspaces ────────────────────────────────────────────────────────────────────────────────
+  // Adoption: the first orc command in ANY checkout records it, so a worktree becomes a workspace by
+  // being used and nothing is ever registered by hand. Idempotent on the exact cwd among ACTIVE
+  // records (workspaces.ts workspaceByCwd) — an archived one at the same path is finished business
+  // and a new record is minted beside it.
+  //
+  // An existing record is returned UNCHANGED: `branch`, `onTrunk`, `kind` and `title` are the values
+  // that record was MINTED with, and the ones passed here are DISCARDED. That is deliberate and not
+  // a cheap idempotency — a difference has two opposite readings (the checkout really moved, or this
+  // adoption raced a branch switch), and only the caller knows which. `created: false` plus the
+  // record it found is what lets it decide; adoptCwd archives and re-adopts on a branch change.
+  //
+  // `managed` and `baseBranch` are OPTIONAL, defaulting to the adoption answer (false / null): a
+  // directory orc merely walked into is not orc's to delete, and it was cut from nothing orc knows.
+  // They exist for the ONE caller that is not discovering a directory but REPLACING a record for it —
+  // the re-adoption above, which holds the prior record and is the only place those two facts can
+  // come from. Derived they cannot be: nothing on disk says orc created this tree. Dropped, an
+  // `orc ws new` worktree that switched branches would come back unmanaged, and `archive --remove`
+  // would refuse to delete a tree orc had made itself. Still NOT a general update door — it mints or
+  // it returns what it found, and `createWorkspace` remains the deliberate half.
+  async ensureWorkspace(input: {
+    cwd: string; branch: string | null; kind: WorkspaceKind; onTrunk: boolean; title?: string
+    managed?: boolean; baseBranch?: string | null
+  }): Promise<{ workspace: Workspace; created: boolean }> {
+    const cwd = workspaceCwdKey(input.cwd)
+    return this.log.transaction(async tx => {
+      const existing = workspaceByCwd((await this.stateOf(tx)).workspaces, cwd)
+      if (existing) return { workspace: existing, created: false }
+      // The DERIVED title is truncated, never refused. Adoption runs at BOOT, so a branch longer
+      // than WORKSPACE_TITLE_MAX (or, on a detached HEAD, a very long directory name) would make
+      // Workspace.parse throw and every single orc command in that checkout would fail before it
+      // reached its own handler. An explicit title is the caller's own and still parses on its
+      // own terms — an operator who typed one too long gets told, not silently shortened.
+      const derived = (input.branch ?? path.basename(cwd)).slice(0, WORKSPACE_TITLE_MAX)
+      const workspace = Workspace.parse({
+        // a detached HEAD has no branch to name the workspace after, so the directory does it —
+        // an untitled record would be a row the operator cannot tell from any other
+        id: randomUUID(), title: input.title ?? derived, cwd,
+        branch: input.branch, baseBranch: input.baseBranch ?? null, kind: input.kind,
+        managed: input.managed ?? false, onTrunk: input.onTrunk,
+        createdAt: new Date().toISOString(), archivedAt: null,
+      })
+      await this.appendProjectEvent(tx, EVENT_KIND.workspace_created, { workspace })
+      return { workspace, created: true }
+    })
+  }
+
+  // The deliberate half: orc created the directory (a `git worktree add`), so `managed` is the
+  // caller's to declare — it is the fact that later licenses `git worktree remove`.
+  async createWorkspace(input: { title: string; cwd: string; branch: string; baseBranch: string; kind: WorkspaceKind; managed: boolean; onTrunk: boolean }): Promise<Workspace> {
+    const cwd = workspaceCwdKey(input.cwd)
+    return this.log.transaction(async tx => {
+      if (workspaceByCwd((await this.stateOf(tx)).workspaces, cwd))
+        throw new KernelError(KERNEL_ERROR_CODE.invalid_transition, `a workspace already exists at ${cwd}`)
+      const workspace = Workspace.parse({ id: randomUUID(), ...input, cwd, createdAt: new Date().toISOString(), archivedAt: null })
+      await this.appendProjectEvent(tx, EVENT_KIND.workspace_created, { workspace })
+      return workspace
+    })
+  }
+
+  // Re-seat a record that ALREADY EXISTED, under its original id. `orc purge` deletes every event,
+  // workspace_created included, and then re-seeds the project's identity notes — whose MemoryAuthor
+  // has to name a workspace the log still carries, and has to name the SAME one the notes were
+  // written against. Re-adopting instead would mint a fresh uuid for that directory and orphan them.
+  //
+  // Through the kernel rather than a raw `log.append` at the call site, because the kernel is the
+  // ONE writer of workspace records and the "no two ACTIVE records share a cwd" rule only holds
+  // when the check and the append share a transaction: a boot adoption racing the purge would
+  // otherwise leave two live records for one directory, and workspaceByCwd answers whichever it
+  // finds first. Re-parsed on the way in — the caller is handing back a value it read before a
+  // wipe, which is exactly when a half-stale shape reaches a writer.
+  async restoreWorkspace(workspace: Workspace): Promise<Workspace> {
+    const parsed = Workspace.parse(workspace)
+    const cwd = workspaceCwdKey(parsed.cwd)
+    return this.log.transaction(async tx => {
+      if (workspaceByCwd((await this.stateOf(tx)).workspaces, cwd))
+        throw new KernelError(KERNEL_ERROR_CODE.invalid_transition, `a workspace already exists at ${cwd}`)
+      const restored = { ...parsed, cwd }
+      await this.appendProjectEvent(tx, EVENT_KIND.workspace_created, { workspace: restored })
+      return restored
+    })
+  }
+
+  async retitleWorkspace(id: string, title: string): Promise<Workspace> {
+    return this.log.transaction(async tx => {
+      const w = this.requireWorkspace(await this.stateOf(tx), id)
+      await this.appendProjectEvent(tx, EVENT_KIND.workspace_retitled, WorkspaceRetitledPayload.parse({ workspaceId: id, title }))
+      return applyRetitle(w, title) // the fold's own transition — never a second spelling of it
+    })
+  }
+
+  // `archived` is a PARAMETER, not two methods — the same rule `orc memory archive/restore` follows,
+  // so restore cannot drift from archive. A SETTER, not a transition: re-archiving re-stamps
+  // archivedAt and restoring a live record appends a no-op, both deliberately allowed — an operator
+  // correcting a record must not have to know its current state, and the fold is idempotent either way.
+  async setWorkspaceArchived(id: string, archived: boolean): Promise<Workspace> {
+    return this.log.transaction(async tx => {
+      const w = this.requireWorkspace(await this.stateOf(tx), id)
+      const at = new Date().toISOString()
+      await this.appendProjectEvent(tx, EVENT_KIND.workspace_archived, WorkspaceArchivedPayload.parse({ workspaceId: id, archived, at }))
+      return applyArchived(w, archived, at)
+    })
+  }
+
+  async listWorkspaces(opts: { includeArchived?: boolean } = {}): Promise<Workspace[]> {
+    const all = [...(await this.state()).workspaces.values()]
+    return opts.includeArchived ? all : all.filter(w => w.archivedAt === null)
+  }
+
+  // The "commit" of the workspace transaction: the branch landed on trunk. Recorded ONCE — a reader
+  // derives from this event alone (contracts' WorkspaceMergedPayload), so a second merge naming a
+  // different commit for the same landing would answer differently depending on which one it folded.
+  async mergeWorkspace(id: string, input: { mergeCommit: string; trunk: string }): Promise<WorkspaceMergedPayload> {
+    return this.log.transaction(async tx => {
+      // ONE fold for both facts: this reads the workspace AND its merge, and stateOf refolds the
+      // whole log per call.
+      const state = await this.stateOf(tx)
+      this.requireWorkspace(state, id)
+      if (state.workspaceMerges.has(id))
+        throw new KernelError(KERNEL_ERROR_CODE.invalid_transition, `workspace '${id}' is already merged`)
+      const payload = WorkspaceMergedPayload.parse({ workspaceId: id, ...input, at: new Date().toISOString() })
+      await this.appendProjectEvent(tx, EVENT_KIND.workspace_merged, payload)
+      return payload
     })
   }
 
@@ -560,11 +723,23 @@ export class Kernel {
 
   private async createTaskIn(
     tx: EventLogOps,
-    input: { title: string; spec?: string; type?: string; parentId?: string; budgetUSD?: number | null },
+    // `workspaceId` is optional in the TYPE for exactly one reason: a child may omit it and inherit
+    // its parent's. TaskNode.workspaceId is required, and a root task that names none is refused
+    // below — a default here would silently bind work to a workspace nobody chose.
+    input: { title: string; spec?: string; type?: string; parentId?: string; budgetUSD?: number | null; workspaceId?: string },
   ): Promise<TaskNode> {
-    const parent = input.parentId ? await this.requireTask(tx, input.parentId) : null
+    // ONE fold for both facts this needs — the parent (inheritance) and the workspace record.
+    // stateOf refolds the whole log per call, so asking requireTask and requireWorkspace for their
+    // own would pay for the same fold twice on every task creation.
+    const state = await this.stateOf(tx)
+    const parent = input.parentId ? this.requireTaskIn(state, input.parentId) : null
+    const workspaceId = input.workspaceId ?? parent?.workspaceId
+    if (workspaceId === undefined)
+      throw new KernelError(KERNEL_ERROR_CODE.workspace_not_found,
+        'a task needs a workspace — pass workspaceId (a child inherits its parent\'s)')
+    this.requireWorkspace(state, workspaceId)
     const task: TaskNode = {
-      id: randomUUID(), parentId: parent?.id ?? null, type: input.type ?? 'generic',
+      id: randomUUID(), parentId: parent?.id ?? null, workspaceId, type: input.type ?? 'generic',
       title: input.title, spec: input.spec ?? '', status: TASK_STATUS.draft, zone: [],
       budgetUSD: input.budgetUSD ?? parent?.budgetUSD ?? null,
       depth: parent ? parent.depth + 1 : 0, createdAt: new Date().toISOString(),
@@ -620,9 +795,31 @@ export class Kernel {
     await ops.append({ taskId, stepId: null, runToken: null, kind, payload })
   }
 
+  // A project-level event carries NO task binding — the envelope's taskId is null by design (the
+  // same shape models_discovered and commit_recorded already use), so `append` above, which demands
+  // a task id, cannot express it.
+  private async appendProjectEvent(ops: EventLogOps, kind: EventKind, payload: Record<string, unknown>): Promise<void> {
+    await ops.append({ taskId: null, stepId: null, runToken: null, kind, payload })
+  }
+
   private async requireTask(ops: EventLogOps, id: string): Promise<TaskNode> {
-    const t = (await this.stateOf(ops)).tasks.get(id)
+    return this.requireTaskIn(await this.stateOf(ops), id)
+  }
+
+  // requireWorkspace's shape, for the same reason: a caller that already holds a fold (createTaskIn
+  // needs the parent AND the workspace out of one) must not pay for a second one to ask this.
+  private requireTaskIn(state: State, id: string): TaskNode {
+    const t = state.tasks.get(id)
     if (!t) throw new KernelError(KERNEL_ERROR_CODE.task_not_found, `no task '${id}'`)
     return t
+  }
+
+  // Takes the STATE, not the log ops (requireTask's shape): every workspace caller already holds a
+  // fold, and mergeWorkspace checks two facts out of it — folding the whole log twice to answer one
+  // question is a cost the shape, not the caller, would impose.
+  private requireWorkspace(state: State, id: string): Workspace {
+    const w = state.workspaces.get(id)
+    if (!w) throw new KernelError(KERNEL_ERROR_CODE.workspace_not_found, `no workspace '${id}'`)
+    return w
   }
 }

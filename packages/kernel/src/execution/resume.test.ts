@@ -8,7 +8,7 @@ import { draftFixture, stepFixture } from '@orc/contracts/fixtures'
 import { openStorage } from '../storage'
 import { Kernel } from '../kernel'
 import { fold } from '../projections'
-import { createTestDb, TEST_PROJECT_ID } from '../test-helpers'
+import { createTestDb, seedTestWorkspace, TEST_PROJECT_ID, TEST_WORKSPACE_ID } from '../test-helpers'
 
 const FIXTURE = fileURLToPath(new URL('./resume-fixture.ts', import.meta.url))
 const PARALLEL_FIXTURE = fileURLToPath(new URL('./resume-parallel-fixture.ts', import.meta.url))
@@ -35,7 +35,9 @@ describe('kill -9 resume (spec §10/§11 — the crown jewel)', () => {
     const storage = await openStorage(db.url, { projectId: TEST_PROJECT_ID })
     const log = storage.events
     const kernel = new Kernel(log)
-    const t = await kernel.createTask({ title: 'resume me', spec: 'survive kill -9' })
+    // a task must name a workspace the fold has seen — one seeded record, then tasks as before
+    await seedTestWorkspace(log)
+    const t = await kernel.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'resume me', spec: 'survive kill -9' })
     await kernel.proposePlan(t.id, draftFixture([stepFixture({ title: 'slow', instructions: 'stall then finish' })]))
     await kernel.approvePlan(t.id)
     const marker = path.join(mkdtempSync(path.join(tmpdir(), 'orc-resume-')), 'first-run-started')
@@ -90,7 +92,9 @@ describe('kill -9 resume (spec §10/§11 — the crown jewel)', () => {
     const storage = await openStorage(db.url, { projectId: TEST_PROJECT_ID })
     const log = storage.events
     const kernel = new Kernel(log)
-    const t = await kernel.createTask({ title: 'resume me in parallel', spec: 'survive kill -9 with a wide plan' })
+    // a task must name a workspace the fold has seen — one seeded record, then tasks as before
+    await seedTestWorkspace(log)
+    const t = await kernel.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'resume me in parallel', spec: 'survive kill -9 with a wide plan' })
     await kernel.proposePlan(t.id, draftFixture([
       stepFixture({ id: 'a', title: 'a (slow)' }),
       stepFixture({ id: 'b', title: 'b (fast)' }),

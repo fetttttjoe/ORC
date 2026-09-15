@@ -9,6 +9,10 @@ export interface CopilotConfig {
   resolveModel: (ref: string) => LanguageModel // throws for unknown provider/model
   defaultModelRef: string
   listModels?: () => Promise<string[]> // live provider/model refs for pickers + the copilot
+  // the project's workspaces WITH their health for the copilot's project_status — the same
+  // door-neutral dep mcp-serve wires, so both doors answer "which checkout is this task in, and is
+  // it still going anywhere?" the same way
+  listWorkspaces?: Parameters<typeof buildCopilotTools>[0]['listWorkspaces']
   price?: (ref: string, usage: { inputTokens?: number; outputTokens?: number; inputTokenDetails?: { cacheReadTokens?: number; cacheWriteTokens?: number } }) => number | null
 }
 
@@ -150,6 +154,12 @@ export function startGraphUi(opts: {
         // the same probe the footer badge polls (/api/health) — the copilot must see a
         // rebuilding read model too, or it narrates a silent project as healthy
         ...(opts.health && { health: opts.health }),
+        // HOME project only. The dep reads the kernel this server was started with, while
+        // `projectId` is whichever chat the user is looking at — wiring it unconditionally would
+        // list this checkout's workspaces under a FOREIGN project's tasks, which is a wrong answer
+        // rather than a missing one. listModels above needs no such fence: a provider catalog is
+        // not project-scoped.
+        ...(home && cfg.listWorkspaces && { listWorkspaces: cfg.listWorkspaces }),
       }),
       stopWhen: stepCountIs(8),
     })

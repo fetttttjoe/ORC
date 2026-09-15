@@ -134,9 +134,11 @@ Key terms used throughout the orchestrator codebase and documentation. Many term
 
 **Plugin** — Replaceable behavior: executor, provider, skill, tool server, extension. Registered via `seedRegistries`, opted-in via plan refs. See [plugin registry](../packages/kernel/src/plugins/host.ts).
 
-**Project** — Isolated execution context with its own identity, event log, operations, vault, and memory. Set via `orc init --name`. See [project identity](ARCHITECTURE.md#identity-and-isolation), [`projectId` + `projectName` in config](../README.md#quickstart).
+**Project** — A git repository under orc: isolated execution context with its own identity, event log, operations, vault, and memory. Identity lives in the main checkout's `.orc/identity.json`; every worktree of the repository resolves to the same project. One project spans many [workspaces](#workspace) — the checkouts it is worked in, each adopted on first use. Set via `orc init --name`. See [project identity](ARCHITECTURE.md#identity-and-isolation), [`projectId` + `projectName` in config](../README.md#quickstart).
 
 **Projector** — Background process that reads from the event log and writes projections (vault markdown, Surreal notes, operation journal index). See [vault projector](../packages/vault-projector/), [memory projector](../plugins/memory/src/projector.ts).
+
+**Provisional knowledge** — A note written from a [workspace](#workspace) that is not on trunk and has not merged: it describes work nobody else can see yet. Derived at read time from the note's `workspaceId` and the workspace table's current standing, never stored — which is what lets one `workspace_merged` clear it across the whole corpus on the next read. `memory_search`, `memory_read` and `memory_neighbors` carry `provisional: { workspaceId, title }` on such rows and nothing at all on final ones; a note whose workspace the table does not know is deliberately *not* flagged (that is ignorance, not evidence). A vault file carries `provisional: <workspaceId>` in its frontmatter as a snapshot taken when the file was rendered — a merge re-renders nothing, so the file keeps the flag until the note is next written or the vault is rebuilt from the read model (projector start, `orc memory rebuild`). See [`provisionalOf`](../plugins/memory/src/provisional.ts), [`ProvisionalFlag`](../packages/contracts/src/workspace-entity.ts), [memory trust](ARCHITECTURE.md#note-lifecycle-—-currency-healing-retirement).
 
 ---
 
@@ -172,13 +174,13 @@ Key terms used throughout the orchestrator codebase and documentation. Many term
 
 ## T
 
-**Task** — Top-level work unit. Created via `orc new`, approved via `orc approve`, run via `orc run`. Has a plan and execution state. See [`Task` type](../packages/contracts/src/execution.ts), [`orc new` command](../README.md#quickstart).
+**Task** — Top-level work unit. Created via `orc new`, approved via `orc approve`, run via `orc run`. Has a plan and execution state. Every task names the [workspace](#workspace) it belongs to — a required field, taken from the checkout it was created in (`--workspace <id>` re-homes it, a split child inherits its parent's) — and its runs execute there unless `--cwd` overrides. `orc tasks` groups by workspace. See [`TaskNode` type](../packages/contracts/src/task.ts), [`orc new` command](../README.md#quickstart).
 
 **Tool** — External capability invoked during step execution (via MCP server or built-in skill). Opted-in via `toolRefs`. See [MCP server](#mcp), [tool references](../packages/contracts/src/execution.ts#toolRefs), [`mcp-client` plugin](../plugins/mcp-client/).
 
 **Topic** — A group of [claims](#claim) that mean roughly the same thing, DERIVED by clustering their embeddings — never authored, and not an agent-spelled filter. Recomputed wholesale by `refreshTopics` from the claim table (the third pipeline stage), so nothing about a topic lives only in the read model. A topic's label is the medoid claim's opening words (derived by `topicLabel()`, cut to MEMORY_LIMITS.topicLabelChars=60 and elided at a word boundary), so labels are verbatim prefixes, not paraphrases. The full medoid sentence is always reachable via `topicClaims(topicKey)` / `orc memory topics <topicKey>` / `memory_topics <topicKey>` tool. Browsable via `orc memory topics` (human rows) or `orc memory topics --json` (pretty-printed JSON) and the `memory_topics` tool; fetching one is a TRACKED event (`memory_topic_accessed`). See [topics](ARCHITECTURE.md#topics-—-grouping-that-is-derived-never-authored), [`cluster.ts`](../plugins/memory/src/cluster.ts).
 
-**Trust** — Fingerprint-based consent for plugins/MCP/extensions. Declared in `.orc/config.json`, granted via `orc mcp trust` / `orc ext trust`, stored in `.orc/trust.json` (mode 0600, never committed). See [trust model](../README.md#operational-notes), [declare vs grant invariant](EXTENDING.md#invariants-—-the-rules-that-keep-changes-cheap).
+**Trust** — Fingerprint-based consent for plugins/MCP/extensions. Declared in `.orc/config.json`, granted via `orc mcp trust` / `orc ext trust`, stored in `.orc/trust.json` (under the main checkout, mode 0600, never committed). See [trust model](../README.md#operational-notes), [declare vs grant invariant](EXTENDING.md#invariants-—-the-rules-that-keep-changes-cheap).
 
 ---
 
@@ -191,6 +193,8 @@ Key terms used throughout the orchestrator codebase and documentation. Many term
 ## W
 
 **Workflow** — DBOS-managed durable execution context for a run. Survives crashes via checkpoints + operation journal. See [DBOS workflow](../packages/kernel/src/execution/dbos-port.ts), [workflow recovery](../README.md#guarantees-stated-precisely).
+
+**Workspace** — One checkout being worked in: the unit a [task](#task) belongs to, a run executes in, and a note remembers being written from. Two kinds — `checkout` (the repository's main checkout, the one holding the identity) and `worktree` (a linked git worktree, whether `orc ws new` created it or you did). `cwd` (a resolved realpath) is the natural key: one *active* record per directory, and the first orc command run anywhere adopts that directory, so no checkout is ever registered by hand. `managed` is true only for a directory orc created and is the fact that licenses `git worktree remove` (`orc ws archive --remove`, and the removal `orc ws merge` performs). `onTrunk` is captured at adoption and decides finality: knowledge written on trunk is final, everywhere else it is [provisional](#provisional-knowledge) until `orc ws merge` / `orc ws finalize` records `workspace_merged`. Because it is captured rather than re-derived, a checkout that *switches branch* is re-adopted — the old record is archived and a new one minted for the new branch, carrying over the facts a mint cannot derive (`managed`, `baseBranch`, `kind`) — so a main checkout moved onto a feature branch stops reading as trunk. **Workspace health** — `dangling` / `waiting` / `active` / `idle` / `merged` — is one derivation over the fold plus two probes (does the directory exist, is it clean), rendered identically by `orc ws ls`, the `workspace_list` tool and `project_status`. See [`Workspace` entity](../packages/contracts/src/workspace-entity.ts), [lifecycle operations](../packages/cli/src/workspace-ops.ts), [the `orc ws` surface](../packages/cli/src/ws-commands.ts), [health + `workspaceByCwd`](../packages/kernel/src/workspaces.ts), [adoption](../packages/cli/src/workspace-adopt.ts), [Workspaces](../README.md#workspaces).
 
 ---
 
@@ -208,7 +212,7 @@ Key terms used throughout the orchestrator codebase and documentation. Many term
 - [Checkpoint](#checkpoint), [Operation](#operation), [Signal](#signal), [Workflow](#workflow), [Fold](#fold), [DBOS](#dbos)
 
 **Knowledge & Memory**
-- [Memory note](#memory-note), [Note tier](#note-tier), [Claim](#claim), [Claim history](#claim-history), [Topic](#topic), [Knowledge graph](#knowledge-graph), [Research note](#research-note), [Citation](#citation), [Scope](#scope), [Retention](#retention)
+- [Memory note](#memory-note), [Note tier](#note-tier), [Claim](#claim), [Claim history](#claim-history), [Topic](#topic), [Knowledge graph](#knowledge-graph), [Research note](#research-note), [Citation](#citation), [Scope](#scope), [Retention](#retention), [Provisional knowledge](#provisional-knowledge)
 
 **Architecture**
 - [Event](#event), [Event log](#event-log), [Data-access service](#data-access-service), [Kernel](#kernel), [Contracts](#contracts), [Seam](#seam), [Plugin](#plugin)
@@ -217,7 +221,7 @@ Key terms used throughout the orchestrator codebase and documentation. Many term
 - [Decision](#decision), [Audit replay](#audit-replay), [Lineage](#lineage), [Index](#index)
 
 **Operations**
-- [Project](#project), [Task](#task), [Plan](#plan), [Split](#split), [Approval](#approval), [Artifact](#artifact), [Tool](#tool), [Skill](#skill)
+- [Project](#project), [Workspace](#workspace), [Task](#task), [Plan](#plan), [Split](#split), [Approval](#approval), [Artifact](#artifact), [Tool](#tool), [Skill](#skill)
 
 **Infrastructure**
 - [MCP](#mcp), [Trust](#trust), [Fingerprint](#fingerprint), [Degraded memory](#degraded-memory), [Idempotency key](#idempotency-key), [Redaction](#redaction), [Projector](#projector)

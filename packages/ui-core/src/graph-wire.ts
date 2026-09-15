@@ -13,6 +13,11 @@ export interface GraphNode {
   // is not assignable to the type that declares the wire, and the app compiled only because a
   // hand-written duplicate of this shape stood in for the parsed one.
   heat?: number | undefined // notes only: 0–1 activation heat (2dp) — recently-pulled knowledge renders hot; absent = cold
+  // tasks only: the checkout the task is worked in. Every task has one (TaskNode.workspaceId is
+  // required and set at creation — nothing re-homes a task), so a consumer can group the task list
+  // by workspace without a second fold of the log; absent on every other node type. diffGraphs
+  // deliberately does not compare it — it cannot change for an id that already exists.
+  workspaceId?: string | undefined
 }
 export interface GraphLink {
   source: string

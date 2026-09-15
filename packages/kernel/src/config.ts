@@ -5,6 +5,8 @@ import { parseEnv } from 'node:util'
 import { atomicWriteFileSync } from './atomic-file'
 import { z } from 'zod'
 import { errorMessage, ApprovalPolicy, AUTO_HEAL_MODE, AutoHealMode, GROUNDED_APPROVAL_DOOR, GroundedApprovalDoor, MCP_SERVER_ID_RE, McpServerConfig, ModelCost } from '@orc/contracts'
+import { gitDirs, gitToplevel } from './git'
+import { resolveProjectRoot } from './project-root'
 
 // bump per release — pins DBOS__APPVERSION so recovery survives rebuilds (spec §4)
 const APP_VERSION = 'orc-0.1.0'
@@ -19,7 +21,7 @@ export const DEFAULT_MAX_ITERATIONS = 30
 // consumes is validated here, loudly. (Env of third-party processes we spawn — MCP
 // servers/containers — stays a loose optional record by design: theirs can be absent
 // or opaque.) The schema is a factory because path defaults depend on the project dir.
-const settingsSchema = (dir: string) =>
+const settingsSchema = (dir: string, projectRoot: string) =>
   z.object({
     projectId: z.uuid().nullable().default(null),
     projectName: z.string().min(1).nullable().default(null),
@@ -70,6 +72,12 @@ const settingsSchema = (dir: string) =>
     // decision, taken here in the config FILE, never through anything a model can say.
     groundedApprovalDoors: z.array(GroundedApprovalDoor).nonempty().default([GROUNDED_APPROVAL_DOOR.cli]),
     workspaceRoot: z.string().default(path.join(dir, '.orc', 'workspaces')),
+    // The branch this project treats as trunk — the fact a workspace's `onTrunk` is captured
+    // against at adoption, and the branch `orc ws` branches off. Deliberately NO `.default('main')`:
+    // unset is a meaningful state ("ask git": origin/HEAD via defaultBranch), and a default here
+    // would answer 'main' for a repo whose trunk is `master` or `develop` without anyone noticing.
+    // Set it when git cannot be asked (no remote) or when the remote's HEAD is not the operator's trunk.
+    trunkBranch: z.string().min(1).optional(),
     // operator-allowlisted commands steps may run via the `exec` tool (e.g. "bun test",
     // "bun run typecheck"). Empty = the tool is not offered at all. Without this, acceptance
     // criteria like "tests green" are structurally unverifiable by every step: implementers
@@ -96,8 +104,8 @@ const settingsSchema = (dir: string) =>
     projectDbUser: z.string().default('root'),
     projectDbPassword: z.string().default('orc'),
     costOverrides: z.record(z.string(), z.record(z.string(), ModelCost)).default({}),
-    vaultDir: z.string().default(path.join(dir, 'vault')).transform(p => path.resolve(dir, p)),
-    skillsDir: z.string().optional().transform(p => (p === undefined ? undefined : path.resolve(dir, p))),
+    vaultDir: z.string().default(path.join(projectRoot, 'vault')).transform(p => path.resolve(projectRoot, p)),
+    skillsDir: z.string().optional().transform(p => (p === undefined ? undefined : path.resolve(projectRoot, p))),
     extensions: z.array(z.string()).default([]),
     mcpServers: z.record(z.string().regex(MCP_SERVER_ID_RE), McpServerConfig).default({}),
   })
@@ -131,6 +139,7 @@ const envOverrides = (): Record<string, string> => {
 // derived from the schema so a new setting can never drift out of the type
 export type OrcConfig = Omit<z.infer<ReturnType<typeof settingsSchema>>, 'skillsDir'> & {
   dir: string
+  projectRoot: string
   appVersion: string
   skillsDir: string
 }
@@ -167,16 +176,17 @@ export function deriveSystemUrl(databaseUrl: string, projectId: string): string 
 // systemDatabaseUrl exists only here — DBOS recovery has no meaning without an identity.
 export type ProjectConfig = OrcConfig & { projectId: string; projectName: string; systemDatabaseUrl: string }
 
-// Identity is LOCAL to a checkout; settings are SHAREABLE. They used to live in one file, and that
-// file is committed — so a clone, a `git worktree add`, or any `git reset --hard` restored ANOTHER
+// Identity is per REPOSITORY (the main checkout's file); settings are tracked and travel with
+// each checkout. They used to live in one file, and that file is committed — so a clone, a
+// `git worktree add`, or any `git reset --hard` restored ANOTHER
 // machine's projectId, and every command silently repointed at that project. `orc purge` acts on
 // whatever the resolved config names, so this is not cosmetic: it destroyed a live project's
 // history once, and the bench harness carries three separate workarounds for it.
 //
 // config.json (tracked) now carries settings only. identity.json is covered by the existing
 // `.orc/*` ignore, so it can never be committed and can never be restored over.
-const IDENTITY_FILE = 'identity.json'
-const SETTINGS_FILE = 'config.json'
+export const IDENTITY_FILE = 'identity.json'
+export const SETTINGS_FILE = 'config.json'
 
 const readJson = (file: string): Record<string, unknown> => {
   if (!existsSync(file)) return {}
@@ -200,14 +210,18 @@ export function initializeProject(
   dir: string,
   name: string,
   opts: { force?: boolean } = {},
-): { projectId: string; projectName: string } {
-  const file = path.join(dir, '.orc', IDENTITY_FILE)
-  const current = identityOf(dir).projectId
+): { projectId: string; projectName: string; projectRoot: string } {
+  // Identity belongs to the repository, so an init run from a worktree lands in the main checkout —
+  // otherwise the worktree would mint a second project for the same repo (the same failure the
+  // repository-root rule exists to prevent).
+  const projectRoot = resolveProjectRoot(dir, gitDirs(dir))
+  const file = path.join(projectRoot, '.orc', IDENTITY_FILE)
+  const current = identityOf(projectRoot).projectId
   if (current && !opts.force)
     throw new Error(`project already initialized (${file}) — use --force to mint a new identity`)
   const identity = { projectId: randomUUID(), projectName: name }
   atomicWriteFileSync(file, `${JSON.stringify(identity, null, 2)}\n`)
-  return identity
+  return { ...identity, projectRoot }
 }
 
 export function requireProject(config: OrcConfig): ProjectConfig {
@@ -224,7 +238,13 @@ function findProjectDir(start: string): string {
     if (existsSync(path.join(current, '.orc', IDENTITY_FILE)) || existsSync(path.join(current, '.orc', SETTINGS_FILE)))
       return current
     const parent = path.dirname(current)
-    if (parent === current) return path.resolve(start)
+    // Nothing is marked anywhere above: the REPOSITORY is the project, not whichever directory the
+    // command happened to run in. Without this, orc run from a subdirectory of a repo that has no
+    // `.orc` yet resolved to that subdirectory — so the repository's `.env` was never read (Bun's
+    // own pickup is cwd-relative, which is exactly what loadProjectEnv below exists to fix) and a
+    // project minted at the resolved dir would land inside the subdirectory, invisible one level up.
+    // Outside a repository there is nothing to ask, so `start` stays the last resort.
+    if (parent === current) return gitToplevel(start) ?? path.resolve(start)
     current = parent
   }
 }
@@ -250,11 +270,18 @@ const loadProjectEnv = (dir: string): void => {
 
 export function loadConfig(explicitDir?: string): OrcConfig {
   const dir = explicitDir ?? findProjectDir(process.cwd())
+  // The repository's main checkout. Identity is gitignored and lives ONLY there, so a linked
+  // worktree — which carries the tracked settings but no identity — used to resolve to itself
+  // and demand `orc init`, i.e. a second project for the same repo. project-root.ts holds the rule.
+  const projectRoot = resolveProjectRoot(dir, gitDirs(dir))
+  // the worktree's own .env first (a local override), then the project's — first writer wins,
+  // and the real environment always beats both (loadProjectEnv never overwrites)
   loadProjectEnv(dir)
+  if (projectRoot !== dir) loadProjectEnv(projectRoot)
   const fromFile = readJson(path.join(dir, '.orc', SETTINGS_FILE))
   // identity LAST: it is the one file that names WHICH project this directory is, so a projectId
   // that somehow reached the tracked settings can never override the local identity.
-  const parsed = settingsSchema(dir).safeParse({ ...fromFile, ...identityOf(dir), ...envOverrides() })
+  const parsed = settingsSchema(dir, projectRoot).safeParse({ ...fromFile, ...identityOf(projectRoot), ...envOverrides() })
   if (!parsed.success)
     throw new Error(
       `invalid orc config (env / .orc/config.json): ${parsed.error.issues.map(i => `${i.path.join('.')}: ${i.message}`).join('; ')}`,
@@ -264,6 +291,7 @@ export function loadConfig(explicitDir?: string): OrcConfig {
     // consented MCP secrets ($NAME refs) join the operator's redactEnv so their values never reach the log
     redactEnv: [...new Set([...parsed.data.redactEnv, ...mcpSecretEnvNames(parsed.data.mcpServers)])],
     dir,
+    projectRoot,
     skillsDir: parsed.data.skillsDir ?? path.join(parsed.data.vaultDir, 'skills'),
     appVersion: APP_VERSION,
   }

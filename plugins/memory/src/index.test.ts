@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'bun:test'
 import { MemoryNoteInput, NOTE_TIER, type MemoryNote, type VerifiedStamp } from '@orc/contracts'
+import { TEST_WORKSPACE_ID } from '@orc/contracts/fixtures'
 import { measureDrift } from './index'
 import type { ChangedSince } from './drift'
 
@@ -14,7 +15,7 @@ const note = (over: Record<string, unknown> = {}, verified?: VerifiedStamp): Mem
   if (n.tier !== NOTE_TIER.semantic) throw new Error(`fixture must be semantic, got '${n.tier}'`)
   return {
     ...n, sources: n.sources.map(src => ({ ...src, retrievedAt: '' })),
-    createdAt: 't', createdBy: 'cli', updatedAt: 't', updatedBy: 'cli', revision: 1,
+    createdAt: 't', createdBy: 'cli', updatedAt: 't', updatedBy: 'cli', revision: 1, workspaceId: TEST_WORKSPACE_ID,
     ...(verified && { verified }),
   }
 }

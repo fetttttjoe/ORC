@@ -31,6 +31,7 @@ const GraphNode = z.object({
   label: z.string(),
   detail: z.string(),
   heat: z.number().optional(),
+  workspaceId: z.string().optional(),
 })
 const GraphLink = z.object({ source: z.string(), target: z.string(), type: z.string(), heat: z.number().optional() })
 

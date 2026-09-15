@@ -9,7 +9,7 @@ import {
 import { draftFixture, stepFixture } from '@orc/contracts/fixtures'
 import { openStorage, type EventLog, type Storage } from '../storage'
 import { Kernel } from '../kernel'
-import { createTestDb, fakeProvider, testConfig, TEST_PROJECT_ID } from '../test-helpers'
+import { createTestDb, fakeProvider, seedTestWorkspace, TEST_PROJECT_ID, TEST_WORKSPACE_ID, testConfig } from '../test-helpers'
 import { createDbosPort, type DbosPort } from './dbos-port'
 import { createVaultProjector, type VaultProjector } from '@orc/vault-projector'
 
@@ -51,6 +51,8 @@ describe('vault projection over a real run (e2e)', () => {
     storage = await openStorage(db.url, { projectId: TEST_PROJECT_ID })
     log = storage.events
     kernel = new Kernel(log)
+    // a task must name a workspace the fold has seen — one seeded record, then tasks as before
+    await seedTestWorkspace(log)
     const config = testConfig(db.url, { vaultDir })
     port = await createDbosPort({
       storage, config,
@@ -71,7 +73,7 @@ describe('vault projection over a real run (e2e)', () => {
   afterAll(() => teardown())
 
   it('projects the full run: working-graph DAG, session transcript, log, root index', async () => {
-    const t = await kernel.createTask({ title: 'e2e demo', spec: 'write a file' })
+    const t = await kernel.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'e2e demo', spec: 'write a file' })
     await kernel.proposePlan(t.id, draftFixture([stepFixture({ id: 's1', modelRef: 'fake/m' })]))
     await kernel.approvePlan(t.id)
 

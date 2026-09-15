@@ -13,7 +13,7 @@ import { createMemory } from '@orc/memory'
 import { createTestSurreal } from '@orc/memory/test-helpers'
 import { openStorage } from '../storage'
 import { Kernel } from '../kernel'
-import { createTestDb, fakeProvider, testConfig, TEST_PROJECT_ID, waitFor } from '../test-helpers'
+import { createTestDb, fakeProvider, seedTestWorkspace, TEST_PROJECT_ID, TEST_WORKSPACE_ID, testConfig, waitFor } from '../test-helpers'
 import { createDbosPort } from './dbos-port'
 import { splitTool } from './split-tool'
 
@@ -150,6 +150,8 @@ async function bringUp(policy: 'auto' | 'manual', executor: AgentExecutor<unknow
   const storage = await openStorage(pg.url, { projectId: TEST_PROJECT_ID })
   const log = storage.events
   const kernel = new Kernel(log)
+  // a task must name a workspace the fold has seen — one seeded record, then tasks as before
+  await seedTestWorkspace(log)
   const config = testConfig(pg.url, {
     vaultDir,
     projectDbUrl: ts.url, projectDbNamespace: ts.ns, projectDbName: ts.db,
@@ -163,7 +165,7 @@ async function bringUp(policy: 'auto' | 'manual', executor: AgentExecutor<unknow
     providers: new Map([['fake', fakeProvider]]),
     executors: new Map([['split-fake', executor]]),
     stepTools: p => {
-      const bound = memory.bindStep({ author: { source: 'agent', taskId: p.taskId, stepId: p.stepId, runToken: p.runToken, executor: p.executor, model: p.model, role: p.role }, step: p.step, taskId: p.taskId, ancestorTaskIds: p.ancestorTaskIds })
+      const bound = memory.bindStep({ author: { source: 'agent', workspaceId: p.workspaceId, taskId: p.taskId, stepId: p.stepId, runToken: p.runToken, executor: p.executor, model: p.model, role: p.role }, step: p.step, taskId: p.taskId, ancestorTaskIds: p.ancestorTaskIds })
       return { memory: bound.memory, tools: [
         ...bound.tools,
         ...splitTool({ kernel, config: { approvalPolicy: config.approvalPolicy, maxDepth: config.maxDepth }, p }),
@@ -183,7 +185,7 @@ async function bringUp(policy: 'auto' | 'manual', executor: AgentExecutor<unknow
 }
 
 const parentTask = async (kernel: Kernel): Promise<string> => {
-  const t = await kernel.createTask({ title: 'split e2e', spec: 'spawn a child, gate, join' })
+  const t = await kernel.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'split e2e', spec: 'spawn a child, gate, join' })
   await kernel.proposePlan(t.id, draftFixture([stepFixture({ id: 's1', role: 'worker', executorRef: 'split-fake', modelRef: 'fake/m' })]))
   await kernel.approvePlan(t.id)
   return t.id

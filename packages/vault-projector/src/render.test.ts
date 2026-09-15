@@ -3,13 +3,14 @@ import { type EventRecord, type TaskNode } from '@orc/contracts'
 import { EVENT_KIND } from '@orc/contracts'
 import { planFixture, stepFixture } from '@orc/contracts/fixtures'
 import { eventFixture } from '@orc/contracts/fixtures'
+import { TEST_WORKSPACE_ID } from '@orc/kernel/test-helpers'
 import { renderRootIndex, renderTaskFiles } from './render'
 
 let seq = 0
 const ev = (over: Partial<EventRecord>): EventRecord =>
   eventFixture({ seq: ++seq, ts: '2026-07-17T00:00:00.000Z', ...over })
 const task = (over: Partial<TaskNode> = {}): TaskNode => ({
-  id: 't1', parentId: null, type: 'generic', title: 'demo', spec: 'do it', status: 'running',
+  id: 't1', parentId: null, workspaceId: TEST_WORKSPACE_ID, type: 'generic', title: 'demo', spec: 'do it', status: 'running',
   zone: [], budgetUSD: null, depth: 0, createdAt: '2026-07-17T00:00:00.000Z', ...over,
 })
 

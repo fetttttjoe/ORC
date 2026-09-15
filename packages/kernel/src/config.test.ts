@@ -1,15 +1,16 @@
 import { describe, expect, it } from 'bun:test'
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { GROUNDED_APPROVAL_DOOR } from '@orc/contracts'
-import { deriveSystemUrl, initializeProject, loadConfig, projectDatabaseName, requireProject, type OrcConfig } from './config'
+import { deriveSystemUrl, IDENTITY_FILE, initializeProject, loadConfig, projectDatabaseName, requireProject, SETTINGS_FILE, type OrcConfig } from './config'
+import { tmpGitRepo } from './test-helpers'
 
 describe('loadConfig', () => {
   it('reads .orc/config.json overrides', () => {
     const dir = mkdtempSync(path.join(tmpdir(), 'orc-'))
     mkdirSync(path.join(dir, '.orc'))
-    writeFileSync(path.join(dir, '.orc', 'config.json'), JSON.stringify({ concurrency: 7, workspaceRoot: 'ws' }))
+    writeFileSync(path.join(dir, '.orc', SETTINGS_FILE), JSON.stringify({ concurrency: 7, workspaceRoot: 'ws' }))
     const c = loadConfig(dir)
     expect(c.concurrency).toBe(7)
     expect(c.workspaceRoot).toBe('ws')
@@ -36,8 +37,8 @@ describe('loadConfig', () => {
   it('init writes identity to .orc/identity.json, never into the shareable settings file', () => {
     const dir = mkdtempSync(path.join(tmpdir(), 'orc-identity-'))
     const { projectId } = initializeProject(dir, 'demo')
-    expect(JSON.parse(readFileSync(path.join(dir, '.orc', 'identity.json'), 'utf8')).projectId).toBe(projectId)
-    const settings = path.join(dir, '.orc', 'config.json')
+    expect(JSON.parse(readFileSync(path.join(dir, '.orc', IDENTITY_FILE), 'utf8')).projectId).toBe(projectId)
+    const settings = path.join(dir, '.orc', SETTINGS_FILE)
     if (existsSync(settings)) expect(JSON.parse(readFileSync(settings, 'utf8')).projectId).toBeUndefined()
     expect(requireProject(loadConfig(dir)).projectId).toBe(projectId)
   })
@@ -46,15 +47,15 @@ describe('loadConfig', () => {
     const dir = mkdtempSync(path.join(tmpdir(), 'orc-identity-win-'))
     mkdirSync(path.join(dir, '.orc'))
     // exactly what `git reset --hard` restores when the settings file is tracked and carries an id
-    writeFileSync(path.join(dir, '.orc', 'config.json'), JSON.stringify({ projectId: '00000000-0000-4000-8000-00000000000a', projectName: 'theirs' }))
-    writeFileSync(path.join(dir, '.orc', 'identity.json'), JSON.stringify({ projectId: '00000000-0000-4000-8000-00000000000b', projectName: 'ours' }))
+    writeFileSync(path.join(dir, '.orc', SETTINGS_FILE), JSON.stringify({ projectId: '00000000-0000-4000-8000-00000000000a', projectName: 'theirs' }))
+    writeFileSync(path.join(dir, '.orc', IDENTITY_FILE), JSON.stringify({ projectId: '00000000-0000-4000-8000-00000000000b', projectName: 'ours' }))
     expect(requireProject(loadConfig(dir))).toMatchObject({ projectId: '00000000-0000-4000-8000-00000000000b', projectName: 'ours' })
   })
 
   it('a project whose identity still lives in the settings file keeps loading (pre-split projects)', () => {
     const dir = mkdtempSync(path.join(tmpdir(), 'orc-identity-legacy-'))
     mkdirSync(path.join(dir, '.orc'))
-    writeFileSync(path.join(dir, '.orc', 'config.json'), JSON.stringify({ projectId: '00000000-0000-4000-8000-00000000000c', projectName: 'legacy' }))
+    writeFileSync(path.join(dir, '.orc', SETTINGS_FILE), JSON.stringify({ projectId: '00000000-0000-4000-8000-00000000000c', projectName: 'legacy' }))
     expect(requireProject(loadConfig(dir))).toMatchObject({ projectId: '00000000-0000-4000-8000-00000000000c', projectName: 'legacy' })
   })
 
@@ -83,7 +84,7 @@ describe('loadConfig', () => {
   it('validated env wins over file config', () => {
     const dir = mkdtempSync(path.join(tmpdir(), 'orc-'))
     mkdirSync(path.join(dir, '.orc'))
-    writeFileSync(path.join(dir, '.orc', 'config.json'), JSON.stringify({ concurrency: 7 }))
+    writeFileSync(path.join(dir, '.orc', SETTINGS_FILE), JSON.stringify({ concurrency: 7 }))
     withEnv({ ORC_CONCURRENCY: '9' }, () => {
       expect(loadConfig(dir).concurrency).toBe(9)
     })
@@ -91,7 +92,7 @@ describe('loadConfig', () => {
   it('wraps malformed JSON with the config file path, not a bare SyntaxError', () => {
     const dir = mkdtempSync(path.join(tmpdir(), 'orc-'))
     mkdirSync(path.join(dir, '.orc'))
-    const file = path.join(dir, '.orc', 'config.json')
+    const file = path.join(dir, '.orc', SETTINGS_FILE)
     writeFileSync(file, '{nope')
     expect(() => loadConfig(dir)).toThrow(file)
   })
@@ -100,8 +101,15 @@ describe('loadConfig', () => {
     expect(loadConfig(dir).skillsDir).toBe(path.join(dir, 'vault', 'skills'))
 
     mkdirSync(path.join(dir, '.orc'))
-    writeFileSync(path.join(dir, '.orc', 'config.json'), JSON.stringify({ skillsDir: 'custom/skills' }))
+    writeFileSync(path.join(dir, '.orc', SETTINGS_FILE), JSON.stringify({ skillsDir: 'custom/skills' }))
     expect(loadConfig(dir).skillsDir).toBe(path.resolve(dir, 'custom/skills'))
+  })
+  it('trunkBranch is unset unless the settings file names one — unset means "ask git"', () => {
+    // No `.default('main')` on purpose: the trunk is resolved at workspace adoption (git's
+    // origin/HEAD first), and a default here would erase the "unset" state that lets a repo whose
+    // trunk is `master` or `develop` work without anyone writing it down.
+    expect(loadConfig(mkdtempSync(path.join(tmpdir(), 'orc-'))).trunkBranch).toBeUndefined()
+    expect(loadConfig(tmpProject({ trunkBranch: 'develop' })).trunkBranch).toBe('develop')
   })
   it('vaultDir defaults under dir and skillsDir derives from it', () => {
     const c = loadConfig('/proj')
@@ -203,12 +211,12 @@ describe('loadConfig', () => {
 
     const widened = mkdtempSync(path.join(tmpdir(), 'orc-'))
     mkdirSync(path.join(widened, '.orc'), { recursive: true })
-    writeFileSync(path.join(widened, '.orc', 'config.json'), JSON.stringify({ groundedApprovalDoors: ['cli', 'mcp'] }))
+    writeFileSync(path.join(widened, '.orc', SETTINGS_FILE), JSON.stringify({ groundedApprovalDoors: ['cli', 'mcp'] }))
     expect(loadConfig(widened).groundedApprovalDoors).toEqual([GROUNDED_APPROVAL_DOOR.cli, GROUNDED_APPROVAL_DOOR.mcp])
 
     const bogus = mkdtempSync(path.join(tmpdir(), 'orc-'))
     mkdirSync(path.join(bogus, '.orc'), { recursive: true })
-    writeFileSync(path.join(bogus, '.orc', 'config.json'), JSON.stringify({ groundedApprovalDoors: ['web'] }))
+    writeFileSync(path.join(bogus, '.orc', SETTINGS_FILE), JSON.stringify({ groundedApprovalDoors: ['web'] }))
     expect(() => loadConfig(bogus)).toThrow()
   })
   it('ambientCapture defaults true; ORC_AMBIENT_CAPTURE=false disables it (the kill switch)', () => {
@@ -225,6 +233,89 @@ describe('loadConfig', () => {
     withEnv({ ORC_MEMORY_PRELOAD_TOKENS: '0' }, () => {
       expect(loadConfig(mkdtempSync(path.join(tmpdir(), 'orc-'))).memoryPreloadTokens).toBe(0)
     })
+  })
+
+  it('a linked worktree resolves the MAIN checkout as projectRoot and reads its identity', () => {
+    const { main, worktree } = tmpGitRepo()
+    initializeProject(main, 'shared')
+    const c = loadConfig(worktree)
+    expect(c.dir).toBe(worktree)
+    expect(c.projectRoot).toBe(main)
+    expect(requireProject(c).projectName).toBe('shared')
+    // the vault is a projection of the PROJECT — one per repository, not one per checkout
+    expect(c.vaultDir).toBe(path.join(main, 'vault'))
+    expect(c.skillsDir).toBe(path.join(main, 'vault', 'skills'))
+  })
+  it('settings still come from the checkout being worked in (they are tracked; a worktree may be ahead)', () => {
+    const { main, worktree } = tmpGitRepo()
+    initializeProject(main, 'shared')
+    mkdirSync(path.join(worktree, '.orc'), { recursive: true })
+    writeFileSync(path.join(worktree, '.orc', SETTINGS_FILE), JSON.stringify({ concurrency: 9 }))
+    expect(loadConfig(worktree).concurrency).toBe(9)
+  })
+  it('outside git, projectRoot equals dir (today\'s behaviour, unchanged)', () => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'orc-plain-'))
+    expect(loadConfig(dir).projectRoot).toBe(dir)
+  })
+  it('init from inside a worktree writes identity to the MAIN checkout, never into the worktree', () => {
+    const { main, worktree } = tmpGitRepo()
+    const { projectRoot } = initializeProject(worktree, 'from-wt')
+    expect(projectRoot).toBe(main)
+    expect(existsSync(path.join(main, '.orc', IDENTITY_FILE))).toBe(true)
+    expect(existsSync(path.join(worktree, '.orc', IDENTITY_FILE))).toBe(false)
+    expect(requireProject(loadConfig(worktree)).projectName).toBe('from-wt')
+  })
+  it('an unmarked subdirectory of a repo resolves to the repository toplevel, not to itself', () => {
+    // With no `.orc` anywhere the upward walk used to end at the starting directory, so orc
+    // answered about the subdirectory it was run in: the repository's `.env` went unread and a
+    // project minted at the resolved dir landed inside that subdirectory, invisible one level up.
+    // Git's toplevel is the honest answer for "which directory is this repo"; `start` remains the
+    // fallback outside a repository.
+    const { main } = tmpGitRepo()
+    const sub = path.join(main, 'sub')
+    mkdirSync(sub, { recursive: true })
+    const before = process.cwd()
+    try {
+      process.chdir(sub)
+      expect(loadConfig().dir).toBe(realpathSync(main))
+      initializeProject(loadConfig().dir, 'toplevel')
+      expect(existsSync(path.join(main, '.orc', IDENTITY_FILE))).toBe(true)
+      expect(existsSync(path.join(sub, '.orc', IDENTITY_FILE))).toBe(false)
+    } finally {
+      process.chdir(before)
+    }
+  })
+  it('an orc project initialized in a subdirectory of a repo keeps its own identity', () => {
+    // naively re-rooting every dir inside a repo at the main checkout would lose this identity
+    // and `orc init` would mint a duplicate at the repo root (measured, 2026-09-14) — --git-dir
+    // equals --git-common-dir here (a main checkout, even from a subdirectory), which is the
+    // signal that this dir must NOT be re-rooted.
+    const { main } = tmpGitRepo()
+    const nested = path.join(main, 'apps', 'x')
+    mkdirSync(nested, { recursive: true })
+    initializeProject(nested, 'nested')
+    expect(loadConfig(nested).projectRoot).toBe(nested)
+    expect(requireProject(loadConfig(nested)).projectName).toBe('nested')
+    expect(existsSync(path.join(main, '.orc', IDENTITY_FILE))).toBe(false)
+  })
+
+  it('the .env of the main checkout reaches a worktree; a worktree .env wins over it', () => {
+    const { main, worktree } = tmpGitRepo()
+    initializeProject(main, 'shared')
+    writeFileSync(path.join(main, '.env'), 'ORC_TEST_FROM_MAIN=1\nORC_TEST_SHARED=main\n')
+    writeFileSync(path.join(worktree, '.env'), 'ORC_TEST_SHARED=worktree\n')
+    // a named function, not an inline `delete`, so TS's control-flow narrowing (which reads a
+    // bare `delete process.env.X` as proof the property stays `undefined`) doesn't fight the
+    // later assertions — same shape the sibling .env test above already uses.
+    const clear = (): void => { delete process.env.ORC_TEST_FROM_MAIN; delete process.env.ORC_TEST_SHARED }
+    clear()
+    try {
+      loadConfig(worktree)
+      expect(process.env.ORC_TEST_FROM_MAIN).toBe('1')
+      expect(process.env.ORC_TEST_SHARED).toBe('worktree')
+    } finally {
+      clear()
+    }
   })
 })
 
@@ -277,7 +368,7 @@ describe('initializeProject', () => {
   it('writes identity BESIDE the settings file, leaving the shared settings untouched', () => {
     const dir = tmpProject({ concurrency: 7 })
     initializeProject(dir, 'demo')
-    const settings = JSON.parse(readFileSync(path.join(dir, '.orc', 'config.json'), 'utf8'))
+    const settings = JSON.parse(readFileSync(path.join(dir, '.orc', SETTINGS_FILE), 'utf8'))
     expect(settings).toEqual({ concurrency: 7 }) // no identity smuggled into the tracked file
     const cfg = requireProject(loadConfig(dir))
     expect(cfg.concurrency).toBe(7)
@@ -307,7 +398,7 @@ describe('initializeProject', () => {
 function tmpProject(cfg: Record<string, unknown>): string {
   const d = mkdtempSync(path.join(tmpdir(), 'orc-cfg-'))
   mkdirSync(path.join(d, '.orc'), { recursive: true })
-  writeFileSync(path.join(d, '.orc', 'config.json'), JSON.stringify(cfg))
+  writeFileSync(path.join(d, '.orc', SETTINGS_FILE), JSON.stringify(cfg))
   return d
 }
 

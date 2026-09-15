@@ -1,5 +1,5 @@
 import { MemoryScope, NOTE_TIER, type MemoryStore, type NoteSummary } from '@orc/contracts'
-import { gitRevision } from './index'
+import { gitRevision } from '@orc/kernel'
 
 // The read-only store+git side of the kernel's grounding-freshness probe. The kernel declares the
 // GroundingSource shape (grounding-freshness.ts); this satisfies it STRUCTURALLY and does not import

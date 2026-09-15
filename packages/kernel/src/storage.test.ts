@@ -11,7 +11,7 @@ import { EVENT_KIND, isRecord, isTerminalError, type EventInput, type OperationS
 import { listProjectIds, openStorage, type EventLog, type Storage } from './storage'
 import { isMissingMigrationTable, migrateDatabase } from './storage/migrate'
 import { events } from './schema'
-import { createTestDb, TEST_PROJECT_ID } from './test-helpers'
+import { createTestDb, TEST_PROJECT_ID, TEST_WORKSPACE_ID } from './test-helpers'
 
 const dbs: Array<{ drop: () => Promise<void> }> = []
 afterAll(async () => {
@@ -40,7 +40,7 @@ describe('listProjectIds', () => {
     const other = '99999999-9999-9999-9999-999999999999'
     const s2 = await openStorage(db.url, { projectId: other })
     db.onClose(() => s2.close())
-    const draft = { taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_written, payload: { note: { id: 'p', title: 'p' }, author: { source: 'cli' } } } as const
+    const draft = { taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_written, payload: { note: { id: 'p', title: 'p' }, author: { source: 'cli', workspaceId: TEST_WORKSPACE_ID } } } as const
     await s1.events.append(draft)
     await s2.events.append(draft)
     expect(await listProjectIds(db.url)).toEqual([other, TEST_PROJECT_ID]) // s2 wrote last
@@ -226,7 +226,7 @@ describe('EventLog (postgres)', () => {
     await log.append(statusEvent('t1'))
     await log.append({
       taskId: 't2', stepId: null, runToken: null, kind: 'task_created',
-      payload: { task: { id: 't2', parentId: null, type: 'generic', title: 't2', spec: '', status: 'draft', zone: [], budgetUSD: null, depth: 0, createdAt: 'T' } },
+      payload: { task: { id: 't2', parentId: null, workspaceId: TEST_WORKSPACE_ID, type: 'generic', title: 't2', spec: '', status: 'draft', zone: [], budgetUSD: null, depth: 0, createdAt: 'T' } },
     })
     await log.append(statusEvent('t3'))
     expect((await log.after(0, ['task_created'])).map(e => e.seq)).toEqual([2])
@@ -530,11 +530,11 @@ describe('OperationJournal', () => {
 describe('latestNoteEvent', () => {
   const wrote = (id: string, scope: string, body: string) => ({
     taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_written,
-    payload: { note: { id, scope, title: id, body }, author: { source: 'cli' as const } },
+    payload: { note: { id, scope, title: id, body }, author: { source: 'cli' as const, workspaceId: TEST_WORKSPACE_ID } },
   })
   const deleted = (id: string, scope: string) => ({
     taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_deleted,
-    payload: { id, scope, author: { source: 'cli' as const } },
+    payload: { id, scope, author: { source: 'cli' as const, workspaceId: TEST_WORKSPACE_ID } },
   })
 
   it('returns the newest event for that note, ignoring other notes and other scopes', async () => {

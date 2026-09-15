@@ -10,7 +10,7 @@ import { createMemory } from '@orc/memory'
 import { createTestSurreal } from '@orc/memory/test-helpers'
 import { openStorage } from '../storage'
 import { Kernel } from '../kernel'
-import { createTestDb, testConfig, TEST_PROJECT_ID } from '../test-helpers'
+import { createTestDb, seedTestWorkspace, TEST_PROJECT_ID, TEST_WORKSPACE_ID, testConfig } from '../test-helpers'
 import { createDbosPort } from './dbos-port'
 
 // Access counts are only worth anything if they measure what AGENTS pull — the CLI path is the
@@ -31,6 +31,8 @@ describe('agent-side memory access recording (integration)', () => {
     const storage = await openStorage(pg.url, { projectId: TEST_PROJECT_ID })
     const log = storage.events
     const kernel = new Kernel(log)
+    // a task must name a workspace the fold has seen — one seeded record, then tasks as before
+    await seedTestWorkspace(log)
     const config = testConfig(pg.url, {
       vaultDir,
       projectDbUrl: ts.url, projectDbNamespace: ts.ns, projectDbName: ts.db,
@@ -42,8 +44,8 @@ describe('agent-side memory access recording (integration)', () => {
 
     // two linked notes so the traversal has something to return
     await memory.store.write({ id: 'auth', title: 'Auth', summary: 'tokens', body: 'rotate hourly',
-      links: [{ id: 'crypto', kind: 'depends_on' }] }, { source: 'cli' })
-    await memory.store.write({ id: 'crypto', title: 'Crypto', summary: 'primitives' }, { source: 'cli' })
+      links: [{ id: 'crypto', kind: 'depends_on' }] }, { source: 'cli', workspaceId: TEST_WORKSPACE_ID })
+    await memory.store.write({ id: 'crypto', title: 'Crypto', summary: 'primitives' }, { source: 'cli', workspaceId: TEST_WORKSPACE_ID })
     await memory.projector.catchUp()
 
     // Scripted agent exercising every pull shape. Only the model's token generation is fake —
@@ -61,13 +63,13 @@ describe('agent-side memory access recording (integration)', () => {
       storage, config,
       providers: new Map([['fake', { costs: {}, languageModel: () => model }]]),
       executors: new Map([['api-loop', apiLoopExecutor()]]),
-      stepTools: p => memory.bindStep({ author: { source: 'agent', taskId: p.taskId, stepId: p.stepId, runToken: p.runToken, executor: p.executor, model: p.model, role: p.role }, step: p.step, taskId: p.taskId, ancestorTaskIds: p.ancestorTaskIds }),
+      stepTools: p => memory.bindStep({ author: { source: 'agent', workspaceId: p.workspaceId, taskId: p.taskId, stepId: p.stepId, runToken: p.runToken, executor: p.executor, model: p.model, role: p.role }, step: p.step, taskId: p.taskId, ancestorTaskIds: p.ancestorTaskIds }),
     })
     await port.launch()
     cleanup.push(() => port.shutdown())
     cleanup.push(() => log.close())
 
-    const t = await kernel.createTask({ title: 'use memory', spec: 'pull the auth context' })
+    const t = await kernel.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'use memory', spec: 'pull the auth context' })
     // maxIterations must clear the six scripted turns — the fixture default of 5 would cap the
     // loop before the signal and block the run on an iteration limit, not on anything under test
     await kernel.proposePlan(t.id, draftFixture([stepFixture({ modelRef: 'fake/m', maxIterations: 10 })]))

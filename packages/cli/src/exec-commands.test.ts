@@ -3,7 +3,7 @@ import { afterAll, afterEach, describe, expect, it, mock, spyOn } from 'bun:test
 import { EVENT_KIND, TASK_STATUS, type Analyzer, type ExecutionPort, type OperationSpec, type RunHandle, type RunOutcome, type TaskStatus } from '@orc/contracts'
 import { stepFixture } from '@orc/contracts/fixtures'
 import { openStorage, type EventLog } from '@orc/kernel'
-import { createTestDb, TEST_PROJECT_ID } from '@orc/kernel/test-helpers'
+import { createTestDb, seedTestWorkspace, TEST_PROJECT_ID, TEST_WORKSPACE, TEST_WORKSPACE_ID } from '@orc/kernel/test-helpers'
 import { singleStepDraft } from './plan-template'
 import { buildProgram, openKernel } from './main'
 
@@ -26,6 +26,8 @@ async function makeCli(outcome: 'done' | 'blocked' = 'done') {
   const db = await createTestDb()
   dbs.push(db)
   const { kernel, log, storage } = await openKernel(db.url, { projectId: TEST_PROJECT_ID })
+  // a task must name a workspace the fold has seen — one seeded record, then tasks as before
+  await seedTestWorkspace(log)
   db.onClose(() => storage.close())
   const { port, calls } = stubPort(outcome)
   const lines: string[] = []
@@ -36,7 +38,7 @@ async function makeCli(outcome: 'done' | 'blocked' = 'done') {
 }
 
 async function approvedTask(run: (...a: string[]) => Promise<unknown>, lines: string[]) {
-  await run('new', 'exec me')
+  await run('new', 'exec me', '--workspace', TEST_WORKSPACE_ID)
   const id = lines[0]!
   await run('propose', id)
   await run('approve', id)
@@ -75,6 +77,8 @@ describe('exec commands', () => {
     const db = await createTestDb()
     dbs.push(db)
     const { kernel, log, storage } = await openKernel(db.url, { projectId: TEST_PROJECT_ID })
+    // a task must name a workspace the fold has seen — one seeded record, then tasks as before
+    await seedTestWorkspace(log)
     const { port } = stubPort()
     const lines: string[] = []
     spyOn(console, 'log').mockImplementation((...a: unknown[]) => { lines.push(a.join(' ')) })
@@ -102,7 +106,9 @@ describe('exec commands', () => {
   it('run drains events committed in the final window before printing the outcome', async () => {
     const db = await createTestDb()
     dbs.push(db)
-    const { kernel } = await openKernel(db.url, { projectId: TEST_PROJECT_ID })
+    const { kernel, log } = await openKernel(db.url, { projectId: TEST_PROJECT_ID })
+    // a task must name a workspace the fold has seen — one seeded record, then tasks as before
+    await seedTestWorkspace(log)
     const lines: string[] = []
     spyOn(console, 'log').mockImplementation((...a: unknown[]) => { lines.push(a.join(' ')) })
     const { port } = stubPort()
@@ -137,6 +143,8 @@ describe('exec commands', () => {
     const db = await createTestDb()
     dbs.push(db)
     const { kernel, log, storage } = await openKernel(db.url, { projectId: TEST_PROJECT_ID })
+    // a task must name a workspace the fold has seen — one seeded record, then tasks as before
+    await seedTestWorkspace(log)
     db.onClose(() => storage.close())
     const lines: string[] = []
     spyOn(console, 'log').mockImplementation((...a: unknown[]) => { lines.push(a.join(' ')) })
@@ -166,6 +174,8 @@ describe('exec commands', () => {
     const db = await createTestDb()
     dbs.push(db)
     const { kernel, log, storage } = await openKernel(db.url, { projectId: TEST_PROJECT_ID })
+    // a task must name a workspace the fold has seen — one seeded record, then tasks as before
+    await seedTestWorkspace(log)
     db.onClose(() => storage.close())
     const { port, calls } = stubPort('done')
     const lines: string[] = []
@@ -206,6 +216,8 @@ describe('exec commands', () => {
     const db = await createTestDb()
     dbs.push(db)
     const { kernel, log, storage } = await openKernel(db.url, { projectId: TEST_PROJECT_ID })
+    // a task must name a workspace the fold has seen — one seeded record, then tasks as before
+    await seedTestWorkspace(log)
     db.onClose(() => storage.close())
     const { port, calls } = stubPort('done')
     const lines: string[] = []
@@ -213,7 +225,7 @@ describe('exec commands', () => {
     const run = async (...args: string[]) => buildProgram(kernel, async () => port).parseAsync(args, { from: 'user' })
     const parent = await approvedTask(run, lines)
     // the split: a child task of the parent, still running when the parent's steps finish
-    const child = (await kernel.createTask({ title: 'split child', spec: '', parentId: parent })).id
+    const child = (await kernel.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'split child', spec: '', parentId: parent })).id
     await kernel.proposePlan(child, singleStepDraft({ title: 'child', spec: '' }, 'fake/m', []))
     await kernel.approvePlan(child)
     calls.length = 0
@@ -243,7 +255,8 @@ describe('exec commands', () => {
     await stamp(log, id, TASK_STATUS.running, TASK_STATUS.done)
     await watched
     const requested = (await kernel.eventsFor(id)).find(e => e.kind === EVENT_KIND.run_requested)
-    expect(requested?.payload).toEqual({ taskId: id, cwd: null, retry: true })
+    // no --cwd on the retry, so the recorded cwd is the task's workspace (kernel.requestRun)
+    expect(requested?.payload).toEqual({ taskId: id, cwd: TEST_WORKSPACE.cwd, retry: true })
 
     await run('cancel', id)
     expect(calls).toEqual([]) // neither command needs a runtime of its own
@@ -262,6 +275,8 @@ describe('exec commands', () => {
     const analyze = stepFixture({ id: 'analyze', role: 'scout' })
     const analyzers = new Map<string, Analyzer>([['agent-analyzer', { id: 'agent-analyzer', analysisStep: () => analyze }]])
     const { kernel, log } = await openKernel(db.url, { projectId: TEST_PROJECT_ID, analyzers })
+    // a task must name a workspace the fold has seen — one seeded record, then tasks as before
+    await seedTestWorkspace(log)
     db.onClose(() => log.close())
     // a non-done outcome is a thrown CommandFailure now, not a write to process.exitCode, so this
     // could assert either; 'done' keeps the test about the grounded bootstrap rather than exits.
@@ -270,7 +285,7 @@ describe('exec commands', () => {
     spyOn(console, 'log').mockImplementation((...a: unknown[]) => { lines.push(a.join(' ')) })
     const run = async (...args: string[]) => buildProgram(kernel, async () => port).parseAsync(args, { from: 'user' })
 
-    const bootstrapping = run('new', 'grounded task', '--spec', 'analyze the repo and split the work', '--strategy', 'grounded-plan', '--model', 'anthropic/claude-sonnet-5')
+    const bootstrapping = run('new', 'grounded task', '--spec', 'analyze the repo and split the work', '--strategy', 'grounded-plan', '--model', 'anthropic/claude-sonnet-5', '--workspace', TEST_WORKSPACE_ID)
     await watching(lines)
     const taskId = lines[0]!
     await stamp(log, taskId, TASK_STATUS.approved, TASK_STATUS.running)
@@ -289,7 +304,7 @@ describe('exec commands', () => {
 
   it('new --strategy grounded-plan without --model is a clear error', async () => {
     const { run } = await makeCli()
-    await expect(run('new', 'x', '--strategy', 'grounded-plan')).rejects.toThrow(/--model is required/)
+    await expect(run('new', 'x', '--strategy', 'grounded-plan', '--workspace', TEST_WORKSPACE_ID)).rejects.toThrow(/--model is required/)
   })
 
   it('status renders per-step state and cost totals from the fold', async () => {
@@ -305,6 +320,8 @@ describe('exec commands', () => {
     const db = await createTestDb()
     dbs.push(db)
     const { kernel, log, storage } = await openKernel(db.url, { projectId: TEST_PROJECT_ID })
+    // a task must name a workspace the fold has seen — one seeded record, then tasks as before
+    await seedTestWorkspace(log)
     db.onClose(() => storage.close())
     const { port } = stubPort()
     const lines: string[] = []

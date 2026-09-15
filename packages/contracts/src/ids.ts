@@ -59,6 +59,17 @@ export const AUTHOR_SOURCE = AuthorSource.enum
 // the memory/events cycle that resolves to undefined depending on which module loaded first.
 export const MemoryAuthor = z.object({
   source: AuthorSource,
+  // The workspace the write came FROM, captured at the moment of the write — from the writing
+  // task for an agent step, from the cwd's adopted workspace for a CLI/MCP/reactor door. ONE shape
+  // for every author: writes, verifications, accesses, removals and archive flags alike, so no
+  // reader has to know which kind of author it is holding before it can ask.
+  //
+  // REQUIRED, and deliberately not `.optional()`/`.nullable()`/`.default()`: the read tools derive
+  // a note's `provisional` standing from it, and a workspace can only be known at write time —
+  // recovered later it would have to be GUESSED from the envelope's task, which is absent on a CLI
+  // write and wrong for a task that moved. A required key turns a writer that forgot to name its
+  // workspace into a build failure instead of a note that quietly reads as trunk knowledge.
+  workspaceId: z.string().min(1),
   taskId: z.string().nullable().optional(),
   stepId: z.string().nullable().optional(),
   runToken: z.string().nullable().optional(),

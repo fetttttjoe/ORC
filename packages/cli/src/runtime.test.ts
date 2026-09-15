@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, it, mock, spyOn } from 'bun:test'
-import { mkdtempSync } from 'node:fs'
+import { mkdtempSync, realpathSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { MEMORY_HEALTH,
@@ -8,7 +8,7 @@ import { MEMORY_HEALTH,
 } from '@orc/contracts'
 import { Surreal } from 'surrealdb'
 import { openStorage, Kernel, projectDatabaseName, type ProjectConfig } from '@orc/kernel'
-import { createTestDb, fakeProvider, testConfig, TEST_PROJECT_ID } from '@orc/kernel/test-helpers'
+import { createTestDb, fakeProvider, seedTestWorkspace, testConfig, TEST_PROJECT_ID, TEST_WORKSPACE_ID } from '@orc/kernel/test-helpers'
 import { draftFixture, stepFixture } from '@orc/contracts/fixtures'
 import { createMemory } from '@orc/memory'
 import { buildProgram } from './main'
@@ -116,6 +116,9 @@ describe('stepTools memory_verify registration', () => {
     const storage = await openStorage(db.url, { projectId: TEST_PROJECT_ID })
     const log = storage.events
     const kernel = new Kernel(log)
+    // the workspace must sit at THIS config's dir: buildRuntime resolves the consolidation and
+    // auto-heal authors from the directory it serves, and refuses when nothing claims it
+    await seedTestWorkspace(log, realpathSync(config.dir))
     const { host, hub } = await buildPlugins(config)
     host.providers.set('fake', fakeProvider)
     host.executors.set('api-loop', toolNameExecutor)
@@ -126,18 +129,18 @@ describe('stepTools memory_verify registration', () => {
     // port still being "launched". Shutting it down immediately, in `finally` so a thrown
     // assertion cannot skip it, is what lets the two coexist in one file.
     try {
-      const verifyTask = await kernel.createTask({ title: 'verify step', spec: 'audits' })
+      const verifyTask = await kernel.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'verify step', spec: 'audits' })
       await kernel.proposePlan(verifyTask.id, draftFixture([stepFixture({ id: VERIFY_STEP_ID, role: STEP_ROLE.auditor })]))
       await kernel.approvePlan(verifyTask.id)
       expect(await (await port.startRun(verifyTask.id)).wait()).toBe('done')
 
-      const workerTask = await kernel.createTask({ title: 'worker step', spec: 'implements' })
+      const workerTask = await kernel.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'worker step', spec: 'implements' })
       await kernel.proposePlan(workerTask.id, draftFixture([stepFixture({ id: 's1', role: STEP_ROLE.worker })]))
       await kernel.approvePlan(workerTask.id)
       expect(await (await port.startRun(workerTask.id)).wait()).toBe('done')
 
       // an auditor step named for its JOB, not for this gate — the case that silently lost the tool
-      const healTask = await kernel.createTask({ title: 'heal step', spec: 'confirms notes' })
+      const healTask = await kernel.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'heal step', spec: 'confirms notes' })
       await kernel.proposePlan(healTask.id, draftFixture([stepFixture({ id: AUDITOR_STEP_NAMED_FOR_ITS_JOB, role: STEP_ROLE.auditor })]))
       await kernel.approvePlan(healTask.id)
       expect(await (await port.startRun(healTask.id)).wait()).toBe('done')
@@ -165,6 +168,9 @@ describe('buildRuntime degraded memory', () => {
     const storage = await openStorage(db.url, { projectId: TEST_PROJECT_ID })
     const log = storage.events
     const kernel = new Kernel(log)
+    // the workspace must sit at THIS config's dir: buildRuntime resolves the consolidation and
+    // auto-heal authors from the directory it serves, and refuses when nothing claims it
+    await seedTestWorkspace(log, realpathSync(config.dir))
     const { host, hub } = await buildPlugins(config)
     host.providers.set('fake', fakeProvider)
     host.executors.set('api-loop', probeExecutor)
@@ -176,7 +182,7 @@ describe('buildRuntime degraded memory', () => {
     mock.restore()
     expect(warns.filter(w => w.includes('memory unavailable; continuing in degraded mode'))).toHaveLength(1)
 
-    const t = await kernel.createTask({ title: 'degraded run', spec: 'still executes' })
+    const t = await kernel.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'degraded run', spec: 'still executes' })
     await kernel.proposePlan(t.id, draftFixture([stepFixture()]))
     await kernel.approvePlan(t.id)
     expect(await (await port.startRun(t.id)).wait()).toBe('done')
@@ -204,6 +210,9 @@ describe('status memory health', () => {
     surrealBases.push(config)
     const log = (await openStorage(db.url, { projectId: TEST_PROJECT_ID })).events
     const kernel = new Kernel(log)
+    // the workspace must sit at THIS config's dir: buildRuntime resolves the consolidation and
+    // auto-heal authors from the directory it serves, and refuses when nothing claims it
+    await seedTestWorkspace(log, realpathSync(config.dir))
     const { host, hub } = await buildPlugins(config)
     cleanup.push(() => log.close(), () => hub.close(), () => host.shutdown())
     const lines: string[] = []
@@ -214,7 +223,7 @@ describe('status memory health', () => {
       return lines.join('\n')
     }
 
-    const t = await kernel.createTask({ title: 'health check' })
+    const t = await kernel.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'health check' })
     // ok: derived database opens (auto-created) with cursor 0 and no memory events
     const memory = await createMemory({ log, config })
     await memory.close()
@@ -225,7 +234,7 @@ describe('status memory health', () => {
       taskId: null, stepId: null, runToken: null, kind: 'memory_written',
       payload: {
         note: { id: 'pending-note', title: 'P', scope: 'project', kind: 'fact', sourceRevision: null, categories: [], tags: [], links: [], paths: [], summary: '', body: '' },
-        author: { source: 'cli' },
+        author: { source: 'cli', workspaceId: TEST_WORKSPACE_ID },
       },
     })
     expect(await status(config, t.id)).toContain(`memory: ${MEMORY_HEALTH.catchingUp} (1 event(s) not yet projected)`)

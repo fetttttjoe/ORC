@@ -92,6 +92,13 @@ const noteTable = table(Tb.Note, {
   dependsOn: t.option(t.array(t.string())), skillRefs: t.option(t.array(t.string())),
   toolRefs: t.option(t.array(t.string())), modelRef: t.option(t.string()),
   createdAt: t.string(), createdBy: t.string(), updatedAt: t.string(), updatedBy: t.string(),
+  // The checkout the last write came from — the ONE input every read surface derives `provisional`
+  // from. REQUIRED, unlike the optional columns above that exist so an un-rebuilt row still selects:
+  // a row that answers "which workspace?" with nothing would read as trunk knowledge, which is the
+  // one wrong answer. The cost is that a read model projected before this column must be replayed —
+  // `orc memory rebuild` — or every select throws, the same way a required `seq` once wedged the
+  // meta row's stage read. The fact is on the event, so the replay re-derives it.
+  workspaceId: t.string(),
   revision: t.number(), hits: t.option(t.number()), lastAccessedAt: t.option(t.string()),
   // observed-use OUTCOMES (memory_outcome), Tier-2 like hits: two separate counters, never one
   // signed score — contested displays BOTH. Optional so rows projected before the kind existed
@@ -197,6 +204,9 @@ const joinClaimOwners = (
           // the owner's drift inputs ride along — already resolved here, and the only way a claim
           // in the preload can be dated against the tree
           sourceRevision: owner.sourceRevision, paths: owner.paths,
+          // and its workspace, for the same reason: a claim has no workspace of its own — the note
+          // that ASSERTS it does, and that is what decides whether the statement is trunk knowledge
+          workspaceId: owner.workspaceId,
         }]
       : []
   })
@@ -225,6 +235,9 @@ const SummaryRow = z.object({
   // the third drift input (see NoteSummary.verified): a summary without it makes every consumer of
   // the either-clean rule fall back to the source stamp alone, which is what it exists to correct
   verified: VerifiedStamp.optional(),
+  // the provisional input. Required like the note column it projects: an arm that could not report
+  // the workspace would return rows reading as trunk knowledge, which is worse than failing loudly.
+  workspaceId: z.string(),
 })
 // the SELECT list derived from SummaryRow's own keys, so widening the row shape widens the
 // projection in the same edit. It used to be a hand-kept second spelling of the list, and zod
@@ -625,7 +638,12 @@ export class SurrealMemory {
             ...(n.toolRefs !== undefined && { toolRefs: n.toolRefs }),
             ...(n.modelRef !== undefined && { modelRef: n.modelRef }),
             createdAt: prov.createdAt, createdBy: prov.createdBy,
-            updatedAt: prov.updatedAt, updatedBy: prov.updatedBy, revision: prov.revision,
+            updatedAt: prov.updatedAt, updatedBy: prov.updatedBy,
+            // off the event's author, via the one provenance derivation — never off this process's
+            // cwd: a supervisor serves every workspace at once and its own directory says nothing
+            // about where a given write came from
+            workspaceId: prov.workspaceId,
+            revision: prov.revision,
             // CARRY-or-CLEAR, and the one place a write may touch the stamp. Omit-if-absent is NOT
             // available here, unlike every other optional column above: clearing is the whole point
             // when content moved, and an omitted key survives `UPSERT … SET` untouched — which would
@@ -813,6 +831,7 @@ export class SurrealMemory {
       out.push({
         id: n.id, title: row.title, summary: row.summary, via: n.via, depth: n.depth,
         score: n.score * activationBoost(act), direction: n.direction, activation: act, from: n.from,
+        workspaceId: row.workspaceId,
         ...(foundScope !== undefined && { scope: foundScope }),
       })
     }
@@ -1421,6 +1440,7 @@ function toNote(r: Record<string, any>) {
     rationale: r.rationale, uncertainty: r.uncertainty, zone: r.zone,
     dependsOn: r.dependsOn, skillRefs: r.skillRefs, toolRefs: r.toolRefs, modelRef: r.modelRef,
     createdAt: r.createdAt, createdBy: r.createdBy, updatedAt: r.updatedAt, updatedBy: r.updatedBy,
+    workspaceId: r.workspaceId,
     revision: r.revision,
     // absent on every note nobody has verified, which is most of them — MemoryNote leaves the key
     // off rather than defaulting it, because a defaulted stamp would be a claim nobody made
@@ -1450,6 +1470,11 @@ function toSummary(r: Record<string, any>): NoteSummary {
     id: r.noteId, scope: r.scope, title: r.title,
     // both drift inputs together — a reader holding only the revision invents the wrong comparison
     sourceRevision: r.sourceRevision ?? null, paths: r.paths ?? [],
+    // the provisional input. No `?? ''` fallback, unlike the optional columns around it: an empty
+    // workspace matches nothing in the table and provisionalOf would read it as "cannot tell", which
+    // is indistinguishable from trunk knowledge — the column is required precisely so it is never
+    // absent, and a row that somehow lacks it must fail the parse rather than answer wrongly.
+    workspaceId: r.workspaceId,
     tier: NoteTier.catch(inferTier(r)).parse(r.tier),
     categories: r.categories ?? [], tags: r.tags, summary: r.summary,
     hits: r.hits ?? 0, lastAccessedAt: r.lastAccessedAt ?? null,

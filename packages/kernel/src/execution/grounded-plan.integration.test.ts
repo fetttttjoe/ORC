@@ -13,7 +13,7 @@ import { createMemory, memoryRoleFor } from '@orc/memory'
 import { createTestSurreal } from '@orc/memory/test-helpers'
 import { openStorage } from '../storage'
 import { Kernel } from '../kernel'
-import { createTestDb, fakeProvider, testConfig, TEST_PROJECT_ID, waitFor as poll } from '../test-helpers'
+import { createTestDb, fakeProvider, seedTestWorkspace, TEST_PROJECT_ID, TEST_WORKSPACE_ID, testConfig, waitFor as poll } from '../test-helpers'
 import { createDbosPort, dbosSend } from './dbos-port'
 import { finalizePlanTool } from './finalize-plan-tool'
 import { readAnnotationsTool } from './read-annotations-tool'
@@ -189,6 +189,8 @@ async function bringUp() {
   // send=dbosSend so replyFeedback both appends feedback_provided AND resumes the parked step
   // workflow (the real CLI wiring: new Kernel(log, refValidator, analyzers, dbosSend)).
   const kernel = new Kernel(log, undefined, new Map<string, Analyzer>([['agent-analyzer', testAnalyzer]]), dbosSend)
+  // a task must name a workspace the fold has seen — one seeded record, then tasks as before
+  await seedTestWorkspace(log)
   const memory = await createMemory({ log, config })
   await memory.projector.start()
   const port = await createDbosPort({
@@ -208,7 +210,7 @@ async function bringUp() {
     stepTools: p => {
       // step role keys the memory tier: scout (analyze) / auditor (plan) narrow-or-widen the surface;
       // every other role (the implementer children) gets verify. Scout MUST keep memory_write (FixA).
-      const bound = memory.bindStep({ author: { source: 'agent', taskId: p.taskId, stepId: p.stepId, runToken: p.runToken, executor: p.executor, model: p.model, role: p.role }, step: p.step, taskId: p.taskId, ancestorTaskIds: p.ancestorTaskIds, role: memoryRoleFor(p.role) })
+      const bound = memory.bindStep({ author: { source: 'agent', workspaceId: p.workspaceId, taskId: p.taskId, stepId: p.stepId, runToken: p.runToken, executor: p.executor, model: p.model, role: p.role }, step: p.step, taskId: p.taskId, ancestorTaskIds: p.ancestorTaskIds, role: memoryRoleFor(p.role) })
       return { memory: bound.memory, tools: [
         ...bound.tools,
         ...splitTool({ kernel, config: { approvalPolicy: config.approvalPolicy, maxDepth: config.maxDepth }, p }),
@@ -233,7 +235,7 @@ describe('grounded-plan e2e: the full consent → analyze → plan-graph → ann
   it('consent yes → grounded plan → targeted re-plan → approve → dependency-ordered child execution', async () => {
     const { kernel, memory, port, cleanup } = await bringUp()
     try {
-      const t = await kernel.createGroundedTask({ title: 'Web app', spec: 'build a web app', modelRef: 'fake/m', analyzerRef: 'agent-analyzer' })
+      const t = await kernel.createGroundedTask({ workspaceId: TEST_WORKSPACE_ID, title: 'Web app', spec: 'build a web app', modelRef: 'fake/m', analyzerRef: 'agent-analyzer' })
       mutateAfterApprovalTasks.add(t.id)
       const scope = planScope(t.id)
       const feedbackCount = async (topic: string): Promise<number> =>
@@ -329,7 +331,7 @@ describe('grounded-plan e2e: the full consent → analyze → plan-graph → ann
   it('consent no → empty CoverageReport (analyzed:false) → assumption-mode plan with marked uncertainties', async () => {
     const { kernel, memory, port, cleanup } = await bringUp()
     try {
-      const t = await kernel.createGroundedTask({ title: 'CLI tool', spec: 'ship a cli', modelRef: 'fake/m', analyzerRef: 'agent-analyzer' })
+      const t = await kernel.createGroundedTask({ workspaceId: TEST_WORKSPACE_ID, title: 'CLI tool', spec: 'ship a cli', modelRef: 'fake/m', analyzerRef: 'agent-analyzer' })
       const scope = planScope(t.id)
       const feedbackCount = async (topic: string): Promise<number> =>
         (await kernel.eventsFor(t.id)).filter(e => e.kind === EVENT_KIND.feedback_requested && PAYLOAD_SCHEMAS.feedback_requested.parse(e.payload).topic === topic).length
@@ -380,7 +382,7 @@ describe('grounded-plan e2e: the full consent → analyze → plan-graph → ann
   it('memory_neighbors from the masterplan returns its subplan-notes (the plan-graph is consumable)', async () => {
     const { kernel, memory, port, cleanup } = await bringUp()
     try {
-      const t = await kernel.createGroundedTask({ title: 'Service', spec: 'build a service', modelRef: 'fake/m', analyzerRef: 'agent-analyzer' })
+      const t = await kernel.createGroundedTask({ workspaceId: TEST_WORKSPACE_ID, title: 'Service', spec: 'build a service', modelRef: 'fake/m', analyzerRef: 'agent-analyzer' })
       const scope = planScope(t.id)
       const feedbackCount = async (topic: string): Promise<number> =>
         (await kernel.eventsFor(t.id)).filter(e => e.kind === EVENT_KIND.feedback_requested && PAYLOAD_SCHEMAS.feedback_requested.parse(e.payload).topic === topic).length

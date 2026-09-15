@@ -7,12 +7,23 @@ import {
   type EpisodicNote, type PlanNote, type SemanticNote,
 } from './memory'
 
+// The ONE workspace id every test-side author and task literal names — the kernel's test-helpers
+// re-exports this exact binding and builds TEST_WORKSPACE (the seeded workspace_created) from it,
+// so the two can never disagree. It lives here rather than there because contracts is the bottom of
+// the dependency graph and its own tests need the id too, and here rather than once per test file
+// because MemoryAuthor.workspaceId is required on every author — a per-file copy would be twenty
+// spellings of one uuid. A uuid because Workspace.id is z.uuid(), not a readable 'test-ws'.
+export const TEST_WORKSPACE_ID = '00000000-0000-4000-8000-000000000002'
+
 // A stored note of each tier. One fixture per tier rather than one superset literal: the tiers
 // exist precisely so a note cannot carry another lane's fields, and a test fixture that ignored
 // that would let a wrong-lane field look legal.
 const NOTE_PROVENANCE = {
   createdAt: '2026-07-18T00:00:00.000Z', createdBy: 'cli',
   updatedAt: '2026-07-18T00:00:00.000Z', updatedBy: 'cli', revision: 1,
+  // the same workspace every test-side author names, so a fixture note and a fixture write agree
+  // about which checkout the note came from
+  workspaceId: TEST_WORKSPACE_ID,
 }
 
 export function semanticNoteFixture(over: Partial<SemanticNote> = {}): SemanticNote {

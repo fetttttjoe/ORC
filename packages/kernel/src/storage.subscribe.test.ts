@@ -4,14 +4,14 @@ import { sql } from 'drizzle-orm'
 import { drizzle } from 'drizzle-orm/node-postgres'
 import type { TaskNode } from '@orc/contracts'
 import { EVENT_KIND } from '@orc/contracts'
-import { createTestDb, TEST_PROJECT_ID } from './test-helpers'
+import { createTestDb, TEST_PROJECT_ID, TEST_WORKSPACE_ID } from './test-helpers'
 import { openStorage, type EventLog } from './storage'
 
 const dbs: Array<{ drop: () => Promise<void> }> = []
 afterEach(async () => { for (const d of dbs.splice(0)) await d.drop() })
 
 const task = (id: string): TaskNode => ({
-  id, parentId: null, type: 'generic', title: id, spec: '', status: 'draft',
+  id, parentId: null, workspaceId: TEST_WORKSPACE_ID, type: 'generic', title: id, spec: '', status: 'draft',
   zone: [], budgetUSD: null, depth: 0, createdAt: '2026-07-17T00:00:00.000Z',
 })
 const appendCreated = (log: EventLog, id: string) =>

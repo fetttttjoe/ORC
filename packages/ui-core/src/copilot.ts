@@ -8,7 +8,7 @@ import type { OrcActions } from './actions'
 import type { ProjectSessions } from './sessions'
 
 import { snip } from './summarize'
-import type { MemoryHealth, ResolvedTool, SupervisorHealth } from '@orc/contracts'
+import type { MemoryHealth, ResolvedTool, SupervisorHealth, WorkspaceWithHealth } from '@orc/contracts'
 import { errorMessage, EventKind, MEMORY_HEALTH, toolError } from '@orc/contracts'
 
 // Why a session can't act: 'read-only' = server started outside a project; 'foreign-project'
@@ -74,6 +74,11 @@ export function buildCopilotTools(deps: {
   actions: OrcActions | null
   projectId: string
   listModels?: () => Promise<string[]>
+  // The project's workspaces for project_status, wired from the kernel exactly as listModels is.
+  // Optional for the same reason health is: a composition without a project context has none, and
+  // an empty list would read as "this project has no workspaces" — which is never true, since every
+  // task belongs to one. Absent means the field is OMITTED.
+  listWorkspaces?: () => Promise<readonly WorkspaceWithHealth[]>
   // Read-model health for project_status (same probe graph-ui's /api/health serves). Optional
   // because not every composition has a memory plugin; absent means the field is OMITTED — a
   // fabricated "ok" would tell a driver the graph is current while it is mid-rebuild, which is
@@ -81,7 +86,7 @@ export function buildCopilotTools(deps: {
   // read SurrealDB/Postgres directly to learn why nothing was running).
   health?: () => Promise<{ memory: MemoryHealth; supervisor?: SupervisorHealth }>
 }): ToolSet {
-  const { sessions, actions, projectId, listModels, health } = deps
+  const { sessions, actions, projectId, listModels, listWorkspaces, health } = deps
   const taskId = z.string().min(1)
 
   const read: ToolSet = {
@@ -93,10 +98,15 @@ export function buildCopilotTools(deps: {
       }),
     } : {}),
     project_status: tool({
-      description: 'List every request (task) in this project with its status, plus graph counts and memory (read model) health. Start here.',
+      description: 'List every request (task) in this project with its status, the workspaces (checkouts) they are worked in, plus graph counts and memory (read model) health. Start here.',
       inputSchema: z.object({}),
       execute: async () => {
         const { graph } = await sessions.snapshot(projectId)
+        // A failed lookup OMITS the field, the same posture the health probe below holds and for
+        // the same reason: this is the tool a driver starts from, and one optional dep must never
+        // take the whole answer down. Omission, not `[]` — an empty list reads as "this project has
+        // no workspaces", which is never true.
+        const workspaces = await listWorkspaces?.().catch(() => undefined)
         // Typed against NodeType rather than free-floating: this was the fourth hand-spelled copy
         // of the node vocabulary, and a kind added to the wire counted as undefined here. Still
         // written out — Record<NodeType, number> makes a MISSING key a compile error, which is the
@@ -109,9 +119,26 @@ export function buildCopilotTools(deps: {
           ? await health()
             .catch((err: unknown) => ({ memory: { state: MEMORY_HEALTH.unreachable, pending: 0, reason: errorMessage(err) } }))
           : undefined
+        const tasks = graph.nodes.filter(n => n.type === 'task')
         return {
-          tasks: graph.nodes.filter(n => n.type === 'task').map(n => ({ taskId: n.id, title: n.label, status: n.detail })),
+          tasks: tasks.map(n => ({ taskId: n.id, title: n.label, status: n.detail })),
           counts,
+          // Grouped from the task list this call ALREADY has, not from a second fold: the snapshot's
+          // task nodes carry their workspaceId. `tasks` above still lists every task whatever its
+          // workspace, because two kinds of task fall into no group here and BOTH have to stay
+          // visible: one whose workspace record the log never recorded (an orphan — a log defect),
+          // and one whose workspace was ARCHIVED, which listWorkspaces filters out while the task
+          // itself is still perfectly real.
+          ...(workspaces && {
+            workspaces: workspaces.map(({ workspace: w, health }) => ({
+              id: w.id, title: w.title, kind: w.kind, branch: w.branch, cwd: w.cwd,
+              taskIds: tasks.filter(n => n.workspaceId === w.id).map(n => n.id),
+              // Passed through WHOLE, never re-derived and never narrowed here: this is the same
+              // verdict `orc ws ls` and workspace_list carry, and a door that summarized it into its
+              // own words would be a fourth reading of "is this checkout still going anywhere".
+              health,
+            })),
+          }),
           ...(h && { memory: h.memory }),
           // "is anything driving?" — a driver seeing every task idle needs this before anything else
           ...(h && 'supervisor' in h && h.supervisor && { supervisor: h.supervisor }),
@@ -196,12 +223,23 @@ export function buildCopilotTools(deps: {
 
   const mutate: ToolSet = {
     new_request: tool({
-      description: 'Create a new request. The title is a short LABEL; spec carries the actual intent (goal, constraints, outputs) — agents never infer intent from the title. grounded=true makes an agent analyze the repo and propose a decomposition (REQUIRES spec and cwd); otherwise a quick single-step task is created (then propose/approve/run it).',
+      description: 'Create a new request. The title is a short LABEL; spec carries the actual intent (goal, constraints, outputs) — agents never infer intent from the title. grounded=true makes an agent analyze the repo and propose a decomposition (REQUIRES spec and cwd); otherwise a quick single-step task is created (then propose/approve/run it). workspaceId picks the checkout the request is worked in — it defaults to the workspace this server runs in, so pass one only to target another (workspace_list names them; workspace_new makes one).',
       inputSchema: z.object({
         title: z.string().min(1), spec: z.string().optional(),
+        workspaceId: z.string().min(1).optional(),
         grounded: z.object({ modelRef: z.string().min(1), cwd: z.string().min(1) }).optional(),
       }),
       execute: async input => actions.newTask(input),
+    }),
+    workspace_list: tool({
+      description: 'Workspaces of this project: a checkout, or an orc worktree created for one request, each with its health — state (dangling/waiting/active/idle/merged), when it last saw activity, its task counts and how many notes it holds that are still pending a merge. Ordered attention-first. Read-only — project_status lists each workspace\'s tasks.',
+      inputSchema: z.object({}),
+      execute: async () => actions.listWorkspaces(),
+    }),
+    workspace_new: tool({
+      description: 'Create a git worktree + branch for ONE request under the project\'s .orc/worktrees, record it as a workspace, and draft the request as its first task. Use for a new piece of work; reuse the current workspace for follow-ups to it.',
+      inputSchema: z.object({ title: z.string().min(1), spec: z.string().optional(), base: z.string().optional() }),
+      execute: async input => actions.newWorkspace(input),
     }),
     propose: tool({
       description: 'Propose a single-step plan for a draft task.',
@@ -214,8 +252,11 @@ export function buildCopilotTools(deps: {
     // .orc/config.json can add 'mcp' to the sources the grounded gate accepts — a config-file
     // edit the operator makes, which no tool here can perform.
     run: tool({
-      description: 'Start the approved plan running in the given working directory.',
-      inputSchema: z.object({ taskId, cwd: z.string().min(1) }),
+      // cwd is the OVERRIDE, not the instruction: omitted, the run happens in the task's own
+      // workspace (the kernel resolves it from the record). Naming a directory for every run is how
+      // a task created in one worktree gets driven from another checkout.
+      description: 'Start the approved plan running in its workspace (or an explicit cwd).',
+      inputSchema: z.object({ taskId, cwd: z.string().min(1).optional() }),
       execute: async ({ taskId: id, cwd }) => actions.run(id, cwd),
     }),
     reply: tool({

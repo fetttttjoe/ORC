@@ -1,12 +1,13 @@
 import { MEMORY_HEALTH, type EmbeddingProvider, type MemoryHealth, type MemoryStore } from '@orc/contracts'
 import { errorMessage } from '@orc/contracts'
 import { MemoryStage } from '@orc/contracts/health'
-import { EventLog, type ProjectConfig, type ProjectorLease } from '@orc/kernel'
+import { EventLog, gitRevision, type ProjectConfig, type ProjectorLease } from '@orc/kernel'
 import { openKnowledge, type Knowledge } from './knowledge'
 import { createMemoryStore } from './store'
 import { createMemoryProjector, KNOWLEDGE_KINDS, type MemoryProjector } from './projector'
 import { bindStepMemory, unavailableStepMemory, type BindStep } from './step'
 import { corpusDrift, createDriftProbe, type ChangedSince } from './drift'
+import { createWorkspaceView } from './workspace-view'
 import { createDriftCache } from './drift-cache'
 import { treeFingerprint } from '@orc/kernel'
 
@@ -29,25 +30,29 @@ export { recheckNotes, summarize, RECHECK_KINDS } from './recheck'
 export { KNOWLEDGE_KINDS } from './projector'
 export { archiveCandidates } from './archive'
 export { frontier } from './frontier'
-export { consolidateTask, type ConsolidationInput, type ConsolidationDistiller } from './consolidate'
+// CONSOLIDATE_EXECUTOR travels with them: both composition roots that build a consolidation author
+// (the serve runtime's lifecycle subscriber and `orc memory consolidate --force`) must name the
+// writer identically, and a literal spelled at each door is exactly what drifts.
+export { consolidateTask, CONSOLIDATE_EXECUTOR, type ConsolidationInput, type ConsolidationDistiller } from './consolidate'
 export { createMemoryLifecycle, type MemoryLifecycle } from './lifecycle'
 export { corpusDrift, needsReground, restampableNotes, createDriftProbe } from './drift'
+// consumer: packages/cli/src/mcp-serve.ts, which builds its own read tools and so must bind this
+// dep itself — the same reason it builds its own createDriftProbe rather than taking createMemory's.
+// `provisionalOf` and the view TYPES stay module-internal: nothing outside this plugin derives the
+// flag or names the shape, and a re-export nobody imports is API surface to keep compatible for no
+// consumer (see this file's header).
+export { createWorkspaceView } from './workspace-view'
+// consumer: packages/cli/src/workspace-health.ts, which needs "how much knowledge is still pending
+// in this checkout" to tell a dangling workspace from an idle one. It takes a PROBE, so a caller
+// wires it up without naming the view's shape: createWorkspaceView above builds one from a log, and
+// a caller that has already folded the log hands its own maps back instead — which is what the
+// workspace lister does, since a second fold there would be a second read of the same log.
+export { provisionalNoteCounts } from './provisional-count'
 export { restampToHead } from './restamp'
 // consumer: packages/cli/src/runtime.ts, which binds it to the knowledge handle below and injects it
 // into the step tools — the kernel never imports this plugin, so the query crosses as a callback.
 export { notesCiting, type CitingNote } from './drift'
 export { createGroundingSource } from './grounding-source'
-
-// the actual revision of the code the runtime is looking at — null outside Git
-export async function gitRevision(dir: string): Promise<string | null> {
-  try {
-    const proc = Bun.spawn(['git', '-C', dir, 'rev-parse', 'HEAD'], { stdout: 'pipe', stderr: 'ignore' })
-    const out = await new Response(proc.stdout).text()
-    return (await proc.exited) === 0 ? out.trim() : null
-  } catch {
-    return null
-  }
-}
 
 // the orchestrator: assembles the knowledge service + event log into the memory domain
 // services (gateway, projector, tools) — the business logic never opens Surreal itself
@@ -64,11 +69,17 @@ export async function createMemory(opts: { log: EventLog; config: ProjectConfig;
 }> {
   const knowledge = await openKnowledge(opts.config, opts.embedder)
   const store = createMemoryStore({ log: opts.log, surreal: knowledge, sourceRevision: () => gitRevision(opts.config.dir), halfLifeDays: opts.config.memoryHalfLifeDays })
-  const projector = createMemoryProjector({ log: opts.log, surreal: knowledge, vaultDir: opts.config.vaultDir, ...(opts.lease && { lease: opts.lease }) })
+  // Built here, beside the drift probe, because both answer "how much should a reader trust this
+  // row" and both are read per call rather than snapshotted: one asks whether the CODE moved, the
+  // other whether the WORKSPACE landed. Every surface this root assembles — the step tools and the
+  // vault renderer the projector drives — gets the same view, so the two cannot disagree about one
+  // note. From the log, not from a Kernel: this plugin holds no kernel, and the fold is the rule.
+  const workspaceView = createWorkspaceView(opts.log)
+  const projector = createMemoryProjector({ log: opts.log, surreal: knowledge, vaultDir: opts.config.vaultDir, workspaceView, ...(opts.lease && { lease: opts.lease }) })
   const changedSince = createDriftProbe(opts.config.dir)
   return {
     store, projector, knowledge,
-    bindStep: p => bindStepMemory({ ...p, store, changedSince, catchUp: projector.catchUp }),
+    bindStep: p => bindStepMemory({ ...p, store, changedSince, workspaceView, catchUp: projector.catchUp }),
     close: async () => { await projector.close(); await knowledge.close() },
   }
 }

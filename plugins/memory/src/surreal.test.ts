@@ -2,7 +2,7 @@ import { afterAll, describe, expect, it } from 'bun:test'
 import { RecordId, Surreal } from 'surrealdb'
 import { claimId, EVENT_KIND, LINK_KIND, MEMORY_ACCESS, MEMORY_USE, MemoryScope, PROJECT_NAME_NOTE_ID, isRecord, type AccessVia, type EventKind, type EventRecord, type MemoryAccessMode, type MemoryAuthor, type MemoryNote, type MemoryUseOutcome, type NoteView } from '@orc/contracts'
 import { SurrealMemory } from './surreal'
-import { eventFixture } from '@orc/contracts/fixtures'
+import { TEST_WORKSPACE_ID, eventFixture } from '@orc/contracts/fixtures'
 import { createTestSurreal } from './test-helpers'
 
 const note = (over = {}) => ({
@@ -13,7 +13,7 @@ const note = (over = {}) => ({
 // tier-specific columns read through the shared view: these tests assert on what the read model
 // stored, not on which lane a fixture happened to land in
 const view = (n: MemoryNote | null): NoteView | undefined => n ?? undefined
-const cli: MemoryAuthor = { source: 'cli' }
+const cli: MemoryAuthor = { source: 'cli', workspaceId: TEST_WORKSPACE_ID }
 const written = (seq: number, n = note(), author: MemoryAuthor = cli): EventRecord =>
   eventFixture({ seq, taskId: null, kind: 'memory_written', payload: { note: n, author }, ts: `2026-07-18T0${Math.min(seq, 9)}:00:00Z` })
 const deleted = (seq: number, id: string, scope = 'project'): EventRecord =>
@@ -49,7 +49,7 @@ describe('SurrealMemory.applyEvent', () => {
     expect(got?.revision).toBe(1)
     expect(got?.createdBy).toBe('cli')
     expect(view(got)?.kind).toBe('fact')
-    await m.applyEvent(written(2, note({ summary: 'rotate on use' }), { source: 'agent', executor: 'api-loop', model: 'opus', role: 'review' }))
+    await m.applyEvent(written(2, note({ summary: 'rotate on use' }), { source: 'agent', workspaceId: TEST_WORKSPACE_ID, executor: 'api-loop', model: 'opus', role: 'review' }))
     got = await m.get('auth', 'project')
     expect(got?.revision).toBe(2)
     expect(got?.createdBy).toBe('cli')            // unchanged
@@ -368,7 +368,7 @@ describe('SurrealMemory.applyEvent', () => {
     const apply = (kind: EventKind, payload: Record<string, unknown>) =>
       m.applyEvent(eventFixture({ seq: ++seq, ts, kind, payload }))
     const note = (id: string, links: Array<{ id: string; kind: 'relates_to' }> = []) =>
-      apply(EVENT_KIND.memory_written, { note: { id, scope: 'project', title: id, links }, author: { source: 'cli' } })
+      apply(EVENT_KIND.memory_written, { note: { id, scope: 'project', title: id, links }, author: { source: 'cli', workspaceId: TEST_WORKSPACE_ID } })
     await note('edge-z')
     await note('edge-a')
     await note('edge-seed', [{ id: 'edge-z', kind: 'relates_to' }, { id: 'edge-a', kind: 'relates_to' }])
@@ -376,10 +376,10 @@ describe('SurrealMemory.applyEvent', () => {
     // node-level hit, but no edge to strengthen. A would win a same-score tie-break sort
     // (localeCompare), so Z winning proves the boost, not alphabetical luck.
     await apply(EVENT_KIND.memory_accessed, {
-      id: 'edge-z', scope: 'project', mode: 'read', author: { source: 'cli' },
+      id: 'edge-z', scope: 'project', mode: 'read', author: { source: 'cli', workspaceId: TEST_WORKSPACE_ID },
       via: { seed: 'edge-seed', kind: 'relates_to', direction: 'out' },
     })
-    await apply(EVENT_KIND.memory_accessed, { id: 'edge-a', scope: 'project', mode: 'read', author: { source: 'cli' } })
+    await apply(EVENT_KIND.memory_accessed, { id: 'edge-a', scope: 'project', mode: 'read', author: { source: 'cli', workspaceId: TEST_WORKSPACE_ID } })
 
     const ranked = await m.neighbors('edge-seed', { now: ts })
     // node heat is EQUAL: both notes were hit exactly once at the same timestamp
@@ -519,13 +519,13 @@ describe('SurrealMemory.applyEvent', () => {
     const apply = (kind: EventKind, payload: Record<string, unknown>) =>
       m.applyEvent(eventFixture({ seq: ++seq, ts, kind, payload }))
     const note = (id: string, links: Array<{ id: string; kind: 'relates_to' }> = []) =>
-      apply(EVENT_KIND.memory_written, { note: { id, scope: 'project', title: id, links }, author: { source: 'cli' } })
+      apply(EVENT_KIND.memory_written, { note: { id, scope: 'project', title: id, links }, author: { source: 'cli', workspaceId: TEST_WORKSPACE_ID } })
     // seed → b and seed → c with the SAME kind: identical structural score
     await note('act-b')
     await note('act-c')
     await note('act-seed', [{ id: 'act-b', kind: 'relates_to' }, { id: 'act-c', kind: 'relates_to' }])
     for (let i = 0; i < 5; i++)
-      await apply(EVENT_KIND.memory_accessed, { id: 'act-c', scope: 'project', mode: 'read', author: { source: 'cli' } })
+      await apply(EVENT_KIND.memory_accessed, { id: 'act-c', scope: 'project', mode: 'read', author: { source: 'cli', workspaceId: TEST_WORKSPACE_ID } })
     const ranked = await m.neighbors('act-seed', { now: ts })
     expect(ranked.map(n => n.id)[0]).toBe('act-c') // hot beats cold at equal structure
     expect(ranked.find(n => n.id === 'act-c')!.activation).toBeGreaterThan(0)

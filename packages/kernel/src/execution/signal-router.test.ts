@@ -3,7 +3,7 @@ import { EVENT_KIND, REACTION, ReactionFailedPayload, TASK_STATUS, type EventRec
 import { Kernel } from '../kernel'
 import { fold } from '../projections'
 import { openStorage, type EventLog } from '../storage'
-import { createTestDb, TEST_PROJECT_ID, waitFor } from '../test-helpers'
+import { createTestDb, seedTestWorkspace, TEST_PROJECT_ID, TEST_WORKSPACE_ID, waitFor } from '../test-helpers'
 import { composeSplitResult, createSignalRouter } from './signal-router'
 import { eventFixture } from '@orc/contracts/fixtures'
 
@@ -12,7 +12,7 @@ const evt = (over: Partial<EventRecord>): EventRecord =>
   eventFixture({ projectId: TEST_PROJECT_ID, taskId: 'c1', ts: 'T', ...over })
 const childTask = (id: string, parentId: string) => evt({
   taskId: id,
-  payload: { task: { id, parentId, type: 'split', title: id, spec: '', status: 'draft', zone: [], budgetUSD: null, depth: 1, createdAt: 'T' } },
+  payload: { task: { id, parentId, workspaceId: TEST_WORKSPACE_ID, type: 'split', title: id, spec: '', status: 'draft', zone: [], budgetUSD: null, depth: 1, createdAt: 'T' } },
 })
 
 describe('composeSplitResult', () => {
@@ -32,8 +32,8 @@ describe('composeSplitResult', () => {
     // note events arrive separately: they are NOT router kinds, so the router fetches them only
     // when it actually composes a result rather than on every routed event
     const notes: EventRecord[] = [
-      evt({ seq: 8, taskId: null, kind: 'memory_written', payload: { note: { id: 'finding', scope: 'project', title: 'F', categories: [], tags: [], links: [], paths: [], summary: '', body: '' }, author: { source: 'agent', taskId: 'c1' } } }),
-      evt({ seq: 9, taskId: null, kind: 'memory_written', payload: { note: { id: 'other', scope: 'project', title: 'O', categories: [], tags: [], links: [], paths: [], summary: '', body: '' }, author: { source: 'agent', taskId: 'unrelated' } } }),
+      evt({ seq: 8, taskId: null, kind: 'memory_written', payload: { note: { id: 'finding', scope: 'project', title: 'F', categories: [], tags: [], links: [], paths: [], summary: '', body: '' }, author: { source: 'agent', workspaceId: TEST_WORKSPACE_ID, taskId: 'c1' } } }),
+      evt({ seq: 9, taskId: null, kind: 'memory_written', payload: { note: { id: 'other', scope: 'project', title: 'O', categories: [], tags: [], links: [], paths: [], summary: '', body: '' }, author: { source: 'agent', workspaceId: TEST_WORKSPACE_ID, taskId: 'unrelated' } } }),
     ]
     const r = composeSplitResult(events, notes, split)
     expect(r).toEqual({
@@ -76,7 +76,7 @@ describe('createSignalRouter (integration, real EventLog)', () => {
   })
 
   const taskNode = (id: string, parentId: string | null): TaskNode =>
-    ({ id, parentId, type: parentId ? 'split' : 'root', title: id, spec: '', status: TASK_STATUS.draft, zone: [], budgetUSD: null, depth: parentId ? 1 : 0, createdAt: 'T' })
+    ({ id, parentId, workspaceId: TEST_WORKSPACE_ID, type: parentId ? 'split' : 'root', title: id, spec: '', status: TASK_STATUS.draft, zone: [], budgetUSD: null, depth: parentId ? 1 : 0, createdAt: 'T' })
 
   // parent + child tasks and the split that binds them (runToken = the parent step's send target)
   const seedSplit = async (): Promise<void> => {
@@ -105,7 +105,7 @@ describe('createSignalRouter (integration, real EventLog)', () => {
     await log.append({ taskId: 'f', stepId: null, runToken: null, kind: EVENT_KIND.task_status_changed, payload: { taskId: 'f', from: TASK_STATUS.draft, to: TASK_STATUS.running } })
     const event = await log.append({
       taskId: 'f', stepId: 'plan', runToken: 'step:f:plan:a1', kind: EVENT_KIND.feedback_provided,
-      payload: { topic: 'approval', text: 'approve', author: { source: 'cli' } },
+      payload: { topic: 'approval', text: 'approve', author: { source: 'cli', workspaceId: TEST_WORKSPACE_ID } },
     })
 
     expect(await waitFor(async () => sends.length === 1)).toBe(true)
@@ -121,7 +121,7 @@ describe('createSignalRouter (integration, real EventLog)', () => {
       await log.append({ taskId: id, stepId: null, runToken: null, kind: EVENT_KIND.task_status_changed, payload: { taskId: id, from: TASK_STATUS.draft, to: status } })
       await log.append({
         taskId: id, stepId: 'plan', runToken: `step:${id}:plan:a1`, kind: EVENT_KIND.feedback_provided,
-        payload: { topic: id, text: 'answer', author: { source: 'cli' } },
+        payload: { topic: id, text: 'answer', author: { source: 'cli', workspaceId: TEST_WORKSPACE_ID } },
       })
     }
     router = createSignalRouter({
@@ -137,7 +137,9 @@ describe('createSignalRouter (integration, real EventLog)', () => {
 
   it('startup heals a reply committed before its immediate send failed', async () => {
     const kernel = new Kernel(log, undefined, undefined, async () => { throw new Error('simulated send failure') })
-    const task = await kernel.createTask({ title: 'feedback recovery' })
+    // a task must name a workspace the fold has seen — one seeded record, then tasks as before
+    await seedTestWorkspace(log)
+    const task = await kernel.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'feedback recovery' })
     await log.append({
       taskId: task.id, stepId: null, runToken: null, kind: EVENT_KIND.task_status_changed,
       payload: { taskId: task.id, from: TASK_STATUS.draft, to: TASK_STATUS.running },

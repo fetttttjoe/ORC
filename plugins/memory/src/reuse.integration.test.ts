@@ -9,6 +9,7 @@ import { createMemoryProjector } from './projector'
 import { createMemoryStore } from './store'
 import { SurrealMemory } from './surreal'
 import { createTestSurreal } from './test-helpers'
+import { TEST_WORKSPACE_ID } from '@orc/contracts/fixtures'
 
 describe('typed-link traversal (e2e)', () => {
   // The link table is a function of the LIVE NOTE SET, and stays one across a delete.
@@ -34,18 +35,18 @@ describe('typed-link traversal (e2e)', () => {
       return store.neighbors('area-a')
     }
     try {
-      await store.write({ id: 'area-b', title: 'B' }, { source: 'cli' })
+      await store.write({ id: 'area-b', title: 'B' }, { source: 'cli', workspaceId: TEST_WORKSPACE_ID })
       // A asserts the edge; B never says anything about A
-      await store.write({ id: 'area-a', title: 'A', links: [{ id: 'area-b', kind: 'depends_on' }] }, { source: 'cli' })
+      await store.write({ id: 'area-a', title: 'A', links: [{ id: 'area-b', kind: 'depends_on' }] }, { source: 'cli', workspaceId: TEST_WORKSPACE_ID })
       expect((await settle()).map(n => n.id)).toEqual(['area-b'])
 
       // while B is gone the edge cannot resolve — A's statement stands, its target does not
-      await store.remove('area-b', MemoryScope.project, { source: 'cli' })
+      await store.remove('area-b', MemoryScope.project, { source: 'cli', workspaceId: TEST_WORKSPACE_ID })
       expect((await settle()).map(n => n.id)).toEqual([])
 
       // B returns under the same id: A never wrote again, so only a derivation from the live note
       // set can bring this back — which is exactly the guarantee being pinned
-      await store.write({ id: 'area-b', title: 'B again' }, { source: 'cli' })
+      await store.write({ id: 'area-b', title: 'B again' }, { source: 'cli', workspaceId: TEST_WORKSPACE_ID })
       expect((await settle()).map(n => n.id)).toEqual(['area-b'])
 
       // and a rebuild reproduces the same graph rather than a thinner one
@@ -71,8 +72,8 @@ describe('typed-link traversal (e2e)', () => {
     await proj.start()
 
     try {
-      await store.write({ id: 'decision-a', title: 'A', links: [{ id: 'decision-b', kind: 'supersedes' }] }, { source: 'cli' })
-      await store.write({ id: 'decision-b', title: 'B' }, { source: 'cli' })
+      await store.write({ id: 'decision-a', title: 'A', links: [{ id: 'decision-b', kind: 'supersedes' }] }, { source: 'cli', workspaceId: TEST_WORKSPACE_ID })
+      await store.write({ id: 'decision-b', title: 'B' }, { source: 'cli', workspaceId: TEST_WORKSPACE_ID })
 
       // the projector applies memory_written asynchronously — poll until the edge materializes
       let nb: NeighborResult[] = []

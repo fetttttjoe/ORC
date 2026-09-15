@@ -6,6 +6,7 @@ import {
 import { applyBudget } from './budget'
 import { memoryTools, unavailableMemoryTools, MEMORY_ROLE, type MemoryRole } from './tools'
 import { corpusDrift, type ChangedSince, type CorpusDrift } from './drift'
+import type { WorkspaceViewProbe } from './provisional'
 
 // Distinct id prefixes so a later success cannot overwrite a failure lesson — both notes coexist.
 // `partial` is null — NO ambient note: continuation rounds share a runToken, so the ambient
@@ -83,6 +84,9 @@ export function bindStepMemory(opts: {
   role?: MemoryRole
   // the drift probe: also what lets recall report how much of its own output still holds
   changedSince?: ChangedSince
+  // the workspace standing behind the tools' `provisional` flag — bound by the composition root for
+  // the same reason changedSince is: neither can be answered from inside one step
+  workspaceView?: WorkspaceViewProbe
   // drains the projection before the step's own reads — see memoryTools' catchUp
   catchUp?: () => Promise<void>
   ambientCapture?: boolean
@@ -174,7 +178,7 @@ export function bindStepMemory(opts: {
     Promise.race([p, new Promise<never>((_, reject) => setTimeout(() => reject(new Error(`${what} still pending after ${recallTimeoutMs}ms — degraded store treated as absent`)), recallTimeoutMs).unref?.())])
 
   return {
-    tools: memoryTools({ store: tracking, author, role: opts.role, changedSince: opts.changedSince, catchUp: opts.catchUp, searchScope: scope }),
+    tools: memoryTools({ store: tracking, author, role: opts.role, changedSince: opts.changedSince, workspaceView: opts.workspaceView, catchUp: opts.catchUp, searchScope: scope }),
     memory: {
       // KEYWORD arm only, and now actually PASSED as such: a path is a literal, and the semantic
       // arm returns claims merely about the same area — the opposite of what a retirement prompt
@@ -316,7 +320,7 @@ export function bindStepMemory(opts: {
 }
 
 // What the composition root calls per step, with the store already bound.
-export type BindStep = (p: Omit<Parameters<typeof bindStepMemory>[0], 'store' | 'changedSince' | 'catchUp'>) => StepMemoryBinding
+export type BindStep = (p: Omit<Parameters<typeof bindStepMemory>[0], 'store' | 'changedSince' | 'workspaceView' | 'catchUp'>) => StepMemoryBinding
 
 // Degraded mode (design §8.4): the tools still EXIST and every call returns an explicit isError
 // naming the reason, so the model learns context is unavailable instead of silently losing them.

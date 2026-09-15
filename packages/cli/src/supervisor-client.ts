@@ -1,4 +1,5 @@
-import type { SupervisorRow } from '@orc/kernel'
+import type { ProjectConfig, SupervisorRow } from '@orc/kernel'
+import { serveLogFile } from './serve-paths'
 
 // How this command reaches a runtime: one already beating, one this command started, or none at
 // all because --no-daemon says the command holds its own. Named, so the three cases are matched
@@ -12,6 +13,10 @@ export interface EnsureDeps {
   waitMs: number
   noDaemon: boolean
   sleep: (ms: number) => Promise<void>
+  // Lazy like `spawn`: read only in the throw below, which is reached only past the `noDaemon`
+  // guard — a caller with no project context (tests, embedded hosts) forces noDaemon instead of
+  // supplying one.
+  config: () => Pick<ProjectConfig, 'projectRoot'>
 }
 
 const POLL_MS = 100
@@ -30,5 +35,5 @@ export async function ensureSupervisor(deps: EnsureDeps): Promise<SupervisorMode
     if (Date.now() >= deadline) break
     await deps.sleep(POLL_MS)
   }
-  throw new Error('no supervisor came up — see .orc/serve.log, or re-run with --no-daemon to execute in this process')
+  throw new Error(`no supervisor came up — see ${serveLogFile(deps.config())}, or re-run with --no-daemon to execute in this process`)
 }

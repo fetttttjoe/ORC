@@ -5,6 +5,7 @@ import { EVENT_KIND, type EventRecord } from './event-kinds'
 import { composeAuthor, MEMORY_ID_RE, MemoryAuthor } from './ids'
 import { MEMORY_LIMITS } from './limits'
 import { planScope } from './plan'
+import { ProvisionalFlag } from './workspace-entity'
 
 // re-exported so every memory consumer keeps importing this vocabulary from one place
 export { MEMORY_ID_RE, slugId, MemoryAuthor, composeAuthor } from './ids'
@@ -463,6 +464,15 @@ const noteProvenance = {
   createdBy: z.string(),   // composed identity: "executor·model·role" or "cli"
   updatedAt: z.string(),
   updatedBy: z.string(),
+  // Which checkout the note's CURRENT content was written from, off the writing author. Provenance,
+  // like createdBy — not something a writer authors, which is why it is here and not on any *Input
+  // shape (CONTENT_FIELDS derives from those, so this correctly never clears a verification stamp).
+  //
+  // It advances with `updatedBy`, not with `createdBy`: a note re-written from another worktree is
+  // pending in THAT one until it merges, whatever checkout first created it. Every read surface
+  // derives `provisional` from this and nothing else — and a workspace can only be known at write
+  // time, so a note that lands without one is unflaggable forever and reads as trunk knowledge.
+  workspaceId: z.string().min(1),
   revision: z.number().int().positive(),
   // On the SHARED provenance object, not just the semantic tier: an episodic or plan note is
   // never verified in practice, but a stamp that only some tiers could hold would need a second
@@ -533,6 +543,13 @@ export const NoteSummary = z.object({
   // evidence exists — the common case must not widen every envelope. Two counter pairs, never one
   // net score: contested is displayed as BOTH counts.
   use: NoteUseStats.optional(),
+  // The provisional derivation's INPUT, carried on the summary for the same reason the drift inputs
+  // are: the summary is what retrieval hands a reader, and the read tool that computes the flag has
+  // no note row of its own to look the workspace up in.
+  workspaceId: z.string(),
+  // …and its RESULT, attached by the read tool. Absent when the note is trunk knowledge — the common
+  // case, which must cost no tokens — the same posture `verified` and the drift flags keep.
+  provisional: ProvisionalFlag.optional(),
 })
 export type NoteSummary = z.infer<typeof NoteSummary>
 
@@ -584,8 +601,32 @@ export const NeighborResult = z.object({
   // resolve a link into the durable project lane (see linkLookupScopes), and a caller that then
   // reads the note needs to know where it lives. Optional: rows predating the field still parse.
   scope: z.string().optional(),
+  // the provisional pair, same rule as NoteSummary's: the workspace is the derivation's input, the
+  // flag its result, and a traversal row is acted on exactly like a search row
+  workspaceId: z.string(),
+  provisional: ProvisionalFlag.optional(),
 })
 export type NeighborResult = z.infer<typeof NeighborResult>
+
+// Every row a memory READ hands out carries the provisional pair, or neither half of it. The input
+// (`workspaceId`) without the output (`provisional`) is a row the flag can never reach, and it fails
+// SILENTLY: the flag is optional by design — absence means "final" — so nothing at runtime would
+// report a surface that simply never sets it, and the row would read as settled project knowledge
+// forever.
+//
+// WHAT IT ACTUALLY CATCHES, precisely: for each of the three row types NAMED below, dropping either
+// half of the pair fails the build. It is a hand-kept list, like budget.ts's BoundedField and
+// note-md.ts's RenderedField — a FOURTH row type added to a read reply and not added here is NOT
+// caught, so extend the intersection in the same edit that gives that row its `workspaceId`.
+// Keyed on `keyof`, NOT on structural assignability: `{workspaceId}` DOES extend
+// `{workspaceId; provisional?}` — an optional property in the target asks nothing of the source — so
+// an `extends` guard here compiles green against exactly the row it is meant to catch. (Measured:
+// the first spelling of this guard passed with `provisional` deleted from NeighborResult.)
+type CarriesProvisionalPair<T> = 'workspaceId' extends keyof T ? ('provisional' extends keyof T ? true : never) : never
+type ReadRowsCarryProvisional =
+  CarriesProvisionalPair<NoteSummary> & CarriesProvisionalPair<ClaimHit> & CarriesProvisionalPair<NeighborResult>
+const readRowsCarryProvisional: ReadRowsCarryProvisional = true
+void readRowsCarryProvisional
 
 // Options for a neighbors() traversal. halfLifeDays tunes the activation boost (the store
 // feeds it from config.memoryHalfLifeDays); `now` exists for deterministic tests —
@@ -734,13 +775,18 @@ export type MemoryOutcomePayload = z.infer<typeof MemoryOutcomePayload>
 export { MEMORY_HEALTH, type MemoryHealth, type MemoryHealthState } from './health'
 
 export interface MemoryStore {
+  // `author` is REQUIRED on every door that appends, removal and archive flags included. It used to
+  // be optional on the three below, defaulted to `{source:'cli'}` inside the store — which was a
+  // LIE about who wrote (a reactor is not a person at a terminal) and is now impossible anyway:
+  // MemoryAuthor.workspaceId has no defensible default, so a store that invented one would file
+  // knowledge under whichever checkout happened to boot the process.
   // idempotencyKey: deterministic writers (tool-driven writes inside an operation) pass one so
   // a crash retry of the surrounding effect cannot append the note event twice
   // invalidates: claim ids this write supersedes. On the OPTS, not the draft, because it is stated
   // about the write rather than about the note — it lands on the event, and the note keeps live
   // claims only. See ClaimWrite for why absence cannot mean deletion.
   write(input: MemoryNoteDraft, author: MemoryAuthor, opts?: { idempotencyKey?: string; invalidates?: string[] }): Promise<MemoryNote>
-  remove(id: string, scope?: string, author?: MemoryAuthor): Promise<void>
+  remove(id: string, scope: string | undefined, author: MemoryAuthor): Promise<void>
   /**
    * Retire a note from the read model, or bring it back. A LIFECYCLE transition, deliberately not
    * `write({archived})`: a write re-stamps `sourceRevision` from the runtime's HEAD, so archiving a
@@ -749,13 +795,13 @@ export interface MemoryStore {
    * This re-appends the stored note with only the flag moved, so provenance survives the round trip.
    * Absent (or already-archived) notes are a no-op, never an error: retiring twice is not a fault.
    */
-  setArchived(id: string, scope: string, archived: boolean, author?: MemoryAuthor): Promise<void>
+  setArchived(id: string, scope: string, archived: boolean, author: MemoryAuthor): Promise<void>
   /**
    * The same transition for MANY notes, with one pass over the log. `recheck --apply` retires every
    * candidate at once, and the per-note door folded the whole knowledge log each time.
    * Ids the log never carried are skipped, not faulted — the same tolerance setArchived has.
    */
-  setArchivedAll(entries: ReadonlyArray<{ id: string; scope: string }>, archived: boolean, author?: MemoryAuthor): Promise<void>
+  setArchivedAll(entries: ReadonlyArray<{ id: string; scope: string }>, archived: boolean, author: MemoryAuthor): Promise<void>
   /**
    * Declare a note VERIFIED at the runtime's current HEAD — appends memory_verified and nothing
    * else, so body/summary/authorship stay byte-stable. Throws on an id the LOG has no live note
@@ -866,7 +912,7 @@ export function deriveNoteProvenance(
   author: MemoryAuthor,
   ts: string,
   prev?: { createdAt?: string; createdBy?: string; revision?: number; sources?: readonly MemorySource[]; verified?: VerifiedStamp },
-): { sources?: MemorySource[]; createdAt: string; createdBy: string; updatedAt: string; updatedBy: string; revision: number; verified?: VerifiedStamp } {
+): { sources?: MemorySource[]; createdAt: string; createdBy: string; updatedAt: string; updatedBy: string; workspaceId: string; revision: number; verified?: VerifiedStamp } {
   const by = composeAuthor(author)
   // A citation's retrievedAt is when THAT url was fetched, so it survives a rewrite keyed on the
   // url — the same survivor rule claims use for validFrom. Stamping `ts` unconditionally meant any
@@ -883,6 +929,9 @@ export function deriveNoteProvenance(
     createdBy: prev?.createdBy ?? by,
     updatedAt: ts,
     updatedBy: by,
+    // never carried from `prev`: the workspace of the write that is landing NOW is the one the
+    // note's content is pending in, and a note healed on trunk must stop reading provisional
+    workspaceId: author.workspaceId,
     revision: (prev?.revision ?? 0) + 1,
     // CARRY or CLEAR — never SET. A write is not a verification, so no write path may mint a stamp;
     // this only decides whether an existing one survives. Byte-identical content keeps it (the

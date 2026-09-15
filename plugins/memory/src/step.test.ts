@@ -4,13 +4,14 @@ import {
   type ClaimHit, type MemoryAuthor, type MemoryNote, type MemoryNoteDraft, type MemoryStore, type NoteSummary,
 } from '@orc/contracts'
 import { bindStepMemory, deriveQueryTerms, preloadQuery } from './step'
+import { TEST_WORKSPACE_ID } from '@orc/contracts/fixtures'
 
-const AUTHOR: MemoryAuthor = { source: 'agent', taskId: 'task-1', stepId: 'implement', runToken: 'rt-1' }
+const AUTHOR: MemoryAuthor = { source: 'agent', workspaceId: TEST_WORKSPACE_ID, taskId: 'task-1', stepId: 'implement', runToken: 'rt-1' }
 
 const summary = (over: Partial<NoteSummary> = {}): NoteSummary => ({
   id: 'area-memory', scope: MemoryScope.project, title: 'Memory area',
   tier: NOTE_TIER.semantic, categories: [], tags: [], summary: 'How memory works.',
-  hits: 0, lastAccessedAt: null, sourceRevision: null, paths: [], ...over,
+  hits: 0, lastAccessedAt: null, sourceRevision: null, paths: [], workspaceId: TEST_WORKSPACE_ID, ...over,
 })
 
 interface Recorded { id: string; scope: string | undefined; mode: string }
@@ -24,6 +25,10 @@ function fakeStore(opts: {
 } = {}) {
   const accesses: Recorded[] = []
   const writes: MemoryNoteDraft[] = []
+  // Who each write claimed to be. MemoryAuthor.workspaceId is captured at write time and never
+  // recoverable afterwards, so "the binding wrote as the author it was handed" needs the author,
+  // not just the draft.
+  const writeAuthors: MemoryAuthor[] = []
   const queries: string[] = []
   const claimQueries: string[] = []
   const outcomes: { entries: ReadonlyArray<{ id: string; outcome: string }>; base?: string }[] = []
@@ -35,7 +40,7 @@ function fakeStore(opts: {
     topics: async () => [],
     topicClaims: async () => [],
     recordAccess: async (id, scope, mode) => { accesses.push({ id, scope, mode }) },
-    write: async note => { writes.push(note); return note as unknown as MemoryNote },
+    write: async (note, author) => { writes.push(note); writeAuthors.push(author); return note as unknown as MemoryNote },
     get: async id => opts.notes?.[id] ?? null,
     useStats: async () => null,
     recordOutcomes: async (entries, _author, o) => { outcomes.push({ entries, ...(o?.idempotencyKeyBase && { base: o.idempotencyKeyBase }) }) },
@@ -44,7 +49,7 @@ function fakeStore(opts: {
     remove: async () => {},
     verify: async () => ({ revision: 'headrev', at: '2026-07-30T00:00:00.000Z', by: 'cli' }),
   }
-  return { store, accesses, writes, queries, claimQueries, outcomes }
+  return { store, accesses, writes, writeAuthors, queries, claimQueries, outcomes }
 }
 
 const bind = (f: ReturnType<typeof fakeStore>, over: Partial<Parameters<typeof bindStepMemory>[0]> = {}) =>
@@ -108,7 +113,7 @@ describe('recall', () => {
 
   it('recalls claims alongside notes, and records ONE access per owning note', async () => {
     const hit = (claimId: string, noteId: string) =>
-      ({ claimId, noteId, scope: 'project', title: noteId, text: `statement ${claimId}`, validFrom: '2026-07-26T00:00:00.000Z', sourceRevision: null, paths: [] })
+      ({ claimId, noteId, scope: 'project', title: noteId, text: `statement ${claimId}`, validFrom: '2026-07-26T00:00:00.000Z', sourceRevision: null, paths: [], workspaceId: TEST_WORKSPACE_ID })
     // two claims on ONE note plus a note-arm hit for the same note: the activation signal counts
     // notes, so a preload must not charge that note three times
     const f = fakeStore({ searchClaims: () => [hit('c1', 'area-memory'), hit('c2', 'area-memory')], search: () => [summary()] })
@@ -124,7 +129,7 @@ describe('recall', () => {
     // the retirement nudge then named half the notes the edit had falsified.
     const same = 'cluster.ts owns the pure algorithm'
     const shared = (noteId: string): ClaimHit =>
-      ({ claimId: 'dup12', noteId, scope: 'project', title: noteId, text: same, validFrom: '2026-07-26T00:00:00.000Z', sourceRevision: null, paths: [] })
+      ({ claimId: 'dup12', noteId, scope: 'project', title: noteId, text: same, validFrom: '2026-07-26T00:00:00.000Z', sourceRevision: null, paths: [], workspaceId: TEST_WORKSPACE_ID })
     const f = fakeStore({ searchClaims: () => [shared('area-memory'), shared('area-cluster')] })
     const at = await bind(f).memory.claimsCiting(['plugins/memory/src/cluster.ts'])
     expect(at.map(h => h.noteId).sort()).toEqual(['area-cluster', 'area-memory'])
@@ -132,7 +137,7 @@ describe('recall', () => {
 
   it('claims alone are enough — the fallback chain stops without any note hit', async () => {
     const f = fakeStore({
-      searchClaims: () => [{ claimId: 'c1', noteId: 'n', scope: 'project', title: 'N', text: 'a statement', validFrom: '2026-07-26T00:00:00.000Z', sourceRevision: null, paths: [] }],
+      searchClaims: () => [{ claimId: 'c1', noteId: 'n', scope: 'project', title: 'N', text: 'a statement', validFrom: '2026-07-26T00:00:00.000Z', sourceRevision: null, paths: [], workspaceId: TEST_WORKSPACE_ID }],
       search: () => [],
     })
     const { claims, notes } = await bind(f).memory.recall(500)
@@ -274,7 +279,7 @@ describe('capture', () => {
   it('a traversal seed counts as provenance, like a read', async () => {
     const f = fakeStore({ notes: { 'area-memory': {} as MemoryNote } })
     // set before binding: the tracking decorator spreads the store, so later reassignment is unseen
-    f.store.neighbors = async () => [{ id: 'x', title: 'x', summary: '', via: LINK_KIND.refines, depth: 1, score: 1, direction: 'out', activation: 0, from: 'area-memory' }]
+    f.store.neighbors = async () => [{ id: 'x', title: 'x', summary: '', via: LINK_KIND.refines, depth: 1, score: 1, direction: 'out', activation: 0, from: 'area-memory', workspaceId: TEST_WORKSPACE_ID }]
     const b = bind(f)
     await b.tools.find(t => t.name === 'memory_neighbors')?.execute({ seed: 'area-memory' }, 'c1')
     await b.memory.capture({ outcome: 'success', summary: 'done' })
@@ -336,6 +341,21 @@ describe('lane scoping', () => {
     const b = bind(f, { ancestorTaskIds: ['task-parent'] })
     await b.tools.find(t => t.name === 'memory_search')?.execute({ query: 'anything' }, 'c1')
     expect(filters).toEqual([[planScope('task-1'), planScope('task-parent'), MemoryScope.project]])
+  })
+})
+
+// The step's author travels WHOLE. The binding is handed a complete MemoryAuthor by the
+// composition root (runtime.ts stepTools, whose workspaceId comes off the running TaskNode), and it
+// must not rebuild, default or narrow it on the way to the store: a workspace can only be known at
+// write time, so a note filed under the wrong one is wrong forever.
+describe('the author a step writes as', () => {
+  it('reaches every write unchanged — the model\'s own memory_write and the ambient capture alike', async () => {
+    const f = fakeStore()
+    const b = bind(f)
+    await b.tools.find(t => t.name === 'memory_write')?.execute({ id: 'from-the-model', title: 'From the model' }, 'w1')
+    await b.memory.capture({ outcome: 'success', summary: 'done' })
+    expect(f.writeAuthors.length).toBe(2) // the tool call and the ambient note
+    for (const a of f.writeAuthors) expect(a).toEqual(AUTHOR)
   })
 })
 
@@ -432,7 +452,7 @@ describe('recall reports currency through the shared drift verdict', () => {
 describe('currency covers the claims arm too', () => {
   const claimHit = (noteId: string, path: string) => ({
     claimId: `c-${noteId}`, noteId, scope: 'project', title: 'T', text: 'a statement',
-    validFrom: '2026-07-26T00:00:00.000Z', sourceRevision: 'rev-a', paths: [path],
+    validFrom: '2026-07-26T00:00:00.000Z', sourceRevision: 'rev-a', paths: [path], workspaceId: TEST_WORKSPACE_ID,
   })
 
   it('counts a drifted claim owner even when the notes arm is empty', async () => {

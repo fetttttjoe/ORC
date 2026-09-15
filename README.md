@@ -36,7 +36,8 @@ Working today, in rough order of how much of the system each one touches:
 | **Knowledge** | a typed, agent-maintained graph — atomic claims, confidence-weighted `RELATE` edges, a graph-distance ranker, and `memory_neighbors` so an agent pulls a bounded slice instead of re-reading everything |
 | **Topics** | claims cluster by embedding into a browsable inventory, derived and never authored, so knowledge sorts itself without anyone maintaining a taxonomy |
 | **Provenance** | web findings land as cited `research` notes rather than pasted pages, output artifacts carry verified receipts, and what memory was actually *read* is event-sourced rather than guessed |
-| **Isolation** | committed project identity, project-scoped databases, and a runtime lock — two projects on one machine cannot cross-recover each other's work |
+| **Workspaces** | one checkout per request: any checkout adopts itself on first use, `orc ws new` makes a worktree + branch for one request, tasks and runs bind to it, and knowledge written off trunk reads *provisional* until that workspace merges |
+| **Isolation** | project identity per repository (every worktree shares it), project-scoped databases, and a runtime lock — two projects on one machine cannot cross-recover each other's work |
 
 Degraded-memory tolerant: if SurrealDB is down you get one warning and explicit
 `memory unavailable` tool results, and everything else keeps working.
@@ -95,12 +96,22 @@ echo 'ANTHROPIC_API_KEY=sk-ant-...' >> .env    # or ORC_ANTHROPIC_AUTH=oauth for
                                                # and/or run a local Ollama — no key needed
 
 orc db migrate                  # explicit schema setup; works before project initialization
-orc init --name my-project      # identity + first-party skills; run once per checkout (identity is local, never committed)
-orc new "write release notes" --spec "summarize changes since v1.2; declare the notes file as an output"
+orc init --name my-project      # identity + first-party skills; run once per repository — every
+                                # worktree of it is the same project; identity lives only in the
+                                # main checkout, never committed
+orc ws new "write release notes" --spec "summarize changes since v1.2; declare the notes file as an output"
+                                # a git worktree + branch for ONE request under .orc/worktrees/<slug>,
+                                # recorded as a workspace, with the request drafted as its first task;
+                                # prints `cd <path>` — work the request there
+orc new "write release notes" --spec "…"   # or draft it in the checkout you are already standing in
 orc propose <task-id> --model anthropic/claude-sonnet-5   # or ollama/<model>
 orc plan <task-id>              # review it
 orc approve <task-id>           # the human gate
-orc run <task-id> --cwd .       # durable execution against this working tree, with live event tail
+orc run <task-id>               # durable execution in the task's workspace (--cwd <dir> overrides),
+                                # with live event tail
+orc ws ls                       # every checkout of this project, attention-first, with its health
+orc ws merge <ws-id>            # land its branch on trunk (--no-ff), record the merge, archive the
+                                # record, and remove the worktree if orc created it
 orc serve status                # the supervisor holding the runtime (the first executing command starts one)
 orc status <task-id>            # project, memory health, steps, operations, receipts, cost
 orc replay <task-id> --at <seq> # read-only audit replay at any event sequence
@@ -113,6 +124,97 @@ orc retry <task-id>             # re-run failed steps after a block
 orc memory topics [key] [--json]  # what this project knows, grouped; --json for scripts
 orc memory claims <note-id> [--json]  # a note's live claims; --history folds the log for retired ones
 ```
+
+### Workspaces
+
+A **workspace** is one checkout being worked in. Every task belongs to one, every
+run happens in one, and every note remembers the one it was written from.
+
+**Two kinds, one of them free.** `checkout` is the repository's main checkout —
+the one holding `.orc/identity.json`. `worktree` is a linked git worktree: one
+`orc ws new` created for a request, or one you made yourself. Either way you
+never register a checkout: the first `orc` command run in a directory **adopts**
+it, recording `workspace_created` before the command's own handler runs. So
+`cd`-ing into any worktree of the project and typing `orc tasks` is all it takes
+for that worktree to exist in the tree. What gets adopted is the directory orc
+resolves settings from, so a worktree becomes its own workspace when the
+repository tracks `.orc/config.json` (that tracked file is what stops the
+upward walk inside the worktree); with nothing tracked there, the walk reaches
+the main checkout's `.orc` and the command adopts — and files its tasks
+under — that workspace instead.
+
+`orc ws new "<request>"` is the deliberate half: `git worktree add` under
+`.orc/worktrees/<slug>` on branch `orc/<slug>` (`--base <ref>` starts it
+somewhere other than this checkout's HEAD), the record, and the request drafted
+as that workspace's first task (`--no-task` makes only the workspace). It prints
+the `cd` line to work in.
+
+**`cwd` is the natural key**, matched as a resolved realpath: one *active*
+record per directory, adoption is idempotent on it, and a worktree moved to a
+new path becomes a new workspace rather than re-pointing the old record.
+
+**`managed` is the fact that licenses deletion** — it is true only for a
+directory orc itself created. `orc ws archive <id> --remove` refuses anything
+else (archive the record and remove the checkout yourself), and `orc ws merge`
+removes a worktree only when it is managed. `orc ws archive` alone always works,
+and `orc ws restore <id>` un-archives the record — a removed worktree is gone.
+`orc ws current` names the workspace this directory is; `orc ws retitle <id>
+<title>` changes the label only, never the branch or the directory.
+
+**Work binds to a workspace, not to a directory you retype.** `orc new` files a
+task under the workspace of the checkout you typed it in (`--workspace <id>`
+re-homes it; a split child inherits its parent's), `orc run` executes in that
+task's workspace — `--cwd <dir>` is an override, not the instruction — and `orc
+tasks` groups by workspace, with a loud `ORPHANED` group for any task whose
+workspace record the log never recorded.
+
+**Trunk decides whether knowledge is final.** `trunkBranch` in
+`.orc/config.json` names the branch this project treats as trunk; unset, git is
+asked (`origin/HEAD`), and a repository with no remote to ask falls back to
+`main`. Adoption captures `onTrunk` — was this checkout on trunk at that
+moment — and notes written on trunk are final by construction. Everywhere else
+they read **provisional** until the workspace merges: `memory_search`,
+`memory_read` and `memory_neighbors` carry a `provisional` flag naming the
+workspace, `orc ws ls` counts the still-pending notes per checkout, and the flag
+is *derived at read time*, never stored — so one merge clears it across the
+whole corpus on the next read. Outside git there is no trunk to be behind and no
+merge that could ever arrive, so such a project's knowledge is final.
+
+**Landing the work.** `orc ws merge <id>` merges the workspace's branch into
+trunk with `--no-ff` — one addressable commit for the merge fact to point at —
+in the project root, records `workspace_merged`, archives the record, and removes
+the worktree when it is managed. It refuses before git touches anything: the
+workspace must have no uncommitted changes (a merge carries only what is
+committed), and the project root must be on trunk and clean, since that is the
+checkout the branch lands in. Past the merge nothing can be undone, so every
+later failure is reported with the way out rather than thrown as though the merge
+had not happened. For a branch merged by hand — or an `orc ws merge` that merged
+and then failed to record — `orc ws finalize <id>` records the fact, refusing
+unless the branch tip is already contained in trunk, and removes nothing.
+
+**`orc ws ls` is the attention-first view** (`--all` includes archived). One row
+per workspace: id, state, age, kind, branch, task count, still-provisional notes,
+`[archived]` / `[dirty]` flags, title and path. The state is one derivation, made
+by the same call the `workspace_list` tool and `project_status` make:
+
+| state | meaning |
+|---|---|
+| `dangling` | the checkout is gone with the branch unmerged, or nothing is open in it while knowledge written there still waits on a merge |
+| `waiting` | a task is at the approval gate, or a step asked a question nobody answered |
+| `active` | a task is running |
+| `idle` | none of the above — a live checkout with nothing pending |
+| `merged` | the branch landed on trunk and the merge is recorded |
+
+No threshold anywhere: the age is printed and you decide what is stale. A `?` in
+the provisional column means the note read model could not be reached — that is
+not a count of none.
+
+Every task and every note names its workspace as a **required** field, so a
+project database written without one cannot be folded — the tasks and notes it
+holds simply stop appearing. Recreate it with `docker compose down -v && docker
+compose up -d --wait && orc db migrate`; a repository whose main checkout has no
+`.orc/identity.json` also needs `orc init --name <name>` once (an existing
+identity is kept — `orc init` refuses to mint a second one without `--force`).
 
 ### Two settings a new project usually wants
 
@@ -193,7 +295,7 @@ without overwriting project edits:
 task_id=$(orc new "generate architecture docs" --spec "Write docs/architecture.md from current/target memory; declare it as an output")
 orc propose "$task_id" --model anthropic/claude-sonnet-5 --skill documentation
 orc approve "$task_id"
-orc run "$task_id" --cwd .
+orc run "$task_id"
 ```
 
 ### Rebuilding the knowledge graph in parallel
@@ -205,7 +307,7 @@ connectivity (wave 2). Use after a purge or a large refactor:
 ```bash
 task_id=$(orc new "Rebuild the knowledge graph" --spec "map every area, then assemble the hub")
 orc propose "$task_id" --file docs/kb-build-parallel.plan.json
-orc approve "$task_id" && orc run "$task_id" --cwd .
+orc approve "$task_id" && orc run "$task_id"
 ```
 
 ### Driving orc from another agent (door #2, MCP)
@@ -223,9 +325,10 @@ Tools served (project-bound, same `OrcActions` validation as the web):
 
 | Kind | Tools |
 |---|---|
-| Read | `project_status`, `task_plan`, `task_transcript`, `plan_notes`, `recent_activity` |
+| Read | `project_status`, `task_plan`, `task_transcript`, `plan_notes`, `recent_activity`, `available_models` (the live provider catalog — call it before naming a `modelRef`, never guess one) |
 | Knowledge (degraded-tolerant) | `memory_search`, `memory_read`, `memory_neighbors`, `memory_topics` (statements grouped by meaning; list them, then read one's claims), `memory_recheck` (the corpus drift verdict: counts plus the drifted/unknown lists) |
-| Mutate | `new_request` (quick/grounded), `propose`, `run`, `reply`, `retry`, `cancel`, `annotate`, `revise` |
+| Mutate | `new_request` (quick/grounded; `workspaceId` defaults to the workspace this server runs in), `propose`, `run` (in the task's workspace unless a `cwd` says otherwise), `reply`, `retry`, `cancel`, `annotate`, `revise` |
+| Workspaces (served only with the mutating door) | `workspace_list` — the checkouts this project is worked in, each with its health (state, last activity, task counts, notes still pending a merge) and ordered attention-first, read-only; `workspace_new` — a git worktree + branch for ONE request under `.orc/worktrees`, recorded as a workspace, with the request as its first task |
 | The gate | `approve` — refuses under the default `--autonomy gated` (the human approves in the UI or `orc approve`); approves under `--autonomy full`, recorded as `approvedBy: mcp` |
 
 stdout carries ONLY protocol frames: boot diagnostics are rebound to stderr, and the
@@ -244,7 +347,7 @@ skill alongside the others.
 orc mcp trust search             # after declaring a "search" server in .orc/config.json
 task_id=$(orc new "compare pgvector vs qdrant for our recall path" --spec "cite every claim")
 orc propose "$task_id" --file research-plan.json   # toolRefs live in the plan draft
-orc approve "$task_id" && orc run "$task_id" --cwd .
+orc approve "$task_id" && orc run "$task_id"
 orc memory ls --tag research     # hits column shows what later steps actually pulled back
 ```
 
@@ -273,8 +376,11 @@ by the agent.
 ## Guarantees, stated precisely
 
 - **Project identity.** `orc init` writes `projectId`/`projectName` into
-  `.orc/identity.json`, which is git-ignored: identity belongs to a checkout,
-  settings (`.orc/config.json`) are shared. Committing the identity meant a
+  `.orc/identity.json`, which is git-ignored: identity belongs to the
+  repository, not to any one checkout — it lives in the main checkout's
+  `.orc/identity.json`, and a linked worktree resolves to it through git's
+  common dir, so no worktree can mint a second project. The tracked
+  `.orc/config.json` carries settings only. Committing the identity meant a
   clone, a worktree or a `git reset --hard` silently repointed every command —
   including `orc purge` — at someone else's project. Every event, journal row,
   DBOS system database, and SurrealDB database is bound to that identity, so
@@ -383,14 +489,16 @@ by the agent.
   the output, or write a reviewed SQL migration by hand.
 - Resetting development state: `docker compose down -v && docker compose up -d --wait && orc db migrate`
   drops and recreates Postgres (events, journal, DBOS) and SurrealDB; the vault re-renders
-  and memory rebuilds from events on next use. A checkout without `.orc/identity.json` needs
-  `orc init` once before project commands work; a trust grant whose fingerprint no longer
+  and memory rebuilds from events on next use. A repository whose main checkout has no
+  `.orc/identity.json` needs `orc init` once before project commands work; a worktree of an
+  already-initialized repository needs nothing — it resolves through git's common dir to the
+  main checkout's identity. A trust grant whose fingerprint no longer
   matches fails closed until re-granted.
-- Environment: `orc` loads `<project>/.env` itself, resolved from the same walk-up that finds
-  `.orc/`, so a command run from a subdirectory — or a supervisor spawned with a different cwd —
-  gets the same credentials as one run from the project root. Bun's own `.env` pickup is
-  cwd-relative with no walk-up, so it cannot be relied on for this. Real environment variables
-  always win over the file.
+- Environment: `orc` loads `.env` itself rather than relying on Bun's cwd-relative, no-walk-up
+  pickup. The checkout's own `.env` is loaded first (a local override), then the repository root's
+  — first writer wins, so a command run from a subdirectory, a worktree, or a supervisor spawned
+  with a different cwd still gets the project's credentials. Real environment variables always win
+  over both files.
 - Never bundle the CLI (`bun build`): DBOS must run unbundled via `bun run`.
 - Upgrading orc: finish or `orc cancel` active runs first — DBOS recovery is
   keyed to the app version (`DBOS__APPVERSION`).

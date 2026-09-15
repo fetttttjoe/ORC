@@ -1,12 +1,12 @@
 import { afterAll, afterEach, describe, expect, it, mock, spyOn } from 'bun:test'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import type { Command } from 'commander'
 import { Surreal } from 'surrealdb'
-import { ApprovalPolicy, EVENT_KIND, MemoryAccessedPayload, MemoryDeletedPayload, MemoryWrittenPayload, NOTE_TIER, RUN_OUTCOME, TASK_STATUS, claimId, type ExecutionPort, type OperationSpec, type RunOutcome, type TaskStatus } from '@orc/contracts'
+import { ApprovalPolicy, EVENT_KIND, MemoryAccessedPayload, MemoryDeletedPayload, MemoryWrittenPayload, NOTE_TIER, RUN_OUTCOME, TASK_STATUS, WORKSPACE_KIND, claimId, type ExecutionPort, type OperationSpec, type RunOutcome, type TaskNode, type TaskStatus } from '@orc/contracts'
 import { loadConfig, projectDatabaseName, requireProject, type EventLog, type ProjectConfig } from '@orc/kernel'
-import { createTestDb, TEST_PROJECT_ID } from '@orc/kernel/test-helpers'
+import { createTestDb, seedTestWorkspace, TEST_PROJECT_ID, TEST_WORKSPACE, TEST_WORKSPACE_ID } from '@orc/kernel/test-helpers'
 import { singleStepDraft } from './plan-template'
 import { buildProgram, openKernel, runInit } from './main'
 import { withMemory } from './memory-open'
@@ -26,6 +26,7 @@ const overrideExits = (program: ReturnType<typeof buildProgram>): ReturnType<typ
   return program
 }
 import { buildPlugins } from './runtime'
+import { archivedRefusal } from './workspace-ops'
 
 // memory_written / memory_deleted payloads parsed through their owning schemas at the read
 // boundary, the same way main.ts's claims fold reads them.
@@ -79,6 +80,9 @@ async function makeCli() {
   dbs.push(db)
   const { kernel, storage } = await openKernel(db.url, { projectId: TEST_PROJECT_ID })
   db.onClose(() => storage.close())
+  // buildProgram(kernel) has no project context, so `new` cannot resolve a cwd workspace here —
+  // the tests below pass --workspace explicitly, and this is the record they name.
+  await seedTestWorkspace(storage.events)
   const lines: string[] = []
   spyOn(console, 'log').mockImplementation((...a: unknown[]) => {
     lines.push(a.join(' '))
@@ -88,7 +92,9 @@ async function makeCli() {
     await overrideExits(buildProgram(kernel)).parseAsync(args, { from: 'user' })
     return lines
   }
-  return { run, lines, kernel }
+  // exposed for tests that must append a raw event the kernel would never produce itself (an
+  // orphaned task_created naming a workspace the fold never saw)
+  return { run, lines, kernel, storage }
 }
 
 afterEach(() => {
@@ -129,6 +135,8 @@ describe('orc CLI', () => {
     const db = await createTestDb()
     dbs.push(db)
     const { kernel, log, storage } = await openKernel(db.url, { projectId: TEST_PROJECT_ID })
+    // a task must name a workspace the fold has seen — one seeded record, then tasks as before
+    await seedTestWorkspace(log)
     cleanup.push(() => log.close())
     const lines: string[] = []
     spyOn(console, 'log').mockImplementation((...a: unknown[]) => { lines.push(a.join(' ')) })
@@ -136,7 +144,7 @@ describe('orc CLI', () => {
       await overrideExits(buildProgram(kernel)).parseAsync(args, { from: 'user' })
     }
 
-    const t = await kernel.createTask({ title: 'audit me' })
+    const t = await kernel.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'audit me' })
     const opContext = { taskId: t.id, stepId: 's1', runToken: `step:${t.id}:s1:a1` }
     const spec: OperationSpec = { operationId: `${opContext.runToken}:model:1`, kind: 'model', name: 'fake/m', before: { q: 1 } }
     await storage.operations.beginOperation(opContext, spec)
@@ -161,8 +169,10 @@ describe('orc CLI', () => {
     const db = await createTestDb()
     dbs.push(db)
     const { kernel, log } = await openKernel(db.url, { projectId: TEST_PROJECT_ID })
+    // a task must name a workspace the fold has seen — one seeded record, then tasks as before
+    await seedTestWorkspace(log)
     cleanup.push(() => log.close())
-    const t = await kernel.createTask({ title: 'audit me', spec: '' })
+    const t = await kernel.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'audit me', spec: '' })
     const events = await kernel.eventsFor(t.id)
     const first = events[0]!.seq
     const errors: string[] = []
@@ -181,11 +191,13 @@ describe('orc CLI', () => {
     const db = await createTestDb()
     dbs.push(db)
     const { kernel, log } = await openKernel(db.url, { projectId: TEST_PROJECT_ID })
+    // a task must name a workspace the fold has seen — one seeded record, then tasks as before
+    await seedTestWorkspace(log)
     cleanup.push(() => log.close())
     const lines: string[] = []
     spyOn(console, 'log').mockImplementation((...a: unknown[]) => { lines.push(a.join(' ')) })
     const run = async (...args: string[]) => buildProgram(kernel).parseAsync(args, { from: 'user' })
-    const t = await kernel.createTask({ title: 'json log' })
+    const t = await kernel.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'json log' })
     lines.length = 0
     await run('log', t.id, '--json')
     const records = JSON.parse(lines.join('\n'))
@@ -201,7 +213,7 @@ describe('orc CLI', () => {
 
   it('new → propose → approve → log round-trip', async () => {
     const { run, lines } = await makeCli()
-    await run('new', 'hello world', '--spec', 'do things')
+    await run('new', 'hello world', '--spec', 'do things', '--workspace', TEST_WORKSPACE_ID)
     const taskId = lines[0]
     expect(taskId).toMatch(/[0-9a-f-]{36}/)
 
@@ -220,14 +232,56 @@ describe('orc CLI', () => {
     ])
   })
 
+  it('new --workspace binds the task to the named workspace', async () => {
+    const { run, kernel } = await makeCli()
+    const w = await kernel.createWorkspace({ title: 'W', cwd: '/w', branch: 'b', baseBranch: 'main', kind: WORKSPACE_KIND.worktree, managed: false, onTrunk: false })
+    const [id] = await run('new', 'T', '--workspace', w.id)
+    expect(id).toBeDefined()
+    expect((await kernel.getTask(id ?? ''))?.workspaceId).toBe(w.id)
+  })
+
+  // The kernel accepts a task in an archived workspace, and should: archiving is not a fact about
+  // whether a record may be REFERENCED, and a merged workspace's subtree keeps growing. The refusal
+  // belongs at the door, where a human named the id: that operator archived the checkout on purpose,
+  // so a task filed there is work the default listing hides and the directory may no longer hold.
+  it('new --workspace refuses an archived workspace and names the way back', async () => {
+    const { run, kernel } = await makeCli()
+    const w = await kernel.createWorkspace({ title: 'Done', cwd: '/done', branch: 'b', baseBranch: 'main', kind: WORKSPACE_KIND.worktree, managed: false, onTrunk: false })
+    await kernel.setWorkspaceArchived(w.id, true)
+    await expect(run('new', 'T', '--workspace', w.id)).rejects.toThrow(archivedRefusal(w.id))
+    expect((await kernel.listTasks()).some(t => t.workspaceId === w.id)).toBe(false)
+    // restored, the same command works — the refusal is about standing, not about the id
+    await kernel.setWorkspaceArchived(w.id, false)
+    const [id] = await run('new', 'T', '--workspace', w.id)
+    expect((await kernel.getTask(id ?? ''))?.workspaceId).toBe(w.id)
+  })
+
+  // A child of a task in workspace B belongs to B, wherever the operator happened to type the
+  // command. Binding it to the cwd instead would let ONE subtree straddle two working directories —
+  // the thing proposeSplit's inheritance exists to prevent.
+  it('new --parent inherits the parent\'s workspace instead of the directory the command was typed in', async () => {
+    const { run, lines, kernel } = await makeCli()
+    const other = await kernel.createWorkspace({ title: 'Other', cwd: '/other', branch: 'b', baseBranch: 'main', kind: WORKSPACE_KIND.worktree, managed: false, onTrunk: false })
+    await run('new', 'P', '--workspace', other.id)
+    const parentId = lines[0]!
+    lines.length = 0
+    await run('new', 'C', '--parent', parentId) // no --workspace: the parent decides
+    const childId = lines[0]!
+    expect((await kernel.getTask(childId))?.workspaceId).toBe(other.id)
+    // …and an explicit --workspace still overrides the parent, for a deliberate re-home
+    lines.length = 0
+    await run('new', 'C2', '--parent', parentId, '--workspace', TEST_WORKSPACE_ID)
+    expect((await kernel.getTask(lines[0]!))?.workspaceId).toBe(TEST_WORKSPACE_ID)
+  })
+
   it('new rejects an unrecognized --strategy value instead of silently falling through', async () => {
     const { run } = await makeCli()
-    await expect(run('new', 'x', '--strategy', 'grounded')).rejects.toThrow(/unknown --strategy 'grounded'/)
+    await expect(run('new', 'x', '--strategy', 'grounded', '--workspace', TEST_WORKSPACE_ID)).rejects.toThrow(/unknown --strategy 'grounded'/)
   })
 
   it('propose --skill places the named skills in the template step', async () => {
     const { run, lines } = await makeCli()
-    await run('new', 'documented task')
+    await run('new', 'documented task', '--workspace', TEST_WORKSPACE_ID)
     const taskId = lines[0]!
     await run('propose', taskId, '--model', 'ollama/llama3', '--skill', 'documentation')
     lines.length = 0
@@ -238,7 +292,7 @@ describe('orc CLI', () => {
 
   it('plan prints the plan as JSON', async () => {
     const { run, lines } = await makeCli()
-    await run('new', 'x')
+    await run('new', 'x', '--workspace', TEST_WORKSPACE_ID)
     const taskId = lines[0]
     await run('propose', taskId, '--model', 'ollama/llama3')
     lines.length = 0
@@ -272,18 +326,51 @@ describe('orc CLI', () => {
     expect(lines).toEqual(['_no tasks_'])
   })
 
-  it('tasks lists id, status and title', async () => {
+  it('tasks lists id, status and title, indented under its workspace heading', async () => {
     const { run, lines } = await makeCli()
-    await run('new', 'listed task')
+    await run('new', 'listed task', '--workspace', TEST_WORKSPACE_ID)
     lines.length = 0
     await run('tasks')
-    expect(lines[0]).toContain('draft')
-    expect(lines[0]).toContain('listed task')
+    expect(lines[0]).toContain(TEST_WORKSPACE.title) // the group heading comes first
+    expect(lines[1]).toContain('draft')
+    expect(lines[1]).toContain('listed task')
+  })
+
+  // groups.map(...) alone would drop a workspace with zero tasks — this pins that a bare heading
+  // still prints, since "nothing is running here" is itself information an operator needs.
+  it('tasks prints tasks grouped under their workspace, and an empty workspace still gets a heading', async () => {
+    const { run, kernel } = await makeCli()
+    const empty = await kernel.createWorkspace({ title: 'Empty', cwd: '/empty', branch: 'e', baseBranch: 'main', kind: WORKSPACE_KIND.worktree, managed: false, onTrunk: false })
+    const w = await kernel.createWorkspace({ title: 'Feature X', cwd: '/w', branch: 'b', baseBranch: 'main', kind: WORKSPACE_KIND.worktree, managed: false, onTrunk: false })
+    await kernel.createTask({ title: 'inside', workspaceId: w.id })
+    const out = (await run('tasks')).join('\n')
+    expect(out.indexOf('Feature X')).toBeLessThan(out.indexOf('inside'))
+    expect(out).toContain(`# ${empty.title}  (${empty.branch})  ${empty.cwd}`)
+  })
+
+  // A task naming a workspace the fold never saw is a log defect (Task 7's grouping is only as
+  // trustworthy as its handling of the case it cannot group) — it must surface loudly, not vanish
+  // from a view keyed by workspace.
+  it('tasks prints an orphaned task under a loud heading, never hidden', async () => {
+    const { run, storage } = await makeCli()
+    const orphan: TaskNode = {
+      id: 'orphan-1', parentId: null, workspaceId: 'workspace-the-fold-never-saw', type: 'generic',
+      title: 'ghost task', spec: '', status: TASK_STATUS.draft, zone: [], budgetUSD: null,
+      depth: 0, createdAt: '2026-09-14T00:00:00.000Z',
+    }
+    await storage.events.append({
+      taskId: orphan.id, stepId: null, runToken: null,
+      kind: EVENT_KIND.task_created, payload: { task: orphan },
+    })
+    const out = (await run('tasks')).join('\n')
+    // an -1 (heading absent) would sort "before" any real index, so pin the heading's presence too
+    expect(out).toContain('# ORPHANED — workspace missing from the log')
+    expect(out.indexOf('# ORPHANED — workspace missing from the log')).toBeLessThan(out.indexOf('ghost task'))
   })
 
   it('propose --file loads a plan draft from disk', async () => {
     const { run, lines } = await makeCli()
-    await run('new', 'file task')
+    await run('new', 'file task', '--workspace', TEST_WORKSPACE_ID)
     const taskId = lines[0]
 
     const draftPath = path.join(mkdtempSync(path.join(tmpdir(), 'orc-draft-')), 'draft.json')
@@ -315,7 +402,7 @@ describe('orc CLI', () => {
 
   it('propose --file rejects malformed JSON', async () => {
     const { run, lines } = await makeCli()
-    await run('new', 'bad file task')
+    await run('new', 'bad file task', '--workspace', TEST_WORKSPACE_ID)
     const taskId = lines[0]
 
     const badPath = path.join(mkdtempSync(path.join(tmpdir(), 'orc-draft-')), 'bad.json')
@@ -326,7 +413,7 @@ describe('orc CLI', () => {
 
   it('edit round-trip bumps the plan version and logs plan_edited', async () => {
     const { run, lines } = await makeCli()
-    await run('new', 'edit task')
+    await run('new', 'edit task', '--workspace', TEST_WORKSPACE_ID)
     const taskId = lines[0]
     await run('propose', taskId)
 
@@ -354,6 +441,8 @@ describe('orc CLI', () => {
       projectId: TEST_PROJECT_ID,
       send: async (id, message, topic) => { sent.push({ id, message, topic }) },
     })
+    // a task must name a workspace the fold has seen — one seeded record, then tasks as before
+    await seedTestWorkspace(log)
     cleanup.push(() => log.close())
     const lines: string[] = []
     spyOn(console, 'log').mockImplementation((...a: unknown[]) => { lines.push(a.join(' ')) })
@@ -368,7 +457,7 @@ describe('orc CLI', () => {
     }
     const run = async (...args: string[]) => buildProgram(kernel, async () => stubPort).parseAsync(args, { from: 'user' })
 
-    await run('new', 'grounded task')
+    await run('new', 'grounded task', '--workspace', TEST_WORKSPACE_ID)
     const taskId = lines[0]!
     await run('propose', taskId)
 
@@ -403,11 +492,13 @@ describe('orc CLI', () => {
     const db = await createTestDb()
     dbs.push(db)
     const { kernel, log } = await openKernel(db.url, { projectId: TEST_PROJECT_ID })
+    // a task must name a workspace the fold has seen — one seeded record, then tasks as before
+    await seedTestWorkspace(log)
     cleanup.push(() => log.close())
     const lines: string[] = []
     spyOn(console, 'log').mockImplementation((...a: unknown[]) => { lines.push(a.join(' ')) })
     const run = async (...args: string[]) => buildProgram(kernel).parseAsync(args, { from: 'user' })
-    const t = await kernel.createTask({ title: 'grounded' })
+    const t = await kernel.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'grounded' })
     const runToken = `step:${t.id}:plan:a1`
     await log.append({ taskId: t.id, stepId: 'plan', runToken, kind: EVENT_KIND.feedback_requested, payload: { question: 'changes or approve?', topic: 'plan-1' } })
 
@@ -420,11 +511,13 @@ describe('orc CLI', () => {
     const db = await createTestDb()
     dbs.push(db)
     const { kernel, log } = await openKernel(db.url, { projectId: TEST_PROJECT_ID })
+    // a task must name a workspace the fold has seen — one seeded record, then tasks as before
+    await seedTestWorkspace(log)
     cleanup.push(() => log.close())
     const lines: string[] = []
     spyOn(console, 'log').mockImplementation((...a: unknown[]) => { lines.push(a.join(' ')) })
     const run = async (...args: string[]) => buildProgram(kernel).parseAsync(args, { from: 'user' })
-    const t = await kernel.createTask({ title: 'grounded' })
+    const t = await kernel.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'grounded' })
     await kernel.reportCoverage(
       { taskId: t.id, stepId: 'analyze', runToken: `step:${t.id}:analyze:a1` },
       { analyzed: true, scope: ['packages'], gaps: ['no tests read'], confidence: 'medium', notesWritten: 3 },
@@ -440,12 +533,14 @@ describe('orc CLI', () => {
     const db = await createTestDb()
     dbs.push(db)
     const { kernel, log } = await openKernel(db.url, { projectId: TEST_PROJECT_ID })
+    // a task must name a workspace the fold has seen — one seeded record, then tasks as before
+    await seedTestWorkspace(log)
     cleanup.push(() => log.close())
     const lines: string[] = []
     spyOn(console, 'log').mockImplementation((...a: unknown[]) => { lines.push(a.join(' ')) })
     const run = async (...args: string[]) => buildProgram(kernel).parseAsync(args, { from: 'user' })
 
-    await run('new', 'usage task')
+    await run('new', 'usage task', '--workspace', TEST_WORKSPACE_ID)
     const taskId = lines[0]!
     await run('propose', taskId) // singleStepDraft's one step, id 's1'
 
@@ -474,6 +569,8 @@ describe('orc CLI', () => {
       projectId: TEST_PROJECT_ID,
       send: async (id, message, topic) => { sent.push({ id, message, topic }) },
     })
+    // a task must name a workspace the fold has seen — one seeded record, then tasks as before
+    await seedTestWorkspace(log)
     cleanup.push(() => log.close())
     const lines: string[] = []
     spyOn(console, 'log').mockImplementation((...a: unknown[]) => { lines.push(a.join(' ')) })
@@ -484,7 +581,7 @@ describe('orc CLI', () => {
     }
     const run = async (...args: string[]) => buildProgram(kernel, async () => stubPort).parseAsync(args, { from: 'user' })
 
-    await run('new', 'grounded task')
+    await run('new', 'grounded task', '--workspace', TEST_WORKSPACE_ID)
     const taskId = lines[0]!
     await run('propose', taskId)
     const runToken = `step:${taskId}:plan:a1`
@@ -512,12 +609,14 @@ describe('orc CLI', () => {
     const db = await createTestDb()
     dbs.push(db)
     const { kernel, log } = await openKernel(db.url, { projectId: TEST_PROJECT_ID })
+    // a task must name a workspace the fold has seen — one seeded record, then tasks as before
+    await seedTestWorkspace(log)
     cleanup.push(() => log.close())
     const lines: string[] = []
     spyOn(console, 'log').mockImplementation((...a: unknown[]) => { lines.push(a.join(' ')) })
     const run = (...args: string[]) => buildProgram(kernel, async () => forbiddenPort()).parseAsync(args, { from: 'user' })
 
-    await run('new', 'cancel me')
+    await run('new', 'cancel me', '--workspace', TEST_WORKSPACE_ID)
     const taskId = lines[0]!
     await run('propose', taskId)
     await run('approve', taskId)
@@ -548,12 +647,14 @@ describe('orc CLI', () => {
     const db = await createTestDb()
     dbs.push(db)
     const { kernel, log } = await openKernel(db.url, { projectId: TEST_PROJECT_ID })
+    // a task must name a workspace the fold has seen — one seeded record, then tasks as before
+    await seedTestWorkspace(log)
     cleanup.push(() => log.close())
     const lines: string[] = []
     spyOn(console, 'log').mockImplementation((...a: unknown[]) => { lines.push(a.join(' ')) })
     const run = (...args: string[]) => buildProgram(kernel, async () => forbiddenPort()).parseAsync(args, { from: 'user' })
 
-    await run('new', 'parent')
+    await run('new', 'parent', '--workspace', TEST_WORKSPACE_ID)
     const taskId = lines[0]!
     await run('propose', taskId)
     await run('approve', taskId)
@@ -574,12 +675,14 @@ describe('orc CLI', () => {
     const db = await createTestDb()
     dbs.push(db)
     const { kernel, log } = await openKernel(db.url, { projectId: TEST_PROJECT_ID })
+    // a task must name a workspace the fold has seen — one seeded record, then tasks as before
+    await seedTestWorkspace(log)
     cleanup.push(() => log.close())
     const lines: string[] = []
     spyOn(console, 'log').mockImplementation((...a: unknown[]) => { lines.push(a.join(' ')) })
     const run = (...args: string[]) => buildProgram(kernel, async () => forbiddenPort()).parseAsync(args, { from: 'user' })
 
-    await run('new', 'parent')
+    await run('new', 'parent', '--workspace', TEST_WORKSPACE_ID)
     const taskId = lines[0]!
     await run('propose', taskId)
     await run('approve', taskId)
@@ -601,6 +704,8 @@ describe('orc CLI', () => {
     const db = await createTestDb()
     dbs.push(db)
     const { kernel, log } = await openKernel(db.url, { projectId: TEST_PROJECT_ID })
+    // a task must name a workspace the fold has seen — one seeded record, then tasks as before
+    await seedTestWorkspace(log)
     cleanup.push(() => log.close())
     const lines: string[] = []
     spyOn(console, 'log').mockImplementation((...a: unknown[]) => { lines.push(a.join(' ')) })
@@ -612,7 +717,7 @@ describe('orc CLI', () => {
     }
     const run = (...args: string[]) => buildProgram(kernel, async () => port).parseAsync(args, { from: 'user' })
 
-    await run('new', 'parent')
+    await run('new', 'parent', '--workspace', TEST_WORKSPACE_ID)
     const taskId = lines[0]!
     await run('propose', taskId)
     await run('approve', taskId)
@@ -632,12 +737,14 @@ describe('orc CLI', () => {
     const db = await createTestDb()
     dbs.push(db)
     const { kernel, log } = await openKernel(db.url, { projectId: TEST_PROJECT_ID })
+    // a task must name a workspace the fold has seen — one seeded record, then tasks as before
+    await seedTestWorkspace(log)
     cleanup.push(() => log.close())
     const lines: string[] = []
     spyOn(console, 'log').mockImplementation((...a: unknown[]) => { lines.push(a.join(' ')) })
     const run = (...args: string[]) => buildProgram(kernel, async () => forbiddenPort()).parseAsync(args, { from: 'user' })
 
-    await run('new', 'parent')
+    await run('new', 'parent', '--workspace', TEST_WORKSPACE_ID)
     const taskId = lines[0]!
     await run('propose', taskId)
     await run('approve', taskId)
@@ -653,12 +760,14 @@ describe('orc CLI', () => {
 
     const requested = (await kernel.eventsFor(taskId)).filter(e => e.kind === EVENT_KIND.run_requested)
     expect(requested).toHaveLength(1)
-    expect(requested[0]!.payload).toEqual({ taskId, cwd: null, retry: false })
+    // `orc run` passed no --cwd, so the kernel records the TASK'S WORKSPACE cwd — the port's own
+    // chain never sees the project-level workspace events, so the resolution has to happen here.
+    expect(requested[0]!.payload).toEqual({ taskId, cwd: TEST_WORKSPACE.cwd, retry: false })
   }, 15_000)
 
   it('orc run refuses an undrivable task before recording anything', async () => {
     const { run, lines, kernel } = await makeCli()
-    await run('new', 'never approved')
+    await run('new', 'never approved', '--workspace', TEST_WORKSPACE_ID)
     const taskId = lines[0]!
     await expect(run('run', taskId)).rejects.toThrow(/approve a plan first/)
     expect((await kernel.eventsFor(taskId)).some(e => e.kind === EVENT_KIND.run_requested)).toBe(false)
@@ -668,12 +777,14 @@ describe('orc CLI', () => {
     const db = await createTestDb()
     dbs.push(db)
     const { kernel, log } = await openKernel(db.url, { projectId: TEST_PROJECT_ID })
+    // a task must name a workspace the fold has seen — one seeded record, then tasks as before
+    await seedTestWorkspace(log)
     cleanup.push(() => log.close())
     const lines: string[] = []
     spyOn(console, 'log').mockImplementation((...a: unknown[]) => { lines.push(a.join(' ')) })
     const run = (...args: string[]) => buildProgram(kernel, async () => forbiddenPort()).parseAsync(args, { from: 'user' })
 
-    await run('new', 'parent')
+    await run('new', 'parent', '--workspace', TEST_WORKSPACE_ID)
     const taskId = lines[0]!
     await run('propose', taskId)
     lines.length = 0
@@ -698,7 +809,7 @@ describe('orc CLI', () => {
 
   it('status names the child awaiting plan approval, with the command that unblocks it', async () => {
     const { run, lines, kernel } = await makeCli()
-    await run('new', 'parent')
+    await run('new', 'parent', '--workspace', TEST_WORKSPACE_ID)
     const taskId = lines[0]!
     const child = await kernel.proposeSplit(splitArgs(taskId, 'call_1', 'gated child', ApprovalPolicy.parse({})))
 
@@ -711,12 +822,14 @@ describe('orc CLI', () => {
     const db = await createTestDb()
     dbs.push(db)
     const { kernel, log } = await openKernel(db.url, { projectId: TEST_PROJECT_ID })
+    // a task must name a workspace the fold has seen — one seeded record, then tasks as before
+    await seedTestWorkspace(log)
     cleanup.push(() => log.close())
     const lines: string[] = []
     spyOn(console, 'log').mockImplementation((...a: unknown[]) => { lines.push(a.join(' ')) })
     const run = (...args: string[]) => buildProgram(kernel, async () => forbiddenPort()).parseAsync(args, { from: 'user' })
 
-    await run('new', 'parent')
+    await run('new', 'parent', '--workspace', TEST_WORKSPACE_ID)
     const taskId = lines[0]!
     await run('propose', taskId)
     await run('approve', taskId)
@@ -745,12 +858,14 @@ describe('orc CLI', () => {
     const db = await createTestDb()
     dbs.push(db)
     const { kernel, log } = await openKernel(db.url, { projectId: TEST_PROJECT_ID })
+    // a task must name a workspace the fold has seen — one seeded record, then tasks as before
+    await seedTestWorkspace(log)
     cleanup.push(() => log.close())
     const lines: string[] = []
     spyOn(console, 'log').mockImplementation((...a: unknown[]) => { lines.push(a.join(' ')) })
     const run = (...args: string[]) => buildProgram(kernel, async () => forbiddenPort()).parseAsync(args, { from: 'user' })
 
-    await run('new', 'cost summary')
+    await run('new', 'cost summary', '--workspace', TEST_WORKSPACE_ID)
     const taskId = lines[0]!
     await run('propose', taskId)
     await run('approve', taskId)
@@ -796,10 +911,12 @@ describe('orc CLI', () => {
     const db = await createTestDb()
     dbs.push(db)
     const { kernel, log } = await openKernel(db.url, { projectId: TEST_PROJECT_ID })
+    // a task must name a workspace the fold has seen — one seeded record, then tasks as before
+    await seedTestWorkspace(log)
     cleanup.push(() => log.close())
     spyOn(console, 'log').mockImplementation(() => {})
 
-    const parent = await kernel.createTask({ title: 'parent', spec: '' })
+    const parent = await kernel.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'parent', spec: '' })
     await kernel.proposePlan(parent.id, singleStepDraft({ title: 'p', spec: 'p' }, 'fake/m'))
     await kernel.approvePlan(parent.id)
     // the auto-policy child a split creates: approved, so somebody is still expected to run it
@@ -823,10 +940,12 @@ describe('orc CLI', () => {
     const db = await createTestDb()
     dbs.push(db)
     const { kernel, log } = await openKernel(db.url, { projectId: TEST_PROJECT_ID })
+    // a task must name a workspace the fold has seen — one seeded record, then tasks as before
+    await seedTestWorkspace(log)
     cleanup.push(() => log.close())
     spyOn(console, 'log').mockImplementation(() => {})
 
-    const parent = await kernel.createTask({ title: 'parent', spec: '' })
+    const parent = await kernel.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'parent', spec: '' })
     await kernel.proposePlan(parent.id, singleStepDraft({ title: 'p', spec: 'p' }, 'fake/m'))
     await kernel.approvePlan(parent.id)
     const child = await kernel.proposeSplit(splitArgs(parent.id, 'call_1', 'child', ApprovalPolicy.parse({ default: 'auto' })))
@@ -849,6 +968,9 @@ describe('orc CLI', () => {
     const config = requireProject({ ...loadConfig(dir), projectDbName, projectId: TEST_PROJECT_ID, projectName: 'test' })
     surrealConfigs.push(config)
     const { kernel, log } = await openKernel(db.url, { projectId: TEST_PROJECT_ID })
+    // the workspace must sit at THIS config's dir: every CLI memory write resolves its author's
+    // workspace by matching the process's directory, and refuses when nothing claims it
+    await seedTestWorkspace(log, realpathSync(config.dir))
     const lines: string[] = []
     spyOn(console, 'log').mockImplementation((...a: unknown[]) => { lines.push(a.join(' ')) })
     const { host, hub } = await buildPlugins(config) // real plugin wiring — no stub casts
@@ -941,7 +1063,7 @@ describe('orc CLI', () => {
     const seedNote = (nid: string, links: Array<{ id: string; kind: string }> = []) =>
       log.append({
         taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_written,
-        payload: { note: { id: nid, title: nid, links }, author: { source: 'cli' } },
+        payload: { note: { id: nid, title: nid, links }, author: { source: 'cli', workspaceId: TEST_WORKSPACE_ID } },
       })
     await seedNote('nb-seed', [{ id: 'nb-hop1', kind: 'depends_on' }, { id: 'nb-other', kind: 'refines' }])
     await seedNote('nb-hop1', [{ id: 'nb-hop2', kind: 'relates_to' }])
@@ -1061,6 +1183,9 @@ describe('orc CLI', () => {
     const config = requireProject({ ...loadConfig(dir), projectDbName, projectId: TEST_PROJECT_ID, projectName: 'test', memoryEmbedModel: '' })
     surrealConfigs.push(config)
     const { kernel, log } = await openKernel(db.url, { projectId: TEST_PROJECT_ID })
+    // the workspace must sit at THIS config's dir: every CLI memory write resolves its author's
+    // workspace by matching the process's directory, and refuses when nothing claims it
+    await seedTestWorkspace(log, realpathSync(config.dir))
     const lines: string[] = []
     spyOn(console, 'log').mockImplementation((...a: unknown[]) => { lines.push(a.join(' ')) })
     const { host, hub } = await buildPlugins(config)
@@ -1078,7 +1203,7 @@ describe('orc CLI', () => {
       taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_written,
       payload: {
         note: { id: noteId, title: 'claims', claims: texts.map(t => ({ id: claimId(t), text: t })) },
-        author: { source: 'cli' }, invalidates,
+        author: { source: 'cli', workspaceId: TEST_WORKSPACE_ID }, invalidates,
       },
     })
     await write([retiredText])
@@ -1103,7 +1228,7 @@ describe('orc CLI', () => {
     // a fold that saw only memory_written would keep reporting the live one as live forever.
     await log.append({
       taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_deleted,
-      payload: { id: noteId, scope: 'project', author: { source: 'cli' } },
+      payload: { id: noteId, scope: 'project', author: { source: 'cli', workspaceId: TEST_WORKSPACE_ID } },
     })
     lines.length = 0
     await run('memory', 'claims', noteId, '--history')
@@ -1154,6 +1279,9 @@ describe('orc CLI', () => {
     const config = requireProject({ ...loadConfig(dir), projectDbName, projectId: TEST_PROJECT_ID, projectName: 'test', memoryEmbedModel: '' })
     surrealConfigs.push(config)
     const { kernel, log } = await openKernel(db.url, { projectId: TEST_PROJECT_ID })
+    // the workspace must sit at THIS config's dir: every CLI memory write resolves its author's
+    // workspace by matching the process's directory, and refuses when nothing claims it
+    await seedTestWorkspace(log, realpathSync(config.dir))
     const lines: string[] = []
     spyOn(console, 'log').mockImplementation((...a: unknown[]) => { lines.push(a.join(' ')) })
     const { host, hub } = await buildPlugins(config)
@@ -1171,7 +1299,7 @@ describe('orc CLI', () => {
       taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_written,
       payload: {
         note: { id: noteId, title: 'claims json', claims: texts.map(t => ({ id: claimId(t), text: t })) },
-        author: { source: 'cli' }, invalidates,
+        author: { source: 'cli', workspaceId: TEST_WORKSPACE_ID }, invalidates,
       },
     })
     await write([retiredText])
@@ -1230,6 +1358,9 @@ describe('orc CLI', () => {
     const config = requireProject({ ...loadConfig(dir), projectDbName, projectId: TEST_PROJECT_ID, projectName: 'test', memoryEmbedModel: '' })
     surrealConfigs.push(config)
     const { kernel, log } = await openKernel(db.url, { projectId: TEST_PROJECT_ID })
+    // the workspace must sit at THIS config's dir: every CLI memory write resolves its author's
+    // workspace by matching the process's directory, and refuses when nothing claims it
+    await seedTestWorkspace(log, realpathSync(config.dir))
     const lines: string[] = []
     spyOn(console, 'log').mockImplementation((...a: unknown[]) => { lines.push(a.join(' ')) })
     const { host, hub } = await buildPlugins(config)
@@ -1274,6 +1405,9 @@ describe('cancel-sweep wiring (real plugin, stub port)', () => {
     const config = requireProject({ ...loadConfig(dir), projectDbName, projectId: TEST_PROJECT_ID, projectName: 'test' })
     surrealConfigs.push(config)
     const { kernel, log } = await openKernel(db.url, { projectId: TEST_PROJECT_ID })
+    // the workspace must sit at THIS config's dir: every CLI memory write resolves its author's
+    // workspace by matching the process's directory, and refuses when nothing claims it
+    await seedTestWorkspace(log, realpathSync(config.dir))
     const lines: string[] = []
     spyOn(console, 'log').mockImplementation((...a: unknown[]) => { lines.push(a.join(' ')) })
     const { host, hub } = await buildPlugins(config)
@@ -1287,15 +1421,15 @@ describe('cancel-sweep wiring (real plugin, stub port)', () => {
     const run = (...args: string[]) =>
       buildProgram(kernel, async () => stubPort, { host, hub, config, log }).parseAsync(args, { from: 'user' })
 
-    await run('new', 'sweep wiring')
+    await run('new', 'sweep wiring', '--workspace', TEST_WORKSPACE_ID)
     const taskId = lines[0]!
     const write = (id: string, author: Record<string, unknown>) => log.append({
       taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_written,
       payload: { note: { id, title: id }, author },
     })
-    await write('wiring-orphan', { source: 'agent', taskId })
-    await write('wiring-adopted', { source: 'agent', taskId })
-    await write('wiring-adopted', { source: 'cli' }) // re-written by a live writer -> adopted
+    await write('wiring-orphan', { source: 'agent', workspaceId: TEST_WORKSPACE_ID, taskId })
+    await write('wiring-adopted', { source: 'agent', workspaceId: TEST_WORKSPACE_ID, taskId })
+    await write('wiring-adopted', { source: 'cli', workspaceId: TEST_WORKSPACE_ID }) // re-written by a live writer -> adopted
 
     lines.length = 0
     await run('cancel', taskId)

@@ -1,13 +1,13 @@
 // E2E fixture server (run by playwright's webServer): real Postgres test db, seeded state,
 // scripted copilot, kernel-backed newTask — everything else read-only-stubbed.
 import { MockLanguageModelV4 } from 'ai/test'
-import { AUTHOR_SOURCE, EVENT_KIND, FAILURE_CLASS, STEP_ID, TASK_STATUS } from '@orc/contracts'
-import { stepFixture } from '@orc/contracts/fixtures'
+import { AUTHOR_SOURCE, EVENT_KIND, FAILURE_CLASS, STEP_ID, TASK_STATUS, WORKSPACE_KIND } from '@orc/contracts'
+import { TEST_WORKSPACE_ID, stepFixture } from '@orc/contracts/fixtures'
 import { draftFixture } from '@orc/contracts/fixtures'
 
 /** the one step draftFixture ships with — the monitor keys its ceiling off this id */
 const LIVE_STEP_ID = stepFixture().id
-import { Kernel, openStorage } from '@orc/kernel'
+import { Kernel, fold, openStorage, workspaceHealth } from '@orc/kernel'
 import { createTestDb, TEST_PROJECT_ID } from '@orc/kernel/test-helpers'
 import type { OrcActions } from '@orc/ui-core'
 import { startGraphUi } from '../src/server'
@@ -17,7 +17,10 @@ export const E2E_PORT = 7911
 const db = await createTestDb()
 const storage = await openStorage(db.url, { projectId: TEST_PROJECT_ID })
 const kernel = new Kernel(storage.events)
-const seeded = await kernel.createTask({ title: 'hello world request', spec: 'write hello.txt' })
+// Every task names a workspace, so the fixture adopts one before it seeds anything — the same
+// thing a real boot does for the checkout it runs in.
+const { workspace } = await kernel.ensureWorkspace({ cwd: '/e2e', branch: 'main', kind: WORKSPACE_KIND.checkout, onTrunk: true })
+const seeded = await kernel.createTask({ workspaceId: workspace.id, title: 'hello world request', spec: 'write hello.txt' })
 await kernel.proposePlan(seeded.id, draftFixture())
 // approved, so the projection emits STEP nodes: without them the contract test can only ever
 // see one node kind, and the step/artifact shapes go unchecked
@@ -27,7 +30,7 @@ await kernel.approvePlan(seeded.id)
 // a plan-step question is OPEN, so the pane offers the one-click approve. Answering it drives
 // the reply action below, which reproduces the failure this fixture exists to prove is visible.
 const GATE_RUN_TOKEN = 'e2e-gate-run'
-const gated = await kernel.createTask({ title: 'gated plan request', spec: 'decompose something' })
+const gated = await kernel.createTask({ workspaceId: workspace.id, title: 'gated plan request', spec: 'decompose something' })
 const gateEnvelope = { taskId: gated.id, stepId: STEP_ID.plan, runToken: GATE_RUN_TOKEN }
 await storage.events.append({
   ...gateEnvelope, kind: EVENT_KIND.feedback_requested,
@@ -48,7 +51,7 @@ for (let i = 1; i <= 60; i++) {
 // A gate whose question is a whole plan. Tall on purpose: an unbounded gate block used to grow
 // past the pane and paint over the copilot beneath it, and the layout test needs its own task so
 // the answer-refusal scenario above cannot retire it first.
-const tall = await kernel.createTask({ title: 'tall gate request', spec: 'a plan with many waves' })
+const tall = await kernel.createTask({ workspaceId: workspace.id, title: 'tall gate request', spec: 'a plan with many waves' })
 await storage.events.append({
   taskId: tall.id, stepId: STEP_ID.plan, runToken: 'e2e-tall-run', kind: EVENT_KIND.feedback_requested,
   payload: {
@@ -60,7 +63,7 @@ await storage.events.append({
 // A plan with REAL topology: a diamond over three waves (analyze -> left ∥ right -> join). The
 // single-step draftFixture cannot exercise the dependency graph's subflows at all — one wave, one
 // node, no edges — so multi-wave rendering shipped unproven until this existed.
-const shaped = await kernel.createTask({ title: 'shaped plan request', spec: 'a diamond plan' })
+const shaped = await kernel.createTask({ workspaceId: workspace.id, title: 'shaped plan request', spec: 'a diamond plan' })
 await kernel.proposePlan(shaped.id, draftFixture([
   stepFixture({ id: 'analyze', title: 'analyze', dependsOn: [] }),
   stepFixture({ id: 'left', title: 'left', dependsOn: ['analyze'] }),
@@ -74,7 +77,7 @@ await kernel.approvePlan(shaped.id)
 // failure mode the wire-shape bugs took four rounds to surface. Iteration 4 of a ceiling of 5
 // also puts the bar in its near-ceiling branch.
 const LIVE_RUN_TOKEN = 'e2e-live-run'
-const live = await kernel.createTask({ title: 'live run request', spec: 'work that is still going' })
+const live = await kernel.createTask({ workspaceId: workspace.id, title: 'live run request', spec: 'work that is still going' })
 await kernel.proposePlan(live.id, draftFixture())
 await kernel.approvePlan(live.id)
 await storage.events.append({
@@ -97,7 +100,7 @@ await storage.events.append({
 // affordance shipped once as a button that silently did nothing.
 const REJECT_RUN_TOKEN = 'e2e-reject-run'
 const REJECT_STEP_ID = stepFixture().id
-const rejected = await kernel.createTask({ title: 'rejected plan request', spec: 'work an auditor judged unacceptable' })
+const rejected = await kernel.createTask({ workspaceId: workspace.id, title: 'rejected plan request', spec: 'work an auditor judged unacceptable' })
 await kernel.proposePlan(rejected.id, draftFixture())
 await kernel.approvePlan(rejected.id)
 const rejectEnvelope = { taskId: rejected.id, stepId: REJECT_STEP_ID, runToken: REJECT_RUN_TOKEN }
@@ -138,7 +141,7 @@ const copilotModel = new MockLanguageModelV4({
 
 const unsupported = (name: string) => async (): Promise<never> => { throw new Error(`${name} not available in e2e fixture`) }
 const actions: OrcActions = {
-  newTask: async input => ({ taskId: (await kernel.createTask({ title: input.title, spec: input.spec ?? '' })).id }),
+  newTask: async input => ({ taskId: (await kernel.createTask({ workspaceId: workspace.id, title: input.title, spec: input.spec ?? '' })).id }),
   propose: unsupported('propose'),
   // kernel-backed, not stubbed: `edit` is the documented repair path for a BLOCKED task
   // (kernel.editPlan stamps blocked -> awaiting_approval), and the console's reopen button is its
@@ -152,7 +155,7 @@ const actions: OrcActions = {
   reply: async (taskId, text) => {
     await storage.events.append({
       ...gateEnvelope, taskId, kind: EVENT_KIND.feedback_provided,
-      payload: { topic: 'plan-gate', text, author: { source: AUTHOR_SOURCE.cli } },
+      payload: { topic: 'plan-gate', text, author: { source: AUTHOR_SOURCE.cli, workspaceId: TEST_WORKSPACE_ID } },
     })
     await storage.events.append({
       ...gateEnvelope, taskId, kind: EVENT_KIND.tool_result,
@@ -169,15 +172,30 @@ const actions: OrcActions = {
   annotate: unsupported('annotate'),
   revise: unsupported('revise'),
   writeNote: async note => {
-    await storage.events.append({ taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_written, payload: { note, author: { source: AUTHOR_SOURCE.cli } } })
+    await storage.events.append({ taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_written, payload: { note, author: { source: AUTHOR_SOURCE.cli, workspaceId: TEST_WORKSPACE_ID } } })
     return { id: note.id, scope: 'project' }
   },
   deleteNote: async (id, scope) => {
-    await storage.events.append({ taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_deleted, payload: { id, scope: scope ?? 'project', author: { source: AUTHOR_SOURCE.cli } } })
+    await storage.events.append({ taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_deleted, payload: { id, scope: scope ?? 'project', author: { source: AUTHOR_SOURCE.cli, workspaceId: TEST_WORKSPACE_ID } } })
     return { id }
   },
   renameProject: unsupported('renameProject'),
   newProject: unsupported('newProject'),
+  // kernel-backed, not stubbed: it is a plain read of the log this fixture already folds, and the
+  // seeded workspace is what a copilot answer about "which checkout" would have to name. The health
+  // comes from the SAME pure derivation the CLI uses; what the fixture cannot honestly answer it
+  // says it cannot — /e2e is no checkout (dirExists false, git unasked) and there is no memory read
+  // model here, so the note count is UNKNOWN rather than a fabricated zero.
+  listWorkspaces: async () => {
+    const events = await storage.events.all()
+    const state = fold(events)
+    return [...state.workspaces.values()].map(w => ({
+      workspace: w,
+      health: workspaceHealth(state, events, null, w, { dirExists: false, clean: null }),
+    }))
+  },
+  // git-backed (a worktree + branch per request) — out of reach of a fixture that owns no checkout
+  newWorkspace: unsupported('newWorkspace'),
   purgeProject: unsupported('purgeProject'),
   deleteProject: unsupported('deleteProject'),
 }

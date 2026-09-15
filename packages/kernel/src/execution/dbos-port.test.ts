@@ -17,7 +17,7 @@ import type { GroundingNoteRef, GroundingSource } from './strategies/grounding-f
 import { draftFixture, stepFixture } from '@orc/contracts/fixtures'
 import { openStorage, type EventLog } from '../storage'
 import { Kernel } from '../kernel'
-import { createTestDb, fakeProvider, testConfig, TEST_PROJECT_ID, waitFor } from '../test-helpers'
+import { createTestDb, fakeProvider, seedTestWorkspace, TEST_PROJECT_ID, TEST_WORKSPACE_ID, testConfig, waitFor } from '../test-helpers'
 import { appendRunInit, createDbosPort, runQueueOptions, type DbosPort } from './dbos-port'
 
 // One DBOS runtime per process: registerWorkflow throws on duplicate names, so the whole file
@@ -38,6 +38,10 @@ const lastDepOutputs = new Map<string, Record<string, string>>()
 // Scripted grounding probe for the freshness gate. One mutable holder: bun runs a file's tests
 // serially and the port is built once for the whole file, so each test installs its own script.
 let groundingScript: (GroundingSource & { probes: string[] }) | null = null
+// Every step surface the port asked for, verbatim. The composition root builds an agent step's
+// MemoryAuthor out of exactly this object, so what it carries is the only evidence that a write
+// from a step is stamped with the workspace its TASK names rather than the supervisor's own cwd.
+const stepToolsCalls: Array<{ taskId: string; stepId: string; workspaceId: string }> = []
 
 function fakeExecutor(): AgentExecutor<unknown> {
   return {
@@ -161,6 +165,8 @@ describe('DBOS execution port (integration)', () => {
       return realTransaction(fn)
     }
     kernel = new Kernel(log)
+    // a task must name a workspace the fold has seen — one seeded record, then tasks as before
+    await seedTestWorkspace(log)
     // isolated dir: bare runs now default their workspace to config.dir — tests that write
     // real files (declared outputs) must land in a scratch dir, never the actual repo
     projectDir = mkdtempSync(path.join(tmpdir(), 'orc-project-'))
@@ -192,6 +198,9 @@ describe('DBOS execution port (integration)', () => {
           return { name, body: `body of ${name}`, hash: `hash-${name}` }
         },
       },
+      // Records what the port offers a step and adds no tools — the surface every other test in
+      // this file sees is unchanged (a port without stepTools contributes nothing either).
+      stepTools: p => { stepToolsCalls.push({ taskId: p.taskId, stepId: p.stepId, workspaceId: p.workspaceId }); return [] },
       tools: {
         close: async () => {},
         resolve: async (refs: string[]) => refs.map(ref => {
@@ -209,7 +218,7 @@ describe('DBOS execution port (integration)', () => {
   afterAll(async () => { await teardown() })
 
   async function approvedTask(behavior: Record<string, 'ok' | 'fail'> = {}, draft: PlanDraft = twoStepDraft()) {
-    const t = await kernel.createTask({ title: 'exec test', spec: 'run the dag' })
+    const t = await kernel.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'exec test', spec: 'run the dag' })
     behaviors.set(t.id, behavior)
     await kernel.proposePlan(t.id, draft)
     await kernel.approvePlan(t.id)
@@ -239,6 +248,16 @@ describe('DBOS execution port (integration)', () => {
     expect(kinds.indexOf(EVENT_KIND.run_started)).toBeLessThan(kinds.indexOf(EVENT_KIND.step_started))
   }, 15_000)
 
+  it('hands every step surface the workspace its OWN task names, so an agent write is stamped from the task, not the supervisor cwd', async () => {
+    const t = await approvedTask()
+    expect(await (await port.startRun(t.id)).wait()).toBe('done')
+    const seen = stepToolsCalls.filter(c => c.taskId === t.id)
+    expect(seen.map(c => c.stepId).sort()).toEqual(['a', 'b'])
+    // The value, not merely presence: the port reads it off the TaskNode it already folds for the
+    // spec, so a step that ran in a worktree cannot inherit whichever checkout booted the port.
+    for (const c of seen) expect(c.workspaceId).toBe(TEST_WORKSPACE_ID)
+  })
+
   it('startRun is idempotent — second call attaches, no duplicate run_started', async () => {
     const t = await approvedTask()
     const [h1, h2] = [await port.startRun(t.id), await port.startRun(t.id)]
@@ -262,7 +281,7 @@ describe('DBOS execution port (integration)', () => {
     const second = await port.startRun(t.id)
     expect(second.workflowId).not.toBe(first.workflowId)
     expect(await second.wait()).toBe('done')
-  })
+  }, 15_000) // two full DBOS workflows — bun's 5s default is too tight under suite load
 
   it('failed step blocks task; retry re-runs only the failed step to done', async () => {
     const behavior: Record<string, 'ok' | 'fail'> = { a: 'ok', b: 'fail' }
@@ -441,12 +460,12 @@ describe('DBOS execution port (integration)', () => {
   })
 
   it('refuses to run an unapproved task', async () => {
-    const t = await kernel.createTask({ title: 'nope' })
+    const t = await kernel.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'nope' })
     await expect(port.startRun(t.id)).rejects.toThrow(/approve/)
   })
 
   it('fails the step (no wedge) when modelRef is unresolvable', async () => {
-    const t = await kernel.createTask({ title: 'bad model', spec: 'x' })
+    const t = await kernel.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'bad model', spec: 'x' })
     await kernel.proposePlan(t.id, draftFixture([stepFixture({ modelRef: 'nope/x' })]))
     await kernel.approvePlan(t.id)
     expect(await (await port.startRun(t.id)).wait()).toBe('blocked')
@@ -595,7 +614,7 @@ describe('DBOS execution port (integration)', () => {
   })
 
   it('a pre-M3 plan with no toolRefs in the log replays to done (no TypeError on undefined.length)', async () => {
-    const t = await kernel.createTask({ title: 'legacy plan', spec: 'x' })
+    const t = await kernel.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'legacy plan', spec: 'x' })
     // Kernel.proposePlan and even a direct EventLog.append re-parse payloads through the Plan
     // zod schema, which would restore toolRefs via its .default([]) — masking the bug. The only
     // honest way to reproduce a row that predates the field is to write it straight into the

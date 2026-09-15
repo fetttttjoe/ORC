@@ -4,8 +4,10 @@ import {
   RUN_OUTCOME, STEP_RUN_STATUS, TASK_STATUS, TERMINAL_TASK_STATUS, TaskNode, TaskStatus, ZERO_USAGE, addUsage, runOutcomeFor,
   MemoryDeletedPayload, MemoryVerifiedPayload, MemoryWrittenPayload, noteContentKey, noteKey, normalizeRelPath,
   OperationCompletedPayload, OperationFailedPayload, OperationStartedPayload, ReactionFailedPayload,
+  WorkspaceArchivedPayload, WorkspaceCreatedPayload, WorkspaceMergedPayload, WorkspaceRetitledPayload,
 } from '@orc/contracts'
-import type { EventRecord, OperationRecord, RunOutcome, StepRunStatus, Usage } from '@orc/contracts'
+import type { EventRecord, OperationRecord, RunOutcome, StepRunStatus, Usage, Workspace } from '@orc/contracts'
+import { applyArchived, applyRetitle } from './workspaces'
 
 export interface TaskPlans {
   versions: Plan[]
@@ -62,6 +64,11 @@ export interface State {
   // acted on something the log already records as asked. Folded so `orc status` can SAY why a task
   // never moved — the failure used to exist only as a line on a supervisor's stdout.
   reactionFailures: Map<string, ReactionFailedPayload[]>
+  workspaces: Map<string, Workspace>
+  // A merge is its OWN fact, keyed by workspace, never a field on the Workspace record: the record
+  // is what workspaceByCwd matches on, and that match must keep ignoring whether the branch landed
+  // (a merged worktree is still the live directory its tasks run in until someone archives it).
+  workspaceMerges: Map<string, WorkspaceMergedPayload>
 }
 
 
@@ -141,6 +148,10 @@ const View = {
   split_resolved: z.object({ splitId: z.string() }),
   step_completed: z.object({ stepId: z.string(), summary: z.string() }),
   step_failed: z.object({ stepId: z.string(), class: FailureClass.catch(FAILURE_CLASS.agent_error), message: z.string() }),
+  workspace_created: WorkspaceCreatedPayload,
+  workspace_retitled: WorkspaceRetitledPayload,
+  workspace_archived: WorkspaceArchivedPayload,
+  workspace_merged: WorkspaceMergedPayload,
 }
 
 const stepOf = (state: State, taskId: string, stepId: string): StepState | undefined =>
@@ -160,7 +171,7 @@ export interface FoldAcc {
 }
 
 export const emptyFold = (): FoldAcc => ({
-  state: { tasks: new Map(), plans: new Map(), steps: new Map(), runs: new Map(), usage: new Map(), stepUsage: new Map(), splits: new Map(), operations: new Map(), artifacts: new Map(), reactionFailures: new Map() },
+  state: { tasks: new Map(), plans: new Map(), steps: new Map(), runs: new Map(), usage: new Map(), stepUsage: new Map(), splits: new Map(), operations: new Map(), artifacts: new Map(), reactionFailures: new Map(), workspaces: new Map(), workspaceMerges: new Map() },
   seen: new Set(),
 })
 
@@ -333,6 +344,31 @@ export function foldInto(acc: FoldAcc, e: EventRecord): FoldAcc {
       case EVENT_KIND.copilot_exchange:
       case EVENT_KIND.commit_recorded:
         break // traceability only; no state derivation
+      case EVENT_KIND.workspace_created: {
+        const p = View.workspace_created.safeParse(e.payload)
+        if (p.success) state.workspaces.set(p.data.workspace.id, p.data.workspace)
+        break
+      }
+      case EVENT_KIND.workspace_retitled: {
+        // The transition itself lives in workspaces.ts and is shared with the kernel method that
+        // appends this event; only the lenient lookup (malformed payload, unknown id → no-op) is
+        // the fold's own business.
+        const p = View.workspace_retitled.safeParse(e.payload)
+        const w = p.success ? state.workspaces.get(p.data.workspaceId) : undefined
+        if (p.success && w) state.workspaces.set(w.id, applyRetitle(w, p.data.title))
+        break
+      }
+      case EVENT_KIND.workspace_archived: {
+        const p = View.workspace_archived.safeParse(e.payload)
+        const w = p.success ? state.workspaces.get(p.data.workspaceId) : undefined
+        if (p.success && w) state.workspaces.set(w.id, applyArchived(w, p.data.archived, p.data.at))
+        break
+      }
+      case EVENT_KIND.workspace_merged: {
+        const p = View.workspace_merged.safeParse(e.payload)
+        if (p.success) state.workspaceMerges.set(p.data.workspaceId, p.data)
+        break
+      }
       default: {
         const unhandled: never = e.kind
         void unhandled

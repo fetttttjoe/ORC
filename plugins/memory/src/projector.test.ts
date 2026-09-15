@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { claimId, EVENT_KIND, MEMORY_ACCESS, noteKey, TASK_STATUS, type EmbeddingProvider, type EventKind } from '@orc/contracts'
 import { openStorage } from '@orc/kernel'
-import { createTestDb, TEST_PROJECT_ID } from '@orc/kernel/test-helpers'
+import { TEST_WORKSPACE_ID, createTestDb, TEST_PROJECT_ID } from '@orc/kernel/test-helpers'
 import { SurrealMemory } from './surreal'
 import { createTestSurreal } from './test-helpers'
 import { catchUpProgressLine, createMemoryProjector } from './projector'
@@ -45,12 +45,12 @@ describe('memory projector', () => {
     const warnSpy = spyOn(console, 'warn').mockImplementation((...a: unknown[]) => { warns.push(a.join(' ')) })
     try {
       const noteFile = path.join(vaultDir, 'memory', 'auth.md')
-      await log.append({ taskId: null, stepId: null, runToken: null, kind: 'memory_written', payload: { note: noteInput, author: { source: 'cli' } } })
+      await log.append({ taskId: null, stepId: null, runToken: null, kind: 'memory_written', payload: { note: noteInput, author: { source: 'cli', workspaceId: TEST_WORKSPACE_ID } } })
       await until(() => existsSync(noteFile))
       expect(existsSync(noteFile)).toBe(true)
       expect((await surreal.get('auth', 'project'))?.title).toBe('Auth')
 
-      await log.append({ taskId: null, stepId: null, runToken: null, kind: 'memory_deleted', payload: { id: 'auth', scope: 'project', author: { source: 'cli' } } })
+      await log.append({ taskId: null, stepId: null, runToken: null, kind: 'memory_deleted', payload: { id: 'auth', scope: 'project', author: { source: 'cli', workspaceId: TEST_WORKSPACE_ID } } })
       await until(() => !existsSync(noteFile))
       expect(existsSync(noteFile)).toBe(false)
       expect(await surreal.get('auth', 'project')).toBeNull()
@@ -83,9 +83,9 @@ describe('memory projector', () => {
     try {
       // two writes by DIFFERENT authors: revision advances, createdAt/By pin to the first
       await log.append({ taskId: null, stepId: null, runToken: null, kind: 'memory_written',
-        payload: { note: noteInput, author: { source: 'cli' } } })
+        payload: { note: noteInput, author: { source: 'cli', workspaceId: TEST_WORKSPACE_ID } } })
       await log.append({ taskId: null, stepId: null, runToken: null, kind: 'memory_written',
-        payload: { note: { ...noteInput, summary: 'revised' }, author: { source: 'agent', executor: 'api-loop', model: 'opus', role: 'review' } } })
+        payload: { note: { ...noteInput, summary: 'revised' }, author: { source: 'agent', workspaceId: TEST_WORKSPACE_ID, executor: 'api-loop', model: 'opus', role: 'review' } } })
       await proj.catchUp()
 
       const before = await surreal.allNotes()
@@ -95,6 +95,37 @@ describe('memory projector', () => {
 
       await proj.rebuild()
       expect(await surreal.allNotes()).toEqual(before)
+    } finally {
+      await proj.close(); await surreal.close(); await log.close()
+    }
+  })
+
+  // The workspace a note was written FROM is what every read surface derives `provisional` from, and
+  // it can only be known at write time — the author names it and nothing can recover it afterwards.
+  // So it has to land on the projected row like createdBy does; a row without it makes the flag
+  // underivable for that note forever, silently reading as trunk knowledge.
+  it('projects the writing workspace onto the note row', async () => {
+    const pg = await createTestDb(); drops.push(pg.drop)
+    const ts = await createTestSurreal(); drops.push(ts.drop)
+    const log = (await openStorage(pg.url, { projectId: TEST_PROJECT_ID })).events
+    const surreal = await SurrealMemory.open(ts)
+    const vaultDir = mkdtempSync(path.join(tmpdir(), 'orc-vault-ws-'))
+    const proj = createMemoryProjector({ log, surreal, vaultDir })
+    await proj.start()
+    try {
+      await log.append({ taskId: null, stepId: null, runToken: null, kind: 'memory_written',
+        payload: { note: noteInput, author: { source: 'cli', workspaceId: TEST_WORKSPACE_ID } } })
+      await proj.catchUp()
+      expect((await surreal.get('auth', 'project'))?.workspaceId).toBe(TEST_WORKSPACE_ID)
+      // the LAST writer's workspace, not the first: a note re-written from another checkout is
+      // pending in THAT one until it merges, whatever the note's origin was
+      await log.append({ taskId: null, stepId: null, runToken: null, kind: 'memory_written',
+        payload: { note: { ...noteInput, summary: 'revised' }, author: { source: 'cli', workspaceId: 'ws-later' } } })
+      await proj.catchUp()
+      expect((await surreal.get('auth', 'project'))?.workspaceId).toBe('ws-later')
+      // and it survives a replay — the fact comes off the event, so a rebuild re-derives it
+      await proj.rebuild()
+      expect((await surreal.get('auth', 'project'))?.workspaceId).toBe('ws-later')
     } finally {
       await proj.close(); await surreal.close(); await log.close()
     }
@@ -114,8 +145,8 @@ describe('memory projector', () => {
     try {
       const append = (kind: EventKind, payload: Record<string, unknown>) =>
         log.append({ taskId: null, stepId: null, runToken: null, kind, payload })
-      const access = { id: 'auth', scope: 'project', mode: MEMORY_ACCESS.read, author: { source: 'cli' } }
-      await append(EVENT_KIND.memory_written, { note: noteInput, author: { source: 'cli' } })
+      const access = { id: 'auth', scope: 'project', mode: MEMORY_ACCESS.read, author: { source: 'cli', workspaceId: TEST_WORKSPACE_ID } }
+      await append(EVENT_KIND.memory_written, { note: noteInput, author: { source: 'cli', workspaceId: TEST_WORKSPACE_ID } })
       await append(EVENT_KIND.memory_accessed, access)
       await append(EVENT_KIND.memory_accessed, access)
       await proj.catchUp()
@@ -153,7 +184,7 @@ describe('memory projector', () => {
         ({ ...noteInput, id, claims: texts.map(text => ({ id: claimId(text), text, sourceRevision: null })) })
       for (const [id, texts] of [['n1', ['alpha holds', 'beta holds']], ['n2', ['zeta holds']], ['n3', ['gamma holds']]] as const)
         await log.append({ taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_written,
-          payload: { note: withClaims(id, [...texts]), author: { source: 'cli' } } })
+          payload: { note: withClaims(id, [...texts]), author: { source: 'cli', workspaceId: TEST_WORKSPACE_ID } } })
       await proj.catchUp()
 
       const before = await surreal.topics()
@@ -176,7 +207,7 @@ describe('memory projector', () => {
     const log = (await openStorage(pg.url, { projectId: TEST_PROJECT_ID })).events
     const surreal = await SurrealMemory.open(ts)
     const vaultDir = mkdtempSync(path.join(tmpdir(), 'vault-'))
-    await log.append({ taskId: null, stepId: null, runToken: null, kind: 'memory_written', payload: { note: noteInput, author: { source: 'cli' } } })
+    await log.append({ taskId: null, stepId: null, runToken: null, kind: 'memory_written', payload: { note: noteInput, author: { source: 'cli', workspaceId: TEST_WORKSPACE_ID } } })
 
     const allSpy = spyOn(log, 'all')
     const proj = createMemoryProjector({ log, surreal, vaultDir })
@@ -209,7 +240,7 @@ describe('memory projector', () => {
     // a run where refreshTopics kept failing: apply straight to Surreal, bypassing the projector
     // entirely, so Surreal's cursor lands at this event's seq WITHOUT refreshTopics ever running.
     const withClaims = { ...noteInput, id: 'topic-note', claims: [{ id: claimId('alpha holds'), text: 'alpha holds', sourceRevision: null }] }
-    const rec = await log.append({ taskId: null, stepId: null, runToken: null, kind: 'memory_written', payload: { note: withClaims, author: { source: 'cli' } } })
+    const rec = await log.append({ taskId: null, stepId: null, runToken: null, kind: 'memory_written', payload: { note: withClaims, author: { source: 'cli', workspaceId: TEST_WORKSPACE_ID } } })
     await surreal.applyEvent(rec)
     expect(await surreal.topics()).toEqual([]) // sanity: claims exist, nothing partitioned yet
 
@@ -232,7 +263,7 @@ describe('memory projector', () => {
       // memory_accessed IS a MEMORY_KINDS member, so it DOES wake the reconcile (the trigger filter
       // is by kind, not by "can this change claims") — but it cannot change which claims exist, so the
       // internal vaultChanged gate must still suppress the refresh.
-      await log.append({ taskId: null, stepId: null, runToken: null, kind: 'memory_accessed', payload: { id: 'topic-note', scope: 'project', mode: MEMORY_ACCESS.read, author: { source: 'cli' } } })
+      await log.append({ taskId: null, stepId: null, runToken: null, kind: 'memory_accessed', payload: { id: 'topic-note', scope: 'project', mode: MEMORY_ACCESS.read, author: { source: 'cli', workspaceId: TEST_WORKSPACE_ID } } })
       await Bun.sleep(150)
       expect(afterSpy).toHaveBeenCalled()
       expect(refreshSpy).toHaveBeenCalledTimes(1)
@@ -276,7 +307,7 @@ describe('projector resilience', () => {
     const proj = createMemoryProjector({ log, surreal: stub, vaultDir })
     try {
       await proj.start()
-      await log.append({ taskId: null, stepId: null, runToken: null, kind: 'memory_written', payload: { note: noteInput, author: { source: 'cli' } } })
+      await log.append({ taskId: null, stepId: null, runToken: null, kind: 'memory_written', payload: { note: noteInput, author: { source: 'cli', workspaceId: TEST_WORKSPACE_ID } } })
       await Bun.sleep(600) // subscription fires -> fail -> 250ms backoff -> retry succeeds
     } finally {
       // restore in the finally too: a throw above would otherwise leave console.warn mocked for
@@ -312,7 +343,7 @@ describe('projector resilience', () => {
     const proj = createMemoryProjector({ log, surreal: stub, vaultDir })
     try {
       for (const id of ['first', 'second'])
-        await log.append({ taskId: null, stepId: null, runToken: null, kind: 'memory_written', payload: { note: { ...noteInput, id }, author: { source: 'cli' } } })
+        await log.append({ taskId: null, stepId: null, runToken: null, kind: 'memory_written', payload: { note: { ...noteInput, id }, author: { source: 'cli', workspaceId: TEST_WORKSPACE_ID } } })
       await proj.catchUp().catch(() => {}) // no start(): nothing forces a refresh, only the gate can
     } finally {
       await proj.close(); await log.close(); warnSpy.mockRestore()
@@ -341,13 +372,13 @@ describe('projector resilience', () => {
     try {
       // a plain WRITE materializes its own edges per-note in applyEvent, so the global O(all-notes)
       // re-link is wasteful work it must skip. Topics still repartition (no per-event shortcut).
-      await log.append({ taskId: null, stepId: null, runToken: null, kind: 'memory_written', payload: { note: { ...noteInput }, author: { source: 'cli' } } })
+      await log.append({ taskId: null, stepId: null, runToken: null, kind: 'memory_written', payload: { note: { ...noteInput }, author: { source: 'cli', workspaceId: TEST_WORKSPACE_ID } } })
       await proj.catchUp()
       expect(topics).toBe(1)
       expect(links).toBe(0)
       // a DELETE cascades away edges a NEIGHBOUR authored (Surreal drops a RELATE when either endpoint
       // is deleted), so only here does recomputing the whole edge set earn its cost.
-      await log.append({ taskId: null, stepId: null, runToken: null, kind: 'memory_deleted', payload: { id: noteInput.id, scope: 'project', author: { source: 'cli' } } })
+      await log.append({ taskId: null, stepId: null, runToken: null, kind: 'memory_deleted', payload: { id: noteInput.id, scope: 'project', author: { source: 'cli', workspaceId: TEST_WORKSPACE_ID } } })
       await proj.catchUp()
       expect(links).toBe(1)
     } finally {
@@ -386,8 +417,8 @@ describe('projector resilience', () => {
     const warnSpy = spyOn(console, 'warn').mockImplementation((...a: unknown[]) => { warns.push(a.join(' ')) })
     const proj = createMemoryProjector({ log, surreal: stub, vaultDir })
     try {
-      await log.append({ taskId: null, stepId: null, runToken: null, kind: 'memory_written', payload: { note: { ...noteInput, id: droppedId }, author: { source: 'cli' } } })
-      await log.append({ taskId: null, stepId: null, runToken: null, kind: 'memory_written', payload: { note: { ...noteInput, id: 'kept-note' }, author: { source: 'cli' } } })
+      await log.append({ taskId: null, stepId: null, runToken: null, kind: 'memory_written', payload: { note: { ...noteInput, id: droppedId }, author: { source: 'cli', workspaceId: TEST_WORKSPACE_ID } } })
+      await log.append({ taskId: null, stepId: null, runToken: null, kind: 'memory_written', payload: { note: { ...noteInput, id: 'kept-note' }, author: { source: 'cli', workspaceId: TEST_WORKSPACE_ID } } })
 
       const result = await proj.rebuild()
 
@@ -418,7 +449,7 @@ describe('projector resilience', () => {
     try {
       // start()'s initial drain hits the failing stub too — tolerate it; the subscription is live after
       await proj.start().catch(() => {})
-      await log.append({ taskId: null, stepId: null, runToken: null, kind: 'memory_written', payload: { note: noteInput, author: { source: 'cli' } } })
+      await log.append({ taskId: null, stepId: null, runToken: null, kind: 'memory_written', payload: { note: noteInput, author: { source: 'cli', workspaceId: TEST_WORKSPACE_ID } } })
       await Bun.sleep(400)
     } finally {
       await proj.close(); await log.close()
@@ -472,8 +503,8 @@ describe('projector stage publication', () => {
     const proj = createMemoryProjector({ log, surreal: stub, vaultDir })
     try {
       // a DELETE is what makes both stages run — a plain write skips the global re-link
-      await log.append({ taskId: null, stepId: null, runToken: null, kind: 'memory_written', payload: { note: { ...noteInput }, author: { source: 'cli' } } })
-      await log.append({ taskId: null, stepId: null, runToken: null, kind: 'memory_deleted', payload: { id: noteInput.id, scope: 'project', author: { source: 'cli' } } })
+      await log.append({ taskId: null, stepId: null, runToken: null, kind: 'memory_written', payload: { note: { ...noteInput }, author: { source: 'cli', workspaceId: TEST_WORKSPACE_ID } } })
+      await log.append({ taskId: null, stepId: null, runToken: null, kind: 'memory_deleted', payload: { id: noteInput.id, scope: 'project', author: { source: 'cli', workspaceId: TEST_WORKSPACE_ID } } })
       await proj.catchUp()
     } finally {
       await proj.close(); await log.close()
@@ -510,7 +541,7 @@ describe('projector stage publication', () => {
     const TOTAL = 50 // the isBigDrain floor exactly — below it nothing is announced
     try {
       for (let i = 0; i < TOTAL; i += 1)
-        await log.append({ taskId: null, stepId: null, runToken: null, kind: 'memory_written', payload: { note: { ...noteInput, id: `n${i}` }, author: { source: 'cli' } } })
+        await log.append({ taskId: null, stepId: null, runToken: null, kind: 'memory_written', payload: { note: { ...noteInput, id: `n${i}` }, author: { source: 'cli', workspaceId: TEST_WORKSPACE_ID } } })
       await proj.catchUp()
     } finally {
       await proj.close(); await log.close()
@@ -551,8 +582,8 @@ describe('projector stage publication', () => {
     } as unknown as SurrealMemory
     const proj = createMemoryProjector({ log, surreal: stub, vaultDir })
     try {
-      await log.append({ taskId: null, stepId: null, runToken: null, kind: 'memory_written', payload: { note: { ...noteInput, id: 'b1' }, author: { source: 'cli' } } })
-      await log.append({ taskId: null, stepId: null, runToken: null, kind: 'memory_written', payload: { note: { ...noteInput, id: 'b2' }, author: { source: 'cli' } } })
+      await log.append({ taskId: null, stepId: null, runToken: null, kind: 'memory_written', payload: { note: { ...noteInput, id: 'b1' }, author: { source: 'cli', workspaceId: TEST_WORKSPACE_ID } } })
+      await log.append({ taskId: null, stepId: null, runToken: null, kind: 'memory_written', payload: { note: { ...noteInput, id: 'b2' }, author: { source: 'cli', workspaceId: TEST_WORKSPACE_ID } } })
       await proj.start()
     } finally {
       await proj.close(); await log.close()
@@ -601,7 +632,7 @@ describe('projector lease', () => {
       await proj.start()
       // no holder is actually projecting, so the bounded wait must expire and the fallback drain
       // must cover the note — a dead holder degrades to slower reads, never to no reads
-      await log.append({ taskId: null, stepId: null, runToken: null, kind: 'memory_written', payload: { note: noteInput, author: { source: 'cli' } } })
+      await log.append({ taskId: null, stepId: null, runToken: null, kind: 'memory_written', payload: { note: noteInput, author: { source: 'cli', workspaceId: TEST_WORKSPACE_ID } } })
       await proj.catchUp()
       expect((await surreal.get('auth', 'project'))?.title).toBe('Auth')
       // now the read model covers the log: the next catchUp is the cheap path — no re-apply

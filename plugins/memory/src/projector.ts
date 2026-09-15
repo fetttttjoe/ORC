@@ -3,6 +3,7 @@ import { MEMORY_STAGE, type MemoryStageName, type StageProgress } from '@orc/con
 import type { EventLog, ProjectorLease } from '@orc/kernel'
 import { SurrealMemory } from './surreal'
 import { noteRelPath, renderNoteFile } from './note-md'
+import type { WorkspaceView, WorkspaceViewProbe } from './provisional'
 import { deleteMemoryFile, writeMemoryFile } from './write-note'
 import { rebuildVaultMemory, renderMemoryIndex } from './memory-index'
 
@@ -86,6 +87,11 @@ export function createMemoryProjector(opts: {
   log: EventLog
   surreal: SurrealMemory
   vaultDir: string
+  // The workspace standing the rendered note files carry `provisional` from. Folded ONCE per drain
+  // and once per vault rebuild rather than per file: a rebuild renders the whole corpus, and a fold
+  // per note would put a log query between every write. Absent = the files claim nothing, the same
+  // fail-toward-silence rule the read tools follow with no view wired.
+  workspaceView?: WorkspaceViewProbe
   // ONE live projector per project (see kernel's projectorLease). Absent = unconditional leader,
   // which is what one-shot CLI commands and tests want: they never start() the standing machinery.
   lease?: ProjectorLease
@@ -106,7 +112,7 @@ export function createMemoryProjector(opts: {
   // Returns whether the VAULT changed, not whether the event applied: memory_accessed moves a
   // counter that no rendered file carries, and reads are frequent — re-rendering index.md (every
   // note body, every time) on each one would make reading the graph cost more than writing it.
-  const applyOne = async (e: EventRecord): Promise<boolean> => {
+  const applyOne = async (e: EventRecord, view: WorkspaceView | undefined): Promise<boolean> => {
     const applied = await surreal.applyEvent(e)
     if (!applied) return false
     // safeParse, matching surreal.applyEvent's own skip-and-advance for an unparseable payload.
@@ -127,7 +133,7 @@ export function createMemoryProjector(opts: {
       // An archived note has no row (applyEvent deleted it), so `full` is null and its vault file
       // must go with it — the vault is the human read surface, and a file for a note the graph has
       // retired is the two disagreeing. A restore re-upserts the row and re-renders the file.
-      if (full) writeMemoryFile(vaultDir, noteRelPath(full), renderNoteFile(full))
+      if (full) writeMemoryFile(vaultDir, noteRelPath(full), renderNoteFile(full, view))
       else deleteMemoryFile(vaultDir, noteRelPath(ref))
     } else if (e.kind === EVENT_KIND.memory_deleted) {
       const parsed = MemoryDeletedPayload.safeParse(e.payload)
@@ -159,6 +165,10 @@ export function createMemoryProjector(opts: {
   // cascade edges away.
   const drainFrom = async (fromSeq: number, reconcile: (c: { deletedCount: number }) => void | Promise<void>, drainOpts: { announce?: boolean } = {}): Promise<{ cursor: number; vaultChanged: number; deletedCount: number }> => {
     const events = await log.after(fromSeq, MEMORY_KINDS)
+    // one fold for the whole drain: the standing cannot change under a drain in any way that would
+    // make a per-event re-read more correct — a merge landing mid-drain is picked up by the next one,
+    // and every read tool derives the flag live regardless
+    const view = await opts.workspaceView?.()
     let vaultChanged = 0
     let deletedCount = 0
     // The replay is the boot's LONGEST stage and was the only one publishing nothing: `replaying`
@@ -180,7 +190,7 @@ export function createMemoryProjector(opts: {
       for (const [i, e] of events.entries()) {
         if (e.kind === EVENT_KIND.memory_written || e.kind === EVENT_KIND.memory_deleted) vaultChanged += 1
         if (e.kind === EVENT_KIND.memory_deleted) deletedCount += 1
-        await applyOne(e)
+        await applyOne(e, view)
         const progress = catchUpProgressLine(i + 1, events.length)
         if (progress) console.log(progress)
         if (progress || perEvent)
@@ -384,7 +394,7 @@ export function createMemoryProjector(opts: {
         // and refreshDerived(true) rebuilds edges too, repairing any RELATE a delete cascaded away.
         cursorCache = (await drainFrom(await surreal.getCursor(), () => {}, { announce: true })).cursor
         await refreshDerived(true)
-        await rebuildVaultMemory(surreal, vaultDir) // boot-time heal: replace vault/memory/** from Surreal
+        await rebuildVaultMemory(surreal, vaultDir, await opts.workspaceView?.()) // boot-time heal: replace vault/memory/** from Surreal
       })
     },
     close: async () => { closed = true; if (refreshTimer) { clearTimeout(refreshTimer); refreshTimer = null } if (unsub) { await unsub(); unsub = null } await applying; await opts.lease?.release() },
@@ -397,7 +407,7 @@ export function createMemoryProjector(opts: {
         await surreal.clear()
         cursorCache = (await drainFrom(0, () => {}, { announce: true })).cursor
         await refreshDerived(true) // same boot-time-heal reasoning as start()
-        await rebuildVaultMemory(surreal, vaultDir)
+        await rebuildVaultMemory(surreal, vaultDir, await opts.workspaceView?.())
 
         // Per-id accounting: a rebuild that silently DROPS a note (a skip, a dropped write,
         // anything) must not report success. Scoped query (log.after with KNOWLEDGE_KINDS), never

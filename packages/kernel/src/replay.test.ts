@@ -4,7 +4,7 @@ import { draftFixture } from '@orc/contracts/fixtures'
 import { openStorage } from './storage'
 import { Kernel } from './kernel'
 import { fold } from './projections'
-import { createTestDb, TEST_PROJECT_ID } from './test-helpers'
+import { createTestDb, seedTestWorkspace, TEST_PROJECT_ID, TEST_WORKSPACE_ID } from './test-helpers'
 
 const draft = (): PlanDraft => draftFixture()
 
@@ -14,8 +14,10 @@ describe('replay guarantee (spec §10)', () => {
     try {
       const log1 = (await openStorage(db.url, { projectId: TEST_PROJECT_ID })).events
       const k1 = new Kernel(log1)
-      const t = await k1.createTask({ title: 'parent', spec: 'root task' })
-      const child = await k1.createTask({ title: 'child', parentId: t.id })
+      // a task must name a workspace the fold has seen — one seeded record, then tasks as before
+      await seedTestWorkspace(log1)
+      const t = await k1.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'parent', spec: 'root task' })
+      const child = await k1.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'child', parentId: t.id })
       await k1.proposePlan(t.id, draft())
       await k1.editPlan(t.id, draft())
       await k1.approvePlan(t.id)
@@ -37,7 +39,9 @@ describe('replay guarantee (spec §10)', () => {
       const storage = await openStorage(db.url, { projectId: TEST_PROJECT_ID })
       const log = storage.events
       const k = new Kernel(log)
-      const t = await k.createTask({ title: 'x' })
+      // a task must name a workspace the fold has seen — one seeded record, then tasks as before
+      await seedTestWorkspace(log)
+      const t = await k.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'x' })
       await k.proposePlan(t.id, draft())
       await k.approvePlan(t.id)
       expect((await log.byTask(t.id)).map(e => e.kind)).toEqual([
@@ -58,7 +62,9 @@ describe('replay guarantee (spec §10)', () => {
       const storage = await openStorage(db.url, { projectId: TEST_PROJECT_ID })
       const log = storage.events
       const k = new Kernel(log)
-      const t = await k.createTask({ title: 'audited', spec: 'traced work' })
+      // a task must name a workspace the fold has seen — one seeded record, then tasks as before
+      await seedTestWorkspace(log)
+      const t = await k.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'audited', spec: 'traced work' })
       await k.proposePlan(t.id, draft())
       await k.approvePlan(t.id)
 

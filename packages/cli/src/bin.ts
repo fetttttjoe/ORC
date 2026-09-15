@@ -5,6 +5,7 @@ import { buildProgram, openKernel, runInit, runMigrate } from './main'
 import { exitCodeFor } from './exit'
 import type { Command } from 'commander'
 import { bootPhase, buildPlugins, buildRuntime } from './runtime'
+import { adoptCwd } from './workspace-adopt'
 
 // The DBOS port is built lazily, once, only when a command actually asks for it —
 // read-only commands never pay the DBOS launch, and new port commands need no registration here.
@@ -68,6 +69,11 @@ async function main(): Promise<number> {
       onAppend: e => loaded.host.hooks.dispatch(HOOK_NAME.event_appended, e),
     }), openTiming)
     storage = opened.storage
+    // Adoption runs at EVERY boot, here and nowhere else: this is the one place a kernel is
+    // guaranteed open (the --help path above returns with none), and every door — including
+    // `orc mcp serve`, a subcommand of the program parsed below — boots through it. A second call
+    // inside mcp-serve.ts would be a second spelling of the same rule, not a second behaviour.
+    await adoptCwd(opened.kernel, config)
     const storageMs = openTiming[0]?.[1]
     return await parse(buildProgram(
       opened.kernel,

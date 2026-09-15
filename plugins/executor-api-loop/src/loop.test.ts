@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import type { ClaimHit, Checkpoint, EventDraft, ExecutorContext, NoteSummary, OperationCheckpoint, OperationSpec, ResolvedTool, SplitResult, UnifiedEvent } from '@orc/contracts'
 import { EVENT_KIND, LINK_KIND, MEMORY_ACCESS, NOTE_TIER, OPERATION_KIND, SIGNAL_OUTCOME, planScope, slugId } from '@orc/contracts'
-import { stepFixture } from '@orc/contracts/fixtures'
+import { stepFixture, TEST_WORKSPACE_ID } from '@orc/contracts/fixtures'
 import { z } from 'zod'
 import type { LanguageModel } from 'ai'
 import { apiLoopExecutor } from './loop'
@@ -667,12 +667,13 @@ describe('step memory seam', () => {
   }
   const claim = (over: Partial<ClaimHit> = {}): ClaimHit => ({
     claimId: 'abc123abc123', noteId: 'auth-middleware', scope: 'project', title: 'Auth middleware overview',
-    text: 'Refresh tokens are single-use.', validFrom: '2026-07-26T00:00:00.000Z', sourceRevision: null, paths: [], ...over,
+    text: 'Refresh tokens are single-use.', validFrom: '2026-07-26T00:00:00.000Z', sourceRevision: null, paths: [],
+    workspaceId: TEST_WORKSPACE_ID, ...over,
   })
   const note = (over: Partial<NoteSummary> = {}): NoteSummary => ({
     id: 'auth-middleware', scope: 'project', title: 'Auth middleware overview',
     tier: NOTE_TIER.semantic, categories: [], tags: [], summary: 'Handles session validation.',
-    hits: 0, lastAccessedAt: null, sourceRevision: null, paths: [], ...over,
+    hits: 0, lastAccessedAt: null, sourceRevision: null, paths: [], workspaceId: TEST_WORKSPACE_ID, ...over,
   })
   const signalled = (outcome: 'success' | 'failure', summary: string) =>
     scriptModel([{ toolCalls: [{ toolCallId: 'c1', toolName: 'signal', input: { outcome, summary } }] }])

@@ -1,8 +1,9 @@
 import { describe, expect, it } from 'bun:test'
-import { LINK_KIND, MEMORY_ACCESS, MemoryNoteInput, NOTE_KIND, slugId, type EventRecord, type MemoryNoteDraft, type MemoryStore } from '@orc/contracts'
+import { LINK_KIND, MEMORY_ACCESS, MemoryNoteInput, NOTE_KIND, slugId, type EventRecord, type MemoryAuthor, type MemoryNoteDraft, type MemoryStore } from '@orc/contracts'
 import { eventFixture } from '@orc/contracts/fixtures'
 import type { EventLog } from '@orc/kernel'
-import { AREA_ROOT, CONSOLIDATED_TAG, areaOf, consolidateTask, consolidatedNote, consolidatedNotes, isPlanChild, isSubstantive } from './consolidate'
+import { TEST_WORKSPACE_ID } from '@orc/kernel/test-helpers'
+import { AREA_ROOT, CONSOLIDATED_TAG, areaOf, consolidateTask, CONSOLIDATE_EXECUTOR, consolidatedNote, consolidatedNotes, isPlanChild, isSubstantive } from './consolidate'
 
 describe('consolidatedNote', () => {
   it('promotes step outcomes into one durable project note, linked derived_from what the task read', () => {
@@ -154,6 +155,10 @@ describe('isSubstantive', () => {
   })
 })
 
+// The author the composition root hands in (runtime.ts / `orc memory consolidate`): 'agent' named
+// through `executor`, stamped with the workspace it writes from. The plugin builds none of its own.
+const CONSOLIDATE_AUTHOR: MemoryAuthor = { source: 'agent', workspaceId: TEST_WORKSPACE_ID, executor: CONSOLIDATE_EXECUTOR }
+
 describe('consolidateTask provenance', () => {
   // Minimal fakes: consolidateTask reads three event slices off the log and one scoped note list off
   // the store. Nothing here mocks the code under test — the fakes ARE the two collaborators.
@@ -167,10 +172,10 @@ describe('consolidateTask provenance', () => {
   const created = (taskId: string, title: string): EventRecord =>
     eventFixture({
       taskId, kind: 'task_created',
-      payload: { task: { id: taskId, parentId: null, type: 'generic', title, spec: '', status: 'draft', zone: [], budgetUSD: null, depth: 0, createdAt: '2026-07-26T00:00:00.000Z' } },
+      payload: { task: { id: taskId, parentId: null, workspaceId: TEST_WORKSPACE_ID, type: 'generic', title, spec: '', status: 'draft', zone: [], budgetUSD: null, depth: 0, createdAt: '2026-07-26T00:00:00.000Z' } },
     })
   const accessed = (taskId: string, id: string, mode: string): EventRecord =>
-    eventFixture({ taskId, kind: 'memory_accessed', payload: { id, scope: 'project', mode, author: { source: 'agent', taskId } } })
+    eventFixture({ taskId, kind: 'memory_accessed', payload: { id, scope: 'project', mode, author: { source: 'agent', workspaceId: TEST_WORKSPACE_ID, taskId } } })
 
   const TASK = '11111111-1111-1111-1111-111111111111'
 
@@ -180,37 +185,40 @@ describe('consolidateTask provenance', () => {
   it('a preload access is provenance, exactly like a read', async () => {
     const written: MemoryNoteDraft[] = []
     const note = await consolidateTask(
-      { log: logOf([created(TASK, 'Explain heat'), accessed(TASK, 'area-memory', MEMORY_ACCESS.preload)]) as EventLog, store: storeOf(written) as MemoryStore },
+      { log: logOf([created(TASK, 'Explain heat'), accessed(TASK, 'area-memory', MEMORY_ACCESS.preload)]) as EventLog, store: storeOf(written) as MemoryStore, author: CONSOLIDATE_AUTHOR },
       TASK,
     )
     expect(note).not.toBeNull()
     expect(written[0]?.links).toEqual([{ id: 'area-memory', kind: LINK_KIND.derived_from }])
   })
 
-  // 'cli' is what a HUMAN at a terminal writes as — every packages/cli memory command passes it,
-  // and store.ts defaults to it. A consolidation is machine output, so claiming 'cli' made every
-  // outcome note in the vault read `createdBy: cli`, indistinguishable from one a person typed.
-  // That is corrosive exactly where it matters most: a knowledge base whose decisions are supposed
-  // to carry "a human approved this" cannot tell those apart from what the machine wrote itself.
-  it('is attributed to the machine, never to a person at a terminal', async () => {
+  // 'cli' is what a HUMAN at a terminal writes as — every packages/cli memory command passes it.
+  // A consolidation is machine output, so claiming 'cli' made every outcome note in the vault read
+  // `createdBy: cli`, indistinguishable from one a person typed. That is corrosive exactly where it
+  // matters most: a knowledge base whose decisions are supposed to carry "a human approved this"
+  // cannot tell those apart from what the machine wrote itself.
+  // The author is now the caller's, so what this pins is that it travels through UNCHANGED — a
+  // consolidation that rebuilt or defaulted an author here is what the old 'cli' stamp WAS.
+  it('writes as the author it was given, never one of its own making', async () => {
     const authors: unknown[] = []
     const store: Pick<MemoryStore, 'list' | 'write'> = {
       list: async () => [],
       write: async (note, author) => { authors.push(author); return note as never },
     }
     const note = await consolidateTask(
-      { log: logOf([created(TASK, 'Explain heat'), accessed(TASK, 'area-memory', MEMORY_ACCESS.preload)]) as EventLog, store: store as MemoryStore },
+      { log: logOf([created(TASK, 'Explain heat'), accessed(TASK, 'area-memory', MEMORY_ACCESS.preload)]) as EventLog, store: store as MemoryStore, author: CONSOLIDATE_AUTHOR },
       TASK,
     )
     expect(note).not.toBeNull()
-    expect(authors[0]).not.toEqual({ source: 'cli' })
+    expect(authors[0]).toEqual(CONSOLIDATE_AUTHOR)
+    expect(authors[0]).not.toEqual({ source: 'cli', workspaceId: TEST_WORKSPACE_ID })
   })
 
   it('an access belonging to a DIFFERENT task is not this task\'s provenance', async () => {
     const written: MemoryNoteDraft[] = []
     const other = '22222222-2222-2222-2222-222222222222'
     const note = await consolidateTask(
-      { log: logOf([created(TASK, 'Explain heat'), accessed(other, 'area-memory', MEMORY_ACCESS.preload)]) as EventLog, store: storeOf(written) as MemoryStore },
+      { log: logOf([created(TASK, 'Explain heat'), accessed(other, 'area-memory', MEMORY_ACCESS.preload)]) as EventLog, store: storeOf(written) as MemoryStore, author: CONSOLIDATE_AUTHOR },
       TASK,
     )
     // no provenance and no second step -> the salience gate declines, nothing is written
@@ -233,7 +241,7 @@ describe('consolidateTask provenance', () => {
           wrote(TASK, 'fs_write', 'plugins/memory/src/tools.ts'),
           wrote(TASK, 'fs_edit', 'plugins/memory/src/tools.ts'), // dup path folds to one
           wrote('33333333-3333-3333-3333-333333333333', 'fs_write', 'packages/cli/src/main.ts'), // other task's write is not ours
-        ]) as EventLog, store: storeOf(written) as MemoryStore },
+        ]) as EventLog, store: storeOf(written) as MemoryStore, author: CONSOLIDATE_AUTHOR },
       TASK,
     )
     expect(written.length).toBe(1)
@@ -244,7 +252,7 @@ describe('consolidateTask provenance', () => {
     const written: MemoryNoteDraft[] = []
     const child = `${TASK}.plan.toolu_01xyz`
     const note = await consolidateTask(
-      { log: logOf([created(child, 'Author the plan'), accessed(child, 'area-memory', MEMORY_ACCESS.read)]) as EventLog, store: storeOf(written) as MemoryStore },
+      { log: logOf([created(child, 'Author the plan'), accessed(child, 'area-memory', MEMORY_ACCESS.read)]) as EventLog, store: storeOf(written) as MemoryStore, author: CONSOLIDATE_AUTHOR },
       child,
     )
     expect(note).toBeNull()

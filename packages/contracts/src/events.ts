@@ -8,6 +8,7 @@ import { MemoryAccessedPayload, MemoryDeletedPayload, MemoryOutcomePayload, Memo
 import { MemoryTopicAccessedPayload } from './cluster'
 import { SHA256_HEX_RE } from './ids'
 import { AnalysisCompletedPayload, FeedbackProvidedPayload, FeedbackRequestedPayload, PlanAnnotatedPayload } from './analysis'
+import { WorkspaceArchivedPayload, WorkspaceCreatedPayload, WorkspaceMergedPayload, WorkspaceRetitledPayload } from './workspace-entity'
 
 // typed so folds can parse receipts without casts
 export const ArtifactProducedPayload = z.object({
@@ -187,6 +188,10 @@ export const PAYLOAD_SCHEMAS = {
   copilot_exchange: CopilotExchangePayload,
   reaction_failed: ReactionFailedPayload,
   commit_recorded: CommitRecordedPayload,
+  workspace_created: WorkspaceCreatedPayload,
+  workspace_retitled: WorkspaceRetitledPayload,
+  workspace_archived: WorkspaceArchivedPayload,
+  workspace_merged: WorkspaceMergedPayload,
 } satisfies Record<EventKind, z.ZodType>
 
 export const EventInput = z.object({

@@ -1,10 +1,11 @@
 import { describe, expect, it } from 'bun:test'
 import { EVENT_KIND, FAILURE_CLASS, STEP_RUN_STATUS, TASK_STATUS, type EventRecord, type Plan, type TaskNode } from '@orc/contracts'
 import { eventFixture, draftFixture, planFixture, stepFixture } from '@orc/contracts/fixtures'
+import { TEST_WORKSPACE_ID } from './test-helpers'
 import { blockingVerdicts, retryIsFutile, startedAttempts, type State, emptyFold, estimateCostUSD, fold, foldInto, subtreeOutcome, completedStepIds, nextAttempts, crashDedupKey, stepUsage, subtreeTaskIds, subtreeUsage, pendingSplitForChild, remainingBudget, inheritedCwd, runCwd, taskChangedPaths, taskNoteWrites, taskVerifiedNotes } from './projections'
 
 const task: TaskNode = {
-  id: 't1', parentId: null, type: 'generic', title: 'hello', spec: '',
+  id: 't1', parentId: null, workspaceId: TEST_WORKSPACE_ID, type: 'generic', title: 'hello', spec: '',
   status: 'draft', zone: [], budgetUSD: null, depth: 0,
   createdAt: '2026-07-16T00:00:00.000Z',
 }
@@ -22,7 +23,7 @@ describe('nextAttempts and an orphaned running step', () => {
   const plan = { steps: [{ id: 'a' }, { id: 'b' }] } as Parameters<typeof nextAttempts>[2]
   const stateWith = (status: string, stepStatus: string) => {
     const st = emptyFold().state
-    st.tasks.set('t1', { id: 't1', parentId: null, type: 'generic', title: 'T', spec: '', status, zone: [], budgetUSD: null, depth: 0, createdAt: '2026-07-27T00:00:00.000Z' } as never)
+    st.tasks.set('t1', { id: 't1', parentId: null, workspaceId: TEST_WORKSPACE_ID, type: 'generic', title: 'T', spec: '', status, zone: [], budgetUSD: null, depth: 0, createdAt: '2026-07-27T00:00:00.000Z' } as never)
     st.steps.set('t1', new Map([['a', { status: stepStatus, attempt: 2 } as never]]))
     return st
   }
@@ -190,7 +191,7 @@ describe('fold — execution kinds', () => {
     const withMem = fold([{
       seq: 1, projectId: 'p1', idempotencyKey: null, taskId: null, stepId: null, runToken: null,
       kind: 'memory_written',
-      payload: { note: { id: 'x', title: 'X', scope: 'project', categories: [], tags: [], links: [], paths: [], summary: '', body: '' }, author: { source: 'cli' } },
+      payload: { note: { id: 'x', title: 'X', scope: 'project', categories: [], tags: [], links: [], paths: [], summary: '', body: '' }, author: { source: 'cli', workspaceId: TEST_WORKSPACE_ID } },
       usage: null, ts: '2026-07-18T00:00:00Z',
     }])
     expect(withMem.tasks.size).toBe(base.tasks.size)
@@ -266,7 +267,7 @@ describe('fold — execution kinds', () => {
   it('subtreeUsage sums a task and its descendants; subtreeTaskIds walks parentId', () => {
     const t = (id: string, parentId: string | null): EventRecord => ({
       seq: 0, projectId: 'p1', idempotencyKey: null, taskId: id, stepId: null, runToken: null, kind: 'task_created',
-      payload: { task: { id, parentId, type: 'generic', title: id, spec: '', status: 'draft', zone: [], budgetUSD: null, depth: parentId ? 1 : 0, createdAt: 'T' } },
+      payload: { task: { id, parentId, workspaceId: TEST_WORKSPACE_ID, type: 'generic', title: id, spec: '', status: 'draft', zone: [], budgetUSD: null, depth: parentId ? 1 : 0, createdAt: 'T' } },
       usage: null, ts: 'T',
     })
     const usage = (taskId: string, cost: number): EventRecord => ({
@@ -283,7 +284,7 @@ describe('fold — execution kinds', () => {
   it("remainingBudget is the min over the ancestor chain, not just the task's own budget", () => {
     const t = (id: string, parentId: string | null, budgetUSD: number | null): EventRecord => ({
       seq: 0, projectId: 'p1', idempotencyKey: null, taskId: id, stepId: null, runToken: null, kind: 'task_created',
-      payload: { task: { id, parentId, type: 'generic', title: id, spec: '', status: 'draft', zone: [], budgetUSD, depth: parentId ? 1 : 0, createdAt: 'T' } },
+      payload: { task: { id, parentId, workspaceId: TEST_WORKSPACE_ID, type: 'generic', title: id, spec: '', status: 'draft', zone: [], budgetUSD, depth: parentId ? 1 : 0, createdAt: 'T' } },
       usage: null, ts: 'T',
     })
     const usage = (taskId: string, cost: number): EventRecord => ({
@@ -559,14 +560,14 @@ describe('taskChangedPaths', () => {
 
 const write = (seq: number, note: Record<string, unknown>, taskId: string | undefined): EventRecord =>
   eventFixture({ seq, ts: 'T', kind: 'memory_written',
-    payload: { note, author: { source: 'agent', ...(taskId ? { taskId } : {}) } } })
+    payload: { note, author: { source: 'agent', workspaceId: TEST_WORKSPACE_ID, ...(taskId ? { taskId } : {}) } } })
 const del = (seq: number, id: string, scope = 'project'): EventRecord =>
   eventFixture({ seq, ts: 'T', kind: 'memory_deleted',
-    payload: { id, scope, author: { source: 'cli' } } })
+    payload: { id, scope, author: { source: 'cli', workspaceId: TEST_WORKSPACE_ID } } })
 const verified = (seq: number, id: string, taskId: string | undefined, scope = 'project', revision = 'head1'): EventRecord =>
   eventFixture({ seq, ts: 'T', kind: 'memory_verified',
     payload: { id, scope, stamp: { revision, at: 'T', by: 'exec·m·auditor' },
-      author: { source: 'agent', ...(taskId ? { taskId } : {}) } } })
+      author: { source: 'agent', workspaceId: TEST_WORKSPACE_ID, ...(taskId ? { taskId } : {}) } } })
 const semantic = (id: string, paths: string[]): Record<string, unknown> =>
   ({ id, scope: 'project', title: id, tier: 'semantic', paths })
 const subtree = new Set(['t1', 't1.c1'])

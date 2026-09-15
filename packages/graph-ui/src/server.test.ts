@@ -2,7 +2,7 @@ import { afterAll, describe, expect, it } from 'bun:test'
 import { z } from 'zod'
 import { EVENT_KIND } from '@orc/contracts'
 import { Kernel, openStorage } from '@orc/kernel'
-import { createTestDb, TEST_PROJECT_ID } from '@orc/kernel/test-helpers'
+import { createTestDb, seedTestWorkspace, TEST_PROJECT_ID, TEST_WORKSPACE_ID } from '@orc/kernel/test-helpers'
 import { MockLanguageModelV4 } from 'ai/test'
 import { noteNodeId, type OrcActions } from '@orc/ui-core'
 import { startGraphUi } from './server'
@@ -24,7 +24,7 @@ afterAll(async () => {
 
 const noteEvent = (id: string) => ({
   taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_written,
-  payload: { note: { id, title: id }, author: { source: 'cli' as const } },
+  payload: { note: { id, title: id }, author: { source: 'cli' as const, workspaceId: TEST_WORKSPACE_ID } },
 })
 
 // Asserted subsets of the SSE stream contract (ui-core StreamEnvelope) — runtime-parsed
@@ -69,6 +69,7 @@ function stubActions(over: Partial<OrcActions>): OrcActions {
     retry: unsupported('retry'), annotate: unsupported('annotate'), revise: unsupported('revise'),
     writeNote: unsupported('writeNote'), deleteNote: unsupported('deleteNote'),
     renameProject: unsupported('renameProject'), newProject: unsupported('newProject'),
+    listWorkspaces: unsupported('listWorkspaces'), newWorkspace: unsupported('newWorkspace'),
     cancel: unsupported('cancel'), purgeProject: unsupported('purgeProject'),
     deleteProject: unsupported('deleteProject'),
     ...over,
@@ -80,7 +81,9 @@ async function setup() {
   dbs.push(db)
   const storage = await openStorage(db.url, { projectId: TEST_PROJECT_ID })
   openStores.push(storage)
-  const t = await new Kernel(storage.events).createTask({ title: 'seed task', spec: '' })
+  // a task must name a workspace the fold has seen — one seeded record, then tasks as before
+  await seedTestWorkspace(storage.events)
+  const t = await new Kernel(storage.events).createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'seed task', spec: '' })
   const ui = startGraphUi({ url: db.url, port: 0, cwdProject: { id: TEST_PROJECT_ID, name: 'test-proj' } })
   openServers.push(ui)
   const base = `http://127.0.0.1:${ui.port}`
@@ -168,7 +171,7 @@ describe('graph-ui web adapter', () => {
     const accessed = await fetch(`${base}/api/stream?project=${TEST_PROJECT_ID}&fromSeq=${appended.seq}`)
     await storage.events.append({
       taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_accessed,
-      payload: { id: 'live-note', scope: 'project', mode: 'read', author: { source: 'cli' } },
+      payload: { id: 'live-note', scope: 'project', mode: 'read', author: { source: 'cli', workspaceId: TEST_WORKSPACE_ID } },
     })
     const heated = await readSse(accessed, m => m.data.includes('memory_accessed'))
     const heatedEnv = HeatEnvelope.parse(JSON.parse(heated!.data))
@@ -337,7 +340,9 @@ describe('graph-ui web adapter', () => {
     dbs.push(db)
     const storage = await openStorage(db.url, { projectId: TEST_PROJECT_ID })
     openStores.push(storage)
-    await new Kernel(storage.events).createTask({ title: 'doomed', spec: '' })
+    // a task must name a workspace the fold has seen — one seeded record, then tasks as before
+    await seedTestWorkspace(storage.events)
+    await new Kernel(storage.events).createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'doomed', spec: '' })
     const actions = stubActions({
       purgeProject: async () => ({ ...(await storage.purge()), warnings: [] }),
     })
@@ -369,7 +374,9 @@ describe('graph-ui web adapter', () => {
     dbs.push(db)
     const storage = await openStorage(db.url, { projectId: TEST_PROJECT_ID })
     openStores.push(storage)
-    await new Kernel(storage.events).createTask({ title: 'seed', spec: '' })
+    // a task must name a workspace the fold has seen — one seeded record, then tasks as before
+    await seedTestWorkspace(storage.events)
+    await new Kernel(storage.events).createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'seed', spec: '' })
     // provider-level scripted stream (shapes from @ai-sdk/provider LanguageModelV4StreamPart)
     const model = new MockLanguageModelV4({
       doStream: async () => ({

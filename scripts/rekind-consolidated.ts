@@ -18,7 +18,8 @@
 // append, merge-on-omit carries every unrestated field forward untouched, and every prior revision
 // stays in the event log. Modelled on plugins/memory/src/restamp.ts, the established shape for a
 // bulk re-write through the store gateway.
-import { loadConfig, openStorage, requireProject } from '../packages/kernel/src/index'
+import { Kernel, loadConfig, openStorage, requireProject } from '../packages/kernel/src/index'
+import { cwdAuthor } from '../packages/cli/src/cwd-workspace'
 import { createMemory } from '../plugins/memory/src/index'
 import { CONSOLIDATED_TAG } from '../plugins/memory/src/consolidate'
 import { AUTHOR_SOURCE, NOTE_KIND } from '../packages/contracts/src/index'
@@ -46,8 +47,11 @@ try {
     } else {
       // id + scope + kind ONLY. Every other field is omitted so the store gateway's merge-on-omit
       // carries the stored value forward; naming them would risk writing back a stale copy.
+      // The workspace this script is being run from, resolved ONCE: a bulk re-write is still a
+      // write, and MemoryAuthor.workspaceId has no default to fall back on.
+      const author = await cwdAuthor(new Kernel(storage.events), config.dir, AUTHOR_SOURCE.cli)
       for (const n of stale)
-        await memory.store.write({ id: n.id, scope: n.scope, kind: NOTE_KIND.outcome }, { source: AUTHOR_SOURCE.cli })
+        await memory.store.write({ id: n.id, scope: n.scope, kind: NOTE_KIND.outcome }, author)
       await memory.projector.catchUp()
       console.log(`re-kinded ${stale.length} note(s) to '${NOTE_KIND.outcome}'`)
     }

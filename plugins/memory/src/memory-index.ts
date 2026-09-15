@@ -5,6 +5,7 @@ import { mermaidLabel } from '@orc/contracts'
 import { frontmatter } from '@orc/vault-projector'
 import { SurrealMemory } from './surreal'
 import { noteRelPath, renderNoteFile } from './note-md'
+import type { WorkspaceView } from './provisional'
 import { writeMemoryFile } from './write-note'
 
 // Exported so a test can assert every NOTE_KINDS member is placed: a kind missing here still
@@ -79,12 +80,15 @@ export function renderMemoryIndex(notes: MemoryNote[]): string {
 
 // Replace vault/memory/** from current Surreal state: manually deleted files reappear,
 // stale files disappear, and index.md always reflects the live graph. Vault is never truth.
-export async function rebuildVaultMemory(surreal: SurrealMemory, vaultDir: string): Promise<void> {
+// `view` is the workspace standing the rendered files carry `provisional` from — resolved by the
+// CALLER and passed as a snapshot, so the whole-corpus render below folds the workspace table once
+// rather than once per note.
+export async function rebuildVaultMemory(surreal: SurrealMemory, vaultDir: string, view?: WorkspaceView): Promise<void> {
   const notes = await surreal.allNotes()
   const root = path.join(vaultDir, 'memory')
   const expected = new Set([...notes.map(n => noteRelPath(n)), 'index.md'])
   for (const rel of listFiles(root)) if (!expected.has(rel)) rmSync(path.join(root, rel), { force: true })
-  for (const n of notes) writeMemoryFile(vaultDir, noteRelPath(n), renderNoteFile(n))
+  for (const n of notes) writeMemoryFile(vaultDir, noteRelPath(n), renderNoteFile(n, view))
   writeMemoryFile(vaultDir, 'index.md', renderMemoryIndex(notes))
 }
 

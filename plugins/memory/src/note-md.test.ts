@@ -74,6 +74,18 @@ describe('renderNoteFile', () => {
     expect(md).not.toContain('## Depends on')
   })
 
+  // The vault is the human read surface, so it owes the same standing the tools report: a note
+  // still living in an unmerged checkout is not yet project knowledge, and a file that says nothing
+  // reads as if it were.
+  it('names the workspace a note is still pending in, and says nothing once it is trunk knowledge', () => {
+    const pending = note({ id: 'auth-token-refresh', workspaceId: 'w1' })
+    const view = { workspaces: new Map([['w1', { onTrunk: false, title: 'Requests rework' }]]), merged: new Set<string>() }
+    expect(renderNoteFile(pending, view)).toContain('provisional: w1')
+    expect(renderNoteFile(pending, { ...view, merged: new Set(['w1']) })).not.toContain('provisional:')
+    // no view bound (a render path with no log to fold) claims nothing either way
+    expect(renderNoteFile(pending)).not.toContain('provisional:')
+  })
+
   it('renders citations with their retrieval time, and no empty section when uncited', () => {
     const cited = renderNoteFile(note({
       id: 'finding', kind: 'research',

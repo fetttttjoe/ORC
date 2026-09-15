@@ -12,7 +12,7 @@ import { createMemory } from '@orc/memory'
 import { createTestSurreal } from '@orc/memory/test-helpers'
 import { openStorage } from '../storage'
 import { Kernel } from '../kernel'
-import { createTestDb, testConfig, TEST_PROJECT_ID } from '../test-helpers'
+import { createTestDb, seedTestWorkspace, TEST_PROJECT_ID, TEST_WORKSPACE_ID, testConfig } from '../test-helpers'
 import { SkillIndex } from '../plugins/skills'
 import { createDbosPort } from './dbos-port'
 
@@ -41,6 +41,8 @@ describe('sourced web research through a durable run (integration)', () => {
     const storage = await openStorage(pg.url, { projectId: TEST_PROJECT_ID })
     const log = storage.events
     const kernel = new Kernel(log)
+    // a task must name a workspace the fold has seen — one seeded record, then tasks as before
+    await seedTestWorkspace(log)
     const config = testConfig(pg.url, {
       vaultDir,
       projectDbUrl: ts.url, projectDbNamespace: ts.ns, projectDbName: ts.db,
@@ -73,13 +75,13 @@ describe('sourced web research through a durable run (integration)', () => {
       providers: new Map([['fake', { costs: {}, languageModel: () => model }]]),
       executors: new Map([['api-loop', apiLoopExecutor()]]),
       skills, tools: hub,
-      stepTools: p => memory.bindStep({ author: { source: 'agent', taskId: p.taskId, stepId: p.stepId, runToken: p.runToken, executor: p.executor, model: p.model, role: p.role }, step: p.step, taskId: p.taskId, ancestorTaskIds: p.ancestorTaskIds }),
+      stepTools: p => memory.bindStep({ author: { source: 'agent', workspaceId: p.workspaceId, taskId: p.taskId, stepId: p.stepId, runToken: p.runToken, executor: p.executor, model: p.model, role: p.role }, step: p.step, taskId: p.taskId, ancestorTaskIds: p.ancestorTaskIds }),
     })
     await port.launch()
     cleanup.push(() => port.shutdown())
     cleanup.push(() => log.close())
 
-    const t = await kernel.createTask({ title: 'research pg16', spec: 'what shipped in postgres 16' })
+    const t = await kernel.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'research pg16', spec: 'what shipped in postgres 16' })
     await kernel.proposePlan(t.id, draftFixture([stepFixture({
       modelRef: 'fake/m', skillRefs: ['web-research'], toolRefs: ['fixture/echo'],
     })]))

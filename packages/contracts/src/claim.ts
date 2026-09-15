@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto'
 import { z } from 'zod'
 import { MEMORY_LIMITS } from './limits'
+import { ProvisionalFlag } from './workspace-entity'
 
 // A claim's id IS its statement. A positional index would shift the moment a claim is invalidated —
 // which the temporal model makes routine — so identity is content-derived: stable without counter
@@ -83,6 +84,12 @@ export const ClaimHit = z.object({
   // be checked against the tree), which joinClaimOwners already has in hand.
   sourceRevision: z.string().nullable(),
   paths: z.array(z.string()),
+  // The owner's workspace and the flag derived from it, carried for exactly the reason the drift
+  // inputs above are: claims take the search budget FIRST, so at a default budget most of what a
+  // reader is handed is claims — flagging only the notes arm would leave the majority of the reply
+  // reading as trunk knowledge while it is still pending in a worktree.
+  workspaceId: z.string(),
+  provisional: ProvisionalFlag.optional(),
 })
 export type ClaimHit = z.infer<typeof ClaimHit>
 

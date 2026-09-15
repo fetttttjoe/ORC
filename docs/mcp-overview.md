@@ -1,6 +1,6 @@
 # How MCP works in this repo
 
-The repo does MCP in **both directions**. `orc mcp serve` (an MCP client such as Claude Code connects to it over stdio) exposes the orchestrator itself as a stdio MCP server with up to **18 tools** — everything reads/writes one append-only Postgres event log. Separately, `plugins/mcp-client` lets agents running *inside* plans call out to external MCP servers declared in `.orc/config.json`.
+The repo does MCP in **both directions**. `orc mcp serve` (an MCP client such as Claude Code connects to it over stdio) exposes the orchestrator itself as a stdio MCP server with up to **22 tools** — everything reads/writes one append-only Postgres event log. Separately, `plugins/mcp-client` lets agents running *inside* plans call out to external MCP servers declared in `.orc/config.json`.
 
 ## Direction 1: `orc` as an MCP server ("door #2")
 
@@ -12,8 +12,8 @@ flowchart TB
     subgraph serve["orc mcp serve — packages/cli/src/mcp-serve.ts"]
         SRV["MCP Server 'orc'<br/>capabilities: tools only"]
         SRV --> REG["buildServeTools()"]
-        REG --> COP["copilot tools<br/>ui-core buildCopilotTools<br/>5 read + 8 mutate"]
-        REG --> MEM["memory read slice<br/>MEMORY_READ_TOOLS: 4 tools"]
+        REG --> COP["copilot tools<br/>ui-core buildCopilotTools<br/>6 read + 10 mutate"]
+        REG --> MEM["memory read slice<br/>MEMORY_READ_TOOLS: 5 tools"]
         REG --> APPR["approve<br/>--autonomy gated: refuses<br/>--autonomy full: approvedBy=mcp"]
     end
 
@@ -32,11 +32,12 @@ flowchart TB
 
 How a call flows: the client sends `tools/call` over stdio → the handler looks the tool up in a `Map` → the tool either reads a **fold of the event log** (via `createProjectSessions`, which replays all events into State + Graph and refolds live) or appends new events through `OrcActions`/the kernel. Nothing reads domain tables directly — the event log is the single source of truth; SurrealDB and the vault markdown are downstream projections.
 
-## The tools it exposes (18 max)
+## The tools it exposes (22 max)
 
 | Group | Tool | What it does |
 |---|---|---|
-| **Read** (always) | `project_status` | Every task + status, graph node counts |
+| **Read** (always) | `available_models` | Every usable model ref, fetched live from the providers — call it before choosing one |
+| | `project_status` | Every task + status, the workspaces (checkouts) they are worked in with each one's health, graph node counts, memory read-model health |
 | | `task_plan` | Plan versions, steps, which version is approved |
 | | `task_transcript` | Last 30 items of a task's agent conversation |
 | | `plan_notes` | Grounded decomposition notes (subplans, uncertainty, links) |
@@ -46,12 +47,14 @@ How a call flows: the client sends `tools/call` over stdio → the handler looks
 | | `memory_neighbors` | Typed-link graph walk from a seed note, ranked by weight × confidence × depth-decay |
 | | `memory_topics` | Derived topics over project knowledge; list them, or pass a topicKey to read its claims |
 | | `memory_recheck` | The authoritative corpus drift verdict: exact counts plus the drifted/unknown note lists — the heal-sweep worklist |
-| **Mutate** (only when actions ≠ null) | `new_request` | Create a task; `grounded` triggers repo analysis + decomposition |
+| **Mutate** (only when actions ≠ null) | `new_request` | Create a task; `grounded` triggers repo analysis + decomposition; `workspaceId` picks the checkout, defaulting to the one this server runs in |
 | | `propose` | Propose a single-step plan for a draft task |
-| | `run` | Start the approved plan in a cwd |
+| | `run` | Start the approved plan in the task's workspace, or in an explicit `cwd` |
 | | `reply` | Answer a task's open feedback question |
 | | `retry` / `cancel` | Retry a failed run / terminally cancel |
 | | `annotate` / `revise` | Feedback on one plan-note / wake the plan agent to revise scoped notes |
+| | `workspace_list` | The project's active workspaces, each with its health (state `dangling`/`waiting`/`active`/`idle`/`merged`, last activity, task counts, notes still pending a merge), attention-first — read-only, but served only with the mutating door |
+| | `workspace_new` | A git worktree + branch for ONE request under `.orc/worktrees`, recorded as a workspace, with the request as its first task |
 | **Gate** | `approve` | The one tool the two doors differ on — see below |
 
 Key behaviors:
@@ -86,4 +89,4 @@ Plan steps declare `toolRefs` like `"server-id/tool-name"`; plan validation reje
 
 ## Tool count
 
-The server Claude Code connects to: **9 tools read-only, 18 with actions wired** (5 copilot read + 8 mutate + 4 memory read + `approve`).
+The server Claude Code connects to: **11 tools read-only, 22 with actions wired** (6 copilot read + 10 mutate + 5 memory read + `approve`).

@@ -16,9 +16,9 @@ import { z } from 'zod'
 import { Server } from '@modelcontextprotocol/sdk/server/index.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js'
-import { AUTHOR_SOURCE, errorMessage, toolError, type ResolvedTool, type SupervisorHealth } from '@orc/contracts'
+import { errorMessage, toolError, type MemoryAuthor, type ResolvedTool, type SupervisorHealth } from '@orc/contracts'
 import type { EventLog, ProjectConfig } from '@orc/kernel'
-import { MEMORY_READ_TOOLS, MEMORY_ROLE, createDriftProbe, createMemory, memoryTools as buildMemoryTools, probeMemory, unavailableMemoryTools } from '@orc/memory'
+import { MEMORY_READ_TOOLS, MEMORY_ROLE, createDriftProbe, createMemory, createWorkspaceView, memoryTools as buildMemoryTools, probeMemory, unavailableMemoryTools } from '@orc/memory'
 import { openMemory } from './memory-open'
 import { asResolvedTools, buildCopilotTools, createProjectSessions, type OrcActions } from '@orc/ui-core'
 
@@ -72,6 +72,7 @@ export function buildServeTools(deps: {
   actions: OrcActions | null
   autonomy: Autonomy
   health?: Parameters<typeof buildCopilotTools>[0]['health']
+  listWorkspaces?: Parameters<typeof buildCopilotTools>[0]['listWorkspaces']
 }): ResolvedTool[] {
   return [
     // one tool definition, two doors: the copilot set (read + mutate-without-approve, P2).
@@ -81,11 +82,18 @@ export function buildServeTools(deps: {
       sessions: deps.sessions, actions: deps.actions, projectId: deps.projectId,
       listModels: () => deps.sessions.modelCatalog(deps.projectId),
       ...(deps.health && { health: deps.health }),
+      ...(deps.listWorkspaces && { listWorkspaces: deps.listWorkspaces }),
     })),
     ...deps.memoryTools.filter(t => READ_MEMORY.has(t.name)),
     ...(deps.actions ? [mcpApproveTool(deps.actions, deps.autonomy)] : []),
   ]
 }
+
+// The `executor` this door stamps on a memory write. composeAuthor renders it verbatim as the
+// note's createdBy, and the author itself is built by main.ts (which holds the kernel), so the name
+// has to be shared rather than spelled at both ends. 'mcp' the AuthorSource is reserved for the
+// human-attribution question (who approved), which is a different question from which door wrote.
+export const MCP_SERVE_EXECUTOR = 'mcp-serve'
 
 export async function startMcpServe(opts: {
   config: ProjectConfig
@@ -95,8 +103,18 @@ export async function startMcpServe(opts: {
   // "is anything driving?" for project_status — injected because the heartbeat table and pid
   // file live behind the caller's storage; absent = the field is omitted, never fabricated
   supervisor?: () => Promise<SupervisorHealth>
+  // "which checkout is this task in, and is it still going anywhere?" for project_status —
+  // injected for the same reason supervisor is: this module holds a log and a sessions store,
+  // never a kernel, and the health half also needs a filesystem probe and the note read model.
+  // Typed off buildCopilotTools so this door and the console cannot drift on the shape.
+  listWorkspaces?: Parameters<typeof buildCopilotTools>[0]['listWorkspaces']
+  // Who a memory write through THIS door is recorded as. Injected, not built here, for the same
+  // reason listWorkspaces is: MemoryAuthor.workspaceId is answered by folding the workspace table,
+  // and this module holds no kernel to fold it with. REQUIRED — a door that cannot say which
+  // checkout it writes from must not open, rather than file notes under a guess.
+  memoryAuthor: MemoryAuthor
 }): Promise<void> {
-  const { config, log, actions, autonomy, supervisor } = opts
+  const { config, log, actions, autonomy, supervisor, listWorkspaces, memoryAuthor } = opts
 
   // stdout hardening layer 2: the transport keeps the real stdout; everything else — winston
   // when DBOS boots for run/retry/cancel, any stray library print — lands on stderr.
@@ -122,9 +140,15 @@ export async function startMcpServe(opts: {
     // first live probe of memory_recheck). One probe per process; it caches per revision.
     memoryTools = buildMemoryTools({
       store: memory.store,
-      author: { source: AUTHOR_SOURCE.agent, executor: 'mcp-serve' },
+      author: memoryAuthor,
       role: MEMORY_ROLE.verify,
       changedSince: createDriftProbe(config.dir),
+      // The `provisional` flag's input, bound here for the same reason changedSince is: this door
+      // builds its own read tools rather than taking createMemory's, so a dep left off here is a
+      // flag that silently never fires — which is how memory_recheck shipped through this door
+      // reporting "135 uncheckable" while the CLI saw the real list. From the LOG, not from the
+      // kernel this module does not hold.
+      workspaceView: createWorkspaceView(log),
     })
   } catch (err) {
     memoryTools = unavailableMemoryTools(errorMessage(err))
@@ -133,6 +157,7 @@ export async function startMcpServe(opts: {
   // project must be able to see "the read model is rebuilding" without opening the databases
   const tools = buildServeTools({
     sessions, projectId: config.projectId, memoryTools, actions, autonomy,
+    ...(listWorkspaces && { listWorkspaces }),
     health: async () => ({
       memory: await probeMemory(config, log),
       ...(supervisor && { supervisor: await supervisor() }),

@@ -72,6 +72,7 @@ const actionsStub = (over: Partial<OrcActions> = {}): OrcActions => ({
   retry: unsupported('retry'), annotate: unsupported('annotate'), revise: unsupported('revise'),
   writeNote: unsupported('writeNote'), deleteNote: unsupported('deleteNote'),
   renameProject: unsupported('renameProject'), newProject: unsupported('newProject'),
+  listWorkspaces: unsupported('listWorkspaces'), newWorkspace: unsupported('newWorkspace'),
   cancel: unsupported('cancel'), purgeProject: unsupported('purgeProject'), deleteProject: unsupported('deleteProject'), ...over,
 })
 
@@ -130,7 +131,8 @@ describe('orc mcp serve (stdio, read slice)', () => {
 
     const names = toolNames(parsed.find(p => p.id === 2)!.result)
     for (const expected of ['project_status', 'task_plan', 'task_transcript', 'recent_activity',
-      'memory_search', 'memory_read', 'memory_neighbors', 'memory_topics', 'memory_recheck', 'new_request', 'propose', 'run', 'retry', 'cancel', 'approve', 'available_models'])
+      'memory_search', 'memory_read', 'memory_neighbors', 'memory_topics', 'memory_recheck', 'new_request', 'propose', 'run', 'retry', 'cancel', 'approve', 'available_models',
+      'workspace_list', 'workspace_new'])
       expect(names).toContain(expected)
     expect(names).not.toContain('memory_write') // agents inside plans write; the driver does not
 

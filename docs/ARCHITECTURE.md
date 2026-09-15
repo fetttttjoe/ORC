@@ -66,6 +66,14 @@ fact. `orc memory rebuild` and `orc vault rebuild` exist to prove it.
 contain — the git working tree. That is why drift can move without any event being appended, and
 why a repo edited outside orc accumulates staleness no projection can repair on its own.
 
+**Workspaces enter the log as project-level facts.** `workspace_created`, `workspace_retitled`,
+`workspace_archived` and `workspace_merged` carry `taskId: null` — they are about a checkout, not
+about any one task. Every boot **adopts** the checkout it runs in: before any command handler runs,
+a directory the fold has not seen yet gets its `workspace_created`, so a checkout joins the tree by
+being used and nothing is registered by hand. Everything downstream reads that fold — the `cwd` a
+run is recorded with, the workspace a write names as its author, the grouping `orc tasks` prints,
+each workspace's health, and whether a note reads as provisional.
+
 **The one loop that closes.** `tools → agent → store → log → surreal → drift → tools` is the
 self-healing cycle: a reader is told a note is stale, corrects it under the same id, and the write
 re-stamps it current. Every other path is one-way.
@@ -115,6 +123,11 @@ graph TD
     BIN["bin.ts<br/>help/init/migrate bootstrap + cleanup"]
     MAIN["main.ts<br/>commands (buildProgram)"]
     RUNTIME["runtime.ts<br/>startup order, degraded mode"]
+    WSCMD["ws-commands.ts<br/>orc ws surface: option parsing + rendering"]
+    WSOPS["workspace-ops.ts<br/>lifecycle ops (create/merge/finalize/archive)<br/>result values, no printing — both doors call it"]
+    ADOPT["workspace-adopt.ts<br/>adoptCwd + resolveTrunk (every boot)"]
+    CWDW["cwd-workspace.ts<br/>which workspace a write comes from"]
+    WSH["workspace-health.ts<br/>fold + disk/git/note probes"]
   end
 
   subgraph CONTRACTS ["packages/contracts — the seam layer"]
@@ -122,6 +135,7 @@ graph TD
     OPS_C["operations.ts<br/>OperationSpec/Record, transitions"]
     EXEC_C["execution.ts<br/>ExecutorContext, Checkpoint, Signal"]
     WS["workspace.ts<br/>resolveInWorkspace guard"]
+    WSE["workspace-entity.ts<br/>Workspace record, merge payload, provisional flag"]
     MEM_C["memory.ts · claim.ts · cluster.ts<br/>note tiers/kinds, claims, topics, store interface"]
   end
 
@@ -134,7 +148,10 @@ graph TD
     end
     REDACT["redact.ts<br/>storage-boundary normalizer"]
     FOLD["projections.ts<br/>fold, applyOperationEvent"]
-    KAPI["kernel.ts<br/>task/plan + feedback/approval API"]
+    WSK["workspaces.ts<br/>cwd key, transitions, health states"]
+    FBOPEN["feedback-open.ts<br/>pure rule: which questions are still open"]
+    GIT["git.ts<br/>worktree · branch · merge · trunk probes"]
+    KAPI["kernel.ts<br/>task/plan + feedback/approval + workspace API"]
     PORT["execution/dbos-port.ts<br/>durable workflows"]
     ART["execution/artifacts.ts<br/>verifyArtifacts receipts"]
     ROUTER["execution/signal-router.ts<br/>split + feedback delivery"]
@@ -166,7 +183,26 @@ graph TD
 
   BIN --> MAIN
   BIN --> RUNTIME
+  BIN --> ADOPT
   MAIN --> KAPI
+  MAIN --> WSCMD
+  MAIN --> CWDW
+  ADOPT --> KAPI
+  ADOPT --> GIT
+  CWDW --> KAPI
+  WSCMD --> WSOPS
+  WSCMD --> WSH
+  WSCMD --> CWDW
+  WSOPS --> KAPI
+  WSOPS --> GIT
+  WSOPS --> ADOPT
+  KAPI --> FBOPEN
+  WSK --> FBOPEN
+  WSH --> WSK
+  WSH --> GIT
+  WSH --> MEMBIZ
+  KAPI --> WSK
+  FOLD --> WSK
   RUNTIME --> PORT
   RUNTIME --> VP
   RUNTIME --> MEMBIZ
@@ -396,6 +432,17 @@ edge, so the graph stays a graph of *our* knowledge. `retrievedAt` is stamped by
 from the canonical `memory_written` event timestamp — a writer cannot supply one, and a replay
 reproduces it exactly.
 
+Provenance travels on every memory event, in one shape. `MemoryAuthor` names the door (`agent` |
+`cli` | `mcp`), the **workspace the write came from**, and — for an agent — the task/step/run
+envelope plus executor, model and role; `composeAuthor` renders it into the note's
+`createdBy`/`updatedBy`. `workspaceId` is a **required** key, not an optional one: a note's
+provisional standing is derived from it, and a workspace can only be known at the moment of the
+write — recovered later it would have to be guessed from an envelope that is absent on a CLI write
+and wrong for a task that moved. An agent step names the workspace its **task** belongs to (which
+may be a different worktree from the one the supervisor was started in); every other door — CLI,
+MCP, the auto-heal reactor, post-task consolidation — names the checkout its process is running in,
+through one shared `cwdAuthor`, which throws rather than substituting a default.
+
 Access is a fact, not bookkeeping. `memory_accessed` is appended by the call sites that know a
 pull delivered something — `memory_read` on a hit, `memory_neighbors` against its seed, `orc
 memory cat` — and `hits`/`lastAccessedAt` project from those events like every other field, so
@@ -505,6 +552,23 @@ is tri-state, and each state means something a reader can act on:
 
 A note carrying **no** `sourceRevision` or **no** declared paths is uncheckable. It folds to `clean`
 (the fail-toward-not-drifted rule) but nothing was checked, so no surface may claim it is current.
+
+**Trust has a second dimension: `provisional`.** Currency asks whether a note is still true of the
+code; `provisional` asks whether it is trunk knowledge at all. The two ride the same rows and
+neither implies the other — a note can be `current: true` and provisional (checked against a working
+tree that has not merged), or final and drifted. It is **derived per read**, by `provisionalOf`
+(`plugins/memory/src/provisional.ts`, pure and import-free like `cluster.ts`) from the note's
+`workspaceId` and the workspace table's current standing, folded from the log's four workspace event
+kinds on the memory read path. Absent means final: written from a checkout that was `onTrunk`, or
+from a workspace whose `workspace_merged` is recorded. Present, it names the workspace
+(`{ workspaceId, title }`) so a reader can act on it rather than merely distrust the row, and
+`memory_search` / `memory_read` / `memory_neighbors` carry the same sentence telling a model what to
+do with it. Nothing stores the flag anywhere — that is exactly what lets one merge clear it across
+the whole corpus on the next read, with no sweep able to miss a note. A workspace the table does not
+know is deliberately **not** flagged: that is ignorance, not evidence. The single snapshot in the
+system is the vault file's `provisional: <workspaceId>` frontmatter key, stamped when the file is
+rendered: a merge re-renders nothing, so the file keeps saying `provisional` until that note is next
+written or the vault is rebuilt from the read model (projector start, `orc memory rebuild`).
 
 **Two independent stamps, fresher wins.** `sourceRevision` is set by the store on every write;
 `verified.revision` is set only by `memory_verify`, and by nothing else. A note whose code moved
@@ -697,7 +761,7 @@ Door discipline, stated precisely:
 
 | Component | Owns | Explicitly does NOT own |
 |---|---|---|
-| `contracts` | Zod schemas, event kinds + typed payloads, executor/port/store interfaces, the workspace containment guard | Any I/O, any storage, any policy |
+| `contracts` | Zod schemas, event kinds + typed payloads, executor/port/store interfaces, the step's workspace containment guard (`workspace.ts`), and the workspace record with its merge and provisional shapes (`workspace-entity.ts`) | Any I/O, any storage, any policy |
 | `kernel/storage/postgres` | The one Postgres owner: pool, project-scoped advisory lock (`withProjectLock`), redaction wiring, schema verification | Deciding *what* to store; the DBOS system database |
 | `kernel/storage/event-log` | Project-bound append (jsonb-shape → redact → validate → insert → notify, one locked transaction), idempotency keys, lossless subscribe with reconnect, scoped queries + `countAfter`, `latestNoteEvent` (one indexed row per note — migration 0004) | Deciding *what* to append (callers do), projections |
 | `kernel/storage/operation-journal` | Durable before/after nodes (begin/complete/fail), rebuild-from-log; transitions append through the `EventLog` in the same locked transaction | Model/tool specifics; the checkpoint machinery (that's the port) |
@@ -706,23 +770,47 @@ Door discipline, stated precisely:
 | `kernel/projections` | `fold(events) → State` as a reduce over `foldInto` (one event, one accumulator), `applyOperationEvent` (shared by live journal and rebuild), crash dedup | Persisting anything |
 | `kernel/live-state` | `openLiveState(log)` — a subscription-maintained `State` index, re-seeded when the log is truncated or replaced. Serves advisory reads (budget chain, "is anything running") | Reads that decide a write — those stay inside `log.transaction` |
 | `contracts/memory` folds | `foldMemory` / `foldMemoryInto` — every derivation over the memory stream (live notes, write times, node access, edge access) in ONE walk, batch or incremental. `bumpAccess` and `viaEdge` are the single increment and edge-canonicalization rules, applied by both the log fold and the Surreal projector | Deciding policy — `archive.ts`'s rule table and the graph do that |
-| `kernel/kernel.ts` | Atomic task/plan lifecycle, feedback outbox events, seq-bound human approval over the log | Execution |
+| `kernel/kernel.ts` | Atomic task/plan lifecycle, feedback outbox events, seq-bound human approval over the log, and the ONE writer of workspace records (adoption, `orc ws new`, retitle/archive, the merge fact) — including resolving a run's `cwd` from the task's workspace at `requestRun` | Execution; probing git or the filesystem (that is `git.ts` and the caller's) |
 | `kernel/dbos-port` | Durable run/step workflows, `ctx.checkpoint` and `ctx.operation` wrappers, retry policy, queue partitioning, cancellation cascade, output receipt commit | Model/tool specifics (executor's job), plan authoring |
 | `kernel/signal-router` | Resolving splits, starting approved children, and live/startup delivery of committed feedback | Composing plans, executing steps |
 | `kernel/plugins/*` | Registry + propose-time ref validation (`host`), fingerprint trust store (`trust`), SKILL.md indexing (`skills`), T2 extension loading | Runtime tool execution (that's the hub/executor) |
 | `plugins/executor-api-loop` | The model⇄tool loop, prompt assembly (incl. knowledge protocol + the recalled-context block), signal/output pre-flight, per-call operation journaling | Durability (delegates to ctx), trust, receipts, **what to remember** (delegates to `ctx.memory`) |
 | `plugins/memory` | Event-first note store (gateway stamps git revision, resolved lazily), transactional Surreal projection of notes + edges + `claim` rows, stateless topic derivation (`refreshTopics`, stage 3, driven from the drain and only by drains that touched claims), per-project database boundary, hybrid (vector⊕keyword) retrieval with activation re-ranking over both notes and claims, the `StepMemory` binding (recall/capture, ambient edges), consolidation lifecycle, tri-state drift probe, evidence-based archival + cancel-time sweep, `vault/memory/**` rebuild | Being authoritative — Surreal and vault/memory are disposable. Authoring a topic: stage 3 derives them, nobody writes one |
 | `packages/vault-projector` | Deterministic markdown/mermaid renders of tasks, execution, lineage, task expansion; coalesced live re-render | Truth of any kind; whole-log scans |
-| `packages/cli` | Pre-bootstrap help/init/migrate, command surface, project discovery, startup/shutdown order, degraded-memory wiring | Business rules (kernel's job) |
+| `packages/cli` | Pre-bootstrap help/init/migrate, command surface, project discovery, startup/shutdown order, degraded-memory wiring, boot adoption of the checkout (`workspace-adopt`) and the impure half of workspace health — does the directory exist, is it clean, how much knowledge is still pending (`workspace-health`) | Business rules (kernel's job); the health state table itself (pure, in `kernel/workspaces.ts`) |
 | `packages/ui-core` | Transport-free UI core: `ProjectSessions` (live folds, graph patches, transcripts, log rows), `OrcActions` interface, the copilot toolset + `asResolvedTools` door-#2 bridge | Any transport (HTTP/SSE/stdio are adapters' jobs), any DOM |
 | `packages/graph-ui` | Door #1: web adapter — JSON+SSE routes, CSRF-token mutations fenced to the home project, `/api/health`, copilot streaming + `copilot_exchange` journaling, browser page | Deciding what a graph or plan IS (ui-core's job) |
 | `packages/cli/mcp-serve` | Door #2: stdio MCP adapter — same toolset via `asResolvedTools`, memory read tools, the `--autonomy gated\|full` approve dial, stdout ownership | Its own tool semantics (they are the copilot's), trust/init (CLI-only, never over MCP) |
 
 ## Identity and isolation
 
-`orc init` mints `projectId` into the git-ignored `.orc/identity.json` (the committable
-`.orc/config.json` carries settings only). Everything derives:
+`orc init` mints `projectId` into the git-ignored `.orc/identity.json`, which lives in the
+repository's MAIN checkout — not in whichever checkout the command ran from. A linked worktree
+resolves the project root via git's `--git-dir` vs `--git-common-dir`: `project-root.ts` holds the
+pure rule (`resolveProjectRoot(dir, gitDirs)`, tested without a repository), `git.ts` the one probe
+that calls out to `git rev-parse --git-dir --git-common-dir` (`gitDirs`). The two are EQUAL for a
+main checkout (even from a subdirectory), a submodule, and a bare repo — none of which are
+re-rooted — and DIFFER only for a linked worktree, where `--git-dir` names the worktree's own
+`.git/worktrees/<name>` and `--git-common-dir` the shared `.git`; only then does `projectRoot`
+become the parent of the shared `.git`. `OrcConfig` exposes both directories a command needs:
 
+| Directory | Reads/writes |
+|---|---|
+| `projectRoot` (main checkout) | identity, `.orc/trust.json`, `.orc/serve.log` / `.orc/serve.pid`, extensions, `vaultDir` default, `.env` fallback |
+| `dir` (checkout the command runs in) | tracked `.orc/config.json` settings, drift probe / `gitRevision` / restamp, the commit tool, grounding source, the workspace adopted at boot (and the run-`cwd` fallback when a request recorded none), a worktree-local `.env` override |
+
+Outside git, or wherever `--git-dir` and `--git-common-dir` are equal (a main checkout and every
+subdirectory of it, a submodule, a bare repo), `projectRoot === dir` — the directory keeps its own
+identity rather than being re-rooted into an ancestor's. Everything else derives:
+
+- a project spans many **workspaces** — the checkouts it is worked in. Identity is per repository
+  and minted once; a workspace is per checkout, keyed by its resolved `cwd`, recorded by adoption
+  at boot, and is the unit a task, a run and a note's provenance bind to. Two kinds only:
+  `checkout` (the main checkout) and `worktree` (a linked worktree, orc-created under
+  `.orc/worktrees/<slug>` on branch `orc/<slug>` or your own); `managed` marks the ones orc may
+  `git worktree remove`. `trunkBranch` — unset, git's `origin/HEAD`, else `main` — is the branch
+  `onTrunk` is captured against at adoption, and `workspace_merged` is the fact that turns that
+  checkout's knowledge into trunk knowledge
 - **parallelism ceiling** — three limits stack, and only the first is a setting: `concurrency`
   (default 3) caps concurrent steps **per depth**; the run workflow schedules in dependency waves
   and awaits each wave whole (DBOS binds child workflows positionally, so launch order must be a
@@ -741,5 +829,6 @@ Door discipline, stated precisely:
 - DBOS system database name = `deriveSystemUrl(dbUrl, projectId)`
 - SurrealDB database name = `projectDatabaseName(base, projectId)`
 - `requireProject(config)` gates project commands; uninitialized directories can still run
-  help, `orc db migrate`, and `orc init`
+  help, `orc db migrate`, and `orc init`. `orc init` run from a worktree initializes the
+  repository, not the worktree — identity lands in `projectRoot`
 - `orc init` seeds the first-party analysis/plan/documentation skills without overwriting project files

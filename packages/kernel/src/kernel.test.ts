@@ -1,11 +1,11 @@
 import { afterAll, describe, expect, it } from 'bun:test'
-import { APPROVAL_ANSWER, ApprovalPolicy, EVENT_KIND, GROUNDED_APPROVAL_DOOR, LINK_KIND, NOTE_TIER, PAYLOAD_SCHEMAS, STEP_ROLE, TASK_STATUS, TaskStatus, type Analyzer, type PlanDraft, type PlanStep } from '@orc/contracts'
+import { APPROVAL_ANSWER, ApprovalPolicy, EVENT_KIND, GROUNDED_APPROVAL_DOOR, LINK_KIND, NOTE_TIER, PAYLOAD_SCHEMAS, RunRequestedPayload, STEP_ROLE, TASK_STATUS, TaskStatus, WORKSPACE_KIND, WORKSPACE_TITLE_MAX, type Analyzer, type PlanDraft, type PlanStep, type TaskNode } from '@orc/contracts'
 import { draftFixture, stepFixture } from '@orc/contracts/fixtures'
 import { openStorage, type EventLogOps } from './storage'
 import { KERNEL_ERROR_CODE, KernelError } from './errors'
 import { Kernel, SPLIT_ORIGIN } from './kernel'
 import { instantiateFrozenPlan, planGraphHash, planScope } from './execution/strategies/grounded-plan'
-import { createTestDb, TEST_PROJECT_ID } from './test-helpers'
+import { createTestDb, seedTestWorkspace, TEST_PROJECT_ID, TEST_WORKSPACE_ID } from './test-helpers'
 
 const dbs: Array<{ drop: () => Promise<void> }> = []
 // Teardown drops one DB per test (every test goes through freshKernelAndLog), each a pg_database
@@ -28,6 +28,9 @@ async function freshKernelAndLog(): Promise<{ k: Kernel; log: TestLog }> {
   dbs.push(db)
   const storage = await openStorage(db.url, { projectId: TEST_PROJECT_ID })
   db.onClose(() => storage.close())
+  // createTask refuses a workspace the fold has never seen, so every kernel a test opens starts
+  // with the one TEST_WORKSPACE_ID names — the tests below are about tasks, not about adoption.
+  await seedTestWorkspace(storage.events)
   return { k: new Kernel(storage.events), log: storage.events }
 }
 const toRunning = (log: TestLog, taskId: string): Promise<unknown> =>
@@ -51,7 +54,7 @@ const codeOf = async (p: Promise<unknown>): Promise<string> => {
 describe('Kernel lifecycle', () => {
   it('create → propose → edit → approve happy path', async () => {
     const k = await freshKernel()
-    const t = await k.createTask({ title: 'hello', spec: 'world' })
+    const t = await k.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'hello', spec: 'world' })
     expect(t.status).toBe(TASK_STATUS.draft)
 
     const v1 = await k.proposePlan(t.id, draft())
@@ -69,7 +72,7 @@ describe('Kernel lifecycle', () => {
 
   it('approvePlan records who approved: default human, mcp when an agent drove (P7)', async () => {
     const k = await freshKernel()
-    const t = await k.createTask({ title: 'attributed' })
+    const t = await k.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'attributed' })
     await k.proposePlan(t.id, draft())
     await k.approvePlan(t.id, undefined, { approvedBy: 'mcp' })
     const evt = (await k.eventsFor(t.id)).find(e => e.kind === 'plan_approved')!
@@ -78,8 +81,8 @@ describe('Kernel lifecycle', () => {
 
   it('child tasks inherit budget and increment depth', async () => {
     const k = await freshKernel()
-    const parent = await k.createTask({ title: 'p', budgetUSD: 5 })
-    const child = await k.createTask({ title: 'c', parentId: parent.id })
+    const parent = await k.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'p', budgetUSD: 5 })
+    const child = await k.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'c', parentId: parent.id })
     expect(child.depth).toBe(1)
     expect(child.parentId).toBe(parent.id)
     expect(parent.budgetUSD).toBe(5)
@@ -88,14 +91,14 @@ describe('Kernel lifecycle', () => {
 
   it('rejects proposing twice', async () => {
     const k = await freshKernel()
-    const t = await k.createTask({ title: 'x' })
+    const t = await k.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'x' })
     await k.proposePlan(t.id, draft())
     expect(await codeOf(k.proposePlan(t.id, draft()))).toBe(KERNEL_ERROR_CODE.invalid_transition)
   })
 
   it('serializes concurrent proposes: exactly one v1 wins', async () => {
     const k = await freshKernel()
-    const t = await k.createTask({ title: 'race' })
+    const t = await k.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'race' })
     const results = await Promise.allSettled([k.proposePlan(t.id, draft()), k.proposePlan(t.id, draft())])
     expect(results.filter(r => r.status === 'fulfilled')).toHaveLength(1)
     expect((await k.getPlan(t.id))?.version).toBe(1)
@@ -104,7 +107,7 @@ describe('Kernel lifecycle', () => {
 
   it('rejects editing before a proposal exists', async () => {
     const k = await freshKernel()
-    const t = await k.createTask({ title: 'x' })
+    const t = await k.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'x' })
     expect(await codeOf(k.editPlan(t.id, draft()))).toBe(KERNEL_ERROR_CODE.invalid_transition)
   })
 
@@ -120,7 +123,7 @@ describe('Kernel lifecycle', () => {
     const outcomes: Record<string, string> = {}
     for (const status of TaskStatus.options) {
       // one task per status on a shared log — status is per-task, so a DB per case buys nothing
-      const t = await k.createTask({ title: `edit from ${status}` })
+      const t = await k.createTask({ workspaceId: TEST_WORKSPACE_ID, title: `edit from ${status}` })
       await k.proposePlan(t.id, draft()) // a plan must exist before editing is even meaningful
       if (status !== TASK_STATUS.awaiting_approval) await toStatus(log, t.id, status)
       outcomes[status] = await codeOf(k.editPlan(t.id, draft()))
@@ -132,7 +135,7 @@ describe('Kernel lifecycle', () => {
 
   it('rejects approving a stale version', async () => {
     const k = await freshKernel()
-    const t = await k.createTask({ title: 'x' })
+    const t = await k.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'x' })
     await k.proposePlan(t.id, draft())
     await k.editPlan(t.id, draft())
     expect(await codeOf(k.approvePlan(t.id, 1))).toBe(KERNEL_ERROR_CODE.version_conflict)
@@ -145,7 +148,7 @@ describe('Kernel lifecycle', () => {
 
   it('rejects invalid plan drafts (cycle)', async () => {
     const k = await freshKernel()
-    const t = await k.createTask({ title: 'x' })
+    const t = await k.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'x' })
     const bad = draftFixture([stepFixture({ id: 'a', dependsOn: ['b'] }), stepFixture({ id: 'b', dependsOn: ['a'] })])
     expect(await codeOf(k.proposePlan(t.id, bad))).toBe(KERNEL_ERROR_CODE.plan_validation_failed)
     expect((await k.getTask(t.id))?.status).toBe(TASK_STATUS.draft)
@@ -154,14 +157,14 @@ describe('Kernel lifecycle', () => {
   it('propose fails with plan_validation_failed when the refValidator reports errors', async () => {
     const { log } = await freshKernelAndLog()
     const k = new Kernel(log, async () => [`unknown executor 'nope'`])
-    const t = await k.createTask({ title: 'x' })
+    const t = await k.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'x' })
     await expect(k.proposePlan(t.id, draft())).rejects.toThrow(/unknown executor 'nope'/)
   })
 
   it('propose succeeds when the refValidator returns no errors', async () => {
     const { log } = await freshKernelAndLog()
     const k = new Kernel(log, async () => [])
-    const t = await k.createTask({ title: 'x' })
+    const t = await k.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'x' })
     await expect(k.proposePlan(t.id, draft())).resolves.toBeDefined()
   })
 
@@ -169,7 +172,7 @@ describe('Kernel lifecycle', () => {
     const kernel = await freshKernel()
     const seen: number[] = []
     const unsub = await kernel.subscribe({ fromSeq: 0 }, e => { seen.push(e.seq) })
-    const t = await kernel.createTask({ title: 'x' })
+    const t = await kernel.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'x' })
     await kernel.proposePlan(t.id, draft()) // more than one event, so ORDER is observable at all
     // deadline poll, not a fixed sleep: a contended Postgres can exceed any constant, and every
     // other subscription test in the repo already polls
@@ -190,7 +193,7 @@ describe('Kernel lifecycle', () => {
     const analyze: PlanStep = stepFixture({ id: 'analyze', role: 'scout', skillRefs: ['codebase-analysis'] })
     const analyzers = new Map<string, Analyzer>([['agent-analyzer', { id: 'agent-analyzer', analysisStep: () => analyze }]])
     const k = new Kernel(log, undefined, analyzers)
-    const t = await k.createGroundedTask({ title: 'build web', spec: 's', modelRef: 'anthropic/claude-sonnet-5', analyzerRef: 'agent-analyzer' })
+    const t = await k.createGroundedTask({ workspaceId: TEST_WORKSPACE_ID, title: 'build web', spec: 's', modelRef: 'anthropic/claude-sonnet-5', analyzerRef: 'agent-analyzer' })
     const plan = (await k.getPlan(t.id))!
     expect(plan.strategyRef).toBe('grounded-plan')
     expect(plan.analyzerRef).toBe('agent-analyzer')
@@ -209,7 +212,7 @@ describe('Kernel lifecycle', () => {
     const analyzers = new Map<string, Analyzer>([['agent-analyzer', { id: 'agent-analyzer', analysisStep: () => analyze }]])
     const kg = new Kernel(log, undefined, analyzers)
 
-    const first = await kg.createGroundedTask({ title: 'first', spec: 's', modelRef: 'fake/m', analyzerRef: 'agent-analyzer' })
+    const first = await kg.createGroundedTask({ workspaceId: TEST_WORKSPACE_ID, title: 'first', spec: 's', modelRef: 'fake/m', analyzerRef: 'agent-analyzer' })
     // nothing comparable has settled yet — no history means no number, never a fabricated $0
     expect((await kg.getPlan(first.id))!.costEstimateUSD).toBeNull()
 
@@ -224,13 +227,13 @@ describe('Kernel lifecycle', () => {
       payload: { taskId: first.id, from: TASK_STATUS.approved, to: TASK_STATUS.done },
     })
 
-    const second = await kg.createGroundedTask({ title: 'second', spec: 's', modelRef: 'fake/m', analyzerRef: 'agent-analyzer' })
+    const second = await kg.createGroundedTask({ workspaceId: TEST_WORKSPACE_ID, title: 'second', spec: 's', modelRef: 'fake/m', analyzerRef: 'agent-analyzer' })
     expect((await kg.getPlan(second.id))!.costEstimateUSD).toBeCloseTo(0.42, 10)
   })
 
   it('proposeSplit carries a measured cost estimate from prior split history', async () => {
     const { k, log } = await freshKernelAndLog()
-    const parent = await k.createTask({ title: 'P', spec: 'parent' })
+    const parent = await k.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'P', spec: 'parent' })
     await toRunning(log, parent.id)
     const base = {
       parentTaskId: parent.id, stepId: 's1', runToken: `step:${parent.id}:s1:a1`, spec: '', title: 'C',
@@ -261,7 +264,7 @@ describe('Kernel lifecycle', () => {
     const analyze: PlanStep = stepFixture({ id: 'analyze', role: 'scout', maxIterations: 30 })
     const analyzers = new Map<string, Analyzer>([['agent-analyzer', { id: 'agent-analyzer', analysisStep: () => analyze }]])
     const k = new Kernel(log, undefined, analyzers)
-    const t = await k.createGroundedTask({ title: 'x', spec: 's', modelRef: 'fake/m', analyzerRef: 'agent-analyzer', maxIterations: 60 })
+    const t = await k.createGroundedTask({ workspaceId: TEST_WORKSPACE_ID, title: 'x', spec: 's', modelRef: 'fake/m', analyzerRef: 'agent-analyzer', maxIterations: 60 })
     expect((await k.getPlan(t.id))!.steps.map(s => s.maxIterations)).toEqual([60, 60])
   })
 
@@ -270,8 +273,8 @@ describe('Kernel lifecycle', () => {
     const analyze: PlanStep = stepFixture({ id: 'analyze', role: 'scout' })
     const analyzers = new Map<string, Analyzer>([['agent-analyzer', { id: 'agent-analyzer', analysisStep: () => analyze }]])
     const k = new Kernel(log, undefined, analyzers)
-    const parent = await k.createTask({ title: 'parent' })
-    const t = await k.createGroundedTask({ title: 'child', spec: 's', modelRef: 'fake/m', analyzerRef: 'agent-analyzer', parentId: parent.id })
+    const parent = await k.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'parent' })
+    const t = await k.createGroundedTask({ workspaceId: TEST_WORKSPACE_ID, title: 'child', spec: 's', modelRef: 'fake/m', analyzerRef: 'agent-analyzer', parentId: parent.id })
     const stored = (await k.getTask(t.id))!
     expect(stored.parentId).toBe(parent.id)
     expect(stored.depth).toBe(1)
@@ -290,7 +293,7 @@ describe('Kernel lifecycle', () => {
     const k = new Kernel(log, undefined, analyzers)
 
     const task = await k.createGroundedTask({
-      title: 'release notes', spec: 'Summarize changes since v1.2 into notes.md', modelRef: 'fake/m', analyzerRef: 'agent-analyzer',
+      workspaceId: TEST_WORKSPACE_ID, title: 'release notes', spec: 'Summarize changes since v1.2 into notes.md', modelRef: 'fake/m', analyzerRef: 'agent-analyzer',
     })
 
     expect((await k.getTask(task.id))?.spec).toBe('Summarize changes since v1.2 into notes.md')
@@ -304,29 +307,29 @@ describe('Kernel lifecycle', () => {
     const k = new Kernel(log, async () => [`unknown skill 'codebase-analysis'`], analyzers)
 
     await expect(k.createGroundedTask({
-      title: 'build web', spec: 'ground it', modelRef: 'fake/m', analyzerRef: 'agent-analyzer',
+      workspaceId: TEST_WORKSPACE_ID, title: 'build web', spec: 'ground it', modelRef: 'fake/m', analyzerRef: 'agent-analyzer',
     })).rejects.toThrow("unknown skill 'codebase-analysis'")
 
-    expect(await log.all()).toHaveLength(0)
+    expect((await log.all()).map(e => e.kind)).toEqual([EVENT_KIND.workspace_created]) // the seed alone: the whole creation rolled back
     expect(await k.listTasks()).toEqual([])
   })
 
   it('createGroundedTask rejects an unknown analyzerRef', async () => {
     const { log } = await freshKernelAndLog()
     const k = new Kernel(log, undefined, new Map())
-    expect(await codeOf(k.createGroundedTask({ title: 'x', spec: '', modelRef: 'fake/m', analyzerRef: 'ghost' }))).toBe(KERNEL_ERROR_CODE.invalid_transition)
+    expect(await codeOf(k.createGroundedTask({ workspaceId: TEST_WORKSPACE_ID, title: 'x', spec: '', modelRef: 'fake/m', analyzerRef: 'ghost' }))).toBe(KERNEL_ERROR_CODE.invalid_transition)
   })
 
   it('createGroundedTask rejects an empty spec — the title is a label, never the goal', async () => {
     const k = await freshKernel()
-    await expect(k.createGroundedTask({ title: 'test', spec: '  ', modelRef: 'fake/m', analyzerRef: 'agent-analyzer' }))
+    await expect(k.createGroundedTask({ workspaceId: TEST_WORKSPACE_ID, title: 'test', spec: '  ', modelRef: 'fake/m', analyzerRef: 'agent-analyzer' }))
       .rejects.toThrow(/grounded tasks need a spec/)
     expect(await k.listTasks()).toEqual([]) // nothing committed, no analyze run wasted
   })
 
   it('proposeSplit: deterministic ids, inherited refs, clamped budget, manual gate parks the child', async () => {
     const { k, log } = await freshKernelAndLog()
-    const parent = await k.createTask({ title: 'P', spec: 'parent', budgetUSD: 10 })
+    const parent = await k.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'P', spec: 'parent', budgetUSD: 10 })
     await toRunning(log, parent.id)
     const args = {
       parentTaskId: parent.id, stepId: 's1', runToken: `step:${parent.id}:s1:a1`, toolCallId: 'call_1',
@@ -352,7 +355,7 @@ describe('Kernel lifecycle', () => {
 
   it('proposeSplit: refuses a model-authored committer step — the role is kernel-set only', async () => {
     const { k, log } = await freshKernelAndLog()
-    const parent = await k.createTask({ title: 'P', spec: 'parent' })
+    const parent = await k.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'P', spec: 'parent' })
     await toRunning(log, parent.id)
     const base = {
       parentTaskId: parent.id, stepId: 's1', runToken: `step:${parent.id}:s1:a1`, toolCallId: 'call_1',
@@ -372,7 +375,7 @@ describe('Kernel lifecycle', () => {
 
   it('openFeedbackInSubtree finds a question parked on a DESCENDANT, not only on the root', async () => {
     const { k, log } = await freshKernelAndLog()
-    const parent = await k.createTask({ title: 'P', spec: 'parent' })
+    const parent = await k.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'P', spec: 'parent' })
     await toRunning(log, parent.id)
     const child = await k.proposeSplit({
       parentTaskId: parent.id, stepId: 's1', runToken: `step:${parent.id}:s1:a1`, toolCallId: 'call_1',
@@ -392,7 +395,7 @@ describe('Kernel lifecycle', () => {
 
   it('gatedChildren names the descendants a manual policy parked, and only those', async () => {
     const { k, log } = await freshKernelAndLog()
-    const parent = await k.createTask({ title: 'P', spec: 'parent' })
+    const parent = await k.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'P', spec: 'parent' })
     await toRunning(log, parent.id)
     const base = {
       parentTaskId: parent.id, stepId: 's1', runToken: `step:${parent.id}:s1:a1`, spec: '',
@@ -407,7 +410,7 @@ describe('Kernel lifecycle', () => {
 
   it('proposeSplit: rejects a cross-attempt childTaskId collision (same toolCallId, new runToken)', async () => {
     const { k, log } = await freshKernelAndLog()
-    const parent = await k.createTask({ title: 'P', spec: '', budgetUSD: 10 })
+    const parent = await k.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'P', spec: '', budgetUSD: 10 })
     await toRunning(log, parent.id)
     const base = {
       parentTaskId: parent.id, stepId: 's1', toolCallId: 'call_1',
@@ -425,7 +428,7 @@ describe('Kernel lifecycle', () => {
 
   it('proposeSplit: auto policy approves with provenance; depth cap rejects', async () => {
     const { k, log } = await freshKernelAndLog()
-    const parent = await k.createTask({ title: 'P', spec: '' })
+    const parent = await k.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'P', spec: '' })
     await toRunning(log, parent.id)
     const auto = ApprovalPolicy.parse({ default: 'auto' })
     const base = {
@@ -444,7 +447,7 @@ describe('Kernel lifecycle', () => {
 
   it('proposeSplit: refuses a split from a non-running (cancelled) parent — closes the cancel race', async () => {
     const { k, log } = await freshKernelAndLog()
-    const parent = await k.createTask({ title: 'P', spec: '' })
+    const parent = await k.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'P', spec: '' })
     await log.append({ taskId: parent.id, stepId: null, runToken: null, kind: EVENT_KIND.task_status_changed, payload: { taskId: parent.id, from: TASK_STATUS.draft, to: TASK_STATUS.cancelled } })
     const args = {
       parentTaskId: parent.id, stepId: 's1', runToken: `step:${parent.id}:s1:a1`, toolCallId: 'call_9',
@@ -460,7 +463,7 @@ describe('Kernel lifecycle', () => {
     const { log } = await freshKernelAndLog()
     const sent: Array<{ runToken: string; message: string; topic: string; key?: string }> = []
     const k = new Kernel(log, undefined, undefined, async (runToken, message, topic, key) => { sent.push({ runToken, message, topic, key }) })
-    const t = await k.createTask({ title: 'grounded task' })
+    const t = await k.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'grounded task' })
     await k.proposePlan(t.id, draft())
     await k.approvePlan(t.id)
     // simulate the port raising a feedback gate from inside the running plan step (Task 5 only
@@ -486,9 +489,9 @@ describe('Kernel lifecycle', () => {
 
   it('replyFeedback binds exact grounded plan approval to the current graph hash', async () => {
     const { k, log } = await freshKernelAndLog()
-    const t = await k.createTask({ title: 'grounded', type: 'grounded' })
+    const t = await k.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'grounded', type: 'grounded' })
     const scope = planScope(t.id)
-    const author = { source: 'agent' as const }
+    const author = { source: 'agent' as const, workspaceId: TEST_WORKSPACE_ID }
     await log.append({ taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_written, payload: { note: { id: 'masterplan', scope, tier: 'plan', title: 'Plan', links: [{ id: 'db', kind: 'decomposes_into' }] }, author } })
     await log.append({ taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_written, payload: { note: { id: 'db', scope, tier: 'plan', title: 'DB', body: 'schema' }, author } })
     const runToken = `step:${t.id}:plan:a1`
@@ -505,7 +508,7 @@ describe('Kernel lifecycle', () => {
   it('replyFeedback stamps for any word in APPROVAL_ANSWERS, not just the canonical one', async () => {
     const { k, log } = await freshKernelAndLog()
     for (const text of ['agree', 'Agreed', ' LGTM ', 'yes', APPROVAL_ANSWER]) {
-      const task = await k.createTask({ title: text, type: 'grounded' })
+      const task = await k.createTask({ workspaceId: TEST_WORKSPACE_ID, title: text, type: 'grounded' })
       await log.append({
         taskId: task.id, stepId: 'plan', runToken: `step:${task.id}:plan:a1`,
         kind: EVENT_KIND.feedback_requested, payload: { question: 'approve?', topic: 'plan-1' },
@@ -521,7 +524,7 @@ describe('Kernel lifecycle', () => {
     // 'not yet' / 'approve later' are the near-misses that matter: whole-string only, so an answer
     // that merely CONTAINS an approval word is still ordinary feedback.
     for (const [type, text] of [['generic', 'approve'], ['grounded', 'not yet'], ['grounded', 'approve later']] as const) {
-      const task = await k.createTask({ title: type, type })
+      const task = await k.createTask({ workspaceId: TEST_WORKSPACE_ID, title: type, type })
       await log.append({
         taskId: task.id, stepId: 'plan', runToken: `step:${task.id}:plan:a1`,
         kind: EVENT_KIND.feedback_requested, payload: { question: 'continue?', topic: `${type}-1` },
@@ -534,11 +537,11 @@ describe('Kernel lifecycle', () => {
 
   it('approvedPlanHash is scoped to the exact run attempt', async () => {
     const { k, log } = await freshKernelAndLog()
-    const task = await k.createTask({ title: 'grounded', type: 'grounded' })
+    const task = await k.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'grounded', type: 'grounded' })
     const runA = `step:${task.id}:plan:a1`
     const runB = `step:${task.id}:plan:a2`
-    await log.append({ taskId: task.id, stepId: 'plan', runToken: runA, kind: EVENT_KIND.feedback_provided, payload: { topic: 'a', text: 'approve', author: { source: 'cli' }, planHash: 'a'.repeat(64) } })
-    await log.append({ taskId: task.id, stepId: 'plan', runToken: runB, kind: EVENT_KIND.feedback_provided, payload: { topic: 'b', text: 'approve', author: { source: 'cli' }, planHash: 'b'.repeat(64) } })
+    await log.append({ taskId: task.id, stepId: 'plan', runToken: runA, kind: EVENT_KIND.feedback_provided, payload: { topic: 'a', text: 'approve', author: { source: 'cli', workspaceId: TEST_WORKSPACE_ID }, planHash: 'a'.repeat(64) } })
+    await log.append({ taskId: task.id, stepId: 'plan', runToken: runB, kind: EVENT_KIND.feedback_provided, payload: { topic: 'b', text: 'approve', author: { source: 'cli', workspaceId: TEST_WORKSPACE_ID }, planHash: 'b'.repeat(64) } })
 
     expect(await k.approvedPlanHash(task.id, runA)).toMatchObject({ hash: 'a'.repeat(64) })
     expect(await k.approvedPlanHash(task.id, runB)).toMatchObject({ hash: 'b'.repeat(64) })
@@ -551,12 +554,12 @@ describe('Kernel lifecycle', () => {
   // what SATISFIES the gate did not move.
   it('nonHumanPlanApproval surfaces a non-cli approve for this run, and nothing else', async () => {
     const { k, log } = await freshKernelAndLog()
-    const task = await k.createTask({ title: 'grounded', type: 'grounded' })
+    const task = await k.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'grounded', type: 'grounded' })
     const runA = `step:${task.id}:plan:a1`
     const runB = `step:${task.id}:plan:a2`
     const provided = (runToken: string, topic: string, source: 'cli' | 'mcp' | 'agent') => log.append({
       taskId: task.id, stepId: 'plan', runToken, kind: EVENT_KIND.feedback_provided,
-      payload: { topic, text: 'approve', author: { source }, planHash: 'a'.repeat(64) },
+      payload: { topic, text: 'approve', author: { source, workspaceId: TEST_WORKSPACE_ID }, planHash: 'a'.repeat(64) },
     })
     await provided(runA, 'a', 'mcp')
     await provided(runB, 'b', 'cli')
@@ -575,12 +578,12 @@ describe('Kernel lifecycle', () => {
   const mcpApproval = async (log: TestLog, taskId: string, runToken: string): Promise<unknown> =>
     log.append({
       taskId, stepId: 'plan', runToken, kind: EVENT_KIND.feedback_provided,
-      payload: { topic: 'a', text: 'approve', author: { source: 'mcp' }, planHash: 'a'.repeat(64) },
+      payload: { topic: 'a', text: 'approve', author: { source: 'mcp', workspaceId: TEST_WORKSPACE_ID }, planHash: 'a'.repeat(64) },
     })
 
   it('by default only the cli door satisfies the plan gate — an mcp approve is refused and reported', async () => {
     const { k, log } = await freshKernelAndLog()
-    const task = await k.createTask({ title: 'grounded', type: 'grounded' })
+    const task = await k.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'grounded', type: 'grounded' })
     const runToken = `step:${task.id}:plan:a1`
     await mcpApproval(log, task.id, runToken)
 
@@ -590,7 +593,7 @@ describe('Kernel lifecycle', () => {
 
   it('a kernel configured with the mcp door accepts that same approve, and stops calling it non-human', async () => {
     const { k, log } = await freshKernelAndLog()
-    const task = await k.createTask({ title: 'grounded', type: 'grounded' })
+    const task = await k.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'grounded', type: 'grounded' })
     const runToken = `step:${task.id}:plan:a1`
     await mcpApproval(log, task.id, runToken)
     const widened = new Kernel(log, undefined, undefined, undefined, [GROUNDED_APPROVAL_DOOR.cli, GROUNDED_APPROVAL_DOOR.mcp])
@@ -606,7 +609,7 @@ describe('Kernel lifecycle', () => {
 
   it('replyFeedback appends feedback_provided and returns the topic even without an injected send', async () => {
     const { k, log } = await freshKernelAndLog() // no send wired — matches read-only CLI / most-tests construction
-    const t = await k.createTask({ title: 'x' })
+    const t = await k.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'x' })
     const runToken = `step:${t.id}:s1:a1`
     await log.append({ taskId: t.id, stepId: 's1', runToken, kind: EVENT_KIND.feedback_requested, payload: { question: 'q', topic: 'topic-1' } })
 
@@ -619,11 +622,11 @@ describe('Kernel lifecycle', () => {
     const { log } = await freshKernelAndLog()
     const sent: Array<{ runToken: string; topic: string }> = []
     const k = new Kernel(log, undefined, undefined, async (runToken, _message, topic) => { sent.push({ runToken, topic }) })
-    const t = await k.createTask({ title: 'x' })
+    const t = await k.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'x' })
     const runTokenA = `step:${t.id}:s1:a1`
     const runTokenB = `step:${t.id}:s2:a1`
     await log.append({ taskId: t.id, stepId: 's1', runToken: runTokenA, kind: EVENT_KIND.feedback_requested, payload: { question: 'q1', topic: 'topic-a' } })
-    await log.append({ taskId: t.id, stepId: 's1', runToken: null, kind: EVENT_KIND.feedback_provided, payload: { topic: 'topic-a', text: 'ok', author: { source: 'cli' } } })
+    await log.append({ taskId: t.id, stepId: 's1', runToken: null, kind: EVENT_KIND.feedback_provided, payload: { topic: 'topic-a', text: 'ok', author: { source: 'cli', workspaceId: TEST_WORKSPACE_ID } } })
     await log.append({ taskId: t.id, stepId: 's2', runToken: runTokenB, kind: EVENT_KIND.feedback_requested, payload: { question: 'q2', topic: 'topic-b' } })
 
     const topic = await k.replyFeedback(t.id, 'approve')
@@ -633,7 +636,7 @@ describe('Kernel lifecycle', () => {
 
   it('openFeedback surfaces the latest unanswered feedback_requested, then null once answered', async () => {
     const { k, log } = await freshKernelAndLog()
-    const t = await k.createTask({ title: 'x' })
+    const t = await k.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'x' })
     expect(await k.openFeedback(t.id)).toBeNull() // nothing pending
     const runToken = `step:${t.id}:plan:a1`
     await log.append({ taskId: t.id, stepId: 'plan', runToken, kind: EVENT_KIND.feedback_requested, payload: { question: 'changes or approve?', topic: 'plan-1' } })
@@ -644,7 +647,7 @@ describe('Kernel lifecycle', () => {
 
   it('reportCoverage appends analysis_completed carrying the parsed CoverageReport (defaults + provenance)', async () => {
     const { k, log } = await freshKernelAndLog()
-    const t = await k.createTask({ title: 'x' })
+    const t = await k.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'x' })
     const runToken = `step:${t.id}:analyze:a1`
     await k.reportCoverage({ taskId: t.id, stepId: 'analyze', runToken }, { analyzed: true, gaps: ['no tests read'] })
     const ev = (await log.byTask(t.id)).find(e => e.kind === EVENT_KIND.analysis_completed)!
@@ -658,7 +661,7 @@ describe('Kernel lifecycle', () => {
 
   it('latestCoverage returns the most recent analysis_completed, or null before any', async () => {
     const k = await freshKernel()
-    const t = await k.createTask({ title: 'x' })
+    const t = await k.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'x' })
     expect(await k.latestCoverage(t.id)).toBeNull()
     const ctx = { taskId: t.id, stepId: 'analyze', runToken: `step:${t.id}:analyze:a1` }
     await k.reportCoverage(ctx, { analyzed: false })
@@ -673,7 +676,7 @@ describe('Kernel lifecycle', () => {
     // out of scope here) — append the status change directly, the way the port's run-finish
     // checkpoint does.
     for (const to of [TASK_STATUS.done, TASK_STATUS.cancelled, TASK_STATUS.failed] as const) {
-      const t = await k.createTask({ title: 'x' })
+      const t = await k.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'x' })
       await k.proposePlan(t.id, draft())
       await k.approvePlan(t.id)
       await log.append({ taskId: t.id, stepId: null, runToken: null, kind: EVENT_KIND.task_status_changed, payload: { taskId: t.id, from: TASK_STATUS.approved, to } })
@@ -683,7 +686,7 @@ describe('Kernel lifecycle', () => {
 
   it('listAnnotations returns the appended plan_annotated events, in chronological order', async () => {
     const k = await freshKernel()
-    const t = await k.createTask({ title: 'x' })
+    const t = await k.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'x' })
     await k.proposePlan(t.id, draft())
     await k.approvePlan(t.id)
     expect(await k.listAnnotations(t.id)).toEqual([])
@@ -705,7 +708,7 @@ describe('Kernel lifecycle', () => {
     const { k, log } = await freshKernelAndLog()
     const taskId = 'grounded-1'
     const scope = planScope(taskId)
-    const author = { source: 'agent' as const }
+    const author = { source: 'agent' as const, workspaceId: TEST_WORKSPACE_ID }
     // memory_written events carry taskId:null (scoped by note.scope) — exactly what store.write appends
     await log.append({ taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_written, payload: { note: { id: 'masterplan', scope, tier: 'plan', title: 'Web app', links: [{ id: 'db', kind: 'decomposes_into' }] }, author } })
     await log.append({ taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_written, payload: { note: { id: 'db', scope, tier: 'plan', title: 'DB', body: 'schema' }, author } })
@@ -727,7 +730,7 @@ describe('Kernel lifecycle', () => {
   it('listTaskVerifiedNotes returns a verified note WITH paths and stampRevision, reading memory_written alongside memory_verified', async () => {
     const { k, log } = await freshKernelAndLog()
     const taskId = 'verify-1'
-    const author = { source: 'agent' as const, taskId }
+    const author = { source: 'agent' as const, workspaceId: TEST_WORKSPACE_ID, taskId }
     await log.append({ taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_written, payload: { note: { id: 'area-x', scope: 'project', tier: NOTE_TIER.semantic, title: 'area-x', paths: ['a.ts'] }, author } })
     await log.append({ taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_verified, payload: { id: 'area-x', scope: 'project', stamp: { revision: 'rev-1', at: 'T', by: 'exec·m·auditor' }, author } })
 
@@ -738,7 +741,7 @@ describe('Kernel lifecycle', () => {
   it('freezes a subplan-declared modelRef, and omits the key when the planner left it empty', async () => {
     const { k, log } = await freshKernelAndLog()
     const scope = planScope('grounded-models')
-    const author = { source: 'agent' as const }
+    const author = { source: 'agent' as const, workspaceId: TEST_WORKSPACE_ID }
     const note = (id: string, over: Record<string, unknown> = {}) => log.append({
       taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_written,
       payload: { note: { id, scope, tier: NOTE_TIER.plan, title: id, ...over }, author },
@@ -755,7 +758,7 @@ describe('Kernel lifecycle', () => {
 
   it('requestRun records the ask, with the cwd override the supervisor cannot derive', async () => {
     const k = await freshKernel()
-    const t = await k.createTask({ title: 'x', spec: 's' })
+    const t = await k.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'x', spec: 's' })
     await k.proposePlan(t.id, draft())
     await k.approvePlan(t.id)
     await k.requestRun(t.id, { cwd: '/tree' })
@@ -770,7 +773,7 @@ describe('Kernel lifecycle', () => {
 
   it('cancelSubtree stamps the whole subtree cancelled, so a client can cancel without a port', async () => {
     const { k, log } = await freshKernelAndLog()
-    const parent = await k.createTask({ title: 'P', spec: '' })
+    const parent = await k.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'P', spec: '' })
     await toRunning(log, parent.id)
     const child = await k.proposeSplit({
       parentTaskId: parent.id, stepId: 's1', runToken: `step:${parent.id}:s1:a1`, toolCallId: 'call_1',
@@ -793,7 +796,7 @@ describe('Kernel lifecycle', () => {
   // must NOT bleed an unrelated sibling task's writes in.
   it('listTaskChangedPaths covers a descendant split task and excludes an unrelated sibling', async () => {
     const { k, log } = await freshKernelAndLog()
-    const parent = await k.createTask({ title: 'P', spec: '' })
+    const parent = await k.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'P', spec: '' })
     await toRunning(log, parent.id)
     const child = await k.proposeSplit({
       parentTaskId: parent.id, stepId: 's1', runToken: `step:${parent.id}:s1:a1`, toolCallId: 'call_1',
@@ -803,7 +806,7 @@ describe('Kernel lifecycle', () => {
       policy: ApprovalPolicy.parse({ default: 'auto' }), maxDepth: 3,
     })
     // an unrelated sibling task with its OWN write — must never appear in the parent's set
-    const sibling = await k.createTask({ title: 'unrelated', spec: '' })
+    const sibling = await k.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'unrelated', spec: '' })
 
     // helper: a confirmed write (tool_call + isError:false tool_result on the same toolCallId)
     const write = async (taskId: string, stepId: string, toolCallId: string, path: string) => {
@@ -829,7 +832,7 @@ describe('Kernel lifecycle', () => {
 
   it('cancelSubtree stamps a child whose split commits after the snapshot, before the sweep', async () => {
     const { k, log } = await freshKernelAndLog()
-    const parent = await k.createTask({ title: 'P', spec: '' })
+    const parent = await k.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'P', spec: '' })
     await toRunning(log, parent.id)
     let injected = false
     const inject = () => k.proposeSplit({
@@ -852,5 +855,151 @@ describe('Kernel lifecycle', () => {
     const childId = `${parent.id}.s1.call_1`
     expect(stamped.sort()).toEqual([parent.id, childId].sort())
     expect((await k.getTask(childId))?.status).toBe(TASK_STATUS.cancelled)
+  })
+})
+
+describe('workspaces', () => {
+  const cwd = '/tmp/orc-ws-test/repo'
+  it('ensureWorkspace is idempotent on cwd and titles from the branch', async () => {
+    const k = await freshKernel()
+    const first = await k.ensureWorkspace({ cwd, branch: 'feat/x', kind: WORKSPACE_KIND.checkout, onTrunk: false })
+    const again = await k.ensureWorkspace({ cwd, branch: 'feat/x', kind: WORKSPACE_KIND.checkout, onTrunk: false })
+    expect(first.created).toBe(true)
+    expect(again).toEqual({ workspace: first.workspace, created: false })
+    expect(first.workspace).toMatchObject({ title: 'feat/x', managed: false, kind: 'checkout', archivedAt: null })
+  })
+  // cwd is the NATURAL KEY: '/repo' and '/repo/' are one directory, and two live records for one
+  // directory make workspaceByCwd answer whichever was minted first.
+  it('two spellings of one directory are one workspace', async () => {
+    const k = await freshKernel()
+    const first = await k.ensureWorkspace({ cwd, branch: 'a', kind: WORKSPACE_KIND.checkout, onTrunk: true })
+    const again = await k.ensureWorkspace({ cwd: `${cwd}/`, branch: 'a', kind: WORKSPACE_KIND.checkout, onTrunk: true })
+    expect(again).toEqual({ workspace: first.workspace, created: false })
+    expect(again.workspace.cwd).toBe(cwd) // the record stores the normalized spelling
+    const dotted = await k.ensureWorkspace({ cwd: `${cwd}/./`, branch: 'a', kind: WORKSPACE_KIND.checkout, onTrunk: true })
+    expect(dotted.created).toBe(false)
+    expect(await codeOf(k.createWorkspace({ title: 'dup', cwd: `${cwd}/`, branch: 'orc/dup', baseBranch: 'main', kind: WORKSPACE_KIND.worktree, managed: true, onTrunk: false })))
+      .toBe(KERNEL_ERROR_CODE.invalid_transition)
+    // an empty cwd resolves to the PROCESS's directory, which would mint a record for a directory
+    // nobody named — refused by code rather than silently adopted
+    expect(await codeOf(k.ensureWorkspace({ cwd: '', branch: 'a', kind: WORKSPACE_KIND.checkout, onTrunk: true }))).toBe(KERNEL_ERROR_CODE.invalid_transition)
+  })
+  it('ensureWorkspace titles from the directory name on a detached HEAD', async () => {
+    const k = await freshKernel()
+    expect((await k.ensureWorkspace({ cwd: '/x/y/my-checkout', branch: null, kind: WORKSPACE_KIND.checkout, onTrunk: false })).workspace.title).toBe('my-checkout')
+  })
+  it('an archived workspace does not satisfy ensureWorkspace — a fresh record is created', async () => {
+    const k = await freshKernel()
+    const { workspace } = await k.ensureWorkspace({ cwd, branch: 'a', kind: WORKSPACE_KIND.checkout, onTrunk: true })
+    await k.setWorkspaceArchived(workspace.id, true)
+    const next = await k.ensureWorkspace({ cwd, branch: 'a', kind: WORKSPACE_KIND.checkout, onTrunk: true })
+    expect(next.created).toBe(true)
+    expect(next.workspace.id).not.toBe(workspace.id)
+    // TEST_WORKSPACE_ID is the helper's seed, minted before either of these — named here rather
+    // than filtered out, so the listing stays an exact set and a stray record still fails.
+    expect((await k.listWorkspaces()).map(w => w.id)).toEqual([TEST_WORKSPACE_ID, next.workspace.id])
+    expect((await k.listWorkspaces({ includeArchived: true })).map(w => w.id)).toEqual([TEST_WORKSPACE_ID, workspace.id, next.workspace.id])
+  })
+  it('retitle and archive/restore fold back; unknown ids are refused by name', async () => {
+    const k = await freshKernel()
+    const w = await k.createWorkspace({ title: 'Req', cwd: '/r/.orc/worktrees/req', branch: 'orc/req', baseBranch: 'main', kind: WORKSPACE_KIND.worktree, managed: true, onTrunk: false })
+    expect((await k.retitleWorkspace(w.id, 'Request')).title).toBe('Request')
+    expect((await k.setWorkspaceArchived(w.id, true)).archivedAt).not.toBeNull()
+    expect((await k.setWorkspaceArchived(w.id, false)).archivedAt).toBeNull()
+    expect(await codeOf(k.retitleWorkspace('nope', 'x'))).toBe(KERNEL_ERROR_CODE.workspace_not_found)
+  })
+  it('createWorkspace refuses a second record at a live cwd', async () => {
+    const k = await freshKernel()
+    const input = { title: 'Req', cwd: '/r/.orc/worktrees/req', branch: 'orc/req', baseBranch: 'main', kind: WORKSPACE_KIND.worktree, managed: true, onTrunk: false }
+    await k.createWorkspace(input)
+    expect(await codeOf(k.createWorkspace(input))).toBe(KERNEL_ERROR_CODE.invalid_transition)
+  })
+  // The one door that re-seats an EXISTING record rather than minting one. `orc purge` wipes the
+  // whole log, workspace_created included, and then re-seeds the project's identity notes — whose
+  // author has to name a workspace the log still carries, under the SAME id the notes were written
+  // against. Going through the kernel (not a raw append at the call site) is what keeps the
+  // "one active record per cwd" rule enforced inside a transaction against a concurrent adoption.
+  it('restoreWorkspace re-seats a record on an empty log, keeping its id verbatim', async () => {
+    const k = await freshKernel()
+    const original = await k.createWorkspace({ title: 'Req', cwd: '/r/.orc/worktrees/req', branch: 'orc/req', baseBranch: 'main', kind: WORKSPACE_KIND.worktree, managed: true, onTrunk: false })
+    const fresh = await freshKernel() // a log that has never seen THIS record — the post-purge state
+    const restored = await fresh.restoreWorkspace(original)
+    expect(restored).toEqual(original) // id, createdAt, branch — the record verbatim, nothing re-minted
+    // exactly one live record at that directory, and it is the original: a re-mint would show a new id
+    expect((await fresh.listWorkspaces()).filter(w => w.cwd === original.cwd)).toEqual([original])
+  })
+  it('restoreWorkspace refuses when an ACTIVE record already holds that cwd', async () => {
+    const k = await freshKernel()
+    const original = await k.createWorkspace({ title: 'Req', cwd: '/r/.orc/worktrees/req', branch: 'orc/req', baseBranch: 'main', kind: WORKSPACE_KIND.worktree, managed: true, onTrunk: false })
+    // a concurrent boot adoption got there first, under its own id — re-seating would be the second
+    // live record for one directory, exactly what workspaceByCwd cannot answer
+    expect(await codeOf(k.restoreWorkspace({ ...original, id: '99999999-9999-4999-8999-999999999999' })))
+      .toBe(KERNEL_ERROR_CODE.invalid_transition)
+    expect((await k.listWorkspaces()).filter(w => w.cwd === original.cwd)).toEqual([original]) // nothing appended
+  })
+  it('mergeWorkspace records the commit once; a second merge is refused', async () => {
+    const k = await freshKernel()
+    const w = await k.createWorkspace({ title: 'R', cwd: '/r/.orc/worktrees/r', branch: 'orc/r', baseBranch: 'main', kind: WORKSPACE_KIND.worktree, managed: true, onTrunk: false })
+    const m = await k.mergeWorkspace(w.id, { mergeCommit: 'abc123', trunk: 'main' })
+    expect(m).toMatchObject({ workspaceId: w.id, mergeCommit: 'abc123', trunk: 'main' })
+    expect((await k.state()).workspaceMerges.get(w.id)?.mergeCommit).toBe('abc123')
+    expect(await codeOf(k.mergeWorkspace(w.id, { mergeCommit: 'def', trunk: 'main' }))).toBe(KERNEL_ERROR_CODE.invalid_transition)
+  })
+  // Adoption runs at BOOT, so a Workspace.parse that throws on the derived title fails every orc
+  // command in that checkout — a long branch name would lock the operator out of their own repo.
+  it('a branch longer than the title limit is truncated, not refused', async () => {
+    const k = await freshKernel()
+    const branch = `feat/${'x'.repeat(125)}` // 130 chars — past WORKSPACE_TITLE_MAX
+    const { workspace } = await k.ensureWorkspace({ cwd: `${cwd}-long`, branch, kind: WORKSPACE_KIND.checkout, onTrunk: false })
+    expect(branch.length).toBe(130)
+    expect(workspace.title.length).toBe(WORKSPACE_TITLE_MAX)
+    expect(branch.startsWith(workspace.title)).toBe(true) // the head of the branch, so it stays recognisable
+  })
+  it('createTask binds a workspace and refuses an unknown one', async () => {
+    const k = await freshKernel()
+    const { workspace } = await k.ensureWorkspace({ cwd, branch: 'a', kind: WORKSPACE_KIND.checkout, onTrunk: true })
+    expect((await k.createTask({ title: 't', workspaceId: workspace.id })).workspaceId).toBe(workspace.id)
+    expect(await codeOf(k.createTask({ title: 't', workspaceId: 'ghost' }))).toBe(KERNEL_ERROR_CODE.workspace_not_found)
+    // a root task with nothing to inherit from is refused by name, never bound to a made-up id
+    expect(await codeOf(k.createTask({ title: 't' }))).toBe(KERNEL_ERROR_CODE.workspace_not_found)
+    // a child inherits: createTask({ parentId }) is the one path that may omit the id
+    const parent = await k.createTask({ title: 'p', workspaceId: workspace.id })
+    expect((await k.createTask({ title: 'c', parentId: parent.id, workspaceId: undefined })).workspaceId).toBe(workspace.id)
+  })
+  it('requestRun without a cwd records the task\'s workspace cwd; an explicit cwd still wins', async () => {
+    const { k, log } = await freshKernelAndLog()
+    const { workspace } = await k.ensureWorkspace({ cwd, branch: 'a', kind: WORKSPACE_KIND.checkout, onTrunk: true })
+    const t = await k.createTask({ title: 't', workspaceId: workspace.id })
+    const seq1 = await k.requestRun(t.id)
+    const seq2 = await k.requestRun(t.id, { cwd: '/elsewhere' })
+    const rows = await log.byTask(t.id)
+    const cwdAt = (seq: number) => RunRequestedPayload.parse(rows.find(r => r.seq === seq)?.payload).cwd
+    expect(cwdAt(seq1)).toBe(cwd)
+    expect(cwdAt(seq2)).toBe('/elsewhere')
+  })
+  // The ORPHAN: a task naming a workspace the fold never saw. createTask cannot produce one (it
+  // refuses an unknown id above), so it is reached the only way it is reachable in the wild — a
+  // `task_created` already in the log whose workspace record is not, after a purge or a partial
+  // restore. The cwd then resolves to null, and recording THAT would send the run to the project
+  // directory as though nothing were wrong: the step would execute in the wrong checkout and the
+  // operator would never learn that the workspace record is missing.
+  it('requestRun refuses an orphaned task rather than silently running it somewhere else', async () => {
+    const { k, log } = await freshKernelAndLog()
+    const orphan: TaskNode = {
+      id: 'orphan-1', parentId: null, workspaceId: 'workspace-the-fold-never-saw', type: 'generic',
+      title: 'ghost task', spec: '', status: TASK_STATUS.draft, zone: [], budgetUSD: null,
+      depth: 0, createdAt: '2026-09-14T00:00:00.000Z',
+    }
+    await log.append({ taskId: orphan.id, stepId: null, runToken: null, kind: EVENT_KIND.task_created, payload: { task: orphan } })
+    expect(await codeOf(k.requestRun(orphan.id))).toBe(KERNEL_ERROR_CODE.workspace_not_found)
+    // and NOTHING was appended: a run_requested naming a fabricated cwd is the failure this refusal
+    // exists to prevent, so the refusal must not leave one behind
+    expect((await log.byTask(orphan.id)).some(e => e.kind === EVENT_KIND.run_requested)).toBe(false)
+    // the override is the documented way out, and it still works — the task is not unrunnable, it
+    // just cannot answer "where" on its own
+    await k.requestRun(orphan.id, { cwd: '/elsewhere' })
+    const requested = (await log.byTask(orphan.id)).filter(e => e.kind === EVENT_KIND.run_requested)
+    expect(requested.length).toBe(1)
+    expect(RunRequestedPayload.parse(requested[0]?.payload).cwd).toBe('/elsewhere')
   })
 })

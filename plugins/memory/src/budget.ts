@@ -40,7 +40,7 @@ const itemChars = (value: unknown): number =>
 // still leaked, because nothing had blanked or refilled it — so each group member also needs a
 // blank + refill pair, and a test that feeds it oversized.
 type BoundedField =
-  | 'id' | 'scope' | 'title' | 'sourceRevision'                        // clamped building `fitted`
+  | 'id' | 'scope' | 'title' | 'sourceRevision' | 'workspaceId'        // clamped building `fitted`
   | 'createdAt' | 'createdBy' | 'updatedAt' | 'updatedBy' | 'verified' // dropped by the discard ladder
   | 'tier' | 'kind' | 'retention' | 'revision' | 'archived'            // fixed width, nothing to trim
   | 'summary' | 'rationale' | 'body'                                   // bisected, cut marked
@@ -85,6 +85,7 @@ export function fitMemoryNoteToBudget(stored: MemoryNote, budget: number): Fitte
     createdBy: note.createdBy.slice(0, 200),
     updatedAt: note.updatedAt.slice(0, 128),
     updatedBy: note.updatedBy.slice(0, 200),
+    workspaceId: note.workspaceId.slice(0, 128),
     // clamped like the identity fields it sits beside — `by` is a composed author string and
     // `revision` a git rev, both agent-adjacent input, so neither is trusted to be short
     ...(note.verified && { verified: {
@@ -117,6 +118,9 @@ export function fitMemoryNoteToBudget(stored: MemoryNote, budget: number): Fitte
   // id and scope are NOT on this ladder: they are bounded at 128 chars each and are the only
   // fields that make the response actionable. Discarding them emits `next: memory_read with a
   // larger budget` alongside no id to read — a hint the agent cannot follow.
+  // `workspaceId` stays off it for the same reason in a different currency: it is a uuid (~36 bytes,
+  // clamped at 128), and blanking it would make the note's own copy of where it came from disagree
+  // with the `provisional` flag the tool derived from it beside it in the same reply.
   for (const discard of [
     // First off the ladder: it is provenance ABOUT the note, and a reader who blew the budget needs
     // the note's words before it needs to know who last checked them. `delete`, not `= undefined`:

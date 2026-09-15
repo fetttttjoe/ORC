@@ -3,6 +3,7 @@ import { generateText, stepCountIs } from 'ai'
 import { MockLanguageModelV4 } from 'ai/test'
 import type { ToolSet } from 'ai'
 import { planNoteFixture } from '@orc/contracts/fixtures'
+import { WORKSPACE_KIND, WORKSPACE_STATE, type Workspace, type WorkspaceHealth, type WorkspaceWithHealth } from '@orc/contracts'
 import type { OrcActions } from './actions'
 import type { ProjectSessions } from './sessions'
 import type { TranscriptItem } from './transcript'
@@ -26,8 +27,24 @@ const actionsStub = (over: Partial<OrcActions> = {}): OrcActions => ({
   retry: unsupported('retry'), annotate: unsupported('annotate'), revise: unsupported('revise'),
   writeNote: unsupported('writeNote'), deleteNote: unsupported('deleteNote'),
   renameProject: unsupported('renameProject'), newProject: unsupported('newProject'),
+  listWorkspaces: unsupported('listWorkspaces'), newWorkspace: unsupported('newWorkspace'),
   cancel: unsupported('cancel'), purgeProject: unsupported('purgeProject'), deleteProject: unsupported('deleteProject'), ...over,
 })
+
+// A full Workspace record, not a partial: the two workspace tools hand the record straight through,
+// so a fixture missing a field would let the tools ship one too.
+const wsFixture: Workspace = {
+  id: '11111111-1111-4111-8111-111111111111', title: 'Req', cwd: '/repo/.orc/worktrees/req',
+  branch: 'orc/req', baseBranch: 'main', kind: WORKSPACE_KIND.worktree, managed: true, onTrunk: false,
+  createdAt: '2026-01-01T00:00:00.000Z', archivedAt: null,
+}
+// …and the verdict that now travels with it. Full for the same reason: both doors pass `health`
+// through untouched, so a partial here would let them ship a partial.
+const healthFixture: WorkspaceHealth = {
+  state: WORKSPACE_STATE.waiting, lastActivityAt: '2026-01-02T00:00:00.000Z',
+  taskCount: 1, openTaskCount: 1, merged: false, provisionalNotes: 3, dirExists: true, clean: false,
+}
+const wsRow: WorkspaceWithHealth = { workspace: wsFixture, health: healthFixture }
 
 // minimal scripted model (doGenerate shape verified in plugins/executor-api-loop/src/test-model.ts)
 function scriptModel(turns: Array<{ text?: string; toolCalls?: Array<{ toolCallId: string; toolName: string; input: unknown }> }>) {
@@ -193,6 +210,86 @@ const toolItem = (over: Partial<Extract<TranscriptItem, { kind: 'tool' }>> = {})
 })
 const QUESTION: TranscriptItem = { kind: 'question', stepId: 's1', question: 'which cwd?'.repeat(80), answer: null }
 const SIGNAL: TranscriptItem = { kind: 'signal', stepId: 's1', outcome: 'success', summary: 'done '.repeat(120) }
+
+describe('workspaces at the doors', () => {
+  it('workspace_new creates the workspace and its request task; workspace_list returns it', async () => {
+    const calls: unknown[] = []
+    const actions = actionsStub({
+      newWorkspace: async input => { calls.push(input); return { workspace: wsFixture, taskId: 't1' } },
+      listWorkspaces: async () => [wsRow],
+    })
+    const tools = buildCopilotTools({ sessions: stubSessions, actions, projectId: 'p1' })
+    expect((await callTool(tools, 'workspace_new', { title: 'Req', spec: 'do it' })).output).toMatchObject({ taskId: 't1' })
+    expect(calls).toEqual([{ title: 'Req', spec: 'do it' }])
+    // the verdict travels WITH the record: a driver deciding where to work next needs to see that
+    // this checkout is waiting on a person, not just that it exists
+    expect((await callTool(tools, 'workspace_list', {})).output).toEqual([wsRow])
+  })
+
+  it('run no longer requires cwd — the kernel resolves the task\'s workspace', async () => {
+    const seen: unknown[] = []
+    const tools = buildCopilotTools({
+      sessions: stubSessions, projectId: 'p1',
+      actions: actionsStub({ run: async (id, cwd) => { seen.push([id, cwd]); return { requested: true } } }),
+    })
+    await callTool(tools, 'run', { taskId: 't1' })
+    expect(seen).toEqual([['t1', undefined]])
+  })
+
+  it('new_request carries an explicit workspaceId through to the actions layer', async () => {
+    const calls: unknown[] = []
+    const tools = buildCopilotTools({
+      sessions: stubSessions, projectId: 'p1',
+      actions: actionsStub({ newTask: async input => { calls.push(input); return { taskId: 't9' } } }),
+    })
+    await callTool(tools, 'new_request', { title: 'in that worktree', workspaceId: wsFixture.id })
+    expect(calls).toEqual([{ title: 'in that worktree', workspaceId: wsFixture.id }])
+  })
+
+  // A driver's first question in a multi-workspace project is "which checkout is this task in?" —
+  // project_status is where it starts, so the grouping lives there rather than behind a second tool.
+  it('project_status groups the tasks it already lists under their workspaces', async () => {
+    const sessions = sessionsStub({
+      snapshot: async () => ({
+        seq: 1,
+        graph: {
+          nodes: [
+            { id: 't1', type: 'task', label: 'in the worktree', detail: 'draft', workspaceId: wsFixture.id },
+            { id: 't2', type: 'task', label: 'somewhere else', detail: 'draft', workspaceId: 'another-workspace' },
+          ],
+          links: [],
+        },
+      }),
+    })
+    const tools = buildCopilotTools({ sessions, actions: null, projectId: 'p1', listWorkspaces: async () => [wsRow] })
+    expect((await callTool(tools, 'project_status', {})).output).toMatchObject({
+      workspaces: [{
+        id: wsFixture.id, title: 'Req', kind: WORKSPACE_KIND.worktree, branch: 'orc/req',
+        cwd: '/repo/.orc/worktrees/req', taskIds: ['t1'],
+        // the SAME verdict workspace_list and `orc ws ls` carry — the tool a driver starts from
+        // must not describe a checkout differently from the tool it moves on to
+        health: healthFixture,
+      }],
+    })
+    // no dep wired → the field is OMITTED. An empty array would read as "this project has no
+    // workspaces", which is never true — every task has one.
+    const bare = buildCopilotTools({ sessions, actions: null, projectId: 'p1' })
+    expect((await callTool(bare, 'project_status', {})).output).not.toHaveProperty('workspaces')
+  })
+
+  // Same posture the health probe already holds: project_status is the tool a driver starts from,
+  // so an optional dep that fails must cost the caller that ONE field, never the whole answer.
+  it('a failing listWorkspaces omits the field — it never takes project_status down', async () => {
+    const tools = buildCopilotTools({
+      sessions: stubSessions, actions: null, projectId: 'p1',
+      listWorkspaces: async () => { throw new Error('the log is unreachable') },
+    })
+    const r = await callTool(tools, 'project_status', {})
+    expect(r.isError).toBe(false)
+    expect(r.output).toMatchObject({ tasks: [{ taskId: 't1', title: 'build it', status: 'draft' }] })
+    expect(r.output).not.toHaveProperty('workspaces') // and never [], which reads as "none exist"
+  })
+})
 
 describe('task_transcript (bounded for the MCP door)', () => {
   it('snips tool input/output to strings and leaves questions/signals verbatim', async () => {

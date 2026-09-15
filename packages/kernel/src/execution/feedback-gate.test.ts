@@ -6,7 +6,7 @@ import {
 import { draftFixture, stepFixture } from '@orc/contracts/fixtures'
 import { openStorage } from '../storage'
 import { Kernel } from '../kernel'
-import { createTestDb, fakeProvider, testConfig, TEST_PROJECT_ID, waitFor } from '../test-helpers'
+import { createTestDb, fakeProvider, seedTestWorkspace, TEST_PROJECT_ID, TEST_WORKSPACE_ID, testConfig, waitFor } from '../test-helpers'
 import { createDbosPort, dbosSend, type DbosPort } from './dbos-port'
 
 // what the executor observed as the resumed value of the feedback yield
@@ -42,6 +42,8 @@ describe('durable conversational gate (feedback)', () => {
     const storage = await openStorage(db.url, { projectId: TEST_PROJECT_ID })
     const log = storage.events
     kernel = new Kernel(log, undefined, undefined, dbosSend)
+    // a task must name a workspace the fold has seen — one seeded record, then tasks as before
+    await seedTestWorkspace(log)
     const config = testConfig(db.url)
     port = await createDbosPort({
       storage, config,
@@ -54,7 +56,7 @@ describe('durable conversational gate (feedback)', () => {
   afterAll(async () => { await teardown() })
 
   it('a feedback gate appends feedback_requested and resumes the turn with the human text', async () => {
-    const t = await kernel.createTask({ title: 'feedback test', spec: 'ask then continue' })
+    const t = await kernel.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'feedback test', spec: 'ask then continue' })
     await kernel.proposePlan(t.id, draftFixture([stepFixture({ executorRef: 'feedback-fake' })]))
     await kernel.approvePlan(t.id)
 

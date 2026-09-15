@@ -8,7 +8,7 @@ import { draftFixture, stepFixture } from '@orc/contracts/fixtures'
 import { openStorage } from '../storage'
 import { Kernel } from '../kernel'
 import { deriveSystemUrl } from '../config'
-import { createTestDb, fakeProvider, testConfig, TEST_PROJECT_ID } from '../test-helpers'
+import { createTestDb, fakeProvider, seedTestWorkspace, TEST_PROJECT_ID, TEST_WORKSPACE_ID, testConfig } from '../test-helpers'
 import { createDbosPort } from './dbos-port'
 
 // set BEFORE openStorage: buildRedactor snapshots process.env when the store opens
@@ -45,7 +45,9 @@ describe('redaction covers what DBOS persists', () => {
     const storage = await openStorage(db.url, { projectId: TEST_PROJECT_ID })
     cleanup.push(() => storage.close())
     const kernel = new Kernel(storage.events)
-    const t = await kernel.createTask({ title: 'leak probe', spec: 'return a secret from a step' })
+    // a task must name a workspace the fold has seen — one seeded record, then tasks as before
+    await seedTestWorkspace(storage.events)
+    const t = await kernel.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'leak probe', spec: 'return a secret from a step' })
     await kernel.proposePlan(t.id, draftFixture([stepFixture({ id: 's1', title: 's1' })]))
     await kernel.approvePlan(t.id)
 

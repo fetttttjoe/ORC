@@ -11,7 +11,7 @@ import { scriptModel } from '@orc/executor-api-loop/test-model'
 import { openStorage, type EventLog, type Storage } from '../storage'
 import { Kernel } from '../kernel'
 import { fold } from '../projections'
-import { createTestDb, testConfig, TEST_PROJECT_ID } from '../test-helpers'
+import { createTestDb, seedTestWorkspace, TEST_PROJECT_ID, TEST_WORKSPACE_ID, testConfig } from '../test-helpers'
 import { SkillIndex } from '../plugins/skills'
 import { createDbosPort, type DbosPort } from './dbos-port'
 
@@ -31,6 +31,8 @@ describe('MCP + skills through a durable run (integration)', () => {
     storage = await openStorage(db.url, { projectId: TEST_PROJECT_ID })
     log = storage.events
     kernel = new Kernel(log)
+    // a task must name a workspace the fold has seen — one seeded record, then tasks as before
+    await seedTestWorkspace(log)
 
     const skillsRoot = mkdtempSync(path.join(tmpdir(), 'orc-mcp-run-'))
     mkdirSync(path.join(skillsRoot, 'haiku-style'), { recursive: true })
@@ -66,7 +68,7 @@ describe('MCP + skills through a durable run (integration)', () => {
   afterAll(async () => { await teardown() })
 
   it('runs to done with skill_loaded + real MCP tool events, and replay holds', async () => {
-    const t = await kernel.createTask({ title: 'mcp run', spec: 'echo ping' })
+    const t = await kernel.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'mcp run', spec: 'echo ping' })
     await kernel.proposePlan(t.id, draftFixture([stepFixture({
       modelRef: 'fake/m', skillRefs: ['haiku-style'], toolRefs: ['fixture/echo'],
     })]))

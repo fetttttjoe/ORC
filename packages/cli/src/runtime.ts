@@ -5,12 +5,19 @@ import { createOpenAIProvider } from '@orc/provider-openai'
 import { createOllamaProvider } from '@orc/provider-ollama'
 import { agentAnalyzer } from '@orc/analyzer-agent'
 import { createMcpHub, type McpHub } from '@orc/mcp-client'
-import { corpusDrift, createDriftProbe, createMemory, createMemoryLifecycle, createGroundingSource, memoryVerifyTool, notesCiting, restampToHead, unavailableStepMemory, memoryRoleFor, type BindStep, type MemoryLifecycle } from '@orc/memory'
+import { corpusDrift, CONSOLIDATE_EXECUTOR, createDriftProbe, createMemory, createMemoryLifecycle, createGroundingSource, memoryVerifyTool, notesCiting, restampToHead, unavailableStepMemory, memoryRoleFor, type BindStep, type MemoryLifecycle } from '@orc/memory'
 import { AUTO_HEAL_DEBOUNCE_MS, AUTO_SWEEP_TITLE, createAutoHeal, sweepPlanDraft } from './auto-heal'
 import { openMemory } from './memory-open'
 import { buildDistiller } from './consolidation-distiller'
+import { cwdAuthor, cwdWorkspaceId } from './cwd-workspace'
 import { createVaultProjector } from '@orc/vault-projector'
 import { commitTool, createDbosPort, createPluginHost, dbosSend, execTool, finalizePlanTool, isMcpTrusted, loadConfig, loadTrust, openStorage, projectorLease, readAnnotationsTool, reportCoverageTool, requireProject, scopedChangesTool, splitTool, Kernel, type DbosPort, type PluginHost, type ProjectConfig, type Storage } from '@orc/kernel'
+
+// The `executor` the commit reactor stamps on the notes it restamps. composeAuthor renders it
+// verbatim as the note's updatedBy, so this is the name an operator reads in the vault when asking
+// who touched a note nobody edited. Declared here, at the composition root that builds the author —
+// the reactor itself never sees it.
+const AUTO_HEAL_EXECUTOR = 'auto-heal'
 
 export function seedRegistries(config = loadConfig()) {
   const providers = new Map<string, ModelProvider<unknown>>([
@@ -29,7 +36,7 @@ export async function buildPlugins(config = loadConfig()): Promise<{ host: Plugi
   const host = await createPluginHost(config, seedRegistries(config))
   // point-of-use enforcement (EXTENDING invariant 4): the fingerprint predicate runs against
   // a fresh trust read at spawn time, never a startup snapshot
-  const hub = createMcpHub(config.mcpServers, (id, cfg) => isMcpTrusted(loadTrust(config.dir), id, cfg))
+  const hub = createMcpHub(config.mcpServers, (id, cfg) => isMcpTrusted(loadTrust(config.projectRoot), id, cfg))
   return { host, hub }
 }
 
@@ -75,6 +82,14 @@ export async function buildRuntime(
   const kernel = shared?.kernel ?? new Kernel(log, host.refValidator, host.analyzers, dbosSend, config.groundedApprovalDoors)
   log.onAppend = e => host.hooks.dispatch(HOOK_NAME.event_appended, e)
 
+  // Resolved HERE, before the memory block below, and deliberately NOT inside its try: a runtime
+  // that cannot name the workspace it serves is a wiring bug, and inside that try it would surface
+  // as "memory unavailable; continuing in degraded mode" — a silent downgrade of the whole memory
+  // subsystem for what is actually a missing boot adoption. Post-task consolidation is a WRITER,
+  // and the note it distils is durable project knowledge written from the checkout this supervisor
+  // serves, so its workspace is this directory's — not the completed task's.
+  const consolidateAuthor = await cwdAuthor(kernel, config.dir, AUTHOR_SOURCE.agent, { executor: CONSOLIDATE_EXECUTOR })
+
   // Startup order (design §8.4): projections FIRST — DBOS recovery may emit events the
   // moment it launches, and they must already be observed. Surreal failure degrades memory
   // (explicit unavailable tools) but never blocks history, execution, or the vault trace.
@@ -102,7 +117,7 @@ export async function buildRuntime(
     // `distill` (optional, memoryConsolidateModel) upgrades the note from extractive bullets to a
     // coherent synthesis, off the agent turn budget; absent → extractive. `catchUp` flushes the
     // projection before a consolidation reads the step notes.
-    lifecycle = createMemoryLifecycle({ log, store: memory.store, distill: buildDistiller(host.providers, config.memoryConsolidateModel), catchUp: () => memoryProjector.catchUp() })
+    lifecycle = createMemoryLifecycle({ log, store: memory.store, author: consolidateAuthor, distill: buildDistiller(host.providers, config.memoryConsolidateModel), catchUp: () => memoryProjector.catchUp() })
     await lifecycle.start()
     bindStep = memory.bindStep
     groundingSource = createGroundingSource({ store: memory.store, dir: config.dir })
@@ -123,7 +138,13 @@ export async function buildRuntime(
       mode: config.autoHeal,
       debounceMs: AUTO_HEAL_DEBOUNCE_MS,
       schedule: (fn, ms) => { const t = setTimeout(fn, ms); return () => clearTimeout(t) },
-      restamp: async () => (await restampToHead(memoryStore, config.dir)).length,
+      // the reactor's whole frame of reference is config.dir (the restamp and the drift probe both
+      // read it), so the restamp writes from the workspace that directory IS — the same lookup the
+      // sweep task below makes for its workspaceId.
+      // 'agent' named through `executor`, NOT 'cli': nobody typed this. 'cli' means a human at a
+      // terminal, and claiming it here would make every reactor-restamped note read `updatedBy: cli`
+      // — the same mis-attribution consolidate.ts already carries a comment about.
+      restamp: async () => (await restampToHead(memoryStore, config.dir, await cwdAuthor(kernel, config.dir, AUTHOR_SOURCE.agent, { executor: AUTO_HEAL_EXECUTOR }))).length,
       // a FRESH probe per pass: createDriftProbe caches per revision, and the tree this pass
       // must judge is the one the commit just changed — a reactor-lifetime probe would answer
       // from the previous commit's diffs
@@ -131,6 +152,10 @@ export async function buildRuntime(
       hasOpenSweep: async () => (await kernel.listTasks()).some(t => t.title === AUTO_SWEEP_TITLE && !TERMINAL_TASK_STATUS.has(t.status)),
       draftSweep: async drifted => {
         const task = await kernel.createTask({
+          // No originating task to inherit from: auto-heal reacts to a COMMIT, and its whole frame
+          // of reference is config.dir (the restamp and the drift probe both read it). So the sweep
+          // belongs to the workspace that directory is — the same lookup the `new` command makes.
+          workspaceId: await cwdWorkspaceId(kernel, config.dir),
           title: AUTO_SWEEP_TITLE,
           spec: `Auto-drafted by the commit reactor: ${drifted} note(s) still read drifted after the free restamp pass. `
             + 'Call memory_recheck FIRST — it returns the authoritative worklist; never discover candidates via memory_search. '
@@ -154,7 +179,11 @@ export async function buildRuntime(
     ...(autoHeal && { onCommitRecorded: async () => { autoHeal.onCommitRecorded() } }),
     skills: host.skills, tools: hub, groundingSource,
     stepTools: p => {
-      const author: MemoryAuthor = { source: AUTHOR_SOURCE.agent, taskId: p.taskId, stepId: p.stepId, runToken: p.runToken, executor: p.executor, model: p.model, role: p.role }
+      // workspaceId comes off `p`, i.e. off the running TASK — NOT from cwdAuthor like every other
+      // door here. One supervisor serves every workspace at once, so the process cwd says nothing
+      // about where a given step's knowledge belongs; the port reads it from the TaskNode it
+      // already folds. See createDbosPort's stepTools.
+      const author: MemoryAuthor = { source: AUTHOR_SOURCE.agent, workspaceId: p.workspaceId, taskId: p.taskId, stepId: p.stepId, runToken: p.runToken, executor: p.executor, model: p.model, role: p.role }
       // step role keys the memory role (Task 7): scout/auditor narrow or widen the tool surface
       // + epistemic posture; every other role (e.g. plain worker steps) gets today's verify role.
       const bound = bindStep({

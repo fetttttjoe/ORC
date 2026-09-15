@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'bun:test'
 import { DRIFT_STATE, EVENT_KIND, MEMORY_USE, MemoryScope, NOTE_KIND, NOTE_TIER, type EventRecord } from '@orc/contracts'
 import { recheckNotes, summarize } from './recheck'
+import { TEST_WORKSPACE_ID } from '@orc/contracts/fixtures'
 
 // One spelling of the fixture corpus. The two drift-verdict cases below each name the note, its
 // declared path and BOTH revisions, so a literal repeated per test is the drift this file's own
@@ -19,13 +20,13 @@ let seq = 0
 const write = (note: Record<string, unknown>): EventRecord => ({
   seq: ++seq, ts: AT, taskId: null, stepId: null, runToken: null,
   kind: EVENT_KIND.memory_written, id: `e${seq}`,
-  payload: { note: { tier: NOTE_TIER.semantic, kind: NOTE_KIND.fact, scope: MemoryScope.project, ...note }, author: { source: 'cli' } },
+  payload: { note: { tier: NOTE_TIER.semantic, kind: NOTE_KIND.fact, scope: MemoryScope.project, ...note }, author: { source: 'cli', workspaceId: TEST_WORKSPACE_ID } },
 } as unknown as EventRecord)
 
 const verify = (id: string, revision: string): EventRecord => ({
   seq: ++seq, ts: AT, taskId: null, stepId: null, runToken: null,
   kind: EVENT_KIND.memory_verified, id: `e${seq}`,
-  payload: { id, scope: MemoryScope.project, stamp: { revision, at: AT, by: 'auditor' }, author: { source: 'cli' } },
+  payload: { id, scope: MemoryScope.project, stamp: { revision, at: AT, by: 'auditor' }, author: { source: 'cli', workspaceId: TEST_WORKSPACE_ID } },
 } as unknown as EventRecord)
 
 const deps = { changedSince: async () => new Set<string>(), terminalTaskIds: new Set<string>() }
@@ -43,7 +44,7 @@ const drifting = { id: NOTE_ID, title: NOTE_ID, paths: [DECLARED_PATH], sourceRe
 const used = (id: string, outcome: string): EventRecord => ({
   seq: ++seq, ts: AT, taskId: null, stepId: null, runToken: null,
   kind: EVENT_KIND.memory_outcome, id: `e${seq}`,
-  payload: { id, scope: MemoryScope.project, outcome, author: { source: 'agent' } },
+  payload: { id, scope: MemoryScope.project, outcome, author: { source: 'agent', workspaceId: TEST_WORKSPACE_ID } },
 } as unknown as EventRecord)
 
 describe('recheckNotes', () => {

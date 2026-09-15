@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'bun:test'
 import { EventInput, EventKind, PAYLOAD_SCHEMAS } from './events'
+import { TEST_WORKSPACE_ID } from './fixtures'
 
 describe('events', () => {
   it('has a payload schema for every kind', () => {
@@ -27,7 +28,7 @@ describe('events', () => {
     expect(() => PAYLOAD_SCHEMAS.skill_loaded.parse({ ...good, hash: '' })).toThrow()
   })
   it('memory_deleted rejects a path-unsafe id or scope (no poison event)', () => {
-    const good = { id: 'auth', scope: 'project', author: { source: 'cli' } }
+    const good = { id: 'auth', scope: 'project', author: { source: 'cli', workspaceId: TEST_WORKSPACE_ID } }
     expect(() => PAYLOAD_SCHEMAS.memory_deleted.parse(good)).not.toThrow()
     expect(() => PAYLOAD_SCHEMAS.memory_deleted.parse({ ...good, scope: '../x' })).toThrow()
     expect(() => PAYLOAD_SCHEMAS.memory_deleted.parse({ ...good, id: '../x' })).toThrow()
@@ -42,7 +43,7 @@ describe('events', () => {
   })
 
   it('memory_accessed rejects a path-unsafe id or scope, and an unknown mode', () => {
-    const good = { id: 'auth', scope: 'project', mode: 'read', author: { source: 'cli' } }
+    const good = { id: 'auth', scope: 'project', mode: 'read', author: { source: 'cli', workspaceId: TEST_WORKSPACE_ID } }
     expect(() => PAYLOAD_SCHEMAS.memory_accessed.parse(good)).not.toThrow()
     expect(() => PAYLOAD_SCHEMAS.memory_accessed.parse({ ...good, mode: 'neighbors' })).not.toThrow()
     expect(() => PAYLOAD_SCHEMAS.memory_accessed.parse({ ...good, scope: '../x' })).toThrow()

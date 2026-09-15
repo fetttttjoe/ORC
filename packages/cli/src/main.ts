@@ -3,10 +3,10 @@ import { spawn } from 'node:child_process'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { Command, InvalidArgumentError } from 'commander'
-import { AUTHOR_SOURCE, SUPERVISOR_HEALTH, claimHistory, EDGE_DIRECTION, errorMessage, EVENT_KIND, foldMemory, LINK_KINDS, MASTERPLAN_NOTE_ID, MEMORY_ACCESS, MemoryDeletedPayload, MemoryScope, MemoryWrittenPayload, noteKey, NOTE_KINDS, NoteKind, NOTE_TIER, NOTE_TIERS, NoteTier, parseLinkSpec, PlanDraft, ROLE_SKILL, RUN_OUTCOME, STRATEGY, TASK_STATUS, TERMINAL_TASK_STATUS, LinkKind, slugId, type Analyzer, type EventRecord, type MemoryLink, type NoteFields, type ExecutionPort, type MemoryHealth, type Plan, formatModelRate } from '@orc/contracts'
-import { openStorage, Kernel, atomicWriteFileSync, listProjectIds, claimSlot, fold, gatedChildren, freezePlan, liveSupervisors, staleSupervisors, grantExtensionTrust, grantMcpTrust, initializeProject, isExtensionTrusted, isMcpTrusted, loadConfig, loadTrust, migrateDatabase, requireProject, runtimeLockHeld, stepUsage, subtreeUsage, taskUsage, type EventLog, type OrcConfig, type PluginHost, type ProjectConfig, type Storage } from '@orc/kernel'
+import { AUTHOR_SOURCE, SUPERVISOR_HEALTH, claimHistory, EDGE_DIRECTION, errorMessage, EVENT_KIND, foldMemory, LINK_KINDS, MASTERPLAN_NOTE_ID, MEMORY_ACCESS, MemoryDeletedPayload, MemoryScope, MemoryWrittenPayload, noteKey, NOTE_KINDS, NoteKind, NOTE_TIER, NOTE_TIERS, NoteTier, parseLinkSpec, PlanDraft, ROLE_SKILL, RUN_OUTCOME, STRATEGY, TASK_STATUS, TERMINAL_TASK_STATUS, LinkKind, slugId, type Analyzer, type EventRecord, type MemoryAuthor, type MemoryLink, type NoteFields, type ExecutionPort, type MemoryHealth, type Plan, type TaskNode, type WorkspaceWithHealth, formatModelRate } from '@orc/contracts'
+import { openStorage, Kernel, atomicWriteFileSync, listProjectIds, claimSlot, fold, gatedChildren, freezePlan, liveSupervisors, orphanTasks, staleSupervisors, grantExtensionTrust, grantMcpTrust, initializeProject, isExtensionTrusted, isMcpTrusted, loadConfig, loadTrust, migrateDatabase, requireProject, runtimeLockHeld, stepUsage, subtreeUsage, tasksByWorkspace, taskUsage, type EventLog, type OrcConfig, type PluginHost, type ProjectConfig, type Storage } from '@orc/kernel'
 import { createVaultProjector, parsePlanFile } from '@orc/vault-projector'
-import { archiveCandidates, consolidateTask, createDriftProbe, frontier, needsReground, probeMemory, RECHECK_KINDS, recheckNotes, restampToHead, summarize } from '@orc/memory'
+import { archiveCandidates, consolidateTask, CONSOLIDATE_EXECUTOR, createDriftProbe, frontier, needsReground, probeMemory, RECHECK_KINDS, recheckNotes, restampToHead, summarize } from '@orc/memory'
 import { withMemory } from './memory-open'
 import { DEFAULT_TEMPLATE_MODEL, singleStepDraft } from './plan-template'
 import { buildDistiller } from './consolidation-distiller'
@@ -15,16 +15,22 @@ import { runSupervisor, startBootHeartbeat, supervisorHealth } from './serve'
 import { ensureSupervisor, SUPERVISOR_MODE, type SupervisorMode } from './supervisor-client'
 import { isLanguageModel } from './model-guard'
 import { assertDrivable, assertRetryable, buildModelDiscovery, buildOrcActions } from './actions'
+import { cwdAuthor, cwdWorkspaceId } from './cwd-workspace'
 import { renderDerivedPlan, renderPlanHuman } from './plan-render'
+import { wsCommand } from './ws-commands'
+import { requireLiveWorkspace } from './workspace-ops'
+import { listWorkspaceHealth } from './workspace-health'
+import { serveLogFile, servePidFile } from './serve-paths'
 import { CommandFailure } from './exit'
 import { formatUsageLine } from './usage-render'
 import { watchSubtree, type TailResult } from './watch'
 
 
-function buildCopilotConfig(discovery: ReturnType<typeof buildModelDiscovery>) {
+function buildCopilotConfig(discovery: ReturnType<typeof buildModelDiscovery>, listWorkspaces: () => Promise<WorkspaceWithHealth[]>) {
   return {
     defaultModelRef: 'anthropic/claude-haiku-4-5',
     listModels: discovery.listModels,
+    listWorkspaces,
     resolveModel: (ref: string) => {
       const { p, modelId } = discovery.providerFor(ref)
       const model = p.languageModel(modelId)
@@ -108,7 +114,7 @@ export function initCommand(dir?: string): Command {
         mkdirSync(path.dirname(target), { recursive: true })
         copyFileSync(path.join(SHIPPED_SKILLS_DIR, name, 'SKILL.md'), target)
       }
-      console.log(`initialized project '${identity.projectName}' (${identity.projectId})`)
+      console.log(`initialized project '${identity.projectName}' (${identity.projectId}) in ${identity.projectRoot}`)
     })
 }
 
@@ -195,16 +201,23 @@ function resolveDraft(task: { title: string; spec: string }, opts: { file?: stri
     : singleStepDraft(task, opts.model, opts.skill ?? [], config?.maxIterations)
 }
 
+// Re-exported (not just imported) so existing callers of these two paths keep resolving them
+// through main.ts — see serve-paths.ts for why they live there rather than here.
+export { serveLogFile, servePidFile }
+
 // Start a supervisor that survives this command. Detached on purpose: a supervisor left in the
 // CLI's process group would take the ctrl-c meant for the watch, which is the exact behaviour this
 // phase removes. node's spawn is what carries `detached` (setsid); Bun.spawn has no equivalent.
 function spawnSupervisor(config: ProjectConfig): void {
-  const logPath = path.join(config.dir, '.orc', 'serve.log')
+  const logPath = serveLogFile(config)
   mkdirSync(path.dirname(logPath), { recursive: true })
   const log = openSync(logPath, 'a')
   try {
     // argv[1] is this CLI's own entry point — re-running it is what makes the child the same orc,
-    // whether it was reached through the bin shim, `bun run`, or a linked node_modules/.bin
+    // whether it was reached through the bin shim, `bun run`, or a linked node_modules/.bin.
+    // cwd stays config.dir (the checkout this command runs in), not projectRoot: the supervisor
+    // child's own loadConfig then defaults its run workspace to the tree being worked, which is
+    // the wanted behaviour until a run's cwd is resolved from a recorded workspace instead of the process cwd.
     spawn(process.execPath, [process.argv[1] ?? '', 'serve'], {
       cwd: config.dir, detached: true, stdio: ['ignore', log, log],
     }).unref()
@@ -240,6 +253,16 @@ export function buildProgram(
     return kernel
   }
 
+  // Placed after requireKernel rather than beside the init/db addCommands above: the deps object
+  // reads that binding immediately, so calling wsCommand up there would hit its temporal dead zone.
+  program.addCommand(wsCommand({ requireKernel, ...(plugin && { project: { config: plugin.config, log: plugin.log } }) }))
+
+  // The author every `orc memory` write carries, in ONE place — a dozen handlers each spelling
+  // their own `{ source: cli, workspaceId: … }` is exactly the shape that leaves one command
+  // writing knowledge under the wrong checkout. Folded per invocation rather than captured once:
+  // `orc ws new` can mint a workspace mid-session, and a boot-time snapshot would not see it.
+  const cliAuthor = (): Promise<MemoryAuthor> => cwdAuthor(requireKernel(), plugin?.config.dir, AUTHOR_SOURCE.cli)
+
   // Discovery-backed model validation rejects invented refs at creation time on every surface;
   // declared here (not at the actions site below) so the `plan` command's rate line can reach it.
   const discovery = plugin ? buildModelDiscovery(plugin.config, plugin.log) : undefined
@@ -256,17 +279,31 @@ export function buildProgram(
     // budget from the parent's remaining), but nothing could SET it — a spend cap no caller can
     // turn on is a cap that does not exist.
     .option('--budget <usd>', 'cap total spend for this task and its subtree', parsePositiveNumber)
-    .action(async (title: string, opts: { spec: string; parent?: string; strategy?: string; model?: string; analyzer: string; budget?: number }) => {
+    .option('--workspace <id>', 'workspace for this task (default: the workspace this directory is)')
+    .action(async (title: string, opts: { spec: string; parent?: string; strategy?: string; model?: string; analyzer: string; budget?: number; workspace?: string }) => {
       if (opts.strategy !== undefined && !(Object.values(STRATEGY) as string[]).includes(opts.strategy))
         throw new Error(`unknown --strategy '${opts.strategy}' — valid strategies: ${Object.values(STRATEGY).join(', ')}`)
+      // A ROOT task belongs to the checkout the operator typed the command in; a CHILD belongs to
+      // its parent's workspace, so `--parent` hands the decision to the kernel (createTaskIn's
+      // inheritance) by leaving this undefined. Re-homing a child to wherever the command happened
+      // to be typed would let ONE subtree straddle two working directories — exactly what
+      // proposeSplit's inherited workspaceId exists to prevent. An explicit --workspace still wins
+      // over both, for the deliberate re-home.
+      // Named outright, so it is checked outright: the kernel accepts a task in an archived
+      // workspace (a merged workspace's subtree must keep growing) and only a caller that typed the
+      // id can be told it named finished business. The inherited and cwd-derived arms below are not
+      // checked — one subtree must not straddle two checkouts.
+      if (opts.workspace !== undefined) await requireLiveWorkspace(requireKernel(), opts.workspace)
+      const workspaceId = opts.workspace
+        ?? (opts.parent === undefined ? await cwdWorkspaceId(requireKernel(), plugin?.config.dir) : undefined)
       if (opts.strategy !== STRATEGY.groundedPlan) {
-        const t = await requireKernel().createTask({ title, spec: opts.spec, parentId: opts.parent, budgetUSD: opts.budget ?? null })
+        const t = await requireKernel().createTask({ title, spec: opts.spec, parentId: opts.parent, budgetUSD: opts.budget ?? null, workspaceId })
         console.log(t.id)
         return
       }
       if (!opts.model) throw new Error(`--model is required with --strategy ${STRATEGY.groundedPlan}`)
       const t = await requireKernel().createGroundedTask({
-        title, spec: opts.spec, modelRef: opts.model, analyzerRef: opts.analyzer, parentId: opts.parent, budgetUSD: opts.budget ?? null,
+        title, spec: opts.spec, modelRef: opts.model, analyzerRef: opts.analyzer, parentId: opts.parent, budgetUSD: opts.budget ?? null, workspaceId,
         modelCatalog: await discovery?.listModelOptions().catch(() => []) ?? [],
         ...(plugin ? { maxIterations: plugin.config.maxIterations } : {}),
       })
@@ -465,13 +502,32 @@ export function buildProgram(
       for (const w of r.warnings) console.log(`warning: ${w}`)
     })
 
+  // The task line format every group (and the orphan bucket) shares, indented so it reads as
+  // belonging to the heading printed just above it.
+  const taskLine = (t: TaskNode): string => `  ${t.id}  ${t.status.padEnd(17)} ${t.title}`
+
   program
     .command('tasks')
     .description('list tasks')
     .action(async () => {
-      const tasks = await requireKernel().listTasks()
-      if (tasks.length === 0) console.log('_no tasks_')
-      for (const t of tasks) console.log(`${t.id}  ${t.status.padEnd(17)} ${t.title}`)
+      const state = await requireKernel().state()
+      const groups = tasksByWorkspace(state)
+      const orphans = orphanTasks(state)
+      if (groups.every(g => g.tasks.length === 0) && orphans.length === 0) {
+        console.log('_no tasks_')
+        return
+      }
+      for (const g of groups) {
+        console.log(`# ${g.workspace.title}  (${g.workspace.branch ?? 'detached'})  ${g.workspace.cwd}`)
+        for (const t of g.tasks) console.log(taskLine(t))
+      }
+      // A task naming a workspace the fold never saw is a log defect (every task is created after
+      // its workspace exists) — surfaced loudly here rather than silently dropped from a view keyed
+      // by workspace, so the operator sees the task AND the missing record it points at.
+      if (orphans.length > 0) {
+        console.log('# ORPHANED — workspace missing from the log')
+        for (const t of orphans) console.log(taskLine(t))
+      }
     })
 
   program
@@ -544,6 +600,9 @@ export function buildProgram(
       waitMs: SPAWN_WAIT_MS,
       noDaemon: noDaemon() || !storage,
       sleep: ms => Bun.sleep(ms),
+      // Lazy like `spawn`: only read once spawning has already happened, which never occurs under
+      // noDaemon — so a caller with no project context (tests, embedded hosts) never forces one.
+      config: () => needPlugin().config,
     })
     if (mode === SUPERVISOR_MODE.inProcess) await needPort()
     return mode
@@ -618,10 +677,21 @@ export function buildProgram(
     await report(await watchSubtree(requireKernel(), taskId, since), root)
   }
 
+  // What `--cwd` overrides, spelled ONCE for the two commands that offer it — `run` and `retry` take
+  // the same flag to the same kernel call, and two copies would let one of them keep describing a
+  // default the other had since changed.
+  //
+  // "else the project directory" is deliberately gone: requestRun resolves the cwd from the task's
+  // workspace and REFUSES a task whose workspace the log never saw, so there is no fallback left for
+  // a human to plan around — an orphan is a refusal naming this flag, not a silent run somewhere
+  // else. (The execution port still has a project-dir rung, but nothing can reach it: the cwd is
+  // resolved before the ask is even recorded.)
+  const CWD_OVERRIDE_HELP = "override the working directory (default: the task's workspace)"
+
   program
     .command('run <taskId>')
     .description('execute the approved plan (durable; the supervisor drives it, re-running attaches)')
-    .option('--cwd <dir>', 'shared workspace for all steps (default: the project directory)')
+    .option('--cwd <dir>', CWD_OVERRIDE_HELP)
     .action(async (taskId: string, opts: { cwd?: string }) => {
       await requireDrivable(taskId)
       await requestAndWatch(taskId, { cwd: opts.cwd })
@@ -630,7 +700,7 @@ export function buildProgram(
   program
     .command('retry <taskId>')
     .description('re-run failed steps of a blocked task as new attempts')
-    .option('--cwd <dir>', "workspace override (default: the previous run's cwd, else the project directory)")
+    .option('--cwd <dir>', CWD_OVERRIDE_HELP)
     .action(async (taskId: string, opts: { cwd?: string }) => {
       // the same refusal port.retry made, kept client-side for the same reason as requireDrivable:
       // an ask nobody can serve must not reach the log — one implementation, shared with the doors
@@ -663,7 +733,9 @@ export function buildProgram(
         memoryHalfLifeDays: (cfg ?? loadConfig()).memoryHalfLifeDays,
         // mutations only when launched inside a project with a real runtime behind it
         actions: portFactory && plugin ? actions() : undefined,
-        copilot: portFactory && plugin && discovery ? buildCopilotConfig(discovery) : undefined,
+        copilot: portFactory && plugin && discovery
+          ? buildCopilotConfig(discovery, () => listWorkspaceHealth(needPlugin()))
+          : undefined,
         defaultCwd: cfg?.dir ?? process.cwd(),
         // degraded-memory + supervisor visibility: the footer badge polls this — probe per call,
         // no cache. Supervisor state answers "is anything driving?" (2026-08-01's recurring blind
@@ -671,7 +743,7 @@ export function buildProgram(
         health: plugin ? async () => {
           // The supervisor's pid gates the stage: probeMemory reports one only when the process
           // that published it is the one driving now. See its comment for why pid beats an age.
-          const supervisor = plugin.storage ? await probeSupervisor(plugin.storage, plugin.config.dir, plugin.config) : undefined
+          const supervisor = plugin.storage ? await probeSupervisor(plugin.storage, plugin.config.projectRoot, plugin.config) : undefined
           return {
             memory: await probeMemory(plugin.config, plugin.log, supervisor?.pid),
             ...(supervisor && { supervisor }),
@@ -691,15 +763,14 @@ export function buildProgram(
   // over each other's files. Phase 2 moves claims to Postgres and raises this — presence is
   // already a heartbeat, so nothing else has to change when it does.
   const PHASE1_MAX_SLOTS = 1
-  const servePidFile = (dir: string) => path.join(dir, '.orc', 'serve.pid')
   // one derivation of supervisor health for every door that reports it (graph /api/health, the
   // MCP project_status) — heartbeat rows + the ready-only pid file, classified by supervisorHealth
-  const probeSupervisor = async (storage: Storage, dir: string, config?: { databaseUrl: string; projectId: string }) => {
+  const probeSupervisor = async (storage: Storage, projectRoot: string, config?: { databaseUrl: string; projectId: string }) => {
     const now = new Date()
     // the runtime lock answers "is anything DRIVING", which the heartbeat cannot: a --no-daemon
     // command or the graph server holds it without ever writing a supervisor row
     const held = config ? await runtimeLockHeld(config.databaseUrl, config.projectId) : false
-    return supervisorHealth(await liveSupervisors(storage, now), await staleSupervisors(storage, now), existsSync(servePidFile(dir)), held)
+    return supervisorHealth(await liveSupervisors(storage, now), await staleSupervisors(storage, now), existsSync(servePidFile(projectRoot)), held)
   }
   const SERVE_NEEDS_STORAGE = 'serve needs a live storage connection'
 
@@ -733,7 +804,7 @@ export function buildProgram(
       }
       // for `serve status`/`serve stop` only — presence (admission, liveness) is decided by the
       // heartbeat row alone, never by this file's existence
-      atomicWriteFileSync(servePidFile(config.dir), `${process.pid}\n`)
+      atomicWriteFileSync(servePidFile(config.projectRoot), `${process.pid}\n`)
       console.log(`orc serve: ready  idle exit after ${opts.idle}m — ctrl-c to stop`)
       // The parallelism ceiling, stated where an operator can act on it: steps run in dependency
       // waves and the whole wave is awaited before the next is scheduled, so `concurrency` is the
@@ -757,7 +828,7 @@ export function buildProgram(
         // about to exit either way — draining would block shutdown on an hour-long parked gate
         // (dbos-port.ts's own `drain: false` rationale); recovery owns resumption on the next boot.
         await port.shutdown({ drain: false })
-        rmSync(servePidFile(config.dir), { force: true })
+        rmSync(servePidFile(config.projectRoot), { force: true })
       }
     })
   serve
@@ -883,9 +954,13 @@ export function buildProgram(
       if (opts.autonomy !== 'gated' && opts.autonomy !== 'full')
         throw new Error(`--autonomy must be 'gated' or 'full', got '${opts.autonomy}'`)
       const { config, log, storage } = needPlugin()
-      const { startMcpServe } = await import('./mcp-serve') // lazy: the SDK loads only here
+      const { startMcpServe, MCP_SERVE_EXECUTOR } = await import('./mcp-serve') // lazy: the SDK loads only here
       await startMcpServe({
         config, log,
+        // Resolved BEFORE the server opens: a stdio server that discovered mid-session it cannot
+        // name its workspace would surface the refusal as a failed tool call, where here it is a
+        // startup error naming the missing project context.
+        memoryAuthor: await cwdAuthor(requireKernel(), config.dir, AUTHOR_SOURCE.agent, { executor: MCP_SERVE_EXECUTOR }),
         // 'mcp', so a feedback answer arriving through this door is RECORDED as arriving through
         // it. For a grounded task the conversational 'approve' is the human gate, and
         // approvedPlanHash only honours source 'cli' — so an agent answering 'approve' here now
@@ -893,7 +968,11 @@ export function buildProgram(
         // DO want the client approving still have the explicit, autonomy-gated `approve` tool.
         actions: portFactory ? actions('mcp') : null,
         autonomy: opts.autonomy,
-        ...(storage && { supervisor: () => probeSupervisor(storage, config.dir, config) }),
+        ...(storage && { supervisor: () => probeSupervisor(storage, config.projectRoot, config) }),
+        // project_status names the checkout each task is worked in — a driver's first question in a
+        // project with a worktree per request. Read-only, so it is wired whether or not this server
+        // can mutate (actions above may be null).
+        listWorkspaces: () => listWorkspaceHealth({ config, log }),
       })
     })
   mcp
@@ -901,7 +980,7 @@ export function buildProgram(
     .description('declared servers and their trust state')
     .action(async () => {
       const { config } = needPlugin()
-      const trust = loadTrust(config.dir) // fresh read: grants take effect in the same session's list
+      const trust = loadTrust(config.projectRoot) // fresh read: grants take effect in the same session's list
       for (const [id, cfg] of Object.entries(config.mcpServers)) {
         const state = isMcpTrusted(trust, id, cfg) ? 'trusted  ' : 'untrusted'
         console.log(`${state} ${id.padEnd(16)} ${cfg.command} ${(cfg.args ?? []).join(' ')}`)
@@ -923,7 +1002,7 @@ export function buildProgram(
       const { config } = needPlugin()
       const declared = config.mcpServers[serverId]
       if (!declared) throw new Error(`undeclared MCP server '${serverId}' — declare it in .orc/config.json first`)
-      grantMcpTrust(serverId, declared, config.dir)
+      grantMcpTrust(serverId, declared, config.projectRoot)
       console.log(`trusted mcp server '${serverId}' (bound to its current command/args/env declaration)`)
     })
 
@@ -933,10 +1012,10 @@ export function buildProgram(
     .description('declared extensions and their trust state')
     .action(async () => {
       const { host, config } = needPlugin()
-      const trust = loadTrust(config.dir) // fresh read: grants take effect in the same session's list
+      const trust = loadTrust(config.projectRoot) // fresh read: grants take effect in the same session's list
       for (const p of config.extensions) {
-        const state = isExtensionTrusted(trust, p, config.dir) ? 'trusted  ' : 'untrusted'
-        const active = host.extensions.loaded.find(l => l.path === path.resolve(config.dir, p))
+        const state = isExtensionTrusted(trust, p, config.projectRoot) ? 'trusted  ' : 'untrusted'
+        const active = host.extensions.loaded.find(l => l.path === path.resolve(config.projectRoot, p))
         console.log(`${state} ${p}${active ? `  (loaded: ${active.manifest.id})` : ''}`)
       }
     })
@@ -945,9 +1024,9 @@ export function buildProgram(
     .description('grant local trust to a declared extension')
     .action(async (p: string) => {
       const { config } = needPlugin()
-      if (!config.extensions.some(e => path.resolve(config.dir, e) === path.resolve(config.dir, p)))
+      if (!config.extensions.some(e => path.resolve(config.projectRoot, e) === path.resolve(config.projectRoot, p)))
         throw new Error(`undeclared extension '${p}' — declare it in .orc/config.json first`)
-      grantExtensionTrust(p, config.dir)
+      grantExtensionTrust(p, config.projectRoot)
       console.log(`trusted extension '${p}' (bound to its current content) — takes effect on the next orc invocation`)
     })
 
@@ -998,7 +1077,7 @@ export function buildProgram(
           // ERASES the stored column, so an unflagged update would wipe the note's kind
           ...(o.kind !== undefined && { kind: o.kind }),
           ...(o.claim !== undefined && { addClaims: o.claim }),
-        }, { source: AUTHOR_SOURCE.cli }, { ...(o.invalidate !== undefined && { invalidates: o.invalidate }) })
+        }, await cliAuthor(), { ...(o.invalidate !== undefined && { invalidates: o.invalidate }) })
         await memory.projector.catchUp() // one-shot: no live subscription in a CLI process, so project the append now
       })
       console.log(`wrote memory '${o.id}'`)
@@ -1010,7 +1089,7 @@ export function buildProgram(
     .action(async (id: string, o: { scope?: string }) => {
       const { config, log } = needPlugin()
       await withMemory({ log, config }, async memory => {
-        await memory.store.remove(id, o.scope)
+        await memory.store.remove(id, o.scope, await cliAuthor())
         await memory.projector.catchUp()
       })
       console.log(`deleted '${id}'`)
@@ -1070,7 +1149,7 @@ export function buildProgram(
           const n = byKey.get(c.key)
           return n ? [{ id: n.id, scope: n.scope }] : []
         })
-        await memory.store.setArchivedAll(retiring, true, { source: AUTHOR_SOURCE.cli })
+        await memory.store.setArchivedAll(retiring, true, await cliAuthor())
         await memory.projector.catchUp()
       })
       console.log(`archived ${goes.length} note(s) — restore any with: orc memory restore <id> --scope <scope>`)
@@ -1085,7 +1164,7 @@ export function buildProgram(
       // provenance was damaged (an old archive/restore that overwrote its author before that was
       // fixed) has no evidence left to retire it by, and without this it could never be retired.
       await withMemory({ log, config }, async memory => {
-        await memory.store.setArchived(id, o.scope ?? 'project', true, { source: AUTHOR_SOURCE.cli })
+        await memory.store.setArchived(id, o.scope ?? 'project', true, await cliAuthor())
         await memory.projector.catchUp()
       })
       console.log(`archived '${id}' — restore with: orc memory restore ${id} --scope ${o.scope ?? 'project'}`)
@@ -1097,7 +1176,7 @@ export function buildProgram(
     .action(async (id: string, o: { scope?: string }) => {
       const { config, log } = needPlugin()
       await withMemory({ log, config }, async memory => {
-        await memory.store.setArchived(id, o.scope ?? 'project', false, { source: AUTHOR_SOURCE.cli })
+        await memory.store.setArchived(id, o.scope ?? 'project', false, await cliAuthor())
         await memory.projector.catchUp()
       })
       console.log(`restored '${id}'`)
@@ -1180,7 +1259,7 @@ export function buildProgram(
         // a human read counts the same as an agent read — but only on a hit, and only after the
         // note was actually produced (same rule the memory_read tool follows). No catchUp: the
         // append is durable, and every read path already drains before it reads.
-        if (note) await memory.store.recordAccess(id, o.scope, MEMORY_ACCESS.read, { source: AUTHOR_SOURCE.cli })
+        if (note) await memory.store.recordAccess(id, o.scope, MEMORY_ACCESS.read, await cliAuthor())
         return note
       })
       if (!n) throw new Error(`no note '${id}'`)
@@ -1265,7 +1344,7 @@ export function buildProgram(
         // by the CLI's error path, not caught here. It also appends memory_topic_accessed exactly
         // once, so the --json branch reads THROUGH it rather than around it: the access event is
         // recorded whether the caller wants JSON or human rows.
-        const claims = await memory.store.topicClaims(topicKey, { source: AUTHOR_SOURCE.cli })
+        const claims = await memory.store.topicClaims(topicKey, await cliAuthor())
         // --json: raw Claim[] and stop, no human rows (stdout stays one parseable JSON value).
         if (o.json) { console.log(JSON.stringify(claims, null, 2)); return }
         for (const c of claims)
@@ -1289,7 +1368,7 @@ export function buildProgram(
         const ranked = await memory.store.neighbors(id, { kinds, depth: o.depth, scope: o.scope })
         // mirror the memory_neighbors MCP tool: one access against the SEED, only on a hit —
         // the neighbours are summaries the caller may never read.
-        if (ranked.length > 0) await memory.store.recordAccess(id, o.scope, MEMORY_ACCESS.neighbors, { source: AUTHOR_SOURCE.cli })
+        if (ranked.length > 0) await memory.store.recordAccess(id, o.scope, MEMORY_ACCESS.neighbors, await cliAuthor())
         // empty prints a sentinel (like ls/search's `_no notes_`) so a human isn't shown zero bytes.
         if (ranked.length === 0) { console.log('_no neighbors_'); return }
         // direction disambiguates asymmetric kinds: '→ supersedes' = seed supersedes n; '← supersedes' = n supersedes seed
@@ -1315,7 +1394,7 @@ export function buildProgram(
       const { config, log } = needPlugin()
       await withMemory({ log, config }, async memory => {
         // one spelling with the auto-heal reactor — restampToHead is the whole pass
-        const targets = await restampToHead(memory.store, config.dir)
+        const targets = await restampToHead(memory.store, config.dir, await cliAuthor())
         console.log(targets.length === 0
           ? 'nothing to restamp — no note has fully-committed drift to catch up'
           : `restamped ${targets.length} note(s) to HEAD: ${targets.map(t => t.id).join(', ')}`)
@@ -1331,7 +1410,11 @@ export function buildProgram(
         await memory.projector.catchUp()
         const distill = opts.model ? buildDistiller(seedRegistries(config).providers, opts.model) : undefined
         // force: an explicit manual request bypasses the salience gate the auto-lifecycle applies
-        const notes = await consolidateTask({ log, store: memory.store, distill }, taskId, { force: true })
+        // The SAME author shape the lifecycle subscriber builds (runtime.ts) — a consolidation is
+        // an agent writer named through `executor`, never a person at a terminal, whichever door
+        // asked for it; only the workspace comes from this cwd.
+        const author = await cwdAuthor(requireKernel(), config.dir, AUTHOR_SOURCE.agent, { executor: CONSOLIDATE_EXECUTOR })
+        const notes = await consolidateTask({ log, store: memory.store, author, distill }, taskId, { force: true })
         if (!notes || notes.length === 0) { console.log(`nothing to consolidate for '${taskId}' — unknown task, planning child, or no step notes`); return }
         await memory.projector.catchUp()
         // one line per note: a multi-area task consolidates into one anchored note per area
@@ -1350,7 +1433,7 @@ export function buildProgram(
       const { config, log } = needPlugin()
       await withMemory({ log, config }, async memory => {
         const id = slugId(title)
-        await memory.store.write({ id, title, summary: o.summary, body: o.body, tags: o.tags }, { source: AUTHOR_SOURCE.cli })
+        await memory.store.write({ id, title, summary: o.summary, body: o.body, tags: o.tags }, await cliAuthor())
         await memory.projector.catchUp() // one-shot CLI process: project the append now
         console.log(`noted '${id}' — read it back: orc memory cat ${id}`)
       })

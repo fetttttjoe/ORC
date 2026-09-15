@@ -657,7 +657,7 @@ Drives the executor's generator to completion, always calling `gen.return(undefi
 
 The port builds **every step's `ExecutorContext` inside the one registered DBOS `stepWorkflow`**:
 
-- **`workspaceDir`** = `args.cwd ?? path.join(config.workspaceRoot, taskId, stepId)`. Because a run is started with `cwd = runCwd(...)` (the project dir by default), **every step of one run executes in the SAME directory** (a shared working tree) — this is what lets repo tasks succeed.
+- **`workspaceDir`** = `args.cwd ?? path.join(config.workspaceRoot, taskId, stepId)`. Because a run is started with `cwd = runCwd(...)` (the task's workspace directory by default — the kernel records it into `run_requested`; the project dir is only the last fallback), **every step of one run executes in the SAME directory** (a shared working tree) — this is what lets repo tasks succeed.
 - **`depOutputs`** — from `init`: for each `dep` in `step.dependsOn`, the completed dep step's `output`. On a *mixed* grounding verdict the scan-scope directive is injected as a synthetic `grounding` dep output (§7.8), leaving the recorded plan untouched.
 - **`extraTools`** — MCP tools from `tools.resolve(step.toolRefs)`, concatenated with the per-step `stepTools({...})` result. `stepTools` returns either `ResolvedTool[]` or `{ tools, memory? }`; the optional `memory` becomes `ctx.memory` (`StepMemory`).
 - Budget-clamped `checkpoint`/`operation` closures (each `priceDraft`s usage drafts through the provider cost table), and `budgetRemainingUSD` = `remainingBudget(projectState, taskId)` (min-over-ancestors).

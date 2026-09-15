@@ -1,5 +1,6 @@
 import { frontmatter } from '@orc/vault-projector'
 import { LINK_KIND, MemoryScope, type MemoryLink, type MemoryNote, type NoteView } from '@orc/contracts'
+import { provisionalOf, type WorkspaceView } from './provisional'
 
 export function noteRelPath(note: Pick<MemoryNote, 'id' | 'scope'>): string {
   return note.scope === MemoryScope.project ? `${note.id}.md` : `${note.scope}/${note.id}.md`
@@ -29,6 +30,9 @@ type RenderedField =
   | 'dependsOn' | 'skillRefs' | 'toolRefs' | 'modelRef'                // plan tier's execution payload
   | 'summary'
   | 'createdAt' | 'createdBy' | 'updatedAt' | 'updatedBy' | 'revision' | 'verified'
+  // rendered as the DERIVED `provisional` key rather than verbatim: a bare workspace uuid on every
+  // file tells a reader nothing, where "this is pending in <that checkout>" is actionable
+  | 'workspaceId'
   | 'sources' | 'claims' | 'rationale' | 'uncertainty'                 // body sections
   | 'body'
 // `archived` is unrenderable by construction: an archived note's vault file is DELETED, so there
@@ -41,8 +45,20 @@ void renderCoversNote
 // The note is read through NoteView so one renderer covers every tier: a field the note's tier
 // does not have reads as undefined, and is spread away rather than written out as a hollow key —
 // the vault file then shows the note's real shape, not a union's worth of empty fields.
-export function renderNoteFile(note: MemoryNote): string {
+// `view` is the workspace standing at render time — the SAME derivation the read tools run, so the
+// vault and the tools cannot disagree about one note. A SNAPSHOT, not the async probe the tools
+// take: a render loop covers hundreds of notes and must fold the workspace table once, not per file.
+// Absent = claim nothing, the same fail-toward-silence rule the drift probe follows.
+//
+// CEILING: the flag is stamped when the FILE is written, and `workspace_merged` re-renders nothing —
+// so a merged workspace's files keep saying `provisional` until the notes are next written or the
+// vault is replaced from Surreal (rebuildVaultMemory, which runs on projector start and on
+// `orc memory rebuild`). The tools are always current because they derive per call; only the file is
+// a snapshot. Upgrade path if that gap bites: have the memory projector wake on `workspace_merged`
+// and re-render the notes carrying that workspaceId, which is a query it can already make.
+export function renderNoteFile(note: MemoryNote, view?: WorkspaceView): string {
   const n: NoteView = note
+  const provisional = view ? provisionalOf(note, view.workspaces, view.merged) : null
   const head = frontmatter({
     type: 'memory',
     id: note.id, scope: note.scope, title: note.title, tier: note.tier,
@@ -64,6 +80,10 @@ export function renderNoteFile(note: MemoryNote): string {
     // Omitted on the notes nobody has checked, which is most of them: a `verified: null` on every
     // file would read as a claim about them ("checked, found nothing") rather than as silence.
     ...(n.verified && { verified: n.verified }),
+    // The workspace id alone, not the pair the tools return: a human reading the vault follows the
+    // id to `orc ws`, where the title already lives, and a two-key block on every pending note would
+    // outweigh the frontmatter it sits in. Omitted on trunk knowledge — same silence rule as above.
+    ...(provisional && { provisional: provisional.workspaceId }),
   })
   const decomposesInto = linksOf(note.links, LINK_KIND.decomposes_into)
   const dependsOn = linksOf(note.links, LINK_KIND.depends_on)

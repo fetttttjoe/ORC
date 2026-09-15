@@ -1,5 +1,5 @@
 import { z } from 'zod'
-import { AUTHOR_SOURCE, EVENT_KIND, FS_WRITE_TOOL_NAME, LINK_KIND, MemoryAccessedPayload, MemoryScope, NOTE_KIND, NOTE_TIER, PAYLOAD_SCHEMAS, RETENTION, STEP_ID, TASK_STATUS, planScope, slugId, type MemoryNote, type MemoryNoteDraft, type MemoryStore } from '@orc/contracts'
+import { EVENT_KIND, FS_WRITE_TOOL_NAME, LINK_KIND, MemoryAccessedPayload, MemoryScope, NOTE_KIND, NOTE_TIER, PAYLOAD_SCHEMAS, RETENTION, STEP_ID, TASK_STATUS, planScope, slugId, type MemoryAuthor, type MemoryNote, type MemoryNoteDraft, type MemoryStore } from '@orc/contracts'
 import type { EventLog } from '@orc/kernel'
 
 // One transient step outcome — the (title, summary) of a plan-scoped ambient note a task left behind.
@@ -135,10 +135,19 @@ export function isSubstantive(input: { steps: StepOutcome[]; derivedFrom: string
   return input.derivedFrom.length >= 1 || input.steps.length >= 2
 }
 
+// The `executor` a consolidation author names. composeAuthor renders it verbatim as the note's
+// createdBy, and TWO composition roots build that author — the lifecycle subscriber in the serve
+// runtime and `orc memory consolidate --force` — so a bare literal spelled twice would eventually
+// show one operation under two writer names in the vault.
+export const CONSOLIDATE_EXECUTOR = 'consolidate'
+
 // What consolidateTask reads from — the memory read model and the event log, nothing from the
 // execution kernel: memory-lifecycle work stays in the memory domain. `distill` is the optional LLM
 // upgrade, injected by the composition root; absent → extractive.
-export interface ConsolidationDeps { log: EventLog; store: MemoryStore; distill?: ConsolidationDistiller }
+// `author` is a PARAMETER, not a literal built here: the plugin never invents an author, because
+// MemoryAuthor.workspaceId can only be answered by the composition root that knows which checkout
+// this process speaks for. It still names the writer through `executor` — see the write below.
+export interface ConsolidationDeps { log: EventLog; store: MemoryStore; author: MemoryAuthor; distill?: ConsolidationDistiller }
 
 // The task's title, folded from its task_created event; null if the task is unknown to the log.
 async function taskTitle(log: EventLog, taskId: string): Promise<string | null> {
@@ -230,7 +239,9 @@ export async function consolidateTask(
     // through `executor` is the shape mcp-serve.ts already uses for its own door, and composeAuthor
     // renders it as 'consolidate'. Note this only fixes attribution GOING FORWARD: createdBy is
     // sticky across rewrites (deriveNoteProvenance), so notes written before this keep saying 'cli'.
-    written.push(await deps.store.write(draft, { source: AUTHOR_SOURCE.agent, executor: 'consolidate' }, writeOpts))
+    // The composition root supplies both halves (CONSOLIDATE_EXECUTOR + the workspace) — see
+    // ConsolidationDeps.
+    written.push(await deps.store.write(draft, deps.author, writeOpts))
   }
   return written
 }

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'bun:test'
 import { COMMIT_STEP_ID, EVENT_KIND, LINK_KIND, ROLE_SKILL, STEP_ROLE, type EventRecord, type MemoryLink, type PlanNote } from '@orc/contracts'
-import { planNoteFixture, stepFixture } from '@orc/contracts/fixtures'
+import { TEST_WORKSPACE_ID, planNoteFixture, stepFixture } from '@orc/contracts/fixtures'
 import { foldPlanNotes, groundedPlanOmission, instantiateFrozenPlan, planGraphHash, planScope, withCommitStep } from './grounded-plan'
 
 const note = (over: Partial<PlanNote> & { id: string }): PlanNote =>
@@ -216,12 +216,12 @@ describe('foldPlanNotes (log-fold, projection-independent)', () => {
   let seq = 0
   const written = (note: Record<string, unknown>): EventRecord => ({
     seq: ++seq, projectId: 'p', idempotencyKey: null, taskId: null, stepId: null, runToken: null,
-    kind: EVENT_KIND.memory_written, payload: { note, author: { source: 'agent' } }, usage: null,
+    kind: EVENT_KIND.memory_written, payload: { note, author: { source: 'agent', workspaceId: TEST_WORKSPACE_ID } }, usage: null,
     ts: `2026-01-01T00:00:${String(seq).padStart(2, '0')}.000Z`,
   })
   const deleted = (id: string, scope: string): EventRecord => ({
     seq: ++seq, projectId: 'p', idempotencyKey: null, taskId: null, stepId: null, runToken: null,
-    kind: EVENT_KIND.memory_deleted, payload: { id, scope, author: { source: 'cli' } }, usage: null,
+    kind: EVENT_KIND.memory_deleted, payload: { id, scope, author: { source: 'cli', workspaceId: TEST_WORKSPACE_ID } }, usage: null,
     ts: `2026-01-01T00:00:${String(seq).padStart(2, '0')}.000Z`,
   })
 
@@ -295,7 +295,7 @@ describe('foldPlanNotes (log-fold, projection-independent)', () => {
     const scope = planScope('t1')
     const poison: EventRecord = {
       seq: ++seq, projectId: 'p', idempotencyKey: null, taskId: null, stepId: null, runToken: null,
-      kind: EVENT_KIND.memory_written, payload: { note: { id: 'BAD ID WITH SPACES' }, author: { source: 'agent' } },
+      kind: EVENT_KIND.memory_written, payload: { note: { id: 'BAD ID WITH SPACES' }, author: { source: 'agent', workspaceId: TEST_WORKSPACE_ID } },
       usage: null, ts: '2026-01-01T00:00:59.000Z',
     }
     const notes = foldPlanNotes([poison, written({ id: 'masterplan', scope, tier: 'plan', title: 'M' })], scope)

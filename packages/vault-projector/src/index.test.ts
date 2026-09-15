@@ -3,7 +3,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { Kernel, openStorage } from '@orc/kernel'
-import { createTestDb, TEST_PROJECT_ID } from '@orc/kernel/test-helpers'
+import { createTestDb, seedTestWorkspace, TEST_PROJECT_ID, TEST_WORKSPACE_ID } from '@orc/kernel/test-helpers'
 import { draftFixture, stepFixture } from '@orc/contracts/fixtures'
 import { createVaultProjector } from './index'
 
@@ -17,7 +17,9 @@ describe('createVaultProjector.renderAll', () => {
     const vaultDir = mkdtempSync(path.join(tmpdir(), 'orc-vp-')); dirs.push(vaultDir)
     const log = (await openStorage(db.url, { projectId: TEST_PROJECT_ID })).events
     const kernel = new Kernel(log)
-    const t = await kernel.createTask({ title: 'demo', spec: 'do it' })
+    // a task must name a workspace the fold has seen — one seeded record, then tasks as before
+    await seedTestWorkspace(log)
+    const t = await kernel.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'demo', spec: 'do it' })
     await kernel.proposePlan(t.id, draftFixture([stepFixture({ id: 's1', modelRef: 'anthropic/claude-sonnet-5' })]))
 
     const projector = createVaultProjector({ log, config: { vaultDir } })
@@ -35,13 +37,15 @@ describe('createVaultProjector.renderAll', () => {
     const vaultDir = mkdtempSync(path.join(tmpdir(), 'orc-vp-')); dirs.push(vaultDir)
     const log = (await openStorage(db.url, { projectId: TEST_PROJECT_ID })).events
     const kernel = new Kernel(log)
-    const t = await kernel.createTask({ title: 'demo', spec: 'do it' })
+    // a task must name a workspace the fold has seen — one seeded record, then tasks as before
+    await seedTestWorkspace(log)
+    const t = await kernel.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'demo', spec: 'do it' })
     await log.append({
       taskId: null, stepId: null, runToken: null,
       kind: 'memory_written',
       payload: {
         note: { id: 'note-x', title: 'X', scope: 'project', categories: [], tags: [], links: [], paths: [], summary: '', body: '' },
-        author: { source: 'cli' },
+        author: { source: 'cli', workspaceId: TEST_WORKSPACE_ID },
       },
     })
 
@@ -67,7 +71,9 @@ describe('createVaultProjector.renderAll', () => {
     const vaultDir = mkdtempSync(path.join(tmpdir(), 'orc-vp-')); dirs.push(vaultDir)
     const log = (await openStorage(db.url, { projectId: TEST_PROJECT_ID })).events
     const kernel = new Kernel(log)
-    const t = await kernel.createTask({ title: 'scoped', spec: 'x' })
+    // a task must name a workspace the fold has seen — one seeded record, then tasks as before
+    await seedTestWorkspace(log)
+    const t = await kernel.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'scoped', spec: 'x' })
     const allSpy = spyOn(log, 'all')
     const projector = createVaultProjector({ log, config: { vaultDir } })
     await projector.renderAll()
@@ -82,18 +88,20 @@ describe('createVaultProjector.renderAll', () => {
     const vaultDir = mkdtempSync(path.join(tmpdir(), 'orc-vp-')); dirs.push(vaultDir)
     const log = (await openStorage(db.url, { projectId: TEST_PROJECT_ID })).events
     const kernel = new Kernel(log)
+    // a task must name a workspace the fold has seen — one seeded record, then tasks as before
+    await seedTestWorkspace(log)
 
     const projector = createVaultProjector({ log, config: { vaultDir } })
     await projector.start()
     const byTaskSpy = spyOn(log, 'byTask')
 
-    const t = await kernel.createTask({ title: 'demo', spec: 'do it' })
+    const t = await kernel.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'demo', spec: 'do it' })
     await log.append({
       taskId: null, stepId: null, runToken: null,
       kind: 'memory_written',
       payload: {
         note: { id: 'note-y', title: 'Y', scope: 'project', categories: [], tags: [], links: [], paths: [], summary: '', body: '' },
-        author: { source: 'cli' },
+        author: { source: 'cli', workspaceId: TEST_WORKSPACE_ID },
       },
     })
 

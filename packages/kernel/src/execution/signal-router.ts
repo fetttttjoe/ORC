@@ -44,6 +44,10 @@ const ROUTER_RELEVANT: Record<EventKind, boolean> = {
   // stamps, and the free restamp/heal reaction (onCommitRecorded) is how drift settles without
   // an operator running `orc memory restamp` by hand — proven live twice on 2026-08-03
   commit_recorded: true,
+  // workspace lifecycle facts: vocabulary only so far, same as models_discovered — no reactor
+  // reads these yet, unlike commit_recorded's onCommitRecorded. Flip to true once a later
+  // change wires a reaction to one of them.
+  workspace_created: false, workspace_retitled: false, workspace_archived: false, workspace_merged: false,
 }
 const ROUTER_KINDS = EventKind.options.filter(k => ROUTER_RELEVANT[k])
 

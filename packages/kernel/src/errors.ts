@@ -6,6 +6,7 @@ export const KERNEL_ERROR_CODE = {
   // a keyed append conflicted with a stored event of DIFFERENT data — a typed identity so
   // consumers (the memory gateway's benign-replay tolerance) match a code, not a prose message
   idempotency_conflict: 'idempotency_conflict',
+  workspace_not_found: 'workspace_not_found',
 } as const
 export type KernelErrorCode = (typeof KERNEL_ERROR_CODE)[keyof typeof KERNEL_ERROR_CODE]
 

@@ -3,6 +3,7 @@ import { mkdtempSync, writeFileSync, mkdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import type { MemoryFilter, MemoryStore, NoteSummary } from '@orc/contracts'
+import { TEST_WORKSPACE_ID } from '@orc/contracts/fixtures'
 import { createGroundingSource } from './grounding-source'
 
 // A NoteSummary is a wide shape; tests only care about the four fields notes() reads, so this
@@ -10,7 +11,7 @@ import { createGroundingSource } from './grounding-source'
 const summary = (over: Partial<NoteSummary>): NoteSummary => ({
   id: 'n', scope: 'project', title: 't', tier: 'semantic',
   categories: [], tags: [], summary: '', hits: 0, lastAccessedAt: null,
-  sourceRevision: null, paths: [], ...over,
+  sourceRevision: null, paths: [], workspaceId: TEST_WORKSPACE_ID, ...over,
 })
 
 // Only list() is exercised; every other MemoryStore method throws so a test can never depend on one.
