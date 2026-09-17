@@ -140,7 +140,7 @@ describe('listing and showing', () => {
     expect((await listDecisions(d, { status: DECISION_STATUS.proposed })).map(r => r.id)).toEqual(['idea'])
   }, 20_000)
 
-  // Decisions are project-scope knowledge (spec §6): a plan-scoped `kind: decision` note is one
+  // Decisions are project-scope knowledge: a plan-scoped `kind: decision` note is one
   // task's own scratch note under that kind, not an ADR the project made.
   it('does not list a plan-scoped decision note', async () => {
     const d = await door()

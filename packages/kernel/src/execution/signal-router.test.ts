@@ -5,7 +5,7 @@ import { fold } from '../projections'
 import { openStorage, type EventLog } from '../storage'
 import { createTestDb, seedTestWorkspace, TEST_PROJECT_ID, TEST_WORKSPACE_ID, waitFor } from '../test-helpers'
 import { composeSplitResult, createSignalRouter } from './signal-router'
-import { eventFixture } from '@orc/contracts/fixtures'
+import { eventFixture, must } from '@orc/contracts/fixtures'
 
 const split = { splitId: 'sp1', taskId: 'p', stepId: 's1', runToken: 'rt', childTaskId: 'c1', resolved: false }
 const evt = (over: Partial<EventRecord>): EventRecord =>
@@ -19,21 +19,21 @@ describe('composeSplitResult', () => {
   it('done: joins terminal-step summaries; collects subtree note (id, scope) pairs', () => {
     const events: EventRecord[] = [
       childTask('c1', 'p'),
-      evt({ seq: 2, kind: 'plan_proposed', payload: { plan: { taskId: 'c1', version: 1, strategyRef: 'split', costEstimateUSD: null, steps: [
+      evt({ seq: 2, kind: EVENT_KIND.plan_proposed, payload: { plan: { taskId: 'c1', version: 1, strategyRef: 'split', costEstimateUSD: null, steps: [
         { id: 'w1', role: 'worker', title: 'w1', instructions: 'x', executorRef: 'e', modelRef: 'f/m', skillRefs: [], toolRefs: [], isolation: 'local', zone: [], maxIterations: 5, dependsOn: [] },
         { id: 'w2', role: 'worker', title: 'w2', instructions: 'x', executorRef: 'e', modelRef: 'f/m', skillRefs: [], toolRefs: [], isolation: 'local', zone: [], maxIterations: 5, dependsOn: ['w1'] },
       ] } } }),
-      evt({ seq: 3, kind: 'step_started', stepId: 'w1', runToken: 'rt-w1', payload: { stepId: 'w1', runToken: 'rt-w1', attempt: 1 } }),
-      evt({ seq: 4, kind: 'step_completed', stepId: 'w1', runToken: 'rt-w1', payload: { stepId: 'w1', runToken: 'rt-w1', summary: 'first' } }),
-      evt({ seq: 5, kind: 'step_started', stepId: 'w2', runToken: 'rt-w2', payload: { stepId: 'w2', runToken: 'rt-w2', attempt: 1 } }),
-      evt({ seq: 6, kind: 'step_completed', stepId: 'w2', runToken: 'rt-w2', payload: { stepId: 'w2', runToken: 'rt-w2', summary: 'second' } }),
-      evt({ seq: 7, kind: 'task_status_changed', payload: { taskId: 'c1', from: 'running', to: 'done' } }),
+      evt({ seq: 3, kind: EVENT_KIND.step_started, stepId: 'w1', runToken: 'rt-w1', payload: { stepId: 'w1', runToken: 'rt-w1', attempt: 1 } }),
+      evt({ seq: 4, kind: EVENT_KIND.step_completed, stepId: 'w1', runToken: 'rt-w1', payload: { stepId: 'w1', runToken: 'rt-w1', summary: 'first' } }),
+      evt({ seq: 5, kind: EVENT_KIND.step_started, stepId: 'w2', runToken: 'rt-w2', payload: { stepId: 'w2', runToken: 'rt-w2', attempt: 1 } }),
+      evt({ seq: 6, kind: EVENT_KIND.step_completed, stepId: 'w2', runToken: 'rt-w2', payload: { stepId: 'w2', runToken: 'rt-w2', summary: 'second' } }),
+      evt({ seq: 7, kind: EVENT_KIND.task_status_changed, payload: { taskId: 'c1', from: 'running', to: 'done' } }),
     ]
     // note events arrive separately: they are NOT router kinds, so the router fetches them only
     // when it actually composes a result rather than on every routed event
     const notes: EventRecord[] = [
-      evt({ seq: 8, taskId: null, kind: 'memory_written', payload: { note: { id: 'finding', scope: 'project', title: 'F', categories: [], tags: [], links: [], paths: [], summary: '', body: '' }, author: { source: 'agent', workspaceId: TEST_WORKSPACE_ID, taskId: 'c1' } } }),
-      evt({ seq: 9, taskId: null, kind: 'memory_written', payload: { note: { id: 'other', scope: 'project', title: 'O', categories: [], tags: [], links: [], paths: [], summary: '', body: '' }, author: { source: 'agent', workspaceId: TEST_WORKSPACE_ID, taskId: 'unrelated' } } }),
+      evt({ seq: 8, taskId: null, kind: EVENT_KIND.memory_written, payload: { note: { id: 'finding', scope: 'project', title: 'F', categories: [], tags: [], links: [], paths: [], summary: '', body: '' }, author: { source: 'agent', workspaceId: TEST_WORKSPACE_ID, taskId: 'c1' } } }),
+      evt({ seq: 9, taskId: null, kind: EVENT_KIND.memory_written, payload: { note: { id: 'other', scope: 'project', title: 'O', categories: [], tags: [], links: [], paths: [], summary: '', body: '' }, author: { source: 'agent', workspaceId: TEST_WORKSPACE_ID, taskId: 'unrelated' } } }),
     ]
     const r = composeSplitResult(events, notes, split)
     expect(r).toEqual({
@@ -45,15 +45,15 @@ describe('composeSplitResult', () => {
   it('blocked: failing step message; cancelled: fixed summary', () => {
     const blocked = composeSplitResult([
       childTask('c1', 'p'),
-      evt({ seq: 2, kind: 'step_started', stepId: 'w1', runToken: 'rt-w1', payload: { stepId: 'w1', runToken: 'rt-w1', attempt: 1 } }),
-      evt({ seq: 3, kind: 'step_failed', stepId: 'w1', runToken: 'rt-w1', payload: { stepId: 'w1', runToken: 'rt-w1', class: 'agent_error', message: 'nope' } }),
-      evt({ seq: 4, kind: 'task_status_changed', payload: { taskId: 'c1', from: 'running', to: 'blocked' } }),
+      evt({ seq: 2, kind: EVENT_KIND.step_started, stepId: 'w1', runToken: 'rt-w1', payload: { stepId: 'w1', runToken: 'rt-w1', attempt: 1 } }),
+      evt({ seq: 3, kind: EVENT_KIND.step_failed, stepId: 'w1', runToken: 'rt-w1', payload: { stepId: 'w1', runToken: 'rt-w1', class: 'agent_error', message: 'nope' } }),
+      evt({ seq: 4, kind: EVENT_KIND.task_status_changed, payload: { taskId: 'c1', from: 'running', to: 'blocked' } }),
     ], [], split)
     expect(blocked.outcome).toBe('blocked')
     expect(blocked.summary).toBe('nope')
     const cancelled = composeSplitResult([
       childTask('c1', 'p'),
-      evt({ seq: 2, kind: 'task_status_changed', payload: { taskId: 'c1', from: 'running', to: 'cancelled' } }),
+      evt({ seq: 2, kind: EVENT_KIND.task_status_changed, payload: { taskId: 'c1', from: 'running', to: 'cancelled' } }),
     ], [], split)
     expect(cancelled).toMatchObject({ outcome: 'cancelled', summary: 'cancelled' })
   })
@@ -131,7 +131,7 @@ describe('createSignalRouter (integration, real EventLog)', () => {
 
     await router.start()
 
-    const event = (await log.byTask('running')).find(e => e.kind === EVENT_KIND.feedback_provided)!
+    const event = must((await log.byTask('running')).find(e => e.kind === EVENT_KIND.feedback_provided), 'feedback provided event')
     expect(sends).toEqual([{ dest: 'step:running:plan:a1', key: `feedback:${event.seq}` }])
   })
 
@@ -151,7 +151,7 @@ describe('createSignalRouter (integration, real EventLog)', () => {
     })
 
     await expect(kernel.replyFeedback(task.id, 'yes')).rejects.toThrow('simulated send failure')
-    const provided = (await log.byTask(task.id)).find(e => e.kind === EVENT_KIND.feedback_provided)!
+    const provided = must((await log.byTask(task.id)).find(e => e.kind === EVENT_KIND.feedback_provided), 'feedback provided event')
     expect(await kernel.openFeedback(task.id)).toBeNull()
 
     const sends: Array<{ dest: string; message: string; topic: string; key: string }> = []
@@ -175,7 +175,7 @@ describe('createSignalRouter (integration, real EventLog)', () => {
     expect(await waitFor(async () => (await resolvedCount()) === 1)).toBe(true)
     expect(sends).toHaveLength(1)
     expect(sends[0]).toMatchObject({ dest: 'rt', topic: 'split:sp1', key: 'sp1' })
-    expect(sends[0]!.result).toMatchObject({ splitId: 'sp1', childTaskId: 'c', outcome: 'done' })
+    expect(must(sends[0], 'first send').result).toMatchObject({ splitId: 'sp1', childTaskId: 'c', outcome: 'done' })
   })
 
   it('sweep: a terminal split that landed before start is resolved by start() alone', async () => {
@@ -186,7 +186,7 @@ describe('createSignalRouter (integration, real EventLog)', () => {
     await router.start() // sweep runs synchronously before returning
     expect(await resolvedCount()).toBe(1)
     expect(sends).toHaveLength(1)
-    expect(sends[0]!.outcome).toBe('blocked')
+    expect(must(sends[0], 'first send').outcome).toBe('blocked')
   })
 
   it('sweep route 2: an approved pending-split child with no run gets startChildRun on start()', async () => {
@@ -254,7 +254,7 @@ describe('createSignalRouter (integration, real EventLog)', () => {
   // A request nothing can ever serve must not be retried forever. startRunAt admits only
   // approved/running/blocked, so a run_requested left over from before a task settled was
   // re-attempted and re-refused on EVERY boot — three done tasks did exactly that on all 18
-  // supervisor starts recorded in .orc/serve.log.
+  // supervisor starts.
   it('sweep: a run_requested for a task that has since settled is NOT re-served', async () => {
     const started: string[] = []
     await log.append({ taskId: 't1', stepId: null, runToken: null, kind: EVENT_KIND.task_created, payload: { task: taskNode('t1', null) } })
@@ -316,7 +316,7 @@ describe('createSignalRouter (integration, real EventLog)', () => {
 
     const failures = async () => (await log.byTask('t1')).filter(e => e.kind === EVENT_KIND.reaction_failed)
     expect(await waitFor(async () => (await failures()).length > 0)).toBe(true)
-    const recorded = ReactionFailedPayload.parse((await failures())[0]!.payload)
+    const recorded = ReactionFailedPayload.parse(must((await failures())[0], 'reaction failed event').payload)
     expect(recorded).toEqual({
       reaction: REACTION.runRequested, taskId: 't1', message: 'nothing can serve this', causeSeq: asked.seq,
     })
@@ -389,7 +389,7 @@ describe('createSignalRouter (integration, real EventLog)', () => {
       const c = await commit('e'.repeat(40), ['x.ts'])
       const failures = async () => (await log.all()).filter(e => e.kind === EVENT_KIND.reaction_failed)
       expect(await waitFor(async () => (await failures()).length > 0)).toBe(true)
-      const recorded = ReactionFailedPayload.parse((await failures())[0]!.payload)
+      const recorded = ReactionFailedPayload.parse(must((await failures())[0], 'reaction failed event').payload)
       expect(recorded).toEqual({ reaction: REACTION.commitRecorded, taskId: null, message: 'memory down', causeSeq: c.seq })
     })
   })

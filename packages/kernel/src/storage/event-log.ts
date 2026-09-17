@@ -1,11 +1,11 @@
 import { isDeepStrictEqual } from 'node:util'
-import pg from 'pg'
 import { and, asc, count, desc, eq, gt, inArray, sql } from 'drizzle-orm'
 import { errorMessage, EVENT_KIND, EventInput, PAYLOAD_SCHEMAS, type EventKind, type EventRecord } from '@orc/contracts'
 import { events } from '../schema'
 import { KERNEL_ERROR_CODE, KernelError } from '../errors'
 import type { Redactor } from '../redact'
-import { isGonePermanently, NOTIFY_CHANNEL, PostgresStore, RECONNECT_DELAYS_MS, type Tx } from './postgres'
+import { isGonePermanently, NOTIFY_CHANNEL, PostgresStore, type Tx } from './postgres'
+import { pgListen } from './pg-listen'
 
 const PUMP_RETRY_MS = 250
 
@@ -180,7 +180,7 @@ export class EventLog implements EventLogOps {
     return row?.n ?? 0
   }
 
-  // reads/appends inside fn MUST go through tx — pool queries would escape the transaction (spec §4)
+  // reads/appends inside fn MUST go through tx — pool queries would escape the transaction
   transaction<T>(fn: (tx: EventLogOps) => Promise<T>): Promise<T> {
     return this.store.withProjectLock(tx => fn(this.txOps(tx)))
   }
@@ -191,7 +191,7 @@ export class EventLog implements EventLogOps {
     return row?.seq ?? 0
   }
 
-  // Lossless stream (spec §5.4): NOTIFY is only a wake-up, catch-up queries are
+  // Lossless stream: NOTIFY is only a wake-up, catch-up queries are
   // authoritative; the cursor advances only after the handler succeeds; a dropped LISTEN
   // connection reconnects with bounded backoff and catches up first.
   // `onReset` fires when delivery restarts from a DIFFERENT log (see rewindIfReplaced) — a
@@ -202,12 +202,10 @@ export class EventLog implements EventLogOps {
   ): Promise<() => Promise<void>> {
     let cursor = opts.fromSeq ?? (await this.latestSeq())
     let closed = false
-    let client: pg.Client | null = null
     let pumpTimer: ReturnType<typeof setTimeout> | null = null
-    let reconnectTimer: ReturnType<typeof setTimeout> | null = null
-    let backoff = 0
     let pumping = false
     let wakeAgain = false
+    let firstConnect = true
 
     const pump = async (): Promise<void> => {
       if (pumping) { wakeAgain = true; return }
@@ -241,78 +239,36 @@ export class EventLog implements EventLogOps {
       cursor = 0
       await opts.onReset?.()
     }
-    const scheduleReconnect = (): void => {
-      if (closed || reconnectTimer !== null) return
-      const delay = RECONNECT_DELAYS_MS[Math.min(backoff, RECONNECT_DELAYS_MS.length - 1)] ?? RECONNECT_DELAYS_MS[0]
-      backoff += 1
-      reconnectTimer = setTimeout(() => {
-        reconnectTimer = null
-        void connect(false)
-      }, delay)
-    }
-    const connect = async (initial: boolean): Promise<void> => {
-      if (closed) return
-      const c = new pg.Client({ connectionString: this.store.url, application_name: `orc-events-${this.store.projectId}` })
-      // an 'error' event with no listener crashes the process (Node default), so the handler must
-      // stay attached even after close — but it must stop TALKING, the way the 'end' handler
-      // already does. A subscription that was disposed has nothing to report: the socket dying
-      // afterwards is the expected consequence of closing it, and warning about it prints an
-      // alarming line after the user's command already finished.
-      c.on('error', err => {
-        if (!closed) console.warn(`event stream listener error: ${errorMessage(err)}`)
-      })
-      try {
-        await c.connect()
-        await c.query(`LISTEN ${NOTIFY_CHANNEL}`)
-        // the disposer may have run during the awaits above; if so, don't adopt this
-        // fresh LISTEN client — the disposer already ended the previous `client` and left.
-        if (closed) { await c.end().catch(() => {}); return }
-        client = c
-        c.on('notification', () => pumpSafe())
-        c.once('end', () => {
-          if (!closed) scheduleReconnect()
-        })
+
+    const listener = await pgListen({
+      url: this.store.url,
+      applicationName: `orc-events-${this.store.projectId}`,
+      channel: NOTIFY_CHANNEL,
+      onNotification: () => pumpSafe(),
+      onConnected: async () => {
         await rewindIfReplaced() // a reconnect is exactly when the log underneath may have changed
         // catch-up closes the gap before live delivery resumes. On the INITIAL connect it must
         // throw — the caller is still waiting to learn whether the subscription came up. On a
-        // RECONNECT it must not: the connection-level catch below reacts to a failure here by
-        // ending a perfectly healthy LISTEN and backing off, so a handler that threw once cost the
-        // stream its socket and pinned the backoff, where the steady-state path (pumpSafe, wired to
-        // 'notification' above) would have warned and retried in 250ms with LISTEN intact.
-        if (initial) await pump()
+        // RECONNECT it must not: pgListen reacts to a failure here by ending a perfectly healthy
+        // LISTEN and backing off, so a handler that threw once cost the stream its socket and
+        // pinned the backoff, where the steady-state path (pumpSafe, wired to onNotification)
+        // would have warned and retried in 250ms with LISTEN intact.
+        if (firstConnect) { firstConnect = false; await pump() }
         else pumpSafe()
-        backoff = 0
-      } catch (err) {
-        await c.end().catch(() => {})
-        if (initial) {
-          // Nothing owns this subscription yet: the caller receives a throw and NO disposer, so
-          // `closed` can never be set and any timer still armed reconnects forever with no way to
-          // stop it. `c.end()` above fires the 'end' handler, which schedules exactly such a
-          // reconnect — so the teardown the disposer would have done has to happen here instead.
-          closed = true
-          if (pumpTimer !== null) { clearTimeout(pumpTimer); pumpTimer = null }
-          if (reconnectTimer !== null) { clearTimeout(reconnectTimer); reconnectTimer = null }
-          throw err
-        }
-        // same rule as the project watch: a gone database or a rejected credential cannot be
-        // retried into working, and a loop that never gives up outlives whatever owned it
-        if (isGonePermanently(err)) {
-          closed = true
-          if (pumpTimer !== null) { clearTimeout(pumpTimer); pumpTimer = null }
-          console.warn(`event stream stopped: ${errorMessage(err)}`)
-          return
-        }
-        console.warn(`event stream reconnect failed: ${errorMessage(err)}`)
-        scheduleReconnect()
-      }
-    }
-    await connect(true)
+      },
+      isGonePermanently,
+      // measured: with the database dropped mid-pump, the 250 ms retry re-armed on every failure
+      // for the rest of the process — four warnings in the first 1.2 s
+      onStopped: () => {
+        closed = true
+        if (pumpTimer !== null) { clearTimeout(pumpTimer); pumpTimer = null }
+      },
+      warn: msg => console.warn(`event stream ${msg}`),
+    })
     return async () => {
       closed = true
       if (pumpTimer !== null) clearTimeout(pumpTimer)
-      if (reconnectTimer !== null) clearTimeout(reconnectTimer)
-      client?.removeAllListeners('notification')
-      await client?.end()
+      await listener.close()
     }
   }
 

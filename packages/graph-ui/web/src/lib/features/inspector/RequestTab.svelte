@@ -67,7 +67,8 @@
   const waves = $derived(plans.data?.visual?.version === shownVersion ? (plans.data?.visual?.waves ?? null) : null)
 
   const openQuestion = $derived(ledger.gates.find(g => g.taskId === taskId)?.question ?? null)
-  // the task payload already carries them — the completion line used to claim zero regardless
+  // read off the task payload, which carries the artifacts — a completion line computed elsewhere
+  // claimed zero regardless
   const artifacts = $derived(TaskArtifacts.safeParse(node.data).data?.artifacts ?? [])
   const failed = $derived(waves?.flatMap(w => w.steps).find(st => st.status === 'failed') ?? null)
   const failedStep = $derived(failed?.id ?? null)

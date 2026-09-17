@@ -3,7 +3,7 @@ import {
   EVENT_KIND, FINISH_STEP_ID, PAYLOAD_SCHEMAS, SIGNAL_OUTCOME, TASK_STATUS,
   type AgentExecutor, type EventDraft, type ExecutorContext, type SplitResult, type UnifiedEvent,
 } from '@orc/contracts'
-import { draftFixture, stepFixture } from '@orc/contracts/fixtures'
+import { draftFixture, must, stepFixture } from '@orc/contracts/fixtures'
 import { openStorage } from '../storage'
 import { Kernel } from '../kernel'
 import { createTestDb, fakeProvider, fakeSkills, seedTestWorkspace, TEST_PROJECT_ID, TEST_WORKSPACE_ID, testConfig, waitFor } from '../test-helpers'
@@ -82,7 +82,7 @@ describe('durable conversational gate (feedback)', () => {
     expect(seen).toEqual(['yes'])
 
     const completed = (await kernel.eventsFor(t.id)).find(e => e.kind === EVENT_KIND.step_completed)
-    expect(PAYLOAD_SCHEMAS.step_completed.parse(completed!.payload).summary).toContain('got:yes')
+    expect(PAYLOAD_SCHEMAS.step_completed.parse(must(completed, 'step completed event').payload).summary).toContain('got:yes')
     expect((await kernel.getTask(t.id))?.status).toBe(TASK_STATUS.done)
     // 30s, the budget the other gate tests (continuation.test.ts) use: the run is two DBOS step
     // workflows now — the scripted step and the kernel's appended finish step — and bun's default

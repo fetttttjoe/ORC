@@ -203,7 +203,7 @@ export async function createDbosPort(opts: {
   // terminal errors (e.g. a 4xx model failure) must NOT retry — see terminalError in @orc/contracts
   const RETRY_POLICY = { retriesAllowed: true, maxAttempts: 4, intervalSeconds: 1, backoffRate: 2, shouldRetry: (e: unknown) => !isTerminalError(e) }
 
-  // durable step wrapper that also appends the drafted events INSIDE the step (spec §6.2) —
+  // durable step wrapper that also appends the drafted events INSIDE the step —
   // one transaction per batch, each draft under a deterministic idempotency key, so a crash
   // retry returns the committed records instead of appending duplicates
   const makeCheckpoint = (taskId: string, stepId: string | null, runToken: string): Checkpoint =>
@@ -226,7 +226,7 @@ export async function createDbosPort(opts: {
         { name, ...RETRY_POLICY },
       )
 
-  // The journal-backed operation checkpoint (design §5.2): before-record commits ahead of the
+  // The journal-backed operation checkpoint: before-record commits ahead of the
   // external effect; completion/failure attaches afterward. On recovery a completed node
   // short-circuits with its stored (redacted) value — the effect is never re-run.
   const makeOperation = (taskId: string, stepId: string, runToken: string): OperationCheckpoint =>
@@ -756,10 +756,10 @@ export async function createDbosPort(opts: {
       throw new KernelError(KERNEL_ERROR_CODE.invalid_transition, `task is '${task.status}' — approve a plan first (orc approve ${taskId})`)
     const workflowID = retryIndex === 0 ? `run:${taskId}:v${approved}` : `run:${taskId}:v${approved}:r${retryIndex}`
     const handle = await DBOS.startWorkflow(runWorkflow, { workflowID, ...runQueueOptions(task.depth) })({
-      // A run with no explicit cwd works on the PROJECT, not in an empty scratch dir. The old
-      // per-step .orc/workspaces/ default gave every step a directory with nothing in it — a
-      // workspace no repo task can succeed in (scenario-2 burned five verify attempts on it,
-      // each ENOENT-blind). Explicit --cwd still overrides; projections.runCwd is the ONE rule,
+      // A run with no explicit cwd works on the PROJECT, not in an empty scratch dir: a per-step
+      // scratch default gave every step a directory with nothing in it — a workspace no repo task
+      // can succeed in (a verify auditor burned five attempts on it, each ENOENT-blind). Explicit
+      // --cwd still overrides; projections.runCwd is the ONE rule,
       // shared with startChildRun, so the whole run tree stays in one world no matter which of
       // the two paths reached the child's (deterministic, shared) workflow id first.
       taskId, planVersion: approved, retryIndex, cwd: runCwd(cwdState, task, cwd, config.dir),
@@ -775,7 +775,7 @@ export async function createDbosPort(opts: {
     return runs.length === 0 ? 0 : Math.max(...runs.map(r => r.retryIndex)) + 1
   }
 
-  // The DBOS half of ONE task's cancellation (spec §6.1): DBOS cancel does NOT cascade by
+  // The DBOS half of ONE task's cancellation: DBOS cancel does NOT cascade by
   // default, so cancel EVERY non-completed step's deterministic workflow (catches
   // enqueued-but-not-yet-dequeued steps too), then the run. No status append and no subtree walk
   // — kernel.cancelSubtree owns both, appending across the whole subtree BEFORE this runs. Called
@@ -830,7 +830,7 @@ export async function createDbosPort(opts: {
       // before DBOS: recovery is what makes a second runtime destructive, so refuse to become one
       runtimeLock = await acquireRuntimeLock(config.databaseUrl, config.projectId)
       live = await openLiveState(log)
-      // DBOS__APPVERSION pinned from config BEFORE launch so recovery survives rebuilds (spec §4)
+      // DBOS__APPVERSION pinned from config BEFORE launch so recovery survives rebuilds
       process.env.DBOS__APPVERSION ??= config.appVersion
       DBOS.setConfig({
         name: `orc-${projectSuffix(config.projectId).slice(0, 12)}`,
@@ -908,7 +908,7 @@ export async function createDbosPort(opts: {
   }
 
   // port-level: child-terminal events → split_resolved + DBOS.send; approved children → run start;
-  // run_requested → start (Task 1's explicit ask); a cancelled status → finish the DBOS half a
+  // run_requested → start (the explicit ask); a cancelled status → finish the DBOS half a
   // port-less client cannot do itself.
   // References port.startChildRun, so it is built after the port object.
   const router = createSignalRouter({

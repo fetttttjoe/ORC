@@ -38,8 +38,8 @@ const EditInput = z.object({ path: z.string().min(1), old_string: z.string().min
 const DeleteInput = z.object({ path: z.string().min(1) })
 const ListInput = z.object({ path: z.string().default('.') })
 
-// Declared WITHOUT execute — the SDK returns tool calls; execution is ours, inside a durable step (spec §6.2).
-// Extra (MCP) tools are neutral ResolvedTool[] (spec seam D1) — their JSON Schema travels as-is via jsonSchema().
+// Declared WITHOUT execute — the SDK returns tool calls; execution is ours, inside a durable step.
+// Extra (MCP) tools are neutral ResolvedTool[] — their JSON Schema travels as-is via jsonSchema().
 export function toolSet(extra: ResolvedTool[] = [], opts: { role?: string; readOnlySource?: boolean } = {}) {
   // Steps that ground a plan — the analyze scout and the plan step — read, run gates, and write
   // MEMORY notes, never source files. A scout once edited tracked code before any plan existed,

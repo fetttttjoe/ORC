@@ -14,7 +14,7 @@ import {
   type SplitResult, type UnifiedEvent,
 } from '@orc/contracts'
 import type { GroundingNoteRef, GroundingSource } from './strategies/grounding-freshness'
-import { draftFixture, stepFixture } from '@orc/contracts/fixtures'
+import { draftFixture, must, stepFixture } from '@orc/contracts/fixtures'
 import { openStorage, type EventLog } from '../storage'
 import { Kernel } from '../kernel'
 import { createTestDb, fakeProvider, seedTestWorkspace, TEST_PROJECT_ID, TEST_WORKSPACE_ID, testConfig, waitFor } from '../test-helpers'
@@ -51,7 +51,7 @@ function fakeExecutor(): AgentExecutor<unknown> {
   return {
     id: 'api-loop',
     async *startTurn(ctx: ExecutorContext<unknown>): AsyncGenerator<UnifiedEvent, void, SplitResult[] | undefined> {
-      const taskId = ctx.runToken.split(':')[1]!
+      const taskId = must(ctx.runToken.split(':')[1], 'task id in runToken')
       const key = spyKey(taskId, ctx.step.id)
       startTurns.set(key, (startTurns.get(key) ?? 0) + 1)
       lastDepOutputs.set(key, ctx.depOutputs)
@@ -311,8 +311,8 @@ describe('DBOS execution port (integration)', () => {
     expect((await kernel.getTask(t.id))?.status).toBe(TASK_STATUS.done)
   }, 15_000) // two full DBOS workflows — bun's 5s default is too tight under suite load
 
-  // A run with no explicit cwd works on the project, never in an empty scratch dir — scenario-2
-  // burned five verify attempts in workspaces where every fs_read of the repo was ENOENT.
+  // A run with no explicit cwd works on the project, never in an empty scratch dir —
+  // a verify auditor burned five attempts in workspaces where every fs_read of the repo was ENOENT.
   it('a bare startRun records the project dir as its cwd', async () => {
     const t = await approvedTask()
     expect(await (await port.startRun(t.id)).wait()).toBe('done')
@@ -357,7 +357,7 @@ describe('DBOS execution port (integration)', () => {
   }, 20_000)
 
   // A retry must re-enter the world the run failed in. Inheritance skips null-cwd runs: histories
-  // from before the project-dir default carry bare retries (scenario-2's log is exactly
+  // from before the project-dir default carry bare retries (the history was exactly
   // [repo, null, null, null]) that would poison plain last-run inheritance.
   it("retry without --cwd inherits the last run that HAD a cwd, over null-cwd history", async () => {
     const behavior: Record<string, 'ok' | 'fail'> = { a: 'ok', b: 'fail' }
@@ -379,7 +379,7 @@ describe('DBOS execution port (integration)', () => {
     expect(runs.map(r => r.cwd)).toEqual([shared, null, shared]) // inherited past the poison, not defaulted away
   }, 15_000)
 
-  // Containment (§D#3): an uncaught error in the run workflow AFTER the task is 'running' must not
+  // Containment: an uncaught error in the run workflow AFTER the task is 'running' must not
   // strand it 'running' with a burned ERROR workflow — it settles 'blocked', the retryable state.
   // Inject a throw into the finish path for all its retries, then let the contain transaction through.
   it('an uncaught run-workflow failure is contained: the task settles blocked, not stuck running', async () => {
@@ -455,10 +455,10 @@ describe('DBOS execution port (integration)', () => {
       sha256: createHash('sha256').update('content of report.md').digest('hex'),
       size: 'content of report.md'.length,
     })
-    expect(receipt!.seq).toBeLessThan(completed!.seq)
+    expect(must(receipt, 'artifact produced event').seq).toBeLessThan(must(completed, 'step completed event').seq)
     const artifacts = (await kernel.state()).artifacts.get(t.id)
     expect(artifacts).toHaveLength(1)
-    expect(artifacts![0]!.path).toBe('report.md')
+    expect(must(artifacts?.[0], 'first artifact').path).toBe('report.md')
   })
 
   it('a missing declared output blocks the step with validation_error and no receipt', async () => {
@@ -528,7 +528,7 @@ describe('DBOS execution port (integration)', () => {
       })
     }
     try {
-      // Task 5: the live router now really cancels the run's DBOS workflow on ANY cancelled
+      // the live router cancels the run's DBOS workflow on ANY cancelled
       // status, not only ones cancelRun itself produced. That reaction races this run's own
       // finish step for real, so DBOS may now refuse to record the run's success outcome —
       // a DBOSWorkflowCancelledError here is the correct new result of that race, and orthogonal
@@ -579,7 +579,7 @@ describe('DBOS execution port (integration)', () => {
     // child's terminal status — split_resolved lands on the PARENT (split.taskId = parentTaskId)
     expect(await waitFor(async () => (await kernel.eventsFor(t.id)).some(e => e.kind === EVENT_KIND.split_resolved))).toBe(true)
     const resolved = (await kernel.eventsFor(t.id)).find(e => e.kind === EVENT_KIND.split_resolved)
-    expect(PAYLOAD_SCHEMAS.split_resolved.parse(resolved!.payload).outcome).toBe('cancelled')
+    expect(PAYLOAD_SCHEMAS.split_resolved.parse(must(resolved, 'split resolved event').payload).outcome).toBe('cancelled')
   })
 
   it('refuses to retry a task that is not blocked (no second concurrent run)', async () => {
@@ -600,9 +600,9 @@ describe('DBOS execution port (integration)', () => {
     const loaded = events.filter(e => e.kind === EVENT_KIND.skill_loaded && e.stepId === 's1')
     expect(loaded).toHaveLength(1)
     expect(events.filter(e => e.kind === EVENT_KIND.skill_loaded && e.stepId === FINISH_STEP_ID)).toHaveLength(1)
-    expect(loaded[0]!.payload).toMatchObject({ name: 'style-guide', hash: 'hash-style-guide' })
+    expect(must(loaded[0], 'first loaded skill event').payload).toMatchObject({ name: 'style-guide', hash: 'hash-style-guide' })
     const done = events.find(e => e.kind === EVENT_KIND.step_completed)
-    expect(PAYLOAD_SCHEMAS.step_completed.parse(done!.payload).summary).toContain('skills=[style-guide]')
+    expect(PAYLOAD_SCHEMAS.step_completed.parse(must(done, 'step completed event').payload).summary).toContain('skills=[style-guide]')
   })
 
   it('resolves toolRefs into executor extraTools', async () => {
@@ -610,7 +610,7 @@ describe('DBOS execution port (integration)', () => {
     const handle = await port.startRun(t.id)
     expect(await handle.wait()).toBe('done')
     const done = (await kernel.eventsFor(t.id)).find(e => e.kind === EVENT_KIND.step_completed)
-    expect(PAYLOAD_SCHEMAS.step_completed.parse(done!.payload).summary).toContain('tools=[mcp__fixture__echo]')
+    expect(PAYLOAD_SCHEMAS.step_completed.parse(must(done, 'step completed event').payload).summary).toContain('tools=[mcp__fixture__echo]')
   })
 
   it('unknown skill fails the step as validation_error before any model call', async () => {
@@ -619,7 +619,7 @@ describe('DBOS execution port (integration)', () => {
     expect(await handle.wait()).toBe('blocked')
     const events = await kernel.eventsFor(t.id)
     const failed = events.find(e => e.kind === EVENT_KIND.step_failed)
-    expect(PAYLOAD_SCHEMAS.step_failed.parse(failed!.payload).class).toBe(FAILURE_CLASS.validation_error)
+    expect(PAYLOAD_SCHEMAS.step_failed.parse(must(failed, 'step failed event').payload).class).toBe(FAILURE_CLASS.validation_error)
     expect(events.filter(e => e.kind === EVENT_KIND.agent_call)).toHaveLength(0)
   })
 
@@ -629,7 +629,7 @@ describe('DBOS execution port (integration)', () => {
     expect(await handle.wait()).toBe('blocked')
     const events = await kernel.eventsFor(t.id)
     const failed = events.find(e => e.kind === EVENT_KIND.step_failed)
-    expect(PAYLOAD_SCHEMAS.step_failed.parse(failed!.payload).class).toBe(FAILURE_CLASS.validation_error)
+    expect(PAYLOAD_SCHEMAS.step_failed.parse(must(failed, 'step failed event').payload).class).toBe(FAILURE_CLASS.validation_error)
     expect(events.filter(e => e.kind === EVENT_KIND.agent_call)).toHaveLength(0)
   })
 
@@ -685,7 +685,7 @@ describe('DBOS execution port (integration)', () => {
     // CONDITION 2: `orc log` must answer WHY it skipped without re-running anything — the note
     // ids, each note's sourceRevision, and the HEAD sha the gate compared against.
     const coverage = PAYLOAD_SCHEMAS.analysis_completed.parse(
-      events.find(e => e.kind === EVENT_KIND.analysis_completed)!.payload)
+      must(events.find(e => e.kind === EVENT_KIND.analysis_completed), 'analysis completed event').payload)
     const scopeText = coverage.scope.join(' | ')
     expect(scopeText).toContain('arch-overview')
     expect(scopeText).toContain('area-execution')
@@ -699,7 +699,7 @@ describe('DBOS execution port (integration)', () => {
 
     // the plan step reads ONLY this summary (depOutputs[analyze]), so the evidence repeats here
     const summary = PAYLOAD_SCHEMAS.step_completed.parse(
-      events.find(e => e.kind === EVENT_KIND.step_completed)!.payload).summary
+      must(events.find(e => e.kind === EVENT_KIND.step_completed), 'step completed event').payload).summary
     expect(summary).toContain('arch-overview')
     expect(summary).toContain('area-execution')
     expect(summary).toContain(OLD_SHA)
@@ -724,7 +724,7 @@ describe('DBOS execution port (integration)', () => {
     expect(events.some(e => e.kind === EVENT_KIND.analysis_completed)).toBe(false)
     expect(events.filter(e => e.kind === EVENT_KIND.agent_call && e.stepId === STEP_ID.analyze)).toHaveLength(1)
     const summary = PAYLOAD_SCHEMAS.step_completed.parse(
-      events.find(e => e.kind === EVENT_KIND.step_completed)!.payload).summary
+      must(events.find(e => e.kind === EVENT_KIND.step_completed), 'step completed event').payload).summary
     expect(summary).toContain('analyze:success') // the executor's own summary, unchanged
   }, 15_000)
 
@@ -772,7 +772,7 @@ describe('DBOS execution port (integration)', () => {
     // and the decision is in the log, answerable without re-running anything
     const events = await kernel.eventsFor(t.id)
     const coverage = PAYLOAD_SCHEMAS.analysis_completed.parse(
-      events.find(e => e.kind === EVENT_KIND.analysis_completed)!.payload)
+      must(events.find(e => e.kind === EVENT_KIND.analysis_completed), 'analysis completed event').payload)
     expect(coverage.scope.join(' | ')).toContain('arch-overview')
     const gaps = coverage.gaps.join(' | ')
     expect(coverage.gaps[0]).toContain('incremental re-scan')
@@ -800,7 +800,7 @@ describe('DBOS execution port (integration)', () => {
     expect(await (await port.startRun(t.id)).wait()).toBe('done')
 
     const summary = PAYLOAD_SCHEMAS.step_completed.parse(
-      (await kernel.eventsFor(t.id)).find(e => e.kind === EVENT_KIND.step_completed)!.payload).summary
+      must((await kernel.eventsFor(t.id)).find(e => e.kind === EVENT_KIND.step_completed), 'step completed event').payload).summary
     expect(summary).toContain('analyze:success') // the executor's own summary is still there
     expect(summary).toContain('arch-overview')   // + the port's mechanical citation
     expect(summary).toContain(MID_SHA)           // the revision it was written at
@@ -856,7 +856,7 @@ describe('DBOS execution port (integration)', () => {
     expect(events.filter(e => e.kind === EVENT_KIND.step_completed && e.stepId === STEP_ID.analyze)).toHaveLength(1)
     expect(events.some(e => e.kind === EVENT_KIND.step_failed)).toBe(false)
     const gaps = PAYLOAD_SCHEMAS.analysis_completed.parse(
-      events.find(e => e.kind === EVENT_KIND.analysis_completed)!.payload).gaps.join(' | ')
+      must(events.find(e => e.kind === EVENT_KIND.analysis_completed), 'analysis completed event').payload).gaps.join(' | ')
     expect(gaps).toContain('area-execution') // the ORIGINAL scope, not the moved world's
   }, 20_000)
 
@@ -894,7 +894,7 @@ describe('DBOS execution port (integration)', () => {
     expect(events.filter(e => e.kind === EVENT_KIND.analysis_completed)).toHaveLength(1)
     expect(events.filter(e => e.kind === EVENT_KIND.step_completed && e.stepId === STEP_ID.analyze)).toHaveLength(1)
     const summary = PAYLOAD_SCHEMAS.step_completed.parse(
-      events.find(e => e.kind === EVENT_KIND.step_completed)!.payload).summary
+      must(events.find(e => e.kind === EVENT_KIND.step_completed), 'step completed event').payload).summary
     expect(summary).toContain(OLD_SHA) // still the ORIGINAL verdict's evidence
   }, 20_000)
 })

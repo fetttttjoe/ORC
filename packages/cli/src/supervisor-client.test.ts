@@ -26,7 +26,7 @@ describe('ensureSupervisor', () => {
     expect([r, spawned]).toEqual([SUPERVISOR_MODE.spawned, 1])
   })
 
-  // ".orc/serve.log" alone was wrong for every worktree: the log lives under the MAIN checkout's
+  // A hardcoded log path alone was wrong for every worktree: the log lives under the MAIN checkout's
   // projectRoot, not the cwd the command was typed in — serveLogFile is the one place that joins
   // them, so the message must route through it rather than repeat the fixed string.
   it('reports the real serve log path for this project when the spawned supervisor never beats', async () => {

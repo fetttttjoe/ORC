@@ -57,7 +57,7 @@ describe('finish tools', () => {
     expect(z.object({ notes: z.array(z.object({ id: z.string() })) }).parse(r?.output).notes.map(n => n.id)).toEqual(['mine'])
   }, 30_000)
 
-  it('record_decision writes through the PR3 op with the STEP\'s author and refuses a second record of the same title', async () => {
+  it('record_decision writes through the op with the STEP\'s author and refuses a second record of the same title', async () => {
     const live = await door()
     const tool = finishTools({ log: live.live.log, door: live, author: stepAuthor, p: p() })
       .find(t => t.name === FINISH_TOOL_NAME.recordDecision)

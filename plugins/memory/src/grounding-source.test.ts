@@ -1,52 +1,29 @@
 import { describe, expect, it } from 'bun:test'
-import { mkdtempSync, writeFileSync, mkdirSync } from 'node:fs'
+import { mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import type { MemoryFilter, MemoryStore, NoteSummary } from '@orc/contracts'
-import { TEST_WORKSPACE_ID } from '@orc/contracts/fixtures'
 import { createGroundingSource } from './grounding-source'
-
-// A NoteSummary is a wide shape; tests only care about the four fields notes() reads, so this
-// fills the rest with inert defaults. (id/tier/scope/sourceRevision/paths are the load-bearing ones.)
-const summary = (over: Partial<NoteSummary>): NoteSummary => ({
-  id: 'n', scope: 'project', title: 't', tier: 'semantic',
-  categories: [], tags: [], summary: '', hits: 0, lastAccessedAt: null,
-  sourceRevision: null, paths: [], workspaceId: TEST_WORKSPACE_ID, ...over,
-})
+import { summaryFixture, tmpSourceRepo } from './test-helpers'
 
 // Only list() is exercised; every other MemoryStore method throws so a test can never depend on one.
-function fakeStore(rows: NoteSummary[]): MemoryStore & { lastFilter?: MemoryFilter } {
-  const store = {
-    lastFilter: undefined as MemoryFilter | undefined,
+function fakeStore(rows: NoteSummary[]): Pick<MemoryStore, 'list'> & { lastFilter?: MemoryFilter } {
+  const store: Pick<MemoryStore, 'list'> & { lastFilter?: MemoryFilter } = {
     async list(filter?: MemoryFilter) { store.lastFilter = filter; return rows },
-  } as unknown as MemoryStore & { lastFilter?: MemoryFilter }
+  }
   return store
 }
 
-// A throwaway git repo so head()/commitsSince() run against real `git`, exactly as drift.test.ts does.
-function repo(): { dir: string; run: (...a: string[]) => void; head: () => string } {
-  const dir = mkdtempSync(path.join(tmpdir(), 'orc-grounding-'))
-  const run = (...args: string[]) => { Bun.spawnSync(['git', '-C', dir, ...args], { stdout: 'ignore', stderr: 'ignore' }) }
-  run('init', '-q')
-  run('config', 'user.email', 't@t.t')
-  run('config', 'user.name', 't')
-  mkdirSync(path.join(dir, 'src'), { recursive: true })
-  writeFileSync(path.join(dir, 'src', 'a.ts'), 'export const a = 1\n')
-  writeFileSync(path.join(dir, 'src', 'b.ts'), 'export const b = 1\n')
-  run('add', '-A')
-  run('commit', '-qm', 'base')
-  const head = () => Bun.spawnSync(['git', '-C', dir, 'rev-parse', 'HEAD'], { stdout: 'pipe' }).stdout.toString().trim()
-  return { dir, run, head }
-}
+const repo = () => tmpSourceRepo('orc-grounding-')
 
 describe('createGroundingSource.notes', () => {
   it('returns only the durable grounding family (arch-overview / area-*) as {id,sourceRevision,paths}', async () => {
     const store = fakeStore([
-      summary({ id: 'arch-overview', sourceRevision: 'r1', paths: ['docs/'] }),
-      summary({ id: 'area-memory', sourceRevision: 'r2', paths: ['plugins/memory/'] }),
-      summary({ id: 'area-cli', sourceRevision: null, paths: [] }),
-      summary({ id: 'some-random-fact', sourceRevision: 'r3', paths: ['x.ts'] }),   // not grounding family
-      summary({ id: 'areaxyz', sourceRevision: 'r4', paths: ['y.ts'] }),            // 'area' prefix without dash — excluded
+      summaryFixture({ id: 'arch-overview', sourceRevision: 'r1', paths: ['docs/'] }),
+      summaryFixture({ id: 'area-memory', sourceRevision: 'r2', paths: ['plugins/memory/'] }),
+      summaryFixture({ id: 'area-cli', sourceRevision: null, paths: [] }),
+      summaryFixture({ id: 'some-random-fact', sourceRevision: 'r3', paths: ['x.ts'] }),   // not grounding family
+      summaryFixture({ id: 'areaxyz', sourceRevision: 'r4', paths: ['y.ts'] }),            // 'area' prefix without dash — excluded
     ])
     const gs = createGroundingSource({ store, dir: '/nowhere' })
     const notes = await gs.notes()
@@ -65,7 +42,7 @@ describe('createGroundingSource.notes', () => {
 
   it('excludes non-semantic tiers even if their id matches the family', async () => {
     const store = fakeStore([
-      summary({ id: 'area-plan', tier: 'plan', sourceRevision: 'r1', paths: ['a'] }),
+      summaryFixture({ id: 'area-plan', tier: 'plan', sourceRevision: 'r1', paths: ['a'] }),
     ])
     expect(await createGroundingSource({ store, dir: '/nowhere' }).notes()).toEqual([])
   })

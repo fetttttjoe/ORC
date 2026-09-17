@@ -1,10 +1,10 @@
 <script lang="ts">
   import Chip from '$lib/components/Chip.svelte'
+  import type { Temperature } from '$lib/temperature'
 
   let { kind }: { kind: string } = $props()
 
-  type Temp = 'human' | 'machine' | 'moss' | 'rust' | 'neutral'
-  const TABLE: Record<string, { label: string; temp: Temp }> = {
+  const TABLE: Record<string, { label: string; temp: Temperature }> = {
     feedback_requested: { label: 'question', temp: 'human' },
     feedback_provided: { label: 'answered', temp: 'human' },
     plan_proposed: { label: 'plan', temp: 'machine' },
@@ -31,7 +31,8 @@
     reaction_failed: { label: 'reaction failed', temp: 'rust' },
     copilot_exchange: { label: 'copilot', temp: 'neutral' },
   }
-  const entry = $derived(TABLE[kind] ?? { label: kind.replace(/_/g, ' '), temp: 'neutral' as Temp })
+  const FALLBACK_TEMP: Temperature = 'neutral'
+  const entry = $derived(TABLE[kind] ?? { label: kind.replace(/_/g, ' '), temp: FALLBACK_TEMP })
 </script>
 
 <Chip temp={entry.temp} mono>{entry.label}</Chip>

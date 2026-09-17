@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'bun:test'
-import { linkRefusal, linkSteps, unlinkSteps, wouldCycle } from './plan-edit'
+import { linkRefusal, linkSteps, unlinkSteps, wouldCycle, type EditableStep } from './plan-edit'
 
-const chain = [
-  { id: 'a', dependsOn: [] as string[] },
+const chain: EditableStep[] = [
+  { id: 'a', dependsOn: [] },
   { id: 'b', dependsOn: ['a'] },
   { id: 'c', dependsOn: ['b'] },
 ]
@@ -65,7 +65,7 @@ describe('linkSteps / unlinkSteps', () => {
   })
 
   it('never mutates the caller’s array — an editor that edits the cache corrupts its own view', () => {
-    const before = [{ id: 'x', dependsOn: [] as string[] }, { id: 'y', dependsOn: [] as string[] }]
+    const before: EditableStep[] = [{ id: 'x', dependsOn: [] }, { id: 'y', dependsOn: [] }]
     linkSteps(before, 'x', 'y')
     expect(before.find(s => s.id === 'y')?.dependsOn).toEqual([])
   })

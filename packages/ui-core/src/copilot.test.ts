@@ -2,7 +2,7 @@ import { describe, expect, it } from 'bun:test'
 import { generateText, stepCountIs } from 'ai'
 import { MockLanguageModelV4 } from 'ai/test'
 import type { ToolSet } from 'ai'
-import { planNoteFixture } from '@orc/contracts/fixtures'
+import { listOf, must, planNoteFixture, recordOf } from '@orc/contracts/fixtures'
 import { DECISION_STATUS, WORKSPACE_KIND, WORKSPACE_STATE, type Workspace, type WorkspaceHealth, type WorkspaceWithHealth } from '@orc/contracts'
 import type { OrcActions } from './actions'
 import type { ProjectSessions } from './sessions'
@@ -101,7 +101,7 @@ describe('copilot tools', () => {
 
   it('asResolvedTools reshapes the copilot toolset for door #2: JSON schemas + {output,isError}', async () => {
     const tools = asResolvedTools(buildCopilotTools({ sessions: stubSessions, actions: null, projectId: 'p1' }))
-    const status = tools.find(t => t.name === 'project_status')!
+    const status = must(tools.find(t => t.name === 'project_status'), 'tools.find(t => t.name === \'project_status\')')
     expect(status.inputSchema.type).toBe('object')
     expect(status.inputSchema.$schema).toBeUndefined() // stripped for MCP
     const r = await status.execute({}, undefined)
@@ -112,13 +112,13 @@ describe('copilot tools', () => {
   it('project_status carries memory health when the probe is wired — a rebuilding read model must be visible at the door, not only in the DB', async () => {
     const health = async () => ({ memory: { state: 'catching_up' as const, pending: 372, reason: '372 event(s) not yet projected' } })
     const tools = asResolvedTools(buildCopilotTools({ sessions: stubSessions, actions: null, projectId: 'p1', health }))
-    const r = await tools.find(t => t.name === 'project_status')!.execute({}, undefined)
+    const r = await must(tools.find(t => t.name === 'project_status'), 'tools.find(t => t.name === \'project_status\')').execute({}, undefined)
     expect(r.isError).toBe(false)
     expect(r.output).toHaveProperty('memory', { state: 'catching_up', pending: 372, reason: '372 event(s) not yet projected' })
 
     // probe absent → field omitted, never a fabricated "ok"
     const bare = asResolvedTools(buildCopilotTools({ sessions: stubSessions, actions: null, projectId: 'p1' }))
-    const r2 = await bare.find(t => t.name === 'project_status')!.execute({}, undefined)
+    const r2 = await must(bare.find(t => t.name === 'project_status'), 'bare.find(t => t.name === \'project_status\')').execute({}, undefined)
     expect(r2.output).not.toHaveProperty('memory')
 
     // probe failure → unreachable with the reason, mirroring graph-ui's /api/health posture
@@ -126,7 +126,7 @@ describe('copilot tools', () => {
       sessions: stubSessions, actions: null, projectId: 'p1',
       health: async () => { throw new Error('surreal is down') },
     }))
-    const r3 = await failing.find(t => t.name === 'project_status')!.execute({}, undefined)
+    const r3 = await must(failing.find(t => t.name === 'project_status'), 'failing.find(t => t.name === \'project_status\')').execute({}, undefined)
     expect(r3.isError).toBe(false)
     expect(r3.output).toHaveProperty('memory', { state: 'unreachable', pending: 0, reason: 'surreal is down' })
   })
@@ -143,7 +143,7 @@ describe('copilot tools', () => {
       }),
     })
     const tools = asResolvedTools(buildCopilotTools({ sessions: withPlan, actions: null, projectId: 'p1' }))
-    const r = await tools.find(t => t.name === 'task_plan')!.execute({ taskId: 't1' }, undefined)
+    const r = await must(tools.find(t => t.name === 'task_plan'), 'tools.find(t => t.name === \'task_plan\')').execute({ taskId: 't1' }, undefined)
     expect(r.isError).toBe(false)
     expect(JSON.stringify(r.output)).not.toContain('graph TD')
     expect(JSON.stringify(r.output)).toContain('"waves"')
@@ -203,7 +203,7 @@ describe('copilot tools', () => {
 // Door #2 shape: call through asResolvedTools so the assertions run against the SAME
 // safeParse-then-execute path an MCP client hits with raw JSON.
 const callTool = async (tools: ToolSet, name: string, input: unknown) =>
-  asResolvedTools(tools).find(t => t.name === name)!.execute(input, undefined)
+  must(asResolvedTools(tools).find(t => t.name === name), 'asResolvedTools(tools).find(t => t.name === name)').execute(input, undefined)
 
 const toolItem = (over: Partial<Extract<TranscriptItem, { kind: 'tool' }>> = {}): TranscriptItem => ({
   kind: 'tool', iteration: 1, stepId: 's1', toolName: 'fs_read',
@@ -317,12 +317,12 @@ describe('task_transcript (bounded for the MCP door)', () => {
     })
     const r = await callTool(tools, 'task_transcript', { taskId: 't1' })
     expect(r.isError).toBe(false)
-    const out = r.output as TranscriptItem[]
-    const mappedTool = out[0] as { input: unknown; output: unknown }
+    const out = listOf(r.output)
+    const mappedTool = recordOf(out[0])
     expect(typeof mappedTool.input).toBe('string')
     expect(typeof mappedTool.output).toBe('string')
-    expect((mappedTool.input as string).length).toBeLessThanOrEqual(401)
-    expect((mappedTool.output as string).length).toBeLessThanOrEqual(401)
+    expect(String(mappedTool.input).length).toBeLessThanOrEqual(401)
+    expect(String(mappedTool.output).length).toBeLessThanOrEqual(401)
     // a driver must read a question and a signal EXACTLY — no snip, no reshape
     expect(out[1]).toEqual(QUESTION)
     expect(out[2]).toEqual(SIGNAL)
@@ -334,7 +334,7 @@ describe('task_transcript (bounded for the MCP door)', () => {
       sessions: sessionsStub({ transcript: async () => items }), actions: null, projectId: 'p1',
     })
     const r = await callTool(tools, 'task_transcript', { taskId: 't1', limit: 2 })
-    expect((r.output as Array<{ toolName: string }>).map(i => i.toolName)).toEqual(['t4', 't5'])
+    expect(listOf(r.output).map(i => recordOf(i).toolName)).toEqual(['t4', 't5'])
   })
 })
 
@@ -350,13 +350,13 @@ describe('plan_notes (mechanical fields)', () => {
       actions: null, projectId: 'p1',
     })
     const r = await callTool(tools, 'plan_notes', { taskId: 't1' })
-    const [out] = r.output as Array<Record<string, unknown>>
+    const out = recordOf(listOf(r.output)[0])
     expect(out).toMatchObject({
       id: 'sub-a', dependsOn: ['generate-doc'], zone: ['docs/**'],
       skillRefs: ['role-auditor'], toolRefs: ['web/search'], modelRef: 'anthropic/claude-haiku-4-5',
     })
-    expect(typeof out!.body).toBe('string')
-    expect((out!.body as string).length).toBeLessThanOrEqual(401)
+    expect(typeof out.body).toBe('string')
+    expect(String(out.body).length).toBeLessThanOrEqual(401)
   })
 
   it('omits modelRef entirely when the subplan inherits the parent model', async () => {
@@ -364,7 +364,7 @@ describe('plan_notes (mechanical fields)', () => {
       sessions: sessionsStub({ planNotes: async () => ({ notes: [planNoteFixture({ modelRef: '' })], mermaid: null }) }),
       actions: null, projectId: 'p1',
     })
-    const [out] = (await callTool(tools, 'plan_notes', { taskId: 't1' })).output as Array<Record<string, unknown>>
+    const out = recordOf(listOf((await callTool(tools, 'plan_notes', { taskId: 't1' })).output)[0])
     expect(out).not.toHaveProperty('modelRef')
   })
 })

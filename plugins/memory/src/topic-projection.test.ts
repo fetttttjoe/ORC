@@ -1,10 +1,10 @@
 import { afterAll, describe, expect, it } from 'bun:test'
-import { claimId, MEMORY_LIMITS, MemoryScope, PROJECT_NAME_NOTE_ID, type EmbeddingProvider, type EventRecord, type MemoryAuthor } from '@orc/contracts'
+import { claimId, MEMORY_LIMITS, PROJECT_NAME_NOTE_ID, type EmbeddingProvider, type EventRecord, type MemoryAuthor, EVENT_KIND } from '@orc/contracts'
 import { Surreal } from 'surrealdb'
 import { TEST_WORKSPACE_ID, eventFixture } from '@orc/contracts/fixtures'
 import { topicLabel } from './cluster'
 import { SurrealMemory } from './surreal'
-import { createTestSurreal } from './test-helpers'
+import { claimFixture, createTestSurreal, noteFixture } from './test-helpers'
 
 // Same fake encoder shape as semantic-search.test.ts: 'zeta' maps to alpha's vector while sharing no
 // token with it, so grouping is proven by MEANING rather than by shared words.
@@ -17,13 +17,8 @@ const vec = (text: string): number[] => {
 const fakeEmbedder: EmbeddingProvider = { embed: async texts => texts.map(vec) }
 
 const cli: MemoryAuthor = { source: 'cli', workspaceId: TEST_WORKSPACE_ID }
-const claim = (text: string) => ({ id: claimId(text), text, sourceRevision: null })
-const note = (over = {}) => ({
-  id: 'n', scope: MemoryScope.project, kind: 'fact', sourceRevision: null, title: 'T',
-  categories: [], tags: [], links: [], paths: [], summary: '', body: '', ...over,
-})
 const written = (seq: number, n: object): EventRecord =>
-  eventFixture({ seq, taskId: null, kind: 'memory_written', payload: { note: n, author: cli }, ts: `2026-07-26T0${seq}:00:00Z` })
+  eventFixture({ seq, taskId: null, kind: EVENT_KIND.memory_written, payload: { note: n, author: cli }, ts: `2026-07-26T0${seq}:00:00Z` })
 
 const drops: (() => Promise<void>)[] = []
 afterAll(async () => { await Promise.all(drops.map(d => d())) }, 30_000)
@@ -40,9 +35,9 @@ const open = async () => {
 describe('SurrealMemory topic projection', () => {
   it('groups claims that mean the same thing and separates ones that do not', async () => {
     const m = await open()
-    await m.applyEvent(written(1, note({ id: 'n1', claims: [claim('alpha holds')] })))
-    await m.applyEvent(written(2, note({ id: 'n2', claims: [claim('zeta holds')] })))
-    await m.applyEvent(written(3, note({ id: 'n3', claims: [claim('beta holds')] })))
+    await m.applyEvent(written(1, noteFixture({ id: 'n1', claims: [claimFixture('alpha holds')] })))
+    await m.applyEvent(written(2, noteFixture({ id: 'n2', claims: [claimFixture('zeta holds')] })))
+    await m.applyEvent(written(3, noteFixture({ id: 'n3', claims: [claimFixture('beta holds')] })))
     await m.refreshTopics(0.75)
     const topics = await m.topics()
     expect(topics).toHaveLength(2)
@@ -52,13 +47,14 @@ describe('SurrealMemory topic projection', () => {
     expect(big?.label).toMatch(/alpha holds|zeta holds/)
   })
 
-  // The case the two-word fixtures above cannot reach: a medoid longer than the label cap. The
-  // label used to be the medoid's full text, so a real 300-char claim became the whole CLI row and
-  // most of an agent's memory_topics budget. refreshTopics is the ONE place that is decided.
+  // The case the two-word fixtures above cannot reach: a medoid longer than the label cap. A
+  // bounded label is derived from the medoid, never its full text: a real 300-char claim as the
+  // label became the whole CLI row and most of an agent's memory_topics budget. refreshTopics is
+  // the ONE place that is decided.
   it('derives a bounded label from a medoid longer than the cap, and keeps the full text in topicClaims', async () => {
     const m = await open()
     const long = `alpha holds ${'and so does everything else about alpha '.repeat(20)}`.trim()
-    await m.applyEvent(written(1, note({ id: 'n1', claims: [claim(long)] })))
+    await m.applyEvent(written(1, noteFixture({ id: 'n1', claims: [claimFixture(long)] })))
     await m.refreshTopics(0.75)
     const [topic] = await m.topics()
     expect(long.length).toBeGreaterThan(MEMORY_LIMITS.topicLabelChars)
@@ -78,7 +74,7 @@ describe('SurrealMemory topic projection', () => {
     const t = await createTestSurreal(); drops.push(t.drop)
     const m = await SurrealMemory.open(t, fakeEmbedder)
     drops.push(() => m.close())
-    await m.applyEvent(written(1, note({ id: 'n1', claims: [claim('alpha holds')] })))
+    await m.applyEvent(written(1, noteFixture({ id: 'n1', claims: [claimFixture('alpha holds')] })))
     await m.refreshTopics(0.75)
     expect(await m.topics()).toHaveLength(1)
 
@@ -102,7 +98,7 @@ describe('SurrealMemory topic projection', () => {
 
   it('a refresh replaces the table wholesale and is idempotent on unchanged claims', async () => {
     const m = await open()
-    await m.applyEvent(written(1, note({ id: 'n1', claims: [claim('alpha holds')] })))
+    await m.applyEvent(written(1, noteFixture({ id: 'n1', claims: [claimFixture('alpha holds')] })))
     await m.refreshTopics(0.75)
     const first = await m.topics()
     await m.refreshTopics(0.75)
@@ -111,24 +107,24 @@ describe('SurrealMemory topic projection', () => {
 
   it('drops a topic whose claims were retired', async () => {
     const m = await open()
-    await m.applyEvent(written(1, note({ id: 'n1', claims: [claim('alpha holds')] })))
+    await m.applyEvent(written(1, noteFixture({ id: 'n1', claims: [claimFixture('alpha holds')] })))
     await m.refreshTopics(0.75)
     expect(await m.topics()).toHaveLength(1)
-    await m.applyEvent(written(2, note({ id: 'n1', claims: [] })))
+    await m.applyEvent(written(2, noteFixture({ id: 'n1', claims: [] })))
     await m.refreshTopics(0.75)
     expect(await m.topics()).toEqual([])
   })
 
   it('clusters the project scope only — a plan-scope claim is not grouped', async () => {
     const m = await open()
-    await m.applyEvent(written(1, note({ id: 'p', scope: 'plan-t1', claims: [claim('alpha holds')] })))
+    await m.applyEvent(written(1, noteFixture({ id: 'p', scope: 'plan-t1', claims: [claimFixture('alpha holds')] })))
     await m.refreshTopics(0.75)
     expect(await m.topics()).toEqual([])
   })
 
   it('returns a topic’s claims, and nothing for a key from an older partition', async () => {
     const m = await open()
-    await m.applyEvent(written(1, note({ id: 'n1', claims: [claim('alpha holds'), claim('zeta holds')] })))
+    await m.applyEvent(written(1, noteFixture({ id: 'n1', claims: [claimFixture('alpha holds'), claimFixture('zeta holds')] })))
     await m.refreshTopics(0.75)
     const key = (await m.topics())[0]?.topicKey ?? ''
     expect((await m.topicClaims(key)).map(c => c.text).sort()).toEqual(['alpha holds', 'zeta holds'])
@@ -141,8 +137,8 @@ describe('SurrealMemory topic projection', () => {
   // corroborations of the same fact.
   it('a statement asserted on two notes is ONE claim in its topic, matching the topic’s size', async () => {
     const m = await open()
-    await m.applyEvent(written(1, note({ id: 'n1', claims: [claim('alpha holds')] })))
-    await m.applyEvent(written(2, note({ id: 'n2', claims: [claim('alpha holds')] })))
+    await m.applyEvent(written(1, noteFixture({ id: 'n1', claims: [claimFixture('alpha holds')] })))
+    await m.applyEvent(written(2, noteFixture({ id: 'n2', claims: [claimFixture('alpha holds')] })))
     await m.refreshTopics(0.75)
     const [topic] = await m.topics()
     expect(topic?.size).toBe(1)
@@ -164,12 +160,12 @@ describe('SurrealMemory topic projection', () => {
     }
     const m = await SurrealMemory.open(t, flaky)
     drops.push(() => m.close())
-    await m.applyEvent(written(1, note({ id: 'n1', claims: [claim('alpha holds'), claim('beta holds')] })))
+    await m.applyEvent(written(1, noteFixture({ id: 'n1', claims: [claimFixture('alpha holds'), claimFixture('beta holds')] })))
     await m.refreshTopics(0.75)
     expect(await m.topics()).toHaveLength(2)
 
     up = false
-    await m.applyEvent(written(2, note({ id: 'n1', claims: [claim('alpha holds'), claim('beta holds'), claim('gamma holds')] })))
+    await m.applyEvent(written(2, noteFixture({ id: 'n1', claims: [claimFixture('alpha holds'), claimFixture('beta holds'), claimFixture('gamma holds')] })))
     await m.refreshTopics(0.75)
     // the two already-embedded claims keep their vectors and their topics; only the NEW claim is
     // left unembedded, so it is keyword-only until the next write or a rebuild with the embedder up
@@ -181,9 +177,9 @@ describe('SurrealMemory topic projection', () => {
   // memory_topics while the note itself stays hidden.
   it('excludes claims on ui-metadata notes from the partition', async () => {
     const m = await open()
-    await m.applyEvent(written(1, note({ id: PROJECT_NAME_NOTE_ID, claims: [claim('alpha holds')] })))
+    await m.applyEvent(written(1, noteFixture({ id: PROJECT_NAME_NOTE_ID, claims: [claimFixture('alpha holds')] })))
     expect(await m.topics()).toEqual([])
-    await m.applyEvent(written(2, note({ id: 'n2', claims: [claim('beta holds')] })))
+    await m.applyEvent(written(2, noteFixture({ id: 'n2', claims: [claimFixture('beta holds')] })))
     await m.refreshTopics(0.75)
     const claims = await m.topicClaims((await m.topics())[0]?.topicKey ?? '')
     expect(claims.map(c => c.text)).toEqual(['beta holds'])
@@ -193,7 +189,7 @@ describe('SurrealMemory topic projection', () => {
     const t = await createTestSurreal(); drops.push(t.drop)
     const m = await SurrealMemory.open(t) // no embedder
     drops.push(() => m.close())
-    await m.applyEvent(written(1, note({ id: 'n1', claims: [claim('alpha holds')] })))
+    await m.applyEvent(written(1, noteFixture({ id: 'n1', claims: [claimFixture('alpha holds')] })))
     await m.refreshTopics(0.75)
     expect(await m.topics()).toEqual([])
     expect(await m.searchClaims('alpha')).toHaveLength(1)

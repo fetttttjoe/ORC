@@ -6,6 +6,7 @@ import { Kernel, openStorage } from '@orc/kernel'
 import { createTestDb, seedTestWorkspace, TEST_PROJECT_ID, TEST_WORKSPACE_ID } from '@orc/kernel/test-helpers'
 import { draftFixture, stepFixture } from '@orc/contracts/fixtures'
 import { createVaultProjector } from './index'
+import { EVENT_KIND } from '@orc/contracts'
 
 const dbs: Array<{ drop: () => Promise<void> }> = []
 const dirs: string[] = []
@@ -42,7 +43,7 @@ describe('createVaultProjector.renderAll', () => {
     const t = await kernel.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'demo', spec: 'do it' })
     await log.append({
       taskId: null, stepId: null, runToken: null,
-      kind: 'memory_written',
+      kind: EVENT_KIND.memory_written,
       payload: {
         note: { id: 'note-x', title: 'X', scope: 'project', categories: [], tags: [], links: [], paths: [], summary: '', body: '' },
         author: { source: 'cli', workspaceId: TEST_WORKSPACE_ID },
@@ -98,7 +99,7 @@ describe('createVaultProjector.renderAll', () => {
     const t = await kernel.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'demo', spec: 'do it' })
     await log.append({
       taskId: null, stepId: null, runToken: null,
-      kind: 'memory_written',
+      kind: EVENT_KIND.memory_written,
       payload: {
         note: { id: 'note-y', title: 'Y', scope: 'project', categories: [], tags: [], links: [], paths: [], summary: '', body: '' },
         author: { source: 'cli', workspaceId: TEST_WORKSPACE_ID },

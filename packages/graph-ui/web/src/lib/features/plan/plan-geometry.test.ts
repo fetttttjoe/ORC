@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'bun:test'
 import { DEFAULT_GEOMETRY, groupIdFor, planGeometry } from './plan-geometry'
+import { must } from '@orc/contracts/fixtures'
 
 const spec = { nodeW: 100, nodeH: 20, gapX: 40, gapY: 10, padX: 10, padTop: 20, padBottom: 10 }
 
@@ -24,7 +25,7 @@ describe('planGeometry', () => {
   it('stacks the steps of one wave without overlapping them', () => {
     const g = planGeometry([{ id: 'a', rank: 0, lane: 0 }, { id: 'b', rank: 0, lane: 1 }], spec)
     const ys = g.steps.map(s => s.y).sort((p, q) => p - q)
-    expect(ys[1]! - ys[0]!).toBe(spec.nodeH + spec.gapY)
+    expect(must(ys[1], 'ys[1]') - must(ys[0], 'ys[0]')).toBe(spec.nodeH + spec.gapY)
   })
 
   it('gives every container the height of the FULLEST wave, so the row reads as one band', () => {
@@ -44,7 +45,7 @@ describe('planGeometry', () => {
     ], spec)
     const lonely = g.steps.find(s => s.id === 'a')
     const firstOfPair = g.steps.find(s => s.id === 'b')
-    expect(lonely!.y).toBeGreaterThan(firstOfPair!.y)
+    expect(must(lonely, 'lonely').y).toBeGreaterThan(must(firstOfPair, 'firstOfPair').y)
   })
 
   it('reports a canvas size that covers every container', () => {

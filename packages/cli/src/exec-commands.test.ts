@@ -1,11 +1,12 @@
 import path from 'node:path'
-import { afterAll, afterEach, describe, expect, it, mock, spyOn } from 'bun:test'
+import { afterAll, afterEach, describe, expect, it, mock } from 'bun:test'
 import { EVENT_KIND, TASK_STATUS, type Analyzer, type ExecutionPort, type OperationSpec, type RunHandle, type RunOutcome, type TaskStatus } from '@orc/contracts'
-import { stepFixture } from '@orc/contracts/fixtures'
+import { must, stepFixture } from '@orc/contracts/fixtures'
 import { openStorage, type EventLog } from '@orc/kernel'
 import { createTestDb, seedTestWorkspace, TEST_PROJECT_ID, TEST_WORKSPACE, TEST_WORKSPACE_ID } from '@orc/kernel/test-helpers'
 import { singleStepDraft } from './plan-template'
-import { buildProgram, openKernel } from './main'
+import { openKernel } from './main'
+import { cli } from './test-helpers'
 
 const dbs: Array<{ drop: () => Promise<void> }> = []
 afterAll(async () => { for (const d of dbs) await d.drop() })
@@ -30,16 +31,13 @@ async function makeCli(outcome: 'done' | 'blocked' = 'done') {
   await seedTestWorkspace(log)
   db.onClose(() => storage.close())
   const { port, calls } = stubPort(outcome)
-  const lines: string[] = []
-  spyOn(console, 'log').mockImplementation((...a: unknown[]) => { lines.push(a.join(' ')) })
-  const run = async (...args: string[]) =>
-    buildProgram(kernel, async () => port).parseAsync(args, { from: 'user' })
+  const { run, lines } = cli(kernel, async () => port)
   return { run, lines, calls, kernel, log, db }
 }
 
 async function approvedTask(run: (...a: string[]) => Promise<unknown>, lines: string[]) {
   await run('new', 'exec me', '--workspace', TEST_WORKSPACE_ID)
-  const id = lines[0]!
+  const id = must(lines[0], 'task id from new command')
   await run('propose', id)
   await run('approve', id)
   return id
@@ -64,13 +62,12 @@ describe('exec commands', () => {
   it('run records the ask and reports the outcome the log settles on', async () => {
     const { run, lines, calls, log, kernel } = await makeCli('done')
     const id = await approvedTask(run, lines)
-    lines.length = 0
     const watched = run('run', id)
     await drive(log, lines, id, TASK_STATUS.done)
-    await watched
+    const out = await watched
     expect(calls).toEqual([]) // the supervisor starts runs; this command only asked for one
     expect((await kernel.eventsFor(id)).some(e => e.kind === EVENT_KIND.run_requested)).toBe(true)
-    expect(lines.join('\n')).toContain('run finished: done')
+    expect(out.join('\n')).toContain('run finished: done')
   }, 15_000)
 
   it('blocked run exits 1 — real process exit status via subprocess fixture', async () => {
@@ -80,9 +77,7 @@ describe('exec commands', () => {
     // a task must name a workspace the fold has seen — one seeded record, then tasks as before
     await seedTestWorkspace(log)
     const { port } = stubPort()
-    const lines: string[] = []
-    spyOn(console, 'log').mockImplementation((...a: unknown[]) => { lines.push(a.join(' ')) })
-    const run = async (...args: string[]) => buildProgram(kernel, async () => port).parseAsync(args, { from: 'user' })
+    const { run, lines } = cli(kernel, async () => port)
     const id = await approvedTask(run, lines)
     mock.restore()
     await log.close()
@@ -95,7 +90,6 @@ describe('exec commands', () => {
   it('run --cwd records the override, the one thing only the caller knows', async () => {
     const { run, lines, log, kernel } = await makeCli()
     const id = await approvedTask(run, lines)
-    lines.length = 0
     const watched = run('run', id, '--cwd', '/tmp/shared-ws')
     await drive(log, lines, id, TASK_STATUS.done)
     await watched
@@ -109,12 +103,9 @@ describe('exec commands', () => {
     const { kernel, log } = await openKernel(db.url, { projectId: TEST_PROJECT_ID })
     // a task must name a workspace the fold has seen — one seeded record, then tasks as before
     await seedTestWorkspace(log)
-    const lines: string[] = []
-    spyOn(console, 'log').mockImplementation((...a: unknown[]) => { lines.push(a.join(' ')) })
     const { port } = stubPort()
-    const run = async (...args: string[]) => buildProgram(kernel, async () => port).parseAsync(args, { from: 'user' })
+    const { run, lines } = cli(kernel, async () => port)
     const id = await approvedTask(run, lines)
-    lines.length = 0
 
     // Simulate the real race: a step's last event commits in the same window as the terminal
     // status the watch settles on, possibly after the push subscription has been torn down. The
@@ -129,8 +120,8 @@ describe('exec commands', () => {
         payload: { stepId: 's1', runToken: 'r1', class: 'agent_error', message: 'blocked: boom' },
       })
       await stamp(rawLog, id, TASK_STATUS.running, TASK_STATUS.done) // draining is under test, not exit semantics
-      await watched
-      expect(lines.join('\n')).toContain(EVENT_KIND.step_failed)
+      const out = await watched
+      expect(out.join('\n')).toContain(EVENT_KIND.step_failed)
     } finally {
       await rawLog.close()
     }
@@ -146,21 +137,17 @@ describe('exec commands', () => {
     // a task must name a workspace the fold has seen — one seeded record, then tasks as before
     await seedTestWorkspace(log)
     db.onClose(() => storage.close())
-    const lines: string[] = []
-    spyOn(console, 'log').mockImplementation((...a: unknown[]) => { lines.push(a.join(' ')) })
     // the workflow is suspended on the gate: its result NEVER arrives
     const handle: RunHandle = { workflowId: 'run:x:v1', wait: () => new Promise<RunOutcome>(() => {}) }
     const port: ExecutionPort = { startRun: async () => handle, retry: async () => handle, cancelRun: async () => {} }
-    const run = async (...args: string[]) => buildProgram(kernel, async () => port).parseAsync(args, { from: 'user' })
+    const { run, lines } = cli(kernel, async () => port)
     const id = await approvedTask(run, lines)
     await log.append({
       taskId: id, stepId: 's1', runToken: 'r1', kind: EVENT_KIND.feedback_requested,
       payload: { question: 'May I analyze the codebase?', topic: `${id}:s1:1` },
     })
-    lines.length = 0
 
-    await run('run', id) // must RETURN — before the fix this awaited forever
-    const out = lines.join('\n')
+    const out = (await run('run', id)).join('\n') // must RETURN — before the fix this awaited forever
     expect(out).toContain('parked')
     expect(out).toContain('May I analyze the codebase?')
     expect(out).toContain(`orc reply ${id}`)
@@ -178,9 +165,7 @@ describe('exec commands', () => {
     await seedTestWorkspace(log)
     db.onClose(() => storage.close())
     const { port, calls } = stubPort('done')
-    const lines: string[] = []
-    spyOn(console, 'log').mockImplementation((...a: unknown[]) => { lines.push(a.join(' ')) })
-    const run = async (...args: string[]) => buildProgram(kernel, async () => port).parseAsync(args, { from: 'user' })
+    const { run, lines } = cli(kernel, async () => port)
     const id = await approvedTask(run, lines)
     await stamp(log, id, TASK_STATUS.approved, TASK_STATUS.running) // the run this question is parked inside
     await log.append({
@@ -188,23 +173,21 @@ describe('exec commands', () => {
       payload: { question: 'proceed?', topic: `${id}:s1:1` },
     })
     calls.length = 0
-    lines.length = 0
 
     const watched = run('reply', id, 'yes')
     await until(() => lines.some(l => l.includes('answered feedback')))
     await stamp(log, id, TASK_STATUS.running, TASK_STATUS.done)
-    await watched
+    const out = await watched
     expect(calls).toEqual([]) // the supervisor carries the answer in; this command never drives
-    expect(lines.join('\n')).toContain('run finished: done')
+    expect(out.join('\n')).toContain('run finished: done')
   }, 15_000)
 
   it('reply without an open question says so and attaches nothing', async () => {
     const { run, lines, calls } = await makeCli()
     const id = await approvedTask(run, lines)
     calls.length = 0
-    lines.length = 0
-    await run('reply', id, 'yes')
-    expect(lines.join('\n')).toContain('no open feedback question')
+    const out = await run('reply', id, 'yes')
+    expect(out.join('\n')).toContain('no open feedback question')
     expect(calls).toEqual([])
   })
 
@@ -220,34 +203,30 @@ describe('exec commands', () => {
     await seedTestWorkspace(log)
     db.onClose(() => storage.close())
     const { port, calls } = stubPort('done')
-    const lines: string[] = []
-    spyOn(console, 'log').mockImplementation((...a: unknown[]) => { lines.push(a.join(' ')) })
-    const run = async (...args: string[]) => buildProgram(kernel, async () => port).parseAsync(args, { from: 'user' })
+    const { run, lines } = cli(kernel, async () => port)
     const parent = await approvedTask(run, lines)
     // the split: a child task of the parent, still running when the parent's steps finish
     const child = (await kernel.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'split child', spec: '', parentId: parent })).id
     await kernel.proposePlan(child, singleStepDraft({ title: 'child', spec: '' }, 'fake/m', []))
     await kernel.approvePlan(child)
     calls.length = 0
-    lines.length = 0
 
     let settled = false
-    const watched = run('run', parent).then(() => { settled = true })
+    const watched = run('run', parent).then(out => { settled = true; return out })
     await drive(log, lines, parent, TASK_STATUS.done)
     await Bun.sleep(300)
     expect(settled).toBe(false) // the parent's own steps are done; the tree is not
 
     await stamp(log, child, TASK_STATUS.approved, TASK_STATUS.done)
-    await watched
+    const out = await watched
     expect(calls).toEqual([])
-    expect(lines.join('\n')).toContain('run finished: done')
+    expect(out.join('\n')).toContain('run finished: done')
   }, 20_000)
 
   it('retry records a retry ask; cancel stamps the subtree, both without a port', async () => {
     const { run, lines, calls, log, kernel } = await makeCli('done')
     const id = await approvedTask(run, lines)
     await stamp(log, id, TASK_STATUS.approved, TASK_STATUS.blocked) // only a blocked task can be retried
-    lines.length = 0
 
     const watched = run('retry', id)
     await watching(lines)
@@ -281,16 +260,14 @@ describe('exec commands', () => {
     // a non-done outcome is a thrown CommandFailure now, not a write to process.exitCode, so this
     // could assert either; 'done' keeps the test about the grounded bootstrap rather than exits.
     const { port, calls } = stubPort('done')
-    const lines: string[] = []
-    spyOn(console, 'log').mockImplementation((...a: unknown[]) => { lines.push(a.join(' ')) })
-    const run = async (...args: string[]) => buildProgram(kernel, async () => port).parseAsync(args, { from: 'user' })
+    const { run, lines } = cli(kernel, async () => port)
 
     const bootstrapping = run('new', 'grounded task', '--spec', 'analyze the repo and split the work', '--strategy', 'grounded-plan', '--model', 'anthropic/claude-sonnet-5', '--workspace', TEST_WORKSPACE_ID)
     await watching(lines)
-    const taskId = lines[0]!
+    const taskId = must(lines[0], 'task id from new command')
     await stamp(log, taskId, TASK_STATUS.approved, TASK_STATUS.running)
     await stamp(log, taskId, TASK_STATUS.running, TASK_STATUS.done)
-    await bootstrapping
+    const out = await bootstrapping
 
     const plan = await kernel.getPlan(taskId)
     expect(plan?.strategyRef).toBe('grounded-plan')
@@ -299,7 +276,7 @@ describe('exec commands', () => {
     // auto-started (D9): the ask is recorded, and a supervisor — not this command — serves it
     expect((await kernel.eventsFor(taskId)).some(e => e.kind === EVENT_KIND.run_requested)).toBe(true)
     expect(calls).toEqual([])
-    expect(lines.join('\n')).toContain('run finished: done')
+    expect(out.join('\n')).toContain('run finished: done')
   }, 15_000)
 
   it('new --strategy grounded-plan without --model is a clear error', async () => {
@@ -310,10 +287,9 @@ describe('exec commands', () => {
   it('status renders per-step state and cost totals from the fold', async () => {
     const { run, lines } = await makeCli()
     const id = await approvedTask(run, lines)
-    lines.length = 0
-    await run('status', id)
-    expect(lines.join('\n')).toContain('approved') // task status
-    expect(lines.join('\n')).toContain('s1')       // template step listed
+    const out = (await run('status', id)).join('\n')
+    expect(out).toContain('approved') // task status
+    expect(out).toContain('s1')       // template step listed
   })
 
   it('status shows started/completed operations and output receipts', async () => {
@@ -324,9 +300,7 @@ describe('exec commands', () => {
     await seedTestWorkspace(log)
     db.onClose(() => storage.close())
     const { port } = stubPort()
-    const lines: string[] = []
-    spyOn(console, 'log').mockImplementation((...a: unknown[]) => { lines.push(a.join(' ')) })
-    const run = async (...args: string[]) => buildProgram(kernel, async () => port).parseAsync(args, { from: 'user' })
+    const { run, lines } = cli(kernel, async () => port)
     const id = await approvedTask(run, lines)
 
     const opContext = { taskId: id, stepId: 's1', runToken: `step:${id}:s1:a1` }
@@ -340,9 +314,7 @@ describe('exec commands', () => {
       payload: { path: 'report.md', sha256: 'a'.repeat(64), size: 5 },
     })
 
-    lines.length = 0
-    await run('status', id)
-    const out = lines.join('\n')
+    const out = (await run('status', id)).join('\n')
     expect(out).toMatch(/op {2}model {2}fake\/m\s+completed/)
     expect(out).toMatch(/op {2}tool {3}fs_write\s+started/)
     expect(out).toContain('report.md · sha256:aaaaaaaaaaaa… · 5B')

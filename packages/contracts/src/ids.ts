@@ -88,11 +88,8 @@ export function composeAuthor(a: MemoryAuthor): string {
   // and a person is not a pipeline.
   if (a.source === AUTHOR_SOURCE.cli || a.source === AUTHOR_SOURCE.human) return a.source
   // Every other door composes from its pipeline, and falls back TO ITS OWN SOURCE — never to a
-  // hardcoded 'agent'. The fallback used to be the literal, which made a bare
-  // `{ source: 'mcp', workspaceId }` — exactly what cwdAuthor builds for the MCP door, which has no
-  // executor/model/role — render as 'agent'. deriveNoteProvenance stamps that into createdBy, and
-  // createdBy is STICKY across rewrites: every decision recorded over MCP would have read as an
-  // agent's work forever, with no migration able to correct it. Unchanged for a bare 'agent',
-  // whose source IS the word the fallback used to spell.
+  // hardcoded 'agent'. A hardcoded fallback mis-stamps MCP writes: a bare `{ source: 'mcp', workspaceId }`
+  // would render as 'agent' and that's sticky in createdBy — every note would persist with wrong
+  // authorship forever. Instead, the fallback is a.source itself.
   return [a.executor, a.model, a.role].filter(Boolean).join('·') || a.source
 }

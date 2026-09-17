@@ -19,6 +19,11 @@ export const errorMessage = (err: unknown): string =>
 export const toolError = (err: unknown): { output: { error: string }; isError: true } =>
   ({ output: { error: errorMessage(err) }, isError: true })
 
+// Trimmed, non-blank lines out of a git/CLI stdout blob — the one splitter every process-output
+// reader needs, re-spelled five times (commit-tool, drift, grounding-source) before this existed.
+export const nonEmptyLines = (text: string): string[] =>
+  text.split('\n').map(l => l.trim()).filter(l => l !== '')
+
 // mermaid labels: double quotes end the label, a newline ends the STATEMENT — an agent-authored
 // title carrying one escapes the graph and renders as live markdown in human-facing views.
 // The ONE escaper for every mermaid-producing view (vault, ui-core diagrams, memory index).

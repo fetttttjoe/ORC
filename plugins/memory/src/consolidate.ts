@@ -145,12 +145,9 @@ export const CONSOLIDATE_EXECUTOR = 'consolidate'
 // execution kernel: memory-lifecycle work stays in the memory domain. `distill` is the optional LLM
 // upgrade, injected by the composition root; absent → extractive.
 // `authorFor` is a PARAMETER, not a literal built here: the plugin never invents an author, because
-// MemoryAuthor.workspaceId can only be answered per TASK, not once at boot. A single cwd-resolved
-// author used to be built ONCE at the composition root and stamped on every outcome note — so a
-// task that ran in a worktree consolidated as durable knowledge under the SUPERVISOR's own
-// checkout, wrong for as long as that task's branch stayed unmerged [fixed 2026-09-15].
-// `authorFor` takes the writing task's own id + workspaceId, so the note always names where the
-// work actually happened. It still names the writer through `executor` — see the write below.
+// MemoryAuthor.workspaceId can only be answered per TASK, not once at boot. Each write stamps the
+// task's own id + workspaceId, so the note names where the work actually happened, not where the
+// supervisor checked out. It still names the writer through `executor` — see the write below.
 // Only what consolidation reads and writes — a test fakes four methods, not two whole interfaces.
 export type ConsolidationLog = Pick<EventLog, 'after'>
 export type ConsolidationStore = Pick<MemoryStore, 'list' | 'write' | 'setArchivedAll'>

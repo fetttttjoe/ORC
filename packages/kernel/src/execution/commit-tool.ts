@@ -1,9 +1,8 @@
-import { createHash } from 'node:crypto'
 import { existsSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { z } from 'zod'
-import { COMMIT_STEP_ID, STEP_ROLE, errorMessage, noteKey, toolError, type ResolvedTool } from '@orc/contracts'
+import { COMMIT_STEP_ID, STEP_ROLE, errorMessage, noteKey, nonEmptyLines, sha256, toolError, type ResolvedTool } from '@orc/contracts'
 import type { Kernel } from '../kernel'
 import { subtreeUsage } from '../projections'
 import type { CitingNotes } from './scoped-changes-tool'
@@ -26,12 +25,11 @@ import { clipMiddle } from './clip'
 // here, not just in the committer skill's prose: the refusal names the rule, so the agent repairs
 // in one iteration instead of guessing.
 //
-// Correction to what this comment used to claim: 79303eb's mid-sentence body was NOT a committer
-// writing a truncated essay. The repo's commit-msg hook rewrote long messages instead of refusing
-// them, keeping the first two content lines and dropping the rest — twenty commits in that stretch
-// end at a 62–88 character wrap boundary. The hook now refuses too (scripts/hooks/commit-msg), and
-// `git commit` here does not pass --no-verify, so both rules apply to this call and the hook's
-// refusal text is surfaced verbatim in the `git commit failed: …` error below.
+// The repo's commit-msg hook (scripts/hooks/commit-msg) refuses messages longer than two lines. A
+// hook that rewrote long messages instead of refusing them left twenty commits cut at a 62–88
+// character wrap boundary — silent truncation, not a committer writing a short body. `git commit`
+// here does not pass --no-verify, so the refusal applies to this call and the hook's text is
+// surfaced verbatim in the `git commit failed: …` error below.
 const CommitInput = z.object({
   message: z.string().min(1).max(5000).refine(
     m => m.split('\n').filter(l => l.trim() !== '').length <= 2,
@@ -84,8 +82,6 @@ async function git(dir: string, args: string[], opts?: { env?: Record<string, st
   return { code, stdout, stderr }
 }
 
-const lines = (s: string): string[] => s.split('\n').map(l => l.trim()).filter(l => l !== '')
-
 // linear trim like drift.ts (a regex here is CodeQL-flagged polynomial on agent-authored input)
 const trimSlashes = (p: string): string => {
   let end = p.length
@@ -98,8 +94,6 @@ const trimSlashes = (p: string): string => {
 // question to the whole tree), so every path gate — the dirty check and the reverify range diff —
 // resolves its pathspecs through here rather than each trimming its own way.
 const checkable = (declared: readonly string[]): string[] => declared.map(trimSlashes).filter(p => p !== '')
-
-const sha256 = (s: string): string => createHash('sha256').update(s).digest('hex')
 
 // What one staging pass concluded. `digest` fingerprints the UNCLIPPED diff — clip() could mask a
 // mid-diff change — and is what the preview↔commit handshake compares.
@@ -157,11 +151,11 @@ export function commitTool(opts: {
     if (floor.length === 0) return { addable: [], paths: [], skippedIgnored: [] }
     const ignoreProbe = await git(dir, ['check-ignore', '--', ...floor], { literal: false })
     if (ignoreProbe.code > 1) return { error: `git check-ignore failed: ${ignoreProbe.stderr.trim()}` }
-    const ignored = new Set(lines(ignoreProbe.stdout))
+    const ignored = new Set(nonEmptyLines(ignoreProbe.stdout))
     const kept = floor.filter(f => !ignored.has(f))
-    const inIndex = new Set(kept.length === 0 ? [] : lines((await git(dir, ['ls-files', '--', ...kept])).stdout))
+    const inIndex = new Set(kept.length === 0 ? [] : nonEmptyLines((await git(dir, ['ls-files', '--', ...kept])).stdout))
     const headList = kept.length === 0 ? null : await git(dir, ['ls-tree', '-r', '--name-only', 'HEAD', '--', ...kept])
-    const inHead = new Set(headList && headList.code === 0 ? lines(headList.stdout) : []) // unborn HEAD = empty
+    const inHead = new Set(headList && headList.code === 0 ? nonEmptyLines(headList.stdout) : []) // unborn HEAD = empty
     return {
       addable: kept.filter(f => inIndex.has(f) || existsSync(path.join(dir, f))),
       paths: kept.filter(f => inIndex.has(f) || inHead.has(f) || existsSync(path.join(dir, f))),
@@ -198,7 +192,7 @@ export function commitTool(opts: {
       if (names.code !== 0) return { error: `git diff failed: ${names.stderr.trim()}` }
       const diff = await git(dir, ['diff', '--cached', '--', ...paths], { env })
       if (diff.code !== 0) return { error: `git diff failed: ${diff.stderr.trim()}` }
-      return { addable, paths, staged: lines(names.stdout), diff: clip(diff.stdout), digest: sha256(diff.stdout), skippedIgnored }
+      return { addable, paths, staged: nonEmptyLines(names.stdout), diff: clip(diff.stdout), digest: sha256(diff.stdout), skippedIgnored }
     } finally {
       if (scratch) rmSync(scratch, { recursive: true, force: true })
     }
@@ -216,9 +210,9 @@ export function commitTool(opts: {
     if (untracked.code !== 0) return null
     const atHead = await git(dir, ['ls-tree', '-r', '--name-only', 'HEAD', '--', ...paths])
     if (atHead.code !== 0) return null
-    const entries = lines(atHead.stdout)
+    const entries = nonEmptyLines(atHead.stdout)
     const uncovered = paths.filter(p => !entries.some(e => e === p || e.startsWith(`${p}/`)))
-    const dirty = [...new Set([...lines(pending.stdout), ...lines(untracked.stdout), ...uncovered])]
+    const dirty = [...new Set([...nonEmptyLines(pending.stdout), ...nonEmptyLines(untracked.stdout), ...uncovered])]
     return dirty
   }
 
@@ -237,7 +231,7 @@ export function commitTool(opts: {
   const movedSinceAudit = async (audited: string | null, stampRevision: string, paths: readonly string[]): Promise<boolean> => {
     if (audited === null) return true
     const moved = await git(dir, ['diff', '--name-only', `${stampRevision}..${audited}`, '--', ...checkable(paths)])
-    return moved.code !== 0 || lines(moved.stdout).length > 0
+    return moved.code !== 0 || nonEmptyLines(moved.stdout).length > 0
   }
 
   const stampDeclared = async (audited: string | null): Promise<{
@@ -372,7 +366,7 @@ export function commitTool(opts: {
           if (commit.code !== 0) return { output: { error: `git commit failed: ${commit.stderr.trim() || commit.stdout.trim()}` }, isError: true }
           created = true
           const shown = await git(dir, ['show', '--name-only', '--format=', 'HEAD'])
-          committedPaths = shown.code === 0 ? lines(shown.stdout) : real.staged
+          committedPaths = shown.code === 0 ? nonEmptyLines(shown.stdout) : real.staged
         }
         const head = await git(dir, ['rev-parse', 'HEAD'])
         if (head.code !== 0) return { output: { error: `cannot resolve HEAD: ${head.stderr.trim()}` }, isError: true }

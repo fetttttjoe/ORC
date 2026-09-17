@@ -1,18 +1,14 @@
 import { describe, expect, it } from 'bun:test'
-import { type EventRecord, type TaskNode } from '@orc/contracts'
+import { type EventRecord, type TaskNode, TASK_STATUS } from '@orc/contracts'
 import { EVENT_KIND } from '@orc/contracts'
-import { planFixture, stepFixture } from '@orc/contracts/fixtures'
+import { planFixture, stepFixture, must, taskFixture } from '@orc/contracts/fixtures'
 import { eventFixture } from '@orc/contracts/fixtures'
-import { TEST_WORKSPACE_ID } from '@orc/kernel/test-helpers'
 import { renderRootIndex, renderTaskFiles } from './render'
 
 let seq = 0
 const ev = (over: Partial<EventRecord>): EventRecord =>
   eventFixture({ seq: ++seq, ts: '2026-07-17T00:00:00.000Z', ...over })
-const task = (over: Partial<TaskNode> = {}): TaskNode => ({
-  id: 't1', parentId: null, workspaceId: TEST_WORKSPACE_ID, type: 'generic', title: 'demo', spec: 'do it', status: 'running',
-  zone: [], budgetUSD: null, depth: 0, createdAt: '2026-07-17T00:00:00.000Z', ...over,
-})
+const task = (over: Partial<TaskNode> = {}): TaskNode => taskFixture({ title: 'demo', spec: 'do it', status: TASK_STATUS.running, createdAt: '2026-07-17T00:00:00.000Z', ...over })
 
 describe('renderTaskFiles', () => {
   // The index used to list a session link per PLAN step, but a session file is written only for a
@@ -38,11 +34,11 @@ describe('renderTaskFiles', () => {
   it('a step named like a generated node keeps its own box', () => {
     seq = 0
     const plan = planFixture({ taskId: 't1', version: 1, steps: [stepFixture({ id: 'op0' })] })
-    const md = renderTaskFiles('t1', [
+    const md = must(renderTaskFiles('t1', [
       ev({ kind: EVENT_KIND.task_created, payload: { task: task() } }),
       ev({ kind: EVENT_KIND.plan_proposed, payload: { plan } }),
       ev({ kind: EVENT_KIND.operation_started, stepId: 'op0', runToken: 'r', payload: { operationId: 'o1', operationKind: 'tool', name: 'fs_write', attempt: 1, before: {} } }),
-    ])['tasks/t1/execution.md']!
+    ])['tasks/t1/execution.md'], 'tasks/t1/execution.md')
     // the step's node and the operation's node are distinct, and the edge runs between them
     expect(md).toContain('s_op0 --> op_0')
     expect(md).not.toContain('op0 --> op0')
@@ -79,7 +75,7 @@ describe('renderTaskFiles — mermaid label escaping', () => {
       ev({ kind: EVENT_KIND.task_created, payload: { task: task() } }),
       ev({ kind: EVENT_KIND.plan_proposed, payload: { plan } }),
     ]
-    const md = renderTaskFiles('t1', events)['tasks/t1/index.md']!
+    const md = must(renderTaskFiles('t1', events)['tasks/t1/index.md'], 'renderTaskFiles(\'t1\', events)[\'tasks/t1/index.md\']')
     // a raw double quote inside ["…"] ends the label and leaks the rest as live mermaid
     expect(md).toContain(`s_s1["s1 · api'loop · fake/'m'"]`)
   })
@@ -107,7 +103,7 @@ describe('renderTaskFiles — ## Usage table', () => {
       // s2: costUSD null → placeholder; cacheReadTokens absent → `?? 0`
       agentCall('s2', { inputTokens: 200, outputTokens: 40, costUSD: null, estimated: false }),
     ]
-    const md = renderTaskFiles('t1', events)['tasks/t1/index.md']!
+    const md = must(renderTaskFiles('t1', events)['tasks/t1/index.md'], 'renderTaskFiles(\'t1\', events)[\'tasks/t1/index.md\']')
     // header + separator
     expect(md).toContain('## Usage\n\n| Step | Input | Output | Cache Read | Cost USD |\n| --- | --- | --- | --- | --- |')
     // per-step rows, in stored order
@@ -124,7 +120,7 @@ describe('renderTaskFiles — ## Usage table', () => {
 
   it('empty view: no plan yet renders the italic gap, not an empty table', () => {
     seq = 0
-    const md = renderTaskFiles('t1', [ev({ kind: EVENT_KIND.task_created, payload: { task: task() } })])['tasks/t1/index.md']!
+    const md = must(renderTaskFiles('t1', [ev({ kind: EVENT_KIND.task_created, payload: { task: task() } })])['tasks/t1/index.md'], 'tasks/t1/index.md')
     expect(md).toContain('## Usage\n\n_no plan yet_')
     expect(md).not.toContain('| Step | Input |')
   })
@@ -157,7 +153,7 @@ describe('renderTaskFiles — execution and lineage graphs', () => {
       ev({ kind: EVENT_KIND.operation_completed, stepId: 's1', runToken: rt, payload: { operationId: `${rt}:model:1`, attempt: 1, after: {} } }),
       op(`${rt}:tool:1:c9`, 'operation_started', { attempt: 2, operationKind: 'tool', name: 'fs_write', before: {} }),
     ]
-    const md = renderTaskFiles('t1', events)['tasks/t1/execution.md']!
+    const md = must(renderTaskFiles('t1', events)['tasks/t1/execution.md'], 'renderTaskFiles(\'t1\', events)[\'tasks/t1/execution.md\']')
     expect(md).toContain('type: execution')
     expect(md).toContain('model fake/m · completed · attempts 1')
     expect(md).toContain('tool fs_write · started · attempts 2')
@@ -175,12 +171,12 @@ describe('renderTaskFiles — execution and lineage graphs', () => {
       ev({ kind: EVENT_KIND.task_created, payload: { task: task() } }),
       ev({ kind: EVENT_KIND.artifact_produced, stepId: 's1', runToken: rt, payload: { path: 'report.md', sha256: 'ab'.repeat(32), size: 42 } }),
     ]
-    const md = renderTaskFiles('t1', events)['tasks/t1/lineage.md']!
+    const md = must(renderTaskFiles('t1', events)['tasks/t1/lineage.md'], 'renderTaskFiles(\'t1\', events)[\'tasks/t1/lineage.md\']')
     expect(md).toContain('type: lineage')
     expect(md).toContain('report.md · sha256:abababababab… · 42B')
     expect(md).toContain('s_s1 --> art_0')
     // no receipts → explicit empty view, deterministic
-    const empty = renderTaskFiles('t1', [ev({ kind: EVENT_KIND.task_created, payload: { task: task() } })])['tasks/t1/lineage.md']!
+    const empty = must(renderTaskFiles('t1', [ev({ kind: EVENT_KIND.task_created, payload: { task: task() } })])['tasks/t1/lineage.md'], 'tasks/t1/lineage.md')
     expect(empty).toContain('_no declared outputs_')
   })
 

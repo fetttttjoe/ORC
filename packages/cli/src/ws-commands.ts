@@ -1,8 +1,8 @@
 import { Command } from 'commander'
-import type { EventLog, Kernel, OrcConfig, ProjectConfig } from '@orc/kernel'
+import type { EventLog, Kernel, ProjectConfig } from '@orc/kernel'
 import type { WorkspaceWithHealth } from '@orc/contracts'
 import { listWorkspaceHealth, PROVISIONAL_UNKNOWN } from './workspace-health'
-import { archiveWorkspaceOp, createRequestWorkspace, finalizeWorkspaceOp, HEAD_REF, mergeWorkspaceOp } from './workspace-ops'
+import { archiveWorkspaceOp, createRequestWorkspace, finalizeWorkspaceOp, HEAD_REF, mergeWorkspaceOp, type WorkspaceConfig } from './workspace-ops'
 import { findCwdWorkspace } from './cwd-workspace'
 import { AGE_UNKNOWN, relativeAge } from './relative-age'
 
@@ -55,7 +55,7 @@ export function wsCommand(deps: {
     if (!deps.project) throw new Error('ws commands need a project context')
     return deps.project
   }
-  const needConfig = (): Pick<OrcConfig, 'dir' | 'projectRoot' | 'trunkBranch' | 'workspaceSetup'> => needProject().config
+  const needConfig = (): WorkspaceConfig => needProject().config
 
   ws.command(`${WS_SUBCOMMAND.new} <title>`)
     .description('create a git worktree + branch for one request under .orc/worktrees, record it as a workspace, and draft the request as its first task')

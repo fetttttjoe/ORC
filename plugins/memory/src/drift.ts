@@ -11,7 +11,7 @@
 // so an agent that re-grounds a drifted note and writes it back under the SAME id clears the drift.
 // Correcting a note is the same call as writing one.
 
-import { DRIFT_STATE, type DriftState } from '@orc/contracts'
+import { DRIFT_STATE, nonEmptyLines, type DriftState } from '@orc/contracts'
 
 // Every check fails toward "not drifted". A note we cannot check is not evidence of rot, and
 // treating unknown as drifted collapses the graph back into re-read-everything — the exact cost
@@ -105,7 +105,7 @@ export function createDriftProbe(dir: string): ChangedSince {
           const out = await new Response(proc.stdout).text()
           // a revision git cannot reach (rebased away, shallow clone) is UNKNOWN, never "drifted"
           if ((await proc.exited) !== 0) return null
-          return new Set(out.split('\n').map(l => l.trim()).filter(l => l !== ''))
+          return new Set(nonEmptyLines(out))
         } catch {
           return null
         }
@@ -260,6 +260,6 @@ const gitDiffNames = async (dir: string, range: string, paths: readonly string[]
     const proc = Bun.spawn(['git', '-C', dir, 'diff', '--name-only', range, '--', ...paths], { stdout: 'pipe', stderr: 'ignore' })
     const out = await new Response(proc.stdout).text()
     if ((await proc.exited) !== 0) return null
-    return out.split('\n').map(l => l.trim()).filter(l => l !== '')
+    return nonEmptyLines(out)
   } catch { return null }
 }

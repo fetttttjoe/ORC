@@ -163,6 +163,8 @@ const setStep = (state: State, taskId: string, s: StepState): void => {
   state.steps.set(taskId, m)
 }
 
+const stepUsageKey = (taskId: string, stepId: string): string => `${taskId}\u0000${stepId}`
+
 // `seen` travels with the state because it is not recoverable from it: a suppressed duplicate
 // leaves no trace, so an incremental fold without it would double-count every replayed event.
 export interface FoldAcc {
@@ -183,7 +185,7 @@ export function foldInto(acc: FoldAcc, e: EventRecord): FoldAcc {
   {
     const key = crashDedupKey(e)
     if (key !== null) {
-      if (seen.has(key)) return acc // crash-boundary duplicate (spec §6.2)
+      if (seen.has(key)) return acc // crash-boundary duplicate
       seen.add(key)
     }
     switch (e.kind) {
@@ -245,7 +247,7 @@ export function foldInto(acc: FoldAcc, e: EventRecord): FoldAcc {
         if (s && s.runToken === e.runToken) s.iterations = Math.max(s.iterations, p.data.iteration)
         if (e.usage) {
           state.usage.set(e.taskId, addUsage(state.usage.get(e.taskId) ?? ZERO_USAGE, e.usage))
-          const sk = `${e.taskId}\u0000${p.data.stepId}`
+          const sk = stepUsageKey(e.taskId, p.data.stepId)
           state.stepUsage.set(sk, addUsage(state.stepUsage.get(sk) ?? ZERO_USAGE, e.usage))
         }
         break
@@ -466,7 +468,7 @@ export function taskUsage(state: State, taskId: string): Usage {
 }
 
 export function stepUsage(state: State, taskId: string, stepId: string): Usage {
-  return state.stepUsage.get(`${taskId}\u0000${stepId}`) ?? ZERO_USAGE
+  return state.stepUsage.get(stepUsageKey(taskId, stepId)) ?? ZERO_USAGE
 }
 
 // Descendants parked at the human approval gate. `task_split` honours the project's approvalPolicy,
@@ -704,9 +706,9 @@ export interface TaskNoteRef { id: string; scope: string; paths: string[] }
 export interface TaskNoteWrite extends TaskNoteRef { preexisting: boolean }
 
 // A note a subtree step DECLARED verified, carrying the revision its stamp named — the tree the
-// auditor read the cited paths against. The commit step's reverify gate diffs those paths between
-// this revision and the tree it is about to stamp, so dropping it (which this fold used to do) is
-// what let a commit advance a verification across ANOTHER task's change to the same file.
+// auditor read the cited paths against. Keeping stampRevision lets the commit step's reverify gate
+// diff paths between the verified revision and the new tree, preventing a commit from advancing a
+// verification across another task's change to the same file.
 export interface TaskVerifiedNote extends TaskNoteRef { stampRevision: string }
 
 // The semantic notes a task subtree wrote — half the restamp set: git_commit stamps exactly these,

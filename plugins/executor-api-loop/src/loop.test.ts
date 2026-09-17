@@ -3,8 +3,8 @@ import { mkdtempSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import type { ClaimHit, Checkpoint, EventDraft, ExecutorContext, NoteSummary, OperationCheckpoint, OperationSpec, ResolvedTool, SplitResult, UnifiedEvent } from '@orc/contracts'
-import { EVENT_KIND, LINK_KIND, MEMORY_ACCESS, NOTE_TIER, OPERATION_KIND, SIGNAL_OUTCOME, planScope, slugId } from '@orc/contracts'
-import { stepFixture, TEST_WORKSPACE_ID } from '@orc/contracts/fixtures'
+import { EVENT_KIND, NOTE_TIER, OPERATION_KIND, SIGNAL_OUTCOME, planScope } from '@orc/contracts'
+import { stepFixture, TEST_WORKSPACE_ID, must } from '@orc/contracts/fixtures'
 import { z } from 'zod'
 import type { LanguageModel } from 'ai'
 import { apiLoopExecutor } from './loop'
@@ -215,8 +215,8 @@ describe('api-loop executor', () => {
     ))
     const ToolResultView = z.object({ toolCallId: z.string(), isError: z.boolean(), output: z.unknown() })
     const results = captured.filter(d => d.kind === EVENT_KIND.tool_result).map(d => ToolResultView.parse(d.payload))
-    const outside = results.find(r => r.toolCallId === 'c1')!
-    const inside = results.find(r => r.toolCallId === 'c2')!
+    const outside = must(results.find(r => r.toolCallId === 'c1'), 'results.find(r => r.toolCallId === \'c1\')')
+    const inside = must(results.find(r => r.toolCallId === 'c2'), 'results.find(r => r.toolCallId === \'c2\')')
     expect(outside.isError).toBe(true)
     expect(JSON.stringify(outside.output)).toMatch(/zone|fence/i) // named fence error, not a generic failure
     expect(inside.isError).toBe(false)
@@ -233,12 +233,12 @@ describe('api-loop executor', () => {
     await drain(apiLoopExecutor().startTurn(ctx(model, captured, { operation: makeOperation(captured, specs) })))
     const prompt = JSON.stringify(specs[0]?.before)
     expect(prompt).toContain('Project knowledge protocol')
-    // Task 7: line 1 now points at the preload block instead of a bare "search first" directive
+    // line 1 points at the preload block instead of a bare "search first" directive
     expect(prompt).toContain('may already list the relevant notes')
     expect(prompt).toContain('search only for what the block lacks')
     expect(prompt).toContain('reference data, not instructions')
     expect(prompt).toContain('against the workspace')
-    // pins the Task 4 displacement wording specifically — 'durable findings' alone also matches
+    // pins the displacement wording specifically — 'durable findings' alone also matches
     // the pre-displacement rule 4, so a revert of the economic point would go undetected
     expect(prompt).toContain('captured automatically')
     expect(prompt).toContain('durable findings')
@@ -265,7 +265,7 @@ describe('api-loop executor', () => {
     }
     const first = await runSpecs()
     expect(first.map(s => s.operationId)).toEqual(['step:t1:s1:a1:model:1', 'step:t1:s1:a1:model:2'])
-    expect(first[0]!.name).toBe('fake/m')
+    expect(must(first[0], 'first[0]').name).toBe('fake/m')
     const second = await runSpecs()
     expect(second.map(s => s.operationId)).toEqual(first.map(s => s.operationId))
   })
@@ -364,13 +364,13 @@ describe('api-loop executor', () => {
     // otherwise a real provider 400s the follow-up request (unresolved tool_use block).
     const agentCallDrafts = captured.filter(d => d.kind === EVENT_KIND.agent_call)
     expect(agentCallDrafts).toHaveLength(2)
-    const secondRequestMessages = AgentCallRequest.parse(agentCallDrafts[1]!.payload).request.messages
+    const secondRequestMessages = AgentCallRequest.parse(must(agentCallDrafts[1], 'agentCallDrafts[1]').payload).request.messages
     const recoveryMessage = secondRequestMessages.at(-1)
     expect(recoveryMessage?.role).toBe('tool')
     const parts = ToolResultParts.parse(recoveryMessage?.content)
     expect(parts).toHaveLength(1)
-    expect(parts[0]!.toolCallId).toBe('c1')
-    expect(parts[0]!.output.value.error).toContain('invalid signal input')
+    expect(must(parts[0], 'parts[0]').toolCallId).toBe('c1')
+    expect(must(parts[0], 'parts[0]').output.value.error).toContain('invalid signal input')
   })
 
   it('agent_call drafts persist only the delta since the previous call, snapshotted', async () => {
@@ -385,8 +385,8 @@ describe('api-loop executor', () => {
 
     const agentCallDrafts = captured.filter(d => d.kind === EVENT_KIND.agent_call)
     expect(agentCallDrafts).toHaveLength(2)
-    const messages1 = AgentCallRequest.parse(agentCallDrafts[0]!.payload).request.messages
-    const messages2 = AgentCallRequest.parse(agentCallDrafts[1]!.payload).request.messages
+    const messages1 = AgentCallRequest.parse(must(agentCallDrafts[0], 'agentCallDrafts[0]').payload).request.messages
+    const messages2 = AgentCallRequest.parse(must(agentCallDrafts[1], 'agentCallDrafts[1]').payload).request.messages
     expect(messages1).toHaveLength(1) // the initial user prompt
     expect(messages2).toHaveLength(2) // ONLY what was appended since: assistant (tool call) + tool result
     // concatenated deltas reconstruct the full request history without O(n²) storage
@@ -423,7 +423,7 @@ describe('api-loop executor', () => {
     expect(events.at(-1)?.type).toBe('done')
 
     const agentCallDrafts = captured.filter(d => d.kind === EVENT_KIND.agent_call)
-    const firstRequestMessages = AgentCallRequest.parse(agentCallDrafts[0]!.payload).request.messages
+    const firstRequestMessages = AgentCallRequest.parse(must(agentCallDrafts[0], 'agentCallDrafts[0]').payload).request.messages
     expect(firstRequestMessages[0]?.content).toContain('# Skill: style-guide')
     expect(firstRequestMessages[0]?.content).toContain('Always write haiku.')
   })
@@ -452,7 +452,7 @@ describe('api-loop executor', () => {
     expect(toolResultEvent?.type === 'tool_result' && toolResultEvent.output).toEqual({ hi: 'x' })
     expect(toolResultEvent?.type === 'tool_result' && toolResultEvent.isError).toBe(false)
     // the real provider tool_call id reaches ResolvedTool.execute — this is what lets
-    // kernel/task_split derive a deterministic, non-colliding split id (Task 7)
+    // kernel/task_split derive a deterministic, non-colliding split id
     expect(seenToolCallId).toBe('c1')
   })
 
@@ -481,7 +481,7 @@ describe('api-loop executor', () => {
     expect(result?.type === 'tool_result' && !result.isError).toBe(true)
     expect(events.at(-1)?.type).toBe('done')
     // the model's second turn saw the split results in its tool message
-    expect(JSON.stringify(model.doGenerateCalls[1]!.prompt)).toContain('child ok')
+    expect(JSON.stringify(must(model.doGenerateCalls[1], 'model.doGenerateCalls[1]').prompt)).toContain('child ok')
   })
 
   it('a valid signal batched with a valid join_splits defers the signal instead of dropping it', async () => {
@@ -508,7 +508,7 @@ describe('api-loop executor', () => {
     // so the next generateText call would be rejected for a missing tool result)
     expect(events.some(e => e.type === 'error')).toBe(false)
     expect(events.at(-1)?.type).toBe('done')
-    expect(unansweredToolCallIds(model.doGenerateCalls[1]!.prompt)).toEqual([])
+    expect(unansweredToolCallIds(must(model.doGenerateCalls[1], 'model.doGenerateCalls[1]').prompt)).toEqual([])
   })
 
   it('a valid signal batched with an invalid join_splits input also answers every tool_use id', async () => {
@@ -523,7 +523,7 @@ describe('api-loop executor', () => {
     const events = await drain(apiLoopExecutor().startTurn(ctx(model, captured)))
     expect(events.some(e => e.type === 'error')).toBe(false)
     expect(events.at(-1)?.type).toBe('done')
-    expect(unansweredToolCallIds(model.doGenerateCalls[1]!.prompt)).toEqual([])
+    expect(unansweredToolCallIds(must(model.doGenerateCalls[1], 'model.doGenerateCalls[1]').prompt)).toEqual([])
   })
 
   it('ask_human yields a feedback gate and feeds the human reply back as the tool result', async () => {
@@ -553,7 +553,7 @@ describe('api-loop executor', () => {
     expect(result?.type === 'tool_result' && !result.isError).toBe(true)
     expect(events.at(-1)?.type).toBe('done')
     // the model's second turn saw the human reply in its tool message
-    expect(JSON.stringify(model.doGenerateCalls[1]!.prompt)).toContain('yes, approve')
+    expect(JSON.stringify(must(model.doGenerateCalls[1], 'model.doGenerateCalls[1]').prompt)).toContain('yes, approve')
   })
 
   it('ask_human honors an explicit topic and defers a batched signal', async () => {
@@ -581,7 +581,7 @@ describe('api-loop executor', () => {
     // the premature signal was deferred, not dropped: no error, and its tool_use is answered
     expect(events.some(e => e.type === 'error')).toBe(false)
     expect(events.at(-1)?.type).toBe('done')
-    expect(unansweredToolCallIds(model.doGenerateCalls[1]!.prompt)).toEqual([])
+    expect(unansweredToolCallIds(must(model.doGenerateCalls[1], 'model.doGenerateCalls[1]').prompt)).toEqual([])
   })
 })
 
@@ -609,7 +609,7 @@ describe('iteration-budget awareness', () => {
       captured,
       { step: stepFixture({ instructions: 'do', maxIterations: 10 }) },
     )))
-    const first = JSON.stringify(RequestPayload.parse(captured.find(e => e.kind === EVENT_KIND.agent_call)!.payload).request)
+    const first = JSON.stringify(RequestPayload.parse(must(captured.find(e => e.kind === EVENT_KIND.agent_call), 'captured.find(e => e.kind === EVENT_KIND.agent_call)').payload).request)
     expect(first).toContain('Iteration budget: 10 model calls')
     expect(first).not.toContain('model calls left')
     expect(first).not.toContain('FINAL iteration')
@@ -640,11 +640,11 @@ describe('memory lint nudge', () => {
 
     const agentCallDrafts = captured.filter(d => d.kind === EVENT_KIND.agent_call)
     expect(agentCallDrafts).toHaveLength(3)
-    const secondRequest = JSON.stringify(AgentCallRequest.parse(agentCallDrafts[1]!.payload).request.messages)
+    const secondRequest = JSON.stringify(AgentCallRequest.parse(must(agentCallDrafts[1], 'agentCallDrafts[1]').payload).request.messages)
     expect(secondRequest).toContain(`memory lint on 'x'`)
     expect(secondRequest).toContain('not optional')
     // fires once: the third iteration's delta must not repeat the nudge
-    const thirdRequest = JSON.stringify(AgentCallRequest.parse(agentCallDrafts[2]!.payload).request.messages)
+    const thirdRequest = JSON.stringify(AgentCallRequest.parse(must(agentCallDrafts[2], 'agentCallDrafts[2]').payload).request.messages)
     expect(thirdRequest).not.toContain('memory lint')
   })
 })
@@ -653,15 +653,17 @@ describe('step memory seam', () => {
   // The executor's whole memory responsibility is WHEN: recall before the first prompt, capture
   // after the signal. What gets searched, recorded, written and linked belongs to the memory
   // plugin (plugins/memory/src/step.ts) and is tested there.
+  type RecallLog = { recalled: number[]; captured: unknown[]; citedPaths: string[][] }
+  const recallLog = (): RecallLog => ({ recalled: [], captured: [], citedPaths: [] })
   function fakeMemory(
-    log: { recalled: number[]; captured: unknown[]; citedPaths?: string[][] },
+    log: RecallLog,
     notes: NoteSummary[] = [],
     claims: ClaimHit[] = [],
     atRisk: ClaimHit[] = [],
   ) {
     return {
       recall: async (budget: number) => { log.recalled.push(budget); return { claims, notes } },
-      claimsCiting: async (paths: readonly string[]) => { log.citedPaths?.push([...paths]); return atRisk },
+      claimsCiting: async (paths: readonly string[]) => { log.citedPaths.push([...paths]); return atRisk },
       capture: async (signal: unknown) => { log.captured.push(signal) },
     }
   }
@@ -685,7 +687,7 @@ describe('step memory seam', () => {
   it('surfaces claims citing a file the step EDITED, once, and only after a successful write', async () => {
     const captured: EventDraft[] = []
     const specs: OperationSpec[] = []
-    const log = { recalled: [] as number[], captured: [] as unknown[], citedPaths: [] as string[][] }
+    const log = recallLog()
     const stale = claim({ claimId: 'aaaaaaaaaaaa', noteId: 'area-cli', text: 'orc memory topics accepts no options.' })
     // turn 1 edits a file; turn 2 must carry the at-risk block; turn 3 signals. A second edit of the
     // SAME path must not re-surface it — a block repeated every turn is one the model learns to skip.
@@ -713,7 +715,7 @@ describe('step memory seam', () => {
   it('says nothing when a read-only step touches no file', async () => {
     const captured: EventDraft[] = []
     const specs: OperationSpec[] = []
-    const log = { recalled: [] as number[], captured: [] as unknown[], citedPaths: [] as string[][] }
+    const log = recallLog()
     const model = scriptModel([
       { toolCalls: [{ toolCallId: 'c1', toolName: 'fs_read', input: { path: 'main.ts' } }] },
       { toolCalls: [{ toolCallId: 'c2', toolName: 'signal', input: { outcome: 'success', summary: 'ok' } }] },
@@ -730,7 +732,7 @@ describe('step memory seam', () => {
   it('renders what recall returned into the first prompt, inside a checkpoint', async () => {
     const captured: EventDraft[] = []
     const specs: OperationSpec[] = []
-    const log = { recalled: [] as number[], captured: [] as unknown[] }
+    const log = recallLog()
     await drain(apiLoopExecutor().startTurn(ctx(signalled('success', 'ok'), captured, {
       memory: fakeMemory(log, [note()]), memoryPreloadTokens: 500, operation: makeOperation(captured, specs),
     })))
@@ -747,7 +749,7 @@ describe('step memory seam', () => {
   it('states currency when no checkable note describes code that moved', async () => {
     const captured: EventDraft[] = []
     const specs: OperationSpec[] = []
-    const log = { recalled: [] as number[], captured: [] as unknown[] }
+    const log = recallLog()
     const memory = { ...fakeMemory(log, [note()]), recall: async () => ({ claims: [], notes: [note()], currency: { checkable: 3, drifted: 0, unknown: 0, total: 3, ratio: 0 } }) }
     await drain(apiLoopExecutor().startTurn(ctx(signalled('success', 'ok'), captured, {
       memory, memoryPreloadTokens: 500, operation: makeOperation(captured, specs),
@@ -758,7 +760,7 @@ describe('step memory seam', () => {
   it('names how many describe code that has since changed', async () => {
     const captured: EventDraft[] = []
     const specs: OperationSpec[] = []
-    const log = { recalled: [] as number[], captured: [] as unknown[] }
+    const log = recallLog()
     const memory = { ...fakeMemory(log, [note()]), recall: async () => ({ claims: [], notes: [note()], currency: { checkable: 4, drifted: 1, unknown: 0, total: 4, ratio: 0.25 } }) }
     await drain(apiLoopExecutor().startTurn(ctx(signalled('success', 'ok'), captured, {
       memory, memoryPreloadTokens: 500, operation: makeOperation(captured, specs),
@@ -772,7 +774,7 @@ describe('step memory seam', () => {
   it('names how many notes could not be checked when nothing else is checkable', async () => {
     const captured: EventDraft[] = []
     const specs: OperationSpec[] = []
-    const log = { recalled: [] as number[], captured: [] as unknown[] }
+    const log = recallLog()
     const memory = { ...fakeMemory(log, [note()]), recall: async () => ({ claims: [], notes: [note()], currency: { checkable: 0, drifted: 0, unknown: 2, total: 2, ratio: null } }) }
     await drain(apiLoopExecutor().startTurn(ctx(signalled('success', 'ok'), captured, {
       memory, memoryPreloadTokens: 500, operation: makeOperation(captured, specs),
@@ -785,7 +787,7 @@ describe('step memory seam', () => {
   it('says nothing about currency when it cannot be known', async () => {
     const captured: EventDraft[] = []
     const specs: OperationSpec[] = []
-    const log = { recalled: [] as number[], captured: [] as unknown[] }
+    const log = recallLog()
     await drain(apiLoopExecutor().startTurn(ctx(signalled('success', 'ok'), captured, {
       memory: fakeMemory(log, [note()]), memoryPreloadTokens: 500, operation: makeOperation(captured, specs),
     })))
@@ -803,7 +805,7 @@ describe('step memory seam', () => {
       { toolCalls: [{ toolCallId: 'ok', toolName: 'signal', input: { outcome: 'success', summary: 'done' } }] },
     ])
     await drain(apiLoopExecutor().startTurn(ctx(model, captured, { step: stepFixture({ instructions: 'go', maxIterations: 10 }) })))
-    const second = AgentCallRequest.parse(captured.filter(d => d.kind === EVENT_KIND.agent_call)[1]!.payload).request.messages
+    const second = AgentCallRequest.parse(must(captured.filter(d => d.kind === EVENT_KIND.agent_call)[1], 'captured.filter(d => d.kind === EVENT_KIND.agent_call)[1]').payload).request.messages
     const results = second.flatMap(m => (Array.isArray(m.content) ? m.content : []))
       .filter((p): p is { type: string; toolCallId: string } => isRecord(p) && p.type === 'tool-result' && typeof p.toolCallId === 'string')
     // exactly one result for the id — this is the invariant a real provider enforces with a 400
@@ -837,7 +839,7 @@ describe('step memory seam', () => {
   it('renders a recalled CLAIM as the statement itself, carrying its note id', async () => {
     const captured: EventDraft[] = []
     const specs: OperationSpec[] = []
-    const log = { recalled: [] as number[], captured: [] as unknown[] }
+    const log = recallLog()
     await drain(apiLoopExecutor().startTurn(ctx(signalled('success', 'ok'), captured, {
       memory: fakeMemory(log, [], [claim(), claim({ claimId: 'def456def456', noteId: 'plan-n', scope: planScope('task-1'), text: 'Plan scoped fact.' })]),
       memoryPreloadTokens: 500, operation: makeOperation(captured, specs),
@@ -854,7 +856,7 @@ describe('step memory seam', () => {
   it('claims alone fill the block — no note hit is not an empty preload', async () => {
     const captured: EventDraft[] = []
     const specs: OperationSpec[] = []
-    const log = { recalled: [] as number[], captured: [] as unknown[] }
+    const log = recallLog()
     await drain(apiLoopExecutor().startTurn(ctx(signalled('success', 'ok'), captured, {
       memory: fakeMemory(log, [], [claim()]), memoryPreloadTokens: 500, operation: makeOperation(captured, specs),
     })))
@@ -866,7 +868,7 @@ describe('step memory seam', () => {
   it('a non-project-scope note renders its id qualified with scope', async () => {
     const captured: EventDraft[] = []
     const specs: OperationSpec[] = []
-    const log = { recalled: [] as number[], captured: [] as unknown[] }
+    const log = recallLog()
     await drain(apiLoopExecutor().startTurn(ctx(signalled('success', 'ok'), captured, {
       memory: fakeMemory(log, [note({ id: 'plan-note', scope: planScope('task-1') }), note()]),
       memoryPreloadTokens: 500, operation: makeOperation(captured, specs),
@@ -879,7 +881,7 @@ describe('step memory seam', () => {
   it('recall returning nothing leaves the prompt unchanged', async () => {
     const captured: EventDraft[] = []
     const specs: OperationSpec[] = []
-    const log = { recalled: [] as number[], captured: [] as unknown[] }
+    const log = recallLog()
     await drain(apiLoopExecutor().startTurn(ctx(signalled('success', 'ok'), captured, {
       memory: fakeMemory(log), memoryPreloadTokens: 500, operation: makeOperation(captured, specs),
     })))
@@ -888,7 +890,7 @@ describe('step memory seam', () => {
 
   it('memoryPreloadTokens 0 never calls recall', async () => {
     const captured: EventDraft[] = []
-    const log = { recalled: [] as number[], captured: [] as unknown[] }
+    const log = recallLog()
     await drain(apiLoopExecutor().startTurn(ctx(signalled('success', 'ok'), captured, {
       memory: fakeMemory(log, [note()]), memoryPreloadTokens: 0,
     })))
@@ -898,7 +900,7 @@ describe('step memory seam', () => {
   it('hands the signal to capture — success and failure alike', async () => {
     for (const outcome of ['success', 'failure'] as const) {
       const captured: EventDraft[] = []
-      const log = { recalled: [] as number[], captured: [] as unknown[] }
+      const log = recallLog()
       await drain(apiLoopExecutor().startTurn(ctx(signalled(outcome, 'what happened'), captured, {
         memory: fakeMemory(log), taskId: 'task-1',
       })))

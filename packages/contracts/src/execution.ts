@@ -317,7 +317,7 @@ export interface ExecutorContext<LM = unknown> {
   // reaches the loop as a frozen PlanStep field, wrong for a runtime knob). Optional so every
   // existing ctx constructor (tests, fixtures) keeps compiling untouched.
   taskId?: string // the plan this step belongs to — absent in bare test ctxs, which skip ambient capture
-  memoryPreloadTokens?: number // Task 7's memory-preload budget: fed via dbos-port config, consumed by the loop's preload search
+  memoryPreloadTokens?: number // memory-preload budget: fed via dbos-port config, consumed by the loop's preload search
   memory?: StepMemory
   // Set by the port on a continuation round (a previous round signalled `partial`): the previous
   // round's summary IS the handoff — the same "your summary is the only output downstream sees"

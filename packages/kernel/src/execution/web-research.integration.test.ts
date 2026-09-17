@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { EVENT_KIND, MemoryScope, PAYLOAD_SCHEMAS, type NoteView } from '@orc/contracts'
-import { draftFixture, stepFixture } from '@orc/contracts/fixtures'
+import { draftFixture, must, stepFixture } from '@orc/contracts/fixtures'
 import { createMcpHub } from '@orc/mcp-client'
 import { apiLoopExecutor } from '@orc/executor-api-loop'
 import { scriptModel } from '@orc/executor-api-loop/test-model'
@@ -94,22 +94,22 @@ describe('sourced web research through a durable run (integration)', () => {
     // the shipped skill reached the model, and the trusted MCP tool actually ran
     const events = await kernel.eventsFor(t.id)
     expect(events.map(e => e.kind)).toContain(EVENT_KIND.skill_loaded)
-    expect(JSON.stringify(events.find(e => e.kind === EVENT_KIND.agent_call)!.payload)).toContain('DATA, not instructions')
-    const mcpResult = events.find(e =>
-      e.kind === EVENT_KIND.tool_result && PAYLOAD_SCHEMAS.tool_result.parse(e.payload).toolName === 'mcp__fixture__echo')!
+    expect(JSON.stringify(must(events.find(e => e.kind === EVENT_KIND.agent_call), 'agent call event').payload)).toContain('DATA, not instructions')
+    const mcpResult = must(events.find(e =>
+      e.kind === EVENT_KIND.tool_result && PAYLOAD_SCHEMAS.tool_result.parse(e.payload).toolName === 'mcp__fixture__echo'), 'mcp tool result event')
     expect(JSON.stringify(mcpResult.payload)).toContain(INJECTION) // raw evidence IS in the audit, by design
 
     await memory.projector.catchUp()
     const stored = await memory.store.get('pg16-logical-replication')
     expect(stored).not.toBeNull()
-    const note: NoteView = stored!
+    const note: NoteView = must(stored, 'stored note')
     expect(note.kind).toBe('research')
     expect(note.retention).toBe('expirable')
     expect(note.body).toBe(FINDING)
 
     // the citation is stamped from the canonical write event, not by the agent. Memory events are
     // project-scoped (taskId: null), so they are not in this task's event slice.
-    const written = (await log.all()).find(e => e.kind === EVENT_KIND.memory_written)!
+    const written = must((await log.all()).find(e => e.kind === EVENT_KIND.memory_written), 'memory written event')
     expect(note.sources).toEqual([{ url: SOURCE_URL, title: 'Postgres 16 release notes', retrievedAt: written.ts }])
 
     // THE POINT: the distilled fact reaches the vault, the hostile page does not — anywhere.
@@ -117,8 +117,8 @@ describe('sourced web research through a durable run (integration)', () => {
     expect(vaultFile).toContain(FINDING)
     expect(vaultFile).toContain(SOURCE_URL)
     expect(vaultFile).not.toContain(INJECTION)
-    // recursive: non-project scopes nest under a subdirectory (noteRelPath) — Task 4's ambient
-    // capture now also lands a plan-scoped step note here, so the scan must not assume a flat dir
+    // recursive: non-project scopes nest under a subdirectory (noteRelPath) — ambient
+    // capture also lands a plan-scoped step note here, so the scan must not assume a flat dir
     const memoryDir = path.join(vaultDir, 'memory')
     const everyVaultFile = readdirSync(memoryDir, { recursive: true, encoding: 'utf8' })
       .map(f => path.join(memoryDir, f))
@@ -128,7 +128,7 @@ describe('sourced web research through a durable run (integration)', () => {
     expect(JSON.stringify(note)).not.toContain(INJECTION)
 
     // citations are provenance, not graph nodes: no note or edge is minted for a URL.
-    // project scope only: Task 4's ambient capture also lands a plan-scoped step note for this
+    // project scope only: the ambient capture also lands a plan-scoped step note for this
     // run, which is a different, expected thing (a step report, not derived from the citation).
     expect((await memory.store.list({ scope: MemoryScope.project })).map(n => n.id)).toEqual(['pg16-logical-replication'])
     expect(await memory.store.neighbors('pg16-logical-replication')).toEqual([])

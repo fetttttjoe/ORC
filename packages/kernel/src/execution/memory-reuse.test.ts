@@ -8,7 +8,7 @@ import {
   type AgentExecutor, type EventDraft, type ExecutorContext, type ResolvedTool,
   type SplitResult, type UnifiedEvent,
 } from '@orc/contracts'
-import { draftFixture, stepFixture } from '@orc/contracts/fixtures'
+import { draftFixture, must, stepFixture } from '@orc/contracts/fixtures'
 import { createMemory } from '@orc/memory'
 import { createTestSurreal } from '@orc/memory/test-helpers'
 import { openStorage } from '../storage'
@@ -124,8 +124,8 @@ describe('memory reuse over a real run (e2e): step B reads step A\'s note', () =
       const events = await log.all()
       const written = events.find(e => e.kind === 'memory_written')
       expect(written).toBeDefined()
-      expect(written!.taskId).toBeNull()
-      const author = MemoryWrittenPayload.parse(written!.payload).author
+      expect(must(written, 'memory written event').taskId).toBeNull()
+      const author = MemoryWrittenPayload.parse(must(written, 'memory written event').payload).author
       expect(author.executor).toBe('memory-fake')
       expect(author.role).toBe('worker')
 

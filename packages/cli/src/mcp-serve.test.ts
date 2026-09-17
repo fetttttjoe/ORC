@@ -3,6 +3,7 @@ import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { isRecord } from '@orc/contracts'
+import { must } from '@orc/contracts/fixtures'
 import { buildCopilotTools, type OrcActions, type ProjectSessions } from '@orc/ui-core'
 import { MEMORY_READ_TOOLS, unavailableMemoryTools } from '@orc/memory'
 import { createTestDb, TEST_PROJECT_ID } from '@orc/kernel/test-helpers'
@@ -135,7 +136,8 @@ describe('orc mcp serve (stdio, read slice)', () => {
     // authoring tool it serves. A set, because tools/list order is the composition's, not a
     // promise. Spelled out here rather than derived from buildCopilotTools on purpose: the parity
     // test below proves the composition, this one proves what actually reached the client.
-    const names = toolNames(parsed.find(p => p.id === 2)!.result)
+    const frame2 = must(parsed.find(p => p.id === 2), 'tools/list response frame')
+    const names = toolNames(frame2.result)
     expect(new Set(names)).toEqual(new Set([
       'project_status', 'task_plan', 'task_transcript', 'plan_notes', 'recent_activity', 'available_models',
       'memory_search', 'memory_read', 'memory_neighbors', 'memory_topics', 'memory_recheck',
@@ -146,20 +148,26 @@ describe('orc mcp serve (stdio, read slice)', () => {
     // layout and a lifecycle, a free note has neither — agents inside plans write those
     expect(names).not.toContain('memory_write')
 
-    const call = asCallResult(parsed.find(p => p.id === 3)!.result)
+    const frame3 = must(parsed.find(p => p.id === 3), 'tools/call frame')
+    const call = asCallResult(frame3.result)
     expect(call.isError).toBe(false)
-    expect(Array.isArray(asJsonObject(call.content[0]!.text).tasks)).toBe(true)
+    const callContent0 = must(call.content[0], 'first content block')
+    expect(Array.isArray(asJsonObject(callContent0.text).tasks)).toBe(true)
 
     // the dial holds: gated approve refuses and names the way forward
-    const gate = asCallResult(parsed.find(p => p.id === 4)!.result)
+    const frame4 = must(parsed.find(p => p.id === 4), 'gated approve frame')
+    const gate = asCallResult(frame4.result)
     expect(gate.isError).toBe(true)
-    expect(gate.content[0]!.text).toContain('human gate')
-    expect(gate.content[0]!.text).toContain('--autonomy full')
+    const gateContent0 = must(gate.content[0], 'first gate content block')
+    expect(gateContent0.text).toContain('human gate')
+    expect(gateContent0.text).toContain('--autonomy full')
 
     // mutations flow through the same OrcActions as the web door
-    const created = asCallResult(parsed.find(p => p.id === 5)!.result)
+    const frame5 = must(parsed.find(p => p.id === 5), 'new_request response frame')
+    const created = asCallResult(frame5.result)
     expect(created.isError).toBe(false)
-    expect(asJsonObject(created.content[0]!.text)).toHaveProperty('taskId')
+    const createdContent0 = must(created.content[0], 'first created content block')
+    expect(asJsonObject(createdContent0.text)).toHaveProperty('taskId')
   }, 40_000)
 
   it('door parity is mechanical: every copilot tool is served, memory read names still exist', () => {
@@ -195,7 +203,7 @@ describe('orc mcp serve (stdio, read slice)', () => {
     const actions = actionsStub()
     const memoryTools = unavailableMemoryTools('parity-check')
     const served = buildServeTools({ sessions, projectId: 'p1', memoryTools, actions, autonomy: 'gated' })
-    const tool = served.find(t => t.name === 'available_models')!
+    const tool = must(served.find(t => t.name === 'available_models'), 'available_models tool')
     const result = await tool.execute({}, undefined)
     expect(result.isError).toBe(false)
     expect(result.output).toEqual({ refs })
@@ -237,7 +245,7 @@ describe('orc mcp serve (stdio, read slice)', () => {
     const sessions = sessionsStub()
     const memoryTools = unavailableMemoryTools('parity-check')
     const served = buildServeTools({ sessions, projectId: 'p1', memoryTools, actions, autonomy: 'gated' })
-    const run = served.find(t => t.name === 'run')!
+    const run = must(served.find(t => t.name === 'run'), 'run tool')
     for (const bad of [undefined, {}, { taskId: 42, cwd: '/tmp' }, { taskId: 't1', cwd: { evil: true } }, { taskId: '', cwd: '/tmp' }]) {
       const r = await run.execute(bad, undefined)
       expect(r.isError).toBe(true)

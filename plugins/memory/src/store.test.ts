@@ -3,12 +3,13 @@ import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { z } from 'zod'
-import { claimId, EVENT_KIND, MEMORY_USE, MemoryAccessedPayload, MemoryAuthor, MemoryOutcomePayload, MemoryScope, MemoryTopicAccessedPayload, MemoryVerifiedPayload, MemoryWrittenPayload, NOTE_TIER, type AccessVia } from '@orc/contracts'
+import { claimId, EVENT_KIND, MEMORY_USE, MemoryAccessedPayload, MemoryAuthor, MemoryOutcomePayload, MemoryScope, MemoryTopicAccessedPayload, MemoryVerifiedPayload, MemoryWrittenPayload, NOTE_TIER, type AccessVia, LINK_KIND } from '@orc/contracts'
 import { gitRevision, openStorage, type EventLog } from '@orc/kernel'
 import { TEST_WORKSPACE_ID, createTestDb, TEST_PROJECT_ID, type TestDb } from '@orc/kernel/test-helpers'
 import { SurrealMemory } from './surreal'
 import { createTestSurreal } from './test-helpers'
 import { createMemoryStore, STORE_REFUSAL } from './store'
+import { must } from '@orc/contracts/fixtures'
 
 const drops: (() => Promise<void>)[] = []
 // Concurrent drops with a real hook budget — the same fix and reason as surreal.test.ts's teardown:
@@ -35,9 +36,9 @@ describe('MemoryStore gateway', () => {
     await store.write({ id: 'auth', title: 'Auth' }, { source: 'agent', workspaceId: TEST_WORKSPACE_ID, executor: 'api-loop', model: 'opus', role: 'review' })
     const events = await log.all()
     expect(events).toHaveLength(1)
-    expect(events[0]!.kind).toBe('memory_written')
-    expect(events[0]!.taskId).toBeNull()
-    const { author } = z.object({ author: MemoryAuthor }).parse(events[0]!.payload)
+    expect(must(events[0], 'events[0]').kind).toBe('memory_written')
+    expect(must(events[0], 'events[0]').taskId).toBeNull()
+    const { author } = z.object({ author: MemoryAuthor }).parse(must(events[0], 'events[0]').payload)
     expect(author.executor).toBe('api-loop')
   })
 
@@ -49,10 +50,10 @@ describe('MemoryStore gateway', () => {
     await store.recordAccess('auth', 'project', 'read', { source: 'agent', workspaceId: TEST_WORKSPACE_ID, taskId: 't1', stepId: 's1', runToken: 'r1' })
     await store.recordAccess('auth', 'project', 'read', { source: 'cli', workspaceId: TEST_WORKSPACE_ID })
     const events = await log.all()
-    expect(events[0]!.taskId).toBe('t1')
-    expect(events[0]!.stepId).toBe('s1')
-    expect(events[0]!.runToken).toBe('r1')
-    expect(events[1]!.taskId).toBeNull() // cli access stays unbound
+    expect(must(events[0], 'events[0]').taskId).toBe('t1')
+    expect(must(events[0], 'events[0]').stepId).toBe('s1')
+    expect(must(events[0], 'events[0]').runToken).toBe('r1')
+    expect(must(events[1], 'events[1]').taskId).toBeNull() // cli access stays unbound
   })
 
   it('recordOutcomes appends one bound memory_outcome event per entry, idempotent under a key base', async () => {
@@ -70,8 +71,8 @@ describe('MemoryStore gateway', () => {
     const events = await log.all()
     expect(events).toHaveLength(2)
     expect(events.map(e => e.kind)).toEqual(['memory_outcome', 'memory_outcome'])
-    expect(events[0]!.taskId).toBe('t1') // bound to the acting step, recordAccess's rule
-    const payload = MemoryOutcomePayload.parse(events[0]!.payload)
+    expect(must(events[0], 'events[0]').taskId).toBe('t1') // bound to the acting step, recordAccess's rule
+    const payload = MemoryOutcomePayload.parse(must(events[0], 'events[0]').payload)
     expect(payload).toMatchObject({ id: 'auth', scope: 'project', outcome: MEMORY_USE.useful })
   })
 
@@ -80,10 +81,10 @@ describe('MemoryStore gateway', () => {
     const ts = await createTestSurreal(); drops.push(ts.drop)
     const log = await openLog(pg)
     const store = createMemoryStore({ log, surreal: await SurrealMemory.open(ts) })
-    const via: AccessVia = { seed: 'net-topology', kind: 'supersedes', direction: 'out' }
+    const via: AccessVia = { seed: 'net-topology', kind: LINK_KIND.supersedes, direction: 'out' }
     await store.recordAccess('auth', 'project', 'read', { source: 'cli', workspaceId: TEST_WORKSPACE_ID }, { via })
     const events = await log.all()
-    const payload = MemoryAccessedPayload.parse(events[0]!.payload)
+    const payload = MemoryAccessedPayload.parse(must(events[0], 'events[0]').payload)
     expect(payload.via).toEqual(via)
   })
 
@@ -121,7 +122,7 @@ describe('MemoryStore gateway', () => {
     const store = createMemoryStore({ log, surreal: await SurrealMemory.open(ts), sourceRevision: async () => 'head-sha-42' })
     await store.write({ id: 'auth', title: 'Auth', sourceRevision: 'invented-by-agent' }, { source: 'agent', workspaceId: TEST_WORKSPACE_ID })
     const [event] = await log.all()
-    const { note } = z.object({ note: z.object({ sourceRevision: z.string().nullable() }) }).parse(event!.payload)
+    const { note } = z.object({ note: z.object({ sourceRevision: z.string().nullable() }) }).parse(must(event, 'event').payload)
     expect(note.sourceRevision).toBe('head-sha-42')
   })
 
@@ -141,22 +142,22 @@ describe('MemoryStore gateway', () => {
     const surreal = await SurrealMemory.open(ts)
     const store = createMemoryStore({ log, surreal })
     const notePayload = z.object({ note: z.object({ title: z.string(), summary: z.string(), body: z.string(), tags: z.array(z.string()), links: z.array(z.object({ id: z.string(), kind: z.string() })) }) })
-    await store.write({ id: 'auth', title: 'Auth', summary: 'tokens rotate', body: 'long body', tags: ['auth'], links: [{ id: 'other', kind: 'depends_on' }] }, { source: 'cli', workspaceId: TEST_WORKSPACE_ID })
+    await store.write({ id: 'auth', title: 'Auth', summary: 'tokens rotate', body: 'long body', tags: ['auth'], links: [{ id: 'other', kind: LINK_KIND.depends_on }] }, { source: 'cli', workspaceId: TEST_WORKSPACE_ID })
     let events = await log.all()
-    await surreal.applyEvent(events[0]!) // materialize so the gateway sees the previous revision
+    await surreal.applyEvent(must(events[0], 'events[0]')) // materialize so the gateway sees the previous revision
     // omitting body/tags/links must NOT wipe them (the graph-refresh body-wipe defect)
     await store.write({ id: 'auth', title: 'Auth v2' }, { source: 'cli', workspaceId: TEST_WORKSPACE_ID })
     events = await log.all()
-    let { note } = notePayload.parse(events[1]!.payload)
+    let { note } = notePayload.parse(must(events[1], 'events[1]').payload)
     expect(note.title).toBe('Auth v2')            // supplied → replaced
     expect(note.body).toBe('long body')           // omitted → preserved
     expect(note.tags).toEqual(['auth'])
-    expect(note.links).toEqual([{ id: 'other', kind: 'depends_on' }])
+    expect(note.links).toEqual([{ id: 'other', kind: LINK_KIND.depends_on }])
     // an EXPLICIT empty still clears; an undefined-valued key is an omission (CLI optional flags)
-    await surreal.applyEvent(events[1]!)
+    await surreal.applyEvent(must(events[1], 'events[1]'))
     await store.write({ id: 'auth', title: 'Auth v2', body: '', summary: undefined }, { source: 'cli', workspaceId: TEST_WORKSPACE_ID })
     events = await log.all()
-    note = notePayload.parse(events[2]!.payload).note
+    note = notePayload.parse(must(events[2], 'events[2]').payload).note
     expect(note.body).toBe('')
     expect(note.summary).toBe('tokens rotate')
   })
@@ -174,7 +175,7 @@ describe('MemoryStore gateway', () => {
     await store.write({ id: 'auth', title: 'Auth', body: 'long body', tags: ['auth'] }, { source: 'cli', workspaceId: TEST_WORKSPACE_ID })
     await store.write({ id: 'auth', title: 'Auth v2' }, { source: 'cli', workspaceId: TEST_WORKSPACE_ID })
     const events = await log.all()
-    const { note } = notePayload.parse(events[1]!.payload)
+    const { note } = notePayload.parse(must(events[1], 'events[1]').payload)
     expect(note.title).toBe('Auth v2')       // supplied → replaced
     expect(note.body).toBe('long body')       // omitted → preserved despite the un-projected first write
     expect(note.tags).toEqual(['auth'])
@@ -258,10 +259,9 @@ describe('sourceRevision is resolved lazily', () => {
     await store.search('x')
     expect(calls).toBe(0)
 
-    // ONE PER WRITE, not one per store. This assertion used to read `toBe(1)` and locked in a
-    // memoization that made a supervisor stamp every note it ever wrote with the commit it booted
-    // at — in the immutable log, where no rebuild heals it, and under a drift check that then
-    // reported moved code as current. The saving was never real either: only writes resolve it.
+    // ONE PER WRITE, not one per store: a store-level memo stamped every note with the commit the
+    // supervisor booted at — in the immutable log, where no rebuild heals it — and the drift check
+    // then reported moved code as current. Only writes resolve it, so the saving was never real.
     await store.write({ id: 'n1', title: 'N1' }, { source: 'cli', workspaceId: TEST_WORKSPACE_ID })
     await store.write({ id: 'n2', title: 'N2' }, { source: 'cli', workspaceId: TEST_WORKSPACE_ID })
     expect(calls).toBe(2)
@@ -339,13 +339,13 @@ describe('topic fetches are tracked', () => {
   it('one fetch appends exactly one memory_topic_accessed, carrying the resolved label', async () => {
     const { log, store } = await openTopics()
     const [topic] = await store.topics()
-    const claims = await store.topicClaims(topic!.topicKey, { source: 'agent', workspaceId: TEST_WORKSPACE_ID, taskId: 't1', stepId: 's1', runToken: 'r1' })
-    expect(claims).toHaveLength(topic!.size)
+    const claims = await store.topicClaims(must(topic, 'topic').topicKey, { source: 'agent', workspaceId: TEST_WORKSPACE_ID, taskId: 't1', stepId: 's1', runToken: 'r1' })
+    expect(claims).toHaveLength(must(topic, 'topic').size)
 
     const tracked = await topicAccesses(log)
     expect(tracked).toHaveLength(1)
     // the label rides the EVENT because the read model is disposable — a rebuild would erase it
-    expect(MemoryTopicAccessedPayload.parse(tracked[0]!.payload)).toMatchObject({ topicKey: topic!.topicKey, label: topic!.label })
+    expect(MemoryTopicAccessedPayload.parse(must(tracked[0], 'tracked[0]').payload)).toMatchObject({ topicKey: must(topic, 'topic').topicKey, label: must(topic, 'topic').label })
     // and the envelope binds it to the acting step, the same rule recordAccess follows: task-scoped
     // views filter on the envelope, so an unbound append orphans the fetch from the run that made it
     expect(tracked[0]).toMatchObject({ taskId: 't1', stepId: 's1', runToken: 'r1' })
@@ -355,9 +355,9 @@ describe('topic fetches are tracked', () => {
     const { log, store } = await openTopics()
     const [topic] = await store.topics()
     const author: MemoryAuthor = { source: 'agent', workspaceId: TEST_WORKSPACE_ID, runToken: 'r1' }
-    const key = `r1:tool:c1:topic:${topic!.topicKey}`
-    await store.topicClaims(topic!.topicKey, author, { idempotencyKey: key })
-    await store.topicClaims(topic!.topicKey, author, { idempotencyKey: key })
+    const key = `r1:tool:c1:topic:${must(topic, 'topic').topicKey}`
+    await store.topicClaims(must(topic, 'topic').topicKey, author, { idempotencyKey: key })
+    await store.topicClaims(must(topic, 'topic').topicKey, author, { idempotencyKey: key })
     expect(await topicAccesses(log)).toHaveLength(1)
   })
 
@@ -393,12 +393,12 @@ describe('MemoryStore.verify', () => {
     const events = await log.all()
     // the act writes NO note: one write, one verification, and nothing else
     expect(events.map(e => e.kind)).toEqual([EVENT_KIND.memory_written, EVENT_KIND.memory_verified])
-    const p = MemoryVerifiedPayload.parse(events[1]!.payload)
+    const p = MemoryVerifiedPayload.parse(must(events[1], 'events[1]').payload)
     expect(p).toMatchObject({ id: 'auth', scope: 'project', stamp })
     // envelope bound to the acting step, same rule recordAccess follows — an unbound append would
     // orphan the verification from the run that made it
-    expect(events[1]!.taskId).toBe('t1')
-    expect(events[1]!.runToken).toBe('r1')
+    expect(must(events[1], 'events[1]').taskId).toBe('t1')
+    expect(must(events[1], 'events[1]').runToken).toBe('r1')
   })
 
   it('refuses an id the LOG has no live note for, naming it', async () => {

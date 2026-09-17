@@ -4,6 +4,11 @@ import { WORKSPACE_KIND, errorMessage, slugId, type Workspace } from '@orc/contr
 import { KERNEL_ERROR_CODE, KernelError, branchDelete, currentBranch, dirtyPaths, isAncestor, MERGE_REFUSAL, mergeBranch, revParse, worktreeAdd, worktreeRemove, type Kernel, type OrcConfig } from '@orc/kernel'
 import { resolveTrunk } from './workspace-adopt'
 
+// The OrcConfig slice `orc ws new` (ws-commands.ts) and adoptCwd (workspace-adopt.ts) both need — the
+// union of what each narrows to. One export so a Pick spelled twice can't drift when one call site
+// starts needing a field the other doesn't.
+export type WorkspaceConfig = Pick<OrcConfig, 'dir' | 'projectRoot' | 'trunkBranch' | 'workspaceSetup'>
+
 // The workspace lifecycle operations — create-with-worktree, merge, finalize, archive — as plain
 // async functions returning result values.
 //

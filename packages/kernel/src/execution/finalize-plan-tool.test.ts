@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'bun:test'
 import { COMMIT_STEP_ID, FINISH_STEP_ID, GROUNDED_APPROVAL_DOOR, STEP_ROLE, type MemoryLink, type PlanNote } from '@orc/contracts'
-import { planNoteFixture } from '@orc/contracts/fixtures'
+import { must, planNoteFixture } from '@orc/contracts/fixtures'
 import { finalizePlanTool } from './finalize-plan-tool'
 import { instantiateFrozenPlan, planGraphHash } from './strategies/grounded-plan'
 import { withFinishStep } from '../finish-step'
@@ -12,7 +12,7 @@ const note = (over: Partial<PlanNote> & { id: string }): PlanNote =>
   planNoteFixture({ scope: 'plan-t1', title: over.id, createdAt: '', createdBy: '', updatedAt: '', updatedBy: '', ...over })
 const link = (id: string, kind: MemoryLink['kind']): MemoryLink => ({ id, kind })
 
-// FixE: finalize_plan now sources the frozen plan from kernel.listPlanNotes (a LOG fold) — never the
+// finalize_plan sources the frozen plan from kernel.listPlanNotes (a LOG fold) — never the
 // SurrealDB projection. The double models that log-fold; there is NO memory store here, so a finalize
 // that still read the async read model could not possibly work.
 function fakeKernel(
@@ -255,7 +255,7 @@ describe('autoCommit', () => {
     expect(r.isError).toBe(false)
     const plan = (calls[0] as { plan: { steps: { id: string; role: string }[] } }).plan
     expect(plan.steps.map(s => s.id)).toEqual(['a', FINISH_STEP_ID, COMMIT_STEP_ID])
-    expect(plan.steps.at(-1)!.role).toBe(STEP_ROLE.committer)
+    expect(must(plan.steps.at(-1), 'last step').role).toBe(STEP_ROLE.committer)
   })
 
   it('off (default): the frozen plan is the bare decomposition plus the finish step, and nothing else', async () => {

@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { EVENT_KIND, FINISH_STEP_ID } from '@orc/contracts'
-import { draftFixture, stepFixture } from '@orc/contracts/fixtures'
+import { draftFixture, must, stepFixture } from '@orc/contracts/fixtures'
 import { openStorage } from '../storage'
 import { Kernel } from '../kernel'
 import { fold, stepUsage } from '../projections'
@@ -21,7 +21,7 @@ const waitForFile = async (file: string, timeoutMs: number, what: string): Promi
   }
 }
 
-describe('kill -9 resume (spec §10/§11 — the crown jewel)', () => {
+describe('kill -9 resume', () => {
   // An array, not a single `drop`: a lone variable is overwritten by the second test, so the
   // first test's database and its _dbos_ sibling survive every suite run. Measured — one pair
   // leaked per run, and the pair count grows with each CI pass forever, since nothing ever
@@ -73,8 +73,8 @@ describe('kill -9 resume (spec §10/§11 — the crown jewel)', () => {
     // step: the finish step journals an operation of its own, and it is not what was interrupted.
     const ops = (await storage.operations.operationsFor(t.id)).filter(o => o.stepId === 's1')
     expect(ops).toHaveLength(1)
-    expect(ops[0]!.status).toBe('completed')
-    expect(ops[0]!.attempts).toBe(2)
+    expect(must(ops[0], 'first operation').status).toBe('completed')
+    expect(must(ops[0], 'first operation').attempts).toBe(2)
     const taskEvents = (await log.byTask(t.id)).filter(e => e.stepId === 's1')
     expect(taskEvents.filter(e => e.kind === EVENT_KIND.operation_started)).toHaveLength(2)
     expect(taskEvents.filter(e => e.kind === EVENT_KIND.operation_completed)).toHaveLength(1)

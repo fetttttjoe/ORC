@@ -23,7 +23,7 @@ export const Workspace = z.object({
   kind: WorkspaceKind,
   managed: z.boolean(),
   // Captured at creation/adoption: branch === the project's trunk. Notes written on trunk are final
-  // by construction; everywhere else they are provisional until workspace_merged (spec §5).
+  // by construction; everywhere else they are provisional until workspace_merged.
   onTrunk: z.boolean(),
   createdAt: z.string(),
   archivedAt: z.string().nullable(), // required key: nothing about a workspace record defaults silently

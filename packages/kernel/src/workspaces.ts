@@ -111,8 +111,8 @@ function workspaceEventId(e: Pick<EventRecord, 'kind' | 'payload'>): string | nu
  *
  * The RULE is feedback-open.ts's, shared with Kernel.openRequest, which asks a narrower question of
  * the same events: WHICH question is open on ONE task, with the envelope a reply has to resume.
- * This asks "is anything open anywhere in this checkout" across many tasks at once. A second
- * spelling here used to claim equivalence in a comment, and a comment cannot be run.
+ * This asks "is anything open anywhere in this checkout" across many tasks at once. The spelling
+ * is code, not a comment, so the keyset is testable.
  *
  * Scoped BEFORE the rule rather than after it: the keys it returns are the pure module's own
  * spelling, so the only place to test membership of this workspace's tasks is the events going in.

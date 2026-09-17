@@ -1,9 +1,12 @@
 import { describe, expect, it } from 'bun:test'
-import { mkdtempSync, writeFileSync, mkdirSync } from 'node:fs'
+import { mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { corpusDrift, createDriftProbe, needsReground, noteDriftState, noteHasDrifted, notesCiting, restampableNotes, CORPUS_DRIFT_ADVISORY, type ChangedSince, type CitingNote } from './drift'
 import { DRIFT_STATE } from '@orc/contracts'
+import { must } from '@orc/contracts/fixtures'
+import { sh } from '@orc/kernel/test-helpers'
+import { tmpSourceRepo } from './test-helpers'
 
 const note = (over: Partial<{ sourceRevision: string | null; paths: string[] }> = {}) =>
   ({ sourceRevision: 'abc123', paths: ['packages/kernel/src/kernel.ts'], ...over })
@@ -75,21 +78,8 @@ describe('notesCiting', () => {
 })
 
 describe('createDriftProbe', () => {
-  function repo(): string {
-    const dir = mkdtempSync(path.join(tmpdir(), 'orc-drift-'))
-    const run = (...args: string[]) => Bun.spawnSync(['git', '-C', dir, ...args], { stdout: 'ignore', stderr: 'ignore' })
-    run('init', '-q')
-    run('config', 'user.email', 't@t.t')
-    run('config', 'user.name', 't')
-    mkdirSync(path.join(dir, 'src'), { recursive: true })
-    writeFileSync(path.join(dir, 'src', 'a.ts'), 'export const a = 1\n')
-    writeFileSync(path.join(dir, 'src', 'b.ts'), 'export const b = 1\n')
-    run('add', '-A')
-    run('commit', '-qm', 'base')
-    return dir
-  }
-
-  const head = (dir: string) => Bun.spawnSync(['git', '-C', dir, 'rev-parse', 'HEAD'], { stdout: 'pipe' }).stdout.toString().trim()
+  const repo = (): string => tmpSourceRepo('orc-drift-').dir
+  const head = (dir: string): string => sh(dir, 'rev-parse', 'HEAD')
 
   it('reports a file edited since the revision, including uncommitted work', async () => {
     const dir = repo()
@@ -97,7 +87,7 @@ describe('createDriftProbe', () => {
     writeFileSync(path.join(dir, 'src', 'a.ts'), 'export const a = 2\n') // never committed
     const changed = await createDriftProbe(dir)(rev)
     expect(changed).not.toBeNull()
-    expect([...changed!]).toEqual(['src/a.ts'])
+    expect([...must(changed, 'changed')]).toEqual(['src/a.ts'])
     expect(noteHasDrifted({ sourceRevision: rev, paths: ['src/a.ts'] }, changed)).toBe(true)
     expect(noteHasDrifted({ sourceRevision: rev, paths: ['src/b.ts'] }, changed)).toBe(false)
   })
@@ -109,17 +99,9 @@ describe('createDriftProbe', () => {
 })
 
 describe('restampableNotes — catching a healed note up to HEAD after commit', () => {
-  const run = (dir: string, ...args: string[]) => Bun.spawnSync(['git', '-C', dir, ...args], { stdout: 'ignore', stderr: 'ignore' })
-  const head = (dir: string) => Bun.spawnSync(['git', '-C', dir, 'rev-parse', 'HEAD'], { stdout: 'pipe' }).stdout.toString().trim()
-  function repo(): string {
-    const dir = mkdtempSync(path.join(tmpdir(), 'orc-restamp-'))
-    run(dir, 'init', '-q'); run(dir, 'config', 'user.email', 't@t.t'); run(dir, 'config', 'user.name', 't')
-    mkdirSync(path.join(dir, 'src'), { recursive: true })
-    writeFileSync(path.join(dir, 'src', 'a.ts'), 'export const a = 1\n')
-    writeFileSync(path.join(dir, 'src', 'b.ts'), 'export const b = 1\n')
-    run(dir, 'add', '-A'); run(dir, 'commit', '-qm', 'base')
-    return dir
-  }
+  const run = (dir: string, ...args: string[]): void => { sh(dir, ...args) }
+  const head = (dir: string): string => sh(dir, 'rev-parse', 'HEAD')
+  const repo = (): string => tmpSourceRepo('orc-restamp-').dir
 
   it('restamps a note whose paths CHANGED in a commit and have no uncommitted edits left', async () => {
     const dir = repo(); const rev0 = head(dir)

@@ -17,7 +17,7 @@ const TRANSIENT_CODE = new Set([
 // is the NUMBER 23 (the legacy DOMException constant, not a string like 'ETIMEDOUT'), and it
 // carries no statusCode and no isRetryable. Every check in isTransient therefore missed it, and a
 // timed-out model call — the single most retryable failure there is — was stamped terminal and
-// burned the step on attempt 1 of 4. Observed live in .orc/serve.log:
+// burned the step on attempt 1 of 4. Observed live:
 //   "Non-retryable error in step. Attempt 1 of 4. Error: The operation timed out."
 //
 // AbortError is deliberately absent: that is a cancellation someone asked for, and re-issuing a

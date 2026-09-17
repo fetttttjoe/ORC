@@ -1,6 +1,7 @@
 import { realpathSync } from 'node:fs'
 import { WORKSPACE_KIND, type Workspace } from '@orc/contracts'
 import { currentBranch, defaultBranch, gitDirs, type Kernel, type OrcConfig } from '@orc/kernel'
+import type { WorkspaceConfig } from './workspace-ops'
 
 // The trunk name assumed when neither the operator (`trunkBranch`) nor git (origin/HEAD) names one —
 // a fresh repository with no remote answers nothing at all. A constant, not a literal at the call
@@ -41,7 +42,7 @@ export function resolveTrunk(config: Pick<OrcConfig, 'trunkBranch'>, dir: string
 // on it, and a merge is exactly what would settle that — so it stays off-trunk.
 export async function adoptCwd(
   kernel: Pick<Kernel, 'ensureWorkspace' | 'setWorkspaceArchived'>,
-  config: Pick<OrcConfig, 'dir' | 'projectRoot' | 'trunkBranch'>,
+  config: WorkspaceConfig,
 ): Promise<Workspace> {
   const cwd = realpathSync(config.dir)
   const kind = config.dir === config.projectRoot ? WORKSPACE_KIND.checkout : WORKSPACE_KIND.worktree

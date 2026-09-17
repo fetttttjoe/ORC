@@ -1,6 +1,7 @@
 import { test, expect } from 'bun:test'
 import { isRecord } from '@orc/contracts'
 import { markCacheBreakpoints, cachingFetch } from './cache'
+import { must } from '@orc/contracts/fixtures'
 
 // Anthropic request `system`/`content` are arrays of plain JSON blocks; narrow at the read
 // boundary instead of casting, so a wrong shape fails the check rather than lying about it.
@@ -20,24 +21,24 @@ test('marks last system block and last message content block, idempotently', () 
   markCacheBreakpoints(json)
   markCacheBreakpoints(json) // idempotent — no double markers
   const sys = blockArray(json.system)
-  expect(sys[0]!.cache_control).toBeUndefined()
-  expect(sys[1]!.cache_control).toEqual({ type: 'ephemeral' })
+  expect(must(sys[0], 'sys[0]').cache_control).toBeUndefined()
+  expect(must(sys[1], 'sys[1]').cache_control).toEqual({ type: 'ephemeral' })
   const msgs = blockArray(json.messages)
-  expect(blockArray(msgs[0]!.content)[0]!.cache_control).toBeUndefined()
-  expect(blockArray(msgs[1]!.content)[0]!.cache_control).toBeUndefined()
-  expect(blockArray(msgs[1]!.content)[1]!.cache_control).toEqual({ type: 'ephemeral' })
+  expect(must(blockArray(must(msgs[0], 'msgs[0]').content)[0], 'blockArray(must(msgs[0], \'msgs[0]\').content)[0]').cache_control).toBeUndefined()
+  expect(must(blockArray(must(msgs[1], 'msgs[1]').content)[0], 'blockArray(must(msgs[1], \'msgs[1]\').content)[0]').cache_control).toBeUndefined()
+  expect(must(blockArray(must(msgs[1], 'msgs[1]').content)[1], 'blockArray(must(msgs[1], \'msgs[1]\').content)[1]').cache_control).toEqual({ type: 'ephemeral' })
 })
 
 test('string content and non-JSON bodies pass through untouched', async () => {
   const json: Record<string, unknown> = { system: 'plain', messages: [{ role: 'user', content: 'hi' }] }
   markCacheBreakpoints(json)
   expect(json.system).toBe('plain')
-  expect(blockArray(json.messages)[0]!.content).toBe('hi')
+  expect(must(blockArray(json.messages)[0], 'blockArray(json.messages)[0]').content).toBe('hi')
 
   let seen: RequestInit | undefined
   const f = cachingFetch(async (_i, init) => { seen = init; return new Response('{}') })
   await f('https://x.test', { body: 'not-json{', method: 'POST' })
-  expect(seen!.body).toBe('not-json{')
+  expect(must(seen, 'seen').body).toBe('not-json{')
 })
 
 test('composition: oauthFetch rewrites the body, then cachingFetch marks the FINAL shape', async () => {
@@ -55,8 +56,8 @@ test('composition: oauthFetch rewrites the body, then cachingFetch marks the FIN
   })
   expect(seen.headers.get('authorization')).toBe('Bearer tok')
   const sys = seen.body.system
-  expect(sys[0]!.text).toContain('Claude Code')      // identity prepended first
-  expect(sys[sys.length - 1]!.cache_control).toEqual({ type: 'ephemeral' }) // cache marks the final shape
-  const content = seen.body.messages[0]!.content
-  expect(content[content.length - 1]!.cache_control).toEqual({ type: 'ephemeral' })
+  expect(must(sys[0], 'sys[0]').text).toContain('Claude Code')      // identity prepended first
+  expect(must(sys[sys.length - 1], 'sys[sys.length - 1]').cache_control).toEqual({ type: 'ephemeral' }) // cache marks the final shape
+  const content = must(seen.body.messages[0], 'seen.body.messages[0]').content
+  expect(must(content[content.length - 1], 'content[content.length - 1]').cache_control).toEqual({ type: 'ephemeral' })
 })

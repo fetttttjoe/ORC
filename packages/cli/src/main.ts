@@ -2,7 +2,7 @@ import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, 
 import { spawn } from 'node:child_process'
 import path from 'node:path'
 import { Command, InvalidArgumentError } from 'commander'
-import { AUTHOR_SOURCE, SUPERVISOR_HEALTH, claimHistory, EDGE_DIRECTION, errorMessage, EVENT_KIND, foldMemory, LINK_KINDS, MASTERPLAN_NOTE_ID, MEMORY_ACCESS, MemoryDeletedPayload, MemoryScope, MemoryWrittenPayload, noteKey, NOTE_KINDS, NoteKind, NOTE_TIER, NOTE_TIERS, NoteTier, parseLinkSpec, PlanDraft, RUN_OUTCOME, STRATEGY, TASK_STATUS, TERMINAL_TASK_STATUS, LinkKind, slugId, type Analyzer, type EventRecord, type MemoryAuthor, type MemoryLink, type NoteFields, type ExecutionPort, type MemoryHealth, type Plan, type TaskNode, type WorkspaceWithHealth, formatModelRate } from '@orc/contracts'
+import { AUTHOR_SOURCE, claimHistory, EDGE_DIRECTION, errorMessage, EVENT_KIND, foldMemory, LINK_KINDS, MASTERPLAN_NOTE_ID, MEMORY_ACCESS, MemoryDeletedPayload, MemoryScope, MemoryWrittenPayload, noteKey, NOTE_KINDS, NoteKind, NOTE_TIER, NOTE_TIERS, NoteTier, parseLinkSpec, PlanDraft, RUN_OUTCOME, STRATEGY, TASK_STATUS, TERMINAL_TASK_STATUS, LinkKind, slugId, type Analyzer, type EventRecord, type MemoryAuthor, type MemoryLink, type NoteFields, type ExecutionPort, type MemoryHealth, type Plan, type TaskNode, type WorkspaceWithHealth, formatModelRate } from '@orc/contracts'
 import { openStorage, Kernel, atomicWriteFileSync, listProjectIds, claimSlot, fold, gatedChildren, freezePlan, liveSupervisors, orphanTasks, staleSupervisors, grantExtensionTrust, grantMcpTrust, initializeProject, isExtensionTrusted, isMcpTrusted, loadConfig, loadTrust, migrateDatabase, requireProject, runtimeLockHeld, stepUsage, subtreeUsage, tasksByWorkspace, taskUsage, type EventLog, type OrcConfig, type PluginHost, type ProjectConfig, type Storage } from '@orc/kernel'
 import { createVaultProjector, parsePlanFile } from '@orc/vault-projector'
 import { archiveCandidates, consolidateTask, CONSOLIDATE_EXECUTOR, createDriftProbe, frontier, needsReground, probeMemory, RECHECK_KINDS, recheckNotes, restampToHead, summarize, taskInfo } from '@orc/memory'
@@ -893,10 +893,9 @@ export function buildProgram(
         const derived = await derivedPlanBlock(taskId)
         for (const line of derived ? derived.split('\n') : []) console.log(`  ${line}`)
       }
-      // The runtime failing at its own job. Printed LAST and unconditionally, because it is the one
-      // thing that explains a task which is not running, not parked, and not terminal either: a
-      // reaction threw, so nobody acted on something the log records as asked. It used to be
-      // invisible outside a supervisor's stdout, which read at the terminal as a hang.
+      // The runtime failing at its own job. Printed LAST and unconditionally, because it explains
+      // why a task is not running, not parked, and not terminal: a reaction threw. Outside a
+      // supervisor's stdout this is otherwise invisible and reads at the terminal as a hang.
       for (const f of state.reactionFailures.get(taskId) ?? [])
         console.log(`  runtime could not ${f.reaction}${f.causeSeq === null ? '' : ` (seq ${f.causeSeq})`}: ${f.message}`)
       // the other human gate: a split the manual approvalPolicy parked. Same surface, because the
@@ -1414,7 +1413,7 @@ export function buildProgram(
         // through `executor`, never a person at a terminal — but the workspace is NOT this cwd. It
         // is the named task's own workspace: an operator can run `orc memory consolidate` from any
         // checkout for a task that ran in a different one, and this cwd is irrelevant to that task's
-        // provenance [fixed 2026-09-15 — see ConsolidationDeps.authorFor].
+        // provenance — see ConsolidationDeps.authorFor.
         const authorFor = (task: { id: string; workspaceId: string }): MemoryAuthor =>
           ({ source: AUTHOR_SOURCE.agent, executor: CONSOLIDATE_EXECUTOR, workspaceId: task.workspaceId, taskId: task.id })
         const notes = await consolidateTask({ log, store: memory.store, authorFor, distill }, taskId, await taskInfo(log, taskId), { force: true })

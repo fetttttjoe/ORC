@@ -2,10 +2,16 @@
 // ponytail: DNS-rebinding TOCTOU remains (check-then-fetch re-resolves) — pin the connection to the
 // vetted IP via a custom dispatcher if this graduates past simulation.
 import { lookup } from 'node:dns/promises'
+import { z } from 'zod'
 
 export const USER_AGENT = 'orc-sim-web-mcp/0.0 (durable-workflow research simulation)'
 
 const MAX_REDIRECTS = 5
+
+const octet = z.number().int().min(0).max(255)
+// Exactly four in-range octets — the shape a dotted-quad IPv4 address must have, checked once
+// instead of the hand-rolled length + range guard it replaces.
+const Octets = z.tuple([octet, octet, octet, octet])
 
 // WHATWG URL already canonicalized 0x7f.1 / 2130706433 into dotted quads. Unparseable = refuse.
 export function isPrivateIp(ip: string): boolean {
@@ -18,9 +24,9 @@ export function isPrivateIp(ip: string): boolean {
     const embedded = mapped?.[1]
     return embedded === undefined ? false : isPrivateIp(embedded)
   }
-  const parts = ip.split('.').map(Number)
-  if (parts.length !== 4 || parts.some(n => !Number.isInteger(n) || n < 0 || n > 255)) return true
-  const [a, b] = parts as [number, number, number, number]
+  const parsed = Octets.safeParse(ip.split('.').map(Number))
+  if (!parsed.success) return true
+  const [a, b] = parsed.data
   return a === 0 || a === 10 || a === 127 || a >= 224      // this-net, private, loopback, multicast+reserved
     || (a === 169 && b === 254)                            // link-local incl. 169.254.169.254 metadata
     || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168)

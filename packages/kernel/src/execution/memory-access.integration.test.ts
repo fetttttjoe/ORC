@@ -2,7 +2,7 @@ import { afterAll, describe, expect, it } from 'bun:test'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import { EVENT_KIND, MEMORY_ACCESS, MemoryAccessedPayload } from '@orc/contracts'
+import { EVENT_KIND, MEMORY_ACCESS, MemoryAccessedPayload, LINK_KIND } from '@orc/contracts'
 import { draftFixture, stepFixture } from '@orc/contracts/fixtures'
 import { apiLoopExecutor } from '@orc/executor-api-loop'
 import { scriptModel } from '@orc/executor-api-loop/test-model'
@@ -44,7 +44,7 @@ describe('agent-side memory access recording (integration)', () => {
 
     // two linked notes so the traversal has something to return
     await memory.store.write({ id: 'auth', title: 'Auth', summary: 'tokens', body: 'rotate hourly',
-      links: [{ id: 'crypto', kind: 'depends_on' }] }, { source: 'cli', workspaceId: TEST_WORKSPACE_ID })
+      links: [{ id: 'crypto', kind: LINK_KIND.depends_on }] }, { source: 'cli', workspaceId: TEST_WORKSPACE_ID })
     await memory.store.write({ id: 'crypto', title: 'Crypto', summary: 'primitives' }, { source: 'cli', workspaceId: TEST_WORKSPACE_ID })
     await memory.projector.catchUp()
 

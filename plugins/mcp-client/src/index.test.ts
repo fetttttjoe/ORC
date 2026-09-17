@@ -2,6 +2,7 @@ import { afterAll, describe, expect, it, spyOn } from 'bun:test'
 import { fileURLToPath } from 'node:url'
 import type { McpServerConfig } from '@orc/contracts'
 import { createMcpHub } from './index'
+import { must } from '@orc/contracts/fixtures'
 
 const FIXTURE = fileURLToPath(new URL('./fixture-server.ts', import.meta.url))
 const SERVERS: Record<string, McpServerConfig> = { fixture: { command: 'bun', args: [FIXTURE] } }
@@ -17,11 +18,11 @@ describe('createMcpHub', () => {
   it('resolves refs into mangled, schema-bearing, executable tools', async () => {
     const hub = makeHub()
     const [echo] = await hub.resolve(['fixture/echo'])
-    expect(echo!.name).toBe('mcp__fixture__echo')
-    expect(echo!.ref).toBe('fixture/echo')
-    expect(echo!.description).toBe('echo text back')
-    expect(echo!.inputSchema.properties).toHaveProperty('text')
-    const r = await echo!.execute({ text: 'hi' })
+    expect(must(echo, 'echo').name).toBe('mcp__fixture__echo')
+    expect(must(echo, 'echo').ref).toBe('fixture/echo')
+    expect(must(echo, 'echo').description).toBe('echo text back')
+    expect(must(echo, 'echo').inputSchema.properties).toHaveProperty('text')
+    const r = await must(echo, 'echo').execute({ text: 'hi' })
     expect(r.isError).toBe(false)
     expect(JSON.stringify(r.output)).toContain('echo: hi')
   })
@@ -29,8 +30,8 @@ describe('createMcpHub', () => {
   it('maps MCP isError to tool-result isError (server-declared and invalid-args)', async () => {
     const hub = makeHub()
     const [fail, echo] = await hub.resolve(['fixture/fail', 'fixture/echo'])
-    expect((await fail!.execute({})).isError).toBe(true)
-    expect((await echo!.execute({ wrong: 1 })).isError).toBe(true) // server-side zod validation
+    expect((await must(fail, 'fail').execute({})).isError).toBe(true)
+    expect((await must(echo, 'echo').execute({ wrong: 1 })).isError).toBe(true) // server-side zod validation
   })
 
   it('throws on undeclared server, untrusted server, and unknown tool', async () => {
@@ -45,7 +46,7 @@ describe('createMcpHub', () => {
     const hub = makeHub()
     await expect(hub.resolve(['fixture/late'])).rejects.toThrow(/unknown tool/)
     const [grow] = await hub.resolve(['fixture/grow'])
-    await grow!.execute({})
+    await must(grow, 'grow').execute({})
     // list_changed arrives async; poll briefly
     const deadline = Date.now() + 2000
     let ok = false
@@ -97,7 +98,7 @@ describe('createMcpHub', () => {
         fixture: { command: 'bun', args: [FIXTURE], env: { FIXTURE_CRASH: '$UNSET_VAR_XYZ' } },
       })
       const [echo] = await hub.resolve(['fixture/echo'])
-      expect(echo!.name).toBe('mcp__fixture__echo')
+      expect(must(echo, 'echo').name).toBe('mcp__fixture__echo')
       expect(warn).toHaveBeenCalledWith(`MCP server 'fixture': env FIXTURE_CRASH references unset $UNSET_VAR_XYZ — omitted`)
     } finally {
       warn.mockRestore()
@@ -108,9 +109,9 @@ describe('createMcpHub', () => {
     const hub = makeHub()
     const [echo] = await hub.resolve(['fixture/echo'])
     await hub.close() // kill the child under the tool's feet
-    const dead = await echo!.execute({ text: 'x' })
+    const dead = await must(echo, 'echo').execute({ text: 'x' })
     expect(dead.isError).toBe(true)
     const [echo2] = await hub.resolve(['fixture/echo']) // lazy respawn
-    expect((await echo2!.execute({ text: 'back' })).isError).toBe(false)
+    expect((await must(echo2, 'echo2').execute({ text: 'back' })).isError).toBe(false)
   })
 })

@@ -98,7 +98,7 @@ function storedResolution(events: EventRecord[], splitId: string): SplitResult |
 export function createSignalRouter(opts: {
   log: EventLog
   onChildApproved: (childTaskId: string) => Promise<void>
-  // The explicit ask (Task 1), turned into a workflow. The router is a dumb relay here — cwd and
+  // The explicit ask, turned into a workflow. The router is a dumb relay here — cwd and
   // retry come straight off the recorded payload, no policy decisions made in this file.
   onRunRequested: (taskId: string, opts: { cwd: string | null; retry: boolean }) => Promise<void>
   // The DBOS half of a cancel, which a client with no execution port cannot do itself —
@@ -197,7 +197,7 @@ export function createSignalRouter(opts: {
         // A SETTLED task can never serve one. startRunAt admits approved/running/blocked only, so a
         // request left in the log from before the task finished is re-attempted and re-refused on
         // every single boot, forever — measured: three done tasks logging "task is 'done' — approve
-        // a plan first" on all 18 supervisor starts in .orc/serve.log.
+        // a plan first" on all 18 supervisor starts.
         //
         // TERMINAL_TASK_STATUS (done/failed/cancelled), NOT this file's local TERMINAL, which also
         // holds `blocked` for split resolution. Blocked is the state a retry resumes FROM, so
@@ -265,7 +265,7 @@ export function createSignalRouter(opts: {
           await sendFeedback(e).catch(err => reactionFailed(REACTION.feedback, ofEvent(e), err))
           return
         }
-        // The explicit ask (Task 1). Deterministic workflow ids make a redelivered request an
+        // The explicit ask. Deterministic workflow ids make a redelivered request an
         // attach, not a second run, so at-least-once delivery is safe here.
         if (e.kind === EVENT_KIND.run_requested && e.taskId) {
           const p = RunRequestedPayload.safeParse(e.payload)

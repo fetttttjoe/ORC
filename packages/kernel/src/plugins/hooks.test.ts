@@ -1,5 +1,6 @@
 import { describe, expect, it, mock, spyOn } from 'bun:test'
-import { HOOK_NAME } from '@orc/contracts'
+import { HOOK_NAME, EVENT_KIND } from '@orc/contracts'
+import { eventFixture } from '@orc/contracts/fixtures'
 import { HookBus } from './hooks'
 
 describe('HookBus', () => {
@@ -24,10 +25,9 @@ describe('HookBus', () => {
     })
     expect(typeof bus.dispatch).toBe('function')
 
-    bus.dispatch(HOOK_NAME.event_appended, {
-      seq: 1, ts: 't', projectId: 'p1', idempotencyKey: null, taskId: 't1', stepId: null, runToken: null,
-      kind: 'task_status_changed', payload: { taskId: 't1', from: 'draft', to: 'awaiting_approval' }, usage: null,
-    })
+    bus.dispatch(HOOK_NAME.event_appended, eventFixture({
+      ts: 't', kind: EVENT_KIND.task_status_changed, payload: { taskId: 't1', from: 'draft', to: 'awaiting_approval' },
+    }))
     expect(calls).toEqual([])
     await bus.drain()
     expect(calls).toEqual(['done'])
@@ -40,10 +40,10 @@ describe('HookBus', () => {
       const calls: string[] = []
       bus.on(HOOK_NAME.event_appended, () => { throw new Error('boom') })
       bus.on(HOOK_NAME.event_appended, () => { calls.push('after') })
-      await bus.emit(HOOK_NAME.event_appended, {
-        seq: 1, ts: 't', projectId: 'p1', idempotencyKey: null, taskId: 't1', stepId: null, runToken: null,
-        kind: 'task_status_changed', payload: { taskId: 't1', from: 'draft', to: 'awaiting_approval' }, usage: null,
-      })
+      await bus.emit(HOOK_NAME.event_appended, eventFixture({
+        ts: 't', kind: EVENT_KIND.task_status_changed,
+        payload: { taskId: 't1', from: 'draft', to: 'awaiting_approval' },
+      }))
       expect(calls).toEqual(['after'])
       expect(warn).toHaveBeenCalled()
     } finally {

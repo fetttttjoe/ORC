@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test'
-import { MemoryNoteDraftInput, MemoryNoteInput, MemoryNote, MEMORY_ID_RE, MEMORY_USE, USE_VERDICT, LINK_KINDS, MemoryScope, NOTE_KIND, NOTE_TIER, VerifiedStamp, composeAuthor, deriveNoteProvenance, foldMemory, inferTier, noteContentKey, noteKey, parseLinkSpec, useLine, useVerdict, type MemoryUseOutcome, type PlanNoteInput, type SemanticNoteInput, type UseStats } from './memory'
+import { MemoryNoteDraftInput, MemoryNoteInput, MemoryNote, MEMORY_ID_RE, MEMORY_USE, USE_VERDICT, LINK_KIND, LINK_KINDS, MemoryScope, NOTE_KIND, NOTE_TIER, VerifiedStamp, composeAuthor, deriveNoteProvenance, foldMemory, inferTier, noteContentKey, noteKey, parseLinkSpec, useLine, useVerdict, type MemoryUseOutcome, type PlanNoteInput, type SemanticNoteInput, type UseStats } from './memory'
 import { DECISION_STATUS } from './decision'
 import { AUTHOR_SOURCE } from './ids'
 import { EVENT_KIND } from './event-kinds'
@@ -24,30 +24,30 @@ describe('note tiers', () => {
   // The lane a writer never named is derived from the shape it wrote — this is what lets every
   // event appended before the split still fold, and it must not re-label anything by accident.
   it('classifies an unlabelled note from the shape its writer produced', () => {
-    expect(inferTier({ id: 'a', title: 'A' })).toBe('semantic')
-    expect(inferTier({ id: 'a', title: 'A', scope: 'project', retention: 'expirable' })).toBe('semantic')
-    expect(inferTier({ id: 'a', title: 'A', scope: 'plan-t1', retention: 'expirable' })).toBe('episodic')
-    expect(inferTier({ id: 'a', title: 'A', scope: 'plan-t1', kind: 'plan' })).toBe('plan')
-    expect(inferTier({ id: 'a', title: 'A', zone: ['docs/**'] })).toBe('plan')
-    expect(inferTier({ id: 'a', title: 'A', rationale: 'because' })).toBe('plan')
-    expect(inferTier({ id: 'a', title: 'A', uncertainty: ['unknown'] })).toBe('plan')
-    expect(inferTier('not an object')).toBe('semantic')
+    expect(inferTier({ id: 'a', title: 'A' })).toBe(NOTE_TIER.semantic)
+    expect(inferTier({ id: 'a', title: 'A', scope: 'project', retention: 'expirable' })).toBe(NOTE_TIER.semantic)
+    expect(inferTier({ id: 'a', title: 'A', scope: 'plan-t1', retention: 'expirable' })).toBe(NOTE_TIER.episodic)
+    expect(inferTier({ id: 'a', title: 'A', scope: 'plan-t1', kind: 'plan' })).toBe(NOTE_TIER.plan)
+    expect(inferTier({ id: 'a', title: 'A', zone: ['docs/**'] })).toBe(NOTE_TIER.plan)
+    expect(inferTier({ id: 'a', title: 'A', rationale: 'because' })).toBe(NOTE_TIER.plan)
+    expect(inferTier({ id: 'a', title: 'A', uncertainty: ['unknown'] })).toBe(NOTE_TIER.plan)
+    expect(inferTier('not an object')).toBe(NOTE_TIER.semantic)
   })
 
   it('an explicit tier always wins over inference', () => {
     // a plan-shaped payload the author labelled semantic keeps the label — and loses the fields
     // that lane does not have, rather than being silently re-laned
-    const n = MemoryNoteInput.parse({ tier: 'semantic', id: 'a', title: 'A', zone: ['docs/**'] })
-    expect(n.tier).toBe('semantic')
+    const n = MemoryNoteInput.parse({ tier: NOTE_TIER.semantic, id: 'a', title: 'A', zone: ['docs/**'] })
+    expect(n.tier).toBe(NOTE_TIER.semantic)
     expect(n).not.toHaveProperty('zone')
   })
 
   // The episodic lane's sweepability is structural, not conventional: no writer can mint a step
   // note the TTL sweep will never be allowed to touch.
   it('pins episodic retention to expirable and rejects an attempt to make one durable', () => {
-    const n = MemoryNoteInput.parse({ tier: 'episodic', id: 'step-a', scope: 'plan-t1', title: 'Step A' })
+    const n = MemoryNoteInput.parse({ tier: NOTE_TIER.episodic, id: 'step-a', scope: 'plan-t1', title: 'Step A' })
     expect(n.retention).toBe('expirable')
-    expect(MemoryNoteInput.safeParse({ tier: 'episodic', id: 'step-a', scope: 'plan-t1', title: 'Step A', retention: 'durable' }).success).toBe(false)
+    expect(MemoryNoteInput.safeParse({ tier: NOTE_TIER.episodic, id: 'step-a', scope: 'plan-t1', title: 'Step A', retention: 'durable' }).success).toBe(false)
   })
 
   it('each tier keeps only its own fields', () => {
@@ -59,7 +59,7 @@ describe('note tiers', () => {
     const p = plan({ id: 'b', title: 'B', zone: ['docs/**'], claims: [aClaim] })
     expect(p.zone).toEqual(['docs/**'])
     expect(p).not.toHaveProperty('claims')
-    const e = MemoryNoteInput.parse({ tier: 'episodic', id: 'c', scope: 'plan-t1', title: 'C', zone: ['y'], claims: [aClaim] })
+    const e = MemoryNoteInput.parse({ tier: NOTE_TIER.episodic, id: 'c', scope: 'plan-t1', title: 'C', zone: ['y'], claims: [aClaim] })
     expect(e).not.toHaveProperty('claims')
     expect(e).not.toHaveProperty('zone')
   })
@@ -158,9 +158,9 @@ describe('MemoryNoteInput', () => {
     expect(n.tags).toEqual([])
     expect(n.paths).toEqual([])
     expect(n.categories).not.toContain('') // the regression: '' → [''] would render junk in the vault
-    expect(plan({ tier: 'plan', id: 'clear-plan', title: 'Clear plan', uncertainty: '' }).uncertainty).toEqual([])
+    expect(plan({ tier: NOTE_TIER.plan, id: 'clear-plan', title: 'Clear plan', uncertainty: '' }).uncertainty).toEqual([])
     // zone keeps its own min(1) item, so '' still rejects there (an empty glob is meaningless)
-    expect(MemoryNoteInput.safeParse({ tier: 'plan', id: 'z', title: 'Z', zone: '' }).success).toBe(false)
+    expect(MemoryNoteInput.safeParse({ tier: NOTE_TIER.plan, id: 'z', title: 'Z', zone: '' }).success).toBe(false)
   })
 
   it('rejects notes above persisted collection and text limits', () => {
@@ -189,8 +189,8 @@ describe('MemoryNoteInput', () => {
   })
 
   it('accepts a typed link with kind + optional confidence', () => {
-    const n = MemoryNoteInput.parse({ id: 'a', title: 'A', links: [{ id: 'b', kind: 'supersedes', confidence: 0.9 }] })
-    expect(n.links[0]).toEqual({ id: 'b', kind: 'supersedes', confidence: 0.9 })
+    const n = MemoryNoteInput.parse({ id: 'a', title: 'A', links: [{ id: 'b', kind: LINK_KIND.supersedes, confidence: 0.9 }] })
+    expect(n.links[0]).toEqual({ id: 'b', kind: LINK_KIND.supersedes, confidence: 0.9 })
   })
 
   it('defaults a typed link kind to relates_to and rejects a bad kind / out-of-range confidence', () => {
@@ -201,8 +201,8 @@ describe('MemoryNoteInput', () => {
   })
 
   it('accepts a decomposes_into typed link (M5b plan-graph edges)', () => {
-    const n = MemoryNoteInput.parse({ id: 'a', title: 'A', links: [{ id: 'subplan-1', kind: 'decomposes_into' }] })
-    expect(n.links[0]).toEqual({ id: 'subplan-1', kind: 'decomposes_into' })
+    const n = MemoryNoteInput.parse({ id: 'a', title: 'A', links: [{ id: 'subplan-1', kind: LINK_KIND.decomposes_into }] })
+    expect(n.links[0]).toEqual({ id: 'subplan-1', kind: LINK_KIND.decomposes_into })
   })
 
   it('rejects a bare string id — links are typed objects only (no back-compat)', () => {
@@ -210,7 +210,7 @@ describe('MemoryNoteInput', () => {
   })
 
   it('memory_written payload carries typed links (and rejects bare strings) with no events.ts change', () => {
-    expect(PAYLOAD_SCHEMAS.memory_written.safeParse({ note: { id: 'a', title: 'A', links: [{ id: 'b', kind: 'refines' }] }, author: { source: 'cli', workspaceId: TEST_WORKSPACE_ID } }).success).toBe(true)
+    expect(PAYLOAD_SCHEMAS.memory_written.safeParse({ note: { id: 'a', title: 'A', links: [{ id: 'b', kind: LINK_KIND.refines }] }, author: { source: 'cli', workspaceId: TEST_WORKSPACE_ID } }).success).toBe(true)
     expect(PAYLOAD_SCHEMAS.memory_written.safeParse({ note: { id: 'a', title: 'A', links: ['b'] }, author: { source: 'cli', workspaceId: TEST_WORKSPACE_ID } }).success).toBe(false)
   })
 
@@ -222,7 +222,7 @@ describe('MemoryNoteInput', () => {
       workspaceId: TEST_WORKSPACE_ID,
     })
     expect(full.revision).toBe(1)
-    expect(full.tier).toBe('semantic')
+    expect(full.tier).toBe(NOTE_TIER.semantic)
   })
 
   it('kind defaults to fact and sourceRevision to null', () => {
@@ -243,7 +243,7 @@ describe('parseLinkSpec', () => {
   it('parses bare ids and kind:id entries, defaulting kind by omission', () => {
     expect(parseLinkSpec('other-note')).toEqual([{ id: 'other-note' }])
     expect(parseLinkSpec('supersedes:old-note, other-note')).toEqual([
-      { id: 'old-note', kind: 'supersedes' }, { id: 'other-note' },
+      { id: 'old-note', kind: LINK_KIND.supersedes }, { id: 'other-note' },
     ])
     expect(parseLinkSpec('  ')).toEqual([])
   })

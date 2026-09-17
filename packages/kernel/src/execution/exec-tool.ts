@@ -4,14 +4,15 @@ import { mkdirSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import { z } from 'zod'
 import { errorMessage, toolError, type ResolvedTool } from '@orc/contracts'
+import { childEnv } from './child-env'
 import { clipMiddle } from './clip'
 import { treeFingerprint } from './tree-fingerprint'
 import { commandArgv } from './command-argv'
 
-// exec (post-scenario-2): the acceptance-gate tool. Plans routinely demand "typecheck clean,
+// exec: the acceptance-gate tool. Plans routinely demand "typecheck clean,
 // tests green", but no step could RUN anything — implementers shipped unexecuted (red) suites
 // and the honest auditor's only move was to refuse certification, which is exactly how
-// scenario-2's verify step failed four times. Mirrors report_coverage's factory shape.
+// a verify step burned four times. Mirrors report_coverage's factory shape.
 //
 // Trust model: the COMMANDS come from the operator (config execAllowlist), never the model —
 // the model only picks an entry and may extend it with arguments at a token boundary
@@ -21,7 +22,7 @@ import { commandArgv } from './command-argv'
 //
 // The allowlisted command still RUNS model-authored code (a `bun test` executes the tests the
 // step just wrote), so it is not a security sandbox: it inherits neither the orchestrator's
-// secrets (env is scrubbed to a minimal surface below, like mcp-client does for its children)
+// secrets (env is scrubbed to a minimal surface, see child-env.ts)
 // nor a write fence (cwd is the workspace, but the command can write anywhere). ponytail: the
 // real containment is the deferred M5c per-step isolation (worktree/container); until it lands,
 // enabling execAllowlist grants the model host code execution, and exec is off unless configured.
@@ -53,16 +54,6 @@ const recorded = new Map<string, Recorded>()
 
 // tree identity, shared with the memory health probe's drift cache — see tree-fingerprint.ts
 const gitFingerprint = (dir: string) => (): Promise<string | null> => treeFingerprint(dir)
-
-// Never the orchestrator's full process.env: provider API keys and DB credentials live there and
-// must not reach model-authored code the command executes. A minimal surface (PATH to find the
-// binary, HOME for tool caches, locale/tmp) — mirror of mcp-client's child-env policy.
-const childEnv = (): NodeJS.ProcessEnv => {
-  const out: NodeJS.ProcessEnv = {}
-  for (const k of ['PATH', 'HOME', 'LANG', 'LC_ALL', 'TZ', 'TMPDIR'])
-    if (process.env[k] !== undefined) out[k] = process.env[k]
-  return out
-}
 
 export function execTool(opts: {
   workspaceDir: string

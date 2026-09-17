@@ -30,8 +30,8 @@ describe('isTransient', () => {
    * The bug this file exists for. Bun surfaces a request timeout as a DOMException whose `name` is
    * 'TimeoutError' and whose `code` is the NUMBER 23 (the legacy DOMException constant) — no
    * statusCode, no isRetryable, and no STRING code, so every check above missed it. A timed-out
-   * model call was stamped terminal and burned the step on attempt 1 of 4; observed live in
-   * .orc/serve.log as "Non-retryable error in step. Attempt 1 of 4. Error: The operation timed out."
+   * model call was stamped terminal and burned the step on attempt 1 of 4; the error was
+   * "Non-retryable error in step. Attempt 1 of 4. Error: The operation timed out."
    */
   it('treats a fetch timeout as transient — the single most retryable failure there is', () => {
     expect(isTransient(new DOMException('The operation timed out.', 'TimeoutError'))).toBe(true)

@@ -110,7 +110,7 @@ export async function buildRuntime(
   const kernel = shared?.kernel ?? new Kernel(log, host.refValidator, host.analyzers, dbosSend, config.groundedApprovalDoors)
   log.onAppend = e => host.hooks.dispatch(HOOK_NAME.event_appended, e)
 
-  // Startup order (design §8.4): projections FIRST — DBOS recovery may emit events the
+  // Startup order: projections FIRST — DBOS recovery may emit events the
   // moment it launches, and they must already be observed. Surreal failure degrades memory
   // (explicit unavailable tools) but never blocks history, execution, or the vault trace.
   const projector = createVaultProjector({ log, config })
@@ -130,8 +130,9 @@ export async function buildRuntime(
     // SurrealDB starved a supervisor boot's drain for 18 minutes. Losers follow the holder's
     // cursor — see createMemoryProjector's follower mode.
     memory = await openMemory({ log, config, lease: projectorLease(config.databaseUrl, config.projectId) })
-    await bootPhase('memory-projection', () => memory!.projector.start(), phases)
-    const memoryProjector = memory.projector // captured for the lifecycle closure (memory is narrowed non-null here)
+    const mem = memory // narrowed once here so bootPhase's callback needs no `!` and the closure below reads the same value
+    await bootPhase('memory-projection', () => mem.projector.start(), phases)
+    const memoryProjector = mem.projector // captured for the lifecycle closure
     // post-task memory maintenance (auto-consolidation) — a decoupled subscriber, started only in
     // the execution runtime (never in the one-shot CLI memory commands) and stopped at shutdown.
     // `distill` (optional, memoryConsolidateModel) upgrades the note from extractive bullets to a
@@ -140,7 +141,7 @@ export async function buildRuntime(
     // `authorFor` reads the WRITING TASK's workspace, never this cwd — a single cwd-resolved author
     // built once here used to stamp every outcome note under the supervisor's own checkout, so a
     // task that ran in a worktree consolidated as durable knowledge under the wrong workspace while
-    // its branch was still unmerged [fixed 2026-09-15]. One supervisor serves every
+    // its branch was still unmerged. One supervisor serves every
     // worktree at once, the same reason stepTools below reads its author off the running task
     // rather than off cwdAuthor.
     lifecycle = createMemoryLifecycle({
@@ -214,7 +215,7 @@ export async function buildRuntime(
       // about where a given step's knowledge belongs; the port reads it from the TaskNode it
       // already folds. See createDbosPort's stepTools.
       const author: MemoryAuthor = { source: AUTHOR_SOURCE.agent, workspaceId: p.workspaceId, taskId: p.taskId, stepId: p.stepId, runToken: p.runToken, executor: p.executor, model: p.model, role: p.role }
-      // step role keys the memory role (Task 7): scout/auditor narrow or widen the tool surface
+      // step role keys the memory role: scout/auditor narrow or widen the tool surface
       // + epistemic posture; every other role (e.g. plain worker steps) gets today's verify role.
       const bound = bindStep({
         author,
@@ -239,8 +240,8 @@ export async function buildRuntime(
       // like splitTool: harmless everywhere, returns an empty list for a task with no annotations.
       readAnnotationsTool({ kernel, p }),
       // report_coverage emits analysis_completed; registration-gated inside the factory to the
-      // scout analyze step — a tool that can only ever error must not be visible (scenario-2's
-      // verify auditor burned one iteration per attempt calling it).
+      // scout analyze step — a tool that can only ever error must not be visible (a verify
+      // auditor burned one iteration per attempt calling it).
       ...reportCoverageTool({ kernel, p }),
       // scoped_changes answers "which paths did MY task's steps change?" off the log, so the verify
       // auditor stops reading sibling tasks' completed work out of the SHARED worktree as its own.

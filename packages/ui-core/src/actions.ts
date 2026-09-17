@@ -41,7 +41,7 @@ export interface OrcActions {
   // request), so the shape is shared with that path rather than a case this one produces.
   newWorkspace(input: { title: string; spec?: string; base?: string }): Promise<{ workspace: Workspace; taskId: string | null }>
   // Knowledge authoring, second and last door: a DECISION made in a driver's session is exactly the
-  // knowledge that otherwise evaporates (spec §6). Deliberately narrow — memory_write stays filtered
+  // knowledge that otherwise evaporates. Deliberately narrow — memory_write stays filtered
   // out of the MCP surface; a decision has a fixed body layout and a lifecycle, a free note has
   // neither. Attributed to the door (`via`: mcp for the MCP server, cli for the web) in the
   // workspace the serving process runs in. Recording is not an upsert: an existing id is refused

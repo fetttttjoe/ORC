@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'bun:test'
-import { layerSteps, stepRanks } from './plan-layering'
+import { layerSteps, stepRanks, type LayerableStep } from './plan-layering'
 
-const chain = [
-  { id: 'a', dependsOn: [] as string[] },
+const chain: LayerableStep[] = [
+  { id: 'a', dependsOn: [] },
   { id: 'b', dependsOn: ['a'] },
   { id: 'c', dependsOn: ['b'] },
 ]

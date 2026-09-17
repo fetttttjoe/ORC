@@ -28,7 +28,7 @@ const PARK_QUIET_MS = 750
 const ACTIVE_TASK_STATUS: ReadonlySet<TaskStatus> =
   new Set([TASK_STATUS.approved, TASK_STATUS.running])
 
-// Observe a run to its next stopping point (spec §5): stream-driven, no polling — LISTEN/NOTIFY
+// Observe a run to its next stopping point: stream-driven, no polling — LISTEN/NOTIFY
 // pushes each event as it commits. The CLI holds no handle to wait on any more, because the
 // supervisor owns the workflow, so "finished" is re-derived from the log instead: nothing anywhere
 // in the subtree is still expected to move. Subtree-wide, because a parent inside join_splits
@@ -79,7 +79,7 @@ export async function watchSubtree(kernel: Kernel, taskId: string, since = 0): P
   // The OTHER thing that stops a run, and the only one that announces nothing: `task_split` honours
   // the project's approvalPolicy, so under the default (manual) the child parks at
   // 'awaiting_approval' and the parent's join_splits recv's forever — no event, no output, no
-  // outcome. Observed live (events-pilot.log 161-188: three gated splits, then join, then silence).
+  // outcome. Observed live: three gated splits, then join, then silence.
   //
   // Advisory, NOT a park: a gated child is a stopping point for the tree, so this watch settles
   // rather than hanging on a status only a human can change — and names the command that unblocks

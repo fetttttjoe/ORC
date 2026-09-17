@@ -3,6 +3,7 @@ import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { COMMIT_STEP_ID, STEP_ROLE, ZERO_USAGE, type ResolvedTool, type Usage } from '@orc/contracts'
+import { must, recordOf } from '@orc/contracts/fixtures'
 import { emptyFold, subtreeUsage, type State } from '../projections'
 import { commitTool, type StampNote } from './commit-tool'
 import type { CitingNotes } from './scoped-changes-tool'
@@ -59,7 +60,7 @@ function build(dir: string, opts: {
     },
     dir, restamp, reverify, ...(opts.citing ? { citing: opts.citing } : {}), p: opts.p ?? p,
   })
-  const tool = (name: string): ResolvedTool => tools.find(t => t.name === name)!
+  const tool = (name: string): ResolvedTool => must(tools.find(t => t.name === name), 'tool')
   // the ordinary flow: read the diff, then commit — what every test not ABOUT the gate uses
   const commit = async (message: string) => {
     await tool('commit_preview').execute({})
@@ -84,7 +85,7 @@ describe('diff-first flow', () => {
     writeFileSync(path.join(dir, 'sibling.ts'), 's2\n') // not in the floor — must not appear
     const r = await build(dir, { paths: ['a.ts'] }).tool('commit_preview').execute({})
     expect(r.isError).toBe(false)
-    const o = r.output as Record<string, unknown>
+    const o = recordOf(r.output)
     expect(o.paths).toEqual(['a.ts'])
     expect(String(o.diff)).toContain('+a2')
     expect(String(o.diff)).not.toContain('sibling')
@@ -96,7 +97,7 @@ describe('diff-first flow', () => {
     writeFileSync(path.join(dir, 'new.ts'), 'n\n')
     const r = await build(dir, { paths: ['a.ts', 'new.ts'] }).tool('commit_preview').execute({})
     expect(r.isError).toBe(false)
-    expect(String((r.output as Record<string, unknown>).diff)).toContain('+n') // untracked file still previews
+    expect(String(recordOf(r.output).diff)).toContain('+n') // untracked file still previews
     expect(out(dir, 'diff', '--cached', '--name-only')).toBe('') // real index untouched
   })
 
@@ -135,7 +136,7 @@ describe('diff-first flow', () => {
     run(dir, 'add', '--', 'sibling.ts') // someone else staged it
     const r = await build(dir, { paths: ['a.ts'] }).commit('feat: only mine')
     expect(r.isError).toBe(false)
-    expect((r.output as Record<string, unknown>).committedPaths).toEqual(['a.ts'])
+    expect(recordOf(r.output).committedPaths).toEqual(['a.ts'])
     expect(out(dir, 'show', '--name-only', '--format=', 'HEAD')).toBe('a.ts')
     expect(out(dir, 'status', '--porcelain')).toBe('M  sibling.ts') // still staged (M_ = staged modify), still theirs
   })
@@ -163,7 +164,7 @@ describe('git_commit', () => {
     writeFileSync(path.join(dir, 'sibling.ts'), 's2\n')    // another task's edit, not in the floor
     const r = await build(dir, { paths: ['a.ts'] }).commit('feat: change a')
     expect(r.isError).toBe(false)
-    const o = r.output as Record<string, unknown>
+    const o = recordOf(r.output)
     expect(o.created).toBe(true)
     expect(o.commit).toBe(out(dir, 'rev-parse', 'HEAD'))
     expect(o.committedPaths).toEqual(['a.ts'])
@@ -177,7 +178,7 @@ describe('git_commit', () => {
     rmSync(path.join(dir, 'a.ts'))
     const r = await build(dir, { paths: ['new.ts', 'a.ts', 'never-existed.ts'] }).commit('chore: churn')
     expect(r.isError).toBe(false)
-    expect((r.output as Record<string, unknown>).committedPaths).toEqual(['a.ts', 'new.ts'])
+    expect(recordOf(r.output).committedPaths).toEqual(['a.ts', 'new.ts'])
     expect(existsSync(path.join(dir, 'a.ts'))).toBe(false)
   })
 
@@ -189,7 +190,7 @@ describe('git_commit', () => {
     writeFileSync(path.join(dir, 'ig.ts'), 'generated\n') // task wrote it; .gitignore excludes it
     const r = await build(dir, { paths: ['a.ts', 'ig.ts'] }).commit('feat: change a')
     expect(r.isError).toBe(false)
-    const o = r.output as Record<string, unknown>
+    const o = recordOf(r.output)
     expect(o.created).toBe(true)
     expect(o.committedPaths).toEqual(['a.ts'])
     expect(o.skippedIgnored).toEqual(['ig.ts'])
@@ -202,7 +203,7 @@ describe('git_commit', () => {
     rmSync(path.join(dir, 'ümlaut.ts'))
     const r = await build(dir, { paths: ['ümlaut.ts'] }).commit('chore: drop umlaut')
     expect(r.isError).toBe(false)
-    expect((r.output as Record<string, unknown>).committedPaths).toEqual(['ümlaut.ts'])
+    expect(recordOf(r.output).committedPaths).toEqual(['ümlaut.ts'])
     expect(out(dir, 'show', '--name-only', '--format=', 'HEAD')).toBe('ümlaut.ts')
   })
 
@@ -211,7 +212,7 @@ describe('git_commit', () => {
     const built = build(dir, { paths: ['a.ts'], notes: [{ id: 'area-a', scope: 'project', paths: ['a.ts'] }] })
     const r = await built.commit('feat: nothing new')
     expect(r.isError).toBe(false)
-    const o = r.output as Record<string, unknown>
+    const o = recordOf(r.output)
     expect(o.created).toBe(false)
     expect(o.commit).toBe(out(dir, 'rev-parse', 'HEAD'))
     expect(o.committedPaths).toEqual([])
@@ -248,7 +249,7 @@ describe('stillDrifted', () => {
     })
     const r = await built.commit('feat: change a')
     expect(r.isError).toBe(false)
-    expect((r.output as Record<string, unknown>).stillDrifted).toEqual([{ id: 'area-foreign', scope: 'project' }])
+    expect(recordOf(r.output).stillDrifted).toEqual([{ id: 'area-foreign', scope: 'project' }])
     expect(built.stamped.map(s => s.id)).toEqual(['area-own'])
   })
 
@@ -276,7 +277,7 @@ describe('stillDrifted', () => {
     expect(r.isError).toBe(false)
     // only the foreign note is a leftover — every task-written note is already reported under
     // its own key (restamped / skippedDirty / restampFailed), never double-counted here
-    expect((r.output as Record<string, unknown>).stillDrifted).toEqual([{ id: 'note-foreign', scope: 'project' }])
+    expect(recordOf(r.output).stillDrifted).toEqual([{ id: 'note-foreign', scope: 'project' }])
   })
 
   it('is null when the callback is absent (memory degraded) — loud, never an empty lie', async () => {
@@ -284,7 +285,7 @@ describe('stillDrifted', () => {
     writeFileSync(path.join(dir, 'a.ts'), 'a2\n')
     const r = await build(dir, { paths: ['a.ts'] }).commit('feat: change a')
     expect(r.isError).toBe(false)
-    const o = r.output as Record<string, unknown>
+    const o = recordOf(r.output)
     expect(o.stillDrifted).toBeNull()
     expect(o.degraded).toEqual(['stillDrifted unmeasured — citing-notes join unavailable (memory degraded)'])
   })
@@ -303,7 +304,7 @@ describe('degraded convention', () => {
     // above. Both writes go absent together in production: one degraded memory store injects both.
     const r = await build(dir, { paths: ['a.ts'], restamp: null, reverify: null, citing: async () => [] }).commit('feat: change a')
     expect(r.isError).toBe(false)
-    const o = r.output as Record<string, unknown>
+    const o = recordOf(r.output)
     expect(o.degraded).toEqual([
       'restamp unavailable — memory is degraded; run `orc memory restamp` once memory is back',
       'reverify unavailable — memory is degraded; notes this task verified keep their pre-commit stamp',
@@ -321,7 +322,7 @@ describe('degraded convention', () => {
     writeFileSync(path.join(dir, 'a.ts'), 'a2\n')
     const r = await build(dir, { paths: ['a.ts'], citing: async () => [] }).commit('feat: change a')
     expect(r.isError).toBe(false)
-    expect(r.output as Record<string, unknown>).not.toHaveProperty('degraded')
+    expect(recordOf(r.output)).not.toHaveProperty('degraded')
   })
 })
 
@@ -340,7 +341,7 @@ describe('verification is declared, never inferred from the write', () => {
     })
     const r = await built.commit('feat: change a')
     expect(r.isError).toBe(false)
-    const o = r.output as Record<string, unknown>
+    const o = recordOf(r.output)
     expect(built.stamped).toEqual([]) // clean paths, still no stamp — the write proved nothing
     expect(o.restamped).toEqual([])
     expect(o.skippedDirty).toEqual([]) // not dirty either: it was never a stamp candidate
@@ -356,7 +357,7 @@ describe('verification is declared, never inferred from the write', () => {
       citing: async () => [{ id: 'area-healed', scope: 'project', title: 'H', sourceRevision: 'old' }],
     })
     const r = await built.commit('feat: change a')
-    const o = r.output as Record<string, unknown>
+    const o = recordOf(r.output)
     expect(built.stamped).toEqual([{ id: 'area-healed', scope: 'project', key: 'rt1:restamp:project:area-healed' }])
     expect(o.restamped).toEqual([{ id: 'area-healed', scope: 'project' }])
     expect(o.stillDrifted).toEqual([])
@@ -373,7 +374,7 @@ describe('verification is declared, never inferred from the write', () => {
     })
     const r = await built.commit('feat: change a')
     expect(r.isError).toBe(false)
-    const o = r.output as Record<string, unknown>
+    const o = recordOf(r.output)
     expect(built.restated).toEqual([{ id: 'area-confirmed', scope: 'project', key: 'rt1:reverify:project:area-confirmed' }])
     expect(o.reverified).toEqual([{ id: 'area-confirmed', scope: 'project' }])
     expect(built.stamped).toEqual([]) // a verification is not a write
@@ -389,7 +390,7 @@ describe('verification is declared, never inferred from the write', () => {
       verified: [{ id: 'area-sib', scope: 'project', paths: ['sibling.ts'] }],
     })
     const r = await built.commit('feat: change a')
-    const o = r.output as Record<string, unknown>
+    const o = recordOf(r.output)
     expect(built.restated).toEqual([])
     expect(o.reverified).toEqual([])
     expect(o.skippedDirty).toEqual([{ id: 'area-sib', scope: 'project', dirtyPaths: ['sibling.ts'] }])
@@ -406,7 +407,7 @@ describe('verification is declared, never inferred from the write', () => {
     })
     const r = await built.commit('feat: change a')
     expect(r.isError).toBe(false) // the commit EXISTS
-    const o = r.output as Record<string, unknown>
+    const o = recordOf(r.output)
     expect(o.reverifyFailed).toEqual([{ id: 'area-v', scope: 'project', error: 'surreal hiccup' }])
     expect(o.restampFailed).toEqual([]) // a failed verification stamp is NOT a failed restamp: the
     // repair differs (re-verify vs `orc memory restamp`), and one key for both would hide which
@@ -423,7 +424,7 @@ describe('verification is declared, never inferred from the write', () => {
       citing: async () => [],
     })
     const r = await built.commit('feat: change a')
-    const o = r.output as Record<string, unknown>
+    const o = recordOf(r.output)
     expect(o.restamped).toEqual([{ id: 'area-both', scope: 'project' }])
     expect(o.reverified).toEqual([{ id: 'area-both', scope: 'project' }])
   })
@@ -449,7 +450,7 @@ describe('the strict reverify gate', () => {
     })
     const r = await built.commit('feat: other')
     expect(r.isError).toBe(false)
-    const o = r.output as Record<string, unknown>
+    const o = recordOf(r.output)
     expect(built.restated).toEqual([])   // the callback never fired: no stamp was minted at all
     expect(o.reverified).toEqual([])
     expect(o.reverifyStale).toEqual([{ id: 'area-x', scope: 'project' }])
@@ -469,7 +470,7 @@ describe('the strict reverify gate', () => {
     })
     const r = await built.commit('feat: other')
     expect(r.isError).toBe(false)
-    const o = r.output as Record<string, unknown>
+    const o = recordOf(r.output)
     expect(built.restated.map(s => s.id)).toEqual(['area-x'])
     expect(o.reverified).toEqual([{ id: 'area-x', scope: 'project' }])
     expect(o.reverifyStale).toEqual([])
@@ -484,7 +485,7 @@ describe('the strict reverify gate', () => {
     })
     const r = await built.commit('feat: change a')
     expect(r.isError).toBe(false)
-    const o = r.output as Record<string, unknown>
+    const o = recordOf(r.output)
     expect(built.restated).toEqual([])
     expect(o.reverifyStale).toEqual([{ id: 'area-x', scope: 'project' }])
   })
@@ -501,7 +502,7 @@ describe('the strict reverify gate', () => {
       verified: [{ id: 'area-x', scope: 'project', paths: ['a.ts'], stampRevision: audited }],
     })
     const r = await built.commit('feat: other')
-    const o = r.output as Record<string, unknown>
+    const o = recordOf(r.output)
     // the heal rewrote the prose against the tree in front of it — that is a different claim from
     // the auditor's, and the gate that refuses the stale verification must not touch it
     expect(o.restamped).toEqual([{ id: 'area-x', scope: 'project' }])
@@ -526,7 +527,7 @@ describe('usage in the receipt', () => {
     const expected = subtreeUsage(st, 't1')
     const r = await build(dir, { paths: ['a.ts'], state: st }).commit('feat: change a')
     expect(r.isError).toBe(false)
-    const o = r.output as Record<string, unknown>
+    const o = recordOf(r.output)
     expect(o.usage).toEqual(expected)
     expect(o.usage).toEqual(measured)
   })
@@ -536,7 +537,7 @@ describe('usage in the receipt', () => {
     writeFileSync(path.join(dir, 'a.ts'), 'a2\n')
     const r = await build(dir, { paths: ['a.ts'] }).commit('feat: change a')
     expect(r.isError).toBe(false)
-    expect((r.output as Record<string, unknown>).usage).toEqual(ZERO_USAGE)
+    expect(recordOf(r.output).usage).toEqual(ZERO_USAGE)
   })
 })
 
@@ -553,7 +554,7 @@ describe('restamp truthfulness', () => {
       ],
     })
     const r = await built.commit('feat: change a')
-    const o = r.output as Record<string, unknown>
+    const o = recordOf(r.output)
     expect(built.stamped).toEqual([{ id: 'area-a', scope: 'project', key: 'rt1:restamp:project:area-a' }])
     expect(o.restamped).toEqual([{ id: 'area-a', scope: 'project' }])
     expect(o.skippedDirty).toEqual([{ id: 'area-sib', scope: 'project', dirtyPaths: ['sibling.ts'] }])
@@ -568,7 +569,7 @@ describe('restamp truthfulness', () => {
       notes: [{ id: 'area-gen', scope: 'project', paths: ['gen.ts'] }],
     })
     const r = await built.commit('feat: change a')
-    const o = r.output as Record<string, unknown>
+    const o = recordOf(r.output)
     expect(built.stamped).toEqual([])
     expect(o.restamped).toEqual([])
     expect(o.skippedDirty).toEqual([{ id: 'area-gen', scope: 'project', dirtyPaths: ['gen.ts'] }])
@@ -582,7 +583,7 @@ describe('restamp truthfulness', () => {
       notes: [{ id: 'area-typo', scope: 'project', paths: ['no/such/file.ts'] }],
     })
     const r = await built.commit('feat: change a')
-    const o = r.output as Record<string, unknown>
+    const o = recordOf(r.output)
     expect(built.stamped).toEqual([])
     expect(o.skippedDirty).toEqual([{ id: 'area-typo', scope: 'project', dirtyPaths: ['no/such/file.ts'] }])
   })
@@ -609,7 +610,7 @@ describe('restamp truthfulness', () => {
     const r = await build(dir, { paths: ['a*.ts'] }).commit('feat: literal star')
     expect(r.isError).toBe(false)
     // without --literal-pathspecs the pathspec 'a*.ts' would glob onto ab.ts and commit sibling work
-    expect((r.output as Record<string, unknown>).committedPaths).toEqual(['a*.ts'])
+    expect(recordOf(r.output).committedPaths).toEqual(['a*.ts'])
     expect(out(dir, 'status', '--porcelain')).toContain('ab.ts')
   })
 
@@ -631,7 +632,7 @@ describe('restamp truthfulness', () => {
       },
     }).commit('feat: change a')
     expect(r.isError).toBe(false) // the commit EXISTS — reporting failure would be a lie
-    const o = r.output as Record<string, unknown>
+    const o = recordOf(r.output)
     expect(o.created).toBe(true)
     expect(o.restamped).toEqual([{ id: 'area-ok', scope: 'project' }])
     expect(o.restampFailed).toEqual([{ id: 'area-throws', scope: 'project', error: 'surreal hiccup' }])

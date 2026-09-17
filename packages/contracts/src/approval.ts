@@ -1,15 +1,18 @@
 import { z } from 'zod'
 
+export const ApprovalMode = z.enum(['auto', 'manual'])
+export const APPROVAL_MODE = ApprovalMode.enum
+
 export const ApprovalRule = z.object({
   maxDepth: z.number().int().positive().optional(),
   maxCostUSD: z.number().positive().optional(),
   type: z.string().optional(),
-  then: z.enum(['auto', 'manual']),
+  then: ApprovalMode,
 })
 export type ApprovalRule = z.infer<typeof ApprovalRule>
 
 export const ApprovalPolicy = z.object({
-  default: z.enum(['manual', 'auto']).default('manual'),
+  default: ApprovalMode.default('manual'),
   rules: z.array(ApprovalRule).default([]),
 })
 export type ApprovalPolicy = z.infer<typeof ApprovalPolicy>

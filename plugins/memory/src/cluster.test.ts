@@ -72,10 +72,8 @@ describe('partition', () => {
   })
 
   // The one case the order-invariance test above cannot reach: the SAME id arriving with DIFFERENT
-  // vectors, which happens after an embedding-model change without a rebuild. The dedupe used to be
-  // `new Map(claims.map(…))` — last occurrence wins — so the partition depended on which row
-  // SurrealDB returned last. Keeping the FIRST would be just as positional; the pick is by vector
-  // content, so every arrangement of the same three rows lands on the same answer.
+  // vectors, which happens after an embedding-model change without a rebuild. The dedupe picks by
+  // vector content (not position), so every arrangement of the same rows lands on the same answer.
   it('resolves a duplicate id carrying conflicting vectors the same way in every input order', () => {
     const conflictA = { id: 'eeeeeeeeeee1', vector: [0, 1, 0] }
     const conflictB = { id: 'eeeeeeeeeee1', vector: [1, 0, 0] }

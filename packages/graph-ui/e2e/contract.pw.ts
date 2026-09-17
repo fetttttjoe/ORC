@@ -1,4 +1,5 @@
 import { expect, test, type APIRequestContext } from '@playwright/test'
+import { must } from '@orc/contracts/fixtures'
 import * as S from '../web/src/lib/api/schemas'
 
 /**
@@ -72,7 +73,7 @@ test('plans, plan-notes and transcript match for a real task', async ({ request 
   const snapshot = S.GraphSnapshot.parse(await json(request, `/api/graph?project=${PROJECT}`))
   const task = snapshot.nodes.find(n => n.type === 'task')
   expect(task, 'the fixture seeds at least one task').toBeDefined()
-  const taskId = task!.id
+  const taskId = must(task, 'task node').id
 
   const plans = await request.get(`/api/plans?project=${PROJECT}&task=${taskId}`)
   if (plans.status() === 200) check(S.PlansView, await plans.json(), '/api/plans')

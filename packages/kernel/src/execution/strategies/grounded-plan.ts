@@ -71,7 +71,7 @@ export function planGraphHash(notes: PlanNote[]): string {
   return createHash('sha256').update(JSON.stringify(canonical)).digest('hex')
 }
 
-// FixE: reconstruct the task's plan-note graph from the EVENT LOG (the source of truth) rather than
+// reconstruct the task's plan-note graph from the EVENT LOG (the source of truth) rather than
 // the async SurrealDB projection — the log is synchronously durable the instant finalize runs, so the
 // frozen executable plan can never be built from a stale read model. Folds memory_written/deleted in
 // seq order to the latest note per id (a later memory_deleted drops it), mirroring the projector's

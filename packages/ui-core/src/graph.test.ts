@@ -1,9 +1,9 @@
 import { afterAll, describe, expect, it } from 'bun:test'
-import { EVENT_KIND, foldMemory, type EventRecord } from '@orc/contracts'
-import { draftFixture, eventFixture, stepFixture } from '@orc/contracts/fixtures'
+import { EVENT_KIND, foldMemory, type EventRecord, LINK_KIND } from '@orc/contracts'
+import { draftFixture, eventFixture, stepFixture, must } from '@orc/contracts/fixtures'
 import { Kernel, emptyFold, fold, openStorage, type EventLog } from '@orc/kernel'
 import { createTestDb, seedTestWorkspace, TEST_PROJECT_ID, TEST_WORKSPACE_ID } from '@orc/kernel/test-helpers'
-import { buildGraph, diffGraphs, EDGE, noteNodeId, stepNodeId } from './graph'
+import { buildGraph, diffGraphs, EDGE, linkKey, noteNodeId, stepNodeId } from './graph'
 
 // the planScopeName↔planScope drift-guard test is gone WITH the duplication it guarded:
 // contracts' planScope is now the single definition, imported everywhere
@@ -85,7 +85,7 @@ describe('buildGraph', () => {
     expect(g.links).toContainEqual({ source: stepNodeId(taskId, 's1'), target: stepNodeId(taskId, 's2'), type: 'depends' })
     expect(g.links).toContainEqual({ source: stepNodeId(taskId, 's1'), target: `artifact:${taskId}:out.txt`, type: 'out' })
     expect(g.links).toContainEqual({ source: taskId, target: noteNodeId('project', 'task-note'), type: 'wrote' })
-    expect(g.links).toContainEqual({ source: noteNodeId('project', 'task-note'), target: noteNodeId('project', 'base-note'), type: 'relates_to' })
+    expect(g.links).toContainEqual({ source: noteNodeId('project', 'task-note'), target: noteNodeId('project', 'base-note'), type: LINK_KIND.relates_to })
     await log.close()
   })
 
@@ -114,7 +114,7 @@ describe('buildGraph', () => {
     await writeNote(log, 'shared', { scope: 'plan-t1' })
     await writeNote(log, 'sub-a', {
       scope: 'plan-t1',
-      links: [{ id: 'arch-overview', kind: 'derived_from' }, { id: 'sub-b', kind: 'depends_on' }, { id: 'shared', kind: 'relates_to' }],
+      links: [{ id: 'arch-overview', kind: LINK_KIND.derived_from }, { id: 'sub-b', kind: LINK_KIND.depends_on }, { id: 'shared', kind: LINK_KIND.relates_to }],
     })
     await writeNote(log, 'sub-b', { scope: 'plan-t1' })
     const events = await log.all()
@@ -124,8 +124,8 @@ describe('buildGraph', () => {
     // same-scope target resolves normally
     expect(g.links).toContainEqual({ source: noteNodeId('plan-t1', 'sub-a'), target: noteNodeId('plan-t1', 'sub-b'), type: 'depends_on' })
     // both scopes hold the id → same-scope WINS (fallback never shadows local resolution)
-    expect(g.links).toContainEqual({ source: noteNodeId('plan-t1', 'sub-a'), target: noteNodeId('plan-t1', 'shared'), type: 'relates_to' })
-    expect(g.links).not.toContainEqual({ source: noteNodeId('plan-t1', 'sub-a'), target: noteNodeId('project', 'shared'), type: 'relates_to' })
+    expect(g.links).toContainEqual({ source: noteNodeId('plan-t1', 'sub-a'), target: noteNodeId('plan-t1', 'shared'), type: LINK_KIND.relates_to })
+    expect(g.links).not.toContainEqual({ source: noteNodeId('plan-t1', 'sub-a'), target: noteNodeId('project', 'shared'), type: LINK_KIND.relates_to })
     await log.close()
   })
 
@@ -148,8 +148,8 @@ describe('buildGraph', () => {
     const empty = fold([]) // no tasks — notes fold straight from the events
     const cold = buildGraph(empty, foldMemory([written]), { now: ts })
     const hot = buildGraph(empty, foldMemory([written, access, access, access]), { now: ts })
-    const coldNode = cold.nodes.find(n => n.id === noteNodeId('project', 'hot'))!
-    const hotNode = hot.nodes.find(n => n.id === noteNodeId('project', 'hot'))!
+    const coldNode = must(cold.nodes.find(n => n.id === noteNodeId('project', 'hot')), 'cold.nodes.find(n => n.id === noteNodeId(\'project\', \'hot\'))')
+    const hotNode = must(hot.nodes.find(n => n.id === noteNodeId('project', 'hot')), 'hot.nodes.find(n => n.id === noteNodeId(\'project\', \'hot\'))')
     expect(coldNode.heat).toBeUndefined()
     expect(hotNode.heat).toBeGreaterThan(0)
     expect(hotNode.heat).toBeLessThanOrEqual(1)
@@ -166,19 +166,19 @@ describe('buildGraph', () => {
       payload: { task: { id: 't1', parentId: null, workspaceId: TEST_WORKSPACE_ID, type: 'generic', title: 'task', spec: '', status: 'draft', zone: [], budgetUSD: null, depth: 0, createdAt: ts } },
     })])
     const events = [
-      { kind: EVENT_KIND.memory_written, ts, payload: { note: { id: 'eseed', scope: 'project', title: 'eseed', links: [{ id: 'ewalked', kind: 'relates_to' }] }, author: { source: 'agent', workspaceId: TEST_WORKSPACE_ID, taskId: 't1' } } },
+      { kind: EVENT_KIND.memory_written, ts, payload: { note: { id: 'eseed', scope: 'project', title: 'eseed', links: [{ id: 'ewalked', kind: LINK_KIND.relates_to }] }, author: { source: 'agent', workspaceId: TEST_WORKSPACE_ID, taskId: 't1' } } },
       { kind: EVENT_KIND.memory_written, ts, payload: { note: { id: 'ewalked', scope: 'project', title: 'ewalked' }, author: { source: 'cli', workspaceId: TEST_WORKSPACE_ID } } },
       // via-provenance access: the connection itself, not just the node, gets credit
-      { kind: EVENT_KIND.memory_accessed, ts, payload: { id: 'ewalked', scope: 'project', mode: 'read', author: { source: 'cli', workspaceId: TEST_WORKSPACE_ID }, via: { seed: 'eseed', kind: 'relates_to', direction: 'out' } } },
+      { kind: EVENT_KIND.memory_accessed, ts, payload: { id: 'ewalked', scope: 'project', mode: 'read', author: { source: 'cli', workspaceId: TEST_WORKSPACE_ID }, via: { seed: 'eseed', kind: LINK_KIND.relates_to, direction: 'out' } } },
     ]
     const g = buildGraph(state, foldMemory(events), { now: ts })
-    const edge = g.links.find(l => l.source === noteNodeId('project', 'eseed') && l.target === noteNodeId('project', 'ewalked'))!
+    const edge = must(g.links.find(l => l.source === noteNodeId('project', 'eseed') && l.target === noteNodeId('project', 'ewalked')), 'edge eseed→ewalked')
     expect(edge.heat).toBeGreaterThan(0)
     expect(edge.heat).toBeLessThanOrEqual(1)
-    const wroteEdge = g.links.find(l => l.type === EDGE.wrote)!
+    const wroteEdge = must(g.links.find(l => l.type === EDGE.wrote), 'g.links.find(l => l.type === EDGE.wrote)')
     expect(wroteEdge).toBeDefined() // guard: a real non-note-link edge exists in this fixture
     // non-note-link edges (task→note 'wrote' etc.) never carry heat — only walked-edge kinds do
-    for (const l of g.links) if (l.type !== 'relates_to') expect(l.heat).toBeUndefined()
+    for (const l of g.links) if (l.type !== LINK_KIND.relates_to) expect(l.heat).toBeUndefined()
   })
 
   it('never links to a node that does not exist (dangling note link, deleted target)', async () => {
@@ -211,7 +211,7 @@ describe('diffGraphs', () => {
     expect(patch.addNodes.map(n => n.id)).toEqual([noteNodeId('project', 'fresh-note')])
     expect(patch.updateNodes).toEqual([])
     expect(patch.removeNodeIds).toEqual([])
-    expect(patch.addLinks.map(l => l.type).sort()).toEqual(['relates_to', 'wrote'])
+    expect(patch.addLinks.map(l => l.type).sort()).toEqual([LINK_KIND.relates_to, EDGE.wrote])
     await log.close()
   })
 
@@ -227,7 +227,7 @@ describe('diffGraphs', () => {
     const patch = diffGraphs(at(before), at(after))
     expect(patch.updateNodes.map(n => [n.id, n.detail])).toEqual([[stepNodeId(taskId, 's2'), 'running']])
     expect(patch.removeNodeIds).toEqual([noteNodeId('project', 'task-note')])
-    expect(patch.removeLinks.map(l => l.type).sort()).toEqual(['relates_to', 'wrote'])
+    expect(patch.removeLinks.map(l => l.type).sort()).toEqual([LINK_KIND.relates_to, EDGE.wrote])
     expect(patch.addNodes).toEqual([])
     await log.close()
   })
@@ -235,16 +235,16 @@ describe('diffGraphs', () => {
   it('emits an updateLinks entry (not remove+add) when only edge heat changes', () => {
     const ts = '2026-07-01T00:00:00.000Z'
     const written = [
-      { kind: EVENT_KIND.memory_written, ts, payload: { note: { id: 'ueseed', scope: 'project', title: 'ueseed', links: [{ id: 'uewalked', kind: 'relates_to' }] }, author: { source: 'cli', workspaceId: TEST_WORKSPACE_ID } } },
+      { kind: EVENT_KIND.memory_written, ts, payload: { note: { id: 'ueseed', scope: 'project', title: 'ueseed', links: [{ id: 'uewalked', kind: LINK_KIND.relates_to }] }, author: { source: 'cli', workspaceId: TEST_WORKSPACE_ID } } },
       { kind: EVENT_KIND.memory_written, ts, payload: { note: { id: 'uewalked', scope: 'project', title: 'uewalked' }, author: { source: 'cli', workspaceId: TEST_WORKSPACE_ID } } },
     ]
-    const access = { kind: EVENT_KIND.memory_accessed, ts, payload: { id: 'uewalked', scope: 'project', mode: 'read', author: { source: 'cli', workspaceId: TEST_WORKSPACE_ID }, via: { seed: 'ueseed', kind: 'relates_to', direction: 'out' } } }
+    const access = { kind: EVENT_KIND.memory_accessed, ts, payload: { id: 'uewalked', scope: 'project', mode: 'read', author: { source: 'cli', workspaceId: TEST_WORKSPACE_ID }, via: { seed: 'ueseed', kind: LINK_KIND.relates_to, direction: 'out' } } }
     const empty = fold([])
     const cold = buildGraph(empty, foldMemory(written), { now: ts })
     const hot = buildGraph(empty, foldMemory([...written, access]), { now: ts })
     const patch = diffGraphs(cold, hot)
-    const key = `${noteNodeId('project', 'ueseed')} ${noteNodeId('project', 'uewalked')} relates_to`
-    expect(patch.updateLinks.some(l => `${l.source} ${l.target} ${l.type}` === key)).toBe(true)
+    const key = linkKey({ source: noteNodeId('project', 'ueseed'), target: noteNodeId('project', 'uewalked'), type: LINK_KIND.relates_to })
+    expect(patch.updateLinks.some(l => linkKey(l) === key)).toBe(true)
     expect(patch.addLinks).toEqual([])
     expect(patch.removeLinks).toEqual([])
   })

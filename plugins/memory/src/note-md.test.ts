@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test'
-import { claimId, DECISION_STATUS, NOTE_KIND, type SemanticNote } from '@orc/contracts'
+import { claimId, DECISION_STATUS, NOTE_KIND, type SemanticNote, LINK_KIND } from '@orc/contracts'
 import { planNoteFixture, semanticNoteFixture } from '@orc/contracts/fixtures'
 import { CLAIMS_HEADING, noteRelPath, renderNoteFile } from './note-md'
 
@@ -9,7 +9,7 @@ const note = (over: Partial<SemanticNote> & { id: string }): SemanticNote => sem
   sourceRevision: 'abc123def',
   title: 'Auth token refresh flow',
   categories: ['architecture', 'security'], tags: ['auth'],
-  links: [{ id: 'session-model', kind: 'refines' }, { id: 'cookie-auth', kind: 'supersedes', confidence: 0.9 }],
+  links: [{ id: 'session-model', kind: LINK_KIND.refines }, { id: 'cookie-auth', kind: LINK_KIND.supersedes, confidence: 0.9 }],
   paths: ['packages/kernel/src/auth.ts'],
   claims: [{ id: claimId(SINGLE_USE), text: SINGLE_USE, sourceRevision: 'abc123def' }],
   summary: 'Refresh tokens rotate on use.', body: '# Detail\nrotation logic',
@@ -61,7 +61,7 @@ describe('renderNoteFile', () => {
   it('renders a plan-note with decomposes_into links, rationale, and uncertainty', () => {
     const md = renderNoteFile(planNoteFixture({
       id: 'master', scope: 'project', title: 'build web', rationale: 'why',
-      uncertainty: ['schema unknown'], links: [{ id: 'db', kind: 'decomposes_into' }],
+      uncertainty: ['schema unknown'], links: [{ id: 'db', kind: LINK_KIND.decomposes_into }],
     }))
     expect(md).toContain('tier: plan')
     expect(md).not.toContain(CLAIMS_HEADING) // a plan note has no retrieval surface to render

@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'bun:test'
 import { decideGroundingFreshness, type GroundingNoteRef, type GroundingSource } from './grounding-freshness'
+import { must } from '@orc/contracts/fixtures'
 
 const HEAD = 'a'.repeat(40)
 const OLD = 'b'.repeat(40)
@@ -77,7 +78,7 @@ describe('decideGroundingFreshness', () => {
 
     expect(v.fresh).toBe(false)
     expect(v.stale.map(s => s.id)).toEqual(['moved'])
-    expect(v.stale[0]!.why).toContain('3')
+    expect(must(v.stale[0], 'v.stale[0]').why).toContain('3')
     expect(v.current.map(c => c.id)).toEqual(['quiet'])
   })
 
@@ -97,14 +98,14 @@ describe('decideGroundingFreshness', () => {
     expect(v.fresh).toBe(false)
     expect(v.head).toBeNull()
     expect(v.stale.map(s => s.id)).toEqual(['area-kernel'])
-    expect(v.stale[0]!.why.toLowerCase()).toContain('head')
+    expect(must(v.stale[0], 'v.stale[0]').why.toLowerCase()).toContain('head')
   })
 
   it('is not fresh when a commitsSince probe cannot answer', async () => {
     const v = await decideGroundingFreshness(fakeSource({ notes: [note()], commits: () => null }))
 
     expect(v.fresh).toBe(false)
-    expect(v.stale[0]!.why.toLowerCase()).toContain('could not')
+    expect(must(v.stale[0], 'v.stale[0]').why.toLowerCase()).toContain('could not')
   })
 
   // Path-awareness is the point (plugins/memory/src/step.ts's in-code measurement): a note that
@@ -117,7 +118,7 @@ describe('decideGroundingFreshness', () => {
 
     expect(v.fresh).toBe(false)
     expect(v.stale.map(s => s.id).sort()).toEqual(['pathless', 'unversioned'])
-    expect(v.stale.find(s => s.id === 'unversioned')!.revision).toBeNull()
+    expect(must(v.stale.find(s => s.id === 'unversioned'), 'v.stale.find(s => s.id === \'unversioned\')').revision).toBeNull()
     expect(v.current).toEqual([])
   })
 

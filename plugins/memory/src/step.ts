@@ -1,10 +1,10 @@
 import {
   claimHitKey, errorMessage, LINK_KIND, MEMORY_ACCESS, MEMORY_LIMITS, MEMORY_USE, MemoryScope, noteKey, NOTE_TIER, planScope, SEARCH_MODE, SIGNAL_OUTCOME, slugId, taskLaneScopes,
-  type ClaimHit, type VerifiedStamp, type LinkKind, type MemoryAuthor, type MemoryStore, type NoteSummary, type ResolvedTool,
+  type ClaimHit, type VerifiedStamp, type LinkKind, type MemoryAuthor, type MemoryStore, type ResolvedTool,
   type RecalledContext, type SignalOutcome, type StepMemory,
 } from '@orc/contracts'
 import { applyBudget } from './budget'
-import { memoryTools, unavailableMemoryTools, MEMORY_ROLE, type MemoryRole } from './tools'
+import { memoryTools, unavailableMemoryTools, type MemoryRole } from './tools'
 import { corpusDrift, type ChangedSince, type CorpusDrift } from './drift'
 import type { WorkspaceViewProbe } from './provisional'
 
@@ -322,7 +322,7 @@ export function bindStepMemory(opts: {
 // What the composition root calls per step, with the store already bound.
 export type BindStep = (p: Omit<Parameters<typeof bindStepMemory>[0], 'store' | 'changedSince' | 'workspaceView' | 'catchUp'>) => StepMemoryBinding
 
-// Degraded mode (design §8.4): the tools still EXIST and every call returns an explicit isError
+// Degraded mode: the tools still EXIST and every call returns an explicit isError
 // naming the reason, so the model learns context is unavailable instead of silently losing them.
 // recall/capture go quiet rather than erroring — neither is the model's call to make.
 export const unavailableStepMemory = (reason: string): StepMemoryBinding => ({

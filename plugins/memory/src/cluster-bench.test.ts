@@ -1,6 +1,5 @@
 // The BEFORE curve for the claim-grouping spec's L1 (cosine-matrix cache) / L2 (heap + Lance-
-// Williams merge) levers — see docs/superpowers/specs/2026-07-26-claim-grouping-design.md's
-// scaling section and the attribute-refresh-cost finding this file backs (area-topic-clustering).
+// Williams merge) levers — the attribute-refresh-cost finding this file backs (area-topic-clustering).
 //
 // Deliberately network-free and embedder-free: partition() takes ClusterInput[] (id + vector) and
 // nothing else (cluster.ts is import-free BY DESIGN, see its own header comment), so this file

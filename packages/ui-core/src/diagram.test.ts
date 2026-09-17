@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'bun:test'
 
 import { todoWaves } from './diagram'
+import { must } from '@orc/contracts/fixtures'
 
 // diamond: a → (b ∥ c) → d
 const diamond = [
@@ -16,8 +17,8 @@ describe('todoWaves', () => {
     const waves = todoWaves(diamond, states)
     expect(waves.map(w => w.steps.map(s => s.id))).toEqual([['a'], ['b', 'c'], ['d']])
     expect(waves.map(w => w.parallel)).toEqual([false, true, false])
-    expect(waves[0]!.steps[0]!.status).toBe('completed')
-    expect(waves[1]!.steps[1]!.status).toBe('pending')
+    expect(must(must(waves[0], 'waves[0]').steps[0], 'waves[0].steps[0]').status).toBe('completed')
+    expect(must(must(waves[1], 'waves[1]').steps[1], 'waves[1].steps[1]').status).toBe('pending')
   })
   /**
    * Cyclic steps are PARKED in a trailing wave, not dropped. This used to return [] — the graph

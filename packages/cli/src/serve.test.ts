@@ -1,5 +1,6 @@
 import { afterAll, describe, expect, it } from 'bun:test'
 import { liveSupervisors, openStorage, supervisors, SUPERVISOR_STALE_MS } from '@orc/kernel'
+import { must } from '@orc/contracts/fixtures'
 import { createTestDb, TEST_PROJECT_ID } from '@orc/kernel/test-helpers'
 import { claimSlot, nextIdle, startBootHeartbeat, supervisorHealth } from './serve'
 
@@ -40,8 +41,7 @@ describe('claimSlot (admission IS slot claiming, not a second rule)', () => {
     expect(await claimSlot(storage, 1)).toBe('supervisor-1')
   })
 
-  // The property the whole stable-slot design rests on (see docs/superpowers/specs/
-  // 2026-07-25-supervisor-runtime-design.md): a restarted supervisor gets the SAME executor id
+  // The property the whole stable-slot design rests on: a restarted supervisor gets the SAME executor id
   // back by reclaiming its OWN row, not by racing a fresh INSERT next to a stale leftover. At
   // maxSlots: 1 the id alone can't tell a genuine upsert from any other implementation that
   // happens to also return 'supervisor-1' — the row count and the rewritten startedAt can.
@@ -50,7 +50,7 @@ describe('claimSlot (admission IS slot claiming, not a second rule)', () => {
 
     // "boot 1"
     expect(await claimSlot(storage, 1)).toBe('supervisor-1')
-    const before = (await liveSupervisors(storage, new Date()))[0]!
+    const before = must((await liveSupervisors(storage, new Date()))[0], 'first live supervisor')
 
     // simulate a crash: the row goes stale (no clean `forget` — last_seen_at just stops advancing)
     const stale = new Date(Date.now() - SUPERVISOR_STALE_MS - 1_000)
@@ -66,7 +66,8 @@ describe('claimSlot (admission IS slot claiming, not a second rule)', () => {
     const live = await liveSupervisors(storage, new Date())
 
     expect(live).toHaveLength(1) // reclaimed the SAME row — a second INSERT would show up here too
-    expect(new Date(live[0]!.startedAt).getTime()).toBeGreaterThan(new Date(before.startedAt).getTime()) // DO UPDATE genuinely fired, not a no-op
+    const liveFirst = must(live[0], 'first live supervisor')
+    expect(new Date(liveFirst.startedAt).getTime()).toBeGreaterThan(new Date(before.startedAt).getTime()) // DO UPDATE genuinely fired, not a no-op
   })
 })
 
@@ -74,7 +75,7 @@ describe('startBootHeartbeat (the slot stays live while buildRuntime blocks on c
   it('advances lastSeenAt while running and stops advancing once stopped', async () => {
     const storage = await fresh()
     expect(await claimSlot(storage, 1)).toBe('supervisor-1')
-    const claimed = (await liveSupervisors(storage, new Date()))[0]!
+    const claimed = must((await liveSupervisors(storage, new Date()))[0], 'first live supervisor')
 
     const stop = startBootHeartbeat(storage, 'supervisor-1', 25)
     try {
@@ -83,11 +84,11 @@ describe('startBootHeartbeat (the slot stays live while buildRuntime blocks on c
       stop()
     }
     await Bun.sleep(60) // let any beat already in flight at stop() land before sampling
-    const afterStop = (await liveSupervisors(storage, new Date()))[0]!
+    const afterStop = must((await liveSupervisors(storage, new Date()))[0], 'first live supervisor')
     expect(new Date(afterStop.lastSeenAt).getTime()).toBeGreaterThan(new Date(claimed.lastSeenAt).getTime())
 
     await Bun.sleep(100) // four would-be intervals: a live timer would beat again in this window
-    const later = (await liveSupervisors(storage, new Date()))[0]!
+    const later = must((await liveSupervisors(storage, new Date()))[0], 'first live supervisor')
     expect(later.lastSeenAt).toEqual(afterStop.lastSeenAt)
   })
 })

@@ -8,6 +8,7 @@ import { drizzle } from 'drizzle-orm/node-postgres'
 import { migrate } from 'drizzle-orm/node-postgres/migrator'
 import { jsonb, pgTable, text } from 'drizzle-orm/pg-core'
 import { EVENT_KIND, isRecord, isTerminalError, type EventInput, type OperationSpec } from '@orc/contracts'
+import { must } from '@orc/contracts/fixtures'
 import { listProjectIds, openStorage, type EventLog, type Storage } from './storage'
 import { isMissingMigrationTable, migrateDatabase } from './storage/migrate'
 import { events } from './schema'
@@ -92,7 +93,7 @@ describe('schema migration', () => {
 
 const statusEvent = (taskId = 't1'): EventInput => ({
   taskId, stepId: null, runToken: null,
-  kind: 'task_status_changed',
+  kind: EVENT_KIND.task_status_changed,
   payload: { taskId, from: 'draft', to: 'awaiting_approval' },
 })
 
@@ -125,7 +126,7 @@ describe('EventLog (postgres)', () => {
     const log = await freshLog()
     const rec = await log.append({
       taskId: 't1', stepId: 's1', runToken: 'r1',
-      kind: 'tool_result',
+      kind: EVENT_KIND.tool_result,
       payload: {
         stepId: 's1', runToken: 'r1', iteration: 1, toolCallId: 'c1', toolName: 'fs_read',
         output: { content: 'binary\u0000data' }, isError: false,
@@ -133,8 +134,8 @@ describe('EventLog (postgres)', () => {
     })
     expect(JSON.stringify(rec.payload)).toContain('binarydata')
     expect(JSON.stringify(rec.payload)).not.toContain('\\u0000')
-    const [stored] = await log.byTask('t1')
-    expect(JSON.stringify(stored!.payload)).toContain('binarydata')
+    const stored = must((await log.byTask('t1'))[0], 'first event for task t1')
+    expect(JSON.stringify(stored.payload)).toContain('binarydata')
   })
 
   it('transaction rolls back atomically on error', async () => {
@@ -193,7 +194,7 @@ describe('EventLog (postgres)', () => {
       payload: jsonb('payload').notNull(),
     })
     await raw.insert(legacyEvents).values({
-      taskId: 't-legacy', kind: 'task_status_changed',
+      taskId: 't-legacy', kind: EVENT_KIND.task_status_changed,
       payload: { taskId: 't-legacy', from: 'draft', to: 'awaiting_approval' },
     })
 
@@ -202,8 +203,8 @@ describe('EventLog (postgres)', () => {
     const log = (await openStorage(db.url, { projectId: TEST_PROJECT_ID })).events
     db.onClose(() => log.close())
     expect(await log.all()).toHaveLength(0) // legacy rows are unreachable from any project
-    const [row] = await raw.select().from(events)
-    expect(row!.projectId).toBe('legacy')
+    const row = must((await raw.select().from(events))[0], 'first row from events table')
+    expect(row.projectId).toBe('legacy')
   })
 
   it('isolates projects sharing one database: each log reads only its own events', async () => {
@@ -225,7 +226,7 @@ describe('EventLog (postgres)', () => {
     const log = await freshLog()
     await log.append(statusEvent('t1'))
     await log.append({
-      taskId: 't2', stepId: null, runToken: null, kind: 'task_created',
+      taskId: 't2', stepId: null, runToken: null, kind: EVENT_KIND.task_created,
       payload: { task: { id: 't2', parentId: null, workspaceId: TEST_WORKSPACE_ID, type: 'generic', title: 't2', spec: '', status: 'draft', zone: [], budgetUSD: null, depth: 0, createdAt: 'T' } },
     })
     await log.append(statusEvent('t3'))
@@ -307,7 +308,7 @@ describe('EventLog (postgres)', () => {
       })).events
       db.onClose(() => log.close())
       await log.append({
-        taskId: 't1', stepId: 's1', runToken: 'r1', kind: 'tool_result',
+        taskId: 't1', stepId: 's1', runToken: 'r1', kind: EVENT_KIND.tool_result,
         payload: {
           stepId: 's1', runToken: 'r1', iteration: 1, toolCallId: 'c1', toolName: 'http',
           isError: false,
@@ -376,10 +377,10 @@ describe('OperationJournal', () => {
     const { events: log, operations: journal } = await freshStorage()
     const begin = await journal.beginOperation(OP_CONTEXT, OP_SPEC)
     expect(begin).toEqual({ reused: false, attempt: 1 })
-    const [op] = await journal.operationsFor('t1')
-    expect(op!.status).toBe('started')
-    expect(op!.attempts).toBe(1)
-    expect(op!.name).toBe('fake/m')
+    const op = must((await journal.operationsFor('t1'))[0], 'first operation for task t1')
+    expect(op.status).toBe('started')
+    expect(op.attempts).toBe(1)
+    expect(op.name).toBe('fake/m')
     const kinds = (await log.byTask('t1')).map(e => e.kind)
     expect(kinds).toEqual(['operation_started'])
   })
@@ -388,12 +389,12 @@ describe('OperationJournal', () => {
     const { events: log, operations: journal } = await freshStorage()
     await journal.beginOperation(OP_CONTEXT, OP_SPEC)
     await journal.completeOperation(OP_CONTEXT, OP_SPEC, 1, { text: 'answer' }, [
-      { kind: 'agent_call', payload: { stepId: 's1', runToken: OP_CONTEXT.runToken, iteration: 1, request: {}, response: { text: 'answer' } } },
+      { kind: EVENT_KIND.agent_call, payload: { stepId: 's1', runToken: OP_CONTEXT.runToken, iteration: 1, request: {}, response: { text: 'answer' } } },
     ])
-    const [op] = await journal.operationsFor('t1')
-    expect(op!.status).toBe('completed')
-    expect(op!.after).toEqual({ text: 'answer' })
-    expect(op!.finishedSeq).not.toBeNull()
+    const op = must((await journal.operationsFor('t1'))[0], 'first operation for task t1')
+    expect(op.status).toBe('completed')
+    expect(op.after).toEqual({ text: 'answer' })
+    expect(op.finishedSeq).not.toBeNull()
     const kinds = (await log.byTask('t1')).map(e => e.kind)
     expect(kinds).toEqual(['operation_started', 'operation_completed', 'agent_call'])
   })
@@ -412,9 +413,9 @@ describe('OperationJournal', () => {
     await journal.beginOperation(OP_CONTEXT, OP_SPEC)
     const second = await journal.beginOperation(OP_CONTEXT, OP_SPEC)
     expect(second).toEqual({ reused: false, attempt: 2 })
-    const [op] = await journal.operationsFor('t1')
-    expect(op!.attempts).toBe(2)
-    expect(op!.status).toBe('started')
+    const op = must((await journal.operationsFor('t1'))[0], 'first operation for task t1')
+    expect(op.attempts).toBe(2)
+    expect(op.status).toBe('started')
     expect((await log.byTask('t1')).filter(e => e.kind === 'operation_started')).toHaveLength(2)
   })
 
@@ -423,11 +424,11 @@ describe('OperationJournal', () => {
     await journal.beginOperation(OP_CONTEXT, OP_SPEC)
     await expect(
       journal.completeOperation(OP_CONTEXT, OP_SPEC, 1, { text: 'x' }, [
-        { kind: 'agent_call', payload: { wrong: true } }, // fails payload validation
+        { kind: EVENT_KIND.agent_call, payload: { wrong: true } }, // fails payload validation
       ]),
     ).rejects.toThrow()
-    const [op] = await journal.operationsFor('t1')
-    expect(op!.status).toBe('started') // update rolled back with the event
+    const op = must((await journal.operationsFor('t1'))[0], 'first operation for task t1')
+    expect(op.status).toBe('started') // update rolled back with the event
     expect((await log.byTask('t1')).map(e => e.kind)).toEqual(['operation_started'])
   })
 
@@ -435,9 +436,9 @@ describe('OperationJournal', () => {
     const { events: log, operations: journal } = await freshStorage()
     await journal.beginOperation(OP_CONTEXT, OP_SPEC)
     await journal.failOperation(OP_CONTEXT, OP_SPEC, 1, { message: 'boom' })
-    const [op] = await journal.operationsFor('t1')
-    expect(op!.status).toBe('failed')
-    expect(op!.error).toEqual({ message: 'boom' })
+    const op = must((await journal.operationsFor('t1'))[0], 'first operation for task t1')
+    expect(op.status).toBe('failed')
+    expect(op.error).toEqual({ message: 'boom' })
     await expect(journal.completeOperation(OP_CONTEXT, OP_SPEC, 2, {})).rejects.toThrow(/stale/)
   })
 
@@ -479,8 +480,8 @@ describe('OperationJournal', () => {
       stepId: 's1', runToken: 'r1',
       signal: { stepId: 's1', runToken: 'r1', outcome: 'success', summary: 'ok', outputs: undefined },
     }
-    const first = await log.append({ taskId: 't1', stepId: 's1', runToken: 'r1', kind: 'signal_received', payload, idempotencyKey: 'r1:signal' })
-    const replay = await log.append({ taskId: 't1', stepId: 's1', runToken: 'r1', kind: 'signal_received', payload, idempotencyKey: 'r1:signal' })
+    const first = await log.append({ taskId: 't1', stepId: 's1', runToken: 'r1', kind: EVENT_KIND.signal_received, payload, idempotencyKey: 'r1:signal' })
+    const replay = await log.append({ taskId: 't1', stepId: 's1', runToken: 'r1', kind: EVENT_KIND.signal_received, payload, idempotencyKey: 'r1:signal' })
     expect(replay.seq).toBe(first.seq) // jsonb drops the key; the comparison must agree
   })
 
@@ -491,7 +492,7 @@ describe('OperationJournal', () => {
 
     // lost-ack failure path after a durable completion: must be a no-op
     await journal.failOperation(OP_CONTEXT, OP_SPEC, 1, { message: 'connection reset' })
-    expect((await journal.operationsFor('t1'))[0]!.status).toBe('completed')
+    expect(must((await journal.operationsFor('t1'))[0], 'first operation for task t1').status).toBe('completed')
 
     // re-entry of the committed attempt returns the stored value instead of throwing
     expect(await journal.completeOperation(OP_CONTEXT, OP_SPEC, 1, { text: 'done' })).toEqual({ text: 'done' })

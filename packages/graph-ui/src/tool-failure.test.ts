@@ -1,10 +1,10 @@
 import { describe, expect, it } from 'bun:test'
-import { EVENT_KIND, type EventRecord } from '@orc/contracts'
+import { EVENT_KIND, type EventKind, type EventRecord } from '@orc/contracts'
+import { eventFixture } from '@orc/contracts/fixtures'
 import { toolFailure } from './tool-failure'
 
-const event = (kind: string, payload: Record<string, unknown>): EventRecord => ({
-  seq: 1, projectId: 'p', idempotencyKey: null, taskId: 't1', stepId: 'plan', runToken: 'r1',
-  kind: kind as EventRecord['kind'], payload, usage: null, ts: new Date().toISOString(),
+const event = (kind: EventKind, payload: Record<string, unknown>): EventRecord => eventFixture({
+  projectId: 'p', stepId: 'plan', runToken: 'r1', kind, payload, ts: new Date().toISOString(),
 })
 
 const result = (over: Record<string, unknown>): EventRecord => event(EVENT_KIND.tool_result, {

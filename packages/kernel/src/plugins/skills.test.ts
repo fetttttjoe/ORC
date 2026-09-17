@@ -3,6 +3,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { SkillIndex, parseSkillMd } from './skills'
+import { must } from '@orc/contracts/fixtures'
 
 const SKILL = (name: string, desc = 'demo skill, use for demos') => `---
 name: ${name}
@@ -79,7 +80,7 @@ describe('SkillIndex', () => {
     const idx = await SkillIndex.open(root)
     const entries = idx.list()
     expect(entries.map(e => [e.name, e.valid])).toEqual([['bad-skill', false], ['good-skill', true]])
-    expect(entries[0]!.errors.length).toBeGreaterThan(0)
+    expect(must(entries[0], 'entries[0]').errors.length).toBeGreaterThan(0)
 
     const empty = await SkillIndex.open(path.join(root, 'does-not-exist'))
     expect(empty.list()).toEqual([])

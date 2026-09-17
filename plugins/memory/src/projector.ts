@@ -83,9 +83,13 @@ const DERIVED_REFRESH_DEBOUNCE_MS = 5_000
 // still-unrefreshed write, so repartition/link-repair stays on a bounded cadence under load.
 const DERIVED_REFRESH_MAX_WAIT_MS = 30_000
 
+// The read-model surface the projector drives, named so a fault-injecting test double can satisfy
+// it structurally — SurrealMemory's private constructor and fields make the class itself unfakeable.
+export type ProjectorStore = Pick<SurrealMemory, 'getCursor' | 'setStage' | 'applyEvent' | 'allNotes' | 'refreshTopics' | 'refreshLinks' | 'get' | 'clear'>
+
 export function createMemoryProjector(opts: {
   log: EventLog
-  surreal: SurrealMemory
+  surreal: ProjectorStore
   vaultDir: string
   // The workspace standing the rendered note files carry `provisional` from. Folded ONCE per drain
   // and once per vault rebuild rather than per file: a rebuild renders the whole corpus, and a fold
@@ -382,10 +386,9 @@ export function createMemoryProjector(opts: {
       //
       // Filtered here, in the handler, because log.subscribe itself takes only `fromSeq` — no kind
       // filter (packages/kernel/src/kernel.ts:439) — and wakes on EVERY event in the project, task
-      // and operation events included. A long task run appends hundreds of those; without this check
-      // each one would enqueue a reconcile that finds zero memory events and, before this fix,
-      // repartitioned anyway. Checking `e.kind` here means a non-memory event never even reaches
-      // enqueueReconcile, so it costs nothing beyond the array membership test.
+      // and operation events included. Without this check, each non-memory event enqueues a reconcile
+      // that finds zero memory events and repartitions unnecessarily. Checking `e.kind` here means
+      // non-memory events never reach enqueueReconcile, costing only the array membership test.
       unsub = await log.subscribe({}, e => { if (MEMORY_KINDS.includes(e.kind)) enqueueReconcile() })
       await serialize(async () => {
         // boot-time heal, done unconditionally (not gated on the drain's count): the corpus may hold

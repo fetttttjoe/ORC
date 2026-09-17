@@ -1,9 +1,8 @@
 import { describe, expect, it } from 'bun:test'
-import { LINK_KIND, MEMORY_ACCESS, MemoryNoteInput, NOTE_KIND, slugId, type EventRecord, type MemoryAuthor, type MemoryNoteDraft, type MemoryStore } from '@orc/contracts'
-import { eventFixture } from '@orc/contracts/fixtures'
-import type { EventLog } from '@orc/kernel'
+import { EVENT_KIND, LINK_KIND, MEMORY_ACCESS, MemoryNote, MemoryNoteInput, NOTE_KIND, slugId, type EventRecord, type MemoryAuthor, type MemoryNoteDraft } from '@orc/contracts'
+import { eventFixture, must, semanticNoteFixture } from '@orc/contracts/fixtures'
 import { TEST_WORKSPACE_ID } from '@orc/kernel/test-helpers'
-import { AREA_ROOT, CONSOLIDATED_TAG, areaOf, consolidateTask, CONSOLIDATE_EXECUTOR, consolidatedNote, consolidatedNotes, isPlanChild, isSubstantive, taskInfo } from './consolidate'
+import { AREA_ROOT, CONSOLIDATED_TAG, areaOf, consolidateTask, CONSOLIDATE_EXECUTOR, consolidatedNote, consolidatedNotes, isPlanChild, isSubstantive, taskInfo, type ConsolidationLog, type ConsolidationStore } from './consolidate'
 
 describe('consolidatedNote', () => {
   it('promotes step outcomes into one durable project note, linked derived_from what the task read', () => {
@@ -31,11 +30,9 @@ describe('consolidatedNote', () => {
     expect(() => MemoryNoteInput.parse(draft)).not.toThrow()
   })
 
-  // A consolidation used to claim kind:'decision'. Measured on the live vault 2026-08-04: ALL 42
-  // notes carrying that kind were outcome-<uuid> consolidations and not one was an architectural
-  // decision — so "read the decisions this project holds" returned 42 task outcomes and zero
-  // decisions, which makes a decision record unusable as a record. A note saying what one run DID
-  // is not a choice the project committed to; they are different questions with different lifetimes.
+  // A consolidation is an OUTCOME, not a decision — they answer different questions with different
+  // lifetimes. [Measured 2026-08-04: all 42 notes with kind:'decision' were outcome consolidations,
+  // making decision queries return 42 task outcomes and zero architectural choices.]
   it('is an OUTCOME, never a decision — the two are different questions', () => {
     const draft = consolidatedNote({
       taskId: 'k1', taskTitle: 'Something happened', steps: [{ title: 'a', summary: 'x' }],
@@ -138,7 +135,7 @@ describe('consolidatedNotes — the area split', () => {
     // every area note keeps the shared provenance AND links its siblings
     for (const n of notes) {
       expect(n.links).toEqual(expect.arrayContaining([{ id: 'area-memory', kind: LINK_KIND.derived_from }]))
-      const sibling = notes.find(o => o !== n)!
+      const sibling = must(notes.find(o => o !== n), 'notes.find(o => o !== n)')
       expect(n.links).toEqual(expect.arrayContaining([{ id: sibling.id, kind: LINK_KIND.relates_to }]))
       expect(n.title).toContain(' — ')
       expect(() => MemoryNoteInput.parse(n)).not.toThrow()
@@ -164,20 +161,24 @@ const CONSOLIDATE_AUTHOR: MemoryAuthor = { source: 'agent', workspaceId: TEST_WO
 describe('consolidateTask provenance', () => {
   // Minimal fakes: consolidateTask reads three event slices off the log and one scoped note list off
   // the store. Nothing here mocks the code under test — the fakes ARE the two collaborators.
-  const logOf = (events: EventRecord[]): Pick<EventLog, 'after'> => ({
+  const logOf = (events: EventRecord[]): ConsolidationLog => ({
     after: async (_seq, kinds) => events.filter(e => !kinds || kinds.includes(e.kind)),
   })
-  const storeOf = (written: MemoryNoteDraft[]): Pick<MemoryStore, 'list' | 'write'> => ({
+  // the fake echoes the draft back as a stored note (parsed, so the shape is the real one): the
+  // tests read links and titles off the return
+  const stored = (note: MemoryNoteDraft): MemoryNote => MemoryNote.parse({ ...semanticNoteFixture(), ...note })
+  const storeOf = (written: MemoryNoteDraft[]): ConsolidationStore => ({
     list: async () => [],
-    write: async note => { written.push(note); return note as never },
+    write: async note => { written.push(note); return stored(note) },
+    setArchivedAll: async () => {},
   })
   const created = (taskId: string, title: string): EventRecord =>
     eventFixture({
-      taskId, kind: 'task_created',
+      taskId, kind: EVENT_KIND.task_created,
       payload: { task: { id: taskId, parentId: null, workspaceId: TEST_WORKSPACE_ID, type: 'generic', title, spec: '', status: 'draft', zone: [], budgetUSD: null, depth: 0, createdAt: '2026-07-26T00:00:00.000Z' } },
     })
   const accessed = (taskId: string, id: string, mode: string): EventRecord =>
-    eventFixture({ taskId, kind: 'memory_accessed', payload: { id, scope: 'project', mode, author: { source: 'agent', workspaceId: TEST_WORKSPACE_ID, taskId } } })
+    eventFixture({ taskId, kind: EVENT_KIND.memory_accessed, payload: { id, scope: 'project', mode, author: { source: 'agent', workspaceId: TEST_WORKSPACE_ID, taskId } } })
 
   const TASK = '11111111-1111-1111-1111-111111111111'
 
@@ -186,9 +187,9 @@ describe('consolidateTask provenance', () => {
   // journaled this list came back empty, the salience gate declined, and the task left no note.
   it('a preload access is provenance, exactly like a read', async () => {
     const written: MemoryNoteDraft[] = []
-    const log = logOf([created(TASK, 'Explain heat'), accessed(TASK, 'area-memory', MEMORY_ACCESS.preload)]) as EventLog
+    const log = logOf([created(TASK, 'Explain heat'), accessed(TASK, 'area-memory', MEMORY_ACCESS.preload)])
     const note = await consolidateTask(
-      { log, store: storeOf(written) as MemoryStore, authorFor: () => CONSOLIDATE_AUTHOR },
+      { log, store: storeOf(written), authorFor: () => CONSOLIDATE_AUTHOR },
       TASK, await taskInfo(log, TASK),
     )
     expect(note).not.toBeNull()
@@ -204,13 +205,14 @@ describe('consolidateTask provenance', () => {
   // consolidation that rebuilt or defaulted an author here is what the old 'cli' stamp WAS.
   it('writes as the author it was given, never one of its own making', async () => {
     const authors: unknown[] = []
-    const store: Pick<MemoryStore, 'list' | 'write'> = {
+    const store: ConsolidationStore = {
       list: async () => [],
-      write: async (note, author) => { authors.push(author); return note as never },
+      write: async (note, author) => { authors.push(author); return stored(note) },
+      setArchivedAll: async () => {},
     }
-    const log = logOf([created(TASK, 'Explain heat'), accessed(TASK, 'area-memory', MEMORY_ACCESS.preload)]) as EventLog
+    const log = logOf([created(TASK, 'Explain heat'), accessed(TASK, 'area-memory', MEMORY_ACCESS.preload)])
     const note = await consolidateTask(
-      { log, store: store as MemoryStore, authorFor: () => CONSOLIDATE_AUTHOR },
+      { log, store, authorFor: () => CONSOLIDATE_AUTHOR },
       TASK, await taskInfo(log, TASK),
     )
     expect(note).not.toBeNull()
@@ -221,9 +223,9 @@ describe('consolidateTask provenance', () => {
   it('an access belonging to a DIFFERENT task is not this task\'s provenance', async () => {
     const written: MemoryNoteDraft[] = []
     const other = '22222222-2222-2222-2222-222222222222'
-    const log = logOf([created(TASK, 'Explain heat'), accessed(other, 'area-memory', MEMORY_ACCESS.preload)]) as EventLog
+    const log = logOf([created(TASK, 'Explain heat'), accessed(other, 'area-memory', MEMORY_ACCESS.preload)])
     const note = await consolidateTask(
-      { log, store: storeOf(written) as MemoryStore, authorFor: () => CONSOLIDATE_AUTHOR },
+      { log, store: storeOf(written), authorFor: () => CONSOLIDATE_AUTHOR },
       TASK, await taskInfo(log, TASK),
     )
     // no provenance and no second step -> the salience gate declines, nothing is written
@@ -233,7 +235,7 @@ describe('consolidateTask provenance', () => {
 
   const wrote = (taskId: string, toolName: string, path: string): EventRecord =>
     eventFixture({
-      taskId, kind: 'tool_call',
+      taskId, kind: EVENT_KIND.tool_call,
       payload: { stepId: 's1', runToken: `step:${taskId}:s1:a1`, iteration: 1, toolCallId: 'c1', toolName, input: { path, content: 'x' } },
     })
 
@@ -245,9 +247,9 @@ describe('consolidateTask provenance', () => {
       wrote(TASK, 'fs_write', 'plugins/memory/src/tools.ts'),
       wrote(TASK, 'fs_edit', 'plugins/memory/src/tools.ts'), // dup path folds to one
       wrote('33333333-3333-3333-3333-333333333333', 'fs_write', 'packages/cli/src/main.ts'), // other task's write is not ours
-    ]) as EventLog
+    ])
     await consolidateTask(
-      { log, store: storeOf(written) as MemoryStore, authorFor: () => CONSOLIDATE_AUTHOR },
+      { log, store: storeOf(written), authorFor: () => CONSOLIDATE_AUTHOR },
       TASK, await taskInfo(log, TASK),
     )
     expect(written.length).toBe(1)
@@ -260,9 +262,9 @@ describe('consolidateTask provenance', () => {
     // consolidateOnCompletion always resolves before calling consolidateTask, even for a plan
     // child (retireStepTrail still needs it) — so this test resolves too, to pin that the
     // plan-child short-circuit wins even when a real TaskInfo was handed in.
-    const log = logOf([created(child, 'Author the plan'), accessed(child, 'area-memory', MEMORY_ACCESS.read)]) as EventLog
+    const log = logOf([created(child, 'Author the plan'), accessed(child, 'area-memory', MEMORY_ACCESS.read)])
     const note = await consolidateTask(
-      { log, store: storeOf(written) as MemoryStore, authorFor: () => CONSOLIDATE_AUTHOR },
+      { log, store: storeOf(written), authorFor: () => CONSOLIDATE_AUTHOR },
       child, await taskInfo(log, child),
     )
     expect(note).toBeNull()

@@ -3,6 +3,7 @@ import { mkdtempSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { z } from 'zod'
+import { must } from '@orc/contracts/fixtures'
 import { execTool } from './exec-tool'
 
 // the success-shape of an exec result — parse (never cast) the tool output the assertions read
@@ -11,7 +12,7 @@ const ExecOut = z.object({ exitCode: z.number(), stdout: z.string(), stderr: z.s
 const ExecLog = ExecOut.extend({ logPath: z.string(), cached: z.literal(true).optional() })
 
 const ws = () => mkdtempSync(path.join(tmpdir(), 'orc-exec-'))
-const tool = (allowlist: string[], dir = ws()) => execTool({ workspaceDir: dir, allowlist })[0]!
+const tool = (allowlist: string[], dir = ws()) => must(execTool({ workspaceDir: dir, allowlist })[0], 'exec tool')
 
 describe('exec tool', () => {
   // 'close' waits for the stdio STREAMS, not the process. A command that leaves a grandchild
@@ -59,7 +60,7 @@ describe('exec tool', () => {
     const dir = ws()
     // side-effecting: each real execution appends a line, so the count IS the execution count
     writeFileSync(path.join(dir, 'count.sh'), 'echo ran >> runs.txt\necho done\n')
-    const t = execTool({ workspaceDir: dir, allowlist: ['sh'], fingerprint: async () => 'TREE-1' })[0]!
+    const t = must(execTool({ workspaceDir: dir, allowlist: ['sh'], fingerprint: async () => 'TREE-1' })[0], 'exec tool')
     const first = ExecLog.parse((await t.execute({ command: 'sh count.sh' })).output)
     expect(first.cached).toBeUndefined()
     const second = ExecLog.parse((await t.execute({ command: 'sh count.sh' })).output)
@@ -72,7 +73,7 @@ describe('exec tool', () => {
     const dir = ws()
     writeFileSync(path.join(dir, 'count.sh'), 'echo ran >> runs.txt\necho done\n')
     let tree = 'TREE-1'
-    const t = execTool({ workspaceDir: dir, allowlist: ['sh'], fingerprint: async () => tree })[0]!
+    const t = must(execTool({ workspaceDir: dir, allowlist: ['sh'], fingerprint: async () => tree })[0], 'exec tool')
     await t.execute({ command: 'sh count.sh' })
     tree = 'TREE-2' // something edited a file
     const second = ExecLog.parse((await t.execute({ command: 'sh count.sh' })).output)
@@ -85,7 +86,7 @@ describe('exec tool', () => {
   it('never reuses when the tree cannot be fingerprinted', async () => {
     const dir = ws()
     writeFileSync(path.join(dir, 'count.sh'), 'echo ran >> runs.txt\necho done\n')
-    const t = execTool({ workspaceDir: dir, allowlist: ['sh'], fingerprint: async () => null })[0]!
+    const t = must(execTool({ workspaceDir: dir, allowlist: ['sh'], fingerprint: async () => null })[0], 'exec tool')
     await t.execute({ command: 'sh count.sh' })
     const second = ExecLog.parse((await t.execute({ command: 'sh count.sh' })).output)
     expect(second.cached).toBeUndefined()

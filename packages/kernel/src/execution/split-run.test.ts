@@ -8,7 +8,7 @@ import {
   type AgentExecutor, type EventDraft, type ExecutorContext, type ResolvedTool,
   type SplitResult, type UnifiedEvent,
 } from '@orc/contracts'
-import { draftFixture, stepFixture } from '@orc/contracts/fixtures'
+import { draftFixture, must, stepFixture } from '@orc/contracts/fixtures'
 import { createMemory } from '@orc/memory'
 import { createTestSurreal } from '@orc/memory/test-helpers'
 import { openStorage } from '../storage'
@@ -131,7 +131,7 @@ function splitFake(cfg: {
       let readOk = true
       if (r0 && r0.outcome === RUN_OUTCOME.done && r0.notes.length > 0) {
         const read = tool('memory_read')
-        const n = r0.notes[0]!
+        const n = must(r0.notes[0], 'first note')
         const body = await ctx.checkpoint('tools:read', async () => {
           for (let i = 0; i < 20; i++) {
             const rr = await read.execute({ id: n.id, scope: n.scope })
@@ -220,12 +220,12 @@ describe('recursion e2e: split, gate, join, manual approve, queue partition', ()
       expect(events.some(e => e.kind === EVENT_KIND.split_proposed)).toBe(true)
       const resolved = events.find(e => e.kind === EVENT_KIND.split_resolved)
       expect(resolved).toBeDefined()
-      expect(resolved!.payload).toMatchObject({ outcome: RUN_OUTCOME.done, notes: [{ id: 'child-finding', scope: 'project' }] })
+      expect(must(resolved, 'split resolved event').payload).toMatchObject({ outcome: RUN_OUTCOME.done, notes: [{ id: 'child-finding', scope: 'project' }] })
 
       expect((await kernel.getTask(childId))?.status).toBe(TASK_STATUS.done)
       expect((await kernel.state()).runs.get(childId)?.at(-1)?.cwd).toBe(sharedWorkspace)
       const approved = events.find(e => e.kind === EVENT_KIND.plan_approved && e.taskId === childId)
-      expect(PAYLOAD_SCHEMAS.plan_approved.parse(approved!.payload).approvedBy).toBe('policy')
+      expect(PAYLOAD_SCHEMAS.plan_approved.parse(must(approved, 'plan approved event').payload).approvedBy).toBe('policy')
     } finally {
       await cleanup()
       rmSync(sharedWorkspace, { recursive: true, force: true })

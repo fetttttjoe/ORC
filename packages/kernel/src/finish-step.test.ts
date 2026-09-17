@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'bun:test'
 import { FINISH_STEP_ID, ISOLATION_TIER, ROLE_SKILL, STEP_ROLE, STRATEGY } from '@orc/contracts'
-import { draftFixture, stepFixture } from '@orc/contracts/fixtures'
+import { draftFixture, must, stepFixture } from '@orc/contracts/fixtures'
 import { FINISH_EXEMPT_STRATEGIES, plansGetFinishStep, reconcileFinishStep, withFinishStepFull, withoutKernelFinishStep } from './finish-step'
 
 describe('withFinishStepFull (full-PlanDraft plans)', () => {
@@ -103,7 +103,7 @@ describe('reconcileFinishStep (the ONE rule both plan doors apply)', () => {
 
   it('re-derives the step after an edit that appended a new last step', () => {
     const rendered = reconcileFinishStep(root, draftFixture([stepFixture({ id: 's1' })]))
-    const edited = { ...rendered, steps: [rendered.steps[0]!, stepFixture({ id: 's2', modelRef: 'fake/tail' }), rendered.steps[1]!] }
+    const edited = { ...rendered, steps: [must(rendered.steps[0], 'first step in rendered'), stepFixture({ id: 's2', modelRef: 'fake/tail' }), must(rendered.steps[1], 'second step in rendered')] }
     const out = reconcileFinishStep(root, edited)
     expect(out.steps.map(s => s.id)).toEqual(['s1', 's2', FINISH_STEP_ID])
     expect(out.steps[2]).toMatchObject({ dependsOn: ['s1', 's2'], modelRef: 'fake/tail' })

@@ -28,7 +28,7 @@ export interface OperationContext {
   runToken: string
 }
 
-// Durable before/after journal (design §5.2): node and transition events commit in one
+// Durable before/after journal: node and transition events commit in one
 // locked transaction, so the graph node and the append-only history can never disagree.
 export class OperationJournal {
   constructor(private readonly store: PostgresStore, private readonly events: EventLog) {}

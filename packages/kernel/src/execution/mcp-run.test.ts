@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { EVENT_KIND, PAYLOAD_SCHEMAS, ROLE_SKILL } from '@orc/contracts'
-import { draftFixture, stepFixture } from '@orc/contracts/fixtures'
+import { draftFixture, must, stepFixture } from '@orc/contracts/fixtures'
 import { createMcpHub } from '@orc/mcp-client'
 import { apiLoopExecutor } from '@orc/executor-api-loop'
 import { scriptModel } from '@orc/executor-api-loop/test-model'
@@ -92,14 +92,14 @@ describe('MCP + skills through a durable run (integration)', () => {
     const events = await kernel.eventsFor(t.id)
     const kinds = events.map(e => e.kind)
     expect(kinds).toContain(EVENT_KIND.skill_loaded)
-    const call = events.find(e => e.kind === EVENT_KIND.tool_call)!
+    const call = must(events.find(e => e.kind === EVENT_KIND.tool_call), 'tool call event')
     expect(PAYLOAD_SCHEMAS.tool_call.parse(call.payload).toolName).toBe('mcp__fixture__echo')
-    const result = events.find(e => e.kind === EVENT_KIND.tool_result)!
+    const result = must(events.find(e => e.kind === EVENT_KIND.tool_result), 'tool result event')
     expect(JSON.stringify(result.payload)).toContain('echo: ping')
     expect(PAYLOAD_SCHEMAS.tool_result.parse(result.payload).isError).toBe(false)
 
     // the skill body reached the model: recorded in the agent_call request (R9)
-    const agentCall = events.find(e => e.kind === EVENT_KIND.agent_call)!
+    const agentCall = must(events.find(e => e.kind === EVENT_KIND.agent_call), 'agent call event')
     expect(JSON.stringify(agentCall.payload)).toContain('Always answer in haiku.')
 
     // replay identity (golden-replay style): a fresh storage handle re-reads the durable log and

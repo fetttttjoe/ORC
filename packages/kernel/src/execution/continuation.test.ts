@@ -4,7 +4,7 @@ import {
   continuationTopic,
   type AgentExecutor, type EventDraft, type ExecutorContext, type SplitResult, type UnifiedEvent,
 } from '@orc/contracts'
-import { draftFixture, stepFixture } from '@orc/contracts/fixtures'
+import { draftFixture, must, stepFixture } from '@orc/contracts/fixtures'
 import { openStorage } from '../storage'
 import { Kernel } from '../kernel'
 import { createTestDb, fakeProvider, fakeSkills, seedTestWorkspace, TEST_PROJECT_ID, TEST_WORKSPACE_ID, testConfig, waitFor } from '../test-helpers'
@@ -33,7 +33,7 @@ function continuationFake(): AgentExecutor<unknown> {
   return {
     id: 'continuation-fake',
     async *startTurn(ctx: ExecutorContext<unknown>): AsyncGenerator<UnifiedEvent, void, SplitResult[] | string | undefined> {
-      const taskId = ctx.runToken.split(':')[1]!
+      const taskId = must(ctx.runToken.split(':')[1], 'task id in runToken')
       const key = roundsKey(taskId, ctx.step.id)
       const seen = continuations.get(key) ?? []
       seen.push(ctx.continuation)
@@ -97,7 +97,7 @@ describe('partial-signal continuation', () => {
     const t = await newTask(1)
     expect(await (await port.startRun(t.id)).wait()).toBe('done')
 
-    const rounds = continuations.get(roundsKey(t.id, SCRIPTED_STEP))!
+    const rounds = must(continuations.get(roundsKey(t.id, SCRIPTED_STEP)), 'continuations for scripted step')
     expect(rounds).toHaveLength(2)
     expect(rounds[0]).toBeUndefined() // round 0 is an ordinary first prompt
     // the previous round's summary IS the handoff — the only context that crosses the boundary
@@ -123,7 +123,7 @@ describe('partial-signal continuation', () => {
     // rounds 1..cap were auto-granted; the ask names the state and carries the latest report
     expect(continuations.get(roundsKey(t.id, SCRIPTED_STEP))).toHaveLength(MAX_AUTO_CONTINUATIONS + 1)
     const asked = (await kernel.eventsFor(t.id)).find(e => e.kind === EVENT_KIND.feedback_requested)
-    const q = PAYLOAD_SCHEMAS.feedback_requested.parse(asked!.payload)
+    const q = PAYLOAD_SCHEMAS.feedback_requested.parse(must(asked, 'feedback requested event').payload)
     expect(q.question).toContain('round cap reached')
     expect(q.question).toContain(`remaining after ${MAX_AUTO_CONTINUATIONS}`)
 
@@ -131,7 +131,7 @@ describe('partial-signal continuation', () => {
     expect(await handle.wait()).toBe('blocked')
 
     const failed = (await kernel.eventsFor(t.id)).find(e => e.kind === EVENT_KIND.step_failed)
-    const p = PAYLOAD_SCHEMAS.step_failed.parse(failed!.payload)
+    const p = PAYLOAD_SCHEMAS.step_failed.parse(must(failed, 'step failed event').payload)
     expect(p.class).toBe(FAILURE_CLASS.human_abort) // a decision, never a malfunction
     expect(p.message).toContain('continuation declined')
     expect(p.message).toContain(`remaining after ${MAX_AUTO_CONTINUATIONS}`) // the report survives for the operator

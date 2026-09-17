@@ -1,6 +1,6 @@
 import { afterAll, describe, expect, it } from 'bun:test'
 import { APPROVAL_ANSWER, ApprovalPolicy, EVENT_KIND, FINISH_STEP_ID, GROUNDED_APPROVAL_DOOR, LINK_KIND, NOTE_TIER, PAYLOAD_SCHEMAS, RunRequestedPayload, STEP_ID, STEP_ROLE, STRATEGY, TASK_STATUS, TaskStatus, WORKSPACE_KIND, WORKSPACE_TITLE_MAX, type Analyzer, type PlanDraft, type PlanStep, type TaskNode } from '@orc/contracts'
-import { draftFixture, stepFixture } from '@orc/contracts/fixtures'
+import { draftFixture, must, stepFixture } from '@orc/contracts/fixtures'
 import { openStorage, type EventLogOps } from './storage'
 import { KERNEL_ERROR_CODE, KernelError } from './errors'
 import { Kernel, SPLIT_ORIGIN } from './kernel'
@@ -75,7 +75,7 @@ describe('Kernel lifecycle', () => {
     const t = await k.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'attributed' })
     await k.proposePlan(t.id, draft())
     await k.approvePlan(t.id, undefined, { approvedBy: 'mcp' })
-    const evt = (await k.eventsFor(t.id)).find(e => e.kind === 'plan_approved')!
+    const evt = must((await k.eventsFor(t.id)).find(e => e.kind === 'plan_approved'), 'plan_approved event')
     expect(PAYLOAD_SCHEMAS.plan_approved.parse(evt.payload).approvedBy).toBe('mcp')
   })
 
@@ -194,13 +194,13 @@ describe('Kernel lifecycle', () => {
     const analyzers = new Map<string, Analyzer>([['agent-analyzer', { id: 'agent-analyzer', analysisStep: () => analyze }]])
     const k = new Kernel(log, undefined, analyzers)
     const t = await k.createGroundedTask({ workspaceId: TEST_WORKSPACE_ID, title: 'build web', spec: 's', modelRef: 'anthropic/claude-sonnet-5', analyzerRef: 'agent-analyzer' })
-    const plan = (await k.getPlan(t.id))!
+    const plan = must(await k.getPlan(t.id), 'plan for task')
     expect(plan.strategyRef).toBe('grounded-plan')
     expect(plan.analyzerRef).toBe('agent-analyzer')
     expect(plan.steps.map(s => s.id)).toEqual(['analyze', 'plan'])
-    expect(plan.steps[1]!.dependsOn).toEqual(['analyze'])
-    expect(plan.steps[1]!.skillRefs).toEqual(['plan-authoring'])
-    expect((await k.getTask(t.id))!.status).toBe(TASK_STATUS.approved)
+    expect(must(plan.steps[1], 'second step in plan').dependsOn).toEqual(['analyze'])
+    expect(must(plan.steps[1], 'second step in plan').skillRefs).toEqual(['plan-authoring'])
+    expect(must(await k.getTask(t.id), 'task').status).toBe(TASK_STATUS.approved)
   })
 
   // The plan-approval door showed 'cost estimate: none provided' for every plan ever proposed,
@@ -214,7 +214,7 @@ describe('Kernel lifecycle', () => {
 
     const first = await kg.createGroundedTask({ workspaceId: TEST_WORKSPACE_ID, title: 'first', spec: 's', modelRef: 'fake/m', analyzerRef: 'agent-analyzer' })
     // nothing comparable has settled yet — no history means no number, never a fabricated $0
-    expect((await kg.getPlan(first.id))!.costEstimateUSD).toBeNull()
+    expect(must(await kg.getPlan(first.id), 'plan for first task').costEstimateUSD).toBeNull()
 
     const runToken = `step:${first.id}:analyze:a1`
     await log.append({
@@ -228,7 +228,7 @@ describe('Kernel lifecycle', () => {
     })
 
     const second = await kg.createGroundedTask({ workspaceId: TEST_WORKSPACE_ID, title: 'second', spec: 's', modelRef: 'fake/m', analyzerRef: 'agent-analyzer' })
-    expect((await kg.getPlan(second.id))!.costEstimateUSD).toBeCloseTo(0.42, 10)
+    expect(must(await kg.getPlan(second.id), 'plan for second task').costEstimateUSD).toBeCloseTo(0.42, 10)
   })
 
   it('proposeSplit carries a measured cost estimate from prior split history', async () => {
@@ -242,7 +242,7 @@ describe('Kernel lifecycle', () => {
       policy: ApprovalPolicy.parse({ default: 'auto' }), maxDepth: 3,
     }
     const one = await k.proposeSplit({ ...base, toolCallId: 'call_1' })
-    expect((await k.getPlan(one.childTaskId))!.costEstimateUSD).toBeNull() // no split has settled yet
+    expect(must(await k.getPlan(one.childTaskId), 'plan for child task').costEstimateUSD).toBeNull() // no split has settled yet
 
     const runToken = `step:${one.childTaskId}:w1:a1`
     await log.append({
@@ -256,7 +256,7 @@ describe('Kernel lifecycle', () => {
     })
 
     const two = await k.proposeSplit({ ...base, toolCallId: 'call_2' })
-    expect((await k.getPlan(two.childTaskId))!.costEstimateUSD).toBeCloseTo(0.25, 10)
+    expect(must(await k.getPlan(two.childTaskId), 'plan for child task').costEstimateUSD).toBeCloseTo(0.25, 10)
   })
 
   it('createGroundedTask applies the project iteration budget to BOTH steps — subplans inherit the plan step', async () => {
@@ -265,7 +265,7 @@ describe('Kernel lifecycle', () => {
     const analyzers = new Map<string, Analyzer>([['agent-analyzer', { id: 'agent-analyzer', analysisStep: () => analyze }]])
     const k = new Kernel(log, undefined, analyzers)
     const t = await k.createGroundedTask({ workspaceId: TEST_WORKSPACE_ID, title: 'x', spec: 's', modelRef: 'fake/m', analyzerRef: 'agent-analyzer', maxIterations: 60 })
-    expect((await k.getPlan(t.id))!.steps.map(s => s.maxIterations)).toEqual([60, 60])
+    expect(must(await k.getPlan(t.id), 'plan for task').steps.map(s => s.maxIterations)).toEqual([60, 60])
   })
 
   it('createGroundedTask forwards parentId — a grounded task can be a child, not only a root', async () => {
@@ -275,7 +275,7 @@ describe('Kernel lifecycle', () => {
     const k = new Kernel(log, undefined, analyzers)
     const parent = await k.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'parent' })
     const t = await k.createGroundedTask({ workspaceId: TEST_WORKSPACE_ID, title: 'child', spec: 's', modelRef: 'fake/m', analyzerRef: 'agent-analyzer', parentId: parent.id })
-    const stored = (await k.getTask(t.id))!
+    const stored = must(await k.getTask(t.id), 'task')
     expect(stored.parentId).toBe(parent.id)
     expect(stored.depth).toBe(1)
   })
@@ -560,8 +560,8 @@ describe('Kernel lifecycle', () => {
     const t = await k.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'grounded task' })
     await k.proposePlan(t.id, draft())
     await k.approvePlan(t.id)
-    // simulate the port raising a feedback gate from inside the running plan step (Task 5 only
-    // adds the human-facing reply/annotate surface — the gate itself is Task 2's dbos-port branch)
+    // simulate the port raising a feedback gate from inside the running plan step (this test
+    // adds only the human-facing reply/annotate surface — the gate is added in dbos-port)
     const runToken = `step:${t.id}:plan:a1`
     await log.append({ taskId: t.id, stepId: 'plan', runToken, kind: EVENT_KIND.feedback_requested, payload: { question: 'db choice?', topic: 'db-1' } })
 
@@ -570,7 +570,7 @@ describe('Kernel lifecycle', () => {
 
     const topic = await k.replyFeedback(t.id, 'approve')
     expect(topic).toBe('db-1')
-    const provided = (await log.byTask(t.id)).find(e => e.kind === 'feedback_provided')!
+    const provided = must((await log.byTask(t.id)).find(e => e.kind === 'feedback_provided'), 'feedback_provided event')
     expect(provided).toMatchObject({
       taskId: t.id, stepId: 'plan', runToken,
       idempotencyKey: expect.stringMatching(/^feedback:\d+:provided$/),
@@ -586,14 +586,14 @@ describe('Kernel lifecycle', () => {
     const t = await k.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'grounded', type: 'grounded' })
     const scope = planScope(t.id)
     const author = { source: 'agent' as const, workspaceId: TEST_WORKSPACE_ID }
-    await log.append({ taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_written, payload: { note: { id: 'masterplan', scope, tier: 'plan', title: 'Plan', links: [{ id: 'db', kind: 'decomposes_into' }] }, author } })
+    await log.append({ taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_written, payload: { note: { id: 'masterplan', scope, tier: 'plan', title: 'Plan', links: [{ id: 'db', kind: LINK_KIND.decomposes_into }] }, author } })
     await log.append({ taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_written, payload: { note: { id: 'db', scope, tier: 'plan', title: 'DB', body: 'schema' }, author } })
     const runToken = `step:${t.id}:plan:a1`
     await log.append({ taskId: t.id, stepId: 'plan', runToken, kind: EVENT_KIND.feedback_requested, payload: { question: 'approve?', topic: 'plan-1' } })
 
     await k.replyFeedback(t.id, '  ApPrOvE  ')
 
-    const provided = (await log.byTask(t.id)).find(e => e.kind === EVENT_KIND.feedback_provided)!
+    const provided = must((await log.byTask(t.id)).find(e => e.kind === EVENT_KIND.feedback_provided), 'feedback_provided event')
     expect(provided.payload.planHash).toBe(planGraphHash(await k.listPlanNotes(t.id)))
   })
 
@@ -608,7 +608,7 @@ describe('Kernel lifecycle', () => {
         kind: EVENT_KIND.feedback_requested, payload: { question: 'approve?', topic: 'plan-1' },
       })
       await k.replyFeedback(task.id, text)
-      const provided = (await log.byTask(task.id)).find(e => e.kind === EVENT_KIND.feedback_provided)!
+      const provided = must((await log.byTask(task.id)).find(e => e.kind === EVENT_KIND.feedback_provided), 'feedback_provided event')
       expect(provided.payload).toHaveProperty('planHash')
     }
   })
@@ -624,7 +624,7 @@ describe('Kernel lifecycle', () => {
         kind: EVENT_KIND.feedback_requested, payload: { question: 'continue?', topic: `${type}-1` },
       })
       await k.replyFeedback(task.id, text)
-      const provided = (await log.byTask(task.id)).find(e => e.kind === EVENT_KIND.feedback_provided)!
+      const provided = must((await log.byTask(task.id)).find(e => e.kind === EVENT_KIND.feedback_provided), 'feedback_provided event')
       expect(provided.payload).not.toHaveProperty('planHash')
     }
   })
@@ -697,7 +697,7 @@ describe('Kernel lifecycle', () => {
     // door that failed — the refusal message and the gate cannot disagree
     expect(await widened.nonHumanPlanApproval(task.id, runToken)).toBeNull()
     // attribution is never rewritten: the event still records the door it came through
-    const provided = (await log.byTask(task.id)).find(e => e.kind === EVENT_KIND.feedback_provided)!
+    const provided = must((await log.byTask(task.id)).find(e => e.kind === EVENT_KIND.feedback_provided), 'feedback_provided event')
     expect((provided.payload as { author: { source: string } }).author.source).toBe('mcp')
   })
 
@@ -744,7 +744,7 @@ describe('Kernel lifecycle', () => {
     const t = await k.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'x' })
     const runToken = `step:${t.id}:analyze:a1`
     await k.reportCoverage({ taskId: t.id, stepId: 'analyze', runToken }, { analyzed: true, gaps: ['no tests read'] })
-    const ev = (await log.byTask(t.id)).find(e => e.kind === EVENT_KIND.analysis_completed)!
+    const ev = must((await log.byTask(t.id)).find(e => e.kind === EVENT_KIND.analysis_completed), 'analysis_completed event')
     expect(ev.runToken).toBe(runToken) // emitted from within the analyze step
     const p = PAYLOAD_SCHEMAS.analysis_completed.parse(ev.payload)
     expect(p.analyzed).toBe(true)
@@ -792,10 +792,10 @@ describe('Kernel lifecycle', () => {
     expect(annotations).toHaveLength(2)
     expect(annotations[0]).toMatchObject({ targetNote: 'db', refs: ['api'], text: 'use bcrypt', planVersion: 1 })
     expect(annotations[1]).toMatchObject({ targetNote: 'api', refs: [], text: 'add rate limiting', planVersion: 1 })
-    expect(annotations[0]!.seq).toBeLessThan(annotations[1]!.seq)
+    expect(must(annotations[0], 'first annotation').seq).toBeLessThan(must(annotations[1], 'second annotation').seq)
   })
 
-  // FixE: the freeze reads plan-notes from the LOG, never the async SurrealDB projection. Here NO
+  // the freeze reads plan-notes from the LOG, never the async SurrealDB projection. Here NO
   // memory projector runs, so the read model is empty — pre-fix finalize (store.list/get) would see
   // "no masterplan"; listPlanNotes folds the memory_written events straight off the log and succeeds.
   it('listPlanNotes reconstructs the plan-note graph from the log with no projection running', async () => {
@@ -804,14 +804,14 @@ describe('Kernel lifecycle', () => {
     const scope = planScope(taskId)
     const author = { source: 'agent' as const, workspaceId: TEST_WORKSPACE_ID }
     // memory_written events carry taskId:null (scoped by note.scope) — exactly what store.write appends
-    await log.append({ taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_written, payload: { note: { id: 'masterplan', scope, tier: 'plan', title: 'Web app', links: [{ id: 'db', kind: 'decomposes_into' }] }, author } })
+    await log.append({ taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_written, payload: { note: { id: 'masterplan', scope, tier: 'plan', title: 'Web app', links: [{ id: 'db', kind: LINK_KIND.decomposes_into }] }, author } })
     await log.append({ taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_written, payload: { note: { id: 'db', scope, tier: 'plan', title: 'DB', body: 'schema' }, author } })
     // a note in ANOTHER task's scope must not bleed into this task's freeze
     await log.append({ taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_written, payload: { note: { id: 'masterplan', scope: planScope('other'), tier: 'plan', title: 'Theirs' }, author } })
 
     const notes = await k.listPlanNotes(taskId)
     expect(notes.map(n => n.id).sort()).toEqual(['db', 'masterplan'])
-    expect(notes.find(n => n.id === 'masterplan')!.title).toBe('Web app')
+    expect(must(notes.find(n => n.id === 'masterplan'), 'masterplan note').title).toBe('Web app')
     expect(instantiateFrozenPlan('masterplan', notes).steps.map(s => s.id)).toEqual(['db'])
   })
 
@@ -847,7 +847,7 @@ describe('Kernel lifecycle', () => {
     const steps = instantiateFrozenPlan('masterplan', await k.listPlanNotes('grounded-models')).steps
     // absent, not '': the expansion inherits via `?? parentStep.modelRef`, which '' would defeat
     expect(steps.find(s => s.id === 'cheap')).not.toHaveProperty('modelRef')
-    expect(steps.find(s => s.id === 'hard')!.modelRef).toBe('anthropic/claude-opus-5')
+    expect(must(steps.find(s => s.id === 'hard'), 'hard step').modelRef).toBe('anthropic/claude-opus-5')
   })
 
   it('requestRun records the ask, with the cwd override the supervisor cannot derive', async () => {
@@ -856,7 +856,7 @@ describe('Kernel lifecycle', () => {
     await k.proposePlan(t.id, draft())
     await k.approvePlan(t.id)
     await k.requestRun(t.id, { cwd: '/tree' })
-    const e = (await k.eventsFor(t.id)).find(x => x.kind === EVENT_KIND.run_requested)!
+    const e = must((await k.eventsFor(t.id)).find(x => x.kind === EVENT_KIND.run_requested), 'run_requested event')
     expect(PAYLOAD_SCHEMAS.run_requested.parse(e.payload)).toEqual({ taskId: t.id, cwd: '/tree', retry: false })
   })
 
@@ -916,9 +916,9 @@ describe('Kernel lifecycle', () => {
     const paths = rows.map(r => r.path).sort()
     expect(paths).toEqual(['src/child.ts', 'src/parent.ts']) // descendant included, sibling excluded
     // each path is attributed to its OWNING task id
-    expect(rows.find(r => r.path === 'src/child.ts')!.taskId).toBe(child.childTaskId)
-    expect(rows.find(r => r.path === 'src/parent.ts')!.taskId).toBe(parent.id)
-    expect(rows.find(r => r.path === 'src/child.ts')!.steps).toEqual([{ stepId: 'w1', tool: 'fs_write', seq: expect.any(Number) }])
+    expect(must(rows.find(r => r.path === 'src/child.ts'), 'child file row').taskId).toBe(child.childTaskId)
+    expect(must(rows.find(r => r.path === 'src/parent.ts'), 'parent file row').taskId).toBe(parent.id)
+    expect(must(rows.find(r => r.path === 'src/child.ts'), 'child file row').steps).toEqual([{ stepId: 'w1', tool: 'fs_write', seq: expect.any(Number) }])
 
     // the sibling's own set sees only its write, never the parent/child ones
     expect((await k.listTaskChangedPaths(sibling.id)).map(r => r.path)).toEqual(['src/sibling.ts'])

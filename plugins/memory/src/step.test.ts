@@ -1,18 +1,15 @@
 import { describe, expect, it } from 'bun:test'
 import {
   LINK_KIND, MEMORY_ACCESS, MEMORY_USE, MemoryScope, NOTE_TIER, SIGNAL_OUTCOME, planScope, slugId,
-  type ClaimHit, type MemoryAuthor, type MemoryNote, type MemoryNoteDraft, type MemoryStore, type NoteSummary,
+  type ClaimHit, type MemoryAuthor, MemoryNote, type MemoryNoteDraft, type MemoryStore, type NoteSummary,
 } from '@orc/contracts'
 import { bindStepMemory, deriveQueryTerms, preloadQuery } from './step'
-import { TEST_WORKSPACE_ID } from '@orc/contracts/fixtures'
+import { noopMemoryStore, summaryFixture } from './test-helpers'
+import { semanticNoteFixture, TEST_WORKSPACE_ID } from '@orc/contracts/fixtures'
 
 const AUTHOR: MemoryAuthor = { source: 'agent', workspaceId: TEST_WORKSPACE_ID, taskId: 'task-1', stepId: 'implement', runToken: 'rt-1' }
 
-const summary = (over: Partial<NoteSummary> = {}): NoteSummary => ({
-  id: 'area-memory', scope: MemoryScope.project, title: 'Memory area',
-  tier: NOTE_TIER.semantic, categories: [], tags: [], summary: 'How memory works.',
-  hits: 0, lastAccessedAt: null, sourceRevision: null, paths: [], workspaceId: TEST_WORKSPACE_ID, ...over,
-})
+const summary = (over: Partial<NoteSummary> = {}): NoteSummary => summaryFixture({ id: 'area-memory', title: 'Memory area', summary: 'How memory works.', ...over })
 
 interface Recorded { id: string; scope: string | undefined; mode: string }
 
@@ -33,21 +30,13 @@ function fakeStore(opts: {
   const claimQueries: string[] = []
   const outcomes: { entries: ReadonlyArray<{ id: string; outcome: string }>; base?: string }[] = []
   const store: MemoryStore = {
+    ...noopMemoryStore(),
     search: async query => { queries.push(query); return opts.search?.(query) ?? [] },
     searchClaims: async query => { claimQueries.push(query); return opts.searchClaims?.(query) ?? [] },
-    claimsFor: async () => [],
-    setArchived: async () => {}, setArchivedAll: async () => {},
-    topics: async () => [],
-    topicClaims: async () => [],
     recordAccess: async (id, scope, mode) => { accesses.push({ id, scope, mode }) },
-    write: async (note, author) => { writes.push(note); writeAuthors.push(author); return note as unknown as MemoryNote },
+    write: async (note, author) => { writes.push(note); writeAuthors.push(author); return MemoryNote.parse({ ...semanticNoteFixture(), ...note }) },
     get: async id => opts.notes?.[id] ?? null,
-    useStats: async () => null,
     recordOutcomes: async (entries, _author, o) => { outcomes.push({ entries, ...(o?.idempotencyKeyBase && { base: o.idempotencyKeyBase }) }) },
-    list: async () => [],
-    neighbors: async () => [],
-    remove: async () => {},
-    verify: async () => ({ revision: 'headrev', at: '2026-07-30T00:00:00.000Z', by: 'cli' }),
   }
   return { store, accesses, writes, writeAuthors, queries, claimQueries, outcomes }
 }
@@ -262,7 +251,7 @@ describe('capture', () => {
   })
 
   it('links derived_from every durable note the step pulled — preload and tool reads alike', async () => {
-    const f = fakeStore({ search: () => [summary({ id: 'from-preload' })], notes: { 'from-read': {} as MemoryNote } })
+    const f = fakeStore({ search: () => [summary({ id: 'from-preload' })], notes: { 'from-read': semanticNoteFixture({ id: 'from-read' }) } })
     const b = bind(f)
     await b.memory.recall(500)
     const read = b.tools.find(t => t.name === 'memory_read')
@@ -277,7 +266,7 @@ describe('capture', () => {
   // recordAccess fires on a HIT only, and names the seed the agent traversed from — so a step that
   // navigated the graph pulled that note just as deliberately as one that read it.
   it('a traversal seed counts as provenance, like a read', async () => {
-    const f = fakeStore({ notes: { 'area-memory': {} as MemoryNote } })
+    const f = fakeStore({ notes: { 'area-memory': semanticNoteFixture({ id: 'area-memory' }) } })
     // set before binding: the tracking decorator spreads the store, so later reassignment is unseen
     f.store.neighbors = async () => [{ id: 'x', title: 'x', summary: '', via: LINK_KIND.refines, depth: 1, score: 1, direction: 'out', activation: 0, from: 'area-memory', workspaceId: TEST_WORKSPACE_ID }]
     const b = bind(f)
@@ -287,7 +276,7 @@ describe('capture', () => {
   })
 
   it('a plan-scope read is this run\'s own scaffolding, not durable provenance', async () => {
-    const f = fakeStore({ notes: { local: {} as MemoryNote } })
+    const f = fakeStore({ notes: { local: semanticNoteFixture({ id: 'local' }) } })
     const b = bind(f)
     const read = b.tools.find(t => t.name === 'memory_read')
     await read?.execute({ id: 'local', scope: planScope('task-1') }, 'call-1')
@@ -362,7 +351,7 @@ describe('the author a step writes as', () => {
 // Two ways a step's derived_from edges got polluted, both observed on a real run.
 describe('provenance hygiene', () => {
   it('does not cite a note the step itself authored', async () => {
-    const f = fakeStore({ notes: { 'my-own-note': {} as MemoryNote } })
+    const f = fakeStore({ notes: { 'my-own-note': semanticNoteFixture({ id: 'my-own-note' }) } })
     const b = bind(f)
     await b.tools.find(t => t.name === 'memory_write')?.execute({ id: 'my-own-note', title: 'Mine' }, 'w1')
     await b.tools.find(t => t.name === 'memory_read')?.execute({ id: 'my-own-note' }, 'r1')

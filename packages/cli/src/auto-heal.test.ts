@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'bun:test'
 import { AUTO_HEAL_MODE, STRATEGY } from '@orc/contracts'
+import { must } from '@orc/contracts/fixtures'
 import { AUTO_SWEEP_TITLE, createAutoHeal, sweepPlanDraft, type AutoHealDeps } from './auto-heal'
 
 // A hand-cranked scheduler: the debounce contract is about WHICH calls collapse, not wall-clock,
@@ -23,7 +24,7 @@ function fakeScheduler() {
 }
 
 function harness(over: Partial<AutoHealDeps> = {}) {
-  const calls = { restamp: 0, drifted: 0, sweeps: [] as number[], warns: [] as string[] }
+  const calls: { restamp: number; drifted: number; sweeps: number[]; warns: string[] } = { restamp: 0, drifted: 0, sweeps: [], warns: [] }
   const sched = fakeScheduler()
   const deps: AutoHealDeps = {
     mode: AUTO_HEAL_MODE.draftSweep,
@@ -109,7 +110,7 @@ describe('sweepPlanDraft', () => {
   it('builds the one-click plan: sweep title, the drafted spec verbatim, and the LEAN budget', () => {
     const draft = sweepPlanDraft('heal 9 notes: recheck first', 15)
     expect(draft.steps).toHaveLength(1)
-    const s = draft.steps[0]!
+    const s = must(draft.steps[0], 'first step in sweep draft')
     expect(s.title).toBe(AUTO_SWEEP_TITLE) // the dedupe key hasOpenSweep matches on
     expect(s.instructions).toBe('heal 9 notes: recheck first')
     // the knob is the whole point: the general default (60) over-provisioned every sweep, and a

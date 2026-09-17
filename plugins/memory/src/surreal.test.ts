@@ -1,13 +1,12 @@
 import { afterAll, describe, expect, it } from 'bun:test'
 import { RecordId, Surreal } from 'surrealdb'
-import { claimId, DECISION_STATUS, EVENT_KIND, LINK_KIND, MEMORY_ACCESS, MEMORY_USE, MemoryScope, NOTE_KIND, PROJECT_NAME_NOTE_ID, isRecord, type AccessVia, type EventKind, type EventRecord, type MemoryAccessMode, type MemoryAuthor, type MemoryNote, type MemoryUseOutcome, type NoteView } from '@orc/contracts'
+import { DECISION_STATUS, EVENT_KIND, LINK_KIND, MEMORY_ACCESS, MEMORY_USE, MemoryScope, NOTE_KIND, PROJECT_NAME_NOTE_ID, isRecord, type AccessVia, type EventKind, type EventRecord, type MemoryAccessMode, type MemoryAuthor, type MemoryNote, type MemoryUseOutcome, type NoteView } from '@orc/contracts'
 import { SurrealMemory } from './surreal'
-import { TEST_WORKSPACE_ID, eventFixture } from '@orc/contracts/fixtures'
-import { createTestSurreal } from './test-helpers'
+import { TEST_WORKSPACE_ID, eventFixture, must } from '@orc/contracts/fixtures'
+import { claimFixture, createTestSurreal, noteFixture } from './test-helpers'
 
-const note = (over = {}) => ({
-  id: 'auth', scope: 'project', kind: 'fact', sourceRevision: null,
-  title: 'Auth', categories: ['security'], tags: ['auth'], links: [], paths: ['src/auth.ts'],
+const note = (over = {}) => noteFixture({
+  id: 'auth', title: 'Auth', categories: ['security'], tags: ['auth'], paths: ['src/auth.ts'],
   summary: 'tokens rotate', body: 'full text about auth tokens', ...over,
 })
 // tier-specific columns read through the shared view: these tests assert on what the read model
@@ -15,15 +14,15 @@ const note = (over = {}) => ({
 const view = (n: MemoryNote | null): NoteView | undefined => n ?? undefined
 const cli: MemoryAuthor = { source: 'cli', workspaceId: TEST_WORKSPACE_ID }
 const written = (seq: number, n = note(), author: MemoryAuthor = cli): EventRecord =>
-  eventFixture({ seq, taskId: null, kind: 'memory_written', payload: { note: n, author }, ts: `2026-07-18T0${Math.min(seq, 9)}:00:00Z` })
+  eventFixture({ seq, taskId: null, kind: EVENT_KIND.memory_written, payload: { note: n, author }, ts: `2026-07-18T0${Math.min(seq, 9)}:00:00Z` })
 const deleted = (seq: number, id: string, scope = 'project'): EventRecord =>
-  eventFixture({ seq, taskId: null, kind: 'memory_deleted', payload: { id, scope, author: cli }, ts: `2026-07-18T0${Math.min(seq, 9)}:00:00Z` })
+  eventFixture({ seq, taskId: null, kind: EVENT_KIND.memory_deleted, payload: { id, scope, author: cli }, ts: `2026-07-18T0${Math.min(seq, 9)}:00:00Z` })
 const accessed = (seq: number, id: string, mode: MemoryAccessMode = MEMORY_ACCESS.read, scope = 'project', via?: AccessVia): EventRecord =>
-  eventFixture({ seq, taskId: null, kind: 'memory_accessed', payload: { id, scope, mode, author: cli, ...(via && { via }) }, ts: `2026-07-18T0${Math.min(seq, 9)}:00:00Z` })
+  eventFixture({ seq, taskId: null, kind: EVENT_KIND.memory_accessed, payload: { id, scope, mode, author: cli, ...(via && { via }) }, ts: `2026-07-18T0${Math.min(seq, 9)}:00:00Z` })
 const verified = (seq: number, id: string, revision: string, scope = 'project'): EventRecord =>
-  eventFixture({ seq, taskId: null, kind: 'memory_verified', payload: { id, scope, stamp: { revision, at: `2026-07-18T0${Math.min(seq, 9)}:00:00Z`, by: 'cli' }, author: cli }, ts: `2026-07-18T0${Math.min(seq, 9)}:00:00Z` })
+  eventFixture({ seq, taskId: null, kind: EVENT_KIND.memory_verified, payload: { id, scope, stamp: { revision, at: `2026-07-18T0${Math.min(seq, 9)}:00:00Z`, by: 'cli' }, author: cli }, ts: `2026-07-18T0${Math.min(seq, 9)}:00:00Z` })
 const outcome = (seq: number, id: string, use: MemoryUseOutcome, scope = 'project'): EventRecord =>
-  eventFixture({ seq, taskId: null, kind: 'memory_outcome', payload: { id, scope, outcome: use, author: cli }, ts: `2026-07-18T0${Math.min(seq, 9)}:00:00Z` })
+  eventFixture({ seq, taskId: null, kind: EVENT_KIND.memory_outcome, payload: { id, scope, outcome: use, author: cli }, ts: `2026-07-18T0${Math.min(seq, 9)}:00:00Z` })
 
 const drops: (() => Promise<void>)[] = []
 // One throwaway Surreal database per test. Serial drops blew bun's default 5s hook budget as soon
@@ -104,7 +103,7 @@ describe('SurrealMemory.applyEvent', () => {
     expect(reached.map(n => n.id)).toEqual(['arch-overview'])
     // the caller is told WHERE it was found, because reading it back needs the right scope
     expect(reached[0]?.scope).toBe(MemoryScope.project)
-    expect(await m.get('arch-overview', reached[0]!.scope!)).not.toBeNull()
+    expect(await m.get('arch-overview', must(must(reached[0], 'reached[0]').scope, 'reached[0].scope'))).not.toBeNull()
 
     // and the project lane is not polluted in return: a project traversal sees only its own edges,
     // so a transient plan's decomposition can never leak into durable recall
@@ -114,7 +113,7 @@ describe('SurrealMemory.applyEvent', () => {
   it('redelivery is a no-op: same event twice leaves revision 1, one edge, cursor advanced once', async () => {
     const t = await createTestSurreal(); drops.push(t.drop)
     const m = await openMemory(t)
-    const e = written(3, note({ id: 'a', links: [{ id: 'b', kind: 'supersedes' }] }))
+    const e = written(3, note({ id: 'a', links: [{ id: 'b', kind: LINK_KIND.supersedes }] }))
     expect(await m.applyEvent(e)).toBe(true)
     expect(await m.applyEvent(e)).toBe(false) // seq <= cursor → rejected inside the transaction
     expect((await m.get('a', 'project'))?.revision).toBe(1)
@@ -238,7 +237,7 @@ describe('SurrealMemory.applyEvent', () => {
   it('materializes typed RELATE edges and ranks neighbours; delete removes edges', async () => {
     const t = await createTestSurreal(); drops.push(t.drop)
     const m = await openMemory(t)
-    await m.applyEvent(written(1, note({ id: 'a', links: [{ id: 'b', kind: 'supersedes' }, { id: 'c', kind: 'relates_to' }] })))
+    await m.applyEvent(written(1, note({ id: 'a', links: [{ id: 'b', kind: LINK_KIND.supersedes }, { id: 'c', kind: LINK_KIND.relates_to }] })))
     await m.applyEvent(written(2, note({ id: 'b' })))
     await m.applyEvent(written(3, note({ id: 'c' })))
 
@@ -249,7 +248,7 @@ describe('SurrealMemory.applyEvent', () => {
     expect((await m.neighbors('b')).map(n => n.id)).toContain('a') // reverse: what supersedes b (spec RG4)
 
     // re-writing a note re-materializes its out-edges (delete-then-RELATE), no duplicates
-    await m.applyEvent(written(4, note({ id: 'a', links: [{ id: 'b', kind: 'supersedes' }] })))
+    await m.applyEvent(written(4, note({ id: 'a', links: [{ id: 'b', kind: LINK_KIND.supersedes }] })))
     expect((await m.neighbors('a')).map(n => n.id)).toEqual(['b'])
 
     await m.applyEvent(deleted(5, 'a'))
@@ -271,31 +270,31 @@ describe('SurrealMemory.applyEvent', () => {
   // the cursor" is legitimately true. Only an explicit second rebuild() would heal it.
   it('a failed clear never leaves the cursor ahead of the content it describes', async () => {
     const t = await createTestSurreal(); drops.push(t.drop)
-    const m = await openMemory(t)
+    // Fault injection: fail the SECOND delete of the clear, through the store's transaction seam.
+    // Armed only around clear(): applyEvent's own transactions must not count. The seam is also
+    // the regression check — if clear() ever goes back to independent statements,
+    // `insideTransaction` stays false.
+    let armed = false
+    let insideTransaction = false
+    const m = await openMemory(t, undefined, {
+      onTransaction: tx => {
+        if (!armed) return
+        insideTransaction = true
+        if (!isRecord(tx) || typeof tx.delete !== 'function') throw new Error('transaction seam exposes no delete')
+        const realDelete = tx.delete.bind(tx)
+        let deletes = 0
+        tx.delete = (...a: unknown[]) => {
+          if (++deletes === 2) throw new Error('socket dropped')
+          return realDelete(...a)
+        }
+      },
+    })
     await m.applyEvent(written(1))
     expect(await m.getCursor()).toBe(1)
 
-    // Fault injection: fail the SECOND delete of the clear. Injecting through the orm's
-    // transaction seam (rather than the raw socket) is also the regression check — if clear()
-    // ever goes back to independent statements, `insideTransaction` stays false.
-    // ponytail: retained cast — `db` is a private field of SurrealMemory; TypeScript has no
-    // cast-free read of a private member. Upgrade path: an internal/test-only accessor for the orm.
-    const db = (m as unknown as { db: { transaction: (cb: (tx: unknown) => Promise<unknown>) => Promise<unknown> } }).db
-    const realTransaction = db.transaction.bind(db)
-    let insideTransaction = false
-    db.transaction = (cb) => realTransaction(async (tx) => {
-      insideTransaction = true
-      if (!isRecord(tx) || typeof tx.delete !== 'function') throw new Error('transaction seam exposes no delete')
-      const realDelete = tx.delete.bind(tx)
-      let deletes = 0
-      tx.delete = (...a: unknown[]) => {
-        if (++deletes === 2) throw new Error('socket dropped')
-        return realDelete(...a)
-      }
-      return cb(tx)
-    })
+    armed = true
     await m.clear().catch(() => {})
-    db.transaction = realTransaction
+    armed = false
 
     expect(insideTransaction).toBe(true) // clear() must apply its deletes atomically
     const cursor = await m.getCursor()
@@ -383,24 +382,24 @@ describe('SurrealMemory.applyEvent', () => {
     let seq = 0
     const apply = (kind: EventKind, payload: Record<string, unknown>) =>
       m.applyEvent(eventFixture({ seq: ++seq, ts, kind, payload }))
-    const note = (id: string, links: Array<{ id: string; kind: 'relates_to' }> = []) =>
+    const note = (id: string, links: Array<{ id: string; kind: typeof LINK_KIND.relates_to }> = []) =>
       apply(EVENT_KIND.memory_written, { note: { id, scope: 'project', title: id, links }, author: { source: 'cli', workspaceId: TEST_WORKSPACE_ID } })
     await note('edge-z')
     await note('edge-a')
-    await note('edge-seed', [{ id: 'edge-z', kind: 'relates_to' }, { id: 'edge-a', kind: 'relates_to' }])
+    await note('edge-seed', [{ id: 'edge-z', kind: LINK_KIND.relates_to }, { id: 'edge-a', kind: LINK_KIND.relates_to }])
     // Z is reached WITH provenance — the edge itself earns credit; A is read directly — same
     // node-level hit, but no edge to strengthen. A would win a same-score tie-break sort
     // (localeCompare), so Z winning proves the boost, not alphabetical luck.
     await apply(EVENT_KIND.memory_accessed, {
       id: 'edge-z', scope: 'project', mode: 'read', author: { source: 'cli', workspaceId: TEST_WORKSPACE_ID },
-      via: { seed: 'edge-seed', kind: 'relates_to', direction: 'out' },
+      via: { seed: 'edge-seed', kind: LINK_KIND.relates_to, direction: 'out' },
     })
     await apply(EVENT_KIND.memory_accessed, { id: 'edge-a', scope: 'project', mode: 'read', author: { source: 'cli', workspaceId: TEST_WORKSPACE_ID } })
 
     const ranked = await m.neighbors('edge-seed', { now: ts })
     // node heat is EQUAL: both notes were hit exactly once at the same timestamp
-    const z = ranked.find(n => n.id === 'edge-z')!
-    const a = ranked.find(n => n.id === 'edge-a')!
+    const z = must(ranked.find(n => n.id === 'edge-z'), 'ranked.find(n => n.id === \'edge-z\')')
+    const a = must(ranked.find(n => n.id === 'edge-a'), 'ranked.find(n => n.id === \'edge-a\')')
     expect(z.activation).toBe(a.activation)
     expect(z.activation).toBeGreaterThan(0)
     // ...yet Z outranks A — the only remaining discriminator is the edge boost (score checked
@@ -418,15 +417,15 @@ describe('SurrealMemory.applyEvent', () => {
   it('a note UPDATE preserves accumulated edge stats for links that survive the rewrite', async () => {
     const t = await createTestSurreal(); drops.push(t.drop)
     const m = await openMemory(t)
-    await m.applyEvent(written(1, note({ id: 'up-src', links: [{ id: 'up-dst', kind: 'relates_to' }] })))
+    await m.applyEvent(written(1, note({ id: 'up-src', links: [{ id: 'up-dst', kind: LINK_KIND.relates_to }] })))
     await m.applyEvent(written(2, note({ id: 'up-dst' })))
-    await m.applyEvent(accessed(3, 'up-dst', MEMORY_ACCESS.read, 'project', { seed: 'up-src', kind: 'relates_to', direction: 'out' }))
+    await m.applyEvent(accessed(3, 'up-dst', MEMORY_ACCESS.read, 'project', { seed: 'up-src', kind: LINK_KIND.relates_to, direction: 'out' }))
     const before = await rawLinkRow(t, 'up-src', 'up-dst', 'relates_to')
     expect(before?.hits).toBe(1)
 
     // re-apply memory_written for the source note, keeping the SAME link — this used to wipe
     // the edge's stats via the unconditional delete-then-RELATE.
-    await m.applyEvent(written(4, note({ id: 'up-src', links: [{ id: 'up-dst', kind: 'relates_to' }], summary: 'revised' })))
+    await m.applyEvent(written(4, note({ id: 'up-src', links: [{ id: 'up-dst', kind: LINK_KIND.relates_to }], summary: 'revised' })))
     const after = await rawLinkRow(t, 'up-src', 'up-dst', 'relates_to')
     expect(after?.hits).toBe(1)
     expect(after?.lastAccessedAt).toBe(before?.lastAccessedAt)
@@ -437,7 +436,7 @@ describe('SurrealMemory.applyEvent', () => {
   it('a zero-access graph ranks byte-identically to the pre-activation structural scores', async () => {
     const t = await createTestSurreal(); drops.push(t.drop)
     const m = await openMemory(t)
-    await m.applyEvent(written(1, note({ id: 'za', links: [{ id: 'zb', kind: 'supersedes' }, { id: 'zc', kind: 'relates_to' }] })))
+    await m.applyEvent(written(1, note({ id: 'za', links: [{ id: 'zb', kind: LINK_KIND.supersedes }, { id: 'zc', kind: LINK_KIND.relates_to }] })))
     await m.applyEvent(written(2, note({ id: 'zb' })))
     await m.applyEvent(written(3, note({ id: 'zc' })))
     const nb = await m.neighbors('za', { depth: 2 })
@@ -534,18 +533,18 @@ describe('SurrealMemory.applyEvent', () => {
     let seq = 0
     const apply = (kind: EventKind, payload: Record<string, unknown>) =>
       m.applyEvent(eventFixture({ seq: ++seq, ts, kind, payload }))
-    const note = (id: string, links: Array<{ id: string; kind: 'relates_to' }> = []) =>
+    const note = (id: string, links: Array<{ id: string; kind: typeof LINK_KIND.relates_to }> = []) =>
       apply(EVENT_KIND.memory_written, { note: { id, scope: 'project', title: id, links }, author: { source: 'cli', workspaceId: TEST_WORKSPACE_ID } })
     // seed → b and seed → c with the SAME kind: identical structural score
     await note('act-b')
     await note('act-c')
-    await note('act-seed', [{ id: 'act-b', kind: 'relates_to' }, { id: 'act-c', kind: 'relates_to' }])
+    await note('act-seed', [{ id: 'act-b', kind: LINK_KIND.relates_to }, { id: 'act-c', kind: LINK_KIND.relates_to }])
     for (let i = 0; i < 5; i++)
       await apply(EVENT_KIND.memory_accessed, { id: 'act-c', scope: 'project', mode: 'read', author: { source: 'cli', workspaceId: TEST_WORKSPACE_ID } })
     const ranked = await m.neighbors('act-seed', { now: ts })
     expect(ranked.map(n => n.id)[0]).toBe('act-c') // hot beats cold at equal structure
-    expect(ranked.find(n => n.id === 'act-c')!.activation).toBeGreaterThan(0)
-    expect(ranked.find(n => n.id === 'act-b')!.activation).toBe(0)
+    expect(must(ranked.find(n => n.id === 'act-c'), 'ranked.find(n => n.id === \'act-c\')').activation).toBeGreaterThan(0)
+    expect(must(ranked.find(n => n.id === 'act-b'), 'ranked.find(n => n.id === \'act-b\')').activation).toBe(0)
   })
 })
 
@@ -563,13 +562,11 @@ it('search never returns ui-metadata notes; get still resolves them by id', asyn
 })
 
 describe('SurrealMemory claim projection', () => {
-  const claim = (text: string, sourceRevision: string | null = null) =>
-    ({ id: claimId(text), text, sourceRevision })
 
   it('projects one row per live claim, stamped with the event ts', async () => {
     const t = await createTestSurreal(); drops.push(t.drop)
     const mem = await openMemory(t)
-    await mem.applyEvent(written(1, note({ id: 'n', claims: [claim('a')] })))
+    await mem.applyEvent(written(1, note({ id: 'n', claims: [claimFixture('a')] })))
     const rows = await mem.claimsFor('n', 'project')
     expect(rows.map(c => c.text)).toEqual(['a'])
     // a writer cannot date its own claim: the event that carried it does
@@ -579,15 +576,15 @@ describe('SurrealMemory claim projection', () => {
   it('a rewrite re-materializes claims: retired ones disappear, survivors keep their validFrom', async () => {
     const t = await createTestSurreal(); drops.push(t.drop)
     const mem = await openMemory(t)
-    await mem.applyEvent(written(1, note({ id: 'n', claims: [claim('a')] })))
-    await mem.applyEvent(written(2, note({ id: 'n', claims: [claim('a'), claim('b')] })))
+    await mem.applyEvent(written(1, note({ id: 'n', claims: [claimFixture('a')] })))
+    await mem.applyEvent(written(2, note({ id: 'n', claims: [claimFixture('a'), claimFixture('b')] })))
     let rows = await mem.claimsFor('n', 'project')
     expect(rows.map(c => c.text).sort()).toEqual(['a', 'b'])
     // re-stating a fact does not make it new — 'a' keeps the ts of the write that FIRST carried it
     expect(rows.find(c => c.text === 'a')?.validFrom).toBe('2026-07-18T01:00:00Z')
     expect(rows.find(c => c.text === 'b')?.validFrom).toBe('2026-07-18T02:00:00Z')
 
-    await mem.applyEvent(written(3, note({ id: 'n', claims: [claim('b')] })))
+    await mem.applyEvent(written(3, note({ id: 'n', claims: [claimFixture('b')] })))
     rows = await mem.claimsFor('n', 'project')
     expect(rows.map(c => c.text)).toEqual(['b']) // retired 'a' is no longer live
     expect(rows[0]?.validFrom).toBe('2026-07-18T02:00:00Z')
@@ -596,7 +593,7 @@ describe('SurrealMemory claim projection', () => {
   it('carries a claim sourceRevision through the read model', async () => {
     const t = await createTestSurreal(); drops.push(t.drop)
     const mem = await openMemory(t)
-    await mem.applyEvent(written(1, note({ id: 'n', claims: [claim('a', 'deadbeef'), claim('b')] })))
+    await mem.applyEvent(written(1, note({ id: 'n', claims: [claimFixture('a', 'deadbeef'), claimFixture('b')] })))
     const rows = await mem.claimsFor('n', 'project')
     expect(rows.find(c => c.text === 'a')?.sourceRevision).toBe('deadbeef')
     expect(rows.find(c => c.text === 'b')?.sourceRevision).toBeNull()
@@ -605,7 +602,7 @@ describe('SurrealMemory claim projection', () => {
   it('deleting a note drops its claim rows with it', async () => {
     const t = await createTestSurreal(); drops.push(t.drop)
     const mem = await openMemory(t)
-    await mem.applyEvent(written(1, note({ id: 'n', claims: [claim('a')] })))
+    await mem.applyEvent(written(1, note({ id: 'n', claims: [claimFixture('a')] })))
     await mem.applyEvent(deleted(2, 'n'))
     expect(await mem.claimsFor('n', 'project')).toEqual([])
   })
@@ -613,8 +610,8 @@ describe('SurrealMemory claim projection', () => {
   it('a claim is scoped to its owning note — same statement on two notes is two rows', async () => {
     const t = await createTestSurreal(); drops.push(t.drop)
     const mem = await openMemory(t)
-    await mem.applyEvent(written(1, note({ id: 'n1', claims: [claim('shared')] })))
-    await mem.applyEvent(written(2, note({ id: 'n2', claims: [claim('shared')] })))
+    await mem.applyEvent(written(1, note({ id: 'n1', claims: [claimFixture('shared')] })))
+    await mem.applyEvent(written(2, note({ id: 'n2', claims: [claimFixture('shared')] })))
     expect(await mem.claimsFor('n1', 'project')).toHaveLength(1)
     expect(await mem.claimsFor('n2', 'project')).toHaveLength(1)
   })
@@ -622,19 +619,18 @@ describe('SurrealMemory claim projection', () => {
   it('a plan note contributes no claim rows — the tier has no such field', async () => {
     const t = await createTestSurreal(); drops.push(t.drop)
     const mem = await openMemory(t)
-    await mem.applyEvent(written(1, note({ id: 'p', tier: 'plan', rationale: 'why', claims: [claim('a')] })))
+    await mem.applyEvent(written(1, note({ id: 'p', tier: 'plan', rationale: 'why', claims: [claimFixture('a')] })))
     expect(await mem.claimsFor('p', 'project')).toEqual([])
   })
 })
 
 describe('SurrealMemory.searchClaims', () => {
-  const claim = (text: string) => ({ id: claimId(text), text, sourceRevision: null })
 
   it('returns the matched statement and its owning note, not the whole note', async () => {
     const t = await createTestSurreal(); drops.push(t.drop)
     const mem = await openMemory(t)
     await mem.applyEvent(written(1, note({
-      id: 'truth', title: 'Decision log', claims: [claim('the event log is the only truth'), claim('surreal is disposable')],
+      id: 'truth', title: 'Decision log', claims: [claimFixture('the event log is the only truth'), claimFixture('surreal is disposable')],
     })))
     const hits = await mem.searchClaims('event log truth')
     expect(hits).toHaveLength(1)
@@ -649,7 +645,7 @@ describe('SurrealMemory.searchClaims', () => {
     const mem = await openMemory(t)
     await mem.applyEvent(written(1, note({
       id: 'partial', title: 'P',
-      claims: [claim('surreal is disposable'), claim('a surreal projection replays kubernetes helm charts')],
+      claims: [claimFixture('surreal is disposable'), claimFixture('a surreal projection replays kubernetes helm charts')],
     })))
     // 4 terms; 'surreal is disposable' carries only 'surreal' → excluded, the other carries all 4
     const hits = await mem.searchClaims('surreal kubernetes helm charts', {}, { mode: 'keyword', perNote: 'all' })
@@ -664,9 +660,9 @@ describe('SurrealMemory.searchClaims', () => {
     const t = await createTestSurreal(); drops.push(t.drop)
     const mem = await openMemory(t)
     await mem.applyEvent(written(1, note({
-      id: 'hoarder', title: 'H', claims: [claim('scope alpha'), claim('scope beta'), claim('scope gamma')],
+      id: 'hoarder', title: 'H', claims: [claimFixture('scope alpha'), claimFixture('scope beta'), claimFixture('scope gamma')],
     })))
-    await mem.applyEvent(written(2, note({ id: 'other', title: 'O', claims: [claim('scope delta')] })))
+    await mem.applyEvent(written(2, note({ id: 'other', title: 'O', claims: [claimFixture('scope delta')] })))
     const hits = await mem.searchClaims('scope')
     expect(hits.map(h => h.noteId).sort()).toEqual(['hoarder', 'other'])
   })
@@ -674,15 +670,15 @@ describe('SurrealMemory.searchClaims', () => {
   it('honours the note-level scope filter a claim row cannot answer itself', async () => {
     const t = await createTestSurreal(); drops.push(t.drop)
     const mem = await openMemory(t)
-    await mem.applyEvent(written(1, note({ id: 'p', scope: 'project', title: 'P', claims: [claim('shared statement')] })))
-    await mem.applyEvent(written(2, note({ id: 'i', scope: 'infra', title: 'I', claims: [claim('shared statement')] })))
+    await mem.applyEvent(written(1, note({ id: 'p', scope: 'project', title: 'P', claims: [claimFixture('shared statement')] })))
+    await mem.applyEvent(written(2, note({ id: 'i', scope: 'infra', title: 'I', claims: [claimFixture('shared statement')] })))
     expect((await mem.searchClaims('shared', { scope: 'infra' })).map(h => h.noteId)).toEqual(['i'])
   })
 
   it('a retired claim stops being findable', async () => {
     const t = await createTestSurreal(); drops.push(t.drop)
     const mem = await openMemory(t)
-    await mem.applyEvent(written(1, note({ id: 'n', title: 'N', claims: [claim('retire me later')] })))
+    await mem.applyEvent(written(1, note({ id: 'n', title: 'N', claims: [claimFixture('retire me later')] })))
     expect(await mem.searchClaims('retire')).toHaveLength(1)
     await mem.applyEvent(written(2, note({ id: 'n', title: 'N', claims: [] })))
     expect(await mem.searchClaims('retire')).toEqual([])
@@ -695,15 +691,15 @@ describe('SurrealMemory.searchClaims', () => {
   it('never returns a claim asserted on a ui-metadata note, the same exclusion search() applies', async () => {
     const t = await createTestSurreal(); drops.push(t.drop)
     const mem = await openMemory(t)
-    await mem.applyEvent(written(1, note({ id: PROJECT_NAME_NOTE_ID, title: 'orc-sim', claims: [claim('the project is called orc-sim')] })))
-    await mem.applyEvent(written(2, note({ id: 'real-note', title: 'R', claims: [claim('the project is called by its slug')] })))
+    await mem.applyEvent(written(1, note({ id: PROJECT_NAME_NOTE_ID, title: 'orc-sim', claims: [claimFixture('the project is called orc-sim')] })))
+    await mem.applyEvent(written(2, note({ id: 'real-note', title: 'R', claims: [claimFixture('the project is called by its slug')] })))
     expect((await mem.searchClaims('project is called')).map(h => h.noteId)).toEqual(['real-note'])
   })
 
   it('an empty query matches nothing rather than everything', async () => {
     const t = await createTestSurreal(); drops.push(t.drop)
     const mem = await openMemory(t)
-    await mem.applyEvent(written(1, note({ id: 'n', title: 'N', claims: [claim('a statement')] })))
+    await mem.applyEvent(written(1, note({ id: 'n', title: 'N', claims: [claimFixture('a statement')] })))
     expect(await mem.searchClaims('   ')).toEqual([])
   })
 })
@@ -821,7 +817,7 @@ describe('memory_verified folds onto the note row', () => {
   it('skips an unparseable payload and advances the cursor rather than wedging the drain', async () => {
     const t = await createTestSurreal(); drops.push(t.drop)
     const m = await openMemory(t)
-    const bad = eventFixture({ seq: 1, taskId: null, kind: 'memory_verified', payload: { id: 'auth' }, ts: '2026-07-18T01:00:00Z' })
+    const bad = eventFixture({ seq: 1, taskId: null, kind: EVENT_KIND.memory_verified, payload: { id: 'auth' }, ts: '2026-07-18T01:00:00Z' })
     expect(await m.applyEvent(bad)).toBe(true)
     expect(await m.getCursor()).toBe(1)
   })

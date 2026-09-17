@@ -1,4 +1,4 @@
-import { AUTO_HEAL_MODE, STRATEGY, type AutoHealMode, type PlanDraft } from '@orc/contracts'
+import { AUTO_HEAL_MODE, errorMessage, STRATEGY, type AutoHealMode, type PlanDraft } from '@orc/contracts'
 import { DEFAULT_TEMPLATE_MODEL, singleStepDraft } from './plan-template'
 
 /**
@@ -32,8 +32,8 @@ export interface AutoHealDeps {
 export const AUTO_SWEEP_TITLE = 'auto-heal: sweep drifted knowledge'
 
 // The drafted sweep's PLAN, built beside the title it belongs to: reactor drafts arrive
-// plan-ready so the human's approve is genuinely one click (the operator used to have to
-// `orc propose` the draft by hand first — observed 2026-08-04). `maxIterations` comes from
+// plan-ready so the human's approve is genuinely one click (observed 2026-08-04: without it the
+// operator had to `orc propose` the draft by hand first). `maxIterations` comes from
 // config.memorySweepIterations, deliberately lean: a sweep that genuinely needs more signals
 // `partial` and continues under the runtime's own continuation grants.
 // STRATEGY.sweep, not the operator template: it is what exempts this plan from the kernel's
@@ -61,7 +61,7 @@ export function createAutoHeal(deps: AutoHealDeps): { onCommitRecorded: () => vo
       // broken store would page the human about work the free pass may already cover
       if (drifted > 0 && !(await deps.hasOpenSweep())) await deps.draftSweep(drifted)
     } catch (err) {
-      deps.warn(`auto-heal: reaction failed — ${err instanceof Error ? err.message : String(err)}`)
+      deps.warn(`auto-heal: reaction failed — ${errorMessage(err)}`)
     }
   }
 

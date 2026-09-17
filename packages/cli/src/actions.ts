@@ -1,4 +1,4 @@
-import { AUTHOR_SOURCE, errorMessage, EVENT_KIND, ModelsDiscoveredPayload, NOTE_KIND, TASK_STATUS, costUSDFor, parseModelRef, type ExecutionPort, type ModelOption, type TaskStatus } from '@orc/contracts'
+import { AUTHOR_SOURCE, errorMessage, EVENT_KIND, ModelsDiscoveredPayload, NOTE_KIND, TASK_STATUS, costUSDFor, parseModelRef, type ModelOption, type TaskStatus } from '@orc/contracts'
 import { Kernel, blockingVerdicts, retryIsFutile, deriveSystemUrl, dropSystemDatabase, initializeProject, liveSupervisors, loadConfig, openStorage, resetSystemDatabase, subtreeTaskIds, type EventLog, type ProjectConfig, type Storage } from '@orc/kernel'
 import { cwdAuthor, cwdWorkspace, cwdWorkspaceId, type AuthorExtras } from './cwd-workspace'
 import { adoptCwd } from './workspace-adopt'
@@ -547,11 +547,10 @@ export function buildOrcActions(deps: {
       try {
         const counts = await storage.purge()
         // The knowledge goes with the chat. This read model lives in a PROJECT-DERIVED SurrealDB
-        // database, so the home project's memory instance cannot reach it — and leaving it was not
-        // the harmless "inert garbage" this comment used to claim: a deleted project's notes stayed
-        // live in `orc memory ls`, in memory_search, in agent recall and in the graph UI, with no
-        // events behind them, until some later rebuild silently dropped them. Deleting a chat has
-        // to mean the data goes too, which is what anyone clicking delete already assumes.
+        // database, so the home project's memory instance cannot reach it. Leaving it is not inert
+        // garbage: a deleted project's notes stay live in `orc memory ls`, memory_search, agent recall
+        // and the graph UI, with no events behind them, until a later rebuild silently drops them.
+        // Deleting a chat means the data goes too.
         try {
           const knowledge = await openKnowledge({ ...plugin.config, projectId })
           // drop, not clear: the database object goes with the project. Clearing rows left one

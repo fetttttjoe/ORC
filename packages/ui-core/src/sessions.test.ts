@@ -1,10 +1,11 @@
 import { afterAll, describe, expect, it } from 'bun:test'
 import { z } from 'zod'
-import { EVENT_KIND, ISOLATION_TIER, TASK_STATUS } from '@orc/contracts'
+import { EVENT_KIND, ISOLATION_TIER } from '@orc/contracts'
 import { Kernel, openStorage } from '@orc/kernel'
 import { createTestDb, seedTestWorkspace, TEST_PROJECT_ID, TEST_WORKSPACE_ID } from '@orc/kernel/test-helpers'
 import { noteNodeId } from './graph'
 import { createProjectSessions, type SessionUpdate } from './sessions'
+import { must } from '@orc/contracts/fixtures'
 
 // nodeDetail returns an opaque view (Promise<unknown | null>); these name the subsets each
 // assertion pins, parsed at the read boundary instead of cast.
@@ -86,8 +87,8 @@ describe('ProjectSessions', () => {
     await storage.events.append(noteEvent('live-note'))
     for (let i = 0; i < 40 && updates.length === 0; i++) await Bun.sleep(50) // LISTEN/NOTIFY latency
     expect(updates).toHaveLength(1)
-    expect(updates[0]!.patch.addNodes.map(n => n.id)).toEqual([noteNodeId('project', 'live-note')])
-    expect(updates[0]!.event?.kind).toBe(EVENT_KIND.memory_written)
+    expect(must(updates[0], 'updates[0]').patch.addNodes.map(n => n.id)).toEqual([noteNodeId('project', 'live-note')])
+    expect(must(updates[0], 'updates[0]').event?.kind).toBe(EVENT_KIND.memory_written)
     unsub()
   })
 
@@ -99,7 +100,7 @@ describe('ProjectSessions', () => {
     for (let i = 0; i < 40 && (await sessions.snapshot(TEST_PROJECT_ID)).seq < appended.seq; i++) await Bun.sleep(50)
     const u = await sessions.since(TEST_PROJECT_ID, seq)
     expect(u?.patch.addNodes.map(n => n.id)).toEqual([noteNodeId('project', 'missed-note')])
-    expect(await sessions.since(TEST_PROJECT_ID, u!.seq)).toBeNull()
+    expect(await sessions.since(TEST_PROJECT_ID, must(u, 'u').seq)).toBeNull()
   })
 
   it('an empty-patch event (task_status_changed-like) still notifies with a summary', async () => {
@@ -115,9 +116,9 @@ describe('ProjectSessions', () => {
     })
     for (let i = 0; i < 40 && updates.length < 2; i++) await Bun.sleep(50)
     expect(updates).toHaveLength(2)
-    expect(updates[1]!.summary?.kind).toBe(EVENT_KIND.memory_accessed)
-    expect(updates[1]!.summary?.noteRef).toBe(noteNodeId('project', 'hit-note'))
-    expect(updates[1]!.patch.addNodes).toEqual([])
+    expect(must(updates[1], 'updates[1]').summary?.kind).toBe(EVENT_KIND.memory_accessed)
+    expect(must(updates[1], 'updates[1]').summary?.noteRef).toBe(noteNodeId('project', 'hit-note'))
+    expect(must(updates[1], 'updates[1]').patch.addNodes).toEqual([])
     unsub()
   })
 
@@ -133,7 +134,7 @@ describe('ProjectSessions', () => {
 
     expect(await sessions.taskPlans(TEST_PROJECT_ID, taskId)).toBeNull() // no plan proposed
     const rows = await sessions.log(TEST_PROJECT_ID, { taskId })
-    expect(rows.at(-1)!.line).toContain('hello there')
+    expect(must(rows.at(-1), 'rows.at(-1)').line).toContain('hello there')
     expect(await sessions.log(TEST_PROJECT_ID, { limit: 1 })).toHaveLength(1)
   })
 

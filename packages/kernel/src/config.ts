@@ -8,7 +8,7 @@ import { errorMessage, ApprovalPolicy, AUTO_HEAL_MODE, AutoHealMode, GROUNDED_AP
 import { gitDirs, gitToplevel } from './git'
 import { resolveProjectRoot } from './project-root'
 
-// bump per release — pins DBOS__APPVERSION so recovery survives rebuilds (spec §4)
+// bump per release — pins DBOS__APPVERSION so recovery survives rebuilds
 const APP_VERSION = 'orc-0.1.0'
 const DEFAULT_DATABASE_URL = 'postgresql://postgres:orc@localhost:5433/orc'
 // The agent-loop budget an AUTHORED step gets when the project sets none. One constant, because
@@ -34,10 +34,10 @@ const settingsSchema = (dir: string, projectRoot: string) =>
     maxIterations: z.coerce.number().int().positive().default(DEFAULT_MAX_ITERATIONS),
     // half-life for the memory activation derivation (days) — THE calibration knob the neuron
     // ranking needs once real hot/cold data exists. Read-time only: changing it re-ranks and
-    // re-heats instantly, rewrites nothing. Threaded to BOTH consumers (store ranking, Task 8;
-    // graph heat via sessions, Task 9) so the two surfaces always decay at ONE rate.
+    // re-heats instantly, rewrites nothing. Threaded to BOTH consumers (store ranking;
+    // graph heat via sessions) so the two surfaces always decay at ONE rate.
     memoryHalfLifeDays: z.coerce.number().positive().default(14),
-    // Task 7 preload budget: token budget for the ONE journaled memory_search the loop runs
+    // preload budget: token budget for the ONE journaled memory_search the loop runs
     // before iteration 1, rendered as a "Known project context" block. 0 = off (skip preload
     // entirely, prompt unchanged) — same escape hatch shape as ambientCapture below.
     memoryPreloadTokens: z.coerce.number().int().nonnegative().default(800),
@@ -59,7 +59,7 @@ const settingsSchema = (dir: string, projectRoot: string) =>
     // set it (e.g. 'anthropic/claude-haiku-4-5') to have the out-of-band lifecycle synthesise a
     // coherent note instead. A per-task cost, deliberately opt-in — it runs off the agent turn budget.
     memoryConsolidateModel: z.string().default(''),
-    // ambient capture kill switch (Task 4): displaces the manual step-report protocol rule —
+    // ambient capture kill switch: displaces the manual step-report protocol rule —
     // successful steps auto-persist their signal summary as an expirable plan note, at zero
     // model-call cost. z.stringbool(), NOT z.coerce.boolean(): coerce turns the env string
     // 'false' into `true` (any non-empty string is truthy), which would make the switch inoperable.

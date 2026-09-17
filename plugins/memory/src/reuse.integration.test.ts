@@ -2,7 +2,7 @@ import { describe, expect, it } from 'bun:test'
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import { MemoryScope, type NeighborResult } from '@orc/contracts'
+import { MemoryScope, type NeighborResult, LINK_KIND } from '@orc/contracts'
 import { openStorage } from '@orc/kernel'
 import { createTestDb, TEST_PROJECT_ID } from '@orc/kernel/test-helpers'
 import { createMemoryProjector } from './projector'
@@ -37,7 +37,7 @@ describe('typed-link traversal (e2e)', () => {
     try {
       await store.write({ id: 'area-b', title: 'B' }, { source: 'cli', workspaceId: TEST_WORKSPACE_ID })
       // A asserts the edge; B never says anything about A
-      await store.write({ id: 'area-a', title: 'A', links: [{ id: 'area-b', kind: 'depends_on' }] }, { source: 'cli', workspaceId: TEST_WORKSPACE_ID })
+      await store.write({ id: 'area-a', title: 'A', links: [{ id: 'area-b', kind: LINK_KIND.depends_on }] }, { source: 'cli', workspaceId: TEST_WORKSPACE_ID })
       expect((await settle()).map(n => n.id)).toEqual(['area-b'])
 
       // while B is gone the edge cannot resolve — A's statement stands, its target does not
@@ -72,7 +72,7 @@ describe('typed-link traversal (e2e)', () => {
     await proj.start()
 
     try {
-      await store.write({ id: 'decision-a', title: 'A', links: [{ id: 'decision-b', kind: 'supersedes' }] }, { source: 'cli', workspaceId: TEST_WORKSPACE_ID })
+      await store.write({ id: 'decision-a', title: 'A', links: [{ id: 'decision-b', kind: LINK_KIND.supersedes }] }, { source: 'cli', workspaceId: TEST_WORKSPACE_ID })
       await store.write({ id: 'decision-b', title: 'B' }, { source: 'cli', workspaceId: TEST_WORKSPACE_ID })
 
       // the projector applies memory_written asynchronously — poll until the edge materializes

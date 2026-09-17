@@ -1,6 +1,6 @@
-import { createHash } from 'node:crypto'
 import { existsSync, readFileSync } from 'node:fs'
 import path from 'node:path'
+import { sha256 } from '@orc/contracts'
 import { z } from 'zod'
 import { atomicWriteFileSync } from '@orc/kernel'
 import type { VaultFiles } from './render'
@@ -8,7 +8,6 @@ import type { VaultFiles } from './render'
 // the on-disk shape this file's own writes always produce (rel path → content sha256)
 const Manifest = z.record(z.string(), z.string())
 
-const sha = (s: string): string => createHash('sha256').update(s).digest('hex')
 const isPlanFile = (rel: string): boolean => /\/plan-v\d+\.md$/.test(rel)
 
 // Single writer for the trace subtree (spec D5). Atomic per file, skip-unchanged,
@@ -29,10 +28,10 @@ export function writeVaultFiles(vaultDir: string, files: VaultFiles): void {
     const onDisk = existsSync(abs) ? readFileSync(abs, 'utf8') : null
     if (onDisk === content) continue                       // unchanged
     if (isPlanFile(rel) && onDisk !== null) continue       // write-once (protects human edits)
-    if (!isPlanFile(rel) && onDisk !== null && manifest[rel] !== undefined && sha(onDisk) !== manifest[rel])
+    if (!isPlanFile(rel) && onDisk !== null && manifest[rel] !== undefined && sha256(onDisk) !== manifest[rel])
       console.warn(`vault: ${rel} was hand-edited; it is projection-only and is being overwritten`)
     atomicWriteFileSync(abs, content)
-    manifest[rel] = sha(content)
+    manifest[rel] = sha256(content)
   }
   atomicWriteFileSync(manifestPath, JSON.stringify(manifest, null, 2) + '\n')
 }

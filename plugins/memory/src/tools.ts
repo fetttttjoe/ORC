@@ -507,7 +507,7 @@ type WriteSchemaCoversInput =
 const writeSchemaCoversInput: WriteSchemaCoversInput = true
 void writeSchemaCoversInput
 
-// Degraded mode (design §8.4): the same six tools exist but every call returns an explicit
+// Degraded mode: the same six tools exist but every call returns an explicit
 // isError result naming the reason — the model learns context is unavailable instead of
 // silently losing its memory tools.
 // The ONE author this plugin is allowed to invent, and only because it can never reach a log: every
@@ -763,7 +763,7 @@ export function memoryTools(opts: {
           // tier), else the draft's own inferred tier (contracts' inferTier, the same classifier the
           // store gateway itself falls back to).
           //
-          // Compound-update hole (found in the boundary-contracts Task 2 re-review, deferred here):
+          // Compound-update hole (deferred here):
           // the STORED-tier fallback reads the tier the note has TODAY, not the tier the MERGED note
           // is about to land as. One write that adds `zone` (plan evidence — inferTier reads zone/
           // rationale/uncertainty, never `links`) AND a sibling-resolving depends_on link to a

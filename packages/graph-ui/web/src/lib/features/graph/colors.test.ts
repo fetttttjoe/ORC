@@ -121,10 +121,10 @@ describe('the worker reads as a worker', () => {
    * for the same reason notes do: it carries no lifecycle, it is an actor.
    */
   it('is its own hue, not shared with any other node type', () => {
-    const others = (Object.entries(TYPE_COLORS) as [string, string][]).filter(([t]) => t !== 'model')
+    const others = Object.entries(TYPE_COLORS).filter(([t]) => t !== 'model')
     for (const [type, hex] of others)
       expect(TYPE_COLORS.model, `model must not share a colour with ${type}`).not.toBe(hex)
-    expect(TYPE_COLORS.model).not.toBe('#8b93a1') // --color-mist, the chrome it used to be
+    expect(TYPE_COLORS.model).not.toBe('#8b93a1') // not the previous model color --color-mist
   })
 
   it('never takes a lifecycle override — a model is not running or failed, it is used', () => {

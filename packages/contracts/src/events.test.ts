@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'bun:test'
 import { EventInput, EventKind, PAYLOAD_SCHEMAS } from './events'
+import { EVENT_KIND } from './event-kinds'
 import { TEST_WORKSPACE_ID } from './fixtures'
 
 describe('events', () => {
@@ -11,7 +12,7 @@ describe('events', () => {
   it('parses a valid input envelope', () => {
     const input: EventInput = {
       taskId: 't1', stepId: null, runToken: null,
-      kind: 'task_status_changed',
+      kind: EVENT_KIND.task_status_changed,
       payload: { taskId: 't1', from: 'draft', to: 'awaiting_approval' },
     }
     expect(EventInput.parse(input)).toEqual({ ...input, idempotencyKey: null })
@@ -77,7 +78,7 @@ describe('events', () => {
   it('idempotency key defaults to null, accepts a non-empty key, rejects empty', () => {
     const base: EventInput = {
       taskId: 't1', stepId: null, runToken: null,
-      kind: 'task_status_changed',
+      kind: EVENT_KIND.task_status_changed,
       payload: { taskId: 't1', from: 'draft', to: 'awaiting_approval' },
     }
     expect(EventInput.parse(base).idempotencyKey).toBeNull()

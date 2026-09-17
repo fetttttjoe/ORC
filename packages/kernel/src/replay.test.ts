@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'bun:test'
 import { EVENT_KIND, type OperationSpec, type PlanDraft } from '@orc/contracts'
-import { draftFixture } from '@orc/contracts/fixtures'
+import { draftFixture, must } from '@orc/contracts/fixtures'
 import { openStorage } from './storage'
 import { Kernel } from './kernel'
 import { fold } from './projections'
@@ -8,7 +8,7 @@ import { createTestDb, seedTestWorkspace, TEST_PROJECT_ID, TEST_WORKSPACE_ID } f
 
 const draft = (): PlanDraft => draftFixture()
 
-describe('replay guarantee (spec §10)', () => {
+describe('replay guarantee', () => {
   it('a reopened kernel folds to the identical state ("kill -9" scenario)', async () => {
     const db = await createTestDb()
     try {
@@ -71,7 +71,7 @@ describe('replay guarantee (spec §10)', () => {
       const opContext = { taskId: t.id, stepId: 's1', runToken: `step:${t.id}:s1:a1` }
       const spec: OperationSpec = { operationId: `${opContext.runToken}:model:1`, kind: 'model', name: 'fake/m', before: { q: 1 } }
       await storage.operations.beginOperation(opContext, spec)
-      const startedSeq = (await log.byTask(t.id)).at(-1)!.seq
+      const startedSeq = must((await log.byTask(t.id)).at(-1), 'last event from task').seq
       await storage.operations.completeOperation(opContext, spec, 1, { text: 'result' })
       await log.append({
         taskId: t.id, stepId: 's1', runToken: opContext.runToken, kind: EVENT_KIND.artifact_produced,
@@ -99,7 +99,7 @@ describe('replay guarantee (spec §10)', () => {
       const reopenedStorage = await openStorage(db.url, { projectId: TEST_PROJECT_ID })
       const reopened = reopenedStorage.events
       expect(fold(await reopened.byTask(t.id))).toEqual(state)
-      expect(await reopenedStorage.operations.operationsFor(t.id)).toEqual([journalOp!])
+      expect(await reopenedStorage.operations.operationsFor(t.id)).toEqual([must(journalOp, 'journalOp')])
       await reopened.close()
     } finally {
       await db.drop()

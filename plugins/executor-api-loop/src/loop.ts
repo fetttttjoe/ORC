@@ -80,21 +80,40 @@ function uniqueByCallId<T extends { toolCallId: string; toolName: string }>(call
 // a clean journal, and a terminal provider_error that blocked the step.
 //
 // Both views must be deduped at the SAME boundary or they disagree about what the turn contained.
+// One place that rebuilds a message with some of its parts removed. The ai SDK's ModelMessage is a
+// union whose `content` element type differs per role, so the role switch is what keeps the variant:
+// TS cannot reassemble `{ ...m, content }` from a widened array without a cast. Returns `m` itself
+// when nothing was removed, so a caller can tell an untouched message from a rebuilt one.
+type PartFilter = (part: { type: string; toolCallId?: string }) => boolean
+function withParts(m: ModelMessage, keep: PartFilter): ModelMessage {
+  switch (m.role) {
+    case 'system': return m
+    case 'user': {
+      if (!Array.isArray(m.content)) return m
+      const kept = m.content.filter(keep)
+      return kept.length === m.content.length ? m : { ...m, content: kept }
+    }
+    case 'assistant': {
+      if (!Array.isArray(m.content)) return m
+      const kept = m.content.filter(keep)
+      return kept.length === m.content.length ? m : { ...m, content: kept }
+    }
+    case 'tool': {
+      const kept = m.content.filter(keep)
+      return kept.length === m.content.length ? m : { ...m, content: kept }
+    }
+  }
+}
+
 function dedupeToolUseParts(messages: ModelMessage[]): ModelMessage[] {
   const seen = new Set<string>()
-  return messages.map(m => {
-    if (!Array.isArray(m.content)) return m
-    // the SDK's own discriminated union carries toolCallId on the tool-call variant — narrow on
-    // `type` rather than a structural guard, which collapses the union to never
-    const parts: unknown[] = m.content
-    const kept = parts.filter(part => {
-      if (!isRecord(part) || part.type !== 'tool-call' || typeof part.toolCallId !== 'string') return true
-      if (seen.has(part.toolCallId)) return false
-      seen.add(part.toolCallId)
-      return true
-    })
-    return kept.length === parts.length ? m : { ...m, content: kept } as ModelMessage
-  })
+  const notRepeated: PartFilter = part => {
+    if (part.type !== 'tool-call' || typeof part.toolCallId !== 'string') return true
+    if (seen.has(part.toolCallId)) return false
+    seen.add(part.toolCallId)
+    return true
+  }
+  return messages.map(m => withParts(m, notRepeated))
 }
 
 // The THIRD way one tool_use ends up with two results, and the mirror of the dedupe above. A tool
@@ -110,14 +129,14 @@ function dedupeToolUseParts(messages: ModelMessage[]): ModelMessage[] {
 // A tool message left with no parts is removed entirely: an empty content array is not a message a
 // provider accepts.
 function withoutToolResults(messages: readonly ModelMessage[], ids: ReadonlySet<string>): ModelMessage[] {
+  const notRemoved: PartFilter = part =>
+    !(part.type === 'tool-result' && typeof part.toolCallId === 'string' && ids.has(part.toolCallId))
   const out: ModelMessage[] = []
   for (const m of messages) {
-    if (!Array.isArray(m.content)) { out.push(m); continue }
-    const parts: unknown[] = m.content
-    const kept = parts.filter(part =>
-      !(isRecord(part) && part.type === 'tool-result' && typeof part.toolCallId === 'string' && ids.has(part.toolCallId)))
-    if (kept.length === parts.length) { out.push(m); continue }
-    if (kept.length > 0) out.push({ ...m, content: kept } as ModelMessage)
+    const kept = withParts(m, notRemoved)
+    // a message the filter emptied is dropped; one that was untouched (kept === m) always stays
+    if (kept !== m && Array.isArray(kept.content) && kept.content.length === 0) continue
+    out.push(kept)
   }
   return out
 }
@@ -168,7 +187,7 @@ function notExecutedResult(call: { toolCallId: string; toolName: string }, reaso
 const signalDeferred = 'signal cannot be combined with a suspension (join_splits/ask_human) — call signal again after'
 const askDeferred = 'ask_human cannot be combined with join_splits — the join ran; ask again after'
 
-// The knowledge protocol (design §10.2): a protocol, not context injection — agents keep
+// The knowledge protocol: a protocol, not context injection — agents keep
 // control of bounded pulls through the memory tools; note bodies are never auto-inlined.
 const KNOWLEDGE_PROTOCOL = `# Project knowledge protocol
 1. A "Known project context" block may already list the relevant notes — memory_read those ids for detail; search only for what the block lacks.
@@ -185,7 +204,7 @@ const KNOWLEDGE_PROTOCOL = `# Project knowledge protocol
 12. When a memory_neighbors row leads you to memory_read a note, pass via {seed: row.from, kind: row.via, direction: row.direction} — connections you actually use must strengthen.
 13. When you call signal, report the notes you pulled: knowledge.useful = ids that answered your question, knowledge.deadEnd = ids that wasted the step. Future readers see these verdicts beside each note — report honestly, dead ends included.`
 
-// Task 7: preload block arg, default '' — kept minimal and named rather than folded into
+// preload block arg, default '' — kept minimal and named rather than folded into
 // ExecutorContext, since it is a per-call render input, not step/run state.
 function buildPrompt(ctx: ExecutorContext<LanguageModel>, knownContextBlock = ''): string {
   const skills = ctx.skills
@@ -197,7 +216,7 @@ function buildPrompt(ctx: ExecutorContext<LanguageModel>, knownContextBlock = ''
   return [
     `# Task\n${ctx.taskSpec}`,
     `# Your step: ${ctx.step.title} (role: ${ctx.step.role})\n${ctx.step.instructions}`,
-    skills, // force-loaded plan data — never model-elective (spec §6)
+    skills, // force-loaded plan data — never model-elective
     deps ? `# Upstream outputs\n${deps}` : '',
     // The continuation handoff: the previous round's signal summary is the ONLY context that
     // survives a round boundary (the conversation does not), so it renders as its own block —
@@ -282,6 +301,9 @@ export function apiLoopExecutor(): AgentExecutor<LanguageModel> {
         const knownContext = await preloadKnownContext(ctx)
         const messages: ModelMessage[] = [{ role: 'user', content: buildPrompt(ctx, knownContext) }]
         const tools = toolSet(ctx.extraTools, { role: ctx.step.role, readOnlySource: ctx.step.readOnlySource })
+        // toolSet always registers signal (tools.ts) — resolved once here so the final-iteration
+        // narrowing below needs no non-null assertion
+        const signalTool = tools[TOOL_NAME.signal]
         const base = { stepId: ctx.step.id, runToken: ctx.runToken }
         let persistedThrough = 0 // messages[0..persistedThrough) are already in an agent_call event
         // set right after a memory_write result lints with a warning; nudged into the very next
@@ -348,7 +370,7 @@ export function apiLoopExecutor(): AgentExecutor<LanguageModel> {
                 name: ctx.step.modelRef,
                 before: { messages: messages.slice(persistedThrough) },
               },
-              () => callModel(ctx.model, messages, finalIteration ? { [TOOL_NAME.signal]: tools[TOOL_NAME.signal]! } : tools),
+              () => callModel(ctx.model, messages, finalIteration ? { [TOOL_NAME.signal]: signalTool } : tools),
               (r): EventDraft[] => [{
                 kind: EVENT_KIND.agent_call,
                 // persist only the DELTA since the previous agent_call — the full cumulative
@@ -392,7 +414,7 @@ export function apiLoopExecutor(): AgentExecutor<LanguageModel> {
                 },
               })),
             })
-            continue // counts as an iteration (agent_error accounting, spec §9)
+            continue // counts as an iteration (agent_error accounting)
           }
 
           if (turn.toolCalls.length === 0) {

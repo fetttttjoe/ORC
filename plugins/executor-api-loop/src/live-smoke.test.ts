@@ -6,7 +6,7 @@ import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import type { Checkpoint, OperationCheckpoint, ExecutorContext } from '@orc/contracts'
-import { stepFixture } from '@orc/contracts/fixtures'
+import { stepFixture, must } from '@orc/contracts/fixtures'
 import type { LanguageModel } from 'ai'
 import { apiLoopExecutor } from './loop'
 
@@ -50,7 +50,7 @@ describe.skipIf(!LIVE)('live smoke', () => {
 
   it.skipIf(!process.env.OLLAMA_MODEL)('ollama completes a real step', async () => {
     const { createOllamaProvider } = await import('@orc/provider-ollama')
-    const model = createOllamaProvider().languageModel(process.env.OLLAMA_MODEL!)
+    const model = createOllamaProvider().languageModel(must(process.env.OLLAMA_MODEL, 'process.env.OLLAMA_MODEL'))
     const events = []
     for await (const ev of apiLoopExecutor().startTurn(liveCtx(model))) events.push(ev)
     expect(events.at(-1)?.type).toBe('done')

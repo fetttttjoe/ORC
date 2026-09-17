@@ -152,11 +152,10 @@ export function validatePlan(plan: Plan): { ok: true } | { ok: false; errors: st
     const v = planFieldViolations({ id: s.id, zone: s.zone, links: [], siblings: [] })
     for (const msg of v.shape) errors.push(`step '${s.id}': ${msg}`)
   }
-  // A multi-step plan where EVERY step is parallel shipped twice in live testing — verification
-  // running alongside the work it verifies. This once exempted plans containing a '<VERIFY>' step,
-  // but that exemption is only REACHABLE when the verify step is itself unordered, which is the
-  // very defect: a plan froze `draft` and `verify` with no dependency, they ran in one wave, and
-  // verify audited a file draft had not written yet.
+  // A multi-step plan where EVERY step is parallel is a defect — it shipped twice in live testing,
+  // with verify auditing a file draft had not written yet because the two ran in one wave.
+  // Exempting plans that contain a '<VERIFY>' step does not work: that exemption is only reachable
+  // when the verify step is itself unordered, which is the very defect.
   if (plan.steps.length > 1 && plan.steps.every(s => s.dependsOn.length === 0))
     errors.push(
       `malformed plan shape: ${plan.steps.length} steps, all parallel (every dependsOn empty) — declare dependencies between steps, e.g. a final '${VERIFY_STEP_ID}' step that dependsOn the work it checks`)

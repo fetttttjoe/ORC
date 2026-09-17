@@ -17,7 +17,7 @@ export function normalizeRelPath(p: string): string {
   return p.replace(/\\/g, '/').replace(/^\.\//, '').replace(/\/{2,}/g, '/')
 }
 
-// Trust boundary (spec §6.3): resolved path — symlinks included — must stay inside the
+// Trust boundary: resolved path — symlinks included — must stay inside the
 // workspace. The ONE containment guard: file tools and signal-output verification share it.
 export function resolveInWorkspace(workspaceDir: string, p: string): string {
   const root = realpathSync(workspaceDir)

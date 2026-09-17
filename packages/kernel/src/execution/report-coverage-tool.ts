@@ -17,7 +17,7 @@ export function reportCoverageTool(opts: {
 }): ResolvedTool[] {
   const { kernel, p } = opts
   // Registration gate, not an execute-time rejection: a visible tool that can only ever error
-  // gets called anyway — scenario-2's verify auditor burned one iteration per attempt on it.
+  // gets called anyway — a verify auditor burned one iteration per attempt on it.
   // For every non-scout step the tool simply does not exist.
   if (p.role !== ANALYZE_STEP_ROLE) return []
   return [{

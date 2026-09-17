@@ -120,7 +120,7 @@ export async function recordDecision(door: DecisionDoor, author: MemoryAuthor, i
 // proposed first (it needs a person), then accepted, deprecated, superseded — attention-first like
 // `orc ws ls`; within a rung newest first.
 //
-// BY SPEC (§6): a superseded row stays listed here — nothing here retires it. It leaves the working
+// By spec: a superseded row stays listed here — nothing here retires it. It leaves the working
 // set through the EXISTING lifecycle only: `orc memory recheck --apply` archives a note with a live
 // supersedes/contradicts link against it UNLESS another surviving note links to it — archive.ts's
 // protector rule outranks `retiredBy`, because retiring a note something still points at leaves that
@@ -138,7 +138,7 @@ const RUNG: Record<DecisionStatus, number> = {
 // summary row (surreal.ts toSummary) and drop the gets.
 export async function listDecisions(door: DecisionDoor, filter: { status?: DecisionStatus } = {}): Promise<DecisionRecord[]> {
   await door.catchUp()
-  // Project scope only — decisions are project-level ADRs (spec §6). A plan-scoped `kind: decision`
+  // Project scope only — decisions are project-level ADRs. A plan-scoped `kind: decision`
   // note is one task's own scratch note under that kind, not an architectural decision the project
   // made, and getDecision/recordDecision already only ever address a project-scope id (store.get's
   // scope default): listing must not show a wider set than the two doors that read one row of it.

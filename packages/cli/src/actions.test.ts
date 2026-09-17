@@ -2,13 +2,13 @@ import { afterAll, describe, expect, it } from 'bun:test'
 import { mkdirSync, mkdtempSync, realpathSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import { Surreal } from 'surrealdb'
-import { AUTHOR_SOURCE, DECISION_STATUS, EVENT_KIND, MemoryWrittenPayload, NOTE_KIND, TASK_STATUS, WORKSPACE_KIND, WORKSPACE_STATE, type AuthorSource, type ExecutionPort } from '@orc/contracts'
-import { KERNEL_ERROR_CODE, Kernel, KernelError, currentBranch, initializeProject, loadConfig, openStorage, projectDatabaseName, requireProject, type ProjectConfig } from '@orc/kernel'
+import { AUTHOR_SOURCE, DECISION_STATUS, EVENT_KIND, MemoryWrittenPayload, NOTE_KIND, TASK_STATUS, WORKSPACE_KIND, WORKSPACE_STATE, type AuthorSource } from '@orc/contracts'
+import { KERNEL_ERROR_CODE, Kernel, KernelError, currentBranch, initializeProject, loadConfig, openStorage, requireProject, type ProjectConfig } from '@orc/kernel'
 import { createTestDb, seedTestWorkspace, TEST_PROJECT_ID, TEST_WORKSPACE, TEST_WORKSPACE_ID, testConfig, tmpGitRepo, type TestDb } from '@orc/kernel/test-helpers'
 import { PROJECT_DIR_NOTE_ID } from '@orc/ui-core'
 import { buildOrcActions, catalogAppends, modelUniverse } from './actions'
 import { openMemory } from './memory-open'
+import { dropSurrealDb } from './test-helpers'
 import { archivedRefusal } from './workspace-ops'
 
 const dbs: Array<{ drop: () => Promise<void> }> = []
@@ -18,21 +18,6 @@ const surrealConfigs: ProjectConfig[] = []
 afterAll(async () => {
   await Promise.all([...dbs.map(d => d.drop()), ...surrealConfigs.map(c => dropSurrealDb(c))])
 }, 30_000)
-
-// mirrors main.test.ts's / adr-commands.test.ts's drop shape (not cross-imported per the repo's
-// no-cross-test-import convention): `use()` selects only the namespace, and the (internally
-// generated, `t_[a-z0-9]+`) db name is inlined directly, since `REMOVE DATABASE IF EXISTS
-// type::database($db)` is not a valid function path in SurrealDB v3.2.0.
-async function dropSurrealDb(config: ProjectConfig): Promise<void> {
-  const s = new Surreal()
-  await s.connect(config.projectDbUrl)
-  await s.signin({ username: config.projectDbUser, password: config.projectDbPassword })
-  await s.use({ namespace: config.projectDbNamespace })
-  // createMemory opens the project-derived name; drop base and derived alike
-  for (const name of [config.projectDbName, projectDatabaseName(config.projectDbName, config.projectId)])
-    await s.query(`REMOVE DATABASE IF EXISTS \`${name}\`;`).catch(() => {})
-  await s.close()
-}
 
 // memory_written payload parsed through its owning schema at the read boundary — never a cast
 const writtenNote = (payload: unknown): { id: string; title: string } => MemoryWrittenPayload.parse(payload).note
@@ -532,12 +517,9 @@ describe('deleteProject', () => {
     expect(await check.events.all()).toEqual([])
   })
 
-  // Deleting a chat has to take its knowledge with it — the read model lives in a project-derived
-  // SurrealDB database that the home project's memory instance cannot reach. It used to be left
-  // behind silently as "inert garbage", which it was not: those notes stayed live in `orc memory
-  // ls`, in search and in agent recall, with no events behind them, until a later rebuild dropped
-  // them. This setup points at an unreachable Surreal, so it pins the half that must never go
-  // quiet again — when the wipe cannot happen, the caller is told.
+  // Deleting a chat must delete its knowledge — the read model lives in a project-derived SurrealDB
+  // database that the home project's memory instance cannot reach (orphaned notes stay live until
+  // a rebuild drops them). When the wipe fails, the caller is told.
   it('reports when the deleted chat\'s knowledge could not be wiped', async () => {
     const { kernel, actions } = await setup()
     await kernel.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'home task', spec: '' })

@@ -83,7 +83,7 @@ export function renderMemoryIndex(notes: MemoryNote[]): string {
 // `view` is the workspace standing the rendered files carry `provisional` from — resolved by the
 // CALLER and passed as a snapshot, so the whole-corpus render below folds the workspace table once
 // rather than once per note.
-export async function rebuildVaultMemory(surreal: SurrealMemory, vaultDir: string, view?: WorkspaceView): Promise<void> {
+export async function rebuildVaultMemory(surreal: Pick<SurrealMemory, 'allNotes'>, vaultDir: string, view?: WorkspaceView): Promise<void> {
   const notes = await surreal.allNotes()
   const root = path.join(vaultDir, 'memory')
   const expected = new Set([...notes.map(n => noteRelPath(n)), 'index.md'])

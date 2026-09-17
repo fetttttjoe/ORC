@@ -97,12 +97,11 @@ export const RETENTION = Retention.enum
 // `research` is a distilled web finding — it is the one kind that MUST carry a citation.
 // A kind classifies a CLAIM, so it belongs to the semantic tier alone: 'plan' is not a kind of
 // claim, it is a different memory system, and it lives in NOTE_TIERS below.
-// `outcome` vs `decision` is the one distinction here that was learned the hard way. A
-// consolidation — what one task DID — used to be written as a decision, and on the live vault that
-// meant all 42 notes carrying `decision` were outcome-<uuid> consolidations and not one was an
-// architectural choice. So "which decisions has this project made" was unanswerable: the kind that
-// should have named a short, human-approved set instead named the highest-volume machine output in
-// the system. They also have different lifetimes — an outcome is true forever about a run that is
+// `outcome` vs `decision` is the one distinction here learned the hard way. A consolidation
+// (what one task DID) is an outcome, not a decision — they have different lifetimes and answer
+// different questions. [Measured 2026-08-04: labeling outcome consolidations as decisions made
+// "which decisions has this project made" unanswerable: the kind returned 42 task outcomes and
+// zero architectural choices.] An outcome is true forever about a run that is
 // over, while a decision stays live until something overturns it.
 export const NOTE_KINDS = ['fact', 'decision', 'outcome', 'architecture_current', 'architecture_target', 'documentation', 'research'] as const
 export const NoteKind = z.enum(NOTE_KINDS)
@@ -203,7 +202,7 @@ export const MemoryWriteResult = z.object({ id: z.string(), warnings: z.array(z.
 export type MemoryWriteResult = z.infer<typeof MemoryWriteResult>
 
 // Models pass a bare string where a one-element array is meant often enough to cost real
-// iterations (a scenario-2 verify step lost a turn to `paths: "src/x.ts"` → zod error → retry).
+// iterations (a verify step lost a turn to `paths: "src/x.ts"` → zod error → retry).
 // Accept the scalar as [scalar] at this boundary — a typed union, not z.preprocess, so the
 // draft's input types stay precise for TS callers. Object arrays (links/sources) stay strict:
 // a bare string there is a genuine shape mistake, not a spelling of the same intent.
@@ -291,8 +290,8 @@ export const PlanNoteInput = z.object({
   // LINK is a durable statement about how facts relate. Carrying ordering as a `depends_on` link
   // overloaded one kind with two meanings (plan-authoring said "order lives in depends_on", while
   // codebase-analysis said "each area links depends_on: <area>" to mean an import), so the freeze
-  // had to GUESS which was meant from whether the target happened to be a sibling — and guessed
-  // wrong for a target that used to be one, silently un-ordering the plan.
+  // guesses which is meant from whether the target is a sibling — a heuristic that can fail if
+  // the target changed status, silently un-ordering the plan.
   // Nothing traverses it either: the graph draws step ordering from the frozen step's own
   // dependsOn, so this was only ever an input to the freeze.
   dependsOn: stringOrList(z.string().min(1).max(MEMORY_LIMITS.labelChars), MEMORY_LIMITS.detailItems).default([]),
@@ -569,7 +568,7 @@ export const NoteSummary = z.object({
 })
 export type NoteSummary = z.infer<typeof NoteSummary>
 
-// memory_search's result envelope (tools.ts constructs it; the loop's Task 7 preload parses it —
+// memory_search's result envelope (tools.ts constructs it; the loop's preload parses it —
 // no casts, same discipline as MemoryWriteResult).
 export const MemorySearchResult = z.object({
   // Claims are the retrieval surface: a matched STATEMENT is what a reader can act on. `notes` is
@@ -682,11 +681,10 @@ export interface MemorySearchOpts { mode?: SearchMode; halfLifeDays?: number }
 // plus its own plan scope — contracts linkLookupScopes). It must reach the QUERY, never a post-filter:
 // the semantic arm ranks over the whole table and truncates, so filtering afterwards lets one busy
 // project's plan notes occupy every slot and starve the knowledge the filter was asking for.
-// `kind` is the retrieval handle for a CLASS of knowledge — "which decisions does this project
-// hold" was previously answerable only by tag, and a tag is refused when no note carries it yet
-// (tools.ts's unknownTagError), so the question read as a tool failure on every corpus until
-// someone had already answered it once. A closed enum cannot fail that way: an empty result is a
-// real answer. Semantic-tier only, like the field itself.
+// `kind` is the retrieval handle for a CLASS of knowledge. A closed enum (not a tag) is used
+// because an empty result is a real answer — if kind retrieval returned empty on a corpus with no
+// notes, that's a valid "this project holds zero of that kind", whereas a tag-based query fails
+// when no note carries it yet (tools.ts's unknownTagError). Semantic-tier only, like the field itself.
 export interface MemoryFilter { scope?: string | string[]; category?: string; tag?: string; tier?: NoteTier; kind?: NoteKind }
 
 // The single-writer gateway (the wrapper). write/remove append events; reads hit SurrealDB.

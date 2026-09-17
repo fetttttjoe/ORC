@@ -1,31 +1,16 @@
-import { afterAll, afterEach, describe, expect, it, mock, spyOn } from 'bun:test'
+import { afterAll, afterEach, describe, expect, it, mock } from 'bun:test'
 import { mkdtempSync, realpathSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import type { Command } from 'commander'
-import { Surreal } from 'surrealdb'
 import { z } from 'zod'
 import { AUTHOR_SOURCE, DECISION_STATUS, EVENT_KIND, MemoryWrittenPayload } from '@orc/contracts'
-import { loadConfig, projectDatabaseName, requireProject, type ProjectConfig } from '@orc/kernel'
+import { loadConfig, requireProject, type ProjectConfig } from '@orc/kernel'
 import { createTestDb, seedTestWorkspace, TEST_PROJECT_ID, TEST_WORKSPACE_ID } from '@orc/kernel/test-helpers'
 import { ADR_SECTION, DECISION_REFUSAL } from '@orc/memory'
 import { renderDecisionList } from './adr-commands'
-import { buildProgram, openKernel } from './main'
+import { openKernel } from './main'
 import { buildPlugins } from './runtime'
-
-// The same walk main.test.ts and ws-commands.test.ts do, copied rather than imported (importing
-// another test file would run its whole suite): commander copies exitOverride only to subcommands
-// created AFTER the call, and buildProgram builds every `adr` subcommand up front — so the bad
-// `--status final` this file asserts on would process.exit(1) and take the whole test process down
-// instead of rejecting.
-const overrideExits = (program: Command): Command => {
-  const walk = (c: Command): void => {
-    c.exitOverride()
-    for (const sub of c.commands) walk(sub)
-  }
-  walk(program)
-  return program
-}
+import { cli, dropSurrealDb } from './test-helpers'
 
 const dbs: Array<{ drop: () => Promise<void> }> = []
 const surrealConfigs: ProjectConfig[] = []
@@ -38,21 +23,6 @@ afterAll(async () => {
   await Promise.all([...dbs.map(d => d.drop()), ...surrealConfigs.map(c => dropSurrealDb(c))])
 }, 30_000)
 afterEach(() => mock.restore())
-
-// mirrors main.test.ts's drop shape (not cross-imported per the repo's no-cross-test-import
-// convention): `use()` selects only the namespace, and the (internally-generated, `t_[a-z0-9]+`)
-// db name is inlined directly, since `REMOVE DATABASE IF EXISTS type::database($db)` is not a valid
-// function path in SurrealDB v3.2.0. Connection details come from the injected config — no literals.
-async function dropSurrealDb(config: ProjectConfig): Promise<void> {
-  const s = new Surreal()
-  await s.connect(config.projectDbUrl)
-  await s.signin({ username: config.projectDbUser, password: config.projectDbPassword })
-  await s.use({ namespace: config.projectDbNamespace })
-  // createMemory opens the project-derived name; drop base and derived alike
-  for (const name of [config.projectDbName, projectDatabaseName(config.projectDbName, config.projectId)])
-    await s.query(`REMOVE DATABASE IF EXISTS \`${name}\`;`).catch(() => {})
-  await s.close()
-}
 
 // makeCli from main.test.ts's "memory add … isolated throwaway SurrealDB db" test: a per-test
 // Postgres log, a throwaway Surreal database, and the real plugin wiring `orc adr` reads through.
@@ -67,20 +37,9 @@ async function makeAdrCli() {
   // the workspace must sit at THIS config's dir: `orc adr` resolves its author's workspace by
   // matching the process's directory (cwdAuthor), and refuses when nothing claims it
   await seedTestWorkspace(log, realpathSync(config.dir))
-  const lines: string[] = []
-  spyOn(console, 'log').mockImplementation((...a: unknown[]) => { lines.push(a.join(' ')) })
   const { host, hub } = await buildPlugins(config) // real plugin wiring — no stub casts
   cleanup.push(() => log.close(), () => hub.close(), () => host.shutdown())
-  const plugin = { host, hub, config, log }
-  // Returns the lines THIS invocation printed, never the accumulated buffer (ws-commands.test.ts's
-  // rule): a cumulative array makes `ls` assertions unfalsifiable, because the `new` lines printed
-  // earlier in the same test already carry every id the listing would.
-  const run = async (...args: string[]) => {
-    const from = lines.length
-    // fresh Command instance per invocation; commander does not re-parse cleanly
-    await overrideExits(buildProgram(kernel, undefined, plugin)).parseAsync(args, { from: 'user' })
-    return lines.slice(from)
-  }
+  const { run } = cli(kernel, undefined, { host, hub, config, log })
   return { run, log, config, kernel }
 }
 

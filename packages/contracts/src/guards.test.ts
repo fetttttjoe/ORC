@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'bun:test'
 import { z } from 'zod'
-import { errorMessage } from './guards'
+import { errorMessage, nonEmptyLines } from './guards'
 
 describe('errorMessage', () => {
   it('unwraps Error and stringifies the rest', () => {
@@ -16,5 +16,16 @@ describe('errorMessage', () => {
     const msg = errorMessage(r.error)
     expect(msg).toContain('paths')
     expect(msg).not.toContain('"code"') // no raw issue JSON
+  })
+})
+
+describe('nonEmptyLines', () => {
+  it('trims each line and drops blanks', () => {
+    expect(nonEmptyLines('  a  \n\nb\n  \nc  ')).toEqual(['a', 'b', 'c'])
+  })
+
+  it('returns an empty array for blank input', () => {
+    expect(nonEmptyLines('')).toEqual([])
+    expect(nonEmptyLines('\n  \n')).toEqual([])
   })
 })

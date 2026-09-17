@@ -1,10 +1,9 @@
 // wire shapes of /api — the app depends on the HTTP contract, not server internals.
 //
-// Every shape here is INFERRED from the schema that parses it. Hand-writing them a second time is
-// what this file used to do, and the two copies drifted: the envelope declared `patch` required
-// where the schema made it optional (a build error), and `authorTaskId`, `copilotModel` and
-// `analyzerRef` existed on the wire but were invisible to every consumer because no interface
-// mentioned them. A field can now only reach a component by being parsed first.
+// Every shape here is INFERRED from the schema that parses it. A hand-written second copy drifts:
+// an envelope declaring `patch` required where the schema made it optional was a build error, and
+// `authorTaskId`, `copilotModel` and `analyzerRef` existed on the wire but were invisible to every
+// consumer because no interface mentioned them. A field can only reach a component by being parsed first.
 import type { z } from 'zod'
 import type * as S from './schemas'
 import type { GraphNode as WireNode, GraphLink as WireLink, GraphPatch as WirePatch } from '@orc/ui-core/graph-wire'

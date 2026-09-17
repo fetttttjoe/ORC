@@ -2,7 +2,7 @@ import { afterAll, describe, expect, it } from 'bun:test'
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import { NOTE_KINDS, type EventRecord, type SemanticNote } from '@orc/contracts'
+import { NOTE_KINDS, type EventRecord, type SemanticNote, EVENT_KIND, LINK_KIND } from '@orc/contracts'
 import { SurrealMemory } from './surreal'
 import { TEST_WORKSPACE_ID, episodicNoteFixture, eventFixture, planNoteFixture, semanticNoteFixture } from '@orc/contracts/fixtures'
 import { createTestSurreal } from './test-helpers'
@@ -32,7 +32,7 @@ describe('renderMemoryIndex', () => {
 
   it('groups notes into current/target/decision sections with labeled edges and note links', () => {
     const notes = [
-      note({ id: 'db', kind: 'architecture_current', title: 'Postgres log', links: [{ id: 'events', kind: 'depends_on' }] }),
+      note({ id: 'db', kind: 'architecture_current', title: 'Postgres log', links: [{ id: 'events', kind: LINK_KIND.depends_on }] }),
       note({ id: 'events', kind: 'architecture_current', title: 'Event "envelope"' }),
       note({ id: 'server', kind: 'architecture_target', title: 'Team server' }),
       note({ id: 'why-pg', kind: 'decision', title: 'Why Postgres' }),
@@ -60,7 +60,7 @@ describe('renderMemoryIndex', () => {
   // memory_neighbors traversed it fine. One graph with subgraphs is what makes it visible.
   it('draws an edge whose endpoints are in different sections', () => {
     const md = renderMemoryIndex([
-      note({ id: 'summary', kind: 'fact', title: 'Summary', links: [{ id: 'finding', kind: 'derived_from' }] }),
+      note({ id: 'summary', kind: 'fact', title: 'Summary', links: [{ id: 'finding', kind: LINK_KIND.derived_from }] }),
       note({ id: 'finding', kind: 'research', title: 'Finding', sources: [{ url: 'https://e.test', retrievedAt: 'T' }] }),
     ])
     expect(md).toContain('-->|derived_from|')
@@ -114,7 +114,7 @@ describe('rebuildVaultMemory', () => {
     drops.push(() => m.close())
     const vaultDir = mkdtempSync(path.join(tmpdir(), 'orc-memidx-'))
     const written = (seq: number, id: string): EventRecord => eventFixture({
-      seq, taskId: null, kind: 'memory_written',
+      seq, taskId: null, kind: EVENT_KIND.memory_written,
       payload: {
         note: {
           id, scope: 'project', kind: 'fact', sourceRevision: null, title: id,

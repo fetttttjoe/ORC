@@ -48,7 +48,7 @@ export function createVaultProjector(opts: { log: EventLog; config: { vaultDir: 
         const taskId = e.taskId
         const prev = timers.get(taskId)
         if (prev) clearTimeout(prev)
-        // coalesce a burst into one render per task (spec §5) — not a poll
+        // coalesce a burst into one render per task — not a poll
         timers.set(taskId, setTimeout(() => {
           timers.delete(taskId)
           renderTask(taskId).catch(err => console.warn(`vault render failed: ${errorMessage(err)}`))

@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'bun:test'
 import { EventKind, PAYLOAD_SCHEMAS } from './events'
+import { EVENT_KIND } from './event-kinds'
 import {
   addUsage, classifiedError, costUSDFor, failureClassOf, isTerminalError, modelIdsFrom, resolveModel, terminalError,
   Signal, UnifiedEvent, FAILURE_CLASS, SIGNAL_OUTCOME,
@@ -77,7 +78,7 @@ describe('execution contracts', () => {
     const result = await operation(
       { operationId: 'r1:model:1', kind: 'model', name: 'fake/m', before: {} },
       async () => 'answer',
-      r => [{ kind: 'agent_call', payload: { response: r } }],
+      r => [{ kind: EVENT_KIND.agent_call, payload: { response: r } }],
     )
     expect(result).toBe('answer')
     expect(captured).toHaveLength(1)

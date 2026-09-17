@@ -382,8 +382,8 @@ export class Kernel {
   }
 
   // The OTHER human gate, and the one nothing ever announced — see projections.gatedChildren for
-  // why it is invisible. Observed live (events-pilot.log 161-188: three gated splits, then join,
-  // then never another event).
+  // why it is invisible. Observed live: three gated splits, then join,
+  // then never another event.
   async gatedChildren(taskId: string): Promise<Array<{ id: string; title: string }>> {
     return gatedChildren(await this.state(), taskId)
   }
@@ -401,26 +401,34 @@ export class Kernel {
     return null
   }
 
-  // The hash the human approved, and WHEN — the seq lets finalize_plan name the notes edited since,
-  // instead of reporting only that something moved. One derivation of "which approval", so the
-  // check and the explanation can never disagree about which one they mean. What counts as an
-  // approving answer comes from isApprovalAnswer (contracts/approval-answer.ts) — it must be the
-  // SAME predicate replyFeedback stamped with, or this read finds nothing the writer left.
-  async approvedPlanHash(taskId: string, runToken: string): Promise<{ hash: string; seq: number } | null> {
+  // The scan + parse + isApprovalAnswer + planHash predicate approvedPlanHash and
+  // nonHumanPlanApproval both need — they read the SAME feedback_provided events for this
+  // (taskId, runToken) and differ only in which door they accept, so the read happens once, here.
+  // Newest first (reverse log order): both callers want the MOST RECENT matching answer. What
+  // counts as an approving answer comes from isApprovalAnswer (contracts/approval-answer.ts) — it
+  // must be the SAME predicate replyFeedback stamped with, or this read finds nothing the writer left.
+  private async planApprovals(taskId: string, runToken: string): Promise<Array<{ source: string; hash: string; seq: number }>> {
+    const out: Array<{ source: string; hash: string; seq: number }> = []
     for (const event of [...(await this.log.byTask(taskId))].reverse()) {
       if (event.kind !== EVENT_KIND.feedback_provided || event.runToken !== runToken) continue
       const parsed = FeedbackProvidedPayload.safeParse(event.payload)
-      if (parsed.success && this.approvalDoors.includes(parsed.data.author.source)
-        && isApprovalAnswer(parsed.data.text) && parsed.data.planHash)
-        return { hash: parsed.data.planHash, seq: event.seq }
+      if (parsed.success && isApprovalAnswer(parsed.data.text) && parsed.data.planHash)
+        out.push({ source: parsed.data.author.source, hash: parsed.data.planHash, seq: event.seq })
     }
-    return null
+    return out
   }
 
-  // The approval approvedPlanHash THREW AWAY, and which door it came through. Same scan, same
-  // parse, same isApprovalAnswer + planHash requirements — inverted on exactly one term: the
-  // author.source is NOT in this.approvalDoors, the very list the gate accepts, so a door an
-  // operator opened can never be both accepted and reported as the reason for a refusal.
+  // The hash the human approved, and WHEN — the seq lets finalize_plan name the notes edited since,
+  // instead of reporting only that something moved. One derivation of "which approval", so the
+  // check and the explanation can never disagree about which one they mean.
+  async approvedPlanHash(taskId: string, runToken: string): Promise<{ hash: string; seq: number } | null> {
+    const found = (await this.planApprovals(taskId, runToken)).find(a => this.approvalDoors.includes(a.source))
+    return found ? { hash: found.hash, seq: found.seq } : null
+  }
+
+  // The approval approvedPlanHash THREW AWAY, and which door it came through — inverted on exactly
+  // one term: the author.source is NOT in this.approvalDoors, the very list the gate accepts, so a
+  // door an operator opened can never be both accepted and reported as the reason for a refusal.
   // Deliberately a SIBLING read rather than a widened return on
   // approvedPlanHash: that function IS the gate, and a refusal message must never be a reason to
   // touch what satisfies it. Nothing here decides anything — finalize_plan calls it only after
@@ -428,14 +436,8 @@ export class Kernel {
   // the MCP door", which the log records identically apart from this field. Reports the source it
   // actually found, so the message can name the door instead of guessing 'mcp'.
   async nonHumanPlanApproval(taskId: string, runToken: string): Promise<{ source: string } | null> {
-    for (const event of [...(await this.log.byTask(taskId))].reverse()) {
-      if (event.kind !== EVENT_KIND.feedback_provided || event.runToken !== runToken) continue
-      const parsed = FeedbackProvidedPayload.safeParse(event.payload)
-      if (parsed.success && !this.approvalDoors.includes(parsed.data.author.source)
-        && isApprovalAnswer(parsed.data.text) && parsed.data.planHash)
-        return { source: parsed.data.author.source }
-    }
-    return null
+    const found = (await this.planApprovals(taskId, runToken)).find(a => !this.approvalDoors.includes(a.source))
+    return found ? { source: found.source } : null
   }
 
   // Plan-tier note ids written or deleted after `seq` in this task's plan scope — what actually

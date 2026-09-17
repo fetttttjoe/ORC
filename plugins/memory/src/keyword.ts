@@ -108,8 +108,7 @@ export const keywordTerms = (query: string): string[] => {
 // are shared between the two corpora, so the columns are not independent samples. What would settle
 // it is a corpus with independent negatives and n >= 50 positives. If it becomes a real complaint
 // the direction to test first is a floor on the absolute matched count (">= half OR >= 3 terms"),
-// which both corpora would tolerate — untested, a direction only. Evidence:
-// .superpowers/sdd/2026-07-28-retrieval-quality/corpus-comparison-report.md.
+// which both corpora would tolerate — untested, a direction only.
 //
 // THE TWO SURVIVING NEGATIVES are "graphql resolver schema stitching" (2 of its 4 terms appear in
 // real notes) and "stripe cli" — which are also the two highest-cosine negatives SEMANTIC_FLOOR

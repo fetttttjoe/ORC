@@ -12,6 +12,8 @@
 // `sourceRevision` thunk, whose callers already `await` it, and making it sync now would change
 // nothing observable, so it stays as measured rather than "fixed" to match the rest of the file.
 
+import { errorMessage } from '@orc/contracts'
+
 // The ONE spawn; every probe in this file is a view of it. Raw (exit code plus BOTH streams)
 // because the views genuinely disagree about what carries the answer: `git()` reads stdout,
 // `gitResult()` reads stderr, `isAncestor` reads the exit code alone (1 is git's "no", anything
@@ -25,7 +27,7 @@ function spawnGit(dir: string, args: string[]): { code: number | null; stdout: s
     const r = Bun.spawnSync(['git', '-C', dir, ...args], { stdout: 'pipe', stderr: 'pipe' })
     return { code: r.exitCode, stdout: decoder.decode(r.stdout).trim(), stderr: decoder.decode(r.stderr).trim() }
   } catch (err) {
-    return { code: null, stdout: '', stderr: err instanceof Error ? err.message : String(err) }
+    return { code: null, stdout: '', stderr: errorMessage(err) }
   }
 }
 

@@ -7,6 +7,7 @@ import {
   extensionFingerprint, grantExtensionTrust, grantMcpTrust,
   isExtensionTrusted, isMcpTrusted, loadTrust, mcpFingerprint,
 } from './trust'
+import { must } from '@orc/contracts/fixtures'
 
 let dirs: string[] = []
 const temp = () => { const d = mkdtempSync(path.join(tmpdir(), 'orc-trust-')); dirs.push(d); return d }
@@ -112,7 +113,7 @@ describe('trust store', () => {
     writeFileSync(entry, 'export default { id: "x", activate() {} }')
     const store = grantExtensionTrust('ext.ts', d)
     expect(isExtensionTrusted(store, 'ext.ts', d)).toBe(true)
-    expect(store.extensions[0]!.fingerprint).toBe(extensionFingerprint(entry, d))
+    expect(must(store.extensions[0], 'store.extensions[0]').fingerprint).toBe(extensionFingerprint(entry, d))
 
     writeFileSync(entry, 'export default { id: "x", activate() { /* changed */ } }')
     expect(isExtensionTrusted(store, 'ext.ts', d)).toBe(false)

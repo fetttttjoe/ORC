@@ -1,11 +1,11 @@
-import { afterAll, afterEach, describe, expect, it, mock, spyOn } from 'bun:test'
+import { afterAll, afterEach, describe, expect, it, mock } from 'bun:test'
 import { existsSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
-import type { Command } from 'commander'
 import { WORKSPACE_KIND, WORKSPACE_STATE, errorMessage, type Workspace, type WorkspaceHealth, type WorkspaceWithHealth } from '@orc/contracts'
 import { currentBranch, initializeProject, loadConfig, requireProject } from '@orc/kernel'
 import { createTestDb, sh, TEST_PROJECT_ID, tmpGitRepo } from '@orc/kernel/test-helpers'
-import { buildProgram, openKernel } from './main'
+import { openKernel } from './main'
+import { cli } from './test-helpers'
 import { buildPlugins } from './runtime'
 import { adoptCwd } from './workspace-adopt'
 import { listWorkspaceHealth, PROVISIONAL_UNKNOWN } from './workspace-health'
@@ -18,19 +18,6 @@ import { ARCHIVE_WITHOUT_REMOVE, WORKSPACE_BRANCH_PREFIX, WORKTREES_DIR } from '
 const branches = (repo: string): string[] => {
   const r = Bun.spawnSync(['git', '-C', repo, 'branch', '--format=%(refname:short)'], { stdout: 'pipe', stderr: 'pipe' })
   return new TextDecoder().decode(r.stdout).split('\n').filter(l => l !== '')
-}
-
-// The same walk main.test.ts does, copied rather than imported (importing another test file would
-// run its whole suite): commander copies exitOverride only to subcommands created AFTER the call,
-// and buildProgram builds every `ws` subcommand up front — so without this an unknown subcommand or
-// a missing argument process.exit(1)s and takes the whole test process down instead of rejecting.
-const overrideExits = (program: Command): Command => {
-  const walk = (c: Command): void => {
-    c.exitOverride()
-    for (const sub of c.commands) walk(sub)
-  }
-  walk(program)
-  return program
 }
 
 const dbs: Array<{ drop: () => Promise<void> }> = []
@@ -70,19 +57,10 @@ async function makeWsCli() {
   // directly, so seed the same record here — `ws current` and a task bound to this directory both
   // read it, and without it they would report a project state no real invocation can produce.
   await adoptCwd(kernel, config)
-  const lines: string[] = []
-  spyOn(console, 'log').mockImplementation((...a: unknown[]) => { lines.push(a.join(' ')) })
-  // Returns the lines THIS invocation printed, never the accumulated buffer. A cumulative array
-  // made assertions unfalsifiable: `ws current`'s only check was that the output contained the
-  // workspace id, which the retitle and restore lines printed earlier in the same test already
-  // did — deleting the whole `current` action body still passed. The buffer is not returned from
-  // makeWsCli either, so a later test cannot reach around this.
-  const run = async (...args: string[]) => {
-    const from = lines.length
-    // fresh Command instance per invocation; commander does not re-parse cleanly
-    await overrideExits(buildProgram(kernel, undefined, { host, hub, config, log })).parseAsync(args, { from: 'user' })
-    return lines.slice(from)
-  }
+  // `ws current`'s only check is that the output contains the workspace id, which the retitle and
+  // restore lines printed earlier in the same test already did — so only the per-invocation lines
+  // cli() hands back are returned, never the buffer.
+  const { run } = cli(kernel, undefined, { host, hub, config, log })
   return { run, kernel, log, main, worktree, config }
 }
 

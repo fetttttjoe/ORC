@@ -2,6 +2,7 @@ import { describe, expect, it } from 'bun:test'
 import { mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
+import { must } from '@orc/contracts/fixtures'
 import { verifyArtifacts } from './artifacts'
 
 const ws = () => mkdtempSync(path.join(tmpdir(), 'orc-art-'))
@@ -15,7 +16,7 @@ describe('verifyArtifacts', () => {
     const receipts = verifyArtifacts(dir, ['b.txt', 'sub/a.txt'])
     expect(receipts).toEqual([
       { path: 'b.txt', sha256: '2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824', size: 5 },
-      { path: 'sub/a.txt', sha256: receipts[1]!.sha256, size: 2 },
+      { path: 'sub/a.txt', sha256: must(receipts[1], 'second receipt').sha256, size: 2 },
     ])
     expect(receipts.map(r => r.path)).toEqual([...receipts.map(r => r.path)].sort())
   })

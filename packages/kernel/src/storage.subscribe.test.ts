@@ -4,16 +4,14 @@ import { sql } from 'drizzle-orm'
 import { drizzle } from 'drizzle-orm/node-postgres'
 import type { TaskNode } from '@orc/contracts'
 import { EVENT_KIND } from '@orc/contracts'
-import { createTestDb, TEST_PROJECT_ID, TEST_WORKSPACE_ID } from './test-helpers'
+import { createTestDb, TEST_PROJECT_ID } from './test-helpers'
 import { openStorage, type EventLog } from './storage'
+import { taskFixture } from '@orc/contracts/fixtures'
 
 const dbs: Array<{ drop: () => Promise<void> }> = []
 afterEach(async () => { for (const d of dbs.splice(0)) await d.drop() })
 
-const task = (id: string): TaskNode => ({
-  id, parentId: null, workspaceId: TEST_WORKSPACE_ID, type: 'generic', title: id, spec: '', status: 'draft',
-  zone: [], budgetUSD: null, depth: 0, createdAt: '2026-07-17T00:00:00.000Z',
-})
+const task = (id: string): TaskNode => taskFixture({ id, title: id, createdAt: '2026-07-17T00:00:00.000Z' })
 const appendCreated = (log: EventLog, id: string) =>
   log.append({ taskId: id, stepId: null, runToken: null, kind: EVENT_KIND.task_created, payload: { task: task(id) } })
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms))
@@ -28,7 +26,10 @@ describe('EventLog.subscribe', () => {
     const log = (await openStorage(db.url, { projectId: TEST_PROJECT_ID })).events
     await appendCreated(log, 'a')
     const seen: number[] = []
-    const unsub = await log.subscribe({ fromSeq: 0 }, e => { seen.push(e.seq) })
+    // the handler for seq 2 stalls so the pump is mid-flight when the database vanishes: the next
+    // notification sets wakeAgain, the loop's next SELECT then fails, and the 250 ms pump retry is
+    // armed — the second loop that must stop with the reconnect loop, not spin for the process's life
+    const unsub = await log.subscribe({ fromSeq: 0 }, async e => { seen.push(e.seq); if (e.seq === 2) await sleep(400) })
     await sleep(50)
     expect(seen.length).toBe(1)
 
@@ -36,14 +37,20 @@ describe('EventLog.subscribe', () => {
     const realWarn = console.warn
     console.warn = (...a: unknown[]) => { warnings.push(a.join(' ')) }
     try {
+      await appendCreated(log, 'b')
+      await sleep(50)
+      await appendCreated(log, 'c')
       await db.drop() // pulls the database out from under a LIVE subscription
-      await sleep(1200) // past several reconnect delays (100/200/400/800)
+      await sleep(1200) // past several reconnect delays (100/200/400/800) and pump retries (250)
     } finally {
       console.warn = realWarn
     }
     // it gives up ONCE, rather than logging a fresh failure on every backoff tick
     expect(warnings.filter(w => w.includes('event stream stopped')).length).toBe(1)
     expect(warnings.filter(w => w.includes('reconnect failed')).length).toBe(0)
+    // the pump retry quiesces with it: one failure plus at most the retry already armed, never one
+    // every 250 ms for the rest of the process
+    expect(warnings.filter(w => w.includes('pump failed')).length).toBeLessThanOrEqual(2)
     await unsub()
     await log.close().catch(() => {})
   }, 15000)

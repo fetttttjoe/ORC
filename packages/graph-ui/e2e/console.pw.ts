@@ -1,4 +1,5 @@
 import { expect, test, type Page } from '@playwright/test'
+import { must } from '@orc/contracts/fixtures'
 
 /**
  * What an operator must be able to do, proven end to end against the fixture server (real kernel,
@@ -133,9 +134,9 @@ test('the rail measures what it declares and keeps its controls inside', async (
   await open(page)
   // rem-based sizing is anchored to the ROOT font size: setting it on html once scaled the whole
   // layout to 84%, so panes rendered narrower than declared and their contents spilled out.
-  const railBox = (await rail(page).boundingBox())!
+  const railBox = must(await rail(page).boundingBox(), 'rail bounding box')
   expect(railBox.width).toBe(288)
-  const note = (await rail(page).getByRole('button', { name: /knowledge note/ }).boundingBox())!
+  const note = must(await rail(page).getByRole('button', { name: /knowledge note/ }).boundingBox(), 'knowledge note bounding box')
   expect(note.x + note.width).toBeLessThanOrEqual(railBox.x + railBox.width)
 })
 
@@ -155,11 +156,11 @@ test('a tall gate question never pushes the panes over each other', async ({ pag
 
   // the ledger and the copilot must remain stacked, not overlapping: an unbounded gate block
   // grew past the pane and painted over the composer below it
-  const ledgerBox = (await ledger(page).boundingBox())!
-  const copilotBox = (await copilot(page).boundingBox())!
+  const ledgerBox = must(await ledger(page).boundingBox(), 'ledger bounding box')
+  const copilotBox = must(await copilot(page).boundingBox(), 'copilot bounding box')
   expect(ledgerBox.y + ledgerBox.height).toBeLessThanOrEqual(copilotBox.y + 1)
   // and everything stays inside the window
-  const viewport = page.viewportSize()!
+  const viewport = must(page.viewportSize(), 'viewport size')
   expect(copilotBox.y + copilotBox.height).toBeLessThanOrEqual(viewport.height + 1)
 })
 

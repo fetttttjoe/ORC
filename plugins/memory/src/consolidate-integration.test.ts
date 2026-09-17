@@ -34,9 +34,9 @@ async function harness(taskId: string, title: string) {
   return live
 }
 
-// A completion nobody was listening for used to be lost for good: the subscription starts at the
-// latest seq, and nothing supervises runs, so a task that finished while the CLI process was on its
-// way out simply never got consolidated. Observed live on a real grounded run.
+// A task that finishes while no listener is attached still gets consolidated: the subscription
+// starts at the latest seq and nothing supervises runs, so consolidation must work retroactively
+// (a real grounded run finished while the CLI process exited).
 it('consolidates a task that finished while no lifecycle was attached', async () => {
   const live = await createLiveMemory()
   drops.push(live.close)

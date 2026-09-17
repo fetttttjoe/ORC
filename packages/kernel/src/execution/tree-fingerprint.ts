@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process'
 import { createHash } from 'node:crypto'
+import { childEnv } from './child-env'
 
 // "Has the working tree changed?" as ONE cheap value, shared by every consumer that caches against
 // it. HEAD plus the porcelain status covers both halves: a commit moves HEAD, and any tracked or
@@ -18,15 +19,6 @@ import { createHash } from 'node:crypto'
 // null is NOT a fingerprint. A directory that is not a repo, or a git that failed, yields null, and
 // every consumer must treat null as "cannot cache" rather than as a stable key — with nothing to
 // invalidate against, a hit could serve a result for a tree that has completely changed.
-
-// Never the orchestrator's full env: this runs git, but the same child-env policy applies as
-// everywhere else a subprocess is spawned — provider keys and DB credentials do not travel.
-const childEnv = (): NodeJS.ProcessEnv => {
-  const out: NodeJS.ProcessEnv = {}
-  for (const k of ['PATH', 'HOME', 'LANG', 'LC_ALL', 'TZ', 'TMPDIR'])
-    if (process.env[k] !== undefined) out[k] = process.env[k]
-  return out
-}
 
 const gitStdout = (dir: string, args: readonly string[]): Promise<string | null> =>
   new Promise(resolve => {

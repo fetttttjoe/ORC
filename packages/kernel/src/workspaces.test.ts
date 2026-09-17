@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'bun:test'
 import { EVENT_KIND, TASK_STATUS, WORKSPACE_KIND, WORKSPACE_STATE, type EventRecord, type TaskNode, type TaskStatus, type Workspace, type WorkspaceHealth } from '@orc/contracts'
+import { eventFixture } from '@orc/contracts/fixtures'
 import { fold, type State } from './projections'
 import { applyArchived, applyRetitle, compareWorkspaceHealth, orphanTasks, tasksByWorkspace, workspaceByCwd, workspaceCwdFor, workspaceHealth, type WorkspaceProbes } from './workspaces'
 
@@ -19,7 +20,7 @@ const ws = (id: string, cwd: string, extra: Partial<Workspace> = {}): Workspace 
 })
 let seq = 0
 const ev = (kind: EventRecord['kind'], payload: Record<string, unknown>, taskId: string | null = null, ts = '2026-09-14T00:00:00.000Z'): EventRecord =>
-  ({ seq: ++seq, projectId: 'p', idempotencyKey: null, taskId, stepId: null, runToken: null, kind, payload, usage: null, ts })
+  eventFixture({ seq: ++seq, taskId, kind, payload, ts })
 
 describe('workspace fold', () => {
   it('created → retitled → archived → restored', () => {

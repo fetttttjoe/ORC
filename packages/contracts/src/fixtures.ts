@@ -1,11 +1,13 @@
 // Shared test fixtures (import via '@orc/contracts/fixtures') — the single place a
 // PlanStep/Plan/EventRecord shape change has to touch across every package's tests.
+import { z } from 'zod'
 import type { EventRecord } from './events'
 import { STRATEGY, type Plan, type PlanDraft, type PlanStep } from './plan'
 import {
   EpisodicNoteInput, NOTE_TIER, PlanNoteInput, SemanticNoteInput,
   type EpisodicNote, type PlanNote, type SemanticNote,
 } from './memory'
+import { TASK_STATUS, type TaskNode } from './task'
 
 // The ONE workspace id every test-side author and task literal names — the kernel's test-helpers
 // re-exports this exact binding and builds TEST_WORKSPACE (the seeded workspace_created) from it,
@@ -66,3 +68,26 @@ export function draftFixture(steps: PlanStep[] = [stepFixture()]): PlanDraft {
 export function planFixture(over: Partial<Plan> = {}): Plan {
   return { taskId: 't1', version: 1, ...draftFixture(), ...over }
 }
+
+export function taskFixture(over: Partial<TaskNode> = {}): TaskNode {
+  return {
+    id: 't1', parentId: null, workspaceId: TEST_WORKSPACE_ID, type: 'generic', title: 'hello', spec: '',
+    status: TASK_STATUS.draft, zone: [], budgetUSD: null, depth: 0,
+    createdAt: '2026-07-16T00:00:00.000Z',
+    ...over,
+  }
+}
+
+// Test-only narrowing so `!` never appears in a test: a thrown, named error beats a silent
+// null/undefined slipping through into an assertion.
+export const must = <T>(v: T | null | undefined, what: string): T => {
+  if (v === null || v === undefined) throw new Error(`expected ${what}`)
+  return v
+}
+
+// A tool result's `output` is `unknown` by contract (ToolResult carries no schema); a test reads it
+// through these instead of a cast, so a tool that returns the wrong shape fails the parse, not a
+// later property access.
+const UnknownRecord = z.record(z.string(), z.unknown())
+export const recordOf = (v: unknown): Record<string, unknown> => UnknownRecord.parse(v)
+export const listOf = (v: unknown): unknown[] => z.array(z.unknown()).parse(v)

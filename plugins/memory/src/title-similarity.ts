@@ -57,8 +57,7 @@ export function trigramDice(a: string, b: string): number {
 // and the only false positive across both: 0.416, a run-outcome note against an architecture hub
 // sharing one phrase — one false positive in 164 pairs. The search-gated path the tool actually
 // runs (store.search(title), then trigramDice >= this) recalls all three pairs here: rewriting each
-// title id-lessly fires the warning on 3 of 17, every time naming a real sibling. Evidence:
-// .superpowers/sdd/2026-07-28-retrieval-quality/corpus-comparison-report.md.
+// title id-lessly fires the warning on 3 of 17, every time naming a real sibling.
 //
 // The band was also constrained from below, independently, and 0.60 does NOT hold there either:
 // tools.test.ts's own pre-existing fixture

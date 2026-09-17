@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'bun:test'
 import { COMMIT_STEP_ID, EVENT_KIND, FINISH_STEP_ID, LINK_KIND, ROLE_SKILL, STEP_ROLE, type EventRecord, type MemoryLink, type PlanNote } from '@orc/contracts'
-import { TEST_WORKSPACE_ID, planNoteFixture, stepFixture } from '@orc/contracts/fixtures'
+import { TEST_WORKSPACE_ID, eventFixture, must, planNoteFixture, stepFixture } from '@orc/contracts/fixtures'
 import { foldPlanNotes, freezePlan, groundedPlanOmission, instantiateFrozenPlan, planGraphHash, planScope, withCommitStep } from './grounded-plan'
 // the appender lives in the pure module now (finish-step.ts, contracts-only imports); this describe
 // stays here because its subject is what the FREEZE ends with, not the appender in isolation
@@ -36,8 +36,8 @@ describe('instantiateFrozenPlan (pure, deterministic)', () => {
     ]
     const draft = instantiateFrozenPlan('masterplan', notes)
     expect(draft.steps.map(s => s.id)).toEqual(['db', 'api'])
-    expect(draft.steps.find(s => s.id === 'api')!.dependsOn).toEqual(['db'])
-    expect(draft.steps.find(s => s.id === 'db')!.dependsOn).toEqual([])
+    expect(must(draft.steps.find(s => s.id === 'api'), 'draft.steps.find(s => s.id === \'api\')').dependsOn).toEqual(['db'])
+    expect(must(draft.steps.find(s => s.id === 'db'), 'draft.steps.find(s => s.id === \'db\')').dependsOn).toEqual([])
     expect(draft.steps[0]).toEqual({ id: 'db', role: 'implementer', title: 'DB', instructions: 'create the schema', dependsOn: [], skillRefs: [], toolRefs: [], zone: [] })
   })
 
@@ -48,8 +48,8 @@ describe('instantiateFrozenPlan (pure, deterministic)', () => {
       note({ id: 'b', title: 'B', body: 'y' }),
     ]
     const draft = instantiateFrozenPlan('masterplan', notes)
-    expect(draft.steps.find(s => s.id === 'a')!.zone).toEqual(['docs/**'])
-    expect(draft.steps.find(s => s.id === 'b')!.zone).toEqual([]) // undeclared = unfenced
+    expect(must(draft.steps.find(s => s.id === 'a'), 'draft.steps.find(s => s.id === \'a\')').zone).toEqual(['docs/**'])
+    expect(must(draft.steps.find(s => s.id === 'b'), 'draft.steps.find(s => s.id === \'b\')').zone).toEqual([]) // undeclared = unfenced
   })
 
   it("freezes a 'verify' subplan as auditor; siblings stay implementer", () => {
@@ -59,14 +59,14 @@ describe('instantiateFrozenPlan (pure, deterministic)', () => {
       note({ id: 'verify', title: 'Verify', body: 'audit it', dependsOn: ['work'] }),
     ]
     const draft = instantiateFrozenPlan('masterplan', notes)
-    expect(draft.steps.find(s => s.id === 'verify')!.role).toBe('auditor')
-    expect(draft.steps.find(s => s.id === 'work')!.role).toBe('implementer')
+    expect(must(draft.steps.find(s => s.id === 'verify'), 'draft.steps.find(s => s.id === \'verify\')').role).toBe('auditor')
+    expect(must(draft.steps.find(s => s.id === 'work'), 'draft.steps.find(s => s.id === \'work\')').role).toBe('implementer')
     // the auditor + heal contracts ride as the kernel-appended role skill — the REF is frozen
     // into the plan (planner can't remove it); implementer siblings never carry it
-    expect(draft.steps.find(s => s.id === 'verify')!.instructions).toBe('audit it')
-    expect(draft.steps.find(s => s.id === 'verify')!.skillRefs).toEqual([ROLE_SKILL.auditor])
-    expect(draft.steps.find(s => s.id === 'work')!.instructions).toBe('do it')
-    expect(draft.steps.find(s => s.id === 'work')!.skillRefs).toEqual([])
+    expect(must(draft.steps.find(s => s.id === 'verify'), 'draft.steps.find(s => s.id === \'verify\')').instructions).toBe('audit it')
+    expect(must(draft.steps.find(s => s.id === 'verify'), 'draft.steps.find(s => s.id === \'verify\')').skillRefs).toEqual([ROLE_SKILL.auditor])
+    expect(must(draft.steps.find(s => s.id === 'work'), 'draft.steps.find(s => s.id === \'work\')').instructions).toBe('do it')
+    expect(must(draft.steps.find(s => s.id === 'work'), 'draft.steps.find(s => s.id === \'work\')').skillRefs).toEqual([])
   })
 
   it('freezes a verify note that already names the role skill without duplication', () => {
@@ -75,7 +75,7 @@ describe('instantiateFrozenPlan (pure, deterministic)', () => {
       note({ id: 'work', title: 'Work', body: 'do it' }),
       note({ id: 'verify', title: 'Verify', body: 'audit it', dependsOn: ['work'], skillRefs: [ROLE_SKILL.auditor] }),
     ]
-    expect(instantiateFrozenPlan('masterplan', notes).steps.find(s => s.id === 'verify')!.skillRefs).toEqual([ROLE_SKILL.auditor])
+    expect(must(instantiateFrozenPlan('masterplan', notes).steps.find(s => s.id === 'verify'), 'verify step').skillRefs).toEqual([ROLE_SKILL.auditor])
   })
 
   it('is a pure function of the notes: same input → identical output', () => {
@@ -85,7 +85,7 @@ describe('instantiateFrozenPlan (pure, deterministic)', () => {
     ]
     expect(instantiateFrozenPlan('masterplan', notes)).toEqual(instantiateFrozenPlan('masterplan', notes))
     // instructions fall back title→summary→body: empty body uses summary
-    expect(instantiateFrozenPlan('masterplan', notes).steps[0]!.instructions).toBe('sum')
+    expect(must(instantiateFrozenPlan('masterplan', notes).steps[0], 'instantiateFrozenPlan(\'masterplan\', notes).steps[0]').instructions).toBe('sum')
   })
 
   // A depends_on LINK to a NON-sibling is knowledge ("builds on that finding") and never schedules.
@@ -94,7 +94,7 @@ describe('instantiateFrozenPlan (pure, deterministic)', () => {
       note({ id: 'masterplan', links: [link('a', LINK_KIND.decomposes_into)] }),
       note({ id: 'a', title: 'A', links: [link('outsider', LINK_KIND.depends_on)] }),
     ]
-    expect(instantiateFrozenPlan('masterplan', notes).steps[0]!.dependsOn).toEqual([])
+    expect(must(instantiateFrozenPlan('masterplan', notes).steps[0], 'instantiateFrozenPlan(\'masterplan\', notes).steps[0]').dependsOn).toEqual([])
   })
 
   // A link to a SIBLING is a spelling error with an obvious correction: honouring it would keep two
@@ -114,7 +114,7 @@ describe('instantiateFrozenPlan (pure, deterministic)', () => {
       note({ id: 'a', title: 'A' }),
       note({ id: 'b', title: 'B', dependsOn: ['a'] }),
     ]
-    expect(instantiateFrozenPlan('masterplan', notes).steps.find(s => s.id === 'b')!.dependsOn).toEqual(['a'])
+    expect(must(instantiateFrozenPlan('masterplan', notes).steps.find(s => s.id === 'b'), 'step b').dependsOn).toEqual(['a'])
   })
 
   // A missing dependency lets a step run EARLY — silent corruption. A surplus one only makes it run
@@ -127,7 +127,7 @@ describe('instantiateFrozenPlan (pure, deterministic)', () => {
       note({ id: 'a-write', title: 'A write' }),
       note({ id: 'b', title: 'B', dependsOn: ['a'] }), // 'a' no longer exists
     ]
-    const b = instantiateFrozenPlan('masterplan', notes).steps.find(s => s.id === 'b')!
+    const b = must(instantiateFrozenPlan('masterplan', notes).steps.find(s => s.id === 'b'), 'step b')
     expect(b.dependsOn).toEqual(['a-read', 'a-write']) // never [], never containing itself
   })
 
@@ -138,7 +138,7 @@ describe('instantiateFrozenPlan (pure, deterministic)', () => {
       note({ id: 'b', title: 'B' }),
     ]
     const first = instantiateFrozenPlan('masterplan', notes)
-    expect(first.steps.find(s => s.id === 'a')!.dependsOn).toEqual(['b'])
+    expect(must(first.steps.find(s => s.id === 'a'), 'first.steps.find(s => s.id === \'a\')').dependsOn).toEqual(['b'])
     expect(first).toEqual(instantiateFrozenPlan('masterplan', notes))
   })
 
@@ -174,7 +174,7 @@ describe('instantiateFrozenPlan (pure, deterministic)', () => {
       note({ id: 'masterplan', links: [link('a', LINK_KIND.decomposes_into)] }),
       note({ id: 'a', title: 'A', body: 'do the thing', uncertainty: ['unresolved: does X handle Y?', 'second gap: Z is unverified'] }),
     ]
-    const instructions = instantiateFrozenPlan('masterplan', notes).steps[0]!.instructions
+    const instructions = must(instantiateFrozenPlan('masterplan', notes).steps[0], 'instantiateFrozenPlan(\'masterplan\', notes).steps[0]').instructions
     expect(instructions).toContain('unresolved: does X handle Y?')
     expect(instructions).toContain('second gap: Z is unverified')
   })
@@ -186,14 +186,14 @@ describe('instantiateFrozenPlan (pure, deterministic)', () => {
       note({ id: 'masterplan', links: [link('a', LINK_KIND.decomposes_into)] }),
       note({ id: 'a', title: 'A', body: 'do the thing' }),
     ]
-    const n = notes.find(x => x.id === 'a')!
-    const instructions = instantiateFrozenPlan('masterplan', notes).steps[0]!.instructions
+    const n = must(notes.find(x => x.id === 'a'), 'notes.find(x => x.id === \'a\')')
+    const instructions = must(instantiateFrozenPlan('masterplan', notes).steps[0], 'instantiateFrozenPlan(\'masterplan\', notes).steps[0]').instructions
     expect(instructions).toBe(n.body || n.summary || n.title)
     expect(instructions).toBe('do the thing')
   })
 })
 
-// FixE: the freeze is built from the EVENT LOG, not the async SurrealDB projection. foldPlanNotes
+// the freeze is built from the EVENT LOG, not the async SurrealDB projection. foldPlanNotes
 // reconstructs the plan-note graph from memory_written/memory_deleted events — synchronously durable
 // at finalize time — so a lagging read model can never yield "no masterplan".
 
@@ -217,28 +217,28 @@ describe('instantiateFrozenPlan (pure, deterministic)', () => {
 
 describe('foldPlanNotes (log-fold, projection-independent)', () => {
   let seq = 0
-  const written = (note: Record<string, unknown>): EventRecord => ({
-    seq: ++seq, projectId: 'p', idempotencyKey: null, taskId: null, stepId: null, runToken: null,
-    kind: EVENT_KIND.memory_written, payload: { note, author: { source: 'agent', workspaceId: TEST_WORKSPACE_ID } }, usage: null,
+  const written = (note: Record<string, unknown>): EventRecord => eventFixture({
+    seq: ++seq, projectId: 'p', taskId: null, kind: EVENT_KIND.memory_written,
+    payload: { note, author: { source: 'agent', workspaceId: TEST_WORKSPACE_ID } },
     ts: `2026-01-01T00:00:${String(seq).padStart(2, '0')}.000Z`,
   })
-  const deleted = (id: string, scope: string): EventRecord => ({
-    seq: ++seq, projectId: 'p', idempotencyKey: null, taskId: null, stepId: null, runToken: null,
-    kind: EVENT_KIND.memory_deleted, payload: { id, scope, author: { source: 'cli', workspaceId: TEST_WORKSPACE_ID } }, usage: null,
+  const deleted = (id: string, scope: string): EventRecord => eventFixture({
+    seq: ++seq, projectId: 'p', taskId: null, kind: EVENT_KIND.memory_deleted,
+    payload: { id, scope, author: { source: 'cli', workspaceId: TEST_WORKSPACE_ID } },
     ts: `2026-01-01T00:00:${String(seq).padStart(2, '0')}.000Z`,
   })
 
   it('reconstructs the plan-note graph so instantiateFrozenPlan yields the approved draft', () => {
     const scope = planScope('t1')
     const notes = foldPlanNotes([
-      written({ id: 'masterplan', scope, tier: 'plan', title: 'Web app', body: 'whole thing', links: [{ id: 'db', kind: 'decomposes_into' }, { id: 'api', kind: 'decomposes_into' }] }),
+      written({ id: 'masterplan', scope, tier: 'plan', title: 'Web app', body: 'whole thing', links: [{ id: 'db', kind: LINK_KIND.decomposes_into }, { id: 'api', kind: LINK_KIND.decomposes_into }] }),
       written({ id: 'db', scope, tier: 'plan', title: 'DB', body: 'schema' }),
       written({ id: 'api', scope, tier: 'plan', title: 'API', body: 'endpoints', dependsOn: ['db'] }),
     ], scope)
     expect(notes.map(n => n.id).sort()).toEqual(['api', 'db', 'masterplan'])
     const draft = instantiateFrozenPlan('masterplan', notes)
     expect(draft.steps.map(s => s.id)).toEqual(['db', 'api'])
-    expect(draft.steps.find(s => s.id === 'api')!.dependsOn).toEqual(['db'])
+    expect(must(draft.steps.find(s => s.id === 'api'), 'draft.steps.find(s => s.id === \'api\')').dependsOn).toEqual(['db'])
   })
 
   it('keeps only the latest write per id and mirrors the projector\'s provenance (createdAt fixed, revision advances)', () => {
@@ -247,10 +247,10 @@ describe('foldPlanNotes (log-fold, projection-independent)', () => {
     const v2 = written({ id: 'db', scope, tier: 'plan', title: 'DB v2', body: 'tightened' })
     const notes = foldPlanNotes([v1, v2], scope)
     expect(notes).toHaveLength(1)
-    expect(notes[0]!.title).toBe('DB v2')
-    expect(notes[0]!.revision).toBe(2)
-    expect(notes[0]!.createdAt).toBe(v1.ts) // fixed to the first write
-    expect(notes[0]!.updatedAt).toBe(v2.ts) // advances to the latest write
+    expect(must(notes[0], 'notes[0]').title).toBe('DB v2')
+    expect(must(notes[0], 'notes[0]').revision).toBe(2)
+    expect(must(notes[0], 'notes[0]').createdAt).toBe(v1.ts) // fixed to the first write
+    expect(must(notes[0], 'notes[0]').updatedAt).toBe(v2.ts) // advances to the latest write
   })
 
   it('drops ids removed by a later memory_deleted', () => {
@@ -279,8 +279,8 @@ describe('foldPlanNotes (log-fold, projection-independent)', () => {
     const ev = written({ id: 'masterplan', scope, tier: 'plan', title: 'M' })
     const notes = foldPlanNotes([ev], scope)
     expect(notes).toHaveLength(1)
-    expect(notes[0]!.createdAt).toBe(ev.ts) // stamped from the canonical event ts
-    expect(notes[0]!.revision).toBe(1)
+    expect(must(notes[0], 'notes[0]').createdAt).toBe(ev.ts) // stamped from the canonical event ts
+    expect(must(notes[0], 'notes[0]').revision).toBe(1)
   })
 
   // A task's plan scope also holds the episodic notes its own planning step left behind. Folding
@@ -296,11 +296,11 @@ describe('foldPlanNotes (log-fold, projection-independent)', () => {
 
   it('is lenient: one unparseable memory_written (any scope) is skipped, not fatal to the whole fold', () => {
     const scope = planScope('t1')
-    const poison: EventRecord = {
-      seq: ++seq, projectId: 'p', idempotencyKey: null, taskId: null, stepId: null, runToken: null,
-      kind: EVENT_KIND.memory_written, payload: { note: { id: 'BAD ID WITH SPACES' }, author: { source: 'agent', workspaceId: TEST_WORKSPACE_ID } },
-      usage: null, ts: '2026-01-01T00:00:59.000Z',
-    }
+    const poison = eventFixture({
+      seq: ++seq, projectId: 'p', taskId: null, kind: EVENT_KIND.memory_written,
+      payload: { note: { id: 'BAD ID WITH SPACES' }, author: { source: 'agent', workspaceId: TEST_WORKSPACE_ID } },
+      ts: '2026-01-01T00:00:59.000Z',
+    })
     const notes = foldPlanNotes([poison, written({ id: 'masterplan', scope, tier: 'plan', title: 'M' })], scope)
     expect(notes.map(n => n.id)).toEqual(['masterplan'])
   })
@@ -311,9 +311,8 @@ describe('foldPlanNotes (log-fold, projection-independent)', () => {
 // happened on a real run: the agent verified the analyze step's work itself and passed.
 describe('groundedPlanOmission', () => {
   const runToken = 'step:t1:plan:a1'
-  const grounded = (over: Partial<EventRecord> = {}): EventRecord => ({
-    seq: 1, projectId: 'p', idempotencyKey: null, taskId: 't1', stepId: null, runToken: null,
-    kind: EVENT_KIND.plan_proposed, usage: null, ts: '2026-07-24T00:00:00.000Z',
+  const grounded = (over: Partial<EventRecord> = {}): EventRecord => eventFixture({
+    projectId: 'p', kind: EVENT_KIND.plan_proposed, ts: '2026-07-24T00:00:00.000Z',
     payload: { plan: { taskId: 't1', version: 1, strategyRef: 'grounded-plan', costEstimateUSD: null, steps: [stepFixture({ id: 'plan' })] } },
     ...over,
   })
@@ -355,7 +354,7 @@ describe('withCommitStep', () => {
   it('appends the kernel-owned trailing commit step, ordered after every sibling', () => {
     const draft = withCommitStep(frozen())
     expect(draft.steps.map(s => s.id)).toEqual(['db', 'verify', 'commit'])
-    const commit = draft.steps.at(-1)!
+    const commit = must(draft.steps.at(-1), 'draft.steps.at(-1)')
     expect(commit).toEqual({
       id: COMMIT_STEP_ID, role: STEP_ROLE.committer, title: 'Commit',
       instructions: "Commit this task's changes; the 'role-committer' skill is your contract.", dependsOn: ['db', 'verify'],
@@ -364,14 +363,14 @@ describe('withCommitStep', () => {
   })
 
   it('refuses a plan that already carries a step named commit — loud, never a silent shadow', () => {
-    const clash = { steps: [...frozen().steps, { ...frozen().steps[0]!, id: 'commit', dependsOn: [] }] }
+    const clash = { steps: [...frozen().steps, { ...must(frozen().steps[0], 'first frozen step'), id: 'commit', dependsOn: [] }] }
     expect(() => withCommitStep(clash)).toThrow(/commit/)
   })
 
   it('the frozen verify step carries the role-auditor skill; implementers never do', () => {
-    const verify = frozen().steps.find(s => s.id === 'verify')!
+    const verify = must(frozen().steps.find(s => s.id === 'verify'), 'frozen().steps.find(s => s.id === \'verify\')')
     expect(verify.skillRefs).toEqual([ROLE_SKILL.auditor])
-    expect(frozen().steps.find(s => s.id === 'db')!.skillRefs).toEqual([])
+    expect(must(frozen().steps.find(s => s.id === 'db'), 'frozen().steps.find(s => s.id === \'db\')').skillRefs).toEqual([])
   })
 })
 

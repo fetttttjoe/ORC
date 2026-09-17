@@ -1,9 +1,7 @@
 import { describe, expect, it } from 'bun:test'
-import { claimId, type SemanticNote } from '@orc/contracts'
+import { claimId } from '@orc/contracts'
 import { planNoteFixture, semanticNoteFixture } from '@orc/contracts/fixtures'
 import { applyBudget, approxTokens, fitMemoryNoteToBudget, TRIM_MARKER } from './budget'
-
-const noteWith = (overrides: Partial<SemanticNote>): SemanticNote => semanticNoteFixture(overrides)
 
 describe('applyBudget', () => {
   it('caps by count and by token budget, reporting truncation + omitted', () => {
@@ -27,7 +25,7 @@ describe('fitMemoryNoteToBudget', () => {
   // the refill ladder — every list refills ahead of the long prose, and nothing else says so.
   it('spends the budget on claims and makes the body pay', () => {
     const claims = [{ id: claimId('keep me'), text: 'keep me', sourceRevision: null }]
-    const fitted = fitMemoryNoteToBudget(noteWith({ body: 'x'.repeat(5_000), claims }), 20).note
+    const fitted = fitMemoryNoteToBudget(semanticNoteFixture({ body: 'x'.repeat(5_000), claims }), 20).note
     expect(fitted.claims).toEqual(claims)            // the retrieval surface survives intact
     expect(fitted.body ?? '').toEndWith(TRIM_MARKER) // the fidelity layer is what got cut for it
   })
@@ -90,7 +88,7 @@ describe('fitMemoryNoteToBudget', () => {
   // actually pins the build-time clamp (the block right after `fitted` is constructed) rather than
   // the ladder's unconditional fallback.
   it('clamps an oversized verified stamp instead of letting the ladder drop it entirely', () => {
-    const note = noteWith({
+    const note = semanticNoteFixture({
       verified: { revision: 'r'.repeat(5_000), at: 'a'.repeat(5_000), by: 'b'.repeat(5_000) },
     })
     const result = fitMemoryNoteToBudget(note, 1)
@@ -103,7 +101,7 @@ describe('fitMemoryNoteToBudget', () => {
 
   it('trims at a whitespace boundary and marks the cut — never a silent mid-word slice', () => {
     const long = Array.from({ length: 400 }, (_, i) => `word${i}`).join(' ')
-    const { note: fitted, truncated } = fitMemoryNoteToBudget(noteWith({ body: long }), 200)
+    const { note: fitted, truncated } = fitMemoryNoteToBudget(semanticNoteFixture({ body: long }), 200)
     expect(truncated).toBe(true)
     expect(fitted.body ?? '').toEndWith(TRIM_MARKER)
     const kept = (fitted.body ?? '').slice(0, -TRIM_MARKER.length)
@@ -112,18 +110,18 @@ describe('fitMemoryNoteToBudget', () => {
   })
 
   it('whitespace-free content keeps its budget: mid-word cut + marker, no collapse', () => {
-    const { note: fitted } = fitMemoryNoteToBudget(noteWith({ body: 'x'.repeat(4_000) }), 100)
+    const { note: fitted } = fitMemoryNoteToBudget(semanticNoteFixture({ body: 'x'.repeat(4_000) }), 100)
     expect((fitted.body ?? '').length).toBeGreaterThan(200) // well over half of contentLimit=400
     expect(fitted.body ?? '').toEndWith(TRIM_MARKER)
   })
 
   it('surfaces the next-hint on truncation (regression pin — shipped behavior)', () => {
-    const { next } = fitMemoryNoteToBudget(noteWith({ body: 'x'.repeat(50_000) }), 100)
+    const { next } = fitMemoryNoteToBudget(semanticNoteFixture({ body: 'x'.repeat(50_000) }), 100)
     expect(next).toContain('memory_read')
   })
 
   it('leaves fields byte-identical and unmarked when everything fits', () => {
-    const { note: fitted, truncated } = fitMemoryNoteToBudget(noteWith({ body: 'short body' }), 5_000)
+    const { note: fitted, truncated } = fitMemoryNoteToBudget(semanticNoteFixture({ body: 'short body' }), 5_000)
     expect(truncated).toBe(false)
     expect(fitted.body).toBe('short body')
   })

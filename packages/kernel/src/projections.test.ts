@@ -1,14 +1,10 @@
 import { describe, expect, it } from 'bun:test'
-import { EVENT_KIND, FAILURE_CLASS, STEP_RUN_STATUS, TASK_STATUS, type EventRecord, type Plan, type TaskNode } from '@orc/contracts'
-import { eventFixture, draftFixture, planFixture, stepFixture } from '@orc/contracts/fixtures'
+import { EVENT_KIND, FAILURE_CLASS, STEP_RUN_STATUS, TASK_STATUS, type EventRecord, type FailureClass, type Plan, type StepRunStatus, type TaskNode, type TaskStatus } from '@orc/contracts'
+import { eventFixture, draftFixture, must, planFixture, stepFixture, taskFixture } from '@orc/contracts/fixtures'
 import { TEST_WORKSPACE_ID } from './test-helpers'
-import { blockingVerdicts, retryIsFutile, startedAttempts, type State, emptyFold, estimateCostUSD, fold, foldInto, subtreeOutcome, completedStepIds, nextAttempts, crashDedupKey, stepUsage, subtreeTaskIds, subtreeUsage, pendingSplitForChild, remainingBudget, inheritedCwd, runCwd, taskChangedPaths, taskNoteWrites, taskVerifiedNotes } from './projections'
+import { blockingVerdicts, retryIsFutile, startedAttempts, type State, type StepState, emptyFold, estimateCostUSD, fold, foldInto, subtreeOutcome, completedStepIds, nextAttempts, crashDedupKey, stepUsage, subtreeTaskIds, subtreeUsage, pendingSplitForChild, remainingBudget, inheritedCwd, runCwd, taskChangedPaths, taskNoteWrites, taskVerifiedNotes } from './projections'
 
-const task: TaskNode = {
-  id: 't1', parentId: null, workspaceId: TEST_WORKSPACE_ID, type: 'generic', title: 'hello', spec: '',
-  status: 'draft', zone: [], budgetUSD: null, depth: 0,
-  createdAt: '2026-07-16T00:00:00.000Z',
-}
+const task: TaskNode = taskFixture()
 
 const planV = (version: number): Plan => planFixture({ version })
 
@@ -20,24 +16,28 @@ const evt = (seq: number, kind: EventRecord['kind'], payload: Record<string, unk
 // reusing the attempt re-attached to a DEAD workflow, which replays its stored error and makes
 // every `orc retry` fail identically, forever.
 describe('nextAttempts and an orphaned running step', () => {
-  const plan = { steps: [{ id: 'a' }, { id: 'b' }] } as Parameters<typeof nextAttempts>[2]
-  const stateWith = (status: string, stepStatus: string) => {
+  const plan: Pick<Plan, 'steps'> = { steps: [stepFixture({ id: 'a' }), stepFixture({ id: 'b' })] }
+  const stateWith = (status: TaskStatus, stepStatus: StepRunStatus) => {
     const st = emptyFold().state
-    st.tasks.set('t1', { id: 't1', parentId: null, workspaceId: TEST_WORKSPACE_ID, type: 'generic', title: 'T', spec: '', status, zone: [], budgetUSD: null, depth: 0, createdAt: '2026-07-27T00:00:00.000Z' } as never)
-    st.steps.set('t1', new Map([['a', { status: stepStatus, attempt: 2 } as never]]))
+    st.tasks.set('t1', taskFixture({ title: 'T', status, createdAt: '2026-07-27T00:00:00.000Z' }))
+    const step: StepState = {
+      stepId: 'a', runToken: 'rt', attempt: 2, status: stepStatus,
+      iterations: 1, output: null, failure: null,
+    }
+    st.steps.set('t1', new Map([['a', step]]))
     return st
   }
 
   it('reuses the attempt while the run is LIVE, so the workflow id re-attaches', () => {
-    expect(nextAttempts(stateWith('running', 'running'), 't1', plan).a).toBe(2)
+    expect(nextAttempts(stateWith(TASK_STATUS.running, STEP_RUN_STATUS.running), 't1', plan).a).toBe(2)
   })
 
   it('gives a fresh attempt once the task has settled — the running step is orphaned', () => {
-    expect(nextAttempts(stateWith('blocked', 'running'), 't1', plan).a).toBe(3)
+    expect(nextAttempts(stateWith(TASK_STATUS.blocked, STEP_RUN_STATUS.running), 't1', plan).a).toBe(3)
   })
 
   it('a step with no history starts at 1 either way', () => {
-    expect(nextAttempts(stateWith('blocked', 'running'), 't1', plan).b).toBe(1)
+    expect(nextAttempts(stateWith(TASK_STATUS.blocked, STEP_RUN_STATUS.running), 't1', plan).b).toBe(1)
   })
 })
 
@@ -68,36 +68,29 @@ describe('fold', () => {
 
 describe('crashDedupKey', () => {
   it('differs when toolCallId differs (same runToken/kind/iteration otherwise)', () => {
-    const base: EventRecord = {
-      seq: 1, ts: '2026-07-17T00:00:00.000Z', projectId: 'p1', idempotencyKey: null, taskId: 't1', stepId: 's1',
-      runToken: 'step:t1:s1:a1', kind: 'tool_call',
+    const base = eventFixture({
+      ts: '2026-07-17T00:00:00.000Z', stepId: 's1', runToken: 'step:t1:s1:a1', kind: EVENT_KIND.tool_call,
       payload: { stepId: 's1', runToken: 'step:t1:s1:a1', iteration: 1, toolCallId: 'c1', toolName: 'fs_read', input: {} },
-      usage: null,
-    }
+    })
     const other: EventRecord = { ...base, payload: { ...base.payload, toolCallId: 'c2' } }
     expect(crashDedupKey(base)).not.toBe(crashDedupKey(other))
   })
 
   it('matches when (runToken, kind, iteration, toolCallId, name) match, regardless of other fields', () => {
-    const e1: EventRecord = {
-      seq: 1, ts: '2026-07-17T00:00:00.000Z', projectId: 'p1', idempotencyKey: null, taskId: 't1', stepId: 's1',
-      runToken: 'step:t1:s1:a1', kind: 'tool_call',
+    const e1 = eventFixture({
+      ts: '2026-07-17T00:00:00.000Z', stepId: 's1', runToken: 'step:t1:s1:a1', kind: EVENT_KIND.tool_call,
       payload: { stepId: 's1', runToken: 'step:t1:s1:a1', iteration: 1, toolCallId: 'c1', toolName: 'fs_read', input: {} },
-      usage: null,
-    }
-    const e2: EventRecord = {
-      seq: 2, ts: '2026-07-17T00:05:00.000Z', projectId: 'p1', idempotencyKey: null, taskId: 't1', stepId: 's1',
-      runToken: 'step:t1:s1:a1', kind: 'tool_call',
+    })
+    const e2 = eventFixture({
+      seq: 2, ts: '2026-07-17T00:05:00.000Z', stepId: 's1', runToken: 'step:t1:s1:a1', kind: EVENT_KIND.tool_call,
       payload: { stepId: 's1', runToken: 'step:t1:s1:a1', iteration: 1, toolCallId: 'c1', toolName: 'different_tool', input: { x: 1 } },
-      usage: null,
-    }
+    })
     expect(crashDedupKey(e1)).toBe(crashDedupKey(e2))
   })
 
   it('skill_loaded events dedup per skill name, not per step', () => {
-    const mk = (seq: number, name: string): EventRecord => ({
-      seq, ts: 't', projectId: 'p1', idempotencyKey: null, taskId: 't1', stepId: 's1', runToken: 'step:t1:s1:a1',
-      kind: 'skill_loaded', usage: null,
+    const mk = (seq: number, name: string): EventRecord => eventFixture({
+      seq, ts: 't', stepId: 's1', runToken: 'step:t1:s1:a1', kind: EVENT_KIND.skill_loaded,
       payload: { stepId: 's1', runToken: 'step:t1:s1:a1', name, hash: 'h' },
     })
     // two different skills in one init: both keys distinct
@@ -107,22 +100,15 @@ describe('crashDedupKey', () => {
   })
 
   it('returns null for task_status_changed even when a runToken is present', () => {
-    const e: EventRecord = {
-      seq: 1, ts: '2026-07-17T00:00:00.000Z', projectId: 'p1', idempotencyKey: null, taskId: 't1', stepId: null,
-      runToken: 'step:t1:s1:a1', kind: 'task_status_changed',
+    const e = eventFixture({
+      ts: '2026-07-17T00:00:00.000Z', runToken: 'step:t1:s1:a1', kind: EVENT_KIND.task_status_changed,
       payload: { taskId: 't1', from: 'draft', to: 'approved' },
-      usage: null,
-    }
+    })
     expect(crashDedupKey(e)).toBeNull()
   })
 
   it('returns null for any event with a null runToken', () => {
-    const e: EventRecord = {
-      seq: 1, ts: '2026-07-17T00:00:00.000Z', projectId: 'p1', idempotencyKey: null, taskId: 't1', stepId: null,
-      runToken: null, kind: 'task_created',
-      payload: { task },
-      usage: null,
-    }
+    const e = eventFixture({ ts: '2026-07-17T00:00:00.000Z', payload: { task } })
     expect(crashDedupKey(e)).toBeNull()
   })
 })
@@ -188,12 +174,11 @@ describe('fold — execution kinds', () => {
 
   it('ignores memory events and does not create a task', () => {
     const base = fold([])
-    const withMem = fold([{
-      seq: 1, projectId: 'p1', idempotencyKey: null, taskId: null, stepId: null, runToken: null,
-      kind: 'memory_written',
+    const withMem = fold([eventFixture({
+      taskId: null, kind: EVENT_KIND.memory_written,
       payload: { note: { id: 'x', title: 'X', scope: 'project', categories: [], tags: [], links: [], paths: [], summary: '', body: '' }, author: { source: 'cli', workspaceId: TEST_WORKSPACE_ID } },
-      usage: null, ts: '2026-07-18T00:00:00Z',
-    }])
+      ts: '2026-07-18T00:00:00Z',
+    })])
     expect(withMem.tasks.size).toBe(base.tasks.size)
   })
 
@@ -249,29 +234,35 @@ describe('fold — execution kinds', () => {
   it('folds splits: proposed pending, resolved marks; dedups replayed proposals by splitId', () => {
     const splitP = { splitId: 'sp1', taskId: 't1', stepId: 's1', runToken: rt('s1'), childTaskId: 'c1' }
     const state = fold([
-      { seq: 1, projectId: 'p1', idempotencyKey: null, taskId: 't1', stepId: 's1', runToken: rt('s1'), kind: 'split_proposed', payload: splitP, usage: null, ts: 'T' },
-      { seq: 2, projectId: 'p1', idempotencyKey: null, taskId: 't1', stepId: 's1', runToken: rt('s1'), kind: 'split_proposed', payload: splitP, usage: null, ts: 'T' }, // crash replay
-      { seq: 3, projectId: 'p1', idempotencyKey: null, taskId: 't1', stepId: 's1', runToken: rt('s1'), kind: 'split_proposed', payload: { ...splitP, splitId: 'sp2', childTaskId: 'c2' }, usage: null, ts: 'T' },
+      eventFixture({ stepId: 's1', runToken: rt('s1'), kind: EVENT_KIND.split_proposed, payload: splitP, ts: 'T' }),
+      eventFixture({ seq: 2, stepId: 's1', runToken: rt('s1'), kind: EVENT_KIND.split_proposed, payload: splitP, ts: 'T' }), // crash replay
+      eventFixture({
+        seq: 3, stepId: 's1', runToken: rt('s1'), kind: EVENT_KIND.split_proposed,
+        payload: { ...splitP, splitId: 'sp2', childTaskId: 'c2' }, ts: 'T',
+      }),
     ])
     expect(state.splits.size).toBe(2) // sp1 deduped, sp2 distinct despite same runToken
     expect(state.splits.get('sp1')?.resolved).toBe(false)
     expect(pendingSplitForChild(state, 'c1')?.splitId).toBe('sp1')
     const resolved = fold([
-      { seq: 1, projectId: 'p1', idempotencyKey: null, taskId: 't1', stepId: 's1', runToken: rt('s1'), kind: 'split_proposed', payload: splitP, usage: null, ts: 'T' },
-      { seq: 2, projectId: 'p1', idempotencyKey: null, taskId: 't1', stepId: null, runToken: null, kind: 'split_resolved', payload: { splitId: 'sp1', childTaskId: 'c1', outcome: 'done', summary: 'ok', notes: [] }, usage: null, ts: 'T' },
+      eventFixture({ stepId: 's1', runToken: rt('s1'), kind: EVENT_KIND.split_proposed, payload: splitP, ts: 'T' }),
+      eventFixture({
+        seq: 2, kind: EVENT_KIND.split_resolved,
+        payload: { splitId: 'sp1', childTaskId: 'c1', outcome: 'done', summary: 'ok', notes: [] }, ts: 'T',
+      }),
     ])
     expect(resolved.splits.get('sp1')?.resolved).toBe(true)
     expect(pendingSplitForChild(resolved, 'c1')).toBeUndefined()
   })
 
   it('subtreeUsage sums a task and its descendants; subtreeTaskIds walks parentId', () => {
-    const t = (id: string, parentId: string | null): EventRecord => ({
-      seq: 0, projectId: 'p1', idempotencyKey: null, taskId: id, stepId: null, runToken: null, kind: 'task_created',
+    const t = (id: string, parentId: string | null): EventRecord => eventFixture({
+      seq: 0, taskId: id,
       payload: { task: { id, parentId, workspaceId: TEST_WORKSPACE_ID, type: 'generic', title: id, spec: '', status: 'draft', zone: [], budgetUSD: null, depth: parentId ? 1 : 0, createdAt: 'T' } },
-      usage: null, ts: 'T',
+      ts: 'T',
     })
-    const usage = (taskId: string, cost: number): EventRecord => ({
-      seq: 0, projectId: 'p1', idempotencyKey: null, taskId, stepId: 's1', runToken: `rt-${taskId}`, kind: 'agent_call',
+    const usage = (taskId: string, cost: number): EventRecord => eventFixture({
+      seq: 0, taskId, stepId: 's1', runToken: `rt-${taskId}`, kind: EVENT_KIND.agent_call,
       payload: { stepId: 's1', runToken: `rt-${taskId}`, iteration: 1, request: {}, response: {} },
       usage: { inputTokens: 1, outputTokens: 1, costUSD: cost, estimated: false }, ts: 'T',
     })
@@ -282,13 +273,13 @@ describe('fold — execution kinds', () => {
   })
 
   it("remainingBudget is the min over the ancestor chain, not just the task's own budget", () => {
-    const t = (id: string, parentId: string | null, budgetUSD: number | null): EventRecord => ({
-      seq: 0, projectId: 'p1', idempotencyKey: null, taskId: id, stepId: null, runToken: null, kind: 'task_created',
+    const t = (id: string, parentId: string | null, budgetUSD: number | null): EventRecord => eventFixture({
+      seq: 0, taskId: id,
       payload: { task: { id, parentId, workspaceId: TEST_WORKSPACE_ID, type: 'generic', title: id, spec: '', status: 'draft', zone: [], budgetUSD, depth: parentId ? 1 : 0, createdAt: 'T' } },
-      usage: null, ts: 'T',
+      ts: 'T',
     })
-    const usage = (taskId: string, cost: number): EventRecord => ({
-      seq: 0, projectId: 'p1', idempotencyKey: null, taskId, stepId: 's1', runToken: `rt-${taskId}`, kind: 'agent_call',
+    const usage = (taskId: string, cost: number): EventRecord => eventFixture({
+      seq: 0, taskId, stepId: 's1', runToken: `rt-${taskId}`, kind: EVENT_KIND.agent_call,
       payload: { stepId: 's1', runToken: `rt-${taskId}`, iteration: 1, request: {}, response: {} },
       usage: { inputTokens: 1, outputTokens: 1, costUSD: cost, estimated: false }, ts: 'T',
     })
@@ -306,11 +297,11 @@ describe('fold — execution kinds', () => {
     const state = fold([
       evt(1, 'task_created', { task: { ...task, id: 'p' } }),
       evt(2, 'task_created', { task: { ...task, id: 'c', parentId: 'p', depth: 1 } }),
-      eventFixture({ seq: 3, ts: '2026-07-16T00:00:00.000Z', taskId: 'p', kind: 'run_started', payload: { planVersion: 1, retryIndex: 0, workflowId: 'w1', cwd: '/tree' } }),
+      eventFixture({ seq: 3, ts: '2026-07-16T00:00:00.000Z', taskId: 'p', kind: EVENT_KIND.run_started, payload: { planVersion: 1, retryIndex: 0, workflowId: 'w1', cwd: '/tree' } }),
     ])
-    expect(runCwd(state, state.tasks.get('c')!, undefined, '/proj')).toBe('/tree')
-    expect(runCwd(state, state.tasks.get('p')!, undefined, '/proj')).toBe('/proj')
-    expect(runCwd(state, state.tasks.get('c')!, '/explicit', '/proj')).toBe('/explicit')
+    expect(runCwd(state, must(state.tasks.get('c'), 'child task'), undefined, '/proj')).toBe('/tree')
+    expect(runCwd(state, must(state.tasks.get('p'), 'parent task'), undefined, '/proj')).toBe('/proj')
+    expect(runCwd(state, must(state.tasks.get('c'), 'child task'), '/explicit', '/proj')).toBe('/explicit')
   })
 
   it('inheritedCwd: override wins; else the last run that HAD a cwd (skip null history); else fallback', () => {
@@ -325,26 +316,24 @@ describe('fold — execution kinds', () => {
   it('plan_proposed replay with the same (taskId, version) folds once', () => {
     const plan = planFixture({ taskId: 't1', version: 1 })
     const state = fold([
-      { seq: 1, projectId: 'p1', idempotencyKey: null, taskId: 't1', stepId: null, runToken: null, kind: 'plan_proposed', payload: { plan }, usage: null, ts: 'T' },
-      { seq: 2, projectId: 'p1', idempotencyKey: null, taskId: 't1', stepId: null, runToken: null, kind: 'plan_proposed', payload: { plan }, usage: null, ts: 'T' },
+      eventFixture({ kind: EVENT_KIND.plan_proposed, payload: { plan }, ts: 'T' }),
+      eventFixture({ seq: 2, kind: EVENT_KIND.plan_proposed, payload: { plan }, ts: 'T' }),
     ])
     expect(state.plans.get('t1')?.versions).toHaveLength(1)
   })
 
   it('folds artifacts by task; distinct paths survive, a replayed receipt folds once', () => {
-    const receipt = (seq: number, p: string): EventRecord => ({
-      seq, projectId: 'p1', idempotencyKey: null, taskId: 't1', stepId: 's1',
-      runToken: rt('s1'), kind: 'artifact_produced',
-      payload: { path: p, sha256: 'a'.repeat(64), size: 1 }, usage: null, ts: 'T',
+    const receipt = (seq: number, p: string): EventRecord => eventFixture({
+      seq, stepId: 's1', runToken: rt('s1'), kind: EVENT_KIND.artifact_produced,
+      payload: { path: p, sha256: 'a'.repeat(64), size: 1 }, ts: 'T',
     })
     const state = fold([receipt(1, 'a.md'), receipt(2, 'b.md'), receipt(3, 'a.md')])
     expect(state.artifacts.get('t1')?.map(a => a.path)).toEqual(['a.md', 'b.md'])
   })
 
   it('folds operation transitions into replayable journal state', () => {
-    const op = (seq: number, kind: EventRecord['kind'], payload: Record<string, unknown>): EventRecord => ({
-      seq, projectId: 'p1', idempotencyKey: null, taskId: 't1', stepId: 's1',
-      runToken: rt('s1'), kind, payload, usage: null, ts: `T${seq}`,
+    const op = (seq: number, kind: EventRecord['kind'], payload: Record<string, unknown>): EventRecord => eventFixture({
+      seq, stepId: 's1', runToken: rt('s1'), kind, payload, ts: `T${seq}`,
     })
     const id = 'step:t1:s1:a1:model:1'
     const state = fold([
@@ -369,8 +358,8 @@ describe('fold — execution kinds', () => {
 
   it('fold is total: one poison operation/artifact event skips its case, never throws (contract: never wedge on history)', () => {
     const good = 'step:t1:s1:a1:model:1'
-    const op = (seq: number, kind: EventRecord['kind'], payload: Record<string, unknown>): EventRecord => ({
-      seq, projectId: 'p1', idempotencyKey: null, taskId: 't1', stepId: 's1', runToken: rt('s1'), kind, payload, usage: null, ts: `T${seq}`,
+    const op = (seq: number, kind: EventRecord['kind'], payload: Record<string, unknown>): EventRecord => eventFixture({
+      seq, stepId: 's1', runToken: rt('s1'), kind, payload, ts: `T${seq}`,
     })
     // an orphaned completion (no started node) and a malformed artifact payload would previously
     // throw out of fold and wedge status/vault/ui/replay for the whole project on one bad event.
@@ -401,10 +390,10 @@ describe('foldInto / emptyFold', () => {
     evt(3, 'task_status_changed', { taskId: 't1', from: 'draft', to: 'awaiting_approval' }),
     evt(4, 'plan_approved', { taskId: 't1', version: 1, approvedAt: '2026-07-16T01:00:00.000Z' }),
     evt(5, 'task_status_changed', { taskId: 't1', from: 'awaiting_approval', to: 'approved' }),
-    eventFixture({ seq: 6, taskId: 't1', runToken: 'r1', kind: 'run_started', payload: { taskId: 't1', planVersion: 1, retryIndex: 0, workflowId: 'run:t1:v1', cwd: null } }),
-    eventFixture({ seq: 7, taskId: 't1', runToken: 'r1', kind: 'step_started', payload: { stepId: 's1', runToken: 'r1', attempt: 1 } }),
-    eventFixture({ seq: 8, taskId: 't1', stepId: 's1', runToken: 'r1', kind: 'agent_call', usage: { inputTokens: 10, outputTokens: 5, costUSD: 0.5, estimated: false }, payload: { stepId: 's1', runToken: 'r1', iteration: 1, request: {}, response: {} } }),
-    eventFixture({ seq: 9, taskId: 't1', runToken: 'r1', kind: 'step_completed', payload: { stepId: 's1', runToken: 'r1', summary: 'ok' } }),
+    eventFixture({ seq: 6, taskId: 't1', runToken: 'r1', kind: EVENT_KIND.run_started, payload: { taskId: 't1', planVersion: 1, retryIndex: 0, workflowId: 'run:t1:v1', cwd: null } }),
+    eventFixture({ seq: 7, taskId: 't1', runToken: 'r1', kind: EVENT_KIND.step_started, payload: { stepId: 's1', runToken: 'r1', attempt: 1 } }),
+    eventFixture({ seq: 8, taskId: 't1', stepId: 's1', runToken: 'r1', kind: EVENT_KIND.agent_call, usage: { inputTokens: 10, outputTokens: 5, costUSD: 0.5, estimated: false }, payload: { stepId: 's1', runToken: 'r1', iteration: 1, request: {}, response: {} } }),
+    eventFixture({ seq: 9, taskId: 't1', runToken: 'r1', kind: EVENT_KIND.step_completed, payload: { stepId: 's1', runToken: 'r1', summary: 'ok' } }),
   ]
 
   const asJson = (s: ReturnType<typeof fold>) =>
@@ -418,7 +407,7 @@ describe('foldInto / emptyFold', () => {
   it('carries crash-boundary dedup ACROSS applications, not just within one batch', () => {
     // the same tool_result delivered twice — the dedup key lives on the accumulator, so a
     // duplicate arriving in a later application is still suppressed
-    const dup = eventFixture({ seq: 10, taskId: 't1', stepId: 's1', runToken: 'r1', kind: 'agent_call', usage: { inputTokens: 10, outputTokens: 5, costUSD: 0.5, estimated: false }, payload: { stepId: 's1', runToken: 'r1', iteration: 1, request: {}, response: {} } })
+    const dup = eventFixture({ seq: 10, taskId: 't1', stepId: 's1', runToken: 'r1', kind: EVENT_KIND.agent_call, usage: { inputTokens: 10, outputTokens: 5, costUSD: 0.5, estimated: false }, payload: { stepId: 's1', runToken: 'r1', iteration: 1, request: {}, response: {} } })
     const acc = [...lifecycle, dup].reduce(foldInto, emptyFold())
     expect(acc.state.usage.get('t1')?.costUSD).toBe(0.5) // not 1.0 — the replay folded once
     expect(asJson(acc.state)).toEqual(asJson(fold([...lifecycle, dup])))
@@ -459,14 +448,14 @@ describe('subtreeOutcome', () => {
 describe('taskChangedPaths', () => {
   // one tool_call event
   const call = (seq: number, toolCallId: string, toolName: string, input: unknown, stepId = 's1'): EventRecord =>
-    eventFixture({ seq, ts: 'T', stepId, runToken: rt(stepId), kind: 'tool_call',
+    eventFixture({ seq, ts: 'T', stepId, runToken: rt(stepId), kind: EVENT_KIND.tool_call,
       payload: { stepId, runToken: rt(stepId), iteration: 1, toolCallId, toolName, input } })
   // its paired tool_result
   const result = (seq: number, toolCallId: string, toolName: string, isError: boolean, stepId = 's1'): EventRecord =>
-    eventFixture({ seq, ts: 'T', stepId, runToken: rt(stepId), kind: 'tool_result',
+    eventFixture({ seq, ts: 'T', stepId, runToken: rt(stepId), kind: EVENT_KIND.tool_result,
       payload: { stepId, runToken: rt(stepId), iteration: 1, toolCallId, toolName, output: {}, isError } })
   const artifact = (seq: number, path: string, stepId = 's1'): EventRecord =>
-    eventFixture({ seq, ts: 'T', stepId, runToken: rt(stepId), kind: 'artifact_produced',
+    eventFixture({ seq, ts: 'T', stepId, runToken: rt(stepId), kind: EVENT_KIND.artifact_produced,
       payload: { path, sha256: 'a'.repeat(64), size: 1 } })
 
   const paths = (rows: ReturnType<typeof taskChangedPaths>): string[] => rows.map(r => r.path)
@@ -477,7 +466,7 @@ describe('taskChangedPaths', () => {
       result(2, 'c1', 'fs_write', false),
     ])
     expect(paths(rows)).toEqual(['src/a.ts'])
-    expect(rows[0]!.steps).toEqual([{ stepId: 's1', tool: 'fs_write', seq: 1 }])
+    expect(must(rows[0], 'first row').steps).toEqual([{ stepId: 's1', tool: 'fs_write', seq: 1 }])
   })
 
   it('EXCLUDES a write whose tool_result isError === true', () => {
@@ -529,7 +518,7 @@ describe('taskChangedPaths', () => {
       call(3, 'c2', 'fs_edit', { path: 'x.ts' }, 's2'), result(4, 'c2', 'fs_edit', false, 's2'),
     ])
     expect(paths(rows)).toEqual(['x.ts'])
-    expect(rows[0]!.steps).toEqual([
+    expect(must(rows[0], 'first row').steps).toEqual([
       { stepId: 's1', tool: 'fs_write', seq: 1 },
       { stepId: 's2', tool: 'fs_edit', seq: 3 },
     ])
@@ -545,7 +534,7 @@ describe('taskChangedPaths', () => {
   it('folds an artifact_produced receipt into the set as a contributing path', () => {
     const rows = taskChangedPaths([artifact(1, 'out/report.md')])
     expect(paths(rows)).toEqual(['out/report.md'])
-    expect(rows[0]!.steps).toEqual([{ stepId: 's1', tool: 'artifact_produced', seq: 1 }])
+    expect(must(rows[0], 'first row').steps).toEqual([{ stepId: 's1', tool: 'artifact_produced', seq: 1 }])
   })
 
   it('orders deterministically by first seq, then path', () => {
@@ -559,13 +548,13 @@ describe('taskChangedPaths', () => {
 })
 
 const write = (seq: number, note: Record<string, unknown>, taskId: string | undefined): EventRecord =>
-  eventFixture({ seq, ts: 'T', kind: 'memory_written',
+  eventFixture({ seq, ts: 'T', kind: EVENT_KIND.memory_written,
     payload: { note, author: { source: 'agent', workspaceId: TEST_WORKSPACE_ID, ...(taskId ? { taskId } : {}) } } })
 const del = (seq: number, id: string, scope = 'project'): EventRecord =>
-  eventFixture({ seq, ts: 'T', kind: 'memory_deleted',
+  eventFixture({ seq, ts: 'T', kind: EVENT_KIND.memory_deleted,
     payload: { id, scope, author: { source: 'cli', workspaceId: TEST_WORKSPACE_ID } } })
 const verified = (seq: number, id: string, taskId: string | undefined, scope = 'project', revision = 'head1'): EventRecord =>
-  eventFixture({ seq, ts: 'T', kind: 'memory_verified',
+  eventFixture({ seq, ts: 'T', kind: EVENT_KIND.memory_verified,
     payload: { id, scope, stamp: { revision, at: 'T', by: 'exec·m·auditor' },
       author: { source: 'agent', workspaceId: TEST_WORKSPACE_ID, ...(taskId ? { taskId } : {}) } } })
 const semantic = (id: string, paths: string[]): Record<string, unknown> =>
@@ -805,9 +794,9 @@ describe('estimateCostUSD', () => {
 })
 
 describe('blockingVerdicts / retryIsFutile — a verdict is not a malfunction', () => {
-  const failedStep = (id: string, cls: string) => ({
+  const failedStep = (id: string, cls: FailureClass) => ({
     stepId: id, runToken: `rt-${id}`, attempt: 1, status: STEP_RUN_STATUS.failed,
-    iterations: 1, output: null, failure: { class: cls as never, message: `${id} says no` },
+    iterations: 1, output: null, failure: { class: cls, message: `${id} says no` },
   })
   const stateWith = (...steps: ReturnType<typeof failedStep>[]): State => {
     const s = fold([])
@@ -849,9 +838,9 @@ describe('blockingVerdicts / retryIsFutile — a verdict is not a malfunction', 
  * completed siblings and reaches the same verdict forever.
  */
 describe('rejected is an AUDITOR verdict, not any signalled failure', () => {
-  const failed = (id: string, cls: string) => ({
+  const failed = (id: string, cls: FailureClass) => ({
     stepId: id, runToken: `rt-${id}`, attempt: 1, status: STEP_RUN_STATUS.failed,
-    iterations: 1, output: null, failure: { class: cls as never, message: `${id} failed` },
+    iterations: 1, output: null, failure: { class: cls, message: `${id} failed` },
   })
   const stateWith = (...steps: ReturnType<typeof failed>[]): State => {
     const s = fold([])
@@ -880,14 +869,14 @@ describe('rejected is an AUDITOR verdict, not any signalled failure', () => {
  * then: cancel asked nextAttempts and got an id one ahead of the live workflow, every time.
  */
 describe('startedAttempts vs nextAttempts — cancel targets the running attempt', () => {
-  const plan = { steps: [{ id: 'a' }, { id: 'b' }] } as unknown as Plan
+  const plan = planFixture({ steps: [stepFixture({ id: 'a' }), stepFixture({ id: 'b' })] })
   const running = (attempt: number) => ({
     stepId: 'a', runToken: 'rt', attempt, status: STEP_RUN_STATUS.running,
     iterations: 1, output: null, failure: null,
   })
-  const stateOf = (status: string): State => {
+  const stateOf = (status: TaskStatus): State => {
     const s = fold([])
-    s.tasks.set('t1', { id: 't1', status } as unknown as TaskNode)
+    s.tasks.set('t1', taskFixture({ id: 't1', status }))
     s.steps.set('t1', new Map([['a', running(1)]]))
     return s
   }
@@ -895,7 +884,7 @@ describe('startedAttempts vs nextAttempts — cancel targets the running attempt
   it('targets the CURRENT attempt even after the task is stamped cancelled', () => {
     const state = stateOf(TASK_STATUS.cancelled)
     expect(startedAttempts(state, 't1', plan)).toEqual({ a: 1 })
-    // the trap: the derivation cancel used to call returns the NEXT one
+    // the trap: nextAttempts yields the attempt AFTER the running one, which is not what cancel targets
     expect(nextAttempts(state, 't1', plan).a).toBe(2)
   })
 

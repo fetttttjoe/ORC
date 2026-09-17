@@ -24,7 +24,8 @@ export function commandArgv(command: string): ArgvResult {
   let quote: string | null = null
 
   for (let i = 0; i < command.length; i += 1) {
-    const c = command[i]!
+    const c = command[i]
+    if (c === undefined) continue // unreachable (i bounded by command.length above) — satisfies noUncheckedIndexedAccess without `!`
     if (quote !== null) {
       // a backslash escapes inside DOUBLE quotes only — single quotes are literal, as in POSIX
       if (c === '\\' && quote === '"' && i + 1 < command.length) { token += command[++i]; continue }

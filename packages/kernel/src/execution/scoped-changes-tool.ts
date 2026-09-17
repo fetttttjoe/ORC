@@ -125,9 +125,8 @@ export function scopedChangesTool(opts: {
         const citingNotes = citing ? await citing(uniquePaths) : null
         // The `degraded` convention (shared with commit-tool.ts): an absent measurement is `null`
         // in its own field (citingNotes above) PLUS a reason in `degraded`, omitted when nothing
-        // is degraded. This sentence used to be appended straight into `floor` — prose smuggled
-        // into another field, the shape this convention forbids — so a consumer reading `floor`
-        // for its own (unrelated) exec-writes caveat could miss the absence note riding along.
+        // is degraded. Use a separate field (not floor) because floor should only have exec-writes
+        // caveats, so a consumer can read `floor` without missing absence notes riding along.
         return { output: { paths, citingNotes, floor: FLOOR_NOTE, ...(citing ? {} : { degraded: [CITING_DEGRADED] }) }, isError: false }
       } catch (e) {
         return toolError(e)

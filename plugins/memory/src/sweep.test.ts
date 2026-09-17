@@ -2,17 +2,18 @@ import { test, expect } from 'bun:test'
 import type { EventRecord } from '@orc/contracts'
 import { TEST_WORKSPACE_ID, eventFixture } from '@orc/contracts/fixtures'
 import { orphanedNotes } from './sweep'
+import { EVENT_KIND } from '@orc/contracts'
 
 const A = '11111111-1111-1111-1111-111111111111'
 const B = '22222222-2222-2222-2222-222222222222'
 
 // orphanedNotes reads only e.kind + e.payload; eventFixture fills the rest of the record honestly.
 const wrote = (taskId: string, id: string, links: string[] = []): EventRecord =>
-  eventFixture({ kind: 'memory_written', payload: { note: { id, title: id, links: links.map(t => ({ id: t })) }, author: { source: 'agent', workspaceId: TEST_WORKSPACE_ID, taskId } } })
+  eventFixture({ kind: EVENT_KIND.memory_written, payload: { note: { id, title: id, links: links.map(t => ({ id: t })) }, author: { source: 'agent', workspaceId: TEST_WORKSPACE_ID, taskId } } })
 const cli = (id: string): EventRecord =>
-  eventFixture({ kind: 'memory_written', payload: { note: { id, title: id, links: [] }, author: { source: 'cli', workspaceId: TEST_WORKSPACE_ID } } })
+  eventFixture({ kind: EVENT_KIND.memory_written, payload: { note: { id, title: id, links: [] }, author: { source: 'cli', workspaceId: TEST_WORKSPACE_ID } } })
 const deleted = (id: string): EventRecord =>
-  eventFixture({ kind: 'memory_deleted', payload: { id, scope: 'project', author: { source: 'cli', workspaceId: TEST_WORKSPACE_ID } } })
+  eventFixture({ kind: EVENT_KIND.memory_deleted, payload: { id, scope: 'project', author: { source: 'cli', workspaceId: TEST_WORKSPACE_ID } } })
 
 test('owned+unreferenced goes; adopted and referenced stay', () => {
   const events = [
@@ -26,7 +27,7 @@ test('owned+unreferenced goes; adopted and referenced stay', () => {
 })
 
 test('unparseable payloads are skipped, not fatal', () => {
-  const events = [eventFixture({ kind: 'memory_written', payload: { garbage: true } }), wrote(A, 'n1')]
+  const events = [eventFixture({ kind: EVENT_KIND.memory_written, payload: { garbage: true } }), wrote(A, 'n1')]
   expect(orphanedNotes(events, new Set([A])).map(n => n.id)).toEqual(['n1'])
 })
 

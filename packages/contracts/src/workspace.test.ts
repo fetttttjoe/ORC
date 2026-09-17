@@ -1,10 +1,14 @@
-import { describe, expect, it } from 'bun:test'
-import { mkdtempSync, symlinkSync, writeFileSync } from 'node:fs'
+import { afterAll, describe, expect, it } from 'bun:test'
+import { mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { assertInZone, pathInZone, resolveInWorkspace } from './workspace'
 
-const ws = () => mkdtempSync(path.join(tmpdir(), 'orc-ws-'))
+// every temp dir this file creates, removed once at the end
+const dirs: string[] = []
+afterAll(() => { for (const d of dirs) rmSync(d, { recursive: true, force: true }) })
+const tmp = (prefix: string): string => { const d = mkdtempSync(path.join(tmpdir(), prefix)); dirs.push(d); return d }
+const ws = () => tmp('orc-ws-')
 
 describe('pathInZone (pure zone predicate)', () => {
   it('matches a path inside a single glob', () => {
@@ -68,7 +72,7 @@ describe('resolveInWorkspace (trust boundary)', () => {
 
   it('rejects a symlink pointing outside the workspace', () => {
     const dir = ws()
-    const outside = mkdtempSync(path.join(tmpdir(), 'orc-outside-'))
+    const outside = tmp('orc-outside-')
     writeFileSync(path.join(outside, 'secret.txt'), 'top-secret')
     symlinkSync(outside, path.join(dir, 'sneaky'))
     expect(() => resolveInWorkspace(dir, 'sneaky/secret.txt')).toThrow(/escapes workspace/)
@@ -76,7 +80,7 @@ describe('resolveInWorkspace (trust boundary)', () => {
 
   it('rejects a deep nonexistent path under a symlinked dir (ancestor-walk loop)', () => {
     const dir = ws()
-    const outside = mkdtempSync(path.join(tmpdir(), 'orc-outside-'))
+    const outside = tmp('orc-outside-')
     symlinkSync(outside, path.join(dir, 'sneaky'))
     // nothing below `sneaky` exists — the guard must climb past a/ and b/ to find the symlink
     expect(() => resolveInWorkspace(dir, 'sneaky/a/b/new.txt')).toThrow(/escapes workspace/)

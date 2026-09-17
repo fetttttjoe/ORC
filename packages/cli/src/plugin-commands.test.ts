@@ -1,12 +1,14 @@
-import { afterAll, afterEach, describe, expect, it, mock, spyOn } from 'bun:test'
+import { afterAll, afterEach, describe, expect, it, mock } from 'bun:test'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createMcpHub } from '@orc/mcp-client'
 import { createPluginHost, grantMcpTrust, isMcpTrusted, loadConfig, loadTrust, requireProject } from '@orc/kernel'
+import { must } from '@orc/contracts/fixtures'
 import { createTestDb, seedTestWorkspace, TEST_PROJECT_ID, TEST_WORKSPACE_ID } from '@orc/kernel/test-helpers'
-import { buildProgram, openKernel } from './main'
+import { openKernel } from './main'
+import { cli } from './test-helpers'
 import { seedShippedSkills } from './shipped-skills'
 
 const FIXTURE = fileURLToPath(new URL('../../../plugins/mcp-client/src/fixture-server.ts', import.meta.url))
@@ -41,10 +43,7 @@ async function makeCli(dir: string) {
   const { kernel, log } = await openKernel(db.url, { projectId: TEST_PROJECT_ID, refValidator: host.refValidator })
   // a task must name a workspace the fold has seen — one seeded record, then tasks as before
   await seedTestWorkspace(log)
-  const lines: string[] = []
-  spyOn(console, 'log').mockImplementation((...a: unknown[]) => { lines.push(a.join(' ')) })
-  const run = (...args: string[]) =>
-    buildProgram(kernel, undefined, { host, hub, config, log }).parseAsync(args, { from: 'user' })
+  const { run, lines } = cli(kernel, undefined, { host, hub, config, log })
   return { run, lines, dir, host, hub, kernel, config }
 }
 
@@ -112,7 +111,7 @@ describe('plugin commands', () => {
     const dir = project({ mcpServers: { fixture: { command: 'bun', args: [FIXTURE] } } })
     const { run, lines, dir: d } = await makeCli(dir)
     await run('new', 'task with tools', '--workspace', TEST_WORKSPACE_ID)
-    const taskId = lines[0]!
+    const taskId = must(lines[0], 'task id from new command')
     const draftFile = path.join(d, 'draft.json')
     writeFileSync(draftFile, JSON.stringify({
       strategyRef: 'template:single', costEstimateUSD: null,
@@ -147,7 +146,7 @@ describe('plugin commands', () => {
     const dir = project({})
     const { run, lines } = await makeCli(dir)
     await run('new', 'both sources task', '--workspace', TEST_WORKSPACE_ID)
-    const taskId = lines[0]!
+    const taskId = must(lines[0], 'task id from new command')
     await expect(run('edit', taskId, '--file', path.join(dir, 'draft.json'), '--from-vault'))
       .rejects.toThrow(/pass exactly one/)
   })
@@ -156,7 +155,7 @@ describe('plugin commands', () => {
     const dir = project({})
     const { run, lines, config } = await makeCli(dir)
     await run('new', 'vault edit task', '--workspace', TEST_WORKSPACE_ID)
-    const taskId = lines[0]!
+    const taskId = must(lines[0], 'task id from new command')
     await run('propose', taskId, '--model', 'fake/m') // v1 — 'fake' is the only provider this test's host registers
     for (let i = 0; i < 10; i++) await run('edit', taskId, '--model', 'fake/m') // v2..v11 — plan-v10/plan-v11 must sort after plan-v9 numerically, not lexicographically
     await run('vault', 'render', taskId) // render every plan-vN.md to disk (real vault files, not a mock)

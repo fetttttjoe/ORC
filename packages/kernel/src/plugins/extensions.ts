@@ -1,14 +1,21 @@
 import { createRequire } from 'node:module'
 import { errorMessage } from '@orc/contracts'
 import path from 'node:path'
+import { z } from 'zod'
 import type { ExtensionApi, ExtensionManifest } from '@orc/contracts'
 
 const require = createRequire(import.meta.url)
 
-const isManifest = (v: unknown): v is ExtensionManifest =>
-  typeof v === 'object' && v !== null &&
-  'id' in v && typeof v.id === 'string' &&
-  'activate' in v && typeof v.activate === 'function'
+// Shape check only — `deactivate` is optional and unchecked here.
+const ExtensionManifestShape = z.object({
+  id: z.string(),
+  activate: z.custom<ExtensionManifest['activate']>(v => typeof v === 'function'),
+})
+
+// A type predicate over safeParse, not the parsed value itself: z.object() strips keys the
+// schema doesn't declare, and the caller stores the ORIGINAL module object (so an untyped
+// `deactivate` on it still gets called at shutdown).
+const isManifest = (v: unknown): v is ExtensionManifest => ExtensionManifestShape.safeParse(v).success
 
 export interface LoadedExtension { path: string; manifest: ExtensionManifest }
 

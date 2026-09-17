@@ -1,6 +1,7 @@
 import { afterAll, describe, expect, it } from 'bun:test'
 import { z } from 'zod'
 import { EVENT_KIND } from '@orc/contracts'
+import { must } from '@orc/contracts/fixtures'
 import { Kernel, openStorage } from '@orc/kernel'
 import { createTestDb, seedTestWorkspace, TEST_PROJECT_ID, TEST_WORKSPACE_ID } from '@orc/kernel/test-helpers'
 import { MockLanguageModelV4 } from 'ai/test'
@@ -100,7 +101,7 @@ const ProjectsFrame = z.object({
 // every frame on the way — for asserting an earlier frame and a later one on ONE stream
 // (a response body reader cannot be re-acquired after cancel)
 async function readSse(res: Response, until: (msg: { id: number; data: string }) => boolean, seen?: (msg: { id: number; data: string }) => void) {
-  const reader = res.body!.getReader()
+  const reader = must(res.body, 'sse response body').getReader()
   const dec = new TextDecoder()
   let buf = ''
   const deadline = Date.now() + 2000
@@ -162,7 +163,7 @@ describe('graph-ui web adapter', () => {
     const appended = await storage.events.append(noteEvent('live-note'))
     const liveMsg = await readSse(live, m => m.data.includes('live-note'))
     expect(liveMsg?.id).toBe(appended.seq)
-    const env = WriteEnvelope.parse(JSON.parse(liveMsg!.data))
+    const env = WriteEnvelope.parse(JSON.parse(must(liveMsg, 'live envelope').data))
     expect(env.patch.addNodes.map(n => n.id)).toEqual([noteNodeId('project', 'live-note')])
     expect(env.summary.kind).toBe(EVENT_KIND.memory_written)
     expect(env.summary.noteRef).toBe(noteNodeId('project', 'live-note'))
@@ -175,7 +176,7 @@ describe('graph-ui web adapter', () => {
       payload: { id: 'live-note', scope: 'project', mode: 'read', author: { source: 'cli', workspaceId: TEST_WORKSPACE_ID } },
     })
     const heated = await readSse(accessed, m => m.data.includes('memory_accessed'))
-    const heatedEnv = HeatEnvelope.parse(JSON.parse(heated!.data))
+    const heatedEnv = HeatEnvelope.parse(JSON.parse(must(heated, 'heated envelope').data))
     const heatedNote = heatedEnv.patch.updateNodes.find(n => n.id === noteNodeId('project', 'live-note'))
     expect(heatedNote?.heat).toBeGreaterThan(0)
     expect(heatedEnv.summary.line).toContain('read')
@@ -184,7 +185,7 @@ describe('graph-ui web adapter', () => {
     const resumed = await fetch(`${base}/api/stream?project=${TEST_PROJECT_ID}&fromSeq=${g.seq}`)
     const catchUp = await readSse(resumed, m => m.data.includes('live-note'))
     expect(catchUp).not.toBeNull()
-    expect(CatchUpEnvelope.parse(JSON.parse(catchUp!.data)).patch.addNodes.map(n => n.id)).toEqual([noteNodeId('project', 'live-note')])
+    expect(CatchUpEnvelope.parse(JSON.parse(must(catchUp, 'catch-up envelope').data)).patch.addNodes.map(n => n.id)).toEqual([noteNodeId('project', 'live-note')])
 
     await ui.stop(); await storage.close()
   })
@@ -207,7 +208,7 @@ describe('graph-ui web adapter', () => {
     const frames: string[] = []
     const failed = await readSse(stream, m => m.data.includes('"failure"'), m => frames.push(m.data))
     expect(failed).not.toBeNull()
-    const env = FailureEnvelope.parse(JSON.parse(failed!.data))
+    const env = FailureEnvelope.parse(JSON.parse(must(failed, 'failure envelope').data))
     expect(env.summary.kind).toBe(EVENT_KIND.tool_result)
     expect(env.summary.failure).toEqual({ toolName: 'finalize_plan', error: 'the plan graph changed since you approved' })
     // the successful result streamed first and carried no failure — errors are the signal, not
@@ -233,14 +234,14 @@ describe('graph-ui web adapter', () => {
     const grown = await readSse(stream, m => m.data.includes(other), m => frames.push(m))
     expect(grown).not.toBeNull()
     // projects frames carry NO SSE id: state sync must never advance Last-Event-ID resume
-    expect(grown!.id).toBe(-1)
-    expect(ProjectsFrame.parse(JSON.parse(grown!.data)).projects.map(p => p.id)).toContain(other)
+    expect(must(grown, 'grown').id).toBe(-1)
+    expect(ProjectsFrame.parse(JSON.parse(must(grown, 'grown').data)).projects.map(p => p.id)).toContain(other)
 
     // the connect-time seed frame preceded it — reconnecting tabs converge without a reload
     const seed = frames.find(f => f.data.includes('"projects"'))
     expect(seed).not.toBeUndefined()
-    expect(seed!.id).toBe(-1)
-    expect(ProjectsFrame.parse(JSON.parse(seed!.data)).projects.map(p => p.id)).toContain(TEST_PROJECT_ID)
+    expect(must(seed, 'seed').id).toBe(-1)
+    expect(ProjectsFrame.parse(JSON.parse(must(seed, 'seed').data)).projects.map(p => p.id)).toContain(TEST_PROJECT_ID)
 
     await foreign.close(); await ui.stop(); await storage.close()
   })

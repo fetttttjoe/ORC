@@ -1,4 +1,4 @@
-import { MemoryScope, NOTE_TIER, type MemoryStore, type NoteSummary } from '@orc/contracts'
+import { MemoryScope, NOTE_TIER, nonEmptyLines, type MemoryStore, type NoteSummary } from '@orc/contracts'
 import { gitRevision } from '@orc/kernel'
 
 // The read-only store+git side of the kernel's grounding-freshness probe. The kernel declares the
@@ -15,7 +15,7 @@ import { gitRevision } from '@orc/kernel'
 // filter by id prefix (it filters scope/category/tag/tier only).
 const isGroundingFamily = (id: string): boolean => id === 'arch-overview' || id.startsWith('area-')
 
-export function createGroundingSource(opts: { store: MemoryStore; dir: string }): {
+export function createGroundingSource(opts: { store: Pick<MemoryStore, 'list'>; dir: string }): {
   head(): Promise<string | null>
   notes(): Promise<{ id: string; sourceRevision: string | null; paths: string[] }[]>
   commitsSince(rev: string, paths: string[]): Promise<number | null>
@@ -23,14 +23,12 @@ export function createGroundingSource(opts: { store: MemoryStore; dir: string })
 } {
   const { store, dir } = opts
 
-  // One `git rev-list` per DISTINCT (rev, paths) per process, exactly as drift.ts caches per
+  // One `git diff --name-only` per DISTINCT (rev, paths) per process, exactly as drift.ts caches per
   // revision — one freshness verdict must not spawn N duplicate gits. Keyed on rev + the ordered
-  // path list; two callers asking the same question share the single in-flight promise.
-  const cache = new Map<string, Promise<number | null>>()
-
-  // One `git diff --name-only` per DISTINCT (rev, paths) per process — same caching discipline
-  // as commitsSince. Returns only paths within the declared set that changed; [] = nothing changed;
-  // null = git could not answer (no repo, unknown revision, non-zero exit, throw).
+  // path list; two callers asking the same question share the single in-flight promise. Returns
+  // only paths within the declared set that changed; [] = nothing changed; null = git could not
+  // answer (no repo, unknown revision, non-zero exit, throw). commitsSince is this count, so both
+  // probes share the one spawn and the one cache.
   const changedCache = new Map<string, Promise<string[] | null>>()
 
   return {
@@ -48,29 +46,9 @@ export function createGroundingSource(opts: { store: MemoryStore; dir: string })
         .map(n => ({ id: n.id, sourceRevision: n.sourceRevision, paths: n.paths }))
     },
 
-    commitsSince(rev, paths) {
-      const key = `${rev}\u0000${paths.join('\u0000')}`
-      let hit = cache.get(key)
-      if (!hit) {
-        hit = (async () => {
-          try {
-            // files under `paths` that differ between `rev` and the WORKING TREE — committed changes
-            // AND unstaged edits. Line count = number of changed files (0 = clean). NOT `rev..HEAD`:
-            // orc edits source without committing, so its drift is UNSTAGED, and rev..HEAD (commits
-            // only) is blind to exactly that. Same probe as drift.ts's read-path check, so gate and
-            // reads agree. `--` separates the revision from paths.
-            const proc = Bun.spawn(['git', '-C', dir, 'diff', '--name-only', `${rev}`, '--', ...paths], { stdout: 'pipe', stderr: 'ignore' })
-            const out = await new Response(proc.stdout).text()
-            // no repo, unknown revision, non-zero exit → null ("cannot answer"; the kernel analyzes)
-            if ((await proc.exited) !== 0) return null
-            return out.split('\n').filter(l => l.trim() !== '').length
-          } catch {
-            return null
-          }
-        })()
-        cache.set(key, hit)
-      }
-      return hit
+    async commitsSince(rev, paths) {
+      const changed = await this.changedPaths(rev, paths)
+      return changed === null ? null : changed.length
     },
 
     changedPaths(rev, paths) {
@@ -86,7 +64,7 @@ export function createGroundingSource(opts: { store: MemoryStore; dir: string })
             const out = await new Response(proc.stdout).text()
             // no repo, unknown revision, non-zero exit → null ("cannot answer"; caller falls back to declared paths)
             if ((await proc.exited) !== 0) return null
-            return out.split('\n').filter(l => l.trim() !== '')
+            return nonEmptyLines(out)
           } catch {
             return null
           }

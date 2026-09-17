@@ -1,4 +1,4 @@
-import { afterAll, describe, expect, it, mock, spyOn } from 'bun:test'
+import { afterAll, afterEach, describe, expect, it, mock, spyOn } from 'bun:test'
 import { mkdtempSync, realpathSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
@@ -36,6 +36,7 @@ afterAll(async () => {
     await s.close()
   }
 })
+afterEach(() => mock.restore())
 
 // captures the memory tools the port hands each step, then signals success
 const toolProbe: { results: { name: string; isError: boolean; output: unknown }[] } = { results: [] }
@@ -206,7 +207,6 @@ describe('buildRuntime role-skill pre-flight', () => {
     const warns: string[] = []
     spyOn(console, 'warn').mockImplementation((...a: unknown[]) => { warns.push(a.join(' ')) })
     const port = await buildRuntime({ host, hub, config, storage, kernel })
-    mock.restore()
     // Shut down HERE in `finally`, not via the shared `cleanup` array: DBOS launch is
     // process-global, and the degraded-memory test below builds its own runtime.
     try {
@@ -257,7 +257,6 @@ describe('buildRuntime degraded memory', () => {
     spyOn(console, 'warn').mockImplementation((...a: unknown[]) => { warns.push(a.join(' ')) })
     const port = await buildRuntime({ host, hub, config, storage, kernel })
     cleanup.push(() => log.close(), () => port.shutdown())
-    mock.restore()
     expect(warns.filter(w => w.includes('memory unavailable; continuing in degraded mode'))).toHaveLength(1)
     // ...and the role-skill pre-flight stays SILENT here: this harness seeds the shipped set the
     // way `orc init` does, and a warning that fires for a correctly seeded project is noise an
@@ -319,7 +318,7 @@ describe('status memory health', () => {
 
     // behind, not broken: a projector that has not drained yet is a healthy system mid-write
     await log.append({
-      taskId: null, stepId: null, runToken: null, kind: 'memory_written',
+      taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_written,
       payload: {
         note: { id: 'pending-note', title: 'P', scope: 'project', kind: 'fact', sourceRevision: null, categories: [], tags: [], links: [], paths: [], summary: '', body: '' },
         author: { source: 'cli', workspaceId: TEST_WORKSPACE_ID },
@@ -330,7 +329,5 @@ describe('status memory health', () => {
     // unreachable database → the one real fault, and status still exits normally
     const broken = testConfig(db.url, { ...config, projectDbUrl: 'not-a-url' })
     expect(await status(broken, t.id)).toContain(`memory: ${MEMORY_HEALTH.unreachable}`)
-
-    mock.restore()
   }, 30_000)
 })

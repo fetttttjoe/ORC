@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test'
-import { activation, activationBoost, foldMemory, edgeKey, noteKey, EVENT_KIND } from './index'
+import { activation, activationBoost, foldMemory, edgeKey, noteKey, EVENT_KIND, LINK_KIND } from './index'
 import { TEST_WORKSPACE_ID } from './fixtures'
 
 const T0 = '2026-07-01T00:00:00.000Z'
@@ -46,7 +46,7 @@ describe('foldMemory — node access', () => {
 // The connection-level twin: folds memory_accessed.via into per-edge stats.
 describe('foldMemory — edge access', () => {
   it('counts hits per edge key with the last event ts, skipping unparseable and via-less payloads', () => {
-    const via = { seed: 'a', kind: 'supersedes', direction: 'out' as const }
+    const via = { seed: 'a', kind: LINK_KIND.supersedes, direction: 'out' as const }
     const ev = (ts: string, extra: Record<string, unknown> = {}) =>
       ({ kind: EVENT_KIND.memory_accessed, ts, payload: { id: 'b', scope: 'project', mode: 'read', author: { source: 'cli', workspaceId: TEST_WORKSPACE_ID }, ...extra } })
     const m = foldMemory([
@@ -62,8 +62,8 @@ describe('foldMemory — edge access', () => {
   it('canonicalizes both traversal directions of one authored edge onto ONE key', () => {
     // authored edge a -[supersedes]-> b. Walking out from seed a lands on b (direction out, seed a).
     // Walking in from seed b lands on a (direction in, seed b) — the SAME authored edge, opposite hop.
-    const outHop = { kind: EVENT_KIND.memory_accessed, ts: T0, payload: { id: 'b', scope: 'project', mode: 'read', author: { source: 'cli', workspaceId: TEST_WORKSPACE_ID }, via: { seed: 'a', kind: 'supersedes', direction: 'out' } } }
-    const inHop = { kind: EVENT_KIND.memory_accessed, ts: days(1), payload: { id: 'a', scope: 'project', mode: 'read', author: { source: 'cli', workspaceId: TEST_WORKSPACE_ID }, via: { seed: 'b', kind: 'supersedes', direction: 'in' } } }
+    const outHop = { kind: EVENT_KIND.memory_accessed, ts: T0, payload: { id: 'b', scope: 'project', mode: 'read', author: { source: 'cli', workspaceId: TEST_WORKSPACE_ID }, via: { seed: 'a', kind: LINK_KIND.supersedes, direction: 'out' } } }
+    const inHop = { kind: EVENT_KIND.memory_accessed, ts: days(1), payload: { id: 'a', scope: 'project', mode: 'read', author: { source: 'cli', workspaceId: TEST_WORKSPACE_ID }, via: { seed: 'b', kind: LINK_KIND.supersedes, direction: 'in' } } }
     const m = foldMemory([outHop, inHop]).edges
     expect(m.size).toBe(1)
     expect(m.get(edgeKey('project', 'a', 'b', 'supersedes'))).toEqual({ hits: 2, lastAccessedAt: days(1) })

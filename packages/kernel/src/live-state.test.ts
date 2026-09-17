@@ -2,7 +2,8 @@ import { afterAll, describe, expect, it } from 'bun:test'
 import { EVENT_KIND, type TaskNode } from '@orc/contracts'
 import { openStorage, type EventLog, type Storage } from './storage'
 import { openLiveState } from './live-state'
-import { createTestDb, TEST_PROJECT_ID, TEST_WORKSPACE_ID } from './test-helpers'
+import { createTestDb, TEST_PROJECT_ID, waitFor } from './test-helpers'
+import { taskFixture } from '@orc/contracts/fixtures'
 
 const dbs: Array<{ drop: () => Promise<void> }> = []
 afterAll(async () => {
@@ -17,11 +18,7 @@ async function freshStorage(): Promise<Storage> {
   return storage
 }
 
-const task = (id: string, over: Partial<TaskNode> = {}): TaskNode => ({
-  id, parentId: null, workspaceId: TEST_WORKSPACE_ID, type: 'generic', title: id, spec: '',
-  status: 'draft', zone: [], budgetUSD: null, depth: 0,
-  createdAt: '2026-07-26T00:00:00.000Z', ...over,
-})
+const task = (id: string, over: Partial<TaskNode> = {}): TaskNode => taskFixture({ id, title: id, ...over })
 
 const createTask = (log: EventLog, t: TaskNode) =>
   log.append({ taskId: t.id, stepId: null, runToken: null, kind: EVENT_KIND.task_created, payload: { task: t } })
@@ -29,11 +26,7 @@ const createTask = (log: EventLog, t: TaskNode) =>
 // `settled` waits for the subscription to have applied everything committed so far. The stream is
 // push-based and the handler is async, so a test that asserts immediately after an append races it.
 const settled = async (until: () => boolean): Promise<void> => {
-  for (let i = 0; i < 200; i++) {
-    if (until()) return
-    await Bun.sleep(10)
-  }
-  throw new Error('live state did not catch up within 2s')
+  if (!(await waitFor(async () => until(), 2000))) throw new Error('live state did not catch up within 2s')
 }
 
 describe('openLiveState', () => {

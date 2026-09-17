@@ -8,25 +8,18 @@ import {
   type AgentExecutor, type EventDraft, type ExecutorContext, type SplitResult, type UnifiedEvent,
 } from '@orc/contracts'
 import { draftFixture, stepFixture } from '@orc/contracts/fixtures'
-import { Surreal } from 'surrealdb'
-import { dbosSend, openStorage, projectDatabaseName, Kernel, type ProjectConfig } from '@orc/kernel'
+import { dbosSend, openStorage, Kernel, type ProjectConfig } from '@orc/kernel'
 import { createTestDb, fakeProvider, seedTestWorkspace, testConfig, TEST_PROJECT_ID, TEST_WORKSPACE_ID, waitFor } from '@orc/kernel/test-helpers'
 import { FINISH_TOOL_NAME } from '@orc/memory'
 import { buildPlugins, buildRuntime } from './runtime'
 import { seedShippedSkills } from './shipped-skills'
+import { dropSurrealDb } from './test-helpers'
 
 const dbs: Array<{ drop: () => Promise<void> }> = []
 const surrealBases: ProjectConfig[] = []
 afterAll(async () => {
   for (const d of dbs) await d.drop()
-  for (const c of surrealBases) {
-    const s = new Surreal()
-    await s.connect(c.projectDbUrl)
-    await s.signin({ username: c.projectDbUser, password: c.projectDbPassword })
-    await s.use({ namespace: c.projectDbNamespace })
-    await s.query(`REMOVE DATABASE IF EXISTS \`${projectDatabaseName(c.projectDbName, c.projectId)}\`;`).catch(() => {})
-    await s.close()
-  }
+  await Promise.all(surrealBases.map(c => dropSurrealDb(c)))
 })
 
 // The finish step's own question and the decision it records, named once so the assertions below

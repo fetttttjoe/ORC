@@ -4,13 +4,13 @@ import { drizzle, type NodePgDatabase } from 'drizzle-orm/node-postgres'
 import { errorMessage } from '@orc/contracts'
 import { buildRedactor, type Redactor } from '../redact'
 import { assertMigrated } from './migrate'
+import { pgListen } from './pg-listen'
 
 export type Tx = Parameters<Parameters<NodePgDatabase['transaction']>[0]>[0]
 
-// The shared append wake-up channel and listener backoff — owned here (the Postgres owner)
-// so EventLog.subscribe and watchProjectIds speak through one declaration, never two literals.
+// The shared append wake-up channel — owned here (the Postgres owner) so EventLog.subscribe and
+// watchProjectIds speak through one declaration, never two literals.
 export const NOTIFY_CHANNEL = 'orc_events'
-export const RECONNECT_DELAYS_MS: readonly [number, ...number[]] = [100, 200, 400, 800, 1600, 3000]
 
 // A reconnect that can NEVER succeed, so retrying it is a leak rather than resilience.
 //   3D000 invalid_catalog_name — the database is gone. It is not coming back: a dropped project
@@ -104,10 +104,7 @@ const WATCH_DEBOUNCE_MS = 150
 
 export async function watchProjectIds(url: string, onWake: (ids: string[]) => void): Promise<ProjectIdsWatch> {
   let closed = false
-  let client: pg.Client | null = null
   let debounce: ReturnType<typeof setTimeout> | null = null
-  let reconnectTimer: ReturnType<typeof setTimeout> | null = null
-  let backoff = 0
 
   const refresh = async (): Promise<void> => {
     if (closed) return
@@ -120,48 +117,25 @@ export async function watchProjectIds(url: string, onWake: (ids: string[]) => vo
       void refresh().catch(err => console.warn(`project watch refresh failed: ${errorMessage(err)}`))
     }, WATCH_DEBOUNCE_MS)
   }
-  const scheduleReconnect = (): void => {
-    if (closed || reconnectTimer !== null) return
-    const delay = RECONNECT_DELAYS_MS[Math.min(backoff, RECONNECT_DELAYS_MS.length - 1)] ?? RECONNECT_DELAYS_MS[0]
-    backoff += 1
-    reconnectTimer = setTimeout(() => { reconnectTimer = null; void connect(false) }, delay)
-  }
-  const connect = async (initial: boolean): Promise<void> => {
-    if (closed) return
-    const c = new pg.Client({ connectionString: url, application_name: 'orc-project-watch' })
-    // same rule as EventLog.subscribe: an 'error' event with no listener crashes the process,
-    // and a closed watch has nothing left worth reporting
-    c.on('error', err => { if (!closed) console.warn(`project watch listener error: ${errorMessage(err)}`) })
-    try {
-      await c.connect()
-      await c.query(`LISTEN ${NOTIFY_CHANNEL}`)
-      // the disposer may have run during the awaits — don't adopt a client it can't see
-      if (closed) { await c.end().catch(() => {}); return }
-      client = c
-      c.on('notification', wake)
-      c.once('end', () => { if (!closed) scheduleReconnect() })
-      backoff = 0
-      wake() // catch up on anything that landed while (re)connecting
-    } catch (err) {
-      await c.end().catch(() => {})
-      if (initial) throw err
-      // a database that no longer exists never will again — stop, and say so once
-      if (isGonePermanently(err)) {
-        closed = true
-        console.warn(`project watch stopped: ${errorMessage(err)}`)
-        return
-      }
-      console.warn(`project watch reconnect failed: ${errorMessage(err)}`)
-      scheduleReconnect()
-    }
-  }
-  await connect(true)
+
+  const listener = await pgListen({
+    url,
+    applicationName: 'orc-project-watch',
+    channel: NOTIFY_CHANNEL,
+    onNotification: () => wake(),
+    onConnected: () => wake(), // catch up on anything that landed while (re)connecting
+    isGonePermanently,
+    onStopped: () => {
+      closed = true
+      if (debounce) { clearTimeout(debounce); debounce = null }
+    },
+    warn: msg => console.warn(`project watch ${msg}`),
+  })
   return {
     async close() {
       closed = true
       if (debounce) clearTimeout(debounce)
-      if (reconnectTimer) clearTimeout(reconnectTimer)
-      await client?.end().catch(() => {})
+      await listener.close()
     },
   }
 }

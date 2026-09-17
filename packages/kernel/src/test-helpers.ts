@@ -71,8 +71,7 @@ export function testConfig(databaseUrl: string, overrides: Partial<ProjectConfig
   })
 }
 
-// the ONE polling loop for "the router/port will get there soon" assertions — five test files
-// each carried their own copy of this exact shape before it was hoisted
+// the ONE polling loop for "the router/port will get there soon" assertions, hoisted from five test files
 export const waitFor = async (pred: () => Promise<boolean>, ms = 3000): Promise<boolean> => {
   const start = Date.now()
   while (Date.now() - start < ms) { if (await pred()) return true; await Bun.sleep(50) }

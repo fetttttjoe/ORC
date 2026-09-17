@@ -242,9 +242,9 @@ const SummaryRow = z.object({
   // the workspace would return rows reading as trunk knowledge, which is worse than failing loudly.
   workspaceId: z.string(),
 })
-// the SELECT list derived from SummaryRow's own keys, so widening the row shape widens the
-// projection in the same edit. It used to be a hand-kept second spelling of the list, and zod
-// strips unknown keys, so half a change was silent.
+// the SELECT list is derived from SummaryRow's own keys, so widening the row shape widens the
+// projection in the same edit; a hand-kept second spelling drifts silently, because zod strips
+// unknown keys and half a change produces no error.
 //
 // It is a NARROWING for the keyword arm, which used to select the whole row through the builder:
 // toSummary falls back to `inferTier(r)` for a row with no stored `tier`, and inference reads
@@ -366,8 +366,7 @@ const CLAIM_SEARCH_LIMIT = 10
 // and 0.495 dips to 14/22, one probe wide — and there the floor costs three positives, two of them
 // the natural-language synonym probes an embedder exists to serve. The overlap above is also worse
 // on the narrow corpus (67% of positives inside the negative range, against 53% here), which is the
-// predicted single-topic effect. Evidence, both sweeps:
-// .superpowers/sdd/2026-07-28-retrieval-quality/corpus-comparison-report.md.
+// predicted single-topic effect.
 //
 // 0.60 IS NOT AN IMPROVEMENT AND MUST NOT BE ADOPTED. This was recorded here as an open decision
 // ("scores one better, someone decide") and is now settled, measured on both corpora: 0.60 wins the
@@ -441,6 +440,12 @@ function makeOrm(surreal: Surreal) {
   return orm(surreal, noteTable, metaTable, linkTable, claimTable, topicTable)
 }
 type Db = ReturnType<typeof makeOrm>
+
+// The one test seam: observes every orm transaction's `tx` before the body runs (the first line of
+// each transaction below), so a test can fail a statement mid-transaction. Nothing in production
+// passes it; the alternative was reaching the private orm, and TypeScript has no cast-free read of
+// a private field.
+export interface OpenSeams { onTransaction?: (tx: unknown) => void }
 // ReturnType picks the last overload, which is the no-callback one returning the tx itself.
 type Tx = Awaited<ReturnType<Db['transaction']>>
 
@@ -477,12 +482,13 @@ export class SurrealMemory {
     // where this store lives — needed only by drop(), which removes the database object itself
     // rather than its rows, and so cannot go through the ORM
     private readonly at?: { ns: string; db: string },
+    private readonly seams: OpenSeams = {},
   ) {}
 
   static async open(t: {
     url: string; ns: string; db: string; username: string; password: string
     connectTimeoutMs?: number
-  }, embedder?: EmbeddingProvider): Promise<SurrealMemory> {
+  }, embedder?: EmbeddingProvider, seams: OpenSeams = {}): Promise<SurrealMemory> {
     const surreal = new Surreal()
     try {
       // The driver's connect() does NOT reject on an unreachable endpoint — measured still
@@ -546,7 +552,7 @@ export class SurrealMemory {
         ftsIndexes(Tb.Note, NOTE_SEARCH_FIELDS),
         ftsIndexes(Tb.Claim, CLAIM_SEARCH_FIELDS),
       ].join(' '))
-      return new SurrealMemory(surreal, makeOrm(surreal), embedder, { ns: t.ns, db: t.db })
+      return new SurrealMemory(surreal, makeOrm(surreal), embedder, { ns: t.ns, db: t.db }, seams)
     } catch (err) {
       // connect() opens a live socket; if signin/use/DEFINE then throws, don't leak it
       // (symmetry with PostgresStore.open, which pool.end()s on an assertMigrated throw).
@@ -557,7 +563,7 @@ export class SurrealMemory {
     }
   }
 
-  // The ONE apply path (design §8.2): note/edges/cursor commit in a single Surreal
+  // The ONE apply path: note/edges/cursor commit in a single Surreal
   // transaction, gated by the ordered cursor — redelivery of any memory event is a no-op,
   // and revision counts distinct accepted writes, never delivery attempts.
   //
@@ -574,6 +580,7 @@ export class SurrealMemory {
     const embedding = m?.op === MutationOp.upsert ? await this.embedWritten(m.payload, e.seq) : undefined
     const claimEmbeddings = m?.op === MutationOp.upsert ? await this.embedClaims(m.payload, e.seq) : new Map<string, number[]>()
     return this.db.transaction(async tx => {
+      this.seams.onTransaction?.(tx)
       const cursor = (await tx.select(Tb.Meta, 'cursor'))[0]?.seq ?? 0
       if (e.seq <= cursor) return false
       if (m !== null) switch (m.op) {
@@ -765,7 +772,7 @@ export class SurrealMemory {
           // back under the same id has lost edges its neighbours still assert in their own `links`,
           // and only `orc memory rebuild` restores them. Fixing that means re-materializing inbound
           // edges on write, which is a scan of the note table on the hottest path — a deliberate
-          // trade, not a patch. See docs/superpowers/dataflow-audit-open-findings.md.
+          // trade, not a patch.
           await tx.delete(Tb.Link).where(l => l.fromId.eq(p.id).and(l.scope.eq(p.scope)))
           // the derived claim rows go with the note, same as its edges
           await tx.delete(Tb.Claim).where(c => c.noteId.eq(p.id).and(c.scope.eq(p.scope)))
@@ -793,7 +800,7 @@ export class SurrealMemory {
     const halfLife = opts.halfLifeDays ?? DEFAULT_HALF_LIFE_DAYS
     const now = opts.now ?? new Date().toISOString()
     // All in-scope edges, ranked in TS — fine for a hand-authored graph; a frontier-scoped
-    // fetch is a later optimisation (spec §4.2). Both directions (spec RG4): "what supersedes
+    // fetch is a later optimisation. Both directions: "what supersedes
     // this note" must be reachable from the superseded seed, so each edge is added reversed too.
     const rows = await this.db.select(Tb.Link).where(l => l.scope.eq(scope))
     // tagged with direction so an asymmetric kind stays unambiguous: A→B is 'out' from A, 'in' from B
@@ -916,8 +923,7 @@ export class SurrealMemory {
     // silent and the semantic arm was not. Fusion is not therefore bad — fused top-1 ties or beats
     // both arms and fused zero-result is the lowest of the three — but no threshold in either arm
     // can fix the negative column, because the fix belongs HERE (a negative-consensus rule: stay
-    // silent when the arm that CAN refuse did). Evidence:
-    // .superpowers/sdd/2026-07-28-retrieval-quality/corpus-comparison-report.md.
+    // silent when the arm that CAN refuse did).
     const keyword = knowledge(await this.keywordSearch(query, filter))
     const byKey = new Map<string, NoteSummary>()
     for (const n of [...semantic, ...keyword]) byKey.set(noteKey(n.scope, n.id), n)
@@ -1189,6 +1195,7 @@ export class SurrealMemory {
   async refreshLinks(): Promise<void> {
     const notes = await this.db.select(Tb.Note)
     await this.db.transaction(async tx => {
+      this.seams.onTransaction?.(tx)
       const stats = linkStatsOf(await tx.select(Tb.Link))
       await tx.delete(Tb.Link)
       for (const n of notes) await relateLinks(tx, n.scope, n.noteId, n.links, stats)
@@ -1211,6 +1218,7 @@ export class SurrealMemory {
       r.embedding === undefined ? [] : [{ id: r.claimId, vector: r.embedding }])
     const groups = partition(claims, threshold)
     await this.db.transaction(async tx => {
+      this.seams.onTransaction?.(tx)
       // Drop exactly the rows THIS refresh drops, in one statement that never reads a row — not a
       // blanket delete-then-recreate (a topic key is a deterministic claim id, and deleting a fixed
       // record id and upserting the SAME id inside one Surreal transaction leaves it deleted at
@@ -1250,9 +1258,9 @@ export class SurrealMemory {
       .map(r => Topic.parse({
         topicKey: r.topicKey,
         // topicKey is the group's lowest member id, so it is the standing fallback for the window
-        // between a medoid being retired and the next refresh re-partitioning without it. If BOTH
-        // are gone the topic has no name to show: a row labelled '' is worse than no row, and it
-        // used to be appended to the immutable log as the topic's name via memory_topic_accessed.
+        // between a medoid being retired and the next refresh re-partitioning without it. If BOTH are
+        // gone the label falls through to topicKey: a row labelled '' is worse than no row, and the
+        // name is appended to the immutable log via memory_topic_accessed, where it cannot be repaired.
         label: topicLabel(text.get(r.medoidClaimId) ?? text.get(r.topicKey) ?? r.topicKey, MEMORY_LIMITS.topicLabelChars),
         size: r.members.length,
       }))
@@ -1419,6 +1427,7 @@ export class SurrealMemory {
   // merely unlikely.
   async clear(): Promise<void> {
     await this.db.transaction(async tx => {
+      this.seams.onTransaction?.(tx)
       await tx.delete(Tb.Note)
       await tx.delete(Tb.Meta)
       await tx.delete(Tb.Link)

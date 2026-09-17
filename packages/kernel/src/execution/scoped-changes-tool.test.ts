@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'bun:test'
-import { FINISH_STEP_ID, STEP_ID, STEP_ROLE, VERIFY_STEP_ID, type EventRecord, type Plan } from '@orc/contracts'
-import { eventFixture, planFixture, stepFixture } from '@orc/contracts/fixtures'
+import { FINISH_STEP_ID, STEP_ID, STEP_ROLE, VERIFY_STEP_ID, type EventRecord, type Plan, EVENT_KIND } from '@orc/contracts'
+import { eventFixture, must, planFixture, recordOf, stepFixture } from '@orc/contracts/fixtures'
 import { taskChangedPaths } from '../projections'
 import { scopedChangesTool, SCOPED_CHANGES_TOOL_NAME } from './scoped-changes-tool'
 
@@ -20,10 +20,10 @@ const SIBLING_TASK = 'task-sibling' // NOT a descendant: a parallel task sharing
 
 const rt = (stepId: string): string => `run-${stepId}`
 const call = (seq: number, taskId: string, stepId: string, id: string, path: string): EventRecord =>
-  eventFixture({ seq, taskId, stepId, runToken: rt(stepId), kind: 'tool_call',
+  eventFixture({ seq, taskId, stepId, runToken: rt(stepId), kind: EVENT_KIND.tool_call,
     payload: { stepId, runToken: rt(stepId), iteration: 1, toolCallId: id, toolName: 'fs_write', input: { path } } })
 const ok = (seq: number, taskId: string, stepId: string, id: string): EventRecord =>
-  eventFixture({ seq, taskId, stepId, runToken: rt(stepId), kind: 'tool_result',
+  eventFixture({ seq, taskId, stepId, runToken: rt(stepId), kind: EVENT_KIND.tool_result,
     payload: { stepId, runToken: rt(stepId), iteration: 1, toolCallId: id, toolName: 'fs_write', output: {}, isError: false } })
 
 // ONE log holding every task's events, exactly as production does.
@@ -66,7 +66,7 @@ const verifyP = { taskId: THIS_TASK, stepId: VERIFY_STEP_ID, role: STEP_ROLE.aud
 
 const run = async (kernel = fakeKernel([THIS_TASK, CHILD_TASK], PLAN)) => {
   const [tool] = scopedChangesTool({ kernel, p: verifyP })
-  const r = await tool!.execute({})
+  const r = await must(tool, 'scoped changes tool').execute({})
   return r
 }
 
@@ -82,11 +82,11 @@ describe('citingNotes (heal-or-confirm candidates)', () => {
       kernel: fakeKernel([THIS_TASK, CHILD_TASK], PLAN), p: verifyP,
       citing: async paths => { seen.push(paths); return [NOTE] },
     })
-    const r = await tool!.execute({})
+    const r = await must(tool, 'scoped changes tool').execute({})
     expect(r.isError).toBe(false)
     expect((r.output as { citingNotes: unknown }).citingNotes).toEqual([NOTE])
     expect(seen).toHaveLength(1)
-    expect([...seen[0]!].sort()).toEqual([
+    expect([...must(seen[0], 'seen[0]')].sort()).toEqual([
       'docs/unrelated-note.md',
       'packages/kernel/src/child.ts',
       'packages/kernel/src/execution/scoped-changes-tool.ts',
@@ -108,7 +108,7 @@ describe('citingNotes (heal-or-confirm candidates)', () => {
       p: verifyP,
       citing: async paths => { seen.push(paths); return [] },
     })
-    await tool!.execute({})
+    await must(tool, 'scoped changes tool').execute({})
     expect(seen).toEqual([['packages/kernel/src/dup.ts']])
   })
 
@@ -124,9 +124,9 @@ describe('citingNotes (heal-or-confirm candidates)', () => {
       kernel: fakeKernel([THIS_TASK, CHILD_TASK], PLAN), p: verifyP,
       citing: async () => [],
     })
-    const r = await tool!.execute({})
+    const r = await must(tool, 'scoped changes tool').execute({})
     expect(r.isError).toBe(false)
-    expect(r.output as Record<string, unknown>).not.toHaveProperty('degraded')
+    expect(recordOf(r.output)).not.toHaveProperty('degraded')
   })
 })
 
@@ -143,27 +143,27 @@ describe('scoped_changes tool', () => {
     const rows = ((await run()).output as { paths: Array<{ path: string; inZone: boolean; zoneMatched?: string; stepId: string | null; taskId: string }> }).paths
     const stray = rows.find(x => x.path === 'docs/unrelated-note.md')
     expect(stray).toBeDefined()
-    expect(stray!.inZone).toBe(false)
-    expect(stray!.zoneMatched).toBeUndefined()
-    expect(stray!.stepId).toBe('s1')
-    expect(stray!.taskId).toBe(THIS_TASK)
+    expect(must(stray, 'stray path').inZone).toBe(false)
+    expect(must(stray, 'stray path').zoneMatched).toBeUndefined()
+    expect(must(stray, 'stray path').stepId).toBe('s1')
+    expect(must(stray, 'stray path').taskId).toBe(THIS_TASK)
   })
 
   it('reports an in-zone write with the glob it matched', async () => {
     const rows = ((await run()).output as { paths: Array<{ path: string; inZone: boolean; zoneMatched?: string; tool: string }> }).paths
     const own = rows.find(x => x.path === 'packages/kernel/src/execution/scoped-changes-tool.ts')
     expect(own).toBeDefined()
-    expect(own!.inZone).toBe(true)
-    expect(own!.zoneMatched).toBe('packages/kernel/**')
-    expect(own!.tool).toBe('fs_write')
+    expect(must(own, 'own path').inZone).toBe(true)
+    expect(must(own, 'own path').zoneMatched).toBe('packages/kernel/**')
+    expect(must(own, 'own path').tool).toBe('fs_write')
   })
 
   it('includes a descendant split task\'s write, attributed to the child task', async () => {
     const rows = ((await run()).output as { paths: Array<{ path: string; taskId: string; inZone: boolean }> }).paths
     const kid = rows.find(x => x.path === 'packages/kernel/src/child.ts')
     expect(kid).toBeDefined()
-    expect(kid!.taskId).toBe(CHILD_TASK)
-    expect(kid!.inZone).toBe(true)
+    expect(must(kid, 'kid path').taskId).toBe(CHILD_TASK)
+    expect(must(kid, 'kid path').inZone).toBe(true)
   })
 
   it('the kernel-appended commit step (zone:[], readOnlySource) does not unfence the task', async () => {
@@ -188,7 +188,7 @@ describe('scoped_changes tool', () => {
     const rows = (r.output as { paths: Array<{ path: string; inZone: boolean }> }).paths
     // judged against the WRITING steps' zone union — the read-only commit step's empty zone
     // neither unfences the task nor joins the union
-    expect(rows[0]!.inZone).toBe(false)
+    expect(must(rows[0], 'first row').inZone).toBe(false)
   })
 
   it('surfaces a kernel failure as isError, never a throw', async () => {
@@ -199,9 +199,9 @@ describe('scoped_changes tool', () => {
 
   it('describes itself as a floor that never licenses skipping a gate', async () => {
     const [tool] = scopedChangesTool({ kernel: fakeKernel([THIS_TASK], PLAN), p: verifyP })
-    expect(tool!.name).toBe(SCOPED_CHANGES_TOOL_NAME)
-    expect(tool!.ref).toBe(`kernel/${SCOPED_CHANGES_TOOL_NAME}`)
-    const d = tool!.description.toLowerCase()
+    expect(must(tool, 'scoped changes tool').name).toBe(SCOPED_CHANGES_TOOL_NAME)
+    expect(must(tool, 'scoped changes tool').ref).toBe(`kernel/${SCOPED_CHANGES_TOOL_NAME}`)
+    const d = must(tool, 'scoped changes tool').description.toLowerCase()
     expect(d).toContain('exec')
     expect(d).toContain('floor')
     expect(d).toContain('never')
