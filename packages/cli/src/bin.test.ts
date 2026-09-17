@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url'
 import { WORKSPACE_KIND } from '@orc/contracts'
 import { grantExtensionTrust, IDENTITY_FILE } from '@orc/kernel'
 import { createTestDb, tmpGitRepo } from '@orc/kernel/test-helpers'
+import { EXIT_CODE } from './exit'
 import { openKernel } from './main'
 
 const databases: Array<{ drop(): Promise<void> }> = []
@@ -39,6 +40,18 @@ describe('orc bin bootstrap', () => {
       expect(result.stdout).toContain('Usage:')
       expect(result.stderr).toBe('')
     }
+  }, 15_000)
+
+  // A caller that runs orc in EVERY repository (a session hook installed at user scope) has to tell
+  // "this directory is not an orc project" from "orc is broken here" without parsing a sentence:
+  // the first is silence, the second is worth a line.
+  it('a directory that is no orc project exits with its own code, not the generic failure', async () => {
+    const cwd = mkdtempSync(path.join(tmpdir(), 'orc-bin-noproject-'))
+    // an unreachable port: the refusal must come BEFORE any connection is attempted
+    const result = await runBin(cwd, ['tasks'], { ORC_DATABASE_URL: 'postgresql://postgres:orc@127.0.0.1:59999/orc' })
+    expect(result.exitCode).toBe(EXIT_CODE.noProject)
+    expect(result.stderr).toContain('orc init')
+    expect(result.stdout).toBe('')
   }, 15_000)
 
   it('formats validation errors as concise paths', async () => {

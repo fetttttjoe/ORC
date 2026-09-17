@@ -1,8 +1,8 @@
 #!/usr/bin/env bun
-import { isConnectionRefused, loadConfig, requireProject } from '@orc/kernel'
+import { isConnectionRefused, loadConfig, ProjectNotInitializedError, requireProject } from '@orc/kernel'
 import { errorMessage, HOOK_NAME } from '@orc/contracts'
 import { buildProgram, openKernel, runInit, runMigrate } from './main'
-import { exitCodeFor } from './exit'
+import { EXIT_CODE, exitCodeFor } from './exit'
 import type { Command } from 'commander'
 import { bootPhase, buildPlugins, buildRuntime } from './runtime'
 import { adoptCwd } from './workspace-adopt'
@@ -94,10 +94,13 @@ async function main(): Promise<number> {
   }
 }
 
-let exitCode = 1
+let exitCode: number = EXIT_CODE.failure
 try {
   exitCode = await main()
 } catch (error) {
+  // The code is set here and the message still printed below: a terminal user needs the sentence,
+  // a caller that runs orc in every repository needs only the number.
+  if (error instanceof ProjectNotInitializedError) exitCode = EXIT_CODE.noProject
   if (isConnectionRefused(error))
     console.error(`Postgres is not reachable at ${loadConfig().databaseUrl} — start it with: docker compose up -d`)
   // errorMessage prettifies a ZodError (path + message, never the raw issue-JSON dump) — the

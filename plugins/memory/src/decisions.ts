@@ -21,7 +21,10 @@ export interface DecisionDoor { store: DecisionStore; catchUp: () => Promise<voi
 export const decisionDoor = (memory: { store: MemoryStore; projector: { catchUp(): Promise<void> } }): DecisionDoor =>
   ({ store: memory.store, catchUp: () => memory.projector.catchUp() })
 
-export interface DecisionRecord { id: string; title: string; status: DecisionStatus; updatedAt: string; createdBy: string; supersededBy: string | null }
+// `summary` is the note's own one-line pointer (adrSummary of the Decision section at recording
+// time; whatever the writer gave at any other door, possibly empty). Carried so a surface that
+// lists decisions as "title — what was decided" does not have to fetch every body again.
+export interface DecisionRecord { id: string; title: string; summary: string; status: DecisionStatus; updatedAt: string; createdBy: string; supersededBy: string | null }
 // Narrowed to SemanticNote, not the whole MemoryNote union: both callers only ever hand this a note
 // that has already passed asDecision, so the type states what is already known rather than making
 // every reader re-narrow a union asDecision already collapsed.
@@ -151,7 +154,7 @@ export async function listDecisions(door: DecisionDoor, filter: { status?: Decis
   const supersededBy = new Map<string, string>()
   for (const n of notes) for (const l of n.links) if (l.kind === LINK_KIND.supersedes) supersededBy.set(l.id, n.id)
   return notes
-    .map(n => ({ id: n.id, title: n.title, status: decisionStatusOf(n.status), updatedAt: n.updatedAt, createdBy: n.createdBy, supersededBy: supersededBy.get(n.id) ?? null }))
+    .map(n => ({ id: n.id, title: n.title, summary: n.summary, status: decisionStatusOf(n.status), updatedAt: n.updatedAt, createdBy: n.createdBy, supersededBy: supersededBy.get(n.id) ?? null }))
     .filter(r => filter.status === undefined || r.status === filter.status)
     .sort((a, b) => RUNG[a.status] - RUNG[b.status] || b.updatedAt.localeCompare(a.updatedAt) || a.id.localeCompare(b.id))
 }

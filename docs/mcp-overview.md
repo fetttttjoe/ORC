@@ -4,6 +4,13 @@ The repo does MCP in **both directions**. `orc mcp serve` (an MCP client such as
 
 ## Direction 1: `orc` as an MCP server ("door #2")
 
+A Claude Code session reaches this server through the plugin in `plugin/`: its manifest declares the
+server inline, and the wrapper `plugin/bin/orc-mcp` changes into the session's project directory
+(`CLAUDE_PROJECT_DIR`) before running `orc mcp serve`, which is what binds the server to the right
+project. The same plugin's `SessionStart` hook prints `orc brief` into the session, and its three
+skills (`/orc:request`, `/orc:adr`, `/orc:workspace`) teach the tools listed here. Any other MCP
+client registers `orc mcp serve` as a plain stdio server.
+
 ```mermaid
 flowchart TB
     CC["Claude Code / any MCP client<br/>connects over stdio → bun cli mcp serve"]

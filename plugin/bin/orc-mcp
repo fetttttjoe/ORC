@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# Runs orc's MCP door for the Claude Code session that spawned it.
+#
+# The cd is what binds the server to the right project: orc resolves its project from the working
+# directory, and a git worktree resolves to the repository it belongs to. Resolved BEFORE the cd —
+# $0 may be a relative path.
+run="$(cd "$(dirname "$0")" && pwd)/orc-run"
+cd "${CLAUDE_PROJECT_DIR:-$PWD}" || exit 1
+exec "$run" mcp serve "$@"

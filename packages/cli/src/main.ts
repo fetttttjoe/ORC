@@ -2,7 +2,7 @@ import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, 
 import { spawn } from 'node:child_process'
 import path from 'node:path'
 import { Command, InvalidArgumentError } from 'commander'
-import { AUTHOR_SOURCE, claimHistory, EDGE_DIRECTION, errorMessage, EVENT_KIND, foldMemory, LINK_KINDS, MASTERPLAN_NOTE_ID, MEMORY_ACCESS, MemoryDeletedPayload, MemoryScope, MemoryWrittenPayload, noteKey, NOTE_KINDS, NoteKind, NOTE_TIER, NOTE_TIERS, NoteTier, parseLinkSpec, PlanDraft, RUN_OUTCOME, STRATEGY, TASK_STATUS, TERMINAL_TASK_STATUS, LinkKind, slugId, type Analyzer, type EventRecord, type MemoryAuthor, type MemoryLink, type NoteFields, type ExecutionPort, type MemoryHealth, type Plan, type TaskNode, type WorkspaceWithHealth, formatModelRate } from '@orc/contracts'
+import { AUTHOR_SOURCE, claimHistory, EDGE_DIRECTION, errorMessage, EVENT_KIND, foldMemory, LINK_KINDS, MASTERPLAN_NOTE_ID, MEMORY_ACCESS, MemoryDeletedPayload, MemoryScope, MemoryWrittenPayload, noteKey, NOTE_KINDS, NoteKind, NOTE_TIER, NOTE_TIERS, NoteTier, parseLinkSpec, PlanDraft, RUN_OUTCOME, STRATEGY, TASK_STATUS, TERMINAL_TASK_STATUS, LinkKind, slugId, type Analyzer, type EventRecord, type MemoryAuthor, type MemoryLink, type NoteFields, type ExecutionPort, type Plan, type TaskNode, type WorkspaceWithHealth, formatModelRate } from '@orc/contracts'
 import { openStorage, Kernel, atomicWriteFileSync, listProjectIds, claimSlot, fold, gatedChildren, freezePlan, liveSupervisors, orphanTasks, staleSupervisors, grantExtensionTrust, grantMcpTrust, initializeProject, isExtensionTrusted, isMcpTrusted, loadConfig, loadTrust, migrateDatabase, requireProject, runtimeLockHeld, stepUsage, subtreeUsage, tasksByWorkspace, taskUsage, type EventLog, type OrcConfig, type PluginHost, type ProjectConfig, type Storage } from '@orc/kernel'
 import { createVaultProjector, parsePlanFile } from '@orc/vault-projector'
 import { archiveCandidates, consolidateTask, CONSOLIDATE_EXECUTOR, createDriftProbe, frontier, needsReground, probeMemory, RECHECK_KINDS, recheckNotes, restampToHead, summarize, taskInfo } from '@orc/memory'
@@ -20,10 +20,12 @@ import { enumArg } from './enum-arg'
 import { renderDerivedPlan, renderPlanHuman } from './plan-render'
 import { adrCommand } from './adr-commands'
 import { wsCommand } from './ws-commands'
+import { briefCommand } from './brief-commands'
+import { driftLine } from './drift-line'
 import { requireLiveWorkspace } from './workspace-ops'
 import { listWorkspaceHealth } from './workspace-health'
 import { serveLogFile, servePidFile } from './serve-paths'
-import { CommandFailure } from './exit'
+import { CommandFailure, EXIT_CODE } from './exit'
 import { formatUsageLine } from './usage-render'
 import { watchSubtree, type TailResult } from './watch'
 
@@ -66,34 +68,6 @@ export async function openKernel(
   const log = storage.events
   if (opts.onAppend) log.onAppend = opts.onAppend
   return { kernel: new Kernel(log, opts.refValidator, opts.analyzers, opts.send, config.groundedApprovalDoors), log, storage }
-}
-
-// The committed plan that re-grounds a drifted graph. ONE spelling: the status line and the
-// supervisor banner both name it, and it is a real path a reader will paste. Exported so
-// shipped-skills.test.ts's driftLine pins assert against the same string driftLine actually
-// prints, rather than a second copy of the path that could drift from this one.
-export const REGROUND_PLAN = 'docs/kb-build-parallel.plan.json'
-
-// P5: driftLine could only ever recommend REGROUND_PLAN's full remap, even for a handful of stale
-// notes — healing ~10 drifted notes had no targeted instrument, only "re-derive all ten area notes
-// from scratch". This is the cheaper tier-3 instrument: one auditor step that walks the notes
-// memory_search already flags drifted and heals/confirms each via memory_write/memory_verify,
-// writing no source files. Below the reground threshold (needsReground), a handful of stale notes
-// doesn't justify redoing the whole graph, so the advisory now names this instead of REGROUND_PLAN.
-// Exported for the same reason as REGROUND_PLAN: shipped-skills.test.ts reads the tracked plan
-// file at this path and pins driftLine's below-threshold wording against it — one spelling, so a
-// rename here cannot leave either check pointed at a path that no longer exists.
-export const REGROUND_HEAL_PLAN = 'docs/reground-heal.plan.json'
-
-// How a drift reading reads to a human. Lives here, not in the memory plugin: which command to
-// recommend is a CLI concern, and a measurement module that builds prose ends up shipping a
-// hardcoded path inside a pure function. Exported so shipped-skills.test.ts can pin each branch's
-// wording without re-typing REGROUND_PLAN/REGROUND_HEAL_PLAN as a second literal.
-export const driftLine = (d: NonNullable<MemoryHealth['drift']>): string => {
-  const pct = Math.round(d.ratio * 100)
-  return needsReground(d)
-    ? `knowledge drift: at least ${d.drifted}/${d.checkable} checkable notes (${pct}%) describe code changed since they were written — something moved this repo without going through orc. Re-ground: orc propose <task> --file ${REGROUND_PLAN}`
-    : `knowledge drift: ${d.drifted}/${d.checkable} checkable notes (${pct}%) describe code that has since changed — heal: orc propose <task> --file ${REGROUND_HEAL_PLAN}`
 }
 
 // `orc init` must work before Postgres/plugins exist, so it gets a standalone entry
@@ -251,6 +225,7 @@ export function buildProgram(
   // reads that binding immediately, so calling wsCommand up there would hit its temporal dead zone.
   program.addCommand(wsCommand({ requireKernel, ...(plugin && { project: { config: plugin.config, log: plugin.log } }) }))
   program.addCommand(adrCommand({ requireKernel, ...(plugin && { project: { config: plugin.config, log: plugin.log } }) }))
+  program.addCommand(briefCommand({ ...(plugin && { project: { config: plugin.config, log: plugin.log } }) }))
 
   // The author every `orc memory` write carries, in ONE place — a dozen handlers each spelling
   // their own `{ source: cli, workspaceId: … }` is exactly the shape that leaves one command
@@ -554,7 +529,7 @@ export function buildProgram(
       if (events.length === 0 && first && last) {
         // an empty fold here is a footgun, not data: --at is below this task's first event
         console.error(`no events for '${taskId}' at or before seq ${opts.at} — sequences are GLOBAL across the project log; this task's events span ${first.seq}..${last.seq} (orc log ${taskId})`)
-        throw new CommandFailure(1) // already reported above — the entry point only sets the code
+        throw new CommandFailure(EXIT_CODE.failure) // already reported above — the entry point only sets the code
       }
       const state = fold(events)
       console.log(JSON.stringify(
@@ -644,7 +619,7 @@ export function buildProgram(
     const state = await requireKernel().state()
     console.log(formatUsageLine(subtreeUsage(state, rootId)))
     console.log(`run finished: ${result.outcome}`)
-    if (result.outcome !== RUN_OUTCOME.done) throw new CommandFailure(1)
+    if (result.outcome !== RUN_OUTCOME.done) throw new CommandFailure(EXIT_CODE.failure)
   }
 
   // The run a whole tree belongs to: a split child's work only ever resolves a gate held by an
@@ -783,7 +758,7 @@ export function buildProgram(
       const executorId = await claimSlot(storage, PHASE1_MAX_SLOTS)
       if (!executorId) {
         console.error(`another supervisor is already live for '${config.projectName}' — see: orc serve status`)
-        throw new CommandFailure(1)
+        throw new CommandFailure(EXIT_CODE.failure)
       }
       // Say something BEFORE buildRuntime, and beat through it: the build blocks on projection
       // catch-up, which is unbounded (a wiped read model replays the whole log — measured

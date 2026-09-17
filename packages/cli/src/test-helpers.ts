@@ -1,12 +1,13 @@
-// Shared CLI-test scaffolding: a throwaway-SurrealDB dropper and a `Command`-per-call CLI runner.
-// One spelling of the SurrealDB dropper and the CLI runner, so the six CLI test files that need
-// them cannot drift against each other.
+// Shared CLI-test scaffolding: a throwaway-SurrealDB dropper, a `Command`-per-call CLI runner, and
+// the throwing stubs the served-tool surface is built from. One spelling of each, so the CLI test
+// files that need them cannot drift against each other.
 import { spyOn } from 'bun:test'
 import type { Command } from 'commander'
 import { Surreal } from 'surrealdb'
 import type { ExecutionPort } from '@orc/contracts'
 import { projectDatabaseName, type EventLog, type Kernel, type PluginHost, type ProjectConfig, type Storage } from '@orc/kernel'
 import type { McpHub } from '@orc/mcp-client'
+import type { OrcActions, ProjectSessions } from '@orc/ui-core'
 import { buildProgram } from './main'
 
 // `use()` selects only the namespace, and the (internally-generated, `t_[a-z0-9]+`) db name is
@@ -53,3 +54,28 @@ export function cli(kernel: Kernel | null, port?: () => Promise<ExecutionPort>, 
   }
   return { run, lines }
 }
+
+// Honest stubs for the ui-core ports buildServeTools/mcpApproveTool take: every member throws unless
+// overridden, so an unexercised call surfaces instead of a cast lying about completeness. Shared
+// because two suites build the served tool surface — the MCP door's own tests, and the check that
+// the Claude Code plugin's skills name only tools that door serves.
+// ponytail: mirrors the unsupported() helper in packages/ui-core/src/copilot.test.ts; one home for
+// both would have to be production source in ui-core.
+export const unsupported = (name: string) => async (): Promise<never> => { throw new Error(`${name} not available in this test`) }
+export const sessionsStub = (over: Partial<ProjectSessions> = {}): ProjectSessions => ({
+  projects: unsupported('projects'), snapshot: unsupported('snapshot'), subscribe: unsupported('subscribe'),
+  subscribeProjects: unsupported('subscribeProjects'), notifyProjectsChanged: unsupported('notifyProjectsChanged'),
+  since: unsupported('since'), nodeDetail: unsupported('nodeDetail'), modelCatalog: unsupported('modelCatalog'),
+  reset: unsupported('reset'), transcript: unsupported('transcript'), taskPlans: unsupported('taskPlans'),
+  planNotes: unsupported('planNotes'), log: unsupported('log'), close: unsupported('close'), ...over,
+})
+export const actionsStub = (over: Partial<OrcActions> = {}): OrcActions => ({
+  newTask: unsupported('newTask'), propose: unsupported('propose'), edit: unsupported('edit'),
+  approve: unsupported('approve'), run: unsupported('run'), reply: unsupported('reply'),
+  retry: unsupported('retry'), annotate: unsupported('annotate'), revise: unsupported('revise'),
+  writeNote: unsupported('writeNote'), deleteNote: unsupported('deleteNote'),
+  recordDecision: unsupported('recordDecision'),
+  renameProject: unsupported('renameProject'), newProject: unsupported('newProject'),
+  listWorkspaces: unsupported('listWorkspaces'), newWorkspace: unsupported('newWorkspace'),
+  cancel: unsupported('cancel'), purgeProject: unsupported('purgeProject'), deleteProject: unsupported('deleteProject'), ...over,
+})

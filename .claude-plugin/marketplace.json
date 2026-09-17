@@ -1,0 +1,12 @@
+{
+  "name": "orc",
+  "owner": { "name": "Yanneck Haendeler" },
+  "metadata": { "description": "The orc orchestrator's own Claude Code plugin, served from its repository" },
+  "plugins": [
+    {
+      "name": "orc",
+      "source": "./plugin",
+      "description": "Drive orc from Claude Code: MCP tools, a session-start brief, and skills for requests, decisions and workspaces"
+    }
+  ]
+}

@@ -4,10 +4,11 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { isRecord } from '@orc/contracts'
 import { must } from '@orc/contracts/fixtures'
-import { buildCopilotTools, type OrcActions, type ProjectSessions } from '@orc/ui-core'
+import { buildCopilotTools } from '@orc/ui-core'
 import { MEMORY_READ_TOOLS, unavailableMemoryTools } from '@orc/memory'
 import { createTestDb, TEST_PROJECT_ID } from '@orc/kernel/test-helpers'
 import { buildServeTools, mcpApproveTool } from './mcp-serve'
+import { actionsStub, sessionsStub } from './test-helpers'
 
 // P7 prerequisite acceptance: under `mcp serve`, stdout carries ONLY JSON-RPC frames — one
 // stray boot print corrupts the channel. This drives a real spawned `orc mcp serve` through
@@ -54,29 +55,6 @@ const asJsonObject = (text: string): Record<string, unknown> => {
   if (!isRecord(v)) throw new Error('tool payload is not a JSON object')
   return v
 }
-
-// Honest stubs for the ui-core ports this suite hands to buildServeTools/mcpApproveTool: every
-// member throws unless overridden, so an unexercised call surfaces instead of a cast lying about
-// completeness. ponytail: mirrors the e2e fixture's unsupported() helper (also in
-// packages/ui-core/src/copilot.test.ts) — the shared home would be a production-source change.
-const unsupported = (name: string) => async (): Promise<never> => { throw new Error(`${name} not available in this test`) }
-const sessionsStub = (over: Partial<ProjectSessions> = {}): ProjectSessions => ({
-  projects: unsupported('projects'), snapshot: unsupported('snapshot'), subscribe: unsupported('subscribe'),
-  subscribeProjects: unsupported('subscribeProjects'), notifyProjectsChanged: unsupported('notifyProjectsChanged'),
-  since: unsupported('since'), nodeDetail: unsupported('nodeDetail'), modelCatalog: unsupported('modelCatalog'),
-  reset: unsupported('reset'), transcript: unsupported('transcript'), taskPlans: unsupported('taskPlans'),
-  planNotes: unsupported('planNotes'), log: unsupported('log'), close: unsupported('close'), ...over,
-})
-const actionsStub = (over: Partial<OrcActions> = {}): OrcActions => ({
-  newTask: unsupported('newTask'), propose: unsupported('propose'), edit: unsupported('edit'),
-  approve: unsupported('approve'), run: unsupported('run'), reply: unsupported('reply'),
-  retry: unsupported('retry'), annotate: unsupported('annotate'), revise: unsupported('revise'),
-  writeNote: unsupported('writeNote'), deleteNote: unsupported('deleteNote'),
-  recordDecision: unsupported('recordDecision'),
-  renameProject: unsupported('renameProject'), newProject: unsupported('newProject'),
-  listWorkspaces: unsupported('listWorkspaces'), newWorkspace: unsupported('newWorkspace'),
-  cancel: unsupported('cancel'), purgeProject: unsupported('purgeProject'), deleteProject: unsupported('deleteProject'), ...over,
-})
 
 describe('orc mcp serve (stdio, read slice)', () => {
   it('speaks clean JSON-RPC on stdout: initialize, tools/list, tools/call', async () => {

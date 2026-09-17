@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# Runs the orc CLI with the given arguments — the ONE place this plugin decides how orc is reached.
+# The MCP wrapper and the session hook both go through it, so the two cannot come to disagree about
+# which orc a session is talking to.
+#
+# Decoupled from where this plugin was cloned: Claude Code copies a plugin into its own cache on
+# install, so nothing here may reach back into the checkout. `bun link` in packages/cli puts `orc`
+# on PATH once; ORC_HOME names a checkout to run unlinked.
+#
+# 127 is the shell's own "command not found", which is what this is.
+if command -v orc >/dev/null 2>&1; then exec orc "$@"; fi
+if [ -n "${ORC_HOME:-}" ]; then exec bun "$ORC_HOME/packages/cli/src/bin.ts" "$@"; fi
+echo "orc is not on PATH — run (cd <orchestrator>/packages/cli && bun link) or set ORC_HOME" >&2
+exit 127

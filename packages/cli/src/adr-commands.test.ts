@@ -90,7 +90,7 @@ describe('orc adr', () => {
 
 describe('renderDecisionList', () => {
   it('renders one row per decision with status, age column and the superseding id', () => {
-    const rows = renderDecisionList([{ id: 'a', title: 'A', status: DECISION_STATUS.superseded, updatedAt: '2026-01-01T00:00:00.000Z', createdBy: 'human', supersededBy: 'b' }])
+    const rows = renderDecisionList([{ id: 'a', title: 'A', summary: 'what A decided', status: DECISION_STATUS.superseded, updatedAt: '2026-01-01T00:00:00.000Z', createdBy: 'human', supersededBy: 'b' }])
     expect(rows[0]).toContain('a')
     expect(rows[0]).toContain('superseded')
     expect(rows[0]).toContain('→ b')

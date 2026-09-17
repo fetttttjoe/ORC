@@ -128,6 +128,7 @@ graph TD
     ADOPT["workspace-adopt.ts<br/>adoptCwd + resolveTrunk (every boot)"]
     CWDW["cwd-workspace.ts<br/>which workspace a write comes from"]
     WSH["workspace-health.ts<br/>fold + disk/git/note probes"]
+    BRIEF["brief-commands.ts · brief-gather.ts · brief.ts<br/>orc brief: surface · the reads · pure select + render"]
   end
 
   subgraph CONTRACTS ["packages/contracts — the seam layer"]
@@ -190,6 +191,10 @@ graph TD
   ADOPT --> KAPI
   ADOPT --> GIT
   CWDW --> KAPI
+  MAIN --> BRIEF
+  BRIEF --> WSH
+  BRIEF --> CWDW
+  BRIEF --> MEMBIZ
   WSCMD --> WSOPS
   WSCMD --> WSH
   WSCMD --> CWDW

@@ -11,8 +11,8 @@ export const PROVISIONAL_UNKNOWN = '?'
 
 /**
  * Every workspace of this project with its health — the ONE place the impure half of the verdict is
- * assembled, so `orc ws ls`, `workspace_list` and `project_status.workspaces` describe a checkout
- * the same way.
+ * assembled, so `orc ws ls`, `workspace_list`, `project_status.workspaces` and `orc brief` describe a
+ * checkout the same way.
  *
  * The split is deliberate: the STATE TABLE is pure (kernel's `workspaceHealth`) and this layer
  * supplies only what a pure function cannot see — whether the directory is still there, whether git
@@ -22,7 +22,7 @@ export const PROVISIONAL_UNKNOWN = '?'
  * ONE log read for both the events and the fold, rather than `Kernel.state()` plus a second read:
  * `state()` folds `log.all()` internally, so asking it here would pay for the whole log twice.
  */
-export async function listWorkspaceHealth(opts: {
+export async function projectHealth(opts: {
   log: EventLog
   config: ProjectConfig
   includeArchived?: boolean
@@ -31,11 +31,11 @@ export async function listWorkspaceHealth(opts: {
   // `dangling` or `idle`, and with the read hard-wired the ONLY way to exercise it was to take the
   // read model down. A caller that supplies this owns the whole answer, absent/zero split included.
   counts?: () => Promise<Map<string, number> | null>
-}): Promise<WorkspaceWithHealth[]> {
+}): Promise<{ state: Pick<State, 'tasks' | 'workspaces'>; rows: WorkspaceWithHealth[] }> {
   const events = await opts.log.all()
   const state = fold(events)
   const notes = await (opts.counts ?? (() => provisionalCounts(opts, state)))()
-  return [...state.workspaces.values()]
+  const rows = [...state.workspaces.values()]
     .filter(w => opts.includeArchived === true || w.archivedAt === null)
     .map(w => {
       const dirExists = existsSync(w.cwd)
@@ -49,7 +49,15 @@ export async function listWorkspaceHealth(opts: {
       return { workspace: w, health: workspaceHealth(state, events, notes, w, { dirExists, clean: dirExists ? isClean(w.cwd) : null }) }
     })
     .sort(compareWorkspaceHealth)
+  return { state, rows }
 }
+
+// The rows alone — what every listing door wants. projectHealth also hands back the fold it derived
+// them from, for the one caller (the session brief) that reads tasks beside the verdicts: a second
+// `Kernel.state()` there would read the log again, and a task approved between the two reads would
+// be listed as waiting under a workspace whose state says nothing is.
+export const listWorkspaceHealth = async (opts: Parameters<typeof projectHealth>[0]): Promise<WorkspaceWithHealth[]> =>
+  (await projectHealth(opts)).rows
 
 /**
  * Still-provisional notes per workspace, or null when the read model could not be asked.

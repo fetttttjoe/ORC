@@ -14,6 +14,12 @@ Key terms used throughout the orchestrator codebase and documentation. Many term
 
 ---
 
+## B
+
+**Brief** — What a new session is told about a project before it has asked anything: the workspace the directory is, with its [health](#workspace); tasks awaiting approval, running or blocked (capped per status, this checkout's first); accepted [decisions](#decision), title plus one line, capped; and the drift advisory when it fires. `orc brief` prints it (`--json` for the parsed shape). The Claude Code plugin's `SessionStart` hook injects it into every session. It reads the read model as it stands and never drains the projector, stating how many knowledge events it is behind. A read model that cannot be reached costs the brief its decisions and note count — printed as unknown, never as none. See [`Brief` schema](../packages/contracts/src/brief.ts), [selection and rendering](../packages/cli/src/brief.ts), [the reads](../packages/cli/src/brief-gather.ts), [the hook](../plugin/hooks/session-start.sh).
+
+---
+
 ## C
 
 **Checkpoint** — DBOS-managed durable state across step retries. Distinct from `operation`, which journals external calls. See [execution flow](ARCHITECTURE.md#execution-flow-—-one-step-durably), [DBOS port invariant](EXTENDING.md#invariants-—-the-rules-that-keep-changes-cheap).
@@ -196,7 +202,7 @@ Key terms used throughout the orchestrator codebase and documentation. Many term
 
 **Workflow** — DBOS-managed durable execution context for a run. Survives crashes via checkpoints + operation journal. See [DBOS workflow](../packages/kernel/src/execution/dbos-port.ts), [workflow recovery](../README.md#guarantees-stated-precisely).
 
-**Workspace** — One checkout being worked in: the unit a [task](#task) belongs to, a run executes in, and a note remembers being written from. Two kinds — `checkout` (the repository's main checkout, the one holding the identity) and `worktree` (a linked git worktree, whether `orc ws new` created it or you did). `cwd` (a resolved realpath) is the natural key: one *active* record per directory, and the first orc command run anywhere adopts that directory, so no checkout is ever registered by hand. `managed` is true only for a directory orc created and is the fact that licenses `git worktree remove` (`orc ws archive --remove`, and the removal `orc ws merge` performs). `onTrunk` is captured at adoption and decides finality: knowledge written on trunk is final, everywhere else it is [provisional](#provisional-knowledge) until `orc ws merge` / `orc ws finalize` records `workspace_merged`. Because it is captured rather than re-derived, a checkout that *switches branch* is re-adopted — the old record is archived and a new one minted for the new branch, carrying over the facts a mint cannot derive (`managed`, `baseBranch`, `kind`) — so a main checkout moved onto a feature branch stops reading as trunk. **Workspace health** — `dangling` / `waiting` / `active` / `idle` / `merged` — is one derivation over the fold plus two probes (does the directory exist, is it clean), rendered identically by `orc ws ls`, the `workspace_list` tool and `project_status`. See [`Workspace` entity](../packages/contracts/src/workspace-entity.ts), [lifecycle operations](../packages/cli/src/workspace-ops.ts), [the `orc ws` surface](../packages/cli/src/ws-commands.ts), [health + `workspaceByCwd`](../packages/kernel/src/workspaces.ts), [adoption](../packages/cli/src/workspace-adopt.ts), [Workspaces](../README.md#workspaces).
+**Workspace** — One checkout being worked in: the unit a [task](#task) belongs to, a run executes in, and a note remembers being written from. Two kinds — `checkout` (the repository's main checkout, the one holding the identity) and `worktree` (a linked git worktree, whether `orc ws new` created it or you did). `cwd` (a resolved realpath) is the natural key: one *active* record per directory, and the first orc command run anywhere adopts that directory, so no checkout is ever registered by hand. `managed` is true only for a directory orc created and is the fact that licenses `git worktree remove` (`orc ws archive --remove`, and the removal `orc ws merge` performs). `onTrunk` is captured at adoption and decides finality: knowledge written on trunk is final, everywhere else it is [provisional](#provisional-knowledge) until `orc ws merge` / `orc ws finalize` records `workspace_merged`. Because it is captured rather than re-derived, a checkout that *switches branch* is re-adopted — the old record is archived and a new one minted for the new branch, carrying over the facts a mint cannot derive (`managed`, `baseBranch`, `kind`) — so a main checkout moved onto a feature branch stops reading as trunk. **Workspace health** — `dangling` / `waiting` / `active` / `idle` / `merged` — is one derivation over the fold plus two probes (does the directory exist, is it clean), rendered identically by `orc ws ls`, the `workspace_list` tool and `project_status`, and stated for the current checkout by the [brief](#brief). See [`Workspace` entity](../packages/contracts/src/workspace-entity.ts), [lifecycle operations](../packages/cli/src/workspace-ops.ts), [the `orc ws` surface](../packages/cli/src/ws-commands.ts), [health + `workspaceByCwd`](../packages/kernel/src/workspaces.ts), [adoption](../packages/cli/src/workspace-adopt.ts), [Workspaces](../README.md#workspaces).
 
 ---
 
@@ -223,7 +229,7 @@ Key terms used throughout the orchestrator codebase and documentation. Many term
 - [Decision](#decision), [Audit replay](#audit-replay), [Lineage](#lineage), [Index](#index)
 
 **Operations**
-- [Project](#project), [Workspace](#workspace), [Task](#task), [Plan](#plan), [Split](#split), [Approval](#approval), [Artifact](#artifact), [Tool](#tool), [Skill](#skill)
+- [Project](#project), [Workspace](#workspace), [Brief](#brief), [Task](#task), [Plan](#plan), [Split](#split), [Approval](#approval), [Artifact](#artifact), [Tool](#tool), [Skill](#skill)
 
 **Infrastructure**
 - [MCP](#mcp), [Trust](#trust), [Fingerprint](#fingerprint), [Degraded memory](#degraded-memory), [Idempotency key](#idempotency-key), [Redaction](#redaction), [Projector](#projector)

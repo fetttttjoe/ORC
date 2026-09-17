@@ -114,6 +114,8 @@ orc ws merge <ws-id>            # land its branch on trunk (--no-ff), record the
                                 # record, and remove the worktree if orc created it
 orc serve status                # the supervisor holding the runtime (the first executing command starts one)
 orc status <task-id>            # project, memory health, steps, operations, receipts, cost
+orc brief [--json]              # what a new session should know: this workspace and its health, tasks awaiting
+                                # approval / running / blocked, decisions in force, the drift advisory
 orc replay <task-id> --at <seq> # read-only audit replay at any event sequence
 orc log <task-id> --json        # full redacted event records
 orc skills                      # indexed SKILL.md skills (vault/skills/<name>/SKILL.md)
@@ -334,12 +336,48 @@ orc approve "$task_id" && orc run "$task_id"
 ### Driving orc from another agent (door #2, MCP)
 
 orc is usable from two doors: humans work the web UI (`orc graph`); external agents —
-Claude Code, any MCP client — drive the same substrate over stdio:
+Claude Code, any MCP client — drive the same substrate over stdio.
+
+**Claude Code: install the plugin.** This repository is its own plugin marketplace
+(`.claude-plugin/marketplace.json`, plugin in `plugin/`):
 
 ```bash
-claude mcp add orc -- bun /path/to/orchestrator/packages/cli/src/bin.ts mcp serve
-# or fully autonomous (approve included, attributed as approvedBy: mcp):
-claude mcp add orc -- … mcp serve --autonomy full
+docker compose up -d --wait && bun install && (cd packages/cli && bun link)   # `orc` on PATH
+```
+
+Then, inside Claude Code:
+
+```
+/plugin marketplace add /path/to/orchestrator      # or the git remote
+/plugin install orc@orc
+```
+
+The plugin loads in every session and is silent outside an orc project. Inside one it brings
+three things:
+
+- **The MCP door.** `plugin/bin/orc-mcp` runs `orc mcp serve` in the session's project directory,
+  so the server is bound to the project that directory belongs to — a git worktree resolves to its
+  repository. `plugin/bin/orc-run` is how the plugin reaches orc: `orc` on PATH, or the checkout
+  named by `ORC_HOME=/path/to/orchestrator` when the CLI is not linked.
+- **A brief at session start.** A `SessionStart` hook prints `orc brief` into the model's context:
+  this workspace and its health, tasks waiting on someone, decisions in force, the drift advisory.
+  It is fail-open — it always exits 0, says nothing in a directory that is not an orc project, and
+  when orc cannot answer says one line (`orc: unavailable — <reason>`, URL credentials removed).
+  With SurrealDB down the brief still prints, marking what it could not read as unknown. It reads
+  the read model as it stands and never drains the projector, so it says how many knowledge events
+  the decisions may be behind.
+- **Skills** — `/orc:request` (an ask → a request, its plan read back, the human gate),
+  `/orc:adr` (enumerate decisions, record, supersede), `/orc:workspace` (which checkout a request
+  belongs to). They teach the tools below; the skills under `vault/skills/` are a different
+  audience — agents running inside plans.
+
+The plugin serves the door under the default `--autonomy gated`. Any other MCP client, or a
+fully autonomous door, registers the server directly:
+
+```bash
+claude mcp add orc -- orc mcp serve
+# fully autonomous (approve included, attributed as approvedBy: mcp):
+claude mcp add orc -- orc mcp serve --autonomy full
 ```
 
 Tools served (project-bound, same `OrcActions` validation as the web):

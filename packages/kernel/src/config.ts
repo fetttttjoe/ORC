@@ -249,10 +249,18 @@ export function initializeProject(
   return { ...identity, projectRoot }
 }
 
+// A CLASS, not a message to match on: the entry point gives this refusal its own exit code, and a
+// caller comparing sentences would break the day the wording is improved.
+export class ProjectNotInitializedError extends Error {
+  constructor() {
+    super("project is not initialized — run 'orc init'")
+    this.name = 'ProjectNotInitializedError'
+  }
+}
+
 export function requireProject(config: OrcConfig): ProjectConfig {
   const { projectId, projectName } = config
-  if (!projectId || !projectName)
-    throw new Error("project is not initialized — run 'orc init'")
+  if (!projectId || !projectName) throw new ProjectNotInitializedError()
   return { ...config, projectId, projectName, systemDatabaseUrl: deriveSystemUrl(config.databaseUrl, projectId) }
 }
 

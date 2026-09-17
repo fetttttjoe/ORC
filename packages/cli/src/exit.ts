@@ -19,3 +19,13 @@ export class CommandFailure extends Error {
 export function exitCodeFor(error: unknown): number | null {
   return error instanceof CommandFailure ? error.exitCode : null
 }
+
+// The process's exit vocabulary. `noProject` exists for callers that run orc in directories they
+// did not choose — a session hook installed at user scope fires in every repository — and must tell
+// "nothing to say here" from "orc is broken here" without matching on a sentence. 3, because 1 is
+// every other failure (commander's usage errors included — an unknown command exits 1, measured),
+// 2 is what bash reports for misuse of a builtin, and anything above 125 belongs to the shell.
+// plugin/hooks/session-start.sh spells the number again
+// (bash cannot import this); claude-plugin.test.ts drives that script with a stub exiting
+// EXIT_CODE.noProject, so the two cannot drift silently.
+export const EXIT_CODE = { failure: 1, noProject: 3 } as const

@@ -4,7 +4,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { PlanDraft, ROLE_SKILL, STEP_ROLE, validatePlan, VERIFY_STEP_ID } from '@orc/contracts'
 import { parseSkillMd, SCOPED_CHANGES_TOOL_NAME } from '@orc/kernel'
-import { driftLine, REGROUND_HEAL_PLAN, REGROUND_PLAN } from './main'
+import { driftLine, REGROUND_HEAL_PLAN, REGROUND_PLAN } from './drift-line'
 import { SHIPPED_SKILLS } from './shipped-skills'
 
 // The tracked shipped-skill sources (exceptions inside gitignored vault/). The role skills carry
