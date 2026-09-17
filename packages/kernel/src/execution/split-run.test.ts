@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import {
-  ApprovalPolicy, EVENT_KIND, PAYLOAD_SCHEMAS, RUN_OUTCOME, SIGNAL_OUTCOME, TASK_STATUS,
+  ApprovalPolicy, EVENT_KIND, FINISH_STEP_ID, PAYLOAD_SCHEMAS, RUN_OUTCOME, SIGNAL_OUTCOME, TASK_STATUS,
   type AgentExecutor, type EventDraft, type ExecutorContext, type ResolvedTool,
   type SplitResult, type UnifiedEvent,
 } from '@orc/contracts'
@@ -13,7 +13,7 @@ import { createMemory } from '@orc/memory'
 import { createTestSurreal } from '@orc/memory/test-helpers'
 import { openStorage } from '../storage'
 import { Kernel } from '../kernel'
-import { createTestDb, fakeProvider, seedTestWorkspace, TEST_PROJECT_ID, TEST_WORKSPACE_ID, testConfig, waitFor } from '../test-helpers'
+import { createTestDb, fakeProvider, fakeSkills, seedTestWorkspace, TEST_PROJECT_ID, TEST_WORKSPACE_ID, testConfig, waitFor } from '../test-helpers'
 import { createDbosPort } from './dbos-port'
 import { splitTool } from './split-tool'
 
@@ -49,6 +49,21 @@ function splitFake(cfg: {
         if (!t) throw new Error(`no '${name}' tool injected`)
         return t
       }
+      // ---- the kernel's appended FINISH step ----
+      // It runs this same fake (it inherits the parent step's executorRef), and everything below
+      // the child branch is the PARENT choreography — so without this it would propose a SECOND
+      // split of its own and gate on it, which is how (b) went from done to a 20s timeout. The
+      // finish step has no part in the split choreography: it signals success and ends the run.
+      if (ctx.step.id === FINISH_STEP_ID) {
+        const signal = { ...base, outcome: SIGNAL_OUTCOME.success, summary: 'finished' }
+        await ctx.checkpoint('signal:1', async () => signal, (): EventDraft[] => [
+          { kind: EVENT_KIND.signal_received, payload: { ...base, signal } },
+        ])
+        yield { type: 'signal', signal }
+        yield { type: 'done' }
+        return
+      }
+
       // ---- CHILD step (w1) ----
       if (ctx.step.id === 'w1') {
         const workspaceOk = cfg.expectedWorkspace === undefined || ctx.workspaceDir === cfg.expectedWorkspace
@@ -161,7 +176,7 @@ async function bringUp(policy: 'auto' | 'manual', executor: AgentExecutor<unknow
   const memory = await createMemory({ log, config })
   await memory.projector.start()
   const port = await createDbosPort({
-    storage, config,
+    storage, config, skills: fakeSkills,
     providers: new Map([['fake', fakeProvider]]),
     executors: new Map([['split-fake', executor]]),
     stepTools: p => {

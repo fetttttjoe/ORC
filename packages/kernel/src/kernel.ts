@@ -1,12 +1,13 @@
 import { randomUUID } from 'node:crypto'
 import path from 'node:path'
 import { MASTERPLAN_NOTE_ID,
-  AnalysisCompletedPayload, ChildPlanDraft, EVENT_KIND, FeedbackProvidedPayload, GROUNDED_APPROVAL_DOOR, ISOLATION_TIER, MemoryDeletedPayload, MemoryWrittenPayload, NOTE_TIER, PAYLOAD_SCHEMAS, PlanAnnotatedPayload, PlanDraft, RunRequestedPayload, STEP_ROLE, STRATEGY, TASK_STATUS, TERMINAL_TASK_STATUS, WORKSPACE_TITLE_MAX, Workspace, WorkspaceArchivedPayload, WorkspaceMergedPayload, WorkspaceRetitledPayload, evaluateApproval, formatModelOption, isApprovalAnswer, validatePlan, type ChildPlanDraftInput, type ModelOption,
+  AnalysisCompletedPayload, ChildPlanDraft, EVENT_KIND, FINISH_STEP_ID, FeedbackProvidedPayload, GROUNDED_APPROVAL_DOOR, ISOLATION_TIER, MemoryDeletedPayload, MemoryWrittenPayload, NOTE_TIER, PAYLOAD_SCHEMAS, PlanAnnotatedPayload, PlanDraft, RunRequestedPayload, STEP_ROLE, STRATEGY, TASK_STATUS, TERMINAL_TASK_STATUS, WORKSPACE_TITLE_MAX, Workspace, WorkspaceArchivedPayload, WorkspaceMergedPayload, WorkspaceRetitledPayload, evaluateApproval, formatModelOption, isApprovalAnswer, validatePlan, type ChildPlanDraftInput, type ModelOption,
   type Analyzer, type ApprovalPolicy, type EventKind, type EventRecord,
   type PlanNote, type Plan, type PlanStep, type TaskNode, type TaskStatus,
   type MemoryAuthor, type WorkspaceKind,
 } from '@orc/contracts'
 import { foldPlanNotes, planApprovalStamp, planGraphHash, planScope, PLAN_STEP_ID, PLAN_STEP_ROLE } from './execution/strategies/grounded-plan'
+import { reconcileFinishStep } from './finish-step'
 import { DEFAULT_MAX_ITERATIONS } from './config'
 import { feedbackKey, openFeedbackTopics } from './feedback-open'
 import { EventLog, type EventLogOps } from './storage'
@@ -127,7 +128,11 @@ export class Kernel {
       const task = await this.requireTask(tx, taskId)
       if (task.status !== TASK_STATUS.draft)
         throw new KernelError(KERNEL_ERROR_CODE.invalid_transition, `cannot propose a plan while task is '${task.status}'`)
-      return this.appendPlanVersion(tx, taskId, draft, EVENT_KIND.plan_proposed, task.status)
+      // The finish step rides every ROOT plan from the moment it is proposed, so the human approves
+      // the shape that actually runs — the same reason freezePlan appends before the approval
+      // render. WHICH plans get one is finish-step.ts's rule (plansGetFinishStep), shared with
+      // editPlan below so a proposed plan and its edit can never end differently.
+      return this.appendPlanVersion(tx, taskId, reconcileFinishStep(task, draft), EVENT_KIND.plan_proposed, task.status)
     })
   }
 
@@ -145,7 +150,12 @@ export class Kernel {
       // swapped mid-flight.
       if (task.status !== TASK_STATUS.awaiting_approval && task.status !== TASK_STATUS.blocked)
         throw new KernelError(KERNEL_ERROR_CODE.invalid_transition, `cannot edit a plan while task is '${task.status}'`)
-      return this.appendPlanVersion(tx, taskId, draft, EVENT_KIND.plan_edited, task.status)
+      // The SAME rule proposePlan applies, and it has to be: a human edits the RENDERED plan, which
+      // already carries the kernel's finish step, so appending blindly would double it — and an
+      // edit written from scratch (orc edit --file) would otherwise drop it silently, leaving a
+      // task that never reconciles its notes. reconcileFinishStep strips the kernel's own trailing
+      // step and re-derives it, so the edited plan ends exactly where the proposed one did.
+      return this.appendPlanVersion(tx, taskId, reconcileFinishStep(task, draft), EVENT_KIND.plan_edited, task.status)
     })
   }
 
@@ -200,14 +210,20 @@ export class Kernel {
       }
 
       const draft = ChildPlanDraft.parse(input.plan)
-      // The committer role arms git_commit (commit-tool's registration gate), so only the kernel's
-      // own freeze may set it. Without this, any implementer could split off an auto-approved child
-      // claiming the role and commit unreviewed work — with autoCommit off, and no verify anywhere.
+      // The committer role arms git_commit (commit-tool's registration gate) and the finisher role
+      // arms the finish step's knowledge-authoring tools (stepMayReconcile), so only the kernel's
+      // own freeze may set either. Without this, any implementer could split off an auto-approved
+      // child claiming the role: committer commits unreviewed work — with autoCommit off, and no
+      // verify anywhere — and finisher records decisions the human never saw. The step ID is
+      // reserved alongside the role because stepMayReconcile keys on BOTH terms: a split step named
+      // 'finish' would shadow the kernel's own in every id-keyed read (status renders, resume).
       if (input.origin !== SPLIT_ORIGIN.freeze) {
-        const reserved = draft.steps.find(s => s.role === STEP_ROLE.committer)
+        const reserved = draft.steps.find(s => s.role === STEP_ROLE.committer || s.role === STEP_ROLE.finisher || s.id === FINISH_STEP_ID)
         if (reserved)
           throw new KernelError(KERNEL_ERROR_CODE.invalid_transition,
-            `step '${reserved.id}' claims role '${STEP_ROLE.committer}', which only the kernel's autoCommit freeze may set — remove it from the split; the commit step is appended for you when the pipeline commits`)
+            reserved.role === STEP_ROLE.committer
+              ? `step '${reserved.id}' claims role '${STEP_ROLE.committer}', which only the kernel's autoCommit freeze may set — remove it from the split; the commit step is appended for you when the pipeline commits`
+              : `step '${reserved.id}' claims the kernel-set ${reserved.role === STEP_ROLE.finisher ? `role '${STEP_ROLE.finisher}'` : `step id '${FINISH_STEP_ID}'`} — remove it from the split; the finish step is appended for you at the end of the pipeline this split belongs to`)
       }
       const child: TaskNode = {
         // a split runs in the same checkout its parent step is running in — inherited, never

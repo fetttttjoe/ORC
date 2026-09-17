@@ -96,9 +96,9 @@ echo 'ANTHROPIC_API_KEY=sk-ant-...' >> .env    # or ORC_ANTHROPIC_AUTH=oauth for
                                                # and/or run a local Ollama — no key needed
 
 orc db migrate                  # explicit schema setup; works before project initialization
-orc init --name my-project      # identity + first-party skills; run once per repository — every
-                                # worktree of it is the same project; identity lives only in the
-                                # main checkout, never committed
+orc init --name my-project      # identity + first-party skills; safe to re-run (it tops up the
+                                # skills after an upgrade) — every worktree of the repository is the
+                                # same project; identity lives only in the main checkout, never committed
 orc ws new "write release notes" --spec "summarize changes since v1.2; declare the notes file as an output"
                                 # a git worktree + branch for ONE request under .orc/worktrees/<slug>,
                                 # recorded as a workspace, with the request drafted as its first task;
@@ -123,7 +123,24 @@ orc ext trust <path>            # local consent, bound to extension dependency c
 orc retry <task-id>             # re-run failed steps after a block
 orc memory topics [key] [--json]  # what this project knows, grouped; --json for scripts
 orc memory claims <note-id> [--json]  # a note's live claims; --history folds the log for retired ones
+orc adr new "<title>" --context … --decision … --consequences … [--status s] [--tags …]
+                                # record a decision (id = slugged title); status defaults to accepted
+orc adr ls [--status s] [--json]  # list decisions, attention-first: proposed → accepted → deprecated → superseded
+orc adr show <id>               # one decision: status, provenance, Context / Decision / Consequences
+orc adr supersede <old-id> "<title>" --context … --decision … --consequences … [--status s] [--tags …]
+                                # records the replacement and marks <old-id> superseded, in one operation
+                                # decisions are `kind: decision` notes with a status; `orc adr` writes them
+                                # as `human`, the MCP door's record_decision as `mcp`
 ```
+
+Every root plan (and every frozen grounded pipeline) ends with a **finish**
+step, appended automatically before the run is done — the grounded bootstrap's
+own analyze/plan template and the auto-heal sweep are the two exceptions. It
+reconciles the task's notes, judges whether the task made an architectural
+decision, and asks once — the paths changed, every note kept or rewritten, and
+the decision draft in ADR wording if there is one. `orc reply <task-id>
+approve` records that decision, if any, and completes the task; anything else
+is read as feedback and the step asks again with the updated summary.
 
 ### Workspaces
 
@@ -145,9 +162,11 @@ under — that workspace instead.
 
 `orc ws new "<request>"` is the deliberate half: `git worktree add` under
 `.orc/worktrees/<slug>` on branch `orc/<slug>` (`--base <ref>` starts it
-somewhere other than this checkout's HEAD), the record, and the request drafted
-as that workspace's first task (`--no-task` makes only the workspace). It prints
-the `cd` line to work in.
+somewhere other than this checkout's HEAD), the project's `workspaceSetup`
+argv run inside the new tree (`["bun", "install", "--frozen-lockfile"]` here;
+a failing setup removes the tree again and records nothing), the record, and
+the request drafted as that workspace's first task (`--no-task` makes only the
+workspace). It prints the `cd` line to work in.
 
 **`cwd` is the natural key**, matched as a resolved realpath: one *active*
 record per directory, adoption is idempotent on it, and a worktree moved to a
@@ -213,8 +232,10 @@ Every task and every note names its workspace as a **required** field, so a
 project database written without one cannot be folded — the tasks and notes it
 holds simply stop appearing. Recreate it with `docker compose down -v && docker
 compose up -d --wait && orc db migrate`; a repository whose main checkout has no
-`.orc/identity.json` also needs `orc init --name <name>` once (an existing
-identity is kept — `orc init` refuses to mint a second one without `--force`).
+`.orc/identity.json` also needs `orc init --name <name>` once. `orc init` is
+idempotent and safe to re-run: it always tops up the shipped skills (never
+overwriting an edited one) and keeps an existing identity — minting a second one
+over a live project needs `--force`.
 
 ### Two settings a new project usually wants
 
@@ -328,13 +349,16 @@ Tools served (project-bound, same `OrcActions` validation as the web):
 | Read | `project_status`, `task_plan`, `task_transcript`, `plan_notes`, `recent_activity`, `available_models` (the live provider catalog — call it before naming a `modelRef`, never guess one) |
 | Knowledge (degraded-tolerant) | `memory_search`, `memory_read`, `memory_neighbors`, `memory_topics` (statements grouped by meaning; list them, then read one's claims), `memory_recheck` (the corpus drift verdict: counts plus the drifted/unknown lists) |
 | Mutate | `new_request` (quick/grounded; `workspaceId` defaults to the workspace this server runs in), `propose`, `run` (in the task's workspace unless a `cwd` says otherwise), `reply`, `retry`, `cancel`, `annotate`, `revise` |
+| Decisions | `record_decision` — record an ADR-shaped decision (Context / Decision / Consequences, status, optional `supersedes`); the one knowledge-authoring tool on this door, attributed `mcp` — the same tool in the web copilot writes `cli` |
 | Workspaces (served only with the mutating door) | `workspace_list` — the checkouts this project is worked in, each with its health (state, last activity, task counts, notes still pending a merge) and ordered attention-first, read-only; `workspace_new` — a git worktree + branch for ONE request under `.orc/worktrees`, recorded as a workspace, with the request as its first task |
 | The gate | `approve` — refuses under the default `--autonomy gated` (the human approves in the UI or `orc approve`); approves under `--autonomy full`, recorded as `approvedBy: mcp` |
 
 stdout carries ONLY protocol frames: boot diagnostics are rebound to stderr, and the
 transport owns the real stdout — DBOS's logger cannot corrupt the channel. Trust grants and
 `orc init` are never exposed over MCP. Memory writing stays with the agents running inside
-plans — the external driver reads knowledge, it does not author it.
+plans, with one deliberate exception: `record_decision`. A decision made in a driver's session
+is exactly the knowledge that otherwise evaporates, so the driver may record decisions — and
+nothing else; `memory_write` is not served.
 
 ### Sourced web research
 
@@ -501,7 +525,10 @@ by the agent.
   over both files.
 - Never bundle the CLI (`bun build`): DBOS must run unbundled via `bun run`.
 - Upgrading orc: finish or `orc cancel` active runs first — DBOS recovery is
-  keyed to the app version (`DBOS__APPVERSION`).
+  keyed to the app version (`DBOS__APPVERSION`). Then run `orc init` once per project: it seeds
+  skills a new version ships that the project's `vault/skills` does not have yet, and a plan
+  proposed before that is refused naming the missing one (`unknown skill 'role-finisher'`).
+  `orc serve` warns at boot for each role skill its index is missing.
 - **Claim rows exist only in the derived read model.** The projector materializes
   [claims](docs/ARCHITECTURE.md#claims-—-the-addressable-unit-of-knowledge) into the `claim`
   table, so a read model built before a note's claims were written has none until

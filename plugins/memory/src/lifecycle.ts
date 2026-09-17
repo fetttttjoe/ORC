@@ -1,5 +1,6 @@
 import { EVENT_KIND, NOTE_TIER, PAYLOAD_SCHEMAS, TASK_STATUS, errorMessage, planScope, type EventRecord } from '@orc/contracts'
-import { consolidateTask, type ConsolidationDeps } from './consolidate'
+import type { EventLog } from '@orc/kernel'
+import { consolidateTask, taskInfo, type ConsolidationDeps, type TaskInfo } from './consolidate'
 
 // The memory-lifecycle seam — a subscriber PEER to the projector that runs out-of-band, post-task
 // memory maintenance, decoupled from the execution kernel. Its FIRST operation is auto-consolidation
@@ -20,18 +21,22 @@ export function taskCompletedId(e: EventRecord): string | null {
 // gathers a task's step notes from the projected note table, which a SEPARATE async projector fills;
 // without catching up first, a still-unprojected step note yields a partial note or a wrongly-failed
 // salience gate that never re-fires. Optional, so the pure deps stay minimal.
-export type LifecycleDeps = ConsolidationDeps & { catchUp?: () => Promise<void> }
+export type CompletionDeps = ConsolidationDeps & { catchUp?: () => Promise<void> }
+// the live subscription is the one thing the per-completion path never needs
+export type LifecycleDeps = CompletionDeps & { log: Pick<EventLog, 'subscribe'> }
 
 // The per-completion action, exported for DETERMINISTIC testing (no live subscription needed): on a
 // terminal completion event, catch the projection up, then consolidate. Errors are SWALLOWED
 // (logged) so one bad task never wedges the subscription stream, and the write is idempotent so an
 // at-least-once redelivery is safe. A non-completion event is a no-op.
-export async function consolidateOnCompletion(deps: LifecycleDeps, e: EventRecord): Promise<void> {
+export async function consolidateOnCompletion(deps: CompletionDeps, e: EventRecord): Promise<void> {
   const taskId = taskCompletedId(e)
   if (taskId === null) return
   try {
     await deps.catchUp?.()
-    await consolidateTask(deps, taskId)
+    // resolved once for both halves — each used to scan the whole log for task_created on its own
+    const resolved = await taskInfo(deps.log, taskId)
+    await consolidateTask(deps, taskId, resolved)
     // AFTER consolidation, and the order is the guarantee — not the timing. consolidateTask reads
     // this task's step notes out of the projected note table, and archiving deletes those rows.
     // Today a flipped order still happens to work, because setArchivedAll is event-first and the
@@ -39,7 +44,7 @@ export async function consolidateOnCompletion(deps: LifecycleDeps, e: EventRecor
     // changes nothing observable. That is an accident of projection lag, not a design. One catchUp
     // added between them, or a synchronous projector, and the flipped order silently distils an
     // empty corpus into a note about nothing.
-    await retireStepTrail(deps, taskId)
+    await retireStepTrail(deps, taskId, resolved)
   } catch (err) {
     console.warn(`memory lifecycle: consolidate '${taskId}' failed:`, errorMessage(err))
   }
@@ -64,14 +69,18 @@ export async function consolidateOnCompletion(deps: LifecycleDeps, e: EventRecor
  * Reversible either way — archiving leaves every revision in the log, and `orc memory restore`
  * brings a note back.
  */
-async function retireStepTrail(deps: LifecycleDeps, taskId: string): Promise<void> {
+async function retireStepTrail(deps: CompletionDeps, taskId: string, resolved: TaskInfo | null): Promise<void> {
   const scope = planScope(taskId)
   const spent = (await deps.store.list({ scope })).filter(n => n.tier === NOTE_TIER.episodic)
   if (spent.length === 0) return
-  // one pass over the log for the whole trail, not one per note. The author is the consolidation
-  // author the composition root supplied (ConsolidationDeps) — retiring a trail is the same
-  // operation's second half, and this plugin invents no author of its own.
-  await deps.store.setArchivedAll(spent.map(n => ({ id: n.id, scope: n.scope })), true, deps.author)
+  // The author comes off the task_created event, never a fixed default — this plugin invents no
+  // author of its own (ConsolidationDeps.authorFor). A null is unreachable for a real completion
+  // (the kernel appends task_created before any status change for an id) but is skipped, not
+  // guessed: an unattributable archive is worse than one retried on the next completion.
+  if (resolved === null) return
+  const author = deps.authorFor({ id: taskId, workspaceId: resolved.workspaceId })
+  // one pass over the log for the whole trail, not one per note.
+  await deps.store.setArchivedAll(spent.map(n => ({ id: n.id, scope: n.scope })), true, author)
 }
 
 // Every task the log says is finished, newest status wins — a pure fold, so "which tasks are done"
@@ -97,11 +106,11 @@ function completedTaskIds(events: EventRecord[]): string[] {
 // lifecycle a persisted cursor if a long history ever makes this slow.
 // Not exported: only createMemoryLifecycle's start() below calls it — see memory/src/index.ts's rule
 // that a re-export nobody imports is compatibility debt for no consumer.
-async function consolidateBacklog(deps: LifecycleDeps): Promise<void> {
+async function consolidateBacklog(deps: CompletionDeps): Promise<void> {
   await deps.catchUp?.()
   for (const taskId of completedTaskIds(await deps.log.after(0, [EVENT_KIND.task_status_changed]))) {
     try {
-      await consolidateTask(deps, taskId)
+      await consolidateTask(deps, taskId, await taskInfo(deps.log, taskId))
     } catch (err) {
       console.warn(`memory lifecycle: backlog consolidate '${taskId}' failed:`, errorMessage(err))
     }

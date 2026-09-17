@@ -2,7 +2,7 @@ import { Client } from 'pg'
 import { mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import { EVENT_KIND, WORKSPACE_KIND, type ModelProvider, type Workspace } from '@orc/contracts'
+import { EVENT_KIND, WORKSPACE_KIND, type LoadedSkill, type ModelProvider, type Workspace } from '@orc/contracts'
 import { TEST_WORKSPACE_ID } from '@orc/contracts/fixtures'
 import { loadConfig, requireProject, type ProjectConfig } from './config'
 import type { EventLogOps } from './storage'
@@ -12,6 +12,16 @@ const ADMIN_URL = process.env.ORC_DATABASE_URL ?? 'postgresql://postgres:orc@loc
 
 // shared by the port integration test and the kill-9 resume fixture — one shape to drift
 export const fakeProvider: ModelProvider<unknown> = { costs: {}, languageModel: () => ({}) }
+
+// Every plan now ends with the kernel-appended finish step, which declares ROLE_SKILL.finisher the
+// way the commit step declares ROLE_SKILL.committer — and a port with NO skill index fails that
+// step's init with "step declares skill 'role-finisher' but no skill index is configured". So a
+// harness that drives a real run needs an index, exactly like the production runtime (which resolves
+// the vault's shipped skills). Loads anything under its own name: these tests are about the run, not
+// about which prose a skill carries — a file testing skill RESOLUTION passes its own index instead.
+export const fakeSkills: { load(name: string): Promise<LoadedSkill> } = {
+  load: async (name: string) => ({ name, body: `body of ${name}`, hash: `hash-${name}` }),
+}
 
 export const TEST_PROJECT_ID = '00000000-0000-4000-8000-000000000001'
 

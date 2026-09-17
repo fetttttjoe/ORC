@@ -9,7 +9,7 @@ import pg from 'pg'
 import { drizzle } from 'drizzle-orm/node-postgres'
 import { events } from '../schema'
 import {
-  ApprovalPolicy, EVENT_KIND, FAILURE_CLASS, PAYLOAD_SCHEMAS, SIGNAL_OUTCOME, STEP_ID, STEP_ROLE, TASK_STATUS,
+  ApprovalPolicy, EVENT_KIND, FAILURE_CLASS, FINISH_STEP_ID, PAYLOAD_SCHEMAS, SIGNAL_OUTCOME, STEP_ID, STEP_ROLE, TASK_STATUS,
   type AgentExecutor, type EventDraft, type ExecutorContext, type PlanDraft,
   type SplitResult, type UnifiedEvent,
 } from '@orc/contracts'
@@ -29,6 +29,10 @@ const operationTasks = new Set<string>()
 const operationRuns = new Map<string, number>()
 // tasks here write `write` files into the workspace and declare `declare` in their signal
 const outputsByTask = new Map<string, { write: string[]; declare: string[] }>()
+// Both spies below are keyed by TASK AND STEP: every root plan now ends with the kernel-appended
+// finish step, which drives this same fake executor, so a per-task counter would read its turn as
+// one more turn of the step under test (and its depOutputs would overwrite the scout's).
+const spyKey = (taskId: string, stepId: string): string => `${taskId}:${stepId}`
 // The executor SPY: the freshness short-circuit's whole claim is "no model turn ran", and only a
 // counter on the executor itself can prove that — a verdict object proves nothing about the port.
 const startTurns = new Map<string, number>()
@@ -48,10 +52,15 @@ function fakeExecutor(): AgentExecutor<unknown> {
     id: 'api-loop',
     async *startTurn(ctx: ExecutorContext<unknown>): AsyncGenerator<UnifiedEvent, void, SplitResult[] | undefined> {
       const taskId = ctx.runToken.split(':')[1]!
-      startTurns.set(taskId, (startTurns.get(taskId) ?? 0) + 1)
-      lastDepOutputs.set(taskId, ctx.depOutputs)
+      const key = spyKey(taskId, ctx.step.id)
+      startTurns.set(key, (startTurns.get(key) ?? 0) + 1)
+      lastDepOutputs.set(key, ctx.depOutputs)
       const behavior = behaviors.get(taskId) ?? {}
-      if (operationTasks.has(taskId))
+      // the journal and declared-output scripts are per-TASK and describe the step under test —
+      // the appended finish step journals no operation and declares no output of its own, or one
+      // script would be replayed twice and every count in those two tests would double
+      const scripted = ctx.step.id !== FINISH_STEP_ID
+      if (scripted && operationTasks.has(taskId))
         await ctx.operation(
           { operationId: `${ctx.runToken}:model:1`, kind: 'model', name: 'fake/m', before: { iteration: 1 } },
           async () => {
@@ -61,7 +70,7 @@ function fakeExecutor(): AgentExecutor<unknown> {
         )
       const outcome = behavior[ctx.step.id] === 'fail' ? SIGNAL_OUTCOME.failure : SIGNAL_OUTCOME.success
       const summary = `${ctx.step.id}:${outcome} deps=[${Object.keys(ctx.depOutputs).sort().join(',')}] skills=[${ctx.skills.map(s => s.name)}] tools=[${ctx.extraTools.map(t => t.name)}]`
-      const outputSpec = outputsByTask.get(taskId)
+      const outputSpec = scripted ? outputsByTask.get(taskId) : undefined
       for (const f of outputSpec?.write ?? []) writeFileSync(path.join(ctx.workspaceDir, f), `content of ${f}`)
       const signal = {
         stepId: ctx.step.id, runToken: ctx.runToken, outcome, summary,
@@ -252,11 +261,13 @@ describe('DBOS execution port (integration)', () => {
     const t = await approvedTask()
     expect(await (await port.startRun(t.id)).wait()).toBe('done')
     const seen = stepToolsCalls.filter(c => c.taskId === t.id)
-    expect(seen.map(c => c.stepId).sort()).toEqual(['a', 'b'])
+    expect(seen.map(c => c.stepId).sort()).toEqual(['a', 'b', FINISH_STEP_ID])
     // The value, not merely presence: the port reads it off the TaskNode it already folds for the
     // spec, so a step that ran in a worktree cannot inherit whichever checkout booted the port.
     for (const c of seen) expect(c.workspaceId).toBe(TEST_WORKSPACE_ID)
-  })
+    // 15s, this file's budget for a full run: the plan is two steps plus the kernel's appended
+    // finish step now, and bun's default 5s cut the run off mid-pipeline
+  }, 15_000)
 
   it('startRun is idempotent — second call attaches, no duplicate run_started', async () => {
     const t = await approvedTask()
@@ -265,7 +276,7 @@ describe('DBOS execution port (integration)', () => {
     await h1.wait()
     const runs = (await kernel.state()).runs.get(t.id) ?? []
     expect(runs).toHaveLength(1)
-  })
+  }, 15_000) // two steps plus the appended finish step no longer fit bun's default 5s
 
   // runWorkflow returns RUN_OUTCOME.blocked as a NORMAL return, so DBOS marks the workflow SUCCESS
   // and keeps its deterministic id. Re-running therefore re-attached to a FINISHED workflow and
@@ -375,7 +386,11 @@ describe('DBOS execution port (integration)', () => {
     const t = await approvedTask({}, draftFixture([stepFixture({ id: 'a', title: 'a', instructions: 'only' })]))
     let finishThrows = 0
     beforeTransaction = async () => {
-      if (!(await log.byTask(t.id)).some(e => e.kind === EVENT_KIND.step_completed)) return
+      // the LAST step's completion, which is the kernel's appended finish step: the injection has
+      // to land in the run workflow's finish path. Armed on the FIRST step_completed it fell on the
+      // finish STEP's own transactions instead — that step failed, the run settled blocked the
+      // ordinary way, and nothing propagated to the caller.
+      if (!(await log.byTask(t.id)).some(e => e.kind === EVENT_KIND.step_completed && e.stepId === FINISH_STEP_ID)) return
       // fail every finish attempt (RETRY_POLICY = 4), then stop so the catch's contain append commits
       if (finishThrows < 4) { finishThrows++; throw new Error('PROBE: injected finish-path failure') }
     }
@@ -481,7 +496,7 @@ describe('DBOS execution port (integration)', () => {
     const before = (await kernel.eventsFor(t.id)).length
     await expect(port.cancelRun(t.id)).rejects.toThrow(/running or blocked/)
     expect((await kernel.eventsFor(t.id)).length).toBe(before)
-  })
+  }, 15_000) // two steps plus the appended finish step no longer fit bun's default 5s
 
   // The cancel/finish race, driven rather than argued. The run's terminal append is the only
   // write that can land on top of a cancellation: fold is last-seq-wins with no `from` check
@@ -503,7 +518,9 @@ describe('DBOS execution port (integration)', () => {
     let injected = false
     beforeTransaction = async () => {
       if (injected) return
-      if (!(await log.byTask(t.id)).some(e => e.kind === EVENT_KIND.step_completed)) return
+      // the LAST step's completion (the kernel's appended finish step), so the cancel still lands
+      // at the run's finish append and not one whole step before it
+      if (!(await log.byTask(t.id)).some(e => e.kind === EVENT_KIND.step_completed && e.stepId === FINISH_STEP_ID)) return
       injected = true // set BEFORE the append: log.append re-enters this same hook
       await log.append({
         taskId: t.id, stepId: null, runToken: null, kind: EVENT_KIND.task_status_changed,
@@ -571,15 +588,18 @@ describe('DBOS execution port (integration)', () => {
     expect(await (await port.startRun(t.id)).wait()).toBe('done')
     await expect(port.retry(t.id)).rejects.toThrow(/blocked/) // done — nothing to retry
     expect((await kernel.state()).runs.get(t.id)).toHaveLength(1)
-  })
+  }, 15_000) // two steps plus the appended finish step no longer fit bun's default 5s
 
   it('force-loads skills: skill_loaded events in init, bodies handed to the executor', async () => {
     const t = await approvedTask({}, draftFixture([stepFixture({ skillRefs: ['style-guide'] })]))
     const handle = await port.startRun(t.id)
     expect(await handle.wait()).toBe('done')
     const events = await kernel.eventsFor(t.id)
-    const loaded = events.filter(e => e.kind === EVENT_KIND.skill_loaded)
+    // per step: the kernel's finish step force-loads its own role skill, and counting both here
+    // would say nothing about whether THIS step's declared skill was loaded
+    const loaded = events.filter(e => e.kind === EVENT_KIND.skill_loaded && e.stepId === 's1')
     expect(loaded).toHaveLength(1)
+    expect(events.filter(e => e.kind === EVENT_KIND.skill_loaded && e.stepId === FINISH_STEP_ID)).toHaveLength(1)
     expect(loaded[0]!.payload).toMatchObject({ name: 'style-guide', hash: 'hash-style-guide' })
     const done = events.find(e => e.kind === EVENT_KIND.step_completed)
     expect(PAYLOAD_SCHEMAS.step_completed.parse(done!.payload).summary).toContain('skills=[style-guide]')
@@ -657,9 +677,9 @@ describe('DBOS execution port (integration)', () => {
     const t = await approvedTask({}, analyzeDraft())
     expect(await (await port.startRun(t.id)).wait()).toBe('done')
 
-    expect(startTurns.get(t.id)).toBeUndefined() // the executor was never resolved, let alone driven
+    expect(startTurns.get(spyKey(t.id, STEP_ID.analyze))).toBeUndefined() // the executor was never resolved, let alone driven
     const events = await kernel.eventsFor(t.id)
-    expect(events.filter(e => e.kind === EVENT_KIND.agent_call)).toHaveLength(0)
+    expect(events.filter(e => e.kind === EVENT_KIND.agent_call && e.stepId === STEP_ID.analyze)).toHaveLength(0)
     expect((await kernel.state()).steps.get(t.id)?.get(STEP_ID.analyze)?.status).toBe('completed')
 
     // CONDITION 2: `orc log` must answer WHY it skipped without re-running anything — the note
@@ -697,12 +717,12 @@ describe('DBOS execution port (integration)', () => {
     const t = await approvedTask({}, analyzeDraft())
     expect(await (await port.startRun(t.id)).wait()).toBe('done')
 
-    expect(startTurns.get(t.id)).toBe(1)
+    expect(startTurns.get(spyKey(t.id, STEP_ID.analyze))).toBe(1)
     // nothing reusable → nothing injected: the scout gets exactly today's context
-    expect(lastDepOutputs.get(t.id)).toEqual({})
+    expect(lastDepOutputs.get(spyKey(t.id, STEP_ID.analyze))).toEqual({})
     const events = await kernel.eventsFor(t.id)
     expect(events.some(e => e.kind === EVENT_KIND.analysis_completed)).toBe(false)
-    expect(events.filter(e => e.kind === EVENT_KIND.agent_call)).toHaveLength(1)
+    expect(events.filter(e => e.kind === EVENT_KIND.agent_call && e.stepId === STEP_ID.analyze)).toHaveLength(1)
     const summary = PAYLOAD_SCHEMAS.step_completed.parse(
       events.find(e => e.kind === EVENT_KIND.step_completed)!.payload).summary
     expect(summary).toContain('analyze:success') // the executor's own summary, unchanged
@@ -713,7 +733,7 @@ describe('DBOS execution port (integration)', () => {
     const t = await approvedTask({}, analyzeDraft())
     expect(await (await port.startRun(t.id)).wait()).toBe('done')
 
-    expect(startTurns.get(t.id)).toBe(1)
+    expect(startTurns.get(spyKey(t.id, STEP_ID.analyze))).toBe(1)
     expect((await kernel.eventsFor(t.id)).some(e => e.kind === EVENT_KIND.analysis_completed)).toBe(false)
   }, 15_000)
 
@@ -733,11 +753,11 @@ describe('DBOS execution port (integration)', () => {
     const t = await approvedTask({}, analyzeDraft())
     expect(await (await port.startRun(t.id)).wait()).toBe('done')
 
-    expect(startTurns.get(t.id)).toBe(1) // mixed is NOT a skip — the scout still runs
+    expect(startTurns.get(spyKey(t.id, STEP_ID.analyze))).toBe(1) // mixed is NOT a skip — the scout still runs
     expect(probe.probes.some(p => p.startsWith('changedPaths:'))).toBe(true)
 
     // the directive reaches the scout through depOutputs, under the synthetic 'grounding' key
-    const directive = lastDepOutputs.get(t.id)?.grounding ?? ''
+    const directive = lastDepOutputs.get(spyKey(t.id, STEP_ID.analyze))?.grounding ?? ''
     expect(directive).toContain('arch-overview')       // reuse this
     expect(directive).toContain('area-execution')      // re-scan this
     expect(directive).toContain('memory_read')
@@ -800,8 +820,8 @@ describe('DBOS execution port (integration)', () => {
     const t = await approvedTask({}, analyzeDraft())
     expect(await (await port.startRun(t.id)).wait()).toBe('done')
 
-    expect(startTurns.get(t.id)).toBe(1)
-    const directive = lastDepOutputs.get(t.id)?.grounding ?? ''
+    expect(startTurns.get(spyKey(t.id, STEP_ID.analyze))).toBe(1)
+    const directive = lastDepOutputs.get(spyKey(t.id, STEP_ID.analyze))?.grounding ?? ''
     expect(directive).toContain('arch-overview')
     // no narrowing available → the scoped list IS the note's whole declared list
     expect(inScope(directive)).toContain('packages/kernel/src/execution/dbos-port.ts')
@@ -830,10 +850,10 @@ describe('DBOS execution port (integration)', () => {
     expect(await h2.wait()).toBe('done')
 
     expect(notesCalls).toBe(1)          // the second, different answer was never consulted
-    expect(startTurns.get(t.id)).toBe(1) // one scout turn, not two
+    expect(startTurns.get(spyKey(t.id, STEP_ID.analyze))).toBe(1) // one scout turn, not two
     const events = await kernel.eventsFor(t.id)
     expect(events.filter(e => e.kind === EVENT_KIND.analysis_completed)).toHaveLength(1)
-    expect(events.filter(e => e.kind === EVENT_KIND.step_completed)).toHaveLength(1)
+    expect(events.filter(e => e.kind === EVENT_KIND.step_completed && e.stepId === STEP_ID.analyze)).toHaveLength(1)
     expect(events.some(e => e.kind === EVENT_KIND.step_failed)).toBe(false)
     const gaps = PAYLOAD_SCHEMAS.analysis_completed.parse(
       events.find(e => e.kind === EVENT_KIND.analysis_completed)!.payload).gaps.join(' | ')
@@ -846,7 +866,7 @@ describe('DBOS execution port (integration)', () => {
     const t = await approvedTask({}, analyzeDraft())
     expect(await (await port.startRun(t.id)).wait()).toBe('done')
 
-    expect(startTurns.get(t.id)).toBe(1)
+    expect(startTurns.get(spyKey(t.id, STEP_ID.analyze))).toBe(1)
     const events = await kernel.eventsFor(t.id)
     expect(events.some(e => e.kind === EVENT_KIND.step_failed)).toBe(false)
     expect(events.some(e => e.kind === EVENT_KIND.analysis_completed)).toBe(false)
@@ -869,10 +889,10 @@ describe('DBOS execution port (integration)', () => {
     expect(await h2.wait()).toBe('done')
 
     expect(notesCalls).toBe(1)                    // the second, different answer was never consulted
-    expect(startTurns.get(t.id)).toBeUndefined()  // the recorded verdict still says skip
+    expect(startTurns.get(spyKey(t.id, STEP_ID.analyze))).toBeUndefined()  // the recorded verdict still says skip
     const events = await kernel.eventsFor(t.id)
     expect(events.filter(e => e.kind === EVENT_KIND.analysis_completed)).toHaveLength(1)
-    expect(events.filter(e => e.kind === EVENT_KIND.step_completed)).toHaveLength(1)
+    expect(events.filter(e => e.kind === EVENT_KIND.step_completed && e.stepId === STEP_ID.analyze)).toHaveLength(1)
     const summary = PAYLOAD_SCHEMAS.step_completed.parse(
       events.find(e => e.kind === EVENT_KIND.step_completed)!.payload).summary
     expect(summary).toContain(OLD_SHA) // still the ORIGINAL verdict's evidence

@@ -1,5 +1,5 @@
 import { createOllamaEmbeddingProvider } from '@orc/provider-ollama'
-import { parseModelRef, type EmbeddingProvider } from '@orc/contracts'
+import { errorMessage, parseModelRef, type EmbeddingProvider } from '@orc/contracts'
 import { createMemory } from '@orc/memory'
 import type { EventLog, ProjectConfig, ProjectorLease } from '@orc/kernel'
 
@@ -25,10 +25,10 @@ export function buildEmbeddingProvider(
 export const openMemory = (opts: { log: EventLog; config: ProjectConfig; lease?: ProjectorLease }) =>
   createMemory({ log: opts.log, config: opts.config, embedder: buildEmbeddingProvider(opts.config), ...(opts.lease && { lease: opts.lease }) })
 
-// The ONE open → work → close bracket every one-shot memory command runs through. The close is
-// deliberately in a finally: seven commands (add, rm, sweep, ls, search, cat, rebuild) used to
-// close only after a successful body, so any throw mid-body leaked the Surreal connection for
-// the life of the process.
+// The ONE open → work → close bracket every one-shot memory command and door runs through. The
+// close is deliberately in a finally: seven commands (add, rm, sweep, ls, search, cat, rebuild)
+// used to close only after a successful body, so any throw mid-body leaked the Surreal connection
+// for the life of the process.
 export async function withMemory<T>(
   opts: { log: EventLog; config: ProjectConfig },
   body: (memory: Awaited<ReturnType<typeof openMemory>>) => Promise<T>,
@@ -37,6 +37,11 @@ export async function withMemory<T>(
   try {
     return await body(memory)
   } finally {
-    await memory.close()
+    // REPORTED, never thrown: every write door through here (`orc memory add`, `orc adr new`,
+    // OrcActions.writeNote/recordDecision/deleteNote) has already committed its event by now, so a
+    // close that fails must not turn a successful write into a non-zero exit — the operator would
+    // retry and meet a refusal for the note they were just told had failed. It cannot mask the
+    // body's own failure either: a throw from the body still propagates out of this finally.
+    await memory.close().catch((err: unknown) => console.warn(`memory connection not closed cleanly (${errorMessage(err)}) — the write itself is committed`))
   }
 }

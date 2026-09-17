@@ -457,9 +457,10 @@ export async function createDbosPort(opts: {
       // ONE round of the executor: drive a fresh generator to its signal/error. Rounds exist
       // because `partial` ends a round without ending the step — the runtime then grants (or the
       // human gate allows) another. Round > 0 gets the previous round's summary as its whole
-      // context (ExecutorContext.continuation), and its checkpoint/operation names carry a round
-      // prefix: the loop names them by ITERATION, which restarts at 1 every round, and a reused
-      // name would replay round 0's recorded model call as round 1's answer.
+      // context (ExecutorContext.continuation), and its checkpoint names and operation ids carry a
+      // round prefix: the loop names them by ITERATION, which restarts at 1 every round, and a
+      // reused key replays round 0's recorded model call as round 1's answer. The journal reuses
+      // by `operationId`; `name` is the model ref the operator reads, so it stays untouched.
       const driveRound = async (round: number, prevSummary: string | null): Promise<{ signal: Signal | null; error: { class: string; message: string } | null }> => {
       // a holder, not two `let`s: the callback below assigns these, and TS control-flow can't see a
       // closure assignment — a plain `let signal` would narrow to `null` at the reads after the drive
@@ -468,7 +469,7 @@ export async function createDbosPort(opts: {
       const roundCtx: typeof ctx = round === 0 ? ctx : {
         ...ctx,
         checkpoint: (name, fn, toEvents) => ctx.checkpoint(roundName(name), fn, toEvents),
-        operation: (spec, fn, toEvents) => ctx.operation({ ...spec, name: roundName(spec.name) }, fn, toEvents),
+        operation: (spec, fn, toEvents) => ctx.operation({ ...spec, operationId: roundName(spec.operationId) }, fn, toEvents),
         continuation: { round, summary: prevSummary ?? '' },
       }
       const gen = executor.startTurn(roundCtx)

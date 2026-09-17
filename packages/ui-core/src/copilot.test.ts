@@ -3,7 +3,7 @@ import { generateText, stepCountIs } from 'ai'
 import { MockLanguageModelV4 } from 'ai/test'
 import type { ToolSet } from 'ai'
 import { planNoteFixture } from '@orc/contracts/fixtures'
-import { WORKSPACE_KIND, WORKSPACE_STATE, type Workspace, type WorkspaceHealth, type WorkspaceWithHealth } from '@orc/contracts'
+import { DECISION_STATUS, WORKSPACE_KIND, WORKSPACE_STATE, type Workspace, type WorkspaceHealth, type WorkspaceWithHealth } from '@orc/contracts'
 import type { OrcActions } from './actions'
 import type { ProjectSessions } from './sessions'
 import type { TranscriptItem } from './transcript'
@@ -26,6 +26,7 @@ const actionsStub = (over: Partial<OrcActions> = {}): OrcActions => ({
   approve: unsupported('approve'), run: unsupported('run'), reply: unsupported('reply'),
   retry: unsupported('retry'), annotate: unsupported('annotate'), revise: unsupported('revise'),
   writeNote: unsupported('writeNote'), deleteNote: unsupported('deleteNote'),
+  recordDecision: unsupported('recordDecision'),
   renameProject: unsupported('renameProject'), newProject: unsupported('newProject'),
   listWorkspaces: unsupported('listWorkspaces'), newWorkspace: unsupported('newWorkspace'),
   cancel: unsupported('cancel'), purgeProject: unsupported('purgeProject'), deleteProject: unsupported('deleteProject'), ...over,
@@ -288,6 +289,23 @@ describe('workspaces at the doors', () => {
     expect(r.isError).toBe(false)
     expect(r.output).toMatchObject({ tasks: [{ taskId: 't1', title: 'build it', status: 'draft' }] })
     expect(r.output).not.toHaveProperty('workspaces') // and never [], which reads as "none exist"
+  })
+})
+
+// Knowledge authoring at the doors: the one WRITE a driver gets (memory_write stays filtered out of
+// the MCP surface — see mcp-serve.test.ts). The tool owns no shape of its own: DecisionInput IS the
+// inputSchema, so the refusal below happens at the door's parse, before actions is ever reached.
+describe('decisions at the doors', () => {
+  it('record_decision hands the parsed decision to actions and is absent without a mutating door', async () => {
+    const calls: unknown[] = []
+    const actions = actionsStub({ recordDecision: async input => { calls.push(input); return { id: 'x', status: DECISION_STATUS.accepted, superseded: null } } })
+    const tools = buildCopilotTools({ sessions: stubSessions, actions, projectId: 'p1' })
+    const r = await callTool(tools, 'record_decision', { title: 'X', context: 'c', decision: 'd', consequences: 'q' })
+    expect(r.output).toEqual({ id: 'x', status: DECISION_STATUS.accepted, superseded: null })
+    expect(calls).toEqual([{ title: 'X', context: 'c', decision: 'd', consequences: 'q', tags: [] }])
+    // the door refuses a status the vocabulary does not have BEFORE actions sees it
+    expect((await callTool(tools, 'record_decision', { title: 'X', context: 'c', decision: 'd', consequences: 'q', status: 'final' })).isError).toBe(true)
+    expect(Object.keys(buildCopilotTools({ sessions: stubSessions, actions: null, projectId: 'p1' }))).not.toContain('record_decision')
   })
 })
 

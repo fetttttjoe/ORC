@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import {
-  EVENT_KIND, ISOLATION_TIER, LINK_KIND, NOTE_TIER, PAYLOAD_SCHEMAS, SIGNAL_OUTCOME, TASK_STATUS, type NoteView,
+  EVENT_KIND, FINISH_STEP_ID, ISOLATION_TIER, LINK_KIND, NOTE_TIER, PAYLOAD_SCHEMAS, SIGNAL_OUTCOME, TASK_STATUS, type NoteView,
   type AgentExecutor, type Analyzer, type CoverageReport, type EventDraft, type ExecutorContext,
   type MemoryNoteDraft, type PlanStep, type ResolvedTool,
   type SplitResult, type UnifiedEvent,
@@ -151,6 +151,12 @@ function groundedFake(): AgentExecutor<unknown> {
         yield* signalDone(fin.isError ? `finalize failed: ${JSON.stringify(fin.output)}` : 'plan finalized', !fin.isError)
         return
       }
+
+      // ---- the kernel's appended FINISH step ----
+      // freezePlan appends it to every frozen pipeline, so the child plan is [db, api, finish].
+      // It is not a subplan: there is no plan-note under its id to read back, and falling into the
+      // branch below made it signal failure and left the child blocked instead of done.
+      if (ctx.step.id === FINISH_STEP_ID) { yield* signalDone('nothing to reconcile'); return }
 
       // ---- CHILD subplan step (db / api): read its OWN plan-note back from the plan-note graph ----
       const childTaskId = taskIdOf(ctx.runToken)

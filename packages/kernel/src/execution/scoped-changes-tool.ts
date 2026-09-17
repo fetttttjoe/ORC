@@ -1,5 +1,5 @@
 import type { PlanStep, ResolvedTool } from '@orc/contracts'
-import { pathInZone, stepMayVerify, toolError } from '@orc/contracts'
+import { pathInZone, stepMayReconcile, stepMayVerify, toolError } from '@orc/contracts'
 import type { Kernel } from '../kernel'
 
 // scoped_changes: the paths THIS task's own steps recorded writing, derived purely from the event
@@ -41,6 +41,12 @@ const DESCRIPTION =
 // verify time (pre-commit) they lag the very work being audited — observed twice as 4/7
 // post-commit drift before this existed.
 export type CitingNotes = (paths: string[]) => Promise<Array<{ id: string; scope: string; title: string; sourceRevision: string | null }>>
+
+// The model-facing name, spelled ONCE. It is an exact-set member in two suites that must agree with
+// this definition (scoped-changes-tool.test.ts and cli/runtime.test.ts's finish-step surface), and
+// a name spelled three times drifts on the first rename while both tests stay green about the old
+// spelling. Exported rather than kept private for exactly those consumers.
+export const SCOPED_CHANGES_TOOL_NAME = 'scoped_changes'
 
 // One classified path, flattened per contributing step so each row names exactly who wrote it.
 export interface ScopedChange {
@@ -84,10 +90,17 @@ export function scopedChangesTool(opts: {
   const { kernel, citing, p } = opts
   // Registration gate, not an execute-time rejection: a visible tool that can only ever error gets
   // called anyway and burns an iteration per attempt (report_coverage learned this live).
-  // stepMayVerify (contracts) is the one spelling, shared with memory_verify's gate.
-  if (!stepMayVerify(p)) return []
+  // TWO floors, each spelled once in contracts and shared with the tool that pairs with it:
+  //  • stepMayVerify — the auditor's verify step, paired with memory_verify. What it audits.
+  //  • stepMayReconcile — the kernel-appended finish step, paired with task_notes. The finish step
+  //    reconciles this task's notes against what the task actually changed, and the changed paths
+  //    are that second half; without them it would have to diff the shared worktree, which is the
+  //    very false positive this tool exists to remove.
+  // Both are both-terms predicates, so a planner-authored step named 'verify' or 'finish' still
+  // gets nothing.
+  if (!stepMayVerify(p) && !stepMayReconcile(p)) return []
   return [{
-    ref: 'kernel/scoped_changes', name: 'scoped_changes',
+    ref: `kernel/${SCOPED_CHANGES_TOOL_NAME}`, name: SCOPED_CHANGES_TOOL_NAME,
     description: DESCRIPTION,
     inputSchema: { type: 'object', properties: {} },
     execute: async () => {

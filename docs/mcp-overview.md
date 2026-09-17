@@ -1,6 +1,6 @@
 # How MCP works in this repo
 
-The repo does MCP in **both directions**. `orc mcp serve` (an MCP client such as Claude Code connects to it over stdio) exposes the orchestrator itself as a stdio MCP server with up to **22 tools** — everything reads/writes one append-only Postgres event log. Separately, `plugins/mcp-client` lets agents running *inside* plans call out to external MCP servers declared in `.orc/config.json`.
+The repo does MCP in **both directions**. `orc mcp serve` (an MCP client such as Claude Code connects to it over stdio) exposes the orchestrator itself as a stdio MCP server with up to **23 tools** — everything reads/writes one append-only Postgres event log. Separately, `plugins/mcp-client` lets agents running *inside* plans call out to external MCP servers declared in `.orc/config.json`.
 
 ## Direction 1: `orc` as an MCP server ("door #2")
 
@@ -12,7 +12,7 @@ flowchart TB
     subgraph serve["orc mcp serve — packages/cli/src/mcp-serve.ts"]
         SRV["MCP Server 'orc'<br/>capabilities: tools only"]
         SRV --> REG["buildServeTools()"]
-        REG --> COP["copilot tools<br/>ui-core buildCopilotTools<br/>6 read + 10 mutate"]
+        REG --> COP["copilot tools<br/>ui-core buildCopilotTools<br/>6 read + 11 mutate"]
         REG --> MEM["memory read slice<br/>MEMORY_READ_TOOLS: 5 tools"]
         REG --> APPR["approve<br/>--autonomy gated: refuses<br/>--autonomy full: approvedBy=mcp"]
     end
@@ -32,7 +32,7 @@ flowchart TB
 
 How a call flows: the client sends `tools/call` over stdio → the handler looks the tool up in a `Map` → the tool either reads a **fold of the event log** (via `createProjectSessions`, which replays all events into State + Graph and refolds live) or appends new events through `OrcActions`/the kernel. Nothing reads domain tables directly — the event log is the single source of truth; SurrealDB and the vault markdown are downstream projections.
 
-## The tools it exposes (22 max)
+## The tools it exposes (23 max)
 
 | Group | Tool | What it does |
 |---|---|---|
@@ -55,6 +55,7 @@ How a call flows: the client sends `tools/call` over stdio → the handler looks
 | | `annotate` / `revise` | Feedback on one plan-note / wake the plan agent to revise scoped notes |
 | | `workspace_list` | The project's active workspaces, each with its health (state `dangling`/`waiting`/`active`/`idle`/`merged`, last activity, task counts, notes still pending a merge), attention-first — read-only, but served only with the mutating door |
 | | `workspace_new` | A git worktree + branch for ONE request under `.orc/worktrees`, recorded as a workspace, with the request as its first task |
+| | `record_decision` | Record an ADR-shaped decision note (status accepted unless proposed; `supersedes` flips the old one); attributed `mcp` |
 | **Gate** | `approve` | The one tool the two doors differ on — see below |
 
 Key behaviors:
@@ -63,7 +64,7 @@ Key behaviors:
 - **Read-only degradation is one mechanism, three triggers**: no port factory (CLI), and on the UI door, out-of-project or foreign-project chats — all just pass `actions: null` into the same `buildCopilotTools`.
 - **`available_models` is served on the MCP door too** — `mcp-serve.ts` wires `listModels` to the projected model catalog (the latest `models_discovered` event per provider), so an MCP client can discover a valid `modelRef` before `propose`/grounded `new_request`.
 - **Memory degrades, never blocks**: if SurrealDB is unreachable, the 5 read tools stay listed but each call returns `memory unavailable: <reason>` instead of the tools silently vanishing.
-- `memory_write` exists in the plugin but is filtered out of MCP serve — authoring stays with agents inside plan runs.
+- `memory_write` exists in the plugin but is filtered out of MCP serve — free-form authoring stays with agents inside plan runs. `record_decision` is the single authoring tool this door serves; the test pins that exact set.
 
 ## Direction 2: orc as an MCP client (tools *for* agents)
 
@@ -89,4 +90,4 @@ Plan steps declare `toolRefs` like `"server-id/tool-name"`; plan validation reje
 
 ## Tool count
 
-The server Claude Code connects to: **11 tools read-only, 22 with actions wired** (6 copilot read + 10 mutate + 5 memory read + `approve`).
+The server Claude Code connects to: **11 tools read-only, 23 with actions wired** (6 copilot read + 11 mutate + 5 memory read + `approve`).

@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'bun:test'
-import { STEP_ID, STEP_ROLE, VERIFY_STEP_ID, type EventRecord, type Plan } from '@orc/contracts'
+import { FINISH_STEP_ID, STEP_ID, STEP_ROLE, VERIFY_STEP_ID, type EventRecord, type Plan } from '@orc/contracts'
 import { eventFixture, planFixture, stepFixture } from '@orc/contracts/fixtures'
 import { taskChangedPaths } from '../projections'
-import { scopedChangesTool } from './scoped-changes-tool'
+import { scopedChangesTool, SCOPED_CHANGES_TOOL_NAME } from './scoped-changes-tool'
 
 // The auditor false-positive scenario, expressed at the LOG level on purpose.
 //
@@ -199,8 +199,8 @@ describe('scoped_changes tool', () => {
 
   it('describes itself as a floor that never licenses skipping a gate', async () => {
     const [tool] = scopedChangesTool({ kernel: fakeKernel([THIS_TASK], PLAN), p: verifyP })
-    expect(tool!.name).toBe('scoped_changes')
-    expect(tool!.ref).toBe('kernel/scoped_changes')
+    expect(tool!.name).toBe(SCOPED_CHANGES_TOOL_NAME)
+    expect(tool!.ref).toBe(`kernel/${SCOPED_CHANGES_TOOL_NAME}`)
     const d = tool!.description.toLowerCase()
     expect(d).toContain('exec')
     expect(d).toContain('floor')
@@ -222,6 +222,15 @@ describe('scoped_changes tool', () => {
     })
     it('is NOT registered for an implementer step that happens to be named verify', () => {
       expect(scopedChangesTool({ kernel, p: { taskId: THIS_TASK, stepId: VERIFY_STEP_ID, role: STEP_ROLE.implementer } })).toEqual([])
+    })
+    // The finish step reads the same floor to know WHAT it is summarizing — which paths this task
+    // changed — so the gate widened to stepMayReconcile as well. Both terms there too: a worker step
+    // a planner happened to name 'finish' gets nothing.
+    it('registers for the finish step with the finisher role', () => {
+      expect(scopedChangesTool({ kernel, p: { taskId: THIS_TASK, stepId: FINISH_STEP_ID, role: STEP_ROLE.finisher } })).toHaveLength(1)
+    })
+    it("is NOT registered for a worker step named 'finish'", () => {
+      expect(scopedChangesTool({ kernel, p: { taskId: THIS_TASK, stepId: FINISH_STEP_ID, role: STEP_ROLE.worker } })).toEqual([])
     })
   })
 

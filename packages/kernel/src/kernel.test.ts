@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, it } from 'bun:test'
-import { APPROVAL_ANSWER, ApprovalPolicy, EVENT_KIND, GROUNDED_APPROVAL_DOOR, LINK_KIND, NOTE_TIER, PAYLOAD_SCHEMAS, RunRequestedPayload, STEP_ROLE, TASK_STATUS, TaskStatus, WORKSPACE_KIND, WORKSPACE_TITLE_MAX, type Analyzer, type PlanDraft, type PlanStep, type TaskNode } from '@orc/contracts'
+import { APPROVAL_ANSWER, ApprovalPolicy, EVENT_KIND, FINISH_STEP_ID, GROUNDED_APPROVAL_DOOR, LINK_KIND, NOTE_TIER, PAYLOAD_SCHEMAS, RunRequestedPayload, STEP_ID, STEP_ROLE, STRATEGY, TASK_STATUS, TaskStatus, WORKSPACE_KIND, WORKSPACE_TITLE_MAX, type Analyzer, type PlanDraft, type PlanStep, type TaskNode } from '@orc/contracts'
 import { draftFixture, stepFixture } from '@orc/contracts/fixtures'
 import { openStorage, type EventLogOps } from './storage'
 import { KERNEL_ERROR_CODE, KernelError } from './errors'
@@ -371,6 +371,100 @@ describe('Kernel lifecycle', () => {
     // the kernel's own freeze stays open: the same draft with origin 'freeze' is accepted
     const ok = await k.proposeSplit({ ...base, toolCallId: 'call_2', origin: SPLIT_ORIGIN.freeze })
     expect((await k.getPlan(ok.childTaskId))?.steps[0]?.role).toBe(STEP_ROLE.committer)
+  })
+
+  it('proposeSplit: refuses a model-authored finisher step or a step named finish — kernel-set only', async () => {
+    const { k, log } = await freshKernelAndLog()
+    const parent = await k.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'P', spec: 'parent' })
+    await toRunning(log, parent.id)
+    const base = {
+      parentTaskId: parent.id, stepId: 's1', runToken: `step:${parent.id}:s1:a1`, toolCallId: 'call_1',
+      title: 'C', spec: '',
+      // an auto-approved child claiming the finisher role would arm task_notes/record_decision on a
+      // step the human never sees — the knowledge-authoring twin of the git_commit bypass above
+      plan: { steps: [{ id: FINISH_STEP_ID, role: STEP_ROLE.finisher, title: 'sneak', instructions: 'reconcile it', dependsOn: [], skillRefs: [], toolRefs: [] }] },
+      parentStep: { executorRef: 'api-loop', modelRef: 'fake/m', maxIterations: 5 },
+      policy: ApprovalPolicy.parse({ default: 'auto' }), maxDepth: 3,
+    }
+    expect(await codeOf(k.proposeSplit(base))).toBe(KERNEL_ERROR_CODE.invalid_transition)
+    expect((await k.listTasks()).filter(t => t.parentId === parent.id)).toEqual([]) // no child minted
+    // either term alone is refused: the reserved ID under an ordinary role, and the role under
+    // another id — the same both-terms shape stepMayReconcile gates on
+    expect(await codeOf(k.proposeSplit({
+      ...base, toolCallId: 'call_2',
+      plan: { steps: [{ id: FINISH_STEP_ID, role: STEP_ROLE.worker, title: 'shadow', instructions: 'do', dependsOn: [], skillRefs: [], toolRefs: [] }] },
+    }))).toBe(KERNEL_ERROR_CODE.invalid_transition)
+    expect(await codeOf(k.proposeSplit({
+      ...base, toolCallId: 'call_3',
+      plan: { steps: [{ id: 'wrap-up', role: STEP_ROLE.finisher, title: 'shadow', instructions: 'do', dependsOn: [], skillRefs: [], toolRefs: [] }] },
+    }))).toBe(KERNEL_ERROR_CODE.invalid_transition)
+    // the kernel's own freeze stays open: the same draft with origin 'freeze' is accepted
+    const ok = await k.proposeSplit({ ...base, toolCallId: 'call_4', origin: SPLIT_ORIGIN.freeze })
+    expect((await k.getPlan(ok.childTaskId))?.steps[0]?.role).toBe(STEP_ROLE.finisher)
+  })
+
+  it('proposePlan appends the finish step to a ROOT plan (single template or --file draft) but not to the grounded bootstrap', async () => {
+    const { k, log } = await freshKernelAndLog()
+    const t = await k.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'quick', spec: 'do' })
+    const plan = await k.proposePlan(t.id, draftFixture([stepFixture({ id: 's1' })]))
+    expect(plan.steps.map(s => s.id)).toEqual(['s1', FINISH_STEP_ID])
+    expect(plan.steps[1]?.role).toBe(STEP_ROLE.finisher)
+    // an operator-authored multi-step draft (orc propose --file) is a root plan too — measured:
+    // docs/kb-build-parallel.plan.json carries strategyRef 'file:…', not template:single
+    const t2 = await k.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'file', spec: 'do' })
+    const filePlan = await k.proposePlan(t2.id, { ...draftFixture([stepFixture({ id: 'a' }), stepFixture({ id: 'b', dependsOn: ['a'] })]), strategyRef: 'file:kb-build' })
+    expect(filePlan.steps.map(s => s.id)).toEqual(['a', 'b', FINISH_STEP_ID])
+    // The grounded strategy is exempt at BOTH doors — asserted through the doors themselves, on a
+    // draft that claims it. (createGroundedTask builds its [analyze, plan] scaffold inside its own
+    // transaction and never calls proposePlan, so asserting on it here could not fail no matter
+    // what this rule did; the scaffold's own shape is pinned by the createGroundedTask test above.)
+    const t3 = await k.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'grounded-ish', spec: 'do' })
+    const grounded = { ...draftFixture([stepFixture({ id: STEP_ID.analyze, role: STEP_ROLE.scout })]), strategyRef: STRATEGY.groundedPlan }
+    expect((await k.proposePlan(t3.id, grounded)).steps.map(s => s.id)).toEqual([STEP_ID.analyze])
+    expect((await k.editPlan(t3.id, grounded)).steps.map(s => s.id)).toEqual([STEP_ID.analyze])
+  })
+
+  it('proposePlan leaves the auto-heal sweep draft alone — machine-drafted maintenance never parks on a human', async () => {
+    const { k } = await freshKernelAndLog()
+    const t = await k.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'sweep', spec: 'heal 9 notes' })
+    const plan = await k.proposePlan(t.id, { ...draftFixture([stepFixture({ id: 's1' })]), strategyRef: STRATEGY.sweep })
+    expect(plan.steps.map(s => s.id)).toEqual(['s1'])
+  })
+
+  it('editPlan applies the same rule: it appends to a root plan that lacks the step, and never doubles the rendered one', async () => {
+    const { k } = await freshKernelAndLog()
+    const t = await k.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'quick', spec: 'do' })
+    // (a) an edited draft the operator wrote from scratch, with no finish step in it
+    const proposed = await k.proposePlan(t.id, draftFixture([stepFixture({ id: 's1' })]))
+    const edited = await k.editPlan(t.id, draftFixture([stepFixture({ id: 's1' }), stepFixture({ id: 's2', dependsOn: ['s1'] })]))
+    expect(edited.steps.map(s => s.id)).toEqual(['s1', 's2', FINISH_STEP_ID])
+    // (b) the RENDERED plan edited and handed straight back — exactly one finish step, still last
+    const again = await k.editPlan(t.id, { ...proposed, steps: edited.steps })
+    expect(again.steps.map(s => s.id)).toEqual(['s1', 's2', FINISH_STEP_ID])
+    expect(again.steps.filter(s => s.role === STEP_ROLE.finisher)).toHaveLength(1)
+  })
+
+  it('editPlan refuses a draft whose finish step is not the kernel\'s — the id stays reserved', async () => {
+    const { k } = await freshKernelAndLog()
+    const t = await k.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'quick', spec: 'do' })
+    await k.proposePlan(t.id, draftFixture([stepFixture({ id: 's1' })]))
+    await expect(k.editPlan(t.id, draftFixture([
+      stepFixture({ id: 's1' }), stepFixture({ id: FINISH_STEP_ID, role: STEP_ROLE.worker, dependsOn: ['s1'] }),
+    ]))).rejects.toThrow(/finish/)
+  })
+
+  it('proposePlan leaves a SPLIT child alone — a child\'s finish is its parent\'s job', async () => {
+    const { k, log } = await freshKernelAndLog()
+    const parent = await k.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'P', spec: 'parent' })
+    await toRunning(log, parent.id)
+    const child = await k.proposeSplit({
+      parentTaskId: parent.id, stepId: 's1', runToken: `step:${parent.id}:s1:a1`, toolCallId: 'call_1',
+      title: 'C', spec: '',
+      plan: { steps: [{ id: 'w1', role: STEP_ROLE.worker, title: 'w', instructions: 'do', dependsOn: [], skillRefs: [], toolRefs: [] }] },
+      parentStep: { executorRef: 'api-loop', modelRef: 'fake/m', maxIterations: 5 },
+      policy: ApprovalPolicy.parse({ default: 'auto' }), maxDepth: 3,
+    })
+    expect((await k.getPlan(child.childTaskId))?.steps.map(s => s.id)).toEqual(['w1'])
   })
 
   it('openFeedbackInSubtree finds a question parked on a DESCENDANT, not only on the root', async () => {

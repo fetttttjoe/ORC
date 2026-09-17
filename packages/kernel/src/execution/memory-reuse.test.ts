@@ -13,7 +13,7 @@ import { createMemory } from '@orc/memory'
 import { createTestSurreal } from '@orc/memory/test-helpers'
 import { openStorage } from '../storage'
 import { Kernel } from '../kernel'
-import { createTestDb, fakeProvider, seedTestWorkspace, TEST_PROJECT_ID, TEST_WORKSPACE_ID, testConfig } from '../test-helpers'
+import { createTestDb, fakeProvider, fakeSkills, seedTestWorkspace, TEST_PROJECT_ID, TEST_WORKSPACE_ID, testConfig } from '../test-helpers'
 import { createDbosPort, type DbosPort } from './dbos-port'
 
 // memory_read's tool output is `{ note: <full note | null> }` (tool output is contract-`unknown`).
@@ -101,7 +101,7 @@ describe('memory reuse over a real run (e2e): step B reads step A\'s note', () =
     const memory = await createMemory({ log, config })
     await memory.projector.start()
     const port: DbosPort = await createDbosPort({
-      storage, config,
+      storage, config, skills: fakeSkills,
       providers: new Map([['fake', fakeProvider]]),
       executors: new Map([['memory-fake', memoryExecutor()]]),
       stepTools: p => memory.bindStep({ author: { source: 'agent', workspaceId: p.workspaceId, taskId: p.taskId, stepId: p.stepId, runToken: p.runToken, executor: p.executor, model: p.model, role: p.role }, step: p.step, taskId: p.taskId, ancestorTaskIds: p.ancestorTaskIds }),

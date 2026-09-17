@@ -68,6 +68,7 @@ function stubActions(over: Partial<OrcActions>): OrcActions {
     approve: unsupported('approve'), run: unsupported('run'), reply: unsupported('reply'),
     retry: unsupported('retry'), annotate: unsupported('annotate'), revise: unsupported('revise'),
     writeNote: unsupported('writeNote'), deleteNote: unsupported('deleteNote'),
+    recordDecision: unsupported('recordDecision'),
     renameProject: unsupported('renameProject'), newProject: unsupported('newProject'),
     listWorkspaces: unsupported('listWorkspaces'), newWorkspace: unsupported('newWorkspace'),
     cancel: unsupported('cancel'), purgeProject: unsupported('purgeProject'),

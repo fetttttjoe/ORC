@@ -9,7 +9,7 @@ import type { ProjectSessions } from './sessions'
 
 import { snip } from './summarize'
 import type { MemoryHealth, ResolvedTool, SupervisorHealth, WorkspaceWithHealth } from '@orc/contracts'
-import { errorMessage, EventKind, MEMORY_HEALTH, toolError } from '@orc/contracts'
+import { DecisionInput, errorMessage, EventKind, MEMORY_HEALTH, toolError } from '@orc/contracts'
 
 // Why a session can't act: 'read-only' = server started outside a project; 'foreign-project'
 // = the user is viewing a chat other than the one this server runs in.
@@ -240,6 +240,16 @@ export function buildCopilotTools(deps: {
       description: 'Create a git worktree + branch for ONE request under the project\'s .orc/worktrees, record it as a workspace, and draft the request as its first task. Use for a new piece of work; reuse the current workspace for follow-ups to it.',
       inputSchema: z.object({ title: z.string().min(1), spec: z.string().optional(), base: z.string().optional() }),
       execute: async input => actions.newWorkspace(input),
+    }),
+    // The contract IS the schema: DecisionInput, the same shape `orc adr new` parses — a re-spelled
+    // object here would be a second vocabulary for one input, and the two would drift on a field
+    // name or a cap. The ONE knowledge write at this door (memory_write is filtered out of the MCP
+    // surface): a decision has a fixed body layout and a lifecycle to refuse a silent overwrite with,
+    // a free note has neither.
+    record_decision: tool({
+      description: 'Record an architectural DECISION as a first-class note (Context / Decision / Consequences), status accepted unless you say proposed. Before recording, enumerate what exists with memory_search {kind:"decision"}; to change a recorded decision pass its id as `supersedes` — never re-record under the same title (that is refused).',
+      inputSchema: DecisionInput,
+      execute: async input => actions.recordDecision(input),
     }),
     propose: tool({
       description: 'Propose a single-step plan for a draft task.',

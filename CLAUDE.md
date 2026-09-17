@@ -24,7 +24,8 @@
   `MEMORY_LIMITS`, `EVENT_KIND`, `CLAIM_ID_RE`. A literal spelled twice will drift.
 - **Comments explain WHY and name the failure that motivated the rule.** Comments here carry
   measured findings a reader cannot re-derive; match that density. A comment stating a ceiling also
-  names the upgrade path.
+  names the upgrade path. Never restate the code, the diff, or the task's own constraints — a
+  comment that adds no fact the reader cannot re-derive is deleted, not shortened.
 - **Reference docs describe the system as it is.** `README.md` and `docs/*.md` must not narrate
   migrations or name milestones — specs and plans carry the history.
 - **A spec or plan tags its claims.** A number, formula or named pattern is `[sourced]` (cite it),

@@ -3,7 +3,7 @@ import { RecordId, Surreal } from 'surrealdb'
 import { edge, orm, table, t } from 'surqlize'
 import {
   activation, activationBoost, bumpAccess, Claim, DEFAULT_HALF_LIFE_DAYS,
-  decodeMemoryEvent, deriveNoteProvenance, EDGE_DIRECTION, edgeKey, LINK_KINDS, MEMORY_USE, NOTE_KINDS, MemoryScope, MutationOp, Topic, viaEdge,
+  decodeMemoryEvent, DECISION_STATUSES, deriveNoteProvenance, EDGE_DIRECTION, edgeKey, LINK_KINDS, MEMORY_USE, NOTE_KINDS, MemoryScope, MutationOp, Topic, viaEdge,
   type LinkKind,
   MemoryNote, VerifiedStamp, type MemoryWrittenPayload,
   MEMORY_LIMITS, SEARCH_MODE, errorMessage, inferTier, isUiMetaNote, noteKey, NoteKind, NoteTier,
@@ -71,13 +71,16 @@ const ftsIndexes = (tb: Tb, fields: readonly { name: string }[]): string =>
 
 const kindType = t.union(LINK_KINDS.map(k => t.literal(k)))
 const noteKindType = t.union(NOTE_KINDS.map(k => t.literal(k)))
+const decisionStatusType = t.union(DECISION_STATUSES.map(s => t.literal(s)))
 
 // Tier-specific columns are optional because a row only HAS the columns its tier owns — a plan
 // note has no `claims` column at all, not an empty one. `tier` itself is optional so a row
 // projected before the split still selects; `orc memory rebuild` re-derives it from the log.
 const noteTable = table(Tb.Note, {
   noteId: t.string(), scope: t.string(), title: t.string(), tier: t.option(t.string()),
-  kind: t.option(noteKindType), sourceRevision: t.option(t.string()),
+  // only a decision ever has one (the note schema refuses it on every other kind), so it is
+  // optional for the same reason `kind` is: a row only has the columns its note actually filled
+  kind: t.option(noteKindType), status: t.option(decisionStatusType), sourceRevision: t.option(t.string()),
   categories: t.option(t.array(t.string())), tags: t.array(t.string()),
   links: t.array(t.object({ id: t.string(), kind: kindType, confidence: t.option(t.number()) })),
   paths: t.option(t.array(t.string())),
@@ -616,6 +619,7 @@ export class SurrealMemory {
           await tx.upsert(Tb.Note, k).set({
             noteId: note.id, scope: note.scope, title: note.title, tier: note.tier,
             ...(n.kind !== undefined && { kind: n.kind }),
+            ...(n.status !== undefined && { status: n.status }),
             ...(note.sourceRevision !== null && { sourceRevision: note.sourceRevision }),
             ...(n.categories !== undefined && { categories: n.categories }),
             tags: note.tags,
@@ -1430,7 +1434,7 @@ function toNote(r: Record<string, any>) {
   return {
     // an absent tier (a row projected before the split) is classified by MemoryNote's own decoder
     // from the columns below, so a read model that has not been rebuilt still parses
-    tier: r.tier, id: r.noteId, scope: r.scope, title: r.title, kind: r.kind,
+    tier: r.tier, id: r.noteId, scope: r.scope, title: r.title, kind: r.kind, status: r.status,
     sourceRevision: r.sourceRevision ?? null,
     categories: r.categories, tags: r.tags,
     links: r.links, paths: r.paths, claims: r.claims, summary: r.summary, body: r.body,

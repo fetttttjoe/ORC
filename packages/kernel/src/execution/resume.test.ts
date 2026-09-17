@@ -3,11 +3,11 @@ import { existsSync, mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { EVENT_KIND } from '@orc/contracts'
+import { EVENT_KIND, FINISH_STEP_ID } from '@orc/contracts'
 import { draftFixture, stepFixture } from '@orc/contracts/fixtures'
 import { openStorage } from '../storage'
 import { Kernel } from '../kernel'
-import { fold } from '../projections'
+import { fold, stepUsage } from '../projections'
 import { createTestDb, seedTestWorkspace, TEST_PROJECT_ID, TEST_WORKSPACE_ID } from '../test-helpers'
 
 const FIXTURE = fileURLToPath(new URL('./resume-fixture.ts', import.meta.url))
@@ -60,15 +60,22 @@ describe('kill -9 resume (spec §10/§11 — the crown jewel)', () => {
     const state = await kernel.state()
     expect(state.steps.get(t.id)?.get('s1')?.status).toBe('completed')
     expect(state.steps.get(t.id)?.get('s1')?.iterations).toBe(1)
-    expect(state.usage.get(t.id)?.inputTokens).toBe(1) // completion drafts ran once, so usage is recorded once
+    // The double-billing question is about THIS step: its completion drafts ran once, so its usage
+    // is recorded once. Counted per step because the plan now ends with the kernel's finish step,
+    // which runs the same fixture executor and honestly bills its own turn — the task total is one
+    // per step, and a task-level 1 would have meant a step ran no turn at all.
+    expect(stepUsage(state, t.id, 's1').inputTokens).toBe(1)
+    expect(stepUsage(state, t.id, FINISH_STEP_ID).inputTokens).toBe(1)
+    expect(state.usage.get(t.id)?.inputTokens).toBe(2)
 
     // the interrupted operation is a single logical node: two start transitions, one final
-    // completion, attempts=2 — never a blind gap, never a double effect.
-    const ops = await storage.operations.operationsFor(t.id)
+    // completion, attempts=2 — never a blind gap, never a double effect. Scoped to the killed
+    // step: the finish step journals an operation of its own, and it is not what was interrupted.
+    const ops = (await storage.operations.operationsFor(t.id)).filter(o => o.stepId === 's1')
     expect(ops).toHaveLength(1)
     expect(ops[0]!.status).toBe('completed')
     expect(ops[0]!.attempts).toBe(2)
-    const taskEvents = await log.byTask(t.id)
+    const taskEvents = (await log.byTask(t.id)).filter(e => e.stepId === 's1')
     expect(taskEvents.filter(e => e.kind === EVENT_KIND.operation_started)).toHaveLength(2)
     expect(taskEvents.filter(e => e.kind === EVENT_KIND.operation_completed)).toHaveLength(1)
     expect(taskEvents.filter(e => e.kind === EVENT_KIND.agent_call)).toHaveLength(1)

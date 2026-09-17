@@ -1,4 +1,4 @@
-import { AUTO_HEAL_MODE, type AutoHealMode, type PlanDraft } from '@orc/contracts'
+import { AUTO_HEAL_MODE, STRATEGY, type AutoHealMode, type PlanDraft } from '@orc/contracts'
 import { DEFAULT_TEMPLATE_MODEL, singleStepDraft } from './plan-template'
 
 /**
@@ -36,8 +36,12 @@ export const AUTO_SWEEP_TITLE = 'auto-heal: sweep drifted knowledge'
 // `orc propose` the draft by hand first — observed 2026-08-04). `maxIterations` comes from
 // config.memorySweepIterations, deliberately lean: a sweep that genuinely needs more signals
 // `partial` and continues under the runtime's own continuation grants.
+// STRATEGY.sweep, not the operator template: it is what exempts this plan from the kernel's
+// appended finish step (FINISH_EXEMPT_STRATEGIES). The sweep is machine-drafted maintenance —
+// nobody asked for it, so there is nobody waiting on its summary, and a finish step would park a
+// self-drafted task on a human indefinitely.
 export const sweepPlanDraft = (spec: string, maxIterations: number): PlanDraft =>
-  singleStepDraft({ title: AUTO_SWEEP_TITLE, spec }, DEFAULT_TEMPLATE_MODEL, [], maxIterations)
+  singleStepDraft({ title: AUTO_SWEEP_TITLE, spec }, DEFAULT_TEMPLATE_MODEL, [], maxIterations, STRATEGY.sweep)
 
 // Starting point, not a measurement: the log carries too few commit_recorded events to derive a
 // cadence yet (2 as of 2026-08-03). The window's job is to make a rebase land as ONE reaction

@@ -3,6 +3,15 @@ import { KERNEL_ERROR_CODE, KernelError, type EventLog } from '@orc/kernel'
 import type { SurrealMemory } from './surreal'
 import { KNOWLEDGE_KINDS } from './projector'
 
+// The store's refusals as exported sentence factories, the same shape and for the same reason as
+// decisions.ts's DECISION_REFUSAL: the tests assert the words the store actually throws rather than
+// a re-spelled copy, which pins the wrong sentence the moment the real one is reworded — and a
+// caller matching on a refusal (recordDecision's archived case) matches the one spelling.
+export const STORE_REFUSAL = {
+  exists: (id: string, scope: string): string =>
+    `note '${id}' already exists in scope '${scope}' (archived notes count — restore or remove it first)`,
+} as const
+
 // The single writer (spec RM5). Writes are event-first appends — like every append they
 // serialize on the per-project advisory lock; the projector applies to SurrealDB. Reads
 // hit SurrealDB directly.
@@ -85,7 +94,19 @@ export function createMemoryStore(opts: { log: EventLog; surreal: SurrealMemory;
       // lock, which serializes every other writer in the project, and ambient capture now writes a
       // note per step — so a scan here would grow with exactly the thing the graph is meant to do.
       const note = await log.transaction(async tx => {
-        const latest = typeof input.id === 'string' ? await tx.latestNoteEvent(scope, input.id) : null
+        // narrowed ONCE and reused: the lookup and the refusal below both need the id as a string,
+        // and re-testing `typeof input.id` at the throw would be a second reading of one fact
+        const id = typeof input.id === 'string' ? input.id : null
+        const latest = id === null ? null : await tx.latestNoteEvent(scope, id)
+        // mustCreate: refuse "already exists" INSIDE the transaction, off the SAME read the merge
+        // base below takes — closing the TOCTOU two doors racing one new id would otherwise hit.
+        // ARCHIVED counts as existing: archiving only DELETES the read-model row (surreal.get
+        // returns null), so a caller that checked existence through store.get alone would see
+        // nothing there and silently resurrect the archived note under a merge base it never asked
+        // for (decisions.ts's recordDecision hit exactly this before mustCreate existed). A
+        // memory_deleted latest does NOT refuse: a removed note is gone and may be re-created.
+        if (writeOpts?.mustCreate && id !== null && latest?.kind === EVENT_KIND.memory_written)
+          throw new Error(STORE_REFUSAL.exists(id, scope))
         const written = latest?.kind === EVENT_KIND.memory_written
           ? MemoryWrittenPayload.safeParse(latest.payload)
           : null

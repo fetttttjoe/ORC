@@ -1,10 +1,10 @@
 import { afterAll, afterEach, describe, expect, it, mock, spyOn } from 'bun:test'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import type { Command } from 'commander'
 import { Surreal } from 'surrealdb'
-import { ApprovalPolicy, EVENT_KIND, MemoryAccessedPayload, MemoryDeletedPayload, MemoryWrittenPayload, NOTE_TIER, RUN_OUTCOME, TASK_STATUS, WORKSPACE_KIND, claimId, type ExecutionPort, type OperationSpec, type RunOutcome, type TaskNode, type TaskStatus } from '@orc/contracts'
+import { ApprovalPolicy, EVENT_KIND, MemoryAccessedPayload, MemoryDeletedPayload, MemoryWrittenPayload, NOTE_TIER, ROLE_SKILL, RUN_OUTCOME, TASK_STATUS, WORKSPACE_KIND, claimId, type ExecutionPort, type OperationSpec, type RunOutcome, type TaskNode, type TaskStatus } from '@orc/contracts'
 import { loadConfig, projectDatabaseName, requireProject, type EventLog, type ProjectConfig } from '@orc/kernel'
 import { createTestDb, seedTestWorkspace, TEST_PROJECT_ID, TEST_WORKSPACE, TEST_WORKSPACE_ID } from '@orc/kernel/test-helpers'
 import { singleStepDraft } from './plan-template'
@@ -124,6 +124,27 @@ describe('orc CLI', () => {
     expect(readFileSync(existing, 'utf8')).toBe('user-owned documentation skill')
     for (const name of ['codebase-analysis', 'plan-authoring', 'web-research'])
       expect(existsSync(path.join(dir, 'custom', 'skills', name, 'SKILL.md'))).toBe(true)
+  })
+
+  // An existing project could not receive a NEWLY shipped skill: init refused outright once
+  // identity existed, and --force minted a whole new project (a different projectId — every task,
+  // note and event orphaned) just to top up a directory. Seeding is now unconditional and identity
+  // minting is the part that is guarded, so `orc init` is the answer to "I pulled a release that
+  // ships a new role skill".
+  it('init is idempotent: a second run keeps the identity and re-seeds a deleted skill', async () => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'orc-init-again-'))
+    await runInit(['--name', 'demo'], dir)
+    const first = requireProject(loadConfig(dir))
+    const skill = path.join(first.skillsDir, ROLE_SKILL.finisher, 'SKILL.md')
+    expect(existsSync(skill)).toBe(true)
+    rmSync(path.dirname(skill), { recursive: true, force: true })
+
+    await runInit(['--name', 'ignored'], dir) // exits 0 — no throw, no new identity
+
+    const second = requireProject(loadConfig(dir))
+    expect(second.projectId).toBe(first.projectId)
+    expect(second.projectName).toBe('demo') // the existing identity wins; --name is not a rename
+    expect(existsSync(skill)).toBe(true)    // the deleted skill is back
   })
 
   it('buildProgram exposes pre-bootstrap init and db commands', async () => {
@@ -1170,6 +1191,35 @@ describe('orc CLI', () => {
     // this list() succeeds — the leaked handle stays live, which is exactly the defect.
     expect(leaked).toBeDefined()
     await expect(leaked!.store.list()).rejects.toThrow()
+  }, 15_000)
+
+  // The other half of that bracket: the close must not be able to FAIL the command. Every door
+  // through here has ALREADY committed its event by the time the finally runs — `orc memory add`,
+  // `orc adr new`, the actions layer — so a close that throws (a dropped socket, a projector still
+  // draining) would exit non-zero for a write that is in the log, and the operator's retry would
+  // then meet a refusal for the very note they were told had failed.
+  it('withMemory warns about a failing close instead of failing the command', async () => {
+    const db = await createTestDb()
+    dbs.push(db)
+    const dir = mkdtempSync(path.join(tmpdir(), 'orc-memory-closefail-'))
+    const projectDbName = `t_${Math.random().toString(36).slice(2, 10)}`
+    const config = requireProject({ ...loadConfig(dir), projectDbName, projectId: TEST_PROJECT_ID, projectName: 'test', memoryEmbedModel: '' })
+    surrealConfigs.push(config)
+    const { log } = await openKernel(db.url, { projectId: TEST_PROJECT_ID })
+    cleanup.push(() => log.close())
+    const warnings: string[] = []
+    spyOn(console, 'warn').mockImplementation((...a: unknown[]) => { warnings.push(a.join(' ')) })
+
+    const answer = await withMemory({ log, config }, async memory => {
+      // A healthy Surreal cannot be made to fail its close (measured: a second close resolves), so
+      // the failure is injected on the handle withMemory holds — after delegating to the REAL close,
+      // which keeps this test from leaking the connection it just opened.
+      const real = memory.close
+      memory.close = async () => { await real(); throw new Error('socket gone') }
+      return 'the body answered'
+    })
+    expect(answer).toBe('the body answered') // the body's value is returned, not lost to the close
+    expect(warnings.join('\n')).toContain('socket gone')
   }, 15_000)
 
   it('memory claims drains before it reads, and --history recovers a retired claim', async () => {

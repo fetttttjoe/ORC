@@ -1,14 +1,14 @@
-import { closeSync, copyFileSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, rmSync } from 'node:fs'
+import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, rmSync } from 'node:fs'
 import { spawn } from 'node:child_process'
 import path from 'node:path'
-import { fileURLToPath } from 'node:url'
 import { Command, InvalidArgumentError } from 'commander'
-import { AUTHOR_SOURCE, SUPERVISOR_HEALTH, claimHistory, EDGE_DIRECTION, errorMessage, EVENT_KIND, foldMemory, LINK_KINDS, MASTERPLAN_NOTE_ID, MEMORY_ACCESS, MemoryDeletedPayload, MemoryScope, MemoryWrittenPayload, noteKey, NOTE_KINDS, NoteKind, NOTE_TIER, NOTE_TIERS, NoteTier, parseLinkSpec, PlanDraft, ROLE_SKILL, RUN_OUTCOME, STRATEGY, TASK_STATUS, TERMINAL_TASK_STATUS, LinkKind, slugId, type Analyzer, type EventRecord, type MemoryAuthor, type MemoryLink, type NoteFields, type ExecutionPort, type MemoryHealth, type Plan, type TaskNode, type WorkspaceWithHealth, formatModelRate } from '@orc/contracts'
+import { AUTHOR_SOURCE, SUPERVISOR_HEALTH, claimHistory, EDGE_DIRECTION, errorMessage, EVENT_KIND, foldMemory, LINK_KINDS, MASTERPLAN_NOTE_ID, MEMORY_ACCESS, MemoryDeletedPayload, MemoryScope, MemoryWrittenPayload, noteKey, NOTE_KINDS, NoteKind, NOTE_TIER, NOTE_TIERS, NoteTier, parseLinkSpec, PlanDraft, RUN_OUTCOME, STRATEGY, TASK_STATUS, TERMINAL_TASK_STATUS, LinkKind, slugId, type Analyzer, type EventRecord, type MemoryAuthor, type MemoryLink, type NoteFields, type ExecutionPort, type MemoryHealth, type Plan, type TaskNode, type WorkspaceWithHealth, formatModelRate } from '@orc/contracts'
 import { openStorage, Kernel, atomicWriteFileSync, listProjectIds, claimSlot, fold, gatedChildren, freezePlan, liveSupervisors, orphanTasks, staleSupervisors, grantExtensionTrust, grantMcpTrust, initializeProject, isExtensionTrusted, isMcpTrusted, loadConfig, loadTrust, migrateDatabase, requireProject, runtimeLockHeld, stepUsage, subtreeUsage, tasksByWorkspace, taskUsage, type EventLog, type OrcConfig, type PluginHost, type ProjectConfig, type Storage } from '@orc/kernel'
 import { createVaultProjector, parsePlanFile } from '@orc/vault-projector'
-import { archiveCandidates, consolidateTask, CONSOLIDATE_EXECUTOR, createDriftProbe, frontier, needsReground, probeMemory, RECHECK_KINDS, recheckNotes, restampToHead, summarize } from '@orc/memory'
+import { archiveCandidates, consolidateTask, CONSOLIDATE_EXECUTOR, createDriftProbe, frontier, needsReground, probeMemory, RECHECK_KINDS, recheckNotes, restampToHead, summarize, taskInfo } from '@orc/memory'
 import { withMemory } from './memory-open'
 import { DEFAULT_TEMPLATE_MODEL, singleStepDraft } from './plan-template'
+import { seedShippedSkills } from './shipped-skills'
 import { buildDistiller } from './consolidation-distiller'
 import { seedRegistries, buildRuntime } from './runtime'
 import { runSupervisor, startBootHeartbeat, supervisorHealth } from './serve'
@@ -16,7 +16,9 @@ import { ensureSupervisor, SUPERVISOR_MODE, type SupervisorMode } from './superv
 import { isLanguageModel } from './model-guard'
 import { assertDrivable, assertRetryable, buildModelDiscovery, buildOrcActions } from './actions'
 import { cwdAuthor, cwdWorkspaceId } from './cwd-workspace'
+import { enumArg } from './enum-arg'
 import { renderDerivedPlan, renderPlanHuman } from './plan-render'
+import { adrCommand } from './adr-commands'
 import { wsCommand } from './ws-commands'
 import { requireLiveWorkspace } from './workspace-ops'
 import { listWorkspaceHealth } from './workspace-health'
@@ -94,27 +96,34 @@ export const driftLine = (d: NonNullable<MemoryHealth['drift']>): string => {
     : `knowledge drift: ${d.drifted}/${d.checkable} checkable notes (${pct}%) describe code that has since changed — heal: orc propose <task> --file ${REGROUND_HEAL_PLAN}`
 }
 
-const SHIPPED_SKILLS_DIR = fileURLToPath(new URL('../../../vault/skills', import.meta.url))
-export const SHIPPED_SKILLS = ['codebase-analysis', 'plan-authoring', 'documentation', 'web-research', ROLE_SKILL.auditor, ROLE_SKILL.committer]
-
 // `orc init` must work before Postgres/plugins exist, so it gets a standalone entry
-// (bin.ts) and the same command inside buildProgram for help/unit visibility
+// (bin.ts) and the same command inside buildProgram for help/unit visibility.
+//
+// IDEMPOTENT, and deliberately so: seeding runs on EVERY invocation and only the identity mint is
+// guarded. Before this, an existing project could not receive a newly shipped skill at all — init
+// refused outright, and `--force` minted a fresh projectId, orphaning every task, note and event in
+// the log just to top up a directory. `orc init` is now the answer to "I pulled a release that
+// ships a new role skill". The kernel's own refusal (initializeProject) is untouched: minting a
+// second identity over a live one still needs --force.
 export function initCommand(dir?: string): Command {
   return new Command('init')
-    .description('initialize project identity (writes .orc/identity.json — local, never committed)')
+    .description('seed the shipped skills and initialize project identity (.orc/identity.json — local, never committed)')
     .requiredOption('--name <name>', 'project name')
     .option('--force', 'mint a new identity for a deliberate fork of an existing project')
     .action((opts: { name: string; force?: boolean }) => {
       const projectDir = dir ?? process.cwd()
-      const identity = initializeProject(projectDir, opts.name, { force: opts.force })
       const config = loadConfig(projectDir)
-      for (const name of SHIPPED_SKILLS) {
-        const target = path.join(config.skillsDir, name, 'SKILL.md')
-        if (existsSync(target)) continue
-        mkdirSync(path.dirname(target), { recursive: true })
-        copyFileSync(path.join(SHIPPED_SKILLS_DIR, name, 'SKILL.md'), target)
+      const seeded = seedShippedSkills(config.skillsDir)
+      const skillLine = seeded.length > 0 ? `seeded: ${seeded.join(', ')}` : 'skills up to date'
+      // an identity already here and no --force: report what is, report what the seed did, exit 0
+      if (config.projectId !== null && config.projectName !== null && !opts.force) {
+        console.log(`project already initialized as '${config.projectName}' (${config.projectId}) in ${config.projectRoot}`)
+        console.log(skillLine)
+        return
       }
+      const identity = initializeProject(projectDir, opts.name, { force: opts.force })
       console.log(`initialized project '${identity.projectName}' (${identity.projectId}) in ${identity.projectRoot}`)
+      console.log(skillLine)
     })
 }
 
@@ -149,21 +158,6 @@ function parsePositiveNumber(value: string): number {
   if (!Number.isFinite(parsed) || parsed <= 0)
     throw new InvalidArgumentError(`must be a positive amount, got '${value}'`)
   return parsed
-}
-
-// ONE spelling of "reject a value outside a closed vocabulary, naming the set" — the alternative is
-// a typo silently filtering everything out and reading as "this lane is empty". Three call sites had
-// grown their own version of it (the tier lane, `neighbors --kinds`, and now `memory add --kind`),
-// each with a different error shape for the identical mistake, and the --kinds one additionally
-// re-parsed the value through zod afterwards purely to avoid a cast.
-// `.find` returns the MEMBER type, so this needs neither a cast nor a second parse.
-function enumArg<T extends string>(label: string, valid: readonly T[]): (value: string) => T {
-  return (value: string): T => {
-    const hit = valid.find(v => v === value)
-    if (hit === undefined)
-      throw new InvalidArgumentError(`unknown ${label} '${value}' — valid: ${valid.join(', ')}`)
-    return hit
-  }
 }
 
 const parseNoteTier = enumArg<NoteTier>('tier', NOTE_TIERS)
@@ -256,6 +250,7 @@ export function buildProgram(
   // Placed after requireKernel rather than beside the init/db addCommands above: the deps object
   // reads that binding immediately, so calling wsCommand up there would hit its temporal dead zone.
   program.addCommand(wsCommand({ requireKernel, ...(plugin && { project: { config: plugin.config, log: plugin.log } }) }))
+  program.addCommand(adrCommand({ requireKernel, ...(plugin && { project: { config: plugin.config, log: plugin.log } }) }))
 
   // The author every `orc memory` write carries, in ONE place — a dozen handlers each spelling
   // their own `{ source: cli, workspaceId: … }` is exactly the shape that leaves one command
@@ -1221,11 +1216,16 @@ export function buildProgram(
     .option('--category <c>', 'filter by category')
     .option('--tag <t>', 'filter by tag')
     .option('--tier <t>', `only one memory lane: ${NOTE_TIERS.join(' | ')}`, parseNoteTier)
-    .action(async (o: { category?: string; tag?: string; tier?: NoteTier }) => {
+    // The inventory question `orc adr ls` cannot answer: every note under one kind, decisions
+    // included. `kind` exists only on the SEMANTIC tier, so this filter selects within that lane
+    // rather than across all three. Without it a human listing knowledge by kind had to read the
+    // whole corpus and filter by eye.
+    .option('--kind <k>', `only one note kind: ${NOTE_KINDS.join(' | ')}`, parseNoteKind)
+    .action(async (o: { category?: string; tag?: string; tier?: NoteTier; kind?: NoteKind }) => {
       const { config, log } = needPlugin()
       const rows = await withMemory({ log, config }, async memory => {
         await memory.projector.catchUp()
-        return memory.store.list({ category: o.category, tag: o.tag, tier: o.tier })
+        return memory.store.list({ category: o.category, tag: o.tag, tier: o.tier, kind: o.kind })
       })
       // the agent path already says "absence is not proof a decision doesn't exist"; printing
       // zero bytes gives the human strictly less than the model gets, and reads as "no such note"
@@ -1410,11 +1410,14 @@ export function buildProgram(
         await memory.projector.catchUp()
         const distill = opts.model ? buildDistiller(seedRegistries(config).providers, opts.model) : undefined
         // force: an explicit manual request bypasses the salience gate the auto-lifecycle applies
-        // The SAME author shape the lifecycle subscriber builds (runtime.ts) — a consolidation is
-        // an agent writer named through `executor`, never a person at a terminal, whichever door
-        // asked for it; only the workspace comes from this cwd.
-        const author = await cwdAuthor(requireKernel(), config.dir, AUTHOR_SOURCE.agent, { executor: CONSOLIDATE_EXECUTOR })
-        const notes = await consolidateTask({ log, store: memory.store, author, distill }, taskId, { force: true })
+        // The SAME builder shape the lifecycle subscriber passes (runtime.ts): an agent writer named
+        // through `executor`, never a person at a terminal — but the workspace is NOT this cwd. It
+        // is the named task's own workspace: an operator can run `orc memory consolidate` from any
+        // checkout for a task that ran in a different one, and this cwd is irrelevant to that task's
+        // provenance [fixed 2026-09-15 — see ConsolidationDeps.authorFor].
+        const authorFor = (task: { id: string; workspaceId: string }): MemoryAuthor =>
+          ({ source: AUTHOR_SOURCE.agent, executor: CONSOLIDATE_EXECUTOR, workspaceId: task.workspaceId, taskId: task.id })
+        const notes = await consolidateTask({ log, store: memory.store, authorFor, distill }, taskId, await taskInfo(log, taskId), { force: true })
         if (!notes || notes.length === 0) { console.log(`nothing to consolidate for '${taskId}' — unknown task, planning child, or no step notes`); return }
         await memory.projector.catchUp()
         // one line per note: a multi-area task consolidates into one anchored note per area

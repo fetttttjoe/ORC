@@ -9,9 +9,13 @@ import { DEFAULT_MAX_ITERATIONS } from '@orc/kernel'
 // `--model` defaults, one edit away from proposing with different models per door.
 export const DEFAULT_TEMPLATE_MODEL = 'anthropic/claude-sonnet-5'
 
-export function singleStepDraft(task: { title: string; spec: string }, modelRef: string, skillRefs: string[] = [], maxIterations = DEFAULT_MAX_ITERATIONS): PlanDraft {
+// `strategyRef` is a PARAMETER with the operator's own template as its default: the auto-heal
+// reactor drafts the same one-step shape but must be exempt from the kernel's appended finish step
+// (FINISH_EXEMPT_STRATEGIES) — a plan nobody requested must not park on a human — and the strategy
+// is the only thing in this draft that can say so.
+export function singleStepDraft(task: { title: string; spec: string }, modelRef: string, skillRefs: string[] = [], maxIterations = DEFAULT_MAX_ITERATIONS, strategyRef: string = STRATEGY.single): PlanDraft {
   return {
-    strategyRef: STRATEGY.single,
+    strategyRef,
     costEstimateUSD: null,
     steps: [{
       id: 's1',

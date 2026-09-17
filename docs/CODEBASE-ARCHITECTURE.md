@@ -388,8 +388,8 @@ These interfaces are *defined* in `contracts` and *implemented* by other package
 - **`ids.ts`** (deliberate leaf module):
   - `MEMORY_ID_RE = /^[a-z0-9][a-z0-9-]*$/` and `SHA256_HEX_RE = /^[a-f0-9]{64}$/` — the one spelling of each shape, used across artifact receipts, plan hashes, and kernel trust fingerprints.
   - `slugId(title: string): string` — deterministic `MEMORY_ID_RE`-safe id from a title (lowercase, collapse non-alphanumerics to `-`, trim edges, cap at 64 chars); throws if the result still fails `MEMORY_ID_RE`.
-  - `MemoryAuthor = z.object({ source: z.enum(['agent','cli','mcp']), taskId?, stepId?, runToken?, executor?, model?, role? })` — who wrote a note/annotation/feedback reply.
-  - `composeAuthor(a: MemoryAuthor): string` — composed provenance string (`'cli'`, or `executor·model·role` joined with `·`, falling back to `'agent'`).
+  - `MemoryAuthor = z.object({ source: z.enum(['agent','cli','mcp','human']), workspaceId, taskId?, stepId?, runToken?, executor?, model?, role? })` — who wrote a note/annotation/feedback reply, and which checkout they wrote it from.
+  - `composeAuthor(a: MemoryAuthor): string` — composed provenance string: `'cli'` and `'human'` render as themselves, every other source composes `executor·model·role` joined with `·` and falls back to **its own source** (so a bare `mcp` author reads `mcp`, not `agent`).
   - The module's own comment states its reason for existing as a leaf: `memory.ts` and `events.ts` import each other in a deliberate cycle, and `analysis.ts` reads an id regex at module top level — routing that read through the cycle would resolve to `undefined` whenever `memory.ts` is still initializing. `limits.ts` and `event-kinds.ts` are leaf modules for the identical reason.
 - **`approval-answer.ts`** — the *conversational* plan-gate vocabulary:
   - `APPROVAL_ANSWERS = ['approve','approved','agree','agreed','yes','ok','okay','lgtm','go','proceed'] as const`, `ApprovalAnswer = z.enum(APPROVAL_ANSWERS)`, `APPROVAL_ANSWER = ApprovalAnswer.enum.approve` (the canonical word the UI's one-click button sends).
@@ -917,7 +917,7 @@ Runs **outside** the event transaction. Selects **project-scope** claim rows, dr
 - **Role gating.** `role ?? 'verify'`. Filters `memory_neighbors` **out** when `role === MEMORY_ROLE.scout` (a scout seeds the graph, it does not traverse a rich one).
 - **Budget-shaping.** Every tool shares `Budget` (default 1500, bounded to `MEMORY_LIMITS.budgetTokens`). `memory_search` runs claims + notes over the **one** budget (claims first) and flags `drifted` note ids via `driftedNoteIds`.
 - **Write hardening.** `normalizeWrite` trims over-cap text/lists with warnings; only identity (`id`/`scope`) still rejects. `noteLint`/`orderingLinkWarning`/`unresolvedLinks`/`duplicateSubjectWarning` are advisory.
-- `MEMORY_READ_TOOLS = [search, read, neighbors, topics]` is the read-only subset external drivers (`orc mcp serve`) expose (§7.6).
+- `MEMORY_READ_TOOLS = [search, read, neighbors, topics, recheck]` is the read-only subset external drivers (`orc mcp serve`) expose (§7.6).
 
 ##### 5.1 Budget fitter — `budget.ts`
 
@@ -1024,7 +1024,7 @@ function diffGraphs(prev: Graph, next: Graph): GraphPatch
 ##### `palette.ts` / `actions.ts` / `diagram.ts` / `transcript.ts` / `summarize.ts`
 
 - **`palette.ts`** — `PALETTE`, the one color-token vocabulary. Exposed as its own subpath (`@orc/ui-core/palette`) so the browser bundle can import *just* the palette without pulling in `sessions.ts`'s server-only chain.
-- **`actions.ts`** — defines `OrcActions`, the mutating-capability interface (`newTask`, `propose`, `edit`, `approve`, `run`, `reply`, `retry`, `annotate`, `revise`, `writeNote`, `deleteNote`, `renameProject`, `newProject`, `cancel`, `purgeProject`, `deleteProject`) — **implemented elsewhere** (the CLI, §7.7); ui-core only consumes it. Methods return data, never print.
+- **`actions.ts`** — defines `OrcActions`, the mutating-capability interface (`newTask`, `propose`, `edit`, `approve`, `run`, `reply`, `retry`, `annotate`, `revise`, `writeNote`, `deleteNote`, `recordDecision`, `listWorkspaces`, `newWorkspace`, `renameProject`, `newProject`, `cancel`, `purgeProject`, `deleteProject`) — **implemented elsewhere** (the CLI, §7.7); ui-core only consumes it. Methods return data, never print.
 - **`diagram.ts`** — server-safe mermaid string builders (`planMermaid`, `decompositionMermaid`, `todoWaves`).
 - **`transcript.ts`** — `foldTranscript(events, taskId, stepId?)` → ordered `TranscriptItem[]`.
 - **`summarize.ts`** — `summarizeEvent(e): LogRow` (one summary line per event, parsing through the SAME `PAYLOAD_SCHEMAS`, degrading to `snip(payload, 90)` on pre-schema history; derives `noteRef` and `authorTaskId`). **`shouldAdmitLogRow(row, taskFilter): boolean`** is the one admit/reject predicate for a per-task Log view: `null` filter admits everything; `row.taskId === taskFilter` admits; `row.taskId === null` admits only when `row.authorTaskId === taskFilter` (a project-scoped memory row attributed to the task that *wrote* it). Applied server-side, in `sessions.ts`'s `log()`: the browser asks for a task's rows rather than filtering a whole-project tail itself, so there is one place the rule lives.
@@ -1135,7 +1135,9 @@ The **one** implementation of every task/plan mutation, called by all three entr
   - `run(taskId, cwd)` — `assertRunnableCwd(cwd)`, then `assertDrivable`, then `ensureRuntime()`, then `kernel.requestRun`.
   - `reply(taskId, text, projectId?)` — same-project answers go through `ensureRuntime()` + `kernel.replyFeedback(taskId, text, deps.via)`; a **foreign** project opens a short-lived `openStorage` and answers directly with **no runtime spawned** (answering is not execution).
   - `annotate`/`revise` — `revise` is `ensureRuntime()` + per-scope-id `kernel.annotatePlan` + `kernel.replyFeedback`.
-  - `writeNote`/`deleteNote` — reject the two reserved UI-metadata note ids, else open a throwaway `openMemory`, write/remove, `catchUp`, close.
+  - `writeNote`/`deleteNote` — reject the two reserved UI-metadata note ids, else run a throwaway memory through `withMemory` (open → write/remove → `catchUp` → close), the same bracket every one-shot `orc memory` command uses.
+  - `recordDecision(input)` — the one knowledge-authoring door for the web and MCP surfaces: resolves the author (`cwdAuthor` with `deps.via ?? 'cli'` — never `human`, which only `orc adr` writes) and delegates the whole lifecycle to `@orc/memory`'s `recordDecision` over `decisionDoor(memory)`. The refusals, the slugged id and the supersession link live there, so `orc adr` and this door cannot drift.
+  - `listWorkspaces`/`newWorkspace` — the workspace door: `listWorkspaceHealth(plugin)` for the records with their derived health, and `createRequestWorkspace` (the same op `orc ws new` calls) for a worktree + branch + the request as its first task.
   - `purgeProject`/`deleteProject` — both refuse while a supervisor is live (`refuseWhileSupervised`). `purgeProject` truncates + re-seeds identity notes; `deleteProject` drops the DBOS system DB and SurrealDB knowledge DB.
   - `cancel(taskId)` — `kernel.cancelSubtree(taskId)`, then best-effort sweeps orphaned memory notes (`orphanedNotes`), reporting `{ swept, sweepError }`.
   - `via?` defaults to the CLI's implicit terminal identity; passed to `replyFeedback`/`revise`.
@@ -1145,7 +1147,7 @@ The **one** implementation of every task/plan mutation, called by all three entr
 - **Two-layer stdout discipline**: layer 1 is `bin.ts`'s console rebind; layer 2 is here — `const realWrite = process.stdout.write.bind(...); process.stdout.write = (chunk, ...) => process.stderr.write(...)`, and a *separate* `Writable` (`transportOut`) calling the captured `realWrite` is what's handed to `StdioServerTransport`. This exists because winston (once DBOS boots) writes to `process.stdout` directly, bypassing `console`.
 - **`Autonomy = 'gated' | 'full'`**, a launch-time choice: `gated` (default) permits everything except approving; `full` lets the client approve (attributed `approvedBy: 'mcp'`).
 - **`mcpApproveTool(actions, autonomy): ResolvedTool`** — `ref: 'orc/approve'`. Under `gated` always returns `{ error: 'human gate: ...' }` without calling `actions`. Under `full` validates and calls `actions.approve(taskId, version, 'mcp')`. Deliberately **not** part of the copilot tool set — "the two doors differ EXACTLY here, by design."
-- **`buildServeTools(deps): ResolvedTool[]`** = `asResolvedTools(buildCopilotTools({ sessions, actions, projectId }))` **+** `deps.memoryTools.filter(t => READ_MEMORY.has(t.name))` **+** `deps.actions ? [mcpApproveTool(...)] : []`. `READ_MEMORY = new Set(MEMORY_READ_TOOLS)` = `[search, read, neighbors, topics]` — deliberately **excludes `memory_write`**: MCP door #2 gets read-only memory access.
+- **`buildServeTools(deps): ResolvedTool[]`** = `asResolvedTools(buildCopilotTools({ sessions, actions, projectId }))` **+** `deps.memoryTools.filter(t => READ_MEMORY.has(t.name))` **+** `deps.actions ? [mcpApproveTool(...)] : []`. `READ_MEMORY = new Set(MEMORY_READ_TOOLS)` = `[search, read, neighbors, topics, recheck]` — deliberately **excludes `memory_write`**: MCP door #2 gets read-only memory access. The copilot set contributes `record_decision` (via `OrcActions.recordDecision`), the one authoring tool the door serves.
 - **`startMcpServe(opts)`** — `actions: null` means a read-only server. Boots a `createProjectSessions`, opens memory (degrading to `unavailableMemoryTools(reason)`), assembles `tools` via `buildServeTools`, serves over `@modelcontextprotocol/sdk`'s `Server` + `StdioServerTransport`. Logs readiness to **stderr**.
 
 #### 6. Cross-cutting notes

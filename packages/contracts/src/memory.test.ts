@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'bun:test'
-import { MemoryNoteDraftInput, MemoryNoteInput, MemoryNote, MEMORY_ID_RE, MEMORY_USE, USE_VERDICT, LINK_KINDS, MemoryScope, NOTE_TIER, VerifiedStamp, deriveNoteProvenance, foldMemory, inferTier, noteContentKey, noteKey, parseLinkSpec, useLine, useVerdict, type MemoryUseOutcome, type PlanNoteInput, type SemanticNoteInput, type UseStats } from './memory'
+import { MemoryNoteDraftInput, MemoryNoteInput, MemoryNote, MEMORY_ID_RE, MEMORY_USE, USE_VERDICT, LINK_KINDS, MemoryScope, NOTE_KIND, NOTE_TIER, VerifiedStamp, composeAuthor, deriveNoteProvenance, foldMemory, inferTier, noteContentKey, noteKey, parseLinkSpec, useLine, useVerdict, type MemoryUseOutcome, type PlanNoteInput, type SemanticNoteInput, type UseStats } from './memory'
+import { DECISION_STATUS } from './decision'
+import { AUTHOR_SOURCE } from './ids'
 import { EVENT_KIND } from './event-kinds'
 import { PAYLOAD_SCHEMAS } from './events'
 import { TEST_WORKSPACE_ID } from './fixtures'
@@ -343,6 +345,15 @@ describe('VerifiedStamp on note provenance', () => {
     expect(noteContentKey({ ...MemoryNoteInput.parse(cited), sources: [{ url: 'https://x.test/a', retrievedAt: 't9' }] }))
       .toBe(key(cited))
     expect(key({ ...cited, sources: [{ url: 'https://x.test/b' }] })).not.toBe(key(cited))
+    // status is the ADR lifecycle state, not what the decision SAYS — same exclusion as `archived`.
+    // A supersession writes only `{status: 'superseded'}` (decisions.ts's recordDecision); if
+    // `status` counted as content, that write would have cleared a verified stamp on every decision
+    // the moment it was retired, for text nobody touched.
+    const decision = { id: 'dec', title: 'Dec', kind: NOTE_KIND.decision, body: 'b', status: DECISION_STATUS.accepted }
+    expect(noteContentKey(MemoryNoteInput.parse(decision)))
+      .toBe(noteContentKey(MemoryNoteInput.parse({ ...decision, status: DECISION_STATUS.superseded })))
+    expect(noteContentKey(MemoryNoteInput.parse(decision)))
+      .not.toBe(noteContentKey(MemoryNoteInput.parse({ ...decision, body: 'different' })))
   })
 })
 
@@ -428,5 +439,33 @@ describe('useVerdict', () => {
     expect(useLine(stats(1, 0))).toBe('tentative (1 useful)')
     expect(useLine(stats(0, 2))).toBe('dead-end reported (2)')
     expect(useLine(stats(0, 0))).toBeNull()
+  })
+})
+
+describe('decision status on notes', () => {
+  it('a decision may carry a status; every other kind refuses one', () => {
+    expect(semantic({ id: 'd', title: 'D', kind: NOTE_KIND.decision, status: DECISION_STATUS.proposed }).status).toBe('proposed')
+    expect(MemoryNoteInput.safeParse({ id: 'f', title: 'F', status: DECISION_STATUS.accepted }).success).toBe(false) // kind defaults to fact
+    expect(MemoryNoteInput.safeParse({ id: 'r', title: 'R', kind: NOTE_KIND.research, sources: [{ url: 'https://x.test/a' }], status: DECISION_STATUS.accepted }).success).toBe(false)
+  })
+  // No default on the schema: the store merges on omit, so a defaulted status would flip every
+  // partial update of a decision back to accepted — the same trap memory_write's summary hit.
+  it('a decision without a status stores none (the reader derives accepted)', () => {
+    expect(semantic({ id: 'd', title: 'D', kind: NOTE_KIND.decision }).status).toBeUndefined()
+    expect(MemoryNoteDraftInput.parse({ id: 'd', title: 'D' })).not.toHaveProperty('status')
+  })
+  it("'human' is an author source and renders as itself", () => {
+    expect(composeAuthor({ source: AUTHOR_SOURCE.human, workspaceId: TEST_WORKSPACE_ID })).toBe('human')
+    expect(composeAuthor({ source: AUTHOR_SOURCE.cli, workspaceId: TEST_WORKSPACE_ID })).toBe('cli')
+  })
+  // A door with nothing to compose from renders as ITSELF. The old `|| 'agent'` fallthrough made a
+  // bare `{ source: 'mcp', workspaceId }` — exactly what cwdAuthor builds for the MCP door, which
+  // has no executor/model/role — render as 'agent', and deriveNoteProvenance stamps that into
+  // createdBy, which is STICKY across rewrites: every decision recorded over MCP would have read as
+  // an agent's forever.
+  it('a bare door composes to its own source, never to agent; a pipeline still composes', () => {
+    expect(composeAuthor({ source: AUTHOR_SOURCE.mcp, workspaceId: TEST_WORKSPACE_ID })).toBe('mcp')
+    expect(composeAuthor({ source: AUTHOR_SOURCE.agent, workspaceId: TEST_WORKSPACE_ID })).toBe('agent')
+    expect(composeAuthor({ source: AUTHOR_SOURCE.mcp, workspaceId: TEST_WORKSPACE_ID, executor: 'mcp-serve' })).toBe('mcp-serve')
   })
 })

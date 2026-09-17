@@ -1,5 +1,5 @@
 import { z } from 'zod'
-import { AccessVia, AUTHOR_SOURCE, CLAIM_ID_RE, ClaimWrite, isRecord, DRIFT_STATE, EDGE_DIRECTIONS, inferTier, linkLookupScopes, MASTERPLAN_NOTE_ID, MemoryScope, MEMORY_ACCESS, MEMORY_ID_RE, MEMORY_LIMITS, MEMORY_SOURCE_LIMITS, MEMORY_TOOL_NAME, MemorySearchResult, MemoryWriteResult, NoteCategory, NOTE_CATEGORIES, NoteKind, NOTE_KINDS, LINK_KIND, LINK_KINDS, planFieldViolations, RETENTION_CLASSES, SEARCH_MODES, SearchMode, stepMayVerify, LinkKind, MemoryNoteDraftInput, NOTE_TIER, NOTE_TIERS, emptyUseStats, slugId, toolError, useLine, type MemoryAuthor, type MemoryNote, type MemoryStore, type ProvisionalFlag, type ResolvedTool, type VerifiedStamp } from '@orc/contracts'
+import { AccessVia, AUTHOR_SOURCE, CLAIM_ID_RE, ClaimWrite, DECISION_STATUSES, isRecord, DRIFT_STATE, EDGE_DIRECTIONS, inferTier, linkLookupScopes, MASTERPLAN_NOTE_ID, MemoryScope, MEMORY_ACCESS, MEMORY_ID_RE, MEMORY_LIMITS, MEMORY_SOURCE_LIMITS, MEMORY_TOOL_NAME, MemorySearchResult, MemoryWriteResult, NoteCategory, NOTE_CATEGORIES, NoteKind, NOTE_KINDS, LINK_KIND, LINK_KINDS, planFieldViolations, RETENTION_CLASSES, SEARCH_MODES, SearchMode, stepMayVerify, LinkKind, MemoryNoteDraftInput, NOTE_TIER, NOTE_TIERS, emptyUseStats, slugId, toolError, useLine, type MemoryAuthor, type MemoryNote, type MemoryStore, type ProvisionalFlag, type ResolvedTool, type VerifiedStamp } from '@orc/contracts'
 import { applyBudget, fitMemoryNoteToBudget } from './budget'
 import { noteDriftState, type ChangedSince } from './drift'
 import { provisionalOf, type WorkspaceViewProbe } from './provisional'
@@ -416,6 +416,10 @@ const WRITE_PROPERTIES = {
   kind: {
     type: 'string', enum: [...NOTE_KINDS],
     description: 'semantic only. architecture_current = observed implementation; architecture_target = intended design; research = a distilled web finding, which REQUIRES sources (default fact)',
+  },
+  status: {
+    type: 'string', enum: [...DECISION_STATUSES],
+    description: 'kind=decision ONLY (refused on any other kind): proposed | accepted | superseded | deprecated. Omit it — a decision with no status reads as accepted. Do not set superseded by hand: record the replacing decision with a supersedes link and the lifecycle flips this one.',
   },
   retention: {
     type: 'string', enum: [...RETENTION_CLASSES],

@@ -1,6 +1,10 @@
 import { z } from 'zod'
 import { Claim, ClaimHit, ClaimInput, ClaimWrite, type ClaimSearchOptions } from './claim'
 import { Topic } from './cluster'
+// memory.ts → decision.ts → ids.ts/limits.ts, both leaves: no cycle. decision.ts must never import
+// memory.ts back, or the vocabulary would resolve to undefined depending on load order — the same
+// ordering trap that put MEMORY_ID_RE in ids.ts in the first place.
+import { DecisionStatus } from './decision'
 import { EVENT_KIND, type EventRecord } from './event-kinds'
 import { composeAuthor, MEMORY_ID_RE, MemoryAuthor } from './ids'
 import { MEMORY_LIMITS } from './limits'
@@ -243,6 +247,10 @@ export const SemanticNoteInput = z.object({
   ...noteCore,
   tier: z.literal(NOTE_TIER.semantic),
   kind: NoteKind.default(NOTE_KIND.fact),
+  // The ADR lifecycle state. Only a `decision` may carry it — the refinement on MemoryNoteInput
+  // refuses it on every other kind, the same posture as "sources required only for research". No
+  // default: see decisionStatusOf for why a stored default would corrupt partial updates.
+  status: DecisionStatus.optional(),
   categories: stringOrList(z.string().max(MEMORY_LIMITS.labelChars), MEMORY_LIMITS.labelItems).default([]),
   paths: stringOrList(z.string().max(MEMORY_LIMITS.detailChars), MEMORY_LIMITS.detailItems).default([]), // pointers down to code
   claims: z.array(ClaimInput).max(MEMORY_LIMITS.detailItems).default([]), // the addressable facts it asserts
@@ -354,6 +362,11 @@ export const MemoryNoteInput = z.preprocess(
   // the point of the kind: a research note without provenance is an unsourced claim
   n => n.tier !== NOTE_TIER.semantic || n.kind !== NOTE_KIND.research || n.sources.length > 0,
   { message: "kind 'research' requires at least one source citation" },
+).refine(
+  // a lifecycle state on a fact is meaningless, and a filter on it would silently return notes
+  // nobody ever governed — the mirror of the research/sources rule above
+  n => n.tier !== NOTE_TIER.semantic || n.status === undefined || n.kind === NOTE_KIND.decision,
+  { message: "status is only valid on kind 'decision'" },
 )
 export type MemoryNoteInput = z.infer<typeof MemoryNoteInput>
 
@@ -380,6 +393,9 @@ export const MemoryNoteDraftInput = z.object({
   // unrelated update; `orc memory recheck --apply` and `restore` are what set it either way
   archived: optionalNoDefault(noteCore.archived),
   kind: optionalNoDefault(SemanticNoteInput.shape.kind),
+  // reused verbatim, not wrapped: it is already optional with no default, and optionalNoDefault
+  // takes a ZodDefault — passing this one would not type-check
+  status: SemanticNoteInput.shape.status,
   categories: optionalNoDefault(SemanticNoteInput.shape.categories),
   paths: optionalNoDefault(SemanticNoteInput.shape.paths),
   claims: optionalNoDefault(SemanticNoteInput.shape.claims),
@@ -785,7 +801,16 @@ export interface MemoryStore {
   // invalidates: claim ids this write supersedes. On the OPTS, not the draft, because it is stated
   // about the write rather than about the note — it lands on the event, and the note keeps live
   // claims only. See ClaimWrite for why absence cannot mean deletion.
-  write(input: MemoryNoteDraft, author: MemoryAuthor, opts?: { idempotencyKey?: string; invalidates?: string[] }): Promise<MemoryNote>
+  // mustCreate: refuse when the log's latest event for (scope, id) is a memory_written — ARCHIVED
+  // notes count, because an archived note's row is DELETED from the read model, so a caller that
+  // checked only the read model (store.get) before writing would see nothing there, "recreate" the
+  // title, and silently resurrect the archived note under a merge base it never asked for (measured:
+  // decisions.ts's recordDecision, checking store.get for "does this id exist" before an id-is-new
+  // write, missed exactly this — an archived decision's slug re-recorded as a brand-new one). A
+  // memory_deleted latest does NOT refuse: a removed note is gone and may be re-created. Checked
+  // inside write()'s own transaction, on the SAME latestNoteEvent read the merge base already takes,
+  // so this also closes the TOCTOU two doors racing one new id would otherwise hit.
+  write(input: MemoryNoteDraft, author: MemoryAuthor, opts?: { idempotencyKey?: string; invalidates?: string[]; mustCreate?: boolean }): Promise<MemoryNote>
   remove(id: string, scope: string | undefined, author: MemoryAuthor): Promise<void>
   /**
    * Retire a note from the read model, or bring it back. A LIFECYCLE transition, deliberately not
@@ -872,11 +897,16 @@ export interface MemoryStore {
 //    verification stamp on every rewrite (the fresh note carries `false`, the stored row carries no
 //    such column, so the two keys never matched), and would also mean archiving-then-restoring a
 //    note destroyed an audit that is still true of text nobody touched.
+//  • status — the ADR lifecycle state, not what the decision says; a supersession must not destroy
+//    an audit of text nobody touched. Same trap as `archived`: superseding a decision writes only
+//    `{status:'superseded'}` (decisions.ts's recordDecision), and counting `status` as content would
+//    have cleared a verified stamp on every decision the moment it was retired, for a write that
+//    changed no word of the ADR.
 const CONTENT_FIELDS = [...new Set([
   ...Object.keys(SemanticNoteInput.shape),
   ...Object.keys(EpisodicNoteInput.shape),
   ...Object.keys(PlanNoteInput.shape),
-])].filter(k => k !== 'id' && k !== 'scope' && k !== 'sourceRevision' && k !== 'archived').sort()
+])].filter(k => k !== 'id' && k !== 'scope' && k !== 'sourceRevision' && k !== 'archived' && k !== 'status').sort()
 
 // The three object-array fields, re-parsed so the two sides of the comparison canonicalize: a zod
 // object emits its keys in SHAPE order (a projected Surreal row's come back in storage order) and

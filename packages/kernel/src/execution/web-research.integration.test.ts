@@ -68,6 +68,9 @@ describe('sourced web research through a durable run (integration)', () => {
         sources: [{ url: SOURCE_URL, title: 'Postgres 16 release notes' }],
       } }] },
       { toolCalls: [{ toolCallId: 'c3', toolName: 'signal', input: { outcome: 'success', summary: 'recorded one cited finding' } }] },
+      // the kernel's appended finish step runs this same scripted model: one turn that signals,
+      // writing nothing — an exhausted script yields empty text and loops the step to its cap
+      { toolCalls: [{ toolCallId: 'c4', toolName: 'signal', input: { outcome: 'success', summary: 'nothing to reconcile' } }] },
     ])
 
     const port = await createDbosPort({

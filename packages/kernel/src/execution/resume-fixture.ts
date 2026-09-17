@@ -8,7 +8,7 @@ import {
   type AgentExecutor, type EventDraft, type ExecutorContext, type SplitResult, type UnifiedEvent,
 } from '@orc/contracts'
 import { openStorage } from '../storage'
-import { fakeProvider, testConfig, TEST_PROJECT_ID } from '../test-helpers'
+import { fakeProvider, fakeSkills, testConfig, TEST_PROJECT_ID } from '../test-helpers'
 import { createDbosPort } from './dbos-port'
 
 const [dbUrl, taskId, marker] = process.argv.slice(2)
@@ -47,7 +47,7 @@ const storage = await openStorage(dbUrl, { projectId: TEST_PROJECT_ID })
 const log = storage.events
 const config = testConfig(dbUrl)
 const port = await createDbosPort({
-  storage, config,
+  storage, config, skills: fakeSkills,
   providers: new Map([['fake', fakeProvider]]),
   executors: new Map([['api-loop', stallOnce]]),
 })

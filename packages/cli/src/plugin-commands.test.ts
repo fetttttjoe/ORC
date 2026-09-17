@@ -7,6 +7,7 @@ import { createMcpHub } from '@orc/mcp-client'
 import { createPluginHost, grantMcpTrust, isMcpTrusted, loadConfig, loadTrust, requireProject } from '@orc/kernel'
 import { createTestDb, seedTestWorkspace, TEST_PROJECT_ID, TEST_WORKSPACE_ID } from '@orc/kernel/test-helpers'
 import { buildProgram, openKernel } from './main'
+import { seedShippedSkills } from './shipped-skills'
 
 const FIXTURE = fileURLToPath(new URL('../../../plugins/mcp-client/src/fixture-server.ts', import.meta.url))
 
@@ -27,6 +28,10 @@ async function makeCli(dir: string) {
   const db = await createTestDb()
   dbs.push(db)
   const config = requireProject({ ...loadConfig(dir), databaseUrl: db.url, projectId: TEST_PROJECT_ID, projectName: 'test' })
+  // seeded the way `orc init` seeds a real project (ONE seeder): the kernel appends a finish step
+  // declaring ROLE_SKILL.finisher to every root plan, and refValidator refuses the plan outright
+  // when this temp project's skills dir holds nothing
+  seedShippedSkills(config.skillsDir)
   const host = await createPluginHost(config, {
     providers: new Map([['fake', { costs: {}, languageModel: () => ({}) }]]),
     executors: new Map([['api-loop', { id: 'api-loop', startTurn: async function* () {} }]]),

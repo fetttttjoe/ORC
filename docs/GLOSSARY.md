@@ -34,7 +34,7 @@ Key terms used throughout the orchestrator codebase and documentation. Many term
 
 **Degraded memory** — SurrealDB down ⇒ `memory unavailable` tool results, but all other operations (execution, audit, cancellation, vault trace) continue. Events still append to Postgres. See [degraded memory guarantee](../README.md#guarantees-stated-precisely), [vault startup](../README.md#operational-notes).
 
-**Decision** — Architectural choice recorded as a `kind=decision` note in the knowledge graph. See [`vault/memory/index.md`](../README.md#vault-views), [ADR formalization](plans/INDEX.md#phase-2-documentation-roadmap).
+**Decision** — Architectural choice recorded as a `kind=decision` note. Carries a `status` (`proposed | accepted | superseded | deprecated`; absent reads as `accepted`) and a fixed body — Context, Decision, Consequences (`plugins/memory/src/adr.ts`). Recorded by `orc adr new` (author `human`) or the MCP `record_decision` tool (author `mcp`); changed only by supersession, which links the new note `supersedes` the old and marks the old `superseded`. See [`decisions.ts`](../plugins/memory/src/decisions.ts), [note lifecycle](ARCHITECTURE.md#note-lifecycle-—-currency-healing-retirement).
 
 **Deterministic** — Guaranteed to produce identical output given identical inputs, *for a given build*. Applied to vault projections (same events → same markdown), event-log fold (same events → same state), the plan freeze (same plan-notes → same executable plan). A derivation that serializes parsed records is deterministic with respect to its inputs AND the schema the running build parses them with, so two processes on different builds may disagree — which is why nothing compares such a value across a process boundary. See [vault projections](seams-reference.md#vault-projections-—-read-only-human-views).
 
@@ -57,6 +57,8 @@ Key terms used throughout the orchestrator codebase and documentation. Many term
 **Feedback** — Human-provided reply to a plan approval. Includes task/step envelope and an idempotent outbox for delivery. See [`feedback_provided` event](ARCHITECTURE.md#feedback-delivery-and-grounded-approval), [human gate](EXTENDING.md#invariants-—-the-rules-that-keep-changes-cheap).
 
 **Fingerprint** — Digest of trust consent (for MCP: command + args + env names; for extensions: entry + resolved local imports + `bun.lock`). Binding mechanism for `orc mcp trust` and `orc ext trust`. See [trust model](../README.md#operational-notes), [declare vs grant](EXTENDING.md#invariants-—-the-rules-that-keep-changes-cheap).
+
+**Finish step** — Kernel-appended step (role `finisher`) ending every root plan except the grounded scaffold and the auto-heal sweep, and every frozen grounded pipeline, right before the commit step. Reconciles the task's notes, drafts a decision if the task made one, and asks once; an approval word records the decision (if any) and completes the task. Gated by `stepMayReconcile`, which keys on both step id and role so a planner-authored step merely named `finish` cannot arm it. See [`role-finisher` skill](../vault/skills/role-finisher/SKILL.md), [`stepMayReconcile`](../packages/contracts/src/plan.ts), [note lifecycle](ARCHITECTURE.md#note-lifecycle-—-currency-healing-retirement).
 
 **Fold** — Pure function `fold(events[]) → State`, deterministically reconstructing a snapshot at any point. Idempotent: folding the same events twice yields identical state. See [fold function](../packages/kernel/src/projections.ts), [`applyOperationEvent`](ARCHITECTURE.md#responsibilities).
 

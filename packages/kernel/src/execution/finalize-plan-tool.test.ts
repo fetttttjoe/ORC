@@ -1,8 +1,9 @@
 import { describe, expect, it } from 'bun:test'
-import { GROUNDED_APPROVAL_DOOR, type MemoryLink, type PlanNote } from '@orc/contracts'
+import { COMMIT_STEP_ID, FINISH_STEP_ID, GROUNDED_APPROVAL_DOOR, STEP_ROLE, type MemoryLink, type PlanNote } from '@orc/contracts'
 import { planNoteFixture } from '@orc/contracts/fixtures'
 import { finalizePlanTool } from './finalize-plan-tool'
 import { instantiateFrozenPlan, planGraphHash } from './strategies/grounded-plan'
+import { withFinishStep } from '../finish-step'
 
 const p = { taskId: 't1', stepId: 'plan', runToken: 'step:t1:plan:a1', role: 'auditor', executor: 'api-loop', modelRef: 'anthropic/x', maxIterations: 30 }
 const config = { maxDepth: 3 }
@@ -46,7 +47,10 @@ describe('finalize_plan tool', () => {
       parentTaskId: 't1', stepId: 'plan', runToken: 'step:t1:plan:a1', toolCallId: 'call_1', title: 'Web app',
       policy: { default: 'auto' }, maxDepth: 3,
       parentStep: { executorRef: 'api-loop', modelRef: 'anthropic/x', maxIterations: 30 },
-      plan: { steps: [{ id: 'db', role: 'implementer', dependsOn: [] }, { id: 'api', dependsOn: ['db'] }] },
+      // the kernel appends the finish step at the freeze (withFinishStep), so the frozen split
+      // the tool proposes carries it after every subplan — toMatchObject compares arrays by
+      // length, so leaving it out would only prove the old shape
+      plan: { steps: [{ id: 'db', role: 'implementer', dependsOn: [] }, { id: 'api', dependsOn: ['db'] }, { id: FINISH_STEP_ID, role: STEP_ROLE.finisher, dependsOn: ['db', 'api'] }] },
     })
   })
 
@@ -237,7 +241,8 @@ describe('finalize_plan tool', () => {
 })
 
 // autoCommit appends the kernel-owned commit step at the freeze — the truthful-stamp pipeline's
-// tail. Off (the default) freezes byte-for-byte as before.
+// tail, AFTER the finish step (which every freeze carries, autoCommit or not) so the stamp pass
+// sees reconciled notes. Off (the default) freezes the decomposition plus the finish step alone.
 describe('autoCommit', () => {
   const notes = () => [
     note({ id: 'masterplan', title: 'M', links: [link('a', 'decomposes_into')] }),
@@ -249,14 +254,14 @@ describe('autoCommit', () => {
     const r = await finalizePlanTool({ kernel: fakeKernel(notes(), calls), config: { ...config, autoCommit: true }, p }).execute({}, 'call_1')
     expect(r.isError).toBe(false)
     const plan = (calls[0] as { plan: { steps: { id: string; role: string }[] } }).plan
-    expect(plan.steps.map(s => s.id)).toEqual(['a', 'commit'])
-    expect(plan.steps.at(-1)!.role).toBe('committer')
+    expect(plan.steps.map(s => s.id)).toEqual(['a', FINISH_STEP_ID, COMMIT_STEP_ID])
+    expect(plan.steps.at(-1)!.role).toBe(STEP_ROLE.committer)
   })
 
-  it('off (default): the frozen plan is byte-identical to the bare decomposition', async () => {
+  it('off (default): the frozen plan is the bare decomposition plus the finish step, and nothing else', async () => {
     const calls: unknown[] = []
     await finalizePlanTool({ kernel: fakeKernel(notes(), calls), config, p }).execute({}, 'call_1')
     const plan = (calls[0] as { plan: unknown }).plan
-    expect(plan).toEqual(instantiateFrozenPlan('masterplan', notes()))
+    expect(plan).toEqual(withFinishStep(instantiateFrozenPlan('masterplan', notes())))
   })
 })

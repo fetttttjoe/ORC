@@ -47,9 +47,12 @@ export function slugId(title: string): string {
 // IS its human gate, was recorded as 'cli' whoever sent it. The log could not distinguish a human
 // at a terminal from an agent driving the MCP surface.
 //
-// CEILING: 'cli' still means "came through a terminal", NOT "a human". A machine writer that
-// passes it is indistinguishable from a person typing — see docs/IDEAS.md on human attribution.
-export const AUTHOR_SOURCES = ['agent', 'cli', 'mcp'] as const
+// 'human' means a PERSON typed this, and only doors a person drives write it: `orc adr new` /
+// `orc adr supersede` (a decision is a judgment a person makes). 'cli' still means "came through a
+// terminal" — `orc note` and `orc memory add` keep it, because a script can drive them. The MCP door
+// writes 'mcp'. Forward-only: createdBy is sticky across rewrites (deriveNoteProvenance), so notes
+// written before this source existed cannot be re-attributed — see docs/IDEAS.md entry 12.
+export const AUTHOR_SOURCES = ['agent', 'cli', 'mcp', 'human'] as const
 export const AuthorSource = z.enum(AUTHOR_SOURCES)
 export type AuthorSource = z.infer<typeof AuthorSource>
 export const AUTHOR_SOURCE = AuthorSource.enum
@@ -81,6 +84,15 @@ export type MemoryAuthor = z.infer<typeof MemoryAuthor>
 
 // Composed provenance string for createdBy/updatedBy (frontmatter + read model).
 export function composeAuthor(a: MemoryAuthor): string {
-  if (a.source === 'cli') return 'cli'
-  return [a.executor, a.model, a.role].filter(Boolean).join('·') || 'agent'
+  // 'cli' and 'human' render as THEMSELVES: neither has an executor/model/role to compose from,
+  // and a person is not a pipeline.
+  if (a.source === AUTHOR_SOURCE.cli || a.source === AUTHOR_SOURCE.human) return a.source
+  // Every other door composes from its pipeline, and falls back TO ITS OWN SOURCE — never to a
+  // hardcoded 'agent'. The fallback used to be the literal, which made a bare
+  // `{ source: 'mcp', workspaceId }` — exactly what cwdAuthor builds for the MCP door, which has no
+  // executor/model/role — render as 'agent'. deriveNoteProvenance stamps that into createdBy, and
+  // createdBy is STICKY across rewrites: every decision recorded over MCP would have read as an
+  // agent's work forever, with no migration able to correct it. Unchanged for a bare 'agent',
+  // whose source IS the word the fallback used to spell.
+  return [a.executor, a.model, a.role].filter(Boolean).join('·') || a.source
 }

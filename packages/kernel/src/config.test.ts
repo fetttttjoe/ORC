@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { GROUNDED_APPROVAL_DOOR } from '@orc/contracts'
 import { deriveSystemUrl, IDENTITY_FILE, initializeProject, loadConfig, projectDatabaseName, requireProject, SETTINGS_FILE, type OrcConfig } from './config'
-import { tmpGitRepo } from './test-helpers'
+import { sh, tmpGitRepo } from './test-helpers'
 
 describe('loadConfig', () => {
   it('reads .orc/config.json overrides', () => {
@@ -65,6 +65,7 @@ describe('loadConfig', () => {
     expect(c.databaseUrl).toContain('5433')
     expect(c.appVersion).toMatch(/^orc-/)
     expect(c.execAllowlist).toEqual([]) // no allowlist → exec tool is not offered
+    expect(c.workspaceSetup).toEqual([]) // no setup → a new worktree is the tracked tree and nothing else
     // draft-sweep by default is deliberate: the reactor's free half runs silently and its LLM
     // half only ever appears as a DRAFTED task — the default spends nothing on its own
     expect(c.autoHeal).toBe('draft-sweep')
@@ -158,6 +159,10 @@ describe('loadConfig', () => {
       expect(loadConfig(dir).maxIterations).toBe(40)
     })
   })
+  it('workspaceSetup is one argv from the config file, no empty words', () => {
+    expect(loadConfig(tmpProject({ workspaceSetup: ['bun', 'install', '--frozen-lockfile'] })).workspaceSetup).toEqual(['bun', 'install', '--frozen-lockfile'])
+    expect(() => loadConfig(tmpProject({ workspaceSetup: ['bun', ''] }))).toThrow()
+  })
   it('execAllowlist reads from the config file — the operator trust boundary — and rejects empty entries', () => {
     // the security-relevant path production uses: allowlist comes from .orc/config.json, not just the default
     const dir = tmpProject({ execAllowlist: ['bun test', 'bun run typecheck'] })
@@ -244,7 +249,37 @@ describe('loadConfig', () => {
     expect(requireProject(c).projectName).toBe('shared')
     // the vault is a projection of the PROJECT — one per repository, not one per checkout
     expect(c.vaultDir).toBe(path.join(main, 'vault'))
-    expect(c.skillsDir).toBe(path.join(main, 'vault', 'skills'))
+    // …but vault/skills is TRACKED SOURCE, so it moves with the branch: flipped from the main
+    // checkout's path when a worktree on a branch that ADDS a role skill could not run its own
+    // plans (it read main's index and got "unknown skill 'role-finisher'").
+    expect(c.skillsDir).toBe(path.join(worktree, 'vault', 'skills'))
+  })
+
+  // Re-rooting the vault's relative location only makes sense while the vault IS inside the
+  // repository. Measured: a vaultDir of '/srv/orc-vault' re-rooted to '<worktree>/srv/orc-vault',
+  // and '../shared-vault' to '<worktree>/../shared-vault' — two directories nobody named. A vault
+  // outside the repo is ONE directory for every checkout, and so are the skills in it.
+  // The worktree is NESTED here, not a sibling of the main checkout: at equal depth the escaping
+  // relative path happens to walk back to the same place, so a sibling fixture cannot see the bug.
+  // Unequal depth is the ordinary case anyway — a worktree pool lives wherever the operator put it.
+  it('a vaultDir outside the repository keeps its own skills dir — no re-rooting into the checkout', () => {
+    const { main } = tmpGitRepo()
+    initializeProject(main, 'shared')
+    const nested = path.join(path.dirname(main), 'pool', 'wt')
+    sh(main, 'worktree', 'add', '-q', '-b', 'nested', nested)
+    const outside = mkdtempSync(path.join(tmpdir(), 'orc-vault-outside-'))
+    mkdirSync(path.join(nested, '.orc'), { recursive: true })
+    writeFileSync(path.join(nested, '.orc', SETTINGS_FILE), JSON.stringify({ vaultDir: outside }))
+    expect(loadConfig(nested).vaultDir).toBe(outside)
+    expect(loadConfig(nested).skillsDir).toBe(path.join(outside, 'skills'))
+  })
+
+  it('an explicit skillsDir in a worktree\'s tracked settings resolves under THAT checkout', () => {
+    const { main, worktree } = tmpGitRepo()
+    initializeProject(main, 'shared')
+    mkdirSync(path.join(worktree, '.orc'), { recursive: true })
+    writeFileSync(path.join(worktree, '.orc', SETTINGS_FILE), JSON.stringify({ skillsDir: 'custom/skills' }))
+    expect(loadConfig(worktree).skillsDir).toBe(path.join(worktree, 'custom', 'skills'))
   })
   it('settings still come from the checkout being worked in (they are tracked; a worktree may be ahead)', () => {
     const { main, worktree } = tmpGitRepo()

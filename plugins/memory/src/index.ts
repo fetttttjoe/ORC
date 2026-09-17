@@ -33,7 +33,8 @@ export { frontier } from './frontier'
 // CONSOLIDATE_EXECUTOR travels with them: both composition roots that build a consolidation author
 // (the serve runtime's lifecycle subscriber and `orc memory consolidate --force`) must name the
 // writer identically, and a literal spelled at each door is exactly what drifts.
-export { consolidateTask, CONSOLIDATE_EXECUTOR, type ConsolidationInput, type ConsolidationDistiller } from './consolidate'
+// taskInfo travels with consolidateTask: callers resolve the task and hand it in.
+export { consolidateTask, taskInfo, CONSOLIDATE_EXECUTOR, type ConsolidationInput, type ConsolidationDistiller, type TaskInfo } from './consolidate'
 export { createMemoryLifecycle, type MemoryLifecycle } from './lifecycle'
 export { corpusDrift, needsReground, restampableNotes, createDriftProbe } from './drift'
 // consumer: packages/cli/src/mcp-serve.ts, which builds its own read tools and so must bind this
@@ -53,6 +54,15 @@ export { restampToHead } from './restamp'
 // into the step tools — the kernel never imports this plugin, so the query crosses as a callback.
 export { notesCiting, type CitingNote } from './drift'
 export { createGroundingSource } from './grounding-source'
+export { ADR_SECTION, adrSummary, parseAdrBody, renderAdrBody, type AdrFields } from './adr'
+export { DECISION_REFUSAL, decisionDoor, getDecision, listDecisions, recordDecision, type DecisionDoor, type DecisionRecord, type DecisionStore, type DecisionView, type RecordedDecision } from './decisions'
+// consumer: packages/cli/src/runtime.ts stepTools. Registered by the composition root rather than by
+// bindStepMemory for the same reason memoryVerifyTool is: the gate needs the STEP id and role, which
+// the per-step memory binding never sees. FINISH_TOOL_NAME travels with it so runtime.test.ts pins
+// the model-facing names from the one place they are spelled.
+// `notesWrittenBy` deliberately stays module-internal (this file's header rule): finish-tools.ts is
+// its only consumer and its test imports './task-notes' directly.
+export { finishTools, FINISH_TOOL_NAME } from './finish-tools'
 
 // the orchestrator: assembles the knowledge service + event log into the memory domain
 // services (gateway, projector, tools) — the business logic never opens Surreal itself

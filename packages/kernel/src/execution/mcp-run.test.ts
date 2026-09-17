@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { EVENT_KIND, PAYLOAD_SCHEMAS } from '@orc/contracts'
+import { EVENT_KIND, PAYLOAD_SCHEMAS, ROLE_SKILL } from '@orc/contracts'
 import { draftFixture, stepFixture } from '@orc/contracts/fixtures'
 import { createMcpHub } from '@orc/mcp-client'
 import { apiLoopExecutor } from '@orc/executor-api-loop'
@@ -40,6 +40,15 @@ describe('MCP + skills through a durable run (integration)', () => {
       path.join(skillsRoot, 'haiku-style', 'SKILL.md'),
       `---\nname: haiku-style\ndescription: write everything as haiku\n---\nAlways answer in haiku.`,
     )
+    // The kernel appends a finish step to every root plan and it declares ROLE_SKILL.finisher, so
+    // this index must carry it or the step fails init with "unknown skill" — the same way the
+    // shipped vault carries the role skills. A stand-in body: this file's subject is the MCP round
+    // trip and the skill_loaded record, not which prose the finish contract holds.
+    mkdirSync(path.join(skillsRoot, ROLE_SKILL.finisher), { recursive: true })
+    writeFileSync(
+      path.join(skillsRoot, ROLE_SKILL.finisher, 'SKILL.md'),
+      `---\nname: ${ROLE_SKILL.finisher}\ndescription: finish-step contract\n---\nReconcile, then present the summary.`,
+    )
     const skills = await SkillIndex.open(skillsRoot)
     const hub = createMcpHub({ fixture: { command: 'bun', args: [FIXTURE] } }, id => id === 'fixture')
 
@@ -47,6 +56,9 @@ describe('MCP + skills through a durable run (integration)', () => {
     const model = scriptModel([
       { toolCalls: [{ toolCallId: 'c1', toolName: 'mcp__fixture__echo', input: { text: 'ping' } }] },
       { toolCalls: [{ toolCallId: 'c2', toolName: 'signal', input: { outcome: 'success', summary: 'echoed' } }] },
+      // the appended finish step runs this same scripted model: one turn that signals, so the
+      // script is not exhausted into empty text and the step does not loop to its iteration cap
+      { toolCalls: [{ toolCallId: 'c3', toolName: 'signal', input: { outcome: 'success', summary: 'nothing to reconcile' } }] },
     ])
     const config = testConfig(db.url)
     port = await createDbosPort({
@@ -100,5 +112,7 @@ describe('MCP + skills through a durable run (integration)', () => {
     } finally {
       await reopened.close()
     }
-  })
+    // 30s: the run is two step workflows now — the scripted step and the kernel's appended finish
+    // step — and bun's default 5s sat right on the boundary (5.5s observed under a loaded suite).
+  }, 30_000)
 })

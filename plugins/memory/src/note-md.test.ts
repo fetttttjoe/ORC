@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test'
-import { claimId, type SemanticNote } from '@orc/contracts'
+import { claimId, DECISION_STATUS, NOTE_KIND, type SemanticNote } from '@orc/contracts'
 import { planNoteFixture, semanticNoteFixture } from '@orc/contracts/fixtures'
 import { CLAIMS_HEADING, noteRelPath, renderNoteFile } from './note-md'
 
@@ -28,6 +28,14 @@ describe('renderNoteFile', () => {
     expect(md).toContain('revision: 3')
     expect(md).toContain('# Detail\nrotation logic')
     expect(md).not.toContain('readCount') // Tier-2 never in the file
+  })
+  // The vault file is the human read surface for a decision: whether an ADR is still in force has
+  // to be visible without opening the tool. Spread, never written as a hollow key — a `status:` on
+  // every fact note would say a lifecycle governs knowledge that has none.
+  it("renders a decision's status into frontmatter and omits the key on every other note", () => {
+    const decision = semanticNoteFixture({ id: 'd', kind: NOTE_KIND.decision, status: DECISION_STATUS.superseded })
+    expect(renderNoteFile(decision)).toContain('status: superseded')
+    expect(renderNoteFile(semanticNoteFixture({ id: 'f' }))).not.toContain('status:')
   })
   it('renders typed links (id + kind [+ confidence]) in frontmatter', () => {
     const md = renderNoteFile(note({ id: 'auth-token-refresh' }))

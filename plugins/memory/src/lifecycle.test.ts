@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'bun:test'
+import { EVENT_KIND, NOTE_TIER, planScope, type EventRecord, type MemoryAuthor, type NoteSummary } from '@orc/contracts'
 import { TEST_WORKSPACE_ID, eventFixture } from '@orc/contracts/fixtures'
-import { createDrain, taskCompletedId } from './lifecycle'
+import { CONSOLIDATE_EXECUTOR, type ConsolidationLog, type ConsolidationStore } from './consolidate'
+import { consolidateOnCompletion, createDrain, taskCompletedId } from './lifecycle'
 
 describe('createDrain', () => {
   // The lifecycle has TWO producers — the backlog pass and the live subscription — and they overlap
@@ -29,6 +31,53 @@ describe('createDrain', () => {
     const boom = track(Promise.reject(new Error('consolidate failed')))
     expect(boom).rejects.toThrow('consolidate failed') // still the caller's to surface
     await expect(drain()).resolves.toBeUndefined()
+  })
+})
+
+describe('consolidateOnCompletion resolves the completed task once', () => {
+  const TASK = 'reso-task-1'
+  const CONSOLIDATE_AUTHOR: MemoryAuthor = { source: 'agent', workspaceId: TEST_WORKSPACE_ID, executor: CONSOLIDATE_EXECUTOR }
+
+  const created: EventRecord = eventFixture({
+    taskId: TASK, kind: EVENT_KIND.task_created,
+    payload: {
+      task: {
+        id: TASK, parentId: null, workspaceId: TEST_WORKSPACE_ID, type: 'generic', title: 'Resolved once',
+        spec: '', status: 'draft', zone: [], budgetUSD: null, depth: 0, createdAt: '2026-07-26T00:00:00.000Z',
+      },
+    },
+  })
+  const doneEvent: EventRecord = eventFixture({ kind: EVENT_KIND.task_status_changed, payload: { taskId: TASK, from: 'running', to: 'done' } })
+
+  // one episodic step note: enough for retireStepTrail to reach its author, too little for
+  // isSubstantive — so consolidateTask never writes and the test is about the resolution only
+  const episodicStep: NoteSummary = {
+    id: 'step-a', scope: planScope(TASK), title: 'Step A', tier: NOTE_TIER.episodic,
+    categories: [], tags: [], summary: 'did A', hits: 0, lastAccessedAt: null,
+    sourceRevision: null, paths: [], workspaceId: TEST_WORKSPACE_ID,
+  }
+
+  it('reads task_created ONCE per completion — not once for the outcome and again for the archive', async () => {
+    let taskCreatedReads = 0
+    const log: ConsolidationLog = {
+      after: async (_seq, kinds) => {
+        if (kinds?.includes(EVENT_KIND.task_created)) taskCreatedReads += 1
+        return [created].filter(e => !kinds || kinds.includes(e.kind))
+      },
+    }
+    const archivedCalls: { entries: ReadonlyArray<{ id: string; scope: string }>; author: MemoryAuthor }[] = []
+    const store: ConsolidationStore = {
+      list: async () => [episodicStep],
+      write: async () => { throw new Error('consolidateTask should not write for a non-substantive task') },
+      setArchivedAll: async (entries, _archived, author) => { archivedCalls.push({ entries, author }) },
+    }
+    const deps = { log, store, authorFor: () => CONSOLIDATE_AUTHOR }
+
+    await consolidateOnCompletion(deps, doneEvent)
+
+    expect(taskCreatedReads).toBe(1)
+    // the trail was still archived under the resolved author — shared lookup, not a skipped one
+    expect(archivedCalls).toEqual([{ entries: [{ id: 'step-a', scope: planScope(TASK) }], author: CONSOLIDATE_AUTHOR }])
   })
 })
 

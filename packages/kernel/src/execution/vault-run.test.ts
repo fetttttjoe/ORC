@@ -9,7 +9,7 @@ import {
 import { draftFixture, stepFixture } from '@orc/contracts/fixtures'
 import { openStorage, type EventLog, type Storage } from '../storage'
 import { Kernel } from '../kernel'
-import { createTestDb, fakeProvider, seedTestWorkspace, TEST_PROJECT_ID, TEST_WORKSPACE_ID, testConfig } from '../test-helpers'
+import { createTestDb, fakeProvider, fakeSkills, seedTestWorkspace, TEST_PROJECT_ID, TEST_WORKSPACE_ID, testConfig } from '../test-helpers'
 import { createDbosPort, type DbosPort } from './dbos-port'
 import { createVaultProjector, type VaultProjector } from '@orc/vault-projector'
 
@@ -55,7 +55,7 @@ describe('vault projection over a real run (e2e)', () => {
     await seedTestWorkspace(log)
     const config = testConfig(db.url, { vaultDir })
     port = await createDbosPort({
-      storage, config,
+      storage, config, skills: fakeSkills,
       providers: new Map([['fake', fakeProvider]]),
       executors: new Map([['api-loop', fakeExecutor()]]),
     })
@@ -72,6 +72,12 @@ describe('vault projection over a real run (e2e)', () => {
   })
   afterAll(() => teardown())
 
+  // 30s, the value feedback-gate.test.ts and mcp-run.test.ts settled on for a full DBOS run: bun's
+  // default 5s has to cover a whole run's worth of DBOS workflow, live vault projection and file
+  // rendering, and the kernel-appended finish step added one more step to that budget — enough that
+  // the margin is load-sensitive when this file runs alongside the rest of packages/kernel rather
+  // than alone. A timeout that trips on machine load reports "the vault projection broke" for
+  // something that was only slow.
   it('projects the full run: working-graph DAG, session transcript, log, root index', async () => {
     const t = await kernel.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'e2e demo', spec: 'write a file' })
     await kernel.proposePlan(t.id, draftFixture([stepFixture({ id: 's1', modelRef: 'fake/m' })]))
@@ -96,5 +102,5 @@ describe('vault projection over a real run (e2e)', () => {
       expect(logMd).toContain(kind)
 
     expect(existsSync(path.join(vaultDir, 'index.md'))).toBe(true)
-  })
+  }, 30_000) // a full DBOS run does not fit bun's default 5s under load — see above
 })

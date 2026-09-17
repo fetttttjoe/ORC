@@ -345,9 +345,10 @@ body and nothing else, so every note it produces is `kind: 'fact'`. This is a
 kind selector, a `sources` field so `kind: 'research'` can validate, and
 per-note delete + archive in the inspector.
 
-**Why deferred:** the recording protocol came first. `orc memory add --kind`
-now covers the human door well enough to use, and a decision set nobody writes
-to does not need a second authoring surface yet.
+**Why deferred:** the recording protocol came first. `orc adr new` is the
+human door for decisions and `orc memory add --kind` for every other kind,
+and a decision set nobody writes to does not need a second authoring surface
+yet.
 
 **Design fixes already known** (all verified against the tree on 2026-08-04, so
 the build starts from the corrected version):
@@ -384,26 +385,31 @@ the build starts from the corrected version):
 8. `deleteNote`'s `scope` is required in the web client but optional in both
    `NoteRef` and `OrcActions` — three spellings that disagree.
 
-**Trigger:** someone wants to correct a recorded decision and reaches for the
-browser instead of `orc memory add --kind`.
+**Trigger:** someone wants to author or correct knowledge in the browser rather
+than at the terminal — where correcting a recorded decision is `orc adr
+supersede` (a decision changes only by supersession) and every other kind is
+`orc memory add --kind`.
 
 ---
 
-## 12. `author.source` cannot express "a human"
+## 12. ~~`author.source` cannot express "a human"~~ — SHIPPED 2026-09-15
 
 **Source:** ADR decision-records session, 2026-08-04.
 
-**What it is:** `AuthorSource` is `agent | cli | mcp`. None of those means a
-person: `cli` means "came through a terminal", and a machine writer passing it
-is indistinguishable from someone typing. Task consolidation did exactly that
-until 2026-08-04, which is why every outcome note written before then still
-reads `createdBy: cli`. The fix is a source that names a human, the way
-`plan_approved.approvedBy` already carries `enum(['human','policy','mcp'])`
-"so replay shows exactly who approved".
+**What it is:** `AuthorSource` is `agent | cli | mcp | human`. `cli` used to
+mean both "came through a terminal" and "a person typed this", so a machine
+writer passing it was indistinguishable from someone typing. Task consolidation
+did exactly that until 2026-08-04, which is why every outcome note written
+before then still reads `createdBy: cli`. The fix is a source that names a
+human, the way `plan_approved.approvedBy` already carries
+`enum(['human','policy','mcp'])` "so replay shows exactly who approved".
 
-**Why deferred:** the corrosive half was the machine claiming `cli`, and that
-is fixed at the writer. What remains is a genuine widening of an enum every
-memory event carries, and nothing yet needs to PROVE a note was human-authored.
+**What shipped:** the doors write the source that describes them. `orc adr
+new` / `orc adr supersede` write `human` (a decision is a judgment a person
+makes); the MCP door's `record_decision` writes `mcp`, and the same tool at the
+web door writes `cli`. `orc note` / `orc memory add` keep `cli`, because a
+script can drive them. `composeAuthor` renders a source with no pipeline as
+itself, so `createdBy` reads `mcp` rather than `agent` for a bare MCP author.
 
 **Design fixes already known:**
 
@@ -422,3 +428,5 @@ memory event carries, and nothing yet needs to PROVE a note was human-authored.
 **Trigger:** someone needs to prove a decision was human-authored rather than
 machine-written — an audit, a disputed decision, or a policy that only lets
 humans record certain kinds.
+
+`AUTHOR_SOURCES` gained `human`; `orc adr` writes it. Forward-only as fix 1 predicted.

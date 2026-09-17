@@ -37,6 +37,19 @@ await storage.events.append({
   payload: { topic: 'plan-gate', question: 'approve this plan?' },
 })
 
+// The FINISH step's own question, on its own task. The kernel appends a finish step to every root
+// plan and it asks once before the task completes, so this is the gate an operator meets most —
+// and it reads the same approval word the plan gate does, which is why GateCard offers one-click
+// approve for it too. Seeded SEPARATELY from the plan gate above because that affordance is keyed
+// on the STEP ID: with only a plan gate in the fixture, "the button is on the plan step" and "the
+// button is on every open question" are indistinguishable.
+const FINISH_GATE_QUESTION = 'SUMMARY: 2 notes kept, 1 rewritten, no decision. Reply approve to finish.'
+const finishing = await kernel.createTask({ workspaceId: workspace.id, title: 'finishing request', spec: 'work that is done and being summarised' })
+await storage.events.append({
+  taskId: finishing.id, stepId: STEP_ID.finish, runToken: 'e2e-finish-run', kind: EVENT_KIND.feedback_requested,
+  payload: { topic: 'finish', question: FINISH_GATE_QUESTION },
+})
+
 // The log tab's pin-to-bottom is only observable when the inspector actually overflows — a
 // handful of seeded lifecycle events all fit the 900px viewport, so "pinned" would be trivially
 // true. Enough tool calls that the panel scrolls; tool_call adds no graph nodes and rides the
@@ -179,6 +192,9 @@ const actions: OrcActions = {
     await storage.events.append({ taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_deleted, payload: { id, scope: scope ?? 'project', author: { source: AUTHOR_SOURCE.cli, workspaceId: TEST_WORKSPACE_ID } } })
     return { id }
   },
+  // the lifecycle behind it needs the memory read model this fixture has no Surreal for, and a
+  // fabricated receipt would let the copilot's decision tool be tested without being exercised
+  recordDecision: unsupported('recordDecision'),
   renameProject: unsupported('renameProject'),
   newProject: unsupported('newProject'),
   // kernel-backed, not stubbed: it is a plain read of the log this fixture already folds, and the

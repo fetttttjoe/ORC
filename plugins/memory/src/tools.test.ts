@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'bun:test'
 import { z } from 'zod'
-import { claimId, CLAIM_ID_RE, LINK_KIND, LINK_KINDS, MEMORY_ACCESS, MEMORY_LIMITS, MemoryNoteInput, NOTE_KIND, NOTE_TIER, MemoryWriteResult, MEMORY_TOOL_NAME, STEP_ID, STEP_ROLE, VERIFY_STEP_ID, type AccessVia, type MemoryAccessMode, type MemoryFilter, type MemoryNote, type MemoryNoteDraft, type MemoryStore, type NoteSummary } from '@orc/contracts'
+import { claimId, CLAIM_ID_RE, DECISION_STATUSES, LINK_KIND, LINK_KINDS, MEMORY_ACCESS, MEMORY_LIMITS, MemoryNoteInput, NOTE_KIND, NOTE_TIER, MemoryWriteResult, MEMORY_TOOL_NAME, STEP_ID, STEP_ROLE, VERIFY_STEP_ID, type AccessVia, type MemoryAccessMode, type MemoryFilter, type MemoryNote, type MemoryNoteDraft, type MemoryStore, type NoteSummary } from '@orc/contracts'
 import { TEST_WORKSPACE_ID, episodicNoteFixture, semanticNoteFixture } from '@orc/contracts/fixtures'
 import { approxTokens } from './budget'
 import { MEMORY_READ_TOOLS, memoryTools, memoryRoleFor, memoryVerifyTool, noteLint } from './tools'
@@ -1035,6 +1035,18 @@ describe('memory tools', () => {
     const write = memoryTools({ store, author: { source: 'cli', workspaceId: TEST_WORKSPACE_ID } }).find(t => t.name === 'memory_write')!
     const props = WriteInputProps.parse(write.inputSchema).properties
     expect(props.dependsOn).toMatchObject({ type: 'array', items: { type: 'string' } })
+  })
+
+  // `status` is refused on every kind but decision, so a model that discovers the field without
+  // that condition spends a write learning it — the same unadvertised-surface failure dependsOn
+  // above records, one step further along. The enum comes from the parser's own constant: a second
+  // spelling here would advertise a state the refinement rejects.
+  it("memory_write advertises status as decision-only, in the parser's own vocabulary", () => {
+    const { store } = fakeStore()
+    const write = memoryTools({ store, author: { source: 'cli', workspaceId: TEST_WORKSPACE_ID } }).find(t => t.name === MEMORY_TOOL_NAME.write)
+    const props = z.object({ properties: z.object({ status: z.object({ enum: z.array(z.string()), description: z.string() }) }) }).parse(write?.inputSchema)
+    expect(props.properties.status.enum).toEqual([...DECISION_STATUSES])
+    expect(props.properties.status.description).toContain('decision')
   })
 })
 

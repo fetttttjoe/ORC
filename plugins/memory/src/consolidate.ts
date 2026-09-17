@@ -144,23 +144,40 @@ export const CONSOLIDATE_EXECUTOR = 'consolidate'
 // What consolidateTask reads from — the memory read model and the event log, nothing from the
 // execution kernel: memory-lifecycle work stays in the memory domain. `distill` is the optional LLM
 // upgrade, injected by the composition root; absent → extractive.
-// `author` is a PARAMETER, not a literal built here: the plugin never invents an author, because
-// MemoryAuthor.workspaceId can only be answered by the composition root that knows which checkout
-// this process speaks for. It still names the writer through `executor` — see the write below.
-export interface ConsolidationDeps { log: EventLog; store: MemoryStore; author: MemoryAuthor; distill?: ConsolidationDistiller }
+// `authorFor` is a PARAMETER, not a literal built here: the plugin never invents an author, because
+// MemoryAuthor.workspaceId can only be answered per TASK, not once at boot. A single cwd-resolved
+// author used to be built ONCE at the composition root and stamped on every outcome note — so a
+// task that ran in a worktree consolidated as durable knowledge under the SUPERVISOR's own
+// checkout, wrong for as long as that task's branch stayed unmerged [fixed 2026-09-15].
+// `authorFor` takes the writing task's own id + workspaceId, so the note always names where the
+// work actually happened. It still names the writer through `executor` — see the write below.
+// Only what consolidation reads and writes — a test fakes four methods, not two whole interfaces.
+export type ConsolidationLog = Pick<EventLog, 'after'>
+export type ConsolidationStore = Pick<MemoryStore, 'list' | 'write' | 'setArchivedAll'>
 
-// The task's title, folded from its task_created event; null if the task is unknown to the log.
-async function taskTitle(log: EventLog, taskId: string): Promise<string | null> {
+export interface ConsolidationDeps {
+  log: ConsolidationLog
+  store: ConsolidationStore
+  authorFor: (task: { id: string; workspaceId: string }) => MemoryAuthor
+  distill?: ConsolidationDistiller
+}
+
+export interface TaskInfo { title: string; workspaceId: string }
+
+// The task's title and workspace, folded from its task_created event; null if the task is unknown
+// to the log. workspaceId travels with the title because both come off the SAME event, and the
+// workspace is what `authorFor` needs to attribute the outcome note correctly — see ConsolidationDeps.
+export async function taskInfo(log: ConsolidationLog, taskId: string): Promise<TaskInfo | null> {
   for (const e of await log.after(0, [EVENT_KIND.task_created])) {
     const p = PAYLOAD_SCHEMAS.task_created.safeParse(e.payload)
-    if (p.success && p.data.task.id === taskId) return p.data.task.title
+    if (p.success && p.data.task.id === taskId) return { title: p.data.task.title, workspaceId: p.data.task.workspaceId }
   }
   return null
 }
 
 // The DURABLE project note ids this task actually read (its provenance). memory_accessed carries the
 // acting task in its envelope; parse the payload for the note id + scope, never cast.
-async function accessedProjectIds(log: EventLog, taskId: string): Promise<string[]> {
+async function accessedProjectIds(log: ConsolidationLog, taskId: string): Promise<string[]> {
   const ids = new Set<string>()
   for (const e of await log.after(0, [EVENT_KIND.memory_accessed])) {
     if (e.taskId !== taskId) continue
@@ -178,7 +195,7 @@ const FS_WRITE_NAMES = new Set<string>(Object.values(FS_WRITE_TOOL_NAME))
 // events — the same truth scoped_changes reads, derived here from the log because consolidation
 // deliberately owns no kernel dependency. Deletions count: an outcome explaining a removal cites
 // the removed path, which restamps clean after the commit and can never drift again.
-async function touchedPaths(log: EventLog, taskId: string): Promise<string[]> {
+async function touchedPaths(log: ConsolidationLog, taskId: string): Promise<string[]> {
   const out = new Set<string>()
   for (const e of await log.after(0, [EVENT_KIND.tool_call])) {
     if (e.taskId !== taskId) continue
@@ -192,7 +209,7 @@ async function touchedPaths(log: EventLog, taskId: string): Promise<string[]> {
 
 // Descendants of `taskId` (child ids are `<parent>.<step>.<callId>`) whose latest status is not
 // `done`. Folded from the log rather than a projection: consolidation runs off the same events.
-async function unfinishedDescendants(log: EventLog, taskId: string): Promise<string[]> {
+async function unfinishedDescendants(log: ConsolidationLog, taskId: string): Promise<string[]> {
   const status = new Map<string, string>()
   for (const e of await log.after(0, [EVENT_KIND.task_status_changed])) {
     const p = PAYLOAD_SCHEMAS.task_status_changed.safeParse(e.payload)
@@ -206,27 +223,32 @@ async function unfinishedDescendants(log: EventLog, taskId: string): Promise<str
 // completion never double-writes. Returns the note, or null when the task is unknown or the salience
 // gate declines. Projection is the caller's concern (the runtime's live projector picks the write up;
 // the CLI catches up explicitly) — this stays a pure write.
+// `resolved` is the caller's taskInfo lookup, required: consolidateOnCompletion shares one with
+// retireStepTrail, and an optional self-resolve here would quietly bring the second log scan back.
 export async function consolidateTask(
   deps: ConsolidationDeps,
   taskId: string,
+  resolved: TaskInfo | null,
   opts: { force?: boolean } = {},
 ): Promise<MemoryNote[] | null> {
   // the planning child's outcome IS the plan — see isPlanChild; force does not override, because
   // the duplicate it would write is wrong however explicitly it is requested
   if (isPlanChild(taskId)) return null
-  const title = await taskTitle(deps.log, taskId)
-  if (title === null) return null
+  if (resolved === null) return null
   const steps = (await deps.store.list({ scope: planScope(taskId) })).map(n => ({ title: n.title, summary: n.summary }))
   const derivedFrom = await accessedProjectIds(deps.log, taskId)
   if (!opts.force && !isSubstantive({ steps, derivedFrom })) return null
   const input: ConsolidationInput = {
-    taskId, taskTitle: title, steps, derivedFrom,
+    taskId, taskTitle: resolved.title, steps, derivedFrom,
     paths: await touchedPaths(deps.log, taskId),
     unfinished: await unfinishedDescendants(deps.log, taskId),
   }
   // distillation is best-effort — a model hiccup falls back to the extractive note rather than
   // dropping the capture entirely.
   const distilled = deps.distill ? await deps.distill(input).catch(() => null) : null
+  // one author for every area-split note (consolidatedNotes): same task, same workspace — never a
+  // boot-time cwd. See ConsolidationDeps.authorFor for the defect this fixes.
+  const author = deps.authorFor({ id: taskId, workspaceId: resolved.workspaceId })
   const written: MemoryNote[] = []
   for (const draft of consolidatedNotes(input, distilled ?? undefined)) {
     // force (an explicit manual request) always REWRITES; the auto path keys by draft id — the
@@ -239,9 +261,9 @@ export async function consolidateTask(
     // through `executor` is the shape mcp-serve.ts already uses for its own door, and composeAuthor
     // renders it as 'consolidate'. Note this only fixes attribution GOING FORWARD: createdBy is
     // sticky across rewrites (deriveNoteProvenance), so notes written before this keep saying 'cli'.
-    // The composition root supplies both halves (CONSOLIDATE_EXECUTOR + the workspace) — see
-    // ConsolidationDeps.
-    written.push(await deps.store.write(draft, deps.author, writeOpts))
+    // The composition root supplies the builder (CONSOLIDATE_EXECUTOR + authorFor) — this function
+    // supplies the workspace, read off the task itself — see ConsolidationDeps.
+    written.push(await deps.store.write(draft, author, writeOpts))
   }
   return written
 }

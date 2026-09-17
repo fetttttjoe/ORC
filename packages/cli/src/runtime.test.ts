@@ -3,16 +3,17 @@ import { mkdtempSync, realpathSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { MEMORY_HEALTH,
-  EVENT_KIND, MEMORY_TOOL_NAME, SIGNAL_OUTCOME, STEP_ROLE, VERIFY_STEP_ID,
+  EVENT_KIND, FINISH_STEP_ID, MEMORY_TOOL_NAME, ROLE_SKILL, SIGNAL_OUTCOME, STEP_ROLE, VERIFY_STEP_ID,
   type AgentExecutor, type EventDraft, type ExecutorContext, type SplitResult, type UnifiedEvent,
 } from '@orc/contracts'
 import { Surreal } from 'surrealdb'
-import { openStorage, Kernel, projectDatabaseName, type ProjectConfig } from '@orc/kernel'
+import { openStorage, Kernel, projectDatabaseName, SCOPED_CHANGES_TOOL_NAME, type ProjectConfig } from '@orc/kernel'
 import { createTestDb, fakeProvider, seedTestWorkspace, testConfig, TEST_PROJECT_ID, TEST_WORKSPACE_ID } from '@orc/kernel/test-helpers'
 import { draftFixture, stepFixture } from '@orc/contracts/fixtures'
-import { createMemory } from '@orc/memory'
+import { createMemory, FINISH_TOOL_NAME } from '@orc/memory'
 import { buildProgram } from './main'
 import { buildPlugins, buildRuntime, seedPhases } from './runtime'
+import { seedShippedSkills } from './shipped-skills'
 
 const dbs: Array<{ drop: () => Promise<void> }> = []
 const surrealBases: ProjectConfig[] = []
@@ -112,6 +113,12 @@ describe('stepTools memory_verify registration', () => {
     const vaultDir = mkdtempSync(path.join(tmpdir(), 'orc-rt-verify-'))
     const projectDbName = `t_${Math.random().toString(36).slice(2, 10)}`
     const config = testConfig(db.url, { vaultDir, skillsDir: path.join(vaultDir, 'skills'), projectDbName })
+    // Seeded the way `orc init` seeds a real project: the kernel appends a finish step declaring
+    // ROLE_SKILL.finisher to every root plan, and a temp skills dir that nothing seeds fails the
+    // run at step init with "unknown skill 'role-finisher'". ONE seeder (shipped-skills.ts) — a
+    // harness pointing at the repo's own vault instead would hide exactly the case where orc ships
+    // a skill no project has yet.
+    seedShippedSkills(config.skillsDir)
     surrealBases.push(config)
     const storage = await openStorage(db.url, { projectId: TEST_PROJECT_ID })
     const log = storage.events
@@ -145,9 +152,74 @@ describe('stepTools memory_verify registration', () => {
       await kernel.approvePlan(healTask.id)
       expect(await (await port.startRun(healTask.id)).wait()).toBe('done')
 
+      // The finish step is APPENDED by the kernel to every root plan, and proposePlan
+      // REFUSES a draft that names it — so the fixture is a plain one-step draft and the step under
+      // test is the one the kernel added. That is the only shape this step ever has in production; a
+      // hand-authored 'finish' step could not reach the port at all.
+      const finishTask = await kernel.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'finish step', spec: 'reconciles' })
+      await kernel.proposePlan(finishTask.id, draftFixture([stepFixture({ id: 'lead', role: STEP_ROLE.worker })]))
+      await kernel.approvePlan(finishTask.id)
+      expect(await (await port.startRun(finishTask.id)).wait()).toBe('done')
+
       expect(toolNamesByStep[VERIFY_STEP_ID]).toContain(MEMORY_TOOL_NAME.verify)
       expect(toolNamesByStep[AUDITOR_STEP_NAMED_FOR_ITS_JOB]).toContain(MEMORY_TOOL_NAME.verify)
       expect(toolNamesByStep['s1']).not.toContain(MEMORY_TOOL_NAME.verify)
+
+      // The finish step's surface as an EXACT set of its own: a plain worker step's tools
+      // PLUS exactly the three stepMayReconcile arms. Expressed as a delta against 's1' rather than
+      // a re-listed surface so the shared part cannot drift between the two assertions, and exact
+      // rather than toContain because the failure this catches is a gate coming OFF — an ordinary
+      // step gaining record_decision, which a containment check would never see.
+      expect(new Set(toolNamesByStep[FINISH_STEP_ID]))
+        .toEqual(new Set([...(toolNamesByStep['s1'] ?? []), FINISH_TOOL_NAME.taskNotes, FINISH_TOOL_NAME.recordDecision, SCOPED_CHANGES_TOOL_NAME]))
+      expect(toolNamesByStep['s1']).not.toContain(FINISH_TOOL_NAME.recordDecision)
+      expect(toolNamesByStep['s1']).not.toContain(FINISH_TOOL_NAME.taskNotes)
+      expect(toolNamesByStep['s1']).not.toContain(SCOPED_CHANGES_TOOL_NAME)
+    } finally {
+      await port.shutdown()
+      await log.close()
+    }
+  }, 60_000)
+})
+
+// The kernel APPENDS steps a planner never authored — the finish step declares
+// ROLE_SKILL.finisher, the commit step ROLE_SKILL.committer — so a checkout whose skills dir was
+// never seeded is already broken before anyone asks it to do anything. It used to say so only at
+// proposePlan ("unknown skill 'role-finisher'"), which is correct but arrives when a human is
+// already trying to start work. buildRuntime names it once per missing skill at boot instead.
+describe('buildRuntime role-skill pre-flight', () => {
+  it('warns at boot for a skills dir nothing seeded, naming the skill and the fix — and still boots', async () => {
+    const db = await createTestDb()
+    dbs.push(db)
+    const vaultDir = mkdtempSync(path.join(tmpdir(), 'orc-rt-skills-'))
+    // deliberately NOT seedShippedSkills(config.skillsDir) — that absence IS the case under test.
+    // projectDbUrl is malformed so no Surreal database is created for a run that never touches
+    // memory: the pre-flight reads the skill index, which has nothing to do with the read model.
+    const config = testConfig(db.url, { vaultDir, skillsDir: path.join(vaultDir, 'skills'), projectDbUrl: 'not-a-url' })
+    const storage = await openStorage(db.url, { projectId: TEST_PROJECT_ID })
+    const log = storage.events
+    const kernel = new Kernel(log)
+    await seedTestWorkspace(log, realpathSync(config.dir))
+    const { host, hub } = await buildPlugins(config)
+    host.providers.set('fake', fakeProvider)
+
+    const warns: string[] = []
+    spyOn(console, 'warn').mockImplementation((...a: unknown[]) => { warns.push(a.join(' ')) })
+    const port = await buildRuntime({ host, hub, config, storage, kernel })
+    mock.restore()
+    // Shut down HERE in `finally`, not via the shared `cleanup` array: DBOS launch is
+    // process-global, and the degraded-memory test below builds its own runtime.
+    try {
+      const named = warns.filter(w => w.includes(ROLE_SKILL.finisher))
+      // ONE line, not one per caller of the index: a repeated warning reads as a repeated fault
+      expect(named).toHaveLength(1)
+      // the skill, where it was looked for, and the command that fixes it — a warning an operator
+      // cannot act on is one they learn to scroll past
+      expect(named[0]).toContain(config.skillsDir)
+      expect(named[0]).toContain('orc init')
+      // every shipped role skill is missing here, so each gets its own line — the finish step is
+      // not the only kernel-appended step that declares one
+      for (const skill of Object.values(ROLE_SKILL)) expect(warns.some(w => w.includes(skill))).toBe(true)
     } finally {
       await port.shutdown()
       await log.close()
@@ -165,6 +237,12 @@ describe('buildRuntime degraded memory', () => {
       skillsDir: path.join(vaultDir, 'skills'),
       projectDbUrl: 'not-a-url', // malformed on purpose: createMemory must throw, runtime must degrade
     })
+    // Seeded the way `orc init` seeds a real project: the kernel appends a finish step declaring
+    // ROLE_SKILL.finisher to every root plan, and a temp skills dir that nothing seeds fails the
+    // run at step init with "unknown skill 'role-finisher'". ONE seeder (shipped-skills.ts) — a
+    // harness pointing at the repo's own vault instead would hide exactly the case where orc ships
+    // a skill no project has yet.
+    seedShippedSkills(config.skillsDir)
     const storage = await openStorage(db.url, { projectId: TEST_PROJECT_ID })
     const log = storage.events
     const kernel = new Kernel(log)
@@ -181,6 +259,10 @@ describe('buildRuntime degraded memory', () => {
     cleanup.push(() => log.close(), () => port.shutdown())
     mock.restore()
     expect(warns.filter(w => w.includes('memory unavailable; continuing in degraded mode'))).toHaveLength(1)
+    // ...and the role-skill pre-flight stays SILENT here: this harness seeds the shipped set the
+    // way `orc init` does, and a warning that fires for a correctly seeded project is noise an
+    // operator learns to ignore — which is how the real one would then get missed.
+    expect(warns.filter(w => w.includes(ROLE_SKILL.finisher))).toEqual([])
 
     const t = await kernel.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'degraded run', spec: 'still executes' })
     await kernel.proposePlan(t.id, draftFixture([stepFixture()]))
@@ -207,6 +289,12 @@ describe('status memory health', () => {
     const vaultDir = mkdtempSync(path.join(tmpdir(), 'orc-rt-status-'))
     const projectDbName = `t_${Math.random().toString(36).slice(2, 10)}`
     const config = testConfig(db.url, { vaultDir, skillsDir: path.join(vaultDir, 'skills'), projectDbName })
+    // Seeded the way `orc init` seeds a real project: the kernel appends a finish step declaring
+    // ROLE_SKILL.finisher to every root plan, and a temp skills dir that nothing seeds fails the
+    // run at step init with "unknown skill 'role-finisher'". ONE seeder (shipped-skills.ts) — a
+    // harness pointing at the repo's own vault instead would hide exactly the case where orc ships
+    // a skill no project has yet.
+    seedShippedSkills(config.skillsDir)
     surrealBases.push(config)
     const log = (await openStorage(db.url, { projectId: TEST_PROJECT_ID })).events
     const kernel = new Kernel(log)

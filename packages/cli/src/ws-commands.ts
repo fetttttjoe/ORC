@@ -55,7 +55,7 @@ export function wsCommand(deps: {
     if (!deps.project) throw new Error('ws commands need a project context')
     return deps.project
   }
-  const needConfig = (): Pick<OrcConfig, 'dir' | 'projectRoot' | 'trunkBranch'> => needProject().config
+  const needConfig = (): Pick<OrcConfig, 'dir' | 'projectRoot' | 'trunkBranch' | 'workspaceSetup'> => needProject().config
 
   ws.command(`${WS_SUBCOMMAND.new} <title>`)
     .description('create a git worktree + branch for one request under .orc/worktrees, record it as a workspace, and draft the request as its first task')

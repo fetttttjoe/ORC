@@ -38,9 +38,11 @@
     return gate.question.replace(/^Q:\s*/, '')
   })
 
-  // only the grounded plan step's question earns one-click approve: it is the one place the
-  // kernel reads the answer as more than plain text (it freezes the plan the human just saw)
-  const isApprovalGate = $derived(gate.stepId === STEP_ID.plan)
+  // the grounded plan step's question earns one-click approve: it is the one place the kernel
+  // reads the answer as more than plain text (it freezes the plan the human just saw); the
+  // kernel-appended finish step reads the same approval word too — "record the decision (if
+  // any) and finish" — so it gets the button as well
+  const isApprovalGate = $derived(gate.stepId === STEP_ID.plan || gate.stepId === STEP_ID.finish)
 
   async function send(answer: string): Promise<void> {
     if (!answer || busy) return

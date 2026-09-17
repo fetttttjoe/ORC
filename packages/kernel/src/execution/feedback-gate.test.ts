@@ -1,12 +1,12 @@
 import { afterAll, beforeAll, describe, expect, it } from 'bun:test'
 import {
-  EVENT_KIND, PAYLOAD_SCHEMAS, SIGNAL_OUTCOME, TASK_STATUS,
+  EVENT_KIND, FINISH_STEP_ID, PAYLOAD_SCHEMAS, SIGNAL_OUTCOME, TASK_STATUS,
   type AgentExecutor, type EventDraft, type ExecutorContext, type SplitResult, type UnifiedEvent,
 } from '@orc/contracts'
 import { draftFixture, stepFixture } from '@orc/contracts/fixtures'
 import { openStorage } from '../storage'
 import { Kernel } from '../kernel'
-import { createTestDb, fakeProvider, seedTestWorkspace, TEST_PROJECT_ID, TEST_WORKSPACE_ID, testConfig, waitFor } from '../test-helpers'
+import { createTestDb, fakeProvider, fakeSkills, seedTestWorkspace, TEST_PROJECT_ID, TEST_WORKSPACE_ID, testConfig, waitFor } from '../test-helpers'
 import { createDbosPort, dbosSend, type DbosPort } from './dbos-port'
 
 // what the executor observed as the resumed value of the feedback yield
@@ -18,8 +18,15 @@ function feedbackFake(): AgentExecutor<unknown> {
   return {
     id: 'feedback-fake',
     async *startTurn(ctx: ExecutorContext<unknown>): AsyncGenerator<UnifiedEvent, void, SplitResult[] | string | undefined> {
-      const answer = yield { type: 'feedback', question: 'analyze the codebase?', topic: 'consent', toolCallId: 'c1' }
-      seen.push(String(answer))
+      // The kernel appends a finish step to every root plan, and it runs this same fake executor.
+      // It must NOT open a second gate: nobody answers it, so the run would park forever and this
+      // file's subject — the ONE scripted question and the text it resumes with — would never be
+      // reached. It signals success straight away instead.
+      let answer = 'finished'
+      if (ctx.step.id !== FINISH_STEP_ID) {
+        answer = String(yield { type: 'feedback', question: 'analyze the codebase?', topic: 'consent', toolCallId: 'c1' })
+        seen.push(answer)
+      }
       const summary = `got:${answer}`
       const signal = { stepId: ctx.step.id, runToken: ctx.runToken, outcome: SIGNAL_OUTCOME.success, summary }
       await ctx.checkpoint('signal:1', async () => signal, (): EventDraft[] => [
@@ -46,7 +53,7 @@ describe('durable conversational gate (feedback)', () => {
     await seedTestWorkspace(log)
     const config = testConfig(db.url)
     port = await createDbosPort({
-      storage, config,
+      storage, config, skills: fakeSkills,
       providers: new Map([['fake', fakeProvider]]),
       executors: new Map([['feedback-fake', feedbackFake()]]),
     })
@@ -77,5 +84,8 @@ describe('durable conversational gate (feedback)', () => {
     const completed = (await kernel.eventsFor(t.id)).find(e => e.kind === EVENT_KIND.step_completed)
     expect(PAYLOAD_SCHEMAS.step_completed.parse(completed!.payload).summary).toContain('got:yes')
     expect((await kernel.getTask(t.id))?.status).toBe(TASK_STATUS.done)
-  })
+    // 30s, the budget the other gate tests (continuation.test.ts) use: the run is two DBOS step
+    // workflows now — the scripted step and the kernel's appended finish step — and bun's default
+    // 5s timed out on the second one while the gate itself worked.
+  }, 30_000)
 })

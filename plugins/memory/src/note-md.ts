@@ -23,7 +23,7 @@ const linksOf = (links: MemoryLink[], kind: MemoryLink['kind']): string =>
 // human-facing field — the vault projection has never rendered it.
 type RenderedField =
   | 'id' | 'scope' | 'title' | 'tier'                                  // frontmatter identity
-  | 'kind' | 'categories'                                              // semantic tier, spread when present
+  | 'kind' | 'status' | 'categories'                                   // semantic tier, spread when present
   | 'retention' | 'sourceRevision'                                     // frontmatter provenance
   | 'tags' | 'links'                                                   // frontmatter + the body link sections
   | 'paths'                                                            // spread when present
@@ -63,6 +63,9 @@ export function renderNoteFile(note: MemoryNote, view?: WorkspaceView): string {
     type: 'memory',
     id: note.id, scope: note.scope, title: note.title, tier: note.tier,
     ...(n.kind !== undefined && { kind: n.kind }),
+    // only a decision has one; spread rather than written as `status: null`, so the key's presence
+    // in a vault file is itself the signal that a lifecycle governs this note
+    ...(n.status !== undefined && { status: n.status }),
     retention: note.retention, sourceRevision: note.sourceRevision,
     ...(n.categories !== undefined && { categories: n.categories }),
     tags: note.tags, links: note.links,

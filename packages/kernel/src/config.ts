@@ -83,6 +83,11 @@ const settingsSchema = (dir: string, projectRoot: string) =>
     // criteria like "tests green" are structurally unverifiable by every step: implementers
     // ship unexecuted tests and an honest auditor can only refuse to certify.
     execAllowlist: z.array(z.string().min(1)).default([]),
+    // ONE argv `orc ws new` runs inside the fresh worktree before recording it (e.g. ["bun",
+    // "install", "--frozen-lockfile"]). `git worktree add` yields the tracked tree and nothing
+    // else: the first run in such a tree spent $1.92 and parked because `bun test` could not
+    // resolve a workspace package and `bun install` was not on the exec allowlist.
+    workspaceSetup: z.array(z.string().min(1)).default([]),
     // append the commit step to every frozen grounded plan: the run commits its own diff and
     // restamps the notes it wrote (the truthful-stamp pipeline). Default off like every capability
     // gate here — committing an operator's repo is an outward action they opt into.
@@ -105,10 +110,30 @@ const settingsSchema = (dir: string, projectRoot: string) =>
     projectDbPassword: z.string().default('orc'),
     costOverrides: z.record(z.string(), z.record(z.string(), ModelCost)).default({}),
     vaultDir: z.string().default(path.join(projectRoot, 'vault')).transform(p => path.resolve(projectRoot, p)),
-    skillsDir: z.string().optional().transform(p => (p === undefined ? undefined : path.resolve(projectRoot, p))),
+    // TREE-scoped, unlike the vault it sits inside: `vault/skills` is TRACKED SOURCE (the
+    // .gitignore exception for authored content), so it moves with the branch, while the vault
+    // PROJECTION (memory/, tasks/) is one per project and rebuilt from the log. Resolved against
+    // `dir` — the checkout being worked in — not projectRoot. Measured: from a linked worktree this
+    // gave the MAIN checkout's path, so a branch that ADDS a role skill could not run its own
+    // plans; every step declaring it failed with "unknown skill 'role-finisher'" until the branch
+    // merged. Same rule as the drift probe and the commit tool, which also read the working tree.
+    skillsDir: z.string().optional().transform(p => (p === undefined ? undefined : path.resolve(dir, p))),
     extensions: z.array(z.string()).default([]),
     mcpServers: z.record(z.string().regex(MCP_SERVER_ID_RE), McpServerConfig).default({}),
   })
+
+// The vault directory as THIS checkout sees it, for deriving the tree-scoped skills dir.
+// Re-rooting is only sound while the vault lives INSIDE the repository, which is the default
+// (<projectRoot>/vault) and every in-repo override (kb/). A vault the operator put elsewhere is ONE
+// directory for every checkout — and so are the skills in it — so it is returned unchanged.
+// Measured, both mis-rootings this guard removes: vaultDir '/srv/orc-vault' became
+// '<worktree>/srv/orc-vault', and '../shared-vault' became '<worktree>/../shared-vault'. Neither
+// path was named by anyone. (`path.relative` answers with an ABSOLUTE path across drives, hence
+// both terms.)
+const reRootedVault = (dir: string, projectRoot: string, vaultDir: string): string => {
+  const rel = path.relative(projectRoot, vaultDir)
+  return rel.startsWith('..') || path.isAbsolute(rel) ? vaultDir : path.join(dir, rel)
+}
 
 // container reality: `VAR=` (empty) counts as unset, not as a value
 const envOverrides = (): Record<string, string> => {
@@ -292,7 +317,10 @@ export function loadConfig(explicitDir?: string): OrcConfig {
     redactEnv: [...new Set([...parsed.data.redactEnv, ...mcpSecretEnvNames(parsed.data.mcpServers)])],
     dir,
     projectRoot,
-    skillsDir: parsed.data.skillsDir ?? path.join(parsed.data.vaultDir, 'skills'),
+    // the vault's own RELATIVE location, re-rooted in this checkout: in a main checkout
+    // dir === projectRoot, so this is byte-identical to <vaultDir>/skills (including a vaultDir
+    // override such as kb/); in a worktree it is <worktree>/vault/skills. See the schema field.
+    skillsDir: parsed.data.skillsDir ?? path.join(reRootedVault(dir, projectRoot, parsed.data.vaultDir), 'skills'),
     appVersion: APP_VERSION,
   }
 }

@@ -17,7 +17,7 @@ import {
   type AgentExecutor, type EventDraft, type ExecutorContext, type SplitResult, type UnifiedEvent,
 } from '@orc/contracts'
 import { openStorage } from '../storage'
-import { fakeProvider, testConfig, TEST_PROJECT_ID } from '../test-helpers'
+import { fakeProvider, fakeSkills, testConfig, TEST_PROJECT_ID } from '../test-helpers'
 import { createDbosPort } from './dbos-port'
 
 const [dbUrl, taskId, markerDir] = process.argv.slice(2)
@@ -71,7 +71,7 @@ const log = storage.events
 // in plan order and the recovery divergence this fixture exists to catch never arises.
 const config = testConfig(dbUrl, { concurrency: 4 })
 const port = await createDbosPort({
-  storage, config,
+  storage, config, skills: fakeSkills,
   providers: new Map([['fake', fakeProvider]]),
   executors: new Map([['api-loop', scheduled]]),
 })

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test'
-import { AUTO_HEAL_MODE } from '@orc/contracts'
+import { AUTO_HEAL_MODE, STRATEGY } from '@orc/contracts'
 import { AUTO_SWEEP_TITLE, createAutoHeal, sweepPlanDraft, type AutoHealDeps } from './auto-heal'
 
 // A hand-cranked scheduler: the debounce contract is about WHICH calls collapse, not wall-clock,
@@ -115,5 +115,10 @@ describe('sweepPlanDraft', () => {
     // the knob is the whole point: the general default (60) over-provisioned every sweep, and a
     // sweep that genuinely needs more signals 'partial' and continues under runtime grants
     expect(s.maxIterations).toBe(15)
+    // EXEMPT from the kernel's finish step: the sweep is machine-drafted maintenance, not a
+    // request, and a finish step would park it on a human who never asked for it. The strategyRef
+    // is how the kernel knows (FINISH_EXEMPT_STRATEGIES) — nothing else distinguishes this draft
+    // from an operator's quick task.
+    expect(draft.strategyRef).toBe(STRATEGY.sweep)
   })
 })

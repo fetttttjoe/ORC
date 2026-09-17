@@ -30,10 +30,14 @@ export const PlanStep = z.object({
 export type PlanStep = z.infer<typeof PlanStep>
 
 // matched values, never scattered literals: routing keys the runtime and M5a split path share.
-export const STRATEGY = { groundedPlan: 'grounded-plan', split: 'split', single: 'template:single' } as const
+// `sweep` names the auto-heal reactor's machine-drafted maintenance plan (cli/auto-heal.ts). It is
+// its own strategy for exactly one reason: the kernel exempts it from the appended finish step
+// (FINISH_EXEMPT_STRATEGIES) — a plan nobody requested must never park on a human it never asked —
+// and nothing else in a one-step draft distinguishes it from an operator's quick task.
+export const STRATEGY = { groundedPlan: 'grounded-plan', split: 'split', single: 'template:single', sweep: 'template:sweep' } as const
 
 // step-id vocabulary lives in step-ids.ts (zero-import: the browser and every plugin need it)
-export { STEP_ID, VERIFY_STEP_ID, COMMIT_STEP_ID, MASTERPLAN_NOTE_ID, type StepId } from './step-ids'
+export { STEP_ID, VERIFY_STEP_ID, COMMIT_STEP_ID, FINISH_STEP_ID, MASTERPLAN_NOTE_ID, type StepId } from './step-ids'
 import { STEP_ID, VERIFY_STEP_ID, MASTERPLAN_NOTE_ID } from './step-ids'
 
 // Step roles the system gives meaning to. `PlanStep.role` stays an open string on purpose — an
@@ -44,6 +48,9 @@ export const STEP_ROLE = {
   // kernel-set only (withCommitStep): a planner note named 'commit' freezes as implementer, so the
   // git_commit gate's role term keeps it unarmed.
   committer: 'committer',
+  // kernel-set only (withFinishStep), same reasoning as committer: it arms task_notes/record_decision
+  // on the appended finish step and nowhere a planner or split could claim it.
+  finisher: 'finisher',
 } as const
 
 /**
@@ -58,13 +65,20 @@ export const STEP_ROLE = {
 export const stepMayVerify = (p: { stepId: string; role: string }): boolean =>
   p.role === STEP_ROLE.auditor && p.stepId !== STEP_ID.plan
 
+// The finish step's gate — BOTH terms, like the commit gate: the finisher role is kernel-set
+// (withFinishStep, enforced by proposeSplit's reserved-role refusal), so a planner-authored step
+// named 'finish' never arms task_notes/record_decision, and the role alone would arm them on a
+// step a split claimed. Shared by every gate that keys on the finish step so they cannot drift.
+export const stepMayReconcile = (p: { stepId: string; role: string }): boolean =>
+  p.stepId === STEP_ID.finish && p.role === STEP_ROLE.finisher
+
 // The shipped skills carrying each kernel-appended role contract: auditor+heal prose on the
-// verify step, the commit contract on the commit step. Named here because the freeze (kernel)
-// appends the refs and `orc init` (cli) seeds the files — a literal spelled twice would drift.
-// The PROSE lives in vault/skills/<name>/SKILL.md, operator-editable and audited via
-// skill_loaded content-hash events; the kernel owns only WHICH steps carry them, so a planner
-// can neither author nor remove a role contract.
-export const ROLE_SKILL = { auditor: 'role-auditor', committer: 'role-committer' } as const
+// verify step, the commit contract on the commit step, the finish contract on the finish step.
+// Named here because the freeze (kernel) appends the refs and `orc init` (cli) seeds the files —
+// a literal spelled twice would drift. The PROSE lives in vault/skills/<name>/SKILL.md,
+// operator-editable and audited via skill_loaded content-hash events; the kernel owns only WHICH
+// steps carry them, so a planner can neither author nor remove a role contract.
+export const ROLE_SKILL = { auditor: 'role-auditor', committer: 'role-committer', finisher: 'role-finisher' } as const
 
 // Which `author.source` values satisfy the grounded plan-approval gate (Kernel.approvedPlanHash).
 // OPERATOR-owned, and deliberately a file edit in .orc/config.json rather than anything a prompt

@@ -1,7 +1,10 @@
 import { describe, expect, it } from 'bun:test'
-import { COMMIT_STEP_ID, EVENT_KIND, LINK_KIND, ROLE_SKILL, STEP_ROLE, type EventRecord, type MemoryLink, type PlanNote } from '@orc/contracts'
+import { COMMIT_STEP_ID, EVENT_KIND, FINISH_STEP_ID, LINK_KIND, ROLE_SKILL, STEP_ROLE, type EventRecord, type MemoryLink, type PlanNote } from '@orc/contracts'
 import { TEST_WORKSPACE_ID, planNoteFixture, stepFixture } from '@orc/contracts/fixtures'
-import { foldPlanNotes, groundedPlanOmission, instantiateFrozenPlan, planGraphHash, planScope, withCommitStep } from './grounded-plan'
+import { foldPlanNotes, freezePlan, groundedPlanOmission, instantiateFrozenPlan, planGraphHash, planScope, withCommitStep } from './grounded-plan'
+// the appender lives in the pure module now (finish-step.ts, contracts-only imports); this describe
+// stays here because its subject is what the FREEZE ends with, not the appender in isolation
+import { withFinishStep } from '../../finish-step'
 
 const note = (over: Partial<PlanNote> & { id: string }): PlanNote =>
   planNoteFixture({ scope: 'plan-t', title: over.id, ...over })
@@ -369,5 +372,52 @@ describe('withCommitStep', () => {
     const verify = frozen().steps.find(s => s.id === 'verify')!
     expect(verify.skillRefs).toEqual([ROLE_SKILL.auditor])
     expect(frozen().steps.find(s => s.id === 'db')!.skillRefs).toEqual([])
+  })
+})
+
+describe('withFinishStep', () => {
+  // the same three notes withCommitStep's describe freezes — duplicated rather than shared, so a
+  // change to one describe's fixture cannot silently retune the other's assertions
+  const frozen = () => instantiateFrozenPlan('masterplan', [
+    note({ id: 'masterplan', links: [link('db', LINK_KIND.decomposes_into), link('verify', LINK_KIND.decomposes_into)] }),
+    note({ id: 'db', body: 'do it' }),
+    note({ id: 'verify', body: 'check it', dependsOn: ['db'] }),
+  ])
+  const notes = (): PlanNote[] => [
+    note({ id: 'masterplan', links: [link('db', LINK_KIND.decomposes_into), link('verify', LINK_KIND.decomposes_into)] }),
+    note({ id: 'db', body: 'do it' }),
+    note({ id: 'verify', body: 'check it', dependsOn: ['db'] }),
+  ]
+
+  it('appends the kernel-owned finish step after every sibling, and the commit step after it', () => {
+    const draft = withCommitStep(withFinishStep(frozen()))
+    expect(draft.steps.map(s => s.id)).toEqual(['db', 'verify', FINISH_STEP_ID, COMMIT_STEP_ID])
+    const finish = draft.steps.find(s => s.id === FINISH_STEP_ID)
+    expect(finish).toEqual({
+      id: FINISH_STEP_ID, role: STEP_ROLE.finisher, title: 'Finish',
+      instructions: "Reconcile this task's notes, record its decision if it made one, and present the summary; the 'role-finisher' skill is your contract.",
+      dependsOn: ['db', 'verify'], skillRefs: [ROLE_SKILL.finisher], toolRefs: [], zone: [], readOnlySource: true,
+    })
+    // the commit stamp must see reconciled notes, so it waits on the finish step too
+    expect(draft.steps.at(-1)?.dependsOn).toEqual(['db', 'verify', FINISH_STEP_ID])
+  })
+
+  it('freezePlan always carries the finish step, with or without autoCommit', () => {
+    expect(freezePlan('masterplan', notes(), { autoCommit: false }).steps.map(s => s.id)).toEqual(['db', 'verify', FINISH_STEP_ID])
+    expect(freezePlan('masterplan', notes(), { autoCommit: true }).steps.map(s => s.id)).toEqual(['db', 'verify', FINISH_STEP_ID, COMMIT_STEP_ID])
+  })
+
+  // the blank-plan refusal (instantiateFrozenPlan) stays AHEAD of the append: a childless masterplan
+  // must never freeze to a finish-only pipeline that asks the human to summarize nothing — the same
+  // silent-failure shape the commit-only pipeline had (incidents c4bc1d38, 8b5e1034)
+  it('never turns a childless masterplan into a finish-only pipeline — the blank-plan refusal comes first', () => {
+    expect(() => freezePlan('masterplan', [note({ id: 'masterplan', title: 'M', links: [] })], { autoCommit: false })).toThrow(/decomposes_into/)
+  })
+
+  it('refuses a plan that already names finish', () => {
+    const first = frozen().steps[0]
+    if (!first) throw new Error('fixture must freeze at least one step')
+    const clash = { steps: [...frozen().steps, { ...first, id: FINISH_STEP_ID, dependsOn: [] }] }
+    expect(() => withFinishStep(clash)).toThrow(/finish/)
   })
 })

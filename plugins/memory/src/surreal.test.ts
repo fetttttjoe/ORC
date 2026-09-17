@@ -1,6 +1,6 @@
 import { afterAll, describe, expect, it } from 'bun:test'
 import { RecordId, Surreal } from 'surrealdb'
-import { claimId, EVENT_KIND, LINK_KIND, MEMORY_ACCESS, MEMORY_USE, MemoryScope, PROJECT_NAME_NOTE_ID, isRecord, type AccessVia, type EventKind, type EventRecord, type MemoryAccessMode, type MemoryAuthor, type MemoryNote, type MemoryUseOutcome, type NoteView } from '@orc/contracts'
+import { claimId, DECISION_STATUS, EVENT_KIND, LINK_KIND, MEMORY_ACCESS, MEMORY_USE, MemoryScope, NOTE_KIND, PROJECT_NAME_NOTE_ID, isRecord, type AccessVia, type EventKind, type EventRecord, type MemoryAccessMode, type MemoryAuthor, type MemoryNote, type MemoryUseOutcome, type NoteView } from '@orc/contracts'
 import { SurrealMemory } from './surreal'
 import { TEST_WORKSPACE_ID, eventFixture } from '@orc/contracts/fixtures'
 import { createTestSurreal } from './test-helpers'
@@ -55,6 +55,22 @@ describe('SurrealMemory.applyEvent', () => {
     expect(got?.createdBy).toBe('cli')            // unchanged
     expect(got?.updatedBy).toBe('api-loop·opus·review')
     expect(got?.summary).toBe('rotate on use')
+  })
+
+  // The persistence leg of a decision's status is guarded only by ENUMERATION at compile time —
+  // ProjectionCoversTiers proves the column exists, ToNoteCoversTiers proves the key appears in the
+  // mapping — and neither proves a value survives the trip. Delete the upsert spread or toNote's
+  // `status:` and both guards, typecheck and every other test stay green while a decision's
+  // lifecycle state vanishes from the read model and from every vault file rendered off it. That is
+  // exactly the leak budget.ts's FitterCoversNote comment records ("dependsOn was listed and still
+  // leaked"); only a real round trip against Surreal can fail on it.
+  it("carries a decision's status through the projection, and reads none back on a note without one", async () => {
+    const t = await createTestSurreal(); drops.push(t.drop)
+    const m = await openMemory(t)
+    await m.applyEvent(written(1, note({ id: 'adr-1', kind: NOTE_KIND.decision, status: DECISION_STATUS.proposed })))
+    await m.applyEvent(written(2, note()))   // the default fixture is kind 'fact' — it may carry none
+    expect(view(await m.get('adr-1', 'project'))?.status).toBe(DECISION_STATUS.proposed)
+    expect(view(await m.get('auth', 'project'))?.status).toBeUndefined()
   })
 
   // list() used to push the category predicate into the surqlize builder, where `.contains` on an

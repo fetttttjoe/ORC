@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto'
 import { COMMIT_STEP_ID, deriveNoteProvenance, EVENT_KIND, LINK_KIND, MemoryDeletedPayload, MemoryNote, MemoryWrittenPayload, MASTERPLAN_NOTE_ID, NOTE_TIER, PAYLOAD_SCHEMAS, ROLE_SKILL, siblingOrderingMisuse, STEP_ID, STEP_ROLE, STRATEGY, VERIFY_STEP_ID, isApprovalAnswer, planScope, type ChildPlanDraft, type EventRecord, type PlanNote, type TaskNode } from '@orc/contracts'
+import { withFinishStep } from '../../finish-step'
 
 // planScope moved to contracts (one format, one place); re-exported so kernel callers keep working
 export { planScope }
@@ -229,7 +230,11 @@ export function instantiateFrozenPlan(masterId: string, notes: PlanNote[]): Chil
 // block) and the freeze itself both call this, so a human can never approve a shape the freeze
 // then silently changes.
 export function freezePlan(masterId: string, notes: PlanNote[], opts: { autoCommit?: boolean }): ChildPlanDraft {
-  const frozen = instantiateFrozenPlan(masterId, notes)
+  // instantiateFrozenPlan FIRST, and its blank-plan refusal with it: a childless masterplan must
+  // throw before anything is appended, or the append would turn `steps: []` into a finish-only
+  // pipeline that asks the human to summarize a task that wrote nothing — the same silent success
+  // the commit-only pipeline reported (incidents c4bc1d38, 8b5e1034).
+  const frozen = withFinishStep(instantiateFrozenPlan(masterId, notes))
   return opts.autoCommit ? withCommitStep(frozen) : frozen
 }
 

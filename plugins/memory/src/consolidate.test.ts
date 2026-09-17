@@ -3,7 +3,7 @@ import { LINK_KIND, MEMORY_ACCESS, MemoryNoteInput, NOTE_KIND, slugId, type Even
 import { eventFixture } from '@orc/contracts/fixtures'
 import type { EventLog } from '@orc/kernel'
 import { TEST_WORKSPACE_ID } from '@orc/kernel/test-helpers'
-import { AREA_ROOT, CONSOLIDATED_TAG, areaOf, consolidateTask, CONSOLIDATE_EXECUTOR, consolidatedNote, consolidatedNotes, isPlanChild, isSubstantive } from './consolidate'
+import { AREA_ROOT, CONSOLIDATED_TAG, areaOf, consolidateTask, CONSOLIDATE_EXECUTOR, consolidatedNote, consolidatedNotes, isPlanChild, isSubstantive, taskInfo } from './consolidate'
 
 describe('consolidatedNote', () => {
   it('promotes step outcomes into one durable project note, linked derived_from what the task read', () => {
@@ -155,8 +155,10 @@ describe('isSubstantive', () => {
   })
 })
 
-// The author the composition root hands in (runtime.ts / `orc memory consolidate`): 'agent' named
-// through `executor`, stamped with the workspace it writes from. The plugin builds none of its own.
+// The author the composition root's authorFor builds (runtime.ts / `orc memory consolidate`):
+// 'agent' named through `executor`, stamped with the writing task's workspace. Fixed to
+// TEST_WORKSPACE_ID here (via `authorFor: () => CONSOLIDATE_AUTHOR`) because these tests are not
+// about WHICH workspace gets named — see consolidate-integration.test.ts for that behaviour.
 const CONSOLIDATE_AUTHOR: MemoryAuthor = { source: 'agent', workspaceId: TEST_WORKSPACE_ID, executor: CONSOLIDATE_EXECUTOR }
 
 describe('consolidateTask provenance', () => {
@@ -184,9 +186,10 @@ describe('consolidateTask provenance', () => {
   // journaled this list came back empty, the salience gate declined, and the task left no note.
   it('a preload access is provenance, exactly like a read', async () => {
     const written: MemoryNoteDraft[] = []
+    const log = logOf([created(TASK, 'Explain heat'), accessed(TASK, 'area-memory', MEMORY_ACCESS.preload)]) as EventLog
     const note = await consolidateTask(
-      { log: logOf([created(TASK, 'Explain heat'), accessed(TASK, 'area-memory', MEMORY_ACCESS.preload)]) as EventLog, store: storeOf(written) as MemoryStore, author: CONSOLIDATE_AUTHOR },
-      TASK,
+      { log, store: storeOf(written) as MemoryStore, authorFor: () => CONSOLIDATE_AUTHOR },
+      TASK, await taskInfo(log, TASK),
     )
     expect(note).not.toBeNull()
     expect(written[0]?.links).toEqual([{ id: 'area-memory', kind: LINK_KIND.derived_from }])
@@ -205,9 +208,10 @@ describe('consolidateTask provenance', () => {
       list: async () => [],
       write: async (note, author) => { authors.push(author); return note as never },
     }
+    const log = logOf([created(TASK, 'Explain heat'), accessed(TASK, 'area-memory', MEMORY_ACCESS.preload)]) as EventLog
     const note = await consolidateTask(
-      { log: logOf([created(TASK, 'Explain heat'), accessed(TASK, 'area-memory', MEMORY_ACCESS.preload)]) as EventLog, store: store as MemoryStore, author: CONSOLIDATE_AUTHOR },
-      TASK,
+      { log, store: store as MemoryStore, authorFor: () => CONSOLIDATE_AUTHOR },
+      TASK, await taskInfo(log, TASK),
     )
     expect(note).not.toBeNull()
     expect(authors[0]).toEqual(CONSOLIDATE_AUTHOR)
@@ -217,9 +221,10 @@ describe('consolidateTask provenance', () => {
   it('an access belonging to a DIFFERENT task is not this task\'s provenance', async () => {
     const written: MemoryNoteDraft[] = []
     const other = '22222222-2222-2222-2222-222222222222'
+    const log = logOf([created(TASK, 'Explain heat'), accessed(other, 'area-memory', MEMORY_ACCESS.preload)]) as EventLog
     const note = await consolidateTask(
-      { log: logOf([created(TASK, 'Explain heat'), accessed(other, 'area-memory', MEMORY_ACCESS.preload)]) as EventLog, store: storeOf(written) as MemoryStore, author: CONSOLIDATE_AUTHOR },
-      TASK,
+      { log, store: storeOf(written) as MemoryStore, authorFor: () => CONSOLIDATE_AUTHOR },
+      TASK, await taskInfo(log, TASK),
     )
     // no provenance and no second step -> the salience gate declines, nothing is written
     expect(note).toBeNull()
@@ -234,15 +239,16 @@ describe('consolidateTask provenance', () => {
 
   it('the outcome note carries the paths the task itself wrote — the WHY layer becomes checkable', async () => {
     const written: MemoryNoteDraft[] = []
+    const log = logOf([
+      created(TASK, 'Fix the tools'),
+      accessed(TASK, 'area-memory', MEMORY_ACCESS.read),
+      wrote(TASK, 'fs_write', 'plugins/memory/src/tools.ts'),
+      wrote(TASK, 'fs_edit', 'plugins/memory/src/tools.ts'), // dup path folds to one
+      wrote('33333333-3333-3333-3333-333333333333', 'fs_write', 'packages/cli/src/main.ts'), // other task's write is not ours
+    ]) as EventLog
     await consolidateTask(
-      { log: logOf([
-          created(TASK, 'Fix the tools'),
-          accessed(TASK, 'area-memory', MEMORY_ACCESS.read),
-          wrote(TASK, 'fs_write', 'plugins/memory/src/tools.ts'),
-          wrote(TASK, 'fs_edit', 'plugins/memory/src/tools.ts'), // dup path folds to one
-          wrote('33333333-3333-3333-3333-333333333333', 'fs_write', 'packages/cli/src/main.ts'), // other task's write is not ours
-        ]) as EventLog, store: storeOf(written) as MemoryStore, author: CONSOLIDATE_AUTHOR },
-      TASK,
+      { log, store: storeOf(written) as MemoryStore, authorFor: () => CONSOLIDATE_AUTHOR },
+      TASK, await taskInfo(log, TASK),
     )
     expect(written.length).toBe(1)
     expect(written[0]?.paths).toEqual(['plugins/memory/src/tools.ts'])
@@ -251,9 +257,13 @@ describe('consolidateTask provenance', () => {
   it('a .plan. child writes nothing — the plan lane already holds its outcome', async () => {
     const written: MemoryNoteDraft[] = []
     const child = `${TASK}.plan.toolu_01xyz`
+    // consolidateOnCompletion always resolves before calling consolidateTask, even for a plan
+    // child (retireStepTrail still needs it) — so this test resolves too, to pin that the
+    // plan-child short-circuit wins even when a real TaskInfo was handed in.
+    const log = logOf([created(child, 'Author the plan'), accessed(child, 'area-memory', MEMORY_ACCESS.read)]) as EventLog
     const note = await consolidateTask(
-      { log: logOf([created(child, 'Author the plan'), accessed(child, 'area-memory', MEMORY_ACCESS.read)]) as EventLog, store: storeOf(written) as MemoryStore, author: CONSOLIDATE_AUTHOR },
-      child,
+      { log, store: storeOf(written) as MemoryStore, authorFor: () => CONSOLIDATE_AUTHOR },
+      child, await taskInfo(log, child),
     )
     expect(note).toBeNull()
     expect(written).toEqual([])

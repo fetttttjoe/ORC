@@ -3,8 +3,9 @@ import { readFileSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { PlanDraft, ROLE_SKILL, STEP_ROLE, validatePlan, VERIFY_STEP_ID } from '@orc/contracts'
-import { parseSkillMd } from '@orc/kernel'
-import { driftLine, REGROUND_HEAL_PLAN, REGROUND_PLAN, SHIPPED_SKILLS } from './main'
+import { parseSkillMd, SCOPED_CHANGES_TOOL_NAME } from '@orc/kernel'
+import { driftLine, REGROUND_HEAL_PLAN, REGROUND_PLAN } from './main'
+import { SHIPPED_SKILLS } from './shipped-skills'
 
 // The tracked shipped-skill sources (exceptions inside gitignored vault/). The role skills carry
 // contract prose the freeze used to inline as kernel constants (grounded-plan.ts); these pin the
@@ -24,7 +25,7 @@ describe('shipped skills', () => {
     const { body } = read(ROLE_SKILL.auditor)
     expect(body).toContain("if your audit finds ANY defect, signal outcome 'failure'")
     expect(body).toContain('Success means zero defects.')
-    expect(body).toContain('scoped_changes')
+    expect(body).toContain(SCOPED_CHANGES_TOOL_NAME)
     expect(body).toContain('not from a working-tree diff')
     expect(body).toContain('never licenses skipping the test/typecheck gate')
     expect(body).toContain('never excuses a defect in a file that IS in scope')
@@ -57,6 +58,20 @@ describe('shipped skills', () => {
     expect(body).toContain('Conventional Commits format')
     // C.9: guidance on type/scope fields and the importance of message clarity for the historical record
     expect(body).toContain('Type is one of fix, feat, refactor, docs, or test')
+  })
+
+  test('role-finisher pins the finish contract sentences', () => {
+    const { body } = read(ROLE_SKILL.finisher)
+    expect(body).toContain('task_notes')
+    expect(body).toContain(SCOPED_CHANGES_TOOL_NAME)
+    expect(body).toContain('memory_read')
+    expect(body).toContain('same id, whole title, summary and body')
+    expect(body).toContain('Most tasks make none')
+    expect(body).toContain("memory_search")
+    expect(body).toContain('ask_human ONCE')
+    expect(body).toContain("reply 'approve' to finish")
+    expect(body).toContain('record_decision')
+    expect(body).toContain('never edit source files')
   })
 
   // A planner froze a newline-joined zone entry (zone: ["a/**\nb.ts"]); the fence then matched no

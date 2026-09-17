@@ -3,12 +3,12 @@ import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { z } from 'zod'
-import { claimId, EVENT_KIND, MEMORY_USE, MemoryAccessedPayload, MemoryAuthor, MemoryOutcomePayload, MemoryTopicAccessedPayload, MemoryVerifiedPayload, MemoryWrittenPayload, NOTE_TIER, type AccessVia } from '@orc/contracts'
+import { claimId, EVENT_KIND, MEMORY_USE, MemoryAccessedPayload, MemoryAuthor, MemoryOutcomePayload, MemoryScope, MemoryTopicAccessedPayload, MemoryVerifiedPayload, MemoryWrittenPayload, NOTE_TIER, type AccessVia } from '@orc/contracts'
 import { gitRevision, openStorage, type EventLog } from '@orc/kernel'
 import { TEST_WORKSPACE_ID, createTestDb, TEST_PROJECT_ID, type TestDb } from '@orc/kernel/test-helpers'
 import { SurrealMemory } from './surreal'
 import { createTestSurreal } from './test-helpers'
-import { createMemoryStore } from './store'
+import { createMemoryStore, STORE_REFUSAL } from './store'
 
 const drops: (() => Promise<void>)[] = []
 // Concurrent drops with a real hook budget — the same fix and reason as surreal.test.ts's teardown:
@@ -187,6 +187,30 @@ describe('MemoryStore gateway', () => {
     const store = createMemoryStore({ log, surreal: await SurrealMemory.open(ts) })
     await expect(store.write({ id: 'Bad Id', title: 'x' }, { source: 'cli', workspaceId: TEST_WORKSPACE_ID })).rejects.toThrow()
     expect(await log.all()).toHaveLength(0)
+  })
+
+  // ARCHIVED counts as "already exists" because archiving only DELETES the read-model row
+  // (surreal.get returns null) — a caller checking existence through store.get alone would see
+  // nothing and silently resurrect the archived note (decisions.ts's recordDecision hit this
+  // before mustCreate existed). A REMOVED note (memory_deleted) is gone and may come back.
+  it('mustCreate refuses an id whose log carries a memory_written — archived counts, removed does not', async () => {
+    const pg = await createTestDb(); drops.push(pg.drop)
+    const ts = await createTestSurreal(); drops.push(ts.drop)
+    const log = await openLog(pg)
+    const store = createMemoryStore({ log, surreal: await SurrealMemory.open(ts) })
+    const author = { source: 'cli', workspaceId: TEST_WORKSPACE_ID } as const
+    // a fresh id succeeds
+    await store.write({ id: 'auth', title: 'Auth' }, author, { mustCreate: true })
+    // the same id, still live, is refused
+    await expect(store.write({ id: 'auth', title: 'Auth v2' }, author, { mustCreate: true }))
+      .rejects.toThrow(STORE_REFUSAL.exists('auth', MemoryScope.project))
+    // archived — still refused
+    await store.setArchived('auth', 'project', true, author)
+    await expect(store.write({ id: 'auth', title: 'Auth v3' }, author, { mustCreate: true }))
+      .rejects.toThrow(STORE_REFUSAL.exists('auth', MemoryScope.project))
+    // removed — the id is free again
+    await store.remove('auth', 'project', author)
+    await expect(store.write({ id: 'auth', title: 'Auth again' }, author, { mustCreate: true })).resolves.toBeDefined()
   })
 })
 

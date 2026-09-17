@@ -35,5 +35,10 @@
   },
   "memoryEmbedModel": "ollama/mxbai-embed-large",
   "maxIterations": 60,
-  "autoCommit": true
+  "autoCommit": true,
+  "workspaceSetup": [
+    "bun",
+    "install",
+    "--frozen-lockfile"
+  ]
 }

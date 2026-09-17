@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'bun:test'
-import { ChildPlanStep, Plan, PlanStep, planScope, validatePlan } from './plan'
+import { ChildPlanStep, Plan, PlanStep, ROLE_SKILL, STEP_ROLE, planScope, stepMayReconcile, stepMayVerify, validatePlan } from './plan'
+import { FINISH_STEP_ID, STEP_ID } from './step-ids'
 import { MEMORY_ID_RE } from './ids'
 import { MemoryNoteInput } from './memory'
 import { planFixture, stepFixture } from './fixtures'
@@ -172,5 +173,19 @@ describe('plan shape defects that cause races', () => {
       expect(joined).toContain("step 'x':")
       expect(joined).toContain('one glob per array entry')
     }
+  })
+})
+
+describe('the finish step predicate', () => {
+  it('arms only the kernel-appended finish step with the finisher role — both terms, like the commit gate', () => {
+    expect(stepMayReconcile({ stepId: FINISH_STEP_ID, role: STEP_ROLE.finisher })).toBe(true)
+    expect(stepMayReconcile({ stepId: FINISH_STEP_ID, role: STEP_ROLE.worker })).toBe(false)   // a planner step named finish
+    expect(stepMayReconcile({ stepId: 'wrap-up', role: STEP_ROLE.finisher })).toBe(false)     // role claimed elsewhere
+    // the two predicates never overlap: an auditor verify step is not a finish step and vice versa
+    expect(stepMayVerify({ stepId: FINISH_STEP_ID, role: STEP_ROLE.finisher })).toBe(false)
+  })
+  it('names the skill the freeze appends', () => {
+    expect(ROLE_SKILL.finisher).toBe('role-finisher')
+    expect(STEP_ID.finish).toBe('finish')
   })
 })

@@ -66,6 +66,19 @@ export const shellQuote = (value: string): string => `'${value.replaceAll("'", "
 // is checked out in the worktree, so the tree goes first (pinned in kernel git.test.ts). Returns
 // the sentence describing what happened — a cleanup that itself failed is REPORTED, never
 // swallowed, because what it left behind is state the operator now has to remove by hand.
+// The configured argv, run once in the new tree; the empty argv is "no setup". stderr is what a
+// failed install says, so it travels with the exit code.
+function runWorkspaceSetup(dir: string, argv: readonly string[]): { ok: true } | { ok: false; error: string } {
+  if (argv.length === 0) return { ok: true }
+  try {
+    const r = Bun.spawnSync([...argv], { cwd: dir, stdout: 'pipe', stderr: 'pipe' })
+    if (r.exitCode === 0) return { ok: true }
+    return { ok: false, error: `exit ${r.exitCode}: ${new TextDecoder().decode(r.stderr).trim()}` }
+  } catch (err) {
+    return { ok: false, error: errorMessage(err) }
+  }
+}
+
 function rollbackWorktree(projectRoot: string, dest: string, branch: string): string {
   const removed = worktreeRemove(projectRoot, dest)
   if (!removed.ok)
@@ -124,7 +137,7 @@ export async function requireLiveWorkspace(kernel: Pick<Kernel, 'state'>, id: st
  */
 export async function createRequestWorkspace(
   kernel: Pick<Kernel, 'createWorkspace' | 'createTask'>,
-  cfg: Pick<OrcConfig, 'dir' | 'projectRoot'>,
+  cfg: Pick<OrcConfig, 'dir' | 'projectRoot' | 'workspaceSetup'>,
   input: { title: string; spec: string; base: string; task: boolean },
 ): Promise<{ workspace: Workspace; taskId: string | null; branch: string; base: string }> {
   const slug = slugId(input.title)
@@ -142,6 +155,9 @@ export async function createRequestWorkspace(
   // workspace. Left as a note rather than a guard: which way that should fail is a later decision.
   const added = worktreeAdd(cfg.projectRoot, dest, branch, base)
   if (!added.ok) throw new Error(`git worktree add failed: ${added.error}`)
+  // Setup before the record, so a tree the operator's own setup rejects is never a workspace.
+  const setup = runWorkspaceSetup(dest, cfg.workspaceSetup)
+  if (!setup.ok) throw withNote(new Error(`workspaceSetup ${JSON.stringify(cfg.workspaceSetup)} failed in ${dest}: ${setup.error}`), rollbackWorktree(cfg.projectRoot, dest, branch))
   // Act-then-record is the only order available here: git has to create the tree before there is
   // anything to record. So the window between the two is real, and a record refused inside it used
   // to leave the worktree and the orc/<slug> branch behind with nothing pointing at them — the

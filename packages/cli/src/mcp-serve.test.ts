@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { isRecord } from '@orc/contracts'
 import { buildCopilotTools, type OrcActions, type ProjectSessions } from '@orc/ui-core'
-import { unavailableMemoryTools } from '@orc/memory'
+import { MEMORY_READ_TOOLS, unavailableMemoryTools } from '@orc/memory'
 import { createTestDb, TEST_PROJECT_ID } from '@orc/kernel/test-helpers'
 import { buildServeTools, mcpApproveTool } from './mcp-serve'
 
@@ -71,6 +71,7 @@ const actionsStub = (over: Partial<OrcActions> = {}): OrcActions => ({
   approve: unsupported('approve'), run: unsupported('run'), reply: unsupported('reply'),
   retry: unsupported('retry'), annotate: unsupported('annotate'), revise: unsupported('revise'),
   writeNote: unsupported('writeNote'), deleteNote: unsupported('deleteNote'),
+  recordDecision: unsupported('recordDecision'),
   renameProject: unsupported('renameProject'), newProject: unsupported('newProject'),
   listWorkspaces: unsupported('listWorkspaces'), newWorkspace: unsupported('newWorkspace'),
   cancel: unsupported('cancel'), purgeProject: unsupported('purgeProject'), deleteProject: unsupported('deleteProject'), ...over,
@@ -129,12 +130,21 @@ describe('orc mcp serve (stdio, read slice)', () => {
     const parsed = lines.map(asRpcFrame)
     for (const p of parsed) expect(p.jsonrpc).toBe('2.0')
 
+    // The EXACT wire surface, not a subset: a `toContain` loop cannot see a tool that appeared —
+    // and the one thing this door's design rests on is that `record_decision` is the ONLY
+    // authoring tool it serves. A set, because tools/list order is the composition's, not a
+    // promise. Spelled out here rather than derived from buildCopilotTools on purpose: the parity
+    // test below proves the composition, this one proves what actually reached the client.
     const names = toolNames(parsed.find(p => p.id === 2)!.result)
-    for (const expected of ['project_status', 'task_plan', 'task_transcript', 'recent_activity',
-      'memory_search', 'memory_read', 'memory_neighbors', 'memory_topics', 'memory_recheck', 'new_request', 'propose', 'run', 'retry', 'cancel', 'approve', 'available_models',
-      'workspace_list', 'workspace_new'])
-      expect(names).toContain(expected)
-    expect(names).not.toContain('memory_write') // agents inside plans write; the driver does not
+    expect(new Set(names)).toEqual(new Set([
+      'project_status', 'task_plan', 'task_transcript', 'plan_notes', 'recent_activity', 'available_models',
+      'memory_search', 'memory_read', 'memory_neighbors', 'memory_topics', 'memory_recheck',
+      'new_request', 'workspace_list', 'workspace_new', 'record_decision',
+      'propose', 'run', 'reply', 'retry', 'cancel', 'annotate', 'revise', 'approve',
+    ]))
+    // the ONE knowledge write this door gets is the decision above: a decision has a fixed body
+    // layout and a lifecycle, a free note has neither — agents inside plans write those
+    expect(names).not.toContain('memory_write')
 
     const call = asCallResult(parsed.find(p => p.id === 3)!.result)
     expect(call.isError).toBe(false)
@@ -160,11 +170,15 @@ describe('orc mcp serve (stdio, read slice)', () => {
     const actions = actionsStub()
     const memoryTools = unavailableMemoryTools('parity-check') // full named surface, no store needed
     const served = buildServeTools({ sessions, projectId: 'p1', memoryTools, actions, autonomy: 'gated' }).map(t => t.name)
-    for (const name of Object.keys(buildCopilotTools({ sessions, actions, projectId: 'p1' })))
-      expect(served).toContain(name)
-    for (const name of ['memory_search', 'memory_read', 'memory_neighbors', 'memory_topics', 'memory_recheck'])
-      expect(served).toContain(name) // whitelist names must still exist in the memory plugin
-    expect(served).toContain('approve')
+    // EXACTLY the three contributions, no fourth: the copilot set, the memory READ whitelist (named
+    // by the owning package, so a rename there fails here rather than silently dropping a tool),
+    // and this door's own approve. A per-name `toContain` could not see a tool the composition
+    // GAINED — and "record_decision is the only authoring tool" is a claim about what is absent.
+    // listModels is passed because buildServeTools always wires it (from sessions.modelCatalog), so
+    // the copilot set it composes carries available_models; omitting it here would compare the
+    // served surface against a set the door never builds.
+    const copilot = Object.keys(buildCopilotTools({ sessions, actions, projectId: 'p1', listModels: async () => [] }))
+    expect(new Set(served)).toEqual(new Set([...copilot, ...MEMORY_READ_TOOLS, 'approve']))
     expect(served).not.toContain('memory_write')
     // nor memory_verify: verification is an AUDITOR's declaration about a step's own work, gated to
     // the verify step inside a plan (runtime.ts stepTools), so it is not part of the memory tool

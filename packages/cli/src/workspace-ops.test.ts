@@ -148,6 +148,27 @@ describe('the window between git creating a worktree and the log recording it', 
   }, 30_000)
 })
 
+describe('the setup step between git creating the worktree and the log recording it', () => {
+  it('runs the configured argv inside the new worktree', async () => {
+    const { kernel, config } = await makeOps()
+    const cfg = { ...config, workspaceSetup: ['sh', '-c', 'echo ready > setup.marker'] }
+    const r = await createRequestWorkspace(kernel, cfg, { title: 'Setup', spec: '', base: HEAD_REF, task: false })
+    expect(existsSync(path.join(r.workspace.cwd, 'setup.marker'))).toBe(true)
+  }, 30_000)
+
+  it('a failing setup names the command and its stderr, and leaves neither worktree nor record', async () => {
+    const { kernel, config } = await makeOps()
+    const cfg = { ...config, workspaceSetup: ['sh', '-c', 'echo no lockfile >&2; exit 3'] }
+    const failure = await createRequestWorkspace(kernel, cfg, { title: 'Broken setup', spec: '', base: HEAD_REF, task: true })
+      .then(() => 'no error', (e: unknown) => errorMessage(e))
+    expect(failure).toContain('workspaceSetup')
+    expect(failure).toContain('no lockfile')
+    expect(failure).toContain('exit 3')
+    expect(existsSync(path.join(config.projectRoot, '.orc', 'worktrees', 'broken-setup'))).toBe(false)
+    expect((await kernel.listWorkspaces()).some(w => w.title === 'Broken setup')).toBe(false)
+  }, 30_000)
+})
+
 // POSIX single quotes, always applied — the rule has no "only when it looks dangerous" arm, because
 // the caller cannot see the value and the one case that matters is the one nobody thought about.
 describe('shellQuote', () => {

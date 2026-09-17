@@ -2,15 +2,37 @@ import { afterAll, describe, expect, it } from 'bun:test'
 import { mkdirSync, mkdtempSync, realpathSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import { EVENT_KIND, MemoryWrittenPayload, TASK_STATUS, WORKSPACE_KIND, WORKSPACE_STATE, type ExecutionPort } from '@orc/contracts'
-import { KERNEL_ERROR_CODE, Kernel, KernelError, currentBranch, initializeProject, loadConfig, openStorage, requireProject } from '@orc/kernel'
+import { Surreal } from 'surrealdb'
+import { AUTHOR_SOURCE, DECISION_STATUS, EVENT_KIND, MemoryWrittenPayload, NOTE_KIND, TASK_STATUS, WORKSPACE_KIND, WORKSPACE_STATE, type AuthorSource, type ExecutionPort } from '@orc/contracts'
+import { KERNEL_ERROR_CODE, Kernel, KernelError, currentBranch, initializeProject, loadConfig, openStorage, projectDatabaseName, requireProject, type ProjectConfig } from '@orc/kernel'
 import { createTestDb, seedTestWorkspace, TEST_PROJECT_ID, TEST_WORKSPACE, TEST_WORKSPACE_ID, testConfig, tmpGitRepo, type TestDb } from '@orc/kernel/test-helpers'
 import { PROJECT_DIR_NOTE_ID } from '@orc/ui-core'
 import { buildOrcActions, catalogAppends, modelUniverse } from './actions'
+import { openMemory } from './memory-open'
 import { archivedRefusal } from './workspace-ops'
 
 const dbs: Array<{ drop: () => Promise<void> }> = []
-afterAll(async () => { await Promise.all(dbs.map(d => d.drop())) }, 30_000)
+// Only setupWithSurreal registers here — every other test in this file points at a dead Surreal
+// port on purpose, and a config with no database behind it has nothing to drop.
+const surrealConfigs: ProjectConfig[] = []
+afterAll(async () => {
+  await Promise.all([...dbs.map(d => d.drop()), ...surrealConfigs.map(c => dropSurrealDb(c))])
+}, 30_000)
+
+// mirrors main.test.ts's / adr-commands.test.ts's drop shape (not cross-imported per the repo's
+// no-cross-test-import convention): `use()` selects only the namespace, and the (internally
+// generated, `t_[a-z0-9]+`) db name is inlined directly, since `REMOVE DATABASE IF EXISTS
+// type::database($db)` is not a valid function path in SurrealDB v3.2.0.
+async function dropSurrealDb(config: ProjectConfig): Promise<void> {
+  const s = new Surreal()
+  await s.connect(config.projectDbUrl)
+  await s.signin({ username: config.projectDbUser, password: config.projectDbPassword })
+  await s.use({ namespace: config.projectDbNamespace })
+  // createMemory opens the project-derived name; drop base and derived alike
+  for (const name of [config.projectDbName, projectDatabaseName(config.projectDbName, config.projectId)])
+    await s.query(`REMOVE DATABASE IF EXISTS \`${name}\`;`).catch(() => {})
+  await s.close()
+}
 
 // memory_written payload parsed through its owning schema at the read boundary — never a cast
 const writtenNote = (payload: unknown): { id: string; title: string } => MemoryWrittenPayload.parse(payload).note
@@ -22,7 +44,10 @@ function stubRuntime() {
   return { ensured, ensureRuntime: async () => { ensured.count++ } }
 }
 
-async function setup(listModels?: () => Promise<string[]>) {
+// The wiring both setups share — a per-test Postgres log, one seeded workspace, and the actions
+// layer over them. ONE spelling, because the two differ in exactly one thing (whether a real memory
+// read model is behind them) and a second copy of this block would drift on the rest.
+async function openActions(opts: { listModels?: () => Promise<string[]>; via?: AuthorSource; config?: Partial<ProjectConfig> } = {}) {
   const db = await createTestDb()
   dbs.push(db)
   const storage = await openStorage(db.url, { projectId: TEST_PROJECT_ID })
@@ -34,27 +59,57 @@ async function setup(listModels?: () => Promise<string[]>) {
   // a task must name a workspace the fold has seen — one seeded record, then tasks as before
   await seedTestWorkspace(storage.events)
   const { ensured, ensureRuntime } = stubRuntime()
-  const actions = buildOrcActions({
-    kernel, ensureRuntime, listModels,
-    // newProject/renameProject/purge need only urls + storage from the plugin context; the
-    // bogus surreal url makes purge's memory rebuild report instead of hang, and the derived
-    // system-db url points at a never-created database (the common pre-first-run state)
-    plugin: {
-      config: testConfig(db.url, {
-        projectDbUrl: 'ws://127.0.0.1:1/rpc',
-        // the driver pends on unreachable endpoints, so the connect guard IS the failure path —
-        // at its 5000ms production default the designed failure cannot fit a 5s test budget
-        projectDbConnectTimeoutMs: 300,
-        vaultDir: mkdtempSync(path.join(tmpdir(), 'orc-vault-')),
-        // the project dir IS the seeded workspace's checkout: every memory write from this layer
-        // names the workspace of the directory it runs in, so a dir no workspace claims would make
-        // writeNote/deleteNote/cancel-sweep/purge refuse rather than exercise their real paths
-        projectName: 'purge-me', dir: TEST_WORKSPACE.cwd,
-      }),
-      log: storage.events, storage,
-    },
+  const config = testConfig(db.url, {
+    vaultDir: mkdtempSync(path.join(tmpdir(), 'orc-vault-')),
+    // the project dir IS the seeded workspace's checkout: every memory write from this layer
+    // names the workspace of the directory it runs in, so a dir no workspace claims would make
+    // writeNote/deleteNote/recordDecision/cancel-sweep/purge refuse rather than exercise their
+    // real paths
+    projectName: 'purge-me', dir: TEST_WORKSPACE.cwd,
+    ...opts.config,
   })
-  return { kernel, actions, ensured, url: db.url, db, storage }
+  const actions = buildOrcActions({
+    kernel, ensureRuntime, ...(opts.listModels && { listModels: opts.listModels }), ...(opts.via && { via: opts.via }),
+    plugin: { config, log: storage.events, storage },
+  })
+  return { kernel, actions, ensured, url: db.url, db, storage, config }
+}
+
+// newProject/renameProject/purge need only urls + storage from the plugin context; the bogus
+// surreal url makes purge's memory rebuild report instead of hang, and the derived system-db url
+// points at a never-created database (the common pre-first-run state)
+const setup = (listModels?: () => Promise<string[]>) => openActions({
+  ...(listModels && { listModels }),
+  config: {
+    projectDbUrl: 'ws://127.0.0.1:1/rpc',
+    // the driver pends on unreachable endpoints, so the connect guard IS the failure path —
+    // at its 5000ms production default the designed failure cannot fit a 5s test budget
+    projectDbConnectTimeoutMs: 300,
+  },
+})
+
+// …and the sibling with a LIVE throwaway Surreal database (main.test.ts's `t_<random>` shape),
+// for the one action whose behaviour is a read of the real read model: recordDecision refuses an
+// id that already exists, which the dead-port setup above could never exercise.
+// `via` is OPTIONAL because its absence is a case in its own right: the web door builds these
+// actions without one, and what it then writes is the twin of what the MCP door writes.
+async function setupWithSurreal(via?: AuthorSource) {
+  const r = await openActions({ ...(via && { via }), config: { projectDbName: `t_${Math.random().toString(36).slice(2, 10)}` } })
+  surrealConfigs.push(r.config)
+  return r
+}
+
+// `createdBy` is composed at the write (composeAuthor) and lands in the read model, never in the
+// event payload, so reading the note back is the only way to assert what a door stamped. The
+// actions layer closes its own memory, so this opens a second one over the SAME log and config.
+async function storedNote(r: Awaited<ReturnType<typeof setupWithSurreal>>, id: string) {
+  const memory = await openMemory({ log: r.storage.events, config: r.config })
+  try {
+    await memory.projector.catchUp()
+    return await memory.store.get(id)
+  } finally {
+    await memory.close()
+  }
 }
 
 describe('model validation at the action boundary', () => {
@@ -86,6 +141,38 @@ describe('writeNote/deleteNote guards', () => {
     const bare = buildOrcActions({ kernel, ensureRuntime: stubRuntime().ensureRuntime }) // no plugin
     await expect(bare.writeNote({ id: 'x', title: 'x' })).rejects.toThrow(/project context/)
   })
+})
+
+// The second (and last) knowledge-authoring door: what a driver's session decided, recorded where
+// it cannot evaporate. Attribution is the whole point of testing it HERE rather than only over the
+// lifecycle op — the op takes an author, and this layer is what decides which door and which
+// checkout that author names.
+describe('the decision door', () => {
+  it('recordDecision writes a decision attributed to the door it came through (mcp) in the serving checkout\'s workspace', async () => {
+    const r = await setupWithSurreal(AUTHOR_SOURCE.mcp)
+    expect(await r.actions.recordDecision({ title: 'From Claude', context: 'c', decision: 'd', consequences: 'q', tags: [] }))
+      .toEqual({ id: 'from-claude', status: DECISION_STATUS.accepted, superseded: null })
+    // the log is the truth this asserts against: the read model is a projection of it
+    const written = (await r.storage.events.all()).filter(e => e.kind === EVENT_KIND.memory_written).map(e => MemoryWrittenPayload.parse(e.payload))
+    expect(written.at(-1)?.author).toMatchObject({ source: AUTHOR_SOURCE.mcp, workspaceId: TEST_WORKSPACE_ID })
+    expect(written.at(-1)?.note).toMatchObject({ id: 'from-claude', kind: NOTE_KIND.decision, status: DECISION_STATUS.accepted })
+    // …and the STORED attribution, which is the half a reader sees: composeAuthor renders a bare
+    // door as itself. It read 'agent' until 2026-09-15, and createdBy is sticky across rewrites —
+    // so a misattribution here is permanent, not a display bug.
+    expect((await storedNote(r, 'from-claude'))?.createdBy).toBe(AUTHOR_SOURCE.mcp)
+  }, 30_000)
+
+  // The twin: no `via` is the WEB door, which is a terminal-equivalent surface (deps.via ?? cli).
+  // Asserted alongside the mcp case because the two must not converge — a door that cannot be told
+  // apart in the log is the attribution failure this source vocabulary exists to end.
+  it('recordDecision without a door records cli, in the log and in what a reader sees', async () => {
+    const r = await setupWithSurreal()
+    expect(await r.actions.recordDecision({ title: 'From the web', context: 'c', decision: 'd', consequences: 'q', tags: [] }))
+      .toEqual({ id: 'from-the-web', status: DECISION_STATUS.accepted, superseded: null })
+    const written = (await r.storage.events.all()).filter(e => e.kind === EVENT_KIND.memory_written).map(e => MemoryWrittenPayload.parse(e.payload))
+    expect(written.at(-1)?.author).toMatchObject({ source: AUTHOR_SOURCE.cli, workspaceId: TEST_WORKSPACE_ID })
+    expect((await storedNote(r, 'from-the-web'))?.createdBy).toBe(AUTHOR_SOURCE.cli)
+  }, 30_000)
 })
 
 describe('modelUniverse', () => {

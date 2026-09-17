@@ -10,7 +10,7 @@ import { createMemory } from '@orc/memory'
 import { createTestSurreal } from '@orc/memory/test-helpers'
 import { openStorage } from '../storage'
 import { Kernel } from '../kernel'
-import { createTestDb, seedTestWorkspace, TEST_PROJECT_ID, TEST_WORKSPACE_ID, testConfig } from '../test-helpers'
+import { createTestDb, fakeSkills, seedTestWorkspace, TEST_PROJECT_ID, TEST_WORKSPACE_ID, testConfig } from '../test-helpers'
 import { createDbosPort } from './dbos-port'
 
 // Access counts are only worth anything if they measure what AGENTS pull — the CLI path is the
@@ -57,10 +57,14 @@ describe('agent-side memory access recording (integration)', () => {
       { toolCalls: [{ toolCallId: 'c4', toolName: 'memory_neighbors', input: { seed: 'auth' } }] },
       { toolCalls: [{ toolCallId: 'c5', toolName: 'memory_neighbors', input: { seed: 'crypto', kinds: ['supersedes'] } }] },
       { toolCalls: [{ toolCallId: 'c6', toolName: 'signal', input: { outcome: 'success', summary: 'pulled context' } }] },
+      // the kernel's appended finish step runs this same scripted model: one turn that signals,
+      // pulling nothing — an exhausted script yields empty text and would loop the step to its
+      // iteration cap, blocking the run before any of the assertions below could be reached
+      { toolCalls: [{ toolCallId: 'c7', toolName: 'signal', input: { outcome: 'success', summary: 'nothing to reconcile' } }] },
     ])
 
     const port = await createDbosPort({
-      storage, config,
+      storage, config, skills: fakeSkills,
       providers: new Map([['fake', { costs: {}, languageModel: () => model }]]),
       executors: new Map([['api-loop', apiLoopExecutor()]]),
       stepTools: p => memory.bindStep({ author: { source: 'agent', workspaceId: p.workspaceId, taskId: p.taskId, stepId: p.stepId, runToken: p.runToken, executor: p.executor, model: p.model, role: p.role }, step: p.step, taskId: p.taskId, ancestorTaskIds: p.ancestorTaskIds }),

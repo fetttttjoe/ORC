@@ -582,9 +582,16 @@ covers the whole retrieval surface — title and summary too, since searchers re
 and merge-on-omit keeps a stale one verbatim. `body` and `summary` are **full replacements**: a
 partial write is a truncation, not a merge.
 
+**The finish step closes this out.** Appended to every root plan (`packages/kernel/src/finish-step.ts`),
+it reconciles the task's notes and records its decision, if it made one, before the commit step
+stamps them — so a commit only ever sees notes a human has already looked at.
+
 **Retirement is decided by evidence, never by elapsed time or coldness** (`archive.ts`, a pure
 zero-import rule table). A note is archivable only when it is superseded by a surviving note, or is
-task-scaffolding whose task has settled. Drift is explicitly *not* grounds for retirement — it is
+task-scaffolding whose task has settled. For decisions that supersession is a first-class act:
+`orc adr supersede` / `record_decision {supersedes}` write the `supersedes` link on the new note
+and `status: superseded` on the old in one operation, so a retired decision is both archivable and
+readable as retired. Drift is explicitly *not* grounds for retirement — it is
 the input to healing, and archiving a drifted note discards exactly the knowledge the heal loop
 exists to repair. An inbound link from a survivor protects a note against both, because nothing
 repairs a link left dangling at a dead id.
@@ -632,6 +639,12 @@ sequenceDiagram
   D->>L: artifact_produced* + step_completed (ONE transaction)
   L-->>U: live tail via LISTEN/NOTIFY subscription
 ```
+
+This loop repeats once per step, in the plan's dependency order. Every root plan except the
+grounded scaffold and the auto-heal sweep, and every frozen grounded pipeline, runs its own
+authored steps and then two the kernel appends rather than a planner authors: the finish step
+reconciles the task's notes and asks once, and — only under `autoCommit` — the commit step runs
+last: `… → finish → commit` (`packages/kernel/src/finish-step.ts`).
 
 ### Retrieval lanes — what a step may be handed
 
@@ -796,8 +809,21 @@ become the parent of the shared `.git`. `OrcConfig` exposes both directories a c
 
 | Directory | Reads/writes |
 |---|---|
-| `projectRoot` (main checkout) | identity, `.orc/trust.json`, `.orc/serve.log` / `.orc/serve.pid`, extensions, `vaultDir` default, `.env` fallback |
-| `dir` (checkout the command runs in) | tracked `.orc/config.json` settings, drift probe / `gitRevision` / restamp, the commit tool, grounding source, the workspace adopted at boot (and the run-`cwd` fallback when a request recorded none), a worktree-local `.env` override |
+| `projectRoot` (main checkout) | identity, `.orc/trust.json`, `.orc/serve.log` / `.orc/serve.pid`, extensions, `vaultDir` default — the vault PROJECTION is one per project, rebuilt from the log — `.env` fallback |
+| `dir` (checkout the command runs in) | tracked `.orc/config.json` settings, the skills index (`skillsDir`: tracked source, so it moves with the branch), drift probe / `gitRevision` / restamp, the commit tool, grounding source, the workspace adopted at boot (and the run-`cwd` fallback when a request recorded none), a worktree-local `.env` override |
+
+`skillsDir` defaults to the vault's own location re-rooted in the checkout (`<dir>/vault/skills`),
+and stays at `<vaultDir>/skills` when the vault sits outside the repository — a vault elsewhere is
+one directory for every checkout.
+
+**Ceiling: one skill index per supervisor process.** `createPluginHost` opens a single `SkillIndex`
+over the `skillsDir` of the checkout the supervisor itself was started in, and every step reads
+through it — the port hands one index to every run, whatever workspace that run executes in. So a
+worktree whose branch *adds* a role skill is still resolved against the supervisor's copy: the new
+skill is invisible until the supervisor is restarted from a checkout that has it, and the run fails
+naming it. The upgrade path is a per-workspace index opened from the task's own checkout, keyed the
+way the workspace's directory already is; nothing needs it while the shipped role skills are the
+only ones the kernel appends steps for.
 
 Outside git, or wherever `--git-dir` and `--git-common-dir` are equal (a main checkout and every
 subdirectory of it, a submodule, a bare repo), `projectRoot === dir` — the directory keeps its own

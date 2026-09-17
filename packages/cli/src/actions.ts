@@ -6,8 +6,10 @@ import { createRequestWorkspace, HEAD_REF, requireLiveWorkspace } from './worksp
 import { listWorkspaceHealth } from './workspace-health'
 import { seedRegistries } from './runtime'
 import { singleStepDraft } from './plan-template'
-import { createMemory, openKnowledge, orphanedNotes } from '@orc/memory'
-import { openMemory } from './memory-open'
+// aliased: the local method below is named for the capability, the import for the lifecycle op it
+// delegates to — one file cannot hold two bindings of one name
+import { createMemory, decisionDoor, openKnowledge, orphanedNotes, recordDecision as recordDecisionOp } from '@orc/memory'
+import { openMemory, withMemory } from './memory-open'
 import { PROJECT_DIR_NOTE_ID, PROJECT_NAME_NOTE_ID, type OrcActions } from '@orc/ui-core'
 import type { MemoryAuthor, Workspace } from '@orc/contracts'
 import { createVaultProjector } from '@orc/vault-projector'
@@ -373,31 +375,38 @@ export function buildOrcActions(deps: {
       if (!plugin) throw new Error('writing notes needs a project context')
       if (note.id === PROJECT_NAME_NOTE_ID || note.id === PROJECT_DIR_NOTE_ID)
         throw new Error(`'${note.id}' is a reserved ui-metadata note id`)
-      let memory: Awaited<ReturnType<typeof createMemory>> | undefined
-      try {
-        memory = await openMemory({ log: plugin.log, config: plugin.config })
+      return withMemory({ log: plugin.log, config: plugin.config }, async memory => {
         const written = await memory.store.write(note, await cliAuthor())
         // event committed — the read model heals on the next drain if this catch-up fails
         await memory.projector.catchUp().catch(() => {})
         return { id: written.id, scope: written.scope }
-      } finally {
-        await memory?.close().catch(() => {})
-      }
+      })
+    },
+
+    // The decision door. The LIFECYCLE is not here: decisions.ts owns the refusals, the slugged id
+    // and the supersession link, and `orc adr` calls the same op — a second implementation would be
+    // a second answer to what recording a decision means. What this layer owns is the author.
+    async recordDecision(input) {
+      if (!plugin) throw new Error('recording a decision needs a project context')
+      return withMemory({ log: plugin.log, config: plugin.config }, async memory => {
+        // `via` is the door: mcp for the MCP server, absent (→ cli) for the web. Never 'human' here
+        // — an agent drove this call, whoever is behind the agent; `orc adr new` is the door where a
+        // person typed it, and that one writes 'human'.
+        const author = await cwdAuthor(kernel, plugin.config.dir, deps.via ?? AUTHOR_SOURCE.cli)
+        const r = await recordDecisionOp(decisionDoor(memory), author, input)
+        return { id: r.note.id, status: r.status, superseded: r.superseded }
+      })
     },
 
     async deleteNote(id, scope) {
       if (!plugin) throw new Error('deleting notes needs a project context')
       if (id === PROJECT_NAME_NOTE_ID || id === PROJECT_DIR_NOTE_ID)
         throw new Error(`'${id}' is a reserved ui-metadata note id`)
-      let memory: Awaited<ReturnType<typeof createMemory>> | undefined
-      try {
-        memory = await openMemory({ log: plugin.log, config: plugin.config })
+      return withMemory({ log: plugin.log, config: plugin.config }, async memory => {
         await memory.store.remove(id, scope, await cliAuthor())
         await memory.projector.catchUp().catch(() => {})
         return { id }
-      } finally {
-        await memory?.close().catch(() => {})
-      }
+      })
     },
 
     async renameProject(name) {

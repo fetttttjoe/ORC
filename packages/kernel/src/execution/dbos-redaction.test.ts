@@ -8,7 +8,7 @@ import { draftFixture, stepFixture } from '@orc/contracts/fixtures'
 import { openStorage } from '../storage'
 import { Kernel } from '../kernel'
 import { deriveSystemUrl } from '../config'
-import { createTestDb, fakeProvider, seedTestWorkspace, TEST_PROJECT_ID, TEST_WORKSPACE_ID, testConfig } from '../test-helpers'
+import { createTestDb, fakeProvider, fakeSkills, seedTestWorkspace, TEST_PROJECT_ID, TEST_WORKSPACE_ID, testConfig } from '../test-helpers'
 import { createDbosPort } from './dbos-port'
 
 // set BEFORE openStorage: buildRedactor snapshots process.env when the store opens
@@ -52,7 +52,7 @@ describe('redaction covers what DBOS persists', () => {
     await kernel.approvePlan(t.id)
 
     const port = await createDbosPort({
-      storage, config: testConfig(db.url),
+      storage, config: testConfig(db.url), skills: fakeSkills,
       providers: new Map([['fake', fakeProvider]]),
       executors: new Map([['api-loop', leaker]]),
     })

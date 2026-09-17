@@ -1,11 +1,11 @@
-import { AUTHOR_SOURCE, AUTO_HEAL_MODE, errorMessage, HOOK_NAME, NOTE_TIER, TERMINAL_TASK_STATUS, type AgentExecutor, type Analyzer, type MemoryAuthor, type ModelProvider } from '@orc/contracts'
+import { AUTHOR_SOURCE, AUTO_HEAL_MODE, errorMessage, HOOK_NAME, NOTE_TIER, ROLE_SKILL, TERMINAL_TASK_STATUS, type AgentExecutor, type Analyzer, type MemoryAuthor, type ModelProvider } from '@orc/contracts'
 import { apiLoopExecutor } from '@orc/executor-api-loop'
 import { createAnthropicProvider } from '@orc/provider-anthropic'
 import { createOpenAIProvider } from '@orc/provider-openai'
 import { createOllamaProvider } from '@orc/provider-ollama'
 import { agentAnalyzer } from '@orc/analyzer-agent'
 import { createMcpHub, type McpHub } from '@orc/mcp-client'
-import { corpusDrift, CONSOLIDATE_EXECUTOR, createDriftProbe, createMemory, createMemoryLifecycle, createGroundingSource, memoryVerifyTool, notesCiting, restampToHead, unavailableStepMemory, memoryRoleFor, type BindStep, type MemoryLifecycle } from '@orc/memory'
+import { corpusDrift, CONSOLIDATE_EXECUTOR, createDriftProbe, createMemory, createMemoryLifecycle, createGroundingSource, decisionDoor, finishTools, memoryVerifyTool, notesCiting, restampToHead, unavailableStepMemory, memoryRoleFor, type BindStep, type MemoryLifecycle } from '@orc/memory'
 import { AUTO_HEAL_DEBOUNCE_MS, AUTO_SWEEP_TITLE, createAutoHeal, sweepPlanDraft } from './auto-heal'
 import { openMemory } from './memory-open'
 import { buildDistiller } from './consolidation-distiller'
@@ -62,11 +62,39 @@ export const bootPhase = async <T>(label: string, run: () => Promise<T>, into: A
 export const seedPhases = (hasSharedStorage: boolean, storageMs: number | undefined): Array<[string, number]> =>
   hasSharedStorage && storageMs !== undefined ? [['storage', storageMs]] : []
 
+/**
+ * Boot-time notice for role skills the index does not hold — one `warn` per missing skill, never a
+ * throw.
+ *
+ * The kernel APPENDS steps a planner never authored and stamps role skills onto steps it did not
+ * write: the finish step declares ROLE_SKILL.finisher, the commit step ROLE_SKILL.committer, and
+ * the grounded freeze adds ROLE_SKILL.auditor to the verify step. So a checkout whose skills dir
+ * was never seeded is already broken before anything runs — but it only said so at proposePlan
+ * ("unknown skill 'role-finisher'"), which is the right refusal at the wrong moment: a human is by
+ * then already trying to start work.
+ *
+ * A NOTICE, not a second gate. proposePlan's refusal is the enforcement and stays exactly as it is;
+ * a supervisor that would not boot over a skill no plan has asked for yet would be worse than the
+ * problem. Pure and exported so the rule is testable without launching DBOS, the same reason
+ * seedPhases above is.
+ */
+export function warnMissingRoleSkills(indexed: string[], skillsDir: string, warn: (message: string) => void): void {
+  const have = new Set(indexed)
+  for (const skill of Object.values(ROLE_SKILL)) {
+    if (!have.has(skill))
+      warn(`skill '${skill}' is not in ${skillsDir} — the kernel appends steps that need it; run 'orc init' to seed the shipped skills`)
+  }
+}
+
 export async function buildRuntime(
   shared?: { host: PluginHost; hub: McpHub; config?: ProjectConfig; storage?: Storage; storageMs?: number; kernel?: Kernel; executorId?: string },
 ): Promise<DbosPort> {
   const config = shared?.config ?? requireProject(loadConfig())
   const { host, hub } = shared ?? (await buildPlugins(config))
+  // first thing after the host exists, so the notice lands before the boot line rather than after
+  // a minute of projection catch-up — see warnMissingRoleSkills
+  warnMissingRoleSkills(host.skills.list().map(s => s.name), config.skillsDir, m => console.warn(m))
+
   // reuse the caller's storage (bin passes the kernel's) — one pool, one lifecycle. When the
   // caller already timed that open (bin.ts's openKernel path), seed the phases list with it so
   // the boot line still names 'storage' instead of the phase silently vanishing whenever
@@ -81,14 +109,6 @@ export async function buildRuntime(
   // the configured set — finalize_plan's refusal text reads it straight off the kernel
   const kernel = shared?.kernel ?? new Kernel(log, host.refValidator, host.analyzers, dbosSend, config.groundedApprovalDoors)
   log.onAppend = e => host.hooks.dispatch(HOOK_NAME.event_appended, e)
-
-  // Resolved HERE, before the memory block below, and deliberately NOT inside its try: a runtime
-  // that cannot name the workspace it serves is a wiring bug, and inside that try it would surface
-  // as "memory unavailable; continuing in degraded mode" — a silent downgrade of the whole memory
-  // subsystem for what is actually a missing boot adoption. Post-task consolidation is a WRITER,
-  // and the note it distils is durable project knowledge written from the checkout this supervisor
-  // serves, so its workspace is this directory's — not the completed task's.
-  const consolidateAuthor = await cwdAuthor(kernel, config.dir, AUTHOR_SOURCE.agent, { executor: CONSOLIDATE_EXECUTOR })
 
   // Startup order (design §8.4): projections FIRST — DBOS recovery may emit events the
   // moment it launches, and they must already be observed. Surreal failure degrades memory
@@ -117,7 +137,17 @@ export async function buildRuntime(
     // `distill` (optional, memoryConsolidateModel) upgrades the note from extractive bullets to a
     // coherent synthesis, off the agent turn budget; absent → extractive. `catchUp` flushes the
     // projection before a consolidation reads the step notes.
-    lifecycle = createMemoryLifecycle({ log, store: memory.store, author: consolidateAuthor, distill: buildDistiller(host.providers, config.memoryConsolidateModel), catchUp: () => memoryProjector.catchUp() })
+    // `authorFor` reads the WRITING TASK's workspace, never this cwd — a single cwd-resolved author
+    // built once here used to stamp every outcome note under the supervisor's own checkout, so a
+    // task that ran in a worktree consolidated as durable knowledge under the wrong workspace while
+    // its branch was still unmerged [fixed 2026-09-15]. One supervisor serves every
+    // worktree at once, the same reason stepTools below reads its author off the running task
+    // rather than off cwdAuthor.
+    lifecycle = createMemoryLifecycle({
+      log, store: memory.store,
+      authorFor: task => ({ source: AUTHOR_SOURCE.agent, executor: CONSOLIDATE_EXECUTOR, workspaceId: task.workspaceId, taskId: task.id }),
+      distill: buildDistiller(host.providers, config.memoryConsolidateModel), catchUp: () => memoryProjector.catchUp(),
+    })
     await lifecycle.start()
     bindStep = memory.bindStep
     groundingSource = createGroundingSource({ store: memory.store, dir: config.dir })
@@ -224,6 +254,12 @@ export async function buildRuntime(
       // when memory is healthy — with no store there is nothing to append to, and a tool that can
       // only ever error is one the model calls anyway, an iteration per attempt.
       ...(memoryStore ? memoryVerifyTool({ store: memoryStore, author, p }) : []),
+      // The finish step's pair: what THIS task wrote, and the one write it may make after
+      // the human approved the wording. Gated inside the factory on stepMayReconcile — both terms,
+      // so only the kernel-appended finish step arms them. `door` is null when memory is degraded so
+      // record_decision answers "unavailable" rather than vanishing: a tool that disappears reads to
+      // the model as "no decision to record". task_notes reads the LOG, which is up either way.
+      ...finishTools({ log, door: memory ? decisionDoor(memory) : null, author, p }),
       // The commit step's tool pair (autoCommit pipeline): preview the task's floor diff, commit,
       // advance the note stamps this task earned at the new HEAD. Registration is gated TWICE — on
       // config.autoCommit here (the operator's runtime switch, so a stale frozen plan cannot commit

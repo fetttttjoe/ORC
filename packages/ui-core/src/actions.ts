@@ -2,7 +2,7 @@
 // see packages/cli/src/actions.ts). Adapters (web server, future TUI) receive this interface;
 // ui-core itself never constructs one. Implementations return data and never print: each
 // adapter renders results its own way (CLI lines, web toasts).
-import type { NoteAuthoringDraft, PlanDraft, Workspace, WorkspaceWithHealth } from '@orc/contracts'
+import type { DecisionInput, DecisionStatus, NoteAuthoringDraft, PlanDraft, Workspace, WorkspaceWithHealth } from '@orc/contracts'
 
 export interface OrcActions {
   newTask(input: {
@@ -40,6 +40,13 @@ export interface OrcActions {
   // themselves. This door has no such flag (a driver asking for a workspace is asking for a
   // request), so the shape is shared with that path rather than a case this one produces.
   newWorkspace(input: { title: string; spec?: string; base?: string }): Promise<{ workspace: Workspace; taskId: string | null }>
+  // Knowledge authoring, second and last door: a DECISION made in a driver's session is exactly the
+  // knowledge that otherwise evaporates (spec §6). Deliberately narrow — memory_write stays filtered
+  // out of the MCP surface; a decision has a fixed body layout and a lifecycle, a free note has
+  // neither. Attributed to the door (`via`: mcp for the MCP server, cli for the web) in the
+  // workspace the serving process runs in. Recording is not an upsert: an existing id is refused
+  // and `supersedes` is the way a decision changes.
+  recordDecision(input: DecisionInput): Promise<{ id: string; status: DecisionStatus; superseded: string | null }>
   // `projectId` names the project to answer IN; omitted means this door's own. Answering is the one
   // human action that is not execution: the append only unblocks the parked step, and a supervisor's
   // router carries it into the workflow off feedback_provided — so unlike run/retry/propose it binds

@@ -54,6 +54,16 @@ test('an open question is unmissable, verbatim, and answerable in one click', as
   await expect(gate.getByRole('button', { name: 'approve' })).toBeVisible()
 })
 
+test('the finish step\'s question is answerable in one click too', async ({ page }) => {
+  await open(page)
+  // The kernel-appended finish step reads the same approval word as the plan gate — "record the
+  // decision (if any) and finish" — so the one-click button must be there. It is keyed on the step
+  // id, and a fixture with only a plan gate cannot tell that rule from "every gate gets a button".
+  const gate = page.getByRole('region', { name: 'open question' }).filter({ hasText: 'Reply approve to finish' })
+  await expect(gate).toContainText('Reply approve to finish')
+  await expect(gate.getByRole('button', { name: 'approve' })).toBeVisible()
+})
+
 test('an answer the kernel then REFUSES is shown, never swallowed', async ({ page }) => {
   await open(page)
   // The fixture scripts the measured failure: the reply lands, finalize_plan rejects it. Before
