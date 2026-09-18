@@ -2,13 +2,13 @@ import { afterAll, describe, expect, it } from 'bun:test'
 import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import { isRecord } from '@orc/contracts'
-import { must } from '@orc/contracts/fixtures'
+import { EVENT_KIND, isRecord } from '@orc/contracts'
+import { eventFixture, must } from '@orc/contracts/fixtures'
 import { buildCopilotTools } from '@orc/ui-core'
 import { MEMORY_READ_TOOLS, unavailableMemoryTools } from '@orc/memory'
 import { createTestDb, TEST_PROJECT_ID } from '@orc/kernel/test-helpers'
 import { buildServeTools, mcpApproveTool } from './mcp-serve'
-import { actionsStub, sessionsStub } from './test-helpers'
+import { actionsStub, sessionsOf, sessionsStub } from './test-helpers'
 
 // P7 prerequisite acceptance: under `mcp serve`, stdout carries ONLY JSON-RPC frames — one
 // stray boot print corrupts the channel. This drives a real spawned `orc mcp serve` through
@@ -160,9 +160,9 @@ describe('orc mcp serve (stdio, read slice)', () => {
     // by the owning package, so a rename there fails here rather than silently dropping a tool),
     // and this door's own approve. A per-name `toContain` could not see a tool the composition
     // GAINED — and "record_decision is the only authoring tool" is a claim about what is absent.
-    // listModels is passed because buildServeTools always wires it (from sessions.modelCatalog), so
-    // the copilot set it composes carries available_models; omitting it here would compare the
-    // served surface against a set the door never builds.
+    // listModels is passed because buildServeTools always wires it (from the models view), so the
+    // copilot set it composes carries available_models; omitting it here would compare the served
+    // surface against a set the door never builds.
     const copilot = Object.keys(buildCopilotTools({ sessions, actions, projectId: 'p1', listModels: async () => [] }))
     expect(new Set(served)).toEqual(new Set([...copilot, ...MEMORY_READ_TOOLS, 'approve']))
     expect(served).not.toContain('memory_write')
@@ -174,10 +174,13 @@ describe('orc mcp serve (stdio, read slice)', () => {
 
   // The serve door drives agents over MCP that must never invent a model ref (the copilot
   // system prompt says as much) — available_models is the copilot tool's own catalog lookup,
-  // wired through deps.sessions.modelCatalog exactly as the graph-ui door already does.
+  // answered from the models view exactly as the graph-ui door already does.
   it('available_models is served and returns the project\'s live model catalog', async () => {
     const refs = ['anthropic/claude-opus-4', 'openai/gpt-5']
-    const sessions = sessionsStub({ modelCatalog: async () => refs })
+    const sessions = sessionsOf([
+      eventFixture({ seq: 1, taskId: null, kind: EVENT_KIND.models_discovered, payload: { providerId: 'anthropic', models: ['claude-opus-4'] } }),
+      eventFixture({ seq: 2, taskId: null, kind: EVENT_KIND.models_discovered, payload: { providerId: 'openai', models: ['gpt-5'] } }),
+    ])
     const actions = actionsStub()
     const memoryTools = unavailableMemoryTools('parity-check')
     const served = buildServeTools({ sessions, projectId: 'p1', memoryTools, actions, autonomy: 'gated' })

@@ -725,14 +725,18 @@ stale approval returns a tool error before any child split.
 ## Adapters — two doors over one transport-free core
 
 Everything a user or an external agent touches goes through `@orc/ui-core`, which is
-transport-free by contract: it exposes `ProjectSessions` (live read model: snapshots,
-patches, transcripts, plans, log rows), `OrcActions` (the one mutation surface), and the
-copilot toolset. Adapters stay thin because the core does the thinking:
+transport-free by contract: it exposes `ProjectSessions` (live read model: the folded state,
+events, memory fold and graph every read is answered against, plus graph snapshots and
+per-event patches), the view registry that answers every named read over that model
+(`readView`/`viewOf` — see [the read side](#the-read-side-—-the-view-registry) below),
+`OrcActions` (the one mutation surface), and the copilot toolset. Adapters stay thin because
+the core does the thinking:
 
 ```mermaid
 graph TD
   subgraph CORE ["packages/ui-core — transport-free"]
-    SESS["sessions.ts<br/>ProjectSessions: snapshot · patches · detail · log"]
+    SESS["sessions.ts<br/>ProjectSessions: model · snapshot · patches"]
+    REG["views/registry.ts<br/>readView · viewOf · touchesOf"]
     ACT["actions.ts<br/>OrcActions (interface)"]
     CTOOLS["copilot.ts<br/>buildCopilotTools · asResolvedTools"]
   end
@@ -747,11 +751,14 @@ graph TD
 
   PAGE --> SRV
   SRV --> SESS
+  SRV --> REG
   SRV --> CTOOLS
   SRV -->|mutations| CLIA
   MSRV --> SESS
+  MSRV --> REG
   MSRV --> CTOOLS
   MSRV -->|mutations| CLIA
+  REG --> SESS
   CLIA --> ACT
   SRV -->|copilot_exchange · append| EVL[("event log")]
   SESS --> EVL
@@ -775,6 +782,70 @@ Door discipline, stated precisely:
   server's `opts.health`; the footer polls `/api/health` and shows degradation + projector
   lag within one 15s interval.
 
+## The read side — the view registry
+
+Every read the browser or an in-process caller can make is a **named view**: a pure function of
+the folded read model (`ReadModel { seq, events, state, memory, graph }`) to a result, declared
+once on the wire (`packages/ui-core/src/wire.ts`'s `ViewName` and `WIRE` — each name's param
+schema and result schema, `as const satisfies Record<ViewName, ...>` so a name added with no
+matching pair fails the build) and implemented once under `packages/ui-core/src/views/`
+(`view.ts`'s `View<N>`/`Touchable<P>` interfaces; one file per view — `timeline.ts`, `node.ts`,
+`transcript.ts`, `plans.ts`, `plan-notes.ts`, `models.ts`, `operator-state.ts`; `registry.ts`'s
+`VIEWS` table and its `ViewsCoverNames` compile-time guard, which fails the build the moment a
+name on the wire has no implementation). `health.ts` is a `Touchable` that answers no view:
+corpus health probes SurrealDB and git rather than folding the log, so it has no params/result
+pair and no `read`.
+
+**One route.** `GET /api/view/<name>?project=<id>&q=<json>` (`VIEW_ROUTE`, built by `viewPath` and
+read back by `viewParams`) answers every view through `readView` — parse params against
+`WIRE[name].params`, call the view's `read`, wrap the result in `ViewEnvelope({ seq, data })`. A
+view's own "not found" is a null `read`, answered 404; a name that is no view, or not yet
+implemented, is the same 404 the caller cannot tell apart from a typo. An in-process caller (the
+copilot's tools, the MCP door) skips the HTTP round trip and the re-parse through `viewOf`, which
+takes typed params and returns the typed result directly — a re-parse there would cost a full deep
+copy of an answer that can run to a 500-row log or a whole transcript. Adding a read costs one view
+file and one entry in `WIRE`/`VIEWS`, never a second route and never a door-specific reshaping of
+the same question.
+
+**Every payload carries `seq`, and an older-than-held payload is ignored.** A view's envelope, a
+graph snapshot, and every SSE frame carry the event position they describe. `newer()`
+(`packages/graph-ui/web/src/lib/api/seq-guard.ts`) keeps whichever of two seq-stamped view answers
+is fresher, so a fetch racing a fresher one queued behind it (an SSE touch triggering a refetch
+while an earlier request for the same key is still in flight) cannot overwrite the fresher cached
+value. `planFrame` (`packages/graph-ui/web/src/lib/frame-plan.ts`, tested with no connection in the
+loop) applies the same rule to the stream itself: an envelope whose `seq` is behind what the tab
+already holds is a **regression** — the log was reset out-of-band — and everything describing the
+graph/ledger on that frame is withheld while the caller resyncs from a fresh snapshot; `touched`
+and the pushed operator value are never withheld, because neither describes a moment the client
+could have already moved past.
+
+**The stream says which views went stale, not which rows changed.** Each `Touchable` (every view,
+plus `health`) answers `touches(event, model)` with the *param patterns* one appended event makes
+stale; `touchesOf` runs this over the whole registry and the server ships the result as the
+frame's `touched: Touch[]`. The browser holds no refresh table of its own: `view-client.ts`'s
+`viewKey`/`touchKey` key its TanStack cache by `['view', name, project, params]`, and a `touched`
+entry invalidates every held query whose params structurally contain the pattern's keys
+(TanStack's own partial match, pinned by `view-client.test.ts` against a real `QueryClient`) —
+`view-client.ts`'s 250ms trailing coalescer (built over `touch-coalesce.ts`'s generic debounce)
+folds a burst of touches on one key into one refetch. A client-side filter table would be a second
+copy of the staleness rule this scheme keeps in one place, on the server, beside each view.
+
+**Operator state is folded server-side from the whole log and pushed, never fetched.** Open
+questions (`open-questions.ts`, keyed by `(taskId, topic)` via the shared `feedbackKey`/
+`openFeedbackTopics` rule, withdrawn once the task is terminal), retryable tasks (the kernel's own
+`canRetry`, so an offered retry is one both the button and the port will accept) and planned tasks
+(`state.plans.keys()`) compose into one `OperatorState`, read by `operatorStateView` (`push: true`)
+and carried on the SSE frame's `operator` field rather than touched-and-refetched — it changes on
+almost every append, so a refetch per event would be a round trip for a value already beside the
+frame. It rides whichever frame the connection needs it on: the catch-up frame when there is one,
+else an id-less sync frame — never withheld by a seq regression, because a reconnecting tab must
+still learn which tasks are waiting on a human before any event is owed for it. `operator.svelte.ts`
+holds the last non-null value a frame carried; nothing else derives it from events, so there is one
+fold of the log to disagree with instead of two.
+
+**The rule this seam exists to keep:** a new read is a new view file, never a route, a
+client-side filter, or a browser fold.
+
 ## Responsibilities
 
 | Component | Owns | Explicitly does NOT own |
@@ -796,7 +867,7 @@ Door discipline, stated precisely:
 | `plugins/memory` | Event-first note store (gateway stamps git revision, resolved lazily), transactional Surreal projection of notes + edges + `claim` rows, stateless topic derivation (`refreshTopics`, stage 3, driven from the drain and only by drains that touched claims), per-project database boundary, hybrid (vector⊕keyword) retrieval with activation re-ranking over both notes and claims, the `StepMemory` binding (recall/capture, ambient edges), consolidation lifecycle, tri-state drift probe, evidence-based archival + cancel-time sweep, `vault/memory/**` rebuild | Being authoritative — Surreal and vault/memory are disposable. Authoring a topic: stage 3 derives them, nobody writes one |
 | `packages/vault-projector` | Deterministic markdown/mermaid renders of tasks, execution, lineage, task expansion; coalesced live re-render | Truth of any kind; whole-log scans |
 | `packages/cli` | Pre-bootstrap help/init/migrate, command surface, project discovery, startup/shutdown order, degraded-memory wiring, boot adoption of the checkout (`workspace-adopt`) and the impure half of workspace health — does the directory exist, is it clean, how much knowledge is still pending (`workspace-health`) | Business rules (kernel's job); the health state table itself (pure, in `kernel/workspaces.ts`) |
-| `packages/ui-core` | Transport-free UI core: `ProjectSessions` (live folds, graph patches, transcripts, log rows), `OrcActions` interface, the copilot toolset + `asResolvedTools` door-#2 bridge | Any transport (HTTP/SSE/stdio are adapters' jobs), any DOM |
+| `packages/ui-core` | Transport-free UI core: `ProjectSessions` (live folds, graph snapshots/patches), the view registry (`readView`/`viewOf`/`touchesOf` over `WIRE`), `OrcActions` interface, the copilot toolset + `asResolvedTools` door-#2 bridge | Any transport (HTTP/SSE/stdio are adapters' jobs), any DOM |
 | `packages/graph-ui` | Door #1: web adapter — JSON+SSE routes, CSRF-token mutations fenced to the home project, `/api/health`, copilot streaming + `copilot_exchange` journaling, browser page | Deciding what a graph or plan IS (ui-core's job) |
 | `packages/cli/mcp-serve` | Door #2: stdio MCP adapter — same toolset via `asResolvedTools`, memory read tools, the `--autonomy gated\|full` approve dial, stdout ownership | Its own tool semantics (they are the copilot's), trust/init (CLI-only, never over MCP) |
 

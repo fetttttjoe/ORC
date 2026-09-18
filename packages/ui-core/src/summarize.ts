@@ -1,25 +1,13 @@
 import { EVENT_KIND, NOTE_TIER, PAYLOAD_SCHEMAS, noteLabel, type CopilotExchangePayload, type EventRecord } from '@orc/contracts'
 import { z } from 'zod'
 import { noteNodeId } from './graph'
+import type { LogRow as WireLogRow } from './wire'
 
-export interface LogRow {
-  seq: number
-  ts: string
-  kind: string
-  taskId: string | null
-  stepId: string | null
-  line: string
-  // the task that AUTHORED a project-scoped (envelope taskId null) memory_written/memory_deleted
-  // row, read from payload.author.taskId — the same provenance graph.ts's EDGE.wrote uses. Null
-  // for every other kind (they're already attributed by the envelope taskId) and for ownerless
-  // memory rows (a human/cli-authored global note). shouldAdmitLogRow uses it to attribute a
-  // null-taskId memory row to its writing task under a per-task Log filter.
-  authorTaskId: string | null
-  noteRef: string | null // graph.ts noteNodeId(scope, id) for memory events — lets log rows link without string-parsing
-  // full exchange for copilot_exchange rows — the chat pane rebuilds real bubbles from the log
-  // (same side-channel pattern as noteRef; other consumers render `line` and ignore this)
-  exchange?: CopilotExchangePayload
-}
+// ONE declaration of the row, and it is the schema the browser parses. Held as an interface here
+// and a schema there, the two drifted: `failure` reached the browser on rows that no type on this
+// side admitted could carry it. Aliasing makes summarizeEvent fail the build the moment its output
+// stops satisfying what the wire promises a reader. Per-field WHY lives with the schema.
+export type LogRow = z.infer<typeof WireLogRow>
 
 // the one truncator — shared with copilot.ts (was duplicated there)
 export const snip = (v: unknown, n = 140): string => {

@@ -3,7 +3,7 @@
   import RunMonitor from './RunMonitor.svelte'
   import { TASK_STATUS } from '@orc/contracts/task'
   import { graph } from '$lib/stores/graph.svelte'
-  import { ledger } from '$lib/stores/ledger.svelte'
+  import { operator } from '$lib/stores/operator.svelte'
   import { session } from '$lib/stores/session.svelte'
 
   const counts = $derived.by(() => {
@@ -38,7 +38,7 @@
 
 <div class="flex shrink-0 flex-col gap-2 border-b border-line bg-ink/60 px-3 py-2">
   <div class="flex items-stretch gap-2">
-    <StatTile label="waiting" value={ledger.gates.length} temp="human" hint="open questions — the run is parked until you answer" onclick={toGates} />
+    <StatTile label="waiting" value={operator.state.openQuestions.length} temp="human" hint="open questions — the run is parked until you answer" onclick={toGates} />
     <StatTile label="running" value={counts.running} temp="machine" hint="tasks a supervisor is driving right now" />
     <StatTile label="stuck" value={counts.stuck} temp="rust" hint="blocked or failed — opens the first one" onclick={firstStuck ? toStuck : undefined} />
     <StatTile label="done" value={counts.done} temp="moss" hint="tasks that finished and committed" />

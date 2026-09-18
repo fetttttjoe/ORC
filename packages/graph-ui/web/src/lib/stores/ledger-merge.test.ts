@@ -11,6 +11,9 @@ const row = (seq: number, kind: string = EVENT_KIND.step_started, failure?: { to
   taskId: null,
   stepId: null,
   noteRef: null,
+  // nullable but not optional on the wire, so a fixture spells it too: a row that can omit it is a
+  // row the per-task filter drops without saying so
+  authorTaskId: null,
   ...(failure && { failure }),
 })
 

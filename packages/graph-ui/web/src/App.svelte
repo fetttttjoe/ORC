@@ -9,6 +9,8 @@
   import AppSidebar from '$lib/features/sidebar/AppSidebar.svelte'
   import * as SidebarUi from '$lib/components/ui/sidebar'
   import { api, setApiErrorHandler, setAuth } from '$lib/api/client'
+  import { allViewsKey, fetchView } from '$lib/api/view-client'
+  import { VIEW } from '@orc/ui-core/wire'
   import { Toaster } from '$lib/components/ui/sonner'
   import { notify } from '$lib/notify'
   import OverviewStrip from '$lib/features/overview/OverviewStrip.svelte'
@@ -16,6 +18,7 @@
   import { connectStream, type StreamHandle } from '$lib/sse'
   import { graph } from '$lib/stores/graph.svelte'
   import { ledger } from '$lib/stores/ledger.svelte'
+  import { operator } from '$lib/stores/operator.svelte'
   import { session } from '$lib/stores/session.svelte'
 
   const queryClient = new QueryClient({
@@ -43,10 +46,16 @@
       snap = await api.graph(project)
     }
     graph.setSnapshot(snap)
+    // Every view query answered before this point describes a moment this fresh snapshot has
+    // already moved past (a project switch, or a purge/seq-regression resync) — the stream ships
+    // no compensating `touched` entries for either (server.ts's reset path sends `touched: []`),
+    // so nothing else invalidates them.
+    void queryClient.invalidateQueries({ queryKey: allViewsKey() })
     // seed to the snapshot seq, attach the stream there: its catch-up frame closes any gap
-    const rows = await api.log(project, { limit: 150 })
+    const { data: rows } = await fetchView(project, VIEW.timeline, { limit: 150 })
     ledger.reset(0)
-    for (const row of rows) if (row.seq <= snap.seq) ledger.add(row)
+    operator.reset()
+    for (const row of rows ?? []) if (row.seq <= snap.seq) ledger.add(row)
     stream = connectStream({
       project,
       fromSeq: snap.seq,

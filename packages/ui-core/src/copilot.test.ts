@@ -2,10 +2,11 @@ import { describe, expect, it } from 'bun:test'
 import { generateText, stepCountIs } from 'ai'
 import { MockLanguageModelV4 } from 'ai/test'
 import type { ToolSet } from 'ai'
-import { listOf, must, planNoteFixture, recordOf } from '@orc/contracts/fixtures'
-import { DECISION_STATUS, WORKSPACE_KIND, WORKSPACE_STATE, type Workspace, type WorkspaceHealth, type WorkspaceWithHealth } from '@orc/contracts'
+import { TEST_WORKSPACE_ID, eventFixture, listOf, must, planFixture, planNoteFixture, recordOf, taskFixture } from '@orc/contracts/fixtures'
+import { AUTHOR_SOURCE, DECISION_STATUS, EVENT_KIND, WORKSPACE_KIND, WORKSPACE_STATE, type EventRecord, type PlanNote, type Workspace, type WorkspaceHealth, type WorkspaceWithHealth } from '@orc/contracts'
 import type { OrcActions } from './actions'
 import type { ProjectSessions } from './sessions'
+import { modelOf } from './test-helpers'
 import type { TranscriptItem } from './transcript'
 import { asResolvedTools, buildCopilotTools, copilotSystemPrompt } from './copilot'
 
@@ -15,12 +16,15 @@ import { asResolvedTools, buildCopilotTools, copilotSystemPrompt } from './copil
 // third suite needs it.
 const unsupported = (name: string) => async (): Promise<never> => { throw new Error(`${name} not available in this test`) }
 const sessionsStub = (over: Partial<ProjectSessions> = {}): ProjectSessions => ({
-  projects: unsupported('projects'), snapshot: unsupported('snapshot'), subscribe: unsupported('subscribe'),
+  projects: unsupported('projects'), model: unsupported('model'), snapshot: unsupported('snapshot'), subscribe: unsupported('subscribe'),
   subscribeProjects: unsupported('subscribeProjects'), notifyProjectsChanged: unsupported('notifyProjectsChanged'),
-  since: unsupported('since'), nodeDetail: unsupported('nodeDetail'), modelCatalog: unsupported('modelCatalog'),
-  reset: unsupported('reset'), transcript: unsupported('transcript'), taskPlans: unsupported('taskPlans'),
-  planNotes: unsupported('planNotes'), log: unsupported('log'), close: unsupported('close'), ...over,
+  since: unsupported('since'), reset: unsupported('reset'), close: unsupported('close'), ...over,
 })
+
+// A stub feeds the read tools EVENTS, never a canned answer per tool: a tool can then only be
+// handed a shape the fold itself can produce.
+const sessionsOf = (events: EventRecord[], over: Partial<ProjectSessions> = {}): ProjectSessions =>
+  sessionsStub({ model: async () => modelOf(events), ...over })
 const actionsStub = (over: Partial<OrcActions> = {}): OrcActions => ({
   newTask: unsupported('newTask'), propose: unsupported('propose'), edit: unsupported('edit'),
   approve: unsupported('approve'), run: unsupported('run'), reply: unsupported('reply'),
@@ -69,16 +73,18 @@ function scriptModel(turns: Array<{ text?: string; toolCalls?: Array<{ toolCallI
   })
 }
 
-const stubSessions = sessionsStub({
+// An EMPTY log behind the read tools: no plan, no conversation, no decomposition, no activity —
+// each answers its own "nothing yet", which is what the tools that do not exercise a fold need.
+const stubSessions = sessionsOf([], {
   snapshot: async () => ({
     seq: 1,
     graph: { nodes: [{ id: 't1', type: 'task', label: 'build it', detail: 'draft' }], links: [] },
   }),
-  taskPlans: async () => null,
-  transcript: async () => [],
-  planNotes: async () => ({ notes: [], mermaid: null }),
-  log: async () => [],
 })
+
+const author = { source: AUTHOR_SOURCE.cli, workspaceId: TEST_WORKSPACE_ID }
+const wrotePlanNote = (seq: number, note: PlanNote): EventRecord =>
+  eventFixture({ seq, taskId: null, kind: EVENT_KIND.memory_written, payload: { note, author } })
 
 describe('copilot tools', () => {
   it('read tools ground the model; the loop runs tool → answer', async () => {
@@ -131,21 +137,20 @@ describe('copilot tools', () => {
     expect(r3.output).toHaveProperty('memory', { state: 'unreachable', pending: 0, reason: 'surreal is down' })
   })
 
-  // `visual` is an ALLOWLIST, not a spread. The field it was built for (a mermaid diagram string)
-  // is gone, so the stub below smuggles an unknown one in its place: the point was never mermaid
-  // specifically, it is that a field added to taskPlans for the BROWSER must not silently start
-  // costing model tokens on every task_plan call.
+  // `visual` is an ALLOWLIST, not a spread: the plans view serves a BROWSER as well, and a field
+  // added there for a renderer must not silently start costing model tokens on every task_plan
+  // call. It caught exactly that once — a mermaid diagram string, re-telling the model what
+  // `waves` already says. So this pins the two keys a driver can act on, and nothing else.
   it('task_plan passes only the visual fields a driver can act on, dropping any other', async () => {
-    const withPlan = sessionsStub({
-      taskPlans: async () => ({
-        versions: [{ taskId: 't1', version: 1, strategyRef: 's', costEstimateUSD: null, steps: [] }], approvedVersion: 1,
-        visual: { version: 1, renderedForTheBrowser: 'graph TD\n a-->b', waves: [{ wave: 1, parallel: false, steps: [] }] },
-      }),
-    })
+    const withPlan = sessionsOf([
+      eventFixture({ seq: 1, taskId: 't1', kind: EVENT_KIND.task_created, payload: { task: taskFixture({ id: 't1' }) } }),
+      eventFixture({ seq: 2, taskId: 't1', kind: EVENT_KIND.plan_proposed, payload: { plan: planFixture({ taskId: 't1' }) } }),
+      eventFixture({ seq: 3, taskId: 't1', kind: EVENT_KIND.plan_approved, payload: { taskId: 't1', version: 1 } }),
+    ])
     const tools = asResolvedTools(buildCopilotTools({ sessions: withPlan, actions: null, projectId: 'p1' }))
     const r = await must(tools.find(t => t.name === 'task_plan'), 'tools.find(t => t.name === \'task_plan\')').execute({ taskId: 't1' }, undefined)
     expect(r.isError).toBe(false)
-    expect(JSON.stringify(r.output)).not.toContain('graph TD')
+    expect(Object.keys(recordOf(recordOf(r.output).visual)).sort()).toEqual(['version', 'waves'])
     expect(JSON.stringify(r.output)).toContain('"waves"')
   })
 
@@ -205,12 +210,17 @@ describe('copilot tools', () => {
 const callTool = async (tools: ToolSet, name: string, input: unknown) =>
   must(asResolvedTools(tools).find(t => t.name === name), 'asResolvedTools(tools).find(t => t.name === name)').execute(input, undefined)
 
-const toolItem = (over: Partial<Extract<TranscriptItem, { kind: 'tool' }>> = {}): TranscriptItem => ({
-  kind: 'tool', iteration: 1, stepId: 's1', toolName: 'fs_read',
-  input: { path: 'p'.repeat(600) }, output: { content: 'c'.repeat(900) }, isError: false, ...over,
-})
-const QUESTION: TranscriptItem = { kind: 'question', stepId: 's1', question: 'which cwd?'.repeat(80), answer: null }
-const SIGNAL: TranscriptItem = { kind: 'signal', stepId: 's1', outcome: 'success', summary: 'done '.repeat(120) }
+// A step's conversation as the EVENTS it is folded from: a canned item list could assert a shape
+// the fold can never produce.
+const spoke = (seq: number, kind: EventRecord['kind'], payload: Record<string, unknown>): EventRecord =>
+  eventFixture({ seq, taskId: 't1', stepId: 's1', runToken: 'r1', kind, payload })
+const calledTool = (seq: number, toolCallId: string, toolName: string, input: unknown): EventRecord =>
+  spoke(seq, EVENT_KIND.tool_call, { stepId: 's1', iteration: 1, toolCallId, toolName, input })
+const toolAnswered = (seq: number, toolCallId: string, output: unknown): EventRecord =>
+  spoke(seq, EVENT_KIND.tool_result, { stepId: 's1', iteration: 1, toolCallId, toolName: 'fs_read', output, isError: false })
+
+const QUESTION: Extract<TranscriptItem, { kind: 'question' }> = { kind: 'question', stepId: 's1', question: 'which cwd?'.repeat(80), answer: null }
+const SIGNAL: Extract<TranscriptItem, { kind: 'signal' }> = { kind: 'signal', stepId: 's1', outcome: 'success', summary: 'done '.repeat(120) }
 
 describe('workspaces at the doors', () => {
   it('workspace_new creates the workspace and its request task; workspace_list returns it', async () => {
@@ -311,9 +321,14 @@ describe('decisions at the doors', () => {
 
 describe('task_transcript (bounded for the MCP door)', () => {
   it('snips tool input/output to strings and leaves questions/signals verbatim', async () => {
-    const items = [toolItem(), QUESTION, SIGNAL]
     const tools = buildCopilotTools({
-      sessions: sessionsStub({ transcript: async () => items }), actions: null, projectId: 'p1',
+      sessions: sessionsOf([
+        calledTool(1, 'c1', 'fs_read', { path: 'p'.repeat(600) }),
+        toolAnswered(2, 'c1', { content: 'c'.repeat(900) }),
+        spoke(3, EVENT_KIND.feedback_requested, { topic: 'cwd', question: QUESTION.question }),
+        spoke(4, EVENT_KIND.signal_received, { stepId: 's1', signal: { outcome: SIGNAL.outcome, summary: SIGNAL.summary } }),
+      ]),
+      actions: null, projectId: 'p1',
     })
     const r = await callTool(tools, 'task_transcript', { taskId: 't1' })
     expect(r.isError).toBe(false)
@@ -329,9 +344,9 @@ describe('task_transcript (bounded for the MCP door)', () => {
   })
 
   it('limit returns the LAST n items', async () => {
-    const items = [1, 2, 3, 4, 5].map(i => toolItem({ toolName: `t${i}`, input: {}, output: null }))
     const tools = buildCopilotTools({
-      sessions: sessionsStub({ transcript: async () => items }), actions: null, projectId: 'p1',
+      sessions: sessionsOf([1, 2, 3, 4, 5].map(i => calledTool(i, `c${i}`, `t${i}`, {}))),
+      actions: null, projectId: 'p1',
     })
     const r = await callTool(tools, 'task_transcript', { taskId: 't1', limit: 2 })
     expect(listOf(r.output).map(i => recordOf(i).toolName)).toEqual(['t4', 't5'])
@@ -346,8 +361,7 @@ describe('plan_notes (mechanical fields)', () => {
       modelRef: 'anthropic/claude-haiku-4-5',
     })
     const tools = buildCopilotTools({
-      sessions: sessionsStub({ planNotes: async () => ({ notes: [note], mermaid: null }) }),
-      actions: null, projectId: 'p1',
+      sessions: sessionsOf([wrotePlanNote(1, note)]), actions: null, projectId: 'p1',
     })
     const r = await callTool(tools, 'plan_notes', { taskId: 't1' })
     const out = recordOf(listOf(r.output)[0])
@@ -361,7 +375,7 @@ describe('plan_notes (mechanical fields)', () => {
 
   it('omits modelRef entirely when the subplan inherits the parent model', async () => {
     const tools = buildCopilotTools({
-      sessions: sessionsStub({ planNotes: async () => ({ notes: [planNoteFixture({ modelRef: '' })], mermaid: null }) }),
+      sessions: sessionsOf([wrotePlanNote(1, planNoteFixture({ modelRef: '' }))]),
       actions: null, projectId: 'p1',
     })
     const out = recordOf(listOf((await callTool(tools, 'plan_notes', { taskId: 't1' })).output)[0])
@@ -370,39 +384,30 @@ describe('plan_notes (mechanical fields)', () => {
 })
 
 describe('recent_activity (pollable)', () => {
-  const row = (seq: number, kind: string) => ({
-    seq, ts: '2026-07-30T00:00:00.000Z', kind, taskId: 't1', stepId: null,
-    line: `${kind} ${seq}`, authorTaskId: null, noteRef: null,
-  })
+  // five events across two steps and two kinds — enough that a cursor and a kind filter each have
+  // something to leave out
+  const feed = [
+    spoke(5, EVENT_KIND.step_started, { stepId: 's1', attempt: 1 }),
+    spoke(6, EVENT_KIND.tool_call, { stepId: 's1', iteration: 1, toolCallId: 'c1', toolName: 'fs_read', input: {} }),
+    spoke(7, EVENT_KIND.step_started, { stepId: 's2', attempt: 1 }),
+    spoke(9, EVENT_KIND.step_completed, { stepId: 's2', summary: 'done' }),
+  ]
+  const tools = buildCopilotTools({ sessions: sessionsOf(feed), actions: null, projectId: 'p1' })
 
-  it('returns { rows, maxSeq } and passes sinceSeq/kinds through to the log read', async () => {
-    const seen: unknown[] = []
-    const tools = buildCopilotTools({
-      sessions: sessionsStub({
-        log: async (_p, opts) => { seen.push(opts); return [row(7, 'step_started'), row(9, 'step_completed')] },
-      }),
-      actions: null, projectId: 'p1',
-    })
+  it('returns { rows, maxSeq }, and the cursor and kind filter reach the read', async () => {
     const r = await callTool(tools, 'recent_activity', { sinceSeq: 5, kinds: ['step_started', 'step_completed'], limit: 3 })
-    expect(r.output).toEqual({ rows: [row(7, 'step_started'), row(9, 'step_completed')], maxSeq: 9 })
-    expect(seen).toEqual([{ taskId: undefined, limit: 3, sinceSeq: 5, kinds: ['step_started', 'step_completed'] }])
+    // seq 5 is the caller's own cursor (EXCLUSIVE) and seq 6 is the wrong kind: a door that
+    // dropped either filter would hand back rows the driver has already paid to read
+    expect(r.output).toMatchObject({ maxSeq: 9 })
+    expect(listOf(recordOf(r.output).rows).map(i => recordOf(i).seq)).toEqual([7, 9])
   })
 
-  it('maxSeq is null when nothing is new; sinceSeq/kinds are absent (not undefined) when unset', async () => {
-    const seen: unknown[] = []
-    const tools = buildCopilotTools({
-      sessions: sessionsStub({ log: async (_p, opts) => { seen.push(opts); return [] } }),
-      actions: null, projectId: 'p1',
-    })
-    const r = await callTool(tools, 'recent_activity', {})
+  it('maxSeq is null when nothing is new', async () => {
+    const r = await callTool(tools, 'recent_activity', { sinceSeq: 9 })
     expect(r.output).toEqual({ rows: [], maxSeq: null })
-    expect(Object.keys(seen[0] as object).sort()).toEqual(['limit', 'taskId'])
   })
 
   it('rejects a kind that is not in the EventKind vocabulary', async () => {
-    const tools = buildCopilotTools({
-      sessions: sessionsStub({ log: async () => [] }), actions: null, projectId: 'p1',
-    })
     const r = await callTool(tools, 'recent_activity', { kinds: ['not_a_kind'] })
     expect(r.isError).toBe(true)
   })

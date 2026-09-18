@@ -4,8 +4,9 @@
   import { MEMORY_STAGE, MemoryStageName, SUPERVISOR_HEALTH } from '@orc/contracts/health'
   import { Progress } from '$lib/components/ui/progress'
   import { api } from '$lib/api/client'
-  import { qk } from '$lib/query-keys'
+  import { healthKey } from '$lib/api/view-client'
   import { cn } from '$lib/utils'
+  import { session } from '$lib/stores/session.svelte'
   import type { Temperature } from '$lib/temperature'
   import { TEMP_TEXT } from '$lib/temperature'
 
@@ -35,7 +36,7 @@
   const ago = (ms: number): string => (ms < 60_000 ? `${Math.floor(ms / 1000)}s` : `${Math.floor(ms / 60_000)}m`)
 
   const health = createQuery(() => ({
-    queryKey: qk.health(),
+    queryKey: healthKey(session.sel.project),
     queryFn: api.health,
     // faster than the header's 15s poll: this banner exists for the minutes when things move
     refetchInterval: POLL_MS,

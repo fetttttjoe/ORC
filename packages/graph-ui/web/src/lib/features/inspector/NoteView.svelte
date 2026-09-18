@@ -10,7 +10,7 @@
   import PullIcon from '@lucide/svelte/icons/download'
   import { noteNodeId } from '$lib/node-id'
   import { graph } from '$lib/stores/graph.svelte'
-  import type { NoteDetail } from './detail-view'
+  import type { NoteDetail } from '@orc/ui-core/wire'
 
   /**
    * A note, sectioned. Everything a note holds — prose, claims, both link directions, sources,
@@ -137,7 +137,10 @@
           {#if n.note.sources.length > 0}
             <div>
               <p class="mb-1 font-mono text-label text-fog">derived from</p>
-              {#each n.note.sources as src (src)}<p class="truncate font-mono text-row text-mist" title={src}>{src}</p>{/each}
+              <!-- a source is a citation: the url identifies it, the title is the readable half.
+                   Keyed on the element, not the url — nothing dedupes citations on the write path,
+                   and a note citing one url twice would throw a duplicate-key error. -->
+              {#each n.note.sources as src (src)}<p class="truncate font-mono text-row text-mist" title={src.url}>{src.title ?? src.url}</p>{/each}
             </div>
           {/if}
         </Accordion.Content>

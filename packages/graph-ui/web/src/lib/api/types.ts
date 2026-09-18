@@ -13,10 +13,11 @@ import type { GraphNode as WireNode, GraphLink as WireLink, GraphPatch as WirePa
 export type { GraphNode, GraphLink, GraphPatch } from '@orc/ui-core/graph-wire'
 
 /**
- * The graph schemas in schemas.ts parse what graph-wire.ts declares. graph-wire takes no imports
+ * ui-core's wire module parses what its graph-wire module declares. graph-wire takes no imports
  * (the browser must not drag the projection's dependencies in through it), so the two cannot be
- * one declaration — these guards are the substitute: widen or rename either side and the build
- * fails here rather than in a pane that renders nothing.
+ * one declaration — these guards are the substitute, and they live HERE because this build is the
+ * one with `exactOptionalPropertyTypes` on: widen or rename either side and it fails here rather
+ * than in a pane that renders nothing.
  *
  * TWO guards, because `Exact` alone has a hole that cost us a field. Mutual assignability holds in
  * BOTH directions when one side gains an OPTIONAL property — a value lacking it is assignable to
@@ -61,12 +62,3 @@ export type WaveStep = NonNullable<PlansView['visual']>['waves'][number]['steps'
 
 export type PlanNotesView = z.infer<typeof S.PlanNotesView>
 export type PlanNoteView = PlanNotesView['notes'][number]
-
-/**
- * A UNION, not a bag of optionals: a question carries `question`/`answer`, a signal carries
- * `outcome`/`summary`, and a tool's input/output are arbitrary JSON. Flattening it once made
- * questions render blank and objects render as "[object Object]".
- */
-export type TranscriptItem = z.infer<typeof S.Transcript>[number]
-
-export type NodeDetail = Record<string, unknown>

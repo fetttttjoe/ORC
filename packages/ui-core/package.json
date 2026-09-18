@@ -4,7 +4,10 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
-    "./graph-wire": "./src/graph-wire.ts"
+    "./graph-wire": "./src/graph-wire.ts",
+    "./wire": "./src/wire.ts",
+    "./event-classes": "./src/event-classes.ts",
+    "./test-helpers": "./src/test-helpers.ts"
   },
   "dependencies": {
     "@orc/contracts": "workspace:*",

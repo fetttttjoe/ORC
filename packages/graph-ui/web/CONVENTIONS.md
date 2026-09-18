@@ -27,8 +27,19 @@ adds errors OUTSIDE that directory.
 
 ## Validation
 
-Nothing crosses a boundary unparsed. Every HTTP response, every SSE frame, every action result
-and every localStorage read goes through a zod schema in `src/lib/api/schemas.ts`.
+Nothing crosses a boundary unparsed. A view's params and result are declared once on
+`@orc/ui-core/wire` (`WIRE`, keyed by `ViewName`); `src/lib/api/schemas.ts` re-exports those same
+schemas and declares its own for the handful of routes outside the view registry (`/api/session`,
+`/api/projects`, `/api/graph`, `/api/health`, action results, localStorage reads), so every
+component and `e2e/contract.pw.ts` import from this one file.
+
+Reads go through the view client. `lib/api/view-client.ts`'s `fetchView`/`fetchViewGuarded` (or
+`view-query.ts`'s `viewQuery` for a reactive pane) parse a view's response against `WIRE[name].result`
+inside the `seq` envelope every view answers in; `client.ts`'s `get`/`post` do the same for the
+plain routes above. Nothing else in this app builds a `/api/view/*` URL, parses a view's response,
+or keys its TanStack cache entry by hand. **A new read is a new view** — one file under
+`packages/ui-core/src/views/`, one entry on `WIRE` — never a new route, a client-side filter, or a
+browser fold of the log.
 
 This is not ceremony: a `get<T>()` cast is erased at build time, and four separate shape
 mismatches shipped because of it — an empty model picker that made the primary flow impossible,

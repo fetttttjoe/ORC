@@ -13,6 +13,13 @@ export const errorMessage = (err: unknown): string =>
   : err instanceof Error ? err.message
   : String(err)
 
+// One issue, as the field a caller has to fix: PATH: MESSAGE, `(root)` when the path is empty (a
+// whole-value miss, e.g. a number where an object belongs, not a named field). Independently
+// re-spelled at three call sites across ui-core and the web/e2e layers — only two of the three
+// agreed on the `(root)` fallback — before this existed.
+export const issueLine = (issue: { path: PropertyKey[]; message: string }): string =>
+  `${issue.path.join('.') || '(root)'}: ${issue.message}`
+
 // The one tool-result error envelope. `output` is `unknown` in the tool contract, so the inner
 // `error` key is protocol only by convention — the LLM reading the result greps for it, and it
 // was hand-spelled at 12 catch sites across 6 workspaces where a drifted key would fail silently.

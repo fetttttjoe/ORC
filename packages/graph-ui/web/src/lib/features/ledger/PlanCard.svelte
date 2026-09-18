@@ -1,13 +1,12 @@
 <script lang="ts">
-  import { createQuery, keepPreviousData } from '@tanstack/svelte-query'
+  import { createQuery } from '@tanstack/svelte-query'
   import StatusPill from '$lib/components/StatusPill.svelte'
   import PlanBoard from '$lib/features/plan/PlanBoard.svelte'
   import { Badge } from '$lib/components/ui/badge'
-  import { api } from '$lib/api/client'
-  import { qk } from '$lib/query-keys'
+  import { viewQuery } from '$lib/api/view-query'
+  import { VIEW } from '@orc/ui-core/wire'
   import { stepNodeId } from '$lib/node-id'
   import { graph } from '$lib/stores/graph.svelte'
-  import { session } from '$lib/stores/session.svelte'
   import { cn } from '$lib/utils'
   import { statusTemperature, TEMP_DOT } from '$lib/temperature'
 
@@ -15,14 +14,7 @@
   // steps as chips that carry their own status and open in the inspector.
   let { taskId }: { taskId: string } = $props()
 
-  const project = $derived(session.sel.project)
-  const plans = createQuery(() => ({
-    queryKey: qk.taskPlans(taskId),
-    queryFn: () => api.plans(project, taskId),
-    enabled: project !== '',
-    // keep the last good answer on screen while a refetch runs
-    placeholderData: keepPreviousData,
-  }))
+  const plans = createQuery(viewQuery(VIEW.plans, () => ({ taskId })))
 
   const waves = $derived(plans.data?.visual?.waves ?? [])
   const title = $derived(graph.taskTitle(taskId) ?? taskId)

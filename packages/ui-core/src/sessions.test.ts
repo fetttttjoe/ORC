@@ -4,10 +4,19 @@ import { EVENT_KIND, ISOLATION_TIER } from '@orc/contracts'
 import { Kernel, openStorage } from '@orc/kernel'
 import { createTestDb, seedTestWorkspace, TEST_PROJECT_ID, TEST_WORKSPACE_ID } from '@orc/kernel/test-helpers'
 import { noteNodeId } from './graph'
-import { createProjectSessions, type SessionUpdate } from './sessions'
+import { createProjectSessions, type ProjectSessions, type SessionUpdate } from './sessions'
+import { viewOf } from './views/registry'
+import type { ViewParams } from './views/view'
+import { VIEW } from './wire'
 import { must } from '@orc/contracts/fixtures'
 
-// nodeDetail returns an opaque view (Promise<unknown | null>); these name the subsets each
+// Every read here goes through the door helper the tools use, against a REAL session: the views'
+// own unit tests answer from a hand-built model, and what those cannot show is that the thing the
+// session folds out of Postgres is the same thing a view reads.
+const logOf = async (sessions: ProjectSessions, params: ViewParams<'timeline'> = {}) =>
+  await viewOf(sessions, TEST_PROJECT_ID, VIEW.timeline, params) ?? []
+
+// The node view answers a union ending in a permissive record, so these name the subsets each
 // assertion pins, parsed at the read boundary instead of cast.
 const BacklinksView = z.object({ backlinks: z.array(z.object({ id: z.string() })) })
 const TaskDetailView = z.object({ task: z.object({ title: z.string() }) })
@@ -122,23 +131,23 @@ describe('ProjectSessions', () => {
     unsub()
   })
 
-  it('transcript, taskPlans, and log read from the cached session', async () => {
+  it('the transcript, plans and timeline views read from the cached session', async () => {
     const { storage, taskId, sessions } = await setup()
     await storage.events.append({
       taskId, stepId: 's1', runToken: 'r1', kind: EVENT_KIND.agent_call,
       payload: { stepId: 's1', runToken: 'r1', iteration: 1, request: {}, response: { text: 'hello there', toolCalls: [] } },
       usage: { inputTokens: 1, outputTokens: 1, costUSD: null, estimated: false },
     })
-    const items = await sessions.transcript(TEST_PROJECT_ID, taskId)
+    const items = await viewOf(sessions, TEST_PROJECT_ID, VIEW.transcript, { taskId })
     expect(items).toEqual([{ kind: 'message', iteration: 1, stepId: 's1', text: 'hello there' }])
 
-    expect(await sessions.taskPlans(TEST_PROJECT_ID, taskId)).toBeNull() // no plan proposed
-    const rows = await sessions.log(TEST_PROJECT_ID, { taskId })
+    expect(await viewOf(sessions, TEST_PROJECT_ID, VIEW.plans, { taskId })).toBeNull() // no plan proposed
+    const rows = await logOf(sessions, { taskId })
     expect(must(rows.at(-1), 'rows.at(-1)').line).toContain('hello there')
-    expect(await sessions.log(TEST_PROJECT_ID, { limit: 1 })).toHaveLength(1)
+    expect(await logOf(sessions, { limit: 1 })).toHaveLength(1)
   })
 
-  it('log(taskId) attributes each task its own step rows + its author.taskId memory rows, and no sibling/ownerless memory row', async () => {
+  it('a task-scoped timeline attributes each task its own step rows + its author.taskId memory rows, and no sibling/ownerless memory row', async () => {
     const { storage, taskId: taskA, sessions } = await setup()
     // a second task in the same project — its step rows must never leak into A's log and vice versa
     const k = new Kernel(storage.events)
@@ -160,8 +169,7 @@ describe('ProjectSessions', () => {
     })
     await storage.events.append(noteEvent('ownerless-note')) // author.source 'cli', no taskId
 
-    const line = (rows: Awaited<ReturnType<typeof sessions.log>>): string[] => rows.map(r => r.line)
-    const linesFor = async (t: string): Promise<string[]> => line(await sessions.log(TEST_PROJECT_ID, { taskId: t }))
+    const linesFor = async (t: string): Promise<string[]> => (await logOf(sessions, { taskId: t })).map(r => r.line)
 
     const aLines = await linesFor(taskA)
     expect(aLines.some(l => l.includes('sa'))).toBe(true) // A's own step row
@@ -178,7 +186,7 @@ describe('ProjectSessions', () => {
     expect(bLines.some(l => l.includes('ownerless-note'))).toBe(false)
   })
 
-  it('log(sinceSeq/kinds) filters BEFORE the limit slice, keeping the newest matching rows', async () => {
+  it('a timeline cursor filters BEFORE the limit slice, keeping the newest matching rows', async () => {
     const { storage, taskId, sessions } = await setup()
     const step = (id: string) => storage.events.append({
       taskId, stepId: id, runToken: 'r1', kind: EVENT_KIND.step_started,
@@ -194,37 +202,36 @@ describe('ProjectSessions', () => {
     const q2 = await ask('two')
 
     // sinceSeq is EXCLUSIVE: the row a poller already saw must not come back
-    const since = await sessions.log(TEST_PROJECT_ID, { taskId, sinceSeq: s1.seq })
+    const since = await logOf(sessions, { taskId, sinceSeq: s1.seq })
     expect(since.map(r => r.seq)).toEqual([q1.seq, s2.seq, q2.seq])
     expect(since.every(r => r.seq > s1.seq)).toBe(true)
 
-    const asked = await sessions.log(TEST_PROJECT_ID, { taskId, kinds: [EVENT_KIND.feedback_requested] })
+    const asked = await logOf(sessions, { taskId, kinds: [EVENT_KIND.feedback_requested] })
     expect(asked.map(r => r.seq)).toEqual([q1.seq, q2.seq])
     expect(asked.every(r => r.kind === EVENT_KIND.feedback_requested)).toBe(true)
 
     // composed with limit: the newest MATCHING row, not the newest event (which is q2's neighbour)
-    expect((await sessions.log(TEST_PROJECT_ID, { taskId, kinds: [EVENT_KIND.step_started], limit: 1 })).map(r => r.seq))
+    expect((await logOf(sessions, { taskId, kinds: [EVENT_KIND.step_started], limit: 1 })).map(r => r.seq))
       .toEqual([s2.seq])
-    expect((await sessions.log(TEST_PROJECT_ID, { taskId, sinceSeq: q1.seq, limit: 1 })).map(r => r.seq)).toEqual([q2.seq])
+    expect((await logOf(sessions, { taskId, sinceSeq: q1.seq, limit: 1 })).map(r => r.seq)).toEqual([q2.seq])
     // whole-project (untargeted) reads take the same filters
-    expect((await sessions.log(TEST_PROJECT_ID, { sinceSeq: q2.seq })).map(r => r.seq)).toEqual([])
-    expect((await sessions.log(TEST_PROJECT_ID, { kinds: [EVENT_KIND.feedback_requested] })).map(r => r.seq))
+    expect((await logOf(sessions, { sinceSeq: q2.seq })).map(r => r.seq)).toEqual([])
+    expect((await logOf(sessions, { kinds: [EVENT_KIND.feedback_requested] })).map(r => r.seq))
       .toEqual([q1.seq, q2.seq])
 
     // beforeSeq is EXCLUSIVE and pages BACKWARD: the ledger asks for what precedes its oldest
     // row, and with limit it must get the rows nearest the cursor, not the start of the log
     // (the head of the unlimited read is the task's own task_created row, so assert the tail)
-    const before = await sessions.log(TEST_PROJECT_ID, { taskId, beforeSeq: q2.seq })
+    const before = await logOf(sessions, { taskId, beforeSeq: q2.seq })
     expect(before.every(r => r.seq < q2.seq)).toBe(true)
     expect(before.map(r => r.seq).slice(-3)).toEqual([s1.seq, q1.seq, s2.seq])
-    expect((await sessions.log(TEST_PROJECT_ID, { taskId, beforeSeq: q2.seq, limit: 2 })).map(r => r.seq))
+    expect((await logOf(sessions, { taskId, beforeSeq: q2.seq, limit: 2 })).map(r => r.seq))
       .toEqual([q1.seq, s2.seq])
-    expect((await sessions.log(TEST_PROJECT_ID, { beforeSeq: s1.seq, limit: 5 })).every(r => r.seq < s1.seq)).toBe(true)
+    expect((await logOf(sessions, { beforeSeq: s1.seq, limit: 5 })).every(r => r.seq < s1.seq)).toBe(true)
   })
 
-  // The 'armed' colouring these three cases used to assert lived only in the mermaid strings
-  // planNotes/taskPlans no longer emit. What replaces them is the guard below: the wire must not
-  // grow the field back, because a projection nothing renders is paid for on every request.
+  // A guard, not a rendering test: the plan wire must not grow a serialized diagram back, because
+  // a projection nothing renders is built and paid for on every request.
   it('the plan wire carries waves and notes only — no rendered diagram', async () => {
     const { storage, taskId, sessions } = await setup()
     await storage.events.append(planNoteEvent(taskId, 'sub'))
@@ -234,11 +241,11 @@ describe('ProjectSessions', () => {
     })
     for (let i = 0; i < 40 && (await sessions.snapshot(TEST_PROJECT_ID)).seq < 2; i++) await Bun.sleep(50)
 
-    const tp = await sessions.taskPlans(TEST_PROJECT_ID, taskId)
+    const tp = await viewOf(sessions, TEST_PROJECT_ID, VIEW.plans, { taskId })
     expect(tp?.visual?.waves.flatMap(w => w.steps.map(s => s.id))).toEqual(['own'])
     expect(Object.keys(tp?.visual ?? {}).sort()).toEqual(['version', 'waves'])
 
-    expect(Object.keys(await sessions.planNotes(TEST_PROJECT_ID, taskId))).toEqual(['notes'])
+    expect(Object.keys(must(await viewOf(sessions, TEST_PROJECT_ID, VIEW.planNotes, { taskId }), 'planNotes'))).toEqual(['notes'])
   })
 
   it('note backlinks list notes that link to it', async () => {
@@ -248,21 +255,21 @@ describe('ProjectSessions', () => {
       taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_written,
       payload: { note: { id: 'pointer', title: 'pointer', links: [{ id: 'target' }] }, author: { source: 'cli', workspaceId: TEST_WORKSPACE_ID } },
     })
-    const d = BacklinksView.parse(await sessions.nodeDetail(TEST_PROJECT_ID, noteNodeId('project', 'target')))
+    const d = BacklinksView.parse(await viewOf(sessions, TEST_PROJECT_ID, VIEW.node, { id: noteNodeId('project', 'target') }))
     expect(d.backlinks.map(b => b.id)).toEqual(['pointer'])
   })
 
-  it('nodeDetail resolves task and note (with access hits); unknown ids are null', async () => {
+  it('the node view resolves task and note (with access hits); unknown ids are null', async () => {
     const { storage, taskId, sessions } = await setup()
     await storage.events.append(noteEvent('detail-note'))
     await storage.events.append({
       taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_accessed,
       payload: { id: 'detail-note', scope: 'project', mode: 'read', author: { source: 'cli', workspaceId: TEST_WORKSPACE_ID } },
     })
-    const task = TaskDetailView.parse(await sessions.nodeDetail(TEST_PROJECT_ID, taskId))
+    const task = TaskDetailView.parse(await viewOf(sessions, TEST_PROJECT_ID, VIEW.node, { id: taskId }))
     expect(task.task.title).toBe('seed task')
-    const note = NoteHitsView.parse(await sessions.nodeDetail(TEST_PROJECT_ID, noteNodeId('project', 'detail-note')))
+    const note = NoteHitsView.parse(await viewOf(sessions, TEST_PROJECT_ID, VIEW.node, { id: noteNodeId('project', 'detail-note') }))
     expect(note.hits).toBe(1)
-    expect(await sessions.nodeDetail(TEST_PROJECT_ID, 'nope')).toBeNull()
+    expect(await viewOf(sessions, TEST_PROJECT_ID, VIEW.node, { id: 'nope' })).toBeNull()
   })
 })

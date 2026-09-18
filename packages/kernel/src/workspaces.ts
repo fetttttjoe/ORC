@@ -1,6 +1,5 @@
-import { EVENT_KIND, PAYLOAD_SCHEMAS, TERMINAL_TASK_STATUS, TASK_STATUS, WORKSPACE_STATE } from '@orc/contracts'
-import type { EventRecord, TaskNode, Workspace, WorkspaceHealth, WorkspaceState } from '@orc/contracts'
-import { openFeedbackTopics, type FeedbackEvent } from './feedback-open'
+import { EVENT_KIND, groupByWorkspace, openFeedbackTopics, PAYLOAD_SCHEMAS, TERMINAL_TASK_STATUS, TASK_STATUS, WORKSPACE_STATE } from '@orc/contracts'
+import type { EventRecord, FeedbackEvent, TaskNode, Workspace, WorkspaceHealth, WorkspaceState } from '@orc/contracts'
 import type { State } from './projections'
 
 // Pure derivations over the fold — no db, no git, no clock — so the rule the CLI prints, the MCP
@@ -28,10 +27,7 @@ export function workspaceCwdFor(task: Pick<TaskNode, 'workspaceId'>, workspaces:
 // Every task has a workspace; a task naming an unknown id is a fold defect and is reported by
 // orphanTasks(state) rather than dropped into a group it does not belong to.
 export function tasksByWorkspace(state: Pick<State, 'tasks' | 'workspaces'>): Array<{ workspace: Workspace; tasks: TaskNode[] }> {
-  const groups = new Map<string, TaskNode[]>()
-  for (const w of state.workspaces.values()) groups.set(w.id, [])
-  for (const t of state.tasks.values()) groups.get(t.workspaceId)?.push(t)
-  return [...state.workspaces.values()].map(w => ({ workspace: w, tasks: groups.get(w.id) ?? [] }))
+  return groupByWorkspace(state.workspaces.values(), state.tasks.values()).map(g => ({ workspace: g.workspace, tasks: g.items }))
 }
 
 // Tasks whose workspaceId the fold never saw — shown by `orc tasks` under a loud "orphaned"

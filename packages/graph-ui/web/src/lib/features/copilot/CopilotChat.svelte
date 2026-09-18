@@ -8,8 +8,9 @@
   import { copilotSend, type CopilotMessage } from '$lib/api/copilot'
   import { notify } from '$lib/notify'
   import { session } from '$lib/stores/session.svelte'
-  import { createQuery, keepPreviousData } from '@tanstack/svelte-query'
-  import { api } from '$lib/api/client'
+  import { createQuery } from '@tanstack/svelte-query'
+  import { viewQuery } from '$lib/api/view-query'
+  import { VIEW } from '@orc/ui-core/wire'
   import { EVENT_KIND } from '$lib/event-kinds'
   import { fmtCost, fmtTokens } from '$lib/features/inspector/node-head'
   import { restoredRows, type CopilotRow as Row } from './copilot-rows'
@@ -22,8 +23,6 @@
    */
   const HISTORY_CAP = 20
   const NEW_CHAT_COMMAND = '/new'
-  // how far back to look for journaled exchanges when the pane opens
-  const HISTORY_WINDOW = 400
 
   // live rows carry their own namespace so they can never collide with a journal seq
   let nextId = 0
@@ -41,14 +40,14 @@
    * question, the answer and the tools it called. Restoring from the LOG means the same history
    * is there from another browser and survives a cleared cache — browser storage held a private
    * copy of a record the server already keeps.
+   *
+   * Filtered server-side by KIND rather than windowed by row count: a fixed-size tail of the whole
+   * project log can run past every exchange in it once enough agent-loop noise (tool_call, …)
+   * follows — observed with 450 tool_call rows after one exchange, which pushed it out of a
+   * 400-row window entirely. `kinds` narrows BEFORE the slice (timeline.ts), so the last
+   * `HISTORY_CAP * 2` matching rows are always the newest exchanges, whatever else happened after.
    */
-  const history = createQuery(() => ({
-    queryKey: ['copilot', session.sel.project],
-    queryFn: () => api.log(session.sel.project, { limit: HISTORY_WINDOW }),
-    enabled: session.sel.project !== '',
-    // keep the last good answer on screen while a refetch runs
-    placeholderData: keepPreviousData,
-  }))
+  const history = createQuery(viewQuery(VIEW.timeline, () => ({ kinds: [EVENT_KIND.copilot_exchange], limit: HISTORY_CAP * 2 })))
 
   const restored = $derived(
     restoredRows(

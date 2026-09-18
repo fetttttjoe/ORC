@@ -1,9 +1,11 @@
 import { stepCountIs, streamText, type LanguageModel } from 'ai'
 import { z } from 'zod'
 import { MEMORY_HEALTH, type MemoryHealth, type SupervisorHealth, errorMessage, isRecord, NoteAuthoringDraft, NoteRef, PlanDraft, type CopilotExchangePayload, type Usage } from '@orc/contracts'
-import { LOG_PARAM, buildCopilotTools, copilotSystemPrompt, createProjectSessions, emptyPatch, type CopilotMode, type OrcActions, type ProjectEntry, type ProjectSessions, type SessionUpdate } from '@orc/ui-core'
+import { VIEWS, buildCopilotTools, copilotSystemPrompt, createProjectSessions, emptyPatch, touchesOf, type CopilotMode, type OrcActions, type ProjectEntry, type ProjectSessions, type ReadModel, type SessionUpdate } from '@orc/ui-core'
+import { PROJECT_PARAM, VIEW, VIEW_ROUTE, type OperatorState, type StreamFrame } from '@orc/ui-core/wire'
 import path from 'node:path'
 import { toolFailure } from './tool-failure'
+import { viewResponse, type DoorAnswers } from './view-route'
 
 export interface CopilotConfig {
   resolveModel: (ref: string) => LanguageModel // throws for unknown provider/model
@@ -126,6 +128,11 @@ export function startGraphUi(opts: {
   const token = crypto.randomUUID()
   // shown in the page footer — makes a stale server process (old bundle, old routes) visible
   const bootedAt = new Date().toISOString()
+
+  // The provider catalog a project has not discovered yet — see DoorAnswers.
+  const whenEmpty: DoorAnswers = {
+    [VIEW.models]: async () => await opts.copilot?.listModels?.() ?? [],
+  }
 
   // the copilot loop: same tools as the UI, streamed to the client part by part — every tool
   // call is visible, usage is priced through the same table as agent runs
@@ -262,8 +269,18 @@ export function startGraphUi(opts: {
     // uuid for a project that was never created would allocate just as happily. One indexed query
     // against a set the UI already fetches, and an unknown id is treated as "no project" — every
     // consumer below already handles the empty string.
-    const requested = u.searchParams.get('project') ?? ''
+    const requested = u.searchParams.get(PROJECT_PARAM) ?? ''
     const project = requested !== '' && (await sessions.projects()).some(p => p.id === requested) ? requested : ''
+    // Every read the browser can ask for, answered from the registry: the name is a path segment
+    // and the params one url-encoded JSON value, both resolved by readView. A new question costs a
+    // view and nothing here.
+    if (u.pathname.startsWith(VIEW_ROUTE.prefix))
+      return viewResponse(
+        await sessions.model(project),
+        u.pathname.slice(VIEW_ROUTE.prefix.length),
+        u.searchParams.get(VIEW_ROUTE.params),
+        whenEmpty,
+      )
     switch (u.pathname) {
       case '/api/session':
         return Response.json({
@@ -283,42 +300,9 @@ export function startGraphUi(opts: {
         return Response.json(opts.health
           ? await opts.health().catch(err => ({ memory: { state: MEMORY_HEALTH.unreachable, pending: 0, reason: errorMessage(err) } }))
           : { memory: null })
-      case '/api/models': {
-        // the event-sourced catalog first (works read-only, no provider APIs in the request
-        // path); live discovery as fallback and to seed the first catalog events
-        const catalog = project ? await sessions.modelCatalog(project) : []
-        if (catalog.length > 0) return Response.json(catalog)
-        return Response.json(await opts.copilot?.listModels?.() ?? [])
-      }
       case '/api/graph': {
         const s = await sessions.snapshot(project)
         return Response.json({ seq: s.seq, nodes: s.graph.nodes, links: s.graph.links })
-      }
-      case '/api/node': {
-        const d = await sessions.nodeDetail(project, u.searchParams.get('id') ?? '')
-        return d === null ? new Response('not found', { status: 404 }) : Response.json(d)
-      }
-      case '/api/transcript':
-        return Response.json(await sessions.transcript(project, u.searchParams.get('task') ?? '', u.searchParams.get('step') ?? undefined))
-      case '/api/plans': {
-        const p = await sessions.taskPlans(project, u.searchParams.get('task') ?? '')
-        return p === null ? new Response('not found', { status: 404 }) : Response.json(p)
-      }
-      case '/api/plan-notes':
-        return Response.json(await sessions.planNotes(project, u.searchParams.get('task') ?? ''))
-      case '/api/log': {
-        const limitRaw = Number(u.searchParams.get(LOG_PARAM.limit))
-        // `since` exposes sessions.log's incremental seam: the page backfills the narrative
-        // window a catch-up patch skipped (summaries are per-event; since()'s patch is not).
-        // `before` is the same seam pointed backward — the ledger paging into history.
-        const sinceRaw = Number(u.searchParams.get(LOG_PARAM.since))
-        const beforeRaw = Number(u.searchParams.get(LOG_PARAM.before))
-        return Response.json(await sessions.log(project, {
-          taskId: u.searchParams.get(LOG_PARAM.task) ?? undefined,
-          limit: Number.isFinite(limitRaw) && limitRaw > 0 ? limitRaw : undefined,
-          sinceSeq: Number.isFinite(sinceRaw) && sinceRaw > 0 ? sinceRaw : undefined,
-          beforeSeq: Number.isFinite(beforeRaw) && beforeRaw > 0 ? beforeRaw : undefined,
-        }))
       }
       case '/api/stream': {
         // resume point: Last-Event-ID (browser reconnect) wins over fromSeq (first attach)
@@ -331,20 +315,41 @@ export function startGraphUi(opts: {
         const stream = new ReadableStream<Uint8Array>({
           start: async controller => {
             const enc = new TextEncoder()
-            const send = (seq: number, data: unknown): void =>
+            const send = (seq: number, data: StreamFrame): void =>
               controller.enqueue(enc.encode(`id: ${seq}\ndata: ${JSON.stringify(data)}\n\n`))
+            // State sync rides the same stream WITHOUT an `id:` line: it describes no event, so it
+            // must never advance the client's Last-Event-ID resume cursor.
+            const sync = (data: StreamFrame): void => controller.enqueue(enc.encode(`data: ${JSON.stringify(data)}\n\n`))
             controller.enqueue(enc.encode(': connected\n\n')) // flush headers + first byte immediately
             // keepalive: quiet projects emit nothing — periodic comments keep the connection
             // alive through idle timeouts and proxies, and detect dead clients (enqueue throws)
             ping = setInterval(() => {
               try { controller.enqueue(enc.encode(': ping\n\n')) } catch { clearInterval(ping); unsub?.(); dropFeed() }
             }, 25_000)
+            // The operator value THIS connection last carried, serialized. Per connection, not per
+            // server: a reconnecting tab holds none, and would otherwise wait for an event that
+            // happened to change it before learning a task is parked on a question. Compared by
+            // serialization because each fold builds the value afresh — no two share an identity,
+            // and resending an unchanged one puts a full operator payload on the agent loop's
+            // cadence.
+            let lastOperator: string | null = null
+            const operatorIfChanged = (model: ReadModel): OperatorState | null => {
+              const value = VIEWS.operatorState.read(model, {})
+              const key = JSON.stringify(value)
+              if (key === lastOperator) return null
+              lastOperator = key
+              return value
+            }
             // Subscribe FIRST (buffering), catch up second, flush third: an event landing
             // during the catch-up await is buffered, never lost. The old order (since → then
             // subscribe) left a gap the width of the awaits in between — luck-sized before,
-            // structural zero now. Envelope: { patch|null, summary|null, projects? }.
+            // structural zero now.
             let liveNow = false
             const buffered: SessionUpdate[] = []
+            // Synchronous, and it takes no model of its own: `up.model` is the state as of
+            // `up.seq`, handed over by the session inside the tick it notified in. Fetching one
+            // back here would answer for whenever this happened to run — a frame describing a later
+            // world than the seq it carries, with nothing failing to say so.
             const deliver = (up: SessionUpdate): void => {
               const patch = emptyPatch(up.patch) ? null : up.patch
               // A failed tool call rides ALONG the summary row rather than in a channel of its
@@ -353,7 +358,8 @@ export function startGraphUi(opts: {
               // next to the question that was re-asked, not somewhere else.
               const failure = toolFailure(up.event)
               const summary = up.summary && failure ? { ...up.summary, failure } : up.summary
-              try { send(up.seq, { patch, summary }) } catch { unsub?.(); dropFeed() }
+              const touched = up.event ? touchesOf(up.event, up.model) : []
+              try { send(up.seq, { patch, summary, touched, operator: operatorIfChanged(up.model) }) } catch { unsub?.(); dropFeed() }
             }
             unsub = await sessions.subscribe(project, up => {
               if (liveNow) deliver(up)
@@ -361,15 +367,21 @@ export function startGraphUi(opts: {
             })
             const fromSafe = Number.isFinite(fromSeq) ? fromSeq : 0
             const missed = await sessions.since(project, fromSafe)
-            if (missed) send(missed.seq, { patch: missed.patch, summary: null })
+            // The first frame after connect always carries this connection's operator state: a tab
+            // attaching to a quiet project must still know which tasks are waiting on a human, and
+            // no event is owed for it. WHICH frame carries it is load-bearing — an id-less frame is
+            // read against whatever Last-Event-ID the client still holds, and a client whose graph
+            // has run ahead of that id reads it as a seq regression, drops the payload and resyncs,
+            // on exactly the reconnect this value exists to serve. So it rides the catch-up frame,
+            // which has an id, whenever there is one.
+            if (missed) send(missed.seq, { patch: missed.patch, summary: null, operator: operatorIfChanged(missed.model) })
+            else sync({ operator: operatorIfChanged(await sessions.model(project)) })
             const cutoff = missed?.seq ?? fromSafe
             for (const up of buffered) if (up.seq > cutoff) deliver(up)
             liveNow = true // sync flip before any yield — nothing can interleave
-            // chats-list frames ride the same stream WITHOUT an `id:` line — state sync must
-            // never advance the client's Last-Event-ID cursor. Seeded LAST: its await must not
-            // sit inside the event-delivery path.
+            // Seeded LAST: its await must not sit inside the event-delivery path.
             feed = ps => {
-              try { controller.enqueue(enc.encode(`data: ${JSON.stringify({ patch: null, summary: null, projects: ps })}\n\n`)) } catch { dropFeed() }
+              try { sync({ projects: ps }) } catch { dropFeed() }
             }
             projectFeeds.add(feed)
             feed(await sessions.projects()) // seed: a (re)connecting tab converges without a reload

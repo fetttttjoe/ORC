@@ -58,7 +58,7 @@ How a call flows: the client sends `tools/call` over stdio → the handler looks
 | | `propose` | Propose a single-step plan for a draft task |
 | | `run` | Start the approved plan in the task's workspace, or in an explicit `cwd` |
 | | `reply` | Answer a task's open feedback question |
-| | `retry` / `cancel` | Retry a failed run / terminally cancel |
+| | `retry` / `cancel` | Re-run a blocked task's incomplete steps (refused when a verdict blocked it) / terminally cancel |
 | | `annotate` / `revise` | Feedback on one plan-note / wake the plan agent to revise scoped notes |
 | | `workspace_list` | The project's active workspaces, each with its health (state `dangling`/`waiting`/`active`/`idle`/`merged`, last activity, task counts, notes still pending a merge), attention-first — read-only, but served only with the mutating door |
 | | `workspace_new` | A git worktree + branch for ONE request under `.orc/worktrees`, recorded as a workspace, with the request as its first task |

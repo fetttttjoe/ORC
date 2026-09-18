@@ -1,5 +1,5 @@
 import { AUTHOR_SOURCE, errorMessage, EVENT_KIND, ModelsDiscoveredPayload, NOTE_KIND, TASK_STATUS, costUSDFor, parseModelRef, type ModelOption, type TaskStatus } from '@orc/contracts'
-import { Kernel, blockingVerdicts, retryIsFutile, deriveSystemUrl, dropSystemDatabase, initializeProject, liveSupervisors, loadConfig, openStorage, resetSystemDatabase, subtreeTaskIds, type EventLog, type ProjectConfig, type Storage } from '@orc/kernel'
+import { Kernel, blockingVerdicts, canRetry, deriveSystemUrl, dropSystemDatabase, initializeProject, liveSupervisors, loadConfig, openStorage, resetSystemDatabase, subtreeTaskIds, type EventLog, type ProjectConfig, type Storage } from '@orc/kernel'
 import { cwdAuthor, cwdWorkspace, cwdWorkspaceId, type AuthorExtras } from './cwd-workspace'
 import { adoptCwd } from './workspace-adopt'
 import { createRequestWorkspace, HEAD_REF, requireLiveWorkspace } from './workspace-ops'
@@ -55,21 +55,23 @@ export async function assertDrivable(kernel: Kernel, taskId: string): Promise<vo
 export async function assertRetryable(kernel: Kernel, taskId: string): Promise<void> {
   const task = await kernel.getTask(taskId)
   if (!task) throw new Error(`no task '${taskId}'`)
+  const state = await kernel.state()
+  // canRetry is the DECISION; everything below only picks which refusal to explain. Split that way
+  // because a read model has to make the same call to decide whether to offer the retry at all, and
+  // it cannot throw — a second `status === blocked && !retryIsFutile` spelled here is the drift.
+  if (canRetry(state, taskId)) return
   if (task.status !== TASK_STATUS.blocked)
     throw new Error(`task is '${task.status}' — only a blocked task can be retried`)
   // A task blocked purely on VERDICTS cannot be moved by repeating itself: retry re-runs only what
   // did not complete, so the rejecting step would see the same sibling outputs and reach the same
   // conclusion. Refuse here, at the door, and name the action that does work — otherwise the
   // operator is handed a button that provably cannot succeed (measured: three identical passes).
-  const state = await kernel.state()
-  if (retryIsFutile(state, taskId)) {
-    const verdicts = blockingVerdicts(state, taskId)
-    throw new Error(
-      `this run was REJECTED, not broken — ${verdicts.map(v => `'${v.stepId}'`).join(', ')} judged the work unacceptable, `
-      + `and a retry re-runs only that step against the same completed siblings, so it would reach the same verdict. `
-      + `Revise the plan instead (orc revise ${taskId}), then approve the new version. Verdict: ${verdicts[0]?.message ?? ''}`,
-    )
-  }
+  const verdicts = blockingVerdicts(state, taskId)
+  throw new Error(
+    `this run was REJECTED, not broken — ${verdicts.map(v => `'${v.stepId}'`).join(', ')} judged the work unacceptable, `
+    + `and a retry re-runs only that step against the same completed siblings, so it would reach the same verdict. `
+    + `Revise the plan instead (orc revise ${taskId}), then approve the new version. Verdict: ${verdicts[0]?.message ?? ''}`,
+  )
 }
 
 // A provider's valid model ids: live-discovered UNION cost-table. The API list omits aliases

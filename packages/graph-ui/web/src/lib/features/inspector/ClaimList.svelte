@@ -16,8 +16,10 @@
     noteRevision,
     bare = false,
   }: {
-    claims: readonly { id: string; text: string; sourceRevision?: string | undefined }[]
-    noteRevision?: string | undefined
+    // "no revision recorded" arrives as null (a claim written where none could be stamped), as
+    // undefined (an older row without the key), and both mean the same thing to every test below
+    claims: readonly { id: string; text: string; sourceRevision?: string | null | undefined }[]
+    noteRevision?: string | null | undefined
     /** inside a titled section the heading is the section's job, not ours */
     bare?: boolean
   } = $props()
@@ -36,7 +38,7 @@
 
   <ol class="flex flex-col">
     {#each claims as claim, i (claim.id)}
-      {@const carried = claim.sourceRevision !== undefined && noteRevision !== undefined && claim.sourceRevision !== noteRevision}
+      {@const carried = claim.sourceRevision != null && noteRevision != null && claim.sourceRevision !== noteRevision}
       <li class="group flex gap-2 border-l border-line py-1 pl-2 transition-colors hover:border-machine/50 hover:bg-desk/30">
         <span class="w-4 shrink-0 pt-px text-right font-mono text-label tabular-nums text-fog select-none">{i + 1}</span>
         <div class="min-w-0 grow">

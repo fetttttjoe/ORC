@@ -1,19 +1,12 @@
 import type { z } from 'zod'
+import { issueLine } from '@orc/contracts/guards'
 
 /**
- * Parse with a schema and REPORT what failed.
- *
- * A `safeParse` whose failure branch renders a fallback is a silent bug: the pane shows something
- * plausible ("unrecognised shape", an empty list) while the real cause — one renamed or nullable
- * field — stays invisible. Measured repeatedly on this app. Every fallback path goes through here
- * so the console names the schema and the exact field path that did not match.
- *
- * Returns null on failure; callers still render their fallback, but never silently.
+ * The first three issues of a failed parse, as one line naming the field path — the shape both
+ * `client.ts`'s `get`/`post` and `view-client.ts`'s `fetchView` report a wire mismatch with. One
+ * spelling so the three error surfaces read alike; sliced to three because a whole-object shape
+ * miss can carry dozens of issues and the endpoint name plus the first few is what a reader acts on.
  */
-export function parseOrReport<T>(schema: z.ZodType<T>, value: unknown, what: string): T | null {
-  const parsed = schema.safeParse(value)
-  if (parsed.success) return parsed.data
-  const where = parsed.error.issues.map(i => `${i.path.join('.') || '(root)'}: ${i.message}`).join('; ')
-  console.warn(`[shape] ${what} did not match its schema — ${where}`, value)
-  return null
+export function describeZodError(error: z.ZodError): string {
+  return error.issues.map(issueLine).slice(0, 3).join('; ')
 }

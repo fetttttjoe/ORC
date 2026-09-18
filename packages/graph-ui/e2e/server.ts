@@ -2,7 +2,7 @@
 // scripted copilot, kernel-backed newTask — everything else read-only-stubbed.
 import { MockLanguageModelV4 } from 'ai/test'
 import { AUTHOR_SOURCE, EVENT_KIND, FAILURE_CLASS, STEP_ID, TASK_STATUS, WORKSPACE_KIND } from '@orc/contracts'
-import { TEST_WORKSPACE_ID, stepFixture } from '@orc/contracts/fixtures'
+import { TEST_WORKSPACE_ID, semanticNoteFixture, stepFixture } from '@orc/contracts/fixtures'
 import { draftFixture } from '@orc/contracts/fixtures'
 
 /** the one step draftFixture ships with — the monitor keys its ceiling off this id */
@@ -49,6 +49,42 @@ await storage.events.append({
   taskId: finishing.id, stepId: STEP_ID.finish, runToken: 'e2e-finish-run', kind: EVENT_KIND.feedback_requested,
   payload: { topic: 'finish', question: FINISH_GATE_QUESTION },
 })
+
+// TWO open questions on ONE task, different topics, neither answered. operatorState's
+// openQuestions is keyed by (taskId, topic) — task-only would collapse this pair into one entry,
+// and a `{#each}` keyed on taskId alone would then render one gate card where the operator is
+// actually owed two answers.
+const MULTI_Q_TOPIC_A = 'grounding-model'
+const MULTI_Q_TOPIC_B = 'grounding-cwd'
+const MULTI_Q_QUESTION_A = 'which model should analyze this?'
+const MULTI_Q_QUESTION_B = 'which checkout should this run in?'
+const multiQuestion = await kernel.createTask({ workspaceId: workspace.id, title: 'multi-question request', spec: 'needs two answers before it can start' })
+await storage.events.append({
+  taskId: multiQuestion.id, stepId: null, runToken: 'e2e-multi-q-run', kind: EVENT_KIND.feedback_requested,
+  payload: { topic: MULTI_Q_TOPIC_A, question: MULTI_Q_QUESTION_A },
+})
+await storage.events.append({
+  taskId: multiQuestion.id, stepId: null, runToken: 'e2e-multi-q-run', kind: EVENT_KIND.feedback_requested,
+  payload: { topic: MULTI_Q_TOPIC_B, question: MULTI_Q_QUESTION_B },
+})
+
+// A copilot exchange, then 450 tool_call events with no exchange among them. The copilot pane
+// used to restore history from a fixed-size tail of the WHOLE project log (api.log's `limit`); a
+// burst of agent-loop noise after the one exchange it needs to find pushed it out of that window
+// entirely — reproduced here, not hypothesised. The view-registry fix filters by KIND before
+// slicing (timeline.ts), so the exchange is found regardless of what runs after it.
+const BURIED_EXCHANGE_USER = 'what happened while I was away?'
+const BURIED_EXCHANGE_ASSISTANT = 'a step failed and was retried; the retry is running now'
+await storage.events.append({
+  taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.copilot_exchange,
+  payload: { user: BURIED_EXCHANGE_USER, assistant: BURIED_EXCHANGE_ASSISTANT, toolCalls: [], modelRef: 'mock/e2e' },
+})
+for (let i = 1; i <= 450; i++) {
+  await storage.events.append({
+    taskId: seeded.id, stepId: STEP_ID.analyze, runToken: 'e2e-noise-run', kind: EVENT_KIND.tool_call,
+    payload: { stepId: STEP_ID.analyze, runToken: 'e2e-noise-run', iteration: i, toolCallId: `noise-${i}`, toolName: 'noise_tool', input: { i } },
+  })
+}
 
 // The log tab's pin-to-bottom is only observable when the inspector actually overflows — a
 // handful of seeded lifecycle events all fit the 900px viewport, so "pinned" would be trivially
@@ -128,6 +164,31 @@ await storage.events.append({
 await storage.events.append({
   taskId: rejected.id, stepId: null, runToken: null, kind: EVENT_KIND.task_status_changed,
   payload: { taskId: rejected.id, from: TASK_STATUS.approved, to: TASK_STATUS.blocked },
+})
+
+// A NOTE and an ARTIFACT, so the contract test can assert their detail shapes against a real
+// server. Four wire-vs-server disagreements stayed invisible because the fixture had neither: the
+// artifact record arrives bare and was read as if wrapped, and a note's claims, sources and
+// nullable sourceRevision each cost the whole note when the schema was wrong about them.
+await storage.events.append({
+  taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_written,
+  payload: {
+    note: semanticNoteFixture({
+      id: 'e2e-note', title: 'a fixture note',
+      summary: 'what the console renders in the inspector',
+      // the three fields whose absence hid a schema bug: a citation (not a bare string), a claim
+      // carrying the revision it was recorded at, and a null sourceRevision
+      sources: [{ url: 'https://example.invalid/spec', title: 'the spec', retrievedAt: '2026-09-18T00:00:00.000Z' }],
+      // CLAIM_ID_RE: 12 hex characters, so a claim id is the same shape wherever it is quoted
+      claims: [{ id: 'a1b2c3d4e5f6', text: 'the console reads notes through the view registry', sourceRevision: null }],
+      sourceRevision: null,
+    }),
+    author: { source: AUTHOR_SOURCE.cli, workspaceId: TEST_WORKSPACE_ID },
+  },
+})
+await storage.events.append({
+  taskId: seeded.id, stepId: STEP_ID.analyze, runToken: 'e2e-artifact-run', kind: EVENT_KIND.artifact_produced,
+  payload: { path: 'hello.txt', size: 12, sha256: 'a'.repeat(64) },
 })
 
 const copilotModel = new MockLanguageModelV4({

@@ -6,37 +6,15 @@
   import TaskChip from '$lib/components/TaskChip.svelte'
   import { Button } from '$lib/components/ui/button'
   import { Textarea } from '$lib/components/ui/textarea'
-  import { createQuery, keepPreviousData } from '@tanstack/svelte-query'
   import { actions, replyReceipt } from '$lib/api/actions'
-  import { api } from '$lib/api/client'
-  import { qk } from '$lib/query-keys'
   import { notify } from '$lib/notify'
   import { session } from '$lib/stores/session.svelte'
-  import type { OpenGate } from '$lib/stores/ledger.svelte'
+  import type { OpenQuestion } from '@orc/ui-core/wire'
 
-  let { gate }: { gate: OpenGate } = $props()
+  let { gate }: { gate: OpenQuestion } = $props()
 
   let text = $state('')
   let busy = $state(false)
-
-  // The ledger line is a 120-char summary with a "Q: " prefix; the full question is in the
-  // transcript. Answering a truncated question is answering the wrong one, so the gate reads
-  // the verbatim text and only falls back to the summary while that is in flight.
-  const transcript = createQuery(() => ({
-    queryKey: qk.taskTranscript(gate.taskId, gate.stepId),
-    queryFn: () => api.transcript(session.sel.project, gate.taskId, gate.stepId ?? undefined),
-    enabled: session.sel.project !== '',
-    // keep the last good answer on screen while a refetch runs
-    placeholderData: keepPreviousData,
-  }))
-  const verbatim = $derived.by(() => {
-    const items = transcript.data ?? []
-    for (let i = items.length - 1; i >= 0; i -= 1) {
-      const item = items[i]
-      if (item?.kind === 'question' && item.answer === null) return item.question
-    }
-    return gate.question.replace(/^Q:\s*/, '')
-  })
 
   // the grounded plan step's question earns one-click approve: it is the one place the kernel
   // reads the answer as more than plain text (it freezes the plan the human just saw); the
@@ -67,7 +45,11 @@
     <span class="font-mono text-label text-human/70">#{gate.seq}</span>
   </div>
 
-  <p class="mb-2.5 text-[13px] leading-relaxed break-words whitespace-pre-wrap text-paper">{verbatim}</p>
+  <!-- `gate.question` is the agent's own text, straight from the event payload — the view registry
+       carries it verbatim (see openQuestions() in ui-core), never the ledger's clipped, `Q: `-
+       prefixed summary line. Answering a truncated question was answering the wrong one; this
+       pane no longer needs a transcript fetch to recover the real wording. -->
+  <p class="mb-2.5 text-[13px] leading-relaxed break-words whitespace-pre-wrap text-paper">{gate.question}</p>
 
   {#if session.canAnswer()}
     <div class="flex items-start gap-2">

@@ -1,45 +1,42 @@
-import { EVENT_KIND, ModelsDiscoveredPayload, ZERO_USAGE, addUsage, emptyMemoryFold, errorMessage, foldMemory, foldMemoryInto, noteKey, noteLabel, type EventKind, type EventRecord, type MemoryFold, type Plan, type Usage } from '@orc/contracts'
-import { emptyFold, fold, foldInto, foldPlanNotes, listProjectIds, openStorage, planScope, stepUsage, taskUsage, watchProjectIds, type FoldAcc, type ProjectIdsWatch, type Storage } from '@orc/kernel'
-import { NODE_PREFIX, PROJECT_DIR_NOTE_ID, PROJECT_NAME_NOTE_ID, buildGraph, diffGraphs, emptyPatch, type Graph, type GraphPatch } from './graph'
-import { todoWaves, type StepStatusEntry, type TodoWave } from './diagram'
-
+import { emptyMemoryFold, errorMessage, foldMemory, foldMemoryInto, noteKey, type EventRecord, type MemoryFold } from '@orc/contracts'
+import { emptyFold, fold, foldInto, listProjectIds, openStorage, watchProjectIds, type FoldAcc, type ProjectIdsWatch, type Storage } from '@orc/kernel'
 // the project's display name / working directory live in memory notes — event-sourced,
-// rebuild-safe, no schema; ids + view filtering live in graph.ts (imported below)
-
-// latest models_discovered per provider IS the catalog (append-on-change upstream)
-function foldModelCatalog(events: Array<Pick<EventRecord, 'kind' | 'payload'>>): Map<string, string[]> {
-  const catalog = new Map<string, string[]>()
-  for (const e of events) {
-    if (e.kind !== EVENT_KIND.models_discovered) continue
-    const p = ModelsDiscoveredPayload.safeParse(e.payload)
-    if (p.success) catalog.set(p.data.providerId, p.data.models)
-  }
-  return catalog
-}
-import { shouldAdmitLogRow, summarizeEvent, type LogRow } from './summarize'
-import { foldTranscript, type TranscriptItem } from './transcript'
+// rebuild-safe, no schema; ids + view filtering live in graph.ts
+import { PROJECT_DIR_NOTE_ID, PROJECT_NAME_NOTE_ID, buildGraph, diffGraphs, emptyPatch, type Graph, type GraphPatch } from './graph'
+import { summarizeEvent, type LogRow } from './summarize'
+import type { ReadModel } from './views/view'
 
 export interface SessionSnapshot { seq: number; graph: Graph }
-// patch may be EMPTY (adapters filter); summary is null only for since()'s synthetic catch-up
-export interface SessionUpdate { seq: number; patch: GraphPatch; event: EventRecord | null; summary: LogRow | null }
+
+/**
+ * One notification: what changed, and the read model it changed INTO.
+ *
+ * patch may be EMPTY (adapters filter); summary and event are null for a synthetic update —
+ * since()'s catch-up, and the repair a truncated log produces.
+ *
+ * `model` is the session's state AS OF `seq`, handed over rather than fetched back. A subscriber
+ * that took its own would get whatever the session held by the time it asked, which is still this
+ * moment only while the event pump happens to be serial and each handler happens to await before
+ * folding — so a frame's `seq` and the state it described were two facts kept equal by an invariant
+ * two packages away, with nothing failing when it moved. Handing it over makes that unaskable.
+ *
+ * It carries the same contract as ProjectSessions.model, with the callback's tick as the window:
+ * CONSUME IT INSIDE THE CALLBACK, never keep it, never mutate it. The arrays and maps are the
+ * session's own: the next event appends to `events`/`state`/`memory` in place and replaces `graph`
+ * wholesale (a fresh `buildGraph` result each fold) — either way, a held reference stops tracking,
+ * so consume it inside the callback.
+ */
+export interface SessionUpdate { seq: number; patch: GraphPatch; event: EventRecord | null; summary: LogRow | null; model: ReadModel }
 export type Unsubscribe = () => void
 
 // One chats-list entry: id always; name/dir resolve from the project's identity notes and are
 // null until that project's session has been opened (foreign, never-viewed projects).
 export interface ProjectEntry { id: string; name: string | null; dir: string | null }
 
-// nodeDetail's model-node shape — exported so the page aliases it (page/api.ts's ModelDetailView)
-// instead of re-spelling the fields by hand at the cast site, the same PlanStepView/PlanNoteView
-// posture api.ts already states for the plan shapes.
-export interface ModelDetail {
-  ref: string
-  tasks: Array<{ taskId: string; title: string; status: string; calls: number; usage: Usage }>
-  totals: Usage
-}
-
-// The one live store every adapter (web server, future TUI) subscribes to. Transport-free:
-// callers get snapshots, per-event patches, catch-up patches, and node detail — never SQL,
-// never HTTP.
+// The one live store every adapter (web server, future TUI) subscribes to. Transport-free, and
+// read-free: callers get the read model itself, graph snapshots and per-event patches — never SQL,
+// never HTTP, and never a per-question method. What can be ASKED of the model lives in the view
+// registry, so a new question costs no method here and none in any adapter.
 export interface ProjectSessions {
   projects(): Promise<ProjectEntry[]>
   // membership/name push: fires with the fresh, name-resolved list whenever it actually changed —
@@ -48,35 +45,28 @@ export interface ProjectSessions {
   // the adapter that performs them calls notifyProjectsChanged() afterwards.
   subscribeProjects(cb: (projects: ProjectEntry[]) => void): Promise<Unsubscribe>
   notifyProjectsChanged(): Promise<void>
+  // The cache under the narrow face a view reads: folded state and the events behind it, with no
+  // route from it back to storage or the subscriber set. A door answers a read by handing this to
+  // readView, so adding a view costs no method here and no method in any adapter.
+  //
+  // LIVE, not a copy — the arrays and maps are the session's own, and the subscriber path appends
+  // to them as events arrive. So a model is coherent only within the tick it was taken in: TAKE
+  // IT, ANSWER, DISCARD. Never hold one across an await, and never mutate what it hands back. The
+  // failure it guards against is an envelope whose `seq` was read before an await and whose rows
+  // were read after — a client told "you are current at 41" while holding rows up to 43 never asks
+  // for 42 and 43 again, and the two events are simply gone from its feed. Copying instead would
+  // cost a full fold per read, which is the expense this cache exists to avoid.
+  model(projectId: string): Promise<ReadModel>
   snapshot(projectId: string): Promise<SessionSnapshot>
   // fires on EVERY event: the patch may be empty, the summary/log row is always present —
   // graph adapters filter on the patch, feed adapters (log, chat, TUI) consume the summary
   subscribe(projectId: string, cb: (u: SessionUpdate) => void): Promise<Unsubscribe>
   // catch-up for resume: one cumulative patch from a client's seq to now (null when current)
   since(projectId: string, fromSeq: number): Promise<SessionUpdate | null>
-  nodeDetail(projectId: string, nodeId: string): Promise<unknown | null>
-  // event-sourced provider/model refs — [] until a discovery has been appended
-  modelCatalog(projectId: string): Promise<string[]>
   // drop a cached session (after a purge): the next read refolds from the log. Live SSE
   // subscribers of the old session go silent — the initiating client re-attaches itself;
   // other tabs stay stale until their next reload.
   reset(projectId: string): Promise<void>
-  transcript(projectId: string, taskId: string, stepId?: string): Promise<TranscriptItem[]>
-  taskPlans(projectId: string, taskId: string): Promise<{
-    versions: Plan[]
-    approvedVersion: number | null
-    // the wave layering of the approved (else latest) version — conversation cards + request view
-    visual: { version: number; waves: TodoWave[] } | null
-  } | null>
-  // grounded decomposition: the plan-note graph living in the task's plan memory scope. The notes
-  // carry their own decomposes_into/depends_on links, so a client draws the graph from these.
-  planNotes(projectId: string, taskId: string): Promise<{ notes: ReturnType<typeof foldPlanNotes> }>
-  // sinceSeq/kinds make the log incrementally POLLABLE: a reader that remembers the last seq it
-  // saw asks only for what came after it (and only the kinds it cares about) instead of
-  // re-reading the whole tail. beforeSeq pages the OTHER way — the ledger asks for what precedes
-  // its oldest row. All filters apply BEFORE the limit slice, so the result is the newest
-  // `limit` MATCHING rows. sinceSeq and beforeSeq are both exclusive.
-  log(projectId: string, opts?: { taskId?: string; limit?: number; sinceSeq?: number; beforeSeq?: number; kinds?: EventKind[] }): Promise<LogRow[]>
   close(): Promise<void>
 }
 
@@ -99,6 +89,11 @@ export function createProjectSessions(opts: {
   halfLifeDays?: number
 }): ProjectSessions {
   const sessions = new Map<string, Promise<Session>>()
+
+  // The session's own arrays under the narrow face a view reads — no copy, so this is only as
+  // current as the tick it is read in. The ONE place the model is assembled, shared by model() and
+  // by every notification.
+  const liveModel = (s: Session): ReadModel => ({ seq: s.seq, events: s.events, state: s.acc.state, memory: s.mem, graph: s.graph })
 
   async function open(projectId: string): Promise<Session> {
     const storage = await openStorage(opts.url, { projectId })
@@ -127,21 +122,25 @@ export function createProjectSessions(opts: {
       session.graph = buildGraph(session.acc.state, session.mem, { halfLifeDays: opts.halfLifeDays })
       session.seq = session.events.at(-1)?.seq ?? 0
     }
+    // Every notification carries the state it notified ABOUT, built here — after the fold, before
+    // the callbacks, inside the same tick.
+    const notify = (u: Omit<SessionUpdate, 'model'>): void => {
+      const model = liveModel(session)
+      for (const cb of session.subscribers) cb({ ...u, model })
+    }
     // The truncation check below needs an event to arrive; a re-created log never delivers one
     // (our cursor sits above every new row), so the log reports it here instead.
     const onReset = async (): Promise<void> => {
       const stale = session.graph
       await reload()
-      const repair = diffGraphs(stale, session.graph)
-      for (const cb of session.subscribers) cb({ seq: session.seq, patch: repair, event: null, summary: null })
+      notify({ seq: session.seq, patch: diffGraphs(stale, session.graph), event: null, summary: null })
     }
     session.unsubscribe = await storage.events.subscribe({ fromSeq: session.seq, onReset }, async e => {
       const oldest = session.events[0]?.seq ?? 0
       if (oldest !== 0 && await storage.events.earliestSeq() !== oldest) {
         const stale = session.graph
         await reload()
-        const repair = diffGraphs(stale, session.graph)
-        for (const cb of session.subscribers) cb({ seq: session.seq, patch: repair, event: e, summary: summarizeEvent(e) })
+        notify({ seq: session.seq, patch: diffGraphs(stale, session.graph), event: e, summary: summarizeEvent(e) })
         return
       }
       session.events.push(e)
@@ -151,8 +150,7 @@ export function createProjectSessions(opts: {
       const patch = diffGraphs(session.graph, next)
       session.graph = next
       session.seq = e.seq
-      const summary = summarizeEvent(e)
-      for (const cb of session.subscribers) cb({ seq: e.seq, patch, event: e, summary })
+      notify({ seq: e.seq, patch, event: e, summary: summarizeEvent(e) })
     })
     return session
   }
@@ -167,6 +165,11 @@ export function createProjectSessions(opts: {
     }
     return s
   }
+
+  // Taken fresh per call, and only after the await that guarantees the session is open: `seq` and
+  // the arrays beside it then describe one moment. Holding the result instead — see the contract
+  // on ProjectSessions.model — lets them describe two.
+  const modelFor = async (projectId: string): Promise<ReadModel> => liveModel(await sessionFor(projectId))
 
   // listed = has events. Purge keeps its project listed by re-seeding identity notes;
   // a DELETED project has zero events and correctly disappears — even the server's own.
@@ -220,6 +223,8 @@ export function createProjectSessions(opts: {
       await emitProjects()
     },
 
+    model: modelFor,
+
     async snapshot(projectId) {
       const s = await sessionFor(projectId)
       return { seq: s.seq, graph: s.graph }
@@ -236,113 +241,9 @@ export function createProjectSessions(opts: {
       if (fromSeq >= s.seq) return null
       const past = s.events.filter(e => e.seq <= fromSeq)
       const patch = diffGraphs(buildGraph(fold(past), foldMemory(past), { halfLifeDays: opts.halfLifeDays }), s.graph)
-      return emptyPatch(patch) ? null : { seq: s.seq, patch, event: null, summary: null }
-    },
-
-    async nodeDetail(projectId, nodeId) {
-      const s = await sessionFor(projectId)
-      if (nodeId.startsWith(NODE_PREFIX.step)) {
-        const [, taskId, stepId] = nodeId.split(':')
-        if (!taskId || !stepId) return null
-        const plans = s.acc.state.plans.get(taskId)
-        const plan = plans?.approvedVersion != null ? plans.versions.find(v => v.version === plans.approvedVersion) : undefined
-        const step = plan?.steps.find(st => st.id === stepId)
-        if (!step) return null
-        return { step, run: s.acc.state.steps.get(taskId)?.get(stepId) ?? null }
-      }
-      if (nodeId.startsWith(NODE_PREFIX.artifact)) {
-        const [, taskId, ...pathParts] = nodeId.split(':')
-        const path = pathParts.join(':') // artifact paths may contain ':'
-        return (s.acc.state.artifacts.get(taskId ?? '') ?? []).find(a => a.path === path) ?? null
-      }
-      if (nodeId.startsWith(NODE_PREFIX.model)) {
-        // performance lens: every task this model took over, with per-model usage summed from
-        // the agent_call events of exactly the steps that ran on it
-        const ref = nodeId.slice(NODE_PREFIX.model.length)
-
-        const tasks: ModelDetail['tasks'] = []
-        for (const t of s.acc.state.tasks.values()) {
-          const tp = s.acc.state.plans.get(t.id)
-          const plan = tp?.approvedVersion != null ? tp.versions.find(v => v.version === tp.approvedVersion) : undefined
-          const stepIds = new Set((plan?.steps ?? []).filter(st => st.modelRef === ref).map(st => st.id))
-          if (stepIds.size === 0) continue
-          let usage: Usage = ZERO_USAGE
-          let calls = 0
-          for (const e of s.events) {
-            if (e.kind !== EVENT_KIND.agent_call || e.taskId !== t.id || !e.stepId || !stepIds.has(e.stepId) || !e.usage) continue
-            usage = addUsage(usage, e.usage)
-            calls++
-          }
-          tasks.push({ taskId: t.id, title: t.title, status: t.status, calls, usage })
-        }
-        if (tasks.length === 0) return null
-        const detail: ModelDetail = { ref, tasks, totals: tasks.reduce((acc, t) => addUsage(acc, t.usage), ZERO_USAGE) }
-        return detail
-      }
-      if (nodeId.startsWith(NODE_PREFIX.note)) {
-        const key = nodeId.slice(NODE_PREFIX.note.length) // `${scope}\u0000${id}`
-        const live = s.mem.notes
-        const payload = live.get(key)
-        if (!payload) return null
-        const [scope, id] = key.split('\u0000')
-        const hits = s.mem.access.get(key)?.hits ?? 0
-        // backlinks: notes whose links target this note (links resolve same-scope)
-        const backlinks = [...live.values()]
-          .filter(({ note }) => note.scope === scope && note.links.some(l => l.id === id))
-          .map(({ note }) => ({ id: note.id, scope: note.scope, title: note.title, kind: noteLabel(note) }))
-        return { ...payload, hits, backlinks }
-      }
-      const task = s.acc.state.tasks.get(nodeId)
-      if (!task) return null
-      // artifacts dedup by (path, sha): a verify step re-declaring the same output is one
-      // artifact, not two — the raw per-event list stays available on the artifact node itself
-      const arts = new Map((s.acc.state.artifacts.get(nodeId) ?? []).map(a => [`${a.path}\u0000${a.sha256}`, a] as const))
-      return {
-        task,
-        usage: taskUsage(s.acc.state, nodeId),
-        steps: [...(s.acc.state.steps.get(nodeId)?.values() ?? [])].map(st => ({ ...st, usage: stepUsage(s.acc.state, nodeId, st.stepId) })),
-        artifacts: [...arts.values()],
-        // token-economy made visible: how often this task pulled knowledge instead of re-reading
-        // (memory_accessed envelopes are task-bound since the store threads author identity)
-        memoryPulls: s.events.filter(e => e.kind === EVENT_KIND.memory_accessed && e.taskId === nodeId).length,
-      }
-    },
-
-    async transcript(projectId, taskId, stepId) {
-      const s = await sessionFor(projectId)
-      return foldTranscript(s.events, taskId, stepId)
-    },
-
-    async taskPlans(projectId, taskId) {
-      const s = await sessionFor(projectId)
-      const tp = s.acc.state.plans.get(taskId)
-      if (!tp) return null
-      const shown = (tp.approvedVersion != null ? tp.versions.find(v => v.version === tp.approvedVersion) : undefined) ?? tp.versions.at(-1)
-      // Fresh Map, so the raw run-status fold is never mutated. A step with no run entry yet has
-      // no status, and todoWaves reports it 'pending'.
-      const states = new Map<string, StepStatusEntry>(
-        [...(s.acc.state.steps.get(taskId) ?? [])].map(([id, st]) =>
-          [id, { status: st.status, ...(st.failure && { failureClass: st.failure.class }) }]),
-      )
-      return {
-        versions: tp.versions,
-        approvedVersion: tp.approvedVersion,
-        visual: shown ? { version: shown.version, waves: todoWaves(shown.steps, states) } : null,
-      }
-    },
-
-    async planNotes(projectId, taskId) {
-      const s = await sessionFor(projectId)
-      // The child-step status correlation that used to live here fed decompositionMermaid alone,
-      // and went with it: it walked every child task and its plan versions on each call to colour
-      // a diagram no surface drew. The notes themselves already carry the decomposition links, so
-      // a client that wants to draw it has everything it needs.
-      return { notes: foldPlanNotes(s.events, planScope(taskId)) }
-    },
-
-    async modelCatalog(projectId) {
-      const s = await sessionFor(projectId)
-      return [...foldModelCatalog(s.events).entries()].flatMap(([pid, models]) => models.map(m => `${pid}/${m}`)).sort()
+      // the model beside the patch is the state the catch-up brings the caller UP TO, taken in the
+      // same tick as the `seq` it is labelled with
+      return emptyPatch(patch) ? null : { seq: s.seq, patch, event: null, summary: null, model: liveModel(s) }
     },
 
     async reset(projectId) {
@@ -351,29 +252,6 @@ export function createProjectSessions(opts: {
       sessions.delete(projectId)
       const s = await p.catch(() => null)
       if (s) { await s.unsubscribe(); await s.storage.close() }
-    },
-
-    async log(projectId, opts = {}) {
-      const s = await sessionFor(projectId)
-      const limit = opts.limit ?? 200
-      // Untargeted (opts.taskId undefined = whole-project Conversation view): every event,
-      // unfiltered — slice then summarize, exactly as before. Task-scoped: summarize, then route
-      // through shouldAdmitLogRow — the ONE per-task admission rule, and server-side on purpose:
-      // the browser asks for a task's rows rather than filtering a whole-project tail itself, so
-      // a project-scoped memory row is admitted only when payload.author.taskId matches the filter,
-      // never blanket-admitted by null taskId. Filter must precede slice to return the last
-      // `limit` MATCHING rows, not the last `limit` events of which few may match.
-      // sinceSeq/kinds narrow the SAME rows before the slice, for the same reason the taskId
-      // filter does: a poller asking for "everything after seq N" must get the newest matching
-      // rows, not the newest `limit` events of which few (or none) are new.
-      const { taskId, sinceSeq, beforeSeq, kinds } = opts
-      const kindSet = kinds && kinds.length > 0 ? new Set<string>(kinds) : null
-      const narrow = (rows: LogRow[]) => rows.filter(r =>
-        (sinceSeq === undefined || r.seq > sinceSeq) && (beforeSeq === undefined || r.seq < beforeSeq) && (kindSet === null || kindSet.has(r.kind)))
-      // unfiltered whole-project tail: slice first, summarize only what is returned (unchanged)
-      if (taskId === undefined && sinceSeq === undefined && beforeSeq === undefined && kindSet === null) return s.events.slice(-limit).map(summarizeEvent)
-      if (taskId === undefined) return narrow(s.events.map(summarizeEvent)).slice(-limit)
-      return narrow(s.events.map(summarizeEvent).filter(r => shouldAdmitLogRow(r, taskId))).slice(-limit)
     },
 
     async close() {

@@ -7,6 +7,8 @@
     "./fixtures": "./src/fixtures.ts",
     "./task": "./src/task.ts",
     "./event-kinds": "./src/event-kinds.ts",
+    "./guards": "./src/guards.ts",
+    "./feedback-key": "./src/feedback-key.ts",
     "./memory": "./src/memory.ts",
     "./execution": "./src/execution.ts",
     "./approval-answer": "./src/approval-answer.ts",
@@ -14,7 +16,9 @@
     "./ids": "./src/ids.ts",
     "./step-ids": "./src/step-ids.ts",
     "./health": "./src/health.ts",
-    "./plan-layering": "./src/plan-layering.ts"
+    "./plan-layering": "./src/plan-layering.ts",
+    "./feedback-open": "./src/feedback-open.ts",
+    "./group-by-workspace": "./src/group-by-workspace.ts"
   },
   "dependencies": {
     "zod": "^4.4.3"

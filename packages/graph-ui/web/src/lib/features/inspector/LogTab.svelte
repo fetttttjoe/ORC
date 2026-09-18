@@ -3,27 +3,19 @@
   import * as Empty from '$lib/components/ui/empty'
   import { Skeleton } from '$lib/components/ui/skeleton'
   // the ledger filtered to this task — same rows, same renderer, one source of truth for shape
-  import { createQuery, keepPreviousData } from '@tanstack/svelte-query'
+  import { createQuery } from '@tanstack/svelte-query'
   import LedgerRow from '$lib/features/ledger/LedgerRow.svelte'
-  import { api } from '$lib/api/client'
+  import { viewQuery } from '$lib/api/view-query'
+  import { VIEW } from '@orc/ui-core/wire'
   import { taskIdOf } from '$lib/node-id'
-  import { session } from '$lib/stores/session.svelte'
-  import { qk } from '$lib/query-keys'
 
   const LOG_LIMIT = 200
 
   let { nodeId }: { nodeId: string } = $props()
 
-  const project = $derived(session.sel.project)
   const taskId = $derived(taskIdOf(nodeId))
 
-  const log = createQuery(() => ({
-    queryKey: qk.taskLog(taskId ?? ''),
-    queryFn: () => api.log(project, { ...(taskId !== null && { task: taskId }), limit: LOG_LIMIT }),
-    enabled: taskId !== null && project !== '',
-    // keep the last good answer on screen while a refetch runs
-    placeholderData: keepPreviousData,
-  }))
+  const log = createQuery(viewQuery(VIEW.timeline, () => (taskId !== null ? { taskId, limit: LOG_LIMIT } : null)))
 </script>
 
 {#if taskId === null}

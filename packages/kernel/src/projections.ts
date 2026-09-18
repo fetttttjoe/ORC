@@ -420,6 +420,23 @@ export function retryIsFutile(state: State, taskId: string): boolean {
   return steps.length > 0 && steps.every(s => s.failure?.class === FAILURE_CLASS.rejected)
 }
 
+/**
+ * Whether a retry of this task would be SERVED — the whole admission rule, spelled once.
+ *
+ * Three sites need this verdict and only two of them can raise an error: the actions door and the
+ * execution port each refuse with their own message, and a read model has to decide whether to
+ * OFFER the retry at all. An offer derived from anything else contradicts the refusal that follows
+ * it — reading it off the event order ("a step failed, and nothing has started since") calls a
+ * verdict-blocked task retryable, and leaves a task that was cancelled out of `blocked` retryable
+ * forever, because no later event unsets that reading.
+ *
+ * `blocked` is the only status with a run waiting to resume: every other one has either no failure
+ * to clear or has already settled. Pure over State, so the offer and the refusal read one fact.
+ */
+export function canRetry(state: State, taskId: string): boolean {
+  return state.tasks.get(taskId)?.status === TASK_STATUS.blocked && !retryIsFutile(state, taskId)
+}
+
 export function nextAttempts(state: State, taskId: string, plan: Pick<Plan, 'steps'>): Record<string, number> {
   const out: Record<string, number> = {}
   // A step folded `running` normally means a LIVE attempt, and reusing its number is what makes the

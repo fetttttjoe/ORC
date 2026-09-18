@@ -20,7 +20,8 @@ import { errorMessage, toolError, type MemoryAuthor, type ResolvedTool, type Sup
 import type { EventLog, ProjectConfig } from '@orc/kernel'
 import { MEMORY_READ_TOOLS, MEMORY_ROLE, createDriftProbe, createMemory, createWorkspaceView, memoryTools as buildMemoryTools, probeMemory, unavailableMemoryTools } from '@orc/memory'
 import { openMemory } from './memory-open'
-import { asResolvedTools, buildCopilotTools, createProjectSessions, type OrcActions } from '@orc/ui-core'
+import { asResolvedTools, buildCopilotTools, createProjectSessions, viewOf, type OrcActions } from '@orc/ui-core'
+import { VIEW } from '@orc/ui-core/wire'
 
 export type Autonomy = 'gated' | 'full'
 
@@ -76,11 +77,12 @@ export function buildServeTools(deps: {
 }): ResolvedTool[] {
   return [
     // one tool definition, two doors: the copilot set (read + mutate-without-approve, P2).
-    // listModels is wired here too — this door drives agents that must never invent a model
-    // ref, and modelCatalog (already a sessions dep) is all buildCopilotTools needs to serve it.
+    // listModels is wired here too — this door drives agents that must never invent a model ref,
+    // and the catalog is one more view over the read model this door already holds. An empty
+    // catalog, never a 404: a project with no discovery yet has no models to name.
     ...asResolvedTools(buildCopilotTools({
       sessions: deps.sessions, actions: deps.actions, projectId: deps.projectId,
-      listModels: () => deps.sessions.modelCatalog(deps.projectId),
+      listModels: () => viewOf(deps.sessions, deps.projectId, VIEW.models, {}).then(refs => refs ?? []),
       ...(deps.health && { health: deps.health }),
       ...(deps.listWorkspaces && { listWorkspaces: deps.listWorkspaces }),
     })),

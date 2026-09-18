@@ -43,7 +43,7 @@ auto-migrating it: the log's shape is a deliberate act, never a boot side effect
 | `contracts` (`@orc/contracts`) | The seam layer: zod schemas + extension-point interfaces + pure helpers; the leaf of the dependency DAG, zod its only dependency. |
 | `kernel` (`@orc/kernel`) | The event-log writer, the Postgres storage cluster, the fold/projection layer, the plugin host, config, and the DBOS-durable execution engine. |
 | `cli` (`@orc/cli`) | The composition root: wires kernel + plugin host + DBOS port + memory into one process and exposes two doors (web / MCP) plus the CLI itself. |
-| `ui-core` (`@orc/ui-core`) | The transport-free `ProjectSessions` read API — snapshots, patches, graph/diagram/copilot derivations — over the log fold + memory fold. |
+| `ui-core` (`@orc/ui-core`) | The transport-free `ProjectSessions` read API (snapshots, patches, the folded read model) plus the view registry that answers every named read over it — over the log fold + memory fold. |
 | `graph-ui` (`@orc/graph-ui`) | The one shipped UI adapter: a Bun HTTP+SSE server plus a sigma.js WebGL browser bundle over `ui-core`. |
 | `vault-projector` (`@orc/vault-projector`) | Folds the log into a git-friendly markdown vault (task index/log/execution/lineage/plan/session files). |
 
@@ -993,7 +993,7 @@ Single writer for the whole trace subtree. Per file: (1) load `.orc-manifest.jso
 function createProjectSessions(opts: { url: string; cwdProject?: {...}; halfLifeDays?: number }): ProjectSessions
 ```
 
-`ProjectSessions`: `projects()`, `subscribeProjects()`, `notifyProjectsChanged()`, `snapshot(projectId)`, `subscribe(projectId, cb)`, `since(projectId, fromSeq)`, `nodeDetail(projectId, nodeId)`, `modelCatalog(projectId)`, `reset(projectId)`, `transcript(...)`, `taskPlans(...)`, `planNotes(...)`, `log(...)`, `close()`. The interface's own comment: *"Transport-free: callers get snapshots, per-event patches, catch-up patches, and node detail — never SQL, never HTTP."*
+`ProjectSessions`: `projects()`, `subscribeProjects()`, `notifyProjectsChanged()`, `model(projectId)` (the live `ReadModel { seq, events, state, memory, graph }` every view answers questions against), `snapshot(projectId)`, `subscribe(projectId, cb)`, `since(projectId, fromSeq)`, `reset(projectId)`, `close()`. Read-free by design — the interface's own comment: *"callers get the read model itself, graph snapshots and per-event patches — never SQL, never HTTP, and never a per-question method. What can be ASKED of the model lives in the view registry, so a new question costs no method here and none in any adapter."*
 
 One **`Session`** object per open `projectId` (cached in a `Map<string, Promise<Session>>`, opened lazily, evicted on a failed open). `open(projectId)`:
 1. `openStorage(opts.url, { projectId })`, reads **every** event.
@@ -1002,7 +1002,33 @@ One **`Session`** object per open `projectId` (cached in a `Map<string, Promise<
 4. Subscribes to the live feed. On each new event: push it, `foldInto`/`foldMemoryInto` **in place**, rebuild `Graph`, `diffGraphs(old, new)` to a `GraphPatch`, fan `{ seq, patch, event, summary }` to subscribers. (An inline `ponytail` comment flags this as O(events) per event.)
 5. **Truncation/reset handling**: because Postgres can be externally truncated (`orc purge`) with no event announcing it, two paths repair it — `onReset` (fired structurally by the storage layer) and an in-handler `earliestSeq() !== oldest` check. Either path: **rebuild from the log, diff against the stale in-memory graph, emit the diff as a patch**.
 
-Key read methods: `snapshot` (`{ seq, graph }`); `subscribe` (fires on **every event**, patch may be empty but `summary` always present); `since(fromSeq)` (catch-up: refolds `≤ fromSeq`, diffs, returns `null` if empty); `nodeDetail` (one switch on `NODE_PREFIX` — `step:`, `artifact:`, `note:`, `model:`, else task); `log(opts)` (routes through `summarizeEvent`, filters via `shouldAdmitLogRow` **before** `.slice(-limit)`); `reset` (drops the cached `Session`).
+Key read methods: `snapshot` (`{ seq, graph }`); `subscribe` (fires on **every event**, patch may be empty but `summary` always present); `since(fromSeq)` (catch-up: refolds `≤ fromSeq`, diffs, returns `null` if empty); `reset` (drops the cached `Session`). Every per-question read — node detail, a task's plans/plan-notes/transcript, the model catalog, the log — is a `View` answered against `model(projectId)`; see the `views/` section below.
+
+##### `views/` — the view registry: every read, named once
+
+`wire.ts` declares the read vocabulary the server and browser both import: `ViewName` (`timeline`,
+`node`, `transcript`, `plans`, `planNotes`, `models`, `operatorState`) and `WIRE`, each name's param
+schema and result schema, `as const satisfies Record<ViewName, ...>` — a name added to `ViewName`
+with no matching `WIRE` entry fails the build. `view.ts` declares the two interfaces every view and
+non-view read share: `Touchable<P>` (`touches(event, model): P[]` — the param PATTERNS one appended
+event makes stale) and `View<N> extends Touchable<...>` (`read(model, params): result | null`, plus
+`push`, whether the value rides the SSE frame instead of being fetched). One file per view
+(`timeline.ts`, `node.ts`, `transcript.ts`, `plans.ts`, `plan-notes.ts`, `models.ts`,
+`operator-state.ts`); `health.ts` is a `Touchable` with no `read` — corpus health probes SurrealDB
+and git rather than folding the log, so it has no result to pin on the wire. `registry.ts`'s
+`VIEWS` table implements every view, and its `ViewsCoverNames` type guard fails the build the
+moment a name on the wire has no entry here.
+
+`readView(model, name, rawParams)` is the path a door (a URL path segment, an MCP tool's JSON)
+answers through: parse `name` against `ViewName`, parse `rawParams` against that view's `WIRE`
+schema, call `read`, and return a typed `ViewOutcome` (`{ ok: true, name, seq, data }` or a
+400/404). `viewOf(sessions, projectId, name, params)` is the in-process shortcut for a caller that
+already holds typed params (the copilot's tools, the MCP door) — it skips the parse (and the deep
+copy a re-parse would cost for a 500-row log or a whole transcript) and answers `null` for the
+view's own "not found" or a name the table has no entry for. `touchesOf(event, model)` runs every
+registered `Touchable`'s `touches` (views plus `health`) and returns the union as `Touch[]` — what
+one appended event leaves stale, named and keyed by param pattern, which is what the SSE stream
+reports instead of the browser owning a refresh table of its own.
 
 ##### `graph.ts` — the events→graph projection
 
@@ -1019,7 +1045,7 @@ function diffGraphs(prev: Graph, next: Graph): GraphPatch
 
 ##### `copilot.ts` — the copilot's tools are the UI's own action surface
 
-`buildCopilotTools(deps: { sessions; actions: OrcActions | null; projectId; listModels? }): ToolSet` builds an AI-SDK `ToolSet` whose **read** tools call the exact same `ProjectSessions` methods the web UI renders with, and whose **mutate** tools call the exact same `OrcActions` (§7.7) the web UI's buttons call — `deps.actions` is `OrcActions | null`; when `null`, only the read set is returned. **There is no `approve` tool, by design** ("plan approval is human-only… a prompt line is not a gate"). `asResolvedTools(tools)` reshapes an AI-SDK `ToolSet` into `ResolvedTool[]` for door-#2 consumers — "one tool definition, two doors."
+`buildCopilotTools(deps: { sessions: Pick<ProjectSessions, 'model' | 'snapshot'>; actions: OrcActions | null; projectId; listModels?; listWorkspaces?; health? }): ToolSet` builds an AI-SDK `ToolSet` whose **read** tools (`task_plan`, `task_transcript`, `plan_notes`, `recent_activity`) derive their input schema from the SAME `WIRE[view].params` the browser's view client parses against, and read through `viewOf` over `sessions.model(projectId)` — the identical view the web UI's own pane renders, never a second query; `project_status` reads `sessions.snapshot`'s graph plus the optional `listWorkspaces`/`health` deps. **Mutate** tools call the exact same `OrcActions` (§7.7) the web UI's buttons call — `deps.actions` is `OrcActions | null`; when `null`, only the read set is returned. **There is no `approve` tool, by design** ("plan approval is human-only… a prompt line is not a gate"). `asResolvedTools(tools)` reshapes an AI-SDK `ToolSet` into `ResolvedTool[]` for door-#2 consumers — "one tool definition, two doors."
 
 ##### `palette.ts` / `actions.ts` / `diagram.ts` / `transcript.ts` / `summarize.ts`
 
@@ -1027,7 +1053,7 @@ function diffGraphs(prev: Graph, next: Graph): GraphPatch
 - **`actions.ts`** — defines `OrcActions`, the mutating-capability interface (`newTask`, `propose`, `edit`, `approve`, `run`, `reply`, `retry`, `annotate`, `revise`, `writeNote`, `deleteNote`, `recordDecision`, `listWorkspaces`, `newWorkspace`, `renameProject`, `newProject`, `cancel`, `purgeProject`, `deleteProject`) — **implemented elsewhere** (the CLI, §7.7); ui-core only consumes it. Methods return data, never print.
 - **`diagram.ts`** — server-safe mermaid string builders (`planMermaid`, `decompositionMermaid`, `todoWaves`).
 - **`transcript.ts`** — `foldTranscript(events, taskId, stepId?)` → ordered `TranscriptItem[]`.
-- **`summarize.ts`** — `summarizeEvent(e): LogRow` (one summary line per event, parsing through the SAME `PAYLOAD_SCHEMAS`, degrading to `snip(payload, 90)` on pre-schema history; derives `noteRef` and `authorTaskId`). **`shouldAdmitLogRow(row, taskFilter): boolean`** is the one admit/reject predicate for a per-task Log view: `null` filter admits everything; `row.taskId === taskFilter` admits; `row.taskId === null` admits only when `row.authorTaskId === taskFilter` (a project-scoped memory row attributed to the task that *wrote* it). Applied server-side, in `sessions.ts`'s `log()`: the browser asks for a task's rows rather than filtering a whole-project tail itself, so there is one place the rule lives.
+- **`summarize.ts`** — `summarizeEvent(e): LogRow` (one summary line per event, parsing through the SAME `PAYLOAD_SCHEMAS`, degrading to `snip(payload, 90)` on pre-schema history; derives `noteRef` and `authorTaskId`). **`shouldAdmitLogRow(row, taskFilter): boolean`** is the one admit/reject predicate for a per-task Log view: `null` filter admits everything; `row.taskId === taskFilter` admits; `row.taskId === null` admits only when `row.authorTaskId === taskFilter` (a project-scoped memory row attributed to the task that *wrote* it). Applied server-side, in the `timeline` view's `read()`: the browser asks for a task's rows rather than filtering a whole-project tail itself, so there is one place the rule lives.
 
 ##### Transport-free boundary
 
@@ -1045,17 +1071,17 @@ Constructs one `ProjectSessions` for the whole server process, then:
 - **CSRF token**: `crypto.randomUUID()` minted once per boot, readable only via `GET /api/session`, required as `x-orc-token` on every mutating route.
 - **`/api/actions/{name}`** dispatches through `ACTION_ROUTES` (each entry a zod schema + a call into `opts.actions` — the SAME `OrcActions` the copilot's mutate tools call). A **project fence**: an action naming a project other than `opts.cwdProject.id` is rejected `409` *unless* it is in `CROSS_PROJECT_ACTIONS = {newProject, deleteProject, reply}`.
 - **`/api/copilot`**: `streamText` over `buildCopilotTools(...)`, SSE-streaming `fullStream` parts; journals one `copilot_exchange` via `opts.appendExchange` (home project only).
-- **`/api/graph`, `/api/node`, `/api/transcript`, `/api/plans`, `/api/plan-notes`, `/api/log`** — thin `Response.json(await sessions.<method>(...))` wrappers; `project` resolved against `sessions.projects()` so an arbitrary string can't allocate a new cached `Session`.
+- **`/api/view/<name>`** — the one route for every registered read (`view-route.ts`'s `viewResponse`, over `readView`): parse `q` (one url-encoded JSON param blob, `viewParams`), call the named view's `read`, answer `{ seq, data }` or the 400/404 `readView` returned. `DoorAnswers` lets a door answer a view the log cannot fill YET (only `models`, for the live provider catalog before any `models_discovered` event) when the view came back empty — the log always wins once it has anything to say. **`/api/graph`** is the one read outside the registry: the whole current snapshot (`{ seq, nodes, links }`), which a fresh mount or a seq-regression resync needs whole rather than by name. `project` (both routes) is resolved against `sessions.projects()` so an arbitrary string can't allocate a new cached `Session`.
 - **`/api/stream`**: the SSE tail. Subscribes **before** fetching `since(fromSeq)` catch-up, buffering events during the await (`liveNow` flag) — "luck-sized before, structural zero now." Resumes from `Last-Event-ID` in preference to a `fromSeq` param. Rides the server-wide `projectFeeds` chats-list push on the same stream without an SSE `id:` line.
 
 ##### `web/` — the browser console (`@orc/graph-web`)
 
 A Svelte 5 SPA built by Vite into `web/dist`, which `src/server.ts` serves. Runes for state, TanStack `svelte-query` for the server cache, vendored shadcn-svelte for primitives.
 
-- **`lib/api/`** — the wire boundary. `schemas.ts` declares one zod schema per endpoint; **`types.ts` derives every browser-side type from those schemas with `z.infer`** and never hand-writes a second copy, plus compile-time `Exact<>` guards tying the parsed graph shapes to `@orc/ui-core/graph-wire`. `parse.ts`'s `parseOrReport` is the only fallback path: a schema miss logs the failing field rather than silently rendering an empty pane. `client.ts` is the fetch layer, `actions.ts` the mutating half (CSRF token from `/api/session`).
-- **`lib/stores/`** — three runes stores, each with exactly one writer. `graph.svelte.ts` holds nodes/links keyed by the shared `linkKey`; `ledger.svelte.ts` folds the SSE tail into rows, open gates, retryable tasks and the single "working" ticker line; `session.svelte.ts` holds selection and routing.
-- **`lib/sse.ts`** — the only writer into those stores. On an envelope whose `seq` is *behind* what this tab holds (an out-of-band `orc purge`), it discards the patch and resyncs from a fresh `/api/graph` snapshot. Every admitted row also runs through **`lib/invalidation.ts`**, which maps one log row to the query-key prefixes to invalidate — including the *parent* task's keys, because a parent's rendered plan carries its children's step states.
-- **`lib/features/`** — one directory per pane: `ledger/`, `inspector/`, `graph/` (the sigma island plus its pure `colors.ts`), `copilot/`, `overview/` (stat tiles and the live `RunMonitor`), `plan/`, `sidebar/`, `gates/`, `forms/`, `chrome/`. Logic that can be pure is a sibling `.ts` with its own test — `topo.ts`, `your-move.ts`, `node-id.ts`, `colors.ts`, `invalidation.ts`.
+- **`lib/api/`** — the wire boundary. `schemas.ts` declares the plain-endpoint schemas (`SessionInfo`, `ProjectList`, `GraphSnapshot`, `Health`, the action results, `StoredChat`) and re-exports the view registry's own schemas from `@orc/ui-core/wire`, so every component and `e2e/contract.pw.ts` import from this one file; **`types.ts` derives every browser-side type from those schemas with `z.infer`**, plus compile-time `Exact<>`/`SameKeys<>` guards tying the parsed graph shapes to `@orc/ui-core/graph-wire`. `client.ts`'s `get`/`post` parse the plain endpoints, reporting a mismatch via `parse.ts`'s `describeZodError` and the shared `ApiError`/`reportApiError` surface; `view-client.ts`'s `fetchView`/`fetchViewGuarded` do the same for a named view (parsed against `WIRE[name].result` inside its `seq` envelope, raced against an in-flight fetch by `seq-guard.ts`'s `newer()`), and `view-query.ts`'s `viewQuery` wraps it as a reactive `createQuery`. `touch-coalesce.ts`'s generic debounce backs `view-client.ts`'s 250ms trailing coalescer for `touched`-driven invalidation. `actions.ts` is the mutating half (CSRF token from `/api/session`).
+- **`lib/stores/`** — four runes stores, each with exactly one writer. `graph.svelte.ts` holds nodes/links keyed by the shared `linkKey`; `ledger.svelte.ts` holds the row list and the single "working" ticker line; `operator.svelte.ts` holds the `OperatorState` the server last pushed on the stream frame (open questions, retryable tasks, planned tasks) — split out of the ledger so the server's one fold of the log is not repeated in the browser; `session.svelte.ts` holds selection and routing.
+- **`lib/sse.ts`** — the only writer into those stores, but the DECISION lives beside it in **`lib/frame-plan.ts`**'s `planFrame(heldSeq, envSeq, envelope)`, tested with no connection in the loop. An envelope whose `seq` is *behind* what this tab holds (an out-of-band `orc purge`) is a regression: the patch/summary are withheld and the caller resyncs from a fresh `/api/graph` snapshot, but `touched` and the pushed `operator` value are never withheld — neither describes a moment the client could have already moved past. Every `touched` entry runs through `view-client.ts`'s `invalidateTouch`, which keys the SAME TanStack cache entries `viewQuery` reads (`viewKey(project, name, params)`) rather than a hand-kept map of log-row kind → query-key prefix.
+- **`lib/features/`** — one directory per pane: `ledger/`, `inspector/`, `graph/` (the sigma island plus its pure `colors.ts`), `copilot/`, `overview/` (stat tiles and the live `RunMonitor`), `plan/`, `sidebar/`, `gates/`, `forms/`, `chrome/`. Logic that can be pure is a sibling `.ts` with its own test — `topo.ts`, `your-move.ts`, `node-id.ts`, `colors.ts`.
 - **`lib/temperature.ts`** — the two-temperature vocabulary (amber = waits on a human, steel = autonomous, moss = settled well, rust = settled badly) as token maps, so no component spells a colour class itself.
 
 **Testing note**: `bun test` runs with no DOM, so unit tests here cover only the extracted pure modules. Behaviour is covered by Playwright against a real-kernel fixture server — `e2e/console.pw.ts` for the panes and `e2e/contract.pw.ts`, which asserts every `/api` response against the same schemas the client parses with. Playwright matches `**/*.pw.ts` and is **not** part of `bun test`; CI runs it as its own step, alongside `bun run check:web` (svelte-check with vendored shadcn noise filtered out).

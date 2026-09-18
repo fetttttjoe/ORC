@@ -18,7 +18,7 @@ import {
   type GroundingScope, type StalePathAnswer,
 } from './strategies/grounding-scope'
 import { verifyArtifacts } from './artifacts'
-import { fold, ancestorTaskIds, blockingVerdicts, retryIsFutile, completedStepIds, nextAttempts, startedAttempts, remainingBudget, inheritedCwd, runCwd, type State } from '../projections'
+import { fold, ancestorTaskIds, blockingVerdicts, canRetry, completedStepIds, nextAttempts, startedAttempts, remainingBudget, inheritedCwd, runCwd, type State } from '../projections'
 import { Kernel } from '../kernel'
 import { KERNEL_ERROR_CODE, KernelError } from '../errors'
 import { readySteps, runOutcomeOf } from './interpreter'
@@ -873,12 +873,13 @@ export async function createDbosPort(opts: {
       const state = await foldState(taskId)
       const task = state.tasks.get(taskId)
       if (!task) throw new KernelError(KERNEL_ERROR_CODE.task_not_found, `no task '${taskId}'`)
-      if (task.status !== TASK_STATUS.blocked)
-        throw new KernelError(KERNEL_ERROR_CODE.invalid_transition, `task is '${task.status}' — only a blocked task can be retried`)
-      // The port half of assertRetryable's refusal, off the SAME derivation — a verdict cannot be
-      // argued with by repeating the step that reached it. Enforced here too because the router
-      // reaches startRunAt without passing the actions layer at all.
-      if (retryIsFutile(state, taskId)) {
+      // The port half of assertRetryable's refusal, off the SAME predicate — enforced here too
+      // because the router reaches startRunAt without passing the actions layer at all. canRetry is
+      // the decision; the branches below only pick which refusal to explain.
+      if (!canRetry(state, taskId)) {
+        if (task.status !== TASK_STATUS.blocked)
+          throw new KernelError(KERNEL_ERROR_CODE.invalid_transition, `task is '${task.status}' — only a blocked task can be retried`)
+        // A verdict cannot be argued with by repeating the step that reached it.
         const verdicts = blockingVerdicts(state, taskId)
         throw new KernelError(
           KERNEL_ERROR_CODE.invalid_transition,

@@ -4,10 +4,10 @@
   import { Separator } from '$lib/components/ui/separator'
   import Chip from '$lib/components/Chip.svelte'
   import { api } from '$lib/api/client'
-  import { qk } from '$lib/query-keys'
+  import { healthKey } from '$lib/api/view-client'
   import { cn } from '$lib/utils'
   import { graph } from '$lib/stores/graph.svelte'
-  import { ledger } from '$lib/stores/ledger.svelte'
+  import { operator } from '$lib/stores/operator.svelte'
   import { session } from '$lib/stores/session.svelte'
   import type { Temperature } from '$lib/temperature'
 
@@ -17,11 +17,14 @@
   // the read model is often a little behind mid-write; only a real backlog is worth saying
   const CATCHUP_FLOOR = 50
 
-  const health = createQuery(() => ({ queryKey: qk.health(), queryFn: api.health, refetchInterval: HEALTH_POLL_MS }))
+  // keyed through view-client's OWN builder (not a second `['health']` spelling) so a `health`
+  // touch on the stream invalidates the SAME cache entry SystemBanner's faster poll also reads —
+  // one shared entry, two poll cadences.
+  const health = createQuery(() => ({ queryKey: healthKey(session.sel.project), queryFn: api.health, refetchInterval: HEALTH_POLL_MS }))
 
   const sup = $derived(health.data?.supervisor)
   const mem = $derived(health.data?.memory)
-  const gates = $derived(ledger.gates.length)
+  const gates = $derived(operator.state.openQuestions.length)
 
   const SUPERVISOR: Record<string, { text: string; temp: Temperature; hint: string }> = {
     [SUPERVISOR_HEALTH.ready]: { text: 'supervisor ready', temp: 'moss', hint: 'a supervisor holds the runtime — runs execute' },

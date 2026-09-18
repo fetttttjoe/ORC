@@ -2,7 +2,7 @@
   // the task as a request: plan versions, the approved plan's waves, grounded plan notes,
   // and (when this server can act) the revise gate
   import { FAILURE_CLASS } from '@orc/contracts/execution'
-  import { createQuery, keepPreviousData } from '@tanstack/svelte-query'
+  import { createQuery } from '@tanstack/svelte-query'
   import { SvelteSet } from 'svelte/reactivity'
   import InboxIcon from '@lucide/svelte/icons/inbox'
   import * as Empty from '$lib/components/ui/empty'
@@ -17,44 +17,24 @@
   import PlanPanel from '$lib/features/plan/PlanPanel.svelte'
   import YourMoveCard from './YourMoveCard.svelte'
   import { yourMove } from './your-move'
-  import { TaskArtifacts } from './detail-view'
+  import { viewQuery } from '$lib/api/view-query'
+  import { NODE_KIND, VIEW } from '@orc/ui-core/wire'
   import { api } from '$lib/api/client'
   import { actions } from '$lib/api/actions'
   import { notify } from '$lib/notify'
-  import { qk } from '$lib/query-keys'
-  import { ledger } from '$lib/stores/ledger.svelte'
+  import { operator } from '$lib/stores/operator.svelte'
   import { stepNodeId, taskIdOf } from '$lib/node-id'
   import { session } from '$lib/stores/session.svelte'
   import { fmtCost, fmtTokens, nodeHead } from './node-head'
 
   let { nodeId }: { nodeId: string } = $props()
 
-  const project = $derived(session.sel.project)
   const taskId = $derived(taskIdOf(nodeId))
-  const ready = $derived(taskId !== null && project !== '')
 
-  const plans = createQuery(() => ({
-    queryKey: qk.taskPlans(taskId ?? ''),
-    queryFn: () => api.plans(project, taskId ?? ''),
-    enabled: ready,
-    // keep the last good answer on screen while a refetch runs
-    placeholderData: keepPreviousData,
-  }))
-  // plan notes 404 until grounding ran — a missing decomposition is a state, not an error
-  const notes = createQuery(() => ({
-    queryKey: qk.taskPlanNotes(taskId ?? ''),
-    queryFn: () => api.planNotes(project, taskId ?? '').catch(() => null),
-    enabled: ready,
-    // keep the last good answer on screen while a refetch runs
-    placeholderData: keepPreviousData,
-  }))
-  const node = createQuery(() => ({
-    queryKey: qk.node(nodeId),
-    queryFn: () => api.node(project, nodeId),
-    enabled: project !== '',
-    // keep the last good answer on screen while a refetch runs
-    placeholderData: keepPreviousData,
-  }))
+  const plans = createQuery(viewQuery(VIEW.plans, () => (taskId !== null ? { taskId } : null)))
+  // an undecomposed task answers an empty note list, not a 404 — never a missing state to guard
+  const notes = createQuery(viewQuery(VIEW.planNotes, () => (taskId !== null ? { taskId } : null)))
+  const node = createQuery(viewQuery(VIEW.node, () => ({ id: nodeId })))
 
   const head = $derived(nodeHead(node.data))
 
@@ -66,10 +46,12 @@
   // waves are rendered server-side for ONE version only — other versions fall back to a flat list
   const waves = $derived(plans.data?.visual?.version === shownVersion ? (plans.data?.visual?.waves ?? null) : null)
 
-  const openQuestion = $derived(ledger.gates.find(g => g.taskId === taskId)?.question ?? null)
-  // read off the task payload, which carries the artifacts — a completion line computed elsewhere
-  // claimed zero regardless
-  const artifacts = $derived(TaskArtifacts.safeParse(node.data).data?.artifacts ?? [])
+  // the OLDEST open question on this task — a "your move" card shows one line; GateCard (in the
+  // ledger and chat tab) is where every open question on the task renders, one card each
+  const openQuestion = $derived(taskId === null ? null : (operator.questionsFor(taskId)[0]?.question ?? null))
+  // read off the task detail's own artifacts, parsed once by the view client — a completion line
+  // computed elsewhere claimed zero regardless
+  const artifacts = $derived(node.data?.type === NODE_KIND.task ? node.data.artifacts : [])
   const failed = $derived(waves?.flatMap(w => w.steps).find(st => st.status === 'failed') ?? null)
   const failedStep = $derived(failed?.id ?? null)
   // a REJECTED step judged the work; retrying repeats it unchanged, so the pane offers revise

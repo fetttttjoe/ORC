@@ -82,7 +82,7 @@ export function planGraphHash(notes: PlanNote[]): string {
 // behind (ambient capture writes one per step, into the same scope). Those are not part of the
 // decomposition, and including them would let a step note the human never reviewed change the
 // plan hash between approval and freeze.
-export function foldPlanNotes(events: EventRecord[], scope: string): PlanNote[] {
+export function foldPlanNotes(events: ReadonlyArray<EventRecord>, scope: string): PlanNote[] {
   const byId = new Map<string, PlanNote>()
   for (const e of events) {
     if (e.kind === EVENT_KIND.memory_written) {

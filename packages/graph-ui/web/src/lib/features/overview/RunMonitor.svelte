@@ -1,18 +1,15 @@
 <script lang="ts">
-  import { createQuery, keepPreviousData } from '@tanstack/svelte-query'
+  import { createQuery } from '@tanstack/svelte-query'
   import { STEP_RUN_STATUS } from '@orc/contracts/execution'
   import ProgressRing from './ProgressRing.svelte'
   import Chip from '$lib/components/Chip.svelte'
   import NodeLink from '$lib/components/NodeLink.svelte'
-  import { api } from '$lib/api/client'
-  import { qk } from '$lib/query-keys'
-  import { parseOrReport } from '$lib/api/parse'
+  import { viewQuery } from '$lib/api/view-query'
+  import { NODE_KIND, VIEW } from '@orc/ui-core/wire'
   import { stepNodeId } from '$lib/node-id'
   import { graph } from '$lib/stores/graph.svelte'
   import { ledger } from '$lib/stores/ledger.svelte'
-  import { session } from '$lib/stores/session.svelte'
   import { cn } from '$lib/utils'
-  import { TaskDetail } from '$lib/features/inspector/detail-view'
   import { fmtCost, fmtTokens } from '$lib/features/inspector/node-head'
 
   /**
@@ -25,22 +22,10 @@
    */
   let { taskId }: { taskId: string } = $props()
 
-  const project = $derived(session.sel.project)
+  const node = createQuery(viewQuery(VIEW.node, () => ({ id: taskId })))
+  const plans = createQuery(viewQuery(VIEW.plans, () => ({ taskId })))
 
-  const node = createQuery(() => ({
-    queryKey: qk.node(taskId),
-    queryFn: () => api.node(project, taskId),
-    enabled: project !== '',
-    placeholderData: keepPreviousData,
-  }))
-  const plans = createQuery(() => ({
-    queryKey: qk.taskPlans(taskId),
-    queryFn: () => api.plans(project, taskId),
-    enabled: project !== '',
-    placeholderData: keepPreviousData,
-  }))
-
-  const detail = $derived(node.data ? parseOrReport(TaskDetail, node.data, 'run monitor (task)') : null)
+  const detail = $derived(node.data?.type === NODE_KIND.task ? node.data : null)
   const steps = $derived(detail?.steps ?? [])
   const done = $derived(steps.filter(s => s.status === STEP_RUN_STATUS.completed).length)
   const running = $derived(steps.filter(s => s.status === STEP_RUN_STATUS.running))

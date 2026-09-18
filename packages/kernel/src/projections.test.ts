@@ -2,7 +2,7 @@ import { describe, expect, it } from 'bun:test'
 import { EVENT_KIND, FAILURE_CLASS, STEP_RUN_STATUS, TASK_STATUS, type EventRecord, type FailureClass, type Plan, type StepRunStatus, type TaskNode, type TaskStatus } from '@orc/contracts'
 import { eventFixture, draftFixture, must, planFixture, stepFixture, taskFixture } from '@orc/contracts/fixtures'
 import { TEST_WORKSPACE_ID } from './test-helpers'
-import { blockingVerdicts, retryIsFutile, startedAttempts, type State, type StepState, emptyFold, estimateCostUSD, fold, foldInto, subtreeOutcome, completedStepIds, nextAttempts, crashDedupKey, stepUsage, subtreeTaskIds, subtreeUsage, pendingSplitForChild, remainingBudget, inheritedCwd, runCwd, taskChangedPaths, taskNoteWrites, taskVerifiedNotes } from './projections'
+import { blockingVerdicts, canRetry, retryIsFutile, startedAttempts, type State, type StepState, emptyFold, estimateCostUSD, fold, foldInto, subtreeOutcome, completedStepIds, nextAttempts, crashDedupKey, stepUsage, subtreeTaskIds, subtreeUsage, pendingSplitForChild, remainingBudget, inheritedCwd, runCwd, taskChangedPaths, taskNoteWrites, taskVerifiedNotes } from './projections'
 
 const task: TaskNode = taskFixture()
 
@@ -825,6 +825,37 @@ describe('blockingVerdicts / retryIsFutile — a verdict is not a malfunction', 
   it('is not futile when nothing failed at all', () => {
     expect(retryIsFutile(fold([]), 'nobody')).toBe(false)
     expect(blockingVerdicts(fold([]), 'nobody')).toEqual([])
+  })
+
+  /**
+   * The whole admission rule for a retry, in one place. Three sites need the same verdict and only
+   * two of them can raise an error: the actions door and the port each refuse with their own
+   * message, and a read model has to decide whether to OFFER the retry at all. Spelled once, an
+   * offer cannot disagree with the refusal that would follow it.
+   */
+  describe('canRetry', () => {
+    const atStatus = (status: TaskStatus, ...steps: ReturnType<typeof failedStep>[]): State => {
+      const s = stateWith(...steps)
+      s.tasks.set('t1', taskFixture({ id: 't1', status }))
+      return s
+    }
+
+    it('admits a blocked task whose failure could be cleared by running again', () => {
+      expect(canRetry(atStatus(TASK_STATUS.blocked, failedStep('build', FAILURE_CLASS.agent_error)), 't1')).toBe(true)
+    })
+
+    it('refuses every status but blocked — nothing else has a run waiting to resume', () => {
+      for (const status of [TASK_STATUS.running, TASK_STATUS.cancelled, TASK_STATUS.done, TASK_STATUS.failed, TASK_STATUS.draft])
+        expect(canRetry(atStatus(status, failedStep('build', FAILURE_CLASS.agent_error)), 't1')).toBe(false)
+    })
+
+    it('refuses a blocked task held up only by verdicts', () => {
+      expect(canRetry(atStatus(TASK_STATUS.blocked, failedStep('verify', FAILURE_CLASS.rejected)), 't1')).toBe(false)
+    })
+
+    it('refuses a task nothing knows about', () => {
+      expect(canRetry(fold([]), 'nobody')).toBe(false)
+    })
   })
 })
 

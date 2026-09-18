@@ -2,10 +2,11 @@ export {
   PROJECT_DIR_NOTE_ID, PROJECT_NAME_NOTE_ID, emptyPatch, noteNodeId,
   type Graph, type GraphLink, type GraphNode, type GraphPatch,
 } from './graph'
-export { LOG_PARAM } from './graph-wire'
 export type { TodoWave } from './diagram'
-export { createProjectSessions, type ModelDetail, type ProjectEntry, type ProjectSessions, type SessionUpdate } from './sessions'
+export { createProjectSessions, type ProjectEntry, type ProjectSessions, type SessionUpdate } from './sessions'
 export type { TranscriptItem } from './transcript'
 export type { OrcActions } from './actions'
 export { asResolvedTools, buildCopilotTools, copilotSystemPrompt, type CopilotMode } from './copilot'
 export { summarizeEvent, shouldAdmitLogRow, type LogRow } from './summarize'
+export { VIEWS, readView, touchesOf, viewOf, type ViewOutcome } from './views/registry'
+export type { ReadModel, Touchable, ViewParams, ViewResult } from './views/view'

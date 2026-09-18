@@ -134,6 +134,8 @@ Key terms used throughout the orchestrator codebase and documentation. Many term
 
 **Operation journal** — Postgres `operations` table (rebuildable from events). Records `operation_started` BEFORE the external call and completion/failure AFTER. Crash leaves an unresolved node. See [operation journal](ARCHITECTURE.md#the-storage-service-—-read/write-boundary), [`orc status` command](../README.md#quickstart).
 
+**Operator state** — Everything a project has waiting on a human, folded server-side from the whole log into one value: open questions still owed an answer (`openQuestions`, keyed by task+topic, withdrawn once the task is terminal), retryable tasks (the kernel's own `canRetry` predicate), and tasks with a plan worth showing (`planned`). Answered by the `operatorState` view and pushed on the SSE stream's `operator` field rather than fetched — it changes on almost every append, so a client holds the last non-null value instead of refetching one. See [the read side](ARCHITECTURE.md#the-read-side-—-the-view-registry), [`operator-state.ts`](../packages/ui-core/src/views/operator-state.ts).
+
 ---
 
 ## P
@@ -196,6 +198,8 @@ Key terms used throughout the orchestrator codebase and documentation. Many term
 
 **Vault** — Deterministic markdown projections of tasks, execution, lineage, and knowledge. Rebuilt on every relevant event. Starts empty; first event triggers initial render. See [`vault/` views](../README.md#vault-views), [vault projections](seams-reference.md#vault-projections-—-read-only-human-views).
 
+**View** — A named, pure read over the folded project state, declared once on the wire (`ViewName`, `WIRE` — its own param and result schema) and implemented once as a file under `packages/ui-core/src/views/`. Answered through one route (`GET /api/view/<name>`) or, for an in-process caller, `viewOf`; a view's own "not found" is `null`, answered 404. Every view is also a `Touchable`: it reports the param patterns one appended event makes stale, which the stream carries so a client refetches exactly what an event touched rather than owning a refresh table of its own. Not every `Touchable` is a view — corpus health probes SurrealDB and git rather than folding the log, so it has no params/result pair. A new read is a new view file, never a route, a client-side filter, or a browser fold. See [the read side](ARCHITECTURE.md#the-read-side-—-the-view-registry), [`wire.ts`](../packages/ui-core/src/wire.ts), [`registry.ts`](../packages/ui-core/src/views/registry.ts).
+
 ---
 
 ## W
@@ -223,7 +227,7 @@ Key terms used throughout the orchestrator codebase and documentation. Many term
 - [Memory note](#memory-note), [Note tier](#note-tier), [Claim](#claim), [Claim history](#claim-history), [Topic](#topic), [Knowledge graph](#knowledge-graph), [Research note](#research-note), [Citation](#citation), [Scope](#scope), [Retention](#retention), [Provisional knowledge](#provisional-knowledge)
 
 **Architecture**
-- [Event](#event), [Event log](#event-log), [Data-access service](#data-access-service), [Kernel](#kernel), [Contracts](#contracts), [Seam](#seam), [Plugin](#plugin)
+- [Event](#event), [Event log](#event-log), [Data-access service](#data-access-service), [Kernel](#kernel), [Contracts](#contracts), [Seam](#seam), [Plugin](#plugin), [View](#view), [Operator state](#operator-state)
 
 **Documentation**
 - [Decision](#decision), [Audit replay](#audit-replay), [Lineage](#lineage), [Index](#index)

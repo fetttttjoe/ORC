@@ -2,14 +2,16 @@
 // it can never bypass the action layer, and every call it makes is streamed to the client as a
 // visible card. Transport-free: the web server (or a TUI) supplies the model and runs the loop.
 import { tool, type ToolSet } from 'ai'
-import type { NodeType } from './graph-wire'
+import type { GraphNode, NodeType } from './graph-wire'
 import { z } from 'zod'
 import type { OrcActions } from './actions'
 import type { ProjectSessions } from './sessions'
 
 import { snip } from './summarize'
+import { viewOf } from './views/registry'
+import { VIEW, WIRE } from './wire'
 import type { MemoryHealth, ResolvedTool, SupervisorHealth, WorkspaceWithHealth } from '@orc/contracts'
-import { DecisionInput, errorMessage, EventKind, MEMORY_HEALTH, toolError } from '@orc/contracts'
+import { DecisionInput, errorMessage, EventKind, groupByWorkspace, MEMORY_HEALTH, toolError } from '@orc/contracts'
 
 // Why a session can't act: 'read-only' = server started outside a project; 'foreign-project'
 // = the user is viewing a chat other than the one this server runs in.
@@ -70,7 +72,10 @@ export function asResolvedTools(tools: ToolSet): ResolvedTool[] {
 }
 
 export function buildCopilotTools(deps: {
-  sessions: ProjectSessions
+  // Exactly the two reads this door performs: every grounded answer comes through `model` (the
+  // view registry reads it) and the graph snapshot project_status counts. Narrow on purpose —
+  // a composition without a full session store can still serve these tools.
+  sessions: Pick<ProjectSessions, 'model' | 'snapshot'>
   actions: OrcActions | null
   projectId: string
   listModels?: () => Promise<string[]>
@@ -120,6 +125,16 @@ export function buildCopilotTools(deps: {
             .catch((err: unknown) => ({ memory: { state: MEMORY_HEALTH.unreachable, pending: 0, reason: errorMessage(err) } }))
           : undefined
         const tasks = graph.nodes.filter(n => n.type === 'task')
+        // groupByWorkspace requires a required workspaceId; GraphNode's stays `| undefined` because
+        // the field is wire-shared across all five node kinds, so the predicate narrows here rather
+        // than asserting one. Computed once, outside the return, so every workspace entry below
+        // reads its slice off ONE grouping pass instead of re-filtering `tasks` per workspace.
+        const byWorkspace = workspaces && new Map(
+          groupByWorkspace(
+            workspaces.map(w => w.workspace),
+            tasks.filter((n): n is GraphNode & { workspaceId: string } => n.workspaceId !== undefined),
+          ).map(g => [g.workspace.id, g.items]),
+        )
         return {
           tasks: tasks.map(n => ({ taskId: n.id, title: n.label, status: n.detail })),
           counts,
@@ -132,7 +147,7 @@ export function buildCopilotTools(deps: {
           ...(workspaces && {
             workspaces: workspaces.map(({ workspace: w, health }) => ({
               id: w.id, title: w.title, kind: w.kind, branch: w.branch, cwd: w.cwd,
-              taskIds: tasks.filter(n => n.workspaceId === w.id).map(n => n.id),
+              taskIds: (byWorkspace?.get(w.id) ?? []).map(n => n.id),
               // Passed through WHOLE, never re-derived and never narrowed here: this is the same
               // verdict `orc ws ls` and workspace_list carry, and a door that summarized it into its
               // own words would be a fourth reading of "is this checkout still going anywhere".
@@ -147,14 +162,16 @@ export function buildCopilotTools(deps: {
     }),
     task_plan: tool({
       description: 'Read a task’s plan versions (steps, models, dependencies) and which version is approved.',
-      inputSchema: z.object({ taskId }),
+      // Derived, not re-spelled: this tool's input IS the plans view's params, and a door whose
+      // schema drifts from the view it reads asks for a field the read will not honour.
+      inputSchema: WIRE[VIEW.plans].params,
       // `visual` is rebuilt field-by-field rather than spread: this is an ALLOWLIST, so a field
-      // added to taskPlans for the browser's benefit cannot silently start costing model tokens on
-      // every call. It caught exactly that once — visual.mermaid was a diagram serialization for a
-      // renderer, re-telling the model what `waves` already says. That field is gone now, which
-      // makes the projection an identity TODAY; it stays because the next added field will not be.
+      // added to the plans view for the browser's benefit cannot silently start costing model
+      // tokens on every call. It caught exactly that once — visual.mermaid was a diagram
+      // serialization for a renderer, re-telling the model what `waves` already says. That field is
+      // gone, which makes the projection an identity TODAY; it stays because the next one will not.
       execute: async ({ taskId: id }) => {
-        const plans = await sessions.taskPlans(projectId, id)
+        const plans = await viewOf(sessions, projectId, VIEW.plans, { taskId: id })
         if (!plans) return { error: 'no plan proposed yet' }
         const { visual, ...rest } = plans
         return { ...rest, ...(visual && { visual: { version: visual.version, waves: visual.waves } }) }
@@ -162,7 +179,9 @@ export function buildCopilotTools(deps: {
     }),
     task_transcript: tool({
       description: 'Read a task’s agent conversation (messages, tool calls, questions, signal). Recent items only; tool payloads are truncated — read an artifact or the file itself for the full text.',
-      inputSchema: z.object({ taskId, stepId: z.string().optional(), limit: z.number().int().min(1).max(50).optional() }),
+      // The transcript view's params plus this door's own bound. The limit is NOT the view's:
+      // a model reads 50 items at most because it pays per token, while a pane scrolls thousands.
+      inputSchema: WIRE[VIEW.transcript].params.extend({ limit: z.number().int().min(1).max(50).optional() }),
       // Every payload is bounded because an unbounded one is not a readable answer: one single
       // tool result came back as 88KB through this door, burying the conversation it was meant
       // to explain. Tool input/output become snipped STRINGS (they are arbitrary JSON — a
@@ -170,14 +189,14 @@ export function buildCopilotTools(deps: {
       // SIGNALS PASS THROUGH VERBATIM: a driver has to answer the exact question that was asked
       // and read the exact summary that was signalled — a truncated one is a wrong one.
       execute: async ({ taskId: id, stepId, limit }) =>
-        (await sessions.transcript(projectId, id, stepId)).slice(-(limit ?? 30)).map(i =>
+        (await viewOf(sessions, projectId, VIEW.transcript, { taskId: id, stepId }) ?? []).slice(-(limit ?? 30)).map(i =>
           i.kind === 'message' ? { ...i, text: snip(i.text, 400) }
           : i.kind === 'tool' ? { ...i, input: snip(JSON.stringify(i.input), 400), output: snip(JSON.stringify(i.output), 400) }
           : i),
     }),
     plan_notes: tool({
       description: 'Read a grounded task’s decomposition plan-notes (the split-up: subplans, dependencies, zones, skills/tools, models, uncertainty).',
-      inputSchema: z.object({ taskId }),
+      inputSchema: WIRE[VIEW.planNotes].params,
       // The mechanics — dependsOn (the ONLY thing that orders the frozen plan), zone (the write
       // fence), skillRefs/toolRefs/modelRef — are what a driver has to see to judge or revise a
       // decomposition; mapping only the prose left it reviewing a plan it could not read.
@@ -189,7 +208,7 @@ export function buildCopilotTools(deps: {
       // stay readable. But memory_read answers `null` for those same ids, and two doors giving
       // opposite answers about one note is how a reader stops trusting either. Stated, not hidden.
       execute: async ({ taskId: id }) =>
-        (await sessions.planNotes(projectId, id)).notes.map(n => ({
+        ((await viewOf(sessions, projectId, VIEW.planNotes, { taskId: id }))?.notes ?? []).map(n => ({
           id: n.id, title: n.title, summary: snip(n.summary, 400), rationale: snip(n.rationale, 400),
           body: snip(n.body, 400), uncertainty: n.uncertainty, links: n.links,
           dependsOn: n.dependsOn, zone: n.zone, skillRefs: n.skillRefs, toolRefs: n.toolRefs,
@@ -199,21 +218,19 @@ export function buildCopilotTools(deps: {
     }),
     recent_activity: tool({
       description: 'The latest events in this project (one line each) — what just happened. Pass the previous call’s maxSeq as sinceSeq to read only what is new, and kinds to watch specific event kinds.',
-      inputSchema: z.object({
-        taskId: taskId.optional(), limit: z.number().int().min(1).max(50).optional(),
-        sinceSeq: z.number().int().nonnegative().optional(),
-        // the event vocabulary itself, never hand-typed kind strings
-        kinds: z.array(EventKind).optional(),
+      // The timeline view's params, narrowed to what a model should hold: no beforeSeq (paging
+      // backward is a scrollback gesture, not a driver's question) and a limit of 50 rather than
+      // the view's 1000, because this door's rows are paid for per token. Everything else — the
+      // task filter, the seq cursor, the event vocabulary behind `kinds` — is the view's own
+      // schema, so this door cannot ask for a field the read will not honour.
+      inputSchema: WIRE[VIEW.timeline].params.pick({ taskId: true, sinceSeq: true, kinds: true }).extend({
+        limit: z.number().int().min(1).max(50).optional(),
       }),
       // maxSeq is the poll cursor: without one a driver had no way to ask "what happened since?"
       // and re-read the whole tail every time, paying for (and re-reasoning about) rows it had
-      // already seen. sinceSeq/kinds are spread conditionally — an explicit `undefined` field is
-      // not a no-op for a caller that checks `'sinceSeq' in opts`.
+      // already seen.
       execute: async ({ taskId: id, limit, sinceSeq, kinds }) => {
-        const rows = await sessions.log(projectId, {
-          taskId: id, limit: limit ?? 15,
-          ...(sinceSeq !== undefined && { sinceSeq }), ...(kinds && { kinds }),
-        })
+        const rows = await viewOf(sessions, projectId, VIEW.timeline, { taskId: id, sinceSeq, kinds, limit: limit ?? 15 }) ?? []
         return { rows, maxSeq: rows.at(-1)?.seq ?? null } // log rows are ascending by seq
       },
     }),
@@ -275,7 +292,7 @@ export function buildCopilotTools(deps: {
       execute: async ({ taskId: id, text }) => actions.reply(id, text),
     }),
     retry: tool({
-      description: 'Retry a failed run.',
+      description: 'Re-run the steps of a BLOCKED task that did not complete (a task in any other status is refused). A task blocked by a rejecting verdict is refused too — the same siblings would be judged the same way; revise the plan instead.',
       inputSchema: z.object({ taskId }),
       execute: async ({ taskId: id }) => actions.retry(id),
     }),

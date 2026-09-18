@@ -1,5 +1,11 @@
-import { EVENT_KIND, PAYLOAD_SCHEMAS } from '@orc/contracts'
-import type { EventRecord } from '@orc/contracts'
+import { EVENT_KIND } from './event-kinds'
+import { PAYLOAD_SCHEMAS } from './events'
+import type { EventRecord } from './event-kinds'
+import { feedbackKey } from './feedback-key'
+
+// re-exported so every existing importer of feedbackKey from here (or from the bare package
+// entry point, which re-exports this whole file) keeps compiling unchanged
+export { feedbackKey }
 
 // The ONE rule for "is this question still open?", and nothing else.
 //
@@ -21,16 +27,6 @@ import type { EventRecord } from '@orc/contracts'
 // health-table fixture that carries no `seq` — the rule is ORDER-based, not seq-based, and taking
 // seq would let a caller think it could pass events out of log order.
 export type FeedbackEvent = Pick<EventRecord, 'taskId' | 'kind' | 'payload'>
-
-/**
- * The identity of an open question: one (task, topic) pair, spelled ONCE.
- *
- * A topic is unique per task, not per project — two tasks asking `cwd` are two different questions —
- * so the task id is part of the key. Exported so a consumer can ask about a question it holds in
- * hand (the kernel, which has the `feedback_requested` event and needs to know whether that one is
- * still open) without re-deriving the spelling and drifting from the set it is testing against.
- */
-export const feedbackKey = (taskId: string, topic: string): string => `${taskId} ${topic}`
 
 /**
  * Every (task, topic) still owed an answer, from events in LOG ORDER.

@@ -65,6 +65,15 @@ test('the finish step\'s question is answerable in one click too', async ({ page
   await expect(gate.getByRole('button', { name: 'approve' })).toBeVisible()
 })
 
+test('two open questions on one task render as two gate cards, not one', async ({ page }) => {
+  await open(page)
+  // operatorState.openQuestions is keyed by (taskId, topic); a task-only `{#each}` key used to
+  // collapse this pair into one DOM node — the fixture's multi-question task carries two distinct
+  // topics on the same task specifically to catch that regression.
+  await expect(page.getByRole('region', { name: 'open question' }).filter({ hasText: 'which model should analyze this?' })).toBeVisible()
+  await expect(page.getByRole('region', { name: 'open question' }).filter({ hasText: 'which checkout should this run in?' })).toBeVisible()
+})
+
 test('an answer the kernel then REFUSES is shown, never swallowed', async ({ page }) => {
   await open(page)
   // The fixture scripts the measured failure: the reply lands, finalize_plan rejects it. Before
@@ -117,6 +126,15 @@ test('the copilot streams an answer and reports what it cost', async ({ page }) 
   // than the user-visible duplication it was.
   await expect(copilot(page).getByText('what is going on?')).toHaveCount(1)
   await expect(copilot(page).getByText('e2e copilot reply')).toHaveCount(1)
+})
+
+test('a copilot exchange survives 450 events of agent-loop noise after it', async ({ page }) => {
+  await open(page)
+  // The copilot pane used to restore history from a fixed-size tail of the whole project log; the
+  // fixture's 450 tool_call rows after the one seeded exchange pushed it out of a 400-row window
+  // entirely (observed, not hypothesised — see e2e/server.ts). The view registry's timeline read
+  // filters by kind BEFORE slicing, so the exchange is found regardless of what ran after it.
+  await expect(copilot(page).getByText('a step failed and was retried; the retry is running now')).toBeVisible()
 })
 
 test('the transcript renders tool payloads as readable JSON, not [object Object]', async ({ page }) => {

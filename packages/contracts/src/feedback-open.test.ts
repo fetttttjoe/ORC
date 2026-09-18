@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test'
-import { EVENT_KIND } from '@orc/contracts'
+import { EVENT_KIND } from './event-kinds'
 import { feedbackKey, openFeedbackTopics, type FeedbackEvent } from './feedback-open'
 
 // A TABLE, because the table IS the contract: the kernel's `openRequest` and the workspace health

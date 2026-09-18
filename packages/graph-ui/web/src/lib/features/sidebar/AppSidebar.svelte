@@ -21,7 +21,7 @@
     { key: 'settled', label: 'settled' },
   ] as const
   import { graph } from '$lib/stores/graph.svelte'
-  import { ledger } from '$lib/stores/ledger.svelte'
+  import { operator } from '$lib/stores/operator.svelte'
   import { session } from '$lib/stores/session.svelte'
   import type { GraphNode } from '$lib/api/types'
 
@@ -30,7 +30,7 @@
   let composerOpen = $state(false)
   let noteOpen = $state(false)
 
-  const gated = $derived(new Set(ledger.gates.map(g => g.taskId)))
+  const gated = $derived(new Set(operator.state.openQuestions.map(g => g.taskId)))
 
   // Requests grouped by what they need from the operator. Split children stay out of the top
   // level — they render inside their parent's request view.

@@ -1,11 +1,11 @@
 import { z } from 'zod'
 import { EVENT_KIND, type EventRecord } from '@orc/contracts'
+import type { TranscriptItem as WireTranscriptItem } from './wire'
 
-export type TranscriptItem =
-  | { kind: 'message'; iteration: number; stepId: string; text: string }
-  | { kind: 'tool'; iteration: number; stepId: string; toolName: string; input: unknown; output: unknown; isError: boolean }
-  | { kind: 'question'; stepId: string; question: string; answer: string | null }
-  | { kind: 'signal'; stepId: string; outcome: string; summary: string }
+// ONE declaration of an item, and it is the schema the browser parses — the LogRow posture in
+// summarize.ts, for the same reason: held as a union here and a schema there, the two can drift
+// silently, and the fold then produces an item shape no reader admits exists.
+export type TranscriptItem = z.infer<typeof WireTranscriptItem>
 
 // Lenient read-side views (the projections.ts pattern): a malformed payload skips its event,
 // never throws — transcripts must render for any history.
@@ -23,7 +23,7 @@ const View = {
 
 // Ordered conversation for a task (optionally one step). Tool calls pair with their results by
 // toolCallId; a dangling call (crash window) renders with output null.
-export function foldTranscript(events: EventRecord[], taskId: string, stepId?: string): TranscriptItem[] {
+export function foldTranscript(events: ReadonlyArray<EventRecord>, taskId: string, stepId?: string): TranscriptItem[] {
   const items: TranscriptItem[] = []
   const openTools = new Map<string, Extract<TranscriptItem, { kind: 'tool' }>>()
   const openQuestions = new Map<string, Extract<TranscriptItem, { kind: 'question' }>>()

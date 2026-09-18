@@ -5,8 +5,11 @@
   import RetryRow from './RetryRow.svelte'
   import WorkingLine from './WorkingLine.svelte'
   import PlanCard from './PlanCard.svelte'
-  import { api } from '$lib/api/client'
+  import { feedbackKey } from '@orc/contracts/feedback-key'
+  import { fetchView } from '$lib/api/view-client'
+  import { VIEW } from '@orc/ui-core/wire'
   import { ledger } from '$lib/stores/ledger.svelte'
+  import { operator } from '$lib/stores/operator.svelte'
   import { session } from '$lib/stores/session.svelte'
   import { dropTicker } from '$lib/stores/ledger-merge'
   import { EVENT_KIND, WORKING } from '$lib/event-kinds'
@@ -68,9 +71,9 @@
       let page: ReturnType<typeof dropTicker> = []
       for (let hop = 0; hop < NOISE_CHAIN && page.length === 0; hop++) {
         const before = oldestFetched ?? frontier
-        const raw = await api.log(project, { beforeSeq: before, limit: OLDER_PAGE })
+        const { data: raw } = await fetchView(project, VIEW.timeline, { beforeSeq: before, limit: OLDER_PAGE })
         if (gen !== ledger.generation) return
-        if (raw.length === 0) {
+        if (!raw || raw.length === 0) {
           exhausted = true
           return
         }
@@ -100,7 +103,7 @@
        a long question and painted over the copilot below it. Half the height at most, and its
        own scroll for the rest. -->
   <div id="open-gates" class="max-h-[50%] shrink-0 overflow-x-hidden overflow-y-auto">
-    {#each ledger.gates as gate (gate.taskId)}
+    {#each operator.state.openQuestions as gate (feedbackKey(gate.taskId, gate.topic))}
       <GateCard {gate} />
     {/each}
   </div>
@@ -123,7 +126,7 @@
     {/if}
     {#each ledger.rows as row, i (row.seq)}
       <LedgerRow {row} showTask={row.taskId !== ledger.rows[i - 1]?.taskId} />
-      {#if row.kind === EVENT_KIND.step_failed && row.taskId !== null && ledger.retryable.includes(row.taskId)}
+      {#if row.kind === EVENT_KIND.step_failed && row.taskId !== null && operator.state.retryable.includes(row.taskId)}
         <RetryRow taskId={row.taskId} />
       {/if}
       {#if row.kind === EVENT_KIND.plan_approved && row.taskId !== null}

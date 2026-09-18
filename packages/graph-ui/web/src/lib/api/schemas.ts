@@ -3,14 +3,23 @@ import { z } from 'zod'
 // precisely so the browser can take it, and a re-typed enum here silently accepts a state the
 // server stopped sending (or rejects one it started sending)
 import { MEMORY_HEALTH_STATES, MemoryStageName, SUPERVISOR_HEALTH_STATES } from '@orc/contracts/health'
-// the node vocabulary comes from the wire module, never a second spelling
-import { NODE_TYPES } from '@orc/ui-core/graph-wire'
-// relative, not the $lib alias: the e2e contract test imports this file from the graph-ui
-// package, whose tsconfig knows nothing about the web app's path aliases
-import { ArtifactDetail, ModelDetail, NoteDetail, StepDetail, TaskDetail } from '../features/inspector/detail-view'
+// the view registry and every parsed response shape come from ui-core's browser-safe wire
+// module — the one spelling the server and this app both import
+import {
+  ArtifactDetail, Envelope, GraphSnapshot, LogRows, ModelDetail, ModelRefs,
+  NoteDetail, PlanNotesView, PlansView, ProjectList, StepDetail, TaskDetail, Transcript,
+  VIEW, VIEW_ROUTE, ViewEnvelope, viewPath,
+} from '@orc/ui-core/wire'
 
-// re-exported so the contract test can assert each node kind against the schema its view uses
-export { ArtifactDetail, ModelDetail, NoteDetail, StepDetail, TaskDetail }
+// re-exported so the contract test and every component keep importing from this one file.
+// NodeDetail/TranscriptItem/LogRow (the SINGULAR element schemas) are not re-exported: every
+// consumer of a node or transcript or log-row shape now gets it typed through view-client.ts's
+// `ViewResult<N>`, parsed once at the fetch boundary — a schema import here with no reader left.
+export {
+  ArtifactDetail, Envelope, GraphSnapshot, LogRows, ModelDetail, ModelRefs,
+  NoteDetail, PlanNotesView, PlansView, ProjectList, StepDetail, TaskDetail, Transcript,
+  VIEW, VIEW_ROUTE, ViewEnvelope, viewPath,
+}
 
 /**
  * The response shape of every endpoint, as data rather than as a type assertion.
@@ -25,18 +34,6 @@ export { ArtifactDetail, ModelDetail, NoteDetail, StepDetail, TaskDetail }
  * lets e2e/contract.pw.ts assert the live server still satisfies them.
  */
 
-const GraphNode = z.object({
-  id: z.string(),
-  type: z.enum(NODE_TYPES),
-  label: z.string(),
-  detail: z.string(),
-  heat: z.number().optional(),
-  workspaceId: z.string().optional(),
-})
-const GraphLink = z.object({ source: z.string(), target: z.string(), type: z.string(), heat: z.number().optional() })
-
-export const GraphSnapshot = z.object({ seq: z.number(), nodes: z.array(GraphNode), links: z.array(GraphLink) })
-
 export const SessionInfo = z.object({
   projectId: z.string().nullable(),
   actions: z.boolean(),
@@ -46,8 +43,6 @@ export const SessionInfo = z.object({
   defaultCwd: z.string().nullable().optional(),
   bootedAt: z.string().optional(),
 })
-
-export const ProjectList = z.array(z.object({ id: z.string(), name: z.string().nullable(), dir: z.string().nullable().optional() }))
 
 const MemoryHealth = z.object({
   state: z.enum(MEMORY_HEALTH_STATES),
@@ -66,135 +61,6 @@ const MemoryHealth = z.object({
 export const Health = z.object({
   memory: MemoryHealth.nullable(),
   supervisor: z.object({ state: z.enum(SUPERVISOR_HEALTH_STATES), pid: z.number().optional(), lastSeenAt: z.string().optional() }).optional(),
-})
-
-const CopilotExchange = z.object({
-  user: z.string(),
-  assistant: z.string(),
-  toolCalls: z.array(z.object({ toolName: z.string(), summary: z.string() })).default([]),
-  modelRef: z.string(),
-})
-
-export const LogRows = z.array(
-  z.object({
-    seq: z.number(),
-    ts: z.string(),
-    kind: z.string(),
-    line: z.string(),
-    taskId: z.string().nullable(),
-    stepId: z.string().nullable(),
-    noteRef: z.string().nullable().optional(),
-    authorTaskId: z.string().nullable().optional(),
-    failure: z.object({ toolName: z.string(), error: z.string() }).nullable().optional(),
-    // the chat pane rebuilds real bubbles from these rather than from browser storage
-    exchange: CopilotExchange.nullable().optional(),
-  }),
-)
-
-export const Transcript = z.array(
-  z.discriminatedUnion('kind', [
-    z.object({ kind: z.literal('message'), iteration: z.number(), stepId: z.string(), text: z.string() }),
-    z.object({
-      kind: z.literal('tool'),
-      iteration: z.number(),
-      stepId: z.string(),
-      toolName: z.string(),
-      input: z.unknown(),
-      output: z.unknown(),
-      isError: z.boolean(),
-    }),
-    z.object({ kind: z.literal('question'), stepId: z.string(), question: z.string(), answer: z.string().nullable() }),
-    z.object({ kind: z.literal('signal'), stepId: z.string(), outcome: z.string(), summary: z.string() }),
-  ]),
-)
-
-const WaveStep = z.object({ id: z.string(), title: z.string(), status: z.string(), failureClass: z.string().optional() })
-export const PlansView = z.object({
-  versions: z.array(
-    z.object({
-      taskId: z.string(),
-      version: z.number(),
-      strategyRef: z.string(),
-      analyzerRef: z.string().optional(),
-      costEstimateUSD: z.number().nullable(),
-      // Every field PlanDraft REQUIRES must survive this parse, not just the ones the read views
-      // render: `reopen plan for editing` posts these steps straight back as a new version, and a
-      // schema that dropped executorRef/isolation made the server refuse the draft — a replan
-      // button that looked wired and could never succeed.
-      steps: z.array(
-        z.object({
-          id: z.string(),
-          role: z.string(),
-          title: z.string(),
-          instructions: z.string(),
-          executorRef: z.string(),
-          isolation: z.string(),
-          modelRef: z.string().optional(),
-          dependsOn: z.array(z.string()).default([]),
-          zone: z.array(z.string()).default([]),
-          skillRefs: z.array(z.string()).default([]),
-          toolRefs: z.array(z.string()).default([]),
-          maxIterations: z.number().optional(),
-        }),
-      ),
-    }),
-  ),
-  approvedVersion: z.number().nullable(),
-  visual: z
-    .object({
-      version: z.number(),
-      waves: z.array(z.object({ wave: z.number(), parallel: z.boolean(), steps: z.array(WaveStep) })),
-    })
-    .nullable(),
-})
-
-export const PlanNotesView = z.object({
-  notes: z.array(
-    z.object({
-      id: z.string(),
-      title: z.string(),
-      summary: z.string().default(''),
-      body: z.string().default(''),
-      rationale: z.string().default(''),
-      uncertainty: z.array(z.string()).default([]),
-      links: z.array(z.object({ id: z.string(), kind: z.string() })).default([]),
-      dependsOn: z.array(z.string()).default([]),
-      zone: z.array(z.string()).default([]),
-      modelRef: z.string().optional(),
-    }),
-  ),
-})
-
-/** the models catalog is a BARE array of refs — the `{refs}` wrapper it never had cost a flow */
-export const ModelRefs = z.array(z.string())
-
-/**
- * `/api/node` answers with a different shape per node kind. Unknown shapes stay legal (the view
- * renders a labelled raw record) — a NEW node kind must not break the pane — but the five known
- * ones are pinned, so a rename inside any of them fails the contract test.
- */
-export const NodeDetail = z.union([TaskDetail, StepDetail, NoteDetail, ArtifactDetail, ModelDetail, z.record(z.string(), z.unknown())])
-
-// ---- the live stream ----
-
-const GraphPatch = z.object({
-  addNodes: z.array(GraphNode).default([]),
-  updateNodes: z.array(GraphNode).default([]),
-  removeNodeIds: z.array(z.string()).default([]),
-  addLinks: z.array(GraphLink).default([]),
-  updateLinks: z.array(GraphLink).default([]),
-  removeLinks: z.array(GraphLink).default([]),
-})
-
-/**
- * An SSE frame. This carries the whole live experience — a malformed one used to be cast, so a
- * server-side rename would have corrupted the graph store silently rather than failing. Rejected
- * frames are dropped and reported, never applied half-parsed.
- */
-export const Envelope = z.object({
-  patch: GraphPatch.nullable().optional(),
-  summary: LogRows.element.nullable().optional(),
-  projects: ProjectList.optional(),
 })
 
 // ---- action results ----

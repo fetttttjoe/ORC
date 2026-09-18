@@ -1,14 +1,15 @@
-// envelope fan-out: patch → graph, summary → ledger + query invalidation
+// EventSource plumbing only: parse the frame, ask frame-plan.ts what it means against what's
+// already held, then apply that plan to the stores. The DECISION (what a frame means, including
+// the seq-regression and id-less-frame rules) lives in frame-plan.ts, tested without a connection.
 import { QueryClient } from '@tanstack/svelte-query'
-import { api } from '$lib/api/client'
-import type { Envelope, ProjectEntry } from '$lib/api/types'
+import { fetchView, invalidateTouch } from '$lib/api/view-client'
+import type { ProjectEntry } from '$lib/api/types'
 import { Envelope as EnvelopeSchema } from '$lib/api/schemas'
+import { VIEW } from '@orc/ui-core/wire'
+import { ID_LESS_SEQ, planFrame } from '$lib/frame-plan'
 import { graph } from '$lib/stores/graph.svelte'
 import { ledger } from '$lib/stores/ledger.svelte'
-import { invalidations } from '$lib/invalidation'
-import { EVENT_KIND } from '$lib/event-kinds'
-import { TERMINAL_TASK_STATUS, TaskStatus } from '@orc/contracts/task'
-
+import { operator } from '$lib/stores/operator.svelte'
 
 export interface StreamHandle {
   close(): void
@@ -24,22 +25,12 @@ export function connectStream(opts: {
 }): StreamHandle {
   const { project, queryClient } = opts
 
-  const applyRow = (row: Parameters<typeof ledger.add>[0]): void => {
-    if (!ledger.add(row)) return
-    if (row.kind === EVENT_KIND.task_status_changed && row.taskId) {
-      const status = TaskStatus.safeParse(graph.taskStatus(row.taskId))
-      ledger.retireGatesFor(row.taskId, status.success && TERMINAL_TASK_STATUS.has(status.data))
-    }
-    for (const key of invalidations(row, id => graph.parentOf(id))) void queryClient.invalidateQueries({ queryKey: key })
-  }
-
   // a catch-up frame (patch, no summary) means the narrative missed a window — refill it
   const backfill = (): void => {
     const from = ledger.lastRowSeq
-    void api
-      .log(project, { sinceSeq: from })
-      .then(rows => {
-        for (const row of rows) applyRow(row)
+    void fetchView(project, VIEW.timeline, { sinceSeq: from })
+      .then(({ data }) => {
+        for (const row of data ?? []) ledger.add(row)
       })
       .catch(() => {})
   }
@@ -55,18 +46,21 @@ export function connectStream(opts: {
       console.error('stream: envelope did not match its schema —', frame.error.issues[0]?.message)
       return
     }
-    const env: Envelope = frame.data
-    const envSeq = Number(ev.lastEventId) || 0
-    if (env.projects) opts.onProjects(env.projects)
-    // seq went backwards: the log was reset out-of-band, resync from a snapshot
-    if (envSeq && envSeq < graph.seq) {
+    const envSeq = Number(ev.lastEventId) || ID_LESS_SEQ
+    const plan = planFrame(graph.seq, envSeq, frame.data)
+    if (plan.projects) opts.onProjects(plan.projects)
+    // operator/touched are applied before the regression check can return early — planFrame never
+    // withholds them for a regression, so neither must this call site.
+    if (plan.operator) operator.state = plan.operator
+    for (const t of plan.touched) invalidateTouch(queryClient, project, t)
+    if (plan.regression) {
       opts.onSeqRegression()
       return
     }
-    if (envSeq) graph.seq = envSeq
-    if (env.patch) graph.applyPatch(env.patch)
-    if (env.summary) applyRow(env.summary)
-    else if (env.patch) backfill()
+    if (plan.seq !== null) graph.seq = plan.seq
+    if (plan.patch) graph.applyPatch(plan.patch)
+    if (plan.summary) ledger.add(plan.summary)
+    else if (plan.backfill) backfill()
     opts.onLive(true)
   }
   return { close: () => es.close() }

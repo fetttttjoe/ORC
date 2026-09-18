@@ -1,7 +1,7 @@
 // every fetch goes through get/post: one error surface, one URL builder, one schema check
 import type { z } from 'zod'
-import { LOG_PARAM } from '@orc/ui-core/graph-wire'
-import type { GraphSnapshot, Health, LogRow, NodeDetail, PlanNotesView, PlansView, ProjectEntry, SessionInfo, TranscriptItem } from './types'
+import type { GraphSnapshot, Health, ProjectEntry, SessionInfo } from './types'
+import { describeZodError } from './parse'
 import * as S from './schemas'
 
 export class ApiError extends Error {
@@ -18,6 +18,10 @@ export const setApiErrorHandler = (fn: (err: ApiError) => void): void => {
   onError = fn
 }
 
+// view-client.ts's fetchView reports a failed view read through this SAME toast surface, rather
+// than a second error-handler registry — one place an endpoint failure reaches the operator.
+export const reportApiError = (err: ApiError): void => onError(err)
+
 const qs = (params: Record<string, string | number | undefined>): string => {
   const u = new URLSearchParams()
   for (const [k, v] of Object.entries(params)) if (v !== undefined) u.set(k, String(v))
@@ -29,15 +33,13 @@ const qs = (params: Record<string, string | number | undefined>): string => {
  * Fetch and PARSE. The schema is the contract: a server that renames or re-nests a field fails
  * here, once, naming the endpoint and the path — instead of every consumer of that field quietly
  * rendering nothing. Callers still get their declared type, now earned rather than asserted.
+ *
+ * No `nullOn404` here: every read left on this surface (session/projects/graph/health) always
+ * answers something. The views that legitimately 404 (`plans`, `planNotes`) go through
+ * view-client.ts's `fetchView`, which owns that case beside the registry that decides it.
  */
-async function get<T>(
-  endpoint: string,
-  schema: z.ZodType<unknown>,
-  params: Record<string, string | number | undefined> = {},
-  opts?: { nullOn404?: boolean },
-): Promise<T> {
+async function get<T>(endpoint: string, schema: z.ZodType<T>, params: Record<string, string | number | undefined> = {}): Promise<T> {
   const res = await fetch(`/api/${endpoint}${qs(params)}`)
-  if (res.status === 404 && opts?.nullOn404) return null as T
   if (!res.ok) {
     const err = new ApiError(endpoint, await res.text().catch(() => res.statusText))
     onError(err)
@@ -45,12 +47,11 @@ async function get<T>(
   }
   const parsed = schema.safeParse(await res.json())
   if (!parsed.success) {
-    const where = parsed.error.issues.map(i => `${i.path.join('.') || '(root)'}: ${i.message}`).slice(0, 3).join('; ')
-    const err = new ApiError(endpoint, `response did not match the expected shape — ${where}`)
+    const err = new ApiError(endpoint, `response did not match the expected shape — ${describeZodError(parsed.error)}`)
     onError(err)
     throw err
   }
-  return parsed.data as T
+  return parsed.data
 }
 
 // CSRF: the server 403s any mutation without the per-boot token from /api/session, and actions
@@ -80,8 +81,7 @@ async function post<T>(endpoint: string, body: unknown, schema?: z.ZodType<unkno
   if (!schema) return payload as T // the caller reads nothing from this result
   const parsed = schema.safeParse(payload)
   if (!parsed.success) {
-    const where = parsed.error.issues.map(i => `${i.path.join('.') || '(root)'}: ${i.message}`).slice(0, 3).join('; ')
-    const err = new ApiError(endpoint, `result did not match the expected shape — ${where}`)
+    const err = new ApiError(endpoint, `result did not match the expected shape — ${describeZodError(parsed.error)}`)
     onError(err)
     throw err
   }
@@ -93,18 +93,5 @@ export const api = {
   projects: () => get<ProjectEntry[]>('projects', S.ProjectList),
   graph: (project: string) => get<GraphSnapshot>('graph', S.GraphSnapshot, { project }),
   health: () => get<Health>('health', S.Health),
-  log: (project: string, opts: { task?: string; limit?: number; sinceSeq?: number; beforeSeq?: number } = {}) =>
-    get<LogRow[]>('log', S.LogRows, {
-      project,
-      [LOG_PARAM.task]: opts.task,
-      [LOG_PARAM.limit]: opts.limit,
-      [LOG_PARAM.since]: opts.sinceSeq,
-      [LOG_PARAM.before]: opts.beforeSeq,
-    }),
-  node: (project: string, node: string) => get<NodeDetail>('node', S.NodeDetail, { project, id: node }),
-  transcript: (project: string, task: string, step?: string) => get<TranscriptItem[]>('transcript', S.Transcript, { project, task, step }),
-  plans: (project: string, task: string) => get<PlansView | null>('plans', S.PlansView, { project, task }, { nullOn404: true }),
-  planNotes: (project: string, task: string) => get<PlanNotesView | null>('plan-notes', S.PlanNotesView, { project, task }, { nullOn404: true }),
-  models: (project: string) => get<string[]>('models', S.ModelRefs, { project }),
   act: <T = unknown>(name: string, body: unknown, schema?: z.ZodType<unknown>) => post<T>(`actions/${name}`, body, schema),
 }

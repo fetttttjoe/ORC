@@ -1,16 +1,16 @@
 <script lang="ts">
-  import { createQuery, keepPreviousData } from '@tanstack/svelte-query'
+  import { createQuery } from '@tanstack/svelte-query'
   import MessageIcon from '@lucide/svelte/icons/message-square-dashed'
   import * as Empty from '$lib/components/ui/empty'
   import { Skeleton } from '$lib/components/ui/skeleton'
   import Chip from '$lib/components/Chip.svelte'
   import Payload from '$lib/components/Payload.svelte'
   import GateCard from '$lib/features/gates/GateCard.svelte'
-  import { api } from '$lib/api/client'
-  import { qk } from '$lib/query-keys'
+  import { feedbackKey } from '@orc/contracts/feedback-key'
+  import { viewQuery } from '$lib/api/view-query'
+  import { VIEW } from '@orc/ui-core/wire'
   import { stepIdOf, taskIdOf } from '$lib/node-id'
-  import { ledger } from '$lib/stores/ledger.svelte'
-  import { session } from '$lib/stores/session.svelte'
+  import { operator } from '$lib/stores/operator.svelte'
   import { toolPreview } from './tool-preview'
 
   /**
@@ -20,26 +20,22 @@
    */
   let { nodeId }: { nodeId: string } = $props()
 
-  const project = $derived(session.sel.project)
   const taskId = $derived(taskIdOf(nodeId))
   const stepId = $derived(stepIdOf(nodeId))
-  const gate = $derived(taskId === null ? null : (ledger.gates.find(g => g.taskId === taskId) ?? null))
+  // EVERY open question on this task, not just one — a task can be parked on two topics at once
+  // (see feedbackKey), and showing only the first silently hid the second from the one pane where
+  // a step-scoped question is answered.
+  const gates = $derived(taskId === null ? [] : operator.questionsFor(taskId))
 
-  const transcript = createQuery(() => ({
-    queryKey: qk.taskTranscript(taskId ?? '', stepId),
-    queryFn: () => api.transcript(project, taskId ?? '', stepId ?? undefined),
-    enabled: taskId !== null && project !== '',
-    // keep the last good answer on screen while a refetch runs
-    placeholderData: keepPreviousData,
-  }))
+  const transcript = createQuery(viewQuery(VIEW.transcript, () => (taskId !== null ? { taskId, ...(stepId !== null && { stepId }) } : null)))
 
   const items = $derived(transcript.data ?? [])
 
 </script>
 
-{#if gate !== null}
+{#each gates as gate (feedbackKey(gate.taskId, gate.topic))}
   <GateCard {gate} />
-{/if}
+{/each}
 
 {#if taskId === null}
   <Empty.Root class="py-10">

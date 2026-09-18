@@ -4,10 +4,11 @@
 import { spyOn } from 'bun:test'
 import type { Command } from 'commander'
 import { Surreal } from 'surrealdb'
-import type { ExecutionPort } from '@orc/contracts'
+import type { EventRecord, ExecutionPort } from '@orc/contracts'
 import { projectDatabaseName, type EventLog, type Kernel, type PluginHost, type ProjectConfig, type Storage } from '@orc/kernel'
 import type { McpHub } from '@orc/mcp-client'
 import type { OrcActions, ProjectSessions } from '@orc/ui-core'
+import { modelOf } from '@orc/ui-core/test-helpers'
 import { buildProgram } from './main'
 
 // `use()` selects only the namespace, and the (internally-generated, `t_[a-z0-9]+`) db name is
@@ -63,12 +64,15 @@ export function cli(kernel: Kernel | null, port?: () => Promise<ExecutionPort>, 
 // both would have to be production source in ui-core.
 export const unsupported = (name: string) => async (): Promise<never> => { throw new Error(`${name} not available in this test`) }
 export const sessionsStub = (over: Partial<ProjectSessions> = {}): ProjectSessions => ({
-  projects: unsupported('projects'), snapshot: unsupported('snapshot'), subscribe: unsupported('subscribe'),
+  projects: unsupported('projects'), model: unsupported('model'), snapshot: unsupported('snapshot'), subscribe: unsupported('subscribe'),
   subscribeProjects: unsupported('subscribeProjects'), notifyProjectsChanged: unsupported('notifyProjectsChanged'),
-  since: unsupported('since'), nodeDetail: unsupported('nodeDetail'), modelCatalog: unsupported('modelCatalog'),
-  reset: unsupported('reset'), transcript: unsupported('transcript'), taskPlans: unsupported('taskPlans'),
-  planNotes: unsupported('planNotes'), log: unsupported('log'), close: unsupported('close'), ...over,
+  since: unsupported('since'), reset: unsupported('reset'), close: unsupported('close'), ...over,
 })
+
+// A session answering every read from these EVENTS: the served tools read through the view
+// registry, so a test hands them a log rather than one canned method per tool.
+export const sessionsOf = (events: EventRecord[], over: Partial<ProjectSessions> = {}): ProjectSessions =>
+  sessionsStub({ model: async () => modelOf(events), ...over })
 export const actionsStub = (over: Partial<OrcActions> = {}): OrcActions => ({
   newTask: unsupported('newTask'), propose: unsupported('propose'), edit: unsupported('edit'),
   approve: unsupported('approve'), run: unsupported('run'), reply: unsupported('reply'),

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { createQuery, keepPreviousData } from '@tanstack/svelte-query'
+  import { createQuery } from '@tanstack/svelte-query'
   import PlusIcon from '@lucide/svelte/icons/plus'
   import * as Field from '$lib/components/ui/field'
   import * as Select from '$lib/components/ui/select'
@@ -7,10 +7,10 @@
   import { Input } from '$lib/components/ui/input'
   import { Textarea } from '$lib/components/ui/textarea'
   import { Spinner } from '$lib/components/ui/spinner'
-  import { api } from '$lib/api/client'
   import { actions } from '$lib/api/actions'
   import { notify } from '$lib/notify'
-  import { qk } from '$lib/query-keys'
+  import { viewQuery } from '$lib/api/view-query'
+  import { VIEW } from '@orc/ui-core/wire'
   import { session } from '$lib/stores/session.svelte'
 
   /**
@@ -35,13 +35,7 @@
   let cwd = $state('')
   let busy = $state(false)
 
-  const models = createQuery(() => ({
-    queryKey: qk.models(session.sel.project),
-    queryFn: () => api.models(session.sel.project),
-    enabled: session.canAct() && mode === 'grounded',
-    // keep the last good answer on screen while a refetch runs
-    placeholderData: keepPreviousData,
-  }))
+  const models = createQuery(viewQuery(VIEW.models, () => (session.canAct() && mode === 'grounded' ? {} : null)))
 
   const modeLabel = $derived(MODES.find(m => m.value === mode)?.label ?? '')
   const effectiveCwd = $derived(cwd.trim() || session.info.defaultCwd || '')

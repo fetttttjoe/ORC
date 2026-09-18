@@ -1,6 +1,8 @@
-// The slice of /api/node the tab headers read. NodeDetail is Record<string, unknown> on the wire,
-// so the slice goes through zod (repo rule: no casts on unknown-shaped data) — a shape miss means
-// "no head", never a crash, and the generic detail renderer still shows everything.
+// The slice of the node view the tab headers read: one title/status/usage line, across node kinds
+// whose full shapes have nothing else in common. Parsed rather than read off the typed detail
+// because that is a discriminated union and this is the one reader that does NOT care which member
+// it got — loose schemas keep it to one pass, and a shape miss means "no head", never a crash, with
+// the detail renderer below still showing everything.
 import { z } from 'zod'
 
 // task detail nests {task, usage}; other kinds may carry title/status at the top level
@@ -45,3 +47,4 @@ export const nodeHead = (data: unknown): Head | null => {
 // claim a measurement nobody made. Callers pass the raw nullable straight through.
 export const fmtCost = (usd: number | null | undefined): string => (usd == null ? 'unpriced' : `$${usd.toFixed(usd < 1 ? 3 : 2)}`)
 export const fmtTokens = (n: number): string => (n >= 1000 ? `${(n / 1000).toFixed(n >= 10_000 ? 0 : 1)}k` : String(n))
+export const fmtBytes = (n: number): string => (n < 1024 ? `${n} B` : n < 1024 * 1024 ? `${(n / 1024).toFixed(1)} KB` : `${(n / 1024 / 1024).toFixed(1)} MB`)
