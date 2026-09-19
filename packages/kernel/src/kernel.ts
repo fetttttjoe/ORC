@@ -1,10 +1,11 @@
 import { randomUUID } from 'node:crypto'
+import { statSync } from 'node:fs'
 import path from 'node:path'
 import { MASTERPLAN_NOTE_ID,
   AnalysisCompletedPayload, ChildPlanDraft, EVENT_KIND, FINISH_STEP_ID, FeedbackProvidedPayload, GROUNDED_APPROVAL_DOOR, ISOLATION_TIER, MemoryDeletedPayload, MemoryWrittenPayload, NOTE_TIER, PAYLOAD_SCHEMAS, PlanAnnotatedPayload, PlanDraft, RunRequestedPayload, STEP_ROLE, STRATEGY, TASK_STATUS, TERMINAL_TASK_STATUS, WORKSPACE_TITLE_MAX, Workspace, WorkspaceArchivedPayload, WorkspaceMergedPayload, WorkspaceRetitledPayload, evaluateApproval, feedbackKey, formatModelOption, isApprovalAnswer, openFeedbackTopics, validatePlan, type ChildPlanDraftInput, type ModelOption,
   type Analyzer, type ApprovalPolicy, type EventKind, type EventRecord,
   type PlanNote, type Plan, type PlanStep, type TaskNode, type TaskStatus,
-  type MemoryAuthor, type WorkspaceKind,
+  type WorkspaceKind, authorSourceOf, directoryZoneEntries, type Origin,
 } from '@orc/contracts'
 import { foldPlanNotes, planApprovalStamp, planGraphHash, planScope, PLAN_STEP_ID, PLAN_STEP_ROLE } from './execution/strategies/grounded-plan'
 import { reconcileFinishStep } from './finish-step'
@@ -27,6 +28,18 @@ export type PlanAnnotation = PlanAnnotatedPayload & { seq: number }
 const workspaceCwdKey = (cwd: string): string => {
   if (cwd.trim() === '') throw new KernelError(KERNEL_ERROR_CODE.invalid_transition, 'a workspace needs a cwd')
   return path.resolve(cwd)
+}
+
+// A workspace directory that is missing or unresolvable is not judged here.
+function assertZonesCanMatch(plan: Plan, workspaceCwd: string | null): void {
+  if (workspaceCwd === null) return
+  if (statSync(workspaceCwd, { throwIfNoEntry: false })?.isDirectory() !== true) return
+  const isDirectory = (rel: string): boolean =>
+    statSync(path.resolve(workspaceCwd, rel), { throwIfNoEntry: false })?.isDirectory() === true
+  for (const step of plan.steps)
+    for (const entry of directoryZoneEntries(step.zone, isDirectory))
+      throw new KernelError(KERNEL_ERROR_CODE.plan_validation_failed,
+        `step '${step.id}' zone entry '${entry}' names a directory, which matches no file — write '${entry}/**'`)
 }
 
 // Who authored a split's plan draft. Omitted = 'agent' (fail closed): only the kernel's own freeze
@@ -74,7 +87,7 @@ export class Kernel {
   // inherits it (proposeSplit expands with parentStep.maxIterations), so raising the project
   // ceiling moved nothing below the analyze step. One override, one place, plans stay frozen data.
   // `workspaceId`: same rule as createTask — optional in the type only so a child inherits.
-  async createGroundedTask(input: { title: string; spec: string; modelRef: string; analyzerRef: string; parentId?: string; budgetUSD?: number | null; workspaceId?: string; modelCatalog?: ModelOption[]; maxIterations?: number }): Promise<TaskNode> {
+  async createGroundedTask(input: { title: string; spec: string; modelRef: string; analyzerRef: string; parentId?: string; budgetUSD?: number | null; workspaceId?: string; modelCatalog?: ModelOption[]; maxIterations?: number }, origin: Origin): Promise<TaskNode> {
     // the title is a LABEL, never the goal — a grounded run without intent would make the
     // analyze/plan agents guess (burning an analyze pass on "what did you mean?")
     const spec = input.spec.trim()
@@ -85,7 +98,7 @@ export class Kernel {
     if (!analyzer)
       throw new KernelError(KERNEL_ERROR_CODE.invalid_transition, `unknown analyzer '${input.analyzerRef}' — register it or pass a valid analyzerRef`)
     return this.log.transaction(async tx => {
-      const task = await this.createTaskIn(tx, { title: input.title, spec, type: 'grounded', parentId: input.parentId, budgetUSD: input.budgetUSD, workspaceId: input.workspaceId })
+      const task = await this.createTaskIn(tx, { title: input.title, spec, type: 'grounded', parentId: input.parentId, budgetUSD: input.budgetUSD, workspaceId: input.workspaceId }, origin)
       const maxIterations = input.maxIterations ?? DEFAULT_MAX_ITERATIONS
       const analyzeStep: PlanStep = { ...analyzer.analysisStep({ modelRef: input.modelRef, taskSpec: spec }), maxIterations, readOnlySource: true }
       const planStep: PlanStep = {
@@ -110,19 +123,19 @@ export class Kernel {
         costEstimateUSD: estimateCostUSD(state, { strategyRef: STRATEGY.groundedPlan, analyzerRef: input.analyzerRef }),
         steps: [analyzeStep, planStep],
       }
-      const plan = await this.appendPlanVersion(tx, task.id, draft, EVENT_KIND.plan_proposed, task.status)
-      await this.approvePlanIn(tx, task.id, plan.version, { approvedBy: 'policy' })
+      const plan = await this.appendPlanVersion(tx, task.id, draft, EVENT_KIND.plan_proposed, task.status, origin)
+      await this.approvePlanIn(tx, task.id, plan.version, { approvedBy: 'policy' }, origin)
       return task
     })
   }
 
   // `workspaceId` is required in practice and optional in the type only so a child can inherit its
   // parent's (createTaskIn). Omitting it without a parentId is a KernelError, not a default.
-  async createTask(input: { title: string; spec?: string; type?: string; parentId?: string; budgetUSD?: number | null; workspaceId?: string }): Promise<TaskNode> {
-    return this.log.transaction(tx => this.createTaskIn(tx, input))
+  async createTask(input: { title: string; spec?: string; type?: string; parentId?: string; budgetUSD?: number | null; workspaceId?: string }, origin: Origin): Promise<TaskNode> {
+    return this.log.transaction(tx => this.createTaskIn(tx, input, origin))
   }
 
-  async proposePlan(taskId: string, draft: PlanDraft): Promise<Plan> {
+  async proposePlan(taskId: string, draft: PlanDraft, origin: Origin): Promise<Plan> {
     return this.log.transaction(async tx => {
       const task = await this.requireTask(tx, taskId)
       if (task.status !== TASK_STATUS.draft)
@@ -131,11 +144,11 @@ export class Kernel {
       // the shape that actually runs — the same reason freezePlan appends before the approval
       // render. WHICH plans get one is finish-step.ts's rule (plansGetFinishStep), shared with
       // editPlan below so a proposed plan and its edit can never end differently.
-      return this.appendPlanVersion(tx, taskId, reconcileFinishStep(task, draft), EVENT_KIND.plan_proposed, task.status)
+      return this.appendPlanVersion(tx, taskId, reconcileFinishStep(task, draft), EVENT_KIND.plan_proposed, task.status, origin)
     })
   }
 
-  async editPlan(taskId: string, draft: PlanDraft): Promise<Plan> {
+  async editPlan(taskId: string, draft: PlanDraft, origin: Origin): Promise<Plan> {
     return this.log.transaction(async tx => {
       const task = await this.requireTask(tx, taskId)
       // `blocked` is editable, not just `awaiting_approval`: a plan froze a step whose zone entry
@@ -154,16 +167,19 @@ export class Kernel {
       // edit written from scratch (orc edit --file) would otherwise drop it silently, leaving a
       // task that never reconciles its notes. reconcileFinishStep strips the kernel's own trailing
       // step and re-derives it, so the edited plan ends exactly where the proposed one did.
-      return this.appendPlanVersion(tx, taskId, reconcileFinishStep(task, draft), EVENT_KIND.plan_edited, task.status)
+      return this.appendPlanVersion(tx, taskId, reconcileFinishStep(task, draft), EVENT_KIND.plan_edited, task.status, origin)
     })
   }
 
+  // `version` and `approval` stay positional but lose their `?`: origin is required and LAST, and a
+  // required parameter cannot follow an optional one (TS1016) — callers pass undefined explicitly.
   async approvePlan(
     taskId: string,
-    version?: number,
-    approval?: { approvedBy: 'human' | 'policy' | 'mcp'; ruleIndex?: number },
+    version: number | undefined,
+    approval: { approvedBy: 'human' | 'policy' | 'mcp'; ruleIndex?: number } | undefined,
+    origin: Origin,
   ): Promise<Plan> {
-    return this.log.transaction(tx => this.approvePlanIn(tx, taskId, version, approval))
+    return this.log.transaction(tx => this.approvePlanIn(tx, taskId, version, approval, origin))
   }
 
   async proposeSplit(input: {
@@ -171,8 +187,9 @@ export class Kernel {
     title: string; spec: string; plan: ChildPlanDraftInput; budgetUSD?: number
     parentStep: Pick<PlanStep, 'executorRef' | 'modelRef' | 'maxIterations'>
     policy: ApprovalPolicy; maxDepth: number
-    origin?: SplitOrigin
-  }): Promise<{ splitId: string; childTaskId: string; gated: boolean }> {
+    // WHO authored the draft — not the caller's Origin, which is the last parameter
+    authoredBy?: SplitOrigin
+  }, origin: Origin): Promise<{ splitId: string; childTaskId: string; gated: boolean }> {
     const splitId = `split:${input.runToken}:${input.toolCallId}`
     const childTaskId = `${input.parentTaskId}.${input.stepId}.${input.toolCallId}`
     return this.log.transaction(async tx => {
@@ -216,7 +233,7 @@ export class Kernel {
       // verify anywhere — and finisher records decisions the human never saw. The step ID is
       // reserved alongside the role because stepMayReconcile keys on BOTH terms: a split step named
       // 'finish' would shadow the kernel's own in every id-keyed read (status renders, resume).
-      if (input.origin !== SPLIT_ORIGIN.freeze) {
+      if (input.authoredBy !== SPLIT_ORIGIN.freeze) {
         const reserved = draft.steps.find(s => s.role === STEP_ROLE.committer || s.role === STEP_ROLE.finisher || s.id === FINISH_STEP_ID)
         if (reserved)
           throw new KernelError(KERNEL_ERROR_CODE.invalid_transition,
@@ -231,10 +248,10 @@ export class Kernel {
         status: TASK_STATUS.draft, zone: [], budgetUSD, depth: parent.depth + 1,
         createdAt: new Date().toISOString(),
       }
-      await this.append(tx, child.id, EVENT_KIND.task_created, { task: child })
+      await this.append(tx, child.id, EVENT_KIND.task_created, { task: child }, origin)
       await this.append(tx, input.parentTaskId, EVENT_KIND.split_proposed, {
         splitId, taskId: input.parentTaskId, stepId: input.stepId, runToken: input.runToken, childTaskId,
-      })
+      }, origin)
 
       // expand the trimmed draft with inherited refs (spec D3) and propose+maybe-approve
       const expanded: PlanDraft = {
@@ -249,15 +266,15 @@ export class Kernel {
           isolation: ISOLATION_TIER.local, zone: s.zone, maxIterations: input.parentStep.maxIterations,
         })),
       }
-      const plan = await this.appendPlanVersion(tx, childTaskId, expanded, EVENT_KIND.plan_proposed, TASK_STATUS.draft)
+      const plan = await this.appendPlanVersion(tx, childTaskId, expanded, EVENT_KIND.plan_proposed, TASK_STATUS.draft, origin)
 
       const verdict = evaluateApproval(input.policy, { depth: child.depth, costEstimateUSD: plan.costEstimateUSD, type: child.type })
       if (verdict.then === 'auto') {
         await this.append(tx, childTaskId, EVENT_KIND.plan_approved, {
           taskId: childTaskId, version: plan.version, approvedAt: new Date().toISOString(),
           approvedBy: 'policy', ...(verdict.ruleIndex !== undefined && { ruleIndex: verdict.ruleIndex }),
-        })
-        await this.append(tx, childTaskId, EVENT_KIND.task_status_changed, { taskId: childTaskId, from: TASK_STATUS.awaiting_approval, to: TASK_STATUS.approved })
+        }, origin)
+        await this.append(tx, childTaskId, EVENT_KIND.task_status_changed, { taskId: childTaskId, from: TASK_STATUS.awaiting_approval, to: TASK_STATUS.approved }, origin)
       }
       return { splitId, childTaskId, gated: verdict.then === 'manual' }
     })
@@ -265,7 +282,7 @@ export class Kernel {
 
   // D5 human annotation on a plan-note (M5b): an input event only — the plan-authoring agent
   // reads it and re-renders on its next revise. No fold/state change of its own.
-  async annotatePlan(taskId: string, input: { targetNote: string; refs?: string[]; text: string }): Promise<void> {
+  async annotatePlan(taskId: string, input: { targetNote: string; refs?: string[]; text: string }, origin: Origin): Promise<void> {
     return this.log.transaction(async tx => {
       const task = await this.requireTask(tx, taskId)
       if (task.status === TASK_STATUS.done || task.status === TASK_STATUS.cancelled || task.status === TASK_STATUS.failed)
@@ -273,7 +290,7 @@ export class Kernel {
       const plan = (await this.stateOf(tx)).plans.get(taskId)?.versions.at(-1)
       if (!plan) throw new KernelError(KERNEL_ERROR_CODE.invalid_transition, 'no plan to annotate')
       const payload = PlanAnnotatedPayload.parse({ planVersion: plan.version, targetNote: input.targetNote, refs: input.refs ?? [], text: input.text })
-      await this.append(tx, taskId, EVENT_KIND.plan_annotated, payload)
+      await this.append(tx, taskId, EVENT_KIND.plan_annotated, payload, origin)
     })
   }
 
@@ -461,15 +478,15 @@ export class Kernel {
   // the step workflow parked on DBOS.recv(`feedback:<topic>`, 60) — that workflow's id is the event's
   // own envelope runToken, recorded by the port from inside the step (never reconstructed here).
   // Returns the resolved topic, or null if the task has no open question (the CLI reports either).
-  // `via` names the DOOR the answer arrived through, and defaults to the terminal. It is recorded
-  // rather than assumed because for a GROUNDED task the conversational approval answered here IS
+  // The ANSWERER's door names the author source (authorSourceOf), and it is recorded rather than
+  // assumed because for a GROUNDED task the conversational approval answered here IS
   // the human gate — createGroundedTask policy-approves the scaffold precisely because "the human's
   // real gate is the conversational approve inside the plan step" — so who sent it decides whether
   // a plan was approved by a person or by an agent driving the MCP surface.
   // Which answers count is isApprovalAnswer's alone (contracts/approval-answer.ts): the word used to
   // be a bare literal here AND a second copy in the browser bundle, and a human who typed "agree"
   // was silently given ordinary feedback instead of the gate they meant to open.
-  async replyFeedback(taskId: string, text: string, via: MemoryAuthor['source'] = 'cli'): Promise<string | null> {
+  async replyFeedback(taskId: string, text: string, origin: Origin): Promise<string | null> {
     const open = await this.log.transaction(async tx => {
       const task = await this.requireTask(tx, taskId)
       const requested = this.openRequest(await tx.byTask(taskId))
@@ -488,13 +505,16 @@ export class Kernel {
         // workspaceId off the TASK, which requireTask above already has in hand: an answer belongs
         // to the checkout the task is being worked in, not to wherever the person answering happens
         // to be sitting — the web and MCP doors can both reply to a task in another worktree.
-        topic, text, author: { source: via, workspaceId: task.workspaceId }, ...(planHash && { planHash }),
+        // the author's own origin is the ANSWERER's, not the question's: MemoryAuthor.origin says
+        // where the write came from, and omitting it made FeedbackProvidedPayload.parse throw.
+        topic, text, author: { source: authorSourceOf(origin.door), workspaceId: task.workspaceId, origin }, ...(planHash && { planHash }),
       })
-      const provided = await tx.append({
-        taskId, stepId: event.stepId, runToken: event.runToken,
-        kind: EVENT_KIND.feedback_provided, payload,
-        idempotencyKey: `feedback:${event.seq}:provided`,
-      })
+      // The QUESTION's chat, the ANSWERER's door: the reply belongs to the interaction that asked,
+      // and a reply threaded into the answerer's own chat would leave the gate's transcript with a
+      // question nobody ever answered.
+      const provided = await this.append(tx, taskId, EVENT_KIND.feedback_provided, payload,
+        { chatId: event.chatId, door: origin.door },
+        { stepId: event.stepId, runToken: event.runToken, idempotencyKey: `feedback:${event.seq}:provided` })
       return { topic, runToken: event.runToken, seq: provided.seq }
     })
     if (!open) return null
@@ -513,11 +533,11 @@ export class Kernel {
   // D3/RG7 emitter (M5b): the analyze (scout) step self-reports its CoverageReport before signaling
   // success — the report_coverage tool's write side. Carries the step's runToken for provenance;
   // orc status reads the latest back off the log. Degradation (analyzed:false) is a valid report.
-  async reportCoverage(ctx: { taskId: string; stepId: string; runToken: string }, coverage: unknown): Promise<void> {
+  async reportCoverage(ctx: { taskId: string; stepId: string; runToken: string }, coverage: unknown, origin: Origin): Promise<void> {
     return this.log.transaction(async tx => {
       await this.requireTask(tx, ctx.taskId)
       const payload = AnalysisCompletedPayload.parse(coverage)
-      await tx.append({ taskId: ctx.taskId, stepId: ctx.stepId, runToken: ctx.runToken, kind: EVENT_KIND.analysis_completed, payload })
+      await this.append(tx, ctx.taskId, EVENT_KIND.analysis_completed, payload, origin, { stepId: ctx.stepId, runToken: ctx.runToken })
     })
   }
 
@@ -527,7 +547,7 @@ export class Kernel {
   // Returns the recorded ask's seq: a client that then watches needs to tell "the supervisor has
   // not reacted yet" from "the run is over", and the only difference between those two is whether
   // anything happened after this event.
-  async requestRun(taskId: string, opts: { cwd?: string; retry?: boolean } = {}): Promise<number> {
+  async requestRun(taskId: string, opts: { cwd?: string; retry?: boolean }, origin: Origin): Promise<number> {
     return this.log.transaction(async tx => {
       const state = await this.stateOf(tx)
       const task = this.requireTaskIn(state, taskId)
@@ -541,10 +561,8 @@ export class Kernel {
       if (cwd === null)
         throw new KernelError(KERNEL_ERROR_CODE.workspace_not_found,
           `task '${taskId}' names workspace '${task.workspaceId}', which is not in the log — pass --cwd to run it anyway`)
-      const requested = await tx.append({
-        taskId, stepId: null, runToken: null, kind: EVENT_KIND.run_requested,
-        payload: RunRequestedPayload.parse({ taskId, cwd, retry: opts.retry ?? false }),
-      })
+      const requested = await this.append(tx, taskId, EVENT_KIND.run_requested,
+        RunRequestedPayload.parse({ taskId, cwd, retry: opts.retry ?? false }), origin)
       return requested.seq
     })
   }
@@ -560,17 +578,19 @@ export class Kernel {
   // run AFTER the cancel completed. Under the project write lock a split lands either before the
   // sweep (its child is in the fold, so it gets stamped) or after commit, where proposeSplit's
   // terminal-parent guard refuses it — every subtree task is terminal by then.
-  async cancelSubtree(taskId: string): Promise<string[]> {
+  async cancelSubtree(taskId: string, origin: Origin): Promise<string[]> {
     return this.log.transaction(async tx => {
       const state = await this.stateOf(tx)
       const stamped: string[] = []
       for (const id of subtreeTaskIds(state, taskId).reverse()) {
         const status = state.tasks.get(id)?.status
         if (status === undefined || TERMINAL_TASK_STATUS.has(status)) continue
-        await tx.append({
-          taskId: id, stepId: null, runToken: null, kind: EVENT_KIND.task_status_changed,
-          payload: { taskId: id, from: status, to: TASK_STATUS.cancelled },
-        })
+        // A running task's end belongs to the RUN's chat — that transcript is where the cancelled
+        // status is read back from — while the door stays the canceller's, who is not the supervisor.
+        const run = status === TASK_STATUS.running ? state.runs.get(id)?.at(-1) : undefined
+        await this.append(tx, id, EVENT_KIND.task_status_changed,
+          { taskId: id, from: status, to: TASK_STATUS.cancelled },
+          run ? { chatId: run.workflowId, door: origin.door } : origin)
         stamped.push(id)
       }
       return stamped
@@ -600,7 +620,7 @@ export class Kernel {
   async ensureWorkspace(input: {
     cwd: string; branch: string | null; kind: WorkspaceKind; onTrunk: boolean; title?: string
     managed?: boolean; baseBranch?: string | null
-  }): Promise<{ workspace: Workspace; created: boolean }> {
+  }, origin: Origin): Promise<{ workspace: Workspace; created: boolean }> {
     const cwd = workspaceCwdKey(input.cwd)
     return this.log.transaction(async tx => {
       const existing = workspaceByCwd((await this.stateOf(tx)).workspaces, cwd)
@@ -619,20 +639,20 @@ export class Kernel {
         managed: input.managed ?? false, onTrunk: input.onTrunk,
         createdAt: new Date().toISOString(), archivedAt: null,
       })
-      await this.appendProjectEvent(tx, EVENT_KIND.workspace_created, { workspace })
+      await this.appendProjectEvent(tx, EVENT_KIND.workspace_created, { workspace }, origin)
       return { workspace, created: true }
     })
   }
 
   // The deliberate half: orc created the directory (a `git worktree add`), so `managed` is the
   // caller's to declare — it is the fact that later licenses `git worktree remove`.
-  async createWorkspace(input: { title: string; cwd: string; branch: string; baseBranch: string; kind: WorkspaceKind; managed: boolean; onTrunk: boolean }): Promise<Workspace> {
+  async createWorkspace(input: { title: string; cwd: string; branch: string; baseBranch: string; kind: WorkspaceKind; managed: boolean; onTrunk: boolean }, origin: Origin): Promise<Workspace> {
     const cwd = workspaceCwdKey(input.cwd)
     return this.log.transaction(async tx => {
       if (workspaceByCwd((await this.stateOf(tx)).workspaces, cwd))
         throw new KernelError(KERNEL_ERROR_CODE.invalid_transition, `a workspace already exists at ${cwd}`)
       const workspace = Workspace.parse({ id: randomUUID(), ...input, cwd, createdAt: new Date().toISOString(), archivedAt: null })
-      await this.appendProjectEvent(tx, EVENT_KIND.workspace_created, { workspace })
+      await this.appendProjectEvent(tx, EVENT_KIND.workspace_created, { workspace }, origin)
       return workspace
     })
   }
@@ -648,22 +668,22 @@ export class Kernel {
   // otherwise leave two live records for one directory, and workspaceByCwd answers whichever it
   // finds first. Re-parsed on the way in — the caller is handing back a value it read before a
   // wipe, which is exactly when a half-stale shape reaches a writer.
-  async restoreWorkspace(workspace: Workspace): Promise<Workspace> {
+  async restoreWorkspace(workspace: Workspace, origin: Origin): Promise<Workspace> {
     const parsed = Workspace.parse(workspace)
     const cwd = workspaceCwdKey(parsed.cwd)
     return this.log.transaction(async tx => {
       if (workspaceByCwd((await this.stateOf(tx)).workspaces, cwd))
         throw new KernelError(KERNEL_ERROR_CODE.invalid_transition, `a workspace already exists at ${cwd}`)
       const restored = { ...parsed, cwd }
-      await this.appendProjectEvent(tx, EVENT_KIND.workspace_created, { workspace: restored })
+      await this.appendProjectEvent(tx, EVENT_KIND.workspace_created, { workspace: restored }, origin)
       return restored
     })
   }
 
-  async retitleWorkspace(id: string, title: string): Promise<Workspace> {
+  async retitleWorkspace(id: string, title: string, origin: Origin): Promise<Workspace> {
     return this.log.transaction(async tx => {
       const w = this.requireWorkspace(await this.stateOf(tx), id)
-      await this.appendProjectEvent(tx, EVENT_KIND.workspace_retitled, WorkspaceRetitledPayload.parse({ workspaceId: id, title }))
+      await this.appendProjectEvent(tx, EVENT_KIND.workspace_retitled, WorkspaceRetitledPayload.parse({ workspaceId: id, title }), origin)
       return applyRetitle(w, title) // the fold's own transition — never a second spelling of it
     })
   }
@@ -672,11 +692,11 @@ export class Kernel {
   // so restore cannot drift from archive. A SETTER, not a transition: re-archiving re-stamps
   // archivedAt and restoring a live record appends a no-op, both deliberately allowed — an operator
   // correcting a record must not have to know its current state, and the fold is idempotent either way.
-  async setWorkspaceArchived(id: string, archived: boolean): Promise<Workspace> {
+  async setWorkspaceArchived(id: string, archived: boolean, origin: Origin): Promise<Workspace> {
     return this.log.transaction(async tx => {
       const w = this.requireWorkspace(await this.stateOf(tx), id)
       const at = new Date().toISOString()
-      await this.appendProjectEvent(tx, EVENT_KIND.workspace_archived, WorkspaceArchivedPayload.parse({ workspaceId: id, archived, at }))
+      await this.appendProjectEvent(tx, EVENT_KIND.workspace_archived, WorkspaceArchivedPayload.parse({ workspaceId: id, archived, at }), origin)
       return applyArchived(w, archived, at)
     })
   }
@@ -689,7 +709,7 @@ export class Kernel {
   // The "commit" of the workspace transaction: the branch landed on trunk. Recorded ONCE — a reader
   // derives from this event alone (contracts' WorkspaceMergedPayload), so a second merge naming a
   // different commit for the same landing would answer differently depending on which one it folded.
-  async mergeWorkspace(id: string, input: { mergeCommit: string; trunk: string }): Promise<WorkspaceMergedPayload> {
+  async mergeWorkspace(id: string, input: { mergeCommit: string; trunk: string }, origin: Origin): Promise<WorkspaceMergedPayload> {
     return this.log.transaction(async tx => {
       // ONE fold for both facts: this reads the workspace AND its merge, and stateOf refolds the
       // whole log per call.
@@ -698,7 +718,7 @@ export class Kernel {
       if (state.workspaceMerges.has(id))
         throw new KernelError(KERNEL_ERROR_CODE.invalid_transition, `workspace '${id}' is already merged`)
       const payload = WorkspaceMergedPayload.parse({ workspaceId: id, ...input, at: new Date().toISOString() })
-      await this.appendProjectEvent(tx, EVENT_KIND.workspace_merged, payload)
+      await this.appendProjectEvent(tx, EVENT_KIND.workspace_merged, payload, origin)
       return payload
     })
   }
@@ -744,6 +764,7 @@ export class Kernel {
     // its parent's. TaskNode.workspaceId is required, and a root task that names none is refused
     // below — a default here would silently bind work to a workspace nobody chose.
     input: { title: string; spec?: string; type?: string; parentId?: string; budgetUSD?: number | null; workspaceId?: string },
+    origin: Origin,
   ): Promise<TaskNode> {
     // ONE fold for both facts this needs — the parent (inheritance) and the workspace record.
     // stateOf refolds the whole log per call, so asking requireTask and requireWorkspace for their
@@ -761,15 +782,16 @@ export class Kernel {
       budgetUSD: input.budgetUSD ?? parent?.budgetUSD ?? null,
       depth: parent ? parent.depth + 1 : 0, createdAt: new Date().toISOString(),
     }
-    await this.append(tx, task.id, EVENT_KIND.task_created, { task })
+    await this.append(tx, task.id, EVENT_KIND.task_created, { task }, origin)
     return task
   }
 
   private async approvePlanIn(
     tx: EventLogOps,
     taskId: string,
-    version?: number,
-    approval?: { approvedBy: 'human' | 'policy' | 'mcp'; ruleIndex?: number },
+    version: number | undefined,
+    approval: { approvedBy: 'human' | 'policy' | 'mcp'; ruleIndex?: number } | undefined,
+    origin: Origin,
   ): Promise<Plan> {
     const task = await this.requireTask(tx, taskId)
     if (task.status !== TASK_STATUS.awaiting_approval)
@@ -783,8 +805,8 @@ export class Kernel {
       taskId, version: wanted, approvedAt: new Date().toISOString(),
       approvedBy: approval?.approvedBy ?? 'human',
       ...(approval?.ruleIndex !== undefined && { ruleIndex: approval.ruleIndex }),
-    })
-    await this.append(tx, taskId, EVENT_KIND.task_status_changed, { taskId, from: task.status, to: TASK_STATUS.approved })
+    }, origin)
+    await this.append(tx, taskId, EVENT_KIND.task_status_changed, { taskId, from: task.status, to: TASK_STATUS.approved }, origin)
     return latest
   }
 
@@ -794,29 +816,40 @@ export class Kernel {
     draft: PlanDraft,
     kind: Extract<EventKind, 'plan_proposed' | 'plan_edited'>,
     from: TaskStatus,
+    origin: Origin,
   ): Promise<Plan> {
-    const versions = (await this.stateOf(tx)).plans.get(taskId)?.versions ?? []
+    const state = await this.stateOf(tx)
+    const versions = state.plans.get(taskId)?.versions ?? []
     const plan: Plan = { ...PlanDraft.parse(draft), taskId, version: versions.length + 1 }
     const check = validatePlan(plan)
     if (!check.ok) throw new KernelError(KERNEL_ERROR_CODE.plan_validation_failed, check.errors.join('; '))
+    assertZonesCanMatch(plan, workspaceCwdFor(this.requireTaskIn(state, taskId), state.workspaces))
     const refErrors = this.refValidator ? await this.refValidator(plan) : []
     if (refErrors.length > 0)
       throw new KernelError(KERNEL_ERROR_CODE.plan_validation_failed, refErrors.join('; '))
-    await this.append(tx, taskId, kind, { plan })
+    await this.append(tx, taskId, kind, { plan }, origin)
     if (from !== TASK_STATUS.awaiting_approval)
-      await this.append(tx, taskId, EVENT_KIND.task_status_changed, { taskId, from, to: TASK_STATUS.awaiting_approval })
+      await this.append(tx, taskId, EVENT_KIND.task_status_changed, { taskId, from, to: TASK_STATUS.awaiting_approval }, origin)
     return plan
   }
 
-  private async append(ops: EventLogOps, taskId: string, kind: EventKind, payload: Record<string, unknown>): Promise<void> {
-    await ops.append({ taskId, stepId: null, runToken: null, kind, payload })
+  // The ONE envelope spelling in this file: every verb's origin is spread here, so a new verb
+  // cannot reach the log without naming the interaction and door it came from.
+  private async append(
+    ops: EventLogOps, taskId: string, kind: EventKind, payload: Record<string, unknown>, origin: Origin,
+    extra: { stepId?: string; runToken?: string; idempotencyKey?: string } = {},
+  ): Promise<EventRecord> {
+    return ops.append({
+      ...origin, taskId, stepId: extra.stepId ?? null, runToken: extra.runToken ?? null, kind, payload,
+      ...(extra.idempotencyKey !== undefined && { idempotencyKey: extra.idempotencyKey }),
+    })
   }
 
   // A project-level event carries NO task binding — the envelope's taskId is null by design (the
   // same shape models_discovered and commit_recorded already use), so `append` above, which demands
   // a task id, cannot express it.
-  private async appendProjectEvent(ops: EventLogOps, kind: EventKind, payload: Record<string, unknown>): Promise<void> {
-    await ops.append({ taskId: null, stepId: null, runToken: null, kind, payload })
+  private async appendProjectEvent(ops: EventLogOps, kind: EventKind, payload: Record<string, unknown>, origin: Origin): Promise<void> {
+    await ops.append({ ...origin, taskId: null, stepId: null, runToken: null, kind, payload })
   }
 
   private async requireTask(ops: EventLogOps, id: string): Promise<TaskNode> {

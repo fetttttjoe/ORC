@@ -1,16 +1,16 @@
 import { describe, expect, it } from 'bun:test'
 import { AUTHOR_SOURCE, EVENT_KIND, type EventRecord } from '@orc/contracts'
-import { TEST_WORKSPACE_ID, eventFixture } from '@orc/contracts/fixtures'
+import { authorFixture, eventFixture } from '@orc/contracts/fixtures'
 import { openQuestions } from './open-questions'
 
 const ev = (seq: number, kind: EventRecord['kind'], taskId: string | null, payload: Record<string, unknown> = {}): EventRecord =>
   eventFixture({ seq, kind, taskId, payload })
 
 const ask = (seq: number, task: string, topic: string, q = 'q?') => ev(seq, EVENT_KIND.feedback_requested, task, { question: q, topic })
-// A reply carries a full MemoryAuthor — `workspaceId` is required on it, so a bare `{ source }`
-// does not parse and the answer would silently fail to close its topic.
+// A reply carries a full MemoryAuthor — workspaceId and origin are both required, so a bare
+// `{ source }` does not parse and the answer would silently fail to close its topic.
 const answer = (seq: number, task: string, topic: string) =>
-  ev(seq, EVENT_KIND.feedback_provided, task, { topic, text: 'a', author: { source: AUTHOR_SOURCE.human, workspaceId: TEST_WORKSPACE_ID } })
+  ev(seq, EVENT_KIND.feedback_provided, task, { topic, text: 'a', author: authorFixture({ source: AUTHOR_SOURCE.human }) })
 const never = () => false
 
 describe('open questions', () => {

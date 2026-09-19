@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'bun:test'
 import { z } from 'zod'
-import { EVENT_KIND } from '@orc/contracts'
+import { EVENT_KIND, ScopeType } from '@orc/contracts'
 import { eventFixture, taskFixture } from '@orc/contracts/fixtures'
 import { modelOf } from '@orc/ui-core/test-helpers'
 import { VIEW, ViewEnvelope } from '@orc/ui-core/wire'
@@ -20,7 +20,7 @@ const q = (params: unknown): string => JSON.stringify(params)
 
 describe('the view route', () => {
   it('answers a view inside the envelope, with the seq a client orders its refetch against', async () => {
-    const res = await viewResponse(model, VIEW.timeline, q({ kinds: [EVENT_KIND.tool_call] }))
+    const res = await viewResponse(model, VIEW.timeline, q({ scope: { type: ScopeType.project }, kinds: [EVENT_KIND.tool_call] }))
     expect(res.status).toBe(200)
     const env = await body(res, ViewEnvelope(z.array(z.object({ seq: z.number(), kind: z.string() }))))
     expect(env.seq).toBe(model.seq)
@@ -35,10 +35,12 @@ describe('the view route', () => {
     expect((await body(res, Err)).error).toContain('q')
   })
 
+  // A view whose params are all optional is asked for by name alone; the timeline is not one of
+  // them — a read of the log always names its scope.
   it('treats an absent q as no params, rather than as a parse failure', async () => {
-    const res = await viewResponse(model, VIEW.timeline, null)
+    const res = await viewResponse(model, VIEW.models, null)
     expect(res.status).toBe(200)
-    expect((await body(res, ViewEnvelope(z.array(z.unknown())))).data).toHaveLength(2)
+    expect((await body(res, ViewEnvelope(z.array(z.unknown())))).data).toHaveLength(0)
   })
 
   // A path segment is a string until the enum says otherwise — the same resolution readView does,
@@ -56,7 +58,7 @@ describe('the view route', () => {
   // Naming the field is the whole point: an error that only said "invalid input" sent the reader
   // back to the schema to guess which param was wrong.
   it('400s params that fail their schema, naming the field', async () => {
-    const res = await viewResponse(model, VIEW.timeline, q({ limit: 0 }))
+    const res = await viewResponse(model, VIEW.timeline, q({ scope: { type: ScopeType.project }, limit: 0 }))
     expect(res.status).toBe(400)
     expect((await body(res, Err)).error).toStartWith('limit: ')
   })

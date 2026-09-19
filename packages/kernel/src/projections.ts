@@ -371,6 +371,10 @@ export function foldInto(acc: FoldAcc, e: EventRecord): FoldAcc {
         if (p.success) state.workspaceMerges.set(p.data.workspaceId, p.data)
         break
       }
+      case EVENT_KIND.chat_opened:
+        // A chat is its envelope: the fold holds no chat state, so opening one changes nothing here.
+        // Named anyway because the exhaustive `never` below refuses an unhandled kind.
+        break
       default: {
         const unhandled: never = e.kind
         void unhandled

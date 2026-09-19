@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'bun:test'
 import { EVENT_KIND, type EventKind } from '@orc/contracts'
-import { TEST_WORKSPACE_ID, eventFixture } from '@orc/contracts/fixtures'
+import { authorFixture, eventFixture } from '@orc/contracts/fixtures'
 import { foldTranscript } from './transcript'
 
 const T = 't1'
@@ -15,7 +15,7 @@ describe('foldTranscript', () => {
       ev(EVENT_KIND.tool_call, { stepId: 's1', runToken: 'r1', iteration: 1, toolCallId: 'c1', toolName: 'fs_write', input: { path: 'a' } }, 2),
       ev(EVENT_KIND.tool_result, { stepId: 's1', runToken: 'r1', iteration: 1, toolCallId: 'c1', toolName: 'fs_write', output: { ok: true }, isError: false }, 3),
       ev(EVENT_KIND.feedback_requested, { question: 'proceed?', topic: 'top1' }, 4),
-      ev(EVENT_KIND.feedback_provided, { topic: 'top1', text: 'yes', author: { source: 'cli', workspaceId: TEST_WORKSPACE_ID } }, 5),
+      ev(EVENT_KIND.feedback_provided, { topic: 'top1', text: 'yes', author: authorFixture() }, 5),
       ev(EVENT_KIND.agent_call, { stepId: 's1', runToken: 'r1', iteration: 2, request: {}, response: { text: '', toolCalls: [] } }, 6), // empty text -> no item
       ev(EVENT_KIND.signal_received, { stepId: 's1', runToken: 'r1', signal: { stepId: 's1', runToken: 'r1', outcome: 'success', summary: 'done' } }, 7),
     ]

@@ -24,7 +24,7 @@ const TRANSIENT_CODE = new Set([
 // request the operator (or a budget guard) just stopped would be the opposite of correct.
 const TRANSIENT_NAME = new Set(['TimeoutError'])
 
-const errField = (err: unknown, key: string): unknown =>
+export const errField = (err: unknown, key: string): unknown =>
   typeof err === 'object' && err !== null && key in err ? Reflect.get(err, key) : undefined
 
 // An error chain is attacker-shaped data as far as this file is concerned: `lastError` and `cause`
@@ -32,7 +32,7 @@ const errField = (err: unknown, key: string): unknown =>
 // direct self-reference guards below catch `x.cause === x` and nothing else. A depth cap is enough:
 // no real provider wraps an error more than a few layers deep, and past that the answer is the same
 // as for an error with no fields at all — not transient.
-const MAX_CAUSE_DEPTH = 8
+export const MAX_CAUSE_DEPTH = 8
 
 export function isTransient(err: unknown, depth = 0): boolean {
   if (depth >= MAX_CAUSE_DEPTH) return false

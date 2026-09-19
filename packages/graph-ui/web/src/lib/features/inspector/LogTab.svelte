@@ -7,6 +7,7 @@
   import LedgerRow from '$lib/features/ledger/LedgerRow.svelte'
   import { viewQuery } from '$lib/api/view-query'
   import { VIEW } from '@orc/ui-core/wire'
+  import { ScopeType } from '@orc/contracts/scope'
   import { taskIdOf } from '$lib/node-id'
 
   const LOG_LIMIT = 200
@@ -15,7 +16,11 @@
 
   const taskId = $derived(taskIdOf(nodeId))
 
-  const log = createQuery(viewQuery(VIEW.timeline, () => (taskId !== null ? { taskId, limit: LOG_LIMIT } : null)))
+  // subtree false: this tab is ONE task's slice, and the header chip above it names that task —
+  // admitting a child's rows here would attribute them to the task the operator selected
+  const log = createQuery(
+    viewQuery(VIEW.timeline, () => (taskId !== null ? { scope: { type: ScopeType.task, id: taskId, subtree: false }, limit: LOG_LIMIT } : null)),
+  )
 </script>
 
 {#if taskId === null}

@@ -23,8 +23,10 @@ export interface GroundedSpec {
 }
 
 export const actions = {
+  // budgetUSD is stated, never omitted: the route requires the key, and the console offers no
+  // budget field — so every request it creates runs with no ceiling, and says so.
   newTask: async (input: { title: string; spec?: string; parentId?: string; grounded?: GroundedSpec }): Promise<string> =>
-    (await api.act<{ taskId: string }>('newTask', input, S.TaskCreated)).taskId,
+    (await api.act<{ taskId: string }>('newTask', { ...input, budgetUSD: null }, S.TaskCreated)).taskId,
 
   /**
    * Reopen a plan as a NEW editable version. The server's `edit` accepts a `blocked` task and

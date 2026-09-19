@@ -2,7 +2,7 @@ import { describe, expect, it } from 'bun:test'
 import { CoverageReport, PlanAnnotatedPayload } from './analysis'
 import { LINK_KINDS, NOTE_TIERS, PlanNoteInput } from './memory'
 import { PAYLOAD_SCHEMAS } from './events'
-import { TEST_WORKSPACE_ID } from './fixtures'
+import { authorFixture } from './fixtures'
 
 describe('M5b contracts', () => {
   it('CoverageReport parses full + no-access shapes', () => {
@@ -22,12 +22,12 @@ describe('M5b contracts', () => {
   it('the 4 new event payloads validate; plan_annotated rejects a non-slug targetNote', () => {
     expect(PAYLOAD_SCHEMAS.plan_annotated.safeParse({ planVersion: 1, targetNote: 'db', refs: ['api'], text: 'use bcrypt' }).success).toBe(true)
     expect(PAYLOAD_SCHEMAS.feedback_requested.safeParse({ question: 'analyze?', topic: 't-1' }).success).toBe(true)
-    expect(PAYLOAD_SCHEMAS.feedback_provided.safeParse({ topic: 't-1', text: 'yes', author: { source: 'cli', workspaceId: TEST_WORKSPACE_ID } }).success).toBe(true)
+    expect(PAYLOAD_SCHEMAS.feedback_provided.safeParse({ topic: 't-1', text: 'yes', author: authorFixture() }).success).toBe(true)
     expect(PAYLOAD_SCHEMAS.feedback_provided.safeParse({
-      topic: 't-1', text: 'approve', author: { source: 'cli', workspaceId: TEST_WORKSPACE_ID }, planHash: 'a'.repeat(64),
+      topic: 't-1', text: 'approve', author: authorFixture(), planHash: 'a'.repeat(64),
     }).success).toBe(true)
     expect(PAYLOAD_SCHEMAS.feedback_provided.safeParse({
-      topic: 't-1', text: 'approve', author: { source: 'cli', workspaceId: TEST_WORKSPACE_ID }, planHash: 'not-a-sha256',
+      topic: 't-1', text: 'approve', author: authorFixture(), planHash: 'not-a-sha256',
     }).success).toBe(false)
     expect(PAYLOAD_SCHEMAS.analysis_completed.safeParse({ analyzed: true }).success).toBe(true)
     expect(PlanAnnotatedPayload.safeParse({ planVersion: 1, targetNote: '../x', refs: [], text: 'x' }).success).toBe(false)

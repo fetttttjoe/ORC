@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test'
-import { EVENT_KIND, type OperationSpec, type PlanDraft } from '@orc/contracts'
+import { Door, EVENT_KIND, NO_CHAT, type OperationSpec, type Origin, type PlanDraft } from '@orc/contracts'
 import { draftFixture, must } from '@orc/contracts/fixtures'
 import { openStorage } from './storage'
 import { Kernel } from './kernel'
@@ -8,6 +8,10 @@ import { createTestDb, seedTestWorkspace, TEST_PROJECT_ID, TEST_WORKSPACE_ID } f
 
 const draft = (): PlanDraft => draftFixture()
 
+// Replay is about the log, not about a conversation: every call here comes through the cli door
+// with no chat, spelled at each call site rather than defaulted in by a helper.
+const CLI: Origin = NO_CHAT(Door.cli)
+
 describe('replay guarantee', () => {
   it('a reopened kernel folds to the identical state ("kill -9" scenario)', async () => {
     const db = await createTestDb()
@@ -15,12 +19,12 @@ describe('replay guarantee', () => {
       const log1 = (await openStorage(db.url, { projectId: TEST_PROJECT_ID })).events
       const k1 = new Kernel(log1)
       // a task must name a workspace the fold has seen — one seeded record, then tasks as before
-      await seedTestWorkspace(log1)
-      const t = await k1.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'parent', spec: 'root task' })
-      const child = await k1.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'child', parentId: t.id })
-      await k1.proposePlan(t.id, draft())
-      await k1.editPlan(t.id, draft())
-      await k1.approvePlan(t.id)
+      await seedTestWorkspace(log1, CLI)
+      const t = await k1.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'parent', spec: 'root task' }, CLI)
+      const child = await k1.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'child', parentId: t.id }, CLI)
+      await k1.proposePlan(t.id, draft(), CLI)
+      await k1.editPlan(t.id, draft(), CLI)
+      await k1.approvePlan(t.id, undefined, undefined, CLI)
       const before = await k1.state()
       await log1.close() // simulated process death — nothing held in memory matters
 
@@ -40,10 +44,10 @@ describe('replay guarantee', () => {
       const log = storage.events
       const k = new Kernel(log)
       // a task must name a workspace the fold has seen — one seeded record, then tasks as before
-      await seedTestWorkspace(log)
-      const t = await k.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'x' })
-      await k.proposePlan(t.id, draft())
-      await k.approvePlan(t.id)
+      await seedTestWorkspace(log, CLI)
+      const t = await k.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'x' }, CLI)
+      await k.proposePlan(t.id, draft(), CLI)
+      await k.approvePlan(t.id, undefined, undefined, CLI)
       expect((await log.byTask(t.id)).map(e => e.kind)).toEqual([
         EVENT_KIND.task_created,
         EVENT_KIND.plan_proposed,
@@ -63,18 +67,18 @@ describe('replay guarantee', () => {
       const log = storage.events
       const k = new Kernel(log)
       // a task must name a workspace the fold has seen — one seeded record, then tasks as before
-      await seedTestWorkspace(log)
-      const t = await k.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'audited', spec: 'traced work' })
-      await k.proposePlan(t.id, draft())
-      await k.approvePlan(t.id)
+      await seedTestWorkspace(log, CLI)
+      const t = await k.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'audited', spec: 'traced work' }, CLI)
+      await k.proposePlan(t.id, draft(), CLI)
+      await k.approvePlan(t.id, undefined, undefined, CLI)
 
-      const opContext = { taskId: t.id, stepId: 's1', runToken: `step:${t.id}:s1:a1` }
+      const opContext = { taskId: t.id, stepId: 's1', runToken: `step:${t.id}:s1:a1`, origin: CLI }
       const spec: OperationSpec = { operationId: `${opContext.runToken}:model:1`, kind: 'model', name: 'fake/m', before: { q: 1 } }
       await storage.operations.beginOperation(opContext, spec)
       const startedSeq = must((await log.byTask(t.id)).at(-1), 'last event from task').seq
       await storage.operations.completeOperation(opContext, spec, 1, { text: 'result' })
       await log.append({
-        taskId: t.id, stepId: 's1', runToken: opContext.runToken, kind: EVENT_KIND.artifact_produced,
+        ...CLI, taskId: t.id, stepId: 's1', runToken: opContext.runToken, kind: EVENT_KIND.artifact_produced,
         payload: { path: 'report.md', sha256: 'a'.repeat(64), size: 8 },
       })
 

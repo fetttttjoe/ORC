@@ -1,13 +1,14 @@
 import { describe, expect, it } from 'bun:test'
 import {
-  LINK_KIND, MEMORY_ACCESS, MEMORY_USE, MemoryScope, NOTE_TIER, SIGNAL_OUTCOME, planScope, slugId,
+  Door, LINK_KIND, MEMORY_ACCESS, MEMORY_USE, MemoryScope, NOTE_TIER, SIGNAL_OUTCOME, planScope, slugId,
   type ClaimHit, type MemoryAuthor, MemoryNote, type MemoryNoteDraft, type MemoryStore, type NoteSummary,
 } from '@orc/contracts'
 import { bindStepMemory, deriveQueryTerms, preloadQuery } from './step'
 import { noopMemoryStore, summaryFixture } from './test-helpers'
 import { semanticNoteFixture, TEST_WORKSPACE_ID } from '@orc/contracts/fixtures'
 
-const AUTHOR: MemoryAuthor = { source: 'agent', workspaceId: TEST_WORKSPACE_ID, taskId: 'task-1', stepId: 'implement', runToken: 'rt-1' }
+// The step reads and writes from inside its own run, so the origin is that run's chat.
+const AUTHOR: MemoryAuthor = { source: 'agent', workspaceId: TEST_WORKSPACE_ID, taskId: 'task-1', stepId: 'implement', runToken: 'rt-1', origin: { chatId: 'run:task-1:implement', door: Door.supervisor } }
 
 const summary = (over: Partial<NoteSummary> = {}): NoteSummary => summaryFixture({ id: 'area-memory', title: 'Memory area', summary: 'How memory works.', ...over })
 

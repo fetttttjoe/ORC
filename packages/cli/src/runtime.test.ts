@@ -2,14 +2,17 @@ import { afterAll, afterEach, describe, expect, it, mock, spyOn } from 'bun:test
 import { mkdtempSync, realpathSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import { MEMORY_HEALTH,
+import { MEMORY_HEALTH, Door, NO_CHAT,
   EVENT_KIND, FINISH_STEP_ID, MEMORY_TOOL_NAME, ROLE_SKILL, SIGNAL_OUTCOME, STEP_ROLE, VERIFY_STEP_ID,
   type AgentExecutor, type EventDraft, type ExecutorContext, type SplitResult, type UnifiedEvent,
 } from '@orc/contracts'
 import { Surreal } from 'surrealdb'
 import { openStorage, Kernel, projectDatabaseName, SCOPED_CHANGES_TOOL_NAME, type ProjectConfig } from '@orc/kernel'
 import { createTestDb, fakeProvider, seedTestWorkspace, testConfig, TEST_PROJECT_ID, TEST_WORKSPACE_ID } from '@orc/kernel/test-helpers'
-import { draftFixture, stepFixture } from '@orc/contracts/fixtures'
+import { authorFixture, draftFixture, stepFixture } from '@orc/contracts/fixtures'
+
+// these tests arrange through the CLI door; the runtime's own authors are Door.supervisor
+const CLI = NO_CHAT(Door.cli)
 import { createMemory, FINISH_TOOL_NAME } from '@orc/memory'
 import { buildProgram } from './main'
 import { buildPlugins, buildRuntime, seedPhases } from './runtime'
@@ -126,7 +129,7 @@ describe('stepTools memory_verify registration', () => {
     const kernel = new Kernel(log)
     // the workspace must sit at THIS config's dir: buildRuntime resolves the consolidation and
     // auto-heal authors from the directory it serves, and refuses when nothing claims it
-    await seedTestWorkspace(log, realpathSync(config.dir))
+    await seedTestWorkspace(log, CLI, realpathSync(config.dir))
     const { host, hub } = await buildPlugins(config)
     host.providers.set('fake', fakeProvider)
     host.executors.set('api-loop', toolNameExecutor)
@@ -137,29 +140,29 @@ describe('stepTools memory_verify registration', () => {
     // port still being "launched". Shutting it down immediately, in `finally` so a thrown
     // assertion cannot skip it, is what lets the two coexist in one file.
     try {
-      const verifyTask = await kernel.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'verify step', spec: 'audits' })
-      await kernel.proposePlan(verifyTask.id, draftFixture([stepFixture({ id: VERIFY_STEP_ID, role: STEP_ROLE.auditor })]))
-      await kernel.approvePlan(verifyTask.id)
+      const verifyTask = await kernel.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'verify step', spec: 'audits' }, CLI)
+      await kernel.proposePlan(verifyTask.id, draftFixture([stepFixture({ id: VERIFY_STEP_ID, role: STEP_ROLE.auditor })]), CLI)
+      await kernel.approvePlan(verifyTask.id, undefined, undefined, CLI)
       expect(await (await port.startRun(verifyTask.id)).wait()).toBe('done')
 
-      const workerTask = await kernel.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'worker step', spec: 'implements' })
-      await kernel.proposePlan(workerTask.id, draftFixture([stepFixture({ id: 's1', role: STEP_ROLE.worker })]))
-      await kernel.approvePlan(workerTask.id)
+      const workerTask = await kernel.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'worker step', spec: 'implements' }, CLI)
+      await kernel.proposePlan(workerTask.id, draftFixture([stepFixture({ id: 's1', role: STEP_ROLE.worker })]), CLI)
+      await kernel.approvePlan(workerTask.id, undefined, undefined, CLI)
       expect(await (await port.startRun(workerTask.id)).wait()).toBe('done')
 
       // an auditor step named for its JOB, not for this gate — the case that silently lost the tool
-      const healTask = await kernel.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'heal step', spec: 'confirms notes' })
-      await kernel.proposePlan(healTask.id, draftFixture([stepFixture({ id: AUDITOR_STEP_NAMED_FOR_ITS_JOB, role: STEP_ROLE.auditor })]))
-      await kernel.approvePlan(healTask.id)
+      const healTask = await kernel.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'heal step', spec: 'confirms notes' }, CLI)
+      await kernel.proposePlan(healTask.id, draftFixture([stepFixture({ id: AUDITOR_STEP_NAMED_FOR_ITS_JOB, role: STEP_ROLE.auditor })]), CLI)
+      await kernel.approvePlan(healTask.id, undefined, undefined, CLI)
       expect(await (await port.startRun(healTask.id)).wait()).toBe('done')
 
       // The finish step is APPENDED by the kernel to every root plan, and proposePlan
       // REFUSES a draft that names it — so the fixture is a plain one-step draft and the step under
       // test is the one the kernel added. That is the only shape this step ever has in production; a
       // hand-authored 'finish' step could not reach the port at all.
-      const finishTask = await kernel.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'finish step', spec: 'reconciles' })
-      await kernel.proposePlan(finishTask.id, draftFixture([stepFixture({ id: 'lead', role: STEP_ROLE.worker })]))
-      await kernel.approvePlan(finishTask.id)
+      const finishTask = await kernel.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'finish step', spec: 'reconciles' }, CLI)
+      await kernel.proposePlan(finishTask.id, draftFixture([stepFixture({ id: 'lead', role: STEP_ROLE.worker })]), CLI)
+      await kernel.approvePlan(finishTask.id, undefined, undefined, CLI)
       expect(await (await port.startRun(finishTask.id)).wait()).toBe('done')
 
       expect(toolNamesByStep[VERIFY_STEP_ID]).toContain(MEMORY_TOOL_NAME.verify)
@@ -200,7 +203,7 @@ describe('buildRuntime role-skill pre-flight', () => {
     const storage = await openStorage(db.url, { projectId: TEST_PROJECT_ID })
     const log = storage.events
     const kernel = new Kernel(log)
-    await seedTestWorkspace(log, realpathSync(config.dir))
+    await seedTestWorkspace(log, CLI, realpathSync(config.dir))
     const { host, hub } = await buildPlugins(config)
     host.providers.set('fake', fakeProvider)
 
@@ -248,7 +251,7 @@ describe('buildRuntime degraded memory', () => {
     const kernel = new Kernel(log)
     // the workspace must sit at THIS config's dir: buildRuntime resolves the consolidation and
     // auto-heal authors from the directory it serves, and refuses when nothing claims it
-    await seedTestWorkspace(log, realpathSync(config.dir))
+    await seedTestWorkspace(log, CLI, realpathSync(config.dir))
     const { host, hub } = await buildPlugins(config)
     host.providers.set('fake', fakeProvider)
     host.executors.set('api-loop', probeExecutor)
@@ -263,9 +266,9 @@ describe('buildRuntime degraded memory', () => {
     // operator learns to ignore — which is how the real one would then get missed.
     expect(warns.filter(w => w.includes(ROLE_SKILL.finisher))).toEqual([])
 
-    const t = await kernel.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'degraded run', spec: 'still executes' })
-    await kernel.proposePlan(t.id, draftFixture([stepFixture()]))
-    await kernel.approvePlan(t.id)
+    const t = await kernel.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'degraded run', spec: 'still executes' }, CLI)
+    await kernel.proposePlan(t.id, draftFixture([stepFixture()]), CLI)
+    await kernel.approvePlan(t.id, undefined, undefined, CLI)
     expect(await (await port.startRun(t.id)).wait()).toBe('done')
 
     // all six memory tools exist and each returns an explicit isError result with the reason.
@@ -299,7 +302,7 @@ describe('status memory health', () => {
     const kernel = new Kernel(log)
     // the workspace must sit at THIS config's dir: buildRuntime resolves the consolidation and
     // auto-heal authors from the directory it serves, and refuses when nothing claims it
-    await seedTestWorkspace(log, realpathSync(config.dir))
+    await seedTestWorkspace(log, CLI, realpathSync(config.dir))
     const { host, hub } = await buildPlugins(config)
     cleanup.push(() => log.close(), () => hub.close(), () => host.shutdown())
     const lines: string[] = []
@@ -310,7 +313,7 @@ describe('status memory health', () => {
       return lines.join('\n')
     }
 
-    const t = await kernel.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'health check' })
+    const t = await kernel.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'health check' }, CLI)
     // ok: derived database opens (auto-created) with cursor 0 and no memory events
     const memory = await createMemory({ log, config })
     await memory.close()
@@ -318,10 +321,10 @@ describe('status memory health', () => {
 
     // behind, not broken: a projector that has not drained yet is a healthy system mid-write
     await log.append({
-      taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_written,
+      ...CLI, taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_written,
       payload: {
         note: { id: 'pending-note', title: 'P', scope: 'project', kind: 'fact', sourceRevision: null, categories: [], tags: [], links: [], paths: [], summary: '', body: '' },
-        author: { source: 'cli', workspaceId: TEST_WORKSPACE_ID },
+        author: authorFixture(),
       },
     })
     expect(await status(config, t.id)).toContain(`memory: ${MEMORY_HEALTH.catchingUp} (1 event(s) not yet projected)`)

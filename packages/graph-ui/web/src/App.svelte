@@ -11,6 +11,7 @@
   import { api, setApiErrorHandler, setAuth } from '$lib/api/client'
   import { allViewsKey, fetchView } from '$lib/api/view-client'
   import { VIEW } from '@orc/ui-core/wire'
+  import { ScopeType } from '@orc/contracts/scope'
   import { Toaster } from '$lib/components/ui/sonner'
   import { notify } from '$lib/notify'
   import OverviewStrip from '$lib/features/overview/OverviewStrip.svelte'
@@ -52,7 +53,7 @@
     // so nothing else invalidates them.
     void queryClient.invalidateQueries({ queryKey: allViewsKey() })
     // seed to the snapshot seq, attach the stream there: its catch-up frame closes any gap
-    const { data: rows } = await fetchView(project, VIEW.timeline, { limit: 150 })
+    const { data: rows } = await fetchView(project, VIEW.timeline, { scope: { type: ScopeType.project }, limit: 150 })
     ledger.reset(0)
     operator.reset()
     for (const row of rows ?? []) if (row.seq <= snap.seq) ledger.add(row)

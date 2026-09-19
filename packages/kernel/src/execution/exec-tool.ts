@@ -40,6 +40,11 @@ const MAX_BYTES = 64 * 1024 * 1024 // per stream, matches the old spawnSync maxB
 
 const clip = (s: string): string => clipMiddle(s, CLIP_CHARS)
 
+const killedAtCeiling = (ms: number): string => `killed at the ${ms / 1000}s ceiling`
+
+const hangError = (ms: number): string =>
+  `command HUNG and was ${killedAtCeiling(ms)} — it is not merely slow: the last lines of stdout/stderr name what never finished, and the full streams are in logPath. Re-running the same files with other flags hangs again; narrow to that one test or signal what you have.`
+
 // Where the FULL streams land, workspace-relative so fs_read can reach them. `.orc/*` is
 // gitignored, so a gate log never rides along in a commit.
 const LOG_DIR = path.join('.orc', 'exec')
@@ -60,15 +65,18 @@ export function execTool(opts: {
   allowlist: string[]
   /** tree identity for reuse; injected in tests, git-derived otherwise. null disables reuse. */
   fingerprint?: () => Promise<string | null>
+  /** the hang ceiling; injected in tests so it is reachable without a ten-minute wait. */
+  timeoutMs?: number
 }): ResolvedTool[] {
   const { workspaceDir, allowlist } = opts
   const fingerprint = opts.fingerprint ?? gitFingerprint(workspaceDir)
+  const timeoutMs = opts.timeoutMs ?? TIMEOUT_MS
   // registration gate: no allowlist, no tool — a tool that can only ever error is never offered
   if (allowlist.length === 0) return []
   return [{
     ref: 'kernel/exec', name: 'exec',
     description:
-      `Run one allowlisted command in the step workspace and get {exitCode, stdout, stderr} back. Allowed: ${allowlist.map(a => `'${a}'`).join(', ')} — arguments may be appended. There is NO shell: one command, run from the workspace root — no cd, no pipes, no && chaining, no globs; quoted arguments ARE honoured, so a pattern with spaces works (grep -n \"export const X\" file.ts); pass paths as arguments (e.g. 'bun test packages/x/src/y.test.ts'). A non-zero exitCode is a result to read and report, not a tool failure. Use this to actually execute acceptance gates (tests, typecheck) instead of deferring them downstream. stdout/stderr are CLIPPED head+tail; the FULL output is written to the returned logPath — fs_read that instead of re-running to see the middle. cached:true means an identical command already ran against this exact tree and its recorded result is being reused.`,
+      `Run one allowlisted command in the step workspace and get {exitCode, stdout, stderr} back. Allowed: ${allowlist.map(a => `'${a}'`).join(', ')} — arguments may be appended. There is NO shell: one command, run from the workspace root — no cd, no pipes, no && chaining, no globs; quoted arguments ARE honoured, so a pattern with spaces works (grep -n \"export const X\" file.ts); pass paths as arguments (e.g. 'bun test packages/x/src/y.test.ts'). A non-zero exitCode is a result to read and report, not a tool failure. Use this to actually execute acceptance gates (tests, typecheck) instead of deferring them downstream. stdout/stderr are CLIPPED head+tail; the FULL output is written to the returned logPath — fs_read that instead of re-running to see the middle. cached:true means an identical command already ran against this exact tree and its recorded result is being reused. A run ${killedAtCeiling(timeoutMs)} returns what it printed so far plus timedOut:true — read those lines, it is a hang.`,
     inputSchema: {
       type: 'object', required: ['command'],
       properties: { command: { type: 'string', description: 'an allowlisted command, optionally extended with arguments' } },
@@ -138,22 +146,29 @@ export function execTool(opts: {
           timedOut = true
           child.kill('SIGTERM')
           graceTimer = setTimeout(() => child.kill('SIGKILL'), KILL_GRACE_MS)
-        }, TIMEOUT_MS)
+        }, timeoutMs)
         child.on('error', e => finish(toolError(e)))
-        const settle = (code: number | null, signal: NodeJS.Signals | null): void => {
-          if (timedOut) return finish({ output: { error: `command timed out after ${TIMEOUT_MS / 1000}s (killed with ${signal ?? 'SIGKILL'})` }, isError: true })
-          // an external signal (e.g. an OOM SIGKILL) is a real failure, but NOT a timeout — report it as itself
-          if (signal) return finish({ output: { error: `command killed by ${signal}` }, isError: true })
-          // The clip is head+tail, so anything in the MIDDLE is unreachable and an agent that needed
-          // one line from there had to re-run the whole suite. Full streams go to a file instead.
-          const exitCode = code ?? -1
+        // The clip is head+tail, so anything in the MIDDLE is unreachable and an agent that needed
+        // one line from there had to re-run the whole suite. Full streams go to a file instead.
+        const report = (ending: { exitCode: number } | { killedAtCeiling: true }): { output: Record<string, unknown>; isError: boolean } => {
+          const killed = 'killedAtCeiling' in ending
+          const status = killed ? killedAtCeiling(timeoutMs) : `exit ${ending.exitCode}`
           try {
             mkdirSync(path.join(workspaceDir, LOG_DIR), { recursive: true })
-            writeFileSync(path.join(workspaceDir, logPath), `$ ${command}\nexit ${exitCode}\n\n--- stdout ---\n${stdout}\n--- stderr ---\n${stderr}\n`)
+            writeFileSync(path.join(workspaceDir, logPath), `$ ${command}\n${status}\n\n--- stdout ---\n${stdout}\n--- stderr ---\n${stderr}\n`)
           } catch { /* advisory: losing the log must never fail the command it describes */ }
-          const out = { exitCode, stdout: clip(stdout), stderr: clip(stderr), logPath }
+          const streams = { stdout: clip(stdout), stderr: clip(stderr), logPath }
+          // a hang can be environmental; `recorded` stands in for settled results only
+          if (killed) return { output: { timedOut: true, ...streams, error: hangError(timeoutMs) }, isError: true }
+          const out = { exitCode: ending.exitCode, ...streams }
           if (key !== null) recorded.set(key, { ...out, ranAt: Date.now() })
-          finish({ output: out, isError: false })
+          return { output: out, isError: false }
+        }
+        const settle = (code: number | null, signal: NodeJS.Signals | null): void => {
+          if (timedOut) return finish(report({ killedAtCeiling: true }))
+          // an external signal (e.g. an OOM SIGKILL) is a real failure, but NOT a timeout — report it as itself
+          if (signal) return finish({ output: { error: `command killed by ${signal}` }, isError: true })
+          finish(report({ exitCode: code ?? -1 }))
         }
         child.on('close', settle)
         // 'close' waits for the stdio STREAMS to end, not for the process to exit — so a command

@@ -1,6 +1,6 @@
 import { realpathSync } from 'node:fs'
 import path from 'node:path'
-import type { AuthorSource, MemoryAuthor, Workspace } from '@orc/contracts'
+import type { AuthorSource, MemoryAuthor, Origin, Workspace } from '@orc/contracts'
 import { workspaceByCwd } from '@orc/kernel'
 
 // The ONE thing either door reads off the kernel: the folded workspace table. Named and narrow so
@@ -15,7 +15,7 @@ export interface WorkspaceFold {
 // `workspaceId` are deliberately NOT in it: the door and the workspace are what cwdAuthor exists to
 // decide, and a caller able to pass its own workspaceId here would reintroduce exactly the guessed
 // workspace MemoryAuthor.workspaceId's required key exists to prevent.
-export type AuthorExtras = Omit<Partial<MemoryAuthor>, 'source' | 'workspaceId'>
+export type AuthorExtras = Omit<Partial<MemoryAuthor>, 'source' | 'workspaceId' | 'origin'>
 
 // realpathSync THROWS (ENOENT) for a directory that is not there — a project dir that has been
 // deleted, or a config naming a path nobody created. That is still "no workspace here", and the
@@ -72,8 +72,8 @@ export const cwdWorkspaceId = async (kernel: WorkspaceFold, dir: string | undefi
 // workspace is a wiring bug, and a placeholder would file the note under the wrong checkout
 // forever — MemoryAuthor.workspaceId is captured at write time and never recoverable later.
 export async function cwdAuthor(
-  kernel: WorkspaceFold, dir: string | undefined, source: AuthorSource, extra: AuthorExtras = {},
+  kernel: WorkspaceFold, dir: string | undefined, source: AuthorSource, origin: Origin, extra: AuthorExtras = {},
 ): Promise<MemoryAuthor> {
-  // extra FIRST: the two fields this function is responsible for cannot be shadowed by a caller.
-  return { ...extra, source, workspaceId: await cwdWorkspaceId(kernel, dir) }
+  // extra FIRST: the three fields this function is responsible for cannot be shadowed by a caller.
+  return { ...extra, source, origin, workspaceId: await cwdWorkspaceId(kernel, dir) }
 }

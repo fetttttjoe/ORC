@@ -10,7 +10,10 @@
   import { session } from '$lib/stores/session.svelte'
   import { createQuery } from '@tanstack/svelte-query'
   import { viewQuery } from '$lib/api/view-query'
-  import { VIEW } from '@orc/ui-core/wire'
+  import { CopilotFrameType, VIEW } from '@orc/ui-core/wire'
+  import { ChatKind } from '@orc/contracts/chat'
+  import { ScopeType } from '@orc/contracts/scope'
+  import { taskIdOf } from '$lib/node-id'
   import { EVENT_KIND } from '$lib/event-kinds'
   import { fmtCost, fmtTokens } from '$lib/features/inspector/node-head'
   import { restoredRows, type CopilotRow as Row } from './copilot-rows'
@@ -35,19 +38,37 @@
 
   const ready = $derived(session.info.copilot && session.sel.project !== '')
 
+  // What the copilot is ABOUT: the task the operator has selected, which is what the server builds
+  // the prompt's focus block from. Null workspace — the server resolves it from that task.
+  const taskId = $derived(session.sel.node === null ? null : taskIdOf(session.sel.node))
+
+  /**
+   * Which chat this pane is in. Across a reload the pointer is DERIVED, not stored: the chats view
+   * folds chat_opened out of the log, so the newest copilot chat is the conversation to continue —
+   * browser storage would hold a private copy of a record the server already keeps. `adopted` is
+   * the id the server reported once the turn was COMMITTED, which beats the view until it refetches.
+   */
+  const known = createQuery(viewQuery(VIEW.chats, () => (ready ? { scope: { type: ScopeType.project } } : null)))
+  let adopted = $state<string | null>(null)
+  // `/new` leaves the journal alone and puts this pane in NO chat, so the next turn opens one
+  let cleared = $state(false)
+  const chatId = $derived(adopted ?? (cleared ? null : (known.data ?? []).find(d => d.kind === ChatKind.copilot)?.chatId ?? null))
+
   /**
    * The conversation is journaled: every exchange is a `copilot_exchange` event carrying the
    * question, the answer and the tools it called. Restoring from the LOG means the same history
    * is there from another browser and survives a cleared cache — browser storage held a private
    * copy of a record the server already keeps.
    *
-   * Filtered server-side by KIND rather than windowed by row count: a fixed-size tail of the whole
-   * project log can run past every exchange in it once enough agent-loop noise (tool_call, …)
+   * Scoped to THIS chat, and filtered server-side by KIND rather than windowed by row count: a
+   * fixed-size tail can run past every exchange in it once enough agent-loop noise (tool_call, …)
    * follows — observed with 450 tool_call rows after one exchange, which pushed it out of a
    * 400-row window entirely. `kinds` narrows BEFORE the slice (timeline.ts), so the last
    * `HISTORY_CAP * 2` matching rows are always the newest exchanges, whatever else happened after.
    */
-  const history = createQuery(viewQuery(VIEW.timeline, () => ({ kinds: [EVENT_KIND.copilot_exchange], limit: HISTORY_CAP * 2 })))
+  const history = createQuery(
+    viewQuery(VIEW.timeline, () => (chatId === null ? null : { scope: { type: ScopeType.chat, id: chatId }, kinds: [EVENT_KIND.copilot_exchange], limit: HISTORY_CAP * 2 })),
+  )
 
   const restored = $derived(
     restoredRows(
@@ -60,7 +81,6 @@
 
   // live turns append to whatever the log restored; clearing drops only what this pane shows
   let live = $state<Row[]>([])
-  let cleared = $state(false)
   const rows = $derived(cleared ? live : [...restored, ...live])
 
   const messages = $derived(rows.filter((r): r is Extract<Row, { kind: 'message' }> => r.kind === 'message'))
@@ -76,6 +96,7 @@
     // the journal is the record; /new clears THIS pane's view of it, never the log
     live = []
     cleared = true
+    adopted = null
     usage = null
   }
 
@@ -103,20 +124,24 @@
     try {
       await copilotSend({
         project: session.sel.project,
+        chatId,
+        taskId,
+        workspaceId: null,
         messages: wire,
         signal: abort.signal,
         onPart: part => {
-          if (part.type === 'text') appendToAnswer(part.text)
-          else if (part.type === 'tool-call')
+          if (part.type === CopilotFrameType.text) appendToAnswer(part.text)
+          else if (part.type === CopilotFrameType.toolCall)
             live = [...live, { kind: 'tool', id: liveId(), toolName: part.toolName, state: 'running', detail: JSON.stringify(part.input ?? {}) }]
-          else if (part.type === 'tool-result')
+          else if (part.type === CopilotFrameType.toolResult)
             live = live.map(r =>
               r.kind === 'tool' && r.toolName === part.toolName && r.state === 'running' ? { ...r, state: 'done', detail: JSON.stringify(part.output ?? {}) } : r,
             )
-          else if (part.type === 'tool-error')
+          else if (part.type === CopilotFrameType.toolError)
             live = live.map(r => (r.kind === 'tool' && r.toolName === part.toolName && r.state === 'running' ? { ...r, state: 'error', detail: part.error } : r))
-          else if (part.type === 'error') notify(part.message, 'error')
-          else if (part.type === 'done') usage = part.usage
+          else if (part.type === CopilotFrameType.error) notify(part.message, 'error')
+          else if (part.type === CopilotFrameType.done) usage = part.usage
+          else if (part.type === CopilotFrameType.chat) adopted = part.chatId
         },
       })
     } catch (err) {

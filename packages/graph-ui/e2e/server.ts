@@ -1,7 +1,7 @@
 // E2E fixture server (run by playwright's webServer): real Postgres test db, seeded state,
 // scripted copilot, kernel-backed newTask — everything else read-only-stubbed.
 import { MockLanguageModelV4 } from 'ai/test'
-import { AUTHOR_SOURCE, EVENT_KIND, FAILURE_CLASS, STEP_ID, TASK_STATUS, WORKSPACE_KIND } from '@orc/contracts'
+import { AUTHOR_SOURCE, Door, EVENT_KIND, FAILURE_CLASS, NO_CHAT, STEP_ID, TASK_STATUS, WORKSPACE_KIND } from '@orc/contracts'
 import { TEST_WORKSPACE_ID, semanticNoteFixture, stepFixture } from '@orc/contracts/fixtures'
 import { draftFixture } from '@orc/contracts/fixtures'
 
@@ -10,28 +10,35 @@ const LIVE_STEP_ID = stepFixture().id
 import { Kernel, fold, openStorage, workspaceHealth } from '@orc/kernel'
 import { createTestDb, TEST_PROJECT_ID } from '@orc/kernel/test-helpers'
 import type { OrcActions } from '@orc/ui-core'
+import { chatTitleOf, copilotChat } from '../src/copilot-chat'
+import { appendCopilotExchange } from '../src/copilot-journal'
 import { startGraphUi } from '../src/server'
 
 export const E2E_PORT = 7911
+
+// The two origins this fixture speaks as: the operator seeding through the terminal, and the
+// supervisor stamping what a running step produced.
+const SEED = NO_CHAT(Door.cli)
+const AGENT = NO_CHAT(Door.supervisor)
 
 const db = await createTestDb()
 const storage = await openStorage(db.url, { projectId: TEST_PROJECT_ID })
 const kernel = new Kernel(storage.events)
 // Every task names a workspace, so the fixture adopts one before it seeds anything — the same
 // thing a real boot does for the checkout it runs in.
-const { workspace } = await kernel.ensureWorkspace({ cwd: '/e2e', branch: 'main', kind: WORKSPACE_KIND.checkout, onTrunk: true })
-const seeded = await kernel.createTask({ workspaceId: workspace.id, title: 'hello world request', spec: 'write hello.txt' })
-await kernel.proposePlan(seeded.id, draftFixture())
+const { workspace } = await kernel.ensureWorkspace({ cwd: '/e2e', branch: 'main', kind: WORKSPACE_KIND.checkout, onTrunk: true }, SEED)
+const seeded = await kernel.createTask({ workspaceId: workspace.id, title: 'hello world request', spec: 'write hello.txt' }, SEED)
+await kernel.proposePlan(seeded.id, draftFixture(), SEED)
 // approved, so the projection emits STEP nodes: without them the contract test can only ever
 // see one node kind, and the step/artifact shapes go unchecked
-await kernel.approvePlan(seeded.id)
+await kernel.approvePlan(seeded.id, undefined, undefined, SEED)
 
 // The approval-gate scenario, on its own task so the seeded request's journey stays untouched:
 // a plan-step question is OPEN, so the pane offers the one-click approve. Answering it drives
 // the reply action below, which reproduces the failure this fixture exists to prove is visible.
 const GATE_RUN_TOKEN = 'e2e-gate-run'
-const gated = await kernel.createTask({ workspaceId: workspace.id, title: 'gated plan request', spec: 'decompose something' })
-const gateEnvelope = { taskId: gated.id, stepId: STEP_ID.plan, runToken: GATE_RUN_TOKEN }
+const gated = await kernel.createTask({ workspaceId: workspace.id, title: 'gated plan request', spec: 'decompose something' }, SEED)
+const gateEnvelope = { ...AGENT, taskId: gated.id, stepId: STEP_ID.plan, runToken: GATE_RUN_TOKEN }
 await storage.events.append({
   ...gateEnvelope, kind: EVENT_KIND.feedback_requested,
   payload: { topic: 'plan-gate', question: 'approve this plan?' },
@@ -44,9 +51,9 @@ await storage.events.append({
 // on the STEP ID: with only a plan gate in the fixture, "the button is on the plan step" and "the
 // button is on every open question" are indistinguishable.
 const FINISH_GATE_QUESTION = 'SUMMARY: 2 notes kept, 1 rewritten, no decision. Reply approve to finish.'
-const finishing = await kernel.createTask({ workspaceId: workspace.id, title: 'finishing request', spec: 'work that is done and being summarised' })
+const finishing = await kernel.createTask({ workspaceId: workspace.id, title: 'finishing request', spec: 'work that is done and being summarised' }, SEED)
 await storage.events.append({
-  taskId: finishing.id, stepId: STEP_ID.finish, runToken: 'e2e-finish-run', kind: EVENT_KIND.feedback_requested,
+  ...AGENT, taskId: finishing.id, stepId: STEP_ID.finish, runToken: 'e2e-finish-run', kind: EVENT_KIND.feedback_requested,
   payload: { topic: 'finish', question: FINISH_GATE_QUESTION },
 })
 
@@ -58,13 +65,13 @@ const MULTI_Q_TOPIC_A = 'grounding-model'
 const MULTI_Q_TOPIC_B = 'grounding-cwd'
 const MULTI_Q_QUESTION_A = 'which model should analyze this?'
 const MULTI_Q_QUESTION_B = 'which checkout should this run in?'
-const multiQuestion = await kernel.createTask({ workspaceId: workspace.id, title: 'multi-question request', spec: 'needs two answers before it can start' })
+const multiQuestion = await kernel.createTask({ workspaceId: workspace.id, title: 'multi-question request', spec: 'needs two answers before it can start' }, SEED)
 await storage.events.append({
-  taskId: multiQuestion.id, stepId: null, runToken: 'e2e-multi-q-run', kind: EVENT_KIND.feedback_requested,
+  ...AGENT, taskId: multiQuestion.id, stepId: null, runToken: 'e2e-multi-q-run', kind: EVENT_KIND.feedback_requested,
   payload: { topic: MULTI_Q_TOPIC_A, question: MULTI_Q_QUESTION_A },
 })
 await storage.events.append({
-  taskId: multiQuestion.id, stepId: null, runToken: 'e2e-multi-q-run', kind: EVENT_KIND.feedback_requested,
+  ...AGENT, taskId: multiQuestion.id, stepId: null, runToken: 'e2e-multi-q-run', kind: EVENT_KIND.feedback_requested,
   payload: { topic: MULTI_Q_TOPIC_B, question: MULTI_Q_QUESTION_B },
 })
 
@@ -75,13 +82,14 @@ await storage.events.append({
 // slicing (timeline.ts), so the exchange is found regardless of what runs after it.
 const BURIED_EXCHANGE_USER = 'what happened while I was away?'
 const BURIED_EXCHANGE_ASSISTANT = 'a step failed and was retried; the retry is running now'
-await storage.events.append({
-  taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.copilot_exchange,
-  payload: { user: BURIED_EXCHANGE_USER, assistant: BURIED_EXCHANGE_ASSISTANT, toolCalls: [], modelRef: 'mock/e2e' },
-})
+const buried = copilotChat({ chatId: null, taskId: null, workspaceId: null, title: chatTitleOf(BURIED_EXCHANGE_USER) }, () => 'e2e-buried-chat')
+await appendCopilotExchange(storage.events, {
+  chatId: buried.chatId, opened: buried.opened, usage: null,
+  payload: { user: BURIED_EXCHANGE_USER, assistant: BURIED_EXCHANGE_ASSISTANT, toolCalls: [], modelRef: 'mock/e2e', taskId: null, workspaceId: null },
+}, Door.web)
 for (let i = 1; i <= 450; i++) {
   await storage.events.append({
-    taskId: seeded.id, stepId: STEP_ID.analyze, runToken: 'e2e-noise-run', kind: EVENT_KIND.tool_call,
+    ...AGENT, taskId: seeded.id, stepId: STEP_ID.analyze, runToken: 'e2e-noise-run', kind: EVENT_KIND.tool_call,
     payload: { stepId: STEP_ID.analyze, runToken: 'e2e-noise-run', iteration: i, toolCallId: `noise-${i}`, toolName: 'noise_tool', input: { i } },
   })
 }
@@ -92,7 +100,7 @@ for (let i = 1; i <= 450; i++) {
 // conversation's one-line ticker, so no other scenario's assertions see them.
 for (let i = 1; i <= 60; i++) {
   await storage.events.append({
-    taskId: seeded.id, stepId: STEP_ID.analyze, runToken: 'e2e-log-run', kind: EVENT_KIND.tool_call,
+    ...AGENT, taskId: seeded.id, stepId: STEP_ID.analyze, runToken: 'e2e-log-run', kind: EVENT_KIND.tool_call,
     payload: { stepId: STEP_ID.analyze, runToken: 'e2e-log-run', iteration: i, toolCallId: `log-${i}`, toolName: 'fs_read', input: { seq: i } },
   })
 }
@@ -100,9 +108,9 @@ for (let i = 1; i <= 60; i++) {
 // A gate whose question is a whole plan. Tall on purpose: an unbounded gate block used to grow
 // past the pane and paint over the copilot beneath it, and the layout test needs its own task so
 // the answer-refusal scenario above cannot retire it first.
-const tall = await kernel.createTask({ workspaceId: workspace.id, title: 'tall gate request', spec: 'a plan with many waves' })
+const tall = await kernel.createTask({ workspaceId: workspace.id, title: 'tall gate request', spec: 'a plan with many waves' }, SEED)
 await storage.events.append({
-  taskId: tall.id, stepId: STEP_ID.plan, runToken: 'e2e-tall-run', kind: EVENT_KIND.feedback_requested,
+  ...AGENT, taskId: tall.id, stepId: STEP_ID.plan, runToken: 'e2e-tall-run', kind: EVENT_KIND.feedback_requested,
   payload: {
     topic: 'plan-gate',
     question: ['plan ready — approve to start:', ...Array.from({ length: 40 }, (_, i) => `wave ${i + 1} — a subplan line long enough to make this question tall`)].join('\n'),
@@ -112,28 +120,28 @@ await storage.events.append({
 // A plan with REAL topology: a diamond over three waves (analyze -> left ∥ right -> join). The
 // single-step draftFixture cannot exercise the dependency graph's subflows at all — one wave, one
 // node, no edges — so multi-wave rendering shipped unproven until this existed.
-const shaped = await kernel.createTask({ workspaceId: workspace.id, title: 'shaped plan request', spec: 'a diamond plan' })
+const shaped = await kernel.createTask({ workspaceId: workspace.id, title: 'shaped plan request', spec: 'a diamond plan' }, SEED)
 await kernel.proposePlan(shaped.id, draftFixture([
   stepFixture({ id: 'analyze', title: 'analyze', dependsOn: [] }),
   stepFixture({ id: 'left', title: 'left', dependsOn: ['analyze'] }),
   stepFixture({ id: 'right', title: 'right', dependsOn: ['analyze'] }),
   stepFixture({ id: 'join', title: 'join', dependsOn: ['left', 'right'] }),
-]))
-await kernel.approvePlan(shaped.id)
+]), SEED)
+await kernel.approvePlan(shaped.id, undefined, undefined, SEED)
 
 // A task mid-run. The run monitor only exists while something executes, so without a seeded
 // running step it would ship unexercised — and a panel that renders nothing is exactly the
 // failure mode the wire-shape bugs took four rounds to surface. Iteration 4 of a ceiling of 5
 // also puts the bar in its near-ceiling branch.
 const LIVE_RUN_TOKEN = 'e2e-live-run'
-const live = await kernel.createTask({ workspaceId: workspace.id, title: 'live run request', spec: 'work that is still going' })
-await kernel.proposePlan(live.id, draftFixture())
-await kernel.approvePlan(live.id)
+const live = await kernel.createTask({ workspaceId: workspace.id, title: 'live run request', spec: 'work that is still going' }, SEED)
+await kernel.proposePlan(live.id, draftFixture(), SEED)
+await kernel.approvePlan(live.id, undefined, undefined, SEED)
 await storage.events.append({
-  taskId: live.id, stepId: null, runToken: null, kind: EVENT_KIND.task_status_changed,
+  ...AGENT, taskId: live.id, stepId: null, runToken: null, kind: EVENT_KIND.task_status_changed,
   payload: { taskId: live.id, from: TASK_STATUS.approved, to: TASK_STATUS.running },
 })
-const liveEnvelope = { taskId: live.id, stepId: LIVE_STEP_ID, runToken: LIVE_RUN_TOKEN }
+const liveEnvelope = { ...AGENT, taskId: live.id, stepId: LIVE_STEP_ID, runToken: LIVE_RUN_TOKEN }
 await storage.events.append({
   ...liveEnvelope, kind: EVENT_KIND.step_started,
   payload: { stepId: LIVE_STEP_ID, runToken: LIVE_RUN_TOKEN, attempt: 1 },
@@ -149,10 +157,10 @@ await storage.events.append({
 // affordance shipped once as a button that silently did nothing.
 const REJECT_RUN_TOKEN = 'e2e-reject-run'
 const REJECT_STEP_ID = stepFixture().id
-const rejected = await kernel.createTask({ workspaceId: workspace.id, title: 'rejected plan request', spec: 'work an auditor judged unacceptable' })
-await kernel.proposePlan(rejected.id, draftFixture())
-await kernel.approvePlan(rejected.id)
-const rejectEnvelope = { taskId: rejected.id, stepId: REJECT_STEP_ID, runToken: REJECT_RUN_TOKEN }
+const rejected = await kernel.createTask({ workspaceId: workspace.id, title: 'rejected plan request', spec: 'work an auditor judged unacceptable' }, SEED)
+await kernel.proposePlan(rejected.id, draftFixture(), SEED)
+await kernel.approvePlan(rejected.id, undefined, undefined, SEED)
+const rejectEnvelope = { ...AGENT, taskId: rejected.id, stepId: REJECT_STEP_ID, runToken: REJECT_RUN_TOKEN }
 await storage.events.append({
   ...rejectEnvelope, kind: EVENT_KIND.step_started,
   payload: { stepId: REJECT_STEP_ID, runToken: REJECT_RUN_TOKEN, attempt: 1 },
@@ -162,7 +170,7 @@ await storage.events.append({
   payload: { stepId: REJECT_STEP_ID, runToken: REJECT_RUN_TOKEN, class: FAILURE_CLASS.rejected, message: 'three placement defects; content sound' },
 })
 await storage.events.append({
-  taskId: rejected.id, stepId: null, runToken: null, kind: EVENT_KIND.task_status_changed,
+  ...AGENT, taskId: rejected.id, stepId: null, runToken: null, kind: EVENT_KIND.task_status_changed,
   payload: { taskId: rejected.id, from: TASK_STATUS.approved, to: TASK_STATUS.blocked },
 })
 
@@ -171,7 +179,7 @@ await storage.events.append({
 // artifact record arrives bare and was read as if wrapped, and a note's claims, sources and
 // nullable sourceRevision each cost the whole note when the schema was wrong about them.
 await storage.events.append({
-  taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_written,
+  ...SEED, taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_written,
   payload: {
     note: semanticNoteFixture({
       id: 'e2e-note', title: 'a fixture note',
@@ -183,11 +191,11 @@ await storage.events.append({
       claims: [{ id: 'a1b2c3d4e5f6', text: 'the console reads notes through the view registry', sourceRevision: null }],
       sourceRevision: null,
     }),
-    author: { source: AUTHOR_SOURCE.cli, workspaceId: TEST_WORKSPACE_ID },
+    author: { source: AUTHOR_SOURCE.cli, workspaceId: TEST_WORKSPACE_ID, origin: SEED },
   },
 })
 await storage.events.append({
-  taskId: seeded.id, stepId: STEP_ID.analyze, runToken: 'e2e-artifact-run', kind: EVENT_KIND.artifact_produced,
+  ...AGENT, taskId: seeded.id, stepId: STEP_ID.analyze, runToken: 'e2e-artifact-run', kind: EVENT_KIND.artifact_produced,
   payload: { path: 'hello.txt', size: 12, sha256: 'a'.repeat(64) },
 })
 
@@ -215,24 +223,32 @@ const copilotModel = new MockLanguageModelV4({
 
 const unsupported = (name: string) => async (): Promise<never> => { throw new Error(`${name} not available in e2e fixture`) }
 const actions: OrcActions = {
-  newTask: async input => ({ taskId: (await kernel.createTask({ workspaceId: workspace.id, title: input.title, spec: input.spec ?? '' })).id }),
+  newTask: async (input, origin) => ({ taskId: (await kernel.createTask({ workspaceId: workspace.id, title: input.title, spec: input.spec ?? '' }, origin)).id }),
   propose: unsupported('propose'),
   // kernel-backed, not stubbed: `edit` is the documented repair path for a BLOCKED task
   // (kernel.editPlan stamps blocked -> awaiting_approval), and the console's reopen button is its
   // only caller. Stubbing it unsupported would let that button be tested without being exercised.
-  edit: async (taskId, draft) => ({ version: (await kernel.editPlan(taskId, draft)).version }),
-  approve: async taskId => ({ version: (await kernel.approvePlan(taskId)).version }),
+  // A template edit needs the strategy runner this fixture has no supervisor for; only the
+  // console's reopen path (a concrete draft) is exercised here.
+  edit: async (taskId, draft, origin) => {
+    if ('template' in draft) throw new Error('template edit not available in e2e fixture')
+    return { version: (await kernel.editPlan(taskId, draft.draft, origin)).version }
+  },
+  approve: async (taskId, opts, origin) => ({
+    version: (await kernel.approvePlan(taskId, opts.version, opts.approvedBy ? { approvedBy: opts.approvedBy } : undefined, origin)).version,
+  }),
   run: unsupported('run'),
+  listModels: unsupported('listModels'),
   // The measured bug, scripted: the answer lands, and then finalize_plan rejects it. Before this
   // fix the pane rendered the receipt and nothing else, so eight approvals in a row read as the
   // system running in circles.
-  reply: async (taskId, text) => {
+  reply: async (taskId, text, _projectId, origin) => {
     await storage.events.append({
-      ...gateEnvelope, taskId, kind: EVENT_KIND.feedback_provided,
-      payload: { topic: 'plan-gate', text, author: { source: AUTHOR_SOURCE.cli, workspaceId: TEST_WORKSPACE_ID } },
+      ...gateEnvelope, ...origin, taskId, kind: EVENT_KIND.feedback_provided,
+      payload: { topic: 'plan-gate', text, author: { source: AUTHOR_SOURCE.cli, workspaceId: TEST_WORKSPACE_ID, origin } },
     })
     await storage.events.append({
-      ...gateEnvelope, taskId, kind: EVENT_KIND.tool_result,
+      ...gateEnvelope, ...origin, taskId, kind: EVENT_KIND.tool_result,
       payload: {
         stepId: STEP_ID.plan, runToken: GATE_RUN_TOKEN, iteration: 1, toolCallId: 'e2e-call-1',
         toolName: 'finalize_plan', isError: true,
@@ -245,12 +261,12 @@ const actions: OrcActions = {
   cancel: unsupported('cancel'),
   annotate: unsupported('annotate'),
   revise: unsupported('revise'),
-  writeNote: async note => {
-    await storage.events.append({ taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_written, payload: { note, author: { source: AUTHOR_SOURCE.cli, workspaceId: TEST_WORKSPACE_ID } } })
+  writeNote: async (note, origin) => {
+    await storage.events.append({ ...origin, taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_written, payload: { note, author: { source: AUTHOR_SOURCE.cli, workspaceId: TEST_WORKSPACE_ID, origin } } })
     return { id: note.id, scope: 'project' }
   },
-  deleteNote: async (id, scope) => {
-    await storage.events.append({ taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_deleted, payload: { id, scope: scope ?? 'project', author: { source: AUTHOR_SOURCE.cli, workspaceId: TEST_WORKSPACE_ID } } })
+  deleteNote: async (id, scope, origin) => {
+    await storage.events.append({ ...origin, taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_deleted, payload: { id, scope: scope ?? 'project', author: { source: AUTHOR_SOURCE.cli, workspaceId: TEST_WORKSPACE_ID, origin } } })
     return { id }
   },
   // the lifecycle behind it needs the memory read model this fixture has no Surreal for, and a
@@ -286,8 +302,6 @@ startGraphUi({
   defaultCwd: '/tmp',
   // no supervisor runs behind the fixture, and the console must SAY that rather than look idle
   health: async () => ({ memory: { state: 'ok' as const, pending: 0 }, supervisor: { state: 'none' as const } }),
-  appendExchange: async x => {
-    await storage.events.append({ taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.copilot_exchange, payload: x.payload, usage: x.usage })
-  },
+  appendExchange: async x => appendCopilotExchange(storage.events, x, Door.web),
 })
 console.log(`e2e server on http://127.0.0.1:${E2E_PORT}`)

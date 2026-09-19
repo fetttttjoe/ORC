@@ -2,8 +2,8 @@ import { afterEach, describe, expect, it } from 'bun:test'
 import pg from 'pg'
 import { sql } from 'drizzle-orm'
 import { drizzle } from 'drizzle-orm/node-postgres'
-import type { TaskNode } from '@orc/contracts'
-import { EVENT_KIND } from '@orc/contracts'
+import type { Origin, TaskNode } from '@orc/contracts'
+import { Door, EVENT_KIND, NO_CHAT } from '@orc/contracts'
 import { createTestDb, TEST_PROJECT_ID } from './test-helpers'
 import { openStorage, type EventLog } from './storage'
 import { taskFixture } from '@orc/contracts/fixtures'
@@ -12,8 +12,11 @@ const dbs: Array<{ drop: () => Promise<void> }> = []
 afterEach(async () => { for (const d of dbs.splice(0)) await d.drop() })
 
 const task = (id: string): TaskNode => taskFixture({ id, title: id, createdAt: '2026-07-17T00:00:00.000Z' })
+// These appends exercise the notification pump, not a conversation, so they name the cli door and
+// no chat — spelled at each call site rather than defaulted in by the helper.
+const CLI: Origin = NO_CHAT(Door.cli)
 const appendCreated = (log: EventLog, id: string) =>
-  log.append({ taskId: id, stepId: null, runToken: null, kind: EVENT_KIND.task_created, payload: { task: task(id) } })
+  log.append({ ...CLI, taskId: id, stepId: null, runToken: null, kind: EVENT_KIND.task_created, payload: { task: task(id) } })
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms))
 
 describe('EventLog.subscribe', () => {
@@ -151,7 +154,7 @@ describe('EventLog.subscribe', () => {
     const unsub = await log.subscribe({ fromSeq: 0 }, e => { seen.push(e.seq) })
     db.onClose(unsub)
     await sleep(30)
-    await log.transaction(async tx => { await tx.append({ taskId: 'x', stepId: null, runToken: null, kind: EVENT_KIND.task_created, payload: { task: task('x') } }); throw new Error('rollback') }).catch(() => {})
+    await log.transaction(async tx => { await tx.append({ ...CLI, taskId: 'x', stepId: null, runToken: null, kind: EVENT_KIND.task_created, payload: { task: task('x') } }); throw new Error('rollback') }).catch(() => {})
     await sleep(100)
     expect(seen).toEqual([])
   })

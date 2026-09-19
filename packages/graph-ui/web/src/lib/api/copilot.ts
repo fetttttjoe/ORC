@@ -2,7 +2,7 @@
 import { authHeaders } from './client'
 // Wire contract: server.ts CopilotBody in, `data: <json CopilotPart>` events out. The body carries
 // projectId — the legacy page sent no x-orc-project header on this route, only on /api/actions.
-import { z } from 'zod'
+import { CopilotPart } from '@orc/ui-core/wire'
 import { ApiError } from './client'
 
 export interface CopilotMessage {
@@ -10,19 +10,6 @@ export interface CopilotMessage {
   content: string
 }
 
-// the parts the server emits (it maps the model stream's text-delta → 'text' before the wire)
-const CopilotPartSchema = z.discriminatedUnion('type', [
-  z.object({ type: z.literal('text'), text: z.string() }),
-  z.object({ type: z.literal('tool-call'), toolName: z.string(), input: z.unknown() }),
-  z.object({ type: z.literal('tool-result'), toolName: z.string(), output: z.unknown() }),
-  z.object({ type: z.literal('tool-error'), toolName: z.string(), error: z.string() }),
-  z.object({ type: z.literal('error'), message: z.string() }),
-  z.object({
-    type: z.literal('done'),
-    usage: z.object({ inputTokens: z.number(), outputTokens: z.number(), costUSD: z.number().nullable() }),
-  }),
-])
-export type CopilotPart = z.infer<typeof CopilotPartSchema>
 
 // server caps messages at 60; send the recent tail like the legacy pane did
 export const COPILOT_HISTORY_LIMIT = 20
@@ -53,6 +40,12 @@ async function readSse(res: Response, onData: (data: string) => void): Promise<v
 /** Streams one exchange; resolves when the stream closes. The signal aborts mid-stream. */
 export async function copilotSend(opts: {
   project: string
+  // The conversation this turn belongs to (null opens one) and what it is ABOUT. All three are
+  // required-nullable, like CopilotBody: an omitted key reads as "opening a new chat", which is
+  // how a dropped id silently forks a live conversation.
+  chatId: string | null
+  taskId: string | null
+  workspaceId: string | null
   modelRef?: string
   messages: CopilotMessage[]
   signal?: AbortSignal
@@ -63,6 +56,9 @@ export async function copilotSend(opts: {
     headers: authHeaders(),
     body: JSON.stringify({
       projectId: opts.project,
+      chatId: opts.chatId,
+      taskId: opts.taskId,
+      workspaceId: opts.workspaceId,
       ...(opts.modelRef !== undefined && { modelRef: opts.modelRef }),
       messages: opts.messages.slice(-COPILOT_HISTORY_LIMIT),
     }),
@@ -70,8 +66,8 @@ export async function copilotSend(opts: {
   })
   if (!res.ok) throw new ApiError('copilot', await res.text().catch(() => res.statusText))
   await readSse(res, data => {
-    // safeParse, not parse: an unknown part kind is forward-compat noise, not a dead stream
-    const part = CopilotPartSchema.safeParse(JSON.parse(data))
+    const part = CopilotPart.safeParse(JSON.parse(data))
     if (part.success) opts.onPart(part.data)
+    else console.error('copilot: frame did not match its schema —', part.error.issues[0]?.message)
   })
 }

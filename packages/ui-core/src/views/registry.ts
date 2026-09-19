@@ -10,12 +10,13 @@ import { node } from './node'
 import { operatorStateView } from './operator-state'
 import { planNotes } from './plan-notes'
 import { plans } from './plans'
+import { chats } from './chats'
 import { timeline } from './timeline'
 import { transcript } from './transcript'
 
 type ViewTable = Partial<{ [N in ViewName]: View<N> }>
 
-export const VIEWS = { timeline, node, transcript, plans, planNotes, models, operatorState: operatorStateView } satisfies ViewTable
+export const VIEWS = { timeline, chats, node, transcript, plans, planNotes, models, operatorState: operatorStateView } satisfies ViewTable
 // Fails the build when a view is named on the wire and never implemented: the route would answer
 // 404 for a name the browser was told exists.
 type Implemented = keyof typeof VIEWS

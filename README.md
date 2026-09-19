@@ -376,6 +376,8 @@ fully autonomous door, registers the server directly:
 
 ```bash
 claude mcp add orc -- orc mcp serve
+# Codex, with the linked `orc` on PATH:
+codex mcp add orc -- orc mcp serve
 # fully autonomous (approve included, attributed as approvedBy: mcp):
 claude mcp add orc -- orc mcp serve --autonomy full
 ```
@@ -451,6 +453,19 @@ by the agent.
 - **Audit replay.** History is an append-only, redacted, idempotent event log.
   Folding it reconstructs task, execution, and lineage state at any sequence
   (`orc replay`). Replay never mutates history.
+- **Interaction identity.** Every event carries an `Origin`: a required,
+  nullable `chatId` and a required `Door` (`web`, `cli`, `mcp`, `supervisor`,
+  or `hook`). `NO_CHAT(door)` states that a call belongs to no conversation.
+  `chat_opened` is the one chat lifecycle event; a `ChatDigest` derives its
+  end, cost and effects from the log on each read. A run ends at its own
+  task's status change, never a split child's. Copilot chat ids reach the
+  browser only after their first exchange is committed.
+- **Shared doors and reads.** Doors parse input, name its origin and present
+  results; mutations live in `OrcActions` and `WorkspaceOps`. `WorkspaceDoor`
+  gives `orc ws` the workspace ops and the kernel's reads, withholding the
+  mutating kernel and the task actions it does not use.
+  `Scope` names a project, workspace, task (with an explicit subtree choice)
+  or chat; `inScope` is the membership rule for `timeline` and `chats`.
 - **Operation journal.** Every first-party model/tool effect records a durable
   `started` node *before* the external call and its completion/failure after.
   A crash leaves an explicit unresolved node — never a blind gap.
@@ -562,6 +577,16 @@ by the agent.
   with a different cwd still gets the project's credentials. Real environment variables always win
   over both files.
 - Never bundle the CLI (`bun build`): DBOS must run unbundled via `bun run`.
+- Browser imports use leaf `@orc/contracts/<subpath>` modules: their runtime
+  imports must not reach Node builtins. `browser-leaves.test.ts` checks those
+  dependency paths; `bun run check:web` runs the Svelte checks and builds the
+  browser bundle.
+- The events table stores a nullable `chat_id` and a `door` that is `NOT NULL`
+  with no default: an event outside any chat says so, but a row that does not
+  name the door it entered through cannot exist, and a past event's door is
+  never guessed. The post-commit hook (`scripts/hooks/post-commit-append.ts`)
+  records `Door.hook` and reads `ORC_CHAT_ID` when a commit belongs to a run's
+  chat.
 - Upgrading orc: finish or `orc cancel` active runs first — DBOS recovery is
   keyed to the app version (`DBOS__APPVERSION`). Then run `orc init` once per project: it seeds
   skills a new version ships that the project's `vault/skills` does not have yet, and a plan

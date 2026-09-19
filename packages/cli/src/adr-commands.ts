@@ -1,5 +1,5 @@
 import { Command } from 'commander'
-import { AUTHOR_SOURCE, DECISION_STATUSES, DecisionInput, type DecisionStatus } from '@orc/contracts'
+import { AUTHOR_SOURCE, DECISION_STATUSES, DecisionInput, Door, NO_CHAT, type DecisionStatus } from '@orc/contracts'
 import type { EventLog, Kernel, ProjectConfig } from '@orc/kernel'
 import { ADR_SECTION, decisionDoor, getDecision, listDecisions, recordDecision, type DecisionDoor, type DecisionRecord } from '@orc/memory'
 import { cwdAuthor } from './cwd-workspace'
@@ -62,7 +62,7 @@ export function adrCommand(deps: {
     const input = DecisionInput.parse({ title, context: o.context, decision: o.decision, consequences: o.consequences, ...(o.status !== undefined && { status: o.status }), ...(o.tags !== undefined && { tags: o.tags }), ...(supersedes !== undefined && { supersedes }) })
     // `human`, unconditionally: a person typed this decision (contracts ids.ts). Resolved BEFORE the
     // door opens, so a checkout with no workspace refuses without a Surreal connection to close.
-    const author = await cwdAuthor(deps.requireKernel(), needProject().config.dir, AUTHOR_SOURCE.human)
+    const author = await cwdAuthor(deps.requireKernel(), needProject().config.dir, AUTHOR_SOURCE.human, NO_CHAT(Door.cli))
     const r = await withDoor(door => recordDecision(door, author, input))
     console.log(`recorded decision '${r.note.id}' (${r.status}) — read it back: orc adr ${ADR_SUBCOMMAND.show} ${r.note.id}`)
     if (r.superseded !== null) console.log(`superseded '${r.superseded}'`)

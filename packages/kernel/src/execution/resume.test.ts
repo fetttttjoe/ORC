@@ -3,7 +3,7 @@ import { existsSync, mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { EVENT_KIND, FINISH_STEP_ID } from '@orc/contracts'
+import { Door, EVENT_KIND, FINISH_STEP_ID, NO_CHAT, type Origin } from '@orc/contracts'
 import { draftFixture, must, stepFixture } from '@orc/contracts/fixtures'
 import { openStorage } from '../storage'
 import { Kernel } from '../kernel'
@@ -12,6 +12,8 @@ import { createTestDb, seedTestWorkspace, TEST_PROJECT_ID, TEST_WORKSPACE_ID } f
 
 const FIXTURE = fileURLToPath(new URL('./resume-fixture.ts', import.meta.url))
 const PARALLEL_FIXTURE = fileURLToPath(new URL('./resume-parallel-fixture.ts', import.meta.url))
+
+const CLI: Origin = NO_CHAT(Door.cli)
 
 const waitForFile = async (file: string, timeoutMs: number, what: string): Promise<void> => {
   const deadline = Date.now() + timeoutMs
@@ -36,10 +38,10 @@ describe('kill -9 resume', () => {
     const log = storage.events
     const kernel = new Kernel(log)
     // a task must name a workspace the fold has seen — one seeded record, then tasks as before
-    await seedTestWorkspace(log)
-    const t = await kernel.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'resume me', spec: 'survive kill -9' })
-    await kernel.proposePlan(t.id, draftFixture([stepFixture({ title: 'slow', instructions: 'stall then finish' })]))
-    await kernel.approvePlan(t.id)
+    await seedTestWorkspace(log, CLI)
+    const t = await kernel.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'resume me', spec: 'survive kill -9' }, CLI)
+    await kernel.proposePlan(t.id, draftFixture([stepFixture({ title: 'slow', instructions: 'stall then finish' })]), CLI)
+    await kernel.approvePlan(t.id, undefined, undefined, CLI)
     const marker = path.join(mkdtempSync(path.join(tmpdir(), 'orc-resume-')), 'first-run-started')
 
     // First run: spawn, wait for the marker (executor is now stalled mid-step), kill -9
@@ -100,15 +102,15 @@ describe('kill -9 resume', () => {
     const log = storage.events
     const kernel = new Kernel(log)
     // a task must name a workspace the fold has seen — one seeded record, then tasks as before
-    await seedTestWorkspace(log)
-    const t = await kernel.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'resume me in parallel', spec: 'survive kill -9 with a wide plan' })
+    await seedTestWorkspace(log, CLI)
+    const t = await kernel.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'resume me in parallel', spec: 'survive kill -9 with a wide plan' }, CLI)
     await kernel.proposePlan(t.id, draftFixture([
       stepFixture({ id: 'a', title: 'a (slow)' }),
       stepFixture({ id: 'b', title: 'b (fast)' }),
       stepFixture({ id: 'c', title: 'c', dependsOn: ['a'] }),
       stepFixture({ id: 'd', title: 'd', dependsOn: ['b'] }),
-    ]))
-    await kernel.approvePlan(t.id)
+    ]), CLI)
+    await kernel.approvePlan(t.id, undefined, undefined, CLI)
     const markerDir = mkdtempSync(path.join(tmpdir(), 'orc-resume-parallel-'))
 
     // First run: kill only once BOTH dependents are in flight, so the recovery has two

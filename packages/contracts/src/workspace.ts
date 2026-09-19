@@ -59,6 +59,11 @@ export function pathInZone(relPath: string, zone: string[] | undefined): boolean
   return zone.some(g => new Bun.Glob(g).match(p))
 }
 
+// A directory entry is a dead fence: 'src' matches the path 'src' itself, never a file under it.
+export function directoryZoneEntries(zone: string[], isDirectory: (relPath: string) => boolean): string[] {
+  return zone.filter(entry => isDirectory(normalizeRelPath(entry)))
+}
+
 // The zone write-fence (P2): a step that declares `zone` globs may only WRITE inside them.
 // Pure rule over the canonical workspace-relative path — the caller resolves containment first
 // (resolveInWorkspace), so escapes are already dead and `rel` is always root-relative.

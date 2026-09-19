@@ -1,6 +1,7 @@
 import {
   errorMessage,
   CommitRecordedPayload,
+  Door,
   EVENT_KIND, EventKind, FeedbackProvidedPayload, MemoryWrittenPayload, PAYLOAD_SCHEMAS, REACTION, ReactionFailedPayload, RUN_OUTCOME, RunRequestedPayload, runOutcomeFor, SplitResult, TASK_STATUS, TERMINAL_TASK_STATUS,
   type EventRecord, type Reaction, type TaskStatus,
 } from '@orc/contracts'
@@ -48,6 +49,8 @@ const ROUTER_RELEVANT: Record<EventKind, boolean> = {
   // reads these yet, unlike commit_recorded's onCommitRecorded. Flip to true once a later
   // change wires a reaction to one of them.
   workspace_created: false, workspace_retitled: false, workspace_archived: false, workspace_merged: false,
+  // a chat's opening is a correlation fact — nothing routes off it
+  chat_opened: false,
 }
 const ROUTER_KINDS = EventKind.options.filter(k => ROUTER_RELEVANT[k])
 
@@ -123,19 +126,27 @@ export function createSignalRouter(opts: {
   // splitId where the trigger is a split's state rather than a single event.
   const reactionFailed = async (
     reaction: Reaction,
-    cause: { taskId: string | null; seq: number | null; id: string },
+    // chatId is the REACTED-TO event's: a supervisor reaction belongs to the interaction that
+    // caused it, so a diagnosis lands in the transcript of the run that failed to move.
+    cause: { taskId: string | null; seq: number | null; id: string; chatId: string | null },
     err: unknown,
   ): Promise<void> => {
     const message = errorMessage(err)
     console.warn(`signal router: ${reaction} ${cause.taskId ?? ''} (${cause.id}): ${message}`)
     await opts.log.append({
+      chatId: cause.chatId, door: Door.supervisor,
       taskId: cause.taskId, stepId: null, runToken: null, kind: EVENT_KIND.reaction_failed,
       payload: ReactionFailedPayload.parse({ reaction, taskId: cause.taskId, message, causeSeq: cause.seq }),
       idempotencyKey: `${cause.id}:${reaction}:reaction_failed`,
     }).catch(() => {})
   }
-  const ofEvent = (e: EventRecord) => ({ taskId: e.taskId, seq: e.seq, id: String(e.seq) })
-  const ofSplit = (s: SplitState) => ({ taskId: s.taskId, seq: null, id: s.splitId })
+  const ofEvent = (e: EventRecord) => ({ taskId: e.taskId, seq: e.seq, id: String(e.seq), chatId: e.chatId })
+  // a split's reacted-to event is the split_proposed that opened it
+  const ofSplit = (s: SplitState, events: EventRecord[]) =>
+    ({ taskId: s.taskId, seq: null, id: s.splitId, chatId: splitProposedFor(events, s.splitId)?.chatId ?? null })
+
+  const splitProposedFor = (events: EventRecord[], splitId: string): EventRecord | undefined =>
+    events.find(e => e.kind === EVENT_KIND.split_proposed && PAYLOAD_SCHEMAS.split_proposed.safeParse(e.payload).data?.splitId === splitId)
 
   const sendResult = async (split: SplitState, result: SplitResult): Promise<void> => {
     await opts.send(split.runToken, result, `split:${split.splitId}`, split.splitId)
@@ -155,6 +166,7 @@ export function createSignalRouter(opts: {
       const result = composeSplitResult(all, await opts.log.after(0, [EVENT_KIND.memory_written]), split)
       try {
         await opts.log.append({
+          chatId: splitProposedFor(all, split.splitId)?.chatId ?? null, door: Door.supervisor,
           taskId: split.taskId, stepId: split.stepId, runToken: split.runToken,
           kind: EVENT_KIND.split_resolved, payload: result,
           idempotencyKey: `${split.splitId}:resolved`,
@@ -166,7 +178,7 @@ export function createSignalRouter(opts: {
         await sendResult(split, committed)
       }
     } catch (err) {
-      await reactionFailed(REACTION.splitResolve, ofSplit(split), err)
+      await reactionFailed(REACTION.splitResolve, ofSplit(split, all), err)
     }
   }
 
@@ -224,7 +236,7 @@ export function createSignalRouter(opts: {
       }
       for (const taskId of recentlyCancelled)
         await opts.onCancelled(taskId).catch(err =>
-          reactionFailed(REACTION.cancelled, { taskId, seq: null, id: `sweep:${taskId}` }, err))
+          reactionFailed(REACTION.cancelled, { taskId, seq: null, id: `sweep:${taskId}`, chatId: null }, err))
       // catch-up: a commit that landed while no supervisor was up still deserves its heal
       // reaction. The LATEST one only: the reaction is corpus-wide and idempotent (a restamp
       // covers every commit behind it), so serving history would be pure duplicate work.
@@ -244,7 +256,7 @@ export function createSignalRouter(opts: {
           if (state.tasks.get(split.taskId)?.status === TASK_STATUS.running) {
             const committed = storedResolution(seed, split.splitId)
             if (committed) await sendResult(split, committed).catch(err =>
-              reactionFailed(REACTION.splitResolve, ofSplit(split), err))
+              reactionFailed(REACTION.splitResolve, ofSplit(split, seed), err))
           }
           continue
         }
@@ -254,7 +266,7 @@ export function createSignalRouter(opts: {
         // the router was down) still needs its run — same idempotent startChildRun as the live route.
         if (status === TASK_STATUS.approved && !state.runs.get(split.childTaskId)?.length)
           await opts.onChildApproved(split.childTaskId).catch(err =>
-            reactionFailed(REACTION.childApproved, ofSplit(split), err))
+            reactionFailed(REACTION.childApproved, ofSplit(split, seed), err))
       }
       // resume the pump exactly where the sweep's seed ended (seq-exclusive), closing the gap for
       // events that landed between the sweep read and subscribe. Both routes are idempotent under replay.

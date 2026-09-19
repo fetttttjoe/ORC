@@ -2,8 +2,11 @@ import { afterAll, afterEach, describe, expect, it, mock } from 'bun:test'
 import { mkdtempSync, realpathSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import { AUTHOR_SOURCE, Brief, EVENT_KIND, MemoryScope, NOTE_KIND, TASK_STATUS, WORKSPACE_KIND } from '@orc/contracts'
-import { must } from '@orc/contracts/fixtures'
+import { AUTHOR_SOURCE, Brief, Door, EVENT_KIND, MemoryScope, NO_CHAT, NOTE_KIND, TASK_STATUS, WORKSPACE_KIND } from '@orc/contracts'
+import { authorFixture, must } from '@orc/contracts/fixtures'
+
+// this file drives the CLI door; every append it arranges entered the same way
+const CLI = NO_CHAT(Door.cli)
 import { loadConfig, requireProject, type ProjectConfig } from '@orc/kernel'
 import { createTestDb, seedTestWorkspace, TEST_PROJECT_ID, TEST_WORKSPACE, TEST_WORKSPACE_ID } from '@orc/kernel/test-helpers'
 import { ADR_SUBCOMMAND } from './adr-commands'
@@ -36,7 +39,7 @@ async function makeBriefCli() {
   const config = requireProject({ ...loadConfig(dir), projectDbName, projectId: TEST_PROJECT_ID, projectName: 'brief-test' })
   surrealConfigs.push(config)
   const { kernel, log } = await openKernel(db.url, { projectId: TEST_PROJECT_ID })
-  await seedTestWorkspace(log, realpathSync(config.dir))
+  await seedTestWorkspace(log, CLI, realpathSync(config.dir))
   const { host, hub } = await buildPlugins(config)
   cleanup.push(() => log.close(), () => hub.close(), () => host.shutdown())
   const { run } = cli(kernel, undefined, { host, hub, config, log })
@@ -87,10 +90,10 @@ describe('orc brief', () => {
   // and the task reads as one of this checkout's own.
   it('a task waiting in an archived workspace is still labelled with it', async () => {
     const { run, kernel } = await makeBriefCli()
-    const old = await kernel.createWorkspace({ title: 'Old import', cwd: '/old-import', branch: 'orc/old-import', baseBranch: 'main', kind: WORKSPACE_KIND.worktree, managed: false, onTrunk: false })
+    const old = await kernel.createWorkspace({ title: 'Old import', cwd: '/old-import', branch: 'orc/old-import', baseBranch: 'main', kind: WORKSPACE_KIND.worktree, managed: false, onTrunk: false }, CLI)
     const taskId = must((await run('new', 'Import CSV', '--workspace', old.id))[0], 'task id line')
     await run('propose', taskId)
-    await kernel.setWorkspaceArchived(old.id, true)
+    await kernel.setWorkspaceArchived(old.id, true, CLI)
     expect(await run(BRIEF_COMMAND)).toContain(`  ${taskId}  Import CSV  [Old import]`)
   }, 30_000)
 
@@ -103,10 +106,10 @@ describe('orc brief', () => {
     const BEHIND = 60
     for (let i = 0; i < BEHIND; i++)
       await log.append({
-        taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_written,
+        ...CLI, taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_written,
         payload: {
           note: { id: `n${i}`, scope: MemoryScope.project, kind: NOTE_KIND.fact, sourceRevision: null, title: `T${i}`, categories: [], tags: [], links: [], paths: [], summary: '', body: '' },
-          author: { source: AUTHOR_SOURCE.cli, workspaceId: TEST_WORKSPACE_ID },
+          author: authorFixture({ source: AUTHOR_SOURCE.cli, workspaceId: TEST_WORKSPACE_ID }),
         },
       })
     const brief = Brief.parse(JSON.parse((await run(BRIEF_COMMAND, '--json')).join('\n')))

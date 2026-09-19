@@ -22,7 +22,7 @@ import { Kernel, loadConfig, openStorage, requireProject } from '../packages/ker
 import { cwdAuthor } from '../packages/cli/src/cwd-workspace'
 import { createMemory } from '../plugins/memory/src/index'
 import { CONSOLIDATED_TAG } from '../plugins/memory/src/consolidate'
-import { AUTHOR_SOURCE, NOTE_KIND } from '../packages/contracts/src/index'
+import { AUTHOR_SOURCE, Door, NO_CHAT, NOTE_KIND } from '../packages/contracts/src/index'
 
 const apply = process.argv.includes('--apply')
 
@@ -49,7 +49,7 @@ try {
       // carries the stored value forward; naming them would risk writing back a stale copy.
       // The workspace this script is being run from, resolved ONCE: a bulk re-write is still a
       // write, and MemoryAuthor.workspaceId has no default to fall back on.
-      const author = await cwdAuthor(new Kernel(storage.events), config.dir, AUTHOR_SOURCE.cli)
+      const author = await cwdAuthor(new Kernel(storage.events), config.dir, AUTHOR_SOURCE.cli, NO_CHAT(Door.cli))
       for (const n of stale)
         await memory.store.write({ id: n.id, scope: n.scope, kind: NOTE_KIND.outcome }, author)
       await memory.projector.catchUp()

@@ -2,7 +2,7 @@ import { afterAll, describe, expect, it } from 'bun:test'
 import { mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import { assertInZone, pathInZone, resolveInWorkspace } from './workspace'
+import { assertInZone, directoryZoneEntries, pathInZone, resolveInWorkspace } from './workspace'
 
 // every temp dir this file creates, removed once at the end
 const dirs: string[] = []
@@ -46,6 +46,30 @@ describe('pathInZone (pure zone predicate)', () => {
   it('collapses duplicate slashes and normalizes backslashes', () => {
     expect(pathInZone('packages//kernel///src/index.ts', ['packages/kernel/**'])).toBe(true)
     expect(pathInZone('packages\\kernel\\src\\index.ts', ['packages/kernel/**'])).toBe(true)
+  })
+})
+
+describe('directoryZoneEntries (dead-fence rule)', () => {
+  const isDirectory = (rel: string): boolean => rel === 'packages/graph-ui/src' || rel === 'docs'
+
+  it('names an entry that is an existing directory', () => {
+    expect(directoryZoneEntries(['packages/graph-ui/src'], isDirectory)).toEqual(['packages/graph-ui/src'])
+  })
+
+  it('leaves a glob entry alone', () => {
+    expect(directoryZoneEntries(['packages/graph-ui/src/**', 'docs/**'], isDirectory)).toEqual([])
+  })
+
+  it('leaves a file entry alone', () => {
+    expect(directoryZoneEntries(['packages/graph-ui/src/app.ts'], isDirectory)).toEqual([])
+  })
+
+  it('leaves a path that does not exist alone', () => {
+    expect(directoryZoneEntries(['packages/nope'], isDirectory)).toEqual([])
+  })
+
+  it('probes the normalized path but reports the entry as written', () => {
+    expect(directoryZoneEntries(['./packages/graph-ui/src'], isDirectory)).toEqual(['./packages/graph-ui/src'])
   })
 })
 

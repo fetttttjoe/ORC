@@ -1,4 +1,4 @@
-import { AUTHOR_SOURCE, errorMessage, EVENT_KIND, ModelsDiscoveredPayload, NOTE_KIND, TASK_STATUS, costUSDFor, parseModelRef, type ModelOption, type TaskStatus } from '@orc/contracts'
+import { authorSourceOf, errorMessage, EVENT_KIND, ModelsDiscoveredPayload, NOTE_KIND, TASK_STATUS, costUSDFor, parseModelRef, type ModelOption, type Origin, type TaskStatus } from '@orc/contracts'
 import { Kernel, blockingVerdicts, canRetry, deriveSystemUrl, dropSystemDatabase, initializeProject, liveSupervisors, loadConfig, openStorage, resetSystemDatabase, subtreeTaskIds, type EventLog, type ProjectConfig, type Storage } from '@orc/kernel'
 import { cwdAuthor, cwdWorkspace, cwdWorkspaceId, type AuthorExtras } from './cwd-workspace'
 import { adoptCwd } from './workspace-adopt'
@@ -10,7 +10,8 @@ import { singleStepDraft } from './plan-template'
 // delegates to — one file cannot hold two bindings of one name
 import { createMemory, decisionDoor, openKnowledge, orphanedNotes, recordDecision as recordDecisionOp } from '@orc/memory'
 import { openMemory, withMemory } from './memory-open'
-import { PROJECT_DIR_NOTE_ID, PROJECT_NAME_NOTE_ID, type OrcActions } from '@orc/ui-core'
+import { PROJECT_DIR_NOTE_ID, PROJECT_NAME_NOTE_ID, type OrcActions, type PlanSource } from '@orc/ui-core'
+import type { PlanDraft } from '@orc/contracts'
 import type { MemoryAuthor, Workspace } from '@orc/contracts'
 import { createVaultProjector } from '@orc/vault-projector'
 import { existsSync, rmSync, statSync } from 'node:fs'
@@ -21,12 +22,12 @@ import path from 'node:path'
 // The author is a PARAMETER even here, where the note is project metadata rather than knowledge:
 // MemoryAuthor is ONE shape, and the workspace has to be the checkout the append actually lands in
 // — which for newProject/purgeProject is NOT the fold this process booted against.
-const uiNote = (id: string, title: string, summary: string, author: MemoryAuthor) => ({
-  taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_written,
+const uiNote = (id: string, title: string, summary: string, author: MemoryAuthor, origin: Origin) => ({
+  ...origin, taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_written,
   payload: { note: { id, title, kind: NOTE_KIND.fact, summary }, author },
 })
-const nameNote = (name: string, author: MemoryAuthor) => uiNote(PROJECT_NAME_NOTE_ID, name, 'display name for the project chat', author)
-const dirNote = (dir: string, author: MemoryAuthor) => uiNote(PROJECT_DIR_NOTE_ID, dir, 'working directory of the project', author)
+const nameNote = (name: string, author: MemoryAuthor, origin: Origin) => uiNote(PROJECT_NAME_NOTE_ID, name, 'display name for the project chat', author, origin)
+const dirNote = (dir: string, author: MemoryAuthor, origin: Origin) => uiNote(PROJECT_DIR_NOTE_ID, dir, 'working directory of the project', author, origin)
 
 
 // The statuses startRunAt (dbos-port.ts) admits — anything else is terminal or waiting on a human,
@@ -80,6 +81,16 @@ export async function assertRetryable(kernel: Kernel, taskId: string): Promise<v
 export const modelUniverse = (live: string[], costs: Record<string, unknown>): string[] =>
   [...new Set([...live, ...Object.keys(costs).filter(k => k !== '*')])].sort()
 
+// A provider that never answers would hang every door that discovers; rejecting turns "no answer"
+// into the unreachable case discovery already handles. The loser's rejection is handled by the race.
+const bounded = async <T>(work: Promise<T>, ms: number, pid: string): Promise<T> => {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const expiry = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`provider '${pid}' did not list models within ${ms}ms`)), ms)
+  })
+  try { return await Promise.race([work, expiry]) } finally { clearTimeout(timer) }
+}
+
 // One fetch attempt per provider: `reachable` is whether it ANSWERED — a provider that answered
 // with nothing usable carries ids: [] and reachable: true, which are different facts.
 export interface DiscoveredProvider { pid: string; ids: string[]; reachable: boolean }
@@ -98,45 +109,65 @@ export const catalogAppends = (perProvider: readonly DiscoveredProvider[], last:
 // layer (validation), the copilot (available_models), and the web model picker. Cached briefly.
 // With a log, each fetch persists changed catalogs as models_discovered events (append-on-
 // change), making the catalog a projection: linkable to tasks and served without provider APIs.
-export function buildModelDiscovery(config: ProjectConfig, log?: EventLog) {
+// `persist` pairs the log with the ORIGIN its models_discovered appends carry: a catalog is a fact
+// about the serving process, not about an interaction, so the composition root names its door once
+// instead of every discovery call carrying one.
+// A provider daemon that naps answers no faster than one that is down, and BOTH doors discover —
+// so the bound lives at this seam, injectable because a test cannot wait out the production value.
+export const PROVIDER_DISCOVERY_TIMEOUT_MS = 10_000
+
+export function buildModelDiscovery(config: ProjectConfig, persist?: { log: EventLog; origin: Origin }, providerTimeoutMs: number = PROVIDER_DISCOVERY_TIMEOUT_MS) {
   const { providers } = seedRegistries(config)
+  const log = persist?.log
   const providerFor = (ref: string) => {
     const { providerId, modelId } = parseModelRef(ref)
     const p = providers.get(providerId)
     if (!p) throw new Error(`unknown provider '${providerId}'`)
     return { p, modelId }
   }
+  // The catalog as the LOG states it: the latest models_discovered per provider. One fold, read by
+  // the door that must not fetch and by append-on-change alike.
+  const catalogs = async (): Promise<Map<string, string[]>> => {
+    const last = new Map<string, string[]>()
+    if (!log) return last
+    for (const e of await log.after(0, [EVENT_KIND.models_discovered])) {
+      const p = ModelsDiscoveredPayload.safeParse(e.payload)
+      if (p.success) last.set(p.data.providerId, p.data.models)
+    }
+    return last
+  }
+  const refsOf = (byProvider: ReadonlyMap<string, string[]>): string[] =>
+    [...byProvider].flatMap(([pid, ids]) => ids.map(id => `${pid}/${id}`)).sort()
   let cache: { at: number; refs: string[] } | null = null
-  const listModels = async (): Promise<string[]> => {
+  const discoverModels = async (): Promise<string[]> => {
     if (cache && Date.now() - cache.at < 300_000) return cache.refs
     const perProvider: DiscoveredProvider[] = await Promise.all([...providers.entries()].map(async ([pid, p]) => {
-      // a throwing provider is UNREACHABLE, isolated here so one napping daemon neither
-      // rejects the whole fetch nor masquerades as "this provider serves nothing"
+      // a throwing OR timed-out provider is UNREACHABLE, isolated here so one napping daemon
+      // neither rejects the whole fetch nor masquerades as "this provider serves nothing"
       try {
-        const live = p.listModels ? await p.listModels() : []
+        const live = p.listModels ? await bounded(p.listModels(), providerTimeoutMs, pid) : []
         return { pid, ids: modelUniverse(live, p.costs), reachable: true }
       } catch {
         return { pid, ids: modelUniverse([], p.costs), reachable: false }
       }
     }))
-    if (log) {
+    if (persist) {
       // append-on-change: the latest event per provider IS the catalog
-      const last = new Map<string, string>()
-      for (const e of await log.after(0, [EVENT_KIND.models_discovered])) {
-        const p = ModelsDiscoveredPayload.safeParse(e.payload)
-        if (p.success) last.set(p.data.providerId, JSON.stringify(p.data.models))
-      }
+      const last = new Map([...await catalogs()].map(([pid, ids]) => [pid, JSON.stringify(ids)]))
       for (const payload of catalogAppends(perProvider, last)) {
-        await log.append({
-          taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.models_discovered,
+        await persist.log.append({
+          ...persist.origin, taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.models_discovered,
           payload,
         }).catch(() => {}) // catalog persistence is best-effort, discovery still returns live data
       }
     }
-    const refs = perProvider.flatMap(({ pid, ids }) => ids.map(id => `${pid}/${id}`)).sort()
+    const refs = refsOf(new Map(perProvider.map(({ pid, ids }) => [pid, ids])))
     cache = { at: Date.now(), refs }
     return refs
   }
+  // ONE core, no flag: every door discovers. A door that folded the log answered [] for a project
+  // with no models_discovered yet, and an agent handed { refs: [] } cannot name a model at all.
+  const listModels = discoverModels
   // discovery already knows both halves; pairing them here keeps every consumer off `p.costs`
   const listModelOptions = async (): Promise<ModelOption[]> =>
     (await listModels()).map(ref => {
@@ -191,13 +222,9 @@ export function buildOrcActions(deps: {
   // for us, or (under --no-daemon) a runtime this process holds. This layer never touches an
   // execution port itself: every door records the ask and lets the supervisor execute it.
   ensureRuntime: () => Promise<unknown>
-  // Which DOOR these actions belong to. Recorded on a feedback answer, because for a grounded task
-  // the conversational 'approve' IS the human gate: mcpApproveTool refuses under --autonomy gated
-  // and buildCopilotTools omits `approve` entirely "by design: the human gate is structural", but
-  // BOTH still ship `reply` and `revise`, which reach the same gate by a different name. Defaults
-  // to the terminal, so the CLI is unchanged and only a door that knows it is not a human says so.
-  via?: MemoryAuthor['source']
   plugin?: { config: ProjectConfig; log: EventLog; storage?: Storage }
+  // The ONE model core (buildModelDiscovery), flagless: it discovers for every door, bounded
+  // per provider, so no call site chooses between a fetch and a fold.
   listModels?: () => Promise<string[]>
   listModelOptions?: () => Promise<ModelOption[]>
 }): OrcActions {
@@ -206,8 +233,10 @@ export function buildOrcActions(deps: {
   // Every memory write this layer makes names the checkout the process is serving — ONE spelling,
   // so the web and MCP doors agree with the terminal instead of each growing their own lookup.
   // Folded per call, not captured: `orc ws new` can mint a workspace mid-session.
-  const cliAuthor = (extra: AuthorExtras = {}): Promise<MemoryAuthor> =>
-    cwdAuthor(kernel, plugin?.config.dir, AUTHOR_SOURCE.cli, extra)
+  // The SOURCE is derived from the door the call came in by — there is no `via` dep to disagree
+  // with the origin the same call stamps on its events.
+  const doorAuthor = (origin: Origin, extra: AuthorExtras = {}): Promise<MemoryAuthor> =>
+    cwdAuthor(kernel, plugin?.config.dir, authorSourceOf(origin.door), origin, extra)
 
   const requireTask = async (taskId: string) => {
     const task = await kernel.getTask(taskId)
@@ -233,8 +262,18 @@ export function buildOrcActions(deps: {
     throw new Error(`unknown model '${ref}' — valid refs include: ${refs.slice(0, 8).join(', ')}${refs.length > 8 ? ', …' : ''}. Call available_models (copilot) or check orc's providers.`)
   }
 
+  // A door parses an authored draft; building the TEMPLATE and validating either source is this
+  // layer's — an authored draft used to reach proposePlan unchecked from the terminal.
+  const draftFrom = async (taskId: string, plan: PlanSource): Promise<PlanDraft> => {
+    const draft = 'draft' in plan
+      ? plan.draft
+      : singleStepDraft(await requireTask(taskId), plan.template.modelRef, plan.template.skillRefs, plugin?.config.maxIterations)
+    for (const step of draft.steps) await assertKnownModel(step.modelRef)
+    return draft
+  }
+
   return {
-    async newTask(input) {
+    async newTask(input, origin) {
       // Same rule as `orc new`: a ROOT task lands in the checkout this process is serving, so the
       // web and MCP doors agree with the terminal; a CHILD is left to the kernel's inheritance
       // (createTaskIn), because a child of a task in another workspace must not be re-homed to
@@ -248,48 +287,57 @@ export function buildOrcActions(deps: {
       const workspaceId = input.workspaceId
         ?? (input.parentId === undefined ? await cwdWorkspaceId(kernel, plugin?.config.dir) : undefined)
       if (!input.grounded) {
-        const t = await kernel.createTask({ title: input.title, spec: input.spec ?? '', parentId: input.parentId, workspaceId })
+        const t = await kernel.createTask({ title: input.title, spec: input.spec ?? '', parentId: input.parentId, budgetUSD: input.budgetUSD, workspaceId }, origin)
         return { taskId: t.id }
       }
       await assertKnownModel(input.grounded.modelRef)
-      const cwd = assertRunnableCwd(input.grounded.cwd)
+      // a null cwd stays null: requestRun then resolves the task's OWN workspace, so a task created
+      // in one worktree is never dragged into the directory this process happens to serve
+      const cwd = input.grounded.cwd === null ? null : assertRunnableCwd(input.grounded.cwd)
       const t = await kernel.createGroundedTask({
-        title: input.title, spec: input.spec ?? '', parentId: input.parentId, workspaceId,
+        title: input.title, spec: input.spec ?? '', parentId: input.parentId, budgetUSD: input.budgetUSD, workspaceId,
         modelRef: input.grounded.modelRef, analyzerRef: input.grounded.analyzerRef ?? 'agent-analyzer',
         modelCatalog: await listModelOptions?.().catch(() => []) ?? [],
         ...(plugin ? { maxIterations: plugin.config.maxIterations } : {}),
-      })
+      }, origin)
       // the grounded template is policy-approved — the analyze→plan conversation starts now;
       // callers watch progress over the event stream, nothing tails here
       await ensureRuntime()
-      await kernel.requestRun(t.id, { cwd })
+      await kernel.requestRun(t.id, { ...(cwd !== null && { cwd }) }, origin)
       return { taskId: t.id }
     },
 
-    async propose(taskId, opts) {
-      await assertKnownModel(opts.modelRef)
-      const task = await requireTask(taskId)
-      const plan = await kernel.proposePlan(taskId, singleStepDraft(task, opts.modelRef, opts.skillRefs ?? [], plugin?.config.maxIterations))
-      return { version: plan.version, steps: plan.steps.length }
+    async propose(taskId, plan, origin) {
+      const proposed = await kernel.proposePlan(taskId, await draftFrom(taskId, plan), origin)
+      return { version: proposed.version, steps: proposed.steps.length }
     },
 
-    async edit(taskId, draft) {
-      for (const step of draft.steps) await assertKnownModel(step.modelRef)
-      const plan = await kernel.editPlan(taskId, draft)
+    async edit(taskId, plan, origin) {
+      const edited = await kernel.editPlan(taskId, await draftFrom(taskId, plan), origin)
+      return { version: edited.version }
+    },
+
+    async approve(taskId, opts, origin) {
+      // Approving only UNBLOCKS a split child — something still has to execute it, and a bare
+      // approval used to leave the parent parked inside join_splits while the child never started.
+      // Same rule as reply: guarantee the supervisor BEFORE the event it has to react to.
+      if ((await kernel.getTask(taskId))?.parentId) await ensureRuntime()
+      const plan = await kernel.approvePlan(taskId, opts.version, opts.approvedBy ? { approvedBy: opts.approvedBy } : undefined, origin)
       return { version: plan.version }
     },
 
-    async approve(taskId, version, approvedBy) {
-      const plan = await kernel.approvePlan(taskId, version, approvedBy ? { approvedBy } : undefined)
-      return { version: plan.version }
+    async listModels() {
+      // No discovery configured answers []: nothing is blocked, the same best-effort posture
+      // assertKnownModel holds.
+      return listModels ? listModels() : []
     },
 
-    async run(taskId, cwd) {
+    async run(taskId, cwd, origin) {
       // cwd is validated BEFORE the ask is recorded: an unrunnable directory must not become a
       // request every supervisor that boots picks up and fails on again. An OMITTED cwd is passed
       // on as omitted — the kernel resolves it from the task's workspace record, and substituting
       // this process's directory here would run a task created in one worktree in another checkout.
-      const resolved = cwd === undefined ? undefined : assertRunnableCwd(cwd)
+      const resolved = cwd === null ? null : assertRunnableCwd(cwd)
       // …and the SAME drivable-status admission the CLI `run` enforces (main.ts) and startRunAt
       // (dbos-port.ts) enforces: a draft/unapproved/terminal task can never be served, so the web
       // and MCP doors must refuse it here too rather than silently logging a run nobody can run.
@@ -298,8 +346,8 @@ export function buildOrcActions(deps: {
       // conditional spread, not `{ cwd: resolved }`: requestRun reads `opts.cwd ?? the workspace's`,
       // and an explicitly-undefined key is the same thing today — but the idiom keeps it that way
       // if the option ever becomes a presence check.
-      await kernel.requestRun(taskId, { ...(resolved !== undefined && { cwd: resolved }) })
-      return { requested: true }
+      const since = await kernel.requestRun(taskId, { ...(resolved !== null && { cwd: resolved }) }, origin)
+      return { requested: true, since }
     },
 
     // Needs the plugin context, unlike the kernel call it replaces: a workspace's health is derived
@@ -310,7 +358,7 @@ export function buildOrcActions(deps: {
       return listWorkspaceHealth(plugin)
     },
 
-    async newWorkspace(input) {
+    async newWorkspace(input, origin) {
       // The worktree is created under the PROJECT ROOT, which only a project context knows — the
       // same refusal `orc ws` makes, at the same boundary, before git is touched.
       if (!plugin) throw new Error('creating a workspace needs a project context')
@@ -321,17 +369,17 @@ export function buildOrcActions(deps: {
       // asking for a workspace is asking for the request; --no-task is a terminal affordance.
       const { workspace, taskId } = await createRequestWorkspace(kernel, plugin.config, {
         title: input.title, spec: input.spec ?? '', base: input.base ?? HEAD_REF, task: true,
-      })
+      }, origin)
       return { workspace, taskId }
     },
 
-    async reply(taskId, text, projectId) {
+    async reply(taskId, text, projectId, origin) {
       // this door's own project: the answer only unblocks the step; a supervisor is what carries it
       // into the parked workflow (its router reacts to feedback_provided) and keeps executing, so
       // guaranteeing one is what makes the answer's promise true.
       if (!projectId || projectId === plugin?.config.projectId) {
         await ensureRuntime()
-        const topic = await kernel.replyFeedback(taskId, text, deps.via)
+        const topic = await kernel.replyFeedback(taskId, text, origin)
         return { answered: topic !== null, supervised: true }
       }
       // A FOREIGN project — the graph UI's chat switcher can see one, and a question it displays has
@@ -347,38 +395,39 @@ export function buildOrcActions(deps: {
       // only serve the web door; this serves every door that holds a project context.
       const storage = await openStorage(plugin.config.databaseUrl, { projectId })
       try {
-        const topic = await new Kernel(storage.events).replyFeedback(taskId, text, deps.via)
+        const topic = await new Kernel(storage.events).replyFeedback(taskId, text, origin)
         return { answered: topic !== null, supervised: (await liveSupervisors(storage, new Date())).length > 0 }
       } finally {
         await storage.close()
       }
     },
 
-    async retry(taskId) {
+    async retry(taskId, cwd, origin) {
+      const resolved = cwd === null ? null : assertRunnableCwd(cwd)
       await assertRetryable(kernel, taskId)
       await ensureRuntime()
-      await kernel.requestRun(taskId, { retry: true })
-      return { requested: true }
+      const since = await kernel.requestRun(taskId, { retry: true, ...(resolved !== null && { cwd: resolved }) }, origin)
+      return { requested: true, since }
     },
 
-    async annotate(taskId, noteId, text, refs) {
-      await kernel.annotatePlan(taskId, { targetNote: noteId, refs: refs ?? [], text })
+    async annotate(taskId, noteId, text, refs, origin) {
+      await kernel.annotatePlan(taskId, { targetNote: noteId, refs, text }, origin)
       return { noteId }
     },
 
-    async revise(taskId, text, scope) {
+    async revise(taskId, text, scope, origin) {
       await ensureRuntime() // resuming the gate needs a supervisor, exactly like reply
-      for (const noteId of scope) await kernel.annotatePlan(taskId, { targetNote: noteId, refs: [], text })
-      const topic = await kernel.replyFeedback(taskId, text, deps.via)
+      for (const noteId of scope) await kernel.annotatePlan(taskId, { targetNote: noteId, refs: [], text }, origin)
+      const topic = await kernel.replyFeedback(taskId, text, origin)
       return { topic }
     },
 
-    async writeNote(note) {
+    async writeNote(note, origin) {
       if (!plugin) throw new Error('writing notes needs a project context')
       if (note.id === PROJECT_NAME_NOTE_ID || note.id === PROJECT_DIR_NOTE_ID)
         throw new Error(`'${note.id}' is a reserved ui-metadata note id`)
       return withMemory({ log: plugin.log, config: plugin.config }, async memory => {
-        const written = await memory.store.write(note, await cliAuthor())
+        const written = await memory.store.write(note, await doorAuthor(origin))
         // event committed — the read model heals on the next drain if this catch-up fails
         await memory.projector.catchUp().catch(() => {})
         return { id: written.id, scope: written.scope }
@@ -388,36 +437,35 @@ export function buildOrcActions(deps: {
     // The decision door. The LIFECYCLE is not here: decisions.ts owns the refusals, the slugged id
     // and the supersession link, and `orc adr` calls the same op — a second implementation would be
     // a second answer to what recording a decision means. What this layer owns is the author.
-    async recordDecision(input) {
+    async recordDecision(input, origin) {
       if (!plugin) throw new Error('recording a decision needs a project context')
       return withMemory({ log: plugin.log, config: plugin.config }, async memory => {
-        // `via` is the door: mcp for the MCP server, absent (→ cli) for the web. Never 'human' here
-        // — an agent drove this call, whoever is behind the agent; `orc adr new` is the door where a
-        // person typed it, and that one writes 'human'.
-        const author = await cwdAuthor(kernel, plugin.config.dir, deps.via ?? AUTHOR_SOURCE.cli)
+        // The source is the DOOR the call came in by. Never 'human' here — an agent drove this
+        // call, whoever is behind the agent; `orc adr new` is the door where a person typed it.
+        const author = await doorAuthor(origin)
         const r = await recordDecisionOp(decisionDoor(memory), author, input)
         return { id: r.note.id, status: r.status, superseded: r.superseded }
       })
     },
 
-    async deleteNote(id, scope) {
+    async deleteNote(id, scope, origin) {
       if (!plugin) throw new Error('deleting notes needs a project context')
       if (id === PROJECT_NAME_NOTE_ID || id === PROJECT_DIR_NOTE_ID)
         throw new Error(`'${id}' is a reserved ui-metadata note id`)
       return withMemory({ log: plugin.log, config: plugin.config }, async memory => {
-        await memory.store.remove(id, scope, await cliAuthor())
+        await memory.store.remove(id, scope, await doorAuthor(origin))
         await memory.projector.catchUp().catch(() => {})
         return { id }
       })
     },
 
-    async renameProject(name) {
+    async renameProject(name, origin) {
       if (!plugin) throw new Error('renaming needs a project context')
-      await plugin.log.append(nameNote(name, await cliAuthor()))
+      await plugin.log.append(nameNote(name, await doorAuthor(origin), origin))
       return { name }
     },
 
-    async newProject(dir, name) {
+    async newProject(dir, name, origin) {
       if (!plugin) throw new Error('creating projects needs a project context')
       const abs = path.resolve(dir)
       if (!existsSync(abs)) throw new Error(`directory does not exist: ${abs}`)
@@ -439,17 +487,17 @@ export function buildOrcActions(deps: {
         // is idempotent (ensureWorkspace keys on cwd), so reusing an existing project re-finds the
         // record instead of minting a second one.
         const created = loadConfig(abs)
-        const workspace = await adoptCwd(new Kernel(storage.events), created)
-        const author: MemoryAuthor = { source: AUTHOR_SOURCE.cli, workspaceId: workspace.id }
-        await storage.events.append(nameNote(name, author))
-        await storage.events.append(dirNote(abs, author))
+        const workspace = await adoptCwd(new Kernel(storage.events), created, origin)
+        const author: MemoryAuthor = { source: authorSourceOf(origin.door), workspaceId: workspace.id, origin }
+        await storage.events.append(nameNote(name, author, origin))
+        await storage.events.append(dirNote(abs, author, origin))
       } finally {
         await storage.close()
       }
       return { projectId, reused: existing !== null }
     },
 
-    async purgeProject() {
+    async purgeProject(origin) {
       if (!plugin?.storage) throw new Error('purging needs a project context')
       await refuseWhileSupervised(plugin.storage, 'purge')
       const warnings: string[] = []
@@ -496,10 +544,10 @@ export function buildOrcActions(deps: {
           // through the KERNEL, never a raw append: it is the one writer of workspace records, and
           // the "one active record per cwd" rule only holds when the check and the append share a
           // transaction — that racing adoption would otherwise get a duplicate forced in beside it.
-          const seated = await kernel.restoreWorkspace(home.workspace)
-          const reseedAuthor: MemoryAuthor = { source: AUTHOR_SOURCE.cli, workspaceId: seated.id }
-          if (plugin.config.projectName) await plugin.log.append(nameNote(plugin.config.projectName, reseedAuthor))
-          if (plugin.config.dir) await plugin.log.append(dirNote(plugin.config.dir, reseedAuthor))
+          const seated = await kernel.restoreWorkspace(home.workspace, origin)
+          const reseedAuthor: MemoryAuthor = { source: authorSourceOf(origin.door), workspaceId: seated.id, origin }
+          if (plugin.config.projectName) await plugin.log.append(nameNote(plugin.config.projectName, reseedAuthor, origin))
+          if (plugin.config.dir) await plugin.log.append(dirNote(plugin.config.dir, reseedAuthor, origin))
         } catch (err) {
           warnings.push(`project identity not re-seeded (${errorMessage(err)}) — another workspace now holds ${plugin.config.dir}, so this project's name and directory notes were not rewritten`)
         }
@@ -528,7 +576,7 @@ export function buildOrcActions(deps: {
       return { ...counts, warnings }
     },
 
-    async deleteProject(projectId) {
+    async deleteProject(projectId, origin) {
       if (!plugin) throw new Error('deleting projects needs a project context')
       // only the HOME project's supervisor is visible from here — deleting a foreign project cannot
       // check its runtime, and does not need to: this guard exists for the tree you are sitting in
@@ -580,11 +628,11 @@ export function buildOrcActions(deps: {
       }
     },
 
-    async cancel(taskId) {
+    async cancel(taskId, origin) {
       // The append half only: stamping the subtree cancelled is what a client can do without a
       // runtime, and the supervisor's router does the DBOS half off each cancelled status. With no
       // supervisor up there is nothing running to cancel, and the next one to boot sweeps it.
-      await kernel.cancelSubtree(taskId)
+      await kernel.cancelSubtree(taskId, origin)
       // Cancel is terminal — nothing will resume this subtree, so its still-owned, unreferenced
       // notes are garbage. Deterministic sweep (no agent): fold the memory log, keep adopted or
       // still-referenced ids. Each delete appends memory_deleted with the cancelled task as
@@ -600,7 +648,7 @@ export function buildOrcActions(deps: {
         memory = await openMemory({ log: plugin.log, config: plugin.config })
         // one author for the whole sweep — the cancelled task is the provenance, the workspace is
         // this checkout, and folding it once per note would re-read the log N times
-        const author = await cliAuthor({ taskId })
+        const author = await doorAuthor(origin, { taskId })
         for (const n of goes) await memory.store.remove(n.id, n.scope, author)
         // deletes are committed (event-first) — the read-model catch-up is best-effort; the
         // projector self-heals on the next invocation

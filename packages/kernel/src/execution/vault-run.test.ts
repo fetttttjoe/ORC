@@ -3,8 +3,8 @@ import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import {
-  EVENT_KIND, SIGNAL_OUTCOME,
-  type AgentExecutor, type EventDraft, type ExecutorContext, type SplitResult, type UnifiedEvent,
+  Door, EVENT_KIND, NO_CHAT, SIGNAL_OUTCOME,
+  type AgentExecutor, type EventDraft, type ExecutorContext, type Origin, type SplitResult, type UnifiedEvent,
 } from '@orc/contracts'
 import { draftFixture, stepFixture } from '@orc/contracts/fixtures'
 import { openStorage, type EventLog, type Storage } from '../storage'
@@ -12,6 +12,8 @@ import { Kernel } from '../kernel'
 import { createTestDb, fakeProvider, fakeSkills, seedTestWorkspace, TEST_PROJECT_ID, TEST_WORKSPACE_ID, testConfig } from '../test-helpers'
 import { createDbosPort, type DbosPort } from './dbos-port'
 import { createVaultProjector, type VaultProjector } from '@orc/vault-projector'
+
+const CLI: Origin = NO_CHAT(Door.cli)
 
 // fake executor emitting a realistic transcript: agent text + a tool call/result + a success signal
 function fakeExecutor(): AgentExecutor<unknown> {
@@ -52,7 +54,7 @@ describe('vault projection over a real run (e2e)', () => {
     log = storage.events
     kernel = new Kernel(log)
     // a task must name a workspace the fold has seen — one seeded record, then tasks as before
-    await seedTestWorkspace(log)
+    await seedTestWorkspace(log, CLI)
     const config = testConfig(db.url, { vaultDir })
     port = await createDbosPort({
       storage, config, skills: fakeSkills,
@@ -79,9 +81,9 @@ describe('vault projection over a real run (e2e)', () => {
   // than alone. A timeout that trips on machine load reports "the vault projection broke" for
   // something that was only slow.
   it('projects the full run: working-graph DAG, session transcript, log, root index', async () => {
-    const t = await kernel.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'e2e demo', spec: 'write a file' })
-    await kernel.proposePlan(t.id, draftFixture([stepFixture({ id: 's1', modelRef: 'fake/m' })]))
-    await kernel.approvePlan(t.id)
+    const t = await kernel.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'e2e demo', spec: 'write a file' }, CLI)
+    await kernel.proposePlan(t.id, draftFixture([stepFixture({ id: 's1', modelRef: 'fake/m' })]), CLI)
+    await kernel.approvePlan(t.id, undefined, undefined, CLI)
 
     const handle = await port.startRun(t.id)
     expect(await handle.wait()).toBe('done')

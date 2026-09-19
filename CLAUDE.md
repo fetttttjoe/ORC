@@ -22,10 +22,10 @@
 - **No scattered string literals.** Table names, field names, tool names, event kinds, headings and
   subcommands come from an enum or exported constant — `enum Tb`, `MEMORY_TOOL_NAME`,
   `MEMORY_LIMITS`, `EVENT_KIND`, `CLAIM_ID_RE`. A literal spelled twice will drift.
-- **Comments explain WHY and name the failure that motivated the rule.** Comments here carry
-  measured findings a reader cannot re-derive; match that density. A comment stating a ceiling also
-  names the upgrade path. Never restate the code, the diff, or the task's own constraints — a
-  comment that adds no fact the reader cannot re-derive is deleted, not shortened.
+- **No prose comments.** Code reads from its names and small functions. No comment paragraphs, no
+  narrated reasoning. At most one short line where a line would be wrong to change without it. Do
+  not extend existing comment blocks; a measured finding worth keeping belongs in a doc or a test
+  name, not above the code.
 - **Reference docs describe the system as it is.** `README.md` and `docs/*.md` must not narrate
   migrations or name milestones — specs and plans carry the history.
 - **A spec or plan tags its claims.** A number, formula or named pattern is `[sourced]` (cite it),

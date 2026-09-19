@@ -5,6 +5,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createMcpHub } from '@orc/mcp-client'
 import { createPluginHost, grantMcpTrust, isMcpTrusted, loadConfig, loadTrust, requireProject } from '@orc/kernel'
+import { Door, NO_CHAT } from '@orc/contracts'
 import { must } from '@orc/contracts/fixtures'
 import { createTestDb, seedTestWorkspace, TEST_PROJECT_ID, TEST_WORKSPACE_ID } from '@orc/kernel/test-helpers'
 import { openKernel } from './main'
@@ -12,6 +13,15 @@ import { cli } from './test-helpers'
 import { seedShippedSkills } from './shipped-skills'
 
 const FIXTURE = fileURLToPath(new URL('../../../plugins/mcp-client/src/fixture-server.ts', import.meta.url))
+
+// these tests drive the CLI door, so arrangement names the origin that door names
+const CLI = NO_CHAT(Door.cli)
+
+// The shared action validates model refs at the boundary now, so a project that names a model must
+// PRICE it — cost-table keys ARE the valid universe, and the old unpriced 'fake/m' is refused.
+const PRICED = { costOverrides: { ollama: { m: { inPerMTok: 0, outPerMTok: 0 }, edited: { inPerMTok: 0, outPerMTok: 0 } } } }
+const MODEL = 'ollama/m'
+const EDITED_MODEL = 'ollama/edited'
 
 const dbs: Array<{ drop: () => Promise<void> }> = []
 let dirs: string[] = []
@@ -35,14 +45,16 @@ async function makeCli(dir: string) {
   // when this temp project's skills dir holds nothing
   seedShippedSkills(config.skillsDir)
   const host = await createPluginHost(config, {
-    providers: new Map([['fake', { costs: {}, languageModel: () => ({}) }]]),
+    // registered under the id the CONFIG prices: refValidator reads this host, assertKnownModel
+    // reads the config's seeded registry, and a plan must satisfy both
+    providers: new Map([['ollama', { costs: {}, languageModel: () => ({}) }]]),
     executors: new Map([['api-loop', { id: 'api-loop', startTurn: async function* () {} }]]),
   })
   const hub = createMcpHub(config.mcpServers, (id, cfg) => isMcpTrusted(loadTrust(dir), id, cfg))
   db.onClose(() => hub.close())
   const { kernel, log } = await openKernel(db.url, { projectId: TEST_PROJECT_ID, refValidator: host.refValidator })
   // a task must name a workspace the fold has seen — one seeded record, then tasks as before
-  await seedTestWorkspace(log)
+  await seedTestWorkspace(log, CLI)
   const { run, lines } = cli(kernel, undefined, { host, hub, config, log })
   return { run, lines, dir, host, hub, kernel, config }
 }
@@ -108,7 +120,7 @@ describe('plugin commands', () => {
   })
 
   it('propose rejects a plan referencing an untrusted server (wired refValidator)', async () => {
-    const dir = project({ mcpServers: { fixture: { command: 'bun', args: [FIXTURE] } } })
+    const dir = project({ ...PRICED, mcpServers: { fixture: { command: 'bun', args: [FIXTURE] } } })
     const { run, lines, dir: d } = await makeCli(dir)
     await run('new', 'task with tools', '--workspace', TEST_WORKSPACE_ID)
     const taskId = must(lines[0], 'task id from new command')
@@ -117,7 +129,7 @@ describe('plugin commands', () => {
       strategyRef: 'template:single', costEstimateUSD: null,
       steps: [{
         id: 's1', role: 'worker', title: 't', instructions: 'i', executorRef: 'api-loop',
-        modelRef: 'fake/m', skillRefs: [], toolRefs: ['fixture/echo'], isolation: 'local',
+        modelRef: MODEL, skillRefs: [], toolRefs: ['fixture/echo'], isolation: 'local',
         zone: [], maxIterations: 1, dependsOn: [],
       }],
     }))
@@ -127,7 +139,7 @@ describe('plugin commands', () => {
   it('orc vault render writes the task tree', async () => {
     const dir = project({})
     const { run, lines, kernel, config } = await makeCli(dir)
-    const t = await kernel.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'demo', spec: 'do it' })
+    const t = await kernel.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'demo', spec: 'do it' }, CLI)
     await run('vault', 'render', t.id)
     const idx = path.join(config.vaultDir, 'tasks', t.id, 'index.md')
     expect(existsSync(idx)).toBe(true)
@@ -152,17 +164,17 @@ describe('plugin commands', () => {
   })
 
   it('orc edit --from-vault picks the numerically highest plan version, not the lexicographic one', async () => {
-    const dir = project({})
+    const dir = project(PRICED)
     const { run, lines, config } = await makeCli(dir)
     await run('new', 'vault edit task', '--workspace', TEST_WORKSPACE_ID)
     const taskId = must(lines[0], 'task id from new command')
-    await run('propose', taskId, '--model', 'fake/m') // v1 — 'fake' is the only provider this test's host registers
-    for (let i = 0; i < 10; i++) await run('edit', taskId, '--model', 'fake/m') // v2..v11 — plan-v10/plan-v11 must sort after plan-v9 numerically, not lexicographically
+    await run('propose', taskId, '--model', MODEL) // v1
+    for (let i = 0; i < 10; i++) await run('edit', taskId, '--model', MODEL) // v2..v11 — plan-v10/plan-v11 must sort after plan-v9 numerically, not lexicographically
     await run('vault', 'render', taskId) // render every plan-vN.md to disk (real vault files, not a mock)
 
     const planPath = path.join(config.vaultDir, 'tasks', taskId, 'plan-v11.md')
     expect(existsSync(planPath)).toBe(true)
-    writeFileSync(planPath, readFileSync(planPath, 'utf8').replace('fake/m', 'fake/edited'))
+    writeFileSync(planPath, readFileSync(planPath, 'utf8').replaceAll(MODEL, EDITED_MODEL))
 
     lines.length = 0
     await run('edit', taskId, '--from-vault')
@@ -172,6 +184,6 @@ describe('plugin commands', () => {
     await run('plan', taskId, '--json')
     const plan = JSON.parse(lines.join('\n'))
     expect(plan.version).toBe(12)
-    expect(plan.steps[0].modelRef).toBe('fake/edited')
+    expect(plan.steps[0].modelRef).toBe(EDITED_MODEL)
   })
 })

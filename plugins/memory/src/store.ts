@@ -61,7 +61,9 @@ export function createMemoryStore(opts: { log: EventLog; surreal: SurrealMemory;
       // task-bound note carries, so a restored plan note lost the binding `taskSettled` reads and
       // could never be archived again — measured: three restored notes went permanently unretirable.
       await log.append({
-        taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_written,
+        // the ACTING author's origin: the envelope names the interaction that moved the flag, while
+        // the payload keeps the note's own author (who wrote the content)
+        ...author.origin, taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_written,
         payload: { note, author: held?.author ?? author },
       })
     }
@@ -130,7 +132,7 @@ export function createMemoryStore(opts: { log: EventLog; surreal: SurrealMemory;
         const merged = { ...parsed, sourceRevision: stampedRevision }
         try {
           await tx.append({
-            taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_written,
+            ...author.origin, taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_written,
             // the tombstone is stated on the EVENT: the note carries live claims only, and folding
             // the log is what recovers a retired claim and the write that retired it
             payload: { note: merged, author, invalidates: claimWrite.invalidates },
@@ -202,6 +204,7 @@ export function createMemoryStore(opts: { log: EventLog; surreal: SurrealMemory;
             // fail the envelope's min(1) and turn a tool call into an error, so falsy normalizes to
             // unbound. Bound to the acting step so task-scoped views can ask which notes THIS run
             // verified without payload archaeology.
+            ...author.origin,
             taskId: author.taskId || null, stepId: author.stepId || null, runToken: author.runToken || null,
             kind: EVENT_KIND.memory_verified,
             payload: { id, scope, stamp, author },
@@ -238,7 +241,7 @@ export function createMemoryStore(opts: { log: EventLog; surreal: SurrealMemory;
     // author is the CALLER's — cancel-sweep passes the cancelled task's identity as provenance,
     // and a removal with no nameable author is a wiring bug, not a `cli` default.
     async remove(id, scope = MemoryScope.project, author) {
-      await log.append({ taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_deleted, payload: { id, scope, author } })
+      await log.append({ ...author.origin, taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_deleted, payload: { id, scope, author } })
     },
     get: (id, scope = MemoryScope.project) => surreal.get(id, scope),
     useStats: (id, scope = MemoryScope.project) => surreal.useStats(id, scope),
@@ -250,6 +253,7 @@ export function createMemoryStore(opts: { log: EventLog; surreal: SurrealMemory;
         // pull counts fold from the envelope instead of payload archaeology (P5 token-economy)
         // `|| null`, not `?? null`: an empty-string id would fail the envelope's min(1) and
         // turn a memory read into a tool error — normalize falsy to unbound instead
+        ...author.origin,
         taskId: author?.taskId || null, stepId: author?.stepId || null, runToken: author?.runToken || null,
         kind: EVENT_KIND.memory_accessed,
         payload: { id, scope, mode, author, ...(accessOpts?.via && { via: accessOpts.via }) },
@@ -265,6 +269,7 @@ export function createMemoryStore(opts: { log: EventLog; surreal: SurrealMemory;
       for (const { id, outcome } of entries) {
         await log.append({
           // envelope bound to the acting step, recordAccess's rule and reason
+          ...author.origin,
           taskId: author?.taskId || null, stepId: author?.stepId || null, runToken: author?.runToken || null,
           kind: EVENT_KIND.memory_outcome,
           payload: { id, scope: MemoryScope.project, outcome, author },
@@ -297,6 +302,7 @@ export function createMemoryStore(opts: { log: EventLog; surreal: SurrealMemory;
         // envelope bound to the acting step, same rule and same `|| null` normalization as
         // recordAccess above: task-scoped views (recent_activity, task transcripts) filter on the
         // envelope, so an unbound append orphans every topic fetch from the run that made it.
+        ...author.origin,
         taskId: author?.taskId || null, stepId: author?.stepId || null, runToken: author?.runToken || null,
         kind: EVENT_KIND.memory_topic_accessed,
         payload: { topicKey, label: topic.label, author },

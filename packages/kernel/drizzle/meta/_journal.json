@@ -36,6 +36,13 @@
       "when": 1784572456334,
       "tag": "0004_note_lookup_index",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1784658856334,
+      "tag": "0005_chat_envelope",
+      "breakpoints": true
     }
   ]
 }

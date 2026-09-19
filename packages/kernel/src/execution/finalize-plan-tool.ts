@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import { APPROVAL_ANSWER, GROUNDED_APPROVAL_DOOR, MASTERPLAN_NOTE_ID, toolError, ApprovalPolicy, type ResolvedTool } from '@orc/contracts'
+import { APPROVAL_ANSWER, GROUNDED_APPROVAL_DOOR, MASTERPLAN_NOTE_ID, toolError, ApprovalPolicy, type Origin, type ResolvedTool } from '@orc/contracts'
 import { SPLIT_ORIGIN, type Kernel } from '../kernel'
 import { freezePlan, planScope, PLAN_STEP_ROLE } from './strategies/grounded-plan'
 
@@ -18,7 +18,7 @@ const AUTO_APPROVE = ApprovalPolicy.parse({ default: 'auto' })
 export function finalizePlanTool(opts: {
   kernel: Pick<Kernel, 'proposeSplit' | 'listPlanNotes' | 'approvedPlanHash' | 'planNotesChangedSince' | 'nonHumanPlanApproval' | 'approvalDoors'>
   config: { maxDepth: number; autoCommit?: boolean }
-  p: { taskId: string; stepId: string; runToken: string; role: string; executor: string; modelRef: string; maxIterations: number }
+  p: { taskId: string; stepId: string; runToken: string; role: string; executor: string; modelRef: string; maxIterations: number; origin: Origin }
 }): ResolvedTool {
   const { kernel, config, p } = opts
   // Both refusals below quote the SAME list the gate tests (kernel.approvalDoors), never a literal:
@@ -117,8 +117,8 @@ export function finalizePlanTool(opts: {
           parentStep: { executorRef: p.executor, modelRef: p.modelRef, maxIterations: p.maxIterations },
           policy: AUTO_APPROVE, maxDepth: config.maxDepth,
           // the one caller allowed to carry the committer role — the plan is the kernel's own freeze
-          origin: SPLIT_ORIGIN.freeze,
-        })
+          authoredBy: SPLIT_ORIGIN.freeze,
+        }, p.origin)
         return { output: r, isError: false }
       } catch (e) {
         return toolError(e)

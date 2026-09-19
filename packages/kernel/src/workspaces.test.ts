@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'bun:test'
 import { EVENT_KIND, TASK_STATUS, WORKSPACE_KIND, WORKSPACE_STATE, type EventRecord, type TaskNode, type TaskStatus, type Workspace, type WorkspaceHealth } from '@orc/contracts'
-import { eventFixture } from '@orc/contracts/fixtures'
+import { authorFixture, eventFixture } from '@orc/contracts/fixtures'
 import { fold, type State } from './projections'
 import { applyArchived, applyRetitle, compareWorkspaceHealth, orphanTasks, tasksByWorkspace, workspaceByCwd, workspaceCwdFor, workspaceHealth, type WorkspaceProbes } from './workspaces'
 
@@ -123,7 +123,9 @@ const stateOf = (tasks: TaskNode[], merged = false): Pick<State, 'tasks' | 'work
 const LIVE: WorkspaceProbes = { dirExists: true, clean: true }
 const GONE: WorkspaceProbes = { dirExists: false, clean: null }
 const askedT1 = ev(EVENT_KIND.feedback_requested, { topic: 'cwd', question: 'which cwd?' }, 't1')
-const answeredT1 = ev(EVENT_KIND.feedback_provided, { topic: 'cwd', text: 'this one', author: { source: 'cli', workspaceId: ID.a } }, 't1')
+// MemoryAuthor.origin is required and the payload is untyped, so an author without it compiles but
+// fails the FeedbackProvidedPayload parse and the answer never lands.
+const answeredT1 = ev(EVENT_KIND.feedback_provided, { topic: 'cwd', text: 'this one', author: authorFixture({ workspaceId: ID.a }) }, 't1')
 
 const CASES: Array<{
   name: string

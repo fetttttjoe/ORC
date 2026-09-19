@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 import { isConnectionRefused, loadConfig, ProjectNotInitializedError, requireProject } from '@orc/kernel'
-import { errorMessage, HOOK_NAME } from '@orc/contracts'
+import { Door, errorMessage, HOOK_NAME, NO_CHAT } from '@orc/contracts'
 import { buildProgram, openKernel, runInit, runMigrate } from './main'
 import { EXIT_CODE, exitCodeFor } from './exit'
 import type { Command } from 'commander'
@@ -73,7 +73,7 @@ async function main(): Promise<number> {
     // guaranteed open (the --help path above returns with none), and every door — including
     // `orc mcp serve`, a subcommand of the program parsed below — boots through it. A second call
     // inside mcp-serve.ts would be a second spelling of the same rule, not a second behaviour.
-    await adoptCwd(opened.kernel, config)
+    await adoptCwd(opened.kernel, config, NO_CHAT(Door.cli))
     const storageMs = openTiming[0]?.[1]
     return await parse(buildProgram(
       opened.kernel,

@@ -1,14 +1,19 @@
 import { Command } from 'commander'
-import type { EventLog, Kernel, ProjectConfig } from '@orc/kernel'
-import type { WorkspaceWithHealth } from '@orc/contracts'
-import { listWorkspaceHealth, PROVISIONAL_UNKNOWN } from './workspace-health'
-import { archiveWorkspaceOp, createRequestWorkspace, finalizeWorkspaceOp, HEAD_REF, mergeWorkspaceOp, type WorkspaceConfig } from './workspace-ops'
+import { Door, NO_CHAT, type WorkspaceWithHealth } from '@orc/contracts'
+import type { WorkspaceDoor } from './door-kernel'
+import { PROVISIONAL_UNKNOWN } from './workspace-health'
+import { HEAD_REF, type WorkspaceConfig } from './workspace-ops'
 import { findCwdWorkspace } from './cwd-workspace'
 import { AGE_UNKNOWN, relativeAge } from './relative-age'
 
 // The `orc ws` command surface: commander option parsing and the lines a terminal prints, and
 // nothing else. What the subcommands DO lives in workspace-ops.ts, which the MCP/web door calls
 // without pulling commander in behind it.
+
+// Every `orc ws` mutation entered through this terminal: the door names it once, here.
+const CLI_ORIGIN = NO_CHAT(Door.cli)
+
+export const WS_NEEDS_PROJECT = 'ws commands need a project context'
 
 export const WS_SUBCOMMAND = { new: 'new', ls: 'ls', current: 'current', retitle: 'retitle', archive: 'archive', restore: 'restore', merge: 'merge', finalize: 'finalize' } as const
 
@@ -41,21 +46,12 @@ export function renderWorkspaceList(rows: readonly WorkspaceWithHealth[], now: D
 }
 
 export function wsCommand(deps: {
-  requireKernel: () => Kernel
-  // ONE optional dep, not a config and a log that are independently optional: `ls` reads both (the
-  // health of a workspace is derived from the log and counted out of the read model the config
-  // names), and two half-present fields would let a caller wire half a project context that fails
-  // one subcommand deep instead of at the door.
-  project?: { config: ProjectConfig; log: EventLog }
+  // A thunk lets help register commands without a kernel. The returned door exposes workspace
+  // mutations that require an origin, withholding the raw kernel from this adapter.
+  requireDoor: () => WorkspaceDoor
 }): Command {
   const ws = new Command('ws').description('workspaces: one checkout per request (a plain git checkout, or an orc-created worktree)')
-  // Same shape as main.ts's needPlugin: a handler that reached a checkout-less context says so
-  // instead of failing on an undefined projectRoot one call deeper.
-  const needProject = () => {
-    if (!deps.project) throw new Error('ws commands need a project context')
-    return deps.project
-  }
-  const needConfig = (): WorkspaceConfig => needProject().config
+  const needConfig = (): WorkspaceConfig => deps.requireDoor().config()
 
   ws.command(`${WS_SUBCOMMAND.new} <title>`)
     .description('create a git worktree + branch for one request under .orc/worktrees, record it as a workspace, and draft the request as its first task')
@@ -63,7 +59,7 @@ export function wsCommand(deps: {
     .option('--base <ref>', 'start point for the branch (default: HEAD of this checkout)', HEAD_REF)
     .option('--no-task', 'create only the workspace')
     .action(async (title: string, o: { spec: string; base: string; task: boolean }) => {
-      const r = await createRequestWorkspace(deps.requireKernel(), needConfig(), { title, ...o })
+      const r = await deps.requireDoor().workspaces.create({ title, ...o }, CLI_ORIGIN)
       console.log(`workspace ${r.workspace.id}  ${r.branch} ← ${r.base}\n${r.taskId ? `task ${r.taskId}` : 'no task (--no-task)'}\ncd ${r.workspace.cwd}`)
     })
 
@@ -72,7 +68,7 @@ export function wsCommand(deps: {
       // The verdict is DERIVED ONCE, by the same call the MCP door and the console make — this
       // command only prints it. A second reading here of "does the directory still exist" is how
       // three surfaces end up telling an operator three different things about one checkout.
-      const rows = await listWorkspaceHealth({ ...needProject(), ...(o.all === true && { includeArchived: true }) })
+      const rows = await deps.requireDoor().listWorkspaces(o.all === true)
       for (const line of renderWorkspaceList(rows, new Date())) console.log(line)
     })
 
@@ -82,7 +78,7 @@ export function wsCommand(deps: {
       // the realpath policy IS the match (the fold keys on the resolved string), and a command file
       // with its own copy is how `ws current` and the task-creating doors end up disagreeing about
       // which record this directory is.
-      const w = await findCwdWorkspace(deps.requireKernel(), needConfig().dir)
+      const w = await findCwdWorkspace(deps.requireDoor().reads, needConfig().dir)
       // Boot adoption records this checkout before any handler runs, so the miss is reachable only
       // while the fold is still behind the log — which one more command settles.
       console.log(w ? `${w.id}  ${w.title}  (${w.kind}, ${w.branch ?? 'detached'})` : '_not adopted yet — rerun any orc command_')
@@ -90,7 +86,7 @@ export function wsCommand(deps: {
 
   ws.command(`${WS_SUBCOMMAND.retitle} <id> <title>`).description('rename a workspace (the label only — never its branch or directory)')
     .action(async (id: string, title: string) => {
-      const w = await deps.requireKernel().retitleWorkspace(id, title)
+      const w = await deps.requireDoor().workspaces.retitle(id, title, CLI_ORIGIN)
       console.log(`${w.id}  ${w.title}`)
     })
 
@@ -99,8 +95,8 @@ export function wsCommand(deps: {
     .action(async (id: string, o: { remove?: boolean }) => {
       // needConfig() only on the --remove path: archiving the RECORD works in a checkout-less
       // context today, and asking for a project root up here would take that away.
-      const r = await archiveWorkspaceOp(deps.requireKernel(), id,
-        o.remove === true ? { remove: true, projectRoot: needConfig().projectRoot } : { remove: false })
+      const r = await deps.requireDoor().workspaces.archive(id,
+        o.remove === true ? { remove: true, projectRoot: needConfig().projectRoot } : { remove: false }, CLI_ORIGIN)
       const out = [`archived ${r.workspaceId}${r.removedWorktree === null ? '' : ' and removed its worktree'}`]
       if (r.leftoverBranch !== null)
         out.push(`branch ${r.leftoverBranch} is left behind (orc never deletes a branch) — drop it with: git branch -D ${r.leftoverBranch}`)
@@ -110,7 +106,7 @@ export function wsCommand(deps: {
   ws.command(`${WS_SUBCOMMAND.merge} <id>`)
     .description('merge the workspace\'s branch into trunk (--no-ff), record the merge, archive it and remove its orc-managed worktree')
     .action(async (id: string) => {
-      const r = await mergeWorkspaceOp(deps.requireKernel(), needConfig(), id)
+      const r = await deps.requireDoor().workspaces.merge(id, CLI_ORIGIN)
       const out = [`merged ${r.branch} into ${r.trunk} as ${r.mergeCommit}`, `archived workspace ${r.workspaceId}`]
       if (r.removedWorktree !== null) out.push(`removed the worktree at ${r.removedWorktree}`)
       console.log([...out, ...r.warnings].join('\n'))
@@ -119,13 +115,13 @@ export function wsCommand(deps: {
   ws.command(`${WS_SUBCOMMAND.finalize} <id>`)
     .description('record a merge that happened outside orc — the workspace\'s branch must already be contained in trunk')
     .action(async (id: string) => {
-      const r = await finalizeWorkspaceOp(deps.requireKernel(), needConfig(), id)
+      const r = await deps.requireDoor().workspaces.finalize(id, CLI_ORIGIN)
       console.log(`recorded ${r.branch} merged into ${r.trunk} at ${r.mergeCommit}\narchived workspace ${r.workspaceId}`)
     })
 
   ws.command(`${WS_SUBCOMMAND.restore} <id>`).description('un-archive a workspace (the record only — a removed worktree is gone)')
     .action(async (id: string) => {
-      await deps.requireKernel().setWorkspaceArchived(id, false)
+      await deps.requireDoor().workspaces.restore(id, CLI_ORIGIN)
       console.log(`restored ${id}`)
     })
   return ws

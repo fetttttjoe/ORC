@@ -1,7 +1,9 @@
 import { z } from 'zod'
 import type { Usage } from './execution'
+import type { Door } from './origin'
 
-// The event vocabulary and the stored envelope, in a LEAF module (zod + a type-only import).
+// The event vocabulary and the stored envelope, in a LEAF module (zod + type-only imports, which
+// erase at build time and so cannot put this module in an import cycle).
 // `events` holds the PAYLOAD schemas, several of which live in modules that in turn need the
 // event kinds — `memory` folds by kind, `analysis` is read back by kind. Keeping the vocabulary
 // here means those modules never have to import `events` itself, so there is no cycle to reason
@@ -15,6 +17,7 @@ export const EventKind = z.enum([
   'feedback_requested', 'feedback_provided', 'plan_annotated', 'analysis_completed',
   'models_discovered', 'copilot_exchange', 'reaction_failed', 'commit_recorded',
   'workspace_created', 'workspace_retitled', 'workspace_archived', 'workspace_merged',
+  'chat_opened',
 ])
 export type EventKind = z.infer<typeof EventKind>
 
@@ -25,6 +28,12 @@ export interface EventRecord {
   seq: number
   projectId: string
   idempotencyKey: string | null
+  // which interaction caused this event, null for one outside any. Never recoverable later: no
+  // stored field says which of the interactions live at that instant this event belonged to.
+  chatId: string | null
+  // where this call entered. Never null: a chatless event that also lost its door would be
+  // anonymous forever, indistinguishable from a CLI call, an MCP call or a hook's commit.
+  door: Door
   taskId: string | null
   stepId: string | null
   runToken: string | null

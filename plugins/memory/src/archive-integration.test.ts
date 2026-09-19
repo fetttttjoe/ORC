@@ -1,10 +1,15 @@
 import { afterAll, expect, it } from 'bun:test'
-import { EVENT_KIND, MemoryWrittenPayload } from '@orc/contracts'
+import { Door, EVENT_KIND, MemoryWrittenPayload, NO_CHAT, type MemoryAuthor } from '@orc/contracts'
 import { createLiveMemory } from './test-helpers'
 import { TEST_WORKSPACE_ID } from '@orc/contracts/fixtures'
 
 const drops: (() => Promise<void>)[] = []
 afterAll(async () => { for (const d of drops) await d() })
+
+// Every lifecycle move here is an `orc memory` command, which answers to no chat; the one
+// task-bound write is an agent step writing from inside its run's chat.
+const CLI: MemoryAuthor = { source: 'cli', workspaceId: TEST_WORKSPACE_ID, origin: NO_CHAT(Door.cli) }
+const AGENT: MemoryAuthor = { source: 'agent', workspaceId: TEST_WORKSPACE_ID, taskId: 't1', origin: { chatId: 'run:t1:v1', door: Door.supervisor } }
 
 /**
  * The archive → restore round trip over a real log + read model.
@@ -18,16 +23,16 @@ it('archives a note out of the read model and restores it from the log', async (
   const live = await createLiveMemory()
   drops.push(live.close)
 
-  await live.store.write({ id: 'area-x', title: 'Area X', summary: 'durable knowledge' }, { source: 'cli', workspaceId: TEST_WORKSPACE_ID })
+  await live.store.write({ id: 'area-x', title: 'Area X', summary: 'durable knowledge' }, CLI)
   await live.projector.catchUp()
   expect(await live.store.get('area-x')).not.toBeNull()
 
-  await live.store.setArchived('area-x', 'project', true, { source: 'cli', workspaceId: TEST_WORKSPACE_ID })
+  await live.store.setArchived('area-x', 'project', true, CLI)
   await live.projector.catchUp()
   // gone from the read model, so search/neighbours/ranking cannot surface it
   expect(await live.store.get('area-x')).toBeNull()
 
-  await live.store.setArchived('area-x', 'project', false, { source: 'cli', workspaceId: TEST_WORKSPACE_ID })
+  await live.store.setArchived('area-x', 'project', false, CLI)
   await live.projector.catchUp()
   const back = await live.store.get('area-x')
   expect(back).not.toBeNull()
@@ -39,10 +44,10 @@ it('archives a note out of the read model and restores it from the log', async (
 it('is idempotent in both directions — archiving twice is not a fault', async () => {
   const live = await createLiveMemory()
   drops.push(live.close)
-  await live.store.write({ id: 'n', title: 'N', summary: 's' }, { source: 'cli', workspaceId: TEST_WORKSPACE_ID })
+  await live.store.write({ id: 'n', title: 'N', summary: 's' }, CLI)
   await live.projector.catchUp()
-  await live.store.setArchived('n', 'project', true, { source: 'cli', workspaceId: TEST_WORKSPACE_ID })
-  await live.store.setArchived('n', 'project', true, { source: 'cli', workspaceId: TEST_WORKSPACE_ID }) // no second event
+  await live.store.setArchived('n', 'project', true, CLI)
+  await live.store.setArchived('n', 'project', true, CLI) // no second event
   await live.projector.catchUp()
   expect(await live.store.get('n')).toBeNull()
 })
@@ -56,11 +61,11 @@ it('is idempotent in both directions — archiving twice is not a fault', async 
 it('keeps the note\'s own author across archive and restore', async () => {
   const live = await createLiveMemory()
   drops.push(live.close)
-  await live.store.write({ id: 'step-x', scope: 'plan-t1', title: 'Step X', summary: 's' }, { source: 'agent', workspaceId: TEST_WORKSPACE_ID, taskId: 't1' })
+  await live.store.write({ id: 'step-x', scope: 'plan-t1', title: 'Step X', summary: 's' }, AGENT)
   await live.projector.catchUp()
 
-  await live.store.setArchived('step-x', 'plan-t1', true, { source: 'cli', workspaceId: TEST_WORKSPACE_ID })
-  await live.store.setArchived('step-x', 'plan-t1', false, { source: 'cli', workspaceId: TEST_WORKSPACE_ID })
+  await live.store.setArchived('step-x', 'plan-t1', true, CLI)
+  await live.store.setArchived('step-x', 'plan-t1', false, CLI)
   await live.projector.catchUp()
 
   const events = await live.log.after(0, [EVENT_KIND.memory_written])
@@ -80,10 +85,10 @@ it('returns the content just written, not the previous revision', async () => {
   const live = await createLiveMemory()
   drops.push(live.close)
 
-  await live.store.write({ id: 'n', title: 'N', summary: 'ONE', body: 'old body' }, { source: 'cli', workspaceId: TEST_WORKSPACE_ID })
+  await live.store.write({ id: 'n', title: 'N', summary: 'ONE', body: 'old body' }, CLI)
   await live.projector.catchUp()
 
-  const back = await live.store.write({ id: 'n', summary: 'TWO', body: 'new body' }, { source: 'cli', workspaceId: TEST_WORKSPACE_ID })
+  const back = await live.store.write({ id: 'n', summary: 'TWO', body: 'new body' }, CLI)
   expect(back.summary).toBe('TWO')
   expect(back.body).toBe('new body')
   // provenance still comes from the projected row, which is what it is there for
@@ -103,14 +108,14 @@ it('archives many notes with ONE pass over the log, not one per note', async () 
   drops.push(live.close)
 
   const ids = ['a', 'b', 'c']
-  for (const id of ids) await live.store.write({ id, title: id, summary: id }, { source: 'cli', workspaceId: TEST_WORKSPACE_ID })
+  for (const id of ids) await live.store.write({ id, title: id, summary: id }, CLI)
   await live.projector.catchUp()
 
   let reads = 0
   const realAfter = live.log.after.bind(live.log)
   live.log.after = ((...args: Parameters<typeof realAfter>) => { reads += 1; return realAfter(...args) }) as typeof realAfter
 
-  await live.store.setArchivedAll(ids.map(id => ({ id, scope: 'project' })), true, { source: 'cli', workspaceId: TEST_WORKSPACE_ID })
+  await live.store.setArchivedAll(ids.map(id => ({ id, scope: 'project' })), true, CLI)
   // asserted BEFORE catchUp: the projector reads the log too, and counting its pass would hide
   // whether the store made one or three
   expect(reads).toBe(1)
@@ -122,16 +127,16 @@ it('the batch door is idempotent and skips ids the log never had', async () => {
   const live = await createLiveMemory()
   drops.push(live.close)
 
-  await live.store.write({ id: 'real', title: 'Real', summary: 's' }, { source: 'cli', workspaceId: TEST_WORKSPACE_ID })
+  await live.store.write({ id: 'real', title: 'Real', summary: 's' }, CLI)
   await live.projector.catchUp()
   // a ghost id alongside a real one must not throw — retiring twice is not a fault, and neither is
   // naming something the log never carried
-  await live.store.setArchivedAll([{ id: 'real', scope: 'project' }, { id: 'ghost', scope: 'project' }], true, { source: 'cli', workspaceId: TEST_WORKSPACE_ID })
-  await live.store.setArchivedAll([{ id: 'real', scope: 'project' }], true, { source: 'cli', workspaceId: TEST_WORKSPACE_ID })
+  await live.store.setArchivedAll([{ id: 'real', scope: 'project' }, { id: 'ghost', scope: 'project' }], true, CLI)
+  await live.store.setArchivedAll([{ id: 'real', scope: 'project' }], true, CLI)
   await live.projector.catchUp()
   expect(await live.store.get('real')).toBeNull()
 
-  await live.store.setArchivedAll([{ id: 'real', scope: 'project' }], false, { source: 'cli', workspaceId: TEST_WORKSPACE_ID })
+  await live.store.setArchivedAll([{ id: 'real', scope: 'project' }], false, CLI)
   await live.projector.catchUp()
   expect((await live.store.get('real'))?.title).toBe('Real')
 })

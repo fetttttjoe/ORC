@@ -7,6 +7,7 @@ import { stepFixture } from '@orc/contracts/fixtures'
 import { apiLoopExecutor, executeTool, releaseWriteClaims, TOOL_NAME } from '@orc/executor-api-loop'
 import { scriptModel } from '@orc/executor-api-loop/test-model'
 import { driveGenerator } from './dbos-port'
+import { runOrigin } from './run-chat'
 
 // the model type, inferred from scriptModel so this file needs no dependency on the `ai` package
 type Model = ReturnType<typeof scriptModel>
@@ -20,6 +21,7 @@ function ctx(model: Model, workspaceDir: string, runToken: string): ExecutorCont
   return {
     step: stepFixture({ instructions: 'write then join', maxIterations: 3 }),
     taskSpec: 't', depOutputs: {}, skills: [], extraTools: [], model, runToken, workspaceDir,
+    origin: runOrigin('run:t1:v1'), // the step executes inside its run's chat
     checkpoint: passCheckpoint, operation: passOperation, budgetRemainingUSD: async () => null,
   }
 }

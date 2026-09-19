@@ -1,6 +1,6 @@
 // Subprocess fixture: runs the real `run` command against a stub port so tests can
 // assert the process exit status without poisoning the shared bun test process.
-import { EVENT_KIND, TASK_STATUS, type ExecutionPort, type RunHandle, type TaskStatus } from '@orc/contracts'
+import { Door, EVENT_KIND, NO_CHAT, TASK_STATUS, type ExecutionPort, type RunHandle, type TaskStatus } from '@orc/contracts'
 import { buildProgram, openKernel } from './main'
 import { exitCodeFor } from './exit'
 import { TEST_PROJECT_ID } from '@orc/kernel/test-helpers'
@@ -19,7 +19,9 @@ const port: ExecutionPort = {
 // its ask, the statuses a real run would stamp are appended here. Without them the watch would
 // wait forever on a task nothing is driving — which is the point of a supervisor, not a bug.
 const stamp = (from: TaskStatus, to: TaskStatus) => log.append({
-  taskId, stepId: null, runToken: null, kind: EVENT_KIND.task_status_changed, payload: { taskId, from, to },
+  // Door.supervisor: these are the appends the supervisor's half would make, and this fixture is
+  // standing in for it.
+  ...NO_CHAT(Door.supervisor), taskId, stepId: null, runToken: null, kind: EVENT_KIND.task_status_changed, payload: { taskId, from, to },
 })
 const driving = (async () => {
   for (let i = 0; i < 500; i++) {

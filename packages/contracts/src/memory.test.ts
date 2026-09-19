@@ -1,10 +1,10 @@
 import { describe, expect, it } from 'bun:test'
-import { MemoryNoteDraftInput, MemoryNoteInput, MemoryNote, MEMORY_ID_RE, MEMORY_USE, USE_VERDICT, LINK_KIND, LINK_KINDS, MemoryScope, NOTE_KIND, NOTE_TIER, VerifiedStamp, composeAuthor, deriveNoteProvenance, foldMemory, inferTier, noteContentKey, noteKey, parseLinkSpec, useLine, useVerdict, type MemoryUseOutcome, type PlanNoteInput, type SemanticNoteInput, type UseStats } from './memory'
+import { MemoryNoteDraftInput, MemoryNoteInput, MemoryNote, MEMORY_ID_RE, MEMORY_USE, USE_VERDICT, LINK_KIND, LINK_KINDS, MemoryScope, NOTE_KIND, NOTE_TIER, VerifiedStamp, deriveNoteProvenance, foldMemory, inferTier, noteContentKey, noteKey, parseLinkSpec, useLine, useVerdict, type MemoryUseOutcome, type PlanNoteInput, type SemanticNoteInput, type UseStats } from './memory'
 import { DECISION_STATUS } from './decision'
-import { AUTHOR_SOURCE } from './ids'
+import { AUTHOR_SOURCE } from './author'
 import { EVENT_KIND } from './event-kinds'
 import { PAYLOAD_SCHEMAS } from './events'
-import { TEST_WORKSPACE_ID } from './fixtures'
+import { authorFixture, TEST_WORKSPACE_ID } from './fixtures'
 
 // The tier discriminates the union, so a test that asserts tier-specific fields has to say which
 // lane it is in. These parse through the real union (inference included) and then narrow, so a
@@ -210,8 +210,8 @@ describe('MemoryNoteInput', () => {
   })
 
   it('memory_written payload carries typed links (and rejects bare strings) with no events.ts change', () => {
-    expect(PAYLOAD_SCHEMAS.memory_written.safeParse({ note: { id: 'a', title: 'A', links: [{ id: 'b', kind: LINK_KIND.refines }] }, author: { source: 'cli', workspaceId: TEST_WORKSPACE_ID } }).success).toBe(true)
-    expect(PAYLOAD_SCHEMAS.memory_written.safeParse({ note: { id: 'a', title: 'A', links: ['b'] }, author: { source: 'cli', workspaceId: TEST_WORKSPACE_ID } }).success).toBe(false)
+    expect(PAYLOAD_SCHEMAS.memory_written.safeParse({ note: { id: 'a', title: 'A', links: [{ id: 'b', kind: LINK_KIND.refines }] }, author: authorFixture() }).success).toBe(true)
+    expect(PAYLOAD_SCHEMAS.memory_written.safeParse({ note: { id: 'a', title: 'A', links: ['b'] }, author: authorFixture() }).success).toBe(false)
   })
 
   it('MemoryNote extends input with derived provenance/lifecycle', () => {
@@ -260,7 +260,7 @@ describe('parseLinkSpec', () => {
 // stamp forward or destroy it, so these pin both directions — a heal that carried a stale "checked"
 // forward would be exactly the false confidence the stamp exists to prevent.
 describe('VerifiedStamp on note provenance', () => {
-  const author = { source: 'cli', workspaceId: TEST_WORKSPACE_ID } as const
+  const author = authorFixture()
   const stamp = { revision: 'c0ffee1', at: '2026-07-01T00:00:00.000Z', by: 'cli' }
   const draft = { id: 'auth-flow', title: 'Auth flow', summary: 's', body: 'b', paths: ['src/auth.ts'] }
   // `prev` is what a projected row hands deriveNoteProvenance: the note's content plus the
@@ -362,7 +362,7 @@ describe('memory_verified event', () => {
     const payload = {
       id: 'auth-flow', scope: 'project',
       stamp: { revision: 'c0ffee1', at: '2026-07-01T00:00:00.000Z', by: 'cli' },
-      author: { source: 'cli', workspaceId: TEST_WORKSPACE_ID },
+      author: authorFixture(),
     }
     expect(PAYLOAD_SCHEMAS[EVENT_KIND.memory_verified].safeParse(payload).success).toBe(true)
     // id/scope index the read model by key, same MEMORY_ID_RE guard memory_deleted carries
@@ -372,7 +372,7 @@ describe('memory_verified event', () => {
 })
 
 describe('memory_outcome event', () => {
-  const author = { source: 'agent', workspaceId: TEST_WORKSPACE_ID, taskId: 't-1' }
+  const author = authorFixture({ source: AUTHOR_SOURCE.agent, taskId: 't-1' })
   const note = { id: 'auth-flow', title: 'Auth', summary: 's', body: 'b' }
   const KEY = noteKey(MemoryScope.project, note.id)
   const wrote = (ts: string) => ({ kind: EVENT_KIND.memory_written, ts, payload: { note, author, invalidates: [] } })
@@ -380,7 +380,7 @@ describe('memory_outcome event', () => {
     ({ kind: EVENT_KIND.memory_outcome, ...(ts !== undefined && { ts }), payload: { id, scope: MemoryScope.project, outcome, author } })
 
   it('has a payload schema keyed by its own event kind', () => {
-    const payload = { id: 'auth-flow', scope: 'project', outcome: MEMORY_USE.useful, author: { source: 'agent', workspaceId: TEST_WORKSPACE_ID } }
+    const payload = { id: 'auth-flow', scope: 'project', outcome: MEMORY_USE.useful, author: authorFixture({ source: AUTHOR_SOURCE.agent }) }
     expect(PAYLOAD_SCHEMAS[EVENT_KIND.memory_outcome].safeParse(payload).success).toBe(true)
     expect(PAYLOAD_SCHEMAS[EVENT_KIND.memory_outcome].safeParse({ ...payload, outcome: MEMORY_USE.dead_end }).success).toBe(true)
     // no third value: a correction is a heal or a link, never a score — 'corrected' is spelled raw
@@ -453,19 +453,5 @@ describe('decision status on notes', () => {
   it('a decision without a status stores none (the reader derives accepted)', () => {
     expect(semantic({ id: 'd', title: 'D', kind: NOTE_KIND.decision }).status).toBeUndefined()
     expect(MemoryNoteDraftInput.parse({ id: 'd', title: 'D' })).not.toHaveProperty('status')
-  })
-  it("'human' is an author source and renders as itself", () => {
-    expect(composeAuthor({ source: AUTHOR_SOURCE.human, workspaceId: TEST_WORKSPACE_ID })).toBe('human')
-    expect(composeAuthor({ source: AUTHOR_SOURCE.cli, workspaceId: TEST_WORKSPACE_ID })).toBe('cli')
-  })
-  // A door with nothing to compose from renders as ITSELF. The old `|| 'agent'` fallthrough made a
-  // bare `{ source: 'mcp', workspaceId }` — exactly what cwdAuthor builds for the MCP door, which
-  // has no executor/model/role — render as 'agent', and deriveNoteProvenance stamps that into
-  // createdBy, which is STICKY across rewrites: every decision recorded over MCP would have read as
-  // an agent's forever.
-  it('a bare door composes to its own source, never to agent; a pipeline still composes', () => {
-    expect(composeAuthor({ source: AUTHOR_SOURCE.mcp, workspaceId: TEST_WORKSPACE_ID })).toBe('mcp')
-    expect(composeAuthor({ source: AUTHOR_SOURCE.agent, workspaceId: TEST_WORKSPACE_ID })).toBe('agent')
-    expect(composeAuthor({ source: AUTHOR_SOURCE.mcp, workspaceId: TEST_WORKSPACE_ID, executor: 'mcp-serve' })).toBe('mcp-serve')
   })
 })

@@ -1,5 +1,5 @@
 import { realpathSync } from 'node:fs'
-import { WORKSPACE_KIND, type Workspace } from '@orc/contracts'
+import { WORKSPACE_KIND, type Origin, type Workspace } from '@orc/contracts'
 import { currentBranch, defaultBranch, gitDirs, type Kernel, type OrcConfig } from '@orc/kernel'
 import type { WorkspaceConfig } from './workspace-ops'
 
@@ -43,6 +43,7 @@ export function resolveTrunk(config: Pick<OrcConfig, 'trunkBranch'>, dir: string
 export async function adoptCwd(
   kernel: Pick<Kernel, 'ensureWorkspace' | 'setWorkspaceArchived'>,
   config: WorkspaceConfig,
+  origin: Origin,
 ): Promise<Workspace> {
   const cwd = realpathSync(config.dir)
   const kind = config.dir === config.projectRoot ? WORKSPACE_KIND.checkout : WORKSPACE_KIND.worktree
@@ -55,7 +56,7 @@ export async function adoptCwd(
   const branch = currentBranch(config.dir)
   const trunk = resolveTrunk(config, config.dir)
   const onTrunk = gitDirs(config.dir) === null || (branch !== null && branch === trunk)
-  const first = await kernel.ensureWorkspace({ cwd, branch, kind, onTrunk })
+  const first = await kernel.ensureWorkspace({ cwd, branch, kind, onTrunk }, origin)
   const prior = first.workspace
   if (first.created || prior.branch === branch) return prior
   // A CHECKOUT THAT MOVED IS A DIFFERENT WORKSPACE. `ensureWorkspace` keys on cwd alone and keeps
@@ -79,8 +80,8 @@ export async function adoptCwd(
   // switching branch. Everything else is adoption's to answer afresh — the TITLE included, which
   // re-derives from the new branch: carrying it would freeze the OLD branch name onto a record that
   // is no longer on it, and `orc ws retitle` is the one command that fixes a label.
-  await kernel.setWorkspaceArchived(prior.id, true)
+  await kernel.setWorkspaceArchived(prior.id, true, origin)
   return (await kernel.ensureWorkspace({
     cwd, branch, onTrunk, kind: prior.kind, managed: prior.managed, baseBranch: prior.baseBranch,
-  })).workspace
+  }, origin)).workspace
 }

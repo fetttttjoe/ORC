@@ -4,6 +4,11 @@ import { z } from 'zod'
 import { EventKind } from '@orc/contracts/event-kinds'
 // guards.ts is a leaf too (zod only) — one spelling of error→string, browser bundle included
 import { errorMessage } from '@orc/contracts/guards'
+// A read's scope and a chat's digest are the SAME schemas the derivations parse: a second spelling
+// of either on the wire is a shape the browser could hold and no view could answer.
+import { Scope } from '@orc/contracts/scope'
+import { ChatDigest } from '@orc/contracts/chat-digest'
+import { Door } from '@orc/contracts/origin'
 import { NODE_TYPES, type NodeType } from './graph-wire'
 
 // The node vocabulary as a schema, derived from NODE_TYPES rather than re-listed: the node view
@@ -15,7 +20,7 @@ export const NODE_KIND = z.enum(NODE_TYPES).enum
 // graph-wire.ts's NODE_TYPES exists, so a view name is never re-spelled at a call site. `WIRE`
 // below is keyed by `VIEW` and `satisfies Record<ViewName, ...>`, so a view added here without a
 // matching params/result pair fails the build instead of turning into a runtime 404.
-export const ViewName = z.enum(['timeline', 'node', 'transcript', 'plans', 'planNotes', 'models', 'operatorState'])
+export const ViewName = z.enum(['timeline', 'chats', 'node', 'transcript', 'plans', 'planNotes', 'models', 'operatorState'])
 export type ViewName = z.infer<typeof ViewName>
 export const VIEW = ViewName.enum
 
@@ -223,6 +228,11 @@ export const LogRows = z.array(
     line: z.string(),
     taskId: z.string().nullable(),
     stepId: z.string().nullable(),
+    // The chat this row belongs to (null = no chat) and the door that appended it. Both come off
+    // the envelope: a row without them cannot be placed in a conversation, which is what the chat
+    // scope reads and what tells an operator whether a line came from the web, the CLI or a run.
+    chatId: z.string().nullable(),
+    door: z.enum(Door),
     // noteNodeId(scope, id) for the memory kinds — a row links to the note it is about without
     // parsing an id back apart. Nullable but never ABSENT, like authorTaskId below.
     noteRef: z.string().nullable(),
@@ -381,7 +391,11 @@ const Seq = z.number().int().nonnegative()
  * sync at every call site. `node` keeps `id` because a graph node id is not a task id.
  */
 export const WIRE = {
-  [VIEW.timeline]: { params: z.object({ taskId: z.string().min(1).optional(), kinds: Kinds.optional(), sinceSeq: Seq.optional(), beforeSeq: Seq.optional(), limit: z.number().int().positive().max(1000).optional() }), result: z.array(LogRow) },
+  // `scope` is REQUIRED: a read of the log is a read of some scope, and the caller is the only
+  // side that knows which. There is no taskId beside it — two ways to name the same subject is how
+  // a door starts answering one of them.
+  [VIEW.timeline]: { params: z.object({ scope: Scope, kinds: Kinds.optional(), sinceSeq: Seq.optional(), beforeSeq: Seq.optional(), limit: z.number().int().positive().max(1000).optional() }), result: z.array(LogRow) },
+  [VIEW.chats]: { params: z.object({ scope: Scope }), result: z.array(ChatDigest) },
   [VIEW.node]: { params: z.object({ id: z.string().min(1) }), result: NodeDetail },
   [VIEW.transcript]: { params: z.object({ taskId: z.string().min(1), stepId: z.string().optional() }), result: z.array(TranscriptItem) },
   [VIEW.plans]: { params: z.object({ taskId: z.string().min(1) }), result: PlansView },
@@ -456,3 +470,36 @@ export const Envelope = z.object({
  * reports it in a console nobody is reading.
  */
 export type StreamFrame = z.input<typeof Envelope>
+
+// ---- the copilot stream ----
+
+export enum CopilotFrameType {
+  text = 'text',
+  toolCall = 'tool-call',
+  toolResult = 'tool-result',
+  toolError = 'tool-error',
+  error = 'error',
+  done = 'done',
+  chat = 'chat',
+}
+
+export const CopilotPart = z.discriminatedUnion('type', [
+  z.object({ type: z.literal(CopilotFrameType.text), text: z.string() }),
+  z.object({ type: z.literal(CopilotFrameType.toolCall), toolName: z.string(), input: z.unknown() }),
+  z.object({ type: z.literal(CopilotFrameType.toolResult), toolName: z.string(), output: z.unknown() }),
+  z.object({ type: z.literal(CopilotFrameType.toolError), toolName: z.string(), error: z.string() }),
+  z.object({ type: z.literal(CopilotFrameType.error), message: z.string() }),
+  z.object({
+    type: z.literal(CopilotFrameType.done),
+    usage: z.object({ inputTokens: z.number(), outputTokens: z.number(), costUSD: z.number().nullable() }),
+  }),
+  // sent only after the exchange is committed
+  z.object({ type: z.literal(CopilotFrameType.chat), chatId: z.string().min(1) }),
+])
+export type CopilotPart = z.infer<typeof CopilotPart>
+export type CopilotFrame = z.input<typeof CopilotPart>
+
+// fails the build when a frame type has no schema member
+export type CopilotPartCoversFrames = Exclude<CopilotFrameType, CopilotPart['type']> extends never ? true : never
+const _framesCovered: CopilotPartCoversFrames = true
+void _framesCovered

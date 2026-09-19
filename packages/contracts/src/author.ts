@@ -1,0 +1,76 @@
+import { z } from 'zod'
+import { Door, Origin } from './origin'
+
+// The doors a write can come through — MATCHED VALUES, never scattered literals, the same
+// discipline NOTE_KIND/LINK_KIND/MEMORY_ACCESS/EVENT_KIND already apply. These were inline in the
+// schema below and spelled as bare `'cli'` at two dozen production call sites, which is precisely
+// the shape that drifts: nothing connects the spelling at a call site to the enum that defines it,
+// so a renamed door fails at runtime in whichever path is exercised last.
+//
+// 'mcp' is a DOOR, not a person. It exists because plan_approved.approvedBy already carries
+// enum(['human','policy','mcp']) "so replay shows exactly who approved (P7 attribution)", while
+// this enum could not express the same thing — so a grounded task's conversational approve, which
+// IS its human gate, was recorded as 'cli' whoever sent it. The log could not distinguish a human
+// at a terminal from an agent driving the MCP surface.
+//
+// 'human' means a PERSON typed this, and only doors a person drives write it: `orc adr new` /
+// `orc adr supersede` (a decision is a judgment a person makes). 'cli' still means "came through a
+// terminal" — `orc note` and `orc memory add` keep it, because a script can drive them. The MCP door
+// writes 'mcp'. Forward-only: createdBy is sticky across rewrites (deriveNoteProvenance), so notes
+// written before this source existed cannot be re-attributed — see docs/IDEAS.md entry 12.
+export const AUTHOR_SOURCES = ['agent', 'cli', 'mcp', 'human'] as const
+export const AuthorSource = z.enum(AUTHOR_SOURCES)
+export type AuthorSource = z.infer<typeof AuthorSource>
+export const AUTHOR_SOURCE = AuthorSource.enum
+
+// What each door stamps as the author today. `satisfies Record<Door, AuthorSource>` makes a new
+// door a compile error instead of an undefined that sticks forever in createdBy.
+const DOOR_AUTHOR_SOURCE = {
+  [Door.web]: AUTHOR_SOURCE.cli,
+  [Door.cli]: AUTHOR_SOURCE.cli,
+  [Door.mcp]: AUTHOR_SOURCE.mcp,
+  [Door.supervisor]: AUTHOR_SOURCE.agent,
+  [Door.hook]: AUTHOR_SOURCE.cli,
+} satisfies Record<Door, AuthorSource>
+
+export const authorSourceOf = (door: Door): AuthorSource => DOOR_AUTHOR_SOURCE[door]
+
+// Who wrote a note, a plan annotation, or a feedback reply. It lives in this leaf module rather
+// than with the memory schemas because `analysis` and `events` both read it at module top level:
+// from inside the memory/events cycle that resolves to undefined depending on which module loaded first.
+export const MemoryAuthor = z.object({
+  source: AuthorSource,
+  // The workspace the write came FROM, captured at the moment of the write — from the writing
+  // task for an agent step, from the cwd's adopted workspace for a CLI/MCP/reactor door. ONE shape
+  // for every author: writes, verifications, accesses, removals and archive flags alike, so no
+  // reader has to know which kind of author it is holding before it can ask.
+  //
+  // REQUIRED, and deliberately not `.optional()`/`.nullable()`/`.default()`: the read tools derive
+  // a note's `provisional` standing from it, and a workspace can only be known at write time —
+  // recovered later it would have to be GUESSED from the envelope's task, which is absent on a CLI
+  // write and wrong for a task that moved. A required key turns a writer that forgot to name its
+  // workspace into a build failure instead of a note that quietly reads as trunk knowledge.
+  workspaceId: z.string().min(1),
+  // Which interaction and door the write came FROM, on the same terms as the workspace above.
+  // Unrecoverable afterwards: a note that did not name its origin reads as coming from nowhere.
+  origin: Origin,
+  taskId: z.string().nullable().optional(),
+  stepId: z.string().nullable().optional(),
+  runToken: z.string().nullable().optional(),
+  executor: z.string().optional(),
+  model: z.string().optional(),
+  role: z.string().optional(),
+})
+export type MemoryAuthor = z.infer<typeof MemoryAuthor>
+
+// Composed provenance string for createdBy/updatedBy (frontmatter + read model).
+export function composeAuthor(a: MemoryAuthor): string {
+  // 'cli' and 'human' render as THEMSELVES: neither has an executor/model/role to compose from,
+  // and a person is not a pipeline.
+  if (a.source === AUTHOR_SOURCE.cli || a.source === AUTHOR_SOURCE.human) return a.source
+  // Every other door composes from its pipeline, and falls back TO ITS OWN SOURCE — never to a
+  // hardcoded 'agent'. A hardcoded fallback mis-stamps MCP writes: a bare `{ source: 'mcp', workspaceId }`
+  // would render as 'agent' and that's sticky in createdBy — every note would persist with wrong
+  // authorship forever. Instead, the fallback is a.source itself.
+  return [a.executor, a.model, a.role].filter(Boolean).join('·') || a.source
+}

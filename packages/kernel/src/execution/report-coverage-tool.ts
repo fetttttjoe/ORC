@@ -1,4 +1,4 @@
-import type { ResolvedTool } from '@orc/contracts'
+import type { Origin, ResolvedTool } from '@orc/contracts'
 import { toolError } from '@orc/contracts'
 import type { Kernel } from '../kernel'
 import { ANALYZE_STEP_ROLE } from './strategies/grounded-plan'
@@ -13,7 +13,7 @@ import { ANALYZE_STEP_ROLE } from './strategies/grounded-plan'
 // the reserved RG7 telemetry (confidence/scope) already lands as a real event when a reader arrives.
 export function reportCoverageTool(opts: {
   kernel: Pick<Kernel, 'reportCoverage'>
-  p: { taskId: string; stepId: string; runToken: string; role: string }
+  p: { taskId: string; stepId: string; runToken: string; role: string; origin: Origin }
 }): ResolvedTool[] {
   const { kernel, p } = opts
   // Registration gate, not an execute-time rejection: a visible tool that can only ever error
@@ -37,7 +37,7 @@ export function reportCoverageTool(opts: {
     },
     execute: async input => {
       try {
-        await kernel.reportCoverage({ taskId: p.taskId, stepId: p.stepId, runToken: p.runToken }, input)
+        await kernel.reportCoverage({ taskId: p.taskId, stepId: p.stepId, runToken: p.runToken }, input, p.origin)
         return { output: { recorded: true }, isError: false }
       } catch (e) {
         return toolError(e)

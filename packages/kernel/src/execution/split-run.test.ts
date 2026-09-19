@@ -4,8 +4,8 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import {
-  ApprovalPolicy, EVENT_KIND, FINISH_STEP_ID, PAYLOAD_SCHEMAS, RUN_OUTCOME, SIGNAL_OUTCOME, TASK_STATUS,
-  type AgentExecutor, type EventDraft, type ExecutorContext, type ResolvedTool,
+  ApprovalPolicy, AUTHOR_SOURCE, Door, EVENT_KIND, FINISH_STEP_ID, NO_CHAT, PAYLOAD_SCHEMAS, RUN_OUTCOME, SIGNAL_OUTCOME, TASK_STATUS,
+  type AgentExecutor, type EventDraft, type ExecutorContext, type Origin, type ResolvedTool,
   type SplitResult, type UnifiedEvent,
 } from '@orc/contracts'
 import { draftFixture, must, stepFixture } from '@orc/contracts/fixtures'
@@ -26,6 +26,8 @@ const ReadBody = z.object({ note: z.object({ body: z.string() }).nullable() })
 // on ChildPlanStep — no zod default — so they are spelled out here).
 const CHILD_PLAN = { steps: [{ id: 'w1', role: 'worker', title: 'w', instructions: 'do', dependsOn: [], skillRefs: [] }] }
 const CHILD_NOTE = { id: 'child-finding', title: 'CF', body: 'from the child' }
+
+const CLI: Origin = NO_CHAT(Door.cli)
 
 
 // ONE scripted executor drives BOTH the parent step (s1) and the split child step (w1),
@@ -166,7 +168,7 @@ async function bringUp(policy: 'auto' | 'manual', executor: AgentExecutor<unknow
   const log = storage.events
   const kernel = new Kernel(log)
   // a task must name a workspace the fold has seen — one seeded record, then tasks as before
-  await seedTestWorkspace(log)
+  await seedTestWorkspace(log, CLI)
   const config = testConfig(pg.url, {
     vaultDir,
     projectDbUrl: ts.url, projectDbNamespace: ts.ns, projectDbName: ts.db,
@@ -180,7 +182,7 @@ async function bringUp(policy: 'auto' | 'manual', executor: AgentExecutor<unknow
     providers: new Map([['fake', fakeProvider]]),
     executors: new Map([['split-fake', executor]]),
     stepTools: p => {
-      const bound = memory.bindStep({ author: { source: 'agent', workspaceId: p.workspaceId, taskId: p.taskId, stepId: p.stepId, runToken: p.runToken, executor: p.executor, model: p.model, role: p.role }, step: p.step, taskId: p.taskId, ancestorTaskIds: p.ancestorTaskIds })
+      const bound = memory.bindStep({ author: { source: AUTHOR_SOURCE.agent, origin: p.origin, workspaceId: p.workspaceId, taskId: p.taskId, stepId: p.stepId, runToken: p.runToken, executor: p.executor, model: p.model, role: p.role }, step: p.step, taskId: p.taskId, ancestorTaskIds: p.ancestorTaskIds })
       return { memory: bound.memory, tools: [
         ...bound.tools,
         ...splitTool({ kernel, config: { approvalPolicy: config.approvalPolicy, maxDepth: config.maxDepth }, p }),
@@ -200,9 +202,9 @@ async function bringUp(policy: 'auto' | 'manual', executor: AgentExecutor<unknow
 }
 
 const parentTask = async (kernel: Kernel): Promise<string> => {
-  const t = await kernel.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'split e2e', spec: 'spawn a child, gate, join' })
-  await kernel.proposePlan(t.id, draftFixture([stepFixture({ id: 's1', role: 'worker', executorRef: 'split-fake', modelRef: 'fake/m' })]))
-  await kernel.approvePlan(t.id)
+  const t = await kernel.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'split e2e', spec: 'spawn a child, gate, join' }, CLI)
+  await kernel.proposePlan(t.id, draftFixture([stepFixture({ id: 's1', role: 'worker', executorRef: 'split-fake', modelRef: 'fake/m' })]), CLI)
+  await kernel.approvePlan(t.id, undefined, undefined, CLI)
   return t.id
 }
 
@@ -241,7 +243,7 @@ describe('recursion e2e: split, gate, join, manual approve, queue partition', ()
 
       // the child is parked at awaiting_approval; nothing runs it until a human approves
       expect(await waitFor(async () => (await kernel.getTask(childId))?.status === TASK_STATUS.awaiting_approval, 10_000)).toBe(true)
-      await kernel.approvePlan(childId) // router route 2 starts the child run — no other test-side action
+      await kernel.approvePlan(childId, undefined, undefined, CLI) // router route 2 starts the child run — no other test-side action
 
       expect(await handle.wait()).toBe('done')
       expect((await kernel.getTask(childId))?.status).toBe(TASK_STATUS.done)
@@ -272,7 +274,7 @@ describe('recursion e2e: split, gate, join, manual approve, queue partition', ()
 
       // wait until the auto-approved child is genuinely running before cancelling the parent
       expect(await waitFor(async () => (await kernel.getTask(childId))?.status === TASK_STATUS.running, 15_000)).toBe(true)
-      await port.cancelRun(parentId)
+      await port.cancelRun(parentId, CLI)
       await handle.wait().then(() => {}, () => {}) // a DBOS-cancelled workflow may resolve OR reject — both fine
 
       expect((await kernel.getTask(parentId))?.status).toBe(TASK_STATUS.cancelled)

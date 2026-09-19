@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'bun:test'
+import { Door } from '@orc/contracts/origin'
 import type { LogRow } from '$lib/api/types'
 import { EVENT_KIND, WORKING } from '$lib/event-kinds'
 import { dropTicker, mergeOlder } from './ledger-merge'
@@ -10,6 +11,8 @@ const row = (seq: number, kind: string = EVENT_KIND.step_started, failure?: { to
   line: `row ${seq}`,
   taskId: null,
   stepId: null,
+  chatId: null,
+  door: Door.supervisor,
   noteRef: null,
   // nullable but not optional on the wire, so a fixture spells it too: a row that can omit it is a
   // row the per-task filter drops without saying so

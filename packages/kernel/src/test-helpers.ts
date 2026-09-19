@@ -2,7 +2,7 @@ import { Client } from 'pg'
 import { mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import { EVENT_KIND, WORKSPACE_KIND, type LoadedSkill, type ModelProvider, type Workspace } from '@orc/contracts'
+import { EVENT_KIND, WORKSPACE_KIND, type LoadedSkill, type ModelProvider, type Origin, type Workspace } from '@orc/contracts'
 import { TEST_WORKSPACE_ID } from '@orc/contracts/fixtures'
 import { loadConfig, requireProject, type ProjectConfig } from './config'
 import type { EventLogOps } from './storage'
@@ -52,9 +52,11 @@ export const TEST_WORKSPACE: Workspace = {
 // CALLERS MUST PASS A REALPATH: a tmp dir is commonly a symlink, the doors resolve theirs before
 // asking, and the fold matches the resolved string exactly — an unresolved spelling seeds a
 // workspace nothing will ever find.
-export async function seedTestWorkspace(log: Pick<EventLogOps, 'append'>, cwd: string = TEST_WORKSPACE.cwd): Promise<void> {
+// `origin` is a required parameter, never a default here: a helper that invented one would put the
+// forbidden envelope default back into every test that seeds through it.
+export async function seedTestWorkspace(log: Pick<EventLogOps, 'append'>, origin: Origin, cwd: string = TEST_WORKSPACE.cwd): Promise<void> {
   await log.append({
-    taskId: null, stepId: null, runToken: null,
+    ...origin, taskId: null, stepId: null, runToken: null,
     kind: EVENT_KIND.workspace_created, payload: { workspace: { ...TEST_WORKSPACE, cwd } },
   })
 }
@@ -97,11 +99,15 @@ export interface TestDb {
 // terminates them — which is where "terminating connection due to administrator command" and
 // "event stream reconnect failed: database does not exist" come from. FORCE is the backstop for
 // a genuinely wedged backend, not the mechanism for routine teardown.
-export async function createTestDb(opts: { migrate?: boolean } = {}): Promise<TestDb> {
+async function withAdmin<T>(fn: (admin: Client) => Promise<T>): Promise<T> {
   const admin = new Client({ connectionString: ADMIN_URL })
   await admin.connect()
+  try { return await fn(admin) } finally { await admin.end() }
+}
+
+export async function createTestDb(opts: { migrate?: boolean } = {}): Promise<TestDb> {
   const name = `orc_test_${Math.random().toString(36).slice(2, 10)}`
-  await admin.query(`CREATE DATABASE ${name}`)
+  await withAdmin(admin => admin.query(`CREATE DATABASE ${name}`))
   const url = new URL(ADMIN_URL)
   url.pathname = `/${name}`
   if (opts.migrate !== false) await migrateDatabase(url.toString()) // schema setup is explicit — open() only verifies
@@ -116,13 +122,14 @@ export async function createTestDb(opts: { migrate?: boolean } = {}): Promise<Te
         try { await close() } catch { /* already-closed or mid-failure teardown */ }
       }
       // also drop every per-project DBOS system DB a port test may have auto-created
-      const derived = await admin.query('SELECT datname FROM pg_database WHERE datname LIKE $1', [`${name}_dbos_%`])
-      for (const row of derived.rows) {
-        if (!/^[a-z0-9_]+$/.test(row.datname)) throw new Error(`unexpected database name: ${row.datname}`)
-        await admin.query(`DROP DATABASE IF EXISTS ${row.datname} WITH (FORCE)`)
-      }
-      await admin.query(`DROP DATABASE IF EXISTS ${name} WITH (FORCE)`)
-      await admin.end()
+      await withAdmin(async admin => {
+        const derived = await admin.query('SELECT datname FROM pg_database WHERE datname LIKE $1', [`${name}_dbos_%`])
+        for (const row of derived.rows) {
+          if (!/^[a-z0-9_]+$/.test(row.datname)) throw new Error(`unexpected database name: ${row.datname}`)
+          await admin.query(`DROP DATABASE IF EXISTS ${row.datname} WITH (FORCE)`)
+        }
+        await admin.query(`DROP DATABASE IF EXISTS ${name} WITH (FORCE)`)
+      })
     },
   }
 }

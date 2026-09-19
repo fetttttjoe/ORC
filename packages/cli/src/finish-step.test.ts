@@ -3,7 +3,7 @@ import { mkdtempSync, realpathSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import {
-  APPROVAL_ANSWER, AUTHOR_SOURCE, DECISION_STATUS, EVENT_KIND, FINISH_STEP_ID, isApprovalAnswer,
+  APPROVAL_ANSWER, AUTHOR_SOURCE, DECISION_STATUS, Door, EVENT_KIND, FINISH_STEP_ID, isApprovalAnswer, NO_CHAT,
   MemoryWrittenPayload, NOTE_KIND, NOTE_TIER, parseModelRef, SIGNAL_OUTCOME, slugId, STEP_ROLE, TASK_STATUS,
   type AgentExecutor, type EventDraft, type ExecutorContext, type SplitResult, type UnifiedEvent,
 } from '@orc/contracts'
@@ -27,6 +27,9 @@ afterAll(async () => {
 const FINISH_TOPIC = 'finish'
 const FINISH_QUESTION = 'SUMMARY: ran s1 and wrote nothing. Reply approve to finish.'
 const DECISION_DRAFT = { title: 'E2E decision', context: 'c', decision: 'd', consequences: 'q' }
+
+// this test drives the CLI door end to end; the run's own appends get their origin from the runtime
+const CLI = NO_CHAT(Door.cli)
 
 // The draft's ONLY authored step, named here rather than inline in the proposePlan call because the
 // appended finish step INHERITS executorRef/modelRef/maxIterations from it (withFinishStepFull) —
@@ -101,7 +104,7 @@ describe('the finish step, end to end', () => {
     const kernel = new Kernel(log, undefined, undefined, dbosSend)
     // the workspace must sit at THIS config's dir: buildRuntime resolves the consolidation and
     // auto-heal authors from the directory it serves, and refuses when nothing claims it
-    await seedTestWorkspace(log, realpathSync(config.dir))
+    await seedTestWorkspace(log, CLI, realpathSync(config.dir))
     const { host, hub } = await buildPlugins(config)
     host.providers.set('fake', fakeProvider)
     host.executors.set('api-loop', finishExecutor)
@@ -109,10 +112,10 @@ describe('the finish step, end to end', () => {
     // In `finally`, not after the assertions: DBOS registration is process-global, and a leaked
     // launched runtime poisons every later test file in the process (runtime.test.ts's precedent).
     try {
-      const t = await kernel.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'quick', spec: 'do' })
-      const plan = await kernel.proposePlan(t.id, draftFixture([LAST_STEP]))
+      const t = await kernel.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'quick', spec: 'do' }, CLI)
+      const plan = await kernel.proposePlan(t.id, draftFixture([LAST_STEP]), CLI)
       expect(plan.steps.map(s => s.id)).toEqual(['s1', FINISH_STEP_ID])
-      await kernel.approvePlan(t.id)
+      await kernel.approvePlan(t.id, undefined, undefined, CLI)
 
       const handle = await port.startRun(t.id)
       expect(await waitFor(async () => (await kernel.eventsFor(t.id)).some(e => e.kind === EVENT_KIND.feedback_requested), 20_000)).toBe(true)
@@ -120,7 +123,7 @@ describe('the finish step, end to end', () => {
       // the question belongs to the FINISH step, not to s1 — the envelope is what an operator's
       // `orc status` reads to say which step is waiting
       expect(asked?.stepId).toBe(FINISH_STEP_ID)
-      expect(await kernel.replyFeedback(t.id, APPROVAL_ANSWER)).toBe(FINISH_TOPIC)
+      expect(await kernel.replyFeedback(t.id, APPROVAL_ANSWER, CLI)).toBe(FINISH_TOPIC)
       expect(await handle.wait()).toBe('done')
 
       // the step saw the human's word (so isApprovalAnswer had something real to judge) and got a

@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'bun:test'
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import { COMMIT_STEP_ID, STEP_ROLE, ZERO_USAGE, type ResolvedTool, type Usage } from '@orc/contracts'
+import { COMMIT_STEP_ID, Door, NO_CHAT, ORC_CHAT_ID, STEP_ROLE, ZERO_USAGE, type Origin, type ResolvedTool, type Usage } from '@orc/contracts'
 import { must, recordOf } from '@orc/contracts/fixtures'
 import { emptyFold, subtreeUsage, type State } from '../projections'
 import { commitTool, type StampNote } from './commit-tool'
@@ -20,8 +20,17 @@ function repo(): string {
   return dir
 }
 
-const p: { taskId: string; stepId: string; role: string; runToken: string } =
-  { taskId: 't1', stepId: COMMIT_STEP_ID, role: STEP_ROLE.committer, runToken: 'rt1' }
+// a committer step runs inside its run's chat, so that is what the fixture spells
+const p: { taskId: string; stepId: string; role: string; runToken: string; origin: Origin } =
+  { taskId: 't1', stepId: COMMIT_STEP_ID, role: STEP_ROLE.committer, runToken: 'rt1', origin: { chatId: 'run:t1:v1', door: Door.supervisor } }
+const UNSET = '<unset>'
+// A hook runs inside git's OWN process, so it is the only witness that the chat id reached git
+// rather than merely the tool's argv; the sentinel keeps an absent key distinct from an empty one.
+function chatIdHook(dir: string): () => string {
+  writeFileSync(path.join(dir, '.git', 'hooks', 'pre-commit'),
+    `#!/bin/sh\nprintf %s "\${${ORC_CHAT_ID}-${UNSET}}" > chat-env.txt\n`, { mode: 0o755 })
+  return () => readFileSync(path.join(dir, 'chat-env.txt'), 'utf8')
+}
 const changed = (...paths: string[]) => paths.map(path => ({ path, taskId: 't1', steps: [{ stepId: 's1', tool: 'fs_write', seq: 1 }] }))
 
 function build(dir: string, opts: {
@@ -231,6 +240,24 @@ describe('git_commit', () => {
     const { tool } = build(repo(), { paths: ['a.ts'] })
     expect((await tool('git_commit').execute({})).isError).toBe(true)
     expect((await tool('git_commit').execute({ message: '' })).isError).toBe(true)
+  })
+
+  it("carries the step's chat into git's own environment, so the commit hook can name the interaction", async () => {
+    const dir = repo()
+    const seen = chatIdHook(dir)
+    writeFileSync(path.join(dir, 'a.ts'), 'a2\n')
+    const r = await build(dir, { paths: ['a.ts'], p: { ...p, origin: { chatId: 'chat-commit', door: Door.web } } }).commit('feat: change a')
+    expect(r.isError).toBe(false)
+    expect(seen()).toBe('chat-commit')
+  })
+
+  it('a chatless commit passes NO chat key at all, rather than an empty one', async () => {
+    const dir = repo()
+    const seen = chatIdHook(dir)
+    writeFileSync(path.join(dir, 'a.ts'), 'a2\n')
+    const r = await build(dir, { paths: ['a.ts'], p: { ...p, origin: NO_CHAT(Door.supervisor) } }).commit('feat: change a')
+    expect(r.isError).toBe(false)
+    expect(seen()).toBe(UNSET) // an empty ORC_CHAT_ID would read to a hook as a chat named ''
   })
 })
 

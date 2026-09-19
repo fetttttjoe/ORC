@@ -1,15 +1,18 @@
 import { afterAll, afterEach, describe, expect, it, mock } from 'bun:test'
 import { existsSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
-import { WORKSPACE_KIND, WORKSPACE_STATE, errorMessage, type Workspace, type WorkspaceHealth, type WorkspaceWithHealth } from '@orc/contracts'
+import { Door, EVENT_KIND, NO_CHAT, WORKSPACE_KIND, WORKSPACE_STATE, errorMessage, type EventKind, type Workspace, type WorkspaceHealth, type WorkspaceWithHealth } from '@orc/contracts'
 import { currentBranch, initializeProject, loadConfig, requireProject } from '@orc/kernel'
 import { createTestDb, sh, TEST_PROJECT_ID, tmpGitRepo } from '@orc/kernel/test-helpers'
 import { openKernel } from './main'
 import { cli } from './test-helpers'
 import { buildPlugins } from './runtime'
 import { adoptCwd } from './workspace-adopt'
+
+// every `orc ws` command and the boot adoption behind it entered through this door
+const CLI = NO_CHAT(Door.cli)
 import { listWorkspaceHealth, PROVISIONAL_UNKNOWN } from './workspace-health'
-import { renderWorkspaceList } from './ws-commands'
+import { renderWorkspaceList, WS_NEEDS_PROJECT } from './ws-commands'
 import { ARCHIVE_WITHOUT_REMOVE, WORKSPACE_BRANCH_PREFIX, WORKTREES_DIR } from './workspace-ops'
 
 // What git itself says survived a rolled-back `ws new`. Real git, like the rest of this file and
@@ -56,7 +59,7 @@ async function makeWsCli() {
   // bin.ts adopts the checkout it boots in on EVERY command; these tests drive buildProgram
   // directly, so seed the same record here — `ws current` and a task bound to this directory both
   // read it, and without it they would report a project state no real invocation can produce.
-  await adoptCwd(kernel, config)
+  await adoptCwd(kernel, config, CLI)
   // `ws current`'s only check is that the output contains the workspace id, which the retitle and
   // restore lines printed earlier in the same test already did — so only the per-invocation lines
   // cli() hands back are returned, never the buffer.
@@ -91,8 +94,8 @@ describe('orc ws', () => {
 
   it('ls prints active workspaces with task counts; --all includes archived', async () => {
     const { run, kernel } = await makeWsCli()
-    const w = await kernel.createWorkspace({ title: 'Old', cwd: '/old', branch: 'x', baseBranch: 'main', kind: WORKSPACE_KIND.worktree, managed: false, onTrunk: false })
-    await kernel.setWorkspaceArchived(w.id, true)
+    const w = await kernel.createWorkspace({ title: 'Old', cwd: '/old', branch: 'x', baseBranch: 'main', kind: WORKSPACE_KIND.worktree, managed: false, onTrunk: false }, CLI)
+    await kernel.setWorkspaceArchived(w.id, true, CLI)
     expect((await run('ws', 'ls')).join('\n')).not.toContain('Old')
     expect((await run('ws', 'ls', '--all')).join('\n')).toContain('Old')
   }, 30_000)
@@ -109,8 +112,8 @@ describe('orc ws', () => {
     // the checkout removed behind orc's back — the exact shape of an abandoned request: a branch
     // that will never land and a directory that is not there
     rmSync(abandoned.cwd, { recursive: true, force: true })
-    const old = await kernel.createWorkspace({ title: 'Old', cwd: '/old', branch: 'x', baseBranch: 'main', kind: WORKSPACE_KIND.worktree, managed: false, onTrunk: false })
-    await kernel.setWorkspaceArchived(old.id, true)
+    const old = await kernel.createWorkspace({ title: 'Old', cwd: '/old', branch: 'x', baseBranch: 'main', kind: WORKSPACE_KIND.worktree, managed: false, onTrunk: false }, CLI)
+    await kernel.setWorkspaceArchived(old.id, true, CLI)
 
     const lines = await run('ws', 'ls', '--all')
     expect(lines.find(l => l.includes('Abandoned'))).toContain('dangling')
@@ -143,7 +146,7 @@ describe('orc ws', () => {
     // …and a --remove whose directory is already gone says what to do about it. git answers "is
     // not a git worktree", which names no way out; the way out is the unmanaged one.
     await expect(run('ws', 'archive', ws.id, '--remove')).rejects.toThrow(ARCHIVE_WITHOUT_REMOVE)
-    const adopted = await kernel.ensureWorkspace({ cwd: realpathSync(main), branch: 'main', kind: WORKSPACE_KIND.checkout, onTrunk: true })
+    const adopted = await kernel.ensureWorkspace({ cwd: realpathSync(main), branch: 'main', kind: WORKSPACE_KIND.checkout, onTrunk: true }, CLI)
     await expect(run('ws', 'archive', adopted.workspace.id, '--remove')).rejects.toThrow(/not managed by orc/)
   }, 30_000)
 
@@ -157,7 +160,7 @@ describe('orc ws', () => {
     const slug = 'blocked'
     const branch = `${WORKSPACE_BRANCH_PREFIX}${slug}`
     const dest = path.join(realpathSync(main), ...WORKTREES_DIR, slug)
-    await kernel.createWorkspace({ title: 'squatter', cwd: dest, branch: 'x', baseBranch: 'main', kind: WORKSPACE_KIND.worktree, managed: false, onTrunk: false })
+    await kernel.createWorkspace({ title: 'squatter', cwd: dest, branch: 'x', baseBranch: 'main', kind: WORKSPACE_KIND.worktree, managed: false, onTrunk: false }, CLI)
 
     const failure = await run('ws', 'new', 'Blocked').catch((e: unknown) => errorMessage(e))
     // the ORIGINAL refusal is what the operator acts on; the rollback is one appended sentence
@@ -257,7 +260,7 @@ describe('orc ws', () => {
 
   it('finalize records a merge made outside orc, and only once the branch tip is an ancestor of trunk', async () => {
     const { run, kernel, main, worktree } = await makeWsCli()
-    const { workspace } = await kernel.ensureWorkspace({ cwd: realpathSync(worktree), branch: 'feature', kind: WORKSPACE_KIND.worktree, onTrunk: false })
+    const { workspace } = await kernel.ensureWorkspace({ cwd: realpathSync(worktree), branch: 'feature', kind: WORKSPACE_KIND.worktree, onTrunk: false }, CLI)
     writeFileSync(path.join(worktree, 'g.txt'), 'x')
     sh(worktree, 'add', 'g.txt')
     sh(worktree, 'commit', '-q', '-m', 'g')
@@ -303,9 +306,34 @@ describe('orc ws', () => {
     expect(others.map(r => r.health.provisionalNotes)).toEqual(others.map(() => 0))
   }, 30_000)
 
+  it('retitle and restore append their event stamped with the terminal door and no chat', async () => {
+    const { run, kernel, log, main } = await makeWsCli()
+    const { workspace } = await kernel.ensureWorkspace({ cwd: realpathSync(main), branch: 'main', kind: WORKSPACE_KIND.checkout, onTrunk: true }, CLI)
+    await run('ws', 'retitle', workspace.id, 'Renamed')
+    await run('ws', 'archive', workspace.id)
+    await run('ws', 'restore', workspace.id)
+
+    const stamps = async (kind: EventKind) => (await log.after(0, [kind])).map(e => ({ chatId: e.chatId, door: e.door }))
+    expect(await stamps(EVENT_KIND.workspace_retitled)).toEqual([{ chatId: null, door: Door.cli }])
+    // archive, then restore: the SECOND row is the unarchive path, which writes the same event
+    expect(await stamps(EVENT_KIND.workspace_archived)).toEqual([{ chatId: null, door: Door.cli }, { chatId: null, door: Door.cli }])
+    // …and the events are the ones these commands MEANT to write, not any two of that kind
+    expect((await kernel.listWorkspaces())[0]).toMatchObject({ title: 'Renamed', archivedAt: null })
+  }, 30_000)
+
+  it('refuses every subcommand that needs a checkout in one wording, and still archives a record without one', async () => {
+    const { kernel, main } = await makeWsCli()
+    const { workspace } = await kernel.ensureWorkspace({ cwd: realpathSync(main), branch: 'main', kind: WORKSPACE_KIND.checkout, onTrunk: true }, CLI)
+    const { run } = cli(kernel)
+    for (const args of [['ws', 'ls'], ['ws', 'current'], ['ws', 'new', 'Req'], ['ws', 'archive', workspace.id, '--remove']])
+      await expect(run(...args)).rejects.toThrow(WS_NEEDS_PROJECT)
+    await run('ws', 'archive', workspace.id)
+    expect((await kernel.listWorkspaces({ includeArchived: true })).find(w => w.id === workspace.id)?.archivedAt).not.toBeNull()
+  }, 30_000)
+
   it('retitle, restore and current round-trip', async () => {
     const { run, kernel, main } = await makeWsCli()
-    const { workspace } = await kernel.ensureWorkspace({ cwd: realpathSync(main), branch: 'main', kind: WORKSPACE_KIND.checkout, onTrunk: true })
+    const { workspace } = await kernel.ensureWorkspace({ cwd: realpathSync(main), branch: 'main', kind: WORKSPACE_KIND.checkout, onTrunk: true }, CLI)
     await run('ws', 'retitle', workspace.id, 'Main line')
     await run('ws', 'archive', workspace.id)
     // the adopted checkout was this project's only workspace, so the listing is now empty — and
@@ -336,7 +364,7 @@ describe('orc ws', () => {
 
     // the switch happens INSIDE the worktree, so adoption runs against its config, not the root's
     sh(before.cwd, 'checkout', '-b', 'other', '--quiet')
-    const after = await adoptCwd(kernel, { ...config, dir: before.cwd })
+    const after = await adoptCwd(kernel, { ...config, dir: before.cwd }, CLI)
     expect(after.id).not.toBe(before.id)
     expect(after).toMatchObject({
       branch: 'other', managed: true, baseBranch: 'main', kind: WORKSPACE_KIND.worktree, cwd: before.cwd,
@@ -356,7 +384,7 @@ describe('orc ws', () => {
     const before = (await run('ws', 'current')).join('\n')
     expect(before).toContain(`(${WORKSPACE_KIND.checkout}, main)`)
     sh(main, 'checkout', '-b', 'feature2', '--quiet')
-    const after = await adoptCwd(kernel, config)
+    const after = await adoptCwd(kernel, config, CLI)
 
     const current = (await run('ws', 'current')).join('\n')
     expect(current).toContain(after.id)

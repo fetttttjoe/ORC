@@ -1,14 +1,17 @@
 import { afterAll, beforeAll, describe, expect, it } from 'bun:test'
 import {
-  EVENT_KIND, FAILURE_CLASS, FINISH_STEP_ID, MAX_AUTO_CONTINUATIONS, OPERATION_KIND, PAYLOAD_SCHEMAS, SIGNAL_OUTCOME, TASK_STATUS,
+  Door, EVENT_KIND, FAILURE_CLASS, FINISH_STEP_ID, MAX_AUTO_CONTINUATIONS, NO_CHAT, OPERATION_KIND, PAYLOAD_SCHEMAS, SIGNAL_OUTCOME, TASK_STATUS,
   continuationTopic,
-  type AgentExecutor, type EventDraft, type ExecutorContext, type SplitResult, type UnifiedEvent,
+  type AgentExecutor, type EventDraft, type ExecutorContext, type Origin, type SplitResult, type UnifiedEvent,
 } from '@orc/contracts'
 import { draftFixture, must, stepFixture } from '@orc/contracts/fixtures'
 import { openStorage } from '../storage'
 import { Kernel } from '../kernel'
 import { createTestDb, fakeProvider, fakeSkills, seedTestWorkspace, TEST_PROJECT_ID, TEST_WORKSPACE_ID, testConfig, waitFor } from '../test-helpers'
 import { createDbosPort, dbosSend, type DbosPort } from './dbos-port'
+
+// `orc` at a terminal: these calls belong to no chat, and the run opens its own.
+const CLI: Origin = NO_CHAT(Door.cli)
 
 // The continuation contract under test: the agent REPORTS `partial`, the runtime GRANTS.
 // Auto-continue while the round cap allows (no budget is configured here, so the cap is the only
@@ -73,7 +76,7 @@ describe('partial-signal continuation', () => {
     const log = storage.events
     kernel = new Kernel(log, undefined, undefined, dbosSend)
     // a task must name a workspace the fold has seen — one seeded record, then tasks as before
-    await seedTestWorkspace(log)
+    await seedTestWorkspace(log, CLI)
     const config = testConfig(db.url)
     port = await createDbosPort({
       storage, config, skills: fakeSkills,
@@ -86,10 +89,10 @@ describe('partial-signal continuation', () => {
   afterAll(async () => { await teardown() })
 
   const newTask = async (partials: number) => {
-    const t = await kernel.createTask({ workspaceId: TEST_WORKSPACE_ID, title: `continuation x${partials}`, spec: 'finish the job' })
+    const t = await kernel.createTask({ workspaceId: TEST_WORKSPACE_ID, title: `continuation x${partials}`, spec: 'finish the job' }, CLI)
     partialsByTask.set(t.id, partials)
-    await kernel.proposePlan(t.id, draftFixture([stepFixture({ executorRef: 'continuation-fake' })]))
-    await kernel.approvePlan(t.id)
+    await kernel.proposePlan(t.id, draftFixture([stepFixture({ executorRef: 'continuation-fake' })]), CLI)
+    await kernel.approvePlan(t.id, undefined, undefined, CLI)
     return t
   }
 
@@ -127,7 +130,7 @@ describe('partial-signal continuation', () => {
     expect(q.question).toContain('round cap reached')
     expect(q.question).toContain(`remaining after ${MAX_AUTO_CONTINUATIONS}`)
 
-    expect(await kernel.replyFeedback(t.id, 'no — stop here')).toBe(q.topic)
+    expect(await kernel.replyFeedback(t.id, 'no — stop here', CLI)).toBe(q.topic)
     expect(await handle.wait()).toBe('blocked')
 
     const failed = (await kernel.eventsFor(t.id)).find(e => e.kind === EVENT_KIND.step_failed)
@@ -142,7 +145,7 @@ describe('partial-signal continuation', () => {
     const handle = await port.startRun(t.id)
 
     expect(await waitFor(async () => (await kernel.eventsFor(t.id)).some(e => e.kind === EVENT_KIND.feedback_requested), 15_000)).toBe(true)
-    expect(await kernel.replyFeedback(t.id, 'approve')).toBe(continuationTopic(SCRIPTED_STEP, MAX_AUTO_CONTINUATIONS))
+    expect(await kernel.replyFeedback(t.id, 'approve', CLI)).toBe(continuationTopic(SCRIPTED_STEP, MAX_AUTO_CONTINUATIONS))
 
     expect(await handle.wait()).toBe('done')
     expect(continuations.get(roundsKey(t.id, SCRIPTED_STEP))).toHaveLength(MAX_AUTO_CONTINUATIONS + 2)

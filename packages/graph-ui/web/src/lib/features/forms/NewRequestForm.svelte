@@ -16,7 +16,7 @@
   /**
    * Grounded analyses the repo and decomposes before asking for approval; draft is one step
    * running the spec verbatim. The distinction is the presence of the `grounded` block on the
-   * wire — the server's newTask schema has no `mode` field, and no budget field either.
+   * wire — the server's newTask schema has no `mode` field, and this form sets no budget.
    */
   const MODES = [
     { value: 'grounded', label: 'grounded — analyse, decompose, review' },

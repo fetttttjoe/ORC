@@ -3,7 +3,8 @@
   "version": "0.0.0",
   "type": "module",
   "exports": {
-    ".": "./src/server.ts"
+    ".": "./src/server.ts",
+    "./copilot-journal": "./src/copilot-journal.ts"
   },
   "dependencies": {
     "@orc/ui-core": "workspace:*",

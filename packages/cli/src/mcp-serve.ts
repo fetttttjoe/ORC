@@ -16,12 +16,11 @@ import { z } from 'zod'
 import { Server } from '@modelcontextprotocol/sdk/server/index.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js'
-import { errorMessage, toolError, type MemoryAuthor, type ResolvedTool, type SupervisorHealth } from '@orc/contracts'
+import { AUTHOR_SOURCE, Door, errorMessage, NO_CHAT, toolError, type MemoryAuthor, type ResolvedTool, type SupervisorHealth } from '@orc/contracts'
 import type { EventLog, ProjectConfig } from '@orc/kernel'
 import { MEMORY_READ_TOOLS, MEMORY_ROLE, createDriftProbe, createMemory, createWorkspaceView, memoryTools as buildMemoryTools, probeMemory, unavailableMemoryTools } from '@orc/memory'
 import { openMemory } from './memory-open'
-import { asResolvedTools, buildCopilotTools, createProjectSessions, viewOf, type OrcActions } from '@orc/ui-core'
-import { VIEW } from '@orc/ui-core/wire'
+import { asResolvedTools, buildCopilotTools, createProjectSessions, type OrcActions } from '@orc/ui-core'
 
 export type Autonomy = 'gated' | 'full'
 
@@ -57,13 +56,16 @@ export function mcpApproveTool(actions: OrcActions, autonomy: Autonomy): Resolve
       const parsed = ApproveInput.safeParse(input ?? {})
       if (!parsed.success) return toolError(parsed.error)
       try {
-        return { output: await actions.approve(parsed.data.taskId, parsed.data.version, 'mcp'), isError: false }
+        return { output: await actions.approve(parsed.data.taskId, { ...(parsed.data.version !== undefined && { version: parsed.data.version }), approvedBy: AUTHOR_SOURCE.mcp }, MCP_ORIGIN), isError: false }
       } catch (err) {
         return toolError(err)
       }
     },
   }
 }
+
+// Every tool call entered through THIS door; the door names it once, here.
+const MCP_ORIGIN = NO_CHAT(Door.mcp)
 
 // exported for the unit test: the registry is pure given its deps
 export function buildServeTools(deps: {
@@ -81,8 +83,10 @@ export function buildServeTools(deps: {
     // and the catalog is one more view over the read model this door already holds. An empty
     // catalog, never a 404: a project with no discovery yet has no models to name.
     ...asResolvedTools(buildCopilotTools({
-      sessions: deps.sessions, actions: deps.actions, projectId: deps.projectId,
-      listModels: () => viewOf(deps.sessions, deps.projectId, VIEW.models, {}).then(refs => refs ?? []),
+      sessions: deps.sessions, actions: deps.actions, projectId: deps.projectId, origin: MCP_ORIGIN,
+      // ONE core, two doors, no flag: it discovers here too — an agent answered { refs: [] } on a
+      // project with no catalog yet cannot name a model. The stall is bounded inside discovery.
+      listModels: async () => deps.actions ? deps.actions.listModels() : [],
       ...(deps.health && { health: deps.health }),
       ...(deps.listWorkspaces && { listWorkspaces: deps.listWorkspaces }),
     })),

@@ -6,6 +6,7 @@ import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import type { Checkpoint, OperationCheckpoint, ExecutorContext } from '@orc/contracts'
+import { Door } from '@orc/contracts'
 import { stepFixture, must } from '@orc/contracts/fixtures'
 import type { LanguageModel } from 'ai'
 import { apiLoopExecutor } from './loop'
@@ -32,6 +33,8 @@ function liveCtx(model: LanguageModel): ExecutorContext<LanguageModel> {
     }),
     taskSpec: 'live smoke test', depOutputs: {}, skills: [], extraTools: [], model,
     runToken: 'step:smoke:s1:a1',
+    // a step runs inside its run's chat, driven by the supervisor
+    origin: { chatId: 'run:smoke:v1', door: Door.supervisor },
     workspaceDir: mkdtempSync(path.join(tmpdir(), 'orc-smoke-')),
     checkpoint: passthrough,
     operation: passthroughOperation,

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test'
-import { EVENT_KIND, LINK_KIND, MEMORY_ACCESS, MemoryNote, MemoryNoteInput, NOTE_KIND, slugId, type EventRecord, type MemoryAuthor, type MemoryNoteDraft } from '@orc/contracts'
+import { Door, EVENT_KIND, LINK_KIND, MEMORY_ACCESS, MemoryNote, MemoryNoteInput, NOTE_KIND, NO_CHAT, slugId, type EventRecord, type MemoryAuthor, type MemoryNoteDraft } from '@orc/contracts'
 import { eventFixture, must, semanticNoteFixture } from '@orc/contracts/fixtures'
 import { TEST_WORKSPACE_ID } from '@orc/kernel/test-helpers'
 import { AREA_ROOT, CONSOLIDATED_TAG, areaOf, consolidateTask, CONSOLIDATE_EXECUTOR, consolidatedNote, consolidatedNotes, isPlanChild, isSubstantive, taskInfo, type ConsolidationLog, type ConsolidationStore } from './consolidate'
@@ -156,7 +156,7 @@ describe('isSubstantive', () => {
 // 'agent' named through `executor`, stamped with the writing task's workspace. Fixed to
 // TEST_WORKSPACE_ID here (via `authorFor: () => CONSOLIDATE_AUTHOR`) because these tests are not
 // about WHICH workspace gets named — see consolidate-integration.test.ts for that behaviour.
-const CONSOLIDATE_AUTHOR: MemoryAuthor = { source: 'agent', workspaceId: TEST_WORKSPACE_ID, executor: CONSOLIDATE_EXECUTOR }
+const CONSOLIDATE_AUTHOR: MemoryAuthor = { source: 'agent', workspaceId: TEST_WORKSPACE_ID, executor: CONSOLIDATE_EXECUTOR, origin: NO_CHAT(Door.supervisor) }
 
 describe('consolidateTask provenance', () => {
   // Minimal fakes: consolidateTask reads three event slices off the log and one scoped note list off
@@ -178,7 +178,7 @@ describe('consolidateTask provenance', () => {
       payload: { task: { id: taskId, parentId: null, workspaceId: TEST_WORKSPACE_ID, type: 'generic', title, spec: '', status: 'draft', zone: [], budgetUSD: null, depth: 0, createdAt: '2026-07-26T00:00:00.000Z' } },
     })
   const accessed = (taskId: string, id: string, mode: string): EventRecord =>
-    eventFixture({ taskId, kind: EVENT_KIND.memory_accessed, payload: { id, scope: 'project', mode, author: { source: 'agent', workspaceId: TEST_WORKSPACE_ID, taskId } } })
+    eventFixture({ taskId, kind: EVENT_KIND.memory_accessed, payload: { id, scope: 'project', mode, author: { source: 'agent', workspaceId: TEST_WORKSPACE_ID, taskId, origin: { chatId: `run:${taskId}:v1`, door: Door.supervisor } } } })
 
   const TASK = '11111111-1111-1111-1111-111111111111'
 

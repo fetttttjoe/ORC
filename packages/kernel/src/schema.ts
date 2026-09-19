@@ -1,6 +1,6 @@
 import { sql } from 'drizzle-orm'
 import { bigint, index, integer, jsonb, pgTable, primaryKey, text, timestamp, uniqueIndex } from 'drizzle-orm/pg-core'
-import type { EventKind, OperationKind, OperationStatus, Usage } from '@orc/contracts'
+import type { Door, EventKind, OperationKind, OperationStatus, Usage } from '@orc/contracts'
 
 export const events = pgTable(
   'events',
@@ -8,6 +8,10 @@ export const events = pgTable(
     seq: bigint('seq', { mode: 'number' }).primaryKey().generatedAlwaysAsIdentity(),
     projectId: text('project_id').notNull(),
     idempotencyKey: text('idempotency_key'),
+    chatId: text('chat_id'),
+    // never null: an event that lost its door is anonymous forever — a CLI call, an MCP call and
+    // a hook's commit become indistinguishable
+    door: text('door').$type<Door>().notNull(),
     taskId: text('task_id'),
     stepId: text('step_id'),
     runToken: text('run_token'),
@@ -19,6 +23,7 @@ export const events = pgTable(
   t => [
     index('idx_events_project_seq').on(t.projectId, t.seq),
     index('idx_events_project_task_seq').on(t.projectId, t.taskId, t.seq),
+    index('idx_events_project_chat_seq').on(t.projectId, t.chatId, t.seq),
     index('idx_events_project_kind_seq').on(t.projectId, t.kind, t.seq),
     uniqueIndex('uq_events_project_idempotency')
       .on(t.projectId, t.idempotencyKey)

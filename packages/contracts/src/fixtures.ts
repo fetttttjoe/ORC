@@ -2,6 +2,8 @@
 // PlanStep/Plan/EventRecord shape change has to touch across every package's tests.
 import { z } from 'zod'
 import type { EventRecord } from './events'
+import { AUTHOR_SOURCE, type MemoryAuthor } from './author'
+import { Door, NO_CHAT } from './origin'
 import { STRATEGY, type Plan, type PlanDraft, type PlanStep } from './plan'
 import {
   EpisodicNoteInput, NOTE_TIER, PlanNoteInput, SemanticNoteInput,
@@ -45,11 +47,17 @@ export function episodicNoteFixture(over: Partial<EpisodicNote> = {}): EpisodicN
 
 export function eventFixture(over: Partial<EventRecord> = {}): EventRecord {
   return {
-    seq: 1, projectId: 'p1', idempotencyKey: null,
+    seq: 1, projectId: 'p1', idempotencyKey: null, chatId: null, door: Door.cli,
     taskId: 't1', stepId: null, runToken: null,
     kind: 'task_created', payload: {}, usage: null, ts: '2026-07-18T00:00:00.000Z',
     ...over,
   }
+}
+
+// One spelling of a test-side author: workspaceId and origin are both required, so a per-file
+// literal would be twenty copies to edit the next time provenance gains a key.
+export function authorFixture(over: Partial<MemoryAuthor> = {}): MemoryAuthor {
+  return { source: AUTHOR_SOURCE.cli, workspaceId: TEST_WORKSPACE_ID, origin: NO_CHAT(Door.cli), ...over }
 }
 
 export function stepFixture(over: Partial<PlanStep> = {}): PlanStep {

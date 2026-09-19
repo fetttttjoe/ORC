@@ -1,6 +1,6 @@
 import { existsSync, realpathSync } from 'node:fs'
 import path from 'node:path'
-import { WORKSPACE_KIND, errorMessage, slugId, type Workspace } from '@orc/contracts'
+import { WORKSPACE_KIND, errorMessage, slugId, type Origin, type Workspace } from '@orc/contracts'
 import { KERNEL_ERROR_CODE, KernelError, branchDelete, currentBranch, dirtyPaths, isAncestor, MERGE_REFUSAL, mergeBranch, revParse, worktreeAdd, worktreeRemove, type Kernel, type OrcConfig } from '@orc/kernel'
 import { resolveTrunk } from './workspace-adopt'
 
@@ -144,6 +144,7 @@ export async function createRequestWorkspace(
   kernel: Pick<Kernel, 'createWorkspace' | 'createTask'>,
   cfg: Pick<OrcConfig, 'dir' | 'projectRoot' | 'workspaceSetup'>,
   input: { title: string; spec: string; base: string; task: boolean },
+  origin: Origin,
 ): Promise<{ workspace: Workspace; taskId: string | null; branch: string; base: string }> {
   const slug = slugId(input.title)
   const dest = path.join(cfg.projectRoot, ...WORKTREES_DIR, slug)
@@ -180,7 +181,7 @@ export async function createRequestWorkspace(
     // A freshly minted orc/<slug> branch is by construction not the trunk, so the notes written
     // here stay provisional until this workspace merges.
     onTrunk: false,
-  }).catch((err: unknown) => { throw withNote(err, rollbackWorktree(cfg.projectRoot, dest, branch)) })
+  }, origin).catch((err: unknown) => { throw withNote(err, rollbackWorktree(cfg.projectRoot, dest, branch)) })
   if (!input.task) return { workspace, taskId: null, branch, base }
   // Past this line the directory is REFERENCED, so the rollback stops here: deleting a recorded
   // workspace's worktree would leave an active record pointing at nothing, which is worse than the
@@ -192,7 +193,7 @@ export async function createRequestWorkspace(
   // re-create the task with an empty one.
   const recover = `orc new ${shellQuote(input.title)} --workspace ${workspace.id}`
     + (input.spec === '' ? '' : ` --spec ${shellQuote(input.spec)}`)
-  const task = await kernel.createTask({ title: input.title, spec: input.spec, workspaceId: workspace.id })
+  const task = await kernel.createTask({ title: input.title, spec: input.spec, workspaceId: workspace.id }, origin)
     .catch((err: unknown) => { throw withNote(err, `the workspace is recorded (${workspace.id}, ${workspace.cwd}) — draft the task with: ${recover}`) })
   return { workspace, taskId: task.id, branch, base }
 }
@@ -238,9 +239,10 @@ async function recordMerge(
   id: string,
   input: { mergeCommit: string; trunk: string },
   unrecorded: string,
+  origin: Origin,
 ): Promise<void> {
-  await kernel.mergeWorkspace(id, input).catch((err: unknown) => { throw withNote(err, unrecorded) })
-  await kernel.setWorkspaceArchived(id, true)
+  await kernel.mergeWorkspace(id, input, origin).catch((err: unknown) => { throw withNote(err, unrecorded) })
+  await kernel.setWorkspaceArchived(id, true, origin)
     .catch((err: unknown) => { throw withNote(err, `the merge IS recorded (${input.mergeCommit}) — archive the record with: orc ws archive ${id}`) })
 }
 
@@ -284,6 +286,7 @@ export async function mergeWorkspaceOp(
   kernel: Pick<Kernel, 'state' | 'mergeWorkspace' | 'setWorkspaceArchived'>,
   cfg: Pick<OrcConfig, 'projectRoot' | 'trunkBranch'>,
   id: string,
+  origin: Origin,
 ): Promise<MergeWorkspaceResult> {
   const { workspace, branch, trunk } = await mergeTarget(kernel, cfg, id)
   if (workspace.archivedAt !== null) throw new Error(archivedRefusal(id))
@@ -311,7 +314,7 @@ export async function mergeWorkspaceOp(
   // Past this line git HAS merged and nothing can take it back, so the compensation stops
   // being "retry the merge" and becomes "record what is already true".
   await recordMerge(kernel, id, { mergeCommit: merged.mergeCommit, trunk },
-    `git HAS merged ${branch} into ${trunk} as ${merged.mergeCommit} and nothing can undo that — record it with: orc ws finalize ${id}`)
+    `git HAS merged ${branch} into ${trunk} as ${merged.mergeCommit} and nothing can undo that — record it with: orc ws finalize ${id}`, origin)
   const warnings: string[] = []
   let removedWorktree: string | null = null
   // Only what orc created may be deleted by orc — the same rule `archive --remove` follows.
@@ -331,6 +334,7 @@ export async function finalizeWorkspaceOp(
   kernel: Pick<Kernel, 'state' | 'mergeWorkspace' | 'setWorkspaceArchived'>,
   cfg: Pick<OrcConfig, 'projectRoot' | 'trunkBranch'>,
   id: string,
+  origin: Origin,
 ): Promise<FinalizeWorkspaceResult> {
   // An ARCHIVED workspace is accepted here, unlike merge: finalize records what has already
   // happened, and "merged by hand, archived, recorded only later" is the exact history this
@@ -349,7 +353,7 @@ export async function finalizeWorkspaceOp(
   // two is the tip itself, so there is no separate landing commit to look up.
   // Nothing irreversible precedes this one: finalize only reads git, so a failed append leaves
   // the world exactly as it was and rerunning the same command is the whole recovery.
-  await recordMerge(kernel, id, { mergeCommit: tip, trunk }, `nothing was recorded and nothing was changed — rerun: orc ws finalize ${id}`)
+  await recordMerge(kernel, id, { mergeCommit: tip, trunk }, `nothing was recorded and nothing was changed — rerun: orc ws finalize ${id}`, origin)
   // No worktree removal: finalize records a merge orc did not make, in a checkout orc may not
   // have created. Deleting it is the operator's call — `orc ws archive <id> --remove`.
   return { workspaceId: id, branch, trunk, mergeCommit: tip }
@@ -367,6 +371,7 @@ export async function archiveWorkspaceOp(
   kernel: Pick<Kernel, 'listWorkspaces' | 'setWorkspaceArchived'>,
   id: string,
   opts: { remove: false } | { remove: true; projectRoot: string },
+  origin: Origin,
 ): Promise<ArchiveWorkspaceResult> {
   const w = (await kernel.listWorkspaces({ includeArchived: true })).find(x => x.id === id)
   if (!w) throw noSuchWorkspace(id)
@@ -387,10 +392,37 @@ export async function archiveWorkspaceOp(
   // if this append fails the worktree is already gone and an active record points at a deleted
   // directory. Nothing can undo a `git worktree remove`, so the way out is forward — `orc ws
   // archive <id>` without --remove records what is already true.
-  await kernel.setWorkspaceArchived(id, true)
+  await kernel.setWorkspaceArchived(id, true, origin)
   // `git worktree remove` deletes the tree and leaves the BRANCH — and orc must not delete that: an
   // unmerged orc/<slug> is the only copy of whatever was committed in there, and an archive is not
   // a statement that the work is unwanted. So the branch is named, not removed, and the operator
   // decides. (Observed on a live probe: the directory went, the branch stayed, and nothing said so.)
   return { workspaceId: id, removedWorktree, leftoverBranch: removedWorktree === null ? null : w.branch }
+}
+
+// Every workspace mutation requires its caller's origin. Giving a door these verbs instead of the
+// kernel keeps retitle and restore from bypassing the same boundary as the other lifecycle writes.
+export interface WorkspaceOps {
+  create(input: { title: string; spec: string; base: string; task: boolean }, origin: Origin): Promise<{ workspace: Workspace; taskId: string | null; branch: string; base: string }>
+  merge(id: string, origin: Origin): Promise<MergeWorkspaceResult>
+  finalize(id: string, origin: Origin): Promise<FinalizeWorkspaceResult>
+  archive(id: string, opts: { remove: false } | { remove: true; projectRoot: string }, origin: Origin): Promise<ArchiveWorkspaceResult>
+  retitle(id: string, title: string, origin: Origin): Promise<Workspace>
+  restore(id: string, origin: Origin): Promise<Workspace>
+}
+
+// `config` is resolved PER CALL rather than captured: archiving or restoring a RECORD needs no
+// project context at all, and a door built where there is none must still serve those.
+export function buildWorkspaceOps(deps: { kernel: Kernel; config: () => WorkspaceConfig }): WorkspaceOps {
+  const { kernel, config } = deps
+  return {
+    create: (input, origin) => createRequestWorkspace(kernel, config(), input, origin),
+    merge: (id, origin) => mergeWorkspaceOp(kernel, config(), id, origin),
+    finalize: (id, origin) => finalizeWorkspaceOp(kernel, config(), id, origin),
+    archive: (id, opts, origin) => archiveWorkspaceOp(kernel, id, opts, origin),
+    retitle: (id, title, origin) => kernel.retitleWorkspace(id, title, origin),
+    // The archive SETTER, not `restoreWorkspace` — that one re-seats a purged record under its old
+    // id. Un-archiving is the same event archiving writes, with `archived: false`.
+    restore: (id, origin) => kernel.setWorkspaceArchived(id, false, origin),
+  }
 }

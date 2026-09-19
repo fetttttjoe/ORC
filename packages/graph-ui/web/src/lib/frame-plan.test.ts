@@ -1,10 +1,11 @@
 import { describe, expect, it } from 'bun:test'
+import { Door } from '@orc/contracts/origin'
 import type { GraphPatch, LogRow } from './api/types'
 import type { OperatorState, Touch } from '@orc/ui-core/wire'
 import { planFrame } from './frame-plan'
 
 const PATCH: GraphPatch = { addNodes: [], updateNodes: [], removeNodeIds: [], addLinks: [], removeLinks: [], updateLinks: [] }
-const ROW: LogRow = { seq: 11, ts: '2026-09-18T00:00:00.000Z', kind: 'step_started', line: 'x', taskId: null, stepId: null, noteRef: null, authorTaskId: null }
+const ROW: LogRow = { seq: 11, ts: '2026-09-18T00:00:00.000Z', kind: 'step_started', line: 'x', taskId: null, stepId: null, chatId: null, door: Door.supervisor, noteRef: null, authorTaskId: null }
 const OP: OperatorState = { openQuestions: [], retryable: [], planned: [] }
 const TOUCH: Touch = { name: 'node', params: { id: 'a' } }
 

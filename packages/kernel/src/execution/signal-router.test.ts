@@ -1,11 +1,16 @@
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test'
-import { EVENT_KIND, REACTION, ReactionFailedPayload, TASK_STATUS, type EventRecord, type SplitResult, type TaskNode } from '@orc/contracts'
+import { AUTHOR_SOURCE, Door, EVENT_KIND, NO_CHAT, REACTION, ReactionFailedPayload, TASK_STATUS, type EventRecord, type Origin, type SplitResult, type TaskNode } from '@orc/contracts'
 import { Kernel } from '../kernel'
 import { fold } from '../projections'
 import { openStorage, type EventLog } from '../storage'
 import { createTestDb, seedTestWorkspace, TEST_PROJECT_ID, TEST_WORKSPACE_ID, waitFor } from '../test-helpers'
 import { composeSplitResult, createSignalRouter } from './signal-router'
-import { eventFixture, must } from '@orc/contracts/fixtures'
+import { authorFixture, eventFixture, must } from '@orc/contracts/fixtures'
+
+// these arrangements are a client acting through no chat; the split below is asked for from a real
+// one, because that chat is what a supervisor reaction has to answer to
+const CLI: Origin = NO_CHAT(Door.cli)
+const SPLIT_CHAT: Origin = { chatId: 'chat-split', door: Door.web }
 
 const split = { splitId: 'sp1', taskId: 'p', stepId: 's1', runToken: 'rt', childTaskId: 'c1', resolved: false }
 const evt = (over: Partial<EventRecord>): EventRecord =>
@@ -32,8 +37,8 @@ describe('composeSplitResult', () => {
     // note events arrive separately: they are NOT router kinds, so the router fetches them only
     // when it actually composes a result rather than on every routed event
     const notes: EventRecord[] = [
-      evt({ seq: 8, taskId: null, kind: EVENT_KIND.memory_written, payload: { note: { id: 'finding', scope: 'project', title: 'F', categories: [], tags: [], links: [], paths: [], summary: '', body: '' }, author: { source: 'agent', workspaceId: TEST_WORKSPACE_ID, taskId: 'c1' } } }),
-      evt({ seq: 9, taskId: null, kind: EVENT_KIND.memory_written, payload: { note: { id: 'other', scope: 'project', title: 'O', categories: [], tags: [], links: [], paths: [], summary: '', body: '' }, author: { source: 'agent', workspaceId: TEST_WORKSPACE_ID, taskId: 'unrelated' } } }),
+      evt({ seq: 8, taskId: null, kind: EVENT_KIND.memory_written, payload: { note: { id: 'finding', scope: 'project', title: 'F', categories: [], tags: [], links: [], paths: [], summary: '', body: '' }, author: authorFixture({ source: AUTHOR_SOURCE.agent, taskId: 'c1' }) } }),
+      evt({ seq: 9, taskId: null, kind: EVENT_KIND.memory_written, payload: { note: { id: 'other', scope: 'project', title: 'O', categories: [], tags: [], links: [], paths: [], summary: '', body: '' }, author: authorFixture({ source: AUTHOR_SOURCE.agent, taskId: 'unrelated' }) } }),
     ]
     const r = composeSplitResult(events, notes, split)
     expect(r).toEqual({
@@ -80,12 +85,12 @@ describe('createSignalRouter (integration, real EventLog)', () => {
 
   // parent + child tasks and the split that binds them (runToken = the parent step's send target)
   const seedSplit = async (): Promise<void> => {
-    await log.append({ taskId: 'p', stepId: null, runToken: null, kind: EVENT_KIND.task_created, payload: { task: taskNode('p', null) } })
-    await log.append({ taskId: 'c', stepId: null, runToken: null, kind: EVENT_KIND.task_created, payload: { task: taskNode('c', 'p') } })
-    await log.append({ taskId: 'p', stepId: 's1', runToken: 'rt', kind: EVENT_KIND.split_proposed, payload: { splitId: 'sp1', taskId: 'p', stepId: 's1', runToken: 'rt', childTaskId: 'c' } })
+    await log.append({ ...CLI, taskId: 'p', stepId: null, runToken: null, kind: EVENT_KIND.task_created, payload: { task: taskNode('p', null) } })
+    await log.append({ ...CLI, taskId: 'c', stepId: null, runToken: null, kind: EVENT_KIND.task_created, payload: { task: taskNode('c', 'p') } })
+    await log.append({ ...SPLIT_CHAT, taskId: 'p', stepId: 's1', runToken: 'rt', kind: EVENT_KIND.split_proposed, payload: { splitId: 'sp1', taskId: 'p', stepId: 's1', runToken: 'rt', childTaskId: 'c' } })
   }
   const terminal = (to: string) => log.append({
-    taskId: 'c', stepId: null, runToken: null,
+    ...CLI, taskId: 'c', stepId: null, runToken: null,
     kind: EVENT_KIND.task_status_changed, payload: { taskId: 'c', from: TASK_STATUS.running, to },
   })
   const resolvedCount = async (): Promise<number> => (await log.all()).filter(e => e.kind === EVENT_KIND.split_resolved).length
@@ -101,11 +106,11 @@ describe('createSignalRouter (integration, real EventLog)', () => {
       sendFeedback: async (dest, message, topic, key) => { sends.push({ dest, message, topic, key }) },
     })
     await router.start()
-    await log.append({ taskId: 'f', stepId: null, runToken: null, kind: EVENT_KIND.task_created, payload: { task: taskNode('f', null) } })
-    await log.append({ taskId: 'f', stepId: null, runToken: null, kind: EVENT_KIND.task_status_changed, payload: { taskId: 'f', from: TASK_STATUS.draft, to: TASK_STATUS.running } })
+    await log.append({ ...CLI, taskId: 'f', stepId: null, runToken: null, kind: EVENT_KIND.task_created, payload: { task: taskNode('f', null) } })
+    await log.append({ ...CLI, taskId: 'f', stepId: null, runToken: null, kind: EVENT_KIND.task_status_changed, payload: { taskId: 'f', from: TASK_STATUS.draft, to: TASK_STATUS.running } })
     const event = await log.append({
-      taskId: 'f', stepId: 'plan', runToken: 'step:f:plan:a1', kind: EVENT_KIND.feedback_provided,
-      payload: { topic: 'approval', text: 'approve', author: { source: 'cli', workspaceId: TEST_WORKSPACE_ID } },
+      ...CLI, taskId: 'f', stepId: 'plan', runToken: 'step:f:plan:a1', kind: EVENT_KIND.feedback_provided,
+      payload: { topic: 'approval', text: 'approve', author: authorFixture() },
     })
 
     expect(await waitFor(async () => sends.length === 1)).toBe(true)
@@ -117,11 +122,11 @@ describe('createSignalRouter (integration, real EventLog)', () => {
   it('startup replays feedback only while its task is running', async () => {
     const sends: Array<{ dest: string; key: string }> = []
     for (const [id, status] of [['running', TASK_STATUS.running], ['done', TASK_STATUS.done]] as const) {
-      await log.append({ taskId: id, stepId: null, runToken: null, kind: EVENT_KIND.task_created, payload: { task: taskNode(id, null) } })
-      await log.append({ taskId: id, stepId: null, runToken: null, kind: EVENT_KIND.task_status_changed, payload: { taskId: id, from: TASK_STATUS.draft, to: status } })
+      await log.append({ ...CLI, taskId: id, stepId: null, runToken: null, kind: EVENT_KIND.task_created, payload: { task: taskNode(id, null) } })
+      await log.append({ ...CLI, taskId: id, stepId: null, runToken: null, kind: EVENT_KIND.task_status_changed, payload: { taskId: id, from: TASK_STATUS.draft, to: status } })
       await log.append({
-        taskId: id, stepId: 'plan', runToken: `step:${id}:plan:a1`, kind: EVENT_KIND.feedback_provided,
-        payload: { topic: id, text: 'answer', author: { source: 'cli', workspaceId: TEST_WORKSPACE_ID } },
+        ...CLI, taskId: id, stepId: 'plan', runToken: `step:${id}:plan:a1`, kind: EVENT_KIND.feedback_provided,
+        payload: { topic: id, text: 'answer', author: authorFixture() },
       })
     }
     router = createSignalRouter({
@@ -138,19 +143,19 @@ describe('createSignalRouter (integration, real EventLog)', () => {
   it('startup heals a reply committed before its immediate send failed', async () => {
     const kernel = new Kernel(log, undefined, undefined, async () => { throw new Error('simulated send failure') })
     // a task must name a workspace the fold has seen — one seeded record, then tasks as before
-    await seedTestWorkspace(log)
-    const task = await kernel.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'feedback recovery' })
+    await seedTestWorkspace(log, CLI)
+    const task = await kernel.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'feedback recovery' }, CLI)
     await log.append({
-      taskId: task.id, stepId: null, runToken: null, kind: EVENT_KIND.task_status_changed,
+      ...CLI, taskId: task.id, stepId: null, runToken: null, kind: EVENT_KIND.task_status_changed,
       payload: { taskId: task.id, from: TASK_STATUS.draft, to: TASK_STATUS.running },
     })
     const runToken = `step:${task.id}:s1:a1`
     await log.append({
-      taskId: task.id, stepId: 's1', runToken, kind: EVENT_KIND.feedback_requested,
+      ...CLI, taskId: task.id, stepId: 's1', runToken, kind: EVENT_KIND.feedback_requested,
       payload: { question: 'continue?', topic: 'consent' },
     })
 
-    await expect(kernel.replyFeedback(task.id, 'yes')).rejects.toThrow('simulated send failure')
+    await expect(kernel.replyFeedback(task.id, 'yes', CLI)).rejects.toThrow('simulated send failure')
     const provided = must((await log.byTask(task.id)).find(e => e.kind === EVENT_KIND.feedback_provided), 'feedback provided event')
     expect(await kernel.openFeedback(task.id)).toBeNull()
 
@@ -176,6 +181,9 @@ describe('createSignalRouter (integration, real EventLog)', () => {
     expect(sends).toHaveLength(1)
     expect(sends[0]).toMatchObject({ dest: 'rt', topic: 'split:sp1', key: 'sp1' })
     expect(must(sends[0], 'first send').result).toMatchObject({ splitId: 'sp1', childTaskId: 'c', outcome: 'done' })
+    // the reaction answers to the chat that ASKED for the split, stamped with the supervisor's door
+    const resolved = must((await log.all()).find(e => e.kind === EVENT_KIND.split_resolved), 'split resolved event')
+    expect({ chatId: resolved.chatId, door: resolved.door }).toEqual({ chatId: SPLIT_CHAT.chatId, door: Door.supervisor })
   })
 
   it('sweep: a terminal split that landed before start is resolved by start() alone', async () => {
@@ -193,8 +201,8 @@ describe('createSignalRouter (integration, real EventLog)', () => {
     const approved: string[] = []
     await seedSplit()
     // child approved while the router was down — the plan_approved event will never be redelivered
-    await log.append({ taskId: 'c', stepId: null, runToken: null, kind: EVENT_KIND.plan_approved, payload: { taskId: 'c', version: 1, approvedAt: 'T', approvedBy: 'policy' } })
-    await log.append({ taskId: 'c', stepId: null, runToken: null, kind: EVENT_KIND.task_status_changed, payload: { taskId: 'c', from: TASK_STATUS.draft, to: TASK_STATUS.approved } })
+    await log.append({ ...CLI, taskId: 'c', stepId: null, runToken: null, kind: EVENT_KIND.plan_approved, payload: { taskId: 'c', version: 1, approvedAt: 'T', approvedBy: 'policy' } })
+    await log.append({ ...CLI, taskId: 'c', stepId: null, runToken: null, kind: EVENT_KIND.task_status_changed, payload: { taskId: 'c', from: TASK_STATUS.draft, to: TASK_STATUS.approved } })
     router = createSignalRouter({ log, onChildApproved: async id => { approved.push(id) }, onRunRequested: async () => {}, onCancelled: async () => {}, send: async () => {}, sendFeedback: async () => {} })
     await router.start() // sweep runs (and awaits onChildApproved) synchronously before returning
     expect(approved).toEqual(['c'])
@@ -205,7 +213,7 @@ describe('createSignalRouter (integration, real EventLog)', () => {
     router = createSignalRouter({ log, onChildApproved: async id => { approved.push(id) }, onRunRequested: async () => {}, onCancelled: async () => {}, send: async () => {}, sendFeedback: async () => {} })
     await router.start()
     await seedSplit()
-    await log.append({ taskId: 'c', stepId: null, runToken: null, kind: EVENT_KIND.plan_approved, payload: { taskId: 'c', version: 1, approvedAt: 'T', approvedBy: 'policy' } })
+    await log.append({ ...CLI, taskId: 'c', stepId: null, runToken: null, kind: EVENT_KIND.plan_approved, payload: { taskId: 'c', version: 1, approvedAt: 'T', approvedBy: 'policy' } })
     expect(await waitFor(async () => approved.length > 0)).toBe(true)
     expect(approved).toEqual(['c'])
   })
@@ -231,17 +239,17 @@ describe('createSignalRouter (integration, real EventLog)', () => {
       send: async () => {}, sendFeedback: async () => {},
     })
     await router.start()
-    await log.append({ taskId: 't1', stepId: null, runToken: null, kind: EVENT_KIND.task_created, payload: { task: taskNode('t1', null) } })
-    await log.append({ taskId: 't1', stepId: null, runToken: null, kind: EVENT_KIND.run_requested, payload: { taskId: 't1', cwd: '/tree', retry: false } })
+    await log.append({ ...CLI, taskId: 't1', stepId: null, runToken: null, kind: EVENT_KIND.task_created, payload: { task: taskNode('t1', null) } })
+    await log.append({ ...CLI, taskId: 't1', stepId: null, runToken: null, kind: EVENT_KIND.run_requested, payload: { taskId: 't1', cwd: '/tree', retry: false } })
     expect(await waitFor(async () => started.length > 0)).toBe(true)
     expect(started).toEqual([{ taskId: 't1', cwd: '/tree', retry: false }])
   })
 
   it('sweep: a run_requested that landed before start still starts the run', async () => {
     const started: string[] = []
-    await log.append({ taskId: 't1', stepId: null, runToken: null, kind: EVENT_KIND.task_created, payload: { task: taskNode('t1', null) } })
+    await log.append({ ...CLI, taskId: 't1', stepId: null, runToken: null, kind: EVENT_KIND.task_created, payload: { task: taskNode('t1', null) } })
     // lands with NO router subscribed — the pump never redelivers it, only start()'s sweep can catch it
-    await log.append({ taskId: 't1', stepId: null, runToken: null, kind: EVENT_KIND.run_requested, payload: { taskId: 't1', cwd: null, retry: false } })
+    await log.append({ ...CLI, taskId: 't1', stepId: null, runToken: null, kind: EVENT_KIND.run_requested, payload: { taskId: 't1', cwd: null, retry: false } })
     router = createSignalRouter({
       log, onChildApproved: async () => {}, onCancelled: async () => {},
       onRunRequested: async taskId => { started.push(taskId) },
@@ -257,10 +265,10 @@ describe('createSignalRouter (integration, real EventLog)', () => {
   // supervisor starts.
   it('sweep: a run_requested for a task that has since settled is NOT re-served', async () => {
     const started: string[] = []
-    await log.append({ taskId: 't1', stepId: null, runToken: null, kind: EVENT_KIND.task_created, payload: { task: taskNode('t1', null) } })
-    await log.append({ taskId: 't1', stepId: null, runToken: null, kind: EVENT_KIND.run_requested, payload: { taskId: 't1', cwd: null, retry: false } })
+    await log.append({ ...CLI, taskId: 't1', stepId: null, runToken: null, kind: EVENT_KIND.task_created, payload: { task: taskNode('t1', null) } })
+    await log.append({ ...CLI, taskId: 't1', stepId: null, runToken: null, kind: EVENT_KIND.run_requested, payload: { taskId: 't1', cwd: null, retry: false } })
     // the task finished afterwards — the ask is answered by the outcome, not by another run
-    await log.append({ taskId: 't1', stepId: null, runToken: null, kind: EVENT_KIND.task_status_changed, payload: { taskId: 't1', from: TASK_STATUS.running, to: TASK_STATUS.done } })
+    await log.append({ ...CLI, taskId: 't1', stepId: null, runToken: null, kind: EVENT_KIND.task_status_changed, payload: { taskId: 't1', from: TASK_STATUS.running, to: TASK_STATUS.done } })
     router = createSignalRouter({
       log, onChildApproved: async () => {}, onCancelled: async () => {},
       onRunRequested: async taskId => { started.push(taskId) },
@@ -275,9 +283,9 @@ describe('createSignalRouter (integration, real EventLog)', () => {
   // FROM, so an unserved retry MUST still be redelivered by the sweep.
   it('sweep: a run_requested for a BLOCKED task is still served — that is what retry resumes from', async () => {
     const started: string[] = []
-    await log.append({ taskId: 't1', stepId: null, runToken: null, kind: EVENT_KIND.task_created, payload: { task: taskNode('t1', null) } })
-    await log.append({ taskId: 't1', stepId: null, runToken: null, kind: EVENT_KIND.task_status_changed, payload: { taskId: 't1', from: TASK_STATUS.running, to: TASK_STATUS.blocked } })
-    await log.append({ taskId: 't1', stepId: null, runToken: null, kind: EVENT_KIND.run_requested, payload: { taskId: 't1', cwd: null, retry: true } })
+    await log.append({ ...CLI, taskId: 't1', stepId: null, runToken: null, kind: EVENT_KIND.task_created, payload: { task: taskNode('t1', null) } })
+    await log.append({ ...CLI, taskId: 't1', stepId: null, runToken: null, kind: EVENT_KIND.task_status_changed, payload: { taskId: 't1', from: TASK_STATUS.running, to: TASK_STATUS.blocked } })
+    await log.append({ ...CLI, taskId: 't1', stepId: null, runToken: null, kind: EVENT_KIND.run_requested, payload: { taskId: 't1', cwd: null, retry: true } })
     router = createSignalRouter({
       log, onChildApproved: async () => {}, onCancelled: async () => {},
       onRunRequested: async taskId => { started.push(taskId) },
@@ -295,8 +303,8 @@ describe('createSignalRouter (integration, real EventLog)', () => {
       send: async () => {}, sendFeedback: async () => {},
     })
     await router.start()
-    await log.append({ taskId: 't1', stepId: null, runToken: null, kind: EVENT_KIND.task_created, payload: { task: taskNode('t1', null) } })
-    await log.append({ taskId: 't1', stepId: null, runToken: null, kind: EVENT_KIND.task_status_changed, payload: { taskId: 't1', from: TASK_STATUS.running, to: TASK_STATUS.cancelled } })
+    await log.append({ ...CLI, taskId: 't1', stepId: null, runToken: null, kind: EVENT_KIND.task_created, payload: { task: taskNode('t1', null) } })
+    await log.append({ ...CLI, taskId: 't1', stepId: null, runToken: null, kind: EVENT_KIND.task_status_changed, payload: { taskId: 't1', from: TASK_STATUS.running, to: TASK_STATUS.cancelled } })
     expect(await waitFor(async () => cancelled.length > 0)).toBe(true)
     expect(cancelled).toEqual(['t1'])
   })
@@ -311,8 +319,9 @@ describe('createSignalRouter (integration, real EventLog)', () => {
       send: async () => {}, sendFeedback: async () => {},
     })
     await router.start()
-    await log.append({ taskId: 't1', stepId: null, runToken: null, kind: EVENT_KIND.task_created, payload: { task: taskNode('t1', null) } })
-    const asked = await log.append({ taskId: 't1', stepId: null, runToken: null, kind: EVENT_KIND.run_requested, payload: { taskId: 't1', cwd: null, retry: false } })
+    const asker: Origin = { chatId: 'chat-ask', door: Door.web }
+    await log.append({ ...asker, taskId: 't1', stepId: null, runToken: null, kind: EVENT_KIND.task_created, payload: { task: taskNode('t1', null) } })
+    const asked = await log.append({ ...asker, taskId: 't1', stepId: null, runToken: null, kind: EVENT_KIND.run_requested, payload: { taskId: 't1', cwd: null, retry: false } })
 
     const failures = async () => (await log.byTask('t1')).filter(e => e.kind === EVENT_KIND.reaction_failed)
     expect(await waitFor(async () => (await failures()).length > 0)).toBe(true)
@@ -320,6 +329,10 @@ describe('createSignalRouter (integration, real EventLog)', () => {
     expect(recorded).toEqual({
       reaction: REACTION.runRequested, taskId: 't1', message: 'nothing can serve this', causeSeq: asked.seq,
     })
+    // the diagnosis belongs to the chat whose ask failed — otherwise the client that asked never
+    // sees why its task did not move
+    const diagnosis = must((await failures())[0], 'reaction failed event')
+    expect({ chatId: diagnosis.chatId, door: diagnosis.door }).toEqual({ chatId: 'chat-ask', door: Door.supervisor })
 
     // a fresh supervisor sweeps the same unserved request on every boot — the diagnosis is keyed by
     // the CAUSE, so a permanently broken reaction cannot grow the log without bound
@@ -338,7 +351,7 @@ describe('createSignalRouter (integration, real EventLog)', () => {
   // ran by hand twice on 2026-08-03 (commit → restamp → drift 0, ~1 min, zero LLM cost each time).
   describe('commit_recorded routing', () => {
     const commit = (sha: string, paths: string[]) =>
-      log.append({ taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.commit_recorded, payload: { sha, paths } })
+      log.append({ ...CLI, taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.commit_recorded, payload: { sha, paths, workspaceId: TEST_WORKSPACE_ID } })
 
     it('a live commit_recorded event reaches onCommitRecorded with its payload', async () => {
       const seen: Array<{ sha: string; paths: string[] }> = []
@@ -401,20 +414,20 @@ describe('createSignalRouter (integration, real EventLog)', () => {
       send: async () => {}, sendFeedback: async () => {},
     })
     await router.start()
-    await log.append({ taskId: 't1', stepId: null, runToken: null, kind: EVENT_KIND.task_created, payload: { task: taskNode('t1', null) } })
-    await log.append({ taskId: 't1', stepId: null, runToken: null, kind: EVENT_KIND.run_requested, payload: { taskId: 't1', cwd: null, retry: false } })
+    await log.append({ ...CLI, taskId: 't1', stepId: null, runToken: null, kind: EVENT_KIND.task_created, payload: { task: taskNode('t1', null) } })
+    await log.append({ ...CLI, taskId: 't1', stepId: null, runToken: null, kind: EVENT_KIND.run_requested, payload: { taskId: 't1', cwd: null, retry: false } })
     expect(await waitFor(async () => fold(await log.all()).reactionFailures.has('t1'))).toBe(true)
     expect(fold(await log.all()).reactionFailures.get('t1')?.map(f => f.message)).toEqual(['budget exhausted'])
   })
 
   it('sweep: a retry request that landed after an earlier run still starts it', async () => {
     const started: Array<{ taskId: string; retry: boolean }> = []
-    await log.append({ taskId: 't1', stepId: null, runToken: null, kind: EVENT_KIND.task_created, payload: { task: taskNode('t1', null) } })
+    await log.append({ ...CLI, taskId: 't1', stepId: null, runToken: null, kind: EVENT_KIND.task_created, payload: { task: taskNode('t1', null) } })
     // an earlier run already happened — the OLD "does this task have any run" gate would have
     // wrongly treated the request below as already served
-    await log.append({ taskId: 't1', stepId: null, runToken: null, kind: EVENT_KIND.run_started, payload: { taskId: 't1', planVersion: 1, retryIndex: 0, workflowId: 'run:t1:v1', cwd: null } })
+    await log.append({ ...CLI, taskId: 't1', stepId: null, runToken: null, kind: EVENT_KIND.run_started, payload: { taskId: 't1', planVersion: 1, retryIndex: 0, workflowId: 'run:t1:v1', cwd: null } })
     // the retry request lands AFTER that run, with no router subscribed
-    await log.append({ taskId: 't1', stepId: null, runToken: null, kind: EVENT_KIND.run_requested, payload: { taskId: 't1', cwd: null, retry: true } })
+    await log.append({ ...CLI, taskId: 't1', stepId: null, runToken: null, kind: EVENT_KIND.run_requested, payload: { taskId: 't1', cwd: null, retry: true } })
     router = createSignalRouter({
       log, onChildApproved: async () => {}, onCancelled: async () => {},
       onRunRequested: async (taskId, o) => { started.push({ taskId, retry: o.retry }) },
@@ -426,10 +439,10 @@ describe('createSignalRouter (integration, real EventLog)', () => {
 
   it('sweep: a cancelled task that landed before start still cancels its workflows', async () => {
     const cancelled: string[] = []
-    await log.append({ taskId: 't1', stepId: null, runToken: null, kind: EVENT_KIND.task_created, payload: { task: taskNode('t1', null) } })
+    await log.append({ ...CLI, taskId: 't1', stepId: null, runToken: null, kind: EVENT_KIND.task_created, payload: { task: taskNode('t1', null) } })
     // lands with NO router subscribed — DBOS recovery on THIS boot would otherwise resume the
     // workflow with nobody ever telling it to stop
-    await log.append({ taskId: 't1', stepId: null, runToken: null, kind: EVENT_KIND.task_status_changed, payload: { taskId: 't1', from: TASK_STATUS.running, to: TASK_STATUS.cancelled } })
+    await log.append({ ...CLI, taskId: 't1', stepId: null, runToken: null, kind: EVENT_KIND.task_status_changed, payload: { taskId: 't1', from: TASK_STATUS.running, to: TASK_STATUS.cancelled } })
     router = createSignalRouter({
       log, onChildApproved: async () => {}, onRunRequested: async () => {},
       onCancelled: async id => { cancelled.push(id) },

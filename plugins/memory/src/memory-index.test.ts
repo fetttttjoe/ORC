@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { NOTE_KINDS, type EventRecord, type SemanticNote, EVENT_KIND, LINK_KIND } from '@orc/contracts'
 import { SurrealMemory } from './surreal'
-import { TEST_WORKSPACE_ID, episodicNoteFixture, eventFixture, planNoteFixture, semanticNoteFixture } from '@orc/contracts/fixtures'
+import { authorFixture, episodicNoteFixture, eventFixture, planNoteFixture, semanticNoteFixture } from '@orc/contracts/fixtures'
 import { createTestSurreal } from './test-helpers'
 import { renderMemoryIndex, rebuildVaultMemory, SECTIONS } from './memory-index'
 
@@ -120,7 +120,7 @@ describe('rebuildVaultMemory', () => {
           id, scope: 'project', kind: 'fact', sourceRevision: null, title: id,
           categories: [], tags: [], links: [], paths: [], summary: '', body: 'body',
         },
-        author: { source: 'cli', workspaceId: TEST_WORKSPACE_ID },
+        author: authorFixture(),
       },
       ts: '2026-07-18T00:00:00Z',
     })

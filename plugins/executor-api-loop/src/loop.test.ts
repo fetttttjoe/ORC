@@ -1,14 +1,23 @@
-import { describe, expect, it } from 'bun:test'
-import { mkdtempSync, readFileSync } from 'node:fs'
+import { afterAll, describe, expect, it } from 'bun:test'
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import type { ClaimHit, Checkpoint, EventDraft, ExecutorContext, NoteSummary, OperationCheckpoint, OperationSpec, ResolvedTool, SplitResult, UnifiedEvent } from '@orc/contracts'
-import { EVENT_KIND, NOTE_TIER, OPERATION_KIND, SIGNAL_OUTCOME, planScope } from '@orc/contracts'
+import { Door, EVENT_KIND, NOTE_TIER, OPERATION_KIND, SIGNAL_OUTCOME, isTerminalError, planScope } from '@orc/contracts'
 import { stepFixture, TEST_WORKSPACE_ID, must } from '@orc/contracts/fixtures'
 import { z } from 'zod'
 import type { LanguageModel } from 'ai'
-import { apiLoopExecutor } from './loop'
+import { CANCELLED_WHILE_RATE_LIMITED, CANCEL_POLL_MS, TURN_ECONOMY, apiLoopExecutor } from './loop'
+import { FIRST_WAIT_MS, TOTAL_WAIT_BUDGET_MS } from './rate-limit'
 import { TOOL_NAME, executeTool, releaseWriteClaims } from './tools'
+
+const tempDirs: string[] = []
+function tempWorkspace(prefix: string): string {
+  const dir = mkdtempSync(path.join(tmpdir(), prefix))
+  tempDirs.push(dir)
+  return dir
+}
+afterAll(() => { for (const dir of tempDirs) rmSync(dir, { recursive: true, force: true }) })
 
 // test-double checkpoint: runs fn, captures drafted events (what DBOS would append durably)
 function makeCheckpoint(captured: EventDraft[]): Checkpoint {
@@ -38,7 +47,9 @@ function ctx(model: LanguageModel, captured: EventDraft[], over: Partial<Executo
     extraTools: [],
     model,
     runToken: 'step:t1:s1:a1',
-    workspaceDir: mkdtempSync(path.join(tmpdir(), 'orc-ws-')),
+    // a step runs inside its run's chat, driven by the supervisor
+    origin: { chatId: 'run:t1:v1', door: Door.supervisor },
+    workspaceDir: tempWorkspace('orc-ws-'),
     checkpoint: makeCheckpoint(captured),
     operation: makeOperation(captured),
     budgetRemainingUSD: async () => null,
@@ -160,6 +171,66 @@ describe('api-loop executor', () => {
     expect(seenTools[2]).toEqual([TOOL_NAME.signal]) // the last turn can only report
   })
 
+  it('a 429 is waited out and the model call re-issued — the step completes', async () => {
+    const rateLimit = (): unknown => Object.assign(new Error('This request would exceed your account rate limit'), { statusCode: 429 })
+    const seenTools: string[][] = []
+    const specs: OperationSpec[] = []
+    const captured: EventDraft[] = []
+    const model = scriptModel([
+      { throws: rateLimit() },
+      { throws: rateLimit() },
+      { toolCalls: [{ toolCallId: 'c1', toolName: TOOL_NAME.signal, input: { outcome: SIGNAL_OUTCOME.success, summary: 'survived the rate limit' } }] },
+    ], seenTools)
+    const waits: number[] = []
+    const sleep = async (ms: number): Promise<void> => { waits.push(ms) }
+    const events = await drain(apiLoopExecutor(sleep).startTurn(ctx(model, captured, { operation: makeOperation(captured, specs) })))
+
+    expect(events.map(e => e.type)).toEqual(['usage', 'signal', 'done'])
+    expect(seenTools).toHaveLength(3)
+    expect(waits.reduce((sum, ms) => sum + ms, 0)).toBe(FIRST_WAIT_MS + FIRST_WAIT_MS * 2)
+    expect(Math.max(...waits)).toBeLessThanOrEqual(CANCEL_POLL_MS)
+    expect(specs.filter(s => s.kind === OPERATION_KIND.model).map(s => s.operationId)).toEqual(['step:t1:s1:a1:model:1'])
+  })
+
+  it('a rate limit that outlasts the wait budget fails the step with a terminal error, after ONE budget', async () => {
+    const rateLimit = (): unknown => Object.assign(new Error('still rate limited'), { statusCode: 429 })
+    const seenTools: string[][] = []
+    const captured: EventDraft[] = []
+    const model = scriptModel(Array.from({ length: 20 }, () => ({ throws: rateLimit() })), seenTools)
+    let waited = 0
+    const sleep = async (ms: number): Promise<void> => { waited += ms }
+    const thrown: unknown[] = []
+    const operation: ExecutorContext<LanguageModel>['operation'] = async (_spec, fn) => {
+      try { return await fn() } catch (err) { thrown.push(err); throw err }
+    }
+    const events = await drain(apiLoopExecutor(sleep).startTurn(ctx(model, captured, { operation })))
+
+    expect(events.at(-1)?.type).toBe('error')
+    expect(waited).toBeLessThanOrEqual(TOTAL_WAIT_BUDGET_MS)
+    expect(thrown).toHaveLength(1)
+    expect(isTerminalError(thrown[0])).toBe(true)
+  })
+
+  it('a run cancelled during a rate-limit wait stops waiting and never re-issues the model call', async () => {
+    const rateLimit = (): unknown => Object.assign(new Error('rate limited'), { statusCode: 429 })
+    const seenTools: string[][] = []
+    const captured: EventDraft[] = []
+    const model = scriptModel([
+      { throws: rateLimit() },
+      { toolCalls: [{ toolCallId: 'c1', toolName: TOOL_NAME.signal, input: { outcome: SIGNAL_OUTCOME.success, summary: 'must not be reached' } }] },
+    ], seenTools)
+    const waits: number[] = []
+    const sleep = async (ms: number): Promise<void> => { waits.push(ms) }
+    const isCancelled = async (): Promise<boolean> => waits.length >= 1
+    const events = await drain(apiLoopExecutor(sleep).startTurn(ctx(model, captured, { isCancelled })))
+
+    expect(seenTools).toHaveLength(1)
+    expect(waits).toEqual([CANCEL_POLL_MS])
+    const last = events.at(-1)
+    expect(last?.type).toBe('error')
+    expect(last?.type === 'error' ? last.message : '').toContain(CANCELLED_WHILE_RATE_LIMITED)
+  })
+
   it('tool call → executes → feeds result back → signal on turn 2', async () => {
     const captured: EventDraft[] = []
     const model = scriptModel([
@@ -171,6 +242,45 @@ describe('api-loop executor', () => {
     expect(events.at(-1)?.type).toBe('done')
     const toolDrafts = captured.filter(d => d.kind === EVENT_KIND.tool_call || d.kind === EVENT_KIND.tool_result)
     expect(toolDrafts).toHaveLength(2)
+  })
+
+  it('two tool calls in ONE turn both execute and both results reach the next request, for one model call', async () => {
+    const captured: EventDraft[] = []
+    const specs: OperationSpec[] = []
+    const model = scriptModel([
+      { toolCalls: [
+        { toolCallId: 'c1', toolName: TOOL_NAME.fs_write, input: { path: 'a.txt', content: 'a' } },
+        { toolCallId: 'c2', toolName: TOOL_NAME.fs_write, input: { path: 'b.txt', content: 'b' } },
+      ] },
+      { toolCalls: [{ toolCallId: 'c3', toolName: TOOL_NAME.signal, input: { outcome: SIGNAL_OUTCOME.success, summary: 'ok' } }] },
+    ])
+    const c = ctx(model, captured, { operation: makeOperation(captured, specs), step: stepFixture({ instructions: 'do the thing', maxIterations: 10 }) })
+    await drain(apiLoopExecutor().startTurn(c))
+
+    expect(readFileSync(path.join(c.workspaceDir, 'a.txt'), 'utf8')).toBe('a')
+    expect(readFileSync(path.join(c.workspaceDir, 'b.txt'), 'utf8')).toBe('b')
+    expect(specs.filter(s => s.kind === OPERATION_KIND.model).map(s => s.operationId))
+      .toEqual(['step:t1:s1:a1:model:1', 'step:t1:s1:a1:model:2'])
+    const agentCalls = captured.filter(d => d.kind === EVENT_KIND.agent_call)
+    const second = AgentCallRequest.parse(must(agentCalls[1], 'agentCalls[1]').payload).request.messages
+    const answered = second.flatMap(m => (Array.isArray(m.content) ? m.content : []))
+      .filter((p): p is { type: string; toolCallId: string } => isRecord(p) && p.type === 'tool-result' && typeof p.toolCallId === 'string')
+      .map(p => p.toolCallId)
+    expect(answered).toEqual(['c1', 'c2'])
+  })
+
+  it('the turn-economy rule is sent once, in the stable prefix, never per iteration', async () => {
+    const captured: EventDraft[] = []
+    const specs: OperationSpec[] = []
+    const model = scriptModel([
+      { toolCalls: [{ toolCallId: 'c1', toolName: 'fs_write', input: { path: 'out.txt', content: 'hi' } }] },
+      { toolCalls: [{ toolCallId: 'c2', toolName: TOOL_NAME.signal, input: { outcome: SIGNAL_OUTCOME.success, summary: 'ok' } }] },
+    ])
+    await drain(apiLoopExecutor().startTurn(ctx(model, captured, { operation: makeOperation(captured, specs) })))
+    const modelCalls = specs.filter(sp => sp.kind === OPERATION_KIND.model)
+    expect(modelCalls).toHaveLength(2)
+    expect(JSON.stringify(must(modelCalls[0], 'first model call').before)).toContain(TURN_ECONOMY)
+    expect(JSON.stringify(must(modelCalls[1], 'second model call').before)).not.toContain(TURN_ECONOMY)
   })
 
   it('a repeated tool_use id is dropped from the REPLAYED assistant message, not just from execution', async () => {
@@ -202,7 +312,7 @@ describe('api-loop executor', () => {
     // Every other link (assertInZone, executeTool, plan-note zone) is tested in isolation, so dropping
     // this wiring would leave the whole suite green while parallel siblings lose mechanical isolation.
     const captured: EventDraft[] = []
-    const workspaceDir = mkdtempSync(path.join(tmpdir(), 'orc-zone-'))
+    const workspaceDir = tempWorkspace('orc-zone-')
     const model = scriptModel([
       { toolCalls: [
         { toolCallId: 'c1', toolName: 'fs_write', input: { path: 'src/x.ts', content: 'nope' } }, // outside docs/**
@@ -817,7 +927,7 @@ describe('step memory seam', () => {
   // poll. The child's refusal then reads as a concurrency error nobody caused.
   it('releases its write claims while parked, so a sibling can take the path', async () => {
     const captured: EventDraft[] = []
-    const dir = mkdtempSync(path.join(tmpdir(), 'orc-park-'))
+    const dir = tempWorkspace('orc-park-')
     const model = scriptModel([
       { toolCalls: [{ toolCallId: 'w', toolName: 'fs_write', input: { path: 'shared.md', content: 'A' } }] },
       { toolCalls: [{ toolCallId: 'q', toolName: 'ask_human', input: { question: 'proceed?' } }] },

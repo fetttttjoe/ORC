@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, it } from 'bun:test'
-import { EVENT_KIND, MemoryScope, foldMemory, noteContentKey, noteKey, type VerifiedStamp } from '@orc/contracts'
+import { Door, EVENT_KIND, MemoryScope, NO_CHAT, foldMemory, noteContentKey, noteKey, type VerifiedStamp } from '@orc/contracts'
 import { createLiveMemory, type LiveMemory } from './test-helpers'
 import { TEST_WORKSPACE_ID } from '@orc/contracts/fixtures'
 
@@ -18,7 +18,7 @@ import { TEST_WORKSPACE_ID } from '@orc/contracts/fixtures'
 const cleanup: LiveMemory[] = []
 afterAll(async () => { for (const m of cleanup) await m.close() }, 30_000)
 
-const author = { source: 'cli', workspaceId: TEST_WORKSPACE_ID } as const
+const author = { source: 'cli', workspaceId: TEST_WORKSPACE_ID, origin: NO_CHAT(Door.cli) } as const
 
 describe('fold and read model agree on every knowledge event kind', () => {
   it('projects the same live notes, with the same content, verification and lifecycle', async () => {
@@ -34,13 +34,13 @@ describe('fold and read model agree on every knowledge event kind', () => {
     // appended directly: store.verify refuses without a readable Git HEAD (a stamp nothing can be
     // diffed against is worse than none), and this test is about the EVENT, not that guard
     await m.log.append({
-      taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_verified,
+      ...author.origin, taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_verified,
       payload: { id: 'kept', scope: MemoryScope.project, stamp: { revision: 'c0ffee1', at: '2026-08-02T00:00:00.000Z', by: 'cli' }, author },
     })
     await m.store.setArchived('retired', MemoryScope.project, true, author)
     await m.store.remove('removed', MemoryScope.project, author)
     await m.log.append({
-      taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_accessed,
+      ...author.origin, taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_accessed,
       payload: { id: 'kept', scope: MemoryScope.project, mode: 'read', author },
     })
     await m.projector.catchUp()

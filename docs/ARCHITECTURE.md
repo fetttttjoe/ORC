@@ -627,7 +627,7 @@ sequenceDiagram
   K->>L: run_requested (the ask, nothing more)
   L-->>R: LISTEN/NOTIFY
   R->>D: startRunAt (deterministic workflow id)
-  D->>L: run_started + status→running (idempotent keys)
+  D->>L: chat_opened + run_started + status→running (one transaction, idempotent keys)
   D->>X: startTurn(ctx)
   X->>Y: recall(budget) — inside ctx.checkpoint
   Y->>L: memory_accessed{mode:preload} per surfaced note
@@ -766,21 +766,64 @@ graph TD
 
 Door discipline, stated precisely:
 
+- **A door parses, names its `Origin`, and presents the result.** Task verbs
+  live in `OrcActions`; checkout lifecycle verbs live in `WorkspaceOps`.
+  `main.ts` supplies `wsCommand` a memoized `WorkspaceDoor` holding `workspaces`,
+  `reads`, the workspace config and the workspace listing, never the mutating
+  `Kernel` and never `actions`. Boot adoption remains
+  at the composition root. Web action buttons use `NO_CHAT(Door.web)`, terminal
+  commands `NO_CHAT(Door.cli)`, and MCP calls `NO_CHAT(Door.mcp)`; a copilot tool
+  call carries that conversation's chat id and `Door.web`. Origin identifies
+  the caller's interaction; it grants no authority. Note authorship follows
+  `authorSourceOf(origin.door)`; `orc adr` explicitly records a human author.
 - **One toolset, two doors.** `buildCopilotTools` defines the read+mutate surface once;
   the web copilot consumes it as an AI toolset, the MCP server reshapes the same set via
   `asResolvedTools` (zod → JSON Schema). The doors differ in exactly one tool: `approve`.
   The web UI has an approve *button* (human click); the copilot has NO approve tool (P2);
-  MCP gets an approve tool only behind the launch-time `--autonomy full` dial, attributed
+  MCP lists an approve tool when actions are wired, but it refuses unless the
+  launch-time `--autonomy full` dial permits it; approval is attributed
   `approvedBy: mcp` in the `plan_approved` event.
-- **The web door journals its conversations**: each copilot exchange is appended as a
-  `copilot_exchange` event (server-side, home project only); the chat pane rebuilds from
-  the log — the browser is a cache, never the record.
+- **The web door journals its conversations.** `copilotChat` mints an id when the
+  browser passes `chatId: null`, or continues the id it echoes. Tool events may
+  precede the open. `appendCopilotExchange` atomically appends a keyed `chat_opened`
+  and the first `copilot_exchange`; subsequent exchanges append only the exchange.
+  The home-project server publishes a separate `chat` frame only after that
+  transaction resolves; `done` carries usage. Empty, foreign-project and failed
+  appends publish no id. The pane adopts only the committed id and rebuilds its
+  conversation from the log.
 - **The stdio door owns stdout**: boot diagnostics rebind to stderr (bin.ts, first lines),
   and the MCP transport holds the real stdout while `process.stdout.write` reroutes to
   stderr — a lazily-booting DBOS (winston writes past `console`) cannot corrupt frames.
 - **Health is a provider, not a subsystem**: the CLI wires `probeMemory` into the web
   server's `opts.health`; the footer polls `/api/health` and shows degradation + projector
   lag within one 15s interval.
+
+## Chats and the event envelope
+
+Every stored event names a required, nullable `chatId` and a required `door`.
+`Origin` defines those fields once; `EventInput` extends it. `Door` names where
+the call entered: `web` for the browser and its copilot, `cli` for the terminal,
+`mcp` for external MCP calls, `supervisor` for durable execution, and `hook` for
+the post-commit append. A call outside a conversation uses `NO_CHAT(door)`.
+The post-commit hook reads `ORC_CHAT_ID`, supplied by a run's commit tool, and
+records a null chat id when it is absent. The database's `door` column is
+`NOT NULL` without a default: a row that does not name its entry door cannot
+exist, and a past event's door is never guessed.
+
+`chat_opened` is the only chat lifecycle event. It records kind, title, workspace
+and task at opening, a nullable parent `ChatRef` (chat id plus event sequence),
+and a nullable external session reference. A run uses its deterministic workflow
+id as its chat id; `appendRunInit` appends the open before `run_started` in the
+same transaction. Its parent points to the initiating `run_requested`, or a
+split child's `split_proposed`, when that event belongs to another chat.
+
+`chatDigests` derives each `ChatDigest` from the event log on every read. End,
+outcome, usage, questions, notes, commits, artifacts and caused tasks/plans/runs
+are never stored as a second record. A run's end uses only status changes for
+the task its open names, even if that open arrives later than those events;
+a split child's stamps cannot end its parent. Other chat kinds have no end.
+Usage sums only events belonging to that chat, without adding its children's
+spend. Events whose chat was never opened yield no digest.
 
 ## The read side — the view registry
 
@@ -789,12 +832,37 @@ the folded read model (`ReadModel { seq, events, state, memory, graph }`) to a r
 once on the wire (`packages/ui-core/src/wire.ts`'s `ViewName` and `WIRE` — each name's param
 schema and result schema, `as const satisfies Record<ViewName, ...>` so a name added with no
 matching pair fails the build) and implemented once under `packages/ui-core/src/views/`
-(`view.ts`'s `View<N>`/`Touchable<P>` interfaces; one file per view — `timeline.ts`, `node.ts`,
+(`view.ts`'s `View<N>`/`Touchable<P>` interfaces; one file per view — `timeline.ts`, `chats.ts`, `node.ts`,
 `transcript.ts`, `plans.ts`, `plan-notes.ts`, `models.ts`, `operator-state.ts`; `registry.ts`'s
 `VIEWS` table and its `ViewsCoverNames` compile-time guard, which fails the build the moment a
 name on the wire has no implementation). `health.ts` is a `Touchable` that answers no view:
 corpus health probes SurrealDB and git rather than folding the log, so it has no params/result
 pair and no `read`.
+
+**A read states its scope.** `Scope` and its discriminant `ScopeType` live in
+`contracts/src/scope.ts`: project, workspace id, task id with a required `subtree`
+boolean, or chat id. `inScope` is the one membership rule, including taskless
+memory events attributed to their author and workspace commits attributed to
+their checkout. `timeline` requires `scope`, applies scope/kind/sequence filters
+before its limit, then summarizes the matching events. `chats` also requires
+`scope`: any matching event admits the chat, but its digest uses the whole log
+so its cost and outcome are complete.
+
+`scopePatternsOf` stales the project, workspace, exact task and chat queries an
+event belongs to. Ancestor task queries with `subtree: true` have no live
+invalidation yet; no browser consumer issues them. Every chat-bearing event
+stales `chats`; a child's `chat_opened` also stales its parent's chat query.
+`copilotFocus` derives the selected task's spec/status/direct children or the
+selected workspace's root requests from folded state. The copilot system prompt
+includes that focus, discriminated by the same `ScopeType`; selection is not
+stored as another source of truth.
+
+**The browser consumes leaf contracts.** Runtime imports from
+`@orc/contracts/<subpath>` must not reach Node builtins. The `Scope` and
+`ChatDigest` schemas stay separate from their event-reading folds. The runtime
+dependency walk in `contracts/src/browser-leaves.test.ts` derives its entries
+from the browser and `ui-core/wire`, then guards their contract subpaths; `bun run check:web` also builds the Vite
+bundle after checking Svelte, catching resolution failures typechecking cannot.
 
 **One route.** `GET /api/view/<name>?project=<id>&q=<json>` (`VIEW_ROUTE`, built by `viewPath` and
 read back by `viewParams`) answers every view through `readView` — parse params against

@@ -6,13 +6,15 @@ import { Topic } from './cluster'
 // ordering trap that put MEMORY_ID_RE in ids.ts in the first place.
 import { DecisionStatus } from './decision'
 import { EVENT_KIND, type EventRecord } from './event-kinds'
-import { composeAuthor, MEMORY_ID_RE, MemoryAuthor } from './ids'
+import { composeAuthor, MemoryAuthor } from './author'
+import { MEMORY_ID_RE } from './ids'
 import { MEMORY_LIMITS } from './limits'
 import { planScope } from './plan'
 import { ProvisionalFlag } from './workspace-entity'
 
 // re-exported so every memory consumer keeps importing this vocabulary from one place
-export { MEMORY_ID_RE, slugId, MemoryAuthor, composeAuthor } from './ids'
+export { MemoryAuthor, composeAuthor } from './author'
+export { MEMORY_ID_RE, slugId } from './ids'
 export * from './claim'
 
 const Id = z.string().regex(MEMORY_ID_RE).max(128)

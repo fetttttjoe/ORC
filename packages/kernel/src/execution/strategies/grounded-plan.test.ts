@@ -1,10 +1,14 @@
 import { describe, expect, it } from 'bun:test'
-import { COMMIT_STEP_ID, EVENT_KIND, FINISH_STEP_ID, LINK_KIND, ROLE_SKILL, STEP_ROLE, type EventRecord, type MemoryLink, type PlanNote } from '@orc/contracts'
-import { TEST_WORKSPACE_ID, eventFixture, must, planNoteFixture, stepFixture } from '@orc/contracts/fixtures'
+import { AUTHOR_SOURCE, COMMIT_STEP_ID, Door, EVENT_KIND, FINISH_STEP_ID, LINK_KIND, ROLE_SKILL, STEP_ROLE, type EventRecord, type MemoryLink, type Origin, type PlanNote } from '@orc/contracts'
+import { authorFixture, eventFixture, must, planNoteFixture, stepFixture } from '@orc/contracts/fixtures'
 import { foldPlanNotes, freezePlan, groundedPlanOmission, instantiateFrozenPlan, planGraphHash, planScope, withCommitStep } from './grounded-plan'
 // the appender lives in the pure module now (finish-step.ts, contracts-only imports); this describe
 // stays here because its subject is what the FREEZE ends with, not the appender in isolation
 import { withFinishStep } from '../../finish-step'
+
+// The planning agent writes inside its run's chat. MemoryAuthor.origin is required, and an author
+// without it makes the lenient fold skip the note instead of failing to compile.
+const RUN: Origin = { chatId: 'run:t1:v1', door: Door.supervisor }
 
 const note = (over: Partial<PlanNote> & { id: string }): PlanNote =>
   planNoteFixture({ scope: 'plan-t', title: over.id, ...over })
@@ -219,12 +223,12 @@ describe('foldPlanNotes (log-fold, projection-independent)', () => {
   let seq = 0
   const written = (note: Record<string, unknown>): EventRecord => eventFixture({
     seq: ++seq, projectId: 'p', taskId: null, kind: EVENT_KIND.memory_written,
-    payload: { note, author: { source: 'agent', workspaceId: TEST_WORKSPACE_ID } },
+    payload: { note, author: authorFixture({ source: AUTHOR_SOURCE.agent, origin: RUN }) },
     ts: `2026-01-01T00:00:${String(seq).padStart(2, '0')}.000Z`,
   })
   const deleted = (id: string, scope: string): EventRecord => eventFixture({
     seq: ++seq, projectId: 'p', taskId: null, kind: EVENT_KIND.memory_deleted,
-    payload: { id, scope, author: { source: 'cli', workspaceId: TEST_WORKSPACE_ID } },
+    payload: { id, scope, author: authorFixture() },
     ts: `2026-01-01T00:00:${String(seq).padStart(2, '0')}.000Z`,
   })
 
@@ -298,7 +302,7 @@ describe('foldPlanNotes (log-fold, projection-independent)', () => {
     const scope = planScope('t1')
     const poison = eventFixture({
       seq: ++seq, projectId: 'p', taskId: null, kind: EVENT_KIND.memory_written,
-      payload: { note: { id: 'BAD ID WITH SPACES' }, author: { source: 'agent', workspaceId: TEST_WORKSPACE_ID } },
+      payload: { note: { id: 'BAD ID WITH SPACES' }, author: authorFixture({ source: AUTHOR_SOURCE.agent, origin: RUN }) },
       ts: '2026-01-01T00:00:59.000Z',
     })
     const notes = foldPlanNotes([poison, written({ id: 'masterplan', scope, tier: 'plan', title: 'M' })], scope)

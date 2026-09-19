@@ -2,7 +2,7 @@ import { existsSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { z } from 'zod'
-import { COMMIT_STEP_ID, STEP_ROLE, errorMessage, noteKey, nonEmptyLines, sha256, toolError, type ResolvedTool } from '@orc/contracts'
+import { COMMIT_STEP_ID, ORC_CHAT_ID, STEP_ROLE, errorMessage, noteKey, nonEmptyLines, sha256, toolError, type Origin, type ResolvedTool } from '@orc/contracts'
 import type { Kernel } from '../kernel'
 import { subtreeUsage } from '../projections'
 import type { CitingNotes } from './scoped-changes-tool'
@@ -125,7 +125,7 @@ export function commitTool(opts: {
   // powers the receipt's stillDrifted honesty line — notes citing committed paths that no step of
   // this task verified, which would otherwise sit stale-stamped and silent until the next drift scan.
   citing?: CitingNotes
-  p: { taskId: string; stepId: string; role: string; runToken: string }
+  p: { taskId: string; stepId: string; role: string; runToken: string; origin: Origin }
 }): ResolvedTool[] {
   const { kernel, dir, restamp, reverify, citing, p } = opts
   // both terms, like scoped_changes: the committer role is kernel-set (withCommitStep, enforced by
@@ -362,7 +362,10 @@ export function commitTool(opts: {
           if ('error' in real) return { output: { error: real.error }, isError: true }
           // pathspec commit: commits the named paths' content and nothing else, so an unrelated
           // entry someone left in the shared index can never ride along in this task's commit
-          const commit = await git(dir, ['commit', '-m', parsed.data.message, '--', ...real.paths])
+          // the chat rides into git's own environment, so the hook that sees the commit can name
+          // the interaction that made it; a chatless commit passes no key at all rather than ''
+          const commit = await git(dir, ['commit', '-m', parsed.data.message, '--', ...real.paths],
+            p.origin.chatId === null ? undefined : { env: { [ORC_CHAT_ID]: p.origin.chatId } })
           if (commit.code !== 0) return { output: { error: `git commit failed: ${commit.stderr.trim() || commit.stdout.trim()}` }, isError: true }
           created = true
           const shown = await git(dir, ['show', '--name-only', '--format=', 'HEAD'])

@@ -3,7 +3,7 @@ import { mkdtempSync, realpathSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { z } from 'zod'
-import { AUTHOR_SOURCE, DECISION_STATUS, EVENT_KIND, MemoryWrittenPayload } from '@orc/contracts'
+import { AUTHOR_SOURCE, DECISION_STATUS, Door, EVENT_KIND, MemoryWrittenPayload, NO_CHAT } from '@orc/contracts'
 import { loadConfig, requireProject, type ProjectConfig } from '@orc/kernel'
 import { createTestDb, seedTestWorkspace, TEST_PROJECT_ID, TEST_WORKSPACE_ID } from '@orc/kernel/test-helpers'
 import { ADR_SECTION, DECISION_REFUSAL } from '@orc/memory'
@@ -36,7 +36,7 @@ async function makeAdrCli() {
   const { kernel, log } = await openKernel(db.url, { projectId: TEST_PROJECT_ID })
   // the workspace must sit at THIS config's dir: `orc adr` resolves its author's workspace by
   // matching the process's directory (cwdAuthor), and refuses when nothing claims it
-  await seedTestWorkspace(log, realpathSync(config.dir))
+  await seedTestWorkspace(log, NO_CHAT(Door.cli), realpathSync(config.dir))
   const { host, hub } = await buildPlugins(config) // real plugin wiring — no stub casts
   cleanup.push(() => log.close(), () => hub.close(), () => host.shutdown())
   const { run } = cli(kernel, undefined, { host, hub, config, log })

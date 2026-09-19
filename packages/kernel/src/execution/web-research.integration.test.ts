@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from 'node:f
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { EVENT_KIND, MemoryScope, PAYLOAD_SCHEMAS, type NoteView } from '@orc/contracts'
+import { AUTHOR_SOURCE, Door, EVENT_KIND, MemoryScope, NO_CHAT, PAYLOAD_SCHEMAS, type NoteView, type Origin } from '@orc/contracts'
 import { draftFixture, must, stepFixture } from '@orc/contracts/fixtures'
 import { createMcpHub } from '@orc/mcp-client'
 import { apiLoopExecutor } from '@orc/executor-api-loop'
@@ -26,6 +26,8 @@ const PAGE = `${INJECTION} — Postgres 16 shipped its logical replication failo
 const FINDING = 'Postgres 16 added logical replication failover.'
 const SOURCE_URL = 'https://example.test/postgres-16-notes'
 
+const CLI: Origin = NO_CHAT(Door.cli)
+
 describe('sourced web research through a durable run (integration)', () => {
   const cleanup: (() => Promise<void> | void)[] = []
   // LIFO: the port and log must close before the database they hold connections to is dropped,
@@ -42,7 +44,7 @@ describe('sourced web research through a durable run (integration)', () => {
     const log = storage.events
     const kernel = new Kernel(log)
     // a task must name a workspace the fold has seen — one seeded record, then tasks as before
-    await seedTestWorkspace(log)
+    await seedTestWorkspace(log, CLI)
     const config = testConfig(pg.url, {
       vaultDir,
       projectDbUrl: ts.url, projectDbNamespace: ts.ns, projectDbName: ts.db,
@@ -78,17 +80,17 @@ describe('sourced web research through a durable run (integration)', () => {
       providers: new Map([['fake', { costs: {}, languageModel: () => model }]]),
       executors: new Map([['api-loop', apiLoopExecutor()]]),
       skills, tools: hub,
-      stepTools: p => memory.bindStep({ author: { source: 'agent', workspaceId: p.workspaceId, taskId: p.taskId, stepId: p.stepId, runToken: p.runToken, executor: p.executor, model: p.model, role: p.role }, step: p.step, taskId: p.taskId, ancestorTaskIds: p.ancestorTaskIds }),
+      stepTools: p => memory.bindStep({ author: { source: AUTHOR_SOURCE.agent, origin: p.origin, workspaceId: p.workspaceId, taskId: p.taskId, stepId: p.stepId, runToken: p.runToken, executor: p.executor, model: p.model, role: p.role }, step: p.step, taskId: p.taskId, ancestorTaskIds: p.ancestorTaskIds }),
     })
     await port.launch()
     cleanup.push(() => port.shutdown())
     cleanup.push(() => log.close())
 
-    const t = await kernel.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'research pg16', spec: 'what shipped in postgres 16' })
+    const t = await kernel.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'research pg16', spec: 'what shipped in postgres 16' }, CLI)
     await kernel.proposePlan(t.id, draftFixture([stepFixture({
       modelRef: 'fake/m', skillRefs: ['web-research'], toolRefs: ['fixture/echo'],
-    })]))
-    await kernel.approvePlan(t.id)
+    })]), CLI)
+    await kernel.approvePlan(t.id, undefined, undefined, CLI)
     expect(await (await port.startRun(t.id)).wait()).toBe('done')
 
     // the shipped skill reached the model, and the trusted MCP tool actually ran

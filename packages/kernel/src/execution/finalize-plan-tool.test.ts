@@ -2,10 +2,12 @@ import { describe, expect, it } from 'bun:test'
 import { COMMIT_STEP_ID, FINISH_STEP_ID, GROUNDED_APPROVAL_DOOR, STEP_ROLE, type MemoryLink, type PlanNote } from '@orc/contracts'
 import { must, planNoteFixture } from '@orc/contracts/fixtures'
 import { finalizePlanTool } from './finalize-plan-tool'
+import { runOrigin } from './run-chat'
 import { instantiateFrozenPlan, planGraphHash } from './strategies/grounded-plan'
 import { withFinishStep } from '../finish-step'
 
-const p = { taskId: 't1', stepId: 'plan', runToken: 'step:t1:plan:a1', role: 'auditor', executor: 'api-loop', modelRef: 'anthropic/x', maxIterations: 30 }
+// the planning step runs inside its run's chat, so the frozen split it proposes is stamped with it
+const p = { taskId: 't1', stepId: 'plan', runToken: 'step:t1:plan:a1', role: 'auditor', executor: 'api-loop', modelRef: 'anthropic/x', maxIterations: 30, origin: runOrigin('run:t1:v1') }
 const config = { maxDepth: 3 }
 
 const note = (over: Partial<PlanNote> & { id: string }): PlanNote =>

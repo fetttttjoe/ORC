@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'bun:test'
 import { QueryClient } from '@tanstack/query-core'
+import { ScopeType } from '@orc/contracts/scope'
 import { TOUCHABLE, VIEW } from '@orc/ui-core/wire'
-import { allViewsKey, healthKey, touchKey, viewKey } from './view-client'
+import { type ApiError, setApiErrorHandler } from './client'
+import { allViewsKey, fetchView, healthKey, touchKey, viewKey } from './view-client'
 
 const isStale = (qc: QueryClient, k: readonly unknown[]): boolean | undefined => qc.getQueryState(k as unknown[])?.isInvalidated
 
@@ -14,15 +16,20 @@ describe('touchKey / viewKey — partial matching', () => {
     const qc = new QueryClient()
     qc.setQueryData(viewKey('p', VIEW.node, { id: 'a' }), 1)
     qc.setQueryData(viewKey('p', VIEW.node, { id: 'b' }), 1)
-    qc.setQueryData(viewKey('p', VIEW.timeline, { taskId: 'a', limit: 5 }), 1)
+    const held = { scope: { type: ScopeType.chat, id: 'c1' }, limit: 5 }
+    qc.setQueryData(viewKey('p', VIEW.timeline, held), 1)
+    qc.setQueryData(viewKey('p', VIEW.timeline, { scope: { type: ScopeType.chat, id: 'c2' }, limit: 5 }), 1)
 
     // touched entries carry `{ name, params }` — `name` is a TouchableName (wire.ts's `Touch`).
     await qc.invalidateQueries({ queryKey: touchKey('p', { name: VIEW.node, params: { id: 'a' } }) })
     expect(isStale(qc, viewKey('p', VIEW.node, { id: 'a' }))).toBe(true)
     expect(isStale(qc, viewKey('p', VIEW.node, { id: 'b' }))).toBe(false)
 
-    await qc.invalidateQueries({ queryKey: touchKey('p', { name: VIEW.timeline, params: {} }) })
-    expect(isStale(qc, viewKey('p', VIEW.timeline, { taskId: 'a', limit: 5 }))).toBe(true)
+    // a scope pattern matches NESTED-partially: the chat it names goes stale, the other chat's
+    // pane does not — which is what keeps every chat pane off every other chat's cadence
+    await qc.invalidateQueries({ queryKey: touchKey('p', { name: VIEW.timeline, params: { scope: { type: ScopeType.chat, id: 'c1' } } }) })
+    expect(isStale(qc, viewKey('p', VIEW.timeline, held))).toBe(true)
+    expect(isStale(qc, viewKey('p', VIEW.timeline, { scope: { type: ScopeType.chat, id: 'c2' }, limit: 5 }))).toBe(false)
   })
 })
 
@@ -41,5 +48,22 @@ describe('allViewsKey', () => {
     expect(isStale(qc, viewKey('p', VIEW.node, { id: 'a' }))).toBe(true)
     expect(isStale(qc, viewKey('other-project', VIEW.plans, { taskId: 'x' }))).toBe(true)
     expect(isStale(qc, viewKey('p', TOUCHABLE.health, {}))).toBe(true)
+  })
+})
+
+describe('fetchView — a subject that no longer exists', () => {
+  it('answers null for a node that is gone, and reports no error', async () => {
+    const reported: ApiError[] = []
+    const realFetch = globalThis.fetch
+    setApiErrorHandler(err => reported.push(err))
+    globalThis.fetch = (async () => new Response(JSON.stringify({ error: 'node: not found' }), { status: 404 })) as typeof fetch
+    try {
+      const answer = await fetchView('p', VIEW.node, { id: 'note:project\u0000deleted-note' })
+      expect(answer.data).toBeNull()
+      expect(reported).toEqual([])
+    } finally {
+      globalThis.fetch = realFetch
+      setApiErrorHandler(() => {})
+    }
   })
 })

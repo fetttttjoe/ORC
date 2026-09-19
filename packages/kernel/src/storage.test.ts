@@ -7,12 +7,19 @@ import pg from 'pg'
 import { drizzle } from 'drizzle-orm/node-postgres'
 import { migrate } from 'drizzle-orm/node-postgres/migrator'
 import { jsonb, pgTable, text } from 'drizzle-orm/pg-core'
-import { EVENT_KIND, isRecord, isTerminalError, type EventInput, type OperationSpec } from '@orc/contracts'
-import { must } from '@orc/contracts/fixtures'
+import { Door, EVENT_KIND, isRecord, isTerminalError, NO_CHAT, type EventInput, type OperationSpec } from '@orc/contracts'
+import { authorFixture, eventFixture, must } from '@orc/contracts/fixtures'
+import { KernelError, KERNEL_ERROR_CODE } from './errors'
 import { listProjectIds, openStorage, type EventLog, type Storage } from './storage'
 import { isMissingMigrationTable, migrateDatabase } from './storage/migrate'
 import { events } from './schema'
 import { createTestDb, TEST_PROJECT_ID, TEST_WORKSPACE_ID } from './test-helpers'
+
+// one spelling of a chatless CLI envelope — every append names both keys, so a per-literal copy
+// would be a dozen places to edit the next time provenance gains one
+const ORIGIN = NO_CHAT(Door.cli)
+// the project the backfilling migration parks pre-existing rows in — no log ever opens it
+const LEGACY_PROJECT_ID = 'legacy'
 
 const dbs: Array<{ drop: () => Promise<void> }> = []
 afterAll(async () => {
@@ -41,7 +48,7 @@ describe('listProjectIds', () => {
     const other = '99999999-9999-9999-9999-999999999999'
     const s2 = await openStorage(db.url, { projectId: other })
     db.onClose(() => s2.close())
-    const draft = { taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_written, payload: { note: { id: 'p', title: 'p' }, author: { source: 'cli', workspaceId: TEST_WORKSPACE_ID } } } as const
+    const draft = { ...ORIGIN, taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_written, payload: { note: { id: 'p', title: 'p' }, author: authorFixture() } } as const
     await s1.events.append(draft)
     await s2.events.append(draft)
     expect(await listProjectIds(db.url)).toEqual([other, TEST_PROJECT_ID]) // s2 wrote last
@@ -92,7 +99,7 @@ describe('schema migration', () => {
 })
 
 const statusEvent = (taskId = 't1'): EventInput => ({
-  taskId, stepId: null, runToken: null,
+  ...ORIGIN, taskId, stepId: null, runToken: null,
   kind: EVENT_KIND.task_status_changed,
   payload: { taskId, from: 'draft', to: 'awaiting_approval' },
 })
@@ -125,7 +132,7 @@ describe('EventLog (postgres)', () => {
   it('strips \\u0000 from payload strings (jsonb cannot store them)', async () => {
     const log = await freshLog()
     const rec = await log.append({
-      taskId: 't1', stepId: 's1', runToken: 'r1',
+      ...ORIGIN, taskId: 't1', stepId: 's1', runToken: 'r1',
       kind: EVENT_KIND.tool_result,
       payload: {
         stepId: 's1', runToken: 'r1', iteration: 1, toolCallId: 'c1', toolName: 'fs_read',
@@ -174,19 +181,23 @@ describe('EventLog (postgres)', () => {
     dbs.push(db)
     const migrations = fileURLToPath(new URL('../drizzle', import.meta.url))
 
-    // stage a pre-0002 database: apply only migrations 0000 + 0001
-    const stage = mkdtempSync(path.join(tmpdir(), 'orc-mig-'))
-    mkdirSync(path.join(stage, 'meta'))
-    const journal = JSON.parse(readFileSync(path.join(migrations, 'meta', '_journal.json'), 'utf8'))
-    const staged = { ...journal, entries: journal.entries.slice(0, 2) }
-    writeFileSync(path.join(stage, 'meta', '_journal.json'), JSON.stringify(staged))
-    for (const entry of staged.entries)
-      copyFileSync(path.join(migrations, `${entry.tag}.sql`), path.join(stage, `${entry.tag}.sql`))
+    // a database frozen after the first `count` migrations, so a row can be written against the
+    // shape that existed then
+    const stageThrough = (count: number): string => {
+      const stage = mkdtempSync(path.join(tmpdir(), 'orc-mig-'))
+      mkdirSync(path.join(stage, 'meta'))
+      const journal = JSON.parse(readFileSync(path.join(migrations, 'meta', '_journal.json'), 'utf8'))
+      const staged = { ...journal, entries: journal.entries.slice(0, count) }
+      writeFileSync(path.join(stage, 'meta', '_journal.json'), JSON.stringify(staged))
+      for (const entry of staged.entries)
+        copyFileSync(path.join(migrations, `${entry.tag}.sql`), path.join(stage, `${entry.tag}.sql`))
+      return stage
+    }
 
     const pool = new pg.Pool({ connectionString: db.url })
     db.onClose(() => pool.end())
     const raw = drizzle(pool)
-    await migrate(raw, { migrationsFolder: stage })
+    await migrate(raw, { migrationsFolder: stageThrough(2) })
     // one row written against the old schema — no project_id column exists yet
     const legacyEvents = pgTable('events', {
       taskId: text('task_id'),
@@ -198,13 +209,24 @@ describe('EventLog (postgres)', () => {
       payload: { taskId: 't-legacy', from: 'draft', to: 'awaiting_approval' },
     })
 
-    // applying the remaining migration backfills project_id on the pre-existing rows
+    // the backfilling migration assigns the pre-existing row to the legacy project
+    await migrate(raw, { migrationsFolder: stageThrough(3) })
+    const backfilledEvents = pgTable('events', { projectId: text('project_id').notNull() })
+    const row = must((await raw.select().from(backfilledEvents))[0], 'first row from events table')
+    expect(row.projectId).toBe(LEGACY_PROJECT_ID)
+
+    // the door column is NOT NULL with no default — it can only be added to an empty table, so the
+    // legacy row is re-created once the chain is complete
+    await raw.delete(legacyEvents)
     await migrateDatabase(db.url)
+    await raw.insert(events).values({
+      ...ORIGIN, projectId: LEGACY_PROJECT_ID, taskId: 't-legacy',
+      kind: EVENT_KIND.task_status_changed,
+      payload: { taskId: 't-legacy', from: 'draft', to: 'awaiting_approval' },
+    })
     const log = (await openStorage(db.url, { projectId: TEST_PROJECT_ID })).events
     db.onClose(() => log.close())
     expect(await log.all()).toHaveLength(0) // legacy rows are unreachable from any project
-    const row = must((await raw.select().from(events))[0], 'first row from events table')
-    expect(row.projectId).toBe('legacy')
   })
 
   it('isolates projects sharing one database: each log reads only its own events', async () => {
@@ -226,7 +248,7 @@ describe('EventLog (postgres)', () => {
     const log = await freshLog()
     await log.append(statusEvent('t1'))
     await log.append({
-      taskId: 't2', stepId: null, runToken: null, kind: EVENT_KIND.task_created,
+      ...ORIGIN, taskId: 't2', stepId: null, runToken: null, kind: EVENT_KIND.task_created,
       payload: { task: { id: 't2', parentId: null, workspaceId: TEST_WORKSPACE_ID, type: 'generic', title: 't2', spec: '', status: 'draft', zone: [], budgetUSD: null, depth: 0, createdAt: 'T' } },
     })
     await log.append(statusEvent('t3'))
@@ -252,6 +274,39 @@ describe('EventLog (postgres)', () => {
         payload: { taskId: 't1', from: 'approved', to: 'running' },
       }),
     ).rejects.toThrow(/idempotency key/)
+    expect(await log.all()).toHaveLength(1)
+  })
+
+  it('round-trips the envelope: a chat id, its absence, and the door the call entered by', async () => {
+    const log = await freshLog()
+    const inChat = await log.append({ ...statusEvent(), chatId: 'c1', door: Door.web })
+    expect(inChat).toEqual(eventFixture({
+      seq: inChat.seq, projectId: TEST_PROJECT_ID, chatId: 'c1', door: Door.web,
+      kind: EVENT_KIND.task_status_changed,
+      payload: { taskId: 't1', from: 'draft', to: 'awaiting_approval' },
+      ts: inChat.ts,
+    }))
+    await log.append(statusEvent())
+    // read back from the rows: a column the insert never filled still round-trips through the
+    // record the append returned
+    expect((await log.byTask('t1')).map(e => [e.chatId, e.door])).toEqual([['c1', Door.web], [null, Door.cli]])
+  })
+
+  it('idempotency: same key + a different chatId rejects instead of sharing the key', async () => {
+    const log = await freshLog()
+    const keyed = { ...statusEvent(), idempotencyKey: 'r1:status:0' }
+    await log.append(keyed)
+    const err = await log.append({ ...keyed, chatId: 'c1' }).catch((e: unknown) => e)
+    expect(err instanceof KernelError ? err.code : err).toBe(KERNEL_ERROR_CODE.idempotency_conflict)
+    expect(await log.all()).toHaveLength(1)
+  })
+
+  it('idempotency: same key + a different door rejects instead of sharing the key', async () => {
+    const log = await freshLog()
+    const keyed = { ...statusEvent(), idempotencyKey: 'r1:status:0' }
+    await log.append(keyed)
+    const err = await log.append({ ...keyed, door: Door.mcp }).catch((e: unknown) => e)
+    expect(err instanceof KernelError ? err.code : err).toBe(KERNEL_ERROR_CODE.idempotency_conflict)
     expect(await log.all()).toHaveLength(1)
   })
 
@@ -308,7 +363,7 @@ describe('EventLog (postgres)', () => {
       })).events
       db.onClose(() => log.close())
       await log.append({
-        taskId: 't1', stepId: 's1', runToken: 'r1', kind: EVENT_KIND.tool_result,
+        ...ORIGIN, taskId: 't1', stepId: 's1', runToken: 'r1', kind: EVENT_KIND.tool_result,
         payload: {
           stepId: 's1', runToken: 'r1', iteration: 1, toolCallId: 'c1', toolName: 'http',
           isError: false,
@@ -369,7 +424,7 @@ describe('EventLog (postgres)', () => {
   })
 })
 
-const OP_CONTEXT = { taskId: 't1', stepId: 's1', runToken: 'step:t1:s1:a1' }
+const OP_CONTEXT = { taskId: 't1', stepId: 's1', runToken: 'step:t1:s1:a1', origin: ORIGIN }
 const OP_SPEC: OperationSpec = { operationId: 'step:t1:s1:a1:model:1', kind: 'model', name: 'fake/m', before: { messages: ['hi'] } }
 
 describe('OperationJournal', () => {
@@ -480,8 +535,8 @@ describe('OperationJournal', () => {
       stepId: 's1', runToken: 'r1',
       signal: { stepId: 's1', runToken: 'r1', outcome: 'success', summary: 'ok', outputs: undefined },
     }
-    const first = await log.append({ taskId: 't1', stepId: 's1', runToken: 'r1', kind: EVENT_KIND.signal_received, payload, idempotencyKey: 'r1:signal' })
-    const replay = await log.append({ taskId: 't1', stepId: 's1', runToken: 'r1', kind: EVENT_KIND.signal_received, payload, idempotencyKey: 'r1:signal' })
+    const first = await log.append({ ...ORIGIN, taskId: 't1', stepId: 's1', runToken: 'r1', kind: EVENT_KIND.signal_received, payload, idempotencyKey: 'r1:signal' })
+    const replay = await log.append({ ...ORIGIN, taskId: 't1', stepId: 's1', runToken: 'r1', kind: EVENT_KIND.signal_received, payload, idempotencyKey: 'r1:signal' })
     expect(replay.seq).toBe(first.seq) // jsonb drops the key; the comparison must agree
   })
 
@@ -530,12 +585,12 @@ describe('OperationJournal', () => {
 // history to find it — inside the project advisory lock, which serializes every other writer.
 describe('latestNoteEvent', () => {
   const wrote = (id: string, scope: string, body: string) => ({
-    taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_written,
-    payload: { note: { id, scope, title: id, body }, author: { source: 'cli' as const, workspaceId: TEST_WORKSPACE_ID } },
+    ...ORIGIN, taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_written,
+    payload: { note: { id, scope, title: id, body }, author: authorFixture() },
   })
   const deleted = (id: string, scope: string) => ({
-    taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_deleted,
-    payload: { id, scope, author: { source: 'cli' as const, workspaceId: TEST_WORKSPACE_ID } },
+    ...ORIGIN, taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_deleted,
+    payload: { id, scope, author: authorFixture() },
   })
 
   it('returns the newest event for that note, ignoring other notes and other scopes', async () => {

@@ -15,6 +15,7 @@ import { MockLanguageModelV4 } from 'ai/test'
 export interface ScriptedTurn {
   text?: string
   toolCalls?: Array<{ toolCallId: string; toolName: string; input: unknown }>
+  throws?: unknown
 }
 
 // `seenTools` (optional): receives the ADVERTISED tool names per call — the loop narrows the
@@ -25,6 +26,7 @@ export function scriptModel(turns: ScriptedTurn[], seenTools?: string[][]) {
     doGenerate: async (options: { tools?: Array<{ name: string }> }) => {
       seenTools?.push((options.tools ?? []).map(t => t.name).sort())
       const turn = turns[i++] ?? { text: '' }
+      if (turn.throws !== undefined) throw turn.throws
       const isToolCall = (turn.toolCalls?.length ?? 0) > 0
       return {
         finishReason: { unified: isToolCall ? 'tool-calls' as const : 'stop' as const, raw: undefined },

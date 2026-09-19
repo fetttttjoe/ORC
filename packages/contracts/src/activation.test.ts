@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'bun:test'
 import { activation, activationBoost, foldMemory, edgeKey, noteKey, EVENT_KIND, LINK_KIND } from './index'
-import { TEST_WORKSPACE_ID } from './fixtures'
+import { authorFixture } from './fixtures'
 
 const T0 = '2026-07-01T00:00:00.000Z'
 const days = (n: number) => new Date(Date.parse(T0) + n * 86_400_000).toISOString()
@@ -35,7 +35,7 @@ describe('activationBoost', () => {
 
 describe('foldMemory — node access', () => {
   it('counts hits per (scope,id) with the last event ts, skipping unparseable payloads', () => {
-    const ev = (id: string, ts: string) => ({ kind: EVENT_KIND.memory_accessed, ts, payload: { id, scope: 'project', mode: 'read', author: { source: 'cli', workspaceId: TEST_WORKSPACE_ID } } })
+    const ev = (id: string, ts: string) => ({ kind: EVENT_KIND.memory_accessed, ts, payload: { id, scope: 'project', mode: 'read', author: authorFixture() } })
     const m = foldMemory([ev('a', T0), ev('a', days(1)), ev('b', T0), { kind: EVENT_KIND.memory_accessed, ts: T0, payload: { junk: true } }]).access
     expect(m.get(noteKey('project', 'a'))).toEqual({ hits: 2, lastAccessedAt: days(1) })
     expect(m.get(noteKey('project', 'b'))).toEqual({ hits: 1, lastAccessedAt: T0 })
@@ -48,7 +48,7 @@ describe('foldMemory — edge access', () => {
   it('counts hits per edge key with the last event ts, skipping unparseable and via-less payloads', () => {
     const via = { seed: 'a', kind: LINK_KIND.supersedes, direction: 'out' as const }
     const ev = (ts: string, extra: Record<string, unknown> = {}) =>
-      ({ kind: EVENT_KIND.memory_accessed, ts, payload: { id: 'b', scope: 'project', mode: 'read', author: { source: 'cli', workspaceId: TEST_WORKSPACE_ID }, ...extra } })
+      ({ kind: EVENT_KIND.memory_accessed, ts, payload: { id: 'b', scope: 'project', mode: 'read', author: authorFixture(), ...extra } })
     const m = foldMemory([
       ev(T0, { via }),
       ev(days(1), { via }),
@@ -62,8 +62,8 @@ describe('foldMemory — edge access', () => {
   it('canonicalizes both traversal directions of one authored edge onto ONE key', () => {
     // authored edge a -[supersedes]-> b. Walking out from seed a lands on b (direction out, seed a).
     // Walking in from seed b lands on a (direction in, seed b) — the SAME authored edge, opposite hop.
-    const outHop = { kind: EVENT_KIND.memory_accessed, ts: T0, payload: { id: 'b', scope: 'project', mode: 'read', author: { source: 'cli', workspaceId: TEST_WORKSPACE_ID }, via: { seed: 'a', kind: LINK_KIND.supersedes, direction: 'out' } } }
-    const inHop = { kind: EVENT_KIND.memory_accessed, ts: days(1), payload: { id: 'a', scope: 'project', mode: 'read', author: { source: 'cli', workspaceId: TEST_WORKSPACE_ID }, via: { seed: 'b', kind: LINK_KIND.supersedes, direction: 'in' } } }
+    const outHop = { kind: EVENT_KIND.memory_accessed, ts: T0, payload: { id: 'b', scope: 'project', mode: 'read', author: authorFixture(), via: { seed: 'a', kind: LINK_KIND.supersedes, direction: 'out' } } }
+    const inHop = { kind: EVENT_KIND.memory_accessed, ts: days(1), payload: { id: 'a', scope: 'project', mode: 'read', author: authorFixture(), via: { seed: 'b', kind: LINK_KIND.supersedes, direction: 'in' } } }
     const m = foldMemory([outHop, inHop]).edges
     expect(m.size).toBe(1)
     expect(m.get(edgeKey('project', 'a', 'b', 'supersedes'))).toEqual({ hits: 2, lastAccessedAt: days(1) })
@@ -75,11 +75,11 @@ describe('foldMemory — edge access', () => {
 describe('foldMemory — one pass', () => {
   const note = (id: string, ts: string, retention = 'durable') => ({
     kind: EVENT_KIND.memory_written, ts,
-    payload: { note: { id, title: id, retention }, author: { source: 'cli', workspaceId: TEST_WORKSPACE_ID } },
+    payload: { note: { id, title: id, retention }, author: authorFixture() },
   })
   const read = (id: string, ts: string) => ({
     kind: EVENT_KIND.memory_accessed, ts,
-    payload: { id, scope: 'project', mode: 'read', author: { source: 'cli', workspaceId: TEST_WORKSPACE_ID } },
+    payload: { id, scope: 'project', mode: 'read', author: authorFixture() },
   })
 
   it('derives live notes, write times and access stats from a single walk', () => {
@@ -93,7 +93,7 @@ describe('foldMemory — one pass', () => {
   it('a deleted note leaves the live set but keeps no write time it no longer has', () => {
     const m = foldMemory([
       note('a', T0),
-      { kind: EVENT_KIND.memory_deleted, ts: days(1), payload: { id: 'a', scope: 'project', author: { source: 'cli', workspaceId: TEST_WORKSPACE_ID } } },
+      { kind: EVENT_KIND.memory_deleted, ts: days(1), payload: { id: 'a', scope: 'project', author: authorFixture() } },
     ])
     expect(m.notes.size).toBe(0)
     expect(m.writes.has(noteKey('project', 'a'))).toBe(false)

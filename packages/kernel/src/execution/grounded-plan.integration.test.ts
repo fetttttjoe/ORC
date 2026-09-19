@@ -4,9 +4,9 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import {
-  EVENT_KIND, FINISH_STEP_ID, ISOLATION_TIER, LINK_KIND, NOTE_TIER, PAYLOAD_SCHEMAS, SIGNAL_OUTCOME, TASK_STATUS, type NoteView,
+  AUTHOR_SOURCE, Door, EVENT_KIND, FINISH_STEP_ID, ISOLATION_TIER, LINK_KIND, NO_CHAT, NOTE_TIER, PAYLOAD_SCHEMAS, SIGNAL_OUTCOME, TASK_STATUS, type NoteView,
   type AgentExecutor, type Analyzer, type CoverageReport, type EventDraft, type ExecutorContext,
-  type MemoryNoteDraft, type PlanStep, type ResolvedTool,
+  type MemoryNoteDraft, type Origin, type PlanStep, type ResolvedTool,
   type SplitResult, type UnifiedEvent,
 } from '@orc/contracts'
 import { must } from '@orc/contracts/fixtures'
@@ -20,6 +20,8 @@ import { finalizePlanTool } from './finalize-plan-tool'
 import { readAnnotationsTool } from './read-annotations-tool'
 import { splitTool } from './split-tool'
 import { planScope } from './strategies/grounded-plan'
+
+const CLI: Origin = NO_CHAT(Door.cli)
 
 // Tool outputs are contract-`unknown`; these name the shapes this suite reads back at the boundary.
 const AnnotationsOutput = z.object({ annotations: z.array(z.object({ targetNote: z.string() })) })
@@ -198,7 +200,7 @@ async function bringUp() {
   // workflow (the real CLI wiring: new Kernel(log, refValidator, analyzers, dbosSend)).
   const kernel = new Kernel(log, undefined, new Map<string, Analyzer>([['agent-analyzer', testAnalyzer]]), dbosSend)
   // a task must name a workspace the fold has seen — one seeded record, then tasks as before
-  await seedTestWorkspace(log)
+  await seedTestWorkspace(log, CLI)
   const memory = await createMemory({ log, config })
   await memory.projector.start()
   const port = await createDbosPort({
@@ -218,7 +220,7 @@ async function bringUp() {
     stepTools: p => {
       // step role keys the memory tier: scout (analyze) / auditor (plan) narrow-or-widen the surface;
       // every other role (the implementer children) gets verify. Scout MUST keep memory_write (FixA).
-      const bound = memory.bindStep({ author: { source: 'agent', workspaceId: p.workspaceId, taskId: p.taskId, stepId: p.stepId, runToken: p.runToken, executor: p.executor, model: p.model, role: p.role }, step: p.step, taskId: p.taskId, ancestorTaskIds: p.ancestorTaskIds, role: memoryRoleFor(p.role) })
+      const bound = memory.bindStep({ author: { source: AUTHOR_SOURCE.agent, origin: p.origin, workspaceId: p.workspaceId, taskId: p.taskId, stepId: p.stepId, runToken: p.runToken, executor: p.executor, model: p.model, role: p.role }, step: p.step, taskId: p.taskId, ancestorTaskIds: p.ancestorTaskIds, role: memoryRoleFor(p.role) })
       return { memory: bound.memory, tools: [
         ...bound.tools,
         ...splitTool({ kernel, config: { approvalPolicy: config.approvalPolicy, maxDepth: config.maxDepth }, p }),
@@ -243,7 +245,7 @@ describe('grounded-plan e2e: the full consent → analyze → plan-graph → ann
   it('consent yes → grounded plan → targeted re-plan → approve → dependency-ordered child execution', async () => {
     const { kernel, memory, port, cleanup } = await bringUp()
     try {
-      const t = await kernel.createGroundedTask({ workspaceId: TEST_WORKSPACE_ID, title: 'Web app', spec: 'build a web app', modelRef: 'fake/m', analyzerRef: 'agent-analyzer' })
+      const t = await kernel.createGroundedTask({ workspaceId: TEST_WORKSPACE_ID, title: 'Web app', spec: 'build a web app', modelRef: 'fake/m', analyzerRef: 'agent-analyzer' }, CLI)
       mutateAfterApprovalTasks.add(t.id)
       const scope = planScope(t.id)
       const feedbackCount = async (topic: string): Promise<number> =>
@@ -253,7 +255,7 @@ describe('grounded-plan e2e: the full consent → analyze → plan-graph → ann
 
       // consent gate → yes (the real durable feedback gate: recv parks, replyFeedback→DBOS.send resumes)
       expect(await waitFor(() => feedbackCount('consent').then(n => n >= 1))).toBe(true)
-      expect(await kernel.replyFeedback(t.id, 'yes')).toBe('consent')
+      expect(await kernel.replyFeedback(t.id, 'yes', CLI)).toBe('consent')
 
       // ASSERT (FixA Gap C): the analyze SCOUT authored its note via the REAL memory_write tool —
       // proof it runs under scout tier that STILL carries memory_write. Pre-FixA scout dropped
@@ -272,8 +274,8 @@ describe('grounded-plan e2e: the full consent → analyze → plan-graph → ann
       expect((await kernel.eventsFor(t.id)).some(e => e.kind === EVENT_KIND.split_proposed)).toBe(false)
 
       // annotate 'db' then reply 'go' (a targeted revise, not approve)
-      await kernel.annotatePlan(t.id, { targetNote: 'db', text: 'tighten the schema step' })
-      expect(await kernel.replyFeedback(t.id, 'go')).toBe('plan:1')
+      await kernel.annotatePlan(t.id, { targetNote: 'db', text: 'tighten the schema step' }, CLI)
+      expect(await kernel.replyFeedback(t.id, 'go', CLI)).toBe('plan:1')
 
       // wait for the revise to project, then ASSERT (a): annotating 'db' bumped ONLY db's revision;
       // sibling 'api' is byte-stable at revision 1 (targeted re-plan, D6).
@@ -292,7 +294,7 @@ describe('grounded-plan e2e: the full consent → analyze → plan-graph → ann
       // First approval binds revision 2. The scripted agent then mutates db to revision 3;
       // finalize rejects the stale hash and asks again instead of splitting.
       expect(await waitFor(() => feedbackCount('plan:2').then(n => n >= 1))).toBe(true)
-      expect(await kernel.replyFeedback(t.id, 'approve')).toBe('plan:2')
+      expect(await kernel.replyFeedback(t.id, 'approve', CLI)).toBe('plan:2')
       expect(await waitFor(() => feedbackCount('plan:3').then(n => n >= 1))).toBe(true)
       const stale = (await kernel.eventsFor(t.id)).find(e =>
         e.kind === EVENT_KIND.tool_result && PAYLOAD_SCHEMAS.tool_result.parse(e.payload).toolCallId === 'finalize-stale')
@@ -301,7 +303,7 @@ describe('grounded-plan e2e: the full consent → analyze → plan-graph → ann
       expect((await kernel.eventsFor(t.id)).some(e => e.kind === EVENT_KIND.split_proposed)).toBe(false)
 
       // A second approval binds revision 3 and permits the deterministic split.
-      expect(await kernel.replyFeedback(t.id, 'approve')).toBe('plan:3')
+      expect(await kernel.replyFeedback(t.id, 'approve', CLI)).toBe('plan:3')
 
       // ASSERT (d.1): the grounded run resolves 'done' (plan step signalled after finalize_plan)
       expect(await handle.wait()).toBe('done')
@@ -339,7 +341,7 @@ describe('grounded-plan e2e: the full consent → analyze → plan-graph → ann
   it('consent no → empty CoverageReport (analyzed:false) → assumption-mode plan with marked uncertainties', async () => {
     const { kernel, memory, port, cleanup } = await bringUp()
     try {
-      const t = await kernel.createGroundedTask({ workspaceId: TEST_WORKSPACE_ID, title: 'CLI tool', spec: 'ship a cli', modelRef: 'fake/m', analyzerRef: 'agent-analyzer' })
+      const t = await kernel.createGroundedTask({ workspaceId: TEST_WORKSPACE_ID, title: 'CLI tool', spec: 'ship a cli', modelRef: 'fake/m', analyzerRef: 'agent-analyzer' }, CLI)
       const scope = planScope(t.id)
       const feedbackCount = async (topic: string): Promise<number> =>
         (await kernel.eventsFor(t.id)).filter(e => e.kind === EVENT_KIND.feedback_requested && PAYLOAD_SCHEMAS.feedback_requested.parse(e.payload).topic === topic).length
@@ -348,7 +350,7 @@ describe('grounded-plan e2e: the full consent → analyze → plan-graph → ann
 
       // consent gate → NO (degradation path, RG7)
       expect(await waitFor(() => feedbackCount('consent').then(n => n >= 1))).toBe(true)
-      expect(await kernel.replyFeedback(t.id, 'no')).toBe('consent')
+      expect(await kernel.replyFeedback(t.id, 'no', CLI)).toBe('consent')
 
       // The fake checkpoints the same analysis_completed payload emitted by production's
       // report_coverage tool. The persisted uncertainty[] assertion below proves the report's
@@ -362,7 +364,7 @@ describe('grounded-plan e2e: the full consent → analyze → plan-graph → ann
 
       // drive the plan to done (no annotations → approve on the first ask_human)
       expect(await waitFor(() => feedbackCount('plan:1').then(n => n >= 1))).toBe(true)
-      expect(await kernel.replyFeedback(t.id, 'approve')).toBe('plan:1')
+      expect(await kernel.replyFeedback(t.id, 'approve', CLI)).toBe('plan:1')
       expect(await handle.wait()).toBe('done')
 
       // let the router-started child run settle before teardown (avoids racing memory.close())
@@ -390,16 +392,16 @@ describe('grounded-plan e2e: the full consent → analyze → plan-graph → ann
   it('memory_neighbors from the masterplan returns its subplan-notes (the plan-graph is consumable)', async () => {
     const { kernel, memory, port, cleanup } = await bringUp()
     try {
-      const t = await kernel.createGroundedTask({ workspaceId: TEST_WORKSPACE_ID, title: 'Service', spec: 'build a service', modelRef: 'fake/m', analyzerRef: 'agent-analyzer' })
+      const t = await kernel.createGroundedTask({ workspaceId: TEST_WORKSPACE_ID, title: 'Service', spec: 'build a service', modelRef: 'fake/m', analyzerRef: 'agent-analyzer' }, CLI)
       const scope = planScope(t.id)
       const feedbackCount = async (topic: string): Promise<number> =>
         (await kernel.eventsFor(t.id)).filter(e => e.kind === EVENT_KIND.feedback_requested && PAYLOAD_SCHEMAS.feedback_requested.parse(e.payload).topic === topic).length
 
       const handle = await port.startRun(t.id)
       expect(await waitFor(() => feedbackCount('consent').then(n => n >= 1))).toBe(true)
-      expect(await kernel.replyFeedback(t.id, 'yes')).toBe('consent')
+      expect(await kernel.replyFeedback(t.id, 'yes', CLI)).toBe('consent')
       expect(await waitFor(() => feedbackCount('plan:1').then(n => n >= 1))).toBe(true)
-      expect(await kernel.replyFeedback(t.id, 'approve')).toBe('plan:1')
+      expect(await kernel.replyFeedback(t.id, 'approve', CLI)).toBe('plan:1')
       expect(await handle.wait()).toBe('done')
 
       // let the router-started child run settle before teardown (avoids racing memory.close())

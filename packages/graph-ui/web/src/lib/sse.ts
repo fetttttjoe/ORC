@@ -6,6 +6,7 @@ import { fetchView, invalidateTouch } from '$lib/api/view-client'
 import type { ProjectEntry } from '$lib/api/types'
 import { Envelope as EnvelopeSchema } from '$lib/api/schemas'
 import { VIEW } from '@orc/ui-core/wire'
+import { ScopeType } from '@orc/contracts/scope'
 import { ID_LESS_SEQ, planFrame } from '$lib/frame-plan'
 import { graph } from '$lib/stores/graph.svelte'
 import { ledger } from '$lib/stores/ledger.svelte'
@@ -28,7 +29,8 @@ export function connectStream(opts: {
   // a catch-up frame (patch, no summary) means the narrative missed a window — refill it
   const backfill = (): void => {
     const from = ledger.lastRowSeq
-    void fetchView(project, VIEW.timeline, { sinceSeq: from })
+    // the ledger is the whole project's narrative, so its backfill is a project-scoped read
+    void fetchView(project, VIEW.timeline, { scope: { type: ScopeType.project }, sinceSeq: from })
       .then(({ data }) => {
         for (const row of data ?? []) ledger.add(row)
       })

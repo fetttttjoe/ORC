@@ -7,6 +7,7 @@ import {
 } from '@orc/contracts'
 import { AskHumanInput, JoinSplitsInput, SignalInput, TOOL_NAME, executeTool, releaseWriteClaims, toolSet } from './tools'
 import { isTransient } from './transient'
+import { isRateLimited, rateLimitWaitMs } from './rate-limit'
 
 // Pre-flight for declared outputs, so the model can fix a bad declaration instead of the
 // step failing at the runtime's trusted verification. Same rule set as the runtime
@@ -162,6 +163,38 @@ async function callModel(model: LanguageModel, messages: ModelMessage[], tools: 
   }
 }
 
+export type Sleep = (ms: number) => Promise<void>
+export type IsCancelled = () => Promise<boolean>
+const timerSleep: Sleep = ms => new Promise(resolve => setTimeout(resolve, ms))
+const neverCancelled: IsCancelled = async () => false
+export const CANCEL_POLL_MS = 5_000
+export const CANCELLED_WHILE_RATE_LIMITED = 'run cancelled while waiting out a provider rate limit'
+
+async function sleepUnlessCancelled(ms: number, sleep: Sleep, isCancelled: IsCancelled): Promise<boolean> {
+  for (let left = ms; left > 0; left -= CANCEL_POLL_MS) {
+    if (await isCancelled()) return false
+    await sleep(Math.min(left, CANCEL_POLL_MS))
+  }
+  return !(await isCancelled())
+}
+
+// Waiting INSIDE the operation is what keeps the conversation: a thrown 429 restarts the step.
+async function callModelWaitingOutRateLimits(
+  model: LanguageModel, messages: ModelMessage[], tools: ToolSet, sleep: Sleep, isCancelled: IsCancelled,
+): Promise<TurnResult> {
+  for (let waits = 0; ; waits++) {
+    try {
+      return await callModel(model, messages, tools)
+    } catch (err) {
+      const waitMs = rateLimitWaitMs(err, waits)
+      // terminal: a spent wait budget must not be spent again by every step retry
+      if (waitMs === null) throw isRateLimited(err) ? terminalError(errorMessage(err)) : err
+      console.warn(`rate limited: waiting ${Math.round(waitMs / 1000)}s before re-issuing the model call — ${errorMessage(err)}`)
+      if (!(await sleepUnlessCancelled(waitMs, sleep, isCancelled))) throw terminalError(CANCELLED_WHILE_RATE_LIMITED)
+    }
+  }
+}
+
 // The file tools that CHANGE a file — contracts' FS_WRITE_TOOL_NAMES, so this claim-tracking set
 // and kernel's audit projection (taskChangedPaths) can never drift apart. fs_read/fs_list are
 // absent by design: reading a file cannot falsify a claim about it, and a claim block after every
@@ -204,6 +237,8 @@ const KNOWLEDGE_PROTOCOL = `# Project knowledge protocol
 12. When a memory_neighbors row leads you to memory_read a note, pass via {seed: row.from, kind: row.via, direction: row.direction} — connections you actually use must strengthen.
 13. When you call signal, report the notes you pulled: knowledge.useful = ids that answered your question, knowledge.deadEnd = ids that wasted the step. Future readers see these verdicts beside each note — report honestly, dead ends included.`
 
+export const TURN_ECONOMY = `Turn economy: every model call costs seconds and the iteration budget counts calls, not tools, so the number of turns IS your wall clock. Send independent calls together in ONE turn — several fs_read of files you already know you need, several fs_edit to different files, a read alongside an exec. Keep calls in separate turns only when one of them needs the result of another.`
+
 // preload block arg, default '' — kept minimal and named rather than folded into
 // ExecutorContext, since it is a per-call render input, not step/run state.
 function buildPrompt(ctx: ExecutorContext<LanguageModel>, knownContextBlock = ''): string {
@@ -227,6 +262,7 @@ function buildPrompt(ctx: ExecutorContext<LanguageModel>, knownContextBlock = ''
     knownContextBlock, // between deps and the protocol (design: retrieval without a turn)
     KNOWLEDGE_PROTOCOL,
     `You have file tools scoped to your workspace. Iteration budget: ${ctx.step.maxIterations} model calls — plan to finish within it. When finished (or stuck), call the 'signal' tool — its summary is the only thing downstream steps will see.`,
+    TURN_ECONOMY,
   ].filter(Boolean).join('\n\n')
 }
 
@@ -292,7 +328,7 @@ async function preloadKnownContext(ctx: ExecutorContext<LanguageModel>): Promise
   return empty ? '' : renderKnownContext(recalled)
 }
 
-export function apiLoopExecutor(): AgentExecutor<LanguageModel> {
+export function apiLoopExecutor(sleep: Sleep = timerSleep): AgentExecutor<LanguageModel> {
   return {
     id: 'api-loop',
 
@@ -370,7 +406,7 @@ export function apiLoopExecutor(): AgentExecutor<LanguageModel> {
                 name: ctx.step.modelRef,
                 before: { messages: messages.slice(persistedThrough) },
               },
-              () => callModel(ctx.model, messages, finalIteration ? { [TOOL_NAME.signal]: signalTool } : tools),
+              () => callModelWaitingOutRateLimits(ctx.model, messages, finalIteration ? { [TOOL_NAME.signal]: signalTool } : tools, sleep, ctx.isCancelled ?? neverCancelled),
               (r): EventDraft[] => [{
                 kind: EVENT_KIND.agent_call,
                 // persist only the DELTA since the previous agent_call — the full cumulative

@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, it } from 'bun:test'
-import { claimId, MEMORY_LIMITS, PROJECT_NAME_NOTE_ID, type EmbeddingProvider, type EventRecord, type MemoryAuthor, EVENT_KIND } from '@orc/contracts'
+import { claimId, Door, MEMORY_LIMITS, NO_CHAT, PROJECT_NAME_NOTE_ID, type EmbeddingProvider, type EventRecord, type MemoryAuthor, EVENT_KIND } from '@orc/contracts'
 import { Surreal } from 'surrealdb'
 import { TEST_WORKSPACE_ID, eventFixture } from '@orc/contracts/fixtures'
 import { topicLabel } from './cluster'
@@ -16,7 +16,7 @@ const vec = (text: string): number[] => {
 }
 const fakeEmbedder: EmbeddingProvider = { embed: async texts => texts.map(vec) }
 
-const cli: MemoryAuthor = { source: 'cli', workspaceId: TEST_WORKSPACE_ID }
+const cli: MemoryAuthor = { source: 'cli', workspaceId: TEST_WORKSPACE_ID, origin: NO_CHAT(Door.cli) }
 const written = (seq: number, n: object): EventRecord =>
   eventFixture({ seq, taskId: null, kind: EVENT_KIND.memory_written, payload: { note: n, author: cli }, ts: `2026-07-26T0${seq}:00:00Z` })
 

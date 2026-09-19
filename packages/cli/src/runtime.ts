@@ -1,4 +1,4 @@
-import { AUTHOR_SOURCE, AUTO_HEAL_MODE, errorMessage, HOOK_NAME, NOTE_TIER, ROLE_SKILL, TERMINAL_TASK_STATUS, type AgentExecutor, type Analyzer, type MemoryAuthor, type ModelProvider } from '@orc/contracts'
+import { AUTHOR_SOURCE, AUTO_HEAL_MODE, Door, errorMessage, HOOK_NAME, NO_CHAT, NOTE_TIER, ROLE_SKILL, TERMINAL_TASK_STATUS, type AgentExecutor, type Analyzer, type MemoryAuthor, type ModelProvider } from '@orc/contracts'
 import { apiLoopExecutor } from '@orc/executor-api-loop'
 import { createAnthropicProvider } from '@orc/provider-anthropic'
 import { createOpenAIProvider } from '@orc/provider-openai'
@@ -18,6 +18,10 @@ import { commitTool, createDbosPort, createPluginHost, dbosSend, execTool, final
 // who touched a note nobody edited. Declared here, at the composition root that builds the author —
 // the reactor itself never sees it.
 const AUTO_HEAL_EXECUTOR = 'auto-heal'
+
+// What this supervisor process itself initiates (consolidation, the commit reactor's restamp and
+// sweep): no chat answered it, and no terminal typed it.
+const SUPERVISOR_ORIGIN = NO_CHAT(Door.supervisor)
 
 export function seedRegistries(config = loadConfig()) {
   const providers = new Map<string, ModelProvider<unknown>>([
@@ -146,7 +150,9 @@ export async function buildRuntime(
     // rather than off cwdAuthor.
     lifecycle = createMemoryLifecycle({
       log, store: memory.store,
-      authorFor: task => ({ source: AUTHOR_SOURCE.agent, executor: CONSOLIDATE_EXECUTOR, workspaceId: task.workspaceId, taskId: task.id }),
+      // Door.supervisor, not cli: this process, not a terminal, decided to consolidate — and no
+      // chat, because a lifecycle pass answers no message.
+      authorFor: task => ({ source: AUTHOR_SOURCE.agent, executor: CONSOLIDATE_EXECUTOR, workspaceId: task.workspaceId, taskId: task.id, origin: SUPERVISOR_ORIGIN }),
       distill: buildDistiller(host.providers, config.memoryConsolidateModel), catchUp: () => memoryProjector.catchUp(),
     })
     await lifecycle.start()
@@ -175,7 +181,7 @@ export async function buildRuntime(
       // 'agent' named through `executor`, NOT 'cli': nobody typed this. 'cli' means a human at a
       // terminal, and claiming it here would make every reactor-restamped note read `updatedBy: cli`
       // — the same mis-attribution consolidate.ts already carries a comment about.
-      restamp: async () => (await restampToHead(memoryStore, config.dir, await cwdAuthor(kernel, config.dir, AUTHOR_SOURCE.agent, { executor: AUTO_HEAL_EXECUTOR }))).length,
+      restamp: async () => (await restampToHead(memoryStore, config.dir, await cwdAuthor(kernel, config.dir, AUTHOR_SOURCE.agent, SUPERVISOR_ORIGIN, { executor: AUTO_HEAL_EXECUTOR }))).length,
       // a FRESH probe per pass: createDriftProbe caches per revision, and the tree this pass
       // must judge is the one the commit just changed — a reactor-lifetime probe would answer
       // from the previous commit's diffs
@@ -195,10 +201,10 @@ export async function buildRuntime(
             + 'Memory tools and read-only filesystem access only — never edit repository files, never run git commands. '
             + 'Finish by calling memory_recheck again and reporting both counts verbatim. '
             + "If the worklist outgrows your iteration budget, signal outcome 'partial' naming the healed and remaining ids.",
-        })
+        }, SUPERVISOR_ORIGIN)
         // Proposing is still not approving — the human gate and the spend stay exactly where
         // they were; see sweepPlanDraft for why the draft now carries its plan and lean budget.
-        await kernel.proposePlan(task.id, sweepPlanDraft(task.spec, config.memorySweepIterations))
+        await kernel.proposePlan(task.id, sweepPlanDraft(task.spec, config.memorySweepIterations), SUPERVISOR_ORIGIN)
       },
       warn: m => console.warn(m),
     })
@@ -214,7 +220,9 @@ export async function buildRuntime(
       // door here. One supervisor serves every workspace at once, so the process cwd says nothing
       // about where a given step's knowledge belongs; the port reads it from the TaskNode it
       // already folds. See createDbosPort's stepTools.
-      const author: MemoryAuthor = { source: AUTHOR_SOURCE.agent, workspaceId: p.workspaceId, taskId: p.taskId, stepId: p.stepId, runToken: p.runToken, executor: p.executor, model: p.model, role: p.role }
+      // p.origin is the RUNNING STEP's own origin (its run chat), never this process's: the note a
+      // step writes belongs to the conversation that step is.
+      const author: MemoryAuthor = { source: AUTHOR_SOURCE.agent, origin: p.origin, workspaceId: p.workspaceId, taskId: p.taskId, stepId: p.stepId, runToken: p.runToken, executor: p.executor, model: p.model, role: p.role }
       // step role keys the memory role: scout/auditor narrow or widen the tool surface
       // + epistemic posture; every other role (e.g. plain worker steps) gets today's verify role.
       const bound = bindStep({

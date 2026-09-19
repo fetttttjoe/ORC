@@ -3,8 +3,10 @@ import path from 'node:path'
 import { DBOS } from '@dbos-inc/dbos-sdk'
 import {
   EVENT_KIND, FAILURE_CLASS, MAX_AUTO_CONTINUATIONS, RUN_OUTCOME, SIGNAL_OUTCOME, STEP_ID, STEP_ROLE, TASK_STATUS, UNIFIED_EVENT_TYPE,
+  ChatRef, PAYLOAD_SCHEMAS,
   classifiedError, continuationTopic, errorMessage, failureClassOf, isApprovalAnswer, isTerminalError, resolveModel, costUSDFor,
-  type AgentExecutor, type Checkpoint, type CommitRecordedPayload, type EventDraft, type ExecutionPort, type ExecutorContext,
+  type AgentExecutor, type Checkpoint, type CommitRecordedPayload, type EventDraft, type EventRecord, type ExecutionPort, type ExecutorContext,
+  type Origin, type TaskNode,
   type FailureClass, type LoadedSkill, type ModelProvider, type OperationCheckpoint, type Plan, type PlanStep,
   type ResolvedTool, type RunHandle, type RunOutcome, type Signal, type SplitResult, type StepMemory, type TaskStatus, type ToolSource,
 } from '@orc/contracts'
@@ -18,6 +20,7 @@ import {
   type GroundingScope, type StalePathAnswer,
 } from './strategies/grounding-scope'
 import { verifyArtifacts } from './artifacts'
+import { runChatOpened, runOrigin } from './run-chat'
 import { fold, ancestorTaskIds, blockingVerdicts, canRetry, completedStepIds, nextAttempts, startedAttempts, remainingBudget, inheritedCwd, runCwd, type State } from '../projections'
 import { Kernel } from '../kernel'
 import { KERNEL_ERROR_CODE, KernelError } from '../errors'
@@ -63,8 +66,10 @@ const GATE_POLL_SECONDS = 3_600
 // nothing reused, nothing scoped. Kept explicit so the recorded checkpoint output has one shape.
 const NO_SCOPE: GroundingScope = { reused: [], rescan: [], paths: [], probed: false, perNote: [] }
 
-interface RunArgs { taskId: string; planVersion: number; retryIndex: number; cwd: string | null }
-interface StepArgs { taskId: string; stepId: string; planVersion: number; attempt: number; cwd: string | null }
+// origin is the RUN's, never the step workflow's: one run is one chat, and a per-step chat would
+// scatter a run's transcript across as many chats as it has steps.
+interface RunArgs { taskId: string; planVersion: number; retryIndex: number; cwd: string | null; origin: Origin }
+interface StepArgs { taskId: string; stepId: string; planVersion: number; attempt: number; cwd: string | null; origin: Origin }
 interface StepResult { stepId: string; ok: boolean }
 
 // the ONE place the deterministic step workflow id is built (start + cancel both use it)
@@ -92,30 +97,58 @@ export const dbosSend = (workflowId: string, message: string, topic: string, ide
 // the init step's output): the re-check makes the second call a clean no-op instead of a fixed-key
 // idempotency_conflict that would brick the task at 'running'.
 export async function appendRunInit(tx: EventLogOps, args: RunArgs, workflowId: string): Promise<void> {
+  const events = await tx.byTask(args.taskId)
+  const task = fold(events).tasks.get(args.taskId)
+  if (!task) throw classifiedError(FAILURE_CLASS.validation_error, `no task '${args.taskId}'`)
+  // BEFORE run_started: nothing may claim to be inside a chat that has not been opened. Keyed by
+  // the chat id, so the init DBOS re-executes on resume opens no second chat for the same run.
+  const opened = runChatOpened({ chatId: workflowId, task, parent: await runChatParent(tx, events, task) })
   await tx.append({
-    taskId: args.taskId, stepId: null, runToken: workflowId, kind: EVENT_KIND.run_started,
+    ...args.origin, taskId: args.taskId, stepId: null, runToken: workflowId,
+    kind: opened.kind, payload: opened.payload,
+    ...(opened.idempotencyKey !== undefined && { idempotencyKey: opened.idempotencyKey }),
+  })
+  await tx.append({
+    ...args.origin, taskId: args.taskId, stepId: null, runToken: workflowId, kind: EVENT_KIND.run_started,
     payload: { taskId: args.taskId, planVersion: args.planVersion, retryIndex: args.retryIndex, workflowId, cwd: args.cwd },
     idempotencyKey: `${workflowId}:init:run_started`,
   })
   const status = fold(await tx.byTask(args.taskId)).tasks.get(args.taskId)?.status
   if (status === TASK_STATUS.approved || status === TASK_STATUS.blocked)
     await tx.append({
-      taskId: args.taskId, stepId: null, runToken: workflowId, kind: EVENT_KIND.task_status_changed,
+      ...args.origin, taskId: args.taskId, stepId: null, runToken: workflowId, kind: EVENT_KIND.task_status_changed,
       payload: { taskId: args.taskId, from: status, to: TASK_STATUS.running },
       idempotencyKey: `${workflowId}:init:task_status_changed`,
     })
+}
+
+// The causation pointer for a run's chat: the event in ANOTHER chat that started this run. A split
+// child answers to the split_proposed on its PARENT's stream (it is never asked for by a client);
+// every other run answers to the newest run_requested that itself belongs to a chat.
+async function runChatParent(tx: EventLogOps, events: EventRecord[], task: TaskNode): Promise<ChatRef | null> {
+  if (task.parentId !== null) {
+    for (const e of [...(await tx.byTask(task.parentId))].reverse()) {
+      if (e.kind !== EVENT_KIND.split_proposed || e.chatId === null) continue
+      const p = PAYLOAD_SCHEMAS.split_proposed.safeParse(e.payload)
+      if (p.success && p.data.childTaskId === task.id) return ChatRef.parse({ chatId: e.chatId, seq: e.seq })
+    }
+  }
+  for (const e of [...events].reverse())
+    if (e.kind === EVENT_KIND.run_requested)
+      return e.chatId === null ? null : ChatRef.parse({ chatId: e.chatId, seq: e.seq })
+  return null
 }
 
 // Stamp `to` on a task that is still 'running', in ONE locked transaction. Reading the status in a
 // checkpoint's fn and appending from its toEvents would be TOCTOU: makeCheckpoint opens a SEPARATE
 // transaction for its drafts, so an `orc cancel` could commit running→cancelled in between and this
 // would append running→done on top of it (fold is last-seq-wins with no `from` check).
-async function stampIfRunning(log: EventLog, taskId: string, to: TaskStatus, workflowId: string, name: string): Promise<void> {
+async function stampIfRunning(log: EventLog, taskId: string, to: TaskStatus, workflowId: string, name: string, origin: Origin): Promise<void> {
   await log.transaction(async tx => {
     const status = fold(await tx.byTask(taskId)).tasks.get(taskId)?.status
     if (status !== TASK_STATUS.running) return // a cancel already stamped a terminal status
     await tx.append({
-      taskId, stepId: null, runToken: workflowId, kind: EVENT_KIND.task_status_changed,
+      ...origin, taskId, stepId: null, runToken: workflowId, kind: EVENT_KIND.task_status_changed,
       payload: { taskId, from: TASK_STATUS.running, to },
       idempotencyKey: `${workflowId}:${name}:task_status_changed`,
     })
@@ -154,6 +187,8 @@ export async function createDbosPort(opts: {
   // (contracts StepMemory) when a memory backend is wired. `step` travels whole so a binding can
   // read title/dependsOn without the port re-deriving them.
   stepTools?: (p: {
+    // the RUN's chat, so a tool that spawns a process or writes a note names the same interaction
+    origin: Origin
     taskId: string; stepId: string; runToken: string; role: string; executor: string; model: string
     modelRef: string; maxIterations: number; workspaceDir: string; step: PlanStep
     // The workspace the TASK belongs to, off the TaskNode this run already folds. Here rather than
@@ -206,7 +241,7 @@ export async function createDbosPort(opts: {
   // durable step wrapper that also appends the drafted events INSIDE the step —
   // one transaction per batch, each draft under a deterministic idempotency key, so a crash
   // retry returns the committed records instead of appending duplicates
-  const makeCheckpoint = (taskId: string, stepId: string | null, runToken: string): Checkpoint =>
+  const makeCheckpoint = (taskId: string, stepId: string | null, runToken: string, origin: Origin): Checkpoint =>
     (name, fn, toEvents) =>
       DBOS.runStep(
         async () => {
@@ -216,7 +251,7 @@ export async function createDbosPort(opts: {
             await log.transaction(async tx => {
               for (const [i, d] of drafts.entries())
                 await tx.append({
-                  taskId, stepId, runToken, kind: d.kind, payload: d.payload, usage: d.usage ?? null,
+                  ...origin, taskId, stepId, runToken, kind: d.kind, payload: d.payload, usage: d.usage ?? null,
                   idempotencyKey: d.idempotencyKey ?? `${runToken}:${name}:${i}:${d.kind}`,
                 })
             })
@@ -229,11 +264,11 @@ export async function createDbosPort(opts: {
   // The journal-backed operation checkpoint: before-record commits ahead of the
   // external effect; completion/failure attaches afterward. On recovery a completed node
   // short-circuits with its stored (redacted) value — the effect is never re-run.
-  const makeOperation = (taskId: string, stepId: string, runToken: string): OperationCheckpoint =>
+  const makeOperation = (taskId: string, stepId: string, runToken: string, origin: Origin): OperationCheckpoint =>
     (spec, fn, toEvents) =>
       DBOS.runStep(
         async () => {
-          const context = { taskId, stepId, runToken }
+          const context = { taskId, stepId, runToken, origin }
           const begin = await journal.beginOperation(context, spec)
           // journal values are plain JSON — parse hands back the caller's shape
           if (begin.reused) return JSON.parse(JSON.stringify(begin.value ?? null))
@@ -254,8 +289,8 @@ export async function createDbosPort(opts: {
   const stepWorkflow = DBOS.registerWorkflow(
     async (args: StepArgs): Promise<StepResult> => {
       const runToken = workflowIdOrThrow()
-      const checkpoint = makeCheckpoint(args.taskId, args.stepId, runToken)
-      const operation = makeOperation(args.taskId, args.stepId, runToken)
+      const checkpoint = makeCheckpoint(args.taskId, args.stepId, runToken, args.origin)
+      const operation = makeOperation(args.taskId, args.stepId, runToken, args.origin)
 
       // ANY throw — init included — becomes a step_failed event instead of an uncaught workflow
       // error that would leave the task stuck 'running' with a burned ERROR workflow that retry
@@ -408,6 +443,7 @@ export async function createDbosPort(opts: {
       let stepMemory: StepMemory | undefined
       if (stepTools) {
         const bound = stepTools({
+          origin: args.origin,
           taskId: args.taskId, stepId: args.stepId, runToken, workspaceId: init.workspaceId,
           role: init.step.role, executor: init.step.executorRef, model: modelId,
           modelRef: init.step.modelRef, maxIterations: init.step.maxIterations, workspaceDir,
@@ -432,6 +468,7 @@ export async function createDbosPort(opts: {
         extraTools,
         model,
         runToken,
+        origin: args.origin,
         workspaceDir,
         taskId: args.taskId,
         memoryPreloadTokens: config.memoryPreloadTokens,
@@ -445,6 +482,7 @@ export async function createDbosPort(opts: {
         // grants are clamped at propose time but never reserved, so without an ancestor check N sibling splits
         // could each spend the full parent budget. min-over-ancestors shares it by construction.
         budgetRemainingUSD: async () => remainingBudget(await projectState(), args.taskId),
+        isCancelled: async () => (await projectState()).tasks.get(args.taskId)?.status === TASK_STATUS.cancelled,
       }
 
       // splitIds already handed to a previous gate in THIS workflow. Rebuilds correctly on
@@ -644,7 +682,7 @@ export async function createDbosPort(opts: {
   const runWorkflow = DBOS.registerWorkflow(
     async (args: RunArgs): Promise<RunOutcome> => {
       const workflowId = workflowIdOrThrow()
-      const checkpoint = makeCheckpoint(args.taskId, null, workflowId) // run-level events carry no stepId
+      const checkpoint = makeCheckpoint(args.taskId, null, workflowId, args.origin) // run-level events carry no stepId
 
       try {
         const init = await checkpoint('init', async () => {
@@ -693,7 +731,7 @@ export async function createDbosPort(opts: {
             const handle = await DBOS.startWorkflow(stepWorkflow, {
               workflowID: stepWorkflowId(args.taskId, s.id, init.attempts[s.id] ?? 1),
               queueName: agentQueue(init.depth),
-            })({ taskId: args.taskId, stepId: s.id, planVersion: args.planVersion, attempt: init.attempts[s.id] ?? 1, cwd: args.cwd })
+            })({ taskId: args.taskId, stepId: s.id, planVersion: args.planVersion, attempt: init.attempts[s.id] ?? 1, cwd: args.cwd, origin: args.origin })
             results.push(handle.getResult())
           }
           for (const r of await Promise.all(results)) (r.ok ? done : failed).add(r.stepId)
@@ -701,7 +739,7 @@ export async function createDbosPort(opts: {
 
         const outcome = runOutcomeOf(plan, done)
         await checkpoint('finish', async () => {
-          await stampIfRunning(log, args.taskId, outcome === RUN_OUTCOME.done ? TASK_STATUS.done : TASK_STATUS.blocked, workflowId, 'finish')
+          await stampIfRunning(log, args.taskId, outcome === RUN_OUTCOME.done ? TASK_STATUS.done : TASK_STATUS.blocked, workflowId, 'finish', args.origin)
           return { outcome }
         })
         return outcome
@@ -713,7 +751,7 @@ export async function createDbosPort(opts: {
         // cancelled), surface the original error and let cancelOne own the terminal status.
         try {
           await checkpoint('contain', async () => {
-            await stampIfRunning(log, args.taskId, TASK_STATUS.blocked, workflowId, 'contain')
+            await stampIfRunning(log, args.taskId, TASK_STATUS.blocked, workflowId, 'contain', args.origin)
             return { contained: true }
           })
         } catch { /* best-effort containment — original error still propagates */ }
@@ -763,6 +801,8 @@ export async function createDbosPort(opts: {
       // shared with startChildRun, so the whole run tree stays in one world no matter which of
       // the two paths reached the child's (deterministic, shared) workflow id first.
       taskId, planVersion: approved, retryIndex, cwd: runCwd(cwdState, task, cwd, config.dir),
+      // the run's own workflow id IS its chat — a retry gets a new id, so it opens a new one
+      origin: runOrigin(workflowID),
     })
     return { workflowId: workflowID, wait: () => handle.getResult() }
   }
@@ -894,7 +934,7 @@ export async function createDbosPort(opts: {
       const cwd = inheritedCwd(runs, o?.cwd, config.dir)
       return startRunAt(taskId, await nextRetryIndex(taskId), cwd)
     },
-    cancelRun: async taskId => {
+    cancelRun: async (taskId, origin) => {
       const task = (await foldState(taskId)).tasks.get(taskId)
       if (!task) throw new KernelError(KERNEL_ERROR_CODE.task_not_found, `no task '${taskId}'`)
       if (task.status !== TASK_STATUS.running && task.status !== TASK_STATUS.blocked)
@@ -903,7 +943,9 @@ export async function createDbosPort(opts: {
       // see its own comment); this port then does the DBOS half itself for every task it stamped,
       // rather than waiting on the live router to notice. The router's onCancelled reaction does
       // the same idempotent work off the SAME events, so a cancel issued here is never double-charged.
-      const stamped = await kernel.cancelSubtree(taskId)
+      // The canceller's origin: a cancel is identity like any other append. cancelSubtree stamps a
+      // RUNNING task inside that run's chat regardless — the end of a run is read there.
+      const stamped = await kernel.cancelSubtree(taskId, origin)
       for (const id of stamped) await cancelWorkflowsFor(id)
     },
   }

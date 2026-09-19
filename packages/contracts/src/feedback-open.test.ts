@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'bun:test'
 import { EVENT_KIND } from './event-kinds'
 import { feedbackKey, openFeedbackTopics, type FeedbackEvent } from './feedback-open'
+import { authorFixture } from './fixtures'
 
 // A TABLE, because the table IS the contract: the kernel's `openRequest` and the workspace health
 // rung both read this one rule, so a case that stopped being handled would otherwise have to be
@@ -9,7 +10,7 @@ import { feedbackKey, openFeedbackTopics, type FeedbackEvent } from './feedback-
 const ask = (taskId: string | null, topic: string): FeedbackEvent =>
   ({ taskId, kind: EVENT_KIND.feedback_requested, payload: { topic, question: `${topic}?` } })
 const answer = (taskId: string | null, topic: string): FeedbackEvent =>
-  ({ taskId, kind: EVENT_KIND.feedback_provided, payload: { topic, text: 'yes', author: { source: 'cli', workspaceId: '11111111-1111-4111-8111-111111111111' } } })
+  ({ taskId, kind: EVENT_KIND.feedback_provided, payload: { topic, text: 'yes', author: authorFixture() } })
 
 const CASES: Array<{ name: string; events: FeedbackEvent[]; open: string[] }> = [
   { name: 'asked → open', events: [ask('t1', 'cwd')], open: [feedbackKey('t1', 'cwd')] },

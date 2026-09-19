@@ -1,5 +1,5 @@
 import { z } from 'zod'
-import { AccessVia, AUTHOR_SOURCE, CLAIM_ID_RE, ClaimWrite, DECISION_STATUSES, isRecord, DRIFT_STATE, EDGE_DIRECTIONS, inferTier, linkLookupScopes, MASTERPLAN_NOTE_ID, MemoryScope, MEMORY_ACCESS, MEMORY_ID_RE, MEMORY_LIMITS, MEMORY_SOURCE_LIMITS, MEMORY_TOOL_NAME, MemorySearchResult, MemoryWriteResult, NoteCategory, NOTE_CATEGORIES, NoteKind, NOTE_KINDS, LINK_KIND, LINK_KINDS, planFieldViolations, RETENTION_CLASSES, SEARCH_MODES, SearchMode, stepMayVerify, LinkKind, MemoryNoteDraftInput, NOTE_TIER, NOTE_TIERS, emptyUseStats, slugId, toolError, useLine, type MemoryAuthor, type MemoryNote, type MemoryStore, type ProvisionalFlag, type ResolvedTool, type VerifiedStamp } from '@orc/contracts'
+import { AccessVia, AUTHOR_SOURCE, CLAIM_ID_RE, Door, NO_CHAT, ClaimWrite, DECISION_STATUSES, isRecord, DRIFT_STATE, EDGE_DIRECTIONS, inferTier, linkLookupScopes, MASTERPLAN_NOTE_ID, MemoryScope, MEMORY_ACCESS, MEMORY_ID_RE, MEMORY_LIMITS, MEMORY_SOURCE_LIMITS, MEMORY_TOOL_NAME, MemorySearchResult, MemoryWriteResult, NoteCategory, NOTE_CATEGORIES, NoteKind, NOTE_KINDS, LINK_KIND, LINK_KINDS, planFieldViolations, RETENTION_CLASSES, SEARCH_MODES, SearchMode, stepMayVerify, LinkKind, MemoryNoteDraftInput, NOTE_TIER, NOTE_TIERS, emptyUseStats, slugId, toolError, useLine, type MemoryAuthor, type MemoryNote, type MemoryStore, type ProvisionalFlag, type ResolvedTool, type VerifiedStamp } from '@orc/contracts'
 import { applyBudget, fitMemoryNoteToBudget } from './budget'
 import { noteDriftState, type ChangedSince } from './drift'
 import { provisionalOf, type WorkspaceViewProbe } from './provisional'
@@ -517,7 +517,7 @@ void writeSchemaCoversInput
 // event, the id names itself as the bug rather than filing a note under a live checkout.
 // Everywhere else in this plugin the author is a parameter — see ConsolidationDeps, restampToHead
 // and MemoryStore's required `author` arguments.
-const UNAVAILABLE_AUTHOR: MemoryAuthor = { source: AUTHOR_SOURCE.agent, workspaceId: 'memory-unavailable' }
+const UNAVAILABLE_AUTHOR: MemoryAuthor = { source: AUTHOR_SOURCE.agent, workspaceId: 'memory-unavailable', origin: NO_CHAT(Door.supervisor) }
 
 export function unavailableMemoryTools(reason: string): ResolvedTool[] {
   const fail = async (): Promise<never> => { throw new Error(`memory unavailable: ${reason}`) }

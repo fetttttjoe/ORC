@@ -1,6 +1,6 @@
 import { afterAll, describe, expect, it } from 'bun:test'
 import { z } from 'zod'
-import { AUTHOR_SOURCE, composeAuthor, FINISH_STEP_ID, STEP_ROLE, type MemoryAuthor } from '@orc/contracts'
+import { AUTHOR_SOURCE, composeAuthor, Door, FINISH_STEP_ID, STEP_ROLE, type MemoryAuthor } from '@orc/contracts'
 import { TEST_WORKSPACE_ID } from '@orc/contracts/fixtures'
 import { DECISION_REFUSAL, type DecisionDoor } from './decisions'
 import { finishTools, FINISH_TOOL_NAME } from './finish-tools'
@@ -9,7 +9,8 @@ import { createLiveMemory, type LiveMemory } from './test-helpers'
 const lives: LiveMemory[] = []
 afterAll(async () => { await Promise.all(lives.map(l => l.close())) }, 30_000)
 
-const author: MemoryAuthor = { source: AUTHOR_SOURCE.agent, workspaceId: TEST_WORKSPACE_ID }
+// A finisher step writes from inside its run, so its origin is the run's own chat.
+const author: MemoryAuthor = { source: AUTHOR_SOURCE.agent, workspaceId: TEST_WORKSPACE_ID, origin: { chatId: 'run:t1:v1', door: Door.supervisor } }
 
 // The author the PORT actually hands this step (runtime.ts's stepTools): source + workspace + task
 // off the TaskNode, then executor/model/role read off the RUNNING step — `executor` is the step's

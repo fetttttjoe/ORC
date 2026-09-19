@@ -1,11 +1,15 @@
 import { describe, expect, it } from 'bun:test'
-import { AUTHOR_SOURCE, EVENT_KIND, type EventRecord } from '@orc/contracts'
-import { TEST_WORKSPACE_ID } from '@orc/contracts/fixtures'
+import { AUTHOR_SOURCE, Door, EVENT_KIND, type EventRecord, type Origin } from '@orc/contracts'
+import { authorFixture } from '@orc/contracts/fixtures'
 import { notesWrittenBy } from './task-notes'
+
+// A task's agent writes inside its run's chat; MemoryAuthor.origin is required, and the untyped
+// payload lets an author without it compile and then fail the parse at author.origin.
+const RUN: Origin = { chatId: 'run:t1:v1', door: Door.supervisor }
 
 // the task rides on the AUTHOR: the store appends every memory event with a null envelope task
 // (store.ts:64, :133 — measured 2026-09-15), so a fold keyed on the envelope would return nothing.
-const authorOf = (taskId: string | null) => ({ source: AUTHOR_SOURCE.agent, workspaceId: TEST_WORKSPACE_ID, ...(taskId !== null && { taskId }) })
+const authorOf = (taskId: string | null) => authorFixture({ source: AUTHOR_SOURCE.agent, origin: RUN, ...(taskId !== null && { taskId }) })
 const written = (taskId: string | null, note: Record<string, unknown>) =>
   ({ taskId: null, kind: EVENT_KIND.memory_written, payload: { note, author: authorOf(taskId) } })
 const deleted = (taskId: string | null, id: string, scope = 'project') =>

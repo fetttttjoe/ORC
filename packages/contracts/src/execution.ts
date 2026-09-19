@@ -7,6 +7,7 @@ import type { EventKind } from './events'
 import type { OperationSpec } from './operations'
 import type { LoadedSkill, ResolvedTool } from './plugins'
 import type { ClaimHit, NoteSummary } from './memory'
+import type { Origin } from './origin'
 
 // Whether anything can DRIVE a run right now — the question every silent project raises first.
 // Derived from the supervisor heartbeat row plus the pid file the serve process writes only once
@@ -309,6 +310,10 @@ export interface ExecutorContext<LM = unknown> {
   extraTools: ResolvedTool[]
   model: LM
   runToken: string
+  // The interaction this step runs inside — the RUN's chat, so every event a step appends
+  // correlates with the run that started it. Required: a step that cannot name its chat writes
+  // events no transcript can assemble.
+  origin: Origin
   workspaceDir: string
   checkpoint: Checkpoint
   operation: OperationCheckpoint
@@ -324,6 +329,7 @@ export interface ExecutorContext<LM = unknown> {
   // seam, pointed at your own successor. The loop renders it into the first prompt; nothing else
   // changes shape, so round 0 constructors (tests, fixtures) keep compiling untouched.
   continuation?: { round: number; summary: string }
+  isCancelled?: () => Promise<boolean>
 }
 
 /** One preload pull: matched statements plus the notes that matched without asserting one. */
@@ -390,5 +396,7 @@ export interface RunHandle {
 export interface ExecutionPort {
   startRun(taskId: string, opts?: { cwd?: string }): Promise<RunHandle>
   retry(taskId: string, opts?: { cwd?: string }): Promise<RunHandle>
-  cancelRun(taskId: string): Promise<void>
+  // origin: a cancel is an interaction like any other — the canceller's door is stamped on every
+  // status the subtree sweep appends, so the log says who stopped the run.
+  cancelRun(taskId: string, origin: Origin): Promise<void>
 }

@@ -113,21 +113,28 @@ subsystem into one running process. Every other CLI file receives an already-bui
 (runtime.port ??= await buildRuntime(...))`): read-only commands never pay a DBOS launch; every
 command that needs execution shares one port instance per invocation.
 
-**One mutation surface, two doors plus the CLI.** Task/plan state is mutated through exactly one object,
+**One mutation surface, two doors plus the CLI.** Task/plan state is mutated through one shared implementation,
 `buildOrcActions` (`packages/cli/src/actions.ts`), no matter which entry point a request enters:
 
 - **The `orc` commander CLI** (`packages/cli/src/main.ts`): `new`/`propose`/`plan`/
-  `approve`/`run`/`retry`/`reply`/`cancel`/… each mutating command calls `actions(via?)`.
-- **Door #1 — the web/graph-ui adapter** (`orc graph` → `@orc/graph-ui`): receives the *same*
-  `actions()` object as `startGraphUi`'s `actions:`.
+  `approve`/`run`/`retry`/`reply`/`cancel`/… each mutating command calls `actions()` and passes `NO_CHAT(Door.cli)`.
+- **Door #1 — the web/graph-ui adapter** (`orc graph` → `@orc/graph-ui`): receives the same
+  `actions()` implementation as `startGraphUi`'s `actions:`.
 - **Door #2 — the stdio MCP server** (`orc mcp serve` → `packages/cli/src/mcp-serve.ts`): receives
-  the same `actions('mcp')` object; narrows what's *reachable* to `buildCopilotTools`'s subset plus
+  the same `actions()` surface, passing `NO_CHAT(Door.mcp)`; narrows what's *reachable* to `buildCopilotTools`'s subset plus
   a separately-gated `approve`.
 
 Because all three call into the same `assertDrivable`/`assertRetryable`/`assertKnownModel`/
 `assertRunnableCwd` functions, the admission check (`DRIVABLE_TASK_STATUS = {approved, running,
 blocked}`) means the same thing at every entry point — it is *literally* the same function, not a
 parallel re-implementation.
+
+Each door parses input, names its `Origin`, and presents the result. Checkout lifecycle verbs
+live in `WorkspaceOps`, built by `buildWorkspaceOps`. The terminal workspace adapter receives
+`WorkspaceDoor = { workspaces, reads, config, listWorkspaces }`: it can call those verbs and read
+`KernelReads`, but cannot reach a raw kernel mutation or the task actions. `main.ts` memoizes that object behind `requireDoor` so
+registering help needs no kernel. `workspace-adopt.ts` keeps the kernel at the composition root
+for boot adoption, before the door exists.
 
 **The DBOS run/step engine — `packages/kernel/src/execution/dbos-port.ts`.** `createDbosPort`
 registers two DBOS workflows: `orcRun` (the dependency-wave scheduler) and `orcStep` (one step
@@ -324,14 +331,26 @@ Every schema, type, const, and function documented in this section is reachable 
 
 ##### `events.ts` — the event vocabulary's payloads
 
-- `PAYLOAD_SCHEMAS` — a const object literally listing all 32 event kinds (`task_created`, `plan_proposed`, …, `reaction_failed`) each mapped to its zod payload schema, typed `satisfies Record<EventKind, z.ZodType>` so a payload schema is a compile error to omit when a new `EventKind` is added.
-- `EventInput = z.object({ taskId: string|null, stepId: string|null, runToken: string|null, kind: EventKind, payload: Record<string, unknown>, usage: Usage.nullable().optional(), idempotencyKey: string|null (default null) })`, type exported as `EventInput` (via `z.input`) — what a writer hands the append path before the kind-specific payload schema is applied.
+- `PAYLOAD_SCHEMAS` — each `EventKind`, including `chat_opened`, mapped to its zod payload schema, typed `satisfies Record<EventKind, z.ZodType>` so a payload schema is a compile error to omit when a kind is added.
+- `EventInput = Origin.extend({ taskId: string|null, stepId: string|null, runToken: string|null, kind: EventKind, payload: Record<string, unknown>, usage: Usage.nullable().optional(), idempotencyKey: string|null (default null) })`, type exported as `EventInput` (via `z.input`) — a writer must state `chatId` (nullable) and `door` before kind-specific payload validation.
 - `EventKind` and `EVENT_KIND` are actually defined in `event-kinds.ts` (re-exported here); `events.ts` re-exports them alongside payload types it owns directly: `ArtifactProducedPayload`, `ModelsDiscoveredPayload`, `CopilotExchangePayload`, `REACTION` (const map of five reaction names) + `ReactionFailedPayload`, `RunRequestedPayload`.
 
 ##### `event-kinds.ts` — the leaf vocabulary module
 
-- `EventKind = z.enum([...32 kinds...])` and `EVENT_KIND = EventKind.enum`. Kept in its own leaf module (zod + one type-only import of `Usage`) specifically so `memory.ts` (folds by kind) and `analysis.ts` (reads back by kind) never need to import the heavier `events.ts` module and risk a cycle.
-- `EventRecord` interface — the stored envelope: `{ seq, projectId, idempotencyKey, taskId, stepId, runToken, kind: EventKind, payload, usage: Usage|null, ts }`.
+- `EventKind = z.enum([...])` and `EVENT_KIND = EventKind.enum`. Kept in its own leaf module (zod + type-only imports of `Usage` and `Door`) so `memory.ts` and `analysis.ts` can read event kinds without reaching the payload schemas and their cycles.
+- `EventRecord` interface — the stored envelope: `{ seq, projectId, idempotencyKey, chatId: string|null, door: Door, taskId, stepId, runToken, kind: EventKind, payload, usage: Usage|null, ts }`.
+
+##### `origin.ts`, `chat.ts`, `scope.ts`, `chat-digest.ts` — interaction and read shapes
+
+- `Origin` requires `chatId: string|null` and `door: Door`. `Door` names the entry point: `web` (browser and copilot), `cli` (terminal), `mcp` (external MCP calls), `supervisor` (durable execution), or `hook` (post-commit). `NO_CHAT(door)` explicitly names calls outside a conversation. Origin is identity, never authority. `authorSourceOf(origin.door)` maps the door to note authorship; the terminal ADR command explicitly records a human author.
+- `ChatKind` distinguishes `copilot`, `run`, `external`, and `imported`. `ChatOpenedPayload` records chat id, title, kind, workspace/task at open, nullable parent `ChatRef = { chatId, seq }`, and nullable `externalRef`. `chatOpenedKey` keys the sole lifecycle event, `chat_opened`; there is no stored close or digest event.
+- `ScopeType` belongs to `scope.ts` beside `Scope`: project; workspace id; task id with required `subtree: boolean`; or chat id. `in-scope.ts` implements `inScope` over `EventRecord` plus a `ScopeIndex`, including author-attributed memory events and workspace commits.
+- `ChatDigest` is a browser-safe schema. `chat-digest-fold.ts`'s `chatDigests` derives identity, end/outcome, usage, questions and effects from events on each read. Only a run's own task status changes can supply its end, selected after folding so a late open still works. Child task stamps cannot replace that end; child chats' usage is not added to their parent. An unopened chat id yields no digest.
+- Browser runtime imports take leaf `@orc/contracts/<subpath>` modules. `browser-leaves.test.ts` derives entries from browser imports and walks their runtime imports and re-exports to reject paths to Node builtins; `bun run check:web` also builds the browser bundle after Svelte checking. The shape modules stay separate from the event-reading folds so importing `Scope` or `ChatDigest` cannot pull in `node:crypto` through the payload schemas.
+
+The events table stores nullable `chat_id` and required `door`. Migration
+`packages/kernel/drizzle/0005_chat_envelope.sql` adds `door` as `NOT NULL` with no default:
+it applies to an empty log, without fabricating the provenance of historical events.
 
 ##### `plan.ts` — plan shape and the grounded-plan strategy
 
@@ -357,7 +376,7 @@ This is the largest and most cross-cutting module; besides usage/cost accounting
 - `terminalError(message)`, `isTerminalError(err)`, `classifiedError(cls, message)`, `failureClassOf(err)` — the retry protocol between checkpoint implementations and callers: a `terminalError` throw is never retried; a small set of permanent filesystem error codes (`EACCES, EPERM, ENOENT, EROFS, ENOTDIR, EISDIR`) are also treated as terminal.
 - `RecalledContext = { claims: ClaimHit[], notes: NoteSummary[], currency?: { checkable: number; drifted: number } }` — one preload pull's result, including the same drift verdict `memory_read`/`orc status` report.
 - `StepMemory` interface — `{ recall(budget): Promise<RecalledContext>; claimsCiting(paths): Promise<ClaimHit[]>; capture(signal): Promise<void> }` — the step's bound memory handle; the executor decides only *when* to call it.
-- `RunHandle = { workflowId: string; wait(): Promise<RunOutcome> }` and `ExecutionPort = { startRun, retry, cancelRun }` — the port a driver (CLI, MCP surface) starts/retries/cancels a run through.
+- `RunHandle = { workflowId: string; wait(): Promise<RunOutcome> }` and `ExecutionPort = { startRun, retry, cancelRun }` — the durable execution port. `cancelRun(taskId, origin)` requires the canceller's `Origin`; start/retry take an optional cwd, and the workflow supplies its own run origin.
 - Helper functions: `parseModelRef(ref)`, `resolveModel(providers, modelRef)`, `modelIdsFrom(body, listKey, idKey)` (the one parse of a provider's model-list JSON, tolerant of malformed input — never throws, returns fewer ids).
 
 #### Extension-point interfaces (dependency-inversion in practice)
@@ -667,6 +686,8 @@ The port builds **every step's `ExecutorContext` inside the one registered DBOS 
 `launch()` acquires the process-exclusive **runtime lock**, opens `LiveState`, pins `DBOS__APPVERSION`, `DBOS.setConfig({ executorID })`, `DBOS.launch()`, registers depth queues, then `router.start()`. `shutdown({drain=true})` closes the router and (when draining) `DBOS.shutdown`; an exiting command passes `drain:false`.
 
 `startRunAt` derives a deterministic run workflow id (`run:<task>:v<approved>[:r<retry>]`), admits on the *fold* (`approved|running|blocked`), computes `cwd` via `runCwd`. `cancelWorkflowsFor` is the DBOS half of a cancel: `kernel.cancelSubtree` appends `cancelled` first, then this cancels every non-completed step workflow and the run workflow (idempotent). The port also constructs `createSignalRouter` (below).
+
+The workflow id is also its chat id (`runOrigin` in `execution/run-chat.ts`), with `Door.supervisor`. `appendRunInit` appends a keyed `chat_opened` before `run_started` and the status stamp in one transaction. `runChatParent` points to the initiating `run_requested`, or a split child's `split_proposed`, when that event belongs to a chat. Every step keeps the run's origin. The commit tool passes `ORC_CHAT_ID` to its subprocess; `scripts/hooks/post-commit-append.ts` reads it and stamps `Door.hook` (null chat id when absent).
 
 #### 2. The grounding freshness gate (summary — see §7.8)
 
@@ -1006,18 +1027,26 @@ Key read methods: `snapshot` (`{ seq, graph }`); `subscribe` (fires on **every e
 
 ##### `views/` — the view registry: every read, named once
 
-`wire.ts` declares the read vocabulary the server and browser both import: `ViewName` (`timeline`,
+`wire.ts` declares the read vocabulary the server and browser both import: `ViewName` (`timeline`, `chats`,
 `node`, `transcript`, `plans`, `planNotes`, `models`, `operatorState`) and `WIRE`, each name's param
 schema and result schema, `as const satisfies Record<ViewName, ...>` — a name added to `ViewName`
 with no matching `WIRE` entry fails the build. `view.ts` declares the two interfaces every view and
 non-view read share: `Touchable<P>` (`touches(event, model): P[]` — the param PATTERNS one appended
 event makes stale) and `View<N> extends Touchable<...>` (`read(model, params): result | null`, plus
 `push`, whether the value rides the SSE frame instead of being fetched). One file per view
-(`timeline.ts`, `node.ts`, `transcript.ts`, `plans.ts`, `plan-notes.ts`, `models.ts`,
+(`timeline.ts`, `chats.ts`, `node.ts`, `transcript.ts`, `plans.ts`, `plan-notes.ts`, `models.ts`,
 `operator-state.ts`); `health.ts` is a `Touchable` with no `read` — corpus health probes SurrealDB
 and git rather than folding the log, so it has no result to pin on the wire. `registry.ts`'s
 `VIEWS` table implements every view, and its `ViewsCoverNames` type guard fails the build the
 moment a name on the wire has no entry here.
+
+`timeline` requires `scope: Scope`, with optional `kinds`, `sinceSeq`, `beforeSeq` and `limit`.
+`inScope` and the kind/sequence filters run before taking the newest matching events and
+summarizing them. `chats` also requires `scope`: any event in that scope admits its chat, but
+`chatDigests` folds the whole log for the admitted chat's complete usage and outcome.
+`scopePatternsOf` stales the project, workspace, exact task and chat queries an event belongs to;
+ancestor task queries with `subtree: true` are not live-invalidated (no browser consumer holds
+them). Every chat-bearing event stales `chats`; a child's open also stales its parent's chat query.
 
 `readView(model, name, rawParams)` is the path a door (a URL path segment, an MCP tool's JSON)
 answers through: parse `name` against `ViewName`, parse `rawParams` against that view's `WIRE`
@@ -1045,15 +1074,16 @@ function diffGraphs(prev: Graph, next: Graph): GraphPatch
 
 ##### `copilot.ts` — the copilot's tools are the UI's own action surface
 
-`buildCopilotTools(deps: { sessions: Pick<ProjectSessions, 'model' | 'snapshot'>; actions: OrcActions | null; projectId; listModels?; listWorkspaces?; health? }): ToolSet` builds an AI-SDK `ToolSet` whose **read** tools (`task_plan`, `task_transcript`, `plan_notes`, `recent_activity`) derive their input schema from the SAME `WIRE[view].params` the browser's view client parses against, and read through `viewOf` over `sessions.model(projectId)` — the identical view the web UI's own pane renders, never a second query; `project_status` reads `sessions.snapshot`'s graph plus the optional `listWorkspaces`/`health` deps. **Mutate** tools call the exact same `OrcActions` (§7.7) the web UI's buttons call — `deps.actions` is `OrcActions | null`; when `null`, only the read set is returned. **There is no `approve` tool, by design** ("plan approval is human-only… a prompt line is not a gate"). `asResolvedTools(tools)` reshapes an AI-SDK `ToolSet` into `ResolvedTool[]` for door-#2 consumers — "one tool definition, two doors."
+`buildCopilotTools(deps: { sessions: Pick<ProjectSessions, 'model' | 'snapshot'>; actions: OrcActions | null; projectId; origin: Origin; listModels?; listWorkspaces?; health? }): ToolSet` builds an AI-SDK `ToolSet` whose **read** tools (`task_plan`, `task_transcript`, `plan_notes`, `recent_activity`) derive their input schema from the SAME `WIRE[view].params` the browser's view client parses against, and read through `viewOf` over `sessions.model(projectId)` — the identical view the web UI's own pane renders, never a second query; `project_status` reads `sessions.snapshot`'s graph plus the optional `listWorkspaces`/`health` deps. **Mutate** tools call the exact same `OrcActions` (§7.7) the web UI's buttons call — `deps.actions` is `OrcActions | null`; when `null`, only the read set is returned. **There is no `approve` tool, by design** ("plan approval is human-only… a prompt line is not a gate"). `asResolvedTools(tools)` reshapes an AI-SDK `ToolSet` into `ResolvedTool[]` for door-#2 consumers — "one tool definition, two doors."
 
 ##### `palette.ts` / `actions.ts` / `diagram.ts` / `transcript.ts` / `summarize.ts`
 
 - **`palette.ts`** — `PALETTE`, the one color-token vocabulary. Exposed as its own subpath (`@orc/ui-core/palette`) so the browser bundle can import *just* the palette without pulling in `sessions.ts`'s server-only chain.
-- **`actions.ts`** — defines `OrcActions`, the mutating-capability interface (`newTask`, `propose`, `edit`, `approve`, `run`, `reply`, `retry`, `annotate`, `revise`, `writeNote`, `deleteNote`, `recordDecision`, `listWorkspaces`, `newWorkspace`, `renameProject`, `newProject`, `cancel`, `purgeProject`, `deleteProject`) — **implemented elsewhere** (the CLI, §7.7); ui-core only consumes it. Methods return data, never print.
+- **`actions.ts`** — defines `OrcActions`, the mutating-capability interface (`newTask`, `propose`, `edit`, `approve`, `run`, `reply`, `retry`, `annotate`, `revise`, `writeNote`, `deleteNote`, `recordDecision`, `newWorkspace`, `renameProject`, `newProject`, `cancel`, `purgeProject`, `deleteProject`, plus the read methods `listModels`, `listWorkspaces`) — **implemented elsewhere** (the CLI, §7.7); ui-core only consumes it. Mutations require an `Origin` last; methods return data, never print.
 - **`diagram.ts`** — server-safe mermaid string builders (`planMermaid`, `decompositionMermaid`, `todoWaves`).
 - **`transcript.ts`** — `foldTranscript(events, taskId, stepId?)` → ordered `TranscriptItem[]`.
-- **`summarize.ts`** — `summarizeEvent(e): LogRow` (one summary line per event, parsing through the SAME `PAYLOAD_SCHEMAS`, degrading to `snip(payload, 90)` on pre-schema history; derives `noteRef` and `authorTaskId`). **`shouldAdmitLogRow(row, taskFilter): boolean`** is the one admit/reject predicate for a per-task Log view: `null` filter admits everything; `row.taskId === taskFilter` admits; `row.taskId === null` admits only when `row.authorTaskId === taskFilter` (a project-scoped memory row attributed to the task that *wrote* it). Applied server-side, in the `timeline` view's `read()`: the browser asks for a task's rows rather than filtering a whole-project tail itself, so there is one place the rule lives.
+- **`summarize.ts`** — `summarizeEvent(e): LogRow` renders one event after the view has filtered it with `inScope`. It parses `PAYLOAD_SCHEMAS`, falls back to `snip(payload, 90)` for an unparseable payload, derives `noteRef` and `authorTaskId`, and carries envelope `chatId` and `door` onto the row.
+- **`copilot-focus.ts`** — `copilotFocus` derives the selected task's title/spec/status/direct children, or the selected workspace's root requests, from folded state. `CopilotFocus` discriminates on `ScopeType.task` and `ScopeType.workspace`; `copilotSystemPrompt` includes that focus when present. A task selection wins over a workspace selection, including when the selected task is unknown (null focus).
 
 ##### Transport-free boundary
 
@@ -1070,7 +1100,8 @@ Constructs one `ProjectSessions` for the whole server process, then:
 - **Host-header allowlist** (first check on every request): rejects with `403 forbidden host` unless the normalized `Host` is exactly `127.0.0.1`, `localhost`, or `::1` — anti-DNS-rebinding, before CSRF, before routing.
 - **CSRF token**: `crypto.randomUUID()` minted once per boot, readable only via `GET /api/session`, required as `x-orc-token` on every mutating route.
 - **`/api/actions/{name}`** dispatches through `ACTION_ROUTES` (each entry a zod schema + a call into `opts.actions` — the SAME `OrcActions` the copilot's mutate tools call). A **project fence**: an action naming a project other than `opts.cwdProject.id` is rejected `409` *unless* it is in `CROSS_PROJECT_ACTIONS = {newProject, deleteProject, reply}`.
-- **`/api/copilot`**: `streamText` over `buildCopilotTools(...)`, SSE-streaming `fullStream` parts; journals one `copilot_exchange` via `opts.appendExchange` (home project only).
+  Button actions always pass `NO_CHAT(Door.web)`, ignoring a stray body `chatId`; `newTask` requires a positive-or-null `budgetUSD` key, and the browser states `null` when no ceiling is set.
+- **`/api/copilot`**: requires nullable `chatId`, `taskId` and `workspaceId`. `copilotChat` mints an id for a null chat id or continues an echoed id; tools receive that id with `Door.web`, and the prompt receives `copilotFocus`. Tool events may precede the open. For a home-project exchange with text or tool calls, `appendCopilotExchange` (`copilot-journal.ts`) appends the keyed open and first exchange in one transaction; main.ts and the test/Playwright servers share that function. Only a successful append publishes `{ type: 'chat', chatId }`; the pane adopts that id. `done` carries usage only. An empty, foreign-project or failed append publishes no id.
 - **`/api/view/<name>`** — the one route for every registered read (`view-route.ts`'s `viewResponse`, over `readView`): parse `q` (one url-encoded JSON param blob, `viewParams`), call the named view's `read`, answer `{ seq, data }` or the 400/404 `readView` returned. `DoorAnswers` lets a door answer a view the log cannot fill YET (only `models`, for the live provider catalog before any `models_discovered` event) when the view came back empty — the log always wins once it has anything to say. **`/api/graph`** is the one read outside the registry: the whole current snapshot (`{ seq, nodes, links }`), which a fresh mount or a seq-regression resync needs whole rather than by name. `project` (both routes) is resolved against `sessions.projects()` so an arbitrary string can't allocate a new cached `Session`.
 - **`/api/stream`**: the SSE tail. Subscribes **before** fetching `since(fromSeq)` catch-up, buffering events during the await (`liveNow` flag) — "luck-sized before, structural zero now." Resumes from `Last-Event-ID` in preference to a `fromSeq` param. Rides the server-wide `projectFeeds` chats-list push on the same stream without an SSE `id:` line.
 
@@ -1084,7 +1115,7 @@ A Svelte 5 SPA built by Vite into `web/dist`, which `src/server.ts` serves. Rune
 - **`lib/features/`** — one directory per pane: `ledger/`, `inspector/`, `graph/` (the sigma island plus its pure `colors.ts`), `copilot/`, `overview/` (stat tiles and the live `RunMonitor`), `plan/`, `sidebar/`, `gates/`, `forms/`, `chrome/`. Logic that can be pure is a sibling `.ts` with its own test — `topo.ts`, `your-move.ts`, `node-id.ts`, `colors.ts`.
 - **`lib/temperature.ts`** — the two-temperature vocabulary (amber = waits on a human, steel = autonomous, moss = settled well, rust = settled badly) as token maps, so no component spells a colour class itself.
 
-**Testing note**: `bun test` runs with no DOM, so unit tests here cover only the extracted pure modules. Behaviour is covered by Playwright against a real-kernel fixture server — `e2e/console.pw.ts` for the panes and `e2e/contract.pw.ts`, which asserts every `/api` response against the same schemas the client parses with. Playwright matches `**/*.pw.ts` and is **not** part of `bun test`; CI runs it as its own step, alongside `bun run check:web` (svelte-check with vendored shadcn noise filtered out).
+**Testing note**: `bun test` runs with no DOM, so unit tests here cover only the extracted pure modules. Behaviour is covered by Playwright against a real-kernel fixture server — `e2e/console.pw.ts` for the panes and `e2e/contract.pw.ts`, which asserts every `/api` response against the same schemas the client parses with. Playwright matches `**/*.pw.ts` and is **not** part of `bun test`; CI runs it as its own step, alongside `bun run check:web` (svelte-check with vendored shadcn noise filtered out, followed by a Vite browser build).
 
 ##### Summary: the rebuildable-projection pattern, end to end
 
@@ -1100,7 +1131,7 @@ Every row can be discarded and reconstructed from the one Postgres event log wit
 
 ### 7.7 CLI (`packages/cli`) — composition root, two doors plus a CLI, one mutation surface
 
-`packages/cli` is orc's **composition root**: the only package that wires a `Kernel`, a plugin host, a DBOS execution port, and a memory subsystem into one running process, and the only package that exposes that wiring through exactly **two doors plus the CLI entry point** — the `orc` commander CLI (`main.ts`), the embedded web/graph-ui adapter (`orc graph`), and the stdio MCP server (`mcp-serve.ts`, `orc mcp serve`). Every entry point that *mutates* task/plan state does so through **one shared object**, `buildOrcActions` (`actions.ts`): **two doors plus a CLI, one action surface, one admission check.**
+`packages/cli` is orc's **composition root**: the only package that wires a `Kernel`, a plugin host, a DBOS execution port, and a memory subsystem into one running process, and the only package that exposes that wiring through exactly **two doors plus the CLI entry point** — the `orc` commander CLI (`main.ts`), the embedded web/graph-ui adapter (`orc graph`), and the stdio MCP server (`mcp-serve.ts`, `orc mcp serve`). Every entry point that *mutates* task/plan state does so through **one shared implementation**, `buildOrcActions` (`actions.ts`): **two doors plus a CLI, one action surface, one admission check.**
 
 ```
 bin.ts (process entry)
@@ -1109,9 +1140,9 @@ bin.ts (process entry)
   ├─ openKernel(url, opts)                     → { kernel, log, storage }            (main.ts)
   └─ buildProgram(kernel, portFactory, plugin) → commander Command                   (main.ts)
         │                                        portFactory = () => buildRuntime(...) (lazy, memoized)
-        ├─ commander actions → actions(via?) = buildOrcActions({...})
-        ├─ door #1 (`orc graph`): passes the SAME actions() object to startGraphUi
-        └─ door #2 (`orc mcp serve`): passes the SAME actions('mcp') object; adds buildCopilotTools + read-only memory tools + mcpApproveTool
+        ├─ commander actions → actions() = buildOrcActions({...}); each call supplies its Origin
+        ├─ door #1 (`orc graph`): passes actions() to startGraphUi
+        └─ door #2 (`orc mcp serve`): passes the SAME actions() surface; tools supply NO_CHAT(Door.mcp)
 ```
 
 #### 1. Entry point — `bin.ts`
@@ -1119,7 +1150,7 @@ bin.ts (process entry)
 A script (`#!/usr/bin/env bun`) whose top-level `async function main(): Promise<number>` parses `process.argv`, decides which pre-boot command applies, otherwise stands up the full stack and hands off to commander, then guarantees shutdown.
 
 - **stdout hardening for door #2, before any boot code.** If `args[0]==='mcp' && args[1]==='serve'`, rebinds `console.log`/`console.info`/`console.debug` to `console.error` *before* any plugin/storage code can print. Layer 1 of the two-layer stdout discipline for MCP stdio framing; layer 2 lives in `mcp-serve.ts` (§5 below).
-- **Pre-Postgres commands.** `init` (`runInit`) and `db migrate` (`runMigrate`) run and return before any config/Postgres/plugin work. `--help`/`-h`/`help` builds a bare `buildProgram({} as Kernel)`.
+- **Pre-Postgres commands.** `init` (`runInit`) and `db migrate` (`runMigrate`) run and return before any config/Postgres/plugin work. `--help`/`-h`/`help` builds a bare `buildProgram(null)`.
 - **Composition, in order:** `requireProject(loadConfig())` → `buildPlugins(config)` → `host.hooks.emit(session_start)` → `openKernel(config.databaseUrl, { projectId, redactEnv, refValidator, analyzers, onAppend })` → `buildProgram(...)`.
 - **Lazy, memoized port.** `portFactory = async () => (runtime.port ??= await buildRuntime({...}))`. Read-only commands never call it. Every execution command shares the *same* port instance within one process.
 - **`parse(program, argv)`** calls `overrideExits` recursively so commander throws instead of `process.exit`, then `program.parseAsync(argv)`. Errors → `exitCodeFor(error)`.
@@ -1142,11 +1173,11 @@ A script (`#!/usr/bin/env bun`) whose top-level `async function main(): Promise<
 
 - **`openKernel(url, opts): Promise<{ kernel; log; storage }>`** — the one resolution; `bin.ts` calls it once and shares the result.
 - **`buildProgram(kernel, portFactory?, plugin?): Command`** registers the full command inventory: `init`, `db migrate`, `new <title>` (`--strategy grounded-plan` → `kernel.createGroundedTask` + auto-start), `propose`/`edit`/`plan`/`approve`, `plan-note`, `reply`, `plan-revise`, `purge`/`projects`/`delete`, `tasks`/`log`/`replay`, `run`/`retry`/`cancel`, `graph`, `serve`, `status`, `skills`, `vault render`, `mcp serve`/`mcp list`/`mcp tools`/`mcp trust`, `ext list`/`ext trust`, the whole `memory` (`mem`) subtree, and `note`.
-- **`const actions = (via?: 'cli' | 'mcp') => buildOrcActions({ kernel, ensureRuntime, plugin, via, listModels, listModelOptions })`** — declared once inside `buildProgram`; every mutating commander action, the `graph` command's `actions:`, and the `mcp serve` command's `actions:` all call through this **same closure**.
+- **`actions()`** — the one closure constructing `buildOrcActions({ kernel, ensureRuntime, plugin, listModels, listModelOptions })` for commander, graph and MCP. Each mutation takes its `Origin` last; there is no separate source option. `requireWsDoor` memoizes the workspace adapter's `WorkspaceDoor` — `buildWorkspaceOps`, the kernel's reads, the workspace config and the workspace listing — built without these actions. `ws-commands.ts` reaches six verbs through `workspaces`: create, merge, finalize, archive, retitle and restore. The config thunk lets record-only archive/restore work without eagerly resolving a project.
 - **`ensureRuntime = async (): Promise<SupervisorMode>`** — guarantees something will drive a request before it is recorded: `ensureSupervisor({ live, spawn: spawnSupervisor, waitMs: 15_000, ... })`. `spawnSupervisor` detached-spawns `[process.argv[1], 'serve']` redirected to `.orc/serve.log`, `.unref()`d so it survives the parent exiting. Under `SUPERVISOR_MODE.inProcess`, `ensureRuntime` builds/reuses the lazy `portFactory` port and drives in-process.
 - **`requireDrivable = (taskId) => assertDrivable(kernel, taskId)`** — the CLI's pre-check before `run`/`approve`, the exact same function `actions.ts`'s `run()` calls.
 - **`watchSubtree(kernel, taskId, since?): Promise<TailResult>`** — stream-driven subtree observation to its next stopping point: a terminal `RunOutcome`, or a park declared only after `PARK_QUIET_MS` (750ms) of quiet. Surfaces gated splits as an advisory stop.
-- **`mcp serve` command** — `--autonomy <mode>` defaults to `'gated'`; lazy-imports `./mcp-serve` and calls `startMcpServe({ ..., actions: portFactory ? actions('mcp') : null })`. The `'mcp'` `via` tag matters: because `approvedPlanHash` only honours source `'cli'`, an agent answering `'approve'` through this door fails the grounded-task's human gate honestly.
+- **`mcp serve` command** — `--autonomy <mode>` defaults to `'gated'`; lazy-imports `./mcp-serve` and supplies `actions: portFactory ? actions() : null`. MCP tool calls carry `NO_CHAT(Door.mcp)`, so a conversational approval is attributed to that door and does not satisfy the grounded plan's human approval gate.
 
 #### 4. `actions.ts` — `buildOrcActions`, the single mutation surface
 
@@ -1155,24 +1186,24 @@ The **one** implementation of every task/plan mutation, called by all three entr
 - **`DRIVABLE_TASK_STATUS = new Set([approved, running, blocked])`** — the statuses `startRunAt` (§7.3) actually admits. One set; "can this be driven?" means the same at every door.
 - **`assertDrivable(kernel, taskId)`** — `getTask` + `approvedVersion` + `DRIVABLE_TASK_STATUS.has(status)`. Called from `main.ts`'s `requireDrivable` **and** this file's own `run()` — literally the same function.
 - **`assertRetryable(kernel, taskId)`** — only `TASK_STATUS.blocked` may be retried; shared by `main.ts`'s `retry` and this file's `retry()`.
-- **`buildModelDiscovery(config, log?)`** — `listModels`/`listModelOptions`/`providerFor`/`price`, backed by `seedRegistries(config).providers`, with append-on-change persistence as `models_discovered` events and a 5-minute cache.
+- **`buildModelDiscovery(config, persist?)`** — `listModels`/`listModelOptions`/`providerFor`/`price`, backed by `seedRegistries(config).providers`, with a 5-minute cache. `persist` carries `{ log, origin }` for append-on-change `models_discovered` events. Every door calls the same live discovery, bounded per provider; failures/timeouts are isolated and do not overwrite that provider's recorded catalog. A positively empty reply can clear the catalog. Providers without live discovery fall back to their cost-table keys.
 - **`buildOrcActions(deps): OrcActions`** returns one object implementing `OrcActions`:
   - `newTask` — plain `kernel.createTask` or, when grounded, `assertKnownModel` + `assertRunnableCwd` + `kernel.createGroundedTask` + `ensureRuntime()` + `kernel.requestRun`.
-  - `run(taskId, cwd)` — `assertRunnableCwd(cwd)`, then `assertDrivable`, then `ensureRuntime()`, then `kernel.requestRun`.
-  - `reply(taskId, text, projectId?)` — same-project answers go through `ensureRuntime()` + `kernel.replyFeedback(taskId, text, deps.via)`; a **foreign** project opens a short-lived `openStorage` and answers directly with **no runtime spawned** (answering is not execution).
+  - `run(taskId, cwd, origin)` — validates an explicit cwd, checks admission, ensures a driver and records `kernel.requestRun` with the supplied origin; a null cwd uses the task's workspace.
+  - `reply(taskId, text, projectId, origin)` — same-project answers go through `ensureRuntime()` + `kernel.replyFeedback(taskId, text, origin)`; a foreign project opens a short-lived `openStorage` and answers with that same origin without spawning a runtime there.
   - `annotate`/`revise` — `revise` is `ensureRuntime()` + per-scope-id `kernel.annotatePlan` + `kernel.replyFeedback`.
   - `writeNote`/`deleteNote` — reject the two reserved UI-metadata note ids, else run a throwaway memory through `withMemory` (open → write/remove → `catchUp` → close), the same bracket every one-shot `orc memory` command uses.
-  - `recordDecision(input)` — the one knowledge-authoring door for the web and MCP surfaces: resolves the author (`cwdAuthor` with `deps.via ?? 'cli'` — never `human`, which only `orc adr` writes) and delegates the whole lifecycle to `@orc/memory`'s `recordDecision` over `decisionDoor(memory)`. The refusals, the slugged id and the supersession link live there, so `orc adr` and this door cannot drift.
+  - `recordDecision(input, origin)` — resolves `cwdAuthor` with `authorSourceOf(origin.door)` and the same origin, then delegates to `@orc/memory`'s `recordDecision` over `decisionDoor(memory)`. Web calls record `cli`, MCP calls `mcp`; only the terminal ADR command explicitly records `human`. Refusals, slugged identity and supersession live in that shared operation.
   - `listWorkspaces`/`newWorkspace` — the workspace door: `listWorkspaceHealth(plugin)` for the records with their derived health, and `createRequestWorkspace` (the same op `orc ws new` calls) for a worktree + branch + the request as its first task.
   - `purgeProject`/`deleteProject` — both refuse while a supervisor is live (`refuseWhileSupervised`). `purgeProject` truncates + re-seeds identity notes; `deleteProject` drops the DBOS system DB and SurrealDB knowledge DB.
-  - `cancel(taskId)` — `kernel.cancelSubtree(taskId)`, then best-effort sweeps orphaned memory notes (`orphanedNotes`), reporting `{ swept, sweepError }`.
-  - `via?` defaults to the CLI's implicit terminal identity; passed to `replyFeedback`/`revise`.
+  - `cancel(taskId, origin)` — `kernel.cancelSubtree(taskId, origin)`, then best-effort sweeps orphaned memory notes (`orphanedNotes`), reporting `{ swept, sweepError }`.
+  - Every mutation receives an explicit `Origin`; annotations, replies, decisions and cancellation preserve it into the events they append.
 
 #### 5. `mcp-serve.ts` — door #2: stdio MCP server
 
 - **Two-layer stdout discipline**: layer 1 is `bin.ts`'s console rebind; layer 2 is here — `const realWrite = process.stdout.write.bind(...); process.stdout.write = (chunk, ...) => process.stderr.write(...)`, and a *separate* `Writable` (`transportOut`) calling the captured `realWrite` is what's handed to `StdioServerTransport`. This exists because winston (once DBOS boots) writes to `process.stdout` directly, bypassing `console`.
 - **`Autonomy = 'gated' | 'full'`**, a launch-time choice: `gated` (default) permits everything except approving; `full` lets the client approve (attributed `approvedBy: 'mcp'`).
-- **`mcpApproveTool(actions, autonomy): ResolvedTool`** — `ref: 'orc/approve'`. Under `gated` always returns `{ error: 'human gate: ...' }` without calling `actions`. Under `full` validates and calls `actions.approve(taskId, version, 'mcp')`. Deliberately **not** part of the copilot tool set — "the two doors differ EXACTLY here, by design."
+- **`mcpApproveTool(actions, autonomy): ResolvedTool`** — `ref: 'orc/approve'`. Listed when actions exist, but under `gated` returns `{ error: 'human gate: ...' }` without calling them. Under `full` validates the input and calls `actions.approve(taskId, { version?, approvedBy: AUTHOR_SOURCE.mcp }, MCP_ORIGIN)`. The copilot tool set does not include it.
 - **`buildServeTools(deps): ResolvedTool[]`** = `asResolvedTools(buildCopilotTools({ sessions, actions, projectId }))` **+** `deps.memoryTools.filter(t => READ_MEMORY.has(t.name))` **+** `deps.actions ? [mcpApproveTool(...)] : []`. `READ_MEMORY = new Set(MEMORY_READ_TOOLS)` = `[search, read, neighbors, topics, recheck]` — deliberately **excludes `memory_write`**: MCP door #2 gets read-only memory access. The copilot set contributes `record_decision` (via `OrcActions.recordDecision`), the one authoring tool the door serves.
 - **`startMcpServe(opts)`** — `actions: null` means a read-only server. Boots a `createProjectSessions`, opens memory (degrading to `unavailableMemoryTools(reason)`), assembles `tools` via `buildServeTools`, serves over `@modelcontextprotocol/sdk`'s `Server` + `StdioServerTransport`. Logs readiness to **stderr**.
 
@@ -1378,4 +1409,3 @@ Where the system's most-referenced types are *defined* (the seam) and where they
 | `EmbeddingProvider` | `contracts/src/execution.ts` (§7.1) | `{ embed(texts): Promise<number[][]> }` — the one embedding seam, optional system-wide. | sole impl `createOllamaEmbeddingProvider` (§7.4); consumed by the memory semantic arm + clustering (§7.5). |
 | `STRATEGY` | `contracts/src/plan.ts` (§7.1) | `{ groundedPlan, split, single }` — the three routing keys. | `createGroundedTask`/`createRegroundTask`/`proposeSplit` (§7.2), `groundedPlanOmission` (§7.3), grounded flow (§7.8). |
 | `activation` / `isApprovalAnswer` (placement notes) | `contracts/src/memory.ts` / `approval-answer.ts` | `activation()`/`DEFAULT_HALF_LIFE_DAYS` live at the bottom of `memory.ts` (there is **no** `activation.ts`); `isApprovalAnswer`/`APPROVAL_ANSWERS` live in `approval-answer.ts` (**not** `approval.ts`, which holds `ApprovalPolicy`/`evaluateApproval`). | heat re-rank (§7.5/§7.6); the conversational plan gate (§7.2/§7.8). |
-

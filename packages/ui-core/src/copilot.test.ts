@@ -2,13 +2,14 @@ import { describe, expect, it } from 'bun:test'
 import { generateText, stepCountIs } from 'ai'
 import { MockLanguageModelV4 } from 'ai/test'
 import type { ToolSet } from 'ai'
-import { TEST_WORKSPACE_ID, eventFixture, listOf, must, planFixture, planNoteFixture, recordOf, taskFixture } from '@orc/contracts/fixtures'
-import { AUTHOR_SOURCE, DECISION_STATUS, EVENT_KIND, WORKSPACE_KIND, WORKSPACE_STATE, type EventRecord, type PlanNote, type Workspace, type WorkspaceHealth, type WorkspaceWithHealth } from '@orc/contracts'
+import { authorFixture, eventFixture, listOf, must, planFixture, planNoteFixture, recordOf, taskFixture } from '@orc/contracts/fixtures'
+import { DECISION_STATUS, Door, EVENT_KIND, ScopeType, TASK_STATUS, WORKSPACE_KIND, WORKSPACE_STATE, type EventRecord, type Origin, type PlanNote, type Workspace, type WorkspaceHealth, type WorkspaceWithHealth } from '@orc/contracts'
 import type { OrcActions } from './actions'
 import type { ProjectSessions } from './sessions'
 import { modelOf } from './test-helpers'
 import type { TranscriptItem } from './transcript'
 import { asResolvedTools, buildCopilotTools, copilotSystemPrompt } from './copilot'
+import type { CopilotFocus } from './copilot-focus'
 
 // Honest stubs for the ui-core ports this suite drives: every member throws unless overridden,
 // so an unexercised call surfaces loudly instead of a cast pretending the object is complete.
@@ -33,6 +34,7 @@ const actionsStub = (over: Partial<OrcActions> = {}): OrcActions => ({
   recordDecision: unsupported('recordDecision'),
   renameProject: unsupported('renameProject'), newProject: unsupported('newProject'),
   listWorkspaces: unsupported('listWorkspaces'), newWorkspace: unsupported('newWorkspace'),
+  listModels: unsupported('listModels'),
   cancel: unsupported('cancel'), purgeProject: unsupported('purgeProject'), deleteProject: unsupported('deleteProject'), ...over,
 })
 
@@ -82,19 +84,22 @@ const stubSessions = sessionsOf([], {
   }),
 })
 
-const author = { source: AUTHOR_SOURCE.cli, workspaceId: TEST_WORKSPACE_ID }
+// The exchange these tools are built for. Every mutating tool passes it to the action it calls,
+// so there is no origin-less spelling of buildCopilotTools to fall back to.
+const ORIGIN: Origin = { chatId: 'chat-copilot', door: Door.mcp }
+const author = authorFixture()
 const wrotePlanNote = (seq: number, note: PlanNote): EventRecord =>
   eventFixture({ seq, taskId: null, kind: EVENT_KIND.memory_written, payload: { note, author } })
 
 describe('copilot tools', () => {
   it('read tools ground the model; the loop runs tool → answer', async () => {
-    const tools = buildCopilotTools({ sessions: stubSessions, actions: null, projectId: 'p1' })
+    const tools = buildCopilotTools({ sessions: stubSessions, actions: null, projectId: 'p1', origin: ORIGIN })
     const result = await generateText({
       model: scriptModel([
         { toolCalls: [{ toolCallId: 'c1', toolName: 'project_status', input: {} }] },
         { text: 'you have one draft task: build it' },
       ]),
-      system: copilotSystemPrompt('test', 'read-only'),
+      system: copilotSystemPrompt('test', 'read-only', undefined, null),
       messages: [{ role: 'user', content: 'what is going on?' }],
       tools,
       stopWhen: stepCountIs(3),
@@ -106,7 +111,7 @@ describe('copilot tools', () => {
   })
 
   it('asResolvedTools reshapes the copilot toolset for door #2: JSON schemas + {output,isError}', async () => {
-    const tools = asResolvedTools(buildCopilotTools({ sessions: stubSessions, actions: null, projectId: 'p1' }))
+    const tools = asResolvedTools(buildCopilotTools({ sessions: stubSessions, actions: null, projectId: 'p1', origin: ORIGIN }))
     const status = must(tools.find(t => t.name === 'project_status'), 'tools.find(t => t.name === \'project_status\')')
     expect(status.inputSchema.type).toBe('object')
     expect(status.inputSchema.$schema).toBeUndefined() // stripped for MCP
@@ -117,19 +122,19 @@ describe('copilot tools', () => {
 
   it('project_status carries memory health when the probe is wired — a rebuilding read model must be visible at the door, not only in the DB', async () => {
     const health = async () => ({ memory: { state: 'catching_up' as const, pending: 372, reason: '372 event(s) not yet projected' } })
-    const tools = asResolvedTools(buildCopilotTools({ sessions: stubSessions, actions: null, projectId: 'p1', health }))
+    const tools = asResolvedTools(buildCopilotTools({ sessions: stubSessions, actions: null, projectId: 'p1', origin: ORIGIN, health }))
     const r = await must(tools.find(t => t.name === 'project_status'), 'tools.find(t => t.name === \'project_status\')').execute({}, undefined)
     expect(r.isError).toBe(false)
     expect(r.output).toHaveProperty('memory', { state: 'catching_up', pending: 372, reason: '372 event(s) not yet projected' })
 
     // probe absent → field omitted, never a fabricated "ok"
-    const bare = asResolvedTools(buildCopilotTools({ sessions: stubSessions, actions: null, projectId: 'p1' }))
+    const bare = asResolvedTools(buildCopilotTools({ sessions: stubSessions, actions: null, projectId: 'p1', origin: ORIGIN }))
     const r2 = await must(bare.find(t => t.name === 'project_status'), 'bare.find(t => t.name === \'project_status\')').execute({}, undefined)
     expect(r2.output).not.toHaveProperty('memory')
 
     // probe failure → unreachable with the reason, mirroring graph-ui's /api/health posture
     const failing = asResolvedTools(buildCopilotTools({
-      sessions: stubSessions, actions: null, projectId: 'p1',
+      sessions: stubSessions, actions: null, projectId: 'p1', origin: ORIGIN,
       health: async () => { throw new Error('surreal is down') },
     }))
     const r3 = await must(failing.find(t => t.name === 'project_status'), 'failing.find(t => t.name === \'project_status\')').execute({}, undefined)
@@ -147,7 +152,7 @@ describe('copilot tools', () => {
       eventFixture({ seq: 2, taskId: 't1', kind: EVENT_KIND.plan_proposed, payload: { plan: planFixture({ taskId: 't1' }) } }),
       eventFixture({ seq: 3, taskId: 't1', kind: EVENT_KIND.plan_approved, payload: { taskId: 't1', version: 1 } }),
     ])
-    const tools = asResolvedTools(buildCopilotTools({ sessions: withPlan, actions: null, projectId: 'p1' }))
+    const tools = asResolvedTools(buildCopilotTools({ sessions: withPlan, actions: null, projectId: 'p1', origin: ORIGIN }))
     const r = await must(tools.find(t => t.name === 'task_plan'), 'tools.find(t => t.name === \'task_plan\')').execute({ taskId: 't1' }, undefined)
     expect(r.isError).toBe(false)
     expect(Object.keys(recordOf(recordOf(r.output).visual)).sort()).toEqual(['version', 'waves'])
@@ -155,20 +160,20 @@ describe('copilot tools', () => {
   })
 
   it('the human gate is structural: no approve tool even with actions wired', () => {
-    const acting = buildCopilotTools({ sessions: stubSessions, actions: actionsStub(), projectId: 'p1' })
+    const acting = buildCopilotTools({ sessions: stubSessions, actions: actionsStub(), projectId: 'p1', origin: ORIGIN })
     expect(Object.keys(acting)).toContain('run')
     expect(Object.keys(acting)).toContain('reply')
     expect(Object.keys(acting)).not.toContain('approve')
-    expect(copilotSystemPrompt('proj', 'act')).toContain('HUMAN-ONLY')
+    expect(copilotSystemPrompt('proj', 'act', undefined, null)).toContain('HUMAN-ONLY')
   })
 
   it('available_models lists live refs and only exists when discovery is wired', async () => {
     const tools = buildCopilotTools({
-      sessions: stubSessions, actions: null, projectId: 'p1',
+      sessions: stubSessions, actions: null, projectId: 'p1', origin: ORIGIN,
       listModels: async () => ['anthropic/claude-x', 'ollama/llama3.2:3b'],
     })
     expect(Object.keys(tools)).toContain('available_models')
-    expect(Object.keys(buildCopilotTools({ sessions: stubSessions, actions: null, projectId: 'p1' }))).not.toContain('available_models')
+    expect(Object.keys(buildCopilotTools({ sessions: stubSessions, actions: null, projectId: 'p1', origin: ORIGIN }))).not.toContain('available_models')
     const result = await generateText({
       model: scriptModel([
         { toolCalls: [{ toolCallId: 'c1', toolName: 'available_models', input: {} }] },
@@ -187,9 +192,9 @@ describe('copilot tools', () => {
     const actions = actionsStub({
       newTask: async input => { calls.push(input); return { taskId: 't-new' } },
     })
-    const tools = buildCopilotTools({ sessions: stubSessions, actions, projectId: 'p1' })
+    const tools = buildCopilotTools({ sessions: stubSessions, actions, projectId: 'p1', origin: ORIGIN })
     expect(Object.keys(tools)).toContain('new_request')
-    expect(Object.keys(buildCopilotTools({ sessions: stubSessions, actions: null, projectId: 'p1' }))).not.toContain('new_request')
+    expect(Object.keys(buildCopilotTools({ sessions: stubSessions, actions: null, projectId: 'p1', origin: ORIGIN }))).not.toContain('new_request')
 
     const result = await generateText({
       model: scriptModel([
@@ -200,7 +205,8 @@ describe('copilot tools', () => {
       tools,
       stopWhen: stepCountIs(3),
     })
-    expect(calls).toEqual([{ title: 'demo request' }])
+    // budgetUSD travels explicitly: a chat tool never invents a spend cap, and the action requires one stated
+    expect(calls).toEqual([{ title: 'demo request', budgetUSD: null }])
     expect(result.text).toContain('t-new')
   })
 })
@@ -229,7 +235,7 @@ describe('workspaces at the doors', () => {
       newWorkspace: async input => { calls.push(input); return { workspace: wsFixture, taskId: 't1' } },
       listWorkspaces: async () => [wsRow],
     })
-    const tools = buildCopilotTools({ sessions: stubSessions, actions, projectId: 'p1' })
+    const tools = buildCopilotTools({ sessions: stubSessions, actions, projectId: 'p1', origin: ORIGIN })
     expect((await callTool(tools, 'workspace_new', { title: 'Req', spec: 'do it' })).output).toMatchObject({ taskId: 't1' })
     expect(calls).toEqual([{ title: 'Req', spec: 'do it' }])
     // the verdict travels WITH the record: a driver deciding where to work next needs to see that
@@ -240,21 +246,21 @@ describe('workspaces at the doors', () => {
   it('run no longer requires cwd — the kernel resolves the task\'s workspace', async () => {
     const seen: unknown[] = []
     const tools = buildCopilotTools({
-      sessions: stubSessions, projectId: 'p1',
-      actions: actionsStub({ run: async (id, cwd) => { seen.push([id, cwd]); return { requested: true } } }),
+      sessions: stubSessions, projectId: 'p1', origin: ORIGIN,
+      actions: actionsStub({ run: async (id, cwd) => { seen.push([id, cwd]); return { requested: true, since: 1 } } }),
     })
     await callTool(tools, 'run', { taskId: 't1' })
-    expect(seen).toEqual([['t1', undefined]])
+    expect(seen).toEqual([['t1', null]])
   })
 
   it('new_request carries an explicit workspaceId through to the actions layer', async () => {
     const calls: unknown[] = []
     const tools = buildCopilotTools({
-      sessions: stubSessions, projectId: 'p1',
+      sessions: stubSessions, projectId: 'p1', origin: ORIGIN,
       actions: actionsStub({ newTask: async input => { calls.push(input); return { taskId: 't9' } } }),
     })
     await callTool(tools, 'new_request', { title: 'in that worktree', workspaceId: wsFixture.id })
-    expect(calls).toEqual([{ title: 'in that worktree', workspaceId: wsFixture.id }])
+    expect(calls).toEqual([{ title: 'in that worktree', workspaceId: wsFixture.id, budgetUSD: null }])
   })
 
   // A driver's first question in a multi-workspace project is "which checkout is this task in?" —
@@ -272,7 +278,7 @@ describe('workspaces at the doors', () => {
         },
       }),
     })
-    const tools = buildCopilotTools({ sessions, actions: null, projectId: 'p1', listWorkspaces: async () => [wsRow] })
+    const tools = buildCopilotTools({ sessions, actions: null, projectId: 'p1', origin: ORIGIN, listWorkspaces: async () => [wsRow] })
     expect((await callTool(tools, 'project_status', {})).output).toMatchObject({
       workspaces: [{
         id: wsFixture.id, title: 'Req', kind: WORKSPACE_KIND.worktree, branch: 'orc/req',
@@ -284,7 +290,7 @@ describe('workspaces at the doors', () => {
     })
     // no dep wired → the field is OMITTED. An empty array would read as "this project has no
     // workspaces", which is never true — every task has one.
-    const bare = buildCopilotTools({ sessions, actions: null, projectId: 'p1' })
+    const bare = buildCopilotTools({ sessions, actions: null, projectId: 'p1', origin: ORIGIN })
     expect((await callTool(bare, 'project_status', {})).output).not.toHaveProperty('workspaces')
   })
 
@@ -292,7 +298,7 @@ describe('workspaces at the doors', () => {
   // so an optional dep that fails must cost the caller that ONE field, never the whole answer.
   it('a failing listWorkspaces omits the field — it never takes project_status down', async () => {
     const tools = buildCopilotTools({
-      sessions: stubSessions, actions: null, projectId: 'p1',
+      sessions: stubSessions, actions: null, projectId: 'p1', origin: ORIGIN,
       listWorkspaces: async () => { throw new Error('the log is unreachable') },
     })
     const r = await callTool(tools, 'project_status', {})
@@ -309,13 +315,42 @@ describe('decisions at the doors', () => {
   it('record_decision hands the parsed decision to actions and is absent without a mutating door', async () => {
     const calls: unknown[] = []
     const actions = actionsStub({ recordDecision: async input => { calls.push(input); return { id: 'x', status: DECISION_STATUS.accepted, superseded: null } } })
-    const tools = buildCopilotTools({ sessions: stubSessions, actions, projectId: 'p1' })
+    const tools = buildCopilotTools({ sessions: stubSessions, actions, projectId: 'p1', origin: ORIGIN })
     const r = await callTool(tools, 'record_decision', { title: 'X', context: 'c', decision: 'd', consequences: 'q' })
     expect(r.output).toEqual({ id: 'x', status: DECISION_STATUS.accepted, superseded: null })
     expect(calls).toEqual([{ title: 'X', context: 'c', decision: 'd', consequences: 'q', tags: [] }])
     // the door refuses a status the vocabulary does not have BEFORE actions sees it
     expect((await callTool(tools, 'record_decision', { title: 'X', context: 'c', decision: 'd', consequences: 'q', status: 'final' })).isError).toBe(true)
-    expect(Object.keys(buildCopilotTools({ sessions: stubSessions, actions: null, projectId: 'p1' }))).not.toContain('record_decision')
+    expect(Object.keys(buildCopilotTools({ sessions: stubSessions, actions: null, projectId: 'p1', origin: ORIGIN }))).not.toContain('record_decision')
+  })
+})
+
+// What the copilot is told about the selection. The block is rendered from the derived focus, so
+// a copilot answering "this request" can never name a task the fold does not hold.
+describe('the system prompt renders the selection', () => {
+  const taskFocus: CopilotFocus = {
+    type: ScopeType.task, title: 'wire the door', spec: 'the whole spec', status: TASK_STATUS.running,
+    subtasks: [{ id: 't2', title: 'the child step', status: TASK_STATUS.draft }],
+  }
+
+  it('names the focus title (and its subtasks) when something is selected', () => {
+    const prompt = copilotSystemPrompt('proj', 'act', undefined, taskFocus)
+    expect(prompt).toContain('You are looking at')
+    expect(prompt).toContain('wire the door')
+    expect(prompt).toContain('the child step')
+  })
+
+  it('names a selected workspace and its requests', () => {
+    const prompt = copilotSystemPrompt('proj', 'act', undefined, {
+      type: ScopeType.workspace, title: 'Alpha', tasks: [{ id: 't1', title: 'build it', status: TASK_STATUS.draft }],
+    })
+    expect(prompt).toContain('You are looking at')
+    expect(prompt).toContain('Alpha')
+    expect(prompt).toContain('build it')
+  })
+
+  it('has NO focus block when nothing is selected', () => {
+    expect(copilotSystemPrompt('proj', 'act', undefined, null)).not.toContain('You are looking at')
   })
 })
 
@@ -328,7 +363,7 @@ describe('task_transcript (bounded for the MCP door)', () => {
         spoke(3, EVENT_KIND.feedback_requested, { topic: 'cwd', question: QUESTION.question }),
         spoke(4, EVENT_KIND.signal_received, { stepId: 's1', signal: { outcome: SIGNAL.outcome, summary: SIGNAL.summary } }),
       ]),
-      actions: null, projectId: 'p1',
+      actions: null, projectId: 'p1', origin: ORIGIN,
     })
     const r = await callTool(tools, 'task_transcript', { taskId: 't1' })
     expect(r.isError).toBe(false)
@@ -346,7 +381,7 @@ describe('task_transcript (bounded for the MCP door)', () => {
   it('limit returns the LAST n items', async () => {
     const tools = buildCopilotTools({
       sessions: sessionsOf([1, 2, 3, 4, 5].map(i => calledTool(i, `c${i}`, `t${i}`, {}))),
-      actions: null, projectId: 'p1',
+      actions: null, projectId: 'p1', origin: ORIGIN,
     })
     const r = await callTool(tools, 'task_transcript', { taskId: 't1', limit: 2 })
     expect(listOf(r.output).map(i => recordOf(i).toolName)).toEqual(['t4', 't5'])
@@ -361,7 +396,7 @@ describe('plan_notes (mechanical fields)', () => {
       modelRef: 'anthropic/claude-haiku-4-5',
     })
     const tools = buildCopilotTools({
-      sessions: sessionsOf([wrotePlanNote(1, note)]), actions: null, projectId: 'p1',
+      sessions: sessionsOf([wrotePlanNote(1, note)]), actions: null, projectId: 'p1', origin: ORIGIN,
     })
     const r = await callTool(tools, 'plan_notes', { taskId: 't1' })
     const out = recordOf(listOf(r.output)[0])
@@ -376,7 +411,7 @@ describe('plan_notes (mechanical fields)', () => {
   it('omits modelRef entirely when the subplan inherits the parent model', async () => {
     const tools = buildCopilotTools({
       sessions: sessionsOf([wrotePlanNote(1, planNoteFixture({ modelRef: '' }))]),
-      actions: null, projectId: 'p1',
+      actions: null, projectId: 'p1', origin: ORIGIN,
     })
     const out = recordOf(listOf((await callTool(tools, 'plan_notes', { taskId: 't1' })).output)[0])
     expect(out).not.toHaveProperty('modelRef')
@@ -392,10 +427,12 @@ describe('recent_activity (pollable)', () => {
     spoke(7, EVENT_KIND.step_started, { stepId: 's2', attempt: 1 }),
     spoke(9, EVENT_KIND.step_completed, { stepId: 's2', summary: 'done' }),
   ]
-  const tools = buildCopilotTools({ sessions: sessionsOf(feed), actions: null, projectId: 'p1' })
+  const tools = buildCopilotTools({ sessions: sessionsOf(feed), actions: null, projectId: 'p1', origin: ORIGIN })
+
+  const project = { type: ScopeType.project }
 
   it('returns { rows, maxSeq }, and the cursor and kind filter reach the read', async () => {
-    const r = await callTool(tools, 'recent_activity', { sinceSeq: 5, kinds: ['step_started', 'step_completed'], limit: 3 })
+    const r = await callTool(tools, 'recent_activity', { scope: project, sinceSeq: 5, kinds: ['step_started', 'step_completed'], limit: 3 })
     // seq 5 is the caller's own cursor (EXCLUSIVE) and seq 6 is the wrong kind: a door that
     // dropped either filter would hand back rows the driver has already paid to read
     expect(r.output).toMatchObject({ maxSeq: 9 })
@@ -403,12 +440,21 @@ describe('recent_activity (pollable)', () => {
   })
 
   it('maxSeq is null when nothing is new', async () => {
-    const r = await callTool(tools, 'recent_activity', { sinceSeq: 9 })
+    const r = await callTool(tools, 'recent_activity', { scope: project, sinceSeq: 9 })
     expect(r.output).toEqual({ rows: [], maxSeq: null })
   })
 
   it('rejects a kind that is not in the EventKind vocabulary', async () => {
-    const r = await callTool(tools, 'recent_activity', { kinds: ['not_a_kind'] })
+    const r = await callTool(tools, 'recent_activity', { scope: project, kinds: ['not_a_kind'] })
     expect(r.isError).toBe(true)
+  })
+
+  // The scope is the view's own, so this door reads one conversation or one request without a
+  // second filtering rule living here.
+  it('narrows to a scope: a chat reads only its own rows, and an unstated scope is refused', async () => {
+    const chatty = buildCopilotTools({ sessions: sessionsOf([...feed, eventFixture({ seq: 11, kind: EVENT_KIND.copilot_exchange, taskId: null, chatId: 'c1', door: Door.web, payload: { user: 'u', assistant: 'a', toolCalls: [], modelRef: 'm/m', taskId: null, workspaceId: null } })]), actions: null, projectId: 'p1', origin: ORIGIN })
+    const r = await callTool(chatty, 'recent_activity', { scope: { type: ScopeType.chat, id: 'c1' } })
+    expect(listOf(recordOf(r.output).rows).map(i => recordOf(i).seq)).toEqual([11])
+    expect((await callTool(chatty, 'recent_activity', {})).isError).toBe(true)
   })
 })

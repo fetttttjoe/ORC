@@ -45,6 +45,7 @@ export type ViewEnvelopeData<N extends ViewName> = { seq: number; data: ViewResu
 type ResultSchemas<N extends ViewName> = { [K in N]: z.ZodType<ViewResult<K>> }
 const RESULT_SCHEMAS: ResultSchemas<ViewName> = {
   [VIEW.timeline]: WIRE.timeline.result,
+  [VIEW.chats]: WIRE.chats.result,
   [VIEW.node]: WIRE.node.result,
   [VIEW.transcript]: WIRE.transcript.result,
   [VIEW.plans]: WIRE.plans.result,
@@ -96,12 +97,8 @@ export function touchKey(project: string, t: Touch): readonly ['view', Touchable
   return viewKey(project, t.name, t.params)
 }
 
-// 404 → `{ seq: 0, data: null }` only for `plans`, whose caller renders "no plan proposed yet" as a
-// normal STATE, not an error. `planNotes` is NOT in this set: its `read` never returns null (an
-// undecomposed task answers an empty note list, plan-notes.ts's own comment says so), so it never
-// 404s in the first place. Every other view either never 404s or a missing subject is a real error
-// the toast should show.
-const NULL_ON_404: ReadonlySet<ViewName> = new Set([VIEW.plans])
+// a missing subject is a state the pane renders, not an error: no plan yet, a deleted note
+const NULL_ON_404: ReadonlySet<ViewName> = new Set([VIEW.plans, VIEW.node])
 
 /**
  * One view read, parsed against the SAME schema the registry answers with (`WIRE[name].result`,

@@ -1,8 +1,12 @@
 import { describe, expect, it } from 'bun:test'
-import { EVENT_KIND, FAILURE_CLASS, STEP_RUN_STATUS, TASK_STATUS, type EventRecord, type FailureClass, type Plan, type StepRunStatus, type TaskNode, type TaskStatus } from '@orc/contracts'
-import { eventFixture, draftFixture, must, planFixture, stepFixture, taskFixture } from '@orc/contracts/fixtures'
+import { AUTHOR_SOURCE, Door, EVENT_KIND, FAILURE_CLASS, STEP_RUN_STATUS, TASK_STATUS, type EventRecord, type FailureClass, type Origin, type Plan, type StepRunStatus, type TaskNode, type TaskStatus } from '@orc/contracts'
+import { authorFixture, eventFixture, draftFixture, must, planFixture, stepFixture, taskFixture } from '@orc/contracts/fixtures'
 import { TEST_WORKSPACE_ID } from './test-helpers'
 import { blockingVerdicts, canRetry, retryIsFutile, startedAttempts, type State, type StepState, emptyFold, estimateCostUSD, fold, foldInto, subtreeOutcome, completedStepIds, nextAttempts, crashDedupKey, stepUsage, subtreeTaskIds, subtreeUsage, pendingSplitForChild, remainingBudget, inheritedCwd, runCwd, taskChangedPaths, taskNoteWrites, taskVerifiedNotes } from './projections'
+
+// An agent authors inside its run's chat; MemoryAuthor.origin is required, and a payload author
+// missing it fails zod at runtime (payload is untyped, so nothing flags it at compile time).
+const RUN: Origin = { chatId: 'run:t1:v1', door: Door.supervisor }
 
 const task: TaskNode = taskFixture()
 
@@ -176,7 +180,7 @@ describe('fold — execution kinds', () => {
     const base = fold([])
     const withMem = fold([eventFixture({
       taskId: null, kind: EVENT_KIND.memory_written,
-      payload: { note: { id: 'x', title: 'X', scope: 'project', categories: [], tags: [], links: [], paths: [], summary: '', body: '' }, author: { source: 'cli', workspaceId: TEST_WORKSPACE_ID } },
+      payload: { note: { id: 'x', title: 'X', scope: 'project', categories: [], tags: [], links: [], paths: [], summary: '', body: '' }, author: authorFixture() },
       ts: '2026-07-18T00:00:00Z',
     })])
     expect(withMem.tasks.size).toBe(base.tasks.size)
@@ -549,14 +553,14 @@ describe('taskChangedPaths', () => {
 
 const write = (seq: number, note: Record<string, unknown>, taskId: string | undefined): EventRecord =>
   eventFixture({ seq, ts: 'T', kind: EVENT_KIND.memory_written,
-    payload: { note, author: { source: 'agent', workspaceId: TEST_WORKSPACE_ID, ...(taskId ? { taskId } : {}) } } })
+    payload: { note, author: authorFixture({ source: AUTHOR_SOURCE.agent, origin: RUN, ...(taskId ? { taskId } : {}) }) } })
 const del = (seq: number, id: string, scope = 'project'): EventRecord =>
   eventFixture({ seq, ts: 'T', kind: EVENT_KIND.memory_deleted,
-    payload: { id, scope, author: { source: 'cli', workspaceId: TEST_WORKSPACE_ID } } })
+    payload: { id, scope, author: authorFixture() } })
 const verified = (seq: number, id: string, taskId: string | undefined, scope = 'project', revision = 'head1'): EventRecord =>
   eventFixture({ seq, ts: 'T', kind: EVENT_KIND.memory_verified,
     payload: { id, scope, stamp: { revision, at: 'T', by: 'exec·m·auditor' },
-      author: { source: 'agent', workspaceId: TEST_WORKSPACE_ID, ...(taskId ? { taskId } : {}) } } })
+      author: authorFixture({ source: AUTHOR_SOURCE.agent, origin: RUN, ...(taskId ? { taskId } : {}) }) } })
 const semantic = (id: string, paths: string[]): Record<string, unknown> =>
   ({ id, scope: 'project', title: id, tier: 'semantic', paths })
 const subtree = new Set(['t1', 't1.c1'])

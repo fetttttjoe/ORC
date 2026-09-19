@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'bun:test'
-import { AUTHOR_SOURCE, EVENT_KIND, MemoryAuthor, PAYLOAD_SCHEMAS, TaskNode } from './index'
+import { AUTHOR_SOURCE, Door, EVENT_KIND, MemoryAuthor, NO_CHAT, PAYLOAD_SCHEMAS, TaskNode } from './index'
+import { authorFixture } from './fixtures'
 import { WORKSPACE_KIND, Workspace, WorkspaceArchivedPayload } from './workspace-entity'
 
 const ws = {
@@ -53,12 +54,23 @@ describe('MemoryAuthor.workspaceId', () => {
     expect(MemoryAuthor.safeParse({ source: AUTHOR_SOURCE.agent, workspaceId: '' }).success).toBe(false)
   })
   it('round-trips an agent author carrying the workspace it wrote from', () => {
-    expect(MemoryAuthor.parse({ source: AUTHOR_SOURCE.agent, workspaceId: ws.id })).toEqual({ source: 'agent', workspaceId: ws.id })
+    const origin = NO_CHAT(Door.cli)
+    expect(MemoryAuthor.parse({ source: AUTHOR_SOURCE.agent, workspaceId: ws.id, origin })).toEqual({ source: 'agent', workspaceId: ws.id, origin })
+  })
+  // The door is the half of the provenance that is never null, so an author that named only a chat
+  // would read back as having come from nowhere on every chatless write.
+  it('requires a full origin — a bare chatId does not satisfy it', () => {
+    expect(MemoryAuthor.safeParse({ source: AUTHOR_SOURCE.cli, workspaceId: ws.id, chatId: null }).success).toBe(false)
+    expect(MemoryAuthor.safeParse({ source: AUTHOR_SOURCE.cli, workspaceId: ws.id, origin: { chatId: null } }).success).toBe(false)
+    expect(MemoryAuthor.parse({ source: AUTHOR_SOURCE.cli, workspaceId: ws.id, origin: NO_CHAT(Door.mcp) }).origin.door).toBe(Door.mcp)
+  })
+  it('authorFixture names the chatless CLI origin every test-side author shares', () => {
+    expect(authorFixture().origin).toEqual(NO_CHAT(Door.cli))
   })
   it('the required key reaches every author-bearing payload, not just the write', () => {
     const note = { id: 'n', title: 'N' }
     expect(PAYLOAD_SCHEMAS[EVENT_KIND.memory_written].safeParse({ note, author: { source: AUTHOR_SOURCE.cli } }).success).toBe(false)
-    expect(PAYLOAD_SCHEMAS[EVENT_KIND.memory_written].safeParse({ note, author: { source: AUTHOR_SOURCE.cli, workspaceId: ws.id } }).success).toBe(true)
+    expect(PAYLOAD_SCHEMAS[EVENT_KIND.memory_written].safeParse({ note, author: authorFixture({ workspaceId: ws.id }) }).success).toBe(true)
     expect(PAYLOAD_SCHEMAS[EVENT_KIND.memory_deleted].safeParse({ id: 'n', scope: 'project', author: { source: AUTHOR_SOURCE.cli } }).success).toBe(false)
     expect(PAYLOAD_SCHEMAS[EVENT_KIND.feedback_provided].safeParse({ topic: 't', text: 'yes', author: { source: AUTHOR_SOURCE.cli } }).success).toBe(false)
   })

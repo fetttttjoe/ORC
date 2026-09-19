@@ -130,23 +130,6 @@ export function summarizeEvent(e: EventRecord): LogRow {
     }
     default: break
   }
-  return { seq: e.seq, ts: e.ts, kind: e.kind, taskId: e.taskId, stepId: e.stepId, line: line ?? snip(p, 90), authorTaskId, noteRef, ...(exchange ? { exchange } : {}) }
+  return { seq: e.seq, ts: e.ts, kind: e.kind, taskId: e.taskId, stepId: e.stepId, chatId: e.chatId, door: e.door, line: line ?? snip(p, 90), authorTaskId, noteRef, ...(exchange ? { exchange } : {}) }
 }
 
-// The ONE admit/reject rule for a per-task Log filter, shared by the server-side initial batch
-// (sessions.ts log()) and the live SSE tail (the web app's ledger), so the two
-// can never drift. `taskFilter` is the task whose Log tab is open (null = whole-project view,
-// which admits everything).
-//
-// A row's ENVELOPE taskId attributes step-scoped events (step_started/tool_call/…) — those never
-// leak cross-task, since `row.taskId === taskFilter` alone excludes another task's rows. The one
-// gap this closes: project-scoped memory rows carry envelope taskId null, so they'd match every
-// task filter under a naive `=== null` admit; instead attribute them to their WRITING task via
-// authorTaskId (payload.author.taskId), and admit only when that matches. An ownerless memory row
-// (authorTaskId null — a human/cli global note) is admitted by NO task filter.
-export function shouldAdmitLogRow(row: LogRow, taskFilter: string | null): boolean {
-  if (taskFilter === null) return true
-  if (row.taskId === taskFilter) return true
-  if (row.taskId === null) return row.authorTaskId === taskFilter
-  return false
-}

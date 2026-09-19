@@ -2,7 +2,7 @@ import { describe, expect, it } from 'bun:test'
 import { mkdtempSync, realpathSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import { AUTHOR_SOURCE, WORKSPACE_KIND, type Workspace } from '@orc/contracts'
+import { AUTHOR_SOURCE, Door, NO_CHAT, WORKSPACE_KIND, type Workspace } from '@orc/contracts'
 import { TEST_WORKSPACE_ID } from '@orc/contracts/fixtures'
 import { cwdAuthor, cwdWorkspaceId, type WorkspaceFold } from './cwd-workspace'
 
@@ -23,15 +23,15 @@ const kernelWith = (...ws: Workspace[]): WorkspaceFold =>
 
 describe('cwdAuthor', () => {
   it('stamps the cwd workspace onto the author, keeping the caller-supplied door and extras', async () => {
-    const author = await cwdAuthor(kernelWith(workspace), dir, AUTHOR_SOURCE.agent, { executor: 'mcp-serve' })
-    expect(author).toEqual({ source: AUTHOR_SOURCE.agent, workspaceId: TEST_WORKSPACE_ID, executor: 'mcp-serve' })
+    const author = await cwdAuthor(kernelWith(workspace), dir, AUTHOR_SOURCE.agent, NO_CHAT(Door.mcp), { executor: 'mcp-serve' })
+    expect(author).toEqual({ source: AUTHOR_SOURCE.agent, workspaceId: TEST_WORKSPACE_ID, origin: NO_CHAT(Door.mcp), executor: 'mcp-serve' })
   })
   it('defaults to no extras and still names the workspace', async () => {
-    expect(await cwdAuthor(kernelWith(workspace), dir, AUTHOR_SOURCE.cli))
-      .toEqual({ source: AUTHOR_SOURCE.cli, workspaceId: TEST_WORKSPACE_ID })
+    expect(await cwdAuthor(kernelWith(workspace), dir, AUTHOR_SOURCE.cli, NO_CHAT(Door.cli)))
+      .toEqual({ source: AUTHOR_SOURCE.cli, workspaceId: TEST_WORKSPACE_ID, origin: NO_CHAT(Door.cli) })
   })
   it('THROWS on a directory no workspace claims — a writer that cannot name its workspace is a wiring bug, never a placeholder', async () => {
-    await expect(cwdAuthor(kernelWith(), dir, AUTHOR_SOURCE.cli)).rejects.toThrow('no workspace for this directory')
+    await expect(cwdAuthor(kernelWith(), dir, AUTHOR_SOURCE.cli, NO_CHAT(Door.cli))).rejects.toThrow('no workspace for this directory')
     await expect(cwdWorkspaceId(kernelWith(), dir)).rejects.toThrow('no workspace for this directory')
   })
 })

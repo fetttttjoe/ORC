@@ -1,6 +1,6 @@
 import { z } from 'zod'
 import { CLAIM_ID_RE } from './claim'
-import { MemoryAuthor } from './ids'
+import { MemoryAuthor } from './author'
 import { MEMORY_LIMITS } from './limits'
 
 // A derived group of claims as a reader receives it. `topicKey` is a claim id — a content hash — so it

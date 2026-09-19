@@ -1,9 +1,11 @@
 import { stepCountIs, streamText, type LanguageModel } from 'ai'
 import { z } from 'zod'
-import { MEMORY_HEALTH, type MemoryHealth, type SupervisorHealth, errorMessage, isRecord, NoteAuthoringDraft, NoteRef, PlanDraft, type CopilotExchangePayload, type Usage } from '@orc/contracts'
-import { VIEWS, buildCopilotTools, copilotSystemPrompt, createProjectSessions, emptyPatch, touchesOf, type CopilotMode, type OrcActions, type ProjectEntry, type ProjectSessions, type ReadModel, type SessionUpdate } from '@orc/ui-core'
-import { PROJECT_PARAM, VIEW, VIEW_ROUTE, type OperatorState, type StreamFrame } from '@orc/ui-core/wire'
+import { Door, MEMORY_HEALTH, type MemoryHealth, NO_CHAT, type Origin, type SupervisorHealth, errorMessage, isRecord, NoteAuthoringDraft, NoteRef, PlanDraft, type CopilotExchangePayload, type Usage } from '@orc/contracts'
+import { VIEWS, buildCopilotTools, copilotFocus, copilotSystemPrompt, createProjectSessions, emptyPatch, touchesOf, type CopilotMode, type OrcActions, type ProjectEntry, type ProjectSessions, type ReadModel, type SessionUpdate } from '@orc/ui-core'
+import { CopilotFrameType, PROJECT_PARAM, VIEW, VIEW_ROUTE, type CopilotFrame, type OperatorState, type StreamFrame } from '@orc/ui-core/wire'
 import path from 'node:path'
+import { chatTitleOf, copilotChat } from './copilot-chat'
+import type { CopilotExchangeRecord } from './copilot-journal'
 import { toolFailure } from './tool-failure'
 import { viewResponse, type DoorAnswers } from './view-route'
 
@@ -15,11 +17,19 @@ export interface CopilotConfig {
   // door-neutral dep mcp-serve wires, so both doors answer "which checkout is this task in, and is
   // it still going anywhere?" the same way
   listWorkspaces?: Parameters<typeof buildCopilotTools>[0]['listWorkspaces']
+  // Which checkout an exchange is ABOUT when the client names none: the task's own workspace, else
+  // the one this server was started in. This door holds no task index — the composition root does.
+  resolveWorkspace?: (taskId: string | null) => Promise<string | null>
   price?: (ref: string, usage: { inputTokens?: number; outputTokens?: number; inputTokenDetails?: { cacheReadTokens?: number; cacheWriteTokens?: number } }) => number | null
 }
 
 const CopilotBody = z.object({
   projectId: z.string().min(1),
+  // Required, nullable: the client STATES whether it is continuing a chat (echo the id) or opening
+  // one (null). An optional key made a dropped id look like a new conversation every exchange.
+  chatId: z.string().min(1).nullable(),
+  taskId: z.string().min(1).nullable(),
+  workspaceId: z.string().min(1).nullable(),
   modelRef: z.string().min(1).optional(),
   messages: z.array(z.object({ role: z.enum(['user', 'assistant']), content: z.string() })).min(1).max(60),
 })
@@ -29,13 +39,13 @@ const CopilotBody = z.object({
 // The web boundary is a trust boundary even on localhost.
 // `project` is the chat the request came from (the x-orc-project header, defaulting to this
 // server's own). Routes that act on ONE named project read it; the rest ignore it.
-type ActionHandler = (a: OrcActions, body: unknown, project: string | undefined) => Promise<Response>
+type ActionHandler = (a: OrcActions, body: unknown, project: string | undefined, origin: Origin) => Promise<Response>
 
-const route = <S extends z.ZodType>(schema: S, run: (a: OrcActions, input: z.output<S>, project: string | undefined) => Promise<unknown>): ActionHandler =>
-  async (a, body, project) => {
+const route = <S extends z.ZodType>(schema: S, run: (a: OrcActions, input: z.output<S>, project: string | undefined, origin: Origin) => Promise<unknown>): ActionHandler =>
+  async (a, body, project, origin) => {
     const parsed = schema.safeParse(body)
     if (!parsed.success) return Response.json({ error: parsed.error.message }, { status: 400 })
-    return Response.json(await run(a, parsed.data, project))
+    return Response.json(await run(a, parsed.data, project, origin))
   }
 
 const id = z.string().min(1)
@@ -43,40 +53,44 @@ const ACTION_ROUTES: Record<string, ActionHandler> = {
   newTask: route(
     z.object({
       title: z.string().min(1), spec: z.string().optional(), parentId: id.optional(),
+      // required key, nullable value — the same shape OrcActions.newTask states: a caller that
+      // forgot a ceiling must be refused here, not silently given none
+      budgetUSD: z.number().positive().nullable(),
       grounded: z.object({ modelRef: id, cwd: id, analyzerRef: id.optional() }).optional(),
     }),
-    (a, d) => a.newTask(d),
+    (a, d, _p, o) => a.newTask(d, o),
   ),
   propose: route(
     z.object({ taskId: id, modelRef: id, skillRefs: z.array(z.string()).optional() }),
-    (a, d) => a.propose(d.taskId, { modelRef: d.modelRef, skillRefs: d.skillRefs }),
+    (a, d, _p, o) => a.propose(d.taskId, { template: { modelRef: d.modelRef, skillRefs: d.skillRefs ?? [] } }, o),
   ),
   // the draft is validated by the SAME contract schema the kernel writes with — no duplicate
-  edit: route(z.object({ taskId: id, draft: PlanDraft }), (a, d) => a.edit(d.taskId, d.draft)),
+  edit: route(z.object({ taskId: id, draft: PlanDraft }), (a, d, _p, o) => a.edit(d.taskId, { draft: d.draft }, o)),
   approve: route(
     z.object({ taskId: id, version: z.number().int().positive().optional() }),
-    (a, d) => a.approve(d.taskId, d.version),
+    (a, d, _p, o) => a.approve(d.taskId, { version: d.version }, o),
   ),
-  run: route(z.object({ taskId: id, cwd: id }), (a, d) => a.run(d.taskId, d.cwd)),
+  run: route(z.object({ taskId: id, cwd: id }), (a, d, _p, o) => a.run(d.taskId, d.cwd, o)),
   // answers the chat the user is LOOKING at, not this server's own project — a reply is a pure
   // append, so it belongs to whichever project asked the question (see CROSS_PROJECT_ACTIONS)
-  reply: route(z.object({ taskId: id, text: z.string().min(1) }), (a, d, project) => a.reply(d.taskId, d.text, project)),
-  retry: route(z.object({ taskId: id }), (a, d) => a.retry(d.taskId)),
-  cancel: route(z.object({ taskId: id }), (a, d) => a.cancel(d.taskId)),
+  reply: route(z.object({ taskId: id, text: z.string().min(1) }), (a, d, project, o) => a.reply(d.taskId, d.text, project, o)),
+  // no cwd: the retried run belongs in the task's own workspace, and this door has no terminal
+  retry: route(z.object({ taskId: id }), (a, d, _p, o) => a.retry(d.taskId, null, o)),
+  cancel: route(z.object({ taskId: id }), (a, d, _p, o) => a.cancel(d.taskId, o)),
   annotate: route(
     z.object({ taskId: id, noteId: id, text: z.string().min(1), refs: z.array(z.string()).optional() }),
-    (a, d) => a.annotate(d.taskId, d.noteId, d.text, d.refs),
+    (a, d, _p, o) => a.annotate(d.taskId, d.noteId, d.text, d.refs ?? [], o),
   ),
   revise: route(
     z.object({ taskId: id, text: z.string().min(1), scope: z.array(id).min(1) }),
-    (a, d) => a.revise(d.taskId, d.text, d.scope),
+    (a, d, _p, o) => a.revise(d.taskId, d.text, d.scope, o),
   ),
-  writeNote: route(NoteAuthoringDraft, (a, d) => a.writeNote(d)),
-  deleteNote: route(NoteRef, (a, d) => a.deleteNote(d.id, d.scope)),
-  renameProject: route(z.object({ name: z.string().min(1).max(80) }), (a, d) => a.renameProject(d.name)),
-  newProject: route(z.object({ dir: id, name: z.string().min(1).max(80) }), (a, d) => a.newProject(d.dir, d.name)),
-  purgeProject: route(z.object({}), a => a.purgeProject()),
-  deleteProject: route(z.object({ projectId: id }), (a, d) => a.deleteProject(d.projectId)),
+  writeNote: route(NoteAuthoringDraft, (a, d, _p, o) => a.writeNote(d, o)),
+  deleteNote: route(NoteRef, (a, d, _p, o) => a.deleteNote(d.id, d.scope, o)),
+  renameProject: route(z.object({ name: z.string().min(1).max(80) }), (a, d, _p, o) => a.renameProject(d.name, o)),
+  newProject: route(z.object({ dir: id, name: z.string().min(1).max(80) }), (a, d, _p, o) => a.newProject(d.dir, d.name, o)),
+  purgeProject: route(z.object({}), (a, _d, _p, o) => a.purgeProject(o)),
+  deleteProject: route(z.object({ projectId: id }), (a, d, _p, o) => a.deleteProject(d.projectId, o)),
 }
 
 // Actions that EXECUTE run against the ONE project this server was started in — they need the
@@ -114,7 +128,9 @@ export function startGraphUi(opts: {
   health?: () => Promise<{ memory: MemoryHealth; supervisor?: SupervisorHealth }>
   // P6 interaction journaling: append one copilot_exchange event per completed exchange — the
   // conversation that caused an action is part of the record. Absent = exchanges unrecorded.
-  appendExchange?: (x: { payload: CopilotExchangePayload; usage: Usage | null }) => Promise<void>
+  // `opened` rides along so the chat and its first exchange land in ONE append: a chat_opened that
+  // committed without its exchange would leave an empty conversation in every chats list.
+  appendExchange?: (x: CopilotExchangeRecord) => Promise<void>
   // threads config → sessions → graph heat: the same decay rate the store ranking uses
   memoryHalfLifeDays?: number
 }): GraphUiServer {
@@ -142,8 +158,12 @@ export function startGraphUi(opts: {
     if (req.headers.get('x-orc-token') !== token) return Response.json({ error: 'missing or invalid x-orc-token' }, { status: 403 })
     const parsed = CopilotBody.safeParse(await req.json().catch(() => null))
     if (!parsed.success) return Response.json({ error: parsed.error.message }, { status: 400 })
-    const { projectId, messages } = parsed.data
+    const { projectId, messages, taskId } = parsed.data
     const modelRef = parsed.data.modelRef ?? cfg.defaultModelRef
+    const user = [...messages].reverse().find(m => m.role === 'user')?.content ?? ''
+    const workspaceId = parsed.data.workspaceId ?? await cfg.resolveWorkspace?.(taskId) ?? null
+    const chat = copilotChat({ chatId: parsed.data.chatId, taskId, workspaceId, title: chatTitleOf(user) }, () => crypto.randomUUID())
+    const origin: Origin = { chatId: chat.chatId, door: Door.web }
     let model: LanguageModel
     try { model = cfg.resolveModel(modelRef) } catch (err) {
       return Response.json({ error: errorMessage(err) }, { status: 400 })
@@ -154,10 +174,10 @@ export function startGraphUi(opts: {
     const mode: CopilotMode = opts.actions === undefined ? 'read-only' : home ? 'act' : 'foreign-project'
     const result = streamText({
       model,
-      system: copilotSystemPrompt(name, mode, opts.defaultCwd),
+      system: copilotSystemPrompt(name, mode, opts.defaultCwd, copilotFocus((await sessions.model(projectId)).state, { taskId, workspaceId })),
       messages,
       tools: buildCopilotTools({
-        sessions, actions: mode === 'act' ? opts.actions ?? null : null, projectId, listModels: cfg.listModels,
+        sessions, actions: mode === 'act' ? opts.actions ?? null : null, projectId, origin, listModels: cfg.listModels,
         // the same probe the footer badge polls (/api/health) — the copilot must see a
         // rebuilding read model too, or it narrates a silent project as healthy
         ...(opts.health && { health: opts.health }),
@@ -177,18 +197,21 @@ export function startGraphUi(opts: {
     let exUsage: Usage | null = null
     const stream = new ReadableStream<Uint8Array>({
       start: async controller => {
-        const send = (data: unknown): void => controller.enqueue(enc.encode(`data: ${JSON.stringify(data)}\n\n`))
+        const send = (data: CopilotFrame): void => {
+          const frame = enc.encode(`data: ${JSON.stringify(data)}\n\n`)
+          try { controller.enqueue(frame) } catch { /* client gone */ }
+        }
         try {
           for await (const part of result.fullStream) {
             switch (part.type) {
-              case 'text-delta': send({ type: 'text', text: part.text }); assistant += part.text; break
+              case 'text-delta': send({ type: CopilotFrameType.text, text: part.text }); assistant += part.text; break
               case 'tool-call':
-                send({ type: 'tool-call', toolName: part.toolName, input: part.input })
+                send({ type: CopilotFrameType.toolCall, toolName: part.toolName, input: part.input })
                 if (toolCalls.length < 64) toolCalls.push({ toolName: part.toolName, summary: (JSON.stringify(part.input) ?? '').slice(0, 140) })
                 break
-              case 'tool-result': send({ type: 'tool-result', toolName: part.toolName, output: part.output }); break
-              case 'tool-error': send({ type: 'tool-error', toolName: part.toolName, error: String(part.error) }); break
-              case 'error': send({ type: 'error', message: String(part.error) }); break
+              case 'tool-result': send({ type: CopilotFrameType.toolResult, toolName: part.toolName, output: part.output }); break
+              case 'tool-error': send({ type: CopilotFrameType.toolError, toolName: part.toolName, error: String(part.error) }); break
+              case 'error': send({ type: CopilotFrameType.error, message: String(part.error) }); break
               case 'finish': {
                 const usage = {
                   inputTokens: part.totalUsage.inputTokens ?? 0,
@@ -196,23 +219,28 @@ export function startGraphUi(opts: {
                   costUSD: cfg.price?.(modelRef, part.totalUsage) ?? null,
                 }
                 exUsage = { ...usage, estimated: false }
-                send({ type: 'done', usage })
+                send({ type: CopilotFrameType.done, usage })
                 break
               }
               default: break // start/step/reasoning parts are wire noise for us
             }
           }
         } catch (err) {
-          send({ type: 'error', message: errorMessage(err) })
+          send({ type: CopilotFrameType.error, message: errorMessage(err) })
         } finally {
           // journal only the project this server can act in — a foreign-project chat is
           // read-only and its record belongs to that project's own server
           if (opts.appendExchange && home && (assistant !== '' || toolCalls.length > 0)) {
-            const user = [...messages].reverse().find(m => m.role === 'user')?.content ?? ''
-            await opts.appendExchange({ payload: { user, assistant, toolCalls, modelRef }, usage: exUsage })
-              .catch(err => console.error('copilot exchange journaling failed:', err))
+            const journaled = await opts.appendExchange({
+              chatId: chat.chatId, opened: chat.opened,
+              payload: { user, assistant, toolCalls, modelRef, taskId, workspaceId }, usage: exUsage,
+            }).then(() => true, (err: unknown) => {
+              console.error('copilot exchange journaling failed:', err)
+              return false
+            })
+            if (journaled) send({ type: CopilotFrameType.chat, chatId: chat.chatId })
           }
-          controller.close()
+          try { controller.close() } catch { /* client gone */ }
         }
       },
     })
@@ -231,7 +259,9 @@ export function startGraphUi(opts: {
       }, { status: 409 })
     try {
       const body: unknown = await req.json().catch(() => null)
-      const res = await handler(opts.actions, body, claimed ?? opts.cwdProject?.id)
+      // An operator's click belongs to no copilot conversation: this door's only chat-stamped
+      // calls are the copilot's own tool calls, which carry their origin from the stream.
+      const res = await handler(opts.actions, body, claimed ?? opts.cwdProject?.id, NO_CHAT(Door.web))
       // purge/delete rewrote history behind a cached session — drop it so reads refold; both
       // change the chats list without an append NOTIFY (deletion removes rows outright), so
       // the push must be told explicitly

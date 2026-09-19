@@ -1,8 +1,8 @@
 import { afterAll, describe, expect, it } from 'bun:test'
 import pg from 'pg'
 import {
-  EVENT_KIND, SIGNAL_OUTCOME,
-  type AgentExecutor, type EventDraft, type ExecutorContext, type SplitResult, type UnifiedEvent,
+  Door, EVENT_KIND, NO_CHAT, SIGNAL_OUTCOME,
+  type AgentExecutor, type EventDraft, type ExecutorContext, type Origin, type SplitResult, type UnifiedEvent,
 } from '@orc/contracts'
 import { draftFixture, stepFixture } from '@orc/contracts/fixtures'
 import { openStorage } from '../storage'
@@ -14,6 +14,8 @@ import { createDbosPort } from './dbos-port'
 // set BEFORE openStorage: buildRedactor snapshots process.env when the store opens
 const SECRET = 'sk-ant-totally-not-a-real-key-9f3a'
 process.env.ORC_REDACTION_PROBE_KEY = SECRET
+
+const CLI: Origin = NO_CHAT(Door.cli)
 
 // A step's return value does NOT flow through EventLog.append — DBOS serializes it straight
 // into operation_outputs in its own system database (same cluster, same credentials). This is
@@ -46,10 +48,10 @@ describe('redaction covers what DBOS persists', () => {
     cleanup.push(() => storage.close())
     const kernel = new Kernel(storage.events)
     // a task must name a workspace the fold has seen — one seeded record, then tasks as before
-    await seedTestWorkspace(storage.events)
-    const t = await kernel.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'leak probe', spec: 'return a secret from a step' })
-    await kernel.proposePlan(t.id, draftFixture([stepFixture({ id: 's1', title: 's1' })]))
-    await kernel.approvePlan(t.id)
+    await seedTestWorkspace(storage.events, CLI)
+    const t = await kernel.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'leak probe', spec: 'return a secret from a step' }, CLI)
+    await kernel.proposePlan(t.id, draftFixture([stepFixture({ id: 's1', title: 's1' })]), CLI)
+    await kernel.approvePlan(t.id, undefined, undefined, CLI)
 
     const port = await createDbosPort({
       storage, config: testConfig(db.url), skills: fakeSkills,

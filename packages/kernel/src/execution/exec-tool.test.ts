@@ -1,5 +1,5 @@
-import { describe, expect, it } from 'bun:test'
-import { mkdtempSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
+import { afterAll, describe, expect, it } from 'bun:test'
+import { mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { z } from 'zod'
@@ -11,7 +11,19 @@ const ExecOut = z.object({ exitCode: z.number(), stdout: z.string(), stderr: z.s
 // the same shape plus what the log/bracket adds
 const ExecLog = ExecOut.extend({ logPath: z.string(), cached: z.literal(true).optional() })
 
-const ws = () => mkdtempSync(path.join(tmpdir(), 'orc-exec-'))
+// the shape of a run killed at the ceiling
+const ExecHang = z.object({
+  timedOut: z.literal(true), stdout: z.string(), stderr: z.string(), logPath: z.string(), error: z.string(),
+  cached: z.literal(true).optional(),
+})
+
+const dirs: string[] = []
+const ws = () => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'orc-exec-'))
+  dirs.push(dir)
+  return dir
+}
+afterAll(() => { for (const dir of dirs) rmSync(dir, { recursive: true, force: true }) })
 const tool = (allowlist: string[], dir = ws()) => must(execTool({ workspaceDir: dir, allowlist })[0], 'exec tool')
 
 describe('exec tool', () => {
@@ -28,6 +40,21 @@ describe('exec tool', () => {
     expect(out.exitCode).toBe(0)
     expect(out.stdout).toContain('done')
   }, 10_000)
+
+  it('a run killed at the ceiling reports what it printed, names the hang, and is not reused', async () => {
+    const dir = ws()
+    // `exec` flushes sh's stdout and hands the signal straight to the sleeper
+    writeFileSync(path.join(dir, 'hang.sh'), 'echo HANGING_TEST_NAME\nexec sleep 30\n')
+    const t = must(execTool({ workspaceDir: dir, allowlist: ['sh'], fingerprint: async () => 'TREE-1', timeoutMs: 500 })[0], 'exec tool')
+    const r = await t.execute({ command: 'sh hang.sh' })
+    expect(r.isError).toBe(true)
+    const out = ExecHang.parse(r.output)
+    expect(out.stdout).toContain('HANGING_TEST_NAME')
+    expect(out.error.toLowerCase()).toContain('hang')
+    expect(readFileSync(path.join(dir, out.logPath), 'utf8')).toContain('HANGING_TEST_NAME')
+    const second = ExecHang.parse((await t.execute({ command: 'sh hang.sh' })).output)
+    expect(second.cached).toBeUndefined() // a hang can be environmental — never a settled result
+  }, 20_000)
 
   it('is not offered at all when the allowlist is empty — registration gate, not a runtime error', () => {
     expect(execTool({ workspaceDir: ws(), allowlist: [] })).toEqual([])

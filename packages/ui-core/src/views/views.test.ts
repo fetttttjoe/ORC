@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'bun:test'
-import { AUTHOR_SOURCE, EVENT_KIND, FAILURE_CLASS, NOTE_TIER, TASK_STATUS, type EventRecord, type FailureClass, type TaskStatus } from '@orc/contracts'
-import { TEST_WORKSPACE_ID, eventFixture, must, planFixture, stepFixture, taskFixture } from '@orc/contracts/fixtures'
+import { EVENT_KIND, FAILURE_CLASS, NOTE_TIER, TASK_STATUS, type EventRecord, type FailureClass, type TaskStatus } from '@orc/contracts'
+import { authorFixture, eventFixture, must, planFixture, stepFixture, taskFixture } from '@orc/contracts/fixtures'
 import { planScope } from '@orc/kernel'
 import { artifactNodeId, modelNodeId, noteNodeId, stepNodeId } from '../graph'
 import { modelOf } from '../test-helpers'
@@ -15,7 +15,7 @@ import { NODE_KIND } from '../wire'
 const ev = (seq: number, kind: EventRecord['kind'], taskId: string | null, payload: Record<string, unknown> = {}): EventRecord =>
   eventFixture({ seq, kind, taskId, payload })
 
-const author = { source: AUTHOR_SOURCE.cli, workspaceId: TEST_WORKSPACE_ID }
+const author = authorFixture()
 const wrote = (seq: number, scope: string, id: string, note: Record<string, unknown> = {}) =>
   ev(seq, EVENT_KIND.memory_written, null, { note: { id, title: id, scope, ...note }, author })
 // a run's envelope: the fold keys a step's run state off runToken/stepId, not off the payload

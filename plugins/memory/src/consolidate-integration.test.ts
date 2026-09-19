@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, it } from 'bun:test'
-import { EVENT_KIND, PAYLOAD_SCHEMAS, planScope, slugId, WORKSPACE_KIND, type MemoryAuthor, type TaskNode } from '@orc/contracts'
+import { Door, EVENT_KIND, NO_CHAT, PAYLOAD_SCHEMAS, planScope, slugId, WORKSPACE_KIND, type MemoryAuthor, type Origin, type TaskNode } from '@orc/contracts'
 import { eventFixture } from '@orc/contracts/fixtures'
 import { seedTestWorkspace, TEST_WORKSPACE, TEST_WORKSPACE_ID } from '@orc/kernel/test-helpers'
 import { createLiveMemory } from './test-helpers'
@@ -8,12 +8,17 @@ import { consolidateOnCompletion, createMemoryLifecycle } from './lifecycle'
 
 // The author the composition root hands in (runtime.ts / `orc memory consolidate`): 'agent' named
 // through `executor`, stamped with the workspace it writes from. The plugin builds none of its own.
-const CONSOLIDATE_AUTHOR: MemoryAuthor = { source: 'agent', workspaceId: TEST_WORKSPACE_ID, executor: CONSOLIDATE_EXECUTOR }
+// Consolidation is a background drain over a finished task, not a turn anyone typed, so it belongs
+// to no chat and comes through the supervisor door; the log rows this file hand-builds are `orc`.
+const CONSOLIDATE_ORIGIN: Origin = NO_CHAT(Door.supervisor)
+const CLI_ORIGIN: Origin = NO_CHAT(Door.cli)
+const CLI: MemoryAuthor = { source: 'cli', workspaceId: TEST_WORKSPACE_ID, origin: CLI_ORIGIN }
+const CONSOLIDATE_AUTHOR: MemoryAuthor = { source: 'agent', workspaceId: TEST_WORKSPACE_ID, executor: CONSOLIDATE_EXECUTOR, origin: CONSOLIDATE_ORIGIN }
 
 // The builder shape BOTH composition roots pass (runtime.ts's lifecycle subscriber and `orc memory
 // consolidate`): the plugin never invents an author, it asks for one PER TASK.
 const authorForTask = (task: { id: string; workspaceId: string }): MemoryAuthor =>
-  ({ source: 'agent', workspaceId: task.workspaceId, executor: CONSOLIDATE_EXECUTOR, taskId: task.id })
+  ({ source: 'agent', workspaceId: task.workspaceId, executor: CONSOLIDATE_EXECUTOR, taskId: task.id, origin: CONSOLIDATE_ORIGIN })
 
 const drops: (() => Promise<void>)[] = []
 afterAll(async () => { for (const d of drops) await d() })
@@ -30,7 +35,7 @@ const done = (taskId: string) =>
 async function harness(taskId: string, title: string) {
   const live = await createLiveMemory()
   drops.push(live.close)
-  await live.log.append({ taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.task_created, payload: { task: taskNode(taskId, title) } })
+  await live.log.append({ ...CLI_ORIGIN, taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.task_created, payload: { task: taskNode(taskId, title) } })
   return live
 }
 
@@ -40,11 +45,11 @@ async function harness(taskId: string, title: string) {
 it('consolidates a task that finished while no lifecycle was attached', async () => {
   const live = await createLiveMemory()
   drops.push(live.close)
-  await live.log.append({ taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.task_created, payload: { task: taskNode('t9', 'Detached task') } })
-  await live.store.write({ id: 'sa', scope: planScope('t9'), title: 'Step A', summary: 'did A' }, { source: 'cli', workspaceId: TEST_WORKSPACE_ID })
-  await live.store.write({ id: 'sb', scope: planScope('t9'), title: 'Step B', summary: 'did B' }, { source: 'cli', workspaceId: TEST_WORKSPACE_ID })
+  await live.log.append({ ...CLI_ORIGIN, taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.task_created, payload: { task: taskNode('t9', 'Detached task') } })
+  await live.store.write({ id: 'sa', scope: planScope('t9'), title: 'Step A', summary: 'did A' }, CLI)
+  await live.store.write({ id: 'sb', scope: planScope('t9'), title: 'Step B', summary: 'did B' }, CLI)
   // the completion lands with NOBODY subscribed — exactly the case that used to vanish
-  await live.log.append({ taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.task_status_changed, payload: { taskId: 't9', from: 'running', to: 'done' } })
+  await live.log.append({ ...CLI_ORIGIN, taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.task_status_changed, payload: { taskId: 't9', from: 'running', to: 'done' } })
   const outcomeId = slugId('outcome t9')
   await live.projector.catchUp()
   expect(await live.store.get(outcomeId)).toBeNull()
@@ -60,8 +65,8 @@ it('consolidates a task that finished while no lifecycle was attached', async ()
 describe('consolidateTask (integration)', () => {
   it('substantive task: non-force converges idempotently, force always rewrites', async () => {
     const { log, store, projector } = await harness('t1', 'My task')
-    await store.write({ id: 'sa', scope: planScope('t1'), title: 'Step A', summary: 'did A' }, { source: 'cli', workspaceId: TEST_WORKSPACE_ID })
-    await store.recordAccess('area-x', 'project', 'read', { source: 'agent', workspaceId: TEST_WORKSPACE_ID, taskId: 't1' }) // provenance → substantive
+    await store.write({ id: 'sa', scope: planScope('t1'), title: 'Step A', summary: 'did A' }, CLI)
+    await store.recordAccess('area-x', 'project', 'read', { source: 'agent', workspaceId: TEST_WORKSPACE_ID, taskId: 't1', origin: { chatId: 'run:t1:v1', door: Door.supervisor } }) // provenance → substantive
     const outcomeId = slugId('outcome t1')
     const rev = async (): Promise<number> => { await projector.catchUp(); return (await store.get(outcomeId))?.revision ?? 0 }
 
@@ -80,7 +85,7 @@ describe('consolidateTask (integration)', () => {
 
   it('unknown task → null; trivial task gated unless forced; a throwing distiller falls back to extractive', async () => {
     const { log, store, projector } = await harness('t2', 'Trivial task')
-    await store.write({ id: 'sb', scope: planScope('t2'), title: 'Step B', summary: 'x' }, { source: 'cli', workspaceId: TEST_WORKSPACE_ID })
+    await store.write({ id: 'sb', scope: planScope('t2'), title: 'Step B', summary: 'x' }, CLI)
     await projector.catchUp()
     // 'no-such-task' resolves to null — the exact "skip rather than guess" case, not a special path
     expect(await consolidateTask({ log, store, authorFor: () => CONSOLIDATE_AUTHOR }, 'no-such-task', await taskInfo(log, 'no-such-task'))).toBeNull()
@@ -106,23 +111,23 @@ describe('consolidateTask attributes the outcome to the TASK\'s workspace, not a
     // Two distinct, REAL workspace records — mirroring the supervisor's own checkout (A) and a
     // second worktree a task actually ran in (B). Real records because that is what a live
     // supervisor always has: one process, N adopted checkouts.
-    await seedTestWorkspace(live.log, '/test/workspace-a')
+    await seedTestWorkspace(live.log, CLI_ORIGIN, '/test/workspace-a')
     const workspaceB = '22222222-0000-4000-8000-000000000002'
     await live.log.append({
-      taskId: null, stepId: null, runToken: null,
+      ...CLI_ORIGIN, taskId: null, stepId: null, runToken: null,
       kind: EVENT_KIND.workspace_created,
       payload: { workspace: { ...TEST_WORKSPACE, id: workspaceB, cwd: '/test/workspace-b', kind: WORKSPACE_KIND.worktree } },
     })
 
     const taskId = 't30'
     await live.log.append({
-      taskId: null, stepId: null, runToken: null,
+      ...CLI_ORIGIN, taskId: null, stepId: null, runToken: null,
       kind: EVENT_KIND.task_created,
       payload: { task: taskNode(taskId, 'Worked in a worktree', workspaceB) },
     })
     // two steps: salience-gated on its own (isSubstantive), no provenance access needed
-    await live.store.write({ id: 'sa', scope: planScope(taskId), title: 'Step A', summary: 'did A' }, { source: 'agent', workspaceId: workspaceB, taskId })
-    await live.store.write({ id: 'sb', scope: planScope(taskId), title: 'Step B', summary: 'did B' }, { source: 'agent', workspaceId: workspaceB, taskId })
+    await live.store.write({ id: 'sa', scope: planScope(taskId), title: 'Step A', summary: 'did A' }, { source: 'agent', workspaceId: workspaceB, taskId, origin: { chatId: `run:${taskId}:v1`, door: Door.supervisor } })
+    await live.store.write({ id: 'sb', scope: planScope(taskId), title: 'Step B', summary: 'did B' }, { source: 'agent', workspaceId: workspaceB, taskId, origin: { chatId: `run:${taskId}:v1`, door: Door.supervisor } })
 
     await consolidateTask({ log: live.log, store: live.store, authorFor: authorForTask }, taskId, await taskInfo(live.log, taskId), { force: true })
     await live.projector.catchUp()
@@ -142,8 +147,8 @@ describe('consolidateTask attributes the outcome to the TASK\'s workspace, not a
 describe('consolidateOnCompletion (subscriber action)', () => {
   it('a done event consolidates (catch-up + write); a non-done event does nothing', async () => {
     const { log, store, projector } = await harness('t3', 'Subscribed task')
-    await store.write({ id: 'sc', scope: planScope('t3'), title: 'Step C', summary: 'did C' }, { source: 'cli', workspaceId: TEST_WORKSPACE_ID })
-    await store.recordAccess('area-y', 'project', 'read', { source: 'agent', workspaceId: TEST_WORKSPACE_ID, taskId: 't3' })
+    await store.write({ id: 'sc', scope: planScope('t3'), title: 'Step C', summary: 'did C' }, CLI)
+    await store.recordAccess('area-y', 'project', 'read', { source: 'agent', workspaceId: TEST_WORKSPACE_ID, taskId: 't3', origin: { chatId: 'run:t3:v1', door: Door.supervisor } })
     const deps = { log, store, authorFor: () => CONSOLIDATE_AUTHOR, catchUp: () => projector.catchUp() }
     const outcomeId = slugId('outcome t3')
     // a non-done transition → the classifier gates it → no note
@@ -175,9 +180,9 @@ describe('the step trail retires with the task, the design record does not', () 
    */
   it('archives the empty step trail and keeps the plan notes', async () => {
     const live = await harness('t20', 'Trail task')
-    await live.store.write({ id: 'step-a', scope: planScope('t20'), title: 'Step A', summary: 'did A', tier: 'episodic', retention: 'expirable' }, { source: 'cli', workspaceId: TEST_WORKSPACE_ID })
-    await live.store.write({ id: 'step-b', scope: planScope('t20'), title: 'Step B', summary: 'did B', tier: 'episodic', retention: 'expirable' }, { source: 'cli', workspaceId: TEST_WORKSPACE_ID })
-    await live.store.write({ id: 'masterplan', scope: planScope('t20'), title: 'Masterplan', summary: 'the split', rationale: 'why it was split this way' }, { source: 'cli', workspaceId: TEST_WORKSPACE_ID })
+    await live.store.write({ id: 'step-a', scope: planScope('t20'), title: 'Step A', summary: 'did A', tier: 'episodic', retention: 'expirable' }, CLI)
+    await live.store.write({ id: 'step-b', scope: planScope('t20'), title: 'Step B', summary: 'did B', tier: 'episodic', retention: 'expirable' }, CLI)
+    await live.store.write({ id: 'masterplan', scope: planScope('t20'), title: 'Masterplan', summary: 'the split', rationale: 'why it was split this way' }, CLI)
     await live.projector.catchUp()
 
     await consolidateOnCompletion({ log: live.log, store: live.store, authorFor: () => CONSOLIDATE_AUTHOR, catchUp: live.projector.catchUp }, done('t20'))
@@ -205,8 +210,8 @@ describe('the step trail retires with the task, the design record does not', () 
   it('consolidates BEFORE it retires — asserted on call order, not on a side effect', async () => {
     const live = await harness('t21', 'Ordering task')
     // two steps: consolidation is salience-gated, and a single trail note does not clear it
-    await live.store.write({ id: 'step-a', scope: planScope('t21'), title: 'Step A', summary: 'a real finding worth keeping', tier: 'episodic', retention: 'expirable' }, { source: 'cli', workspaceId: TEST_WORKSPACE_ID })
-    await live.store.write({ id: 'step-b', scope: planScope('t21'), title: 'Step B', summary: 'a second real finding', tier: 'episodic', retention: 'expirable' }, { source: 'cli', workspaceId: TEST_WORKSPACE_ID })
+    await live.store.write({ id: 'step-a', scope: planScope('t21'), title: 'Step A', summary: 'a real finding worth keeping', tier: 'episodic', retention: 'expirable' }, CLI)
+    await live.store.write({ id: 'step-b', scope: planScope('t21'), title: 'Step B', summary: 'a second real finding', tier: 'episodic', retention: 'expirable' }, CLI)
     await live.projector.catchUp()
 
     const calls: string[] = []

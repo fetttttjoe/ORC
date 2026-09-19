@@ -1,5 +1,6 @@
 import { expect, test, type APIRequestContext } from '@playwright/test'
 import type { z } from 'zod'
+import { ScopeType } from '@orc/contracts/scope'
 import { must } from '@orc/contracts/fixtures'
 import { issueLine } from '@orc/contracts/guards'
 import * as S from '../web/src/lib/api/schemas'
@@ -58,7 +59,7 @@ test('the models catalog is a bare array of refs', async ({ request }) => {
 
 test('the graph snapshot and timeline match, including every node and link field', async ({ request }) => {
   check(S.GraphSnapshot, await json(request, `/api/graph?project=${PROJECT}`), '/api/graph')
-  await view(request, S.VIEW.timeline, { limit: 50 }, S.LogRows, 'the timeline view')
+  await view(request, S.VIEW.timeline, { scope: { type: ScopeType.project }, limit: 50 }, S.LogRows, 'the timeline view')
 })
 
 test('every node kind parses as ITS OWN shape, not merely as something', async ({ request }) => {
@@ -102,5 +103,5 @@ test('a name that is no view, and params that fail their schema, are refused', a
   // hand-built on purpose: the builder cannot produce malformed JSON, and this is the shape a
   // client that encoded its params wrongly actually sends
   expect((await request.get(`${viewPath(S.VIEW.timeline)}&${S.VIEW_ROUTE.params}=%7Bnot-json`)).status()).toBe(400)
-  expect((await request.get(viewPath(S.VIEW.timeline, { limit: 0 }))).status()).toBe(400)
+  expect((await request.get(viewPath(S.VIEW.timeline, { scope: { type: ScopeType.project }, limit: 0 }))).status()).toBe(400)
 })

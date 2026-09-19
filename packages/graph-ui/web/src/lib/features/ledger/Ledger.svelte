@@ -8,6 +8,7 @@
   import { feedbackKey } from '@orc/contracts/feedback-key'
   import { fetchView } from '$lib/api/view-client'
   import { VIEW } from '@orc/ui-core/wire'
+  import { ScopeType } from '@orc/contracts/scope'
   import { ledger } from '$lib/stores/ledger.svelte'
   import { operator } from '$lib/stores/operator.svelte'
   import { session } from '$lib/stores/session.svelte'
@@ -71,7 +72,7 @@
       let page: ReturnType<typeof dropTicker> = []
       for (let hop = 0; hop < NOISE_CHAIN && page.length === 0; hop++) {
         const before = oldestFetched ?? frontier
-        const { data: raw } = await fetchView(project, VIEW.timeline, { beforeSeq: before, limit: OLDER_PAGE })
+        const { data: raw } = await fetchView(project, VIEW.timeline, { scope: { type: ScopeType.project }, beforeSeq: before, limit: OLDER_PAGE })
         if (gen !== ledger.generation) return
         if (!raw || raw.length === 0) {
           exhausted = true

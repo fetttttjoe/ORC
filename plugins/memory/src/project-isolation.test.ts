@@ -2,6 +2,7 @@ import { afterAll, describe, expect, it } from 'bun:test'
 import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
+import { Door, NO_CHAT } from '@orc/contracts'
 import { openStorage } from '@orc/kernel'
 import { createTestDb, testConfig, TEST_PROJECT_ID } from '@orc/kernel/test-helpers'
 import { createMemory } from './index'
@@ -38,8 +39,8 @@ describe('project isolation (SurrealDB native database boundary)', () => {
 
     const a = await open(P1)
     const b = await open(P2)
-    await a.memory.store.write({ id: 'only-a', title: 'A-side note', summary: 'alpha finding' }, { source: 'cli', workspaceId: TEST_WORKSPACE_ID })
-    await b.memory.store.write({ id: 'only-b', title: 'B-side note', summary: 'beta finding' }, { source: 'cli', workspaceId: TEST_WORKSPACE_ID })
+    await a.memory.store.write({ id: 'only-a', title: 'A-side note', summary: 'alpha finding' }, { source: 'cli', workspaceId: TEST_WORKSPACE_ID, origin: NO_CHAT(Door.cli) })
+    await b.memory.store.write({ id: 'only-b', title: 'B-side note', summary: 'beta finding' }, { source: 'cli', workspaceId: TEST_WORKSPACE_ID, origin: NO_CHAT(Door.cli) })
     await a.memory.projector.catchUp()
     await b.memory.projector.catchUp()
 

@@ -5,13 +5,15 @@ import { tool, type ToolSet } from 'ai'
 import type { GraphNode, NodeType } from './graph-wire'
 import { z } from 'zod'
 import type { OrcActions } from './actions'
+import { ScopeType } from '@orc/contracts/scope'
+import type { CopilotFocus } from './copilot-focus'
 import type { ProjectSessions } from './sessions'
 
 import { snip } from './summarize'
 import { viewOf } from './views/registry'
 import { VIEW, WIRE } from './wire'
 import type { MemoryHealth, ResolvedTool, SupervisorHealth, WorkspaceWithHealth } from '@orc/contracts'
-import { DecisionInput, errorMessage, EventKind, groupByWorkspace, MEMORY_HEALTH, toolError } from '@orc/contracts'
+import { DecisionInput, errorMessage, EventKind, groupByWorkspace, MEMORY_HEALTH, toolError, type Origin } from '@orc/contracts'
 
 // Why a session can't act: 'read-only' = server started outside a project; 'foreign-project'
 // = the user is viewing a chat other than the one this server runs in.
@@ -23,13 +25,25 @@ const MODE_LINES: Record<CopilotMode, string> = {
   'foreign-project': `This chat is READ-ONLY: actions run only in the project chat where orc graph was started. If the user wants to act, tell them to switch to that chat — or restart orc graph from this project's directory.`,
 }
 
-export function copilotSystemPrompt(projectName: string, mode: CopilotMode, defaultCwd?: string): string {
+// The selection in the user's own words, so "run this" resolves to the pane they are reading
+// rather than to whatever task the model last saw in a tool result.
+const focusBlock = (f: CopilotFocus): string =>
+  f.type === ScopeType.task
+    ? [
+        `You are looking at the request "${f.title}" (status: ${f.status}).`,
+        `Its spec: ${f.spec}`,
+        ...(f.subtasks.length > 0 ? [`Its subtasks: ${f.subtasks.map(t => `${t.title} [${t.id}] (${t.status})`).join('; ')}`] : []),
+      ].join('\n')
+    : `You are looking at the workspace "${f.title}". Its requests: ${f.tasks.map(t => `${t.title} [${t.id}] (${t.status})`).join('; ')}`
+
+export function copilotSystemPrompt(projectName: string, mode: CopilotMode, defaultCwd: string | undefined, focus: CopilotFocus | null): string {
   return [
     `You are the orc copilot for the project "${projectName}" — a guide through a multi-agent orchestrator.`,
     `Requests (tasks) move through: draft → plan proposed → approved (human gate) → running steps → done, with verified output artifacts and a growing knowledge graph of memory notes.`,
     `Ground every answer in tool reads — never invent task ids, statuses, or content. Read before you act.`,
     `Model refs have the form provider/model (e.g. anthropic/…). Call available_models before choosing one — never guess a ref.`,
     MODE_LINES[mode],
+    ...(focus ? [focusBlock(focus)] : []),
     `The UI already streams every event to the user live — NEVER offer to poll, watch, or "check back periodically". After an action, verify once with project_status/recent_activity, report, and stop.`,
     defaultCwd
       ? `The project's working directory is ${defaultCwd} — use it as the cwd (grounded.cwd / run's cwd) unless the user names a different EXISTING absolute path. NEVER invent paths (no /workspace/…); a non-existent cwd is rejected.`
@@ -78,6 +92,9 @@ export function buildCopilotTools(deps: {
   sessions: Pick<ProjectSessions, 'model' | 'snapshot'>
   actions: OrcActions | null
   projectId: string
+  // The EXCHANGE this toolset serves: every mutation below is stamped with it, so the events a
+  // copilot call appends are readable as one conversation rather than as anonymous door traffic.
+  origin: Origin
   listModels?: () => Promise<string[]>
   // The project's workspaces for project_status, wired from the kernel exactly as listModels is.
   // Optional for the same reason health is: a composition without a project context has none, and
@@ -91,7 +108,7 @@ export function buildCopilotTools(deps: {
   // read SurrealDB/Postgres directly to learn why nothing was running).
   health?: () => Promise<{ memory: MemoryHealth; supervisor?: SupervisorHealth }>
 }): ToolSet {
-  const { sessions, actions, projectId, listModels, listWorkspaces, health } = deps
+  const { sessions, actions, projectId, origin, listModels, listWorkspaces, health } = deps
   const taskId = z.string().min(1)
 
   const read: ToolSet = {
@@ -217,20 +234,21 @@ export function buildCopilotTools(deps: {
         })),
     }),
     recent_activity: tool({
-      description: 'The latest events in this project (one line each) — what just happened. Pass the previous call’s maxSeq as sinceSeq to read only what is new, and kinds to watch specific event kinds.',
+      description: 'The latest events (one line each) — what just happened. scope says what to read: {"type":"project"} for everything, {"type":"task","id":"…","subtree":true} for one request and its subtasks, {"type":"workspace","id":"…"} for a checkout, {"type":"chat","id":"…"} for one conversation. Pass the previous call’s maxSeq as sinceSeq to read only what is new, and kinds to watch specific event kinds.',
       // The timeline view's params, narrowed to what a model should hold: no beforeSeq (paging
       // backward is a scrollback gesture, not a driver's question) and a limit of 50 rather than
       // the view's 1000, because this door's rows are paid for per token. Everything else — the
-      // task filter, the seq cursor, the event vocabulary behind `kinds` — is the view's own
-      // schema, so this door cannot ask for a field the read will not honour.
-      inputSchema: WIRE[VIEW.timeline].params.pick({ taskId: true, sinceSeq: true, kinds: true }).extend({
+      // scope, the seq cursor, the event vocabulary behind `kinds` — is the view's own schema, so
+      // this door cannot ask for a field the read will not honour, and `scope` stays REQUIRED here
+      // for the reason it is required there: a default would silently pick one of two questions.
+      inputSchema: WIRE[VIEW.timeline].params.pick({ scope: true, sinceSeq: true, kinds: true }).extend({
         limit: z.number().int().min(1).max(50).optional(),
       }),
       // maxSeq is the poll cursor: without one a driver had no way to ask "what happened since?"
       // and re-read the whole tail every time, paying for (and re-reasoning about) rows it had
       // already seen.
-      execute: async ({ taskId: id, limit, sinceSeq, kinds }) => {
-        const rows = await viewOf(sessions, projectId, VIEW.timeline, { taskId: id, sinceSeq, kinds, limit: limit ?? 15 }) ?? []
+      execute: async ({ scope, limit, sinceSeq, kinds }) => {
+        const rows = await viewOf(sessions, projectId, VIEW.timeline, { scope, sinceSeq, kinds, limit: limit ?? 15 }) ?? []
         return { rows, maxSeq: rows.at(-1)?.seq ?? null } // log rows are ascending by seq
       },
     }),
@@ -246,7 +264,9 @@ export function buildCopilotTools(deps: {
         workspaceId: z.string().min(1).optional(),
         grounded: z.object({ modelRef: z.string().min(1), cwd: z.string().min(1) }).optional(),
       }),
-      execute: async input => actions.newTask(input),
+      // no budget from a chat tool: a ceiling is an operator decision, and a model inventing one
+      // silently capped runs the human never agreed to
+      execute: async input => actions.newTask({ ...input, budgetUSD: null }, origin),
     }),
     workspace_list: tool({
       description: 'Workspaces of this project: a checkout, or an orc worktree created for one request, each with its health — state (dangling/waiting/active/idle/merged), when it last saw activity, its task counts and how many notes it holds that are still pending a merge. Ordered attention-first. Read-only — project_status lists each workspace\'s tasks.',
@@ -256,7 +276,7 @@ export function buildCopilotTools(deps: {
     workspace_new: tool({
       description: 'Create a git worktree + branch for ONE request under the project\'s .orc/worktrees, record it as a workspace, and draft the request as its first task. Use for a new piece of work; reuse the current workspace for follow-ups to it.',
       inputSchema: z.object({ title: z.string().min(1), spec: z.string().optional(), base: z.string().optional() }),
-      execute: async input => actions.newWorkspace(input),
+      execute: async input => actions.newWorkspace(input, origin),
     }),
     // The contract IS the schema: DecisionInput, the same shape `orc adr new` parses — a re-spelled
     // object here would be a second vocabulary for one input, and the two would drift on a field
@@ -266,12 +286,12 @@ export function buildCopilotTools(deps: {
     record_decision: tool({
       description: 'Record an architectural DECISION as a first-class note (Context / Decision / Consequences), status accepted unless you say proposed. Before recording, enumerate what exists with memory_search {kind:"decision"}; to change a recorded decision pass its id as `supersedes` — never re-record under the same title (that is refused).',
       inputSchema: DecisionInput,
-      execute: async input => actions.recordDecision(input),
+      execute: async input => actions.recordDecision(input, origin),
     }),
     propose: tool({
       description: 'Propose a single-step plan for a draft task.',
       inputSchema: z.object({ taskId, modelRef: z.string().min(1), skillRefs: z.array(z.string()).optional() }),
-      execute: async ({ taskId: id, ...opts }) => actions.propose(id, opts),
+      execute: async ({ taskId: id, modelRef, skillRefs }) => actions.propose(id, { template: { modelRef, skillRefs: skillRefs ?? [] } }, origin),
     }),
     // no `approve` tool by design: the human gate is structural — a prompt line is not a gate
     // (observed live: create→propose→approve→run in 600ms with no human in the loop). The one
@@ -284,32 +304,32 @@ export function buildCopilotTools(deps: {
       // a task created in one worktree gets driven from another checkout.
       description: 'Start the approved plan running in its workspace (or an explicit cwd).',
       inputSchema: z.object({ taskId, cwd: z.string().min(1).optional() }),
-      execute: async ({ taskId: id, cwd }) => actions.run(id, cwd),
+      execute: async ({ taskId: id, cwd }) => actions.run(id, cwd ?? null, origin),
     }),
     reply: tool({
       description: 'Answer a task’s open feedback question, resuming the waiting step.',
       inputSchema: z.object({ taskId, text: z.string().min(1) }),
-      execute: async ({ taskId: id, text }) => actions.reply(id, text),
+      execute: async ({ taskId: id, text }) => actions.reply(id, text, undefined, origin),
     }),
     retry: tool({
       description: 'Re-run the steps of a BLOCKED task that did not complete (a task in any other status is refused). A task blocked by a rejecting verdict is refused too — the same siblings would be judged the same way; revise the plan instead.',
       inputSchema: z.object({ taskId }),
-      execute: async ({ taskId: id }) => actions.retry(id),
+      execute: async ({ taskId: id }) => actions.retry(id, null, origin),
     }),
     cancel: tool({
       description: 'Cancel a running/blocked task (terminal; sweeps its orphaned notes). Ask the user first.',
       inputSchema: z.object({ taskId }),
-      execute: async ({ taskId: id }) => actions.cancel(id),
+      execute: async ({ taskId: id }) => actions.cancel(id, origin),
     }),
     annotate: tool({
       description: 'Queue refinement feedback on one plan-note of a grounded decomposition.',
       inputSchema: z.object({ taskId, noteId: z.string().min(1), text: z.string().min(1) }),
-      execute: async ({ taskId: id, noteId, text }) => actions.annotate(id, noteId, text),
+      execute: async ({ taskId: id, noteId, text }) => actions.annotate(id, noteId, text, [], origin),
     }),
     revise: tool({
       description: 'Annotate the scoped plan-notes and wake the plan agent to revise them.',
       inputSchema: z.object({ taskId, text: z.string().min(1), scope: z.array(z.string().min(1)).min(1) }),
-      execute: async ({ taskId: id, text, scope }) => actions.revise(id, text, scope),
+      execute: async ({ taskId: id, text, scope }) => actions.revise(id, text, scope, origin),
     }),
   }
   return { ...read, ...mutate }

@@ -2,7 +2,7 @@ import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, 
 import { spawn } from 'node:child_process'
 import path from 'node:path'
 import { Command, InvalidArgumentError } from 'commander'
-import { AUTHOR_SOURCE, claimHistory, EDGE_DIRECTION, errorMessage, EVENT_KIND, foldMemory, LINK_KINDS, MASTERPLAN_NOTE_ID, MEMORY_ACCESS, MemoryDeletedPayload, MemoryScope, MemoryWrittenPayload, noteKey, NOTE_KINDS, NoteKind, NOTE_TIER, NOTE_TIERS, NoteTier, parseLinkSpec, PlanDraft, RUN_OUTCOME, STRATEGY, TASK_STATUS, TERMINAL_TASK_STATUS, LinkKind, slugId, type Analyzer, type EventRecord, type MemoryAuthor, type MemoryLink, type NoteFields, type ExecutionPort, type Plan, type TaskNode, type WorkspaceWithHealth, formatModelRate } from '@orc/contracts'
+import { AUTHOR_SOURCE, claimHistory, Door, NO_CHAT, EDGE_DIRECTION, errorMessage, EVENT_KIND, foldMemory, LINK_KINDS, MASTERPLAN_NOTE_ID, MEMORY_ACCESS, MemoryDeletedPayload, MemoryScope, MemoryWrittenPayload, noteKey, NOTE_KINDS, NoteKind, NOTE_TIER, NOTE_TIERS, NoteTier, parseLinkSpec, PlanDraft, RUN_OUTCOME, STRATEGY, TASK_STATUS, TERMINAL_TASK_STATUS, LinkKind, slugId, type Analyzer, type EventRecord, type MemoryAuthor, type MemoryLink, type NoteFields, type ExecutionPort, type Plan, type TaskNode, type WorkspaceWithHealth, formatModelRate } from '@orc/contracts'
 import { openStorage, Kernel, atomicWriteFileSync, listProjectIds, claimSlot, fold, gatedChildren, freezePlan, liveSupervisors, orphanTasks, staleSupervisors, grantExtensionTrust, grantMcpTrust, initializeProject, isExtensionTrusted, isMcpTrusted, loadConfig, loadTrust, migrateDatabase, requireProject, runtimeLockHeld, stepUsage, subtreeUsage, tasksByWorkspace, taskUsage, type EventLog, type OrcConfig, type PluginHost, type ProjectConfig, type Storage } from '@orc/kernel'
 import { createVaultProjector, parsePlanFile } from '@orc/vault-projector'
 import { archiveCandidates, consolidateTask, CONSOLIDATE_EXECUTOR, createDriftProbe, frontier, needsReground, probeMemory, RECHECK_KINDS, recheckNotes, restampToHead, summarize, taskInfo } from '@orc/memory'
@@ -15,25 +15,37 @@ import { runSupervisor, startBootHeartbeat, supervisorHealth } from './serve'
 import { ensureSupervisor, SUPERVISOR_MODE, type SupervisorMode } from './supervisor-client'
 import { isLanguageModel } from './model-guard'
 import { assertDrivable, assertRetryable, buildModelDiscovery, buildOrcActions } from './actions'
-import { cwdAuthor, cwdWorkspaceId } from './cwd-workspace'
+import { cwdAuthor, cwdWorkspaceId, findCwdWorkspace } from './cwd-workspace'
 import { enumArg } from './enum-arg'
 import { renderDerivedPlan, renderPlanHuman } from './plan-render'
 import { adrCommand } from './adr-commands'
-import { wsCommand } from './ws-commands'
+import { wsCommand, WS_NEEDS_PROJECT } from './ws-commands'
 import { briefCommand } from './brief-commands'
 import { driftLine } from './drift-line'
-import { requireLiveWorkspace } from './workspace-ops'
+import { buildWorkspaceOps, requireLiveWorkspace, type WorkspaceConfig } from './workspace-ops'
+import type { WorkspaceDoor } from './door-kernel'
 import { listWorkspaceHealth } from './workspace-health'
 import { serveLogFile, servePidFile } from './serve-paths'
 import { CommandFailure, EXIT_CODE } from './exit'
 import { formatUsageLine } from './usage-render'
 import { watchSubtree, type TailResult } from './watch'
+import type { PlanSource } from '@orc/ui-core'
+
+// Every command in this file enters through the terminal, so every event it causes is stamped with
+// the same Origin — identity (which door), never authority: no handler below branches on it.
+const CLI_ORIGIN = NO_CHAT(Door.cli)
 
 
-function buildCopilotConfig(discovery: ReturnType<typeof buildModelDiscovery>, listWorkspaces: () => Promise<WorkspaceWithHealth[]>) {
+function buildCopilotConfig(
+  discovery: ReturnType<typeof buildModelDiscovery>,
+  listWorkspaces: () => Promise<WorkspaceWithHealth[]>,
+  resolveWorkspace: (taskId: string | null) => Promise<string | null>,
+) {
   return {
+    resolveWorkspace,
     defaultModelRef: 'anthropic/claude-haiku-4-5',
-    listModels: discovery.listModels,
+    // one flagless core, shared with the MCP door: it discovers, bounded per provider
+    listModels: () => discovery.listModels(),
     listWorkspaces,
     resolveModel: (ref: string) => {
       const { p, modelId } = discovery.providerFor(ref)
@@ -149,7 +161,9 @@ function parsePositiveInteger(value: string): number {
   return parsed
 }
 
-function resolveDraft(task: { title: string; spec: string }, opts: { file?: string; model: string; skill?: string[]; fromVault?: boolean }, taskId: string, config?: OrcConfig): PlanDraft {
+// An AUTHORED draft — the door's parsing job. The template arm lives in OrcActions.propose, so
+// every door validates one draft the same way.
+function authoredDraft(opts: { file?: string; fromVault?: boolean }, taskId: string, config?: OrcConfig): PlanDraft {
   // Two sources for one draft. The vault arm used to win silently, so an operator who passed both
   // watched their authored --file draft be ignored and the vault markdown applied under its name.
   if (opts.fromVault && opts.file)
@@ -164,9 +178,8 @@ function resolveDraft(task: { title: string; spec: string }, opts: { file?: stri
     if (!latest) throw new Error(`no plan file in ${dir} — run 'orc vault render ${taskId}' first`)
     return parsePlanFile(readFileSync(path.join(dir, latest), 'utf8'))
   }
-  return opts.file
-    ? PlanDraft.parse(JSON.parse(readFileSync(opts.file, 'utf8')))
-    : singleStepDraft(task, opts.model, opts.skill ?? [], config?.maxIterations)
+  if (!opts.file) throw new Error('no authored draft: pass --file or --from-vault')
+  return PlanDraft.parse(JSON.parse(readFileSync(opts.file, 'utf8')))
 }
 
 // Re-exported (not just imported) so existing callers of these two paths keep resolving them
@@ -221,9 +234,22 @@ export function buildProgram(
     return kernel
   }
 
+  const wsProject = (): { config: ProjectConfig; log: EventLog } => {
+    if (!plugin) throw new Error(WS_NEEDS_PROJECT)
+    return { config: plugin.config, log: plugin.log }
+  }
+  const wsConfig = (): WorkspaceConfig => wsProject().config
+  let wsDoor: WorkspaceDoor | null = null
+  const requireWsDoor = (): WorkspaceDoor => (wsDoor ??= {
+    workspaces: buildWorkspaceOps({ kernel: requireKernel(), config: wsConfig }),
+    reads: requireKernel(),
+    config: wsConfig,
+    listWorkspaces: includeArchived => listWorkspaceHealth({ ...wsProject(), includeArchived }),
+  })
+
   // Placed after requireKernel rather than beside the init/db addCommands above: the deps object
   // reads that binding immediately, so calling wsCommand up there would hit its temporal dead zone.
-  program.addCommand(wsCommand({ requireKernel, ...(plugin && { project: { config: plugin.config, log: plugin.log } }) }))
+  program.addCommand(wsCommand({ requireDoor: requireWsDoor }))
   program.addCommand(adrCommand({ requireKernel, ...(plugin && { project: { config: plugin.config, log: plugin.log } }) }))
   program.addCommand(briefCommand({ ...(plugin && { project: { config: plugin.config, log: plugin.log } }) }))
 
@@ -231,11 +257,11 @@ export function buildProgram(
   // their own `{ source: cli, workspaceId: … }` is exactly the shape that leaves one command
   // writing knowledge under the wrong checkout. Folded per invocation rather than captured once:
   // `orc ws new` can mint a workspace mid-session, and a boot-time snapshot would not see it.
-  const cliAuthor = (): Promise<MemoryAuthor> => cwdAuthor(requireKernel(), plugin?.config.dir, AUTHOR_SOURCE.cli)
+  const cliAuthor = (): Promise<MemoryAuthor> => cwdAuthor(requireKernel(), plugin?.config.dir, AUTHOR_SOURCE.cli, CLI_ORIGIN)
 
   // Discovery-backed model validation rejects invented refs at creation time on every surface;
   // declared here (not at the actions site below) so the `plan` command's rate line can reach it.
-  const discovery = plugin ? buildModelDiscovery(plugin.config, plugin.log) : undefined
+  const discovery = plugin ? buildModelDiscovery(plugin.config, { log: plugin.log, origin: CLI_ORIGIN }) : undefined
 
   program
     .command('new <title>')
@@ -263,24 +289,20 @@ export function buildProgram(
       // workspace (a merged workspace's subtree must keep growing) and only a caller that typed the
       // id can be told it named finished business. The inherited and cwd-derived arms below are not
       // checked — one subtree must not straddle two checkouts.
-      if (opts.workspace !== undefined) await requireLiveWorkspace(requireKernel(), opts.workspace)
-      const workspaceId = opts.workspace
-        ?? (opts.parent === undefined ? await cwdWorkspaceId(requireKernel(), plugin?.config.dir) : undefined)
-      if (opts.strategy !== STRATEGY.groundedPlan) {
-        const t = await requireKernel().createTask({ title, spec: opts.spec, parentId: opts.parent, budgetUSD: opts.budget ?? null, workspaceId })
-        console.log(t.id)
-        return
-      }
-      if (!opts.model) throw new Error(`--model is required with --strategy ${STRATEGY.groundedPlan}`)
-      const t = await requireKernel().createGroundedTask({
-        title, spec: opts.spec, modelRef: opts.model, analyzerRef: opts.analyzer, parentId: opts.parent, budgetUSD: opts.budget ?? null, workspaceId,
-        modelCatalog: await discovery?.listModelOptions().catch(() => []) ?? [],
-        ...(plugin ? { maxIterations: plugin.config.maxIterations } : {}),
-      })
-      console.log(t.id)
-      // auto-start: the grounded-plan template is policy-approved (its real gate is the
-      // conversational one inside the plan step), so the analyze→plan conversation begins now
-      await requestAndWatch(t.id, {})
+      if (opts.strategy === STRATEGY.groundedPlan && !opts.model)
+        throw new Error(`--model is required with --strategy ${STRATEGY.groundedPlan}`)
+      const grounded = opts.strategy === STRATEGY.groundedPlan && opts.model
+        // cwd null: the task's own workspace is the checkout it runs in, never this terminal's
+        ? { grounded: { modelRef: opts.model, analyzerRef: opts.analyzer, cwd: null } }
+        : {}
+      const { taskId } = await actions().newTask({
+        title, spec: opts.spec, parentId: opts.parent, budgetUSD: opts.budget ?? null,
+        ...(opts.workspace !== undefined && { workspaceId: opts.workspace }), ...grounded,
+      }, CLI_ORIGIN)
+      console.log(taskId)
+      // the grounded arm's run is already requested by the action (its template is policy-approved
+      // — the real gate is the conversational one inside the plan step); this only watches it
+      if (opts.strategy === STRATEGY.groundedPlan) await watchFrom(taskId, undefined)
     })
 
   const requireTask = async (taskId: string) => {
@@ -288,11 +310,16 @@ export function buildProgram(
     if (!task) throw new Error(`no task '${taskId}'`)
     return task
   }
-  const planAction = (apply: (taskId: string, draft: PlanDraft) => Promise<Plan>, describe: (plan: Plan) => string) =>
+  // The door's half of a plan stamp: --file/--from-vault is a draft to PARSE, a bare invocation is
+  // the action's own template. Nothing here decides what a plan is.
+  const planSource = (taskId: string, opts: { file?: string; model: string; skill?: string[]; fromVault?: boolean }): PlanSource =>
+    opts.file || opts.fromVault
+      ? { draft: authoredDraft(opts, taskId, plugin?.config) }
+      : { template: { modelRef: opts.model, skillRefs: opts.skill ?? [] } }
+  const planAction = <R extends { version: number }>(apply: (taskId: string, plan: PlanSource) => Promise<R>, describe: (result: R) => string) =>
     async (taskId: string, opts: { file?: string; model: string; skill?: string[]; fromVault?: boolean }) => {
-      const task = await requireTask(taskId)
-      const plan = await apply(taskId, resolveDraft(task, opts, taskId, plugin?.config))
-      console.log(`plan v${plan.version} ${describe(plan)} — review with: orc plan ${taskId}`)
+      const result = await apply(taskId, planSource(taskId, opts))
+      console.log(`plan v${result.version} ${describe(result)} — review with: orc plan ${taskId}`)
     }
 
   program
@@ -301,7 +328,7 @@ export function buildProgram(
     .option('--file <path>', 'plan draft JSON file')
     .option('--model <ref>', 'model for template steps', DEFAULT_TEMPLATE_MODEL)
     .option('--skill <names...>', 'force-load skills for the template step (e.g. documentation)')
-    .action(planAction((id, draft) => requireKernel().proposePlan(id, draft), plan => `proposed (${plan.steps.length} steps)`))
+    .action(planAction((id, plan) => actions().propose(id, plan, CLI_ORIGIN), r => `proposed (${r.steps} steps)`))
 
   program
     .command('edit <taskId>')
@@ -310,7 +337,7 @@ export function buildProgram(
     .option('--model <ref>', 'model for template steps', DEFAULT_TEMPLATE_MODEL)
     .option('--skill <names...>', 'force-load skills for the template step (e.g. documentation)')
     .option('--from-vault', 'read the edited plan markdown from the vault')
-    .action(planAction((id, draft) => requireKernel().editPlan(id, draft), () => 'edited'))
+    .action(planAction((id, plan) => actions().edit(id, plan, CLI_ORIGIN), () => 'edited'))
 
   // per-MTok rate for the gate: the human weighs spend BEFORE approving. Best-effort —
   // no provider/discovery (read-only context, unknown ref) renders without a rate.
@@ -340,15 +367,9 @@ export function buildProgram(
     .description('approve the latest plan (the human gate)')
     .option('--version <n>', 'expected version (fails if stale)', parseNonNegativeInteger)
     .action(async (taskId: string, opts: { version?: number }) => {
-      // Approving only UNBLOCKS a split child — something still has to execute it, exactly as with
-      // `orc reply`, and a bare approval used to leave the parent parked inside join_splits while
-      // the child never started. A supervisor is what executes it (its router reacts to
-      // plan_approved), so make sure one exists BEFORE the approval it has to react to. A root's
-      // own approval stays a pure approval — running it is a separate decision (`orc run`).
       const root = await rootOf(taskId)
-      if (root !== taskId) await ensureRuntime()
-      const plan = await requireKernel().approvePlan(taskId, opts.version)
-      console.log(`plan v${plan.version} approved`)
+      const { version } = await actions().approve(taskId, { ...(opts.version !== undefined && { version: opts.version }) }, CLI_ORIGIN)
+      console.log(`plan v${version} approved`)
       if (root === taskId) return
       // Watch the ROOT, because that is the run whose join is waiting — and only while it is
       // actually running: approving is never itself a decision to start a run.
@@ -362,7 +383,7 @@ export function buildProgram(
     .description('annotate a plan-note (grounded-plan) — the plan-authoring agent reads it on its next revise')
     .option('--ref <ids...>', 'related plan-note ids')
     .action(async (taskId: string, noteId: string, text: string, opts: { ref?: string[] }) => {
-      await requireKernel().annotatePlan(taskId, { targetNote: noteId, refs: opts.ref ?? [], text })
+      await actions().annotate(taskId, noteId, text, opts.ref ?? [], CLI_ORIGIN)
       console.log(`noted on '${noteId}'`)
     })
 
@@ -373,11 +394,13 @@ export function buildProgram(
       // Answering only UNBLOCKS the step — something still has to carry the answer into the parked
       // workflow (the supervisor's router does, off feedback_provided) and then keep executing. A
       // reply from a fresh terminal used to leave the answer sitting durable in DBOS's notification
-      // table with nobody to act on it; ensuring a supervisor first is what makes this command's
-      // promise true. No run is requested: the run already exists, parked on the question.
-      await ensureRuntime()
-      const topic = await requireKernel().replyFeedback(taskId, text)
-      if (!topic) {
+      // table with nobody to act on it; the action ensures a supervisor first, which is what makes
+      // this command's promise true. No run is requested: the run already exists, parked.
+      // The topic is READ before the answer closes the question — presentation the door owes the
+      // human ('answered feedback:<topic>'), not a second copy of the reply rule.
+      const topic = (await requireKernel().openFeedback(taskId))?.topic
+      const { answered } = await actions().reply(taskId, text, undefined, CLI_ORIGIN)
+      if (!answered) {
         console.log(`no open feedback question for task '${taskId}'`)
         return
       }
@@ -394,7 +417,7 @@ export function buildProgram(
     .action(async (taskId: string, text: string, opts: { scope: string[] }) => {
       // annotate-and-resume sugar over `plan-note … && reply`: queue the same change onto each scoped
       // note, then wake the parked plan step so it reads them (read_annotations) and revises in place.
-      const { topic } = await actions().revise(taskId, text, opts.scope)
+      const { topic } = await actions().revise(taskId, text, opts.scope, CLI_ORIGIN)
       console.log(topic
         ? `revised ${opts.scope.join(', ')} — answered feedback:${topic}`
         : `annotated ${opts.scope.join(', ')} — no open feedback to resume (the agent reads them on its next revise)`)
@@ -414,7 +437,7 @@ export function buildProgram(
       const actual = cfg.projectName
       if (projectName !== actual)
         throw new Error(`refusing: this directory is project '${actual}' (${cfg.dir}), not '${projectName}'`)
-      const r = await actions().purgeProject()
+      const r = await actions().purgeProject(CLI_ORIGIN)
       console.log(`purged ${r.events} event(s), ${r.operations} operation(s) from '${actual}'`)
       for (const w of r.warnings) console.log(`warning: ${w}`)
     })
@@ -456,7 +479,7 @@ export function buildProgram(
           throw new Error('pass a name or --id, not both: a name confirms the cwd project, --id targets a foreign one')
         if (opts.id === cfg.projectId)
           throw new Error(`refusing: ${opts.id} is THIS directory's project — delete it by name (orc delete ${cfg.projectName} --yes) so the name confirms the target`)
-        const r = await actions().deleteProject(opts.id)
+        const r = await actions().deleteProject(opts.id, CLI_ORIGIN)
         console.log(`deleted ${opts.id}: ${r.events} event(s), ${r.operations} operation(s)`)
         for (const w of r.warnings) console.log(`warning: ${w}`)
         return
@@ -467,7 +490,7 @@ export function buildProgram(
       const actual = cfg.projectName
       if (projectName !== actual)
         throw new Error(`refusing: this directory is project '${actual}' (${cfg.dir}), not '${projectName}' — for a project with no identity file, use --id (see: orc projects)`)
-      const r = await actions().deleteProject(cfg.projectId)
+      const r = await actions().deleteProject(cfg.projectId, CLI_ORIGIN)
       console.log(`deleted '${actual}': ${r.events} event(s), ${r.operations} operation(s)`)
       for (const w of r.warnings) console.log(`warning: ${w}`)
     })
@@ -541,7 +564,7 @@ export function buildProgram(
 
   // one shared implementation of every mutating command — the web adapter gets the same object.
   // (discovery is declared up top so the `plan` command's rate line can reach it too)
-  const actions = (via?: 'cli' | 'mcp') => buildOrcActions({ kernel: requireKernel(), ensureRuntime, plugin, via, listModels: discovery?.listModels, listModelOptions: discovery?.listModelOptions })
+  const actions = () => buildOrcActions({ kernel: requireKernel(), ensureRuntime, plugin, listModels: discovery?.listModels, listModelOptions: discovery?.listModelOptions })
 
   const needPort = async (): Promise<ExecutionPort> => {
     if (!portFactory) throw new Error('execution commands are unavailable in this context')
@@ -631,17 +654,10 @@ export function buildProgram(
     return id
   }
 
-  // The admission `startRunAt` enforces, checked here so a request that could never be served is
-  // refused BEFORE it is recorded: a run_requested naming a draft task would sit in the log for
-  // good, and every supervisor that boots would pick it up and fail on it again. The shared
-  // implementation lives in actions.ts so this CLI door and the web/MCP doors cannot drift.
-  const requireDrivable = (taskId: string): Promise<void> => assertDrivable(requireKernel(), taskId)
-
-  // Ask for a run, then watch it. The command starts nothing: a supervisor turns the recorded ask
-  // into a workflow, which is why the run now outlives the terminal that asked for it.
-  const requestAndWatch = async (taskId: string, opts: { cwd?: string; retry?: boolean }): Promise<void> => {
-    await ensureRuntime()
-    const since = await requireKernel().requestRun(taskId, opts)
+  // Watch a run this terminal already asked for, from the sequence the ask was recorded at. The
+  // command starts nothing: a supervisor turns the recorded ask into a workflow, which is why the
+  // run outlives the terminal that asked for it.
+  const watchFrom = async (taskId: string, since: number | undefined): Promise<void> => {
     console.log(`run requested for ${taskId} — watching (ctrl-c stops watching, not the run: orc cancel ${taskId} stops it)`)
     const root = await rootOf(taskId)
     await report(await watchSubtree(requireKernel(), taskId, since), root)
@@ -663,8 +679,8 @@ export function buildProgram(
     .description('execute the approved plan (durable; the supervisor drives it, re-running attaches)')
     .option('--cwd <dir>', CWD_OVERRIDE_HELP)
     .action(async (taskId: string, opts: { cwd?: string }) => {
-      await requireDrivable(taskId)
-      await requestAndWatch(taskId, { cwd: opts.cwd })
+      const { since } = await actions().run(taskId, opts.cwd ?? null, CLI_ORIGIN)
+      await watchFrom(taskId, since)
     })
 
   program
@@ -672,17 +688,15 @@ export function buildProgram(
     .description('re-run failed steps of a blocked task as new attempts')
     .option('--cwd <dir>', CWD_OVERRIDE_HELP)
     .action(async (taskId: string, opts: { cwd?: string }) => {
-      // the same refusal port.retry made, kept client-side for the same reason as requireDrivable:
-      // an ask nobody can serve must not reach the log — one implementation, shared with the doors
-      await assertRetryable(requireKernel(), taskId)
-      await requestAndWatch(taskId, { cwd: opts.cwd, retry: true })
+      const { since } = await actions().retry(taskId, opts.cwd ?? null, CLI_ORIGIN)
+      await watchFrom(taskId, since)
     })
 
   program
     .command('cancel <taskId>')
     .description('cancel the active run (terminal in M2); sweeps knowledge notes the cancelled subtree still owns')
     .action(async (taskId: string) => {
-      const { swept, sweepError } = await actions().cancel(taskId)
+      const { swept, sweepError } = await actions().cancel(taskId, CLI_ORIGIN)
       console.log('cancelled')
       if (sweepError) console.warn(`sweep skipped: ${sweepError} — orphaned notes remain (content is still in the event log)`)
       for (const n of swept) console.log(`swept ${n.scope === 'project' ? '' : `${n.scope}/`}${n.id} — ${n.title}`)
@@ -695,6 +709,7 @@ export function buildProgram(
     .option('--port <n>', 'port', parsePositiveInteger, 7749)
     .action(async (opts: { port: number }) => {
       const { startGraphUi } = await import('@orc/graph-ui') // lazy: keep CLI startup lean
+      const { appendCopilotExchange } = await import('@orc/graph-ui/copilot-journal')
       const cfg = plugin?.config
       const ui = startGraphUi({
         url: (cfg ?? loadConfig()).databaseUrl,
@@ -702,9 +717,13 @@ export function buildProgram(
         cwdProject: cfg ? { id: cfg.projectId, name: cfg.projectName, dir: cfg.dir } : undefined,
         memoryHalfLifeDays: (cfg ?? loadConfig()).memoryHalfLifeDays,
         // mutations only when launched inside a project with a real runtime behind it
-        actions: portFactory && plugin ? actions() : undefined,
+        actions: portFactory && plugin ? actions() : undefined, // the web door names Door.web per call (server.ts)
         copilot: portFactory && plugin && discovery
-          ? buildCopilotConfig(discovery, () => listWorkspaceHealth(needPlugin()))
+          ? buildCopilotConfig(discovery, () => listWorkspaceHealth(needPlugin()), async taskId => {
+            const kernel = requireKernel()
+            const task = taskId === null ? undefined : await kernel.getTask(taskId)
+            return task?.workspaceId ?? (await findCwdWorkspace(kernel, plugin?.config.dir))?.id ?? null
+          })
           : undefined,
         defaultCwd: cfg?.dir ?? process.cwd(),
         // degraded-memory + supervisor visibility: the footer badge polls this — probe per call,
@@ -720,9 +739,7 @@ export function buildProgram(
           }
         } : undefined,
         // P6: copilot exchanges are events — the log is the record, the browser is a cache
-        appendExchange: plugin ? async x => {
-          await plugin.log.append({ taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.copilot_exchange, payload: x.payload, usage: x.usage })
-        } : undefined,
+        appendExchange: plugin ? async x => appendCopilotExchange(plugin.log, x, Door.web) : undefined,
       })
       console.log(`graph ui on http://127.0.0.1:${ui.port}`)
       await new Promise(() => {}) // serve until Ctrl-C
@@ -929,13 +946,13 @@ export function buildProgram(
         // Resolved BEFORE the server opens: a stdio server that discovered mid-session it cannot
         // name its workspace would surface the refusal as a failed tool call, where here it is a
         // startup error naming the missing project context.
-        memoryAuthor: await cwdAuthor(requireKernel(), config.dir, AUTHOR_SOURCE.agent, { executor: MCP_SERVE_EXECUTOR }),
+        memoryAuthor: await cwdAuthor(requireKernel(), config.dir, AUTHOR_SOURCE.agent, NO_CHAT(Door.mcp), { executor: MCP_SERVE_EXECUTOR }),
         // 'mcp', so a feedback answer arriving through this door is RECORDED as arriving through
         // it. For a grounded task the conversational 'approve' is the human gate, and
         // approvedPlanHash only honours source 'cli' — so an agent answering 'approve' here now
         // fails that gate honestly instead of satisfying it under a human's name. Operators who
         // DO want the client approving still have the explicit, autonomy-gated `approve` tool.
-        actions: portFactory ? actions('mcp') : null,
+        actions: portFactory ? actions() : null,
         autonomy: opts.autonomy,
         ...(storage && { supervisor: () => probeSupervisor(storage, config.projectRoot, config) }),
         // project_status names the checkout each task is worked in — a driver's first question in a
@@ -1390,7 +1407,7 @@ export function buildProgram(
         // checkout for a task that ran in a different one, and this cwd is irrelevant to that task's
         // provenance — see ConsolidationDeps.authorFor.
         const authorFor = (task: { id: string; workspaceId: string }): MemoryAuthor =>
-          ({ source: AUTHOR_SOURCE.agent, executor: CONSOLIDATE_EXECUTOR, workspaceId: task.workspaceId, taskId: task.id })
+          ({ source: AUTHOR_SOURCE.agent, executor: CONSOLIDATE_EXECUTOR, workspaceId: task.workspaceId, taskId: task.id, origin: CLI_ORIGIN })
         const notes = await consolidateTask({ log, store: memory.store, authorFor, distill }, taskId, await taskInfo(log, taskId), { force: true })
         if (!notes || notes.length === 0) { console.log(`nothing to consolidate for '${taskId}' — unknown task, planning child, or no step notes`); return }
         await memory.projector.catchUp()

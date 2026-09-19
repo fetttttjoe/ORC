@@ -7,8 +7,10 @@ import { OperationCompletedPayload, OperationFailedPayload, OperationStartedPayl
 import { MemoryAccessedPayload, MemoryDeletedPayload, MemoryOutcomePayload, MemoryVerifiedPayload, MemoryWrittenPayload } from './memory'
 import { MemoryTopicAccessedPayload } from './cluster'
 import { SHA256_HEX_RE } from './ids'
+import { Origin } from './origin'
 import { AnalysisCompletedPayload, FeedbackProvidedPayload, FeedbackRequestedPayload, PlanAnnotatedPayload } from './analysis'
 import { WorkspaceArchivedPayload, WorkspaceCreatedPayload, WorkspaceMergedPayload, WorkspaceRetitledPayload } from './workspace-entity'
+import { ChatOpenedPayload } from './chat'
 
 // typed so folds can parse receipts without casts
 export const ArtifactProducedPayload = z.object({
@@ -35,6 +37,12 @@ export const CopilotExchangePayload = z.object({
   assistant: z.string(),
   toolCalls: z.array(z.object({ toolName: z.string().min(1), summary: z.string() })).max(64),
   modelRef: z.string().min(1),
+  // Which task and checkout the exchange was ABOUT, stated in the payload: a copilot conversation
+  // roams across tasks within one chat, so the envelope's taskId cannot answer it, and a reader
+  // grouping exchanges by workspace would otherwise have to guess from whatever task was selected
+  // when the browser tab happened to be open. Null when the conversation named neither.
+  taskId: z.string().min(1).nullable(),
+  workspaceId: z.string().min(1).nullable(),
 })
 export type CopilotExchangePayload = z.infer<typeof CopilotExchangePayload>
 
@@ -77,6 +85,11 @@ const HEX_RE = /^[a-f0-9]+$/i
 export const CommitRecordedPayload = z.object({
   sha: z.string().min(1).regex(HEX_RE, 'sha must be hex digits'),
   paths: z.array(z.string().min(1)),
+  // The checkout the commit landed in, captured by the hook that saw it. Required rather than
+  // derived at read time: worktrees come and go, so a later reader resolving a sha to a checkout
+  // would attribute a merged workspace's commits to trunk. Null when the hook fired outside any
+  // adopted workspace.
+  workspaceId: z.string().min(1).nullable(),
 })
 export type CommitRecordedPayload = z.infer<typeof CommitRecordedPayload>
 
@@ -192,9 +205,12 @@ export const PAYLOAD_SCHEMAS = {
   workspace_retitled: WorkspaceRetitledPayload,
   workspace_archived: WorkspaceArchivedPayload,
   workspace_merged: WorkspaceMergedPayload,
+  chat_opened: ChatOpenedPayload,
 } satisfies Record<EventKind, z.ZodType>
 
-export const EventInput = z.object({
+// Built on Origin so chatId and door are spelled ONCE: a second spelling could widen or default
+// one of them here and let a writer that named neither append an anonymous event.
+export const EventInput = Origin.extend({
   taskId: z.string().min(1).nullable(),
   stepId: z.string().min(1).nullable(),
   runToken: z.string().min(1).nullable(),

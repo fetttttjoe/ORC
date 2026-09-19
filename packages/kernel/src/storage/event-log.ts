@@ -1,5 +1,6 @@
 import { isDeepStrictEqual } from 'node:util'
 import { and, asc, count, desc, eq, gt, inArray, sql } from 'drizzle-orm'
+import type { z } from 'zod'
 import { errorMessage, EVENT_KIND, EventInput, PAYLOAD_SCHEMAS, type EventKind, type EventRecord } from '@orc/contracts'
 import { events } from '../schema'
 import { KERNEL_ERROR_CODE, KernelError } from '../errors'
@@ -12,10 +13,26 @@ const PUMP_RETRY_MS = 250
 type Row = typeof events.$inferSelect
 type Queryable = Pick<Tx, 'insert' | 'select' | 'execute'>
 
+// The envelope is spelled three times below — the insert, toRecord, and the idempotency
+// comparison. A key added to EventInput and forgotten in one is stored as nothing, read back
+// undefined, or lets two different writes share one key; these types fail the build instead.
+type EnvelopeKey = keyof z.output<typeof EventInput>
+type EnvelopeCoversInput<T extends Record<EnvelopeKey, unknown>> = T
+
+// idempotencyKey is excluded: it is the lookup, not a compared field
+const COMPARED = [
+  'chatId', 'door', 'taskId', 'stepId', 'runToken', 'kind', 'payload', 'usage',
+] as const satisfies ReadonlyArray<EnvelopeKey>
+type Uncompared = Exclude<EnvelopeKey, (typeof COMPARED)[number] | 'idempotencyKey'>
+// reads as the name of the key COMPARED is missing when it fails
+const COMPARED_COVERS_ENVELOPE: [Uncompared] extends [never] ? true : Uncompared = true
+
 const toRecord = (r: Row): EventRecord => ({
   seq: r.seq,
   projectId: r.projectId,
   idempotencyKey: r.idempotencyKey,
+  chatId: r.chatId,
+  door: r.door,
   taskId: r.taskId,
   stepId: r.stepId,
   runToken: r.runToken,
@@ -59,6 +76,8 @@ const makeOps = (db: Queryable, ctx: LogContext): EventLogOps => {
       const values = {
         projectId: ctx.projectId,
         idempotencyKey: parsed.idempotencyKey,
+        chatId: parsed.chatId,
+        door: parsed.door,
         taskId: parsed.taskId,
         stepId: parsed.stepId,
         runToken: parsed.runToken,
@@ -66,7 +85,8 @@ const makeOps = (db: Queryable, ctx: LogContext): EventLogOps => {
         payload,
         usage: parsed.usage ?? null,
       }
-      const [row] = await db.insert(events).values(values).onConflictDoNothing().returning()
+      const insertable: EnvelopeCoversInput<typeof values> = values
+      const [row] = await db.insert(events).values(insertable).onConflictDoNothing().returning()
       if (!row) {
         // conflict: the same (project, key) already committed — reuse only on identical data
         const key = parsed.idempotencyKey
@@ -75,10 +95,7 @@ const makeOps = (db: Queryable, ctx: LogContext): EventLogOps => {
           .where(and(scoped, eq(events.idempotencyKey, key)))
         if (!existing) throw new Error(`idempotency key '${key}' conflicted but no stored event was found`)
         const record = toRecord(existing)
-        const same = record.kind === values.kind && record.taskId === values.taskId
-          && record.stepId === values.stepId && record.runToken === values.runToken
-          && isDeepStrictEqual(record.payload, values.payload)
-          && isDeepStrictEqual(record.usage, values.usage)
+        const same = COMPARED.every(k => isDeepStrictEqual(record[k], values[k]))
         if (!same) throw new KernelError(KERNEL_ERROR_CODE.idempotency_conflict, `idempotency key '${key}' reused with different event data`)
         return record
       }

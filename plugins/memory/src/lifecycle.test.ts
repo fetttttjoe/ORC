@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'bun:test'
-import { EVENT_KIND, NOTE_TIER, planScope, type EventRecord, type MemoryAuthor, type NoteSummary } from '@orc/contracts'
-import { TEST_WORKSPACE_ID, eventFixture } from '@orc/contracts/fixtures'
+import { Door, EVENT_KIND, NOTE_TIER, NO_CHAT, planScope, type EventRecord, type MemoryAuthor, type NoteSummary } from '@orc/contracts'
+import { TEST_WORKSPACE_ID, authorFixture, eventFixture } from '@orc/contracts/fixtures'
 import { CONSOLIDATE_EXECUTOR, type ConsolidationLog, type ConsolidationStore } from './consolidate'
 import { consolidateOnCompletion, createDrain, taskCompletedId } from './lifecycle'
 
@@ -36,7 +36,9 @@ describe('createDrain', () => {
 
 describe('consolidateOnCompletion resolves the completed task once', () => {
   const TASK = 'reso-task-1'
-  const CONSOLIDATE_AUTHOR: MemoryAuthor = { source: 'agent', workspaceId: TEST_WORKSPACE_ID, executor: CONSOLIDATE_EXECUTOR }
+  // Consolidation is a background drain over a completed task, not a turn anyone typed, so it
+  // belongs to no chat and comes through the supervisor door.
+  const CONSOLIDATE_AUTHOR: MemoryAuthor = { source: 'agent', workspaceId: TEST_WORKSPACE_ID, executor: CONSOLIDATE_EXECUTOR, origin: NO_CHAT(Door.supervisor) }
 
   const created: EventRecord = eventFixture({
     taskId: TASK, kind: EVENT_KIND.task_created,
@@ -90,7 +92,7 @@ describe('taskCompletedId', () => {
   it('ignores non-done transitions and other event kinds — no premature or spurious consolidation', () => {
     const running = eventFixture({ seq: 2, kind: EVENT_KIND.task_status_changed, payload: { taskId: 't1', from: 'approved', to: 'running' } })
     const failed = eventFixture({ seq: 3, kind: EVENT_KIND.task_status_changed, payload: { taskId: 't1', from: 'running', to: 'failed' } })
-    const other = eventFixture({ seq: 4, kind: EVENT_KIND.memory_written, payload: { note: { id: 'n', title: 'T' }, author: { source: 'cli', workspaceId: TEST_WORKSPACE_ID } } })
+    const other = eventFixture({ seq: 4, kind: EVENT_KIND.memory_written, payload: { note: { id: 'n', title: 'T' }, author: authorFixture() } })
     expect(taskCompletedId(running)).toBeNull()
     expect(taskCompletedId(failed)).toBeNull()
     expect(taskCompletedId(other)).toBeNull()

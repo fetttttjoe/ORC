@@ -2,8 +2,8 @@ import { afterAll, describe, expect, it } from 'bun:test'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import { EVENT_KIND, MEMORY_ACCESS, MemoryAccessedPayload, LINK_KIND } from '@orc/contracts'
-import { draftFixture, stepFixture } from '@orc/contracts/fixtures'
+import { AUTHOR_SOURCE, Door, EVENT_KIND, MEMORY_ACCESS, MemoryAccessedPayload, LINK_KIND, NO_CHAT, type Origin } from '@orc/contracts'
+import { authorFixture, draftFixture, stepFixture } from '@orc/contracts/fixtures'
 import { apiLoopExecutor } from '@orc/executor-api-loop'
 import { scriptModel } from '@orc/executor-api-loop/test-model'
 import { createMemory } from '@orc/memory'
@@ -17,6 +17,8 @@ import { createDbosPort } from './dbos-port'
 // rare case. tools.test.ts pins the rule against a fake store; this drives the real one through
 // a real durable run, so the whole chain is under test: api-loop tool dispatch → memory tools →
 // the store's event append → the projector → hits in the read model.
+const CLI: Origin = NO_CHAT(Door.cli)
+
 describe('agent-side memory access recording (integration)', () => {
   const cleanup: (() => Promise<void> | void)[] = []
   // LIFO: port and log close before the database they hold connections to is dropped
@@ -32,7 +34,7 @@ describe('agent-side memory access recording (integration)', () => {
     const log = storage.events
     const kernel = new Kernel(log)
     // a task must name a workspace the fold has seen — one seeded record, then tasks as before
-    await seedTestWorkspace(log)
+    await seedTestWorkspace(log, CLI)
     const config = testConfig(pg.url, {
       vaultDir,
       projectDbUrl: ts.url, projectDbNamespace: ts.ns, projectDbName: ts.db,
@@ -44,8 +46,8 @@ describe('agent-side memory access recording (integration)', () => {
 
     // two linked notes so the traversal has something to return
     await memory.store.write({ id: 'auth', title: 'Auth', summary: 'tokens', body: 'rotate hourly',
-      links: [{ id: 'crypto', kind: LINK_KIND.depends_on }] }, { source: 'cli', workspaceId: TEST_WORKSPACE_ID })
-    await memory.store.write({ id: 'crypto', title: 'Crypto', summary: 'primitives' }, { source: 'cli', workspaceId: TEST_WORKSPACE_ID })
+      links: [{ id: 'crypto', kind: LINK_KIND.depends_on }] }, authorFixture())
+    await memory.store.write({ id: 'crypto', title: 'Crypto', summary: 'primitives' }, authorFixture())
     await memory.projector.catchUp()
 
     // Scripted agent exercising every pull shape. Only the model's token generation is fake —
@@ -67,17 +69,17 @@ describe('agent-side memory access recording (integration)', () => {
       storage, config, skills: fakeSkills,
       providers: new Map([['fake', { costs: {}, languageModel: () => model }]]),
       executors: new Map([['api-loop', apiLoopExecutor()]]),
-      stepTools: p => memory.bindStep({ author: { source: 'agent', workspaceId: p.workspaceId, taskId: p.taskId, stepId: p.stepId, runToken: p.runToken, executor: p.executor, model: p.model, role: p.role }, step: p.step, taskId: p.taskId, ancestorTaskIds: p.ancestorTaskIds }),
+      stepTools: p => memory.bindStep({ author: { source: AUTHOR_SOURCE.agent, origin: p.origin, workspaceId: p.workspaceId, taskId: p.taskId, stepId: p.stepId, runToken: p.runToken, executor: p.executor, model: p.model, role: p.role }, step: p.step, taskId: p.taskId, ancestorTaskIds: p.ancestorTaskIds }),
     })
     await port.launch()
     cleanup.push(() => port.shutdown())
     cleanup.push(() => log.close())
 
-    const t = await kernel.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'use memory', spec: 'pull the auth context' })
+    const t = await kernel.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'use memory', spec: 'pull the auth context' }, CLI)
     // maxIterations must clear the six scripted turns — the fixture default of 5 would cap the
     // loop before the signal and block the run on an iteration limit, not on anything under test
-    await kernel.proposePlan(t.id, draftFixture([stepFixture({ modelRef: 'fake/m', maxIterations: 10 })]))
-    await kernel.approvePlan(t.id)
+    await kernel.proposePlan(t.id, draftFixture([stepFixture({ modelRef: 'fake/m', maxIterations: 10 })]), CLI)
+    await kernel.approvePlan(t.id, undefined, undefined, CLI)
     expect(await (await port.startRun(t.id)).wait()).toBe('done')
 
     // memory events are project-scoped (taskId: null), so read the whole log, not the task slice
@@ -95,9 +97,11 @@ describe('agent-side memory access recording (integration)', () => {
     // authorship is the agent's, carrying the step identity — not the CLI default. Without this
     // the counter could never answer "which step pulled this", only "something did".
     for (const a of accesses) {
-      expect(a.author.source).toBe('agent')
+      expect(a.author.source).toBe(AUTHOR_SOURCE.agent)
       expect(a.author.taskId).toBe(t.id)
       expect(a.author.runToken).toContain(t.id)
+      // the pull happened inside the run's chat, so the note can be traced back to that transcript
+      expect(a.author.origin).toEqual({ chatId: expect.stringContaining(t.id), door: Door.supervisor })
     }
 
     // and the counter actually lands in the read model the agent's next search would consult

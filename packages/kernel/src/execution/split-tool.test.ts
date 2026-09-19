@@ -1,9 +1,13 @@
 import { describe, expect, it } from 'bun:test'
+import type { Origin } from '@orc/contracts'
 import { must } from '@orc/contracts/fixtures'
+import { runOrigin } from './run-chat'
 import { splitTool } from './split-tool'
 import { ANALYZE_STEP_ROLE } from './strategies/grounded-plan'
 
-const p = { taskId: 't1', stepId: 's1', runToken: 'step:t1:s1:a1', role: 'worker', executor: 'api-loop', modelRef: 'fake/m', maxIterations: 5 }
+// the proposing step runs inside its run's chat, so the split it proposes is stamped with that chat
+const STEP_ORIGIN: Origin = runOrigin('run:t1:v1')
+const p = { taskId: 't1', stepId: 's1', runToken: 'step:t1:s1:a1', role: 'worker', executor: 'api-loop', modelRef: 'fake/m', maxIterations: 5, origin: STEP_ORIGIN }
 const config = { approvalPolicy: { default: 'manual' as const, rules: [] }, maxDepth: 3 }
 // ChildPlanStep requires skillRefs/dependsOn explicitly (no zod default — only toolRefs has one)
 const step = { id: 'w1', role: 'worker', title: 'w', instructions: 'do', dependsOn: [], skillRefs: [], toolRefs: [] }
@@ -15,15 +19,17 @@ describe('task_split tool', () => {
     expect(splitTool({ kernel, config, p })).toHaveLength(1)
   })
 
-  it('routes a valid proposal to kernel.proposeSplit with inherited parent-step refs', async () => {
+  it('routes a valid proposal to kernel.proposeSplit with inherited parent-step refs and the step\'s own chat', async () => {
     const calls: unknown[] = []
-    const kernel = { proposeSplit: async (input: unknown) => { calls.push(input); return { splitId: 'sp', childTaskId: 'c', gated: true } } }
+    const origins: Origin[] = []
+    const kernel = { proposeSplit: async (input: unknown, origin: Origin) => { calls.push(input); origins.push(origin); return { splitId: 'sp', childTaskId: 'c', gated: true } } }
     const tool = must(splitTool({ kernel, config, p })[0], 'task_split tool')
     expect(tool.name).toBe('task_split')
     const r = await tool.execute({ title: 'C', spec: 'work', plan: { steps: [step] } }, 'call_1')
     expect(r.isError).toBe(false)
     expect(r.output).toEqual({ splitId: 'sp', childTaskId: 'c', gated: true })
     expect(calls[0]).toMatchObject({ parentTaskId: 't1', toolCallId: 'call_1', parentStep: { executorRef: 'api-loop', modelRef: 'fake/m', maxIterations: 5 } })
+    expect(origins[0]).toEqual(STEP_ORIGIN) // the child is proposed FROM the parent run's chat, not from nowhere
   })
 
   it('falls back to a generated id when the caller supplies no toolCallId', async () => {

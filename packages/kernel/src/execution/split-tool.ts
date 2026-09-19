@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { z } from 'zod'
-import { ChildPlanDraft, TOOL_REF_RE, toolError, type ApprovalPolicy, type ResolvedTool } from '@orc/contracts'
+import { ChildPlanDraft, TOOL_REF_RE, toolError, type ApprovalPolicy, type Origin, type ResolvedTool } from '@orc/contracts'
 import type { Kernel } from '../kernel'
 import { ANALYZE_STEP_ROLE } from './strategies/grounded-plan'
 
@@ -14,7 +14,7 @@ const SplitToolInput = z.object({
 export function splitTool(opts: {
   kernel: Pick<Kernel, 'proposeSplit'>
   config: { approvalPolicy: ApprovalPolicy; maxDepth: number }
-  p: { taskId: string; stepId: string; runToken: string; role: string; executor: string; modelRef: string; maxIterations: number }
+  p: { taskId: string; stepId: string; runToken: string; role: string; executor: string; modelRef: string; maxIterations: number; origin: Origin }
 }): ResolvedTool[] {
   const { kernel, config, p } = opts
   // Registration gate, same shape as report_coverage's: a scout ORIENTS, it does not decompose. The
@@ -73,7 +73,7 @@ export function splitTool(opts: {
           title: q.title, spec: q.spec, plan: q.plan, budgetUSD: q.budgetUSD,
           parentStep: { executorRef: p.executor, modelRef: p.modelRef, maxIterations: p.maxIterations },
           policy: config.approvalPolicy, maxDepth: config.maxDepth,
-        })
+        }, p.origin)
         return { output: r, isError: false }
       } catch (e) {
         return toolError(e)

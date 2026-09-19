@@ -1,6 +1,10 @@
 import { afterAll, describe, expect, it } from 'bun:test'
 import { z } from 'zod'
-import { EVENT_KIND, ISOLATION_TIER } from '@orc/contracts'
+import { Door, EVENT_KIND, ISOLATION_TIER, NO_CHAT, type Scope, ScopeType } from '@orc/contracts'
+
+// these histories are arranged through the terminal door; the run halves are the supervisor's
+const CLI = NO_CHAT(Door.cli)
+const SUPERVISOR = NO_CHAT(Door.supervisor)
 import { Kernel, openStorage } from '@orc/kernel'
 import { createTestDb, seedTestWorkspace, TEST_PROJECT_ID, TEST_WORKSPACE_ID } from '@orc/kernel/test-helpers'
 import { noteNodeId } from './graph'
@@ -13,7 +17,9 @@ import { must } from '@orc/contracts/fixtures'
 // Every read here goes through the door helper the tools use, against a REAL session: the views'
 // own unit tests answer from a hand-built model, and what those cannot show is that the thing the
 // session folds out of Postgres is the same thing a view reads.
-const logOf = async (sessions: ProjectSessions, params: ViewParams<'timeline'> = {}) =>
+const PROJECT: Scope = { type: ScopeType.project }
+const taskScope = (id: string): Scope => ({ type: ScopeType.task, id, subtree: false })
+const logOf = async (sessions: ProjectSessions, params: ViewParams<'timeline'> = { scope: PROJECT }) =>
   await viewOf(sessions, TEST_PROJECT_ID, VIEW.timeline, params) ?? []
 
 // The node view answers a union ending in a permissive record, so these name the subsets each
@@ -42,25 +48,27 @@ async function setup() {
   openStores.push(storage)
   const k = new Kernel(storage.events)
   // a task must name a workspace the fold has seen — one seeded record, then tasks as before
-  await seedTestWorkspace(storage.events)
-  const t = await k.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'seed task', spec: '' })
+  await seedTestWorkspace(storage.events, CLI)
+  const t = await k.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'seed task', spec: '' }, CLI)
   const sessions = createProjectSessions({ url: db.url, cwdProject: { id: TEST_PROJECT_ID, name: 'test-proj' } })
   openSessions.push(sessions)
   return { storage, taskId: t.id, sessions }
 }
 
 const noteEvent = (id: string) => ({
+  ...CLI,
   taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_written,
-  payload: { note: { id, title: id }, author: { source: 'cli' as const, workspaceId: TEST_WORKSPACE_ID } },
+  payload: { note: { id, title: id }, author: { source: 'cli' as const, workspaceId: TEST_WORKSPACE_ID, origin: CLI } },
 })
 
 // a plan-note in the parent's plan scope; its id IS the child step id (instantiateFrozenPlan),
 // which is how planNotes correlates the decomposition graph to child execution.
 const planNoteEvent = (taskId: string, id: string, links: Array<{ id: string; kind: string }> = []) => ({
+  ...CLI,
   taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_written,
   payload: {
     note: { id, title: id, scope: `plan-${taskId.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`, tier: 'plan' as const, links },
-    author: { source: 'cli' as const, workspaceId: TEST_WORKSPACE_ID },
+    author: { source: 'cli' as const, workspaceId: TEST_WORKSPACE_ID, origin: CLI },
   },
 })
 
@@ -120,8 +128,9 @@ describe('ProjectSessions', () => {
     // memory_accessed changes no graph shape — patch empty, summary present
     await storage.events.append(noteEvent('hit-note'))
     await storage.events.append({
+      ...CLI,
       taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_accessed,
-      payload: { id: 'hit-note', scope: 'project', mode: 'read', author: { source: 'cli', workspaceId: TEST_WORKSPACE_ID } },
+      payload: { id: 'hit-note', scope: 'project', mode: 'read', author: { source: 'cli', workspaceId: TEST_WORKSPACE_ID, origin: CLI } },
     })
     for (let i = 0; i < 40 && updates.length < 2; i++) await Bun.sleep(50)
     expect(updates).toHaveLength(2)
@@ -134,6 +143,7 @@ describe('ProjectSessions', () => {
   it('the transcript, plans and timeline views read from the cached session', async () => {
     const { storage, taskId, sessions } = await setup()
     await storage.events.append({
+      ...SUPERVISOR,
       taskId, stepId: 's1', runToken: 'r1', kind: EVENT_KIND.agent_call,
       payload: { stepId: 's1', runToken: 'r1', iteration: 1, request: {}, response: { text: 'hello there', toolCalls: [] } },
       usage: { inputTokens: 1, outputTokens: 1, costUSD: null, estimated: false },
@@ -142,9 +152,9 @@ describe('ProjectSessions', () => {
     expect(items).toEqual([{ kind: 'message', iteration: 1, stepId: 's1', text: 'hello there' }])
 
     expect(await viewOf(sessions, TEST_PROJECT_ID, VIEW.plans, { taskId })).toBeNull() // no plan proposed
-    const rows = await logOf(sessions, { taskId })
+    const rows = await logOf(sessions, { scope: taskScope(taskId) })
     expect(must(rows.at(-1), 'rows.at(-1)').line).toContain('hello there')
-    expect(await logOf(sessions, { limit: 1 })).toHaveLength(1)
+    expect(await logOf(sessions, { scope: PROJECT, limit: 1 })).toHaveLength(1)
   })
 
   it('a task-scoped timeline attributes each task its own step rows + its author.taskId memory rows, and no sibling/ownerless memory row', async () => {
@@ -152,24 +162,26 @@ describe('ProjectSessions', () => {
     // a second task in the same project — its step rows must never leak into A's log and vice versa
     const k = new Kernel(storage.events)
     // setup() already seeded TEST_WORKSPACE into this same log — this kernel reads the same fold
-    const taskB = (await k.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'task B', spec: '' })).id
+    const taskB = (await k.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'task B', spec: '' }, CLI)).id
 
     // each task's own step_started (envelope taskId carries the real owner)
-    await storage.events.append({ taskId: taskA, stepId: 'sa', runToken: 'ra', kind: EVENT_KIND.step_started, payload: { stepId: 'sa', runToken: 'ra', attempt: 1 } })
-    await storage.events.append({ taskId: taskB, stepId: 'sb', runToken: 'rb', kind: EVENT_KIND.step_started, payload: { stepId: 'sb', runToken: 'rb', attempt: 1 } })
+    await storage.events.append({ ...SUPERVISOR, taskId: taskA, stepId: 'sa', runToken: 'ra', kind: EVENT_KIND.step_started, payload: { stepId: 'sa', runToken: 'ra', attempt: 1 } })
+    await storage.events.append({ ...SUPERVISOR, taskId: taskB, stepId: 'sb', runToken: 'rb', kind: EVENT_KIND.step_started, payload: { stepId: 'sb', runToken: 'rb', attempt: 1 } })
 
     // project-scoped memory rows (envelope taskId null) authored by A, by B, and ownerless (cli)
     await storage.events.append({
+      ...SUPERVISOR,
       taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_written,
-      payload: { note: { id: 'note-by-a', title: 'note-by-a' }, author: { source: 'agent', workspaceId: TEST_WORKSPACE_ID, taskId: taskA } },
+      payload: { note: { id: 'note-by-a', title: 'note-by-a' }, author: { source: 'agent', workspaceId: TEST_WORKSPACE_ID, taskId: taskA, origin: SUPERVISOR } },
     })
     await storage.events.append({
+      ...SUPERVISOR,
       taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_written,
-      payload: { note: { id: 'note-by-b', title: 'note-by-b' }, author: { source: 'agent', workspaceId: TEST_WORKSPACE_ID, taskId: taskB } },
+      payload: { note: { id: 'note-by-b', title: 'note-by-b' }, author: { source: 'agent', workspaceId: TEST_WORKSPACE_ID, taskId: taskB, origin: SUPERVISOR } },
     })
     await storage.events.append(noteEvent('ownerless-note')) // author.source 'cli', no taskId
 
-    const linesFor = async (t: string): Promise<string[]> => (await logOf(sessions, { taskId: t })).map(r => r.line)
+    const linesFor = async (t: string): Promise<string[]> => (await logOf(sessions, { scope: taskScope(t) })).map(r => r.line)
 
     const aLines = await linesFor(taskA)
     expect(aLines.some(l => l.includes('sa'))).toBe(true) // A's own step row
@@ -189,10 +201,12 @@ describe('ProjectSessions', () => {
   it('a timeline cursor filters BEFORE the limit slice, keeping the newest matching rows', async () => {
     const { storage, taskId, sessions } = await setup()
     const step = (id: string) => storage.events.append({
+      ...SUPERVISOR,
       taskId, stepId: id, runToken: 'r1', kind: EVENT_KIND.step_started,
       payload: { stepId: id, runToken: 'r1', attempt: 1 },
     })
     const ask = (topic: string) => storage.events.append({
+      ...SUPERVISOR,
       taskId, stepId: 's1', runToken: 'r1', kind: EVENT_KIND.feedback_requested,
       payload: { question: `q-${topic}`, topic },
     })
@@ -202,32 +216,32 @@ describe('ProjectSessions', () => {
     const q2 = await ask('two')
 
     // sinceSeq is EXCLUSIVE: the row a poller already saw must not come back
-    const since = await logOf(sessions, { taskId, sinceSeq: s1.seq })
+    const since = await logOf(sessions, { scope: taskScope(taskId), sinceSeq: s1.seq })
     expect(since.map(r => r.seq)).toEqual([q1.seq, s2.seq, q2.seq])
     expect(since.every(r => r.seq > s1.seq)).toBe(true)
 
-    const asked = await logOf(sessions, { taskId, kinds: [EVENT_KIND.feedback_requested] })
+    const asked = await logOf(sessions, { scope: taskScope(taskId), kinds: [EVENT_KIND.feedback_requested] })
     expect(asked.map(r => r.seq)).toEqual([q1.seq, q2.seq])
     expect(asked.every(r => r.kind === EVENT_KIND.feedback_requested)).toBe(true)
 
     // composed with limit: the newest MATCHING row, not the newest event (which is q2's neighbour)
-    expect((await logOf(sessions, { taskId, kinds: [EVENT_KIND.step_started], limit: 1 })).map(r => r.seq))
+    expect((await logOf(sessions, { scope: taskScope(taskId), kinds: [EVENT_KIND.step_started], limit: 1 })).map(r => r.seq))
       .toEqual([s2.seq])
-    expect((await logOf(sessions, { taskId, sinceSeq: q1.seq, limit: 1 })).map(r => r.seq)).toEqual([q2.seq])
-    // whole-project (untargeted) reads take the same filters
-    expect((await logOf(sessions, { sinceSeq: q2.seq })).map(r => r.seq)).toEqual([])
-    expect((await logOf(sessions, { kinds: [EVENT_KIND.feedback_requested] })).map(r => r.seq))
+    expect((await logOf(sessions, { scope: taskScope(taskId), sinceSeq: q1.seq, limit: 1 })).map(r => r.seq)).toEqual([q2.seq])
+    // whole-project reads take the same filters
+    expect((await logOf(sessions, { scope: PROJECT, sinceSeq: q2.seq })).map(r => r.seq)).toEqual([])
+    expect((await logOf(sessions, { scope: PROJECT, kinds: [EVENT_KIND.feedback_requested] })).map(r => r.seq))
       .toEqual([q1.seq, q2.seq])
 
     // beforeSeq is EXCLUSIVE and pages BACKWARD: the ledger asks for what precedes its oldest
     // row, and with limit it must get the rows nearest the cursor, not the start of the log
     // (the head of the unlimited read is the task's own task_created row, so assert the tail)
-    const before = await logOf(sessions, { taskId, beforeSeq: q2.seq })
+    const before = await logOf(sessions, { scope: taskScope(taskId), beforeSeq: q2.seq })
     expect(before.every(r => r.seq < q2.seq)).toBe(true)
     expect(before.map(r => r.seq).slice(-3)).toEqual([s1.seq, q1.seq, s2.seq])
-    expect((await logOf(sessions, { taskId, beforeSeq: q2.seq, limit: 2 })).map(r => r.seq))
+    expect((await logOf(sessions, { scope: taskScope(taskId), beforeSeq: q2.seq, limit: 2 })).map(r => r.seq))
       .toEqual([q1.seq, s2.seq])
-    expect((await logOf(sessions, { beforeSeq: s1.seq, limit: 5 })).every(r => r.seq < s1.seq)).toBe(true)
+    expect((await logOf(sessions, { scope: PROJECT, beforeSeq: s1.seq, limit: 5 })).every(r => r.seq < s1.seq)).toBe(true)
   })
 
   // A guard, not a rendering test: the plan wire must not grow a serialized diagram back, because
@@ -236,6 +250,7 @@ describe('ProjectSessions', () => {
     const { storage, taskId, sessions } = await setup()
     await storage.events.append(planNoteEvent(taskId, 'sub'))
     await storage.events.append({
+      ...CLI,
       taskId, stepId: null, runToken: null, kind: EVENT_KIND.plan_proposed,
       payload: { plan: { taskId, version: 1, strategyRef: 'split', costEstimateUSD: null, steps: [childStep('own')] } },
     })
@@ -252,8 +267,9 @@ describe('ProjectSessions', () => {
     const { storage, sessions } = await setup()
     await storage.events.append(noteEvent('target'))
     await storage.events.append({
+      ...CLI,
       taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_written,
-      payload: { note: { id: 'pointer', title: 'pointer', links: [{ id: 'target' }] }, author: { source: 'cli', workspaceId: TEST_WORKSPACE_ID } },
+      payload: { note: { id: 'pointer', title: 'pointer', links: [{ id: 'target' }] }, author: { source: 'cli', workspaceId: TEST_WORKSPACE_ID, origin: CLI } },
     })
     const d = BacklinksView.parse(await viewOf(sessions, TEST_PROJECT_ID, VIEW.node, { id: noteNodeId('project', 'target') }))
     expect(d.backlinks.map(b => b.id)).toEqual(['pointer'])
@@ -263,8 +279,9 @@ describe('ProjectSessions', () => {
     const { storage, taskId, sessions } = await setup()
     await storage.events.append(noteEvent('detail-note'))
     await storage.events.append({
+      ...CLI,
       taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_accessed,
-      payload: { id: 'detail-note', scope: 'project', mode: 'read', author: { source: 'cli', workspaceId: TEST_WORKSPACE_ID } },
+      payload: { id: 'detail-note', scope: 'project', mode: 'read', author: { source: 'cli', workspaceId: TEST_WORKSPACE_ID, origin: CLI } },
     })
     const task = TaskDetailView.parse(await viewOf(sessions, TEST_PROJECT_ID, VIEW.node, { id: taskId }))
     expect(task.task.title).toBe('seed task')

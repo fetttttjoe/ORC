@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from 'bun:test'
 import {
-  EVENT_KIND, FINISH_STEP_ID, PAYLOAD_SCHEMAS, SIGNAL_OUTCOME, TASK_STATUS,
-  type AgentExecutor, type EventDraft, type ExecutorContext, type SplitResult, type UnifiedEvent,
+  Door, EVENT_KIND, FINISH_STEP_ID, NO_CHAT, PAYLOAD_SCHEMAS, SIGNAL_OUTCOME, TASK_STATUS,
+  type AgentExecutor, type EventDraft, type ExecutorContext, type Origin, type SplitResult, type UnifiedEvent,
 } from '@orc/contracts'
 import { draftFixture, must, stepFixture } from '@orc/contracts/fixtures'
 import { openStorage } from '../storage'
@@ -11,6 +11,8 @@ import { createDbosPort, dbosSend, type DbosPort } from './dbos-port'
 
 // what the executor observed as the resumed value of the feedback yield
 const seen: string[] = []
+
+const CLI: Origin = NO_CHAT(Door.cli)
 
 // scripted executor: yields a feedback gate, records what it resumes with, then signals done —
 // mirrors fakeExecutor in dbos-port.test.ts, but for the feedback (not split) gate.
@@ -50,7 +52,7 @@ describe('durable conversational gate (feedback)', () => {
     const log = storage.events
     kernel = new Kernel(log, undefined, undefined, dbosSend)
     // a task must name a workspace the fold has seen — one seeded record, then tasks as before
-    await seedTestWorkspace(log)
+    await seedTestWorkspace(log, CLI)
     const config = testConfig(db.url)
     port = await createDbosPort({
       storage, config, skills: fakeSkills,
@@ -63,9 +65,9 @@ describe('durable conversational gate (feedback)', () => {
   afterAll(async () => { await teardown() })
 
   it('a feedback gate appends feedback_requested and resumes the turn with the human text', async () => {
-    const t = await kernel.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'feedback test', spec: 'ask then continue' })
-    await kernel.proposePlan(t.id, draftFixture([stepFixture({ executorRef: 'feedback-fake' })]))
-    await kernel.approvePlan(t.id)
+    const t = await kernel.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'feedback test', spec: 'ask then continue' }, CLI)
+    await kernel.proposePlan(t.id, draftFixture([stepFixture({ executorRef: 'feedback-fake' })]), CLI)
+    await kernel.approvePlan(t.id, undefined, undefined, CLI)
 
     const handle = await port.startRun(t.id)
     // deterministic step workflow id (spec: step:<taskId>:<stepId>:a<attempt>) — this IS the
@@ -76,7 +78,7 @@ describe('durable conversational gate (feedback)', () => {
     const requested = (await kernel.eventsFor(t.id)).find(e => e.kind === EVENT_KIND.feedback_requested)
     expect(requested?.payload).toEqual({ question: 'analyze the codebase?', topic: 'consent' })
 
-    expect(await kernel.replyFeedback(t.id, 'yes')).toBe('consent')
+    expect(await kernel.replyFeedback(t.id, 'yes', CLI)).toBe('consent')
 
     expect(await handle.wait()).toBe('done')
     expect(seen).toEqual(['yes'])

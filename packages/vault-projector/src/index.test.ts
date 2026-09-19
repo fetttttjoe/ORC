@@ -6,7 +6,10 @@ import { Kernel, openStorage } from '@orc/kernel'
 import { createTestDb, seedTestWorkspace, TEST_PROJECT_ID, TEST_WORKSPACE_ID } from '@orc/kernel/test-helpers'
 import { draftFixture, stepFixture } from '@orc/contracts/fixtures'
 import { createVaultProjector } from './index'
-import { EVENT_KIND } from '@orc/contracts'
+import { Door, EVENT_KIND, NO_CHAT } from '@orc/contracts'
+
+// this file's arrangement all comes from the terminal door
+const CLI = NO_CHAT(Door.cli)
 
 const dbs: Array<{ drop: () => Promise<void> }> = []
 const dirs: string[] = []
@@ -19,9 +22,9 @@ describe('createVaultProjector.renderAll', () => {
     const log = (await openStorage(db.url, { projectId: TEST_PROJECT_ID })).events
     const kernel = new Kernel(log)
     // a task must name a workspace the fold has seen — one seeded record, then tasks as before
-    await seedTestWorkspace(log)
-    const t = await kernel.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'demo', spec: 'do it' })
-    await kernel.proposePlan(t.id, draftFixture([stepFixture({ id: 's1', modelRef: 'anthropic/claude-sonnet-5' })]))
+    await seedTestWorkspace(log, CLI)
+    const t = await kernel.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'demo', spec: 'do it' }, CLI)
+    await kernel.proposePlan(t.id, draftFixture([stepFixture({ id: 's1', modelRef: 'anthropic/claude-sonnet-5' })]), CLI)
 
     const projector = createVaultProjector({ log, config: { vaultDir } })
     await projector.renderAll()
@@ -39,14 +42,14 @@ describe('createVaultProjector.renderAll', () => {
     const log = (await openStorage(db.url, { projectId: TEST_PROJECT_ID })).events
     const kernel = new Kernel(log)
     // a task must name a workspace the fold has seen — one seeded record, then tasks as before
-    await seedTestWorkspace(log)
-    const t = await kernel.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'demo', spec: 'do it' })
+    await seedTestWorkspace(log, CLI)
+    const t = await kernel.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'demo', spec: 'do it' }, CLI)
     await log.append({
-      taskId: null, stepId: null, runToken: null,
+      ...CLI, taskId: null, stepId: null, runToken: null,
       kind: EVENT_KIND.memory_written,
       payload: {
         note: { id: 'note-x', title: 'X', scope: 'project', categories: [], tags: [], links: [], paths: [], summary: '', body: '' },
-        author: { source: 'cli', workspaceId: TEST_WORKSPACE_ID },
+        author: { source: 'cli', workspaceId: TEST_WORKSPACE_ID, origin: CLI },
       },
     })
 
@@ -73,8 +76,8 @@ describe('createVaultProjector.renderAll', () => {
     const log = (await openStorage(db.url, { projectId: TEST_PROJECT_ID })).events
     const kernel = new Kernel(log)
     // a task must name a workspace the fold has seen — one seeded record, then tasks as before
-    await seedTestWorkspace(log)
-    const t = await kernel.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'scoped', spec: 'x' })
+    await seedTestWorkspace(log, CLI)
+    const t = await kernel.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'scoped', spec: 'x' }, CLI)
     const allSpy = spyOn(log, 'all')
     const projector = createVaultProjector({ log, config: { vaultDir } })
     await projector.renderAll()
@@ -90,19 +93,19 @@ describe('createVaultProjector.renderAll', () => {
     const log = (await openStorage(db.url, { projectId: TEST_PROJECT_ID })).events
     const kernel = new Kernel(log)
     // a task must name a workspace the fold has seen — one seeded record, then tasks as before
-    await seedTestWorkspace(log)
+    await seedTestWorkspace(log, CLI)
 
     const projector = createVaultProjector({ log, config: { vaultDir } })
     await projector.start()
     const byTaskSpy = spyOn(log, 'byTask')
 
-    const t = await kernel.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'demo', spec: 'do it' })
+    const t = await kernel.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'demo', spec: 'do it' }, CLI)
     await log.append({
-      taskId: null, stepId: null, runToken: null,
+      ...CLI, taskId: null, stepId: null, runToken: null,
       kind: EVENT_KIND.memory_written,
       payload: {
         note: { id: 'note-y', title: 'Y', scope: 'project', categories: [], tags: [], links: [], paths: [], summary: '', body: '' },
-        author: { source: 'cli', workspaceId: TEST_WORKSPACE_ID },
+        author: { source: 'cli', workspaceId: TEST_WORKSPACE_ID, origin: CLI },
       },
     })
 

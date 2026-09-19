@@ -4,8 +4,8 @@ import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import {
-  EVENT_KIND, MemoryWrittenPayload, SIGNAL_OUTCOME,
-  type AgentExecutor, type EventDraft, type ExecutorContext, type ResolvedTool,
+  AUTHOR_SOURCE, Door, EVENT_KIND, MemoryWrittenPayload, NO_CHAT, SIGNAL_OUTCOME,
+  type AgentExecutor, type EventDraft, type ExecutorContext, type Origin, type ResolvedTool,
   type SplitResult, type UnifiedEvent,
 } from '@orc/contracts'
 import { draftFixture, must, stepFixture } from '@orc/contracts/fixtures'
@@ -24,6 +24,8 @@ const NoteTitle = z.object({ title: z.string() })
 
 const NOTE_ID = 'finding-x'
 const NOTE = { id: NOTE_ID, title: 'Finding X', summary: 'a durable finding', body: 'the full write-up' }
+
+const CLI: Origin = NO_CHAT(Door.cli)
 
 // Step A writes a note via the injected memory_write tool; step B (dependsOn A) polls
 // memory_read for it — proving reuse across the eventually-consistent SurrealDB projection.
@@ -92,7 +94,7 @@ describe('memory reuse over a real run (e2e): step B reads step A\'s note', () =
     const log = storage.events
     const kernel = new Kernel(log)
     // a task must name a workspace the fold has seen — one seeded record, then tasks as before
-    await seedTestWorkspace(log)
+    await seedTestWorkspace(log, CLI)
     const config = testConfig(pg.url, {
       vaultDir,
       projectDbUrl: ts.url, projectDbNamespace: ts.ns, projectDbName: ts.db,
@@ -104,17 +106,17 @@ describe('memory reuse over a real run (e2e): step B reads step A\'s note', () =
       storage, config, skills: fakeSkills,
       providers: new Map([['fake', fakeProvider]]),
       executors: new Map([['memory-fake', memoryExecutor()]]),
-      stepTools: p => memory.bindStep({ author: { source: 'agent', workspaceId: p.workspaceId, taskId: p.taskId, stepId: p.stepId, runToken: p.runToken, executor: p.executor, model: p.model, role: p.role }, step: p.step, taskId: p.taskId, ancestorTaskIds: p.ancestorTaskIds }),
+      stepTools: p => memory.bindStep({ author: { source: AUTHOR_SOURCE.agent, origin: p.origin, workspaceId: p.workspaceId, taskId: p.taskId, stepId: p.stepId, runToken: p.runToken, executor: p.executor, model: p.model, role: p.role }, step: p.step, taskId: p.taskId, ancestorTaskIds: p.ancestorTaskIds }),
     })
     await port.launch()
 
     try {
-      const t = await kernel.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'memory reuse e2e', spec: 'write then reuse a finding' })
+      const t = await kernel.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'memory reuse e2e', spec: 'write then reuse a finding' }, CLI)
       await kernel.proposePlan(t.id, draftFixture([
         stepFixture({ id: 's1', role: 'worker', executorRef: 'memory-fake', modelRef: 'fake/m' }),
         stepFixture({ id: 's2', role: 'worker', executorRef: 'memory-fake', modelRef: 'fake/m', dependsOn: ['s1'] }),
-      ]))
-      await kernel.approvePlan(t.id)
+      ]), CLI)
+      await kernel.approvePlan(t.id, undefined, undefined, CLI)
 
       const handle = await port.startRun(t.id)
       expect(await handle.wait()).toBe('done') // proves step B signaled success (i.e. it read the note)

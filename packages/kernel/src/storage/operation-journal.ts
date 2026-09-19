@@ -1,7 +1,7 @@
 import { and, asc, eq } from 'drizzle-orm'
 import {
   EVENT_KIND, OPERATION_STATUS, terminalError,
-  type EventDraft, type OperationRecord, type OperationSpec,
+  type EventDraft, type OperationRecord, type OperationSpec, type Origin,
 } from '@orc/contracts'
 import { operations } from '../schema'
 import { applyOperationEvent, foldOperations } from '../projections'
@@ -26,7 +26,15 @@ export interface OperationContext {
   taskId: string
   stepId: string
   runToken: string
+  origin: Origin
 }
+
+// One spelling for the four transitions this file appends: a per-append literal drops the chat and
+// the door on whichever path is edited last, and the events become unattributable.
+const envelopeOf = (context: OperationContext) => ({
+  ...context.origin,
+  taskId: context.taskId, stepId: context.stepId, runToken: context.runToken,
+})
 
 // Durable before/after journal: node and transition events commit in one
 // locked transaction, so the graph node and the append-only history can never disagree.
@@ -57,7 +65,7 @@ export class OperationJournal {
         return { reused: true, attempt: existing.attempts, value: existing.after }
       const attempt = (existing?.attempts ?? 0) + 1
       const event = await ops.append({
-        taskId: context.taskId, stepId: context.stepId, runToken: context.runToken,
+        ...envelopeOf(context),
         kind: EVENT_KIND.operation_started,
         payload: { operationId: spec.operationId, attempt, operationKind: spec.kind, name: spec.name, before: spec.before },
         idempotencyKey: `${spec.operationId}:${attempt}:started`,
@@ -87,7 +95,7 @@ export class OperationJournal {
       if (existing.attempts !== attempt)
         throw terminalError(`operation '${spec.operationId}' attempt ${attempt} is stale (current attempt is ${existing.attempts})`)
       const event = await ops.append({
-        taskId: context.taskId, stepId: context.stepId, runToken: context.runToken,
+        ...envelopeOf(context),
         kind: EVENT_KIND.operation_completed,
         payload: { operationId: spec.operationId, attempt, after: value },
         idempotencyKey: `${spec.operationId}:${attempt}:completed`,
@@ -96,7 +104,7 @@ export class OperationJournal {
       await this.upsert(tx, next)
       for (const [i, d] of drafts.entries())
         await ops.append({
-          taskId: context.taskId, stepId: context.stepId, runToken: context.runToken,
+          ...envelopeOf(context),
           kind: d.kind, payload: d.payload, usage: d.usage ?? null,
           idempotencyKey: d.idempotencyKey ?? `${spec.operationId}:${attempt}:draft:${i}`,
         })
@@ -113,7 +121,7 @@ export class OperationJournal {
       if (!existing) throw terminalError(`operation '${spec.operationId}' was never started`)
       if (existing.status === OPERATION_STATUS.completed || existing.attempts !== attempt) return
       const event = await ops.append({
-        taskId: context.taskId, stepId: context.stepId, runToken: context.runToken,
+        ...envelopeOf(context),
         kind: EVENT_KIND.operation_failed,
         payload: { operationId: spec.operationId, attempt, error },
         idempotencyKey: `${spec.operationId}:${attempt}:failed`,

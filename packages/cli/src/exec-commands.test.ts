@@ -1,6 +1,8 @@
 import path from 'node:path'
+import { mkdtempSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { afterAll, afterEach, describe, expect, it, mock } from 'bun:test'
-import { EVENT_KIND, TASK_STATUS, type Analyzer, type ExecutionPort, type OperationSpec, type RunHandle, type RunOutcome, type TaskStatus } from '@orc/contracts'
+import { Door, EVENT_KIND, NO_CHAT, TASK_STATUS, type Analyzer, type ExecutionPort, type OperationSpec, type RunHandle, type RunOutcome, type TaskStatus } from '@orc/contracts'
 import { must, stepFixture } from '@orc/contracts/fixtures'
 import { openStorage, type EventLog } from '@orc/kernel'
 import { createTestDb, seedTestWorkspace, TEST_PROJECT_ID, TEST_WORKSPACE, TEST_WORKSPACE_ID } from '@orc/kernel/test-helpers'
@@ -9,6 +11,9 @@ import { openKernel } from './main'
 import { cli } from './test-helpers'
 
 const dbs: Array<{ drop: () => Promise<void> }> = []
+// these tests drive the CLI door; SUPERVISOR is the half they fake (the statuses a run stamps)
+const CLI = NO_CHAT(Door.cli)
+const SUPERVISOR = NO_CHAT(Door.supervisor)
 afterAll(async () => { for (const d of dbs) await d.drop() })
 afterEach(() => mock.restore())
 
@@ -28,7 +33,7 @@ async function makeCli(outcome: 'done' | 'blocked' = 'done') {
   dbs.push(db)
   const { kernel, log, storage } = await openKernel(db.url, { projectId: TEST_PROJECT_ID })
   // a task must name a workspace the fold has seen — one seeded record, then tasks as before
-  await seedTestWorkspace(log)
+  await seedTestWorkspace(log, CLI)
   db.onClose(() => storage.close())
   const { port, calls } = stubPort(outcome)
   const { run, lines } = cli(kernel, async () => port)
@@ -46,7 +51,7 @@ async function approvedTask(run: (...a: string[]) => Promise<unknown>, lines: st
 // The supervisor's half of a run, faked: no test here holds a real runtime, so the statuses a run
 // would stamp are appended straight onto the log.
 const stamp = (log: EventLog, taskId: string, from: TaskStatus, to: TaskStatus) =>
-  log.append({ taskId, stepId: null, runToken: null, kind: EVENT_KIND.task_status_changed, payload: { taskId, from, to } })
+  log.append({ ...SUPERVISOR, taskId, stepId: null, runToken: null, kind: EVENT_KIND.task_status_changed, payload: { taskId, from, to } })
 
 const until = async (ready: () => boolean) => { for (let i = 0; i < 300 && !ready(); i++) await Bun.sleep(20) }
 const watching = (lines: string[]) => until(() => lines.some(l => l.includes('run requested for')))
@@ -75,7 +80,7 @@ describe('exec commands', () => {
     dbs.push(db)
     const { kernel, log, storage } = await openKernel(db.url, { projectId: TEST_PROJECT_ID })
     // a task must name a workspace the fold has seen — one seeded record, then tasks as before
-    await seedTestWorkspace(log)
+    await seedTestWorkspace(log, CLI)
     const { port } = stubPort()
     const { run, lines } = cli(kernel, async () => port)
     const id = await approvedTask(run, lines)
@@ -90,11 +95,14 @@ describe('exec commands', () => {
   it('run --cwd records the override, the one thing only the caller knows', async () => {
     const { run, lines, log, kernel } = await makeCli()
     const id = await approvedTask(run, lines)
-    const watched = run('run', id, '--cwd', '/tmp/shared-ws')
+    // a REAL directory: the shared action validates the override at the boundary, so an invented
+    // path is now a refusal rather than an ENOENT four retries deep in the executor
+    const shared = mkdtempSync(path.join(tmpdir(), 'orc-shared-ws-'))
+    const watched = run('run', id, '--cwd', shared)
     await drive(log, lines, id, TASK_STATUS.done)
     await watched
     const requested = (await kernel.eventsFor(id)).find(e => e.kind === EVENT_KIND.run_requested)
-    expect(requested?.payload).toEqual({ taskId: id, cwd: '/tmp/shared-ws', retry: false })
+    expect(requested?.payload).toEqual({ taskId: id, cwd: shared, retry: false })
   }, 15_000)
 
   it('run drains events committed in the final window before printing the outcome', async () => {
@@ -102,7 +110,7 @@ describe('exec commands', () => {
     dbs.push(db)
     const { kernel, log } = await openKernel(db.url, { projectId: TEST_PROJECT_ID })
     // a task must name a workspace the fold has seen — one seeded record, then tasks as before
-    await seedTestWorkspace(log)
+    await seedTestWorkspace(log, CLI)
     const { port } = stubPort()
     const { run, lines } = cli(kernel, async () => port)
     const id = await approvedTask(run, lines)
@@ -116,7 +124,7 @@ describe('exec commands', () => {
       await watching(lines)
       await stamp(rawLog, id, TASK_STATUS.approved, TASK_STATUS.running)
       await rawLog.append({
-        taskId: id, stepId: 's1', runToken: 'r1', kind: EVENT_KIND.step_failed,
+        ...SUPERVISOR, taskId: id, stepId: 's1', runToken: 'r1', kind: EVENT_KIND.step_failed,
         payload: { stepId: 's1', runToken: 'r1', class: 'agent_error', message: 'blocked: boom' },
       })
       await stamp(rawLog, id, TASK_STATUS.running, TASK_STATUS.done) // draining is under test, not exit semantics
@@ -135,7 +143,7 @@ describe('exec commands', () => {
     dbs.push(db)
     const { kernel, log, storage } = await openKernel(db.url, { projectId: TEST_PROJECT_ID })
     // a task must name a workspace the fold has seen — one seeded record, then tasks as before
-    await seedTestWorkspace(log)
+    await seedTestWorkspace(log, CLI)
     db.onClose(() => storage.close())
     // the workflow is suspended on the gate: its result NEVER arrives
     const handle: RunHandle = { workflowId: 'run:x:v1', wait: () => new Promise<RunOutcome>(() => {}) }
@@ -143,7 +151,7 @@ describe('exec commands', () => {
     const { run, lines } = cli(kernel, async () => port)
     const id = await approvedTask(run, lines)
     await log.append({
-      taskId: id, stepId: 's1', runToken: 'r1', kind: EVENT_KIND.feedback_requested,
+      ...SUPERVISOR, taskId: id, stepId: 's1', runToken: 'r1', kind: EVENT_KIND.feedback_requested,
       payload: { question: 'May I analyze the codebase?', topic: `${id}:s1:1` },
     })
 
@@ -162,14 +170,14 @@ describe('exec commands', () => {
     dbs.push(db)
     const { kernel, log, storage } = await openKernel(db.url, { projectId: TEST_PROJECT_ID })
     // a task must name a workspace the fold has seen — one seeded record, then tasks as before
-    await seedTestWorkspace(log)
+    await seedTestWorkspace(log, CLI)
     db.onClose(() => storage.close())
     const { port, calls } = stubPort('done')
     const { run, lines } = cli(kernel, async () => port)
     const id = await approvedTask(run, lines)
     await stamp(log, id, TASK_STATUS.approved, TASK_STATUS.running) // the run this question is parked inside
     await log.append({
-      taskId: id, stepId: 's1', runToken: 'r1', kind: EVENT_KIND.feedback_requested,
+      ...SUPERVISOR, taskId: id, stepId: 's1', runToken: 'r1', kind: EVENT_KIND.feedback_requested,
       payload: { question: 'proceed?', topic: `${id}:s1:1` },
     })
     calls.length = 0
@@ -200,15 +208,15 @@ describe('exec commands', () => {
     dbs.push(db)
     const { kernel, log, storage } = await openKernel(db.url, { projectId: TEST_PROJECT_ID })
     // a task must name a workspace the fold has seen — one seeded record, then tasks as before
-    await seedTestWorkspace(log)
+    await seedTestWorkspace(log, CLI)
     db.onClose(() => storage.close())
     const { port, calls } = stubPort('done')
     const { run, lines } = cli(kernel, async () => port)
     const parent = await approvedTask(run, lines)
     // the split: a child task of the parent, still running when the parent's steps finish
-    const child = (await kernel.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'split child', spec: '', parentId: parent })).id
-    await kernel.proposePlan(child, singleStepDraft({ title: 'child', spec: '' }, 'fake/m', []))
-    await kernel.approvePlan(child)
+    const child = (await kernel.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'split child', spec: '', parentId: parent }, CLI)).id
+    await kernel.proposePlan(child, singleStepDraft({ title: 'child', spec: '' }, 'fake/m', []), CLI)
+    await kernel.approvePlan(child, undefined, undefined, CLI)
     calls.length = 0
 
     let settled = false
@@ -255,7 +263,7 @@ describe('exec commands', () => {
     const analyzers = new Map<string, Analyzer>([['agent-analyzer', { id: 'agent-analyzer', analysisStep: () => analyze }]])
     const { kernel, log } = await openKernel(db.url, { projectId: TEST_PROJECT_ID, analyzers })
     // a task must name a workspace the fold has seen — one seeded record, then tasks as before
-    await seedTestWorkspace(log)
+    await seedTestWorkspace(log, CLI)
     db.onClose(() => log.close())
     // a non-done outcome is a thrown CommandFailure now, not a write to process.exitCode, so this
     // could assert either; 'done' keeps the test about the grounded bootstrap rather than exits.
@@ -297,20 +305,21 @@ describe('exec commands', () => {
     dbs.push(db)
     const { kernel, log, storage } = await openKernel(db.url, { projectId: TEST_PROJECT_ID })
     // a task must name a workspace the fold has seen — one seeded record, then tasks as before
-    await seedTestWorkspace(log)
+    await seedTestWorkspace(log, CLI)
     db.onClose(() => storage.close())
     const { port } = stubPort()
     const { run, lines } = cli(kernel, async () => port)
     const id = await approvedTask(run, lines)
 
-    const opContext = { taskId: id, stepId: 's1', runToken: `step:${id}:s1:a1` }
+    // a step's operations belong to its RUN chat, the conversation the run is
+    const opContext = { taskId: id, stepId: 's1', runToken: `step:${id}:s1:a1`, origin: { chatId: `run:${id}:v1`, door: Door.supervisor } }
     const modelSpec: OperationSpec = { operationId: `${opContext.runToken}:model:1`, kind: 'model', name: 'fake/m', before: {} }
     const toolSpec: OperationSpec = { operationId: `${opContext.runToken}:tool:1:c1`, kind: 'tool', name: 'fs_write', before: {} }
     await storage.operations.beginOperation(opContext, modelSpec)
     await storage.operations.completeOperation(opContext, modelSpec, 1, { text: 'hi' })
     await storage.operations.beginOperation(opContext, toolSpec) // stays started — visible pending work
     await log.append({
-      taskId: id, stepId: 's1', runToken: opContext.runToken, kind: EVENT_KIND.artifact_produced,
+      ...SUPERVISOR, taskId: id, stepId: 's1', runToken: opContext.runToken, kind: EVENT_KIND.artifact_produced,
       payload: { path: 'report.md', sha256: 'a'.repeat(64), size: 5 },
     })
 

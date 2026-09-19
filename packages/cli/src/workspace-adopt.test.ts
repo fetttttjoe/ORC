@@ -2,11 +2,14 @@ import { afterAll, describe, expect, it } from 'bun:test'
 import { mkdtempSync, realpathSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import { WORKSPACE_KIND } from '@orc/contracts'
+import { Door, NO_CHAT, WORKSPACE_KIND } from '@orc/contracts'
 import { initializeProject, loadConfig, requireProject, type Kernel } from '@orc/kernel'
 import { createTestDb, TEST_PROJECT_ID, tmpGitRepo } from '@orc/kernel/test-helpers'
 import { openKernel } from './main'
 import { adoptCwd, DEFAULT_TRUNK, resolveTrunk } from './workspace-adopt'
+
+// adoption runs at boot of every CLI command — that is the door these tests stand in for
+const CLI = NO_CHAT(Door.cli)
 
 const dbs: Array<{ drop: () => Promise<void> }> = []
 afterAll(async () => { await Promise.all(dbs.map(d => d.drop())) }, 30_000)
@@ -55,13 +58,13 @@ describe('adoptCwd', () => {
     const kernel = await freshKernel()
     const { main, worktree } = tmpGitRepo()
     initializeProject(main, 'p')
-    const mainWs = await adoptCwd(kernel, requireProject(loadConfig(main)))
-    const wtWs = await adoptCwd(kernel, requireProject(loadConfig(worktree)))
+    const mainWs = await adoptCwd(kernel, requireProject(loadConfig(main)), CLI)
+    const wtWs = await adoptCwd(kernel, requireProject(loadConfig(worktree)), CLI)
     // no origin in a throwaway repo, so defaultBranch is null and the trunk falls back to
     // DEFAULT_TRUNK — the main checkout is on it, the worktree's `feature` is not
     expect(mainWs).toMatchObject({ kind: WORKSPACE_KIND.checkout, branch: 'main', cwd: realpathSync(main), managed: false, onTrunk: true })
     expect(wtWs).toMatchObject({ kind: WORKSPACE_KIND.worktree, branch: 'feature', title: 'feature', managed: false, onTrunk: false })
-    expect((await adoptCwd(kernel, requireProject(loadConfig(worktree)))).id).toBe(wtWs.id)
+    expect((await adoptCwd(kernel, requireProject(loadConfig(worktree)), CLI)).id).toBe(wtWs.id)
     expect((await kernel.listWorkspaces()).length).toBe(2)
   }, 30_000)
 
@@ -72,10 +75,10 @@ describe('adoptCwd', () => {
     // the discriminating shape: this repo's trunk is `feature`, which is NOT DEFAULT_TRUNK, so only
     // the git rung can answer — drop it and the worktree reads as off-trunk
     setOriginHead(main, 'feature')
-    const wtWs = await adoptCwd(kernel, requireProject(loadConfig(worktree)))
+    const wtWs = await adoptCwd(kernel, requireProject(loadConfig(worktree)), CLI)
     expect(wtWs).toMatchObject({ branch: 'feature', onTrunk: true })
     // and the main checkout, on `main`, is off-trunk in such a repo
-    expect((await adoptCwd(kernel, requireProject(loadConfig(main)))).onTrunk).toBe(false)
+    expect((await adoptCwd(kernel, requireProject(loadConfig(main)), CLI)).onTrunk).toBe(false)
   }, 30_000)
 
   it('the operator\'s trunkBranch wins over git\'s origin/HEAD', async () => {
@@ -85,7 +88,7 @@ describe('adoptCwd', () => {
     // git says the trunk is `feature`; the operator says it is `main`. The operator decides, so the
     // worktree sitting on `feature` is NOT trunk and its notes stay provisional until it merges.
     setOriginHead(main, 'feature')
-    const wtWs = await adoptCwd(kernel, { ...requireProject(loadConfig(worktree)), trunkBranch: 'main' })
+    const wtWs = await adoptCwd(kernel, { ...requireProject(loadConfig(worktree)), trunkBranch: 'main' }, CLI)
     expect(wtWs).toMatchObject({ branch: 'feature', onTrunk: false })
   }, 30_000)
 
@@ -93,7 +96,7 @@ describe('adoptCwd', () => {
     const kernel = await freshKernel()
     const dir = mkdtempSync(path.join(tmpdir(), 'orc-nogit-'))
     initializeProject(dir, 'p')
-    const ws = await adoptCwd(kernel, requireProject(loadConfig(dir)))
+    const ws = await adoptCwd(kernel, requireProject(loadConfig(dir)), CLI)
     expect(ws).toMatchObject({ kind: WORKSPACE_KIND.checkout, branch: null, onTrunk: true })
   }, 30_000)
 
@@ -107,11 +110,11 @@ describe('adoptCwd', () => {
     const { main } = tmpGitRepo()
     initializeProject(main, 'p')
     const config = requireProject(loadConfig(main))
-    const before = await adoptCwd(kernel, config)
+    const before = await adoptCwd(kernel, config, CLI)
     expect(before).toMatchObject({ branch: 'main', onTrunk: true })
 
     git(main, 'checkout', '-b', 'feature2', '--quiet')
-    const after = await adoptCwd(kernel, config)
+    const after = await adoptCwd(kernel, config, CLI)
     expect(after.id).not.toBe(before.id)
     expect(after).toMatchObject({ branch: 'feature2', onTrunk: false, cwd: realpathSync(main) })
     // the old record is FINISHED BUSINESS, not a second live record for one directory —
@@ -122,7 +125,7 @@ describe('adoptCwd', () => {
 
     // …and adoption is still idempotent when nothing moved: a third command on `feature2` must not
     // archive-and-mint on every invocation, which would be one workspace record per orc command
-    expect((await adoptCwd(kernel, config)).id).toBe(after.id)
+    expect((await adoptCwd(kernel, config, CLI)).id).toBe(after.id)
     expect((await kernel.listWorkspaces()).map(w => w.id)).toEqual([after.id])
   }, 30_000)
 
@@ -131,7 +134,7 @@ describe('adoptCwd', () => {
     const { main } = tmpGitRepo()
     initializeProject(main, 'p')
     git(main, 'checkout', '--detach', '--quiet')
-    const ws = await adoptCwd(kernel, requireProject(loadConfig(main)))
+    const ws = await adoptCwd(kernel, requireProject(loadConfig(main)), CLI)
     expect(ws).toMatchObject({ kind: WORKSPACE_KIND.checkout, branch: null, onTrunk: false })
   }, 30_000)
 })

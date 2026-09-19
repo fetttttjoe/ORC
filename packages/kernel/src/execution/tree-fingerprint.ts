@@ -2,45 +2,53 @@ import { spawn } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { childEnv } from './child-env'
 
-// "Has the working tree changed?" as ONE cheap value, shared by every consumer that caches against
-// it. HEAD plus the porcelain status covers both halves: a commit moves HEAD, and any tracked or
-// untracked edit moves the status.
-//
-// Two consumers, one spelling on purpose. exec's reuse bracket asks whether an identical command
-// may return its recorded result; the memory health probe asks whether a drift verdict may be
-// reused. Both mean the same thing by "the tree has not moved", and a second copy of this is
-// exactly the duplication that let foldMemory and the Surreal projector answer one question two
-// ways for weeks.
-//
-// COST: two git subprocesses, measured at ~10ms on a 100k-file-history repo — against the 336ms of
-// per-revision `git diff` calls a full drift recomputation costs, which is what makes caching on
-// this worth doing at all.
-//
-// null is NOT a fingerprint. A directory that is not a repo, or a git that failed, yields null, and
-// every consumer must treat null as "cannot cache" rather than as a stable key — with nothing to
-// invalidate against, a hit could serve a result for a tree that has completely changed.
+const NUL = '\u0000'
+const HASH = 'sha256'
 
-const gitStdout = (dir: string, args: readonly string[]): Promise<string | null> =>
+type Consume<T> = { onData: (chunk: Buffer) => void; result: () => T }
+
+const runGit = <T>(dir: string, args: readonly string[], stdin: string, consume: Consume<T>): Promise<T | null> =>
   new Promise(resolve => {
     try {
       const c = spawn('git', ['-C', dir, ...args], { env: childEnv() })
-      let out = ''
-      c.stdout.setEncoding('utf8')
-      c.stdout.on('data', d => { out += d })
+      c.stdout.on('data', consume.onData)
       c.on('error', () => resolve(null))
-      c.on('close', code => resolve(code === 0 ? out : null))
+      c.on('close', code => resolve(code === 0 ? consume.result() : null))
+      c.stdin.on('error', () => {})
+      c.stdin.end(stdin)
     } catch { resolve(null) }
   })
 
-/** A hash of (HEAD, porcelain status), or null when the directory cannot be fingerprinted. */
+const gitText = (dir: string, args: readonly string[], stdin = ''): Promise<string | null> => {
+  const chunks: Buffer[] = []
+  return runGit(dir, args, stdin, { onData: c => { chunks.push(c) }, result: () => Buffer.concat(chunks).toString('utf8') })
+}
+
+// streamed: a binary diff can be tens of megabytes and this runs before every exec
+const gitDigest = (dir: string, args: readonly string[]): Promise<string | null> => {
+  const hash = createHash(HASH)
+  return runGit(dir, args, '', { onData: c => { hash.update(c) }, result: () => hash.digest('hex') })
+}
+
+const untrackedContents = async (dir: string): Promise<string | null> => {
+  const listed = await gitText(dir, ['ls-files', '--others', '--exclude-standard', '-z'])
+  if (listed === null) return null
+  const paths = listed.split(NUL).filter(p => p !== '')
+  // hash-object reads one path per line, so a name holding a newline is tracked by name only
+  const hashable = paths.filter(p => !p.includes('\n'))
+  if (hashable.length === 0) return JSON.stringify([paths, ''])
+  const hashes = await gitText(dir, ['hash-object', '--stdin-paths'], `${hashable.join('\n')}\n`)
+  if (hashes === null) return null
+  return JSON.stringify([paths, hashes])
+}
+
+/** Hash of HEAD, tracked changes and untracked files BY CONTENT; null means "cannot cache". */
 export async function treeFingerprint(dir: string): Promise<string | null> {
-  const [head, status] = await Promise.all([
-    gitStdout(dir, ['rev-parse', 'HEAD']),
-    gitStdout(dir, ['status', '--porcelain']),
+  const [head, tracked, untracked] = await Promise.all([
+    gitText(dir, ['rev-parse', 'HEAD']),
+    gitDigest(dir, ['diff', 'HEAD', '--binary']),
+    untrackedContents(dir),
   ])
-  if (head === null || status === null) return null
-  // JSON-encoded rather than joined on a separator. The pair must hash injectively, and every
-  // separator worth using is a control character: a literal one makes the whole source file
-  // binary to grep, and a search that silently finds nothing is worse than one that fails.
-  return createHash('sha256').update(JSON.stringify([head, status])).digest('hex')
+  if (head === null || tracked === null || untracked === null) return null
+  return createHash(HASH).update(JSON.stringify([head, tracked, untracked])).digest('hex')
 }

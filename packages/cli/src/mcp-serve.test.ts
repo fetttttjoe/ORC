@@ -2,20 +2,31 @@ import { afterAll, describe, expect, it } from 'bun:test'
 import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import { EVENT_KIND, isRecord } from '@orc/contracts'
-import { eventFixture, must } from '@orc/contracts/fixtures'
+import { z } from 'zod'
+import { AUTHOR_SOURCE, Door, EVENT_KIND, ModelsDiscoveredPayload, NO_CHAT, isRecord } from '@orc/contracts'
+import { must } from '@orc/contracts/fixtures'
 import { buildCopilotTools } from '@orc/ui-core'
 import { MEMORY_READ_TOOLS, unavailableMemoryTools } from '@orc/memory'
-import { createTestDb, TEST_PROJECT_ID } from '@orc/kernel/test-helpers'
+import { openStorage } from '@orc/kernel'
+import { createTestDb, testConfig, TEST_PROJECT_ID } from '@orc/kernel/test-helpers'
+import { buildModelDiscovery } from './actions'
 import { buildServeTools, mcpApproveTool } from './mcp-serve'
-import { actionsStub, sessionsOf, sessionsStub } from './test-helpers'
+import { actionsStub, sessionsStub } from './test-helpers'
+
+// every tool this door serves names the MCP door; the tests assert that literal, never a default
+const MCP = NO_CHAT(Door.mcp)
 
 // P7 prerequisite acceptance: under `mcp serve`, stdout carries ONLY JSON-RPC frames — one
 // stray boot print corrupts the channel. This drives a real spawned `orc mcp serve` through
 // initialize → tools/list → tools/call and asserts every stdout line parses as JSON-RPC.
 
 const dbs: Array<{ drop: () => Promise<void> }> = []
-afterAll(async () => { for (const d of dbs) await d.drop() })
+// stand-in provider daemons: stopped with their connections, or a pending fetch outlives the file
+const servers: Array<{ stop: (closeActive?: boolean) => Promise<void> }> = []
+afterAll(async () => {
+  for (const s of servers) await s.stop(true)
+  for (const d of dbs) await d.drop()
+})
 
 const frame = (o: unknown): string => JSON.stringify(o) + '\n'
 
@@ -163,7 +174,7 @@ describe('orc mcp serve (stdio, read slice)', () => {
     // listModels is passed because buildServeTools always wires it (from the models view), so the
     // copilot set it composes carries available_models; omitting it here would compare the served
     // surface against a set the door never builds.
-    const copilot = Object.keys(buildCopilotTools({ sessions, actions, projectId: 'p1', listModels: async () => [] }))
+    const copilot = Object.keys(buildCopilotTools({ sessions, actions, projectId: 'p1', origin: MCP, listModels: async () => [] }))
     expect(new Set(served)).toEqual(new Set([...copilot, ...MEMORY_READ_TOOLS, 'approve']))
     expect(served).not.toContain('memory_write')
     // nor memory_verify: verification is an AUDITOR's declaration about a step's own work, gated to
@@ -172,33 +183,69 @@ describe('orc mcp serve (stdio, read slice)', () => {
     expect(served).not.toContain('memory_verify')
   })
 
-  // The serve door drives agents over MCP that must never invent a model ref (the copilot
-  // system prompt says as much) — available_models is the copilot tool's own catalog lookup,
-  // answered from the models view exactly as the graph-ui door already does.
-  it('available_models is served and returns the project\'s live model catalog', async () => {
-    const refs = ['anthropic/claude-opus-4', 'openai/gpt-5']
-    const sessions = sessionsOf([
-      eventFixture({ seq: 1, taskId: null, kind: EVENT_KIND.models_discovered, payload: { providerId: 'anthropic', models: ['claude-opus-4'] } }),
-      eventFixture({ seq: 2, taskId: null, kind: EVENT_KIND.models_discovered, payload: { providerId: 'openai', models: ['gpt-5'] } }),
-    ])
-    const actions = actionsStub()
-    const memoryTools = unavailableMemoryTools('parity-check')
-    const served = buildServeTools({ sessions, projectId: 'p1', memoryTools, actions, autonomy: 'gated' })
-    const tool = must(served.find(t => t.name === 'available_models'), 'available_models tool')
+  // The serve door drives agents over MCP that must never invent a model ref (the copilot system
+  // prompt says as much). available_models goes through the SAME flagless listModels core as the
+  // web door: it DISCOVERS, because an agent handed { refs: [] } cannot name a model at all.
+  // A stand-in ollama daemon gives discovery one provider that certainly answers, so the
+  // assertions are about the door and not about what the machine running the test can reach.
+  async function modelDoor(seed: Array<{ providerId: string; models: string[] }>, live = ['llama3.2:3b']) {
+    const db = await createTestDb()
+    dbs.push(db)
+    const storage = await openStorage(db.url, { projectId: TEST_PROJECT_ID })
+    db.onClose(() => storage.close())
+    const log = storage.events
+    for (const payload of seed)
+      await log.append({ ...MCP, taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.models_discovered, payload })
+    const daemon = Bun.serve({ port: 0, fetch: () => Response.json({ models: live.map(name => ({ name })) }) })
+    servers.push(daemon)
+    const config = testConfig(db.url, { ollamaBaseUrl: `http://localhost:${daemon.port}` })
+    const discovery = buildModelDiscovery(config, { log, origin: MCP }, 2000)
+    const actions = actionsStub({ listModels: discovery.listModels })
+    const served = buildServeTools({
+      sessions: sessionsStub(), projectId: 'p1', memoryTools: unavailableMemoryTools('model-door'), actions, autonomy: 'gated',
+    })
+    return { log, tool: must(served.find(t => t.name === 'available_models'), 'available_models tool') }
+  }
+
+  // the tool's output crosses no schema of its own; parsed here rather than narrowed by hand
+  const refsOf = (output: unknown): string[] => z.object({ refs: z.array(z.string()) }).parse(output).refs
+  const catalogFor = async (log: Awaited<ReturnType<typeof modelDoor>>['log'], providerId: string) => {
+    const events = await log.after(0, [EVENT_KIND.models_discovered])
+    return events.filter(e => ModelsDiscoveredPayload.parse(e.payload).providerId === providerId)
+  }
+
+  it('available_models on a log with NO models_discovered still names ids, and appends a catalog carrying Door.mcp', async () => {
+    const { log, tool } = await modelDoor([])
     const result = await tool.execute({}, undefined)
     expect(result.isError).toBe(false)
-    expect(result.output).toEqual({ refs })
+    // the defect: folding an empty log answered [], and an agent that asked for models could name none
+    expect(refsOf(result.output)).toContain('ollama/llama3.2:3b')
+    const appended = await catalogFor(log, 'ollama')
+    expect(appended).toHaveLength(1)
+    expect(must(appended[0], 'appended ollama catalog').door).toBe(Door.mcp)
+  })
+
+  it('available_models discovers over a stale seeded catalog rather than serving it', async () => {
+    const { log, tool } = await modelDoor([{ providerId: 'ollama', models: ['retired-model'] }], ['llama3.2:3b'])
+    const refs = refsOf((await tool.execute({}, undefined)).output)
+    expect(refs).toContain('ollama/llama3.2:3b')
+    expect(refs).not.toContain('ollama/retired-model')
+    // append-on-change: the fresh catalog is recorded beside the stale one, and it names this door
+    const appended = await catalogFor(log, 'ollama')
+    expect(appended).toHaveLength(2)
+    expect(must(appended[1], 'fresh ollama catalog').door).toBe(Door.mcp)
   })
 
   it('mcpApproveTool: gated refuses without touching actions; full approves attributed as mcp', async () => {
     const calls: unknown[] = []
-    const actions = actionsStub({ approve: async (id, v, by) => { calls.push([id, v, by]); return { version: v ?? 1 } } })
+    const actions = actionsStub({ approve: async (id, opts, origin) => { calls.push([id, opts, origin]); return { version: opts.version ?? 1 } } })
     const gated = await mcpApproveTool(actions, 'gated').execute({ taskId: 't1' }, undefined)
     expect(gated.isError).toBe(true)
     expect(calls).toHaveLength(0) // the gate is structural, not a failed call
     const full = await mcpApproveTool(actions, 'full').execute({ taskId: 't1', version: 2 }, undefined)
     expect(full.isError).toBe(false)
-    expect(calls).toEqual([['t1', 2, 'mcp']])
+    // the door names its origin (Door.mcp) and its attribution (approvedBy) — identity, not authority
+    expect(calls).toEqual([['t1', { version: 2, approvedBy: AUTHOR_SOURCE.mcp }, MCP]])
   })
 
   // The input crosses a trust boundary: an external MCP client can send ANY shape, and the
@@ -206,7 +253,7 @@ describe('orc mcp serve (stdio, read slice)', () => {
   // non-string taskId ride straight into actions.approve.
   it('mcpApproveTool: malformed client input is a clean error, never a call into actions', async () => {
     const calls: unknown[] = []
-    const actions = actionsStub({ approve: async (id, v, by) => { calls.push([id, v, by]); return { version: v ?? 1 } } })
+    const actions = actionsStub({ approve: async (id, opts, origin) => { calls.push([id, opts, origin]); return { version: opts.version ?? 1 } } })
     const tool = mcpApproveTool(actions, 'full')
     for (const bad of [undefined, {}, { taskId: 42 }, { taskId: '' }, { taskId: 't1', version: 0 }, { taskId: 't1', version: 1.5 }, { taskId: 't1', version: 'two' }]) {
       const r = await tool.execute(bad, undefined)
@@ -222,7 +269,7 @@ describe('orc mcp serve (stdio, read slice)', () => {
   // safeParsed against the tool's own zod inputSchema.
   it('bridged mutating tool (run): malformed client input is a clean error, never a call into actions', async () => {
     const calls: unknown[] = []
-    const actions = actionsStub({ run: async (id, cwd) => { calls.push([id, cwd]); return { requested: true } } })
+    const actions = actionsStub({ run: async (id, cwd, origin) => { calls.push([id, cwd, origin]); return { requested: true, since: 0 } } })
     const sessions = sessionsStub()
     const memoryTools = unavailableMemoryTools('parity-check')
     const served = buildServeTools({ sessions, projectId: 'p1', memoryTools, actions, autonomy: 'gated' })

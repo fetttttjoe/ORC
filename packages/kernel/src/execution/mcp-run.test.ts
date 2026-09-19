@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { EVENT_KIND, PAYLOAD_SCHEMAS, ROLE_SKILL } from '@orc/contracts'
+import { Door, EVENT_KIND, NO_CHAT, PAYLOAD_SCHEMAS, ROLE_SKILL, type Origin } from '@orc/contracts'
 import { draftFixture, must, stepFixture } from '@orc/contracts/fixtures'
 import { createMcpHub } from '@orc/mcp-client'
 import { apiLoopExecutor } from '@orc/executor-api-loop'
@@ -16,6 +16,8 @@ import { SkillIndex } from '../plugins/skills'
 import { createDbosPort, type DbosPort } from './dbos-port'
 
 const FIXTURE = fileURLToPath(new URL('../../../../plugins/mcp-client/src/fixture-server.ts', import.meta.url))
+
+const CLI: Origin = NO_CHAT(Door.cli)
 
 describe('MCP + skills through a durable run (integration)', () => {
   let kernel: Kernel
@@ -32,7 +34,7 @@ describe('MCP + skills through a durable run (integration)', () => {
     log = storage.events
     kernel = new Kernel(log)
     // a task must name a workspace the fold has seen — one seeded record, then tasks as before
-    await seedTestWorkspace(log)
+    await seedTestWorkspace(log, CLI)
 
     const skillsRoot = mkdtempSync(path.join(tmpdir(), 'orc-mcp-run-'))
     mkdirSync(path.join(skillsRoot, 'haiku-style'), { recursive: true })
@@ -80,11 +82,11 @@ describe('MCP + skills through a durable run (integration)', () => {
   afterAll(async () => { await teardown() })
 
   it('runs to done with skill_loaded + real MCP tool events, and replay holds', async () => {
-    const t = await kernel.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'mcp run', spec: 'echo ping' })
+    const t = await kernel.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'mcp run', spec: 'echo ping' }, CLI)
     await kernel.proposePlan(t.id, draftFixture([stepFixture({
       modelRef: 'fake/m', skillRefs: ['haiku-style'], toolRefs: ['fixture/echo'],
-    })]))
-    await kernel.approvePlan(t.id)
+    })]), CLI)
+    await kernel.approvePlan(t.id, undefined, undefined, CLI)
 
     const handle = await port.startRun(t.id)
     expect(await handle.wait()).toBe('done')

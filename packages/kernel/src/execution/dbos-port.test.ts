@@ -9,8 +9,8 @@ import pg from 'pg'
 import { drizzle } from 'drizzle-orm/node-postgres'
 import { events } from '../schema'
 import {
-  ApprovalPolicy, EVENT_KIND, FAILURE_CLASS, FINISH_STEP_ID, PAYLOAD_SCHEMAS, SIGNAL_OUTCOME, STEP_ID, STEP_ROLE, TASK_STATUS,
-  type AgentExecutor, type EventDraft, type ExecutorContext, type PlanDraft,
+  ApprovalPolicy, ChatOpenedPayload, Door, EVENT_KIND, FAILURE_CLASS, FINISH_STEP_ID, NO_CHAT, PAYLOAD_SCHEMAS, SIGNAL_OUTCOME, STEP_ID, STEP_ROLE, TASK_STATUS,
+  type AgentExecutor, type EventDraft, type EventRecord, type ExecutorContext, type Origin, type PlanDraft,
   type SplitResult, type UnifiedEvent,
 } from '@orc/contracts'
 import type { GroundingNoteRef, GroundingSource } from './strategies/grounding-freshness'
@@ -19,6 +19,11 @@ import { openStorage, type EventLog } from '../storage'
 import { Kernel } from '../kernel'
 import { createTestDb, fakeProvider, seedTestWorkspace, TEST_PROJECT_ID, TEST_WORKSPACE_ID, testConfig, waitFor } from '../test-helpers'
 import { appendRunInit, createDbosPort, runQueueOptions, type DbosPort } from './dbos-port'
+import { runOrigin } from './run-chat'
+
+// The door the supervisor's own test setup knocks on; the run's own events carry the run chat
+// instead, which is what the chat assertions in this file read.
+const CLI: Origin = NO_CHAT(Door.cli)
 
 // One DBOS runtime per process: registerWorkflow throws on duplicate names, so the whole file
 // shares ONE port + DB. Per-task scripting isolates the scenarios (behavior keyed by taskId,
@@ -175,7 +180,7 @@ describe('DBOS execution port (integration)', () => {
     }
     kernel = new Kernel(log)
     // a task must name a workspace the fold has seen — one seeded record, then tasks as before
-    await seedTestWorkspace(log)
+    await seedTestWorkspace(log, CLI)
     // isolated dir: bare runs now default their workspace to config.dir — tests that write
     // real files (declared outputs) must land in a scratch dir, never the actual repo
     projectDir = mkdtempSync(path.join(tmpdir(), 'orc-project-'))
@@ -227,10 +232,10 @@ describe('DBOS execution port (integration)', () => {
   afterAll(async () => { await teardown() })
 
   async function approvedTask(behavior: Record<string, 'ok' | 'fail'> = {}, draft: PlanDraft = twoStepDraft()) {
-    const t = await kernel.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'exec test', spec: 'run the dag' })
+    const t = await kernel.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'exec test', spec: 'run the dag' }, CLI)
     behaviors.set(t.id, behavior)
-    await kernel.proposePlan(t.id, draft)
-    await kernel.approvePlan(t.id)
+    await kernel.proposePlan(t.id, draft, CLI)
+    await kernel.approvePlan(t.id, undefined, undefined, CLI)
     return t
   }
 
@@ -255,6 +260,72 @@ describe('DBOS execution port (integration)', () => {
     // event ordering: run_started before any step_started; a completes before b starts
     const kinds = (await kernel.eventsFor(t.id)).map(e => e.kind)
     expect(kinds.indexOf(EVENT_KIND.run_started)).toBeLessThan(kinds.indexOf(EVENT_KIND.step_started))
+  }, 15_000)
+
+  // A run IS a chat. Asserted on the committed log, not on the port's arguments: an event that
+  // named another chat (or lost its door) would split one run's transcript in two forever.
+  it('a run is one chat: chat_opened once before run_started, and every event of the run carries the run id under the supervisor door', async () => {
+    const t = await approvedTask()
+    const handle = await port.startRun(t.id)
+    expect(await handle.wait()).toBe('done')
+
+    const events = await kernel.eventsFor(t.id)
+    const opened = events.filter(e => e.kind === EVENT_KIND.chat_opened)
+    expect(opened).toHaveLength(1)
+    const open = must(opened[0], 'chat_opened event')
+    expect(ChatOpenedPayload.parse(open.payload).chatId).toBe(handle.workflowId)
+    // nothing may claim to be inside a chat that has not been opened yet
+    expect(open.seq).toBeLessThan(must(events.find(e => e.kind === EVENT_KIND.run_started), 'run_started event').seq)
+
+    const inRun = events.filter(e => e.seq >= open.seq)
+    const stray = (e: EventRecord): string => `${e.kind}@${e.chatId ?? 'null'}/${e.door}`
+    expect(inRun.filter(e => e.chatId !== handle.workflowId).map(stray)).toEqual([])
+    expect(inRun.filter(e => e.door !== Door.supervisor).map(stray)).toEqual([])
+  }, 15_000)
+
+  // A retry gets a new workflow id, so it is a new interaction: folding both runs into one chat
+  // would make the transcript of the failed attempt and its repair indistinguishable.
+  it('a retry opens a SECOND chat, named by the retry workflow id', async () => {
+    const behavior: Record<string, 'ok' | 'fail'> = { a: 'ok', b: 'fail' }
+    const t = await approvedTask(behavior)
+    const first = await port.startRun(t.id)
+    expect(await first.wait()).toBe('blocked')
+
+    behavior.b = 'ok'
+    const retry = await port.retry(t.id)
+    expect(await retry.wait()).toBe('done')
+
+    const chats = (await kernel.eventsFor(t.id))
+      .filter(e => e.kind === EVENT_KIND.chat_opened)
+      .map(e => ChatOpenedPayload.parse(e.payload).chatId)
+    expect(chats).toEqual([first.workflowId, retry.workflowId])
+    expect(must(chats[1], 'retry chat id').endsWith(':r1')).toBe(true)
+  }, 20_000)
+
+  // The one causation pointer a client never supplies: a split child is asked for by its parent's
+  // step, so its chat answers to the split_proposed on the PARENT's stream, by {chatId, seq}.
+  it("a split child's run chat names the parent run's split_proposed as its parent", async () => {
+    const t = await approvedTask()
+    // a chatless split names no parent (runChatParent skips a split_proposed with a null chatId),
+    // so this split has to come from a real chat for the pointer to exist at all
+    const splitterChatId = 'chat-split-parent'
+    const splitter: Origin = { chatId: splitterChatId, door: Door.web }
+    const split = await kernel.proposeSplit({
+      parentTaskId: t.id, stepId: 'a', runToken: `step:${t.id}:a:a1`, toolCallId: 'call_chat',
+      title: 'child', spec: 'child work',
+      plan: { steps: [{ id: 'w1', role: 'worker', title: 'w', instructions: 'do', dependsOn: [], skillRefs: [], toolRefs: [] }] },
+      parentStep: { executorRef: 'api-loop', modelRef: 'fake/m', maxIterations: 5 },
+      policy: ApprovalPolicy.parse({}), maxDepth: 3,
+    }, splitter)
+    const proposed = must((await kernel.eventsFor(t.id)).find(e => e.kind === EVENT_KIND.split_proposed), 'split proposed event')
+
+    const workflowId = `run:${split.childTaskId}:v1`
+    await log.transaction(tx => appendRunInit(
+      tx, { taskId: split.childTaskId, planVersion: 1, retryIndex: 0, cwd: null, origin: runOrigin(workflowId) }, workflowId))
+
+    const opened = must((await kernel.eventsFor(split.childTaskId)).find(e => e.kind === EVENT_KIND.chat_opened), 'child chat_opened event')
+    expect(opened.chatId).toBe(workflowId)
+    expect(ChatOpenedPayload.parse(opened.payload).parent).toEqual({ chatId: splitterChatId, seq: proposed.seq })
   }, 15_000)
 
   it('hands every step surface the workspace its OWN task names, so an agent write is stamped from the task, not the supervisor cwd', async () => {
@@ -337,10 +408,10 @@ describe('DBOS execution port (integration)', () => {
     const repaired = await kernel.editPlan(t.id, draftFixture([
       stepFixture({ id: 'a', title: 'a', instructions: 'first' }),
       stepFixture({ id: 'b', title: 'b', instructions: 'second', dependsOn: ['a'], skillRefs: ['repaired-skill'] }),
-    ]))
+    ]), CLI)
     expect(repaired.version).toBe(2)
     expect((await kernel.getTask(t.id))?.status).toBe(TASK_STATUS.awaiting_approval)
-    await kernel.approvePlan(t.id)
+    await kernel.approvePlan(t.id, undefined, undefined, CLI)
     expect((await kernel.state()).plans.get(t.id)?.approvedVersion).toBe(2)
 
     behavior.b = 'ok'
@@ -367,7 +438,7 @@ describe('DBOS execution port (integration)', () => {
     // fabricate a pre-fix bare retry: run_started with cwd null (only records the run in fold)
     await log.transaction(async tx => {
       await tx.append({
-        taskId: t.id, stepId: null, runToken: null, kind: EVENT_KIND.run_started,
+        ...runOrigin(`run:${t.id}:v1:r1`), taskId: t.id, stepId: null, runToken: null, kind: EVENT_KIND.run_started,
         payload: { taskId: t.id, planVersion: 1, retryIndex: 1, workflowId: `run:${t.id}:v1:r1`, cwd: null },
       })
     })
@@ -414,12 +485,15 @@ describe('DBOS execution port (integration)', () => {
   // task. The in-transaction status re-check makes the second call a clean no-op instead.
   it('D2: re-running init (the resume replay window) is a no-op, not an idempotency conflict', async () => {
     const t = await approvedTask()
-    const args = { taskId: t.id, planVersion: 1, retryIndex: 0, cwd: null }
     const workflowId = `run:${t.id}:v1`
+    const args = { taskId: t.id, planVersion: 1, retryIndex: 0, cwd: null, origin: runOrigin(workflowId) }
     await log.transaction(tx => appendRunInit(tx, args, workflowId))
     await log.transaction(tx => appendRunInit(tx, args, workflowId)) // = DBOS replaying init fn() — must not throw
     const events = await kernel.eventsFor(t.id)
     expect(events.filter(e => e.kind === EVENT_KIND.run_started)).toHaveLength(1)
+    // the replay must not re-open the run's chat: chat_opened is keyed by the chat id, so the
+    // second init finds its open committed and appends nothing
+    expect(events.filter(e => e.kind === EVENT_KIND.chat_opened)).toHaveLength(1)
     const toStatus = z.object({ to: z.string() })
     const running = events.filter(e => e.kind === EVENT_KIND.task_status_changed && toStatus.parse(e.payload).to === TASK_STATUS.running)
     expect(running).toHaveLength(1)
@@ -475,14 +549,14 @@ describe('DBOS execution port (integration)', () => {
   })
 
   it('refuses to run an unapproved task', async () => {
-    const t = await kernel.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'nope' })
+    const t = await kernel.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'nope' }, CLI)
     await expect(port.startRun(t.id)).rejects.toThrow(/approve/)
   })
 
   it('fails the step (no wedge) when modelRef is unresolvable', async () => {
-    const t = await kernel.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'bad model', spec: 'x' })
-    await kernel.proposePlan(t.id, draftFixture([stepFixture({ modelRef: 'nope/x' })]))
-    await kernel.approvePlan(t.id)
+    const t = await kernel.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'bad model', spec: 'x' }, CLI)
+    await kernel.proposePlan(t.id, draftFixture([stepFixture({ modelRef: 'nope/x' })]), CLI)
+    await kernel.approvePlan(t.id, undefined, undefined, CLI)
     expect(await (await port.startRun(t.id)).wait()).toBe('blocked')
     expect((await kernel.getTask(t.id))?.status).toBe(TASK_STATUS.blocked)
     const failure = (await kernel.state()).steps.get(t.id)?.get('s1')?.failure
@@ -494,7 +568,7 @@ describe('DBOS execution port (integration)', () => {
     const t = await approvedTask()
     expect(await (await port.startRun(t.id)).wait()).toBe('done')
     const before = (await kernel.eventsFor(t.id)).length
-    await expect(port.cancelRun(t.id)).rejects.toThrow(/running or blocked/)
+    await expect(port.cancelRun(t.id, CLI)).rejects.toThrow(/running or blocked/)
     expect((await kernel.eventsFor(t.id)).length).toBe(before)
   }, 15_000) // two steps plus the appended finish step no longer fit bun's default 5s
 
@@ -523,7 +597,7 @@ describe('DBOS execution port (integration)', () => {
       if (!(await log.byTask(t.id)).some(e => e.kind === EVENT_KIND.step_completed && e.stepId === FINISH_STEP_ID)) return
       injected = true // set BEFORE the append: log.append re-enters this same hook
       await log.append({
-        taskId: t.id, stepId: null, runToken: null, kind: EVENT_KIND.task_status_changed,
+        ...CLI, taskId: t.id, stepId: null, runToken: null, kind: EVENT_KIND.task_status_changed,
         payload: { taskId: t.id, from: TASK_STATUS.running, to: TASK_STATUS.cancelled },
       })
     }
@@ -566,12 +640,15 @@ describe('DBOS execution port (integration)', () => {
       plan: { steps: [{ id: 'w1', role: 'worker', title: 'w', instructions: 'do', dependsOn: [], skillRefs: [], toolRefs: [] }] },
       parentStep: { executorRef: 'api-loop', modelRef: 'fake/m', maxIterations: 5 },
       policy: ApprovalPolicy.parse({}), maxDepth: 3,
-    })
+    }, CLI)
     expect(split.gated).toBe(true)
     expect((await kernel.getTask(split.childTaskId))?.status).toBe(TASK_STATUS.awaiting_approval)
 
-    await port.cancelRun(t.id)
+    await port.cancelRun(t.id, CLI)
 
+    // the canceller's door, not the port's: cancelRun stamps the origin it was handed.
+    const cancelled = (await kernel.eventsFor(split.childTaskId)).filter(e => e.kind === EVENT_KIND.task_status_changed)
+    expect(cancelled.at(-1)?.door).toBe(Door.cli)
     expect((await kernel.getTask(t.id))?.status).toBe(TASK_STATUS.cancelled)
     expect((await kernel.getTask(split.childTaskId))?.status).toBe(TASK_STATUS.cancelled)
 
@@ -634,7 +711,7 @@ describe('DBOS execution port (integration)', () => {
   })
 
   it('a pre-M3 plan with no toolRefs in the log replays to done (no TypeError on undefined.length)', async () => {
-    const t = await kernel.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'legacy plan', spec: 'x' })
+    const t = await kernel.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'legacy plan', spec: 'x' }, CLI)
     // Kernel.proposePlan and even a direct EventLog.append re-parse payloads through the Plan
     // zod schema, which would restore toolRefs via its .default([]) — masking the bug. The only
     // honest way to reproduce a row that predates the field is to write it straight into the
@@ -647,18 +724,18 @@ describe('DBOS execution port (integration)', () => {
     try {
       const raw = drizzle(pool)
       await raw.insert(events).values({
-        projectId: TEST_PROJECT_ID, taskId: t.id, kind: EVENT_KIND.plan_proposed,
+        projectId: TEST_PROJECT_ID, chatId: CLI.chatId, door: CLI.door, taskId: t.id, kind: EVENT_KIND.plan_proposed,
         payload: { plan: legacyPlan },
       })
       await raw.insert(events).values({
-        projectId: TEST_PROJECT_ID, taskId: t.id, kind: EVENT_KIND.task_status_changed,
+        projectId: TEST_PROJECT_ID, chatId: CLI.chatId, door: CLI.door, taskId: t.id, kind: EVENT_KIND.task_status_changed,
         payload: { taskId: t.id, from: TASK_STATUS.draft, to: TASK_STATUS.awaiting_approval },
       })
     } finally {
       await pool.end()
     }
 
-    await kernel.approvePlan(t.id)
+    await kernel.approvePlan(t.id, undefined, undefined, CLI)
     expect(await (await port.startRun(t.id)).wait()).toBe('done')
     expect((await kernel.eventsFor(t.id)).some(e => e.kind === EVENT_KIND.step_failed)).toBe(false)
   })

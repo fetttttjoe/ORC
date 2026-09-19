@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'bun:test'
-import { EventInput, EventKind, PAYLOAD_SCHEMAS } from './events'
+import { CommitRecordedPayload, EventInput, EventKind, PAYLOAD_SCHEMAS } from './events'
 import { EVENT_KIND } from './event-kinds'
-import { TEST_WORKSPACE_ID } from './fixtures'
+import { ChatKind } from './chat'
+import { Door } from './origin'
+import { authorFixture, eventFixture, TEST_WORKSPACE_ID } from './fixtures'
 
 describe('events', () => {
   it('has a payload schema for every kind', () => {
@@ -11,11 +13,55 @@ describe('events', () => {
   })
   it('parses a valid input envelope', () => {
     const input: EventInput = {
-      taskId: 't1', stepId: null, runToken: null,
+      taskId: 't1', stepId: null, runToken: null, chatId: null, door: Door.cli,
       kind: EVENT_KIND.task_status_changed,
       payload: { taskId: 't1', from: 'draft', to: 'awaiting_approval' },
     }
     expect(EventInput.parse(input)).toEqual({ ...input, idempotencyKey: null })
+  })
+  it('requires chatId as a key — unlike idempotencyKey it has no default', () => {
+    const base = {
+      taskId: 't1', stepId: null, runToken: null, door: Door.cli,
+      kind: EVENT_KIND.task_status_changed,
+      payload: { taskId: 't1', from: 'draft', to: 'awaiting_approval' },
+    }
+    expect(EventInput.safeParse(base).success).toBe(false)
+    expect(EventInput.parse({ ...base, chatId: null }).chatId).toBeNull()
+    expect(EventInput.parse({ ...base, chatId: 'c1' }).chatId).toBe('c1')
+    expect(EventInput.safeParse({ ...base, chatId: '' }).success).toBe(false)
+  })
+  it('requires door as a key — where a call entered is a per-event fact, never defaulted', () => {
+    const base = {
+      taskId: 't1', stepId: null, runToken: null, chatId: null,
+      kind: EVENT_KIND.task_status_changed,
+      payload: { taskId: 't1', from: 'draft', to: 'awaiting_approval' },
+    }
+    expect(() => EventInput.parse(base)).toThrow()
+    expect(() => EventInput.parse({ ...base, door: 'terminal' })).toThrow()
+  })
+  it('keeps the door of a chatless event — a null chat is still a known entry point', () => {
+    const parsed = EventInput.parse({
+      taskId: null, stepId: null, runToken: null, chatId: null, door: Door.hook,
+      kind: EVENT_KIND.commit_recorded,
+      payload: { sha: 'abc123', paths: [], workspaceId: null },
+    })
+    expect(parsed.chatId).toBeNull()
+    expect(parsed.door).toBe(Door.hook)
+  })
+  it('eventFixture stamps a door, so a stored envelope always names one', () => {
+    expect(eventFixture().door).toBe(Door.cli)
+  })
+  it('chat lifecycle payloads validate', () => {
+    expect(PAYLOAD_SCHEMAS[EVENT_KIND.chat_opened].safeParse({
+      chatId: 'run:t1:v1', kind: ChatKind.run, workspaceId: TEST_WORKSPACE_ID, taskId: 't1',
+      title: 'run t1', parent: { chatId: 'copilot:1', seq: 3 }, externalRef: null,
+    }).success).toBe(true)
+  })
+  // A chat has one lifecycle event. A second, writer-declared ending would disagree with the task
+  // status the readers already derive an end from, and nothing would say which of the two is right.
+  it('has no chat_closed kind and no payload row for one', () => {
+    expect(EventKind.options).not.toContain('chat_closed')
+    expect(Object.keys(PAYLOAD_SCHEMAS)).not.toContain('chat_closed')
   })
   it('payload schemas reject wrong shapes', () => {
     expect(() => PAYLOAD_SCHEMAS.plan_approved.parse({})).toThrow()
@@ -29,7 +75,7 @@ describe('events', () => {
     expect(() => PAYLOAD_SCHEMAS.skill_loaded.parse({ ...good, hash: '' })).toThrow()
   })
   it('memory_deleted rejects a path-unsafe id or scope (no poison event)', () => {
-    const good = { id: 'auth', scope: 'project', author: { source: 'cli', workspaceId: TEST_WORKSPACE_ID } }
+    const good = { id: 'auth', scope: 'project', author: authorFixture() }
     expect(() => PAYLOAD_SCHEMAS.memory_deleted.parse(good)).not.toThrow()
     expect(() => PAYLOAD_SCHEMAS.memory_deleted.parse({ ...good, scope: '../x' })).toThrow()
     expect(() => PAYLOAD_SCHEMAS.memory_deleted.parse({ ...good, id: '../x' })).toThrow()
@@ -38,13 +84,16 @@ describe('events', () => {
     const ok = PAYLOAD_SCHEMAS.copilot_exchange.safeParse({
       user: 'run it', assistant: 'which of the two runnable tasks?', modelRef: 'anthropic/x',
       toolCalls: [{ toolName: 'project_status', summary: '{}' }],
+      taskId: null, workspaceId: TEST_WORKSPACE_ID,
     })
     expect(ok.success).toBe(true)
-    expect(PAYLOAD_SCHEMAS.copilot_exchange.safeParse({ user: 'x', assistant: 'y', modelRef: '', toolCalls: [] }).success).toBe(false)
+    expect(PAYLOAD_SCHEMAS.copilot_exchange.safeParse({
+      user: 'x', assistant: 'y', modelRef: '', toolCalls: [], taskId: null, workspaceId: null,
+    }).success).toBe(false)
   })
 
   it('memory_accessed rejects a path-unsafe id or scope, and an unknown mode', () => {
-    const good = { id: 'auth', scope: 'project', mode: 'read', author: { source: 'cli', workspaceId: TEST_WORKSPACE_ID } }
+    const good = { id: 'auth', scope: 'project', mode: 'read', author: authorFixture() }
     expect(() => PAYLOAD_SCHEMAS.memory_accessed.parse(good)).not.toThrow()
     expect(() => PAYLOAD_SCHEMAS.memory_accessed.parse({ ...good, mode: 'neighbors' })).not.toThrow()
     expect(() => PAYLOAD_SCHEMAS.memory_accessed.parse({ ...good, scope: '../x' })).toThrow()
@@ -77,7 +126,7 @@ describe('events', () => {
 
   it('idempotency key defaults to null, accepts a non-empty key, rejects empty', () => {
     const base: EventInput = {
-      taskId: 't1', stepId: null, runToken: null,
+      taskId: 't1', stepId: null, runToken: null, chatId: null, door: Door.cli,
       kind: EVENT_KIND.task_status_changed,
       payload: { taskId: 't1', from: 'draft', to: 'awaiting_approval' },
     }
@@ -100,11 +149,15 @@ describe('events', () => {
   })
 
   it('commit_recorded parses valid sha and paths, rejects missing sha or non-hex', () => {
-    const good = { sha: '0123456789abcdef0123456789abcdef01234567', paths: ['file.ts', 'dir/other.md'] }
+    const good = { sha: '0123456789abcdef0123456789abcdef01234567', paths: ['file.ts', 'dir/other.md'], workspaceId: TEST_WORKSPACE_ID }
     expect(PAYLOAD_SCHEMAS.commit_recorded.safeParse(good).success).toBe(true)
-    expect(PAYLOAD_SCHEMAS.commit_recorded.safeParse({ sha: 'abc123', paths: [] }).success).toBe(true) // paths MAY be empty
-    expect(PAYLOAD_SCHEMAS.commit_recorded.safeParse({ paths: ['file.ts'] }).success).toBe(false) // missing sha
-    expect(PAYLOAD_SCHEMAS.commit_recorded.safeParse({ sha: 'not-hex!', paths: [] }).success).toBe(false) // non-hex sha
-    expect(PAYLOAD_SCHEMAS.commit_recorded.safeParse({ sha: '', paths: [] }).success).toBe(false) // empty sha
+    expect(PAYLOAD_SCHEMAS.commit_recorded.safeParse({ sha: 'abc123', paths: [], workspaceId: null }).success).toBe(true) // paths MAY be empty
+    expect(PAYLOAD_SCHEMAS.commit_recorded.safeParse({ paths: ['file.ts'], workspaceId: null }).success).toBe(false) // missing sha
+    expect(PAYLOAD_SCHEMAS.commit_recorded.safeParse({ sha: 'not-hex!', paths: [], workspaceId: null }).success).toBe(false) // non-hex sha
+    expect(PAYLOAD_SCHEMAS.commit_recorded.safeParse({ sha: '', paths: [], workspaceId: null }).success).toBe(false) // empty sha
+  })
+
+  it('commit_recorded requires the workspace key — a commit is attributed to one checkout', () => {
+    expect(CommitRecordedPayload.safeParse({ sha: 'abc123', paths: [] }).success).toBe(false)
   })
 })
