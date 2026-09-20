@@ -1,8 +1,6 @@
-import { AUTHOR_SOURCE, AUTO_HEAL_MODE, Door, errorMessage, HOOK_NAME, NO_CHAT, NOTE_TIER, ROLE_SKILL, TERMINAL_TASK_STATUS, type AgentExecutor, type Analyzer, type MemoryAuthor, type ModelProvider } from '@orc/contracts'
+import { AUTHOR_SOURCE, AUTO_HEAL_MODE, Door, errorMessage, HOOK_NAME, NO_CHAT, NOTE_TIER, ROLE_SKILL, TERMINAL_TASK_STATUS, type AgentExecutor, type Analyzer, type MemoryAuthor } from '@orc/contracts'
 import { apiLoopExecutor } from '@orc/executor-api-loop'
-import { createAnthropicProvider } from '@orc/provider-anthropic'
-import { createOpenAIProvider } from '@orc/provider-openai'
-import { createOllamaProvider } from '@orc/provider-ollama'
+import { configuredProviders } from './providers'
 import { agentAnalyzer } from '@orc/analyzer-agent'
 import { createMcpHub, type McpHub } from '@orc/mcp-client'
 import { corpusDrift, CONSOLIDATE_EXECUTOR, createDriftProbe, createMemory, createMemoryLifecycle, createGroundingSource, decisionDoor, finishTools, memoryVerifyTool, notesCiting, restampToHead, unavailableStepMemory, memoryRoleFor, type BindStep, type MemoryLifecycle } from '@orc/memory'
@@ -24,11 +22,7 @@ const AUTO_HEAL_EXECUTOR = 'auto-heal'
 const SUPERVISOR_ORIGIN = NO_CHAT(Door.supervisor)
 
 export function seedRegistries(config = loadConfig()) {
-  const providers = new Map<string, ModelProvider<unknown>>([
-    ['anthropic', createAnthropicProvider(config.costOverrides['anthropic'] ?? {})],
-    ['openai', createOpenAIProvider(config.costOverrides['openai'] ?? {})],
-    ['ollama', createOllamaProvider({ baseUrl: config.ollamaBaseUrl, costOverrides: config.costOverrides['ollama'] ?? {} })],
-  ])
+  const providers = configuredProviders(config)
   const executors = new Map<string, AgentExecutor<unknown>>([['api-loop', apiLoopExecutor()]])
   // The config-driven iteration budget is applied by createGroundedTask, to BOTH template steps —
   // wrapping only the analyzer here left the plan step (and every subplan that inherits it) at 30.

@@ -8,6 +8,7 @@
   "dependencies": {
     "@ai-sdk/openai": "^4.0.15",
     "@orc/contracts": "workspace:*",
-    "ai": "^7.0.30"
+    "ai": "^7.0.30",
+    "zod": "^4.4.3"
   }
 }

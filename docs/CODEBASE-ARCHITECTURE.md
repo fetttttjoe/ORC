@@ -57,7 +57,7 @@ auto-migrating it: the log's shape is a deliberate act, never a boot side effect
 | `memory` | The `MemoryStore` + `EmbeddingProvider`-consuming knowledge graph: SurrealDB projection, retrieval fusion, topic clustering, sweeps. |
 | `provider-anthropic` | `ModelProvider` over `@ai-sdk/anthropic`, with OAuth + prompt-caching fetch wrappers. |
 | `provider-ollama` | `ModelProvider` over ollama (free-by-default costs) + the sole `EmbeddingProvider` implementation. |
-| `provider-openai` | `ModelProvider` over `@ai-sdk/openai` (cost-overrides only, no custom fetch). |
+| `provider-openai` | `ModelProvider` over `@ai-sdk/openai` for any OpenAI-compatible endpoint: configurable base URL, auth (API key, Codex ChatGPT login, none), API flavour and model discovery, behind its own fetch transport. |
 
 ---
 
@@ -783,10 +783,12 @@ Each is a thin factory implementing `ModelProvider<LanguageModel>` over one `@ai
 
 **`src/cache.ts`**: `cachingFetch(baseFetch)` (parses the body, calls `markCacheBreakpoints(json)`, re-serializes, drops `content-length`); `markCacheBreakpoints(json)` sets `cache_control ??= {type: 'ephemeral'}` on **the last system block** and **the last content block of the last message** (2 of Anthropic's 4 breakpoints) so each iteration is a cache *read* of the shared prefix.
 
-##### `provider-openai/src/index.ts`
+##### `provider-openai/src/`
 
-- **`createOpenAIProvider(costOverrides = {})`** — **`costs: {...costOverrides}` only** — no built-in price table; `costUSD` stays `null`/estimated until an operator sets `costOverrides.openai`. `languageModel: modelId => createOpenAI({})(modelId)` (API key from `OPENAI_API_KEY`, **no custom fetch wrapper**).
-- **`listOpenAIModels(fetchImpl)`** — `GET /v1/models`; `[]` if `OPENAI_API_KEY` unset or on any failure.
+- **`options.ts`** — `openAIOptions(input)` parses the plugin options (zod, strict): `preset`, `baseUrl`, `auth` (`enum OpenAIAuth`: `apikey` | `codex` | `none`), `apiKeyEnv`, `codexHome`, `api` (`enum OpenAIApi`: `responses` | `chat`), `models` (discovery `path`/`listKey`/`idKey`/`filter`), `providerOptions`, `streamOnly`, `omitRequestFields`. A named preset in `PRESETS` supplies defaults that explicit options override; an unknown preset throws.
+- **`auth.ts`** — `credentialHeaders(options)` resolves credentials per call: the env key named by `apiKeyEnv`, or the Codex ChatGPT login read from `auth.json` under `codexHome` / `CODEX_HOME` / `~/.codex`. A missing key, unreadable file or expired token throws before any request is sent.
+- **`transport.ts`** — `providerFetch(options, fetchImpl)` is the SDK's fetch: it replaces the authorization header with `credentialHeaders`, drops `omitRequestFields` from the JSON body, and for a `streamOnly` endpoint turns a non-streaming call into a streamed one and folds the terminal `response.*` event back into a JSON response.
+- **`index.ts`** — `providerPlugin` (id `openai`) and `createOpenAIProvider(costOverrides, options, fetchImpl)`: **`costs: {...costOverrides}` only**, no built-in price table. `languageModel` picks `openai.chat` or `openai.responses` by `api` and merges the configured `providerOptions` into every call. `listModels` asks the configured discovery path and **throws** when it cannot answer; `[]` means the API answered with nothing usable.
 
 ##### `provider-ollama/src/index.ts`
 
@@ -1159,7 +1161,7 @@ A script (`#!/usr/bin/env bun`) whose top-level `async function main(): Promise<
 
 #### 2. `runtime.ts` — `buildPlugins` / `buildRuntime` / `seedRegistries`
 
-- **`seedRegistries(config)`** → `{ providers, executors, analyzers }`. Seeds three providers (`anthropic`, `openai`, `ollama`), one executor (`'api-loop'` → `apiLoopExecutor()`), and two analyzers (`'agent-analyzer'` → `agentAnalyzer()`, `'reground-analyzer'` → `regroundAnalyzer()`). The one place both discovery and the runtime's providers/executors/analyzers come from — a model ref that resolves in discovery resolves at execution.
+- **`seedRegistries(config)`** → `{ providers, executors, analyzers }`. Providers come from `configuredProviders(config)` (`providers.ts`): every `ProviderPlugin` in `PROVIDER_PLUGINS` (`anthropic`, `openai`, `ollama`) is a default provider under its own id, and the `providers` setting adds a provider (`{ plugin, options }`), replaces a default, or disables one with `null`; an unknown plugin or invalid options throw at boot. Also seeds one executor (`'api-loop'` → `apiLoopExecutor()`), and two analyzers (`'agent-analyzer'` → `agentAnalyzer()`, `'reground-analyzer'` → `regroundAnalyzer()`). The one place both discovery and the runtime's providers/executors/analyzers come from — a model ref that resolves in discovery resolves at execution.
 - **`buildPlugins(config): Promise<{ host; hub }>`** — `createPluginHost(config, seedRegistries(config))` plus `createMcpHub(config.mcpServers, (id, cfg) => isMcpTrusted(loadTrust(config.dir), id, cfg))`. The trust predicate re-reads `loadTrust` at *spawn time* (point-of-use).
 - **`buildRuntime(shared?): Promise<DbosPort>`** — the one function that creates the DBOS port:
   1. Resolves `config`/`{host,hub}`/`storage`/`kernel` from `shared` when the caller has them.

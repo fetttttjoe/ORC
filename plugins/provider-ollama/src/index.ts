@@ -1,7 +1,14 @@
 import { createOllama } from 'ai-sdk-ollama'
 import type { LanguageModel } from 'ai'
 import { z } from 'zod'
-import { isRecord, type EmbeddingProvider, type ModelCost, type ModelProvider } from '@orc/contracts'
+import { isRecord, type EmbeddingProvider, type ModelCost, type ModelProvider, type ProviderPlugin } from '@orc/contracts'
+
+export const providerPlugin: ProviderPlugin<LanguageModel> = {
+  id: 'ollama',
+  create: (options, costs) => createOllamaProvider({
+    ...z.strictObject({ baseUrl: z.url().optional() }).parse(options), costOverrides: costs,
+  }),
+}
 
 // /api/tags entries, loosely: only the fields this filter reads. capabilities is what the daemon
 // itself says a model can do; absent on older daemons, so absence must never exclude a model.

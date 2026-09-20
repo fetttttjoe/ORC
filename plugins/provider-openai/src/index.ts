@@ -1,29 +1,55 @@
 import { createOpenAI } from '@ai-sdk/openai'
-import type { LanguageModel } from 'ai'
-import { modelIdsFrom, type ModelCost, type ModelProvider } from '@orc/contracts'
+import { wrapLanguageModel, type LanguageModel } from 'ai'
+import { z } from 'zod'
+import { modelIdsFrom, type ModelCost, type ModelProvider, type ProviderPlugin } from '@orc/contracts'
+import { credentialHeaders } from './auth'
+import { OPENAI_PLUGIN_ID, OpenAIApi, openAIOptions, type OpenAIOptions } from './options'
+import { providerFetch, type ProviderFetch } from './transport'
 
-// live model discovery — THROWS when it cannot answer (network failure, bad status, unparseable
-// body, missing key); [] means the API answered and nothing usable exists. openai ships no static
-// cost table, so a swallowed failure here read as reachable-and-empty and discovery's append-on-
-// change would record models: [] over the real catalog — the exact silence-vs-empty confusion the
-// listModels contract (2026-08-03) exists to kill. Discovery isolates the throw per provider and
-// keeps the last recorded catalog. fetch injectable for tests.
-export async function listOpenAIModels(fetchImpl: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response> = fetch): Promise<string[]> {
-  const key = process.env.OPENAI_API_KEY
-  if (!key) throw new Error('OPENAI_API_KEY is not set — cannot ask the openai models API')
-  const res = await fetchImpl('https://api.openai.com/v1/models', { headers: { authorization: `Bearer ${key}` } })
-  if (!res.ok) throw new Error(`openai /v1/models answered ${res.status}`)
-  return modelIdsFrom(await res.json(), 'data', 'id')
+export const providerPlugin: ProviderPlugin<LanguageModel> = {
+  id: OPENAI_PLUGIN_ID,
+  create: (options, costs) => createOpenAIProvider(costs, options),
 }
 
-// no verified price table shipped — costUSD stays null/estimated until set in .orc/config.json costOverrides.openai
+const Catalog = z.record(z.string(), z.unknown())
+const ModelRows = z.array(z.record(z.string(), z.unknown()))
+
+async function discoverModels(options: OpenAIOptions, fetchImpl: ProviderFetch): Promise<string[]> {
+  const response = await fetchImpl(`${options.baseUrl.replace(/\/$/, '')}${options.models.path}`, {
+    headers: await credentialHeaders(options),
+  })
+  if (!response.ok) throw new Error(`openai ${options.models.path} answered ${response.status}`)
+  const body = Catalog.parse(await response.json())
+  const filter = options.models.filter
+  if (filter) body[options.models.listKey] = ModelRows.parse(body[options.models.listKey]).filter(row => row[filter.key] === filter.value)
+  return modelIdsFrom(body, options.models.listKey, options.models.idKey)
+}
+
+export async function listOpenAIModels(fetchImpl: ProviderFetch = fetch): Promise<string[]> {
+  return discoverModels(openAIOptions(), fetchImpl)
+}
+
 export function createOpenAIProvider(
   costOverrides: Record<string, ModelCost> = {},
+  input: unknown = {},
+  fetchImpl: ProviderFetch = fetch,
 ): ModelProvider<LanguageModel> {
-  const openai = createOpenAI({}) // OPENAI_API_KEY from env
+  const options = openAIOptions(input)
+  const openai = createOpenAI({ baseURL: options.baseUrl, apiKey: 'resolved-by-provider-transport', fetch: providerFetch(options, fetchImpl) })
   return {
     costs: { ...costOverrides },
-    languageModel: modelId => openai(modelId),
-    listModels: () => listOpenAIModels(),
+    languageModel: modelId => wrapLanguageModel({
+      model: options.api === OpenAIApi.chat ? openai.chat(modelId) : openai.responses(modelId),
+      middleware: {
+        transformParams: async ({ params }) => ({
+          ...params,
+          providerOptions: {
+            ...params.providerOptions,
+            [OPENAI_PLUGIN_ID]: { ...params.providerOptions?.[OPENAI_PLUGIN_ID], ...options.providerOptions },
+          },
+        }),
+      },
+    }),
+    listModels: () => discoverModels(options, fetchImpl),
   }
 }

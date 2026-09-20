@@ -4,7 +4,7 @@ import path from 'node:path'
 import { parseEnv } from 'node:util'
 import { atomicWriteFileSync } from './atomic-file'
 import { z } from 'zod'
-import { errorMessage, ApprovalPolicy, AUTO_HEAL_MODE, AutoHealMode, GROUNDED_APPROVAL_DOOR, GroundedApprovalDoor, MCP_SERVER_ID_RE, McpServerConfig, ModelCost } from '@orc/contracts'
+import { errorMessage, ApprovalPolicy, AUTO_HEAL_MODE, AutoHealMode, GROUNDED_APPROVAL_DOOR, GroundedApprovalDoor, MCP_SERVER_ID_RE, McpServerConfig, ModelCost, ProviderConfigs } from '@orc/contracts'
 import { gitDirs, gitToplevel } from './git'
 import { resolveProjectRoot } from './project-root'
 
@@ -109,6 +109,7 @@ const settingsSchema = (dir: string, projectRoot: string) =>
     projectDbUser: z.string().default('root'),
     projectDbPassword: z.string().default('orc'),
     costOverrides: z.record(z.string(), z.record(z.string(), ModelCost)).default({}),
+    providers: ProviderConfigs.default({}),
     vaultDir: z.string().default(path.join(projectRoot, 'vault')).transform(p => path.resolve(projectRoot, p)),
     // TREE-scoped, unlike the vault it sits inside: `vault/skills` is TRACKED SOURCE (the
     // .gitignore exception for authored content), so it moves with the branch, while the vault

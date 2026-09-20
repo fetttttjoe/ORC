@@ -1,6 +1,7 @@
 import { createAnthropic } from '@ai-sdk/anthropic'
 import type { LanguageModel } from 'ai'
-import { modelIdsFrom, type ModelCost, type ModelProvider } from '@orc/contracts'
+import { modelIdsFrom, type ModelCost, type ModelProvider, type ProviderPlugin } from '@orc/contracts'
+import { z } from 'zod'
 import { cachingFetch } from './cache'
 import { loadOAuthToken, oauthFetch } from './oauth'
 
@@ -12,6 +13,14 @@ const COSTS: Record<string, ModelCost> = {
   'claude-opus-4-8': { inPerMTok: 5, outPerMTok: 25, cacheReadPerMTok: 0.5, cacheWritePerMTok: 6.25 },
   'claude-sonnet-5': { inPerMTok: 3, outPerMTok: 15, cacheReadPerMTok: 0.3, cacheWritePerMTok: 3.75 },
   'claude-haiku-4-5': { inPerMTok: 1, outPerMTok: 5, cacheReadPerMTok: 0.1, cacheWritePerMTok: 1.25 },
+}
+
+export const providerPlugin: ProviderPlugin<LanguageModel> = {
+  id: 'anthropic',
+  create: (options, costs) => {
+    z.strictObject({}).parse(options)
+    return createAnthropicProvider(costs)
+  },
 }
 
 // OAuth (Claude subscription) is opt-in: explicit ORC_ANTHROPIC_AUTH, or the presence of a
