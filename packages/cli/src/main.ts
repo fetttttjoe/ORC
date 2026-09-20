@@ -79,7 +79,7 @@ export async function openKernel(
   const storage = await openStorage(url, { projectId, redactEnv: opts.redactEnv })
   const log = storage.events
   if (opts.onAppend) log.onAppend = opts.onAppend
-  return { kernel: new Kernel(log, opts.refValidator, opts.analyzers, opts.send, config.groundedApprovalDoors), log, storage }
+  return { kernel: new Kernel(log, opts.refValidator, opts.analyzers, opts.send, config.groundedApprovalDoors, config.finishChecks), log, storage }
 }
 
 // `orc init` must work before Postgres/plugins exist, so it gets a standalone entry
@@ -613,7 +613,7 @@ export function buildProgram(
       if (!notes.some(n => n.id === MASTERPLAN_NOTE_ID)) return ''
       // the freeze's own derivation, so the human sees EXACTLY what finalize_plan will freeze —
       // with autoCommit that includes the kernel-appended commit tail
-      return renderDerivedPlan(freezePlan(MASTERPLAN_NOTE_ID, notes, { autoCommit: plugin?.config.autoCommit }))
+      return renderDerivedPlan(freezePlan(MASTERPLAN_NOTE_ID, notes, { autoCommit: plugin?.config.autoCommit, checks: plugin?.config.finishChecks ?? [] }))
     } catch (err) {
       return `the plan notes do not derive a runnable plan: ${errorMessage(err)}`
     }

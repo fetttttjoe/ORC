@@ -7,6 +7,8 @@ import { clipMiddle } from './clip'
 
 const KILL_GRACE_MS = 5_000 // SIGTERM → wait → SIGKILL, so a child that ignores SIGTERM still dies
 const EXIT_FLUSH_MS = 250 // after 'exit', how long the streams get to flush before we settle
+export const COMMAND_TIMEOUT_MS = 10 * 60_000
+export const COMMAND_CANCELLED = 'the run was cancelled'
 const CLIP_CHARS = 8_000 // per stream, head + tail: typecheck errors lead, test summaries trail
 const MAX_BYTES = 64 * 1024 * 1024 // per stream, matches the old spawnSync maxBuffer
 
@@ -14,7 +16,7 @@ const clip = (s: string): string => clipMiddle(s, CLIP_CHARS)
 
 export const killedAtCeiling = (ms: number): string => `killed at the ${ms / 1000}s ceiling`
 
-export const hangError = (ms: number): string =>
+const hangError = (ms: number): string =>
   `command HUNG and was ${killedAtCeiling(ms)} — it is not merely slow: the last lines of stdout/stderr name what never finished, and the full streams are in logPath. Re-running the same files with other flags hangs again; narrow to that one test or signal what you have.`
 
 export interface CommandStreams { stdout: string; stderr: string; logPath: string }
@@ -29,8 +31,9 @@ export function runCommand(opts: {
   cwd: string
   timeoutMs: number
   logPath: string
+  signal?: AbortSignal
 }): Promise<CommandResult> {
-  const { argv, command, cwd, timeoutMs, logPath } = opts
+  const { argv, command, cwd, timeoutMs, logPath, signal } = opts
   // async spawn: a synchronous wait would freeze every other step in this process
   return new Promise<CommandResult>(resolve => {
     let settled = false
@@ -42,11 +45,24 @@ export function runCommand(opts: {
       clearTimeout(killTimer)
       if (graceTimer) clearTimeout(graceTimer)
       if (exitTimer) clearTimeout(exitTimer)
+      signal?.removeEventListener('abort', onAbort)
       resolve(r)
     }
     const [bin, ...rest] = argv
     if (bin === undefined) return finish({ failed: true, error: 'empty command' })
-    const child = spawn(bin, rest, { cwd, env: childEnv() })
+    const child = spawn(bin, rest, { cwd, env: childEnv(), detached: true })
+    const killTree = (sig: NodeJS.Signals): void => {
+      try {
+        if (child.pid === undefined) child.kill(sig)
+        else process.kill(-child.pid, sig)
+      } catch { /* the group is already gone */ }
+    }
+    function onAbort(): void {
+      killTree('SIGKILL')
+      finish({ failed: true, error: COMMAND_CANCELLED })
+    }
+    if (signal?.aborted) return onAbort()
+    signal?.addEventListener('abort', onAbort, { once: true })
     let stdout = '', stderr = '', timedOut = false
     child.stdout.setEncoding('utf8')
     child.stderr.setEncoding('utf8')
@@ -58,8 +74,8 @@ export function runCommand(opts: {
     child.stderr.on('error', onStreamError)
     const killTimer = setTimeout(() => {
       timedOut = true
-      child.kill('SIGTERM')
-      graceTimer = setTimeout(() => child.kill('SIGKILL'), KILL_GRACE_MS)
+      killTree('SIGTERM')
+      graceTimer = setTimeout(() => killTree('SIGKILL'), KILL_GRACE_MS)
     }, timeoutMs)
     child.on('error', e => finish({ failed: true, error: errorMessage(e) }))
     const report = (ending: { exitCode: number } | { killedAtCeiling: true }): CommandResult => {

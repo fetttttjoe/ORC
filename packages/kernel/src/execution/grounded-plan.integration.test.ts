@@ -225,7 +225,7 @@ async function bringUp() {
         ...bound.tools,
         ...splitTool({ kernel, config: { approvalPolicy: config.approvalPolicy, maxDepth: config.maxDepth }, p }),
         readAnnotationsTool({ kernel, p }),
-        finalizePlanTool({ kernel, config: { maxDepth: config.maxDepth }, p }),
+        finalizePlanTool({ kernel, config: { maxDepth: config.maxDepth, finishChecks: [] }, p }),
       ] }
     },
   })

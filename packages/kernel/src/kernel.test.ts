@@ -2,7 +2,7 @@ import { afterAll, afterEach, describe, expect, it } from 'bun:test'
 import { mkdirSync, mkdtempSync, realpathSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import { APPROVAL_ANSWER, AUTHOR_SOURCE, ApprovalPolicy, Door, EVENT_KIND, FINISH_STEP_ID, GROUNDED_APPROVAL_DOOR, LINK_KIND, NO_CHAT, NOTE_TIER, PAYLOAD_SCHEMAS, RunRequestedPayload, STEP_ID, STEP_ROLE, STRATEGY, TASK_STATUS, TaskStatus, WORKSPACE_KIND, WORKSPACE_TITLE_MAX, authorSourceOf, type Analyzer, type AuthorSource, type Origin, type PlanDraft, type PlanStep, type TaskNode, type Workspace } from '@orc/contracts'
+import { APPROVAL_ANSWER, AUTHOR_SOURCE, ApprovalPolicy, CHECKS_STEP_ID, Door, EVENT_KIND, FINISH_STEP_ID, GROUNDED_APPROVAL_DOOR, LINK_KIND, NO_CHAT, NOTE_TIER, PAYLOAD_SCHEMAS, RunRequestedPayload, STEP_ID, STEP_ROLE, STRATEGY, TASK_STATUS, TaskStatus, WORKSPACE_KIND, WORKSPACE_TITLE_MAX, authorSourceOf, type Analyzer, type AuthorSource, type Origin, type PlanDraft, type PlanStep, type TaskNode, type Workspace } from '@orc/contracts'
 import { authorFixture, draftFixture, must, stepFixture } from '@orc/contracts/fixtures'
 import { openStorage, type EventLogOps } from './storage'
 import { KERNEL_ERROR_CODE, KernelError } from './errors'
@@ -597,6 +597,10 @@ describe('Kernel lifecycle', () => {
     expect(await codeOf(k.proposeSplit({
       ...base, toolCallId: 'call_3',
       plan: { steps: [{ id: 'wrap-up', role: STEP_ROLE.finisher, title: 'shadow', instructions: 'do', dependsOn: [], skillRefs: [], toolRefs: [] }] },
+    }, WEB))).toBe(KERNEL_ERROR_CODE.invalid_transition)
+    expect(await codeOf(k.proposeSplit({
+      ...base, toolCallId: 'call_5',
+      plan: { steps: [{ id: CHECKS_STEP_ID, role: STEP_ROLE.worker, title: 'shadow', instructions: 'do', dependsOn: [], skillRefs: [], toolRefs: [] }] },
     }, WEB))).toBe(KERNEL_ERROR_CODE.invalid_transition)
     // the kernel's own freeze stays open: the same draft authored by the freeze is accepted
     const ok = await k.proposeSplit({ ...base, toolCallId: 'call_4', authoredBy: SPLIT_ORIGIN.freeze }, WEB)

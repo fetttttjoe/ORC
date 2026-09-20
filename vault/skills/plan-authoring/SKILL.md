@@ -38,6 +38,8 @@ You are an **auditor** authoring an executable plan, grounded in the analysis no
      ids become step ids — the gate is mechanical). Its requirements: audit the siblings' outputs
      against their own requirement notes and report gaps. A plan that changes things and never
      checks them is half a plan.
+     `checks`, `finish` and `commit` are the kernel's own step ids: a subplan named one of them is
+     refused at the freeze.
    - **Give each subplan the capabilities it needs.** A subplan's step gets ONLY what its note
      declares: `toolRefs` for MCP tools (`web/search`, `web/fetch` — check what the project
      declares before naming one) and `skillRefs` for skills (`web-research`, `documentation`). A

@@ -137,10 +137,15 @@ orc adr supersede <old-id> "<title>" --context … --decision … --consequences
 
 Every root plan (and every frozen grounded pipeline) ends with a **finish**
 step, appended automatically before the run is done — the grounded bootstrap's
-own analyze/plan template and the auto-heal sweep are the two exceptions. It
-reconciles the task's notes, judges whether the task made an architectural
-decision, and asks once — the paths changed, every note kept or rewritten, and
-the decision draft in ADR wording if there is one. `orc reply <task-id>
+own analyze/plan template and the auto-heal sweep are the two exceptions. When
+the operator's `finishChecks` setting is non-empty, a **checks** step runs
+just before it: the configured commands run concurrently, and their
+PASS/FAIL verdict reaches the finish step as an upstream output — a red check
+leads the finish question but never blocks the run; `[]` means no checks step
+at all. The finish step reconciles the task's notes, judges whether the task
+made an architectural decision, and asks once — the paths changed, every note
+kept or rewritten, the checks verdict if any, and the decision draft in ADR
+wording if there is one. `orc reply <task-id>
 approve` records that decision, if any, and completes the task; anything else
 is read as feedback and the step asks again with the updated summary.
 
@@ -169,6 +174,16 @@ argv run inside the new tree (`["bun", "install", "--frozen-lockfile"]` here;
 a failing setup removes the tree again and records nothing), the record, and
 the request drafted as that workspace's first task (`--no-task` makes only the
 workspace). It prints the `cd` line to work in.
+
+`finishChecks` is a sibling setting, also operator-trusted like
+`workspaceSetup`: an array of commands in `.orc/config.json` (default `[]`)
+that the kernel-appended `checks` step runs, concurrently, just before
+`finish`. `[]` means no `checks` step at all — the plan ends with `finish`.
+A red command is never a block: the checks step always completes, and the
+failing command is named in the verdict the finish step reads as its `checks`
+upstream output and leads its question with. The commands are frozen into
+the plan you approve, a cancelled run stops them, and each one's full output
+is in `.orc/checks/`.
 
 **`cwd` is the natural key**, matched as a resolved realpath: one *active*
 record per directory, adoption is idempotent on it, and a worktree moved to a

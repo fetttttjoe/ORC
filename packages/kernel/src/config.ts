@@ -88,6 +88,8 @@ const settingsSchema = (dir: string, projectRoot: string) =>
     // else: the first run in such a tree spent $1.92 and parked because `bun test` could not
     // resolve a workspace package and `bun install` was not on the exec allowlist.
     workspaceSetup: z.array(z.string().min(1)).default([]),
+    // commands the kernel-appended checks step runs before the finish step; [] = no checks step
+    finishChecks: z.array(z.string().min(1)).default([]),
     // append the commit step to every frozen grounded plan: the run commits its own diff and
     // restamps the notes it wrote (the truthful-stamp pipeline). Default off like every capability
     // gate here — committing an operator's repo is an outward action they opt into.

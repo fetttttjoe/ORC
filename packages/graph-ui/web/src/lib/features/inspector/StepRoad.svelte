@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { displayInstructions } from '@orc/contracts/check-commands'
   import * as Card from '$lib/components/ui/card'
   import { Separator } from '$lib/components/ui/separator'
   import Chip from '$lib/components/Chip.svelte'
@@ -57,7 +58,7 @@
             <Separator class="mb-1.5" />
             <details>
               <summary class="cursor-pointer font-mono text-label tracking-widest text-fog uppercase select-none">instructions</summary>
-              <p class="mt-1 text-row leading-relaxed break-words whitespace-pre-wrap text-mist">{step.instructions}</p>
+              <p class="mt-1 text-row leading-relaxed break-words whitespace-pre-wrap text-mist">{displayInstructions(step)}</p>
             </details>
           </Card.Content>
         {/if}

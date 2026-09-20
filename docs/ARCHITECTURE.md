@@ -647,9 +647,16 @@ sequenceDiagram
 
 This loop repeats once per step, in the plan's dependency order. Every root plan except the
 grounded scaffold and the auto-heal sweep, and every frozen grounded pipeline, runs its own
-authored steps and then two the kernel appends rather than a planner authors: the finish step
-reconciles the task's notes and asks once, and — only under `autoCommit` — the commit step runs
-last: `… → finish → commit` (`packages/kernel/src/finish-step.ts`).
+authored steps and then steps the kernel appends rather than a planner authors, never a planner-
+authored one (`Kernel.proposeSplit` refuses a step named `checks` or `finish` the same way):
+when `config.finishChecks` is non-empty a **checks** step runs first, a deterministic
+`AgentExecutor` with no model (`CHECKS_EXECUTOR_REF`, `packages/kernel/src/execution/checks-executor.ts`)
+that runs each configured command concurrently through the one command spawner
+(`packages/kernel/src/execution/run-command.ts`) and always signals success — a failing command is
+named in its summary, never a block. The **finish** step reconciles the task's notes and asks
+once, reading the checks step's summary as its `checks` upstream output and leading its question
+with any failure; and — only under `autoCommit` — the commit step runs last: `… → checks → finish →
+commit` (`packages/kernel/src/finish-step.ts`).
 
 ### Retrieval lanes — what a step may be handed
 

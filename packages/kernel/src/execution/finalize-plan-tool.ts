@@ -17,7 +17,7 @@ const AUTO_APPROVE = ApprovalPolicy.parse({ default: 'auto' })
 // its child runs; recurse only when a real 3-level plan needs it.
 export function finalizePlanTool(opts: {
   kernel: Pick<Kernel, 'proposeSplit' | 'listPlanNotes' | 'approvedPlanHash' | 'planNotesChangedSince' | 'nonHumanPlanApproval' | 'approvalDoors'>
-  config: { maxDepth: number; autoCommit?: boolean }
+  config: { maxDepth: number; autoCommit?: boolean; finishChecks: readonly string[] }
   p: { taskId: string; stepId: string; runToken: string; role: string; executor: string; modelRef: string; maxIterations: number; origin: Origin }
 }): ResolvedTool {
   const { kernel, config, p } = opts
@@ -109,7 +109,7 @@ export function finalizePlanTool(opts: {
           return { output: { error: `the plan-note graph changed after approval (edited since: ${what}) — ask the human to approve it again, then call finalize_plan without editing in between` }, isError: true }
         }
         // autoCommit's tail rides the freeze, not the approval: kernel-owned like the role-skill refs the freeze appends
-        const plan = freezePlan(MASTERPLAN_NOTE_ID, notes, { autoCommit: config.autoCommit })
+        const plan = freezePlan(MASTERPLAN_NOTE_ID, notes, { autoCommit: config.autoCommit, checks: config.finishChecks })
         const r = await kernel.proposeSplit({
           parentTaskId: p.taskId, stepId: p.stepId, runToken: p.runToken,
           toolCallId: toolCallId ?? randomUUID(),

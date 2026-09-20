@@ -1,4 +1,4 @@
-import type { ChildPlanDraft, Plan } from '@orc/contracts'
+import { CHECKS_EXECUTOR_REF, checkCommandsOf, type ChildPlanDraft, type Plan } from '@orc/contracts'
 
 // The review surface of a plan: exactly the fields a human weighs at the gate. A named subset
 // (not the full Plan) so tests construct it cast-free and callers state their dependency.
@@ -20,8 +20,14 @@ export function renderPlanHuman(plan: ReviewablePlan, rateFor?: ModelRate): stri
   for (const s of plan.steps) {
     const rate = rateFor?.(s.modelRef)
     lines.push(`  ${s.id}  [${s.role}] ${s.title}`)
-    lines.push(`      model ${s.modelRef}${rate ? ` (${rate})` : ''} · ≤${s.maxIterations} iterations`
-      + `${s.dependsOn.length ? ` · after ${s.dependsOn.join(', ')}` : ''}`
+    const after = s.dependsOn.length ? ` · after ${s.dependsOn.join(', ')}` : ''
+    const commands = s.executorRef === CHECKS_EXECUTOR_REF ? checkCommandsOf(s.instructions) : null
+    if (commands !== null) {
+      lines.push(`      no model — runs these commands concurrently and reports; a failure never blocks${after}`)
+      for (const c of commands) lines.push(`      $ ${c}`)
+      continue
+    }
+    lines.push(`      model ${s.modelRef}${rate ? ` (${rate})` : ''} · ≤${s.maxIterations} iterations${after}`
       + `${s.zone.length ? ` · writes fenced to ${s.zone.join(', ')}` : ''}`)
     const instr = s.instructions.length > 300 ? `${s.instructions.slice(0, 300)}…` : s.instructions
     for (const l of instr.split('\n')) lines.push(`      ${l}`)

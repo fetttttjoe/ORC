@@ -8,7 +8,7 @@ import { withFinishStep } from '../finish-step'
 
 // the planning step runs inside its run's chat, so the frozen split it proposes is stamped with it
 const p = { taskId: 't1', stepId: 'plan', runToken: 'step:t1:plan:a1', role: 'auditor', executor: 'api-loop', modelRef: 'anthropic/x', maxIterations: 30, origin: runOrigin('run:t1:v1') }
-const config = { maxDepth: 3 }
+const config = { maxDepth: 3, finishChecks: [] }
 
 const note = (over: Partial<PlanNote> & { id: string }): PlanNote =>
   planNoteFixture({ scope: 'plan-t1', title: over.id, createdAt: '', createdBy: '', updatedAt: '', updatedBy: '', ...over })
@@ -264,6 +264,6 @@ describe('autoCommit', () => {
     const calls: unknown[] = []
     await finalizePlanTool({ kernel: fakeKernel(notes(), calls), config, p }).execute({}, 'call_1')
     const plan = (calls[0] as { plan: unknown }).plan
-    expect(plan).toEqual(withFinishStep(instantiateFrozenPlan('masterplan', notes())))
+    expect(plan).toEqual(withFinishStep(instantiateFrozenPlan('masterplan', notes()), { checks: [] }))
   })
 })

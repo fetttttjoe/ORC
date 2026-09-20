@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'bun:test'
+import { CHECKS_EXECUTOR_REF, CHECKS_STEP_ID } from '@orc/contracts'
 import { renderDerivedPlan, renderPlanHuman } from './plan-render'
 import { singleStepDraft } from './plan-template'
 
@@ -12,6 +13,18 @@ describe('renderPlanHuman', () => {
     expect(out).toContain('s1  [worker] summarize notes')
     expect(out).toContain('anthropic/claude-haiku-4-5 ($1/M in · $5/M out) · ≤30 iterations')
     expect(out).toContain('read notes.txt, write summary.md')
+  })
+  it('renders the checks step as its commands, with no model or iteration budget', () => {
+    const [s1] = plan.steps
+    if (s1 === undefined) throw new Error('the template has no step')
+    const checks = { ...s1, id: CHECKS_STEP_ID, title: 'Checks', executorRef: CHECKS_EXECUTOR_REF, dependsOn: [s1.id], instructions: JSON.stringify(['bun run typecheck', 'bun test a.test.ts']) }
+    const out = renderPlanHuman({ ...plan, steps: [s1, checks] })
+    const at = out.split('\n').findIndex(l => l.includes('checks  ['))
+    expect(out.split('\n').slice(at + 1, at + 4)).toEqual([
+      '      no model — runs these commands concurrently and reports; a failure never blocks · after s1',
+      '      $ bun run typecheck',
+      '      $ bun test a.test.ts',
+    ])
   })
   it('shows a provided estimate and survives a missing rate', () => {
     const out = renderPlanHuman({ ...plan, costEstimateUSD: 0.5 })

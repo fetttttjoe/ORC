@@ -4,7 +4,7 @@ import { z } from 'zod'
 import { errorMessage, type ResolvedTool } from '@orc/contracts'
 import { treeFingerprint } from './tree-fingerprint'
 import { commandArgv } from './command-argv'
-import { killedAtCeiling, runCommand } from './run-command'
+import { COMMAND_TIMEOUT_MS, killedAtCeiling, runCommand } from './run-command'
 
 // exec: the acceptance-gate tool. Plans routinely demand "typecheck clean,
 // tests green", but no step could RUN anything — implementers shipped unexecuted (red) suites
@@ -26,7 +26,6 @@ import { killedAtCeiling, runCommand } from './run-command'
 const ExecInput = z.object({ command: z.string().min(1) })
 
 // ponytail: fixed caps — promote to config when a real suite outgrows them
-const TIMEOUT_MS = 10 * 60_000
 
 // Where the FULL streams land, workspace-relative so fs_read can reach them. `.orc/*` is
 // gitignored, so a gate log never rides along in a commit.
@@ -53,7 +52,7 @@ export function execTool(opts: {
 }): ResolvedTool[] {
   const { workspaceDir, allowlist } = opts
   const fingerprint = opts.fingerprint ?? gitFingerprint(workspaceDir)
-  const timeoutMs = opts.timeoutMs ?? TIMEOUT_MS
+  const timeoutMs = opts.timeoutMs ?? COMMAND_TIMEOUT_MS
   // registration gate: no allowlist, no tool — a tool that can only ever error is never offered
   if (allowlist.length === 0) return []
   return [{

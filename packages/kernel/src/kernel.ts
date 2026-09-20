@@ -2,13 +2,13 @@ import { randomUUID } from 'node:crypto'
 import { statSync } from 'node:fs'
 import path from 'node:path'
 import { MASTERPLAN_NOTE_ID,
-  AnalysisCompletedPayload, ChildPlanDraft, EVENT_KIND, FINISH_STEP_ID, FeedbackProvidedPayload, GROUNDED_APPROVAL_DOOR, ISOLATION_TIER, MemoryDeletedPayload, MemoryWrittenPayload, NOTE_TIER, PAYLOAD_SCHEMAS, PlanAnnotatedPayload, PlanDraft, RunRequestedPayload, STEP_ROLE, STRATEGY, TASK_STATUS, TERMINAL_TASK_STATUS, WORKSPACE_TITLE_MAX, Workspace, WorkspaceArchivedPayload, WorkspaceMergedPayload, WorkspaceRetitledPayload, evaluateApproval, feedbackKey, formatModelOption, isApprovalAnswer, openFeedbackTopics, validatePlan, type ChildPlanDraftInput, type ModelOption,
+  AnalysisCompletedPayload, CHECKS_STEP_ID, ChildPlanDraft, EVENT_KIND, FINISH_STEP_ID, FeedbackProvidedPayload, GROUNDED_APPROVAL_DOOR, ISOLATION_TIER, MemoryDeletedPayload, MemoryWrittenPayload, NOTE_TIER, PAYLOAD_SCHEMAS, PlanAnnotatedPayload, PlanDraft, RunRequestedPayload, STEP_ROLE, STRATEGY, TASK_STATUS, TERMINAL_TASK_STATUS, WORKSPACE_TITLE_MAX, Workspace, WorkspaceArchivedPayload, WorkspaceMergedPayload, WorkspaceRetitledPayload, evaluateApproval, feedbackKey, formatModelOption, isApprovalAnswer, openFeedbackTopics, validatePlan, type ChildPlanDraftInput, type ModelOption,
   type Analyzer, type ApprovalPolicy, type EventKind, type EventRecord,
   type PlanNote, type Plan, type PlanStep, type TaskNode, type TaskStatus,
   type WorkspaceKind, authorSourceOf, directoryZoneEntries, type Origin,
 } from '@orc/contracts'
 import { foldPlanNotes, planApprovalStamp, planGraphHash, planScope, PLAN_STEP_ID, PLAN_STEP_ROLE } from './execution/strategies/grounded-plan'
-import { reconcileFinishStep } from './finish-step'
+import { kernelStepExecutorRef, reconcileFinishStep } from './finish-step'
 import { DEFAULT_MAX_ITERATIONS } from './config'
 import { EventLog, type EventLogOps } from './storage'
 import { estimateCostUSD, fold, gatedChildren, subtreeTaskIds, subtreeUsage, taskChangedPaths, taskNoteWrites, taskVerifiedNotes, type State, type TaskNoteWrite, type TaskVerifiedNote } from './projections'
@@ -76,6 +76,7 @@ export class Kernel {
     // built from its own copy is a message that can advise a door the gate rejects. Widening this
     // lets the driving agent approve plans it authored, which is why it is a config file edit.
     readonly approvalDoors: readonly string[] = [GROUNDED_APPROVAL_DOOR.cli],
+    private readonly finishChecks: readonly string[] = [],
   ) {}
 
   // The grounded-plan bootstrap (M5b): an auto-approved [analyze, plan] template. The analyze
@@ -144,7 +145,7 @@ export class Kernel {
       // the shape that actually runs — the same reason freezePlan appends before the approval
       // render. WHICH plans get one is finish-step.ts's rule (plansGetFinishStep), shared with
       // editPlan below so a proposed plan and its edit can never end differently.
-      return this.appendPlanVersion(tx, taskId, reconcileFinishStep(task, draft), EVENT_KIND.plan_proposed, task.status, origin)
+      return this.appendPlanVersion(tx, taskId, reconcileFinishStep(task, draft, { checks: this.finishChecks }), EVENT_KIND.plan_proposed, task.status, origin)
     })
   }
 
@@ -167,7 +168,7 @@ export class Kernel {
       // edit written from scratch (orc edit --file) would otherwise drop it silently, leaving a
       // task that never reconciles its notes. reconcileFinishStep strips the kernel's own trailing
       // step and re-derives it, so the edited plan ends exactly where the proposed one did.
-      return this.appendPlanVersion(tx, taskId, reconcileFinishStep(task, draft), EVENT_KIND.plan_edited, task.status, origin)
+      return this.appendPlanVersion(tx, taskId, reconcileFinishStep(task, draft, { checks: this.finishChecks }), EVENT_KIND.plan_edited, task.status, origin)
     })
   }
 
@@ -234,12 +235,12 @@ export class Kernel {
       // reserved alongside the role because stepMayReconcile keys on BOTH terms: a split step named
       // 'finish' would shadow the kernel's own in every id-keyed read (status renders, resume).
       if (input.authoredBy !== SPLIT_ORIGIN.freeze) {
-        const reserved = draft.steps.find(s => s.role === STEP_ROLE.committer || s.role === STEP_ROLE.finisher || s.id === FINISH_STEP_ID)
+        const reserved = draft.steps.find(s => s.role === STEP_ROLE.committer || s.role === STEP_ROLE.finisher || s.id === FINISH_STEP_ID || s.id === CHECKS_STEP_ID)
         if (reserved)
           throw new KernelError(KERNEL_ERROR_CODE.invalid_transition,
             reserved.role === STEP_ROLE.committer
               ? `step '${reserved.id}' claims role '${STEP_ROLE.committer}', which only the kernel's autoCommit freeze may set — remove it from the split; the commit step is appended for you when the pipeline commits`
-              : `step '${reserved.id}' claims the kernel-set ${reserved.role === STEP_ROLE.finisher ? `role '${STEP_ROLE.finisher}'` : `step id '${FINISH_STEP_ID}'`} — remove it from the split; the finish step is appended for you at the end of the pipeline this split belongs to`)
+              : `step '${reserved.id}' claims the kernel-set ${reserved.role === STEP_ROLE.finisher ? `role '${STEP_ROLE.finisher}'` : `step id '${reserved.id}'`} — remove it from the split; the kernel appends that step itself at the end of the pipeline this split belongs to`)
       }
       const child: TaskNode = {
         // a split runs in the same checkout its parent step is running in — inherited, never
@@ -261,7 +262,8 @@ export class Kernel {
         // never fire while this was hardcoded null.
         strategyRef: STRATEGY.split, costEstimateUSD: estimateCostUSD(state, { strategyRef: STRATEGY.split }),
         steps: draft.steps.map(s => ({
-          ...s, executorRef: input.parentStep.executorRef, modelRef: s.modelRef ?? input.parentStep.modelRef,
+          ...s, executorRef: kernelStepExecutorRef(s.id, input.parentStep.executorRef),
+          modelRef: s.modelRef ?? input.parentStep.modelRef,
           // zone is the child's own declaration (write-fence) — parsed default [] = unfenced
           isolation: ISOLATION_TIER.local, zone: s.zone, maxIterations: input.parentStep.maxIterations,
         })),

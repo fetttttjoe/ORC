@@ -1,4 +1,4 @@
-import { AUTHOR_SOURCE, AUTO_HEAL_MODE, Door, errorMessage, HOOK_NAME, NO_CHAT, NOTE_TIER, ROLE_SKILL, TERMINAL_TASK_STATUS, type AgentExecutor, type Analyzer, type MemoryAuthor } from '@orc/contracts'
+import { AUTHOR_SOURCE, AUTO_HEAL_MODE, CHECKS_EXECUTOR_REF, Door, errorMessage, HOOK_NAME, NO_CHAT, NOTE_TIER, ROLE_SKILL, TERMINAL_TASK_STATUS, type AgentExecutor, type Analyzer, type MemoryAuthor } from '@orc/contracts'
 import { apiLoopExecutor } from '@orc/executor-api-loop'
 import { configuredProviders } from './providers'
 import { agentAnalyzer } from '@orc/analyzer-agent'
@@ -9,7 +9,7 @@ import { openMemory } from './memory-open'
 import { buildDistiller } from './consolidation-distiller'
 import { cwdAuthor, cwdWorkspaceId } from './cwd-workspace'
 import { createVaultProjector } from '@orc/vault-projector'
-import { commitTool, createDbosPort, createPluginHost, dbosSend, execTool, finalizePlanTool, isMcpTrusted, loadConfig, loadTrust, openStorage, projectorLease, readAnnotationsTool, reportCoverageTool, requireProject, scopedChangesTool, splitTool, Kernel, type DbosPort, type PluginHost, type ProjectConfig, type Storage } from '@orc/kernel'
+import { checksExecutor, commitTool, createDbosPort, createPluginHost, dbosSend, execTool, finalizePlanTool, isMcpTrusted, loadConfig, loadTrust, openStorage, projectorLease, readAnnotationsTool, reportCoverageTool, requireProject, scopedChangesTool, splitTool, Kernel, type DbosPort, type PluginHost, type ProjectConfig, type Storage } from '@orc/kernel'
 
 // The `executor` the commit reactor stamps on the notes it restamps. composeAuthor renders it
 // verbatim as the note's updatedBy, so this is the name an operator reads in the vault when asking
@@ -23,7 +23,7 @@ const SUPERVISOR_ORIGIN = NO_CHAT(Door.supervisor)
 
 export function seedRegistries(config = loadConfig()) {
   const providers = configuredProviders(config)
-  const executors = new Map<string, AgentExecutor<unknown>>([['api-loop', apiLoopExecutor()]])
+  const executors = new Map<string, AgentExecutor<unknown>>([['api-loop', apiLoopExecutor()], [CHECKS_EXECUTOR_REF, checksExecutor()]])
   // The config-driven iteration budget is applied by createGroundedTask, to BOTH template steps —
   // wrapping only the analyzer here left the plan step (and every subplan that inherits it) at 30.
   const analyzers = new Map<string, Analyzer>([['agent-analyzer', agentAnalyzer()]])
@@ -105,7 +105,7 @@ export async function buildRuntime(
   // `orc propose`, and createGroundedTask can resolve its analyzer.
   // approval doors are operator config, so the kernel this port builds tools against must carry
   // the configured set — finalize_plan's refusal text reads it straight off the kernel
-  const kernel = shared?.kernel ?? new Kernel(log, host.refValidator, host.analyzers, dbosSend, config.groundedApprovalDoors)
+  const kernel = shared?.kernel ?? new Kernel(log, host.refValidator, host.analyzers, dbosSend, config.groundedApprovalDoors, config.finishChecks)
   log.onAppend = e => host.hooks.dispatch(HOOK_NAME.event_appended, e)
 
   // Startup order: projections FIRST — DBOS recovery may emit events the
@@ -285,7 +285,7 @@ export async function buildRuntime(
       // finalize_plan reconstructs the plan-note graph from the log (kernel.listPlanNotes), not the
       // memory store — but it's still only offered when memory is healthy: with the memory tools
       // degraded the agent can't author a plan-note graph, so a grounded plan is pointless anyway.
-      ...(memory ? [finalizePlanTool({ kernel, config: { maxDepth: config.maxDepth, autoCommit: config.autoCommit }, p })] : []),
+      ...(memory ? [finalizePlanTool({ kernel, config: { maxDepth: config.maxDepth, autoCommit: config.autoCommit, finishChecks: config.finishChecks }, p })] : []),
       ] }
     },
   })

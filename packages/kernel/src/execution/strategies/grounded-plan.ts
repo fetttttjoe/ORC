@@ -229,12 +229,12 @@ export function instantiateFrozenPlan(masterId: string, notes: PlanNote[]): Chil
 // The ONE derivation of "what finalize_plan will freeze": the approval render (orc's derived-plan
 // block) and the freeze itself both call this, so a human can never approve a shape the freeze
 // then silently changes.
-export function freezePlan(masterId: string, notes: PlanNote[], opts: { autoCommit?: boolean }): ChildPlanDraft {
+export function freezePlan(masterId: string, notes: PlanNote[], opts: { autoCommit?: boolean; checks: readonly string[] }): ChildPlanDraft {
   // instantiateFrozenPlan FIRST, and its blank-plan refusal with it: a childless masterplan must
   // throw before anything is appended, or the append would turn `steps: []` into a finish-only
   // pipeline that asks the human to summarize a task that wrote nothing — the same silent success
   // the commit-only pipeline reported (incidents c4bc1d38, 8b5e1034).
-  const frozen = withFinishStep(instantiateFrozenPlan(masterId, notes))
+  const frozen = withFinishStep(instantiateFrozenPlan(masterId, notes), { checks: opts.checks })
   return opts.autoCommit ? withCommitStep(frozen) : frozen
 }
 

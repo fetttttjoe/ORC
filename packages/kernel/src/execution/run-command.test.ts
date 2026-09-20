@@ -2,7 +2,7 @@ import { afterAll, describe, expect, it } from 'bun:test'
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import { runCommand, type CommandExited, type CommandResult, type CommandTimedOut } from './run-command'
+import { COMMAND_CANCELLED, runCommand, type CommandExited, type CommandResult, type CommandTimedOut } from './run-command'
 
 const dirs: string[] = []
 const ws = (): string => {
@@ -23,6 +23,16 @@ const timedOut = (r: CommandResult): CommandTimedOut => {
   return r
 }
 
+const alive = (pid: number): boolean => {
+  try { process.kill(pid, 0); return true } catch { return false }
+}
+const gone = async (pid: number): Promise<boolean> => {
+  for (let i = 0; i < 40 && alive(pid); i++) await new Promise(r => setTimeout(r, 50))
+  return !alive(pid)
+}
+const FORKS_A_SLEEPER = 'sleep 30 &\necho $! > sleeper.pid\nwait\n'
+const sleeperPid = (dir: string): number => Number(readFileSync(path.join(dir, 'sleeper.pid'), 'utf8').trim())
+
 const run = (argv: string[], cwd: string, timeoutMs = 30_000): Promise<CommandResult> =>
   runCommand({ argv, command: argv.join(' '), cwd, timeoutMs, logPath: LOG_PATH })
 
@@ -37,6 +47,25 @@ describe('runCommand', () => {
     const log = readFileSync(path.join(dir, out.logPath), 'utf8')
     expect(log).toContain('killed at the 0.3s ceiling')
     expect(log).toContain('PRINTED_BEFORE_HANG')
+  }, 20_000)
+
+  it('kills the processes a command forked, not only the command', async () => {
+    const dir = ws()
+    writeFileSync(path.join(dir, 'fork.sh'), FORKS_A_SLEEPER)
+    timedOut(await run(['sh', 'fork.sh'], dir, 300))
+    expect(await gone(sleeperPid(dir))).toBe(true)
+  }, 20_000)
+
+  it('stops a command and what it forked when its signal aborts', async () => {
+    const dir = ws()
+    writeFileSync(path.join(dir, 'fork.sh'), FORKS_A_SLEEPER)
+    const stop = new AbortController()
+    const started = Date.now()
+    setTimeout(() => stop.abort(), 300)
+    const r = await runCommand({ argv: ['sh', 'fork.sh'], command: 'sh fork.sh', cwd: dir, timeoutMs: 30_000, logPath: LOG_PATH, signal: stop.signal })
+    expect(r).toEqual({ failed: true, error: COMMAND_CANCELLED })
+    expect(Date.now() - started).toBeLessThan(5_000)
+    expect(await gone(sleeperPid(dir))).toBe(true)
   }, 20_000)
 
   it('clips a long stream keeping the head AND the tail, with the full output in the log', async () => {

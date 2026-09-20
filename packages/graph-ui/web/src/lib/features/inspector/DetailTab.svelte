@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { displayInstructions } from '@orc/contracts/check-commands'
   import { createQuery } from '@tanstack/svelte-query'
   import FileIcon from '@lucide/svelte/icons/file'
   import * as Empty from '$lib/components/ui/empty'
@@ -123,7 +124,7 @@
         <Separator class="my-2" />
         <details>
           <summary class="cursor-pointer font-mono text-label tracking-widest text-fog uppercase select-none">instructions</summary>
-          <p class="mt-1 text-xs leading-relaxed break-words whitespace-pre-wrap text-mist">{s.step.instructions}</p>
+          <p class="mt-1 text-xs leading-relaxed break-words whitespace-pre-wrap text-mist">{displayInstructions({ id: s.step.id, instructions: s.step.instructions })}</p>
         </details>
       {/if}
     </dl>

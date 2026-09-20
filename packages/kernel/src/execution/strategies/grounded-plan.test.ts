@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test'
-import { AUTHOR_SOURCE, COMMIT_STEP_ID, Door, EVENT_KIND, FINISH_STEP_ID, LINK_KIND, ROLE_SKILL, STEP_ROLE, type EventRecord, type MemoryLink, type Origin, type PlanNote } from '@orc/contracts'
+import { AUTHOR_SOURCE, CHECKS_STEP_ID, COMMIT_STEP_ID, Door, EVENT_KIND, FINISH_STEP_ID, LINK_KIND, ROLE_SKILL, STEP_ROLE, type EventRecord, type MemoryLink, type Origin, type PlanNote } from '@orc/contracts'
 import { authorFixture, eventFixture, must, planNoteFixture, stepFixture } from '@orc/contracts/fixtures'
 import { foldPlanNotes, freezePlan, groundedPlanOmission, instantiateFrozenPlan, planGraphHash, planScope, withCommitStep } from './grounded-plan'
 // the appender lives in the pure module now (finish-step.ts, contracts-only imports); this describe
@@ -393,7 +393,7 @@ describe('withFinishStep', () => {
   ]
 
   it('appends the kernel-owned finish step after every sibling, and the commit step after it', () => {
-    const draft = withCommitStep(withFinishStep(frozen()))
+    const draft = withCommitStep(withFinishStep(frozen(), { checks: [] }))
     expect(draft.steps.map(s => s.id)).toEqual(['db', 'verify', FINISH_STEP_ID, COMMIT_STEP_ID])
     const finish = draft.steps.find(s => s.id === FINISH_STEP_ID)
     expect(finish).toEqual({
@@ -406,21 +406,45 @@ describe('withFinishStep', () => {
   })
 
   it('freezePlan always carries the finish step, with or without autoCommit', () => {
-    expect(freezePlan('masterplan', notes(), { autoCommit: false }).steps.map(s => s.id)).toEqual(['db', 'verify', FINISH_STEP_ID])
-    expect(freezePlan('masterplan', notes(), { autoCommit: true }).steps.map(s => s.id)).toEqual(['db', 'verify', FINISH_STEP_ID, COMMIT_STEP_ID])
+    expect(freezePlan('masterplan', notes(), { autoCommit: false, checks: [] }).steps.map(s => s.id)).toEqual(['db', 'verify', FINISH_STEP_ID])
+    expect(freezePlan('masterplan', notes(), { autoCommit: true, checks: [] }).steps.map(s => s.id)).toEqual(['db', 'verify', FINISH_STEP_ID, COMMIT_STEP_ID])
+  })
+
+  it('with no configured checks the frozen plan carries no checks step', () => {
+    const draft = freezePlan('masterplan', notes(), { autoCommit: true, checks: [] })
+    expect(draft.steps.map(s => s.id)).not.toContain(CHECKS_STEP_ID)
+    expect(draft.steps.find(s => s.id === FINISH_STEP_ID)?.dependsOn).toEqual(['db', 'verify'])
+  })
+
+  it('configured checks freeze as a checks step every sibling precedes, with finish waiting on it', () => {
+    const draft = freezePlan('masterplan', notes(), { autoCommit: false, checks: ['bun test x.ts', 'bun run typecheck'] })
+    expect(draft.steps.map(s => s.id)).toEqual(['db', 'verify', CHECKS_STEP_ID, FINISH_STEP_ID])
+    expect(draft.steps.find(s => s.id === CHECKS_STEP_ID)).toEqual({
+      id: CHECKS_STEP_ID, role: STEP_ROLE.worker, title: 'Checks',
+      instructions: JSON.stringify(['bun test x.ts', 'bun run typecheck']),
+      dependsOn: ['db', 'verify'], skillRefs: [], toolRefs: [], zone: [], readOnlySource: true,
+    })
+    expect(draft.steps.at(-1)?.dependsOn).toEqual(['db', 'verify', CHECKS_STEP_ID])
   })
 
   // the blank-plan refusal (instantiateFrozenPlan) stays AHEAD of the append: a childless masterplan
   // must never freeze to a finish-only pipeline that asks the human to summarize nothing — the same
   // silent-failure shape the commit-only pipeline had (incidents c4bc1d38, 8b5e1034)
   it('never turns a childless masterplan into a finish-only pipeline — the blank-plan refusal comes first', () => {
-    expect(() => freezePlan('masterplan', [note({ id: 'masterplan', title: 'M', links: [] })], { autoCommit: false })).toThrow(/decomposes_into/)
+    expect(() => freezePlan('masterplan', [note({ id: 'masterplan', title: 'M', links: [] })], { autoCommit: false, checks: [] })).toThrow(/decomposes_into/)
   })
 
   it('refuses a plan that already names finish', () => {
     const first = frozen().steps[0]
     if (!first) throw new Error('fixture must freeze at least one step')
     const clash = { steps: [...frozen().steps, { ...first, id: FINISH_STEP_ID, dependsOn: [] }] }
-    expect(() => withFinishStep(clash)).toThrow(/finish/)
+    expect(() => withFinishStep(clash, { checks: [] })).toThrow(/finish/)
+  })
+
+  it('refuses a plan that already names checks', () => {
+    const first = frozen().steps[0]
+    if (!first) throw new Error('fixture must freeze at least one step')
+    const clash = { steps: [...frozen().steps, { ...first, id: CHECKS_STEP_ID, dependsOn: [] }] }
+    expect(() => withFinishStep(clash, { checks: [] })).toThrow(/checks/)
   })
 })

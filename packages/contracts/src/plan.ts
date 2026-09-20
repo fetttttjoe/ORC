@@ -37,7 +37,7 @@ export type PlanStep = z.infer<typeof PlanStep>
 export const STRATEGY = { groundedPlan: 'grounded-plan', split: 'split', single: 'template:single', sweep: 'template:sweep' } as const
 
 // step-id vocabulary lives in step-ids.ts (zero-import: the browser and every plugin need it)
-export { STEP_ID, VERIFY_STEP_ID, COMMIT_STEP_ID, FINISH_STEP_ID, MASTERPLAN_NOTE_ID, type StepId } from './step-ids'
+export { STEP_ID, VERIFY_STEP_ID, COMMIT_STEP_ID, CHECKS_STEP_ID, CHECKS_EXECUTOR_REF, FINISH_STEP_ID, MASTERPLAN_NOTE_ID, type StepId } from './step-ids'
 import { STEP_ID, VERIFY_STEP_ID, MASTERPLAN_NOTE_ID } from './step-ids'
 
 // Step roles the system gives meaning to. `PlanStep.role` stays an open string on purpose — an

@@ -159,6 +159,12 @@ describe('loadConfig', () => {
       expect(loadConfig(dir).maxIterations).toBe(40)
     })
   })
+  it('finishChecks defaults to no checks; the config file supplies the commands, no empty ones', () => {
+    expect(loadConfig(mkdtempSync(path.join(tmpdir(), 'orc-'))).finishChecks).toEqual([])
+    expect(loadConfig(tmpProject({ finishChecks: ['bun run typecheck'] })).finishChecks).toEqual(['bun run typecheck'])
+    expect(() => loadConfig(tmpProject({ finishChecks: [''] }))).toThrow()
+  })
+
   it('workspaceSetup is one argv from the config file, no empty words', () => {
     expect(loadConfig(tmpProject({ workspaceSetup: ['bun', 'install', '--frozen-lockfile'] })).workspaceSetup).toEqual(['bun', 'install', '--frozen-lockfile'])
     expect(() => loadConfig(tmpProject({ workspaceSetup: ['bun', ''] }))).toThrow()
