@@ -17,6 +17,7 @@ const CLI = NO_CHAT(Door.cli)
 import { createMemory, FINISH_TOOL_NAME } from '@orc/memory'
 import { buildProgram } from './main'
 import { buildPlugins, buildRuntime, seedPhases } from './runtime'
+import { testSurrealDbName } from './test-helpers'
 import { seedShippedSkills } from './shipped-skills'
 
 const dbs: Array<{ drop: () => Promise<void> }> = []
@@ -116,7 +117,7 @@ describe('stepTools memory_verify registration', () => {
     const db = await createTestDb()
     dbs.push(db)
     const vaultDir = mkdtempSync(path.join(tmpdir(), 'orc-rt-verify-'))
-    const projectDbName = `t_${Math.random().toString(36).slice(2, 10)}`
+    const projectDbName = testSurrealDbName()
     const config = testConfig(db.url, { vaultDir, skillsDir: path.join(vaultDir, 'skills'), projectDbName })
     // Seeded the way `orc init` seeds a real project: the kernel appends a finish step declaring
     // ROLE_SKILL.finisher to every root plan, and a temp skills dir that nothing seeds fails the
@@ -290,7 +291,7 @@ describe('status memory health', () => {
     const db = await createTestDb()
     dbs.push(db)
     const vaultDir = mkdtempSync(path.join(tmpdir(), 'orc-rt-status-'))
-    const projectDbName = `t_${Math.random().toString(36).slice(2, 10)}`
+    const projectDbName = testSurrealDbName()
     const config = testConfig(db.url, { vaultDir, skillsDir: path.join(vaultDir, 'skills'), projectDbName })
     // Seeded the way `orc init` seeds a real project: the kernel appends a finish step declaring
     // ROLE_SKILL.finisher to every root plan, and a temp skills dir that nothing seeds fails the

@@ -2,11 +2,15 @@ import { Client } from 'pg'
 import { mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
+import { z } from 'zod'
 import { EVENT_KIND, WORKSPACE_KIND, type LoadedSkill, type ModelProvider, type Origin, type Workspace } from '@orc/contracts'
 import { TEST_WORKSPACE_ID } from '@orc/contracts/fixtures'
 import { loadConfig, requireProject, type OrcConfig, type ProjectConfig } from './config'
 import type { EventLogOps } from './storage'
 import { migrateDatabase } from './storage/migrate'
+import { staleTestDbs, testDbName } from './stale-test-dbs'
+
+export { STALE_TEST_DB_MS, staleTestDbs, testDbName } from './stale-test-dbs'
 
 const ADMIN_URL = process.env.ORC_DATABASE_URL ?? 'postgresql://postgres:orc@localhost:5433/orc'
 
@@ -111,9 +115,33 @@ async function withAdmin<T>(fn: (admin: Client) => Promise<T>): Promise<T> {
   try { return await fn(admin) } finally { await admin.end() }
 }
 
+const TEST_DB_PREFIX = 'orc_test_'
+const DbNameRow = z.object({ datname: z.string() })
+
+// a live backend marks a running test's database; the age rule alone decides the rest
+async function sweepStaleTestDbs(admin: Client): Promise<void> {
+  const all = DbNameRow.array().parse(
+    (await admin.query('SELECT datname FROM pg_database WHERE datname LIKE $1', [`${TEST_DB_PREFIX}%`])).rows,
+  )
+  const active = DbNameRow.array().parse(
+    (await admin.query('SELECT DISTINCT datname FROM pg_stat_activity WHERE datname IS NOT NULL')).rows,
+  )
+  const activeNames = new Set(active.map(r => r.datname))
+  const candidates = all.map(r => r.datname).filter(name => !activeNames.has(name))
+  for (const name of staleTestDbs(candidates, TEST_DB_PREFIX, Date.now())) {
+    try {
+      if (!/^[a-z0-9_]+$/.test(name)) throw new Error(`unexpected database name: ${name}`)
+      await admin.query(`DROP DATABASE IF EXISTS ${name} WITH (FORCE)`)
+    } catch { /* best-effort: a failing sweep must never fail the test that triggered it */ }
+  }
+}
+
 export async function createTestDb(opts: { migrate?: boolean } = {}): Promise<TestDb> {
-  const name = `orc_test_${Math.random().toString(36).slice(2, 10)}`
-  await withAdmin(admin => admin.query(`CREATE DATABASE ${name}`))
+  const name = testDbName(TEST_DB_PREFIX, Date.now(), Math.random().toString(36).slice(2, 10))
+  await withAdmin(async admin => {
+    await sweepStaleTestDbs(admin)
+    await admin.query(`CREATE DATABASE ${name}`)
+  })
   const url = new URL(ADMIN_URL)
   url.pathname = `/${name}`
   if (opts.migrate !== false) await migrateDatabase(url.toString()) // schema setup is explicit — open() only verifies

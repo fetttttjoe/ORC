@@ -9,7 +9,7 @@ import { createTestDb, seedTestWorkspace, TEST_PROJECT_ID, TEST_WORKSPACE, TEST_
 import { PROJECT_DIR_NOTE_ID } from '@orc/ui-core'
 import { buildModelDiscovery, buildOrcActions, catalogAppends, modelUniverse } from './actions'
 import { openMemory } from './memory-open'
-import { dropSurrealDb } from './test-helpers'
+import { dropSurrealDb, testSurrealDbName } from './test-helpers'
 import { archivedRefusal } from './workspace-ops'
 
 const dbs: Array<{ drop: () => Promise<void> }> = []
@@ -83,7 +83,7 @@ const setup = (listModels?: () => Promise<string[]>) => openActions({
 // for the one action whose behaviour is a read of the real read model: recordDecision refuses an
 // id that already exists, which the dead-port setup above could never exercise.
 async function setupWithSurreal() {
-  const r = await openActions({ config: { projectDbName: `t_${Math.random().toString(36).slice(2, 10)}` } })
+  const r = await openActions({ config: { projectDbName: testSurrealDbName() } })
   surrealConfigs.push(r.config)
   return r
 }

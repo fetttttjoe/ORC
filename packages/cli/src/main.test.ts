@@ -11,7 +11,7 @@ import { buildProgram, openKernel, runInit } from './main'
 import { buildOrcActions } from './actions'
 import { withMemory } from './memory-open'
 import { CommandFailure } from './exit'
-import { cli, dropSurrealDb } from './test-helpers'
+import { cli, dropSurrealDb, testSurrealDbName } from './test-helpers'
 import { watchSubtree } from './watch'
 import { buildPlugins } from './runtime'
 import { archivedRefusal } from './workspace-ops'
@@ -882,7 +882,7 @@ describe('orc CLI', () => {
     const db = await createTestDb()
     dbs.push(db)
     const dir = mkdtempSync(path.join(tmpdir(), 'orc-memory-cli-'))
-    const projectDbName = `t_${Math.random().toString(36).slice(2, 10)}`
+    const projectDbName = testSurrealDbName()
     const config = requireProject({ ...loadConfig(dir), projectDbName, projectId: TEST_PROJECT_ID, projectName: 'test' })
     surrealConfigs.push(config)
     const { kernel, log } = await openKernel(db.url, { projectId: TEST_PROJECT_ID, config: testOrcConfig() })
@@ -1043,7 +1043,7 @@ describe('orc CLI', () => {
     const db = await createTestDb()
     dbs.push(db)
     const dir = mkdtempSync(path.join(tmpdir(), 'orc-memory-withmem-'))
-    const projectDbName = `t_${Math.random().toString(36).slice(2, 10)}`
+    const projectDbName = testSurrealDbName()
     // keyword-only, same reason as the claims tests: nothing here needs an embedder
     const config = requireProject({ ...loadConfig(dir), projectDbName, projectId: TEST_PROJECT_ID, projectName: 'test', memoryEmbedModel: '' })
     surrealConfigs.push(config)
@@ -1072,7 +1072,7 @@ describe('orc CLI', () => {
     const db = await createTestDb()
     dbs.push(db)
     const dir = mkdtempSync(path.join(tmpdir(), 'orc-memory-closefail-'))
-    const projectDbName = `t_${Math.random().toString(36).slice(2, 10)}`
+    const projectDbName = testSurrealDbName()
     const config = requireProject({ ...loadConfig(dir), projectDbName, projectId: TEST_PROJECT_ID, projectName: 'test', memoryEmbedModel: '' })
     surrealConfigs.push(config)
     const { log } = await openKernel(db.url, { projectId: TEST_PROJECT_ID, config: testOrcConfig() })
@@ -1096,7 +1096,7 @@ describe('orc CLI', () => {
     const db = await createTestDb()
     dbs.push(db)
     const dir = mkdtempSync(path.join(tmpdir(), 'orc-memory-claims-cli-'))
-    const projectDbName = `t_${Math.random().toString(36).slice(2, 10)}`
+    const projectDbName = testSurrealDbName()
     // Keyword-only ON PURPOSE: `topics` is derived from claim EMBEDDINGS, so leaving the default
     // ollama embedder wired would make the empty-inventory assertion below depend on whether a
     // local Ollama happens to be running. The claims command itself never touches an embedder.
@@ -1181,7 +1181,7 @@ describe('orc CLI', () => {
     const db = await createTestDb()
     dbs.push(db)
     const dir = mkdtempSync(path.join(tmpdir(), 'orc-memory-claims-json-cli-'))
-    const projectDbName = `t_${Math.random().toString(36).slice(2, 10)}`
+    const projectDbName = testSurrealDbName()
     // Keyword-only, same reason as the sibling claims test: nothing here needs an embedder, and
     // leaving the default ollama one wired makes the test depend on whether a local Ollama runs.
     const config = requireProject({ ...loadConfig(dir), projectDbName, projectId: TEST_PROJECT_ID, projectName: 'test', memoryEmbedModel: '' })
@@ -1245,7 +1245,7 @@ describe('orc CLI', () => {
     const db = await createTestDb()
     dbs.push(db)
     const dir = mkdtempSync(path.join(tmpdir(), 'orc-memory-topics-cli-'))
-    const projectDbName = `t_${Math.random().toString(36).slice(2, 10)}`
+    const projectDbName = testSurrealDbName()
     // Keyword-only ON PURPOSE (same reason as the claims test): `topics` is derived from claim
     // EMBEDDINGS, so leaving the default ollama embedder wired would make the empty-inventory
     // assertions depend on whether a local Ollama happens to be running. With no embedder there
@@ -1291,7 +1291,7 @@ describe('cancel-sweep wiring (real plugin, stub port)', () => {
     const db = await createTestDb()
     dbs.push(db)
     const dir = mkdtempSync(path.join(tmpdir(), 'orc-cancel-sweep-'))
-    const projectDbName = `t_${Math.random().toString(36).slice(2, 10)}`
+    const projectDbName = testSurrealDbName()
     const config = requireProject({ ...loadConfig(dir), projectDbName, projectId: TEST_PROJECT_ID, projectName: 'test' })
     surrealConfigs.push(config)
     const { kernel, log } = await openKernel(db.url, { projectId: TEST_PROJECT_ID, config: testOrcConfig() })

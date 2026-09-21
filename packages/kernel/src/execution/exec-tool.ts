@@ -35,6 +35,8 @@ const LOG_DIR = path.join('.orc', 'exec')
 // Postgres/Surreal/network, and those can move without any file changing.
 const REUSE_TTL_MS = 15 * 60_000
 
+export const EXEC_TOOL_NAME = 'exec'
+
 interface Recorded { exitCode: number; stdout: string; stderr: string; logPath: string; ranAt: number }
 // Per (workspace, command, tree) — module-level so sibling steps in one wave share it.
 const recorded = new Map<string, Recorded>()
@@ -56,9 +58,9 @@ export function execTool(opts: {
   // registration gate: no allowlist, no tool — a tool that can only ever error is never offered
   if (allowlist.length === 0) return []
   return [{
-    ref: 'kernel/exec', name: 'exec',
+    ref: 'kernel/exec', name: EXEC_TOOL_NAME,
     description:
-      `Run one allowlisted command in the step workspace and get {exitCode, stdout, stderr} back. Allowed: ${allowlist.map(a => `'${a}'`).join(', ')} — arguments may be appended. There is NO shell: one command, run from the workspace root — no cd, no pipes, no && chaining, no globs; quoted arguments ARE honoured, so a pattern with spaces works (grep -n \"export const X\" file.ts); pass paths as arguments (e.g. 'bun test packages/x/src/y.test.ts'). A non-zero exitCode is a result to read and report, not a tool failure. Use this to actually execute acceptance gates (tests, typecheck) instead of deferring them downstream. stdout/stderr are CLIPPED head+tail; the FULL output is written to the returned logPath — fs_read that instead of re-running to see the middle. cached:true means an identical command already ran against this exact tree and its recorded result is being reused. A run ${killedAtCeiling(timeoutMs)} returns what it printed so far plus timedOut:true — read those lines, it is a hang.`,
+      `Run one allowlisted command in the step workspace and get {exitCode, stdout, stderr} back. Allowed: ${allowlist.map(a => `'${a}'`).join(', ')} — arguments may be appended. There is NO shell: one command, run from the workspace root — no cd, no pipes, no && chaining, no globs; quoted arguments ARE honoured, so a pattern with spaces works (grep -n \"export const X\" file.ts); pass paths as arguments (e.g. 'bun test packages/x/src/y.test.ts'). A non-zero exitCode is a result to read and report, not a tool failure. Use this to actually execute acceptance gates (tests, typecheck) instead of deferring them downstream. For tests, run the files you changed or 'bun test --changed' (only the test files reachable from your uncommitted edits); the whole suite is the operator's gate, not a step's. stdout/stderr are CLIPPED head+tail; the FULL output is written to the returned logPath — fs_read that instead of re-running to see the middle. cached:true means an identical command already ran against this exact tree and its recorded result is being reused. A run ${killedAtCeiling(timeoutMs)} returns what it printed so far plus timedOut:true — read those lines, it is a hang.`,
     inputSchema: {
       type: 'object', required: ['command'],
       properties: { command: { type: 'string', description: 'an allowlisted command, optionally extended with arguments' } },

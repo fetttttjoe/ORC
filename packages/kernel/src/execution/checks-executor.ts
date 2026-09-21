@@ -10,7 +10,7 @@ import { COMMAND_TIMEOUT_MS, killedAtCeiling, runCommand, type CommandResult } f
 const TAIL_CHARS = 2_000
 const CANCEL_POLL_MS = 2_000
 const LOG_DIR = path.join('.orc', 'checks')
-const CHECK_TOOL_NAME = 'check'
+export const CHECK_TOOL_NAME = 'check'
 export const NO_CHECKS_SUMMARY = 'no checks configured'
 const NOT_A_COMMAND_LIST = 'the step instructions are not a JSON list of commands'
 const ITERATION = 1

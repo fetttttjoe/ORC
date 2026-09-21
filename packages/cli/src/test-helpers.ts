@@ -11,6 +11,8 @@ import type { OrcActions, ProjectSessions } from '@orc/ui-core'
 import { modelOf } from '@orc/ui-core/test-helpers'
 import { buildProgram } from './main'
 
+export { testSurrealDbName } from '@orc/memory/test-helpers'
+
 // `use()` selects only the namespace, and the (internally-generated, `t_[a-z0-9]+`) db name is
 // inlined directly, since `REMOVE DATABASE IF EXISTS type::database($db)` is not a valid function
 // path in SurrealDB v3.2.0. Connection details come from the injected config — no literals.

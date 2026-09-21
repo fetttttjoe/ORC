@@ -12,6 +12,7 @@
     "orc": "bun packages/cli/src/bin.ts",
     "graph": "ORC_GRAPH_DEV=1 bun packages/cli/src/bin.ts graph",
     "test": "bun test",
+    "test:full": "bun test --parallel=4 --timeout=15000",
     "test:live": "bun test plugins/executor-api-loop/src/live-smoke.test.ts",
     "test:supervisor": "bun test packages/cli/src/supervisor-smoke.test.ts",
     "typecheck": "tsc --noEmit -p packages/contracts && tsc --noEmit -p packages/kernel && tsc --noEmit -p packages/cli && tsc --noEmit -p plugins/provider-anthropic && tsc --noEmit -p plugins/provider-openai && tsc --noEmit -p plugins/provider-ollama && tsc --noEmit -p plugins/executor-api-loop && tsc --noEmit -p plugins/mcp-client && tsc --noEmit -p packages/vault-projector && tsc --noEmit -p plugins/memory && tsc --noEmit -p plugins/analyzer-agent && tsc --noEmit -p packages/ui-core && tsc --noEmit -p packages/graph-ui && tsc --noEmit -p bench && tsc --noEmit -p scripts",

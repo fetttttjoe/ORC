@@ -14,7 +14,7 @@ import { createTestDb, fakeProvider, seedTestWorkspace, testConfig, TEST_PROJECT
 import { FINISH_TOOL_NAME } from '@orc/memory'
 import { buildPlugins, buildRuntime } from './runtime'
 import { seedShippedSkills } from './shipped-skills'
-import { dropSurrealDb } from './test-helpers'
+import { dropSurrealDb, testSurrealDbName } from './test-helpers'
 
 const dbs: Array<{ drop: () => Promise<void> }> = []
 const surrealBases: ProjectConfig[] = []
@@ -90,7 +90,7 @@ describe('the finish step, end to end', () => {
     const db = await createTestDb()
     dbs.push(db)
     const vaultDir = mkdtempSync(path.join(tmpdir(), 'orc-finish-'))
-    const projectDbName = `t_${Math.random().toString(36).slice(2, 10)}`
+    const projectDbName = testSurrealDbName()
     const config = testConfig(db.url, { vaultDir, skillsDir: path.join(vaultDir, 'skills'), projectDbName })
     // Seeded the way `orc init` seeds a real project: the finish step declares ROLE_SKILL.finisher,
     // and a temp skills dir that nothing seeds fails the run at step init with "unknown skill

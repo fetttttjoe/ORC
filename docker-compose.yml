@@ -1,6 +1,7 @@
 services:
   postgres:
     image: postgres:16-alpine
+    command: postgres -c max_connections=300 # parallel test workers: measured ~5 connections each
     environment:
       POSTGRES_PASSWORD: orc
       POSTGRES_DB: orc

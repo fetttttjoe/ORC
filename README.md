@@ -86,7 +86,7 @@ models. Zod contracts. Commander CLI.
 
 ```bash
 docker compose up -d --wait     # Postgres :5433 + SurrealDB :8000, loopback-only
-bun install && bun test
+bun install && bun run test:full     # the whole suite, four workers, ~190 s (plain `bun test` is sequential, ~470 s)
 
 (cd packages/cli && bun link)          # installs a global `orc` (Bun shim); alias works too
 

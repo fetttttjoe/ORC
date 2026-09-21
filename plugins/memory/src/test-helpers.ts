@@ -5,7 +5,7 @@ import { Surreal } from 'surrealdb'
 import { claimId, MemoryNote, MemoryScope, NOTE_KIND, NOTE_TIER, type MemoryStore, type NoteSummary } from '@orc/contracts'
 import { semanticNoteFixture, TEST_WORKSPACE_ID } from '@orc/contracts/fixtures'
 import { openStorage, type EventLog } from '@orc/kernel'
-import { createTestDb, sh, TEST_PROJECT_ID } from '@orc/kernel/test-helpers'
+import { createTestDb, sh, staleTestDbs, testDbName, TEST_PROJECT_ID } from '@orc/kernel/test-helpers'
 import { SurrealMemory } from './surreal'
 import { createMemoryStore } from './store'
 import { createMemoryProjector, type MemoryProjector, type ProjectorStore } from './projector'
@@ -17,10 +17,24 @@ const NS = process.env.ORC_PROJECT_DB_NAMESPACE ?? 'orc'
 const USERNAME = process.env.ORC_PROJECT_DB_USER ?? 'root'
 const PASSWORD = process.env.ORC_PROJECT_DB_PASSWORD ?? 'orc'
 
+const TEST_DB_PREFIX = 't_'
+
+export const testSurrealDbName = (): string => testDbName(TEST_DB_PREFIX, Date.now(), Math.random().toString(36).slice(2, 10))
+
 export async function createTestSurreal(): Promise<{
   url: string; ns: string; db: string; username: string; password: string; drop: () => Promise<void>
 }> {
-  const db = `t_${Math.random().toString(36).slice(2, 10)}`
+  const db = testSurrealDbName()
+
+  const sweep = new Surreal()
+  await sweep.connect(URL)
+  await sweep.signin({ username: USERNAME, password: PASSWORD })
+  await sweep.use({ namespace: NS })
+  const [sweepInfo] = await sweep.query<[{ databases: Record<string, unknown> }]>('INFO FOR NS;')
+  for (const name of staleTestDbs(Object.keys(sweepInfo?.databases ?? {}), TEST_DB_PREFIX, Date.now()))
+    await sweep.query(`REMOVE DATABASE IF EXISTS \`${name}\`;`).catch(() => {})
+  await sweep.close()
+
   return {
     url: URL, ns: NS, db, username: USERNAME, password: PASSWORD,
     drop: async () => {
@@ -31,7 +45,7 @@ export async function createTestSurreal(): Promise<{
       // v3.2.0 that `REMOVE DATABASE IF EXISTS type::database($db)` is not a valid function path
       // (a parse ValidationError — a bare .catch here swallows it and silently leaves ~80 throwaway
       // `t_*` dbs behind). The working shape inlines the db name directly;
-      // safe because `db` is generated above from `[a-z0-9]` only, never external input.
+      // safe because `db` is generated above from `[a-z0-9_]` only, never external input.
       await s.use({ namespace: NS })
       // createMemory derives `${db}_<projectSuffix>` from this base name — remove those too.
       // INFO FOR NS lists databases; names are internally generated, never external input.

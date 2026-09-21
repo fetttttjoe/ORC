@@ -10,7 +10,7 @@ import { ADR_SECTION, DECISION_REFUSAL } from '@orc/memory'
 import { renderDecisionList } from './adr-commands'
 import { openKernel } from './main'
 import { buildPlugins } from './runtime'
-import { cli, dropSurrealDb } from './test-helpers'
+import { cli, dropSurrealDb, testSurrealDbName } from './test-helpers'
 
 const dbs: Array<{ drop: () => Promise<void> }> = []
 const surrealConfigs: ProjectConfig[] = []
@@ -30,7 +30,7 @@ async function makeAdrCli() {
   const db = await createTestDb()
   dbs.push(db)
   const dir = mkdtempSync(path.join(tmpdir(), 'orc-adr-cli-'))
-  const projectDbName = `t_${Math.random().toString(36).slice(2, 10)}`
+  const projectDbName = testSurrealDbName()
   const config = requireProject({ ...loadConfig(dir), projectDbName, projectId: TEST_PROJECT_ID, projectName: 'test' })
   surrealConfigs.push(config)
   const { kernel, log } = await openKernel(db.url, { projectId: TEST_PROJECT_ID, config })

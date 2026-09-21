@@ -81,8 +81,10 @@ is a design problem: say so and redesign rather than shipping the seam.
 - **Teardown is unconditional** — `finally`, `afterAll`, or the file's existing `cleanup` array. A
   bare `await port.shutdown()` after assertions leaks a DBOS runtime when anything above it throws,
   and poisons every later test file.
-- The full suite is ~210s and needs Postgres (:5433) and SurrealDB (:8000) up. Run the files you
-  touched while working; run the whole suite as the gate before committing.
+- The gate is `bun run test:full` (four parallel workers, 15 s test/hook timeout): ~190 s, alone, with
+  Postgres (:5433) and SurrealDB (:8000) up. Plain `bun test` runs sequentially in ~470 s and keeps
+  the 5 s default so a hang shows fast. Run the files you touched while working; run the gate once
+  before merging.
 
 ## Gotchas
 
