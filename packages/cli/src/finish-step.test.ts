@@ -4,8 +4,9 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import {
   APPROVAL_ANSWER, AUTHOR_SOURCE, DECISION_STATUS, Door, EVENT_KIND, FINISH_STEP_ID, isApprovalAnswer, NO_CHAT,
-  MemoryWrittenPayload, NOTE_KIND, NOTE_TIER, parseModelRef, SIGNAL_OUTCOME, slugId, STEP_ROLE, TASK_STATUS,
+  MemoryWrittenPayload, NOTE_KIND, NOTE_TIER, parseModelRef, SignalOutcome, slugId, STEP_ROLE, TASK_STATUS,
   type AgentExecutor, type EventDraft, type ExecutorContext, type SplitResult, type UnifiedEvent,
+  RunOutcome,
 } from '@orc/contracts'
 import { draftFixture, stepFixture } from '@orc/contracts/fixtures'
 import { dbosSend, openStorage, Kernel, type ProjectConfig } from '@orc/kernel'
@@ -70,7 +71,7 @@ const finishExecutor: AgentExecutor<unknown> = {
       }
       summary = `finished: ${answer}`
     }
-    const signal = { stepId: ctx.step.id, runToken: ctx.runToken, outcome: SIGNAL_OUTCOME.success, summary }
+    const signal = { stepId: ctx.step.id, runToken: ctx.runToken, outcome: SignalOutcome.success, summary }
     await ctx.checkpoint('signal:1', async () => signal, (): EventDraft[] => [
       { kind: EVENT_KIND.signal_received, payload: { stepId: ctx.step.id, runToken: ctx.runToken, signal } },
     ])
@@ -124,7 +125,7 @@ describe('the finish step, end to end', () => {
       // `orc status` reads to say which step is waiting
       expect(asked?.stepId).toBe(FINISH_STEP_ID)
       expect(await kernel.replyFeedback(t.id, APPROVAL_ANSWER, CLI)).toBe(FINISH_TOPIC)
-      expect(await handle.wait()).toBe('done')
+      expect(await handle.wait()).toBe(RunOutcome.done)
 
       // the step saw the human's word (so isApprovalAnswer had something real to judge) and got a
       // working task_notes — both are the tools/resume seam this test exists for

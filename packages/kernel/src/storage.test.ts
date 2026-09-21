@@ -7,7 +7,7 @@ import pg from 'pg'
 import { drizzle } from 'drizzle-orm/node-postgres'
 import { migrate } from 'drizzle-orm/node-postgres/migrator'
 import { jsonb, pgTable, text } from 'drizzle-orm/pg-core'
-import { Door, EVENT_KIND, isRecord, isTerminalError, NO_CHAT, type EventInput, type OperationSpec } from '@orc/contracts'
+import { Door, EVENT_KIND, isRecord, isTerminalError, NO_CHAT, OperationKind, OperationStatus, SignalOutcome, TASK_STATUS, type EventInput, type OperationSpec, type TaskStatus } from '@orc/contracts'
 import { authorFixture, eventFixture, must } from '@orc/contracts/fixtures'
 import { KernelError, KERNEL_ERROR_CODE } from './errors'
 import { listProjectIds, openStorage, type EventLog, type Storage } from './storage'
@@ -98,10 +98,12 @@ describe('schema migration', () => {
   }, 1000)
 })
 
-const statusEvent = (taskId = 't1'): EventInput => ({
+const statusEvent = (
+  taskId = 't1', from: TaskStatus = TASK_STATUS.draft, to: TaskStatus = TASK_STATUS.awaiting_approval,
+): EventInput => ({
   ...ORIGIN, taskId, stepId: null, runToken: null,
   kind: EVENT_KIND.task_status_changed,
-  payload: { taskId, from: 'draft', to: 'awaiting_approval' },
+  payload: { taskId, from, to },
 })
 
 describe('EventLog (postgres)', () => {
@@ -116,6 +118,7 @@ describe('EventLog (postgres)', () => {
 
   it('rejects payloads that do not match the kind schema', async () => {
     const log = await freshLog()
+    // @ts-expect-error the same mismatch the append refuses at runtime — the type refuses it first
     await expect(log.append({ ...statusEvent(), payload: { wrong: true } })).rejects.toThrow()
     expect(await log.all()).toHaveLength(0)
   })
@@ -249,12 +252,12 @@ describe('EventLog (postgres)', () => {
     await log.append(statusEvent('t1'))
     await log.append({
       ...ORIGIN, taskId: 't2', stepId: null, runToken: null, kind: EVENT_KIND.task_created,
-      payload: { task: { id: 't2', parentId: null, workspaceId: TEST_WORKSPACE_ID, type: 'generic', title: 't2', spec: '', status: 'draft', zone: [], budgetUSD: null, depth: 0, createdAt: 'T' } },
+      payload: { task: { id: 't2', parentId: null, workspaceId: TEST_WORKSPACE_ID, type: 'generic', title: 't2', spec: '', status: TASK_STATUS.draft, zone: [], budgetUSD: null, depth: 0, createdAt: 'T' } },
     })
     await log.append(statusEvent('t3'))
-    expect((await log.after(0, ['task_created'])).map(e => e.seq)).toEqual([2])
+    expect((await log.after(0, [EVENT_KIND.task_created])).map(e => e.seq)).toEqual([2])
     expect((await log.after(1)).map(e => e.seq)).toEqual([2, 3])
-    expect((await log.after(0, ['task_created', 'task_status_changed'])).map(e => e.seq)).toEqual([1, 2, 3])
+    expect((await log.after(0, [EVENT_KIND.task_created, EVENT_KIND.task_status_changed])).map(e => e.seq)).toEqual([1, 2, 3])
   })
 
   it('idempotency: same key + same input returns the original seq and stores one row', async () => {
@@ -269,10 +272,7 @@ describe('EventLog (postgres)', () => {
     const log = await freshLog()
     await log.append({ ...statusEvent(), idempotencyKey: 'r1:status:0' })
     await expect(
-      log.append({
-        ...statusEvent(), idempotencyKey: 'r1:status:0',
-        payload: { taskId: 't1', from: 'approved', to: 'running' },
-      }),
+      log.append({ ...statusEvent('t1', TASK_STATUS.approved, TASK_STATUS.running), idempotencyKey: 'r1:status:0' }),
     ).rejects.toThrow(/idempotency key/)
     expect(await log.all()).toHaveLength(1)
   })
@@ -425,7 +425,7 @@ describe('EventLog (postgres)', () => {
 })
 
 const OP_CONTEXT = { taskId: 't1', stepId: 's1', runToken: 'step:t1:s1:a1', origin: ORIGIN }
-const OP_SPEC: OperationSpec = { operationId: 'step:t1:s1:a1:model:1', kind: 'model', name: 'fake/m', before: { messages: ['hi'] } }
+const OP_SPEC: OperationSpec = { operationId: 'step:t1:s1:a1:model:1', kind: OperationKind.model, name: 'fake/m', before: { messages: ['hi'] } }
 
 describe('OperationJournal', () => {
   it('beginOperation commits a started node and its transition before external code runs', async () => {
@@ -433,11 +433,11 @@ describe('OperationJournal', () => {
     const begin = await journal.beginOperation(OP_CONTEXT, OP_SPEC)
     expect(begin).toEqual({ reused: false, attempt: 1 })
     const op = must((await journal.operationsFor('t1'))[0], 'first operation for task t1')
-    expect(op.status).toBe('started')
+    expect(op.status).toBe(OperationStatus.started)
     expect(op.attempts).toBe(1)
     expect(op.name).toBe('fake/m')
     const kinds = (await log.byTask('t1')).map(e => e.kind)
-    expect(kinds).toEqual(['operation_started'])
+    expect(kinds).toEqual([EVENT_KIND.operation_started])
   })
 
   it('completeOperation stores after and appends completion plus drafts atomically', async () => {
@@ -447,11 +447,11 @@ describe('OperationJournal', () => {
       { kind: EVENT_KIND.agent_call, payload: { stepId: 's1', runToken: OP_CONTEXT.runToken, iteration: 1, request: {}, response: { text: 'answer' } } },
     ])
     const op = must((await journal.operationsFor('t1'))[0], 'first operation for task t1')
-    expect(op.status).toBe('completed')
+    expect(op.status).toBe(OperationStatus.completed)
     expect(op.after).toEqual({ text: 'answer' })
     expect(op.finishedSeq).not.toBeNull()
     const kinds = (await log.byTask('t1')).map(e => e.kind)
-    expect(kinds).toEqual(['operation_started', 'operation_completed', 'agent_call'])
+    expect(kinds).toEqual([EVENT_KIND.operation_started, EVENT_KIND.operation_completed, EVENT_KIND.agent_call])
   })
 
   it('beginOperation after completion reuses the stored value without another attempt', async () => {
@@ -470,7 +470,7 @@ describe('OperationJournal', () => {
     expect(second).toEqual({ reused: false, attempt: 2 })
     const op = must((await journal.operationsFor('t1'))[0], 'first operation for task t1')
     expect(op.attempts).toBe(2)
-    expect(op.status).toBe('started')
+    expect(op.status).toBe(OperationStatus.started)
     expect((await log.byTask('t1')).filter(e => e.kind === 'operation_started')).toHaveLength(2)
   })
 
@@ -479,12 +479,13 @@ describe('OperationJournal', () => {
     await journal.beginOperation(OP_CONTEXT, OP_SPEC)
     await expect(
       journal.completeOperation(OP_CONTEXT, OP_SPEC, 1, { text: 'x' }, [
-        { kind: EVENT_KIND.agent_call, payload: { wrong: true } }, // fails payload validation
+        // @ts-expect-error fails payload validation — and the draft type refuses it before the append does
+        { kind: EVENT_KIND.agent_call, payload: { wrong: true } },
       ]),
     ).rejects.toThrow()
     const op = must((await journal.operationsFor('t1'))[0], 'first operation for task t1')
-    expect(op.status).toBe('started') // update rolled back with the event
-    expect((await log.byTask('t1')).map(e => e.kind)).toEqual(['operation_started'])
+    expect(op.status).toBe(OperationStatus.started) // update rolled back with the event
+    expect((await log.byTask('t1')).map(e => e.kind)).toEqual([EVENT_KIND.operation_started])
   })
 
   it('failOperation records the error and a stale attempt is rejected', async () => {
@@ -492,7 +493,7 @@ describe('OperationJournal', () => {
     await journal.beginOperation(OP_CONTEXT, OP_SPEC)
     await journal.failOperation(OP_CONTEXT, OP_SPEC, 1, { message: 'boom' })
     const op = must((await journal.operationsFor('t1'))[0], 'first operation for task t1')
-    expect(op.status).toBe('failed')
+    expect(op.status).toBe(OperationStatus.failed)
     expect(op.error).toEqual({ message: 'boom' })
     await expect(journal.completeOperation(OP_CONTEXT, OP_SPEC, 2, {})).rejects.toThrow(/stale/)
   })
@@ -533,7 +534,7 @@ describe('OperationJournal', () => {
     const log = await freshLog()
     const payload = {
       stepId: 's1', runToken: 'r1',
-      signal: { stepId: 's1', runToken: 'r1', outcome: 'success', summary: 'ok', outputs: undefined },
+      signal: { stepId: 's1', runToken: 'r1', outcome: SignalOutcome.success, summary: 'ok', outputs: undefined },
     }
     const first = await log.append({ ...ORIGIN, taskId: 't1', stepId: 's1', runToken: 'r1', kind: EVENT_KIND.signal_received, payload, idempotencyKey: 'r1:signal' })
     const replay = await log.append({ ...ORIGIN, taskId: 't1', stepId: 's1', runToken: 'r1', kind: EVENT_KIND.signal_received, payload, idempotencyKey: 'r1:signal' })
@@ -547,7 +548,7 @@ describe('OperationJournal', () => {
 
     // lost-ack failure path after a durable completion: must be a no-op
     await journal.failOperation(OP_CONTEXT, OP_SPEC, 1, { message: 'connection reset' })
-    expect(must((await journal.operationsFor('t1'))[0], 'first operation for task t1').status).toBe('completed')
+    expect(must((await journal.operationsFor('t1'))[0], 'first operation for task t1').status).toBe(OperationStatus.completed)
 
     // re-entry of the committed attempt returns the stored value instead of throwing
     expect(await journal.completeOperation(OP_CONTEXT, OP_SPEC, 1, { text: 'done' })).toEqual({ text: 'done' })
@@ -565,7 +566,7 @@ describe('OperationJournal', () => {
     const s2 = await openStorage(db.url, { projectId: '00000000-0000-4000-8000-000000000002' })
     db.onClose(() => s2.close())
     const journal = s1.operations
-    const spec2: OperationSpec = { ...OP_SPEC, operationId: 'step:t1:s1:a1:tool:1:c1', kind: 'tool', name: 'echo' }
+    const spec2: OperationSpec = { ...OP_SPEC, operationId: 'step:t1:s1:a1:tool:1:c1', kind: OperationKind.tool, name: 'echo' }
     await journal.beginOperation(OP_CONTEXT, OP_SPEC)
     await journal.completeOperation(OP_CONTEXT, OP_SPEC, 1, { text: 'a' })
     await journal.beginOperation(OP_CONTEXT, spec2)
@@ -584,11 +585,11 @@ describe('OperationJournal', () => {
 // store.write needs ONE note as its merge base, and used to fold the project's entire memory
 // history to find it — inside the project advisory lock, which serializes every other writer.
 describe('latestNoteEvent', () => {
-  const wrote = (id: string, scope: string, body: string) => ({
+  const wrote = (id: string, scope: string, body: string): EventInput => ({
     ...ORIGIN, taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_written,
     payload: { note: { id, scope, title: id, body }, author: authorFixture() },
   })
-  const deleted = (id: string, scope: string) => ({
+  const deleted = (id: string, scope: string): EventInput => ({
     ...ORIGIN, taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_deleted,
     payload: { id, scope, author: authorFixture() },
   })

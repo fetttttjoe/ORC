@@ -3,8 +3,8 @@ import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from 'node:f
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { AUTHOR_SOURCE, Door, EVENT_KIND, MemoryScope, NO_CHAT, PAYLOAD_SCHEMAS, type NoteView, type Origin } from '@orc/contracts'
-import { draftFixture, must, stepFixture } from '@orc/contracts/fixtures'
+import { AUTHOR_SOURCE, Door, EVENT_KIND, MemoryScope, NO_CHAT, PAYLOAD_SCHEMAS, RunOutcome, type NoteView, type Origin } from '@orc/contracts'
+import { authorFixture, draftFixture, must, stepFixture } from '@orc/contracts/fixtures'
 import { createMcpHub } from '@orc/mcp-client'
 import { apiLoopExecutor } from '@orc/executor-api-loop'
 import { scriptModel } from '@orc/executor-api-loop/test-model'
@@ -80,7 +80,7 @@ describe('sourced web research through a durable run (integration)', () => {
       providers: new Map([['fake', { costs: {}, languageModel: () => model }]]),
       executors: new Map([['api-loop', apiLoopExecutor()]]),
       skills, tools: hub,
-      stepTools: p => memory.bindStep({ author: { source: AUTHOR_SOURCE.agent, origin: p.origin, workspaceId: p.workspaceId, taskId: p.taskId, stepId: p.stepId, runToken: p.runToken, executor: p.executor, model: p.model, role: p.role }, step: p.step, taskId: p.taskId, ancestorTaskIds: p.ancestorTaskIds }),
+      stepTools: p => memory.bindStep({ author: authorFixture({ source: AUTHOR_SOURCE.agent, origin: p.origin, workspaceId: p.workspaceId, taskId: p.taskId, stepId: p.stepId, runToken: p.runToken, executor: p.executor, model: p.model, role: p.role }), step: p.step, taskId: p.taskId, ancestorTaskIds: p.ancestorTaskIds }),
     })
     await port.launch()
     cleanup.push(() => port.shutdown())
@@ -91,7 +91,7 @@ describe('sourced web research through a durable run (integration)', () => {
       modelRef: 'fake/m', skillRefs: ['web-research'], toolRefs: ['fixture/echo'],
     })]), CLI)
     await kernel.approvePlan(t.id, undefined, undefined, CLI)
-    expect(await (await port.startRun(t.id)).wait()).toBe('done')
+    expect(await (await port.startRun(t.id)).wait()).toBe(RunOutcome.done)
 
     // the shipped skill reached the model, and the trusted MCP tool actually ran
     const events = await kernel.eventsFor(t.id)

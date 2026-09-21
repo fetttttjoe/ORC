@@ -3,6 +3,7 @@ import { mkdirSync, mkdtempSync, realpathSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { AUTHOR_SOURCE, DECISION_STATUS, Door, EVENT_KIND, MemoryWrittenPayload, NOTE_KIND, PlanDraft, TASK_STATUS, WORKSPACE_KIND, WORKSPACE_STATE, type Origin } from '@orc/contracts'
+import { authorFixture } from '@orc/contracts/fixtures'
 import { KERNEL_ERROR_CODE, Kernel, KernelError, currentBranch, initializeProject, loadConfig, openStorage, requireProject, type ProjectConfig } from '@orc/kernel'
 import { createTestDb, seedTestWorkspace, TEST_PROJECT_ID, TEST_WORKSPACE, TEST_WORKSPACE_ID, testConfig, tmpGitRepo, type TestDb } from '@orc/kernel/test-helpers'
 import { PROJECT_DIR_NOTE_ID } from '@orc/ui-core'
@@ -565,7 +566,7 @@ describe('deleteProject', () => {
     db.onClose(() => foreign.close())
     await foreign.events.append({
       taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_written,
-      payload: { note: { id: 'n1', title: 'n1' }, author: { source: AUTHOR_SOURCE.cli, workspaceId: TEST_WORKSPACE_ID, origin: WEB } }, ...WEB,
+      payload: { note: { id: 'n1', title: 'n1' }, author: authorFixture({ origin: WEB }) }, ...WEB,
     })
 
     const r = await actions.deleteProject('doomed-project', WEB)

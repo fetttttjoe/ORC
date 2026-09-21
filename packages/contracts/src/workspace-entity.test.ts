@@ -11,7 +11,7 @@ const ws = {
 
 describe('Workspace', () => {
   it('parses a managed worktree and an adopted checkout', () => {
-    expect(Workspace.parse(ws).kind).toBe('worktree')
+    expect(Workspace.parse(ws).kind).toBe(WORKSPACE_KIND.worktree)
     expect(Workspace.parse({ ...ws, kind: WORKSPACE_KIND.checkout, managed: false, baseBranch: null, branch: null }).branch).toBeNull()
   })
   it('refuses an unknown kind and an empty cwd', () => {
@@ -55,7 +55,7 @@ describe('MemoryAuthor.workspaceId', () => {
   })
   it('round-trips an agent author carrying the workspace it wrote from', () => {
     const origin = NO_CHAT(Door.cli)
-    expect(MemoryAuthor.parse({ source: AUTHOR_SOURCE.agent, workspaceId: ws.id, origin })).toEqual({ source: 'agent', workspaceId: ws.id, origin })
+    expect(MemoryAuthor.parse({ source: AUTHOR_SOURCE.agent, workspaceId: ws.id, origin })).toEqual({ source: AUTHOR_SOURCE.agent, workspaceId: ws.id, origin })
   })
   // The door is the half of the provenance that is never null, so an author that named only a chat
   // would read back as having come from nowhere on every chatless write.

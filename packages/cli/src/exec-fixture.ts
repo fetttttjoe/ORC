@@ -1,15 +1,19 @@
 // Subprocess fixture: runs the real `run` command against a stub port so tests can
 // assert the process exit status without poisoning the shared bun test process.
-import { Door, EVENT_KIND, NO_CHAT, TASK_STATUS, type ExecutionPort, type RunHandle, type TaskStatus } from '@orc/contracts'
+import { Door, EVENT_KIND, NO_CHAT, RunOutcome, TASK_STATUS, type ExecutionPort, type RunHandle, type TaskStatus } from '@orc/contracts'
 import { buildProgram, openKernel } from './main'
 import { exitCodeFor } from './exit'
-import { TEST_PROJECT_ID } from '@orc/kernel/test-helpers'
+import { TEST_PROJECT_ID, testOrcConfig } from '@orc/kernel/test-helpers'
 
 const [dbUrl, taskId, outcome] = process.argv.slice(2)
-if (!dbUrl || !taskId || (outcome !== TASK_STATUS.done && outcome !== TASK_STATUS.blocked))
+if (!dbUrl || !taskId || (outcome !== 'done' && outcome !== 'blocked'))
   throw new Error('usage: exec-fixture <dbUrl> <taskId> done|blocked')
-const { kernel, log } = await openKernel(dbUrl, { projectId: TEST_PROJECT_ID })
-const handle: RunHandle = { workflowId: 'fixture', wait: async () => outcome }
+// one CLI arg names both vocabularies: the run outcome the fixture reports, and the task
+// status the fake supervisor stamps — distinct enums that happen to share these two spellings
+const runOutcome = outcome === 'done' ? RunOutcome.done : RunOutcome.blocked
+const taskStatus = outcome === 'done' ? TASK_STATUS.done : TASK_STATUS.blocked
+const { kernel, log } = await openKernel(dbUrl, { projectId: TEST_PROJECT_ID, config: testOrcConfig() })
+const handle: RunHandle = { workflowId: 'fixture', wait: async () => runOutcome }
 const port: ExecutionPort = {
   startRun: async () => handle,
   retry: async () => handle,
@@ -29,7 +33,7 @@ const driving = (async () => {
     await Bun.sleep(20)
   }
   await stamp(TASK_STATUS.approved, TASK_STATUS.running)
-  await stamp(TASK_STATUS.running, outcome)
+  await stamp(TASK_STATUS.running, taskStatus)
 })()
 // mirrors bin.ts: a command states its outcome by throwing, the entry point turns it into the
 // process's exit status. This fixture exists to observe that status, so it must translate it the

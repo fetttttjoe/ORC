@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test'
-import { CHECKS_EXECUTOR_REF, CHECKS_STEP_ID, ChildPlanDraft, FINISH_STEP_ID, ISOLATION_TIER, ROLE_SKILL, STEP_ROLE, STRATEGY } from '@orc/contracts'
+import { CHECKS_EXECUTOR_REF, CHECKS_STEP_ID, ChildPlanDraft, FINISH_STEP_ID, IsolationTier, ROLE_SKILL, STEP_ROLE, STRATEGY } from '@orc/contracts'
 import { draftFixture, must, stepFixture } from '@orc/contracts/fixtures'
 import { FINISH_EXEMPT_STRATEGIES, kernelStepExecutorRef, plansGetFinishStep, reconcileFinishStep, withFinishStepFull, withoutKernelFinishStep } from './finish-step'
 
@@ -13,7 +13,7 @@ describe('withFinishStepFull (full-PlanDraft plans)', () => {
     expect(out.steps.map(s => s.id)).toEqual(['s1', FINISH_STEP_ID])
     expect(out.steps[1]).toMatchObject({
       role: STEP_ROLE.finisher, executorRef: 'api-loop', modelRef: 'fake/big', maxIterations: 7,
-      isolation: ISOLATION_TIER.local, zone: [], readOnlySource: true, skillRefs: [ROLE_SKILL.finisher], dependsOn: ['s1'],
+      isolation: IsolationTier.local, zone: [], readOnlySource: true, skillRefs: [ROLE_SKILL.finisher], dependsOn: ['s1'],
     })
     expect(out.strategyRef).toBe(STRATEGY.single)
   })
@@ -59,7 +59,7 @@ describe('withFinishStepFull (full-PlanDraft plans)', () => {
     expect(out.steps[2]).toMatchObject({
       role: STEP_ROLE.worker, executorRef: CHECKS_EXECUTOR_REF, instructions: JSON.stringify(CHECKS.checks),
       dependsOn: ['a', 'b'], zone: [], readOnlySource: true, skillRefs: [], toolRefs: [],
-      modelRef: 'fake/tail', maxIterations: 3, isolation: ISOLATION_TIER.local,
+      modelRef: 'fake/tail', maxIterations: 3, isolation: IsolationTier.local,
     })
     expect(out.steps[3]).toMatchObject({ role: STEP_ROLE.finisher, dependsOn: ['a', 'b', CHECKS_STEP_ID] })
   })

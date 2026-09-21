@@ -1,5 +1,5 @@
 import { TASK_STATUS } from '@orc/contracts/task'
-import { STEP_RUN_STATUS } from '@orc/contracts/execution'
+import { StepRunStatus } from '@orc/contracts/execution'
 
 /**
  * The two-temperature system, in one place. Amber = waits on a HUMAN, steel = autonomous machine
@@ -43,7 +43,7 @@ export const statusTemperature = (status: string): Temperature => {
     case TASK_STATUS.done:
     // a step reports `completed` where a task reports `done`; without this a finished step
     // rendered in the same grey as one that had never started
-    case STEP_RUN_STATUS.completed:
+    case StepRunStatus.completed:
       return 'moss'
     case TASK_STATUS.blocked:
     case TASK_STATUS.failed:

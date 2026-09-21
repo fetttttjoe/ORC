@@ -16,7 +16,7 @@ import { z } from 'zod'
 import { Server } from '@modelcontextprotocol/sdk/server/index.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js'
-import { AUTHOR_SOURCE, Door, errorMessage, NO_CHAT, toolError, type MemoryAuthor, type ResolvedTool, type SupervisorHealth } from '@orc/contracts'
+import { ApprovedBy, Door, errorMessage, NO_CHAT, toolError, type MemoryAuthor, type ResolvedTool, type SupervisorHealth } from '@orc/contracts'
 import type { EventLog, ProjectConfig } from '@orc/kernel'
 import { MEMORY_READ_TOOLS, MEMORY_ROLE, createDriftProbe, createMemory, createWorkspaceView, memoryTools as buildMemoryTools, probeMemory, unavailableMemoryTools } from '@orc/memory'
 import { openMemory } from './memory-open'
@@ -56,7 +56,7 @@ export function mcpApproveTool(actions: OrcActions, autonomy: Autonomy): Resolve
       const parsed = ApproveInput.safeParse(input ?? {})
       if (!parsed.success) return toolError(parsed.error)
       try {
-        return { output: await actions.approve(parsed.data.taskId, { ...(parsed.data.version !== undefined && { version: parsed.data.version }), approvedBy: AUTHOR_SOURCE.mcp }, MCP_ORIGIN), isError: false }
+        return { output: await actions.approve(parsed.data.taskId, { ...(parsed.data.version !== undefined && { version: parsed.data.version }), approvedBy: ApprovedBy.mcp }, MCP_ORIGIN), isError: false }
       } catch (err) {
         return toolError(err)
       }

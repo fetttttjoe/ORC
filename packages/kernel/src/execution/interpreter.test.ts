@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test'
-import type { Plan, PlanStep } from '@orc/contracts'
+import { RunOutcome, type Plan, type PlanStep } from '@orc/contracts'
 import { planFixture, stepFixture } from '@orc/contracts/fixtures'
 import { readySteps, runOutcomeOf } from './interpreter'
 
@@ -32,10 +32,10 @@ describe('readySteps (diamond: a → b,c → d)', () => {
 describe('runOutcomeOf', () => {
   const p = plan([step('a'), step('b', ['a'])])
   it('done when every step completed', () => {
-    expect(runOutcomeOf(p, new Set(['a', 'b']))).toBe('done')
+    expect(runOutcomeOf(p, new Set(['a', 'b']))).toBe(RunOutcome.done)
   })
   it('blocked when anything failed or unreachable', () => {
-    expect(runOutcomeOf(p, new Set(['a']))).toBe('blocked')
-    expect(runOutcomeOf(p, new Set())).toBe('blocked') // b unreachable
+    expect(runOutcomeOf(p, new Set(['a']))).toBe(RunOutcome.blocked)
+    expect(runOutcomeOf(p, new Set())).toBe(RunOutcome.blocked) // b unreachable
   })
 })

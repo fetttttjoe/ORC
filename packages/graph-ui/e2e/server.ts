@@ -1,7 +1,7 @@
 // E2E fixture server (run by playwright's webServer): real Postgres test db, seeded state,
 // scripted copilot, kernel-backed newTask — everything else read-only-stubbed.
 import { MockLanguageModelV4 } from 'ai/test'
-import { AUTHOR_SOURCE, Door, EVENT_KIND, FAILURE_CLASS, NO_CHAT, STEP_ID, TASK_STATUS, WORKSPACE_KIND } from '@orc/contracts'
+import { AUTHOR_SOURCE, Door, EVENT_KIND, FailureClass, NO_CHAT, STEP_ID, TASK_STATUS, WORKSPACE_KIND } from '@orc/contracts'
 import { TEST_WORKSPACE_ID, semanticNoteFixture, stepFixture } from '@orc/contracts/fixtures'
 import { draftFixture } from '@orc/contracts/fixtures'
 
@@ -167,7 +167,7 @@ await storage.events.append({
 })
 await storage.events.append({
   ...rejectEnvelope, kind: EVENT_KIND.step_failed,
-  payload: { stepId: REJECT_STEP_ID, runToken: REJECT_RUN_TOKEN, class: FAILURE_CLASS.rejected, message: 'three placement defects; content sound' },
+  payload: { stepId: REJECT_STEP_ID, runToken: REJECT_RUN_TOKEN, class: FailureClass.rejected, message: 'three placement defects; content sound' },
 })
 await storage.events.append({
   ...AGENT, taskId: rejected.id, stepId: null, runToken: null, kind: EVENT_KIND.task_status_changed,

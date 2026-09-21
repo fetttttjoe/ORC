@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test'
-import { COMMIT_STEP_ID, FINISH_STEP_ID, GROUNDED_APPROVAL_DOOR, STEP_ROLE, type MemoryLink, type PlanNote } from '@orc/contracts'
+import { COMMIT_STEP_ID, FINISH_STEP_ID, GroundedApprovalDoor, STEP_ROLE, type MemoryLink, type PlanNote } from '@orc/contracts'
 import { must, planNoteFixture } from '@orc/contracts/fixtures'
 import { finalizePlanTool } from './finalize-plan-tool'
 import { runOrigin } from './run-chat'
@@ -20,7 +20,7 @@ const link = (id: string, kind: MemoryLink['kind']): MemoryLink => ({ id, kind }
 function fakeKernel(
   notes: PlanNote[], calls: unknown[] = [], approvedHash: string | null = planGraphHash(notes),
   nonHuman: { source: string } | null = null,
-  doors: readonly string[] = [GROUNDED_APPROVAL_DOOR.cli],
+  doors: readonly string[] = [GroundedApprovalDoor.cli],
 ): Pick<import('../kernel').Kernel, 'proposeSplit' | 'listPlanNotes' | 'approvedPlanHash' | 'planNotesChangedSince' | 'nonHumanPlanApproval' | 'approvalDoors'> {
   return {
     approvalDoors: doors,
@@ -119,7 +119,7 @@ describe('finalize_plan tool', () => {
       note({ id: 'masterplan', title: 'M', links: [link('a', 'decomposes_into')] }),
       note({ id: 'a', title: 'A' }),
     ]
-    const doors = [GROUNDED_APPROVAL_DOOR.cli, GROUNDED_APPROVAL_DOOR.mcp]
+    const doors = [GroundedApprovalDoor.cli, GroundedApprovalDoor.mcp]
     const none = await finalizePlanTool({ kernel: fakeKernel(notes, [], null, null, doors), config, p }).execute({}, 'call_1')
     expect((none.output as { error: string }).error).toBe(
       "finalize_plan requires human approval for this plan run (accepted approval doors: 'cli', 'mcp'), and none is recorded — ask the human to approve via `orc reply <taskId> approve` in a terminal, or in the web UI, or the 'mcp' door, then call finalize_plan again",
@@ -172,7 +172,7 @@ describe('finalize_plan tool', () => {
   })
 
   it('errors (never throws) when no masterplan note exists in scope', async () => {
-    const kernel = { approvalDoors: [GROUNDED_APPROVAL_DOOR.cli], listPlanNotes: async () => [], approvedPlanHash: async () => null, nonHumanPlanApproval: async () => null, planNotesChangedSince: async () => [], proposeSplit: async () => { throw new Error('should not be called') } }
+    const kernel = { approvalDoors: [GroundedApprovalDoor.cli], listPlanNotes: async () => [], approvedPlanHash: async () => null, nonHumanPlanApproval: async () => null, planNotesChangedSince: async () => [], proposeSplit: async () => { throw new Error('should not be called') } }
     const tool = finalizePlanTool({ kernel, config, p })
     const r = await tool.execute({}, 'call_x')
     expect(r.isError).toBe(true)
@@ -228,7 +228,7 @@ describe('finalize_plan tool', () => {
       note({ id: 'a', title: 'A' }),
     ]
     const kernel = {
-      approvalDoors: [GROUNDED_APPROVAL_DOOR.cli],
+      approvalDoors: [GroundedApprovalDoor.cli],
       listPlanNotes: async () => notes,
       approvedPlanHash: async () => ({ hash: planGraphHash(notes), seq: 1 }),
       nonHumanPlanApproval: async () => null,

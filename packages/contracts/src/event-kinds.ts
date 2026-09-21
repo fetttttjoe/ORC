@@ -1,4 +1,3 @@
-import { z } from 'zod'
 import type { Usage } from './execution'
 import type { Door } from './origin'
 
@@ -8,20 +7,52 @@ import type { Door } from './origin'
 // event kinds — `memory` folds by kind, `analysis` is read back by kind. Keeping the vocabulary
 // here means those modules never have to import `events` itself, so there is no cycle to reason
 // about: a payload schema and the kind that names it can be defined in either order.
-export const EventKind = z.enum([
-  'task_created', 'plan_proposed', 'plan_edited', 'plan_approved', 'task_status_changed',
-  'run_requested', 'run_started', 'step_started', 'skill_loaded', 'agent_call', 'tool_call', 'tool_result',
-  'signal_received', 'step_completed', 'step_failed', 'split_proposed', 'split_resolved',
-  'operation_started', 'operation_completed', 'operation_failed', 'artifact_produced',
-  'memory_written', 'memory_deleted', 'memory_accessed', 'memory_topic_accessed', 'memory_verified', 'memory_outcome',
-  'feedback_requested', 'feedback_provided', 'plan_annotated', 'analysis_completed',
-  'models_discovered', 'copilot_exchange', 'reaction_failed', 'commit_recorded',
-  'workspace_created', 'workspace_retitled', 'workspace_archived', 'workspace_merged',
-  'chat_opened',
-])
-export type EventKind = z.infer<typeof EventKind>
+export enum EventKind {
+  task_created = 'task_created',
+  plan_proposed = 'plan_proposed',
+  plan_edited = 'plan_edited',
+  plan_approved = 'plan_approved',
+  task_status_changed = 'task_status_changed',
+  run_requested = 'run_requested',
+  run_started = 'run_started',
+  step_started = 'step_started',
+  skill_loaded = 'skill_loaded',
+  rate_limit_wait = 'rate_limit_wait',
+  agent_call = 'agent_call',
+  tool_call = 'tool_call',
+  tool_result = 'tool_result',
+  signal_received = 'signal_received',
+  step_completed = 'step_completed',
+  step_failed = 'step_failed',
+  split_proposed = 'split_proposed',
+  split_resolved = 'split_resolved',
+  operation_started = 'operation_started',
+  operation_completed = 'operation_completed',
+  operation_failed = 'operation_failed',
+  artifact_produced = 'artifact_produced',
+  memory_written = 'memory_written',
+  memory_deleted = 'memory_deleted',
+  memory_accessed = 'memory_accessed',
+  memory_topic_accessed = 'memory_topic_accessed',
+  memory_verified = 'memory_verified',
+  memory_outcome = 'memory_outcome',
+  feedback_requested = 'feedback_requested',
+  feedback_provided = 'feedback_provided',
+  plan_annotated = 'plan_annotated',
+  analysis_completed = 'analysis_completed',
+  models_discovered = 'models_discovered',
+  copilot_exchange = 'copilot_exchange',
+  reaction_failed = 'reaction_failed',
+  commit_recorded = 'commit_recorded',
+  workspace_created = 'workspace_created',
+  workspace_retitled = 'workspace_retitled',
+  workspace_archived = 'workspace_archived',
+  workspace_merged = 'workspace_merged',
+  chat_opened = 'chat_opened',
+}
 
-export const EVENT_KIND = EventKind.enum
+// every caller already matches on this accessor, never a raw literal — kept as a plain alias
+export const EVENT_KIND = EventKind
 
 // the stored envelope: project binding and idempotency are explicit on every record
 export interface EventRecord {

@@ -28,6 +28,7 @@
     signal_received: { label: 'signal', temp: 'machine' },
     artifact_produced: { label: 'artifact', temp: 'moss' },
     operation_failed: { label: 'operation failed', temp: 'rust' },
+    rate_limit_wait: { label: 'rate limited', temp: 'rust' },
     reaction_failed: { label: 'reaction failed', temp: 'rust' },
     copilot_exchange: { label: 'copilot', temp: 'neutral' },
   }

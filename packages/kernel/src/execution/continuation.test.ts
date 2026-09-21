@@ -1,8 +1,9 @@
 import { afterAll, beforeAll, describe, expect, it } from 'bun:test'
 import {
-  Door, EVENT_KIND, FAILURE_CLASS, FINISH_STEP_ID, MAX_AUTO_CONTINUATIONS, NO_CHAT, OPERATION_KIND, PAYLOAD_SCHEMAS, SIGNAL_OUTCOME, TASK_STATUS,
+  Door, EVENT_KIND, FailureClass, FINISH_STEP_ID, MAX_AUTO_CONTINUATIONS, NO_CHAT, OperationKind, PAYLOAD_SCHEMAS, SignalOutcome, TASK_STATUS,
   continuationTopic,
   type AgentExecutor, type EventDraft, type ExecutorContext, type Origin, type SplitResult, type UnifiedEvent,
+  RunOutcome,
 } from '@orc/contracts'
 import { draftFixture, must, stepFixture } from '@orc/contracts/fixtures'
 import { openStorage } from '../storage'
@@ -44,15 +45,15 @@ function continuationFake(): AgentExecutor<unknown> {
       const round = seen.length - 1
       // the loop's operation naming: per-iteration, so the id repeats in every round
       await ctx.operation(
-        { operationId: `${ctx.runToken}:model:1`, kind: OPERATION_KIND.model, name: 'fake/m', before: {} },
+        { operationId: `${ctx.runToken}:model:1`, kind: OperationKind.model, name: 'fake/m', before: {} },
         async () => { modelCalls.set(key, (modelCalls.get(key) ?? 0) + 1); return { round } },
         () => [],
       )
       // the kernel-appended finish step is not what this file scripts: it succeeds on its first
       // round, so the partial script stays a statement about the step under test alone
       const partials = ctx.step.id === FINISH_STEP_ID ? 0 : (partialsByTask.get(taskId) ?? 0)
-      const outcome = round < partials ? SIGNAL_OUTCOME.partial : SIGNAL_OUTCOME.success
-      const summary = `round ${round}: ${outcome === SIGNAL_OUTCOME.partial ? `did part ${round}, remaining after ${round}` : 'finished'}`
+      const outcome = round < partials ? SignalOutcome.partial : SignalOutcome.success
+      const summary = `round ${round}: ${outcome === SignalOutcome.partial ? `did part ${round}, remaining after ${round}` : 'finished'}`
       const signal = { stepId: ctx.step.id, runToken: ctx.runToken, outcome, summary }
       // the loop's own checkpoint naming (per-iteration, restarts each round) — the port must
       // round-prefix it or round 1 replays round 0's recorded signal as its own
@@ -98,7 +99,7 @@ describe('partial-signal continuation', () => {
 
   it('one partial auto-continues to done, handing the summary to the next round — no human involved', async () => {
     const t = await newTask(1)
-    expect(await (await port.startRun(t.id)).wait()).toBe('done')
+    expect(await (await port.startRun(t.id)).wait()).toBe(RunOutcome.done)
 
     const rounds = must(continuations.get(roundsKey(t.id, SCRIPTED_STEP)), 'continuations for scripted step')
     expect(rounds).toHaveLength(2)
@@ -131,11 +132,11 @@ describe('partial-signal continuation', () => {
     expect(q.question).toContain(`remaining after ${MAX_AUTO_CONTINUATIONS}`)
 
     expect(await kernel.replyFeedback(t.id, 'no — stop here', CLI)).toBe(q.topic)
-    expect(await handle.wait()).toBe('blocked')
+    expect(await handle.wait()).toBe(RunOutcome.blocked)
 
     const failed = (await kernel.eventsFor(t.id)).find(e => e.kind === EVENT_KIND.step_failed)
     const p = PAYLOAD_SCHEMAS.step_failed.parse(must(failed, 'step failed event').payload)
-    expect(p.class).toBe(FAILURE_CLASS.human_abort) // a decision, never a malfunction
+    expect(p.class).toBe(FailureClass.human_abort) // a decision, never a malfunction
     expect(p.message).toContain('continuation declined')
     expect(p.message).toContain(`remaining after ${MAX_AUTO_CONTINUATIONS}`) // the report survives for the operator
   }, 30_000)
@@ -147,7 +148,7 @@ describe('partial-signal continuation', () => {
     expect(await waitFor(async () => (await kernel.eventsFor(t.id)).some(e => e.kind === EVENT_KIND.feedback_requested), 15_000)).toBe(true)
     expect(await kernel.replyFeedback(t.id, 'approve', CLI)).toBe(continuationTopic(SCRIPTED_STEP, MAX_AUTO_CONTINUATIONS))
 
-    expect(await handle.wait()).toBe('done')
+    expect(await handle.wait()).toBe(RunOutcome.done)
     expect(continuations.get(roundsKey(t.id, SCRIPTED_STEP))).toHaveLength(MAX_AUTO_CONTINUATIONS + 2)
     expect((await kernel.getTask(t.id))?.status).toBe(TASK_STATUS.done)
   }, 30_000)

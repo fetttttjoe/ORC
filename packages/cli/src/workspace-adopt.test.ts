@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { Door, NO_CHAT, WORKSPACE_KIND } from '@orc/contracts'
 import { initializeProject, loadConfig, requireProject, type Kernel } from '@orc/kernel'
-import { createTestDb, TEST_PROJECT_ID, tmpGitRepo } from '@orc/kernel/test-helpers'
+import { createTestDb, TEST_PROJECT_ID, testOrcConfig, tmpGitRepo } from '@orc/kernel/test-helpers'
 import { openKernel } from './main'
 import { adoptCwd, DEFAULT_TRUNK, resolveTrunk } from './workspace-adopt'
 
@@ -19,7 +19,7 @@ afterAll(async () => { await Promise.all(dbs.map(d => d.drop())) }, 30_000)
 async function freshKernel(): Promise<Kernel> {
   const db = await createTestDb()
   dbs.push(db)
-  const { kernel, storage } = await openKernel(db.url, { projectId: TEST_PROJECT_ID })
+  const { kernel, storage } = await openKernel(db.url, { projectId: TEST_PROJECT_ID, config: testOrcConfig() })
   db.onClose(() => storage.close())
   return kernel
 }

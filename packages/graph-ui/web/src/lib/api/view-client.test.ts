@@ -55,15 +55,32 @@ describe('fetchView — a subject that no longer exists', () => {
   it('answers null for a node that is gone, and reports no error', async () => {
     const reported: ApiError[] = []
     const realFetch = globalThis.fetch
-    setApiErrorHandler(err => reported.push(err))
-    globalThis.fetch = (async () => new Response(JSON.stringify({ error: 'node: not found' }), { status: 404 })) as typeof fetch
+    const previousHandler = setApiErrorHandler(err => reported.push(err))
+    const notFound: typeof fetch = Object.assign(
+      async (): Promise<Response> => new Response(JSON.stringify({ error: 'node: not found' }), { status: 404 }),
+      { preconnect: () => {} },
+    )
+    globalThis.fetch = notFound
     try {
       const answer = await fetchView('p', VIEW.node, { id: 'note:project\u0000deleted-note' })
       expect(answer.data).toBeNull()
       expect(reported).toEqual([])
     } finally {
       globalThis.fetch = realFetch
-      setApiErrorHandler(() => {})
+      setApiErrorHandler(previousHandler)
+    }
+  })
+})
+
+describe('setApiErrorHandler', () => {
+  it('hands back the handler it replaced, so a caller can restore exactly that', () => {
+    const first = (): void => {}
+    const second = (): void => {}
+    const original = setApiErrorHandler(first)
+    try {
+      expect(setApiErrorHandler(second)).toBe(first)
+    } finally {
+      setApiErrorHandler(original)
     }
   })
 })

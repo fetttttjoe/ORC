@@ -4,7 +4,7 @@ import path from 'node:path'
 import { parseEnv } from 'node:util'
 import { atomicWriteFileSync } from './atomic-file'
 import { z } from 'zod'
-import { errorMessage, ApprovalPolicy, AUTO_HEAL_MODE, AutoHealMode, GROUNDED_APPROVAL_DOOR, GroundedApprovalDoor, MCP_SERVER_ID_RE, McpServerConfig, ModelCost, ProviderConfigs } from '@orc/contracts'
+import { errorMessage, ApprovalPolicy, AutoHealMode, GroundedApprovalDoor, MCP_SERVER_ID_RE, McpServerConfig, ModelCost, ProviderConfigs } from '@orc/contracts'
 import { gitDirs, gitToplevel } from './git'
 import { resolveProjectRoot } from './project-root'
 
@@ -70,7 +70,7 @@ const settingsSchema = (dir: string, projectRoot: string) =>
     // Nonempty because an empty list would make the gate unsatisfiable through every door at once.
     // Adding 'mcp' lets the agent driving that door approve plans it authored — an operator's
     // decision, taken here in the config FILE, never through anything a model can say.
-    groundedApprovalDoors: z.array(GroundedApprovalDoor).nonempty().default([GROUNDED_APPROVAL_DOOR.cli]),
+    groundedApprovalDoors: z.array(z.enum(GroundedApprovalDoor)).nonempty().default([GroundedApprovalDoor.cli]),
     workspaceRoot: z.string().default(path.join(dir, '.orc', 'workspaces')),
     // The branch this project treats as trunk — the fact a workspace's `onTrunk` is captured
     // against at adoption, and the branch `orc ws` branches off. Deliberately NO `.default('main')`:
@@ -98,7 +98,7 @@ const settingsSchema = (dir: string, projectRoot: string) =>
     // the restamp half is free and silent; the LLM half only ever appears as a DRAFTED task the
     // human approves — so the default spends nothing on its own, unlike autoCommit above whose
     // default-off gates an outward git action. 'off' restores commits-as-records-only.
-    autoHeal: AutoHealMode.default(AUTO_HEAL_MODE.draftSweep),
+    autoHeal: z.enum(AutoHealMode).default(AutoHealMode.draftSweep),
     ollamaBaseUrl: z.url().default('http://localhost:11434'),
     projectDbUrl: z.string().default('ws://127.0.0.1:8000/rpc'),
     // ceiling for the surreal driver's initial dial — the driver does not reject unreachable

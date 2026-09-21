@@ -1,9 +1,8 @@
 import { afterAll, describe, expect, it } from 'bun:test'
-import { Door, NOTE_TIER, NO_CHAT, type NoteView } from '@orc/contracts'
-import { planNoteFixture } from '@orc/contracts/fixtures'
+import { NOTE_TIER, type NoteView } from '@orc/contracts'
+import { authorFixture, planNoteFixture } from '@orc/contracts/fixtures'
 import { renderNoteFile } from './note-md'
 import { createLiveMemory, type LiveMemory } from './test-helpers'
-import { TEST_WORKSPACE_ID } from '@orc/contracts/fixtures'
 
 // The plan tier's execution payload — dependsOn/skillRefs/toolRefs/modelRef — was authored, logged,
 // and then silently re-defaulted to []/'' on every read: noteTable, applyEvent's SET, and toNote()
@@ -20,7 +19,7 @@ describe('plan-tier execution payload round-trip', () => {
       rationale: 'split so the web lookup and the refactor can use different models',
       dependsOn: ['sub-b'], skillRefs: ['web-research'], toolRefs: ['files'],
       modelRef: 'anthropic/claude',
-    }, { source: 'cli', workspaceId: TEST_WORKSPACE_ID, origin: NO_CHAT(Door.cli) })
+    }, authorFixture())
     await live.projector.catchUp()
     const got = await live.store.get('sub-a', 'plan-t9')
     expect(got).not.toBeNull()

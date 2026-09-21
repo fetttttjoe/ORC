@@ -1,13 +1,23 @@
 import { describe, expect, it } from 'bun:test'
-import { CommitRecordedPayload, EventInput, EventKind, PAYLOAD_SCHEMAS } from './events'
+import { CommitRecordedPayload, EventEnvelope, EventKind, PAYLOAD_SCHEMAS, type EventInput } from './events'
 import { EVENT_KIND } from './event-kinds'
 import { ChatKind } from './chat'
-import { Door } from './origin'
+import { Door, NO_CHAT } from './origin'
+import { TASK_STATUS } from './task'
 import { authorFixture, eventFixture, TEST_WORKSPACE_ID } from './fixtures'
+
+const STAMP = { ...NO_CHAT(Door.cli), taskId: 't1', stepId: null, runToken: null }
+// @ts-expect-error an artifact_produced payload under a task_status_changed kind
+const wrongKind: EventInput = { ...STAMP, kind: EVENT_KIND.task_status_changed, payload: { path: 'r.md', sha256: 'a'.repeat(64), size: 1 } }
+// @ts-expect-error task_status_changed names a `to` status and this payload has none
+const missingField: EventInput = { ...STAMP, kind: EVENT_KIND.task_status_changed, payload: { taskId: 't1', from: TASK_STATUS.draft } }
+// @ts-expect-error artifact_produced spells the digest `sha256`, and the schema has no `sha`
+const strayField: EventInput = { ...STAMP, kind: EVENT_KIND.artifact_produced, payload: { path: 'r.md', sha: 'a', size: 1 } }
+void [wrongKind, missingField, strayField]
 
 describe('events', () => {
   it('has a payload schema for every kind', () => {
-    for (const kind of EventKind.options) {
+    for (const kind of Object.values(EventKind)) {
       expect(PAYLOAD_SCHEMAS[kind]).toBeDefined()
     }
   })
@@ -15,32 +25,32 @@ describe('events', () => {
     const input: EventInput = {
       taskId: 't1', stepId: null, runToken: null, chatId: null, door: Door.cli,
       kind: EVENT_KIND.task_status_changed,
-      payload: { taskId: 't1', from: 'draft', to: 'awaiting_approval' },
+      payload: { taskId: 't1', from: TASK_STATUS.draft, to: TASK_STATUS.awaiting_approval },
     }
-    expect(EventInput.parse(input)).toEqual({ ...input, idempotencyKey: null })
+    expect(EventEnvelope.parse(input)).toEqual({ ...input, idempotencyKey: null })
   })
   it('requires chatId as a key — unlike idempotencyKey it has no default', () => {
     const base = {
       taskId: 't1', stepId: null, runToken: null, door: Door.cli,
       kind: EVENT_KIND.task_status_changed,
-      payload: { taskId: 't1', from: 'draft', to: 'awaiting_approval' },
+      payload: { taskId: 't1', from: TASK_STATUS.draft, to: TASK_STATUS.awaiting_approval },
     }
-    expect(EventInput.safeParse(base).success).toBe(false)
-    expect(EventInput.parse({ ...base, chatId: null }).chatId).toBeNull()
-    expect(EventInput.parse({ ...base, chatId: 'c1' }).chatId).toBe('c1')
-    expect(EventInput.safeParse({ ...base, chatId: '' }).success).toBe(false)
+    expect(EventEnvelope.safeParse(base).success).toBe(false)
+    expect(EventEnvelope.parse({ ...base, chatId: null }).chatId).toBeNull()
+    expect(EventEnvelope.parse({ ...base, chatId: 'c1' }).chatId).toBe('c1')
+    expect(EventEnvelope.safeParse({ ...base, chatId: '' }).success).toBe(false)
   })
   it('requires door as a key — where a call entered is a per-event fact, never defaulted', () => {
     const base = {
       taskId: 't1', stepId: null, runToken: null, chatId: null,
       kind: EVENT_KIND.task_status_changed,
-      payload: { taskId: 't1', from: 'draft', to: 'awaiting_approval' },
+      payload: { taskId: 't1', from: TASK_STATUS.draft, to: TASK_STATUS.awaiting_approval },
     }
-    expect(() => EventInput.parse(base)).toThrow()
-    expect(() => EventInput.parse({ ...base, door: 'terminal' })).toThrow()
+    expect(() => EventEnvelope.parse(base)).toThrow()
+    expect(() => EventEnvelope.parse({ ...base, door: 'terminal' })).toThrow()
   })
   it('keeps the door of a chatless event — a null chat is still a known entry point', () => {
-    const parsed = EventInput.parse({
+    const parsed = EventEnvelope.parse({
       taskId: null, stepId: null, runToken: null, chatId: null, door: Door.hook,
       kind: EVENT_KIND.commit_recorded,
       payload: { sha: 'abc123', paths: [], workspaceId: null },
@@ -60,7 +70,7 @@ describe('events', () => {
   // A chat has one lifecycle event. A second, writer-declared ending would disagree with the task
   // status the readers already derive an end from, and nothing would say which of the two is right.
   it('has no chat_closed kind and no payload row for one', () => {
-    expect(EventKind.options).not.toContain('chat_closed')
+    expect(Object.values(EventKind)).not.toContain('chat_closed')
     expect(Object.keys(PAYLOAD_SCHEMAS)).not.toContain('chat_closed')
   })
   it('payload schemas reject wrong shapes', () => {
@@ -128,11 +138,11 @@ describe('events', () => {
     const base: EventInput = {
       taskId: 't1', stepId: null, runToken: null, chatId: null, door: Door.cli,
       kind: EVENT_KIND.task_status_changed,
-      payload: { taskId: 't1', from: 'draft', to: 'awaiting_approval' },
+      payload: { taskId: 't1', from: TASK_STATUS.draft, to: TASK_STATUS.awaiting_approval },
     }
-    expect(EventInput.parse(base).idempotencyKey).toBeNull()
-    expect(EventInput.parse({ ...base, idempotencyKey: 'r1:finish:0' }).idempotencyKey).toBe('r1:finish:0')
-    expect(EventInput.safeParse({ ...base, idempotencyKey: '' }).success).toBe(false)
+    expect(EventEnvelope.parse(base).idempotencyKey).toBeNull()
+    expect(EventEnvelope.parse({ ...base, idempotencyKey: 'r1:finish:0' }).idempotencyKey).toBe('r1:finish:0')
+    expect(EventEnvelope.safeParse({ ...base, idempotencyKey: '' }).success).toBe(false)
   })
 
   it('artifact_produced requires path, full sha256 digest, and byte size', () => {

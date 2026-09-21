@@ -1,7 +1,7 @@
 // How the knowledge graph folded out during a task: which notes were pulled and
 // written, by which step. Run: bun bench/graph-usage.ts <taskId-prefix>
 // ponytail: relative imports — bench/ is not a workspace package and doesn't need to be
-import { MemoryAccessedPayload, MemoryWrittenPayload } from '../packages/contracts/src/index.ts'
+import { EventKind, MemoryAccessedPayload, MemoryWrittenPayload } from '../packages/contracts/src/index.ts'
 import { loadConfig, openStorage, requireProject } from '../packages/kernel/src/index.ts'
 
 const prefix = process.argv[2]
@@ -9,7 +9,7 @@ if (!prefix) { console.error('usage: bun bench/graph-usage.ts <taskId-prefix>');
 
 const config = requireProject(loadConfig())
 const storage = await openStorage(config.databaseUrl, { projectId: config.projectId })
-const events = await storage.events.after(0, ['memory_accessed', 'memory_written'])
+const events = await storage.events.after(0, [EventKind.memory_accessed, EventKind.memory_written])
 
 type Row = { step: string; kind: string; note: string; detail: string }
 const rows: Row[] = []

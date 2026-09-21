@@ -1,12 +1,12 @@
 import { z } from 'zod'
 import {
-  ArtifactProducedPayload, EVENT_KIND, FAILURE_CLASS, FailureClass, FS_WRITE_TOOL_NAMES, NOTE_TIER, OPERATION_STATUS, Plan,
-  RUN_OUTCOME, STEP_RUN_STATUS, TASK_STATUS, TERMINAL_TASK_STATUS, TaskNode, TaskStatus, ZERO_USAGE, addUsage, runOutcomeFor,
+  ArtifactProducedPayload, EVENT_KIND, FailureClass, FS_WRITE_TOOL_NAMES, NOTE_TIER, OperationStatus, Plan,
+  RunOutcome, StepRunStatus, TASK_STATUS, TERMINAL_TASK_STATUS, TaskNode, TaskStatus, ZERO_USAGE, addUsage, runOutcomeFor,
   MemoryDeletedPayload, MemoryVerifiedPayload, MemoryWrittenPayload, noteContentKey, noteKey, normalizeRelPath,
   OperationCompletedPayload, OperationFailedPayload, OperationStartedPayload, ReactionFailedPayload,
   WorkspaceArchivedPayload, WorkspaceCreatedPayload, WorkspaceMergedPayload, WorkspaceRetitledPayload,
 } from '@orc/contracts'
-import type { EventRecord, OperationRecord, RunOutcome, StepRunStatus, Usage, Workspace } from '@orc/contracts'
+import type { EventRecord, OperationRecord, Usage, Workspace } from '@orc/contracts'
 import { applyArchived, applyRetitle } from './workspaces'
 
 export interface TaskPlans {
@@ -85,7 +85,7 @@ export function applyOperationEvent(current: OperationRecord | undefined, e: Eve
       projectId: e.projectId, operationId: p.operationId,
       taskId: e.taskId, stepId: e.stepId, runToken: e.runToken,
       kind: p.operationKind, name: p.name,
-      status: OPERATION_STATUS.started, attempts: p.attempt,
+      status: OperationStatus.started, attempts: p.attempt,
       before: p.before ?? null, after: null, error: null,
       startedSeq: e.seq, finishedSeq: null, startedAt: e.ts, finishedAt: null,
     }
@@ -93,10 +93,10 @@ export function applyOperationEvent(current: OperationRecord | undefined, e: Eve
   if (!current) throw new Error(`operation transition ${e.kind} without a started node (seq ${e.seq})`)
   if (e.kind === EVENT_KIND.operation_completed) {
     const p = OperationCompletedPayload.parse(e.payload)
-    return { ...current, status: OPERATION_STATUS.completed, attempts: p.attempt, after: p.after ?? null, finishedSeq: e.seq, finishedAt: e.ts }
+    return { ...current, status: OperationStatus.completed, attempts: p.attempt, after: p.after ?? null, finishedSeq: e.seq, finishedAt: e.ts }
   }
   const p = OperationFailedPayload.parse(e.payload)
-  return { ...current, status: OPERATION_STATUS.failed, attempts: p.attempt, error: p.error ?? null, finishedSeq: e.seq, finishedAt: e.ts }
+  return { ...current, status: OperationStatus.failed, attempts: p.attempt, error: p.error ?? null, finishedSeq: e.seq, finishedAt: e.ts }
 }
 
 const OPERATION_KINDS: Set<EventRecord['kind']> = new Set([
@@ -122,7 +122,8 @@ export const crashDedupKey = (e: EventRecord): string | null => {
   // and would collide; a replayed status append is idempotent in fold anyway.
   // operation transitions are excluded: their db idempotency keys already forbid raw duplicates,
   // and attempts 1 and 2 of one operation would collide here and hide the retry.
-  if (!e.runToken || e.kind === EVENT_KIND.task_status_changed || OPERATION_KINDS.has(e.kind)) return null
+  // rate_limit_wait carries no discriminator field: every wait of a run would share one key
+  if (!e.runToken || e.kind === EVENT_KIND.task_status_changed || e.kind === EVENT_KIND.rate_limit_wait || OPERATION_KINDS.has(e.kind)) return null
   // `name` discriminates multiple `skill_loaded` events sharing one runToken.
   // `splitId` discriminates multiple `split_proposed` events sharing one runToken.
   // `path` discriminates multiple `artifact_produced` receipts sharing one runToken.
@@ -140,14 +141,14 @@ const View = {
   task_created: z.object({ task: TaskNode }),
   plan: z.object({ plan: Plan }),
   plan_approved: z.object({ taskId: z.string(), version: z.number() }),
-  task_status_changed: z.object({ taskId: z.string(), to: TaskStatus }),
+  task_status_changed: z.object({ taskId: z.string(), to: z.enum(TaskStatus) }),
   run_started: z.object({ planVersion: z.number(), retryIndex: z.number(), workflowId: z.string(), cwd: z.string().nullable().catch(null) }),
   step_started: z.object({ stepId: z.string(), attempt: z.number() }),
   agent_call: z.object({ stepId: z.string(), iteration: z.number() }),
   split_proposed: z.object({ splitId: z.string(), taskId: z.string(), stepId: z.string(), runToken: z.string(), childTaskId: z.string() }),
   split_resolved: z.object({ splitId: z.string() }),
   step_completed: z.object({ stepId: z.string(), summary: z.string() }),
-  step_failed: z.object({ stepId: z.string(), class: FailureClass.catch(FAILURE_CLASS.agent_error), message: z.string() }),
+  step_failed: z.object({ stepId: z.string(), class: z.enum(FailureClass).catch(FailureClass.agent_error), message: z.string() }),
   workspace_created: WorkspaceCreatedPayload,
   workspace_retitled: WorkspaceRetitledPayload,
   workspace_archived: WorkspaceArchivedPayload,
@@ -236,7 +237,7 @@ export function foldInto(acc: FoldAcc, e: EventRecord): FoldAcc {
         if (!p.success || !e.taskId || !e.runToken) break
         setStep(state, e.taskId, {
           stepId: p.data.stepId, runToken: e.runToken, attempt: p.data.attempt,
-          status: STEP_RUN_STATUS.running, iterations: 0, output: null, failure: null,
+          status: StepRunStatus.running, iterations: 0, output: null, failure: null,
         })
         break
       }
@@ -275,6 +276,7 @@ export function foldInto(acc: FoldAcc, e: EventRecord): FoldAcc {
         break
       }
       case EVENT_KIND.skill_loaded:
+      case EVENT_KIND.rate_limit_wait:
       case EVENT_KIND.tool_call:
       case EVENT_KIND.tool_result:
       case EVENT_KIND.signal_received:
@@ -317,7 +319,7 @@ export function foldInto(acc: FoldAcc, e: EventRecord): FoldAcc {
         if (!p.success || !e.taskId) break
         const s = stepOf(state, e.taskId, p.data.stepId)
         if (s && s.runToken === e.runToken) {
-          s.status = STEP_RUN_STATUS.completed
+          s.status = StepRunStatus.completed
           s.output = p.data.summary
         }
         break
@@ -337,13 +339,11 @@ export function foldInto(acc: FoldAcc, e: EventRecord): FoldAcc {
         if (!p.success || !e.taskId) break
         const s = stepOf(state, e.taskId, p.data.stepId)
         if (s && s.runToken === e.runToken) {
-          s.status = STEP_RUN_STATUS.failed
+          s.status = StepRunStatus.failed
           s.failure = { class: p.data.class, message: p.data.message }
         }
         break
       }
-      case EVENT_KIND.models_discovered:
-      case EVENT_KIND.copilot_exchange:
       case EVENT_KIND.commit_recorded:
         break // traceability only; no state derivation
       case EVENT_KIND.workspace_created: {
@@ -391,13 +391,13 @@ export function fold(events: EventRecord[]): State {
 
 export function completedStepIds(state: State, taskId: string): Set<string> {
   const out = new Set<string>()
-  for (const [id, s] of state.steps.get(taskId) ?? []) if (s.status === STEP_RUN_STATUS.completed) out.add(id)
+  for (const [id, s] of state.steps.get(taskId) ?? []) if (s.status === StepRunStatus.completed) out.add(id)
   return out
 }
 
 /**
  * The VERDICTS holding a task back: failed steps that judged the work unacceptable rather than
- * malfunctioning (FAILURE_CLASS.rejected). Empty when the task failed for ordinary reasons.
+ * malfunctioning (FailureClass.rejected). Empty when the task failed for ordinary reasons.
  *
  * This is the ONE derivation behind "may this be retried?", shared by the CLI/web door
  * (assertRetryable) and the execution port (port.retry) — the same pairing completedStepIds and
@@ -406,7 +406,7 @@ export function completedStepIds(state: State, taskId: string): Set<string> {
 export function blockingVerdicts(state: State, taskId: string): Array<{ stepId: string; message: string }> {
   const out: Array<{ stepId: string; message: string }> = []
   for (const [id, s] of state.steps.get(taskId) ?? [])
-    if (s.status === STEP_RUN_STATUS.failed && s.failure?.class === FAILURE_CLASS.rejected)
+    if (s.status === StepRunStatus.failed && s.failure?.class === FailureClass.rejected)
       out.push({ stepId: id, message: s.failure.message })
   return out
 }
@@ -420,8 +420,8 @@ export function blockingVerdicts(state: State, taskId: string): Array<{ stepId: 
  * change what the verdict sees, so refusing there would withhold a recovery that could work.
  */
 export function retryIsFutile(state: State, taskId: string): boolean {
-  const steps = [...(state.steps.get(taskId) ?? []).values()].filter(s => s.status === STEP_RUN_STATUS.failed)
-  return steps.length > 0 && steps.every(s => s.failure?.class === FAILURE_CLASS.rejected)
+  const steps = [...(state.steps.get(taskId) ?? []).values()].filter(s => s.status === StepRunStatus.failed)
+  return steps.length > 0 && steps.every(s => s.failure?.class === FailureClass.rejected)
 }
 
 /**
@@ -456,7 +456,7 @@ export function nextAttempts(state: State, taskId: string, plan: Pick<Plan, 'ste
   const settled = state.tasks.get(taskId)?.status !== TASK_STATUS.running
   for (const step of plan.steps) {
     const s = state.steps.get(taskId)?.get(step.id)
-    const live = s?.status === STEP_RUN_STATUS.running && !settled
+    const live = s?.status === StepRunStatus.running && !settled
     out[step.id] = s ? (live ? s.attempt : s.attempt + 1) : 1
   }
   return out
@@ -501,7 +501,7 @@ export function gatedChildren(state: State, rootId: string): Array<{ id: string;
     .filter(id => id !== rootId)
     .flatMap(id => {
       const task = state.tasks.get(id)
-      return task?.status === TaskStatus.enum.awaiting_approval ? [{ id, title: task.title }] : []
+      return task?.status === TaskStatus.awaiting_approval ? [{ id, title: task.title }] : []
     })
 }
 
@@ -514,12 +514,12 @@ const FAILED_TASK_STATUS: ReadonlySet<TaskStatus> = new Set([TASK_STATUS.blocked
 
 export function subtreeOutcome(state: State, rootId: string): RunOutcome {
   const own = runOutcomeFor(state.tasks.get(rootId)?.status)
-  if (own !== RUN_OUTCOME.done) return own
+  if (own !== RunOutcome.done) return own
   const failed = subtreeTaskIds(state, rootId).some(id => {
     const status = state.tasks.get(id)?.status
     return status !== undefined && FAILED_TASK_STATUS.has(status)
   })
-  return failed ? RUN_OUTCOME.blocked : RUN_OUTCOME.done
+  return failed ? RunOutcome.blocked : RunOutcome.done
 }
 
 export function subtreeTaskIds(state: State, rootId: string): string[] {

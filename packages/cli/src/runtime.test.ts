@@ -3,8 +3,9 @@ import { mkdtempSync, realpathSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { MEMORY_HEALTH, Door, NO_CHAT,
-  EVENT_KIND, FINISH_STEP_ID, MEMORY_TOOL_NAME, ROLE_SKILL, SIGNAL_OUTCOME, STEP_ROLE, VERIFY_STEP_ID,
+  EVENT_KIND, FINISH_STEP_ID, MEMORY_TOOL_NAME, ROLE_SKILL, SignalOutcome, STEP_ROLE, VERIFY_STEP_ID,
   type AgentExecutor, type EventDraft, type ExecutorContext, type SplitResult, type UnifiedEvent,
+  RunOutcome,
 } from '@orc/contracts'
 import { Surreal } from 'surrealdb'
 import { openStorage, Kernel, projectDatabaseName, SCOPED_CHANGES_TOOL_NAME, type ProjectConfig } from '@orc/kernel'
@@ -58,7 +59,7 @@ const probeExecutor: AgentExecutor<unknown> = {
       const r = await t.execute(inputs[t.name])
       toolProbe.results.push({ name: t.name, isError: r.isError, output: r.output })
     }
-    const signal = { stepId: ctx.step.id, runToken: ctx.runToken, outcome: SIGNAL_OUTCOME.success, summary: 'probed' }
+    const signal = { stepId: ctx.step.id, runToken: ctx.runToken, outcome: SignalOutcome.success, summary: 'probed' }
     await ctx.checkpoint('signal:1', async () => signal,
       (): EventDraft[] => [{ kind: EVENT_KIND.signal_received, payload: { stepId: ctx.step.id, runToken: ctx.runToken, signal } }])
     yield { type: 'signal', signal }
@@ -75,7 +76,7 @@ const toolNameExecutor: AgentExecutor<unknown> = {
   id: 'api-loop',
   async *startTurn(ctx: ExecutorContext<unknown>): AsyncGenerator<UnifiedEvent, void, SplitResult[] | undefined> {
     toolNamesByStep[ctx.step.id] = ctx.extraTools.map(t => t.name)
-    const signal = { stepId: ctx.step.id, runToken: ctx.runToken, outcome: SIGNAL_OUTCOME.success, summary: 'probed' }
+    const signal = { stepId: ctx.step.id, runToken: ctx.runToken, outcome: SignalOutcome.success, summary: 'probed' }
     await ctx.checkpoint('signal:1', async () => signal,
       (): EventDraft[] => [{ kind: EVENT_KIND.signal_received, payload: { stepId: ctx.step.id, runToken: ctx.runToken, signal } }])
     yield { type: 'signal', signal }
@@ -143,18 +144,18 @@ describe('stepTools memory_verify registration', () => {
       const verifyTask = await kernel.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'verify step', spec: 'audits' }, CLI)
       await kernel.proposePlan(verifyTask.id, draftFixture([stepFixture({ id: VERIFY_STEP_ID, role: STEP_ROLE.auditor })]), CLI)
       await kernel.approvePlan(verifyTask.id, undefined, undefined, CLI)
-      expect(await (await port.startRun(verifyTask.id)).wait()).toBe('done')
+      expect(await (await port.startRun(verifyTask.id)).wait()).toBe(RunOutcome.done)
 
       const workerTask = await kernel.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'worker step', spec: 'implements' }, CLI)
       await kernel.proposePlan(workerTask.id, draftFixture([stepFixture({ id: 's1', role: STEP_ROLE.worker })]), CLI)
       await kernel.approvePlan(workerTask.id, undefined, undefined, CLI)
-      expect(await (await port.startRun(workerTask.id)).wait()).toBe('done')
+      expect(await (await port.startRun(workerTask.id)).wait()).toBe(RunOutcome.done)
 
       // an auditor step named for its JOB, not for this gate — the case that silently lost the tool
       const healTask = await kernel.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'heal step', spec: 'confirms notes' }, CLI)
       await kernel.proposePlan(healTask.id, draftFixture([stepFixture({ id: AUDITOR_STEP_NAMED_FOR_ITS_JOB, role: STEP_ROLE.auditor })]), CLI)
       await kernel.approvePlan(healTask.id, undefined, undefined, CLI)
-      expect(await (await port.startRun(healTask.id)).wait()).toBe('done')
+      expect(await (await port.startRun(healTask.id)).wait()).toBe(RunOutcome.done)
 
       // The finish step is APPENDED by the kernel to every root plan, and proposePlan
       // REFUSES a draft that names it — so the fixture is a plain one-step draft and the step under
@@ -163,7 +164,7 @@ describe('stepTools memory_verify registration', () => {
       const finishTask = await kernel.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'finish step', spec: 'reconciles' }, CLI)
       await kernel.proposePlan(finishTask.id, draftFixture([stepFixture({ id: 'lead', role: STEP_ROLE.worker })]), CLI)
       await kernel.approvePlan(finishTask.id, undefined, undefined, CLI)
-      expect(await (await port.startRun(finishTask.id)).wait()).toBe('done')
+      expect(await (await port.startRun(finishTask.id)).wait()).toBe(RunOutcome.done)
 
       expect(toolNamesByStep[VERIFY_STEP_ID]).toContain(MEMORY_TOOL_NAME.verify)
       expect(toolNamesByStep[AUDITOR_STEP_NAMED_FOR_ITS_JOB]).toContain(MEMORY_TOOL_NAME.verify)
@@ -269,7 +270,7 @@ describe('buildRuntime degraded memory', () => {
     const t = await kernel.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'degraded run', spec: 'still executes' }, CLI)
     await kernel.proposePlan(t.id, draftFixture([stepFixture()]), CLI)
     await kernel.approvePlan(t.id, undefined, undefined, CLI)
-    expect(await (await port.startRun(t.id)).wait()).toBe('done')
+    expect(await (await port.startRun(t.id)).wait()).toBe(RunOutcome.done)
 
     // all six memory tools exist and each returns an explicit isError result with the reason.
     // SIX, deliberately: memory_verify is NOT one of them and must not be added here. It is gated

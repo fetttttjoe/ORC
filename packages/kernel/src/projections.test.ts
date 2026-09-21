@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test'
-import { AUTHOR_SOURCE, Door, EVENT_KIND, FAILURE_CLASS, STEP_RUN_STATUS, TASK_STATUS, type EventRecord, type FailureClass, type Origin, type Plan, type StepRunStatus, type TaskNode, type TaskStatus } from '@orc/contracts'
+import { AUTHOR_SOURCE, Door, EVENT_KIND, FailureClass, OperationKind, OperationStatus, RunOutcome, StepRunStatus, TASK_STATUS, TaskStatus, type EventRecord, type Origin, type Plan, type TaskNode } from '@orc/contracts'
 import { authorFixture, eventFixture, draftFixture, must, planFixture, stepFixture, taskFixture } from '@orc/contracts/fixtures'
 import { TEST_WORKSPACE_ID } from './test-helpers'
 import { blockingVerdicts, canRetry, retryIsFutile, startedAttempts, type State, type StepState, emptyFold, estimateCostUSD, fold, foldInto, subtreeOutcome, completedStepIds, nextAttempts, crashDedupKey, stepUsage, subtreeTaskIds, subtreeUsage, pendingSplitForChild, remainingBudget, inheritedCwd, runCwd, taskChangedPaths, taskNoteWrites, taskVerifiedNotes } from './projections'
@@ -33,34 +33,34 @@ describe('nextAttempts and an orphaned running step', () => {
   }
 
   it('reuses the attempt while the run is LIVE, so the workflow id re-attaches', () => {
-    expect(nextAttempts(stateWith(TASK_STATUS.running, STEP_RUN_STATUS.running), 't1', plan).a).toBe(2)
+    expect(nextAttempts(stateWith(TASK_STATUS.running, StepRunStatus.running), 't1', plan).a).toBe(2)
   })
 
   it('gives a fresh attempt once the task has settled — the running step is orphaned', () => {
-    expect(nextAttempts(stateWith(TASK_STATUS.blocked, STEP_RUN_STATUS.running), 't1', plan).a).toBe(3)
+    expect(nextAttempts(stateWith(TASK_STATUS.blocked, StepRunStatus.running), 't1', plan).a).toBe(3)
   })
 
   it('a step with no history starts at 1 either way', () => {
-    expect(nextAttempts(stateWith(TASK_STATUS.blocked, STEP_RUN_STATUS.running), 't1', plan).b).toBe(1)
+    expect(nextAttempts(stateWith(TASK_STATUS.blocked, StepRunStatus.running), 't1', plan).b).toBe(1)
   })
 })
 
 describe('fold', () => {
   it('replays a full lifecycle into consistent state', () => {
     const state = fold([
-      evt(1, 'task_created', { task }),
-      evt(2, 'plan_proposed', { plan: planV(1) }),
-      evt(3, 'task_status_changed', { taskId: 't1', from: 'draft', to: 'awaiting_approval' }),
-      evt(4, 'plan_edited', { plan: planV(2) }),
-      evt(5, 'plan_approved', { taskId: 't1', version: 2, approvedAt: '2026-07-16T01:00:00.000Z' }),
-      evt(6, 'task_status_changed', { taskId: 't1', from: 'awaiting_approval', to: 'approved' }),
+      evt(1, EVENT_KIND.task_created, { task }),
+      evt(2, EVENT_KIND.plan_proposed, { plan: planV(1) }),
+      evt(3, EVENT_KIND.task_status_changed, { taskId: 't1', from: 'draft', to: 'awaiting_approval' }),
+      evt(4, EVENT_KIND.plan_edited, { plan: planV(2) }),
+      evt(5, EVENT_KIND.plan_approved, { taskId: 't1', version: 2, approvedAt: '2026-07-16T01:00:00.000Z' }),
+      evt(6, EVENT_KIND.task_status_changed, { taskId: 't1', from: 'awaiting_approval', to: 'approved' }),
     ])
-    expect(state.tasks.get('t1')?.status).toBe('approved')
+    expect(state.tasks.get('t1')?.status).toBe(TaskStatus.approved)
     expect(state.plans.get('t1')?.versions.map(p => p.version)).toEqual([1, 2])
     expect(state.plans.get('t1')?.approvedVersion).toBe(2)
   })
   it('is pure: same input, same output', () => {
-    const events = [evt(1, 'task_created', { task })]
+    const events = [evt(1, EVENT_KIND.task_created, { task })]
     expect(fold(events)).toEqual(fold(events))
   })
   it('empty log folds to empty state', () => {
@@ -115,6 +115,17 @@ describe('crashDedupKey', () => {
     const e = eventFixture({ ts: '2026-07-17T00:00:00.000Z', payload: { task } })
     expect(crashDedupKey(e)).toBeNull()
   })
+
+  it('returns null for rate_limit_wait, whose db idempotency key already forbids raw duplicates', () => {
+    const mk = (waitsSoFar: number): EventRecord => eventFixture({
+      ts: '2026-07-17T00:00:00.000Z', runToken: 'step:t1:s1:a1', kind: EVENT_KIND.rate_limit_wait,
+      payload: { stepId: 's1', runToken: 'step:t1:s1:a1', waitMs: 5000, waitsSoFar, errorMessage: 'rate limited' },
+    })
+    // every wait in a run shares (runToken, kind) and none of iteration/toolCallId/name/splitId/path —
+    // without this exclusion both collapse to the same key and the second is dropped as a duplicate
+    expect(crashDedupKey(mk(0))).toBeNull()
+    expect(crashDedupKey(mk(1))).toBeNull()
+  })
 })
 
 const rt = (step: string, attempt = 1) => `step:t1:${step}:a${attempt}`
@@ -133,15 +144,15 @@ const exEvt = (
 describe('fold — execution kinds', () => {
   it('projects step lifecycle and per-task usage', () => {
     const state = fold([
-      exEvt(1, 'run_started', { taskId: 't1', planVersion: 1, retryIndex: 0, workflowId: 'run:t1:v1', cwd: null }),
-      exEvt(2, 'step_started', { stepId: 's1', runToken: rt('s1'), attempt: 1 }),
-      exEvt(3, 'agent_call', { stepId: 's1', runToken: rt('s1'), iteration: 1, request: {}, response: {} },
+      exEvt(1, EVENT_KIND.run_started, { taskId: 't1', planVersion: 1, retryIndex: 0, workflowId: 'run:t1:v1', cwd: null }),
+      exEvt(2, EVENT_KIND.step_started, { stepId: 's1', runToken: rt('s1'), attempt: 1 }),
+      exEvt(3, EVENT_KIND.agent_call, { stepId: 's1', runToken: rt('s1'), iteration: 1, request: {}, response: {} },
         { inputTokens: 100, outputTokens: 50, costUSD: 0.01, estimated: false }),
-      exEvt(4, 'signal_received', { stepId: 's1', runToken: rt('s1'), signal: { stepId: 's1', runToken: rt('s1'), outcome: 'success', summary: 'ok' } }),
-      exEvt(5, 'step_completed', { stepId: 's1', runToken: rt('s1'), summary: 'ok' }),
+      exEvt(4, EVENT_KIND.signal_received, { stepId: 's1', runToken: rt('s1'), signal: { stepId: 's1', runToken: rt('s1'), outcome: 'success', summary: 'ok' } }),
+      exEvt(5, EVENT_KIND.step_completed, { stepId: 's1', runToken: rt('s1'), summary: 'ok' }),
     ])
     const step = state.steps.get('t1')?.get('s1')
-    expect(step?.status).toBe('completed')
+    expect(step?.status).toBe(StepRunStatus.completed)
     expect(step?.output).toBe('ok')
     expect(step?.iterations).toBe(1)
     expect(state.runs.get('t1')).toHaveLength(1)
@@ -153,16 +164,16 @@ describe('fold — execution kinds', () => {
 
   it('fold ignores skill_loaded for state (traceability only)', () => {
     const state = fold([
-      exEvt(1, 'run_started', { taskId: 't1', planVersion: 1, retryIndex: 0, workflowId: 'run:t1:v1', cwd: null }),
-      exEvt(2, 'step_started', { stepId: 's1', runToken: rt('s1'), attempt: 1 }),
-      exEvt(3, 'skill_loaded', { stepId: 's1', runToken: rt('s1'), name: 'alpha', hash: 'h' }),
-      exEvt(4, 'agent_call', { stepId: 's1', runToken: rt('s1'), iteration: 1, request: {}, response: {} },
+      exEvt(1, EVENT_KIND.run_started, { taskId: 't1', planVersion: 1, retryIndex: 0, workflowId: 'run:t1:v1', cwd: null }),
+      exEvt(2, EVENT_KIND.step_started, { stepId: 's1', runToken: rt('s1'), attempt: 1 }),
+      exEvt(3, EVENT_KIND.skill_loaded, { stepId: 's1', runToken: rt('s1'), name: 'alpha', hash: 'h' }),
+      exEvt(4, EVENT_KIND.agent_call, { stepId: 's1', runToken: rt('s1'), iteration: 1, request: {}, response: {} },
         { inputTokens: 100, outputTokens: 50, costUSD: 0.01, estimated: false }),
-      exEvt(5, 'signal_received', { stepId: 's1', runToken: rt('s1'), signal: { stepId: 's1', runToken: rt('s1'), outcome: 'success', summary: 'ok' } }),
-      exEvt(6, 'step_completed', { stepId: 's1', runToken: rt('s1'), summary: 'ok' }),
+      exEvt(5, EVENT_KIND.signal_received, { stepId: 's1', runToken: rt('s1'), signal: { stepId: 's1', runToken: rt('s1'), outcome: 'success', summary: 'ok' } }),
+      exEvt(6, EVENT_KIND.step_completed, { stepId: 's1', runToken: rt('s1'), summary: 'ok' }),
     ])
     const step = state.steps.get('t1')?.get('s1')
-    expect(step?.status).toBe('completed')
+    expect(step?.status).toBe(StepRunStatus.completed)
     expect(step?.output).toBe('ok')
     expect(step?.iterations).toBe(1)
     expect(state.runs.get('t1')).toHaveLength(1)
@@ -187,14 +198,14 @@ describe('fold — execution kinds', () => {
   })
 
   it('dedups crash-boundary duplicates by (runToken, kind, iteration, toolCallId)', () => {
-    const dup = exEvt(3, 'agent_call', { stepId: 's1', runToken: rt('s1'), iteration: 1, request: {}, response: {} },
+    const dup = exEvt(3, EVENT_KIND.agent_call, { stepId: 's1', runToken: rt('s1'), iteration: 1, request: {}, response: {} },
       { inputTokens: 100, outputTokens: 50, costUSD: 0.01, estimated: false })
     const state = fold([
-      exEvt(2, 'step_started', { stepId: 's1', runToken: rt('s1'), attempt: 1 }),
+      exEvt(2, EVENT_KIND.step_started, { stepId: 's1', runToken: rt('s1'), attempt: 1 }),
       dup,
       { ...dup, seq: 4 }, // crash-boundary replay of the same iteration
-      exEvt(5, 'tool_call', { stepId: 's1', runToken: rt('s1'), iteration: 1, toolCallId: 'c1', toolName: 'fs_read', input: {} }),
-      exEvt(6, 'tool_call', { stepId: 's1', runToken: rt('s1'), iteration: 1, toolCallId: 'c2', toolName: 'fs_read', input: {} }),
+      exEvt(5, EVENT_KIND.tool_call, { stepId: 's1', runToken: rt('s1'), iteration: 1, toolCallId: 'c1', toolName: 'fs_read', input: {} }),
+      exEvt(6, EVENT_KIND.tool_call, { stepId: 's1', runToken: rt('s1'), iteration: 1, toolCallId: 'c2', toolName: 'fs_read', input: {} }),
     ])
     expect(state.usage.get('t1')?.inputTokens).toBe(100) // counted once
     expect(state.steps.get('t1')?.get('s1')?.iterations).toBe(1)
@@ -204,29 +215,29 @@ describe('fold — execution kinds', () => {
   it('failed attempt then fresh attempt: latest wins, nextAttempts increments', () => {
     const plan = draftFixture([stepFixture({ id: 's1' }), stepFixture({ id: 's2' })])
     const state = fold([
-      exEvt(1, 'step_started', { stepId: 's1', runToken: rt('s1', 1), attempt: 1 }),
-      exEvt(2, 'step_failed', { stepId: 's1', runToken: rt('s1', 1), class: 'agent_error', message: 'nope' }),
-      exEvt(3, 'step_started', { stepId: 's1', runToken: rt('s1', 2), attempt: 2 }),
-      exEvt(4, 'step_completed', { stepId: 's1', runToken: rt('s1', 2), summary: 'fixed' }),
+      exEvt(1, EVENT_KIND.step_started, { stepId: 's1', runToken: rt('s1', 1), attempt: 1 }),
+      exEvt(2, EVENT_KIND.step_failed, { stepId: 's1', runToken: rt('s1', 1), class: 'agent_error', message: 'nope' }),
+      exEvt(3, EVENT_KIND.step_started, { stepId: 's1', runToken: rt('s1', 2), attempt: 2 }),
+      exEvt(4, EVENT_KIND.step_completed, { stepId: 's1', runToken: rt('s1', 2), summary: 'fixed' }),
     ])
-    expect(state.steps.get('t1')?.get('s1')?.status).toBe('completed')
+    expect(state.steps.get('t1')?.get('s1')?.status).toBe(StepRunStatus.completed)
     expect(state.steps.get('t1')?.get('s1')?.attempt).toBe(2)
     expect(nextAttempts(state, 't1', plan)).toEqual({ s1: 3, s2: 1 })
   })
 
   it('rejects a late event carrying a superseded attempt runToken', () => {
     const state = fold([
-      exEvt(1, 'step_started', { stepId: 's1', runToken: rt('s1', 1), attempt: 1 }),
-      exEvt(2, 'step_failed', { stepId: 's1', runToken: rt('s1', 1), class: 'agent_error', message: 'boom' }),
-      exEvt(3, 'step_started', { stepId: 's1', runToken: rt('s1', 2), attempt: 2 }),
-      exEvt(4, 'step_completed', { stepId: 's1', runToken: rt('s1', 2), summary: 'fresh' }),
+      exEvt(1, EVENT_KIND.step_started, { stepId: 's1', runToken: rt('s1', 1), attempt: 1 }),
+      exEvt(2, EVENT_KIND.step_failed, { stepId: 's1', runToken: rt('s1', 1), class: 'agent_error', message: 'boom' }),
+      exEvt(3, EVENT_KIND.step_started, { stepId: 's1', runToken: rt('s1', 2), attempt: 2 }),
+      exEvt(4, EVENT_KIND.step_completed, { stepId: 's1', runToken: rt('s1', 2), summary: 'fresh' }),
       // late/stale events from the superseded attempt 1 — envelope and payload both carry the old runToken
-      exEvt(5, 'step_completed', { stepId: 's1', runToken: rt('s1', 1), summary: 'stale' }),
-      exEvt(6, 'agent_call', { stepId: 's1', runToken: rt('s1', 1), iteration: 9, request: {}, response: {} },
+      exEvt(5, EVENT_KIND.step_completed, { stepId: 's1', runToken: rt('s1', 1), summary: 'stale' }),
+      exEvt(6, EVENT_KIND.agent_call, { stepId: 's1', runToken: rt('s1', 1), iteration: 9, request: {}, response: {} },
         { inputTokens: 5, outputTokens: 5, costUSD: 0, estimated: false }),
     ])
     const step = state.steps.get('t1')?.get('s1')
-    expect(step?.status).toBe('completed')
+    expect(step?.status).toBe(StepRunStatus.completed)
     expect(step?.output).toBe('fresh')
     expect(step?.attempt).toBe(2)
     // stale agent_call's runToken doesn't match the current attempt, so it can't bump iterations
@@ -299,8 +310,8 @@ describe('fold — execution kinds', () => {
 
   it('runCwd: a split child inherits its PARENT\'s run cwd; a root falls back to the project dir', () => {
     const state = fold([
-      evt(1, 'task_created', { task: { ...task, id: 'p' } }),
-      evt(2, 'task_created', { task: { ...task, id: 'c', parentId: 'p', depth: 1 } }),
+      evt(1, EVENT_KIND.task_created, { task: { ...task, id: 'p' } }),
+      evt(2, EVENT_KIND.task_created, { task: { ...task, id: 'c', parentId: 'p', depth: 1 } }),
       eventFixture({ seq: 3, ts: '2026-07-16T00:00:00.000Z', taskId: 'p', kind: EVENT_KIND.run_started, payload: { planVersion: 1, retryIndex: 0, workflowId: 'w1', cwd: '/tree' } }),
     ])
     expect(runCwd(state, must(state.tasks.get('c'), 'child task'), undefined, '/proj')).toBe('/tree')
@@ -341,22 +352,22 @@ describe('fold — execution kinds', () => {
     })
     const id = 'step:t1:s1:a1:model:1'
     const state = fold([
-      op(1, 'operation_started', { operationId: id, attempt: 1, operationKind: 'model', name: 'fake/m', before: { q: 1 } }),
-      op(2, 'operation_failed', { operationId: id, attempt: 1, error: { message: 'boom' } }),
-      op(3, 'operation_started', { operationId: id, attempt: 2, operationKind: 'model', name: 'fake/m', before: { q: 1 } }),
-      op(4, 'operation_completed', { operationId: id, attempt: 2, after: { text: 'ok' } }),
+      op(1, EVENT_KIND.operation_started, { operationId: id, attempt: 1, operationKind: OperationKind.model, name: 'fake/m', before: { q: 1 } }),
+      op(2, EVENT_KIND.operation_failed, { operationId: id, attempt: 1, error: { message: 'boom' } }),
+      op(3, EVENT_KIND.operation_started, { operationId: id, attempt: 2, operationKind: OperationKind.model, name: 'fake/m', before: { q: 1 } }),
+      op(4, EVENT_KIND.operation_completed, { operationId: id, attempt: 2, after: { text: 'ok' } }),
     ])
     const node = state.operations.get(id)
-    expect(node?.status).toBe('completed')
+    expect(node?.status).toBe(OperationStatus.completed)
     expect(node?.attempts).toBe(2)
     expect(node?.after).toEqual({ text: 'ok' })
     expect(node?.startedSeq).toBe(3)
     expect(node?.finishedSeq).toBe(4)
 
     const unresolved = fold([
-      op(1, 'operation_started', { operationId: id, attempt: 1, operationKind: 'model', name: 'fake/m', before: null }),
+      op(1, EVENT_KIND.operation_started, { operationId: id, attempt: 1, operationKind: OperationKind.model, name: 'fake/m', before: null }),
     ]).operations.get(id)
-    expect(unresolved?.status).toBe('started')
+    expect(unresolved?.status).toBe(OperationStatus.started)
     expect(unresolved?.finishedSeq).toBeNull()
   })
 
@@ -370,13 +381,13 @@ describe('fold — execution kinds', () => {
     let state!: ReturnType<typeof fold>
     expect(() => {
       state = fold([
-        op(1, 'operation_completed', { operationId: 'orphan', attempt: 1, after: {} }), // no started node
-        op(2, 'operation_started', { operationId: good, attempt: 1, operationKind: 'model', name: 'fake/m', before: null }),
-        exEvt(3, 'artifact_produced', { nope: true }), // malformed artifact payload
-        exEvt(4, 'artifact_produced', { path: 'ok.md', sha256: 'ab'.repeat(32), size: 3 }),
+        op(1, EVENT_KIND.operation_completed, { operationId: 'orphan', attempt: 1, after: {} }), // no started node
+        op(2, EVENT_KIND.operation_started, { operationId: good, attempt: 1, operationKind: OperationKind.model, name: 'fake/m', before: null }),
+        exEvt(3, EVENT_KIND.artifact_produced, { nope: true }), // malformed artifact payload
+        exEvt(4, EVENT_KIND.artifact_produced, { path: 'ok.md', sha256: 'ab'.repeat(32), size: 3 }),
       ])
     }).not.toThrow()
-    expect(state.operations.get(good)?.status).toBe('started') // the good event still applied
+    expect(state.operations.get(good)?.status).toBe(OperationStatus.started) // the good event still applied
     expect(state.operations.has('orphan')).toBe(false)         // the poison one skipped
     expect(state.artifacts.get('t1')?.map(a => a.path)).toEqual(['ok.md']) // only the valid receipt
   })
@@ -389,11 +400,11 @@ describe('fold — execution kinds', () => {
 // instead of re-reading and re-folding the entire project log per question.
 describe('foldInto / emptyFold', () => {
   const lifecycle: EventRecord[] = [
-    evt(1, 'task_created', { task }),
-    evt(2, 'plan_proposed', { plan: planV(1) }),
-    evt(3, 'task_status_changed', { taskId: 't1', from: 'draft', to: 'awaiting_approval' }),
-    evt(4, 'plan_approved', { taskId: 't1', version: 1, approvedAt: '2026-07-16T01:00:00.000Z' }),
-    evt(5, 'task_status_changed', { taskId: 't1', from: 'awaiting_approval', to: 'approved' }),
+    evt(1, EVENT_KIND.task_created, { task }),
+    evt(2, EVENT_KIND.plan_proposed, { plan: planV(1) }),
+    evt(3, EVENT_KIND.task_status_changed, { taskId: 't1', from: 'draft', to: 'awaiting_approval' }),
+    evt(4, EVENT_KIND.plan_approved, { taskId: 't1', version: 1, approvedAt: '2026-07-16T01:00:00.000Z' }),
+    evt(5, EVENT_KIND.task_status_changed, { taskId: 't1', from: 'awaiting_approval', to: 'approved' }),
     eventFixture({ seq: 6, taskId: 't1', runToken: 'r1', kind: EVENT_KIND.run_started, payload: { taskId: 't1', planVersion: 1, retryIndex: 0, workflowId: 'run:t1:v1', cwd: null } }),
     eventFixture({ seq: 7, taskId: 't1', runToken: 'r1', kind: EVENT_KIND.step_started, payload: { stepId: 's1', runToken: 'r1', attempt: 1 } }),
     eventFixture({ seq: 8, taskId: 't1', stepId: 's1', runToken: 'r1', kind: EVENT_KIND.agent_call, usage: { inputTokens: 10, outputTokens: 5, costUSD: 0.5, estimated: false }, payload: { stepId: 's1', runToken: 'r1', iteration: 1, request: {}, response: {} } }),
@@ -426,21 +437,21 @@ describe('foldInto / emptyFold', () => {
 // "run finished: done" and exited 0. The root's own status is not the run's outcome.
 describe('subtreeOutcome', () => {
   const t = (id: string, status: TaskNode['status'], parentId: string | null = null): EventRecord =>
-    evt(1, 'task_created', { task: { ...task, id, status, parentId, depth: parentId ? 1 : 0 } })
+    evt(1, EVENT_KIND.task_created, { task: { ...task, id, status, parentId, depth: parentId ? 1 : 0 } })
 
   it('a blocked descendant makes the run blocked even when the root finished', () => {
-    const state = fold([t('root', 'done'), t('root.child', 'blocked', 'root')])
-    expect(subtreeOutcome(state, 'root')).toBe('blocked')
+    const state = fold([t('root', TaskStatus.done), t('root.child', TaskStatus.blocked, 'root')])
+    expect(subtreeOutcome(state, 'root')).toBe(RunOutcome.blocked)
   })
 
   it('all done is done', () => {
-    const state = fold([t('root', 'done'), t('root.child', 'done', 'root')])
-    expect(subtreeOutcome(state, 'root')).toBe('done')
+    const state = fold([t('root', TaskStatus.done), t('root.child', TaskStatus.done, 'root')])
+    expect(subtreeOutcome(state, 'root')).toBe(RunOutcome.done)
   })
 
   it("the root's own non-done outcome still wins", () => {
-    const state = fold([t('root', 'cancelled'), t('root.child', 'done', 'root')])
-    expect(subtreeOutcome(state, 'root')).toBe('cancelled')
+    const state = fold([t('root', TaskStatus.cancelled), t('root.child', TaskStatus.done, 'root')])
+    expect(subtreeOutcome(state, 'root')).toBe(RunOutcome.cancelled)
   })
 })
 
@@ -753,7 +764,7 @@ describe('estimateCostUSD', () => {
   it('returns null when no comparable task has ever settled — never a fabricated zero', () => {
     expect(estimateCostUSD(fold([]), { strategyRef: 'grounded-plan' })).toBeNull()
     // a matching plan that has NOT settled measures nothing yet
-    const running = fold(past('t-run', { strategyRef: 'grounded-plan', status: 'running', costUSD: 0.4 }))
+    const running = fold(past('t-run', { strategyRef: 'grounded-plan', status: TaskStatus.running, costUSD: 0.4 }))
     expect(estimateCostUSD(running, { strategyRef: 'grounded-plan' })).toBeNull()
   })
 
@@ -799,7 +810,7 @@ describe('estimateCostUSD', () => {
 
 describe('blockingVerdicts / retryIsFutile — a verdict is not a malfunction', () => {
   const failedStep = (id: string, cls: FailureClass) => ({
-    stepId: id, runToken: `rt-${id}`, attempt: 1, status: STEP_RUN_STATUS.failed,
+    stepId: id, runToken: `rt-${id}`, attempt: 1, status: StepRunStatus.failed,
     iterations: 1, output: null, failure: { class: cls, message: `${id} says no` },
   })
   const stateWith = (...steps: ReturnType<typeof failedStep>[]): State => {
@@ -809,12 +820,12 @@ describe('blockingVerdicts / retryIsFutile — a verdict is not a malfunction', 
   }
 
   it('lists only the steps that REJECTED, with their verdict text', () => {
-    const state = stateWith(failedStep('verify', FAILURE_CLASS.rejected), failedStep('build', FAILURE_CLASS.provider_error))
+    const state = stateWith(failedStep('verify', FailureClass.rejected), failedStep('build', FailureClass.provider_error))
     expect(blockingVerdicts(state, 't1')).toEqual([{ stepId: 'verify', message: 'verify says no' }])
   })
 
   it('calls a retry futile when EVERY failure is a verdict', () => {
-    expect(retryIsFutile(stateWith(failedStep('verify', FAILURE_CLASS.rejected)), 't1')).toBe(true)
+    expect(retryIsFutile(stateWith(failedStep('verify', FailureClass.rejected)), 't1')).toBe(true)
   })
 
   /**
@@ -822,7 +833,7 @@ describe('blockingVerdicts / retryIsFutile — a verdict is not a malfunction', 
    * sees on the next pass, so refusing here would withhold a recovery that could genuinely work.
    */
   it('keeps a MIXED failure retryable — the error may be what the verdict is reacting to', () => {
-    const state = stateWith(failedStep('verify', FAILURE_CLASS.rejected), failedStep('build', FAILURE_CLASS.provider_error))
+    const state = stateWith(failedStep('verify', FailureClass.rejected), failedStep('build', FailureClass.provider_error))
     expect(retryIsFutile(state, 't1')).toBe(false)
   })
 
@@ -845,16 +856,16 @@ describe('blockingVerdicts / retryIsFutile — a verdict is not a malfunction', 
     }
 
     it('admits a blocked task whose failure could be cleared by running again', () => {
-      expect(canRetry(atStatus(TASK_STATUS.blocked, failedStep('build', FAILURE_CLASS.agent_error)), 't1')).toBe(true)
+      expect(canRetry(atStatus(TASK_STATUS.blocked, failedStep('build', FailureClass.agent_error)), 't1')).toBe(true)
     })
 
     it('refuses every status but blocked — nothing else has a run waiting to resume', () => {
       for (const status of [TASK_STATUS.running, TASK_STATUS.cancelled, TASK_STATUS.done, TASK_STATUS.failed, TASK_STATUS.draft])
-        expect(canRetry(atStatus(status, failedStep('build', FAILURE_CLASS.agent_error)), 't1')).toBe(false)
+        expect(canRetry(atStatus(status, failedStep('build', FailureClass.agent_error)), 't1')).toBe(false)
     })
 
     it('refuses a blocked task held up only by verdicts', () => {
-      expect(canRetry(atStatus(TASK_STATUS.blocked, failedStep('verify', FAILURE_CLASS.rejected)), 't1')).toBe(false)
+      expect(canRetry(atStatus(TASK_STATUS.blocked, failedStep('verify', FailureClass.rejected)), 't1')).toBe(false)
     })
 
     it('refuses a task nothing knows about', () => {
@@ -874,7 +885,7 @@ describe('blockingVerdicts / retryIsFutile — a verdict is not a malfunction', 
  */
 describe('rejected is an AUDITOR verdict, not any signalled failure', () => {
   const failed = (id: string, cls: FailureClass) => ({
-    stepId: id, runToken: `rt-${id}`, attempt: 1, status: STEP_RUN_STATUS.failed,
+    stepId: id, runToken: `rt-${id}`, attempt: 1, status: StepRunStatus.failed,
     iterations: 1, output: null, failure: { class: cls, message: `${id} failed` },
   })
   const stateWith = (...steps: ReturnType<typeof failed>[]): State => {
@@ -884,12 +895,12 @@ describe('rejected is an AUDITOR verdict, not any signalled failure', () => {
   }
 
   it('keeps a worker failure retryable — its next attempt re-does the work', () => {
-    expect(retryIsFutile(stateWith(failed('build', FAILURE_CLASS.agent_error)), 't1')).toBe(false)
-    expect(blockingVerdicts(stateWith(failed('build', FAILURE_CLASS.agent_error)), 't1')).toEqual([])
+    expect(retryIsFutile(stateWith(failed('build', FailureClass.agent_error)), 't1')).toBe(false)
+    expect(blockingVerdicts(stateWith(failed('build', FailureClass.agent_error)), 't1')).toEqual([])
   })
 
   it('refuses retry only for the verdict class', () => {
-    expect(retryIsFutile(stateWith(failed('verify', FAILURE_CLASS.rejected)), 't1')).toBe(true)
+    expect(retryIsFutile(stateWith(failed('verify', FailureClass.rejected)), 't1')).toBe(true)
   })
 })
 
@@ -906,7 +917,7 @@ describe('rejected is an AUDITOR verdict, not any signalled failure', () => {
 describe('startedAttempts vs nextAttempts — cancel targets the running attempt', () => {
   const plan = planFixture({ steps: [stepFixture({ id: 'a' }), stepFixture({ id: 'b' })] })
   const running = (attempt: number) => ({
-    stepId: 'a', runToken: 'rt', attempt, status: STEP_RUN_STATUS.running,
+    stepId: 'a', runToken: 'rt', attempt, status: StepRunStatus.running,
     iterations: 1, output: null, failure: null,
   })
   const stateOf = (status: TaskStatus): State => {

@@ -99,7 +99,7 @@ describe('plugin skills', () => {
   // parameters in camelCase, as the tools do, so the only other backticked lowercase words are
   // task statuses, which come from the enum rather than a list typed here.
   it.each(['request', 'adr', 'workspace'])('%s names only tools the MCP door serves', name => {
-    const statuses = new Set<string>(TaskStatus.options)
+    const statuses = new Set<string>(Object.values(TaskStatus))
     const named = [...read(name).body.matchAll(/`([a-z][a-z_]*)`/g)].map(m => m[1] ?? '').filter(t => !statuses.has(t))
     expect(named.length).toBeGreaterThan(0)
     expect(named.filter(t => !served.has(t))).toEqual([])

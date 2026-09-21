@@ -1,7 +1,7 @@
 import { isDeepStrictEqual } from 'node:util'
 import { and, asc, count, desc, eq, gt, inArray, sql } from 'drizzle-orm'
 import type { z } from 'zod'
-import { errorMessage, EVENT_KIND, EventInput, PAYLOAD_SCHEMAS, type EventKind, type EventRecord } from '@orc/contracts'
+import { errorMessage, EVENT_KIND, EventEnvelope, PAYLOAD_SCHEMAS, type EventInput, type EventKind, type EventRecord } from '@orc/contracts'
 import { events } from '../schema'
 import { KERNEL_ERROR_CODE, KernelError } from '../errors'
 import type { Redactor } from '../redact'
@@ -14,9 +14,9 @@ type Row = typeof events.$inferSelect
 type Queryable = Pick<Tx, 'insert' | 'select' | 'execute'>
 
 // The envelope is spelled three times below — the insert, toRecord, and the idempotency
-// comparison. A key added to EventInput and forgotten in one is stored as nothing, read back
+// comparison. A key added to EventEnvelope and forgotten in one is stored as nothing, read back
 // undefined, or lets two different writes share one key; these types fail the build instead.
-type EnvelopeKey = keyof z.output<typeof EventInput>
+type EnvelopeKey = keyof z.output<typeof EventEnvelope>
 type EnvelopeCoversInput<T extends Record<EnvelopeKey, unknown>> = T
 
 // idempotencyKey is excluded: it is the lookup, not a compared field
@@ -68,7 +68,7 @@ const makeOps = (db: Queryable, ctx: LogContext): EventLogOps => {
   const scoped = eq(events.projectId, ctx.projectId)
   return {
     async append(input) {
-      const parsed = EventInput.parse(input)
+      const parsed = EventEnvelope.parse(input)
       // jsonb-shape the payload (drops undefined keys) before redact/compare — otherwise a
       // byte-identical keyed replay deep-compares unequal against the stored row and throws
       const payload = ctx.redact(JSON.parse(JSON.stringify(parsed.payload)))

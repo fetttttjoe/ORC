@@ -1,4 +1,4 @@
-import { AUTHOR_SOURCE, AUTO_HEAL_MODE, CHECKS_EXECUTOR_REF, Door, errorMessage, HOOK_NAME, NO_CHAT, NOTE_TIER, ROLE_SKILL, TERMINAL_TASK_STATUS, type AgentExecutor, type Analyzer, type MemoryAuthor } from '@orc/contracts'
+import { AUTHOR_SOURCE, AutoHealMode, CHECKS_EXECUTOR_REF, Door, errorMessage, HookName, NO_CHAT, NOTE_TIER, ROLE_SKILL, TERMINAL_TASK_STATUS, type AgentExecutor, type Analyzer, type MemoryAuthor } from '@orc/contracts'
 import { apiLoopExecutor } from '@orc/executor-api-loop'
 import { configuredProviders } from './providers'
 import { agentAnalyzer } from '@orc/analyzer-agent'
@@ -106,7 +106,7 @@ export async function buildRuntime(
   // approval doors are operator config, so the kernel this port builds tools against must carry
   // the configured set — finalize_plan's refusal text reads it straight off the kernel
   const kernel = shared?.kernel ?? new Kernel(log, host.refValidator, host.analyzers, dbosSend, config.groundedApprovalDoors, config.finishChecks)
-  log.onAppend = e => host.hooks.dispatch(HOOK_NAME.event_appended, e)
+  log.onAppend = e => host.hooks.dispatch(HookName.event_appended, e)
 
   // Startup order: projections FIRST — DBOS recovery may emit events the
   // moment it launches, and they must already be observed. Surreal failure degrades memory
@@ -164,7 +164,7 @@ export async function buildRuntime(
   // apart: the memory store and the kernel. Absent when memory is degraded or the knob is off —
   // the port's callback is optional and the router then leaves commits as records, as before.
   const memoryStore = memory?.store
-  const autoHeal = memoryStore && config.autoHeal !== AUTO_HEAL_MODE.off
+  const autoHeal = memoryStore && config.autoHeal !== AutoHealMode.off
     ? createAutoHeal({
       mode: config.autoHeal,
       debounceMs: AUTO_HEAL_DEBOUNCE_MS,

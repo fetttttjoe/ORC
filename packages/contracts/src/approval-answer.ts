@@ -23,20 +23,27 @@ import { z } from 'zod'
 // one-click button makes even those unnecessary, but a stray keystroke sent by accident would
 // approve a run — finalize_plan force-auto-approves the split it derives, so a false accept here
 // executes a plan nobody read.
-export const APPROVAL_ANSWERS = [
-  'approve', 'approved', 'agree', 'agreed', 'yes', 'ok', 'okay', 'lgtm', 'go', 'proceed',
-] as const
-export const ApprovalAnswer = z.enum(APPROVAL_ANSWERS)
-export type ApprovalAnswer = z.infer<typeof ApprovalAnswer>
+export enum ApprovalAnswer {
+  approve = 'approve',
+  approved = 'approved',
+  agree = 'agree',
+  agreed = 'agreed',
+  yes = 'yes',
+  ok = 'ok',
+  okay = 'okay',
+  lgtm = 'lgtm',
+  go = 'go',
+  proceed = 'proceed',
+}
 
 // The canonical word — what the UI's one-click approve button sends, and what docs and tool
 // descriptions tell a human to type. Anything else in the set is a courtesy to a human who typed
 // what came naturally.
-export const APPROVAL_ANSWER = ApprovalAnswer.enum.approve
+export const APPROVAL_ANSWER = ApprovalAnswer.approve
 
 // WHOLE-STRING match after trim + case-fold — exactly what the two kernel literals did, so every
 // answer already stored in the event log resolves the same way. Never a substring: "do not
 // approve" and "approve?" are not approvals, and a contains-check would read the first as the
 // opposite of what it says.
 export const isApprovalAnswer = (text: string): boolean =>
-  ApprovalAnswer.safeParse(text.trim().toLowerCase()).success
+  z.enum(ApprovalAnswer).safeParse(text.trim().toLowerCase()).success

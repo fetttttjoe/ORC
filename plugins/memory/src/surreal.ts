@@ -3,7 +3,7 @@ import { RecordId, Surreal } from 'surrealdb'
 import { edge, orm, table, t } from 'surqlize'
 import {
   activation, activationBoost, bumpAccess, Claim, DEFAULT_HALF_LIFE_DAYS,
-  decodeMemoryEvent, DECISION_STATUSES, deriveNoteProvenance, EDGE_DIRECTION, edgeKey, LINK_KINDS, MEMORY_USE, NOTE_KINDS, MemoryScope, MutationOp, Topic, viaEdge,
+  decodeMemoryEvent, DecisionStatus, deriveNoteProvenance, EDGE_DIRECTION, edgeKey, LINK_KINDS, MEMORY_USE, NOTE_KINDS, MemoryScope, MutationOp, Topic, viaEdge,
   type LinkKind,
   MemoryNote, VerifiedStamp, type MemoryWrittenPayload,
   MEMORY_LIMITS, SEARCH_MODE, errorMessage, inferTier, isUiMetaNote, noteKey, NoteKind, NoteTier,
@@ -71,7 +71,7 @@ const ftsIndexes = (tb: Tb, fields: readonly { name: string }[]): string =>
 
 const kindType = t.union(LINK_KINDS.map(k => t.literal(k)))
 const noteKindType = t.union(NOTE_KINDS.map(k => t.literal(k)))
-const decisionStatusType = t.union(DECISION_STATUSES.map(s => t.literal(s)))
+const decisionStatusType = t.union(Object.values(DecisionStatus).map(s => t.literal(s)))
 
 // Tier-specific columns are optional because a row only HAS the columns its tier owns — a plan
 // note has no `claims` column at all, not an empty one. `tier` itself is optional so a row

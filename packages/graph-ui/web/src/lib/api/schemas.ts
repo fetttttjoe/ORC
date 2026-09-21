@@ -3,6 +3,7 @@ import { z } from 'zod'
 // precisely so the browser can take it, and a re-typed enum here silently accepts a state the
 // server stopped sending (or rejects one it started sending)
 import { MEMORY_HEALTH_STATES, MemoryStageName, SUPERVISOR_HEALTH_STATES } from '@orc/contracts/health'
+import { MessageRole } from '@orc/contracts/chat'
 // the view registry and every parsed response shape come from ui-core's browser-safe wire
 // module — the one spelling the server and this app both import
 import {
@@ -53,7 +54,7 @@ const MemoryHealth = z.object({
   // replay, so the slow stages after it (linking, ollama re-clustering) report through this.
   // `progress` rides the replaying stage alone — the other two have no countable unit.
   stage: z.object({
-    name: MemoryStageName,
+    name: z.enum(MemoryStageName),
     sinceMs: z.number(),
     progress: z.object({ applied: z.number(), total: z.number() }).optional(),
   }).optional(),
@@ -75,4 +76,4 @@ export const PurgeReport = z.object({ events: z.number().optional(), operations:
 
 // ---- persisted client state ----
 /** the copilot history in localStorage is untrusted input like any other wire */
-export const StoredChat = z.array(z.object({ role: z.enum(['user', 'assistant']), content: z.string() }))
+export const StoredChat = z.array(z.object({ role: z.enum(MessageRole), content: z.string() }))

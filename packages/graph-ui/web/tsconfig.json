@@ -17,14 +17,6 @@
     "paths": { "$lib": ["./src/lib"], "$lib/*": ["./src/lib/*"] }
   },
   "include": ["src/**/*.ts", "src/**/*.svelte", "vite.config.ts"],
-  // Vendored shadcn-svelte under src/lib/components/ui is NOT excluded here on purpose: measured,
-  // svelte-check ignores `exclude` and walks every file it finds anyway (190 files either way).
-  // The vendored noise is filtered at the reporting layer instead — scripts/check-web.ts.
-  //
-  // src/**/*.test.ts stays excluded — checked 2026-09-18: NOT a one-line fix. Including test files
-  // needs "bun" added to `types` first (bare `bun:test` otherwise fails to resolve), and once
-  // added, 10 pre-existing errors surface in colors.test.ts, plan-edit.test.ts and
-  // plan-geometry.test.ts ("no overload matches this call") — real, and unrelated to whatever
-  // change is being made when this comment is read.
+  // DOM only — test files (typed against Bun too) go through tsconfig.test.json instead
   "exclude": ["src/**/*.test.ts"]
 }

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test'
-import { ApprovalPolicy, evaluateApproval } from './approval'
+import { ApprovalMode, ApprovalPolicy, evaluateApproval } from './approval'
 
 describe('evaluateApproval', () => {
   const policy = ApprovalPolicy.parse({
@@ -18,7 +18,7 @@ describe('evaluateApproval', () => {
   })
   it('defaults: manual, empty rules', () => {
     const p = ApprovalPolicy.parse({})
-    expect(p.default).toBe('manual')
+    expect(p.default).toBe(ApprovalMode.manual)
     expect(evaluateApproval(p, { depth: 0, costEstimateUSD: 0, type: 'generic' })).toEqual({ then: 'manual' })
   })
 })

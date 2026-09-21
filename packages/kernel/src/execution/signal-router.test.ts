@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test'
-import { AUTHOR_SOURCE, Door, EVENT_KIND, NO_CHAT, REACTION, ReactionFailedPayload, TASK_STATUS, type EventRecord, type Origin, type SplitResult, type TaskNode } from '@orc/contracts'
+import { ApprovedBy, AUTHOR_SOURCE, Door, EVENT_KIND, FailureClass, NO_CHAT, REACTION, ReactionFailedPayload, RunOutcome, TASK_STATUS, type EventRecord, type Origin, type SplitResult, type TaskNode, type TaskStatus } from '@orc/contracts'
 import { Kernel } from '../kernel'
 import { fold } from '../projections'
 import { openStorage, type EventLog } from '../storage'
@@ -42,7 +42,7 @@ describe('composeSplitResult', () => {
     ]
     const r = composeSplitResult(events, notes, split)
     expect(r).toEqual({
-      splitId: 'sp1', childTaskId: 'c1', outcome: 'done',
+      splitId: 'sp1', childTaskId: 'c1', outcome: RunOutcome.done,
       summary: 'second',                       // w2 is the only terminal step (nothing depends on it)
       notes: [{ id: 'finding', scope: 'project' }],
     })
@@ -51,10 +51,10 @@ describe('composeSplitResult', () => {
     const blocked = composeSplitResult([
       childTask('c1', 'p'),
       evt({ seq: 2, kind: EVENT_KIND.step_started, stepId: 'w1', runToken: 'rt-w1', payload: { stepId: 'w1', runToken: 'rt-w1', attempt: 1 } }),
-      evt({ seq: 3, kind: EVENT_KIND.step_failed, stepId: 'w1', runToken: 'rt-w1', payload: { stepId: 'w1', runToken: 'rt-w1', class: 'agent_error', message: 'nope' } }),
-      evt({ seq: 4, kind: EVENT_KIND.task_status_changed, payload: { taskId: 'c1', from: 'running', to: 'blocked' } }),
+      evt({ seq: 3, kind: EVENT_KIND.step_failed, stepId: 'w1', runToken: 'rt-w1', payload: { stepId: 'w1', runToken: 'rt-w1', class: FailureClass.agent_error, message: 'nope' } }),
+      evt({ seq: 4, kind: EVENT_KIND.task_status_changed, payload: { taskId: 'c1', from: TASK_STATUS.running, to: TASK_STATUS.blocked } }),
     ], [], split)
-    expect(blocked.outcome).toBe('blocked')
+    expect(blocked.outcome).toBe(RunOutcome.blocked)
     expect(blocked.summary).toBe('nope')
     const cancelled = composeSplitResult([
       childTask('c1', 'p'),
@@ -89,7 +89,7 @@ describe('createSignalRouter (integration, real EventLog)', () => {
     await log.append({ ...CLI, taskId: 'c', stepId: null, runToken: null, kind: EVENT_KIND.task_created, payload: { task: taskNode('c', 'p') } })
     await log.append({ ...SPLIT_CHAT, taskId: 'p', stepId: 's1', runToken: 'rt', kind: EVENT_KIND.split_proposed, payload: { splitId: 'sp1', taskId: 'p', stepId: 's1', runToken: 'rt', childTaskId: 'c' } })
   }
-  const terminal = (to: string) => log.append({
+  const terminal = (to: TaskStatus) => log.append({
     ...CLI, taskId: 'c', stepId: null, runToken: null,
     kind: EVENT_KIND.task_status_changed, payload: { taskId: 'c', from: TASK_STATUS.running, to },
   })
@@ -194,14 +194,14 @@ describe('createSignalRouter (integration, real EventLog)', () => {
     await router.start() // sweep runs synchronously before returning
     expect(await resolvedCount()).toBe(1)
     expect(sends).toHaveLength(1)
-    expect(must(sends[0], 'first send').outcome).toBe('blocked')
+    expect(must(sends[0], 'first send').outcome).toBe(RunOutcome.blocked)
   })
 
   it('sweep route 2: an approved pending-split child with no run gets startChildRun on start()', async () => {
     const approved: string[] = []
     await seedSplit()
     // child approved while the router was down — the plan_approved event will never be redelivered
-    await log.append({ ...CLI, taskId: 'c', stepId: null, runToken: null, kind: EVENT_KIND.plan_approved, payload: { taskId: 'c', version: 1, approvedAt: 'T', approvedBy: 'policy' } })
+    await log.append({ ...CLI, taskId: 'c', stepId: null, runToken: null, kind: EVENT_KIND.plan_approved, payload: { taskId: 'c', version: 1, approvedAt: 'T', approvedBy: ApprovedBy.policy } })
     await log.append({ ...CLI, taskId: 'c', stepId: null, runToken: null, kind: EVENT_KIND.task_status_changed, payload: { taskId: 'c', from: TASK_STATUS.draft, to: TASK_STATUS.approved } })
     router = createSignalRouter({ log, onChildApproved: async id => { approved.push(id) }, onRunRequested: async () => {}, onCancelled: async () => {}, send: async () => {}, sendFeedback: async () => {} })
     await router.start() // sweep runs (and awaits onChildApproved) synchronously before returning
@@ -213,7 +213,7 @@ describe('createSignalRouter (integration, real EventLog)', () => {
     router = createSignalRouter({ log, onChildApproved: async id => { approved.push(id) }, onRunRequested: async () => {}, onCancelled: async () => {}, send: async () => {}, sendFeedback: async () => {} })
     await router.start()
     await seedSplit()
-    await log.append({ ...CLI, taskId: 'c', stepId: null, runToken: null, kind: EVENT_KIND.plan_approved, payload: { taskId: 'c', version: 1, approvedAt: 'T', approvedBy: 'policy' } })
+    await log.append({ ...CLI, taskId: 'c', stepId: null, runToken: null, kind: EVENT_KIND.plan_approved, payload: { taskId: 'c', version: 1, approvedAt: 'T', approvedBy: ApprovedBy.policy } })
     expect(await waitFor(async () => approved.length > 0)).toBe(true)
     expect(approved).toEqual(['c'])
   })

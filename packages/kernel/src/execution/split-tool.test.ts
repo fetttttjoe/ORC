@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test'
-import type { Origin } from '@orc/contracts'
+import { ApprovalMode, type Origin } from '@orc/contracts'
 import { must } from '@orc/contracts/fixtures'
 import { runOrigin } from './run-chat'
 import { splitTool } from './split-tool'
@@ -8,7 +8,7 @@ import { ANALYZE_STEP_ROLE } from './strategies/grounded-plan'
 // the proposing step runs inside its run's chat, so the split it proposes is stamped with that chat
 const STEP_ORIGIN: Origin = runOrigin('run:t1:v1')
 const p = { taskId: 't1', stepId: 's1', runToken: 'step:t1:s1:a1', role: 'worker', executor: 'api-loop', modelRef: 'fake/m', maxIterations: 5, origin: STEP_ORIGIN }
-const config = { approvalPolicy: { default: 'manual' as const, rules: [] }, maxDepth: 3 }
+const config = { approvalPolicy: { default: ApprovalMode.manual, rules: [] }, maxDepth: 3 }
 // ChildPlanStep requires skillRefs/dependsOn explicitly (no zod default — only toolRefs has one)
 const step = { id: 'w1', role: 'worker', title: 'w', instructions: 'do', dependsOn: [], skillRefs: [], toolRefs: [] }
 

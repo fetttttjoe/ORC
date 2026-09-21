@@ -2,7 +2,7 @@
 // see packages/cli/src/actions.ts). Adapters (web server, future TUI) receive this interface;
 // ui-core itself never constructs one. Implementations return data and never print: each
 // adapter renders results its own way (CLI lines, web toasts).
-import type { DecisionInput, DecisionStatus, NoteAuthoringDraft, Origin, PlanDraft, Workspace, WorkspaceWithHealth } from '@orc/contracts'
+import type { ApprovedBy, DecisionInput, DecisionStatus, NoteAuthoringDraft, Origin, PlanDraft, Workspace, WorkspaceWithHealth } from '@orc/contracts'
 
 // The two ways a plan is stamped, named rather than merged into one bag of optionals: a template
 // the action builds, or a draft the door parsed (--file, --from-vault, an authored request body).
@@ -38,7 +38,7 @@ export interface OrcActions {
   // --autonomy full passes 'mcp' so replay shows exactly who approved (P7 attribution).
   // Both optionals collapsed into one options object: TS1016 forbids an optional parameter before
   // the required origin, and two `| undefined` positionals would be passed blind at every door.
-  approve(taskId: string, opts: { version?: number; approvedBy?: 'human' | 'mcp' }, origin: Origin): Promise<{ version: number }>
+  approve(taskId: string, opts: { version?: number; approvedBy?: ApprovedBy.human | ApprovedBy.mcp }, origin: Origin): Promise<{ version: number }>
   // A run is REQUESTED, never started here: the supervisor holding the runtime turns the recorded
   // ask into a workflow, so there is no handle to hand back — callers watch the event stream.
   // Omitted cwd = the task's own workspace, resolved by the kernel (requestRun). A door that filled

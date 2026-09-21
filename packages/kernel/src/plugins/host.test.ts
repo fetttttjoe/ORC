@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from 'bun:test'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import type { Analyzer, ModelProvider } from '@orc/contracts'
+import { IsolationTier, type Analyzer, type ModelProvider } from '@orc/contracts'
 import { planFixture, stepFixture } from '@orc/contracts/fixtures'
 import { loadConfig } from '../config'
 import { grantExtensionTrust, grantMcpTrust } from './trust'
@@ -78,7 +78,7 @@ describe('createPluginHost / refValidator', () => {
   it('rejects isolation tiers that are not implemented', async () => {
     const d = project()
     const host = await makeHost(d)
-    const plan = planFixture({ steps: [stepFixture({ isolation: 'worktree' })] })
+    const plan = planFixture({ steps: [stepFixture({ isolation: IsolationTier.worktree })] })
     expect((await host.refValidator(plan)).join('\n')).toContain(`isolation 'worktree' is not implemented`)
   })
 

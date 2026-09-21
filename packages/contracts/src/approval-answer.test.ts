@@ -1,9 +1,9 @@
 import { describe, expect, it } from 'bun:test'
-import { APPROVAL_ANSWER, APPROVAL_ANSWERS, isApprovalAnswer } from './approval-answer'
+import { APPROVAL_ANSWER, ApprovalAnswer, isApprovalAnswer } from './approval-answer'
 
 describe('isApprovalAnswer', () => {
   it('accepts every word in the set, and the canonical word the UI button sends', () => {
-    for (const w of APPROVAL_ANSWERS) expect(isApprovalAnswer(w)).toBe(true)
+    for (const w of Object.values(ApprovalAnswer)) expect(isApprovalAnswer(w)).toBe(true)
     // the cross-process property: whatever the button sends, the kernel gate must accept
     expect(isApprovalAnswer(APPROVAL_ANSWER)).toBe(true)
   })

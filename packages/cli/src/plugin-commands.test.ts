@@ -52,7 +52,7 @@ async function makeCli(dir: string) {
   })
   const hub = createMcpHub(config.mcpServers, (id, cfg) => isMcpTrusted(loadTrust(dir), id, cfg))
   db.onClose(() => hub.close())
-  const { kernel, log } = await openKernel(db.url, { projectId: TEST_PROJECT_ID, refValidator: host.refValidator })
+  const { kernel, log } = await openKernel(db.url, { config, projectId: TEST_PROJECT_ID, refValidator: host.refValidator })
   // a task must name a workspace the fold has seen — one seeded record, then tasks as before
   await seedTestWorkspace(log, CLI)
   const { run, lines } = cli(kernel, undefined, { host, hub, config, log })

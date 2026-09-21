@@ -3,7 +3,7 @@ import { mkdtempSync, realpathSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { AUTHOR_SOURCE, Door, NO_CHAT, WORKSPACE_KIND, type Workspace } from '@orc/contracts'
-import { TEST_WORKSPACE_ID } from '@orc/contracts/fixtures'
+import { authorFixture, TEST_WORKSPACE_ID } from '@orc/contracts/fixtures'
 import { cwdAuthor, cwdWorkspaceId, type WorkspaceFold } from './cwd-workspace'
 
 // A real directory, because both doors realpath the cwd before asking the fold — a made-up path
@@ -24,11 +24,11 @@ const kernelWith = (...ws: Workspace[]): WorkspaceFold =>
 describe('cwdAuthor', () => {
   it('stamps the cwd workspace onto the author, keeping the caller-supplied door and extras', async () => {
     const author = await cwdAuthor(kernelWith(workspace), dir, AUTHOR_SOURCE.agent, NO_CHAT(Door.mcp), { executor: 'mcp-serve' })
-    expect(author).toEqual({ source: AUTHOR_SOURCE.agent, workspaceId: TEST_WORKSPACE_ID, origin: NO_CHAT(Door.mcp), executor: 'mcp-serve' })
+    expect(author).toEqual(authorFixture({ source: AUTHOR_SOURCE.agent, origin: NO_CHAT(Door.mcp), executor: 'mcp-serve' }))
   })
   it('defaults to no extras and still names the workspace', async () => {
     expect(await cwdAuthor(kernelWith(workspace), dir, AUTHOR_SOURCE.cli, NO_CHAT(Door.cli)))
-      .toEqual({ source: AUTHOR_SOURCE.cli, workspaceId: TEST_WORKSPACE_ID, origin: NO_CHAT(Door.cli) })
+      .toEqual(authorFixture())
   })
   it('THROWS on a directory no workspace claims — a writer that cannot name its workspace is a wiring bug, never a placeholder', async () => {
     await expect(cwdAuthor(kernelWith(), dir, AUTHOR_SOURCE.cli, NO_CHAT(Door.cli))).rejects.toThrow('no workspace for this directory')

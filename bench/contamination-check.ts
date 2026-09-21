@@ -2,7 +2,7 @@
 // (e.g. the sealed baseline). Run: bun bench/contamination-check.ts <taskId-prefix> [pattern...]
 // Exit 1 if any forbidden path was read — the run's judgement data is then tainted.
 // ponytail: relative imports — bench/ is not a workspace package and doesn't need to be
-import { PAYLOAD_SCHEMAS } from '../packages/contracts/src/index.ts'
+import { EventKind, PAYLOAD_SCHEMAS } from '../packages/contracts/src/index.ts'
 import { loadConfig, openStorage, requireProject } from '../packages/kernel/src/index.ts'
 import { z } from 'zod'
 
@@ -18,7 +18,7 @@ const forbidden = patterns.length ? patterns : ['bench/scenarios', 'SEALED']
 
 const config = requireProject(loadConfig())
 const storage = await openStorage(config.databaseUrl, { projectId: config.projectId })
-const evs = await storage.events.after(0, ['tool_call'])
+const evs = await storage.events.after(0, [EventKind.tool_call])
 
 let reads = 0
 const hits: string[] = []

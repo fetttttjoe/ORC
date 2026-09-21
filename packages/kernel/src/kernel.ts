@@ -2,8 +2,8 @@ import { randomUUID } from 'node:crypto'
 import { statSync } from 'node:fs'
 import path from 'node:path'
 import { MASTERPLAN_NOTE_ID,
-  AnalysisCompletedPayload, CHECKS_STEP_ID, ChildPlanDraft, EVENT_KIND, FINISH_STEP_ID, FeedbackProvidedPayload, GROUNDED_APPROVAL_DOOR, ISOLATION_TIER, MemoryDeletedPayload, MemoryWrittenPayload, NOTE_TIER, PAYLOAD_SCHEMAS, PlanAnnotatedPayload, PlanDraft, RunRequestedPayload, STEP_ROLE, STRATEGY, TASK_STATUS, TERMINAL_TASK_STATUS, WORKSPACE_TITLE_MAX, Workspace, WorkspaceArchivedPayload, WorkspaceMergedPayload, WorkspaceRetitledPayload, evaluateApproval, feedbackKey, formatModelOption, isApprovalAnswer, openFeedbackTopics, validatePlan, type ChildPlanDraftInput, type ModelOption,
-  type Analyzer, type ApprovalPolicy, type EventKind, type EventRecord,
+  AnalysisCompletedPayload, ApprovedBy, CHECKS_STEP_ID, ChildPlanDraft, EVENT_KIND, FINISH_STEP_ID, FeedbackProvidedPayload, GroundedApprovalDoor, IsolationTier, MemoryDeletedPayload, MemoryWrittenPayload, NOTE_TIER, PAYLOAD_SCHEMAS, PlanAnnotatedPayload, PlanDraft, RunRequestedPayload, STEP_ROLE, STRATEGY, TASK_STATUS, TERMINAL_TASK_STATUS, WORKSPACE_TITLE_MAX, Workspace, WorkspaceArchivedPayload, WorkspaceMergedPayload, WorkspaceRetitledPayload, evaluateApproval, feedbackKey, formatModelOption, isApprovalAnswer, openFeedbackTopics, validatePlan, type ChildPlanDraftInput, type ModelOption,
+  type Analyzer, type ApprovalPolicy, type EventDraft, type EventKind, type EventRecord,
   type PlanNote, type Plan, type PlanStep, type TaskNode, type TaskStatus,
   type WorkspaceKind, authorSourceOf, directoryZoneEntries, type Origin,
 } from '@orc/contracts'
@@ -70,12 +70,12 @@ export class Kernel {
     // replyFeedback still appends feedback_provided and returns the topic when it's absent.
     private readonly send?: (workflowId: string, message: string, topic: string, idempotencyKey: string) => Promise<void>,
     // OPERATOR-owned: the author.source values that satisfy the grounded plan-approval gate, from
-    // config.groundedApprovalDoors (contracts' GROUNDED_APPROVAL_DOOR). Default = today's exact
+    // config.groundedApprovalDoors (contracts' GroundedApprovalDoor). Default = today's exact
     // behaviour, 'cli' alone, which also covers the web UI (its replies record 'cli'). Public and
     // readonly because the refusal message has to name the SAME list the gate tests — a message
     // built from its own copy is a message that can advise a door the gate rejects. Widening this
     // lets the driving agent approve plans it authored, which is why it is a config file edit.
-    readonly approvalDoors: readonly string[] = [GROUNDED_APPROVAL_DOOR.cli],
+    readonly approvalDoors: readonly string[] = [GroundedApprovalDoor.cli],
     private readonly finishChecks: readonly string[] = [],
   ) {}
 
@@ -112,7 +112,7 @@ export class Kernel {
             ? ` Models you may set as a subplan's modelRef, with their rates: ${input.modelCatalog.map(formatModelOption).join('; ')}. Omit it to inherit '${input.modelRef}'.`
             : ''),
         executorRef: 'api-loop', modelRef: input.modelRef, skillRefs: ['plan-authoring'], toolRefs: [],
-        isolation: ISOLATION_TIER.local, zone: [], maxIterations, dependsOn: [analyzeStep.id], readOnlySource: true,
+        isolation: IsolationTier.local, zone: [], maxIterations, dependsOn: [analyzeStep.id], readOnlySource: true,
       }
       // What this grounded task is likely to cost, from what comparable grounded tasks ACTUALLY
       // cost (projections.estimateCostUSD) — the plan-approval door printed 'none provided' for
@@ -125,7 +125,7 @@ export class Kernel {
         steps: [analyzeStep, planStep],
       }
       const plan = await this.appendPlanVersion(tx, task.id, draft, EVENT_KIND.plan_proposed, task.status, origin)
-      await this.approvePlanIn(tx, task.id, plan.version, { approvedBy: 'policy' }, origin)
+      await this.approvePlanIn(tx, task.id, plan.version, { approvedBy: ApprovedBy.policy }, origin)
       return task
     })
   }
@@ -177,7 +177,7 @@ export class Kernel {
   async approvePlan(
     taskId: string,
     version: number | undefined,
-    approval: { approvedBy: 'human' | 'policy' | 'mcp'; ruleIndex?: number } | undefined,
+    approval: { approvedBy: ApprovedBy; ruleIndex?: number } | undefined,
     origin: Origin,
   ): Promise<Plan> {
     return this.log.transaction(tx => this.approvePlanIn(tx, taskId, version, approval, origin))
@@ -249,9 +249,10 @@ export class Kernel {
         status: TASK_STATUS.draft, zone: [], budgetUSD, depth: parent.depth + 1,
         createdAt: new Date().toISOString(),
       }
-      await this.append(tx, child.id, EVENT_KIND.task_created, { task: child }, origin)
-      await this.append(tx, input.parentTaskId, EVENT_KIND.split_proposed, {
-        splitId, taskId: input.parentTaskId, stepId: input.stepId, runToken: input.runToken, childTaskId,
+      await this.append(tx, child.id, { kind: EVENT_KIND.task_created, payload: { task: child } }, origin)
+      await this.append(tx, input.parentTaskId, {
+        kind: EVENT_KIND.split_proposed,
+        payload: { splitId, taskId: input.parentTaskId, stepId: input.stepId, runToken: input.runToken, childTaskId },
       }, origin)
 
       // expand the trimmed draft with inherited refs (spec D3) and propose+maybe-approve
@@ -265,18 +266,21 @@ export class Kernel {
           ...s, executorRef: kernelStepExecutorRef(s.id, input.parentStep.executorRef),
           modelRef: s.modelRef ?? input.parentStep.modelRef,
           // zone is the child's own declaration (write-fence) — parsed default [] = unfenced
-          isolation: ISOLATION_TIER.local, zone: s.zone, maxIterations: input.parentStep.maxIterations,
+          isolation: IsolationTier.local, zone: s.zone, maxIterations: input.parentStep.maxIterations,
         })),
       }
       const plan = await this.appendPlanVersion(tx, childTaskId, expanded, EVENT_KIND.plan_proposed, TASK_STATUS.draft, origin)
 
       const verdict = evaluateApproval(input.policy, { depth: child.depth, costEstimateUSD: plan.costEstimateUSD, type: child.type })
       if (verdict.then === 'auto') {
-        await this.append(tx, childTaskId, EVENT_KIND.plan_approved, {
-          taskId: childTaskId, version: plan.version, approvedAt: new Date().toISOString(),
-          approvedBy: 'policy', ...(verdict.ruleIndex !== undefined && { ruleIndex: verdict.ruleIndex }),
+        await this.append(tx, childTaskId, {
+          kind: EVENT_KIND.plan_approved,
+          payload: {
+            taskId: childTaskId, version: plan.version, approvedAt: new Date().toISOString(),
+            approvedBy: ApprovedBy.policy, ...(verdict.ruleIndex !== undefined && { ruleIndex: verdict.ruleIndex }),
+          },
         }, origin)
-        await this.append(tx, childTaskId, EVENT_KIND.task_status_changed, { taskId: childTaskId, from: TASK_STATUS.awaiting_approval, to: TASK_STATUS.approved }, origin)
+        await this.append(tx, childTaskId, { kind: EVENT_KIND.task_status_changed, payload: { taskId: childTaskId, from: TASK_STATUS.awaiting_approval, to: TASK_STATUS.approved } }, origin)
       }
       return { splitId, childTaskId, gated: verdict.then === 'manual' }
     })
@@ -292,7 +296,7 @@ export class Kernel {
       const plan = (await this.stateOf(tx)).plans.get(taskId)?.versions.at(-1)
       if (!plan) throw new KernelError(KERNEL_ERROR_CODE.invalid_transition, 'no plan to annotate')
       const payload = PlanAnnotatedPayload.parse({ planVersion: plan.version, targetNote: input.targetNote, refs: input.refs ?? [], text: input.text })
-      await this.append(tx, taskId, EVENT_KIND.plan_annotated, payload, origin)
+      await this.append(tx, taskId, { kind: EVENT_KIND.plan_annotated, payload }, origin)
     })
   }
 
@@ -514,9 +518,10 @@ export class Kernel {
       // The QUESTION's chat, the ANSWERER's door: the reply belongs to the interaction that asked,
       // and a reply threaded into the answerer's own chat would leave the gate's transcript with a
       // question nobody ever answered.
-      const provided = await this.append(tx, taskId, EVENT_KIND.feedback_provided, payload,
+      const provided = await this.append(tx, taskId,
+        { kind: EVENT_KIND.feedback_provided, payload, idempotencyKey: `feedback:${event.seq}:provided` },
         { chatId: event.chatId, door: origin.door },
-        { stepId: event.stepId, runToken: event.runToken, idempotencyKey: `feedback:${event.seq}:provided` })
+        { stepId: event.stepId, runToken: event.runToken })
       return { topic, runToken: event.runToken, seq: provided.seq }
     })
     if (!open) return null
@@ -539,7 +544,7 @@ export class Kernel {
     return this.log.transaction(async tx => {
       await this.requireTask(tx, ctx.taskId)
       const payload = AnalysisCompletedPayload.parse(coverage)
-      await this.append(tx, ctx.taskId, EVENT_KIND.analysis_completed, payload, origin, { stepId: ctx.stepId, runToken: ctx.runToken })
+      await this.append(tx, ctx.taskId, { kind: EVENT_KIND.analysis_completed, payload }, origin, { stepId: ctx.stepId, runToken: ctx.runToken })
     })
   }
 
@@ -563,8 +568,8 @@ export class Kernel {
       if (cwd === null)
         throw new KernelError(KERNEL_ERROR_CODE.workspace_not_found,
           `task '${taskId}' names workspace '${task.workspaceId}', which is not in the log — pass --cwd to run it anyway`)
-      const requested = await this.append(tx, taskId, EVENT_KIND.run_requested,
-        RunRequestedPayload.parse({ taskId, cwd, retry: opts.retry ?? false }), origin)
+      const requested = await this.append(tx, taskId,
+        { kind: EVENT_KIND.run_requested, payload: RunRequestedPayload.parse({ taskId, cwd, retry: opts.retry ?? false }) }, origin)
       return requested.seq
     })
   }
@@ -590,8 +595,8 @@ export class Kernel {
         // A running task's end belongs to the RUN's chat — that transcript is where the cancelled
         // status is read back from — while the door stays the canceller's, who is not the supervisor.
         const run = status === TASK_STATUS.running ? state.runs.get(id)?.at(-1) : undefined
-        await this.append(tx, id, EVENT_KIND.task_status_changed,
-          { taskId: id, from: status, to: TASK_STATUS.cancelled },
+        await this.append(tx, id,
+          { kind: EVENT_KIND.task_status_changed, payload: { taskId: id, from: status, to: TASK_STATUS.cancelled } },
           run ? { chatId: run.workflowId, door: origin.door } : origin)
         stamped.push(id)
       }
@@ -641,7 +646,7 @@ export class Kernel {
         managed: input.managed ?? false, onTrunk: input.onTrunk,
         createdAt: new Date().toISOString(), archivedAt: null,
       })
-      await this.appendProjectEvent(tx, EVENT_KIND.workspace_created, { workspace }, origin)
+      await this.appendProjectEvent(tx, { kind: EVENT_KIND.workspace_created, payload: { workspace } }, origin)
       return { workspace, created: true }
     })
   }
@@ -654,7 +659,7 @@ export class Kernel {
       if (workspaceByCwd((await this.stateOf(tx)).workspaces, cwd))
         throw new KernelError(KERNEL_ERROR_CODE.invalid_transition, `a workspace already exists at ${cwd}`)
       const workspace = Workspace.parse({ id: randomUUID(), ...input, cwd, createdAt: new Date().toISOString(), archivedAt: null })
-      await this.appendProjectEvent(tx, EVENT_KIND.workspace_created, { workspace }, origin)
+      await this.appendProjectEvent(tx, { kind: EVENT_KIND.workspace_created, payload: { workspace } }, origin)
       return workspace
     })
   }
@@ -677,7 +682,7 @@ export class Kernel {
       if (workspaceByCwd((await this.stateOf(tx)).workspaces, cwd))
         throw new KernelError(KERNEL_ERROR_CODE.invalid_transition, `a workspace already exists at ${cwd}`)
       const restored = { ...parsed, cwd }
-      await this.appendProjectEvent(tx, EVENT_KIND.workspace_created, { workspace: restored }, origin)
+      await this.appendProjectEvent(tx, { kind: EVENT_KIND.workspace_created, payload: { workspace: restored } }, origin)
       return restored
     })
   }
@@ -685,7 +690,7 @@ export class Kernel {
   async retitleWorkspace(id: string, title: string, origin: Origin): Promise<Workspace> {
     return this.log.transaction(async tx => {
       const w = this.requireWorkspace(await this.stateOf(tx), id)
-      await this.appendProjectEvent(tx, EVENT_KIND.workspace_retitled, WorkspaceRetitledPayload.parse({ workspaceId: id, title }), origin)
+      await this.appendProjectEvent(tx, { kind: EVENT_KIND.workspace_retitled, payload: WorkspaceRetitledPayload.parse({ workspaceId: id, title }) }, origin)
       return applyRetitle(w, title) // the fold's own transition — never a second spelling of it
     })
   }
@@ -698,7 +703,7 @@ export class Kernel {
     return this.log.transaction(async tx => {
       const w = this.requireWorkspace(await this.stateOf(tx), id)
       const at = new Date().toISOString()
-      await this.appendProjectEvent(tx, EVENT_KIND.workspace_archived, WorkspaceArchivedPayload.parse({ workspaceId: id, archived, at }), origin)
+      await this.appendProjectEvent(tx, { kind: EVENT_KIND.workspace_archived, payload: WorkspaceArchivedPayload.parse({ workspaceId: id, archived, at }) }, origin)
       return applyArchived(w, archived, at)
     })
   }
@@ -720,7 +725,7 @@ export class Kernel {
       if (state.workspaceMerges.has(id))
         throw new KernelError(KERNEL_ERROR_CODE.invalid_transition, `workspace '${id}' is already merged`)
       const payload = WorkspaceMergedPayload.parse({ workspaceId: id, ...input, at: new Date().toISOString() })
-      await this.appendProjectEvent(tx, EVENT_KIND.workspace_merged, payload, origin)
+      await this.appendProjectEvent(tx, { kind: EVENT_KIND.workspace_merged, payload }, origin)
       return payload
     })
   }
@@ -784,7 +789,7 @@ export class Kernel {
       budgetUSD: input.budgetUSD ?? parent?.budgetUSD ?? null,
       depth: parent ? parent.depth + 1 : 0, createdAt: new Date().toISOString(),
     }
-    await this.append(tx, task.id, EVENT_KIND.task_created, { task }, origin)
+    await this.append(tx, task.id, { kind: EVENT_KIND.task_created, payload: { task } }, origin)
     return task
   }
 
@@ -792,7 +797,7 @@ export class Kernel {
     tx: EventLogOps,
     taskId: string,
     version: number | undefined,
-    approval: { approvedBy: 'human' | 'policy' | 'mcp'; ruleIndex?: number } | undefined,
+    approval: { approvedBy: ApprovedBy; ruleIndex?: number } | undefined,
     origin: Origin,
   ): Promise<Plan> {
     const task = await this.requireTask(tx, taskId)
@@ -803,12 +808,15 @@ export class Kernel {
     const wanted = version ?? latest.version
     if (wanted !== latest.version)
       throw new KernelError(KERNEL_ERROR_CODE.version_conflict, `latest plan is v${latest.version}, not v${wanted}`)
-    await this.append(tx, taskId, EVENT_KIND.plan_approved, {
-      taskId, version: wanted, approvedAt: new Date().toISOString(),
-      approvedBy: approval?.approvedBy ?? 'human',
-      ...(approval?.ruleIndex !== undefined && { ruleIndex: approval.ruleIndex }),
+    await this.append(tx, taskId, {
+      kind: EVENT_KIND.plan_approved,
+      payload: {
+        taskId, version: wanted, approvedAt: new Date().toISOString(),
+        approvedBy: approval?.approvedBy ?? ApprovedBy.human,
+        ...(approval?.ruleIndex !== undefined && { ruleIndex: approval.ruleIndex }),
+      },
     }, origin)
-    await this.append(tx, taskId, EVENT_KIND.task_status_changed, { taskId, from: task.status, to: TASK_STATUS.approved }, origin)
+    await this.append(tx, taskId, { kind: EVENT_KIND.task_status_changed, payload: { taskId, from: task.status, to: TASK_STATUS.approved } }, origin)
     return latest
   }
 
@@ -829,29 +837,28 @@ export class Kernel {
     const refErrors = this.refValidator ? await this.refValidator(plan) : []
     if (refErrors.length > 0)
       throw new KernelError(KERNEL_ERROR_CODE.plan_validation_failed, refErrors.join('; '))
-    await this.append(tx, taskId, kind, { plan }, origin)
+    await this.append(tx, taskId, { kind, payload: { plan } }, origin)
     if (from !== TASK_STATUS.awaiting_approval)
-      await this.append(tx, taskId, EVENT_KIND.task_status_changed, { taskId, from, to: TASK_STATUS.awaiting_approval }, origin)
+      await this.append(tx, taskId, { kind: EVENT_KIND.task_status_changed, payload: { taskId, from, to: TASK_STATUS.awaiting_approval } }, origin)
     return plan
   }
 
   // The ONE envelope spelling in this file: every verb's origin is spread here, so a new verb
   // cannot reach the log without naming the interaction and door it came from.
   private async append(
-    ops: EventLogOps, taskId: string, kind: EventKind, payload: Record<string, unknown>, origin: Origin,
-    extra: { stepId?: string; runToken?: string; idempotencyKey?: string } = {},
+    ops: EventLogOps, taskId: string, draft: EventDraft, origin: Origin,
+    extra: { stepId?: string; runToken?: string } = {},
   ): Promise<EventRecord> {
     return ops.append({
-      ...origin, taskId, stepId: extra.stepId ?? null, runToken: extra.runToken ?? null, kind, payload,
-      ...(extra.idempotencyKey !== undefined && { idempotencyKey: extra.idempotencyKey }),
+      ...origin, taskId, stepId: extra.stepId ?? null, runToken: extra.runToken ?? null, ...draft,
     })
   }
 
   // A project-level event carries NO task binding — the envelope's taskId is null by design (the
   // same shape models_discovered and commit_recorded already use), so `append` above, which demands
   // a task id, cannot express it.
-  private async appendProjectEvent(ops: EventLogOps, kind: EventKind, payload: Record<string, unknown>, origin: Origin): Promise<void> {
-    await ops.append({ ...origin, taskId: null, stepId: null, runToken: null, kind, payload })
+  private async appendProjectEvent(ops: EventLogOps, draft: EventDraft, origin: Origin): Promise<void> {
+    await ops.append({ ...origin, taskId: null, stepId: null, runToken: null, ...draft })
   }
 
   private async requireTask(ops: EventLogOps, id: string): Promise<TaskNode> {

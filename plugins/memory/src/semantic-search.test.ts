@@ -1,6 +1,6 @@
 import { afterAll, describe, expect, it } from 'bun:test'
-import { Door, NO_CHAT, type EmbeddingProvider, type EventRecord, type MemoryAuthor, EVENT_KIND } from '@orc/contracts'
-import { TEST_WORKSPACE_ID, eventFixture } from '@orc/contracts/fixtures'
+import { type EmbeddingProvider, type EventRecord, type MemoryAuthor, EVENT_KIND } from '@orc/contracts'
+import { authorFixture, eventFixture } from '@orc/contracts/fixtures'
 import { SEMANTIC_FLOOR, SurrealMemory } from './surreal'
 import { claimFixture, createTestSurreal, noteFixture } from './test-helpers'
 
@@ -23,7 +23,7 @@ const vec = (text: string): number[] => {
 }
 const fakeEmbedder: EmbeddingProvider = { embed: async texts => texts.map(vec) }
 
-const cli: MemoryAuthor = { source: 'cli', workspaceId: TEST_WORKSPACE_ID, origin: NO_CHAT(Door.cli) }
+const cli: MemoryAuthor = authorFixture()
 const written = (seq: number, n: object): EventRecord =>
   eventFixture({ seq, taskId: null, kind: EVENT_KIND.memory_written, payload: { note: n, author: cli }, ts: `2026-07-24T0${seq}:00:00Z` })
 const accessed = (seq: number, id: string): EventRecord =>

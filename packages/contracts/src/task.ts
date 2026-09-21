@@ -1,12 +1,18 @@
 import { z } from 'zod'
 
-export const TaskStatus = z.enum([
-  'draft', 'awaiting_approval', 'approved', 'running',
-  'blocked', 'done', 'failed', 'cancelled',
-])
-export type TaskStatus = z.infer<typeof TaskStatus>
+export enum TaskStatus {
+  draft = 'draft',
+  awaiting_approval = 'awaiting_approval',
+  approved = 'approved',
+  running = 'running',
+  blocked = 'blocked',
+  done = 'done',
+  failed = 'failed',
+  cancelled = 'cancelled',
+}
 
-export const TASK_STATUS = TaskStatus.enum
+// every caller already matches on this accessor, never a raw literal — kept as a plain alias
+export const TASK_STATUS = TaskStatus
 
 // Statuses no further work will move. A driver uses it to decide whether a task it spawned still
 // needs someone to execute it.
@@ -23,7 +29,7 @@ export const TaskNode = z.object({
   type: z.string().min(1),
   title: z.string().min(1),
   spec: z.string(),
-  status: TaskStatus,
+  status: z.enum(TaskStatus),
   zone: z.array(z.string()),
   budgetUSD: z.number().nonnegative().nullable(),
   depth: z.number().int().min(0),

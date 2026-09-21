@@ -189,7 +189,7 @@ describe('renderTaskFiles — execution and lineage graphs', () => {
 
 describe('renderRootIndex', () => {
   it('lists running tasks under active runs', () => {
-    const md = renderRootIndex([task({ status: 'running' })])
+    const md = renderRootIndex([task({ status: TASK_STATUS.running })])
     expect(md).toContain('type: index')
     expect(md).toContain('Active runs')
     expect(md).toContain('tasks/t1/index.md')
@@ -197,8 +197,8 @@ describe('renderRootIndex', () => {
   })
 
   it('renders the parent→child task-expansion graph with status labels, deterministically sorted', () => {
-    const parent = task({ id: 'p1', title: 'parent', status: 'blocked', depth: 0 })
-    const child = task({ id: 'c1', parentId: 'p1', title: 'child', status: 'done', depth: 1 })
+    const parent = task({ id: 'p1', title: 'parent', status: TASK_STATUS.blocked, depth: 0 })
+    const child = task({ id: 'c1', parentId: 'p1', title: 'child', status: TASK_STATUS.done, depth: 1 })
     const md = renderRootIndex([child, parent]) // input order must not matter
     expect(md).toContain('Task expansion')
     expect(md).toContain('t0["parent · blocked"]')

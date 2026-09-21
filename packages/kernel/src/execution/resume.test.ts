@@ -3,7 +3,7 @@ import { existsSync, mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { Door, EVENT_KIND, FINISH_STEP_ID, NO_CHAT, type Origin } from '@orc/contracts'
+import { Door, EVENT_KIND, FINISH_STEP_ID, NO_CHAT, OperationStatus, StepRunStatus, TASK_STATUS, type Origin } from '@orc/contracts'
 import { draftFixture, must, stepFixture } from '@orc/contracts/fixtures'
 import { openStorage } from '../storage'
 import { Kernel } from '../kernel'
@@ -58,9 +58,9 @@ describe('kill -9 resume', () => {
     // task done: the kill lands inside the operation (after operation_started committed,
     // before completion), so the journal shows honest before/after continuity — attempt 1
     // began and vanished, attempt 2 completed. Domain events stay single: one agent_call.
-    expect((await kernel.getTask(t.id))?.status).toBe('done')
+    expect((await kernel.getTask(t.id))?.status).toBe(TASK_STATUS.done)
     const state = await kernel.state()
-    expect(state.steps.get(t.id)?.get('s1')?.status).toBe('completed')
+    expect(state.steps.get(t.id)?.get('s1')?.status).toBe(StepRunStatus.completed)
     expect(state.steps.get(t.id)?.get('s1')?.iterations).toBe(1)
     // The double-billing question is about THIS step: its completion drafts ran once, so its usage
     // is recorded once. Counted per step because the plan now ends with the kernel's finish step,
@@ -75,7 +75,7 @@ describe('kill -9 resume', () => {
     // step: the finish step journals an operation of its own, and it is not what was interrupted.
     const ops = (await storage.operations.operationsFor(t.id)).filter(o => o.stepId === 's1')
     expect(ops).toHaveLength(1)
-    expect(must(ops[0], 'first operation').status).toBe('completed')
+    expect(must(ops[0], 'first operation').status).toBe(OperationStatus.completed)
     expect(must(ops[0], 'first operation').attempts).toBe(2)
     const taskEvents = (await log.byTask(t.id)).filter(e => e.stepId === 's1')
     expect(taskEvents.filter(e => e.kind === EVENT_KIND.operation_started)).toHaveLength(2)
@@ -134,10 +134,10 @@ describe('kill -9 resume', () => {
     }
     expect(code).toBe(0)
 
-    expect((await kernel.getTask(t.id))?.status).toBe('done')
+    expect((await kernel.getTask(t.id))?.status).toBe(TASK_STATUS.done)
     const steps = (await kernel.state()).steps.get(t.id)
     // each id carries its OWN completion, not a sibling's — the positional-binding assertion
-    for (const id of ['a', 'b', 'c', 'd']) expect(steps?.get(id)?.status).toBe('completed')
+    for (const id of ['a', 'b', 'c', 'd']) expect(steps?.get(id)?.status).toBe(StepRunStatus.completed)
     await log.close()
   }, 180_000)
 })

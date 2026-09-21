@@ -2,7 +2,7 @@ import { afterAll, afterEach, describe, expect, it } from 'bun:test'
 import { mkdirSync, mkdtempSync, realpathSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import { APPROVAL_ANSWER, AUTHOR_SOURCE, ApprovalPolicy, CHECKS_STEP_ID, Door, EVENT_KIND, FINISH_STEP_ID, GROUNDED_APPROVAL_DOOR, LINK_KIND, NO_CHAT, NOTE_TIER, PAYLOAD_SCHEMAS, RunRequestedPayload, STEP_ID, STEP_ROLE, STRATEGY, TASK_STATUS, TaskStatus, WORKSPACE_KIND, WORKSPACE_TITLE_MAX, authorSourceOf, type Analyzer, type AuthorSource, type Origin, type PlanDraft, type PlanStep, type TaskNode, type Workspace } from '@orc/contracts'
+import { APPROVAL_ANSWER, ApprovedBy, AUTHOR_SOURCE, ApprovalPolicy, CHECKS_STEP_ID, Confidence, Door, EVENT_KIND, FINISH_STEP_ID, GroundedApprovalDoor, LINK_KIND, NO_CHAT, NOTE_TIER, PAYLOAD_SCHEMAS, RunRequestedPayload, STEP_ID, STEP_ROLE, STRATEGY, TASK_STATUS, TaskStatus, WORKSPACE_KIND, WORKSPACE_TITLE_MAX, authorSourceOf, type Analyzer, type AuthorSource, type Origin, type PlanDraft, type PlanStep, type TaskNode, type Workspace } from '@orc/contracts'
 import { authorFixture, draftFixture, must, stepFixture } from '@orc/contracts/fixtures'
 import { openStorage, type EventLogOps } from './storage'
 import { KERNEL_ERROR_CODE, KernelError } from './errors'
@@ -246,9 +246,9 @@ describe('Kernel lifecycle', () => {
     const k = await freshKernel()
     const t = await k.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'attributed' }, WEB)
     await k.proposePlan(t.id, draft(), WEB)
-    await k.approvePlan(t.id, undefined, { approvedBy: 'mcp' }, WEB)
+    await k.approvePlan(t.id, undefined, { approvedBy: ApprovedBy.mcp }, WEB)
     const evt = must((await k.eventsFor(t.id)).find(e => e.kind === 'plan_approved'), 'plan_approved event')
-    expect(PAYLOAD_SCHEMAS.plan_approved.parse(evt.payload).approvedBy).toBe('mcp')
+    expect(PAYLOAD_SCHEMAS.plan_approved.parse(evt.payload).approvedBy).toBe(ApprovedBy.mcp)
   })
 
   it('child tasks inherit budget and increment depth', async () => {
@@ -293,7 +293,7 @@ describe('Kernel lifecycle', () => {
     const { k, log } = await freshKernelAndLog()
     const editable: ReadonlySet<TaskStatus> = new Set([TASK_STATUS.awaiting_approval, TASK_STATUS.blocked])
     const outcomes: Record<string, string> = {}
-    for (const status of TaskStatus.options) {
+    for (const status of Object.values(TaskStatus)) {
       // one task per status on a shared log — status is per-task, so a DB per case buys nothing
       const t = await k.createTask({ workspaceId: TEST_WORKSPACE_ID, title: `edit from ${status}` }, WEB)
       await k.proposePlan(t.id, draft(), WEB) // a plan must exist before editing is even meaningful
@@ -301,7 +301,7 @@ describe('Kernel lifecycle', () => {
       outcomes[status] = await codeOf(k.editPlan(t.id, draft(), WEB))
       if (editable.has(status)) expect((await k.getTask(t.id))?.status).toBe(TASK_STATUS.awaiting_approval)
     }
-    expect(outcomes).toEqual(Object.fromEntries(TaskStatus.options.map(s =>
+    expect(outcomes).toEqual(Object.fromEntries(Object.values(TaskStatus).map(s =>
       [s, editable.has(s) ? 'no_error' : KERNEL_ERROR_CODE.invalid_transition])))
   }, 20_000)
 
@@ -544,7 +544,7 @@ describe('Kernel lifecycle', () => {
     expect(child?.parentId).toBe(parent.id)
     expect(child?.depth).toBe(1)
     expect(child?.budgetUSD).toBe(10)             // clamped to subtree-remaining, not the requested 99
-    expect(child?.status).toBe('awaiting_approval') // manual default parks it
+    expect(child?.status).toBe(TASK_STATUS.awaiting_approval) // manual default parks it
     const plan = await k.getPlan(r.childTaskId)
     expect(plan?.steps[0]).toMatchObject({ id: 'w1', executorRef: 'api-loop', modelRef: 'fake/m', maxIterations: 5, isolation: 'local', zone: ['docs/**'] })
     // idempotent: same (runToken, toolCallId) → same ids, no second child
@@ -737,9 +737,9 @@ describe('Kernel lifecycle', () => {
     }
     const r = await k.proposeSplit(base, WEB)
     expect(r.gated).toBe(false)
-    expect((await k.getTask(r.childTaskId))?.status).toBe('approved')
+    expect((await k.getTask(r.childTaskId))?.status).toBe(TASK_STATUS.approved)
     const approvedEvt = (await k.eventsFor(r.childTaskId)).find(e => e.kind === 'plan_approved')
-    expect(approvedEvt?.payload).toMatchObject({ approvedBy: 'policy' })
+    expect(approvedEvt?.payload).toMatchObject({ approvedBy: ApprovedBy.policy })
     await expect(k.proposeSplit({ ...base, toolCallId: 'call_3', maxDepth: 0 }, WEB)).rejects.toThrow(/depth/)
   })
 
@@ -803,7 +803,7 @@ describe('Kernel lifecycle', () => {
 
   // A human answered "agree" and the gate silently read it as ordinary feedback: the plan never
   // froze and the agent re-asked. The gate is the vocabulary now, not one magic word.
-  it('replyFeedback stamps for any word in APPROVAL_ANSWERS, not just the canonical one', async () => {
+  it('replyFeedback stamps for any word in ApprovalAnswer, not just the canonical one', async () => {
     const { k, log } = await freshKernelAndLog()
     for (const text of ['agree', 'Agreed', ' LGTM ', 'yes', APPROVAL_ANSWER]) {
       const task = await k.createTask({ workspaceId: TEST_WORKSPACE_ID, title: text, type: 'grounded' }, WEB)
@@ -894,7 +894,7 @@ describe('Kernel lifecycle', () => {
     const task = await k.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'grounded', type: 'grounded' }, WEB)
     const runToken = `step:${task.id}:plan:a1`
     await mcpApproval(log, task.id, runToken)
-    const widened = new Kernel(log, undefined, undefined, undefined, [GROUNDED_APPROVAL_DOOR.cli, GROUNDED_APPROVAL_DOOR.mcp])
+    const widened = new Kernel(log, undefined, undefined, undefined, [GroundedApprovalDoor.cli, GroundedApprovalDoor.mcp])
 
     expect(await widened.approvedPlanHash(task.id, runToken)).toMatchObject({ hash: 'a'.repeat(64) })
     // the inverted sibling reads the SAME list, so an accepted door is never also reported as the
@@ -953,7 +953,7 @@ describe('Kernel lifecycle', () => {
     const p = PAYLOAD_SCHEMAS.analysis_completed.parse(ev.payload)
     expect(p.analyzed).toBe(true)
     expect(p.gaps).toEqual(['no tests read'])
-    expect(p.confidence).toBe('none') // default
+    expect(p.confidence).toBe(Confidence.none) // default
     expect(p.notesWritten).toBe(0) // default
   })
 
@@ -963,7 +963,7 @@ describe('Kernel lifecycle', () => {
     expect(await k.latestCoverage(t.id)).toBeNull()
     const ctx = { taskId: t.id, stepId: 'analyze', runToken: `step:${t.id}:analyze:a1` }
     await k.reportCoverage(ctx, { analyzed: false }, WEB)
-    await k.reportCoverage(ctx, { analyzed: true, scope: ['pkgs'], gaps: ['no tests'], confidence: 'low', notesWritten: 2 }, WEB)
+    await k.reportCoverage(ctx, { analyzed: true, scope: ['pkgs'], gaps: ['no tests'], confidence: Confidence.low, notesWritten: 2 }, WEB)
     const cov = await k.latestCoverage(t.id)
     expect(cov).toMatchObject({ analyzed: true, notesWritten: 2, gaps: ['no tests'] }) // the latest, not the first
   })

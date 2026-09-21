@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test'
-import { EVENT_KIND, FAILURE_CLASS, NOTE_TIER, TASK_STATUS, type EventRecord, type FailureClass, type TaskStatus } from '@orc/contracts'
+import { EVENT_KIND, FailureClass, NOTE_TIER, TASK_STATUS, type EventRecord, type TaskStatus } from '@orc/contracts'
 import { authorFixture, eventFixture, must, planFixture, stepFixture, taskFixture } from '@orc/contracts/fixtures'
 import { planScope } from '@orc/kernel'
 import { artifactNodeId, modelNodeId, noteNodeId, stepNodeId } from '../graph'
@@ -293,12 +293,12 @@ describe('operator state view', () => {
   // disagrees with the door that would have to serve the retry.
   describe('retryable', () => {
     it('offers a retry on a blocked task whose step malfunctioned', () => {
-      expect(operatorStateView.read(modelOf(ranAndFailed(FAILURE_CLASS.agent_error, TASK_STATUS.blocked)), {})?.retryable).toEqual(['C'])
+      expect(operatorStateView.read(modelOf(ranAndFailed(FailureClass.agent_error, TASK_STATUS.blocked)), {})?.retryable).toEqual(['C'])
     })
 
     it('withdraws it once the task is cancelled — nothing will serve it again', () => {
       const gone = modelOf([
-        ...ranAndFailed(FAILURE_CLASS.agent_error, TASK_STATUS.blocked),
+        ...ranAndFailed(FailureClass.agent_error, TASK_STATUS.blocked),
         ev(6, EVENT_KIND.task_status_changed, 'C', { taskId: 'C', to: TASK_STATUS.cancelled }),
       ])
       expect(operatorStateView.read(gone, {})?.retryable).toEqual([])
@@ -307,17 +307,17 @@ describe('operator state view', () => {
     // The door refuses this one with a paragraph explaining why; offering the button anyway is how
     // an operator ends up pressing something that provably cannot succeed.
     it('withdraws it when every failure is a verdict — a retry would reach the same verdict', () => {
-      expect(operatorStateView.read(modelOf(ranAndFailed(FAILURE_CLASS.rejected, TASK_STATUS.blocked)), {})?.retryable).toEqual([])
+      expect(operatorStateView.read(modelOf(ranAndFailed(FailureClass.rejected, TASK_STATUS.blocked)), {})?.retryable).toEqual([])
     })
 
     it('offers nothing on a running task, whatever an older step did', () => {
-      expect(operatorStateView.read(modelOf(ranAndFailed(FAILURE_CLASS.agent_error, TASK_STATUS.running)), {})?.retryable).toEqual([])
+      expect(operatorStateView.read(modelOf(ranAndFailed(FailureClass.agent_error, TASK_STATUS.running)), {})?.retryable).toEqual([])
     })
   })
 
   describe('planned', () => {
     it('names the tasks the fold holds a plan for', () => {
-      expect(operatorStateView.read(modelOf(ranAndFailed(FAILURE_CLASS.agent_error, TASK_STATUS.blocked)), {})?.planned).toEqual(['C'])
+      expect(operatorStateView.read(modelOf(ranAndFailed(FailureClass.agent_error, TASK_STATUS.blocked)), {})?.planned).toEqual(['C'])
       expect(operatorStateView.read(modelOf(asked), {})?.planned).toEqual([])
     })
 

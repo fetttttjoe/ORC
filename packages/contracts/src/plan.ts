@@ -2,10 +2,11 @@ import { z } from 'zod'
 import { TOOL_REF_RE } from './plugins'
 import { planFieldViolations } from './plan-rules'
 
-export const IsolationTier = z.enum(['local', 'worktree', 'docker'])
-export type IsolationTier = z.infer<typeof IsolationTier>
-
-export const ISOLATION_TIER = IsolationTier.enum
+export enum IsolationTier {
+  local = 'local',
+  worktree = 'worktree',
+  docker = 'docker',
+}
 
 export const PlanStep = z.object({
   // path-safe: step ids flow into filesystem workspace paths and deterministic workflow ids
@@ -17,7 +18,7 @@ export const PlanStep = z.object({
   modelRef: z.string().min(1),
   skillRefs: z.array(z.string()),
   toolRefs: z.array(z.string().regex(TOOL_REF_RE)).default([]),
-  isolation: IsolationTier,
+  isolation: z.enum(IsolationTier),
   zone: z.array(z.string()),
   maxIterations: z.number().int().positive(),
   dependsOn: z.array(z.string()),
@@ -88,9 +89,10 @@ export const ROLE_SKILL = { auditor: 'role-auditor', committer: 'role-committer'
 // There is deliberately NO 'web' member: a web-UI reply rides the actions layer's via-default and
 // is recorded as 'cli', so a 'web' entry would name a door the log never stamps. If that
 // attribution ever changes, this enum grows then — never before.
-export const GROUNDED_APPROVAL_DOOR = { cli: 'cli', mcp: 'mcp' } as const
-export type GroundedApprovalDoorValue = (typeof GROUNDED_APPROVAL_DOOR)[keyof typeof GROUNDED_APPROVAL_DOOR]
-export const GroundedApprovalDoor = z.enum([GROUNDED_APPROVAL_DOOR.cli, GROUNDED_APPROVAL_DOOR.mcp])
+export enum GroundedApprovalDoor {
+  cli = 'cli',
+  mcp = 'mcp',
+}
 
 // The per-task plan-note scope. The authoring agent, finalize_plan, and every UI view derive
 // it from the taskId — one format, one place (was duplicated as ui-core's planScopeName).

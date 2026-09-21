@@ -3,8 +3,9 @@ import { mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import {
-  CHECKS_EXECUTOR_REF, CHECKS_STEP_ID, Door, EVENT_KIND, FINISH_STEP_ID, NO_CHAT, PAYLOAD_SCHEMAS, SIGNAL_OUTCOME, TASK_STATUS,
+  CHECKS_EXECUTOR_REF, CHECKS_STEP_ID, Door, EVENT_KIND, FINISH_STEP_ID, NO_CHAT, PAYLOAD_SCHEMAS, SignalOutcome, TASK_STATUS,
   type AgentExecutor, type EventDraft, type ExecutorContext, type Origin, type SplitResult, type UnifiedEvent,
+  RunOutcome,
 } from '@orc/contracts'
 import { draftFixture, must, stepFixture } from '@orc/contracts/fixtures'
 import { openStorage } from '../storage'
@@ -25,7 +26,7 @@ function recordingFake(): AgentExecutor<unknown> {
     id: EXECUTOR_REF,
     async *startTurn(ctx: ExecutorContext<unknown>): AsyncGenerator<UnifiedEvent, void, SplitResult[] | string | undefined> {
       depOutputs.set(ctx.step.id, ctx.depOutputs)
-      const signal = { stepId: ctx.step.id, runToken: ctx.runToken, outcome: SIGNAL_OUTCOME.success, summary: `${ctx.step.id} done` }
+      const signal = { stepId: ctx.step.id, runToken: ctx.runToken, outcome: SignalOutcome.success, summary: `${ctx.step.id} done` }
       await ctx.checkpoint('signal:1', async () => signal, (): EventDraft[] => [
         { kind: EVENT_KIND.signal_received, payload: { stepId: ctx.step.id, runToken: ctx.runToken, signal } },
       ])
@@ -68,7 +69,7 @@ describe('a red check reports, it does not block', () => {
     await kernel.approvePlan(t.id, undefined, undefined, CLI)
 
     const handle = await port.startRun(t.id, { cwd: workspaceDir })
-    expect(await handle.wait()).toBe('done')
+    expect(await handle.wait()).toBe(RunOutcome.done)
     expect(await waitFor(async () => (await kernel.eventsFor(t.id)).some(e => e.kind === EVENT_KIND.step_completed && e.stepId === FINISH_STEP_ID), 10_000)).toBe(true)
 
     const completed = (await kernel.eventsFor(t.id)).filter(e => e.kind === EVENT_KIND.step_completed)

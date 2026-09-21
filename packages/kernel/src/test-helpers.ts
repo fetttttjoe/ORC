@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { EVENT_KIND, WORKSPACE_KIND, type LoadedSkill, type ModelProvider, type Origin, type Workspace } from '@orc/contracts'
 import { TEST_WORKSPACE_ID } from '@orc/contracts/fixtures'
-import { loadConfig, requireProject, type ProjectConfig } from './config'
+import { loadConfig, requireProject, type OrcConfig, type ProjectConfig } from './config'
 import type { EventLogOps } from './storage'
 import { migrateDatabase } from './storage/migrate'
 
@@ -71,6 +71,12 @@ export function testConfig(databaseUrl: string, overrides: Partial<ProjectConfig
     projectName: 'test',
     ...overrides,
   })
+}
+
+// schema defaults only: an explicit dir skips loadConfig's walk-up, and the dir never exists
+export function testOrcConfig(overrides: Partial<OrcConfig> = {}): OrcConfig {
+  const dir = path.join(tmpdir(), `orc-hermetic-config-${Math.random().toString(36).slice(2, 10)}`)
+  return { ...loadConfig(dir), ...overrides }
 }
 
 // the ONE polling loop for "the router/port will get there soon" assertions, hoisted from five test files

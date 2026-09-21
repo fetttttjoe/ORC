@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { Door, EVENT_KIND, NO_CHAT, PAYLOAD_SCHEMAS, ROLE_SKILL, type Origin } from '@orc/contracts'
+import { Door, EVENT_KIND, NO_CHAT, PAYLOAD_SCHEMAS, ROLE_SKILL, RunOutcome, type Origin } from '@orc/contracts'
 import { draftFixture, must, stepFixture } from '@orc/contracts/fixtures'
 import { createMcpHub } from '@orc/mcp-client'
 import { apiLoopExecutor } from '@orc/executor-api-loop'
@@ -89,7 +89,7 @@ describe('MCP + skills through a durable run (integration)', () => {
     await kernel.approvePlan(t.id, undefined, undefined, CLI)
 
     const handle = await port.startRun(t.id)
-    expect(await handle.wait()).toBe('done')
+    expect(await handle.wait()).toBe(RunOutcome.done)
 
     const events = await kernel.eventsFor(t.id)
     const kinds = events.map(e => e.kind)

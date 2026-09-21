@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { z } from 'zod'
-import { AUTHOR_SOURCE, Door, EVENT_KIND, ModelsDiscoveredPayload, NO_CHAT, isRecord } from '@orc/contracts'
+import { ApprovedBy, Door, EVENT_KIND, ModelsDiscoveredPayload, NO_CHAT, isRecord } from '@orc/contracts'
 import { must } from '@orc/contracts/fixtures'
 import { buildCopilotTools } from '@orc/ui-core'
 import { MEMORY_READ_TOOLS, unavailableMemoryTools } from '@orc/memory'
@@ -245,7 +245,7 @@ describe('orc mcp serve (stdio, read slice)', () => {
     const full = await mcpApproveTool(actions, 'full').execute({ taskId: 't1', version: 2 }, undefined)
     expect(full.isError).toBe(false)
     // the door names its origin (Door.mcp) and its attribution (approvedBy) — identity, not authority
-    expect(calls).toEqual([['t1', { version: 2, approvedBy: AUTHOR_SOURCE.mcp }, MCP]])
+    expect(calls).toEqual([['t1', { version: 2, approvedBy: ApprovedBy.mcp }, MCP]])
   })
 
   // The input crosses a trust boundary: an external MCP client can send ANY shape, and the

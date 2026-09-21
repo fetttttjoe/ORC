@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, it } from 'bun:test'
-import { Door, EVENT_KIND, NO_CHAT, type Origin, type TaskNode } from '@orc/contracts'
+import { Door, EVENT_KIND, NO_CHAT, TASK_STATUS, type Origin, type TaskNode } from '@orc/contracts'
 import { openStorage, type EventLog, type Storage } from './storage'
 import { openLiveState } from './live-state'
 import { createTestDb, TEST_PROJECT_ID, waitFor } from './test-helpers'
@@ -51,11 +51,11 @@ describe('openLiveState', () => {
     try {
       await createTask(storage.events, task('t2'))
       await settled(() => live.current().tasks.has('t2'))
-      expect(live.current().tasks.get('t2')?.status).toBe('draft')
+      expect(live.current().tasks.get('t2')?.status).toBe(TASK_STATUS.draft)
 
       await storage.events.append({
         ...CLI, taskId: 't2', stepId: null, runToken: null, kind: EVENT_KIND.task_status_changed,
-        payload: { taskId: 't2', from: 'draft', to: 'awaiting_approval' },
+        payload: { taskId: 't2', from: TASK_STATUS.draft, to: TASK_STATUS.awaiting_approval },
       })
       await settled(() => live.current().tasks.get('t2')?.status === 'awaiting_approval')
     } finally {
@@ -73,7 +73,7 @@ describe('openLiveState', () => {
       await createTask(storage.events, task('b', { parentId: 'a', depth: 1 }))
       await storage.events.append({
         ...CLI, taskId: 'a', stepId: null, runToken: null, kind: EVENT_KIND.task_status_changed,
-        payload: { taskId: 'a', from: 'draft', to: 'awaiting_approval' },
+        payload: { taskId: 'a', from: TASK_STATUS.draft, to: TASK_STATUS.awaiting_approval },
       })
       await settled(() => live.current().tasks.get('a')?.status === 'awaiting_approval')
       const { fold } = await import('./projections')

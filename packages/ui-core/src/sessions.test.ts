@@ -1,6 +1,6 @@
 import { afterAll, describe, expect, it } from 'bun:test'
 import { z } from 'zod'
-import { Door, EVENT_KIND, ISOLATION_TIER, NO_CHAT, type Scope, ScopeType } from '@orc/contracts'
+import { AUTHOR_SOURCE, Door, EVENT_KIND, IsolationTier, NO_CHAT, type EventInput, type Scope, ScopeType } from '@orc/contracts'
 
 // these histories are arranged through the terminal door; the run halves are the supervisor's
 const CLI = NO_CHAT(Door.cli)
@@ -12,7 +12,7 @@ import { createProjectSessions, type ProjectSessions, type SessionUpdate } from 
 import { viewOf } from './views/registry'
 import type { ViewParams } from './views/view'
 import { VIEW } from './wire'
-import { must } from '@orc/contracts/fixtures'
+import { authorFixture, must } from '@orc/contracts/fixtures'
 
 // Every read here goes through the door helper the tools use, against a REAL session: the views'
 // own unit tests answer from a hand-built model, and what those cannot show is that the thing the
@@ -55,27 +55,27 @@ async function setup() {
   return { storage, taskId: t.id, sessions }
 }
 
-const noteEvent = (id: string) => ({
+const noteEvent = (id: string): EventInput => ({
   ...CLI,
   taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_written,
-  payload: { note: { id, title: id }, author: { source: 'cli' as const, workspaceId: TEST_WORKSPACE_ID, origin: CLI } },
+  payload: { note: { id, title: id }, author: authorFixture() },
 })
 
 // a plan-note in the parent's plan scope; its id IS the child step id (instantiateFrozenPlan),
 // which is how planNotes correlates the decomposition graph to child execution.
-const planNoteEvent = (taskId: string, id: string, links: Array<{ id: string; kind: string }> = []) => ({
+const planNoteEvent = (taskId: string, id: string, links: Array<{ id: string; kind: string }> = []): EventInput => ({
   ...CLI,
   taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_written,
   payload: {
     note: { id, title: id, scope: `plan-${taskId.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`, tier: 'plan' as const, links },
-    author: { source: 'cli' as const, workspaceId: TEST_WORKSPACE_ID, origin: CLI },
+    author: authorFixture(),
   },
 })
 
 // A frozen child plan step (post-expansion shape) carrying the note id verbatim.
 const childStep = (id: string) => ({
   id, role: 'implementer', title: id, instructions: 'do it', executorRef: 'api-loop',
-  modelRef: 'p/m', skillRefs: [], toolRefs: [], isolation: ISOLATION_TIER.local, zone: [],
+  modelRef: 'p/m', skillRefs: [], toolRefs: [], isolation: IsolationTier.local, zone: [],
   maxIterations: 8, dependsOn: [],
 })
 
@@ -130,7 +130,7 @@ describe('ProjectSessions', () => {
     await storage.events.append({
       ...CLI,
       taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_accessed,
-      payload: { id: 'hit-note', scope: 'project', mode: 'read', author: { source: 'cli', workspaceId: TEST_WORKSPACE_ID, origin: CLI } },
+      payload: { id: 'hit-note', scope: 'project', mode: 'read', author: authorFixture() },
     })
     for (let i = 0; i < 40 && updates.length < 2; i++) await Bun.sleep(50)
     expect(updates).toHaveLength(2)
@@ -172,12 +172,12 @@ describe('ProjectSessions', () => {
     await storage.events.append({
       ...SUPERVISOR,
       taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_written,
-      payload: { note: { id: 'note-by-a', title: 'note-by-a' }, author: { source: 'agent', workspaceId: TEST_WORKSPACE_ID, taskId: taskA, origin: SUPERVISOR } },
+      payload: { note: { id: 'note-by-a', title: 'note-by-a' }, author: authorFixture({ source: AUTHOR_SOURCE.agent, taskId: taskA, origin: SUPERVISOR }) },
     })
     await storage.events.append({
       ...SUPERVISOR,
       taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_written,
-      payload: { note: { id: 'note-by-b', title: 'note-by-b' }, author: { source: 'agent', workspaceId: TEST_WORKSPACE_ID, taskId: taskB, origin: SUPERVISOR } },
+      payload: { note: { id: 'note-by-b', title: 'note-by-b' }, author: authorFixture({ source: AUTHOR_SOURCE.agent, taskId: taskB, origin: SUPERVISOR }) },
     })
     await storage.events.append(noteEvent('ownerless-note')) // author.source 'cli', no taskId
 
@@ -269,7 +269,7 @@ describe('ProjectSessions', () => {
     await storage.events.append({
       ...CLI,
       taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_written,
-      payload: { note: { id: 'pointer', title: 'pointer', links: [{ id: 'target' }] }, author: { source: 'cli', workspaceId: TEST_WORKSPACE_ID, origin: CLI } },
+      payload: { note: { id: 'pointer', title: 'pointer', links: [{ id: 'target' }] }, author: authorFixture() },
     })
     const d = BacklinksView.parse(await viewOf(sessions, TEST_PROJECT_ID, VIEW.node, { id: noteNodeId('project', 'target') }))
     expect(d.backlinks.map(b => b.id)).toEqual(['pointer'])
@@ -281,7 +281,7 @@ describe('ProjectSessions', () => {
     await storage.events.append({
       ...CLI,
       taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_accessed,
-      payload: { id: 'detail-note', scope: 'project', mode: 'read', author: { source: 'cli', workspaceId: TEST_WORKSPACE_ID, origin: CLI } },
+      payload: { id: 'detail-note', scope: 'project', mode: 'read', author: authorFixture() },
     })
     const task = TaskDetailView.parse(await viewOf(sessions, TEST_PROJECT_ID, VIEW.node, { id: taskId }))
     expect(task.task.title).toBe('seed task')

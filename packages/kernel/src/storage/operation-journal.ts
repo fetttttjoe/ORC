@@ -1,6 +1,6 @@
 import { and, asc, eq } from 'drizzle-orm'
 import {
-  EVENT_KIND, OPERATION_STATUS, terminalError,
+  EVENT_KIND, OperationStatus, terminalError,
   type EventDraft, type OperationRecord, type OperationSpec, type Origin,
 } from '@orc/contracts'
 import { operations } from '../schema'
@@ -61,7 +61,7 @@ export class OperationJournal {
     return this.store.withProjectLock(async tx => {
       const ops = this.events.txOps(tx)
       const existing = await this.row(tx, spec.operationId)
-      if (existing?.status === OPERATION_STATUS.completed)
+      if (existing?.status === OperationStatus.completed)
         return { reused: true, attempt: existing.attempts, value: existing.after }
       const attempt = (existing?.attempts ?? 0) + 1
       const event = await ops.append({
@@ -88,7 +88,7 @@ export class OperationJournal {
       const ops = this.events.txOps(tx)
       const existing = await this.row(tx, spec.operationId)
       if (!existing) throw terminalError(`operation '${spec.operationId}' was never started`)
-      if (existing.status === OPERATION_STATUS.completed) {
+      if (existing.status === OperationStatus.completed) {
         if (existing.attempts === attempt) return existing.after // lost-ack re-entry: already durable
         throw terminalError(`operation '${spec.operationId}' already completed at attempt ${existing.attempts}`)
       }
@@ -104,8 +104,7 @@ export class OperationJournal {
       await this.upsert(tx, next)
       for (const [i, d] of drafts.entries())
         await ops.append({
-          ...envelopeOf(context),
-          kind: d.kind, payload: d.payload, usage: d.usage ?? null,
+          ...envelopeOf(context), ...d, usage: d.usage ?? null,
           idempotencyKey: d.idempotencyKey ?? `${spec.operationId}:${attempt}:draft:${i}`,
         })
       return next.after
@@ -119,7 +118,7 @@ export class OperationJournal {
       const ops = this.events.txOps(tx)
       const existing = await this.row(tx, spec.operationId)
       if (!existing) throw terminalError(`operation '${spec.operationId}' was never started`)
-      if (existing.status === OPERATION_STATUS.completed || existing.attempts !== attempt) return
+      if (existing.status === OperationStatus.completed || existing.attempts !== attempt) return
       const event = await ops.append({
         ...envelopeOf(context),
         kind: EVENT_KIND.operation_failed,

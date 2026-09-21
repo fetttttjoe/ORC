@@ -17,7 +17,7 @@ export const TOOL_NAME = {
 } as const
 
 export const SignalInput = z.object({
-  outcome: SignalOutcome,
+  outcome: z.enum(SignalOutcome),
   summary: z.string().min(1),
   // workspace-relative files this step produced — verified and receipted by the runtime
   outputs: z.array(z.string().min(1)).optional(),

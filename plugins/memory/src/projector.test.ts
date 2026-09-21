@@ -2,9 +2,9 @@ import { afterAll, describe, expect, it, spyOn } from 'bun:test'
 import { mkdtempSync, existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import { claimId, Door, EVENT_KIND, MEMORY_ACCESS, noteKey, NO_CHAT, TASK_STATUS, type EmbeddingProvider, type EventKind, type MemoryAuthor, type Origin } from '@orc/contracts'
+import { AUTHOR_SOURCE, claimId, Door, EVENT_KIND, MEMORY_ACCESS, noteKey, NO_CHAT, TASK_STATUS, type EmbeddingProvider, type EventDraft, type MemoryAuthor, type Origin } from '@orc/contracts'
 import { openStorage } from '@orc/kernel'
-import { semanticNoteFixture, TEST_WORKSPACE_ID } from '@orc/contracts/fixtures'
+import { authorFixture, semanticNoteFixture, TEST_WORKSPACE_ID } from '@orc/contracts/fixtures'
 import { createTestDb, TEST_PROJECT_ID } from '@orc/kernel/test-helpers'
 import { SurrealMemory } from './surreal'
 import { createTestSurreal, projectorStoreStub } from './test-helpers'
@@ -18,7 +18,7 @@ const noteInput = { id: 'auth', scope: 'project', title: 'Auth', categories: [],
 
 // The events here stand in for `orc memory` writes: no chat, through the CLI door.
 const CLI: Origin = NO_CHAT(Door.cli)
-const cliAuthor: MemoryAuthor = { source: 'cli', workspaceId: TEST_WORKSPACE_ID, origin: CLI }
+const cliAuthor: MemoryAuthor = authorFixture()
 
 // Wait for the SUBSCRIPTION to land rather than sleeping a guessed slice. A fixed `Bun.sleep(150)`
 // encodes an assumption about machine speed: measured, it fails reproducibly on a loaded box (three
@@ -90,7 +90,7 @@ describe('memory projector', () => {
       await log.append({ ...CLI, taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_written,
         payload: { note: noteInput, author: cliAuthor } })
       await log.append({ chatId: 'run:t1:v1', door: Door.supervisor, taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_written,
-        payload: { note: { ...noteInput, summary: 'revised' }, author: { source: 'agent', workspaceId: TEST_WORKSPACE_ID, executor: 'api-loop', model: 'opus', role: 'review', origin: { chatId: 'run:t1:v1', door: Door.supervisor } } } })
+        payload: { note: { ...noteInput, summary: 'revised' }, author: authorFixture({ source: AUTHOR_SOURCE.agent, executor: 'api-loop', model: 'opus', role: 'review', origin: { chatId: 'run:t1:v1', door: Door.supervisor } }) } })
       await proj.catchUp()
 
       const before = await surreal.allNotes()
@@ -125,7 +125,7 @@ describe('memory projector', () => {
       // the LAST writer's workspace, not the first: a note re-written from another checkout is
       // pending in THAT one until it merges, whatever the note's origin was
       await log.append({ ...CLI, taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_written,
-        payload: { note: { ...noteInput, summary: 'revised' }, author: { source: 'cli', workspaceId: 'ws-later', origin: CLI } } })
+        payload: { note: { ...noteInput, summary: 'revised' }, author: authorFixture({ workspaceId: 'ws-later' }) } })
       await proj.catchUp()
       expect((await surreal.get('auth', 'project'))?.workspaceId).toBe('ws-later')
       // and it survives a replay — the fact comes off the event, so a rebuild re-derives it
@@ -148,12 +148,12 @@ describe('memory projector', () => {
     const proj = createMemoryProjector({ log, surreal, vaultDir })
     await proj.start()
     try {
-      const append = (kind: EventKind, payload: Record<string, unknown>) =>
-        log.append({ ...CLI, taskId: null, stepId: null, runToken: null, kind, payload })
+      const append = (draft: EventDraft) =>
+        log.append({ ...CLI, taskId: null, stepId: null, runToken: null, ...draft })
       const access = { id: 'auth', scope: 'project', mode: MEMORY_ACCESS.read, author: cliAuthor }
-      await append(EVENT_KIND.memory_written, { note: noteInput, author: cliAuthor })
-      await append(EVENT_KIND.memory_accessed, access)
-      await append(EVENT_KIND.memory_accessed, access)
+      await append({ kind: EVENT_KIND.memory_written, payload: { note: noteInput, author: cliAuthor } })
+      await append({ kind: EVENT_KIND.memory_accessed, payload: access })
+      await append({ kind: EVENT_KIND.memory_accessed, payload: access })
       await proj.catchUp()
 
       const before = await surreal.list()

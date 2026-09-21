@@ -2,7 +2,7 @@ import {
   errorMessage,
   CommitRecordedPayload,
   Door,
-  EVENT_KIND, EventKind, FeedbackProvidedPayload, MemoryWrittenPayload, PAYLOAD_SCHEMAS, REACTION, ReactionFailedPayload, RUN_OUTCOME, RunRequestedPayload, runOutcomeFor, SplitResult, TASK_STATUS, TERMINAL_TASK_STATUS,
+  EVENT_KIND, EventKind, FeedbackProvidedPayload, MemoryWrittenPayload, PAYLOAD_SCHEMAS, REACTION, ReactionFailedPayload, RunOutcome, RunRequestedPayload, runOutcomeFor, SplitResult, TASK_STATUS, TERMINAL_TASK_STATUS,
   type EventRecord, type Reaction, type TaskStatus,
 } from '@orc/contracts'
 import { EventLog } from '../storage'
@@ -27,7 +27,7 @@ const ROUTER_RELEVANT: Record<EventKind, boolean> = {
   // composeSplitResult needs these, but it runs once per split resolution — keeping note bodies out
   // of ROUTER_KINDS means the per-event fetch below does not carry them.
   memory_written: false,
-  skill_loaded: false, agent_call: false, tool_call: false, tool_result: false,
+  skill_loaded: false, rate_limit_wait: false, agent_call: false, tool_call: false, tool_result: false,
   signal_received: false, operation_started: false, operation_completed: false,
   operation_failed: false, artifact_produced: false, memory_deleted: false, memory_accessed: false,
   // a topic access (list or fetch) reads DERIVED knowledge — it starts nothing, unblocks nothing,
@@ -52,7 +52,7 @@ const ROUTER_RELEVANT: Record<EventKind, boolean> = {
   // a chat's opening is a correlation fact — nothing routes off it
   chat_opened: false,
 }
-const ROUTER_KINDS = EventKind.options.filter(k => ROUTER_RELEVANT[k])
+const ROUTER_KINDS = Object.values(EventKind).filter(k => ROUTER_RELEVANT[k])
 
 // Pure composition of the thin join payload from the log (spec D5). Deterministic for a
 // fixed event set — but the set can differ between racing routers (late memory_written),
@@ -63,7 +63,7 @@ export function composeSplitResult(events: EventRecord[], noteEvents: EventRecor
   const subtree = new Set(subtreeTaskIds(state, split.childTaskId))
 
   let summary = 'cancelled'
-  if (outcome === RUN_OUTCOME.done) {
+  if (outcome === RunOutcome.done) {
     const tp = state.plans.get(split.childTaskId)
     const plan = tp?.versions.find(v => v.version === tp.approvedVersion) ?? tp?.versions.at(-1)
     const dependedOn = new Set(plan?.steps.flatMap(s => s.dependsOn) ?? [])
@@ -71,7 +71,7 @@ export function composeSplitResult(events: EventRecord[], noteEvents: EventRecor
     summary = terminals
       .map(s => state.steps.get(split.childTaskId)?.get(s.id)?.output ?? '')
       .filter(Boolean).join('\n')
-  } else if (outcome === RUN_OUTCOME.blocked) {
+  } else if (outcome === RunOutcome.blocked) {
     const failing = [...(state.steps.get(split.childTaskId)?.values() ?? [])].find(s => s.failure)
     summary = failing?.failure?.message ?? 'blocked'
   }

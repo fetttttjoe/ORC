@@ -9,9 +9,10 @@ import pg from 'pg'
 import { drizzle } from 'drizzle-orm/node-postgres'
 import { events } from '../schema'
 import {
-  ApprovalPolicy, ChatOpenedPayload, Door, EVENT_KIND, FAILURE_CLASS, FINISH_STEP_ID, NO_CHAT, PAYLOAD_SCHEMAS, SIGNAL_OUTCOME, STEP_ID, STEP_ROLE, TASK_STATUS,
+  ApprovalPolicy, ChatOpenedPayload, Confidence, Door, EVENT_KIND, FailureClass, FINISH_STEP_ID, NO_CHAT, OperationKind, OperationStatus, PAYLOAD_SCHEMAS, SignalOutcome, STEP_ID, STEP_ROLE, StepRunStatus, TASK_STATUS,
   type AgentExecutor, type EventDraft, type EventRecord, type ExecutorContext, type Origin, type PlanDraft,
   type SplitResult, type UnifiedEvent,
+  RunOutcome,
 } from '@orc/contracts'
 import type { GroundingNoteRef, GroundingSource } from './strategies/grounding-freshness'
 import { draftFixture, must, stepFixture } from '@orc/contracts/fixtures'
@@ -67,13 +68,13 @@ function fakeExecutor(): AgentExecutor<unknown> {
       const scripted = ctx.step.id !== FINISH_STEP_ID
       if (scripted && operationTasks.has(taskId))
         await ctx.operation(
-          { operationId: `${ctx.runToken}:model:1`, kind: 'model', name: 'fake/m', before: { iteration: 1 } },
+          { operationId: `${ctx.runToken}:model:1`, kind: OperationKind.model, name: 'fake/m', before: { iteration: 1 } },
           async () => {
             operationRuns.set(taskId, (operationRuns.get(taskId) ?? 0) + 1)
             return { ok: true }
           },
         )
-      const outcome = behavior[ctx.step.id] === 'fail' ? SIGNAL_OUTCOME.failure : SIGNAL_OUTCOME.success
+      const outcome = behavior[ctx.step.id] === 'fail' ? SignalOutcome.failure : SignalOutcome.success
       const summary = `${ctx.step.id}:${outcome} deps=[${Object.keys(ctx.depOutputs).sort().join(',')}] skills=[${ctx.skills.map(s => s.name)}] tools=[${ctx.extraTools.map(t => t.name)}]`
       const outputSpec = scripted ? outputsByTask.get(taskId) : undefined
       for (const f of outputSpec?.write ?? []) writeFileSync(path.join(ctx.workspaceDir, f), `content of ${f}`)
@@ -249,12 +250,12 @@ describe('DBOS execution port (integration)', () => {
   it('runs a 2-step DAG to done, threading dep outputs, in order', async () => {
     const t = await approvedTask()
     const handle = await port.startRun(t.id)
-    expect(await handle.wait()).toBe('done')
+    expect(await handle.wait()).toBe(RunOutcome.done)
 
     expect((await kernel.getTask(t.id))?.status).toBe(TASK_STATUS.done)
     const state = await kernel.state()
-    expect(state.steps.get(t.id)?.get('a')?.status).toBe('completed')
-    expect(state.steps.get(t.id)?.get('b')?.status).toBe('completed')
+    expect(state.steps.get(t.id)?.get('a')?.status).toBe(StepRunStatus.completed)
+    expect(state.steps.get(t.id)?.get('b')?.status).toBe(StepRunStatus.completed)
     // b saw a's output (the signal summary)
     expect(state.steps.get(t.id)?.get('b')?.output).toContain('deps=[a]')
     // event ordering: run_started before any step_started; a completes before b starts
@@ -267,7 +268,7 @@ describe('DBOS execution port (integration)', () => {
   it('a run is one chat: chat_opened once before run_started, and every event of the run carries the run id under the supervisor door', async () => {
     const t = await approvedTask()
     const handle = await port.startRun(t.id)
-    expect(await handle.wait()).toBe('done')
+    expect(await handle.wait()).toBe(RunOutcome.done)
 
     const events = await kernel.eventsFor(t.id)
     const opened = events.filter(e => e.kind === EVENT_KIND.chat_opened)
@@ -289,11 +290,11 @@ describe('DBOS execution port (integration)', () => {
     const behavior: Record<string, 'ok' | 'fail'> = { a: 'ok', b: 'fail' }
     const t = await approvedTask(behavior)
     const first = await port.startRun(t.id)
-    expect(await first.wait()).toBe('blocked')
+    expect(await first.wait()).toBe(RunOutcome.blocked)
 
     behavior.b = 'ok'
     const retry = await port.retry(t.id)
-    expect(await retry.wait()).toBe('done')
+    expect(await retry.wait()).toBe(RunOutcome.done)
 
     const chats = (await kernel.eventsFor(t.id))
       .filter(e => e.kind === EVENT_KIND.chat_opened)
@@ -330,7 +331,7 @@ describe('DBOS execution port (integration)', () => {
 
   it('hands every step surface the workspace its OWN task names, so an agent write is stamped from the task, not the supervisor cwd', async () => {
     const t = await approvedTask()
-    expect(await (await port.startRun(t.id)).wait()).toBe('done')
+    expect(await (await port.startRun(t.id)).wait()).toBe(RunOutcome.done)
     const seen = stepToolsCalls.filter(c => c.taskId === t.id)
     expect(seen.map(c => c.stepId).sort()).toEqual(['a', 'b', FINISH_STEP_ID])
     // The value, not merely presence: the port reads it off the TaskNode it already folds for the
@@ -349,7 +350,7 @@ describe('DBOS execution port (integration)', () => {
     expect(runs).toHaveLength(1)
   }, 15_000) // two steps plus the appended finish step no longer fit bun's default 5s
 
-  // runWorkflow returns RUN_OUTCOME.blocked as a NORMAL return, so DBOS marks the workflow SUCCESS
+  // runWorkflow returns RunOutcome.blocked as a NORMAL return, so DBOS marks the workflow SUCCESS
   // and keeps its deterministic id. Re-running therefore re-attached to a FINISHED workflow and
   // replayed its cached result: `orc run` on a blocked task was admitted at every door (blocked is
   // drivable) and silently did nothing at all.
@@ -357,24 +358,24 @@ describe('DBOS execution port (integration)', () => {
     const behavior: Record<string, 'ok' | 'fail'> = { a: 'ok', b: 'fail' }
     const t = await approvedTask(behavior)
     const first = await port.startRun(t.id)
-    expect(await first.wait()).toBe('blocked')
+    expect(await first.wait()).toBe(RunOutcome.blocked)
 
     behavior.b = 'ok' // the world is fixed; `orc run` must now actually run
     const second = await port.startRun(t.id)
     expect(second.workflowId).not.toBe(first.workflowId)
-    expect(await second.wait()).toBe('done')
+    expect(await second.wait()).toBe(RunOutcome.done)
   }, 15_000) // two full DBOS workflows — bun's 5s default is too tight under suite load
 
   it('failed step blocks task; retry re-runs only the failed step to done', async () => {
     const behavior: Record<string, 'ok' | 'fail'> = { a: 'ok', b: 'fail' }
     const t = await approvedTask(behavior)
-    expect(await (await port.startRun(t.id)).wait()).toBe('blocked')
+    expect(await (await port.startRun(t.id)).wait()).toBe(RunOutcome.blocked)
     expect((await kernel.getTask(t.id))?.status).toBe(TASK_STATUS.blocked)
 
     behavior.b = 'ok' // human "fixed the world"
     const retry = await port.retry(t.id)
     expect(retry.workflowId).toContain(':r1')
-    expect(await retry.wait()).toBe('done')
+    expect(await retry.wait()).toBe(RunOutcome.done)
 
     const state = await kernel.state()
     expect(state.steps.get(t.id)?.get('a')?.attempt).toBe(1) // completed step NOT re-run
@@ -386,7 +387,7 @@ describe('DBOS execution port (integration)', () => {
   // a verify auditor burned five attempts in workspaces where every fs_read of the repo was ENOENT.
   it('a bare startRun records the project dir as its cwd', async () => {
     const t = await approvedTask()
-    expect(await (await port.startRun(t.id)).wait()).toBe('done')
+    expect(await (await port.startRun(t.id)).wait()).toBe(RunOutcome.done)
     expect((await kernel.state()).runs.get(t.id)?.at(-1)?.cwd).toBe(projectDir)
   }, 15_000)
 
@@ -400,7 +401,7 @@ describe('DBOS execution port (integration)', () => {
   it("a blocked task's plan can be edited and the repaired plan is what the resumed run uses", async () => {
     const behavior: Record<string, 'ok' | 'fail'> = { a: 'ok', b: 'fail' }
     const t = await approvedTask(behavior)
-    expect(await (await port.startRun(t.id)).wait()).toBe('blocked')
+    expect(await (await port.startRun(t.id)).wait()).toBe(RunOutcome.blocked)
     expect((await kernel.getTask(t.id))?.status).toBe(TASK_STATUS.blocked)
 
     // the correction: same DAG, but step b now carries a marker the frozen v1 does not have, so
@@ -417,7 +418,7 @@ describe('DBOS execution port (integration)', () => {
     behavior.b = 'ok'
     const resumed = await port.startRun(t.id)
     expect(resumed.workflowId).toContain(':v2') // the LATEST approved version, not the blocked run's v1
-    expect(await resumed.wait()).toBe('done')
+    expect(await resumed.wait()).toBe(RunOutcome.done)
 
     const state = await kernel.state()
     expect(state.runs.get(t.id)?.at(-1)?.planVersion).toBe(2)
@@ -434,7 +435,7 @@ describe('DBOS execution port (integration)', () => {
     const behavior: Record<string, 'ok' | 'fail'> = { a: 'ok', b: 'fail' }
     const t = await approvedTask(behavior)
     const shared = mkdtempSync(path.join(tmpdir(), 'orc-cwd-'))
-    expect(await (await port.startRun(t.id, { cwd: shared })).wait()).toBe('blocked')
+    expect(await (await port.startRun(t.id, { cwd: shared })).wait()).toBe(RunOutcome.blocked)
     // fabricate a pre-fix bare retry: run_started with cwd null (only records the run in fold)
     await log.transaction(async tx => {
       await tx.append({
@@ -444,7 +445,7 @@ describe('DBOS execution port (integration)', () => {
     })
 
     behavior.b = 'ok'
-    expect(await (await port.retry(t.id)).wait()).toBe('done')
+    expect(await (await port.retry(t.id)).wait()).toBe(RunOutcome.done)
 
     const runs = (await kernel.state()).runs.get(t.id) ?? []
     expect(runs.map(r => r.cwd)).toEqual([shared, null, shared]) // inherited past the poison, not defaulted away
@@ -503,15 +504,15 @@ describe('DBOS execution port (integration)', () => {
     const t = await approvedTask({}, draftFixture([stepFixture()]))
     operationTasks.add(t.id)
     const [h1, h2] = [await port.startRun(t.id), await port.startRun(t.id)]
-    expect(await h1.wait()).toBe('done')
-    expect(await h2.wait()).toBe('done')
+    expect(await h1.wait()).toBe(RunOutcome.done)
+    expect(await h2.wait()).toBe(RunOutcome.done)
     expect(operationRuns.get(t.id)).toBe(1)
 
     const events = await kernel.eventsFor(t.id)
     expect(events.filter(e => e.kind === EVENT_KIND.operation_started)).toHaveLength(1)
     expect(events.filter(e => e.kind === EVENT_KIND.operation_completed)).toHaveLength(1)
     const op = [...(await kernel.state()).operations.values()].find(o => o.taskId === t.id)
-    expect(op?.status).toBe('completed')
+    expect(op?.status).toBe(OperationStatus.completed)
     expect(op?.attempts).toBe(1)
     expect(op?.after).toEqual({ ok: true })
   })
@@ -519,7 +520,7 @@ describe('DBOS execution port (integration)', () => {
   it('declared outputs are verified and receipted atomically before step completion', async () => {
     const t = await approvedTask({}, draftFixture([stepFixture()]))
     outputsByTask.set(t.id, { write: ['report.md'], declare: ['report.md'] })
-    expect(await (await port.startRun(t.id)).wait()).toBe('done')
+    expect(await (await port.startRun(t.id)).wait()).toBe(RunOutcome.done)
 
     const taskEvents = await kernel.eventsFor(t.id)
     const receipt = taskEvents.find(e => e.kind === EVENT_KIND.artifact_produced)
@@ -538,13 +539,13 @@ describe('DBOS execution port (integration)', () => {
   it('a missing declared output blocks the step with validation_error and no receipt', async () => {
     const t = await approvedTask({}, draftFixture([stepFixture()]))
     outputsByTask.set(t.id, { write: [], declare: ['ghost.md'] })
-    expect(await (await port.startRun(t.id)).wait()).toBe('blocked')
+    expect(await (await port.startRun(t.id)).wait()).toBe(RunOutcome.blocked)
 
     const taskEvents = await kernel.eventsFor(t.id)
     expect(taskEvents.some(e => e.kind === EVENT_KIND.step_completed)).toBe(false)
     expect(taskEvents.some(e => e.kind === EVENT_KIND.artifact_produced)).toBe(false)
     const failure = (await kernel.state()).steps.get(t.id)?.get('s1')?.failure
-    expect(failure?.class).toBe(FAILURE_CLASS.validation_error)
+    expect(failure?.class).toBe(FailureClass.validation_error)
     expect(failure?.message).toContain('ghost.md')
   })
 
@@ -557,7 +558,7 @@ describe('DBOS execution port (integration)', () => {
     const t = await kernel.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'bad model', spec: 'x' }, CLI)
     await kernel.proposePlan(t.id, draftFixture([stepFixture({ modelRef: 'nope/x' })]), CLI)
     await kernel.approvePlan(t.id, undefined, undefined, CLI)
-    expect(await (await port.startRun(t.id)).wait()).toBe('blocked')
+    expect(await (await port.startRun(t.id)).wait()).toBe(RunOutcome.blocked)
     expect((await kernel.getTask(t.id))?.status).toBe(TASK_STATUS.blocked)
     const failure = (await kernel.state()).steps.get(t.id)?.get('s1')?.failure
     expect(failure?.class).toBeTruthy()
@@ -566,7 +567,7 @@ describe('DBOS execution port (integration)', () => {
 
   it('refuses to cancel a done task (no status event appended)', async () => {
     const t = await approvedTask()
-    expect(await (await port.startRun(t.id)).wait()).toBe('done')
+    expect(await (await port.startRun(t.id)).wait()).toBe(RunOutcome.done)
     const before = (await kernel.eventsFor(t.id)).length
     await expect(port.cancelRun(t.id, CLI)).rejects.toThrow(/running or blocked/)
     expect((await kernel.eventsFor(t.id)).length).toBe(before)
@@ -629,7 +630,7 @@ describe('DBOS execution port (integration)', () => {
 
   it('cancelRun cascades to the subtree: a gated child (never started) is cancelled too', async () => {
     const t = await approvedTask({ s1: 'fail' }, draftFixture([stepFixture()]))
-    expect(await (await port.startRun(t.id)).wait()).toBe('blocked')
+    expect(await (await port.startRun(t.id)).wait()).toBe(RunOutcome.blocked)
     expect((await kernel.getTask(t.id))?.status).toBe(TASK_STATUS.blocked)
 
     // manual (default) policy parks the child at awaiting_approval — it never gets a run,
@@ -656,13 +657,13 @@ describe('DBOS execution port (integration)', () => {
     // child's terminal status — split_resolved lands on the PARENT (split.taskId = parentTaskId)
     expect(await waitFor(async () => (await kernel.eventsFor(t.id)).some(e => e.kind === EVENT_KIND.split_resolved))).toBe(true)
     const resolved = (await kernel.eventsFor(t.id)).find(e => e.kind === EVENT_KIND.split_resolved)
-    expect(PAYLOAD_SCHEMAS.split_resolved.parse(must(resolved, 'split resolved event').payload).outcome).toBe('cancelled')
+    expect(PAYLOAD_SCHEMAS.split_resolved.parse(must(resolved, 'split resolved event').payload).outcome).toBe(RunOutcome.cancelled)
   })
 
   it('refuses to retry a task that is not blocked (no second concurrent run)', async () => {
     const t = await approvedTask()
     await expect(port.retry(t.id)).rejects.toThrow(/blocked/) // approved, never run
-    expect(await (await port.startRun(t.id)).wait()).toBe('done')
+    expect(await (await port.startRun(t.id)).wait()).toBe(RunOutcome.done)
     await expect(port.retry(t.id)).rejects.toThrow(/blocked/) // done — nothing to retry
     expect((await kernel.state()).runs.get(t.id)).toHaveLength(1)
   }, 15_000) // two steps plus the appended finish step no longer fit bun's default 5s
@@ -670,7 +671,7 @@ describe('DBOS execution port (integration)', () => {
   it('force-loads skills: skill_loaded events in init, bodies handed to the executor', async () => {
     const t = await approvedTask({}, draftFixture([stepFixture({ skillRefs: ['style-guide'] })]))
     const handle = await port.startRun(t.id)
-    expect(await handle.wait()).toBe('done')
+    expect(await handle.wait()).toBe(RunOutcome.done)
     const events = await kernel.eventsFor(t.id)
     // per step: the kernel's finish step force-loads its own role skill, and counting both here
     // would say nothing about whether THIS step's declared skill was loaded
@@ -685,7 +686,7 @@ describe('DBOS execution port (integration)', () => {
   it('resolves toolRefs into executor extraTools', async () => {
     const t = await approvedTask({}, draftFixture([stepFixture({ toolRefs: ['fixture/echo'] })]))
     const handle = await port.startRun(t.id)
-    expect(await handle.wait()).toBe('done')
+    expect(await handle.wait()).toBe(RunOutcome.done)
     const done = (await kernel.eventsFor(t.id)).find(e => e.kind === EVENT_KIND.step_completed)
     expect(PAYLOAD_SCHEMAS.step_completed.parse(must(done, 'step completed event').payload).summary).toContain('tools=[mcp__fixture__echo]')
   })
@@ -693,20 +694,20 @@ describe('DBOS execution port (integration)', () => {
   it('unknown skill fails the step as validation_error before any model call', async () => {
     const t = await approvedTask({}, draftFixture([stepFixture({ skillRefs: ['ghost-skill'] })]))
     const handle = await port.startRun(t.id)
-    expect(await handle.wait()).toBe('blocked')
+    expect(await handle.wait()).toBe(RunOutcome.blocked)
     const events = await kernel.eventsFor(t.id)
     const failed = events.find(e => e.kind === EVENT_KIND.step_failed)
-    expect(PAYLOAD_SCHEMAS.step_failed.parse(must(failed, 'step failed event').payload).class).toBe(FAILURE_CLASS.validation_error)
+    expect(PAYLOAD_SCHEMAS.step_failed.parse(must(failed, 'step failed event').payload).class).toBe(FailureClass.validation_error)
     expect(events.filter(e => e.kind === EVENT_KIND.agent_call)).toHaveLength(0)
   })
 
   it('unknown tool ref fails the step as validation_error before any model call', async () => {
     const t = await approvedTask({}, draftFixture([stepFixture({ toolRefs: ['fixture/nosuch'] })]))
     const handle = await port.startRun(t.id)
-    expect(await handle.wait()).toBe('blocked')
+    expect(await handle.wait()).toBe(RunOutcome.blocked)
     const events = await kernel.eventsFor(t.id)
     const failed = events.find(e => e.kind === EVENT_KIND.step_failed)
-    expect(PAYLOAD_SCHEMAS.step_failed.parse(must(failed, 'step failed event').payload).class).toBe(FAILURE_CLASS.validation_error)
+    expect(PAYLOAD_SCHEMAS.step_failed.parse(must(failed, 'step failed event').payload).class).toBe(FailureClass.validation_error)
     expect(events.filter(e => e.kind === EVENT_KIND.agent_call)).toHaveLength(0)
   })
 
@@ -736,7 +737,7 @@ describe('DBOS execution port (integration)', () => {
     }
 
     await kernel.approvePlan(t.id, undefined, undefined, CLI)
-    expect(await (await port.startRun(t.id)).wait()).toBe('done')
+    expect(await (await port.startRun(t.id)).wait()).toBe(RunOutcome.done)
     expect((await kernel.eventsFor(t.id)).some(e => e.kind === EVENT_KIND.step_failed)).toBe(false)
   })
 
@@ -752,12 +753,12 @@ describe('DBOS execution port (integration)', () => {
       commits: () => 0,
     })
     const t = await approvedTask({}, analyzeDraft())
-    expect(await (await port.startRun(t.id)).wait()).toBe('done')
+    expect(await (await port.startRun(t.id)).wait()).toBe(RunOutcome.done)
 
     expect(startTurns.get(spyKey(t.id, STEP_ID.analyze))).toBeUndefined() // the executor was never resolved, let alone driven
     const events = await kernel.eventsFor(t.id)
     expect(events.filter(e => e.kind === EVENT_KIND.agent_call && e.stepId === STEP_ID.analyze)).toHaveLength(0)
-    expect((await kernel.state()).steps.get(t.id)?.get(STEP_ID.analyze)?.status).toBe('completed')
+    expect((await kernel.state()).steps.get(t.id)?.get(STEP_ID.analyze)?.status).toBe(StepRunStatus.completed)
 
     // CONDITION 2: `orc log` must answer WHY it skipped without re-running anything — the note
     // ids, each note's sourceRevision, and the HEAD sha the gate compared against.
@@ -771,7 +772,7 @@ describe('DBOS execution port (integration)', () => {
     // skipped-but-grounded stays distinguishable from ungrounded: analyzed true, but marked a skip
     expect(coverage.analyzed).toBe(true)
     expect(coverage.notesWritten).toBe(0)
-    expect(coverage.confidence).toBe('medium')
+    expect(coverage.confidence).toBe(Confidence.medium)
     expect(coverage.gaps.join(' | ')).toContain('skipped')
 
     // the plan step reads ONLY this summary (depOutputs[analyze]), so the evidence repeats here
@@ -792,7 +793,7 @@ describe('DBOS execution port (integration)', () => {
       commits: () => 4, // its declared paths moved
     })
     const t = await approvedTask({}, analyzeDraft())
-    expect(await (await port.startRun(t.id)).wait()).toBe('done')
+    expect(await (await port.startRun(t.id)).wait()).toBe(RunOutcome.done)
 
     expect(startTurns.get(spyKey(t.id, STEP_ID.analyze))).toBe(1)
     // nothing reusable → nothing injected: the scout gets exactly today's context
@@ -808,7 +809,7 @@ describe('DBOS execution port (integration)', () => {
   it('no grounding notes at all falls through to the full analyze', async () => {
     scriptGrounding({ notes: [] })
     const t = await approvedTask({}, analyzeDraft())
-    expect(await (await port.startRun(t.id)).wait()).toBe('done')
+    expect(await (await port.startRun(t.id)).wait()).toBe(RunOutcome.done)
 
     expect(startTurns.get(spyKey(t.id, STEP_ID.analyze))).toBe(1)
     expect((await kernel.eventsFor(t.id)).some(e => e.kind === EVENT_KIND.analysis_completed)).toBe(false)
@@ -828,7 +829,7 @@ describe('DBOS execution port (integration)', () => {
       changed: () => ['packages/kernel/src/execution/dbos-port.ts'], // git narrows it to ONE file
     })
     const t = await approvedTask({}, analyzeDraft())
-    expect(await (await port.startRun(t.id)).wait()).toBe('done')
+    expect(await (await port.startRun(t.id)).wait()).toBe(RunOutcome.done)
 
     expect(startTurns.get(spyKey(t.id, STEP_ID.analyze))).toBe(1) // mixed is NOT a skip — the scout still runs
     expect(probe.probes.some(p => p.startsWith('changedPaths:'))).toBe(true)
@@ -857,7 +858,7 @@ describe('DBOS execution port (integration)', () => {
     expect(gaps).toContain('packages/kernel/src/execution/dbos-port.ts')
     expect(coverage.analyzed).toBe(true)
     expect(coverage.notesWritten).toBe(0)
-    expect(coverage.confidence).toBe('medium')
+    expect(coverage.confidence).toBe(Confidence.medium)
   }, 15_000)
 
   // The plan step reads ONLY depOutputs[analyze] = this summary, so the reused notes must be cited
@@ -874,7 +875,7 @@ describe('DBOS execution port (integration)', () => {
       changed: () => ['packages/kernel/src/execution/dbos-port.ts'],
     })
     const t = await approvedTask({}, analyzeDraft())
-    expect(await (await port.startRun(t.id)).wait()).toBe('done')
+    expect(await (await port.startRun(t.id)).wait()).toBe(RunOutcome.done)
 
     const summary = PAYLOAD_SCHEMAS.step_completed.parse(
       must((await kernel.eventsFor(t.id)).find(e => e.kind === EVENT_KIND.step_completed), 'step completed event').payload).summary
@@ -895,7 +896,7 @@ describe('DBOS execution port (integration)', () => {
       // no `changed`: the source has NO changedPaths at all, exactly like every pre-existing one
     })
     const t = await approvedTask({}, analyzeDraft())
-    expect(await (await port.startRun(t.id)).wait()).toBe('done')
+    expect(await (await port.startRun(t.id)).wait()).toBe(RunOutcome.done)
 
     expect(startTurns.get(spyKey(t.id, STEP_ID.analyze))).toBe(1)
     const directive = lastDepOutputs.get(spyKey(t.id, STEP_ID.analyze))?.grounding ?? ''
@@ -923,8 +924,8 @@ describe('DBOS execution port (integration)', () => {
     })
     const t = await approvedTask({}, analyzeDraft())
     const [h1, h2] = [await port.startRun(t.id), await port.startRun(t.id)]
-    expect(await h1.wait()).toBe('done')
-    expect(await h2.wait()).toBe('done')
+    expect(await h1.wait()).toBe(RunOutcome.done)
+    expect(await h2.wait()).toBe(RunOutcome.done)
 
     expect(notesCalls).toBe(1)          // the second, different answer was never consulted
     expect(startTurns.get(spyKey(t.id, STEP_ID.analyze))).toBe(1) // one scout turn, not two
@@ -941,7 +942,7 @@ describe('DBOS execution port (integration)', () => {
   it('a grounding source that throws analyzes instead of failing the step', async () => {
     scriptGrounding({ throws: true })
     const t = await approvedTask({}, analyzeDraft())
-    expect(await (await port.startRun(t.id)).wait()).toBe('done')
+    expect(await (await port.startRun(t.id)).wait()).toBe(RunOutcome.done)
 
     expect(startTurns.get(spyKey(t.id, STEP_ID.analyze))).toBe(1)
     const events = await kernel.eventsFor(t.id)
@@ -962,8 +963,8 @@ describe('DBOS execution port (integration)', () => {
     })
     const t = await approvedTask({}, analyzeDraft())
     const [h1, h2] = [await port.startRun(t.id), await port.startRun(t.id)]
-    expect(await h1.wait()).toBe('done')
-    expect(await h2.wait()).toBe('done')
+    expect(await h1.wait()).toBe(RunOutcome.done)
+    expect(await h2.wait()).toBe(RunOutcome.done)
 
     expect(notesCalls).toBe(1)                    // the second, different answer was never consulted
     expect(startTurns.get(spyKey(t.id, STEP_ID.analyze))).toBeUndefined()  // the recorded verdict still says skip

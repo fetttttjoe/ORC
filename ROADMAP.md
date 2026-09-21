@@ -14,7 +14,7 @@ make DISJOINT concurrent tasks compose; OVERLAPPING tasks still serialize by han
    zones; the same overlap rule `validatePlan` applies within one plan, lifted to admission. Makes
    single-tree mode team-tolerable with a small kernel change. When: before any second concurrent
    writer becomes routine.
-2. **Worktree isolation tier** — *deferred (designed).* Implement `ISOLATION_TIER.worktree` (the
+2. **Worktree isolation tier** — *deferred (designed).* Implement `IsolationTier.worktree` (the
    enum already exists in contracts; frozen plans stamp `local` today): each task runs in its own
    `git worktree` with its own HEAD; the commit step commits on the task's branch.
    When: more than one person (or overlap-heavy concurrent tasks) drives the repo.

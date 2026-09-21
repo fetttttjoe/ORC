@@ -1,15 +1,15 @@
 import { afterAll, expect, it } from 'bun:test'
-import { Door, EVENT_KIND, MemoryWrittenPayload, NO_CHAT, type MemoryAuthor } from '@orc/contracts'
+import { AUTHOR_SOURCE, Door, EVENT_KIND, MemoryWrittenPayload, type MemoryAuthor } from '@orc/contracts'
 import { createLiveMemory } from './test-helpers'
-import { TEST_WORKSPACE_ID } from '@orc/contracts/fixtures'
+import { authorFixture } from '@orc/contracts/fixtures'
 
 const drops: (() => Promise<void>)[] = []
 afterAll(async () => { for (const d of drops) await d() })
 
 // Every lifecycle move here is an `orc memory` command, which answers to no chat; the one
 // task-bound write is an agent step writing from inside its run's chat.
-const CLI: MemoryAuthor = { source: 'cli', workspaceId: TEST_WORKSPACE_ID, origin: NO_CHAT(Door.cli) }
-const AGENT: MemoryAuthor = { source: 'agent', workspaceId: TEST_WORKSPACE_ID, taskId: 't1', origin: { chatId: 'run:t1:v1', door: Door.supervisor } }
+const CLI: MemoryAuthor = authorFixture()
+const AGENT: MemoryAuthor = authorFixture({ source: AUTHOR_SOURCE.agent, taskId: 't1', origin: { chatId: 'run:t1:v1', door: Door.supervisor } })
 
 /**
  * The archive → restore round trip over a real log + read model.
@@ -72,7 +72,7 @@ it('keeps the note\'s own author across archive and restore', async () => {
   const last = events.filter(e => MemoryWrittenPayload.safeParse(e.payload).data?.note.id === 'step-x').at(-1)
   const author = MemoryWrittenPayload.parse(last?.payload).author
   expect(author.taskId).toBe('t1')
-  expect(author.source).toBe('agent')
+  expect(author.source).toBe(AUTHOR_SOURCE.agent)
 })
 
 /**

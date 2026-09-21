@@ -2,9 +2,10 @@
 // PlanStep/Plan/EventRecord shape change has to touch across every package's tests.
 import { z } from 'zod'
 import type { EventRecord } from './events'
+import { EventKind } from './event-kinds'
 import { AUTHOR_SOURCE, type MemoryAuthor } from './author'
 import { Door, NO_CHAT } from './origin'
-import { STRATEGY, type Plan, type PlanDraft, type PlanStep } from './plan'
+import { IsolationTier, STRATEGY, type Plan, type PlanDraft, type PlanStep } from './plan'
 import {
   EpisodicNoteInput, NOTE_TIER, PlanNoteInput, SemanticNoteInput,
   type EpisodicNote, type PlanNote, type SemanticNote,
@@ -49,7 +50,7 @@ export function eventFixture(over: Partial<EventRecord> = {}): EventRecord {
   return {
     seq: 1, projectId: 'p1', idempotencyKey: null, chatId: null, door: Door.cli,
     taskId: 't1', stepId: null, runToken: null,
-    kind: 'task_created', payload: {}, usage: null, ts: '2026-07-18T00:00:00.000Z',
+    kind: EventKind.task_created, payload: {}, usage: null, ts: '2026-07-18T00:00:00.000Z',
     ...over,
   }
 }
@@ -64,7 +65,7 @@ export function stepFixture(over: Partial<PlanStep> = {}): PlanStep {
   return {
     id: 's1', role: 'worker', title: 's1', instructions: 'do',
     executorRef: 'api-loop', modelRef: 'fake/m', skillRefs: [], toolRefs: [],
-    isolation: 'local', zone: [], maxIterations: 5, dependsOn: [],
+    isolation: IsolationTier.local, zone: [], maxIterations: 5, dependsOn: [],
     ...over,
   }
 }

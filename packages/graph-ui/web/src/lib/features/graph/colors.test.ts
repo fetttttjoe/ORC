@@ -3,17 +3,18 @@
 // are NEVER recolored by a coincidental detail string.
 import { describe, expect, it } from 'bun:test'
 import { readFileSync } from 'node:fs'
+import { must } from '@orc/contracts/fixtures'
 import { colorFor, dim, EDGE_COLOR, edgeColorFor, FLASH_COLOR, isActive, LABEL_COLOR, STATUS_COLORS, TYPE_COLORS } from './colors'
 
 describe('status override precedence', () => {
   it('overrides task/step color for live statuses', () => {
-    expect(colorFor('step', 'running')).toBe(STATUS_COLORS.running)
-    expect(colorFor('task', 'running')).toBe(STATUS_COLORS.running)
-    expect(colorFor('step', 'failed')).toBe(STATUS_COLORS.failed)
-    expect(colorFor('task', 'failed')).toBe(STATUS_COLORS.failed)
-    expect(colorFor('task', 'blocked')).toBe(STATUS_COLORS.blocked)
-    expect(colorFor('step', 'blocked')).toBe(STATUS_COLORS.blocked)
-    expect(colorFor('task', 'cancelled')).toBe(STATUS_COLORS.cancelled)
+    expect(colorFor('step', 'running')).toBe(must(STATUS_COLORS.running, 'STATUS_COLORS.running'))
+    expect(colorFor('task', 'running')).toBe(must(STATUS_COLORS.running, 'STATUS_COLORS.running'))
+    expect(colorFor('step', 'failed')).toBe(must(STATUS_COLORS.failed, 'STATUS_COLORS.failed'))
+    expect(colorFor('task', 'failed')).toBe(must(STATUS_COLORS.failed, 'STATUS_COLORS.failed'))
+    expect(colorFor('task', 'blocked')).toBe(must(STATUS_COLORS.blocked, 'STATUS_COLORS.blocked'))
+    expect(colorFor('step', 'blocked')).toBe(must(STATUS_COLORS.blocked, 'STATUS_COLORS.blocked'))
+    expect(colorFor('task', 'cancelled')).toBe(must(STATUS_COLORS.cancelled, 'STATUS_COLORS.cancelled'))
   })
 
   it('failed and blocked outrank running — a dead node must never read as live steel', () => {
@@ -110,7 +111,7 @@ describe('the hardcoded canvas colors still equal their app.css tokens', () => {
 
   it('dim() fades toward --color-ink, the page ground', () => {
     // dim(x, 1) is the ground itself; the mix constants 0x0e/0x11/0x16 are ink spelled as numbers
-    expect(dim('#ffffff', 1)).toBe(tokens.get('ink'))
+    expect(dim('#ffffff', 1)).toBe(tokens.get('ink') ?? '--color-ink is not declared in app.css')
   })
 })
 

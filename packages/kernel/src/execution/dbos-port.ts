@@ -2,13 +2,13 @@ import { mkdirSync } from 'node:fs'
 import path from 'node:path'
 import { DBOS } from '@dbos-inc/dbos-sdk'
 import {
-  EVENT_KIND, FAILURE_CLASS, MAX_AUTO_CONTINUATIONS, RUN_OUTCOME, SIGNAL_OUTCOME, STEP_ID, STEP_ROLE, TASK_STATUS, UNIFIED_EVENT_TYPE,
+  Confidence, EVENT_KIND, FailureClass, MAX_AUTO_CONTINUATIONS, RunOutcome, SignalOutcome, STEP_ID, STEP_ROLE, TASK_STATUS, UnifiedEventType,
   ChatRef, PAYLOAD_SCHEMAS,
   classifiedError, continuationTopic, errorMessage, failureClassOf, isApprovalAnswer, isTerminalError, resolveModel, costUSDFor,
   type AgentExecutor, type Checkpoint, type CommitRecordedPayload, type EventDraft, type EventRecord, type ExecutionPort, type ExecutorContext,
   type Origin, type TaskNode,
-  type FailureClass, type LoadedSkill, type ModelProvider, type OperationCheckpoint, type Plan, type PlanStep,
-  type ResolvedTool, type RunHandle, type RunOutcome, type Signal, type SplitResult, type StepMemory, type TaskStatus, type ToolSource,
+  type LoadedSkill, type ModelProvider, type OperationCheckpoint, type Plan, type PlanStep,
+  type ResolvedTool, type RunHandle, type Signal, type SplitResult, type StepMemory, type TaskStatus, type ToolSource,
 } from '@orc/contracts'
 import { type EventLog, type Storage, type EventLogOps } from '../storage'
 import { openLiveState, type LiveState } from '../live-state'
@@ -99,15 +99,11 @@ export const dbosSend = (workflowId: string, message: string, topic: string, ide
 export async function appendRunInit(tx: EventLogOps, args: RunArgs, workflowId: string): Promise<void> {
   const events = await tx.byTask(args.taskId)
   const task = fold(events).tasks.get(args.taskId)
-  if (!task) throw classifiedError(FAILURE_CLASS.validation_error, `no task '${args.taskId}'`)
+  if (!task) throw classifiedError(FailureClass.validation_error, `no task '${args.taskId}'`)
   // BEFORE run_started: nothing may claim to be inside a chat that has not been opened. Keyed by
   // the chat id, so the init DBOS re-executes on resume opens no second chat for the same run.
   const opened = runChatOpened({ chatId: workflowId, task, parent: await runChatParent(tx, events, task) })
-  await tx.append({
-    ...args.origin, taskId: args.taskId, stepId: null, runToken: workflowId,
-    kind: opened.kind, payload: opened.payload,
-    ...(opened.idempotencyKey !== undefined && { idempotencyKey: opened.idempotencyKey }),
-  })
+  await tx.append({ ...args.origin, taskId: args.taskId, stepId: null, runToken: workflowId, ...opened })
   await tx.append({
     ...args.origin, taskId: args.taskId, stepId: null, runToken: workflowId, kind: EVENT_KIND.run_started,
     payload: { taskId: args.taskId, planVersion: args.planVersion, retryIndex: args.retryIndex, workflowId, cwd: args.cwd },
@@ -251,7 +247,7 @@ export async function createDbosPort(opts: {
             await log.transaction(async tx => {
               for (const [i, d] of drafts.entries())
                 await tx.append({
-                  ...origin, taskId, stepId, runToken, kind: d.kind, payload: d.payload, usage: d.usage ?? null,
+                  ...origin, taskId, stepId, runToken, ...d, usage: d.usage ?? null,
                   idempotencyKey: d.idempotencyKey ?? `${runToken}:${name}:${i}:${d.kind}`,
                 })
             })
@@ -273,7 +269,7 @@ export async function createDbosPort(opts: {
           // journal values are plain JSON — parse hands back the caller's shape
           if (begin.reused) return JSON.parse(JSON.stringify(begin.value ?? null))
           try {
-            const result = await fn()
+            const result = await fn(begin.attempt)
             await journal.completeOperation(context, spec, begin.attempt, result, toEvents ? toEvents(result) : [])
             return redactStepResult(result)
           } catch (err) {
@@ -300,20 +296,20 @@ export async function createDbosPort(opts: {
       const init = await checkpoint('init', async () => {
         const state = await foldState(args.taskId)
         const plan = state.plans.get(args.taskId)?.versions.find(p => p.version === args.planVersion)
-        if (!plan) throw classifiedError(FAILURE_CLASS.validation_error, `no plan v${args.planVersion} for task '${args.taskId}'`)
+        if (!plan) throw classifiedError(FailureClass.validation_error, `no plan v${args.planVersion} for task '${args.taskId}'`)
         const step = plan.steps.find(s => s.id === args.stepId)
-        if (!step) throw classifiedError(FAILURE_CLASS.validation_error, `no step '${args.stepId}' in plan v${args.planVersion}`)
+        if (!step) throw classifiedError(FailureClass.validation_error, `no step '${args.stepId}' in plan v${args.planVersion}`)
         const task = state.tasks.get(args.taskId)
-        if (!task) throw classifiedError(FAILURE_CLASS.validation_error, `no task '${args.taskId}'`)
+        if (!task) throw classifiedError(FailureClass.validation_error, `no task '${args.taskId}'`)
         const depOutputs: Record<string, string> = {}
         for (const dep of step.dependsOn) depOutputs[dep] = state.steps.get(args.taskId)?.get(dep)?.output ?? ''
         const loadedSkills: LoadedSkill[] = []
         for (const ref of step.skillRefs) {
-          if (!skills) throw classifiedError(FAILURE_CLASS.validation_error, `step declares skill '${ref}' but no skill index is configured`)
+          if (!skills) throw classifiedError(FailureClass.validation_error, `step declares skill '${ref}' but no skill index is configured`)
           try {
             loadedSkills.push(await skills.load(ref))
           } catch (err) {
-            throw classifiedError(FAILURE_CLASS.validation_error, `skill '${ref}': ${errorMessage(err)}`)
+            throw classifiedError(FailureClass.validation_error, `skill '${ref}': ${errorMessage(err)}`)
           }
         }
         // workspaceId travels with the spec because the task is only in hand HERE: the workflow
@@ -432,11 +428,11 @@ export async function createDbosPort(opts: {
       const toolRefs = init.step.toolRefs ?? []
       let extraTools: ResolvedTool[] = []
       if (toolRefs.length > 0) {
-        if (!tools) return await finishFailed(checkpoint, args, runToken, `step declares toolRefs but no tool source is configured`, FAILURE_CLASS.validation_error)
+        if (!tools) return await finishFailed(checkpoint, args, runToken, `step declares toolRefs but no tool source is configured`, FailureClass.validation_error)
         try {
           extraTools = await tools.resolve(toolRefs)
         } catch (err) {
-          return await finishFailed(checkpoint, args, runToken, errorMessage(err), FAILURE_CLASS.validation_error)
+          return await finishFailed(checkpoint, args, runToken, errorMessage(err), FailureClass.validation_error)
         }
       }
 
@@ -499,10 +495,10 @@ export async function createDbosPort(opts: {
       // round prefix: the loop names them by ITERATION, which restarts at 1 every round, and a
       // reused key replays round 0's recorded model call as round 1's answer. The journal reuses
       // by `operationId`; `name` is the model ref the operator reads, so it stays untouched.
-      const driveRound = async (round: number, prevSummary: string | null): Promise<{ signal: Signal | null; error: { class: string; message: string } | null }> => {
+      const driveRound = async (round: number, prevSummary: string | null): Promise<{ signal: Signal | null; error: { class: FailureClass; message: string } | null }> => {
       // a holder, not two `let`s: the callback below assigns these, and TS control-flow can't see a
       // closure assignment — a plain `let signal` would narrow to `null` at the reads after the drive
-      const collected: { signal: Signal | null; error: { class: string; message: string } | null } = { signal: null, error: null }
+      const collected: { signal: Signal | null; error: { class: FailureClass; message: string } | null } = { signal: null, error: null }
       const roundName = (name: string): string => round === 0 ? name : `r${round}:${name}`
       const roundCtx: typeof ctx = round === 0 ? ctx : {
         ...ctx,
@@ -517,9 +513,9 @@ export async function createDbosPort(opts: {
       // runs, so the step's write-claims would leak and poison later retries in a long-lived port
       // process (graph-ui server, mcp serve). The callback returns the value to resume with.
       await driveGenerator(gen, async ev => {
-        if (ev.type === UNIFIED_EVENT_TYPE.signal) { collected.signal = ev.signal; return undefined }
-        if (ev.type === UNIFIED_EVENT_TYPE.error) { collected.error = { class: ev.class, message: ev.message }; return undefined }
-        if (ev.type === UNIFIED_EVENT_TYPE.gate) {
+        if (ev.type === UnifiedEventType.signal) { collected.signal = ev.signal; return undefined }
+        if (ev.type === UnifiedEventType.error) { collected.error = { class: ev.class, message: ev.message }; return undefined }
+        if (ev.type === UnifiedEventType.gate) {
           // Resolve targets in a checkpoint (log read = non-deterministic). Default = every
           // split proposed by THIS step attempt that this workflow has not already consumed;
           // an explicit request is intersected with that set so an unknown or foreign id —
@@ -554,7 +550,7 @@ export async function createDbosPort(opts: {
           }
           return results
         }
-        if (ev.type === UNIFIED_EVENT_TYPE.feedback) {
+        if (ev.type === UnifiedEventType.feedback) {
           await checkpoint(`feedback:req:${ev.toolCallId}`, async () => 0, () =>
             [{ kind: EVENT_KIND.feedback_requested, payload: { question: ev.question, topic: ev.topic } }])
           // ponytail: long poll, loop forever — no gate timeout in v1 (mirrors the split gate); cancel is the escape
@@ -575,7 +571,7 @@ export async function createDbosPort(opts: {
       // budget always says yes, so the grant lives where spend is already enforced.
       let round = 0
       let { signal, error } = await driveRound(round, null)
-      while (signal?.outcome === SIGNAL_OUTCOME.partial) {
+      while (signal?.outcome === SignalOutcome.partial) {
         const partialSummary = signal.summary
         // Grant in a checkpoint: the budget read folds the log, which moves between run and
         // replay — an unrecorded verdict could auto-continue live and gate on recovery, forking
@@ -604,7 +600,7 @@ export async function createDbosPort(opts: {
             // a retry loop that would re-ask the same question.
             await checkpoint('finish', async () => answer, () => [{
               kind: EVENT_KIND.step_failed,
-              payload: { stepId: args.stepId, runToken, class: FAILURE_CLASS.human_abort, message: `continuation declined: ${answer}. Last partial report: ${partialSummary}` },
+              payload: { stepId: args.stepId, runToken, class: FailureClass.human_abort, message: `continuation declined: ${answer}. Last partial report: ${partialSummary}` },
             }])
             return { stepId: args.stepId, ok: false }
           }
@@ -613,7 +609,7 @@ export async function createDbosPort(opts: {
         ;({ signal, error } = await driveRound(round, partialSummary))
       }
 
-      if (signal?.outcome === SIGNAL_OUTCOME.success) {
+      if (signal?.outcome === SignalOutcome.success) {
         const success = signal // closures below see the narrowed binding
         // verify declared outputs at the trusted boundary; receipts and step_completed
         // commit in ONE transaction — a completed step can never lack its receipts.
@@ -628,11 +624,11 @@ export async function createDbosPort(opts: {
           // step that skipped the artifact the strategy exists to produce is just as false a
           // success, and just as invisible downstream. Same boundary, same refusal.
           const omission = groundedPlanOmission(events, args.stepId, runToken)
-          if (omission) throw classifiedError(FAILURE_CLASS.validation_error, omission)
+          if (omission) throw classifiedError(FailureClass.validation_error, omission)
           try {
             return verifyArtifacts(workspaceDir, success.outputs ?? [])
           } catch (err) {
-            throw classifiedError(FAILURE_CLASS.validation_error, errorMessage(err))
+            throw classifiedError(FailureClass.validation_error, errorMessage(err))
           }
         }, receipts => receipts === null ? [] : [
           ...receipts.map((r): EventDraft => ({
@@ -663,8 +659,8 @@ export async function createDbosPort(opts: {
       // outcome is exactly what retry is for. Treating every signalled failure as a verdict broke
       // that: it refused the retry of a worker that would have succeeded on its next attempt.
       const failClass = signal
-        ? (init.step.role === STEP_ROLE.auditor ? FAILURE_CLASS.rejected : FAILURE_CLASS.agent_error)
-        : (error?.class ?? FAILURE_CLASS.agent_error)
+        ? (init.step.role === STEP_ROLE.auditor ? FailureClass.rejected : FailureClass.agent_error)
+        : (error?.class ?? FailureClass.agent_error)
       const message = signal ? signal.summary : (error?.message ?? 'executor ended without signal')
       await checkpoint('finish', async () => message, () => [
         { kind: EVENT_KIND.step_failed, payload: { stepId: args.stepId, runToken, class: failClass, message } },
@@ -673,7 +669,7 @@ export async function createDbosPort(opts: {
       } catch (err) {
         return finishFailed(checkpoint, args, runToken,
           errorMessage(err),
-          failureClassOf(err) ?? FAILURE_CLASS.agent_error)
+          failureClassOf(err) ?? FailureClass.agent_error)
       }
     },
     { name: 'orcStep' },
@@ -689,7 +685,7 @@ export async function createDbosPort(opts: {
           const state = await foldState(args.taskId)
           const task = state.tasks.get(args.taskId)
           const plan = state.plans.get(args.taskId)?.versions.find(p => p.version === args.planVersion)
-          if (!task || !plan) throw classifiedError(FAILURE_CLASS.validation_error, `no task/plan v${args.planVersion} for '${args.taskId}'`)
+          if (!task || !plan) throw classifiedError(FailureClass.validation_error, `no task/plan v${args.planVersion} for '${args.taskId}'`)
           // run_started + the running-transition commit in ONE transaction inside fn, NOT the
           // toEvents draft path: the status change depends on foldable state, and a fixed-key draft
           // that re-derives {from: task.status} on recovery flips to {from: running} (its own
@@ -739,7 +735,7 @@ export async function createDbosPort(opts: {
 
         const outcome = runOutcomeOf(plan, done)
         await checkpoint('finish', async () => {
-          await stampIfRunning(log, args.taskId, outcome === RUN_OUTCOME.done ? TASK_STATUS.done : TASK_STATUS.blocked, workflowId, 'finish', args.origin)
+          await stampIfRunning(log, args.taskId, outcome === RunOutcome.done ? TASK_STATUS.done : TASK_STATUS.blocked, workflowId, 'finish', args.origin)
           return { outcome }
         })
         return outcome
@@ -763,7 +759,7 @@ export async function createDbosPort(opts: {
 
   // Index 0 is the FIRST run of an approved plan, and its workflow id is deterministic — which is
   // what makes `orc run` on a LIVE task attach to the run already in flight instead of starting a
-  // second one. But a run that ENDED keeps that id too: runWorkflow returns RUN_OUTCOME.blocked as
+  // second one. But a run that ENDED keeps that id too: runWorkflow returns RunOutcome.blocked as
   // a normal return, so DBOS marks the workflow SUCCESS. Re-running then re-attached to a finished
   // workflow and replayed its cached result — `orc run` on a blocked task was admitted at every
   // door (blocked is drivable) and silently did nothing.
@@ -1000,7 +996,7 @@ function groundingSkipDrafts(v: GroundingVerdict, stepId: string, runToken: stri
           `deep scan skipped this run: coverage is exactly what these notes already declare, verified against HEAD ${v.head} (${v.reason})`,
           ...v.stale.map(s => `${s.id}@${s.revision ?? 'no-revision'} not relied on — ${s.why}`),
         ],
-        confidence: 'medium',
+        confidence: Confidence.medium,
         notesWritten: 0,
       },
       idempotencyKey: `${runToken}:grounding:analysis_completed`,
@@ -1022,7 +1018,7 @@ function priceDraft(d: EventDraft, provider: ModelProvider<unknown>, modelId: st
 
 async function finishFailed(
   checkpoint: Checkpoint, args: StepArgs, runToken: string, message: string,
-  cls: FailureClass = FAILURE_CLASS.agent_error,
+  cls: FailureClass = FailureClass.agent_error,
 ): Promise<StepResult> {
   await checkpoint('finish', async () => message, () => [
     { kind: EVENT_KIND.step_failed, payload: { stepId: args.stepId, runToken, class: cls, message } },

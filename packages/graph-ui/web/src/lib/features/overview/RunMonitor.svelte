@@ -1,6 +1,6 @@
 <script lang="ts">
   import { createQuery } from '@tanstack/svelte-query'
-  import { STEP_RUN_STATUS } from '@orc/contracts/execution'
+  import { StepRunStatus } from '@orc/contracts/execution'
   import ProgressRing from './ProgressRing.svelte'
   import Chip from '$lib/components/Chip.svelte'
   import NodeLink from '$lib/components/NodeLink.svelte'
@@ -27,9 +27,9 @@
 
   const detail = $derived(node.data?.type === NODE_KIND.task ? node.data : null)
   const steps = $derived(detail?.steps ?? [])
-  const done = $derived(steps.filter(s => s.status === STEP_RUN_STATUS.completed).length)
-  const running = $derived(steps.filter(s => s.status === STEP_RUN_STATUS.running))
-  const failed = $derived(steps.filter(s => s.status === STEP_RUN_STATUS.failed).length)
+  const done = $derived(steps.filter(s => s.status === StepRunStatus.completed).length)
+  const running = $derived(steps.filter(s => s.status === StepRunStatus.running))
+  const failed = $derived(steps.filter(s => s.status === StepRunStatus.failed).length)
 
   /** the iteration ceiling each step was frozen with — the number a stuck agent runs into */
   const ceilings = $derived(new Map((plans.data?.versions.at(-1)?.steps ?? []).map(s => [s.id, s.maxIterations])))

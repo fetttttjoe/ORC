@@ -3,10 +3,11 @@ import { authHeaders } from './client'
 // Wire contract: server.ts CopilotBody in, `data: <json CopilotPart>` events out. The body carries
 // projectId — the legacy page sent no x-orc-project header on this route, only on /api/actions.
 import { CopilotPart } from '@orc/ui-core/wire'
+import { MessageRole } from '@orc/contracts/chat'
 import { ApiError } from './client'
 
 export interface CopilotMessage {
-  role: 'user' | 'assistant'
+  role: MessageRole
   content: string
 }
 

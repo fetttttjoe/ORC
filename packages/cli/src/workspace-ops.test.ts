@@ -29,7 +29,7 @@ async function makeOps(): Promise<{ kernel: Kernel; config: ProjectConfig; main:
   sh(main, 'add', '.gitignore')
   sh(main, 'commit', '-q', '-m', 'ignore .orc')
   const config = requireProject({ ...loadConfig(main), databaseUrl: db.url, projectId: TEST_PROJECT_ID, projectName: 'ws-ops-test' })
-  const { kernel, storage } = await openKernel(db.url, { projectId: TEST_PROJECT_ID })
+  const { kernel, storage } = await openKernel(db.url, { projectId: TEST_PROJECT_ID, config })
   db.onClose(() => storage.close())
   return { kernel, config, main, worktree }
 }

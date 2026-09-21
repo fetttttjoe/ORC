@@ -4,11 +4,11 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import {
-  ApprovalPolicy, AUTHOR_SOURCE, Door, EVENT_KIND, FINISH_STEP_ID, NO_CHAT, PAYLOAD_SCHEMAS, RUN_OUTCOME, SIGNAL_OUTCOME, TASK_STATUS,
+  ApprovalPolicy, ApprovedBy, AUTHOR_SOURCE, Door, EVENT_KIND, FINISH_STEP_ID, NO_CHAT, PAYLOAD_SCHEMAS, RunOutcome, SignalOutcome, TASK_STATUS,
   type AgentExecutor, type EventDraft, type ExecutorContext, type Origin, type ResolvedTool,
   type SplitResult, type UnifiedEvent,
 } from '@orc/contracts'
-import { draftFixture, must, stepFixture } from '@orc/contracts/fixtures'
+import { authorFixture, draftFixture, must, stepFixture } from '@orc/contracts/fixtures'
 import { createMemory } from '@orc/memory'
 import { createTestSurreal } from '@orc/memory/test-helpers'
 import { openStorage } from '../storage'
@@ -57,7 +57,7 @@ function splitFake(cfg: {
       // split of its own and gate on it, which is how (b) went from done to a 20s timeout. The
       // finish step has no part in the split choreography: it signals success and ends the run.
       if (ctx.step.id === FINISH_STEP_ID) {
-        const signal = { ...base, outcome: SIGNAL_OUTCOME.success, summary: 'finished' }
+        const signal = { ...base, outcome: SignalOutcome.success, summary: 'finished' }
         await ctx.checkpoint('signal:1', async () => signal, (): EventDraft[] => [
           { kind: EVENT_KIND.signal_received, payload: { ...base, signal } },
         ])
@@ -73,7 +73,7 @@ function splitFake(cfg: {
           // genuinely running until DBOS cancels the workflow (the next checkpoint throws).
           // ponytail: bounded at ~20s so a missed cancel can't wedge the suite; cancel lands <1s.
           for (let i = 0; i < 200; i++) await ctx.checkpoint(`wait:${i}`, async () => { await Bun.sleep(100); return null })
-          const signal = { ...base, outcome: SIGNAL_OUTCOME.success, summary: 'child was never cancelled' }
+          const signal = { ...base, outcome: SignalOutcome.success, summary: 'child was never cancelled' }
           yield { type: 'signal', signal }
           yield { type: 'done' }
           return
@@ -86,7 +86,7 @@ function splitFake(cfg: {
           ])
           const signal = {
             ...base,
-            outcome: r.isError || !workspaceOk ? SIGNAL_OUTCOME.failure : SIGNAL_OUTCOME.success,
+            outcome: r.isError || !workspaceOk ? SignalOutcome.failure : SignalOutcome.success,
             summary: r.isError ? 'write failed' : (!workspaceOk ? `wrong workspace: ${ctx.workspaceDir}` : 'wrote child-finding'),
           }
           await ctx.checkpoint('signal:1', async () => signal, (): EventDraft[] => [
@@ -98,7 +98,7 @@ function splitFake(cfg: {
         }
         const signal = {
           ...base,
-          outcome: workspaceOk ? SIGNAL_OUTCOME.success : SIGNAL_OUTCOME.failure,
+          outcome: workspaceOk ? SignalOutcome.success : SignalOutcome.failure,
           summary: workspaceOk ? 'child ok' : `wrong workspace: ${ctx.workspaceDir}`,
         }
         await ctx.checkpoint('signal:1', async () => signal, (): EventDraft[] => [
@@ -131,7 +131,7 @@ function splitFake(cfg: {
 
       // if the child wrote notes, read one back through the (eventually-consistent) memory store
       let readOk = true
-      if (r0 && r0.outcome === RUN_OUTCOME.done && r0.notes.length > 0) {
+      if (r0 && r0.outcome === RunOutcome.done && r0.notes.length > 0) {
         const read = tool('memory_read')
         const n = must(r0.notes[0], 'first note')
         const body = await ctx.checkpoint('tools:read', async () => {
@@ -149,8 +149,8 @@ function splitFake(cfg: {
         readOk = body === CHILD_NOTE.body
       }
 
-      const good = gatedOk && !!r0 && r0.outcome === RUN_OUTCOME.done && readOk
-      const signal = { ...base, outcome: good ? SIGNAL_OUTCOME.success : SIGNAL_OUTCOME.failure, summary: good ? 'joined child' : 'join/read/gate mismatch' }
+      const good = gatedOk && !!r0 && r0.outcome === RunOutcome.done && readOk
+      const signal = { ...base, outcome: good ? SignalOutcome.success : SignalOutcome.failure, summary: good ? 'joined child' : 'join/read/gate mismatch' }
       await ctx.checkpoint('signal:1', async () => signal, (): EventDraft[] => [
         { kind: EVENT_KIND.signal_received, payload: { ...base, signal } },
       ])
@@ -182,7 +182,7 @@ async function bringUp(policy: 'auto' | 'manual', executor: AgentExecutor<unknow
     providers: new Map([['fake', fakeProvider]]),
     executors: new Map([['split-fake', executor]]),
     stepTools: p => {
-      const bound = memory.bindStep({ author: { source: AUTHOR_SOURCE.agent, origin: p.origin, workspaceId: p.workspaceId, taskId: p.taskId, stepId: p.stepId, runToken: p.runToken, executor: p.executor, model: p.model, role: p.role }, step: p.step, taskId: p.taskId, ancestorTaskIds: p.ancestorTaskIds })
+      const bound = memory.bindStep({ author: authorFixture({ source: AUTHOR_SOURCE.agent, origin: p.origin, workspaceId: p.workspaceId, taskId: p.taskId, stepId: p.stepId, runToken: p.runToken, executor: p.executor, model: p.model, role: p.role }), step: p.step, taskId: p.taskId, ancestorTaskIds: p.ancestorTaskIds })
       return { memory: bound.memory, tools: [
         ...bound.tools,
         ...splitTool({ kernel, config: { approvalPolicy: config.approvalPolicy, maxDepth: config.maxDepth }, p }),
@@ -216,18 +216,18 @@ describe('recursion e2e: split, gate, join, manual approve, queue partition', ()
       const parentId = await parentTask(kernel)
       const childId = `${parentId}.s1.call-1`
       const handle = await port.startRun(parentId, { cwd: sharedWorkspace })
-      expect(await handle.wait()).toBe('done') // proves gate!==true, join outcome=done, note round-tripped
+      expect(await handle.wait()).toBe(RunOutcome.done) // proves gate!==true, join outcome=done, note round-tripped
 
       const events = await log.all()
       expect(events.some(e => e.kind === EVENT_KIND.split_proposed)).toBe(true)
       const resolved = events.find(e => e.kind === EVENT_KIND.split_resolved)
       expect(resolved).toBeDefined()
-      expect(must(resolved, 'split resolved event').payload).toMatchObject({ outcome: RUN_OUTCOME.done, notes: [{ id: 'child-finding', scope: 'project' }] })
+      expect(must(resolved, 'split resolved event').payload).toMatchObject({ outcome: RunOutcome.done, notes: [{ id: 'child-finding', scope: 'project' }] })
 
       expect((await kernel.getTask(childId))?.status).toBe(TASK_STATUS.done)
       expect((await kernel.state()).runs.get(childId)?.at(-1)?.cwd).toBe(sharedWorkspace)
       const approved = events.find(e => e.kind === EVENT_KIND.plan_approved && e.taskId === childId)
-      expect(PAYLOAD_SCHEMAS.plan_approved.parse(must(approved, 'plan approved event').payload).approvedBy).toBe('policy')
+      expect(PAYLOAD_SCHEMAS.plan_approved.parse(must(approved, 'plan approved event').payload).approvedBy).toBe(ApprovedBy.policy)
     } finally {
       await cleanup()
       rmSync(sharedWorkspace, { recursive: true, force: true })
@@ -245,7 +245,7 @@ describe('recursion e2e: split, gate, join, manual approve, queue partition', ()
       expect(await waitFor(async () => (await kernel.getTask(childId))?.status === TASK_STATUS.awaiting_approval, 10_000)).toBe(true)
       await kernel.approvePlan(childId, undefined, undefined, CLI) // router route 2 starts the child run — no other test-side action
 
-      expect(await handle.wait()).toBe('done')
+      expect(await handle.wait()).toBe(RunOutcome.done)
       expect((await kernel.getTask(childId))?.status).toBe(TASK_STATUS.done)
     } finally {
       await cleanup()
@@ -259,7 +259,7 @@ describe('recursion e2e: split, gate, join, manual approve, queue partition', ()
     try {
       const parentId = await parentTask(kernel)
       const handle = await port.startRun(parentId)
-      expect(await handle.wait()).toBe('done')
+      expect(await handle.wait()).toBe(RunOutcome.done)
     } finally {
       await cleanup()
     }
@@ -281,7 +281,7 @@ describe('recursion e2e: split, gate, join, manual approve, queue partition', ()
       expect((await kernel.getTask(childId))?.status).toBe(TASK_STATUS.cancelled)
       // the live router resolves the still-pending split off the child's cancelled terminal status
       expect(await waitFor(async () =>
-        (await log.all()).some(e => e.kind === EVENT_KIND.split_resolved && PAYLOAD_SCHEMAS.split_resolved.parse(e.payload).outcome === RUN_OUTCOME.cancelled),
+        (await log.all()).some(e => e.kind === EVENT_KIND.split_resolved && PAYLOAD_SCHEMAS.split_resolved.parse(e.payload).outcome === RunOutcome.cancelled),
       15_000)).toBe(true)
     } finally {
       await cleanup()
@@ -311,7 +311,7 @@ describe('recursion e2e: split, gate, join, manual approve, queue partition', ()
       const handle = await port.startRun(parentId)
       // the parent encodes its own assertions into the signal: 'done' proves r0 arrived with
       // outcome=done AND the child's note was readable through the memory store
-      expect(await handle.wait()).toBe('done')
+      expect(await handle.wait()).toBe(RunOutcome.done)
     } finally {
       await cleanup()
     }
@@ -324,7 +324,7 @@ describe('recursion e2e: split, gate, join, manual approve, queue partition', ()
     try {
       const parentId = await parentTask(kernel)
       const handle = await port.startRun(parentId)
-      expect(await handle.wait()).toBe('done')
+      expect(await handle.wait()).toBe(RunOutcome.done)
     } finally {
       await cleanup()
     }

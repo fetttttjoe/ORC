@@ -51,7 +51,7 @@ describe('planGeometry', () => {
   it('reports a canvas size that covers every container', () => {
     const g = planGeometry([{ id: 'a', rank: 0, lane: 0 }, { id: 'b', rank: 1, lane: 0 }], spec)
     expect(g.width).toBe(280) // two 120-wide containers + one 40 gap
-    expect(g.height).toBe(g.groups[0]?.height)
+    expect(g.height).toBe(must(g.groups[0], 'groups[0]').height)
   })
 
   it('handles an empty plan without inventing a container', () => {

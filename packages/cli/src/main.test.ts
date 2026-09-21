@@ -2,10 +2,10 @@ import { afterAll, afterEach, describe, expect, it, mock, spyOn } from 'bun:test
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import { ApprovalPolicy, Door, EVENT_KIND, NO_CHAT, MemoryAccessedPayload, MemoryDeletedPayload, MemoryWrittenPayload, NOTE_TIER, ROLE_SKILL, RUN_OUTCOME, TASK_STATUS, WORKSPACE_KIND, claimId, type ExecutionPort, type OperationSpec, type RunOutcome, type TaskNode, type TaskStatus, LINK_KIND } from '@orc/contracts'
+import { ApprovalPolicy, AUTHOR_SOURCE, CHECKS_STEP_ID, Confidence, Door, EVENT_KIND, NO_CHAT, MemoryAccessedPayload, MemoryDeletedPayload, MemoryWrittenPayload, NOTE_TIER, OperationKind, ROLE_SKILL, RunOutcome, TASK_STATUS, WORKSPACE_KIND, claimId, type ExecutionPort, type MemoryAuthor, type OperationSpec, type TaskNode, type TaskStatus, LINK_KIND } from '@orc/contracts'
 import { must } from '@orc/contracts/fixtures'
 import { loadConfig, requireProject, type EventLog, type ProjectConfig } from '@orc/kernel'
-import { createTestDb, seedTestWorkspace, TEST_PROJECT_ID, TEST_WORKSPACE, TEST_WORKSPACE_ID } from '@orc/kernel/test-helpers'
+import { createTestDb, seedTestWorkspace, TEST_PROJECT_ID, TEST_WORKSPACE, TEST_WORKSPACE_ID, testOrcConfig } from '@orc/kernel/test-helpers'
 import { singleStepDraft } from './plan-template'
 import { buildProgram, openKernel, runInit } from './main'
 import { buildOrcActions } from './actions'
@@ -53,7 +53,7 @@ const SUPERVISOR = NO_CHAT(Door.supervisor)
 async function makeCli() {
   const db = await createTestDb()
   dbs.push(db)
-  const { kernel, storage } = await openKernel(db.url, { projectId: TEST_PROJECT_ID })
+  const { kernel, storage } = await openKernel(db.url, { projectId: TEST_PROJECT_ID, config: testOrcConfig() })
   db.onClose(() => storage.close())
   // buildProgram(kernel) has no project context, so `new` cannot resolve a cwd workspace here —
   // the tests below pass --workspace explicitly, and this is the record they name.
@@ -122,7 +122,7 @@ describe('orc CLI', () => {
   it('replay reconstructs operation state at a sequence and appends nothing', async () => {
     const db = await createTestDb()
     dbs.push(db)
-    const { kernel, log, storage } = await openKernel(db.url, { projectId: TEST_PROJECT_ID })
+    const { kernel, log, storage } = await openKernel(db.url, { projectId: TEST_PROJECT_ID, config: testOrcConfig() })
     // a task must name a workspace the fold has seen — one seeded record, then tasks as before
     await seedTestWorkspace(log, CLI)
     cleanup.push(() => log.close())
@@ -131,7 +131,7 @@ describe('orc CLI', () => {
     const t = await kernel.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'audit me' }, CLI)
     // an operation belongs to the RUN that opened it, so its origin is that run's chat
     const opContext = { taskId: t.id, stepId: 's1', runToken: `step:${t.id}:s1:a1`, origin: { chatId: `run:${t.id}:v1`, door: Door.supervisor } }
-    const spec: OperationSpec = { operationId: `${opContext.runToken}:model:1`, kind: 'model', name: 'fake/m', before: { q: 1 } }
+    const spec: OperationSpec = { operationId: `${opContext.runToken}:model:1`, kind: OperationKind.model, name: 'fake/m', before: { q: 1 } }
     await storage.operations.beginOperation(opContext, spec)
     const startSeq = must((await log.byTask(t.id)).at(-1), 'last event').seq
     await storage.operations.completeOperation(opContext, spec, 1, { text: 'answer' })
@@ -151,7 +151,7 @@ describe('orc CLI', () => {
   it('replay --at below the task range explains that sequences are global', async () => {
     const db = await createTestDb()
     dbs.push(db)
-    const { kernel, log } = await openKernel(db.url, { projectId: TEST_PROJECT_ID })
+    const { kernel, log } = await openKernel(db.url, { projectId: TEST_PROJECT_ID, config: testOrcConfig() })
     // a task must name a workspace the fold has seen — one seeded record, then tasks as before
     await seedTestWorkspace(log, CLI)
     cleanup.push(() => log.close())
@@ -174,7 +174,7 @@ describe('orc CLI', () => {
   it('log --json prints the full stored envelope', async () => {
     const db = await createTestDb()
     dbs.push(db)
-    const { kernel, log } = await openKernel(db.url, { projectId: TEST_PROJECT_ID })
+    const { kernel, log } = await openKernel(db.url, { projectId: TEST_PROJECT_ID, config: testOrcConfig() })
     // a task must name a workspace the fold has seen — one seeded record, then tasks as before
     await seedTestWorkspace(log, CLI)
     cleanup.push(() => log.close())
@@ -189,6 +189,24 @@ describe('orc CLI', () => {
     const { run } = await makeCli()
     await expect(run('log', 'missing-task')).rejects.toThrow("no task 'missing-task'")
     await expect(run('replay', 'missing-task')).rejects.toThrow("no task 'missing-task'")
+  })
+
+  // Proof of the hermetic isolation openKernel's required config buys: THIS repo's own
+  // .orc/config.json sets finishChecks (['bun run typecheck']), and a kernel that fell back to
+  // loadConfig() would silently inherit it — the same assertion fails on that code (config
+  // omitted → cwd fallback), because a checks step then IS appended.
+  it('propose leaves off the checks step for a kernel opened with testOrcConfig()', async () => {
+    const db = await createTestDb()
+    dbs.push(db)
+    const { kernel, log } = await openKernel(db.url, { projectId: TEST_PROJECT_ID, config: testOrcConfig() })
+    await seedTestWorkspace(log, CLI)
+    cleanup.push(() => log.close())
+    const { run, lines } = cli(kernel)
+    await run('new', 'no checks step', '--workspace', TEST_WORKSPACE_ID)
+    const taskId = must(lines[0], 'task id from new command')
+    await run('propose', taskId)
+    const plan = must(await kernel.getPlan(taskId), 'plan')
+    expect(plan.steps.some(s => s.id === CHECKS_STEP_ID)).toBe(false)
   })
 
   it('new → propose → approve → log round-trip', async () => {
@@ -391,6 +409,7 @@ describe('orc CLI', () => {
     const sent: Array<{ id: string; message: string; topic: string }> = []
     const { kernel, log } = await openKernel(db.url, {
       projectId: TEST_PROJECT_ID,
+      config: testOrcConfig(),
       send: async (id, message, topic) => { sent.push({ id, message, topic }) },
     })
     // a task must name a workspace the fold has seen — one seeded record, then tasks as before
@@ -401,7 +420,7 @@ describe('orc CLI', () => {
     // parked. The real send path is still the injected `send` above; startRun here only stands in
     // for the driver so the reply can complete.
     const stubPort: ExecutionPort = {
-      startRun: async () => ({ workflowId: 'run:x:v1', wait: async () => RUN_OUTCOME.done }),
+      startRun: async () => ({ workflowId: 'run:x:v1', wait: async () => RunOutcome.done }),
       retry: async () => { throw new Error('unused in this test') },
       cancelRun: async () => {},
     }
@@ -440,7 +459,7 @@ describe('orc CLI', () => {
   it('status surfaces the open feedback question so the human sees what to reply to', async () => {
     const db = await createTestDb()
     dbs.push(db)
-    const { kernel, log } = await openKernel(db.url, { projectId: TEST_PROJECT_ID })
+    const { kernel, log } = await openKernel(db.url, { projectId: TEST_PROJECT_ID, config: testOrcConfig() })
     // a task must name a workspace the fold has seen — one seeded record, then tasks as before
     await seedTestWorkspace(log, CLI)
     cleanup.push(() => log.close())
@@ -455,7 +474,7 @@ describe('orc CLI', () => {
   it('status shows the analysis coverage once the analyze step has reported it', async () => {
     const db = await createTestDb()
     dbs.push(db)
-    const { kernel, log } = await openKernel(db.url, { projectId: TEST_PROJECT_ID })
+    const { kernel, log } = await openKernel(db.url, { projectId: TEST_PROJECT_ID, config: testOrcConfig() })
     // a task must name a workspace the fold has seen — one seeded record, then tasks as before
     await seedTestWorkspace(log, CLI)
     cleanup.push(() => log.close())
@@ -463,7 +482,7 @@ describe('orc CLI', () => {
     const t = await kernel.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'grounded' }, CLI)
     await kernel.reportCoverage(
       { taskId: t.id, stepId: 'analyze', runToken: `step:${t.id}:analyze:a1` },
-      { analyzed: true, scope: ['packages'], gaps: ['no tests read'], confidence: 'medium', notesWritten: 3 },
+      { analyzed: true, scope: ['packages'], gaps: ['no tests read'], confidence: Confidence.medium, notesWritten: 3 },
       SUPERVISOR,
     )
     const out = (await run('status', t.id)).join('\n')
@@ -474,7 +493,7 @@ describe('orc CLI', () => {
   it('status prints a per-step usage/cost line for a step with recorded agent_call usage', async () => {
     const db = await createTestDb()
     dbs.push(db)
-    const { kernel, log } = await openKernel(db.url, { projectId: TEST_PROJECT_ID })
+    const { kernel, log } = await openKernel(db.url, { projectId: TEST_PROJECT_ID, config: testOrcConfig() })
     // a task must name a workspace the fold has seen — one seeded record, then tasks as before
     await seedTestWorkspace(log, CLI)
     cleanup.push(() => log.close())
@@ -505,6 +524,7 @@ describe('orc CLI', () => {
     const sent: Array<{ id: string; message: string; topic: string }> = []
     const { kernel, log } = await openKernel(db.url, {
       projectId: TEST_PROJECT_ID,
+      config: testOrcConfig(),
       send: async (id, message, topic) => { sent.push({ id, message, topic }) },
     })
     // a task must name a workspace the fold has seen — one seeded record, then tasks as before
@@ -542,7 +562,7 @@ describe('orc CLI', () => {
   it('run reports a cancelled run as cancelled, not as a crash', async () => {
     const db = await createTestDb()
     dbs.push(db)
-    const { kernel, log } = await openKernel(db.url, { projectId: TEST_PROJECT_ID })
+    const { kernel, log } = await openKernel(db.url, { projectId: TEST_PROJECT_ID, config: testOrcConfig() })
     // a task must name a workspace the fold has seen — one seeded record, then tasks as before
     await seedTestWorkspace(log, CLI)
     cleanup.push(() => log.close())
@@ -563,7 +583,7 @@ describe('orc CLI', () => {
     await stamp(log, taskId, TASK_STATUS.running, TASK_STATUS.cancelled)
     await watched
     expect(failure).toBeInstanceOf(CommandFailure)
-    expect(lines.slice(from).join('\n')).toContain(`run finished: ${RUN_OUTCOME.cancelled}`)
+    expect(lines.slice(from).join('\n')).toContain(`run finished: ${RunOutcome.cancelled}`)
   }, 15_000)
 
   // one split child, shaped like the ones `task_split` proposes — the only variable is the policy
@@ -577,7 +597,7 @@ describe('orc CLI', () => {
   it('the run watch names a child the manual policy gated — the wait that emits no event', async () => {
     const db = await createTestDb()
     dbs.push(db)
-    const { kernel, log } = await openKernel(db.url, { projectId: TEST_PROJECT_ID })
+    const { kernel, log } = await openKernel(db.url, { projectId: TEST_PROJECT_ID, config: testOrcConfig() })
     // a task must name a workspace the fold has seen — one seeded record, then tasks as before
     await seedTestWorkspace(log, CLI)
     cleanup.push(() => log.close())
@@ -601,7 +621,7 @@ describe('orc CLI', () => {
   it('a split gated mid-run is named while the watch is still attached', async () => {
     const db = await createTestDb()
     dbs.push(db)
-    const { kernel, log } = await openKernel(db.url, { projectId: TEST_PROJECT_ID })
+    const { kernel, log } = await openKernel(db.url, { projectId: TEST_PROJECT_ID, config: testOrcConfig() })
     // a task must name a workspace the fold has seen — one seeded record, then tasks as before
     await seedTestWorkspace(log, CLI)
     cleanup.push(() => log.close())
@@ -626,7 +646,7 @@ describe('orc CLI', () => {
   it('a question parked on a child parks the parent tail, naming the CHILD to reply to', async () => {
     const db = await createTestDb()
     dbs.push(db)
-    const { kernel, log } = await openKernel(db.url, { projectId: TEST_PROJECT_ID })
+    const { kernel, log } = await openKernel(db.url, { projectId: TEST_PROJECT_ID, config: testOrcConfig() })
     // a task must name a workspace the fold has seen — one seeded record, then tasks as before
     await seedTestWorkspace(log, CLI)
     cleanup.push(() => log.close())
@@ -655,7 +675,7 @@ describe('orc CLI', () => {
   it('orc run records the ask and watches — it never starts a workflow itself', async () => {
     const db = await createTestDb()
     dbs.push(db)
-    const { kernel, log } = await openKernel(db.url, { projectId: TEST_PROJECT_ID })
+    const { kernel, log } = await openKernel(db.url, { projectId: TEST_PROJECT_ID, config: testOrcConfig() })
     // a task must name a workspace the fold has seen — one seeded record, then tasks as before
     await seedTestWorkspace(log, CLI)
     cleanup.push(() => log.close())
@@ -691,7 +711,7 @@ describe('orc CLI', () => {
   it('approving a split child watches the tree; approving a root still only approves', async () => {
     const db = await createTestDb()
     dbs.push(db)
-    const { kernel, log } = await openKernel(db.url, { projectId: TEST_PROJECT_ID })
+    const { kernel, log } = await openKernel(db.url, { projectId: TEST_PROJECT_ID, config: testOrcConfig() })
     // a task must name a workspace the fold has seen — one seeded record, then tasks as before
     await seedTestWorkspace(log, CLI)
     cleanup.push(() => log.close())
@@ -728,7 +748,7 @@ describe('orc CLI', () => {
   it('a watched run waits for EVERY outstanding child, not only the first', async () => {
     const db = await createTestDb()
     dbs.push(db)
-    const { kernel, log } = await openKernel(db.url, { projectId: TEST_PROJECT_ID })
+    const { kernel, log } = await openKernel(db.url, { projectId: TEST_PROJECT_ID, config: testOrcConfig() })
     // a task must name a workspace the fold has seen — one seeded record, then tasks as before
     await seedTestWorkspace(log, CLI)
     cleanup.push(() => log.close())
@@ -754,13 +774,13 @@ describe('orc CLI', () => {
 
     await stamp(log, second.childTaskId, TASK_STATUS.approved, TASK_STATUS.done)
     const out = await watched
-    expect(out.join('\n')).toContain(`run finished: ${RUN_OUTCOME.done}`)
+    expect(out.join('\n')).toContain(`run finished: ${RunOutcome.done}`)
   }, 15_000)
 
   it('the terminal summary after a watched run includes a cost line, not just run finished', async () => {
     const db = await createTestDb()
     dbs.push(db)
-    const { kernel, log } = await openKernel(db.url, { projectId: TEST_PROJECT_ID })
+    const { kernel, log } = await openKernel(db.url, { projectId: TEST_PROJECT_ID, config: testOrcConfig() })
     // a task must name a workspace the fold has seen — one seeded record, then tasks as before
     await seedTestWorkspace(log, CLI)
     cleanup.push(() => log.close())
@@ -783,7 +803,7 @@ describe('orc CLI', () => {
     await stamp(log, taskId, TASK_STATUS.running, TASK_STATUS.done)
 
     const out = (await watched).join('\n')
-    expect(out).toContain(`run finished: ${RUN_OUTCOME.done}`)
+    expect(out).toContain(`run finished: ${RunOutcome.done}`)
     // not just 'tokens in/out' — the terminal summary must show where the money went
     expect(out).toContain('cost: $0.0055')
   }, 15_000)
@@ -808,7 +828,7 @@ describe('orc CLI', () => {
   it('a watched run resolves when the whole subtree is terminal, not when the root is', async () => {
     const db = await createTestDb()
     dbs.push(db)
-    const { kernel, log } = await openKernel(db.url, { projectId: TEST_PROJECT_ID })
+    const { kernel, log } = await openKernel(db.url, { projectId: TEST_PROJECT_ID, config: testOrcConfig() })
     // a task must name a workspace the fold has seen — one seeded record, then tasks as before
     await seedTestWorkspace(log, CLI)
     cleanup.push(() => log.close())
@@ -831,13 +851,13 @@ describe('orc CLI', () => {
 
     await stamp(log, child.childTaskId, TASK_STATUS.approved, TASK_STATUS.running)
     await stamp(log, child.childTaskId, TASK_STATUS.running, TASK_STATUS.done)
-    expect(await watching).toEqual({ parked: false, outcome: RUN_OUTCOME.done })
+    expect(await watching).toEqual({ parked: false, outcome: RunOutcome.done })
   }, 15_000)
 
   it('a watched run resolves parked when a gate is open anywhere in the subtree', async () => {
     const db = await createTestDb()
     dbs.push(db)
-    const { kernel, log } = await openKernel(db.url, { projectId: TEST_PROJECT_ID })
+    const { kernel, log } = await openKernel(db.url, { projectId: TEST_PROJECT_ID, config: testOrcConfig() })
     // a task must name a workspace the fold has seen — one seeded record, then tasks as before
     await seedTestWorkspace(log, CLI)
     cleanup.push(() => log.close())
@@ -865,7 +885,7 @@ describe('orc CLI', () => {
     const projectDbName = `t_${Math.random().toString(36).slice(2, 10)}`
     const config = requireProject({ ...loadConfig(dir), projectDbName, projectId: TEST_PROJECT_ID, projectName: 'test' })
     surrealConfigs.push(config)
-    const { kernel, log } = await openKernel(db.url, { projectId: TEST_PROJECT_ID })
+    const { kernel, log } = await openKernel(db.url, { projectId: TEST_PROJECT_ID, config: testOrcConfig() })
     // the workspace must sit at THIS config's dir: every CLI memory write resolves its author's
     // workspace by matching the process's directory, and refuses when nothing claims it
     await seedTestWorkspace(log, CLI, realpathSync(config.dir))
@@ -947,7 +967,7 @@ describe('orc CLI', () => {
     const seedNote = (nid: string, links: Array<{ id: string; kind: string }> = []) =>
       log.append({
         ...CLI, taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_written,
-        payload: { note: { id: nid, title: nid, links }, author: { source: 'cli', workspaceId: TEST_WORKSPACE_ID, origin: CLI } },
+        payload: { note: { id: nid, title: nid, links }, author: { source: AUTHOR_SOURCE.cli, workspaceId: TEST_WORKSPACE_ID, origin: CLI } },
       })
     await seedNote('nb-seed', [{ id: 'nb-hop1', kind: LINK_KIND.depends_on }, { id: 'nb-other', kind: LINK_KIND.refines }])
     await seedNote('nb-hop1', [{ id: 'nb-hop2', kind: LINK_KIND.relates_to }])
@@ -1027,7 +1047,7 @@ describe('orc CLI', () => {
     // keyword-only, same reason as the claims tests: nothing here needs an embedder
     const config = requireProject({ ...loadConfig(dir), projectDbName, projectId: TEST_PROJECT_ID, projectName: 'test', memoryEmbedModel: '' })
     surrealConfigs.push(config)
-    const { log } = await openKernel(db.url, { projectId: TEST_PROJECT_ID })
+    const { log } = await openKernel(db.url, { projectId: TEST_PROJECT_ID, config: testOrcConfig() })
     cleanup.push(() => log.close())
 
     let leaked: Parameters<Parameters<typeof withMemory>[1]>[0] | undefined
@@ -1055,7 +1075,7 @@ describe('orc CLI', () => {
     const projectDbName = `t_${Math.random().toString(36).slice(2, 10)}`
     const config = requireProject({ ...loadConfig(dir), projectDbName, projectId: TEST_PROJECT_ID, projectName: 'test', memoryEmbedModel: '' })
     surrealConfigs.push(config)
-    const { log } = await openKernel(db.url, { projectId: TEST_PROJECT_ID })
+    const { log } = await openKernel(db.url, { projectId: TEST_PROJECT_ID, config: testOrcConfig() })
     cleanup.push(() => log.close())
     const warnings: string[] = []
     spyOn(console, 'warn').mockImplementation((...a: unknown[]) => { warnings.push(a.join(' ')) })
@@ -1082,7 +1102,7 @@ describe('orc CLI', () => {
     // local Ollama happens to be running. The claims command itself never touches an embedder.
     const config = requireProject({ ...loadConfig(dir), projectDbName, projectId: TEST_PROJECT_ID, projectName: 'test', memoryEmbedModel: '' })
     surrealConfigs.push(config)
-    const { kernel, log } = await openKernel(db.url, { projectId: TEST_PROJECT_ID })
+    const { kernel, log } = await openKernel(db.url, { projectId: TEST_PROJECT_ID, config: testOrcConfig() })
     // the workspace must sit at THIS config's dir: every CLI memory write resolves its author's
     // workspace by matching the process's directory, and refuses when nothing claims it
     await seedTestWorkspace(log, CLI, realpathSync(config.dir))
@@ -1100,7 +1120,7 @@ describe('orc CLI', () => {
       ...CLI, taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_written,
       payload: {
         note: { id: noteId, title: 'claims', claims: texts.map(t => ({ id: claimId(t), text: t })) },
-        author: { source: 'cli', workspaceId: TEST_WORKSPACE_ID, origin: CLI }, invalidates,
+        author: { source: AUTHOR_SOURCE.cli, workspaceId: TEST_WORKSPACE_ID, origin: CLI }, invalidates,
       },
     })
     await write([retiredText])
@@ -1123,7 +1143,7 @@ describe('orc CLI', () => {
     // a fold that saw only memory_written would keep reporting the live one as live forever.
     await log.append({
       ...CLI, taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_deleted,
-      payload: { id: noteId, scope: 'project', author: { source: 'cli', workspaceId: TEST_WORKSPACE_ID, origin: CLI } },
+      payload: { id: noteId, scope: 'project', author: { source: AUTHOR_SOURCE.cli, workspaceId: TEST_WORKSPACE_ID, origin: CLI } },
     })
     const history2 = await run('memory', 'claims', noteId, '--history')
     expect(history2.find(l => l.includes(liveText))).toContain('RETIRED')
@@ -1166,7 +1186,7 @@ describe('orc CLI', () => {
     // leaving the default ollama one wired makes the test depend on whether a local Ollama runs.
     const config = requireProject({ ...loadConfig(dir), projectDbName, projectId: TEST_PROJECT_ID, projectName: 'test', memoryEmbedModel: '' })
     surrealConfigs.push(config)
-    const { kernel, log } = await openKernel(db.url, { projectId: TEST_PROJECT_ID })
+    const { kernel, log } = await openKernel(db.url, { projectId: TEST_PROJECT_ID, config: testOrcConfig() })
     // the workspace must sit at THIS config's dir: every CLI memory write resolves its author's
     // workspace by matching the process's directory, and refuses when nothing claims it
     await seedTestWorkspace(log, CLI, realpathSync(config.dir))
@@ -1184,7 +1204,7 @@ describe('orc CLI', () => {
       ...CLI, taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_written,
       payload: {
         note: { id: noteId, title: 'claims json', claims: texts.map(t => ({ id: claimId(t), text: t })) },
-        author: { source: 'cli', workspaceId: TEST_WORKSPACE_ID, origin: CLI }, invalidates,
+        author: { source: AUTHOR_SOURCE.cli, workspaceId: TEST_WORKSPACE_ID, origin: CLI }, invalidates,
       },
     })
     await write([retiredText])
@@ -1232,7 +1252,7 @@ describe('orc CLI', () => {
     // are no claim vectors and thus no topics — the deterministic empty inventory this test needs.
     const config = requireProject({ ...loadConfig(dir), projectDbName, projectId: TEST_PROJECT_ID, projectName: 'test', memoryEmbedModel: '' })
     surrealConfigs.push(config)
-    const { kernel, log } = await openKernel(db.url, { projectId: TEST_PROJECT_ID })
+    const { kernel, log } = await openKernel(db.url, { projectId: TEST_PROJECT_ID, config: testOrcConfig() })
     // the workspace must sit at THIS config's dir: every CLI memory write resolves its author's
     // workspace by matching the process's directory, and refuses when nothing claims it
     await seedTestWorkspace(log, CLI, realpathSync(config.dir))
@@ -1274,7 +1294,7 @@ describe('cancel-sweep wiring (real plugin, stub port)', () => {
     const projectDbName = `t_${Math.random().toString(36).slice(2, 10)}`
     const config = requireProject({ ...loadConfig(dir), projectDbName, projectId: TEST_PROJECT_ID, projectName: 'test' })
     surrealConfigs.push(config)
-    const { kernel, log } = await openKernel(db.url, { projectId: TEST_PROJECT_ID })
+    const { kernel, log } = await openKernel(db.url, { projectId: TEST_PROJECT_ID, config: testOrcConfig() })
     // the workspace must sit at THIS config's dir: every CLI memory write resolves its author's
     // workspace by matching the process's directory, and refuses when nothing claims it
     await seedTestWorkspace(log, CLI, realpathSync(config.dir))
@@ -1289,13 +1309,13 @@ describe('cancel-sweep wiring (real plugin, stub port)', () => {
     const { run } = cli(kernel, async () => stubPort, { host, hub, config, log })
 
     const taskId = must((await run('new', 'sweep wiring', '--workspace', TEST_WORKSPACE_ID))[0], 'task id')
-    const write = (id: string, author: Record<string, unknown>) => log.append({
+    const write = (id: string, author: MemoryAuthor) => log.append({
       ...CLI, taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_written,
       payload: { note: { id, title: id }, author },
     })
-    await write('wiring-orphan', { source: 'agent', workspaceId: TEST_WORKSPACE_ID, taskId, origin: SUPERVISOR })
-    await write('wiring-adopted', { source: 'agent', workspaceId: TEST_WORKSPACE_ID, taskId, origin: SUPERVISOR })
-    await write('wiring-adopted', { source: 'cli', workspaceId: TEST_WORKSPACE_ID, origin: CLI }) // re-written by a live writer -> adopted
+    await write('wiring-orphan', { source: AUTHOR_SOURCE.agent, workspaceId: TEST_WORKSPACE_ID, taskId, origin: SUPERVISOR })
+    await write('wiring-adopted', { source: AUTHOR_SOURCE.agent, workspaceId: TEST_WORKSPACE_ID, taskId, origin: SUPERVISOR })
+    await write('wiring-adopted', { source: AUTHOR_SOURCE.cli, workspaceId: TEST_WORKSPACE_ID, origin: CLI }) // re-written by a live writer -> adopted
 
     const out = (await run('cancel', taskId)).join('\n')
     expect(out).toContain('cancelled')
@@ -1344,11 +1364,11 @@ describe('the CLI door appends exactly what the shared action appends', () => {
   async function doorFixture() {
     const db = await createTestDb()
     dbs.push(db)
-    const { kernel, log, storage } = await openKernel(db.url, { projectId: TEST_PROJECT_ID, send: async () => {} })
+    const { kernel, log, storage } = await openKernel(db.url, { projectId: TEST_PROJECT_ID, config: testOrcConfig(), send: async () => {} })
     db.onClose(() => storage.close())
     await seedTestWorkspace(log, CLI)
     const stubPort: ExecutionPort = {
-      startRun: async () => ({ workflowId: 'run:x:v1', wait: async () => RUN_OUTCOME.done }),
+      startRun: async () => ({ workflowId: 'run:x:v1', wait: async () => RunOutcome.done }),
       retry: async () => { throw new Error('unused in this test') },
       cancelRun: async () => {},
     }

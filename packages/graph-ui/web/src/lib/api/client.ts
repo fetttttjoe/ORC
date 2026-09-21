@@ -13,9 +13,12 @@ export class ApiError extends Error {
   }
 }
 
-let onError: (err: ApiError) => void = () => {}
-export const setApiErrorHandler = (fn: (err: ApiError) => void): void => {
+let onError: ApiErrorHandler = () => {}
+export type ApiErrorHandler = (err: ApiError) => void
+export const setApiErrorHandler = (fn: ApiErrorHandler): ApiErrorHandler => {
+  const previous = onError
   onError = fn
+  return previous
 }
 
 // view-client.ts's fetchView reports a failed view read through this SAME toast surface, rather

@@ -180,9 +180,11 @@ export const taskLaneScopes = (taskId: string, ancestorTaskIds: readonly string[
 // speak one spelling. 'off' = the pre-reactor behavior (commits stay traceability records);
 // 'restamp' = the free no-LLM catch-up pass only; 'draft-sweep' = restamp, then when drift
 // survives DRAFT a heal task for the human to approve — the spend stays behind the gate.
-export const AUTO_HEAL_MODE = { off: 'off', restamp: 'restamp', draftSweep: 'draft-sweep' } as const
-export const AutoHealMode = z.enum([AUTO_HEAL_MODE.off, AUTO_HEAL_MODE.restamp, AUTO_HEAL_MODE.draftSweep])
-export type AutoHealMode = z.infer<typeof AutoHealMode>
+export enum AutoHealMode {
+  off = 'off',
+  restamp = 'restamp',
+  draftSweep = 'draft-sweep',
+}
 
 // The memory tool surface by name — matched values, never scattered literals. Owned in
 // contracts so the executor loop (which cannot import the memory plugin) matches the same
@@ -251,7 +253,7 @@ export const SemanticNoteInput = z.object({
   // The ADR lifecycle state. Only a `decision` may carry it — the refinement on MemoryNoteInput
   // refuses it on every other kind, the same posture as "sources required only for research". No
   // default: see decisionStatusOf for why a stored default would corrupt partial updates.
-  status: DecisionStatus.optional(),
+  status: z.enum(DecisionStatus).optional(),
   categories: stringOrList(z.string().max(MEMORY_LIMITS.labelChars), MEMORY_LIMITS.labelItems).default([]),
   paths: stringOrList(z.string().max(MEMORY_LIMITS.detailChars), MEMORY_LIMITS.detailItems).default([]), // pointers down to code
   claims: z.array(ClaimInput).max(MEMORY_LIMITS.detailItems).default([]), // the addressable facts it asserts

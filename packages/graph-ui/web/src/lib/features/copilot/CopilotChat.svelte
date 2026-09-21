@@ -11,7 +11,7 @@
   import { createQuery } from '@tanstack/svelte-query'
   import { viewQuery } from '$lib/api/view-query'
   import { CopilotFrameType, VIEW } from '@orc/ui-core/wire'
-  import { ChatKind } from '@orc/contracts/chat'
+  import { ChatKind, MessageRole } from '@orc/contracts/chat'
   import { ScopeType } from '@orc/contracts/scope'
   import { taskIdOf } from '$lib/node-id'
   import { EVENT_KIND } from '$lib/event-kinds'
@@ -113,7 +113,7 @@
     abort = new AbortController()
     input = ''
     live = [...live, { kind: 'message', id: liveId(), role: 'user', text }]
-    const wire: CopilotMessage[] = messages.map(m => ({ role: m.role, content: m.text }))
+    const wire: CopilotMessage[] = messages.map(m => ({ role: m.role === 'user' ? MessageRole.user : MessageRole.assistant, content: m.text }))
     const answerId = liveId()
     live = [...live, { kind: 'message', id: answerId, role: 'assistant', text: '' }]
 

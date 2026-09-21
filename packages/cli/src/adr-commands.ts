@@ -1,5 +1,5 @@
 import { Command } from 'commander'
-import { AUTHOR_SOURCE, DECISION_STATUSES, DecisionInput, Door, NO_CHAT, type DecisionStatus } from '@orc/contracts'
+import { AUTHOR_SOURCE, DecisionInput, DecisionStatus, Door, NO_CHAT } from '@orc/contracts'
 import type { EventLog, Kernel, ProjectConfig } from '@orc/kernel'
 import { ADR_SECTION, decisionDoor, getDecision, listDecisions, recordDecision, type DecisionDoor, type DecisionRecord } from '@orc/memory'
 import { cwdAuthor } from './cwd-workspace'
@@ -11,7 +11,7 @@ import { withMemory } from './memory-open'
 // without pulling commander in behind it (ws-commands.ts / workspace-ops.ts precedent).
 
 export const ADR_SUBCOMMAND = { new: 'new', ls: 'ls', show: 'show', supersede: 'supersede' } as const
-const parseStatus = enumArg<DecisionStatus>('status', DECISION_STATUSES)
+const parseStatus = enumArg<DecisionStatus>('status', Object.values(DecisionStatus))
 
 // Pure, so the rendering is testable without a store. `→ <id>` names the superseding decision: an
 // operator reading a superseded row wants the replacement, not just the verdict.
@@ -29,7 +29,7 @@ const sectionOptions = (c: Command): Command => c
   .requiredOption('--context <text>', 'why this decision was needed (the forces at play)')
   .requiredOption('--decision <text>', 'what was decided, as a statement another agent can act on')
   .requiredOption('--consequences <text>', 'what follows — what becomes easier, harder, or forbidden')
-  .option('--status <s>', `${DECISION_STATUSES.join(' | ')} (default accepted: a recorded decision is presumed in force)`, parseStatus)
+  .option('--status <s>', `${Object.values(DecisionStatus).join(' | ')} (default accepted: a recorded decision is presumed in force)`, parseStatus)
   .option('--tags <tags...>', 'tags')
 
 export function adrCommand(deps: {
@@ -73,7 +73,7 @@ export function adrCommand(deps: {
   sectionOptions(adr.command(`${ADR_SUBCOMMAND.supersede} <oldId> <title>`).description('record a decision that replaces an existing one; the old decision is marked superseded'))
     .action((oldId: string, title: string, o: SectionOpts) => record(title, o, oldId))
   adr.command(ADR_SUBCOMMAND.ls).description('list decisions, attention-first (proposed → accepted → deprecated → superseded)')
-    .option('--status <s>', `only: ${DECISION_STATUSES.join(' | ')}`, parseStatus)
+    .option('--status <s>', `only: ${Object.values(DecisionStatus).join(' | ')}`, parseStatus)
     .option('--json', 'machine-readable rows')
     .action(async (o: { status?: DecisionStatus; json?: boolean }) => {
       const rows = await withDoor(door => listDecisions(door, { ...(o.status !== undefined && { status: o.status }) }))

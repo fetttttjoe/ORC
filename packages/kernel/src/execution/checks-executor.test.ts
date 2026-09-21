@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { z } from 'zod'
-import { CHECKS_EXECUTOR_REF, Door, EVENT_KIND, SIGNAL_OUTCOME, UNIFIED_EVENT_TYPE, type Checkpoint, type EventDraft, type ExecutorContext, type OperationCheckpoint, type UnifiedEvent } from '@orc/contracts'
+import { CHECKS_EXECUTOR_REF, Door, EVENT_KIND, SignalOutcome, UnifiedEventType, type Checkpoint, type EventDraft, type ExecutorContext, type OperationCheckpoint, type UnifiedEvent } from '@orc/contracts'
 import { stepFixture } from '@orc/contracts/fixtures'
 import { NO_CHECKS_SUMMARY, checksExecutor } from './checks-executor'
 import { COMMAND_CANCELLED } from './run-command'
@@ -22,7 +22,7 @@ const makeCheckpoint = (captured: EventDraft[]): Checkpoint => async (_name, fn,
   if (toEvents) captured.push(...toEvents(r))
   return r
 }
-const unusedOperation: OperationCheckpoint = async (_spec, fn) => fn()
+const unusedOperation: OperationCheckpoint = async (_spec, fn) => fn(1)
 
 function ctx(commands: string[], workspaceDir: string, captured: EventDraft[], instructions: string = JSON.stringify(commands)): ExecutorContext<unknown> {
   return {
@@ -51,11 +51,11 @@ const CheckOutput = z.object({ command: z.string(), pass: z.boolean(), verdict: 
 type CheckOutput = z.infer<typeof CheckOutput>
 
 const results = (events: UnifiedEvent[]): CheckOutput[] =>
-  events.flatMap(e => e.type === UNIFIED_EVENT_TYPE.tool_result ? [CheckOutput.parse(e.output)] : [])
+  events.flatMap(e => e.type === UnifiedEventType.tool_result ? [CheckOutput.parse(e.output)] : [])
 
 const signalOf = (events: UnifiedEvent[]) => {
-  const ev = events.find(e => e.type === UNIFIED_EVENT_TYPE.signal)
-  if (ev?.type !== UNIFIED_EVENT_TYPE.signal) throw new Error(`no signal in ${JSON.stringify(events.map(e => e.type))}`)
+  const ev = events.find(e => e.type === UnifiedEventType.signal)
+  if (ev?.type !== UnifiedEventType.signal) throw new Error(`no signal in ${JSON.stringify(events.map(e => e.type))}`)
   return ev.signal
 }
 
@@ -81,15 +81,15 @@ describe('checksExecutor', () => {
     expect(summary).toContain('FAIL sh bad.sh (exit 3,')
     expect(summary).toContain('BOOM_IN_THE_TAIL')
     expect(summary).not.toContain('all-good')
-    expect(signalOf(events).outcome).toBe(SIGNAL_OUTCOME.success)
+    expect(signalOf(events).outcome).toBe(SignalOutcome.success)
   }, 20_000)
 
   it('emits one tool_call/tool_result pair per command, in the log too', async () => {
     const dir = workspace()
     const captured: EventDraft[] = []
     const events = await drain(checksExecutor().startTurn(ctx(['true', 'true', 'true'], dir, captured)))
-    expect(events.filter(e => e.type === UNIFIED_EVENT_TYPE.tool_call)).toHaveLength(3)
-    expect(events.filter(e => e.type === UNIFIED_EVENT_TYPE.tool_result)).toHaveLength(3)
+    expect(events.filter(e => e.type === UnifiedEventType.tool_call)).toHaveLength(3)
+    expect(events.filter(e => e.type === UnifiedEventType.tool_result)).toHaveLength(3)
     expect(captured.filter(d => d.kind === EVENT_KIND.tool_call)).toHaveLength(3)
     expect(captured.filter(d => d.kind === EVENT_KIND.tool_result)).toHaveLength(3)
     expect(captured.filter(d => d.kind === EVENT_KIND.signal_received)).toHaveLength(1)
@@ -103,7 +103,7 @@ describe('checksExecutor', () => {
     const summary = signalOf(events).summary
     expect(summary).toContain('FAIL sh hang.sh (hung,')
     expect(summary).toContain('0.3s ceiling')
-    expect(signalOf(events).outcome).toBe(SIGNAL_OUTCOME.success)
+    expect(signalOf(events).outcome).toBe(SignalOutcome.success)
   }, 20_000)
 
   it('stops its commands when the run is cancelled, and still reports them', async () => {
@@ -118,7 +118,7 @@ describe('checksExecutor', () => {
   it.each(['bun run typecheck', '{"a":1}', '["ok", 3]'])('reports instructions that are not a command list as a FAIL and still signals success: %s', async (instructions) => {
     const events = await drain(checksExecutor().startTurn(ctx([], workspace(), [], instructions)))
     const signal = signalOf(events)
-    expect(signal.outcome).toBe(SIGNAL_OUTCOME.success)
+    expect(signal.outcome).toBe(SignalOutcome.success)
     expect(signal.summary).toStartWith(`FAIL ${instructions} (did not run: `)
     expect(results(events).map(r => r.pass)).toEqual([false])
   })
@@ -128,6 +128,6 @@ describe('checksExecutor', () => {
     const events = await drain(checksExecutor().startTurn(ctx([], workspace(), captured)))
     expect(results(events)).toEqual([])
     expect(signalOf(events).summary).toBe(NO_CHECKS_SUMMARY)
-    expect(signalOf(events).outcome).toBe(SIGNAL_OUTCOME.success)
+    expect(signalOf(events).outcome).toBe(SignalOutcome.success)
   })
 })

@@ -18,7 +18,7 @@ import type { WorkspaceView, WorkspaceViewProbe } from './provisional'
 // merge for a window nobody can reason about.
 
 // Only the kinds the fold's workspace cases actually read. Named *_EVENT_KINDS rather than
-// WORKSPACE_KINDS, which contracts already exports for the two workspace KINDS ('checkout' |
+// WORKSPACE_KIND, which contracts already exports for the two workspace KINDS ('checkout' |
 // 'worktree'): one word meaning two things in the same import graph is how a reader reaches for the
 // wrong set. Scoped like the vault projector's
 // `renderRoot` ("the root index must never scan the whole log"): `Kernel.state()` folds every event

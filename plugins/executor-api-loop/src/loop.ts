@@ -1,8 +1,8 @@
 import { generateText, type JSONValue, type LanguageModel, type ModelMessage, type ToolSet } from 'ai'
 import {
-  EVENT_KIND, FAILURE_CLASS, FS_WRITE_TOOL_NAMES, isRecord, MEMORY_TOOL_NAME, MemoryScope, MemoryWriteResult, OPERATION_KIND, SIGNAL_OUTCOME,
-  UNIFIED_EVENT_TYPE, errorMessage, terminalError, validateOutputPaths,
-  type AgentExecutor, type EventDraft, type ExecutorContext, type RecalledContext, type Signal,
+  EVENT_KIND, FailureClass, FS_WRITE_TOOL_NAMES, RATE_LIMIT_MESSAGE_CHARS, isRecord, MEMORY_TOOL_NAME, MemoryScope, MemoryWriteResult,
+  OperationKind, SignalOutcome, UnifiedEventType, errorMessage, terminalError, validateOutputPaths,
+  type AgentExecutor, type Checkpoint, type EventDraft, type ExecutorContext, type RecalledContext, type Signal,
   type SplitResult, type UnifiedEvent, type Usage,
 } from '@orc/contracts'
 import { AskHumanInput, JoinSplitsInput, SignalInput, TOOL_NAME, executeTool, releaseWriteClaims, toolSet } from './tools'
@@ -178,9 +178,29 @@ async function sleepUnlessCancelled(ms: number, sleep: Sleep, isCancelled: IsCan
   return !(await isCancelled())
 }
 
+// never rejects: a failed ledger write must not fail the model call it only observes
+type RecordRateLimitWait = (waits: number, waitMs: number, message: string) => Promise<void>
+
+function recordRateLimitWaitVia(
+  checkpoint: Checkpoint, base: { stepId: string; runToken: string }, iteration: number, attempt: number,
+): RecordRateLimitWait {
+  return async (waits, waitMs, message) => {
+    try {
+      // keyed by attempt: a retried attempt restarts at waits=0 with different provider data
+      await checkpoint(`rate-limit-wait:${iteration}:${attempt}:${waits}`, async () => undefined, (): EventDraft[] => [{
+        kind: EVENT_KIND.rate_limit_wait,
+        payload: { ...base, waitMs, waitsSoFar: waits, errorMessage: message },
+      }])
+    } catch (err) {
+      console.warn(`rate_limit_wait checkpoint failed for ${base.stepId}/${base.runToken} iteration ${iteration} attempt ${attempt} waits ${waits}: ${errorMessage(err)}`)
+    }
+  }
+}
+
 // Waiting INSIDE the operation is what keeps the conversation: a thrown 429 restarts the step.
 async function callModelWaitingOutRateLimits(
   model: LanguageModel, messages: ModelMessage[], tools: ToolSet, sleep: Sleep, isCancelled: IsCancelled,
+  recordWait: RecordRateLimitWait,
 ): Promise<TurnResult> {
   for (let waits = 0; ; waits++) {
     try {
@@ -189,7 +209,8 @@ async function callModelWaitingOutRateLimits(
       const waitMs = rateLimitWaitMs(err, waits)
       // terminal: a spent wait budget must not be spent again by every step retry
       if (waitMs === null) throw isRateLimited(err) ? terminalError(errorMessage(err)) : err
-      console.warn(`rate limited: waiting ${Math.round(waitMs / 1000)}s before re-issuing the model call — ${errorMessage(err)}`)
+      const message = errorMessage(err).slice(0, RATE_LIMIT_MESSAGE_CHARS)
+      await recordWait(waits, waitMs, message)
       if (!(await sleepUnlessCancelled(waitMs, sleep, isCancelled))) throw terminalError(CANCELLED_WHILE_RATE_LIMITED)
     }
   }
@@ -384,7 +405,7 @@ export function apiLoopExecutor(sleep: Sleep = timerSleep): AgentExecutor<Langua
           }
           const remaining = await ctx.checkpoint(`budget:${iteration}`, ctx.budgetRemainingUSD)
           if (remaining !== null && remaining <= 0) {
-            yield { type: UNIFIED_EVENT_TYPE.error, class: FAILURE_CLASS.budget_exceeded, message: `budget exhausted before iteration ${iteration}` }
+            yield { type: UnifiedEventType.error, class: FailureClass.budget_exceeded, message: `budget exhausted before iteration ${iteration}` }
             return
           }
 
@@ -402,11 +423,14 @@ export function apiLoopExecutor(sleep: Sleep = timerSleep): AgentExecutor<Langua
             turn = await ctx.operation(
               {
                 operationId: `${ctx.runToken}:model:${iteration}`,
-                kind: OPERATION_KIND.model,
+                kind: OperationKind.model,
                 name: ctx.step.modelRef,
                 before: { messages: messages.slice(persistedThrough) },
               },
-              () => callModelWaitingOutRateLimits(ctx.model, messages, finalIteration ? { [TOOL_NAME.signal]: signalTool } : tools, sleep, ctx.isCancelled ?? neverCancelled),
+              attempt => callModelWaitingOutRateLimits(
+                ctx.model, messages, finalIteration ? { [TOOL_NAME.signal]: signalTool } : tools, sleep, ctx.isCancelled ?? neverCancelled,
+                recordRateLimitWaitVia(ctx.checkpoint, base, iteration, attempt),
+              ),
               (r): EventDraft[] => [{
                 kind: EVENT_KIND.agent_call,
                 // persist only the DELTA since the previous agent_call — the full cumulative
@@ -420,12 +444,12 @@ export function apiLoopExecutor(sleep: Sleep = timerSleep): AgentExecutor<Langua
           } catch (err) {
             // transient errors retry inside the checkpoint (DBOS); reaching here means retries
             // are exhausted or the error is terminal → terminal provider failure.
-            yield { type: UNIFIED_EVENT_TYPE.error, class: FAILURE_CLASS.provider_error, message: errorMessage(err) }
+            yield { type: UnifiedEventType.error, class: FailureClass.provider_error, message: errorMessage(err) }
             return
           }
 
-          yield { type: UNIFIED_EVENT_TYPE.usage, usage: turn.usage }
-          if (turn.text) yield { type: UNIFIED_EVENT_TYPE.text, text: turn.text }
+          yield { type: UnifiedEventType.usage, usage: turn.usage }
+          if (turn.text) yield { type: UnifiedEventType.text, text: turn.text }
           messages.push(...turn.responseMessages)
 
           const signalCall = turn.toolCalls.find(c => c.toolName === TOOL_NAME.signal)
@@ -477,7 +501,7 @@ export function apiLoopExecutor(sleep: Sleep = timerSleep): AgentExecutor<Langua
                 result: await ctx.operation(
                   {
                     operationId: `${ctx.runToken}:tool:${iteration}:${call.toolCallId}`,
-                    kind: OPERATION_KIND.tool,
+                    kind: OperationKind.tool,
                     name: call.toolName,
                     before: { input: call.input },
                   },
@@ -490,8 +514,8 @@ export function apiLoopExecutor(sleep: Sleep = timerSleep): AgentExecutor<Langua
               })
 
             for (const { call, result } of executed) {
-              yield { type: UNIFIED_EVENT_TYPE.tool_call, toolCallId: call.toolCallId, toolName: call.toolName, input: call.input }
-              yield { type: UNIFIED_EVENT_TYPE.tool_result, toolCallId: call.toolCallId, toolName: call.toolName, output: result.output, isError: result.isError }
+              yield { type: UnifiedEventType.tool_call, toolCallId: call.toolCallId, toolName: call.toolName, input: call.input }
+              yield { type: UnifiedEventType.tool_result, toolCallId: call.toolCallId, toolName: call.toolName, output: result.output, isError: result.isError }
               // noteLint warnings (plugins/memory) are advisory and observed live to be ignored —
               // carry the first one into the next iteration's prompt instead of leaving it inert.
               if (call.toolName === MEMORY_TOOL_NAME.write && !result.isError) {
@@ -532,7 +556,7 @@ export function apiLoopExecutor(sleep: Sleep = timerSleep): AgentExecutor<Langua
             // reads as a concurrency error nobody caused.
             releaseWriteClaims(ctx.runToken)
             const resumed = yield {
-              type: UNIFIED_EVENT_TYPE.gate,
+              type: UnifiedEventType.gate,
               splitIds: parsedJoin.data.splitIds ?? [],
               toolCallId: joinCall.toolCallId,
             }
@@ -545,7 +569,7 @@ export function apiLoopExecutor(sleep: Sleep = timerSleep): AgentExecutor<Langua
                 { kind: EVENT_KIND.tool_result, payload: { ...base, iteration, toolCallId: joinCall.toolCallId, toolName: TOOL_NAME.join_splits, output: { splits: rs }, isError: false } },
               ],
             )
-            yield { type: UNIFIED_EVENT_TYPE.tool_result, toolCallId: joinCall.toolCallId, toolName: TOOL_NAME.join_splits, output: { splits: results }, isError: false }
+            yield { type: UnifiedEventType.tool_result, toolCallId: joinCall.toolCallId, toolName: TOOL_NAME.join_splits, output: { splits: results }, isError: false }
             messages.push({
               role: 'tool',
               content: [
@@ -580,9 +604,9 @@ export function apiLoopExecutor(sleep: Sleep = timerSleep): AgentExecutor<Langua
             // same rule as the join gate above: a turn waiting on a human is not writing, and this
             // one waits unbounded — holding a path across it fences siblings out indefinitely
             releaseWriteClaims(ctx.runToken)
-            const resumed = yield { type: UNIFIED_EVENT_TYPE.feedback, question: parsedAsk.data.question, topic, toolCallId: askCall.toolCallId }
+            const resumed = yield { type: UnifiedEventType.feedback, question: parsedAsk.data.question, topic, toolCallId: askCall.toolCallId }
             const answer = typeof resumed === 'string' ? resumed : ''
-            yield { type: UNIFIED_EVENT_TYPE.tool_result, toolCallId: askCall.toolCallId, toolName: TOOL_NAME.ask_human, output: { answer }, isError: false }
+            yield { type: UnifiedEventType.tool_result, toolCallId: askCall.toolCallId, toolName: TOOL_NAME.ask_human, output: { answer }, isError: false }
             // the reply flows back as the ask_human tool result; the next iteration's agent_call
             // persists it (part of messages.slice(persistedThrough)) — no separate checkpoint,
             // feedback_requested (port) + that agent_call reconstruct the full Q&A on replay.
@@ -607,7 +631,7 @@ export function apiLoopExecutor(sleep: Sleep = timerSleep): AgentExecutor<Langua
           }
 
           if (signalCall && parsedSignal?.success) {
-            const declared = parsedSignal.data.outcome === SIGNAL_OUTCOME.success ? parsedSignal.data.outputs : undefined
+            const declared = parsedSignal.data.outcome === SignalOutcome.success ? parsedSignal.data.outputs : undefined
             const outputError = declared ? invalidOutputs(ctx.workspaceDir, declared) : null
             if (outputError) {
               messages.push({
@@ -633,14 +657,14 @@ export function apiLoopExecutor(sleep: Sleep = timerSleep): AgentExecutor<Langua
               async () => signal,
               (): EventDraft[] => [{ kind: EVENT_KIND.signal_received, payload: { ...base, signal } }],
             )
-            yield { type: UNIFIED_EVENT_TYPE.signal, signal }
+            yield { type: UnifiedEventType.signal, signal }
             await ctx.memory?.capture(signal)
-            yield { type: UNIFIED_EVENT_TYPE.done }
+            yield { type: UnifiedEventType.done }
             return
           }
         }
 
-        yield { type: UNIFIED_EVENT_TYPE.error, class: FAILURE_CLASS.agent_error, message: `maxIterations (${ctx.step.maxIterations}) exhausted without signal` }
+        yield { type: UnifiedEventType.error, class: FailureClass.agent_error, message: `maxIterations (${ctx.step.maxIterations}) exhausted without signal` }
       } finally {
         releaseWriteClaims(ctx.runToken) // claims die with the turn — success, failure, or abort
       }

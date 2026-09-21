@@ -11,7 +11,7 @@
 // citation on every replay without touching git again.
 
 import type { EventDraft } from '@orc/contracts'
-import { EVENT_KIND } from '@orc/contracts'
+import { Confidence, EVENT_KIND } from '@orc/contracts'
 import type { GroundingVerdict } from './grounding-freshness'
 
 /**
@@ -131,7 +131,7 @@ export function mixedGroundingDraft(v: GroundingVerdict, scope: GroundingScope, 
           return `${s.id}@${revOf(s.revision)} re-scanned — ${s.why} — paths scoped for it: ${scoped.join(', ') || '(none resolved)'}`
         }),
       ],
-      confidence: 'medium',
+      confidence: Confidence.medium,
       notesWritten: 0,
     },
     idempotencyKey: `${runToken}:grounding:mixed:analysis_completed`,

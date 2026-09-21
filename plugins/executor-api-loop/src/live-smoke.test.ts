@@ -20,7 +20,7 @@ const passthrough: Checkpoint = async (_n, fn, toEvents) => {
 }
 
 const passthroughOperation: OperationCheckpoint = async (_spec, fn, toEvents) => {
-  const r = await fn()
+  const r = await fn(1)
   void toEvents?.(r)
   return r
 }

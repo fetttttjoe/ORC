@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, it } from 'bun:test'
-import { Door, EVENT_KIND, type OperationSpec } from '@orc/contracts'
+import { Door, EVENT_KIND, OperationKind, type OperationSpec } from '@orc/contracts'
 import { must } from '@orc/contracts/fixtures'
 import { openStorage, type Storage } from '../storage'
 import { createTestDb, TEST_PROJECT_ID } from '../test-helpers'
@@ -21,7 +21,7 @@ const CONTEXT = {
   taskId: 't1', stepId: 's1', runToken: 'step:t1:s1:a1',
   origin: { chatId: 'c1', door: Door.web },
 }
-const SPEC: OperationSpec = { operationId: 'step:t1:s1:a1:model:1', kind: 'model', name: 'fake/m', before: {} }
+const SPEC: OperationSpec = { operationId: 'step:t1:s1:a1:model:1', kind: OperationKind.model, name: 'fake/m', before: {} }
 
 describe('OperationJournal envelope', () => {
   // the journal appends on four paths; one that spelled its own envelope would drop the chat the

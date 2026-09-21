@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { Kernel, openStorage } from '@orc/kernel'
 import { createTestDb, seedTestWorkspace, TEST_PROJECT_ID, TEST_WORKSPACE_ID } from '@orc/kernel/test-helpers'
-import { draftFixture, stepFixture } from '@orc/contracts/fixtures'
+import { authorFixture, draftFixture, stepFixture } from '@orc/contracts/fixtures'
 import { createVaultProjector } from './index'
 import { Door, EVENT_KIND, NO_CHAT } from '@orc/contracts'
 
@@ -49,7 +49,7 @@ describe('createVaultProjector.renderAll', () => {
       kind: EVENT_KIND.memory_written,
       payload: {
         note: { id: 'note-x', title: 'X', scope: 'project', categories: [], tags: [], links: [], paths: [], summary: '', body: '' },
-        author: { source: 'cli', workspaceId: TEST_WORKSPACE_ID, origin: CLI },
+        author: authorFixture(),
       },
     })
 
@@ -105,7 +105,7 @@ describe('createVaultProjector.renderAll', () => {
       kind: EVENT_KIND.memory_written,
       payload: {
         note: { id: 'note-y', title: 'Y', scope: 'project', categories: [], tags: [], links: [], paths: [], summary: '', body: '' },
-        author: { source: 'cli', workspaceId: TEST_WORKSPACE_ID, origin: CLI },
+        author: authorFixture(),
       },
     })
 

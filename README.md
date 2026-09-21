@@ -118,6 +118,7 @@ orc brief [--json]              # what a new session should know: this workspace
                                 # approval / running / blocked, decisions in force, the drift advisory
 orc replay <task-id> --at <seq> # read-only audit replay at any event sequence
 orc log <task-id> --json        # full redacted event records
+orc watch [--since <seq>] [--kind <kind...>]  # follow the whole project's event log live, no server needed
 orc skills                      # indexed SKILL.md skills (vault/skills/<name>/SKILL.md)
 orc mcp trust <id>              # local consent, bound to the server's declaration fingerprint
 orc mcp serve [--autonomy full] # serve THIS project to external agents over stdio (door #2)
@@ -563,7 +564,23 @@ by the agent.
   (focus mode dims everything else). Mutations are available only when launched inside a
   project (CSRF-token guarded, 127.0.0.1 only); trust/init stay CLI-only. Logic lives in
   `@orc/ui-core`; the web server and browser renderer are adapters — a TUI can reuse the core
-  directly.
+  directly. Before serving, it checks `web/dist` against a content fingerprint of the web app's
+  source closure (`web/src`, `@orc/ui-core/src`, `@orc/contracts/src`, test files excluded since
+  they never reach the bundle — not file mtimes, which a branch switch or `git checkout` can leave
+  lying): missing or stale in a dev checkout rebuilds automatically (one line saying so, a few
+  seconds); a checkout with no source tree to rebuild from serves as-is; a rebuild that fails or
+  can't be attempted refuses to start and names the build command to run by hand. The web app's own
+  `build` script stamps `dist` with that same fingerprint once `vite build` succeeds, so a plain
+  `bun run build` or `check:web` leaves dist reading fresh — `orc graph` never rebuilds a dist that
+  a prior build already produced.
+- `orc watch [--since <seq>] [--kind <kind...>]` follows the project's whole event log from the
+  shell — one line per event (`seq`, `kind`, summary) until interrupted. It subscribes through the
+  kernel's own LISTEN/NOTIFY path (the same one `orc graph`'s `/api/stream` rides), so it needs no
+  HTTP server running. `--since` replays events after that sequence before continuing live (default:
+  a live tail from now, nothing replayed); `--kind` filters to the named kinds, repeatable. Every
+  line's summary is the same `summarizeEvent` (`@orc/ui-core`) row the web log renders, so a line
+  here and a row there read identically: `.summary.kind` is the event kind and `.summary.line` is
+  the one-line summary — `/api/stream`'s SSE frames carry that same row under `.summary`.
 - Plugins: `.orc/config.json` *declares* (`mcpServers`, `extensions`, `skillsDir`);
   `.orc/trust.json` *grants* — created only by `orc mcp trust` / `orc ext trust`,
   written atomically with mode 0600, never commit it. Grants bind to a

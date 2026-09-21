@@ -4,7 +4,7 @@
 // get killed; second run: DBOS recovery + idempotent startRun complete the run fast.
 import { existsSync, writeFileSync } from 'node:fs'
 import {
-  EVENT_KIND, SIGNAL_OUTCOME,
+  EVENT_KIND, OperationKind, SignalOutcome,
   type AgentExecutor, type EventDraft, type ExecutorContext, type SplitResult, type UnifiedEvent,
 } from '@orc/contracts'
 import { openStorage } from '../storage'
@@ -21,7 +21,7 @@ const stallOnce: AgentExecutor<unknown> = {
     // kill lands between the journal's before-record and its completion — the audit gap the
     // journal exists to make visible.
     await ctx.operation(
-      { operationId: `${ctx.runToken}:model:1`, kind: 'model', name: 'fake/m', before: { iteration: 1 } },
+      { operationId: `${ctx.runToken}:model:1`, kind: OperationKind.model, name: 'fake/m', before: { iteration: 1 } },
       async () => {
         if (!existsSync(marker)) {
           writeFileSync(marker, '')
@@ -35,7 +35,7 @@ const stallOnce: AgentExecutor<unknown> = {
         usage: { inputTokens: 1, outputTokens: 1, costUSD: 0, estimated: false },
       }],
     )
-    const signal = { stepId: ctx.step.id, runToken: ctx.runToken, outcome: SIGNAL_OUTCOME.success, summary: `${ctx.step.id} ok` }
+    const signal = { stepId: ctx.step.id, runToken: ctx.runToken, outcome: SignalOutcome.success, summary: `${ctx.step.id} ok` }
     await ctx.checkpoint('signal:1', async () => signal,
       (): EventDraft[] => [{ kind: EVENT_KIND.signal_received, payload: { stepId: ctx.step.id, runToken: ctx.runToken, signal } }])
     yield { type: 'signal', signal }

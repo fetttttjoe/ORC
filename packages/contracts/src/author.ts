@@ -18,10 +18,15 @@ import { Door, Origin } from './origin'
 // terminal" — `orc note` and `orc memory add` keep it, because a script can drive them. The MCP door
 // writes 'mcp'. Forward-only: createdBy is sticky across rewrites (deriveNoteProvenance), so notes
 // written before this source existed cannot be re-attributed — see docs/IDEAS.md entry 12.
-export const AUTHOR_SOURCES = ['agent', 'cli', 'mcp', 'human'] as const
-export const AuthorSource = z.enum(AUTHOR_SOURCES)
-export type AuthorSource = z.infer<typeof AuthorSource>
-export const AUTHOR_SOURCE = AuthorSource.enum
+export enum AuthorSource {
+  agent = 'agent',
+  cli = 'cli',
+  mcp = 'mcp',
+  human = 'human',
+}
+
+// every caller already matches on this accessor, never a raw literal — kept as a plain alias
+export const AUTHOR_SOURCE = AuthorSource
 
 // What each door stamps as the author today. `satisfies Record<Door, AuthorSource>` makes a new
 // door a compile error instead of an undefined that sticks forever in createdBy.
@@ -39,7 +44,7 @@ export const authorSourceOf = (door: Door): AuthorSource => DOOR_AUTHOR_SOURCE[d
 // than with the memory schemas because `analysis` and `events` both read it at module top level:
 // from inside the memory/events cycle that resolves to undefined depending on which module loaded first.
 export const MemoryAuthor = z.object({
-  source: AuthorSource,
+  source: z.enum(AuthorSource),
   // The workspace the write came FROM, captured at the moment of the write — from the writing
   // task for an agent step, from the cwd's adopted workspace for a CLI/MCP/reactor door. ONE shape
   // for every author: writes, verifications, accesses, removals and archive flags alike, so no

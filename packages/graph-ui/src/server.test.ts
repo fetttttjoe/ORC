@@ -1,6 +1,6 @@
 import { afterAll, describe, expect, it } from 'bun:test'
 import { z } from 'zod'
-import { ChatKind, Door, EVENT_KIND, NO_CHAT, ScopeType } from '@orc/contracts'
+import { AUTHOR_SOURCE, ChatKind, Door, EVENT_KIND, MessageRole, NO_CHAT, ScopeType, type EventInput } from '@orc/contracts'
 import { must } from '@orc/contracts/fixtures'
 import { Kernel, openStorage } from '@orc/kernel'
 import { createTestDb, seedTestWorkspace, waitFor, TEST_PROJECT_ID, TEST_WORKSPACE_ID } from '@orc/kernel/test-helpers'
@@ -38,10 +38,10 @@ afterAll(async () => {
 const CLI = NO_CHAT(Door.cli)
 const AGENT = NO_CHAT(Door.supervisor)
 
-const noteEvent = (id: string) => ({
+const noteEvent = (id: string): EventInput => ({
   ...CLI,
   taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_written,
-  payload: { note: { id, title: id }, author: { source: 'cli' as const, workspaceId: TEST_WORKSPACE_ID, origin: CLI } },
+  payload: { note: { id, title: id }, author: { source: AUTHOR_SOURCE.cli, workspaceId: TEST_WORKSPACE_ID, origin: CLI } },
 })
 
 // Asserted subsets of the SSE stream contract (ui-core StreamEnvelope) — runtime-parsed
@@ -206,7 +206,7 @@ describe('graph-ui web adapter', () => {
     const accessed = await fetch(`${base}/api/stream?project=${TEST_PROJECT_ID}&fromSeq=${appended.seq}`)
     await storage.events.append({
       ...CLI, taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_accessed,
-      payload: { id: 'live-note', scope: 'project', mode: 'read', author: { source: 'cli', workspaceId: TEST_WORKSPACE_ID, origin: CLI } },
+      payload: { id: 'live-note', scope: 'project', mode: 'read', author: { source: AUTHOR_SOURCE.cli, workspaceId: TEST_WORKSPACE_ID, origin: CLI } },
     })
     const heated = await readSse(accessed, m => m.data.includes('memory_accessed'))
     const heatedEnv = HeatEnvelope.parse(JSON.parse(must(heated, 'heated envelope').data))
@@ -231,7 +231,7 @@ describe('graph-ui web adapter', () => {
     const { storage, taskId, ui, base } = await setup()
     const g = GraphView.parse(await (await fetch(`${base}/api/graph?project=${TEST_PROJECT_ID}`)).json())
     const stream = await fetch(`${base}/api/stream?project=${TEST_PROJECT_ID}&fromSeq=${g.seq}`)
-    const toolResult = (toolCallId: string, isError: boolean, output: unknown) => ({
+    const toolResult = (toolCallId: string, isError: boolean, output: unknown): EventInput => ({
       ...AGENT, taskId, stepId: 'plan', runToken: 'r1', kind: EVENT_KIND.tool_result,
       payload: { stepId: 'plan', runToken: 'r1', iteration: 1, toolCallId, toolName: 'finalize_plan', output, isError },
     })
@@ -340,7 +340,7 @@ describe('graph-ui web adapter', () => {
     })
     const answered = await storage.events.append({
       ...CLI, taskId, stepId: 's1', runToken: 'r1', kind: EVENT_KIND.feedback_provided,
-      payload: { topic: 'plan-gate', text: 'approve', author: { source: 'cli', workspaceId: TEST_WORKSPACE_ID, origin: CLI } },
+      payload: { topic: 'plan-gate', text: 'approve', author: { source: AUTHOR_SOURCE.cli, workspaceId: TEST_WORKSPACE_ID, origin: CLI } },
     })
 
     const frames: Array<{ id: number; data: string }> = []
@@ -641,7 +641,7 @@ describe('graph-ui web adapter', () => {
 
     const res = await fetch(`${base}/api/copilot`, {
       method: 'POST', headers: { 'x-orc-token': session.token },
-      body: JSON.stringify({ projectId: TEST_PROJECT_ID, chatId: null, taskId: null, workspaceId: null, messages: [{ role: 'user', content: 'hi' }] }),
+      body: JSON.stringify({ projectId: TEST_PROJECT_ID, chatId: null, taskId: null, workspaceId: null, messages: [{ role: MessageRole.user, content: 'hi' }] }),
     })
     const frames = framesOf(await res.text())
     expect(frames.flatMap(f => f.type === CopilotFrameType.text ? [f.text] : []).join('')).toBe('hello from copilot')
@@ -655,7 +655,7 @@ describe('graph-ui web adapter', () => {
     expect(roSession.copilot).toBe(false)
     expect((await fetch(`http://127.0.0.1:${ro.port}/api/copilot`, {
       method: 'POST', headers: { 'x-orc-token': roSession.token },
-      body: JSON.stringify({ projectId: TEST_PROJECT_ID, chatId: null, taskId: null, workspaceId: null, messages: [{ role: 'user', content: 'hi' }] }),
+      body: JSON.stringify({ projectId: TEST_PROJECT_ID, chatId: null, taskId: null, workspaceId: null, messages: [{ role: MessageRole.user, content: 'hi' }] }),
     })).status).toBe(501)
     await ro.stop()
   })
@@ -720,7 +720,7 @@ describe('graph-ui web adapter', () => {
     const ask = async (chatId: string | null) => {
       const res = await fetch(`${base}/api/copilot`, {
         method: 'POST', headers: { 'x-orc-token': session.token },
-        body: JSON.stringify({ projectId: TEST_PROJECT_ID, chatId, taskId: task.id, workspaceId: null, messages: [{ role: 'user', content: 'make one' }] }),
+        body: JSON.stringify({ projectId: TEST_PROJECT_ID, chatId, taskId: task.id, workspaceId: null, messages: [{ role: MessageRole.user, content: 'make one' }] }),
       })
       return must(chatIdOf(await res.text()), 'chat frame')
     }
@@ -796,7 +796,7 @@ describe('graph-ui web adapter', () => {
     const ask = async (projectId: string): Promise<string> => {
       const res = await fetch(`${base}/api/copilot`, {
         method: 'POST', headers: { 'x-orc-token': session.token },
-        body: JSON.stringify({ projectId, chatId: null, taskId: null, workspaceId: null, messages: [{ role: 'user', content: 'hi' }] }),
+        body: JSON.stringify({ projectId, chatId: null, taskId: null, workspaceId: null, messages: [{ role: MessageRole.user, content: 'hi' }] }),
       })
       return await res.text()
     }
@@ -878,7 +878,7 @@ describe('graph-ui web adapter', () => {
       const abort = new AbortController()
       const res = await fetch(`${base}/api/copilot`, {
         method: 'POST', headers: { 'x-orc-token': session.token },
-        body: JSON.stringify({ projectId: TEST_PROJECT_ID, chatId: null, taskId: null, workspaceId: null, messages: [{ role: 'user', content: 'hi' }] }),
+        body: JSON.stringify({ projectId: TEST_PROJECT_ID, chatId: null, taskId: null, workspaceId: null, messages: [{ role: MessageRole.user, content: 'hi' }] }),
         signal: abort.signal,
       })
       await must(res.body, 'stream body').getReader().read()

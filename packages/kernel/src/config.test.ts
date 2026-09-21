@@ -2,7 +2,7 @@ import { describe, expect, it } from 'bun:test'
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import { GROUNDED_APPROVAL_DOOR } from '@orc/contracts'
+import { ApprovalMode, AutoHealMode, GroundedApprovalDoor } from '@orc/contracts'
 import { deriveSystemUrl, IDENTITY_FILE, initializeProject, loadConfig, projectDatabaseName, requireProject, SETTINGS_FILE, type OrcConfig } from './config'
 import { sh, tmpGitRepo } from './test-helpers'
 
@@ -68,7 +68,7 @@ describe('loadConfig', () => {
     expect(c.workspaceSetup).toEqual([]) // no setup → a new worktree is the tracked tree and nothing else
     // draft-sweep by default is deliberate: the reactor's free half runs silently and its LLM
     // half only ever appears as a DRAFTED task — the default spends nothing on its own
-    expect(c.autoHeal).toBe('draft-sweep')
+    expect(c.autoHeal).toBe(AutoHealMode.draftSweep)
   })
   it('rejects malformed ORC_CONCURRENCY loudly — orc env is zod-validated', () => {
     withEnv({ ORC_CONCURRENCY: 'abc' }, () => {
@@ -211,19 +211,19 @@ describe('loadConfig', () => {
   it('maxDepth defaults to 3 and approvalPolicy defaults to manual/empty', () => {
     const c = loadConfig(mkdtempSync(path.join(tmpdir(), 'orc-')))
     expect(c.maxDepth).toBe(3)
-    expect(c.approvalPolicy).toEqual({ default: 'manual', rules: [] })
+    expect(c.approvalPolicy).toEqual({ default: ApprovalMode.manual, rules: [] })
   })
   // The default IS the invariant: only the cli door (which the web UI's reply also records as)
   // satisfies the plan gate unless an operator edits this file. A project that never touches
   // config must behave exactly as it did before the knob existed.
   it('groundedApprovalDoors defaults to [cli] and rejects a door the log never stamps', () => {
     const dir = mkdtempSync(path.join(tmpdir(), 'orc-'))
-    expect(loadConfig(dir).groundedApprovalDoors).toEqual([GROUNDED_APPROVAL_DOOR.cli])
+    expect(loadConfig(dir).groundedApprovalDoors).toEqual([GroundedApprovalDoor.cli])
 
     const widened = mkdtempSync(path.join(tmpdir(), 'orc-'))
     mkdirSync(path.join(widened, '.orc'), { recursive: true })
     writeFileSync(path.join(widened, '.orc', SETTINGS_FILE), JSON.stringify({ groundedApprovalDoors: ['cli', 'mcp'] }))
-    expect(loadConfig(widened).groundedApprovalDoors).toEqual([GROUNDED_APPROVAL_DOOR.cli, GROUNDED_APPROVAL_DOOR.mcp])
+    expect(loadConfig(widened).groundedApprovalDoors).toEqual([GroundedApprovalDoor.cli, GroundedApprovalDoor.mcp])
 
     const bogus = mkdtempSync(path.join(tmpdir(), 'orc-'))
     mkdirSync(path.join(bogus, '.orc'), { recursive: true })

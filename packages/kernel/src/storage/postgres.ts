@@ -1,4 +1,5 @@
 import pg from 'pg'
+import { z } from 'zod'
 import { sql } from 'drizzle-orm'
 import { drizzle, type NodePgDatabase } from 'drizzle-orm/node-postgres'
 import { errorMessage } from '@orc/contracts'
@@ -20,11 +21,12 @@ export const NOTIFY_CHANNEL = 'orc_events'
 // CI: one test file dropped its database and the orphaned loop then logged into every LATER file's
 // output, which is the same "poisons every later test file" shape unconditional teardown exists to
 // prevent — except here the noise also buries the failures a reader is looking for.
-const TERMINAL_PG_CODES = new Set(['3D000', '28P01', '28000'])
-export const isGonePermanently = (err: unknown): boolean =>
-  typeof err === 'object' && err !== null && 'code' in err
-  && typeof (err as { code: unknown }).code === 'string'
-  && TERMINAL_PG_CODES.has((err as { code: string }).code)
+export const TERMINAL_PG_CODES = new Set(['3D000', '28P01', '28000'])
+const pgErrorCode = z.object({ code: z.string() })
+export const isGonePermanently = (err: unknown): boolean => {
+  const parsed = pgErrorCode.safeParse(err)
+  return parsed.success && TERMINAL_PG_CODES.has(parsed.data.code)
+}
 
 // The one Postgres owner: pool, project binding, redaction, write serialization.
 export class PostgresStore {

@@ -59,7 +59,8 @@ describe('linkRefusal — the message the operator sees', () => {
 
 describe('linkSteps / unlinkSteps', () => {
   it('adds the dependency to the WAITING step, not the one waited on', () => {
-    const next = linkSteps([{ id: 'x', dependsOn: [] }, { id: 'y', dependsOn: [] }], 'x', 'y')
+    const steps: EditableStep[] = [{ id: 'x', dependsOn: [] }, { id: 'y', dependsOn: [] }]
+    const next = linkSteps(steps, 'x', 'y')
     expect(next.find(s => s.id === 'y')?.dependsOn).toEqual(['x'])
     expect(next.find(s => s.id === 'x')?.dependsOn).toEqual([])
   })

@@ -3,7 +3,7 @@ import { MEMORY_ID_RE } from './ids'
 import { MEMORY_LIMITS } from './limits'
 import type { PlanStep } from './plan'
 import { TASK_STATUS, type TaskStatus } from './task'
-import type { EventKind } from './events'
+import type { EventDraft } from './events'
 import type { OperationSpec } from './operations'
 import type { LoadedSkill, ResolvedTool } from './plugins'
 import type { ClaimHit, NoteSummary } from './memory'
@@ -92,9 +92,11 @@ export function costUSDFor(
 // the RUNTIME grants: continuation rounds are auto-granted while budget and the round cap allow,
 // then escalate to the human gate (feedback_requested — the ask_human machinery). An agent asked
 // "do you want more budget" always says yes, which is why there is no request_iterations tool.
-export const SignalOutcome = z.enum(['success', 'failure', 'partial'])
-export type SignalOutcome = z.infer<typeof SignalOutcome>
-export const SIGNAL_OUTCOME = SignalOutcome.enum
+export enum SignalOutcome {
+  success = 'success',
+  failure = 'failure',
+  partial = 'partial',
+}
 
 // Auto-granted continuation rounds per step attempt before the human gate takes over. The USD
 // budget stays the true ceiling (checked per grant); this cap only bounds how long a step can
@@ -121,7 +123,7 @@ export type KnowledgeReport = z.infer<typeof KnowledgeReport>
 export const Signal = z.object({
   stepId: z.string().min(1),
   runToken: z.string().min(1),
-  outcome: SignalOutcome,
+  outcome: z.enum(SignalOutcome),
   summary: z.string().min(1),
   // workspace-relative paths this step declares as produced outputs — verified by the runtime
   outputs: z.array(z.string().min(1)).optional(),
@@ -142,19 +144,26 @@ export type Signal = z.infer<typeof Signal>
  * reproduced the identical verdict, forever. Measured: three consecutive audit passes, same three
  * defects, same failure. A verdict is answered by changing the PLAN, never by repeating the step.
  */
-export const FailureClass = z.enum(['provider_error', 'agent_error', 'validation_error', 'budget_exceeded', 'human_abort', 'rejected'])
-export type FailureClass = z.infer<typeof FailureClass>
-export const FAILURE_CLASS = FailureClass.enum
+export enum FailureClass {
+  provider_error = 'provider_error',
+  agent_error = 'agent_error',
+  validation_error = 'validation_error',
+  budget_exceeded = 'budget_exceeded',
+  human_abort = 'human_abort',
+  rejected = 'rejected',
+}
 
 /** Classes a rerun could plausibly clear. `rejected` is absent by definition — see above. */
 export const RETRYABLE_FAILURE: ReadonlySet<FailureClass> = new Set([
-  FAILURE_CLASS.provider_error, FAILURE_CLASS.agent_error, FAILURE_CLASS.validation_error,
-  FAILURE_CLASS.budget_exceeded, FAILURE_CLASS.human_abort,
+  FailureClass.provider_error, FailureClass.agent_error, FailureClass.validation_error,
+  FailureClass.budget_exceeded, FailureClass.human_abort,
 ])
 
-export const RunOutcome = z.enum(['done', 'blocked', 'cancelled'])
-export type RunOutcome = z.infer<typeof RunOutcome>
-export const RUN_OUTCOME = RunOutcome.enum
+export enum RunOutcome {
+  done = 'done',
+  blocked = 'blocked',
+  cancelled = 'cancelled',
+}
 
 // What a finished run looked like, read off the task it drove. Shared because two callers derive
 // it — the router composing a split result, and the CLI watch that no longer holds a run handle to
@@ -162,9 +171,9 @@ export const RUN_OUTCOME = RunOutcome.enum
 // non-terminal status surface as blocked: RunOutcome has no 'failed', and to a caller both mean the
 // same thing, the work stopped short of done.
 export function runOutcomeFor(status: TaskStatus | undefined): RunOutcome {
-  if (status === TASK_STATUS.done) return RUN_OUTCOME.done
-  if (status === TASK_STATUS.cancelled) return RUN_OUTCOME.cancelled
-  return RUN_OUTCOME.blocked
+  if (status === TASK_STATUS.done) return RunOutcome.done
+  if (status === TASK_STATUS.cancelled) return RunOutcome.cancelled
+  return RunOutcome.blocked
 }
 
 // The thin join payload (spec D5): what a parent gets back from a resolved split.
@@ -173,19 +182,29 @@ export function runOutcomeFor(status: TaskStatus | undefined): RunOutcome {
 export const SplitResult = z.object({
   splitId: z.string().min(1),
   childTaskId: z.string().min(1),
-  outcome: RunOutcome, // done | blocked | cancelled — NOT SignalOutcome (spec D5)
+  outcome: z.enum(RunOutcome), // done | blocked | cancelled — NOT SignalOutcome (spec D5)
   summary: z.string(),
   notes: z.array(z.object({ id: z.string(), scope: z.string() })),
 })
 export type SplitResult = z.infer<typeof SplitResult>
 
-export const StepRunStatus = z.enum(['running', 'completed', 'failed'])
-export type StepRunStatus = z.infer<typeof StepRunStatus>
-export const STEP_RUN_STATUS = StepRunStatus.enum
+export enum StepRunStatus {
+  running = 'running',
+  completed = 'completed',
+  failed = 'failed',
+}
 
-export const UnifiedEventType = z.enum(['text', 'tool_call', 'tool_result', 'usage', 'signal', 'error', 'done', 'gate', 'feedback'])
-export type UnifiedEventType = z.infer<typeof UnifiedEventType>
-export const UNIFIED_EVENT_TYPE = UnifiedEventType.enum
+export enum UnifiedEventType {
+  text = 'text',
+  tool_call = 'tool_call',
+  tool_result = 'tool_result',
+  usage = 'usage',
+  signal = 'signal',
+  error = 'error',
+  done = 'done',
+  gate = 'gate',
+  feedback = 'feedback',
+}
 
 export const UnifiedEvent = z.discriminatedUnion('type', [
   z.object({ type: z.literal('text'), text: z.string() }),
@@ -193,7 +212,7 @@ export const UnifiedEvent = z.discriminatedUnion('type', [
   z.object({ type: z.literal('tool_result'), toolCallId: z.string(), toolName: z.string(), output: z.unknown(), isError: z.boolean() }),
   z.object({ type: z.literal('usage'), usage: Usage }),
   z.object({ type: z.literal('signal'), signal: Signal }),
-  z.object({ type: z.literal('error'), class: FailureClass, message: z.string() }),
+  z.object({ type: z.literal('error'), class: z.enum(FailureClass), message: z.string() }),
   z.object({ type: z.literal('done') }),
   z.object({ type: z.literal('gate'), splitIds: z.array(z.string()), toolCallId: z.string() }),
   z.object({ type: z.literal('feedback'), question: z.string(), topic: z.string(), toolCallId: z.string() }),
@@ -261,10 +280,6 @@ export function resolveModel<LM>(
   return { provider, modelId, model: provider.languageModel(modelId) }
 }
 
-// idempotencyKey: checkpoints derive a positional key when absent; drafts with a natural
-// stable identity (e.g. artifact receipts keyed by path) set their own
-export type EventDraft = { kind: EventKind; payload: Record<string, unknown>; usage?: Usage | null; idempotencyKey?: string }
-
 // Retry protocol between checkpoint implementations (the port) and checkpoint callers
 // (executors): a fn that throws terminalError() is NOT re-run; any other throw is treated
 // as transient and may be retried with backoff.
@@ -288,17 +303,18 @@ export function classifiedError(cls: FailureClass, message: string): Error {
 }
 export function failureClassOf(err: unknown): FailureClass | null {
   if (typeof err !== 'object' || err === null || !('failureClass' in err)) return null
-  const parsed = FailureClass.safeParse(err.failureClass)
+  const parsed = z.enum(FailureClass).safeParse(err.failureClass)
   return parsed.success ? parsed.data : null
 }
 
 export type Checkpoint = <T>(name: string, fn: () => Promise<T>, toEvents?: (result: T) => EventDraft[]) => Promise<T>
 
 // the enforced before/after wrapper for external model/tool effects: the journal records
-// the spec before fn runs and its result (or failure) after — see OperationSpec
+// the spec before fn runs and its result (or failure) after — see OperationSpec.
+// attempt: the journal's 1-based count for this operationId — a checkpoint nested in fn keys by it
 export type OperationCheckpoint = <T>(
   spec: OperationSpec,
-  fn: () => Promise<T>,
+  fn: (attempt: number) => Promise<T>,
   toEvents?: (result: T) => EventDraft[],
 ) => Promise<T>
 

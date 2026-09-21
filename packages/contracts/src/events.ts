@@ -48,28 +48,41 @@ export type CopilotExchangePayload = z.infer<typeof CopilotExchangePayload>
 
 export { EventKind, EVENT_KIND, type EventRecord } from './event-kinds'
 
+export const RATE_LIMIT_MESSAGE_CHARS = 300
+
+export const RateLimitWaitPayload = z.object({
+  stepId: z.string().min(1),
+  runToken: z.string().min(1),
+  waitMs: z.number().int().positive(),
+  waitsSoFar: z.number().int().nonnegative(),
+  errorMessage: z.string().max(RATE_LIMIT_MESSAGE_CHARS),
+})
+export type RateLimitWaitPayload = z.infer<typeof RateLimitWaitPayload>
+
 // A supervisor reaction that threw. The reactions are the runtime's whole job — turn a recorded ask
 // into a workflow, cancel what a client stamped cancelled, carry an answer into a parked step — and
 // a throw used to leave nothing but a console.warn on the supervisor's stdout: the client had
 // already been told its ask was recorded, `orc status` showed a task that simply never moved, and
 // the only evidence sat in a log nobody reads. Recorded instead, so "nobody could start this" is
 // DATA — visible in status, the graph, and a bench row — rather than a silence that reads as a hang.
-export const REACTION = {
-  runRequested: 'run_requested',
-  cancelled: 'cancelled',
-  childApproved: 'child_approved',
-  feedback: 'feedback',
-  splitResolve: 'split_resolve',
+export enum Reaction {
+  runRequested = 'run_requested',
+  cancelled = 'cancelled',
+  childApproved = 'child_approved',
+  feedback = 'feedback',
+  splitResolve = 'split_resolve',
   // the auto-heal reactor: a recorded out-of-task commit triggers the restamp/heal pass the
   // operator otherwise runs by hand (knowledge provenance plan T2)
-  commitRecorded: 'commit_recorded',
-} as const
-export type Reaction = (typeof REACTION)[keyof typeof REACTION]
+  commitRecorded = 'commit_recorded',
+}
+
+// every caller already matches on this accessor, never a raw literal — kept as a plain alias
+export const REACTION = Reaction
 
 export const ReactionFailedPayload = z.object({
-  // derives from the map — a sixth reaction added to REACTION must not first surface as a
+  // derives from the enum — a seventh reaction added to Reaction must not first surface as a
   // parse failure on the failure-RECORDING path when that reaction first fails
-  reaction: z.enum(REACTION),
+  reaction: z.enum(Reaction),
   taskId: z.string().min(1).nullable(),
   message: z.string(),
   // the seq of the event whose reaction failed, so the read side can point at the exact cause.
@@ -104,6 +117,13 @@ export const RunRequestedPayload = z.object({
 })
 export type RunRequestedPayload = z.infer<typeof RunRequestedPayload>
 
+// Who approved the plan — distinct from AuthorSource (a write's door), which only coincides on 'human'/'mcp' by accident of spelling.
+export enum ApprovedBy {
+  human = 'human',
+  policy = 'policy',
+  mcp = 'mcp',
+}
+
 export const PAYLOAD_SCHEMAS = {
   task_created: z.object({ task: TaskNode }),
   plan_proposed: z.object({ plan: Plan }),
@@ -112,10 +132,10 @@ export const PAYLOAD_SCHEMAS = {
     taskId: z.string().min(1),
     version: z.number().int().positive(),
     approvedAt: z.string(),
-    approvedBy: z.enum(['human', 'policy', 'mcp']), // mcp = an external agent under --autonomy full (P7)
+    approvedBy: z.enum(ApprovedBy),
     ruleIndex: z.number().int().nonnegative().optional(), // which ApprovalPolicy rule matched
   }),
-  task_status_changed: z.object({ taskId: z.string().min(1), from: TaskStatus, to: TaskStatus }),
+  task_status_changed: z.object({ taskId: z.string().min(1), from: z.enum(TaskStatus), to: z.enum(TaskStatus) }),
   run_requested: RunRequestedPayload,
   run_started: z.object({
     taskId: z.string().min(1),
@@ -135,6 +155,7 @@ export const PAYLOAD_SCHEMAS = {
     name: z.string().min(1),
     hash: z.string().min(1),
   }),
+  rate_limit_wait: RateLimitWaitPayload,
   agent_call: z.object({
     stepId: z.string().min(1),
     runToken: z.string().min(1),
@@ -172,7 +193,7 @@ export const PAYLOAD_SCHEMAS = {
   step_failed: z.object({
     stepId: z.string().min(1),
     runToken: z.string().min(1),
-    class: FailureClass,
+    class: z.enum(FailureClass),
     message: z.string(),
   }),
   split_proposed: z.object({
@@ -208,18 +229,32 @@ export const PAYLOAD_SCHEMAS = {
   chat_opened: ChatOpenedPayload,
 } satisfies Record<EventKind, z.ZodType>
 
+export type EventPayload<K extends EventKind> = z.input<(typeof PAYLOAD_SCHEMAS)[K]>
+
+type EventBody<K extends EventKind> = { kind: K; payload: EventPayload<K> }
+
+export type EventDraft = {
+  [K in EventKind]: EventBody<K> & { usage?: Usage | null; idempotencyKey?: string }
+}[EventKind]
+
 // Built on Origin so chatId and door are spelled ONCE: a second spelling could widen or default
 // one of them here and let a writer that named neither append an anonymous event.
-export const EventInput = Origin.extend({
+const EventStamp = Origin.extend({
   taskId: z.string().min(1).nullable(),
   stepId: z.string().min(1).nullable(),
   runToken: z.string().min(1).nullable(),
-  kind: EventKind,
-  payload: z.record(z.string(), z.unknown()),
   usage: Usage.nullable().optional(),
   // deterministic writers supply a key; the log's project/key uniqueness absorbs retries
   idempotencyKey: z.string().min(1).nullable().default(null),
 })
-export type EventInput = z.input<typeof EventInput>
 
+// payload stays opaque here: it is validated only after redaction, so a zod error never quotes a secret
+export const EventEnvelope = EventStamp.extend({
+  kind: z.enum(EventKind),
+  payload: z.record(z.string(), z.unknown()),
+})
+
+export type EventInput = {
+  [K in EventKind]: z.input<typeof EventStamp> & EventBody<K>
+}[EventKind]
 

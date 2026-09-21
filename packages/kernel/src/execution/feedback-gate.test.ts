@@ -1,7 +1,8 @@
 import { afterAll, beforeAll, describe, expect, it } from 'bun:test'
 import {
-  Door, EVENT_KIND, FINISH_STEP_ID, NO_CHAT, PAYLOAD_SCHEMAS, SIGNAL_OUTCOME, TASK_STATUS,
+  Door, EVENT_KIND, FINISH_STEP_ID, NO_CHAT, PAYLOAD_SCHEMAS, SignalOutcome, TASK_STATUS,
   type AgentExecutor, type EventDraft, type ExecutorContext, type Origin, type SplitResult, type UnifiedEvent,
+  RunOutcome,
 } from '@orc/contracts'
 import { draftFixture, must, stepFixture } from '@orc/contracts/fixtures'
 import { openStorage } from '../storage'
@@ -30,7 +31,7 @@ function feedbackFake(): AgentExecutor<unknown> {
         seen.push(answer)
       }
       const summary = `got:${answer}`
-      const signal = { stepId: ctx.step.id, runToken: ctx.runToken, outcome: SIGNAL_OUTCOME.success, summary }
+      const signal = { stepId: ctx.step.id, runToken: ctx.runToken, outcome: SignalOutcome.success, summary }
       await ctx.checkpoint('signal:1', async () => signal, (): EventDraft[] => [
         { kind: EVENT_KIND.signal_received, payload: { stepId: ctx.step.id, runToken: ctx.runToken, signal } },
       ])
@@ -80,7 +81,7 @@ describe('durable conversational gate (feedback)', () => {
 
     expect(await kernel.replyFeedback(t.id, 'yes', CLI)).toBe('consent')
 
-    expect(await handle.wait()).toBe('done')
+    expect(await handle.wait()).toBe(RunOutcome.done)
     expect(seen).toEqual(['yes'])
 
     const completed = (await kernel.eventsFor(t.id)).find(e => e.kind === EVENT_KIND.step_completed)

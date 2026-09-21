@@ -1,8 +1,8 @@
 import { afterAll, describe, expect, it } from 'bun:test'
 import { RecordId, Surreal } from 'surrealdb'
-import { DECISION_STATUS, Door, EVENT_KIND, LINK_KIND, MEMORY_ACCESS, MEMORY_USE, MemoryScope, NOTE_KIND, NO_CHAT, PROJECT_NAME_NOTE_ID, isRecord, type AccessVia, type EventKind, type EventRecord, type MemoryAccessMode, type MemoryAuthor, type MemoryNote, type MemoryUseOutcome, type NoteView } from '@orc/contracts'
+import { AUTHOR_SOURCE, DECISION_STATUS, Door, EVENT_KIND, LINK_KIND, MEMORY_ACCESS, MEMORY_USE, MemoryScope, NOTE_KIND, PROJECT_NAME_NOTE_ID, isRecord, type AccessVia, type EventKind, type EventRecord, type MemoryAccessMode, type MemoryAuthor, type MemoryNote, type MemoryUseOutcome, type NoteView } from '@orc/contracts'
 import { SurrealMemory } from './surreal'
-import { TEST_WORKSPACE_ID, eventFixture, must } from '@orc/contracts/fixtures'
+import { authorFixture, eventFixture, must } from '@orc/contracts/fixtures'
 import { claimFixture, createTestSurreal, noteFixture } from './test-helpers'
 
 const note = (over = {}) => noteFixture({
@@ -12,7 +12,7 @@ const note = (over = {}) => noteFixture({
 // tier-specific columns read through the shared view: these tests assert on what the read model
 // stored, not on which lane a fixture happened to land in
 const view = (n: MemoryNote | null): NoteView | undefined => n ?? undefined
-const cli: MemoryAuthor = { source: 'cli', workspaceId: TEST_WORKSPACE_ID, origin: NO_CHAT(Door.cli) }
+const cli: MemoryAuthor = authorFixture()
 const written = (seq: number, n = note(), author: MemoryAuthor = cli): EventRecord =>
   eventFixture({ seq, taskId: null, kind: EVENT_KIND.memory_written, payload: { note: n, author }, ts: `2026-07-18T0${Math.min(seq, 9)}:00:00Z` })
 const deleted = (seq: number, id: string, scope = 'project'): EventRecord =>
@@ -48,7 +48,7 @@ describe('SurrealMemory.applyEvent', () => {
     expect(got?.revision).toBe(1)
     expect(got?.createdBy).toBe('cli')
     expect(view(got)?.kind).toBe('fact')
-    await m.applyEvent(written(2, note({ summary: 'rotate on use' }), { source: 'agent', workspaceId: TEST_WORKSPACE_ID, executor: 'api-loop', model: 'opus', role: 'review', origin: { chatId: 'run:t1:v1', door: Door.supervisor } }))
+    await m.applyEvent(written(2, note({ summary: 'rotate on use' }), authorFixture({ source: AUTHOR_SOURCE.agent, executor: 'api-loop', model: 'opus', role: 'review', origin: { chatId: 'run:t1:v1', door: Door.supervisor } })))
     got = await m.get('auth', 'project')
     expect(got?.revision).toBe(2)
     expect(got?.createdBy).toBe('cli')            // unchanged

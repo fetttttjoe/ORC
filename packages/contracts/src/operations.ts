@@ -3,17 +3,20 @@ import { z } from 'zod'
 // One generic before/after journal covers model and tool effects: a node is created
 // (started) before the external call and resolved (completed/failed) after it, so a
 // crash can leave an explicit unresolved node but never a blind gap.
-export const OperationKind = z.enum(['model', 'tool'])
-export type OperationKind = z.infer<typeof OperationKind>
-export const OPERATION_KIND = OperationKind.enum
+export enum OperationKind {
+  model = 'model',
+  tool = 'tool',
+}
 
-export const OperationStatus = z.enum(['started', 'completed', 'failed'])
-export type OperationStatus = z.infer<typeof OperationStatus>
-export const OPERATION_STATUS = OperationStatus.enum
+export enum OperationStatus {
+  started = 'started',
+  completed = 'completed',
+  failed = 'failed',
+}
 
 export const OperationSpec = z.object({
   operationId: z.string().min(1), // deterministic within the run
-  kind: OperationKind,
+  kind: z.enum(OperationKind),
   name: z.string().min(1), // model ref or tool name
   before: z.unknown(), // redacted request/input
 })
@@ -24,7 +27,7 @@ export type OperationSpec = z.infer<typeof OperationSpec>
 export const OperationStartedPayload = z.object({
   operationId: z.string().min(1),
   attempt: z.number().int().positive(),
-  operationKind: OperationKind,
+  operationKind: z.enum(OperationKind),
   name: z.string().min(1),
   before: z.unknown(),
 })

@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto'
 import path from 'node:path'
 import {
-  CHECKS_EXECUTOR_REF, EVENT_KIND, checkCommandsOf, SIGNAL_OUTCOME, UNIFIED_EVENT_TYPE,
+  CHECKS_EXECUTOR_REF, EVENT_KIND, checkCommandsOf, SignalOutcome, UnifiedEventType,
   type AgentExecutor, type EventDraft, type ExecutorContext, type Signal, type SplitResult, type UnifiedEvent,
 } from '@orc/contracts'
 import { commandArgv } from './command-argv'
@@ -101,14 +101,14 @@ export function checksExecutor(timeoutMs: number = COMMAND_TIMEOUT_MS, cancelPol
       )
 
       for (const [index, c] of runs.entries()) {
-        yield { type: UNIFIED_EVENT_TYPE.tool_call, toolCallId: callId(index), toolName: CHECK_TOOL_NAME, input: { command: c.command } }
-        yield { type: UNIFIED_EVENT_TYPE.tool_result, toolCallId: callId(index), toolName: CHECK_TOOL_NAME, output: outputOf(c, timeoutMs), isError: !passed(c) }
+        yield { type: UnifiedEventType.tool_call, toolCallId: callId(index), toolName: CHECK_TOOL_NAME, input: { command: c.command } }
+        yield { type: UnifiedEventType.tool_result, toolCallId: callId(index), toolName: CHECK_TOOL_NAME, output: outputOf(c, timeoutMs), isError: !passed(c) }
       }
 
-      const signal: Signal = { ...base, outcome: SIGNAL_OUTCOME.success, summary: summaryOf(runs, timeoutMs) }
+      const signal: Signal = { ...base, outcome: SignalOutcome.success, summary: summaryOf(runs, timeoutMs) }
       await ctx.checkpoint('signal', async () => signal, (): EventDraft[] => [{ kind: EVENT_KIND.signal_received, payload: { ...base, signal } }])
-      yield { type: UNIFIED_EVENT_TYPE.signal, signal }
-      yield { type: UNIFIED_EVENT_TYPE.done }
+      yield { type: UnifiedEventType.signal, signal }
+      yield { type: UnifiedEventType.done }
     },
   }
 }

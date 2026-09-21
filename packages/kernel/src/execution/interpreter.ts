@@ -1,4 +1,4 @@
-import { RUN_OUTCOME, type Plan, type PlanStep, type RunOutcome } from '@orc/contracts'
+import { RunOutcome, type Plan, type PlanStep } from '@orc/contracts'
 
 export function readySteps(
   plan: Plan,
@@ -16,5 +16,5 @@ export function readySteps(
 }
 
 export function runOutcomeOf(plan: Plan, done: Set<string>): RunOutcome {
-  return plan.steps.every(s => done.has(s.id)) ? RUN_OUTCOME.done : RUN_OUTCOME.blocked
+  return plan.steps.every(s => done.has(s.id)) ? RunOutcome.done : RunOutcome.blocked
 }

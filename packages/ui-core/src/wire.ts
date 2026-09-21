@@ -377,7 +377,7 @@ export const ViewEnvelope = <R extends z.ZodType>(data: R) => z.object({ seq: z.
 // filter — that is what the timeline's read does with one, and what a caller assembling a kind set
 // from an empty selection means by it. A `.min(1)` here made the schema the only part of the stack
 // calling that an error, and would have rejected calls the MCP door has always answered.
-const Kinds = z.array(EventKind)
+const Kinds = z.array(z.enum(EventKind))
 // A seq cursor is a whole, non-negative event number — a fractional or negative one names no row.
 // Both cursors are EXCLUSIVE, which is what lets a reader page in either direction without
 // re-reading the row it already holds.

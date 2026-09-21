@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test'
-import { AUTO_HEAL_MODE, STRATEGY } from '@orc/contracts'
+import { AutoHealMode, STRATEGY } from '@orc/contracts'
 import { must } from '@orc/contracts/fixtures'
 import { AUTO_SWEEP_TITLE, createAutoHeal, sweepPlanDraft, type AutoHealDeps } from './auto-heal'
 
@@ -27,7 +27,7 @@ function harness(over: Partial<AutoHealDeps> = {}) {
   const calls: { restamp: number; drifted: number; sweeps: number[]; warns: string[] } = { restamp: 0, drifted: 0, sweeps: [], warns: [] }
   const sched = fakeScheduler()
   const deps: AutoHealDeps = {
-    mode: AUTO_HEAL_MODE.draftSweep,
+    mode: AutoHealMode.draftSweep,
     debounceMs: 1000,
     schedule: sched.schedule,
     restamp: async () => { calls.restamp++; return 2 },
@@ -53,13 +53,13 @@ describe('createAutoHeal', () => {
   })
 
   it("mode 'off' arms nothing at all", () => {
-    const { reactor, sched } = harness({ mode: AUTO_HEAL_MODE.off })
+    const { reactor, sched } = harness({ mode: AutoHealMode.off })
     reactor.onCommitRecorded()
     expect(sched.armed).toBe(false)
   })
 
   it("mode 'restamp' never consults drift and never drafts", async () => {
-    const { reactor, calls, sched } = harness({ mode: AUTO_HEAL_MODE.restamp, drifted: async () => 9 })
+    const { reactor, calls, sched } = harness({ mode: AutoHealMode.restamp, drifted: async () => 9 })
     reactor.onCommitRecorded()
     await sched.fire()
     expect(calls.restamp).toBe(1)

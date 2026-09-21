@@ -808,7 +808,7 @@ Door discipline, stated precisely:
 ## Chats and the event envelope
 
 Every stored event names a required, nullable `chatId` and a required `door`.
-`Origin` defines those fields once; `EventInput` extends it. `Door` names where
+`Origin` defines those fields once; the event envelope extends it. `Door` names where
 the call entered: `web` for the browser and its copilot, `cli` for the terminal,
 `mcp` for external MCP calls, `supervisor` for durable execution, and `hook` for
 the post-commit append. A call outside a conversation uses `NO_CHAT(door)`.

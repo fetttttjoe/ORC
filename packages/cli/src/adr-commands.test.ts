@@ -33,7 +33,7 @@ async function makeAdrCli() {
   const projectDbName = `t_${Math.random().toString(36).slice(2, 10)}`
   const config = requireProject({ ...loadConfig(dir), projectDbName, projectId: TEST_PROJECT_ID, projectName: 'test' })
   surrealConfigs.push(config)
-  const { kernel, log } = await openKernel(db.url, { projectId: TEST_PROJECT_ID })
+  const { kernel, log } = await openKernel(db.url, { projectId: TEST_PROJECT_ID, config })
   // the workspace must sit at THIS config's dir: `orc adr` resolves its author's workspace by
   // matching the process's directory (cwdAuthor), and refuses when nothing claims it
   await seedTestWorkspace(log, NO_CHAT(Door.cli), realpathSync(config.dir))

@@ -72,9 +72,11 @@ export interface ToolSource {
 
 // ---- T2 extensions + hooks ----
 
-export const HookName = z.enum(['session_start', 'session_shutdown', 'event_appended'])
-export type HookName = z.infer<typeof HookName>
-export const HOOK_NAME = HookName.enum
+export enum HookName {
+  session_start = 'session_start',
+  session_shutdown = 'session_shutdown',
+  event_appended = 'event_appended',
+}
 
 export interface HookHandlers {
   session_start: () => void | Promise<void>

@@ -444,7 +444,7 @@ describe('useVerdict', () => {
 
 describe('decision status on notes', () => {
   it('a decision may carry a status; every other kind refuses one', () => {
-    expect(semantic({ id: 'd', title: 'D', kind: NOTE_KIND.decision, status: DECISION_STATUS.proposed }).status).toBe('proposed')
+    expect(semantic({ id: 'd', title: 'D', kind: NOTE_KIND.decision, status: DECISION_STATUS.proposed }).status).toBe(DECISION_STATUS.proposed)
     expect(MemoryNoteInput.safeParse({ id: 'f', title: 'F', status: DECISION_STATUS.accepted }).success).toBe(false) // kind defaults to fact
     expect(MemoryNoteInput.safeParse({ id: 'r', title: 'R', kind: NOTE_KIND.research, sources: [{ url: 'https://x.test/a' }], status: DECISION_STATUS.accepted }).success).toBe(false)
   })

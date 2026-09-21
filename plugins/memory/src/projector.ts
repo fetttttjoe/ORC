@@ -1,5 +1,5 @@
 import { errorMessage, EVENT_KIND, foldMemory, MemoryDeletedPayload, MemoryVerifiedPayload, MemoryWrittenPayload, noteKey, type EventKind, type EventRecord } from '@orc/contracts'
-import { MEMORY_STAGE, type MemoryStageName, type StageProgress } from '@orc/contracts/health'
+import { MemoryStageName, type StageProgress } from '@orc/contracts/health'
 import type { EventLog, ProjectorLease } from '@orc/kernel'
 import { SurrealMemory } from './surreal'
 import { noteRelPath, renderNoteFile } from './note-md'
@@ -189,7 +189,7 @@ export function createMemoryProjector(opts: {
     // nothing before the end): a boot showing 0/2 frozen for minutes is the honest signal.
     const perEvent = announce && !isBigDrain(events.length)
     const startedAt = Date.now()
-    if (announce) publishStage({ name: MEMORY_STAGE.replaying, startedAt, progress: { applied: 0, total: events.length } })
+    if (announce) publishStage({ name: MemoryStageName.replaying, startedAt, progress: { applied: 0, total: events.length } })
     try {
       for (const [i, e] of events.entries()) {
         if (e.kind === EVENT_KIND.memory_written || e.kind === EVENT_KIND.memory_deleted) vaultChanged += 1
@@ -198,7 +198,7 @@ export function createMemoryProjector(opts: {
         const progress = catchUpProgressLine(i + 1, events.length)
         if (progress) console.log(progress)
         if (progress || perEvent)
-          publishStage({ name: MEMORY_STAGE.replaying, startedAt, progress: { applied: i + 1, total: events.length } })
+          publishStage({ name: MemoryStageName.replaying, startedAt, progress: { applied: i + 1, total: events.length } })
       }
     } finally {
       // Cleared HERE, before reconcile, and only when this drain announced: refreshDerived publishes
@@ -250,7 +250,7 @@ export function createMemoryProjector(opts: {
   const refreshDerived = async (hadDelete: boolean): Promise<void> => {
     if (hadDelete) {
       const started = Date.now()
-      stage = { name: MEMORY_STAGE.linking, startedAt: started }
+      stage = { name: MemoryStageName.linking, startedAt: started }
       publishStage(stage)
       try { await surreal.refreshLinks() }
       catch (err) { console.warn(`[memory] link refresh failed: ${errorMessage(err)}`) }
@@ -261,7 +261,7 @@ export function createMemoryProjector(opts: {
       }
     }
     const started = Date.now()
-    stage = { name: MEMORY_STAGE.clustering, startedAt: started }
+    stage = { name: MemoryStageName.clustering, startedAt: started }
     publishStage(stage)
     try { await surreal.refreshTopics() }
     catch (err) { console.warn(`[memory] topic refresh failed: ${errorMessage(err)}`) }

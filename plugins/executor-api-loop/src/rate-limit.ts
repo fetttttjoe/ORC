@@ -1,5 +1,5 @@
 // How long to wait out a provider rate limit before re-issuing the same model call.
-import { MAX_CAUSE_DEPTH, errField } from './transient'
+import { errField, errorChainNodes } from './error-chain'
 
 const RATE_LIMIT_STATUS = 429
 const RETRY_AFTER_HEADER = 'retry-after'
@@ -9,22 +9,11 @@ export const FIRST_WAIT_MS = 30_000
 export const MAX_WAIT_MS = 300_000
 export const TOTAL_WAIT_BUDGET_MS = 1_200_000
 
-function errorChain(err: unknown): unknown[] {
-  const nodes: unknown[] = []
-  let node = err
-  while (node !== undefined && node !== null && nodes.length < MAX_CAUSE_DEPTH) {
-    nodes.push(node)
-    const next = errField(node, 'lastError') ?? errField(node, 'cause')
-    node = next === node ? undefined : next
-  }
-  return nodes
-}
-
 export const isRateLimited = (err: unknown): boolean =>
-  errorChain(err).some(n => (errField(n, 'statusCode') ?? errField(n, 'status')) === RATE_LIMIT_STATUS)
+  [...errorChainNodes(err)].some(n => (errField(n, 'statusCode') ?? errField(n, 'status')) === RATE_LIMIT_STATUS)
 
 function retryAfterMs(err: unknown): number | null {
-  for (const node of errorChain(err)) {
+  for (const node of errorChainNodes(err)) {
     const value = errField(errField(node, 'responseHeaders'), RETRY_AFTER_HEADER)
     const seconds = typeof value === 'string' ? Number(value) : value
     if (typeof seconds === 'number' && Number.isFinite(seconds) && seconds > 0) return seconds * MS_PER_SECOND

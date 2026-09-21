@@ -1,5 +1,5 @@
 import { z } from 'zod'
-import { AccessVia, AUTHOR_SOURCE, CLAIM_ID_RE, Door, NO_CHAT, ClaimWrite, DECISION_STATUSES, isRecord, DRIFT_STATE, EDGE_DIRECTIONS, inferTier, linkLookupScopes, MASTERPLAN_NOTE_ID, MemoryScope, MEMORY_ACCESS, MEMORY_ID_RE, MEMORY_LIMITS, MEMORY_SOURCE_LIMITS, MEMORY_TOOL_NAME, MemorySearchResult, MemoryWriteResult, NoteCategory, NOTE_CATEGORIES, NoteKind, NOTE_KINDS, LINK_KIND, LINK_KINDS, planFieldViolations, RETENTION_CLASSES, SEARCH_MODES, SearchMode, stepMayVerify, LinkKind, MemoryNoteDraftInput, NOTE_TIER, NOTE_TIERS, emptyUseStats, slugId, toolError, useLine, type MemoryAuthor, type MemoryNote, type MemoryStore, type ProvisionalFlag, type ResolvedTool, type VerifiedStamp } from '@orc/contracts'
+import { AccessVia, AUTHOR_SOURCE, CLAIM_ID_RE, Door, NO_CHAT, ClaimWrite, DecisionStatus, isRecord, DRIFT_STATE, EDGE_DIRECTIONS, inferTier, linkLookupScopes, MASTERPLAN_NOTE_ID, MemoryScope, MEMORY_ACCESS, MEMORY_ID_RE, MEMORY_LIMITS, MEMORY_SOURCE_LIMITS, MEMORY_TOOL_NAME, MemorySearchResult, MemoryWriteResult, NoteCategory, NOTE_CATEGORIES, NoteKind, NOTE_KINDS, LINK_KIND, LINK_KINDS, planFieldViolations, RETENTION_CLASSES, SEARCH_MODES, SearchMode, stepMayVerify, LinkKind, MemoryNoteDraftInput, NOTE_TIER, NOTE_TIERS, emptyUseStats, slugId, toolError, useLine, type MemoryAuthor, type MemoryNote, type MemoryStore, type ProvisionalFlag, type ResolvedTool, type VerifiedStamp } from '@orc/contracts'
 import { applyBudget, fitMemoryNoteToBudget } from './budget'
 import { noteDriftState, type ChangedSince } from './drift'
 import { provisionalOf, type WorkspaceViewProbe } from './provisional'
@@ -254,7 +254,10 @@ const withRole = (description: string, role: MemoryRole): string =>
   description
 
 // Tool inputs come from the model — parse at the boundary, never cast.
-const DetailLevel = z.enum(['minimal', 'standard']).default('standard')
+enum DetailLevel {
+  minimal = 'minimal',
+  standard = 'standard',
+}
 // The budget IS the ceiling on the reply — applyBudget and fitMemoryNoteToBudget bound it to this
 // and to nothing else — and it is supplied by the MODEL, so unbounded it was an open invitation to
 // ask for the whole corpus in one response. Bounded once, here, because every memory tool shares
@@ -268,7 +271,7 @@ const Budget = z.number().int().positive().max(MEMORY_LIMITS.budgetTokens).defau
 const SearchInput = z.object({
   query: z.string().optional(), category: z.string().optional(), tag: z.string().optional(),
   kind: z.string().optional(),
-  detail_level: DetailLevel,
+  detail_level: z.enum(DetailLevel).default(DetailLevel.standard),
   limit: z.number().int().positive().max(MEMORY_LIMITS.detailItems).optional(), budget: Budget,
   mode: SearchMode.optional(),
 })
@@ -400,7 +403,7 @@ function normalizeWrite(input: unknown): { input: unknown; warnings: string[] } 
 }
 
 // advertised JSON schemas mirror the zod parsers exactly, so the model can self-correct.
-const detailLevelSchema = { type: 'string', enum: ['minimal', 'standard'], description: 'minimal = top 5 + omitted count' }
+const detailLevelSchema = { type: 'string', enum: Object.values(DetailLevel), description: 'minimal = top 5 + omitted count' }
 const budgetSchema = { type: 'integer', minimum: 1, maximum: MEMORY_LIMITS.budgetTokens, description: 'approx token budget for the result (default 1500)' }
 const idSchema = { type: 'string', pattern: '^[a-z0-9][a-z0-9-]*$' }
 
@@ -418,7 +421,7 @@ const WRITE_PROPERTIES = {
     description: 'semantic only. architecture_current = observed implementation; architecture_target = intended design; research = a distilled web finding, which REQUIRES sources (default fact)',
   },
   status: {
-    type: 'string', enum: [...DECISION_STATUSES],
+    type: 'string', enum: Object.values(DecisionStatus),
     description: 'kind=decision ONLY (refused on any other kind): proposed | accepted | superseded | deprecated. Omit it — a decision with no status reads as accepted. Do not set superseded by hand: record the replacing decision with a supersedes link and the lifecycle flips this one.',
   },
   retention: {
@@ -855,7 +858,7 @@ export function memoryTools(opts: {
           const filtering = q.category !== undefined || q.tag !== undefined || q.kind !== undefined
           if (q.query === undefined && !filtering)
             return { output: { error: 'memory_search needs a `query`, or a filter (kind/category/tag) to enumerate — a call with neither would return the whole corpus' }, isError: true }
-          const limit = q.limit ?? (q.detail_level === 'minimal' ? 5 : 20)
+          const limit = q.limit ?? (q.detail_level === DetailLevel.minimal ? 5 : 20)
           const filter = {
             category: q.category, tag: q.tag,
             ...(q.kind !== undefined && { kind: NoteKind.parse(q.kind) }),

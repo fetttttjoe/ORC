@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'bun:test'
 import { z } from 'zod'
-import { claimId, CLAIM_ID_RE, DECISION_STATUSES, Door, LINK_KIND, LINK_KINDS, MEMORY_ACCESS, MEMORY_LIMITS, NO_CHAT, type MemoryAuthor, type Origin, MemoryNoteInput, NOTE_KIND, NOTE_TIER, MemoryWriteResult, MEMORY_TOOL_NAME, STEP_ID, STEP_ROLE, VERIFY_STEP_ID, type AccessVia, type MemoryAccessMode, type MemoryFilter, type MemoryNote, type MemoryNoteDraft, type MemoryStore, type NoteSummary } from '@orc/contracts'
-import { TEST_WORKSPACE_ID, episodicNoteFixture, semanticNoteFixture, must } from '@orc/contracts/fixtures'
+import { AUTHOR_SOURCE, claimId, CLAIM_ID_RE, DecisionStatus, Door, LINK_KIND, LINK_KINDS, MEMORY_ACCESS, MEMORY_LIMITS, type MemoryAuthor, type Origin, MemoryNoteInput, NOTE_KIND, NOTE_TIER, MemoryWriteResult, MEMORY_TOOL_NAME, STEP_ID, STEP_ROLE, VERIFY_STEP_ID, type AccessVia, type MemoryAccessMode, type MemoryFilter, type MemoryNote, type MemoryNoteDraft, type MemoryStore, type NoteSummary } from '@orc/contracts'
+import { TEST_WORKSPACE_ID, authorFixture, episodicNoteFixture, semanticNoteFixture, must } from '@orc/contracts/fixtures'
 import { approxTokens } from './budget'
 import { noopMemoryStore, summaryFixture } from './test-helpers'
 import { MEMORY_READ_TOOLS, memoryTools, memoryRoleFor, memoryVerifyTool, noteLint } from './tools'
@@ -14,8 +14,8 @@ enum RetiredField { Rules = 'rules' }
 // The two callers these tools have: an `orc memory` command, which belongs to no chat, and an agent
 // step, whose reads and writes belong to the chat its run opened.
 const RUN: Origin = { chatId: 'run:t1:v1', door: Door.supervisor }
-const CLI: MemoryAuthor = { source: 'cli', workspaceId: TEST_WORKSPACE_ID, origin: NO_CHAT(Door.cli) }
-const AGENT: MemoryAuthor = { source: 'agent', workspaceId: TEST_WORKSPACE_ID, origin: RUN }
+const CLI: MemoryAuthor = authorFixture()
+const AGENT: MemoryAuthor = authorFixture({ source: AUTHOR_SOURCE.agent, origin: RUN })
 
 // the store gateway parses a draft into whichever tier it belongs to, then stamps provenance —
 // this mirrors that, so a fixture cannot invent a note the real write path could not produce
@@ -1041,7 +1041,7 @@ describe('memory tools', () => {
     const { store } = fakeStore()
     const write = memoryTools({ store, author: CLI }).find(t => t.name === MEMORY_TOOL_NAME.write)
     const props = z.object({ properties: z.object({ status: z.object({ enum: z.array(z.string()), description: z.string() }) }) }).parse(write?.inputSchema)
-    expect(props.properties.status.enum).toEqual([...DECISION_STATUSES])
+    expect(props.properties.status.enum).toEqual(Object.values(DecisionStatus))
     expect(props.properties.status.description).toContain('decision')
   })
 })

@@ -4,11 +4,12 @@ import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import {
-  AUTHOR_SOURCE, Door, EVENT_KIND, MemoryWrittenPayload, NO_CHAT, SIGNAL_OUTCOME,
+  AUTHOR_SOURCE, Door, EVENT_KIND, MemoryWrittenPayload, NO_CHAT, SignalOutcome,
   type AgentExecutor, type EventDraft, type ExecutorContext, type Origin, type ResolvedTool,
   type SplitResult, type UnifiedEvent,
+  RunOutcome,
 } from '@orc/contracts'
-import { draftFixture, must, stepFixture } from '@orc/contracts/fixtures'
+import { authorFixture, draftFixture, must, stepFixture } from '@orc/contracts/fixtures'
 import { createMemory } from '@orc/memory'
 import { createTestSurreal } from '@orc/memory/test-helpers'
 import { openStorage } from '../storage'
@@ -46,7 +47,7 @@ function memoryExecutor(): AgentExecutor<unknown> {
           { kind: EVENT_KIND.tool_call, payload: { ...base, iteration: 1, toolCallId: 'c1', toolName: 'memory_write', input: NOTE } },
           { kind: EVENT_KIND.tool_result, payload: { ...base, iteration: 1, toolCallId: 'c1', toolName: 'memory_write', output: r.output, isError: r.isError } },
         ])
-        const signal = { ...base, outcome: r.isError ? SIGNAL_OUTCOME.failure : SIGNAL_OUTCOME.success, summary: r.isError ? 'write failed' : 'wrote finding-x' }
+        const signal = { ...base, outcome: r.isError ? SignalOutcome.failure : SignalOutcome.success, summary: r.isError ? 'write failed' : 'wrote finding-x' }
         await ctx.checkpoint('signal:1', async () => signal, (): EventDraft[] => [
           { kind: EVENT_KIND.signal_received, payload: { ...base, signal } },
         ])
@@ -73,8 +74,8 @@ function memoryExecutor(): AgentExecutor<unknown> {
         { kind: EVENT_KIND.tool_result, payload: { ...base, iteration: 1, toolCallId: 'c2', toolName: 'memory_read', output: { note: r.note }, isError: r.isError } },
       ])
       const signal = found.note
-        ? { ...base, outcome: SIGNAL_OUTCOME.success, summary: `read back: ${NoteTitle.parse(found.note).title}` }
-        : { ...base, outcome: SIGNAL_OUTCOME.failure, summary: 'finding-x never appeared' }
+        ? { ...base, outcome: SignalOutcome.success, summary: `read back: ${NoteTitle.parse(found.note).title}` }
+        : { ...base, outcome: SignalOutcome.failure, summary: 'finding-x never appeared' }
       await ctx.checkpoint('signal:1', async () => signal, (): EventDraft[] => [
         { kind: EVENT_KIND.signal_received, payload: { ...base, signal } },
       ])
@@ -106,7 +107,7 @@ describe('memory reuse over a real run (e2e): step B reads step A\'s note', () =
       storage, config, skills: fakeSkills,
       providers: new Map([['fake', fakeProvider]]),
       executors: new Map([['memory-fake', memoryExecutor()]]),
-      stepTools: p => memory.bindStep({ author: { source: AUTHOR_SOURCE.agent, origin: p.origin, workspaceId: p.workspaceId, taskId: p.taskId, stepId: p.stepId, runToken: p.runToken, executor: p.executor, model: p.model, role: p.role }, step: p.step, taskId: p.taskId, ancestorTaskIds: p.ancestorTaskIds }),
+      stepTools: p => memory.bindStep({ author: authorFixture({ source: AUTHOR_SOURCE.agent, origin: p.origin, workspaceId: p.workspaceId, taskId: p.taskId, stepId: p.stepId, runToken: p.runToken, executor: p.executor, model: p.model, role: p.role }), step: p.step, taskId: p.taskId, ancestorTaskIds: p.ancestorTaskIds }),
     })
     await port.launch()
 
@@ -119,7 +120,7 @@ describe('memory reuse over a real run (e2e): step B reads step A\'s note', () =
       await kernel.approvePlan(t.id, undefined, undefined, CLI)
 
       const handle = await port.startRun(t.id)
-      expect(await handle.wait()).toBe('done') // proves step B signaled success (i.e. it read the note)
+      expect(await handle.wait()).toBe(RunOutcome.done) // proves step B signaled success (i.e. it read the note)
 
       await Bun.sleep(200) // final projector flush window
 

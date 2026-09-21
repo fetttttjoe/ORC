@@ -5,7 +5,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { WORKSPACE_KIND } from '@orc/contracts'
 import { grantExtensionTrust, IDENTITY_FILE } from '@orc/kernel'
-import { createTestDb, tmpGitRepo } from '@orc/kernel/test-helpers'
+import { createTestDb, testOrcConfig, tmpGitRepo } from '@orc/kernel/test-helpers'
 import { EXIT_CODE } from './exit'
 import { openKernel } from './main'
 
@@ -111,7 +111,7 @@ export default {
     expect((await runBin(main, ['tasks'], env)).exitCode).toBe(0)
 
     const { projectId } = JSON.parse(readFileSync(path.join(main, '.orc', IDENTITY_FILE), 'utf8'))
-    const { kernel, storage } = await openKernel(database.url, { projectId })
+    const { kernel, storage } = await openKernel(database.url, { projectId, config: testOrcConfig() })
     database.onClose(() => storage.close())
     const workspaces = await kernel.listWorkspaces()
     expect(workspaces.length).toBe(1)

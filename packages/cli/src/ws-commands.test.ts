@@ -52,7 +52,7 @@ async function makeWsCli() {
   sh(main, 'add', '.gitignore')
   sh(main, 'commit', '-q', '-m', 'ignore .orc')
   const config = requireProject({ ...loadConfig(main), databaseUrl: db.url, projectId: TEST_PROJECT_ID, projectName: 'ws-test' })
-  const { kernel, log, storage } = await openKernel(db.url, { projectId: TEST_PROJECT_ID })
+  const { kernel, log, storage } = await openKernel(db.url, { projectId: TEST_PROJECT_ID, config })
   db.onClose(() => storage.close())
   const { host, hub } = await buildPlugins(config)
   cleanup.push(() => hub.close(), () => host.shutdown())

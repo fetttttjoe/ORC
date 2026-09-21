@@ -1,6 +1,6 @@
 import { afterAll, describe, expect, it } from 'bun:test'
-import { Door, EVENT_KIND, NO_CHAT, PAYLOAD_SCHEMAS, planScope, slugId, WORKSPACE_KIND, type MemoryAuthor, type Origin, type TaskNode } from '@orc/contracts'
-import { eventFixture } from '@orc/contracts/fixtures'
+import { AUTHOR_SOURCE, Door, EVENT_KIND, NO_CHAT, PAYLOAD_SCHEMAS, planScope, slugId, TASK_STATUS, WORKSPACE_KIND, type MemoryAuthor, type Origin, type TaskNode } from '@orc/contracts'
+import { authorFixture, eventFixture } from '@orc/contracts/fixtures'
 import { seedTestWorkspace, TEST_WORKSPACE, TEST_WORKSPACE_ID } from '@orc/kernel/test-helpers'
 import { createLiveMemory } from './test-helpers'
 import { consolidateTask, taskInfo, CONSOLIDATE_EXECUTOR } from './consolidate'
@@ -12,19 +12,19 @@ import { consolidateOnCompletion, createMemoryLifecycle } from './lifecycle'
 // to no chat and comes through the supervisor door; the log rows this file hand-builds are `orc`.
 const CONSOLIDATE_ORIGIN: Origin = NO_CHAT(Door.supervisor)
 const CLI_ORIGIN: Origin = NO_CHAT(Door.cli)
-const CLI: MemoryAuthor = { source: 'cli', workspaceId: TEST_WORKSPACE_ID, origin: CLI_ORIGIN }
-const CONSOLIDATE_AUTHOR: MemoryAuthor = { source: 'agent', workspaceId: TEST_WORKSPACE_ID, executor: CONSOLIDATE_EXECUTOR, origin: CONSOLIDATE_ORIGIN }
+const CLI: MemoryAuthor = authorFixture()
+const CONSOLIDATE_AUTHOR: MemoryAuthor = authorFixture({ source: AUTHOR_SOURCE.agent, executor: CONSOLIDATE_EXECUTOR, origin: CONSOLIDATE_ORIGIN })
 
 // The builder shape BOTH composition roots pass (runtime.ts's lifecycle subscriber and `orc memory
 // consolidate`): the plugin never invents an author, it asks for one PER TASK.
 const authorForTask = (task: { id: string; workspaceId: string }): MemoryAuthor =>
-  ({ source: 'agent', workspaceId: task.workspaceId, executor: CONSOLIDATE_EXECUTOR, taskId: task.id, origin: CONSOLIDATE_ORIGIN })
+  authorFixture({ source: AUTHOR_SOURCE.agent, workspaceId: task.workspaceId, executor: CONSOLIDATE_EXECUTOR, taskId: task.id, origin: CONSOLIDATE_ORIGIN })
 
 const drops: (() => Promise<void>)[] = []
 afterAll(async () => { for (const d of drops) await d() })
 
 const taskNode = (id: string, title: string, workspaceId: string = TEST_WORKSPACE_ID): TaskNode => ({
-  id, parentId: null, workspaceId, type: 'task', title, spec: '', status: 'done',
+  id, parentId: null, workspaceId, type: 'task', title, spec: '', status: TASK_STATUS.done,
   zone: [], budgetUSD: null, depth: 0, createdAt: '2026-07-24T00:00:00.000Z',
 })
 const done = (taskId: string) =>
@@ -49,7 +49,7 @@ it('consolidates a task that finished while no lifecycle was attached', async ()
   await live.store.write({ id: 'sa', scope: planScope('t9'), title: 'Step A', summary: 'did A' }, CLI)
   await live.store.write({ id: 'sb', scope: planScope('t9'), title: 'Step B', summary: 'did B' }, CLI)
   // the completion lands with NOBODY subscribed — exactly the case that used to vanish
-  await live.log.append({ ...CLI_ORIGIN, taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.task_status_changed, payload: { taskId: 't9', from: 'running', to: 'done' } })
+  await live.log.append({ ...CLI_ORIGIN, taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.task_status_changed, payload: { taskId: 't9', from: TASK_STATUS.running, to: TASK_STATUS.done } })
   const outcomeId = slugId('outcome t9')
   await live.projector.catchUp()
   expect(await live.store.get(outcomeId)).toBeNull()
@@ -66,7 +66,7 @@ describe('consolidateTask (integration)', () => {
   it('substantive task: non-force converges idempotently, force always rewrites', async () => {
     const { log, store, projector } = await harness('t1', 'My task')
     await store.write({ id: 'sa', scope: planScope('t1'), title: 'Step A', summary: 'did A' }, CLI)
-    await store.recordAccess('area-x', 'project', 'read', { source: 'agent', workspaceId: TEST_WORKSPACE_ID, taskId: 't1', origin: { chatId: 'run:t1:v1', door: Door.supervisor } }) // provenance → substantive
+    await store.recordAccess('area-x', 'project', 'read', authorFixture({ source: AUTHOR_SOURCE.agent, taskId: 't1', origin: { chatId: 'run:t1:v1', door: Door.supervisor } })) // provenance → substantive
     const outcomeId = slugId('outcome t1')
     const rev = async (): Promise<number> => { await projector.catchUp(); return (await store.get(outcomeId))?.revision ?? 0 }
 
@@ -126,8 +126,8 @@ describe('consolidateTask attributes the outcome to the TASK\'s workspace, not a
       payload: { task: taskNode(taskId, 'Worked in a worktree', workspaceB) },
     })
     // two steps: salience-gated on its own (isSubstantive), no provenance access needed
-    await live.store.write({ id: 'sa', scope: planScope(taskId), title: 'Step A', summary: 'did A' }, { source: 'agent', workspaceId: workspaceB, taskId, origin: { chatId: `run:${taskId}:v1`, door: Door.supervisor } })
-    await live.store.write({ id: 'sb', scope: planScope(taskId), title: 'Step B', summary: 'did B' }, { source: 'agent', workspaceId: workspaceB, taskId, origin: { chatId: `run:${taskId}:v1`, door: Door.supervisor } })
+    await live.store.write({ id: 'sa', scope: planScope(taskId), title: 'Step A', summary: 'did A' }, authorFixture({ source: AUTHOR_SOURCE.agent, workspaceId: workspaceB, taskId, origin: { chatId: `run:${taskId}:v1`, door: Door.supervisor } }))
+    await live.store.write({ id: 'sb', scope: planScope(taskId), title: 'Step B', summary: 'did B' }, authorFixture({ source: AUTHOR_SOURCE.agent, workspaceId: workspaceB, taskId, origin: { chatId: `run:${taskId}:v1`, door: Door.supervisor } }))
 
     await consolidateTask({ log: live.log, store: live.store, authorFor: authorForTask }, taskId, await taskInfo(live.log, taskId), { force: true })
     await live.projector.catchUp()
@@ -148,7 +148,7 @@ describe('consolidateOnCompletion (subscriber action)', () => {
   it('a done event consolidates (catch-up + write); a non-done event does nothing', async () => {
     const { log, store, projector } = await harness('t3', 'Subscribed task')
     await store.write({ id: 'sc', scope: planScope('t3'), title: 'Step C', summary: 'did C' }, CLI)
-    await store.recordAccess('area-y', 'project', 'read', { source: 'agent', workspaceId: TEST_WORKSPACE_ID, taskId: 't3', origin: { chatId: 'run:t3:v1', door: Door.supervisor } })
+    await store.recordAccess('area-y', 'project', 'read', authorFixture({ source: AUTHOR_SOURCE.agent, taskId: 't3', origin: { chatId: 'run:t3:v1', door: Door.supervisor } }))
     const deps = { log, store, authorFor: () => CONSOLIDATE_AUTHOR, catchUp: () => projector.catchUp() }
     const outcomeId = slugId('outcome t3')
     // a non-done transition → the classifier gates it → no note

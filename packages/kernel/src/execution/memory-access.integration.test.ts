@@ -2,7 +2,7 @@ import { afterAll, describe, expect, it } from 'bun:test'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import { AUTHOR_SOURCE, Door, EVENT_KIND, MEMORY_ACCESS, MemoryAccessedPayload, LINK_KIND, NO_CHAT, type Origin } from '@orc/contracts'
+import { AUTHOR_SOURCE, Door, EVENT_KIND, MEMORY_ACCESS, MemoryAccessedPayload, LINK_KIND, NO_CHAT, RunOutcome, type Origin } from '@orc/contracts'
 import { authorFixture, draftFixture, stepFixture } from '@orc/contracts/fixtures'
 import { apiLoopExecutor } from '@orc/executor-api-loop'
 import { scriptModel } from '@orc/executor-api-loop/test-model'
@@ -69,7 +69,7 @@ describe('agent-side memory access recording (integration)', () => {
       storage, config, skills: fakeSkills,
       providers: new Map([['fake', { costs: {}, languageModel: () => model }]]),
       executors: new Map([['api-loop', apiLoopExecutor()]]),
-      stepTools: p => memory.bindStep({ author: { source: AUTHOR_SOURCE.agent, origin: p.origin, workspaceId: p.workspaceId, taskId: p.taskId, stepId: p.stepId, runToken: p.runToken, executor: p.executor, model: p.model, role: p.role }, step: p.step, taskId: p.taskId, ancestorTaskIds: p.ancestorTaskIds }),
+      stepTools: p => memory.bindStep({ author: authorFixture({ source: AUTHOR_SOURCE.agent, origin: p.origin, workspaceId: p.workspaceId, taskId: p.taskId, stepId: p.stepId, runToken: p.runToken, executor: p.executor, model: p.model, role: p.role }), step: p.step, taskId: p.taskId, ancestorTaskIds: p.ancestorTaskIds }),
     })
     await port.launch()
     cleanup.push(() => port.shutdown())
@@ -80,7 +80,7 @@ describe('agent-side memory access recording (integration)', () => {
     // loop before the signal and block the run on an iteration limit, not on anything under test
     await kernel.proposePlan(t.id, draftFixture([stepFixture({ modelRef: 'fake/m', maxIterations: 10 })]), CLI)
     await kernel.approvePlan(t.id, undefined, undefined, CLI)
-    expect(await (await port.startRun(t.id)).wait()).toBe('done')
+    expect(await (await port.startRun(t.id)).wait()).toBe(RunOutcome.done)
 
     // memory events are project-scoped (taskId: null), so read the whole log, not the task slice
     const accesses = (await log.all())

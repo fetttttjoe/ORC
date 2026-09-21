@@ -24,7 +24,7 @@ export const ChatDigest = z.object({
   // Null for every kind but `run`: only a run has an end anyone can point at — a copilot chat is
   // never closed, it just stops receiving events.
   endedSeq: z.number().int().nonnegative().nullable(),
-  outcome: TaskStatus.nullable(),
+  outcome: z.enum(TaskStatus).nullable(),
   asked: z.string().nullable(),
   caused: z.object({
     tasks: z.array(z.string().min(1)),

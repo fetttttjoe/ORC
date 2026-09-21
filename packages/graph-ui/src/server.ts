@@ -1,6 +1,6 @@
 import { stepCountIs, streamText, type LanguageModel } from 'ai'
 import { z } from 'zod'
-import { Door, MEMORY_HEALTH, type MemoryHealth, NO_CHAT, type Origin, type SupervisorHealth, errorMessage, isRecord, NoteAuthoringDraft, NoteRef, PlanDraft, type CopilotExchangePayload, type Usage } from '@orc/contracts'
+import { Door, MEMORY_HEALTH, MessageRole, type MemoryHealth, NO_CHAT, type Origin, type SupervisorHealth, errorMessage, isRecord, NoteAuthoringDraft, NoteRef, PlanDraft, type CopilotExchangePayload, type Usage } from '@orc/contracts'
 import { VIEWS, buildCopilotTools, copilotFocus, copilotSystemPrompt, createProjectSessions, emptyPatch, touchesOf, type CopilotMode, type OrcActions, type ProjectEntry, type ProjectSessions, type ReadModel, type SessionUpdate } from '@orc/ui-core'
 import { CopilotFrameType, PROJECT_PARAM, VIEW, VIEW_ROUTE, type CopilotFrame, type OperatorState, type StreamFrame } from '@orc/ui-core/wire'
 import path from 'node:path'
@@ -31,7 +31,7 @@ const CopilotBody = z.object({
   taskId: z.string().min(1).nullable(),
   workspaceId: z.string().min(1).nullable(),
   modelRef: z.string().min(1).optional(),
-  messages: z.array(z.object({ role: z.enum(['user', 'assistant']), content: z.string() })).min(1).max(60),
+  messages: z.array(z.object({ role: z.enum(MessageRole), content: z.string() })).min(1).max(60),
 })
 
 // Every mutating route: its body schema and its dispatch, tied together in one closure so the
@@ -160,7 +160,7 @@ export function startGraphUi(opts: {
     if (!parsed.success) return Response.json({ error: parsed.error.message }, { status: 400 })
     const { projectId, messages, taskId } = parsed.data
     const modelRef = parsed.data.modelRef ?? cfg.defaultModelRef
-    const user = [...messages].reverse().find(m => m.role === 'user')?.content ?? ''
+    const user = [...messages].reverse().find(m => m.role === MessageRole.user)?.content ?? ''
     const workspaceId = parsed.data.workspaceId ?? await cfg.resolveWorkspace?.(taskId) ?? null
     const chat = copilotChat({ chatId: parsed.data.chatId, taskId, workspaceId, title: chatTitleOf(user) }, () => crypto.randomUUID())
     const origin: Origin = { chatId: chat.chatId, door: Door.web }

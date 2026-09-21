@@ -1,5 +1,5 @@
 import { z } from 'zod'
-import { EVENT_KIND, OPERATION_STATUS, PAYLOAD_SCHEMAS, STEP_RUN_STATUS, TASK_STATUS, mermaidLabel, type EventRecord, type Plan, type TaskNode } from '@orc/contracts'
+import { EVENT_KIND, OperationStatus, PAYLOAD_SCHEMAS, StepRunStatus, TASK_STATUS, mermaidLabel, type EventRecord, type Plan, type TaskNode } from '@orc/contracts'
 import { fold, stepUsage, taskUsage, type State, type StepState } from '@orc/kernel'
 import type { Usage } from '@orc/contracts'
 import { frontmatter } from './frontmatter'
@@ -12,8 +12,8 @@ const truncate = (s: string, n: number): string => (s.length > n ? s.slice(0, n)
 
 const statusClass = (s: StepState | undefined): 'done' | 'running' | 'failed' | 'pending' =>
   !s ? 'pending'
-    : s.status === STEP_RUN_STATUS.completed ? 'done'
-    : s.status === STEP_RUN_STATUS.failed ? 'failed'
+    : s.status === StepRunStatus.completed ? 'done'
+    : s.status === StepRunStatus.failed ? 'failed'
     : 'running'
 
 // the one mermaid escaper lives in contracts (guards) — every producing view shares it
@@ -55,7 +55,7 @@ function stepNodesAndEdges(
 
 function mermaidDag(plan: Plan, steps: Map<string, StepState> | undefined): string {
   const nodes = stepNodesAndEdges(plan, steps, (st, s) => {
-    const iter = s && s.status === STEP_RUN_STATUS.running ? ` · iter ${s.iterations}` : ''
+    const iter = s && s.status === StepRunStatus.running ? ` · iter ${s.iterations}` : ''
     return `${st.id} · ${st.executorRef} · ${st.modelRef}${iter}`
   })
   return ['```mermaid', 'graph TD', ...nodes, ...STEP_CLASS_DEFS, '```'].join('\n')
@@ -89,7 +89,7 @@ function renderExecution(task: TaskNode, plan: Plan | undefined, state: State): 
     .filter(o => o.taskId === task.id)
     .sort((a, b) => a.startedSeq - b.startedSeq)
   ops.forEach((o, i) => {
-    const cls = o.status === OPERATION_STATUS.completed ? 'done' : o.status === OPERATION_STATUS.failed ? 'failed' : 'unresolved'
+    const cls = o.status === OperationStatus.completed ? 'done' : o.status === OperationStatus.failed ? 'failed' : 'unresolved'
     lines.push(`  ${opNode(i)}["${label(`${o.kind} ${o.name} · ${o.status} · attempts ${o.attempts}`)}"]:::${cls}`)
     lines.push(`  ${stepNode(o.stepId)} --> ${opNode(i)}`)
   })

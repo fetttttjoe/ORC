@@ -36,20 +36,16 @@ export interface MemoryHealth {
 export interface StageProgress { applied: number; total: number }
 
 // The slow derived stages, named. Both run after the replay and neither is reflected in `pending`.
-// A zod enum rather than a const map because this value crosses a PROCESS boundary — the projector
-// publishes it, a different process reads it back — so it is parsed at the door like every other
-// unknown-shaped read, never hand-checked.
-export const MemoryStageName = z.enum([
-  'replaying',  // draining knowledge events into the read model
-  'linking',    // re-RELATEing every note's out-edges (Surreal I/O)
-  'clustering', // re-partitioning the claim corpus through the embedder (ollama)
-])
-export type MemoryStageName = z.infer<typeof MemoryStageName>
-export const MEMORY_STAGE = MemoryStageName.enum
+// crosses a process boundary (projector publishes, another process reads), so it is parsed, never hand-checked
+export enum MemoryStageName {
+  replaying = 'replaying',   // draining knowledge events into the read model
+  linking = 'linking',       // re-RELATEing every note's out-edges (Surreal I/O)
+  clustering = 'clustering', // re-partitioning the claim corpus through the embedder (ollama)
+}
 
 /** the published row, parsed rather than trusted — an unrecognised stage is simply absent */
 export const MemoryStage = z.object({
-  name: MemoryStageName,
+  name: z.enum(MemoryStageName),
   startedAt: z.number(),
   pid: z.number(),
   // Both halves or neither: a lone `applied` renders as "240/" and a lone `total` says nothing about

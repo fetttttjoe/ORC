@@ -1,8 +1,9 @@
 import { afterAll, describe, expect, it } from 'bun:test'
 import pg from 'pg'
 import {
-  Door, EVENT_KIND, NO_CHAT, SIGNAL_OUTCOME,
+  Door, EVENT_KIND, NO_CHAT, SignalOutcome,
   type AgentExecutor, type EventDraft, type ExecutorContext, type Origin, type SplitResult, type UnifiedEvent,
+  RunOutcome,
 } from '@orc/contracts'
 import { draftFixture, stepFixture } from '@orc/contracts/fixtures'
 import { openStorage } from '../storage'
@@ -25,7 +26,7 @@ const leaker: AgentExecutor<unknown> = {
   async *startTurn(ctx: ExecutorContext<unknown>): AsyncGenerator<UnifiedEvent, void, SplitResult[] | undefined> {
     // shaped like a real tool result: the secret sits inside the step's RETURN value
     await ctx.checkpoint('leak', async () => ({ toolOutput: `env dump: ORC_REDACTION_PROBE_KEY=${SECRET}` }))
-    const signal = { stepId: ctx.step.id, runToken: ctx.runToken, outcome: SIGNAL_OUTCOME.success, summary: 'ok' }
+    const signal = { stepId: ctx.step.id, runToken: ctx.runToken, outcome: SignalOutcome.success, summary: 'ok' }
     await ctx.checkpoint('signal:1', async () => signal,
       (): EventDraft[] => [{ kind: EVENT_KIND.signal_received, payload: { stepId: ctx.step.id, runToken: ctx.runToken, signal } }])
     yield { type: 'signal', signal }
@@ -60,7 +61,7 @@ describe('redaction covers what DBOS persists', () => {
     })
     await port.launch()
     cleanup.push(() => port.shutdown())
-    expect(await (await port.startRun(t.id)).wait()).toBe('done')
+    expect(await (await port.startRun(t.id)).wait()).toBe(RunOutcome.done)
 
     const sys = new pg.Client({ connectionString: deriveSystemUrl(db.url, TEST_PROJECT_ID) })
     await sys.connect()

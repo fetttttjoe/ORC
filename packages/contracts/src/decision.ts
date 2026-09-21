@@ -8,10 +8,15 @@ import { MEMORY_LIMITS } from './limits'
 //   accepted   — in force. The reading a decision gets when it names no status at all.
 //   superseded — replaced by a newer decision that links to it with kind 'supersedes'
 //   deprecated — withdrawn with no successor
-export const DECISION_STATUSES = ['proposed', 'accepted', 'superseded', 'deprecated'] as const
-export const DecisionStatus = z.enum(DECISION_STATUSES)
-export type DecisionStatus = z.infer<typeof DecisionStatus>
-export const DECISION_STATUS = DecisionStatus.enum
+export enum DecisionStatus {
+  proposed = 'proposed',
+  accepted = 'accepted',
+  superseded = 'superseded',
+  deprecated = 'deprecated',
+}
+
+// every caller already matches on this accessor, never a raw literal — kept as a plain alias
+export const DECISION_STATUS = DecisionStatus
 
 // The ONE place "no status" becomes a status. A schema default would be wrong here: the store
 // merges on omit, so a defaulted field flips every partial update of a decision back to accepted
@@ -30,7 +35,7 @@ export const DecisionInput = z.object({
   context: z.string().min(1),
   decision: z.string().min(1),
   consequences: z.string().min(1),
-  status: DecisionStatus.optional(),
+  status: z.enum(DecisionStatus).optional(),
   tags: z.array(z.string().max(MEMORY_LIMITS.labelChars)).max(MEMORY_LIMITS.labelItems).default([]),
   supersedes: z.string().regex(MEMORY_ID_RE).optional(),
 })

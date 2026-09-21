@@ -1,7 +1,7 @@
 // Node/edge color vocabulary for the sigma island — pure, zero-import, pinned by colors.test.ts.
 // A WebGL canvas cannot read CSS custom properties, so these are hardcoded copies of the app.css
 // @theme tokens with the token named beside each hex — change a token there, grep the name here.
-// Status strings mirror the TASK_STATUS/STEP_RUN_STATUS wire values; the test pins the set.
+// Status strings mirror the TASK_STATUS/StepRunStatus wire values; the test pins the set.
 
 // TYPE-ONLY imports: erased at build, so this module stays runtime-pure. The "no imports" rule in
 // the header is about the COLOURS — a WebGL canvas cannot read CSS custom properties, so the hexes

@@ -1,5 +1,5 @@
 import type { Origin, ResolvedTool } from '@orc/contracts'
-import { toolError } from '@orc/contracts'
+import { Confidence, toolError } from '@orc/contracts'
 import type { Kernel } from '../kernel'
 import { ANALYZE_STEP_ROLE } from './strategies/grounded-plan'
 
@@ -30,7 +30,7 @@ export function reportCoverageTool(opts: {
         analyzed: { type: 'boolean' },
         scope: { type: 'array', items: { type: 'string' } },
         gaps: { type: 'array', items: { type: 'string' } },
-        confidence: { type: 'string', enum: ['high', 'medium', 'low', 'none'] },
+        confidence: { type: 'string', enum: Object.values(Confidence) },
         notesWritten: { type: 'number' },
       },
       required: ['analyzed'],

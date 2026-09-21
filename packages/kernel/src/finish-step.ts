@@ -1,4 +1,4 @@
-import { CHECKS_EXECUTOR_REF, CHECKS_STEP_ID, FINISH_STEP_ID, ISOLATION_TIER, ROLE_SKILL, STEP_ROLE, STRATEGY, type ChildPlanDraft, type PlanDraft, type PlanStep } from '@orc/contracts'
+import { CHECKS_EXECUTOR_REF, CHECKS_STEP_ID, FINISH_STEP_ID, IsolationTier, ROLE_SKILL, STEP_ROLE, STRATEGY, type ChildPlanDraft, type PlanDraft, type PlanStep } from '@orc/contracts'
 
 // The kernel-appended finish step, in ONE file with ONE import (contracts). Everything about "which
 // plans end with it, and what it looks like" lives here: the two appenders (frozen pipeline and
@@ -134,7 +134,7 @@ export function withFinishStepFull(draft: PlanDraft, opts: FinishStepOptions): P
   if (last === undefined) throw new Error('a plan needs at least one step before the finish step can follow it')
   // never the last step's isolation: a worktree/docker tier would reconcile notes about a tree
   // the operator cannot see, and these steps write knowledge, not source
-  const inherited = { modelRef: last.modelRef, maxIterations: last.maxIterations, isolation: ISOLATION_TIER.local }
+  const inherited = { modelRef: last.modelRef, maxIterations: last.maxIterations, isolation: IsolationTier.local }
   const steps = [...draft.steps]
   if (opts.checks.length > 0)
     steps.push({ ...checksStepFields(steps.map(s => s.id), opts.checks), executorRef: CHECKS_EXECUTOR_REF, ...inherited })

@@ -2,7 +2,7 @@ import { describe, expect, it } from 'bun:test'
 import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import { UNIFIED_EVENT_TYPE, type Checkpoint, type ExecutorContext, type OperationCheckpoint } from '@orc/contracts'
+import { UnifiedEventType, type Checkpoint, type ExecutorContext, type OperationCheckpoint } from '@orc/contracts'
 import { stepFixture } from '@orc/contracts/fixtures'
 import { apiLoopExecutor, executeTool, releaseWriteClaims, TOOL_NAME } from '@orc/executor-api-loop'
 import { scriptModel } from '@orc/executor-api-loop/test-model'
@@ -15,7 +15,7 @@ type Model = ReturnType<typeof scriptModel>
 // pass-through seams: run fn, ignore drafts — enough to execute the fs_write tool (which takes the
 // write-claim) as it flows through ctx.operation, without any DBOS/Postgres machinery.
 const passCheckpoint: Checkpoint = async (_name, fn) => fn()
-const passOperation: OperationCheckpoint = async (_spec, fn) => fn()
+const passOperation: OperationCheckpoint = async (_spec, fn) => fn(1)
 
 function ctx(model: Model, workspaceDir: string, runToken: string): ExecutorContext<Model> {
   return {
@@ -41,7 +41,7 @@ describe('driveGenerator releases a suspended step\'s write-claim when the drive
     // the real failure this fix addresses: the port throws (a cancelled recv) while the generator
     // is suspended at the gate, by which point the fs_write claim is already held.
     await expect(driveGenerator(gen, async ev => {
-      if (ev.type === UNIFIED_EVENT_TYPE.gate) throw new Error('recv cancelled')
+      if (ev.type === UnifiedEventType.gate) throw new Error('recv cancelled')
       return undefined
     })).rejects.toThrow('recv cancelled')
 

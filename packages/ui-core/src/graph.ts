@@ -1,4 +1,4 @@
-import { activation, DEFAULT_HALF_LIFE_DAYS, edgeKey, isUiMetaNote, noteKey, noteLabel, STEP_RUN_STATUS, type AccessStats, type LinkKind, type MemoryFold } from '@orc/contracts'
+import { activation, DEFAULT_HALF_LIFE_DAYS, edgeKey, isUiMetaNote, noteKey, noteLabel, StepRunStatus, type AccessStats, type LinkKind, type MemoryFold } from '@orc/contracts'
 import type { State } from '@orc/kernel'
 
 // wire shapes + vocabulary live in graph-wire.ts (zero-import, shared with the browser)
@@ -41,7 +41,7 @@ export function buildGraph(state: State, mem: MemoryFold, opts: GraphBuildOption
       // as a duplicate insert; the step names itself. Running steps carry their live loop
       // progress so the graph shows plan iteration, not just that something works.
       const base = s.title === t.title ? `${s.title} · ${s.id}` : s.title
-      const label = run?.status === STEP_RUN_STATUS.running ? `${base} · ${run.iterations}/${s.maxIterations}` : base
+      const label = run?.status === StepRunStatus.running ? `${base} · ${run.iterations}/${s.maxIterations}` : base
       nodes.push({ id: stepNodeId(t.id, s.id), type: 'step', label, detail: run?.status ?? 'pending' })
       links.push({ source: t.id, target: stepNodeId(t.id, s.id), type: EDGE.plan })
       for (const dep of s.dependsOn) links.push({ source: stepNodeId(t.id, dep), target: stepNodeId(t.id, s.id), type: EDGE.depends })

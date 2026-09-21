@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test'
-import { EVENT_KIND, PAYLOAD_SCHEMAS } from '@orc/contracts'
+import { Confidence, EVENT_KIND, PAYLOAD_SCHEMAS } from '@orc/contracts'
 import type { GroundingVerdict } from './grounding-freshness'
 import { groundingDirective, isMixed, mixedGroundingDraft, reusedCitation, scanScope } from './grounding-scope'
 
@@ -108,7 +108,7 @@ describe('mixedGroundingDraft', () => {
     const payload = PAYLOAD_SCHEMAS.analysis_completed.parse(draft.payload)
     expect(payload.analyzed).toBe(true)
     expect(payload.notesWritten).toBe(0)
-    expect(payload.confidence).toBe('medium')
+    expect(payload.confidence).toBe(Confidence.medium)
     expect(payload.scope.join(' | ')).toContain(`arch-overview@${HEAD} current at HEAD ${HEAD}`)
     expect(payload.gaps[0]).toContain('incremental re-scan: only 2 path(s) in scope')
     const gaps = payload.gaps.join(' | ')

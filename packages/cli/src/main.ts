@@ -2,7 +2,7 @@ import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, 
 import { spawn } from 'node:child_process'
 import path from 'node:path'
 import { Command, InvalidArgumentError } from 'commander'
-import { AUTHOR_SOURCE, claimHistory, Door, NO_CHAT, EDGE_DIRECTION, errorMessage, EVENT_KIND, foldMemory, LINK_KINDS, MASTERPLAN_NOTE_ID, MEMORY_ACCESS, MemoryDeletedPayload, MemoryScope, MemoryWrittenPayload, noteKey, NOTE_KINDS, NoteKind, NOTE_TIER, NOTE_TIERS, NoteTier, parseLinkSpec, PlanDraft, RUN_OUTCOME, STRATEGY, TASK_STATUS, TERMINAL_TASK_STATUS, LinkKind, slugId, type Analyzer, type EventRecord, type MemoryAuthor, type MemoryLink, type NoteFields, type ExecutionPort, type Plan, type TaskNode, type WorkspaceWithHealth, formatModelRate } from '@orc/contracts'
+import { AUTHOR_SOURCE, claimHistory, Door, NO_CHAT, EDGE_DIRECTION, errorMessage, EVENT_KIND, EventKind, foldMemory, LINK_KINDS, MASTERPLAN_NOTE_ID, MEMORY_ACCESS, MemoryDeletedPayload, MemoryScope, MemoryWrittenPayload, noteKey, NOTE_KINDS, NoteKind, NOTE_TIER, NOTE_TIERS, NoteTier, parseLinkSpec, PlanDraft, RunOutcome, STRATEGY, TASK_STATUS, TERMINAL_TASK_STATUS, LinkKind, slugId, type Analyzer, type EventRecord, type MemoryAuthor, type MemoryLink, type NoteFields, type ExecutionPort, type Plan, type TaskNode, type WorkspaceWithHealth, formatModelRate } from '@orc/contracts'
 import { openStorage, Kernel, atomicWriteFileSync, listProjectIds, claimSlot, fold, gatedChildren, freezePlan, liveSupervisors, orphanTasks, staleSupervisors, grantExtensionTrust, grantMcpTrust, initializeProject, isExtensionTrusted, isMcpTrusted, loadConfig, loadTrust, migrateDatabase, requireProject, runtimeLockHeld, stepUsage, subtreeUsage, tasksByWorkspace, taskUsage, type EventLog, type OrcConfig, type PluginHost, type ProjectConfig, type Storage } from '@orc/kernel'
 import { createVaultProjector, parsePlanFile } from '@orc/vault-projector'
 import { archiveCandidates, consolidateTask, CONSOLIDATE_EXECUTOR, createDriftProbe, frontier, needsReground, probeMemory, RECHECK_KINDS, recheckNotes, restampToHead, summarize, taskInfo } from '@orc/memory'
@@ -29,6 +29,8 @@ import { serveLogFile, servePidFile } from './serve-paths'
 import { CommandFailure, EXIT_CODE } from './exit'
 import { formatUsageLine } from './usage-render'
 import { watchSubtree, type TailResult } from './watch'
+import { watchStream } from './stream-watch'
+import { untilInterrupted } from './until-interrupted'
 import type { PlanSource } from '@orc/ui-core'
 
 // Every command in this file enters through the terminal, so every event it causes is stamped with
@@ -58,8 +60,7 @@ function buildCopilotConfig(
 }
 import type { McpHub } from '@orc/mcp-client'
 
-// loadConfig is the ONE resolution of env → .orc/config.json → default; every command
-// (read-only or executing) must land on the same database, bound to one project
+// config is the caller's: doors and finishChecks are operator config this factory must not invent
 export async function openKernel(
   url: string,
   opts: {
@@ -69,12 +70,10 @@ export async function openKernel(
     analyzers?: Map<string, Analyzer>
     send?: (workflowId: string, message: string, topic: string, idempotencyKey: string) => Promise<void>
     onAppend?: (e: EventRecord) => void
-  } = {},
+    config: OrcConfig
+  },
 ): Promise<{ kernel: Kernel; log: EventLog; storage: Storage }> {
-  // one config read for both the project binding and the approval doors: the gate's accepted-door
-  // set is operator config, so every kernel this factory hands out must already carry it — a
-  // kernel built on the default list would silently refuse approvals the operator opened a door for.
-  const config = loadConfig()
+  const { config } = opts
   const projectId = opts.projectId ?? requireProject(config).projectId
   const storage = await openStorage(url, { projectId, redactEnv: opts.redactEnv })
   const log = storage.events
@@ -562,6 +561,18 @@ export function buildProgram(
       ))
     })
 
+  program
+    .command('watch')
+    .description("follow the project's whole event log live — one line per event (seq, kind, summary) — until interrupted")
+    .option('--since <seq>', 'only events after this sequence (default: a live tail from now, nothing replayed)', parseNonNegativeInteger)
+    .option('--kind <kind...>', `only these event kinds (repeatable): ${Object.values(EventKind).join(', ')}`)
+    .action(async (opts: { since?: number; kind?: string[] }) => {
+      const kinds = opts.kind?.map(k => enumArg<EventKind>('--kind', Object.values(EventKind))(k))
+      const unsubscribe = await watchStream(requireKernel(), { since: opts.since, kinds }, line => console.log(line))
+      await untilInterrupted()
+      await unsubscribe()
+    })
+
   // one shared implementation of every mutating command — the web adapter gets the same object.
   // (discovery is declared up top so the `plan` command's rate line can reach it too)
   const actions = () => buildOrcActions({ kernel: requireKernel(), ensureRuntime, plugin, listModels: discovery?.listModels, listModelOptions: discovery?.listModelOptions })
@@ -642,7 +653,7 @@ export function buildProgram(
     const state = await requireKernel().state()
     console.log(formatUsageLine(subtreeUsage(state, rootId)))
     console.log(`run finished: ${result.outcome}`)
-    if (result.outcome !== RUN_OUTCOME.done) throw new CommandFailure(EXIT_CODE.failure)
+    if (result.outcome !== RunOutcome.done) throw new CommandFailure(EXIT_CODE.failure)
   }
 
   // The run a whole tree belongs to: a split child's work only ever resolves a gate held by an
@@ -710,6 +721,13 @@ export function buildProgram(
     .action(async (opts: { port: number }) => {
       const { startGraphUi } = await import('@orc/graph-ui') // lazy: keep CLI startup lean
       const { appendCopilotExchange } = await import('@orc/graph-ui/copilot-journal')
+      const { ensureGraphUiDistFresh } = await import('@orc/graph-ui/dist-freshness')
+      const dist = await ensureGraphUiDistFresh() // refuse or rebuild a stale web/dist before serving it
+      if (!dist.ok) {
+        console.error(`graph ui: web/dist is ${dist.verdict} and could not be rebuilt — run \`${dist.manualBuildCommand}\``)
+        throw new CommandFailure(EXIT_CODE.failure)
+      }
+      if (dist.rebuilt) console.log(`graph ui: web/dist was ${dist.verdict} — rebuilt automatically`)
       const cfg = plugin?.config
       const ui = startGraphUi({
         url: (cfg ?? loadConfig()).databaseUrl,
@@ -742,7 +760,8 @@ export function buildProgram(
         appendExchange: plugin ? async x => appendCopilotExchange(plugin.log, x, Door.web) : undefined,
       })
       console.log(`graph ui on http://127.0.0.1:${ui.port}`)
-      await new Promise(() => {}) // serve until Ctrl-C
+      await untilInterrupted()
+      await ui.stop()
     })
 
   // Phase 1 keeps exactly one supervisor per project: the zone write-fence is still an in-process

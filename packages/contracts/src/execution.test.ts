@@ -1,33 +1,34 @@
 import { describe, expect, it } from 'bun:test'
-import { EventKind, PAYLOAD_SCHEMAS } from './events'
+import { EventKind, PAYLOAD_SCHEMAS, type EventDraft } from './events'
 import { EVENT_KIND } from './event-kinds'
 import {
   addUsage, classifiedError, costUSDFor, failureClassOf, isTerminalError, modelIdsFrom, resolveModel, terminalError,
-  Signal, UnifiedEvent, FAILURE_CLASS, SIGNAL_OUTCOME,
-  type EventDraft, type ModelProvider, type OperationCheckpoint, type Usage,
+  Signal, UnifiedEvent, FailureClass, SignalOutcome,
+  type ModelProvider, type OperationCheckpoint, type Usage,
 } from './execution'
+import { OperationKind } from './operations'
 
 const usage = (i: number, o: number, cost: number | null = null, estimated = false): Usage =>
   ({ inputTokens: i, outputTokens: o, costUSD: cost, estimated })
 
 describe('execution contracts', () => {
   it('has a payload schema for every event kind (incl. the 8 new ones)', () => {
-    expect(EventKind.options).toContain('run_started')
-    expect(EventKind.options).toContain('step_failed')
-    for (const kind of EventKind.options) expect(PAYLOAD_SCHEMAS[kind]).toBeDefined()
+    expect(Object.values(EventKind)).toContain(EventKind.run_started)
+    expect(Object.values(EventKind)).toContain(EventKind.step_failed)
+    for (const kind of Object.values(EventKind)) expect(PAYLOAD_SCHEMAS[kind]).toBeDefined()
   })
 
   it('step_failed payload requires a failure class', () => {
     expect(() => PAYLOAD_SCHEMAS.step_failed.parse({ stepId: 's', runToken: 'r', message: 'x' })).toThrow()
     expect(PAYLOAD_SCHEMAS.step_failed.parse({
-      stepId: 's', runToken: 'r', class: FAILURE_CLASS.agent_error, message: 'x',
+      stepId: 's', runToken: 'r', class: FailureClass.agent_error, message: 'x',
     })).toBeTruthy()
   })
 
   it('UnifiedEvent discriminates on type', () => {
     const ev = UnifiedEvent.parse({
       type: 'signal',
-      signal: { stepId: 's1', runToken: 'rt', outcome: SIGNAL_OUTCOME.success, summary: 'done' },
+      signal: { stepId: 's1', runToken: 'rt', outcome: SignalOutcome.success, summary: 'done' },
     })
     expect(ev.type).toBe('signal')
     expect(() => UnifiedEvent.parse({ type: 'nope' })).toThrow()
@@ -71,14 +72,14 @@ describe('execution contracts', () => {
     // the test-double shape every executor test uses in place of the DBOS journal
     const captured: EventDraft[] = []
     const operation: OperationCheckpoint = async (_spec, fn, toEvents) => {
-      const r = await fn()
+      const r = await fn(1)
       if (toEvents) captured.push(...toEvents(r))
       return r
     }
     const result = await operation(
-      { operationId: 'r1:model:1', kind: 'model', name: 'fake/m', before: {} },
+      { operationId: 'r1:model:1', kind: OperationKind.model, name: 'fake/m', before: {} },
       async () => 'answer',
-      r => [{ kind: EVENT_KIND.agent_call, payload: { response: r } }],
+      r => [{ kind: EVENT_KIND.agent_call, payload: { stepId: 's', runToken: 'r1', iteration: 1, request: {}, response: r } }],
     )
     expect(result).toBe('answer')
     expect(captured).toHaveLength(1)
@@ -99,9 +100,9 @@ describe('execution contracts', () => {
   })
 
   it('classifiedError is terminal and carries its class', () => {
-    const err = classifiedError(FAILURE_CLASS.validation_error, 'bad ref')
+    const err = classifiedError(FailureClass.validation_error, 'bad ref')
     expect(isTerminalError(err)).toBe(true)
-    expect(failureClassOf(err)).toBe(FAILURE_CLASS.validation_error)
+    expect(failureClassOf(err)).toBe(FailureClass.validation_error)
     expect(failureClassOf(new Error('plain'))).toBeNull()
     expect(failureClassOf({ failureClass: 'not-a-class' })).toBeNull()
   })

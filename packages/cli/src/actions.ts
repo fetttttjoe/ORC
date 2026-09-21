@@ -1,4 +1,4 @@
-import { authorSourceOf, errorMessage, EVENT_KIND, ModelsDiscoveredPayload, NOTE_KIND, TASK_STATUS, costUSDFor, parseModelRef, type ModelOption, type Origin, type TaskStatus } from '@orc/contracts'
+import { authorSourceOf, errorMessage, EVENT_KIND, ModelsDiscoveredPayload, NOTE_KIND, TASK_STATUS, costUSDFor, parseModelRef, type EventInput, type ModelOption, type Origin, type TaskStatus } from '@orc/contracts'
 import { Kernel, blockingVerdicts, canRetry, deriveSystemUrl, dropSystemDatabase, initializeProject, liveSupervisors, loadConfig, openStorage, resetSystemDatabase, subtreeTaskIds, type EventLog, type ProjectConfig, type Storage } from '@orc/kernel'
 import { cwdAuthor, cwdWorkspace, cwdWorkspaceId, type AuthorExtras } from './cwd-workspace'
 import { adoptCwd } from './workspace-adopt'
@@ -22,7 +22,7 @@ import path from 'node:path'
 // The author is a PARAMETER even here, where the note is project metadata rather than knowledge:
 // MemoryAuthor is ONE shape, and the workspace has to be the checkout the append actually lands in
 // — which for newProject/purgeProject is NOT the fold this process booted against.
-const uiNote = (id: string, title: string, summary: string, author: MemoryAuthor, origin: Origin) => ({
+const uiNote = (id: string, title: string, summary: string, author: MemoryAuthor, origin: Origin): EventInput => ({
   ...origin, taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_written,
   payload: { note: { id, title, kind: NOTE_KIND.fact, summary }, author },
 })

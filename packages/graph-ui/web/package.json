@@ -5,8 +5,8 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "vite build",
-    "check": "svelte-check --tsconfig ./tsconfig.json --tsgo --threshold error"
+    "build": "vite build && bun ../src/stamp-dist.ts",
+    "check": "svelte-check --tsconfig ./tsconfig.json --tsgo --threshold error && svelte-check --tsconfig ./tsconfig.test.json --tsgo --threshold error"
   },
   "dependencies": {
     "@fontsource/ibm-plex-mono": "^5.3.0",

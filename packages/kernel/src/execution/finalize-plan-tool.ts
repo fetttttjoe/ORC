@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import { APPROVAL_ANSWER, GROUNDED_APPROVAL_DOOR, MASTERPLAN_NOTE_ID, toolError, ApprovalPolicy, type Origin, type ResolvedTool } from '@orc/contracts'
+import { APPROVAL_ANSWER, GroundedApprovalDoor, MASTERPLAN_NOTE_ID, toolError, ApprovalPolicy, type Origin, type ResolvedTool } from '@orc/contracts'
 import { SPLIT_ORIGIN, type Kernel } from '../kernel'
 import { freezePlan, planScope, PLAN_STEP_ROLE } from './strategies/grounded-plan'
 
@@ -31,7 +31,7 @@ export function finalizePlanTool(opts: {
   // opened it knows how it is driven.
   const doorAdvice = (): string =>
     kernel.approvalDoors
-      .map(d => d === GROUNDED_APPROVAL_DOOR.cli ? '`orc reply <taskId> approve` in a terminal, or in the web UI' : `the '${d}' door`)
+      .map(d => d === GroundedApprovalDoor.cli ? '`orc reply <taskId> approve` in a terminal, or in the web UI' : `the '${d}' door`)
       .join(', or ')
   return {
     ref: 'kernel/finalize_plan', name: 'finalize_plan',

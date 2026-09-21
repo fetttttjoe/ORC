@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 import { isConnectionRefused, loadConfig, ProjectNotInitializedError, requireProject } from '@orc/kernel'
-import { Door, errorMessage, HOOK_NAME, NO_CHAT } from '@orc/contracts'
+import { Door, errorMessage, HookName, NO_CHAT } from '@orc/contracts'
 import { buildProgram, openKernel, runInit, runMigrate } from './main'
 import { EXIT_CODE, exitCodeFor } from './exit'
 import type { Command } from 'commander'
@@ -51,13 +51,14 @@ async function main(): Promise<number> {
     const config = requireProject(loadConfig())
     const loaded = await buildPlugins(config)
     plugins = loaded
-    await loaded.host.hooks.emit(HOOK_NAME.session_start)
+    await loaded.host.hooks.emit(HookName.session_start)
     // Timed with the SAME instrument buildRuntime uses for its own phases: this open (via
     // openKernel) happens before buildRuntime ever runs and threads its storage in already, so
     // buildRuntime's own bootPhase('storage', ...) call is always skipped on this path — without
     // this, the storage open (part of the boot window) never appears in the printed boot line.
     const openTiming: Array<[string, number]> = []
     const opened = await bootPhase('storage', () => openKernel(config.databaseUrl, {
+      config,
       projectId: config.projectId,
       redactEnv: config.redactEnv,
       refValidator: loaded.host.refValidator,
@@ -66,7 +67,7 @@ async function main(): Promise<number> {
       // runtime. The supervisor's router already delivers every feedback_provided under the same
       // idempotency key (the event's own seq), so this was a duplicate of the delivery that works
       // in both modes — and the only one that could throw where there is nothing to send with.
-      onAppend: e => loaded.host.hooks.dispatch(HOOK_NAME.event_appended, e),
+      onAppend: e => loaded.host.hooks.dispatch(HookName.event_appended, e),
     }), openTiming)
     storage = opened.storage
     // Adoption runs at EVERY boot, here and nowhere else: this is the one place a kernel is

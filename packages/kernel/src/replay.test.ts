@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test'
-import { Door, EVENT_KIND, NO_CHAT, type OperationSpec, type Origin, type PlanDraft } from '@orc/contracts'
+import { Door, EVENT_KIND, NO_CHAT, OperationKind, OperationStatus, TASK_STATUS, type OperationSpec, type Origin, type PlanDraft } from '@orc/contracts'
 import { draftFixture, must } from '@orc/contracts/fixtures'
 import { openStorage } from './storage'
 import { Kernel } from './kernel'
@@ -30,8 +30,8 @@ describe('replay guarantee', () => {
 
       const k2 = new Kernel((await openStorage(db.url, { projectId: TEST_PROJECT_ID })).events)
       expect(await k2.state()).toEqual(before)
-      expect((await k2.getTask(t.id))?.status).toBe('approved')
-      expect((await k2.getTask(child.id))?.status).toBe('draft')
+      expect((await k2.getTask(t.id))?.status).toBe(TASK_STATUS.approved)
+      expect((await k2.getTask(child.id))?.status).toBe(TASK_STATUS.draft)
     } finally {
       await db.drop()
     }
@@ -73,7 +73,7 @@ describe('replay guarantee', () => {
       await k.approvePlan(t.id, undefined, undefined, CLI)
 
       const opContext = { taskId: t.id, stepId: 's1', runToken: `step:${t.id}:s1:a1`, origin: CLI }
-      const spec: OperationSpec = { operationId: `${opContext.runToken}:model:1`, kind: 'model', name: 'fake/m', before: { q: 1 } }
+      const spec: OperationSpec = { operationId: `${opContext.runToken}:model:1`, kind: OperationKind.model, name: 'fake/m', before: { q: 1 } }
       await storage.operations.beginOperation(opContext, spec)
       const startedSeq = must((await log.byTask(t.id)).at(-1), 'last event from task').seq
       await storage.operations.completeOperation(opContext, spec, 1, { text: 'result' })
@@ -89,11 +89,11 @@ describe('replay guarantee', () => {
       const foldedOp = state.operations.get(spec.operationId)
       const [journalOp] = await storage.operations.operationsFor(t.id)
       expect(foldedOp).toEqual(journalOp)
-      expect(foldedOp?.status).toBe('completed')
+      expect(foldedOp?.status).toBe(OperationStatus.completed)
 
       // replay-at-sequence: at the start transition the node is honestly unresolved
       const atStart = fold(events.filter(e => e.seq <= startedSeq))
-      expect(atStart.operations.get(spec.operationId)?.status).toBe('started')
+      expect(atStart.operations.get(spec.operationId)?.status).toBe(OperationStatus.started)
 
       // artifact receipt visible in state and in the rendered lineage input
       expect(state.artifacts.get(t.id)?.map(a => a.path)).toEqual(['report.md'])

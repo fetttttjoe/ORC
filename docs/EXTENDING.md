@@ -47,11 +47,13 @@ step is adding a seam to `packages/contracts`, not code to the kernel.
    executor, provider) gets a check in `refValidator`
    (`packages/kernel/src/plugins/host.ts`) so bad plans die before approval,
    not mid-run.
-6. **No scattered string literals** for matched values — always the const maps
-   (`TASK_STATUS`, `EVENT_KIND`, `ISOLATION_TIER`, `FAILURE_CLASS`, `NOTE_KIND`,
-   `MEMORY_ACCESS`, `RETENTION`, …). A new enum ships its map in the same
-   commit; a `z.enum` without one guarantees literals scattered at the call
-   sites within a release.
+6. **No scattered string literals** for matched values — always the named
+   vocabulary (`TASK_STATUS`, `EVENT_KIND`, `IsolationTier`, `FailureClass`,
+   `NOTE_KIND`, `MEMORY_ACCESS`, `RETENTION`, …): a TS `enum` parsed with
+   `z.enum(Enum)`, or an array paired with its `.enum` accessor. A new
+   vocabulary ships its accessor in the same commit; a bare literal union
+   without one guarantees literals scattered at the call sites within a
+   release.
 7. **Deliberate ceilings carry a `ponytail:` comment** naming the ceiling and
    the upgrade path (existing examples: global advisory lock, refold-per-call,
    500 ms polling). A shortcut without its comment is a bug report waiting.

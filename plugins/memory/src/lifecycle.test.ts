@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test'
-import { Door, EVENT_KIND, NOTE_TIER, NO_CHAT, planScope, type EventRecord, type MemoryAuthor, type NoteSummary } from '@orc/contracts'
+import { AUTHOR_SOURCE, Door, EVENT_KIND, NOTE_TIER, NO_CHAT, planScope, type EventRecord, type MemoryAuthor, type NoteSummary } from '@orc/contracts'
 import { TEST_WORKSPACE_ID, authorFixture, eventFixture } from '@orc/contracts/fixtures'
 import { CONSOLIDATE_EXECUTOR, type ConsolidationLog, type ConsolidationStore } from './consolidate'
 import { consolidateOnCompletion, createDrain, taskCompletedId } from './lifecycle'
@@ -38,7 +38,7 @@ describe('consolidateOnCompletion resolves the completed task once', () => {
   const TASK = 'reso-task-1'
   // Consolidation is a background drain over a completed task, not a turn anyone typed, so it
   // belongs to no chat and comes through the supervisor door.
-  const CONSOLIDATE_AUTHOR: MemoryAuthor = { source: 'agent', workspaceId: TEST_WORKSPACE_ID, executor: CONSOLIDATE_EXECUTOR, origin: NO_CHAT(Door.supervisor) }
+  const CONSOLIDATE_AUTHOR: MemoryAuthor = authorFixture({ source: AUTHOR_SOURCE.agent, executor: CONSOLIDATE_EXECUTOR, origin: NO_CHAT(Door.supervisor) })
 
   const created: EventRecord = eventFixture({
     taskId: TASK, kind: EVENT_KIND.task_created,

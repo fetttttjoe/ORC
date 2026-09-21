@@ -1,7 +1,7 @@
 import {
-  claimHitKey, errorMessage, LINK_KIND, MEMORY_ACCESS, MEMORY_LIMITS, MEMORY_USE, MemoryScope, noteKey, NOTE_TIER, planScope, SEARCH_MODE, SIGNAL_OUTCOME, slugId, taskLaneScopes,
+  claimHitKey, errorMessage, LINK_KIND, MEMORY_ACCESS, MEMORY_LIMITS, MEMORY_USE, MemoryScope, noteKey, NOTE_TIER, planScope, SEARCH_MODE, SignalOutcome, slugId, taskLaneScopes,
   type ClaimHit, type VerifiedStamp, type LinkKind, type MemoryAuthor, type MemoryStore, type ResolvedTool,
-  type RecalledContext, type SignalOutcome, type StepMemory,
+  type RecalledContext, type StepMemory,
 } from '@orc/contracts'
 import { applyBudget } from './budget'
 import { memoryTools, unavailableMemoryTools, type MemoryRole } from './tools'
@@ -18,9 +18,9 @@ interface AmbientSpec { idPrefix: string; tags: readonly string[] }
 // for the id a SIBLING links to — one drifting from the other is a dead edge
 const STEP_NOTE_PREFIX = 'step'
 const AMBIENT: Record<SignalOutcome, AmbientSpec | null> = {
-  [SIGNAL_OUTCOME.success]: { idPrefix: STEP_NOTE_PREFIX, tags: ['ambient'] },
-  [SIGNAL_OUTCOME.failure]: { idPrefix: `failed ${STEP_NOTE_PREFIX}`, tags: ['ambient', 'failure'] },
-  [SIGNAL_OUTCOME.partial]: null,
+  [SignalOutcome.success]: { idPrefix: STEP_NOTE_PREFIX, tags: ['ambient'] },
+  [SignalOutcome.failure]: { idPrefix: `failed ${STEP_NOTE_PREFIX}`, tags: ['ambient', 'failure'] },
+  [SignalOutcome.partial]: null,
 }
 
 // ONE derivation: the id a step writes and the id a sibling links to must match or the edge is dead.

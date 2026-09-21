@@ -1,4 +1,4 @@
-import { AUTO_HEAL_MODE, errorMessage, STRATEGY, type AutoHealMode, type PlanDraft } from '@orc/contracts'
+import { AutoHealMode, errorMessage, STRATEGY, type PlanDraft } from '@orc/contracts'
 import { DEFAULT_TEMPLATE_MODEL, singleStepDraft } from './plan-template'
 
 /**
@@ -55,7 +55,7 @@ export function createAutoHeal(deps: AutoHealDeps): { onCommitRecorded: () => vo
   const run = async (): Promise<void> => {
     try {
       await deps.restamp()
-      if (deps.mode !== AUTO_HEAL_MODE.draftSweep) return
+      if (deps.mode !== AutoHealMode.draftSweep) return
       const drifted = await deps.drifted()
       // a failed restamp never reaches here (the catch below) — a sweep drafted on top of a
       // broken store would page the human about work the free pass may already cover
@@ -67,7 +67,7 @@ export function createAutoHeal(deps: AutoHealDeps): { onCommitRecorded: () => vo
 
   return {
     onCommitRecorded: () => {
-      if (deps.mode === AUTO_HEAL_MODE.off) return
+      if (deps.mode === AutoHealMode.off) return
       // every commit RESETS the window: a burst (rebase, stacked hand-commits) lands as one
       // reaction after the quiet period, not one per commit
       cancel?.()

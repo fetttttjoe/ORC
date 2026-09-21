@@ -2,17 +2,17 @@ import { describe, expect, it } from 'bun:test'
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import { Door, MemoryScope, NO_CHAT, type MemoryAuthor, type NeighborResult, LINK_KIND } from '@orc/contracts'
+import { MemoryScope, type MemoryAuthor, type NeighborResult, LINK_KIND } from '@orc/contracts'
 import { openStorage } from '@orc/kernel'
 import { createTestDb, TEST_PROJECT_ID } from '@orc/kernel/test-helpers'
 import { createMemoryProjector } from './projector'
 import { createMemoryStore } from './store'
 import { SurrealMemory } from './surreal'
 import { createTestSurreal } from './test-helpers'
-import { TEST_WORKSPACE_ID } from '@orc/contracts/fixtures'
+import { authorFixture } from '@orc/contracts/fixtures'
 
 // These notes are written the way `orc memory write` writes them: no chat, through the CLI door.
-const CLI: MemoryAuthor = { source: 'cli', workspaceId: TEST_WORKSPACE_ID, origin: NO_CHAT(Door.cli) }
+const CLI: MemoryAuthor = authorFixture()
 
 describe('typed-link traversal (e2e)', () => {
   // The link table is a function of the LIVE NOTE SET, and stays one across a delete.

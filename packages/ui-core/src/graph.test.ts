@@ -1,6 +1,6 @@
 import { afterAll, describe, expect, it } from 'bun:test'
-import { Door, EVENT_KIND, foldMemory, type EventRecord, LINK_KIND, NO_CHAT } from '@orc/contracts'
-import { draftFixture, eventFixture, stepFixture, must } from '@orc/contracts/fixtures'
+import { AUTHOR_SOURCE, Door, EVENT_KIND, foldMemory, TASK_STATUS, type EventRecord, type MemoryAuthor, LINK_KIND, NO_CHAT } from '@orc/contracts'
+import { authorFixture, draftFixture, eventFixture, stepFixture, must } from '@orc/contracts/fixtures'
 import { Kernel, emptyFold, fold, openStorage, type EventLog } from '@orc/kernel'
 import { createTestDb, seedTestWorkspace, TEST_PROJECT_ID, TEST_WORKSPACE_ID } from '@orc/kernel/test-helpers'
 import { buildGraph, diffGraphs, EDGE, linkKey, noteNodeId, stepNodeId } from './graph'
@@ -29,7 +29,7 @@ async function freshLog(): Promise<EventLog> {
 const CLI = NO_CHAT(Door.cli)
 const SUPERVISOR = NO_CHAT(Door.supervisor)
 
-const writeNote = (log: EventLog, id: string, extra: Record<string, unknown> = {}, author: Record<string, unknown> = { source: 'cli', workspaceId: TEST_WORKSPACE_ID, origin: CLI }) =>
+const writeNote = (log: EventLog, id: string, extra: Record<string, unknown> = {}, author: MemoryAuthor = authorFixture()) =>
   log.append({ ...CLI, taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_written, payload: { note: { id, title: id, ...extra }, author } })
 
 // one realistic history: task → approved 2-step plan → step s1 runs and produces an artifact,
@@ -45,7 +45,7 @@ async function seed(log: EventLog): Promise<{ taskId: string }> {
   await log.append({ ...SUPERVISOR, taskId: t.id, stepId: 's1', runToken: 'r1', kind: EVENT_KIND.artifact_produced, payload: { path: 'out.txt', sha256: SHA, size: 3 } })
   await log.append({ ...SUPERVISOR, taskId: t.id, stepId: 's1', runToken: 'r1', kind: EVENT_KIND.step_completed, payload: { stepId: 's1', runToken: 'r1', summary: 'done' } })
   await writeNote(log, 'base-note')
-  await writeNote(log, 'task-note', { links: [{ id: 'base-note' }] }, { source: 'agent', workspaceId: TEST_WORKSPACE_ID, taskId: t.id, origin: SUPERVISOR })
+  await writeNote(log, 'task-note', { links: [{ id: 'base-note' }] }, authorFixture({ source: AUTHOR_SOURCE.agent, taskId: t.id, origin: SUPERVISOR }))
   return { taskId: t.id }
 }
 
@@ -55,7 +55,7 @@ async function seed(log: EventLog): Promise<{ taskId: string }> {
 describe('artifact node identity', () => {
   it('emits one node per path, and diffing a graph against itself is empty', () => {
     const st = emptyFold().state
-    st.tasks.set('t1', { id: 't1', parentId: null, workspaceId: TEST_WORKSPACE_ID, type: 'generic', title: 'T', spec: '', status: 'running', zone: [], budgetUSD: null, depth: 0, createdAt: '2026-07-27T00:00:00.000Z' })
+    st.tasks.set('t1', { id: 't1', parentId: null, workspaceId: TEST_WORKSPACE_ID, type: 'generic', title: 'T', spec: '', status: TASK_STATUS.running, zone: [], budgetUSD: null, depth: 0, createdAt: '2026-07-27T00:00:00.000Z' })
     st.artifacts.set('t1', [
       { path: 'out.md', sha256: 'a'.repeat(64), size: 10, stepId: null, runToken: null, seq: 1 },
       { path: 'out.md', sha256: 'b'.repeat(64), size: 20, stepId: null, runToken: null, seq: 2 },
@@ -147,8 +147,8 @@ describe('buildGraph', () => {
 
   it('derives note heat from access events, and diffGraphs patches on heat change', () => {
     const ts = '2026-07-01T00:00:00.000Z'
-    const written = { kind: EVENT_KIND.memory_written, ts, payload: { note: { id: 'hot', scope: 'project', title: 'hot' }, author: { source: 'cli', workspaceId: TEST_WORKSPACE_ID, origin: CLI } } }
-    const access = { kind: EVENT_KIND.memory_accessed, ts, payload: { id: 'hot', scope: 'project', mode: 'read', author: { source: 'cli', workspaceId: TEST_WORKSPACE_ID, origin: CLI } } }
+    const written = { kind: EVENT_KIND.memory_written, ts, payload: { note: { id: 'hot', scope: 'project', title: 'hot' }, author: authorFixture() } }
+    const access = { kind: EVENT_KIND.memory_accessed, ts, payload: { id: 'hot', scope: 'project', mode: 'read', author: authorFixture() } }
     const empty = fold([]) // no tasks — notes fold straight from the events
     const cold = buildGraph(empty, foldMemory([written]), { now: ts })
     const hot = buildGraph(empty, foldMemory([written, access, access, access]), { now: ts })
@@ -170,10 +170,10 @@ describe('buildGraph', () => {
       payload: { task: { id: 't1', parentId: null, workspaceId: TEST_WORKSPACE_ID, type: 'generic', title: 'task', spec: '', status: 'draft', zone: [], budgetUSD: null, depth: 0, createdAt: ts } },
     })])
     const events = [
-      { kind: EVENT_KIND.memory_written, ts, payload: { note: { id: 'eseed', scope: 'project', title: 'eseed', links: [{ id: 'ewalked', kind: LINK_KIND.relates_to }] }, author: { source: 'agent', workspaceId: TEST_WORKSPACE_ID, taskId: 't1', origin: SUPERVISOR } } },
-      { kind: EVENT_KIND.memory_written, ts, payload: { note: { id: 'ewalked', scope: 'project', title: 'ewalked' }, author: { source: 'cli', workspaceId: TEST_WORKSPACE_ID, origin: CLI } } },
+      { kind: EVENT_KIND.memory_written, ts, payload: { note: { id: 'eseed', scope: 'project', title: 'eseed', links: [{ id: 'ewalked', kind: LINK_KIND.relates_to }] }, author: authorFixture({ source: AUTHOR_SOURCE.agent, taskId: 't1', origin: SUPERVISOR }) } },
+      { kind: EVENT_KIND.memory_written, ts, payload: { note: { id: 'ewalked', scope: 'project', title: 'ewalked' }, author: authorFixture() } },
       // via-provenance access: the connection itself, not just the node, gets credit
-      { kind: EVENT_KIND.memory_accessed, ts, payload: { id: 'ewalked', scope: 'project', mode: 'read', author: { source: 'cli', workspaceId: TEST_WORKSPACE_ID, origin: CLI }, via: { seed: 'eseed', kind: LINK_KIND.relates_to, direction: 'out' } } },
+      { kind: EVENT_KIND.memory_accessed, ts, payload: { id: 'ewalked', scope: 'project', mode: 'read', author: authorFixture(), via: { seed: 'eseed', kind: LINK_KIND.relates_to, direction: 'out' } } },
     ]
     const g = buildGraph(state, foldMemory(events), { now: ts })
     const edge = must(g.links.find(l => l.source === noteNodeId('project', 'eseed') && l.target === noteNodeId('project', 'ewalked')), 'edge eseed→ewalked')
@@ -189,7 +189,7 @@ describe('buildGraph', () => {
     const log = await freshLog()
     await seed(log)
     await writeNote(log, 'dangler', { links: [{ id: 'base-note' }, { id: 'never-written' }] })
-    await log.append({ ...CLI, taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_deleted, payload: { id: 'base-note', scope: 'project', author: { source: 'cli', workspaceId: TEST_WORKSPACE_ID, origin: CLI } } })
+    await log.append({ ...CLI, taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_deleted, payload: { id: 'base-note', scope: 'project', author: authorFixture() } })
     const events = await log.all()
     const g = buildGraph(fold(events), foldMemory(events))
     const ids = new Set(g.nodes.map(n => n.id))
@@ -208,7 +208,7 @@ describe('diffGraphs', () => {
     const log = await freshLog()
     const { taskId } = await seed(log)
     const before = await log.all()
-    await writeNote(log, 'fresh-note', { links: [{ id: 'base-note' }] }, { source: 'agent', workspaceId: TEST_WORKSPACE_ID, taskId, origin: SUPERVISOR })
+    await writeNote(log, 'fresh-note', { links: [{ id: 'base-note' }] }, authorFixture({ source: AUTHOR_SOURCE.agent, taskId, origin: SUPERVISOR }))
     const after = await log.all()
 
     const patch = diffGraphs(at(before), at(after))
@@ -225,7 +225,7 @@ describe('diffGraphs', () => {
     const before = await log.all()
     // distinct runToken per step, as production issues them (crashDedupKey folds duplicates per token)
     await log.append({ ...SUPERVISOR, taskId, stepId: 's2', runToken: 'r2', kind: EVENT_KIND.step_started, payload: { stepId: 's2', runToken: 'r2', attempt: 1 } })
-    await log.append({ ...CLI, taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_deleted, payload: { id: 'task-note', scope: 'project', author: { source: 'cli', workspaceId: TEST_WORKSPACE_ID, origin: CLI } } })
+    await log.append({ ...CLI, taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_deleted, payload: { id: 'task-note', scope: 'project', author: authorFixture() } })
     const after = await log.all()
 
     const patch = diffGraphs(at(before), at(after))
@@ -239,10 +239,10 @@ describe('diffGraphs', () => {
   it('emits an updateLinks entry (not remove+add) when only edge heat changes', () => {
     const ts = '2026-07-01T00:00:00.000Z'
     const written = [
-      { kind: EVENT_KIND.memory_written, ts, payload: { note: { id: 'ueseed', scope: 'project', title: 'ueseed', links: [{ id: 'uewalked', kind: LINK_KIND.relates_to }] }, author: { source: 'cli', workspaceId: TEST_WORKSPACE_ID, origin: CLI } } },
-      { kind: EVENT_KIND.memory_written, ts, payload: { note: { id: 'uewalked', scope: 'project', title: 'uewalked' }, author: { source: 'cli', workspaceId: TEST_WORKSPACE_ID, origin: CLI } } },
+      { kind: EVENT_KIND.memory_written, ts, payload: { note: { id: 'ueseed', scope: 'project', title: 'ueseed', links: [{ id: 'uewalked', kind: LINK_KIND.relates_to }] }, author: authorFixture() } },
+      { kind: EVENT_KIND.memory_written, ts, payload: { note: { id: 'uewalked', scope: 'project', title: 'uewalked' }, author: authorFixture() } },
     ]
-    const access = { kind: EVENT_KIND.memory_accessed, ts, payload: { id: 'uewalked', scope: 'project', mode: 'read', author: { source: 'cli', workspaceId: TEST_WORKSPACE_ID, origin: CLI }, via: { seed: 'ueseed', kind: LINK_KIND.relates_to, direction: 'out' } } }
+    const access = { kind: EVENT_KIND.memory_accessed, ts, payload: { id: 'uewalked', scope: 'project', mode: 'read', author: authorFixture(), via: { seed: 'ueseed', kind: LINK_KIND.relates_to, direction: 'out' } } }
     const empty = fold([])
     const cold = buildGraph(empty, foldMemory(written), { now: ts })
     const hot = buildGraph(empty, foldMemory([...written, access]), { now: ts })

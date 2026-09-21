@@ -3,19 +3,18 @@ import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { z } from 'zod'
-import { claimId, Door, EVENT_KIND, MEMORY_USE, MemoryAccessedPayload, MemoryAuthor, MemoryOutcomePayload, MemoryScope, MemoryTopicAccessedPayload, MemoryVerifiedPayload, MemoryWrittenPayload, NOTE_TIER, NO_CHAT, type AccessVia, type Origin, LINK_KIND } from '@orc/contracts'
+import { AUTHOR_SOURCE, claimId, Door, EVENT_KIND, MEMORY_USE, MemoryAccessedPayload, MemoryAuthor, MemoryOutcomePayload, MemoryScope, MemoryTopicAccessedPayload, MemoryVerifiedPayload, MemoryWrittenPayload, NOTE_TIER, type AccessVia, type Origin, LINK_KIND } from '@orc/contracts'
 import { gitRevision, openStorage, type EventLog } from '@orc/kernel'
-import { TEST_WORKSPACE_ID, createTestDb, TEST_PROJECT_ID, type TestDb } from '@orc/kernel/test-helpers'
+import { createTestDb, TEST_PROJECT_ID, type TestDb } from '@orc/kernel/test-helpers'
 import { SurrealMemory } from './surreal'
 import { createTestSurreal } from './test-helpers'
 import { createMemoryStore, STORE_REFUSAL } from './store'
-import { must } from '@orc/contracts/fixtures'
+import { authorFixture, must } from '@orc/contracts/fixtures'
 
 const drops: (() => Promise<void>)[] = []
 
-// The two origins this file writes from, spelled once each: an `orc memory` command belongs to no
-// chat, and an agent step's writes belong to the chat its run opened.
-const CLI: Origin = NO_CHAT(Door.cli)
+// The one non-default origin this file writes from: an agent step's writes belong to the chat its
+// run opened. A CLI write is authorFixture()'s default origin.
 const RUN: Origin = { chatId: 'run:t1:v1', door: Door.supervisor }
 // Concurrent drops with a real hook budget — the same fix and reason as surreal.test.ts's teardown:
 // serial drops blew bun's default 5s budget as soon as this file grew another describe block, and a
@@ -38,10 +37,10 @@ describe('MemoryStore gateway', () => {
     const ts = await createTestSurreal(); drops.push(ts.drop)
     const log = await openLog(pg)
     const store = createMemoryStore({ log, surreal: await SurrealMemory.open(ts) })
-    await store.write({ id: 'auth', title: 'Auth' }, { source: 'agent', workspaceId: TEST_WORKSPACE_ID, origin: RUN, executor: 'api-loop', model: 'opus', role: 'review' })
+    await store.write({ id: 'auth', title: 'Auth' }, authorFixture({ source: AUTHOR_SOURCE.agent, origin: RUN, executor: 'api-loop', model: 'opus', role: 'review' }))
     const events = await log.all()
     expect(events).toHaveLength(1)
-    expect(must(events[0], 'events[0]').kind).toBe('memory_written')
+    expect(must(events[0], 'events[0]').kind).toBe(EVENT_KIND.memory_written)
     expect(must(events[0], 'events[0]').taskId).toBeNull()
     const { author } = z.object({ author: MemoryAuthor }).parse(must(events[0], 'events[0]').payload)
     expect(author.executor).toBe('api-loop')
@@ -52,7 +51,7 @@ describe('MemoryStore gateway', () => {
     const ts = await createTestSurreal(); drops.push(ts.drop)
     const log = await openLog(pg)
     const store = createMemoryStore({ log, surreal: await SurrealMemory.open(ts) })
-    await store.write({ id: 'auth', title: 'Auth' }, { source: 'mcp', workspaceId: TEST_WORKSPACE_ID, origin: { chatId: 'c1', door: Door.mcp } })
+    await store.write({ id: 'auth', title: 'Auth' }, authorFixture({ source: AUTHOR_SOURCE.mcp, origin: { chatId: 'c1', door: Door.mcp } }))
     const event = must((await log.all())[0], 'events[0]')
     // a note written through the MCP door in chat c1 must stay attributable to it: an envelope that
     // drops either half cannot answer who asked for the write.
@@ -64,8 +63,8 @@ describe('MemoryStore gateway', () => {
     const ts = await createTestSurreal(); drops.push(ts.drop)
     const log = await openLog(pg)
     const store = createMemoryStore({ log, surreal: await SurrealMemory.open(ts) })
-    await store.recordAccess('auth', 'project', 'read', { source: 'agent', workspaceId: TEST_WORKSPACE_ID, origin: RUN, taskId: 't1', stepId: 's1', runToken: 'r1' })
-    await store.recordAccess('auth', 'project', 'read', { source: 'cli', workspaceId: TEST_WORKSPACE_ID, origin: CLI })
+    await store.recordAccess('auth', 'project', 'read', authorFixture({ source: AUTHOR_SOURCE.agent, origin: RUN, taskId: 't1', stepId: 's1', runToken: 'r1' }))
+    await store.recordAccess('auth', 'project', 'read', authorFixture())
     const events = await log.all()
     expect(must(events[0], 'events[0]').taskId).toBe('t1')
     expect(must(events[0], 'events[0]').stepId).toBe('s1')
@@ -78,7 +77,7 @@ describe('MemoryStore gateway', () => {
     const ts = await createTestSurreal(); drops.push(ts.drop)
     const log = await openLog(pg)
     const store = createMemoryStore({ log, surreal: await SurrealMemory.open(ts) })
-    const author = { source: 'agent', workspaceId: TEST_WORKSPACE_ID, origin: RUN, taskId: 't1', stepId: 's1', runToken: 'r1' } as const
+    const author = authorFixture({ source: AUTHOR_SOURCE.agent, origin: RUN, taskId: 't1', stepId: 's1', runToken: 'r1' })
     await store.recordOutcomes(
       [{ id: 'auth', outcome: MEMORY_USE.useful }, { id: 'net', outcome: MEMORY_USE.dead_end }],
       author, { idempotencyKeyBase: 'r1:knowledge' },
@@ -87,7 +86,7 @@ describe('MemoryStore gateway', () => {
     await store.recordOutcomes([{ id: 'auth', outcome: MEMORY_USE.useful }], author, { idempotencyKeyBase: 'r1:knowledge' })
     const events = await log.all()
     expect(events).toHaveLength(2)
-    expect(events.map(e => e.kind)).toEqual(['memory_outcome', 'memory_outcome'])
+    expect(events.map(e => e.kind)).toEqual([EVENT_KIND.memory_outcome, EVENT_KIND.memory_outcome])
     expect(must(events[0], 'events[0]').taskId).toBe('t1') // bound to the acting step, recordAccess's rule
     const payload = MemoryOutcomePayload.parse(must(events[0], 'events[0]').payload)
     expect(payload).toMatchObject({ id: 'auth', scope: 'project', outcome: MEMORY_USE.useful })
@@ -99,7 +98,7 @@ describe('MemoryStore gateway', () => {
     const log = await openLog(pg)
     const store = createMemoryStore({ log, surreal: await SurrealMemory.open(ts) })
     const via: AccessVia = { seed: 'net-topology', kind: LINK_KIND.supersedes, direction: 'out' }
-    await store.recordAccess('auth', 'project', 'read', { source: 'cli', workspaceId: TEST_WORKSPACE_ID, origin: CLI }, { via })
+    await store.recordAccess('auth', 'project', 'read', authorFixture(), { via })
     const events = await log.all()
     const payload = MemoryAccessedPayload.parse(must(events[0], 'events[0]').payload)
     expect(payload.via).toEqual(via)
@@ -110,7 +109,7 @@ describe('MemoryStore gateway', () => {
     const ts = await createTestSurreal(); drops.push(ts.drop)
     const log = await openLog(pg)
     const store = createMemoryStore({ log, surreal: await SurrealMemory.open(ts) })
-    const author: MemoryAuthor = { source: 'agent', workspaceId: TEST_WORKSPACE_ID, origin: RUN, runToken: 'step:t1:s1:a1' }
+    const author: MemoryAuthor = authorFixture({ source: AUTHOR_SOURCE.agent, origin: RUN, runToken: 'step:t1:s1:a1' })
     const key = 'step:t1:s1:a1:tool:c1:memory:auth'
     await store.write({ id: 'auth', title: 'Auth' }, author, { idempotencyKey: key })
     await store.write({ id: 'auth', title: 'Auth' }, author, { idempotencyKey: key })
@@ -122,7 +121,7 @@ describe('MemoryStore gateway', () => {
     const ts = await createTestSurreal(); drops.push(ts.drop)
     const log = await openLog(pg)
     const surreal = await SurrealMemory.open(ts)
-    const author: MemoryAuthor = { source: 'agent', workspaceId: TEST_WORKSPACE_ID, origin: RUN, runToken: 'step:t1:s1:a1' }
+    const author: MemoryAuthor = authorFixture({ source: AUTHOR_SOURCE.agent, origin: RUN, runToken: 'step:t1:s1:a1' })
     const key = 'step:t1:s1:a1:tool:c1:memory:auth'
     // same tool call replayed after a restart: identical draft, but a new Git HEAD stamp → the
     // memory_written payload DIFFERS. The event log throws KernelError(idempotency_conflict); the
@@ -137,7 +136,7 @@ describe('MemoryStore gateway', () => {
     const ts = await createTestSurreal(); drops.push(ts.drop)
     const log = await openLog(pg)
     const store = createMemoryStore({ log, surreal: await SurrealMemory.open(ts), sourceRevision: async () => 'head-sha-42' })
-    await store.write({ id: 'auth', title: 'Auth', sourceRevision: 'invented-by-agent' }, { source: 'agent', workspaceId: TEST_WORKSPACE_ID, origin: RUN })
+    await store.write({ id: 'auth', title: 'Auth', sourceRevision: 'invented-by-agent' }, authorFixture({ source: AUTHOR_SOURCE.agent, origin: RUN }))
     const [event] = await log.all()
     const { note } = z.object({ note: z.object({ sourceRevision: z.string().nullable() }) }).parse(must(event, 'event').payload)
     expect(note.sourceRevision).toBe('head-sha-42')
@@ -159,11 +158,11 @@ describe('MemoryStore gateway', () => {
     const surreal = await SurrealMemory.open(ts)
     const store = createMemoryStore({ log, surreal })
     const notePayload = z.object({ note: z.object({ title: z.string(), summary: z.string(), body: z.string(), tags: z.array(z.string()), links: z.array(z.object({ id: z.string(), kind: z.string() })) }) })
-    await store.write({ id: 'auth', title: 'Auth', summary: 'tokens rotate', body: 'long body', tags: ['auth'], links: [{ id: 'other', kind: LINK_KIND.depends_on }] }, { source: 'cli', workspaceId: TEST_WORKSPACE_ID, origin: CLI })
+    await store.write({ id: 'auth', title: 'Auth', summary: 'tokens rotate', body: 'long body', tags: ['auth'], links: [{ id: 'other', kind: LINK_KIND.depends_on }] }, authorFixture())
     let events = await log.all()
     await surreal.applyEvent(must(events[0], 'events[0]')) // materialize so the gateway sees the previous revision
     // omitting body/tags/links must NOT wipe them (the graph-refresh body-wipe defect)
-    await store.write({ id: 'auth', title: 'Auth v2' }, { source: 'cli', workspaceId: TEST_WORKSPACE_ID, origin: CLI })
+    await store.write({ id: 'auth', title: 'Auth v2' }, authorFixture())
     events = await log.all()
     let { note } = notePayload.parse(must(events[1], 'events[1]').payload)
     expect(note.title).toBe('Auth v2')            // supplied → replaced
@@ -172,7 +171,7 @@ describe('MemoryStore gateway', () => {
     expect(note.links).toEqual([{ id: 'other', kind: LINK_KIND.depends_on }])
     // an EXPLICIT empty still clears; an undefined-valued key is an omission (CLI optional flags)
     await surreal.applyEvent(must(events[1], 'events[1]'))
-    await store.write({ id: 'auth', title: 'Auth v2', body: '', summary: undefined }, { source: 'cli', workspaceId: TEST_WORKSPACE_ID, origin: CLI })
+    await store.write({ id: 'auth', title: 'Auth v2', body: '', summary: undefined }, authorFixture())
     events = await log.all()
     note = notePayload.parse(must(events[2], 'events[2]').payload).note
     expect(note.body).toBe('')
@@ -189,8 +188,8 @@ describe('MemoryStore gateway', () => {
     // write A (full), then partial B WITHOUT projecting A — the projector is "stalled". Under the old
     // projection-based merge, surreal.get returns null and B clears body/tags into the canonical log;
     // folding the merge base from the log preserves them.
-    await store.write({ id: 'auth', title: 'Auth', body: 'long body', tags: ['auth'] }, { source: 'cli', workspaceId: TEST_WORKSPACE_ID, origin: CLI })
-    await store.write({ id: 'auth', title: 'Auth v2' }, { source: 'cli', workspaceId: TEST_WORKSPACE_ID, origin: CLI })
+    await store.write({ id: 'auth', title: 'Auth', body: 'long body', tags: ['auth'] }, authorFixture())
+    await store.write({ id: 'auth', title: 'Auth v2' }, authorFixture())
     const events = await log.all()
     const { note } = notePayload.parse(must(events[1], 'events[1]').payload)
     expect(note.title).toBe('Auth v2')       // supplied → replaced
@@ -203,7 +202,7 @@ describe('MemoryStore gateway', () => {
     const ts = await createTestSurreal(); drops.push(ts.drop)
     const log = await openLog(pg)
     const store = createMemoryStore({ log, surreal: await SurrealMemory.open(ts) })
-    await expect(store.write({ id: 'Bad Id', title: 'x' }, { source: 'cli', workspaceId: TEST_WORKSPACE_ID, origin: CLI })).rejects.toThrow()
+    await expect(store.write({ id: 'Bad Id', title: 'x' }, authorFixture())).rejects.toThrow()
     expect(await log.all()).toHaveLength(0)
   })
 
@@ -216,7 +215,7 @@ describe('MemoryStore gateway', () => {
     const ts = await createTestSurreal(); drops.push(ts.drop)
     const log = await openLog(pg)
     const store = createMemoryStore({ log, surreal: await SurrealMemory.open(ts) })
-    const author = { source: 'cli', workspaceId: TEST_WORKSPACE_ID, origin: CLI } as const
+    const author = authorFixture()
     // a fresh id succeeds
     await store.write({ id: 'auth', title: 'Auth' }, author, { mustCreate: true })
     // the same id, still live, is refused
@@ -246,7 +245,7 @@ describe('claims on a tier that cannot hold them', () => {
     const store = createMemoryStore({ log, surreal })
     await expect(store.write(
       { id: 'p1', title: 'A plan note', rationale: 'why this subplan exists', addClaims: ['a durable statement'] },
-      { source: 'cli', workspaceId: TEST_WORKSPACE_ID, origin: CLI },
+      authorFixture(),
     )).rejects.toThrow(/semantic-tier/)
     // and nothing was appended — the failure is total, not a half-written note
     expect(await store.get('p1')).toBeNull()
@@ -258,7 +257,7 @@ describe('claims on a tier that cannot hold them', () => {
     const log = await openLog(pg)
     const surreal = await SurrealMemory.open(ts)
     const store = createMemoryStore({ log, surreal })
-    await store.write({ id: 's1', title: 'A fact', addClaims: ['a durable statement'] }, { source: 'cli', workspaceId: TEST_WORKSPACE_ID, origin: CLI })
+    await store.write({ id: 's1', title: 'A fact', addClaims: ['a durable statement'] }, authorFixture())
   })
 })
 
@@ -279,8 +278,8 @@ describe('sourceRevision is resolved lazily', () => {
     // ONE PER WRITE, not one per store: a store-level memo stamped every note with the commit the
     // supervisor booted at — in the immutable log, where no rebuild heals it — and the drift check
     // then reported moved code as current. Only writes resolve it, so the saving was never real.
-    await store.write({ id: 'n1', title: 'N1' }, { source: 'cli', workspaceId: TEST_WORKSPACE_ID, origin: CLI })
-    await store.write({ id: 'n2', title: 'N2' }, { source: 'cli', workspaceId: TEST_WORKSPACE_ID, origin: CLI })
+    await store.write({ id: 'n1', title: 'N1' }, authorFixture())
+    await store.write({ id: 'n2', title: 'N2' }, authorFixture())
     expect(calls).toBe(2)
   })
 })
@@ -297,16 +296,16 @@ describe('additive claim writes', () => {
 
   it('adds one claim without the writer resending the others', async () => {
     const { log, store } = await openStore()
-    await store.write({ id: 'n', title: 'N', addClaims: ['first'] }, { source: 'cli', workspaceId: TEST_WORKSPACE_ID, origin: CLI })
-    await store.write({ id: 'n', title: 'N', addClaims: ['second'] }, { source: 'cli', workspaceId: TEST_WORKSPACE_ID, origin: CLI })
+    await store.write({ id: 'n', title: 'N', addClaims: ['first'] }, authorFixture())
+    await store.write({ id: 'n', title: 'N', addClaims: ['second'] }, authorFixture())
 
     expect(claimsOf(await lastWrite(log)).map(c => c.text)).toEqual(['first', 'second'])
   })
 
   it('invalidating drops a claim and records the tombstone on the EVENT, not the note', async () => {
     const { log, store } = await openStore()
-    await store.write({ id: 'n', title: 'N', addClaims: ['first', 'second'] }, { source: 'cli', workspaceId: TEST_WORKSPACE_ID, origin: CLI })
-    await store.write({ id: 'n', title: 'N' }, { source: 'cli', workspaceId: TEST_WORKSPACE_ID, origin: CLI }, { invalidates: [claimId('first')] })
+    await store.write({ id: 'n', title: 'N', addClaims: ['first', 'second'] }, authorFixture())
+    await store.write({ id: 'n', title: 'N' }, authorFixture(), { invalidates: [claimId('first')] })
 
     const last = await lastWrite(log)
     expect(claimsOf(last).map(c => c.text)).toEqual(['second'])
@@ -317,8 +316,8 @@ describe('additive claim writes', () => {
   // does not mention a claim must carry it forward. Absence can never mean deletion.
   it('a write that mentions no claims at all leaves the live set untouched', async () => {
     const { log, store } = await openStore()
-    await store.write({ id: 'n', title: 'N', addClaims: ['first'] }, { source: 'cli', workspaceId: TEST_WORKSPACE_ID, origin: CLI })
-    await store.write({ id: 'n', title: 'N', summary: 'unrelated edit' }, { source: 'cli', workspaceId: TEST_WORKSPACE_ID, origin: CLI })
+    await store.write({ id: 'n', title: 'N', addClaims: ['first'] }, authorFixture())
+    await store.write({ id: 'n', title: 'N', summary: 'unrelated edit' }, authorFixture())
 
     const last = await lastWrite(log)
     expect(claimsOf(last).map(c => c.text)).toEqual(['first'])
@@ -327,7 +326,7 @@ describe('additive claim writes', () => {
 
   it('addClaims is an instruction, never stored: the payload carries resolved claims only', async () => {
     const { log, store } = await openStore()
-    await store.write({ id: 'n', title: 'N', addClaims: ['first'] }, { source: 'cli', workspaceId: TEST_WORKSPACE_ID, origin: CLI })
+    await store.write({ id: 'n', title: 'N', addClaims: ['first'] }, authorFixture())
     expect(JSON.stringify((await lastWrite(log)).note)).not.toContain('addClaims')
   })
 })
@@ -347,7 +346,7 @@ describe('topic fetches are tracked', () => {
     const log = await openLog(pg)
     const surreal = await SurrealMemory.open(ts, { embed: async texts => texts.map(vec) })
     const store = createMemoryStore({ log, surreal })
-    await store.write({ id: 'n', title: 'N', addClaims: ['alpha holds', 'beta holds'] }, { source: 'cli', workspaceId: TEST_WORKSPACE_ID, origin: CLI })
+    await store.write({ id: 'n', title: 'N', addClaims: ['alpha holds', 'beta holds'] }, authorFixture())
     for (const e of await log.all()) await surreal.applyEvent(e)
     await surreal.refreshTopics()
     return { log, store }
@@ -356,7 +355,7 @@ describe('topic fetches are tracked', () => {
   it('one fetch appends exactly one memory_topic_accessed, carrying the resolved label', async () => {
     const { log, store } = await openTopics()
     const [topic] = await store.topics()
-    const claims = await store.topicClaims(must(topic, 'topic').topicKey, { source: 'agent', workspaceId: TEST_WORKSPACE_ID, origin: RUN, taskId: 't1', stepId: 's1', runToken: 'r1' })
+    const claims = await store.topicClaims(must(topic, 'topic').topicKey, authorFixture({ source: AUTHOR_SOURCE.agent, origin: RUN, taskId: 't1', stepId: 's1', runToken: 'r1' }))
     expect(claims).toHaveLength(must(topic, 'topic').size)
 
     const tracked = await topicAccesses(log)
@@ -371,7 +370,7 @@ describe('topic fetches are tracked', () => {
   it('a keyed replay of one fetch appends one event, not two', async () => {
     const { log, store } = await openTopics()
     const [topic] = await store.topics()
-    const author: MemoryAuthor = { source: 'agent', workspaceId: TEST_WORKSPACE_ID, origin: RUN, runToken: 'r1' }
+    const author: MemoryAuthor = authorFixture({ source: AUTHOR_SOURCE.agent, origin: RUN, runToken: 'r1' })
     const key = `r1:tool:c1:topic:${must(topic, 'topic').topicKey}`
     await store.topicClaims(must(topic, 'topic').topicKey, author, { idempotencyKey: key })
     await store.topicClaims(must(topic, 'topic').topicKey, author, { idempotencyKey: key })
@@ -386,7 +385,7 @@ describe('topic fetches are tracked', () => {
 
   it('an unknown key throws rather than returning empty, and records no signal for it', async () => {
     const { log, store } = await openTopics()
-    await expect(store.topicClaims('deadbeef0000', { source: 'cli', workspaceId: TEST_WORKSPACE_ID, origin: CLI })).rejects.toThrow(/list topics again/)
+    await expect(store.topicClaims('deadbeef0000', authorFixture())).rejects.toThrow(/list topics again/)
     expect(await topicAccesses(log)).toEqual([])
   })
 })
@@ -403,8 +402,8 @@ describe('MemoryStore.verify', () => {
 
   it('appends exactly one memory_verified stamped with the SAME HEAD a write stamps sourceRevision from', async () => {
     const { log, store } = await open()
-    await store.write({ id: 'auth', title: 'Auth' }, { source: 'cli', workspaceId: TEST_WORKSPACE_ID, origin: CLI })
-    const stamp = await store.verify('auth', undefined, { source: 'agent', workspaceId: TEST_WORKSPACE_ID, origin: RUN, taskId: 't1', stepId: 'verify', runToken: 'r1' })
+    await store.write({ id: 'auth', title: 'Auth' }, authorFixture())
+    const stamp = await store.verify('auth', undefined, authorFixture({ source: AUTHOR_SOURCE.agent, origin: RUN, taskId: 't1', stepId: 'verify', runToken: 'r1' }))
     expect(stamp.revision).toBe(HEAD)
     expect(stamp.by).toBe('agent')
     const events = await log.all()
@@ -420,12 +419,12 @@ describe('MemoryStore.verify', () => {
 
   it('refuses an id the LOG has no live note for, naming it', async () => {
     const { log, store } = await open()
-    await expect(store.verify('never-written', undefined, { source: 'cli', workspaceId: TEST_WORKSPACE_ID, origin: CLI })).rejects.toThrow(/never-written/)
+    await expect(store.verify('never-written', undefined, authorFixture())).rejects.toThrow(/never-written/)
     expect(await log.all()).toEqual([])
     // a deleted note cannot be verified back into existence
-    await store.write({ id: 'gone', title: 'Gone' }, { source: 'cli', workspaceId: TEST_WORKSPACE_ID, origin: CLI })
-    await store.remove('gone', undefined, { source: 'cli', workspaceId: TEST_WORKSPACE_ID, origin: CLI })
-    await expect(store.verify('gone', undefined, { source: 'cli', workspaceId: TEST_WORKSPACE_ID, origin: CLI })).rejects.toThrow(/gone/)
+    await store.write({ id: 'gone', title: 'Gone' }, authorFixture())
+    await store.remove('gone', undefined, authorFixture())
+    await expect(store.verify('gone', undefined, authorFixture())).rejects.toThrow(/gone/)
     expect((await log.all()).map(e => e.kind)).toEqual([EVENT_KIND.memory_written, EVENT_KIND.memory_deleted])
   })
 
@@ -433,8 +432,8 @@ describe('MemoryStore.verify', () => {
   // nothing — worse than no stamp at all, and unrecoverable once it is in an immutable log.
   it('refuses to stamp at all when the runtime has no readable HEAD', async () => {
     const { log, store } = await open(async () => null)
-    await store.write({ id: 'auth', title: 'Auth' }, { source: 'cli', workspaceId: TEST_WORKSPACE_ID, origin: CLI })
-    await expect(store.verify('auth', undefined, { source: 'cli', workspaceId: TEST_WORKSPACE_ID, origin: CLI })).rejects.toThrow(/source revision/)
+    await store.write({ id: 'auth', title: 'Auth' }, authorFixture())
+    await expect(store.verify('auth', undefined, authorFixture())).rejects.toThrow(/source revision/)
     expect((await log.all()).map(e => e.kind)).toEqual([EVENT_KIND.memory_written])
   })
 
@@ -445,8 +444,8 @@ describe('MemoryStore.verify', () => {
   // attempt, so the log's identical-payload reuse path can never fire for a verification.
   it('is idempotent under a keyed crash-retry of the surrounding tool call', async () => {
     const { log, store } = await open()
-    await store.write({ id: 'auth', title: 'Auth' }, { source: 'cli', workspaceId: TEST_WORKSPACE_ID, origin: CLI })
-    const author: MemoryAuthor = { source: 'agent', workspaceId: TEST_WORKSPACE_ID, origin: RUN, runToken: 'r1' }
+    await store.write({ id: 'auth', title: 'Auth' }, authorFixture())
+    const author: MemoryAuthor = authorFixture({ source: AUTHOR_SOURCE.agent, origin: RUN, runToken: 'r1' })
     const first = await store.verify('auth', undefined, author, { idempotencyKey: 'r1:tool:c1:verify:auth' })
     const replay = await store.verify('auth', undefined, author, { idempotencyKey: 'r1:tool:c1:verify:auth' })
     expect(replay.revision).toBe(first.revision)

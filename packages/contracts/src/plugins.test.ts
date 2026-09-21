@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'bun:test'
 import {
-  HOOK_NAME, MCP_SERVER_ID_RE, McpServerConfig, SkillManifest,
+  HookName, MCP_SERVER_ID_RE, McpServerConfig, SkillManifest,
   mcpToolName, parseToolRef,
 } from './plugins'
 
@@ -84,9 +84,9 @@ describe('McpServerConfig', () => {
 })
 
 describe('hooks', () => {
-  it('exposes the const map', () => {
-    expect(HOOK_NAME.event_appended).toBe('event_appended')
-    expect(HOOK_NAME.session_start).toBe('session_start')
-    expect(HOOK_NAME.session_shutdown).toBe('session_shutdown')
+  it('pins the wire spelling of every hook name', () => {
+    expect(String(HookName.event_appended)).toBe('event_appended')
+    expect(String(HookName.session_start)).toBe('session_start')
+    expect(String(HookName.session_shutdown)).toBe('session_shutdown')
   })
 })

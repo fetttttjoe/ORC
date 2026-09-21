@@ -1,9 +1,9 @@
 import { describe, expect, it } from 'bun:test'
-import { DECISION_STATUS, DECISION_STATUSES, DecisionInput, decisionStatusOf } from './decision'
+import { DECISION_STATUS, DecisionInput, DecisionStatus, decisionStatusOf } from './decision'
 
 describe('decision status', () => {
   it('names the four ADR states and nothing else', () => {
-    expect([...DECISION_STATUSES]).toEqual(['proposed', 'accepted', 'superseded', 'deprecated'])
+    expect(Object.values(DecisionStatus)).toEqual([DecisionStatus.proposed, DecisionStatus.accepted, DecisionStatus.superseded, DecisionStatus.deprecated])
   })
   // The default is a DERIVATION, not a stored value: a decision written without one (orc memory add
   // --kind decision) must read as in force, and a second spelling of 'accepted' anywhere is drift.

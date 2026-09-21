@@ -13,7 +13,7 @@
 import { existsSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import {
-  EVENT_KIND, SIGNAL_OUTCOME,
+  EVENT_KIND, SignalOutcome,
   type AgentExecutor, type EventDraft, type ExecutorContext, type SplitResult, type UnifiedEvent,
 } from '@orc/contracts'
 import { openStorage } from '../storage'
@@ -57,7 +57,7 @@ const scheduled: AgentExecutor<unknown> = {
       await awaitFile(marker('b-done'))
       await new Promise(r => setTimeout(r, 2_000)) // let b's result reach the parent before a settles
     }
-    const signal = { stepId: id, runToken: ctx.runToken, outcome: SIGNAL_OUTCOME.success, summary: `${id} ok` }
+    const signal = { stepId: id, runToken: ctx.runToken, outcome: SignalOutcome.success, summary: `${id} ok` }
     await ctx.checkpoint('signal:1', async () => signal,
       (): EventDraft[] => [{ kind: EVENT_KIND.signal_received, payload: { stepId: id, runToken: ctx.runToken, signal } }])
     yield { type: 'signal', signal }

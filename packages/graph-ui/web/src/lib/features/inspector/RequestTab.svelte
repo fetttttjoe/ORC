@@ -1,7 +1,7 @@
 <script lang="ts">
   // the task as a request: plan versions, the approved plan's waves, grounded plan notes,
   // and (when this server can act) the revise gate
-  import { FAILURE_CLASS } from '@orc/contracts/execution'
+  import { FailureClass } from '@orc/contracts/execution'
   import { createQuery } from '@tanstack/svelte-query'
   import { SvelteSet } from 'svelte/reactivity'
   import InboxIcon from '@lucide/svelte/icons/inbox'
@@ -55,7 +55,7 @@
   const failed = $derived(waves?.flatMap(w => w.steps).find(st => st.status === 'failed') ?? null)
   const failedStep = $derived(failed?.id ?? null)
   // a REJECTED step judged the work; retrying repeats it unchanged, so the pane offers revise
-  const rejected = $derived(failed?.failureClass === FAILURE_CLASS.rejected)
+  const rejected = $derived(failed?.failureClass === FailureClass.rejected)
   const move = $derived(
     taskId === null
       ? null

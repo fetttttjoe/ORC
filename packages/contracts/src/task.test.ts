@@ -1,10 +1,10 @@
 import { describe, expect, it } from 'bun:test'
-import { TaskNode, type TaskNode as TaskNodeType } from './task'
+import { TaskNode, TaskStatus, type TaskNode as TaskNodeType } from './task'
 import { TEST_WORKSPACE_ID } from './fixtures'
 
 const valid: TaskNodeType = {
   id: 'a', parentId: null, workspaceId: TEST_WORKSPACE_ID, type: 'generic', title: 'hello', spec: '',
-  status: 'draft', zone: [], budgetUSD: null, depth: 0,
+  status: TaskStatus.draft, zone: [], budgetUSD: null, depth: 0,
   createdAt: '2026-07-16T00:00:00.000Z',
 }
 

@@ -1,14 +1,14 @@
 import { describe, expect, it } from 'bun:test'
 import {
-  Door, LINK_KIND, MEMORY_ACCESS, MEMORY_USE, MemoryScope, NOTE_TIER, SIGNAL_OUTCOME, planScope, slugId,
+  AUTHOR_SOURCE, Door, LINK_KIND, MEMORY_ACCESS, MEMORY_USE, MemoryScope, NOTE_TIER, SignalOutcome, planScope, slugId,
   type ClaimHit, type MemoryAuthor, MemoryNote, type MemoryNoteDraft, type MemoryStore, type NoteSummary,
 } from '@orc/contracts'
 import { bindStepMemory, deriveQueryTerms, preloadQuery } from './step'
 import { noopMemoryStore, summaryFixture } from './test-helpers'
-import { semanticNoteFixture, TEST_WORKSPACE_ID } from '@orc/contracts/fixtures'
+import { authorFixture, semanticNoteFixture, TEST_WORKSPACE_ID } from '@orc/contracts/fixtures'
 
 // The step reads and writes from inside its own run, so the origin is that run's chat.
-const AUTHOR: MemoryAuthor = { source: 'agent', workspaceId: TEST_WORKSPACE_ID, taskId: 'task-1', stepId: 'implement', runToken: 'rt-1', origin: { chatId: 'run:task-1:implement', door: Door.supervisor } }
+const AUTHOR: MemoryAuthor = authorFixture({ source: AUTHOR_SOURCE.agent, taskId: 'task-1', stepId: 'implement', runToken: 'rt-1', origin: { chatId: 'run:task-1:implement', door: Door.supervisor } })
 
 const summary = (over: Partial<NoteSummary> = {}): NoteSummary => summaryFixture({ id: 'area-memory', title: 'Memory area', summary: 'How memory works.', ...over })
 
@@ -172,7 +172,7 @@ describe('recall', () => {
 describe('capture', () => {
   it('writes an expirable plan-scoped episodic note keyed by step id', async () => {
     const f = fakeStore()
-    await bind(f).memory.capture({ outcome: 'success', summary: 'x'.repeat(600) })
+    await bind(f).memory.capture({ outcome: SignalOutcome.success, summary: 'x'.repeat(600) })
     const note = f.writes[0]
     expect(note?.id).toBe(slugId('step implement'))
     expect(note?.scope).toBe(planScope('task-1'))
@@ -187,7 +187,7 @@ describe('capture', () => {
   it('records the signal knowledge as outcome events, deduped and keyed on the run', async () => {
     const f = fakeStore()
     await bind(f).memory.capture({
-      outcome: 'success', summary: 'done',
+      outcome: SignalOutcome.success, summary: 'done',
       knowledge: { useful: ['area-auth', 'area-auth', 'area-net'], deadEnd: ['old-map'] },
     })
     expect(f.outcomes).toEqual([{
@@ -203,7 +203,7 @@ describe('capture', () => {
   it('knowledge records survive ambientCapture: false — evidence is a different concern than step notes', async () => {
     const f = fakeStore()
     await bind(f, { ambientCapture: false }).memory.capture({
-      outcome: 'success', summary: 'done', knowledge: { useful: ['area-auth'], deadEnd: [] },
+      outcome: SignalOutcome.success, summary: 'done', knowledge: { useful: ['area-auth'], deadEnd: [] },
     })
     expect(f.outcomes).toHaveLength(1)
     expect(f.writes).toHaveLength(0) // the knob still silences the ambient note itself
@@ -216,7 +216,7 @@ describe('capture', () => {
   it('a partial signal records knowledge but writes no ambient note', async () => {
     const f = fakeStore()
     await bind(f).memory.capture({
-      outcome: SIGNAL_OUTCOME.partial, summary: 'healed 14/26 — remaining ids in worklist',
+      outcome: SignalOutcome.partial, summary: 'healed 14/26 — remaining ids in worklist',
       knowledge: { useful: ['area-auth'], deadEnd: [] },
     })
     expect(f.outcomes).toHaveLength(1)
@@ -225,13 +225,13 @@ describe('capture', () => {
 
   it('a signal with no knowledge records nothing — absence costs nothing', async () => {
     const f = fakeStore()
-    await bind(f).memory.capture({ outcome: 'success', summary: 'done' })
+    await bind(f).memory.capture({ outcome: SignalOutcome.success, summary: 'done' })
     expect(f.outcomes).toEqual([])
   })
 
   it('a failure gets its OWN id so a later success cannot overwrite the lesson', async () => {
     const f = fakeStore()
-    await bind(f).memory.capture({ outcome: 'failure', summary: 'the API returned 500' })
+    await bind(f).memory.capture({ outcome: SignalOutcome.failure, summary: 'the API returned 500' })
     expect(f.writes[0]?.id).toBe(slugId('failed step implement'))
     expect(f.writes[0]?.id).not.toBe(slugId('step implement'))
     expect(f.writes[0]?.tags).toEqual(['ambient', 'failure'])
@@ -244,7 +244,7 @@ describe('capture', () => {
       store: f.store, author: AUTHOR, taskId: 'task-1',
       step: { id: 'implement', title: 'Implement', instructions: 'do', dependsOn: ['analyze', 'design'] },
     })
-    await b.memory.capture({ outcome: 'success', summary: 'done' })
+    await b.memory.capture({ outcome: SignalOutcome.success, summary: 'done' })
     expect(f.writes[0]?.links).toEqual([
       { id: slugId('step analyze'), kind: LINK_KIND.depends_on },
       { id: slugId('step design'), kind: LINK_KIND.depends_on },
@@ -257,7 +257,7 @@ describe('capture', () => {
     await b.memory.recall(500)
     const read = b.tools.find(t => t.name === 'memory_read')
     await read?.execute({ id: 'from-read' }, 'call-1')
-    await b.memory.capture({ outcome: 'success', summary: 'done' })
+    await b.memory.capture({ outcome: SignalOutcome.success, summary: 'done' })
     expect(f.writes[0]?.links).toEqual([
       { id: 'from-preload', kind: LINK_KIND.derived_from },
       { id: 'from-read', kind: LINK_KIND.derived_from },
@@ -272,7 +272,7 @@ describe('capture', () => {
     f.store.neighbors = async () => [{ id: 'x', title: 'x', summary: '', via: LINK_KIND.refines, depth: 1, score: 1, direction: 'out', activation: 0, from: 'area-memory', workspaceId: TEST_WORKSPACE_ID }]
     const b = bind(f)
     await b.tools.find(t => t.name === 'memory_neighbors')?.execute({ seed: 'area-memory' }, 'c1')
-    await b.memory.capture({ outcome: 'success', summary: 'done' })
+    await b.memory.capture({ outcome: SignalOutcome.success, summary: 'done' })
     expect(f.writes[0]?.links).toEqual([{ id: 'area-memory', kind: LINK_KIND.derived_from }])
   })
 
@@ -281,20 +281,20 @@ describe('capture', () => {
     const b = bind(f)
     const read = b.tools.find(t => t.name === 'memory_read')
     await read?.execute({ id: 'local', scope: planScope('task-1') }, 'call-1')
-    await b.memory.capture({ outcome: 'success', summary: 'done' })
+    await b.memory.capture({ outcome: SignalOutcome.success, summary: 'done' })
     expect(f.writes[0]?.links).toEqual([])
   })
 
   it('ambientCapture false writes nothing', async () => {
     const f = fakeStore()
-    await bind(f, { ambientCapture: false }).memory.capture({ outcome: 'success', summary: 'done' })
+    await bind(f, { ambientCapture: false }).memory.capture({ outcome: SignalOutcome.success, summary: 'done' })
     expect(f.writes).toEqual([])
   })
 
   it('a throwing store never turns an already-signalled step into a failure', async () => {
     const f = fakeStore()
     f.store.write = async () => { throw new Error('surreal down') }
-    await bind(f).memory.capture({ outcome: 'success', summary: 'done' })
+    await bind(f).memory.capture({ outcome: SignalOutcome.success, summary: 'done' })
   })
 })
 
@@ -343,7 +343,7 @@ describe('the author a step writes as', () => {
     const f = fakeStore()
     const b = bind(f)
     await b.tools.find(t => t.name === 'memory_write')?.execute({ id: 'from-the-model', title: 'From the model' }, 'w1')
-    await b.memory.capture({ outcome: 'success', summary: 'done' })
+    await b.memory.capture({ outcome: SignalOutcome.success, summary: 'done' })
     expect(f.writeAuthors.length).toBe(2) // the tool call and the ambient note
     for (const a of f.writeAuthors) expect(a).toEqual(AUTHOR)
   })
@@ -356,7 +356,7 @@ describe('provenance hygiene', () => {
     const b = bind(f)
     await b.tools.find(t => t.name === 'memory_write')?.execute({ id: 'my-own-note', title: 'Mine' }, 'w1')
     await b.tools.find(t => t.name === 'memory_read')?.execute({ id: 'my-own-note' }, 'r1')
-    await b.memory.capture({ outcome: 'success', summary: 'done' })
+    await b.memory.capture({ outcome: SignalOutcome.success, summary: 'done' })
     expect(f.writes.at(-1)?.links).toEqual([])
   })
 })

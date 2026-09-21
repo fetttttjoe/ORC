@@ -1,7 +1,7 @@
 <script lang="ts">
   import { createQuery } from '@tanstack/svelte-query'
   import { MEMORY_HEALTH } from '@orc/contracts/health'
-  import { MEMORY_STAGE, MemoryStageName, SUPERVISOR_HEALTH } from '@orc/contracts/health'
+  import { MemoryStageName, SUPERVISOR_HEALTH } from '@orc/contracts/health'
   import { Progress } from '$lib/components/ui/progress'
   import { api } from '$lib/api/client'
   import { healthKey } from '$lib/api/view-client'
@@ -71,19 +71,19 @@
   // keyed by the contract's own stage names, and Record<MemoryStageName,...> makes a stage added
   // there a compile error here rather than a raw enum value leaking onto the screen
   const STAGE_SAID: Record<MemoryStageName, string> = {
-    [MEMORY_STAGE.replaying]: 'replaying knowledge events',
-    [MEMORY_STAGE.linking]: 're-linking the knowledge graph',
-    [MEMORY_STAGE.clustering]: 're-clustering claims through the embedder',
+    [MemoryStageName.replaying]: 'replaying knowledge events',
+    [MemoryStageName.linking]: 're-linking the knowledge graph',
+    [MemoryStageName.clustering]: 're-clustering claims through the embedder',
   }
   // The boot pipeline as a SEGMENTED track: replay → link → cluster, in the contract's own stage
-  // order (one spelling — MemoryStageName.options is the sequence the projector actually runs).
+  // order (one spelling — the sequence the projector actually runs).
   // Rendered only while BOOTING with a live stage: during a live-path refresh the earlier
   // segments did not run, and a track showing them "done" would be a lie about work nobody did.
-  const STAGE_ORDER = MemoryStageName.options
+  const STAGE_ORDER = Object.values(MemoryStageName)
   const SEGMENT_LABEL: Record<MemoryStageName, string> = {
-    [MEMORY_STAGE.replaying]: 'replay',
-    [MEMORY_STAGE.linking]: 'link',
-    [MEMORY_STAGE.clustering]: 'cluster',
+    [MemoryStageName.replaying]: 'replay',
+    [MemoryStageName.linking]: 'link',
+    [MemoryStageName.clustering]: 'cluster',
   }
   const activeIdx = $derived(mem?.stage ? STAGE_ORDER.indexOf(mem.stage.name) : -1)
   const bootTrack = $derived(sup?.state === SUPERVISOR_HEALTH.booting && activeIdx >= 0)

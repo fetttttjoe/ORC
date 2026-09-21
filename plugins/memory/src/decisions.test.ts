@@ -1,6 +1,6 @@
 import { afterAll, describe, expect, it } from 'bun:test'
-import { AUTHOR_SOURCE, DECISION_STATUS, Door, LINK_KIND, MemoryScope, NOTE_KIND, NOTE_TIER, NO_CHAT, planScope, type DecisionInput, type MemoryAuthor } from '@orc/contracts'
-import { TEST_WORKSPACE_ID } from '@orc/contracts/fixtures'
+import { AUTHOR_SOURCE, DECISION_STATUS, LINK_KIND, MemoryScope, NOTE_KIND, NOTE_TIER, planScope, type DecisionInput, type MemoryAuthor } from '@orc/contracts'
+import { authorFixture } from '@orc/contracts/fixtures'
 import { ADR_SECTION } from './adr'
 import { DECISION_REFUSAL, getDecision, listDecisions, recordDecision, type DecisionDoor } from './decisions'
 import { STORE_REFUSAL } from './store'
@@ -11,7 +11,7 @@ afterAll(async () => { await Promise.all(lives.map(l => l.close())) }, 30_000)
 
 // A human recording a decision with `orc decide` is not talking in a chat, so the origin is the
 // CLI door with no chat.
-const human: MemoryAuthor = { source: AUTHOR_SOURCE.human, workspaceId: TEST_WORKSPACE_ID, origin: NO_CHAT(Door.cli) }
+const human: MemoryAuthor = authorFixture({ source: AUTHOR_SOURCE.human })
 async function door(): Promise<DecisionDoor & { live: LiveMemory }> {
   const live = await createLiveMemory()
   lives.push(live)

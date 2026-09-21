@@ -3,8 +3,9 @@ import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import {
-  Door, EVENT_KIND, NO_CHAT, SIGNAL_OUTCOME,
+  Door, EVENT_KIND, NO_CHAT, SignalOutcome,
   type AgentExecutor, type EventDraft, type ExecutorContext, type Origin, type SplitResult, type UnifiedEvent,
+  RunOutcome,
 } from '@orc/contracts'
 import { draftFixture, stepFixture } from '@orc/contracts/fixtures'
 import { openStorage, type EventLog, type Storage } from '../storage'
@@ -28,7 +29,7 @@ function fakeExecutor(): AgentExecutor<unknown> {
         { kind: EVENT_KIND.tool_call, payload: { ...base, iteration: 1, toolCallId: 'c1', toolName: 'fs_write', input: { path: 'out.txt' } } },
         { kind: EVENT_KIND.tool_result, payload: { ...base, iteration: 1, toolCallId: 'c1', toolName: 'fs_write', output: { written: 'out.txt' }, isError: false } },
       ])
-      const signal = { ...base, outcome: SIGNAL_OUTCOME.success, summary: 'done: wrote out.txt' }
+      const signal = { ...base, outcome: SignalOutcome.success, summary: 'done: wrote out.txt' }
       await ctx.checkpoint('signal:1', async () => signal, (): EventDraft[] => [
         { kind: EVENT_KIND.signal_received, payload: { ...base, signal } },
       ])
@@ -86,7 +87,7 @@ describe('vault projection over a real run (e2e)', () => {
     await kernel.approvePlan(t.id, undefined, undefined, CLI)
 
     const handle = await port.startRun(t.id)
-    expect(await handle.wait()).toBe('done')
+    expect(await handle.wait()).toBe(RunOutcome.done)
 
     await projector.close() // final authoritative sync (also flushes any live-debounced render)
 

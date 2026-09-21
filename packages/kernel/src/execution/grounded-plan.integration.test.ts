@@ -4,12 +4,13 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import {
-  AUTHOR_SOURCE, Door, EVENT_KIND, FINISH_STEP_ID, ISOLATION_TIER, LINK_KIND, NO_CHAT, NOTE_TIER, PAYLOAD_SCHEMAS, SIGNAL_OUTCOME, TASK_STATUS, type NoteView,
+  AUTHOR_SOURCE, Confidence, Door, EVENT_KIND, FINISH_STEP_ID, IsolationTier, LINK_KIND, NO_CHAT, NOTE_TIER, PAYLOAD_SCHEMAS, SignalOutcome, TASK_STATUS, type NoteView,
   type AgentExecutor, type Analyzer, type CoverageReport, type EventDraft, type ExecutorContext,
   type MemoryNoteDraft, type Origin, type PlanStep, type ResolvedTool,
   type SplitResult, type UnifiedEvent,
+  RunOutcome,
 } from '@orc/contracts'
-import { must } from '@orc/contracts/fixtures'
+import { authorFixture, must } from '@orc/contracts/fixtures'
 import { createMemory, memoryRoleFor } from '@orc/memory'
 import { createTestSurreal } from '@orc/memory/test-helpers'
 import { openStorage } from '../storage'
@@ -37,7 +38,7 @@ const testAnalyzer: Analyzer = {
     id: 'analyze', role: 'scout', title: 'Analyze the codebase',
     instructions: 'Ground the plan per the codebase-analysis skill.',
     executorRef: 'api-loop', modelRef, skillRefs: ['codebase-analysis'], toolRefs: [],
-    isolation: ISOLATION_TIER.local, zone: [], maxIterations: 15, dependsOn: [],
+    isolation: IsolationTier.local, zone: [], maxIterations: 15, dependsOn: [],
   }),
 }
 
@@ -69,7 +70,7 @@ function groundedFake(): AgentExecutor<unknown> {
           { kind: EVENT_KIND.tool_result, payload: { ...base, iteration: 1, toolCallId: `w-${tag}`, toolName: 'memory_write', output: r.output, isError: r.isError } },
         ])
       const signalDone = async function* (summary: string, ok = true): AsyncGenerator<UnifiedEvent> {
-        const signal = { ...base, outcome: ok ? SIGNAL_OUTCOME.success : SIGNAL_OUTCOME.failure, summary }
+        const signal = { ...base, outcome: ok ? SignalOutcome.success : SignalOutcome.failure, summary }
         await ctx.checkpoint(`signal`, async () => signal, (): EventDraft[] => [
           { kind: EVENT_KIND.signal_received, payload: { ...base, signal } },
         ])
@@ -87,8 +88,8 @@ function groundedFake(): AgentExecutor<unknown> {
         // This scripted executor checkpoints the equivalent event directly; persisted plan-note
         // uncertainty below remains the end-to-end proof that degraded analysis affects planning.
         const report: CoverageReport = analyzed
-          ? { analyzed: true, scope: ['project'], gaps: ['auth flow not exercised'], confidence: 'medium', notesWritten: 1 }
-          : { analyzed: false, scope: [], gaps: [], confidence: 'none', notesWritten: 0 }
+          ? { analyzed: true, scope: ['project'], gaps: ['auth flow not exercised'], confidence: Confidence.medium, notesWritten: 1 }
+          : { analyzed: false, scope: [], gaps: [], confidence: Confidence.none, notesWritten: 0 }
         await ctx.checkpoint('analysis-completed', async () => report, (): EventDraft[] => [
           { kind: EVENT_KIND.analysis_completed, payload: report },
         ])
@@ -220,7 +221,7 @@ async function bringUp() {
     stepTools: p => {
       // step role keys the memory tier: scout (analyze) / auditor (plan) narrow-or-widen the surface;
       // every other role (the implementer children) gets verify. Scout MUST keep memory_write (FixA).
-      const bound = memory.bindStep({ author: { source: AUTHOR_SOURCE.agent, origin: p.origin, workspaceId: p.workspaceId, taskId: p.taskId, stepId: p.stepId, runToken: p.runToken, executor: p.executor, model: p.model, role: p.role }, step: p.step, taskId: p.taskId, ancestorTaskIds: p.ancestorTaskIds, role: memoryRoleFor(p.role) })
+      const bound = memory.bindStep({ author: authorFixture({ source: AUTHOR_SOURCE.agent, origin: p.origin, workspaceId: p.workspaceId, taskId: p.taskId, stepId: p.stepId, runToken: p.runToken, executor: p.executor, model: p.model, role: p.role }), step: p.step, taskId: p.taskId, ancestorTaskIds: p.ancestorTaskIds, role: memoryRoleFor(p.role) })
       return { memory: bound.memory, tools: [
         ...bound.tools,
         ...splitTool({ kernel, config: { approvalPolicy: config.approvalPolicy, maxDepth: config.maxDepth }, p }),
@@ -306,7 +307,7 @@ describe('grounded-plan e2e: the full consent → analyze → plan-graph → ann
       expect(await kernel.replyFeedback(t.id, 'approve', CLI)).toBe('plan:3')
 
       // ASSERT (d.1): the grounded run resolves 'done' (plan step signalled after finalize_plan)
-      expect(await handle.wait()).toBe('done')
+      expect(await handle.wait()).toBe(RunOutcome.done)
 
       // finalize_plan split off a child task carrying the frozen db/api plan
       const split = (await kernel.eventsFor(t.id)).find(e => e.kind === EVENT_KIND.split_proposed)
@@ -365,7 +366,7 @@ describe('grounded-plan e2e: the full consent → analyze → plan-graph → ann
       // drive the plan to done (no annotations → approve on the first ask_human)
       expect(await waitFor(() => feedbackCount('plan:1').then(n => n >= 1))).toBe(true)
       expect(await kernel.replyFeedback(t.id, 'approve', CLI)).toBe('plan:1')
-      expect(await handle.wait()).toBe('done')
+      expect(await handle.wait()).toBe(RunOutcome.done)
 
       // let the router-started child run settle before teardown (avoids racing memory.close())
       const childId2 = PAYLOAD_SCHEMAS.split_proposed.parse(must((await kernel.eventsFor(t.id)).find(e => e.kind === EVENT_KIND.split_proposed), 'split proposed event').payload).childTaskId
@@ -402,7 +403,7 @@ describe('grounded-plan e2e: the full consent → analyze → plan-graph → ann
       expect(await kernel.replyFeedback(t.id, 'yes', CLI)).toBe('consent')
       expect(await waitFor(() => feedbackCount('plan:1').then(n => n >= 1))).toBe(true)
       expect(await kernel.replyFeedback(t.id, 'approve', CLI)).toBe('plan:1')
-      expect(await handle.wait()).toBe('done')
+      expect(await handle.wait()).toBe(RunOutcome.done)
 
       // let the router-started child run settle before teardown (avoids racing memory.close())
       const childId3 = PAYLOAD_SCHEMAS.split_proposed.parse(must((await kernel.eventsFor(t.id)).find(e => e.kind === EVENT_KIND.split_proposed), 'split proposed event').payload).childTaskId

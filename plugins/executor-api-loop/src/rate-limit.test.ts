@@ -52,4 +52,18 @@ describe('rateLimitWaitMs', () => {
     expect(rateLimitWaitMs(Object.assign(new Error('overloaded'), { statusCode: 503 }), 0)).toBeNull()
     expect(rateLimitWaitMs(new Error('boom'), 0)).toBeNull()
   })
+
+  it('finds a rate limit behind a self-referencing lastError, falling back to cause', () => {
+    const selfRef: Record<string, unknown> = {}
+    selfRef.lastError = selfRef
+    selfRef.cause = rateLimited()
+    expect(rateLimitWaitMs(selfRef, 0)).toBe(FIRST_WAIT_MS)
+  })
+
+  it('does not hang on a two-node cycle with no rate limit anywhere in it', () => {
+    const a: Record<string, unknown> = {}
+    const b: Record<string, unknown> = { cause: a }
+    a.cause = b
+    expect(rateLimitWaitMs(a, 0)).toBeNull()
+  })
 })

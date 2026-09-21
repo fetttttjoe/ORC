@@ -12,6 +12,13 @@ export enum ChatKind {
   imported = 'imported',
 }
 
+// The copilot conversation's own message role — shared by the server route body and the web
+// client's stored-chat cache, so the two never re-spell the same two-value wire vocabulary.
+export enum MessageRole {
+  user = 'user',
+  assistant = 'assistant',
+}
+
 // A pointer at ONE event inside a chat: the chat plus that event's sequence number.
 export const ChatRef = z.object({
   chatId: z.string().min(1),

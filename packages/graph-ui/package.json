@@ -4,7 +4,8 @@
   "type": "module",
   "exports": {
     ".": "./src/server.ts",
-    "./copilot-journal": "./src/copilot-journal.ts"
+    "./copilot-journal": "./src/copilot-journal.ts",
+    "./dist-freshness": "./src/web-dist.ts"
   },
   "dependencies": {
     "@orc/ui-core": "workspace:*",

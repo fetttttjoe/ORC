@@ -38,7 +38,7 @@ async function makeBriefCli() {
   const projectDbName = `t_${Math.random().toString(36).slice(2, 10)}`
   const config = requireProject({ ...loadConfig(dir), projectDbName, projectId: TEST_PROJECT_ID, projectName: 'brief-test' })
   surrealConfigs.push(config)
-  const { kernel, log } = await openKernel(db.url, { projectId: TEST_PROJECT_ID })
+  const { kernel, log } = await openKernel(db.url, { projectId: TEST_PROJECT_ID, config })
   await seedTestWorkspace(log, CLI, realpathSync(config.dir))
   const { host, hub } = await buildPlugins(config)
   cleanup.push(() => log.close(), () => hub.close(), () => host.shutdown())
