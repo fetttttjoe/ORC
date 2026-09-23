@@ -2,9 +2,8 @@ import { z } from 'zod'
 import { RecordId, Surreal } from 'surrealdb'
 import { edge, orm, table, t } from 'surqlize'
 import {
-  activation, activationBoost, bumpAccess, Claim, DEFAULT_HALF_LIFE_DAYS,
-  decodeMemoryEvent, DecisionStatus, deriveNoteProvenance, EDGE_DIRECTION, edgeKey, LINK_KINDS, MEMORY_USE, NOTE_KINDS, MemoryScope, MutationOp, Topic, viaEdge,
-  type LinkKind,
+  activation, activationBoost, bumpAccess, Claim, ClaimAnchor, ClaimClass, DEFAULT_HALF_LIFE_DAYS,
+  decodeMemoryEvent, DecisionStatus, deriveNoteProvenance, EDGE_DIRECTION, edgeKey, LinkKind, MEMORY_USE, MemoryScope, MutationOp, Topic, viaEdge,
   MemoryNote, VerifiedStamp, type MemoryWrittenPayload,
   MEMORY_LIMITS, SEARCH_MODE, errorMessage, inferTier, isUiMetaNote, noteKey, NoteKind, NoteTier,
   type EmbeddingProvider, type EventRecord, type NeighborQuery, type MemoryFilter, type NoteFields, type NoteView, type UseStats,
@@ -31,7 +30,7 @@ enum Tb { Note = 'note', Meta = 'meta', Link = 'link', Claim = 'claim', Topic = 
 // rebuild — and are stripped back out in toNote() before the row reaches the public MemoryNote
 // shape (they belong to the summary, not to the authored note). Both are optional in the row
 // type so a note projected before the counter existed still selects without a rebuild.
-// literal-typed link kind, derived from the contract's LINK_KINDS — rows come back as LinkKind.
+// literal-typed link kind, derived from the contract's LinkKind — rows come back as LinkKind.
 
 // The full-text analyzer both keyword arms match through, and the searchable field of each table
 // with what a match there is worth. ONE spelling: the schema setup below builds a DEFINE INDEX per
@@ -69,8 +68,20 @@ const namesOf = (fields: readonly { name: string }[]): string[] => fields.map(f 
 const ftsIndexes = (tb: Tb, fields: readonly { name: string }[]): string =>
   fields.map(f => `DEFINE INDEX IF NOT EXISTS ${tb}_${f.name}_fts ON ${tb} FIELDS ${f.name} FULLTEXT ANALYZER ${FTS_ANALYZER} BM25;`).join(' ')
 
-const kindType = t.union(LINK_KINDS.map(k => t.literal(k)))
-const noteKindType = t.union(NOTE_KINDS.map(k => t.literal(k)))
+// spelled once for the note row and the derived claim row
+const anchorColumn = () => t.array(t.object({ path: t.string(), symbol: t.option(t.string()), blob: t.option(t.string()) }))
+// t.option infers `string | undefined`, so the optional keys are materialized as the note row's links are
+const anchorRow = (a: ClaimAnchor) => ({ path: a.path, symbol: a.symbol ?? undefined, blob: a.blob ?? undefined })
+// the verification stamp as the row holds it — its claim snapshot is what claim drift compares against
+const verifiedRow = (v: VerifiedStamp | undefined) => v === undefined
+  ? undefined
+  : {
+      revision: v.revision, at: v.at, by: v.by,
+      claims: v.claims?.map(c => ({ claimId: c.claimId, anchors: c.anchors.map(anchorRow) })),
+    }
+
+const kindType = t.union(Object.values(LinkKind).map(k => t.literal(k)))
+const noteKindType = t.union(Object.values(NoteKind).map(k => t.literal(k)))
 const decisionStatusType = t.union(Object.values(DecisionStatus).map(s => t.literal(s)))
 
 // Tier-specific columns are optional because a row only HAS the columns its tier owns — a plan
@@ -87,7 +98,9 @@ const noteTable = table(Tb.Note, {
   // stored on the note row like `links` is, and — like `links` — ALSO materialized into a derived
   // per-claim table for retrieval. The row is the note's own live set (what a read returns); the
   // derived table is what search matches statement-by-statement.
-  claims: t.option(t.array(t.object({ id: t.string(), text: t.string(), sourceRevision: t.option(t.string()) }))),
+  claims: t.option(t.array(t.object({
+    id: t.string(), text: t.string(), class: t.string(), anchors: anchorColumn(), sourceRevision: t.option(t.string()),
+  }))),
   summary: t.string(), body: t.string(),
   retention: t.string(),
   sources: t.option(t.array(t.object({ url: t.string(), title: t.option(t.string()), retrievedAt: t.string() }))),
@@ -111,7 +124,10 @@ const noteTable = table(Tb.Note, {
   // Set by memory_verified and by nothing else — the only note column no memory_written can
   // originate (a write can carry it forward or drop it; see deriveNoteProvenance). Optional so
   // every row projected before the stamp existed still selects, without a rebuild.
-  verified: t.option(t.object({ revision: t.string(), at: t.string(), by: t.string() })),
+  verified: t.option(t.object({
+    revision: t.string(), at: t.string(), by: t.string(),
+    claims: t.option(t.array(t.object({ claimId: t.string(), anchors: anchorColumn() }))),
+  })),
   // the note's dense vector (embedder-derived, Tier-2 like hits) — set only when an embedder was
   // configured at write/rebuild; the semantic scan reads it raw, toNote/toSummary drop it.
   embedding: t.option(t.array(t.number())),
@@ -145,6 +161,7 @@ const metaTable = table(Tb.Meta, {
 // records the access, which is what the heat re-rank is computed from.
 const claimTable = table(Tb.Claim, {
   claimId: t.string(), noteId: t.string(), scope: t.string(), text: t.string(),
+  class: t.string(), anchors: anchorColumn(),
   validFrom: t.string(), sourceRevision: t.option(t.string()),
   embedding: t.option(t.array(t.number())),
 })
@@ -195,7 +212,7 @@ type OwnerMap = ReadonlyMap<string, NoteSummary>
 // Attach each claim row's owning note. A row whose owner is absent from the map is one the filter
 // excluded, one knowledge() excluded, or one whose note is gone — either way, not a hit.
 const joinClaimOwners = (
-  rows: ReadonlyArray<{ claimId: string; noteId: string; scope: string; text: string; validFrom: string }>,
+  rows: ReadonlyArray<z.infer<typeof ClaimRowBase>>,
   owners: OwnerMap,
 ): ClaimHit[] =>
   rows.flatMap(r => {
@@ -203,7 +220,7 @@ const joinClaimOwners = (
     return owner
       ? [{
           claimId: r.claimId, noteId: r.noteId, scope: r.scope, title: owner.title,
-          text: r.text, validFrom: r.validFrom,
+          text: r.text, class: r.class, anchors: r.anchors, validFrom: r.validFrom,
           // the owner's drift inputs ride along — already resolved here, and the only way a claim
           // in the preload can be dated against the tree
           sourceRevision: owner.sourceRevision, paths: owner.paths,
@@ -221,12 +238,12 @@ const SummaryRow = z.object({
   // projected like every other summary field: without it toSummary would fall back to shape
   // inference over a row that carries none of the columns inference reads, and label every
   // vector hit 'semantic' — including the plan and episodic notes it surfaced.
-  tier: NoteTier.optional(),
+  tier: z.enum(NoteTier).optional(),
   // Projected so a `kind` FILTER works on this arm too. matchesRow reads it off the row, and the
   // raw selects project exactly SUMMARY_COLUMNS — so without it here every kind-filtered search
   // matched nothing (r.kind undefined), while the same filter worked on list(), which selects the
   // whole row. Optional like `tier`: a row projected before the column existed still parses.
-  kind: NoteKind.optional(),
+  kind: z.enum(NoteKind).optional(),
   categories: z.array(z.string()).optional(), tags: z.array(z.string()), summary: z.string(),
   hits: z.number().optional(), lastAccessedAt: z.string().nullable().optional(),
   // observed-use outcomes — optional like hits, a row may predate the columns
@@ -297,8 +314,14 @@ const KeywordRow = SummaryRow.extend({ updatedAt: z.string() }).extend(ftsColumn
 // Raw claim rows, from the cosine select and the full-text one.
 const ClaimRowBase = z.object({
   claimId: z.string(), noteId: z.string(), scope: z.string(), text: z.string(),
+  class: z.enum(ClaimClass), anchors: z.array(ClaimAnchor),
   validFrom: z.string(),
 })
+// a claim field missing from this hand-mapped row fails the build; `id` is `claimId`, `sourceRevision` is the owner's
+type ClaimRowCoversClaim =
+  Exclude<keyof Claim, keyof typeof ClaimRowBase.shape | 'id' | 'sourceRevision'> extends never ? true : never
+const claimRowCoversClaim: ClaimRowCoversClaim = true
+void claimRowCoversClaim
 // derived like SUMMARY_COLUMNS above: the parse's keys are the projection, one edit widens both
 const CLAIM_COLUMNS = Object.keys(ClaimRowBase.shape).join(', ')
 const ClaimRow = ClaimRowBase.extend({ score: z.number() })
@@ -615,7 +638,7 @@ export class SurrealMemory {
           const ex = (await tx.select(Tb.Note, k))[0]
           // provenance + retrievedAt stamping shared with the kernel plan-note fold (deriveNoteProvenance):
           // the one place this is computed, so projector and log-side fold cannot disagree.
-          const prov = deriveNoteProvenance(note, author, e.ts, ex)
+          const prov = deriveNoteProvenance(note, author, e.ts, ex && { ...ex, verified: VerifiedStamp.safeParse(ex.verified).data })
           // read through NoteView so one write path covers every tier: a column the note's tier does
           // not own is OMITTED from the SET rather than nulled. An omitted key survives `UPSERT … SET`
           // untouched (that is exactly why the embedding fields use the same pattern), so a note that
@@ -635,7 +658,10 @@ export class SurrealMemory {
             ...(n.paths !== undefined && { paths: n.paths }),
             // materialize the optional sourceRevision key, same reason as links' confidence above
             ...(n.claims !== undefined && {
-              claims: n.claims.map(c => ({ id: c.id, text: c.text, sourceRevision: c.sourceRevision ?? undefined })),
+              claims: n.claims.map(c => ({
+                id: c.id, text: c.text, class: c.class, anchors: c.anchors.map(anchorRow),
+                sourceRevision: c.sourceRevision ?? undefined,
+              })),
             }),
             summary: note.summary, body: note.body,
             retention: note.retention,
@@ -660,7 +686,7 @@ export class SurrealMemory {
             // when content moved, and an omitted key survives `UPSERT … SET` untouched — which would
             // leave a stale "verified" on a note the write just rewrote. `undefined` is what UNSETs
             // the column, so this names the key unconditionally.
-            verified: prov.verified,
+            verified: verifiedRow(prov.verified),
             hits: ex?.hits ?? 0,
             // OptionType fields validate against `undefined`, not `null` — omit rather than null it out.
             ...(ex?.lastAccessedAt !== undefined && { lastAccessedAt: ex.lastAccessedAt }),
@@ -695,6 +721,7 @@ export class SurrealMemory {
             const vec = claimEmbeddings.get(c.id)
             await tx.upsert(Tb.Claim, claimKey(note.scope, note.id, c.id)).set({
               claimId: c.id, noteId: note.id, scope: note.scope, text: c.text,
+              class: c.class, anchors: c.anchors.map(anchorRow),
               // the payload carries no date — the FIRST event that carried this claim is its validFrom
               validFrom: prev?.validFrom ?? e.ts,
               // `?? undefined` here is deliberate and NOT the omit-pattern below: resolveClaims carries
@@ -757,7 +784,7 @@ export class SurrealMemory {
           // ONLY this column: the act declares a note checked and asserts nothing about its content,
           // so revision/updatedAt/updatedBy stay exactly where the last write left them. A verify that
           // moved `updatedBy` would report the auditor as the note's author.
-          if (ex) await tx.upsert(Tb.Note, k).set({ verified: p.stamp })
+          if (ex) await tx.upsert(Tb.Note, k).set({ verified: verifiedRow(p.stamp) })
           break
         }
         case MutationOp.delete: {
@@ -1169,7 +1196,8 @@ export class SurrealMemory {
   async claimsFor(noteId: string, scope: string = MemoryScope.project): Promise<Claim[]> {
     const rows = await this.db.select(Tb.Claim).where(c => c.noteId.eq(noteId).and(c.scope.eq(scope)))
     return rows.map(r => Claim.parse({
-      id: r.claimId, text: r.text, validFrom: r.validFrom, sourceRevision: r.sourceRevision,
+      id: r.claimId, text: r.text, class: r.class, anchors: r.anchors,
+      validFrom: r.validFrom, sourceRevision: r.sourceRevision,
     }))
   }
 
@@ -1287,7 +1315,10 @@ export class SurrealMemory {
     const byClaim = new Map<string, Claim>()
     for (const r of rows) {
       if (!members.has(r.claimId)) continue
-      const claim = Claim.parse({ id: r.claimId, text: r.text, validFrom: r.validFrom, sourceRevision: r.sourceRevision })
+      const claim = Claim.parse({
+        id: r.claimId, text: r.text, class: r.class, anchors: r.anchors,
+        validFrom: r.validFrom, sourceRevision: r.sourceRevision,
+      })
       const prev = byClaim.get(claim.id)
       if (!prev || claim.validFrom < prev.validFrom) byClaim.set(claim.id, claim)
     }
@@ -1457,7 +1488,7 @@ function toNote(r: Record<string, any>) {
     revision: r.revision,
     // absent on every note nobody has verified, which is most of them — MemoryNote leaves the key
     // off rather than defaulting it, because a defaulted stamp would be a claim nobody made
-    verified: r.verified,
+    verified: VerifiedStamp.safeParse(r.verified).data,
   }
 }
 
@@ -1479,6 +1510,7 @@ void toNoteCoversTiers
 
 function toSummary(r: Record<string, any>): NoteSummary {
   const u = useOf(r)
+  const verified = VerifiedStamp.safeParse(r.verified).data
   return {
     id: r.noteId, scope: r.scope, title: r.title,
     // both drift inputs together — a reader holding only the revision invents the wrong comparison
@@ -1488,12 +1520,12 @@ function toSummary(r: Record<string, any>): NoteSummary {
     // is indistinguishable from trunk knowledge — the column is required precisely so it is never
     // absent, and a row that somehow lacks it must fail the parse rather than answer wrongly.
     workspaceId: r.workspaceId,
-    tier: NoteTier.catch(inferTier(r)).parse(r.tier),
+    tier: z.enum(NoteTier).catch(inferTier(r)).parse(r.tier),
     categories: r.categories ?? [], tags: r.tags, summary: r.summary,
     hits: r.hits ?? 0, lastAccessedAt: r.lastAccessedAt ?? null,
     // conditional spread, not `?? undefined`: an explicit undefined key would parse fine here but
     // reads as a hollow field on every unverified note in every rendered summary
-    ...(r.verified && { verified: r.verified }),
+    ...(verified && { verified }),
     // present only when evidence exists — the common no-evidence case must not widen every envelope
     ...(u && { use: u }),
   }

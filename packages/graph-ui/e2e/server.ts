@@ -2,7 +2,7 @@
 // scripted copilot, kernel-backed newTask — everything else read-only-stubbed.
 import { MockLanguageModelV4 } from 'ai/test'
 import { AUTHOR_SOURCE, Door, EVENT_KIND, FailureClass, NO_CHAT, STEP_ID, TASK_STATUS, WORKSPACE_KIND } from '@orc/contracts'
-import { TEST_WORKSPACE_ID, semanticNoteFixture, stepFixture } from '@orc/contracts/fixtures'
+import { TEST_WORKSPACE_ID, claimFixture, semanticNoteFixture, stepFixture } from '@orc/contracts/fixtures'
 import { draftFixture } from '@orc/contracts/fixtures'
 
 /** the one step draftFixture ships with — the monitor keys its ceiling off this id */
@@ -188,7 +188,7 @@ await storage.events.append({
       // carrying the revision it was recorded at, and a null sourceRevision
       sources: [{ url: 'https://example.invalid/spec', title: 'the spec', retrievedAt: '2026-09-18T00:00:00.000Z' }],
       // CLAIM_ID_RE: 12 hex characters, so a claim id is the same shape wherever it is quoted
-      claims: [{ id: 'a1b2c3d4e5f6', text: 'the console reads notes through the view registry', sourceRevision: null }],
+      claims: [claimFixture('the console reads notes through the view registry', { id: 'a1b2c3d4e5f6', sourceRevision: null })],
       sourceRevision: null,
     }),
     author: { source: AUTHOR_SOURCE.cli, workspaceId: TEST_WORKSPACE_ID, origin: SEED },

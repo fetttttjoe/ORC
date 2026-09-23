@@ -1,7 +1,7 @@
 import { z } from 'zod'
-import { AccessVia, AUTHOR_SOURCE, CLAIM_ID_RE, Door, NO_CHAT, ClaimWrite, DecisionStatus, isRecord, DRIFT_STATE, EDGE_DIRECTIONS, inferTier, linkLookupScopes, MASTERPLAN_NOTE_ID, MemoryScope, MEMORY_ACCESS, MEMORY_ID_RE, MEMORY_LIMITS, MEMORY_SOURCE_LIMITS, MEMORY_TOOL_NAME, MemorySearchResult, MemoryWriteResult, NoteCategory, NOTE_CATEGORIES, NoteKind, NOTE_KINDS, LINK_KIND, LINK_KINDS, planFieldViolations, RETENTION_CLASSES, SEARCH_MODES, SearchMode, stepMayVerify, LinkKind, MemoryNoteDraftInput, NOTE_TIER, NOTE_TIERS, emptyUseStats, slugId, toolError, useLine, type MemoryAuthor, type MemoryNote, type MemoryStore, type ProvisionalFlag, type ResolvedTool, type VerifiedStamp } from '@orc/contracts'
+import { AccessVia, AUTHOR_SOURCE, CLAIM_ID_RE, ClaimClass, Door, NO_CHAT, ClaimWrite, DecisionStatus, isRecord, DRIFT_STATE, EdgeDirection, inferTier, linkLookupScopes, MASTERPLAN_NOTE_ID, MemoryScope, MEMORY_ACCESS, MEMORY_ID_RE, MEMORY_LIMITS, MEMORY_SOURCE_LIMITS, MEMORY_TOOL_NAME, MemorySearchResult, MemoryWriteResult, NoteCategory, NoteKind, LINK_KIND, planFieldViolations, Retention, SearchMode, stepMayVerify, LinkKind, MemoryNoteDraftInput, NOTE_TIER, NoteTier, emptyUseStats, slugId, toolError, useLine, type ClaimInput, type MemoryAuthor, type MemoryNote, type MemoryStore, type NoteSummary, type ProvisionalFlag, type ResolvedTool, type VerifiedStamp } from '@orc/contracts'
 import { applyBudget, fitMemoryNoteToBudget } from './budget'
-import { noteDriftState, type ChangedSince } from './drift'
+import { readNoteDrift, type DriftableNote, type DriftSources } from './claim-drift-read'
 import { provisionalOf, type WorkspaceViewProbe } from './provisional'
 import { NEAR_SUBJECT, trigramDice } from './title-similarity'
 
@@ -155,7 +155,7 @@ export function noteLint(note: MemoryNote): string[] {
       + ` so the rest is stored and readable but invisible to semantic search; split it or move detail into paths/claims/links`)
   // the categories lint targets the retrieval surface, so it only fires on the tier that has one
   if (note.tier === NOTE_TIER.semantic && note.kind.startsWith('architecture') && note.categories.length === 0)
-    w.push(`categories empty — set one of ${NOTE_CATEGORIES.join(' | ')} so category-filtered search finds this`)
+    w.push(`categories empty — set one of ${Object.values(NoteCategory).join(' | ')} so category-filtered search finds this`)
   // NO "all edges are relates_to" LINT either, and for the same reason as the isolated-note one: a
   // cross-cutting note whose relationships genuinely ARE all relates_to is correct, and the warning
   // asks it to re-type them into decomposes_into or depends_on — structure it would be inventing.
@@ -185,20 +185,20 @@ const ok = (output: unknown) => ({ output, isError: false })
 // memory_topics shipped without it, which is how the rule drifted; three spellings would be worse.
 const absenceNote = (what: string): string => `no ${what} matched — absence is not proof a decision doesn't exist`
 
-// category is a FIXED three-value vocabulary (contracts' NOTE_CATEGORIES) — safeParse against the
+// category is a FIXED three-value vocabulary (contracts' NoteCategory) — safeParse against the
 // real exported enum, never a hand-rolled literal array here, the same discipline
 // packages/cli/src/main.ts's parseNoteTier and the `mem neighbors --kinds` option already apply
-// to NOTE_TIERS/LINK_KINDS: reject an unknown value at the boundary, naming the real set, rather
+// to NoteTier/LinkKind: reject an unknown value at the boundary, naming the real set, rather
 // than letting a typo silently filter everything out and read as "this category is empty".
 const unknownCategoryError = (value: string): string =>
-  `unknown category '${value}' — valid categories: ${NOTE_CATEGORIES.join(', ')}`
+  `unknown category '${value}' — valid categories: ${Object.values(NoteCategory).join(', ')}`
 
 // kind is closed like category, so the same boundary refusal applies — but ONLY to a value outside
 // the enum. A real kind no note carries is NOT an error: it is an empty corpus, which is the first
 // thing anyone reading a whole class of knowledge ('which decisions exist?') will meet.
 // 'adr' is the near-miss this exists to name: it is a tag, never a kind.
 const unknownKindError = (value: string): string =>
-  `unknown kind '${value}' — valid kinds: ${NOTE_KINDS.join(', ')}`
+  `unknown kind '${value}' — valid kinds: ${Object.values(NoteKind).join(', ')}`
 
 // tag has NO fixed vocabulary — unlike category, inventing one would be a guess, so the known set
 // is derived from the corpus itself, at request time, client-side: same small-corpus approach
@@ -273,11 +273,11 @@ const SearchInput = z.object({
   kind: z.string().optional(),
   detail_level: z.enum(DetailLevel).default(DetailLevel.standard),
   limit: z.number().int().positive().max(MEMORY_LIMITS.detailItems).optional(), budget: Budget,
-  mode: SearchMode.optional(),
+  mode: z.enum(SearchMode).optional(),
 })
 const ReadInput = z.object({ id: z.string(), scope: z.string().optional(), budget: Budget, via: AccessVia.optional() })
 const NeighborsInput = z.object({
-  seed: z.string(), kinds: z.array(LinkKind).optional(), scope: z.string().optional(),
+  seed: z.string(), kinds: z.array(z.enum(LinkKind)).optional(), scope: z.string().optional(),
   depth: z.number().int().positive().optional(), budget: Budget,
 })
 // topic omitted lists the inventory; a topicKey from that listing fetches one topic's claims. The
@@ -313,6 +313,8 @@ const MemoryWriteToolInput = MemoryNoteDraftInput.extend({
   // same mistake retail. Length is handled by normalizeWrite, which trims and warns.
   summary: MemoryNoteDraftInput.shape.summary,
   invalidates: ClaimWrite.shape.invalidates.removeDefault().optional(),
+  why: ClaimWrite.shape.why.removeDefault(),
+  decision: ClaimWrite.shape.decision.removeDefault(),
 })
 
 // Trim what only needs trimming, and say so. Runs on the RAW input so the schema never sees a value
@@ -353,7 +355,7 @@ const LIST_CAPS: ReadonlyArray<readonly [string, number]> = [
 ]
 const ITEM_CAPS: ReadonlyArray<readonly [string, number]> = [
   ['tags', MEMORY_LIMITS.labelChars], ['categories', MEMORY_LIMITS.labelChars],
-  ['paths', MEMORY_LIMITS.detailChars], ['addClaims', MEMORY_LIMITS.detailChars],
+  ['paths', MEMORY_LIMITS.detailChars],
 ]
 
 // A citation whose url is not a credential-free http(s) URL — a repo path, a bare filename, a
@@ -413,11 +415,11 @@ const WRITE_PROPERTIES = {
   id: { ...idSchema, description: 'omit id unless you are updating a note whose id you read — the title-derived slug makes the same finding converge instead of forking.' },
   title: { type: 'string', minLength: 1, maxLength: 200, description: 'required for a NEW note (it derives the id); omit when updating by id — the stored title carries forward' },
   tier: {
-    type: 'string', enum: [...NOTE_TIERS],
+    type: 'string', enum: Object.values(NoteTier),
     description: "which memory this note belongs to (default semantic). semantic = durable project knowledge, and the only tier that takes kind/categories/paths/claims/sources. plan = one node of a task's decomposition, and the only tier that takes rationale/dependsOn/uncertainty/zone. episodic = a record of what one run did, expirable, title+summary+tags only. Fields outside the tier you name are dropped.",
   },
   kind: {
-    type: 'string', enum: [...NOTE_KINDS],
+    type: 'string', enum: Object.values(NoteKind),
     description: 'semantic only. architecture_current = observed implementation; architecture_target = intended design; research = a distilled web finding, which REQUIRES sources (default fact)',
   },
   status: {
@@ -425,7 +427,7 @@ const WRITE_PROPERTIES = {
     description: 'kind=decision ONLY (refused on any other kind): proposed | accepted | superseded | deprecated. Omit it — a decision with no status reads as accepted. Do not set superseded by hand: record the replacing decision with a supersedes link and the lifecycle flips this one.',
   },
   retention: {
-    type: 'string', enum: [...RETENTION_CLASSES],
+    type: 'string', enum: Object.values(Retention),
     description: 'durable = keep indefinitely (default); expirable = a provisional finding that may be swept once stale. Choose deliberately: this is not recoverable later.',
   },
   sources: {
@@ -456,7 +458,7 @@ const WRITE_PROPERTIES = {
       type: 'object', required: ['id'],
       properties: {
         id: { ...idSchema, description: 'target note id' },
-        kind: { type: 'string', enum: [...LINK_KINDS], description: 'relationship kind (default relates_to). depends_on means "this knowledge builds on that" — it is NOT plan ordering.' },
+        kind: { type: 'string', enum: Object.values(LinkKind), description: 'relationship kind (default relates_to). depends_on means "this knowledge builds on that" — it is NOT plan ordering.' },
         confidence: { type: 'number', minimum: 0, maximum: 1 },
       },
     },
@@ -464,14 +466,39 @@ const WRITE_PROPERTIES = {
   paths: { type: 'array', maxItems: MEMORY_LIMITS.detailItems, items: { type: 'string', maxLength: MEMORY_LIMITS.detailChars }, description: 'code paths this note refers to' },
   addClaims: {
     type: 'array', maxItems: MEMORY_LIMITS.detailItems,
-    items: { type: 'string', maxLength: MEMORY_LIMITS.detailChars },
-    description: 'statements to ADD to this note — send only what is new; existing claims carry forward untouched, so never resend them. One fact per statement: a claim is what search returns and what another agent acts on.',
+    description: 'statements to ADD to this note — send only what is new; existing claims carry forward untouched, so never resend them. One fact per statement: a claim is what search returns and what another agent acts on. Each item is an OBJECT, never a bare string. What a task DID belongs in the step summary, not in a claim.',
+    items: {
+      type: 'object', required: ['text', 'class'],
+      properties: {
+        text: { type: 'string', maxLength: MEMORY_LIMITS.detailChars, description: 'the statement, standalone: it is read outside the note' },
+        class: { type: 'string', enum: Object.values(ClaimClass), description: 'fact = what the code does now; why = the reason it is that way' },
+        anchors: {
+          type: 'array', maxItems: MEMORY_LIMITS.claimAnchors,
+          description: 'the files that REALISE this claim — the reader follows them to the code, and the store stamps each one\'s blob from your checkout',
+          items: {
+            type: 'object', required: ['path'],
+            properties: {
+              path: { type: 'string', maxLength: MEMORY_LIMITS.detailChars, description: 'repository-relative path, never absolute and never containing ..' },
+              symbol: { type: 'string', maxLength: MEMORY_LIMITS.labelChars, description: 'the function/type/constant inside that file, when the claim is about one' },
+            },
+          },
+        },
+      },
+    },
   },
   invalidates: {
     // the pattern the parser actually enforces, not a second spelling of it
     type: 'array', maxItems: MEMORY_LIMITS.detailItems,
     items: { type: 'string', pattern: CLAIM_ID_RE.source },
     description: 'claim ids this write supersedes — a superseded claim stops being returned but stays in the log. State it: a claim you simply do not resend carries forward.',
+  },
+  why: {
+    type: 'string', maxLength: MEMORY_LIMITS.detailChars,
+    description: 'why THIS write states what it states — a reader asking why a claim is true, or why it was retired, reads this. It is never carried forward to a later write.',
+  },
+  decision: {
+    type: 'string', pattern: MEMORY_ID_RE.source,
+    description: 'the decision note this write served, by id — it must already be recorded as a `kind: decision` note in this scope.',
   },
   rationale: { type: 'string', maxLength: MEMORY_LIMITS.rationaleChars, description: 'plan tier only: why this subplan exists' },
   // The parser has always accepted this; the schema never named it, so a model looking for a way to
@@ -615,7 +642,7 @@ export function memoryTools(opts: {
   store: MemoryStore
   author: MemoryAuthor
   role?: MemoryRole
-  changedSince?: ChangedSince
+  drift?: DriftSources
   // Which workspaces exist, which are trunk, which have merged — the ONE input `provisional` is
   // derived from. A callback rather than a snapshot, and re-read per CALL like the drift probe: a
   // `workspace_merged` recorded mid-session has to clear the flag on the next read, and tools are
@@ -635,7 +662,7 @@ export function memoryTools(opts: {
   // exactly backwards: an agent cannot inspect the projector to find out.
   catchUp?: () => Promise<void>
 }): ResolvedTool[] {
-  const { store, author, changedSince, searchScope, workspaceView } = opts
+  const { store, author, drift, searchScope, workspaceView } = opts
   // never fails a read: a projector that cannot drain leaves the reader with a slightly stale view,
   // which is the situation it was already in — throwing here would turn a lag into a failed step
   const settled = async (): Promise<void> => { try { await opts.catchUp?.() } catch { /* stale beats failed */ } }
@@ -646,16 +673,24 @@ export function memoryTools(opts: {
   // Tri-state: `drifted` (checked, moved) and `unknown` (revision unreachable, could not be checked)
   // are reported separately — collapsing them would tell a searcher a note is fine when it is
   // actually un-auditable, exactly the conflation noteDriftState exists to avoid.
-  const noteDriftIds = async (notes: readonly { id: string; sourceRevision: string | null; paths: readonly string[]; verified?: VerifiedStamp }[]): Promise<{ drifted: string[]; unknown: string[] }> => {
-    if (!changedSince) return { drifted: [], unknown: [] }
-    const seen = new Map<string, { sourceRevision: string; paths: string[]; verified?: VerifiedStamp }>()
-    for (const n of notes) if (n.sourceRevision !== null && !seen.has(n.id)) seen.set(n.id, { sourceRevision: n.sourceRevision, paths: [...n.paths], ...(n.verified && { verified: n.verified }) })
+  const noteDriftIds = async (notes: readonly { id: string; sourceRevision: string | null; paths: readonly string[]; verified?: VerifiedStamp; claims?: readonly ClaimInput[] }[]): Promise<{ drifted: string[]; unknown: string[] }> => {
+    if (!drift) return { drifted: [], unknown: [] }
+    const seen = new Map<string, DriftableNote>()
+    for (const n of notes) {
+      if (n.sourceRevision === null) continue
+      const held = seen.get(n.id)
+      // several claim hits of one note accumulate into one verdict
+      const claims = [...(held?.claims ?? []), ...(n.claims ?? [])]
+      seen.set(n.id, {
+        sourceRevision: n.sourceRevision, paths: [...n.paths],
+        ...(claims.length > 0 && { claims }),
+        ...((held?.verified ?? n.verified) && { verified: held?.verified ?? n.verified }),
+      })
+    }
     const drifted: string[] = []
     const unknown: string[] = []
-    // noteDriftState, not noteHasDrifted: a note an auditor verified AFTER the code moved is not
-    // stale, and flagging it here sends the next reader to re-derive what was just confirmed
     for (const [id, n] of seen) {
-      const state = await noteDriftState(n, changedSince)
+      const state = (await readNoteDrift(n, drift)).state
       if (state === DRIFT_STATE.drifted) drifted.push(id)
       else if (state === DRIFT_STATE.unknown) unknown.push(id)
     }
@@ -699,7 +734,7 @@ export function memoryTools(opts: {
           // omitted field into an explicit clear, defeating the store gateway's merge-on-omit.
           // The gateway parses the merged note fully — same validation, right order, no casts.
           const normalized = normalizeWrite(input)
-          const { invalidates, ...parsed } = MemoryWriteToolInput.parse(normalized.input)
+          const { invalidates, why, decision, ...parsed } = MemoryWriteToolInput.parse(normalized.input)
           if (parsed.id === undefined && parsed.title === undefined)
             throw new Error('a new note needs a title (it derives the id) — pass an id instead to update an existing note')
           const scope = parsed.scope ?? MemoryScope.project
@@ -790,7 +825,9 @@ export function memoryTools(opts: {
           // read BEFORE the write, so a rewrite that guts a note can be reported at the moment it
           // happens rather than found days later. One extra read on the write path, paid only here.
           const prior = await store.get(id, scope)
-          const n = await store.write({ ...parsed, id }, author, { idempotencyKey, ...(invalidates && { invalidates }) })
+          const n = await store.write({ ...parsed, id }, author, {
+            idempotencyKey, ...(invalidates && { invalidates }), ...(why != null && { why }), ...(decision != null && { decision }),
+          })
           // No revision: the write is event-first and the projector is asynchronous, so within
           // the flush window store.write reports the revision from BEFORE this write (and
           // fabricates 1 when nothing is projected yet). Handing the model a number that was
@@ -825,14 +862,14 @@ export function memoryTools(opts: {
         type: 'object',
         properties: {
           query: { type: 'string', description: 'what to search for. OMIT it to enumerate instead — with a filter and no query you get every note the filter matches, unranked, which is how you read a whole class of knowledge (e.g. every decision). A call with neither a query nor a filter is refused.' },
-          category: { type: 'string', enum: [...NOTE_CATEGORIES] },
+          category: { type: 'string', enum: Object.values(NoteCategory) },
           tag: { type: 'string', description: 'a tag an existing note already carries — an unknown one is refused, naming what the corpus does carry' },
           kind: {
-            type: 'string', enum: [...NOTE_KINDS],
-            description: "only notes of this kind. Unlike `tag`, a kind nothing currently carries returns EMPTY rather than refusing — NOTE_KINDS is a closed set, so 'none recorded yet' is a real answer. Combine with no `query` to enumerate, e.g. {kind: 'decision'} for every decision this project has recorded.",
+            type: 'string', enum: Object.values(NoteKind),
+            description: "only notes of this kind. Unlike `tag`, a kind nothing currently carries returns EMPTY rather than refusing — NoteKind is a closed set, so 'none recorded yet' is a real answer. Combine with no `query` to enumerate, e.g. {kind: 'decision'} for every decision this project has recorded.",
           },
           detail_level: detailLevelSchema, limit: { type: 'integer', minimum: 1, maximum: MEMORY_LIMITS.detailItems }, budget: budgetSchema,
-          mode: { type: 'string', enum: [...SEARCH_MODES], description: 'keyword | semantic | hybrid (default hybrid; falls back to keyword when no embedder is configured)' },
+          mode: { type: 'string', enum: Object.values(SearchMode), description: 'keyword | semantic | hybrid (default hybrid; falls back to keyword when no embedder is configured)' },
         },
       },
       execute: async input => {
@@ -842,7 +879,7 @@ export function memoryTools(opts: {
           // Refused BEFORE either store call: an unknown category/tag would otherwise pass
           // straight into the filter and come back as an empty result indistinguishable from a
           // genuinely empty search (the exact E-i confusion absenceNote exists to prevent).
-          if (q.category !== undefined && !NoteCategory.safeParse(q.category).success)
+          if (q.category !== undefined && !z.enum(NoteCategory).safeParse(q.category).success)
             return { output: { error: unknownCategoryError(q.category) }, isError: true }
           if (q.tag !== undefined) {
             const known = await knownTags(store, searchScope)
@@ -851,7 +888,7 @@ export function memoryTools(opts: {
           // kind validates like category (closed enum, refuse an unknown) and NOT like tag (which
           // also refuses a value no note carries). The difference is the whole point: a planner
           // asking for decisions on a corpus that has none must get an empty answer, not an error.
-          if (q.kind !== undefined && !NoteKind.safeParse(q.kind).success)
+          if (q.kind !== undefined && !z.enum(NoteKind).safeParse(q.kind).success)
             return { output: { error: unknownKindError(q.kind) }, isError: true }
           // Neither a query nor a filter is "return the whole corpus" — a dropped argument rather
           // than an intent, and one no budget can honour. Refused with the two ways forward.
@@ -861,7 +898,7 @@ export function memoryTools(opts: {
           const limit = q.limit ?? (q.detail_level === DetailLevel.minimal ? 5 : 20)
           const filter = {
             category: q.category, tag: q.tag,
-            ...(q.kind !== undefined && { kind: NoteKind.parse(q.kind) }),
+            ...(q.kind !== undefined && { kind: z.enum(NoteKind).parse(q.kind) }),
             ...(searchScope && { scope: [...searchScope] }),
           }
           // ENUMERATE vs SEARCH. With no query there is nothing to rank against: the semantic arm
@@ -911,7 +948,10 @@ export function memoryTools(opts: {
           // since claim.ts cannot import memory.ts.
           const { drifted, unknown } = await noteDriftIds([
             ...r.items.map(n => ({ id: n.id, sourceRevision: n.sourceRevision, paths: n.paths, ...(n.verified && { verified: n.verified }) })),
-            ...c.items.map(h => ({ id: h.noteId, sourceRevision: h.sourceRevision, paths: h.paths })),
+            ...c.items.map(h => ({
+              id: h.noteId, sourceRevision: h.sourceRevision, paths: h.paths,
+              claims: [{ id: h.claimId, text: h.text, class: h.class, anchors: h.anchors, sourceRevision: h.sourceRevision }],
+            })),
           ])
           return ok(MemorySearchResult.parse({
             claims: c.items, notes: r.items, truncated, omitted: c.omitted + r.omitted,
@@ -935,8 +975,8 @@ export function memoryTools(opts: {
             description: "pass {seed: <the row's 'from'>, kind: <the row's 'via'>, direction: <the row's 'direction'>} from the memory_neighbors row that led you here — it strengthens that connection.",
             properties: {
               seed: idSchema,
-              kind: { type: 'string', enum: [...LINK_KINDS] },
-              direction: { type: 'string', enum: [...EDGE_DIRECTIONS] },
+              kind: { type: 'string', enum: Object.values(LinkKind) },
+              direction: { type: 'string', enum: Object.values(EdgeDirection) },
             },
           },
         },
@@ -959,9 +999,11 @@ export function memoryTools(opts: {
           const paths = 'paths' in n && Array.isArray(n.paths) ? n.paths : []
           // the either-clean rule: the note's own verification is the second, independent answer to
           // "is this still true", and the fresher stamp governs (drift.ts noteDriftState)
-          const state = changedSince
-            ? await noteDriftState({ sourceRevision: n.sourceRevision, paths, ...(n.verified && { verified: n.verified }) }, changedSince)
-            : DRIFT_STATE.clean
+          const judged: DriftableNote = n
+          const verdict = drift
+            ? await readNoteDrift(judged, drift)
+            : { state: DRIFT_STATE.clean, suspectClaims: [], unknownClaims: [], checkable: false }
+          const state = verdict.state
           // Display epistemics beside the note, never a rank input: the reader about to act on a
           // contested note is exactly who needs both counts in view. useLine is the one spelling.
           const use = useLine(await store.useStats(q.id, q.scope) ?? emptyUseStats())
@@ -992,7 +1034,10 @@ export function memoryTools(opts: {
             ...(provisional && { provisional }),
             ...(state === DRIFT_STATE.drifted && {
               drifted: true,
-              next: `the code this note describes changed since it was written (${n.sourceRevision?.slice(0, 8)}) — re-read ${where} and, if the note is now wrong, memory_write the SAME id with the corrected content instead of adding a second note`,
+              ...(verdict.suspectClaims.length > 0 && { suspectClaims: verdict.suspectClaims }),
+              next: verdict.suspectClaims.length > 0
+                ? `the files these claims were read from have changed since they were stated — re-read the anchors of ${verdict.suspectClaims.join(', ')} and, where a claim is now wrong, memory_write the SAME note id adding the corrected claim and invalidating the old one`
+                : `the code this note describes changed since it was written (${n.sourceRevision?.slice(0, 8)}) — re-read ${where} and, if the note is now wrong, memory_write the SAME id with the corrected content instead of adding a second note`,
             }),
             ...(state === DRIFT_STATE.unknown && {
               unknown: true,
@@ -1008,7 +1053,7 @@ export function memoryTools(opts: {
             // for a note with no stamp or no declared paths (drift.ts's fail-toward-not-drifted
             // rule), and claiming those were verified is the same lie `orc memory recheck` tells
             // when it reports every unchecked note as "current".
-            ...(state === DRIFT_STATE.clean && changedSince !== undefined && n.sourceRevision !== null && paths.length > 0 && {
+            ...(state === DRIFT_STATE.clean && verdict.checkable && n.sourceRevision !== null && {
               current: true,
               next: `checked: nothing under ${where} has changed since this note was stamped (${n.sourceRevision.slice(0, 8)}), so it describes the code as it is now — you do not need to re-read those paths to confirm it. Read them only for detail this note does not carry.`,
             }),
@@ -1023,7 +1068,7 @@ export function memoryTools(opts: {
         type: 'object', required: ['seed'],
         properties: {
           seed: { ...idSchema, description: 'note id to traverse from' },
-          kinds: { type: 'array', items: { type: 'string', enum: [...LINK_KINDS] }, description: 'only follow these link kinds' },
+          kinds: { type: 'array', items: { type: 'string', enum: Object.values(LinkKind) }, description: 'only follow these link kinds' },
           depth: { type: 'integer', minimum: 1, description: 'max hops (default 2)' },
           scope: idSchema,
           budget: budgetSchema,
@@ -1117,7 +1162,7 @@ export function memoryTools(opts: {
         try {
           const q = RecheckInput.parse(input)
           const notes = await store.list(searchScope ? { scope: [...searchScope] } : {})
-          if (!changedSince) {
+          if (!drift) {
             // absence prose, never an error: no git probe means no verdict is possible, and a
             // missing verdict is not evidence of rot (drift.ts's fail-toward-not-drifted rule) —
             // same epistemics as memory_read's null and memory_topics' empty inventory
@@ -1127,17 +1172,27 @@ export function memoryTools(opts: {
               absenceNote: 'drift cannot be checked without a git probe — no repository revision is available to compare against, so nothing here is evidence for or against rot',
             })
           }
-          const driftedRows: { id: string; scope: string; title: string; paths: string[] }[] = []
+          // a summary carries no claims, and claims are what a claim-bearing note is judged on
+          const claimed = async (n: NoteSummary): Promise<DriftableNote> => ({
+            sourceRevision: n.sourceRevision, paths: n.paths, ...(n.verified && { verified: n.verified }),
+            claims: await store.claimsFor(n.id, n.scope),
+          })
+          const driftedRows: { id: string; scope: string; title: string; paths: string[]; suspectClaims?: string[] }[] = []
           const unknownRows: { id: string; scope: string; title: string }[] = []
           let checkable = 0
           let uncheckable = 0
           for (const n of notes) {
-            // corpusDrift's checkability rule, verbatim: the SOURCE stamp alone decides it
-            if (n.sourceRevision === null || n.paths.length === 0) { uncheckable += 1; continue }
-            const state = await noteDriftState({ sourceRevision: n.sourceRevision, paths: n.paths, ...(n.verified && { verified: n.verified }) }, changedSince)
-            if (state === DRIFT_STATE.unknown) { unknownRows.push({ id: n.id, scope: n.scope, title: n.title }); continue }
+            // one verdict function for every surface: per claim where the note has claims, per
+            // declared path where it has none
+            const judged = await readNoteDrift(await claimed(n), drift)
+            if (judged.state === DRIFT_STATE.unknown) { unknownRows.push({ id: n.id, scope: n.scope, title: n.title }); continue }
+            if (!judged.checkable) { uncheckable += 1; continue }
             checkable += 1
-            if (state === DRIFT_STATE.drifted) driftedRows.push({ id: n.id, scope: n.scope, title: n.title, paths: [...n.paths] })
+            if (judged.state === DRIFT_STATE.drifted)
+              driftedRows.push({
+                id: n.id, scope: n.scope, title: n.title, paths: [...n.paths],
+                ...(judged.suspectClaims.length > 0 && { suspectClaims: judged.suspectClaims }),
+              })
           }
           const limit = q.limit ?? MEMORY_LIMITS.detailItems
           // one budget across both listings, drifted taking its share first (it is the actionable

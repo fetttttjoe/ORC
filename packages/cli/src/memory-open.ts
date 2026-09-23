@@ -1,6 +1,6 @@
 import { createOllamaEmbeddingProvider } from '@orc/provider-ollama'
-import { errorMessage, parseModelRef, type EmbeddingProvider } from '@orc/contracts'
-import { createMemory } from '@orc/memory'
+import { errorMessage, parseModelRef, type EmbeddingProvider, type MemoryAuthor, type TreeStamps } from '@orc/contracts'
+import { createMemory, treeStamps } from '@orc/memory'
 import type { EventLog, ProjectConfig, ProjectorLease } from '@orc/kernel'
 
 // Build the configured embedding provider (memoryEmbedModel), or undefined for keyword-only. The
@@ -22,8 +22,13 @@ export function buildEmbeddingProvider(
 // command and the runtime share, so semantic retrieval is on everywhere or nowhere by one setting.
 // `lease`: passed by the RUNTIME path only (serve, graph, mcp — anything that projector.start()s),
 // so one process owns the standing refresh machinery. One-shot commands never start() and need none.
-export const openMemory = (opts: { log: EventLog; config: ProjectConfig; lease?: ProjectorLease }) =>
-  createMemory({ log: opts.log, config: opts.config, embedder: buildEmbeddingProvider(opts.config), ...(opts.lease && { lease: opts.lease }) })
+export const openMemory = (opts: { log: EventLog; config: ProjectConfig; lease?: ProjectorLease; stampsFor?: (author: MemoryAuthor) => TreeStamps }) =>
+  createMemory({
+    log: opts.log, config: opts.config, embedder: buildEmbeddingProvider(opts.config),
+    ...(opts.lease && { lease: opts.lease }),
+    // a one-shot command writes from the directory it was typed in; the runtime hands a workspace-keyed provider
+    stampsFor: opts.stampsFor ?? (() => treeStamps(opts.config.dir)),
+  })
 
 // The ONE open → work → close bracket every one-shot memory command and door runs through. The
 // close is deliberately in a finally: seven commands (add, rm, sweep, ls, search, cat, rebuild)

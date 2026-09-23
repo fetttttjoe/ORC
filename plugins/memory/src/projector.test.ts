@@ -2,9 +2,9 @@ import { afterAll, describe, expect, it, spyOn } from 'bun:test'
 import { mkdtempSync, existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import { AUTHOR_SOURCE, claimId, Door, EVENT_KIND, MEMORY_ACCESS, noteKey, NO_CHAT, TASK_STATUS, type EmbeddingProvider, type EventDraft, type MemoryAuthor, type Origin } from '@orc/contracts'
+import { AUTHOR_SOURCE, ClaimClass, Door, EVENT_KIND, MEMORY_ACCESS, noteKey, NO_CHAT, TASK_STATUS, type ClaimInput, type EmbeddingProvider, type EventDraft, type MemoryAuthor, type Origin } from '@orc/contracts'
 import { openStorage } from '@orc/kernel'
-import { authorFixture, semanticNoteFixture, TEST_WORKSPACE_ID } from '@orc/contracts/fixtures'
+import { authorFixture, claimFixture, semanticNoteFixture, TEST_WORKSPACE_ID } from '@orc/contracts/fixtures'
 import { createTestDb, TEST_PROJECT_ID } from '@orc/kernel/test-helpers'
 import { SurrealMemory } from './surreal'
 import { createTestSurreal, projectorStoreStub } from './test-helpers'
@@ -185,22 +185,30 @@ describe('memory projector', () => {
     const vaultDir = mkdtempSync(path.join(tmpdir(), 'orc-vault-partition-'))
     const proj = createMemoryProjector({ log, surreal, vaultDir })
     try {
-      const withClaims = (id: string, texts: string[]) =>
-        ({ ...noteInput, id, claims: texts.map(text => ({ id: claimId(text), text, sourceRevision: null })) })
-      for (const [id, texts] of [['n1', ['alpha holds', 'beta holds']], ['n2', ['zeta holds']], ['n3', ['gamma holds']]] as const)
+      const withClaims = (id: string, claims: ClaimInput[]) => ({ ...noteInput, id, claims })
+      const anchored = claimFixture('alpha holds', {
+        class: ClaimClass.why, anchors: [{ path: 'src/auth.ts', symbol: 'rotate', blob: 'aaa' }], sourceRevision: 'deadbeef',
+      })
+      for (const [id, claims] of [['n1', [anchored, claimFixture('beta holds')]], ['n2', [claimFixture('zeta holds')]], ['n3', [claimFixture('gamma holds')]]] as const)
         await log.append({ ...CLI, taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_written,
-          payload: { note: withClaims(id, [...texts]), author: cliAuthor } })
+          payload: { note: withClaims(id, [...claims]), author: cliAuthor } })
       await proj.catchUp()
 
       const before = await surreal.topics()
       expect(before).toHaveLength(3) // {alpha, zeta} merged; beta and gamma stand alone
       expect(before[0]?.size).toBe(2)
       const claimsBefore = await Promise.all(before.map(t => surreal.topicClaims(t.topicKey)))
+      // the stamps a rebuild must reproduce: class, every anchor with its blob, and the revision
+      const rowsBefore = await surreal.claimsFor('n1', 'project')
+      expect(rowsBefore).toContainEqual(expect.objectContaining({
+        class: ClaimClass.why, anchors: [{ path: 'src/auth.ts', symbol: 'rotate', blob: 'aaa' }], sourceRevision: 'deadbeef',
+      }))
 
       await proj.rebuild()
       expect(await surreal.topics()).toEqual(before)
       // and each key still resolves to the same statements, with the same validFrom stamps
       expect(await Promise.all(before.map(t => surreal.topicClaims(t.topicKey)))).toEqual(claimsBefore)
+      expect(await surreal.claimsFor('n1', 'project')).toEqual(rowsBefore)
     } finally {
       await proj.close(); await surreal.close(); await log.close()
     }
@@ -244,7 +252,7 @@ describe('memory projector', () => {
     // Simulate a corpus that already holds claims but was never partitioned — pre-feature data, or
     // a run where refreshTopics kept failing: apply straight to Surreal, bypassing the projector
     // entirely, so Surreal's cursor lands at this event's seq WITHOUT refreshTopics ever running.
-    const withClaims = { ...noteInput, id: 'topic-note', claims: [{ id: claimId('alpha holds'), text: 'alpha holds', sourceRevision: null }] }
+    const withClaims = { ...noteInput, id: 'topic-note', claims: [claimFixture('alpha holds')] }
     const rec = await log.append({ ...CLI, taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_written, payload: { note: withClaims, author: cliAuthor } })
     await surreal.applyEvent(rec)
     expect(await surreal.topics()).toEqual([]) // sanity: claims exist, nothing partitioned yet

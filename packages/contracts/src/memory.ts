@@ -1,5 +1,5 @@
 import { z } from 'zod'
-import { Claim, ClaimHit, ClaimInput, ClaimWrite, type ClaimSearchOptions } from './claim'
+import { Claim, ClaimHit, ClaimInput, ClaimWrite, VerifiedClaim, type ClaimSearchOptions } from './claim'
 import { Topic } from './cluster'
 // memory.ts → decision.ts → ids.ts/limits.ts, both leaves: no cycle. decision.ts must never import
 // memory.ts back, or the vocabulary would resolve to undefined depending on load order — the same
@@ -20,17 +20,22 @@ export * from './claim'
 const Id = z.string().regex(MEMORY_ID_RE).max(128)
 
 
-export const LINK_KINDS = [
-  'refines', 'supersedes', 'contradicts', 'depends_on',
-  'example_of', 'derived_from', 'relates_to', 'decomposes_into',
-] as const
-export const LinkKind = z.enum(LINK_KINDS)
-export type LinkKind = z.infer<typeof LinkKind>
-export const LINK_KIND = LinkKind.enum
+export enum LinkKind {
+  refines = 'refines',
+  supersedes = 'supersedes',
+  contradicts = 'contradicts',
+  depends_on = 'depends_on',
+  example_of = 'example_of',
+  derived_from = 'derived_from',
+  relates_to = 'relates_to',
+  decomposes_into = 'decomposes_into',
+}
+
+export const LINK_KIND = LinkKind
 
 export const MemoryLink = z.object({
   id: Id,
-  kind: LinkKind.default('relates_to'), // fills a missing key on a typed link; NOT a string-coercion
+  kind: z.enum(LinkKind).default(LinkKind.relates_to), // fills a missing key on a typed link; NOT a string-coercion
   confidence: z.number().min(0).max(1).optional(),
 })
 export type MemoryLink = z.infer<typeof MemoryLink>
@@ -48,14 +53,14 @@ export function parseLinkSpec(input: string): Array<{ id: string; kind?: LinkKin
     .filter(e => e.length > 0)
     .map(entry => {
       const sep = entry.indexOf(':')
-      const kind = sep === -1 ? undefined : entry.slice(0, sep).trim()
+      const rawKind = sep === -1 ? undefined : entry.slice(0, sep).trim()
       const id = (sep === -1 ? entry : entry.slice(sep + 1)).trim()
-      if (kind !== undefined && !(LINK_KINDS as readonly string[]).includes(kind))
-        throw new Error(`unknown link kind '${kind}' in '${entry}' — valid: ${LINK_KINDS.join(', ')}`)
+      const kind = rawKind === undefined ? undefined : z.enum(LinkKind).safeParse(rawKind)
+      if (kind && !kind.success)
+        throw new Error(`unknown link kind '${rawKind}' in '${entry}' — valid: ${Object.values(LinkKind).join(', ')}`)
       if (!MEMORY_ID_RE.test(id))
         throw new Error(`'${id}' is not a valid note id (lowercase letters/digits/dashes)`)
-      // the includes-check above guarantees this parse cannot throw (boundary-parse, never cast)
-      return kind === undefined ? { id } : { id, kind: LinkKind.parse(kind) }
+      return kind ? { id, kind: kind.data } : { id }
     })
 }
 
@@ -90,25 +95,34 @@ export type MemorySource = z.infer<typeof MemorySource>
 // time, and that is the only moment it exists. A field added later would silently default every
 // note written in the interim to durable, which is precisely wrong for research findings.
 // Defaults to `durable`: a note nobody classified must never become auto-deletable.
-export const RETENTION_CLASSES = ['durable', 'expirable'] as const
-export const Retention = z.enum(RETENTION_CLASSES)
-export type Retention = z.infer<typeof Retention>
-export const RETENTION = Retention.enum
+export enum Retention {
+  durable = 'durable',
+  expirable = 'expirable',
+}
+
+export const RETENTION = Retention
 
 // knowledge lifecycle: current/target architecture stay distinguishable and queryable.
 // `research` is a distilled web finding — it is the one kind that MUST carry a citation.
 // A kind classifies a CLAIM, so it belongs to the semantic tier alone: 'plan' is not a kind of
-// claim, it is a different memory system, and it lives in NOTE_TIERS below.
+// claim, it is a different memory system, and it lives in NoteTier below.
 // `outcome` vs `decision` is the one distinction here learned the hard way. A consolidation
 // (what one task DID) is an outcome, not a decision — they have different lifetimes and answer
 // different questions. [Measured 2026-08-04: labeling outcome consolidations as decisions made
 // "which decisions has this project made" unanswerable: the kind returned 42 task outcomes and
 // zero architectural choices.] An outcome is true forever about a run that is
 // over, while a decision stays live until something overturns it.
-export const NOTE_KINDS = ['fact', 'decision', 'outcome', 'architecture_current', 'architecture_target', 'documentation', 'research'] as const
-export const NoteKind = z.enum(NOTE_KINDS)
-export type NoteKind = z.infer<typeof NoteKind>
-export const NOTE_KIND = NoteKind.enum
+export enum NoteKind {
+  fact = 'fact',
+  decision = 'decision',
+  outcome = 'outcome',
+  architecture_current = 'architecture_current',
+  architecture_target = 'architecture_target',
+  documentation = 'documentation',
+  research = 'research',
+}
+
+export const NOTE_KIND = NoteKind
 
 // The retrieval-surface vocabulary for `categories` (SemanticNoteInput.categories, below): a
 // FIXED three-value set, unlike `tags`, which is deliberately open and corpus-derived (see
@@ -116,12 +130,15 @@ export const NOTE_KIND = NoteKind.enum
 // against an invented list here). noteLint's own advisory message and the codebase-analysis
 // skill already state these three in prose; this is the one real exported enum for them, matched
 // values rather than a hand-rolled literal array wherever a category is validated (memory_search's
-// `category` filter, same discipline as NOTE_TIER/NOTE_TIERS above and packages/cli/src/main.ts's
+// `category` filter, same discipline as NOTE_TIER above and packages/cli/src/main.ts's
 // parseNoteTier).
-export const NOTE_CATEGORIES = ['subsystem', 'cross-cutting', 'target'] as const
-export const NoteCategory = z.enum(NOTE_CATEGORIES)
-export type NoteCategory = z.infer<typeof NoteCategory>
-export const NOTE_CATEGORY = NoteCategory.enum
+export enum NoteCategory {
+  subsystem = 'subsystem',
+  'cross-cutting' = 'cross-cutting',
+  target = 'target',
+}
+
+export const NOTE_CATEGORY = NoteCategory
 
 // Every agent-memory system worth copying separates a cheap, lossless EPISODIC trail from a
 // distilled, linked SEMANTIC tier. orc adds a third, PLAN, because a decomposition is neither: it
@@ -131,10 +148,13 @@ export const NOTE_CATEGORY = NoteCategory.enum
 //   plan     — one node of a task's decomposition: requirements, rationale, write-fence, deps.
 // The tier decides which FIELDS a note may carry, so the lanes are separated structurally rather
 // than by a soft rank penalty: a step note cannot grow claims[], and a claim cannot smuggle a zone.
-export const NOTE_TIERS = ['semantic', 'episodic', 'plan'] as const
-export const NoteTier = z.enum(NOTE_TIERS)
-export type NoteTier = z.infer<typeof NoteTier>
-export const NOTE_TIER = NoteTier.enum
+export enum NoteTier {
+  semantic = 'semantic',
+  episodic = 'episodic',
+  plan = 'plan',
+}
+
+export const NOTE_TIER = NoteTier
 
 // The scope families of a memory note — matched values, never scattered literals (same rule
 // as STRATEGY in plan.ts). `project` is the one durable knowledge scope; per-task transient
@@ -249,7 +269,7 @@ const noteCore = {
 export const SemanticNoteInput = z.object({
   ...noteCore,
   tier: z.literal(NOTE_TIER.semantic),
-  kind: NoteKind.default(NOTE_KIND.fact),
+  kind: z.enum(NoteKind).default(NOTE_KIND.fact),
   // The ADR lifecycle state. Only a `decision` may carry it — the refinement on MemoryNoteInput
   // refuses it on every other kind, the same posture as "sources required only for research". No
   // default: see decisionStatusOf for why a stored default would corrupt partial updates.
@@ -257,7 +277,7 @@ export const SemanticNoteInput = z.object({
   categories: stringOrList(z.string().max(MEMORY_LIMITS.labelChars), MEMORY_LIMITS.labelItems).default([]),
   paths: stringOrList(z.string().max(MEMORY_LIMITS.detailChars), MEMORY_LIMITS.detailItems).default([]), // pointers down to code
   claims: z.array(ClaimInput).max(MEMORY_LIMITS.detailItems).default([]), // the addressable facts it asserts
-  retention: Retention.default(RETENTION.durable),                                 // may this ever be swept?
+  retention: z.enum(Retention).default(RETENTION.durable),                         // may this ever be swept?
   sources: z.array(MemorySourceInput).max(MEMORY_SOURCE_LIMITS.items).default([]), // provenance for a web finding
 })
 export type SemanticNoteInput = z.infer<typeof SemanticNoteInput>
@@ -283,7 +303,7 @@ export const PlanNoteInput = z.object({
   // default rather than kept forever. Not PINNED expirable the way episodic is: a planner may
   // deliberately mark a decomposition durable. The sweep additionally waits for the owning task to
   // reach a terminal status, so an approved plan cannot vanish while it can still be retried.
-  retention: Retention.default(RETENTION.expirable),
+  retention: z.enum(Retention).default(RETENTION.expirable),
   rationale: z.string().max(MEMORY_LIMITS.rationaleChars).default(''),          // why this subplan exists
   uncertainty: stringOrList(z.string().max(MEMORY_LIMITS.detailChars), MEMORY_LIMITS.detailItems).default([]), // coverage gaps / assumptions (RG7)
   // workspace-relative write globs this subplan may touch at execution — the freezer carries them
@@ -385,7 +405,7 @@ const optionalNoDefault = <T extends z.ZodTypeAny>(s: z.ZodDefault<T>): z.ZodOpt
 export const MemoryNoteDraftInput = z.object({
   id: noteCore.id,
   title: noteCore.title,
-  tier: NoteTier.optional(),
+  tier: z.enum(NoteTier).optional(),
   scope: optionalNoDefault(noteCore.scope),
   sourceRevision: optionalNoDefault(noteCore.sourceRevision),
   tags: optionalNoDefault(noteCore.tags),
@@ -475,6 +495,8 @@ export const VerifiedStamp = z.object({
   revision: z.string().min(1),
   at: z.string(),
   by: z.string(),   // composed identity, same spelling as createdBy
+  // optional, not defaulted: a default splits input from output and the nested note tiers cannot carry that
+  claims: z.array(VerifiedClaim).max(MEMORY_LIMITS.detailItems).optional(),
 })
 export type VerifiedStamp = z.infer<typeof VerifiedStamp>
 
@@ -534,7 +556,7 @@ export const NoteSummary = z.object({
   id: z.string(), scope: z.string(), title: z.string(),
   // which lane the hit came from: a reader has to be able to tell durable project knowledge from
   // one run's step trail, and `categories` is empty on both non-semantic tiers
-  tier: NoteTier,
+  tier: z.enum(NoteTier),
   categories: z.array(z.string()), tags: z.array(z.string()), summary: z.string(),
   // observed use, event-sourced (see MemoryAccessedPayload) — so it survives a rebuild and is
   // real data rather than a projection-local counter that any replay silently zeroes.
@@ -600,15 +622,17 @@ export type MemorySearchResult = z.infer<typeof MemorySearchResult>
 // Traversal direction relative to the seed — a matched value, so it lives as a const map, never
 // scattered 'out'/'in' literals. 'out' = seed →(via)→ neighbour; 'in' = neighbour →(via)→ seed.
 // Disambiguates asymmetric kinds (e.g. supersedes) that reverse-traversal would otherwise flatten.
-export const EDGE_DIRECTIONS = ['out', 'in'] as const
-export const EdgeDirection = z.enum(EDGE_DIRECTIONS)
-export type EdgeDirection = z.infer<typeof EdgeDirection>
-export const EDGE_DIRECTION = EdgeDirection.enum
+export enum EdgeDirection {
+  out = 'out',
+  in = 'in',
+}
+
+export const EDGE_DIRECTION = EdgeDirection
 
 export const NeighborResult = z.object({
   id: z.string(), title: z.string(), summary: z.string(),
-  via: LinkKind, depth: z.number().int().positive(), score: z.number(),
-  direction: EdgeDirection,
+  via: z.enum(LinkKind), depth: z.number().int().positive(), score: z.number(),
+  direction: z.enum(EdgeDirection),
   // read-time activation of this neighbor (0 = never accessed) — the score already includes
   // its boost; exposed so callers/UI can tell structure from heat
   activation: z.number().nonnegative(),
@@ -661,20 +685,26 @@ export interface NeighborQuery {
 // Retrieval mode. keyword = substring AND-match; semantic = vector cosine over embeddings;
 // hybrid = reciprocal-rank fusion of both. The store falls back to keyword whenever no embedder
 // is configured, so 'hybrid'/'semantic' are safe defaults on any deployment.
-export const SEARCH_MODES = ['keyword', 'semantic', 'hybrid'] as const
-export const SearchMode = z.enum(SEARCH_MODES)
-export type SearchMode = z.infer<typeof SearchMode>
-export const SEARCH_MODE = SearchMode.enum
+export enum SearchMode {
+  keyword = 'keyword',
+  semantic = 'semantic',
+  hybrid = 'hybrid',
+}
+
+export const SEARCH_MODE = SearchMode
 
 // The drift verdict, tri-state. clean = checked against the tree and unmoved (also the uncheckable
 // case: no sourceRevision, or no declared paths); drifted = checked and the declared code moved;
 // unknown = the sourceRevision could not be reached (rebased away, shallow clone), so no check could
-// be made. Follows the SEARCH_MODE convention (array + z.enum + `.enum`), not the plain-object
+// be made. Follows the SEARCH_MODE convention (TS enum + plain alias), not the plain-object
 // MEMORY_HEALTH one, deliberately.
-export const DRIFT_STATES = ['clean', 'drifted', 'unknown'] as const
-export const DriftState = z.enum(DRIFT_STATES)
-export type DriftState = z.infer<typeof DriftState>
-export const DRIFT_STATE = DriftState.enum
+export enum DriftState {
+  clean = 'clean',
+  drifted = 'drifted',
+  unknown = 'unknown',
+}
+
+export const DRIFT_STATE = DriftState
 
 // `halfLifeDays` tunes the SAME activation decay NeighborQuery's does — search re-ranks cosine by
 // activation heat, so a project that configured a half-life had it honoured in neighbors() and in
@@ -704,6 +734,9 @@ export const MemoryWrittenPayload = z.object({
   // side used to take an unbounded array of arbitrary strings, which claimHistory then folded.
   // Nothing already in the log can fail it — every append routes through ClaimWrite first.
   invalidates: ClaimWrite.shape.invalidates,
+  // the act's reason and served decision live on the event, never on the note
+  why: ClaimWrite.shape.why,
+  decision: ClaimWrite.shape.decision,
 })
 export type MemoryWrittenPayload = z.infer<typeof MemoryWrittenPayload>
 export const MemoryDeletedPayload = z.object({
@@ -737,10 +770,13 @@ export type MemoryVerifiedPayload = z.infer<typeof MemoryVerifiedPayload>
 // carry the same MEMORY_ID_RE guard as memory_deleted, since both index the read model by key.
 // 'read'/'neighbors' are the agent pulling; 'preload' is the executor injecting summaries into the
 // first prompt. Distinct so the log can tell a delivered summary from a delivered body.
-export const MEMORY_ACCESS_MODES = ['read', 'neighbors', 'preload'] as const
-export const MemoryAccessMode = z.enum(MEMORY_ACCESS_MODES)
-export type MemoryAccessMode = z.infer<typeof MemoryAccessMode>
-export const MEMORY_ACCESS = MemoryAccessMode.enum
+export enum MemoryAccessMode {
+  read = 'read',
+  neighbors = 'neighbors',
+  preload = 'preload',
+}
+
+export const MEMORY_ACCESS = MemoryAccessMode
 
 // The edge an access travelled: recorded when a memory_read follows a memory_neighbors
 // discovery, so the CONNECTION that proved load-bearing can strengthen — not just the node.
@@ -749,15 +785,15 @@ export const MEMORY_ACCESS = MemoryAccessMode.enum
 // rows name the node actually linked to the read note, so provenance never fabricates edges.
 export const AccessVia = z.object({
   seed: z.string().regex(MEMORY_ID_RE),
-  kind: LinkKind,
-  direction: EdgeDirection,
+  kind: z.enum(LinkKind),
+  direction: z.enum(EdgeDirection),
 })
 export type AccessVia = z.infer<typeof AccessVia>
 
 export const MemoryAccessedPayload = z.object({
   id: z.string().regex(MEMORY_ID_RE),
   scope: z.string().regex(MEMORY_ID_RE),
-  mode: MemoryAccessMode,
+  mode: z.enum(MemoryAccessMode),
   author: MemoryAuthor,
   via: AccessVia.optional(),
 })
@@ -770,10 +806,12 @@ export type MemoryAccessedPayload = z.infer<typeof MemoryAccessedPayload>
 // a correction is a HEAL (memory_write to the same id) or a supersedes/contradicts link, never a
 // score — the reference implementation's third `corrected` value scored −1 yet recorded positive
 // provenance, and a corrected-only node dropped out of its display entirely.
-export const MEMORY_USE_OUTCOMES = ['useful', 'dead_end'] as const
-export const MemoryUseOutcome = z.enum(MEMORY_USE_OUTCOMES)
-export type MemoryUseOutcome = z.infer<typeof MemoryUseOutcome>
-export const MEMORY_USE = MemoryUseOutcome.enum
+export enum MemoryUseOutcome {
+  useful = 'useful',
+  dead_end = 'dead_end',
+}
+
+export const MEMORY_USE = MemoryUseOutcome
 
 // One event per (note, outcome) — id and scope carry the same MEMORY_ID_RE guard as
 // memory_accessed, since both index the read model by key. Attribution (which task/step reported)
@@ -781,7 +819,7 @@ export const MEMORY_USE = MemoryUseOutcome.enum
 export const MemoryOutcomePayload = z.object({
   id: z.string().regex(MEMORY_ID_RE),
   scope: z.string().regex(MEMORY_ID_RE),
-  outcome: MemoryUseOutcome,
+  outcome: z.enum(MemoryUseOutcome),
   author: MemoryAuthor,
 })
 export type MemoryOutcomePayload = z.infer<typeof MemoryOutcomePayload>
@@ -791,6 +829,12 @@ export type MemoryOutcomePayload = z.infer<typeof MemoryOutcomePayload>
 // Collapsing them lit the UI's degraded badge on every burst of note writes.
 // health vocabulary lives in health.ts (zero-import: the browser needs it too)
 export { MEMORY_HEALTH, type MemoryHealth, type MemoryHealthState } from './health'
+
+// the two stamps a write takes from ONE checkout: its revision, and the blob of each anchored file
+export interface TreeStamps {
+  revision(): Promise<string | null>
+  blob(path: string): Promise<string | null>
+}
 
 export interface MemoryStore {
   // `author` is REQUIRED on every door that appends, removal and archive flags included. It used to
@@ -812,7 +856,8 @@ export interface MemoryStore {
   // memory_deleted latest does NOT refuse: a removed note is gone and may be re-created. Checked
   // inside write()'s own transaction, on the SAME latestNoteEvent read the merge base already takes,
   // so this also closes the TOCTOU two doors racing one new id would otherwise hit.
-  write(input: MemoryNoteDraft, author: MemoryAuthor, opts?: { idempotencyKey?: string; invalidates?: string[]; mustCreate?: boolean }): Promise<MemoryNote>
+  // why/decision are stated per write, never inherited; `decision` must name a live decision note in scope
+  write(input: MemoryNoteDraft, author: MemoryAuthor, opts?: { idempotencyKey?: string; invalidates?: string[]; why?: string; decision?: string; mustCreate?: boolean }): Promise<MemoryNote>
   remove(id: string, scope: string | undefined, author: MemoryAuthor): Promise<void>
   /**
    * Retire a note from the read model, or bring it back. A LIFECYCLE transition, deliberately not
@@ -1063,10 +1108,13 @@ export const emptyUseStats = (): UseStats =>
 // explain it would be the drift-with-no-cause problem all over again.
 export const MIN_CORROBORATION = 2
 
-export const USE_VERDICTS = ['preferred', 'tentative', 'contested'] as const
-export const UseVerdict = z.enum(USE_VERDICTS)
-export type UseVerdict = z.infer<typeof UseVerdict>
-export const USE_VERDICT = UseVerdict.enum
+export enum UseVerdict {
+  preferred = 'preferred',
+  tentative = 'tentative',
+  contested = 'contested',
+}
+
+export const USE_VERDICT = UseVerdict
 
 // Contested FIRST and unconditional: corroboration never outvotes a dead-end report — hiding the
 // disagreement behind a majority is the net-score shape in different clothes. Dead-end-only yields

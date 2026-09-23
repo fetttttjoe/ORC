@@ -1,10 +1,13 @@
 import { describe, expect, it } from 'bun:test'
-import { ClaimInput, claimId, ClaimWrite, resolveClaims } from './claim'
+import { ClaimClass, ClaimDraft, ClaimInput, claimId, ClaimWrite, resolveClaims } from './claim'
+import { additionFixture, claimFixture } from './fixtures'
 import { errorMessage } from './guards'
 import { MEMORY_LIMITS } from './limits'
 
 const REV = 'abc123'
-const claim = (text: string): ClaimInput => ClaimInput.parse({ id: claimId(text), text, sourceRevision: REV })
+const claim = (text: string): ClaimInput => claimFixture(text, { sourceRevision: REV })
+const add = (text: string) => additionFixture(text)
+const draft = (text: string) => ({ text, class: ClaimClass.fact })
 
 describe('claimId', () => {
   it('is stable for the same statement and insensitive to surrounding whitespace', () => {
@@ -22,12 +25,22 @@ describe('claimId', () => {
 describe('resolveClaims', () => {
   it('adds a statement without the caller resending the existing ones', () => {
     const live = [claim('first')]
-    const out = resolveClaims(live, ['second'], [], REV)
+    const out = resolveClaims(live, [add('second')], [], REV)
     expect(out.map(c => c.text)).toEqual(['first', 'second'])
   })
   it('re-adding an identical statement is a no-op, not a duplicate', () => {
-    const out = resolveClaims([claim('first')], ['first'], [], REV)
+    const out = resolveClaims([claim('first')], [add('first')], [], REV)
     expect(out).toHaveLength(1)
+  })
+  it('carries each addition’s class and stamped anchors onto the stored claim', () => {
+    const anchors = [{ path: 'packages/kernel/src/kernel.ts', symbol: null, blob: 'aaa' }]
+    const out = resolveClaims([], [additionFixture('second', { class: ClaimClass.why, anchors })], [], REV)
+    expect(out[0]).toMatchObject({ class: ClaimClass.why, anchors })
+  })
+  it('re-adding live text with different metadata keeps the ORIGINAL class, anchors and revision', () => {
+    const live = claimFixture('first', { class: ClaimClass.why, anchors: [{ path: 'a/b.ts', symbol: null, blob: 'aaa' }], sourceRevision: 'old' })
+    const restated = additionFixture('first', { class: ClaimClass.fact, anchors: [{ path: 'c/d.ts', symbol: null, blob: 'bbb' }] })
+    expect(resolveClaims([live], [restated], [], REV)).toEqual([live])
   })
   it('invalidating drops a claim from the live set', () => {
     const out = resolveClaims([claim('first'), claim('second')], [], [claimId('first')], REV)
@@ -37,12 +50,12 @@ describe('resolveClaims', () => {
     expect(resolveClaims([claim('first')], [], ['deadbeef'], REV)).toHaveLength(1)
   })
   it('a claim added in the same write as its own invalidation does not survive', () => {
-    const out = resolveClaims([], ['first'], [claimId('first')], REV)
+    const out = resolveClaims([], [add('first')], [claimId('first')], REV)
     expect(out).toEqual([])
   })
   it('keeps a surviving claim’s own sourceRevision, not the new write’s', () => {
-    const older = ClaimInput.parse({ id: claimId('first'), text: 'first', sourceRevision: 'old' })
-    const out = resolveClaims([older], ['second'], [], REV)
+    const older = claimFixture('first', { sourceRevision: 'old' })
+    const out = resolveClaims([older], [add('second')], [], REV)
     expect(out[0]?.sourceRevision).toBe('old')
     expect(out[1]?.sourceRevision).toBe(REV)
   })
@@ -52,16 +65,16 @@ describe('resolveClaims', () => {
   // the appended event carried the unchanged set. Loud beats silent, and the writer picks the fix.
   it('a note at the claim cap fails the write instead of swallowing the new statement', () => {
     const full = Array.from({ length: MEMORY_LIMITS.detailItems }, (_, i) => claim(`fact number ${i}`))
-    expect(() => resolveClaims(full, ['a brand new fact nobody has stated'], [], REV))
+    expect(() => resolveClaims(full, [add('a brand new fact nobody has stated')], [], REV))
       .toThrow(/invalidate the claims this write supersedes/)
     // making room the way the message says lands the new claim
-    const out = resolveClaims(full, ['a brand new fact nobody has stated'], [claimId('fact number 0')], REV)
+    const out = resolveClaims(full, [add('a brand new fact nobody has stated')], [claimId('fact number 0')], REV)
     expect(out).toHaveLength(MEMORY_LIMITS.detailItems)
     expect(out.at(-1)?.text).toBe('a brand new fact nobody has stated')
   })
 
   it('a writer cannot supply validFrom — the input type has no such field', () => {
-    expect(Object.keys(ClaimInput.shape).sort()).toEqual(['id', 'sourceRevision', 'text'])
+    expect(Object.keys(ClaimInput.shape).sort()).toEqual(['anchors', 'class', 'id', 'sourceRevision', 'text'])
   })
 })
 
@@ -71,7 +84,7 @@ describe('ClaimWrite', () => {
   // `claims.0.text`, a field it never sent and cannot find in the tool schema. Checked here, on the
   // field it did send, with a message that names the problem.
   it('rejects a blank statement by name, on the field the writer actually sent', () => {
-    const r = ClaimWrite.safeParse({ addClaims: ['   '] })
+    const r = ClaimWrite.safeParse({ addClaims: [draft('   ')] })
     expect(r.success).toBe(false)
     const message = r.success ? '' : errorMessage(r.error)
     expect(message).toContain('a claim cannot be blank')
@@ -79,6 +92,44 @@ describe('ClaimWrite', () => {
   })
 
   it('still accepts a statement that merely has surrounding whitespace', () => {
-    expect(ClaimWrite.parse({ addClaims: ['  the log is truth  '] }).addClaims).toHaveLength(1)
+    expect(ClaimWrite.parse({ addClaims: [draft('  the log is truth  ')] }).addClaims).toHaveLength(1)
+  })
+
+  // a bare string was the whole shape once; taking one now would store a classless, anchorless
+  // statement under a schema that says both are required
+  it('refuses a bare string in addClaims, naming the item that is wrong', () => {
+    const r = ClaimWrite.safeParse({ addClaims: ['the log is truth'] })
+    expect(r.success).toBe(false)
+    expect(r.success ? '' : errorMessage(r.error)).toContain('addClaims')
+  })
+})
+
+describe('ClaimDraft', () => {
+  it('requires a class', () => {
+    expect(ClaimDraft.safeParse({ text: 'the log is truth' }).success).toBe(false)
+  })
+
+  it('rejects classes outside the contract vocabulary', () => {
+    expect(ClaimDraft.safeParse({ text: 'the log is truth', class: 'story' }).success).toBe(false)
+  })
+
+  it('defaults anchors to an empty list', () => {
+    expect(ClaimDraft.parse({ text: 'the log is truth', class: 'fact' }).anchors).toEqual([])
+  })
+
+  it('strips a caller-supplied anchor blob', () => {
+    const draft = ClaimDraft.parse({
+      text: 'the log is truth',
+      class: 'fact',
+      anchors: [{ path: './packages\\kernel/src/task.ts', blob: 'caller-owned' }],
+    })
+    expect(draft.anchors).toEqual([{ path: 'packages/kernel/src/task.ts', symbol: null }])
+    expect('blob' in draft.anchors[0]).toBe(false)
+  })
+
+  it('rejects unsafe and root-only anchor paths', () => {
+    for (const path of ['/etc/passwd', 'C:\\secret.txt', '../secret.txt', 'a/../secret.txt', 'a\0b', '.'])
+      expect(ClaimDraft.safeParse({ text: 'the log is truth', class: 'fact', anchors: [{ path }] }).success)
+        .toBe(false)
   })
 })

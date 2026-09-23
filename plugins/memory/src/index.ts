@@ -1,12 +1,12 @@
-import { MEMORY_HEALTH, type EmbeddingProvider, type MemoryHealth, type MemoryStore } from '@orc/contracts'
+import { MEMORY_HEALTH, type EmbeddingProvider, type MemoryAuthor, type MemoryHealth, type MemoryStore, type TreeStamps } from '@orc/contracts'
 import { errorMessage } from '@orc/contracts'
 import { MemoryStage } from '@orc/contracts/health'
-import { EventLog, gitRevision, type ProjectConfig, type ProjectorLease } from '@orc/kernel'
+import { EventLog, type ProjectConfig, type ProjectorLease } from '@orc/kernel'
 import { openKnowledge, type Knowledge } from './knowledge'
 import { createMemoryStore } from './store'
 import { createMemoryProjector, KNOWLEDGE_KINDS, type MemoryProjector } from './projector'
 import { bindStepMemory, unavailableStepMemory, type BindStep } from './step'
-import { corpusDrift, createDriftProbe, type ChangedSince } from './drift'
+import { checkoutDrift, readCorpusDrift, type DriftSources } from './claim-drift-read'
 import { createWorkspaceView } from './workspace-view'
 import { createDriftCache } from './drift-cache'
 import { treeFingerprint } from '@orc/kernel'
@@ -36,7 +36,10 @@ export { frontier } from './frontier'
 // taskInfo travels with consolidateTask: callers resolve the task and hand it in.
 export { consolidateTask, taskInfo, CONSOLIDATE_EXECUTOR, type ConsolidationInput, type ConsolidationDistiller, type TaskInfo } from './consolidate'
 export { createMemoryLifecycle, type MemoryLifecycle } from './lifecycle'
-export { corpusDrift, needsReground, restampableNotes, createDriftProbe } from './drift'
+export { needsReground, restampableNotes, createDriftProbe } from './drift'
+// the ONE reader every drift surface goes through — per claim where a note has claims, per
+// declared path where it does not
+export { checkoutDrift, readCorpusDrift, readNoteDrift, type DriftSources } from './claim-drift-read'
 // consumer: packages/cli/src/mcp-serve.ts, which builds its own read tools and so must bind this
 // dep itself — the same reason it builds its own createDriftProbe rather than taking createMemory's.
 // `provisionalOf` and the view TYPES stay module-internal: nothing outside this plugin derives the
@@ -54,7 +57,9 @@ export { restampToHead } from './restamp'
 // into the step tools — the kernel never imports this plugin, so the query crosses as a callback.
 export { notesCiting, type CitingNote } from './drift'
 export { createGroundingSource } from './grounding-source'
-export { ADR_SECTION, adrSummary, parseAdrBody, renderAdrBody, type AdrFields } from './adr'
+// consumers: packages/cli/src/runtime.ts and memory-open.ts, which key it by checkout directory
+export { treeStamps } from './tree-stamps'
+export { AdrSection, adrSummary, parseAdrBody, renderAdrBody, type AdrFields } from './adr'
 export { DECISION_REFUSAL, decisionDoor, getDecision, listDecisions, recordDecision, type DecisionDoor, type DecisionRecord, type DecisionStore, type DecisionView, type RecordedDecision } from './decisions'
 // consumer: packages/cli/src/runtime.ts stepTools. Registered by the composition root rather than by
 // bindStepMemory for the same reason memoryVerifyTool is: the gate needs the STEP id and role, which
@@ -66,7 +71,14 @@ export { finishTools, FINISH_TOOL_NAME } from './finish-tools'
 
 // the orchestrator: assembles the knowledge service + event log into the memory domain
 // services (gateway, projector, tools) — the business logic never opens Surreal itself
-export async function createMemory(opts: { log: EventLog; config: ProjectConfig; embedder?: EmbeddingProvider; lease?: ProjectorLease }): Promise<{
+export async function createMemory(opts: {
+  log: EventLog
+  config: ProjectConfig
+  embedder?: EmbeddingProvider
+  lease?: ProjectorLease
+  // from the caller: only the composition root knows which checkout an author's workspace is
+  stampsFor?: (author: MemoryAuthor) => TreeStamps
+}): Promise<{
   store: MemoryStore
   projector: MemoryProjector
   bindStep: BindStep
@@ -78,7 +90,7 @@ export async function createMemory(opts: { log: EventLog; config: ProjectConfig;
   close: () => Promise<void>
 }> {
   const knowledge = await openKnowledge(opts.config, opts.embedder)
-  const store = createMemoryStore({ log: opts.log, surreal: knowledge, sourceRevision: () => gitRevision(opts.config.dir), halfLifeDays: opts.config.memoryHalfLifeDays })
+  const store = createMemoryStore({ log: opts.log, surreal: knowledge, ...(opts.stampsFor && { stampsFor: opts.stampsFor }), halfLifeDays: opts.config.memoryHalfLifeDays })
   // Built here, beside the drift probe, because both answer "how much should a reader trust this
   // row" and both are read per call rather than snapshotted: one asks whether the CODE moved, the
   // other whether the WORKSPACE landed. Every surface this root assembles — the step tools and the
@@ -86,10 +98,10 @@ export async function createMemory(opts: { log: EventLog; config: ProjectConfig;
   // note. From the log, not from a Kernel: this plugin holds no kernel, and the fold is the rule.
   const workspaceView = createWorkspaceView(opts.log)
   const projector = createMemoryProjector({ log: opts.log, surreal: knowledge, vaultDir: opts.config.vaultDir, workspaceView, ...(opts.lease && { lease: opts.lease }) })
-  const changedSince = createDriftProbe(opts.config.dir)
+  const drift = checkoutDrift(opts.config.dir)
   return {
     store, projector, knowledge,
-    bindStep: p => bindStepMemory({ ...p, store, changedSince, workspaceView, catchUp: projector.catchUp }),
+    bindStep: p => bindStepMemory({ ...p, store, drift, workspaceView, catchUp: projector.catchUp }),
     close: async () => { await projector.close(); await knowledge.close() },
   }
 }
@@ -104,7 +116,7 @@ export async function createMemory(opts: { log: EventLog; config: ProjectConfig;
 // Surreal connection or a repo on disk, the same narrowing `corpusDrift`/`needsReground` already
 // commit to. The probe is built by the caller because `config.dir` is the caller's business.
 export async function measureDrift(
-  changedSince: ChangedSince,
+  drift: DriftSources,
   knowledge: Pick<Knowledge, 'allNotes'>,
 ): Promise<MemoryHealth['drift']> {
   try {
@@ -113,7 +125,7 @@ export async function measureDrift(
     // that used to narrow it here silently dropped `verified` the moment the stamp shipped: the
     // either-clean rule kept passing its own tests while no production caller could reach it.
     // Narrowing a shape by hand at a call site is how a new field goes missing; do not restore it.
-    const d = await corpusDrift(await knowledge.allNotes(), changedSince)
+    const d = await readCorpusDrift(await knowledge.allNotes(), drift)
     if (d.ratio === null) return undefined
     return { checkable: d.checkable, drifted: d.drifted, ratio: d.ratio }
   } catch {
@@ -165,7 +177,7 @@ export async function probeMemory(config: ProjectConfig, log: EventLog, livePid?
     // connection this function opens per probe (~68ms) plus its cursor/count queries. That is the
     // next lever if this path is ever hot again; it needs a connection whose lifetime outlives one
     // probe, which is a change to who owns the handle, not to this cache.
-    const drift = await driftCacheFor(config.dir)(cursor, () => measureDrift(createDriftProbe(config.dir), k))
+    const drift = await driftCacheFor(config.dir)(cursor, () => measureDrift(checkoutDrift(config.dir), k))
     // What the projector is doing RIGHT NOW, published by it into a shared meta row. `pending`
     // only covers the event replay; the linking and clustering stages run with pending already at
     // zero, which is why a boot could sit in ollama for minutes with nothing on screen to say so.

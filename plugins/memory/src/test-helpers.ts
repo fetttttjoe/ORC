@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { Surreal } from 'surrealdb'
-import { claimId, MemoryNote, MemoryScope, NOTE_KIND, NOTE_TIER, type MemoryStore, type NoteSummary } from '@orc/contracts'
+import { ClaimClass, claimId, MemoryNote, MemoryScope, NOTE_KIND, NOTE_TIER, type ClaimHit, type MemoryStore, type NoteSummary } from '@orc/contracts'
 import { semanticNoteFixture, TEST_WORKSPACE_ID } from '@orc/contracts/fixtures'
 import { openStorage, type EventLog } from '@orc/kernel'
 import { createTestDb, sh, staleTestDbs, testDbName, TEST_PROJECT_ID } from '@orc/kernel/test-helpers'
@@ -102,7 +102,12 @@ export const noteFixture = (over: Record<string, unknown> = {}): Record<string, 
   categories: [], tags: [], links: [], paths: [], summary: '', body: '', ...over,
 })
 
-export const claimFixture = (text: string, sourceRevision: string | null = null) => ({ id: claimId(text), text, sourceRevision })
+// a search HIT, which is a claim plus the owning note's identity and drift inputs
+export const claimHitFixture = (over: Partial<ClaimHit> = {}): ClaimHit => ({
+  claimId: claimId('a statement'), noteId: 'n', scope: MemoryScope.project, title: 'T',
+  text: 'a statement', class: ClaimClass.fact, anchors: [],
+  validFrom: '2026-07-18T00:00:00.000Z', sourceRevision: null, paths: [], workspaceId: TEST_WORKSPACE_ID, ...over,
+})
 
 // Every MemoryStore method as a no-op with an empty answer; a test spreads this and overrides the
 // two or three methods it observes. `write` echoes the draft as a parsed note so callers that read
@@ -122,7 +127,7 @@ export const noopMemoryStore = (): MemoryStore => ({
   recordAccess: async () => {},
   topics: async () => [],
   topicClaims: async () => [],
-  verify: async () => ({ revision: 'headrev', at: '2026-07-30T00:00:00.000Z', by: 'cli' }),
+  verify: async () => ({ revision: 'headrev', at: '2026-07-30T00:00:00.000Z', by: 'cli', claims: [] }),
 })
 
 // The projector's read-model surface with inert defaults; a fault-injecting test overrides one member.

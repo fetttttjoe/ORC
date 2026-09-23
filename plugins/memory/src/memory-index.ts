@@ -8,7 +8,7 @@ import { noteRelPath, renderNoteFile } from './note-md'
 import type { WorkspaceView } from './provisional'
 import { writeMemoryFile } from './write-note'
 
-// Exported so a test can assert every NOTE_KINDS member is placed: a kind missing here still
+// Exported so a test can assert every NoteKind member is placed: a kind missing here still
 // gets its note file, but never appears in the index, and nothing errors — which is exactly how
 // `research` was invisible on arrival.
 // Research is its own section rather than folded into decisions/facts: a cited web finding is

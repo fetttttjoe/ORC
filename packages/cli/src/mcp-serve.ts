@@ -18,7 +18,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js'
 import { ApprovedBy, Door, errorMessage, NO_CHAT, toolError, type MemoryAuthor, type ResolvedTool, type SupervisorHealth } from '@orc/contracts'
 import type { EventLog, ProjectConfig } from '@orc/kernel'
-import { MEMORY_READ_TOOLS, MEMORY_ROLE, createDriftProbe, createMemory, createWorkspaceView, memoryTools as buildMemoryTools, probeMemory, unavailableMemoryTools } from '@orc/memory'
+import { MEMORY_READ_TOOLS, MEMORY_ROLE, checkoutDrift, createMemory, createWorkspaceView, memoryTools as buildMemoryTools, probeMemory, unavailableMemoryTools } from '@orc/memory'
 import { openMemory } from './memory-open'
 import { asResolvedTools, buildCopilotTools, createProjectSessions, type OrcActions } from '@orc/ui-core'
 
@@ -148,7 +148,7 @@ export async function startMcpServe(opts: {
       store: memory.store,
       author: memoryAuthor,
       role: MEMORY_ROLE.verify,
-      changedSince: createDriftProbe(config.dir),
+      drift: checkoutDrift(config.dir),
       // The `provisional` flag's input, bound here for the same reason changedSince is: this door
       // builds its own read tools rather than taking createMemory's, so a dep left off here is a
       // flag that silently never fires — which is how memory_recheck shipped through this door

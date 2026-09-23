@@ -2,10 +2,10 @@ import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, 
 import { spawn } from 'node:child_process'
 import path from 'node:path'
 import { Command, InvalidArgumentError } from 'commander'
-import { AUTHOR_SOURCE, claimHistory, Door, NO_CHAT, EDGE_DIRECTION, errorMessage, EVENT_KIND, EventKind, foldMemory, LINK_KINDS, MASTERPLAN_NOTE_ID, MEMORY_ACCESS, MemoryDeletedPayload, MemoryScope, MemoryWrittenPayload, noteKey, NOTE_KINDS, NoteKind, NOTE_TIER, NOTE_TIERS, NoteTier, parseLinkSpec, PlanDraft, RunOutcome, STRATEGY, TASK_STATUS, TERMINAL_TASK_STATUS, LinkKind, slugId, type Analyzer, type EventRecord, type MemoryAuthor, type MemoryLink, type NoteFields, type ExecutionPort, type Plan, type TaskNode, type WorkspaceWithHealth, formatModelRate } from '@orc/contracts'
+import { AUTHOR_SOURCE, ClaimClass, claimHistory, composeAuthor, Door, NO_CHAT, EDGE_DIRECTION, errorMessage, EVENT_KIND, EventKind, foldMemory, MASTERPLAN_NOTE_ID, MEMORY_ACCESS, MemoryDeletedPayload, MemoryScope, MemoryWrittenPayload, noteKey, NoteKind, NOTE_TIER, NoteTier, parseLinkSpec, PlanDraft, RunOutcome, STRATEGY, TASK_STATUS, TERMINAL_TASK_STATUS, LinkKind, slugId, type Analyzer, type EventRecord, type MemoryAuthor, type MemoryLink, type NoteFields, type ExecutionPort, type Plan, type TaskNode, type WorkspaceWithHealth, formatModelRate, type ClaimEvent } from '@orc/contracts'
 import { openStorage, Kernel, atomicWriteFileSync, listProjectIds, claimSlot, fold, gatedChildren, freezePlan, liveSupervisors, orphanTasks, staleSupervisors, grantExtensionTrust, grantMcpTrust, initializeProject, isExtensionTrusted, isMcpTrusted, loadConfig, loadTrust, migrateDatabase, requireProject, runtimeLockHeld, stepUsage, subtreeUsage, tasksByWorkspace, taskUsage, type EventLog, type OrcConfig, type PluginHost, type ProjectConfig, type Storage } from '@orc/kernel'
 import { createVaultProjector, parsePlanFile } from '@orc/vault-projector'
-import { archiveCandidates, consolidateTask, CONSOLIDATE_EXECUTOR, createDriftProbe, frontier, needsReground, probeMemory, RECHECK_KINDS, recheckNotes, restampToHead, summarize, taskInfo } from '@orc/memory'
+import { archiveCandidates, checkoutDrift, consolidateTask, CONSOLIDATE_EXECUTOR, frontier, needsReground, probeMemory, RECHECK_KINDS, recheckNotes, restampToHead, summarize, taskInfo } from '@orc/memory'
 import { withMemory } from './memory-open'
 import { DEFAULT_TEMPLATE_MODEL, singleStepDraft } from './plan-template'
 import { seedShippedSkills } from './shipped-skills'
@@ -145,11 +145,12 @@ function parsePositiveNumber(value: string): number {
   return parsed
 }
 
-const parseNoteTier = enumArg<NoteTier>('tier', NOTE_TIERS)
+const parseNoteTier = enumArg<NoteTier>('tier', Object.values(NoteTier))
 // Without this a human could not record a DECISION at any door: `memory add` had no kind flag, so
 // every note either human door produced defaulted to 'fact' and only an agent mid-step could mint
 // a decision. 'adr' is the near-miss it catches — that is a tag, never a kind.
-const parseNoteKind = enumArg<NoteKind>('kind', NOTE_KINDS)
+const parseNoteKind = enumArg<NoteKind>('kind', Object.values(NoteKind))
+const parseClaimClass = enumArg<ClaimClass>('claim class', Object.values(ClaimClass))
 
 // neighbors --depth must be >= 1: the store default is 2 and rankNeighbors requires a positive
 // hop count (depth 0 traverses nothing and silently returns []), so reject it at parse time with
@@ -1052,7 +1053,7 @@ export function buildProgram(
     // The human door for a DECISION. Omitted keeps the schema default ('fact') on a new note and,
     // under merge-on-omit, the stored kind on an update — so adding a link to an existing decision
     // does not silently demote it to a fact.
-    .option('--kind <k>', `what kind of knowledge: ${NOTE_KINDS.join(' | ')}`, parseNoteKind)
+    .option('--kind <k>', `what kind of knowledge: ${Object.values(NoteKind).join(' | ')}`, parseNoteKind)
     // Without this the CLI could create knowledge but never wire it in, so every human-authored
     // note landed isolated — reachable by search, invisible to traversal. Same shorthand the web
     // note editor uses, so a note wired from either surface is the same edge.
@@ -1062,8 +1063,9 @@ export function buildProgram(
     // `invalidates`) — additive by design: state what to add and what to retire, never the whole
     // array, because supplying the array would REPLACE under the store's merge-on-omit rule.
     .option('--claim <text...>', 'state a claim on this note (addClaims) — repeatable')
+    .option('--claim-class <c>', `what every --claim on this call states: ${Object.values(ClaimClass).join(' | ')}`, parseClaimClass, ClaimClass.fact)
     .option('--invalidate <claimId...>', 'retire a claim by its 12-hex id (invalidates) — repeatable')
-    .action(async (o: { id: string; title?: string; summary?: string; body?: string; tags?: string[]; categories?: string[]; kind?: NoteKind; links?: MemoryLink[]; claim?: string[]; invalidate?: string[] }) => {
+    .action(async (o: { id: string; title?: string; summary?: string; body?: string; tags?: string[]; categories?: string[]; kind?: NoteKind; links?: MemoryLink[]; claim?: string[]; claimClass: ClaimClass; invalidate?: string[] }) => {
       const { config, log } = needPlugin()
       await withMemory({ log, config }, async memory => {
         // the tool boundary's own refusal, at this door too: a NEW note without a title fails the
@@ -1081,7 +1083,7 @@ export function buildProgram(
           // conditional spread, not a bare `kind: o.kind`: an optional field set to undefined
           // ERASES the stored column, so an unflagged update would wipe the note's kind
           ...(o.kind !== undefined && { kind: o.kind }),
-          ...(o.claim !== undefined && { addClaims: o.claim }),
+          ...(o.claim !== undefined && { addClaims: o.claim.map(text => ({ text, class: o.claimClass, anchors: [] })) }),
         }, await cliAuthor(), { ...(o.invalidate !== undefined && { invalidates: o.invalidate }) })
         await memory.projector.catchUp() // one-shot: no live subscription in a CLI process, so project the append now
       })
@@ -1115,7 +1117,7 @@ export function buildProgram(
           .filter(t => TERMINAL_TASK_STATUS.has(t.status))
           .map(t => t.id),
       )
-      const notes = await recheckNotes(events, { changedSince: createDriftProbe(config.dir), terminalTaskIds })
+      const notes = await recheckNotes(events, { drift: checkoutDrift(config.dir), terminalTaskIds })
       const s = summarize(notes)
       // "current" means CHECKED and unmoved. A note with no stamp or no declared paths was never
       // compared to anything, so it is reported as never-checked rather than folded into current —
@@ -1225,12 +1227,12 @@ export function buildProgram(
     .description('list memory notes')
     .option('--category <c>', 'filter by category')
     .option('--tag <t>', 'filter by tag')
-    .option('--tier <t>', `only one memory lane: ${NOTE_TIERS.join(' | ')}`, parseNoteTier)
+    .option('--tier <t>', `only one memory lane: ${Object.values(NoteTier).join(' | ')}`, parseNoteTier)
     // The inventory question `orc adr ls` cannot answer: every note under one kind, decisions
     // included. `kind` exists only on the SEMANTIC tier, so this filter selects within that lane
     // rather than across all three. Without it a human listing knowledge by kind had to read the
     // whole corpus and filter by eye.
-    .option('--kind <k>', `only one note kind: ${NOTE_KINDS.join(' | ')}`, parseNoteKind)
+    .option('--kind <k>', `only one note kind: ${Object.values(NoteKind).join(' | ')}`, parseNoteKind)
     .action(async (o: { category?: string; tag?: string; tier?: NoteTier; kind?: NoteKind }) => {
       const { config, log } = needPlugin()
       const rows = await withMemory({ log, config }, async memory => {
@@ -1306,23 +1308,31 @@ export function buildProgram(
         // stretches too — the projector drops their rows, so a fold that saw only writes would
         // report a deleted note's claims as live forever.
         const events = (await log.all()).filter(e => e.kind === EVENT_KIND.memory_written || e.kind === EVENT_KIND.memory_deleted)
-        const folded = claimHistory(events.flatMap(e => {
+        const folded = claimHistory(events.flatMap((e): ClaimEvent[] => {
           if (e.kind === EVENT_KIND.memory_deleted) {
             const d = MemoryDeletedPayload.safeParse(e.payload)
             if (!d.success || d.data.id !== id || d.data.scope !== scope) return []
-            return [{ ts: e.ts, claims: [], invalidates: [], deleted: true }]
+            return [{ seq: e.seq, ts: e.ts, author: d.data.author, sourceRevision: null, why: null, decision: null, claims: [], invalidates: [], deleted: true }]
           }
           const p = MemoryWrittenPayload.safeParse(e.payload)
           if (!p.success || p.data.note.id !== id || p.data.note.scope !== scope) return []
           const n: NoteFields = p.data.note
-          return [{ ts: e.ts, claims: n.claims ?? [], invalidates: p.data.invalidates }]
+          return [{
+            seq: e.seq, ts: e.ts, author: p.data.author, sourceRevision: n.sourceRevision ?? null,
+            why: p.data.why, decision: p.data.decision,
+            claims: n.claims ?? [], invalidates: p.data.invalidates, deleted: false,
+          }]
         }))
         // same rule on the history form: one parseable JSON value (the folded claims, tombstones
         // and all), never JSON followed by human rows
         if (o.json) { console.log(JSON.stringify(folded, null, 2)); return }
         if (folded.length === 0) throw new Error(`no claims in the log for '${id}' (scope ${scope})`)
-        for (const c of folded)
+        for (const c of folded) {
           console.log(`${c.id}  ${c.validFrom}  ${c.invalidatedAt ? `RETIRED ${c.invalidatedAt}` : 'live'}  ${c.text}`)
+          console.log(`    added by ${composeAuthor(c.addedBy.author)}${c.addedBy.why ? `: ${c.addedBy.why}` : ''}${c.addedBy.decision ? ` [${c.addedBy.decision}]` : ''}`)
+          if (c.retiredBy)
+            console.log(`    retired by ${composeAuthor(c.retiredBy.author)}${c.retiredBy.why ? `: ${c.retiredBy.why}` : ''}${c.retiredBy.decision ? ` [${c.retiredBy.decision}]` : ''}`)
+        }
       })
     })
   mem
@@ -1371,7 +1381,7 @@ export function buildProgram(
       // One pass through the shared enumArg: validates AND narrows, where this used to check in a
       // loop and then re-parse through zod to get the type without a cast. A friendly error beats
       // the store silently ignoring an unknown kind, which reads as "no neighbors".
-      const kinds = o.kinds?.map(k => enumArg<LinkKind>('--kinds', LINK_KINDS)(k))
+      const kinds = o.kinds?.map(k => enumArg<LinkKind>('--kinds', Object.values(LinkKind))(k))
       const { config, log } = needPlugin()
       await withMemory({ log, config }, async memory => {
         await memory.projector.catchUp()

@@ -1,11 +1,12 @@
 import {
   claimHitKey, errorMessage, LINK_KIND, MEMORY_ACCESS, MEMORY_LIMITS, MEMORY_USE, MemoryScope, noteKey, NOTE_TIER, planScope, SEARCH_MODE, SignalOutcome, slugId, taskLaneScopes,
-  type ClaimHit, type VerifiedStamp, type LinkKind, type MemoryAuthor, type MemoryStore, type ResolvedTool,
+  type ClaimHit, type ClaimInput, type LinkKind, type MemoryAuthor, type MemoryStore, type ResolvedTool,
   type RecalledContext, type StepMemory,
 } from '@orc/contracts'
 import { applyBudget } from './budget'
 import { memoryTools, unavailableMemoryTools, type MemoryRole } from './tools'
-import { corpusDrift, type ChangedSince, type CorpusDrift } from './drift'
+import { readCorpusDrift, type DriftableNote, type DriftSources } from './claim-drift-read'
+import type { CorpusDrift } from './drift'
 import type { WorkspaceViewProbe } from './provisional'
 
 // Distinct id prefixes so a later success cannot overwrite a failure lesson — both notes coexist.
@@ -82,8 +83,8 @@ export function bindStepMemory(opts: {
   step: { id: string; title: string; instructions: string; dependsOn: readonly string[] }
   taskId: string
   role?: MemoryRole
-  // the drift probe: also what lets recall report how much of its own output still holds
-  changedSince?: ChangedSince
+  // the drift probes: also what lets recall report how much of its own output still holds
+  drift?: DriftSources
   // the workspace standing behind the tools' `provisional` flag — bound by the composition root for
   // the same reason changedSince is: neither can be answered from inside one step
   workspaceView?: WorkspaceViewProbe
@@ -148,7 +149,8 @@ export function bindStepMemory(opts: {
   // Every failure folds to undefined, matching the module's rule that unknown is never "drifted"
   // and never "current": a git probe that cannot answer must not produce a sentence.
   const currencyOf = async (found: RecalledContext): Promise<CorpusDrift | undefined> => {
-    if (!opts.changedSince) return undefined
+    const drift = opts.drift
+    if (!drift) return undefined
     try {
       // BOTH arms. Claims take the budget first, so at the default budget a block is typically
       // several claims and one note — computing currency from the notes alone put most of what the
@@ -158,10 +160,18 @@ export function bindStepMemory(opts: {
       // NOTES second, so a note that appears in both arms wins the key: only the note summary
       // carries `verified`, and dropping it here would leave the preload's verdict blind to every
       // verification an auditor ever declared (the same slip tools.ts's search flagging had).
-      const byNote = new Map<string, { sourceRevision: string | null; paths: readonly string[]; verified?: VerifiedStamp }>()
-      for (const c of found.claims) byNote.set(noteKey(c.scope, c.noteId), { sourceRevision: c.sourceRevision, paths: c.paths })
-      for (const n of found.notes) byNote.set(noteKey(n.scope, n.id), { sourceRevision: n.sourceRevision, paths: n.paths, ...(n.verified && { verified: n.verified }) })
-      const d = await corpusDrift([...byNote.values()], opts.changedSince)
+      // a matched claim is judged on its own anchors; several claims of one note accumulate
+      const byNote = new Map<string, DriftableNote>()
+      for (const c of found.claims) {
+        const held = byNote.get(noteKey(c.scope, c.noteId))
+        const claim: ClaimInput = { id: c.claimId, text: c.text, class: c.class, anchors: c.anchors, sourceRevision: c.sourceRevision }
+        byNote.set(noteKey(c.scope, c.noteId), { sourceRevision: c.sourceRevision, paths: c.paths, claims: [...(held?.claims ?? []), claim] })
+      }
+      for (const n of found.notes) {
+        const held = byNote.get(noteKey(n.scope, n.id))
+        byNote.set(noteKey(n.scope, n.id), { sourceRevision: n.sourceRevision, paths: n.paths, ...(held?.claims && { claims: held.claims }), ...(n.verified && { verified: n.verified }) })
+      }
+      const d = await readCorpusDrift([...byNote.values()], drift)
       return (d.checkable === 0 && d.unknown === 0) ? undefined : d
     } catch { return undefined }
   }
@@ -178,7 +188,7 @@ export function bindStepMemory(opts: {
     Promise.race([p, new Promise<never>((_, reject) => setTimeout(() => reject(new Error(`${what} still pending after ${recallTimeoutMs}ms — degraded store treated as absent`)), recallTimeoutMs).unref?.())])
 
   return {
-    tools: memoryTools({ store: tracking, author, role: opts.role, changedSince: opts.changedSince, workspaceView: opts.workspaceView, catchUp: opts.catchUp, searchScope: scope }),
+    tools: memoryTools({ store: tracking, author, role: opts.role, ...(opts.drift && { drift: opts.drift }), workspaceView: opts.workspaceView, catchUp: opts.catchUp, searchScope: scope }),
     memory: {
       // KEYWORD arm only, and now actually PASSED as such: a path is a literal, and the semantic
       // arm returns claims merely about the same area — the opposite of what a retirement prompt

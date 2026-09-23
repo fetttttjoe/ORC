@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'bun:test'
 import { rankNeighbors, DEFAULT_LINK_WEIGHTS, rrfFuse } from './rank'
 import { must } from '@orc/contracts/fixtures'
-import { LINK_KIND } from '@orc/contracts'
+import { EDGE_DIRECTION, LINK_KIND } from '@orc/contracts'
 
 const edges = [
   { from: 'a', to: 'b', kind: LINK_KIND.supersedes }, // weight 1.0, depth 1 → 1.0
@@ -23,7 +23,7 @@ describe('rankNeighbors', () => {
     const shuffled = [must(edges[2], 'edges[2]'), must(edges[0], 'edges[0]'), must(edges[1], 'edges[1]')] // same graph, different fetch order (a rebuild reshuffles ids)
     expect(rankNeighbors(shuffled, ['a'], { depth: 3 }).map(n => n.id))
       .toEqual(rankNeighbors(edges, ['a'], { depth: 3 }).map(n => n.id))
-    const dir = rankNeighbors([{ from: 'a', to: 'b', kind: LINK_KIND.supersedes, direction: 'in' as const }], ['a'])
+    const dir = rankNeighbors([{ from: 'a', to: 'b', kind: LINK_KIND.supersedes, direction: EDGE_DIRECTION.in }], ['a'])
     expect(dir[0]).toMatchObject({ id: 'b', via: 'supersedes', direction: 'in' })
   })
 
@@ -56,7 +56,7 @@ describe('rankNeighbors', () => {
   })
 
   it('filters by kind, caps result count, and down-weights by confidence', () => {
-    expect(rankNeighbors(edges, ['a'], { kinds: ['supersedes'] }).map(n => n.id)).toEqual(['b'])
+    expect(rankNeighbors(edges, ['a'], { kinds: [LINK_KIND.supersedes] }).map(n => n.id)).toEqual(['b'])
     expect(rankNeighbors(edges, ['a'], { cap: 1 })).toHaveLength(1)
     const low = rankNeighbors([{ from: 'a', to: 'b', kind: LINK_KIND.supersedes, confidence: 0.1 }], ['a'])
     expect(low[0].score).toBeCloseTo(0.1) // 1.0 weight × 0.1 confidence, no decay at depth 1

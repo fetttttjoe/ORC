@@ -3,7 +3,7 @@ import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { z } from 'zod'
-import { AUTHOR_SOURCE, claimId, Door, EVENT_KIND, MEMORY_USE, MemoryAccessedPayload, MemoryAuthor, MemoryOutcomePayload, MemoryScope, MemoryTopicAccessedPayload, MemoryVerifiedPayload, MemoryWrittenPayload, NOTE_TIER, type AccessVia, type Origin, LINK_KIND } from '@orc/contracts'
+import { AUTHOR_SOURCE, basisAnchors, type BlobAt, ClaimClass, ClaimDraft, ClaimDriftState, claimDriftState, claimId, Door, EDGE_DIRECTION, EVENT_KIND, MEMORY_ACCESS, MEMORY_LIMITS, MEMORY_USE, MemoryAccessedPayload, MemoryAuthor, MemoryOutcomePayload, MemoryScope, MemoryTopicAccessedPayload, MemoryVerifiedPayload, MemoryWrittenPayload, NOTE_KIND, NOTE_TIER, type AccessVia, type Origin, type TreeStamps, LINK_KIND } from '@orc/contracts'
 import { gitRevision, openStorage, type EventLog } from '@orc/kernel'
 import { createTestDb, TEST_PROJECT_ID, type TestDb } from '@orc/kernel/test-helpers'
 import { SurrealMemory } from './surreal'
@@ -30,6 +30,18 @@ const openLog = async (pg: TestDb): Promise<EventLog> => {
   pg.onClose(() => log.close())
   return log
 }
+
+// A checkout as a test double: a test names the revision it expects and the blob of every path it
+// anchors, so both stamps are observable without a real repo (tree-stamps.test.ts owns that).
+const stampsOf = (revision: string | null, blobs: Record<string, string> = {}): TreeStamps => ({
+  revision: async () => revision,
+  blob: async file => blobs[file] ?? null,
+})
+const draft = (text: string, ...paths: string[]): ClaimDraft =>
+  ClaimDraft.parse({ text, class: ClaimClass.fact, anchors: paths.map(path => ({ path })) })
+
+const lastWrite = async (log: EventLog): Promise<MemoryWrittenPayload> => MemoryWrittenPayload.parse((await log.all()).at(-1)?.payload)
+const claimsOf = (p: MemoryWrittenPayload) => p.note.tier === NOTE_TIER.semantic ? p.note.claims : []
 
 describe('MemoryStore gateway', () => {
   it('write appends a memory_written event with stamped provenance and null taskId', async () => {
@@ -63,8 +75,8 @@ describe('MemoryStore gateway', () => {
     const ts = await createTestSurreal(); drops.push(ts.drop)
     const log = await openLog(pg)
     const store = createMemoryStore({ log, surreal: await SurrealMemory.open(ts) })
-    await store.recordAccess('auth', 'project', 'read', authorFixture({ source: AUTHOR_SOURCE.agent, origin: RUN, taskId: 't1', stepId: 's1', runToken: 'r1' }))
-    await store.recordAccess('auth', 'project', 'read', authorFixture())
+    await store.recordAccess('auth', 'project', MEMORY_ACCESS.read, authorFixture({ source: AUTHOR_SOURCE.agent, origin: RUN, taskId: 't1', stepId: 's1', runToken: 'r1' }))
+    await store.recordAccess('auth', 'project', MEMORY_ACCESS.read, authorFixture())
     const events = await log.all()
     expect(must(events[0], 'events[0]').taskId).toBe('t1')
     expect(must(events[0], 'events[0]').stepId).toBe('s1')
@@ -97,8 +109,8 @@ describe('MemoryStore gateway', () => {
     const ts = await createTestSurreal(); drops.push(ts.drop)
     const log = await openLog(pg)
     const store = createMemoryStore({ log, surreal: await SurrealMemory.open(ts) })
-    const via: AccessVia = { seed: 'net-topology', kind: LINK_KIND.supersedes, direction: 'out' }
-    await store.recordAccess('auth', 'project', 'read', authorFixture(), { via })
+    const via: AccessVia = { seed: 'net-topology', kind: LINK_KIND.supersedes, direction: EDGE_DIRECTION.out }
+    await store.recordAccess('auth', 'project', MEMORY_ACCESS.read, authorFixture(), { via })
     const events = await log.all()
     const payload = MemoryAccessedPayload.parse(must(events[0], 'events[0]').payload)
     expect(payload.via).toEqual(via)
@@ -126,8 +138,8 @@ describe('MemoryStore gateway', () => {
     // same tool call replayed after a restart: identical draft, but a new Git HEAD stamp → the
     // memory_written payload DIFFERS. The event log throws KernelError(idempotency_conflict); the
     // gateway must recognize it by CODE and swallow it (the first write stands), not fail the op.
-    await createMemoryStore({ log, surreal, sourceRevision: async () => 'sha-A' }).write({ id: 'auth', title: 'Auth' }, author, { idempotencyKey: key })
-    await createMemoryStore({ log, surreal, sourceRevision: async () => 'sha-B' }).write({ id: 'auth', title: 'Auth' }, author, { idempotencyKey: key })
+    await createMemoryStore({ log, surreal, stampsFor: () => stampsOf('sha-A') }).write({ id: 'auth', title: 'Auth' }, author, { idempotencyKey: key })
+    await createMemoryStore({ log, surreal, stampsFor: () => stampsOf('sha-B') }).write({ id: 'auth', title: 'Auth' }, author, { idempotencyKey: key })
     expect(await log.all()).toHaveLength(1) // one event; the differing replay was tolerated, not thrown
   })
 
@@ -135,7 +147,7 @@ describe('MemoryStore gateway', () => {
     const pg = await createTestDb(); drops.push(pg.drop)
     const ts = await createTestSurreal(); drops.push(ts.drop)
     const log = await openLog(pg)
-    const store = createMemoryStore({ log, surreal: await SurrealMemory.open(ts), sourceRevision: async () => 'head-sha-42' })
+    const store = createMemoryStore({ log, surreal: await SurrealMemory.open(ts), stampsFor: () => stampsOf('head-sha-42') })
     await store.write({ id: 'auth', title: 'Auth', sourceRevision: 'invented-by-agent' }, authorFixture({ source: AUTHOR_SOURCE.agent, origin: RUN }))
     const [event] = await log.all()
     const { note } = z.object({ note: z.object({ sourceRevision: z.string().nullable() }) }).parse(must(event, 'event').payload)
@@ -244,7 +256,7 @@ describe('claims on a tier that cannot hold them', () => {
     const surreal = await SurrealMemory.open(ts)
     const store = createMemoryStore({ log, surreal })
     await expect(store.write(
-      { id: 'p1', title: 'A plan note', rationale: 'why this subplan exists', addClaims: ['a durable statement'] },
+      { id: 'p1', title: 'A plan note', rationale: 'why this subplan exists', addClaims: [draft('a durable statement')] },
       authorFixture(),
     )).rejects.toThrow(/semantic-tier/)
     // and nothing was appended — the failure is total, not a half-written note
@@ -257,7 +269,7 @@ describe('claims on a tier that cannot hold them', () => {
     const log = await openLog(pg)
     const surreal = await SurrealMemory.open(ts)
     const store = createMemoryStore({ log, surreal })
-    await store.write({ id: 's1', title: 'A fact', addClaims: ['a durable statement'] }, authorFixture())
+    await store.write({ id: 's1', title: 'A fact', addClaims: [draft('a durable statement')] }, authorFixture())
   })
 })
 
@@ -268,7 +280,7 @@ describe('sourceRevision is resolved lazily', () => {
     const log = await openLog(pg)
     const surreal = await SurrealMemory.open(ts)
     let calls = 0
-    const store = createMemoryStore({ log, surreal, sourceRevision: async () => { calls++; return 'abc123' } })
+    const store = createMemoryStore({ log, surreal, stampsFor: () => ({ revision: async () => { calls++; return 'abc123' }, blob: async () => null }) })
 
     await store.get('nothing')
     await store.list()
@@ -291,20 +303,18 @@ describe('additive claim writes', () => {
     const log = await openLog(pg)
     return { log, store: createMemoryStore({ log, surreal: await SurrealMemory.open(ts) }) }
   }
-  const lastWrite = async (log: EventLog) => MemoryWrittenPayload.parse((await log.all()).at(-1)?.payload)
-  const claimsOf = (p: MemoryWrittenPayload) => p.note.tier === NOTE_TIER.semantic ? p.note.claims : []
 
   it('adds one claim without the writer resending the others', async () => {
     const { log, store } = await openStore()
-    await store.write({ id: 'n', title: 'N', addClaims: ['first'] }, authorFixture())
-    await store.write({ id: 'n', title: 'N', addClaims: ['second'] }, authorFixture())
+    await store.write({ id: 'n', title: 'N', addClaims: [draft('first')] }, authorFixture())
+    await store.write({ id: 'n', title: 'N', addClaims: [draft('second')] }, authorFixture())
 
     expect(claimsOf(await lastWrite(log)).map(c => c.text)).toEqual(['first', 'second'])
   })
 
   it('invalidating drops a claim and records the tombstone on the EVENT, not the note', async () => {
     const { log, store } = await openStore()
-    await store.write({ id: 'n', title: 'N', addClaims: ['first', 'second'] }, authorFixture())
+    await store.write({ id: 'n', title: 'N', addClaims: [draft('first'), draft('second')] }, authorFixture())
     await store.write({ id: 'n', title: 'N' }, authorFixture(), { invalidates: [claimId('first')] })
 
     const last = await lastWrite(log)
@@ -316,7 +326,7 @@ describe('additive claim writes', () => {
   // does not mention a claim must carry it forward. Absence can never mean deletion.
   it('a write that mentions no claims at all leaves the live set untouched', async () => {
     const { log, store } = await openStore()
-    await store.write({ id: 'n', title: 'N', addClaims: ['first'] }, authorFixture())
+    await store.write({ id: 'n', title: 'N', addClaims: [draft('first')] }, authorFixture())
     await store.write({ id: 'n', title: 'N', summary: 'unrelated edit' }, authorFixture())
 
     const last = await lastWrite(log)
@@ -326,8 +336,194 @@ describe('additive claim writes', () => {
 
   it('addClaims is an instruction, never stored: the payload carries resolved claims only', async () => {
     const { log, store } = await openStore()
-    await store.write({ id: 'n', title: 'N', addClaims: ['first'] }, authorFixture())
+    await store.write({ id: 'n', title: 'N', addClaims: [draft('first')] }, authorFixture())
     expect(JSON.stringify((await lastWrite(log)).note)).not.toContain('addClaims')
+  })
+
+  // A reader asking "why is this true, and what decided it" reads the WRITE, so both ride the
+  // event — and a `decision` that names no live decision note would send that reader nowhere.
+  it('records the why and the decision of a write that changes no claims at all', async () => {
+    const { log, store } = await openStore()
+    await store.write({ id: 'follow-the-barrel', title: 'Follow the barrel', kind: NOTE_KIND.decision }, authorFixture())
+    await store.write({ id: 'n', title: 'N' }, authorFixture(), { why: 'the walker now follows the barrel', decision: 'follow-the-barrel' })
+
+    const last = await lastWrite(log)
+    expect(last.why).toBe('the walker now follows the barrel')
+    expect(last.decision).toBe('follow-the-barrel')
+  })
+
+  it('leaves why and decision null when the write states neither', async () => {
+    const { log, store } = await openStore()
+    await store.write({ id: 'n', title: 'N', addClaims: [draft('first')] }, authorFixture())
+    expect(await lastWrite(log)).toMatchObject({ why: null, decision: null })
+  })
+
+  // Checked against the LOG inside the write's own transaction: the read model is asynchronous, so
+  // a decision recorded a moment ago must not be refused by a projection that has not drained.
+  it('accepts a decision written in the same turn, with nothing projected', async () => {
+    const { log, store } = await openStore()
+    await store.write({ id: 'fresh-decision', title: 'Fresh', kind: NOTE_KIND.decision }, authorFixture())
+    await store.write({ id: 'n', title: 'N', addClaims: [draft('first')] }, authorFixture(), { decision: 'fresh-decision' })
+    expect((await lastWrite(log)).decision).toBe('fresh-decision')
+  })
+
+  it('refuses a decision that is not a decision note, is absent, or was deleted', async () => {
+    const { store } = await openStore()
+    const author = authorFixture()
+    await store.write({ id: 'plain', title: 'Plain' }, author)
+    await store.write({ id: 'gone', title: 'Gone', kind: NOTE_KIND.decision }, author)
+    await store.remove('gone', MemoryScope.project, author)
+
+    await expect(store.write({ id: 'n', title: 'N' }, author, { decision: 'plain' }))
+      .rejects.toThrow(STORE_REFUSAL.notADecision('plain', MemoryScope.project))
+    await expect(store.write({ id: 'n', title: 'N' }, author, { decision: 'never-recorded' }))
+      .rejects.toThrow(STORE_REFUSAL.notADecision('never-recorded', MemoryScope.project))
+    await expect(store.write({ id: 'n', title: 'N' }, author, { decision: 'gone' }))
+      .rejects.toThrow(STORE_REFUSAL.notADecision('gone', MemoryScope.project))
+  })
+
+  // Claim identity is (scope, noteId, claimId): two notes can hold the same sentence, and retiring
+  // one must leave the other's stretch open.
+  it('retiring a claim on one note leaves the identical claim on another untouched', async () => {
+    const { log, store } = await openStore()
+    await store.write({ id: 'a', title: 'A', addClaims: [draft('shared sentence')] }, authorFixture())
+    await store.write({ id: 'b', title: 'B', addClaims: [draft('shared sentence')] }, authorFixture())
+    await store.write({ id: 'a', title: 'A' }, authorFixture(), { invalidates: [claimId('shared sentence')] })
+
+    const events = (await log.all()).filter(e => e.kind === EVENT_KIND.memory_written).map(e => MemoryWrittenPayload.parse(e.payload))
+    const forNote = (id: string) => events.filter(p => p.note.id === id)
+    expect(claimsOf(must(forNote('a').at(-1), 'a write for note a'))).toEqual([])
+    expect(claimsOf(must(forNote('b').at(-1), 'a write for note b')).map(c => c.text)).toEqual(['shared sentence'])
+  })
+})
+
+// Both stamps name the AUTHOR's checkout, never the supervisor's: a note written from a worktree
+// but stamped with main's HEAD reads clean until its branch merges, and drifted afterwards.
+describe('claim stamps are read from the author checkout', () => {
+  const KERNEL = 'packages/kernel/src/kernel.ts'
+  const openStamped = async (stampsFor: (author: MemoryAuthor) => TreeStamps) => {
+    const pg = await createTestDb(); drops.push(pg.drop)
+    const ts = await createTestSurreal(); drops.push(ts.drop)
+    const log = await openLog(pg)
+    return { log, store: createMemoryStore({ log, surreal: await SurrealMemory.open(ts), stampsFor }) }
+  }
+  const stampsIn = (p: MemoryWrittenPayload) =>
+    claimsOf(p).map(c => ({ sourceRevision: c.sourceRevision, blobs: c.anchors.map(a => a.blob) }))
+
+  it('stores every anchor blob and the claim revision the provider answers', async () => {
+    const { log, store } = await openStamped(() => stampsOf('rev1', { [KERNEL]: 'aaa' }))
+    await store.write({ id: 'n', title: 'N', addClaims: [draft('first', KERNEL)] }, authorFixture())
+    expect(claimsOf(await lastWrite(log))).toEqual([{
+      id: claimId('first'), text: 'first', class: ClaimClass.fact, sourceRevision: 'rev1',
+      anchors: [{ path: KERNEL, symbol: null, blob: 'aaa' }],
+    }])
+  })
+
+  it('stores blob null for an anchor the checkout cannot hash', async () => {
+    const { log, store } = await openStamped(() => stampsOf('rev1'))
+    await store.write({ id: 'n', title: 'N', addClaims: [draft('first', 'src/gone.ts')] }, authorFixture())
+    expect(stampsIn(await lastWrite(log))).toEqual([{ sourceRevision: 'rev1', blobs: [null] }])
+  })
+
+  it('resolves the provider from the AUTHOR: two workspaces stamp differently through one store', async () => {
+    const { log, store } = await openStamped(author =>
+      author.workspaceId === 'ws-a' ? stampsOf('rev-a', { [KERNEL]: 'aaa' }) : stampsOf('rev-b', { [KERNEL]: 'bbb' }))
+    await store.write({ id: 'a', title: 'A', addClaims: [draft('from a', KERNEL)] }, authorFixture({ workspaceId: 'ws-a' }))
+    await store.write({ id: 'b', title: 'B', addClaims: [draft('from b', KERNEL)] }, authorFixture({ workspaceId: 'ws-b' }))
+    const stamped = (await log.all()).map(e => stampsIn(MemoryWrittenPayload.parse(e.payload)))
+    expect(stamped).toEqual([
+      [{ sourceRevision: 'rev-a', blobs: ['aaa'] }],
+      [{ sourceRevision: 'rev-b', blobs: ['bbb'] }],
+    ])
+  })
+
+  it('takes both stamps before the log transaction — git never spawns under the write lock', async () => {
+    const pg = await createTestDb(); drops.push(pg.drop)
+    const ts = await createTestSurreal(); drops.push(ts.drop)
+    const log = await openLog(pg)
+    const order: string[] = []
+    const traced: EventLog = new Proxy(log, {
+      get: (target, prop) => prop === 'transaction'
+        ? (fn: Parameters<EventLog['transaction']>[0]) => { order.push('transaction'); return target.transaction(fn) }
+        : Reflect.get(target, prop, target),
+    })
+    const store = createMemoryStore({
+      log: traced, surreal: await SurrealMemory.open(ts),
+      stampsFor: () => ({
+        revision: async () => { order.push('revision'); return 'rev1' },
+        blob: async () => { order.push('blob'); return 'aaa' },
+      }),
+    })
+    await store.write({ id: 'n', title: 'N', addClaims: [draft('first', KERNEL)] }, authorFixture())
+    expect(order).toEqual(['revision', 'blob', 'transaction'])
+  })
+
+  it('re-adding identical text keeps the original class, anchors, blob and revision', async () => {
+    const { log, store } = await openStamped(author =>
+      author.workspaceId === 'ws-a' ? stampsOf('rev-a', { [KERNEL]: 'aaa' }) : stampsOf('rev-b', { [KERNEL]: 'bbb' }))
+    await store.write({ id: 'n', title: 'N', addClaims: [draft('first', KERNEL)] }, authorFixture({ workspaceId: 'ws-a' }))
+    await store.write(
+      { id: 'n', title: 'N', addClaims: [ClaimDraft.parse({ text: 'first', class: ClaimClass.why, anchors: [] })] },
+      authorFixture({ workspaceId: 'ws-b' }),
+    )
+    expect(claimsOf(await lastWrite(log))).toEqual([{
+      id: claimId('first'), text: 'first', class: ClaimClass.fact, sourceRevision: 'rev-a',
+      anchors: [{ path: KERNEL, symbol: null, blob: 'aaa' }],
+    }])
+  })
+
+  it('invalidating an id beats adding the same text in one write', async () => {
+    const { log, store } = await openStamped(() => stampsOf('rev1', { [KERNEL]: 'aaa' }))
+    await store.write({ id: 'n', title: 'N', addClaims: [draft('first', KERNEL)] }, authorFixture(), { invalidates: [claimId('first')] })
+    expect(claimsOf(await lastWrite(log))).toEqual([])
+  })
+
+  it('refuses a write that would take the note past the claim limit', async () => {
+    const { log, store } = await openStamped(() => stampsOf('rev1'))
+    const full = Array.from({ length: MEMORY_LIMITS.detailItems }, (_, i) => draft(`statement ${i}`))
+    await store.write({ id: 'n', title: 'N', addClaims: full }, authorFixture())
+    await expect(store.write({ id: 'n', title: 'N', addClaims: [draft('one statement too many')] }, authorFixture()))
+      .rejects.toThrow(/too many claims/)
+    expect(await log.all()).toHaveLength(1)
+  })
+
+  it('a metadata-only write, an archive and a restore all carry the stamps forward', async () => {
+    const { log, store } = await openStamped(() => stampsOf('rev1', { [KERNEL]: 'aaa' }))
+    const author = authorFixture()
+    await store.write({ id: 'n', title: 'N', addClaims: [draft('first', KERNEL)] }, author)
+    await store.write({ id: 'n', title: 'N', summary: 'unrelated edit' }, author)
+    await store.setArchived('n', 'project', true, author)
+    await store.setArchived('n', 'project', false, author)
+    const stamped = (await log.all()).map(e => stampsIn(MemoryWrittenPayload.parse(e.payload)))
+    expect(stamped).toEqual(Array.from({ length: 4 }, () => [{ sourceRevision: 'rev1', blobs: ['aaa'] }]))
+  })
+
+  it('a verification snapshots the blobs it checked, and that snapshot becomes the comparison basis', async () => {
+    const blobs: Record<string, string> = { [KERNEL]: 'A' }
+    const { log, store } = await openStamped(() => stampsOf('rev1', blobs))
+    const author = authorFixture()
+    await store.write({ id: 'n', title: 'N', addClaims: [draft('first', KERNEL)] }, author)
+    const writtenClaims = async () => claimsOf(MemoryWrittenPayload.parse(
+      must((await log.all()).filter(e => e.kind === EVENT_KIND.memory_written).at(-1), 'the last write').payload,
+    ))
+    const claim = must((await writtenClaims())[0], 'the written claim')
+
+    blobs[KERNEL] = 'B'
+    const atB: BlobAt = () => 'B'
+    expect(claimDriftState(claim, atB)).toBe(ClaimDriftState.suspect)
+
+    const stamp = await store.verify('n', MemoryScope.project, author)
+    expect(stamp.claims).toEqual([{ claimId: claimId('first'), anchors: [{ path: KERNEL, symbol: null, blob: 'B' }] }])
+    // the verification is an event APPEND: the claim's own stamp still says A
+    expect((await writtenClaims())[0]?.anchors).toEqual([{ path: KERNEL, symbol: null, blob: 'A' }])
+
+    const replayed = MemoryVerifiedPayload.parse(
+      must((await log.all()).filter(e => e.kind === EVENT_KIND.memory_verified).at(-1), 'the verification').payload,
+    )
+    const basis = basisAnchors(claim, replayed.stamp.claims ?? [])
+    expect(claimDriftState(basis, atB)).toBe(ClaimDriftState.clean)
+    expect(claimDriftState(basis, () => 'C')).toBe(ClaimDriftState.suspect)
+    expect(claimDriftState(basis, () => undefined)).toBe(ClaimDriftState.unknown)
   })
 })
 
@@ -346,7 +542,7 @@ describe('topic fetches are tracked', () => {
     const log = await openLog(pg)
     const surreal = await SurrealMemory.open(ts, { embed: async texts => texts.map(vec) })
     const store = createMemoryStore({ log, surreal })
-    await store.write({ id: 'n', title: 'N', addClaims: ['alpha holds', 'beta holds'] }, authorFixture())
+    await store.write({ id: 'n', title: 'N', addClaims: [draft('alpha holds'), draft('beta holds')] }, authorFixture())
     for (const e of await log.all()) await surreal.applyEvent(e)
     await surreal.refreshTopics()
     return { log, store }
@@ -393,11 +589,11 @@ describe('topic fetches are tracked', () => {
 // ─── store.verify: the single writer of the verification stamp ─────────────────────────────────
 describe('MemoryStore.verify', () => {
   const HEAD = 'c0ffee1234567890'
-  const open = async (sourceRevision: () => Promise<string | null> = async () => HEAD) => {
+  const open = async (revision: string | null = HEAD) => {
     const pg = await createTestDb(); drops.push(pg.drop)
     const ts = await createTestSurreal(); drops.push(ts.drop)
     const log = await openLog(pg)
-    return { log, store: createMemoryStore({ log, surreal: await SurrealMemory.open(ts), sourceRevision }) }
+    return { log, store: createMemoryStore({ log, surreal: await SurrealMemory.open(ts), stampsFor: () => stampsOf(revision) }) }
   }
 
   it('appends exactly one memory_verified stamped with the SAME HEAD a write stamps sourceRevision from', async () => {
@@ -431,7 +627,7 @@ describe('MemoryStore.verify', () => {
   // A stamp whose revision nothing can be compared against reads as confirmation while proving
   // nothing — worse than no stamp at all, and unrecoverable once it is in an immutable log.
   it('refuses to stamp at all when the runtime has no readable HEAD', async () => {
-    const { log, store } = await open(async () => null)
+    const { log, store } = await open(null)
     await store.write({ id: 'auth', title: 'Auth' }, authorFixture())
     await expect(store.verify('auth', undefined, authorFixture())).rejects.toThrow(/source revision/)
     expect((await log.all()).map(e => e.kind)).toEqual([EVENT_KIND.memory_written])

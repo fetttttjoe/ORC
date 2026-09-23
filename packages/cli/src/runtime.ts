@@ -1,9 +1,9 @@
-import { AUTHOR_SOURCE, AutoHealMode, CHECKS_EXECUTOR_REF, Door, errorMessage, HookName, NO_CHAT, NOTE_TIER, ROLE_SKILL, TERMINAL_TASK_STATUS, type AgentExecutor, type Analyzer, type MemoryAuthor } from '@orc/contracts'
+import { AUTHOR_SOURCE, AutoHealMode, CHECKS_EXECUTOR_REF, Door, errorMessage, HookName, NO_CHAT, NOTE_TIER, ROLE_SKILL, TERMINAL_TASK_STATUS, type AgentExecutor, type Analyzer, type MemoryAuthor, type TreeStamps } from '@orc/contracts'
 import { apiLoopExecutor } from '@orc/executor-api-loop'
 import { configuredProviders } from './providers'
 import { agentAnalyzer } from '@orc/analyzer-agent'
 import { createMcpHub, type McpHub } from '@orc/mcp-client'
-import { corpusDrift, CONSOLIDATE_EXECUTOR, createDriftProbe, createMemory, createMemoryLifecycle, createGroundingSource, decisionDoor, finishTools, memoryVerifyTool, notesCiting, restampToHead, unavailableStepMemory, memoryRoleFor, type BindStep, type MemoryLifecycle } from '@orc/memory'
+import { readCorpusDrift, checkoutDrift, CONSOLIDATE_EXECUTOR, createMemory, createMemoryLifecycle, createGroundingSource, decisionDoor, finishTools, memoryVerifyTool, notesCiting, restampToHead, treeStamps, unavailableStepMemory, memoryRoleFor, type BindStep, type MemoryLifecycle } from '@orc/memory'
 import { AUTO_HEAL_DEBOUNCE_MS, AUTO_SWEEP_TITLE, createAutoHeal, sweepPlanDraft } from './auto-heal'
 import { openMemory } from './memory-open'
 import { buildDistiller } from './consolidation-distiller'
@@ -84,6 +84,21 @@ export function warnMissingRoleSkills(indexed: string[], skillsDir: string, warn
   }
 }
 
+// one supervisor serves every workspace: a note's stamps come from the AUTHOR's checkout, never this process's
+export function workspaceStamps(dirOf: (workspaceId: string) => Promise<string | null>): (author: MemoryAuthor) => TreeStamps {
+  const stampsIn = async (workspaceId: string): Promise<TreeStamps | null> => {
+    const dir = await dirOf(workspaceId)
+    return dir === null ? null : treeStamps(dir)
+  }
+  return author => {
+    const stamps = stampsIn(author.workspaceId)
+    return {
+      revision: async () => (await stamps)?.revision() ?? null,
+      blob: async path => (await stamps)?.blob(path) ?? null,
+    }
+  }
+}
+
 export async function buildRuntime(
   shared?: { host: PluginHost; hub: McpHub; config?: ProjectConfig; storage?: Storage; storageMs?: number; kernel?: Kernel; executorId?: string },
 ): Promise<DbosPort> {
@@ -127,7 +142,10 @@ export async function buildRuntime(
     // graph server, mcp serve) used to run the full standing machinery; three of them against one
     // SurrealDB starved a supervisor boot's drain for 18 minutes. Losers follow the holder's
     // cursor — see createMemoryProjector's follower mode.
-    memory = await openMemory({ log, config, lease: projectorLease(config.databaseUrl, config.projectId) })
+    memory = await openMemory({
+      log, config, lease: projectorLease(config.databaseUrl, config.projectId),
+      stampsFor: workspaceStamps(async id => (await kernel.listWorkspaces({ includeArchived: true })).find(w => w.id === id)?.cwd ?? null),
+    })
     const mem = memory // narrowed once here so bootPhase's callback needs no `!` and the closure below reads the same value
     await bootPhase('memory-projection', () => mem.projector.start(), phases)
     const memoryProjector = mem.projector // captured for the lifecycle closure
@@ -176,10 +194,10 @@ export async function buildRuntime(
       // terminal, and claiming it here would make every reactor-restamped note read `updatedBy: cli`
       // — the same mis-attribution consolidate.ts already carries a comment about.
       restamp: async () => (await restampToHead(memoryStore, config.dir, await cwdAuthor(kernel, config.dir, AUTHOR_SOURCE.agent, SUPERVISOR_ORIGIN, { executor: AUTO_HEAL_EXECUTOR }))).length,
-      // a FRESH probe per pass: createDriftProbe caches per revision, and the tree this pass
-      // must judge is the one the commit just changed — a reactor-lifetime probe would answer
-      // from the previous commit's diffs
-      drifted: async () => (await corpusDrift(await memoryStore.list({ tier: NOTE_TIER.semantic }), createDriftProbe(config.dir))).drifted,
+      // FRESH probes per pass: they cache per revision and per path, and the tree this pass must
+      // judge is the one the commit just changed — reactor-lifetime probes would answer from the
+      // previous commit's diffs
+      drifted: async () => (await readCorpusDrift(await memoryStore.list({ tier: NOTE_TIER.semantic }), checkoutDrift(config.dir))).drifted,
       hasOpenSweep: async () => (await kernel.listTasks()).some(t => t.title === AUTO_SWEEP_TITLE && !TERMINAL_TASK_STATUS.has(t.status)),
       draftSweep: async drifted => {
         const task = await kernel.createTask({

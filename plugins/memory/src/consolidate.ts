@@ -13,11 +13,6 @@ export interface ConsolidationInput {
   taskTitle: string
   steps: StepOutcome[]
   derivedFrom: string[]
-  // The task's own written paths (fs_write/fs_edit/fs_delete), folded from its tool_call events.
-  // Without them every outcome note was uncheckable forever: 51 of 91 semantic notes carried no
-  // paths, and one kept asserting a fix in a directory deleted weeks earlier with nothing able to
-  // flag it [measured 2026-08-03]. Empty for a read-only task — nothing to cite is the honest state.
-  paths: string[]
   // Descendants that never reached done. A grounded parent finishes as soon as its plan is authored
   // and split, so its step summaries describe INTENDED work — and a distiller handed only those
   // renders them as accomplished ("implemented, tested and verified" for a run whose test step
@@ -27,21 +22,6 @@ export interface ConsolidationInput {
 
 // Marks a note as a task-consolidation output — one place, so search/filters agree on the spelling.
 export const CONSOLIDATED_TAG = 'consolidated'
-
-// The area a root-level file folds into — `README.md` as its own area would fragment the split.
-export const AREA_ROOT = '.'
-// The monorepo namespaces whose second segment IS the unit of work. Everything else groups by
-// its first segment. A heuristic and labelled as one: it mirrors how this repo's area-* notes
-// and typecheck projects are already cut, not a universal truth.
-const AREA_NAMESPACES = new Set(['packages', 'plugins'])
-
-/** `packages/cli/src/main.ts` → `packages/cli`; `docs/x.md` → `docs`; `README.md` → AREA_ROOT */
-export function areaOf(path: string): string {
-  const segs = path.split('/').filter(s => s !== '')
-  if (segs.length <= 1) return AREA_ROOT
-  const head = segs[0] ?? AREA_ROOT
-  return AREA_NAMESPACES.has(head) && segs.length >= 3 ? `${head}/${segs[1]}` : head
-}
 
 // A grounded task's planning child (`<parent>.plan.<callId>`) never consolidates: its outcome IS
 // the plan, already durable as plan-tier notes — a second "execution plan frozen" project note
@@ -79,7 +59,7 @@ export function consolidatedNote(input: ConsolidationInput, distilled?: Distille
     tier: NOTE_TIER.semantic,
     scope: MemoryScope.project,
     // OUTCOME, not decision: this records what a task did, which is a different question from what
-    // the project chose — see the NOTE_KINDS comment for the 42-notes measurement that separated them.
+    // the project chose — see the NoteKind comment for the 42-notes measurement that separated them.
     kind: NOTE_KIND.outcome,
     title: (distilled?.title ?? `Outcome: ${input.taskTitle}`).slice(0, 200),
     summary: (distilled?.summary ?? withSummary[0]?.summary ?? input.taskTitle).slice(0, 500),
@@ -88,43 +68,6 @@ export function consolidatedNote(input: ConsolidationInput, distilled?: Distille
     links,
     retention: RETENTION.durable,
   }
-}
-
-/**
- * The area-split builder consolidateTask actually uses. One task, one durable outcome — unless
- * its written paths span areas, in which case each area gets its own note anchored to its own
- * paths, cross-linked `relates_to`, sharing body and provenance. DECIDED 2026-08-03: one note
- * citing every touched subsystem is arch-overview's disease — a degree-81 hub that re-drifts on
- * every commit anywhere; the split keeps each note's drift tied to its own area's churn.
- * Single-area tasks keep the legacy taskId-keyed id, so the common case needs no migration.
- */
-export function consolidatedNotes(input: ConsolidationInput, distilled?: DistilledText): MemoryNoteDraft[] {
-  const byArea = new Map<string, string[]>()
-  for (const p of [...new Set(input.paths)].sort()) {
-    const area = areaOf(p)
-    const bucket = byArea.get(area)
-    if (bucket) bucket.push(p)
-    else byArea.set(area, [p])
-  }
-  const base = consolidatedNote(input, distilled)
-  if (byArea.size <= 1) {
-    const paths = [...byArea.values()][0] ?? []
-    // paths stays OMITTED (not []) for a read-only task: an optional field set to undefined is
-    // not the same as an empty list at the store boundary, and omission is the honest shape
-    return [paths.length > 0 ? { ...base, paths } : base]
-  }
-  const areas = [...byArea.keys()].sort()
-  const idOf = (area: string): string => slugId(`outcome ${input.taskId} ${area}`)
-  return areas.map(area => ({
-    ...base,
-    id: idOf(area),
-    title: `${base.title ?? input.taskTitle} — ${area}`.slice(0, 200),
-    paths: byArea.get(area) ?? [],
-    links: [
-      ...(base.links ?? []),
-      ...areas.filter(a => a !== area).map(a => ({ id: idOf(a), kind: LINK_KIND.relates_to })),
-    ],
-  }))
 }
 
 // Salience gate for AUTO consolidation: a finished task earns a durable note only if it did real
@@ -184,26 +127,6 @@ async function accessedProjectIds(log: ConsolidationLog, taskId: string): Promis
   return [...ids]
 }
 
-// The one field this fold reads off a write-tool's input — parsed, never cast; extra keys pass.
-const FsToolInput = z.object({ path: z.string().min(1) }).loose()
-const FS_WRITE_NAMES = new Set<string>(Object.values(FS_WRITE_TOOL_NAME))
-
-// The paths this task itself wrote (fs_write/fs_edit/fs_delete), folded from its own tool_call
-// events — the same truth scoped_changes reads, derived here from the log because consolidation
-// deliberately owns no kernel dependency. Deletions count: an outcome explaining a removal cites
-// the removed path, which restamps clean after the commit and can never drift again.
-async function touchedPaths(log: ConsolidationLog, taskId: string): Promise<string[]> {
-  const out = new Set<string>()
-  for (const e of await log.after(0, [EVENT_KIND.tool_call])) {
-    if (e.taskId !== taskId) continue
-    const p = PAYLOAD_SCHEMAS.tool_call.safeParse(e.payload)
-    if (!p.success || !FS_WRITE_NAMES.has(p.data.toolName)) continue
-    const input = FsToolInput.safeParse(p.data.input)
-    if (input.success) out.add(input.data.path)
-  }
-  return [...out].sort()
-}
-
 // Descendants of `taskId` (child ids are `<parent>.<step>.<callId>`) whose latest status is not
 // `done`. Folded from the log rather than a projection: consolidation runs off the same events.
 async function unfinishedDescendants(log: ConsolidationLog, taskId: string): Promise<string[]> {
@@ -237,21 +160,17 @@ export async function consolidateTask(
   if (!opts.force && !isSubstantive({ steps, derivedFrom })) return null
   const input: ConsolidationInput = {
     taskId, taskTitle: resolved.title, steps, derivedFrom,
-    paths: await touchedPaths(deps.log, taskId),
     unfinished: await unfinishedDescendants(deps.log, taskId),
   }
   // distillation is best-effort — a model hiccup falls back to the extractive note rather than
   // dropping the capture entirely.
   const distilled = deps.distill ? await deps.distill(input).catch(() => null) : null
-  // one author for every area-split note (consolidatedNotes): same task, same workspace — never a
-  // boot-time cwd. See ConsolidationDeps.authorFor for the defect this fixes.
+  // the task's own workspace, never a boot-time cwd. See ConsolidationDeps.authorFor.
   const author = deps.authorFor({ id: taskId, workspaceId: resolved.workspaceId })
-  const written: MemoryNote[] = []
-  for (const draft of consolidatedNotes(input, distilled ?? undefined)) {
-    // force (an explicit manual request) always REWRITES; the auto path keys by draft id — the
-    // taskId for a single-area note, taskId+area for the split — so a redelivered completion
-    // converges on the same events instead of appending duplicates.
-    const writeOpts = opts.force ? {} : { idempotencyKey: `consolidate:${taskId}:${draft.id}` }
+  const draft = consolidatedNote(input, distilled ?? undefined)
+  // force (an explicit manual request) always REWRITES; the auto path keys by draft id, so a
+  // redelivered completion converges on the same events instead of appending duplicates.
+  const writeOpts = opts.force ? {} : { idempotencyKey: `consolidate:${taskId}:${draft.id}` }
     // NOT `{source:'cli'}`. 'cli' means a human at a terminal — it is what every packages/cli
     // memory command passes — and claiming it made every outcome note in the vault read
     // `createdBy: cli`, indistinguishable from a note somebody actually typed. Naming the writer
@@ -259,8 +178,6 @@ export async function consolidateTask(
     // renders it as 'consolidate'. Note this only fixes attribution GOING FORWARD: createdBy is
     // sticky across rewrites (deriveNoteProvenance), so notes written before this keep saying 'cli'.
     // The composition root supplies the builder (CONSOLIDATE_EXECUTOR + authorFor) — this function
-    // supplies the workspace, read off the task itself — see ConsolidationDeps.
-    written.push(await deps.store.write(draft, author, writeOpts))
-  }
-  return written
+  // supplies the workspace, read off the task itself — see ConsolidationDeps.
+  return [await deps.store.write(draft, author, writeOpts)]
 }

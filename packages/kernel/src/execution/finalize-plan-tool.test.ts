@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test'
-import { COMMIT_STEP_ID, FINISH_STEP_ID, GroundedApprovalDoor, STEP_ROLE, type MemoryLink, type PlanNote } from '@orc/contracts'
+import { COMMIT_STEP_ID, FINISH_STEP_ID, GroundedApprovalDoor, LINK_KIND, STEP_ROLE, type MemoryLink, type PlanNote } from '@orc/contracts'
 import { must, planNoteFixture } from '@orc/contracts/fixtures'
 import { finalizePlanTool } from './finalize-plan-tool'
 import { runOrigin } from './run-chat'
@@ -35,7 +35,7 @@ function fakeKernel(
 describe('finalize_plan tool', () => {
   it('freezes the log-reconstructed plan-note graph into an auto-approved split (task_split path)', async () => {
     const notes = [
-      note({ id: 'masterplan', title: 'Web app', body: 'the whole thing', links: [link('db', 'decomposes_into'), link('api', 'decomposes_into')] }),
+      note({ id: 'masterplan', title: 'Web app', body: 'the whole thing', links: [link('db', LINK_KIND.decomposes_into), link('api', LINK_KIND.decomposes_into)] }),
       note({ id: 'db', title: 'DB', body: 'schema' }),
       note({ id: 'api', title: 'API', body: 'endpoints', dependsOn: ['db'] }),
     ]
@@ -58,7 +58,7 @@ describe('finalize_plan tool', () => {
 
   it('rejects finalize when no matching human approval exists', async () => {
     const notes = [
-      note({ id: 'masterplan', title: 'M', links: [link('a', 'decomposes_into')] }),
+      note({ id: 'masterplan', title: 'M', links: [link('a', LINK_KIND.decomposes_into)] }),
       note({ id: 'a', title: 'A' }),
     ]
     const calls: unknown[] = []
@@ -72,7 +72,7 @@ describe('finalize_plan tool', () => {
   // itself, so the message has to name the doors a HUMAN can use, verbatim enough to relay.
   it('no approval at all names the concrete human doors (orc reply + the web UI)', async () => {
     const notes = [
-      note({ id: 'masterplan', title: 'M', links: [link('a', 'decomposes_into')] }),
+      note({ id: 'masterplan', title: 'M', links: [link('a', LINK_KIND.decomposes_into)] }),
       note({ id: 'a', title: 'A' }),
     ]
     const calls: unknown[] = []
@@ -92,7 +92,7 @@ describe('finalize_plan tool', () => {
   // nobody had approved, and retried. Say what happened, and NAME the door it came through.
   it('an approval from a non-human door says so, names that source, and still points at the human doors', async () => {
     const notes = [
-      note({ id: 'masterplan', title: 'M', links: [link('a', 'decomposes_into')] }),
+      note({ id: 'masterplan', title: 'M', links: [link('a', LINK_KIND.decomposes_into)] }),
       note({ id: 'a', title: 'A' }),
     ]
     const calls: unknown[] = []
@@ -116,7 +116,7 @@ describe('finalize_plan tool', () => {
   // requires it. Same list the gate tests, so advice and gate cannot disagree.
   it('the refusal names the operator-configured door set, not a hardcoded one', async () => {
     const notes = [
-      note({ id: 'masterplan', title: 'M', links: [link('a', 'decomposes_into')] }),
+      note({ id: 'masterplan', title: 'M', links: [link('a', LINK_KIND.decomposes_into)] }),
       note({ id: 'a', title: 'A' }),
     ]
     const doors = [GroundedApprovalDoor.cli, GroundedApprovalDoor.mcp]
@@ -140,7 +140,7 @@ describe('finalize_plan tool', () => {
   // name a cause. An approval nothing has edited since MUST finalize, whoever computed the hash.
   it('finalizes an untouched graph even when the approved hash is from another build', async () => {
     const notes = [
-      note({ id: 'masterplan', title: 'M', links: [link('a', 'decomposes_into')] }),
+      note({ id: 'masterplan', title: 'M', links: [link('a', LINK_KIND.decomposes_into)] }),
       note({ id: 'a', title: 'A' }),
     ]
     const calls: unknown[] = []
@@ -154,7 +154,7 @@ describe('finalize_plan tool', () => {
 
   it('checks approval against the current run token, not another attempt', async () => {
     const notes = [
-      note({ id: 'masterplan', title: 'M', links: [link('a', 'decomposes_into')] }),
+      note({ id: 'masterplan', title: 'M', links: [link('a', LINK_KIND.decomposes_into)] }),
       note({ id: 'a', title: 'A' }),
     ]
     const seen: string[] = []
@@ -197,7 +197,7 @@ describe('finalize_plan tool', () => {
   // grounded plan-authoring (auditor) step. A future change exposing taskId in a prompt must not let
   // any other step call it and bypass the approval policy.
   it('refuses to run for a non-auditor step (isError, no split)', async () => {
-    const notes = [note({ id: 'masterplan', title: 'M', links: [link('a', 'decomposes_into')] }), note({ id: 'a', title: 'A' })]
+    const notes = [note({ id: 'masterplan', title: 'M', links: [link('a', LINK_KIND.decomposes_into)] }), note({ id: 'a', title: 'A' })]
     const calls: unknown[] = []
     const tool = finalizePlanTool({ kernel: fakeKernel(notes, calls), config, p: { ...p, role: 'worker' } })
     const r = await tool.execute({}, 'call_1')
@@ -208,7 +208,7 @@ describe('finalize_plan tool', () => {
 
   it('a post-approval edit names the notes that changed, not just that something did', async () => {
     const notes = [
-      note({ id: 'masterplan', title: 'M', links: [link('a', 'decomposes_into')] }),
+      note({ id: 'masterplan', title: 'M', links: [link('a', LINK_KIND.decomposes_into)] }),
       note({ id: 'a', title: 'A' }),
     ]
     const kernel = {
@@ -224,7 +224,7 @@ describe('finalize_plan tool', () => {
 
   it('surfaces a kernel rejection as isError, never a throw', async () => {
     const notes = [
-      note({ id: 'masterplan', title: 'M', links: [link('a', 'decomposes_into')] }),
+      note({ id: 'masterplan', title: 'M', links: [link('a', LINK_KIND.decomposes_into)] }),
       note({ id: 'a', title: 'A' }),
     ]
     const kernel = {
@@ -247,7 +247,7 @@ describe('finalize_plan tool', () => {
 // sees reconciled notes. Off (the default) freezes the decomposition plus the finish step alone.
 describe('autoCommit', () => {
   const notes = () => [
-    note({ id: 'masterplan', title: 'M', links: [link('a', 'decomposes_into')] }),
+    note({ id: 'masterplan', title: 'M', links: [link('a', LINK_KIND.decomposes_into)] }),
     note({ id: 'a', title: 'A' }),
   ]
 

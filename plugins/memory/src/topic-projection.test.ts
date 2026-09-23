@@ -1,10 +1,10 @@
 import { afterAll, describe, expect, it } from 'bun:test'
 import { claimId, MEMORY_LIMITS, PROJECT_NAME_NOTE_ID, type EmbeddingProvider, type EventRecord, type MemoryAuthor, EVENT_KIND } from '@orc/contracts'
 import { Surreal } from 'surrealdb'
-import { authorFixture, eventFixture } from '@orc/contracts/fixtures'
+import { authorFixture, claimFixture, eventFixture } from '@orc/contracts/fixtures'
 import { topicLabel } from './cluster'
 import { SurrealMemory } from './surreal'
-import { claimFixture, createTestSurreal, noteFixture } from './test-helpers'
+import { createTestSurreal, noteFixture } from './test-helpers'
 
 // Same fake encoder shape as semantic-search.test.ts: 'zeta' maps to alpha's vector while sharing no
 // token with it, so grouping is proven by MEANING rather than by shared words.

@@ -1,4 +1,4 @@
-import { ClaimWrite, composeAuthor, EVENT_KIND, foldMemory, noteKey, MemoryNoteInput, MemoryScope, MemoryWrittenPayload, NOTE_TIER, resolveClaims, type ClaimSearchOptions, type MemoryFilter, type MemorySearchOpts, type MemoryNote, type MemoryStore, type NoteSummary, type Claim, type ClaimHit, type Topic } from '@orc/contracts'
+import { ClaimWrite, composeAuthor, EVENT_KIND, foldMemory, noteKey, MemoryNoteInput, MemoryScope, MemoryWrittenPayload, NOTE_KIND, NOTE_TIER, resolveClaims, type ClaimDraft, type ClaimSearchOptions, type MemoryAuthor, type MemoryFilter, type MemorySearchOpts, type MemoryNote, type MemoryStore, type NoteSummary, type Claim, type ClaimHit, type ClaimInput, type StampedAddition, type Topic, type TreeStamps, type VerifiedClaim } from '@orc/contracts'
 import { KERNEL_ERROR_CODE, KernelError, type EventLog } from '@orc/kernel'
 import type { SurrealMemory } from './surreal'
 import { KNOWLEDGE_KINDS } from './projector'
@@ -10,14 +10,29 @@ import { KNOWLEDGE_KINDS } from './projector'
 export const STORE_REFUSAL = {
   exists: (id: string, scope: string): string =>
     `note '${id}' already exists in scope '${scope}' (archived notes count — restore or remove it first)`,
+  notADecision: (id: string, scope: string): string =>
+    `a write's decision must name a live decision note, and '${id}' is not one in scope '${scope}' — record the decision first, or drop the reference`,
 } as const
+
+// no provider → null stamps, never this process's HEAD
+const NO_STAMPS: TreeStamps = { revision: () => Promise.resolve(null), blob: () => Promise.resolve(null) }
+
+// read from the log inside the write's transaction — the lagging read model would refuse a fresh decision
+const servedDecision = async (tx: Pick<EventLog, 'latestNoteEvent'>, scope: string, id: string): Promise<boolean> => {
+  const latest = await tx.latestNoteEvent(scope, id)
+  if (latest?.kind !== EVENT_KIND.memory_written) return false
+  const written = MemoryWrittenPayload.safeParse(latest.payload)
+  if (!written.success) return false
+  const note = written.data.note
+  return note.tier === NOTE_TIER.semantic && note.kind === NOTE_KIND.decision && !note.archived
+}
 
 // The single writer (spec RM5). Writes are event-first appends — like every append they
 // serialize on the per-project advisory lock; the projector applies to SurrealDB. Reads
 // hit SurrealDB directly.
-// `sourceRevision` is a PROVIDER, not a value: resolving it shells out to git, and only a write
-// consumes it — every read path would otherwise pay a subprocess spawn for a field it never reads.
-export function createMemoryStore(opts: { log: EventLog; surreal: SurrealMemory; sourceRevision?: () => Promise<string | null>; halfLifeDays?: number }): MemoryStore {
+// `stampsFor` is a PROVIDER keyed by the author, not a value: a stamp shells out to git in the
+// author's checkout and only a write consumes it — a read path never pays the spawn.
+export function createMemoryStore(opts: { log: EventLog; surreal: SurrealMemory; stampsFor?: (author: MemoryAuthor) => TreeStamps; halfLifeDays?: number }): MemoryStore {
   const { log, surreal } = opts
   // Resolved PER WRITE, never memoized. Caching it across the store's lifetime looked like an
   // obvious saving — only writes read it, and it shells out to git — but a supervisor is a
@@ -27,7 +42,29 @@ export function createMemoryStore(opts: { log: EventLog; surreal: SurrealMemory;
   // the change), the preload tells a step to trust it, and the rewrite loop that is supposed to
   // clear drift re-stamps the same stale commit. The spawn is bounded by write frequency, and it
   // already runs OUTSIDE the project write lock (see the call below), so it blocks nothing.
-  const sourceRevision = (): Promise<string | null> => opts.sourceRevision?.() ?? Promise.resolve(null)
+  const stampsFor = (author: MemoryAuthor): TreeStamps => opts.stampsFor?.(author) ?? NO_STAMPS
+
+  // blobs are read before the transaction: no git spawn under the project write lock
+  const stampAdditions = (drafts: readonly ClaimDraft[], stamps: TreeStamps): Promise<StampedAddition[]> =>
+    Promise.all(drafts.map(async draft => ({
+      text: draft.text,
+      class: draft.class,
+      anchors: await Promise.all(draft.anchors.map(async a => ({ ...a, blob: await stamps.blob(a.path) }))),
+    })))
+
+  // The note's live claims as the LOG holds them, re-stamped from the checkout being verified —
+  // the blobs are what a later check compares against, so the revision alone cannot carry the act.
+  const checkedClaims = async (scope: string, id: string, stamps: TreeStamps): Promise<VerifiedClaim[]> => {
+    const latest = await log.latestNoteEvent(scope, id)
+    if (latest === null || latest.kind !== EVENT_KIND.memory_written) return []
+    const written = MemoryWrittenPayload.safeParse(latest.payload)
+    if (!written.success) return []
+    const live: readonly ClaimInput[] = 'claims' in written.data.note ? written.data.note.claims : []
+    return Promise.all(live.map(async c => ({
+      claimId: c.id,
+      anchors: await Promise.all(c.anchors.map(async a => ({ ...a, blob: await stamps.blob(a.path) }))),
+    })))
+  }
 
   /**
    * Retire or restore MANY notes with ONE pass over the log.
@@ -85,7 +122,9 @@ export function createMemoryStore(opts: { log: EventLog; surreal: SurrealMemory;
       // can never reach the payload as a stored field.
       const claimWrite = ClaimWrite.parse({ ...input, ...writeOpts })
       // resolved BEFORE the transaction: a git spawn must never run inside the project write lock
-      const stampedRevision = await sourceRevision()
+      const stamps = stampsFor(author)
+      const stampedRevision = await stamps.revision()
+      const additions = await stampAdditions(claimWrite.addClaims, stamps)
       // Merge base from the EVENT LOG inside the append transaction, never from the async
       // projection. Two writes to one note inside the projector's flush window would otherwise merge
       // against a stale base and append REGRESSED field values into the canonical log — corruption
@@ -113,9 +152,11 @@ export function createMemoryStore(opts: { log: EventLog; surreal: SurrealMemory;
           ? MemoryWrittenPayload.safeParse(latest.payload)
           : null
         const existing = written?.success ? written.data.note : null
+        if (claimWrite.decision !== null && !(await servedDecision(tx, scope, claimWrite.decision)))
+          throw new Error(STORE_REFUSAL.notADecision(claimWrite.decision, scope))
         // the live set the tier actually owns — a plan or episodic note has no claims to carry
         const live = existing?.tier === NOTE_TIER.semantic ? existing.claims : []
-        const claims = resolveClaims(live, claimWrite.addClaims, claimWrite.invalidates, stampedRevision)
+        const claims = resolveClaims(live, additions, claimWrite.invalidates, stampedRevision)
         // reject malformed BEFORE appending. `claims` is passed explicitly rather than merged: it is
         // already resolved against the live set, so merge-on-omit must not reach it.
         const parsed = MemoryNoteInput.parse(existing ? { ...existing, ...supplied, claims } : { ...input, claims })
@@ -135,7 +176,7 @@ export function createMemoryStore(opts: { log: EventLog; surreal: SurrealMemory;
             ...author.origin, taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_written,
             // the tombstone is stated on the EVENT: the note carries live claims only, and folding
             // the log is what recovers a retired claim and the write that retired it
-            payload: { note: merged, author, invalidates: claimWrite.invalidates },
+            payload: { note: merged, author, invalidates: claimWrite.invalidates, why: claimWrite.why, decision: claimWrite.decision },
             idempotencyKey: writeOpts?.idempotencyKey ?? null,
           })
         } catch (err) {
@@ -185,12 +226,13 @@ export function createMemoryStore(opts: { log: EventLog; surreal: SurrealMemory;
       // outside the write lock) — a second git read here would let the two stamps disagree about
       // which tree they were compared against, which is the one thing drift's either-clean rule
       // cannot tolerate.
-      const revision = await sourceRevision()
+      const stamps = stampsFor(author)
+      const revision = await stamps.revision()
       // Refused, not stamped with a placeholder: `verified.revision` is what every later check
       // diffs against, and a stamp nothing can be compared to is worse than no stamp — it reads
       // as confirmation while proving nothing.
       if (revision === null) throw new Error('cannot record a verification without a source revision — this runtime has no readable Git HEAD, so nothing could date the check afterwards')
-      const stamp = { revision, at: new Date().toISOString(), by: composeAuthor(author) }
+      const stamp = { revision, at: new Date().toISOString(), by: composeAuthor(author), claims: await checkedClaims(scope, id, stamps) }
       await log.transaction(async tx => {
         // Existence is checked against the LOG, the source of truth, not the read model: the
         // projection is asynchronous, so a note verified in the same turn it was written would be

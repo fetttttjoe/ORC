@@ -1,9 +1,9 @@
 import { describe, expect, it } from 'bun:test'
-import { TEST_WORKSPACE_ID } from '@orc/contracts/fixtures'
 import { dedupeByNote, type ClaimHit } from './claim-search'
+import { claimHitFixture } from './test-helpers'
 
 const hit = (claimId: string, noteId: string, scope = 'project'): ClaimHit =>
-  ({ claimId, noteId, scope, title: noteId, text: claimId, validFrom: '2026-07-26T00:00:00.000Z', sourceRevision: null, paths: [], workspaceId: TEST_WORKSPACE_ID })
+  claimHitFixture({ claimId, noteId, scope, title: noteId, text: claimId })
 
 describe('dedupeByNote', () => {
   it('keeps the best-ranked claim per note, so one note cannot fill every slot', () => {

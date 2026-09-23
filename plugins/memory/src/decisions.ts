@@ -136,7 +136,7 @@ const RUNG: Record<DecisionStatus, number> = {
 }
 
 // Full notes, not summaries: NoteSummary carries neither kind nor status, and a decision set is
-// small by construction (the kind exists to name a short, human-approved set — see NOTE_KINDS'
+// small by construction (the kind exists to name a short, human-approved set — see NoteKind's
 // comment). CEILING: one get per decision; if a project ever holds hundreds, carry `status` on the
 // summary row (surreal.ts toSummary) and drop the gets.
 export async function listDecisions(door: DecisionDoor, filter: { status?: DecisionStatus } = {}): Promise<DecisionRecord[]> {

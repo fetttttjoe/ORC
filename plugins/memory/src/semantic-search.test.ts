@@ -1,8 +1,9 @@
 import { afterAll, describe, expect, it } from 'bun:test'
-import { type EmbeddingProvider, type EventRecord, type MemoryAuthor, EVENT_KIND } from '@orc/contracts'
+import { type EmbeddingProvider, type EventRecord, type MemoryAuthor, EVENT_KIND, NOTE_TIER, SEARCH_MODE, SearchMode } from '@orc/contracts'
 import { authorFixture, eventFixture } from '@orc/contracts/fixtures'
 import { SEMANTIC_FLOOR, SurrealMemory } from './surreal'
-import { claimFixture, createTestSurreal, noteFixture } from './test-helpers'
+import { claimFixture } from '@orc/contracts/fixtures'
+import { createTestSurreal, noteFixture } from './test-helpers'
 
 // A deterministic fake encoder: maps text to one of three orthogonal vectors by concept keyword.
 // 'zeta' shares NO literal token with the 'alpha' note yet maps to the SAME vector — the synonym
@@ -50,9 +51,9 @@ describe('SurrealMemory semantic + hybrid search', () => {
     await m.applyEvent(written(1, noteFixture({ id: 'alpha-note', title: 'Alpha subject', summary: 'the alpha thing', body: 'alpha' })))
     await m.applyEvent(written(2, noteFixture({ id: 'beta-note', title: 'Beta subject', summary: 'the beta thing', body: 'beta' })))
     // 'zeta' appears in NEITHER note → keyword returns nothing…
-    expect(await m.search('zeta', {}, { mode: 'keyword' })).toEqual([])
+    expect(await m.search('zeta', {}, { mode: SEARCH_MODE.keyword })).toEqual([])
     // …but it maps to alpha's vector, so semantic surfaces the alpha note first
-    expect((await m.search('zeta', {}, { mode: 'semantic' }))[0]?.id).toBe('alpha-note')
+    expect((await m.search('zeta', {}, { mode: SEARCH_MODE.semantic }))[0]?.id).toBe('alpha-note')
   })
 
   it('semantic mode is exact by vector; hybrid fuses both arms', async () => {
@@ -60,17 +61,17 @@ describe('SurrealMemory semantic + hybrid search', () => {
     const m = await openMemory(t, fakeEmbedder)
     await m.applyEvent(written(1, noteFixture({ id: 'alpha-note', title: 'Alpha', summary: 'alpha', body: 'alpha' })))
     await m.applyEvent(written(2, noteFixture({ id: 'beta-note', title: 'Beta', summary: 'beta', body: 'beta' })))
-    expect((await m.search('beta', {}, { mode: 'semantic' }))[0]?.id).toBe('beta-note')
+    expect((await m.search('beta', {}, { mode: SEARCH_MODE.semantic }))[0]?.id).toBe('beta-note')
     // 'alpha' matches alpha-note by BOTH keyword and vector → agreement ranks it first
-    expect((await m.search('alpha', {}, { mode: 'hybrid' }))[0]?.id).toBe('alpha-note')
+    expect((await m.search('alpha', {}, { mode: SEARCH_MODE.hybrid }))[0]?.id).toBe('alpha-note')
   })
 
   it('falls back to keyword when no embedder is configured, even if a semantic mode is requested', async () => {
     const t = await createTestSurreal(); drops.push(t.drop)
     const m = await openMemory(t) // no embedder → degraded to keyword
     await m.applyEvent(written(1, noteFixture({ id: 'k', title: 'Tokens', summary: 'tokens rotate', body: 'x' })))
-    expect((await m.search('tokens', {}, { mode: 'semantic' })).map(n => n.id)).toEqual(['k']) // keyword still serves
-    expect(await m.search('zeta', {}, { mode: 'semantic' })).toEqual([]) // no vector path, no match
+    expect((await m.search('tokens', {}, { mode: SEARCH_MODE.semantic })).map(n => n.id)).toEqual(['k']) // keyword still serves
+    expect(await m.search('zeta', {}, { mode: SEARCH_MODE.semantic })).toEqual([]) // no vector path, no match
   })
 
   it('hybrid fusion is load-bearing: keyword agreement lifts a note above a hotter semantic-only one', async () => {
@@ -83,7 +84,7 @@ describe('SurrealMemory semantic + hybrid search', () => {
     await m.applyEvent(written(2, noteFixture({ id: 'sem', title: 'S', summary: 'zeta', body: 'zeta' })))
     await m.applyEvent(accessed(3, 'sem'))
     await m.applyEvent(accessed(4, 'sem'))
-    const ids = (await m.search('alpha', {}, { mode: 'hybrid' })).map(n => n.id)
+    const ids = (await m.search('alpha', {}, { mode: SEARCH_MODE.hybrid })).map(n => n.id)
     expect(ids[0]).toBe('both') // fails if only the semantic arm is returned (would give the hotter 'sem')
     expect(ids).toContain('sem') // the semantic-only note survives the (scope,id) fuse; fails if mis-keyed
   })
@@ -96,8 +97,8 @@ describe('SurrealMemory semantic + hybrid search', () => {
     const t = await createTestSurreal(); drops.push(t.drop)
     const m = await openMemory(t, fakeEmbedder)
     await m.applyEvent(written(1, noteFixture({ id: 'floor-a', title: 'Alpha subject', summary: 'the alpha thing', body: 'alpha' })))
-    expect(await m.search('faint resemblance', {}, { mode: 'semantic' })).toEqual([])
-    expect((await m.search('near resemblance', {}, { mode: 'semantic' })).map(n => n.id)).toEqual(['floor-a'])
+    expect(await m.search('faint resemblance', {}, { mode: SEARCH_MODE.semantic })).toEqual([])
+    expect((await m.search('near resemblance', {}, { mode: SEARCH_MODE.semantic })).map(n => n.id)).toEqual(['floor-a'])
   })
 
   // Heat must MODULATE the cosine, never overrule it. Measured on the live corpus: the hottest note
@@ -116,7 +117,7 @@ describe('SurrealMemory semantic + hybrid search', () => {
     for (let seq = 3; seq <= 11; seq += 1)
       await m.applyEvent(eventFixture({ seq, taskId: null, kind: EVENT_KIND.memory_accessed, ts: new Date().toISOString(),
         payload: { id: 'hot-vague', scope: 'project', mode: 'read', author: cli } }))
-    expect((await m.search('alpha', {}, { mode: 'semantic' })).map(n => n.id)).toEqual(['cold-exact', 'hot-vague'])
+    expect((await m.search('alpha', {}, { mode: SEARCH_MODE.semantic })).map(n => n.id)).toEqual(['cold-exact', 'hot-vague'])
   })
 
   // The re-rank scores `cosine * heat` with heat ≥ 1, so it orders correctly only for cosine ≥ 0:
@@ -134,11 +135,11 @@ describe('SurrealMemory semantic + hybrid search', () => {
     // every note is the SAME mediocre match for 'alpha' (0.55, comfortably above the floor)
     for (let i = 1; i <= 12; i += 1)
       await m.applyEvent(written(i, noteFixture({ id: `dim-${i}`, title: `Dim ${i}`, summary: 'dim', body: 'dim' })))
-    expect(await m.search('alpha', {}, { mode: 'semantic' })).toEqual([])
+    expect(await m.search('alpha', {}, { mode: SEARCH_MODE.semantic })).toEqual([])
     // …and the paired assertion, so a future "fix" cannot just return [] more often: one note that
     // actually stands out (0.76) makes the arm answer, and answer with THAT note.
     await m.applyEvent(written(13, noteFixture({ id: 'stands-out', title: 'Near', summary: 'near', body: 'near' })))
-    expect((await m.search('alpha', {}, { mode: 'semantic' }))[0]?.id).toBe('stands-out')
+    expect((await m.search('alpha', {}, { mode: SEARCH_MODE.semantic }))[0]?.id).toBe('stands-out')
   }, 30_000)
 
   it('SEMANTIC_FLOOR stays non-negative, or cos × heat inverts on the rows it admits', () => {
@@ -153,7 +154,7 @@ describe('SurrealMemory semantic + hybrid search', () => {
     // both map to the SAME vector (a cosine tie) — only read-heat can separate them
     await m.applyEvent(accessed(3, 'alpha-hot'))
     await m.applyEvent(accessed(4, 'alpha-hot'))
-    expect((await m.search('alpha', {}, { mode: 'semantic' })).map(n => n.id)).toEqual(['alpha-hot', 'alpha-cold'])
+    expect((await m.search('alpha', {}, { mode: SEARCH_MODE.semantic })).map(n => n.id)).toEqual(['alpha-hot', 'alpha-cold'])
   })
 })
 
@@ -168,10 +169,10 @@ describe('tier on the retrieval surface', () => {
     await m.applyEvent(written(1, { tier: 'plan', id: 'subplan', scope: 'plan-t1', title: 'Alpha subplan', body: 'alpha', rationale: 'why' }))
     await m.applyEvent(written(2, { tier: 'episodic', id: 'step-a', scope: 'plan-t1', title: 'Alpha step', body: 'alpha' }))
     await m.applyEvent(written(3, noteFixture({ id: 'claim', title: 'Alpha claim', body: 'alpha' })))
-    const byId = new Map((await m.search('alpha', {}, { mode: 'semantic' })).map(n => [n.id, n.tier]))
-    expect(byId.get('subplan')).toBe('plan')
-    expect(byId.get('step-a')).toBe('episodic')
-    expect(byId.get('claim')).toBe('semantic')
+    const byId = new Map((await m.search('alpha', {}, { mode: SEARCH_MODE.semantic })).map(n => [n.id, n.tier]))
+    expect(byId.get('subplan')).toBe(NOTE_TIER.plan)
+    expect(byId.get('step-a')).toBe(NOTE_TIER.episodic)
+    expect(byId.get('claim')).toBe(NOTE_TIER.semantic)
   })
 
   it('filters both retrieval arms and list() down to one lane', async () => {
@@ -179,9 +180,9 @@ describe('tier on the retrieval surface', () => {
     const m = await openMemory(t, fakeEmbedder)
     await m.applyEvent(written(1, { tier: 'episodic', id: 'step-a', scope: 'plan-t1', title: 'Alpha step', body: 'alpha' }))
     await m.applyEvent(written(2, noteFixture({ id: 'claim', title: 'Alpha claim', body: 'alpha' })))
-    for (const mode of ['keyword', 'semantic', 'hybrid'] as const)
-      expect((await m.search('alpha', { tier: 'semantic' }, { mode })).map(n => n.id)).toEqual(['claim'])
-    expect((await m.list({ tier: 'episodic' })).map(n => n.id)).toEqual(['step-a'])
+    for (const mode of Object.values(SearchMode))
+      expect((await m.search('alpha', { tier: NOTE_TIER.semantic }, { mode })).map(n => n.id)).toEqual(['claim'])
+    expect((await m.list({ tier: NOTE_TIER.episodic })).map(n => n.id)).toEqual(['step-a'])
   })
 })
 
@@ -196,9 +197,9 @@ describe('SurrealMemory claim semantic + hybrid search', () => {
     await m.applyEvent(written(1, noteFixture({ id: 'na', title: 'A', claims: [claimFixture('the alpha invariant holds')] })))
     await m.applyEvent(written(2, noteFixture({ id: 'nb', title: 'B', claims: [claimFixture('the beta invariant holds')] })))
     // 'zeta' is in neither claim's text → the keyword arm cannot serve it…
-    expect(await m.searchClaims('zeta', {}, { mode: 'keyword' })).toEqual([])
+    expect(await m.searchClaims('zeta', {}, { mode: SEARCH_MODE.keyword })).toEqual([])
     // …but it maps to alpha's vector, so the claim arm surfaces the alpha STATEMENT
-    const hits = await m.searchClaims('zeta', {}, { mode: 'semantic' })
+    const hits = await m.searchClaims('zeta', {}, { mode: SEARCH_MODE.semantic })
     expect(hits[0]?.noteId).toBe('na')
     expect(hits[0]?.text).toBe('the alpha invariant holds')
   })
@@ -208,8 +209,8 @@ describe('SurrealMemory claim semantic + hybrid search', () => {
     const m = await openMemory(t, fakeEmbedder)
     // both statements live on the SAME note, so a note-level vector could not tell them apart
     await m.applyEvent(written(1, noteFixture({ id: 'n', title: 'N', claims: [claimFixture('alpha statement'), claimFixture('beta statement')] })))
-    expect((await m.searchClaims('zeta', {}, { mode: 'semantic' }))[0]?.text).toBe('alpha statement')
-    expect((await m.searchClaims('beta', {}, { mode: 'semantic' }))[0]?.text).toBe('beta statement')
+    expect((await m.searchClaims('zeta', {}, { mode: SEARCH_MODE.semantic }))[0]?.text).toBe('alpha statement')
+    expect((await m.searchClaims('beta', {}, { mode: SEARCH_MODE.semantic }))[0]?.text).toBe('beta statement')
   })
 
   it('hybrid fuses both claim arms; agreement between them wins', async () => {
@@ -218,7 +219,7 @@ describe('SurrealMemory claim semantic + hybrid search', () => {
     // 'both' matches 'alpha' by keyword AND vector; 'sem' only by vector (zeta ≈ alpha, no token)
     await m.applyEvent(written(1, noteFixture({ id: 'both', title: 'B', claims: [claimFixture('alpha holds here')] })))
     await m.applyEvent(written(2, noteFixture({ id: 'sem', title: 'S', claims: [claimFixture('zeta holds here')] })))
-    const ids = (await m.searchClaims('alpha', {}, { mode: 'hybrid' })).map(h => h.noteId)
+    const ids = (await m.searchClaims('alpha', {}, { mode: SEARCH_MODE.hybrid })).map(h => h.noteId)
     expect(ids[0]).toBe('both')
     expect(ids).toContain('sem') // the semantic-only claim survives the fuse; fails if mis-keyed
   })
@@ -227,8 +228,8 @@ describe('SurrealMemory claim semantic + hybrid search', () => {
     const t = await createTestSurreal(); drops.push(t.drop)
     const m = await openMemory(t) // no embedder
     await m.applyEvent(written(1, noteFixture({ id: 'n', title: 'N', claims: [claimFixture('tokens rotate on use')] })))
-    expect((await m.searchClaims('tokens', {}, { mode: 'semantic' })).map(h => h.text)).toEqual(['tokens rotate on use'])
-    expect(await m.searchClaims('zeta', {}, { mode: 'semantic' })).toEqual([]) // no vector path, no match
+    expect((await m.searchClaims('tokens', {}, { mode: SEARCH_MODE.semantic })).map(h => h.text)).toEqual(['tokens rotate on use'])
+    expect(await m.searchClaims('zeta', {}, { mode: SEARCH_MODE.semantic })).toEqual([]) // no vector path, no match
   })
 
   // The claim arm is the hotter path (every memory_search and every step preload) and gets the SAME
@@ -238,16 +239,16 @@ describe('SurrealMemory claim semantic + hybrid search', () => {
     const t = await createTestSurreal(); drops.push(t.drop)
     const m = await openMemory(t, fakeEmbedder)
     await m.applyEvent(written(1, noteFixture({ id: 'n', title: 'N', claims: [claimFixture('the alpha invariant holds')] })))
-    expect(await m.searchClaims('faint resemblance', {}, { mode: 'semantic' })).toEqual([])
-    expect((await m.searchClaims('near resemblance', {}, { mode: 'semantic' })).map(h => h.noteId)).toEqual(['n'])
+    expect(await m.searchClaims('faint resemblance', {}, { mode: SEARCH_MODE.semantic })).toEqual([])
+    expect((await m.searchClaims('near resemblance', {}, { mode: SEARCH_MODE.semantic })).map(h => h.noteId)).toEqual(['n'])
   })
 
   it('a retired claim loses its vector too — semantic cannot resurrect it', async () => {
     const t = await createTestSurreal(); drops.push(t.drop)
     const m = await openMemory(t, fakeEmbedder)
     await m.applyEvent(written(1, noteFixture({ id: 'n', title: 'N', claims: [claimFixture('alpha was true once')] })))
-    expect(await m.searchClaims('zeta', {}, { mode: 'semantic' })).toHaveLength(1)
+    expect(await m.searchClaims('zeta', {}, { mode: SEARCH_MODE.semantic })).toHaveLength(1)
     await m.applyEvent(written(2, noteFixture({ id: 'n', title: 'N', claims: [] })))
-    expect(await m.searchClaims('zeta', {}, { mode: 'semantic' })).toEqual([])
+    expect(await m.searchClaims('zeta', {}, { mode: SEARCH_MODE.semantic })).toEqual([])
   })
 })

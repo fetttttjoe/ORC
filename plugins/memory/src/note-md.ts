@@ -98,7 +98,9 @@ export function renderNoteFile(note: MemoryNote, view?: WorkspaceView): string {
   // Claims render in the body, not frontmatter: a statement runs to a sentence, and block-style
   // YAML for a list of three-key objects buries the text a reader came for. The leading [id] is
   // load-bearing — it is the handle `invalidates` takes, so it has to be readable off the file.
-  const claims = (n.claims ?? []).map(c => `- [${c.id}] ${c.text}`).join('\n')
+  const claims = (n.claims ?? [])
+    .map(c => `- [${c.id}] (${c.class}) ${c.text}${c.anchors.length ? ` — ${c.anchors.map(a => a.path).join(', ')}` : ''}`)
+    .join('\n')
   const sections = [
     claims ? `${CLAIMS_HEADING}\n\n${claims}` : '',
     n.rationale ? `## Rationale\n\n${n.rationale}` : '',

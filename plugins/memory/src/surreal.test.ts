@@ -1,9 +1,9 @@
 import { afterAll, describe, expect, it } from 'bun:test'
 import { RecordId, Surreal } from 'surrealdb'
-import { AUTHOR_SOURCE, DECISION_STATUS, Door, EVENT_KIND, LINK_KIND, MEMORY_ACCESS, MEMORY_USE, MemoryScope, NOTE_KIND, PROJECT_NAME_NOTE_ID, isRecord, type AccessVia, type EventKind, type EventRecord, type MemoryAccessMode, type MemoryAuthor, type MemoryNote, type MemoryUseOutcome, type NoteView } from '@orc/contracts'
+import { AUTHOR_SOURCE, ClaimClass, DECISION_STATUS, Door, EDGE_DIRECTION, EVENT_KIND, LINK_KIND, MEMORY_ACCESS, MEMORY_USE, MemoryScope, NOTE_KIND, PROJECT_NAME_NOTE_ID, SEARCH_MODE, isRecord, type AccessVia, type EventKind, type EventRecord, type MemoryAccessMode, type MemoryAuthor, type MemoryNote, type MemoryUseOutcome, type NoteView } from '@orc/contracts'
 import { SurrealMemory } from './surreal'
-import { authorFixture, eventFixture, must } from '@orc/contracts/fixtures'
-import { claimFixture, createTestSurreal, noteFixture } from './test-helpers'
+import { authorFixture, claimFixture, eventFixture, must } from '@orc/contracts/fixtures'
+import { createTestSurreal, noteFixture } from './test-helpers'
 
 const note = (over = {}) => noteFixture({
   id: 'auth', title: 'Auth', categories: ['security'], tags: ['auth'], paths: ['src/auth.ts'],
@@ -47,7 +47,7 @@ describe('SurrealMemory.applyEvent', () => {
     let got = await m.get('auth', 'project')
     expect(got?.revision).toBe(1)
     expect(got?.createdBy).toBe('cli')
-    expect(view(got)?.kind).toBe('fact')
+    expect(view(got)?.kind).toBe(NOTE_KIND.fact)
     await m.applyEvent(written(2, note({ summary: 'rotate on use' }), authorFixture({ source: AUTHOR_SOURCE.agent, executor: 'api-loop', model: 'opus', role: 'review', origin: { chatId: 'run:t1:v1', door: Door.supervisor } })))
     got = await m.get('auth', 'project')
     expect(got?.revision).toBe(2)
@@ -244,7 +244,7 @@ describe('SurrealMemory.applyEvent', () => {
     const nb = await m.neighbors('a', { depth: 2 })
     expect(nb.map(n => n.id)).toEqual(['b', 'c'])            // supersedes(1.0) ranked above relates_to(0.5)
     expect(nb[0]).toMatchObject({ id: 'b', via: 'supersedes' })
-    expect((await m.neighbors('a', { kinds: ['supersedes'] })).map(n => n.id)).toEqual(['b'])
+    expect((await m.neighbors('a', { kinds: [LINK_KIND.supersedes] })).map(n => n.id)).toEqual(['b'])
     expect((await m.neighbors('b')).map(n => n.id)).toContain('a') // reverse: what supersedes b (spec RG4)
 
     // re-writing a note re-materializes its out-edges (delete-then-RELATE), no duplicates
@@ -419,7 +419,7 @@ describe('SurrealMemory.applyEvent', () => {
     const m = await openMemory(t)
     await m.applyEvent(written(1, note({ id: 'up-src', links: [{ id: 'up-dst', kind: LINK_KIND.relates_to }] })))
     await m.applyEvent(written(2, note({ id: 'up-dst' })))
-    await m.applyEvent(accessed(3, 'up-dst', MEMORY_ACCESS.read, 'project', { seed: 'up-src', kind: LINK_KIND.relates_to, direction: 'out' }))
+    await m.applyEvent(accessed(3, 'up-dst', MEMORY_ACCESS.read, 'project', { seed: 'up-src', kind: LINK_KIND.relates_to, direction: EDGE_DIRECTION.out }))
     const before = await rawLinkRow(t, 'up-src', 'up-dst', 'relates_to')
     expect(before?.hits).toBe(1)
 
@@ -593,10 +593,25 @@ describe('SurrealMemory claim projection', () => {
   it('carries a claim sourceRevision through the read model', async () => {
     const t = await createTestSurreal(); drops.push(t.drop)
     const mem = await openMemory(t)
-    await mem.applyEvent(written(1, note({ id: 'n', claims: [claimFixture('a', 'deadbeef'), claimFixture('b')] })))
+    await mem.applyEvent(written(1, note({ id: 'n', claims: [claimFixture('a', { sourceRevision: 'deadbeef' }), claimFixture('b')] })))
     const rows = await mem.claimsFor('n', 'project')
     expect(rows.find(c => c.text === 'a')?.sourceRevision).toBe('deadbeef')
     expect(rows.find(c => c.text === 'b')?.sourceRevision).toBeNull()
+  })
+
+  // class and anchors are what make a claim checkable — the class says what kind of statement it is
+  // and each anchor's blob dates it against the file it was read from. A row that drops either
+  // reads as a statement about nothing.
+  it('carries a claim class and every anchor, blob included, through the read model', async () => {
+    const t = await createTestSurreal(); drops.push(t.drop)
+    const mem = await openMemory(t)
+    const anchored = claimFixture('a', {
+      class: ClaimClass.why,
+      anchors: [{ path: 'src/auth.ts', symbol: 'rotate', blob: 'aaa' }, { path: 'src/token.ts', symbol: null, blob: null }],
+      sourceRevision: 'deadbeef',
+    })
+    await mem.applyEvent(written(1, note({ id: 'n', claims: [anchored] })))
+    expect(await mem.claimsFor('n', 'project')).toEqual([{ ...anchored, validFrom: '2026-07-18T01:00:00Z' }])
   })
 
   it('deleting a note drops its claim rows with it', async () => {
@@ -638,6 +653,18 @@ describe('SurrealMemory.searchClaims', () => {
     expect(hits[0]?.validFrom).toBe('2026-07-18T01:00:00Z')
   })
 
+  it('a hit carries the claim class and anchors, not only its text', async () => {
+    const t = await createTestSurreal(); drops.push(t.drop)
+    const mem = await openMemory(t)
+    const anchored = claimFixture('the event log is the only truth', {
+      class: ClaimClass.why, anchors: [{ path: 'src/auth.ts', symbol: 'rotate', blob: 'aaa' }],
+    })
+    await mem.applyEvent(written(1, note({ id: 'truth', title: 'Decision log', claims: [anchored] })))
+    expect((await mem.searchClaims('event log truth'))[0]).toMatchObject({
+      class: ClaimClass.why, anchors: [{ path: 'src/auth.ts', symbol: 'rotate', blob: 'aaa' }],
+    })
+  })
+
   // The claim arm's half of the same wiring check as the note arm's above: keywordClaims has its
   // own meetsQuorum call, and every other fixture in this block clears the quorum trivially.
   it('the keyword claim arm drops a statement carrying fewer than half the query terms', async () => {
@@ -648,11 +675,11 @@ describe('SurrealMemory.searchClaims', () => {
       claims: [claimFixture('surreal is disposable'), claimFixture('a surreal projection replays kubernetes helm charts')],
     })))
     // 4 terms; 'surreal is disposable' carries only 'surreal' → excluded, the other carries all 4
-    const hits = await mem.searchClaims('surreal kubernetes helm charts', {}, { mode: 'keyword', perNote: 'all' })
+    const hits = await mem.searchClaims('surreal kubernetes helm charts', {}, { mode: SEARCH_MODE.keyword, perNote: 'all' })
     expect(hits.map(h => h.text)).toEqual(['a surreal projection replays kubernetes helm charts'])
     // the excluded statement is still findable on a query it does cover — the exclusion is the
     // quorum, not a missing row
-    expect((await mem.searchClaims('surreal disposable', {}, { mode: 'keyword', perNote: 'all' })).map(h => h.text))
+    expect((await mem.searchClaims('surreal disposable', {}, { mode: SEARCH_MODE.keyword, perNote: 'all' })).map(h => h.text))
       .toContain('surreal is disposable')
   })
 
@@ -765,6 +792,18 @@ describe('memory_verified folds onto the note row', () => {
     // the act declares a note CHECKED and asserts nothing about its content: everything the write
     // stamped must come back byte-identical, or the log is claiming the auditor edited the note
     expect({ ...after, verified: undefined }).toEqual({ ...before, verified: undefined })
+  })
+
+  it('carries the verification claim snapshot onto the row — drift compares against those blobs', async () => {
+    const t = await createTestSurreal(); drops.push(t.drop)
+    const m = await openMemory(t)
+    await m.applyEvent(written(1))
+    const snapshot = [{ claimId: 'a'.repeat(12), anchors: [{ path: 'src/auth.ts', symbol: null, blob: 'blob-checked' }] }]
+    await m.applyEvent(eventFixture({
+      seq: 2, taskId: null, kind: EVENT_KIND.memory_verified, ts: '2026-07-18T02:00:00Z',
+      payload: { id: 'auth', scope: 'project', stamp: { revision: 'rev-a', at: '2026-07-18T02:00:00Z', by: 'cli', claims: snapshot }, author: cli },
+    }))
+    expect((await m.get('auth', 'project'))?.verified?.claims).toEqual(snapshot)
   })
 
   it('a byte-identical rewrite CARRIES the stamp — the commit restamp must not destroy it', async () => {

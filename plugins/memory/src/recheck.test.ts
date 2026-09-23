@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'bun:test'
-import { AUTHOR_SOURCE, DRIFT_STATE, Door, EVENT_KIND, MEMORY_USE, MemoryScope, NOTE_KIND, NOTE_TIER, type EventRecord, type Origin } from '@orc/contracts'
+import { AUTHOR_SOURCE, ClaimClass, DRIFT_STATE, Door, EVENT_KIND, MEMORY_USE, MemoryScope, NOTE_KIND, NOTE_TIER, type ClaimInput, type EventRecord, type Origin } from '@orc/contracts'
 import { recheckNotes, summarize } from './recheck'
+import type { BlobsAt } from './claim-drift-read'
 import { authorFixture, eventFixture } from '@orc/contracts/fixtures'
 
 // An agent records an outcome inside its run's chat; MemoryAuthor.origin is required, and the
@@ -31,13 +32,27 @@ const verify = (id: string, revision: string): EventRecord => eventFixture({
   payload: { id, scope: MemoryScope.project, stamp: { revision, at: AT, by: 'auditor' }, author: authorFixture() },
 })
 
-const deps = { changedSince: async () => new Set<string>(), terminalTaskIds: new Set<string>() }
+/** a path the fixture does not name is one the probe could not answer for, never a deletion */
+const blobsOf = (blobs: Record<string, string | null>): BlobsAt => async paths => {
+  const out = new Map<string, string | null>()
+  for (const p of paths) {
+    const seen = blobs[p]
+    if (seen !== undefined) out.set(p, seen)
+  }
+  return out
+}
+const NO_BLOBS = blobsOf({})
+
+const deps = { drift: { changedSince: async () => new Set<string>(), blobsAt: NO_BLOBS }, terminalTaskIds: new Set<string>() }
 
 // Revision-AWARE, which is the whole point of the two cases below: the declared path has moved
 // since WRITTEN_AT and has not moved since CHECKED_AT. A probe reporting it moved for both would
 // leave the note drifted — correctly — and prove nothing about the either-clean rule.
 const movedSinceWrite = {
-  changedSince: async (rev: string) => rev === WRITTEN_AT ? new Set([DECLARED_PATH]) : new Set<string>(),
+  drift: {
+    changedSince: async (rev: string) => rev === WRITTEN_AT ? new Set([DECLARED_PATH]) : new Set<string>(),
+    blobsAt: NO_BLOBS,
+  },
   terminalTaskIds: new Set<string>(),
 }
 
@@ -123,5 +138,45 @@ describe('recheckNotes', () => {
     expect(s.drifted).toBe(1)
     expect(s.clean).toBe(1)        // only the one whose declared paths were actually compared
     expect(s.uncheckable).toBe(1)  // no stamp / no paths — nothing was compared at all
+  })
+})
+
+const MOVED_CLAIM = 'a'.repeat(12)
+const STILL_CLAIM = 'b'.repeat(12)
+const claim = (id: string, anchors: { path: string; blob: string }[]): ClaimInput => ({
+  id, text: `statement ${id}`, class: ClaimClass.fact, sourceRevision: WRITTEN_AT,
+  anchors: anchors.map(a => ({ ...a, symbol: null })),
+})
+
+describe('recheckNotes judges a note that carries claims claim by claim', () => {
+  it('names the one claim whose own file moved, not the whole note', async () => {
+    const out = await recheckNotes([write({
+      id: 'two-claims', title: 'two claims', paths: [],
+      sourceRevision: WRITTEN_AT,
+      claims: [claim(MOVED_CLAIM, [{ path: DECLARED_PATH, blob: 'blob-a1' }]), claim(STILL_CLAIM, [{ path: OTHER_PATH, blob: 'blob-b1' }])],
+    })], {
+      drift: { changedSince: async () => new Set<string>(), blobsAt: blobsOf({ [DECLARED_PATH]: 'blob-a2', [OTHER_PATH]: 'blob-b1' }) },
+      terminalTaskIds: new Set<string>(),
+    })
+    expect(out[0].verdict).toBe(DRIFT_STATE.drifted)
+    expect(out[0].suspectClaims).toEqual([MOVED_CLAIM])
+    expect(out[0].unknownClaims).toEqual([])
+  })
+
+  it('is never drifted by a code change when every claim is unanchored', async () => {
+    const out = await recheckNotes([write({
+      id: 'unanchored', title: 'unanchored', paths: [DECLARED_PATH],
+      sourceRevision: WRITTEN_AT,
+      claims: [claim(MOVED_CLAIM, []), claim(STILL_CLAIM, [])],
+    })], movedSinceWrite)
+    expect(out[0].verdict).toBe(DRIFT_STATE.clean)
+    expect(out[0].suspectClaims).toEqual([])
+    expect(out[0].checkable).toBe(false) // nothing was compared — clean is not checked
+  })
+
+  it('a claim-free note still follows the note-path rule', async () => {
+    const out = await recheckNotes([write(drifting)], movedSinceWrite)
+    expect(out[0].verdict).toBe(DRIFT_STATE.drifted)
+    expect(out[0].suspectClaims).toEqual([])
   })
 })

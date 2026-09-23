@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, it } from 'bun:test'
-import { AUTHOR_SOURCE, Door, EVENT_KIND, NO_CHAT, PAYLOAD_SCHEMAS, planScope, slugId, TASK_STATUS, WORKSPACE_KIND, type MemoryAuthor, type Origin, type TaskNode } from '@orc/contracts'
+import { AUTHOR_SOURCE, Door, EVENT_KIND, MEMORY_ACCESS, NO_CHAT, NOTE_TIER, PAYLOAD_SCHEMAS, planScope, RETENTION, slugId, TASK_STATUS, WORKSPACE_KIND, type MemoryAuthor, type Origin, type TaskNode } from '@orc/contracts'
 import { authorFixture, eventFixture } from '@orc/contracts/fixtures'
 import { seedTestWorkspace, TEST_WORKSPACE, TEST_WORKSPACE_ID } from '@orc/kernel/test-helpers'
 import { createLiveMemory } from './test-helpers'
@@ -66,7 +66,7 @@ describe('consolidateTask (integration)', () => {
   it('substantive task: non-force converges idempotently, force always rewrites', async () => {
     const { log, store, projector } = await harness('t1', 'My task')
     await store.write({ id: 'sa', scope: planScope('t1'), title: 'Step A', summary: 'did A' }, CLI)
-    await store.recordAccess('area-x', 'project', 'read', authorFixture({ source: AUTHOR_SOURCE.agent, taskId: 't1', origin: { chatId: 'run:t1:v1', door: Door.supervisor } })) // provenance → substantive
+    await store.recordAccess('area-x', 'project', MEMORY_ACCESS.read, authorFixture({ source: AUTHOR_SOURCE.agent, taskId: 't1', origin: { chatId: 'run:t1:v1', door: Door.supervisor } })) // provenance → substantive
     const outcomeId = slugId('outcome t1')
     const rev = async (): Promise<number> => { await projector.catchUp(); return (await store.get(outcomeId))?.revision ?? 0 }
 
@@ -148,7 +148,7 @@ describe('consolidateOnCompletion (subscriber action)', () => {
   it('a done event consolidates (catch-up + write); a non-done event does nothing', async () => {
     const { log, store, projector } = await harness('t3', 'Subscribed task')
     await store.write({ id: 'sc', scope: planScope('t3'), title: 'Step C', summary: 'did C' }, CLI)
-    await store.recordAccess('area-y', 'project', 'read', authorFixture({ source: AUTHOR_SOURCE.agent, taskId: 't3', origin: { chatId: 'run:t3:v1', door: Door.supervisor } }))
+    await store.recordAccess('area-y', 'project', MEMORY_ACCESS.read, authorFixture({ source: AUTHOR_SOURCE.agent, taskId: 't3', origin: { chatId: 'run:t3:v1', door: Door.supervisor } }))
     const deps = { log, store, authorFor: () => CONSOLIDATE_AUTHOR, catchUp: () => projector.catchUp() }
     const outcomeId = slugId('outcome t3')
     // a non-done transition → the classifier gates it → no note
@@ -180,8 +180,8 @@ describe('the step trail retires with the task, the design record does not', () 
    */
   it('archives the empty step trail and keeps the plan notes', async () => {
     const live = await harness('t20', 'Trail task')
-    await live.store.write({ id: 'step-a', scope: planScope('t20'), title: 'Step A', summary: 'did A', tier: 'episodic', retention: 'expirable' }, CLI)
-    await live.store.write({ id: 'step-b', scope: planScope('t20'), title: 'Step B', summary: 'did B', tier: 'episodic', retention: 'expirable' }, CLI)
+    await live.store.write({ id: 'step-a', scope: planScope('t20'), title: 'Step A', summary: 'did A', tier: NOTE_TIER.episodic, retention: RETENTION.expirable }, CLI)
+    await live.store.write({ id: 'step-b', scope: planScope('t20'), title: 'Step B', summary: 'did B', tier: NOTE_TIER.episodic, retention: RETENTION.expirable }, CLI)
     await live.store.write({ id: 'masterplan', scope: planScope('t20'), title: 'Masterplan', summary: 'the split', rationale: 'why it was split this way' }, CLI)
     await live.projector.catchUp()
 
@@ -194,7 +194,7 @@ describe('the step trail retires with the task, the design record does not', () 
     // Narrowed by tier rather than reached for: `rationale` is a plan-tier field, and the union
     // store.get returns is exactly what stops a semantic note from pretending to have one.
     const kept = await live.store.get('masterplan', planScope('t20'))
-    expect(kept?.tier).toBe('plan')
+    expect(kept?.tier).toBe(NOTE_TIER.plan)
     expect(kept?.tier === 'plan' ? kept.rationale : '').toContain('why it was split')
   })
 
@@ -210,8 +210,8 @@ describe('the step trail retires with the task, the design record does not', () 
   it('consolidates BEFORE it retires — asserted on call order, not on a side effect', async () => {
     const live = await harness('t21', 'Ordering task')
     // two steps: consolidation is salience-gated, and a single trail note does not clear it
-    await live.store.write({ id: 'step-a', scope: planScope('t21'), title: 'Step A', summary: 'a real finding worth keeping', tier: 'episodic', retention: 'expirable' }, CLI)
-    await live.store.write({ id: 'step-b', scope: planScope('t21'), title: 'Step B', summary: 'a second real finding', tier: 'episodic', retention: 'expirable' }, CLI)
+    await live.store.write({ id: 'step-a', scope: planScope('t21'), title: 'Step A', summary: 'a real finding worth keeping', tier: NOTE_TIER.episodic, retention: RETENTION.expirable }, CLI)
+    await live.store.write({ id: 'step-b', scope: planScope('t21'), title: 'Step B', summary: 'a second real finding', tier: NOTE_TIER.episodic, retention: RETENTION.expirable }, CLI)
     await live.projector.catchUp()
 
     const calls: string[] = []

@@ -144,30 +144,6 @@ export interface CorpusDrift {
 // cost more than the staleness it cures.
 export const CORPUS_DRIFT_ADVISORY = 0.34
 
-export async function corpusDrift(
-  notes: ReadonlyArray<{ sourceRevision: string | null; paths?: readonly string[]; verified?: { revision: string } }>,
-  changedSince: ChangedSince,
-): Promise<CorpusDrift> {
-  let checkable = 0
-  let drifted = 0
-  let unknown = 0
-  for (const n of notes) {
-    const paths = n.paths ?? []
-    // The SOURCE stamp alone decides CHECKABILITY (a verification cannot make an unstamped or
-    // path-less note checkable): those notes are the `clean`-uncheckable case, counted as neither
-    // checkable nor unknown — the same silent skip as before.
-    if (n.sourceRevision === null || paths.length === 0) continue
-    // One spelling of the verdict, via noteDriftState, so the corpus counts and the per-note flag
-    // cannot answer differently. An unreachable revision is now COUNTED as `unknown` instead of
-    // being decremented back out of checkable and dropped — every other case keeps its old numbers.
-    const state = await noteDriftState({ sourceRevision: n.sourceRevision, paths, ...(n.verified && { verified: n.verified }) }, changedSince)
-    if (state === DRIFT_STATE.unknown) { unknown += 1; continue } // unreachable revision, not checkable
-    checkable += 1
-    if (state === DRIFT_STATE.drifted) drifted += 1
-  }
-  return { checkable, drifted, unknown, total: notes.length, ratio: checkable === 0 ? null : drifted / checkable }
-}
-
 // Has the graph fallen far enough behind to be worth re-grounding wholesale? A verdict, not a
 // sentence: what to SAY about it, and which command to name, belongs to whoever is talking to a
 // human. This module measures.

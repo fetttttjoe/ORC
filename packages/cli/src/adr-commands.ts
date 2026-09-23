@@ -1,7 +1,7 @@
 import { Command } from 'commander'
 import { AUTHOR_SOURCE, DecisionInput, DecisionStatus, Door, NO_CHAT } from '@orc/contracts'
 import type { EventLog, Kernel, ProjectConfig } from '@orc/kernel'
-import { ADR_SECTION, decisionDoor, getDecision, listDecisions, recordDecision, type DecisionDoor, type DecisionRecord } from '@orc/memory'
+import { AdrSection, decisionDoor, getDecision, listDecisions, recordDecision, type DecisionDoor, type DecisionRecord } from '@orc/memory'
 import { cwdAuthor } from './cwd-workspace'
 import { enumArg } from './enum-arg'
 import { withMemory } from './memory-open'
@@ -20,7 +20,7 @@ export function renderDecisionList(rows: readonly DecisionRecord[]): string[] {
   return rows.map(r => `${r.id.padEnd(40)} ${r.status.padEnd(10)} ${r.updatedAt.slice(0, 10)}  ${r.createdBy.padEnd(12)} ${r.title}${r.supersededBy ? `  → ${r.supersededBy}` : ''}`)
 }
 
-interface SectionOpts { context: string; decision: string; consequences: string; status?: DecisionStatus; tags?: string[] }
+interface SectionOpts { context: string; decision: string; consequences: string; considered?: string[]; status?: DecisionStatus; tags?: string[] }
 
 // The three ADR sections plus the two fields a human decides at recording time, shared by `new` and
 // `supersede` — the two differ only in whether an old id is named, and a second spelling of the
@@ -29,6 +29,7 @@ const sectionOptions = (c: Command): Command => c
   .requiredOption('--context <text>', 'why this decision was needed (the forces at play)')
   .requiredOption('--decision <text>', 'what was decided, as a statement another agent can act on')
   .requiredOption('--consequences <text>', 'what follows — what becomes easier, harder, or forbidden')
+  .option('--considered <options...>', 'the alternatives weighed and not taken, one per argument')
   .option('--status <s>', `${Object.values(DecisionStatus).join(' | ')} (default accepted: a recorded decision is presumed in force)`, parseStatus)
   .option('--tags <tags...>', 'tags')
 
@@ -59,7 +60,7 @@ export function adrCommand(deps: {
     // Conditional spread, not a bare `status: o.status`: DecisionInput leaves `status` optional so
     // that "no status" stays absent all the way to decisionStatusOf, and an explicit undefined here
     // would be a field the schema then has to distinguish from a real one.
-    const input = DecisionInput.parse({ title, context: o.context, decision: o.decision, consequences: o.consequences, ...(o.status !== undefined && { status: o.status }), ...(o.tags !== undefined && { tags: o.tags }), ...(supersedes !== undefined && { supersedes }) })
+    const input = DecisionInput.parse({ title, context: o.context, decision: o.decision, consequences: o.consequences, ...(o.considered !== undefined && { considered: o.considered }), ...(o.status !== undefined && { status: o.status }), ...(o.tags !== undefined && { tags: o.tags }), ...(supersedes !== undefined && { supersedes }) })
     // `human`, unconditionally: a person typed this decision (contracts ids.ts). Resolved BEFORE the
     // door opens, so a checkout with no workspace refuses without a Surreal connection to close.
     const author = await cwdAuthor(deps.requireKernel(), needProject().config.dir, AUTHOR_SOURCE.human, NO_CHAT(Door.cli))
@@ -93,7 +94,9 @@ export function adrCommand(deps: {
         console.log(v.note.body)
         return
       }
-      for (const [name, text] of [[ADR_SECTION.context, v.fields.context], [ADR_SECTION.decision, v.fields.decision], [ADR_SECTION.consequences, v.fields.consequences]] as const)
+      const sections: [string, string][] = [[AdrSection.context, v.fields.context], [AdrSection.decision, v.fields.decision], [AdrSection.consequences, v.fields.consequences]]
+      if (v.fields.considered.length > 0) sections.push([AdrSection.considered, v.fields.considered.map(o => `- ${o}`).join('\n')])
+      for (const [name, text] of sections)
         console.log(`\n## ${name}\n\n${text}`)
     })
   return adr

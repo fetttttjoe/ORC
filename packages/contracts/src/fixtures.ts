@@ -4,6 +4,7 @@ import { z } from 'zod'
 import type { EventRecord } from './events'
 import { EventKind } from './event-kinds'
 import { AUTHOR_SOURCE, type MemoryAuthor } from './author'
+import { ClaimClass, ClaimInput, claimId, type StampedAddition } from './claim'
 import { Door, NO_CHAT } from './origin'
 import { IsolationTier, STRATEGY, type Plan, type PlanDraft, type PlanStep } from './plan'
 import {
@@ -59,6 +60,15 @@ export function eventFixture(over: Partial<EventRecord> = {}): EventRecord {
 // literal would be twenty copies to edit the next time provenance gains a key.
 export function authorFixture(over: Partial<MemoryAuthor> = {}): MemoryAuthor {
   return { source: AUTHOR_SOURCE.cli, workspaceId: TEST_WORKSPACE_ID, origin: NO_CHAT(Door.cli), ...over }
+}
+
+// one spelling of a stored claim and of a stamped addition, so a new claim field is one edit
+export function claimFixture(text: string, over: Partial<ClaimInput> = {}): ClaimInput {
+  return ClaimInput.parse({ id: claimId(text), text, class: ClaimClass.fact, anchors: [], ...over })
+}
+
+export function additionFixture(text: string, over: Partial<StampedAddition> = {}): StampedAddition {
+  return { text, class: ClaimClass.fact, anchors: [], ...over }
 }
 
 export function stepFixture(over: Partial<PlanStep> = {}): PlanStep {

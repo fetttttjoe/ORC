@@ -55,7 +55,7 @@ describe('foldMemory — edge access', () => {
       ev(T0), // via-less (a plain node access, or an old pre-provenance event) — node-only, skipped here
       { kind: EVENT_KIND.memory_accessed, ts: T0, payload: { junk: true } }, // unparseable
     ]).edges
-    expect(m.get(edgeKey('project', 'a', 'b', 'supersedes'))).toEqual({ hits: 2, lastAccessedAt: days(1) })
+    expect(m.get(edgeKey('project', 'a', 'b', LINK_KIND.supersedes))).toEqual({ hits: 2, lastAccessedAt: days(1) })
     expect(m.size).toBe(1)
   })
 
@@ -66,7 +66,7 @@ describe('foldMemory — edge access', () => {
     const inHop = { kind: EVENT_KIND.memory_accessed, ts: days(1), payload: { id: 'a', scope: 'project', mode: 'read', author: authorFixture(), via: { seed: 'b', kind: LINK_KIND.supersedes, direction: 'in' } } }
     const m = foldMemory([outHop, inHop]).edges
     expect(m.size).toBe(1)
-    expect(m.get(edgeKey('project', 'a', 'b', 'supersedes'))).toEqual({ hits: 2, lastAccessedAt: days(1) })
+    expect(m.get(edgeKey('project', 'a', 'b', LINK_KIND.supersedes))).toEqual({ hits: 2, lastAccessedAt: days(1) })
   })
 })
 

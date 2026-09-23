@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'bun:test'
 import { Confidence, CoverageReport, PlanAnnotatedPayload } from './analysis'
-import { LINK_KINDS, NOTE_TIERS, PlanNoteInput } from './memory'
+import { LinkKind, NoteTier, PlanNoteInput } from './memory'
 import { PAYLOAD_SCHEMAS } from './events'
 import { authorFixture } from './fixtures'
 
@@ -10,8 +10,8 @@ describe('M5b contracts', () => {
     expect(CoverageReport.parse({ analyzed: false }).confidence).toBe(Confidence.none) // defaults
   })
   it('adds decomposes_into link kind and the plan note tier', () => {
-    expect(LINK_KINDS).toContain('decomposes_into')
-    expect(NOTE_TIERS).toContain('plan')
+    expect(Object.values(LinkKind)).toContain(LinkKind.decomposes_into)
+    expect(Object.values(NoteTier)).toContain(NoteTier.plan)
   })
   it('plan-note carries rationale + uncertainty with safe defaults', () => {
     const n = PlanNoteInput.parse({ tier: 'plan', id: 'masterplan', title: 'build web app' })

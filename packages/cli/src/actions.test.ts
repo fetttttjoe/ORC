@@ -173,7 +173,7 @@ describe('writeNote/deleteNote guards', () => {
 describe('the decision door', () => {
   it('recordDecision writes a decision attributed to the door it came through (mcp) in the serving checkout\'s workspace', async () => {
     const r = await setupWithSurreal()
-    expect(await r.actions.recordDecision({ title: 'From Claude', context: 'c', decision: 'd', consequences: 'q', tags: [] }, MCP))
+    expect(await r.actions.recordDecision({ title: 'From Claude', context: 'c', decision: 'd', consequences: 'q', considered: [], tags: [] }, MCP))
       .toEqual({ id: 'from-claude', status: DECISION_STATUS.accepted, superseded: null })
     // the log is the truth this asserts against: the read model is a projection of it
     const written = (await r.storage.events.all()).filter(e => e.kind === EVENT_KIND.memory_written).map(e => MemoryWrittenPayload.parse(e.payload))
@@ -190,7 +190,7 @@ describe('the decision door', () => {
   // apart in the log is the attribution failure this source vocabulary exists to end.
   it('recordDecision from the web door records cli, in the log and in what a reader sees', async () => {
     const r = await setupWithSurreal()
-    expect(await r.actions.recordDecision({ title: 'From the web', context: 'c', decision: 'd', consequences: 'q', tags: [] }, WEB))
+    expect(await r.actions.recordDecision({ title: 'From the web', context: 'c', decision: 'd', consequences: 'q', considered: [], tags: [] }, WEB))
       .toEqual({ id: 'from-the-web', status: DECISION_STATUS.accepted, superseded: null })
     const written = (await r.storage.events.all()).filter(e => e.kind === EVENT_KIND.memory_written).map(e => MemoryWrittenPayload.parse(e.payload))
     expect(written.at(-1)?.author).toMatchObject({ source: AUTHOR_SOURCE.cli, workspaceId: TEST_WORKSPACE_ID })

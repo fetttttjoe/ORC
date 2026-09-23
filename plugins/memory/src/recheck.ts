@@ -1,5 +1,5 @@
 import { DRIFT_STATE, EVENT_KIND, LINK_KIND, NOTE_TIER, foldMemory, noteKey, type EventKind, type EventRecord } from '@orc/contracts'
-import { noteDriftState, type ChangedSince } from './drift'
+import { readNoteDrift, type DriftableNote, type DriftSources } from './claim-drift-read'
 import { KNOWLEDGE_KINDS } from './projector'
 import type { NoteFacts, Verdict } from './archive'
 
@@ -30,7 +30,7 @@ const RETIRING_LINK: ReadonlySet<string> = new Set([LINK_KIND.supersedes, LINK_K
 const TASK_BOUND: ReadonlySet<string> = new Set([NOTE_TIER.plan, NOTE_TIER.episodic])
 
 export interface RecheckDeps {
-  changedSince: ChangedSince
+  drift: DriftSources
   /** tasks that can no longer run — a task-bound note outlives its task only while it may be retried */
   terminalTaskIds: ReadonlySet<string>
 }
@@ -44,6 +44,12 @@ export interface RecheckedNote extends NoteFacts {
   sourceRevision: string | null
   /** what the note declares it describes — echoed so a report can show what a verdict was measured against */
   paths: readonly string[]
+  /** the claims whose own anchors moved — what a heal has to re-ground, instead of the whole note */
+  suspectClaims: string[]
+  /** claims nothing could be compared for: no stamped blob, or a probe that could not answer */
+  unknownClaims: string[]
+  /** was anything actually compared — an unstamped, path-less or wholly unanchored note is not \"current\" */
+  checkable: boolean
 }
 
 export async function recheckNotes(events: EventRecord[], deps: RecheckDeps): Promise<RecheckedNote[]> {
@@ -73,19 +79,17 @@ export async function recheckNotes(events: EventRecord[], deps: RecheckDeps): Pr
     const key = noteKey(note.scope, note.id)
     // `paths` exists on the semantic tier only, so the folded note is a union — read it the same
     // widened way corpusDrift does rather than narrowing per tier at every call site.
-    const withPaths: { sourceRevision: string | null; paths?: readonly string[]; verified?: { revision: string } } = note
+    const withPaths: DriftableNote = note
     const declared: readonly string[] = withPaths.paths ?? []
-    const state = await noteDriftState(
-      { sourceRevision: withPaths.sourceRevision, paths: declared, ...(withPaths.verified && { verified: withPaths.verified }) },
-      deps.changedSince,
-    )
+    const drift = await readNoteDrift(withPaths, deps.drift)
     const taskId = author.taskId ?? ''
     // the fold's outcome tallies, flattened to the counts archive.ts rules on (it takes no dates)
     const use = fold.outcomes.get(key)
     out.push({
       key, id: note.id, scope: note.scope, title: note.title, tier: note.tier, paths: declared,
       sourceRevision: withPaths.sourceRevision,
-      verdict: verdictOf(state),
+      verdict: verdictOf(drift.state),
+      suspectClaims: drift.suspectClaims, unknownClaims: drift.unknownClaims, checkable: drift.checkable,
       retiredBy: retiredBy.get(key) ?? [],
       // self-links would otherwise make a note its own protector
       inboundFrom: (inboundFrom.get(key) ?? []).filter(k => k !== key),
@@ -117,13 +121,10 @@ export interface RecheckSummary {
   uncheckable: number
 }
 
-/** what the drift check needs to have anything to compare — the same pair corpusDrift requires */
-const isCheckable = (n: RecheckedNote): boolean => n.sourceRevision !== null && n.paths.length > 0
-
 export const summarize = (notes: readonly RecheckedNote[]): RecheckSummary => ({
   total: notes.length,
-  clean: notes.filter(n => n.verdict === 'clean' && isCheckable(n)).length,
+  clean: notes.filter(n => n.verdict === 'clean' && n.checkable).length,
   drifted: notes.filter(n => n.verdict === 'drifted').length,
   unknown: notes.filter(n => n.verdict === 'unknown').length,
-  uncheckable: notes.filter(n => n.verdict === 'clean' && !isCheckable(n)).length,
+  uncheckable: notes.filter(n => n.verdict === 'clean' && !n.checkable).length,
 })

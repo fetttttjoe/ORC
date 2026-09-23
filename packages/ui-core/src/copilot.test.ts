@@ -316,9 +316,9 @@ describe('decisions at the doors', () => {
     const calls: unknown[] = []
     const actions = actionsStub({ recordDecision: async input => { calls.push(input); return { id: 'x', status: DECISION_STATUS.accepted, superseded: null } } })
     const tools = buildCopilotTools({ sessions: stubSessions, actions, projectId: 'p1', origin: ORIGIN })
-    const r = await callTool(tools, 'record_decision', { title: 'X', context: 'c', decision: 'd', consequences: 'q' })
+    const r = await callTool(tools, 'record_decision', { title: 'X', context: 'c', decision: 'd', consequences: 'q', considered: ['the other way'] })
     expect(r.output).toEqual({ id: 'x', status: DECISION_STATUS.accepted, superseded: null })
-    expect(calls).toEqual([{ title: 'X', context: 'c', decision: 'd', consequences: 'q', tags: [] }])
+    expect(calls).toEqual([{ title: 'X', context: 'c', decision: 'd', consequences: 'q', considered: ['the other way'], tags: [] }])
     // the door refuses a status the vocabulary does not have BEFORE actions sees it
     expect((await callTool(tools, 'record_decision', { title: 'X', context: 'c', decision: 'd', consequences: 'q', status: 'final' })).isError).toBe(true)
     expect(Object.keys(buildCopilotTools({ sessions: stubSessions, actions: null, projectId: 'p1', origin: ORIGIN }))).not.toContain('record_decision')

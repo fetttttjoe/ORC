@@ -2,7 +2,7 @@ import { describe, expect, it } from 'bun:test'
 import { MemoryNoteInput, NOTE_TIER, type MemoryNote, type VerifiedStamp } from '@orc/contracts'
 import { TEST_WORKSPACE_ID } from '@orc/contracts/fixtures'
 import { measureDrift } from './index'
-import type { ChangedSince } from './drift'
+import type { DriftSources } from './claim-drift-read'
 
 // The corpus drift reading behind `orc status` and needsReground. Measured HERE rather than through
 // probeMemory, because what this exercises is the mapping from stored notes into the drift check —
@@ -19,7 +19,10 @@ const note = (over: Record<string, unknown> = {}, verified?: VerifiedStamp): Mem
     ...(verified && { verified }),
   }
 }
-const probe = (changed: Record<string, string[]>): ChangedSince => async rev => new Set(changed[rev] ?? [])
+const probe = (changed: Record<string, string[]>): DriftSources => ({
+  changedSince: async rev => new Set(changed[rev] ?? []),
+  blobsAt: async () => new Map(),
+})
 const allNotes = (notes: MemoryNote[]) => ({ allNotes: async () => notes })
 
 describe('measureDrift', () => {

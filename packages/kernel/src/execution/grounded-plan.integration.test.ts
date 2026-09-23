@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import {
-  AUTHOR_SOURCE, Confidence, Door, EVENT_KIND, FINISH_STEP_ID, IsolationTier, LINK_KIND, NO_CHAT, NOTE_TIER, PAYLOAD_SCHEMAS, SignalOutcome, TASK_STATUS, type NoteView,
+  AUTHOR_SOURCE, Confidence, Door, EVENT_KIND, FINISH_STEP_ID, IsolationTier, LINK_KIND, NO_CHAT, NOTE_KIND, NOTE_TIER, PAYLOAD_SCHEMAS, SignalOutcome, TASK_STATUS, type NoteView,
   type AgentExecutor, type Analyzer, type CoverageReport, type EventDraft, type ExecutorContext,
   type MemoryNoteDraft, type Origin, type PlanStep, type ResolvedTool,
   type SplitResult, type UnifiedEvent,
@@ -83,7 +83,7 @@ function groundedFake(): AgentExecutor<unknown> {
         const answer = yield { type: 'feedback', question: 'May I analyze the codebase to ground the plan? (yes/no)', topic: 'consent', toolCallId: 'consent-1' }
         const analyzed = answer === 'yes'
         if (analyzed)
-          await write('analysis', { id: 'analysis', title: 'Architecture', kind: 'architecture_current', body: 'observed layering', summary: 'the shape of the code', paths: ['src/'] })
+          await write('analysis', { id: 'analysis', title: 'Architecture', kind: NOTE_KIND.architecture_current, body: 'observed layering', summary: 'the shape of the code', paths: ['src/'] })
         // The production report_coverage tool emits analysis_completed through Kernel.reportCoverage.
         // This scripted executor checkpoints the equivalent event directly; persisted plan-note
         // uncertainty below remains the end-to-end proof that degraded analysis affects planning.

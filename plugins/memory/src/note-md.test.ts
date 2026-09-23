@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'bun:test'
-import { claimId, DECISION_STATUS, NOTE_KIND, type SemanticNote, LINK_KIND } from '@orc/contracts'
-import { planNoteFixture, semanticNoteFixture } from '@orc/contracts/fixtures'
+import { ClaimClass, claimId, DECISION_STATUS, NOTE_KIND, type SemanticNote, LINK_KIND } from '@orc/contracts'
+import { claimFixture, planNoteFixture, semanticNoteFixture } from '@orc/contracts/fixtures'
 import { CLAIMS_HEADING, noteRelPath, renderNoteFile } from './note-md'
 
 const SINGLE_USE = 'Refresh tokens are single-use.'
@@ -11,7 +11,9 @@ const note = (over: Partial<SemanticNote> & { id: string }): SemanticNote => sem
   categories: ['architecture', 'security'], tags: ['auth'],
   links: [{ id: 'session-model', kind: LINK_KIND.refines }, { id: 'cookie-auth', kind: LINK_KIND.supersedes, confidence: 0.9 }],
   paths: ['packages/kernel/src/auth.ts'],
-  claims: [{ id: claimId(SINGLE_USE), text: SINGLE_USE, sourceRevision: 'abc123def' }],
+  claims: [claimFixture(SINGLE_USE, {
+    class: ClaimClass.why, anchors: [{ path: 'packages/kernel/src/auth.ts', symbol: null, blob: 'aaa' }], sourceRevision: 'abc123def',
+  })],
   summary: 'Refresh tokens rotate on use.', body: '# Detail\nrotation logic',
   createdAt: '2026-07-18T09:12:04Z', createdBy: 'api-loop·sonnet-5·research',
   updatedAt: '2026-07-18T11:30:22Z', updatedBy: 'api-loop·opus·review', revision: 3,
@@ -44,10 +46,10 @@ describe('renderNoteFile', () => {
     expect(md).toContain('kind: supersedes')
     expect(md).toContain('confidence: 0.9')
   })
-  it('renders claims with their ids so a human can invalidate one by name', () => {
+  it('renders each claim with its id, class, text and anchor paths', () => {
     const md = renderNoteFile(note({ id: 'auth-token-refresh' }))
     expect(md).toContain(CLAIMS_HEADING)
-    expect(md).toContain(`- [${claimId(SINGLE_USE)}] ${SINGLE_USE}`)
+    expect(md).toContain(`- [${claimId(SINGLE_USE)}] (${ClaimClass.why}) ${SINGLE_USE} — packages/kernel/src/auth.ts`)
     // the id is what `orc memory claims --invalidate` takes, so it has to be readable off the file
     expect(md).toContain(claimId(SINGLE_USE))
   })
@@ -96,7 +98,7 @@ describe('renderNoteFile', () => {
 
   it('renders citations with their retrieval time, and no empty section when uncited', () => {
     const cited = renderNoteFile(note({
-      id: 'finding', kind: 'research',
+      id: 'finding', kind: NOTE_KIND.research,
       sources: [
         { url: 'https://example.test/a', title: 'Paper A', retrievedAt: '2026-07-18T00:00:00Z' },
         { url: 'https://example.test/b', retrievedAt: '2026-07-18T00:00:00Z' },

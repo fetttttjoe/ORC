@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test'
-import { AUTHOR_SOURCE, DECISION_STATUS, Door, EVENT_KIND, type EventRecord, type Origin } from '@orc/contracts'
+import { AUTHOR_SOURCE, DECISION_STATUS, Door, EVENT_KIND, NOTE_KIND, type EventRecord, type Origin } from '@orc/contracts'
 import { authorFixture } from '@orc/contracts/fixtures'
 import { notesWrittenBy } from './task-notes'
 
@@ -37,7 +37,7 @@ describe('notesWrittenBy', () => {
       deleted('t2', 'swept'),
       written('t1', { id: 'd', title: 'D', summary: '', kind: 'decision', status: 'accepted' }),
     ], 't1')
-    expect(rows).toEqual([{ id: 'd', scope: 'project', title: 'D', summary: '', kind: 'decision', status: DECISION_STATUS.accepted, archived: false }])
+    expect(rows).toEqual([{ id: 'd', scope: 'project', title: 'D', summary: '', kind: NOTE_KIND.decision, status: DECISION_STATUS.accepted, archived: false }])
   })
 
   // LAST WRITER WINS, and archiving IS a write (a memory_written carrying archived: true). Both
@@ -64,7 +64,7 @@ describe('notesWrittenBy', () => {
       written('t1', { id: 'retired', title: 'Retired', summary: '' }),
       written('t1', { id: 'retired', title: 'Retired', summary: '', archived: true }),
     ], 't1')
-    expect(rows).toEqual([{ id: 'retired', scope: 'project', title: 'Retired', summary: '', kind: 'fact', archived: true }])
+    expect(rows).toEqual([{ id: 'retired', scope: 'project', title: 'Retired', summary: '', kind: NOTE_KIND.fact, archived: true }])
   })
 
   // Typed through this alias rather than written inline: the parameter is Pick<EventRecord, 'kind' |

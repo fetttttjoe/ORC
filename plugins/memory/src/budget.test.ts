@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'bun:test'
 import { claimId } from '@orc/contracts'
-import { planNoteFixture, semanticNoteFixture } from '@orc/contracts/fixtures'
+import { claimFixture, planNoteFixture, semanticNoteFixture } from '@orc/contracts/fixtures'
 import { applyBudget, approxTokens, fitMemoryNoteToBudget, TRIM_MARKER } from './budget'
 
 describe('applyBudget', () => {
@@ -24,8 +24,8 @@ describe('fitMemoryNoteToBudget', () => {
   // fits, the statements are what a reader can act on. Pinned because the ordering is implicit in
   // the refill ladder — every list refills ahead of the long prose, and nothing else says so.
   it('spends the budget on claims and makes the body pay', () => {
-    const claims = [{ id: claimId('keep me'), text: 'keep me', sourceRevision: null }]
-    const fitted = fitMemoryNoteToBudget(semanticNoteFixture({ body: 'x'.repeat(5_000), claims }), 20).note
+    const claims = [claimFixture('keep me')]
+    const fitted = fitMemoryNoteToBudget(semanticNoteFixture({ body: 'x'.repeat(5_000), claims }), 60).note
     expect(fitted.claims).toEqual(claims)            // the retrieval surface survives intact
     expect(fitted.body ?? '').toEndWith(TRIM_MARKER) // the fidelity layer is what got cut for it
   })

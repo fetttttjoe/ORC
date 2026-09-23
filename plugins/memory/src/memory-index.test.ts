@@ -2,7 +2,7 @@ import { afterAll, describe, expect, it } from 'bun:test'
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import { NOTE_KINDS, type EventRecord, type SemanticNote, EVENT_KIND, LINK_KIND } from '@orc/contracts'
+import { NoteKind, NOTE_KIND, type EventRecord, type SemanticNote, EVENT_KIND, LINK_KIND } from '@orc/contracts'
 import { SurrealMemory } from './surreal'
 import { authorFixture, episodicNoteFixture, eventFixture, planNoteFixture, semanticNoteFixture } from '@orc/contracts/fixtures'
 import { createTestSurreal } from './test-helpers'
@@ -21,7 +21,7 @@ describe('renderMemoryIndex', () => {
   // live markdown — every note in the section disappears from the human-facing index.
   it('keeps an agent-authored newline from escaping the mermaid block', () => {
     const md = renderMemoryIndex([
-      note({ id: 'evil', kind: 'architecture_current', title: 'Auth\n```\n## Injected heading' }),
+      note({ id: 'evil', kind: NOTE_KIND.architecture_current, title: 'Auth\n```\n## Injected heading' }),
     ])
     const lines = md.split('\n')
     // the whole label stays one mermaid statement — nothing of it lands as document markdown
@@ -32,11 +32,11 @@ describe('renderMemoryIndex', () => {
 
   it('groups notes into current/target/decision sections with labeled edges and note links', () => {
     const notes = [
-      note({ id: 'db', kind: 'architecture_current', title: 'Postgres log', links: [{ id: 'events', kind: LINK_KIND.depends_on }] }),
-      note({ id: 'events', kind: 'architecture_current', title: 'Event "envelope"' }),
-      note({ id: 'server', kind: 'architecture_target', title: 'Team server' }),
-      note({ id: 'why-pg', kind: 'decision', title: 'Why Postgres' }),
-      note({ id: 'plain', kind: 'fact', title: 'A fact' }),
+      note({ id: 'db', kind: NOTE_KIND.architecture_current, title: 'Postgres log', links: [{ id: 'events', kind: LINK_KIND.depends_on }] }),
+      note({ id: 'events', kind: NOTE_KIND.architecture_current, title: 'Event "envelope"' }),
+      note({ id: 'server', kind: NOTE_KIND.architecture_target, title: 'Team server' }),
+      note({ id: 'why-pg', kind: NOTE_KIND.decision, title: 'Why Postgres' }),
+      note({ id: 'plain', kind: NOTE_KIND.fact, title: 'A fact' }),
     ]
     const md = renderMemoryIndex(notes)
     expect(md).toContain('["Current architecture"]')
@@ -60,8 +60,8 @@ describe('renderMemoryIndex', () => {
   // memory_neighbors traversed it fine. One graph with subgraphs is what makes it visible.
   it('draws an edge whose endpoints are in different sections', () => {
     const md = renderMemoryIndex([
-      note({ id: 'summary', kind: 'fact', title: 'Summary', links: [{ id: 'finding', kind: LINK_KIND.derived_from }] }),
-      note({ id: 'finding', kind: 'research', title: 'Finding', sources: [{ url: 'https://e.test', retrievedAt: 'T' }] }),
+      note({ id: 'summary', kind: NOTE_KIND.fact, title: 'Summary', links: [{ id: 'finding', kind: LINK_KIND.derived_from }] }),
+      note({ id: 'finding', kind: NOTE_KIND.research, title: 'Finding', sources: [{ url: 'https://e.test', retrievedAt: 'T' }] }),
     ])
     expect(md).toContain('-->|derived_from|')
     expect(md.match(/```mermaid/g)).toHaveLength(1) // one graph, so cross-section edges CAN exist
@@ -80,10 +80,10 @@ describe('renderMemoryIndex', () => {
   // A kind missing from SECTIONS gets a note file but never appears in the human-facing index —
   // silently, since nothing errors. That is how `research` shipped: the sourced-research feature
   // writes cited findings that its own index then omits. Pin every kind the renderer must place,
-  // so the next kind added to NOTE_KINDS fails here instead of going invisible.
+  // so the next kind added to NoteKind fails here instead of going invisible.
   it('places every note kind in a section — a new kind cannot go invisible', () => {
     const placed = new Set(SECTIONS.flatMap(s => s.kinds))
-    expect(NOTE_KINDS.filter(k => !placed.has(k))).toEqual([])
+    expect(Object.values(NoteKind).filter(k => !placed.has(k))).toEqual([])
   })
 
   // The index is the knowledge map: only the semantic tier claims anything about the project.
@@ -96,7 +96,7 @@ describe('renderMemoryIndex', () => {
 
   it('renders a research note into the index with its own section', () => {
     const md = renderMemoryIndex([
-      note({ id: 'pgvector', kind: 'research', title: 'pgvector recall past 1M rows',
+      note({ id: 'pgvector', kind: NOTE_KIND.research, title: 'pgvector recall past 1M rows',
         sources: [{ url: 'https://example.test/b', retrievedAt: 'T' }] }),
     ])
     expect(md).toContain('["Research"]')

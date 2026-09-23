@@ -1,11 +1,13 @@
 import { describe, expect, it } from 'bun:test'
 import { z } from 'zod'
-import { AUTHOR_SOURCE, claimId, CLAIM_ID_RE, DecisionStatus, Door, LINK_KIND, LINK_KINDS, MEMORY_ACCESS, MEMORY_LIMITS, type MemoryAuthor, type Origin, MemoryNoteInput, NOTE_KIND, NOTE_TIER, MemoryWriteResult, MEMORY_TOOL_NAME, STEP_ID, STEP_ROLE, VERIFY_STEP_ID, type AccessVia, type MemoryAccessMode, type MemoryFilter, type MemoryNote, type MemoryNoteDraft, type MemoryStore, type NoteSummary } from '@orc/contracts'
+import { AUTHOR_SOURCE, type Claim, ClaimClass, claimId, CLAIM_ID_RE, DecisionStatus, Door, MEMORY_ID_RE, EDGE_DIRECTION, LINK_KIND, LinkKind, MEMORY_ACCESS, MEMORY_LIMITS, type MemoryAuthor, type Origin, MemoryNoteInput, NOTE_KIND, NOTE_TIER, MemoryWriteResult, MEMORY_TOOL_NAME, STEP_ID, STEP_ROLE, VERIFY_STEP_ID, type AccessVia, type MemoryAccessMode, type MemoryFilter, type MemoryNote, type MemoryNoteDraft, type MemoryStore, type NoteSummary } from '@orc/contracts'
 import { TEST_WORKSPACE_ID, authorFixture, episodicNoteFixture, semanticNoteFixture, must } from '@orc/contracts/fixtures'
 import { approxTokens } from './budget'
-import { noopMemoryStore, summaryFixture } from './test-helpers'
+import { claimHitFixture, noopMemoryStore, summaryFixture } from './test-helpers'
 import { MEMORY_READ_TOOLS, memoryTools, memoryRoleFor, memoryVerifyTool, noteLint } from './tools'
 import type { ClaimHit } from './claim-search'
+import type { BlobsAt, DriftSources } from './claim-drift-read'
+import type { ChangedSince } from './drift'
 
 // field names retired from the note schema — collected here, not as scattered literals, because
 // more will accrue as the schema evolves (surreal.ts's Tb enum is the same precedent)
@@ -29,13 +31,32 @@ const toNote = (input: MemoryNoteDraft): MemoryNote => {
 
 const summary = (id: string, title: string): NoteSummary => summaryFixture({ id, title, summary: 's' })
 
+/** a path the caller does not name is one the probe could not answer for, never a deletion */
+const blobsOf = (blobs: Record<string, string | null>): BlobsAt => async paths => {
+  const out = new Map<string, string | null>()
+  for (const p of paths) {
+    const seen = blobs[p]
+    if (seen !== undefined) out.set(p, seen)
+  }
+  return out
+}
+const driftOf = (changedSince: ChangedSince, blobs: Record<string, string | null> = {}): DriftSources =>
+  ({ changedSince, blobsAt: blobsOf(blobs) })
+
+const MOVED_CLAIM = 'a'.repeat(12)
+const STILL_CLAIM = 'b'.repeat(12)
+const claimAt = (id: string, path: string, blob: string): Claim => ({
+  id, text: `statement ${id}`, class: ClaimClass.fact, sourceRevision: 'abc1234',
+  anchors: [{ path, symbol: null, blob }], validFrom: '2026-08-02T00:00:00.000Z',
+})
+
 const fakeStore = (over: Partial<MemoryStore> = {}) => {
-  const written: { input: MemoryNoteDraft; author: unknown; idempotencyKey?: string; invalidates?: string[] }[] = []
+  const written: { input: MemoryNoteDraft; author: unknown; idempotencyKey?: string; invalidates?: string[]; why?: string; decision?: string }[] = []
   const accessed: { id: string; scope?: string; mode: MemoryAccessMode; author: unknown; via?: AccessVia }[] = []
   const verified: { id: string; scope?: string; author: unknown; idempotencyKey?: string }[] = []
   const store: MemoryStore = {
     ...noopMemoryStore(),
-    write: async (input, author, opts) => { written.push({ input, author, idempotencyKey: opts?.idempotencyKey, invalidates: opts?.invalidates }); return toNote(input) },
+    write: async (input, author, opts) => { written.push({ input, author, idempotencyKey: opts?.idempotencyKey, invalidates: opts?.invalidates, why: opts?.why, decision: opts?.decision }); return toNote(input) },
     get: async () => toNote({ id: 'auth', title: 'Auth', body: 'b' }),
     search: async () => [summary('auth', 'Auth')],
     recordAccess: async (id, scope, mode, author, opts) => { accessed.push({ id, scope, mode, author, via: opts?.via }) },
@@ -455,8 +476,7 @@ describe('memory tools', () => {
     const { store } = fakeStore({ search: async () => [stale, fresh], searchClaims: async () => [] })
     // only src/x.ts moved since abc1234 -> area-x is stale, area-y is not; a searcher acting on a
     // matched claim must be told, not only a reader who pulls the full note.
-    const changedSince = async () => new Set(['src/x.ts'])
-    const search = must(memoryTools({ store, author: CLI, changedSince }).find(t => t.name === 'memory_search'), 'memory_search tool')
+    const search = must(memoryTools({ store, author: CLI, drift: driftOf(async () => new Set(['src/x.ts'])) }).find(t => t.name === 'memory_search'), 'memory_search tool')
     const out = z.object({ drifted: z.array(z.string()).optional() }).parse((await search.execute({ query: 'x' })).output)
     expect(out.drifted).toEqual(['area-x'])
   })
@@ -511,7 +531,7 @@ describe('memory tools', () => {
   it('memory_neighbors counts the provisional key against the budget too', async () => {
     const rows = Array.from({ length: 6 }, (_, i) => ({
       id: `n${i}`, title: 'Area note', summary: 's', via: LINK_KIND.refines, depth: 1, score: 1,
-      direction: 'out' as const, activation: 0, workspaceId: 'w1',
+      direction: EDGE_DIRECTION.out, activation: 0, workspaceId: 'w1',
     }))
     const { store } = fakeStore({ neighbors: async () => rows })
     const budget = approxTokens(JSON.stringify(rows[0])) * 3
@@ -552,8 +572,7 @@ describe('memory tools', () => {
     const { store } = fakeStore({ search: async () => [unreachable], searchClaims: async () => [] })
     // changedSince resolves null for every revision here — rebased away / shallow clone — so the
     // note's drift verdict cannot be judged at all, distinct from a note checked and found clean.
-    const changedSince = async () => null
-    const search = must(memoryTools({ store, author: CLI, changedSince }).find(t => t.name === 'memory_search'), 'memory_search tool')
+    const search = must(memoryTools({ store, author: CLI, drift: driftOf(async () => null) }).find(t => t.name === 'memory_search'), 'memory_search tool')
     const out = z.object({ drifted: z.array(z.string()).optional(), unknown: z.array(z.string()).optional() })
       .parse((await search.execute({ query: 'x' })).output)
     expect(out.unknown).toEqual(['area-x'])
@@ -581,8 +600,7 @@ describe('memory tools', () => {
       const { store } = fakeStore({ list: async () => corpus })
       // only src/x.ts moved since abc1234 → area-drifted is stale, area-clean checked out,
       // area-pathless declares nothing and can never be checked (fail-toward-not-drifted)
-      const changedSince = async () => new Set(['src/x.ts'])
-      const recheck = must(memoryTools({ store, author: CLI, changedSince }).find(t => t.name === 'memory_recheck'), 'memory_recheck tool')
+      const recheck = must(memoryTools({ store, author: CLI, drift: driftOf(async () => new Set(['src/x.ts'])) }).find(t => t.name === 'memory_recheck'), 'memory_recheck tool')
       const r = await recheck.execute({})
       expect(r.isError).toBeFalsy()
       const out = RecheckOutput.parse(r.output)
@@ -594,8 +612,7 @@ describe('memory tools', () => {
 
     it('an unreachable revision lists under unknown, never drifted', async () => {
       const { store } = fakeStore({ list: async () => [must(corpus[1], 'corpus[1]')] })
-      const changedSince = async () => null // rebased away / shallow clone
-      const recheck = must(memoryTools({ store, author: CLI, changedSince }).find(t => t.name === 'memory_recheck'), 'memory_recheck tool')
+      const recheck = must(memoryTools({ store, author: CLI, drift: driftOf(async () => null) }).find(t => t.name === 'memory_recheck'), 'memory_recheck tool')
       const out = RecheckOutput.parse((await recheck.execute({})).output)
       expect(out.counts).toEqual({ total: 1, checkable: 0, drifted: 0, unknown: 1, uncheckable: 0 })
       expect(out.unknown).toEqual([{ id: 'area-drifted', scope: 'project', title: 'Drifted area' }])
@@ -612,8 +629,7 @@ describe('memory tools', () => {
       }
       const { store } = fakeStore({ list: async () => [verified] })
       // src/x.ts moved since the SOURCE stamp but not since the VERIFIED one
-      const changedSince = async (rev: string) => (rev === 'old1234' ? new Set(['src/x.ts']) : new Set<string>())
-      const recheck = must(memoryTools({ store, author: CLI, changedSince }).find(t => t.name === 'memory_recheck'), 'memory_recheck tool')
+      const recheck = must(memoryTools({ store, author: CLI, drift: driftOf(async rev => (rev === 'old1234' ? new Set(['src/x.ts']) : new Set<string>())) }).find(t => t.name === 'memory_recheck'), 'memory_recheck tool')
       const out = RecheckOutput.parse((await recheck.execute({})).output)
       expect(out.counts).toEqual({ total: 1, checkable: 1, drifted: 0, unknown: 0, uncheckable: 0 })
       expect(out.drifted).toEqual([])
@@ -631,8 +647,7 @@ describe('memory tools', () => {
 
     it('a clean checkable corpus says so affirmatively — silence is not trust', async () => {
       const { store } = fakeStore({ list: async () => [must(corpus[0], 'corpus[0]')] })
-      const changedSince = async () => new Set(['src/elsewhere.ts'])
-      const recheck = must(memoryTools({ store, author: CLI, changedSince }).find(t => t.name === 'memory_recheck'), 'memory_recheck tool')
+      const recheck = must(memoryTools({ store, author: CLI, drift: driftOf(async () => new Set(['src/elsewhere.ts'])) }).find(t => t.name === 'memory_recheck'), 'memory_recheck tool')
       const out = RecheckOutput.parse((await recheck.execute({})).output)
       expect(out.counts.drifted).toBe(0)
       expect(out.absenceNote).toBe('nothing drifted — every checkable note describes the tree as it is')
@@ -642,17 +657,35 @@ describe('memory tools', () => {
       let seenFilter: unknown
       const { store } = fakeStore({ list: async filter => { seenFilter = filter; return [] } })
       const lanes = ['plan-task-a', 'project'] as const
-      const recheck = must(memoryTools({ store, author: CLI, searchScope: lanes, changedSince: async () => new Set<string>() }).find(t => t.name === 'memory_recheck'), 'memory_recheck tool')
+      const recheck = must(memoryTools({ store, author: CLI, searchScope: lanes, drift: driftOf(async () => new Set<string>()) }).find(t => t.name === 'memory_recheck'), 'memory_recheck tool')
       await recheck.execute({})
       expect(seenFilter).toEqual({ scope: ['plan-task-a', 'project'] })
+    })
+
+    it('names the suspect claim ids on a note whose claims disagree with the tree', async () => {
+      const claimed = { ...summary('area-claimed', 'Claimed area'), sourceRevision: 'abc1234', paths: ['src/x.ts'] }
+      const { store } = fakeStore({
+        list: async () => [claimed],
+        claimsFor: async () => [claimAt(MOVED_CLAIM, 'src/x.ts', 'blob-1'), claimAt(STILL_CLAIM, 'src/y.ts', 'blob-2')],
+      })
+      // nothing is reported moved by the note-path probe: the verdict comes from the anchors alone
+      const recheck = must(memoryTools({
+        store, author: CLI,
+        drift: driftOf(async () => new Set<string>(), { 'src/x.ts': 'blob-9', 'src/y.ts': 'blob-2' }),
+      }).find(t => t.name === 'memory_recheck'), 'memory_recheck tool')
+      const out = z.object({
+        counts: z.object({ drifted: z.number() }),
+        drifted: z.array(z.object({ id: z.string(), suspectClaims: z.array(z.string()).optional() })),
+      }).parse((await recheck.execute({})).output)
+      expect(out.counts.drifted).toBe(1)
+      expect(out.drifted[0]?.suspectClaims).toEqual([MOVED_CLAIM])
     })
 
     it('budgets the drifted listing with the serialized measure — counts stay authoritative', async () => {
       const many: NoteSummary[] = Array.from({ length: 30 }, (_, i) =>
         ({ ...summary(`stale-${i}`, `Stale ${i}`), sourceRevision: 'abc1234', paths: ['src/x.ts'] }))
       const { store } = fakeStore({ list: async () => many })
-      const changedSince = async () => new Set(['src/x.ts'])
-      const recheck = must(memoryTools({ store, author: CLI, changedSince }).find(t => t.name === 'memory_recheck'), 'memory_recheck tool')
+      const recheck = must(memoryTools({ store, author: CLI, drift: driftOf(async () => new Set(['src/x.ts'])) }).find(t => t.name === 'memory_recheck'), 'memory_recheck tool')
       const out = z.object({
         counts: z.object({ drifted: z.number() }), drifted: z.array(z.unknown()), truncated: z.boolean(),
       }).parse((await recheck.execute({ budget: 30 })).output)
@@ -676,7 +709,7 @@ describe('memory tools', () => {
   })
 
   it('memory_neighbors traverses from a seed and returns ranked neighbours', async () => {
-    const { store } = fakeStore({ neighbors: async () => [{ id: 'b', title: 'B', summary: 's', via: 'supersedes', depth: 1, score: 1, direction: 'out', activation: 0, workspaceId: TEST_WORKSPACE_ID }] })
+    const { store } = fakeStore({ neighbors: async () => [{ id: 'b', title: 'B', summary: 's', via: LINK_KIND.supersedes, depth: 1, score: 1, direction: EDGE_DIRECTION.out, activation: 0, workspaceId: TEST_WORKSPACE_ID }] })
     const nb = must(memoryTools({ store, author: CLI }).find(t => t.name === 'memory_neighbors'), 'memory_neighbors tool')
     const r = await nb.execute({ seed: 'a' })
     const out = NeighborsOutput.parse(r.output)
@@ -709,7 +742,7 @@ describe('memory tools', () => {
     const oversized = {
       ...toNote({ id: 'auth', title: 'Auth' }),
       claims: Array.from({ length: 1_000 }, (_, i) =>
-        ({ id: claimId(`c-${i}`), text: `claim-${i}-${'x'.repeat(100)}`, sourceRevision: null })),
+        ({ id: claimId(`c-${i}`), text: `claim-${i}-${'x'.repeat(100)}`, class: ClaimClass.fact, anchors: [], sourceRevision: null })),
     }
     const { store } = fakeStore({ get: async () => oversized })
     const read = must(memoryTools({ store, author: CLI }).find(t => t.name === 'memory_read'), 'memory_read tool')
@@ -771,7 +804,7 @@ describe('memory tools', () => {
     expect(r.output).toMatchObject({ note: "no note matched — absence is not proof a decision doesn't exist" })
   })
 
-  // category is a FIXED three-value vocabulary (contracts' NOTE_CATEGORIES) — an unknown value is
+  // category is a FIXED three-value vocabulary (contracts' NoteCategory) — an unknown value is
   // refused at the boundary, naming the real set, the same discipline packages/cli/src/main.ts's
   // parseNoteTier and the `mem neighbors --kinds` option already apply to their own enums.
   it('memory_search refuses an unknown category, naming the known set', async () => {
@@ -807,7 +840,7 @@ describe('memory tools', () => {
     expect(good.isError).toBeFalsy()
   })
 
-  // kind is a FIXED vocabulary (contracts' NOTE_KINDS), so it validates like `category` and NOT
+  // kind is a FIXED vocabulary (contracts' NoteKind), so it validates like `category` and NOT
   // like `tag`: an unknown value is refused naming the real set, but a real kind the corpus does
   // not currently carry returns EMPTY. That difference is load-bearing — a planner reading "which
   // decisions does this project hold" meets the empty corpus on its very first run, and `tag`'s
@@ -876,7 +909,7 @@ describe('memory tools', () => {
   it('memory_read with via forwards opts.via — the traversed edge strengthens alongside the node', async () => {
     const { store, accessed } = fakeStore()
     const read = must(memoryTools({ store, author: CLI }).find(t => t.name === 'memory_read'), 'memory_read tool')
-    const via: AccessVia = { seed: 'net-topology', kind: LINK_KIND.supersedes, direction: 'out' }
+    const via: AccessVia = { seed: 'net-topology', kind: LINK_KIND.supersedes, direction: EDGE_DIRECTION.out }
     await read.execute({ id: 'auth', via })
     expect(accessed).toEqual([{ id: 'auth', scope: undefined, mode: MEMORY_ACCESS.read, author: CLI, via }])
   })
@@ -888,7 +921,7 @@ describe('memory tools', () => {
   })
 
   it('memory_neighbors records one traversal against the seed, and none when nothing came back', async () => {
-    const hit = fakeStore({ neighbors: async () => [{ id: 'b', title: 'B', summary: 's', via: 'supersedes', depth: 1, score: 1, direction: 'out', activation: 0, workspaceId: TEST_WORKSPACE_ID }] })
+    const hit = fakeStore({ neighbors: async () => [{ id: 'b', title: 'B', summary: 's', via: LINK_KIND.supersedes, depth: 1, score: 1, direction: EDGE_DIRECTION.out, activation: 0, workspaceId: TEST_WORKSPACE_ID }] })
     await must(memoryTools({ store: hit.store, author: CLI }).find(t => t.name === 'memory_neighbors'), 'memory_neighbors tool').execute({ seed: 'a' })
     expect(hit.accessed).toEqual([{ id: 'a', scope: undefined, mode: MEMORY_ACCESS.neighbors, author: CLI }])
 
@@ -1010,7 +1043,7 @@ describe('memory tools', () => {
       }),
     }).parse(props.via)
     expect(via.required.sort()).toEqual(['direction', 'kind', 'seed'])
-    expect(via.properties.kind.enum.sort()).toEqual([...LINK_KINDS].sort())
+    expect(via.properties.kind.enum.sort()).toEqual(Object.values(LinkKind).sort())
     expect(via.properties.direction.enum.sort()).toEqual(['in', 'out'])
   })
 
@@ -1213,10 +1246,22 @@ describe('drift on memory_read', () => {
   const note = (over: Partial<MemoryNoteDraft> = {}): MemoryNote =>
     toNote({ id: 'auth', title: 'Auth', body: 'b', paths: ['src/auth.ts'], ...over })
   const readTool = (get: () => Promise<MemoryNote>, changed: ReadonlySet<string> | null) =>
-    must(memoryTools({ store: fakeStore({ get: async () => await get() }).store, author: AGENT, changedSince: async () => changed })
+    must(memoryTools({ store: fakeStore({ get: async () => await get() }).store, author: AGENT, drift: driftOf(async () => changed) })
       .find(t => t.name === 'memory_read'), 'memory_read tool')
 
   const Read = z.object({ drifted: z.boolean().optional(), unknown: z.boolean().optional(), current: z.boolean().optional(), next: z.string().optional() })
+
+  it('names the suspect claim ids, not the whole note, when the note carries claims', async () => {
+    const claimed = note({ claims: [claimAt(MOVED_CLAIM, 'src/auth.ts', 'blob-1'), claimAt(STILL_CLAIM, 'src/token.ts', 'blob-2')] })
+    const read = must(memoryTools({
+      store: fakeStore({ get: async () => ({ ...claimed, sourceRevision: 'abc1234567' }) }).store, author: AGENT,
+      drift: driftOf(async () => new Set<string>(), { 'src/auth.ts': 'blob-9', 'src/token.ts': 'blob-2' }),
+    }).find(t => t.name === 'memory_read'), 'memory_read tool')
+    const out = z.object({ drifted: z.boolean().optional(), suspectClaims: z.array(z.string()).optional() })
+      .parse((await read.execute({ id: 'auth' }, 'c1')).output)
+    expect(out.drifted).toBe(true)
+    expect(out.suspectClaims).toEqual([MOVED_CLAIM])
+  })
 
   it('names the DECLARED PATHS in the hint, not a category', async () => {
     // `hintPaths` read `'paths' in fitted`, but the fitter returns an ENVELOPE ({note,truncated}),
@@ -1368,16 +1413,15 @@ describe('body length: advertised, not corrected', () => {
 })
 
 describe('claims through the tool surface', () => {
-  const claimHit = (over: Partial<ClaimHit> = {}): ClaimHit => ({
-    claimId: 'c1', noteId: 'n1', scope: 'project', title: 'N1',
-    text: 'the log is truth', validFrom: '2026-07-26T00:00:00.000Z', sourceRevision: null, paths: [], workspaceId: TEST_WORKSPACE_ID, ...over,
-  })
+  const claimHit = (over: Partial<ClaimHit> = {}): ClaimHit =>
+    claimHitFixture({ claimId: 'c1', noteId: 'n1', title: 'N1', text: 'the log is truth', validFrom: '2026-07-26T00:00:00.000Z', ...over })
 
   it('memory_write forwards addClaims on the draft and invalidates on the opts', async () => {
     const { store, written } = fakeStore()
     const write = must(memoryTools({ store, author: CLI }).find(t => t.name === 'memory_write'), 'memory_write tool')
-    await write.execute({ id: 'n', title: 'N', addClaims: ['a statement'], invalidates: ['deadbeef0000'] }, 'c1')
-    expect(written[0]?.input).toMatchObject({ addClaims: ['a statement'] })
+    const statement = { text: 'a statement', class: ClaimClass.fact, anchors: [{ path: 'packages/kernel/src/kernel.ts' }] }
+    await write.execute({ id: 'n', title: 'N', addClaims: [statement], invalidates: ['deadbeef0000'] }, 'c1')
+    expect(written[0]?.input).toMatchObject({ addClaims: [{ text: 'a statement', class: ClaimClass.fact, anchors: [{ path: 'packages/kernel/src/kernel.ts' }] }] })
     // invalidates is stated about the WRITE, so it rides the opts and lands on the event
     expect(written[0]?.invalidates).toEqual(['deadbeef0000'])
     // and it is never smuggled onto the note draft
@@ -1389,11 +1433,62 @@ describe('claims through the tool surface', () => {
     const write = must(memoryTools({ store, author: CLI }).find(t => t.name === 'memory_write'), 'memory_write tool')
     const props = WriteInputProps.parse(write.inputSchema).properties
     expect(props.addClaims).toMatchObject({
-      maxItems: MEMORY_LIMITS.detailItems, items: { maxLength: MEMORY_LIMITS.detailChars },
+      maxItems: MEMORY_LIMITS.detailItems,
+      items: {
+        type: 'object', required: ['text', 'class'],
+        properties: {
+          text: { maxLength: MEMORY_LIMITS.detailChars },
+          class: { enum: Object.values(ClaimClass) },
+          anchors: { maxItems: MEMORY_LIMITS.claimAnchors },
+        },
+      },
     })
     expect(props.invalidates).toMatchObject({ items: { pattern: CLAIM_ID_RE.source } })
     // the retired spelling is gone from the advertised surface entirely
     expect(props[RetiredField.Rules]).toBeUndefined()
+  })
+
+  // A reader asking "why is this true" reads the WRITE act, so the tool must offer the writer a
+  // place to say it and the decision it served.
+  it('memory_write advertises why and decision, and forwards both on the opts', async () => {
+    const { store, written } = fakeStore()
+    const write = must(memoryTools({ store, author: CLI }).find(t => t.name === 'memory_write'), 'memory_write tool')
+    const props = WriteInputProps.parse(write.inputSchema).properties
+    expect(props.why).toMatchObject({ maxLength: MEMORY_LIMITS.detailChars })
+    expect(props.decision).toMatchObject({ pattern: MEMORY_ID_RE.source })
+
+    await write.execute({ id: 'n', title: 'N', why: 'the walker now follows the barrel', decision: 'follow-the-barrel' }, 'c1')
+    expect(written[0]).toMatchObject({ why: 'the walker now follows the barrel', decision: 'follow-the-barrel' })
+    expect(written[0]?.input).not.toHaveProperty('why')
+    expect(written[0]?.input).not.toHaveProperty('decision')
+  })
+
+  // A claim is a classed, anchored statement now: the two shapes a model reaches for from memory —
+  // a bare string and an invented class — must both be refused where the writer can see which item
+  // is wrong, rather than half-written as an unanchored fact.
+  it('memory_write takes a classed, anchored claim', async () => {
+    const { store, written } = fakeStore()
+    const write = must(memoryTools({ store, author: CLI }).find(t => t.name === 'memory_write'), 'memory_write tool')
+    const r = await write.execute({ id: 'n', title: 'N', addClaims: [{ text: 'a statement', class: 'fact', anchors: [{ path: 'packages/kernel/src/kernel.ts' }] }] }, 'c1')
+    expect(r.isError ?? false).toBe(false)
+    expect(written[0]?.input).toMatchObject({ addClaims: [{ class: ClaimClass.fact, anchors: [{ path: 'packages/kernel/src/kernel.ts' }] }] })
+  })
+
+  it('memory_write refuses a bare string in addClaims, locating the item', async () => {
+    const { store, written } = fakeStore()
+    const write = must(memoryTools({ store, author: CLI }).find(t => t.name === 'memory_write'), 'memory_write tool')
+    const r = await write.execute({ id: 'n', title: 'N', addClaims: ['a statement'] }, 'c1')
+    expect(r.isError).toBe(true)
+    expect(JSON.stringify(r.output)).toContain('addClaims[0]')
+    expect(written).toEqual([])
+  })
+
+  it('memory_write refuses a class outside the vocabulary', async () => {
+    const { store, written } = fakeStore()
+    const write = must(memoryTools({ store, author: CLI }).find(t => t.name === 'memory_write'), 'memory_write tool')
+    const r = await write.execute({ id: 'n', title: 'N', addClaims: [{ text: 'a statement', class: 'story' }] }, 'c1')
+    expect(r.isError).toBe(true)
+    expect(written).toEqual([])
   })
 
   it('memory_search returns matched claims, not whole notes', async () => {
@@ -1413,13 +1508,13 @@ describe('claims through the tool surface', () => {
       claimHit({ claimId: `c${i}`, noteId: `n${i}`, title: 'T'.repeat(200), text: 'x' }))
     const { store } = fakeStore({ searchClaims: async () => many, search: async () => [] })
     const search = must(memoryTools({ store, author: CLI }).find(t => t.name === 'memory_search'), 'memory_search tool')
-    const r = await search.execute({ query: 'x', budget: 100 })
+    const r = await search.execute({ query: 'x', budget: 200 })
     const out = z.object({ claims: z.array(z.unknown()), truncated: z.boolean(), omitted: z.number() }).parse(r.output)
     expect(out.claims.length).toBeLessThan(many.length)
     expect(out.truncated).toBe(true)
     expect(out.omitted).toBe(many.length - out.claims.length)
     // and what actually goes out fits the budget it was measured against (approxTokens is chars/4)
-    expect(JSON.stringify(out.claims).length).toBeLessThanOrEqual(100 * 4)
+    expect(JSON.stringify(out.claims).length).toBeLessThanOrEqual(200 * 4)
   })
 
   it('an empty claim result still says absence is not proof', async () => {
@@ -1447,7 +1542,7 @@ describe('memory_topics', () => {
   })
 
   it('fetches one topic’s claims', async () => {
-    const claims = [{ id: 'aaaaaaaaaaa1', text: 'the log is truth', validFrom: '2026-07-26T00:00:00.000Z', sourceRevision: null }]
+    const claims = [{ id: 'aaaaaaaaaaa1', text: 'the log is truth', class: ClaimClass.fact, anchors: [], validFrom: '2026-07-26T00:00:00.000Z', sourceRevision: null }]
     const { store } = fakeStore({ topics: async () => [topic('aaaaaaaaaaa1', 'the log is truth')], topicClaims: async () => claims })
     const tool = must(memoryTools({ store, author: CLI }).find(t => t.name === 'memory_topics'), 'memory_topics tool')
     const out = z.object({ claims: z.array(z.object({ text: z.string() })) })

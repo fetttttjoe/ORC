@@ -1,16 +1,20 @@
 import { describe, expect, it } from 'bun:test'
 import {
-  AUTHOR_SOURCE, Door, LINK_KIND, MEMORY_ACCESS, MEMORY_USE, MemoryScope, NOTE_TIER, SignalOutcome, planScope, slugId,
+  AUTHOR_SOURCE, Door, EDGE_DIRECTION, LINK_KIND, MEMORY_ACCESS, MEMORY_USE, MemoryScope, NOTE_TIER, SignalOutcome, planScope, slugId,
   type ClaimHit, type MemoryAuthor, MemoryNote, type MemoryNoteDraft, type MemoryStore, type NoteSummary,
 } from '@orc/contracts'
 import { bindStepMemory, deriveQueryTerms, preloadQuery } from './step'
-import { noopMemoryStore, summaryFixture } from './test-helpers'
+import type { BlobsAt, DriftSources } from './claim-drift-read'
+import type { ChangedSince } from './drift'
+import { claimHitFixture, noopMemoryStore, summaryFixture } from './test-helpers'
 import { authorFixture, semanticNoteFixture, TEST_WORKSPACE_ID } from '@orc/contracts/fixtures'
 
 // The step reads and writes from inside its own run, so the origin is that run's chat.
 const AUTHOR: MemoryAuthor = authorFixture({ source: AUTHOR_SOURCE.agent, taskId: 'task-1', stepId: 'implement', runToken: 'rt-1', origin: { chatId: 'run:task-1:implement', door: Door.supervisor } })
 
 const summary = (over: Partial<NoteSummary> = {}): NoteSummary => summaryFixture({ id: 'area-memory', title: 'Memory area', summary: 'How memory works.', ...over })
+
+const NO_BLOBS: BlobsAt = async () => new Map()
 
 interface Recorded { id: string; scope: string | undefined; mode: string }
 
@@ -103,7 +107,7 @@ describe('recall', () => {
 
   it('recalls claims alongside notes, and records ONE access per owning note', async () => {
     const hit = (claimId: string, noteId: string) =>
-      ({ claimId, noteId, scope: 'project', title: noteId, text: `statement ${claimId}`, validFrom: '2026-07-26T00:00:00.000Z', sourceRevision: null, paths: [], workspaceId: TEST_WORKSPACE_ID })
+      claimHitFixture({ claimId, noteId, title: noteId, text: `statement ${claimId}` })
     // two claims on ONE note plus a note-arm hit for the same note: the activation signal counts
     // notes, so a preload must not charge that note three times
     const f = fakeStore({ searchClaims: () => [hit('c1', 'area-memory'), hit('c2', 'area-memory')], search: () => [summary()] })
@@ -119,7 +123,7 @@ describe('recall', () => {
     // the retirement nudge then named half the notes the edit had falsified.
     const same = 'cluster.ts owns the pure algorithm'
     const shared = (noteId: string): ClaimHit =>
-      ({ claimId: 'dup12', noteId, scope: 'project', title: noteId, text: same, validFrom: '2026-07-26T00:00:00.000Z', sourceRevision: null, paths: [], workspaceId: TEST_WORKSPACE_ID })
+      claimHitFixture({ claimId: 'dup12', noteId, title: noteId, text: same })
     const f = fakeStore({ searchClaims: () => [shared('area-memory'), shared('area-cluster')] })
     const at = await bind(f).memory.claimsCiting(['plugins/memory/src/cluster.ts'])
     expect(at.map(h => h.noteId).sort()).toEqual(['area-cluster', 'area-memory'])
@@ -127,7 +131,7 @@ describe('recall', () => {
 
   it('claims alone are enough — the fallback chain stops without any note hit', async () => {
     const f = fakeStore({
-      searchClaims: () => [{ claimId: 'c1', noteId: 'n', scope: 'project', title: 'N', text: 'a statement', validFrom: '2026-07-26T00:00:00.000Z', sourceRevision: null, paths: [], workspaceId: TEST_WORKSPACE_ID }],
+      searchClaims: () => [claimHitFixture({ claimId: 'c1', noteId: 'n', title: 'N' })],
       search: () => [],
     })
     const { claims, notes } = await bind(f).memory.recall(500)
@@ -269,7 +273,7 @@ describe('capture', () => {
   it('a traversal seed counts as provenance, like a read', async () => {
     const f = fakeStore({ notes: { 'area-memory': semanticNoteFixture({ id: 'area-memory' }) } })
     // set before binding: the tracking decorator spreads the store, so later reassignment is unseen
-    f.store.neighbors = async () => [{ id: 'x', title: 'x', summary: '', via: LINK_KIND.refines, depth: 1, score: 1, direction: 'out', activation: 0, from: 'area-memory', workspaceId: TEST_WORKSPACE_ID }]
+    f.store.neighbors = async () => [{ id: 'x', title: 'x', summary: '', via: LINK_KIND.refines, depth: 1, score: 1, direction: EDGE_DIRECTION.out, activation: 0, from: 'area-memory', workspaceId: TEST_WORKSPACE_ID }]
     const b = bind(f)
     await b.tools.find(t => t.name === 'memory_neighbors')?.execute({ seed: 'area-memory' }, 'c1')
     await b.memory.capture({ outcome: SignalOutcome.success, summary: 'done' })
@@ -370,11 +374,11 @@ describe('provenance hygiene', () => {
 // every step to re-derive everything, which is exactly the cost the preload exists to avoid.
 describe('recall reports currency through the shared drift verdict', () => {
   const dated = (id: string, path: string) => summary({ id, sourceRevision: 'rev-a', paths: [path] })
+  const drift = (changedSince: ChangedSince): DriftSources => ({ changedSince, blobsAt: NO_BLOBS })
 
   it('counts a note as drifted when the code it declares has moved', async () => {
     const f = fakeStore({ search: () => [dated('n1', 'src/auth.ts'), dated('n2', 'src/untouched.ts')] })
-    const changedSince = async () => new Set(['src/auth.ts'])
-    const got = await bind(f, { changedSince }).memory.recall(5000)
+    const got = await bind(f, { drift: drift(async () => new Set(['src/auth.ts'])) }).memory.recall(5000)
     expect(got.currency).toMatchObject({ checkable: 2, drifted: 1 })
   })
 
@@ -385,14 +389,13 @@ describe('recall reports currency through the shared drift verdict', () => {
   it('does not count a note whose verification is newer than the change', async () => {
     const stamp = { revision: 'rev-b', at: '2026-07-30T00:00:00.000Z', by: 'cli' }
     const f = fakeStore({ search: () => [summary({ id: 'n1', sourceRevision: 'rev-a', paths: ['src/auth.ts'], verified: stamp })] })
-    const changedSince = async (rev: string) => new Set(rev === 'rev-a' ? ['src/auth.ts'] : [])
-    const got = await bind(f, { changedSince }).memory.recall(5000)
+    const got = await bind(f, { drift: drift(async rev => new Set(rev === 'rev-a' ? ['src/auth.ts'] : [])) }).memory.recall(5000)
     expect(got.currency).toMatchObject({ checkable: 1, drifted: 0 })
   })
 
   it('omits currency entirely when nothing could be checked', async () => {
     const f = fakeStore({ search: () => [summary({ id: 'n1', sourceRevision: 'rev-a', paths: [] })] })
-    const got = await bind(f, { changedSince: async () => new Set(['src/auth.ts']) }).memory.recall(5000)
+    const got = await bind(f, { drift: drift(async () => new Set(['src/auth.ts'])) }).memory.recall(5000)
     expect(got.currency).toBeUndefined()
   })
 
@@ -404,8 +407,7 @@ describe('recall reports currency through the shared drift verdict', () => {
       dated('n1', 'src/auth.ts'), // checkable, clean
       summary({ id: 'n2', sourceRevision: 'rev-unreachable', paths: ['src/gone.ts'] }), // unreachable
     ] })
-    const changedSince = async (rev: string) => (rev === 'rev-unreachable' ? null : new Set<string>())
-    const got = await bind(f, { changedSince }).memory.recall(5000)
+    const got = await bind(f, { drift: drift(async rev => (rev === 'rev-unreachable' ? null : new Set<string>())) }).memory.recall(5000)
     expect(got.currency).toBeDefined()
     expect(got.currency).toMatchObject({ checkable: 1, drifted: 0, unknown: 1 })
   })
@@ -415,8 +417,7 @@ describe('recall reports currency through the shared drift verdict', () => {
   // above, whose note declares no paths at all and is genuinely uncheckable.
   it('surfaces currency when every note has an unreachable revision (checkable 0, unknown > 0)', async () => {
     const f = fakeStore({ search: () => [summary({ id: 'n1', sourceRevision: 'rev-unreachable', paths: ['src/gone.ts'] })] })
-    const changedSince = async () => null
-    const got = await bind(f, { changedSince }).memory.recall(5000)
+    const got = await bind(f, { drift: drift(async () => null) }).memory.recall(5000)
     expect(got.currency).toBeDefined()
     expect(got.currency).toMatchObject({ checkable: 0, drifted: 0, unknown: 1 })
   })
@@ -429,8 +430,7 @@ describe('recall reports currency through the shared drift verdict', () => {
   // The probe shells out to git; a step must never fail because a repo could not be read.
   it('omits currency rather than failing the recall when the probe throws', async () => {
     const f = fakeStore({ search: () => [dated('n1', 'src/auth.ts')] })
-    const changedSince = async () => { throw new Error('not a repo') }
-    const got = await bind(f, { changedSince }).memory.recall(5000)
+    const got = await bind(f, { drift: drift(async () => { throw new Error('not a repo') }) }).memory.recall(5000)
     expect(got.currency).toBeUndefined()
     expect(got.notes).toHaveLength(1) // the knowledge still arrives
   })
@@ -439,25 +439,25 @@ describe('recall reports currency through the shared drift verdict', () => {
 // Claims take the budget FIRST, so at the default budget a preload is typically several claims and
 // one note. Currency computed from the notes arm alone put most of what the step was handed under a
 // verdict that never examined it.
-describe('currency covers the claims arm too', () => {
-  const claimHit = (noteId: string, path: string) => ({
-    claimId: `c-${noteId}`, noteId, scope: 'project', title: 'T', text: 'a statement',
-    validFrom: '2026-07-26T00:00:00.000Z', sourceRevision: 'rev-a', paths: [path], workspaceId: TEST_WORKSPACE_ID,
+describe('currency counts a matched claim by its own anchors, not by its note\'s paths', () => {
+  const AUTH = 'src/auth.ts'
+  const claimHit = (noteId: string, blob: string) =>
+    claimHitFixture({ claimId: `c-${noteId}`, noteId, sourceRevision: 'rev-a', paths: [AUTH], anchors: [{ path: AUTH, symbol: null, blob }] })
+  const withBlob = (blob: string): DriftSources => ({
+    changedSince: async () => new Set([AUTH]),
+    blobsAt: async paths => new Map(paths.map(p => [p, blob])),
   })
 
-  it('counts a drifted claim owner even when the notes arm is empty', async () => {
-    const f = fakeStore({ search: () => [], searchClaims: () => [claimHit('n1', 'src/auth.ts')] })
-    const got = await bind(f, { changedSince: async () => new Set(['src/auth.ts']) }).memory.recall(5000)
+  it('counts a claim whose anchored blob moved as drifted, with the notes arm empty', async () => {
+    const f = fakeStore({ search: () => [], searchClaims: () => [claimHit('n1', 'blob-1')] })
+    const got = await bind(f, { drift: withBlob('blob-2') }).memory.recall(5000)
     expect(got.currency).toMatchObject({ checkable: 1, drifted: 1 })
   })
 
-  // A claim's checkable unit IS its owning note, so several claims from one note must count once —
-  // otherwise a single drifted note drowns out every clean note in the ratio.
-  it('dedupes by owning note, so five claims from one note count once', async () => {
-    const hits = Array.from({ length: 5 }, (_, i) => ({ ...claimHit('n1', 'src/auth.ts'), claimId: `c${i}` }))
-    const f = fakeStore({ search: () => [summary({ id: 'n2', sourceRevision: 'rev-a', paths: ['src/clean.ts'] })], searchClaims: () => hits })
-    const got = await bind(f, { changedSince: async () => new Set(['src/auth.ts']) }).memory.recall(5000)
-    expect(got.currency).toMatchObject({ checkable: 2, drifted: 1 })
+  it('leaves a claim clean when its anchored blob is unchanged, however its note\'s declared path moved', async () => {
+    const f = fakeStore({ search: () => [], searchClaims: () => [claimHit('n1', 'blob-1')] })
+    const got = await bind(f, { drift: withBlob('blob-1') }).memory.recall(5000)
+    expect(got.currency).toMatchObject({ checkable: 1, drifted: 0 })
   })
 })
 

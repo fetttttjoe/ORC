@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import type { ClaimHit, Checkpoint, EventDraft, ExecutorContext, NoteSummary, OperationCheckpoint, OperationSpec, ResolvedTool, SplitResult, UnifiedEvent } from '@orc/contracts'
-import { Door, EVENT_KIND, FailureClass, NOTE_TIER, OperationKind, RunOutcome, SignalOutcome, isTerminalError, planScope } from '@orc/contracts'
+import { ClaimClass, Door, EVENT_KIND, FailureClass, NOTE_TIER, OperationKind, RunOutcome, SignalOutcome, isTerminalError, planScope } from '@orc/contracts'
 import { stepFixture, TEST_WORKSPACE_ID, must } from '@orc/contracts/fixtures'
 import { z } from 'zod'
 import type { LanguageModel } from 'ai'
@@ -873,7 +873,8 @@ describe('step memory seam', () => {
   }
   const claim = (over: Partial<ClaimHit> = {}): ClaimHit => ({
     claimId: 'abc123abc123', noteId: 'auth-middleware', scope: 'project', title: 'Auth middleware overview',
-    text: 'Refresh tokens are single-use.', validFrom: '2026-07-26T00:00:00.000Z', sourceRevision: null, paths: [],
+    text: 'Refresh tokens are single-use.', class: ClaimClass.fact, anchors: [],
+    validFrom: '2026-07-26T00:00:00.000Z', sourceRevision: null, paths: [],
     workspaceId: TEST_WORKSPACE_ID, ...over,
   })
   const note = (over: Partial<NoteSummary> = {}): NoteSummary => ({

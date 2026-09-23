@@ -1,5 +1,5 @@
 import { afterAll, afterEach, describe, expect, it, mock, spyOn } from 'bun:test'
-import { mkdtempSync, realpathSync } from 'node:fs'
+import { mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { MEMORY_HEALTH, Door, NO_CHAT,
@@ -9,14 +9,14 @@ import { MEMORY_HEALTH, Door, NO_CHAT,
 } from '@orc/contracts'
 import { Surreal } from 'surrealdb'
 import { openStorage, Kernel, projectDatabaseName, SCOPED_CHANGES_TOOL_NAME, type ProjectConfig } from '@orc/kernel'
-import { createTestDb, fakeProvider, seedTestWorkspace, testConfig, TEST_PROJECT_ID, TEST_WORKSPACE_ID } from '@orc/kernel/test-helpers'
+import { createTestDb, fakeProvider, seedTestWorkspace, sh, testConfig, TEST_PROJECT_ID, TEST_WORKSPACE_ID } from '@orc/kernel/test-helpers'
 import { authorFixture, draftFixture, stepFixture } from '@orc/contracts/fixtures'
 
 // these tests arrange through the CLI door; the runtime's own authors are Door.supervisor
 const CLI = NO_CHAT(Door.cli)
 import { createMemory, FINISH_TOOL_NAME } from '@orc/memory'
 import { buildProgram } from './main'
-import { buildPlugins, buildRuntime, seedPhases } from './runtime'
+import { buildPlugins, buildRuntime, seedPhases, workspaceStamps } from './runtime'
 import { testSurrealDbName } from './test-helpers'
 import { seedShippedSkills } from './shipped-skills'
 
@@ -335,4 +335,34 @@ describe('status memory health', () => {
     const broken = testConfig(db.url, { ...config, projectDbUrl: 'not-a-url' })
     expect(await status(broken, t.id)).toContain(`memory: ${MEMORY_HEALTH.unreachable}`)
   }, 30_000)
+})
+
+// One supervisor serves every checkout at once, so a note's stamps must come from the AUTHOR's
+// workspace: a step running in a worktree that stamped the supervisor's HEAD would read clean
+// until its branch merged, and drifted afterwards.
+describe('workspaceStamps', () => {
+  const repo = (contents: string): string => {
+    const dir = realpathSync(mkdtempSync(path.join(tmpdir(), 'orc-rt-stamps-')))
+    cleanup.push(() => rmSync(dir, { recursive: true, force: true }))
+    sh(dir, 'init', '-q'); sh(dir, 'config', 'user.email', 't@t.t'); sh(dir, 'config', 'user.name', 't')
+    writeFileSync(path.join(dir, 'a.ts'), contents)
+    sh(dir, 'add', '-A'); sh(dir, 'commit', '-qm', 'base')
+    return dir
+  }
+
+  it('stamps each author from their own workspace directory, and an orphan author not at all', async () => {
+    const dirs = new Map([['ws-a', repo('export const a = 1\n')], ['ws-b', repo('export const a = 2\n')]])
+    const stampsFor = workspaceStamps(async id => dirs.get(id) ?? null)
+    const inA = stampsFor(authorFixture({ workspaceId: 'ws-a' }))
+    const inB = stampsFor(authorFixture({ workspaceId: 'ws-b' }))
+
+    expect(await inA.revision()).toMatch(/^[0-9a-f]{40}$/)
+    expect(await inA.revision()).not.toBe(await inB.revision())
+    expect(await inA.blob('a.ts')).not.toBe(await inB.blob('a.ts'))
+
+    // a workspace the log does not carry is a defect, not a reason to stamp another tree
+    const orphan = stampsFor(authorFixture({ workspaceId: 'ws-gone' }))
+    expect(await orphan.revision()).toBeNull()
+    expect(await orphan.blob('a.ts')).toBeNull()
+  })
 })

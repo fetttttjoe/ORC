@@ -26,7 +26,7 @@ export const decisionStatusOf = (status: DecisionStatus | undefined): DecisionSt
   status ?? DECISION_STATUS.accepted
 
 // What a decision-recording door accepts — the terminal (`orc adr new`) and the MCP/copilot tool
-// (`record_decision`) parse the SAME shape, so neither can drift on a field name or a cap. The three
+// (`record_decision`) parse the SAME shape, so neither can drift on a field name or a cap. The
 // sections are the ADR body, which the decision renderer emits under fixed headings; `tags` and
 // `supersedes` are the two note fields a human decides at recording time. `supersedes` names an
 // existing decision by id; the lifecycle module refuses one that is not a live decision.
@@ -35,6 +35,8 @@ export const DecisionInput = z.object({
   context: z.string().min(1),
   decision: z.string().min(1),
   consequences: z.string().min(1),
+  // the alternatives weighed, rendered into the ADR body — the note carries no second copy
+  considered: z.array(z.string().min(1)).max(MEMORY_LIMITS.detailItems).default([]),
   status: z.enum(DecisionStatus).optional(),
   tags: z.array(z.string().max(MEMORY_LIMITS.labelChars)).max(MEMORY_LIMITS.labelItems).default([]),
   supersedes: z.string().regex(MEMORY_ID_RE).optional(),

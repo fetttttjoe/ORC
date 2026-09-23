@@ -82,7 +82,7 @@ describe('typed-link traversal (e2e)', () => {
       let nb: NeighborResult[] = []
       for (let i = 0; i < 20 && nb.length === 0; i++) { await Bun.sleep(100); nb = await store.neighbors('decision-a') }
       expect(nb.map(n => n.id)).toEqual(['decision-b'])
-      expect(nb[0]?.via).toBe('supersedes')
+      expect(nb[0]?.via).toBe(LINK_KIND.supersedes)
 
       // typed links land in the vault projection too
       expect(readFileSync(path.join(vaultDir, 'memory', 'decision-a.md'), 'utf8')).toContain('kind: supersedes')

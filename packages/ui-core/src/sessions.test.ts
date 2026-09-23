@@ -1,6 +1,6 @@
 import { afterAll, describe, expect, it } from 'bun:test'
 import { z } from 'zod'
-import { AUTHOR_SOURCE, Door, EVENT_KIND, IsolationTier, NO_CHAT, type EventInput, type Scope, ScopeType } from '@orc/contracts'
+import { AUTHOR_SOURCE, Door, EVENT_KIND, IsolationTier, MEMORY_ACCESS, NO_CHAT, type EventInput, type Scope, ScopeType } from '@orc/contracts'
 
 // these histories are arranged through the terminal door; the run halves are the supervisor's
 const CLI = NO_CHAT(Door.cli)
@@ -130,7 +130,7 @@ describe('ProjectSessions', () => {
     await storage.events.append({
       ...CLI,
       taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_accessed,
-      payload: { id: 'hit-note', scope: 'project', mode: 'read', author: authorFixture() },
+      payload: { id: 'hit-note', scope: 'project', mode: MEMORY_ACCESS.read, author: authorFixture() },
     })
     for (let i = 0; i < 40 && updates.length < 2; i++) await Bun.sleep(50)
     expect(updates).toHaveLength(2)
@@ -281,7 +281,7 @@ describe('ProjectSessions', () => {
     await storage.events.append({
       ...CLI,
       taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_accessed,
-      payload: { id: 'detail-note', scope: 'project', mode: 'read', author: authorFixture() },
+      payload: { id: 'detail-note', scope: 'project', mode: MEMORY_ACCESS.read, author: authorFixture() },
     })
     const task = TaskDetailView.parse(await viewOf(sessions, TEST_PROJECT_ID, VIEW.node, { id: taskId }))
     expect(task.task.title).toBe('seed task')

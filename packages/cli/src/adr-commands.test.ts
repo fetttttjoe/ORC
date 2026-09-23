@@ -6,7 +6,7 @@ import { z } from 'zod'
 import { AUTHOR_SOURCE, DECISION_STATUS, Door, EVENT_KIND, MemoryWrittenPayload, NO_CHAT } from '@orc/contracts'
 import { loadConfig, requireProject, type ProjectConfig } from '@orc/kernel'
 import { createTestDb, seedTestWorkspace, TEST_PROJECT_ID, TEST_WORKSPACE_ID } from '@orc/kernel/test-helpers'
-import { ADR_SECTION, DECISION_REFUSAL } from '@orc/memory'
+import { AdrSection, DECISION_REFUSAL } from '@orc/memory'
 import { renderDecisionList } from './adr-commands'
 import { openKernel } from './main'
 import { buildPlugins } from './runtime'
@@ -53,8 +53,15 @@ describe('orc adr', () => {
     expect(written.at(-1)?.author).toMatchObject({ source: AUTHOR_SOURCE.human, workspaceId: TEST_WORKSPACE_ID })
     const shown = (await run('adr', 'show', 'event-log-is-truth')).join('\n')
     expect(shown).toContain('status: accepted')
-    expect(shown).toContain(`## ${ADR_SECTION.decision}`)
+    expect(shown).toContain(`## ${AdrSection.decision}`)
     expect(shown).toContain('the log is the only writer of facts')
+  }, 30_000)
+
+  it('new records the options it considered and show lists them under their heading', async () => {
+    const { run } = await makeAdrCli()
+    await run('adr', 'new', 'Blob drift', '--context', 'c', '--decision', 'd', '--consequences', 'q', '--considered', 'path-level drift', 'restamp to HEAD')
+    const shown = (await run('adr', 'show', 'blob-drift')).join('\n')
+    expect(shown).toContain(`## ${AdrSection.considered}\n\n- path-level drift\n- restamp to HEAD`)
   }, 30_000)
 
   it('supersede links the new decision to the old and ls shows both, the old as superseded', async () => {

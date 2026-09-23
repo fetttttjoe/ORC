@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'bun:test'
-import { AUTHOR_SOURCE, Door, EVENT_KIND, LINK_KIND, MEMORY_ACCESS, MemoryNote, MemoryNoteInput, NOTE_KIND, NO_CHAT, slugId, type EventRecord, type MemoryAuthor, type MemoryNoteDraft } from '@orc/contracts'
-import { authorFixture, eventFixture, must, semanticNoteFixture } from '@orc/contracts/fixtures'
+import { AUTHOR_SOURCE, Door, EVENT_KIND, LINK_KIND, MEMORY_ACCESS, MemoryNote, MemoryNoteInput, NOTE_KIND, NO_CHAT, RETENTION, slugId, type EventRecord, type MemoryAuthor, type MemoryNoteDraft } from '@orc/contracts'
+import { authorFixture, eventFixture, semanticNoteFixture } from '@orc/contracts/fixtures'
 import { TEST_WORKSPACE_ID } from '@orc/kernel/test-helpers'
-import { AREA_ROOT, CONSOLIDATED_TAG, areaOf, consolidateTask, CONSOLIDATE_EXECUTOR, consolidatedNote, consolidatedNotes, isPlanChild, isSubstantive, taskInfo, type ConsolidationLog, type ConsolidationStore } from './consolidate'
+import { CONSOLIDATED_TAG, consolidateTask, CONSOLIDATE_EXECUTOR, consolidatedNote, isPlanChild, isSubstantive, taskInfo, type ConsolidationLog, type ConsolidationStore } from './consolidate'
 
 describe('consolidatedNote', () => {
   it('promotes step outcomes into one durable project note, linked derived_from what the task read', () => {
@@ -12,11 +12,10 @@ describe('consolidatedNote', () => {
       steps: [{ title: 'Step A', summary: 'edges strengthen via memory_accessed' }, { title: 'Step B', summary: '   ' }],
       derivedFrom: ['area-memory', 'area-memory', 'projector-re-materialization'], // dup on purpose
       unfinished: [],
-      paths: [],
     })
     expect(draft.id).toBe(slugId('outcome a1b2c3d4-0000-4000-8000-000000000001'))
     expect(draft.scope).toBe('project')
-    expect(draft.retention).toBe('durable')
+    expect(draft.retention).toBe(RETENTION.durable)
     expect(draft.tags).toEqual([CONSOLIDATED_TAG])
     // deduped, typed provenance edges — project→project, so they resolve in the graph
     expect(draft.links).toEqual([
@@ -36,7 +35,7 @@ describe('consolidatedNote', () => {
   it('is an OUTCOME, never a decision — the two are different questions', () => {
     const draft = consolidatedNote({
       taskId: 'k1', taskTitle: 'Something happened', steps: [{ title: 'a', summary: 'x' }],
-      derivedFrom: [], unfinished: [], paths: [],
+      derivedFrom: [], unfinished: [],
     })
     expect(draft.kind).toBe(NOTE_KIND.outcome)
     expect(draft.kind).not.toBe(NOTE_KIND.decision)
@@ -48,13 +47,13 @@ describe('consolidatedNote', () => {
   // first task's record was simply gone.
   it('two tasks sharing a title get two notes, not one overwriting the other', () => {
     const of = (taskId: string): MemoryNoteDraft =>
-      consolidatedNote({ taskId, taskTitle: 'Fix the auth bug', steps: [{ title: 'a', summary: 'x' }], derivedFrom: [], unfinished: [], paths: [] })
+      consolidatedNote({ taskId, taskTitle: 'Fix the auth bug', steps: [{ title: 'a', summary: 'x' }], derivedFrom: [], unfinished: [] })
     expect(of('run-one').id).not.toBe(of('run-two').id)
     expect(of('run-one').id).toBe(of('run-one').id) // still idempotent for the SAME task
   })
 
   it('with no steps and no provenance still yields a valid (if thin) durable note', () => {
-    const draft = consolidatedNote({ taskId: 'empty-1', taskTitle: 'Empty task', steps: [], derivedFrom: [], unfinished: [], paths: [] })
+    const draft = consolidatedNote({ taskId: 'empty-1', taskTitle: 'Empty task', steps: [], derivedFrom: [], unfinished: [] })
     expect(draft.body).toBe('')
     expect(draft.links).toEqual([])
     expect(draft.summary).toBe('Empty task')
@@ -63,7 +62,7 @@ describe('consolidatedNote', () => {
 
   it('uses distilled text when provided, keeping the task-keyed id, scope, and links', () => {
     const draft = consolidatedNote(
-      { taskId: 'a1b2c3d4-0000-4000-8000-000000000001', taskTitle: 'Explain memory heat', steps: [{ title: 'a', summary: 'raw' }], derivedFrom: ['area-memory'], unfinished: [], paths: [] },
+      { taskId: 'a1b2c3d4-0000-4000-8000-000000000001', taskTitle: 'Explain memory heat', steps: [{ title: 'a', summary: 'raw' }], derivedFrom: ['area-memory'], unfinished: [] },
       { title: 'How memory heat works', summary: 'Edges strengthen on use.', body: '- via records the edge' },
     )
     expect(draft.title).toBe('How memory heat works') // distilled, not "Outcome: …"
@@ -76,70 +75,11 @@ describe('consolidatedNote', () => {
   })
 })
 
-describe('areaOf', () => {
-  it('monorepo namespaces keep two segments, everything else one, root files fold together', () => {
-    expect(areaOf('packages/cli/src/main.ts')).toBe('packages/cli')
-    expect(areaOf('plugins/memory/src/tools.ts')).toBe('plugins/memory')
-    expect(areaOf('docs/mcp-overview.md')).toBe('docs')
-    expect(areaOf('scripts/hooks/commit-msg')).toBe('scripts')
-    expect(areaOf('README.md')).toBe(AREA_ROOT)
-  })
-})
-
 describe('isPlanChild', () => {
   it('a grounded planning child never consolidates — its outcome IS the plan notes', () => {
     expect(isPlanChild('798d7b9c-dca5-4adc-b053-2849b3e71944.plan.toolu_013x')).toBe(true)
     expect(isPlanChild('798d7b9c-dca5-4adc-b053-2849b3e71944')).toBe(false)
     expect(isPlanChild('798d7b9c-dca5-4adc-b053-2849b3e71944.impl.toolu_01ab')).toBe(false)
-  })
-})
-
-describe('consolidatedNotes — the area split', () => {
-  const base = {
-    taskId: 'a1b2c3d4-0000-4000-8000-000000000001',
-    taskTitle: 'Cross-cutting fix',
-    steps: [{ title: 'Step A', summary: 'did the thing' }],
-    derivedFrom: ['area-memory'],
-    unfinished: [],
-  }
-
-  it('a single-area task keeps the legacy id and gains its paths', () => {
-    const notes = consolidatedNotes({ ...base, paths: ['plugins/memory/src/tools.ts', 'plugins/memory/src/step.ts'] })
-    expect(notes.length).toBe(1)
-    expect(notes[0]?.id).toBe(slugId('outcome a1b2c3d4-0000-4000-8000-000000000001'))
-    // sorted + deduped — deterministic like every other list the store compares
-    expect(notes[0]?.paths).toEqual(['plugins/memory/src/step.ts', 'plugins/memory/src/tools.ts'])
-    expect(() => MemoryNoteInput.parse(notes[0])).not.toThrow()
-  })
-
-  it('a read-only task stays a single unanchored note — nothing to cite is the honest state', () => {
-    const notes = consolidatedNotes({ ...base, paths: [] })
-    expect(notes.length).toBe(1)
-    expect(notes[0]?.paths).toBeUndefined()
-  })
-
-  it('a multi-area task emits one note per area, cross-linked — never a god node', () => {
-    // DECIDED 2026-08-03: one note citing every touched subsystem is arch-overview's disease —
-    // a degree-81 hub that re-drifts on every commit anywhere. Split by area instead.
-    const notes = consolidatedNotes({
-      ...base,
-      paths: ['plugins/memory/src/tools.ts', 'packages/cli/src/actions.ts', 'packages/cli/src/main.ts'],
-    })
-    expect(notes.map(n => n.id).sort()).toEqual([
-      slugId('outcome a1b2c3d4-0000-4000-8000-000000000001 packages/cli'),
-      slugId('outcome a1b2c3d4-0000-4000-8000-000000000001 plugins/memory'),
-    ].sort())
-    const byArea = new Map(notes.map(n => [n.paths?.[0]?.startsWith('packages') ? 'cli' : 'mem', n]))
-    expect(byArea.get('cli')?.paths).toEqual(['packages/cli/src/actions.ts', 'packages/cli/src/main.ts'])
-    expect(byArea.get('mem')?.paths).toEqual(['plugins/memory/src/tools.ts'])
-    // every area note keeps the shared provenance AND links its siblings
-    for (const n of notes) {
-      expect(n.links).toEqual(expect.arrayContaining([{ id: 'area-memory', kind: LINK_KIND.derived_from }]))
-      const sibling = must(notes.find(o => o !== n), 'notes.find(o => o !== n)')
-      expect(n.links).toEqual(expect.arrayContaining([{ id: sibling.id, kind: LINK_KIND.relates_to }]))
-      expect(n.title).toContain(' — ')
-      expect(() => MemoryNoteInput.parse(n)).not.toThrow()
-    }
   })
 })
 
@@ -239,21 +179,20 @@ describe('consolidateTask provenance', () => {
       payload: { stepId: 's1', runToken: `step:${taskId}:s1:a1`, iteration: 1, toolCallId: 'c1', toolName, input: { path, content: 'x' } },
     })
 
-  it('the outcome note carries the paths the task itself wrote — the WHY layer becomes checkable', async () => {
+  it('declares no paths — what the task touched stays in the log\'s tool_call events', async () => {
     const written: MemoryNoteDraft[] = []
     const log = logOf([
       created(TASK, 'Fix the tools'),
       accessed(TASK, 'area-memory', MEMORY_ACCESS.read),
       wrote(TASK, 'fs_write', 'plugins/memory/src/tools.ts'),
-      wrote(TASK, 'fs_edit', 'plugins/memory/src/tools.ts'), // dup path folds to one
-      wrote('33333333-3333-3333-3333-333333333333', 'fs_write', 'packages/cli/src/main.ts'), // other task's write is not ours
+      wrote(TASK, 'fs_edit', 'plugins/memory/src/tools.ts'),
     ])
     await consolidateTask(
       { log, store: storeOf(written), authorFor: () => CONSOLIDATE_AUTHOR },
       TASK, await taskInfo(log, TASK),
     )
     expect(written.length).toBe(1)
-    expect(written[0]?.paths).toEqual(['plugins/memory/src/tools.ts'])
+    expect(written[0]?.paths).toBeUndefined()
   })
 
   it('a .plan. child writes nothing — the plan lane already holds its outcome', async () => {

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test'
-import { MemoryNoteDraftInput, MemoryNoteInput, MemoryNote, MEMORY_ID_RE, MEMORY_USE, USE_VERDICT, LINK_KIND, LINK_KINDS, MemoryScope, NOTE_KIND, NOTE_TIER, VerifiedStamp, deriveNoteProvenance, foldMemory, inferTier, noteContentKey, noteKey, parseLinkSpec, useLine, useVerdict, type MemoryUseOutcome, type PlanNoteInput, type SemanticNoteInput, type UseStats } from './memory'
+import { MemoryNoteDraftInput, MemoryNoteInput, MemoryNote, MEMORY_ID_RE, MEMORY_USE, USE_VERDICT, LINK_KIND, LinkKind, MemoryScope, NOTE_KIND, NOTE_TIER, RETENTION, VerifiedStamp, deriveNoteProvenance, foldMemory, inferTier, noteContentKey, noteKey, parseLinkSpec, useLine, useVerdict, type MemoryUseOutcome, type PlanNoteInput, type SemanticNoteInput, type UseStats } from './memory'
 import { DECISION_STATUS } from './decision'
 import { AUTHOR_SOURCE } from './author'
 import { EVENT_KIND } from './event-kinds'
@@ -46,7 +46,7 @@ describe('note tiers', () => {
   // note the TTL sweep will never be allowed to touch.
   it('pins episodic retention to expirable and rejects an attempt to make one durable', () => {
     const n = MemoryNoteInput.parse({ tier: NOTE_TIER.episodic, id: 'step-a', scope: 'plan-t1', title: 'Step A' })
-    expect(n.retention).toBe('expirable')
+    expect(n.retention).toBe(RETENTION.expirable)
     expect(MemoryNoteInput.safeParse({ tier: NOTE_TIER.episodic, id: 'step-a', scope: 'plan-t1', title: 'Step A', retention: 'durable' }).success).toBe(false)
   })
 
@@ -81,8 +81,8 @@ describe('MemoryNoteInput', () => {
   // Captured at write time because that is the only moment the author's judgment exists; a note
   // nobody classified must never become auto-deletable, so the default is durable.
   it('defaults retention to durable and accepts an explicit expirable', () => {
-    expect(MemoryNoteInput.parse({ id: 'a', title: 'A' }).retention).toBe('durable')
-    expect(MemoryNoteInput.parse({ id: 'a', title: 'A', retention: 'expirable' }).retention).toBe('expirable')
+    expect(MemoryNoteInput.parse({ id: 'a', title: 'A' }).retention).toBe(RETENTION.durable)
+    expect(MemoryNoteInput.parse({ id: 'a', title: 'A', retention: 'expirable' }).retention).toBe(RETENTION.expirable)
     expect(() => MemoryNoteInput.parse({ id: 'a', title: 'A', retention: 'forever' })).toThrow()
   })
 
@@ -126,7 +126,7 @@ describe('MemoryNoteInput', () => {
     expect(() => MemoryNoteInput.parse({ id: 'r', title: 'R', kind: 'research' })).toThrow()
     expect(semantic({
       id: 'r', title: 'R', kind: 'research', sources: [{ url: 'https://example.test/a' }],
-    }).kind).toBe('research')
+    }).kind).toBe(NOTE_KIND.research)
     // every other kind may cite, or not
     expect(semantic({ id: 'f', title: 'F', kind: 'fact' }).sources).toEqual([])
   })
@@ -194,10 +194,10 @@ describe('MemoryNoteInput', () => {
   })
 
   it('defaults a typed link kind to relates_to and rejects a bad kind / out-of-range confidence', () => {
-    expect(MemoryNoteInput.parse({ id: 'a', title: 'A', links: [{ id: 'b' }] }).links[0].kind).toBe('relates_to')
+    expect(MemoryNoteInput.parse({ id: 'a', title: 'A', links: [{ id: 'b' }] }).links[0].kind).toBe(LINK_KIND.relates_to)
     expect(MemoryNoteInput.safeParse({ id: 'a', title: 'A', links: [{ id: 'b', kind: 'nope' }] }).success).toBe(false)
     expect(MemoryNoteInput.safeParse({ id: 'a', title: 'A', links: [{ id: 'b', confidence: 2 }] }).success).toBe(false)
-    expect(LINK_KINDS).toContain('supersedes')
+    expect(Object.values(LinkKind)).toContain(LinkKind.supersedes)
   })
 
   it('accepts a decomposes_into typed link (M5b plan-graph edges)', () => {
@@ -227,7 +227,7 @@ describe('MemoryNoteInput', () => {
 
   it('kind defaults to fact and sourceRevision to null', () => {
     const n = semantic({ id: 'x', title: 'X' })
-    expect(n.kind).toBe('fact')
+    expect(n.kind).toBe(NOTE_KIND.fact)
     expect(n.sourceRevision).toBeNull()
     expect(MemoryNoteInput.safeParse({ id: 'x', title: 'X', kind: 'architecture_target' }).success).toBe(true)
     expect(MemoryNoteInput.safeParse({ id: 'x', title: 'X', kind: 'vibes' }).success).toBe(false)
@@ -261,7 +261,7 @@ describe('parseLinkSpec', () => {
 // forward would be exactly the false confidence the stamp exists to prevent.
 describe('VerifiedStamp on note provenance', () => {
   const author = authorFixture()
-  const stamp = { revision: 'c0ffee1', at: '2026-07-01T00:00:00.000Z', by: 'cli' }
+  const stamp = { revision: 'c0ffee1', at: '2026-07-01T00:00:00.000Z', by: 'cli', claims: [] }
   const draft = { id: 'auth-flow', title: 'Auth flow', summary: 's', body: 'b', paths: ['src/auth.ts'] }
   // `prev` is what a projected row hands deriveNoteProvenance: the note's content plus the
   // provenance columns, sources already stamped with the retrievedAt the projector derived.

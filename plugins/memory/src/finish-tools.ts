@@ -21,7 +21,7 @@ const TASK_NOTES_DESCRIPTION =
 
 const RECORD_DECISION_DESCRIPTION =
   'Record the ONE architectural decision this task made, AFTER the human approved its wording in your '
-  + 'summary. Title + Context / Decision / Consequences. Refused if a decision with that title exists — '
+  + 'summary. Title + Context / Decision / Consequences, plus the alternatives you considered. Refused if a decision with that title exists — '
   + 'then it is a supersession, which is a human act: report it in your summary instead.'
 
 // Advertised separately from the tool literal so the coverage guard below has something to compare
@@ -33,6 +33,7 @@ const RECORD_DECISION_PROPERTIES = {
   context: { type: 'string', description: 'the forces in play: what made this a decision rather than an obvious step' },
   decision: { type: 'string', description: 'what was decided, stated so a later decision could supersede it' },
   consequences: { type: 'string', description: 'what this commits the project to, and what it rules out' },
+  considered: { type: 'array', items: { type: 'string' }, description: 'the alternatives weighed and not taken, one per item — a later reader must not re-argue them' },
   tags: { type: 'array', items: { type: 'string' } },
 }
 

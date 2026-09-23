@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, it } from 'bun:test'
-import { EVENT_KIND, MemoryScope, foldMemory, noteContentKey, noteKey, type VerifiedStamp } from '@orc/contracts'
+import { EVENT_KIND, MEMORY_ACCESS, MemoryScope, foldMemory, noteContentKey, noteKey, type VerifiedStamp } from '@orc/contracts'
 import { createLiveMemory, type LiveMemory } from './test-helpers'
 import { authorFixture } from '@orc/contracts/fixtures'
 
@@ -41,7 +41,7 @@ describe('fold and read model agree on every knowledge event kind', () => {
     await m.store.remove('removed', MemoryScope.project, author)
     await m.log.append({
       ...author.origin, taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_accessed,
-      payload: { id: 'kept', scope: MemoryScope.project, mode: 'read', author },
+      payload: { id: 'kept', scope: MemoryScope.project, mode: MEMORY_ACCESS.read, author },
     })
     await m.projector.catchUp()
 

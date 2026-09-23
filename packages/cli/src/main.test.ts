@@ -2,8 +2,8 @@ import { afterAll, afterEach, describe, expect, it, mock, spyOn } from 'bun:test
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import { ApprovalPolicy, AUTHOR_SOURCE, CHECKS_STEP_ID, Confidence, Door, EVENT_KIND, NO_CHAT, MemoryAccessedPayload, MemoryDeletedPayload, MemoryWrittenPayload, NOTE_TIER, OperationKind, ROLE_SKILL, RunOutcome, TASK_STATUS, WORKSPACE_KIND, claimId, type ExecutionPort, type MemoryAuthor, type OperationSpec, type TaskNode, type TaskStatus, LINK_KIND } from '@orc/contracts'
-import { must } from '@orc/contracts/fixtures'
+import { ApprovalPolicy, AUTHOR_SOURCE, CHECKS_STEP_ID, Confidence, Door, EVENT_KIND, NO_CHAT, MEMORY_ACCESS, MemoryAccessedPayload, MemoryDeletedPayload, MemoryWrittenPayload, NOTE_TIER, OperationKind, ROLE_SKILL, RunOutcome, TASK_STATUS, WORKSPACE_KIND, claimId, type ExecutionPort, type MemoryAuthor, type OperationSpec, type TaskNode, type TaskStatus, LINK_KIND } from '@orc/contracts'
+import { claimFixture, must } from '@orc/contracts/fixtures'
 import { loadConfig, requireProject, type EventLog, type ProjectConfig } from '@orc/kernel'
 import { createTestDb, seedTestWorkspace, TEST_PROJECT_ID, TEST_WORKSPACE, TEST_WORKSPACE_ID, testOrcConfig } from '@orc/kernel/test-helpers'
 import { singleStepDraft } from './plan-template'
@@ -1000,7 +1000,7 @@ describe('orc CLI', () => {
     const accessed = (await log.all()).filter(e => e.kind === EVENT_KIND.memory_accessed)
     const lastAccessEvent = must(accessed.at(-1), 'last memory accessed event')
     const lastAccess = MemoryAccessedPayload.parse(lastAccessEvent.payload)
-    expect(lastAccess.mode).toBe('neighbors')
+    expect(lastAccess.mode).toBe(MEMORY_ACCESS.neighbors)
     expect(lastAccess.id).toBe('nb-seed')
 
     // 2. --kinds depends_on narrows: nb-other (refines) is excluded, nb-hop1 (depends_on) stays.
@@ -1119,7 +1119,7 @@ describe('orc CLI', () => {
     const write = (texts: string[], invalidates: string[] = []) => log.append({
       ...CLI, taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_written,
       payload: {
-        note: { id: noteId, title: 'claims', claims: texts.map(t => ({ id: claimId(t), text: t })) },
+        note: { id: noteId, title: 'claims', claims: texts.map(t => claimFixture(t)) },
         author: { source: AUTHOR_SOURCE.cli, workspaceId: TEST_WORKSPACE_ID, origin: CLI }, invalidates,
       },
     })
@@ -1203,7 +1203,7 @@ describe('orc CLI', () => {
     const write = (texts: string[], invalidates: string[] = []) => log.append({
       ...CLI, taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_written,
       payload: {
-        note: { id: noteId, title: 'claims json', claims: texts.map(t => ({ id: claimId(t), text: t })) },
+        note: { id: noteId, title: 'claims json', claims: texts.map(t => claimFixture(t)) },
         author: { source: AUTHOR_SOURCE.cli, workspaceId: TEST_WORKSPACE_ID, origin: CLI }, invalidates,
       },
     })

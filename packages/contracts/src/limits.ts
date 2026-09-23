@@ -9,6 +9,7 @@ export const MEMORY_LIMITS = {
   labelChars: 64,
   detailItems: 100,
   detailChars: 1_000,
+  claimAnchors: 8,
   // A note's one-line pointer, shown in every listing and every preload — which is why it is short.
   // Named here rather than inlined at the schema so the boundary that ACCOMMODATES an over-long one
   // and the schema that stores it cannot drift on the number.

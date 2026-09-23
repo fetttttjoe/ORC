@@ -1,6 +1,6 @@
 import { afterAll, describe, expect, it } from 'bun:test'
 import { z } from 'zod'
-import { AUTHOR_SOURCE, ChatKind, Door, EVENT_KIND, MessageRole, NO_CHAT, ScopeType, type EventInput } from '@orc/contracts'
+import { AUTHOR_SOURCE, ChatKind, Door, EVENT_KIND, MEMORY_ACCESS, MessageRole, NO_CHAT, ScopeType, type EventInput } from '@orc/contracts'
 import { must } from '@orc/contracts/fixtures'
 import { Kernel, openStorage } from '@orc/kernel'
 import { createTestDb, seedTestWorkspace, waitFor, TEST_PROJECT_ID, TEST_WORKSPACE_ID } from '@orc/kernel/test-helpers'
@@ -206,7 +206,7 @@ describe('graph-ui web adapter', () => {
     const accessed = await fetch(`${base}/api/stream?project=${TEST_PROJECT_ID}&fromSeq=${appended.seq}`)
     await storage.events.append({
       ...CLI, taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_accessed,
-      payload: { id: 'live-note', scope: 'project', mode: 'read', author: { source: AUTHOR_SOURCE.cli, workspaceId: TEST_WORKSPACE_ID, origin: CLI } },
+      payload: { id: 'live-note', scope: 'project', mode: MEMORY_ACCESS.read, author: { source: AUTHOR_SOURCE.cli, workspaceId: TEST_WORKSPACE_ID, origin: CLI } },
     })
     const heated = await readSse(accessed, m => m.data.includes('memory_accessed'))
     const heatedEnv = HeatEnvelope.parse(JSON.parse(must(heated, 'heated envelope').data))

@@ -2,7 +2,7 @@ import { describe, expect, it } from 'bun:test'
 import { mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import type { MemoryFilter, MemoryStore, NoteSummary } from '@orc/contracts'
+import { NOTE_TIER, type MemoryFilter, type MemoryStore, type NoteSummary } from '@orc/contracts'
 import { createGroundingSource } from './grounding-source'
 import { summaryFixture, tmpSourceRepo } from './test-helpers'
 
@@ -37,12 +37,12 @@ describe('createGroundingSource.notes', () => {
   it('lists the project scope, semantic tier — never a note body', async () => {
     const store = fakeStore([])
     await createGroundingSource({ store, dir: '/nowhere' }).notes()
-    expect(store.lastFilter).toEqual({ scope: 'project', tier: 'semantic' })
+    expect(store.lastFilter).toEqual({ scope: 'project', tier: NOTE_TIER.semantic })
   })
 
   it('excludes non-semantic tiers even if their id matches the family', async () => {
     const store = fakeStore([
-      summaryFixture({ id: 'area-plan', tier: 'plan', sourceRevision: 'r1', paths: ['a'] }),
+      summaryFixture({ id: 'area-plan', tier: NOTE_TIER.plan, sourceRevision: 'r1', paths: ['a'] }),
     ])
     expect(await createGroundingSource({ store, dir: '/nowhere' }).notes()).toEqual([])
   })

@@ -1,7 +1,7 @@
 import { afterAll, describe, expect, it } from 'bun:test'
 import { AUTHOR_SOURCE, DECISION_STATUS, LINK_KIND, MemoryScope, NOTE_KIND, NOTE_TIER, planScope, type DecisionInput, type MemoryAuthor } from '@orc/contracts'
 import { authorFixture } from '@orc/contracts/fixtures'
-import { ADR_SECTION } from './adr'
+import { AdrSection } from './adr'
 import { DECISION_REFUSAL, getDecision, listDecisions, recordDecision, type DecisionDoor } from './decisions'
 import { STORE_REFUSAL } from './store'
 import { createLiveMemory, type LiveMemory } from './test-helpers'
@@ -21,7 +21,7 @@ async function door(): Promise<DecisionDoor & { live: LiveMemory }> {
 // the schema — a typo'd `supercedes`, a dropped rename — is then a compile error here rather than a
 // silently ignored key that leaves the test asserting the default path.
 const input = (title: string, over: Partial<DecisionInput> = {}): DecisionInput =>
-  ({ title, context: 'ctx', decision: `we do ${title}`, consequences: 'cons', tags: [], ...over })
+  ({ title, context: 'ctx', decision: `we do ${title}`, consequences: 'cons', considered: [], tags: [], ...over })
 
 describe('recording a decision', () => {
   it('writes a semantic decision note with an explicit status, the ADR body and the human author', async () => {
@@ -32,7 +32,7 @@ describe('recording a decision', () => {
     if (!n || n.tier !== NOTE_TIER.semantic) throw new Error('no semantic note stored')
     expect(n.kind).toBe(NOTE_KIND.decision)
     expect(n.status).toBe(DECISION_STATUS.accepted) // stamped, not left to the reader
-    expect(n.body).toContain(`## ${ADR_SECTION.decision}`)
+    expect(n.body).toContain(`## ${AdrSection.decision}`)
     expect(n.summary).toBe('we do Event log is truth')
     expect(n.createdBy).toBe('human')
   }, 20_000)
@@ -157,10 +157,22 @@ describe('listing and showing', () => {
     await recordDecision(d, human, input('Shaped'))
     await d.store.write({ id: 'loose', title: 'Loose', kind: NOTE_KIND.decision, body: 'free prose' }, human)
     await d.catchUp()
-    expect((await getDecision(d, 'shaped')).fields).toEqual({ context: 'ctx', decision: 'we do Shaped', consequences: 'cons' })
+    expect((await getDecision(d, 'shaped')).fields).toEqual({ context: 'ctx', decision: 'we do Shaped', consequences: 'cons', considered: [] })
     const loose = await getDecision(d, 'loose')
     expect(loose.fields).toBeNull()
     expect(loose.status).toBe(DECISION_STATUS.accepted)
     await expect(getDecision(d, 'nope')).rejects.toThrow(DECISION_REFUSAL.noSuchDecision('nope'))
+  }, 20_000)
+
+  // The options the decision weighed are part of the ADR body and nothing else — reading the
+  // decision back is what recovers them.
+  it('round-trips the alternatives a decision considered, multiline ones included', async () => {
+    const d = await door()
+    const considered = ['keep both doors', 'one door\nwith two renderers']
+    await recordDecision(d, human, input('Weighed', { considered }))
+    await d.catchUp()
+    const v = await getDecision(d, 'weighed')
+    expect(v.note.body).toContain(`## ${AdrSection.considered}`)
+    expect(v.fields?.considered).toEqual(considered)
   }, 20_000)
 })

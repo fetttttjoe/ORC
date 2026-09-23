@@ -5,7 +5,7 @@ import { execSync } from 'node:child_process'
 import { readFileSync } from 'node:fs'
 import path from 'node:path'
 // ponytail: relative imports — bench/ is not a workspace package and doesn't need to be
-import { LinkKind, NoteTier, SEARCH_MODE, SEARCH_MODES, type ClaimHit, type NoteSummary, type SearchMode } from '../packages/contracts/src/index.ts'
+import { LinkKind, NoteTier, SEARCH_MODE, SearchMode, type ClaimHit, type NoteSummary } from '../packages/contracts/src/index.ts'
 import { loadConfig, openStorage, requireProject } from '../packages/kernel/src/index.ts'
 import { openMemory } from '../packages/cli/src/memory-open.ts'
 import { z } from 'zod'
@@ -30,7 +30,7 @@ const PROBE_CATEGORY = ['derived', 'synonym', 'cross-page', 'partial-recall', 'n
 // filter is a DIFFERENT path and, measured here, a broken one: `orc memory ls --category subsystem`
 // throws `n.categories.contains is not a function` against surqlize/SurrealDB 3.2.0. A filtered probe
 // exercises the path search() actually uses, not the CLI ls one.
-const ProbeFilter = z.object({ category: z.string().optional(), tag: z.string().optional(), tier: NoteTier.optional() })
+const ProbeFilter = z.object({ category: z.string().optional(), tag: z.string().optional(), tier: z.enum(NoteTier).optional() })
 
 const SearchProbe = z.object({
   q: z.string(),
@@ -81,12 +81,12 @@ const head = execSync('git rev-parse HEAD', { cwd: config.dir }).toString().trim
 // arm's zero-result rate from 13/20 to 4/20 and the claim arm's from 16/20 to 8/20. Both measured
 // with throwaway scratchpad scripts because nothing in this file could see either one — rrfFuse
 // consumes rank ORDER and discards score magnitude, so a within-arm reordering can't move the fused
-// number unless it flips cross-arm rank order. Reuses SEARCH_MODES (contracts) rather than a second
+// number unless it flips cross-arm rank order. Reuses SearchMode (contracts) rather than a second
 // spelling of the same three names.
 const ARM_LABEL: Record<SearchMode, string> = { keyword: 'keyword', semantic: 'semantic', hybrid: 'fused' }
-// The two raw channels, derived from SEARCH_MODES rather than a second hand-spelled list — a mode
+// The two raw channels, derived from SearchMode rather than a second hand-spelled list — a mode
 // added to contracts (or renamed) shows up, or drops out, here without this file going stale.
-const RAW_ARMS: readonly SearchMode[] = SEARCH_MODES.filter(m => m !== SEARCH_MODE.hybrid)
+const RAW_ARMS: readonly SearchMode[] = Object.values(SearchMode).filter(m => m !== SEARCH_MODE.hybrid)
 // One spelling of the two probe kinds this file grades, used by recordDivergence's labels below —
 // a bare 'search'/'claim' string at each call site is exactly the drift this repo's string-literal
 // rule exists to catch.
@@ -107,11 +107,11 @@ const gradeIds = (ids: readonly string[], fullCount: number, expect: readonly st
     zeroResult: fullCount === 0,
   }
 }
-// Runs one probe query through all three SEARCH_MODES and grades each — the seam this whole file
-// exists to use is `{ mode }` on store.search()/searchClaims(), never their private arm methods.
+// Runs one probe query through all three SearchMode values and grades each — the seam this whole
+// file exists to use is `{ mode }` on store.search()/searchClaims(), never their private arm methods.
 // Generic over T (NoteSummary | ClaimHit) so note probes and claim probes share one code path
 // instead of two near-identical copies that could drift on what "a hit" means. Three explicit calls
-// rather than a loop into a built-up object: SEARCH_MODES has exactly three literal keys, and this
+// rather than a loop into a built-up object: SearchMode has exactly three literal members, and this
 // way the Record is fully inferred — no `as` cast standing in for what TS can just be shown.
 async function runModes<T>(
   fetch: (mode: SearchMode) => Promise<T[]>,
@@ -139,7 +139,7 @@ interface ArmTally { pass3: number; top1: number; zero: number; total: number }
 const zeroTally = (): ArmTally => ({ pass3: 0, top1: 0, zero: 0, total: 0 })
 const newArmTally = (): Record<SearchMode, ArmTally> => ({ keyword: zeroTally(), semantic: zeroTally(), hybrid: zeroTally() })
 const recordArm = (tallies: Record<SearchMode, ArmTally>, grades: Record<SearchMode, ArmGrade>): void => {
-  for (const mode of SEARCH_MODES) {
+  for (const mode of Object.values(SearchMode)) {
     const t = tallies[mode]
     t.total += 1
     if (grades[mode].ok) t.pass3 += 1
@@ -224,7 +224,7 @@ for (const p of probes.claims) {
 
 console.log('')
 for (const p of probes.neighbors) {
-  const ns = await memory.store.neighbors(p.seed, { kinds: p.kinds?.map(k => LinkKind.parse(k)) })
+  const ns = await memory.store.neighbors(p.seed, { kinds: p.kinds?.map(k => z.enum(LinkKind).parse(k)) })
   const ids = new Set(ns.map(n => n.id))
   const missing = p.expectMin.filter(id => !ids.has(id))
   const scores = ns.map(n => n.score)
@@ -247,7 +247,7 @@ for (const [cat, c] of byCategory)
 const posTotal = (ps: readonly { expect: readonly string[] }[]): number => ps.filter(p => p.expect.length > 0).length
 const armTable = (title: string, tallies: Record<SearchMode, ArmTally>, positives: number): void => {
   console.log(`\n${title}`)
-  for (const mode of SEARCH_MODES) {
+  for (const mode of Object.values(SearchMode)) {
     const t = tallies[mode]
     console.log(`  ${ARM_LABEL[mode].padEnd(8)} ${String(t.pass3).padStart(2)}/${t.total} top-3   ${String(t.top1).padStart(2)}/${positives} top-1   zero-result ${t.zero}/${t.total}`)
   }

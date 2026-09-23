@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from 'node:f
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { AUTHOR_SOURCE, Door, EVENT_KIND, MemoryScope, NO_CHAT, PAYLOAD_SCHEMAS, RunOutcome, type NoteView, type Origin } from '@orc/contracts'
+import { AUTHOR_SOURCE, Door, EVENT_KIND, MemoryScope, NO_CHAT, NOTE_KIND, PAYLOAD_SCHEMAS, RETENTION, RunOutcome, type NoteView, type Origin } from '@orc/contracts'
 import { authorFixture, draftFixture, must, stepFixture } from '@orc/contracts/fixtures'
 import { createMcpHub } from '@orc/mcp-client'
 import { apiLoopExecutor } from '@orc/executor-api-loop'
@@ -105,8 +105,8 @@ describe('sourced web research through a durable run (integration)', () => {
     const stored = await memory.store.get('pg16-logical-replication')
     expect(stored).not.toBeNull()
     const note: NoteView = must(stored, 'stored note')
-    expect(note.kind).toBe('research')
-    expect(note.retention).toBe('expirable')
+    expect(note.kind).toBe(NOTE_KIND.research)
+    expect(note.retention).toBe(RETENTION.expirable)
     expect(note.body).toBe(FINDING)
 
     // the citation is stamped from the canonical write event, not by the agent. Memory events are
