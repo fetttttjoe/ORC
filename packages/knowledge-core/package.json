@@ -1,0 +1,7 @@
+{
+  "name": "@orc/knowledge-core",
+  "version": "0.0.0",
+  "type": "module",
+  "exports": { ".": "./src/index.ts", "./contract-suite": "./src/contract-suite.ts" },
+  "dependencies": { "@orc/contracts": "workspace:*", "zod": "^4.4.3" }
+}

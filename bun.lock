@@ -26,6 +26,8 @@
         "@orc/executor-api-loop": "workspace:*",
         "@orc/graph-ui": "workspace:*",
         "@orc/kernel": "workspace:*",
+        "@orc/knowledge-core": "workspace:*",
+        "@orc/knowledge-git": "workspace:*",
         "@orc/mcp-client": "workspace:*",
         "@orc/memory": "workspace:*",
         "@orc/provider-anthropic": "workspace:*",
@@ -115,6 +117,14 @@
         "@types/pg": "^8.20.0",
       },
     },
+    "packages/knowledge-core": {
+      "name": "@orc/knowledge-core",
+      "version": "0.0.0",
+      "dependencies": {
+        "@orc/contracts": "workspace:*",
+        "zod": "^4.4.3",
+      },
+    },
     "packages/ui-core": {
       "name": "@orc/ui-core",
       "version": "0.0.0",
@@ -152,6 +162,15 @@
       "devDependencies": {
         "@orc/provider-anthropic": "workspace:*",
         "@orc/provider-ollama": "workspace:*",
+      },
+    },
+    "plugins/knowledge-git": {
+      "name": "@orc/knowledge-git",
+      "version": "0.0.0",
+      "dependencies": {
+        "@orc/contracts": "workspace:*",
+        "@orc/knowledge-core": "workspace:*",
+        "zod": "^4.4.3",
       },
     },
     "plugins/mcp-client": {
@@ -322,6 +341,10 @@
     "@orc/graph-web": ["@orc/graph-web@workspace:packages/graph-ui/web"],
 
     "@orc/kernel": ["@orc/kernel@workspace:packages/kernel"],
+
+    "@orc/knowledge-core": ["@orc/knowledge-core@workspace:packages/knowledge-core"],
+
+    "@orc/knowledge-git": ["@orc/knowledge-git@workspace:plugins/knowledge-git"],
 
     "@orc/mcp-client": ["@orc/mcp-client@workspace:plugins/mcp-client"],
 

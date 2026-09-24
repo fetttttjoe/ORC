@@ -99,6 +99,14 @@ const SUMMARIZE = {
   [EVENT_KIND.memory_outcome]: entry(PAYLOAD_SCHEMAS.memory_outcome, p => ({
     line: `${p.id} → ${p.outcome}`,
   })),
+  [EVENT_KIND.knowledge_delivered]: entry(PAYLOAD_SCHEMAS.knowledge_delivered, p => ({
+    line: `${p.mode} ${p.ids.length} claim(s) · ${snip(p.subject, 80)}`,
+    authorTaskId: p.author.taskId ?? null,
+  })),
+  [EVENT_KIND.knowledge_written]: entry(PAYLOAD_SCHEMAS.knowledge_written, p => ({
+    line: `+${p.added.length} ~${p.changed.length} -${p.retired.length}${p.why === null ? '' : ` · ${snip(p.why, 80)}`}`,
+    authorTaskId: p.author.taskId ?? null,
+  })),
   [EVENT_KIND.signal_received]: entry(PAYLOAD_SCHEMAS.signal_received, p => ({
     line: `${p.signal.outcome}: ${snip(p.signal.summary, 90)}`,
   })),

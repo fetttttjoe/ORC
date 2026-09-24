@@ -7,6 +7,8 @@
   "dependencies": {
     "@orc/contracts": "workspace:*",
     "@orc/kernel": "workspace:*",
+    "@orc/knowledge-core": "workspace:*",
+    "@orc/knowledge-git": "workspace:*",
     "@orc/analyzer-agent": "workspace:*",
     "@orc/mcp-client": "workspace:*",
     "@orc/memory": "workspace:*",

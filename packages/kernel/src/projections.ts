@@ -293,6 +293,8 @@ export function foldInto(acc: FoldAcc, e: EventRecord): FoldAcc {
       case EVENT_KIND.memory_verified:
       // an agent's self-reported use outcome — evidence for the memory read model, no task state
       case EVENT_KIND.memory_outcome:
+      case EVENT_KIND.knowledge_delivered:
+      case EVENT_KIND.knowledge_written:
       case EVENT_KIND.models_discovered:
       case EVENT_KIND.feedback_requested:
       case EVENT_KIND.feedback_provided:

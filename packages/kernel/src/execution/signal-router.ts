@@ -37,6 +37,7 @@ const ROUTER_RELEVANT: Record<EventKind, boolean> = {
   memory_verified: false,
   // an agent's self-reported use outcome — evidence the memory fold aggregates, nothing to route
   memory_outcome: false,
+  knowledge_delivered: false, knowledge_written: false,
   feedback_requested: false, feedback_provided: true, plan_annotated: false, analysis_completed: false,
   models_discovered: false, // catalog metadata — nothing to route
   copilot_exchange: false, // conversation record — nothing to route

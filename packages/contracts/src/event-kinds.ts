@@ -36,6 +36,8 @@ export enum EventKind {
   memory_topic_accessed = 'memory_topic_accessed',
   memory_verified = 'memory_verified',
   memory_outcome = 'memory_outcome',
+  knowledge_delivered = 'knowledge_delivered',
+  knowledge_written = 'knowledge_written',
   feedback_requested = 'feedback_requested',
   feedback_provided = 'feedback_provided',
   plan_annotated = 'plan_annotated',

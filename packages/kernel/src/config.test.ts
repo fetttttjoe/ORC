@@ -436,6 +436,20 @@ describe('initializeProject', () => {
   })
 })
 
+describe('knowledge config', () => {
+  const withSettings = (settings: Record<string, unknown>): string => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'orc-kcfg-'))
+    mkdirSync(path.join(dir, '.orc'))
+    writeFileSync(path.join(dir, '.orc', SETTINGS_FILE), JSON.stringify(settings))
+    return dir
+  }
+  it('defaults to the git-files backend, accepts null to turn knowledge off, refuses an unknown key', () => {
+    expect(loadConfig(withSettings({})).knowledge).toEqual({ plugin: 'git-files', options: {} })
+    expect(loadConfig(withSettings({ knowledge: null })).knowledge).toBeNull()
+    expect(() => loadConfig(withSettings({ knowledge: { plugin: 'git-files', typo: 1 } }))).toThrow()
+  })
+})
+
 function tmpProject(cfg: Record<string, unknown>): string {
   const d = mkdtempSync(path.join(tmpdir(), 'orc-cfg-'))
   mkdirSync(path.join(d, '.orc'), { recursive: true })

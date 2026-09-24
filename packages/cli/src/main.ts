@@ -17,8 +17,10 @@ import { isLanguageModel } from './model-guard'
 import { assertDrivable, assertRetryable, buildModelDiscovery, buildOrcActions } from './actions'
 import { cwdAuthor, cwdWorkspaceId, findCwdWorkspace } from './cwd-workspace'
 import { enumArg } from './enum-arg'
+import { parseNonNegativeInteger, parsePositiveInteger } from './int-arg'
 import { renderDerivedPlan, renderPlanHuman } from './plan-render'
 import { adrCommand } from './adr-commands'
+import { knowledgeCommand } from './knowledge-commands'
 import { wsCommand, WS_NEEDS_PROJECT } from './ws-commands'
 import { briefCommand } from './brief-commands'
 import { driftLine } from './drift-line'
@@ -131,13 +133,6 @@ export async function runMigrate(args: string[], dir?: string): Promise<void> {
   await databaseCommand(dir).parseAsync(args, { from: 'user' })
 }
 
-function parseNonNegativeInteger(value: string): number {
-  const parsed = Number(value)
-  if (!/^\d+$/.test(value) || !Number.isSafeInteger(parsed))
-    throw new InvalidArgumentError(`must be a non-negative integer, got '${value}'`)
-  return parsed
-}
-
 function parsePositiveNumber(value: string): number {
   const parsed = Number(value)
   if (!Number.isFinite(parsed) || parsed <= 0)
@@ -151,15 +146,6 @@ const parseNoteTier = enumArg<NoteTier>('tier', Object.values(NoteTier))
 // a decision. 'adr' is the near-miss it catches — that is a tag, never a kind.
 const parseNoteKind = enumArg<NoteKind>('kind', Object.values(NoteKind))
 const parseClaimClass = enumArg<ClaimClass>('claim class', Object.values(ClaimClass))
-
-// neighbors --depth must be >= 1: the store default is 2 and rankNeighbors requires a positive
-// hop count (depth 0 traverses nothing and silently returns []), so reject it at parse time with
-// a clear error rather than letting a 0 look like "no neighbors".
-function parsePositiveInteger(value: string): number {
-  const parsed = parseNonNegativeInteger(value)
-  if (parsed < 1) throw new InvalidArgumentError(`must be a positive integer (>= 1), got '${value}'`)
-  return parsed
-}
 
 // An AUTHORED draft — the door's parsing job. The template arm lives in OrcActions.propose, so
 // every door validates one draft the same way.
@@ -251,6 +237,7 @@ export function buildProgram(
   // reads that binding immediately, so calling wsCommand up there would hit its temporal dead zone.
   program.addCommand(wsCommand({ requireDoor: requireWsDoor }))
   program.addCommand(adrCommand({ requireKernel, ...(plugin && { project: { config: plugin.config, log: plugin.log } }) }))
+  program.addCommand(knowledgeCommand({ requireKernel, ...(plugin && { project: { config: plugin.config, log: plugin.log } }) }))
   program.addCommand(briefCommand({ ...(plugin && { project: { config: plugin.config, log: plugin.log } }) }))
 
   // The author every `orc memory` write carries, in ONE place — a dozen handlers each spelling

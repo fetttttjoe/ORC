@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test'
-import { AUTHOR_SOURCE, Confidence, EVENT_KIND } from '@orc/contracts'
+import { AUTHOR_SOURCE, Confidence, DeliveryMode, EVENT_KIND } from '@orc/contracts'
 import { TEST_WORKSPACE_ID, authorFixture, eventFixture, planFixture, stepFixture, taskFixture } from '@orc/contracts/fixtures'
 import { summarizeEvent } from './summarize'
 
@@ -68,6 +68,20 @@ describe('summarizeEvent', () => {
       payload: { id: 'gone', scope: 'project', author: authorFixture({ source: AUTHOR_SOURCE.agent, taskId: 'task-B' }) },
     }))
     expect(row.authorTaskId).toBe('task-B')
+  })
+
+  it('knowledge_delivered and knowledge_written surface payload.author.taskId as authorTaskId', () => {
+    const author = authorFixture({ source: AUTHOR_SOURCE.agent, taskId: 'task-K' })
+    const delivered = summarizeEvent(eventFixture({
+      kind: EVENT_KIND.knowledge_delivered, taskId: null,
+      payload: { ids: ['abcd1234'], mode: DeliveryMode.card, subject: 'src/a.ts', author },
+    }))
+    const written = summarizeEvent(eventFixture({
+      kind: EVENT_KIND.knowledge_written, taskId: null,
+      payload: { added: [{ id: 'abcd1234', location: 'knowledge/src/a.ts.md' }], changed: [], retired: [], why: 'because', decision: null, author },
+    }))
+    expect([delivered.line, written.line]).toEqual(['card 1 claim(s) · src/a.ts', '+1 ~0 -0 · because'])
+    expect([delivered.authorTaskId, written.authorTaskId]).toEqual(['task-K', 'task-K'])
   })
 
   it('an ownerless (cli/human) memory row has authorTaskId null', () => {

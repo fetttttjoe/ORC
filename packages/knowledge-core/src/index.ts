@@ -1,0 +1,5 @@
+export { cardOf, CARD_REFUSAL } from './card'
+export { mergeChange, sameContent } from './patch'
+export { createMemoryBackend, type MemoryBackendOptions } from './memory-backend'
+export { createKnowledgePort, EVIDENCE_NOT_RECORDED, type KnowledgePortDeps } from './port'
+export { resolveKnowledgeBackend, REGISTRY_REFUSAL } from './registry'

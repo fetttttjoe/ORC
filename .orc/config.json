@@ -36,7 +36,7 @@
   "memoryEmbedModel": "ollama/mxbai-embed-large",
   "maxIterations": 60,
   "autoCommit": true,
-  "finishChecks": ["bun run typecheck"],
+  "finishChecks": ["bun run typecheck", "bun run knowledge:check"],
   "workspaceSetup": [
     "bun",
     "install",

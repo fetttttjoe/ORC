@@ -17,6 +17,7 @@
     "./ids": "./src/ids.ts",
     "./origin": "./src/origin.ts",
     "./author": "./src/author.ts",
+    "./entity-of": "./src/entity-of.ts",
     "./chat": "./src/chat.ts",
     "./scope": "./src/scope.ts",
     "./chat-digest": "./src/chat-digest.ts",
