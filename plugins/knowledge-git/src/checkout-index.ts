@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto'
 import { existsSync, readFileSync } from 'node:fs'
 import path from 'node:path'
 import { KnowledgeClaim, KnowledgeDraft, normalizeEntity, type KnowledgeProblem } from '@orc/contracts'
-import { codeOf } from './error-code'
+import { codeOf, Errno } from './error-code'
 import { parseBucket } from './format'
 import { CLASS_OF_HEADING, HEADINGS } from './headings'
 import { isBucket } from './layout'
@@ -34,7 +34,7 @@ async function lsFiles(checkout: string, pathspecs: readonly string[]): Promise<
 
 function readIfPresent(file: string): string | null {
   try { return readFileSync(file, 'utf8') } catch (err) {
-    if (codeOf(err) === 'ENOENT') return null
+    if (codeOf(err) === Errno.ENOENT) return null
     throw err
   }
 }

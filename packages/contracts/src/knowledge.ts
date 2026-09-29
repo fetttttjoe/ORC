@@ -3,9 +3,10 @@ import { z } from 'zod'
 import type { MemoryAuthor } from './author'
 import { ClaimClass, EntityPath } from './claim'
 import { ROOT_ENTITY } from './entity-of'
+import { KNOWLEDGE_ID_LENGTH, KNOWLEDGE_ID_RE, KnowledgeId, KnowledgeRef } from './knowledge-ref'
 
-export const KNOWLEDGE_ID_LENGTH = 8
-export const KNOWLEDGE_ID_RE = new RegExp(`^[a-z0-9]{${KNOWLEDGE_ID_LENGTH}}$`)
+export { KNOWLEDGE_ID_LENGTH, KNOWLEDGE_ID_RE, KnowledgeId, KnowledgeRef } from './knowledge-ref'
+
 export const DECISION_SLUG_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/
 export const KNOWLEDGE_TAG_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/
 const GRAMMAR_BREAKERS = /[\s#@{}]/
@@ -28,6 +29,15 @@ export const KNOWLEDGE_LIMITS = {
   bucketWarnClaims: 40,
 } as const
 
+export const KNOWLEDGE_DEFAULTS = { pageItems: 50, searchItems: 20 } as const
+
+export enum KnowledgeToolName {
+  card = 'knowledge_card',
+  search = 'knowledge_search',
+  write = 'knowledge_write',
+  taskClaims = 'task_claims',
+}
+
 const idFromBytes = (bytes: Uint8Array): string =>
   Array.from(bytes.subarray(0, KNOWLEDGE_ID_LENGTH), byte => ID_ALPHABET.charAt(byte % ID_ALPHABET.length)).join('')
 
@@ -36,7 +46,6 @@ export const knowledgeIdFrom = (seed: string): string => idFromBytes(createHash(
 
 const grammarSafe = (value: string): boolean => !GRAMMAR_BREAKERS.test(value)
 
-export const KnowledgeId = z.string().regex(KNOWLEDGE_ID_RE)
 export const DecisionSlug = z.string().max(KNOWLEDGE_LIMITS.slugChars).regex(DECISION_SLUG_RE)
 const Tag = z.string().max(KNOWLEDGE_LIMITS.tagChars).regex(KNOWLEDGE_TAG_RE)
 const URL_BREAKERS = /[\s<>{}]/
@@ -106,14 +115,12 @@ export const KnowledgePatch = z.object({
 export type KnowledgePatch = z.infer<typeof KnowledgePatch>
 export type KnowledgePatchInput = z.input<typeof KnowledgePatch>
 
-export const KnowledgeRef = z.object({ id: KnowledgeId, location: z.string().min(1) })
-export type KnowledgeRef = z.infer<typeof KnowledgeRef>
-
 export const KnowledgeWriteResult = z.object({
   added: z.array(KnowledgeRef),
   changed: z.array(KnowledgeRef),
   retired: z.array(KnowledgeRef),
   warnings: z.array(z.string()),
+  files: z.array(z.string()),
 })
 export type KnowledgeWriteResult = z.infer<typeof KnowledgeWriteResult>
 
@@ -157,6 +164,8 @@ export interface KnowledgePort {
   write(call: KnowledgeCall, patch: KnowledgePatchInput): Promise<KnowledgeWriteResult>
 }
 
+export type KnowledgeAccess = { port: KnowledgePort } | { unavailable: string }
+
 export interface KnowledgePlugin {
   id: string
   create(options: Record<string, unknown>): KnowledgeBackend
@@ -183,4 +192,6 @@ export const KNOWLEDGE_REFUSAL = {
     `'${location}' has ${count} problem(s) — ${CHECK_HINT}, fix them, then write again`,
   raced: (): string => 'the knowledge write kept racing with other writers — call again',
   missingCheckout: (dir: string): string => `checkout '${dir}' does not exist`,
+  off: (): string => 'knowledge is off for this project (.orc/config.json "knowledge": null)',
+  unavailable: (reason: string): string => `knowledge unavailable: ${reason}`,
 } as const

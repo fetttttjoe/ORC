@@ -27,6 +27,7 @@ export type KernelMutationVerb =
 export type KernelReads = Pick<Kernel,
   | 'listAnnotations'
   | 'listTaskChangedPaths'
+  | 'listTaskKnowledgeWrites'
   | 'listTaskNoteWrites'
   | 'listTaskVerifiedNotes'
   | 'listPlanNotes'

@@ -49,26 +49,24 @@ export const STEP_ROLE = {
   // kernel-set only (withCommitStep): a planner note named 'commit' freezes as implementer, so the
   // git_commit gate's role term keeps it unarmed.
   committer: 'committer',
-  // kernel-set only (withFinishStep), same reasoning as committer: it arms task_notes/record_decision
+  // kernel-set only (withFinishStep), same reasoning as committer: it arms task_claims/record_decision
   // on the appended finish step and nowhere a planner or split could claim it.
   finisher: 'finisher',
 } as const
 
 /**
- * May this step record a confirmation — `memory_verify`, and the `scoped_changes` list feeding it?
- * Any auditor may, except the grounded planner, which shares the role (PLAN_STEP_ROLE ===
- * STEP_ROLE.auditor) and has audited nothing.
- *
- * Excludes the planner by identity rather than requiring the id `verify`: under that older rule an
- * auditor step named anything else silently lost the tool and fell back to memory_write, whose
- * `body` is a full replace — a confirm is not a rewrite. Shared by both gates so they cannot drift.
+ * May this step receive the `scoped_changes` list? Any auditor may, except the grounded planner,
+ * which shares the role and has audited nothing — excluded by identity, not by the step id `verify`.
  */
 export const stepMayVerify = (p: { stepId: string; role: string }): boolean =>
   p.role === STEP_ROLE.auditor && p.stepId !== STEP_ID.plan
 
+// The grounded plan step: it alone authors plan notes and records decisions until those leave the memory store.
+export const stepMayPlan = (p: { stepId: string; role: string }): boolean => p.stepId === STEP_ID.plan && p.role === STEP_ROLE.auditor
+
 // The finish step's gate — BOTH terms, like the commit gate: the finisher role is kernel-set
 // (withFinishStep, enforced by proposeSplit's reserved-role refusal), so a planner-authored step
-// named 'finish' never arms task_notes/record_decision, and the role alone would arm them on a
+// named 'finish' never arms task_claims/record_decision, and the role alone would arm them on a
 // step a split claimed. Shared by every gate that keys on the finish step so they cannot drift.
 export const stepMayReconcile = (p: { stepId: string; role: string }): boolean =>
   p.stepId === STEP_ID.finish && p.role === STEP_ROLE.finisher

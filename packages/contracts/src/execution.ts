@@ -1,6 +1,4 @@
 import { z } from 'zod'
-import { MEMORY_ID_RE } from './ids'
-import { MEMORY_LIMITS } from './limits'
 import type { PlanStep } from './plan'
 import { TASK_STATUS, type TaskStatus } from './task'
 import type { EventDraft } from './events'
@@ -8,6 +6,9 @@ import type { OperationSpec } from './operations'
 import type { LoadedSkill, ResolvedTool } from './plugins'
 import type { ClaimHit, NoteSummary } from './memory'
 import type { Origin } from './origin'
+import { KnowledgeRef } from './knowledge-ref'
+// kept type-only and separate from KnowledgeRef above: knowledge.ts pulls node:crypto, and only a fully-`type` import is erased before graph-ui's bundle (browser-leaves.test.ts)
+import type { KnowledgeClaim } from './knowledge'
 
 // Whether anything can DRIVE a run right now — the question every silent project raises first.
 // Derived from the supervisor heartbeat row plus the pid file the serve process writes only once
@@ -108,18 +109,6 @@ export const MAX_AUTO_CONTINUATIONS = 3
 // and any reader tracing a feedback event back to its round all derive it here.
 export const continuationTopic = (stepId: string, round: number): string => `continue:${stepId}:${round}`
 
-// The agent's self-report of which pulled notes ANSWERED the step and which wasted it — the
-// capture seam for memory_outcome events: one field on the signal the step already sends, no
-// extra tool calls. EVIDENCE, never verification — memory_verify stays auditor-gated and
-// separate, and nothing here may mint a stamp. Ids are project-scope note ids (plan-lane notes
-// are expirable run trail, not verdict targets). Bounded per REPORT only — see
-// MEMORY_LIMITS.outcomeIds for why the cap cannot hide evidence from the aggregator.
-export const KnowledgeReport = z.object({
-  useful: z.array(z.string().regex(MEMORY_ID_RE)).max(MEMORY_LIMITS.outcomeIds).default([]),
-  deadEnd: z.array(z.string().regex(MEMORY_ID_RE)).max(MEMORY_LIMITS.outcomeIds).default([]),
-})
-export type KnowledgeReport = z.infer<typeof KnowledgeReport>
-
 export const Signal = z.object({
   stepId: z.string().min(1),
   runToken: z.string().min(1),
@@ -127,8 +116,6 @@ export const Signal = z.object({
   summary: z.string().min(1),
   // workspace-relative paths this step declares as produced outputs — verified by the runtime
   outputs: z.array(z.string().min(1)).optional(),
-  // optional: a step that pulled no knowledge has nothing to report, and absence must cost nothing
-  knowledge: KnowledgeReport.optional(),
 })
 export type Signal = z.infer<typeof Signal>
 
@@ -184,7 +171,7 @@ export const SplitResult = z.object({
   childTaskId: z.string().min(1),
   outcome: z.enum(RunOutcome), // done | blocked | cancelled — NOT SignalOutcome (spec D5)
   summary: z.string(),
-  notes: z.array(z.object({ id: z.string(), scope: z.string() })),
+  claims: z.array(KnowledgeRef),
 })
 export type SplitResult = z.infer<typeof SplitResult>
 
@@ -340,6 +327,7 @@ export interface ExecutorContext<LM = unknown> {
   taskId?: string // the plan this step belongs to — absent in bare test ctxs, which skip ambient capture
   memoryPreloadTokens?: number // memory-preload budget: fed via dbos-port config, consumed by the loop's preload search
   memory?: StepMemory
+  knowledge?: StepKnowledge
   // Set by the port on a continuation round (a previous round signalled `partial`): the previous
   // round's summary IS the handoff — the same "your summary is the only output downstream sees"
   // seam, pointed at your own successor. The loop renders it into the first prompt; nothing else
@@ -381,23 +369,12 @@ export interface StepMemory {
    * calls would record two values and could rebuild messages[0] differently on recovery.
    */
   recall(budget: number): Promise<RecalledContext>
-  /**
-   * The claims a file edit puts at risk: every recorded claim that cites one of `paths`.
-   *
-   * A step that changes code falsifies the claims describing what that code used to do, and the
-   * knowledge protocol obliges it to retire them — but "remember to check" is the weakest possible
-   * enforcement, and it failed: a run added a CLI flag while a claim saying that command "accepts
-   * no options" stayed live, so one note asserted a thing and its opposite.
-   *
-   * The join is deterministic, not inferential: claims name their source file by convention, so
-   * citing text is a string match. Judging whether a cited claim is now FALSE is the agent's job —
-   * nothing here can know that, which is exactly why this surfaces candidates rather than retiring
-   * anything itself.
-   */
-  claimsCiting(paths: readonly string[]): Promise<ClaimHit[]>
   /** What the finished step leaves behind. Best-effort: never throws into the step. */
-  capture(signal: { outcome: SignalOutcome; summary: string; knowledge?: KnowledgeReport }): Promise<void>
+  capture(signal: { outcome: SignalOutcome; summary: string }): Promise<void>
 }
+
+/** The step's own knowledge claims: what an edited path puts at risk. */
+export interface StepKnowledge { claimsAt(paths: readonly string[]): Promise<KnowledgeClaim[]> }
 
 export interface AgentExecutor<LM = unknown> {
   id: string

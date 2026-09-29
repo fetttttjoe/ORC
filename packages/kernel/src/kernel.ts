@@ -3,7 +3,7 @@ import { statSync } from 'node:fs'
 import path from 'node:path'
 import { MASTERPLAN_NOTE_ID,
   AnalysisCompletedPayload, ApprovedBy, CHECKS_STEP_ID, ChildPlanDraft, EVENT_KIND, FINISH_STEP_ID, FeedbackProvidedPayload, GroundedApprovalDoor, IsolationTier, MemoryDeletedPayload, MemoryWrittenPayload, NOTE_TIER, PAYLOAD_SCHEMAS, PlanAnnotatedPayload, PlanDraft, RunRequestedPayload, STEP_ROLE, STRATEGY, TASK_STATUS, TERMINAL_TASK_STATUS, WORKSPACE_TITLE_MAX, Workspace, WorkspaceArchivedPayload, WorkspaceMergedPayload, WorkspaceRetitledPayload, evaluateApproval, feedbackKey, formatModelOption, isApprovalAnswer, openFeedbackTopics, validatePlan, type ChildPlanDraftInput, type ModelOption,
-  type Analyzer, type ApprovalPolicy, type EventDraft, type EventKind, type EventRecord,
+  type Analyzer, type ApprovalPolicy, type EventDraft, type EventKind, type EventRecord, type KnowledgeWrites,
   type PlanNote, type Plan, type PlanStep, type TaskNode, type TaskStatus,
   type WorkspaceKind, authorSourceOf, directoryZoneEntries, type Origin,
 } from '@orc/contracts'
@@ -12,6 +12,7 @@ import { kernelStepExecutorRef, reconcileFinishStep } from './finish-step'
 import { DEFAULT_MAX_ITERATIONS } from './config'
 import { EventLog, type EventLogOps } from './storage'
 import { estimateCostUSD, fold, gatedChildren, subtreeTaskIds, subtreeUsage, taskChangedPaths, taskNoteWrites, taskVerifiedNotes, type State, type TaskNoteWrite, type TaskVerifiedNote } from './projections'
+import { knowledgeWritesIn } from './task-knowledge'
 import { applyArchived, applyRetitle, workspaceByCwd, workspaceCwdFor } from './workspaces'
 import { KERNEL_ERROR_CODE, KernelError } from './errors'
 
@@ -334,6 +335,13 @@ export class Kernel {
       for (const changed of taskChangedPaths(await this.log.byTask(id)))
         out.push({ path: changed.path, taskId: id, steps: changed.steps })
     return out
+  }
+
+  // Same subtree rule as listTaskChangedPaths: covers delegated writes in a descendant split task.
+  async listTaskKnowledgeWrites(taskId: string): Promise<KnowledgeWrites> {
+    const ids = subtreeTaskIds(await this.state(), taskId)
+    const events = (await Promise.all(ids.map(id => this.log.byTask(id)))).flat()
+    return knowledgeWritesIn(events, new Set(ids))
   }
 
   // The restamp set for git_commit: semantic notes this task's subtree wrote, from the log (same

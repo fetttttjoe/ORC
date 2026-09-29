@@ -1,18 +1,21 @@
-import { describe, expect, it } from 'bun:test'
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { afterEach, describe, expect, it } from 'bun:test'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { COMMIT_STEP_ID, Door, NO_CHAT, ORC_CHAT_ID, STEP_ROLE, ZERO_USAGE, type Origin, type ResolvedTool, type Usage } from '@orc/contracts'
 import { must, recordOf } from '@orc/contracts/fixtures'
 import { emptyFold, subtreeUsage, type State } from '../projections'
-import { commitTool, type StampNote } from './commit-tool'
-import type { CitingNotes } from './scoped-changes-tool'
+import { commitTool, type CitingNotes, type StampNote } from './commit-tool'
+
+const tempDirs: string[] = []
+afterEach(() => { for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true }) })
 
 const run = (dir: string, ...args: string[]) => Bun.spawnSync(['git', '-C', dir, ...args], { stdout: 'ignore', stderr: 'ignore' })
 const out = (dir: string, ...args: string[]) => Bun.spawnSync(['git', '-C', dir, '-c', 'core.quotePath=false', ...args], { stdout: 'pipe' }).stdout.toString().trim()
 const head = (dir: string) => out(dir, 'rev-parse', 'HEAD')
 function repo(): string {
   const dir = mkdtempSync(path.join(tmpdir(), 'orc-commit-'))
+  tempDirs.push(dir)
   run(dir, 'init', '-q'); run(dir, 'config', 'user.email', 't@t.t'); run(dir, 'config', 'user.name', 't')
   writeFileSync(path.join(dir, 'a.ts'), 'a1\n')
   writeFileSync(path.join(dir, 'sibling.ts'), 's1\n')
@@ -46,6 +49,7 @@ function build(dir: string, opts: {
   restamp?: StampNote | null
   reverify?: StampNote | null
   citing?: CitingNotes
+  knowledgeFiles?: string[]
   p?: typeof p
   state?: State
 }) {
@@ -64,6 +68,7 @@ function build(dir: string, opts: {
       listTaskChangedPaths: async () => changed(...(opts.paths ?? [])),
       listTaskNoteWrites: async () => (opts.notes ?? []).map(n => ({ preexisting: true, ...n })),
       listTaskVerifiedNotes: async () => (opts.verified ?? []).map(n => ({ stampRevision: auditedHead, ...n })),
+      listTaskKnowledgeWrites: async () => ({ live: [], retired: [], files: opts.knowledgeFiles ?? [] }),
       // no usage recorded by default — subtreeUsage(emptyFold().state, taskId) reads back ZERO_USAGE
       state: async () => opts.state ?? emptyFold().state,
     },
@@ -230,6 +235,7 @@ describe('git_commit', () => {
 
   it('outside a git repository both tools error honestly', async () => {
     const dir = mkdtempSync(path.join(tmpdir(), 'orc-norepo-'))
+    tempDirs.push(dir)
     writeFileSync(path.join(dir, 'a.ts'), 'a\n')
     const { tool } = build(dir, { paths: ['a.ts'] })
     expect((await tool('commit_preview').execute({})).isError).toBe(true)
@@ -664,5 +670,32 @@ describe('restamp truthfulness', () => {
     expect(o.restamped).toEqual([{ id: 'area-ok', scope: 'project' }])
     expect(o.restampFailed).toEqual([{ id: 'area-throws', scope: 'project', error: 'surreal hiccup' }])
     expect(stampedOk).toEqual(['area-ok'])
+  })
+})
+
+describe('knowledge files ride the commit', () => {
+  const committed = (dir: string): string[] =>
+    Bun.spawnSync(['git', '-C', dir, 'show', '--name-only', '--format=', 'HEAD']).stdout.toString().trim().split('\n').sort()
+  it('a knowledge file the task wrote is committed with the code', async () => {
+    const dir = repo()
+    writeFileSync(path.join(dir, 'a.ts'), 'a2\n')
+    mkdirSync(path.join(dir, 'knowledge'), { recursive: true })
+    writeFileSync(path.join(dir, 'knowledge', 'a.ts.md'), '# a.ts\n')
+    const r = await build(dir, { paths: ['a.ts'], knowledgeFiles: ['knowledge/a.ts.md'] }).commit('feat: a')
+    expect(r.isError).toBe(false)
+    expect(committed(dir)).toEqual(['a.ts', 'knowledge/a.ts.md'])
+  })
+  it('a bucket the task emptied is committed as a deletion', async () => {
+    const dir = repo()
+    mkdirSync(path.join(dir, 'knowledge'), { recursive: true })
+    writeFileSync(path.join(dir, 'knowledge', 'b.ts.md'), '# b.ts\n')
+    Bun.spawnSync(['git', '-C', dir, 'add', '-A'])
+    Bun.spawnSync(['git', '-C', dir, 'commit', '-qm', 'seed bucket'])
+    rmSync(path.join(dir, 'knowledge', 'b.ts.md'))
+    const r = await build(dir, { knowledgeFiles: ['knowledge/b.ts.md'] }).commit('chore: retire')
+    expect(r.isError).toBe(false)
+    expect(Bun.spawnSync(['git', '-C', dir, 'log', '-1', '--format=%s']).stdout.toString().trim()).toBe('chore: retire')
+    expect(committed(dir)).toEqual(['knowledge/b.ts.md'])
+    expect(Bun.spawnSync(['git', '-C', dir, 'ls-files', 'knowledge/b.ts.md']).stdout.toString()).toBe('')
   })
 })

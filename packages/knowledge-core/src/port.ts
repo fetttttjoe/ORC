@@ -63,7 +63,7 @@ export function createKnowledgePort(deps: KnowledgePortDeps): KnowledgePort {
       try {
         await deps.append({
           ...envelope(call), kind: EVENT_KIND.knowledge_written,
-          payload: { added: result.added, changed: result.changed, retired: result.retired, why: patch.why, decision: patch.decision, author: call.author },
+          payload: { added: result.added, changed: result.changed, retired: result.retired, files: result.files, why: patch.why, decision: patch.decision, author: call.author },
         })
         return result
       } catch (err) {

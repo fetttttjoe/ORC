@@ -1,9 +1,10 @@
 import { afterAll, afterEach, describe, expect, it, mock, spyOn } from 'bun:test'
-import { mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import { MEMORY_HEALTH, Door, NO_CHAT,
-  EVENT_KIND, FINISH_STEP_ID, MEMORY_TOOL_NAME, ROLE_SKILL, SignalOutcome, STEP_ROLE, VERIFY_STEP_ID,
+import { z } from 'zod'
+import { MEMORY_HEALTH, ClaimClass, DEFAULT_KNOWLEDGE_PLUGIN, Door, NO_CHAT,
+  EVENT_KIND, FINISH_STEP_ID, KNOWLEDGE_REFUSAL, KnowledgeToolName, MEMORY_TOOL_NAME, ROLE_SKILL, SignalOutcome, STEP_ID, STEP_ROLE, VERIFY_STEP_ID,
   type AgentExecutor, type EventDraft, type ExecutorContext, type SplitResult, type UnifiedEvent,
   RunOutcome,
 } from '@orc/contracts'
@@ -19,6 +20,7 @@ import { buildProgram } from './main'
 import { buildPlugins, buildRuntime, seedPhases, workspaceStamps } from './runtime'
 import { testSurrealDbName } from './test-helpers'
 import { seedShippedSkills } from './shipped-skills'
+import { openKnowledge } from './knowledge-open'
 
 const dbs: Array<{ drop: () => Promise<void> }> = []
 const surrealBases: ProjectConfig[] = []
@@ -70,13 +72,22 @@ const probeExecutor: AgentExecutor<unknown> = {
 
 // records the extraTools names each step actually receives, keyed by step id — the mirror image
 // of toolProbe above (which only cares about memory_* execute() results): this one never calls a
-// tool, it just proves whether stepTools registered it, since memory_verify appending an event
-// nobody asked for would be a second, unrelated way this test could fail.
+// tool, it just proves whether stepTools registered it.
 const toolNamesByStep: Record<string, string[]> = {}
+// whether the port forwarded ctx.knowledge (dbos-port.ts's `...(stepKnowledge && { knowledge })`,
+// fed by runtime.ts's stepTools returning `knowledge: stepKnowledge.knowledge`), keyed by step id
+const knowledgePresentByStep: Record<string, boolean> = {}
+// scoped_changes' own execute() result per step — proves runtime.ts actually wired
+// stepKnowledge.citing into scopedChangesTool's claimsAt, not just that the tool exists
+const scopedChangesByStep: Record<string, { isError: boolean; output: unknown }> = {}
+const ScopedChangesOutput = z.object({ citingClaims: z.array(z.unknown()).nullable(), degraded: z.array(z.string()).optional() })
 const toolNameExecutor: AgentExecutor<unknown> = {
   id: 'api-loop',
   async *startTurn(ctx: ExecutorContext<unknown>): AsyncGenerator<UnifiedEvent, void, SplitResult[] | undefined> {
     toolNamesByStep[ctx.step.id] = ctx.extraTools.map(t => t.name)
+    knowledgePresentByStep[ctx.step.id] = ctx.knowledge !== undefined
+    const scopedChanges = ctx.extraTools.find(t => t.name === SCOPED_CHANGES_TOOL_NAME)
+    if (scopedChanges) scopedChangesByStep[ctx.step.id] = await scopedChanges.execute({})
     const signal = { stepId: ctx.step.id, runToken: ctx.runToken, outcome: SignalOutcome.success, summary: 'probed' }
     await ctx.checkpoint('signal:1', async () => signal,
       (): EventDraft[] => [{ kind: EVENT_KIND.signal_received, payload: { stepId: ctx.step.id, runToken: ctx.runToken, signal } }])
@@ -85,12 +96,6 @@ const toolNameExecutor: AgentExecutor<unknown> = {
   },
 }
 
-// C.5: memory_verify is gated on contracts' stepMayVerify — the same predicate scoped_changes uses.
-// 'buildRuntime degraded memory' below pins the negative half against a BROKEN store (no
-// memoryStore, so the tool is absent regardless of role); this pins the positive half against a
-// HEALTHY one, so the registration line itself (runtime.ts stepTools) is what is on test. Declared
-// FIRST for a DBOS reason, not an ordering preference: see the teardown comment inside the `it`.
-// any auditor step earns the tool, whatever a plan calls it — named once rather than inline
 const AUDITOR_STEP_NAMED_FOR_ITS_JOB = 'heal'
 
 // The boot line must account for the storage open, and on the real `orc serve` path bin.ts opens
@@ -112,8 +117,8 @@ describe('seedPhases (the boot line accounts for a storage open it did not perfo
   })
 })
 
-describe('stepTools memory_verify registration', () => {
-  it('offers memory_verify to a healthy store\'s auditor verify step, and withholds it from a plain worker step', async () => {
+describe('stepTools knowledge and memory surfaces per step', () => {
+  it('every step gets the knowledge tools; only the plan step keeps memory write, search and read, the finish step search and read', async () => {
     const db = await createTestDb()
     dbs.push(db)
     const vaultDir = mkdtempSync(path.join(tmpdir(), 'orc-rt-verify-'))
@@ -152,7 +157,6 @@ describe('stepTools memory_verify registration', () => {
       await kernel.approvePlan(workerTask.id, undefined, undefined, CLI)
       expect(await (await port.startRun(workerTask.id)).wait()).toBe(RunOutcome.done)
 
-      // an auditor step named for its JOB, not for this gate — the case that silently lost the tool
       const healTask = await kernel.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'heal step', spec: 'confirms notes' }, CLI)
       await kernel.proposePlan(healTask.id, draftFixture([stepFixture({ id: AUDITOR_STEP_NAMED_FOR_ITS_JOB, role: STEP_ROLE.auditor })]), CLI)
       await kernel.approvePlan(healTask.id, undefined, undefined, CLI)
@@ -167,20 +171,90 @@ describe('stepTools memory_verify registration', () => {
       await kernel.approvePlan(finishTask.id, undefined, undefined, CLI)
       expect(await (await port.startRun(finishTask.id)).wait()).toBe(RunOutcome.done)
 
-      expect(toolNamesByStep[VERIFY_STEP_ID]).toContain(MEMORY_TOOL_NAME.verify)
-      expect(toolNamesByStep[AUDITOR_STEP_NAMED_FOR_ITS_JOB]).toContain(MEMORY_TOOL_NAME.verify)
-      expect(toolNamesByStep['s1']).not.toContain(MEMORY_TOOL_NAME.verify)
+      const planTask = await kernel.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'plan step', spec: 'decomposes' }, CLI)
+      await kernel.proposePlan(planTask.id, draftFixture([stepFixture({ id: STEP_ID.plan, role: STEP_ROLE.auditor })]), CLI)
+      await kernel.approvePlan(planTask.id, undefined, undefined, CLI)
+      expect(await (await port.startRun(planTask.id)).wait()).toBe(RunOutcome.done)
 
-      // The finish step's surface as an EXACT set of its own: a plain worker step's tools
-      // PLUS exactly the three stepMayReconcile arms. Expressed as a delta against 's1' rather than
-      // a re-listed surface so the shared part cannot drift between the two assertions, and exact
-      // rather than toContain because the failure this catches is a gate coming OFF — an ordinary
-      // step gaining record_decision, which a containment check would never see.
+      const family = (step: string) => new Set((toolNamesByStep[step] ?? []).filter(n => n.startsWith('memory_') || n.startsWith('knowledge_')))
+      const knowledge = [KnowledgeToolName.card, KnowledgeToolName.search, KnowledgeToolName.write]
+      expect(family(VERIFY_STEP_ID)).toEqual(new Set(knowledge))
+      expect(family(AUDITOR_STEP_NAMED_FOR_ITS_JOB)).toEqual(new Set(knowledge))
+      expect(family('s1')).toEqual(new Set(knowledge))
+      expect(family(STEP_ID.plan)).toEqual(new Set([...knowledge, MEMORY_TOOL_NAME.write, MEMORY_TOOL_NAME.search, MEMORY_TOOL_NAME.read]))
       expect(new Set(toolNamesByStep[FINISH_STEP_ID]))
-        .toEqual(new Set([...(toolNamesByStep['s1'] ?? []), FINISH_TOOL_NAME.taskNotes, FINISH_TOOL_NAME.recordDecision, SCOPED_CHANGES_TOOL_NAME]))
+        .toEqual(new Set([...(toolNamesByStep['s1'] ?? []), KnowledgeToolName.taskClaims, FINISH_TOOL_NAME.recordDecision, SCOPED_CHANGES_TOOL_NAME, MEMORY_TOOL_NAME.search, MEMORY_TOOL_NAME.read]))
       expect(toolNamesByStep['s1']).not.toContain(FINISH_TOOL_NAME.recordDecision)
-      expect(toolNamesByStep['s1']).not.toContain(FINISH_TOOL_NAME.taskNotes)
+      expect(toolNamesByStep['s1']).not.toContain(KnowledgeToolName.taskClaims)
       expect(toolNamesByStep['s1']).not.toContain(SCOPED_CHANGES_TOOL_NAME)
+      // the port forwards ctx.knowledge to every step, not only the ones that get task_claims
+      expect(knowledgePresentByStep['s1']).toBe(true)
+      expect(knowledgePresentByStep[FINISH_STEP_ID]).toBe(true)
+      // scoped_changes' claimsAt is actually wired to stepKnowledge.citing — an empty array is
+      // fine (nothing was written), but null (the no-callback degraded path) is not
+      const scopedOut = ScopedChangesOutput.parse(scopedChangesByStep[VERIFY_STEP_ID]?.output)
+      expect(scopedOut.citingClaims).not.toBeNull()
+      expect(scopedOut).not.toHaveProperty('degraded')
+    } finally {
+      await port.shutdown()
+      await log.close()
+    }
+  }, 60_000)
+})
+
+const WRITING_STEP = 's1'
+const ANCHOR = 'src/a.ts'
+const knowledgeWrites: Array<{ isError: boolean; output: unknown }> = []
+const knowledgeWriteExecutor: AgentExecutor<unknown> = {
+  id: 'api-loop',
+  async *startTurn(ctx: ExecutorContext<unknown>): AsyncGenerator<UnifiedEvent, void, SplitResult[] | undefined> {
+    const write = ctx.extraTools.find(t => t.name === KnowledgeToolName.write)
+    if (ctx.step.id === WRITING_STEP && write)
+      knowledgeWrites.push(await write.execute({ add: [{ text: 'Lives in the run dir.', class: ClaimClass.fact, anchors: [{ path: ANCHOR }] }], why: 'probe' }, 'call-1'))
+    const signal = { stepId: ctx.step.id, runToken: ctx.runToken, outcome: SignalOutcome.success, summary: 'probed' }
+    await ctx.checkpoint('signal:1', async () => signal,
+      (): EventDraft[] => [{ kind: EVENT_KIND.signal_received, payload: { stepId: ctx.step.id, runToken: ctx.runToken, signal } }])
+    yield { type: 'signal', signal }
+    yield { type: 'done' }
+  },
+}
+
+describe('a step writes knowledge into the directory it runs in', () => {
+  it('lands in the run cwd checkout, not the supervisor\'s, and the evidence names the task and step', async () => {
+    const db = await createTestDb()
+    dbs.push(db)
+    const vaultDir = mkdtempSync(path.join(tmpdir(), 'orc-rt-knowledge-'))
+    const elsewhere = realpathSync(mkdtempSync(path.join(tmpdir(), 'orc-rt-elsewhere-')))
+    cleanup.push(() => rmSync(vaultDir, { recursive: true, force: true }), () => rmSync(elsewhere, { recursive: true, force: true }))
+    sh(elsewhere, 'init', '-q')
+    mkdirSync(path.join(elsewhere, path.dirname(ANCHOR)), { recursive: true })
+    writeFileSync(path.join(elsewhere, ANCHOR), 'export const a = 1\n')
+    const config = testConfig(db.url, {
+      vaultDir, skillsDir: path.join(vaultDir, 'skills'), projectDbName: testSurrealDbName(),
+      knowledge: { plugin: DEFAULT_KNOWLEDGE_PLUGIN, options: {} },
+    })
+    seedShippedSkills(config.skillsDir)
+    surrealBases.push(config)
+    const storage = await openStorage(db.url, { projectId: TEST_PROJECT_ID })
+    const log = storage.events
+    const kernel = new Kernel(log)
+    await seedTestWorkspace(log, CLI, realpathSync(config.dir))
+    const { host, hub } = await buildPlugins(config)
+    host.providers.set('fake', fakeProvider)
+    host.executors.set('api-loop', knowledgeWriteExecutor)
+    const port = await buildRuntime({ host, hub, config, storage, kernel })
+    try {
+      const t = await kernel.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'writes knowledge', spec: 'records a claim' }, CLI)
+      await kernel.proposePlan(t.id, draftFixture([stepFixture({ id: WRITING_STEP })]), CLI)
+      await kernel.approvePlan(t.id, undefined, undefined, CLI)
+      expect(await (await port.startRun(t.id, { cwd: elsewhere })).wait()).toBe(RunOutcome.done)
+
+      const bucket = path.join('knowledge', `${ANCHOR}.md`)
+      expect(existsSync(path.join(elsewhere, bucket))).toBe(true)
+      expect(existsSync(path.join(config.dir, bucket))).toBe(false)
+      expect(knowledgeWrites.map(w => w.isError)).toEqual([false])
+      const written = await log.after(0, [EVENT_KIND.knowledge_written])
+      expect(written.map(e => ({ taskId: e.taskId, stepId: e.stepId }))).toEqual([{ taskId: t.id, stepId: WRITING_STEP }])
     } finally {
       await port.shutdown()
       await log.close()
@@ -232,6 +306,42 @@ describe('buildRuntime role-skill pre-flight', () => {
   }, 60_000)
 })
 
+describe('buildRuntime unavailable knowledge', () => {
+  it('warns once with the reason when the configured plugin cannot open, and stays silent when knowledge is off', async () => {
+    const db = await createTestDb()
+    dbs.push(db)
+    const vaultDir = mkdtempSync(path.join(tmpdir(), 'orc-rt-kwarn-'))
+    cleanup.push(() => rmSync(vaultDir, { recursive: true, force: true }))
+    const base = testConfig(db.url, { vaultDir, skillsDir: path.join(vaultDir, 'skills'), projectDbUrl: 'not-a-url' })
+    const storage = await openStorage(db.url, { projectId: TEST_PROJECT_ID })
+    const log = storage.events
+    const kernel = new Kernel(log)
+    const bootWarnings = async (knowledge: ProjectConfig['knowledge']): Promise<string[]> => {
+      const config = { ...base, knowledge }
+      const { host, hub } = await buildPlugins(config)
+      const warns: string[] = []
+      spyOn(console, 'warn').mockImplementation((...a: unknown[]) => { warns.push(a.join(' ')) })
+      const port = await buildRuntime({ host, hub, config, storage, kernel })
+      try {
+        return warns.filter(w => w.startsWith(KNOWLEDGE_REFUSAL.unavailable('')))
+      } finally {
+        await port.shutdown()
+        mock.restore()
+      }
+    }
+    try {
+      await seedTestWorkspace(log, CLI, realpathSync(base.dir))
+      const broken = { plugin: 'no-such-plugin', options: {} }
+      const opening = openKnowledge({ knowledge: broken })
+      if (!('unavailable' in opening)) throw new Error('an unknown plugin opened')
+      expect(await bootWarnings(broken)).toEqual([KNOWLEDGE_REFUSAL.unavailable(opening.unavailable)])
+      expect(await bootWarnings(null)).toEqual([])
+    } finally {
+      await log.close()
+    }
+  }, 60_000)
+})
+
 describe('buildRuntime degraded memory', () => {
   it('a broken Surreal config yields one warning + explicit unavailable tools; execution still completes', async () => {
     const db = await createTestDb()
@@ -241,6 +351,7 @@ describe('buildRuntime degraded memory', () => {
       vaultDir,
       skillsDir: path.join(vaultDir, 'skills'),
       projectDbUrl: 'not-a-url', // malformed on purpose: createMemory must throw, runtime must degrade
+      knowledge: null, // off too: this run also covers a step completing with knowledge unavailable
     })
     // Seeded the way `orc init` seeds a real project: the kernel appends a finish step declaring
     // ROLE_SKILL.finisher to every root plan, and a temp skills dir that nothing seeds fails the
@@ -261,27 +372,30 @@ describe('buildRuntime degraded memory', () => {
     const warns: string[] = []
     spyOn(console, 'warn').mockImplementation((...a: unknown[]) => { warns.push(a.join(' ')) })
     const port = await buildRuntime({ host, hub, config, storage, kernel })
-    cleanup.push(() => log.close(), () => port.shutdown())
-    expect(warns.filter(w => w.includes('memory unavailable; continuing in degraded mode'))).toHaveLength(1)
-    // ...and the role-skill pre-flight stays SILENT here: this harness seeds the shipped set the
-    // way `orc init` does, and a warning that fires for a correctly seeded project is noise an
-    // operator learns to ignore — which is how the real one would then get missed.
-    expect(warns.filter(w => w.includes(ROLE_SKILL.finisher))).toEqual([])
+    try {
+      expect(warns.filter(w => w.includes('memory unavailable; continuing in degraded mode'))).toHaveLength(1)
+      // ...and the role-skill pre-flight stays SILENT here: this harness seeds the shipped set the
+      // way `orc init` does, and a warning that fires for a correctly seeded project is noise an
+      // operator learns to ignore — which is how the real one would then get missed.
+      expect(warns.filter(w => w.includes(ROLE_SKILL.finisher))).toEqual([])
 
-    const t = await kernel.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'degraded run', spec: 'still executes' }, CLI)
-    await kernel.proposePlan(t.id, draftFixture([stepFixture()]), CLI)
-    await kernel.approvePlan(t.id, undefined, undefined, CLI)
-    expect(await (await port.startRun(t.id)).wait()).toBe(RunOutcome.done)
+      const t = await kernel.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'degraded run', spec: 'still executes' }, CLI)
+      await kernel.proposePlan(t.id, draftFixture([stepFixture()]), CLI)
+      await kernel.approvePlan(t.id, undefined, undefined, CLI)
+      expect(await (await port.startRun(t.id)).wait()).toBe(RunOutcome.done)
 
-    // all six memory tools exist and each returns an explicit isError result with the reason.
-    // SIX, deliberately: memory_verify is NOT one of them and must not be added here. It is gated
-    // twice — to the auditor's verify step (this run's fixture step is neither) and to a healthy
-    // memory (this run has none) — so a seventh name appearing in this set means a gate came off.
-    expect(new Set(toolProbe.results.map(r => r.name))).toEqual(
-      new Set(['memory_write', 'memory_search', 'memory_read', 'memory_neighbors', 'memory_topics', 'memory_recheck']))
-    for (const r of toolProbe.results) {
-      expect(r.isError).toBe(true)
-      expect(JSON.stringify(r.output)).toContain('memory unavailable')
+      // only the appended finish step keeps memory tools, and each answers unavailable with the reason
+      expect(new Set(toolProbe.results.map(r => r.name))).toEqual(new Set([MEMORY_TOOL_NAME.search, MEMORY_TOOL_NAME.read]))
+      for (const r of toolProbe.results) {
+        expect(r.isError).toBe(true)
+        expect(JSON.stringify(r.output)).toContain('memory unavailable')
+      }
+    } finally {
+      try {
+        await port.shutdown()
+      } finally {
+        await log.close()
+      }
     }
   }, 60_000)
 })

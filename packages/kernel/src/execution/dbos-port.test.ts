@@ -771,7 +771,7 @@ describe('DBOS execution port (integration)', () => {
     expect(scopeText).toContain(HEAD_SHA)
     // skipped-but-grounded stays distinguishable from ungrounded: analyzed true, but marked a skip
     expect(coverage.analyzed).toBe(true)
-    expect(coverage.notesWritten).toBe(0)
+    expect(coverage.claimsWritten).toBe(0)
     expect(coverage.confidence).toBe(Confidence.medium)
     expect(coverage.gaps.join(' | ')).toContain('skipped')
 
@@ -857,7 +857,7 @@ describe('DBOS execution port (integration)', () => {
     expect(gaps).toContain('area-execution')
     expect(gaps).toContain('packages/kernel/src/execution/dbos-port.ts')
     expect(coverage.analyzed).toBe(true)
-    expect(coverage.notesWritten).toBe(0)
+    expect(coverage.claimsWritten).toBe(0)
     expect(coverage.confidence).toBe(Confidence.medium)
   }, 15_000)
 

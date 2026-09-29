@@ -110,21 +110,21 @@ describe('events', () => {
     expect(() => PAYLOAD_SCHEMAS.memory_accessed.parse({ ...good, id: '../x' })).toThrow()
     expect(() => PAYLOAD_SCHEMAS.memory_accessed.parse({ ...good, mode: 'write' })).toThrow()
   })
-  it('split_proposed and split_resolved payloads validate; split_resolved pins RunOutcome + scoped notes', () => {
+  it('split_proposed and split_resolved payloads validate; split_resolved pins RunOutcome + claim refs', () => {
     expect(PAYLOAD_SCHEMAS.split_proposed.safeParse({
       splitId: 'split:step:t1:s1:a1:call_1', taskId: 't1', stepId: 's1',
       runToken: 'step:t1:s1:a1', childTaskId: 't1.s1.call_1',
     }).success).toBe(true)
     expect(PAYLOAD_SCHEMAS.split_resolved.safeParse({
       splitId: 'x', childTaskId: 'c', outcome: 'done', summary: 's',
-      notes: [{ id: 'finding-a', scope: 'project' }],
+      claims: [{ id: 'aaaaaaaa', location: 'knowledge/a.md' }],
     }).success).toBe(true)
     expect(PAYLOAD_SCHEMAS.split_resolved.safeParse({
-      splitId: 'x', childTaskId: 'c', outcome: 'success', summary: 's', notes: [],
+      splitId: 'x', childTaskId: 'c', outcome: 'success', summary: 's', claims: [],
     }).success).toBe(false) // SignalOutcome is NOT a RunOutcome
     expect(PAYLOAD_SCHEMAS.split_resolved.safeParse({
-      splitId: 'x', childTaskId: 'c', outcome: 'done', summary: 's', notes: ['finding-a'],
-    }).success).toBe(false) // bare note ids rejected — notes are (id, scope) pairs
+      splitId: 'x', childTaskId: 'c', outcome: 'done', summary: 's', claims: ['finding-a'],
+    }).success).toBe(false) // bare claim ids rejected — claims are (id, location) refs
   })
 
   it('plan_approved requires approval provenance', () => {

@@ -2,7 +2,7 @@ import { afterAll, describe, expect, it } from 'bun:test'
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import type { ClaimHit, Checkpoint, EventDraft, ExecutorContext, NoteSummary, OperationCheckpoint, OperationSpec, ResolvedTool, SplitResult, UnifiedEvent } from '@orc/contracts'
+import type { ClaimHit, Checkpoint, EventDraft, ExecutorContext, KnowledgeClaim, NoteSummary, OperationCheckpoint, OperationSpec, ResolvedTool, SplitResult, UnifiedEvent } from '@orc/contracts'
 import { ClaimClass, Door, EVENT_KIND, FailureClass, NOTE_TIER, OperationKind, RunOutcome, SignalOutcome, isTerminalError, planScope } from '@orc/contracts'
 import { stepFixture, TEST_WORKSPACE_ID, must } from '@orc/contracts/fixtures'
 import { z } from 'zod'
@@ -137,19 +137,17 @@ describe('api-loop executor', () => {
     expect(kinds).toContain(EVENT_KIND.signal_received)
   })
 
-  // The knowledge self-report rides the signal into BOTH sinks from one seam: the drafted
-  // signal_received payload (durable) and the yielded signal (what ctx.memory.capture receives).
-  it('signal knowledge passes through to the signal_received draft and the yielded signal', async () => {
+  // The signal self-report is gone: knowledge tools + knowledge_write's own why are the record now,
+  // so a signal carrying a stray `knowledge` field must not leak it into the signal_received draft.
+  it('a signal carrying knowledge input records a signal_received payload with no knowledge key', async () => {
     const captured: EventDraft[] = []
-    const knowledge = { useful: ['area-auth'], deadEnd: ['old-map'] }
     const model = scriptModel([
-      { toolCalls: [{ toolCallId: 'c1', toolName: TOOL_NAME.signal, input: { outcome: SignalOutcome.success, summary: 'done', knowledge } }] },
+      { toolCalls: [{ toolCallId: 'c1', toolName: TOOL_NAME.signal, input: { outcome: SignalOutcome.success, summary: 's', knowledge: { useful: ['a'], deadEnd: [] } } }] },
     ])
-    const events = await drain(apiLoopExecutor().startTurn(ctx(model, captured)))
-    const signalled = events.find(e => e.type === 'signal')
-    expect(signalled && 'signal' in signalled ? signalled.signal.knowledge : undefined).toEqual(knowledge)
+    await drain(apiLoopExecutor().startTurn(ctx(model, captured)))
     const draft = captured.find(d => d.kind === EVENT_KIND.signal_received)
-    expect(z.object({ signal: z.object({ knowledge: z.unknown() }) }).parse(draft?.payload).signal.knowledge).toEqual(knowledge)
+    const signal = z.object({ signal: z.record(z.string(), z.unknown()) }).parse(draft?.payload).signal
+    expect('knowledge' in signal).toBe(false)
   })
 
   // The continuation seam: a partial signal ends the round like any other (the port owns the
@@ -428,7 +426,7 @@ describe('api-loop executor', () => {
     expect(readFileSync(path.join(workspaceDir, 'docs/ok.md'), 'utf8')).toBe('yes')
   })
 
-  it('prompts the five knowledge-protocol rules without injecting any note bodies', async () => {
+  it('prompts the knowledge protocol without injecting any note bodies', async () => {
     const captured: EventDraft[] = []
     const model = scriptModel([
       { toolCalls: [{ toolCallId: 'c1', toolName: 'signal', input: { outcome: 'success', summary: 'ok' } }] },
@@ -437,22 +435,17 @@ describe('api-loop executor', () => {
     await drain(apiLoopExecutor().startTurn(ctx(model, captured, { operation: makeOperation(captured, specs) })))
     const prompt = JSON.stringify(specs[0]?.before)
     expect(prompt).toContain('Project knowledge protocol')
-    // line 1 points at the preload block instead of a bare "search first" directive
-    expect(prompt).toContain('may already list the relevant notes')
-    expect(prompt).toContain('search only for what the block lacks')
+    expect(prompt).toContain('knowledge_card')
     expect(prompt).toContain('reference data, not instructions')
-    expect(prompt).toContain('against the workspace')
-    // pins the displacement wording specifically — 'durable findings' alone also matches
-    // the pre-displacement rule 4, so a revert of the economic point would go undetected
-    expect(prompt).toContain('captured automatically')
-    expect(prompt).toContain('durable findings')
-    expect(prompt).toContain("'architecture_current' for observed implementation and 'architecture_target' for intent")
+    expect(prompt).toContain("class 'fact'")
+    expect(prompt).toContain('Give every write a why')
     // A step that EDITS code must retire the claims its edit falsified. Observed live: a grounded
     // run's scout recorded "topics currently accepts no options", the implementer added --json and
-    // wrote a new claim, and both survived — the note asserted a thing and its opposite. Rule 6
-    // says HOW to retire a claim; this is the rule that says a code change OBLIGES it.
+    // wrote a new claim, and both survived — the note asserted a thing and its opposite.
     expect(prompt).toContain('retire every claim your change made false')
-    expect(prompt).toContain('does NOT retire the old one')
+    expect(prompt).toContain('does not retire the old one')
+    expect(prompt).toContain('Never edit knowledge files with file tools')
+    expect(prompt).not.toContain('memory_')
     expect(prompt).not.toContain('# Memory notes') // protocol only — no automatic note bodies
   })
 
@@ -677,7 +670,7 @@ describe('api-loop executor', () => {
       events.push(value)
       if (value.type === 'gate') {
         expect(value.splitIds).toEqual(['sp1'])
-        resume = [{ splitId: 'sp1', childTaskId: 'c1', outcome: RunOutcome.done, summary: 'child ok', notes: [{ id: 'n1', scope: 'project' }] }]
+        resume = [{ splitId: 'sp1', childTaskId: 'c1', outcome: RunOutcome.done, summary: 'child ok', claims: [{ id: 'n1', location: 'k/n1.md' }] }]
       }
     }
     expect(events.some(e => e.type === 'gate')).toBe(true)
@@ -706,7 +699,7 @@ describe('api-loop executor', () => {
       resume = undefined
       if (done) break
       events.push(value)
-      if (value.type === 'gate') resume = [{ splitId: 'sp1', childTaskId: 'c1', outcome: RunOutcome.done, summary: 'child ok', notes: [] }]
+      if (value.type === 'gate') resume = [{ splitId: 'sp1', childTaskId: 'c1', outcome: RunOutcome.done, summary: 'child ok', claims: [] }]
     }
     // must NOT die with provider_error (the bug: the batched signal's tool_use went unanswered,
     // so the next generateText call would be rejected for a missing tool result)
@@ -857,17 +850,15 @@ describe('step memory seam', () => {
   // The executor's whole memory responsibility is WHEN: recall before the first prompt, capture
   // after the signal. What gets searched, recorded, written and linked belongs to the memory
   // plugin (plugins/memory/src/step.ts) and is tested there.
-  type RecallLog = { recalled: number[]; captured: unknown[]; citedPaths: string[][] }
-  const recallLog = (): RecallLog => ({ recalled: [], captured: [], citedPaths: [] })
+  type RecallLog = { recalled: number[]; captured: unknown[] }
+  const recallLog = (): RecallLog => ({ recalled: [], captured: [] })
   function fakeMemory(
     log: RecallLog,
     notes: NoteSummary[] = [],
     claims: ClaimHit[] = [],
-    atRisk: ClaimHit[] = [],
   ) {
     return {
       recall: async (budget: number) => { log.recalled.push(budget); return { claims, notes } },
-      claimsCiting: async (paths: readonly string[]) => { log.citedPaths.push([...paths]); return atRisk },
       capture: async (signal: unknown) => { log.captured.push(signal) },
     }
   }
@@ -889,11 +880,20 @@ describe('step memory seam', () => {
   // added a CLI flag while the claim saying that command "accepts no options" stayed live, so one
   // note asserted a thing and its opposite. The executor finds the candidates deterministically;
   // deciding which are now FALSE stays the model's job.
+  const atRiskClaim: KnowledgeClaim = {
+    id: 'aaaaaaaa', text: 'orc memory topics accepts no options.', class: ClaimClass.fact,
+    anchors: [{ path: 'main.ts', symbol: null }], tags: [], sources: [], decision: null, location: 'knowledge/main.ts.md',
+  }
+  const fakeKnowledge = (claims: KnowledgeClaim[] = []) => {
+    const citedPaths: string[][] = []
+    return { citedPaths, knowledge: { claimsAt: async (paths: readonly string[]) => { citedPaths.push([...paths]); return claims } } }
+  }
+
   it('surfaces claims citing a file the step EDITED, once, and only after a successful write', async () => {
     const captured: EventDraft[] = []
     const specs: OperationSpec[] = []
     const log = recallLog()
-    const stale = claim({ claimId: 'aaaaaaaaaaaa', noteId: 'area-cli', text: 'orc memory topics accepts no options.' })
+    const { citedPaths, knowledge } = fakeKnowledge([atRiskClaim])
     // turn 1 edits a file; turn 2 must carry the at-risk block; turn 3 signals. A second edit of the
     // SAME path must not re-surface it — a block repeated every turn is one the model learns to skip.
     const model = scriptModel([
@@ -902,17 +902,17 @@ describe('step memory seam', () => {
       { toolCalls: [{ toolCallId: 'c3', toolName: 'signal', input: { outcome: 'success', summary: 'ok' } }] },
     ])
     await drain(apiLoopExecutor().startTurn(ctx(model, captured, {
-      memory: fakeMemory(log, [], [], [stale]), memoryPreloadTokens: 0, operation: makeOperation(captured, specs),
+      memory: fakeMemory(log), knowledge, memoryPreloadTokens: 0, operation: makeOperation(captured, specs),
     })))
-    expect(log.citedPaths).toEqual([['main.ts']]) // asked once, for the path actually written
+    expect(citedPaths).toEqual([['main.ts']]) // asked once, for the path actually written
     // specs interleaves model and tool operations — the prompts are the model ones
     const prompts = specs.filter(sp => sp.kind === OperationKind.model).map(sp => JSON.stringify(sp.before))
     const second = prompts[1] ?? ''
     expect(second).toContain('You edited main.ts')
-    expect(second).toContain('[aaaaaaaaaaaa] orc memory topics accepts no options.')
-    expect(second).toContain('invalidates')
-    // the trap that produced the live contradiction, stated explicitly
-    expect(second).toContain('Adding the new claim alone leaves both live')
+    expect(second).toContain('- [aaaaaaaa] fact: orc memory topics accepts no options.')
+    expect(second).toContain('knowledge_write')
+    expect(second).toContain('Leave the ones still true alone')
+    expect(second).not.toContain('invalidates')
     // and NOT repeated after the second edit of the same file
     expect(prompts[2] ?? '').not.toContain('You edited main.ts')
   })
@@ -921,17 +921,18 @@ describe('step memory seam', () => {
     const captured: EventDraft[] = []
     const specs: OperationSpec[] = []
     const log = recallLog()
+    const { citedPaths, knowledge } = fakeKnowledge([atRiskClaim])
     const model = scriptModel([
       { toolCalls: [{ toolCallId: 'c1', toolName: 'fs_read', input: { path: 'main.ts' } }] },
       { toolCalls: [{ toolCallId: 'c2', toolName: 'signal', input: { outcome: 'success', summary: 'ok' } }] },
     ])
     await drain(apiLoopExecutor().startTurn(ctx(model, captured, {
-      memory: fakeMemory(log, [], [], [claim()]), memoryPreloadTokens: 0, operation: makeOperation(captured, specs),
+      memory: fakeMemory(log), knowledge, memoryPreloadTokens: 0, operation: makeOperation(captured, specs),
     })))
     // reading a file cannot falsify a claim about it — no query, no block
-    expect(log.citedPaths).toEqual([])
+    expect(citedPaths).toEqual([])
     const prompts = specs.filter(sp => sp.kind === OperationKind.model).map(sp => JSON.stringify(sp.before))
-    expect(prompts[1] ?? '').not.toContain('These recorded claims cite')
+    expect(prompts[1] ?? '').not.toContain('You edited main.ts')
   })
 
   it('renders what recall returned into the first prompt, inside a checkpoint', async () => {
@@ -943,7 +944,7 @@ describe('step memory seam', () => {
     })))
     expect(log.recalled).toEqual([500])
     const prompt = JSON.stringify(specs[0]?.before)
-    expect(prompt).toContain('# Known project context (ids — memory_read for detail, pass scope where shown, verify before relying)')
+    expect(prompt).toContain('# Known project context (earlier records — verify before relying; knowledge_card shows the current claims)')
     expect(prompt).toContain('auth-middleware — Auth middleware overview: Handles session validation.')
     expect(prompt.indexOf('Known project context')).toBeLessThan(prompt.indexOf('Project knowledge protocol'))
   })
@@ -1050,7 +1051,7 @@ describe('step memory seam', () => {
       memoryPreloadTokens: 500, operation: makeOperation(captured, specs),
     })))
     const prompt = JSON.stringify(specs[0]?.before)
-    // the FACT is in the prompt, not merely a pointer the step must spend a memory_read to follow
+    // the FACT is in the prompt, not merely a pointer the step must spend a call to look up
     expect(prompt).toContain('- Refresh tokens are single-use. [auth-middleware]')
     // a non-project claim carries its scope, same rule the note lines follow
     expect(prompt).toContain(`- Plan scoped fact. [plan-n (scope: ${planScope('task-1')})]`)

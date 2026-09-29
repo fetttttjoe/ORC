@@ -58,6 +58,15 @@ describe('inScope', () => {
     expect(inScope(noteDeleted, Scope.parse({ type: ScopeType.workspace, id: TEST_WORKSPACE_ID }), index)).toBe(true)
   })
 
+  it('a taskless knowledge event belongs to its author\'s workspace', () => {
+    const written = eventFixture({
+      seq: 8, taskId: null, kind: EVENT_KIND.knowledge_written,
+      payload: { added: [], changed: [], retired: [], files: [], why: null, decision: null, author: authorFixture({ workspaceId: 'ws-cli' }) },
+    })
+    expect(inScope(written, Scope.parse({ type: ScopeType.workspace, id: 'ws-cli' }), index)).toBe(true)
+    expect(inScope(written, Scope.parse({ type: ScopeType.workspace, id: TEST_WORKSPACE_ID }), index)).toBe(false)
+  })
+
   it('chat matches only that chatId, and never a chatless event', () => {
     expect(inScope(commit, Scope.parse({ type: ScopeType.chat, id: 'c1' }), index)).toBe(true)
     expect(inScope(commit, Scope.parse({ type: ScopeType.chat, id: 'c2' }), index)).toBe(false)

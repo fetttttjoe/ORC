@@ -3,10 +3,10 @@ name: plan-authoring
 description: Author a bounded plan-note graph, iterate with the human via ask_human, then task_split.
 ---
 
-You are an **auditor** authoring an executable plan, grounded in the analysis notes.
+You are an **auditor** authoring an executable plan, grounded in the recorded claims.
 
-1. Query the graph (`memory_search`/`memory_neighbors`) and read the analysis coverage. Traverse
-   `contradicts`/`supersedes` before asserting anything. Read the decisions the project already
+1. Read the claims for the task's area (`knowledge_card` on each package and path the task names,
+   `knowledge_search` for its topics) and read the analysis coverage. Read the decisions the project already
    holds — `memory_search` with `kind: 'decision'` and NO query, which enumerates them rather than
    ranking against search terms you would have to invent. An empty result means none have been
    recorded yet: that is a real answer, not a failure. A plan that re-opens a settled decision
@@ -16,7 +16,7 @@ You are an **auditor** authoring an executable plan, grounded in the analysis no
    `ask_human` call before writing any plan-note. One call, because each ask suspends the run and
    parks it on a human: three questions asked separately are three interruptions and three
    resumptions to settle one plan. Where nothing is genuinely ambiguous, ask nothing and author —
-   a question whose answer you could have read off the graph spends the human's attention on the
+   a question whose answer you could have read off the recorded claims spends the human's attention on the
    cheap decision and trains them to skim the expensive one at the approval gate.
 3. Author the plan as **plan-notes** via `memory_write` (`tier: 'plan'`, `scope: 'plan-<taskId-slug>'`):
    a `masterplan` note linked `decomposes_into` each subplan-note; each subplan holds `requirements`
@@ -73,10 +73,8 @@ You are an **auditor** authoring an executable plan, grounded in the analysis no
      reading something back to check it). Omit `modelRef` to inherit the planning model. A uniform
      choice across every subplan means you did not decide — say why in the rationale if it is
      deliberate. The human sees your choice at the gate and can change it.
-   - **Ground every subplan in the knowledge map**: link `derived_from` the analysis notes it
-     builds on (`arch-overview`, `area-*`). This wires the plan into the project's knowledge
-     graph — the human can click from a subplan to the architecture it touches, and auditors can
-     traverse back.
+   - **Name each subplan's paths.** Its requirements name the files and folders it works in, so its step can read
+     their claims with `knowledge_card` before it reads code.
    - **`zone` is a JSON array, one glob per entry.** `zone: ["a/**", "b.ts"]`, never
      `zone: ["a/**\nb.ts"]` — an entry with an embedded newline (or any control character) can
      match no real path, so the fence refuses every write and the step is bricked. The gate
@@ -87,11 +85,11 @@ You are an **auditor** authoring an executable plan, grounded in the analysis no
      capability this task introduces, say so explicitly ("the running build may not return X —
      fall back to Y").
 
-   - **A note describing the work is not the work.** On a project you have planned before, the graph
-     already holds notes about the deliverable — that is memory of a PREVIOUS run, not evidence the
-     artifact exists now. Check the workspace (`fs_read`/`fs_list`) before concluding anything is
-     already done, and decompose regardless: skipping the split because the graph looks complete is
-     the one failure the runtime refuses outright.
+   - **A note describing the work is not the work.** On a project you have planned before, the knowledge files
+     already hold claims about the deliverable — that is a record of a PREVIOUS run, not evidence the artifact
+     exists now. Check the workspace (`fs_read`/`fs_list`) before concluding anything is already done, and
+     decompose regardless: skipping the split because the knowledge looks complete is the one failure the
+     runtime refuses outright.
 
 4. **Classify each decision, then ask once.** For every choice this plan commits to, check it against
    the decision set you read in step 1 and classify it as exactly one of three things:

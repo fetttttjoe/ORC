@@ -6,6 +6,8 @@ import { fileURLToPath } from 'node:url'
 import { z } from 'zod'
 import { TaskStatus } from '@orc/contracts'
 import { parseSkillMd } from '@orc/kernel'
+import { authorFixture } from '@orc/contracts/fixtures'
+import { KNOWLEDGE_READ_TOOLS, knowledgeTools } from '@orc/knowledge-core'
 import { unavailableMemoryTools } from '@orc/memory'
 import { BRIEF_COMMAND } from './brief-commands'
 import { EXIT_CODE } from './exit'
@@ -81,6 +83,7 @@ describe('plugin skills', () => {
   // would keep passing after a tool was renamed out from under a skill.
   const served = new Set(buildServeTools({
     sessions: sessionsStub(), projectId: 'p1', memoryTools: unavailableMemoryTools('skills-check'), actions: actionsStub(), autonomy: 'gated',
+    knowledgeTools: knowledgeTools({ unavailable: 'skills-check' }, authorFixture(), KNOWLEDGE_READ_TOOLS),
   }).map(t => t.name))
 
   it('ships exactly the three skills', () => {

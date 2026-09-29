@@ -883,7 +883,7 @@ export function buildProgram(
       // D3: a grounded task shows what its analysis covered — and the gaps it did NOT (RG7 honesty).
       const coverage = await requireKernel().latestCoverage(taskId)
       if (coverage)
-        console.log(`  analysis: ${coverage.analyzed ? `${coverage.notesWritten} notes, confidence ${coverage.confidence}` : 'not analyzed'}${coverage.gaps.length ? `  gaps: ${coverage.gaps.join(', ')}` : ''}`)
+        console.log(`  analysis: ${coverage.analyzed ? `${coverage.claimsWritten} claims, confidence ${coverage.confidence}` : 'not analyzed'}${coverage.gaps.length ? `  gaps: ${coverage.gaps.join(', ')}` : ''}`)
       // D4 gate, human side: a grounded-plan step parked on ask_human shows its question here, so the
       // conversation isn't one-directional — the human sees the prompt, not just a blind reply target.
       const feedback = await requireKernel().openFeedback(taskId)

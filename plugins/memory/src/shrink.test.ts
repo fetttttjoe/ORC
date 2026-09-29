@@ -14,7 +14,7 @@ describe('shrinkWarnings (a rewrite that guts a note says so, at the moment it h
     const w = shrinkWarnings({ body: long }, { body: 'TODO: reconstruct this' })
     expect(w).toHaveLength(1)
     expect(w[0]).toContain('1000')
-    expect(w[0]).toContain('memory_verify') // names the tool the writer probably wanted
+    expect(w[0]).toContain('If the correction really is this much shorter, ignore this.')
   })
 
   it('warns on a collapsed summary too — it is the retrieval surface', () => {

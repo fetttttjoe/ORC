@@ -30,18 +30,17 @@ describe('shipped skills', () => {
     expect(body).toContain('never licenses skipping the test/typecheck gate')
     expect(body).toContain('never excuses a defect in a file that IS in scope')
     expect(body).toContain('empty set is not evidence of success')
-    expect(body).toContain('title and summary')
-    expect(body).toContain('retrieval surface')
-    // heal-or-confirm: candidates come from scoped_changes' citingNotes (drift flags lag
-    // uncommitted work — observed twice as post-commit drift). A still-true note is CONFIRMED by
-    // DECLARING it verified, never by rewriting it: a rewrite is authorship, and authorship is
-    // exactly what used to buy a free stamp for prose nobody checked.
-    expect(body).toContain('citingNotes')
-    expect(body).toContain('CONFIRM — call `memory_verify`')
+    // heal candidates come from scoped_changes' citingClaims — every recorded claim anchored at a
+    // path this task changed. Retire or change what the edit falsified; leave the rest alone.
+    expect(body).toContain('citingClaims')
+    expect(body).toContain('knowledge_write')
+    expect(body).toContain('still true stays as it is')
+    expect(body).not.toContain('memory_')
   })
 
   test('role-committer pins the commit contract sentences', () => {
     const { body } = read(ROLE_SKILL.committer)
+    expect(body).toContain('knowledge files')
     expect(body).toContain('commit_preview')
     expect(body).toContain('READ the diff it returns')
     expect(body).toContain('refuses whenever the tree no longer matches')
@@ -62,10 +61,10 @@ describe('shipped skills', () => {
 
   test('role-finisher pins the finish contract sentences', () => {
     const { body } = read(ROLE_SKILL.finisher)
-    expect(body).toContain('task_notes')
+    expect(body).toContain('task_claims')
     expect(body).toContain(SCOPED_CHANGES_TOOL_NAME)
-    expect(body).toContain('memory_read')
-    expect(body).toContain('same id, whole title, summary and body')
+    expect(body).toContain('knowledge_write')
+    expect(body).toContain('missing')
     expect(body).toContain('Most tasks make none')
     expect(body).toContain("memory_search")
     expect(body).toContain('ask_human ONCE')
@@ -140,6 +139,11 @@ describe('plan-authoring pins the ask-then-record-decisions protocol', () => {
     expect(body).toContain('two notes that half-agree')
   })
 
+  test('reads recorded claims before authoring', () => {
+    expect(body).toContain('knowledge_card')
+    expect(body).not.toContain('memory_neighbors')
+  })
+
   test('it links back to the reasoning and forward over what it replaces', () => {
     // Both words already appear in the STRUCTURE RULES (subplans link derived_from the analysis
     // notes; step 1 traverses supersedes), so a bare toContain on either passes against the
@@ -155,37 +159,32 @@ describe('plan-authoring pins the ask-then-record-decisions protocol', () => {
   })
 })
 
-// The scout skill used to ask_human on EVERY grounded request (even zero-drift, "the graph still
-// matches this tree") — three consecutive cheap, incremental scouts interrupted the operator when
-// nothing expensive was ever on the table. The door belongs on the one decision that IS expensive:
-// a wholesale re-read when the corpus has drifted past plugins/memory/src/drift.ts's
-// CORPUS_DRIFT_ADVISORY. Pinned failing-first against the pre-edit two-ask_human-branches SKILL.md.
-describe('codebase-analysis pins the drift-advisory two-branch protocol', () => {
+// The scout used to author a linked note graph from working-tree reading. It now reads what is
+// already recorded FIRST and writes only classed, anchored claims — re-deriving existing knowledge
+// is the single biggest waste in a scout run, and report_coverage counts claims from the log itself
+// rather than trusting a self-report.
+describe('codebase-analysis pins the knowledge-first grounding protocol', () => {
   const { body } = read('codebase-analysis')
 
-  test('keys the branches on the wholesale-remap advisory, not a literal percentage', () => {
-    expect(body).toContain('CORPUS_DRIFT_ADVISORY')
-    expect(body).toContain('plugins/memory/src/drift.ts')
-    expect(body).not.toContain('34%')
-  })
-
-  test('below-advisory branch proceeds without asking', () => {
-    expect(body).toContain('proceed without asking')
-  })
-
-  test('states the why: interruptions over cheap scouts, door belongs on the expensive decision', () => {
-    expect(body).toContain('cheap, incremental scouts')
-    expect(body).toContain('door belongs on the expensive decision')
-  })
-
-  test('retains ask_human for at/above-advisory, no Currency line, or no notes at all', () => {
-    expect(body).toContain('At or above the advisory, or there is no Currency line, or there are no notes at all')
-    expect(body).toContain('ask_human(')
-  })
-
-  test('the memory-first paragraph survives untouched', () => {
-    expect(body).toContain('search before you read')
+  test('reads recorded claims before touching the tree', () => {
+    expect(body).toContain('knowledge_card')
+    expect(body).toContain('knowledge_search')
     expect(body).toContain('never re-derived')
+  })
+
+  test('records claims with knowledge_write, classed fact/why', () => {
+    expect(body).toContain('knowledge_write')
+    expect(body).toContain("class: 'why'")
+  })
+
+  test('reports coverage from the log, not a self-count', () => {
+    expect(body).toContain('report_coverage')
+    expect(body).toContain('taken from the log')
+  })
+
+  test('never mentions the retired memory tools or the drift-advisory percentage', () => {
+    expect(body).not.toContain('memory_')
+    expect(body).not.toContain('34%')
   })
 })
 
@@ -193,9 +192,9 @@ describe('codebase-analysis pins the drift-advisory two-branch protocol', () => 
 // healing a handful of drifted notes had no targeted instrument. This is that instrument's other
 // tracked data file (docs/, not vault/skills/), so it gets the same "stays valid" home. Parses the
 // draft, validates it, and pins the ONE thing the runtime tool gate actually reads: role===auditor
-// AND id===VERIFY_STEP_ID is what earns memory_verify/scoped_changes registration
-// (plugins/memory/src/tools.ts memoryVerifyTool, packages/kernel/src/execution/scoped-changes-tool.ts) —
-// a plan file that drifts off either term silently loses the tools it needs to do its job.
+// AND id===VERIFY_STEP_ID is what earns scoped_changes registration
+// (packages/kernel/src/execution/scoped-changes-tool.ts) — a plan file that drifts off either term
+// silently loses the tool it needs to do its job.
 describe('reground-heal plan file', () => {
   // Repo root, not docs/: REGROUND_HEAL_PLAN already carries the 'docs/' prefix (it is the same
   // string driftLine hands the operator to paste into `orc propose --file`), so joining it under

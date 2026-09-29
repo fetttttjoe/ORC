@@ -4,7 +4,7 @@ import { EVENT_KIND } from './event-kinds'
 import { PAYLOAD_SCHEMAS } from './events'
 import { errorMessage } from './guards'
 import {
-  DeliveryMode, KNOWLEDGE_ID_RE, KnowledgeAnchor, KnowledgeConfig, KnowledgeDraft, KnowledgePatch,
+  DeliveryMode, KNOWLEDGE_DEFAULTS, KNOWLEDGE_ID_RE, KNOWLEDGE_LIMITS, KnowledgeAnchor, KnowledgeConfig, KnowledgeDraft, KnowledgePatch,
   knowledgeIdFrom, newKnowledgeId,
 } from './knowledge'
 
@@ -107,11 +107,18 @@ describe('KnowledgeConfig', () => {
   })
 })
 
+describe('knowledge defaults', () => {
+  it('stay inside the port caps', () => {
+    expect(KNOWLEDGE_DEFAULTS.pageItems).toBeLessThanOrEqual(KNOWLEDGE_LIMITS.pageItems)
+    expect(KNOWLEDGE_DEFAULTS.searchItems).toBeLessThanOrEqual(KNOWLEDGE_LIMITS.searchItems)
+  })
+})
+
 describe('knowledge events', () => {
   it('both kinds exist and parse their payloads', () => {
     expect(PAYLOAD_SCHEMAS[EVENT_KIND.knowledge_delivered].safeParse({ ids: ['abcd1234'], mode: DeliveryMode.card, subject: 'src/a.ts', author }).success).toBe(true)
     expect(PAYLOAD_SCHEMAS[EVENT_KIND.knowledge_written].safeParse({
-      added: [{ id: 'abcd1234', location: 'knowledge/src/a.ts.md' }], changed: [], retired: [], why: null, decision: null, author,
+      added: [{ id: 'abcd1234', location: 'knowledge/src/a.ts.md' }], changed: [], retired: [], files: ['knowledge/src/a.ts.md'], why: null, decision: null, author,
     }).success).toBe(true)
   })
   it('a delivery carries at most 200 ids', () => {

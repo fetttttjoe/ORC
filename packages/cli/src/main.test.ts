@@ -482,7 +482,7 @@ describe('orc CLI', () => {
     const t = await kernel.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'grounded' }, CLI)
     await kernel.reportCoverage(
       { taskId: t.id, stepId: 'analyze', runToken: `step:${t.id}:analyze:a1` },
-      { analyzed: true, scope: ['packages'], gaps: ['no tests read'], confidence: Confidence.medium, notesWritten: 3 },
+      { analyzed: true, scope: ['packages'], gaps: ['no tests read'], confidence: Confidence.medium, claimsWritten: 3 },
       SUPERVISOR,
     )
     const out = (await run('status', t.id)).join('\n')

@@ -9,7 +9,7 @@ import { bm25 } from './bm25'
 import { anchorKind, applyPlan, renderBucket, writeAtomic } from './bucket-files'
 import { createBucketLocks, DEFAULT_LOCK_OPTIONS, type LockOptions } from './bucket-lock'
 import { createCheckoutIndex, type CheckoutSnapshot, type IndexedBucket } from './checkout-index'
-import { codeOf } from './error-code'
+import { codeOf, Errno } from './error-code'
 import { freshIdSource } from './fresh-ids'
 import { GitFilesOptions } from './options'
 import { KNOWLEDGE_PROBLEM } from './problems'
@@ -22,7 +22,7 @@ const chunksOf = <T>(items: readonly T[], size: number): T[][] =>
 
 function rootOf(checkout: string): string {
   try { return realpathSync(checkout) } catch (err) {
-    if (codeOf(err) === 'ENOENT') throw new Error(KNOWLEDGE_REFUSAL.missingCheckout(checkout))
+    if (codeOf(err) === Errno.ENOENT) throw new Error(KNOWLEDGE_REFUSAL.missingCheckout(checkout))
     throw err
   }
 }

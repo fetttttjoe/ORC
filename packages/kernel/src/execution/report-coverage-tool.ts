@@ -1,7 +1,10 @@
 import type { Origin, ResolvedTool } from '@orc/contracts'
-import { Confidence, toolError } from '@orc/contracts'
+import { Confidence, CoverageReport, toolError } from '@orc/contracts'
 import type { Kernel } from '../kernel'
 import { ANALYZE_STEP_ROLE } from './strategies/grounded-plan'
+
+// claimsWritten is a measurement, never a self-report — computed in execute(), not part of what the model sends.
+const ModelCoverage = CoverageReport.omit({ claimsWritten: true })
 
 // report_coverage (M5b, D3/RG7): the analyze (scout) step self-reports what it covered, just before
 // it signals success — the production emitter for analysis_completed. Mirrors finalize_plan's factory
@@ -12,7 +15,7 @@ import { ANALYZE_STEP_ROLE } from './strategies/grounded-plan'
 // ponytail: nothing consumes analysis_completed today beyond orc status; this stays a thin seam so
 // the reserved RG7 telemetry (confidence/scope) already lands as a real event when a reader arrives.
 export function reportCoverageTool(opts: {
-  kernel: Pick<Kernel, 'reportCoverage'>
+  kernel: Pick<Kernel, 'reportCoverage' | 'listTaskKnowledgeWrites'>
   p: { taskId: string; stepId: string; runToken: string; role: string; origin: Origin }
 }): ResolvedTool[] {
   const { kernel, p } = opts
@@ -23,7 +26,7 @@ export function reportCoverageTool(opts: {
   return [{
     ref: 'kernel/report_coverage', name: 'report_coverage',
     description:
-      'Record what this analysis covered: { analyzed, scope?, gaps?, confidence?, notesWritten? }. Call once, just before signaling success. Set analyzed:false with a gap explaining why when you could not read the codebase.',
+      'Record what this analysis covered: { analyzed, scope?, gaps?, confidence? }. Call once, just before signaling success. Set analyzed:false with a gap explaining why when you could not read the codebase.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -31,13 +34,13 @@ export function reportCoverageTool(opts: {
         scope: { type: 'array', items: { type: 'string' } },
         gaps: { type: 'array', items: { type: 'string' } },
         confidence: { type: 'string', enum: Object.values(Confidence) },
-        notesWritten: { type: 'number' },
       },
       required: ['analyzed'],
     },
     execute: async input => {
       try {
-        await kernel.reportCoverage({ taskId: p.taskId, stepId: p.stepId, runToken: p.runToken }, input, p.origin)
+        const claimsWritten = (await kernel.listTaskKnowledgeWrites(p.taskId)).live.length
+        await kernel.reportCoverage({ taskId: p.taskId, stepId: p.stepId, runToken: p.runToken }, { ...ModelCoverage.parse(input), claimsWritten }, p.origin)
         return { output: { recorded: true }, isError: false }
       } catch (e) {
         return toolError(e)

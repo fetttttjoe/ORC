@@ -15,10 +15,7 @@ import { treeFingerprint } from '@orc/kernel'
 // module-internal export of its own file (a re-export nobody imports is API surface to keep
 // compatible for no consumer; eighteen of them accumulated here before this was checked).
 export { openKnowledge } from './knowledge'
-// memoryVerifyTool is registered by the composition root (runtime.ts stepTools), not by
-// bindStepMemory: the gate needs the STEP role and step id, which the per-step memory binding
-// never sees — the same seam scoped_changes uses.
-export { memoryTools, unavailableMemoryTools, memoryVerifyTool, MEMORY_READ_TOOLS, MEMORY_ROLE, memoryRoleFor } from './tools'
+export { memoryTools, unavailableMemoryTools, memoryToolsForStep, MEMORY_READ_TOOLS, MEMORY_ROLE, memoryRoleFor } from './tools'
 export { unavailableStepMemory, type BindStep } from './step'
 export { orphanedNotes } from './sweep'
 // the evidence-based lifecycle: recheck gathers the facts, archive rules on them (no clock in either)
@@ -62,11 +59,9 @@ export { treeStamps } from './tree-stamps'
 export { AdrSection, adrSummary, parseAdrBody, renderAdrBody, type AdrFields } from './adr'
 export { DECISION_REFUSAL, decisionDoor, getDecision, listDecisions, recordDecision, type DecisionDoor, type DecisionRecord, type DecisionStore, type DecisionView, type RecordedDecision } from './decisions'
 // consumer: packages/cli/src/runtime.ts stepTools. Registered by the composition root rather than by
-// bindStepMemory for the same reason memoryVerifyTool is: the gate needs the STEP id and role, which
-// the per-step memory binding never sees. FINISH_TOOL_NAME travels with it so runtime.test.ts pins
-// the model-facing names from the one place they are spelled.
-// `notesWrittenBy` deliberately stays module-internal (this file's header rule): finish-tools.ts is
-// its only consumer and its test imports './task-notes' directly.
+// bindStepMemory: the gate needs the STEP id and role, which the per-step memory binding never sees.
+// FINISH_TOOL_NAME travels with it so runtime.test.ts pins the model-facing names from the one place
+// they are spelled.
 export { finishTools, FINISH_TOOL_NAME } from './finish-tools'
 
 // the orchestrator: assembles the knowledge service + event log into the memory domain

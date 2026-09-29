@@ -94,11 +94,10 @@ const settingsSchema = (dir: string, projectRoot: string) =>
     // restamps the notes it wrote (the truthful-stamp pipeline). Default off like every capability
     // gate here — committing an operator's repo is an outward action they opt into.
     autoCommit: z.union([z.boolean(), z.stringbool()]).default(false),
-    // React to a recorded out-of-task commit (the auto-heal reactor). Default 'draft-sweep':
-    // the restamp half is free and silent; the LLM half only ever appears as a DRAFTED task the
-    // human approves — so the default spends nothing on its own, unlike autoCommit above whose
-    // default-off gates an outward git action. 'off' restores commits-as-records-only.
-    autoHeal: z.enum(AutoHealMode).default(AutoHealMode.draftSweep),
+    // React to a recorded out-of-task commit (the auto-heal reactor). Default 'restamp': the
+    // free, silent half only — the LLM half ('draft-sweep') is an operator opt-in, not a default.
+    // 'off' restores commits-as-records-only.
+    autoHeal: z.enum(AutoHealMode).default(AutoHealMode.restamp),
     ollamaBaseUrl: z.url().default('http://localhost:11434'),
     projectDbUrl: z.string().default('ws://127.0.0.1:8000/rpc'),
     // ceiling for the surreal driver's initial dial — the driver does not reject unreachable

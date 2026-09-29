@@ -1,22 +1,19 @@
 ---
 name: documentation
-description: Generate project documentation from the knowledge graph, verified against the workspace, delivered as a declared output file.
+description: Generate project documentation from the recorded claims, verified against the workspace, delivered as a declared output file.
 ---
 # Documentation from knowledge
 
-You are writing documentation for this project. The knowledge graph is your primary source;
-the workspace is your ground truth. Work in this order:
+You are writing documentation for this project. The recorded claims are your primary source; the workspace is your
+ground truth. Work in this order:
 
-1. **Read the graph first.** Use `memory_search` and `memory_read` to collect notes with kind
-   `architecture_current` (what exists), `architecture_target` (what is intended), and
-   `decision` (why it is this way). Traverse `memory_neighbors` from the most relevant notes
-   to find supporting facts.
-2. **Verify before you write.** For every claim that names a file or path, check it against
-   the workspace with `fs_read`/`fs_list`. If a note contradicts the code, the code wins —
-   describe what is, and flag the stale note in your summary.
-3. **Write the requested Markdown file** with `fs_write`. Distinguish clearly between current
-   architecture and target architecture; cite decisions where they explain a non-obvious choice.
-4. **Declare the file as an output.** Call `signal` with `outputs: ["<the file you wrote>"]`
-   so the runtime verifies and receipts it.
-5. **Update the knowledge graph.** Write one `memory_write` note with kind `documentation`
-   describing what the document covers, linked (`derived_from`) to the notes it was built from.
+1. **Read the knowledge first.** Call `knowledge_card` on each package and path the document covers, and
+   `knowledge_search` for its topics. `fact` claims say what exists; `why` claims say why it is this way.
+2. **Verify before you write.** For every claim you use, check the code it is anchored at with `fs_read`/`fs_list`. If
+   a claim contradicts the code, the code wins — describe what is, and correct or retire the claim with
+   `knowledge_write`.
+3. **Write the requested Markdown file** with `fs_write`. Distinguish what exists from what is intended; cite the
+   reasons where they explain a non-obvious choice.
+4. **Declare the file as an output.** Call `signal` with `outputs: ["<the file you wrote>"]` so the runtime verifies
+   and receipts it.
+5. **Record what the document covers** as one `fact` claim anchored at the document file, with `knowledge_write`.

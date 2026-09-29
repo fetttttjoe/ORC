@@ -5,8 +5,12 @@ import { z } from 'zod'
 import { COMMIT_STEP_ID, ORC_CHAT_ID, STEP_ROLE, errorMessage, noteKey, nonEmptyLines, sha256, toolError, type Origin, type ResolvedTool } from '@orc/contracts'
 import type { Kernel } from '../kernel'
 import { subtreeUsage } from '../projections'
-import type { CitingNotes } from './scoped-changes-tool'
 import { clipMiddle } from './clip'
+
+// The citing-notes join, injected by the composition root (runtime.ts) because the kernel may not
+// import plugins/memory — same seam shape as this file's own StampNote. Powers the receipt's
+// stillDrifted honesty line: notes citing committed paths that no step of this task verified.
+export type CitingNotes = (paths: string[]) => Promise<Array<{ id: string; scope: string; title: string; sourceRevision: string | null }>>
 
 // The commit step's tool pair. commit_preview computes the exact content a commit would contain
 // (against a TEMPORARY index — a preview is a look, never a stage) and returns its real diff;
@@ -100,7 +104,7 @@ const checkable = (declared: readonly string[]): string[] => declared.map(trimSl
 interface Staged { addable: string[]; paths: string[]; staged: string[]; diff: string; digest: string; skippedIgnored: string[] }
 
 export function commitTool(opts: {
-  kernel: Pick<Kernel, 'listTaskChangedPaths' | 'listTaskNoteWrites' | 'listTaskVerifiedNotes' | 'state'>
+  kernel: Pick<Kernel, 'listTaskChangedPaths' | 'listTaskKnowledgeWrites' | 'listTaskNoteWrites' | 'listTaskVerifiedNotes' | 'state'>
   dir: string
   restamp?: StampNote
   // The verification half: advances the verified stamp of the notes a step of this task DECLARED
@@ -121,9 +125,7 @@ export function commitTool(opts: {
   // provisional-stamp design already accepted. Closing that needs the audit to record a content
   // digest of the cited paths rather than a revision.
   reverify?: StampNote
-  // The citing-notes join (scoped-changes-tool's CitingNotes, injected in runtime.ts like restamp):
-  // powers the receipt's stillDrifted honesty line — notes citing committed paths that no step of
-  // this task verified, which would otherwise sit stale-stamped and silent until the next drift scan.
+  // Powers the receipt's stillDrifted honesty line: notes citing committed paths that no step of this task verified. Injected in runtime.ts like restamp.
   citing?: CitingNotes
   p: { taskId: string; stepId: string; role: string; runToken: string; origin: Origin }
 }): ResolvedTool[] {
@@ -147,7 +149,8 @@ export function commitTool(opts: {
   // would brick the step; check-ignore never reports tracked files, measured, so tracked-ignored
   // changes still commit).
   const floorSets = async (): Promise<{ addable: string[]; paths: string[]; skippedIgnored: string[] } | { error: string }> => {
-    const floor = [...new Set((await kernel.listTaskChangedPaths(p.taskId)).map(r => r.path))]
+    const [changed, knowledge] = await Promise.all([kernel.listTaskChangedPaths(p.taskId), kernel.listTaskKnowledgeWrites(p.taskId)])
+    const floor = [...new Set([...changed.map(r => r.path), ...knowledge.files])]
     if (floor.length === 0) return { addable: [], paths: [], skippedIgnored: [] }
     const ignoreProbe = await git(dir, ['check-ignore', '--', ...floor], { literal: false })
     if (ignoreProbe.code > 1) return { error: `git check-ignore failed: ${ignoreProbe.stderr.trim()}` }

@@ -6,7 +6,7 @@ import { authorFixture } from './fixtures'
 
 describe('M5b contracts', () => {
   it('CoverageReport parses full + no-access shapes', () => {
-    expect(CoverageReport.parse({ analyzed: true, scope: ['src'], gaps: [], confidence: Confidence.high, notesWritten: 3 }).analyzed).toBe(true)
+    expect(CoverageReport.parse({ analyzed: true, scope: ['src'], gaps: [], confidence: Confidence.high, claimsWritten: 3 }).analyzed).toBe(true)
     expect(CoverageReport.parse({ analyzed: false }).confidence).toBe(Confidence.none) // defaults
   })
   it('adds decomposes_into link kind and the plan note tier', () => {

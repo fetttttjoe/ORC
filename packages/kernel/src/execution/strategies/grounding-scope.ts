@@ -132,7 +132,7 @@ export function mixedGroundingDraft(v: GroundingVerdict, scope: GroundingScope, 
         }),
       ],
       confidence: Confidence.medium,
-      notesWritten: 0,
+      claimsWritten: 0,
     },
     idempotencyKey: `${runToken}:grounding:mixed:analysis_completed`,
   }

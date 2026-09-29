@@ -19,8 +19,6 @@ import { splitTool } from './split-tool'
 
 // task_split's tool output (contract-`unknown`): the child's address and whether it gated.
 const SplitOutput = z.object({ splitId: z.string(), childTaskId: z.string(), gated: z.boolean() })
-// memory_read's tool output where the reuse assertion only needs the child note's body.
-const ReadBody = z.object({ note: z.object({ body: z.string() }).nullable() })
 
 // The 1-step child plan the parent proposes via task_split (dependsOn/skillRefs are required
 // on ChildPlanStep — no zod default — so they are spelled out here).
@@ -129,28 +127,10 @@ function splitFake(cfg: {
       const results = yield { type: 'gate', splitIds, toolCallId: 'g1' }
       const r0 = results?.[0]
 
-      // if the child wrote notes, read one back through the (eventually-consistent) memory store
-      let readOk = true
-      if (r0 && r0.outcome === RunOutcome.done && r0.notes.length > 0) {
-        const read = tool('memory_read')
-        const n = must(r0.notes[0], 'first note')
-        const body = await ctx.checkpoint('tools:read', async () => {
-          for (let i = 0; i < 20; i++) {
-            const rr = await read.execute({ id: n.id, scope: n.scope })
-            const note = ReadBody.parse(rr.output).note
-            if (note) return note.body
-            await Bun.sleep(100)
-          }
-          return null
-        }, (b): EventDraft[] => [
-          { kind: EVENT_KIND.tool_call, payload: { ...base, iteration: 2, toolCallId: 'c2', toolName: 'memory_read', input: { id: n.id, scope: n.scope } } },
-          { kind: EVENT_KIND.tool_result, payload: { ...base, iteration: 2, toolCallId: 'c2', toolName: 'memory_read', output: { body: b }, isError: false } },
-        ])
-        readOk = body === CHILD_NOTE.body
-      }
-
-      const good = gatedOk && !!r0 && r0.outcome === RunOutcome.done && readOk
-      const signal = { ...base, outcome: good ? SignalOutcome.success : SignalOutcome.failure, summary: good ? 'joined child' : 'join/read/gate mismatch' }
+      // The split join's own claim refs (r0.claims) name knowledge claims, not this fixture's
+      // memory note — CHILD_NOTE goes through memory_write, so there is nothing to read back here.
+      const good = gatedOk && !!r0 && r0.outcome === RunOutcome.done
+      const signal = { ...base, outcome: good ? SignalOutcome.success : SignalOutcome.failure, summary: good ? 'joined child' : 'join/gate mismatch' }
       await ctx.checkpoint('signal:1', async () => signal, (): EventDraft[] => [
         { kind: EVENT_KIND.signal_received, payload: { ...base, signal } },
       ])
@@ -209,20 +189,22 @@ const parentTask = async (kernel: Kernel): Promise<string> => {
 }
 
 describe('recursion e2e: split, gate, join, manual approve, queue partition', () => {
-  it('(a) auto-approved split runs the full loop: propose → child runs → join → read back', async () => {
+  it('(a) auto-approved split runs the full loop: propose → child runs → join', async () => {
     const sharedWorkspace = mkdtempSync(path.join(tmpdir(), 'orc-split-workspace-'))
     const { kernel, log, port, cleanup } = await bringUp('auto', splitFake({ expectGated: false, child: 'write', expectedWorkspace: sharedWorkspace }))
     try {
       const parentId = await parentTask(kernel)
       const childId = `${parentId}.s1.call-1`
       const handle = await port.startRun(parentId, { cwd: sharedWorkspace })
-      expect(await handle.wait()).toBe(RunOutcome.done) // proves gate!==true, join outcome=done, note round-tripped
+      expect(await handle.wait()).toBe(RunOutcome.done) // proves gate!==true, join outcome=done
 
       const events = await log.all()
       expect(events.some(e => e.kind === EVENT_KIND.split_proposed)).toBe(true)
       const resolved = events.find(e => e.kind === EVENT_KIND.split_resolved)
       expect(resolved).toBeDefined()
-      expect(must(resolved, 'split resolved event').payload).toMatchObject({ outcome: RunOutcome.done, notes: [{ id: 'child-finding', scope: 'project' }] })
+      // this fixture's child writes a memory note (memory_write), not a knowledge claim — the
+      // split join's own claims list is empty, and that emptiness is the assertion.
+      expect(must(resolved, 'split resolved event').payload).toMatchObject({ outcome: RunOutcome.done, claims: [] })
 
       expect((await kernel.getTask(childId))?.status).toBe(TASK_STATUS.done)
       expect((await kernel.state()).runs.get(childId)?.at(-1)?.cwd).toBe(sharedWorkspace)
@@ -288,10 +270,10 @@ describe('recursion e2e: split, gate, join, manual approve, queue partition', ()
     }
   }, 40_000)
 
-  it('(f) a child that resolves BEFORE the parent joins still delivers its summary and notes', async () => {
+  it('(f) a child that resolves BEFORE the parent joins still delivers its summary', async () => {
     // split_resolved is appended by the router at RESOLUTION time, then the payload is sent. So a
     // split already resolved when the parent reaches its gate is exactly the one with a message
-    // waiting — filtering it out as "already resolved" dropped the child's summary and notes and
+    // waiting — filtering it out as "already resolved" dropped the child's summary and
     // handed the agent an empty join. Uses the default [] target path, which is what loop.ts passes.
     const gate: { wait?: (splitId: string) => Promise<void> } = {}
     const { kernel, log, port, cleanup } = await bringUp('auto', splitFake({
@@ -310,7 +292,7 @@ describe('recursion e2e: split, gate, join, manual approve, queue partition', ()
       const parentId = await parentTask(kernel)
       const handle = await port.startRun(parentId)
       // the parent encodes its own assertions into the signal: 'done' proves r0 arrived with
-      // outcome=done AND the child's note was readable through the memory store
+      // outcome=done and gatedOk held
       expect(await handle.wait()).toBe(RunOutcome.done)
     } finally {
       await cleanup()

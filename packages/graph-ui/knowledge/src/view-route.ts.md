@@ -1,0 +1,4 @@
+# packages/graph-ui/src/view-route.ts
+
+## Facts
+- graph-ui/src/view-route.ts's viewResponse answers any view name purely over a ReadModel via ui-core's readView, falling back to a caller-supplied DoorAnswers only when the log's answer is an empty array. {5bx8f3a8 @packages/graph-ui/src/view-route.ts#viewResponse #architecture-current}

@@ -104,7 +104,7 @@ advances the stamps the task earned and reports `stillDrifted`: notes citing com
 no step verified.
 
 The out-of-orc path: the post-commit hook records `commit_recorded`, the signal router relays it,
-and the reactor (config `autoHeal`, default `draft-sweep`) debounces a commit burst into one
+and the reactor (config `autoHeal`, default `restamp`) debounces a commit burst into one
 reaction — the free restamp pass always, and when drift survives it, a **drafted** heal task
 carrying the `memory_recheck` worklist instructions. The corpus-level drift ratio stays an
 **advisory** at every door and the reactor keeps that rule: it never approves its own sweep — a

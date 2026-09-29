@@ -2,11 +2,12 @@ import {
   errorMessage,
   CommitRecordedPayload,
   Door,
-  EVENT_KIND, EventKind, FeedbackProvidedPayload, MemoryWrittenPayload, PAYLOAD_SCHEMAS, REACTION, ReactionFailedPayload, RunOutcome, RunRequestedPayload, runOutcomeFor, SplitResult, TASK_STATUS, TERMINAL_TASK_STATUS,
+  EVENT_KIND, EventKind, FeedbackProvidedPayload, PAYLOAD_SCHEMAS, REACTION, ReactionFailedPayload, RunOutcome, RunRequestedPayload, runOutcomeFor, SplitResult, TASK_STATUS, TERMINAL_TASK_STATUS,
   type EventRecord, type Reaction, type TaskStatus,
 } from '@orc/contracts'
 import { EventLog } from '../storage'
 import { fold, pendingSplitForChild, subtreeTaskIds, type SplitState } from '../projections'
+import { knowledgeWritesIn } from '../task-knowledge'
 
 const TERMINAL: Set<TaskStatus> = new Set([TASK_STATUS.done, TASK_STATUS.blocked, TASK_STATUS.cancelled, TASK_STATUS.failed])
 
@@ -24,8 +25,6 @@ const ROUTER_RELEVANT: Record<EventKind, boolean> = {
   plan_proposed: true, plan_edited: true, plan_approved: true,
   run_requested: true, run_started: true, step_started: true, step_completed: true, step_failed: true,
   split_proposed: true, split_resolved: true,
-  // composeSplitResult needs these, but it runs once per split resolution — keeping note bodies out
-  // of ROUTER_KINDS means the per-event fetch below does not carry them.
   memory_written: false,
   skill_loaded: false, rate_limit_wait: false, agent_call: false, tool_call: false, tool_result: false,
   signal_received: false, operation_started: false, operation_completed: false,
@@ -37,7 +36,9 @@ const ROUTER_RELEVANT: Record<EventKind, boolean> = {
   memory_verified: false,
   // an agent's self-reported use outcome — evidence the memory fold aggregates, nothing to route
   memory_outcome: false,
-  knowledge_delivered: false, knowledge_written: false,
+  knowledge_delivered: false,
+  // composeSplitResult fetches these separately (resolveSplit), once per split resolution — kept out of ROUTER_KINDS so routing does not pay for them on every event.
+  knowledge_written: false,
   feedback_requested: false, feedback_provided: true, plan_annotated: false, analysis_completed: false,
   models_discovered: false, // catalog metadata — nothing to route
   copilot_exchange: false, // conversation record — nothing to route
@@ -56,9 +57,9 @@ const ROUTER_RELEVANT: Record<EventKind, boolean> = {
 const ROUTER_KINDS = Object.values(EventKind).filter(k => ROUTER_RELEVANT[k])
 
 // Pure composition of the thin join payload from the log (spec D5). Deterministic for a
-// fixed event set — but the set can differ between racing routers (late memory_written),
+// fixed event set — but the set can differ between racing routers (late knowledge_written),
 // so the append is idempotency-keyed and conflicts recover by sending the STORED result.
-export function composeSplitResult(events: EventRecord[], noteEvents: EventRecord[], split: SplitState): SplitResult {
+export function composeSplitResult(events: EventRecord[], knowledgeEvents: EventRecord[], split: SplitState): SplitResult {
   const state = fold(events)
   const outcome = runOutcomeFor(state.tasks.get(split.childTaskId)?.status)
   const subtree = new Set(subtreeTaskIds(state, split.childTaskId))
@@ -77,16 +78,7 @@ export function composeSplitResult(events: EventRecord[], noteEvents: EventRecor
     summary = failing?.failure?.message ?? 'blocked'
   }
 
-  const notes: { id: string; scope: string }[] = []
-  const seen = new Set<string>()
-  for (const e of noteEvents) {
-    if (e.kind !== EVENT_KIND.memory_written) continue
-    const p = MemoryWrittenPayload.safeParse(e.payload)
-    if (!p.success || !p.data.author.taskId || !subtree.has(p.data.author.taskId)) continue
-    const key = `${p.data.note.scope}:${p.data.note.id}`
-    if (!seen.has(key)) { seen.add(key); notes.push({ id: p.data.note.id, scope: p.data.note.scope }) }
-  }
-  return { splitId: split.splitId, childTaskId: split.childTaskId, outcome, summary, notes }
+  return { splitId: split.splitId, childTaskId: split.childTaskId, outcome, summary, claims: knowledgeWritesIn(knowledgeEvents, subtree).live }
 }
 
 // the committed resolution for a split, if any — the payload the parent must receive
@@ -164,7 +156,7 @@ export function createSignalRouter(opts: {
   // resolution — the parent always receives exactly the stored payload, never nothing.
   const resolveSplit = async (all: EventRecord[], split: SplitState): Promise<void> => {
     try {
-      const result = composeSplitResult(all, await opts.log.after(0, [EVENT_KIND.memory_written]), split)
+      const result = composeSplitResult(all, await opts.log.after(0, [EVENT_KIND.knowledge_written]), split)
       try {
         await opts.log.append({
           chatId: splitProposedFor(all, split.splitId)?.chatId ?? null, door: Door.supervisor,

@@ -76,8 +76,8 @@ describe('a task scope', () => {
     expect(timeline.read(polled, { scope: task('C'), sinceSeq: 2, kinds: [EVENT_KIND.tool_call], limit: 2 })?.map(r => r.seq)).toEqual([3, 4])
   })
 
-  it('answers a workspace scope from the task tree', () => {
-    expect(timeline.read(m, { scope: { type: ScopeType.workspace, id: TEST_WORKSPACE_ID } })?.map(r => r.seq)).toEqual([1, 2, 3, 4, 5])
+  it('answers a workspace scope from the task tree, and from a taskless authored event\'s own workspace', () => {
+    expect(timeline.read(m, { scope: { type: ScopeType.workspace, id: TEST_WORKSPACE_ID } })?.map(r => r.seq)).toEqual([1, 2, 3, 4, 5, 6])
   })
 })
 

@@ -13,7 +13,7 @@ import { CHECKS_EXECUTOR_REF, CHECKS_STEP_ID, FINISH_STEP_ID, IsolationTier, ROL
 export function finishStepFields(dependsOn: string[]) {
   return {
     id: FINISH_STEP_ID, role: STEP_ROLE.finisher, title: 'Finish',
-    instructions: `Reconcile this task's notes, record its decision if it made one, and present the summary; the '${ROLE_SKILL.finisher}' skill is your contract.`,
+    instructions: `Reconcile the claims this task recorded, record its decision if it made one, and present the summary; the '${ROLE_SKILL.finisher}' skill is your contract.`,
     dependsOn, skillRefs: [ROLE_SKILL.finisher], toolRefs: [], zone: [],
     // it reads what the task produced and writes only knowledge — no source edits after verify
     readOnlySource: true,

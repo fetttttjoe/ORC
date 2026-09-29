@@ -3,7 +3,7 @@ import path from 'node:path'
 import { jsonSchema, tool } from 'ai'
 import { z } from 'zod'
 import type { ResolvedTool } from '@orc/contracts'
-import { toolError, errorMessage, FS_WRITE_TOOL_NAME, KnowledgeReport, SignalOutcome, STEP_ROLE, assertInZone, doubleEncodedField, DOUBLE_ENCODED_HINT, resolveInWorkspace, unescapeSequences } from '@orc/contracts'
+import { toolError, errorMessage, FS_WRITE_TOOL_NAME, SignalOutcome, STEP_ROLE, assertInZone, doubleEncodedField, DOUBLE_ENCODED_HINT, resolveInWorkspace, unescapeSequences } from '@orc/contracts'
 
 export const TOOL_NAME = {
   signal: 'signal',
@@ -21,9 +21,6 @@ export const SignalInput = z.object({
   summary: z.string().min(1),
   // workspace-relative files this step produced — verified and receipted by the runtime
   outputs: z.array(z.string().min(1)).optional(),
-  // the agent's self-report of which pulled notes answered vs wasted the step — contracts owns
-  // the shape (id regex + report cap); this is the capture seam for memory_outcome events
-  knowledge: KnowledgeReport.optional(),
 })
 export const JoinSplitsInput = z.object({ splitIds: z.array(z.string()).optional() })
 export const AskHumanInput = z.object({ question: z.string().min(1), topic: z.string().min(1).optional() })
@@ -41,8 +38,8 @@ const ListInput = z.object({ path: z.string().default('.') })
 // Declared WITHOUT execute — the SDK returns tool calls; execution is ours, inside a durable step.
 // Extra (MCP) tools are neutral ResolvedTool[] — their JSON Schema travels as-is via jsonSchema().
 export function toolSet(extra: ResolvedTool[] = [], opts: { role?: string; readOnlySource?: boolean } = {}) {
-  // Steps that ground a plan — the analyze scout and the plan step — read, run gates, and write
-  // MEMORY notes, never source files. A scout once edited tracked code before any plan existed,
+  // Steps that ground a plan — the analyze scout and the plan step — read, run gates, and record
+  // knowledge, never source files. A scout once edited tracked code before any plan existed,
   // and the plan step (role=auditor, shared with child verify steps that DO write scratch) tried
   // the same during planning: both bypass the approval gate. The scout is caught by role; the plan
   // step by an explicit readOnlySource flag the kernel sets on it, since role alone can't tell it
@@ -52,7 +49,7 @@ export function toolSet(extra: ResolvedTool[] = [], opts: { role?: string; readO
   const set = {
     [TOOL_NAME.signal]: tool({
       description:
-        "End this step and report the outcome. Your summary is the ONLY output downstream steps see — put your conclusions and the ids of notes you wrote in it; do not restate note bodies (downstream pulls notes at its own budget). Declare files you produced in `outputs` (workspace-relative paths) so they are verified and receipted. If you pulled memory notes, report them in `knowledge`: note ids that ANSWERED your question in `useful`, ids that wasted the step in `deadEnd` — future retrieval learns from this. Outcome 'partial' means the work is going well but needs another round: state precisely what is DONE and what REMAINS — the runtime may grant a continuation whose only context is that summary. Never 'partial' for work that is blocked or wrong; that is 'failure'. Call this exactly once per round, when the work is done, needs another round, or cannot proceed.",
+        "End this step and report the outcome. Your summary is the ONLY output downstream steps see — put your conclusions in it; the claims you recorded are found with the knowledge tools, so do not restate them. Declare files you produced in `outputs` (workspace-relative paths) so they are verified and receipted. Outcome 'partial' means the work is going well but needs another round: state precisely what is DONE and what REMAINS — the runtime may grant a continuation whose only context is that summary. Never 'partial' for work that is blocked or wrong; that is 'failure'. Call this exactly once per round, when the work is done, needs another round, or cannot proceed.",
       inputSchema: SignalInput,
     }),
     [TOOL_NAME.fs_read]: tool({
@@ -79,7 +76,7 @@ export function toolSet(extra: ResolvedTool[] = [], opts: { role?: string; readO
     }),
     [TOOL_NAME.join_splits]: tool({
       description:
-        'Durably wait for child splits proposed with task_split to finish. Returns per-split {outcome, summary, notes} — notes are memory ids to read with memory_read or traverse with memory_neighbors. Omit splitIds to wait for all your pending splits.',
+        'Durably wait for child splits proposed with task_split to finish. Returns per-split {outcome, summary, claims} — claims are the ids and knowledge files of the claims the child recorded and did not retire. Omit splitIds to wait for all your pending splits.',
       inputSchema: JoinSplitsInput,
     }),
     [TOOL_NAME.ask_human]: tool({
@@ -122,8 +119,8 @@ export async function executeTool(
 ): Promise<{ output: unknown; isError: boolean }> {
   // ONE gate for every tool, before any of them runs: an argument whose escapes were encoded twice
   // corrupts whatever it touches, and it is the ARGUMENT that is wrong, not the tool. Checking it
-  // here means fs_write, memory_write and every tool added later inherit the diagnosis instead of
-  // each re-learning it — fs_edit's own check caught only the case where the file proved it.
+  // here means every write tool inherits the diagnosis instead of each re-learning it — fs_edit's
+  // own check caught only the case where the file proved it.
   const overEncoded = doubleEncodedField(input)
   if (overEncoded)
     return { output: { error: `'${overEncoded}' was rejected: ${DOUBLE_ENCODED_HINT}` }, isError: true }
@@ -169,7 +166,7 @@ export async function executeTool(
     if (occurrences === 0) {
       // The tool argument is ALREADY JSON, so a model that escapes its newlines again sends
       // `\\n` — two characters, backslash and n — and the match can never succeed. noteLint
-      // warns about the same double-encoding on memory_write; here it is fatal, and "copy the
+      // warns about the same double-encoding on a memory write; here it is fatal, and "copy the
       // exact text" sends the model back to re-read a file it copied correctly. Name what it
       // actually did instead. Diagnosed, never auto-repaired: a writer mis-encoding its
       // arguments is mis-encoding the file contents too, and silently fixing one hides that.

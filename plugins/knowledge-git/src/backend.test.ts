@@ -212,6 +212,20 @@ describe('git-files ids', () => {
   })
 })
 
+describe('git-files write reports the files it changed', () => {
+  it('an add names its bucket; a move names both buckets; a retire that empties a bucket names the deleted file', async () => {
+    const { checkout, backend } = setup()
+    const added = await backend.write(checkout, patch({ add: [fact('about a', 'src/a.ts')] }))
+    expect(added.files).toEqual(['knowledge/src/a.ts.md'])
+    const id = added.added[0]?.id ?? ''
+    const moved = await backend.write(checkout, patch({ change: [{ id, anchors: [{ path: 'src/b.ts' }] }] }))
+    expect([...moved.files].sort()).toEqual(['knowledge/src/a.ts.md', 'knowledge/src/b.ts.md'])
+    expect(existsSync(path.join(checkout, 'knowledge/src/a.ts.md'))).toBe(false)
+    const retired = await backend.write(checkout, patch({ retire: [id] }))
+    expect(retired.files).toEqual(['knowledge/src/b.ts.md'])
+  })
+})
+
 describe('git-files and duplicated ids', () => {
   it('a change or retire of an id that sits in two buckets is refused, and fmt leaves both copies', async () => {
     const { checkout, backend } = setup()

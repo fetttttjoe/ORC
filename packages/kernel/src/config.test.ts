@@ -66,9 +66,9 @@ describe('loadConfig', () => {
     expect(c.appVersion).toMatch(/^orc-/)
     expect(c.execAllowlist).toEqual([]) // no allowlist → exec tool is not offered
     expect(c.workspaceSetup).toEqual([]) // no setup → a new worktree is the tracked tree and nothing else
-    // draft-sweep by default is deliberate: the reactor's free half runs silently and its LLM
-    // half only ever appears as a DRAFTED task — the default spends nothing on its own
-    expect(c.autoHeal).toBe(AutoHealMode.draftSweep)
+    // restamp by default is deliberate: the reactor's free half runs silently; the LLM half
+    // ('draft-sweep') is an operator opt-in, not a default
+    expect(c.autoHeal).toBe(AutoHealMode.restamp)
   })
   it('rejects malformed ORC_CONCURRENCY loudly — orc env is zod-validated', () => {
     withEnv({ ORC_CONCURRENCY: 'abc' }, () => {

@@ -3,15 +3,15 @@ import { appendFileSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFile
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import {
-  AUTHOR_SOURCE, ClaimClass, Door, EVENT_KIND, KnowledgePatch, NO_CHAT, WORKSPACE_KIND,
+  AUTHOR_SOURCE, ClaimClass, Door, EVENT_KIND, KNOWLEDGE_REFUSAL, KnowledgePatch, NO_CHAT, WORKSPACE_KIND,
   type EventInput, type EventRecord, type MemoryAuthor, type Workspace,
 } from '@orc/contracts'
 import { authorFixture, TEST_WORKSPACE_ID } from '@orc/contracts/fixtures'
 import { gitFilesPlugin } from '@orc/knowledge-git'
 import type { WorkspaceFold } from './cwd-workspace'
-import { openKnowledgePort } from './knowledge-open'
+import { knowledgeAccess, openKnowledge } from './knowledge-open'
 import {
-  addPatch, KNOWLEDGE_OFF, KNOWLEDGE_SUBCOMMAND, knowledgeAuthor, knowledgeCommand, parseAnchorArg, renderClaims, renderProblems,
+  addPatch, NO_PROJECT_CONTEXT, KNOWLEDGE_SUBCOMMAND, knowledgeAuthor, knowledgeCommand, parseAnchorArg, renderClaims, renderProblems,
   runAdd, runCard, runCheck, runFormat, runRetire, runSearch,
 } from './knowledge-commands'
 
@@ -37,9 +37,8 @@ const portOn = (dir: string) => {
       kind: input.kind, payload: input.payload, usage: input.usage ?? null, ts: new Date().toISOString(),
     }
   }
-  const port = openKnowledgePort({ config: { knowledge: { plugin: 'git-files', options: {} }, dir }, log: { append } })
-  if (port === null) throw new Error('expected a port')
-  return { port, events }
+  const access = knowledgeAccess(openKnowledge({ knowledge: { plugin: 'git-files', options: {} } }), { append }, dir)
+  return { port: access, events }
 }
 
 describe('knowledge command helpers', () => {
@@ -60,8 +59,8 @@ describe('knowledge command helpers', () => {
 describe('knowledge check and fmt', () => {
   it('check passes on a clean checkout and fails with the problems listed', async () => {
     const dir = checkout()
-    const backend = gitFilesPlugin.create({})
-    await backend.write(dir, KnowledgePatch.parse({ add: [{ text: 'ok', class: ClaimClass.fact, anchors: [{ path: 'src/a.ts' }] }] }))
+    const backend = { backend: gitFilesPlugin.create({}) }
+    await backend.backend.write(dir, KnowledgePatch.parse({ add: [{ text: 'ok', class: ClaimClass.fact, anchors: [{ path: 'src/a.ts' }] }] }))
     expect(await runCheck(backend, dir)).toEqual({ lines: ['knowledge: 0 problems'], failed: false })
     appendFileSync(path.join(dir, 'knowledge/src/a.ts.md'), '- by hand\n')
     expect(await runCheck(backend, dir)).toEqual({
@@ -70,14 +69,14 @@ describe('knowledge check and fmt', () => {
   })
   it('fmt fixes a missing id and reports what it rewrote', async () => {
     const dir = checkout()
-    const backend = gitFilesPlugin.create({})
-    await backend.write(dir, KnowledgePatch.parse({ add: [{ text: 'ok', class: ClaimClass.fact, anchors: [{ path: 'src/a.ts' }] }] }))
+    const backend = { backend: gitFilesPlugin.create({}) }
+    await backend.backend.write(dir, KnowledgePatch.parse({ add: [{ text: 'ok', class: ClaimClass.fact, anchors: [{ path: 'src/a.ts' }] }] }))
     appendFileSync(path.join(dir, 'knowledge/src/a.ts.md'), '- by hand {@src/a.ts}\n')
     expect(await runFormat(backend, dir)).toEqual(['formatted knowledge/src/a.ts.md', 'knowledge: 0 problems'])
   })
   it('both say knowledge is off when the config turns it off', async () => {
-    await expect(runCheck(null, '/nowhere')).rejects.toThrow(KNOWLEDGE_OFF)
-    await expect(runFormat(null, '/nowhere')).rejects.toThrow(KNOWLEDGE_OFF)
+    await expect(runCheck({ unavailable: KNOWLEDGE_REFUSAL.off() }, '/nowhere')).rejects.toThrow(KNOWLEDGE_REFUSAL.off())
+    await expect(runFormat({ unavailable: KNOWLEDGE_REFUSAL.off() }, '/nowhere')).rejects.toThrow(KNOWLEDGE_REFUSAL.off())
   })
 })
 
@@ -102,8 +101,8 @@ describe('knowledge card and search', () => {
   it('runCard lists claims anchored under a path and pages with a cursor', async () => {
     const dir = checkout()
     writeFileSync(path.join(dir, 'src/b.ts'), '')
-    const backend = gitFilesPlugin.create({})
-    await backend.write(dir, KnowledgePatch.parse({
+    const backend = { backend: gitFilesPlugin.create({}) }
+    await backend.backend.write(dir, KnowledgePatch.parse({
       add: [
         { text: 'first', class: ClaimClass.fact, anchors: [{ path: 'src/a.ts' }] },
         { text: 'second', class: ClaimClass.fact, anchors: [{ path: 'src/b.ts' }] },
@@ -116,8 +115,8 @@ describe('knowledge card and search', () => {
   })
   it('runSearch finds a written claim', async () => {
     const dir = checkout()
-    const backend = gitFilesPlugin.create({})
-    await backend.write(dir, KnowledgePatch.parse({ add: [{ text: 'findme', class: ClaimClass.fact, anchors: [{ path: 'src/a.ts' }] }] }))
+    const backend = { backend: gitFilesPlugin.create({}) }
+    await backend.backend.write(dir, KnowledgePatch.parse({ add: [{ text: 'findme', class: ClaimClass.fact, anchors: [{ path: 'src/a.ts' }] }] }))
     expect(await runSearch(backend, dir, 'findme', 20)).toEqual([expect.stringContaining('findme')])
   })
 })
@@ -142,11 +141,12 @@ describe('knowledge add and retire through a real port', () => {
 })
 
 describe('every handler is off when the door is off', () => {
-  it('rejects with KNOWLEDGE_OFF', async () => {
-    await expect(runCard(null, '/nowhere', '.', { cursor: null, limit: 10 })).rejects.toThrow(KNOWLEDGE_OFF)
-    await expect(runSearch(null, '/nowhere', 'x', 10)).rejects.toThrow(KNOWLEDGE_OFF)
-    await expect(runAdd(null, testAuthor, { class: ClaimClass.fact, text: 'x' })).rejects.toThrow(KNOWLEDGE_OFF)
-    await expect(runRetire(null, testAuthor, ['aaaaaaaa'], 'why')).rejects.toThrow(KNOWLEDGE_OFF)
+  it('rejects naming the reason knowledge is off', async () => {
+    const off = { unavailable: KNOWLEDGE_REFUSAL.off() }
+    await expect(runCard(off, '/nowhere', '.', { cursor: null, limit: 10 })).rejects.toThrow(KNOWLEDGE_REFUSAL.off())
+    await expect(runSearch(off, '/nowhere', 'x', 10)).rejects.toThrow(KNOWLEDGE_REFUSAL.off())
+    await expect(runAdd(off, testAuthor, { class: ClaimClass.fact, text: 'x' })).rejects.toThrow(KNOWLEDGE_REFUSAL.off())
+    await expect(runRetire(off, testAuthor, ['aaaaaaaa'], 'why')).rejects.toThrow(KNOWLEDGE_REFUSAL.off())
   })
 })
 
@@ -159,7 +159,7 @@ describe('the knowledge command line', () => {
   it.each([[KNOWLEDGE_SUBCOMMAND.card, 'src'], [KNOWLEDGE_SUBCOMMAND.search, 'query']])('%s refuses a --limit that is not a positive integer', async (sub, arg) => {
     for (const bad of ['abc', '0', '-1', '1.5'])
       await expect(quietCommand().parseAsync([sub, arg, '--limit', bad], { from: 'user' })).rejects.toThrow(`must be a positive integer (>= 1), got '${bad}'`)
-    await expect(quietCommand().parseAsync([sub, arg, '--limit', '5'], { from: 'user' })).rejects.toThrow('knowledge commands need a project context')
+    await expect(quietCommand().parseAsync([sub, arg, '--limit', '5'], { from: 'user' })).rejects.toThrow(NO_PROJECT_CONTEXT)
   })
   it('stamps a terminal write as cli, from the cwd workspace, through the cli door', async () => {
     const dir = checkout()

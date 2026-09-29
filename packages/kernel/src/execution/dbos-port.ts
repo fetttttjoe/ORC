@@ -8,7 +8,7 @@ import {
   type AgentExecutor, type Checkpoint, type CommitRecordedPayload, type EventDraft, type EventRecord, type ExecutionPort, type ExecutorContext,
   type Origin, type TaskNode,
   type LoadedSkill, type ModelProvider, type OperationCheckpoint, type Plan, type PlanStep,
-  type ResolvedTool, type RunHandle, type Signal, type SplitResult, type StepMemory, type TaskStatus, type ToolSource,
+  type ResolvedTool, type RunHandle, type Signal, type SplitResult, type StepKnowledge, type StepMemory, type TaskStatus, type ToolSource,
 } from '@orc/contracts'
 import { type EventLog, type Storage, type EventLogOps } from '../storage'
 import { openLiveState, type LiveState } from '../live-state'
@@ -195,7 +195,7 @@ export async function createDbosPort(opts: {
     workspaceId: string
     // nearest first (parent, …, root) — a split child's decomposition lives in its PARENT's scopes
     ancestorTaskIds: string[]
-  }) => ResolvedTool[] | { tools: ResolvedTool[]; memory?: StepMemory }
+  }) => ResolvedTool[] | { tools: ResolvedTool[]; memory?: StepMemory; knowledge?: StepKnowledge }
   // Read-only probe behind the grounded analyze step's freshness short-circuit. Optional: a port
   // built without it behaves exactly as before, because the branch is guarded on its presence.
   groundingSource?: GroundingSource
@@ -437,6 +437,7 @@ export async function createDbosPort(opts: {
       }
 
       let stepMemory: StepMemory | undefined
+      let stepKnowledge: StepKnowledge | undefined
       if (stepTools) {
         const bound = stepTools({
           origin: args.origin,
@@ -445,9 +446,10 @@ export async function createDbosPort(opts: {
           modelRef: init.step.modelRef, maxIterations: init.step.maxIterations, workspaceDir,
           step: init.step, ancestorTaskIds: ancestorTaskIds(await projectState(), args.taskId),
         })
-        const { tools: stepScoped, memory } = Array.isArray(bound) ? { tools: bound, memory: undefined } : bound
+        const { tools: stepScoped, memory, knowledge } = Array.isArray(bound) ? { tools: bound, memory: undefined, knowledge: undefined } : bound
         extraTools = [...extraTools, ...stepScoped]
         stepMemory = memory
+        stepKnowledge = knowledge
       }
 
       const ctx: ExecutorContext<unknown> = {
@@ -469,6 +471,7 @@ export async function createDbosPort(opts: {
         taskId: args.taskId,
         memoryPreloadTokens: config.memoryPreloadTokens,
         ...(stepMemory && { memory: stepMemory }),
+        ...(stepKnowledge && { knowledge: stepKnowledge }),
         // prices usage drafts on the way through: fill costUSD from the provider table
         checkpoint: (name, fn, toEvents) =>
           checkpoint(name, fn, toEvents ? r => toEvents(r).map(d => priceDraft(d, provider, modelId)) : undefined),
@@ -976,7 +979,7 @@ export async function createDbosPort(opts: {
 // model burn tokens this run?". A skipped-but-grounded task HAS grounding: named notes, verified
 // current at a named HEAD. Reporting analyzed:false would make it indistinguishable from a task
 // where analysis genuinely never happened, and would degrade a task that is better grounded than
-// most. What marks it as a skip instead is notesWritten:0, the leading gaps entry, and confidence
+// most. What marks it as a skip instead is claimsWritten:0, the leading gaps entry, and confidence
 // 'medium' rather than 'high' — the evidence is real but indirect (git says the declared paths are
 // quiet), so it is honestly one notch below a scan performed against the tree this run.
 function groundingSkipDrafts(v: GroundingVerdict, stepId: string, runToken: string): EventDraft[] {
@@ -997,7 +1000,7 @@ function groundingSkipDrafts(v: GroundingVerdict, stepId: string, runToken: stri
           ...v.stale.map(s => `${s.id}@${s.revision ?? 'no-revision'} not relied on — ${s.why}`),
         ],
         confidence: Confidence.medium,
-        notesWritten: 0,
+        claimsWritten: 0,
       },
       idempotencyKey: `${runToken}:grounding:analysis_completed`,
     },

@@ -1,17 +1,17 @@
 import { Command } from 'commander'
 import {
-  AUTHOR_SOURCE, ClaimClass, Door, KnowledgePatch, NO_CHAT,
-  type KnowledgeBackend, type KnowledgeClaim, type KnowledgePort, type KnowledgeProblem, type MemoryAuthor,
+  AUTHOR_SOURCE, ClaimClass, Door, KNOWLEDGE_DEFAULTS, KnowledgePatch, NO_CHAT,
+  type KnowledgeAccess, type KnowledgeClaim, type KnowledgeProblem, type MemoryAuthor,
 } from '@orc/contracts'
 import type { EventLog, Kernel, ProjectConfig } from '@orc/kernel'
 import { cwdAuthor, type WorkspaceFold } from './cwd-workspace'
 import { enumArg } from './enum-arg'
 import { parsePositiveInteger } from './int-arg'
 import { CommandFailure } from './exit'
-import { knowledgeBackendFor, openKnowledgePort } from './knowledge-open'
+import { knowledgeAccess, openKnowledge, type KnowledgeOpening } from './knowledge-open'
 
 export const KNOWLEDGE_SUBCOMMAND = { card: 'card', search: 'search', add: 'add', retire: 'retire', fmt: 'fmt', check: 'check' } as const
-export const KNOWLEDGE_OFF = 'knowledge is off for this project (.orc/config.json "knowledge": null)'
+export const NO_PROJECT_CONTEXT = 'knowledge commands need a project context'
 export const ANCHOR_ARG_SEPARATOR = '#'
 const parseClass = enumArg<ClaimClass>('class', Object.values(ClaimClass))
 
@@ -36,34 +36,34 @@ export const renderProblems = (problems: readonly KnowledgeProblem[]): string[] 
   problems.map(p => `${p.location}:${p.line}  ${p.message}`)
 
 const summaryLine = (problems: readonly KnowledgeProblem[]): string => `knowledge: ${problems.length} problems`
-const requireBackend = (backend: KnowledgeBackend | null): KnowledgeBackend => {
-  if (backend === null) throw new Error(KNOWLEDGE_OFF)
-  return backend
+const requireBackend = (opening: KnowledgeOpening) => {
+  if ('unavailable' in opening) throw new Error(opening.unavailable)
+  return opening.backend
 }
-const requirePort = (port: KnowledgePort | null): KnowledgePort => {
-  if (port === null) throw new Error(KNOWLEDGE_OFF)
-  return port
+const requirePort = (access: KnowledgeAccess) => {
+  if ('unavailable' in access) throw new Error(access.unavailable)
+  return access.port
 }
 
 export interface CheckOutcome { lines: string[]; failed: boolean }
 
-export async function runCheck(backend: KnowledgeBackend | null, dir: string): Promise<CheckOutcome> {
-  const problems = await requireBackend(backend).check(dir)
+export async function runCheck(opening: KnowledgeOpening, dir: string): Promise<CheckOutcome> {
+  const problems = await requireBackend(opening).check(dir)
   return { lines: [...renderProblems(problems), summaryLine(problems)], failed: problems.length > 0 }
 }
 
-export async function runFormat(backend: KnowledgeBackend | null, dir: string): Promise<string[]> {
-  const result = await requireBackend(backend).format(dir)
+export async function runFormat(opening: KnowledgeOpening, dir: string): Promise<string[]> {
+  const result = await requireBackend(opening).format(dir)
   return [...result.formatted.map(l => `formatted ${l}`), ...renderProblems(result.problems), summaryLine(result.problems)]
 }
 
-export async function runCard(backend: KnowledgeBackend | null, dir: string, entity: string, page: { cursor: string | null; limit: number }): Promise<string[]> {
-  const card = await requireBackend(backend).card(dir, entity, page)
+export async function runCard(opening: KnowledgeOpening, dir: string, entity: string, page: { cursor: string | null; limit: number }): Promise<string[]> {
+  const card = await requireBackend(opening).card(dir, entity, page)
   return [...renderClaims(card.claims), ...(card.next === null ? [] : [`more: --cursor ${card.next}`])]
 }
 
-export async function runSearch(backend: KnowledgeBackend | null, dir: string, query: string, limit: number): Promise<string[]> {
-  return renderClaims(await requireBackend(backend).search(dir, query, limit))
+export async function runSearch(opening: KnowledgeOpening, dir: string, query: string, limit: number): Promise<string[]> {
+  return renderClaims(await requireBackend(opening).search(dir, query, limit))
 }
 
 export interface AddOptions { class: ClaimClass; text: string; anchor?: string[]; tag?: string[]; source?: string[]; decision?: string; why?: string }
@@ -75,13 +75,13 @@ export function addPatch(o: AddOptions): KnowledgePatch {
   })
 }
 
-export async function runAdd(port: KnowledgePort | null, author: MemoryAuthor, o: AddOptions): Promise<string[]> {
-  const result = await requirePort(port).write({ author, idempotencyKey: null }, addPatch(o))
+export async function runAdd(access: KnowledgeAccess, author: MemoryAuthor, o: AddOptions): Promise<string[]> {
+  const result = await requirePort(access).write({ author, idempotencyKey: null }, addPatch(o))
   return [...result.added.map(r => `added ${r.id} → ${r.location}`), ...result.warnings]
 }
 
-export async function runRetire(port: KnowledgePort | null, author: MemoryAuthor, ids: string[], why: string): Promise<string[]> {
-  const result = await requirePort(port).write({ author, idempotencyKey: null }, KnowledgePatch.parse({ retire: ids, why }))
+export async function runRetire(access: KnowledgeAccess, author: MemoryAuthor, ids: string[], why: string): Promise<string[]> {
+  const result = await requirePort(access).write({ author, idempotencyKey: null }, KnowledgePatch.parse({ retire: ids, why }))
   return [...result.retired.map(r => `retired ${r.id} from ${r.location}`), ...result.warnings]
 }
 
@@ -91,24 +91,24 @@ export const knowledgeAuthor = (fold: WorkspaceFold, dir: string): Promise<Memor
 export function knowledgeCommand(deps: { requireKernel: () => Kernel; project?: { config: ProjectConfig; log: EventLog } }): Command {
   const knowledge = new Command('knowledge').description('project knowledge as files in the repo: read, add, retire, format, check')
   const needProject = () => {
-    if (!deps.project) throw new Error('knowledge commands need a project context')
+    if (!deps.project) throw new Error(NO_PROJECT_CONTEXT)
     return deps.project
   }
   const print = (lines: readonly string[]): void => { for (const line of lines) console.log(line) }
-  const backend = () => knowledgeBackendFor(needProject().config)
+  const backend = () => openKnowledge(needProject().config)
 
   const author = () => { const { config } = needProject(); return knowledgeAuthor(deps.requireKernel(), config.dir) }
-  const port = () => { const { config, log } = needProject(); return openKnowledgePort({ config, log }) }
+  const port = () => { const { config, log } = needProject(); return knowledgeAccess(openKnowledge(config), log, config.dir) }
 
   knowledge.command(`${KNOWLEDGE_SUBCOMMAND.card} <path>`).description('the claims anchored at or under a path')
     .option('--limit <n>', 'claims per page', parsePositiveInteger).option('--cursor <c>', 'continue a previous card')
     .action(async (entity: string, o: { limit?: number; cursor?: string }) => {
-      print(await runCard(backend(), needProject().config.dir, entity, { cursor: o.cursor ?? null, limit: o.limit ?? 50 }))
+      print(await runCard(backend(), needProject().config.dir, entity, { cursor: o.cursor ?? null, limit: o.limit ?? KNOWLEDGE_DEFAULTS.pageItems }))
     })
   knowledge.command(`${KNOWLEDGE_SUBCOMMAND.search} <query>`).description('claims ranked for a query')
     .option('--limit <n>', 'at most this many', parsePositiveInteger)
     .action(async (query: string, o: { limit?: number }) => {
-      print(await runSearch(backend(), needProject().config.dir, query, o.limit ?? 20))
+      print(await runSearch(backend(), needProject().config.dir, query, o.limit ?? KNOWLEDGE_DEFAULTS.searchItems))
     })
   knowledge.command(KNOWLEDGE_SUBCOMMAND.add).description('record one claim')
     .requiredOption('--class <c>', Object.values(ClaimClass).join(' | '), parseClass)
@@ -118,10 +118,10 @@ export function knowledgeCommand(deps: { requireKernel: () => Kernel; project?: 
     .option('--source <url...>', 'where this was learned (credential-free http(s) URLs)')
     .option('--decision <slug>', 'the decision this claim comes from')
     .option('--why <text>', 'why this write happened')
-    .action(async (o: AddOptions) => { const p = requirePort(port()); print(await runAdd(p, await author(), o)) })
+    .action(async (o: AddOptions) => { print(await runAdd(port(), await author(), o)) })
   knowledge.command(`${KNOWLEDGE_SUBCOMMAND.retire} <ids...>`).description('retire claims by id')
     .requiredOption('--why <text>', 'why they no longer hold')
-    .action(async (ids: string[], o: { why: string }) => { const p = requirePort(port()); print(await runRetire(p, await author(), ids, o.why)) })
+    .action(async (ids: string[], o: { why: string }) => { print(await runRetire(port(), await author(), ids, o.why)) })
   knowledge.command(KNOWLEDGE_SUBCOMMAND.fmt).description('assign missing ids, restore canonical order, move misfiled claims')
     .action(async () => { print(await runFormat(backend(), needProject().config.dir)) })
   knowledge.command(KNOWLEDGE_SUBCOMMAND.check).description('validate every knowledge file; exits 1 on any problem')

@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'bun:test'
-import { FINISH_STEP_ID, STEP_ID, STEP_ROLE, VERIFY_STEP_ID, type EventRecord, type Plan, EVENT_KIND } from '@orc/contracts'
+import { z } from 'zod'
+import { ClaimClass, FINISH_STEP_ID, STEP_ID, STEP_ROLE, VERIFY_STEP_ID, type EventRecord, type KnowledgeClaim, type Plan, EVENT_KIND } from '@orc/contracts'
 import { eventFixture, must, planFixture, recordOf, stepFixture } from '@orc/contracts/fixtures'
 import { taskChangedPaths } from '../projections'
 import { scopedChangesTool, SCOPED_CHANGES_TOOL_NAME } from './scoped-changes-tool'
@@ -70,21 +71,23 @@ const run = async (kernel = fakeKernel([THIS_TASK, CHILD_TASK], PLAN)) => {
   return r
 }
 
-// The heal-or-confirm candidate list: citing notes ride the OUTPUT because drift flags are
+// The heal-candidate list: citing claims ride the OUTPUT because drift flags are
 // measured against committed revisions and lag the uncommitted work verify just audited —
 // observed twice as post-commit drift (4/7 corpus) before this existed.
-describe('citingNotes (heal-or-confirm candidates)', () => {
-  const NOTE = { id: 'area-x', scope: 'project', title: 'X', sourceRevision: 'abc' }
+describe('citingClaims (heal candidates)', () => {
+  const CLAIM: KnowledgeClaim = { id: 'aaaaaaaa', text: 'X', class: ClaimClass.fact, anchors: [], tags: [], sources: [], decision: null, location: 'k/x.md' }
+  const CitingClaimsOutput = z.object({ citingClaims: z.array(z.unknown()).nullable(), floor: z.string(), degraded: z.array(z.string()).optional() })
 
-  it('carries the citing callback result, called once with the deduped changed paths', async () => {
+  const build = (opts: { claimsAt?: (paths: string[]) => Promise<KnowledgeClaim[]> } = {}) => {
+    const [tool] = scopedChangesTool({ kernel: fakeKernel([THIS_TASK, CHILD_TASK], PLAN), p: verifyP, ...opts })
+    return must(tool, 'scoped changes tool')
+  }
+
+  it('carries the claimsAt callback result, called once with the deduped changed paths', async () => {
     const seen: string[][] = []
-    const [tool] = scopedChangesTool({
-      kernel: fakeKernel([THIS_TASK, CHILD_TASK], PLAN), p: verifyP,
-      citing: async paths => { seen.push(paths); return [NOTE] },
-    })
-    const r = await must(tool, 'scoped changes tool').execute({})
+    const r = await build({ claimsAt: async paths => { seen.push(paths); return [CLAIM] } }).execute({})
     expect(r.isError).toBe(false)
-    expect((r.output as { citingNotes: unknown }).citingNotes).toEqual([NOTE])
+    expect(CitingClaimsOutput.parse(r.output).citingClaims).toEqual([CLAIM])
     expect(seen).toHaveLength(1)
     expect([...must(seen[0], 'seen[0]')].sort()).toEqual([
       'docs/unrelated-note.md',
@@ -106,27 +109,30 @@ describe('citingNotes (heal-or-confirm candidates)', () => {
         getPlan: async () => PLAN,
       },
       p: verifyP,
-      citing: async paths => { seen.push(paths); return [] },
+      claimsAt: async paths => { seen.push(paths); return [] },
     })
     await must(tool, 'scoped changes tool').execute({})
     expect(seen).toEqual([['packages/kernel/src/dup.ts']])
   })
 
-  it('without the callback citingNotes is null and degraded names the gap (never smuggled into floor)', async () => {
-    const o = (await run()).output as { citingNotes: unknown; floor: string; degraded?: string[] }
-    expect(o.citingNotes).toBeNull()
+  it('without the callback citingClaims is null and degraded names the gap (never smuggled into floor)', async () => {
+    const o = CitingClaimsOutput.parse((await run()).output)
+    expect(o.citingClaims).toBeNull()
     expect(o.floor).not.toContain('unavailable')
-    expect(o.degraded).toEqual(['citingNotes unavailable (memory degraded) — name that loudly in your summary.'])
+    expect(o.degraded).toEqual(['citingClaims unavailable (knowledge unavailable) — name that loudly in your summary.'])
   })
 
   it('with the callback present, degraded is absent entirely (not an empty array)', async () => {
-    const [tool] = scopedChangesTool({
-      kernel: fakeKernel([THIS_TASK, CHILD_TASK], PLAN), p: verifyP,
-      citing: async () => [],
-    })
-    const r = await must(tool, 'scoped changes tool').execute({})
+    const r = await build({ claimsAt: async () => [] }).execute({})
     expect(r.isError).toBe(false)
     expect(recordOf(r.output)).not.toHaveProperty('degraded')
+  })
+
+  it('a failing claims lookup keeps the paths and names the failure in degraded', async () => {
+    const tool = build({ claimsAt: async () => { throw new Error('bucket broken') } })
+    const out = await tool.execute({})
+    expect(out.isError).toBe(false)
+    expect(out.output).toMatchObject({ citingClaims: null, degraded: ['citingClaims unavailable: bucket broken'] })
   })
 })
 

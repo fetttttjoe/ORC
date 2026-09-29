@@ -1,5 +1,5 @@
 import { z } from 'zod'
-import { AccessVia, AUTHOR_SOURCE, CLAIM_ID_RE, ClaimClass, Door, NO_CHAT, ClaimWrite, DecisionStatus, isRecord, DRIFT_STATE, EdgeDirection, inferTier, linkLookupScopes, MASTERPLAN_NOTE_ID, MemoryScope, MEMORY_ACCESS, MEMORY_ID_RE, MEMORY_LIMITS, MEMORY_SOURCE_LIMITS, MEMORY_TOOL_NAME, MemorySearchResult, MemoryWriteResult, NoteCategory, NoteKind, LINK_KIND, planFieldViolations, Retention, SearchMode, stepMayVerify, LinkKind, MemoryNoteDraftInput, NOTE_TIER, NoteTier, emptyUseStats, slugId, toolError, useLine, type ClaimInput, type MemoryAuthor, type MemoryNote, type MemoryStore, type NoteSummary, type ProvisionalFlag, type ResolvedTool, type VerifiedStamp } from '@orc/contracts'
+import { AccessVia, AUTHOR_SOURCE, CLAIM_ID_RE, ClaimClass, Door, NO_CHAT, ClaimWrite, DecisionStatus, isRecord, DRIFT_STATE, EdgeDirection, inferTier, linkLookupScopes, MASTERPLAN_NOTE_ID, MemoryScope, MEMORY_ACCESS, MEMORY_ID_RE, MEMORY_LIMITS, MEMORY_SOURCE_LIMITS, MEMORY_TOOL_NAME, MemorySearchResult, MemoryWriteResult, NoteCategory, NoteKind, LINK_KIND, planFieldViolations, Retention, SearchMode, stepMayPlan, stepMayReconcile, stepMayVerify, LinkKind, MemoryNoteDraftInput, NOTE_TIER, NoteTier, emptyUseStats, slugId, toolError, useLine, type ClaimInput, type MemoryAuthor, type MemoryNote, type MemoryStore, type NoteSummary, type ProvisionalFlag, type ResolvedTool, type VerifiedStamp } from '@orc/contracts'
 import { applyBudget, fitMemoryNoteToBudget } from './budget'
 import { readNoteDrift, type DriftableNote, type DriftSources } from './claim-drift-read'
 import { provisionalOf, type WorkspaceViewProbe } from './provisional'
@@ -128,8 +128,7 @@ export function shrinkWarnings(
     if (after.length <= before.length * SHRINK_RATIO)
       out.push(
         `this write cut ${field} from ${before.length} to ${after.length} characters — ${field} is a full replacement, not a merge. `
-        + 'If you meant to CONFIRM the note rather than rewrite it, use memory_verify and send no content; '
-        + 'if the correction really is this much shorter, ignore this. The previous revision is in the log.',
+        + 'If the correction really is this much shorter, ignore this. The previous revision is in the log.',
       )
   }
   return out
@@ -630,6 +629,11 @@ export function memoryVerifyTool(opts: {
 // drivers (orc mcp serve) expose exactly these — reading knowledge is theirs, authoring it
 // belongs to agents running inside plans. tools.test.ts pins every name to the actual surface.
 export const MEMORY_READ_TOOLS = [MEMORY_TOOL_NAME.search, MEMORY_TOOL_NAME.read, MEMORY_TOOL_NAME.neighbors, MEMORY_TOOL_NAME.topics, MEMORY_TOOL_NAME.recheck] as const
+
+export const PLAN_STEP_MEMORY_TOOLS: readonly string[] = [MEMORY_TOOL_NAME.write, MEMORY_TOOL_NAME.search, MEMORY_TOOL_NAME.read]
+export const FINISH_STEP_MEMORY_TOOLS: readonly string[] = [MEMORY_TOOL_NAME.search, MEMORY_TOOL_NAME.read]
+export const memoryToolsForStep = (p: { stepId: string; role: string }): readonly string[] =>
+  stepMayPlan(p) ? PLAN_STEP_MEMORY_TOOLS : stepMayReconcile(p) ? FINISH_STEP_MEMORY_TOOLS : []
 
 // Injected as ResolvedTool[] via the same channel MCP tools use. Author is bound per step.
 // role keys the tool surface + epistemic posture (default 'verify' = today's unchanged behavior):

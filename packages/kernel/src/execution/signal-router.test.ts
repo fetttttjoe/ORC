@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test'
-import { ApprovedBy, AUTHOR_SOURCE, Door, EVENT_KIND, FailureClass, NO_CHAT, REACTION, ReactionFailedPayload, RunOutcome, TASK_STATUS, type EventRecord, type Origin, type SplitResult, type TaskNode, type TaskStatus } from '@orc/contracts'
+import { ApprovedBy, Door, EVENT_KIND, FailureClass, NO_CHAT, REACTION, ReactionFailedPayload, RunOutcome, TASK_STATUS, type EventRecord, type Origin, type SplitResult, type TaskNode, type TaskStatus } from '@orc/contracts'
 import { Kernel } from '../kernel'
 import { fold } from '../projections'
 import { openStorage, type EventLog } from '../storage'
@@ -34,17 +34,18 @@ describe('composeSplitResult', () => {
       evt({ seq: 6, kind: EVENT_KIND.step_completed, stepId: 'w2', runToken: 'rt-w2', payload: { stepId: 'w2', runToken: 'rt-w2', summary: 'second' } }),
       evt({ seq: 7, kind: EVENT_KIND.task_status_changed, payload: { taskId: 'c1', from: 'running', to: 'done' } }),
     ]
-    // note events arrive separately: they are NOT router kinds, so the router fetches them only
-    // when it actually composes a result rather than on every routed event
-    const notes: EventRecord[] = [
-      evt({ seq: 8, taskId: null, kind: EVENT_KIND.memory_written, payload: { note: { id: 'finding', scope: 'project', title: 'F', categories: [], tags: [], links: [], paths: [], summary: '', body: '' }, author: authorFixture({ source: AUTHOR_SOURCE.agent, taskId: 'c1' }) } }),
-      evt({ seq: 9, taskId: null, kind: EVENT_KIND.memory_written, payload: { note: { id: 'other', scope: 'project', title: 'O', categories: [], tags: [], links: [], paths: [], summary: '', body: '' }, author: authorFixture({ source: AUTHOR_SOURCE.agent, taskId: 'unrelated' }) } }),
+    // knowledge events arrive separately: they are NOT router kinds, so the router fetches them
+    // only when it actually composes a result rather than on every routed event
+    const knowledge: EventRecord[] = [
+      evt({ seq: 8, taskId: 'c1', kind: EVENT_KIND.knowledge_written, payload: { added: [{ id: 'aaaaaaaa', location: 'knowledge/a.md' }, { id: 'bbbbbbbb', location: 'knowledge/b.md' }], changed: [], retired: [], files: ['knowledge/a.md', 'knowledge/b.md'], why: 'w', decision: null, author: authorFixture({ taskId: 'c1' }) } }),
+      evt({ seq: 9, taskId: 'c1', kind: EVENT_KIND.knowledge_written, payload: { added: [], changed: [], retired: [{ id: 'bbbbbbbb', location: 'knowledge/b.md' }], files: ['knowledge/b.md'], why: 'w', decision: null, author: authorFixture({ taskId: 'c1' }) } }),
+      evt({ seq: 10, taskId: 'unrelated', kind: EVENT_KIND.knowledge_written, payload: { added: [{ id: 'cccccccc', location: 'knowledge/c.md' }], changed: [], retired: [], files: [], why: 'w', decision: null, author: authorFixture({ taskId: 'unrelated' }) } }),
     ]
-    const r = composeSplitResult(events, notes, split)
+    const r = composeSplitResult(events, knowledge, split)
     expect(r).toEqual({
       splitId: 'sp1', childTaskId: 'c1', outcome: RunOutcome.done,
       summary: 'second',                       // w2 is the only terminal step (nothing depends on it)
-      notes: [{ id: 'finding', scope: 'project' }],
+      claims: [{ id: 'aaaaaaaa', location: 'knowledge/a.md' }],
     })
   })
   it('blocked: failing step message; cancelled: fixed summary', () => {
@@ -184,6 +185,23 @@ describe('createSignalRouter (integration, real EventLog)', () => {
     // the reaction answers to the chat that ASKED for the split, stamped with the supervisor's door
     const resolved = must((await log.all()).find(e => e.kind === EVENT_KIND.split_resolved), 'split resolved event')
     expect({ chatId: resolved.chatId, door: resolved.door }).toEqual({ chatId: SPLIT_CHAT.chatId, door: Door.supervisor })
+  })
+
+  it('route 1: a knowledge_written claim the child recorded reaches the parent split_resolved claims', async () => {
+    const sends: { dest: string; result: SplitResult; topic: string; key: string }[] = []
+    router = createSignalRouter({ log, onChildApproved: async () => {}, onRunRequested: async () => {}, onCancelled: async () => {}, send: async (dest, result, topic, key) => { sends.push({ dest, result, topic, key }) }, sendFeedback: async () => {} })
+    await router.start()
+    await seedSplit()
+    await log.append({
+      ...CLI, taskId: 'c', stepId: 'w1', runToken: 'rt-w1', kind: EVENT_KIND.knowledge_written,
+      payload: {
+        added: [{ id: 'aaaaaaaa', location: 'knowledge/a.md' }], changed: [], retired: [], files: ['knowledge/a.md'],
+        why: 'w', decision: null, author: authorFixture({ taskId: 'c' }),
+      },
+    })
+    await terminal(TASK_STATUS.done)
+    expect(await waitFor(async () => (await resolvedCount()) === 1)).toBe(true)
+    expect(must(sends[0], 'first send').result.claims).toEqual([{ id: 'aaaaaaaa', location: 'knowledge/a.md' }])
   })
 
   it('sweep: a terminal split that landed before start is resolved by start() alone', async () => {

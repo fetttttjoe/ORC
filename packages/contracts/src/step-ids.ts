@@ -7,7 +7,7 @@
 // VERIFY_STEP_ID: validatePlan accepts it as the alternative to explicit dependencies, and the
 // grounded freezer maps it to the auditor role.
 // COMMIT_STEP_ID: appended by the kernel's withCommitStep; the only step git_commit registers for.
-// FINISH_STEP_ID: appended by the kernel's withFinishStep; the only step task_notes/record_decision
+// FINISH_STEP_ID: appended by the kernel's withFinishStep; the only step task_claims/record_decision
 // register for (stepMayReconcile in plan.ts) — mirrors COMMIT_STEP_ID's role.
 export const STEP_ID = { analyze: 'analyze', plan: 'plan', verify: 'verify', commit: 'commit', checks: 'checks', finish: 'finish' } as const
 export type StepId = (typeof STEP_ID)[keyof typeof STEP_ID]

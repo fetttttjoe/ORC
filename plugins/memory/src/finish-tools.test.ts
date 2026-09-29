@@ -1,5 +1,4 @@
 import { afterAll, describe, expect, it } from 'bun:test'
-import { z } from 'zod'
 import { AUTHOR_SOURCE, composeAuthor, Door, FINISH_STEP_ID, STEP_ROLE, type MemoryAuthor } from '@orc/contracts'
 import { authorFixture } from '@orc/contracts/fixtures'
 import { DECISION_REFUSAL, type DecisionDoor } from './decisions'
@@ -38,29 +37,19 @@ const p = (over: Partial<{ stepId: string; role: string }> = {}) =>
   ({ taskId: 't1', stepId: FINISH_STEP_ID, role: STEP_ROLE.finisher, ...over })
 
 describe('finish tools', () => {
-  it('registers task_notes and record_decision ONLY on the finish step with the finisher role', async () => {
+  it('registers record_decision ONLY on the finish step with the finisher role', async () => {
     const live = await door()
-    const names = (q: ReturnType<typeof p>) => finishTools({ log: live.live.log, door: live, author, p: q }).map(t => t.name)
-    expect(new Set(names(p()))).toEqual(new Set([FINISH_TOOL_NAME.taskNotes, FINISH_TOOL_NAME.recordDecision]))
+    const names = (q: ReturnType<typeof p>) => finishTools({ door: live, author, p: q }).map(t => t.name)
+    expect(new Set(names(p()))).toEqual(new Set([FINISH_TOOL_NAME.recordDecision]))
     // both terms, like the commit gate: a planner-authored step named 'finish' and a split claiming
     // the finisher role each get neither tool
     expect(names(p({ role: STEP_ROLE.worker }))).toEqual([])
     expect(names(p({ stepId: 'wrap-up' }))).toEqual([])
   }, 30_000)
 
-  it('task_notes answers from the log — a note written by this task appears, another task\'s does not', async () => {
-    const live = await door()
-    await live.store.write({ id: 'mine', title: 'Mine' }, { ...author, taskId: 't1' })
-    await live.store.write({ id: 'theirs', title: 'Theirs' }, { ...author, taskId: 't2' })
-    const tool = finishTools({ log: live.live.log, door: live, author, p: p() }).find(t => t.name === FINISH_TOOL_NAME.taskNotes)
-    const r = await tool?.execute({}, undefined)
-    expect(r?.isError).toBe(false)
-    expect(z.object({ notes: z.array(z.object({ id: z.string() })) }).parse(r?.output).notes.map(n => n.id)).toEqual(['mine'])
-  }, 30_000)
-
   it('record_decision writes through the op with the STEP\'s author and refuses a second record of the same title', async () => {
     const live = await door()
-    const tool = finishTools({ log: live.live.log, door: live, author: stepAuthor, p: p() })
+    const tool = finishTools({ door: live, author: stepAuthor, p: p() })
       .find(t => t.name === FINISH_TOOL_NAME.recordDecision)
     const ok = await tool?.execute({ title: 'Log is truth', context: 'c', decision: 'd', consequences: 'q' }, undefined)
     expect(ok?.isError).toBe(false)
@@ -78,7 +67,7 @@ describe('finish tools', () => {
   // A tool that VANISHES when memory is degraded reads as "there is no decision to record"; one that
   // says "unavailable" reads as what it is. Same posture every other memory tool takes.
   it('with the read model down, record_decision is still listed and says memory is unavailable', async () => {
-    const tools = finishTools({ log: { after: async () => [] }, door: null, author, p: p() })
+    const tools = finishTools({ door: null, author, p: p() })
     expect(tools.map(t => t.name)).toContain(FINISH_TOOL_NAME.recordDecision)
     const r = await tools.find(t => t.name === FINISH_TOOL_NAME.recordDecision)?.execute(
       { title: 'T', context: 'c', decision: 'd', consequences: 'q' }, undefined)

@@ -1,6 +1,6 @@
 import {
-  claimHitKey, errorMessage, LINK_KIND, MEMORY_ACCESS, MEMORY_LIMITS, MEMORY_USE, MemoryScope, noteKey, NOTE_TIER, planScope, SEARCH_MODE, SignalOutcome, slugId, taskLaneScopes,
-  type ClaimHit, type ClaimInput, type LinkKind, type MemoryAuthor, type MemoryStore, type ResolvedTool,
+  errorMessage, LINK_KIND, MEMORY_ACCESS, MEMORY_LIMITS, MemoryScope, noteKey, NOTE_TIER, planScope, SignalOutcome, slugId, taskLaneScopes,
+  type ClaimInput, type LinkKind, type MemoryAuthor, type MemoryStore, type ResolvedTool,
   type RecalledContext, type StepMemory,
 } from '@orc/contracts'
 import { applyBudget } from './budget'
@@ -74,6 +74,9 @@ export interface StepMemoryBinding {
   memory: StepMemory
 }
 
+const kept = (tools: ResolvedTool[], keep: readonly string[] | undefined): ResolvedTool[] =>
+  keep === undefined ? tools : tools.filter(t => keep.includes(t.name))
+
 // Everything a running step does to memory, in one place: the tool surface it hands the model, the
 // context it is given before its first prompt, and the note it leaves behind. The executor only
 // decides WHEN each happens.
@@ -94,11 +97,12 @@ export function bindStepMemory(opts: {
   // nearest first (parent, grandparent, …, root) — a split child's decomposition lives in its
   // PARENT's plan scope, so without these it cannot see its own subplan
   ancestorTaskIds?: readonly string[]
-  // Bound on the advisory read paths (recall, claimsCiting). The degrade contract ("never block
+  // Bound on the advisory read path (recall). The degrade contract ("never block
   // the step") only held against THROWS — a dead SurrealDB socket pends forever (measured:
   // connect() still pending after 400s), and a step recovered mid-boot wedged in recall with
   // zero events for 10+ minutes, live 2026-08-04. Injectable so the tests need not wait it out.
   recallTimeoutMs?: number
+  keep?: readonly string[]
 }): StepMemoryBinding {
   const { store, author, step, taskId } = opts
   // Every durable note this step pulled. Collected by decorating the ONE method that already means
@@ -180,56 +184,13 @@ export function bindStepMemory(opts: {
   // CPU embedder — this exists for the pending-forever socket, not for slow-but-alive.
   // [conjecture — sized from observed healthy recalls well under 5s; grep this name before tuning]
   const recallTimeoutMs = opts.recallTimeoutMs ?? 30_000
-  // The hang-shaped half of the degrade contract: a promise that never settles cannot be caught,
-  // so the advisory paths race a timer and the CALLER's own catch turns the timeout into the same
-  // "no notes / nothing at risk" the throwing store already gets. The loser keeps running to
-  // nowhere — acceptable for a read; the step is what must not wedge.
+  // The hang-shaped half of the degrade contract: a promise that never settles cannot be caught, so recall races a timer and the CALLER's own catch turns the timeout into the same "no notes" the throwing store already gets.
   const bounded = <T>(p: Promise<T>, what: string): Promise<T> =>
     Promise.race([p, new Promise<never>((_, reject) => setTimeout(() => reject(new Error(`${what} still pending after ${recallTimeoutMs}ms — degraded store treated as absent`)), recallTimeoutMs).unref?.())])
 
   return {
-    tools: memoryTools({ store: tracking, author, role: opts.role, ...(opts.drift && { drift: opts.drift }), workspaceView: opts.workspaceView, catchUp: opts.catchUp, searchScope: scope }),
+    tools: kept(memoryTools({ store: tracking, author, role: opts.role, ...(opts.drift && { drift: opts.drift }), workspaceView: opts.workspaceView, catchUp: opts.catchUp, searchScope: scope }), opts.keep),
     memory: {
-      // KEYWORD arm only, and now actually PASSED as such: a path is a literal, and the semantic
-      // arm returns claims merely about the same area — the opposite of what a retirement prompt
-      // needs. Omitting the mode meant every embedder-configured deployment silently ran hybrid,
-      // and the fused semantic winner then failed the literal `includes` filter below, so a genuinely
-      // citing note could contribute nothing at all.
-      //
-      // perNote 'all' because this ENUMERATES: the default collapses to the best claim per note, so
-      // a note asserting three claims about the edited file surfaced one and silently withheld two
-      // the same change had falsified.
-      //
-      // Degraded store folds to "nothing at risk": this is an advisory nudge, and failing the step
-      // because the read model is down would be worse than missing a retirement.
-      async claimsCiting(paths) {
-        // ONE bound around the whole walk, not per term: a dead store would otherwise pay the
-        // timeout once per (path × term) and a four-path edit would stall the iteration for minutes
-        const walk = async (): Promise<ClaimHit[]> => {
-          const seen = new Map<string, ClaimHit>()
-          for (const path of paths) {
-            // the basename too: a claim commonly cites `cluster.ts` where the edit names the full
-            // path, and requiring an exact-string match would find neither
-            for (const term of [path, path.split('/').pop() ?? '']) {
-              if (term.length < 3) continue
-              try {
-                for (const hit of await store.searchClaims(term, { scope }, { limit: MEMORY_LIMITS.detailItems, mode: SEARCH_MODE.keyword, perNote: 'all' }))
-                  // keyed by (scope, note, claim), not claimId alone: that id hashes the claim's TEXT,
-                  // so two notes asserting the same sentence share it and one of them vanished here —
-                  // the same silent withholding `perNote: 'all'` above exists to prevent
-                  if (hit.text.includes(term)) seen.set(claimHitKey(hit), hit) // the store ranks; we require the literal
-              } catch { /* degraded: nothing at risk rather than a failed step */ }
-            }
-          }
-          return [...seen.values()].slice(0, MEMORY_LIMITS.detailItems)
-        }
-        try {
-          return await bounded(walk(), `claimsCiting for step '${step.id}'`)
-        } catch (err) {
-          console.warn(errorMessage(err))
-          return []
-        }
-      },
       // Semantic-first, then degrade: full intent (hybrid matches meaning) → distinctive title
       // terms (what keyword-only deployments need) → the single longest term. First non-empty wins.
       // A degraded store must never block the step, so every failure folds to "no notes".
@@ -286,22 +247,6 @@ export function bindStepMemory(opts: {
       },
 
       async capture(signal) {
-        // Knowledge FIRST and unconditionally: outcome evidence is a different concern than the
-        // ambient step note, so the ambientCapture knob must not silence it. Deduped per side —
-        // an agent restating an id is one report, not two — while an id honestly reported on BOTH
-        // sides stays two events (contested is the truthful reading). Contained like the ambient
-        // write below: advisory evidence must never fail the step that volunteered it.
-        const k = signal.knowledge
-        if (k && (k.useful.length > 0 || k.deadEnd.length > 0)) {
-          try {
-            await store.recordOutcomes([
-              ...[...new Set(k.useful)].map(id => ({ id, outcome: MEMORY_USE.useful })),
-              ...[...new Set(k.deadEnd)].map(id => ({ id, outcome: MEMORY_USE.dead_end })),
-            ], author, author.runToken ? { idempotencyKeyBase: `${author.runToken}:knowledge` } : {})
-          } catch (err) {
-            console.warn(`knowledge capture failed for step '${step.id}':`, errorMessage(err))
-          }
-        }
         if (opts.ambientCapture === false || !signal.summary) return
         const spec = AMBIENT[signal.outcome]
         if (spec === null) return // partial: interim state, no durable note (see AMBIENT's comment)
@@ -335,9 +280,7 @@ export type BindStep = (p: Omit<Parameters<typeof bindStepMemory>[0], 'store' | 
 // Degraded mode: the tools still EXIST and every call returns an explicit isError
 // naming the reason, so the model learns context is unavailable instead of silently losing them.
 // recall/capture go quiet rather than erroring — neither is the model's call to make.
-export const unavailableStepMemory = (reason: string): StepMemoryBinding => ({
-  tools: unavailableMemoryTools(reason),
-  // claimsCiting joins the same quiet set: with no read model there is nothing to put at risk, and
-  // an advisory nudge must never be the thing that fails a step.
-  memory: { recall: async () => ({ claims: [], notes: [] }), claimsCiting: async () => [], capture: async () => {} },
+export const unavailableStepMemory = (reason: string, keep?: readonly string[]): StepMemoryBinding => ({
+  tools: kept(unavailableMemoryTools(reason), keep),
+  memory: { recall: async () => ({ claims: [], notes: [] }), capture: async () => {} },
 })

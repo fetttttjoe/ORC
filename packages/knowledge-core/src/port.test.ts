@@ -27,7 +27,7 @@ describe('the knowledge port records evidence', () => {
     expect(events).toEqual([{
       chatId: 'chat-1', door: Door.supervisor, taskId: 't-1', stepId: 's-1', runToken: 'r-1', idempotencyKey: 'key-1',
       kind: EVENT_KIND.knowledge_written,
-      payload: { added: result.added, changed: [], retired: [], why: 'because', decision: 'd-1', author },
+      payload: { added: result.added, changed: [], retired: [], files: result.files, why: 'because', decision: 'd-1', author },
     }])
   })
   it('a card appends knowledge_delivered with the delivered ids, mode and subject; an empty card appends nothing', async () => {

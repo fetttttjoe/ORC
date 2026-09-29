@@ -14,6 +14,7 @@ export const KnowledgeWrittenPayload = z.object({
   added: z.array(KnowledgeRef),
   changed: z.array(KnowledgeRef),
   retired: z.array(KnowledgeRef),
+  files: z.array(z.string()),
   why: z.string().nullable(),
   decision: DecisionSlug.nullable(),
   author: MemoryAuthor,

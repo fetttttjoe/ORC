@@ -580,7 +580,7 @@ describe('Kernel lifecycle', () => {
     const base = {
       parentTaskId: parent.id, stepId: 's1', runToken: `step:${parent.id}:s1:a1`, toolCallId: 'call_1',
       title: 'C', spec: '',
-      // an auto-approved child claiming the finisher role would arm task_notes/record_decision on a
+      // an auto-approved child claiming the finisher role would arm task_claims/record_decision on a
       // step the human never sees — the knowledge-authoring twin of the git_commit bypass above
       plan: { steps: [{ id: FINISH_STEP_ID, role: STEP_ROLE.finisher, title: 'sneak', instructions: 'reconcile it', dependsOn: [], skillRefs: [], toolRefs: [] }] },
       parentStep: { executorRef: 'api-loop', modelRef: 'fake/m', maxIterations: 5 },
@@ -954,7 +954,7 @@ describe('Kernel lifecycle', () => {
     expect(p.analyzed).toBe(true)
     expect(p.gaps).toEqual(['no tests read'])
     expect(p.confidence).toBe(Confidence.none) // default
-    expect(p.notesWritten).toBe(0) // default
+    expect(p.claimsWritten).toBe(0) // default
   })
 
   it('latestCoverage returns the most recent analysis_completed, or null before any', async () => {
@@ -963,9 +963,9 @@ describe('Kernel lifecycle', () => {
     expect(await k.latestCoverage(t.id)).toBeNull()
     const ctx = { taskId: t.id, stepId: 'analyze', runToken: `step:${t.id}:analyze:a1` }
     await k.reportCoverage(ctx, { analyzed: false }, WEB)
-    await k.reportCoverage(ctx, { analyzed: true, scope: ['pkgs'], gaps: ['no tests'], confidence: Confidence.low, notesWritten: 2 }, WEB)
+    await k.reportCoverage(ctx, { analyzed: true, scope: ['pkgs'], gaps: ['no tests'], confidence: Confidence.low, claimsWritten: 2 }, WEB)
     const cov = await k.latestCoverage(t.id)
-    expect(cov).toMatchObject({ analyzed: true, notesWritten: 2, gaps: ['no tests'] }) // the latest, not the first
+    expect(cov).toMatchObject({ analyzed: true, claimsWritten: 2, gaps: ['no tests'] }) // the latest, not the first
   })
 
   it('annotatePlan rejects once the task is done, cancelled, or failed', async () => {
@@ -1126,6 +1126,40 @@ describe('Kernel lifecycle', () => {
 
     // the sibling's own set sees only its write, never the parent/child ones
     expect((await k.listTaskChangedPaths(sibling.id)).map(r => r.path)).toEqual(['src/sibling.ts'])
+  })
+
+  it('listTaskKnowledgeWrites folds the task and its descendants\' knowledge writes in log order, and no sibling\'s', async () => {
+    const { k, log } = await freshKernelAndLog()
+    const parent = await k.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'P', spec: '' }, WEB)
+    await toRunning(log, parent.id, WEB)
+    const child = await k.proposeSplit({
+      parentTaskId: parent.id, stepId: 's1', runToken: `step:${parent.id}:s1:a1`, toolCallId: 'call_1',
+      title: 'C', spec: '',
+      plan: { steps: [{ id: 'w1', role: 'worker', title: 'w', instructions: 'do', dependsOn: [], skillRefs: [], toolRefs: [] }] },
+      parentStep: { executorRef: 'api-loop', modelRef: 'fake/m', maxIterations: 5 },
+      policy: ApprovalPolicy.parse({ default: 'auto' }), maxDepth: 3,
+    }, WEB)
+    const sibling = await k.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'unrelated', spec: '' }, WEB)
+    const written = async (taskId: string, over: { added?: string[]; retired?: string[]; files: string[] }) =>
+      log.append({
+        ...WEB, taskId, stepId: 's1', runToken: null, kind: EVENT_KIND.knowledge_written,
+        payload: {
+          added: (over.added ?? []).map(id => ({ id, location: `knowledge/${id}.md` })), changed: [],
+          retired: (over.retired ?? []).map(id => ({ id, location: `knowledge/${id}.md` })),
+          files: over.files, why: 'w', decision: null, author: authorFixture({ taskId }),
+        },
+      })
+    await written(parent.id, { added: ['aaaaaaaa'], files: ['knowledge/aaaaaaaa.md'] })
+    await written(child.childTaskId, { added: ['bbbbbbbb'], files: ['knowledge/bbbbbbbb.md'] })
+    await written(sibling.id, { added: ['cccccccc'], files: ['knowledge/cccccccc.md'] })
+    await written(child.childTaskId, { retired: ['aaaaaaaa'], files: ['knowledge/aaaaaaaa.md'] })
+
+    expect(await k.listTaskKnowledgeWrites(parent.id)).toEqual({
+      live: [{ id: 'bbbbbbbb', location: 'knowledge/bbbbbbbb.md' }],
+      retired: [{ id: 'aaaaaaaa', location: 'knowledge/aaaaaaaa.md' }],
+      files: ['knowledge/aaaaaaaa.md', 'knowledge/bbbbbbbb.md'],
+    })
+    expect((await k.listTaskKnowledgeWrites(sibling.id)).live.map(r => r.id)).toEqual(['cccccccc'])
   })
 
   it('cancelSubtree stamps a child whose split commits after the snapshot, before the sweep', async () => {

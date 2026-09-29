@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'bun:test'
 import {
-  AUTHOR_SOURCE, Door, EDGE_DIRECTION, LINK_KIND, MEMORY_ACCESS, MEMORY_USE, MemoryScope, NOTE_TIER, SignalOutcome, planScope, slugId,
+  AUTHOR_SOURCE, Door, EDGE_DIRECTION, LINK_KIND, MEMORY_ACCESS, MemoryScope, NOTE_TIER, SignalOutcome, planScope, slugId,
   type ClaimHit, type MemoryAuthor, MemoryNote, type MemoryNoteDraft, type MemoryStore, type NoteSummary,
 } from '@orc/contracts'
 import { bindStepMemory, deriveQueryTerms, preloadQuery } from './step'
@@ -33,7 +33,6 @@ function fakeStore(opts: {
   const writeAuthors: MemoryAuthor[] = []
   const queries: string[] = []
   const claimQueries: string[] = []
-  const outcomes: { entries: ReadonlyArray<{ id: string; outcome: string }>; base?: string }[] = []
   const store: MemoryStore = {
     ...noopMemoryStore(),
     search: async query => { queries.push(query); return opts.search?.(query) ?? [] },
@@ -41,9 +40,8 @@ function fakeStore(opts: {
     recordAccess: async (id, scope, mode) => { accesses.push({ id, scope, mode }) },
     write: async (note, author) => { writes.push(note); writeAuthors.push(author); return MemoryNote.parse({ ...semanticNoteFixture(), ...note }) },
     get: async id => opts.notes?.[id] ?? null,
-    recordOutcomes: async (entries, _author, o) => { outcomes.push({ entries, ...(o?.idempotencyKeyBase && { base: o.idempotencyKeyBase }) }) },
   }
-  return { store, accesses, writes, writeAuthors, queries, claimQueries, outcomes }
+  return { store, accesses, writes, writeAuthors, queries, claimQueries }
 }
 
 const bind = (f: ReturnType<typeof fakeStore>, over: Partial<Parameters<typeof bindStepMemory>[0]> = {}) =>
@@ -117,18 +115,6 @@ describe('recall', () => {
     expect(f.accesses.filter(a => a.mode === MEMORY_ACCESS.preload)).toHaveLength(1)
   })
 
-  it('claimsCiting keeps one row per NOTE asserting a shared statement', async () => {
-    // A claim id hashes the claim's text, so two notes stating the same sentence about the same
-    // file share it. Deduping on that id alone surfaced one note and silently withheld the other —
-    // the retirement nudge then named half the notes the edit had falsified.
-    const same = 'cluster.ts owns the pure algorithm'
-    const shared = (noteId: string): ClaimHit =>
-      claimHitFixture({ claimId: 'dup12', noteId, title: noteId, text: same })
-    const f = fakeStore({ searchClaims: () => [shared('area-memory'), shared('area-cluster')] })
-    const at = await bind(f).memory.claimsCiting(['plugins/memory/src/cluster.ts'])
-    expect(at.map(h => h.noteId).sort()).toEqual(['area-cluster', 'area-memory'])
-  })
-
   it('claims alone are enough — the fallback chain stops without any note hit', async () => {
     const f = fakeStore({
       searchClaims: () => [claimHitFixture({ claimId: 'c1', noteId: 'n', title: 'N' })],
@@ -160,17 +146,6 @@ describe('recall', () => {
     })
     expect(await b.memory.recall(500)).toEqual({ claims: [], notes: [] })
   })
-
-  it('claimsCiting is bounded the same way — a hang folds to nothing-at-risk', async () => {
-    const f = fakeStore()
-    f.store.searchClaims = () => new Promise(() => {})
-    const b = bindStepMemory({
-      store: f.store, author: AUTHOR, taskId: 'task-1',
-      step: { id: 'implement', title: 'Refactor authentication middleware', instructions: 'do the thing', dependsOn: [] },
-      recallTimeoutMs: 50,
-    })
-    expect(await b.memory.claimsCiting(['plugins/memory/src/cluster.ts'])).toEqual([])
-  })
 })
 
 describe('capture', () => {
@@ -185,52 +160,13 @@ describe('capture', () => {
     expect(note?.summary).toHaveLength(500)
   })
 
-  // The signal's knowledge report becomes memory_outcome events through the store — the one seam,
-  // no extra tool calls. Deduped per side (an agent restating an id must not double-count), keyed
-  // on the run so an at-least-once retry cannot either.
-  it('records the signal knowledge as outcome events, deduped and keyed on the run', async () => {
+  // partial is an interim round, not a settled outcome (rounds share a runToken, so the ambient
+  // idempotency key would collide across rounds and an interim summary would swallow the final
+  // one) — the durable note is written only by the terminal signal.
+  it('a partial signal writes no ambient note', async () => {
     const f = fakeStore()
-    await bind(f).memory.capture({
-      outcome: SignalOutcome.success, summary: 'done',
-      knowledge: { useful: ['area-auth', 'area-auth', 'area-net'], deadEnd: ['old-map'] },
-    })
-    expect(f.outcomes).toEqual([{
-      entries: [
-        { id: 'area-auth', outcome: MEMORY_USE.useful },
-        { id: 'area-net', outcome: MEMORY_USE.useful },
-        { id: 'old-map', outcome: MEMORY_USE.dead_end },
-      ],
-      base: 'rt-1:knowledge',
-    }])
-  })
-
-  it('knowledge records survive ambientCapture: false — evidence is a different concern than step notes', async () => {
-    const f = fakeStore()
-    await bind(f, { ambientCapture: false }).memory.capture({
-      outcome: SignalOutcome.success, summary: 'done', knowledge: { useful: ['area-auth'], deadEnd: [] },
-    })
-    expect(f.outcomes).toHaveLength(1)
-    expect(f.writes).toHaveLength(0) // the knob still silences the ambient note itself
-  })
-
-  // A partial round's knowledge is evidence like any other (per-id idempotency keys make a later
-  // round's repeat of the same id a dedupe, not a double-count) — but its ambient note is SKIPPED:
-  // rounds share a runToken, so the ambient idempotency key collides and the interim summary would
-  // swallow the final one. The final signal writes the durable note.
-  it('a partial signal records knowledge but writes no ambient note', async () => {
-    const f = fakeStore()
-    await bind(f).memory.capture({
-      outcome: SignalOutcome.partial, summary: 'healed 14/26 — remaining ids in worklist',
-      knowledge: { useful: ['area-auth'], deadEnd: [] },
-    })
-    expect(f.outcomes).toHaveLength(1)
-    expect(f.writes).toHaveLength(0)
-  })
-
-  it('a signal with no knowledge records nothing — absence costs nothing', async () => {
-    const f = fakeStore()
-    await bind(f).memory.capture({ outcome: SignalOutcome.success, summary: 'done' })
-    expect(f.outcomes).toEqual([])
+    await bind(f).memory.capture({ outcome: SignalOutcome.partial, summary: 'healed 14/26 — remaining ids in worklist' })
+    expect(f.writes).toEqual([])
   })
 
   it('a failure gets its OWN id so a later success cannot overwrite the lesson', async () => {

@@ -63,7 +63,7 @@ export function createMemoryBackend(options: MemoryBackendOptions): KnowledgeBac
       }
       for (const claim of [...added, ...changed]) store.set(claim.id, claim)
       const ref = (c: KnowledgeClaim): KnowledgeRef => ({ id: c.id, location: c.location })
-      return { added: added.map(ref), changed: changed.map(ref), retired, warnings }
+      return { added: added.map(ref), changed: changed.map(ref), retired, warnings, files: [] }
     },
     async check() { return [] },
     async format() { return { formatted: [], problems: [] } },

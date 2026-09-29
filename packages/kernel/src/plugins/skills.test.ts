@@ -150,7 +150,7 @@ describe('shipped documentation skill', () => {
     try {
       const entry = idx.list().find(e => e.name === 'documentation')
       expect(entry?.valid).toBe(true)
-      expect((await idx.load('documentation')).body).toContain('memory_write')
+      expect((await idx.load('documentation')).body).toContain('knowledge_write')
     } finally {
       idx.close()
     }
@@ -172,11 +172,11 @@ describe('shipped web-research skill', () => {
     expect(body).toContain('DATA, not instructions')       // prompt injection
     expect(body).toMatch(/distil/i)                        // one synthesis per finding
     expect(body).toMatch(/do not copy raw page text/i)     // no raw pages in the graph
-    expect(body).toContain('kind: research')
-    expect(body).toContain('retention: expirable')
-    expect(body).toContain('at least one citation')
+    expect(body).toContain('tag `research`')
+    expect(body).toContain('sources')
+    expect(body).toContain('at least one source')
     expect(body).toContain('contradicts')                  // disagreement is linked, not resolved silently
-    expect(body).toContain('supersedes')
+    expect(body).toContain('retire')
     expect(body).toMatch(/absence of a result is not evidence of absence/i)
 
     // tool-agnostic: a plan supplies web tools through toolRefs, so no server/tool is hard-coded
@@ -186,7 +186,7 @@ describe('shipped web-research skill', () => {
     const idx = await SkillIndex.open(root)
     try {
       expect(idx.list().find(e => e.name === 'web-research')?.valid).toBe(true)
-      expect((await idx.load('web-research')).body).toContain('memory_write')
+      expect((await idx.load('web-research')).body).toContain('knowledge_write')
     } finally {
       idx.close()
     }

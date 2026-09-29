@@ -4,7 +4,7 @@ import { AUTHOR_SOURCE, type Claim, ClaimClass, claimId, CLAIM_ID_RE, DecisionSt
 import { TEST_WORKSPACE_ID, authorFixture, episodicNoteFixture, semanticNoteFixture, must } from '@orc/contracts/fixtures'
 import { approxTokens } from './budget'
 import { claimHitFixture, noopMemoryStore, summaryFixture } from './test-helpers'
-import { MEMORY_READ_TOOLS, memoryTools, memoryRoleFor, memoryVerifyTool, noteLint } from './tools'
+import { MEMORY_READ_TOOLS, memoryTools, memoryRoleFor, memoryToolsForStep, memoryVerifyTool, noteLint } from './tools'
 import type { ClaimHit } from './claim-search'
 import type { BlobsAt, DriftSources } from './claim-drift-read'
 import type { ChangedSince } from './drift'
@@ -1659,5 +1659,14 @@ describe('memory_verify', () => {
     const tool = must(memoryVerifyTool({ store: f.store, author: CLI, p })[0], 'memory_verify tool')
     expect((await tool.execute({ id: '../etc/passwd' }, 'call-3')).isError).toBe(true)
     expect(f.verified).toHaveLength(0)
+  })
+})
+
+describe('memoryToolsForStep', () => {
+  it('the plan step keeps write, search and read; the finish step search and read; every other step none', () => {
+    expect(memoryToolsForStep({ stepId: STEP_ID.plan, role: STEP_ROLE.auditor })).toEqual([MEMORY_TOOL_NAME.write, MEMORY_TOOL_NAME.search, MEMORY_TOOL_NAME.read])
+    expect(memoryToolsForStep({ stepId: STEP_ID.finish, role: STEP_ROLE.finisher })).toEqual([MEMORY_TOOL_NAME.search, MEMORY_TOOL_NAME.read])
+    expect(memoryToolsForStep({ stepId: STEP_ID.verify, role: STEP_ROLE.auditor })).toEqual([])
+    expect(memoryToolsForStep({ stepId: 's1', role: STEP_ROLE.worker })).toEqual([])
   })
 })

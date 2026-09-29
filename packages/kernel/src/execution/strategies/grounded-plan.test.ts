@@ -398,7 +398,7 @@ describe('withFinishStep', () => {
     const finish = draft.steps.find(s => s.id === FINISH_STEP_ID)
     expect(finish).toEqual({
       id: FINISH_STEP_ID, role: STEP_ROLE.finisher, title: 'Finish',
-      instructions: "Reconcile this task's notes, record its decision if it made one, and present the summary; the 'role-finisher' skill is your contract.",
+      instructions: "Reconcile the claims this task recorded, record its decision if it made one, and present the summary; the 'role-finisher' skill is your contract.",
       dependsOn: ['db', 'verify'], skillRefs: [ROLE_SKILL.finisher], toolRefs: [], zone: [], readOnlySource: true,
     })
     // the commit stamp must see reconciled notes, so it waits on the finish step too

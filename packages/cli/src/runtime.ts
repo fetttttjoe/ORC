@@ -1,11 +1,13 @@
-import { AUTHOR_SOURCE, AutoHealMode, CHECKS_EXECUTOR_REF, Door, errorMessage, HookName, NO_CHAT, NOTE_TIER, ROLE_SKILL, TERMINAL_TASK_STATUS, type AgentExecutor, type Analyzer, type MemoryAuthor, type TreeStamps } from '@orc/contracts'
+import { AUTHOR_SOURCE, AutoHealMode, CHECKS_EXECUTOR_REF, Door, errorMessage, HookName, KNOWLEDGE_REFUSAL, NO_CHAT, NOTE_TIER, ROLE_SKILL, TERMINAL_TASK_STATUS, type AgentExecutor, type Analyzer, type MemoryAuthor, type TreeStamps } from '@orc/contracts'
 import { apiLoopExecutor } from '@orc/executor-api-loop'
 import { configuredProviders } from './providers'
 import { agentAnalyzer } from '@orc/analyzer-agent'
 import { createMcpHub, type McpHub } from '@orc/mcp-client'
-import { readCorpusDrift, checkoutDrift, CONSOLIDATE_EXECUTOR, createMemory, createMemoryLifecycle, createGroundingSource, decisionDoor, finishTools, memoryVerifyTool, notesCiting, restampToHead, treeStamps, unavailableStepMemory, memoryRoleFor, type BindStep, type MemoryLifecycle } from '@orc/memory'
+import { readCorpusDrift, checkoutDrift, CONSOLIDATE_EXECUTOR, createMemory, createMemoryLifecycle, decisionDoor, finishTools, notesCiting, restampToHead, treeStamps, unavailableStepMemory, memoryRoleFor, memoryToolsForStep, type BindStep, type MemoryLifecycle } from '@orc/memory'
 import { AUTO_HEAL_DEBOUNCE_MS, AUTO_SWEEP_TITLE, createAutoHeal, sweepPlanDraft } from './auto-heal'
 import { openMemory } from './memory-open'
+import { knowledgeAccess, openKnowledge } from './knowledge-open'
+import { bindStepKnowledge } from '@orc/knowledge-core'
 import { buildDistiller } from './consolidation-distiller'
 import { cwdAuthor, cwdWorkspaceId } from './cwd-workspace'
 import { createVaultProjector } from '@orc/vault-projector'
@@ -107,6 +109,8 @@ export async function buildRuntime(
   // first thing after the host exists, so the notice lands before the boot line rather than after
   // a minute of projection catch-up — see warnMissingRoleSkills
   warnMissingRoleSkills(host.skills.list().map(s => s.name), config.skillsDir, m => console.warn(m))
+  const knowledgeOpening = openKnowledge(config)
+  if ('unavailable' in knowledgeOpening && config.knowledge !== null) console.warn(KNOWLEDGE_REFUSAL.unavailable(knowledgeOpening.unavailable))
 
   // reuse the caller's storage (bin passes the kernel's) — one pool, one lifecycle. When the
   // caller already timed that open (bin.ts's openKernel path), seed the phases list with it so
@@ -131,12 +135,6 @@ export async function buildRuntime(
   let memory: Awaited<ReturnType<typeof createMemory>> | null = null
   let lifecycle: MemoryLifecycle | null = null
   let bindStep: BindStep
-  // Read-only probe behind the grounded analyze step's freshness short-circuit (kernel
-  // strategies/grounding-freshness.ts). Built only on the memory-healthy path, from the same
-  // store + config.dir already in hand here — a runtime with no memory has no grounding notes
-  // to reuse, so it stays undefined and the port's branch (guarded on its presence) never fires:
-  // exactly today's behavior.
-  let groundingSource: ReturnType<typeof createGroundingSource> | undefined
   try {
     // The projector LEASE: one live projector per project. Every buildRuntime caller (serve, the
     // graph server, mcp serve) used to run the full standing machinery; three of them against one
@@ -169,11 +167,10 @@ export async function buildRuntime(
     })
     await lifecycle.start()
     bindStep = memory.bindStep
-    groundingSource = createGroundingSource({ store: memory.store, dir: config.dir })
   } catch (err) {
     const reason = errorMessage(err)
     console.warn(`memory unavailable; continuing in degraded mode: ${reason}`)
-    bindStep = () => unavailableStepMemory(reason)
+    bindStep = p => unavailableStepMemory(reason, p.keep)
   }
 
   // The auto-heal reactor (knowledge provenance plan T2): the router relays commit_recorded here;
@@ -226,7 +223,7 @@ export async function buildRuntime(
     storage, config, executorId: shared?.executorId,
     providers: host.providers, executors: host.executors,
     ...(autoHeal && { onCommitRecorded: async () => { autoHeal.onCommitRecorded() } }),
-    skills: host.skills, tools: hub, groundingSource,
+    skills: host.skills, tools: hub,
     stepTools: p => {
       // workspaceId comes off `p`, i.e. off the running TASK — NOT from cwdAuthor like every other
       // door here. One supervisor serves every workspace at once, so the process cwd says nothing
@@ -235,24 +232,25 @@ export async function buildRuntime(
       // p.origin is the RUNNING STEP's own origin (its run chat), never this process's: the note a
       // step writes belongs to the conversation that step is.
       const author: MemoryAuthor = { source: AUTHOR_SOURCE.agent, origin: p.origin, workspaceId: p.workspaceId, taskId: p.taskId, stepId: p.stepId, runToken: p.runToken, executor: p.executor, model: p.model, role: p.role }
-      // step role keys the memory role: scout/auditor narrow or widen the tool surface
-      // + epistemic posture; every other role (e.g. plain worker steps) gets today's verify role.
+      // step role sets the memory role's epistemic posture; keep: memoryToolsForStep(p) decides the tool surface.
       const bound = bindStep({
         author,
         step: p.step, taskId: p.taskId, ancestorTaskIds: p.ancestorTaskIds,
-        role: memoryRoleFor(p.role), ambientCapture: config.ambientCapture,
+        role: memoryRoleFor(p.role), ambientCapture: config.ambientCapture, keep: memoryToolsForStep(p),
+      })
+      const stepKnowledge = bindStepKnowledge({
+        access: knowledgeAccess(knowledgeOpening, log, p.workspaceDir), author, p,
+        writesOf: () => kernel.listTaskKnowledgeWrites(p.taskId),
       })
       const memoryStore = memory?.store
-      // The citing-notes join both audit-side tools ride: candidates for the auditor's
-      // heal-or-confirm pass (scoped_changes) and leftovers for the receipt's stillDrifted line
-      // (git_commit). Injected here because the kernel may not import plugins/memory — the same
-      // seam as the restamp write below. Absent when memory is degraded; the tools say so loudly.
-      const knowledge = memory?.knowledge
-      const citing = knowledge
-        ? (paths: string[]) => notesCiting(knowledge, paths)
+      // The citing-notes join git_commit rides for its stillDrifted line — injected here because the kernel may not import plugins/memory.
+      const noteIndex = memory?.knowledge
+      const citing = noteIndex
+        ? (paths: string[]) => notesCiting(noteIndex, paths)
         : undefined
-      return { memory: bound.memory, tools: [
+      return { memory: bound.memory, knowledge: stepKnowledge.knowledge, tools: [
       ...bound.tools,
+      ...stepKnowledge.tools,
       // registration-gated inside the factory (like report_coverage): a scout orients, the plan
       // step decomposes — a scout that splits builds a second, unapproved decomposition.
       ...splitTool({ kernel, config: { approvalPolicy: config.approvalPolicy, maxDepth: config.maxDepth }, p }),
@@ -268,19 +266,13 @@ export async function buildRuntime(
       // Registration-gated inside the factory to the auditor VERIFY step (role alone would also hand
       // it to the grounded `plan` step, which shares that role). Read-only, and a FLOOR — never a
       // substitute for the test/typecheck gate, never a reason to dismiss an in-scope defect.
-      ...scopedChangesTool({ kernel, p, ...(citing ? { citing } : {}) }),
-      // memory_verify is scoped_changes' write-side counterpart on the same step: that tool hands the
-      // auditor its heal-or-confirm candidates, this one is how it records a CONFIRM. Gated inside
-      // the factory on the identical predicate (auditor role AND the verify step), and only offered
-      // when memory is healthy — with no store there is nothing to append to, and a tool that can
-      // only ever error is one the model calls anyway, an iteration per attempt.
-      ...(memoryStore ? memoryVerifyTool({ store: memoryStore, author, p }) : []),
-      // The finish step's pair: what THIS task wrote, and the one write it may make after
-      // the human approved the wording. Gated inside the factory on stepMayReconcile — both terms,
-      // so only the kernel-appended finish step arms them. `door` is null when memory is degraded so
-      // record_decision answers "unavailable" rather than vanishing: a tool that disappears reads to
-      // the model as "no decision to record". task_notes reads the LOG, which is up either way.
-      ...finishTools({ log, door: memory ? decisionDoor(memory) : null, author, p }),
+      ...scopedChangesTool({ kernel, p, ...(stepKnowledge.citing && { claimsAt: stepKnowledge.citing }) }),
+      // The finish step's tool: the one write it may make after the human approved the wording.
+      // Gated inside the factory on stepMayReconcile — both terms, so only the kernel-appended
+      // finish step arms it. `door` is null when memory is degraded so record_decision answers
+      // "unavailable" rather than vanishing: a tool that disappears reads to the model as "no
+      // decision to record".
+      ...finishTools({ door: memory ? decisionDoor(memory) : null, author, p }),
       // The commit step's tool pair (autoCommit pipeline): preview the task's floor diff, commit,
       // advance the note stamps this task earned at the new HEAD. Registration is gated TWICE — on
       // config.autoCommit here (the operator's runtime switch, so a stale frozen plan cannot commit

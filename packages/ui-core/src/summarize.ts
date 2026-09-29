@@ -132,7 +132,7 @@ const SUMMARIZE = {
     line: `on ${p.targetNote} (v${p.planVersion}): ${snip(p.text, 100)}`,
   })),
   [EVENT_KIND.analysis_completed]: entry(PAYLOAD_SCHEMAS.analysis_completed, p => ({
-    line: `analyzed=${p.analyzed} confidence=${p.confidence} gaps=${p.gaps.length} notes=${p.notesWritten}`,
+    line: `analyzed=${p.analyzed} confidence=${p.confidence} gaps=${p.gaps.length} claims=${p.claimsWritten}`,
   })),
   [EVENT_KIND.artifact_produced]: entry(PAYLOAD_SCHEMAS.artifact_produced, p => ({
     line: `${p.path} · ${(p.size / 1024).toFixed(1)} KB · sha ${p.sha256.slice(0, 8)}`,

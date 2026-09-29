@@ -20,6 +20,8 @@ import { ApprovedBy, Door, errorMessage, NO_CHAT, toolError, type MemoryAuthor, 
 import type { EventLog, ProjectConfig } from '@orc/kernel'
 import { MEMORY_READ_TOOLS, MEMORY_ROLE, checkoutDrift, createMemory, createWorkspaceView, memoryTools as buildMemoryTools, probeMemory, unavailableMemoryTools } from '@orc/memory'
 import { openMemory } from './memory-open'
+import { knowledgeAccess, openKnowledge } from './knowledge-open'
+import { KNOWLEDGE_READ_TOOLS, knowledgeTools } from '@orc/knowledge-core'
 import { asResolvedTools, buildCopilotTools, createProjectSessions, type OrcActions } from '@orc/ui-core'
 
 export type Autonomy = 'gated' | 'full'
@@ -72,6 +74,7 @@ export function buildServeTools(deps: {
   sessions: Parameters<typeof buildCopilotTools>[0]['sessions']
   projectId: string
   memoryTools: ResolvedTool[]
+  knowledgeTools: ResolvedTool[]
   actions: OrcActions | null
   autonomy: Autonomy
   health?: Parameters<typeof buildCopilotTools>[0]['health']
@@ -91,6 +94,7 @@ export function buildServeTools(deps: {
       ...(deps.listWorkspaces && { listWorkspaces: deps.listWorkspaces }),
     })),
     ...deps.memoryTools.filter(t => READ_MEMORY.has(t.name)),
+    ...deps.knowledgeTools,
     ...(deps.actions ? [mcpApproveTool(deps.actions, deps.autonomy)] : []),
   ]
 }
@@ -163,6 +167,7 @@ export async function startMcpServe(opts: {
   // project must be able to see "the read model is rebuilding" without opening the databases
   const tools = buildServeTools({
     sessions, projectId: config.projectId, memoryTools, actions, autonomy,
+    knowledgeTools: knowledgeTools(knowledgeAccess(openKnowledge(config), log, config.dir), memoryAuthor, KNOWLEDGE_READ_TOOLS),
     ...(listWorkspaces && { listWorkspaces }),
     health: async () => ({
       memory: await probeMemory(config, log),

@@ -3,7 +3,7 @@ import { mkdtempSync, realpathSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import {
-  APPROVAL_ANSWER, AUTHOR_SOURCE, DECISION_STATUS, Door, EVENT_KIND, FINISH_STEP_ID, isApprovalAnswer, NO_CHAT,
+  APPROVAL_ANSWER, AUTHOR_SOURCE, DECISION_STATUS, Door, EVENT_KIND, FINISH_STEP_ID, isApprovalAnswer, KnowledgeToolName, NO_CHAT,
   MemoryWrittenPayload, NOTE_KIND, NOTE_TIER, parseModelRef, SignalOutcome, slugId, STEP_ROLE, TASK_STATUS,
   type AgentExecutor, type EventDraft, type ExecutorContext, type SplitResult, type UnifiedEvent,
   RunOutcome,
@@ -40,17 +40,17 @@ const LAST_STEP = stepFixture({ id: 's1' })
 
 // What the finish step observed, asserted in the TEST body rather than thrown from inside the
 // generator: a throw inside a DBOS step workflow surfaces as a retried/failed run, which reports
-// "the task did not complete" instead of "task_notes errored" — the actual finding.
+// "the task did not complete" instead of "task_claims errored" — the actual finding.
 const finishProbe: {
   toolNames: string[]
-  taskNotes?: { output: unknown; isError: boolean }
+  taskClaims?: { output: unknown; isError: boolean }
   decision?: { output: unknown; isError: boolean }
   answer?: string
 } = { toolNames: [] }
 
 // ONE executor under the id every step of this plan names ('api-loop', stepFixture's default, which
 // the kernel-appended finish step inherits from the draft's last step), branching on the step id:
-// s1 just succeeds, the finish step drives the real sequence — read the task's notes, ask the human,
+// s1 just succeeds, the finish step drives the real sequence — read the task's claims, ask the human,
 // record the decision the human approved, then signal.
 const finishExecutor: AgentExecutor<unknown> = {
   id: 'api-loop',
@@ -58,8 +58,8 @@ const finishExecutor: AgentExecutor<unknown> = {
     let summary = 'ran'
     if (ctx.step.id === FINISH_STEP_ID) {
       finishProbe.toolNames = ctx.extraTools.map(t => t.name)
-      const taskNotes = ctx.extraTools.find(t => t.name === FINISH_TOOL_NAME.taskNotes)
-      if (taskNotes !== undefined) finishProbe.taskNotes = await taskNotes.execute({}, undefined)
+      const taskClaims = ctx.extraTools.find(t => t.name === KnowledgeToolName.taskClaims)
+      if (taskClaims !== undefined) finishProbe.taskClaims = await taskClaims.execute({}, undefined)
       const answer = String(yield { type: 'feedback', question: FINISH_QUESTION, topic: FINISH_TOPIC, toolCallId: 'c1' })
       finishProbe.answer = answer
       // The decision is recorded ONLY on the human's approval word — the ADR is written `accepted`
@@ -128,18 +128,18 @@ describe('the finish step, end to end', () => {
       expect(await handle.wait()).toBe(RunOutcome.done)
 
       // the step saw the human's word (so isApprovalAnswer had something real to judge) and got a
-      // working task_notes — both are the tools/resume seam this test exists for
+      // working task_claims — both are the tools/resume seam this test exists for
       expect(finishProbe.answer).toBe(APPROVAL_ANSWER)
       expect(isApprovalAnswer(finishProbe.answer ?? '')).toBe(true)
       // Both tools REACHED the step, asserted before their results so a gate that withheld one
       // fails as "the tool never arrived" instead of as an undefined result. The exact set of the
       // finish step's surface is runtime.test.ts's assertion; this is the composition's own check.
-      expect(finishProbe.toolNames).toContain(FINISH_TOOL_NAME.taskNotes)
+      expect(finishProbe.toolNames).toContain(KnowledgeToolName.taskClaims)
       expect(finishProbe.toolNames).toContain(FINISH_TOOL_NAME.recordDecision)
-      // `{ notes: [] }` — the wrapper key is the contract; empty is honest for this fixture, whose
-      // scripted steps write no notes and whose consolidation note is authored AFTER the task
-      // settles. A bare array (or a thrown listing) would show up here as a shape change.
-      expect(finishProbe.taskNotes).toEqual({ output: { notes: [] }, isError: false })
+      // empty is honest for this fixture, whose scripted steps write no claims and whose
+      // consolidation note is authored AFTER the task settles. A bare array (or a thrown listing)
+      // would show up here as a shape change.
+      expect(finishProbe.taskClaims).toEqual({ output: { claims: [], retired: [], missing: [] }, isError: false })
       // the id the tool reports is the slugged title — the same id the logged note carries below
       expect(finishProbe.decision).toEqual({ output: { id: slugId(DECISION_DRAFT.title), status: DECISION_STATUS.accepted }, isError: false })
 

@@ -121,5 +121,10 @@ export function describeKnowledgeBackend(name: string, make: () => Promise<Contr
       expect(await f.backend.check(f.checkout)).toEqual([])
       expect((await f.backend.format(f.checkout)).problems).toEqual([])
     })
+
+    it('the files a write reports are checkout-relative', async () => {
+      const result = await f.backend.write(f.checkout, patch({ add: [fact('where', 'src/a.ts')] }))
+      expect(result.files.filter(file => file.startsWith('/') || file.split('/').includes('..'))).toEqual([])
+    })
   })
 }

@@ -78,7 +78,7 @@ describe('summarizeEvent', () => {
     }))
     const written = summarizeEvent(eventFixture({
       kind: EVENT_KIND.knowledge_written, taskId: null,
-      payload: { added: [{ id: 'abcd1234', location: 'knowledge/src/a.ts.md' }], changed: [], retired: [], why: 'because', decision: null, author },
+      payload: { added: [{ id: 'abcd1234', location: 'knowledge/src/a.ts.md' }], changed: [], retired: [], files: ['knowledge/src/a.ts.md'], why: 'because', decision: null, author },
     }))
     expect([delivered.line, written.line]).toEqual(['card 1 claim(s) · src/a.ts', '+1 ~0 -0 · because'])
     expect([delivered.authorTaskId, written.authorTaskId]).toEqual(['task-K', 'task-K'])
@@ -177,7 +177,7 @@ describe('summarizeEvent', () => {
   it('split_resolved names the child, its outcome and the join summary', () => {
     const row = summarizeEvent(eventFixture({
       kind: EVENT_KIND.split_resolved,
-      payload: { splitId: 'sp1', childTaskId: 't1.s1.c1', outcome: 'done', summary: 'fixed the bug', notes: [{ id: 'n1', scope: 'plan-x' }] },
+      payload: { splitId: 'sp1', childTaskId: 't1.s1.c1', outcome: 'done', summary: 'fixed the bug', claims: [{ id: 'aaaaaaaa', location: 'knowledge/a.md' }] },
     }))
     expect(row.line).toBe('t1.s1.c1 → done: fixed the bug')
   })
@@ -217,9 +217,9 @@ describe('summarizeEvent', () => {
   it('analysis_completed reports coverage, confidence and gaps', () => {
     const row = summarizeEvent(eventFixture({
       kind: EVENT_KIND.analysis_completed,
-      payload: { analyzed: true, scope: ['src/'], gaps: ['edge case'], confidence: Confidence.medium, notesWritten: 2 },
+      payload: { analyzed: true, scope: ['src/'], gaps: ['edge case'], confidence: Confidence.medium, claimsWritten: 2 },
     }))
-    expect(row.line).toBe('analyzed=true confidence=medium gaps=1 notes=2')
+    expect(row.line).toBe('analyzed=true confidence=medium gaps=1 claims=2')
   })
 
   it('models_discovered names the provider and how many models it now offers', () => {

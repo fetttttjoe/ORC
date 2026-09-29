@@ -10,14 +10,14 @@ export enum Confidence {
   none = 'none',
 }
 
-// analyzed+gaps are load-bearing (RG7 degradation, RG3 uncertainty). scope/confidence/notesWritten
+// analyzed+gaps are load-bearing (RG7 degradation, RG3 uncertainty). scope/confidence/claimsWritten
 // are reserved forward-looking (cbm epistemics ideas #2/#7 + future hot-paths/churn telemetry).
 export const CoverageReport = z.object({
   analyzed: z.boolean(),
   scope: z.array(z.string()).default([]),
   gaps: z.array(z.string()).default([]),
   confidence: z.enum(Confidence).default(Confidence.none),
-  notesWritten: z.number().int().nonnegative().default(0),
+  claimsWritten: z.number().int().nonnegative().default(0),
 })
 export type CoverageReport = z.infer<typeof CoverageReport>
 export const AnalysisCompletedPayload = CoverageReport

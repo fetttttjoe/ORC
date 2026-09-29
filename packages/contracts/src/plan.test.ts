@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test'
-import { ChildPlanStep, Plan, PlanStep, ROLE_SKILL, STEP_ROLE, planScope, stepMayReconcile, stepMayVerify, validatePlan } from './plan'
+import { ChildPlanStep, Plan, PlanStep, ROLE_SKILL, STEP_ROLE, planScope, stepMayPlan, stepMayReconcile, stepMayVerify, validatePlan } from './plan'
 import { FINISH_STEP_ID, STEP_ID } from './step-ids'
 import { MEMORY_ID_RE } from './ids'
 import { MemoryNoteInput } from './memory'
@@ -183,6 +183,11 @@ describe('the finish step predicate', () => {
     expect(stepMayReconcile({ stepId: 'wrap-up', role: STEP_ROLE.finisher })).toBe(false)     // role claimed elsewhere
     // the two predicates never overlap: an auditor verify step is not a finish step and vice versa
     expect(stepMayVerify({ stepId: FINISH_STEP_ID, role: STEP_ROLE.finisher })).toBe(false)
+  })
+  it('stepMayPlan: the plan step run as auditor, and nothing else', () => {
+    expect(stepMayPlan({ stepId: STEP_ID.plan, role: STEP_ROLE.auditor })).toBe(true)
+    expect(stepMayPlan({ stepId: STEP_ID.plan, role: STEP_ROLE.worker })).toBe(false)
+    expect(stepMayPlan({ stepId: STEP_ID.verify, role: STEP_ROLE.auditor })).toBe(false)
   })
   it('names the skill the freeze appends', () => {
     expect(ROLE_SKILL.finisher).toBe('role-finisher')

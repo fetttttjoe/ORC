@@ -88,8 +88,8 @@ function groundedFake(): AgentExecutor<unknown> {
         // This scripted executor checkpoints the equivalent event directly; persisted plan-note
         // uncertainty below remains the end-to-end proof that degraded analysis affects planning.
         const report: CoverageReport = analyzed
-          ? { analyzed: true, scope: ['project'], gaps: ['auth flow not exercised'], confidence: Confidence.medium, notesWritten: 1 }
-          : { analyzed: false, scope: [], gaps: [], confidence: Confidence.none, notesWritten: 0 }
+          ? { analyzed: true, scope: ['project'], gaps: ['auth flow not exercised'], confidence: Confidence.medium, claimsWritten: 1 }
+          : { analyzed: false, scope: [], gaps: [], confidence: Confidence.none, claimsWritten: 0 }
         await ctx.checkpoint('analysis-completed', async () => report, (): EventDraft[] => [
           { kind: EVENT_KIND.analysis_completed, payload: report },
         ])
@@ -361,7 +361,7 @@ describe('grounded-plan e2e: the full consent → analyze → plan-graph → ann
       const report = PAYLOAD_SCHEMAS.analysis_completed.parse(must(ac, 'analysis completed event').payload)
       expect(report.analyzed).toBe(false)
       expect(report.gaps).toEqual([])
-      expect(report.notesWritten).toBe(0)
+      expect(report.claimsWritten).toBe(0)
 
       // drive the plan to done (no annotations → approve on the first ask_human)
       expect(await waitFor(() => feedbackCount('plan:1').then(n => n >= 1))).toBe(true)

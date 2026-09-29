@@ -107,7 +107,7 @@ describe('mixedGroundingDraft', () => {
     expect(draft.idempotencyKey).toBe('step:t1:analyze:a1:grounding:mixed:analysis_completed')
     const payload = PAYLOAD_SCHEMAS.analysis_completed.parse(draft.payload)
     expect(payload.analyzed).toBe(true)
-    expect(payload.notesWritten).toBe(0)
+    expect(payload.claimsWritten).toBe(0)
     expect(payload.confidence).toBe(Confidence.medium)
     expect(payload.scope.join(' | ')).toContain(`arch-overview@${HEAD} current at HEAD ${HEAD}`)
     expect(payload.gaps[0]).toContain('incremental re-scan: only 2 path(s) in scope')

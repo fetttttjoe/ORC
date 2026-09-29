@@ -64,5 +64,5 @@ export function applyPlan(s: CheckoutSnapshot, p: Planned, root: string, dirName
     writeAtomic(file, renderBucket(s, dirName, location, claims))
     if (claims.length > KNOWLEDGE_LIMITS.bucketWarnClaims) warnings.push(KNOWLEDGE_PROBLEM.crowded(location, claims.length))
   }
-  return { added: p.added.map(ref), changed: p.changed.map(c => ref(c.after)), retired: p.retired.map(ref), warnings }
+  return { added: p.added.map(ref), changed: p.changed.map(c => ref(c.after)), retired: p.retired.map(ref), warnings, files: [...p.affected] }
 }

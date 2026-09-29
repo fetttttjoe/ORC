@@ -1,5 +1,5 @@
-import type { PlanStep, ResolvedTool } from '@orc/contracts'
-import { pathInZone, stepMayReconcile, stepMayVerify, toolError } from '@orc/contracts'
+import type { KnowledgeClaim, PlanStep, ResolvedTool } from '@orc/contracts'
+import { errorMessage, KNOWLEDGE_DEFAULTS, KnowledgeToolName, pathInZone, stepMayReconcile, stepMayVerify, toolError } from '@orc/contracts'
 import type { Kernel } from '../kernel'
 
 // scoped_changes: the paths THIS task's own steps recorded writing, derived purely from the event
@@ -31,16 +31,7 @@ const DESCRIPTION =
   + '(formatters, codegen, build steps), so it is a floor, not a complete diff: a file you changed can be missing '
   + 'from it. It reports paths, never verdicts. It NEVER licenses skipping the test/typecheck gate and NEVER '
   + 'excuses a defect in a file that is in scope. An empty list is not evidence of success. '
-  + 'citingNotes lists every memory note citing a path this task changed — your heal-or-confirm candidates; '
-  + 'drift flags lag uncommitted work and are NOT the candidate list. degraded lists why citingNotes came back '
-  + 'null (memory unavailable) and is present ONLY when that measurement could not be made.'
-
-// The citing-notes join, injected by the composition root (runtime.ts) because the kernel may not
-// import plugins/memory — same seam shape as commit-tool's StampNote. Powers the auditor's
-// heal-or-confirm candidate list: drift flags are measured against COMMITTED revisions, so at
-// verify time (pre-commit) they lag the very work being audited — observed twice as 4/7
-// post-commit drift before this existed.
-export type CitingNotes = (paths: string[]) => Promise<Array<{ id: string; scope: string; title: string; sourceRevision: string | null }>>
+  + `citingClaims lists up to ${KNOWLEDGE_DEFAULTS.pageItems} recorded claims anchored at a path this task changed — your heal candidates: retire or change, with ${KnowledgeToolName.write}, each one the change made false. degraded lists why citingClaims came back null and is present ONLY when that measurement could not be made.`
 
 // The model-facing name, spelled ONCE. It is an exact-set member in two suites that must agree with
 // this definition (scoped-changes-tool.test.ts and cli/runtime.test.ts's finish-step surface), and
@@ -84,16 +75,16 @@ function zonesFor(steps: PlanStep[], ownTaskId: string, row: { taskId: string; s
 
 export function scopedChangesTool(opts: {
   kernel: Pick<Kernel, 'listTaskChangedPaths' | 'getPlan'>
-  citing?: CitingNotes
+  claimsAt?: (paths: string[]) => Promise<KnowledgeClaim[]>
   p: { taskId: string; stepId: string; role: string }
 }): ResolvedTool[] {
-  const { kernel, citing, p } = opts
+  const { kernel, claimsAt, p } = opts
   // Registration gate, not an execute-time rejection: a visible tool that can only ever error gets
   // called anyway and burns an iteration per attempt (report_coverage learned this live).
   // TWO floors, each spelled once in contracts and shared with the tool that pairs with it:
-  //  • stepMayVerify — the auditor's verify step, paired with memory_verify. What it audits.
-  //  • stepMayReconcile — the kernel-appended finish step, paired with task_notes. The finish step
-  //    reconciles this task's notes against what the task actually changed, and the changed paths
+  //  • stepMayVerify — the auditor's verify step. What it audits.
+  //  • stepMayReconcile — the kernel-appended finish step, paired with task_claims. The finish step
+  //    reconciles this task's claims against what the task actually changed, and the changed paths
   //    are that second half; without them it would have to diff the shared worktree, which is the
   //    very false positive this tool exists to remove.
   // Both are both-terms predicates, so a planner-authored step named 'verify' or 'finish' still
@@ -122,12 +113,16 @@ export function scopedChangesTool(opts: {
           }))
         // deduped: multiple steps writing one file is one candidate lookup, not several
         const uniquePaths = [...new Set(changed.map(r => r.path))]
-        const citingNotes = citing ? await citing(uniquePaths) : null
         // The `degraded` convention (shared with commit-tool.ts): an absent measurement is `null`
-        // in its own field (citingNotes above) PLUS a reason in `degraded`, omitted when nothing
+        // in its own field (citingClaims below) PLUS a reason in `degraded`, omitted when nothing
         // is degraded. Use a separate field (not floor) because floor should only have exec-writes
         // caveats, so a consumer can read `floor` without missing absence notes riding along.
-        return { output: { paths, citingNotes, floor: FLOOR_NOTE, ...(citing ? {} : { degraded: [CITING_DEGRADED] }) }, isError: false }
+        const cited = claimsAt === undefined
+          ? { citingClaims: null, degraded: [CITING_DEGRADED] }
+          : await claimsAt(uniquePaths).then(
+            claims => ({ citingClaims: claims, degraded: [] }),
+            (err: unknown) => ({ citingClaims: null, degraded: [CITING_FAILED(errorMessage(err))] }))
+        return { output: { paths, citingClaims: cited.citingClaims, floor: FLOOR_NOTE, ...(cited.degraded.length > 0 && { degraded: cited.degraded }) }, isError: false }
       } catch (e) {
         return toolError(e)
       }
@@ -141,7 +136,8 @@ const FLOOR_NOTE =
   'Floor, not a diff: exec-driven writes (formatters, codegen) are not captured, so a changed file can be missing. '
   + 'Scope membership only — never a reason to skip bun test / bun run typecheck, and never a reason to dismiss a defect.'
 
-// The `degraded` reason when the citing-notes join is absent. FLOOR_NOTE describes a real property
-// of the measurement itself (exec writes are never captured) and stays as-is regardless of memory
-// state; this describes an ABSENCE, so it belongs only in `degraded`, never merged into FLOOR_NOTE.
-const CITING_DEGRADED = 'citingNotes unavailable (memory degraded) — name that loudly in your summary.'
+// The `degraded` reasons when the claims join is absent or fails. FLOOR_NOTE describes a real
+// property of the measurement (exec writes are never captured); these describe an ABSENCE, so they
+// belong only in `degraded`, never merged into FLOOR_NOTE.
+const CITING_DEGRADED = 'citingClaims unavailable (knowledge unavailable) — name that loudly in your summary.'
+const CITING_FAILED = (reason: string): string => `citingClaims unavailable: ${reason}`

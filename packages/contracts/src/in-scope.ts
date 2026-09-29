@@ -9,10 +9,11 @@ import type { Scope, ScopeIndex } from './scope'
 // event in scope" would decide a transcript and a cost total differently and neither would look
 // wrong.
 
-// Memory events carry taskId null on the envelope — their task, if any, is the author's.
+// Authored events name their task, if any, and always their workspace.
 const AuthoredPayload = z.union([
   PAYLOAD_SCHEMAS.memory_written, PAYLOAD_SCHEMAS.memory_deleted, PAYLOAD_SCHEMAS.memory_accessed,
   PAYLOAD_SCHEMAS.memory_verified, PAYLOAD_SCHEMAS.memory_outcome, PAYLOAD_SCHEMAS.memory_topic_accessed,
+  PAYLOAD_SCHEMAS.knowledge_written, PAYLOAD_SCHEMAS.knowledge_delivered,
 ])
 
 // The payloads that name a checkout the envelope's task cannot: a hook's commit and a copilot
@@ -32,7 +33,9 @@ export function workspaceOf(event: EventRecord, index: ScopeIndex): string | nul
   const viaTask = taskId === null ? null : index.workspaceOfTask(taskId)
   if (viaTask !== null) return viaTask
   const placed = PlacedPayload.safeParse(event.payload)
-  return placed.success ? placed.data.workspaceId : null
+  if (placed.success) return placed.data.workspaceId
+  const authored = AuthoredPayload.safeParse(event.payload)
+  return authored.success ? authored.data.author.workspaceId : null
 }
 
 export function inScope(event: EventRecord, scope: Scope, index: ScopeIndex): boolean {
