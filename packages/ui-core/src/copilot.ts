@@ -13,7 +13,7 @@ import { snip } from './summarize'
 import { viewOf } from './views/registry'
 import { VIEW, WIRE } from './wire'
 import type { MemoryHealth, ResolvedTool, SupervisorHealth, WorkspaceWithHealth } from '@orc/contracts'
-import { DecisionInput, errorMessage, EventKind, groupByWorkspace, MEMORY_HEALTH, toolError, type Origin } from '@orc/contracts'
+import { DecisionFilter, DecisionInput, errorMessage, EventKind, groupByWorkspace, KnowledgeToolName, MEMORY_HEALTH, toolError, type Origin } from '@orc/contracts'
 
 // Why a session can't act: 'read-only' = server started outside a project; 'foreign-project'
 // = the user is viewing a chat other than the one this server runs in.
@@ -278,13 +278,18 @@ export function buildCopilotTools(deps: {
       inputSchema: z.object({ title: z.string().min(1), spec: z.string().optional(), base: z.string().optional() }),
       execute: async input => actions.newWorkspace(input, origin),
     }),
-    // The contract IS the schema: DecisionInput, the same shape `orc adr new` parses — a re-spelled
-    // object here would be a second vocabulary for one input, and the two would drift on a field
-    // name or a cap. The ONE knowledge write at this door (memory_write is filtered out of the MCP
-    // surface): a decision has a fixed body layout and a lifecycle to refuse a silent overwrite with,
-    // a free note has neither.
-    record_decision: tool({
-      description: 'Record an architectural DECISION as a first-class note (Context / Decision / Consequences), status accepted unless you say proposed. Before recording, enumerate what exists with memory_search {kind:"decision"}; to change a recorded decision pass its id as `supersedes` — never re-record under the same title (that is refused).',
+    [KnowledgeToolName.decisionList]: tool({
+      description: 'List every recorded architectural DECISION, attention-first (proposed, accepted, deprecated, then superseded), each with its one-line summary and its supersedes / supersededBy links. An empty list means none are recorded yet. Optionally filter by status.',
+      inputSchema: DecisionFilter,
+      execute: async input => actions.listDecisions(input, origin),
+    }),
+    [KnowledgeToolName.decisionRead]: tool({
+      description: 'Read one recorded DECISION in full — context, decision, consequences and the options considered — by its id.',
+      inputSchema: z.object({ id: z.string().min(1) }),
+      execute: async ({ id }) => actions.readDecision(id, origin),
+    }),
+    [KnowledgeToolName.recordDecision]: tool({
+      description: `Record an architectural DECISION as a file (Context / Decision / Consequences), status accepted unless you say proposed. Before recording, enumerate what exists with ${KnowledgeToolName.decisionList}; to change a recorded decision pass its id as \`supersedes\` — never re-record under the same title (that is refused).`,
       inputSchema: DecisionInput,
       execute: async input => actions.recordDecision(input, origin),
     }),

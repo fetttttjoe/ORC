@@ -3,7 +3,7 @@ import { generateText, stepCountIs } from 'ai'
 import { MockLanguageModelV4 } from 'ai/test'
 import type { ToolSet } from 'ai'
 import { authorFixture, eventFixture, listOf, must, planFixture, planNoteFixture, recordOf, taskFixture } from '@orc/contracts/fixtures'
-import { DECISION_STATUS, Door, EVENT_KIND, ScopeType, TASK_STATUS, WORKSPACE_KIND, WORKSPACE_STATE, type EventRecord, type Origin, type PlanNote, type Workspace, type WorkspaceHealth, type WorkspaceWithHealth } from '@orc/contracts'
+import { DecisionStatus, Door, EVENT_KIND, KnowledgeToolName, ScopeType, TASK_STATUS, WORKSPACE_KIND, WORKSPACE_STATE, type EventRecord, type Origin, type PlanNote, type Workspace, type WorkspaceHealth, type WorkspaceWithHealth } from '@orc/contracts'
 import type { OrcActions } from './actions'
 import type { ProjectSessions } from './sessions'
 import { modelOf } from './test-helpers'
@@ -31,7 +31,7 @@ const actionsStub = (over: Partial<OrcActions> = {}): OrcActions => ({
   approve: unsupported('approve'), run: unsupported('run'), reply: unsupported('reply'),
   retry: unsupported('retry'), annotate: unsupported('annotate'), revise: unsupported('revise'),
   writeNote: unsupported('writeNote'), deleteNote: unsupported('deleteNote'),
-  recordDecision: unsupported('recordDecision'),
+  recordDecision: unsupported('recordDecision'), listDecisions: unsupported('listDecisions'), readDecision: unsupported('readDecision'),
   renameProject: unsupported('renameProject'), newProject: unsupported('newProject'),
   listWorkspaces: unsupported('listWorkspaces'), newWorkspace: unsupported('newWorkspace'),
   listModels: unsupported('listModels'),
@@ -308,20 +308,41 @@ describe('workspaces at the doors', () => {
   })
 })
 
-// Knowledge authoring at the doors: the one WRITE a driver gets (memory_write stays filtered out of
-// the MCP surface — see mcp-serve.test.ts). The tool owns no shape of its own: DecisionInput IS the
-// inputSchema, so the refusal below happens at the door's parse, before actions is ever reached.
+// The decision tools own no shape of their own: DecisionInput and DecisionFilter ARE the inputSchemas, so a bad
+// input is refused at the door's parse, before actions is ever reached.
 describe('decisions at the doors', () => {
   it('record_decision hands the parsed decision to actions and is absent without a mutating door', async () => {
     const calls: unknown[] = []
-    const actions = actionsStub({ recordDecision: async input => { calls.push(input); return { id: 'x', status: DECISION_STATUS.accepted, superseded: null } } })
+    const actions = actionsStub({ recordDecision: async input => { calls.push(input); return { id: 'x', status: DecisionStatus.accepted, superseded: null } } })
     const tools = buildCopilotTools({ sessions: stubSessions, actions, projectId: 'p1', origin: ORIGIN })
-    const r = await callTool(tools, 'record_decision', { title: 'X', context: 'c', decision: 'd', consequences: 'q', considered: ['the other way'] })
-    expect(r.output).toEqual({ id: 'x', status: DECISION_STATUS.accepted, superseded: null })
+    const r = await callTool(tools, KnowledgeToolName.recordDecision, { title: 'X', context: 'c', decision: 'd', consequences: 'q', considered: ['the other way'] })
+    expect(r.output).toEqual({ id: 'x', status: DecisionStatus.accepted, superseded: null })
     expect(calls).toEqual([{ title: 'X', context: 'c', decision: 'd', consequences: 'q', considered: ['the other way'], tags: [] }])
     // the door refuses a status the vocabulary does not have BEFORE actions sees it
-    expect((await callTool(tools, 'record_decision', { title: 'X', context: 'c', decision: 'd', consequences: 'q', status: 'final' })).isError).toBe(true)
-    expect(Object.keys(buildCopilotTools({ sessions: stubSessions, actions: null, projectId: 'p1', origin: ORIGIN }))).not.toContain('record_decision')
+    expect((await callTool(tools, KnowledgeToolName.recordDecision, { title: 'X', context: 'c', decision: 'd', consequences: 'q', status: 'final' })).isError).toBe(true)
+    expect(Object.keys(buildCopilotTools({ sessions: stubSessions, actions: null, projectId: 'p1', origin: ORIGIN }))).not.toContain(KnowledgeToolName.recordDecision)
+  })
+
+  it('decision_list and decision_read hand the parsed input and the origin to actions', async () => {
+    const calls: unknown[] = []
+    const summary = { id: 'x', title: 'X', status: DecisionStatus.accepted, date: '2026-09-29', summary: 's', supersedes: null, supersededBy: null }
+    const actions = actionsStub({
+      listDecisions: async (filter, origin) => { calls.push(['list', filter, origin]); return [summary] },
+      readDecision: async (id, origin) => { calls.push(['read', id, origin]); throw new Error('no such decision') },
+    })
+    const tools = buildCopilotTools({ sessions: stubSessions, actions, projectId: 'p1', origin: ORIGIN })
+    expect((await callTool(tools, KnowledgeToolName.decisionList, { status: DecisionStatus.proposed })).output).toEqual([summary])
+    expect((await callTool(tools, KnowledgeToolName.decisionRead, { id: 'x' })).isError).toBe(true)
+    expect((await callTool(tools, KnowledgeToolName.decisionList, { status: 'final' })).isError).toBe(true)
+    expect(calls).toEqual([['list', { status: DecisionStatus.proposed }, ORIGIN], ['read', 'x', ORIGIN]])
+    expect(Object.keys(buildCopilotTools({ sessions: stubSessions, actions: null, projectId: 'p1', origin: ORIGIN }))).not.toContain(KnowledgeToolName.decisionList)
+  })
+
+  it('record_decision tells the model to enumerate with decision_list and to supersede', () => {
+    const tools = buildCopilotTools({ sessions: stubSessions, actions: actionsStub(), projectId: 'p1', origin: ORIGIN })
+    const description = tools[KnowledgeToolName.recordDecision]?.description ?? ''
+    expect(description).toContain(KnowledgeToolName.decisionList)
+    expect(description).toContain('supersedes')
   })
 })
 

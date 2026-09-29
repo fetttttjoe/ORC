@@ -1,5 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test'
-import { ClaimClass, KNOWLEDGE_ID_RE, KNOWLEDGE_REFUSAL, KnowledgePatch, type KnowledgeBackend, type KnowledgePatchInput } from '@orc/contracts'
+import {
+  ClaimClass, DECISION_REFUSAL, DecisionStatus, decisionSlugOf, KNOWLEDGE_ID_RE, KNOWLEDGE_REFUSAL, KnowledgePatch,
+  type DecisionDraft, type KnowledgeBackend, type KnowledgePatchInput,
+} from '@orc/contracts'
 
 export const CONTRACT_FILES = ['src/a.ts', 'src/b.ts', 'pkg/package.json', 'pkg/src/c.ts', 'docs/guide.md'] as const
 export const CONTRACT_DIRS = ['src', 'pkg', 'pkg/src', 'docs'] as const
@@ -7,9 +10,14 @@ export const CONTRACT_DIRS = ['src', 'pkg', 'pkg/src', 'docs'] as const
 export interface ContractFixture { backend: KnowledgeBackend; checkout: string; other: string; cleanup(): Promise<void> }
 
 const patch = (input: KnowledgePatchInput) => KnowledgePatch.parse(input)
-const fact = (text: string, ...paths: string[]): { text: string; class: ClaimClass; anchors: { path: string }[]; tags?: string[]; sources?: string[] } =>
+const fact = (text: string, ...paths: string[]): { text: string; class: ClaimClass; anchors: { path: string }[]; tags?: string[]; sources?: string[]; decision?: string } =>
   ({ text, class: ClaimClass.fact, anchors: paths.map(path => ({ path })) })
 const PAGE = { cursor: null, limit: 100 }
+const draft = (title: string, over: Partial<DecisionDraft> = {}): DecisionDraft => ({
+  id: decisionSlugOf(title), title, status: DecisionStatus.accepted, date: '2026-09-29', tags: [], supersedes: null,
+  context: 'Why it came up.', decision: 'What we do.', consequences: 'What follows.', considered: [], ...over,
+})
+const outsideCheckout = (files: readonly string[]): string[] => files.filter(file => file.startsWith('/') || file.split('/').includes('..'))
 
 export function describeKnowledgeBackend(name: string, make: () => Promise<ContractFixture>): void {
   describe(`${name} honours the knowledge contract`, () => {
@@ -117,14 +125,108 @@ export function describeKnowledgeBackend(name: string, make: () => Promise<Contr
     })
 
     it('a clean store has nothing to check or format', async () => {
-      await add(fact('fine', 'src/a.ts'))
+      const cited = draft('Cited decision', { tags: ['kernel'], considered: ['Another way'] })
+      await f.backend.recordDecision(f.checkout, cited)
+      await add(fact('fine', 'src/a.ts'), { ...fact('cites it', 'src/b.ts'), decision: cited.id })
       expect(await f.backend.check(f.checkout)).toEqual([])
       expect((await f.backend.format(f.checkout)).problems).toEqual([])
     })
 
-    it('the files a write reports are checkout-relative', async () => {
+    it('the files a write or a decision record reports are checkout-relative', async () => {
       const result = await f.backend.write(f.checkout, patch({ add: [fact('where', 'src/a.ts')] }))
-      expect(result.files.filter(file => file.startsWith('/') || file.split('/').includes('..'))).toEqual([])
+      expect(outsideCheckout(result.files)).toEqual([])
+      await f.backend.recordDecision(f.checkout, draft('Placed'))
+      const superseding = await f.backend.recordDecision(f.checkout, draft('Placed again', { supersedes: decisionSlugOf('Placed') }))
+      expect(outsideCheckout(superseding.files)).toEqual([])
+    })
+
+    it('a recorded decision reads back whole, and the list holds it', async () => {
+      const d = draft('Finish-gate checks report; they never block', {
+        tags: ['checks', 'kernel'], considered: ['Block on a failed check', 'Report and\nlet the human decide'], context: 'Two lines\nof context.',
+      })
+      const result = await f.backend.recordDecision(f.checkout, d)
+      expect(result.recorded.id).toBe(d.id)
+      expect(result.recorded.location.length).toBeGreaterThan(0)
+      expect(result).toMatchObject({ superseded: null, status: DecisionStatus.accepted, warnings: [] })
+      const whole = { ...d, supersededBy: null, location: result.recorded.location }
+      expect(await f.backend.decision(f.checkout, d.id)).toEqual(whole)
+      expect(await f.backend.decisions(f.checkout)).toEqual([whole])
+    })
+
+    it('recording the same title with other content is refused; an identical record is a replay', async () => {
+      const d = draft('Recorded once')
+      const first = await f.backend.recordDecision(f.checkout, d)
+      await expect(f.backend.recordDecision(f.checkout, { ...d, context: 'Other context.' })).rejects.toThrow(DECISION_REFUSAL.exists(d.id))
+      const replay = await f.backend.recordDecision(f.checkout, d)
+      expect(replay).toEqual(first)
+      expect((await f.backend.decisions(f.checkout)).map(x => x.context)).toEqual([d.context])
+    })
+
+    it('a supersession marks the old decision superseded and names its successor', async () => {
+      const old = draft('The old way')
+      await f.backend.recordDecision(f.checkout, old)
+      const result = await f.backend.recordDecision(f.checkout, draft('The new way', { supersedes: old.id }))
+      expect(result.superseded?.id).toBe(old.id)
+      expect(result.status).toBe(DecisionStatus.accepted)
+      expect(await f.backend.decision(f.checkout, old.id)).toMatchObject({ status: DecisionStatus.superseded, supersededBy: decisionSlugOf('The new way'), context: old.context })
+      expect(await f.backend.decision(f.checkout, decisionSlugOf('The new way'))).toMatchObject({ supersedes: old.id, supersededBy: null })
+    })
+
+    it('a replayed supersession reports the same result as the record, and leaves both decisions as they were', async () => {
+      await f.backend.recordDecision(f.checkout, draft('The old way'))
+      const newer = draft('The new way', { supersedes: 'the-old-way' })
+      const first = await f.backend.recordDecision(f.checkout, newer)
+      const before = await f.backend.decisions(f.checkout)
+      expect(await f.backend.recordDecision(f.checkout, newer)).toEqual(first)
+      expect(await f.backend.decisions(f.checkout)).toEqual(before)
+    })
+
+    it('superseding an unknown or an already-superseded decision is refused and writes nothing', async () => {
+      await f.backend.recordDecision(f.checkout, draft('First'))
+      await f.backend.recordDecision(f.checkout, draft('Second', { supersedes: 'first' }))
+      const before = await f.backend.decisions(f.checkout)
+      await expect(f.backend.recordDecision(f.checkout, draft('Third', { supersedes: 'ghost' }))).rejects.toThrow(DECISION_REFUSAL.noSuchDecision('ghost'))
+      expect(await f.backend.decisions(f.checkout)).toEqual(before)
+      await expect(f.backend.recordDecision(f.checkout, draft('Fourth', { supersedes: 'first' }))).rejects.toThrow(DECISION_REFUSAL.alreadySuperseded('first'))
+      expect(await f.backend.decisions(f.checkout)).toEqual(before)
+    })
+
+    it('a claim or a patch naming an unknown decision is refused and writes nothing; naming a recorded one is kept', async () => {
+      const [plain] = await add(fact('plain', 'src/a.ts'))
+      const id = plain?.id ?? ''
+      const refused = KNOWLEDGE_REFUSAL.unknownDecision('ghost')
+      await expect(f.backend.write(f.checkout, patch({ add: [{ ...fact('cites a ghost', 'src/a.ts'), decision: 'ghost' }] }))).rejects.toThrow(refused)
+      await expect(f.backend.write(f.checkout, patch({ add: [fact('served a ghost', 'src/a.ts')], decision: 'ghost' }))).rejects.toThrow(refused)
+      await expect(f.backend.write(f.checkout, patch({ change: [{ id, decision: 'ghost' }] }))).rejects.toThrow(refused)
+      expect((await f.backend.card(f.checkout, '.', PAGE)).claims).toEqual(await f.backend.get(f.checkout, [id]))
+      expect((await f.backend.get(f.checkout, [id]))[0]?.decision).toBeNull()
+      const real = draft('A real decision')
+      await f.backend.recordDecision(f.checkout, real)
+      const [kept] = await add({ ...fact('cites it', 'src/a.ts'), decision: real.id })
+      await f.backend.write(f.checkout, patch({ change: [{ id, decision: real.id }], decision: real.id }))
+      expect((await f.backend.get(f.checkout, [kept?.id ?? '', id])).map(c => c.decision)).toEqual([real.id, real.id])
+    })
+
+    it('two records of one new title at once: exactly one wins', async () => {
+      const settled = await Promise.allSettled([
+        f.backend.recordDecision(f.checkout, draft('Raced', { context: 'One writer.' })),
+        f.backend.recordDecision(f.checkout, draft('Raced', { context: 'The other writer.' })),
+      ])
+      expect(settled.map(r => r.status).sort()).toEqual(['fulfilled', 'rejected'])
+      expect(settled.flatMap(r => (r.status === 'rejected' ? [String(r.reason)] : []))).toEqual([`Error: ${DECISION_REFUSAL.exists('raced')}`])
+      expect((await f.backend.decisions(f.checkout)).length).toBe(1)
+    })
+
+    it('decisions in one checkout are invisible in another', async () => {
+      await f.backend.recordDecision(f.checkout, draft('Only here'))
+      expect(await f.backend.decisions(f.other)).toEqual([])
+      expect(await f.backend.decision(f.other, decisionSlugOf('Only here'))).toBeNull()
+    })
+
+    it('a proposed decision reads back proposed', async () => {
+      const result = await f.backend.recordDecision(f.checkout, draft('Maybe later', { status: DecisionStatus.proposed }))
+      expect(result.status).toBe(DecisionStatus.proposed)
+      expect((await f.backend.decision(f.checkout, 'maybe-later'))?.status).toBe(DecisionStatus.proposed)
     })
   })
 }

@@ -80,7 +80,7 @@ export const actionsStub = (over: Partial<OrcActions> = {}): OrcActions => ({
   approve: unsupported('approve'), run: unsupported('run'), reply: unsupported('reply'),
   retry: unsupported('retry'), annotate: unsupported('annotate'), revise: unsupported('revise'),
   writeNote: unsupported('writeNote'), deleteNote: unsupported('deleteNote'),
-  recordDecision: unsupported('recordDecision'),
+  recordDecision: unsupported('recordDecision'), listDecisions: unsupported('listDecisions'), readDecision: unsupported('readDecision'),
   renameProject: unsupported('renameProject'), newProject: unsupported('newProject'),
   listWorkspaces: unsupported('listWorkspaces'), newWorkspace: unsupported('newWorkspace'),
   listModels: unsupported('listModels'),

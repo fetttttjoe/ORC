@@ -1,4 +1,4 @@
-import { authorSourceOf, errorMessage, EVENT_KIND, ModelsDiscoveredPayload, NOTE_KIND, TASK_STATUS, costUSDFor, parseModelRef, type EventInput, type ModelOption, type Origin, type TaskStatus } from '@orc/contracts'
+import { authorSourceOf, decisionSummaryOf, errorMessage, EVENT_KIND, ModelsDiscoveredPayload, NOTE_KIND, TASK_STATUS, costUSDFor, parseModelRef, type EventInput, type ModelOption, type Origin, type TaskStatus } from '@orc/contracts'
 import { Kernel, blockingVerdicts, canRetry, deriveSystemUrl, dropSystemDatabase, initializeProject, liveSupervisors, loadConfig, openStorage, resetSystemDatabase, subtreeTaskIds, type EventLog, type ProjectConfig, type Storage } from '@orc/kernel'
 import { cwdAuthor, cwdWorkspace, cwdWorkspaceId, type AuthorExtras } from './cwd-workspace'
 import { adoptCwd } from './workspace-adopt'
@@ -6,9 +6,8 @@ import { createRequestWorkspace, HEAD_REF, requireLiveWorkspace } from './worksp
 import { listWorkspaceHealth } from './workspace-health'
 import { seedRegistries } from './runtime'
 import { singleStepDraft } from './plan-template'
-// aliased: the local method below is named for the capability, the import for the lifecycle op it
-// delegates to — one file cannot hold two bindings of one name
-import { createMemory, decisionDoor, openKnowledge, orphanedNotes, recordDecision as recordDecisionOp } from '@orc/memory'
+import { createMemory, openKnowledge, orphanedNotes } from '@orc/memory'
+import { knowledgeAccess, openKnowledge as openKnowledgeBackend } from './knowledge-open'
 import { openMemory, withMemory } from './memory-open'
 import { PROJECT_DIR_NOTE_ID, PROJECT_NAME_NOTE_ID, type OrcActions, type PlanSource } from '@orc/ui-core'
 import type { PlanDraft } from '@orc/contracts'
@@ -238,6 +237,13 @@ export function buildOrcActions(deps: {
   const doorAuthor = (origin: Origin, extra: AuthorExtras = {}): Promise<MemoryAuthor> =>
     cwdAuthor(kernel, plugin?.config.dir, authorSourceOf(origin.door), origin, extra)
 
+  const decisionPort = async () => {
+    if (!plugin) throw new Error('decisions need a project context')
+    const access = knowledgeAccess(openKnowledgeBackend(plugin.config), plugin.log, plugin.config.dir)
+    if ('unavailable' in access) throw new Error(access.unavailable)
+    return access.port
+  }
+
   const requireTask = async (taskId: string) => {
     const task = await kernel.getTask(taskId)
     if (!task) throw new Error(`no task '${taskId}'`)
@@ -434,18 +440,19 @@ export function buildOrcActions(deps: {
       })
     },
 
-    // The decision door. The LIFECYCLE is not here: decisions.ts owns the refusals, the slugged id
-    // and the supersession link, and `orc adr` calls the same op — a second implementation would be
-    // a second answer to what recording a decision means. What this layer owns is the author.
+    async listDecisions(filter, origin) {
+      const port = await decisionPort()
+      return (await port.decisions({ author: await doorAuthor(origin), idempotencyKey: null }, filter)).map(decisionSummaryOf)
+    },
+
+    async readDecision(id, origin) {
+      return (await decisionPort()).decision({ author: await doorAuthor(origin), idempotencyKey: null }, id)
+    },
+
     async recordDecision(input, origin) {
-      if (!plugin) throw new Error('recording a decision needs a project context')
-      return withMemory({ log: plugin.log, config: plugin.config }, async memory => {
-        // The source is the DOOR the call came in by. Never 'human' here — an agent drove this
-        // call, whoever is behind the agent; `orc adr new` is the door where a person typed it.
-        const author = await doorAuthor(origin)
-        const r = await recordDecisionOp(decisionDoor(memory), author, input)
-        return { id: r.note.id, status: r.status, superseded: r.superseded }
-      })
+      const port = await decisionPort()
+      const r = await port.recordDecision({ author: await doorAuthor(origin), idempotencyKey: null }, input)
+      return { id: r.recorded.id, status: r.status, superseded: r.superseded?.id ?? null }
     },
 
     async deleteNote(id, scope, origin) {

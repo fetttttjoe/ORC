@@ -1,14 +1,15 @@
 import { realpathSync } from 'node:fs'
 import path from 'node:path'
 import {
-  errorMessage, KnowledgeClaim, KNOWLEDGE_LIMITS, KnowledgePatch, KNOWLEDGE_REFUSAL, newKnowledgeId,
+  DecisionDraft, errorMessage, KnowledgeClaim, KNOWLEDGE_LIMITS, KnowledgePatch, KNOWLEDGE_REFUSAL, newKnowledgeId,
   type KnowledgeBackend, type KnowledgeProblem, type KnowledgeWriteResult,
 } from '@orc/contracts'
-import { cardOf } from '@orc/knowledge-core'
+import { cardOf, refuseUnknownDecision } from '@orc/knowledge-core'
 import { bm25 } from './bm25'
 import { anchorKind, applyPlan, renderBucket, writeAtomic } from './bucket-files'
 import { createBucketLocks, DEFAULT_LOCK_OPTIONS, type LockOptions } from './bucket-lock'
 import { createCheckoutIndex, type CheckoutSnapshot, type IndexedBucket } from './checkout-index'
+import { createDecisionFiles } from './decisions'
 import { codeOf, Errno } from './error-code'
 import { freshIdSource } from './fresh-ids'
 import { GitFilesOptions } from './options'
@@ -34,6 +35,7 @@ export function createGitFilesBackend(input: Record<string, unknown>, deps: GitF
   const newId = deps.newId ?? newKnowledgeId
   const index = createCheckoutIndex(options)
   const locks = createBucketLocks(deps.locks ?? DEFAULT_LOCK_OPTIONS)
+  const decisionFiles = createDecisionFiles(options.decisionsDir, locks)
   const placement = (snapshot: CheckoutSnapshot, kindOf: KindOf) => ({ snapshot, kindOf, dirName: options.dirName })
   const render = (s: CheckoutSnapshot, location: string, claims: readonly KnowledgeClaim[]): string =>
     renderBucket(s, options.dirName, location, claims)
@@ -62,6 +64,7 @@ export function createGitFilesBackend(input: Record<string, unknown>, deps: GitF
   const write = async (checkout: string, input: KnowledgePatch): Promise<KnowledgeWriteResult> => {
     const patch = KnowledgePatch.parse(input)
     const root = rootOf(checkout)
+    refuseUnknownDecision(patch, () => decisionFiles.scan(root).decisions)
     const kindOf = anchorKind(root)
     for (let attempt = 0; attempt < WRITE_ATTEMPTS; attempt++) {
       const s = await index.snapshot(root)
@@ -82,10 +85,13 @@ export function createGitFilesBackend(input: Record<string, unknown>, deps: GitF
     const root = rootOf(checkout)
     const s = await index.snapshot(root)
     const kindOf = anchorKind(root)
+    const decisions = decisionFiles.scan(root)
     const problems = [...s.problems]
     for (const bucket of s.buckets.values()) {
       for (const claim of bucket.claims) {
         const line = bucket.lines.get(claim.id) ?? 0
+        if (claim.decision !== null && !decisions.decisions.has(claim.decision))
+          problems.push({ location: bucket.location, line, message: KNOWLEDGE_PROBLEM.unknownDecision(claim.id, claim.decision) })
         try {
           const expected = locationOf(placement(s, kindOf), claim.anchors)
           if (expected !== bucket.location) problems.push({ location: bucket.location, line, message: KNOWLEDGE_PROBLEM.belongsIn(claim.id, expected) })
@@ -96,7 +102,7 @@ export function createGitFilesBackend(input: Record<string, unknown>, deps: GitF
       if (bucket.problems.length === 0 && render(s, bucket.location, bucket.claims) !== bucket.text)
         problems.push({ location: bucket.location, line: 0, message: KNOWLEDGE_PROBLEM.notCanonical() })
     }
-    return problems
+    return [...problems, ...decisions.problems]
   }
 
   return {
@@ -140,5 +146,8 @@ export function createGitFilesBackend(input: Record<string, unknown>, deps: GitF
       }
       return { formatted: [...formatted].sort(), problems: await check(root) }
     },
+    async decisions(checkout) { return [...decisionFiles.scan(rootOf(checkout)).decisions.values()] },
+    async decision(checkout, id) { return decisionFiles.scan(rootOf(checkout)).decisions.get(id) ?? null },
+    async recordDecision(checkout, draft) { return decisionFiles.record(rootOf(checkout), DecisionDraft.parse(draft)) },
   }
 }

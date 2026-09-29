@@ -14,11 +14,9 @@ export interface BriefInput {
   // archives it, and the label has to resolve. The `elsewhere` counts leave archived rows out.
   workspaces: readonly WorkspaceWithHealth[]
   tasks: readonly Pick<TaskNode, 'id' | 'title' | 'status' | 'workspaceId'>[]
-  // Decisions in force, in listing order. null = the read model could not be asked — kept apart
+  // Decisions in force, in listing order. null = the decision files could not be read — kept apart
   // from [] all the way to the text, because the two call for opposite behaviour from a reader.
   decisions: readonly { id: string; title: string; summary: string }[] | null
-  // Knowledge events the read model has not applied yet (MemoryHealth.pending).
-  pendingKnowledge: number
   // Already gated by the caller: non-null only when the re-ground advisory fires.
   drift: NonNullable<Brief['drift']> | null
 }
@@ -61,7 +59,6 @@ export function buildBrief(input: BriefInput): Brief {
       shown: input.decisions.slice(0, BRIEF_LIMITS.decisions).map(d => ({ id: d.id, title: d.title, summary: d.summary })),
       total: input.decisions.length,
     },
-    pendingKnowledge: input.pendingKnowledge,
     drift: input.drift,
   }
 }
@@ -73,9 +70,6 @@ export interface RenderBriefOptions {
   // and `orc status` prints the same sentence. Passed in so there is one spelling of it and this
   // module never learns what a plan file is.
   driftText: (d: NonNullable<Brief['drift']>) => string
-  // A decision's summary cut to one line of at most `maxChars`. The rule is the memory plugin's
-  // (adrSummary — the same one that wrote the summary when the decision was recorded); passed in
-  // for driftText's reason, so this file's imports stay at contracts and one clock helper.
   oneLine: (text: string, maxChars: number) => string
   // The commands the text points at, built by the command module from the subcommand constants —
   // importing them here would pull commander into a file that prints nothing.
@@ -117,7 +111,7 @@ export function renderBrief(brief: Brief, opts: RenderBriefOptions): string[] {
     if (brief.hiddenTasks[status] > 0) lines.push(`  +${brief.hiddenTasks[status]} more not shown`)
   }
 
-  if (brief.decisions === null) lines.push('decisions: unknown — the memory read model could not be reached')
+  if (brief.decisions === null) lines.push('decisions: unknown — the decision files could not be read')
   else if (brief.decisions.shown.length > 0) {
     lines.push(`decisions in force (${brief.decisions.shown.length} of ${brief.decisions.total} — ${opts.hints.decisions}):`)
     for (const d of brief.decisions.shown) {
@@ -125,10 +119,6 @@ export function renderBrief(brief: Brief, opts: RenderBriefOptions): string[] {
       lines.push(line === '' ? `  ${d.title}` : `  ${d.title} — ${line}`)
     }
   }
-  // Only beside decisions that WERE read: when they could not be, the line above already says the
-  // whole section is unknown, and "may be behind" would understate that.
-  if (brief.decisions !== null && brief.pendingKnowledge > 0)
-    lines.push(`decisions may be behind: ${brief.pendingKnowledge} knowledge events are not in the read model yet — ${opts.hints.decisions} catches up`)
 
   if (brief.drift !== null) lines.push(opts.driftText(brief.drift))
   return lines

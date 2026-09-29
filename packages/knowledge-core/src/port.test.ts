@@ -1,11 +1,15 @@
 import { describe, expect, it } from 'bun:test'
 import { ZodError } from 'zod'
-import { AUTHOR_SOURCE, ClaimClass, DeliveryMode, Door, EVENT_KIND, KNOWLEDGE_LIMITS, knowledgeIdFrom, type EventInput, type MemoryAuthor } from '@orc/contracts'
+import {
+  AUTHOR_SOURCE, ClaimClass, DECISION_REFUSAL, DecisionStatus, DeliveryMode, Door, EVENT_KIND, KNOWLEDGE_LIMITS, knowledgeIdFrom,
+  type Decision, type DecisionInputRaw, type EventInput, type KnowledgeBackend, type MemoryAuthor,
+} from '@orc/contracts'
+import { planDecisionRecord } from './decision-record'
 import { createMemoryBackend } from './memory-backend'
-import { createKnowledgePort, EVIDENCE_NOT_RECORDED } from './port'
+import { createKnowledgePort, EVIDENCE_NOT_RECORDED, type KnowledgePortDeps } from './port'
 
 const author: MemoryAuthor = { source: AUTHOR_SOURCE.agent, workspaceId: 'ws-1', origin: { chatId: 'chat-1', door: Door.supervisor }, taskId: 't-1', stepId: 's-1', runToken: 'r-1' }
-const setup = (append: (e: EventInput) => Promise<void> = async () => {}) => {
+const setup = (append: (e: EventInput) => Promise<void> = async () => {}, over: Partial<KnowledgePortDeps> = {}) => {
   const events: EventInput[] = []
   const warned: string[] = []
   const port = createKnowledgePort({
@@ -13,8 +17,23 @@ const setup = (append: (e: EventInput) => Promise<void> = async () => {}) => {
     checkoutOf: async () => '/checkout',
     append: async e => { events.push(e); await append(e) },
     warn: line => warned.push(line),
+    ...over,
   })
   return { port, events, warned }
+}
+const adr = (title: string, over: Partial<DecisionInputRaw> = {}): DecisionInputRaw => ({ title, context: 'c', decision: 'd', consequences: 'q', ...over })
+const fileBackedDecisions = (): KnowledgeBackend => {
+  const held = new Map<string, Decision>()
+  return {
+    ...createMemoryBackend({ exists: () => true }),
+    decisions: async () => [...held.values()],
+    decision: async (_checkout, id) => held.get(id) ?? null,
+    recordDecision: async (_checkout, draft) => {
+      const plan = planDecisionRecord({ held, claimed: new Set(held.keys()), draft, locationOf: d => `docs/decisions/${d.date}-${d.id}.md` })
+      for (const d of plan.writes) held.set(d.id, d)
+      return plan.result
+    },
+  }
 }
 const read = (mode = DeliveryMode.card) => ({ author, idempotencyKey: null, mode })
 const write = (idempotencyKey: string | null = null) => ({ author, idempotencyKey })
@@ -23,11 +42,13 @@ const fact = (text: string) => ({ text, class: ClaimClass.fact, anchors: [{ path
 describe('the knowledge port records evidence', () => {
   it('a write appends knowledge_written with refs, why, decision and the author envelope', async () => {
     const { port, events } = setup()
+    await port.recordDecision(write(), adr('D 1'))
+    events.splice(0)
     const result = await port.write(write('key-1'), { add: [fact('x')], why: 'because', decision: 'd-1' })
     expect(events).toEqual([{
       chatId: 'chat-1', door: Door.supervisor, taskId: 't-1', stepId: 's-1', runToken: 'r-1', idempotencyKey: 'key-1',
       kind: EVENT_KIND.knowledge_written,
-      payload: { added: result.added, changed: [], retired: [], files: result.files, why: 'because', decision: 'd-1', author },
+      payload: { added: result.added, changed: [], retired: [], files: result.files, why: 'because', decision: 'd-1', decisionsRecorded: [], decisionsSuperseded: [], author },
     }])
   })
   it('a card appends knowledge_delivered with the delivered ids, mode and subject; an empty card appends nothing', async () => {
@@ -124,6 +145,79 @@ describe('the knowledge port get', () => {
     const tooMany = Array.from({ length: KNOWLEDGE_LIMITS.deliveredIds + 1 }, (_, i) => knowledgeIdFrom(String(i)))
     await expect(port.get(read(DeliveryMode.get), tooMany)).rejects.toThrow(ZodError)
     await expect(port.get(read(DeliveryMode.get), ['NOT-AN-ID'])).rejects.toThrow(ZodError)
+    expect(asked).toEqual([])
+  })
+})
+
+describe('the knowledge port on decisions', () => {
+  it('a record appends exactly one knowledge_written carrying the refs, the files and the envelope', async () => {
+    const inner = createMemoryBackend({ exists: () => true })
+    const { port, events } = setup(async () => {}, {
+      backend: { ...inner, recordDecision: async (checkout, draft) => ({ ...(await inner.recordDecision(checkout, draft)), files: [`docs/decisions/${draft.id}.md`] }) },
+    })
+    await port.recordDecision(write(), adr('Old way'))
+    events.splice(0)
+    const result = await port.recordDecision(write('key-2'), adr('New way', { supersedes: 'old-way' }))
+    expect(result.recorded).toEqual({ id: 'new-way', location: 'memory:decision/new-way' })
+    expect(events).toEqual([{
+      chatId: 'chat-1', door: Door.supervisor, taskId: 't-1', stepId: 's-1', runToken: 'r-1', idempotencyKey: 'key-2',
+      kind: EVENT_KIND.knowledge_written,
+      payload: {
+        added: [], changed: [], retired: [], files: ['docs/decisions/new-way.md'], why: null, decision: null,
+        decisionsRecorded: [{ id: 'new-way', location: 'memory:decision/new-way' }],
+        decisionsSuperseded: [{ id: 'old-way', location: 'memory:decision/old-way' }],
+        author,
+      },
+    }])
+  })
+  it('a keyed record called twice appends one payload for its key, and the replay carries no warning', async () => {
+    const payloads = new Map<string, string>()
+    const { port, events } = setup(async e => {
+      const key = e.idempotencyKey ?? null
+      if (key === null) return
+      const payload = JSON.stringify(e.payload)
+      const held = payloads.get(key)
+      if (held !== undefined && held !== payload) throw new Error(`idempotency conflict on ${key}`)
+      payloads.set(key, payload)
+    }, { backend: fileBackedDecisions(), today: () => '2026-09-29' })
+    await port.recordDecision(write('key-old'), adr('Old way'))
+    const first = await port.recordDecision(write('key-new'), adr('New way', { supersedes: 'old-way' }))
+    const again = await port.recordDecision(write('key-new'), adr('New way', { supersedes: 'old-way' }))
+    expect(first.files).toEqual(['docs/decisions/2026-09-29-new-way.md', 'docs/decisions/2026-09-29-old-way.md'])
+    expect(again).toEqual(first)
+    expect(again.warnings).toEqual([])
+    expect(events.map(e => e.idempotencyKey)).toEqual(['key-old', 'key-new', 'key-new'])
+  })
+  it('the date comes from today', async () => {
+    const { port } = setup(async () => {}, { today: () => '2026-01-02' })
+    await port.recordDecision(write(), adr('Dated'))
+    expect((await port.decision(write(), 'dated')).date).toBe('2026-01-02')
+  })
+  it('a status filter returns only that status, in attention order', async () => {
+    const days = ['2026-01-01', '2026-02-01', '2026-03-01', '2026-04-01']
+    const { port } = setup(async () => {}, { today: () => days.shift() ?? '2026-12-31' })
+    await port.recordDecision(write(), adr('Oldest'))
+    await port.recordDecision(write(), adr('Maybe', { status: DecisionStatus.proposed }))
+    await port.recordDecision(write(), adr('Middle'))
+    await port.recordDecision(write(), adr('Newest'))
+    expect((await port.decisions(write(), { status: DecisionStatus.accepted })).map(d => d.id)).toEqual(['newest', 'middle', 'oldest'])
+    expect((await port.decisions(write())).map(d => d.id)).toEqual(['maybe', 'newest', 'middle', 'oldest'])
+  })
+  it('a decision of an unknown id is refused as no such decision', async () => {
+    const { port } = setup()
+    await expect(port.decision(write(), 'ghost')).rejects.toThrow(DECISION_REFUSAL.noSuchDecision('ghost'))
+  })
+  it('a record still lands when evidence cannot be appended, and warns in its result', async () => {
+    const { port } = setup(async () => { throw new Error('log down') })
+    const result = await port.recordDecision(write(), adr('Kept'))
+    expect(result.warnings).toEqual([EVIDENCE_NOT_RECORDED('log down')])
+    expect((await port.decision(write(), 'kept')).title).toBe('Kept')
+  })
+  it('a superseded input status is refused before the backend is called', async () => {
+    const asked: string[] = []
+    const inner = createMemoryBackend({ exists: () => true })
+    const { port } = setup(async () => {}, { backend: { ...inner, recordDecision: (checkout, draft) => { asked.push(draft.id); return inner.recordDecision(checkout, draft) } } })
+    await expect(port.recordDecision(write(), adr('Gone', { status: DecisionStatus.superseded }))).rejects.toThrow(ZodError)
     expect(asked).toEqual([])
   })
 })

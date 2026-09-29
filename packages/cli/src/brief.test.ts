@@ -21,7 +21,7 @@ const row = (id: string, title: string, state: WorkspaceState, over: Partial<Wor
 const input = (over: Partial<BriefInput> = {}): BriefInput => ({
   project: 'recipes', cwdWorkspaceId: HERE,
   workspaces: [row(HERE, 'search', WORKSPACE_STATE.idle), row(OTHER, 'import', WORKSPACE_STATE.idle)],
-  tasks: [], decisions: [], pendingKnowledge: 0, drift: null, ...over,
+  tasks: [], decisions: [], drift: null, ...over,
 })
 
 const opts: RenderBriefOptions = {
@@ -157,13 +157,6 @@ describe('renderBrief', () => {
     expect(lines.filter(l => l.includes('more not shown'))).toHaveLength(1)
   })
 
-  it('a read model behind the log says how far, and which command catches it up', () => {
-    expect(text({ pendingKnowledge: 12 })).toContain('decisions may be behind: 12 knowledge events are not in the read model yet — orc adr ls catches up')
-    expect(text()).not.toContain('may be behind')
-    // nothing to be behind OF: the unreachable line already says the decisions are unknown
-    expect(text({ pendingKnowledge: 12, decisions: null })).not.toContain('may be behind')
-  })
-
   it('points at the listing only when another workspace needs someone', () => {
     expect(text()).not.toContain('elsewhere')
     const out = text({ workspaces: [row(HERE, 'search', WORKSPACE_STATE.idle), row(OTHER, 'import', WORKSPACE_STATE.dangling)] })
@@ -171,7 +164,7 @@ describe('renderBrief', () => {
   })
 
   it('decisions: unreachable is said, none is silent, some are listed with a clipped line', () => {
-    expect(text({ decisions: null })).toContain('decisions: unknown — the memory read model could not be reached')
+    expect(text({ decisions: null })).toContain('decisions: unknown — the decision files could not be read')
     expect(text({ decisions: [] })).not.toContain('decisions')
     const long = 'x'.repeat(BRIEF_LIMITS.decisionLineChars + 50)
     const out = text({ decisions: [{ id: 'a', title: 'Use Postgres', summary: long }, { id: 'b', title: 'No summary', summary: '' }] })

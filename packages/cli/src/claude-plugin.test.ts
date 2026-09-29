@@ -8,7 +8,6 @@ import { TaskStatus } from '@orc/contracts'
 import { parseSkillMd } from '@orc/kernel'
 import { authorFixture } from '@orc/contracts/fixtures'
 import { KNOWLEDGE_READ_TOOLS, knowledgeTools } from '@orc/knowledge-core'
-import { unavailableMemoryTools } from '@orc/memory'
 import { BRIEF_COMMAND } from './brief-commands'
 import { EXIT_CODE } from './exit'
 import { buildServeTools } from './mcp-serve'
@@ -82,7 +81,7 @@ describe('plugin skills', () => {
   // The door's whole surface, from the composition that serves it — not a list typed here, which
   // would keep passing after a tool was renamed out from under a skill.
   const served = new Set(buildServeTools({
-    sessions: sessionsStub(), projectId: 'p1', memoryTools: unavailableMemoryTools('skills-check'), actions: actionsStub(), autonomy: 'gated',
+    sessions: sessionsStub(), projectId: 'p1', actions: actionsStub(), autonomy: 'gated',
     knowledgeTools: knowledgeTools({ unavailable: 'skills-check' }, authorFixture(), KNOWLEDGE_READ_TOOLS),
   }).map(t => t.name))
 

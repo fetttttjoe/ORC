@@ -2,7 +2,9 @@ import { afterEach, describe, expect, it } from 'bun:test'
 import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import { ClaimClass, KNOWLEDGE_LIMITS, KNOWLEDGE_REFUSAL, KnowledgePatch, newKnowledgeId, type KnowledgePatchInput } from '@orc/contracts'
+import {
+  ClaimClass, DecisionStatus, decisionSlugOf, KNOWLEDGE_LIMITS, KNOWLEDGE_REFUSAL, KnowledgePatch, newKnowledgeId, type KnowledgePatchInput,
+} from '@orc/contracts'
 import { createGitFilesBackend } from './backend'
 import { createBucketLocks } from './bucket-lock'
 import { KNOWLEDGE_PROBLEM } from './problems'
@@ -239,6 +241,33 @@ describe('git-files and duplicated ids', () => {
     const result = await backend.format(checkout)
     expect(result.problems.map(p => `${p.location}:${p.line}`)).toEqual(['knowledge/src/a.ts.md:4', 'knowledge/README.md:4'])
     expect([read(checkout, 'knowledge/README.md'), read(checkout, 'knowledge/src/a.ts.md')]).toEqual([copy, own])
+  })
+})
+
+describe('git-files claims that name a decision', () => {
+  it('a claim naming a recorded decision is kept; once the decision file is gone, check names the claim\'s bucket and line', async () => {
+    const { checkout, backend } = setup()
+    const title = 'Checks report'
+    const { recorded } = await backend.recordDecision(checkout, {
+      id: decisionSlugOf(title), title, status: DecisionStatus.accepted, date: '2026-09-29', tags: [], supersedes: null,
+      context: 'c', decision: 'd', consequences: 'q', considered: [],
+    })
+    const [ref] = (await backend.write(checkout, patch({ add: [{ ...fact('cites it', 'src/a.ts'), decision: recorded.id }] }))).added
+    expect(read(checkout, 'knowledge/src/a.ts.md')).toBe(`# src/a.ts\n\n## Facts\n- cites it {${ref?.id} @src/a.ts adr:${recorded.id}}\n`)
+    expect(await backend.check(checkout)).toEqual([])
+    rmSync(path.join(checkout, recorded.location))
+    expect(await backend.check(checkout)).toEqual([
+      { location: 'knowledge/src/a.ts.md', line: 4, message: KNOWLEDGE_PROBLEM.unknownDecision(ref?.id ?? '', recorded.id) },
+    ])
+  })
+})
+
+describe('git-files claim writes and the decisions folder', () => {
+  it('a write that names no decision never reads the decisions folder; one that names a decision does', async () => {
+    const { checkout, backend } = setup()
+    writeFileSync(path.join(checkout, 'docs/decisions'), 'a file where the folder belongs\n')
+    expect((await backend.write(checkout, patch({ add: [fact('no decision named', 'src/a.ts')] }))).added.length).toBe(1)
+    await expect(backend.write(checkout, patch({ add: [{ ...fact('names one', 'src/a.ts'), decision: 'some-decision' }] }))).rejects.toThrow(/ENOTDIR/)
   })
 })
 

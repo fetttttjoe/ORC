@@ -66,10 +66,13 @@ describe('shipped skills', () => {
     expect(body).toContain('knowledge_write')
     expect(body).toContain('missing')
     expect(body).toContain('Most tasks make none')
-    expect(body).toContain("memory_search")
+    expect(body).toContain('decision_list')
+    expect(body).not.toContain('memory_search')
+    expect(body).toContain('draft it as a supersession of that id')
+    expect(body).not.toContain('supersession is a human act')
     expect(body).toContain('ask_human ONCE')
     expect(body).toContain("reply 'approve' to finish")
-    expect(body).toContain('record_decision')
+    expect(body).toContain('record_decision with it exactly as approved, with `supersedes` when it changes a recorded decision')
     expect(body).toContain('never edit source files')
   })
 
@@ -87,8 +90,7 @@ describe('shipped skills', () => {
 // retires it out of the retrieval surface the moment the task ends unless something links to it.
 // So every decision a plan committed to was readable only through `orc plan-notes <taskId>`, by
 // someone who already knew which task to open. This pins the two-phase protocol that fixes it —
-// ask once before authoring, propose the decisions inside the approval ask, write them on approve.
-// Pinned failing-first against the pre-edit SKILL.md, which had neither phase.
+// ask once before authoring, propose the decisions inside the approval ask, record them on approve.
 describe('plan-authoring pins the ask-then-record-decisions protocol', () => {
   const { body } = read('plan-authoring')
 
@@ -111,13 +113,10 @@ describe('plan-authoring pins the ask-then-record-decisions protocol', () => {
     expect(body).toContain('was not a decision, it was the obvious move')
   })
 
-  // The decision set is read by `kind`, NOT by a tag. memory_search refuses a tag no note carries
-  // (tools.ts's unknownTagError), so a tag-keyed read reported "no decisions recorded yet" as a
-  // tool failure on every corpus until someone had already recorded one. A closed enum cannot
-  // fail that way — an empty result is a real answer.
-  test('the decision set is read by kind, not by tag', () => {
-    expect(body).toContain("`memory_search` with `kind: 'decision'`")
-    expect(body).not.toContain("tags: ['adr']")
+  test('the decision set is read with decision_list and a candidate with decision_read', () => {
+    expect(body).toContain('with `decision_list` (an empty list is a real answer')
+    expect(body).toContain('`decision_read` a candidate before you say the plan collides with it')
+    expect(body).not.toContain('memory_search')
   })
 
   test('the decisions ride the approval ask rather than a second gate', () => {
@@ -125,18 +124,16 @@ describe('plan-authoring pins the ask-then-record-decisions protocol', () => {
     expect(body).toContain('a gate that asks twice gets skimmed')
   })
 
-  test('the written decision is a pathless, project-scoped semantic note', () => {
-    expect(body).toContain("kind: 'decision'")
-    expect(body).toContain('No `paths`')
+  test('a confirmed decision is recorded with record_decision, never written as a memory note', () => {
+    expect(body).toContain('Each is one `record_decision`')
+    expect(body).not.toContain("kind: 'decision'")
+    expect(body).not.toContain('No `paths`')
   })
 
-  // One decision is one note, rewritten in place. A second note for the same subject leaves the
-  // next planner unable to tell which is current — and the agent cannot retire the loser, because
-  // `archived` is off the memory_write schema BY DESIGN (tools.ts:477: retiring knowledge is an
-  // operator decision from evidence, never something an agent mid-task does to a note it dislikes).
-  test('a changed decision rewrites the existing note by id rather than minting a second', () => {
-    expect(body).toContain('Re-`memory_write` that note under its OWN id')
-    expect(body).toContain('two notes that half-agree')
+  test('a changed decision is recorded as a supersession that names the recorded id', () => {
+    expect(body).toContain('**collides** and **needs rewrite** are recorded as a supersession')
+    expect(body).toContain('`supersedes` is the recorded')
+    expect(body).not.toContain('rewrite the EXISTING note')
   })
 
   test('reads recorded claims before authoring', () => {
@@ -144,18 +141,16 @@ describe('plan-authoring pins the ask-then-record-decisions protocol', () => {
     expect(body).not.toContain('memory_neighbors')
   })
 
-  test('it links back to the reasoning and forward over what it replaces', () => {
-    // Both words already appear in the STRUCTURE RULES (subplans link derived_from the analysis
-    // notes; step 1 traverses supersedes), so a bare toContain on either passes against the
-    // pre-edit file and pins nothing. These two sentences exist only in the decision step.
-    // The inbound derived_from is also what keeps the plan-note out of archive.ts's taskSettled
-    // rule (inboundFrom protects), so the reasoning survives alongside the one-line decision.
-    expect(body).toContain('keeps that plan-note out of the archive')
-    expect(body).toContain('leaves two live notes disagreeing')
+  test('it no longer claims a derived_from link protects the plan-note', () => {
+    expect(body).not.toContain('keeps that plan-note out of the archive')
+  })
+
+  test('what was ruled out is asked for once', () => {
+    expect(body.split('RULED OUT').length - 1).toBe(1)
   })
 
   test('the write happens BEFORE finalize_plan', () => {
-    expect(body).toContain('FIRST write each confirmed decision, THEN call `finalize_plan()`')
+    expect(body).toContain('FIRST record each confirmed decision, THEN call `finalize_plan()`')
   })
 })
 

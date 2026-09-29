@@ -1,5 +1,6 @@
 import { z } from 'zod'
 import { MemoryAuthor } from './author'
+import { DecisionRef } from './decision'
 import { DecisionSlug, DeliveryMode, KNOWLEDGE_LIMITS, KnowledgeId, KnowledgeRef } from './knowledge'
 
 export const KnowledgeDeliveredPayload = z.object({
@@ -17,6 +18,8 @@ export const KnowledgeWrittenPayload = z.object({
   files: z.array(z.string()),
   why: z.string().nullable(),
   decision: DecisionSlug.nullable(),
+  decisionsRecorded: z.array(DecisionRef),
+  decisionsSuperseded: z.array(DecisionRef),
   author: MemoryAuthor,
 })
 export type KnowledgeWrittenPayload = z.infer<typeof KnowledgeWrittenPayload>

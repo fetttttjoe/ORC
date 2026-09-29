@@ -1,7 +1,8 @@
 import { z } from 'zod'
 import {
-  errorMessage, EVENT_KIND, KNOWLEDGE_LIMITS, KnowledgeId, KnowledgePage, KnowledgePatch, knowledgeIdFrom,
-  type EventInput, type KnowledgeBackend, type KnowledgeCall, type KnowledgePort, type KnowledgeRead, type MemoryAuthor,
+  byAttention, DECISION_REFUSAL, DecisionDraft, DecisionFilter, DecisionInput, decisionSlugOf, decisionStatusOf, errorMessage, EVENT_KIND,
+  KNOWLEDGE_LIMITS, KnowledgeId, KnowledgePage, KnowledgePatch, knowledgeIdFrom,
+  type EventInput, type KnowledgeBackend, type KnowledgeCall, type KnowledgePort, type KnowledgeRead, type KnowledgeWrittenPayload, type MemoryAuthor,
 } from '@orc/contracts'
 
 export interface KnowledgePortDeps {
@@ -9,6 +10,7 @@ export interface KnowledgePortDeps {
   checkoutOf: (author: MemoryAuthor) => Promise<string>
   append: (event: EventInput) => Promise<void>
   warn?: (line: string) => void
+  today?: () => string
 }
 
 export const EVIDENCE_NOT_RECORDED = (reason: string): string => `evidence not recorded: ${reason}`
@@ -25,8 +27,19 @@ const limitOf = (asked: number | undefined, max: number): number => Math.min(Kno
 const pageOf = (page: Partial<KnowledgePage> | undefined): KnowledgePage =>
   KnowledgePage.parse({ cursor: page?.cursor ?? null, limit: limitOf(page?.limit, KNOWLEDGE_LIMITS.pageItems) })
 
+const utcToday = (): string => new Date().toISOString().slice(0, 10)
+
 export function createKnowledgePort(deps: KnowledgePortDeps): KnowledgePort {
   const warn = deps.warn ?? ((line: string) => console.warn(line))
+  const today = deps.today ?? utcToday
+  const recordWritten = async <R extends { warnings: string[] }>(call: KnowledgeCall, payload: KnowledgeWrittenPayload, result: R): Promise<R> => {
+    try {
+      await deps.append({ ...envelope(call), kind: EVENT_KIND.knowledge_written, payload })
+      return result
+    } catch (err) {
+      return { ...result, warnings: [...result.warnings, EVIDENCE_NOT_RECORDED(errorMessage(err))] }
+    }
+  }
   const deliver = async (call: KnowledgeRead, ids: readonly string[], subject: string): Promise<void> => {
     if (ids.length === 0) return
     try {
@@ -60,15 +73,32 @@ export function createKnowledgePort(deps: KnowledgePortDeps): KnowledgePort {
       const key = call.idempotencyKey
       const patch = key === null ? parsed : { ...parsed, add: parsed.add.map((a, i) => ({ ...a, id: a.id ?? knowledgeIdFrom(`${key}:${i}`) })) }
       const result = await deps.backend.write(await deps.checkoutOf(call.author), patch)
-      try {
-        await deps.append({
-          ...envelope(call), kind: EVENT_KIND.knowledge_written,
-          payload: { added: result.added, changed: result.changed, retired: result.retired, files: result.files, why: patch.why, decision: patch.decision, author: call.author },
-        })
-        return result
-      } catch (err) {
-        return { ...result, warnings: [...result.warnings, EVIDENCE_NOT_RECORDED(errorMessage(err))] }
-      }
+      return recordWritten(call, {
+        added: result.added, changed: result.changed, retired: result.retired, files: result.files, why: patch.why, decision: patch.decision,
+        decisionsRecorded: [], decisionsSuperseded: [], author: call.author,
+      }, result)
+    },
+    async decisions(call, filter) {
+      const { status } = DecisionFilter.parse(filter ?? {})
+      const all = await deps.backend.decisions(await deps.checkoutOf(call.author))
+      return all.filter(d => status === undefined || d.status === status).toSorted(byAttention)
+    },
+    async decision(call, id) {
+      const found = await deps.backend.decision(await deps.checkoutOf(call.author), id)
+      if (found === null) throw new Error(DECISION_REFUSAL.noSuchDecision(id))
+      return found
+    },
+    async recordDecision(call, raw) {
+      const input = DecisionInput.parse(raw)
+      const draft = DecisionDraft.parse({
+        id: decisionSlugOf(input.title), title: input.title, status: decisionStatusOf(input.status), date: today(), tags: input.tags,
+        supersedes: input.supersedes ?? null, context: input.context, decision: input.decision, consequences: input.consequences, considered: input.considered,
+      })
+      const result = await deps.backend.recordDecision(await deps.checkoutOf(call.author), draft)
+      return recordWritten(call, {
+        added: [], changed: [], retired: [], files: result.files, why: null, decision: null,
+        decisionsRecorded: [result.recorded], decisionsSuperseded: result.superseded ? [result.superseded] : [], author: call.author,
+      }, result)
     },
   }
 }

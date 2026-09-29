@@ -118,7 +118,7 @@ describe('knowledge events', () => {
   it('both kinds exist and parse their payloads', () => {
     expect(PAYLOAD_SCHEMAS[EVENT_KIND.knowledge_delivered].safeParse({ ids: ['abcd1234'], mode: DeliveryMode.card, subject: 'src/a.ts', author }).success).toBe(true)
     expect(PAYLOAD_SCHEMAS[EVENT_KIND.knowledge_written].safeParse({
-      added: [{ id: 'abcd1234', location: 'knowledge/src/a.ts.md' }], changed: [], retired: [], files: ['knowledge/src/a.ts.md'], why: null, decision: null, author,
+      added: [{ id: 'abcd1234', location: 'knowledge/src/a.ts.md' }], changed: [], retired: [], files: ['knowledge/src/a.ts.md'], why: null, decision: null, decisionsRecorded: [], decisionsSuperseded: [], author,
     }).success).toBe(true)
   })
   it('a delivery carries at most 200 ids', () => {

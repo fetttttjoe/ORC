@@ -1,6 +1,6 @@
 import { Command } from 'commander'
+import { clipLine } from '@orc/contracts'
 import type { EventLog, ProjectConfig } from '@orc/kernel'
-import { adrSummary } from '@orc/memory'
 import { ADR_SUBCOMMAND } from './adr-commands'
 import { renderBrief } from './brief'
 import { gatherBrief } from './brief-gather'
@@ -28,6 +28,6 @@ export function briefCommand(deps: {
       if (!deps.project) throw new Error('brief needs a project context')
       const brief = await gatherBrief(deps.project)
       if (o.json) console.log(JSON.stringify(brief, null, 2))
-      else for (const line of renderBrief(brief, { now: new Date(), driftText: driftLine, oneLine: adrSummary, hints: HINTS })) console.log(line)
+      else for (const line of renderBrief(brief, { now: new Date(), driftText: driftLine, oneLine: clipLine, hints: HINTS })) console.log(line)
     })
 }

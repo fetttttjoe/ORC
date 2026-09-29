@@ -3,12 +3,14 @@ import { z } from 'zod'
 import type { MemoryAuthor } from './author'
 import { ClaimClass, EntityPath } from './claim'
 import { ROOT_ENTITY } from './entity-of'
-import { KNOWLEDGE_ID_LENGTH, KNOWLEDGE_ID_RE, KnowledgeId, KnowledgeRef } from './knowledge-ref'
+import type { Decision, DecisionDraft, DecisionFilter, DecisionInputRaw, DecisionWriteResult } from './decision'
+import { DecisionSlug, KNOWLEDGE_ID_LENGTH, KNOWLEDGE_ID_RE, KNOWLEDGE_TAG_LIMITS, KnowledgeId, KnowledgeRef, KnowledgeTag } from './knowledge-ref'
 
-export { KNOWLEDGE_ID_LENGTH, KNOWLEDGE_ID_RE, KnowledgeId, KnowledgeRef } from './knowledge-ref'
+export {
+  DECISION_SLUG_CHARS, DECISION_SLUG_RE, DecisionSlug, KNOWLEDGE_ID_LENGTH, KNOWLEDGE_ID_RE, KNOWLEDGE_TAG_LIMITS, KNOWLEDGE_TAG_RE,
+  KnowledgeId, KnowledgeRef, KnowledgeTag,
+} from './knowledge-ref'
 
-export const DECISION_SLUG_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/
-export const KNOWLEDGE_TAG_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/
 const GRAMMAR_BREAKERS = /[\s#@{}]/
 const ID_ALPHABET = 'abcdefghijklmnopqrstuvwxyz0123456789'
 
@@ -16,11 +18,10 @@ export const KNOWLEDGE_LIMITS = {
   textChars: 1_000,
   whyChars: 1_000,
   anchors: 8,
-  tags: 8,
-  tagChars: 40,
+  tags: KNOWLEDGE_TAG_LIMITS.items,
+  tagChars: KNOWLEDGE_TAG_LIMITS.chars,
   sources: 8,
   urlChars: 2_048,
-  slugChars: 120,
   patchItems: 100,
   deliveredIds: 200,
   subjectChars: 300,
@@ -36,6 +37,9 @@ export enum KnowledgeToolName {
   search = 'knowledge_search',
   write = 'knowledge_write',
   taskClaims = 'task_claims',
+  decisionList = 'decision_list',
+  decisionRead = 'decision_read',
+  recordDecision = 'record_decision',
 }
 
 const idFromBytes = (bytes: Uint8Array): string =>
@@ -46,8 +50,6 @@ export const knowledgeIdFrom = (seed: string): string => idFromBytes(createHash(
 
 const grammarSafe = (value: string): boolean => !GRAMMAR_BREAKERS.test(value)
 
-export const DecisionSlug = z.string().max(KNOWLEDGE_LIMITS.slugChars).regex(DECISION_SLUG_RE)
-const Tag = z.string().max(KNOWLEDGE_LIMITS.tagChars).regex(KNOWLEDGE_TAG_RE)
 const URL_BREAKERS = /[\s<>{}]/
 export const SourceUrl = z.string().max(KNOWLEDGE_LIMITS.urlChars).refine(value => {
   if (URL_BREAKERS.test(value) || !URL.canParse(value)) return false
@@ -68,7 +70,7 @@ export const KnowledgeAnchor = z.object({
 export type KnowledgeAnchor = z.infer<typeof KnowledgeAnchor>
 
 const Anchors = z.array(KnowledgeAnchor).max(KNOWLEDGE_LIMITS.anchors)
-const Tags = z.array(Tag).max(KNOWLEDGE_LIMITS.tags)
+const Tags = z.array(KnowledgeTag).max(KNOWLEDGE_LIMITS.tags)
 const Sources = z.array(SourceUrl).max(KNOWLEDGE_LIMITS.sources)
 
 export const KnowledgeDraft = z.object({
@@ -137,7 +139,13 @@ export type KnowledgePage = z.infer<typeof KnowledgePage>
 export interface KnowledgeCard { entity: string; claims: KnowledgeClaim[]; next: string | null }
 export interface KnowledgeFormatResult { formatted: string[]; problems: KnowledgeProblem[] }
 
-export interface KnowledgeBackend {
+export interface DecisionBackend {
+  decisions(checkout: string): Promise<Decision[]>
+  decision(checkout: string, id: string): Promise<Decision | null>
+  recordDecision(checkout: string, draft: DecisionDraft): Promise<DecisionWriteResult>
+}
+
+export interface KnowledgeBackend extends DecisionBackend {
   card(checkout: string, entity: string, page: KnowledgePage): Promise<KnowledgeCard>
   search(checkout: string, query: string, limit: number): Promise<KnowledgeClaim[]>
   get(checkout: string, ids: readonly string[]): Promise<KnowledgeClaim[]>
@@ -157,7 +165,13 @@ export enum DeliveryMode {
 export interface KnowledgeCall { author: MemoryAuthor; idempotencyKey: string | null }
 export interface KnowledgeRead extends KnowledgeCall { mode: DeliveryMode }
 
-export interface KnowledgePort {
+export interface DecisionPort {
+  decisions(call: KnowledgeCall, filter?: DecisionFilter): Promise<Decision[]>
+  decision(call: KnowledgeCall, id: string): Promise<Decision>
+  recordDecision(call: KnowledgeCall, input: DecisionInputRaw): Promise<DecisionWriteResult>
+}
+
+export interface KnowledgePort extends DecisionPort {
   card(call: KnowledgeRead, entity: string, page?: Partial<KnowledgePage>): Promise<KnowledgeCard>
   search(call: KnowledgeRead, query: string, limit?: number): Promise<KnowledgeClaim[]>
   get(call: KnowledgeRead, ids: readonly string[]): Promise<KnowledgeClaim[]>
@@ -194,4 +208,5 @@ export const KNOWLEDGE_REFUSAL = {
   missingCheckout: (dir: string): string => `checkout '${dir}' does not exist`,
   off: (): string => 'knowledge is off for this project (.orc/config.json "knowledge": null)',
   unavailable: (reason: string): string => `knowledge unavailable: ${reason}`,
+  unknownDecision: (slug: string): string => `no decision '${slug}' in this checkout — record it first, or drop the reference`,
 } as const

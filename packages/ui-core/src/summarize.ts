@@ -1,4 +1,4 @@
-import { EVENT_KIND, NOTE_TIER, PAYLOAD_SCHEMAS, noteLabel, type EventKind, type EventRecord, type Plan } from '@orc/contracts'
+import { EVENT_KIND, NOTE_TIER, PAYLOAD_SCHEMAS, noteLabel, type EventKind, type EventRecord, type KnowledgeWrittenPayload, type Plan } from '@orc/contracts'
 import { z } from 'zod'
 import { noteNodeId } from './graph'
 import type { LogRow as WireLogRow } from './wire'
@@ -20,6 +20,11 @@ const AgentResponse = z.object({
 
 const planLine = (plan: Plan): string =>
   `v${plan.version} · ${plan.steps.length} step${plan.steps.length === 1 ? '' : 's'} · ${plan.strategyRef}`
+
+const decisionLine = (p: Pick<KnowledgeWrittenPayload, 'decisionsRecorded' | 'decisionsSuperseded'>): string => {
+  const ids = (refs: readonly { id: string }[]): string => refs.map(r => r.id).join(', ')
+  return `decision ${ids(p.decisionsRecorded)}${p.decisionsSuperseded.length > 0 ? ` supersedes ${ids(p.decisionsSuperseded)}` : ''}`
+}
 
 // the fields a kind's summary may fill in; everything else on the row comes off the envelope
 type PartialRow = Partial<Pick<LogRow, 'line' | 'noteRef' | 'authorTaskId' | 'exchange'>>
@@ -104,7 +109,7 @@ const SUMMARIZE = {
     authorTaskId: p.author.taskId ?? null,
   })),
   [EVENT_KIND.knowledge_written]: entry(PAYLOAD_SCHEMAS.knowledge_written, p => ({
-    line: `+${p.added.length} ~${p.changed.length} -${p.retired.length}${p.why === null ? '' : ` · ${snip(p.why, 80)}`}`,
+    line: p.decisionsRecorded.length > 0 ? decisionLine(p) : `+${p.added.length} ~${p.changed.length} -${p.retired.length}${p.why === null ? '' : ` · ${snip(p.why, 80)}`}`,
     authorTaskId: p.author.taskId ?? null,
   })),
   [EVENT_KIND.signal_received]: entry(PAYLOAD_SCHEMAS.signal_received, p => ({

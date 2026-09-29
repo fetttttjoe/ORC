@@ -27,7 +27,7 @@ export const toolSchemaOf = (schema: z.ZodType): Record<string, unknown> => {
   return json
 }
 
-interface ToolSpec {
+export interface ToolSpec {
   description: string
   input: z.ZodType
   run(port: KnowledgePort, author: MemoryAuthor, input: unknown, toolCallId: string | undefined): Promise<unknown>
@@ -64,15 +64,16 @@ const SPECS: Record<KnowledgeStepToolName, ToolSpec> = {
   },
 }
 
+export function resolveKnowledgeTool(name: KnowledgeToolName, spec: ToolSpec, access: KnowledgeAccess, author: MemoryAuthor): ResolvedTool {
+  return {
+    ref: `knowledge/${name}`, name, description: spec.description, inputSchema: toolSchemaOf(spec.input),
+    execute: async (input: unknown, toolCallId?: string) => {
+      if ('unavailable' in access) return { output: { error: KNOWLEDGE_REFUSAL.unavailable(access.unavailable) }, isError: true }
+      try { return { output: await spec.run(access.port, author, input, toolCallId), isError: false } } catch (err) { return toolError(err) }
+    },
+  }
+}
+
 export function knowledgeTools(access: KnowledgeAccess, author: MemoryAuthor, names: readonly KnowledgeStepToolName[]): ResolvedTool[] {
-  return names.map(name => {
-    const spec = SPECS[name]
-    return {
-      ref: `knowledge/${name}`, name, description: spec.description, inputSchema: toolSchemaOf(spec.input),
-      execute: async (input: unknown, toolCallId?: string) => {
-        if ('unavailable' in access) return { output: { error: KNOWLEDGE_REFUSAL.unavailable(access.unavailable) }, isError: true }
-        try { return { output: await spec.run(access.port, author, input, toolCallId), isError: false } } catch (err) { return toolError(err) }
-      },
-    }
-  })
+  return names.map(name => resolveKnowledgeTool(name, SPECS[name], access, author))
 }

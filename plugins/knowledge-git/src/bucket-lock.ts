@@ -50,7 +50,9 @@ export const breakStale = (lock: string, judged: string | null, staleMs: number)
   } finally { releaseHeld(breaker, mine) }
 }
 
-export function createBucketLocks(options: LockOptions = DEFAULT_LOCK_OPTIONS) {
+export interface BucketLocks { withLocks<T>(files: readonly string[], fn: () => Promise<T>): Promise<T> }
+
+export function createBucketLocks(options: LockOptions = DEFAULT_LOCK_OPTIONS): BucketLocks {
   const chains = new Map<string, Promise<void>>()
 
   const acquireFile = async (file: string): Promise<() => void> => {

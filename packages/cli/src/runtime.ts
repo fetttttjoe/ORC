@@ -3,7 +3,7 @@ import { apiLoopExecutor } from '@orc/executor-api-loop'
 import { configuredProviders } from './providers'
 import { agentAnalyzer } from '@orc/analyzer-agent'
 import { createMcpHub, type McpHub } from '@orc/mcp-client'
-import { readCorpusDrift, checkoutDrift, CONSOLIDATE_EXECUTOR, createMemory, createMemoryLifecycle, decisionDoor, finishTools, notesCiting, restampToHead, treeStamps, unavailableStepMemory, memoryRoleFor, memoryToolsForStep, type BindStep, type MemoryLifecycle } from '@orc/memory'
+import { readCorpusDrift, checkoutDrift, CONSOLIDATE_EXECUTOR, createMemory, createMemoryLifecycle, notesCiting, restampToHead, treeStamps, unavailableStepMemory, memoryToolsForStep, type BindStep, type MemoryLifecycle } from '@orc/memory'
 import { AUTO_HEAL_DEBOUNCE_MS, AUTO_SWEEP_TITLE, createAutoHeal, sweepPlanDraft } from './auto-heal'
 import { openMemory } from './memory-open'
 import { knowledgeAccess, openKnowledge } from './knowledge-open'
@@ -232,11 +232,10 @@ export async function buildRuntime(
       // p.origin is the RUNNING STEP's own origin (its run chat), never this process's: the note a
       // step writes belongs to the conversation that step is.
       const author: MemoryAuthor = { source: AUTHOR_SOURCE.agent, origin: p.origin, workspaceId: p.workspaceId, taskId: p.taskId, stepId: p.stepId, runToken: p.runToken, executor: p.executor, model: p.model, role: p.role }
-      // step role sets the memory role's epistemic posture; keep: memoryToolsForStep(p) decides the tool surface.
       const bound = bindStep({
         author,
         step: p.step, taskId: p.taskId, ancestorTaskIds: p.ancestorTaskIds,
-        role: memoryRoleFor(p.role), ambientCapture: config.ambientCapture, keep: memoryToolsForStep(p),
+        ambientCapture: config.ambientCapture, keep: memoryToolsForStep(p),
       })
       const stepKnowledge = bindStepKnowledge({
         access: knowledgeAccess(knowledgeOpening, log, p.workspaceDir), author, p,
@@ -267,12 +266,6 @@ export async function buildRuntime(
       // it to the grounded `plan` step, which shares that role). Read-only, and a FLOOR — never a
       // substitute for the test/typecheck gate, never a reason to dismiss an in-scope defect.
       ...scopedChangesTool({ kernel, p, ...(stepKnowledge.citing && { claimsAt: stepKnowledge.citing }) }),
-      // The finish step's tool: the one write it may make after the human approved the wording.
-      // Gated inside the factory on stepMayReconcile — both terms, so only the kernel-appended
-      // finish step arms it. `door` is null when memory is degraded so record_decision answers
-      // "unavailable" rather than vanishing: a tool that disappears reads to the model as "no
-      // decision to record".
-      ...finishTools({ door: memory ? decisionDoor(memory) : null, author, p }),
       // The commit step's tool pair (autoCommit pipeline): preview the task's floor diff, commit,
       // advance the note stamps this task earned at the new HEAD. Registration is gated TWICE — on
       // config.autoCommit here (the operator's runtime switch, so a stale frozen plan cannot commit
@@ -282,7 +275,7 @@ export async function buildRuntime(
       // `reverify` is store.verify, which advances the verified stamp of notes a step DECLARED
       // verified and touches nothing the note says. With memory degraded the tool still commits and
       // says which stamp pass was skipped.
-      ...(config.autoCommit ? commitTool({ kernel, dir: config.dir, p,
+      ...(config.autoCommit ? commitTool({ kernel, dir: p.workspaceDir, p,
         ...(memoryStore ? {
           restamp: async (note: { id: string; scope: string }, idempotencyKey: string) => { await memoryStore.write({ id: note.id, scope: note.scope }, author, { idempotencyKey }) },
           reverify: async (note: { id: string; scope: string }, idempotencyKey: string) => { await memoryStore.verify(note.id, note.scope, author, { idempotencyKey }) },

@@ -129,11 +129,11 @@ orc memory claims <note-id> [--json]  # a note's live claims; --history folds th
 orc adr new "<title>" --context … --decision … --consequences … [--status s] [--tags …]
                                 # record a decision (id = slugged title); status defaults to accepted
 orc adr ls [--status s] [--json]  # list decisions, attention-first: proposed → accepted → deprecated → superseded
-orc adr show <id>               # one decision: status, provenance, Context / Decision / Consequences
+orc adr show <id>               # one decision: status, date, file, Context / Decision / Consequences (and Considered)
 orc adr supersede <old-id> "<title>" --context … --decision … --consequences … [--status s] [--tags …]
                                 # records the replacement and marks <old-id> superseded, in one operation
-                                # decisions are `kind: decision` notes with a status; `orc adr` writes them
-                                # as `human`, the MCP door's record_decision as `mcp`
+                                # decisions are files under docs/decisions/<yyyy-mm-dd>-<slug>.md; `orc adr` records
+                                # them as `human`, the MCP door's record_decision as `mcp`
 ```
 
 Every root plan (and every frozen grounded pipeline) ends with a **finish**
@@ -403,7 +403,7 @@ Tools served (project-bound, same `OrcActions` validation as the web):
 | Kind | Tools |
 |---|---|
 | Read | `project_status`, `task_plan`, `task_transcript`, `plan_notes`, `recent_activity`, `available_models` (the live provider catalog — call it before naming a `modelRef`, never guess one) |
-| Knowledge (degraded-tolerant) | `memory_search`, `memory_read`, `memory_neighbors`, `memory_topics` (statements grouped by meaning; list them, then read one's claims), `memory_recheck` (the corpus drift verdict: counts plus the drifted/unknown lists) |
+| Knowledge (degraded-tolerant) | `knowledge_card`, `knowledge_search`, `decision_list`, `decision_read` |
 | Mutate | `new_request` (quick/grounded; `workspaceId` defaults to the workspace this server runs in), `propose`, `run` (in the task's workspace unless a `cwd` says otherwise), `reply`, `retry`, `cancel`, `annotate`, `revise` |
 | Decisions | `record_decision` — record an ADR-shaped decision (Context / Decision / Consequences, status, optional `supersedes`); the one knowledge-authoring tool on this door, attributed `mcp` — the same tool in the web copilot writes `cli` |
 | Workspaces (served only with the mutating door) | `workspace_list` — the checkouts this project is worked in, each with its health (state, last activity, task counts, notes still pending a merge) and ordered attention-first, read-only; `workspace_new` — a git worktree + branch for ONE request under `.orc/worktrees`, recorded as a workspace, with the request as its first task |

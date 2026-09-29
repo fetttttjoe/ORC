@@ -7,7 +7,6 @@ import { ApprovedBy, Door, EVENT_KIND, ModelsDiscoveredPayload, NO_CHAT, isRecor
 import { authorFixture, must } from '@orc/contracts/fixtures'
 import { KNOWLEDGE_READ_TOOLS, knowledgeTools } from '@orc/knowledge-core'
 import { buildCopilotTools } from '@orc/ui-core'
-import { MEMORY_READ_TOOLS, unavailableMemoryTools } from '@orc/memory'
 import { openStorage } from '@orc/kernel'
 import { createTestDb, testConfig, TEST_PROJECT_ID } from '@orc/kernel/test-helpers'
 import { buildModelDiscovery } from './actions'
@@ -130,7 +129,7 @@ describe('orc mcp serve (stdio, read slice)', () => {
     const names = toolNames(frame2.result)
     expect(new Set(names)).toEqual(new Set([
       'project_status', 'task_plan', 'task_transcript', 'plan_notes', 'recent_activity', 'available_models',
-      'memory_search', 'memory_read', 'memory_neighbors', 'memory_topics', 'memory_recheck',
+      'decision_list', 'decision_read',
       'knowledge_card', 'knowledge_search',
       'new_request', 'workspace_list', 'workspace_new', 'record_decision',
       'propose', 'run', 'reply', 'retry', 'cancel', 'annotate', 'revise', 'approve',
@@ -162,15 +161,13 @@ describe('orc mcp serve (stdio, read slice)', () => {
     expect(asJsonObject(createdContent0.text)).toHaveProperty('taskId')
   }, 40_000)
 
-  it('door parity is mechanical: every copilot tool is served, memory read names still exist', () => {
+  it('door parity is mechanical: every copilot tool is served, no memory tool is', () => {
     // if this fails, the doors drifted — a copilot tool was added/renamed without the MCP
-    // surface following (it follows automatically; this test proves it), or the memory
-    // plugin renamed a read tool out from under the READ_MEMORY whitelist
+    // surface following (it follows automatically; this test proves it)
     const sessions = sessionsStub()
     const actions = actionsStub()
-    const memoryTools = unavailableMemoryTools('parity-check') // full named surface, no store needed
     const served = buildServeTools({
-      sessions, projectId: 'p1', memoryTools, actions, autonomy: 'gated',
+      sessions, projectId: 'p1', actions, autonomy: 'gated',
       knowledgeTools: knowledgeTools({ unavailable: 'parity-check' }, authorFixture(), KNOWLEDGE_READ_TOOLS),
     }).map(t => t.name)
     // A per-name `toContain` could not see a tool the composition GAINED — and "record_decision is
@@ -179,9 +176,7 @@ describe('orc mcp serve (stdio, read slice)', () => {
     // copilot set it composes carries available_models; omitting it here would compare the served
     // surface against a set the door never builds.
     const copilot = Object.keys(buildCopilotTools({ sessions, actions, projectId: 'p1', origin: MCP, listModels: async () => [] }))
-    expect(new Set(served)).toEqual(new Set([...copilot, ...MEMORY_READ_TOOLS, ...KNOWLEDGE_READ_TOOLS, 'approve']))
-    expect(served).not.toContain('memory_write')
-    expect(served).not.toContain('memory_verify')
+    expect(new Set(served)).toEqual(new Set([...copilot, ...KNOWLEDGE_READ_TOOLS, 'approve']))
   })
 
   // The serve door drives agents over MCP that must never invent a model ref (the copilot system
@@ -203,7 +198,7 @@ describe('orc mcp serve (stdio, read slice)', () => {
     const discovery = buildModelDiscovery(config, { log, origin: MCP }, 2000)
     const actions = actionsStub({ listModels: discovery.listModels })
     const served = buildServeTools({
-      sessions: sessionsStub(), projectId: 'p1', memoryTools: unavailableMemoryTools('model-door'), actions, autonomy: 'gated',
+      sessions: sessionsStub(), projectId: 'p1', actions, autonomy: 'gated',
       knowledgeTools: knowledgeTools({ unavailable: 'model-door' }, authorFixture(), KNOWLEDGE_READ_TOOLS),
     })
     return { log, tool: must(served.find(t => t.name === 'available_models'), 'available_models tool') }
@@ -273,9 +268,8 @@ describe('orc mcp serve (stdio, read slice)', () => {
     const calls: unknown[] = []
     const actions = actionsStub({ run: async (id, cwd, origin) => { calls.push([id, cwd, origin]); return { requested: true, since: 0 } } })
     const sessions = sessionsStub()
-    const memoryTools = unavailableMemoryTools('parity-check')
     const served = buildServeTools({
-      sessions, projectId: 'p1', memoryTools, actions, autonomy: 'gated',
+      sessions, projectId: 'p1', actions, autonomy: 'gated',
       knowledgeTools: knowledgeTools({ unavailable: 'parity-check' }, authorFixture(), KNOWLEDGE_READ_TOOLS),
     })
     const run = must(served.find(t => t.name === 'run'), 'run tool')

@@ -1,24 +1,25 @@
 import { afterAll, describe, expect, it } from 'bun:test'
-import { mkdtempSync, realpathSync } from 'node:fs'
+import { existsSync, mkdtempSync, readdirSync, realpathSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import {
-  APPROVAL_ANSWER, AUTHOR_SOURCE, DECISION_STATUS, Door, EVENT_KIND, FINISH_STEP_ID, isApprovalAnswer, KnowledgeToolName, NO_CHAT,
-  MemoryWrittenPayload, NOTE_KIND, NOTE_TIER, parseModelRef, SignalOutcome, slugId, STEP_ROLE, TASK_STATUS,
+  APPROVAL_ANSWER, AUTHOR_SOURCE, DEFAULT_KNOWLEDGE_PLUGIN, decisionSlugOf, DecisionStatus, Door, EVENT_KIND, FINISH_STEP_ID, isApprovalAnswer,
+  KnowledgeToolName, KnowledgeWrittenPayload, NO_CHAT, parseModelRef, SignalOutcome, STEP_ROLE, TASK_STATUS,
   type AgentExecutor, type EventDraft, type ExecutorContext, type SplitResult, type UnifiedEvent,
   RunOutcome,
 } from '@orc/contracts'
 import { draftFixture, stepFixture } from '@orc/contracts/fixtures'
 import { dbosSend, openStorage, Kernel, type ProjectConfig } from '@orc/kernel'
-import { createTestDb, fakeProvider, seedTestWorkspace, testConfig, TEST_PROJECT_ID, TEST_WORKSPACE_ID, waitFor } from '@orc/kernel/test-helpers'
-import { FINISH_TOOL_NAME } from '@orc/memory'
+import { createTestDb, fakeProvider, seedTestWorkspace, sh, testConfig, TEST_PROJECT_ID, TEST_WORKSPACE_ID, waitFor } from '@orc/kernel/test-helpers'
 import { buildPlugins, buildRuntime } from './runtime'
 import { seedShippedSkills } from './shipped-skills'
 import { dropSurrealDb, testSurrealDbName } from './test-helpers'
 
 const dbs: Array<{ drop: () => Promise<void> }> = []
 const surrealBases: ProjectConfig[] = []
+const checkouts: string[] = []
 afterAll(async () => {
+  for (const c of checkouts) rmSync(c, { recursive: true, force: true })
   for (const d of dbs) await d.drop()
   await Promise.all(surrealBases.map(c => dropSurrealDb(c)))
 })
@@ -28,6 +29,7 @@ afterAll(async () => {
 const FINISH_TOPIC = 'finish'
 const FINISH_QUESTION = 'SUMMARY: ran s1 and wrote nothing. Reply approve to finish.'
 const DECISION_DRAFT = { title: 'E2E decision', context: 'c', decision: 'd', consequences: 'q' }
+const RECORD_CALL_ID = 'record-1'
 
 // this test drives the CLI door end to end; the run's own appends get their origin from the runtime
 const CLI = NO_CHAT(Door.cli)
@@ -45,6 +47,7 @@ const finishProbe: {
   toolNames: string[]
   taskClaims?: { output: unknown; isError: boolean }
   decision?: { output: unknown; isError: boolean }
+  replay?: { output: unknown; isError: boolean }
   answer?: string
 } = { toolNames: [] }
 
@@ -66,8 +69,11 @@ const finishExecutor: AgentExecutor<unknown> = {
       // because a person already approved its wording in the gate above, so a step that recorded it
       // regardless would be stamping consent nobody gave.
       if (isApprovalAnswer(answer)) {
-        const record = ctx.extraTools.find(t => t.name === FINISH_TOOL_NAME.recordDecision)
-        if (record !== undefined) finishProbe.decision = await record.execute(DECISION_DRAFT, undefined)
+        const record = ctx.extraTools.find(t => t.name === KnowledgeToolName.recordDecision)
+        if (record !== undefined) {
+          finishProbe.decision = await record.execute(DECISION_DRAFT, RECORD_CALL_ID)
+          finishProbe.replay = await record.execute(DECISION_DRAFT, RECORD_CALL_ID)
+        }
       }
       summary = `finished: ${answer}`
     }
@@ -91,12 +97,15 @@ describe('the finish step, end to end', () => {
     dbs.push(db)
     const vaultDir = mkdtempSync(path.join(tmpdir(), 'orc-finish-'))
     const projectDbName = testSurrealDbName()
-    const config = testConfig(db.url, { vaultDir, skillsDir: path.join(vaultDir, 'skills'), projectDbName })
+    const config = testConfig(db.url, { vaultDir, skillsDir: path.join(vaultDir, 'skills'), projectDbName, knowledge: { plugin: DEFAULT_KNOWLEDGE_PLUGIN, options: {} } })
     // Seeded the way `orc init` seeds a real project: the finish step declares ROLE_SKILL.finisher,
     // and a temp skills dir that nothing seeds fails the run at step init with "unknown skill
     // 'role-finisher'".
     seedShippedSkills(config.skillsDir)
     surrealBases.push(config)
+    const checkout = realpathSync(mkdtempSync(path.join(tmpdir(), 'orc-finish-checkout-')))
+    checkouts.push(checkout)
+    sh(checkout, 'init', '-q')
     const storage = await openStorage(db.url, { projectId: TEST_PROJECT_ID })
     const log = storage.events
     // dbosSend, not the bare `new Kernel(log)` of runtime.test.ts: replyFeedback must SEND on the
@@ -118,7 +127,7 @@ describe('the finish step, end to end', () => {
       expect(plan.steps.map(s => s.id)).toEqual(['s1', FINISH_STEP_ID])
       await kernel.approvePlan(t.id, undefined, undefined, CLI)
 
-      const handle = await port.startRun(t.id)
+      const handle = await port.startRun(t.id, { cwd: checkout })
       expect(await waitFor(async () => (await kernel.eventsFor(t.id)).some(e => e.kind === EVENT_KIND.feedback_requested), 20_000)).toBe(true)
       const asked = (await kernel.eventsFor(t.id)).find(e => e.kind === EVENT_KIND.feedback_requested)
       // the question belongs to the FINISH step, not to s1 — the envelope is what an operator's
@@ -131,35 +140,27 @@ describe('the finish step, end to end', () => {
       // working task_claims — both are the tools/resume seam this test exists for
       expect(finishProbe.answer).toBe(APPROVAL_ANSWER)
       expect(isApprovalAnswer(finishProbe.answer ?? '')).toBe(true)
-      // Both tools REACHED the step, asserted before their results so a gate that withheld one
-      // fails as "the tool never arrived" instead of as an undefined result. The exact set of the
-      // finish step's surface is runtime.test.ts's assertion; this is the composition's own check.
       expect(finishProbe.toolNames).toContain(KnowledgeToolName.taskClaims)
-      expect(finishProbe.toolNames).toContain(FINISH_TOOL_NAME.recordDecision)
-      // empty is honest for this fixture, whose scripted steps write no claims and whose
-      // consolidation note is authored AFTER the task settles. A bare array (or a thrown listing)
-      // would show up here as a shape change.
+      expect(finishProbe.toolNames).toContain(KnowledgeToolName.recordDecision)
       expect(finishProbe.taskClaims).toEqual({ output: { claims: [], retired: [], missing: [] }, isError: false })
-      // the id the tool reports is the slugged title — the same id the logged note carries below
-      expect(finishProbe.decision).toEqual({ output: { id: slugId(DECISION_DRAFT.title), status: DECISION_STATUS.accepted }, isError: false })
 
-      // The LOG is the truth: the read model is a projection of it. `log.all()`, NOT
-      // `kernel.eventsFor(t.id)` — MEASURED: the store appends every memory event with
-      // `taskId: null` in the envelope (store.ts, and kernel.ts:318/:338 say so), so byTask returns
-      // none of them and a task-scoped filter here would be an assertion that can never pass. The
-      // writing task lives on `payload.author.taskId`, which is what this narrows on.
-      const written = (await log.all()).filter(e => e.kind === EVENT_KIND.memory_written).map(e => MemoryWrittenPayload.parse(e.payload))
-      const adr = written.find(w => w.author.taskId === t.id && w.note.tier === NOTE_TIER.semantic && w.note.kind === NOTE_KIND.decision)
-      // The PIPELINE fields too, not just the envelope ones: `role`/`executor`/`model` are what
-      // composeAuthor renders into the note's createdBy ('api-loop·m·finisher'), and they are the
-      // half the port could silently stop forwarding — an author missing them still satisfies
-      // MemoryAuthor (all three are optional) and still writes a note, one that reads as a bare
-      // 'agent' in the vault forever, since createdBy is sticky across rewrites.
-      expect(adr?.author).toMatchObject({
+      const id = decisionSlugOf(DECISION_DRAFT.title)
+      expect(finishProbe.decision).toEqual({ output: { id, status: DecisionStatus.accepted, superseded: null, warnings: [] }, isError: false })
+      expect(finishProbe.replay).toEqual(finishProbe.decision)
+
+      const written = (await log.after(0, [EVENT_KIND.knowledge_written])).filter(e => e.taskId === t.id)
+      expect(written).toHaveLength(1)
+      const payload = KnowledgeWrittenPayload.parse(written[0]?.payload)
+      expect(payload.decisionsRecorded.map(d => d.id)).toEqual([id])
+      const location = payload.decisionsRecorded[0]?.location ?? ''
+      expect(existsSync(path.join(checkout, location))).toBe(true)
+      expect(readdirSync(path.join(checkout, path.dirname(location)))).toEqual([path.basename(location)])
+      expect(existsSync(path.join(config.dir, location))).toBe(false)
+      expect(payload.author).toMatchObject({
         source: AUTHOR_SOURCE.agent, workspaceId: TEST_WORKSPACE_ID, taskId: t.id, stepId: FINISH_STEP_ID,
         role: STEP_ROLE.finisher, executor: LAST_STEP.executorRef, model: parseModelRef(LAST_STEP.modelRef).modelId,
       })
-      expect(adr?.note).toMatchObject({ id: slugId(DECISION_DRAFT.title), status: DECISION_STATUS.accepted })
+      expect((await kernel.listTaskKnowledgeWrites(t.id)).files).toContain(location)
       expect((await kernel.getTask(t.id))?.status).toBe(TASK_STATUS.done)
     } finally {
       await port.shutdown()

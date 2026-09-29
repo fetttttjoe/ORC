@@ -1,10 +1,10 @@
 import { describe, expect, it } from 'bun:test'
 import { z } from 'zod'
-import { AUTHOR_SOURCE, type Claim, ClaimClass, claimId, CLAIM_ID_RE, DecisionStatus, Door, MEMORY_ID_RE, EDGE_DIRECTION, LINK_KIND, LinkKind, MEMORY_ACCESS, MEMORY_LIMITS, type MemoryAuthor, type Origin, MemoryNoteInput, NOTE_KIND, NOTE_TIER, MemoryWriteResult, MEMORY_TOOL_NAME, STEP_ID, STEP_ROLE, VERIFY_STEP_ID, type AccessVia, type MemoryAccessMode, type MemoryFilter, type MemoryNote, type MemoryNoteDraft, type MemoryStore, type NoteSummary } from '@orc/contracts'
+import { AUTHOR_SOURCE, type Claim, ClaimClass, claimId, CLAIM_ID_RE, DecisionStatus, Door, KnowledgeToolName, MEMORY_ID_RE, EDGE_DIRECTION, LINK_KIND, LinkKind, MEMORY_ACCESS, MEMORY_LIMITS, type MemoryAuthor, type Origin, MemoryNoteInput, NOTE_KIND, NOTE_TIER, MemoryWriteResult, MEMORY_TOOL_NAME, STEP_ID, STEP_ROLE, VERIFY_STEP_ID, type AccessVia, type MemoryAccessMode, type MemoryFilter, type MemoryNote, type MemoryNoteDraft, type MemoryStore, type NoteSummary } from '@orc/contracts'
 import { TEST_WORKSPACE_ID, authorFixture, episodicNoteFixture, semanticNoteFixture, must } from '@orc/contracts/fixtures'
 import { approxTokens } from './budget'
 import { claimHitFixture, noopMemoryStore, summaryFixture } from './test-helpers'
-import { MEMORY_READ_TOOLS, memoryTools, memoryRoleFor, memoryToolsForStep, memoryVerifyTool, noteLint } from './tools'
+import { MEMORY_READ_TOOLS, memoryTools, memoryToolsForStep, DECISION_KIND_REFUSAL, memoryVerifyTool, noteLint } from './tools'
 import type { ClaimHit } from './claim-search'
 import type { BlobsAt, DriftSources } from './claim-drift-read'
 import type { ChangedSince } from './drift'
@@ -956,7 +956,7 @@ describe('memory tools', () => {
   // Comparing memoryTools(store, author) against memoryTools(store, author, 'verify') proves only
   // that the default parameter is 'verify' — both sides are the same call. Appending an
   // epistemics fragment to the verify descriptions moves both sides together and the test stays
-  // green, while every plain worker step (the memoryRoleFor default in production) silently ships a
+  // green, while every plain worker step (the default role) silently ships a
   // changed tool surface to the model. Pin the surface against literals instead.
   it('verify tier carries the full tool set with NO epistemics fragment appended', () => {
     const { store } = fakeStore()
@@ -977,11 +977,13 @@ describe('memory tools', () => {
     }
   })
 
-  it('memoryRoleFor is the single source both prod (runtime.ts) and the grounded e2e derive the role from', () => {
-    expect(memoryRoleFor('scout')).toBe('scout')
-    expect(memoryRoleFor('auditor')).toBe('auditor')
-    expect(memoryRoleFor('implementer')).toBe('verify')
-    expect(memoryRoleFor('anything-else')).toBe('verify')
+  it('memory_write refuses kind decision and names record_decision, storing nothing', async () => {
+    const { store, written } = fakeStore()
+    const write = must(memoryTools({ store, author: CLI }).find(t => t.name === 'memory_write'), 'memory_write tool')
+    const r = await write.execute({ title: 'Use files', kind: NOTE_KIND.decision, summary: 's', body: 'b' }, 'call-d')
+    expect(r).toEqual({ output: { error: DECISION_KIND_REFUSAL }, isError: true })
+    expect(DECISION_KIND_REFUSAL).toContain(KnowledgeToolName.recordDecision)
+    expect(written).toHaveLength(0)
   })
 
   it('memory_write never advertises a limit looser than the parser accepts', () => {
@@ -1663,9 +1665,9 @@ describe('memory_verify', () => {
 })
 
 describe('memoryToolsForStep', () => {
-  it('the plan step keeps write, search and read; the finish step search and read; every other step none', () => {
-    expect(memoryToolsForStep({ stepId: STEP_ID.plan, role: STEP_ROLE.auditor })).toEqual([MEMORY_TOOL_NAME.write, MEMORY_TOOL_NAME.search, MEMORY_TOOL_NAME.read])
-    expect(memoryToolsForStep({ stepId: STEP_ID.finish, role: STEP_ROLE.finisher })).toEqual([MEMORY_TOOL_NAME.search, MEMORY_TOOL_NAME.read])
+  it('the plan step keeps write; every other step none', () => {
+    expect(memoryToolsForStep({ stepId: STEP_ID.plan, role: STEP_ROLE.auditor })).toEqual([MEMORY_TOOL_NAME.write])
+    expect(memoryToolsForStep({ stepId: STEP_ID.finish, role: STEP_ROLE.finisher })).toEqual([])
     expect(memoryToolsForStep({ stepId: STEP_ID.verify, role: STEP_ROLE.auditor })).toEqual([])
     expect(memoryToolsForStep({ stepId: 's1', role: STEP_ROLE.worker })).toEqual([])
   })

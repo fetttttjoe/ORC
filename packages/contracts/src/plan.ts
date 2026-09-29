@@ -42,8 +42,7 @@ export { STEP_ID, VERIFY_STEP_ID, COMMIT_STEP_ID, CHECKS_STEP_ID, CHECKS_EXECUTO
 import { STEP_ID, VERIFY_STEP_ID, MASTERPLAN_NOTE_ID } from './step-ids'
 
 // Step roles the system gives meaning to. `PlanStep.role` stays an open string on purpose — an
-// extension may introduce its own role, and memoryRoleFor maps an unknown one to the default
-// surface — so this is the KNOWN set, not a closed enum.
+// extension may introduce its own role — so this is the KNOWN set, not a closed enum.
 export const STEP_ROLE = {
   scout: 'scout', implementer: 'implementer', auditor: 'auditor', worker: 'worker',
   // kernel-set only (withCommitStep): a planner note named 'commit' freezes as implementer, so the
@@ -61,7 +60,7 @@ export const STEP_ROLE = {
 export const stepMayVerify = (p: { stepId: string; role: string }): boolean =>
   p.role === STEP_ROLE.auditor && p.stepId !== STEP_ID.plan
 
-// The grounded plan step: it alone authors plan notes and records decisions until those leave the memory store.
+// The grounded plan step: it alone authors plan notes.
 export const stepMayPlan = (p: { stepId: string; role: string }): boolean => p.stepId === STEP_ID.plan && p.role === STEP_ROLE.auditor
 
 // The finish step's gate — BOTH terms, like the commit gate: the finisher role is kernel-set

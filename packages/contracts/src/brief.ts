@@ -51,15 +51,10 @@ export const Brief = z.object({
   // blocked came out as "blocked: 1 shown, +2 more". A capped list that does not admit it was
   // capped reads as the whole truth; one that admits it under the wrong heading is worse.
   hiddenTasks: z.record(z.enum(BRIEF_TASK_STATUSES), z.number().int()),
-  // null = the memory read model could not be asked. NOT an empty list: "this project has decided
-  // nothing" and "Surreal is down" must not render the same, or an outage silently licenses
+  // null = the decision files could not be read. NOT an empty list: "this project has decided
+  // nothing" and "the files could not be read" must not render the same, or an outage silently licenses
   // re-opening every settled question.
   decisions: z.object({ shown: z.array(BriefDecision), total: z.number().int() }).nullable(),
-  // Knowledge events the read model has not applied yet. The brief reads the read model AS IT
-  // STANDS and never drains the projector into it, so the decisions and the note count above can be
-  // this many events behind the log; saying so is what makes reading a stale model honest. 0 when
-  // the read model could not be reached at all — `decisions: null` already says that.
-  pendingKnowledge: z.number().int(),
   // Present only when the corpus has fallen far enough behind the code for the re-ground advisory
   // to fire; a ratio below that is `orc status`'s to print, not something to open every session with.
   drift: z.object({ checkable: z.number().int(), drifted: z.number().int(), ratio: z.number() }).nullable(),

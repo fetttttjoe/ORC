@@ -22,7 +22,6 @@ const brief = {
   tasks: [{ id: 't1', title: 'Add search', status: TASK_STATUS.awaiting_approval, workspaceId: WS_ID, workspaceTitle: row.workspace.title }],
   hiddenTasks: { [TASK_STATUS.awaiting_approval]: 0, [TASK_STATUS.running]: 0, [TASK_STATUS.blocked]: 0 },
   decisions: { shown: [{ id: 'use-postgres', title: 'Use Postgres', summary: 'The event log lives in Postgres.' }], total: 1 },
-  pendingKnowledge: 0,
   drift: null,
 }
 

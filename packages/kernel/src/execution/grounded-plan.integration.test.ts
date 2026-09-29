@@ -11,7 +11,7 @@ import {
   RunOutcome,
 } from '@orc/contracts'
 import { authorFixture, must } from '@orc/contracts/fixtures'
-import { createMemory, memoryRoleFor } from '@orc/memory'
+import { createMemory } from '@orc/memory'
 import { createTestSurreal } from '@orc/memory/test-helpers'
 import { openStorage } from '../storage'
 import { Kernel } from '../kernel'
@@ -211,17 +211,13 @@ async function bringUp() {
     // the analyze/plan steps declare skillRefs; a minimal loader satisfies the force-load (the
     // fake ignores skill bodies — the loop behaviour comes from the scripted branches).
     skills: { load: async (name: string) => ({ name, body: `body of ${name}`, hash: `hash-${name}` }) },
-    // FAITHFUL MIRROR of runtime.ts buildRuntime.stepTools — the SAME tier-derived memory surface +
+    // FAITHFUL MIRROR of runtime.ts buildRuntime.stepTools — the SAME memory surface +
     // task_split + read_annotations + finalize_plan the CLI wires in production. The factory shape
     // is replicated (not imported) on purpose: that inline factory is a composition-root concern
     // closing over cli-only handles, and sharing it would force kernel→memory as a PROD dep — the
-    // stepTools seam exists precisely so the kernel stays memory-agnostic. But the tier DERIVATION
-    // itself now comes from memoryRoleFor (@orc/memory is a devDependency here — test-only, no prod
-    // edge), so this test can no longer drift from production's role→tier mapping (FixD).
+    // stepTools seam exists precisely so the kernel stays memory-agnostic.
     stepTools: p => {
-      // step role keys the memory tier: scout (analyze) / auditor (plan) narrow-or-widen the surface;
-      // every other role (the implementer children) gets verify. Scout MUST keep memory_write (FixA).
-      const bound = memory.bindStep({ author: authorFixture({ source: AUTHOR_SOURCE.agent, origin: p.origin, workspaceId: p.workspaceId, taskId: p.taskId, stepId: p.stepId, runToken: p.runToken, executor: p.executor, model: p.model, role: p.role }), step: p.step, taskId: p.taskId, ancestorTaskIds: p.ancestorTaskIds, role: memoryRoleFor(p.role) })
+      const bound = memory.bindStep({ author: authorFixture({ source: AUTHOR_SOURCE.agent, origin: p.origin, workspaceId: p.workspaceId, taskId: p.taskId, stepId: p.stepId, runToken: p.runToken, executor: p.executor, model: p.model, role: p.role }), step: p.step, taskId: p.taskId, ancestorTaskIds: p.ancestorTaskIds })
       return { memory: bound.memory, tools: [
         ...bound.tools,
         ...splitTool({ kernel, config: { approvalPolicy: config.approvalPolicy, maxDepth: config.maxDepth }, p }),

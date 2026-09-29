@@ -15,7 +15,7 @@ import { treeFingerprint } from '@orc/kernel'
 // module-internal export of its own file (a re-export nobody imports is API surface to keep
 // compatible for no consumer; eighteen of them accumulated here before this was checked).
 export { openKnowledge } from './knowledge'
-export { memoryTools, unavailableMemoryTools, memoryToolsForStep, MEMORY_READ_TOOLS, MEMORY_ROLE, memoryRoleFor } from './tools'
+export { memoryTools, unavailableMemoryTools, memoryToolsForStep, MEMORY_READ_TOOLS, MEMORY_ROLE, DECISION_KIND_REFUSAL } from './tools'
 export { unavailableStepMemory, type BindStep } from './step'
 export { orphanedNotes } from './sweep'
 // the evidence-based lifecycle: recheck gathers the facts, archive rules on them (no clock in either)
@@ -56,13 +56,6 @@ export { notesCiting, type CitingNote } from './drift'
 export { createGroundingSource } from './grounding-source'
 // consumers: packages/cli/src/runtime.ts and memory-open.ts, which key it by checkout directory
 export { treeStamps } from './tree-stamps'
-export { AdrSection, adrSummary, parseAdrBody, renderAdrBody, type AdrFields } from './adr'
-export { DECISION_REFUSAL, decisionDoor, getDecision, listDecisions, recordDecision, type DecisionDoor, type DecisionRecord, type DecisionStore, type DecisionView, type RecordedDecision } from './decisions'
-// consumer: packages/cli/src/runtime.ts stepTools. Registered by the composition root rather than by
-// bindStepMemory: the gate needs the STEP id and role, which the per-step memory binding never sees.
-// FINISH_TOOL_NAME travels with it so runtime.test.ts pins the model-facing names from the one place
-// they are spelled.
-export { finishTools, FINISH_TOOL_NAME } from './finish-tools'
 
 // the orchestrator: assembles the knowledge service + event log into the memory domain
 // services (gateway, projector, tools) — the business logic never opens Surreal itself

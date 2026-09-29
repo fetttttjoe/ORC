@@ -1,5 +1,5 @@
 import { z } from 'zod'
-import { AccessVia, AUTHOR_SOURCE, CLAIM_ID_RE, ClaimClass, Door, NO_CHAT, ClaimWrite, DecisionStatus, isRecord, DRIFT_STATE, EdgeDirection, inferTier, linkLookupScopes, MASTERPLAN_NOTE_ID, MemoryScope, MEMORY_ACCESS, MEMORY_ID_RE, MEMORY_LIMITS, MEMORY_SOURCE_LIMITS, MEMORY_TOOL_NAME, MemorySearchResult, MemoryWriteResult, NoteCategory, NoteKind, LINK_KIND, planFieldViolations, Retention, SearchMode, stepMayPlan, stepMayReconcile, stepMayVerify, LinkKind, MemoryNoteDraftInput, NOTE_TIER, NoteTier, emptyUseStats, slugId, toolError, useLine, type ClaimInput, type MemoryAuthor, type MemoryNote, type MemoryStore, type NoteSummary, type ProvisionalFlag, type ResolvedTool, type VerifiedStamp } from '@orc/contracts'
+import { AccessVia, AUTHOR_SOURCE, CLAIM_ID_RE, ClaimClass, Door, NO_CHAT, ClaimWrite, DecisionStatus, isRecord, DRIFT_STATE, KnowledgeToolName, EdgeDirection, inferTier, linkLookupScopes, MASTERPLAN_NOTE_ID, MemoryScope, MEMORY_ACCESS, MEMORY_ID_RE, MEMORY_LIMITS, MEMORY_SOURCE_LIMITS, MEMORY_TOOL_NAME, MemorySearchResult, MemoryWriteResult, NoteCategory, NoteKind, LINK_KIND, planFieldViolations, Retention, SearchMode, stepMayPlan, stepMayVerify, LinkKind, MemoryNoteDraftInput, NOTE_TIER, NoteTier, emptyUseStats, slugId, toolError, useLine, type ClaimInput, type MemoryAuthor, type MemoryNote, type MemoryStore, type NoteSummary, type ProvisionalFlag, type ResolvedTool, type VerifiedStamp } from '@orc/contracts'
 import { applyBudget, fitMemoryNoteToBudget } from './budget'
 import { readNoteDrift, type DriftableNote, type DriftSources } from './claim-drift-read'
 import { provisionalOf, type WorkspaceViewProbe } from './provisional'
@@ -224,14 +224,8 @@ const unknownTagError = (value: string, known: ReadonlySet<string>): string => {
   return `unknown tag '${value}' — known tags: ${set}`
 }
 
-// matched values, never scattered literals: the step role → memory-role mapping (runtime.ts) keys off this.
 export const MEMORY_ROLE = { scout: 'scout', verify: 'verify', auditor: 'auditor' } as const
 export type MemoryRole = (typeof MEMORY_ROLE)[keyof typeof MEMORY_ROLE]
-
-// single source of truth for step role → memory role: production (runtime.ts stepTools) and the
-// grounded e2e both call this — one function, so a future edit can't drift the two apart.
-export const memoryRoleFor = (role: string): MemoryRole =>
-  role === MEMORY_ROLE.scout ? MEMORY_ROLE.scout : role === MEMORY_ROLE.auditor ? MEMORY_ROLE.auditor : MEMORY_ROLE.verify
 
 // epistemic fragments — wording reused verbatim from what M5a already shipped elsewhere, so the
 // model sees one consistent posture rather than a divergent restatement:
@@ -497,7 +491,7 @@ const WRITE_PROPERTIES = {
   },
   decision: {
     type: 'string', pattern: MEMORY_ID_RE.source,
-    description: 'the decision note this write served, by id — it must already be recorded as a `kind: decision` note in this scope.',
+    description: `the decision note this write served, by id — it must name an old-store decision note; decisions recorded with ${KnowledgeToolName.recordDecision} are files and are not accepted here.`,
   },
   rationale: { type: 'string', maxLength: MEMORY_LIMITS.rationaleChars, description: 'plan tier only: why this subplan exists' },
   // The parser has always accepted this; the schema never named it, so a model looking for a way to
@@ -630,10 +624,11 @@ export function memoryVerifyTool(opts: {
 // belongs to agents running inside plans. tools.test.ts pins every name to the actual surface.
 export const MEMORY_READ_TOOLS = [MEMORY_TOOL_NAME.search, MEMORY_TOOL_NAME.read, MEMORY_TOOL_NAME.neighbors, MEMORY_TOOL_NAME.topics, MEMORY_TOOL_NAME.recheck] as const
 
-export const PLAN_STEP_MEMORY_TOOLS: readonly string[] = [MEMORY_TOOL_NAME.write, MEMORY_TOOL_NAME.search, MEMORY_TOOL_NAME.read]
-export const FINISH_STEP_MEMORY_TOOLS: readonly string[] = [MEMORY_TOOL_NAME.search, MEMORY_TOOL_NAME.read]
+export const PLAN_STEP_MEMORY_TOOLS: readonly string[] = [MEMORY_TOOL_NAME.write]
 export const memoryToolsForStep = (p: { stepId: string; role: string }): readonly string[] =>
-  stepMayPlan(p) ? PLAN_STEP_MEMORY_TOOLS : stepMayReconcile(p) ? FINISH_STEP_MEMORY_TOOLS : []
+  stepMayPlan(p) ? PLAN_STEP_MEMORY_TOOLS : []
+
+export const DECISION_KIND_REFUSAL = `decisions are recorded with ${KnowledgeToolName.recordDecision}, not ${MEMORY_TOOL_NAME.write} — kind 'decision' is refused here`
 
 // Injected as ResolvedTool[] via the same channel MCP tools use. Author is bound per step.
 // role keys the tool surface + epistemic posture (default 'verify' = today's unchanged behavior):
@@ -739,6 +734,7 @@ export function memoryTools(opts: {
           // The gateway parses the merged note fully — same validation, right order, no casts.
           const normalized = normalizeWrite(input)
           const { invalidates, why, decision, ...parsed } = MemoryWriteToolInput.parse(normalized.input)
+          if (parsed.kind === NoteKind.decision) return { output: { error: DECISION_KIND_REFUSAL }, isError: true }
           if (parsed.id === undefined && parsed.title === undefined)
             throw new Error('a new note needs a title (it derives the id) — pass an id instead to update an existing note')
           const scope = parsed.scope ?? MemoryScope.project

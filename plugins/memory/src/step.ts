@@ -4,7 +4,7 @@ import {
   type RecalledContext, type StepMemory,
 } from '@orc/contracts'
 import { applyBudget } from './budget'
-import { memoryTools, unavailableMemoryTools, type MemoryRole } from './tools'
+import { memoryTools, unavailableMemoryTools } from './tools'
 import { readCorpusDrift, type DriftableNote, type DriftSources } from './claim-drift-read'
 import type { CorpusDrift } from './drift'
 import type { WorkspaceViewProbe } from './provisional'
@@ -85,7 +85,6 @@ export function bindStepMemory(opts: {
   author: MemoryAuthor
   step: { id: string; title: string; instructions: string; dependsOn: readonly string[] }
   taskId: string
-  role?: MemoryRole
   // the drift probes: also what lets recall report how much of its own output still holds
   drift?: DriftSources
   // the workspace standing behind the tools' `provisional` flag — bound by the composition root for
@@ -189,7 +188,7 @@ export function bindStepMemory(opts: {
     Promise.race([p, new Promise<never>((_, reject) => setTimeout(() => reject(new Error(`${what} still pending after ${recallTimeoutMs}ms — degraded store treated as absent`)), recallTimeoutMs).unref?.())])
 
   return {
-    tools: kept(memoryTools({ store: tracking, author, role: opts.role, ...(opts.drift && { drift: opts.drift }), workspaceView: opts.workspaceView, catchUp: opts.catchUp, searchScope: scope }), opts.keep),
+    tools: kept(memoryTools({ store: tracking, author, ...(opts.drift && { drift: opts.drift }), workspaceView: opts.workspaceView, catchUp: opts.catchUp, searchScope: scope }), opts.keep),
     memory: {
       // Semantic-first, then degrade: full intent (hybrid matches meaning) → distinctive title
       // terms (what keyword-only deployments need) → the single longest term. First non-empty wins.

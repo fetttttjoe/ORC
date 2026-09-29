@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { z } from 'zod'
-import { MEMORY_HEALTH, ClaimClass, DEFAULT_KNOWLEDGE_PLUGIN, Door, NO_CHAT,
+import { MEMORY_HEALTH, ClaimClass, COMMIT_STEP_ID, DEFAULT_KNOWLEDGE_PLUGIN, Door, NO_CHAT,
   EVENT_KIND, FINISH_STEP_ID, KNOWLEDGE_REFUSAL, KnowledgeToolName, MEMORY_TOOL_NAME, ROLE_SKILL, SignalOutcome, STEP_ID, STEP_ROLE, VERIFY_STEP_ID,
   type AgentExecutor, type EventDraft, type ExecutorContext, type SplitResult, type UnifiedEvent,
   RunOutcome,
@@ -15,7 +15,7 @@ import { authorFixture, draftFixture, stepFixture } from '@orc/contracts/fixture
 
 // these tests arrange through the CLI door; the runtime's own authors are Door.supervisor
 const CLI = NO_CHAT(Door.cli)
-import { createMemory, FINISH_TOOL_NAME } from '@orc/memory'
+import { createMemory } from '@orc/memory'
 import { buildProgram } from './main'
 import { buildPlugins, buildRuntime, seedPhases, workspaceStamps } from './runtime'
 import { testSurrealDbName } from './test-helpers'
@@ -118,7 +118,7 @@ describe('seedPhases (the boot line accounts for a storage open it did not perfo
 })
 
 describe('stepTools knowledge and memory surfaces per step', () => {
-  it('every step gets the knowledge tools; only the plan step keeps memory write, search and read, the finish step search and read', async () => {
+  it('every step gets the knowledge tools; only the plan step keeps memory write; the plan and finish steps get the decision tools', async () => {
     const db = await createTestDb()
     dbs.push(db)
     const vaultDir = mkdtempSync(path.join(tmpdir(), 'orc-rt-verify-'))
@@ -181,10 +181,15 @@ describe('stepTools knowledge and memory surfaces per step', () => {
       expect(family(VERIFY_STEP_ID)).toEqual(new Set(knowledge))
       expect(family(AUDITOR_STEP_NAMED_FOR_ITS_JOB)).toEqual(new Set(knowledge))
       expect(family('s1')).toEqual(new Set(knowledge))
-      expect(family(STEP_ID.plan)).toEqual(new Set([...knowledge, MEMORY_TOOL_NAME.write, MEMORY_TOOL_NAME.search, MEMORY_TOOL_NAME.read]))
+      expect(family(STEP_ID.plan)).toEqual(new Set([...knowledge, MEMORY_TOOL_NAME.write]))
+      expect(family(FINISH_STEP_ID)).toEqual(new Set(knowledge))
+      const decisions = [KnowledgeToolName.decisionList, KnowledgeToolName.decisionRead, KnowledgeToolName.recordDecision]
+      const decisionsOf = (step: string) => new Set((toolNamesByStep[step] ?? []).filter(n => decisions.some(d => d === n)))
+      expect(decisionsOf(STEP_ID.plan)).toEqual(new Set(decisions))
+      expect(decisionsOf(FINISH_STEP_ID)).toEqual(new Set(decisions))
+      for (const step of [VERIFY_STEP_ID, AUDITOR_STEP_NAMED_FOR_ITS_JOB, 's1']) expect(decisionsOf(step)).toEqual(new Set())
       expect(new Set(toolNamesByStep[FINISH_STEP_ID]))
-        .toEqual(new Set([...(toolNamesByStep['s1'] ?? []), KnowledgeToolName.taskClaims, FINISH_TOOL_NAME.recordDecision, SCOPED_CHANGES_TOOL_NAME, MEMORY_TOOL_NAME.search, MEMORY_TOOL_NAME.read]))
-      expect(toolNamesByStep['s1']).not.toContain(FINISH_TOOL_NAME.recordDecision)
+        .toEqual(new Set([...(toolNamesByStep['s1'] ?? []), KnowledgeToolName.taskClaims, SCOPED_CHANGES_TOOL_NAME, ...decisions]))
       expect(toolNamesByStep['s1']).not.toContain(KnowledgeToolName.taskClaims)
       expect(toolNamesByStep['s1']).not.toContain(SCOPED_CHANGES_TOOL_NAME)
       // the port forwards ctx.knowledge to every step, not only the ones that get task_claims
@@ -255,6 +260,82 @@ describe('a step writes knowledge into the directory it runs in', () => {
       expect(knowledgeWrites.map(w => w.isError)).toEqual([false])
       const written = await log.after(0, [EVENT_KIND.knowledge_written])
       expect(written.map(e => ({ taskId: e.taskId, stepId: e.stepId }))).toEqual([{ taskId: t.id, stepId: WRITING_STEP }])
+    } finally {
+      await port.shutdown()
+      await log.close()
+    }
+  }, 60_000)
+
+  const commitToolResults: Array<{ isError: boolean; output: unknown }> = []
+  const COMMIT_MESSAGE = 'feat: record the probed claim\n\nCommitted by the runtime test\'s probe executor.'
+  const commitProbeExecutor: AgentExecutor<unknown> = {
+    id: 'api-loop',
+    async *startTurn(ctx: ExecutorContext<unknown>): AsyncGenerator<UnifiedEvent, void, SplitResult[] | undefined> {
+      const write = ctx.extraTools.find(t => t.name === KnowledgeToolName.write)
+      if (ctx.step.id === WRITING_STEP && write)
+        knowledgeWrites.push(await write.execute({ add: [{ text: 'Lives in the run dir.', class: ClaimClass.fact, anchors: [{ path: ANCHOR }] }], why: 'probe' }, 'call-1'))
+      if (ctx.step.id === COMMIT_STEP_ID) {
+        const preview = ctx.extraTools.find(t => t.name === 'commit_preview')
+        const commit = ctx.extraTools.find(t => t.name === 'git_commit')
+        if (preview) await preview.execute({})
+        if (commit) commitToolResults.push(await commit.execute({ message: COMMIT_MESSAGE }))
+      }
+      const signal = { stepId: ctx.step.id, runToken: ctx.runToken, outcome: SignalOutcome.success, summary: 'probed' }
+      await ctx.checkpoint('signal:1', async () => signal,
+        (): EventDraft[] => [{ kind: EVENT_KIND.signal_received, payload: { stepId: ctx.step.id, runToken: ctx.runToken, signal } }])
+      yield { type: 'signal', signal }
+      yield { type: 'done' }
+    },
+  }
+
+  it('the commit step commits into the run cwd checkout, not the supervisor\'s', async () => {
+    const db = await createTestDb()
+    dbs.push(db)
+    const vaultDir = mkdtempSync(path.join(tmpdir(), 'orc-rt-commit-'))
+    const elsewhere = realpathSync(mkdtempSync(path.join(tmpdir(), 'orc-rt-commit-elsewhere-')))
+    cleanup.push(() => rmSync(vaultDir, { recursive: true, force: true }), () => rmSync(elsewhere, { recursive: true, force: true }))
+    sh(elsewhere, 'init', '-q')
+    sh(elsewhere, 'config', 'user.email', 't@t.t')
+    sh(elsewhere, 'config', 'user.name', 't')
+    mkdirSync(path.join(elsewhere, path.dirname(ANCHOR)), { recursive: true })
+    writeFileSync(path.join(elsewhere, ANCHOR), 'export const a = 1\n')
+    sh(elsewhere, 'add', '-A')
+    sh(elsewhere, 'commit', '-qm', 'base')
+    const elsewhereHeadBefore = sh(elsewhere, 'rev-parse', 'HEAD')
+
+    const config = testConfig(db.url, {
+      vaultDir, skillsDir: path.join(vaultDir, 'skills'), projectDbName: testSurrealDbName(),
+      knowledge: { plugin: DEFAULT_KNOWLEDGE_PLUGIN, options: {} },
+      autoCommit: true,
+    })
+    seedShippedSkills(config.skillsDir)
+    surrealBases.push(config)
+    const storage = await openStorage(db.url, { projectId: TEST_PROJECT_ID })
+    const log = storage.events
+    const kernel = new Kernel(log)
+    await seedTestWorkspace(log, CLI, realpathSync(config.dir))
+    const configHeadBefore = sh(config.dir, 'rev-parse', 'HEAD')
+    const { host, hub } = await buildPlugins(config)
+    host.providers.set('fake', fakeProvider)
+    host.executors.set('api-loop', commitProbeExecutor)
+    const port = await buildRuntime({ host, hub, config, storage, kernel })
+    try {
+      const t = await kernel.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'writes then commits', spec: 'records a claim, then commits it' }, CLI)
+      await kernel.proposePlan(t.id, draftFixture([
+        stepFixture({ id: WRITING_STEP }),
+        stepFixture({ id: COMMIT_STEP_ID, role: STEP_ROLE.committer, dependsOn: [WRITING_STEP] }),
+      ]), CLI)
+      await kernel.approvePlan(t.id, undefined, undefined, CLI)
+      expect(await (await port.startRun(t.id, { cwd: elsewhere })).wait()).toBe(RunOutcome.done)
+
+      expect(commitToolResults.map(r => r.isError)).toEqual([false])
+      const bucket = path.join('knowledge', `${ANCHOR}.md`)
+      const elsewhereHeadAfter = sh(elsewhere, 'rev-parse', 'HEAD')
+      expect(elsewhereHeadAfter).not.toBe(elsewhereHeadBefore)
+      expect(sh(elsewhere, 'log', '--oneline', '-1')).toContain('feat: record the probed claim')
+      const committedPaths = sh(elsewhere, 'show', '--name-only', '--format=', 'HEAD').split('\n').filter(l => l !== '')
+      expect(committedPaths).toContain(bucket)
+      expect(sh(config.dir, 'rev-parse', 'HEAD')).toBe(configHeadBefore)
     } finally {
       await port.shutdown()
       await log.close()
@@ -380,12 +461,12 @@ describe('buildRuntime degraded memory', () => {
       expect(warns.filter(w => w.includes(ROLE_SKILL.finisher))).toEqual([])
 
       const t = await kernel.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'degraded run', spec: 'still executes' }, CLI)
-      await kernel.proposePlan(t.id, draftFixture([stepFixture()]), CLI)
+      await kernel.proposePlan(t.id, draftFixture([stepFixture({ id: STEP_ID.plan, role: STEP_ROLE.auditor })]), CLI)
       await kernel.approvePlan(t.id, undefined, undefined, CLI)
       expect(await (await port.startRun(t.id)).wait()).toBe(RunOutcome.done)
 
-      // only the appended finish step keeps memory tools, and each answers unavailable with the reason
-      expect(new Set(toolProbe.results.map(r => r.name))).toEqual(new Set([MEMORY_TOOL_NAME.search, MEMORY_TOOL_NAME.read]))
+      // only the plan step keeps a memory tool, and it answers unavailable with the reason
+      expect(new Set(toolProbe.results.map(r => r.name))).toEqual(new Set([MEMORY_TOOL_NAME.write]))
       for (const r of toolProbe.results) {
         expect(r.isError).toBe(true)
         expect(JSON.stringify(r.output)).toContain('memory unavailable')

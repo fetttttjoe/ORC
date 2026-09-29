@@ -37,9 +37,9 @@ describe('composeSplitResult', () => {
     // knowledge events arrive separately: they are NOT router kinds, so the router fetches them
     // only when it actually composes a result rather than on every routed event
     const knowledge: EventRecord[] = [
-      evt({ seq: 8, taskId: 'c1', kind: EVENT_KIND.knowledge_written, payload: { added: [{ id: 'aaaaaaaa', location: 'knowledge/a.md' }, { id: 'bbbbbbbb', location: 'knowledge/b.md' }], changed: [], retired: [], files: ['knowledge/a.md', 'knowledge/b.md'], why: 'w', decision: null, author: authorFixture({ taskId: 'c1' }) } }),
-      evt({ seq: 9, taskId: 'c1', kind: EVENT_KIND.knowledge_written, payload: { added: [], changed: [], retired: [{ id: 'bbbbbbbb', location: 'knowledge/b.md' }], files: ['knowledge/b.md'], why: 'w', decision: null, author: authorFixture({ taskId: 'c1' }) } }),
-      evt({ seq: 10, taskId: 'unrelated', kind: EVENT_KIND.knowledge_written, payload: { added: [{ id: 'cccccccc', location: 'knowledge/c.md' }], changed: [], retired: [], files: [], why: 'w', decision: null, author: authorFixture({ taskId: 'unrelated' }) } }),
+      evt({ seq: 8, taskId: 'c1', kind: EVENT_KIND.knowledge_written, payload: { added: [{ id: 'aaaaaaaa', location: 'knowledge/a.md' }, { id: 'bbbbbbbb', location: 'knowledge/b.md' }], changed: [], retired: [], files: ['knowledge/a.md', 'knowledge/b.md'], why: 'w', decision: null, decisionsRecorded: [], decisionsSuperseded: [], author: authorFixture({ taskId: 'c1' }) } }),
+      evt({ seq: 9, taskId: 'c1', kind: EVENT_KIND.knowledge_written, payload: { added: [], changed: [], retired: [{ id: 'bbbbbbbb', location: 'knowledge/b.md' }], files: ['knowledge/b.md'], why: 'w', decision: null, decisionsRecorded: [], decisionsSuperseded: [], author: authorFixture({ taskId: 'c1' }) } }),
+      evt({ seq: 10, taskId: 'unrelated', kind: EVENT_KIND.knowledge_written, payload: { added: [{ id: 'cccccccc', location: 'knowledge/c.md' }], changed: [], retired: [], files: [], why: 'w', decision: null, decisionsRecorded: [], decisionsSuperseded: [], author: authorFixture({ taskId: 'unrelated' }) } }),
     ]
     const r = composeSplitResult(events, knowledge, split)
     expect(r).toEqual({
@@ -196,7 +196,7 @@ describe('createSignalRouter (integration, real EventLog)', () => {
       ...CLI, taskId: 'c', stepId: 'w1', runToken: 'rt-w1', kind: EVENT_KIND.knowledge_written,
       payload: {
         added: [{ id: 'aaaaaaaa', location: 'knowledge/a.md' }], changed: [], retired: [], files: ['knowledge/a.md'],
-        why: 'w', decision: null, author: authorFixture({ taskId: 'c' }),
+        why: 'w', decision: null, decisionsRecorded: [], decisionsSuperseded: [], author: authorFixture({ taskId: 'c' }),
       },
     })
     await terminal(TASK_STATUS.done)

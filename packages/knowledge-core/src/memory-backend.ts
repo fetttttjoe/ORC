@@ -1,23 +1,31 @@
 import {
   KNOWLEDGE_REFUSAL, KnowledgeClaim, newKnowledgeId, ROOT_ENTITY,
-  type KnowledgeAnchor, type KnowledgeBackend, type KnowledgeDraft, type KnowledgeRef,
+  type Decision, type DecisionDraft, type KnowledgeAnchor, type KnowledgeBackend, type KnowledgeDraft, type KnowledgeRef,
 } from '@orc/contracts'
 import { cardOf } from './card'
-import { mergeChange, sameContent } from './patch'
+import { planDecisionRecord } from './decision-record'
+import { mergeChange, refuseUnknownDecision, sameContent } from './patch'
 
 export interface MemoryBackendOptions { exists: (checkout: string, path: string) => boolean }
 
 const MEMORY_LOCATION = 'memory:'
+const DECISION_LOCATION = `${MEMORY_LOCATION}decision/`
 
-export function createMemoryBackend(options: MemoryBackendOptions): KnowledgeBackend {
-  const stores = new Map<string, Map<string, KnowledgeClaim>>()
-  const storeOf = (checkout: string): Map<string, KnowledgeClaim> => {
-    const held = stores.get(checkout)
+const perCheckout = <V>() => {
+  const maps = new Map<string, Map<string, V>>()
+  return (checkout: string): Map<string, V> => {
+    const held = maps.get(checkout)
     if (held) return held
-    const made = new Map<string, KnowledgeClaim>()
-    stores.set(checkout, made)
+    const made = new Map<string, V>()
+    maps.set(checkout, made)
     return made
   }
+}
+
+export function createMemoryBackend(options: MemoryBackendOptions): KnowledgeBackend {
+  const storeOf = perCheckout<KnowledgeClaim>()
+  const decisionsOf = perCheckout<Decision>()
+  const decisionLocationOf = (draft: DecisionDraft): string => `${DECISION_LOCATION}${draft.id}`
   const locationOf = (anchors: readonly KnowledgeAnchor[]): string => `${MEMORY_LOCATION}${anchors[0]?.path ?? ROOT_ENTITY}`
   const freshId = (store: Map<string, KnowledgeClaim>): string => {
     for (;;) { const id = newKnowledgeId(); if (!store.has(id)) return id }
@@ -39,6 +47,7 @@ export function createMemoryBackend(options: MemoryBackendOptions): KnowledgeBac
     },
     async write(checkout, patch) {
       const store = storeOf(checkout)
+      refuseUnknownDecision(patch, () => decisionsOf(checkout))
       const place = (draft: KnowledgeDraft, id: string): KnowledgeClaim => {
         for (const anchor of draft.anchors) if (!options.exists(checkout, anchor.path)) throw new Error(KNOWLEDGE_REFUSAL.missingAnchor(anchor.path))
         return KnowledgeClaim.parse({ ...draft, id, location: locationOf(draft.anchors) })
@@ -67,5 +76,13 @@ export function createMemoryBackend(options: MemoryBackendOptions): KnowledgeBac
     },
     async check() { return [] },
     async format() { return { formatted: [], problems: [] } },
+    async decisions(checkout) { return [...decisionsOf(checkout).values()] },
+    async decision(checkout, id) { return decisionsOf(checkout).get(id) ?? null },
+    async recordDecision(checkout, draft) {
+      const held = decisionsOf(checkout)
+      const plan = planDecisionRecord({ held, claimed: new Set(held.keys()), draft, locationOf: decisionLocationOf })
+      for (const decision of plan.writes) held.set(decision.id, decision)
+      return { ...plan.result, files: [] }
+    },
   }
 }

@@ -18,18 +18,12 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js'
 import { ApprovedBy, Door, errorMessage, NO_CHAT, toolError, type MemoryAuthor, type ResolvedTool, type SupervisorHealth } from '@orc/contracts'
 import type { EventLog, ProjectConfig } from '@orc/kernel'
-import { MEMORY_READ_TOOLS, MEMORY_ROLE, checkoutDrift, createMemory, createWorkspaceView, memoryTools as buildMemoryTools, probeMemory, unavailableMemoryTools } from '@orc/memory'
-import { openMemory } from './memory-open'
+import { probeMemory } from '@orc/memory'
 import { knowledgeAccess, openKnowledge } from './knowledge-open'
 import { KNOWLEDGE_READ_TOOLS, knowledgeTools } from '@orc/knowledge-core'
 import { asResolvedTools, buildCopilotTools, createProjectSessions, type OrcActions } from '@orc/ui-core'
 
 export type Autonomy = 'gated' | 'full'
-
-// the read slice of the memory surface — the OWNING package exports the names (a rename
-// there fails its own tests, and this import follows automatically); write stays with the
-// agents that run inside plans
-const READ_MEMORY = new Set<string>(MEMORY_READ_TOOLS)
 
 // The zod twin of the advertised JSON inputSchema below. The input crosses a trust boundary —
 // any MCP client can send any shape — and a typecast here once let a non-string taskId ride
@@ -73,7 +67,6 @@ const MCP_ORIGIN = NO_CHAT(Door.mcp)
 export function buildServeTools(deps: {
   sessions: Parameters<typeof buildCopilotTools>[0]['sessions']
   projectId: string
-  memoryTools: ResolvedTool[]
   knowledgeTools: ResolvedTool[]
   actions: OrcActions | null
   autonomy: Autonomy
@@ -93,16 +86,12 @@ export function buildServeTools(deps: {
       ...(deps.health && { health: deps.health }),
       ...(deps.listWorkspaces && { listWorkspaces: deps.listWorkspaces }),
     })),
-    ...deps.memoryTools.filter(t => READ_MEMORY.has(t.name)),
     ...deps.knowledgeTools,
     ...(deps.actions ? [mcpApproveTool(deps.actions, deps.autonomy)] : []),
   ]
 }
 
-// The `executor` this door stamps on a memory write. composeAuthor renders it verbatim as the
-// note's createdBy, and the author itself is built by main.ts (which holds the kernel), so the name
-// has to be shared rather than spelled at both ends. 'mcp' the AuthorSource is reserved for the
-// human-attribution question (who approved), which is a different question from which door wrote.
+// The `executor` main.ts stamps on the author of this door's knowledge reads; shared so the name is spelled once.
 export const MCP_SERVE_EXECUTOR = 'mcp-serve'
 
 export async function startMcpServe(opts: {
@@ -118,10 +107,7 @@ export async function startMcpServe(opts: {
   // never a kernel, and the health half also needs a filesystem probe and the note read model.
   // Typed off buildCopilotTools so this door and the console cannot drift on the shape.
   listWorkspaces?: Parameters<typeof buildCopilotTools>[0]['listWorkspaces']
-  // Who a memory write through THIS door is recorded as. Injected, not built here, for the same
-  // reason listWorkspaces is: MemoryAuthor.workspaceId is answered by folding the workspace table,
-  // and this module holds no kernel to fold it with. REQUIRED — a door that cannot say which
-  // checkout it writes from must not open, rather than file notes under a guess.
+  // Authors the knowledge_delivered evidence of this door's knowledge reads; built by main.ts, which holds the kernel.
   memoryAuthor: MemoryAuthor
 }): Promise<void> {
   const { config, log, actions, autonomy, supervisor, listWorkspaces, memoryAuthor } = opts
@@ -139,34 +125,10 @@ export async function startMcpServe(opts: {
     url: config.databaseUrl,
     cwdProject: { id: config.projectId, name: config.projectName, dir: config.dir },
   })
-  // memory degrades, never blocks — same posture as every other surface
-  let memory: Awaited<ReturnType<typeof createMemory>> | null = null
-  let memoryTools: ResolvedTool[]
-  try {
-    memory = await openMemory({ log, config })
-    // changedSince is what turns the read tools' drift machinery on: without it memory_recheck
-    // answered "135 uncheckable" through this door while the CLI saw the real list, and
-    // memory_search/memory_read shipped no drifted/unknown flags at all (observed 2026-08-03,
-    // first live probe of memory_recheck). One probe per process; it caches per revision.
-    memoryTools = buildMemoryTools({
-      store: memory.store,
-      author: memoryAuthor,
-      role: MEMORY_ROLE.verify,
-      drift: checkoutDrift(config.dir),
-      // The `provisional` flag's input, bound here for the same reason changedSince is: this door
-      // builds its own read tools rather than taking createMemory's, so a dep left off here is a
-      // flag that silently never fires — which is how memory_recheck shipped through this door
-      // reporting "135 uncheckable" while the CLI saw the real list. From the LOG, not from the
-      // kernel this module does not hold.
-      workspaceView: createWorkspaceView(log),
-    })
-  } catch (err) {
-    memoryTools = unavailableMemoryTools(errorMessage(err))
-  }
   // the same probe `orc status` and graph-ui's /api/health read — an MCP driver watching a silent
   // project must be able to see "the read model is rebuilding" without opening the databases
   const tools = buildServeTools({
-    sessions, projectId: config.projectId, memoryTools, actions, autonomy,
+    sessions, projectId: config.projectId, actions, autonomy,
     knowledgeTools: knowledgeTools(knowledgeAccess(openKnowledge(config), log, config.dir), memoryAuthor, KNOWLEDGE_READ_TOOLS),
     ...(listWorkspaces && { listWorkspaces }),
     health: async () => ({
@@ -203,6 +165,5 @@ export async function startMcpServe(opts: {
     await closed // stdin closing (client gone) resolves this — then clean up
   } finally {
     await sessions.close().catch(() => {})
-    await memory?.close().catch(() => {})
   }
 }

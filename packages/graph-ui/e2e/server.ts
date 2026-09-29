@@ -269,9 +269,9 @@ const actions: OrcActions = {
     await storage.events.append({ ...origin, taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_deleted, payload: { id, scope: scope ?? 'project', author: { source: AUTHOR_SOURCE.cli, workspaceId: TEST_WORKSPACE_ID, origin } } })
     return { id }
   },
-  // the lifecycle behind it needs the memory read model this fixture has no Surreal for, and a
-  // fabricated receipt would let the copilot's decision tool be tested without being exercised
   recordDecision: unsupported('recordDecision'),
+  listDecisions: unsupported('listDecisions'),
+  readDecision: unsupported('readDecision'),
   renameProject: unsupported('renameProject'),
   newProject: unsupported('newProject'),
   // kernel-backed, not stubbed: it is a plain read of the log this fixture already folds, and the

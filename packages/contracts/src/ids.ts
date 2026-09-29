@@ -17,7 +17,7 @@ export const SHA256_HEX_RE = /^[a-f0-9]{64}$/
 // linear ONLY because the collapse below guarantees no repeated dashes — an invariant neither a
 // reader nor a scanner can see, and one an innocent edit could turn into quadratic backtracking on
 // a hostile title. Indexing carries no such footgun.
-function trimEdges(value: string, ch: string): string {
+export function trimEdges(value: string, ch: string): string {
   let start = 0
   let end = value.length
   while (start < end && value[start] === ch) start++

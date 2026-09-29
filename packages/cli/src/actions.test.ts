@@ -1,23 +1,18 @@
 import { afterAll, describe, expect, it } from 'bun:test'
-import { mkdirSync, mkdtempSync, realpathSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, realpathSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import { AUTHOR_SOURCE, DECISION_STATUS, Door, EVENT_KIND, MemoryWrittenPayload, NOTE_KIND, PlanDraft, TASK_STATUS, WORKSPACE_KIND, WORKSPACE_STATE, type Origin } from '@orc/contracts'
+import { AUTHOR_SOURCE, DecisionStatus, Door, EVENT_KIND, KNOWLEDGE_REFUSAL, KnowledgeWrittenPayload, MemoryWrittenPayload, PlanDraft, TASK_STATUS, WORKSPACE_KIND, WORKSPACE_STATE, type Origin } from '@orc/contracts'
 import { authorFixture } from '@orc/contracts/fixtures'
 import { KERNEL_ERROR_CODE, Kernel, KernelError, currentBranch, initializeProject, loadConfig, openStorage, requireProject, type ProjectConfig } from '@orc/kernel'
 import { createTestDb, seedTestWorkspace, TEST_PROJECT_ID, TEST_WORKSPACE, TEST_WORKSPACE_ID, testConfig, tmpGitRepo, type TestDb } from '@orc/kernel/test-helpers'
 import { PROJECT_DIR_NOTE_ID } from '@orc/ui-core'
 import { buildModelDiscovery, buildOrcActions, catalogAppends, modelUniverse } from './actions'
-import { openMemory } from './memory-open'
-import { dropSurrealDb, testSurrealDbName } from './test-helpers'
 import { archivedRefusal } from './workspace-ops'
 
 const dbs: Array<{ drop: () => Promise<void> }> = []
-// Only setupWithSurreal registers here — every other test in this file points at a dead Surreal
-// port on purpose, and a config with no database behind it has nothing to drop.
-const surrealConfigs: ProjectConfig[] = []
 afterAll(async () => {
-  await Promise.all([...dbs.map(d => d.drop()), ...surrealConfigs.map(c => dropSurrealDb(c))])
+  await Promise.all(dbs.map(d => d.drop()))
 }, 30_000)
 
 // memory_written payload parsed through its owning schema at the read boundary — never a cast
@@ -48,7 +43,7 @@ async function openActions(opts: { listModels?: () => Promise<string[]>; config?
   db.onClose(() => storage.close())
   const kernel = new Kernel(storage.events)
   // a task must name a workspace the fold has seen — one seeded record, then tasks as before
-  await seedTestWorkspace(storage.events, WEB)
+  await seedTestWorkspace(storage.events, WEB, opts.config?.dir)
   const { ensured, ensureRuntime } = stubRuntime()
   const config = testConfig(db.url, {
     vaultDir: mkdtempSync(path.join(tmpdir(), 'orc-vault-')),
@@ -78,28 +73,6 @@ const setup = (listModels?: () => Promise<string[]>) => openActions({
     projectDbConnectTimeoutMs: 300,
   },
 })
-
-// …and the sibling with a LIVE throwaway Surreal database (main.test.ts's `t_<random>` shape),
-// for the one action whose behaviour is a read of the real read model: recordDecision refuses an
-// id that already exists, which the dead-port setup above could never exercise.
-async function setupWithSurreal() {
-  const r = await openActions({ config: { projectDbName: testSurrealDbName() } })
-  surrealConfigs.push(r.config)
-  return r
-}
-
-// `createdBy` is composed at the write (composeAuthor) and lands in the read model, never in the
-// event payload, so reading the note back is the only way to assert what a door stamped. The
-// actions layer closes its own memory, so this opens a second one over the SAME log and config.
-async function storedNote(r: Awaited<ReturnType<typeof setupWithSurreal>>, id: string) {
-  const memory = await openMemory({ log: r.storage.events, config: r.config })
-  try {
-    await memory.projector.catchUp()
-    return await memory.store.get(id)
-  } finally {
-    await memory.close()
-  }
-}
 
 // Test 1 of the origin work: identity travels with the CALL, so every event a mutation appends
 // carries the chat and the door it came in by. Asserted on the LOG, never a spy — a spy would only
@@ -166,35 +139,59 @@ describe('writeNote/deleteNote guards', () => {
   })
 })
 
-// The second (and last) knowledge-authoring door: what a driver's session decided, recorded where
-// it cannot evaporate. Attribution is the whole point of testing it HERE rather than only over the
-// lifecycle op — the op takes an author, and this layer is what decides which door and which
-// checkout that author names.
+const DECISION = { title: 'From Claude', context: 'c', decision: 'd', consequences: 'q', considered: [], tags: [] }
+
+async function setupWithCheckout(knowledge?: Partial<ProjectConfig>) {
+  const { main } = tmpGitRepo()
+  const r = await openActions({ config: { dir: realpathSync(main), ...knowledge } })
+  return { ...r, main: realpathSync(main) }
+}
+
+const knowledgeWritten = async (r: Awaited<ReturnType<typeof setupWithCheckout>>) =>
+  (await r.storage.events.all()).filter(e => e.kind === EVENT_KIND.knowledge_written).map(e => KnowledgeWrittenPayload.parse(e.payload))
+
 describe('the decision door', () => {
-  it('recordDecision writes a decision attributed to the door it came through (mcp) in the serving checkout\'s workspace', async () => {
-    const r = await setupWithSurreal()
-    expect(await r.actions.recordDecision({ title: 'From Claude', context: 'c', decision: 'd', consequences: 'q', considered: [], tags: [] }, MCP))
-      .toEqual({ id: 'from-claude', status: DECISION_STATUS.accepted, superseded: null })
-    // the log is the truth this asserts against: the read model is a projection of it
-    const written = (await r.storage.events.all()).filter(e => e.kind === EVENT_KIND.memory_written).map(e => MemoryWrittenPayload.parse(e.payload))
-    expect(written.at(-1)?.author).toMatchObject({ source: AUTHOR_SOURCE.mcp, workspaceId: TEST_WORKSPACE_ID })
-    expect(written.at(-1)?.note).toMatchObject({ id: 'from-claude', kind: NOTE_KIND.decision, status: DECISION_STATUS.accepted })
-    // …and the STORED attribution, which is the half a reader sees: composeAuthor renders a bare
-    // door as itself. It read 'agent' until 2026-09-15, and createdBy is sticky across rewrites —
-    // so a misattribution here is permanent, not a display bug.
-    expect((await storedNote(r, 'from-claude'))?.createdBy).toBe(AUTHOR_SOURCE.mcp)
+  it('records, lists and reads a decision through the knowledge port, attributed to the door it came through', async () => {
+    const r = await setupWithCheckout()
+    expect(await r.actions.recordDecision(DECISION, MCP)).toEqual({ id: 'from-claude', status: DecisionStatus.accepted, superseded: null })
+    expect(await r.actions.listDecisions({}, MCP)).toMatchObject([{ id: 'from-claude', title: 'From Claude', status: DecisionStatus.accepted, summary: 'd', supersedes: null, supersededBy: null }])
+    expect(await r.actions.readDecision('from-claude', WEB)).toMatchObject({ id: 'from-claude', context: 'c', decision: 'd', consequences: 'q' })
+    expect(existsSync(path.join(r.main, 'docs', 'decisions'))).toBe(true)
+    const [written] = await knowledgeWritten(r)
+    expect(written?.author).toMatchObject({ source: AUTHOR_SOURCE.mcp, workspaceId: TEST_WORKSPACE_ID })
+    expect(written?.decisionsRecorded.map(d => d.id)).toEqual(['from-claude'])
   }, 30_000)
 
-  // The twin: the WEB door is a terminal-equivalent surface (authorSourceOf(Door.web) === cli).
-  // Asserted alongside the mcp case because the two must not converge — a door that cannot be told
-  // apart in the log is the attribution failure this source vocabulary exists to end.
-  it('recordDecision from the web door records cli, in the log and in what a reader sees', async () => {
-    const r = await setupWithSurreal()
-    expect(await r.actions.recordDecision({ title: 'From the web', context: 'c', decision: 'd', consequences: 'q', considered: [], tags: [] }, WEB))
-      .toEqual({ id: 'from-the-web', status: DECISION_STATUS.accepted, superseded: null })
-    const written = (await r.storage.events.all()).filter(e => e.kind === EVENT_KIND.memory_written).map(e => MemoryWrittenPayload.parse(e.payload))
-    expect(written.at(-1)?.author).toMatchObject({ source: AUTHOR_SOURCE.cli, workspaceId: TEST_WORKSPACE_ID })
-    expect((await storedNote(r, 'from-the-web'))?.createdBy).toBe(AUTHOR_SOURCE.cli)
+  it('recordDecision from the web door records cli', async () => {
+    const r = await setupWithCheckout()
+    await r.actions.recordDecision({ ...DECISION, title: 'From the web' }, WEB)
+    expect((await knowledgeWritten(r)).at(-1)?.author).toMatchObject({ source: AUTHOR_SOURCE.cli, workspaceId: TEST_WORKSPACE_ID })
+  }, 30_000)
+
+  it('a supersession reports the decision it replaced, and the list shows both links', async () => {
+    const r = await setupWithCheckout()
+    await r.actions.recordDecision(DECISION, MCP)
+    expect(await r.actions.recordDecision({ ...DECISION, title: 'Second thoughts', supersedes: 'from-claude' }, MCP))
+      .toEqual({ id: 'second-thoughts', status: DecisionStatus.accepted, superseded: 'from-claude' })
+    const rows = await r.actions.listDecisions({}, MCP)
+    expect(rows.map(d => [d.id, d.status, d.supersedes, d.supersededBy])).toEqual([
+      ['second-thoughts', DecisionStatus.accepted, 'from-claude', null],
+      ['from-claude', DecisionStatus.superseded, null, 'second-thoughts'],
+    ])
+    expect(await r.actions.listDecisions({ status: DecisionStatus.superseded }, MCP)).toHaveLength(1)
+  }, 30_000)
+
+  it('reading an unrecorded decision is refused by name', async () => {
+    const r = await setupWithCheckout()
+    await expect(r.actions.readDecision('nope', MCP)).rejects.toThrow(/no decision 'nope'/)
+  }, 30_000)
+
+  it('with knowledge switched off every decision action refuses with the reason', async () => {
+    const r = await setupWithCheckout({ knowledge: null })
+    const off = KNOWLEDGE_REFUSAL.off()
+    await expect(r.actions.recordDecision(DECISION, MCP)).rejects.toThrow(off)
+    await expect(r.actions.listDecisions({}, MCP)).rejects.toThrow(off)
+    await expect(r.actions.readDecision('x', MCP)).rejects.toThrow(off)
   }, 30_000)
 })
 
