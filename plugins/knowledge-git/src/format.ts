@@ -81,6 +81,13 @@ export function parseBucket(text: string, headings: readonly string[]): ParsedBu
   return { title, claims, problems }
 }
 
+export function claimIdOf(raw: string): string | null {
+  const item = ITEM.exec(raw.trimEnd())
+  const tailed = item === null ? null : WITH_TAIL.exec(item[1].trim())
+  const tail = tailed === null ? null : parseTail(tailed[2])
+  return tail === null || typeof tail === 'string' ? null : tail.id
+}
+
 const byCodeUnit = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0)
 const anchorToken = (anchor: LineAnchor): string =>
   `${ANCHOR_SIGIL}${anchor.path}${anchor.symbol === null ? '' : `${SYMBOL_SEPARATOR}${anchor.symbol}`}`

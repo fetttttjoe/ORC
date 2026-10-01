@@ -87,26 +87,27 @@ moved. Both paths now close — in-task at commit time, out-of-task through the 
 flowchart LR
   change["a step changes files"] --> sc["scoped_changes<br/>citingNotes = heal-or-confirm candidates"]
   sc --> judge{"still true?"}
-  judge -->|yes| verify["memory_verify<br/>one call, body untouched"]
+  judge -->|yes| verify["knowledge_check<br/>one call, body untouched"]
   judge -->|no| heal["memory_write same id<br/>full replacement prose"]
   verify --> commit["git_commit"]
   heal --> commit
-  commit -->|"restamp healed · reverify confirmed"| done["notes current at the new commit"]
-  commit -.->|"stillDrifted receipt"| gap["cited paths nobody verified"]
+  commit -->|"stillDrifted receipt"| gap["claims the commit left suspect"]
 
-  outside["an edit made OUTSIDE orc"] -->|"post-commit hook<br/>commit_recorded"| reactor["auto-heal reactor<br/>debounce → restampToHead (free)"]
-  reactor -.->|"drift survives, autoHeal: draft-sweep"| draft["DRAFTED sweep task<br/>the human approves the spend"]
+  outside["an edit made OUTSIDE orc"] -->|"post-commit hook<br/>commit_recorded"| reactor["auto-heal reactor<br/>debounce → drift read"]
+  reactor -.->|"a claim is suspect, autoHeal: draft"| draft["DRAFTED sweep task<br/>the human approves the spend"]
 ```
 
-`scoped_changes` and `memory_verify` register on the same predicate — `stepMayVerify`: any auditor
-step except the grounded planner, which shares the role but has audited nothing. `git_commit` then
-advances the stamps the task earned and reports `stillDrifted`: notes citing committed paths that
-no step verified.
+`scoped_changes` and `knowledge_check` register on the same predicate — `stepMayVerify`: any auditor
+step except the grounded planner, which shares the role but has audited nothing. `git_commit` reports
+`stillDrifted`: the claims the commit left suspect.
 
 The out-of-orc path: the post-commit hook records `commit_recorded`, the signal router relays it,
-and the reactor (config `autoHeal`, default `restamp`) debounces a commit burst into one
-reaction — the free restamp pass always, and when drift survives it, a **drafted** heal task
-carrying the `memory_recheck` worklist instructions. The corpus-level drift ratio stays an
+and the reactor (config `autoHeal`, `draft` or `off`, default `draft`) debounces a commit burst into
+one reaction: it reads claim drift in the checkout and, when any claim is `suspect` and no sweep is
+open, drafts one heal task. The task is plan-ready, lists up to 50 suspect ids, and has an auditor
+step that reads each claim's anchors and calls `knowledge_check` on it (`autoHealIterations`,
+`ORC_AUTO_HEAL_ITERATIONS`, bounds its budget). `orc knowledge drift` prints the same claim states.
+The corpus-level drift ratio stays an
 **advisory** at every door and the reactor keeps that rule: it never approves its own sweep — a
 model pass firing on its own would cost more than the staleness it cures, so the spend waits at
 the human gate.

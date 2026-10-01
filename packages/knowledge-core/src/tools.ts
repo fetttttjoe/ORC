@@ -1,13 +1,14 @@
 import { z } from 'zod'
 import {
-  DecisionSlug, DeliveryMode, EntityPath, KNOWLEDGE_DEFAULTS, KNOWLEDGE_LIMITS, KNOWLEDGE_REFUSAL, KnowledgeChange,
-  KnowledgeDraft, KnowledgeId, KnowledgePage, KnowledgeToolName, toolError,
+  CheckVerdict, DecisionSlug, DeliveryMode, EntityPath, KNOWLEDGE_DEFAULTS, KNOWLEDGE_LIMITS, KNOWLEDGE_REFUSAL, KnowledgeChange,
+  KnowledgeCheckFields, KnowledgeDraft, KnowledgeId, KnowledgePage, KnowledgeToolName, toolError,
   type KnowledgeAccess, type KnowledgePort, type MemoryAuthor, type ResolvedTool,
 } from '@orc/contracts'
 
 export const KNOWLEDGE_STEP_TOOLS = [KnowledgeToolName.card, KnowledgeToolName.search, KnowledgeToolName.write] as const
 export const KNOWLEDGE_READ_TOOLS = [KnowledgeToolName.card, KnowledgeToolName.search] as const
-export type KnowledgeStepToolName = (typeof KNOWLEDGE_STEP_TOOLS)[number]
+export const KNOWLEDGE_VERIFY_TOOLS = [KnowledgeToolName.check] as const
+export type KnowledgeStepToolName = (typeof KNOWLEDGE_STEP_TOOLS)[number] | (typeof KNOWLEDGE_VERIFY_TOOLS)[number]
 
 const CardInput = KnowledgePage.partial().extend({ path: EntityPath })
 const SearchInput = z.object({ query: z.string().trim().min(1).max(KNOWLEDGE_LIMITS.subjectChars), limit: KnowledgePage.shape.limit.optional() })
@@ -18,6 +19,7 @@ const WriteInput = z.object({
   why: z.string().trim().min(1).max(KNOWLEDGE_LIMITS.whyChars),
   decision: DecisionSlug.nullable().default(null),
 })
+const CheckInput = KnowledgeCheckFields.extend({ patch: WriteInput.omit({ why: true }).optional() })
 
 export const knowledgeIdempotencyKey = (author: MemoryAuthor, toolCallId: string | undefined): string | null =>
   author.runToken && toolCallId ? `${author.runToken}:tool:${toolCallId}:knowledge` : null
@@ -60,6 +62,14 @@ const SPECS: Record<KnowledgeStepToolName, ToolSpec> = {
     run: async (port, author, input, toolCallId) => {
       const result = await port.write({ author, idempotencyKey: knowledgeIdempotencyKey(author, toolCallId) }, WriteInput.parse(input))
       return { added: result.added, changed: result.changed, retired: result.retired, warnings: result.warnings }
+    },
+  },
+  [KnowledgeToolName.check]: {
+    description: `Confirm one claim against the code you read: verdict "${CheckVerdict.holds}" when it still says what the code does, "${CheckVerdict.false}" with the patch that retires or changes it (the same add/change/retire shape as ${KnowledgeToolName.write}), or "${CheckVerdict.unknown}" when the code does not settle it. why: one line on what you read (required). Read the claim's anchors first; a holds clears the claim until its anchored code changes again.`,
+    input: CheckInput,
+    run: async (port, author, input, toolCallId) => {
+      const result = await port.check({ author, idempotencyKey: knowledgeIdempotencyKey(author, toolCallId) }, CheckInput.parse(input))
+      return { verdict: result.verdict, written: result.written, warnings: result.warnings }
     },
   },
 }

@@ -12,12 +12,17 @@ const toLine = (c: KnowledgeClaim): SerializableClaim =>
   ({ id: c.id, text: c.text, section: HEADING_OF_CLASS[c.class], anchors: c.anchors, tags: c.tags, sources: c.sources, decision: c.decision })
 const ref = (c: KnowledgeClaim): KnowledgeRef => ({ id: c.id, location: c.location })
 
-export const anchorKind = (root: string) => (anchorPath: string): AnchorKind => {
+export const anchorRefusal = (root: string, anchorPath: string): string | null => {
   const absolute = path.resolve(root, anchorPath)
-  if (!existsSync(absolute)) throw new Error(KNOWLEDGE_REFUSAL.missingAnchor(anchorPath))
+  if (!existsSync(absolute)) return KNOWLEDGE_REFUSAL.missingAnchor(anchorPath)
   const real = realpathSync(absolute)
-  if (real !== root && !real.startsWith(`${root}${path.sep}`)) throw new Error(KNOWLEDGE_REFUSAL.outsideCheckout(anchorPath))
-  return { path: anchorPath, isDirectory: statSync(real).isDirectory() }
+  return real !== root && !real.startsWith(`${root}${path.sep}`) ? KNOWLEDGE_REFUSAL.outsideCheckout(anchorPath) : null
+}
+
+export const anchorKind = (root: string) => (anchorPath: string): AnchorKind => {
+  const refusal = anchorRefusal(root, anchorPath)
+  if (refusal !== null) throw new Error(refusal)
+  return { path: anchorPath, isDirectory: statSync(realpathSync(path.resolve(root, anchorPath))).isDirectory() }
 }
 
 export function writeAtomic(file: string, content: string): void {

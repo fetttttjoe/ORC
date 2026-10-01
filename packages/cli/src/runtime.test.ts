@@ -118,7 +118,7 @@ describe('seedPhases (the boot line accounts for a storage open it did not perfo
 })
 
 describe('stepTools knowledge and memory surfaces per step', () => {
-  it('every step gets the knowledge tools; only the plan step keeps memory write; the plan and finish steps get the decision tools', async () => {
+  it('every step gets the knowledge tools; only the plan step keeps memory write; the plan and finish steps get the decision tools; audit steps get knowledge_check', async () => {
     const db = await createTestDb()
     dbs.push(db)
     const vaultDir = mkdtempSync(path.join(tmpdir(), 'orc-rt-verify-'))
@@ -178,8 +178,8 @@ describe('stepTools knowledge and memory surfaces per step', () => {
 
       const family = (step: string) => new Set((toolNamesByStep[step] ?? []).filter(n => n.startsWith('memory_') || n.startsWith('knowledge_')))
       const knowledge = [KnowledgeToolName.card, KnowledgeToolName.search, KnowledgeToolName.write]
-      expect(family(VERIFY_STEP_ID)).toEqual(new Set(knowledge))
-      expect(family(AUDITOR_STEP_NAMED_FOR_ITS_JOB)).toEqual(new Set(knowledge))
+      expect(family(VERIFY_STEP_ID)).toEqual(new Set([...knowledge, KnowledgeToolName.check]))
+      expect(family(AUDITOR_STEP_NAMED_FOR_ITS_JOB)).toEqual(new Set([...knowledge, KnowledgeToolName.check]))
       expect(family('s1')).toEqual(new Set(knowledge))
       expect(family(STEP_ID.plan)).toEqual(new Set([...knowledge, MEMORY_TOOL_NAME.write]))
       expect(family(FINISH_STEP_ID)).toEqual(new Set(knowledge))

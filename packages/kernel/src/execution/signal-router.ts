@@ -39,6 +39,7 @@ const ROUTER_RELEVANT: Record<EventKind, boolean> = {
   knowledge_delivered: false,
   // composeSplitResult fetches these separately (resolveSplit), once per split resolution — kept out of ROUTER_KINDS so routing does not pay for them on every event.
   knowledge_written: false,
+  knowledge_checked: false,
   feedback_requested: false, feedback_provided: true, plan_annotated: false, analysis_completed: false,
   models_discovered: false, // catalog metadata — nothing to route
   copilot_exchange: false, // conversation record — nothing to route

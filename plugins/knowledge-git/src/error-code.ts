@@ -1,6 +1,6 @@
 import { z } from 'zod'
 
-export enum Errno { ENOENT = 'ENOENT', EEXIST = 'EEXIST' }
+export enum Errno { ENOENT = 'ENOENT', EISDIR = 'EISDIR', EEXIST = 'EEXIST' }
 
 const WithCode = z.object({ code: z.string() })
 

@@ -1,4 +1,4 @@
-import { DecisionStatus } from '@orc/contracts'
+import { DecisionStatus, KNOWLEDGE_REFUSAL } from '@orc/contracts'
 import { DECISION_FILE_SUFFIX, FrontKey } from './decision-format'
 
 export const FMT_HINT = 'run orc knowledge fmt'
@@ -12,6 +12,9 @@ export const KNOWLEDGE_PROBLEM = {
   badAnchor: (id: string, reason: string): string => `${id}: ${reason}`,
   crowded: (location: string, count: number): string => `'${location}' holds ${count} claims — the code it describes may do too much`,
   unknownDecision: (id: string, slug: string): string => `${id} names decision '${slug}', ${NO_DECISION}`,
+  unknownSymbol: (id: string, path: string, symbol: string, closest: readonly string[]): string =>
+    `${id}: ${KNOWLEDGE_REFUSAL.unknownSymbol(path, symbol, closest)}`,
+  shortSymbol: (id: string, symbol: string, full: string): string => `${id}: symbol '${symbol}' is the short form of '${full}' — ${FMT_HINT}`,
 } as const
 
 export const DECISION_PROBLEM = {

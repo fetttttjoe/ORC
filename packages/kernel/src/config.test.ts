@@ -66,9 +66,7 @@ describe('loadConfig', () => {
     expect(c.appVersion).toMatch(/^orc-/)
     expect(c.execAllowlist).toEqual([]) // no allowlist → exec tool is not offered
     expect(c.workspaceSetup).toEqual([]) // no setup → a new worktree is the tracked tree and nothing else
-    // restamp by default is deliberate: the reactor's free half runs silently; the LLM half
-    // ('draft-sweep') is an operator opt-in, not a default
-    expect(c.autoHeal).toBe(AutoHealMode.restamp)
+    expect(c.autoHeal).toBe(AutoHealMode.draft)
   })
   it('rejects malformed ORC_CONCURRENCY loudly — orc env is zod-validated', () => {
     withEnv({ ORC_CONCURRENCY: 'abc' }, () => {
@@ -142,12 +140,12 @@ describe('loadConfig', () => {
       })
     })
   }
-  it('memorySweepIterations defaults lean (15) and honors ORC_MEMORY_SWEEP_ITERATIONS', () => {
+  it('autoHealIterations defaults lean (15) and honors ORC_AUTO_HEAL_ITERATIONS', () => {
     // deliberately far below maxIterations: the sweep is the one recurring auto-drafted spend,
     // and a sweep that genuinely needs more signals 'partial' and continues under runtime grants
-    expect(loadConfig(mkdtempSync(path.join(tmpdir(), 'orc-'))).memorySweepIterations).toBe(15)
-    withEnv({ ORC_MEMORY_SWEEP_ITERATIONS: '25' }, () => {
-      expect(loadConfig('/tmp/x').memorySweepIterations).toBe(25)
+    expect(loadConfig(mkdtempSync(path.join(tmpdir(), 'orc-'))).autoHealIterations).toBe(15)
+    withEnv({ ORC_AUTO_HEAL_ITERATIONS: '25' }, () => {
+      expect(loadConfig('/tmp/x').autoHealIterations).toBe(25)
     })
   })
 

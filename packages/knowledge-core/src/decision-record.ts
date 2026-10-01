@@ -39,6 +39,7 @@ export function planDecisionRecord(opts: {
   const existing = held.get(draft.id)
   if (existing && sameDecision(existing, draft)) return replayOf(existing, held)
   if (existing || claimed.has(draft.id)) throw new Error(DECISION_REFUSAL.exists(draft.id))
+  if (draft.supersedes !== null && draft.status !== DecisionStatus.accepted) throw new Error(DECISION_REFUSAL.proposedSupersedes(draft.id))
   const old = draft.supersedes === null ? null : held.get(draft.supersedes) ?? null
   if (draft.supersedes !== null && old === null) throw new Error(DECISION_REFUSAL.noSuchDecision(draft.supersedes))
   if (old !== null && old.status === DecisionStatus.superseded) throw new Error(DECISION_REFUSAL.alreadySuperseded(old.id))

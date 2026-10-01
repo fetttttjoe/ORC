@@ -1,10 +1,10 @@
 import path from 'node:path'
 import {
-  DeliveryMode, errorMessage, KNOWLEDGE_DEFAULTS, KNOWLEDGE_REFUSAL, KnowledgeToolName, stepMayPlan, stepMayReconcile, toolError,
+  DeliveryMode, errorMessage, KNOWLEDGE_DEFAULTS, KNOWLEDGE_REFUSAL, KnowledgeToolName, stepMayPlan, stepMayReconcile, stepMayVerify, toolError,
   type KnowledgeAccess, type KnowledgeClaim, type KnowledgePort, type KnowledgeWrites, type MemoryAuthor, type ResolvedTool, type StepKnowledge,
 } from '@orc/contracts'
 import { decisionTools } from './decision-tools'
-import { KNOWLEDGE_STEP_TOOLS, knowledgeIdempotencyKey, knowledgeTools } from './tools'
+import { KNOWLEDGE_STEP_TOOLS, KNOWLEDGE_VERIFY_TOOLS, knowledgeIdempotencyKey, knowledgeTools } from './tools'
 
 export interface StepKnowledgeBinding {
   tools: ResolvedTool[]
@@ -53,6 +53,7 @@ export function bindStepKnowledge(opts: {
   const warn = opts.warn ?? ((line: string) => console.warn(line))
   const tools = [
     ...knowledgeTools(access, author, KNOWLEDGE_STEP_TOOLS),
+    ...(stepMayVerify(opts.p) ? knowledgeTools(access, author, KNOWLEDGE_VERIFY_TOOLS) : []),
     ...(stepMayReconcile(opts.p) ? [taskClaimsTool(access, author, opts.writesOf)] : []),
     ...(stepMayPlan(opts.p) || stepMayReconcile(opts.p) ? decisionTools(access, author) : []),
   ]

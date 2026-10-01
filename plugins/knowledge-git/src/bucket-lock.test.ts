@@ -9,7 +9,7 @@ afterEach(() => { for (const d of dirs.splice(0)) rmSync(d, { recursive: true, f
 const lockDir = () => { const d = mkdtempSync(path.join(tmpdir(), 'orc-klock-')); dirs.push(d); return d }
 
 describe('bucket locks', () => {
-  it('serialises writers of one file across two lock sets (two processes)', async () => {
+  it('two lock sets in one process serialise the writers of one file', async () => {
     const dir = lockDir()
     const options = { staleMs: 30_000, retryMs: 5, timeoutMs: 5_000, dir }
     const one = createBucketLocks(options)

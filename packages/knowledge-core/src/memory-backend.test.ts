@@ -1,19 +1,30 @@
 import { describe, expect, it } from 'bun:test'
 import { ClaimClass, DecisionStatus, KnowledgePatch } from '@orc/contracts'
-import { describeKnowledgeBackend, CONTRACT_DIRS, CONTRACT_FILES } from './contract-suite'
-import { createMemoryBackend } from './memory-backend'
+import { createTreeSitterStructure } from '@orc/structure-treesitter'
+import { describeKnowledgeBackend, contractSourceOf, CONTRACT_DIRS, CONTRACT_FILES } from './contract-suite'
+import { createMemoryBackend, NO_STRUCTURE } from './memory-backend'
 
 const known = new Set<string>([...CONTRACT_FILES, ...CONTRACT_DIRS])
-describeKnowledgeBackend('the in-memory backend', async () => ({
-  backend: createMemoryBackend({ exists: (_checkout, path) => known.has(path) }),
-  checkout: '/checkout-one',
-  other: '/checkout-two',
-  cleanup: async () => {},
-}))
+describeKnowledgeBackend('the in-memory backend', async () => {
+  const rewritten = new Map<string, string>()
+  const keyOf = (checkout: string, file: string): string => `${checkout}\0${file}`
+  return {
+    backend: createMemoryBackend({
+      exists: (_checkout, path) => known.has(path),
+      structure: createTreeSitterStructure(),
+      read: (checkout, path) => rewritten.get(keyOf(checkout, path)) ?? (CONTRACT_FILES.some(file => file === path) ? contractSourceOf(path) : null),
+    }),
+    checkout: '/checkout-one',
+    other: '/checkout-two',
+    rewrite: (checkout, file, source) => { rewritten.set(keyOf(checkout, file), source) },
+    commit: () => {},
+    cleanup: async () => {},
+  }
+})
 
 describe('the in-memory backend holds no files', () => {
   it('its claim writes, decision records, supersessions and replays report no files', async () => {
-    const backend = createMemoryBackend({ exists: () => true })
+    const backend = createMemoryBackend({ exists: () => true, structure: NO_STRUCTURE, read: () => null })
     const decision = (id: string, supersedes: string | null) => ({
       id, title: id, status: DecisionStatus.accepted, date: '2026-09-29', tags: [], supersedes, context: 'c', decision: 'd', consequences: 'q', considered: [],
     })

@@ -1,10 +1,11 @@
-import { AUTHOR_SOURCE, AutoHealMode, CHECKS_EXECUTOR_REF, Door, errorMessage, HookName, KNOWLEDGE_REFUSAL, NO_CHAT, NOTE_TIER, ROLE_SKILL, TERMINAL_TASK_STATUS, type AgentExecutor, type Analyzer, type MemoryAuthor, type TreeStamps } from '@orc/contracts'
+import { AUTHOR_SOURCE, AutoHealMode, CHECKS_EXECUTOR_REF, Door, errorMessage, HookName, KNOWLEDGE_REFUSAL, NO_CHAT, ROLE_SKILL, TERMINAL_TASK_STATUS, type AgentExecutor, type Analyzer, type MemoryAuthor, type TreeStamps } from '@orc/contracts'
 import { apiLoopExecutor } from '@orc/executor-api-loop'
 import { configuredProviders } from './providers'
 import { agentAnalyzer } from '@orc/analyzer-agent'
 import { createMcpHub, type McpHub } from '@orc/mcp-client'
-import { readCorpusDrift, checkoutDrift, CONSOLIDATE_EXECUTOR, createMemory, createMemoryLifecycle, notesCiting, restampToHead, treeStamps, unavailableStepMemory, memoryToolsForStep, type BindStep, type MemoryLifecycle } from '@orc/memory'
-import { AUTO_HEAL_DEBOUNCE_MS, AUTO_SWEEP_TITLE, createAutoHeal, sweepPlanDraft } from './auto-heal'
+import { CONSOLIDATE_EXECUTOR, createMemory, createMemoryLifecycle, treeStamps, unavailableStepMemory, memoryToolsForStep, type BindStep, type MemoryLifecycle } from '@orc/memory'
+import { AUTO_HEAL_DEBOUNCE_MS, AUTO_SWEEP_TITLE, createAutoHeal, sweepPlanDraft, sweepSpec } from './auto-heal'
+import { suspectAtFor } from './suspect-at'
 import { openMemory } from './memory-open'
 import { knowledgeAccess, openKnowledge } from './knowledge-open'
 import { bindStepKnowledge } from '@orc/knowledge-core'
@@ -13,14 +14,10 @@ import { cwdAuthor, cwdWorkspaceId } from './cwd-workspace'
 import { createVaultProjector } from '@orc/vault-projector'
 import { checksExecutor, commitTool, createDbosPort, createPluginHost, dbosSend, execTool, finalizePlanTool, isMcpTrusted, loadConfig, loadTrust, openStorage, projectorLease, readAnnotationsTool, reportCoverageTool, requireProject, scopedChangesTool, splitTool, Kernel, type DbosPort, type PluginHost, type ProjectConfig, type Storage } from '@orc/kernel'
 
-// The `executor` the commit reactor stamps on the notes it restamps. composeAuthor renders it
-// verbatim as the note's updatedBy, so this is the name an operator reads in the vault when asking
-// who touched a note nobody edited. Declared here, at the composition root that builds the author —
-// the reactor itself never sees it.
 const AUTO_HEAL_EXECUTOR = 'auto-heal'
 
-// What this supervisor process itself initiates (consolidation, the commit reactor's restamp and
-// sweep): no chat answered it, and no terminal typed it.
+// What this supervisor process itself initiates (consolidation, the commit reactor's sweep): no
+// chat answered it, and no terminal typed it.
 const SUPERVISOR_ORIGIN = NO_CHAT(Door.supervisor)
 
 export function seedRegistries(config = loadConfig()) {
@@ -173,47 +170,25 @@ export async function buildRuntime(
     bindStep = p => unavailableStepMemory(reason, p.keep)
   }
 
-  // The auto-heal reactor (knowledge provenance plan T2): the router relays commit_recorded here;
-  // this side owns the debounce, the free restamp, and — under draft-sweep — DRAFTING (never
-  // approving) a heal task. Composed here because it crosses the two domains the kernel keeps
-  // apart: the memory store and the kernel. Absent when memory is degraded or the knob is off —
-  // the port's callback is optional and the router then leaves commits as records, as before.
-  const memoryStore = memory?.store
-  const autoHeal = memoryStore && config.autoHeal !== AutoHealMode.off
+  const autoHeal = !('unavailable' in knowledgeOpening) && config.autoHeal !== AutoHealMode.off
     ? createAutoHeal({
       mode: config.autoHeal,
       debounceMs: AUTO_HEAL_DEBOUNCE_MS,
       schedule: (fn, ms) => { const t = setTimeout(fn, ms); return () => clearTimeout(t) },
-      // the reactor's whole frame of reference is config.dir (the restamp and the drift probe both
-      // read it), so the restamp writes from the workspace that directory IS — the same lookup the
-      // sweep task below makes for its workspaceId.
-      // 'agent' named through `executor`, NOT 'cli': nobody typed this. 'cli' means a human at a
-      // terminal, and claiming it here would make every reactor-restamped note read `updatedBy: cli`
-      // — the same mis-attribution consolidate.ts already carries a comment about.
-      restamp: async () => (await restampToHead(memoryStore, config.dir, await cwdAuthor(kernel, config.dir, AUTHOR_SOURCE.agent, SUPERVISOR_ORIGIN, { executor: AUTO_HEAL_EXECUTOR }))).length,
-      // FRESH probes per pass: they cache per revision and per path, and the tree this pass must
-      // judge is the one the commit just changed — reactor-lifetime probes would answer from the
-      // previous commit's diffs
-      drifted: async () => (await readCorpusDrift(await memoryStore.list({ tier: NOTE_TIER.semantic }), checkoutDrift(config.dir))).drifted,
+      suspects: async () => {
+        const access = knowledgeAccess(knowledgeOpening, log, config.dir)
+        if ('unavailable' in access) throw new Error(access.unavailable)
+        const author = await cwdAuthor(kernel, config.dir, AUTHOR_SOURCE.agent, SUPERVISOR_ORIGIN, { executor: AUTO_HEAL_EXECUTOR })
+        return access.port.drift({ author, idempotencyKey: null })
+      },
       hasOpenSweep: async () => (await kernel.listTasks()).some(t => t.title === AUTO_SWEEP_TITLE && !TERMINAL_TASK_STATUS.has(t.status)),
-      draftSweep: async drifted => {
+      draftSweep: async suspects => {
         const task = await kernel.createTask({
-          // No originating task to inherit from: auto-heal reacts to a COMMIT, and its whole frame
-          // of reference is config.dir (the restamp and the drift probe both read it). So the sweep
-          // belongs to the workspace that directory is — the same lookup the `new` command makes.
           workspaceId: await cwdWorkspaceId(kernel, config.dir),
           title: AUTO_SWEEP_TITLE,
-          spec: `Auto-drafted by the commit reactor: ${drifted} note(s) still read drifted after the free restamp pass. `
-            + 'Call memory_recheck FIRST — it returns the authoritative worklist; never discover candidates via memory_search. '
-            + 'For every listed note: memory_read it, check its claims against the current working tree, then re-write it '
-            + '(memory_write, SAME id) with corrected content, or with a re-verified claim when its statements still hold. '
-            + 'Memory tools and read-only filesystem access only — never edit repository files, never run git commands. '
-            + 'Finish by calling memory_recheck again and reporting both counts verbatim. '
-            + "If the worklist outgrows your iteration budget, signal outcome 'partial' naming the healed and remaining ids.",
+          spec: sweepSpec(suspects),
         }, SUPERVISOR_ORIGIN)
-        // Proposing is still not approving — the human gate and the spend stay exactly where
-        // they were; see sweepPlanDraft for why the draft now carries its plan and lean budget.
-        await kernel.proposePlan(task.id, sweepPlanDraft(task.spec, config.memorySweepIterations), SUPERVISOR_ORIGIN)
+        await kernel.proposePlan(task.id, sweepPlanDraft(task.spec, config.autoHealIterations), SUPERVISOR_ORIGIN)
       },
       warn: m => console.warn(m),
     })
@@ -237,16 +212,12 @@ export async function buildRuntime(
         step: p.step, taskId: p.taskId, ancestorTaskIds: p.ancestorTaskIds,
         ambientCapture: config.ambientCapture, keep: memoryToolsForStep(p),
       })
+      const stepAccess = knowledgeAccess(knowledgeOpening, log, p.workspaceDir)
       const stepKnowledge = bindStepKnowledge({
-        access: knowledgeAccess(knowledgeOpening, log, p.workspaceDir), author, p,
+        access: stepAccess, author, p,
         writesOf: () => kernel.listTaskKnowledgeWrites(p.taskId),
       })
-      const memoryStore = memory?.store
-      // The citing-notes join git_commit rides for its stillDrifted line — injected here because the kernel may not import plugins/memory.
-      const noteIndex = memory?.knowledge
-      const citing = noteIndex
-        ? (paths: string[]) => notesCiting(noteIndex, paths)
-        : undefined
+      const suspectAt = suspectAtFor(stepAccess, author)
       return { memory: bound.memory, knowledge: stepKnowledge.knowledge, tools: [
       ...bound.tools,
       ...stepKnowledge.tools,
@@ -266,22 +237,7 @@ export async function buildRuntime(
       // it to the grounded `plan` step, which shares that role). Read-only, and a FLOOR — never a
       // substitute for the test/typecheck gate, never a reason to dismiss an in-scope defect.
       ...scopedChangesTool({ kernel, p, ...(stepKnowledge.citing && { claimsAt: stepKnowledge.citing }) }),
-      // The commit step's tool pair (autoCommit pipeline): preview the task's floor diff, commit,
-      // advance the note stamps this task earned at the new HEAD. Registration is gated TWICE — on
-      // config.autoCommit here (the operator's runtime switch, so a stale frozen plan cannot commit
-      // after the flag is turned off) and on the kernel-set committer step inside the factory. Two
-      // stamp writes, because the two stamps mean different things: `restamp` is the store's
-      // ordinary re-write (stamps sourceRevision from HEAD per write) for notes the task HEALED;
-      // `reverify` is store.verify, which advances the verified stamp of notes a step DECLARED
-      // verified and touches nothing the note says. With memory degraded the tool still commits and
-      // says which stamp pass was skipped.
-      ...(config.autoCommit ? commitTool({ kernel, dir: p.workspaceDir, p,
-        ...(memoryStore ? {
-          restamp: async (note: { id: string; scope: string }, idempotencyKey: string) => { await memoryStore.write({ id: note.id, scope: note.scope }, author, { idempotencyKey }) },
-          reverify: async (note: { id: string; scope: string }, idempotencyKey: string) => { await memoryStore.verify(note.id, note.scope, author, { idempotencyKey }) },
-        } : {}),
-        ...(citing ? { citing } : {}),
-      }) : []),
+      ...(config.autoCommit ? commitTool({ kernel, dir: p.workspaceDir, p, ...(suspectAt && { suspectAt }) }) : []),
       // exec runs operator-allowlisted commands (execAllowlist in .orc/config.json) in the step
       // workspace — the acceptance-gate tool. Empty allowlist = not offered.
       ...execTool({ workspaceDir: p.workspaceDir, allowlist: config.execAllowlist }),

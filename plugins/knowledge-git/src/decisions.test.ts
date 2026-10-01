@@ -8,7 +8,7 @@ import { createBucketLocks } from './bucket-lock'
 import { DECISION_FORMAT_PROBLEM } from './decision-format'
 import { OPTIONS_REFUSAL } from './options'
 import { DECISION_PROBLEM } from './problems'
-import { gitCheckout } from './test-helpers'
+import { gitCheckout, structure } from './test-helpers'
 
 const dirs: string[] = []
 afterEach(() => { for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true }) })
@@ -17,7 +17,7 @@ const setup = (options: Record<string, unknown> = {}) => {
   const lockDir = realpathSync(mkdtempSync(path.join(tmpdir(), 'orc-klock-')))
   dirs.push(checkout, lockDir)
   const locks = { staleMs: 30_000, retryMs: 5, timeoutMs: 10_000, dir: lockDir }
-  return { checkout, locks, backend: createGitFilesBackend(options, { locks }) }
+  return { checkout, locks, backend: createGitFilesBackend(options, { locks, structure }) }
 }
 const draft = (title: string, over: Partial<DecisionDraft> = {}): DecisionDraft => ({
   id: decisionSlugOf(title), title, status: DecisionStatus.accepted, date: '2026-09-29', tags: [], supersedes: null,
@@ -58,9 +58,9 @@ describe('git-files decision files', () => {
     expect(existsSync(path.join(checkout, 'docs/decisions'))).toBe(false)
     expect((await backend.decisions(checkout)).map(d => d.id)).toEqual(['elsewhere'])
     for (const decisionsDir of ['/abs/adr', '../adr', 'docs/../adr', 'docs/', ''])
-      expect(() => createGitFilesBackend({ decisionsDir })).toThrow(OPTIONS_REFUSAL.decisionsPath())
-    expect(() => createGitFilesBackend({ decisionsDir: 'docs/knowledge/adr' })).toThrow(OPTIONS_REFUSAL.decisionsInKnowledge('knowledge'))
-    expect(() => createGitFilesBackend({ dirName: 'kb', decisionsDir: 'kb' })).toThrow(OPTIONS_REFUSAL.decisionsInKnowledge('kb'))
+      expect(() => createGitFilesBackend({ decisionsDir }, { structure })).toThrow(OPTIONS_REFUSAL.decisionsPath())
+    expect(() => createGitFilesBackend({ decisionsDir: 'docs/knowledge/adr' }, { structure })).toThrow(OPTIONS_REFUSAL.decisionsInKnowledge('knowledge'))
+    expect(() => createGitFilesBackend({ dirName: 'kb', decisionsDir: 'kb' }, { structure })).toThrow(OPTIONS_REFUSAL.decisionsInKnowledge('kb'))
   })
 
   it('a supersession rewrites only the old file\'s frontmatter, and reports the new file first', async () => {
@@ -160,8 +160,8 @@ describe('git-files decisions under contention', () => {
 
   it('two backend instances recording one new title with different content at once write one file, and refuse the other', async () => {
     const { checkout, locks } = setup()
-    const one = createGitFilesBackend({}, { locks })
-    const two = createGitFilesBackend({}, { locks })
+    const one = createGitFilesBackend({}, { locks, structure })
+    const two = createGitFilesBackend({}, { locks, structure })
     const settled = await Promise.allSettled([
       one.recordDecision(checkout, draft('Raced', { context: 'One writer.' })),
       two.recordDecision(checkout, draft('Raced', { context: 'The other writer.', date: '2026-09-30' })),
@@ -187,8 +187,8 @@ describe('git-files decisions under contention', () => {
 
   it('two backend instances recording the same decision at once write one file, and the other replays', async () => {
     const { checkout, locks } = setup()
-    const one = createGitFilesBackend({}, { locks })
-    const two = createGitFilesBackend({}, { locks })
+    const one = createGitFilesBackend({}, { locks, structure })
+    const two = createGitFilesBackend({}, { locks, structure })
     const [first, second] = await Promise.all([one.recordDecision(checkout, draft('Same')), two.recordDecision(checkout, draft('Same', { date: '2026-09-30' }))])
     expect(second).toEqual(first)
     expect(fileCount(checkout)).toBe(1)

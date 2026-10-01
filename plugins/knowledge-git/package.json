@@ -7,5 +7,6 @@
     "@orc/contracts": "workspace:*",
     "@orc/knowledge-core": "workspace:*",
     "zod": "^4.4.3"
-  }
+  },
+  "devDependencies": { "@orc/structure-treesitter": "workspace:*" }
 }

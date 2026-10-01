@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import { readFileSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { PlanDraft, ROLE_SKILL, STEP_ROLE, validatePlan, VERIFY_STEP_ID } from '@orc/contracts'
+import { KnowledgeToolName, PlanDraft, ROLE_SKILL, STEP_ROLE, validatePlan, VERIFY_STEP_ID } from '@orc/contracts'
 import { parseSkillMd, SCOPED_CHANGES_TOOL_NAME } from '@orc/kernel'
 import { driftLine, REGROUND_HEAL_PLAN, REGROUND_PLAN } from './drift-line'
 import { SHIPPED_SKILLS } from './shipped-skills'
@@ -31,10 +31,11 @@ describe('shipped skills', () => {
     expect(body).toContain('never excuses a defect in a file that IS in scope')
     expect(body).toContain('empty set is not evidence of success')
     // heal candidates come from scoped_changes' citingClaims — every recorded claim anchored at a
-    // path this task changed. Retire or change what the edit falsified; leave the rest alone.
+    // path this task changed. Each gets a knowledge_check verdict.
     expect(body).toContain('citingClaims')
-    expect(body).toContain('knowledge_write')
-    expect(body).toContain('still true stays as it is')
+    expect(body).toContain(`${KnowledgeToolName.check}, one call per claim: \`holds\` for a claim still true`)
+    expect(body).toContain(`\`false\` carries the patch that retires the claim or changes it`)
+    expect(body).not.toContain('stays as it is')
     expect(body).not.toContain('memory_')
   })
 
@@ -46,12 +47,9 @@ describe('shipped skills', () => {
     expect(body).toContain('refuses whenever the tree no longer matches')
     expect(body).toContain("'Nothing to commit' is a valid outcome")
     expect(body).toContain('STILL call git_commit once')
-    // the receipt's honesty line: leftovers the auditor did not verify travel in the summary
-    expect(body).toContain('stillDrifted')
-    // C.7: the strict reverify gate's own honesty line — a stamp the gate withheld because a
-    // foreign commit moved the note's paths after the audit must read the same way stillDrifted
-    // does: carried into the summary, not silently dropped on the floor.
-    expect(body).toContain('reverifyStale')
+    expect(body).toContain('Carry stillDrifted into your step summary verbatim')
+    expect(body).toContain('Carry degraded the same way')
+    expect(body).not.toContain('stamp')
     // C.8: commit messages must follow Conventional Commits format with a concrete example
     // showing the type(scope): subject pattern for clarity and consistency in the message history.
     expect(body).toContain('Conventional Commits format')

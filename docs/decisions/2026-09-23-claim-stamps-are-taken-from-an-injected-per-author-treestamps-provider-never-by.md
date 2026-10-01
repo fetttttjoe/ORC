@@ -1,6 +1,7 @@
 ---
-status: accepted
+status: superseded
 tags: memory, claims, stamps, provenance, architecture
+supersededBy: claims-carry-no-stamp-the-reading-checkout-s-git-blame-is-the-basis
 ---
 
 # Claim stamps are taken from an injected per-author TreeStamps provider, never by the store shelling git

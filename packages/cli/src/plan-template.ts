@@ -13,13 +13,13 @@ export const DEFAULT_TEMPLATE_MODEL = 'anthropic/claude-sonnet-5'
 // reactor drafts the same one-step shape but must be exempt from the kernel's appended finish step
 // (FINISH_EXEMPT_STRATEGIES) — a plan nobody requested must not park on a human — and the strategy
 // is the only thing in this draft that can say so.
-export function singleStepDraft(task: { title: string; spec: string }, modelRef: string, skillRefs: string[] = [], maxIterations = DEFAULT_MAX_ITERATIONS, strategyRef: string = STRATEGY.single): PlanDraft {
+export function singleStepDraft(task: { title: string; spec: string }, modelRef: string, skillRefs: string[] = [], maxIterations = DEFAULT_MAX_ITERATIONS, strategyRef: string = STRATEGY.single, role: string = STEP_ROLE.worker): PlanDraft {
   return {
     strategyRef,
     costEstimateUSD: null,
     steps: [{
       id: 's1',
-      role: STEP_ROLE.worker,
+      role,
       title: task.title,
       instructions: task.spec === '' ? task.title : task.spec,
       executorRef: 'api-loop',

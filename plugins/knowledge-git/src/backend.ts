@@ -1,18 +1,21 @@
 import { realpathSync } from 'node:fs'
 import path from 'node:path'
 import {
-  DecisionDraft, errorMessage, KnowledgeClaim, KNOWLEDGE_LIMITS, KnowledgePatch, KNOWLEDGE_REFUSAL, newKnowledgeId,
-  type KnowledgeBackend, type KnowledgeProblem, type KnowledgeWriteResult,
+  DecisionDraft, errorMessage, KnowledgeClaim, type KnowledgeChange, KNOWLEDGE_LIMITS, KnowledgePatch, KNOWLEDGE_REFUSAL, newKnowledgeId,
+  type KnowledgeBackend, type KnowledgeProblem, type KnowledgeWriteResult, type StructureProvider,
 } from '@orc/contracts'
-import { cardOf, refuseUnknownDecision } from '@orc/knowledge-core'
+import { canonicalizePatch, cardOf, matchesDrift, refuseUnknownDecision } from '@orc/knowledge-core'
+import { createAnchorOutlines, reportSymbols } from './anchor-symbols'
 import { bm25 } from './bm25'
-import { anchorKind, applyPlan, renderBucket, writeAtomic } from './bucket-files'
+import { anchorKind, anchorRefusal, applyPlan, renderBucket, writeAtomic } from './bucket-files'
 import { createBucketLocks, DEFAULT_LOCK_OPTIONS, type LockOptions } from './bucket-lock'
 import { createCheckoutIndex, type CheckoutSnapshot, type IndexedBucket } from './checkout-index'
 import { createDecisionFiles } from './decisions'
+import { createDrift, type GitRun } from './drift'
 import { codeOf, Errno } from './error-code'
 import { freshIdSource } from './fresh-ids'
 import { GitFilesOptions } from './options'
+import { createOutlineCache } from './outline-cache'
 import { KNOWLEDGE_PROBLEM } from './problems'
 import { generatedClash, locationOf, nameAdditions, planWrite, type KindOf } from './write-plan'
 
@@ -28,14 +31,17 @@ function rootOf(checkout: string): string {
   }
 }
 
-export interface GitFilesDeps { locks?: LockOptions; newId?: () => string }
+export interface GitFilesDeps { structure: StructureProvider; locks?: LockOptions; newId?: () => string; git?: GitRun }
 
-export function createGitFilesBackend(input: Record<string, unknown>, deps: GitFilesDeps = {}): KnowledgeBackend {
+export function createGitFilesBackend(input: Record<string, unknown>, deps: GitFilesDeps): KnowledgeBackend {
   const options = GitFilesOptions.parse(input)
   const newId = deps.newId ?? newKnowledgeId
   const index = createCheckoutIndex(options)
   const locks = createBucketLocks(deps.locks ?? DEFAULT_LOCK_OPTIONS)
   const decisionFiles = createDecisionFiles(options.decisionsDir, locks)
+  const outlineOf = createOutlineCache(deps.structure)
+  const outlines = createAnchorOutlines(outlineOf)
+  const drift = createDrift({ outlineOf, ...(deps.git !== undefined && { git: deps.git }) })
   const placement = (snapshot: CheckoutSnapshot, kindOf: KindOf) => ({ snapshot, kindOf, dirName: options.dirName })
   const render = (s: CheckoutSnapshot, location: string, claims: readonly KnowledgeClaim[]): string =>
     renderBucket(s, options.dirName, location, claims)
@@ -62,10 +68,11 @@ export function createGitFilesBackend(input: Record<string, unknown>, deps: GitF
     })
 
   const write = async (checkout: string, input: KnowledgePatch): Promise<KnowledgeWriteResult> => {
-    const patch = KnowledgePatch.parse(input)
+    const parsed = KnowledgePatch.parse(input)
     const root = rootOf(checkout)
-    refuseUnknownDecision(patch, () => decisionFiles.scan(root).decisions)
+    refuseUnknownDecision(parsed, () => decisionFiles.scan(root).decisions)
     const kindOf = anchorKind(root)
+    const patch = await canonicalizePatch(parsed, outlines(root, kindOf))
     for (let attempt = 0; attempt < WRITE_ATTEMPTS; attempt++) {
       const s = await index.snapshot(root)
       const additions = nameAdditions(s, patch, newId)
@@ -80,6 +87,9 @@ export function createGitFilesBackend(input: Record<string, unknown>, deps: GitF
     }
     throw new Error(KNOWLEDGE_REFUSAL.raced())
   }
+
+  const symbolsOf = (root: string, claim: KnowledgeClaim) =>
+    reportSymbols(claim, outlines(root, anchorKind(root)), anchorPath => anchorRefusal(root, anchorPath) === null)
 
   const check = async (checkout: string): Promise<KnowledgeProblem[]> => {
     const root = rootOf(checkout)
@@ -98,6 +108,7 @@ export function createGitFilesBackend(input: Record<string, unknown>, deps: GitF
         } catch (err) {
           problems.push({ location: bucket.location, line, message: KNOWLEDGE_PROBLEM.badAnchor(claim.id, errorMessage(err)) })
         }
+        for (const message of (await symbolsOf(root, claim)).problems) problems.push({ location: bucket.location, line, message })
       }
       if (bucket.problems.length === 0 && render(s, bucket.location, bucket.claims) !== bucket.text)
         problems.push({ location: bucket.location, line: 0, message: KNOWLEDGE_PROBLEM.notCanonical() })
@@ -139,12 +150,28 @@ export function createGitFilesBackend(input: Record<string, unknown>, deps: GitF
         })
         if (rewrote) formatted.add(bucket.location)
       }
+      const shortForms: KnowledgeChange[] = []
+      const current = await index.snapshot(root)
+      for (const claim of current.claims.values()) {
+        if (current.duplicates.has(claim.id) || !clean(current, claim.location)) continue
+        const { canonical } = await symbolsOf(root, claim)
+        if (canonical !== null) shortForms.push({ id: claim.id, anchors: canonical })
+      }
+      for (const group of chunksOf(shortForms, KNOWLEDGE_LIMITS.patchItems)) {
+        const rewritten = await write(root, KnowledgePatch.parse({ change: group }))
+        for (const r of rewritten.changed) formatted.add(r.location)
+      }
       for (const moves of chunksOf(misplaced(await index.snapshot(root), anchorKind(root)), KNOWLEDGE_LIMITS.patchItems)) {
         const moved = await write(root, KnowledgePatch.parse({ change: moves.map(c => ({ id: c.id })) }))
         for (const c of moves) formatted.add(c.location)
         for (const r of moved.changed) formatted.add(r.location)
       }
       return { formatted: [...formatted].sort(), problems: await check(root) }
+    },
+    async readings(checkout, filter) {
+      const root = rootOf(checkout)
+      const s = await index.snapshot(root)
+      return drift.readings(root, [...s.claims.values()].filter(c => matchesDrift(filter, c)))
     },
     async decisions(checkout) { return [...decisionFiles.scan(rootOf(checkout)).decisions.values()] },
     async decision(checkout, id) { return decisionFiles.scan(rootOf(checkout)).decisions.get(id) ?? null },

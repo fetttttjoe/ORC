@@ -1,13 +1,23 @@
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test'
 import {
-  ClaimClass, DECISION_REFUSAL, DecisionStatus, decisionSlugOf, KNOWLEDGE_ID_RE, KNOWLEDGE_REFUSAL, KnowledgePatch,
-  type DecisionDraft, type KnowledgeBackend, type KnowledgePatchInput,
+  ClaimClass, ClaimState, DECISION_REFUSAL, DecisionStatus, decisionSlugOf, DriftFilter, KNOWLEDGE_ID_RE, KNOWLEDGE_REFUSAL, KnowledgePatch,
+  type DecisionDraft, type DriftFilterInput, type KnowledgeBackend, type KnowledgePatchInput,
 } from '@orc/contracts'
+import { driftOf } from './drift-of'
 
 export const CONTRACT_FILES = ['src/a.ts', 'src/b.ts', 'pkg/package.json', 'pkg/src/c.ts', 'docs/guide.md'] as const
+const SOURCE_A = 'export function alpha() {}\nexport function outer() {\n  function inner() {}\n}\n'
+export const contractSourceOf = (file: string): string => (file === 'src/a.ts' ? SOURCE_A : file.endsWith('package.json') ? '{}\n' : '')
 export const CONTRACT_DIRS = ['src', 'pkg', 'pkg/src', 'docs'] as const
 
-export interface ContractFixture { backend: KnowledgeBackend; checkout: string; other: string; cleanup(): Promise<void> }
+export interface ContractFixture {
+  backend: KnowledgeBackend
+  checkout: string
+  other: string
+  rewrite(checkout: string, file: string, source: string): void
+  commit(checkout: string): void
+  cleanup(): Promise<void>
+}
 
 const patch = (input: KnowledgePatchInput) => KnowledgePatch.parse(input)
 const fact = (text: string, ...paths: string[]): { text: string; class: ClaimClass; anchors: { path: string }[]; tags?: string[]; sources?: string[]; decision?: string } =>
@@ -17,6 +27,8 @@ const draft = (title: string, over: Partial<DecisionDraft> = {}): DecisionDraft 
   id: decisionSlugOf(title), title, status: DecisionStatus.accepted, date: '2026-09-29', tags: [], supersedes: null,
   context: 'Why it came up.', decision: 'What we do.', consequences: 'What follows.', considered: [], ...over,
 })
+const symbolFact = (text: string, file: string, symbol: string, id?: string) =>
+  ({ ...fact(text), anchors: [{ path: file, symbol }], ...(id !== undefined && { id }) })
 const outsideCheckout = (files: readonly string[]): string[] => files.filter(file => file.startsWith('/') || file.split('/').includes('..'))
 
 export function describeKnowledgeBackend(name: string, make: () => Promise<ContractFixture>): void {
@@ -68,6 +80,42 @@ export function describeKnowledgeBackend(name: string, make: () => Promise<Contr
       await expect(f.backend.write(f.checkout, patch({ add: [fact('fine', 'src/a.ts'), fact('bad', 'src/missing.ts')] })))
         .rejects.toThrow(KNOWLEDGE_REFUSAL.missingAnchor('src/missing.ts'))
       expect((await f.backend.card(f.checkout, '.', PAGE)).claims).toEqual([])
+    })
+
+    it('a symbol that matches nothing is refused with the closest real names, and nothing is written', async () => {
+      await expect(f.backend.write(f.checkout, patch({ add: [symbolFact('typo', 'src/a.ts', 'alpah')] }))).rejects.toThrow('closest: alpha')
+      expect((await f.backend.card(f.checkout, '.', PAGE)).claims).toEqual([])
+    })
+
+    it('a symbol given by its unique short form is stored by its full qualified name, added or changed', async () => {
+      const [added, plain] = await add(symbolFact('short', 'src/a.ts', 'inner'), fact('plain', 'src/b.ts'))
+      await f.backend.write(f.checkout, patch({ change: [{ id: plain?.id ?? '', anchors: [{ path: 'src/a.ts', symbol: 'inner' }] }] }))
+      const read = await f.backend.get(f.checkout, [added?.id ?? '', plain?.id ?? ''])
+      expect(read.map(c => c.anchors)).toEqual([[{ path: 'src/a.ts', symbol: 'outer.inner' }], [{ path: 'src/a.ts', symbol: 'outer.inner' }]])
+    })
+
+    it('a retried add with the short form and an explicit id replays instead of clashing', async () => {
+      const retried = patch({ add: [symbolFact('short', 'src/a.ts', 'inner', 'abcd1234')] })
+      const first = await f.backend.write(f.checkout, retried)
+      const second = await f.backend.write(f.checkout, retried)
+      expect(second.added).toEqual(first.added)
+      expect((await f.backend.card(f.checkout, '.', PAGE)).claims.map(c => c.id)).toEqual(['abcd1234'])
+    })
+
+    it('a symbol on a file that cannot be outlined is refused as unsupported; the file itself is accepted', async () => {
+      await expect(f.backend.write(f.checkout, patch({ add: [symbolFact('manifest', 'pkg/package.json', 'name')] })))
+        .rejects.toThrow(KNOWLEDGE_REFUSAL.symbolUnsupported('pkg/package.json'))
+      await expect(f.backend.write(f.checkout, patch({ add: [symbolFact('missing', 'src/missing.ts', 'x')] })))
+        .rejects.toThrow(KNOWLEDGE_REFUSAL.missingAnchor('src/missing.ts'))
+      expect((await add(fact('manifest file', 'pkg/package.json'))).length).toBe(1)
+    })
+
+    it('a change that leaves anchors alone is not blocked by a symbol the file no longer defines', async () => {
+      const [ref] = await add(symbolFact('held', 'src/a.ts', 'inner'))
+      const id = ref?.id ?? ''
+      f.rewrite(f.checkout, 'src/a.ts', 'export function alpha() {}\n')
+      await f.backend.write(f.checkout, patch({ change: [{ id, text: 'edited' }] }))
+      expect((await f.backend.get(f.checkout, [id]))[0]).toMatchObject({ text: 'edited', anchors: [{ path: 'src/a.ts', symbol: 'outer.inner' }] })
     })
 
     it('an addition that names an existing id with the same content is a no-op; with other content it is refused', async () => {
@@ -122,6 +170,57 @@ export function describeKnowledgeBackend(name: string, make: () => Promise<Contr
     it('two checkouts do not see each other', async () => {
       await add(fact('only here', 'src/a.ts'))
       expect((await f.backend.card(f.other, '.', PAGE)).claims).toEqual([])
+    })
+
+    const statesOf = async (filter: DriftFilterInput = {}): Promise<Record<string, ClaimState>> =>
+      Object.fromEntries(driftOf(await f.backend.readings(f.checkout, DriftFilter.parse(filter)), []).map(d => [d.claim.id, d.state]))
+    const SOURCE_A_COMMENTED = 'export function alpha() { /* reads the store */ }\nexport function outer() {\n  // the inner helper\n  function inner() {}\n}\n'
+    const SOURCE_A_EDITED = 'export function alpha() { return 1 }\nexport function outer() {\n  function inner() {}\n}\n'
+
+    it('a fresh claim reads clean; an edit to its anchored symbol\'s tokens turns it suspect, a comment edit does not', async () => {
+      const [ref] = await add(symbolFact('alpha does nothing', 'src/a.ts', 'alpha'))
+      const id = ref?.id ?? ''
+      expect(await statesOf()).toEqual({ [id]: ClaimState.clean })
+      f.commit(f.checkout)
+      f.rewrite(f.checkout, 'src/a.ts', SOURCE_A_COMMENTED)
+      expect(await statesOf()).toEqual({ [id]: ClaimState.clean })
+      f.rewrite(f.checkout, 'src/a.ts', SOURCE_A_EDITED)
+      expect(await statesOf()).toEqual({ [id]: ClaimState.suspect })
+    })
+
+    it('deleting the anchored symbol turns the claim suspect, and an edit elsewhere in the file leaves a symbol claim clean', async () => {
+      const [inner, alpha] = await add(symbolFact('inner helps outer', 'src/a.ts', 'outer.inner'), symbolFact('alpha does nothing', 'src/a.ts', 'alpha'))
+      f.commit(f.checkout)
+      f.rewrite(f.checkout, 'src/a.ts', 'export function alpha() {}\nexport function outer() {}\n')
+      expect(await statesOf()).toEqual({ [inner?.id ?? '']: ClaimState.suspect, [alpha?.id ?? '']: ClaimState.clean })
+    })
+
+    it('an unanchored claim reads unanchored', async () => {
+      const [ref] = await add(fact('the project has no anchor here'))
+      expect(await statesOf()).toEqual({ [ref?.id ?? '']: ClaimState.unanchored })
+    })
+
+    it('a symbol anchor the outline cannot read is never clean: unknown, before and after its basis is committed', async () => {
+      const [ref] = await add(symbolFact('alpha does nothing', 'src/a.ts', 'alpha'))
+      f.rewrite(f.checkout, 'src/a.ts', 'export function beta( {\n')
+      expect(await statesOf()).toEqual({ [ref?.id ?? '']: ClaimState.unknown })
+      f.commit(f.checkout)
+      expect(await statesOf()).toEqual({ [ref?.id ?? '']: ClaimState.unknown })
+    })
+
+    it('a drift filter path matches a claim anchored at it, under it, or at a folder above it; ids narrow it; [] matches nothing', async () => {
+      const [folder, file, elsewhere, loose] = await add(fact('the package', 'pkg'), fact('c', 'pkg/src/c.ts'), fact('a', 'src/a.ts'), fact('loose'))
+      const ids = async (filter: DriftFilterInput) => Object.keys(await statesOf(filter)).sort()
+      const [p, c, a, l] = [folder?.id ?? '', file?.id ?? '', elsewhere?.id ?? '', loose?.id ?? '']
+      expect(await ids({ paths: ['pkg/src/c.ts'] })).toEqual([p, c].sort())
+      expect(await ids({ paths: ['pkg/src'] })).toEqual([p, c].sort())
+      expect(await ids({ paths: ['pkg'] })).toEqual([p, c].sort())
+      expect(await ids({ paths: ['src/a.ts', 'docs'] })).toEqual([a])
+      expect(await ids({ ids: [a, l] })).toEqual([a, l].sort())
+      expect(await ids({ paths: ['pkg/src/c.ts'], ids: [p, a] })).toEqual([p])
+      expect(await ids({ paths: [] })).toEqual([])
+      expect(await ids({})).toEqual([p, c, a, l].sort())
+      expect(await statesOf({ ids: [p] })).toEqual({ [p]: ClaimState.clean })
     })
 
     it('a clean store has nothing to check or format', async () => {

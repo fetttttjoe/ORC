@@ -57,6 +57,7 @@ export const DECISION_REFUSAL = {
   exists: (id: string): string => `decision '${id}' already exists — a changed decision is a supersession: record the new one with supersedes '${id}'`,
   noSuchDecision: (id: string): string => `no decision '${id}'`,
   alreadySuperseded: (id: string): string => `decision '${id}' is already superseded — supersede the decision that replaced it`,
+  proposedSupersedes: (id: string): string => `decision '${id}' is proposed — only an accepted decision supersedes another`,
   noSlug: (title: string): string => `cannot derive a decision id from '${title}' — use latin letters or digits`,
 } as const
 

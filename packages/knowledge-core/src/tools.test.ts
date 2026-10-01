@@ -1,17 +1,17 @@
 import { describe, expect, it } from 'bun:test'
 import {
-  AUTHOR_SOURCE, ClaimClass, DeliveryMode, Door, EVENT_KIND, KNOWLEDGE_REFUSAL, KnowledgeToolName, knowledgeIdFrom,
+  AUTHOR_SOURCE, CheckVerdict, ClaimClass, DeliveryMode, Door, EVENT_KIND, KNOWLEDGE_REFUSAL, KnowledgeToolName, knowledgeIdFrom,
   type EventInput, type MemoryAuthor, type ResolvedTool,
 } from '@orc/contracts'
-import { createMemoryBackend } from './memory-backend'
+import { createMemoryBackend, NO_STRUCTURE } from './memory-backend'
 import { createKnowledgePort } from './port'
-import { KNOWLEDGE_READ_TOOLS, KNOWLEDGE_STEP_TOOLS, knowledgeTools } from './tools'
+import { KNOWLEDGE_READ_TOOLS, KNOWLEDGE_STEP_TOOLS, KNOWLEDGE_VERIFY_TOOLS, knowledgeTools, type KnowledgeStepToolName } from './tools'
 
 const author: MemoryAuthor = { source: AUTHOR_SOURCE.agent, workspaceId: 'ws-1', origin: { chatId: 'c-1', door: Door.supervisor }, taskId: 't-1', stepId: 's-1', runToken: 'r-1' }
-const setup = () => {
+const setup = (names: readonly KnowledgeStepToolName[] = KNOWLEDGE_STEP_TOOLS) => {
   const events: EventInput[] = []
-  const port = createKnowledgePort({ backend: createMemoryBackend({ exists: () => true }), checkoutOf: async () => '/checkout', append: async e => { events.push(e) } })
-  const tools = knowledgeTools({ port }, author, KNOWLEDGE_STEP_TOOLS)
+  const port = createKnowledgePort({ backend: createMemoryBackend({ exists: () => true, structure: NO_STRUCTURE, read: () => null }), checkoutOf: async () => '/checkout', append: async e => { events.push(e) } })
+  const tools = knowledgeTools({ port }, author, names)
   const tool = (name: KnowledgeToolName): ResolvedTool => {
     const found = tools.find(t => t.name === name)
     if (!found) throw new Error(`missing ${name}`)
@@ -61,9 +61,31 @@ describe('knowledge tools', () => {
     expect(refused.isError).toBe(true)
     expect(events).toEqual([])
   })
+  it('knowledge_check needs an id, a verdict and a why; a holds check through it records the check keyed by the tool call', async () => {
+    const { tool, events } = setup([...KNOWLEDGE_STEP_TOOLS, ...KNOWLEDGE_VERIFY_TOOLS])
+    expect(tool(KnowledgeToolName.check).inputSchema).toMatchObject({ type: 'object', required: ['id', 'verdict', 'why'] })
+    const written = await tool(KnowledgeToolName.write).execute(add('The store writes events.'), 'call-1')
+    const id = knowledgeIdFrom('r-1:tool:call-1:knowledge:0')
+    expect(written.output).toMatchObject({ added: [{ id }] })
+    events.splice(0)
+    expect(await tool(KnowledgeToolName.check).execute({ id, verdict: CheckVerdict.holds, why: 'read the store' }, 'call-2'))
+      .toEqual({ isError: false, output: { verdict: CheckVerdict.holds, written: null, warnings: [] } })
+    expect(events.map(e => [e.kind, e.idempotencyKey])).toEqual([[EVENT_KIND.knowledge_checked, 'r-1:tool:call-2:knowledge']])
+    const refused = await tool(KnowledgeToolName.check).execute({ id, verdict: CheckVerdict.false, why: 'wrong' }, 'call-3')
+    expect(refused.isError).toBe(true)
+    expect(events.length).toBe(1)
+  })
+  it('a false check through the tool takes the write tool\'s patch shape: an agent-sent add id is ignored', async () => {
+    const { tool } = setup([...KNOWLEDGE_STEP_TOOLS, ...KNOWLEDGE_VERIFY_TOOLS])
+    await tool(KnowledgeToolName.write).execute(add('The store writes events.'), 'call-1')
+    const id = knowledgeIdFrom('r-1:tool:call-1:knowledge:0')
+    const replacement = { ...add('The store writes events in batches.').add[0], id: 'zzzzzzzz' }
+    const checked = await tool(KnowledgeToolName.check).execute({ id, verdict: CheckVerdict.false, why: 'it batches now', patch: { add: [replacement], retire: [id] } }, 'call-2')
+    expect(checked).toMatchObject({ isError: false, output: { written: { added: [{ id: knowledgeIdFrom('r-1:tool:call-2:knowledge:patch:0') }], retired: [{ id }] } } })
+  })
   it('every knowledge_* tool named inside a description exists in KnowledgeToolName', () => {
     const known = new Set<string>(Object.values(KnowledgeToolName))
-    for (const t of setup().tools) {
+    for (const t of setup([...KNOWLEDGE_STEP_TOOLS, ...KNOWLEDGE_VERIFY_TOOLS]).tools) {
       const mentioned = t.description.match(/\bknowledge_[a-z]+\b/g) ?? []
       expect(mentioned.filter(name => !known.has(name))).toEqual([])
     }

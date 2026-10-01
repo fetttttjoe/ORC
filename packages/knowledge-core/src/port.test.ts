@@ -1,19 +1,20 @@
 import { describe, expect, it } from 'bun:test'
 import { ZodError } from 'zod'
 import {
-  AUTHOR_SOURCE, ClaimClass, DECISION_REFUSAL, DecisionStatus, DeliveryMode, Door, EVENT_KIND, KNOWLEDGE_LIMITS, knowledgeIdFrom,
+  AUTHOR_SOURCE, CheckVerdict, ClaimClass, ClaimState, DECISION_REFUSAL, DecisionStatus, DeliveryMode, Door, EVENT_KIND, KNOWLEDGE_LIMITS,
+  KNOWLEDGE_REFUSAL, KnowledgeCheckedPayload, knowledgeIdFrom, sha256,
   type Decision, type DecisionInputRaw, type EventInput, type KnowledgeBackend, type MemoryAuthor,
 } from '@orc/contracts'
 import { planDecisionRecord } from './decision-record'
-import { createMemoryBackend } from './memory-backend'
-import { createKnowledgePort, EVIDENCE_NOT_RECORDED, type KnowledgePortDeps } from './port'
+import { createMemoryBackend, NO_STRUCTURE } from './memory-backend'
+import { CHECKS_NOT_READ, createKnowledgePort, EVIDENCE_NOT_RECORDED, type KnowledgePortDeps } from './port'
 
 const author: MemoryAuthor = { source: AUTHOR_SOURCE.agent, workspaceId: 'ws-1', origin: { chatId: 'chat-1', door: Door.supervisor }, taskId: 't-1', stepId: 's-1', runToken: 'r-1' }
 const setup = (append: (e: EventInput) => Promise<void> = async () => {}, over: Partial<KnowledgePortDeps> = {}) => {
   const events: EventInput[] = []
   const warned: string[] = []
   const port = createKnowledgePort({
-    backend: createMemoryBackend({ exists: () => true }),
+    backend: createMemoryBackend({ exists: () => true, structure: NO_STRUCTURE, read: () => null }),
     checkoutOf: async () => '/checkout',
     append: async e => { events.push(e); await append(e) },
     warn: line => warned.push(line),
@@ -25,7 +26,7 @@ const adr = (title: string, over: Partial<DecisionInputRaw> = {}): DecisionInput
 const fileBackedDecisions = (): KnowledgeBackend => {
   const held = new Map<string, Decision>()
   return {
-    ...createMemoryBackend({ exists: () => true }),
+    ...createMemoryBackend({ exists: () => true, structure: NO_STRUCTURE, read: () => null }),
     decisions: async () => [...held.values()],
     decision: async (_checkout, id) => held.get(id) ?? null,
     recordDecision: async (_checkout, draft) => {
@@ -105,7 +106,7 @@ describe('the knowledge port on replay and failure', () => {
   })
   it('caps the page and search sizes it asks the backend for', async () => {
     const seen: number[] = []
-    const inner = createMemoryBackend({ exists: () => true })
+    const inner = createMemoryBackend({ exists: () => true, structure: NO_STRUCTURE, read: () => null })
     const port = createKnowledgePort({
       backend: {
         ...inner,
@@ -136,7 +137,7 @@ describe('the knowledge port get', () => {
   })
   it('refuses more ids than one delivery carries, and a malformed id, without asking the backend', async () => {
     const asked: (readonly string[])[] = []
-    const inner = createMemoryBackend({ exists: () => true })
+    const inner = createMemoryBackend({ exists: () => true, structure: NO_STRUCTURE, read: () => null })
     const port = createKnowledgePort({
       backend: { ...inner, get: (checkout, ids) => { asked.push(ids); return inner.get(checkout, ids) } },
       checkoutOf: async () => '/checkout',
@@ -151,7 +152,7 @@ describe('the knowledge port get', () => {
 
 describe('the knowledge port on decisions', () => {
   it('a record appends exactly one knowledge_written carrying the refs, the files and the envelope', async () => {
-    const inner = createMemoryBackend({ exists: () => true })
+    const inner = createMemoryBackend({ exists: () => true, structure: NO_STRUCTURE, read: () => null })
     const { port, events } = setup(async () => {}, {
       backend: { ...inner, recordDecision: async (checkout, draft) => ({ ...(await inner.recordDecision(checkout, draft)), files: [`docs/decisions/${draft.id}.md`] }) },
     })
@@ -215,9 +216,122 @@ describe('the knowledge port on decisions', () => {
   })
   it('a superseded input status is refused before the backend is called', async () => {
     const asked: string[] = []
-    const inner = createMemoryBackend({ exists: () => true })
+    const inner = createMemoryBackend({ exists: () => true, structure: NO_STRUCTURE, read: () => null })
     const { port } = setup(async () => {}, { backend: { ...inner, recordDecision: (checkout, draft) => { asked.push(draft.id); return inner.recordDecision(checkout, draft) } } })
     await expect(port.recordDecision(write(), adr('Gone', { status: DecisionStatus.superseded }))).rejects.toThrow(ZodError)
     expect(asked).toEqual([])
+  })
+})
+
+describe('the knowledge port on claim state and checks', () => {
+  const checking = (over: Partial<KnowledgePortDeps> = {}) => {
+    const sources = new Map<string, string>([['src/a.ts', 'v1'], ['src/b.ts', 'b']])
+    const events: EventInput[] = []
+    const warned: string[] = []
+    let checksDown = false
+    const port = createKnowledgePort({
+      backend: createMemoryBackend({ exists: (_c, path) => sources.has(path), structure: NO_STRUCTURE, read: (_c, path) => sources.get(path) ?? null }),
+      checkoutOf: async () => '/checkout',
+      append: async e => { events.push(e) },
+      checks: async () => {
+        if (checksDown) throw new Error('log down')
+        return events.filter(e => e.kind === EVENT_KIND.knowledge_checked).map(e => KnowledgeCheckedPayload.parse(e.payload))
+      },
+      warn: line => warned.push(line),
+      ...over,
+    })
+    const stateOf = async (id: string) => (await port.drift(write(), { ids: [id] }))[0]?.state
+    return { port, sources, events, warned, stateOf, breakChecks: () => { checksDown = true } }
+  }
+  const claimOn = async (port: ReturnType<typeof checking>['port'], text = 'a writes the store') => {
+    const [ref] = (await port.write(write(), { add: [fact(text)] })).added
+    return ref?.id ?? ''
+  }
+
+  it('a holds check clears a suspect claim until its code changes again; a later text change does not inherit it', async () => {
+    const { port, sources, stateOf } = checking()
+    const id = await claimOn(port)
+    expect(await stateOf(id)).toBe(ClaimState.clean)
+    sources.set('src/a.ts', 'v2')
+    expect(await stateOf(id)).toBe(ClaimState.suspect)
+    await port.check(write(), { id, verdict: CheckVerdict.holds, why: 'read a: it still writes the store' })
+    expect(await stateOf(id)).toBe(ClaimState.clean)
+    sources.set('src/a.ts', 'v3')
+    expect(await stateOf(id)).toBe(ClaimState.suspect)
+    await port.write(write(), { change: [{ id, text: 'a writes the store twice' }] })
+    sources.set('src/a.ts', 'v2')
+    expect(await stateOf(id)).toBe(ClaimState.suspect)
+  })
+
+  it('an unknown check records only, and drift appends no event', async () => {
+    const { port, sources, events, stateOf } = checking()
+    const id = await claimOn(port)
+    sources.set('src/a.ts', 'v2')
+    events.splice(0)
+    expect(await stateOf(id)).toBe(ClaimState.suspect)
+    expect(events).toEqual([])
+    const result = await port.check(write('chk-1'), { id, verdict: CheckVerdict.unknown, why: 'the code does not say' })
+    expect(result).toEqual({ verdict: CheckVerdict.unknown, written: null, warnings: [] })
+    expect(events.map(e => [e.kind, e.idempotencyKey])).toEqual([[EVENT_KIND.knowledge_checked, 'chk-1']])
+    expect(events[0]?.payload).toEqual({
+      id, verdict: CheckVerdict.unknown, text: 'a writes the store', anchors: [{ path: 'src/a.ts', symbol: null, digest: sha256('v2') }], why: 'the code does not say', author,
+    })
+    expect(await stateOf(id)).toBe(ClaimState.suspect)
+  })
+
+  it('a false check without a patch that corrects the claim is refused and appends nothing; so is a holds with a patch and an unknown id', async () => {
+    const { port, events } = checking()
+    const id = await claimOn(port)
+    const other = await claimOn(port, 'b is another module')
+    events.splice(0)
+    await expect(port.check(write(), { id, verdict: CheckVerdict.false, why: 'wrong' })).rejects.toThrow(KNOWLEDGE_REFUSAL.checkNeedsPatch(id))
+    await expect(port.check(write(), { id, verdict: CheckVerdict.false, why: 'wrong', patch: { retire: [other] } })).rejects.toThrow(KNOWLEDGE_REFUSAL.checkNeedsPatch(id))
+    await expect(port.check(write(), { id, verdict: CheckVerdict.holds, why: 'fine', patch: { retire: [id] } })).rejects.toThrow(KNOWLEDGE_REFUSAL.checkTakesNoPatch(CheckVerdict.holds))
+    await expect(port.check(write(), { id: 'zzzzzzzz', verdict: CheckVerdict.holds, why: 'fine' })).rejects.toThrow(KNOWLEDGE_REFUSAL.unknownId('zzzzzzzz'))
+    expect(events).toEqual([])
+    expect((await port.get(read(DeliveryMode.get), [id, other])).length).toBe(2)
+  })
+
+  it('a false check with a retire retires the claim, then records the check of the text and digests it read before the patch', async () => {
+    const { port, sources, events } = checking()
+    const id = await claimOn(port)
+    sources.set('src/a.ts', 'v2')
+    events.splice(0)
+    const result = await port.check(write('chk-2'), { id, verdict: CheckVerdict.false, why: 'a no longer writes the store', patch: { retire: [id] } })
+    expect(result.written?.retired.map(r => r.id)).toEqual([id])
+    expect(events.map(e => [e.kind, e.idempotencyKey])).toEqual([[EVENT_KIND.knowledge_written, 'chk-2:patch'], [EVENT_KIND.knowledge_checked, 'chk-2']])
+    expect(events[0]?.payload).toMatchObject({ retired: [{ id }], why: 'a no longer writes the store' })
+    expect(events[1]?.payload).toMatchObject({ id, verdict: CheckVerdict.false, text: 'a writes the store', anchors: [{ path: 'src/a.ts', symbol: null, digest: sha256('v2') }] })
+    expect(await port.get(read(DeliveryMode.get), [id])).toEqual([])
+  })
+
+  it('a false check with a change corrects the claim, records the text it checked, and the check clears nothing', async () => {
+    const { port, sources, events, stateOf } = checking()
+    const id = await claimOn(port)
+    sources.set('src/a.ts', 'v2')
+    const result = await port.check(write(), { id, verdict: CheckVerdict.false, why: 'a writes twice now', patch: { change: [{ id, text: 'a writes the store twice' }] } })
+    expect(result.written?.changed.map(r => r.id)).toEqual([id])
+    expect(events.at(-1)?.payload).toMatchObject({ id, verdict: CheckVerdict.false, text: 'a writes the store' })
+    expect((await port.get(read(DeliveryMode.get), [id]))[0]?.text).toBe('a writes the store twice')
+    expect(await stateOf(id)).toBe(ClaimState.clean)
+    sources.set('src/a.ts', 'v3')
+    expect(await stateOf(id)).toBe(ClaimState.suspect)
+  })
+
+  it('checks that cannot be read leave drift answering from the basis alone, with a warning', async () => {
+    const { port, sources, warned, stateOf, breakChecks } = checking()
+    const id = await claimOn(port)
+    sources.set('src/a.ts', 'v2')
+    await port.check(write(), { id, verdict: CheckVerdict.holds, why: 'still true' })
+    expect(await stateOf(id)).toBe(ClaimState.clean)
+    breakChecks()
+    expect(await stateOf(id)).toBe(ClaimState.suspect)
+    expect(warned).toEqual([CHECKS_NOT_READ('log down')])
+  })
+
+  it('a check still answers when its evidence cannot be appended, and says so', async () => {
+    const { port } = checking({ append: async e => { if (e.kind === EVENT_KIND.knowledge_checked) throw new Error('log down') } })
+    const id = await claimOn(port)
+    expect(await port.check(write(), { id, verdict: CheckVerdict.holds, why: 'fine' })).toEqual({ verdict: CheckVerdict.holds, written: null, warnings: [EVIDENCE_NOT_RECORDED('log down')] })
   })
 })

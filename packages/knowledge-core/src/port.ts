@@ -1,19 +1,23 @@
 import { z } from 'zod'
 import {
-  byAttention, DECISION_REFUSAL, DecisionDraft, DecisionFilter, DecisionInput, decisionSlugOf, decisionStatusOf, errorMessage, EVENT_KIND,
-  KNOWLEDGE_LIMITS, KnowledgeId, KnowledgePage, KnowledgePatch, knowledgeIdFrom,
-  type EventInput, type KnowledgeBackend, type KnowledgeCall, type KnowledgePort, type KnowledgeRead, type KnowledgeWrittenPayload, type MemoryAuthor,
+  byAttention, DECISION_REFUSAL, DecisionDraft, DecisionFilter, DecisionInput, decisionSlugOf, decisionStatusOf, DriftFilter, errorMessage, EVENT_KIND,
+  KNOWLEDGE_LIMITS, KNOWLEDGE_REFUSAL, KnowledgeCheckInput, KnowledgeId, KnowledgePage, KnowledgePatch, knowledgeIdFrom,
+  type EventInput, type KnowledgeBackend, type KnowledgeCall, type KnowledgeCheckedPayload, type KnowledgePatchInput, type KnowledgePort,
+  type KnowledgeRead, type KnowledgeWriteResult, type KnowledgeWrittenPayload, type MemoryAuthor,
 } from '@orc/contracts'
+import { driftOf } from './drift-of'
 
 export interface KnowledgePortDeps {
   backend: KnowledgeBackend
   checkoutOf: (author: MemoryAuthor) => Promise<string>
   append: (event: EventInput) => Promise<void>
+  checks?: () => Promise<KnowledgeCheckedPayload[]>
   warn?: (line: string) => void
   today?: () => string
 }
 
 export const EVIDENCE_NOT_RECORDED = (reason: string): string => `evidence not recorded: ${reason}`
+export const CHECKS_NOT_READ = (reason: string): string => `knowledge checks not read, claims read from their basis alone: ${reason}`
 
 const envelope = (call: KnowledgeCall) => ({
   ...call.author.origin,
@@ -28,6 +32,7 @@ const pageOf = (page: Partial<KnowledgePage> | undefined): KnowledgePage =>
   KnowledgePage.parse({ cursor: page?.cursor ?? null, limit: limitOf(page?.limit, KNOWLEDGE_LIMITS.pageItems) })
 
 const utcToday = (): string => new Date().toISOString().slice(0, 10)
+const patchCall = (call: KnowledgeCall): KnowledgeCall => ({ ...call, idempotencyKey: call.idempotencyKey === null ? null : `${call.idempotencyKey}:patch` })
 
 export function createKnowledgePort(deps: KnowledgePortDeps): KnowledgePort {
   const warn = deps.warn ?? ((line: string) => console.warn(line))
@@ -39,6 +44,22 @@ export function createKnowledgePort(deps: KnowledgePortDeps): KnowledgePort {
     } catch (err) {
       return { ...result, warnings: [...result.warnings, EVIDENCE_NOT_RECORDED(errorMessage(err))] }
     }
+  }
+  const checksOf = async (): Promise<KnowledgeCheckedPayload[]> => {
+    try { return (await deps.checks?.()) ?? [] } catch (err) {
+      warn(CHECKS_NOT_READ(errorMessage(err)))
+      return []
+    }
+  }
+  const write = async (call: KnowledgeCall, input: KnowledgePatchInput): Promise<KnowledgeWriteResult> => {
+    const parsed = KnowledgePatch.parse(input)
+    const key = call.idempotencyKey
+    const patch = key === null ? parsed : { ...parsed, add: parsed.add.map((a, i) => ({ ...a, id: a.id ?? knowledgeIdFrom(`${key}:${i}`) })) }
+    const result = await deps.backend.write(await deps.checkoutOf(call.author), patch)
+    return recordWritten(call, {
+      added: result.added, changed: result.changed, retired: result.retired, files: result.files, why: patch.why, decision: patch.decision,
+      decisionsRecorded: [], decisionsSuperseded: [], author: call.author,
+    }, result)
   }
   const deliver = async (call: KnowledgeRead, ids: readonly string[], subject: string): Promise<void> => {
     if (ids.length === 0) return
@@ -68,15 +89,26 @@ export function createKnowledgePort(deps: KnowledgePortDeps): KnowledgePort {
       await deliver(call, found.map(c => c.id), unique.join(' '))
       return found
     },
-    async write(call, input) {
-      const parsed = KnowledgePatch.parse(input)
-      const key = call.idempotencyKey
-      const patch = key === null ? parsed : { ...parsed, add: parsed.add.map((a, i) => ({ ...a, id: a.id ?? knowledgeIdFrom(`${key}:${i}`) })) }
-      const result = await deps.backend.write(await deps.checkoutOf(call.author), patch)
-      return recordWritten(call, {
-        added: result.added, changed: result.changed, retired: result.retired, files: result.files, why: patch.why, decision: patch.decision,
-        decisionsRecorded: [], decisionsSuperseded: [], author: call.author,
-      }, result)
+    write,
+    async drift(call, filter) {
+      const readings = await deps.backend.readings(await deps.checkoutOf(call.author), DriftFilter.parse(filter ?? {}))
+      return driftOf(readings, await checksOf())
+    },
+    async check(call, raw) {
+      const input = KnowledgeCheckInput.parse(raw)
+      const [reading] = await deps.backend.readings(await deps.checkoutOf(call.author), DriftFilter.parse({ ids: [input.id] }))
+      if (reading === undefined) throw new Error(KNOWLEDGE_REFUSAL.unknownId(input.id))
+      const written = input.patch === undefined ? null : await write(patchCall(call), { ...input.patch, why: input.patch.why ?? input.why })
+      const payload: KnowledgeCheckedPayload = {
+        id: input.id, verdict: input.verdict, text: reading.claim.text,
+        anchors: reading.anchors.map(a => ({ path: a.path, symbol: a.symbol, digest: a.current })), why: input.why, author: call.author,
+      }
+      try {
+        await deps.append({ ...envelope(call), kind: EVENT_KIND.knowledge_checked, payload })
+        return { verdict: input.verdict, written, warnings: [] }
+      } catch (err) {
+        return { verdict: input.verdict, written, warnings: [EVIDENCE_NOT_RECORDED(errorMessage(err))] }
+      }
     },
     async decisions(call, filter) {
       const { status } = DecisionFilter.parse(filter ?? {})

@@ -112,6 +112,10 @@ const SUMMARIZE = {
     line: p.decisionsRecorded.length > 0 ? decisionLine(p) : `+${p.added.length} ~${p.changed.length} -${p.retired.length}${p.why === null ? '' : ` · ${snip(p.why, 80)}`}`,
     authorTaskId: p.author.taskId ?? null,
   })),
+  [EVENT_KIND.knowledge_checked]: entry(PAYLOAD_SCHEMAS.knowledge_checked, p => ({
+    line: `check ${p.id} ${p.verdict}`,
+    authorTaskId: p.author.taskId ?? null,
+  })),
   [EVENT_KIND.signal_received]: entry(PAYLOAD_SCHEMAS.signal_received, p => ({
     line: `${p.signal.outcome}: ${snip(p.signal.summary, 90)}`,
   })),

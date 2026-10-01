@@ -8,11 +8,12 @@ import {
 } from '@orc/contracts'
 import { authorFixture, TEST_WORKSPACE_ID } from '@orc/contracts/fixtures'
 import { gitFilesPlugin } from '@orc/knowledge-git'
+import { createTreeSitterStructure } from '@orc/structure-treesitter'
 import type { WorkspaceFold } from './cwd-workspace'
 import { knowledgeAccess, openKnowledge } from './knowledge-open'
 import {
   addPatch, NO_PROJECT_CONTEXT, KNOWLEDGE_SUBCOMMAND, knowledgeAuthor, knowledgeCommand, parseAnchorArg, renderClaims, renderProblems,
-  runAdd, runCard, runCheck, runFormat, runRetire, runSearch,
+  runAdd, runCard, runCheck, runDrift, runFormat, runRetire, runSearch,
 } from './knowledge-commands'
 
 const dirs: string[] = []
@@ -24,6 +25,10 @@ const checkout = () => {
   mkdirSync(path.join(dir, 'src'))
   writeFileSync(path.join(dir, 'src/a.ts'), '')
   return dir
+}
+const commitAll = (dir: string, message: string): void => {
+  Bun.spawnSync(['git', '-C', dir, 'add', '.'])
+  Bun.spawnSync(['git', '-C', dir, '-c', 'user.name=t', '-c', 'user.email=t@example.com', '-c', 'commit.gpgsign=false', 'commit', '-q', '-m', message])
 }
 const testAuthor: MemoryAuthor = { source: AUTHOR_SOURCE.cli, workspaceId: 'ws-1', origin: NO_CHAT(Door.cli) }
 const portOn = (dir: string) => {
@@ -37,7 +42,7 @@ const portOn = (dir: string) => {
       kind: input.kind, payload: input.payload, usage: input.usage ?? null, ts: new Date().toISOString(),
     }
   }
-  const access = knowledgeAccess(openKnowledge({ knowledge: { plugin: 'git-files', options: {} } }), { append }, dir)
+  const access = knowledgeAccess(openKnowledge({ knowledge: { plugin: 'git-files', options: {} } }), { append, after: async () => [] }, dir)
   return { port: access, events }
 }
 
@@ -59,7 +64,7 @@ describe('knowledge command helpers', () => {
 describe('knowledge check and fmt', () => {
   it('check passes on a clean checkout and fails with the problems listed', async () => {
     const dir = checkout()
-    const backend = { backend: gitFilesPlugin.create({}) }
+    const backend = { backend: gitFilesPlugin.create({}, { structure: createTreeSitterStructure() }) }
     await backend.backend.write(dir, KnowledgePatch.parse({ add: [{ text: 'ok', class: ClaimClass.fact, anchors: [{ path: 'src/a.ts' }] }] }))
     expect(await runCheck(backend, dir)).toEqual({ lines: ['knowledge: 0 problems'], failed: false })
     appendFileSync(path.join(dir, 'knowledge/src/a.ts.md'), '- by hand\n')
@@ -69,7 +74,7 @@ describe('knowledge check and fmt', () => {
   })
   it('fmt fixes a missing id and reports what it rewrote', async () => {
     const dir = checkout()
-    const backend = { backend: gitFilesPlugin.create({}) }
+    const backend = { backend: gitFilesPlugin.create({}, { structure: createTreeSitterStructure() }) }
     await backend.backend.write(dir, KnowledgePatch.parse({ add: [{ text: 'ok', class: ClaimClass.fact, anchors: [{ path: 'src/a.ts' }] }] }))
     appendFileSync(path.join(dir, 'knowledge/src/a.ts.md'), '- by hand {@src/a.ts}\n')
     expect(await runFormat(backend, dir)).toEqual(['formatted knowledge/src/a.ts.md', 'knowledge: 0 problems'])
@@ -101,7 +106,7 @@ describe('knowledge card and search', () => {
   it('runCard lists claims anchored under a path and pages with a cursor', async () => {
     const dir = checkout()
     writeFileSync(path.join(dir, 'src/b.ts'), '')
-    const backend = { backend: gitFilesPlugin.create({}) }
+    const backend = { backend: gitFilesPlugin.create({}, { structure: createTreeSitterStructure() }) }
     await backend.backend.write(dir, KnowledgePatch.parse({
       add: [
         { text: 'first', class: ClaimClass.fact, anchors: [{ path: 'src/a.ts' }] },
@@ -115,7 +120,7 @@ describe('knowledge card and search', () => {
   })
   it('runSearch finds a written claim', async () => {
     const dir = checkout()
-    const backend = { backend: gitFilesPlugin.create({}) }
+    const backend = { backend: gitFilesPlugin.create({}, { structure: createTreeSitterStructure() }) }
     await backend.backend.write(dir, KnowledgePatch.parse({ add: [{ text: 'findme', class: ClaimClass.fact, anchors: [{ path: 'src/a.ts' }] }] }))
     expect(await runSearch(backend, dir, 'findme', 20)).toEqual([expect.stringContaining('findme')])
   })
@@ -131,12 +136,46 @@ describe('knowledge add and retire through a real port', () => {
   })
   it('runRetire retires a written claim and records a knowledge_written event', async () => {
     const dir = checkout()
-    const backend = gitFilesPlugin.create({})
+    const backend = gitFilesPlugin.create({}, { structure: createTreeSitterStructure() })
     const [ref] = (await backend.write(dir, KnowledgePatch.parse({ add: [{ text: 'ok', class: ClaimClass.fact, anchors: [{ path: 'src/a.ts' }] }] }))).added
     const { port, events } = portOn(dir)
     const lines = await runRetire(port, testAuthor, [ref.id], 'no longer true')
     expect(lines).toEqual([`retired ${ref.id} from ${ref.location}`])
     expect(events.map(e => e.kind)).toEqual([EVENT_KIND.knowledge_written])
+  })
+})
+
+describe('knowledge drift', () => {
+  const driftFixture = async () => {
+    const dir = checkout()
+    writeFileSync(path.join(dir, 'src/b.ts'), '')
+    const { port } = portOn(dir)
+    if ('unavailable' in port) throw new Error(port.unavailable)
+    const added = []
+    for (const anchor of ['src/a.ts', 'src/b.ts'])
+      added.push((await port.port.write({ author: testAuthor, idempotencyKey: null }, { add: [{ text: `about ${anchor}`, class: ClaimClass.fact, anchors: [{ path: anchor }] }] })).added[0])
+    commitAll(dir, 'claims')
+    writeFileSync(path.join(dir, 'src/a.ts'), 'export const changed = 1\n')
+    commitAll(dir, 'change a')
+    return { dir, port, suspectId: added[0]?.id, cleanId: added[1]?.id }
+  }
+  it('lists the suspect claim with its anchors, omits the clean one, and counts every state', async () => {
+    const { port, suspectId, cleanId } = await driftFixture()
+    const lines = await runDrift(port, testAuthor, [], false)
+    expect(lines).toEqual([`suspect  ${suspectId}  knowledge/src/a.ts.md  src/a.ts`, 'clean 1 · suspect 1 · unknown 0 · unanchored 0'])
+    expect(lines.join('\n')).not.toContain(cleanId ?? 'missing')
+  })
+  it('narrows to the given paths', async () => {
+    const { port } = await driftFixture()
+    expect(await runDrift(port, testAuthor, ['src/b.ts'], false)).toEqual(['clean 1 · suspect 0 · unknown 0 · unanchored 0'])
+  })
+  it('--json prints one parseable document of the non-clean rows and the counts', async () => {
+    const { port, suspectId } = await driftFixture()
+    const [line] = await runDrift(port, testAuthor, [], true)
+    expect(JSON.parse(line ?? '')).toEqual({
+      claims: [{ state: 'suspect', id: suspectId, location: 'knowledge/src/a.ts.md', anchors: [{ path: 'src/a.ts', symbol: null, state: 'suspect' }] }],
+      counts: { clean: 1, suspect: 1, unknown: 0, unanchored: 0 },
+    })
   })
 })
 
@@ -147,6 +186,7 @@ describe('every handler is off when the door is off', () => {
     await expect(runSearch(off, '/nowhere', 'x', 10)).rejects.toThrow(KNOWLEDGE_REFUSAL.off())
     await expect(runAdd(off, testAuthor, { class: ClaimClass.fact, text: 'x' })).rejects.toThrow(KNOWLEDGE_REFUSAL.off())
     await expect(runRetire(off, testAuthor, ['aaaaaaaa'], 'why')).rejects.toThrow(KNOWLEDGE_REFUSAL.off())
+    await expect(runDrift(off, testAuthor, [], false)).rejects.toThrow(KNOWLEDGE_REFUSAL.off())
   })
 })
 

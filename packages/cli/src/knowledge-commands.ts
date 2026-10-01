@@ -1,7 +1,7 @@
 import { Command } from 'commander'
 import {
-  AUTHOR_SOURCE, ClaimClass, Door, KNOWLEDGE_DEFAULTS, KnowledgePatch, NO_CHAT,
-  type KnowledgeAccess, type KnowledgeClaim, type KnowledgeProblem, type MemoryAuthor,
+  AUTHOR_SOURCE, ClaimClass, ClaimState, Door, KNOWLEDGE_DEFAULTS, KnowledgePatch, NO_CHAT,
+  type ClaimDrift, type KnowledgeAccess, type KnowledgeClaim, type KnowledgeProblem, type MemoryAuthor,
 } from '@orc/contracts'
 import type { EventLog, Kernel, ProjectConfig } from '@orc/kernel'
 import { cwdAuthor, type WorkspaceFold } from './cwd-workspace'
@@ -10,7 +10,7 @@ import { parsePositiveInteger } from './int-arg'
 import { CommandFailure } from './exit'
 import { knowledgeAccess, openKnowledge, type KnowledgeOpening } from './knowledge-open'
 
-export const KNOWLEDGE_SUBCOMMAND = { card: 'card', search: 'search', add: 'add', retire: 'retire', fmt: 'fmt', check: 'check' } as const
+export const KNOWLEDGE_SUBCOMMAND = { card: 'card', search: 'search', add: 'add', retire: 'retire', fmt: 'fmt', check: 'check', drift: 'drift' } as const
 export const NO_PROJECT_CONTEXT = 'knowledge commands need a project context'
 export const ANCHOR_ARG_SEPARATOR = '#'
 const parseClass = enumArg<ClaimClass>('class', Object.values(ClaimClass))
@@ -85,6 +85,33 @@ export async function runRetire(access: KnowledgeAccess, author: MemoryAuthor, i
   return [...result.retired.map(r => `retired ${r.id} from ${r.location}`), ...result.warnings]
 }
 
+const anchorLabel = (a: { path: string; symbol: string | null }): string => (a.symbol === null ? a.path : `${a.path}${ANCHOR_ARG_SEPARATOR}${a.symbol}`)
+
+export interface DriftRow { state: ClaimState; id: string; location: string; anchors: { path: string; symbol: string | null; state: ClaimState }[] }
+
+export const driftRows = (drifts: readonly ClaimDrift[]): DriftRow[] =>
+  drifts.filter(d => d.state !== ClaimState.clean).map(d => ({
+    state: d.state, id: d.claim.id, location: d.claim.location,
+    anchors: d.anchors.filter(a => a.state !== ClaimState.clean).map(a => ({ path: a.path, symbol: a.symbol, state: a.state })),
+  }))
+
+export const driftCounts = (drifts: readonly ClaimDrift[]): Record<ClaimState, number> => {
+  const counts: Record<ClaimState, number> = { [ClaimState.clean]: 0, [ClaimState.suspect]: 0, [ClaimState.unknown]: 0, [ClaimState.unanchored]: 0 }
+  for (const d of drifts) counts[d.state]++
+  return counts
+}
+
+export async function runDrift(access: KnowledgeAccess, author: MemoryAuthor, paths: string[], json: boolean): Promise<string[]> {
+  const drifts = await requirePort(access).drift({ author, idempotencyKey: null }, paths.length === 0 ? {} : { paths })
+  const rows = driftRows(drifts)
+  const counts = driftCounts(drifts)
+  if (json) return [JSON.stringify({ claims: rows, counts })]
+  return [
+    ...rows.map(r => [r.state, r.id, r.location, ...r.anchors.map(anchorLabel)].join('  ')),
+    Object.values(ClaimState).map(state => `${state} ${counts[state]}`).join(' · '),
+  ]
+}
+
 export const knowledgeAuthor = (fold: WorkspaceFold, dir: string): Promise<MemoryAuthor> =>
   cwdAuthor(fold, dir, AUTHOR_SOURCE.cli, NO_CHAT(Door.cli))
 
@@ -130,5 +157,8 @@ export function knowledgeCommand(deps: { requireKernel: () => Kernel; project?: 
       print(outcome.lines)
       if (outcome.failed) throw new CommandFailure(1)
     })
+  knowledge.command(`${KNOWLEDGE_SUBCOMMAND.drift} [paths...]`).description('claims whose anchored code changed since they were last checked; reports, never fails')
+    .option('--json', 'machine-readable output')
+    .action(async (paths: string[], o: { json?: boolean }) => { print(await runDrift(port(), await author(), paths, o.json === true)) })
   return knowledge
 }

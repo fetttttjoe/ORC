@@ -45,6 +45,12 @@ describe('planDecisionRecord', () => {
     expect(() => plan(heldOf(), draft('broken'), ['broken'])).toThrow(DECISION_REFUSAL.exists('broken'))
   })
 
+  it('a proposed decision may not supersede, and the old one stays untouched', () => {
+    const held = heldOf(recorded(draft('old')))
+    expect(() => plan(held, draft('new', { supersedes: 'old', status: DecisionStatus.proposed }))).toThrow(DECISION_REFUSAL.proposedSupersedes('new'))
+    expect(held.get('old')?.status).toBe(DecisionStatus.accepted)
+  })
+
   it('superseding an unknown decision is refused', () => {
     expect(() => plan(heldOf(), draft('new', { supersedes: 'ghost' }))).toThrow(DECISION_REFUSAL.noSuchDecision('ghost'))
   })

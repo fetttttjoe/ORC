@@ -53,7 +53,7 @@ const settingsSchema = (dir: string, projectRoot: string) =>
     // under 20 iterations of the 60 the general default granted (2026-08-04). A sweep that
     // genuinely needs more signals `partial` and continues through the runtime's continuation
     // grants — lean by default, self-extending under evidence, never silently over-provisioned.
-    memorySweepIterations: z.coerce.number().int().positive().default(15),
+    autoHealIterations: z.coerce.number().int().positive().default(15),
     // the model that DISTILS a finished task's step outcomes into one durable note, as a
     // 'provider/model' ref. '' (default) = extractive promotion (glued bullets, zero model calls);
     // set it (e.g. 'anthropic/claude-haiku-4-5') to have the out-of-band lifecycle synthesise a
@@ -90,14 +90,10 @@ const settingsSchema = (dir: string, projectRoot: string) =>
     workspaceSetup: z.array(z.string().min(1)).default([]),
     // commands the kernel-appended checks step runs before the finish step; [] = no checks step
     finishChecks: z.array(z.string().min(1)).default([]),
-    // append the commit step to every frozen grounded plan: the run commits its own diff and
-    // restamps the notes it wrote (the truthful-stamp pipeline). Default off like every capability
-    // gate here — committing an operator's repo is an outward action they opt into.
+    // append the commit step to every frozen grounded plan: the run commits its own diff.
+    // Default off like every capability gate here — committing an operator's repo is an outward action they opt into.
     autoCommit: z.union([z.boolean(), z.stringbool()]).default(false),
-    // React to a recorded out-of-task commit (the auto-heal reactor). Default 'restamp': the
-    // free, silent half only — the LLM half ('draft-sweep') is an operator opt-in, not a default.
-    // 'off' restores commits-as-records-only.
-    autoHeal: z.enum(AutoHealMode).default(AutoHealMode.restamp),
+    autoHeal: z.enum(AutoHealMode).default(AutoHealMode.draft),
     ollamaBaseUrl: z.url().default('http://localhost:11434'),
     projectDbUrl: z.string().default('ws://127.0.0.1:8000/rpc'),
     // ceiling for the surreal driver's initial dial — the driver does not reject unreachable
@@ -148,7 +144,7 @@ const envOverrides = (): Record<string, string> => {
     memoryHalfLifeDays: process.env.ORC_MEMORY_HALF_LIFE_DAYS,
     memoryPreloadTokens: process.env.ORC_MEMORY_PRELOAD_TOKENS,
     memoryEmbedModel: process.env.ORC_MEMORY_EMBED_MODEL,
-    memorySweepIterations: process.env.ORC_MEMORY_SWEEP_ITERATIONS,
+    autoHealIterations: process.env.ORC_AUTO_HEAL_ITERATIONS,
     memoryConsolidateModel: process.env.ORC_MEMORY_CONSOLIDATE_MODEL,
     ambientCapture: process.env.ORC_AMBIENT_CAPTURE,
     autoCommit: process.env.ORC_AUTO_COMMIT,

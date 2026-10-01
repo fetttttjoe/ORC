@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test'
-import { AUTHOR_SOURCE, Confidence, DeliveryMode, EVENT_KIND } from '@orc/contracts'
+import { AUTHOR_SOURCE, CheckVerdict, Confidence, DeliveryMode, EVENT_KIND } from '@orc/contracts'
 import { TEST_WORKSPACE_ID, authorFixture, eventFixture, planFixture, stepFixture, taskFixture } from '@orc/contracts/fixtures'
 import { summarizeEvent } from './summarize'
 
@@ -82,6 +82,17 @@ describe('summarizeEvent', () => {
     }))
     expect([delivered.line, written.line]).toEqual(['card 1 claim(s) · src/a.ts', '+1 ~0 -0 · because'])
     expect([delivered.authorTaskId, written.authorTaskId]).toEqual(['task-K', 'task-K'])
+  })
+
+  it('a knowledge_checked reads as the check of the claim and its verdict, attributed to the checking task', () => {
+    const author = authorFixture({ source: AUTHOR_SOURCE.agent, taskId: 'task-C' })
+    const lines = Object.values(CheckVerdict).map(verdict => summarizeEvent(eventFixture({
+      kind: EVENT_KIND.knowledge_checked, taskId: null,
+      payload: { id: 'abcd1234', verdict, text: 'The store writes events.', anchors: [{ path: 'src/a.ts', symbol: 'alpha', digest: 'd1' }], why: 'read it', author },
+    })))
+    expect(lines.map(r => [r.line, r.authorTaskId])).toEqual([
+      ['check abcd1234 holds', 'task-C'], ['check abcd1234 false', 'task-C'], ['check abcd1234 unknown', 'task-C'],
+    ])
   })
 
   it('a knowledge_written that recorded a decision reads as the decision, with what it superseded', () => {

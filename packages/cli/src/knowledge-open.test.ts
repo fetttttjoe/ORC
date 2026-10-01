@@ -2,7 +2,10 @@ import { afterEach, describe, expect, it } from 'bun:test'
 import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import { AUTHOR_SOURCE, ClaimClass, DeliveryMode, Door, KNOWLEDGE_REFUSAL, type KnowledgeAccess, type MemoryAuthor } from '@orc/contracts'
+import {
+  AUTHOR_SOURCE, CheckVerdict, ClaimClass, ClaimState, DeliveryMode, Door, EVENT_KIND, KNOWLEDGE_REFUSAL,
+  type EventInput, type EventKind, type EventRecord, type KnowledgeAccess, type MemoryAuthor,
+} from '@orc/contracts'
 import { eventFixture } from '@orc/contracts/fixtures'
 import { EVIDENCE_NOT_RECORDED, REGISTRY_REFUSAL } from '@orc/knowledge-core'
 import { KERNEL_ERROR_CODE, KernelError } from '@orc/kernel'
@@ -14,7 +17,7 @@ const gitCheckout = (): string => {
   const dir = realpathSync(mkdtempSync(path.join(tmpdir(), 'orc-kcli-')))
   Bun.spawnSync(['git', 'init', '-q', dir])
   mkdirSync(path.join(dir, 'src'), { recursive: true })
-  writeFileSync(path.join(dir, 'src', 'a.ts'), '')
+  writeFileSync(path.join(dir, 'src', 'a.ts'), 'export function outer() {\n  function inner() {}\n}\n')
   dirs.push(dir)
   return dir
 }
@@ -26,7 +29,23 @@ const portOf = (access: KnowledgeAccess) => {
   if ('unavailable' in access) throw new Error(access.unavailable)
   return access.port
 }
-const quiet = { append: async () => eventFixture() }
+const NO_EVENTS = async (): Promise<EventRecord[]> => []
+const quiet = { append: async () => eventFixture(), after: NO_EVENTS }
+const memoryLog = () => {
+  const records: EventRecord[] = []
+  return {
+    records,
+    append: async (input: EventInput): Promise<EventRecord> => {
+      const record = eventFixture({ seq: records.length + 1, kind: input.kind, payload: input.payload, idempotencyKey: input.idempotencyKey ?? null })
+      records.push(record)
+      return record
+    },
+    after: async (seq: number, kinds?: EventKind[]): Promise<EventRecord[]> => records.filter(r => r.seq > seq && (kinds === undefined || kinds.includes(r.kind))),
+  }
+}
+const commit = (dir: string): void => {
+  for (const args of [['add', '-A'], ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-q', '-m', 'basis']]) Bun.spawnSync(['git', '-C', dir, ...args])
+}
 
 describe('openKnowledge', () => {
   it('null config is off; an unknown plugin or bad options are unavailable with the reason; git-files opens a backend', () => {
@@ -49,13 +68,37 @@ describe('knowledgeAccess', () => {
     expect(existsSync(path.join(a, 'knowledge/src/a.ts.md'))).toBe(true)
     expect(existsSync(path.join(b, 'knowledge'))).toBe(false)
   })
+  it('the opened backend validates anchor symbols against the real outline of the checkout', async () => {
+    const dir = gitCheckout()
+    const port = portOf(knowledgeAccess(opened(), quiet, dir))
+    const call = { author, idempotencyKey: null }
+    const anchored = (symbol: string) => ({ add: [{ ...fact('symbolic'), anchors: [{ path: 'src/a.ts', symbol }] }] })
+    await expect(port.write(call, anchored('outr'))).rejects.toThrow('closest: outer')
+    const [added] = (await port.write(call, anchored('inner'))).added
+    expect((await port.get({ ...call, mode: DeliveryMode.get }, [added?.id ?? '']))[0]?.anchors).toEqual([{ path: 'src/a.ts', symbol: 'outer.inner' }])
+  })
+  it('a holds check in the log clears the claim for every access over that log; a checked payload that does not parse is skipped', async () => {
+    const dir = gitCheckout()
+    const log = memoryLog()
+    const call = { author, idempotencyKey: null }
+    const first = portOf(knowledgeAccess(opened(), log, dir))
+    const [ref] = (await first.write(call, { add: [{ ...fact('outer declares its inner helper'), anchors: [{ path: 'src/a.ts', symbol: 'outer' }] }] })).added
+    const id = ref?.id ?? ''
+    commit(dir)
+    writeFileSync(path.join(dir, 'src', 'a.ts'), 'export function outer() {\n  function inner() { return 1 }\n}\n')
+    expect((await first.drift(call, { ids: [id] })).map(d => d.state)).toEqual([ClaimState.suspect])
+    await first.check(call, { id, verdict: CheckVerdict.holds, why: 'outer still declares inner' })
+    log.records.push(eventFixture({ seq: log.records.length + 1, kind: EVENT_KIND.knowledge_checked, payload: { id, verdict: 'maybe' } }))
+    const second = portOf(knowledgeAccess(opened(), log, dir))
+    expect((await second.drift(call, { ids: [id] })).map(d => d.state)).toEqual([ClaimState.clean])
+  })
   describe('the log append wrapper', () => {
     it('swallows an idempotency conflict: the write resolves with no evidence warning', async () => {
-      const port = portOf(knowledgeAccess(opened(), { append: async () => { throw new KernelError(KERNEL_ERROR_CODE.idempotency_conflict, 'replay') } }, gitCheckout()))
+      const port = portOf(knowledgeAccess(opened(), { append: async () => { throw new KernelError(KERNEL_ERROR_CODE.idempotency_conflict, 'replay') }, after: NO_EVENTS }, gitCheckout()))
       expect((await port.write({ author, idempotencyKey: 'k-1' }, { add: [fact('x')] })).warnings).toEqual([])
     })
     it('surfaces any other append error as an evidence-not-recorded warning', async () => {
-      const port = portOf(knowledgeAccess(opened(), { append: async () => { throw new Error('log down') } }, gitCheckout()))
+      const port = portOf(knowledgeAccess(opened(), { append: async () => { throw new Error('log down') }, after: NO_EVENTS }, gitCheckout()))
       expect((await port.write({ author, idempotencyKey: 'k-2' }, { add: [fact('x')] })).warnings).toEqual([EVIDENCE_NOT_RECORDED('log down')])
     })
   })

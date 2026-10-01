@@ -4,7 +4,7 @@ import {
   type EventInput, type MemoryAuthor, type ResolvedTool,
 } from '@orc/contracts'
 import { DECISION_STEP_TOOLS, decisionTools } from './decision-tools'
-import { createMemoryBackend } from './memory-backend'
+import { createMemoryBackend, NO_STRUCTURE } from './memory-backend'
 import { createKnowledgePort } from './port'
 
 const author: MemoryAuthor = { source: AUTHOR_SOURCE.agent, workspaceId: 'ws-1', origin: { chatId: 'c-1', door: Door.supervisor }, taskId: 't-1', stepId: 's-1', runToken: 'r-1' }
@@ -13,7 +13,7 @@ const setup = () => {
   const sent: EventInput[] = []
   const stored: EventInput[] = []
   const port = createKnowledgePort({
-    backend: createMemoryBackend({ exists: () => true }), checkoutOf: async () => '/checkout',
+    backend: createMemoryBackend({ exists: () => true, structure: NO_STRUCTURE, read: () => null }), checkoutOf: async () => '/checkout',
     append: async e => {
       sent.push(e)
       if (e.idempotencyKey == null || !stored.some(s => s.idempotencyKey === e.idempotencyKey)) stored.push(e)

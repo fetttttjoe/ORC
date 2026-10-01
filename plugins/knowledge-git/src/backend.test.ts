@@ -8,7 +8,7 @@ import {
 import { createGitFilesBackend } from './backend'
 import { createBucketLocks } from './bucket-lock'
 import { KNOWLEDGE_PROBLEM } from './problems'
-import { gitCheckout } from './test-helpers'
+import { gitCheckout, structure } from './test-helpers'
 
 const dirs: string[] = []
 afterEach(() => { for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true }) })
@@ -17,7 +17,7 @@ const setup = () => {
   const lockDir = realpathSync(mkdtempSync(path.join(tmpdir(), 'orc-klock-')))
   dirs.push(checkout, lockDir)
   const locks = { staleMs: 30_000, retryMs: 5, timeoutMs: 10_000, dir: lockDir }
-  return { checkout, locks, backend: createGitFilesBackend({}, { locks }) }
+  return { checkout, locks, backend: createGitFilesBackend({}, { locks, structure }) }
 }
 const patch = (input: KnowledgePatchInput) => KnowledgePatch.parse(input)
 const fact = (text: string, ...paths: string[]) => ({ text, class: ClaimClass.fact, anchors: paths.map(p => ({ path: p })) })
@@ -92,6 +92,62 @@ describe('git-files placement and format', () => {
     await backend.write(checkout, patch({ add: [fact('visible', 'src/a.ts')] }))
     writeFileSync(path.join(checkout, '.gitignore'), 'knowledge/\n')
     expect((await backend.card(checkout, '.', { cursor: null, limit: 10 })).claims).toEqual([])
+  })
+})
+
+describe('git-files and anchor symbols', () => {
+  const failingStructure = { outline: () => Promise.reject(new Error('wasm missing')) }
+  const bucket = (...lines: string[]) => `# src/a.ts\n\n## Facts\n${lines.join('\n')}\n`
+  const writeBucket = (checkout: string, text: string) => {
+    mkdirSync(path.join(checkout, 'knowledge/src'), { recursive: true })
+    writeFileSync(path.join(checkout, 'knowledge/src/a.ts.md'), text)
+  }
+
+  it('check names a symbol that matches nothing with the closest names, and a short form with its full name', async () => {
+    const { checkout, backend } = setup()
+    writeBucket(checkout, bucket('- bogus {aaaaaaaa @src/a.ts#alpah}', '- short {bbbbbbbb @src/a.ts#inner}', '- full {cccccccc @src/a.ts#outer.inner}'))
+    expect((await backend.check(checkout)).map(p => p.message)).toEqual([
+      KNOWLEDGE_PROBLEM.unknownSymbol('aaaaaaaa', 'src/a.ts', 'alpah', ['alpha', 'outer', 'outer.inner']),
+      KNOWLEDGE_PROBLEM.shortSymbol('bbbbbbbb', 'inner', 'outer.inner'),
+    ])
+  })
+
+  it('check fails loudly when the structure provider throws', async () => {
+    const { checkout, locks } = setup()
+    writeBucket(checkout, bucket('- bogus {aaaaaaaa @src/a.ts#alpah}'))
+    const broken = createGitFilesBackend({}, { locks, structure: failingStructure })
+    await expect(broken.check(checkout)).rejects.toThrow('wasm missing')
+  })
+
+  it('check reports a missing anchor as badAnchor without outlining it', async () => {
+    const { checkout, locks } = setup()
+    writeBucket(checkout, bucket('- gone {aaaaaaaa @src/gone.ts#alpha}'))
+    const broken = createGitFilesBackend({}, { locks, structure: failingStructure })
+    const messages = (await broken.check(checkout)).map(p => p.message)
+    expect(messages).toEqual([KNOWLEDGE_PROBLEM.badAnchor('aaaaaaaa', KNOWLEDGE_REFUSAL.missingAnchor('src/gone.ts'))])
+  })
+
+  it('fmt stores a short form by its full name and leaves a wrong symbol for the human', async () => {
+    const { checkout, backend } = setup()
+    writeBucket(checkout, bucket('- bogus {aaaaaaaa @src/a.ts#alpah}', '- short {bbbbbbbb @src/a.ts#inner}'))
+    const result = await backend.format(checkout)
+    expect(result.formatted).toEqual(['knowledge/src/a.ts.md'])
+    expect(read(checkout, 'knowledge/src/a.ts.md')).toContain('{bbbbbbbb @src/a.ts#outer.inner}')
+    expect(result.problems.map(p => p.message)).toEqual([KNOWLEDGE_PROBLEM.unknownSymbol('aaaaaaaa', 'src/a.ts', 'alpah', ['alpha', 'outer', 'outer.inner'])])
+  })
+
+  it('a change that leaves anchors alone is not blocked by a wrong symbol the claim already holds', async () => {
+    const { checkout, backend } = setup()
+    writeBucket(checkout, bucket('- bogus {aaaaaaaa @src/a.ts#alpah}'))
+    await backend.write(checkout, patch({ change: [{ id: 'aaaaaaaa', text: 'edited' }] }))
+    expect((await backend.get(checkout, ['aaaaaaaa']))[0]).toMatchObject({ text: 'edited', anchors: [{ path: 'src/a.ts', symbol: 'alpah' }] })
+  })
+
+  it('a symbol validates against an outline that is partial', async () => {
+    const { checkout, backend } = setup()
+    appendFileSync(path.join(checkout, 'src/a.ts'), 'function broken( {\n')
+    const [added] = (await backend.write(checkout, patch({ add: [{ ...fact('still fine', 'src/a.ts'), anchors: [{ path: 'src/a.ts', symbol: 'inner' }] }] }))).added
+    expect((await backend.get(checkout, [added?.id ?? '']))[0]?.anchors).toEqual([{ path: 'src/a.ts', symbol: 'outer.inner' }])
   })
 })
 
@@ -186,7 +242,7 @@ describe('git-files ids', () => {
   it('ids it generates skip ids already in the checkout and ids chosen earlier in the same call, in write and fmt', async () => {
     const { checkout, locks } = setup()
     const script = ['abcd1234', 'bbbbbbbb', 'bbbbbbbb', 'cccccccc', 'abcd1234', 'bbbbbbbb', 'cccccccc', 'dddddddd', 'dddddddd', 'eeeeeeee']
-    const backend = createGitFilesBackend({}, { locks, newId: () => script.shift() ?? newKnowledgeId() })
+    const backend = createGitFilesBackend({}, { locks, structure, newId: () => script.shift() ?? newKnowledgeId() })
     await backend.write(checkout, patch({ add: [{ ...fact('held', 'src/a.ts'), id: 'abcd1234' }] }))
     const { added } = await backend.write(checkout, patch({ add: [fact('one', 'src/a.ts'), fact('two', 'src/a.ts')] }))
     expect(added.map(r => r.id)).toEqual(['bbbbbbbb', 'cccccccc'])
@@ -199,7 +255,7 @@ describe('git-files ids', () => {
   it('a generated id taken by another writer while the write waited for its lock is replaced, not refused', async () => {
     const { checkout, locks } = setup()
     const script = ['eeeeeeee']
-    const backend = createGitFilesBackend({}, { locks, newId: () => script.shift() ?? newKnowledgeId() })
+    const backend = createGitFilesBackend({}, { locks, structure, newId: () => script.shift() ?? newKnowledgeId() })
     const bucket = path.join(checkout, 'knowledge/src/a.ts.md')
     const writer = Promise.withResolvers<void>()
     const held = createBucketLocks(locks).withLocks([bucket], () => writer.promise)
@@ -274,8 +330,8 @@ describe('git-files claim writes and the decisions folder', () => {
 describe('git-files under contention', () => {
   it('two backend instances writing one bucket lose nothing', async () => {
     const { checkout, locks } = setup()
-    const one = createGitFilesBackend({}, { locks })
-    const two = createGitFilesBackend({}, { locks })
+    const one = createGitFilesBackend({}, { locks, structure })
+    const two = createGitFilesBackend({}, { locks, structure })
     await Promise.all(Array.from({ length: 20 }, (_, i) =>
       (i % 2 === 0 ? one : two).write(checkout, patch({ add: [fact(`claim ${i}`, 'src/a.ts')] }))))
     expect((await one.card(checkout, 'src/a.ts', { cursor: null, limit: 100 })).claims.length).toBe(20)

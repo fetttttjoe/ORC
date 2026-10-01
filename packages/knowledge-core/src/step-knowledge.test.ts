@@ -3,7 +3,7 @@ import {
   AUTHOR_SOURCE, ClaimClass, DeliveryMode, Door, EVENT_KIND, KNOWLEDGE_REFUSAL, KnowledgeToolName, STEP_ID, STEP_ROLE,
   type EventInput, type KnowledgeWrites, type MemoryAuthor,
 } from '@orc/contracts'
-import { createMemoryBackend } from './memory-backend'
+import { createMemoryBackend, NO_STRUCTURE } from './memory-backend'
 import { createKnowledgePort } from './port'
 import { bindStepKnowledge } from './step-knowledge'
 
@@ -11,22 +11,26 @@ const author: MemoryAuthor = { source: AUTHOR_SOURCE.agent, workspaceId: 'ws-1',
 const worker = { stepId: 's1', role: STEP_ROLE.worker }
 const planner = { stepId: STEP_ID.plan, role: STEP_ROLE.auditor }
 const finisher = { stepId: STEP_ID.finish, role: STEP_ROLE.finisher }
+const verifier = { stepId: STEP_ID.verify, role: STEP_ROLE.auditor }
 const fact = (text: string, path: string) => ({ text, class: ClaimClass.fact, anchors: [{ path }] })
 const setup = (writes: KnowledgeWrites = { live: [], retired: [], files: [] }, p: { stepId: string; role: string } = worker) => {
   const events: EventInput[] = []
-  const port = createKnowledgePort({ backend: createMemoryBackend({ exists: () => true }), checkoutOf: async () => '/c', append: async e => { events.push(e) } })
+  const port = createKnowledgePort({ backend: createMemoryBackend({ exists: () => true, structure: NO_STRUCTURE, read: () => null }), checkoutOf: async () => '/c', append: async e => { events.push(e) } })
   return { port, events, bound: bindStepKnowledge({ access: { port }, author, p, writesOf: async () => writes }) }
 }
 
 describe('bindStepKnowledge', () => {
-  it('the exact tool set per step: decisions on the plan and finish steps, task_claims on the finish step only', () => {
+  it('the exact tool set per step: decisions on the plan and finish steps, task_claims on the finish step only, knowledge_check on audits', () => {
     const names = (p: { stepId: string; role: string }) => new Set(setup(undefined, p).bound.tools.map(t => t.name))
     const base = [KnowledgeToolName.card, KnowledgeToolName.search, KnowledgeToolName.write]
     const decisions = [KnowledgeToolName.decisionList, KnowledgeToolName.decisionRead, KnowledgeToolName.recordDecision]
     expect(names(worker)).toEqual(new Set(base))
+    expect(names(verifier)).toEqual(new Set([...base, KnowledgeToolName.check]))
+    expect(names({ stepId: 'sweep', role: STEP_ROLE.auditor })).toEqual(new Set([...base, KnowledgeToolName.check]))
     expect(names(planner)).toEqual(new Set([...base, ...decisions]))
     expect(names(finisher)).toEqual(new Set([...base, KnowledgeToolName.taskClaims, ...decisions]))
     expect(names({ stepId: STEP_ID.plan, role: STEP_ROLE.worker })).toEqual(new Set(base))
+    expect(names({ stepId: STEP_ID.verify, role: STEP_ROLE.worker })).toEqual(new Set(base))
     expect(names({ stepId: 'lead', role: STEP_ROLE.finisher })).toEqual(new Set(base))
   })
   it('with knowledge off, the plan and finish steps still list the decision tools and each answers unavailable', async () => {
@@ -53,6 +57,7 @@ describe('bindStepKnowledge', () => {
     const failing = {
       card: async () => { throw new Error('bucket broken') }, search: async () => [], get: async () => [], write: async () => { throw new Error('x') },
       decisions: async () => [], decision: async () => { throw new Error('x') }, recordDecision: async () => { throw new Error('x') },
+      drift: async () => [], check: async () => { throw new Error('x') },
     }
     const bound = bindStepKnowledge({ access: { port: failing }, author, p: worker, writesOf: async () => ({ live: [], retired: [], files: [] }), warn: l => warned.push(l) })
     expect(await bound.knowledge.claimsAt(['src/a.ts'])).toEqual([])

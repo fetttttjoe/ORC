@@ -9,6 +9,7 @@
     "@orc/kernel": "workspace:*",
     "@orc/knowledge-core": "workspace:*",
     "@orc/knowledge-git": "workspace:*",
+    "@orc/structure-treesitter": "workspace:*",
     "@orc/analyzer-agent": "workspace:*",
     "@orc/mcp-client": "workspace:*",
     "@orc/memory": "workspace:*",

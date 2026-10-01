@@ -33,6 +33,7 @@
         "@orc/provider-anthropic": "workspace:*",
         "@orc/provider-ollama": "workspace:*",
         "@orc/provider-openai": "workspace:*",
+        "@orc/structure-treesitter": "workspace:*",
         "@orc/ui-core": "workspace:*",
         "@orc/vault-projector": "workspace:*",
         "ai": "^7.0.30",
@@ -124,6 +125,9 @@
         "@orc/contracts": "workspace:*",
         "zod": "^4.4.3",
       },
+      "devDependencies": {
+        "@orc/structure-treesitter": "workspace:*",
+      },
     },
     "packages/ui-core": {
       "name": "@orc/ui-core",
@@ -171,6 +175,9 @@
         "@orc/contracts": "workspace:*",
         "@orc/knowledge-core": "workspace:*",
         "zod": "^4.4.3",
+      },
+      "devDependencies": {
+        "@orc/structure-treesitter": "workspace:*",
       },
     },
     "plugins/mcp-client": {
@@ -221,6 +228,15 @@
         "@orc/contracts": "workspace:*",
         "ai": "^7.0.30",
         "zod": "^4.4.3",
+      },
+    },
+    "plugins/structure-treesitter": {
+      "name": "@orc/structure-treesitter",
+      "version": "0.0.0",
+      "dependencies": {
+        "@orc/contracts": "workspace:*",
+        "tree-sitter-typescript": "^0.23.2",
+        "web-tree-sitter": "^0.27.0",
       },
     },
   },
@@ -355,6 +371,8 @@
     "@orc/provider-ollama": ["@orc/provider-ollama@workspace:plugins/provider-ollama"],
 
     "@orc/provider-openai": ["@orc/provider-openai@workspace:plugins/provider-openai"],
+
+    "@orc/structure-treesitter": ["@orc/structure-treesitter@workspace:plugins/structure-treesitter"],
 
     "@orc/ui-core": ["@orc/ui-core@workspace:packages/ui-core"],
 
@@ -770,6 +788,10 @@
 
     "negotiator": ["negotiator@1.0.0", "", {}, "sha512-8Ofs/AUQh8MaEcrlq5xOX0CQ9ypTF5dl78mjlMNfOK08fzpgTHQRQPBxcPlEtIw0yRpws+Zo/3r+5WRby7u3Gg=="],
 
+    "node-addon-api": ["node-addon-api@8.9.2", "", {}, "sha512-VijLXbi3UACN69I0JVXJsX4tjACjNoQDgv2gTF6sx2wWEi8tkSg2eX8p5gSIFi8z2+DL3oHmY6OyKce38SDolg=="],
+
+    "node-gyp-build": ["node-gyp-build@4.8.4", "", { "bin": { "node-gyp-build": "bin.js", "node-gyp-build-optional": "optional.js", "node-gyp-build-test": "build-test.js" } }, "sha512-LA4ZjwlnUblHVgq0oBF3Jl/6h/Nvs5fzBLwdEF4nuxnFdsfajde4WfxtJr3CaiH+F6ewcIB/q4jQ4UzPyid+CQ=="],
+
     "object-assign": ["object-assign@4.1.1", "", {}, "sha512-rJgTQnkUnH1sFw8yT6VSU3zD3sWmu6sZhIseY8VX+GRu3P6F7Fu+JNDoXfklElbLJSnc3FUQHVe4cU5hj+BcUg=="],
 
     "object-inspect": ["object-inspect@1.13.4", "", {}, "sha512-W67iLl4J2EXEGTbfeHCffrjDfitvLANg0UlX3wFUUSTx92KXRFegMHUVgSqE+wvhAbi4WqjGg9czysTV2Epbew=="],
@@ -904,6 +926,10 @@
 
     "toidentifier": ["toidentifier@1.0.1", "", {}, "sha512-o5sSPKEkg/DIQNmH43V0/uerLrpzVedkUh8tGNvaeXpfpuwjKenlSox/2O/BTlZUtEe+JG7s5YhEz608PlAHRA=="],
 
+    "tree-sitter-javascript": ["tree-sitter-javascript@0.23.1", "", { "dependencies": { "node-addon-api": "^8.2.2", "node-gyp-build": "^4.8.2" }, "peerDependencies": { "tree-sitter": "^0.21.1" }, "optionalPeers": ["tree-sitter"] }, "sha512-/bnhbrTD9frUYHQTiYnPcxyHORIw157ERBa6dqzaKxvR/x3PC4Yzd+D1pZIMS6zNg2v3a8BZ0oK7jHqsQo9fWA=="],
+
+    "tree-sitter-typescript": ["tree-sitter-typescript@0.23.2", "", { "dependencies": { "node-addon-api": "^8.2.2", "node-gyp-build": "^4.8.2", "tree-sitter-javascript": "^0.23.1" }, "peerDependencies": { "tree-sitter": "^0.21.0" }, "optionalPeers": ["tree-sitter"] }, "sha512-e04JUUKxTT53/x3Uq1zIL45DoYKVfHH4CZqwgZhPg5qYROl5nQjV+85ruFzFGZxu+QeFVbRTPDRnqL9UbU4VeA=="],
+
     "tslib": ["tslib@2.8.1", "", {}, "sha512-oJFu94HQb+KVduSUQL7wnpmqnfmLsOA/nAh6b6EH0wCEoK0/mPeXU6c3wKDV83MkOuHPRHtSXKKU99IBazS/2w=="],
 
     "type-fest": ["type-fest@0.20.2", "", {}, "sha512-Ne+eE4r0/iWnpAxD852z3A+N0Bt5RN//NjJwRd2VFHEmrywxf5vsZlh4R6lixl6B+wz/8d+maTSAkN1FIkI3LQ=="],
@@ -923,6 +949,8 @@
     "vite": ["vite@7.3.6", "", { "dependencies": { "esbuild": "^0.27.0 || ^0.28.0", "fdir": "^6.5.0", "picomatch": "^4.0.3", "postcss": "^8.5.6", "rollup": "^4.43.0", "tinyglobby": "^0.2.15" }, "optionalDependencies": { "fsevents": "~2.3.3" }, "peerDependencies": { "@types/node": "^20.19.0 || >=22.12.0", "jiti": ">=1.21.0", "less": "^4.0.0", "lightningcss": "^1.21.0", "sass": "^1.70.0", "sass-embedded": "^1.70.0", "stylus": ">=0.54.8", "sugarss": "^5.0.0", "terser": "^5.16.0", "tsx": "^4.8.1", "yaml": "^2.4.2" }, "optionalPeers": ["@types/node", "jiti", "less", "lightningcss", "sass", "sass-embedded", "stylus", "sugarss", "terser", "tsx", "yaml"], "bin": { "vite": "bin/vite.js" } }, "sha512-4XP60spRGjSZFf1qYH+dJIkK2znL3zQfl9KkOV9MkkRR/3Dls0dxaBsQPTloEc5BLXWPL9vsOxopxyKoMmDueg=="],
 
     "vitefu": ["vitefu@1.1.3", "", { "peerDependencies": { "vite": "^3.0.0 || ^4.0.0 || ^5.0.0 || ^6.0.0 || ^7.0.0 || ^8.0.0" }, "optionalPeers": ["vite"] }, "sha512-ub4okH7Z5KLjb6hDyjqrGXqWtWvoYdU3IGm/NorpgHncKoLTCfRIbvlhBm7r0YstIaQRYlp4yEbFqDcKSzXSSg=="],
+
+    "web-tree-sitter": ["web-tree-sitter@0.27.0", "", {}, "sha512-XK08gj6RwTMQatAG7uVRP8MunqotL/XC19vHgkSPKmELgbGPBj4ECvB8haHOUnyj6ls2B8t42UTro14zxGgAHg=="],
 
     "whatwg-fetch": ["whatwg-fetch@3.6.20", "", {}, "sha512-EqhiFU6daOA8kpjOWTL0olhVOF3i7OrFzSYiGsEMB8GcXS+RrzauAERX65xMeNWVqxA6HXH2m69Z9LaKKdisfg=="],
 

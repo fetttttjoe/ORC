@@ -195,17 +195,6 @@ export const linkLookupScopes = (fromScope: string): string[] =>
 export const taskLaneScopes = (taskId: string, ancestorTaskIds: readonly string[] = []): string[] =>
   [planScope(taskId), ...ancestorTaskIds.map(planScope), MemoryScope.project]
 
-// How the runtime reacts to a recorded out-of-task commit (the auto-heal reactor, knowledge
-// provenance plan T2). Owned in contracts so kernel config and the composition root's reactor
-// speak one spelling. 'off' = the pre-reactor behavior (commits stay traceability records);
-// 'restamp' = the free no-LLM catch-up pass only; 'draft-sweep' = restamp, then when drift
-// survives DRAFT a heal task for the human to approve — the spend stays behind the gate.
-export enum AutoHealMode {
-  off = 'off',
-  restamp = 'restamp',
-  draftSweep = 'draft-sweep',
-}
-
 // The memory tool surface by name — matched values, never scattered literals. Owned in
 // contracts so the executor loop (which cannot import the memory plugin) matches the same
 // spelling the plugin registers. tools.ts derives its registrations from this map.

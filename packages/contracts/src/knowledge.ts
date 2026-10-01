@@ -1,9 +1,11 @@
 import { createHash, randomBytes } from 'node:crypto'
 import { z } from 'zod'
 import type { MemoryAuthor } from './author'
+import type { AnchorReading, ClaimState } from './claim-state'
 import { ClaimClass, EntityPath } from './claim'
 import { ROOT_ENTITY } from './entity-of'
 import type { Decision, DecisionDraft, DecisionFilter, DecisionInputRaw, DecisionWriteResult } from './decision'
+import type { StructureProvider } from './structure'
 import { DecisionSlug, KNOWLEDGE_ID_LENGTH, KNOWLEDGE_ID_RE, KNOWLEDGE_TAG_LIMITS, KnowledgeId, KnowledgeRef, KnowledgeTag } from './knowledge-ref'
 
 export {
@@ -40,6 +42,7 @@ export enum KnowledgeToolName {
   decisionList = 'decision_list',
   decisionRead = 'decision_read',
   recordDecision = 'record_decision',
+  check = 'knowledge_check',
 }
 
 const idFromBytes = (bytes: Uint8Array): string =>
@@ -126,6 +129,43 @@ export const KnowledgeWriteResult = z.object({
 })
 export type KnowledgeWriteResult = z.infer<typeof KnowledgeWriteResult>
 
+export enum CheckVerdict { holds = 'holds', false = 'false', unknown = 'unknown' }
+
+export enum AutoHealMode { off = 'off', draft = 'draft' }
+
+export const DriftFilter = z.object({
+  paths: z.array(EntityPath).max(KNOWLEDGE_LIMITS.patchItems).optional(),
+  ids: z.array(KnowledgeId).max(KNOWLEDGE_LIMITS.patchItems).optional(),
+})
+export type DriftFilter = z.infer<typeof DriftFilter>
+export type DriftFilterInput = z.input<typeof DriftFilter>
+
+export interface ClaimReading { claim: KnowledgeClaim; basis: string | null; anchors: AnchorReading[] }
+export type AnchorDrift = AnchorReading & { state: ClaimState }
+export interface ClaimDrift { claim: KnowledgeClaim; state: ClaimState; basis: string | null; anchors: AnchorDrift[] }
+
+const correctsClaim = (patch: KnowledgePatch, id: string): boolean => patch.retire.includes(id) || patch.change.some(c => c.id === id)
+
+export const KnowledgeCheckFields = z.object({
+  id: KnowledgeId,
+  verdict: z.enum(CheckVerdict),
+  why: z.string().trim().min(1).max(KNOWLEDGE_LIMITS.whyChars),
+  patch: KnowledgePatch.optional(),
+})
+const CHECK_FIELD = KnowledgeCheckFields.keyof().enum
+
+export const KnowledgeCheckInput = KnowledgeCheckFields.check(ctx => {
+  const { id, verdict, patch } = ctx.value
+  if (verdict === CheckVerdict.false && (patch === undefined || !correctsClaim(patch, id)))
+    ctx.issues.push({ code: 'custom', input: ctx.value, path: [CHECK_FIELD.patch], message: KNOWLEDGE_REFUSAL.checkNeedsPatch(id) })
+  if (verdict !== CheckVerdict.false && patch !== undefined)
+    ctx.issues.push({ code: 'custom', input: ctx.value, path: [CHECK_FIELD.patch], message: KNOWLEDGE_REFUSAL.checkTakesNoPatch(verdict) })
+})
+export type KnowledgeCheckInput = z.infer<typeof KnowledgeCheckInput>
+export type KnowledgeCheckInputRaw = z.input<typeof KnowledgeCheckInput>
+
+export interface KnowledgeCheckResult { verdict: CheckVerdict; written: KnowledgeWriteResult | null; warnings: string[] }
+
 export const KnowledgeProblem = z.object({
   location: z.string().min(1),
   line: z.number().int().nonnegative(),
@@ -152,6 +192,7 @@ export interface KnowledgeBackend extends DecisionBackend {
   write(checkout: string, patch: KnowledgePatch): Promise<KnowledgeWriteResult>
   check(checkout: string): Promise<KnowledgeProblem[]>
   format(checkout: string): Promise<KnowledgeFormatResult>
+  readings(checkout: string, filter: DriftFilter): Promise<ClaimReading[]>
 }
 
 export enum DeliveryMode {
@@ -176,13 +217,17 @@ export interface KnowledgePort extends DecisionPort {
   search(call: KnowledgeRead, query: string, limit?: number): Promise<KnowledgeClaim[]>
   get(call: KnowledgeRead, ids: readonly string[]): Promise<KnowledgeClaim[]>
   write(call: KnowledgeCall, patch: KnowledgePatchInput): Promise<KnowledgeWriteResult>
+  drift(call: KnowledgeCall, filter?: DriftFilterInput): Promise<ClaimDrift[]>
+  check(call: KnowledgeCall, input: KnowledgeCheckInputRaw): Promise<KnowledgeCheckResult>
 }
 
 export type KnowledgeAccess = { port: KnowledgePort } | { unavailable: string }
 
+export interface KnowledgeHost { structure: StructureProvider }
+
 export interface KnowledgePlugin {
   id: string
-  create(options: Record<string, unknown>): KnowledgeBackend
+  create(options: Record<string, unknown>, host: KnowledgeHost): KnowledgeBackend
 }
 
 export const DEFAULT_KNOWLEDGE_PLUGIN = 'git-files'
@@ -209,4 +254,11 @@ export const KNOWLEDGE_REFUSAL = {
   off: (): string => 'knowledge is off for this project (.orc/config.json "knowledge": null)',
   unavailable: (reason: string): string => `knowledge unavailable: ${reason}`,
   unknownDecision: (slug: string): string => `no decision '${slug}' in this checkout — record it first, or drop the reference`,
+  unknownSymbol: (path: string, symbol: string, closest: readonly string[]): string =>
+    closest.length === 0
+      ? `anchor '${path}' has no symbol '${symbol}' — the file defines no named symbols`
+      : `anchor '${path}' has no symbol '${symbol}' — closest: ${closest.join(', ')}`,
+  symbolUnsupported: (path: string): string => `anchor '${path}' cannot carry a symbol — its file type has no outline; anchor the file itself`,
+  checkNeedsPatch: (id: string): string => `a false check of '${id}' needs the patch that retires or changes it`,
+  checkTakesNoPatch: (verdict: string): string => `a ${verdict} check carries no patch — only a false check corrects the claim`,
 } as const

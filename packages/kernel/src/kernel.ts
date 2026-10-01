@@ -11,7 +11,7 @@ import { foldPlanNotes, planApprovalStamp, planGraphHash, planScope, PLAN_STEP_I
 import { kernelStepExecutorRef, reconcileFinishStep } from './finish-step'
 import { DEFAULT_MAX_ITERATIONS } from './config'
 import { EventLog, type EventLogOps } from './storage'
-import { estimateCostUSD, fold, gatedChildren, subtreeTaskIds, subtreeUsage, taskChangedPaths, taskNoteWrites, taskVerifiedNotes, type State, type TaskNoteWrite, type TaskVerifiedNote } from './projections'
+import { estimateCostUSD, fold, gatedChildren, subtreeTaskIds, subtreeUsage, taskChangedPaths, type State } from './projections'
 import { knowledgeWritesIn } from './task-knowledge'
 import { applyArchived, applyRetitle, workspaceByCwd, workspaceCwdFor } from './workspaces'
 import { KERNEL_ERROR_CODE, KernelError } from './errors'
@@ -342,25 +342,6 @@ export class Kernel {
     const ids = subtreeTaskIds(await this.state(), taskId)
     const events = (await Promise.all(ids.map(id => this.log.byTask(id)))).flat()
     return knowledgeWritesIn(events, new Set(ids))
-  }
-
-  // The restamp set for git_commit: semantic notes this task's subtree wrote, from the log (same
-  // memory-kind read as listPlanNotes — memory events carry taskId:null, byTask can't see them).
-  // Each row says whether the write HEALED an existing note; only those earn a stamp.
-  async listTaskNoteWrites(taskId: string): Promise<TaskNoteWrite[]> {
-    const subtree = new Set(subtreeTaskIds(await this.state(), taskId))
-    return taskNoteWrites(await this.log.after(0, [EVENT_KIND.memory_written, EVENT_KIND.memory_deleted]), subtree)
-  }
-
-  // The reverify set for git_commit: notes a step of this task's subtree DECLARED verified. Reads
-  // memory_written too, for the declared paths the post-commit dirty gate judges — a memory_verified
-  // carries none, and the note it names always has a write behind it (store.verify refuses an id
-  // the log has no live note for). Each row also carries the stamp's own revision — the tree the
-  // auditor read — which is what the commit step's strict reverify gate diffs the cited paths against.
-  async listTaskVerifiedNotes(taskId: string): Promise<TaskVerifiedNote[]> {
-    const subtree = new Set(subtreeTaskIds(await this.state(), taskId))
-    const kinds = [EVENT_KIND.memory_written, EVENT_KIND.memory_verified, EVENT_KIND.memory_deleted]
-    return taskVerifiedNotes(await this.log.after(0, kinds), subtree)
   }
 
   // FixE freeze-from-log (M5b): reconstruct the task's plan-note graph from the event log — the

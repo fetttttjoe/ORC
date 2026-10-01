@@ -11,7 +11,7 @@ import { Origin } from './origin'
 import { AnalysisCompletedPayload, FeedbackProvidedPayload, FeedbackRequestedPayload, PlanAnnotatedPayload } from './analysis'
 import { WorkspaceArchivedPayload, WorkspaceCreatedPayload, WorkspaceMergedPayload, WorkspaceRetitledPayload } from './workspace-entity'
 import { ChatOpenedPayload } from './chat'
-import { KnowledgeDeliveredPayload, KnowledgeWrittenPayload } from './knowledge-events'
+import { KnowledgeCheckedPayload, KnowledgeDeliveredPayload, KnowledgeWrittenPayload } from './knowledge-events'
 
 // typed so folds can parse receipts without casts
 export const ArtifactProducedPayload = z.object({
@@ -217,6 +217,7 @@ export const PAYLOAD_SCHEMAS = {
   memory_outcome: MemoryOutcomePayload,
   knowledge_delivered: KnowledgeDeliveredPayload,
   knowledge_written: KnowledgeWrittenPayload,
+  knowledge_checked: KnowledgeCheckedPayload,
   feedback_requested: FeedbackRequestedPayload,
   feedback_provided: FeedbackProvidedPayload,
   plan_annotated: PlanAnnotatedPayload,
