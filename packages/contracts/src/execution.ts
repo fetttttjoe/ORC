@@ -4,11 +4,10 @@ import { TASK_STATUS, type TaskStatus } from './task'
 import type { EventDraft } from './events'
 import type { OperationSpec } from './operations'
 import type { LoadedSkill, ResolvedTool } from './plugins'
-import type { ClaimHit, NoteSummary } from './memory'
 import type { Origin } from './origin'
 import { KnowledgeRef } from './knowledge-ref'
 // kept type-only and separate from KnowledgeRef above: knowledge.ts pulls node:crypto, and only a fully-`type` import is erased before graph-ui's bundle (browser-leaves.test.ts)
-import type { KnowledgeClaim } from './knowledge'
+import type { KnowledgeClaim, PreloadedClaim } from './knowledge'
 
 // Whether anything can DRIVE a run right now — the question every silent project raises first.
 // Derived from the supervisor heartbeat row plus the pid file the serve process writes only once
@@ -325,7 +324,7 @@ export interface ExecutorContext<LM = unknown> {
   // reaches the loop as a frozen PlanStep field, wrong for a runtime knob). Optional so every
   // existing ctx constructor (tests, fixtures) keeps compiling untouched.
   taskId?: string // the plan this step belongs to — absent in bare test ctxs, which skip ambient capture
-  memoryPreloadTokens?: number // memory-preload budget: fed via dbos-port config, consumed by the loop's preload search
+  knowledgePreloadTokens?: number
   memory?: StepMemory
   knowledge?: StepKnowledge
   // Set by the port on a continuation round (a previous round signalled `partial`): the previous
@@ -336,45 +335,19 @@ export interface ExecutorContext<LM = unknown> {
   isCancelled?: () => Promise<boolean>
 }
 
-/** One preload pull: matched statements plus the notes that matched without asserting one. */
-export interface RecalledContext {
-  claims: ClaimHit[]
-  notes: NoteSummary[]
-  /**
-   * Of the delivered notes, how many could be checked against the tree at all, and how many
-   * describe code that has since moved — the same `drift.ts` verdict `memory_read` flags per note
-   * and `orc status` reports per corpus, so there is ONE definition of stale in the system.
-   *
-   * A step handed knowledge with no way to date it must re-derive everything to be safe, which is
-   * the most expensive thing a scout does. Absent when nothing could be checked (no repository,
-   * unreachable revision, no note declaring paths): unknown is never reported as current.
-   *
-   * `unknown` counts notes carrying a sourceRevision and declared paths whose revision was
-   * UNREACHABLE — they are no longer folded into `checkable`/`drifted`, they get their own count.
-   */
-  currency?: { checkable: number; drifted: number; unknown: number }
-}
-
 // The step's own memory, bound by the runtime from the memory plugin. The executor decides only
-// WHEN (before the first prompt, after the signal) and wraps each call for durability; what gets
-// searched, recorded, written and linked is the memory domain's business.
-//
-// It exists because the executor was doing that job by reaching into extraTools, matching
-// 'memory_search'/'memory_write' by name and forging tool-call ids to drive them — which made the
-// executor a second writer of memory events alongside the store.
+// WHEN (after the signal) and wraps the call for durability; what gets recorded, written and linked
+// is the memory domain's business.
 export interface StepMemory {
-  /**
-   * Context for the first prompt. Recording the pull is the implementation's business.
-   * Both surfaces come from ONE call so they share ONE budget and ONE replay checkpoint — two
-   * calls would record two values and could rebuild messages[0] differently on recovery.
-   */
-  recall(budget: number): Promise<RecalledContext>
   /** What the finished step leaves behind. Best-effort: never throws into the step. */
   capture(signal: { outcome: SignalOutcome; summary: string }): Promise<void>
 }
 
-/** The step's own knowledge claims: what an edited path puts at risk. */
-export interface StepKnowledge { claimsAt(paths: readonly string[]): Promise<KnowledgeClaim[]> }
+/** The step's own knowledge claims: what its first prompt is handed, and what an edited path puts at risk. */
+export interface StepKnowledge {
+  claimsAt(paths: readonly string[]): Promise<KnowledgeClaim[]>
+  preload(budget: number, round: number): Promise<PreloadedClaim[]>
+}
 
 export interface AgentExecutor<LM = unknown> {
   id: string

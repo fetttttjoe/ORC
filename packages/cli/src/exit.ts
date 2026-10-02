@@ -29,3 +29,7 @@ export function exitCodeFor(error: unknown): number | null {
 // (bash cannot import this); claude-plugin.test.ts drives that script with a stub exiting
 // EXIT_CODE.noProject, so the two cannot drift silently.
 export const EXIT_CODE = { failure: 1, noProject: 3 } as const
+
+export const DATABASE_UNREACHABLE = (url: string): string => `Postgres is not reachable at ${url} — start it with: docker compose up -d`
+
+export const NO_PROJECT_ERROR = (message: string): Error => new Error(message)

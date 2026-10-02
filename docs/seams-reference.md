@@ -20,10 +20,10 @@ ask into a workflow. This is what lets a run outlive the terminal that asked for
 **Tier ① (application — supervisor):**
 3. `packages/kernel/src/execution/signal-router.ts` sees `run_requested` over `LISTEN/NOTIFY` and calls the port's `startRunAt`, which starts the run workflow under the deterministic id `run:<taskId>:v<planVersion>` (`:r<n>` on retry). `port.launch()` is the boot-time `DBOS.launch()`, not a per-run call
 4. The run workflow launches each dependency **wave** of ready steps and awaits the wave whole, then recomputes readiness — DBOS binds child handles positionally, so launch order must be a pure function of `(plan, done, failed)`
-5. `packages/kernel/src/execution/dbos-port.ts` runs each step as its own workflow (`step:<taskId>:<stepId>:a<attempt>`) and hands the injected executor a `ctx` carrying `checkpoint`, `operation`, and `memory`
+5. `packages/kernel/src/execution/dbos-port.ts` runs each step as its own workflow (`step:<taskId>:<stepId>:a<attempt>`) and hands the injected executor a `ctx` carrying `checkpoint`, `operation`, `memory` and `knowledge`
 
 **Tier ① (application — executor plugin):**
-6. `plugins/executor-api-loop/` iterates: `ctx.checkpoint('preload', () => memory.recall(budget))` before the first prompt (so a replay reuses the recorded notes), then model and tool calls — each wrapped in `ctx.operation(spec, fn)` — until `signal(success)` or a terminal error
+6. `plugins/executor-api-loop/` iterates: `ctx.checkpoint('preload', () => knowledge.preload(budget, round))` before the first prompt (so a replay reuses the recorded claims), then model and tool calls — each wrapped in `ctx.operation(spec, fn)` — until `signal(success)` or a terminal error
 
 **Tier ② (data-access service):**
 7. `ctx.operation` → `operationJournal.beginOperation(...)` records `operation_started` *before* the external call, then `completeOperation` commits `operation_completed` plus the drafted `agent_call` / `tool_result` in ONE locked transaction (see "Storage service" below)
@@ -455,7 +455,8 @@ still works when nothing else does.
 | Plan approval (ordinary) | `plan_approved`, `task_status_changed` | `plan_approved` for routing | `EventLog` |
 | Plan approval (grounded) | `feedback_provided` carrying `planHash` | `feedback_provided` for the approval + its seq, then `memory_written` / `memory_deleted` after it for `finalize_plan`'s gate | `EventLog` |
 | Memory write | `memory_written` only (note + live claims, plus event-level `invalidates`). NOT `memory_accessed` — a write is not a read | `memory_written` / `memory_deleted` / `memory_accessed` for the projector + search | `EventLog`, Surreal |
-| Memory read | `memory_accessed` — on a HIT only, from `memory_read`, `memory_neighbors` (against its seed), `recall` (`mode: preload`, one per owning note) and `orc memory cat`. `memory_search` records nothing | — | `EventLog`, Surreal |
+| Memory read | `memory_accessed` — on a HIT only, from `memory_read`, `memory_neighbors` (against its seed) and `orc memory cat`. `memory_search` records nothing | — | `EventLog`, Surreal |
+| Knowledge read | `knowledge_delivered` — the ids a card, search, get, at-risk push or step preload actually handed over, `mode` naming which; a step's preload appends one, after its budget cut | the same, folded into claim evidence | `EventLog` |
 | Topic fetch | `memory_topic_accessed` (topicKey + resolved label). Fetch only — listing records nothing. Projected by nothing; it lives in the log as measurement | the `topic`/`claim` tables | `EventLog`, Surreal |
 | Task split | `task_created`, `split_proposed`, `plan_proposed`, then `plan_approved` (policy or human) and `split_resolved` on join | same + plan lookup | `EventLog` |
 | Artifact receipt | `artifact_produced` | same (for lineage) | `EventLog`, verify via filesystem |

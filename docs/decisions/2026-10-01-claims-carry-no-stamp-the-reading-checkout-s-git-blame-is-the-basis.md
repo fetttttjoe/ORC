@@ -1,7 +1,8 @@
 ---
-status: accepted
+status: superseded
 tags: knowledge, drift, provenance, architecture
 supersedes: claim-stamps-are-taken-from-an-injected-per-author-treestamps-provider-never-by
+supersededBy: a-claim-s-basis-is-the-code-its-writer-saw-recorded-in-knowledge-written-git-bla
 ---
 
 # Claims carry no stamp: the reading checkout's git blame is the basis

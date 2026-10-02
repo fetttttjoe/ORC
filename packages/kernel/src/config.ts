@@ -37,10 +37,7 @@ const settingsSchema = (dir: string, projectRoot: string) =>
     // re-heats instantly, rewrites nothing. Threaded to BOTH consumers (store ranking;
     // graph heat via sessions) so the two surfaces always decay at ONE rate.
     memoryHalfLifeDays: z.coerce.number().positive().default(14),
-    // preload budget: token budget for the ONE journaled memory_search the loop runs
-    // before iteration 1, rendered as a "Known project context" block. 0 = off (skip preload
-    // entirely, prompt unchanged) — same escape hatch shape as ambientCapture below.
-    memoryPreloadTokens: z.coerce.number().int().nonnegative().default(800),
+    knowledgePreloadTokens: z.coerce.number().int().nonnegative().default(1200),
     // the embedding model for SEMANTIC memory retrieval, as a 'provider/model' ref. '' disables it
     // (keyword-only, the prior behaviour). Default is the LARGE local Ollama encoder: the retrieval
     // floor (SEMANTIC_FLOOR, 0.495) was tuned on mxbai vectors, and under the smaller all-minilm a
@@ -142,7 +139,7 @@ const envOverrides = (): Record<string, string> => {
     maxDepth: process.env.ORC_MAX_DEPTH,
     maxIterations: process.env.ORC_MAX_ITERATIONS,
     memoryHalfLifeDays: process.env.ORC_MEMORY_HALF_LIFE_DAYS,
-    memoryPreloadTokens: process.env.ORC_MEMORY_PRELOAD_TOKENS,
+    knowledgePreloadTokens: process.env.ORC_KNOWLEDGE_PRELOAD_TOKENS,
     memoryEmbedModel: process.env.ORC_MEMORY_EMBED_MODEL,
     autoHealIterations: process.env.ORC_AUTO_HEAL_ITERATIONS,
     memoryConsolidateModel: process.env.ORC_MEMORY_CONSOLIDATE_MODEL,

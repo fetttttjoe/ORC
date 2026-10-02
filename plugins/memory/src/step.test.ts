@@ -1,152 +1,37 @@
 import { describe, expect, it } from 'bun:test'
 import {
-  AUTHOR_SOURCE, Door, EDGE_DIRECTION, LINK_KIND, MEMORY_ACCESS, MemoryScope, NOTE_TIER, SignalOutcome, planScope, slugId,
-  type ClaimHit, type MemoryAuthor, MemoryNote, type MemoryNoteDraft, type MemoryStore, type NoteSummary,
+  AUTHOR_SOURCE, Door, EDGE_DIRECTION, LINK_KIND, MemoryScope, NOTE_TIER, SignalOutcome, planScope, slugId,
+  type MemoryAuthor, MemoryNote, type MemoryNoteDraft, type MemoryStore,
 } from '@orc/contracts'
-import { bindStepMemory, deriveQueryTerms, preloadQuery } from './step'
-import type { BlobsAt, DriftSources } from './claim-drift-read'
-import type { ChangedSince } from './drift'
-import { claimHitFixture, noopMemoryStore, summaryFixture } from './test-helpers'
+import { bindStepMemory } from './step'
+import { noopMemoryStore } from './test-helpers'
 import { authorFixture, semanticNoteFixture, TEST_WORKSPACE_ID } from '@orc/contracts/fixtures'
 
 // The step reads and writes from inside its own run, so the origin is that run's chat.
 const AUTHOR: MemoryAuthor = authorFixture({ source: AUTHOR_SOURCE.agent, taskId: 'task-1', stepId: 'implement', runToken: 'rt-1', origin: { chatId: 'run:task-1:implement', door: Door.supervisor } })
 
-const summary = (over: Partial<NoteSummary> = {}): NoteSummary => summaryFixture({ id: 'area-memory', title: 'Memory area', summary: 'How memory works.', ...over })
-
-const NO_BLOBS: BlobsAt = async () => new Map()
-
-interface Recorded { id: string; scope: string | undefined; mode: string }
-
-// A store double that records what was asked of it. `search` answers per query so the fallback
-// ladder is observable; everything else is the minimum the binding touches.
-function fakeStore(opts: {
-  search?: (query: string) => NoteSummary[]
-  searchClaims?: (query: string) => ClaimHit[]
-  notes?: Record<string, MemoryNote>
-} = {}) {
-  const accesses: Recorded[] = []
+// A store double that records what was asked of it; everything else is the minimum the binding touches.
+function fakeStore(opts: { notes?: Record<string, MemoryNote> } = {}) {
   const writes: MemoryNoteDraft[] = []
   // Who each write claimed to be. MemoryAuthor.workspaceId is captured at write time and never
   // recoverable afterwards, so "the binding wrote as the author it was handed" needs the author,
   // not just the draft.
   const writeAuthors: MemoryAuthor[] = []
-  const queries: string[] = []
-  const claimQueries: string[] = []
   const store: MemoryStore = {
     ...noopMemoryStore(),
-    search: async query => { queries.push(query); return opts.search?.(query) ?? [] },
-    searchClaims: async query => { claimQueries.push(query); return opts.searchClaims?.(query) ?? [] },
-    recordAccess: async (id, scope, mode) => { accesses.push({ id, scope, mode }) },
+    recordAccess: async () => {},
     write: async (note, author) => { writes.push(note); writeAuthors.push(author); return MemoryNote.parse({ ...semanticNoteFixture(), ...note }) },
     get: async id => opts.notes?.[id] ?? null,
   }
-  return { store, accesses, writes, writeAuthors, queries, claimQueries }
+  return { store, writes, writeAuthors }
 }
 
 const bind = (f: ReturnType<typeof fakeStore>, over: Partial<Parameters<typeof bindStepMemory>[0]> = {}) =>
   bindStepMemory({
     store: f.store, author: AUTHOR, taskId: 'task-1',
-    step: { id: 'implement', title: 'Refactor authentication middleware', instructions: 'do the thing', dependsOn: [] },
+    step: { id: 'implement', title: 'Refactor authentication middleware', dependsOn: [] },
     ...over,
   })
-
-describe('preloadQuery / deriveQueryTerms', () => {
-  it('the intent query is title + instructions, bounded', () => {
-    expect(preloadQuery({ title: 'A', instructions: 'B' })).toBe('A\nB')
-    expect(preloadQuery({ title: 'x'.repeat(400), instructions: 'y'.repeat(400) })).toHaveLength(600)
-  })
-
-  it('keyword fallback keeps at most three distinctive words', () => {
-    expect(deriveQueryTerms('Refactor the authentication middleware handling')).toEqual(['refactor', 'authentication', 'middleware'])
-    expect(deriveQueryTerms('this step task')).toEqual([]) // all stopwords or too short
-  })
-})
-
-describe('recall', () => {
-  it('queries the full intent first and stops once it has hits', async () => {
-    const f = fakeStore({ search: () => [summary()] })
-    const { notes } = await bind(f).memory.recall(500)
-    expect(notes.map(n => n.id)).toEqual(['area-memory'])
-    // one query string, asked of BOTH arms — the claim arm and the note arm see the same intent
-    expect(f.queries).toEqual(['Refactor authentication middleware\ndo the thing'])
-    // the claim arm is asked the SAME intent, not a separate one
-    expect(f.claimQueries).toEqual(f.queries)
-  })
-
-  it('falls back to distinctive title terms, then to the single longest, when each comes up empty', async () => {
-    const f = fakeStore({ search: q => (q === 'authentication' ? [summary()] : []) })
-    const { notes } = await bind(f).memory.recall(500)
-    expect(notes.map(n => n.id)).toEqual(['area-memory'])
-    expect(f.queries).toEqual([
-      'Refactor authentication middleware\ndo the thing',
-      'refactor authentication middleware',
-      'authentication',
-    ])
-  })
-
-  // memory_search records nothing by design, so without this the retrieval path that runs on EVERY
-  // step earned no activation and left no provenance for consolidation.
-  it('records a preload access for every note it surfaced', async () => {
-    const f = fakeStore({ search: () => [summary(), summary({ id: 'area-kernel' })] })
-    await bind(f).memory.recall(500)
-    expect(f.accesses).toEqual([
-      { id: 'area-memory', scope: MemoryScope.project, mode: MEMORY_ACCESS.preload },
-      { id: 'area-kernel', scope: MemoryScope.project, mode: MEMORY_ACCESS.preload },
-    ])
-  })
-
-  it('a zero budget searches nothing', async () => {
-    const f = fakeStore({ search: () => [summary()] })
-    expect(await bind(f).memory.recall(0)).toEqual({ claims: [], notes: [] })
-    expect(f.queries).toEqual([])
-    expect(f.claimQueries).toEqual([])
-  })
-
-  it('recalls claims alongside notes, and records ONE access per owning note', async () => {
-    const hit = (claimId: string, noteId: string) =>
-      claimHitFixture({ claimId, noteId, title: noteId, text: `statement ${claimId}` })
-    // two claims on ONE note plus a note-arm hit for the same note: the activation signal counts
-    // notes, so a preload must not charge that note three times
-    const f = fakeStore({ searchClaims: () => [hit('c1', 'area-memory'), hit('c2', 'area-memory')], search: () => [summary()] })
-    const { claims, notes } = await bind(f).memory.recall(500)
-    expect(claims.map(c => c.claimId)).toEqual(['c1', 'c2'])
-    expect(notes.map(n => n.id)).toEqual(['area-memory'])
-    expect(f.accesses.filter(a => a.mode === MEMORY_ACCESS.preload)).toHaveLength(1)
-  })
-
-  it('claims alone are enough — the fallback chain stops without any note hit', async () => {
-    const f = fakeStore({
-      searchClaims: () => [claimHitFixture({ claimId: 'c1', noteId: 'n', title: 'N' })],
-      search: () => [],
-    })
-    const { claims, notes } = await bind(f).memory.recall(500)
-    expect(claims).toHaveLength(1)
-    expect(notes).toEqual([])
-    expect(f.claimQueries).toHaveLength(1) // stopped at the first candidate, did not degrade further
-  })
-
-  it('a throwing store degrades to no notes rather than failing the step', async () => {
-    const f = fakeStore()
-    f.store.search = async () => { throw new Error('surreal down') }
-    expect(await bind(f).memory.recall(500)).toEqual({ claims: [], notes: [] })
-  })
-
-  // A HANGING store is not a throwing store: the catch above never fires on a promise that stays
-  // pending, and a dead SurrealDB socket pends forever (measured: connect() still pending after
-  // 400s; live 2026-08-04, a step recovered mid-boot wedged in recall with zero events for 10+
-  // minutes). The degrade contract must hold against hangs too — bounded, then no notes.
-  it('a hanging store degrades to no notes instead of wedging the step forever', async () => {
-    const f = fakeStore()
-    f.store.searchClaims = () => new Promise(() => {}) // pending forever
-    const b = bindStepMemory({
-      store: f.store, author: AUTHOR, taskId: 'task-1',
-      step: { id: 'implement', title: 'Refactor authentication middleware', instructions: 'do the thing', dependsOn: [] },
-      recallTimeoutMs: 50,
-    })
-    expect(await b.memory.recall(500)).toEqual({ claims: [], notes: [] })
-  })
-})
 
 describe('capture', () => {
   it('writes an expirable plan-scoped episodic note keyed by step id', async () => {
@@ -182,7 +67,7 @@ describe('capture', () => {
     const f = fakeStore()
     const b = bindStepMemory({
       store: f.store, author: AUTHOR, taskId: 'task-1',
-      step: { id: 'implement', title: 'Implement', instructions: 'do', dependsOn: ['analyze', 'design'] },
+      step: { id: 'implement', title: 'Implement', dependsOn: ['analyze', 'design'] },
     })
     await b.memory.capture({ outcome: SignalOutcome.success, summary: 'done' })
     expect(f.writes[0]?.links).toEqual([
@@ -191,15 +76,15 @@ describe('capture', () => {
     ])
   })
 
-  it('links derived_from every durable note the step pulled — preload and tool reads alike', async () => {
-    const f = fakeStore({ search: () => [summary({ id: 'from-preload' })], notes: { 'from-read': semanticNoteFixture({ id: 'from-read' }) } })
+  it('links derived_from every durable note the step read', async () => {
+    const f = fakeStore({ notes: { 'first-read': semanticNoteFixture({ id: 'first-read' }), 'from-read': semanticNoteFixture({ id: 'from-read' }) } })
     const b = bind(f)
-    await b.memory.recall(500)
     const read = b.tools.find(t => t.name === 'memory_read')
-    await read?.execute({ id: 'from-read' }, 'call-1')
+    await read?.execute({ id: 'first-read' }, 'call-1')
+    await read?.execute({ id: 'from-read' }, 'call-2')
     await b.memory.capture({ outcome: SignalOutcome.success, summary: 'done' })
     expect(f.writes[0]?.links).toEqual([
-      { id: 'from-preload', kind: LINK_KIND.derived_from },
+      { id: 'first-read', kind: LINK_KIND.derived_from },
       { id: 'from-read', kind: LINK_KIND.derived_from },
     ])
   })
@@ -240,31 +125,10 @@ describe('capture', () => {
 
 // The semantic arm scores across the WHOLE note table, so plan notes from OTHER tasks compete for
 // the same top-N slots as durable project knowledge. Scoping the query is what stops one busy
-// project's decompositions from crowding out the knowledge every step is supposed to be handed.
+// project's decompositions from crowding out the knowledge a step reads.
 describe('lane scoping', () => {
-  it('recall sees this task\'s plan scope and the durable project lane', async () => {
-    const filters: unknown[] = []
-    const f = fakeStore()
-    f.store.search = async (_q, filter) => { filters.push(filter?.scope); return [summary()] }
-    await bind(f).memory.recall(500)
-    expect(filters).toEqual([[planScope('task-1'), MemoryScope.project]])
-  })
-
-  // A split child executes a decomposition its PARENT authored, and `plan-<child>` is a different
-  // scope from `plan-<parent>` — without the ancestor lanes the child cannot see its own subplan.
-  it('recall also sees every ANCESTOR plan scope, nearest first', async () => {
-    const filters: unknown[] = []
-    const f = fakeStore()
-    f.store.search = async (_q, filter) => { filters.push(filter?.scope); return [summary()] }
-    await bind(f, { ancestorTaskIds: ['task-parent', 'task-root'] }).memory.recall(500)
-    expect(filters).toEqual([[
-      planScope('task-1'), planScope('task-parent'), planScope('task-root'), MemoryScope.project,
-    ]])
-  })
-
-  // The model's OWN search had no scope at all, so it was still exposed to the starvation recall
-  // was just fixed for. One rule, both retrieval paths.
-  it('the step\'s memory_search tool is confined to the same lanes', async () => {
+  // A split child executes a decomposition its PARENT authored, so the lanes run through every ancestor.
+  it('the step\'s memory_search tool is confined to its own, its ancestors\' and the project lane', async () => {
     const filters: unknown[] = []
     const f = fakeStore()
     f.store.search = async (_q, filter) => { filters.push(filter?.scope); return [] }
@@ -298,110 +162,5 @@ describe('provenance hygiene', () => {
     await b.tools.find(t => t.name === 'memory_read')?.execute({ id: 'my-own-note' }, 'r1')
     await b.memory.capture({ outcome: SignalOutcome.success, summary: 'done' })
     expect(f.writes.at(-1)?.links).toEqual([])
-  })
-})
-
-// Preload is a HINT, not a request: the knowledge protocol tells the agent to search for whatever
-// the block lacks. A real run surfaced every note in the project because the token budget was the
-// only limiter — which stops being harmless once the corpus is large.
-// Currency is the SAME verdict memory_read flags per note and `orc status` reports per corpus —
-// deliberately not a second, cheaper comparison. `sourceRevision === HEAD` was tried here and is
-// strictly worse: any commit anywhere invalidates every note at once, so the preload would tell
-// every step to re-derive everything, which is exactly the cost the preload exists to avoid.
-describe('recall reports currency through the shared drift verdict', () => {
-  const dated = (id: string, path: string) => summary({ id, sourceRevision: 'rev-a', paths: [path] })
-  const drift = (changedSince: ChangedSince): DriftSources => ({ changedSince, blobsAt: NO_BLOBS })
-
-  it('counts a note as drifted when the code it declares has moved', async () => {
-    const f = fakeStore({ search: () => [dated('n1', 'src/auth.ts'), dated('n2', 'src/untouched.ts')] })
-    const got = await bind(f, { drift: drift(async () => new Set(['src/auth.ts'])) }).memory.recall(5000)
-    expect(got.currency).toMatchObject({ checkable: 2, drifted: 1 })
-  })
-
-  // A note with no declared paths cannot be dated at all, so it must not be counted as current —
-  // "nothing checkable" has to stay distinguishable from "checked and clean".
-  // The either-clean rule reaches the preload, or it reaches nothing a step actually sees: this is
-  // the verdict the block prints, and a note an auditor confirmed AFTER the code moved is current.
-  it('does not count a note whose verification is newer than the change', async () => {
-    const stamp = { revision: 'rev-b', at: '2026-07-30T00:00:00.000Z', by: 'cli' }
-    const f = fakeStore({ search: () => [summary({ id: 'n1', sourceRevision: 'rev-a', paths: ['src/auth.ts'], verified: stamp })] })
-    const got = await bind(f, { drift: drift(async rev => new Set(rev === 'rev-a' ? ['src/auth.ts'] : [])) }).memory.recall(5000)
-    expect(got.currency).toMatchObject({ checkable: 1, drifted: 0 })
-  })
-
-  it('omits currency entirely when nothing could be checked', async () => {
-    const f = fakeStore({ search: () => [summary({ id: 'n1', sourceRevision: 'rev-a', paths: [] })] })
-    const got = await bind(f, { drift: drift(async () => new Set(['src/auth.ts'])) }).memory.recall(5000)
-    expect(got.currency).toBeUndefined()
-  })
-
-  // An unreachable revision is UNKNOWN, not silently dropped: it must surface currency (not fold
-  // into the same undefined a genuinely-uncheckable preload produces) and must be counted apart
-  // from checkable/drifted, not inside either.
-  it('surfaces currency and reports an unreachable revision under unknown, alongside checkable notes', async () => {
-    const f = fakeStore({ search: () => [
-      dated('n1', 'src/auth.ts'), // checkable, clean
-      summary({ id: 'n2', sourceRevision: 'rev-unreachable', paths: ['src/gone.ts'] }), // unreachable
-    ] })
-    const got = await bind(f, { drift: drift(async rev => (rev === 'rev-unreachable' ? null : new Set<string>())) }).memory.recall(5000)
-    expect(got.currency).toBeDefined()
-    expect(got.currency).toMatchObject({ checkable: 1, drifted: 0, unknown: 1 })
-  })
-
-  // The behavioural flip: when EVERY declared-path note's revision is unreachable (checkable 0,
-  // unknown > 0), currency must now be DEFINED — distinct from the 'omits currency entirely' case
-  // above, whose note declares no paths at all and is genuinely uncheckable.
-  it('surfaces currency when every note has an unreachable revision (checkable 0, unknown > 0)', async () => {
-    const f = fakeStore({ search: () => [summary({ id: 'n1', sourceRevision: 'rev-unreachable', paths: ['src/gone.ts'] })] })
-    const got = await bind(f, { drift: drift(async () => null) }).memory.recall(5000)
-    expect(got.currency).toBeDefined()
-    expect(got.currency).toMatchObject({ checkable: 0, drifted: 0, unknown: 1 })
-  })
-
-  it('omits currency when there is no drift probe at all', async () => {
-    const f = fakeStore({ search: () => [dated('n1', 'src/auth.ts')] })
-    expect((await bind(f).memory.recall(5000)).currency).toBeUndefined()
-  })
-
-  // The probe shells out to git; a step must never fail because a repo could not be read.
-  it('omits currency rather than failing the recall when the probe throws', async () => {
-    const f = fakeStore({ search: () => [dated('n1', 'src/auth.ts')] })
-    const got = await bind(f, { drift: drift(async () => { throw new Error('not a repo') }) }).memory.recall(5000)
-    expect(got.currency).toBeUndefined()
-    expect(got.notes).toHaveLength(1) // the knowledge still arrives
-  })
-})
-
-// Claims take the budget FIRST, so at the default budget a preload is typically several claims and
-// one note. Currency computed from the notes arm alone put most of what the step was handed under a
-// verdict that never examined it.
-describe('currency counts a matched claim by its own anchors, not by its note\'s paths', () => {
-  const AUTH = 'src/auth.ts'
-  const claimHit = (noteId: string, blob: string) =>
-    claimHitFixture({ claimId: `c-${noteId}`, noteId, sourceRevision: 'rev-a', paths: [AUTH], anchors: [{ path: AUTH, symbol: null, blob }] })
-  const withBlob = (blob: string): DriftSources => ({
-    changedSince: async () => new Set([AUTH]),
-    blobsAt: async paths => new Map(paths.map(p => [p, blob])),
-  })
-
-  it('counts a claim whose anchored blob moved as drifted, with the notes arm empty', async () => {
-    const f = fakeStore({ search: () => [], searchClaims: () => [claimHit('n1', 'blob-1')] })
-    const got = await bind(f, { drift: withBlob('blob-2') }).memory.recall(5000)
-    expect(got.currency).toMatchObject({ checkable: 1, drifted: 1 })
-  })
-
-  it('leaves a claim clean when its anchored blob is unchanged, however its note\'s declared path moved', async () => {
-    const f = fakeStore({ search: () => [], searchClaims: () => [claimHit('n1', 'blob-1')] })
-    const got = await bind(f, { drift: withBlob('blob-1') }).memory.recall(5000)
-    expect(got.currency).toMatchObject({ checkable: 1, drifted: 0 })
-  })
-})
-
-describe('recall is a bounded hint', () => {
-  it('keeps only the best-ranked few, however many the store returns', async () => {
-    const many = Array.from({ length: 30 }, (_, i) => summary({ id: `note-${i}` }))
-    const f = fakeStore({ search: () => many })
-    const { notes } = await bind(f).memory.recall(100_000) // budget far too large to bind
-    expect(notes.map(n => n.id)).toEqual(['note-0', 'note-1', 'note-2', 'note-3', 'note-4'])
   })
 })

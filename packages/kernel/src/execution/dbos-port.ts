@@ -469,7 +469,7 @@ export async function createDbosPort(opts: {
         origin: args.origin,
         workspaceDir,
         taskId: args.taskId,
-        memoryPreloadTokens: config.memoryPreloadTokens,
+        knowledgePreloadTokens: config.knowledgePreloadTokens,
         ...(stepMemory && { memory: stepMemory }),
         ...(stepKnowledge && { knowledge: stepKnowledge }),
         // prices usage drafts on the way through: fill costUSD from the provider table

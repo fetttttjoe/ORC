@@ -10,7 +10,8 @@ import { openMemory } from './memory-open'
 import { knowledgeAccess, openKnowledge } from './knowledge-open'
 import { bindStepKnowledge } from '@orc/knowledge-core'
 import { buildDistiller } from './consolidation-distiller'
-import { cwdAuthor, cwdWorkspaceId } from './cwd-workspace'
+import { cwdAuthor } from './cwd-workspace'
+import { createHealTarget } from './heal-target'
 import { createVaultProjector } from '@orc/vault-projector'
 import { checksExecutor, commitTool, createDbosPort, createPluginHost, dbosSend, execTool, finalizePlanTool, isMcpTrusted, loadConfig, loadTrust, openStorage, projectorLease, readAnnotationsTool, reportCoverageTool, requireProject, scopedChangesTool, splitTool, Kernel, type DbosPort, type PluginHost, type ProjectConfig, type Storage } from '@orc/kernel'
 
@@ -170,21 +171,27 @@ export async function buildRuntime(
     bindStep = p => unavailableStepMemory(reason, p.keep)
   }
 
+  const healTarget = createHealTarget({ kernel, dir: config.dir })
+
   const autoHeal = !('unavailable' in knowledgeOpening) && config.autoHeal !== AutoHealMode.off
     ? createAutoHeal({
       mode: config.autoHeal,
       debounceMs: AUTO_HEAL_DEBOUNCE_MS,
       schedule: (fn, ms) => { const t = setTimeout(fn, ms); return () => clearTimeout(t) },
-      suspects: async () => {
-        const access = knowledgeAccess(knowledgeOpening, log, config.dir)
+      suspects: async workspaceId => {
+        const target = await healTarget(workspaceId)
+        const access = knowledgeAccess(knowledgeOpening, log, target.dir)
         if ('unavailable' in access) throw new Error(access.unavailable)
-        const author = await cwdAuthor(kernel, config.dir, AUTHOR_SOURCE.agent, SUPERVISOR_ORIGIN, { executor: AUTO_HEAL_EXECUTOR })
+        const author = { source: AUTHOR_SOURCE.agent, origin: SUPERVISOR_ORIGIN, workspaceId: target.id, executor: AUTO_HEAL_EXECUTOR }
         return access.port.drift({ author, idempotencyKey: null })
       },
-      hasOpenSweep: async () => (await kernel.listTasks()).some(t => t.title === AUTO_SWEEP_TITLE && !TERMINAL_TASK_STATUS.has(t.status)),
-      draftSweep: async suspects => {
+      hasOpenSweep: async workspaceId => {
+        const { id } = await healTarget(workspaceId)
+        return (await kernel.listTasks()).some(t => t.title === AUTO_SWEEP_TITLE && t.workspaceId === id && !TERMINAL_TASK_STATUS.has(t.status))
+      },
+      draftSweep: async (workspaceId, suspects) => {
         const task = await kernel.createTask({
-          workspaceId: await cwdWorkspaceId(kernel, config.dir),
+          workspaceId: (await healTarget(workspaceId)).id,
           title: AUTO_SWEEP_TITLE,
           spec: sweepSpec(suspects),
         }, SUPERVISOR_ORIGIN)
@@ -197,7 +204,7 @@ export async function buildRuntime(
   const port = await createDbosPort({
     storage, config, executorId: shared?.executorId,
     providers: host.providers, executors: host.executors,
-    ...(autoHeal && { onCommitRecorded: async () => { autoHeal.onCommitRecorded() } }),
+    ...(autoHeal && { onCommitRecorded: async payload => { autoHeal.onCommitRecorded(payload.workspaceId) } }),
     skills: host.skills, tools: hub,
     stepTools: p => {
       // workspaceId comes off `p`, i.e. off the running TASK — NOT from cwdAuthor like every other
@@ -214,8 +221,8 @@ export async function buildRuntime(
       })
       const stepAccess = knowledgeAccess(knowledgeOpening, log, p.workspaceDir)
       const stepKnowledge = bindStepKnowledge({
-        access: stepAccess, author, p,
-        writesOf: () => kernel.listTaskKnowledgeWrites(p.taskId),
+        access: stepAccess, author, p: { stepId: p.stepId, role: p.role, taskId: p.taskId, ancestorTaskIds: p.ancestorTaskIds, step: p.step },
+        writesOf: id => kernel.listTaskKnowledgeWrites(id),
       })
       const suspectAt = suspectAtFor(stepAccess, author)
       return { memory: bound.memory, knowledge: stepKnowledge.knowledge, tools: [

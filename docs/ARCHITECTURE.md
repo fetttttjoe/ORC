@@ -103,10 +103,12 @@ step except the grounded planner, which shares the role but has audited nothing.
 
 The out-of-orc path: the post-commit hook records `commit_recorded`, the signal router relays it,
 and the reactor (config `autoHeal`, `draft` or `off`, default `draft`) debounces a commit burst into
-one reaction: it reads claim drift in the checkout and, when any claim is `suspect` and no sweep is
-open, drafts one heal task. The task is plan-ready, lists up to 50 suspect ids, and has an auditor
+one reaction: it reads claim drift in the checkout of the workspace that committed and, when any claim
+is `suspect` and that workspace has no open sweep, drafts one heal task. The task is plan-ready, lists up to 50 suspect ids, and has an auditor
 step that reads each claim's anchors and calls `knowledge_check` on it (`autoHealIterations`,
-`ORC_AUTO_HEAL_ITERATIONS`, bounds its budget). `orc knowledge drift` prints the same claim states.
+`ORC_AUTO_HEAL_ITERATIONS`, bounds its budget). `orc knowledge drift` prints the same claim states. `orc knowledge stats` reports what agents were handed
+and the files they read that no claim covers. `orc knowledge verify` lets a person record a claim as
+holds, false with a correction, or unknown.
 The corpus-level drift ratio stays an
 **advisory** at every door and the reactor keeps that rule: it never approves its own sweep — a
 model pass firing on its own would cost more than the staleness it cures, so the spend waits at
@@ -621,6 +623,7 @@ sequenceDiagram
   participant R as Signal router (supervisor)
   participant D as DBOS port
   participant X as api-loop executor
+  participant N as StepKnowledge
   participant Y as StepMemory
   participant M as Model/Tool
 
@@ -630,8 +633,8 @@ sequenceDiagram
   R->>D: startRunAt (deterministic workflow id)
   D->>L: chat_opened + run_started + status→running (one transaction, idempotent keys)
   D->>X: startTurn(ctx)
-  X->>Y: recall(budget) — inside ctx.checkpoint
-  Y->>L: memory_accessed{mode:preload} per surfaced note
+  X->>N: preload(budget, round) — inside ctx.checkpoint
+  N->>L: knowledge_delivered{mode:preload} — the claims delivered
   loop each iteration
     X->>D: ctx.operation(spec, fn)
     D->>L: beginOperation → operation_started + journal row (BEFORE the effect)
@@ -670,42 +673,43 @@ questions:
 
 The ancestor half is load-bearing: a split child's id is `${parent}.${step}.${callId}`, so
 `plan-<child>` is a different scope from the `plan-<parent>` its subplan notes were authored in.
-Without the ancestor lanes a child cannot see its own decomposition. Both `recall` and the step's
-own `memory_search` take the same lanes, and the scope predicate reaches the **query** — the
-semantic arm ranks then truncates, so filtering afterwards would let one task's plan notes occupy
-every slot.
+Without the ancestor lanes a child cannot see its own decomposition. The step's own `memory_search`
+takes these lanes, and the scope predicate reaches the **query** — the semantic arm ranks then
+truncates, so filtering afterwards would let one task's plan notes occupy every slot.
 
 `isUiMetaNote` excludes chat infrastructure (project display name, working directory) from the
 retrieval surface entirely; it stays readable by id, which is how the chats list resolves a name.
 
-### Step memory — the one seam
+### Step knowledge and step memory — the two seams
 
-Everything a running step does to the knowledge graph goes through `StepMemory`
-(`contracts/execution.ts`), bound per step by the composition root from `plugins/memory`'s
-`bindStepMemory`. The executor decides only **when**: `recall` before the first prompt (wrapped in
-`ctx.checkpoint`, so a replay reuses the recorded notes), `capture` after the signal. What is
-searched, recorded, written and linked is the memory domain's business — the executor holds no store
-handle and never drives a model-facing memory tool itself.
+What a running step reads from and records in the knowledge files goes through `StepKnowledge`
+(`contracts/execution.ts`), bound per step by the composition root from `packages/knowledge-core`'s
+`bindStepKnowledge`; the note it leaves behind goes through `StepMemory`, bound from
+`plugins/memory`'s `bindStepMemory`. The executor decides only **when**: `knowledge.preload` before
+the first prompt (wrapped in `ctx.checkpoint`, so a replay rebuilds the prompt from the recorded
+claims), `knowledge.claimsAt` after each edit, `memory.capture` after the signal. The executor holds
+no store handle and never drives a model-facing knowledge or memory tool itself.
 
-Two consequences the graph depends on:
-
-- **`recall` returns two surfaces from one call** (`RecalledContext`): matched **claims** and the
-  notes that matched without asserting one. Claims take their share of the budget first — a matched
-  statement is something the step can act on, where a note summary is a pointer it must spend a
-  `memory_read` to follow — and the notes arm gets the remainder, so one preload costs what the
-  caller allotted. Both come from one call so they share one budget and one replay checkpoint; two
-  calls could rebuild `messages[0]` differently on recovery.
-- **`recall` records what it surfaced** (`memory_accessed{mode: 'preload'}`), one access per owning
-  **note**, deduped by `(scope, id)` — a note that matched through three of its claims is not
-  charged three times. `memory_search` records nothing by design, so without this the retrieval path
-  that runs on *every* step earned no activation and left no provenance for consolidation.
+- **`preload(budget, round)` hands the first prompt claims in four arms, under one budget.** The binding
+  builds one `KnowledgePort.preload` request: the claims live in the writes of the step's **root**
+  task tree (`listTaskKnowledgeWrites`, latest first), the paths its title and instructions name
+  plus each zone glob's static folder, and its title and instructions as the search query. The port
+  reads the arms in order — `pushed`, `here` (an anchor at or under a requested path, the exact
+  matches first), `around` (an anchor in a folder above one; both by `underEntity`, the rule the
+  path read selects with), `search` (the backend's ranked search over the query) —
+  judges every claim's state through the same evidence fold `drift` uses, orders each arm clean →
+  unanchored → unknown → suspect, keeps a claim only in the first arm that has it, and cuts the
+  lot to `knowledgePreloadTokens` (default 1,200, `ORC_KNOWLEDGE_PRELOAD_TOKENS`, 0 = off): tokens
+  at chars/4 of the line the step is shown, the first claim always kept, then greedy in order. It
+  appends **one** `knowledge_delivered{mode: preload}` per round, keyed `<runToken>:preload:<round>`,
+  carrying exactly the ids it delivered — a continuation round preloads again and records its own.
+  The loop renders them as the "Known project context" block — the state rule, one `Currency:`
+  count line, one section per non-empty arm, each claim as `preloadLine` (`contracts/preload-line.ts`,
+  the same string the port costs): the knowledge file's line format with its state shown when not
+  clean. A failing read yields no block and one warning, never a failed step.
 - **`capture` writes edges, not just a node**: `depends_on` the ambient notes of the steps this one
   consumed, `derived_from` every durable note it actually pulled. Both resolve under
   `linkLookupScopes`, so a run wires itself into the graph instead of adding isolated nodes.
-
-`recall` is scoped by `taskLaneScopes(taskId, ancestorTaskIds)` — the retrieval lanes above, so a
-split child sees the decomposition its parent authored and not only its own plan scope — and that
-scope reaches the **query**, never a post-filter, for the reason stated there.
 
 A run's outcome is the **tree's**, not the root task's (`projections.subtreeOutcome`). A grounded
 parent finishes the moment its plan step splits, so its own status reads `done` while the child
@@ -939,8 +943,8 @@ client-side filter, or a browser fold.
 | `kernel/dbos-port` | Durable run/step workflows, `ctx.checkpoint` and `ctx.operation` wrappers, retry policy, queue partitioning, cancellation cascade, output receipt commit | Model/tool specifics (executor's job), plan authoring |
 | `kernel/signal-router` | Resolving splits, starting approved children, and live/startup delivery of committed feedback | Composing plans, executing steps |
 | `kernel/plugins/*` | Registry + propose-time ref validation (`host`), fingerprint trust store (`trust`), SKILL.md indexing (`skills`), T2 extension loading | Runtime tool execution (that's the hub/executor) |
-| `plugins/executor-api-loop` | The model⇄tool loop, prompt assembly (incl. knowledge protocol + the recalled-context block), signal/output pre-flight, per-call operation journaling | Durability (delegates to ctx), trust, receipts, **what to remember** (delegates to `ctx.memory`) |
-| `plugins/memory` | Event-first note store (gateway stamps git revision, resolved lazily), transactional Surreal projection of notes + edges + `claim` rows, stateless topic derivation (`refreshTopics`, stage 3, driven from the drain and only by drains that touched claims), per-project database boundary, hybrid (vector⊕keyword) retrieval with activation re-ranking over both notes and claims, the `StepMemory` binding (recall/capture, ambient edges), consolidation lifecycle, tri-state drift probe, evidence-based archival + cancel-time sweep, `vault/memory/**` rebuild | Being authoritative — Surreal and vault/memory are disposable. Authoring a topic: stage 3 derives them, nobody writes one |
+| `plugins/executor-api-loop` | The model⇄tool loop, prompt assembly (incl. knowledge protocol + the known-context block), signal/output pre-flight, per-call operation journaling | Durability (delegates to ctx), trust, receipts, **what to preload or remember** (delegates to `ctx.knowledge` and `ctx.memory`) |
+| `plugins/memory` | Event-first note store (gateway stamps git revision, resolved lazily), transactional Surreal projection of notes + edges + `claim` rows, stateless topic derivation (`refreshTopics`, stage 3, driven from the drain and only by drains that touched claims), per-project database boundary, hybrid (vector⊕keyword) retrieval with activation re-ranking over both notes and claims, the `StepMemory` binding (capture, ambient edges), consolidation lifecycle, tri-state drift probe, evidence-based archival + cancel-time sweep, `vault/memory/**` rebuild | Being authoritative — Surreal and vault/memory are disposable. Authoring a topic: stage 3 derives them, nobody writes one |
 | `packages/vault-projector` | Deterministic markdown/mermaid renders of tasks, execution, lineage, task expansion; coalesced live re-render | Truth of any kind; whole-log scans |
 | `packages/cli` | Pre-bootstrap help/init/migrate, command surface, project discovery, startup/shutdown order, degraded-memory wiring, boot adoption of the checkout (`workspace-adopt`) and the impure half of workspace health — does the directory exist, is it clean, how much knowledge is still pending (`workspace-health`) | Business rules (kernel's job); the health state table itself (pure, in `kernel/workspaces.ts`) |
 | `packages/ui-core` | Transport-free UI core: `ProjectSessions` (live folds, graph snapshots/patches), the view registry (`readView`/`viewOf`/`touchesOf` over `WIRE`), `OrcActions` interface, the copilot toolset + `asResolvedTools` door-#2 bridge | Any transport (HTTP/SSE/stdio are adapters' jobs), any DOM |

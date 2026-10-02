@@ -605,8 +605,8 @@ export function buildOrcActions(deps: {
         const counts = await storage.purge()
         // The knowledge goes with the chat. This read model lives in a PROJECT-DERIVED SurrealDB
         // database, so the home project's memory instance cannot reach it. Leaving it is not inert
-        // garbage: a deleted project's notes stay live in `orc memory ls`, memory_search, agent recall
-        // and the graph UI, with no events behind them, until a later rebuild silently drops them.
+        // garbage: a deleted project's notes stay live in `orc memory ls`, memory_search and the graph
+        // UI, with no events behind them, until a later rebuild silently drops them.
         // Deleting a chat means the data goes too.
         try {
           const knowledge = await openKnowledge({ ...plugin.config, projectId })

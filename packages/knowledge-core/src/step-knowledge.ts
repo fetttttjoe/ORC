@@ -1,9 +1,10 @@
 import path from 'node:path'
 import {
-  DeliveryMode, errorMessage, KNOWLEDGE_DEFAULTS, KNOWLEDGE_REFUSAL, KnowledgeToolName, stepMayPlan, stepMayReconcile, stepMayVerify, toolError,
-  type KnowledgeAccess, type KnowledgeClaim, type KnowledgePort, type KnowledgeWrites, type MemoryAuthor, type ResolvedTool, type StepKnowledge,
+  DeliveryMode, EntityPath, errorMessage, KNOWLEDGE_DEFAULTS, KNOWLEDGE_LIMITS, KNOWLEDGE_REFUSAL, KnowledgeToolName, ROOT_ENTITY, stepMayPlan, stepMayReconcile, stepMayVerify, toolError,
+  type KnowledgeAccess, type KnowledgeClaim, type KnowledgePort, type KnowledgeWrites, type MemoryAuthor, type PreloadedClaim, type ResolvedTool, type StepKnowledge,
 } from '@orc/contracts'
 import { decisionTools } from './decision-tools'
+import { namedPaths, preloadQuery, zonePrefix } from './preload-request'
 import { KNOWLEDGE_STEP_TOOLS, KNOWLEDGE_VERIFY_TOOLS, knowledgeIdempotencyKey, knowledgeTools } from './tools'
 
 export interface StepKnowledgeBinding {
@@ -13,6 +14,16 @@ export interface StepKnowledgeBinding {
 }
 
 export const AT_RISK_NOT_READ = (reason: string): string => `claims at risk not read: ${reason}`
+export const PRELOAD_NOT_READ = (reason: string): string => `knowledge preload not read: ${reason}`
+export const preloadKey = (runToken: string, round: number): string => `${runToken}:preload:${round}`
+
+interface StepParams {
+  stepId: string
+  role: string
+  taskId: string
+  ancestorTaskIds: readonly string[]
+  step: { title: string; instructions: string; zone?: readonly string[] }
+}
 
 const TASK_CLAIMS_DESCRIPTION = `The claims THIS task and its split children recorded and did not retire, read from the knowledge files; the refs of the claims they retired; and the ids of recorded claims no longer in the files. Start here: each claim is yours to keep, correct (${KnowledgeToolName.write} change) or retire.`
 
@@ -23,6 +34,20 @@ async function claimsAt(port: KnowledgePort, author: MemoryAuthor, paths: readon
     for (const claim of card.claims) found.set(claim.id, claim)
   }
   return [...found.values()].slice(0, KNOWLEDGE_DEFAULTS.pageItems)
+}
+
+function requestedPaths(step: StepParams['step']): string[] {
+  const named = [...namedPaths(`${step.title}\n${step.instructions}`), ...(step.zone ?? []).flatMap(glob => zonePrefix(glob) ?? [])]
+  const parsed = named.flatMap(p => { const r = EntityPath.safeParse(p); return r.success && r.data !== ROOT_ENTITY ? [r.data] : [] })
+  return [...new Set(parsed)].slice(0, KNOWLEDGE_LIMITS.patchItems)
+}
+
+async function preload(port: KnowledgePort, author: MemoryAuthor, p: StepParams, writesOf: (taskId: string) => Promise<KnowledgeWrites>, budget: number, round: number): Promise<PreloadedClaim[]> {
+  const root = p.ancestorTaskIds.at(-1) ?? p.taskId
+  const pushed = (await writesOf(root)).live.map(r => r.id).toReversed().slice(0, KNOWLEDGE_LIMITS.patchItems)
+  return port.preload({ author, idempotencyKey: author.runToken ? preloadKey(author.runToken, round) : null }, {
+    pushed, paths: requestedPaths(p.step), query: preloadQuery(p.step.title, p.step.instructions, KNOWLEDGE_LIMITS.preloadQueryChars), budget,
+  })
 }
 
 function taskClaimsTool(access: KnowledgeAccess, author: MemoryAuthor, writesOf: () => Promise<KnowledgeWrites>): ResolvedTool {
@@ -45,19 +70,19 @@ function taskClaimsTool(access: KnowledgeAccess, author: MemoryAuthor, writesOf:
 export function bindStepKnowledge(opts: {
   access: KnowledgeAccess
   author: MemoryAuthor
-  p: { stepId: string; role: string }
-  writesOf: () => Promise<KnowledgeWrites>
+  p: StepParams
+  writesOf: (taskId: string) => Promise<KnowledgeWrites>
   warn?: (line: string) => void
 }): StepKnowledgeBinding {
-  const { access, author } = opts
+  const { access, author, p, writesOf } = opts
   const warn = opts.warn ?? ((line: string) => console.warn(line))
   const tools = [
     ...knowledgeTools(access, author, KNOWLEDGE_STEP_TOOLS),
-    ...(stepMayVerify(opts.p) ? knowledgeTools(access, author, KNOWLEDGE_VERIFY_TOOLS) : []),
-    ...(stepMayReconcile(opts.p) ? [taskClaimsTool(access, author, opts.writesOf)] : []),
-    ...(stepMayPlan(opts.p) || stepMayReconcile(opts.p) ? decisionTools(access, author) : []),
+    ...(stepMayVerify(p) ? knowledgeTools(access, author, KNOWLEDGE_VERIFY_TOOLS) : []),
+    ...(stepMayReconcile(p) ? [taskClaimsTool(access, author, () => writesOf(p.taskId))] : []),
+    ...(stepMayPlan(p) || stepMayReconcile(p) ? decisionTools(access, author) : []),
   ]
-  if ('unavailable' in access) return { tools, knowledge: { claimsAt: async () => [] }, citing: null }
+  if ('unavailable' in access) return { tools, knowledge: { claimsAt: async () => [], preload: async () => [] }, citing: null }
   const { port } = access
   return {
     tools,
@@ -65,6 +90,13 @@ export function bindStepKnowledge(opts: {
       claimsAt: async paths => {
         try { return await claimsAt(port, author, paths, DeliveryMode.push) } catch (err) {
           warn(AT_RISK_NOT_READ(errorMessage(err)))
+          return []
+        }
+      },
+      preload: async (budget, round) => {
+        if (budget <= 0) return []
+        try { return await preload(port, author, p, writesOf, budget, round) } catch (err) {
+          warn(PRELOAD_NOT_READ(errorMessage(err)))
           return []
         }
       },

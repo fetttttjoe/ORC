@@ -3,6 +3,7 @@ import { AdrSection, AUTHOR_SOURCE, decisionSummaryOf, DecisionStatus, Door, NO_
 import type { EventLog, Kernel, ProjectConfig } from '@orc/kernel'
 import { cwdAuthor } from './cwd-workspace'
 import { enumArg } from './enum-arg'
+import { NO_PROJECT_ERROR } from './exit'
 import { knowledgeAccess, openKnowledge, type KnowledgeOpening } from './knowledge-open'
 import { knowledgeAuthor } from './knowledge-commands'
 
@@ -48,10 +49,11 @@ export function adrCommand(deps: {
   requireKernel: () => Kernel
   project?: { config: ProjectConfig; log: EventLog }
   opening?: KnowledgeOpening
+  noProject?: (message: string) => unknown
 }): Command {
   const adr = new Command('adr').description('architectural decisions as files in the repo: record, list, show, supersede')
   const needProject = () => {
-    if (!deps.project) throw new Error('adr commands need a project context')
+    if (!deps.project) throw (deps.noProject ?? NO_PROJECT_ERROR)('adr commands need a project context')
     return deps.project
   }
   const port = (): KnowledgePort => {

@@ -78,7 +78,7 @@ describe('summarizeEvent', () => {
     }))
     const written = summarizeEvent(eventFixture({
       kind: EVENT_KIND.knowledge_written, taskId: null,
-      payload: { added: [{ id: 'abcd1234', location: 'knowledge/src/a.ts.md' }], changed: [], retired: [], files: ['knowledge/src/a.ts.md'], why: 'because', decision: null, decisionsRecorded: [], decisionsSuperseded: [], author },
+      payload: { added: [{ id: 'abcd1234', location: 'knowledge/src/a.ts.md' }], changed: [], retired: [], files: ['knowledge/src/a.ts.md'], why: 'because', decision: null, decisionsRecorded: [], decisionsSuperseded: [], asserted: [], author },
     }))
     expect([delivered.line, written.line]).toEqual(['card 1 claim(s) · src/a.ts', '+1 ~0 -0 · because'])
     expect([delivered.authorTaskId, written.authorTaskId]).toEqual(['task-K', 'task-K'])
@@ -97,7 +97,7 @@ describe('summarizeEvent', () => {
 
   it('a knowledge_written that recorded a decision reads as the decision, with what it superseded', () => {
     const author = authorFixture({ source: AUTHOR_SOURCE.cli })
-    const base = { added: [], changed: [], retired: [], files: ['docs/decisions/2026-09-29-use-files.md'], why: null, decision: null, author }
+    const base = { added: [], changed: [], retired: [], files: ['docs/decisions/2026-09-29-use-files.md'], why: null, decision: null, asserted: [], author }
     const recorded = summarizeEvent(eventFixture({
       kind: EVENT_KIND.knowledge_written, taskId: null,
       payload: { ...base, decisionsRecorded: [{ id: 'use-files', location: 'docs/decisions/2026-09-29-use-files.md' }], decisionsSuperseded: [] },

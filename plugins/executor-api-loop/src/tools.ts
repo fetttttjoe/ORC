@@ -3,15 +3,15 @@ import path from 'node:path'
 import { jsonSchema, tool } from 'ai'
 import { z } from 'zod'
 import type { ResolvedTool } from '@orc/contracts'
-import { toolError, errorMessage, FS_WRITE_TOOL_NAME, SignalOutcome, STEP_ROLE, assertInZone, doubleEncodedField, DOUBLE_ENCODED_HINT, resolveInWorkspace, unescapeSequences } from '@orc/contracts'
+import { toolError, errorMessage, FS_LIST_TOOL_NAME, FS_READ_TOOL_NAME, FS_WRITE_TOOL_NAME, SignalOutcome, STEP_ROLE, assertInZone, doubleEncodedField, DOUBLE_ENCODED_HINT, resolveInWorkspace, unescapeSequences } from '@orc/contracts'
 
 export const TOOL_NAME = {
   signal: 'signal',
-  fs_read: 'fs_read',
+  fs_read: FS_READ_TOOL_NAME,
   fs_write: FS_WRITE_TOOL_NAME.write,
   fs_edit: FS_WRITE_TOOL_NAME.edit,
   fs_delete: FS_WRITE_TOOL_NAME.delete,
-  fs_list: 'fs_list',
+  fs_list: FS_LIST_TOOL_NAME,
   join_splits: 'join_splits',
   ask_human: 'ask_human',
 } as const

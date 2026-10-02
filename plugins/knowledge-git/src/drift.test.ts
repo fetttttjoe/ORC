@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSy
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import {
-  anchorState, ClaimClass, ClaimState, claimState, DriftFilter, KnowledgePatch,
+  anchorState, ClaimClass, ClaimState, claimState, DriftFilter, KnowledgePatch, NO_ANCHOR_EVIDENCE,
   type ClaimReading, type DriftFilterInput, type KnowledgePatchInput,
 } from '@orc/contracts'
 import { createGitFilesBackend } from './backend'
@@ -27,7 +27,7 @@ const setup = (git: GitRun = runGit) => {
   put('src/a.ts', SOURCE)
   const write = async (input: KnowledgePatchInput) => backend.write(checkout, KnowledgePatch.parse(input))
   const readings = async (filter: DriftFilterInput = {}) => backend.readings(checkout, DriftFilter.parse(filter))
-  const stateOf = (r: ClaimReading | undefined): ClaimState | undefined => r && claimState(r.anchors.map(a => anchorState(a, [])))
+  const stateOf = (r: ClaimReading | undefined): ClaimState | undefined => r && claimState(r.anchors.map(a => anchorState(a, NO_ANCHOR_EVIDENCE)))
   const head = (): string => Bun.spawnSync(['git', '-C', checkout, 'rev-parse', 'HEAD']).stdout.toString().trim()
   return { checkout, backend, put, write, readings, stateOf, head }
 }

@@ -2,6 +2,7 @@ import { existsSync, realpathSync } from 'node:fs'
 import path from 'node:path'
 import { WORKSPACE_KIND, errorMessage, slugId, type Origin, type Workspace } from '@orc/contracts'
 import { KERNEL_ERROR_CODE, KernelError, branchDelete, currentBranch, dirtyPaths, isAncestor, MERGE_REFUSAL, mergeBranch, revParse, worktreeAdd, worktreeRemove, type Kernel, type OrcConfig } from '@orc/kernel'
+import type { WorkspaceFold } from './cwd-workspace'
 import { resolveTrunk } from './workspace-adopt'
 
 // The OrcConfig slice `orc ws new` (ws-commands.ts) and adoptCwd (workspace-adopt.ts) both need — the
@@ -125,7 +126,7 @@ function withNote(err: unknown, note: string): Error {
  * get rather than a scan of a materialized array, and `state.workspaces` already carries archived
  * records — `listWorkspaces({ includeArchived: true })` was building the whole list to find one row.
  */
-export async function requireLiveWorkspace(kernel: Pick<Kernel, 'state'>, id: string): Promise<Workspace> {
+export async function requireLiveWorkspace(kernel: WorkspaceFold, id: string): Promise<Workspace> {
   const found = (await kernel.state()).workspaces.get(id)
   if (!found) throw noSuchWorkspace(id)
   if (found.archivedAt !== null) throw new Error(archivedRefusal(id))

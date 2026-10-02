@@ -1,6 +1,9 @@
 import { existsSync, realpathSync, statSync } from 'node:fs'
 import path from 'node:path'
 
+export const FS_READ_TOOL_NAME = 'fs_read'
+export const FS_LIST_TOOL_NAME = 'fs_list'
+
 // The fs tools that CHANGE a file — matched values, never scattered literals (mirrors
 // MEMORY_TOOL_NAME's shape). Owned here because kernel's audit projection (taskChangedPaths) and
 // the executor's tool registration/write fence must agree on exactly this set: a fourth writing

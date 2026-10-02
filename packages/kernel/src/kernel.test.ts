@@ -1129,7 +1129,7 @@ describe('Kernel lifecycle', () => {
         payload: {
           added: (over.added ?? []).map(id => ({ id, location: `knowledge/${id}.md` })), changed: [],
           retired: (over.retired ?? []).map(id => ({ id, location: `knowledge/${id}.md` })),
-          files: over.files, why: 'w', decision: null, decisionsRecorded: [], decisionsSuperseded: [], author: authorFixture({ taskId }),
+          files: over.files, why: 'w', decision: null, decisionsRecorded: [], decisionsSuperseded: [], asserted: [], author: authorFixture({ taskId }),
         },
       })
     await written(parent.id, { added: ['aaaaaaaa'], files: ['knowledge/aaaaaaaa.md'] })

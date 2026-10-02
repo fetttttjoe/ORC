@@ -5,7 +5,7 @@ import path from 'node:path'
 import { ApprovalPolicy, AUTHOR_SOURCE, CHECKS_STEP_ID, Confidence, Door, EVENT_KIND, NO_CHAT, MEMORY_ACCESS, MemoryAccessedPayload, MemoryDeletedPayload, MemoryWrittenPayload, NOTE_TIER, OperationKind, ROLE_SKILL, RunOutcome, TASK_STATUS, WORKSPACE_KIND, claimId, type ExecutionPort, type MemoryAuthor, type OperationSpec, type TaskNode, type TaskStatus, LINK_KIND } from '@orc/contracts'
 import { claimFixture, must } from '@orc/contracts/fixtures'
 import { loadConfig, requireProject, type EventLog, type ProjectConfig } from '@orc/kernel'
-import { createTestDb, seedTestWorkspace, TEST_PROJECT_ID, TEST_WORKSPACE, TEST_WORKSPACE_ID, testOrcConfig } from '@orc/kernel/test-helpers'
+import { createTestDb, seedTestWorkspace, testConfig, TEST_PROJECT_ID, TEST_WORKSPACE, TEST_WORKSPACE_ID, testOrcConfig } from '@orc/kernel/test-helpers'
 import { singleStepDraft } from './plan-template'
 import { buildProgram, openKernel, runInit } from './main'
 import { buildOrcActions } from './actions'
@@ -112,6 +112,14 @@ describe('orc CLI', () => {
     expect(second.projectId).toBe(first.projectId)
     expect(second.projectName).toBe('demo') // the existing identity wins; --name is not a rename
     expect(existsSync(skill)).toBe(true)    // the deleted skill is back
+  })
+
+  it('with the database unreachable, every project-context guard throws the unreachable error itself', async () => {
+    const error = new Error('connection refused')
+    for (const args of [['purge', 'demo', '--yes'], ['projects'], ['delete', 'demo', '--yes'], ['brief'], ['adr', 'ls'], ['ws', 'ls'], ['tasks']]) {
+      const program = buildProgram(null, undefined, undefined, { config: testConfig('postgresql://unused'), error })
+      await expect(program.parseAsync(['node', 'orc', ...args])).rejects.toBe(error)
+    }
   })
 
   it('buildProgram exposes pre-bootstrap init and db commands', async () => {

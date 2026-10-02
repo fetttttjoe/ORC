@@ -32,4 +32,4 @@ export function digestIn(view: SourceView, symbol: string | null): AnchorDigest 
 }
 
 export const readingOf = (anchor: KnowledgeAnchor, basis: AnchorDigest, current: AnchorDigest): AnchorReading =>
-  ({ path: anchor.path, symbol: anchor.symbol, basis: basis.digest, current: current.digest, readable: current.readable })
+  ({ path: anchor.path, symbol: anchor.symbol, basis: basis.digest, current: current.digest, readable: basis.readable && current.readable })

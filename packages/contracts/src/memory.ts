@@ -583,8 +583,7 @@ export const NoteSummary = z.object({
 })
 export type NoteSummary = z.infer<typeof NoteSummary>
 
-// memory_search's result envelope (tools.ts constructs it; the loop's preload parses it —
-// no casts, same discipline as MemoryWriteResult).
+// memory_search's result envelope (tools.ts constructs it).
 export const MemorySearchResult = z.object({
   // Claims are the retrieval surface: a matched STATEMENT is what a reader can act on. `notes` is
   // kept alongside, not replaced — a note that asserts no claims (every episodic note, and any
@@ -757,8 +756,7 @@ export type MemoryVerifiedPayload = z.infer<typeof MemoryVerifiedPayload>
 // the only evidence of which knowledge is load-bearing, and a counter written outside the log is
 // erased by every rebuild. Emitted per successful pull (a miss records nothing) — id and scope
 // carry the same MEMORY_ID_RE guard as memory_deleted, since both index the read model by key.
-// 'read'/'neighbors' are the agent pulling; 'preload' is the executor injecting summaries into the
-// first prompt. Distinct so the log can tell a delivered summary from a delivered body.
+// 'read'/'neighbors' are the agent pulling.
 export enum MemoryAccessMode {
   read = 'read',
   neighbors = 'neighbors',

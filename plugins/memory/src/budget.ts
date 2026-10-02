@@ -3,7 +3,7 @@ import { MemoryNote, type NoteView } from '@orc/contracts'
 export const approxTokens = (s: string): number => Math.ceil(s.length / 4) // ponytail: chars/4; swap for a real tokenizer only if it misbudgets
 
 // `used` is what the kept items cost, returned so a caller splitting one budget across two arms
-// (search's claims-then-notes, the preload's same split) subtracts the number this loop counted
+// (search's claims-then-notes) subtracts the number this loop counted
 // rather than re-deriving it — two spellings of the sum drift.
 export function applyBudget<T>(items: T[], text: (t: T) => string, opts: { limit: number; budget: number }):
   { items: T[]; used: number; truncated: boolean; omitted: number } {

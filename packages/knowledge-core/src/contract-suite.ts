@@ -173,7 +173,7 @@ export function describeKnowledgeBackend(name: string, make: () => Promise<Contr
     })
 
     const statesOf = async (filter: DriftFilterInput = {}): Promise<Record<string, ClaimState>> =>
-      Object.fromEntries(driftOf(await f.backend.readings(f.checkout, DriftFilter.parse(filter)), []).map(d => [d.claim.id, d.state]))
+      Object.fromEntries(driftOf(await f.backend.readings(f.checkout, DriftFilter.parse(filter)), null).map(d => [d.claim.id, d.state]))
     const SOURCE_A_COMMENTED = 'export function alpha() { /* reads the store */ }\nexport function outer() {\n  // the inner helper\n  function inner() {}\n}\n'
     const SOURCE_A_EDITED = 'export function alpha() { return 1 }\nexport function outer() {\n  function inner() {}\n}\n'
 

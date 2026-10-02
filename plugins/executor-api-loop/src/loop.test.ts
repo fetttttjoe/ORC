@@ -2,12 +2,12 @@ import { afterAll, describe, expect, it } from 'bun:test'
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import type { ClaimHit, Checkpoint, EventDraft, ExecutorContext, KnowledgeClaim, NoteSummary, OperationCheckpoint, OperationSpec, ResolvedTool, SplitResult, UnifiedEvent } from '@orc/contracts'
-import { ClaimClass, Door, EVENT_KIND, FailureClass, NOTE_TIER, OperationKind, RunOutcome, SignalOutcome, isTerminalError, planScope } from '@orc/contracts'
-import { stepFixture, TEST_WORKSPACE_ID, must } from '@orc/contracts/fixtures'
+import type { Checkpoint, EventDraft, ExecutorContext, KnowledgeClaim, OperationCheckpoint, OperationSpec, PreloadedClaim, ResolvedTool, SplitResult, UnifiedEvent } from '@orc/contracts'
+import { ClaimClass, ClaimState, Door, EVENT_KIND, FailureClass, OperationKind, PreloadArm, RunOutcome, SignalOutcome, isTerminalError, preloadLine } from '@orc/contracts'
+import { stepFixture, must } from '@orc/contracts/fixtures'
 import { z } from 'zod'
 import type { LanguageModel } from 'ai'
-import { CANCELLED_WHILE_RATE_LIMITED, CANCEL_POLL_MS, TURN_ECONOMY, apiLoopExecutor } from './loop'
+import { CANCELLED_WHILE_RATE_LIMITED, CANCEL_POLL_MS, PRELOAD_ARM_HEADING, PRELOAD_HEADING, TURN_ECONOMY, apiLoopExecutor, renderKnownContext } from './loop'
 import { FIRST_WAIT_MS, TOTAL_WAIT_BUDGET_MS } from './rate-limit'
 import { TOOL_NAME, executeTool, releaseWriteClaims } from './tools'
 
@@ -445,6 +445,8 @@ describe('api-loop executor', () => {
     expect(prompt).toContain('retire every claim your change made false')
     expect(prompt).toContain('does not retire the old one')
     expect(prompt).toContain('Never edit knowledge files with file tools')
+    expect(prompt).toContain('lists the claims at the paths this step names and those its task already recorded')
+    expect(prompt).toContain('later steps of this task are handed the claims you record')
     expect(prompt).not.toContain('memory_')
     expect(prompt).not.toContain('# Memory notes') // protocol only — no automatic note bodies
   })
@@ -846,33 +848,10 @@ describe('memory lint nudge', () => {
   })
 })
 
-describe('step memory seam', () => {
-  // The executor's whole memory responsibility is WHEN: recall before the first prompt, capture
-  // after the signal. What gets searched, recorded, written and linked belongs to the memory
-  // plugin (plugins/memory/src/step.ts) and is tested there.
-  type RecallLog = { recalled: number[]; captured: unknown[] }
-  const recallLog = (): RecallLog => ({ recalled: [], captured: [] })
-  function fakeMemory(
-    log: RecallLog,
-    notes: NoteSummary[] = [],
-    claims: ClaimHit[] = [],
-  ) {
-    return {
-      recall: async (budget: number) => { log.recalled.push(budget); return { claims, notes } },
-      capture: async (signal: unknown) => { log.captured.push(signal) },
-    }
-  }
-  const claim = (over: Partial<ClaimHit> = {}): ClaimHit => ({
-    claimId: 'abc123abc123', noteId: 'auth-middleware', scope: 'project', title: 'Auth middleware overview',
-    text: 'Refresh tokens are single-use.', class: ClaimClass.fact, anchors: [],
-    validFrom: '2026-07-26T00:00:00.000Z', sourceRevision: null, paths: [],
-    workspaceId: TEST_WORKSPACE_ID, ...over,
-  })
-  const note = (over: Partial<NoteSummary> = {}): NoteSummary => ({
-    id: 'auth-middleware', scope: 'project', title: 'Auth middleware overview',
-    tier: NOTE_TIER.semantic, categories: [], tags: [], summary: 'Handles session validation.',
-    hits: 0, lastAccessedAt: null, sourceRevision: null, paths: [], workspaceId: TEST_WORKSPACE_ID, ...over,
-  })
+describe('step memory and knowledge seams', () => {
+  type CaptureLog = { captured: unknown[] }
+  const captureLog = (): CaptureLog => ({ captured: [] })
+  const fakeMemory = (log: CaptureLog) => ({ capture: async (signal: unknown) => { log.captured.push(signal) } })
   const signalled = (outcome: 'success' | 'failure', summary: string) =>
     scriptModel([{ toolCalls: [{ toolCallId: 'c1', toolName: 'signal', input: { outcome, summary } }] }])
 
@@ -884,15 +863,30 @@ describe('step memory seam', () => {
     id: 'aaaaaaaa', text: 'orc memory topics accepts no options.', class: ClaimClass.fact,
     anchors: [{ path: 'main.ts', symbol: null }], tags: [], sources: [], decision: null, location: 'knowledge/main.ts.md',
   }
-  const fakeKnowledge = (claims: KnowledgeClaim[] = []) => {
+  const fakeKnowledge = (claims: KnowledgeClaim[] = [], preloaded: PreloadedClaim[] = []) => {
     const citedPaths: string[][] = []
-    return { citedPaths, knowledge: { claimsAt: async (paths: readonly string[]) => { citedPaths.push([...paths]); return claims } } }
+    const budgets: number[] = []
+    const rounds: number[] = []
+    return {
+      citedPaths, budgets, rounds,
+      knowledge: {
+        claimsAt: async (paths: readonly string[]) => { citedPaths.push([...paths]); return claims },
+        preload: async (budget: number, round: number) => { budgets.push(budget); rounds.push(round); return preloaded },
+      },
+    }
+  }
+  const known = (id: string, text: string, state: ClaimState, arm: PreloadArm, anchors: KnowledgeClaim['anchors'] = [{ path: 'src/a.ts', symbol: null }]): PreloadedClaim => ({
+    claim: { id, text, class: ClaimClass.fact, anchors, tags: [], sources: [], decision: null, location: 'src/knowledge/a.ts.md' }, state, arm,
+  })
+  const firstPrompt = (specs: OperationSpec[]): string => {
+    const before = z.object({ messages: z.array(z.object({ content: z.string() })) }).parse(specs[0]?.before)
+    return before.messages[0]?.content ?? ''
   }
 
   it('surfaces claims citing a file the step EDITED, once, and only after a successful write', async () => {
     const captured: EventDraft[] = []
     const specs: OperationSpec[] = []
-    const log = recallLog()
+    const log = captureLog()
     const { citedPaths, knowledge } = fakeKnowledge([atRiskClaim])
     // turn 1 edits a file; turn 2 must carry the at-risk block; turn 3 signals. A second edit of the
     // SAME path must not re-surface it — a block repeated every turn is one the model learns to skip.
@@ -902,7 +896,7 @@ describe('step memory seam', () => {
       { toolCalls: [{ toolCallId: 'c3', toolName: 'signal', input: { outcome: 'success', summary: 'ok' } }] },
     ])
     await drain(apiLoopExecutor().startTurn(ctx(model, captured, {
-      memory: fakeMemory(log), knowledge, memoryPreloadTokens: 0, operation: makeOperation(captured, specs),
+      memory: fakeMemory(log), knowledge, operation: makeOperation(captured, specs),
     })))
     expect(citedPaths).toEqual([['main.ts']]) // asked once, for the path actually written
     // specs interleaves model and tool operations — the prompts are the model ones
@@ -920,14 +914,14 @@ describe('step memory seam', () => {
   it('says nothing when a read-only step touches no file', async () => {
     const captured: EventDraft[] = []
     const specs: OperationSpec[] = []
-    const log = recallLog()
+    const log = captureLog()
     const { citedPaths, knowledge } = fakeKnowledge([atRiskClaim])
     const model = scriptModel([
       { toolCalls: [{ toolCallId: 'c1', toolName: 'fs_read', input: { path: 'main.ts' } }] },
       { toolCalls: [{ toolCallId: 'c2', toolName: 'signal', input: { outcome: 'success', summary: 'ok' } }] },
     ])
     await drain(apiLoopExecutor().startTurn(ctx(model, captured, {
-      memory: fakeMemory(log), knowledge, memoryPreloadTokens: 0, operation: makeOperation(captured, specs),
+      memory: fakeMemory(log), knowledge, operation: makeOperation(captured, specs),
     })))
     // reading a file cannot falsify a claim about it — no query, no block
     expect(citedPaths).toEqual([])
@@ -935,69 +929,92 @@ describe('step memory seam', () => {
     expect(prompts[1] ?? '').not.toContain('You edited main.ts')
   })
 
-  it('renders what recall returned into the first prompt, inside a checkpoint', async () => {
+  it('renders each arm under its heading, marks a claim that is not clean, and counts the delivered states', async () => {
     const captured: EventDraft[] = []
     const specs: OperationSpec[] = []
-    const log = recallLog()
+    const { budgets, knowledge } = fakeKnowledge([], [
+      known('pushed01', 'The step before wrote this.', ClaimState.clean, PreloadArm.pushed),
+      known('hereaaaa', 'Config is parsed once.', ClaimState.clean, PreloadArm.here, [{ path: 'src/a.ts', symbol: 'load' }, { path: 'src/b.ts', symbol: null }]),
+      known('heresusp', 'The cache is never cleared.', ClaimState.suspect, PreloadArm.here),
+      known('relatedx', 'Nothing anchors this.', ClaimState.unanchored, PreloadArm.search, []),
+    ])
     await drain(apiLoopExecutor().startTurn(ctx(signalled('success', 'ok'), captured, {
-      memory: fakeMemory(log, [note()]), memoryPreloadTokens: 500, operation: makeOperation(captured, specs),
+      knowledge, knowledgePreloadTokens: 1_200, operation: makeOperation(captured, specs),
     })))
-    expect(log.recalled).toEqual([500])
-    const prompt = JSON.stringify(specs[0]?.before)
-    expect(prompt).toContain('# Known project context (earlier records — verify before relying; knowledge_card shows the current claims)')
-    expect(prompt).toContain('auth-middleware — Auth middleware overview: Handles session validation.')
-    expect(prompt.indexOf('Known project context')).toBeLessThan(prompt.indexOf('Project knowledge protocol'))
+    expect(budgets).toEqual([1_200])
+    const prompt = firstPrompt(specs)
+    const block = prompt.slice(prompt.indexOf(PRELOAD_HEADING), prompt.indexOf('# Project knowledge protocol')).trim().split('\n')
+    expect(block[0]).toBe(PRELOAD_HEADING)
+    for (const rule of ['clean: unchanged since it was written or checked — rely on it', 're-read the anchor first', 'unknown: could not be compared']) expect(block[1]).toContain(rule)
+    for (const state of Object.values(ClaimState)) expect(block[1]).toContain(`${state}: `)
+    expect(block.slice(2)).toEqual([
+      'Currency: 2 clean, 1 unanchored, 1 suspect',
+      `## ${PRELOAD_ARM_HEADING[PreloadArm.pushed]}`,
+      '- The step before wrote this. {pushed01 @src/a.ts}',
+      `## ${PRELOAD_ARM_HEADING[PreloadArm.here]}`,
+      '- Config is parsed once. {hereaaaa @src/a.ts#load @src/b.ts}',
+      '- The cache is never cleared. {heresusp suspect @src/a.ts}',
+      `## ${PRELOAD_ARM_HEADING[PreloadArm.search]}`,
+      '- Nothing anchors this. {relatedx unanchored}',
+    ])
+    expect(prompt).not.toContain(PRELOAD_ARM_HEADING[PreloadArm.around])
   })
 
-  // The scout's most expensive decision — map the repo or fill gaps — was being made blind: the
-  // preload handed it knowledge with no way to date it against the tree. `drift.ts` answers that,
-  // and the block states its verdict.
-  it('states currency when no checkable note describes code that moved', async () => {
-    const captured: EventDraft[] = []
-    const specs: OperationSpec[] = []
-    const log = recallLog()
-    const memory = { ...fakeMemory(log, [note()]), recall: async () => ({ claims: [], notes: [note()], currency: { checkable: 3, drifted: 0, unknown: 0, total: 3, ratio: 0 } }) }
-    await drain(apiLoopExecutor().startTurn(ctx(signalled('success', 'ok'), captured, {
-      memory, memoryPreloadTokens: 500, operation: makeOperation(captured, specs),
-    })))
-    expect(JSON.stringify(specs[0]?.before)).toContain('is unchanged since they were written — trust them')
+  it('renders a claim as the one preload line the port costs, clean and suspect alike', () => {
+    const clean = known('cleanaaa', 'Clean claim.', ClaimState.clean, PreloadArm.here)
+    const suspect = known('suspectb', 'Suspect claim.', ClaimState.suspect, PreloadArm.here, [{ path: 'src/a.ts', symbol: 'run' }])
+    expect(renderKnownContext([clean, suspect]).split('\n').slice(-2)).toEqual([preloadLine(clean.claim, clean.state), preloadLine(suspect.claim, suspect.state)])
   })
 
-  it('names how many describe code that has since changed', async () => {
-    const captured: EventDraft[] = []
-    const specs: OperationSpec[] = []
-    const log = recallLog()
-    const memory = { ...fakeMemory(log, [note()]), recall: async () => ({ claims: [], notes: [note()], currency: { checkable: 4, drifted: 1, unknown: 0, total: 4, ratio: 0.25 } }) }
-    await drain(apiLoopExecutor().startTurn(ctx(signalled('success', 'ok'), captured, {
-      memory, memoryPreloadTokens: 500, operation: makeOperation(captured, specs),
-    })))
-    expect(JSON.stringify(specs[0]?.before)).toContain('1 of 4 checkable note(s) describe code that has since changed')
+  it('no block when the preload delivers nothing, or the budget is zero or unset', async () => {
+    const one = [known('aaaaaaaa', 'x', ClaimState.clean, PreloadArm.here)]
+    const cases: Array<{ over: Partial<ExecutorContext<LanguageModel>>; delivered: PreloadedClaim[]; asked: number[] }> = [
+      { over: { knowledgePreloadTokens: 1_200 }, delivered: [], asked: [1_200] },
+      { over: { knowledgePreloadTokens: 0 }, delivered: one, asked: [] },
+      { over: {}, delivered: one, asked: [] },
+    ]
+    for (const { over, delivered, asked } of cases) {
+      const captured: EventDraft[] = []
+      const specs: OperationSpec[] = []
+      const { budgets, knowledge } = fakeKnowledge([], delivered)
+      await drain(apiLoopExecutor().startTurn(ctx(signalled('success', 'ok'), captured, { knowledge, ...over, operation: makeOperation(captured, specs) })))
+      expect(firstPrompt(specs)).not.toContain(PRELOAD_HEADING)
+      expect(budgets).toEqual(asked)
+    }
   })
 
-  // Unreachable-revision notes are neither "current" nor silently absent: when nothing else is
-  // checkable, the block must say so explicitly rather than fold into the same silence as a
-  // genuinely-nothing-to-check preload.
-  it('names how many notes could not be checked when nothing else is checkable', async () => {
-    const captured: EventDraft[] = []
-    const specs: OperationSpec[] = []
-    const log = recallLog()
-    const memory = { ...fakeMemory(log, [note()]), recall: async () => ({ claims: [], notes: [note()], currency: { checkable: 0, drifted: 0, unknown: 2, total: 2, ratio: null } }) }
-    await drain(apiLoopExecutor().startTurn(ctx(signalled('success', 'ok'), captured, {
-      memory, memoryPreloadTokens: 500, operation: makeOperation(captured, specs),
-    })))
-    expect(JSON.stringify(specs[0]?.before)).toContain('2 note(s) here could not be checked against the tree')
+  it('hands the preload the continuation round it runs in, round 0 first', async () => {
+    for (const { over, round } of [{ over: {}, round: 0 }, { over: { continuation: { round: 2, summary: 'half done' } }, round: 2 }]) {
+      const captured: EventDraft[] = []
+      const { rounds, knowledge } = fakeKnowledge()
+      await drain(apiLoopExecutor().startTurn(ctx(signalled('success', 'ok'), captured, { knowledge, knowledgePreloadTokens: 1_200, ...over })))
+      expect(rounds).toEqual([round])
+    }
   })
 
-  // Nothing checkable is NOT "current": outside a repo, or with no note declaring paths, the block
-  // must say nothing rather than imply the knowledge matches the tree.
-  it('says nothing about currency when it cannot be known', async () => {
-    const captured: EventDraft[] = []
-    const specs: OperationSpec[] = []
-    const log = recallLog()
-    await drain(apiLoopExecutor().startTurn(ctx(signalled('success', 'ok'), captured, {
-      memory: fakeMemory(log, [note()]), memoryPreloadTokens: 500, operation: makeOperation(captured, specs),
-    })))
-    expect(JSON.stringify(specs[0]?.before)).not.toContain('Currency:')
+  it('a replay rebuilds the block from the recorded preload without asking again', async () => {
+    const recorded = new Map<string, string>()
+    const replaying: Checkpoint = async (name, fn) => {
+      const held = recorded.get(name)
+      if (held !== undefined) return JSON.parse(held)
+      const r = await fn()
+      recorded.set(name, JSON.stringify(r))
+      return r
+    }
+    const run = async (preloaded: PreloadedClaim[]) => {
+      const captured: EventDraft[] = []
+      const specs: OperationSpec[] = []
+      const fake = fakeKnowledge([], preloaded)
+      await drain(apiLoopExecutor().startTurn(ctx(signalled('success', 'ok'), captured, {
+        knowledge: fake.knowledge, knowledgePreloadTokens: 1_200, checkpoint: replaying, operation: makeOperation(captured, specs),
+      })))
+      return { prompt: firstPrompt(specs), budgets: fake.budgets }
+    }
+    const first = await run([known('aaaaaaaa', 'Recorded claim.', ClaimState.clean, PreloadArm.here)])
+    const replay = await run([known('bbbbbbbb', 'A live claim the replay must not see.', ClaimState.clean, PreloadArm.here)])
+    expect(replay.budgets).toEqual([])
+    expect(replay.prompt).toBe(first.prompt)
+    expect(replay.prompt).toContain('- Recorded claim. {aaaaaaaa @src/a.ts}')
   })
 
   // ai@7 answers a schema-invalid tool call itself (parseToolCall catches InvalidToolInputError and
@@ -1042,71 +1059,10 @@ describe('step memory seam', () => {
     await gen.return?.(undefined)
   })
 
-  it('renders a recalled CLAIM as the statement itself, carrying its note id', async () => {
-    const captured: EventDraft[] = []
-    const specs: OperationSpec[] = []
-    const log = recallLog()
-    await drain(apiLoopExecutor().startTurn(ctx(signalled('success', 'ok'), captured, {
-      memory: fakeMemory(log, [], [claim(), claim({ claimId: 'def456def456', noteId: 'plan-n', scope: planScope('task-1'), text: 'Plan scoped fact.' })]),
-      memoryPreloadTokens: 500, operation: makeOperation(captured, specs),
-    })))
-    const prompt = JSON.stringify(specs[0]?.before)
-    // the FACT is in the prompt, not merely a pointer the step must spend a call to look up
-    expect(prompt).toContain('- Refresh tokens are single-use. [auth-middleware]')
-    // a non-project claim carries its scope, same rule the note lines follow
-    expect(prompt).toContain(`- Plan scoped fact. [plan-n (scope: ${planScope('task-1')})]`)
-    // told not to re-add them: the writer must not restate what preload already showed it
-    expect(prompt).toContain('do not re-add these')
-  })
-
-  it('claims alone fill the block — no note hit is not an empty preload', async () => {
-    const captured: EventDraft[] = []
-    const specs: OperationSpec[] = []
-    const log = recallLog()
-    await drain(apiLoopExecutor().startTurn(ctx(signalled('success', 'ok'), captured, {
-      memory: fakeMemory(log, [], [claim()]), memoryPreloadTokens: 500, operation: makeOperation(captured, specs),
-    })))
-    const prompt = JSON.stringify(specs[0]?.before)
-    expect(prompt).toContain('Known project context')
-    expect(prompt).toContain('Refresh tokens are single-use.')
-  })
-
-  it('a non-project-scope note renders its id qualified with scope', async () => {
-    const captured: EventDraft[] = []
-    const specs: OperationSpec[] = []
-    const log = recallLog()
-    await drain(apiLoopExecutor().startTurn(ctx(signalled('success', 'ok'), captured, {
-      memory: fakeMemory(log, [note({ id: 'plan-note', scope: planScope('task-1') }), note()]),
-      memoryPreloadTokens: 500, operation: makeOperation(captured, specs),
-    })))
-    const prompt = JSON.stringify(specs[0]?.before)
-    expect(prompt).toContain(`plan-note (scope: ${planScope('task-1')})`)
-    expect(prompt).not.toContain('auth-middleware (scope:')
-  })
-
-  it('recall returning nothing leaves the prompt unchanged', async () => {
-    const captured: EventDraft[] = []
-    const specs: OperationSpec[] = []
-    const log = recallLog()
-    await drain(apiLoopExecutor().startTurn(ctx(signalled('success', 'ok'), captured, {
-      memory: fakeMemory(log), memoryPreloadTokens: 500, operation: makeOperation(captured, specs),
-    })))
-    expect(JSON.stringify(specs[0]?.before)).not.toContain('# Known project context (')
-  })
-
-  it('memoryPreloadTokens 0 never calls recall', async () => {
-    const captured: EventDraft[] = []
-    const log = recallLog()
-    await drain(apiLoopExecutor().startTurn(ctx(signalled('success', 'ok'), captured, {
-      memory: fakeMemory(log, [note()]), memoryPreloadTokens: 0,
-    })))
-    expect(log.recalled).toEqual([])
-  })
-
   it('hands the signal to capture — success and failure alike', async () => {
     for (const outcome of ['success', 'failure'] as const) {
       const captured: EventDraft[] = []
-      const log = recallLog()
+      const log = captureLog()
       await drain(apiLoopExecutor().startTurn(ctx(signalled(outcome, 'what happened'), captured, {
         memory: fakeMemory(log), taskId: 'task-1',
       })))
@@ -1114,10 +1070,10 @@ describe('step memory seam', () => {
     }
   })
 
-  it('no memory on the context: the step runs to done and nothing is recalled or captured', async () => {
+  it('no memory or knowledge on the context: the step runs to done', async () => {
     const captured: EventDraft[] = []
     const events = await drain(apiLoopExecutor().startTurn(ctx(signalled('success', 'ok'), captured, {
-      memoryPreloadTokens: 500,
+      knowledgePreloadTokens: 1_200,
     })))
     expect(events.at(-1)?.type).toBe('done')
   })

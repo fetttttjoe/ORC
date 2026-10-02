@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'bun:test'
 import { sha256, type Outline, type SymbolSpan } from '@orc/contracts'
-import { digestIn, directoryDigest, GONE, sourceView, textOf, UNREADABLE } from './anchor-digest'
+import { digestIn, directoryDigest, GONE, readingOf, sourceView, textOf, UNREADABLE } from './anchor-digest'
 
 const span = (name: string, digest: string): SymbolSpan => ({ name, kind: 'function_declaration', startLine: 1, endLine: 1, digest })
 const raw = (text: string): Uint8Array => Buffer.from(text, 'utf8')
@@ -44,5 +44,16 @@ describe('directoryDigest', () => {
   it('depends on the set of paths, not their order', () => {
     expect(directoryDigest(['pkg/b.ts', 'pkg/a.ts'])).toBe(directoryDigest(['pkg/a.ts', 'pkg/b.ts']))
     expect(directoryDigest(['pkg/a.ts'])).not.toBe(directoryDigest(['pkg/a.ts', 'pkg/b.ts']))
+  })
+})
+
+describe('readingOf', () => {
+  const anchor = { path: 'src/a.ts', symbol: 'alpha' }
+  const seen = { digest: 'd1', readable: true }
+  it('is readable only when both its basis and its current digest are', () => {
+    expect(readingOf(anchor, seen, seen)).toEqual({ path: 'src/a.ts', symbol: 'alpha', basis: 'd1', current: 'd1', readable: true })
+    expect(readingOf(anchor, UNREADABLE, seen).readable).toBe(false)
+    expect(readingOf(anchor, seen, UNREADABLE).readable).toBe(false)
+    expect(readingOf(anchor, GONE, seen).readable).toBe(true)
   })
 })

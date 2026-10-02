@@ -15,6 +15,7 @@ export {
 
 const GRAMMAR_BREAKERS = /[\s#@{}]/
 const ID_ALPHABET = 'abcdefghijklmnopqrstuvwxyz0123456789'
+const PATCH_ITEMS = 100
 
 export const KNOWLEDGE_LIMITS = {
   textChars: 1_000,
@@ -24,12 +25,14 @@ export const KNOWLEDGE_LIMITS = {
   tagChars: KNOWLEDGE_TAG_LIMITS.chars,
   sources: 8,
   urlChars: 2_048,
-  patchItems: 100,
+  patchItems: PATCH_ITEMS,
+  assertedItems: 2 * PATCH_ITEMS,
   deliveredIds: 200,
   subjectChars: 300,
   pageItems: 100,
   searchItems: 50,
   bucketWarnClaims: 40,
+  preloadQueryChars: 600,
 } as const
 
 export const KNOWLEDGE_DEFAULTS = { pageItems: 50, searchItems: 20 } as const
@@ -206,6 +209,18 @@ export enum DeliveryMode {
 export interface KnowledgeCall { author: MemoryAuthor; idempotencyKey: string | null }
 export interface KnowledgeRead extends KnowledgeCall { mode: DeliveryMode }
 
+export enum PreloadArm { pushed = 'pushed', here = 'here', around = 'around', search = 'search' }
+
+export const PreloadRequest = z.object({
+  pushed: z.array(KnowledgeId).max(KNOWLEDGE_LIMITS.patchItems),
+  paths: z.array(EntityPath).max(KNOWLEDGE_LIMITS.patchItems),
+  query: z.string().max(KNOWLEDGE_LIMITS.preloadQueryChars),
+  budget: z.number().int().nonnegative(),
+})
+export type PreloadRequest = z.infer<typeof PreloadRequest>
+
+export interface PreloadedClaim { claim: KnowledgeClaim; state: ClaimState; arm: PreloadArm }
+
 export interface DecisionPort {
   decisions(call: KnowledgeCall, filter?: DecisionFilter): Promise<Decision[]>
   decision(call: KnowledgeCall, id: string): Promise<Decision>
@@ -219,6 +234,7 @@ export interface KnowledgePort extends DecisionPort {
   write(call: KnowledgeCall, patch: KnowledgePatchInput): Promise<KnowledgeWriteResult>
   drift(call: KnowledgeCall, filter?: DriftFilterInput): Promise<ClaimDrift[]>
   check(call: KnowledgeCall, input: KnowledgeCheckInputRaw): Promise<KnowledgeCheckResult>
+  preload(call: KnowledgeCall, request: z.input<typeof PreloadRequest>): Promise<PreloadedClaim[]>
 }
 
 export type KnowledgeAccess = { port: KnowledgePort } | { unavailable: string }

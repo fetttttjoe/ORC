@@ -9,7 +9,7 @@ import {
 import { eventFixture } from '@orc/contracts/fixtures'
 import { EVIDENCE_NOT_RECORDED, REGISTRY_REFUSAL } from '@orc/knowledge-core'
 import { KERNEL_ERROR_CODE, KernelError } from '@orc/kernel'
-import { knowledgeAccess, openKnowledge } from './knowledge-open'
+import { knowledgeAccess, knowledgeAccessWithoutEvidence, NO_LOG_TO_APPEND, openKnowledge } from './knowledge-open'
 
 const dirs: string[] = []
 afterEach(() => { for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true }) })
@@ -30,17 +30,24 @@ const portOf = (access: KnowledgeAccess) => {
   return access.port
 }
 const NO_EVENTS = async (): Promise<EventRecord[]> => []
-const quiet = { append: async () => eventFixture(), after: NO_EVENTS }
+const NO_SEQ = async (): Promise<number> => 0
+const quiet = { append: async () => eventFixture(), after: NO_EVENTS, earliestSeq: NO_SEQ }
 const memoryLog = () => {
   const records: EventRecord[] = []
+  const asked: Array<[number, EventKind[] | undefined]> = []
   return {
     records,
+    asked,
     append: async (input: EventInput): Promise<EventRecord> => {
       const record = eventFixture({ seq: records.length + 1, kind: input.kind, payload: input.payload, idempotencyKey: input.idempotencyKey ?? null })
       records.push(record)
       return record
     },
-    after: async (seq: number, kinds?: EventKind[]): Promise<EventRecord[]> => records.filter(r => r.seq > seq && (kinds === undefined || kinds.includes(r.kind))),
+    after: async (seq: number, kinds?: EventKind[]): Promise<EventRecord[]> => {
+      asked.push([seq, kinds])
+      return records.filter(r => r.seq > seq && (kinds === undefined || kinds.includes(r.kind)))
+    },
+    earliestSeq: async (): Promise<number> => records[0]?.seq ?? 0,
   }
 }
 const commit = (dir: string): void => {
@@ -92,14 +99,49 @@ describe('knowledgeAccess', () => {
     const second = portOf(knowledgeAccess(opened(), log, dir))
     expect((await second.drift(call, { ids: [id] })).map(d => d.state)).toEqual([ClaimState.clean])
   })
+  it('a purge of the log drops the holds check it held, so the next drift through the same log reads suspect again', async () => {
+    const dir = gitCheckout()
+    const log = memoryLog()
+    const call = { author, idempotencyKey: null }
+    const port = portOf(knowledgeAccess(opened(), log, dir))
+    const [ref] = (await port.write(call, { add: [{ ...fact('outer declares its inner helper'), anchors: [{ path: 'src/a.ts', symbol: 'outer' }] }] })).added
+    const id = ref?.id ?? ''
+    commit(dir)
+    writeFileSync(path.join(dir, 'src', 'a.ts'), 'export function outer() {\n  function inner() { return 1 }\n}\n')
+    await port.check(call, { id, verdict: CheckVerdict.holds, why: 'outer still declares inner' })
+    expect((await port.drift(call, { ids: [id] })).map(d => d.state)).toEqual([ClaimState.clean])
+    log.records.splice(0)
+    expect((await port.drift(call, { ids: [id] })).map(d => d.state)).toEqual([ClaimState.suspect])
+  })
+  it('drift reads through one access ask the log for writes and checks once from 0, then only after the last seq', async () => {
+    const log = memoryLog()
+    const call = { author, idempotencyKey: null }
+    const port = portOf(knowledgeAccess(opened(), log, gitCheckout()))
+    await port.write(call, { add: [fact('a declares outer')] })
+    await port.drift(call)
+    await port.write(call, { add: [fact('outer declares inner')] })
+    await port.drift(call)
+    expect(log.asked).toEqual([[0, [EVENT_KIND.knowledge_written, EVENT_KIND.knowledge_checked]], [1, [EVENT_KIND.knowledge_written, EVENT_KIND.knowledge_checked]]])
+  })
   describe('the log append wrapper', () => {
     it('swallows an idempotency conflict: the write resolves with no evidence warning', async () => {
-      const port = portOf(knowledgeAccess(opened(), { append: async () => { throw new KernelError(KERNEL_ERROR_CODE.idempotency_conflict, 'replay') }, after: NO_EVENTS }, gitCheckout()))
+      const port = portOf(knowledgeAccess(opened(), { append: async () => { throw new KernelError(KERNEL_ERROR_CODE.idempotency_conflict, 'replay') }, after: NO_EVENTS, earliestSeq: NO_SEQ }, gitCheckout()))
       expect((await port.write({ author, idempotencyKey: 'k-1' }, { add: [fact('x')] })).warnings).toEqual([])
     })
     it('surfaces any other append error as an evidence-not-recorded warning', async () => {
-      const port = portOf(knowledgeAccess(opened(), { append: async () => { throw new Error('log down') }, after: NO_EVENTS }, gitCheckout()))
+      const port = portOf(knowledgeAccess(opened(), { append: async () => { throw new Error('log down') }, after: NO_EVENTS, earliestSeq: NO_SEQ }, gitCheckout()))
       expect((await port.write({ author, idempotencyKey: 'k-2' }, { add: [fact('x')] })).warnings).toEqual([EVIDENCE_NOT_RECORDED('log down')])
     })
+  })
+})
+
+describe('knowledgeAccessWithoutEvidence', () => {
+  it('reads drift from the checkout alone, refuses to record, and keeps the unavailable reason', async () => {
+    const dir = gitCheckout()
+    const port = portOf(knowledgeAccessWithoutEvidence(opened(), dir))
+    const [ref] = (await port.write({ author, idempotencyKey: null }, { add: [fact('about a')] })).added
+    expect((await port.drift({ author, idempotencyKey: null }, {})).map(d => d.claim.id)).toEqual([ref?.id])
+    await expect(port.check({ author, idempotencyKey: null }, { id: ref?.id ?? '', verdict: CheckVerdict.holds, why: 'w' })).resolves.toMatchObject({ warnings: [expect.stringContaining(NO_LOG_TO_APPEND)] })
+    expect(knowledgeAccessWithoutEvidence({ unavailable: KNOWLEDGE_REFUSAL.off() }, dir)).toEqual({ unavailable: KNOWLEDGE_REFUSAL.off() })
   })
 })

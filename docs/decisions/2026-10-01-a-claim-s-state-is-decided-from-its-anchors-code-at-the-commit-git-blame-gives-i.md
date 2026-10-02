@@ -1,7 +1,8 @@
 ---
-status: accepted
+status: superseded
 tags: knowledge, drift, architecture
 supersedes: memory-drift-is-decided-per-claim-from-its-anchors-blobs
+supersededBy: a-claim-s-state-is-decided-from-its-anchors-digests-against-the-code-its-writer
 ---
 
 # A claim's state is decided from its anchors' code at the commit git blame gives its line

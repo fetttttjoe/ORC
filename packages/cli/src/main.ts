@@ -28,7 +28,7 @@ import { buildWorkspaceOps, requireLiveWorkspace, type WorkspaceConfig } from '.
 import type { WorkspaceDoor } from './door-kernel'
 import { listWorkspaceHealth } from './workspace-health'
 import { serveLogFile, servePidFile } from './serve-paths'
-import { CommandFailure, EXIT_CODE } from './exit'
+import { CommandFailure, DATABASE_UNREACHABLE, EXIT_CODE } from './exit'
 import { formatUsageLine } from './usage-render'
 import { watchSubtree, type TailResult } from './watch'
 import { watchStream } from './stream-watch'
@@ -200,6 +200,8 @@ export function buildProgram(
   kernel: Kernel | null,
   portFactory?: () => Promise<ExecutionPort>,
   plugin?: { host: PluginHost; hub: McpHub; config: ProjectConfig; log: EventLog; storage?: Storage },
+  // set when the project database could not be reached at boot: no kernel and no log, and anything that needs either fails with this error
+  unreachable?: { config: ProjectConfig; error: unknown },
 ): Command {
   const program = new Command('orc')
   program.description('multi-agent orchestrator')
@@ -207,8 +209,10 @@ export function buildProgram(
   program.addCommand(initCommand(plugin?.config.dir))
   program.addCommand(databaseCommand(plugin?.config.dir))
 
+  const noProject = (message: string): unknown => (unreachable ? unreachable.error : new Error(message))
+
   const needPlugin = () => {
-    if (!plugin) throw new Error('plugin commands are unavailable in this context')
+    if (!plugin) throw noProject('plugin commands are unavailable in this context')
     return plugin
   }
 
@@ -216,12 +220,12 @@ export function buildProgram(
   // so a handler that somehow ran under --help fails with an actionable message instead of a bare
   // null-reference TypeError.
   const requireKernel = (): Kernel => {
-    if (!kernel) throw new Error('this command needs a project context (only --help works without one)')
+    if (!kernel) throw noProject('this command needs a project context (only --help works without one)')
     return kernel
   }
 
   const wsProject = (): { config: ProjectConfig; log: EventLog } => {
-    if (!plugin) throw new Error(WS_NEEDS_PROJECT)
+    if (!plugin) throw noProject(WS_NEEDS_PROJECT)
     return { config: plugin.config, log: plugin.log }
   }
   const wsConfig = (): WorkspaceConfig => wsProject().config
@@ -236,9 +240,11 @@ export function buildProgram(
   // Placed after requireKernel rather than beside the init/db addCommands above: the deps object
   // reads that binding immediately, so calling wsCommand up there would hit its temporal dead zone.
   program.addCommand(wsCommand({ requireDoor: requireWsDoor }))
-  program.addCommand(adrCommand({ requireKernel, ...(plugin && { project: { config: plugin.config, log: plugin.log } }) }))
-  program.addCommand(knowledgeCommand({ requireKernel, ...(plugin && { project: { config: plugin.config, log: plugin.log } }) }))
-  program.addCommand(briefCommand({ ...(plugin && { project: { config: plugin.config, log: plugin.log } }) }))
+  program.addCommand(adrCommand({ requireKernel, noProject, ...(plugin && { project: { config: plugin.config, log: plugin.log } }) }))
+  const knowledgeProject = plugin ? { config: plugin.config, log: plugin.log }
+    : unreachable && { config: unreachable.config, logUnreachable: { reason: DATABASE_UNREACHABLE(unreachable.config.databaseUrl), error: unreachable.error } }
+  program.addCommand(knowledgeCommand({ requireKernel, noProject, ...(knowledgeProject && { project: knowledgeProject }) }))
+  program.addCommand(briefCommand({ noProject, ...(plugin && { project: { config: plugin.config, log: plugin.log } }) }))
 
   // The author every `orc memory` write carries, in ONE place — a dozen handlers each spelling
   // their own `{ source: cli, workspaceId: … }` is exactly the shape that leaves one command
@@ -420,7 +426,7 @@ export function buildProgram(
       // hypothetical, it destroyed a live run's history. Naming the project makes the caller
       // state its intent, and a drifted cwd fails loudly instead of deleting the wrong history.
       const cfg = plugin?.config
-      if (!cfg?.projectName) throw new Error('purging needs a project context')
+      if (!cfg?.projectName) throw noProject('purging needs a project context')
       const actual = cfg.projectName
       if (projectName !== actual)
         throw new Error(`refusing: this directory is project '${actual}' (${cfg.dir}), not '${projectName}'`)
@@ -443,7 +449,7 @@ export function buildProgram(
       // that for every row just to print a label. The cwd project knows its own name; the rest are
       // exactly the ones you cannot name, which is the fact worth showing.
       const cfg = plugin?.config
-      if (!cfg) throw new Error('listing projects needs a project context')
+      if (!cfg) throw noProject('listing projects needs a project context')
       const ids = await listProjectIds(cfg.databaseUrl)
       if (ids.length === 0) return console.log('_no projects_')
       for (const id of ids)
@@ -457,7 +463,7 @@ export function buildProgram(
     .requiredOption('--yes', 'confirm: this irreversibly deletes the project and its knowledge')
     .action(async (projectName: string | undefined, opts: { id?: string }) => {
       const cfg = plugin?.config
-      if (!cfg) throw new Error('deleting a project needs a project context')
+      if (!cfg) throw noProject('deleting a project needs a project context')
       if (opts.id !== undefined) {
         // An orphan has no name to confirm against — the id IS the confirmation, and it must not
         // be the project you are standing in, which `delete <name>` already covers with a check
@@ -473,7 +479,7 @@ export function buildProgram(
       }
       // named for the same reason purge is: the target comes from the cwd's config, so a script
       // in the wrong directory would otherwise delete a project it never meant to touch
-      if (!cfg.projectName) throw new Error('deleting a project needs a project context')
+      if (!cfg.projectName) throw noProject('deleting a project needs a project context')
       const actual = cfg.projectName
       if (projectName !== actual)
         throw new Error(`refusing: this directory is project '${actual}' (${cfg.dir}), not '${projectName}' — for a project with no identity file, use --id (see: orc projects)`)
@@ -566,7 +572,7 @@ export function buildProgram(
   const actions = () => buildOrcActions({ kernel: requireKernel(), ensureRuntime, plugin, listModels: discovery?.listModels, listModelOptions: discovery?.listModelOptions })
 
   const needPort = async (): Promise<ExecutionPort> => {
-    if (!portFactory) throw new Error('execution commands are unavailable in this context')
+    if (!portFactory) throw noProject('execution commands are unavailable in this context')
     return portFactory()
   }
 

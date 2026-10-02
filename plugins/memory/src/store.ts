@@ -39,7 +39,7 @@ export function createMemoryStore(opts: { log: EventLog; surreal: SurrealMemory;
   // long-lived process: `orc serve` booting at C0 stamped every note and every claim written for
   // the next N hours with C0, in the immutable log, where no rebuild heals it. Everything built on
   // this field then lies: drift reports moved code as current (the note claims a commit from before
-  // the change), the preload tells a step to trust it, and the rewrite loop that is supposed to
+  // the change), and the rewrite loop that is supposed to
   // clear drift re-stamps the same stale commit. The spawn is bounded by write frequency, and it
   // already runs OUTSIDE the project write lock (see the call below), so it blocks nothing.
   const stampsFor = (author: MemoryAuthor): TreeStamps => opts.stampsFor?.(author) ?? NO_STAMPS

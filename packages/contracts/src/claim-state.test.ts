@@ -1,21 +1,25 @@
 import { describe, expect, it } from 'bun:test'
-import { anchorState, ClaimState, claimState, type AnchorReading } from './claim-state'
+import { anchorState, ClaimState, claimState, NO_ANCHOR_EVIDENCE, type AnchorEvidence, type AnchorReading } from './claim-state'
 
 const reading = (over: Partial<AnchorReading>): AnchorReading => ({ path: 'src/a.ts', symbol: 'alpha', basis: 'b1', current: 'b1', readable: true, ...over })
 
 describe('anchorState', () => {
-  it.each<[string, Partial<AnchorReading>, string[], ClaimState]>([
-    ['an unreadable anchor is unknown, even when its digests agree', { readable: false }, [], ClaimState.unknown],
-    ['an unreadable anchor is unknown, even when its target is gone', { readable: false, current: null }, [], ClaimState.unknown],
-    ['a gone target is suspect', { current: null }, [], ClaimState.suspect],
-    ['a gone target is suspect even when its basis was gone too', { basis: null, current: null }, [], ClaimState.suspect],
-    ['a current digest equal to the basis is clean', {}, [], ClaimState.clean],
-    ['a current digest other than the basis is suspect', { current: 'c2' }, [], ClaimState.suspect],
-    ['a current digest a holds check accepted is clean', { current: 'c2' }, ['c1', 'c2'], ClaimState.clean],
-    ['an accepted digest that is not the current one does not clear it', { current: 'c3' }, ['c2'], ClaimState.suspect],
-    ['a target missing at the basis that exists now is suspect', { basis: null, current: 'c1' }, [], ClaimState.suspect],
-  ])('%s', (_name, over, accepted, expected) => {
-    expect(anchorState(reading(over), accepted)).toBe(expected)
+  it.each<[string, Partial<AnchorReading>, Partial<AnchorEvidence>, ClaimState]>([
+    ['an unreadable anchor is unknown, even when its digests agree', { readable: false }, {}, ClaimState.unknown],
+    ['an unreadable anchor is unknown, even when its target is gone', { readable: false, current: null }, {}, ClaimState.unknown],
+    ['an unreadable anchor is unknown, even when its writer asserted the digest', { readable: false }, { asserted: ['b1'] }, ClaimState.unknown],
+    ['a gone target is suspect', { current: null }, {}, ClaimState.suspect],
+    ['a gone target is suspect even when its basis was gone too', { basis: null, current: null }, {}, ClaimState.suspect],
+    ['a current digest equal to the basis is clean', {}, {}, ClaimState.clean],
+    ['a current digest other than the basis is suspect', { current: 'c2' }, {}, ClaimState.suspect],
+    ['a current digest a holds check accepted is clean', { current: 'c2' }, { held: ['c1', 'c2'] }, ClaimState.clean],
+    ['a held digest that is not the current one does not clear it', { current: 'c3' }, { held: ['c2'] }, ClaimState.suspect],
+    ['a target missing at the basis that exists now is suspect', { basis: null, current: 'c1' }, {}, ClaimState.suspect],
+    ['an assertion that does not name the current digest is suspect, even when the basis agrees', {}, { asserted: ['a0'] }, ClaimState.suspect],
+    ['an asserted current digest is clean while the basis differs', { current: 'c2' }, { asserted: ['a0', 'c2'] }, ClaimState.clean],
+    ['a holds check clears a current digest the assertion does not name', { current: 'c2' }, { asserted: ['a0'], held: ['c2'] }, ClaimState.clean],
+  ])('%s', (_name, over, evidence, expected) => {
+    expect(anchorState(reading(over), { ...NO_ANCHOR_EVIDENCE, ...evidence })).toBe(expected)
   })
 })
 

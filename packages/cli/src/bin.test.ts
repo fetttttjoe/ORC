@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url'
 import { WORKSPACE_KIND } from '@orc/contracts'
 import { grantExtensionTrust, IDENTITY_FILE } from '@orc/kernel'
 import { createTestDb, testOrcConfig, tmpGitRepo } from '@orc/kernel/test-helpers'
-import { EXIT_CODE } from './exit'
+import { DATABASE_UNREACHABLE, EXIT_CODE } from './exit'
 import { openKernel } from './main'
 
 const databases: Array<{ drop(): Promise<void> }> = []
@@ -117,6 +117,34 @@ export default {
     expect(workspaces.length).toBe(1)
     // no origin in a throwaway repo: the trunk falls back to DEFAULT_TRUNK, which `main` is on
     expect(workspaces[0]).toMatchObject({ cwd: realpathSync(main), kind: WORKSPACE_KIND.checkout, branch: 'main', onTrunk: true })
+  }, 30_000)
+
+  it('with the database unreachable, a kernel command fails as before and knowledge drift still answers from git blame', async () => {
+    const database = await createTestDb()
+    databases.push(database)
+    const { main } = tmpGitRepo()
+    expect((await runBin(main, ['init', '--name', 'demo'], { ORC_DATABASE_URL: database.url })).exitCode).toBe(0)
+    const downUrl = 'postgresql://postgres:orc@127.0.0.1:59999/orc'
+    const down = { ORC_DATABASE_URL: downUrl }
+
+    const tasks = await runBin(main, ['tasks'], down)
+    expect(tasks.exitCode).toBe(EXIT_CODE.failure)
+    expect(tasks.stderr).toContain(DATABASE_UNREACHABLE(downUrl))
+    expect(tasks.stdout).toBe('')
+
+    const drift = await runBin(main, ['knowledge', 'drift'], down)
+    expect(drift.exitCode).toBe(0)
+    expect(drift.stdout.split('\n')[0]).toContain('drift read without the event log (')
+    expect(drift.stdout).toContain('clean 0 · suspect 0 · unknown 0 · unanchored 0')
+
+    const stats = await runBin(main, ['knowledge', 'stats'], down)
+    expect(stats.exitCode).toBe(EXIT_CODE.failure)
+    expect(stats.stderr).toContain(DATABASE_UNREACHABLE(downUrl))
+
+    for (const args of [['purge', 'demo', '--yes'], ['projects'], ['delete', 'demo', '--yes'], ['brief'], ['adr', 'ls'], ['ws', 'ls']]) {
+      const result = await runBin(main, args, down)
+      expect([args.join(' '), result.exitCode, result.stderr]).toEqual([args.join(' '), EXIT_CODE.failure, expect.stringContaining(DATABASE_UNREACHABLE(downUrl))])
+    }
   }, 30_000)
 
   it('migrates a fresh database before project initialization', async () => {

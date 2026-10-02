@@ -2,12 +2,17 @@ import { describe, expect, it } from 'bun:test'
 import { ZodError } from 'zod'
 import {
   AUTHOR_SOURCE, CheckVerdict, ClaimClass, ClaimState, DECISION_REFUSAL, DecisionStatus, DeliveryMode, Door, EVENT_KIND, KNOWLEDGE_LIMITS,
-  KNOWLEDGE_REFUSAL, KnowledgeCheckedPayload, knowledgeIdFrom, sha256,
+  KNOWLEDGE_REFUSAL, KnowledgeDeliveredPayload, KnowledgeWrittenPayload, knowledgeIdFrom, PreloadArm, preloadLine, sha256,
   type Decision, type DecisionInputRaw, type EventInput, type KnowledgeBackend, type MemoryAuthor,
 } from '@orc/contracts'
+import { directoryDigest } from './anchor-digest'
 import { planDecisionRecord } from './decision-record'
+import { BASIS_EVIDENCE_KINDS, type EvidenceRecord } from './evidence-events'
+import { createEvidenceReader } from './evidence-reader'
+import { emptyEvidence } from './evidence'
 import { createMemoryBackend, NO_STRUCTURE } from './memory-backend'
-import { CHECKS_NOT_READ, createKnowledgePort, EVIDENCE_NOT_RECORDED, type KnowledgePortDeps } from './port'
+import { tokensOf } from './preload'
+import { ASSERTION_NOT_READ, createKnowledgePort, EVIDENCE_NOT_READ, EVIDENCE_NOT_RECORDED, type KnowledgePortDeps } from './port'
 
 const author: MemoryAuthor = { source: AUTHOR_SOURCE.agent, workspaceId: 'ws-1', origin: { chatId: 'chat-1', door: Door.supervisor }, taskId: 't-1', stepId: 's-1', runToken: 'r-1' }
 const setup = (append: (e: EventInput) => Promise<void> = async () => {}, over: Partial<KnowledgePortDeps> = {}) => {
@@ -46,10 +51,11 @@ describe('the knowledge port records evidence', () => {
     await port.recordDecision(write(), adr('D 1'))
     events.splice(0)
     const result = await port.write(write('key-1'), { add: [fact('x')], why: 'because', decision: 'd-1' })
+    const asserted = [{ id: knowledgeIdFrom('key-1:0'), text: 'x', anchors: [{ path: 'src/a.ts', symbol: null, digest: directoryDigest([]) }] }]
     expect(events).toEqual([{
       chatId: 'chat-1', door: Door.supervisor, taskId: 't-1', stepId: 's-1', runToken: 'r-1', idempotencyKey: 'key-1',
       kind: EVENT_KIND.knowledge_written,
-      payload: { added: result.added, changed: [], retired: [], files: result.files, why: 'because', decision: 'd-1', decisionsRecorded: [], decisionsSuperseded: [], author },
+      payload: { added: result.added, changed: [], retired: [], files: result.files, why: 'because', decision: 'd-1', decisionsRecorded: [], decisionsSuperseded: [], asserted, author },
     }])
   })
   it('a card appends knowledge_delivered with the delivered ids, mode and subject; an empty card appends nothing', async () => {
@@ -167,6 +173,7 @@ describe('the knowledge port on decisions', () => {
         added: [], changed: [], retired: [], files: ['docs/decisions/new-way.md'], why: null, decision: null,
         decisionsRecorded: [{ id: 'new-way', location: 'memory:decision/new-way' }],
         decisionsSuperseded: [{ id: 'old-way', location: 'memory:decision/old-way' }],
+        asserted: [],
         author,
       },
     }])
@@ -227,21 +234,27 @@ describe('the knowledge port on claim state and checks', () => {
   const checking = (over: Partial<KnowledgePortDeps> = {}) => {
     const sources = new Map<string, string>([['src/a.ts', 'v1'], ['src/b.ts', 'b']])
     const events: EventInput[] = []
+    const records: EvidenceRecord[] = []
     const warned: string[] = []
-    let checksDown = false
+    let evidenceDown = false
+    const reader = createEvidenceReader({
+      after: async (seq, kinds) => {
+        if (evidenceDown) throw new Error('log down')
+        return records.filter(r => r.seq > seq && kinds.some(k => k === r.kind))
+      },
+      earliestSeq: async () => records[0]?.seq ?? 0,
+    }, BASIS_EVIDENCE_KINDS)
     const port = createKnowledgePort({
       backend: createMemoryBackend({ exists: (_c, path) => sources.has(path), structure: NO_STRUCTURE, read: (_c, path) => sources.get(path) ?? null }),
       checkoutOf: async () => '/checkout',
-      append: async e => { events.push(e) },
-      checks: async () => {
-        if (checksDown) throw new Error('log down')
-        return events.filter(e => e.kind === EVENT_KIND.knowledge_checked).map(e => KnowledgeCheckedPayload.parse(e.payload))
-      },
+      append: async e => { events.push(e); records.push({ seq: records.length + 1, kind: e.kind, runToken: e.runToken ?? null, payload: e.payload }) },
+      evidence: () => reader.read(),
       warn: line => warned.push(line),
       ...over,
     })
     const stateOf = async (id: string) => (await port.drift(write(), { ids: [id] }))[0]?.state
-    return { port, sources, events, warned, stateOf, breakChecks: () => { checksDown = true } }
+    const assertedBy = (e: EventInput | undefined) => KnowledgeWrittenPayload.parse(e?.payload).asserted
+    return { port, sources, events, warned, stateOf, assertedBy, breakEvidence: () => { evidenceDown = true } }
   }
   const claimOn = async (port: ReturnType<typeof checking>['port'], text = 'a writes the store') => {
     const [ref] = (await port.write(write(), { add: [fact(text)] })).added
@@ -318,20 +331,198 @@ describe('the knowledge port on claim state and checks', () => {
     expect(await stateOf(id)).toBe(ClaimState.suspect)
   })
 
-  it('checks that cannot be read leave drift answering from the basis alone, with a warning', async () => {
-    const { port, sources, warned, stateOf, breakChecks } = checking()
+  it('evidence that cannot be read leaves drift answering from the readings alone, with a warning', async () => {
+    const { port, sources, warned, stateOf, breakEvidence } = checking()
     const id = await claimOn(port)
     sources.set('src/a.ts', 'v2')
     await port.check(write(), { id, verdict: CheckVerdict.holds, why: 'still true' })
     expect(await stateOf(id)).toBe(ClaimState.clean)
-    breakChecks()
+    breakEvidence()
     expect(await stateOf(id)).toBe(ClaimState.suspect)
-    expect(warned).toEqual([CHECKS_NOT_READ('log down')])
+    expect(warned).toEqual([EVIDENCE_NOT_READ('log down')])
+  })
+
+  it('an add asserts the digests its anchors have right after the write', async () => {
+    const { port, events, assertedBy } = checking()
+    const { added } = await port.write(write(), { add: [fact('a writes the store'), { text: 'b is unanchored', class: ClaimClass.fact }] })
+    expect(assertedBy(events.at(-1))).toEqual([
+      { id: added[0]?.id, text: 'a writes the store', anchors: [{ path: 'src/a.ts', symbol: null, digest: sha256('v1') }] },
+      { id: added[1]?.id, text: 'b is unanchored', anchors: [] },
+    ])
+  })
+
+  it('a tag-only change asserts nothing, so it does not clear a claim whose code moved though the backend re-took its basis', async () => {
+    const { port, sources, events, stateOf, assertedBy, breakEvidence } = checking()
+    const id = await claimOn(port)
+    sources.set('src/a.ts', 'v2')
+    await port.write(write(), { change: [{ id, tags: ['store'] }] })
+    expect(assertedBy(events.at(-1))).toEqual([])
+    expect(await stateOf(id)).toBe(ClaimState.suspect)
+    breakEvidence()
+    expect(await stateOf(id)).toBe(ClaimState.clean)
+  })
+
+  it('a text change asserts again, with the digests its anchors have now', async () => {
+    const { port, sources, events, stateOf, assertedBy } = checking()
+    const id = await claimOn(port)
+    sources.set('src/a.ts', 'v2')
+    expect(await stateOf(id)).toBe(ClaimState.suspect)
+    await port.write(write(), { change: [{ id, text: 'a writes the store twice' }] })
+    expect(assertedBy(events.at(-1))).toEqual([{ id, text: 'a writes the store twice', anchors: [{ path: 'src/a.ts', symbol: null, digest: sha256('v2') }] }])
+    expect(await stateOf(id)).toBe(ClaimState.clean)
+  })
+
+  it('a change that resends the claim\'s own text or anchors asserts nothing and leaves it suspect; a new text clears it', async () => {
+    const { port, sources, events, stateOf, assertedBy } = checking()
+    const id = await claimOn(port)
+    sources.set('src/a.ts', 'v2')
+    await port.write(write(), { change: [{ id, text: 'a writes the store', tags: ['store'] }] })
+    expect(assertedBy(events.at(-1))).toEqual([])
+    await port.write(write(), { change: [{ id, anchors: [{ path: 'src/a.ts' }] }] })
+    expect(assertedBy(events.at(-1))).toEqual([])
+    expect(await stateOf(id)).toBe(ClaimState.suspect)
+    await port.write(write(), { change: [{ id, text: 'a writes the store twice', tags: ['store'] }] })
+    expect(await stateOf(id)).toBe(ClaimState.clean)
+  })
+
+  it('a patch with more claims to assert than one drift read takes asserts every one of them', async () => {
+    const { port, events, assertedBy } = checking()
+    const id = await claimOn(port)
+    const result = await port.write(write(), {
+      add: Array.from({ length: KNOWLEDGE_LIMITS.patchItems }, (_, i) => fact(`a writes the store, part ${i}`)),
+      change: [{ id, text: 'a writes the store twice' }],
+    })
+    expect(result.warnings).toEqual([])
+    expect(assertedBy(events.at(-1)).map(a => a.id).toSorted()).toEqual([...result.added.map(r => r.id), id].toSorted())
+  })
+
+  it('a write whose anchors cannot be read after it still lands, asserts nothing and says so', async () => {
+    const inner = createMemoryBackend({ exists: () => true, structure: NO_STRUCTURE, read: () => null })
+    const { port, events, assertedBy } = checking({ backend: { ...inner, readings: async () => { throw new Error('tree unreadable') } } })
+    const result = await port.write(write(), { add: [fact('a writes the store')] })
+    expect(result.warnings).toEqual([ASSERTION_NOT_READ('tree unreadable')])
+    expect(assertedBy(events.at(-1))).toEqual([])
+    expect((await port.get(read(DeliveryMode.get), [result.added[0]?.id ?? ''])).length).toBe(1)
+  })
+
+  it('a restating write still lands and asserts every restating change when the held claims cannot be read first', async () => {
+    const inner = createMemoryBackend({ exists: () => true, structure: NO_STRUCTURE, read: () => null })
+    let armed = false
+    const { port, events, assertedBy } = checking({ backend: { ...inner, get: async (checkout, ids) => { if (armed) throw new Error('index locked'); return inner.get(checkout, ids) } } })
+    const id = await claimOn(port)
+    armed = true
+    const result = await port.write(write(), { change: [{ id, text: 'a writes the store twice' }] })
+    expect(result.warnings).toEqual([ASSERTION_NOT_READ('index locked')])
+    expect(assertedBy(events.at(-1)).map(a => a.id)).toEqual([id])
   })
 
   it('a check still answers when its evidence cannot be appended, and says so', async () => {
     const { port } = checking({ append: async e => { if (e.kind === EVENT_KIND.knowledge_checked) throw new Error('log down') } })
     const id = await claimOn(port)
     expect(await port.check(write(), { id, verdict: CheckVerdict.holds, why: 'fine' })).toEqual({ verdict: CheckVerdict.holds, written: null, warnings: [EVIDENCE_NOT_RECORDED('log down')] })
+  })
+})
+
+describe('the knowledge port preload', () => {
+  const at = (text: string, path: string) => ({ text, class: ClaimClass.fact, anchors: [{ path }] })
+  const idsOf = async (port: ReturnType<typeof setup>['port'], ...claims: ReturnType<typeof at>[]) =>
+    (await port.write(write(), { add: claims })).added.map(r => r.id)
+  const deliveries = (events: EventInput[]) => events.filter(e => e.kind === EVENT_KIND.knowledge_delivered)
+
+  it('reads pushed, then here, around and search, each claim once in its first arm', async () => {
+    const { port } = setup()
+    const [pushed, here, around, found] = await idsOf(port, at('pushed one', 'src/a.ts'), at('here zebra', 'src/a.ts'), at('around one', 'src'), at('found zebra', 'lib/z.ts'))
+    const got = await port.preload(write(), { pushed: [pushed ?? ''], paths: ['src/a.ts'], query: 'zebra', budget: 1_000 })
+    expect(got.map(p => [p.claim.id, p.arm])).toEqual([[pushed, PreloadArm.pushed], [here, PreloadArm.here], [around, PreloadArm.around], [found, PreloadArm.search]])
+  })
+  it('reads a pushed claim through its readings alone, never a second time', async () => {
+    const asked: string[] = []
+    const inner = createMemoryBackend({ exists: () => true, structure: NO_STRUCTURE, read: () => null })
+    const { port } = setup(async () => {}, { backend: { ...inner, get: (c, ids) => { asked.push('get'); return inner.get(c, ids) }, readings: (c, f) => { asked.push('readings'); return inner.readings(c, f) } } })
+    const [first, second] = await idsOf(port, at('first', 'src/a.ts'), at('second', 'lib/b.ts'))
+    asked.splice(0)
+    const got = await port.preload(write(), { pushed: [second ?? '', first ?? ''], paths: [], query: '', budget: 1_000 })
+    expect(got.map(p => p.claim.text)).toEqual(['second', 'first'])
+    expect(asked).toEqual(['readings'])
+  })
+  it('delivers what fits the budget, the first claim always', async () => {
+    const { port } = setup()
+    const ids = await idsOf(port, ...Array.from({ length: 6 }, (_, i) => at(`claim number ${i}`, 'src/a.ts')))
+    const cost = tokensOf(preloadLine({ id: ids[0] ?? '', text: 'claim number 0', anchors: [{ path: 'src/a.ts', symbol: null }] }, ClaimState.clean))
+    expect((await port.preload(write(), { pushed: [], paths: ['src/a.ts'], query: '', budget: 3 * cost })).length).toBe(3)
+    expect((await port.preload(write(), { pushed: [], paths: ['src/a.ts'], query: '', budget: 1 })).length).toBe(1)
+  })
+  it('appends one knowledge_delivered in preload mode with exactly the delivered ids and the call key', async () => {
+    const { port, events } = setup()
+    const ids = await idsOf(port, ...Array.from({ length: 6 }, (_, i) => at(`claim number ${i}`, 'src/a.ts')))
+    const cost = tokensOf(preloadLine({ id: ids[0] ?? '', text: 'claim number 0', anchors: [{ path: 'src/a.ts', symbol: null }] }, ClaimState.clean))
+    events.splice(0)
+    const got = await port.preload(write('r-1:preload'), { pushed: [], paths: ['src/a.ts'], query: 'claim', budget: 2 * cost })
+    expect(deliveries(events)).toEqual([{
+      chatId: 'chat-1', door: Door.supervisor, taskId: 't-1', stepId: 's-1', runToken: 'r-1', idempotencyKey: 'r-1:preload',
+      kind: EVENT_KIND.knowledge_delivered, payload: { ids: got.map(p => p.claim.id), mode: DeliveryMode.preload, subject: 'claim', author },
+    }])
+    expect(got.length).toBe(2)
+  })
+  it('delivers no more claims than one delivery event records', async () => {
+    const { port, events } = setup()
+    for (let batch = 0; batch * KNOWLEDGE_LIMITS.patchItems <= KNOWLEDGE_LIMITS.deliveredIds; batch++)
+      await idsOf(port, ...Array.from({ length: KNOWLEDGE_LIMITS.patchItems }, (_, i) => at(`claim ${batch} ${i}`, 'src/a.ts')))
+    events.splice(0)
+    const got = await port.preload(write(), { pushed: [], paths: ['src/a.ts'], query: '', budget: 1_000_000 })
+    expect(got.length).toBe(KNOWLEDGE_LIMITS.deliveredIds)
+    expect(deliveries(events).map(e => KnowledgeDeliveredPayload.parse(e.payload).ids)).toEqual([got.map(p => p.claim.id)])
+  })
+  it('an empty request or a zero budget delivers nothing, appends nothing and reads nothing', async () => {
+    const asked: string[] = []
+    const inner = createMemoryBackend({ exists: () => true, structure: NO_STRUCTURE, read: () => null })
+    const { port, events } = setup(async () => {}, {
+      backend: { ...inner, readings: (c, f) => { asked.push('readings'); return inner.readings(c, f) }, search: (c, q, l) => { asked.push('search'); return inner.search(c, q, l) } },
+      evidence: async () => { asked.push('evidence'); return emptyEvidence() },
+    })
+    const [id] = await idsOf(port, at('x', 'src/a.ts'))
+    events.splice(0)
+    asked.splice(0)
+    expect(await port.preload(write(), { pushed: [], paths: [], query: ' ', budget: 1_000 })).toEqual([])
+    expect(await port.preload(write(), { pushed: [id ?? ''], paths: ['src/a.ts'], query: 'x', budget: 0 })).toEqual([])
+    expect(events).toEqual([])
+    expect(asked).toEqual([])
+  })
+  it('refuses a request past its limits, or naming a path outside the checkout, before reading anything', async () => {
+    const asked: string[] = []
+    const { port } = setup(async () => {}, { checkoutOf: async () => { asked.push('checkout'); return '/checkout' } })
+    const base = { pushed: [], paths: [], query: 'x', budget: 1_000 }
+    await expect(port.preload(write(), { ...base, query: 'q'.repeat(KNOWLEDGE_LIMITS.preloadQueryChars + 1) })).rejects.toThrow(ZodError)
+    await expect(port.preload(write(), { ...base, paths: Array.from({ length: KNOWLEDGE_LIMITS.patchItems + 1 }, (_, i) => `src/${i}.ts`) })).rejects.toThrow(ZodError)
+    await expect(port.preload(write(), { ...base, paths: ['/etc/passwd'] })).rejects.toThrow(ZodError)
+    await expect(port.preload(write(), { ...base, budget: -1 })).rejects.toThrow(ZodError)
+    expect(asked).toEqual([])
+  })
+  it('a requested path with no claims delivers nothing and is no error', async () => {
+    const { port, events } = setup()
+    await idsOf(port, at('x', 'src/a.ts'))
+    events.splice(0)
+    expect(await port.preload(write(), { pushed: [], paths: ['nowhere/y.ts'], query: '', budget: 1_000 })).toEqual([])
+    expect(events).toEqual([])
+  })
+  it('costs a claim at the token count of the line the step is shown, a clean one without its state', async () => {
+    const sources = new Map([['src/a.ts', 'v1'], ['src/b.ts', 'b']])
+    const { port } = setup(async () => {}, { backend: createMemoryBackend({ exists: (_c, path) => sources.has(path), structure: NO_STRUCTURE, read: (_c, path) => sources.get(path) ?? null }) })
+    const [moved, kept] = await idsOf(port, at('a holds', 'src/a.ts'), at('b holds', 'src/b.ts'))
+    sources.set('src/a.ts', 'v2')
+    const ask = (budget: number) => port.preload(write(), { pushed: [moved ?? '', kept ?? ''], paths: [], query: '', budget })
+    const all = await ask(10_000)
+    expect(all.map(p => p.state)).toEqual([ClaimState.clean, ClaimState.suspect])
+    const exact = all.reduce((sum, p) => sum + tokensOf(preloadLine(p.claim, p.state)), 0)
+    expect((await ask(exact)).length).toBe(2)
+    expect((await ask(exact - 1)).length).toBe(1)
+  })
+  it('a claim whose code changed since it was written is delivered suspect, behind a clean one', async () => {
+    const sources = new Map([['src/a.ts', 'v1'], ['src/b.ts', 'b']])
+    const { port } = setup(async () => {}, { backend: createMemoryBackend({ exists: (_c, path) => sources.has(path), structure: NO_STRUCTURE, read: (_c, path) => sources.get(path) ?? null }) })
+    const [moved, kept] = await idsOf(port, at('a holds', 'src/a.ts'), at('b holds', 'src/b.ts'))
+    sources.set('src/a.ts', 'v2')
+    const got = await port.preload(write(), { pushed: [moved ?? '', kept ?? ''], paths: [], query: '', budget: 1_000 })
+    expect(got.map(p => [p.claim.id, p.state])).toEqual([[kept, ClaimState.clean], [moved, ClaimState.suspect]])
   })
 })

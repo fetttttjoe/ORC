@@ -2,7 +2,7 @@
 import { isConnectionRefused, loadConfig, ProjectNotInitializedError, requireProject } from '@orc/kernel'
 import { Door, errorMessage, HookName, NO_CHAT } from '@orc/contracts'
 import { buildProgram, openKernel, runInit, runMigrate } from './main'
-import { EXIT_CODE, exitCodeFor } from './exit'
+import { DATABASE_UNREACHABLE, EXIT_CODE, exitCodeFor } from './exit'
 import type { Command } from 'commander'
 import { bootPhase, buildPlugins, buildRuntime } from './runtime'
 import { adoptCwd } from './workspace-adopt'
@@ -57,7 +57,7 @@ async function main(): Promise<number> {
     // buildRuntime's own bootPhase('storage', ...) call is always skipped on this path — without
     // this, the storage open (part of the boot window) never appears in the printed boot line.
     const openTiming: Array<[string, number]> = []
-    const opened = await bootPhase('storage', () => openKernel(config.databaseUrl, {
+    const booted = await bootPhase('storage', () => openKernel(config.databaseUrl, {
       config,
       projectId: config.projectId,
       redactEnv: config.redactEnv,
@@ -68,7 +68,12 @@ async function main(): Promise<number> {
       // idempotency key (the event's own seq), so this was a duplicate of the delivery that works
       // in both modes — and the only one that could throw where there is nothing to send with.
       onAppend: e => loaded.host.hooks.dispatch(HookName.event_appended, e),
+    }).then(opened => ({ opened }), (error: unknown) => {
+      if (!isConnectionRefused(error)) throw error
+      return { unreachable: error }
     }), openTiming)
+    if ('unreachable' in booted) return parse(buildProgram(null, undefined, undefined, { config, error: booted.unreachable }), process.argv)
+    const { opened } = booted
     storage = opened.storage
     // Adoption runs at EVERY boot, here and nowhere else: this is the one place a kernel is
     // guaranteed open (the --help path above returns with none), and every door — including
@@ -103,7 +108,7 @@ try {
   // a caller that runs orc in every repository needs only the number.
   if (error instanceof ProjectNotInitializedError) exitCode = EXIT_CODE.noProject
   if (isConnectionRefused(error))
-    console.error(`Postgres is not reachable at ${loadConfig().databaseUrl} — start it with: docker compose up -d`)
+    console.error(DATABASE_UNREACHABLE(loadConfig().databaseUrl))
   // errorMessage prettifies a ZodError (path + message, never the raw issue-JSON dump) — the
   // same rendering every tool-result boundary uses, so a validation failure reads identically
   // here and in a transcript

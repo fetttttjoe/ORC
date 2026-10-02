@@ -1,6 +1,7 @@
 // How many claims read suspect per commit window, file level versus claim state. Run: bun bench/knowledge-drift.ts [--window 10] [--span 80]
 import { z } from 'zod'
-import { anchorState, claimState, ClaimState, ROOT_ENTITY, type KnowledgeAnchor, type KnowledgeClaim } from '../packages/contracts/src/index.ts'
+import { anchorState, claimState, ClaimState, NO_ANCHOR_EVIDENCE, ROOT_ENTITY, type KnowledgeAnchor, type KnowledgeClaim } from '../packages/contracts/src/index.ts'
+import { readingOf } from '../packages/knowledge-core/src/index.ts'
 import { createDrift, createOutlineCache, gitFilesPlugin, runGit } from '../plugins/knowledge-git/src/index.ts'
 import { createTreeSitterStructure } from '../plugins/structure-treesitter/src/index.ts'
 
@@ -49,7 +50,7 @@ const touches = (anchor: KnowledgeAnchor, changed: readonly string[]): boolean =
 const stateOf = async (claim: KnowledgeClaim, from: string, to: string): Promise<ClaimState> => {
   const states = await Promise.all(claim.anchors.map(async anchor => {
     const [basis, current] = await Promise.all([drift.anchorDigestAt(checkout, from, anchor), drift.anchorDigestAt(checkout, to, anchor)])
-    return anchorState({ path: anchor.path, symbol: anchor.symbol, basis: basis.digest, current: current.digest, readable: basis.readable && current.readable }, [])
+    return anchorState(readingOf(anchor, basis, current), NO_ANCHOR_EVIDENCE)
   }))
   return claimState(states)
 }

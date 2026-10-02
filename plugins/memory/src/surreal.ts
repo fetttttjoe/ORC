@@ -222,7 +222,7 @@ const joinClaimOwners = (
           claimId: r.claimId, noteId: r.noteId, scope: r.scope, title: owner.title,
           text: r.text, class: r.class, anchors: r.anchors, validFrom: r.validFrom,
           // the owner's drift inputs ride along — already resolved here, and the only way a claim
-          // in the preload can be dated against the tree
+          // hit can be dated against the tree
           sourceRevision: owner.sourceRevision, paths: owner.paths,
           // and its workspace, for the same reason: a claim has no workspace of its own — the note
           // that ASSERTS it does, and that is what decides whether the statement is trunk knowledge
@@ -967,7 +967,7 @@ export class SurrealMemory {
     const mode = this.embedder ? (opts.mode ?? SEARCH_MODE.hybrid) : SEARCH_MODE.keyword
     // Resolved ONCE and shared by both arms: list() is a full in-scope note scan, and a hybrid
     // claim search used to run it twice — on the hottest path there is, since searchClaims backs
-    // every memory_search and every step preload.
+    // every memory_search.
     const owners = await this.claimOwners(filter)
     const keyword = mode === SEARCH_MODE.semantic ? [] : await this.keywordClaims(query, owners)
     const semantic = mode === SEARCH_MODE.keyword ? [] : await this.semanticClaims(query, filter, owners)
@@ -1081,9 +1081,8 @@ export class SurrealMemory {
         // SUMMARY_COLUMNS, not an inline list: it is derived from SummaryRow, so the projection and
         // the parse of this row cannot drift (zod strips unknown keys, so a hand-kept list widened
         // alone was silent). sourceRevision and paths are why that matters — they are the ONLY two
-        // inputs the drift check has, and a hit that omits them is silently uncheckable, drops out
-        // of corpusDrift's denominator, and makes the preload print "unchanged since they were
-        // written — trust them" over exactly the notes it could not check.
+        // inputs the drift check has, and a hit that omits them is silently uncheckable and drops out
+        // of corpusDrift's denominator.
         `SELECT ${SUMMARY_COLUMNS},`
         + ` vector::similarity::cosine(embedding, $q) AS score`
         + ` FROM ${Tb.Note} WHERE embedding != NONE`
@@ -1105,7 +1104,7 @@ export class SurrealMemory {
       const candidates = rows.filter(r => !isUiMetaNote(r.scope, r.noteId))
       if (!meetsMargin(candidates.map(r => r.score))) return []
       // use makes memory more findable: re-rank cosine by activation heat, mirroring neighbors() so a
-      // note agents keep reading rises in search (and thus preload) as it does in the graph.
+      // note agents keep reading rises in search as it does in the graph.
       //
       // Heat MODULATES the cosine — it must never overrule it. This used to score
       // `(score + 1) * heat`, shifting cosine into [0,2] first so the heat factor (≥1) stayed
