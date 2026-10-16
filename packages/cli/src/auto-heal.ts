@@ -25,6 +25,7 @@ export function sweepSpec(suspects: readonly ClaimDrift[]): string {
   return `Auto-drafted by the commit reactor: ${suspects.length} knowledge claim(s) read suspect after a commit. `
     + `Suspect claims: ${listed.join(', ')}${more > 0 ? ` … and ${more} more` : ''}. `
     + `A folder anchor names a directory: list it with ${FS_LIST_TOOL_NAME} and never guess a file in it. Read each anchored file once. `
+    + `A claim whose text states a number — a count, a size, a limit — holds only after you recount that exact number in the code; if the number no longer matches, correct the claim, never hold it as-is. `
     + `For each claim, read the code at its anchors, then call ${check} with { id, verdict, why }: `
     + `'${CheckVerdict.holds}' when it still describes the code; '${CheckVerdict.false}' with a patch that retires the claim or changes it `
     + `(the ${check} patch field); '${CheckVerdict.unknown}' when you cannot tell. `

@@ -435,7 +435,7 @@ export function createMemoryProjector(opts: {
       if (follower) return followerCatchUp()
       await serialize(async () => {
         // synchronous reconcile, NOT debounced: catchUp is the CLI's projection path, and a command
-        // that awaits it (search, consolidate) expects fresh topics/edges on return, not 5s later.
+        // that awaits it (search) expects fresh topics/edges on return, not 5s later.
         cursorCache = (await drainFrom(await surreal.getCursor(), async c => { await refreshIndex(); await refreshDerived(c.deletedCount > 0) })).cursor
       })
     },

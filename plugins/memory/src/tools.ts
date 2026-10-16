@@ -1,13 +1,13 @@
 import { z } from 'zod'
-import { AccessVia, AUTHOR_SOURCE, CLAIM_ID_RE, ClaimClass, Door, NO_CHAT, ClaimWrite, DecisionStatus, isRecord, DRIFT_STATE, KnowledgeToolName, EdgeDirection, inferTier, linkLookupScopes, MASTERPLAN_NOTE_ID, MemoryScope, MEMORY_ACCESS, MEMORY_ID_RE, MEMORY_LIMITS, MEMORY_SOURCE_LIMITS, MEMORY_TOOL_NAME, MemorySearchResult, MemoryWriteResult, NoteCategory, NoteKind, LINK_KIND, planFieldViolations, Retention, SearchMode, stepMayPlan, stepMayVerify, LinkKind, MemoryNoteDraftInput, NOTE_TIER, NoteTier, emptyUseStats, slugId, toolError, useLine, type ClaimInput, type MemoryAuthor, type MemoryNote, type MemoryStore, type NoteSummary, type ProvisionalFlag, type ResolvedTool, type VerifiedStamp } from '@orc/contracts'
+import { AccessVia, CLAIM_ID_RE, ClaimClass, ClaimWrite, DecisionStatus, isRecord, DRIFT_STATE, KnowledgeToolName, EdgeDirection, linkLookupScopes, MemoryScope, MEMORY_ACCESS, MEMORY_ID_RE, MEMORY_LIMITS, MEMORY_SOURCE_LIMITS, MEMORY_TOOL_NAME, MemorySearchResult, MemoryWriteResult, NoteCategory, NoteKind, planFieldViolations, Retention, SearchMode, stepMayVerify, LinkKind, MemoryNoteDraftInput, NOTE_TIER, NoteTier, emptyUseStats, slugId, toolError, useLine, type ClaimInput, type MemoryAuthor, type MemoryNote, type MemoryStore, type NoteSummary, type ProvisionalFlag, type ResolvedTool, type VerifiedStamp } from '@orc/contracts'
 import { applyBudget, fitMemoryNoteToBudget } from './budget'
 import { readNoteDrift, type DriftableNote, type DriftSources } from './claim-drift-read'
 import { provisionalOf, type WorkspaceViewProbe } from './provisional'
 import { NEAR_SUBJECT, trigramDice } from './title-similarity'
 
 // Advisory note lint, echoed back in the memory_write result. Two severities now, not one — see
-// contracts' plan-rules.ts RULE_SEVERITY: a plan-field SHAPE mistake (an ordering edge where
-// scheduling never reads it, a zone entry that is not one glob) REFUSES before the write lands;
+// contracts' plan-rules.ts RULE_SEVERITY: a plan-field SHAPE mistake (a zone entry that is not one
+// glob) REFUSES before the write lands;
 // everything below this file's own noteLint/normalizeWrite/duplicate checks still only WARNS — a
 // blocked write mid-run burns more tokens than a mediocre note. Two failures motivate the split,
 // not one: [sourced] plugins/executor-api-loop/src/loop.ts's
@@ -42,26 +42,6 @@ export async function unresolvedLinks(store: MemoryStore, note: MemoryNote): Pro
     if (!found) missing.push(l.id)
   }
   return missing
-}
-
-// The depends_on link targets that are themselves plan-tier notes — the ONE store lookup
-// contracts' siblingOrderingMisuse needs but cannot do itself (that predicate is pure/IO-free, so
-// the CALLER resolves who counts as a sibling). Extracted out of the write's pre-write shape check
-// below so it has exactly one caller; a second inline copy is how this would drift from what the
-// grounded freeze means by "sibling" for the same predicate.
-//
-// Not always a sibling: a plan-note may legitimately depends_on a note whose KNOWLEDGE it builds
-// on, which is why only a target that is itself plan-tier in this scope counts. Costs nothing on a
-// write with no depends_on link — the caller checks `links.length` before calling this — and the
-// masterplan is skipped: it is the parent, never a sibling.
-async function planSiblings(store: MemoryStore, scope: string, links: ReadonlyArray<{ id: string; kind: string }>): Promise<string[]> {
-  const siblings: string[] = []
-  for (const l of links) {
-    if (l.kind !== LINK_KIND.depends_on || l.id === MASTERPLAN_NOTE_ID) continue
-    const target = await store.get(l.id, scope)
-    if (target?.tier === NOTE_TIER.plan) siblings.push(l.id)
-  }
-  return siblings
 }
 
 // A note the writer may have meant to UPDATE. `id ?? slugId(title)` forks on any rephrasing —
@@ -530,24 +510,6 @@ type WriteSchemaCoversInput =
 const writeSchemaCoversInput: WriteSchemaCoversInput = true
 void writeSchemaCoversInput
 
-// Degraded mode: the same six tools exist but every call returns an explicit
-// isError result naming the reason — the model learns context is unavailable instead of
-// silently losing its memory tools.
-// The ONE author this plugin is allowed to invent, and only because it can never reach a log: every
-// method of the store below throws before touching anything, so this author is dead data — it is
-// read for nothing but memoryTools' idempotency keys, which need `runToken` (absent here) to form
-// at all. The synthetic workspace id is deliberately not a real one: if this ever DID reach an
-// event, the id names itself as the bug rather than filing a note under a live checkout.
-// Everywhere else in this plugin the author is a parameter — see ConsolidationDeps, restampToHead
-// and MemoryStore's required `author` arguments.
-const UNAVAILABLE_AUTHOR: MemoryAuthor = { source: AUTHOR_SOURCE.agent, workspaceId: 'memory-unavailable', origin: NO_CHAT(Door.supervisor) }
-
-export function unavailableMemoryTools(reason: string): ResolvedTool[] {
-  const fail = async (): Promise<never> => { throw new Error(`memory unavailable: ${reason}`) }
-  const store: MemoryStore = { write: fail, remove: fail, setArchived: fail, setArchivedAll: fail, get: fail, useStats: fail, recordOutcomes: fail, list: fail, search: fail, searchClaims: fail, claimsFor: fail, neighbors: fail, recordAccess: fail, topics: fail, topicClaims: fail, verify: fail }
-  return memoryTools({ store, author: UNAVAILABLE_AUTHOR })
-}
-
 // ─── memory_verify: the ONLY writer of the verification stamp ─────────────────────────────────
 //
 // Verification is DECLARED, never inferred. Nothing anywhere derives "this note is checked" from
@@ -623,10 +585,6 @@ export function memoryVerifyTool(opts: {
 // drivers (orc mcp serve) expose exactly these — reading knowledge is theirs, authoring it
 // belongs to agents running inside plans. tools.test.ts pins every name to the actual surface.
 export const MEMORY_READ_TOOLS = [MEMORY_TOOL_NAME.search, MEMORY_TOOL_NAME.read, MEMORY_TOOL_NAME.neighbors, MEMORY_TOOL_NAME.topics, MEMORY_TOOL_NAME.recheck] as const
-
-export const PLAN_STEP_MEMORY_TOOLS: readonly string[] = [MEMORY_TOOL_NAME.write]
-export const memoryToolsForStep = (p: { stepId: string; role: string }): readonly string[] =>
-  stepMayPlan(p) ? PLAN_STEP_MEMORY_TOOLS : []
 
 export const DECISION_KIND_REFUSAL = `decisions are recorded with ${KnowledgeToolName.recordDecision}, not ${MEMORY_TOOL_NAME.write} — kind 'decision' is refused here`
 
@@ -783,42 +741,8 @@ export function memoryTools(opts: {
           const duplicates = forkRisk && parsed.title !== undefined
             ? await duplicateSubjectWarning(store, scope, parsed.title, id)
             : []
-          // Plan-field SHAPE mistakes refuse HERE, before store.write — contracts' planFieldViolations,
-          // the same table the plan freeze sweeps at approval (see the module header above for why
-          // shape refuses and judgment warns). Checked against what THIS draft carries (parsed.zone,
-          // parsed.links), never the merged/stored note: merge-on-omit means an omitted field
-          // introduces no new mistake, so re-validating stored state here would refuse an unrelated
-          // update for a defect it never restated.
-          //
-          // zone-entry-wellformed stays UNGATED by tier on purpose: inferTier itself infers 'plan'
-          // from a filled zone, so a tier gate on THAT check would only ever agree with the ungated
-          // one. sibling-ordering-link is different — `links` carries no such signal (inferTier never
-          // reads it) — so an ungated check false-positived on a semantic note's depends_on link to a
-          // note that only HAPPENS to be plan-tier: the codebase-analysis area-note pattern links
-          // sibling area notes depends_on each other, and a semantic note has no dependsOn FIELD to
-          // redirect that into. Gated on this note's EFFECTIVE tier: explicit parsed.tier, else the
-          // STORED note's tier (merge-on-omit means a plan-note update adding a link may not restate
-          // tier), else the draft's own inferred tier (contracts' inferTier, the same classifier the
-          // store gateway itself falls back to).
-          //
-          // Compound-update hole (deferred here):
-          // the STORED-tier fallback reads the tier the note has TODAY, not the tier the MERGED note
-          // is about to land as. One write that adds `zone` (plan evidence — inferTier reads zone/
-          // rationale/uncertainty, never `links`) AND a sibling-resolving depends_on link to a
-          // STORED semantic note read the stale stored tier, skipped this check, and the merged note
-          // landed plan-tier carrying the exact ordering misuse this whole check exists to catch. So
-          // draft-inferred plan evidence must outrank a stale stored tier: only when the draft itself
-          // infers to non-plan do we fall back to the stored tier (a links-only draft, inferTier never
-          // reads `links`, still correctly defers to it — the pin above stays green).
-          const zone = parsed.zone ?? []
-          const links = parsed.links ?? []
-          let siblings: string[] = []
-          if (links.length) {
-            const draftTier = inferTier(parsed)
-            const effectiveTier = parsed.tier ?? (draftTier === NOTE_TIER.plan ? NOTE_TIER.plan : (await store.get(id, scope))?.tier ?? draftTier)
-            if (effectiveTier === NOTE_TIER.plan) siblings = await planSiblings(store, scope, links)
-          }
-          const v = planFieldViolations({ id, zone, links, siblings })
+          // contracts' plan-field rules, checked on what THIS draft carries (merge-on-omit adds no new mistake)
+          const v = planFieldViolations({ id, zone: parsed.zone ?? [] })
           // first message only: one-at-a-time teaching, same as the predicates already commit to —
           // a list of every violation would read as one wall of text and get fixed no faster.
           if (v.shape.length) return { output: { error: v.shape[0] }, isError: true }
@@ -835,11 +759,7 @@ export function memoryTools(opts: {
           // authoritative value.
           const dead = await unresolvedLinks(store, n)
           const warnings = [
-            // EXTENSION SLOT: a judgment-severity plan-field rule lands here, first, ahead of every
-            // advisory lint — loop.ts lifts only warnings[0] into the next turn, so this is the one
-            // warning whose neglect fails the run outright. PLAN_FIELD_RULES (contracts/plan-rules.ts)
-            // has no judgment row yet — both current rows are 'shape' and refused above — so this is
-            // always [] today; it occupies the slot orderingLinkWarning's warn-path used to.
+            // a judgment-severity plan-field rule goes first: loop.ts lifts only warnings[0] (none exists yet)
             ...v.judgment,
             // ahead of the advisory lints: loop.ts lifts only warnings[0] into the next turn, and a
             // note the writer just gutted is the one thing it must see before anything stylistic

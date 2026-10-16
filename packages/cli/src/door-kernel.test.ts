@@ -33,6 +33,7 @@ const DOOR_WITHHOLDS: { [V in KernelMutationVerb]: WithheldFromDoor<V> } = {
   approvePlan: true,
   proposeSplit: true,
   annotatePlan: true,
+  writePlanNote: true,
   replyFeedback: true,
   reportCoverage: true,
   requestRun: true,

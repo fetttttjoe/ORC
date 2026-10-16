@@ -42,6 +42,7 @@ export enum EventKind {
   feedback_requested = 'feedback_requested',
   feedback_provided = 'feedback_provided',
   plan_annotated = 'plan_annotated',
+  plan_note_written = 'plan_note_written',
   analysis_completed = 'analysis_completed',
   models_discovered = 'models_discovered',
   copilot_exchange = 'copilot_exchange',

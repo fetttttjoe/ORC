@@ -214,23 +214,17 @@ export function buildCopilotTools(deps: {
     plan_notes: tool({
       description: 'Read a grounded task’s decomposition plan-notes (the split-up: subplans, dependencies, zones, skills/tools, models, uncertainty).',
       inputSchema: WIRE[VIEW.planNotes].params,
-      // The mechanics — dependsOn (the ONLY thing that orders the frozen plan), zone (the write
+      // The mechanics — subplans and dependsOn (what orders the frozen plan), zone (the write
       // fence), skillRefs/toolRefs/modelRef — are what a driver has to see to judge or revise a
       // decomposition; mapping only the prose left it reviewing a plan it could not read.
       // modelRef is conditional: '' means "inherit the parent's", and an empty string reads as a
       // model choice that was made.
-      //
-      // `archived` rides along for a reason. This view folds the LOG, so it keeps showing a
-      // decomposition after its notes are retired — deliberately, since a settled task's plan must
-      // stay readable. But memory_read answers `null` for those same ids, and two doors giving
-      // opposite answers about one note is how a reader stops trusting either. Stated, not hidden.
       execute: async ({ taskId: id }) =>
         ((await viewOf(sessions, projectId, VIEW.planNotes, { taskId: id }))?.notes ?? []).map(n => ({
           id: n.id, title: n.title, summary: snip(n.summary, 400), rationale: snip(n.rationale, 400),
-          body: snip(n.body, 400), uncertainty: n.uncertainty, links: n.links,
+          body: snip(n.body, 400), uncertainty: n.uncertainty, subplans: n.subplans,
           dependsOn: n.dependsOn, zone: n.zone, skillRefs: n.skillRefs, toolRefs: n.toolRefs,
           ...(n.modelRef ? { modelRef: n.modelRef } : {}),
-          ...(n.archived && { archived: true, note: 'retired from retrieval — memory_read will not find it' }),
         })),
     }),
     recent_activity: tool({

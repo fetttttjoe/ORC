@@ -9,6 +9,7 @@ import { errorMessage } from '@orc/contracts/guards'
 import { Scope } from '@orc/contracts/scope'
 import { ChatDigest } from '@orc/contracts/chat-digest'
 import { Door } from '@orc/contracts/origin'
+import type { PlanNote } from '@orc/contracts/plan-note'
 import { NODE_TYPES, type NodeType } from './graph-wire'
 
 // The node vocabulary as a schema, derived from NODE_TYPES rather than re-listed: the node view
@@ -319,30 +320,26 @@ export const PlansView = z.object({
     .nullable(),
 })
 
-export const PlanNotesView = z.object({
-  notes: z.array(
-    z.object({
-      id: z.string(),
-      title: z.string(),
-      summary: z.string().default(''),
-      body: z.string().default(''),
-      rationale: z.string().default(''),
-      uncertainty: z.array(z.string()).default([]),
-      links: z.array(z.object({ id: z.string(), kind: z.string() })).default([]),
-      dependsOn: z.array(z.string()).default([]),
-      zone: z.array(z.string()).default([]),
-      modelRef: z.string().optional(),
-      // The rest of the subplan's EXECUTION payload, which the fold has always sent and this
-      // schema did not name: the capability selection frozen into the child step, and whether the
-      // note has since been retired. A door reading the decomposition to judge or revise it needs
-      // them, and a field absent here is a field its reader cannot see however faithfully the
-      // server sends it.
-      skillRefs: z.array(z.string()).default([]),
-      toolRefs: z.array(z.string()).default([]),
-      archived: z.boolean().default(false),
-    }),
-  ),
+const PlanNoteOnWire = z.object({
+  id: z.string(),
+  title: z.string(),
+  summary: z.string().default(''),
+  body: z.string().default(''),
+  rationale: z.string().default(''),
+  uncertainty: z.array(z.string()).default([]),
+  subplans: z.array(z.string()).default([]),
+  dependsOn: z.array(z.string()).default([]),
+  zone: z.array(z.string()).default([]),
+  modelRef: z.string().optional(),
+  skillRefs: z.array(z.string()).default([]),
+  toolRefs: z.array(z.string()).default([]),
 })
+// a PlanNote field the wire does not name is one no reader can see; this line names it at build time
+type UnwiredPlanNoteField = Exclude<keyof PlanNote, keyof z.output<typeof PlanNoteOnWire>>
+const WIRE_COVERS_PLAN_NOTE: [UnwiredPlanNoteField] extends [never] ? true : UnwiredPlanNoteField = true
+void WIRE_COVERS_PLAN_NOTE
+
+export const PlanNotesView = z.object({ notes: z.array(PlanNoteOnWire) })
 
 /** the models catalog is a BARE array of refs — the `{refs}` wrapper it never had cost a flow */
 export const ModelRefs = z.array(z.string())

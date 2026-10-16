@@ -86,8 +86,7 @@ export function plansGetFinishStep(task: { parentId: string | null }, draft: { s
 // — so editing finishStepFields cannot change which model the step runs on or what it may spend.
 // CEILING: the finish step has no budget or model of its own, and a plan whose last step is a
 // cheap one-iteration formality hands the reconciliation that same ceiling. The upgrade path is an
-// operator setting in the shape memoryConsolidateModel already takes (a `finishModel` model ref,
-// empty = inherit), read at the append; nothing needs it yet, so nothing exists.
+// operator setting (a `finishModel` model ref, empty = inherit), read at the append; nothing needs it yet, so nothing exists.
 const isKernelFinish = (s: PlanStep | undefined): boolean => s?.id === FINISH_STEP_ID && s.role === STEP_ROLE.finisher
 const isKernelChecks = (s: PlanStep | undefined): boolean => s?.id === CHECKS_STEP_ID && s.executorRef === CHECKS_EXECUTOR_REF
 

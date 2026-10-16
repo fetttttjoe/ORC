@@ -12,7 +12,7 @@ import { createProjectSessions, type ProjectSessions, type SessionUpdate } from 
 import { viewOf } from './views/registry'
 import type { ViewParams } from './views/view'
 import { VIEW } from './wire'
-import { authorFixture, must } from '@orc/contracts/fixtures'
+import { authorFixture, must, planNoteFixture } from '@orc/contracts/fixtures'
 
 // Every read here goes through the door helper the tools use, against a REAL session: the views'
 // own unit tests answer from a hand-built model, and what those cannot show is that the thing the
@@ -61,15 +61,11 @@ const noteEvent = (id: string): EventInput => ({
   payload: { note: { id, title: id }, author: authorFixture() },
 })
 
-// a plan-note in the parent's plan scope; its id IS the child step id (instantiateFrozenPlan),
-// which is how planNotes correlates the decomposition graph to child execution.
-const planNoteEvent = (taskId: string, id: string, links: Array<{ id: string; kind: string }> = []): EventInput => ({
+// a plan note of the task; its id IS the child step id (instantiateFrozenPlan)
+const planNoteEvent = (taskId: string, id: string): EventInput => ({
   ...CLI,
-  taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_written,
-  payload: {
-    note: { id, title: id, scope: `plan-${taskId.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`, tier: 'plan' as const, links },
-    author: authorFixture(),
-  },
+  taskId, stepId: null, runToken: null, kind: EVENT_KIND.plan_note_written,
+  payload: { note: planNoteFixture({ id, title: id }) },
 })
 
 // A frozen child plan step (post-expansion shape) carrying the note id verbatim.

@@ -218,8 +218,8 @@ A grounded plan *decomposes* work into a human-approved note graph — it never 
 - **Grounded-plan strategy** (`STRATEGY.groundedPlan`): the `[analyze, plan]` template ends the plan
   step in `finalize_plan`. `groundedPlanOmission` **refuses success** at the plan step if no
   `split_proposed` was produced (the agent narrated instead of decomposing).
-- **`finalize_plan` refusal ladder** (five ordered branches): wrong role → no masterplan → non-human
-  approval (arrived via MCP) → no approval at all → changed after approval. The gate compares the
+- **`finalize_plan` refusal ladder** (offered to the plan step alone; four ordered branches): no
+  masterplan → non-human approval (arrived via MCP) → no approval at all → changed after approval. The gate compares the
   *changed-set*, not a content hash, because the stamped hash attests *that* an approval happened,
   never over *which* graph (the two sides may be different builds).
 - **The verify step** (`scoped_changes`, auditor-gated): judges scope from the event log — a *floor*,
@@ -315,7 +315,7 @@ This is the classic dependency-inversion seam: high-level policy (the kernel, ex
 
 ```
 task · plan · events · execution · operations · workspace · guards · encoding ·
-plugins · event-kinds · ids · limits · cluster · memory · plan-ordering ·
+plugins · event-kinds · ids · limits · cluster · memory · plan-rules · plan-note ·
 approval · approval-answer · analysis
 ```
 
@@ -358,8 +358,8 @@ it applies to an empty log, without fabricating the provenance of historical eve
 
 - `STRATEGY = { groundedPlan: 'grounded-plan', split: 'split', single: 'template:single' } as const` — the three routing keys the runtime and the split path share as matched values rather than scattered literals: `groundedPlan` is the analyze+plan template ending in `finalize_plan`; `split` is child-task decomposition inside `proposeSplit`; `single` is a one-step plan with no authoring, used by `createRegroundTask`.
 - `STEP_ID = { analyze, plan, verify, commit, checks, finish }` lives in the zero-import `step-ids.ts` (re-exported here) so the kernel, every plugin and the browser can match on step ids without importing the kernel; accessors `VERIFY_STEP_ID`, `COMMIT_STEP_ID`, `CHECKS_STEP_ID`, `FINISH_STEP_ID`. `CHECKS_EXECUTOR_REF = 'checks'` is the executor id the kernel-appended checks step runs under — no model, it runs the operator's configured `finishChecks` commands. `STEP_ROLE = { scout, implementer, auditor, worker } as const` — the *known* (not closed) set of step roles.
-- `MASTERPLAN_NOTE_ID = 'masterplan'` (also `step-ids.ts`) — the root note id of a grounded plan-note graph.
-- `planScope(taskId: string): string` — derives the per-task plan-note memory scope (`plan-<sanitized-taskId>`), case-folded and non-alphanumerics collapsed to `-` so `MEMORY_ID_RE` always accepts it.
+- `MASTERPLAN_NOTE_ID = 'masterplan'` (also `step-ids.ts`) — the id of a grounded plan's root plan note, whose `subplans` lists the rest.
+- `planScope(taskId: string): string` — derives the per-task memory lane scope (`plan-<sanitized-taskId>`), case-folded and non-alphanumerics collapsed to `-` so `MEMORY_ID_RE` always accepts it.
 - `PlanStep = z.object({ id (path-safe /^[\w-]+$/), role, title, instructions, executorRef, modelRef, skillRefs: string[], toolRefs: string[] (each matching TOOL_REF_RE, default []), isolation: IsolationTier, zone: string[], maxIterations: positive int, dependsOn: string[], readOnlySource?: boolean })`. `readOnlySource` is kernel-set only, on the grounded template's analyze/plan steps, and is not exposed on the plan-note write path (an agent cannot grant itself source writes).
 - `IsolationTier` is a TS `enum` (`local`/`worktree`/`docker`), parsed with `z.enum(IsolationTier)`; there is no separate constant alias — call sites use `IsolationTier.local` directly.
 - `Plan = z.object({ taskId, version: positive int, strategyRef, analyzerRef?: string, costEstimateUSD: number|null, steps: PlanStep[] (min 1) })`.
@@ -371,12 +371,12 @@ it applies to an empty log, without fabricating the provenance of historical eve
 
 This is the largest and most cross-cutting module; besides usage/cost accounting (`Usage`, `ZERO_USAGE`, `addUsage`, `ModelCost`, `costUSDFor`, `formatModelRate`/`formatModelOption`) and run-outcome plumbing (`Signal`, `SignalOutcome`, `FailureClass`, `RunOutcome`, `runOutcomeFor`, `SplitResult`, `UnifiedEvent`/`UnifiedEventType` — each a TS `enum` parsed with `z.enum(Enum)`, with no separate constant alias), it defines the core runtime seams:
 
-- `ExecutorContext<LM = unknown>` — everything an `AgentExecutor.startTurn` receives: `{ step: PlanStep, taskSpec, depOutputs: Record<string,string>, skills: LoadedSkill[], extraTools: ResolvedTool[], model: LM, runToken, workspaceDir, checkpoint: Checkpoint, operation: OperationCheckpoint, budgetRemainingUSD(): Promise<number|null>, taskId?, knowledgePreloadTokens?, memory?: StepMemory, knowledge?: StepKnowledge }`.
+- `ExecutorContext<LM = unknown>` — everything an `AgentExecutor.startTurn` receives: `{ step: PlanStep, taskSpec, depOutputs: Record<string,string>, skills: LoadedSkill[], extraTools: ResolvedTool[], model: LM, runToken, workspaceDir, checkpoint: Checkpoint, operation: OperationCheckpoint, budgetRemainingUSD(): Promise<number|null>, taskId?, knowledgePreloadTokens?, knowledge?: StepKnowledge, priorFailure?: { attempt, class, message } }`.
 - `Checkpoint = <T>(name: string, fn: () => Promise<T>, toEvents?: (result: T) => EventDraft[]) => Promise<T>` — the durable checkpoint/replay boundary: `fn` runs at-most-effectively-once, its result is turned into events by `toEvents`.
 - `OperationCheckpoint = <T>(spec: OperationSpec, fn: (attempt: number) => Promise<T>, toEvents?) => Promise<T>` — the specialized checkpoint for external model/tool effects; the journal records `spec` before `fn` runs and the result/failure after. `attempt` is the journal's 1-based count for the operation; a checkpoint nested inside `fn` (the rate-limit wait) keys by it.
 - `Signal = z.object({ stepId, runToken, outcome: SignalOutcome, summary, outputs?: string[] })` — what a step hands back on completion, including workspace-relative declared outputs.
 - `terminalError(message)`, `isTerminalError(err)`, `classifiedError(cls, message)`, `failureClassOf(err)` — the retry protocol between checkpoint implementations and callers: a `terminalError` throw is never retried; a small set of permanent filesystem error codes (`EACCES, EPERM, ENOENT, EROFS, ENOTDIR, EISDIR`) are also treated as terminal.
-- `StepMemory` interface — `{ capture(signal): Promise<void> }` — the step's bound memory handle; the executor decides only *when* to call it.
+- `ExecutorContext.priorFailure` — set by the port's `init` checkpoint on a retry from the step's previous attempt's failure; the loop renders it whole as `# Your previous attempt failed (attempt <n>, <class>)` after the upstream outputs. A first attempt and a continuation round have none.
 - `StepKnowledge` interface — `{ claimsAt(paths): Promise<KnowledgeClaim[]>; preload(budget, round): Promise<PreloadedClaim[]> }` — the step's bound knowledge handle: the claims its first prompt is handed (`PreloadedClaim = { claim, state, arm }`, the arms `pushed → here → around → search`, cut to one budget and recorded as one `knowledge_delivered{mode: preload}` per continuation round), and the claims an edited path puts at risk.
 - `RunHandle = { workflowId: string; wait(): Promise<RunOutcome> }` and `ExecutionPort = { startRun, retry, cancelRun }` — the durable execution port. `cancelRun(taskId, origin)` requires the canceller's `Origin`; start/retry take an optional cwd, and the workflow supplies its own run origin.
 - Helper functions: `parseModelRef(ref)`, `resolveModel(providers, modelRef)`, `modelIdsFrom(body, listKey, idKey)` (the one parse of a provider's model-list JSON, tolerant of malformed input — never throws, returns fewer ids).
@@ -434,8 +434,9 @@ These interfaces are *defined* in `contracts` and *implemented* by other package
 - **`encoding.ts`** — detects and reports double-JSON-escaped tool arguments: `looksDoubleEncoded`, `doubleEncodedField`, `DOUBLE_ENCODED_HINT`, `unescapeSequences`.
 - **`limits.ts`** — `MEMORY_LIMITS` const (leaf module): every size/count ceiling shared by the memory schemas.
 - **`cluster.ts`** — `Topic = z.object({ topicKey, label, size })` and `MemoryTopicAccessedPayload` — the derived-topic read model's contract.
-- **`memory.ts`** — the full memory-note tier system (`SemanticNoteInput`/`EpisodicNoteInput`/`PlanNoteInput`, the `MemoryNoteInput`/`MemoryNote` discriminated unions, `NoteSummary`, `MemorySearchResult`, `NeighborResult`, the `MemoryStore` interface — `write/remove/get/list/search/searchClaims/claimsFor/neighbors/recordAccess/topics/topicClaims`), plus `deriveNoteProvenance`, `noteLabel`, `noteKey`, and the activation functions above. Re-exports `ids.ts` and all of `claim.ts` (`Claim`, `ClaimHit`, `ClaimInput`, `ClaimWrite`, `ClaimSearchOptions`).
-- **`plan-ordering.ts`** — `siblingOrderingMisuse(noteId, links, siblings): string | null` — the one spelling of "ordering is the `dependsOn` FIELD, not a `depends_on` LINK", shared by `memory_write`'s warning path and the grounded-plan freeze's rejection path.
+- **`memory.ts`** — the full memory-note tier system (`SemanticNoteInput`/`EpisodicNoteInput`/`MemoryPlanNoteInput`, the `MemoryNoteInput`/`MemoryNote` discriminated unions, `NoteSummary`, `MemorySearchResult`, `NeighborResult`, the `MemoryStore` interface — `write/remove/get/list/search/searchClaims/claimsFor/neighbors/recordAccess/topics/topicClaims`), plus `deriveNoteProvenance`, `noteLabel`, `noteKey`, and the activation functions above. Re-exports `ids.ts` and all of `claim.ts` (`Claim`, `ClaimHit`, `ClaimInput`, `ClaimWrite`, `ClaimSearchOptions`).
+- **`plan-rules.ts`** — `planFieldViolations({ id, zone })` over the `PLAN_FIELD_RULES` table (today one `shape` row, `zone-entry-wellformed`): the one wording of a plan-field mistake, shared by the plan-note write and the freeze's `validatePlan`.
+- **`plan-note.ts`** — the kernel-owned plan note: `PlanNote` (every field required — the stored note is the full merged shape), `PlanNoteWrite` (the tool input: `id` plus any fields), `PlanNoteWrittenPayload`, `PlanNoteToolName` (`plan_note_write`, `plan_note_read`, `finalize_plan` — the plan step's three tools, named once for the tools and the prompts).
 - **`analysis.ts`** — beyond the `Analyzer` interface: `CoverageReport`/`AnalysisCompletedPayload`, `FeedbackRequestedPayload`/`FeedbackProvidedPayload` (the conversational feedback gate), `PlanAnnotatedPayload` (the human annotation-on-plan-note input event).
 
 ### 7.2 Kernel core: storage, projections, plugin host
@@ -449,7 +450,7 @@ These interfaces are *defined* in `contracts` and *implemented* by other package
 - the in-memory task/plan `State` — `projections.ts` `fold()` / `foldInto()`;
 - the durable `operations` index — `operation-journal.ts` `rebuildOperations()` over `foldOperations()`;
 - per-note current state — `event-log.ts` `latestNoteEvent()` (an *indexed* fold of one note's memory events);
-- the plan-note graph a freeze consumes — `kernel.ts` `listPlanNotes()` → `foldPlanNotes()`.
+- the plan notes a freeze consumes — `kernel.ts` `listPlanNotes()` → `plan-notes.ts` `planNotesOf()`.
 
 Two structural consequences enforce this:
 
@@ -482,16 +483,17 @@ Internal helpers: `stateOf(ops) → fold(await ops.all())`, private `append(ops,
 | Symbol | Signature | Responsibility |
 | --- | --- | --- |
 | `createTask` | `(input: {title; spec?; type?; parentId?; budgetUSD?}) → Promise<TaskNode>` | Append a single `task_created` (status `draft`); budget/depth inherited from parent. |
-| `createGroundedTask` | `(input: {title; spec; modelRef; analyzerRef; parentId?; budgetUSD?; modelCatalog?; maxIterations?}) → Promise<TaskNode>` | Bootstrap the auto-approved `[analyze, plan]` template (`STRATEGY.groundedPlan`). Analyze step = resolved `Analyzer.analysisStep` (`readOnlySource:true`); plan step id=`PLAN_STEP_ID` role=`PLAN_STEP_ROLE`, `executorRef:'api-loop'`, `skillRefs:['plan-authoring']`, authors the plan-note graph in scope `planScope(task.id)` root `MASTERPLAN_NOTE_ID`, then calls `finalize_plan`. **Policy-approved** — the human's real gate is the conversational approve *inside* the plan step. See §7.8. |
+| `createGroundedTask` | `(input: {title; spec; modelRef; analyzerRef; parentId?; budgetUSD?; modelCatalog?; maxIterations?}) → Promise<TaskNode>` | Bootstrap the auto-approved `[analyze, plan]` template (`STRATEGY.groundedPlan`). Analyze step = resolved `Analyzer.analysisStep` (`readOnlySource:true`); plan step id=`PLAN_STEP_ID` role=`PLAN_STEP_ROLE`, `executorRef:'api-loop'`, `skillRefs:['plan-authoring']`, authors the plan notes with `plan_note_write` (the `MASTERPLAN_NOTE_ID` note lists its `subplans`), then calls `finalize_plan`; its instructions name no task id. **Policy-approved** — the human's real gate is the conversational approve *inside* the plan step. See §7.8. |
 | `createRegroundTask` | `(input: {modelRef; maxIterations?; budgetUSD?}) → Promise<TaskNode>` | Maintenance re-ground: a **single** scout step (`STRATEGY.single`, type `'reground'`) from the dedicated `reground-analyzer`, used verbatim. Policy-approved, `readOnlySource`, no plan authoring and no human gate — dbos-port's freshness gate fires it automatically per-commit on drifted `area-*` notes. See §7.8. |
 | `proposePlan` / `editPlan` | `(taskId, draft: PlanDraft) → Promise<Plan>` | Append `plan_proposed` (requires status `draft`) / `plan_edited` (requires `awaiting_approval`), via `appendPlanVersion`. |
 | `approvePlan` | `(taskId, version?, approval?: { approvedBy: ApprovedBy; ruleIndex?: number }) → Promise<Plan>` | Append `plan_approved` + `task_status_changed → approved`; version must equal latest or throws `version_conflict`. |
 | `proposeSplit` | `(input: {parentTaskId; stepId; runToken; toolCallId; title; spec; plan: ChildPlanDraftInput; budgetUSD?; parentStep; policy; maxDepth}) → Promise<{splitId; childTaskId; gated}>` | Spawn a child task. `splitId = split:${runToken}:${toolCallId}` (crash-idempotent). Refuses a **terminal** parent (`invalid_transition`), refuses a re-used `childTaskId`, enforces `maxDepth`, clamps `budgetUSD` to the subtree's remaining envelope. Expands the trimmed `ChildPlanDraft` with inherited refs (`STRATEGY.split`, `isolation:local`, child-declared `zone`), then `evaluateApproval(policy,…)` → auto-approve or leave `gated`. |
-| `replyFeedback` | `(taskId, text, via: MemoryAuthor['source'] = 'cli') → Promise<string\|null>` | Human side of the conversational gate. Appends `feedback_provided` for the latest open `feedback_requested`, records `author.source = via`, resumes the parked step via `send`. **Approval attribution:** stamps `planHash` (`planGraphHash(foldPlanNotes(...))`) only when `task.type==='grounded'` **AND** `event.stepId===PLAN_STEP_ID` **AND** `isApprovalAnswer(text)`. |
+| `replyFeedback` | `(taskId, text, via: MemoryAuthor['source'] = 'cli') → Promise<string\|null>` | Human side of the conversational gate. Appends `feedback_provided` for the latest open `feedback_requested`, records `author.source = via`, resumes the parked step via `send`. **Approval attribution:** stamps `planHash` (`planGraphHash(planNotesOf(byTask(taskId)))`) only when `task.type==='grounded'` **AND** `event.stepId===PLAN_STEP_ID` **AND** `isApprovalAnswer(text)`. |
 | `approvedPlanHash` | `(taskId, runToken) → Promise<{hash; seq}\|null>` | The plan hash a **human** approved: newest `feedback_provided` on this runToken with `author.source === 'cli'` **AND** `isApprovalAnswer(text)` **AND** `planHash` set. The gate. |
 | `nonHumanPlanApproval` | `(taskId, runToken) → Promise<{source}\|null>` | Same scan/predicate but `author.source !== 'cli'`. Lets `finalize_plan` distinguish "nobody approved" from "an agent approved through the MCP door". Decides nothing. |
-| `planNotesChangedSince` | `(taskId, seq) → Promise<string[]>` | Plan-tier note ids written/deleted in this task's plan scope after `seq` — what changed since the human approved. |
-| `listPlanNotes` | `(taskId) → Promise<PlanNote[]>` | Reconstruct the plan-note graph from `log.after(0, [memory_written, memory_deleted])` via `foldPlanNotes(events, planScope(taskId))` — **from the log, never the eventually-consistent Surreal projection**. |
+| `planNotesChangedSince` | `(taskId, seq) → Promise<string[]>` | Ids of this task's `plan_note_written` events after `seq` — what changed since the human approved. |
+| `listPlanNotes` | `(taskId) → Promise<PlanNote[]>` | Fold the task's `plan_note_written` events (`log.byTask`) via `planNotesOf`: the latest write per id, in first-write order. |
+| `writePlanNote` | `(taskId, write: PlanNoteWrite, origin, run?: {stepId; runToken; idempotencyKey}) → Promise<PlanNote>` | Append `plan_note_written` with the full merged note (`mergePlanNote`: the empty note, the latest write, then the fields `write` defines). Refuses a task that is not grounded or is terminal, and a create with no title (`invalid_transition`), and a plan-field shape mistake (`plan_validation_failed`). A replayed `idempotencyKey` returns the stored note and appends nothing. |
 | `annotatePlan` / `listAnnotations` | `(taskId, {targetNote; refs?; text})` / `(taskId) → Promise<PlanAnnotation[]>` | Human annotation on a plan-note: write side appends `plan_annotated` (input-only, no fold), read side re-reads them off `log.byTask` seq-ordered. |
 | `openFeedback` / `openFeedbackInSubtree` | `(taskId)` / `(rootId) → Promise<…\|null>` | The latest still-open `feedback_requested`, for a task or nearest-first across its subtree. |
 | `gatedChildren` | `(taskId) → Promise<Array<{id; title}>>` | Descendants parked at the manual approval gate (`awaiting_approval`). |
@@ -576,7 +578,7 @@ The fold turns `EventRecord[]` into the in-memory read model. `fold(events)` = `
 
 - **Crash-dedup.** `crashDedupKey(e)` returns `${runToken}:${kind}:${iteration}:${toolCallId}:${name}:${splitId}:${path}` for runToken-bearing events, and **null** (no dedup) for `task_status_changed` and the three `operation_*` kinds. A key already in `acc.seen` is a crash-boundary duplicate and skipped.
 - **State-deriving cases:** `task_created`, `plan_proposed`/`plan_edited`, `plan_approved`, `task_status_changed`, `run_started`, `step_started`, `agent_call` (bumps `iterations`, folds `usage` into both `usage[taskId]` and `stepUsage[taskId\0stepId]`), `split_proposed`/`split_resolved`, `step_completed`, `step_failed`, `reaction_failed`, and the three `operation_*` kinds (folded leniently via `applyOperationEvent`, **journal only — never drive step-status logic**).
-- **The derive-nothing invariant:** `tool_call`, `tool_result`, `artifact_produced`, `skill_loaded`, `rate_limit_wait`, `signal_received`, `memory_*`, `models_discovered`, `feedback_requested`/`feedback_provided`, `plan_annotated`, `analysis_completed`, `copilot_exchange` derive **no task state** — traceability only. (`artifact_produced` is the one exception: it appends to `state.artifacts` as a receipt, but still drives no task/step status.)
+- **The derive-nothing invariant:** `tool_call`, `tool_result`, `artifact_produced`, `skill_loaded`, `rate_limit_wait`, `signal_received`, `memory_*`, `models_discovered`, `feedback_requested`/`feedback_provided`, `plan_annotated`, `plan_note_written`, `analysis_completed`, `copilot_exchange` derive **no task state** — traceability only. (`artifact_produced` is the one exception: it appends to `state.artifacts` as a receipt, but still drives no task/step status.)
 
 ##### Fold-derived selectors
 
@@ -684,7 +686,7 @@ The port builds **every step's `ExecutorContext` inside the one registered DBOS 
 
 - **`workspaceDir`** = `args.cwd ?? path.join(config.workspaceRoot, taskId, stepId)`. Because a run is started with `cwd = runCwd(...)` (the task's workspace directory by default — the kernel records it into `run_requested`; the project dir is only the last fallback), **every step of one run executes in the SAME directory** (a shared working tree) — this is what lets repo tasks succeed.
 - **`depOutputs`** — from `init`: for each `dep` in `step.dependsOn`, the completed dep step's `output`. On a *mixed* grounding verdict the scan-scope directive is injected as a synthetic `grounding` dep output (§7.8), leaving the recorded plan untouched.
-- **`extraTools`** — MCP tools from `tools.resolve(step.toolRefs)`, concatenated with the per-step `stepTools({...})` result. `stepTools` returns either `ResolvedTool[]` or `{ tools, memory? }`; the optional `memory` becomes `ctx.memory` (`StepMemory`).
+- **`extraTools`** — MCP tools from `tools.resolve(step.toolRefs)`, concatenated with the per-step `stepTools({...})` result. `stepTools` returns either `ResolvedTool[]` or `{ tools, knowledge? }`; the optional `knowledge` becomes `ctx.knowledge` (`StepKnowledge`).
 - Budget-clamped `checkpoint`/`operation` closures (each `priceDraft`s usage drafts through the provider cost table), and `budgetRemainingUSD` = `remainingBudget(projectState, taskId)` (min-over-ancestors).
 
 ##### 1.5 Lifecycle, admission, cancellation
@@ -713,10 +715,10 @@ When `groundingSource` is wired and the step is `STEP_ID.analyze` with role `STE
 Constants: `PLAN_STEP_ROLE = STEP_ROLE.auditor`, `PLAN_STEP_ID = STEP_ID.plan`, `ANALYZE_STEP_ROLE = STEP_ROLE.scout`, and `AUDITOR_CONTRACT` (the auditor rule appended to the verify step at freeze: *any* defect ⇒ signal `failure`; judge scope from `scoped_changes`, not a shared-worktree diff).
 
 - **`groundedPlanOmission(events, stepId, runToken): string | null`** — the acceptance gate for the plan step. Returns a refusal message unless a `split_proposed` with this `runToken` exists — so a plan step that signalled success without calling `finalize_plan` is **refused**. Pure.
-- **`instantiateFrozenPlan(masterId, notes): ChildPlanDraft`** — the **deterministic freeze**: a pure function of the approved plan-notes. The master note's `decomposes_into` links become steps; the verify step gets role `auditor` + `AUDITOR_CONTRACT`, others `implementer`.
-- **`healDependsOn(stepId, declared, links, kids): string[]`** — ordering comes from the `dependsOn` **field**, never `depends_on` links. A `depends_on` **link to a sibling** (`siblingOrderingMisuse`) → **throws at the freeze** (fatal). A `dependsOn` **field entry naming a step no longer in `kids`** → **widens to every other sibling, never drops the edge** (a missing dependency is silent corruption; a surplus one only delays).
-- **`planGraphHash(notes): string`** — sha256 over notes canonicalized (sorted by scope+id, each `MemoryNote.parse`'d). `finalize_plan` deliberately does **not** compare this against a fresh hash (§7.3 tool layer).
-- **`foldPlanNotes(events, scope): PlanNote[]`** — reconstructs the plan-note graph **from the event log**, folding `memory_written`/`memory_deleted` in seq order to the latest **plan-tier** note per id (episodic notes excluded). Lenient.
+- **`instantiateFrozenPlan(masterId, notes): ChildPlanDraft`** — the **deterministic freeze**: a pure function of the approved plan notes. The master note's `subplans`, in order, become steps (an empty list or a dangling id throws, naming `subplans`); each step's instructions lead with `Why: <rationale>` when the note has one, then its body (or summary, or title), then its reviewed uncertainty — the split's spec is the masterplan's text in the same order; the verify step gets role `auditor` + `AUDITOR_CONTRACT`, others `implementer`.
+- **`healDependsOn(stepId, declared, kids): string[]`** — ordering comes from the `dependsOn` **field**. A `dependsOn` **field entry naming a step no longer in `kids`** → **widens to every other sibling, never drops the edge** (a missing dependency is silent corruption; a surplus one only delays).
+- **`planGraphHash(notes): string`** — sha256 over notes canonicalized (sorted by id, each `PlanNote.parse`'d). `finalize_plan` deliberately does **not** compare this against a fresh hash (§7.3 tool layer).
+- **`plan-notes.ts`** (pure, contracts-only imports) — `planNotesOf(events, taskId)` folds the task's `plan_note_written` events to the latest note per id, in first-write order, dropping a payload that fails its schema; `planNotesWrittenAfter(events, taskId, seq)` names the ids written after `seq`; `mergePlanNote(prev, write)` is the write's merge, or a refusal carrying its `PlanNoteRefusal` code (`untitled` → `invalid_transition`, `shape` → `plan_validation_failed`).
 
 #### 5. The step tool layer
 
@@ -726,7 +728,8 @@ Every tool is a factory that receives injected step context `p` (ids/role from t
 - **`run-command.ts` — `runCommand({ argv, command, cwd, timeoutMs, logPath }): Promise<CommandResult>`** — the command spawner behind `exec-tool.ts` and `checks-executor.ts`. Each command runs in its own process group, so the timeout and an aborted `signal` (`COMMAND_CANCELLED`) kill what it forked too. Owns `COMMAND_TIMEOUT_MS`, the `SIGTERM`→grace(`KILL_GRACE_MS`)→`SIGKILL` timeout, output clipping (`clipMiddle`, head+tail) and the full-stream log file. **`childEnv()`** scrubs the environment to `PATH`/`HOME`/`LANG`/`LC_ALL`/`TZ`/`TMPDIR` only. Not a sandbox (M5c isolation deferred).
 - **`checks-executor.ts` — `checksExecutor(timeoutMs?): AgentExecutor<unknown>`**, registered under `CHECKS_EXECUTOR_REF` (`'checks'`). No model: parses the checks step's `instructions` (JSON-encoded `string[]`, the config's `finishChecks`) back with zod, runs every command **concurrently** through `run-command.ts`'s `runCommand`, (`checkCommandsOf(instructions)` in contracts' `check-commands.ts` is that parse; the CLI's plan render and the web inspector show the step through it, as `$ command` lines) polls `ctx.isCancelled` while they run and aborts them on a cancelled run, names each log by a hash of its command, and always signals `SignalOutcome.success` — a failing command is named in the summary (`FAIL <command> (exit N, …)`) but never blocks the step. The finish step reads this summary as its `checks` upstream (`depOutputs`) output.
 - **`split-tool.ts` — `splitTool({ kernel: Pick<Kernel,'proposeSplit'>, config, p }): ResolvedTool[]`** — `kernel/task_split`. **Registration-gated OFF for the analyze/scout role**: a scout orients, it does not decompose. `execute` uses the provider `toolCallId` (stable across replay ⇒ idempotent split).
-- **`finalize-plan-tool.ts` — `finalizePlanTool({ kernel, config, p }): ResolvedTool`** — `kernel/finalize_plan`. Reconstructs the plan-note graph from the log, deterministically freezes it, drives the same `proposeSplit` path — **force-auto-approving** the derived split (safe only because `taskId` never appears in a model prompt). `kernel` dep is `Pick<Kernel, 'proposeSplit' | 'listPlanNotes' | 'approvedPlanHash' | 'planNotesChangedSince' | 'nonHumanPlanApproval'>`. Refuses in **FIVE ordered branches**: (1) wrong role (`p.role !== PLAN_STEP_ROLE`); (2) no masterplan note; (3) non-human approval (arrived via a non-human door — tells the human to `orc reply <taskId> approve`); (4) no approval at all; (5) changed after approval (`planNotesChangedSince(approved.seq)` non-empty). Branch 5 compares the *changed-set*, deliberately **not** `approved.hash !== planGraphHash(notes)`, because a content hash depends on the running build's note schema and the two sides may be different builds.
+- **`plan-note-tools.ts` — `planNoteTools({ kernel, p }): ResolvedTool[]`** — `kernel/plan_note_write` (takes `PlanNoteWrite`, returns `{ note }`; key `${runToken}:tool:${toolCallId}:plan-note:${id}`) and `kernel/plan_note_read` (`{ notes }`, or `{ note }` for an id). **Registration-gated to `stepMayPlan`.**
+- **`finalize-plan-tool.ts` — `finalizePlanTool({ kernel, config, p }): ResolvedTool[]`** — `kernel/finalize_plan`, **registration-gated to `stepMayPlan`**. Reconstructs the plan notes from the log, deterministically freezes it, drives the same `proposeSplit` path — **force-auto-approving** the derived split (safe only because `taskId` never appears in a model prompt). `kernel` dep is `Pick<Kernel, 'proposeSplit' | 'listPlanNotes' | 'approvedPlanHash' | 'planNotesChangedSince' | 'nonHumanPlanApproval'>`. Refuses in **FOUR ordered branches**: (1) no masterplan note; (2) non-human approval (arrived via a non-human door — tells the human to `orc reply <taskId> approve`); (3) no approval at all; (4) changed after approval (`planNotesChangedSince(approved.seq)` non-empty). Branch 4 compares the *changed-set*, deliberately **not** `approved.hash !== planGraphHash(notes)`, because a content hash depends on the running build's note schema and the two sides may be different builds.
 - **`report-coverage-tool.ts` — `reportCoverageTool({ kernel, p }): ResolvedTool[]`** — `kernel/report_coverage`. **Registration-gated to `ANALYZE_STEP_ROLE` (scout).** The production emitter for `analysis_completed`.
 - **`read-annotations-tool.ts` — `readAnnotationsTool({ kernel, p }): ResolvedTool`** — `kernel/read_annotations`. The plan-authoring agent's only channel to read `plan_annotated` events. `taskId` from injected context.
 - **`scoped-changes-tool.ts` — `scopedChangesTool({ kernel, p }): ResolvedTool[]`** — `kernel/scoped_changes`. **Registration-gated to BOTH `role === STEP_ROLE.auditor` AND `stepId === VERIFY_STEP_ID`**. Lists the workspace paths **this task's own steps (and its descendant split steps) recorded writing**, derived purely from the event log, each classified `inZone`. Answers **scope MEMBERSHIP only** — a **FLOOR not a diff**, **never a verdict**, **never a gate exemption**. Read-only.
@@ -755,7 +758,7 @@ Cross-references: the grounding freshness rule and mixed-scope machinery are own
      - **ordinary tool calls** are executed one `ctx.operation()` each (`operationId: '<runToken>:tool:<iter>:<toolCallId>'`), calling `executeTool(...)`; each op's `toEvents` emits a `tool_call` + `tool_result` pair. A successful `fs_write/fs_edit/fs_delete` records `input.path` into the per-turn `editedPaths` set;
      - **`join_splits`**: calls `releaseWriteClaims(ctx.runToken)` **before** yielding the suspension, because a parked turn holds no writes and a wait can last hours (`GATE_POLL_SECONDS=3600`);
      - **`ask_human`**: same release-before-yield pattern, yields `{type: feedback}`;
-     - **valid `signal`**: validates declared `outputs` via `validateOutputPaths`, records `signal_received`, yields `{type: signal}` then `{type: done}`, calls `ctx.memory?.capture(signal)`, and **returns**.
+     - **valid `signal`**: validates declared `outputs` via `validateOutputPaths`, records `signal_received`, yields `{type: signal}` then `{type: done}`, and **returns**.
   5. If the loop exhausts `maxIterations`: yields `{type: error, class: agent_error, message: 'maxIterations (...) exhausted without signal'}`.
   6. **`finally { releaseWriteClaims(ctx.runToken) }`** — write claims always die with the turn.
 
@@ -1174,9 +1177,9 @@ A script (`#!/usr/bin/env bun`) whose top-level `async function main(): Promise<
 - **`buildRuntime(shared?): Promise<DbosPort>`** — the one function that creates the DBOS port:
   1. Resolves `config`/`{host,hub}`/`storage`/`kernel` from `shared` when the caller has them.
   2. **Startup order: projections first.** `createVaultProjector({ log, config })` then `await projector.start()`.
-  3. **Memory boot, explicitly degradable.** `try { memory = await openMemory({...}); await memory.projector.start(); lifecycle = createMemoryLifecycle({...}); await lifecycle.start(); bindStep = memory.bindStep; groundingSource = createGroundingSource({...}) } catch { console.warn; bindStep = () => unavailableStepMemory(reason) }`. `createMemoryLifecycle` is the **post-task auto-consolidation** subscriber.
+  3. **Memory boot, explicitly degradable.** `try { memory = await openMemory({...}); await memory.projector.start(); groundingSource = createGroundingSource({...}) } catch { console.warn }`.
   4. **`groundingSource`** is built **only inside the try block**; on the catch path it stays `undefined`; `createDbosPort`'s grounding branch is guarded on its presence and never fires when memory is degraded.
-  5. **`createDbosPort({ ..., groundingSource, stepTools })`.** `stepTools: p => {...}` returns `bound.tools` (memory tools, or the degraded set) **plus**, each internally registration-gated: `...splitTool(...)`, `readAnnotationsTool(...)`, `...reportCoverageTool(...)`, `...scopedChangesTool(...)`, `...execTool({ allowlist: config.execAllowlist })`, and `...(memory ? [finalizePlanTool(...)] : [])` — **`finalize_plan` only when memory is healthy** (with memory degraded the agent can't author a plan-note graph anyway).
+  5. **`createDbosPort({ ..., groundingSource, stepTools })`.** `stepTools: p => {...}` returns the step's knowledge tools **plus**, each internally registration-gated: `...splitTool(...)`, `readAnnotationsTool(...)`, `...reportCoverageTool(...)`, `...scopedChangesTool(...)`, `...execTool({ allowlist: config.execAllowlist })`, `...planNoteTools(...)` and `...finalizePlanTool(...)` — the plan tools for the grounded plan step alone, whether or not memory is healthy.
   6. `await port.launch(); host.skills.watch()`; returns `port` wrapped so its `shutdown` also closes `lifecycle`, `memory`, `projector`, `host`, `hub`.
 
 #### 3. `main.ts` — `buildProgram` and the pre-plugin CLI surface
@@ -1215,7 +1218,7 @@ The **one** implementation of every task/plan mutation, called by all three entr
 - **`Autonomy = 'gated' | 'full'`**, a launch-time choice: `gated` (default) permits everything except approving; `full` lets the client approve (attributed `approvedBy: 'mcp'`).
 - **`mcpApproveTool(actions, autonomy): ResolvedTool`** — `ref: 'orc/approve'`. Listed when actions exist, but under `gated` returns `{ error: 'human gate: ...' }` without calling them. Under `full` validates the input and calls `actions.approve(taskId, { version?, approvedBy: ApprovedBy.mcp }, MCP_ORIGIN)`. The copilot tool set does not include it.
 - **`buildServeTools(deps): ResolvedTool[]`** = `asResolvedTools(buildCopilotTools({ sessions, actions, projectId }))` **+** `deps.memoryTools.filter(t => READ_MEMORY.has(t.name))` **+** `deps.actions ? [mcpApproveTool(...)] : []`. `READ_MEMORY = new Set(MEMORY_READ_TOOLS)` = `[search, read, neighbors, topics, recheck]` — deliberately **excludes `memory_write`**: MCP door #2 gets read-only memory access. The copilot set contributes `record_decision` (via `OrcActions.recordDecision`), the one authoring tool the door serves.
-- **`startMcpServe(opts)`** — `actions: null` means a read-only server. Boots a `createProjectSessions`, opens memory (degrading to `unavailableMemoryTools(reason)`), assembles `tools` via `buildServeTools`, serves over `@modelcontextprotocol/sdk`'s `Server` + `StdioServerTransport`. Logs readiness to **stderr**.
+- **`startMcpServe(opts)`** — `actions: null` means a read-only server. Boots a `createProjectSessions`, probes memory health (`probeMemory`), assembles `tools` via `buildServeTools`, serves over `@modelcontextprotocol/sdk`'s `Server` + `StdioServerTransport`. Logs readiness to **stderr**.
 
 #### 6. Cross-cutting notes
 
@@ -1255,7 +1258,7 @@ The **one** implementation of every task/plan mutation, called by all three entr
 1. **Guard.** Trims `spec`; throws `invalid_transition` if empty.
 2. **Resolve analyzer.** `analyzer = this.analyzers?.get(input.analyzerRef)`; throws if unknown.
 3. **Build the analyze step** inside one log transaction: `analyzeStep = { ...analyzer.analysisStep({ modelRef, taskSpec: spec }), maxIterations, readOnlySource: true }` — the project's `maxIterations` overrides the analyzer's baked `30`, and the kernel stamps **`readOnlySource: true`** so a scout grounds writes notes but never source.
-4. **Build the plan step**: `id: PLAN_STEP_ID`, `role: PLAN_STEP_ROLE` (auditor), `executorRef: 'api-loop'`, `skillRefs: ['plan-authoring']`, `readOnlySource: true`, and crucially **`dependsOn: [analyzeStep.id]`**. Instructions pin the plan-note scope (`planScope(task.id)`) and root id (`MASTERPLAN_NOTE_ID`).
+4. **Build the plan step**: `id: PLAN_STEP_ID`, `role: PLAN_STEP_ROLE` (auditor), `executorRef: 'api-loop'`, `skillRefs: ['plan-authoring']`, `readOnlySource: true`, and crucially **`dependsOn: [analyzeStep.id]`**. Instructions name `plan_note_write` and the root id (`MASTERPLAN_NOTE_ID`) whose `subplans` lists the rest, and no task id.
 5. **Propose + approve atomically.** `draft = { strategyRef: STRATEGY.groundedPlan, analyzerRef, steps: [analyzeStep, planStep] }` is appended as `plan_proposed`, then `approvePlanIn(..., { approvedBy: 'policy' })` — **both steps proposed and policy-approved in one log transaction**. The human's real gate is the conversational `approve` *inside* the plan step.
 
 #### 4. Seeding — `createRegroundTask` (maintenance)
@@ -1362,7 +1365,7 @@ sequenceDiagram
         P-->>Pl: depOutputs[analyze] = full analysis summary
     end
 
-    Pl->>Pl: authors plan-note graph, finalize_plan
+    Pl->>Pl: authors plan notes (plan_note_write), finalize_plan
     Note over Pl: groundedPlanOmission gates ONLY finalize_plan,<br/>not analysis_completed
 ```
 
@@ -1388,7 +1391,7 @@ flowchart TD
     FIN --> HAND
     FULL --> FIN2[finish: step_completed = summary]
     FIN2 --> HAND
-    HAND --> PLAN[plan step authors graph + finalize_plan]
+    HAND --> PLAN[plan step authors plan notes + finalize_plan]
 ```
 
 #### 10. Invariants worth remembering

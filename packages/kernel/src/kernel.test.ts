@@ -2,13 +2,13 @@ import { afterAll, afterEach, describe, expect, it } from 'bun:test'
 import { mkdirSync, mkdtempSync, realpathSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import { APPROVAL_ANSWER, ApprovedBy, AUTHOR_SOURCE, ApprovalPolicy, CHECKS_STEP_ID, Confidence, Door, EVENT_KIND, FINISH_STEP_ID, GroundedApprovalDoor, LINK_KIND, NO_CHAT, NOTE_TIER, PAYLOAD_SCHEMAS, RunRequestedPayload, STEP_ID, STEP_ROLE, STRATEGY, TASK_STATUS, TaskStatus, WORKSPACE_KIND, WORKSPACE_TITLE_MAX, authorSourceOf, type Analyzer, type AuthorSource, type Origin, type PlanDraft, type PlanStep, type TaskNode, type Workspace } from '@orc/contracts'
-import { authorFixture, draftFixture, must, stepFixture } from '@orc/contracts/fixtures'
+import { planScope, PlanNoteToolName, APPROVAL_ANSWER, ApprovedBy, AUTHOR_SOURCE, ApprovalPolicy, CHECKS_STEP_ID, Confidence, Door, EVENT_KIND, FINISH_STEP_ID, GroundedApprovalDoor, NO_CHAT, PAYLOAD_SCHEMAS, RunRequestedPayload, STEP_ID, STEP_ROLE, STRATEGY, TASK_STATUS, TaskStatus, WORKSPACE_KIND, WORKSPACE_TITLE_MAX, authorSourceOf, type Analyzer, type AuthorSource, type Origin, type PlanDraft, type PlanStep, type TaskNode, type Workspace } from '@orc/contracts'
+import { authorFixture, draftFixture, must, planNoteFixture, stepFixture } from '@orc/contracts/fixtures'
 import { openStorage, type EventLogOps } from './storage'
 import { KERNEL_ERROR_CODE, KernelError } from './errors'
 import { Kernel, SPLIT_ORIGIN } from './kernel'
 import type { KernelMutationVerb } from './kernel-verbs'
-import { instantiateFrozenPlan, planGraphHash, planScope } from './execution/strategies/grounded-plan'
+import { GROUNDED_TASK_TYPE, instantiateFrozenPlan, planGraphHash } from './execution/strategies/grounded-plan'
 import { createTestDb, seedTestWorkspace, TEST_PROJECT_ID, TEST_WORKSPACE, TEST_WORKSPACE_ID } from './test-helpers'
 
 // Every call below spells its own envelope. WEB is one chat entered through the web door; SEED is
@@ -88,6 +88,7 @@ interface VerbFixtures {
   awaitingTask(): Promise<TaskNode>
   approvedTask(): Promise<TaskNode>
   runningTask(): Promise<TaskNode>
+  groundedTask(): Promise<TaskNode>
   askedTask(): Promise<TaskNode>
   liveWorkspace(): Promise<Workspace>
 }
@@ -115,6 +116,11 @@ async function verbFixtures(k: Kernel, log: TestLog, tag: string): Promise<VerbF
     runningTask: async () => {
       const t = await f.draftTask()
       await toRunning(log, t.id, SEED)
+      f.mark = await len()
+      return t
+    },
+    groundedTask: async () => {
+      const t = await k.createTask({ workspaceId: TEST_WORKSPACE_ID, title: tag, type: GROUNDED_TASK_TYPE }, SEED)
       f.mark = await len()
       return t
     },
@@ -157,6 +163,7 @@ const VERBS: Record<KernelMutationVerb, (k: Kernel, f: VerbFixtures) => Promise<
     }, WEB)
   },
   annotatePlan: async (k, f) => k.annotatePlan((await f.approvedTask()).id, { targetNote: 'db', refs: [], text: 'x' }, WEB),
+  writePlanNote: async (k, f) => k.writePlanNote((await f.groundedTask()).id, { id: 'masterplan', title: f.tag }, WEB),
   replyFeedback: async (k, f) => k.replyFeedback((await f.askedTask()).id, 'yes', WEB),
   reportCoverage: async (k, f) => {
     const t = await f.draftTask()
@@ -785,22 +792,6 @@ describe('Kernel lifecycle', () => {
     expect(await k.replyFeedback(t.id, 'again', WEB)).toBeNull()
   })
 
-  it('replyFeedback binds exact grounded plan approval to the current graph hash', async () => {
-    const { k, log } = await freshKernelAndLog()
-    const t = await k.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'grounded', type: 'grounded' }, WEB)
-    const scope = planScope(t.id)
-    const author = authorFixture({ source: AUTHOR_SOURCE.agent })
-    await log.append({ ...WEB, taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_written, payload: { note: { id: 'masterplan', scope, tier: 'plan', title: 'Plan', links: [{ id: 'db', kind: LINK_KIND.decomposes_into }] }, author } })
-    await log.append({ ...WEB, taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_written, payload: { note: { id: 'db', scope, tier: 'plan', title: 'DB', body: 'schema' }, author } })
-    const runToken = `step:${t.id}:plan:a1`
-    await log.append({ ...WEB, taskId: t.id, stepId: 'plan', runToken, kind: EVENT_KIND.feedback_requested, payload: { question: 'approve?', topic: 'plan-1' } })
-
-    await k.replyFeedback(t.id, '  ApPrOvE  ', WEB)
-
-    const provided = must((await log.byTask(t.id)).find(e => e.kind === EVENT_KIND.feedback_provided), 'feedback_provided event')
-    expect(provided.payload.planHash).toBe(planGraphHash(await k.listPlanNotes(t.id)))
-  })
-
   // A human answered "agree" and the gate silently read it as ordinary feedback: the plan never
   // froze and the agent re-asked. The gate is the vocabulary now, not one magic word.
   it('replyFeedback stamps for any word in ApprovalAnswer, not just the canonical one', async () => {
@@ -999,44 +990,6 @@ describe('Kernel lifecycle', () => {
     expect(must(annotations[0], 'first annotation').seq).toBeLessThan(must(annotations[1], 'second annotation').seq)
   })
 
-  // the freeze reads plan-notes from the LOG, never the async SurrealDB projection. Here NO
-  // memory projector runs, so the read model is empty — pre-fix finalize (store.list/get) would see
-  // "no masterplan"; listPlanNotes folds the memory_written events straight off the log and succeeds.
-  it('listPlanNotes reconstructs the plan-note graph from the log with no projection running', async () => {
-    const { k, log } = await freshKernelAndLog()
-    const taskId = 'grounded-1'
-    const scope = planScope(taskId)
-    const author = authorFixture({ source: AUTHOR_SOURCE.agent })
-    // memory_written events carry taskId:null (scoped by note.scope) — exactly what store.write appends
-    await log.append({ ...WEB, taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_written, payload: { note: { id: 'masterplan', scope, tier: 'plan', title: 'Web app', links: [{ id: 'db', kind: LINK_KIND.decomposes_into }] }, author } })
-    await log.append({ ...WEB, taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_written, payload: { note: { id: 'db', scope, tier: 'plan', title: 'DB', body: 'schema' }, author } })
-    // a note in ANOTHER task's scope must not bleed into this task's freeze
-    await log.append({ ...WEB, taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_written, payload: { note: { id: 'masterplan', scope: planScope('other'), tier: 'plan', title: 'Theirs' }, author } })
-
-    const notes = await k.listPlanNotes(taskId)
-    expect(notes.map(n => n.id).sort()).toEqual(['db', 'masterplan'])
-    expect(must(notes.find(n => n.id === 'masterplan'), 'masterplan note').title).toBe('Web app')
-    expect(instantiateFrozenPlan('masterplan', notes).steps.map(s => s.id)).toEqual(['db'])
-  })
-
-  it('freezes a subplan-declared modelRef, and omits the key when the planner left it empty', async () => {
-    const { k, log } = await freshKernelAndLog()
-    const scope = planScope('grounded-models')
-    const author = authorFixture({ source: AUTHOR_SOURCE.agent })
-    const note = (id: string, over: Record<string, unknown> = {}) => log.append({
-      ...WEB, taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_written,
-      payload: { note: { id, scope, tier: NOTE_TIER.plan, title: id, ...over }, author },
-    })
-    await note('masterplan', { links: [{ id: 'cheap', kind: LINK_KIND.decomposes_into }, { id: 'hard', kind: LINK_KIND.decomposes_into }] })
-    await note('cheap')
-    await note('hard', { modelRef: 'anthropic/claude-opus-5' })
-
-    const steps = instantiateFrozenPlan('masterplan', await k.listPlanNotes('grounded-models')).steps
-    // absent, not '': the expansion inherits via `?? parentStep.modelRef`, which '' would defeat
-    expect(steps.find(s => s.id === 'cheap')).not.toHaveProperty('modelRef')
-    expect(must(steps.find(s => s.id === 'hard'), 'hard step').modelRef).toBe('anthropic/claude-opus-5')
-  })
-
   it('requestRun records the ask, with the cwd override the supervisor cannot derive', async () => {
     const k = await freshKernel()
     const t = await k.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'x', spec: 's' }, WEB)
@@ -1145,6 +1098,42 @@ describe('Kernel lifecycle', () => {
     expect((await k.listTaskKnowledgeWrites(sibling.id)).live.map(r => r.id)).toEqual(['cccccccc'])
   })
 
+  describe('knowledge ownership across a split', () => {
+    const splitChild = async (k: Kernel, log: TestLog, type: string) => {
+      const parent = await k.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'P', spec: '', type }, WEB)
+      await toRunning(log, parent.id, WEB)
+      const child = await k.proposeSplit({
+        parentTaskId: parent.id, stepId: 's1', runToken: `step:${parent.id}:s1:a1`, toolCallId: 'call_1',
+        title: 'C', spec: '',
+        plan: { steps: [{ id: 'w1', role: 'worker', title: 'w', instructions: 'do', dependsOn: [], skillRefs: [], toolRefs: [] }] },
+        parentStep: { executorRef: 'api-loop', modelRef: 'fake/m', maxIterations: 5 },
+        policy: ApprovalPolicy.parse({ default: 'auto' }), maxDepth: 3,
+      }, WEB)
+      await log.append({
+        ...WEB, taskId: parent.id, stepId: 's1', runToken: null, kind: EVENT_KIND.knowledge_written,
+        payload: {
+          added: [{ id: 'aaaaaaaa', location: 'knowledge/aaaaaaaa.md' }], changed: [], retired: [],
+          files: ['knowledge/aaaaaaaa.md'], why: 'w', decision: null, decisionsRecorded: [], decisionsSuperseded: [], asserted: [], author: authorFixture({ taskId: parent.id }),
+        },
+      })
+      return { parent, childId: child.childTaskId }
+    }
+
+    it('a grounded parent\'s knowledge writes belong to its split child', async () => {
+      const { k, log } = await freshKernelAndLog()
+      const { parent, childId } = await splitChild(k, log, GROUNDED_TASK_TYPE)
+      expect((await k.listTaskKnowledgeWrites(childId)).files).toEqual(['knowledge/aaaaaaaa.md'])
+      expect((await k.listTaskKnowledgeWrites(parent.id)).files).toEqual(['knowledge/aaaaaaaa.md'])
+    })
+
+    it('a non-grounded parent\'s knowledge writes stay with the parent', async () => {
+      const { k, log } = await freshKernelAndLog()
+      const { parent, childId } = await splitChild(k, log, 'plain')
+      expect((await k.listTaskKnowledgeWrites(childId)).files).toEqual([])
+      expect((await k.listTaskKnowledgeWrites(parent.id)).files).toEqual(['knowledge/aaaaaaaa.md'])
+    })
+  })
+
   it('cancelSubtree stamps a child whose split commits after the snapshot, before the sweep', async () => {
     const { k, log } = await freshKernelAndLog()
     const parent = await k.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'P', spec: '' }, WEB)
@@ -1170,6 +1159,121 @@ describe('Kernel lifecycle', () => {
     const childId = `${parent.id}.s1.call_1`
     expect(stamped.sort()).toEqual([parent.id, childId].sort())
     expect((await k.getTask(childId))?.status).toBe(TASK_STATUS.cancelled)
+  })
+})
+
+describe('plan notes', () => {
+  const groundedTask = (k: Kernel): Promise<TaskNode> =>
+    k.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'grounded', type: GROUNDED_TASK_TYPE }, WEB)
+  const planRun = (taskId: string, idempotencyKey: string) => ({ stepId: STEP_ID.plan, runToken: `step:${taskId}:plan:a1`, idempotencyKey })
+  const writtenCount = async (log: TestLog, taskId: string): Promise<number> =>
+    (await log.byTask(taskId)).filter(e => e.kind === EVENT_KIND.plan_note_written).length
+  const askApproval = (log: TestLog, taskId: string) => log.append({
+    ...WEB, taskId, stepId: STEP_ID.plan, runToken: `step:${taskId}:plan:a1`,
+    kind: EVENT_KIND.feedback_requested, payload: { question: 'approve?', topic: 'plan-1' },
+  })
+
+  it('writePlanNote lands the note with the task, step and run on its envelope', async () => {
+    const { k, log } = await freshKernelAndLog()
+    const t = await groundedTask(k)
+    const note = await k.writePlanNote(t.id, { id: 'masterplan', title: 'Plan', subplans: ['db'] }, WEB, planRun(t.id, 'k1'))
+
+    expect(note).toEqual(planNoteFixture({ title: 'Plan', subplans: ['db'] }))
+    const written = (await log.byTask(t.id)).filter(e => e.kind === EVENT_KIND.plan_note_written)
+    expect(written.map(e => ({ taskId: e.taskId, stepId: e.stepId, runToken: e.runToken, idempotencyKey: e.idempotencyKey })))
+      .toEqual([{ taskId: t.id, stepId: STEP_ID.plan, runToken: `step:${t.id}:plan:a1`, idempotencyKey: 'k1' }])
+    expect(PAYLOAD_SCHEMAS.plan_note_written.parse(must(written[0], 'written event').payload).note).toEqual(note)
+    expect(await k.listPlanNotes(t.id)).toEqual([note])
+  })
+
+  it('a replayed key returns the note it stored and appends nothing, even after a later write moved the note', async () => {
+    const { k, log } = await freshKernelAndLog()
+    const t = await groundedTask(k)
+    const first = await k.writePlanNote(t.id, { id: 'db', title: 'DB', body: 'b1' }, WEB, planRun(t.id, 'k1'))
+    await k.writePlanNote(t.id, { id: 'db', zone: ['src/**'] }, WEB, planRun(t.id, 'k2'))
+    expect(await writtenCount(log, t.id)).toBe(2)
+
+    expect(await k.writePlanNote(t.id, { id: 'db', title: 'DB', body: 'b1' }, WEB, planRun(t.id, 'k1'))).toEqual(first)
+    expect(await writtenCount(log, t.id)).toBe(2)
+  })
+
+  it('refuses a task that is not grounded', async () => {
+    const { k, log } = await freshKernelAndLog()
+    const t = await k.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'draft' }, WEB)
+    expect(await codeOf(k.writePlanNote(t.id, { id: 'masterplan', title: 'Plan' }, WEB))).toBe(KERNEL_ERROR_CODE.invalid_transition)
+    expect(await writtenCount(log, t.id)).toBe(0)
+  })
+
+  it('refuses a done task', async () => {
+    const { k, log } = await freshKernelAndLog()
+    const t = await groundedTask(k)
+    await toStatus(log, t.id, TASK_STATUS.done, SEED)
+    expect(await codeOf(k.writePlanNote(t.id, { id: 'masterplan', title: 'Plan' }, WEB))).toBe(KERNEL_ERROR_CODE.invalid_transition)
+    expect(await writtenCount(log, t.id)).toBe(0)
+  })
+
+  it('refuses a create without a title, and a malformed zone as a validation failure', async () => {
+    const { k, log } = await freshKernelAndLog()
+    const t = await groundedTask(k)
+    expect(await codeOf(k.writePlanNote(t.id, { id: 'db' }, WEB))).toBe(KERNEL_ERROR_CODE.invalid_transition)
+    expect(await codeOf(k.writePlanNote(t.id, { id: 'db', title: 'DB', zone: ['a/**\nb.ts'] }, WEB))).toBe(KERNEL_ERROR_CODE.plan_validation_failed)
+    expect(await writtenCount(log, t.id)).toBe(0)
+  })
+
+  it('the approval hash covers the notes the kernel holds, not an empty graph', async () => {
+    const { k, log } = await freshKernelAndLog()
+    const t = await groundedTask(k)
+    await k.writePlanNote(t.id, { id: 'masterplan', title: 'Plan', subplans: ['db'] }, WEB)
+    await k.writePlanNote(t.id, { id: 'db', title: 'DB', body: 'schema' }, WEB)
+    await askApproval(log, t.id)
+
+    await k.replyFeedback(t.id, '  ApPrOvE  ', WEB)
+
+    const provided = must((await log.byTask(t.id)).find(e => e.kind === EVENT_KIND.feedback_provided), 'feedback_provided event')
+    const planHash = PAYLOAD_SCHEMAS.feedback_provided.parse(provided.payload).planHash
+    expect(planHash).toBe(planGraphHash(await k.listPlanNotes(t.id)))
+    expect(planHash).not.toBe(planGraphHash([]))
+  })
+
+  it('planNotesChangedSince names exactly the note written after the approval', async () => {
+    const { k, log } = await freshKernelAndLog()
+    const t = await groundedTask(k)
+    await k.writePlanNote(t.id, { id: 'masterplan', title: 'Plan', subplans: ['db', 'api'] }, WEB)
+    await k.writePlanNote(t.id, { id: 'db', title: 'DB' }, WEB)
+    await k.writePlanNote(t.id, { id: 'api', title: 'API', dependsOn: ['db'] }, WEB)
+    await askApproval(log, t.id)
+    await k.replyFeedback(t.id, APPROVAL_ANSWER, WEB)
+    const approved = must(await k.approvedPlanHash(t.id, `step:${t.id}:plan:a1`), 'approval')
+    expect(await k.planNotesChangedSince(t.id, approved.seq)).toEqual([])
+
+    await k.writePlanNote(t.id, { id: 'api', body: 'endpoints' }, WEB)
+
+    expect(await k.planNotesChangedSince(t.id, approved.seq)).toEqual(['api'])
+  })
+
+  it('freezes a subplan-declared modelRef, and omits the key when the planner left it empty', async () => {
+    const { k } = await freshKernelAndLog()
+    const t = await groundedTask(k)
+    await k.writePlanNote(t.id, { id: 'masterplan', title: 'Plan', subplans: ['cheap', 'hard'] }, WEB)
+    await k.writePlanNote(t.id, { id: 'cheap', title: 'cheap' }, WEB)
+    await k.writePlanNote(t.id, { id: 'hard', title: 'hard', modelRef: 'anthropic/claude-opus-5' }, WEB)
+
+    const steps = instantiateFrozenPlan('masterplan', await k.listPlanNotes(t.id)).steps
+    // absent, not '': the expansion inherits via `?? parentStep.modelRef`, which '' would defeat
+    expect(steps.find(s => s.id === 'cheap')).not.toHaveProperty('modelRef')
+    expect(must(steps.find(s => s.id === 'hard'), 'hard step').modelRef).toBe('anthropic/claude-opus-5')
+  })
+
+  it("the grounded plan step's instructions name neither the task id nor its scope", async () => {
+    const { log } = await freshKernelAndLog()
+    const analyzers = new Map<string, Analyzer>([['agent-analyzer', { id: 'agent-analyzer', analysisStep: () => stepFixture({ id: STEP_ID.analyze, role: STEP_ROLE.scout }) }]])
+    const k = new Kernel(log, undefined, analyzers)
+    const t = await k.createGroundedTask({ workspaceId: TEST_WORKSPACE_ID, title: 'grounded', spec: 's', modelRef: 'fake/m', analyzerRef: 'agent-analyzer' }, WEB)
+    const instructions = must(must(await k.getPlan(t.id), 'plan').steps.find(s => s.id === STEP_ID.plan), 'plan step').instructions
+    expect(instructions).toContain(PlanNoteToolName.write)
+    expect(instructions).toContain(PlanNoteToolName.finalize)
+    expect(instructions).not.toContain(t.id)
+    expect(instructions).not.toContain(planScope(t.id))
   })
 })
 

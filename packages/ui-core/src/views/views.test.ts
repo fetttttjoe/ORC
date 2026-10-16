@@ -1,7 +1,6 @@
 import { describe, expect, it } from 'bun:test'
-import { EVENT_KIND, FailureClass, NOTE_TIER, TASK_STATUS, type EventRecord, type TaskStatus } from '@orc/contracts'
-import { authorFixture, eventFixture, must, planFixture, stepFixture, taskFixture } from '@orc/contracts/fixtures'
-import { planScope } from '@orc/kernel'
+import { EVENT_KIND, FailureClass, TASK_STATUS, planScope, type EventRecord, type PlanNote, type TaskStatus } from '@orc/contracts'
+import { authorFixture, eventFixture, must, planFixture, planNoteFixture, stepFixture, taskFixture } from '@orc/contracts/fixtures'
 import { artifactNodeId, modelNodeId, noteNodeId, stepNodeId } from '../graph'
 import { modelOf } from '../test-helpers'
 import { models } from './models'
@@ -224,26 +223,22 @@ describe('plans view', () => {
 })
 
 describe('plan notes view', () => {
-  it('reads the decomposition notes living in the task plan scope, and nothing from another scope', () => {
+  const planned = (seq: number, taskId: string, note: PlanNote): EventRecord => ev(seq, EVENT_KIND.plan_note_written, taskId, { note })
+
+  it("reads the task's kernel plan notes, and none of another task's", () => {
     const decomposed = modelOf([
-      wrote(1, planScope('C'), 'sub-a', { tier: NOTE_TIER.plan }),
-      wrote(2, planScope('other'), 'sub-b', { tier: NOTE_TIER.plan }),
+      planned(1, 'C', planNoteFixture({ id: 'sub-a' })),
+      planned(2, 'other', planNoteFixture({ id: 'sub-b' })),
     ])
     expect(planNotes.read(decomposed, { taskId: 'C' })?.notes.map(n => n.id)).toEqual(['sub-a'])
   })
 
-  // memory_written/memory_deleted carry taskId null (store.ts appends them project-scoped), so
-  // taskAndParent alone (envelope-keyed) never fires for the two kinds this view's read actually
-  // folds — the decomposition it exists to show went stale silently. touches has to match the
-  // note's own scope against the task it belongs to instead.
-  it('a memory write in the task plan scope touches that task, and a write in another scope touches nothing', () => {
-    expect(planNotes.touches(wrote(3, planScope('C'), 'sub-a'), m)).toEqual([{ taskId: 'C' }])
-    expect(planNotes.touches(wrote(4, 'project', 'unrelated'), m)).toEqual([])
+  it('a plan note written on a child touches the child and its parent', () => {
+    expect(planNotes.touches(planned(3, 'C', planNoteFixture({ id: 'sub-a' })), m)).toEqual([{ taskId: 'C' }, { taskId: 'P' }])
   })
 
-  it('a memory delete in the task plan scope touches that task too', () => {
-    expect(planNotes.touches(ev(5, EVENT_KIND.memory_deleted, null, { id: 'sub-a', scope: planScope('C'), author }), m))
-      .toEqual([{ taskId: 'C' }])
+  it('a memory write touches nothing, even in the scope plan notes once lived in', () => {
+    expect(planNotes.touches(wrote(4, planScope('C'), 'sub-a'), m)).toEqual([])
   })
 })
 

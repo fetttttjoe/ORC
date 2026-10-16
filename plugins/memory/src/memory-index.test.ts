@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { NoteKind, NOTE_KIND, type EventRecord, type SemanticNote, EVENT_KIND, LINK_KIND } from '@orc/contracts'
 import { SurrealMemory } from './surreal'
-import { authorFixture, episodicNoteFixture, eventFixture, planNoteFixture, semanticNoteFixture } from '@orc/contracts/fixtures'
+import { authorFixture, episodicNoteFixture, eventFixture, memoryPlanNoteFixture, semanticNoteFixture } from '@orc/contracts/fixtures'
 import { createTestSurreal } from './test-helpers'
 import { renderMemoryIndex, rebuildVaultMemory, SECTIONS } from './memory-index'
 
@@ -88,7 +88,7 @@ describe('renderMemoryIndex', () => {
 
   // The index is the knowledge map: only the semantic tier claims anything about the project.
   it('leaves plan and episodic notes out of the index entirely', () => {
-    const md = renderMemoryIndex([note({ id: 'claim', title: 'A claim' }), planNoteFixture({ id: 'masterplan', title: 'A plan' }), episodicNoteFixture({ id: 'step-a', title: 'A step' })])
+    const md = renderMemoryIndex([note({ id: 'claim', title: 'A claim' }), memoryPlanNoteFixture({ id: 'masterplan', title: 'A plan' }), episodicNoteFixture({ id: 'step-a', title: 'A step' })])
     expect(md).toContain('A claim')
     expect(md).not.toContain('A plan')
     expect(md).not.toContain('A step')

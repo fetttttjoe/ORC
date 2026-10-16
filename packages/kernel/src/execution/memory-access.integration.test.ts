@@ -2,11 +2,11 @@ import { afterAll, describe, expect, it } from 'bun:test'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import { AUTHOR_SOURCE, Door, EVENT_KIND, MEMORY_ACCESS, MemoryAccessedPayload, LINK_KIND, NO_CHAT, RunOutcome, type Origin } from '@orc/contracts'
+import { AUTHOR_SOURCE, Door, taskLaneScopes, EVENT_KIND, MEMORY_ACCESS, MemoryAccessedPayload, LINK_KIND, NO_CHAT, RunOutcome, type Origin } from '@orc/contracts'
 import { authorFixture, draftFixture, stepFixture } from '@orc/contracts/fixtures'
 import { apiLoopExecutor } from '@orc/executor-api-loop'
 import { scriptModel } from '@orc/executor-api-loop/test-model'
-import { createMemory } from '@orc/memory'
+import { createMemory, memoryTools } from '@orc/memory'
 import { createTestSurreal } from '@orc/memory/test-helpers'
 import { openStorage } from '../storage'
 import { Kernel } from '../kernel'
@@ -69,7 +69,7 @@ describe('agent-side memory access recording (integration)', () => {
       storage, config, skills: fakeSkills,
       providers: new Map([['fake', { costs: {}, languageModel: () => model }]]),
       executors: new Map([['api-loop', apiLoopExecutor()]]),
-      stepTools: p => memory.bindStep({ author: authorFixture({ source: AUTHOR_SOURCE.agent, origin: p.origin, workspaceId: p.workspaceId, taskId: p.taskId, stepId: p.stepId, runToken: p.runToken, executor: p.executor, model: p.model, role: p.role }), step: p.step, taskId: p.taskId, ancestorTaskIds: p.ancestorTaskIds }),
+      stepTools: p => memoryTools({ store: memory.store, author: authorFixture({ source: AUTHOR_SOURCE.agent, origin: p.origin, workspaceId: p.workspaceId, taskId: p.taskId, stepId: p.stepId, runToken: p.runToken, executor: p.executor, model: p.model, role: p.role }), catchUp: memory.projector.catchUp, searchScope: taskLaneScopes(p.taskId, p.ancestorTaskIds) }),
     })
     await port.launch()
     cleanup.push(() => port.shutdown())

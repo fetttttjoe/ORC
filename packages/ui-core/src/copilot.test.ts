@@ -2,7 +2,7 @@ import { describe, expect, it } from 'bun:test'
 import { generateText, stepCountIs } from 'ai'
 import { MockLanguageModelV4 } from 'ai/test'
 import type { ToolSet } from 'ai'
-import { authorFixture, eventFixture, listOf, must, planFixture, planNoteFixture, recordOf, taskFixture } from '@orc/contracts/fixtures'
+import { eventFixture, listOf, must, planFixture, planNoteFixture, recordOf, taskFixture } from '@orc/contracts/fixtures'
 import { DecisionStatus, Door, EVENT_KIND, KnowledgeToolName, ScopeType, TASK_STATUS, WORKSPACE_KIND, WORKSPACE_STATE, type EventRecord, type Origin, type PlanNote, type Workspace, type WorkspaceHealth, type WorkspaceWithHealth } from '@orc/contracts'
 import type { OrcActions } from './actions'
 import type { ProjectSessions } from './sessions'
@@ -87,9 +87,8 @@ const stubSessions = sessionsOf([], {
 // The exchange these tools are built for. Every mutating tool passes it to the action it calls,
 // so there is no origin-less spelling of buildCopilotTools to fall back to.
 const ORIGIN: Origin = { chatId: 'chat-copilot', door: Door.mcp }
-const author = authorFixture()
 const wrotePlanNote = (seq: number, note: PlanNote): EventRecord =>
-  eventFixture({ seq, taskId: null, kind: EVENT_KIND.memory_written, payload: { note, author } })
+  eventFixture({ seq, taskId: 't1', kind: EVENT_KIND.plan_note_written, payload: { note } })
 
 describe('copilot tools', () => {
   it('read tools ground the model; the loop runs tool → answer', async () => {
@@ -410,9 +409,9 @@ describe('task_transcript (bounded for the MCP door)', () => {
 })
 
 describe('plan_notes (mechanical fields)', () => {
-  it('carries dependsOn/zone/skillRefs/toolRefs/modelRef and a snipped body', async () => {
+  it('carries subplans/dependsOn/zone/skillRefs/toolRefs/modelRef and a snipped body', async () => {
     const note = planNoteFixture({
-      id: 'sub-a', title: 'Sub A', body: 'b'.repeat(900),
+      id: 'sub-a', title: 'Sub A', body: 'b'.repeat(900), subplans: ['sub-b'],
       dependsOn: ['generate-doc'], zone: ['docs/**'], skillRefs: ['role-auditor'], toolRefs: ['web/search'],
       modelRef: 'anthropic/claude-haiku-4-5',
     })
@@ -422,7 +421,7 @@ describe('plan_notes (mechanical fields)', () => {
     const r = await callTool(tools, 'plan_notes', { taskId: 't1' })
     const out = recordOf(listOf(r.output)[0])
     expect(out).toMatchObject({
-      id: 'sub-a', dependsOn: ['generate-doc'], zone: ['docs/**'],
+      id: 'sub-a', subplans: ['sub-b'], dependsOn: ['generate-doc'], zone: ['docs/**'],
       skillRefs: ['role-auditor'], toolRefs: ['web/search'], modelRef: 'anthropic/claude-haiku-4-5',
     })
     expect(typeof out.body).toBe('string')

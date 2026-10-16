@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'bun:test'
 import { claimId } from '@orc/contracts'
-import { claimFixture, planNoteFixture, semanticNoteFixture } from '@orc/contracts/fixtures'
+import { claimFixture, memoryPlanNoteFixture, semanticNoteFixture } from '@orc/contracts/fixtures'
 import { applyBudget, approxTokens, fitMemoryNoteToBudget, TRIM_MARKER } from './budget'
 
 describe('applyBudget', () => {
@@ -34,7 +34,7 @@ describe('fitMemoryNoteToBudget', () => {
   // fitter entirely: 16 skillRefs + 16 toolRefs + a modelRef is ~2KB riding the note spread past
   // every discard, against a 1KB floor. Same shape of leak a retired `rules[]` had.
   it('bounds the plan tier’s execution plumbing — skillRefs/toolRefs/modelRef are not exempt', () => {
-    const note = planNoteFixture({
+    const note = memoryPlanNoteFixture({
       id: 'plumbing', title: 'P',
       skillRefs: Array.from({ length: 16 }, (_, i) => `skill-${i}-${'s'.repeat(50)}`),
       toolRefs: Array.from({ length: 16 }, (_, i) => `web/tool-${i}-${'t'.repeat(48)}`),
@@ -49,7 +49,7 @@ describe('fitMemoryNoteToBudget', () => {
   // `{...note}` spread through every discard whole. At the contracts max (100 ids × 64 chars) that
   // is ~6.6KB against the 1KB response floor — same leak class as skillRefs/toolRefs above.
   it('bounds the plan tier’s dependsOn — the ordering list is not exempt', () => {
-    const note = planNoteFixture({
+    const note = memoryPlanNoteFixture({
       id: 'ordering', title: 'P',
       dependsOn: Array.from({ length: 100 }, (_, i) => `dep-${i}-${'d'.repeat(55)}`.slice(0, 64)),
     })
@@ -61,7 +61,7 @@ describe('fitMemoryNoteToBudget', () => {
   it('keeps the complete response within the irreducible floor even with oversized provenance', () => {
     // a PLAN note: the only tier with all three trimmable text fields, so this exercises the
     // whole ladder in one case
-    const note = planNoteFixture({
+    const note = memoryPlanNoteFixture({
       id: 'a'.repeat(128), title: 't'.repeat(200),
       summary: 's'.repeat(50), rationale: 'r'.repeat(50), body: 'b'.repeat(50),
       scope: 's'.repeat(1_000), sourceRevision: 'r'.repeat(1_000),

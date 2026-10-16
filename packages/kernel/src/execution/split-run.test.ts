@@ -4,12 +4,12 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import {
-  ApprovalPolicy, ApprovedBy, AUTHOR_SOURCE, Door, EVENT_KIND, FINISH_STEP_ID, NO_CHAT, PAYLOAD_SCHEMAS, RunOutcome, SignalOutcome, TASK_STATUS,
+  ApprovalPolicy, ApprovedBy, AUTHOR_SOURCE, Door, taskLaneScopes, EVENT_KIND, FINISH_STEP_ID, NO_CHAT, PAYLOAD_SCHEMAS, RunOutcome, SignalOutcome, TASK_STATUS,
   type AgentExecutor, type EventDraft, type ExecutorContext, type Origin, type ResolvedTool,
   type SplitResult, type UnifiedEvent,
 } from '@orc/contracts'
 import { authorFixture, draftFixture, must, stepFixture } from '@orc/contracts/fixtures'
-import { createMemory } from '@orc/memory'
+import { createMemory, memoryTools } from '@orc/memory'
 import { createTestSurreal } from '@orc/memory/test-helpers'
 import { openStorage } from '../storage'
 import { Kernel } from '../kernel'
@@ -162,9 +162,9 @@ async function bringUp(policy: 'auto' | 'manual', executor: AgentExecutor<unknow
     providers: new Map([['fake', fakeProvider]]),
     executors: new Map([['split-fake', executor]]),
     stepTools: p => {
-      const bound = memory.bindStep({ author: authorFixture({ source: AUTHOR_SOURCE.agent, origin: p.origin, workspaceId: p.workspaceId, taskId: p.taskId, stepId: p.stepId, runToken: p.runToken, executor: p.executor, model: p.model, role: p.role }), step: p.step, taskId: p.taskId, ancestorTaskIds: p.ancestorTaskIds })
-      return { memory: bound.memory, tools: [
-        ...bound.tools,
+      const memoryStepTools = memoryTools({ store: memory.store, author: authorFixture({ source: AUTHOR_SOURCE.agent, origin: p.origin, workspaceId: p.workspaceId, taskId: p.taskId, stepId: p.stepId, runToken: p.runToken, executor: p.executor, model: p.model, role: p.role }), catchUp: memory.projector.catchUp, searchScope: taskLaneScopes(p.taskId, p.ancestorTaskIds) })
+      return { tools: [
+        ...memoryStepTools,
         ...splitTool({ kernel, config: { approvalPolicy: config.approvalPolicy, maxDepth: config.maxDepth }, p }),
       ] }
     },

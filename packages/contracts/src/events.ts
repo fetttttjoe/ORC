@@ -11,6 +11,7 @@ import { Origin } from './origin'
 import { AnalysisCompletedPayload, FeedbackProvidedPayload, FeedbackRequestedPayload, PlanAnnotatedPayload } from './analysis'
 import { WorkspaceArchivedPayload, WorkspaceCreatedPayload, WorkspaceMergedPayload, WorkspaceRetitledPayload } from './workspace-entity'
 import { ChatOpenedPayload } from './chat'
+import { PlanNoteWrittenPayload } from './plan-note'
 import { KnowledgeCheckedPayload, KnowledgeDeliveredPayload, KnowledgeWrittenPayload } from './knowledge-events'
 
 // typed so folds can parse receipts without casts
@@ -221,6 +222,7 @@ export const PAYLOAD_SCHEMAS = {
   feedback_requested: FeedbackRequestedPayload,
   feedback_provided: FeedbackProvidedPayload,
   plan_annotated: PlanAnnotatedPayload,
+  plan_note_written: PlanNoteWrittenPayload,
   analysis_completed: AnalysisCompletedPayload,
   models_discovered: ModelsDiscoveredPayload,
   copilot_exchange: CopilotExchangePayload,

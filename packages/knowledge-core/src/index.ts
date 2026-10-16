@@ -5,7 +5,7 @@ export { createMemoryBackend, NO_STRUCTURE, type MemoryBackendOptions } from './
 export { createKnowledgePort, ASSERTION_NOT_READ, EVIDENCE_NOT_READ, EVIDENCE_NOT_RECORDED, type KnowledgePortDeps } from './port'
 export { resolveKnowledgeBackend, REGISTRY_REFUSAL } from './registry'
 export {
-  KNOWLEDGE_READ_TOOLS, KNOWLEDGE_STEP_TOOLS, KNOWLEDGE_VERIFY_TOOLS, knowledgeIdempotencyKey, knowledgeTools, toolSchemaOf, type KnowledgeStepToolName,
+  KNOWLEDGE_READ_TOOLS, KNOWLEDGE_STEP_TOOLS, KNOWLEDGE_VERIFY_TOOLS, knowledgeIdempotencyKey, knowledgeTools, type KnowledgeStepToolName,
 } from './tools'
 export { bindStepKnowledge, AT_RISK_NOT_READ, PRELOAD_NOT_READ, type StepKnowledgeBinding } from './step-knowledge'
 export { decisionTools, DECISION_STEP_TOOLS, type DecisionStepToolName } from './decision-tools'

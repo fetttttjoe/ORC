@@ -6,7 +6,7 @@ Key terms used throughout the orchestrator codebase and documentation. Many term
 
 ## A
 
-**Approval** — Human gate that permits execution to proceed. Two of them, writing different events: the ordinary gate (`orc approve <taskId>`) appends `plan_approved` and hashes nothing; the grounded-plan gate (`orc reply <taskId> approve`) additionally stamps a SHA-256 of the canonical plan-note graph onto `feedback_provided`, recording what was approved and when. `finalize_plan` freezes the plan only if nothing was written to the task's plan scope after that approval's seq. See [feedback delivery and grounded approval](ARCHITECTURE.md#feedback-delivery-and-grounded-approval), [both gates side by side](seams-reference.md#a-plan-is-approved-by-a-human).
+**Approval** — Human gate that permits execution to proceed. Two of them, writing different events: the ordinary gate (`orc approve <taskId>`) appends `plan_approved` and hashes nothing; the grounded-plan gate (`orc reply <taskId> approve`) additionally stamps a SHA-256 of the task's canonical plan notes onto `feedback_provided`, recording what was approved and when. `finalize_plan` freezes the plan only if no plan note was written after that approval's seq. See [feedback delivery and grounded approval](ARCHITECTURE.md#feedback-delivery-and-grounded-approval), [both gates side by side](seams-reference.md#a-plan-is-approved-by-a-human).
 
 **Artifact** — Output file produced by a step (declared in the step's `signal(success, outputs: [...])` call). Verified via SHA-256 receipt at the storage boundary. See [output lineage](ARCHITECTURE.md#responsibilities), [`artifact_produced` event](ARCHITECTURE.md#execution-flow-—-one-step-durably), [`vault/tasks/<id>/lineage.md`](../README.md#vault-views).
 
@@ -110,9 +110,9 @@ Key terms used throughout the orchestrator codebase and documentation. Many term
 
 **Memory** — Durable knowledge graph (SurrealDB read model + vault projection). Event-first, degradation-tolerant, sourced-research-only. See [`vault/memory/`](../README.md#vault-views), [memory system](seams-reference.md#memory-subsystem-interaction).
 
-**Memory note** — Authored fact, decision, finding, or plan recorded in the knowledge graph. Has `id`, `scope`, `tier`, `links`, `title`, `summary`, `body`, plus whatever else its [tier](#note-tier) allows — for a semantic note that includes its [claims](#claim), the statements it asserts. Only `research` kind requires citations. Claims are written additively (`addClaims` / `invalidates`), never by supplying the array. See [note tiers](../packages/contracts/src/memory.ts), [`memory_write` tool](../plugins/memory/).
+**Memory note** — Authored fact, decision or finding recorded in the memory store. Has `id`, `scope`, `tier`, `links`, `title`, `summary`, `body`, plus whatever else its [tier](#note-tier) allows — for a semantic note that includes its [claims](#claim), the statements it asserts. Only `research` kind requires citations. Claims are written additively (`addClaims` / `invalidates`), never by supplying the array. See [note tiers](../packages/contracts/src/memory.ts), [`memory_write` tool](../plugins/memory/).
 
-**Note tier** — Which memory a note belongs to, and therefore which fields it may carry. `semantic` = durable project knowledge (its [claims](#claim), plus the retrieval surface around them: `kind`, `categories`, `paths`, `sources`). `episodic` = the per-task trail a run leaves behind (title/summary/tags only, always `expirable`). `plan` = one node of a task's decomposition (`rationale`, `uncertainty`, `zone`). A note written without a tier is classified from its shape. See [NOTE_TIERS](../packages/contracts/src/memory.ts).
+**Note tier** — Which memory a note belongs to, and therefore which fields it may carry. `semantic` = durable project knowledge (its [claims](#claim), plus the retrieval surface around them: `kind`, `categories`, `paths`, `sources`). `episodic` = the per-task trail a run leaves behind (title/summary/tags only, always `expirable`). `plan` = a memory-store decomposition node that nothing writes (a grounded plan's notes are [plan notes](#plan-note)). A note written without a tier is classified from its shape. See [NOTE_TIERS](../packages/contracts/src/memory.ts).
 
 **MCP** — Model Context Protocol. External tool server. Declared in `.orc/config.json`, armed with `orc mcp trust` (fingerprint grant), referenced in plans via `toolRefs`. See [MCP server pattern](../README.md#operational-notes), [`mcp-client` plugin](../plugins/mcp-client/), [trust model](EXTENDING.md#invariants-—-the-rules-that-keep-changes-cheap).
 
@@ -140,7 +140,9 @@ Key terms used throughout the orchestrator codebase and documentation. Many term
 
 ## P
 
-**Plan** — Structured task decomposition: list of steps, each with role, title, instructions, skill/tool refs, executor, model, dependencies. Derived from the approved plan-notes at the freeze, which is refused if they moved after the approval. See [plan schema](../packages/contracts/src/execution.ts).
+**Plan** — Structured task decomposition: list of steps, each with role, title, instructions, skill/tool refs, executor, model, dependencies. A grounded plan is derived from its approved [plan notes](#plan-note) at the freeze, which is refused if they moved after the approval. See [plan schema](../packages/contracts/src/plan.ts).
+
+**Plan note** — One note of a grounded task's plan, written by the plan step with `plan_note_write` and stored as a `plan_note_written` event on the task (the latest write per id is the note). The `masterplan` note lists its `subplans`, in step order; each subplan carries the body, `rationale`, `dependsOn`, `zone`, `uncertainty`, capability refs and `modelRef` its frozen step gets. See [plan-note.ts](../packages/contracts/src/plan-note.ts).
 
 **Plugin** — Replaceable behavior: executor, provider, skill, tool server, extension. Registered via `seedRegistries`, opted-in via plan refs. See [plugin registry](../packages/kernel/src/plugins/host.ts).
 

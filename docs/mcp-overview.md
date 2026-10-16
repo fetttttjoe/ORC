@@ -71,7 +71,7 @@ Key behaviors:
 - **Read-only degradation is one mechanism, three triggers**: no port factory (CLI), and on the UI door, out-of-project or foreign-project chats — all just pass `actions: null` into the same `buildCopilotTools`.
 - **`available_models` is served on the MCP door too** — `mcp-serve.ts` wires `listModels` to the projected model catalog (the latest `models_discovered` event per provider), so an MCP client can discover a valid `modelRef` before `propose`/grounded `new_request`.
 - **Memory degrades, never blocks**: if SurrealDB is unreachable, the 5 read tools stay listed but each call returns `memory unavailable: <reason>` instead of the tools silently vanishing.
-- `memory_write` exists in the plugin but is filtered out of MCP serve — free-form authoring stays with agents inside plan runs. `record_decision` is the single authoring tool this door serves; the test pins that exact set.
+- `memory_write` exists in the plugin but is not served — authoring stays with the agents running inside plans. `record_decision` is the single authoring tool this door serves; the test pins that exact set.
 
 ## Direction 2: orc as an MCP client (tools *for* agents)
 

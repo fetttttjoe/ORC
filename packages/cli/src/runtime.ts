@@ -3,21 +3,20 @@ import { apiLoopExecutor } from '@orc/executor-api-loop'
 import { configuredProviders } from './providers'
 import { agentAnalyzer } from '@orc/analyzer-agent'
 import { createMcpHub, type McpHub } from '@orc/mcp-client'
-import { CONSOLIDATE_EXECUTOR, createMemory, createMemoryLifecycle, treeStamps, unavailableStepMemory, memoryToolsForStep, type BindStep, type MemoryLifecycle } from '@orc/memory'
+import { createMemory, treeStamps } from '@orc/memory'
 import { AUTO_HEAL_DEBOUNCE_MS, AUTO_SWEEP_TITLE, createAutoHeal, sweepPlanDraft, sweepSpec } from './auto-heal'
 import { suspectAtFor } from './suspect-at'
 import { openMemory } from './memory-open'
 import { knowledgeAccess, openKnowledge } from './knowledge-open'
 import { bindStepKnowledge } from '@orc/knowledge-core'
-import { buildDistiller } from './consolidation-distiller'
 import { cwdAuthor } from './cwd-workspace'
 import { createHealTarget } from './heal-target'
 import { createVaultProjector } from '@orc/vault-projector'
-import { checksExecutor, commitTool, createDbosPort, createPluginHost, dbosSend, execTool, finalizePlanTool, isMcpTrusted, loadConfig, loadTrust, openStorage, projectorLease, readAnnotationsTool, reportCoverageTool, requireProject, scopedChangesTool, splitTool, Kernel, type DbosPort, type PluginHost, type ProjectConfig, type Storage } from '@orc/kernel'
+import { checksExecutor, commitTool, createDbosPort, createPluginHost, dbosSend, execTool, finalizePlanTool, isMcpTrusted, loadConfig, loadTrust, openStorage, planNoteTools, projectorLease, readAnnotationsTool, reportCoverageTool, requireProject, scopedChangesTool, splitTool, taskPlanTool, Kernel, type DbosPort, type PluginHost, type ProjectConfig, type Storage } from '@orc/kernel'
 
 const AUTO_HEAL_EXECUTOR = 'auto-heal'
 
-// What this supervisor process itself initiates (consolidation, the commit reactor's sweep): no
+// What this supervisor process itself initiates (the commit reactor's sweep): no
 // chat answered it, and no terminal typed it.
 const SUPERVISOR_ORIGIN = NO_CHAT(Door.supervisor)
 
@@ -127,12 +126,10 @@ export async function buildRuntime(
 
   // Startup order: projections FIRST — DBOS recovery may emit events the
   // moment it launches, and they must already be observed. Surreal failure degrades memory
-  // (explicit unavailable tools) but never blocks history, execution, or the vault trace.
+  // but never blocks history, execution, or the vault trace.
   const projector = createVaultProjector({ log, config })
   await bootPhase('vault-projection', () => projector.start(), phases)
   let memory: Awaited<ReturnType<typeof createMemory>> | null = null
-  let lifecycle: MemoryLifecycle | null = null
-  let bindStep: BindStep
   try {
     // The projector LEASE: one live projector per project. Every buildRuntime caller (serve, the
     // graph server, mcp serve) used to run the full standing machinery; three of them against one
@@ -142,33 +139,10 @@ export async function buildRuntime(
       log, config, lease: projectorLease(config.databaseUrl, config.projectId),
       stampsFor: workspaceStamps(async id => (await kernel.listWorkspaces({ includeArchived: true })).find(w => w.id === id)?.cwd ?? null),
     })
-    const mem = memory // narrowed once here so bootPhase's callback needs no `!` and the closure below reads the same value
+    const mem = memory // narrowed once here so bootPhase's callback needs no `!`
     await bootPhase('memory-projection', () => mem.projector.start(), phases)
-    const memoryProjector = mem.projector // captured for the lifecycle closure
-    // post-task memory maintenance (auto-consolidation) — a decoupled subscriber, started only in
-    // the execution runtime (never in the one-shot CLI memory commands) and stopped at shutdown.
-    // `distill` (optional, memoryConsolidateModel) upgrades the note from extractive bullets to a
-    // coherent synthesis, off the agent turn budget; absent → extractive. `catchUp` flushes the
-    // projection before a consolidation reads the step notes.
-    // `authorFor` reads the WRITING TASK's workspace, never this cwd — a single cwd-resolved author
-    // built once here used to stamp every outcome note under the supervisor's own checkout, so a
-    // task that ran in a worktree consolidated as durable knowledge under the wrong workspace while
-    // its branch was still unmerged. One supervisor serves every
-    // worktree at once, the same reason stepTools below reads its author off the running task
-    // rather than off cwdAuthor.
-    lifecycle = createMemoryLifecycle({
-      log, store: memory.store,
-      // Door.supervisor, not cli: this process, not a terminal, decided to consolidate — and no
-      // chat, because a lifecycle pass answers no message.
-      authorFor: task => ({ source: AUTHOR_SOURCE.agent, executor: CONSOLIDATE_EXECUTOR, workspaceId: task.workspaceId, taskId: task.id, origin: SUPERVISOR_ORIGIN }),
-      distill: buildDistiller(host.providers, config.memoryConsolidateModel), catchUp: () => memoryProjector.catchUp(),
-    })
-    await lifecycle.start()
-    bindStep = memory.bindStep
   } catch (err) {
-    const reason = errorMessage(err)
-    console.warn(`memory unavailable; continuing in degraded mode: ${reason}`)
-    bindStep = p => unavailableStepMemory(reason, p.keep)
+    console.warn(`memory unavailable; continuing in degraded mode: ${errorMessage(err)}`)
   }
 
   const healTarget = createHealTarget({ kernel, dir: config.dir })
@@ -214,19 +188,13 @@ export async function buildRuntime(
       // p.origin is the RUNNING STEP's own origin (its run chat), never this process's: the note a
       // step writes belongs to the conversation that step is.
       const author: MemoryAuthor = { source: AUTHOR_SOURCE.agent, origin: p.origin, workspaceId: p.workspaceId, taskId: p.taskId, stepId: p.stepId, runToken: p.runToken, executor: p.executor, model: p.model, role: p.role }
-      const bound = bindStep({
-        author,
-        step: p.step, taskId: p.taskId, ancestorTaskIds: p.ancestorTaskIds,
-        ambientCapture: config.ambientCapture, keep: memoryToolsForStep(p),
-      })
       const stepAccess = knowledgeAccess(knowledgeOpening, log, p.workspaceDir)
       const stepKnowledge = bindStepKnowledge({
         access: stepAccess, author, p: { stepId: p.stepId, role: p.role, taskId: p.taskId, ancestorTaskIds: p.ancestorTaskIds, step: p.step },
         writesOf: id => kernel.listTaskKnowledgeWrites(id),
       })
       const suspectAt = suspectAtFor(stepAccess, author)
-      return { memory: bound.memory, knowledge: stepKnowledge.knowledge, tools: [
-      ...bound.tools,
+      return { knowledge: stepKnowledge.knowledge, tools: [
       ...stepKnowledge.tools,
       // registration-gated inside the factory (like report_coverage): a scout orients, the plan
       // step decomposes — a scout that splits builds a second, unapproved decomposition.
@@ -244,14 +212,14 @@ export async function buildRuntime(
       // it to the grounded `plan` step, which shares that role). Read-only, and a FLOOR — never a
       // substitute for the test/typecheck gate, never a reason to dismiss an in-scope defect.
       ...scopedChangesTool({ kernel, p, ...(stepKnowledge.citing && { claimsAt: stepKnowledge.citing }) }),
+      ...taskPlanTool({ kernel, p }),
       ...(config.autoCommit ? commitTool({ kernel, dir: p.workspaceDir, p, ...(suspectAt && { suspectAt }) }) : []),
       // exec runs operator-allowlisted commands (execAllowlist in .orc/config.json) in the step
       // workspace — the acceptance-gate tool. Empty allowlist = not offered.
       ...execTool({ workspaceDir: p.workspaceDir, allowlist: config.execAllowlist }),
-      // finalize_plan reconstructs the plan-note graph from the log (kernel.listPlanNotes), not the
-      // memory store — but it's still only offered when memory is healthy: with the memory tools
-      // degraded the agent can't author a plan-note graph, so a grounded plan is pointless anyway.
-      ...(memory ? [finalizePlanTool({ kernel, config: { maxDepth: config.maxDepth, autoCommit: config.autoCommit, finishChecks: config.finishChecks }, p })] : []),
+      // the plan step's authoring surface; both factories register for that step alone
+      ...planNoteTools({ kernel, p }),
+      ...finalizePlanTool({ kernel, config: { maxDepth: config.maxDepth, autoCommit: config.autoCommit, finishChecks: config.finishChecks }, p }),
       ] }
     },
   })
@@ -264,7 +232,6 @@ export async function buildRuntime(
     shutdown: async (opts?: { drain?: boolean }) => {
       await port.shutdown(opts)
       autoHeal?.close() // disarm a pending debounce window — a timer firing into closed stores warns, but why let it
-      if (lifecycle) await lifecycle.close()
       if (memory) await memory.close()
       await projector.close()
       await host.shutdown() // drains hooks, fires session_shutdown, deactivates extensions, stops the watcher

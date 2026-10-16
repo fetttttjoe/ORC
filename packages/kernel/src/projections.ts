@@ -8,6 +8,7 @@ import {
 } from '@orc/contracts'
 import type { EventRecord, OperationRecord, Usage, Workspace } from '@orc/contracts'
 import { applyArchived, applyRetitle } from './workspaces'
+import { GROUNDED_TASK_TYPE } from './execution/strategies/grounded-plan'
 
 export interface TaskPlans {
   versions: Plan[]
@@ -297,6 +298,7 @@ export function foldInto(acc: FoldAcc, e: EventRecord): FoldAcc {
       case EVENT_KIND.feedback_requested:
       case EVENT_KIND.feedback_provided:
       case EVENT_KIND.plan_annotated:
+      case EVENT_KIND.plan_note_written:
       case EVENT_KIND.analysis_completed:
       case EVENT_KIND.copilot_exchange:
         break // traceability only; no state derivation (ponytail: no fold state until a consumer needs it — read via events.byTask)
@@ -535,6 +537,13 @@ export function subtreeTaskIds(state: State, rootId: string): string[] {
   const out: string[] = [rootId]
   for (const id of out) out.push(...(children.get(id) ?? []))
   return out
+}
+
+export function knowledgeOwnerTaskIds(state: State, taskId: string): string[] {
+  const parentId = state.tasks.get(taskId)?.parentId
+  const parent = parentId ? state.tasks.get(parentId) : undefined
+  const owned = subtreeTaskIds(state, taskId)
+  return parent?.type === GROUNDED_TASK_TYPE ? [...owned, parent.id] : owned
 }
 
 // The chain ABOVE a task, nearest first (parent, grandparent, …, root); excludes the task itself.

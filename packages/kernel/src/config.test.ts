@@ -228,12 +228,6 @@ describe('loadConfig', () => {
     writeFileSync(path.join(bogus, '.orc', SETTINGS_FILE), JSON.stringify({ groundedApprovalDoors: ['web'] }))
     expect(() => loadConfig(bogus)).toThrow()
   })
-  it('ambientCapture defaults true; ORC_AMBIENT_CAPTURE=false disables it (the kill switch)', () => {
-    expect(loadConfig(mkdtempSync(path.join(tmpdir(), 'orc-'))).ambientCapture).toBe(true)
-    withEnv({ ORC_AMBIENT_CAPTURE: 'false' }, () => {
-      expect(loadConfig(mkdtempSync(path.join(tmpdir(), 'orc-'))).ambientCapture).toBe(false)
-    })
-  })
   it('knowledgePreloadTokens defaults to 1200; ORC_KNOWLEDGE_PRELOAD_TOKENS overrides it, 0 disables preload', () => {
     expect(loadConfig(mkdtempSync(path.join(tmpdir(), 'orc-'))).knowledgePreloadTokens).toBe(1200)
     withEnv({ ORC_KNOWLEDGE_PRELOAD_TOKENS: '300' }, () => {

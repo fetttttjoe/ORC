@@ -4,7 +4,7 @@ import { AUTHOR_SOURCE, type Claim, ClaimClass, claimId, CLAIM_ID_RE, DecisionSt
 import { TEST_WORKSPACE_ID, authorFixture, episodicNoteFixture, semanticNoteFixture, must } from '@orc/contracts/fixtures'
 import { approxTokens } from './budget'
 import { claimHitFixture, noopMemoryStore, summaryFixture } from './test-helpers'
-import { MEMORY_READ_TOOLS, memoryTools, memoryToolsForStep, DECISION_KIND_REFUSAL, memoryVerifyTool, noteLint } from './tools'
+import { MEMORY_READ_TOOLS, memoryTools, DECISION_KIND_REFUSAL, memoryVerifyTool, noteLint } from './tools'
 import type { ClaimHit } from './claim-search'
 import type { BlobsAt, DriftSources } from './claim-drift-read'
 import type { ChangedSince } from './drift'
@@ -1081,98 +1081,6 @@ describe('memory tools', () => {
   })
 })
 
-// Observed TWICE, in two independent runs of the same task on the same model: the plan-authoring
-// agent wrote its 'verify' subplan with a depends_on LINK to a sibling ('synthesize-map' in one run,
-// 'generate-doc' in the other) where scheduling reads the `dependsOn` FIELD. Both writes SUCCEEDED
-// and the graph was refused much later, at finalize_plan — costing a rejection, a re-read and a
-// rewrite each, charged against maxIterations in a grounded run. sibling-ordering-link is now a
-// 'shape' row in contracts' PLAN_FIELD_RULES, so the write itself refuses — that finalize_plan round
-// trip is exactly what the refusal (below) exists to skip.
-describe('plan ordering expressed as a link', () => {
-  const planNote = (id: string, over: Partial<MemoryNoteDraft> = {}): MemoryNote =>
-    toNote({ tier: NOTE_TIER.plan, id, scope: 'plan-t1', title: id, ...over })
-
-  const writeInto = (notes: Record<string, MemoryNote>) => {
-    const { store, written } = fakeStore({ get: async id => notes[id] ?? null })
-    return { write: must(memoryTools({ store, author: CLI }).find(t => t.name === 'memory_write'), 'memory_write tool'), written }
-  }
-
-  // FLIPPED from a warn-and-store pin to a refusal pin — compile-time-blame: catch the mistake
-  // where it is made, while its maker can still fix it. sibling-ordering-link moved to plan-rules'
-  // shape table (the explicit ask), and the whole point of a shape row is that the mistake never lands.
-  it('refuses on the write itself — the sibling ordering mistake never lands', async () => {
-    const { write, written } = writeInto({ 'generate-doc': planNote('generate-doc') })
-    const r = await write.execute({
-      tier: NOTE_TIER.plan, id: 'verify', scope: 'plan-t1', title: 'Verify',
-      links: [{ id: 'generate-doc', kind: LINK_KIND.depends_on }],
-    }, 'c1')
-    expect(r.isError).toBe(true)
-    expect(JSON.stringify(r.output)).toContain("plan-note 'verify' links depends_on 'generate-doc'")
-    expect(JSON.stringify(r.output)).toContain('FIELD, not a link')
-    expect(written).toHaveLength(0)   // refused: the note never lands
-  })
-
-  // The legitimate reading of the same edge: a plan-note whose knowledge derives from a note that is
-  // not part of this decomposition. Rejecting the write would block this author outright.
-  it('says nothing about a depends_on link to a note outside the plan tier', async () => {
-    const { write } = writeInto({ 'auth-flow': toNote({ id: 'auth-flow', title: 'Auth flow' }) })
-    const r = await write.execute({
-      tier: NOTE_TIER.plan, id: 'verify', scope: 'plan-t1', title: 'Verify', summary: 'audit the siblings',
-      links: [{ id: 'auth-flow', kind: LINK_KIND.depends_on }],
-    }, 'c1')
-    expect(MemoryWriteResult.parse(r.output).warnings ?? []).toEqual([])
-  })
-
-  // The sibling-ordering check must NOT run unconditionally like the
-  // zone check does — `links` carries no plan-tier signal (inferTier never reads it, unlike zone/
-  // rationale/uncertainty), so an ungated check false-positives on a semantic note whose depends_on
-  // target only HAPPENS to resolve as plan-tier. The codebase-analysis area-note pattern does exactly
-  // this: sibling area notes link depends_on each other, and a semantic note has no dependsOn FIELD
-  // to redirect that into — refusing it would block a legitimate author with no repair path.
-  it('does not refuse a non-plan note whose depends_on target happens to be plan-tier', async () => {
-    const { write } = writeInto({ 'generate-doc': planNote('generate-doc') })
-    const r = await write.execute({
-      id: 'area-x', title: 'Area X', summary: 'an area note',
-      links: [{ id: 'generate-doc', kind: LINK_KIND.depends_on }],
-    }, 'c1')
-    expect(r.isError).toBeFalsy()
-  })
-
-  // The gate is on EFFECTIVE tier, not merely "did this draft say tier: plan" — merge-on-omit means
-  // an update to an EXISTING plan note may add a sibling link without restating tier at all. The
-  // gate has to consult the STORED note's tier in that case, or this exact mistake (the ordering
-  // link this whole describe block exists to catch) would slip through unrefused on every update.
-  it('still refuses when a plan-note UPDATE adds a sibling link without restating tier', async () => {
-    const { write, written } = writeInto({ 'generate-doc': planNote('generate-doc'), verify: planNote('verify') })
-    const r = await write.execute({ id: 'verify', scope: 'plan-t1', links: [{ id: 'generate-doc', kind: LINK_KIND.depends_on }] }, 'c1')
-    expect(r.isError).toBe(true)
-    expect(JSON.stringify(r.output)).toContain("plan-note 'verify' links depends_on 'generate-doc'")
-    expect(written).toHaveLength(0)
-  })
-
-  // Compound-update hole, found in the boundary-contracts review and deliberately deferred
-  // to this task: the STORED-tier fallback above reads the tier the note has TODAY, not the tier the
-  // MERGED note is about to land as. A single UPDATE that adds `zone` (plan evidence — inferTier
-  // reads zone/rationale/uncertainty, never `links`) AND a sibling-resolving depends_on link in the
-  // SAME write read the stale stored tier ('semantic'), skipped the sibling check, and the merged
-  // note landed plan-tier carrying the exact ordering misuse this describe block exists to catch.
-  // The gate has to key on the tier the merge produces: draft-inferred plan evidence beats a stale
-  // stored tier, even though `links` alone (the previous pin, above) still defers to it.
-  it('refuses a compound update: one write adds zone AND a sibling link to a stored semantic note', async () => {
-    const { write, written } = writeInto({
-      'generate-doc': planNote('generate-doc'),
-      verify: toNote({ id: 'verify', scope: 'plan-t1', title: 'Verify' }), // stored tier: semantic
-    })
-    const r = await write.execute({
-      id: 'verify', scope: 'plan-t1', title: 'Verify', zone: ['docs/**'],
-      links: [{ id: 'generate-doc', kind: LINK_KIND.depends_on }],
-    }, 'c1')
-    expect(r.isError).toBe(true)
-    expect(JSON.stringify(r.output)).toContain("plan-note 'verify' links depends_on 'generate-doc'")
-    expect(written).toHaveLength(0)
-  })
-})
-
 // A planner authored `zone: ["a/**\nb.ts"]` — several globs joined with newlines into ONE entry.
 // The write succeeded, every gate passed, and the frozen fence then matched no real path: two steps
 // were refused every write to their own files, with no repair path, and the slice was cancelled.
@@ -1661,14 +1569,5 @@ describe('memory_verify', () => {
     const tool = must(memoryVerifyTool({ store: f.store, author: CLI, p })[0], 'memory_verify tool')
     expect((await tool.execute({ id: '../etc/passwd' }, 'call-3')).isError).toBe(true)
     expect(f.verified).toHaveLength(0)
-  })
-})
-
-describe('memoryToolsForStep', () => {
-  it('the plan step keeps write; every other step none', () => {
-    expect(memoryToolsForStep({ stepId: STEP_ID.plan, role: STEP_ROLE.auditor })).toEqual([MEMORY_TOOL_NAME.write])
-    expect(memoryToolsForStep({ stepId: STEP_ID.finish, role: STEP_ROLE.finisher })).toEqual([])
-    expect(memoryToolsForStep({ stepId: STEP_ID.verify, role: STEP_ROLE.auditor })).toEqual([])
-    expect(memoryToolsForStep({ stepId: 's1', role: STEP_ROLE.worker })).toEqual([])
   })
 })

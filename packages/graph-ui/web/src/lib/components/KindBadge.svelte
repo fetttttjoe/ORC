@@ -11,6 +11,7 @@
     plan_edited: { label: 'plan edited', temp: 'machine' },
     plan_approved: { label: 'approved', temp: 'human' },
     plan_annotated: { label: 'annotated', temp: 'human' },
+    plan_note_written: { label: 'plan note', temp: 'machine' },
     run_requested: { label: 'run queued', temp: 'machine' },
     run_started: { label: 'run started', temp: 'machine' },
     step_started: { label: 'step started', temp: 'machine' },

@@ -1,24 +1,25 @@
 import { createHash } from 'node:crypto'
-import { COMMIT_STEP_ID, deriveNoteProvenance, EVENT_KIND, LINK_KIND, MemoryDeletedPayload, MemoryNote, MemoryWrittenPayload, MASTERPLAN_NOTE_ID, NOTE_TIER, PAYLOAD_SCHEMAS, ROLE_SKILL, siblingOrderingMisuse, STEP_ID, STEP_ROLE, STRATEGY, VERIFY_STEP_ID, isApprovalAnswer, planScope, type ChildPlanDraft, type EventRecord, type PlanNote, type TaskNode } from '@orc/contracts'
+import { COMMIT_STEP_ID, EVENT_KIND, MASTERPLAN_NOTE_ID, PAYLOAD_SCHEMAS, PlanNote, PlanNoteToolName, ROLE_SKILL, STEP_ID, STEP_ROLE, STRATEGY, VERIFY_STEP_ID, isApprovalAnswer, type ChildPlanDraft, type EventRecord, type TaskNode } from '@orc/contracts'
 import { withFinishStep } from '../../finish-step'
 
-// planScope moved to contracts (one format, one place); re-exported so kernel callers keep working
-export { planScope }
-
-// The grounded plan-authoring step's role. finalize_plan is only meaningful for THIS step, so both
-// createGroundedTask (which stamps it) and finalize_plan's defensive gate reference this one source.
+// the grounded plan step's role, stamped by createGroundedTask
 export const PLAN_STEP_ROLE = STEP_ROLE.auditor
 
 // Its step id, stamped by createGroundedTask — one source, so the step that must produce a plan and
 // the check that it did cannot drift apart.
 export const PLAN_STEP_ID = STEP_ID.plan
 
+export const GROUNDED_TASK_TYPE = 'grounded'
+
+// the line a frozen step's instructions and the split's spec carry the plan's rationale on
+export const WHY_PREFIX = 'Why: '
+
 // True when a feedback answer IS the grounded-plan approval: sent to this strategy's plan step, on
 // a grounded task, using the approval word (isApprovalAnswer, contracts/approval-answer.ts). Named
 // so the generic conversational-feedback path (Kernel.replyFeedback, which runs for every task
 // type) asks this strategy the question instead of re-deriving its step/task shape inline.
 export function planApprovalStamp(task: TaskNode, event: EventRecord, text: string): boolean {
-  return task.type === 'grounded' && event.stepId === PLAN_STEP_ID && isApprovalAnswer(text)
+  return task.type === GROUNDED_TASK_TYPE && event.stepId === PLAN_STEP_ID && isApprovalAnswer(text)
 }
 
 // A grounded plan step's whole job is to PRODUCE a plan: a decomposition the human approved, which
@@ -44,10 +45,9 @@ export function groundedPlanOmission(events: EventRecord[], stepId: string, runT
   })
   return split
     ? null
-    : 'the plan step signalled success without calling finalize_plan — author the plan-note graph '
-      + `in scope '${planScope(events[0]?.taskId ?? '')}' (root note '${MASTERPLAN_NOTE_ID}', each subplan linked `
-      + 'decomposes_into), get the human to approve it, then call finalize_plan. Doing the work '
-      + 'yourself instead of decomposing it defeats the grounded-plan strategy.'
+    : `the plan step signalled success without calling ${PlanNoteToolName.finalize} — author the plan with ${PlanNoteToolName.write} `
+      + `(a '${MASTERPLAN_NOTE_ID}' note whose subplans lists each subplan note id), get the human to approve it, `
+      + `then call ${PlanNoteToolName.finalize}. Doing the work yourself instead of decomposing it defeats the grounded-plan strategy.`
 }
 
 // The grounded analyze step's role (agentAnalyzer.analysisStep stamps it; runtime maps it → the
@@ -65,84 +65,12 @@ export const ANALYZE_STEP_ROLE = STEP_ROLE.scout
 // any step runs.
 
 export function planGraphHash(notes: PlanNote[]): string {
-  const canonical = [...notes]
-    .sort((a, b) => a.scope.localeCompare(b.scope) || a.id.localeCompare(b.id))
-    .map(note => MemoryNote.parse(note))
+  const canonical = [...notes].sort((a, b) => a.id.localeCompare(b.id)).map(note => PlanNote.parse(note))
   return createHash('sha256').update(JSON.stringify(canonical)).digest('hex')
 }
 
-// reconstruct the task's plan-note graph from the EVENT LOG (the source of truth) rather than
-// the async SurrealDB projection — the log is synchronously durable the instant finalize runs, so the
-// frozen executable plan can never be built from a stale read model. Folds memory_written/deleted in
-// seq order to the latest note per id (a later memory_deleted drops it), mirroring the projector's
-// provenance derivation (surreal.applyEvent) so the note shape matches what instantiateFrozenPlan
-// expects. Pure: the caller supplies the already-read events (scoped to the memory kinds).
-// ponytail: caller hands the full memory-event history; add a scope-indexed read if it ever costs.
-// PLAN TIER ONLY: a task's plan scope also holds the episodic notes its own planning step left
-// behind (ambient capture writes one per step, into the same scope). Those are not part of the
-// decomposition, and including them would let a step note the human never reviewed change the
-// plan hash between approval and freeze.
-export function foldPlanNotes(events: ReadonlyArray<EventRecord>, scope: string): PlanNote[] {
-  const byId = new Map<string, PlanNote>()
-  for (const e of events) {
-    if (e.kind === EVENT_KIND.memory_written) {
-      // lenient like the projector's fold contract: one unparseable/legacy payload (any scope, any
-      // age) must skip its case, not throw out of every grounded task's plan freeze and approval.
-      const parsed = MemoryWrittenPayload.safeParse(e.payload)
-      if (!parsed.success) continue
-      const { note, author } = parsed.data
-      if (note.scope !== scope || note.tier !== NOTE_TIER.plan) continue
-      const prev = byId.get(note.id)
-      // shared derivation with the projector — this once forgot to stamp sources.retrievedAt and
-      // threw MemoryNote.parse on every sourced plan note, blocking approval.
-      const full = MemoryNote.parse({ ...note, ...deriveNoteProvenance(note, author, e.ts, prev) })
-      if (full.tier === NOTE_TIER.plan) byId.set(note.id, full)
-    } else if (e.kind === EVENT_KIND.memory_deleted) {
-      const del = MemoryDeletedPayload.safeParse(e.payload)
-      if (del.success && del.data.scope === scope) byId.delete(del.data.id)
-    }
-  }
-  return [...byId.values()]
-}
-
-// The deterministic freeze (S1): the executable plan is a PURE function of the approved
-// plan-notes — no clock/random/IO — so it can never drift from what the human approved.
-// master's decomposes_into children → steps; each child's depends_on links → dependsOn.
-// ponytail: one decomposition level per approve — a subplan that itself decomposes re-splits
-// when its child runs; recurse only when a real 3-level plan needs it.
-// The subplan's ordering, with ONE spelling and two different repairs.
-//
-// Ordering is the `dependsOn` FIELD. A `depends_on` LINK is knowledge ("this subplan builds on that
-// finding") and never schedules — that separation is the whole point: a link is a durable statement
-// about how facts relate, and ordering stops meaning anything the moment the plan is frozen.
-//
-// The two mistakes are not the same mistake, so they are not handled the same way:
-//
-//   * A depends_on LINK to a SIBLING means the author reached for the wrong one. It is a spelling
-//     error with an obvious correction, so it FAILS at the approval gate and says what to write.
-//     Silently honouring it would keep both spellings alive; silently ignoring it would drop the
-//     ordering and let a step run early, which is the race this all exists to prevent.
-//
-//   * A FIELD naming a step that no longer exists means the plan changed underneath it — the
-//     planner replaced `api` with api-read/api-write while `verify` kept dependsOn ['api'], because
-//     the skill tells it to leave untouched notes byte-stable. Nobody can know the right answer, so
-//     it widens to EVERY sibling. A missing dependency lets a step start too early (silent
-//     corruption); a surplus one only makes it start later. The safe direction is the ordered one,
-//     and the human sees it — a step that suddenly waits on everything is what the rendered plan shows.
-//
-// Returned in `kids` order and deduped, so identical notes always freeze identically.
-function healDependsOn(
-  stepId: string,
-  declared: readonly string[],
-  links: ReadonlyArray<{ id: string; kind: string }>,
-  kids: readonly string[],
-): string[] {
-  // the rule and its wording live in contracts (siblingOrderingMisuse) because this is `shape` in
-  // PLAN_FIELD_RULES: memory_write already REFUSES this same edge at authoring (isError before
-  // store.write, the note never lands), and the freeze refuses it again here — one spelling in
-  // contracts so the two boundaries cannot drift apart
-  const misuse = siblingOrderingMisuse(stepId, links, kids)
-  if (misuse) throw new Error(misuse)
+// a dependsOn target that is no longer a sibling widens to every sibling: late beats racing
+function healDependsOn(stepId: string, declared: readonly string[], kids: readonly string[]): string[] {
   const out = new Set<string>()
   for (const d of declared) {
     if (kids.includes(d)) { out.add(d); continue }
@@ -152,71 +80,37 @@ function healDependsOn(
   return kids.filter(k => out.has(k))
 }
 
-// A subplan's derived instructions text: body||summary||title, unchanged, PLUS any reviewed
-// uncertainty entries the human approved along with the note — appended under an unambiguous
-// heading so the executing agent treats them as load-bearing, not decorative. Empty/absent
-// uncertainty (the schema default `[]`) leaves the result byte-identical to the base text: no
-// heading, nothing appended, so every note ever frozen before uncertainty existed freezes the
-// same way today.
-function instructionsFor(n: PlanNote): string {
+// the why leads, so a reader that cuts the text keeps the reason
+export function noteText(n: PlanNote): string {
   const base = n.body || n.summary || n.title
+  return n.rationale === '' ? base : `${WHY_PREFIX}${n.rationale}\n\n${base}`
+}
+
+function instructionsFor(n: PlanNote): string {
+  const base = noteText(n)
   if (n.uncertainty.length === 0) return base
   return [base, '', 'Unresolved uncertainty (reviewed at approval — act on these, do not skip):', ...n.uncertainty.map(u => `- ${u}`)].join('\n')
 }
 
+const subplansError = (masterId: string, detail: string): Error =>
+  new Error(`masterplan '${masterId}' ${detail} — list each subplan note id in the masterplan's subplans (write the notes with ${PlanNoteToolName.write}) before finalizing`)
+
+// the freeze is a pure function of the approved notes: the masterplan's subplans, in order, become the steps
 export function instantiateFrozenPlan(masterId: string, notes: PlanNote[]): ChildPlanDraft {
   const byId = new Map(notes.map(n => [n.id, n]))
-  const kids = (byId.get(masterId)?.links ?? []).filter(l => l.kind === LINK_KIND.decomposes_into).map(l => l.id)
-  // A masterplan with NO decomposes_into children freezes to steps: [] — and withCommitStep (when
-  // autoCommit is on) then appends the trailing commit step, producing a commit-only pipeline that
-  // reports done having written no code. Observed live twice (incidents c4bc1d38, 8b5e1034): the
-  // plan agent dropped the links rewriting the masterplan during warning fix-ups (memory_write
-  // replaces links wholesale) while the door's prose render still read correctly. Refuse HERE, in
-  // the ONE derivation (see freezePlan below), so both finalize_plan (via finalize-plan-tool.ts's
-  // try/catch → toolError) and the CLI door render (main.ts derivedPlanBlock) reject it with an
-  // actionable message instead of the old silent blank/commit-only render. This does NOT touch the
-  // door's blank-render path for an in-progress draft with no masterplan note yet: derivedPlanBlock
-  // returns '' before ever calling freezePlan when the masterplan note is absent, so this throw is
-  // only reachable once the masterplan note exists — which is exactly the silent-failure case.
-  if (kids.length === 0)
-    throw new Error(`masterplan '${masterId}' has no decomposes_into links — write links: [{id: '<subplan-id>', kind: 'decomposes_into'}] on the masterplan note (one per subplan) before finalizing`)
+  const kids = byId.get(masterId)?.subplans ?? []
+  // an empty plan would freeze to a finish/commit-only pipeline that reports done having written nothing
+  if (kids.length === 0) throw subplansError(masterId, 'lists no subplans')
   return {
     steps: kids.map(id => {
       const n = byId.get(id)
-      if (!n) throw new Error(`masterplan decomposes_into '${id}' but no such plan-note exists`)
+      if (!n) throw subplansError(masterId, `lists subplan '${id}', but no plan note has that id`)
       return {
-        // role mapping at the freeze (P2): the verify subplan runs as auditor — memory tier
-        // and prompt framing follow from the role automatically
         id, role: id === VERIFY_STEP_ID ? STEP_ROLE.auditor : STEP_ROLE.implementer, title: n.title,
-        // Reviewed uncertainty (PlanNote.uncertainty) is load-bearing material the human approved
-        // alongside the rest of the note — dropping it here means the executing agent never sees
-        // what the reviewer flagged as unresolved. Appended, never substituted, so the base
-        // body||summary||title precedence is untouched when there is nothing to append (the
-        // default `uncertainty: []` produces byte-identical instructions to before this existed).
         instructions: instructionsFor(n),
-        // Ordering comes from the FIELD, never from links. A link is a durable statement about how
-        // facts relate; ordering is execution structure that stops meaning anything once the plan is
-        // frozen. Reading a field removes the guess entirely — there is no "was this target a
-        // sibling once?" question left to get wrong — and `depends_on` goes back to meaning exactly
-        // one thing in the knowledge graph.
-        //
-        // A target that is no longer a step HEALS TOWARD SAFETY rather than failing the freeze or
-        // being dropped. Reachable through the ordinary revise loop: the planner replaces `api` with
-        // api-read/api-write while `verify` keeps dependsOn ['api'], because the skill tells it to
-        // leave untouched notes byte-stable. Dropping the edge is the dangerous repair — it lets the
-        // step run EARLY, which is the "verify audited a file draft had not written yet" race. So an
-        // unresolvable target is replaced by every current sibling: strictly no looser than intended,
-        // never a race, and it costs only parallelism.
-        //
-        // It stays VISIBLE rather than silent: the human approves a rendered plan, and a step that
-        // suddenly waits on everything is exactly what that render shows.
-        dependsOn: healDependsOn(id, n.dependsOn, n.links, kids),
-        // the note's declared write-globs become the step's zone — the executor fence makes
-        // "parallel siblings must not write the same files" mechanical instead of prose
+        dependsOn: healDependsOn(id, n.dependsOn, kids),
         zone: n.zone,
-        // the planner decides what each subplan needs; the operator decided what exists at all.
-        // The verify step additionally carries the kernel-appended auditor contract skill (deduped:
-        // a planner note that already names it must not double-inject the body into the prompt).
+        // deduped: a note that already names the auditor skill must not inject its body twice
         skillRefs: id === VERIFY_STEP_ID ? [...new Set([...n.skillRefs, ROLE_SKILL.auditor])] : n.skillRefs,
         toolRefs: n.toolRefs,
         // '' means the planner expressed no preference — omit the key so the expansion inherits

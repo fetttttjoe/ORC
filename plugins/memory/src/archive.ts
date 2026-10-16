@@ -1,7 +1,6 @@
 // Which notes the graph may retire, decided from EVIDENCE OF OBSOLESCENCE. Pure and zero-import
 // (the cluster.ts shape): the whole rule set is a table over facts the caller gathers, so it is
-// testable without Surreal, without git and without a clock. The operation that drives it plugs
-// into lifecycle.ts, the seam that already names "decay/sweep" as a future peer of consolidation.
+// testable without Surreal, without git and without a clock.
 //
 // WHY NOT AGE — the design change this file exists for.
 // The TTL sweep this replaces retired on ELAPSED TIME, and that axis is wrong for

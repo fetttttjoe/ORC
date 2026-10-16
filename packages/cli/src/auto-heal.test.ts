@@ -181,6 +181,11 @@ describe('sweepSpec', () => {
     expect(spec.split('A folder anchor').length).toBe(2)
   })
 
+  it('tells the auditor to recount a numeric claim before holding it', () => {
+    const spec = sweepSpec([drift('aaaaaaaa', ClaimState.suspect)])
+    expect(spec).toContain('A claim whose text states a number — a count, a size, a limit — holds only after you recount that exact number in the code; if the number no longer matches, correct the claim, never hold it as-is.')
+  })
+
   it('caps the listed ids and counts the rest', () => {
     const many = Array.from({ length: SWEEP_LISTED_IDS + 7 }, (_, i) => drift(`id${String(i).padStart(6, '0')}`, ClaimState.suspect))
     const spec = sweepSpec(many)

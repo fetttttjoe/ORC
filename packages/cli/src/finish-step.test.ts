@@ -112,8 +112,7 @@ describe('the finish step, end to end', () => {
     // parked step workflow's recv topic, and a kernel without it appends feedback_provided and
     // leaves the run parked until the gate poll expires.
     const kernel = new Kernel(log, undefined, undefined, dbosSend)
-    // the workspace must sit at THIS config's dir: buildRuntime resolves the consolidation and
-    // auto-heal authors from the directory it serves, and refuses when nothing claims it
+    // the workspace must sit at THIS config's dir: buildRuntime resolves the auto-heal authors from it
     await seedTestWorkspace(log, CLI, realpathSync(config.dir))
     const { host, hub } = await buildPlugins(config)
     host.providers.set('fake', fakeProvider)

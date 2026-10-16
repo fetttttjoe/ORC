@@ -1,4 +1,5 @@
-import { CHECKS_EXECUTOR_REF, checkCommandsOf, type ChildPlanDraft, type Plan } from '@orc/contracts'
+import { CHECKS_EXECUTOR_REF, MASTERPLAN_NOTE_ID, checkCommandsOf, errorMessage, type ChildPlanDraft, type Plan } from '@orc/contracts'
+import { freezePlan, type Kernel } from '@orc/kernel'
 
 // The review surface of a plan: exactly the fields a human weighs at the gate. A named subset
 // (not the full Plan) so tests construct it cast-free and callers state their dependency.
@@ -49,4 +50,16 @@ export function renderDerivedPlan(draft: ChildPlanDraft): string {
     lines.push(`  ! all ${draft.steps.length} steps are unordered and run at once`
       + ` — if the description above implies a sequence, the notes do not encode it`)
   return lines.join('\n')
+}
+
+// What approving would freeze from the task's plan notes, or '' before a masterplan exists. A freeze
+// error is what the human needs to see at the gate, so it is rendered, never thrown.
+export async function derivedPlanBlock(kernel: Pick<Kernel, 'listPlanNotes'>, opts: { autoCommit?: boolean; checks: readonly string[] }, taskId: string): Promise<string> {
+  try {
+    const notes = await kernel.listPlanNotes(taskId)
+    if (!notes.some(n => n.id === MASTERPLAN_NOTE_ID)) return ''
+    return renderDerivedPlan(freezePlan(MASTERPLAN_NOTE_ID, notes, opts))
+  } catch (err) {
+    return `the plan notes do not derive a runnable plan: ${errorMessage(err)}`
+  }
 }

@@ -2,19 +2,20 @@ import { randomUUID } from 'node:crypto'
 import { statSync } from 'node:fs'
 import path from 'node:path'
 import { MASTERPLAN_NOTE_ID,
-  AnalysisCompletedPayload, ApprovedBy, CHECKS_STEP_ID, ChildPlanDraft, EVENT_KIND, FINISH_STEP_ID, FeedbackProvidedPayload, GroundedApprovalDoor, IsolationTier, MemoryDeletedPayload, MemoryWrittenPayload, NOTE_TIER, PAYLOAD_SCHEMAS, PlanAnnotatedPayload, PlanDraft, RunRequestedPayload, STEP_ROLE, STRATEGY, TASK_STATUS, TERMINAL_TASK_STATUS, WORKSPACE_TITLE_MAX, Workspace, WorkspaceArchivedPayload, WorkspaceMergedPayload, WorkspaceRetitledPayload, evaluateApproval, feedbackKey, formatModelOption, isApprovalAnswer, openFeedbackTopics, validatePlan, type ChildPlanDraftInput, type ModelOption,
+  AnalysisCompletedPayload, ApprovedBy, CHECKS_STEP_ID, ChildPlanDraft, EVENT_KIND, FINISH_STEP_ID, FeedbackProvidedPayload, GroundedApprovalDoor, IsolationTier, PAYLOAD_SCHEMAS, PlanAnnotatedPayload, PlanDraft, PlanNoteToolName, PlanNoteWrittenPayload, RunRequestedPayload, STEP_ROLE, STRATEGY, TASK_STATUS, TERMINAL_TASK_STATUS, WORKSPACE_TITLE_MAX, Workspace, WorkspaceArchivedPayload, WorkspaceMergedPayload, WorkspaceRetitledPayload, evaluateApproval, feedbackKey, formatModelOption, isApprovalAnswer, openFeedbackTopics, validatePlan, type ChildPlanDraftInput, type ModelOption,
   type Analyzer, type ApprovalPolicy, type EventDraft, type EventKind, type EventRecord, type KnowledgeWrites,
-  type PlanNote, type Plan, type PlanStep, type TaskNode, type TaskStatus,
+  type PlanNote, type PlanNoteWrite, type Plan, type PlanStep, type TaskNode, type TaskStatus,
   type WorkspaceKind, authorSourceOf, directoryZoneEntries, type Origin,
 } from '@orc/contracts'
-import { foldPlanNotes, planApprovalStamp, planGraphHash, planScope, PLAN_STEP_ID, PLAN_STEP_ROLE } from './execution/strategies/grounded-plan'
+import { GROUNDED_TASK_TYPE, planApprovalStamp, planGraphHash, PLAN_STEP_ID, PLAN_STEP_ROLE } from './execution/strategies/grounded-plan'
+import { PlanNoteRefusal, mergePlanNote, planNotesOf, planNotesWrittenAfter } from './plan-notes'
 import { kernelStepExecutorRef, reconcileFinishStep } from './finish-step'
 import { DEFAULT_MAX_ITERATIONS } from './config'
 import { EventLog, type EventLogOps } from './storage'
-import { estimateCostUSD, fold, gatedChildren, subtreeTaskIds, subtreeUsage, taskChangedPaths, type State } from './projections'
+import { estimateCostUSD, fold, gatedChildren, knowledgeOwnerTaskIds, subtreeTaskIds, subtreeUsage, taskChangedPaths, type State } from './projections'
 import { knowledgeWritesIn } from './task-knowledge'
 import { applyArchived, applyRetitle, workspaceByCwd, workspaceCwdFor } from './workspaces'
-import { KERNEL_ERROR_CODE, KernelError } from './errors'
+import { KERNEL_ERROR_CODE, KernelError, type KernelErrorCode } from './errors'
 
 // D6 targeted re-plan (M5b): what listAnnotations hands back to the read_annotations tool — the
 // plan_annotated payload plus the event's own seq, so the agent can order/dedupe across rounds.
@@ -47,6 +48,11 @@ function assertZonesCanMatch(plan: Plan, workspaceCwd: string | null): void {
 // (finalize_plan → withCommitStep) may claim it, and only that origin may carry the committer role.
 export const SPLIT_ORIGIN = { agent: 'agent', freeze: 'freeze' } as const
 export type SplitOrigin = (typeof SPLIT_ORIGIN)[keyof typeof SPLIT_ORIGIN]
+
+const PLAN_NOTE_REFUSAL_CODE = {
+  [PlanNoteRefusal.untitled]: KERNEL_ERROR_CODE.invalid_transition,
+  [PlanNoteRefusal.shape]: KERNEL_ERROR_CODE.plan_validation_failed,
+} satisfies Record<PlanNoteRefusal, KernelErrorCode>
 
 // One open feedback question, already parsed. The raw event travels with it because the reply path
 // resumes the step/run envelope the question was asked from.
@@ -82,7 +88,7 @@ export class Kernel {
 
   // The grounded-plan bootstrap (M5b): an auto-approved [analyze, plan] template. The analyze
   // step is the resolved Analyzer's scout step; the plan step is an auditor api-loop step that
-  // authors a plan-note graph and calls finalize_plan. Policy-approved because the human's real
+  // authors the plan notes and calls finalize_plan. Policy-approved because the human's real
   // gate is the conversational approve inside the plan step, not this scaffold.
   // maxIterations is the PROJECT's agent-loop budget (config.maxIterations), applied here to both
   // template steps rather than by each analyzer: the plan step hardcoded 30 and every subplan
@@ -100,14 +106,12 @@ export class Kernel {
     if (!analyzer)
       throw new KernelError(KERNEL_ERROR_CODE.invalid_transition, `unknown analyzer '${input.analyzerRef}' — register it or pass a valid analyzerRef`)
     return this.log.transaction(async tx => {
-      const task = await this.createTaskIn(tx, { title: input.title, spec, type: 'grounded', parentId: input.parentId, budgetUSD: input.budgetUSD, workspaceId: input.workspaceId }, origin)
+      const task = await this.createTaskIn(tx, { title: input.title, spec, type: GROUNDED_TASK_TYPE, parentId: input.parentId, budgetUSD: input.budgetUSD, workspaceId: input.workspaceId }, origin)
       const maxIterations = input.maxIterations ?? DEFAULT_MAX_ITERATIONS
       const analyzeStep: PlanStep = { ...analyzer.analysisStep({ modelRef: input.modelRef, taskSpec: spec }), maxIterations, readOnlySource: true }
       const planStep: PlanStep = {
         id: PLAN_STEP_ID, role: PLAN_STEP_ROLE, title: 'Author the executable plan',
-        // the concrete scope + root id, so the authoring agent (which never sees its taskId) and
-        // finalize_plan agree on where the plan-note graph lives.
-        instructions: `Author the plan-note graph in memory scope '${planScope(task.id)}' with root note id '${MASTERPLAN_NOTE_ID}', iterate with the human via ask_human, then call finalize_plan. Follow the plan-authoring skill.`
+        instructions: `Author the plan with ${PlanNoteToolName.write}: a '${MASTERPLAN_NOTE_ID}' note whose \`subplans\` lists each subplan note id, iterate with the human via ask_human, then call ${PlanNoteToolName.finalize}. Follow the plan-authoring skill.`
           // the planner cannot price a trade-off between models it has never heard of
           + (input.modelCatalog?.length
             ? ` Models you may set as a subplan's modelRef, with their rates: ${input.modelCatalog.map(formatModelOption).join('; ')}. Omit it to inherit '${input.modelRef}'.`
@@ -337,21 +341,35 @@ export class Kernel {
     return out
   }
 
-  // Same subtree rule as listTaskChangedPaths: covers delegated writes in a descendant split task.
+  // The subtree, plus a grounded parent: it has no commit step, so its frozen child owns its writes.
   async listTaskKnowledgeWrites(taskId: string): Promise<KnowledgeWrites> {
-    const ids = subtreeTaskIds(await this.state(), taskId)
+    const ids = knowledgeOwnerTaskIds(await this.state(), taskId)
     const events = (await Promise.all(ids.map(id => this.log.byTask(id)))).flat()
     return knowledgeWritesIn(events, new Set(ids))
   }
 
-  // FixE freeze-from-log (M5b): reconstruct the task's plan-note graph from the event log — the
-  // source of truth — NOT the eventually-consistent SurrealDB projection. memory_written/deleted
-  // events carry taskId:null (scoped by note.scope), so they can't be read via byTask; after() with
-  // the memory kinds is how the projector reads them too. finalize_plan folds these into the
-  // deterministic executable plan, so the freeze never depends on projection catch-up.
   async listPlanNotes(taskId: string): Promise<PlanNote[]> {
-    const events = await this.log.after(0, [EVENT_KIND.memory_written, EVENT_KIND.memory_deleted])
-    return foldPlanNotes(events, planScope(taskId))
+    return planNotesOf(await this.log.byTask(taskId), taskId)
+  }
+
+  // a replayed key returns the note it stored and appends nothing
+  async writePlanNote(taskId: string, write: PlanNoteWrite, origin: Origin, run?: { stepId: string; runToken: string; idempotencyKey: string }): Promise<PlanNote> {
+    return this.log.transaction(async tx => {
+      const task = await this.requireTask(tx, taskId)
+      if (task.type !== GROUNDED_TASK_TYPE)
+        throw new KernelError(KERNEL_ERROR_CODE.invalid_transition, `only a grounded task has plan notes, and this task is '${task.type}'`)
+      if (TERMINAL_TASK_STATUS.has(task.status))
+        throw new KernelError(KERNEL_ERROR_CODE.invalid_transition, `cannot write a plan note while task is '${task.status}'`)
+      const events = await tx.byTask(taskId)
+      const replayed = run && events.find(e => e.kind === EVENT_KIND.plan_note_written && e.idempotencyKey === run.idempotencyKey)
+      if (replayed) return PlanNoteWrittenPayload.parse(replayed.payload).note
+      const prev = planNotesOf(events, taskId).find(n => n.id === write.id)
+      const note = mergePlanNote(prev, write)
+      if ('refusal' in note) throw new KernelError(PLAN_NOTE_REFUSAL_CODE[note.code], note.refusal)
+      await this.append(tx, taskId, { kind: EVENT_KIND.plan_note_written, payload: { note }, ...(run && { idempotencyKey: run.idempotencyKey }) }, origin,
+        run ? { stepId: run.stepId, runToken: run.runToken } : {})
+      return note
+    })
   }
 
   // The latest still-open feedback_requested (no later feedback_provided on its topic), or null.
@@ -451,22 +469,10 @@ export class Kernel {
     return found ? { source: found.source } : null
   }
 
-  // Plan-tier note ids written or deleted after `seq` in this task's plan scope — what actually
-  // changed since the human approved. "The graph changed" alone sends the agent back to re-ask
-  // without knowing which edit cost it a human gate, and it re-edits and re-asks again.
+  // Plan note ids written after `seq` — what actually changed since the human approved. "The graph
+  // changed" alone sends the agent back to re-ask without knowing which edit cost it a human gate.
   async planNotesChangedSince(taskId: string, seq: number): Promise<string[]> {
-    const scope = planScope(taskId)
-    const ids = new Set<string>()
-    for (const e of await this.log.after(seq, [EVENT_KIND.memory_written, EVENT_KIND.memory_deleted])) {
-      if (e.kind === EVENT_KIND.memory_written) {
-        const p = MemoryWrittenPayload.safeParse(e.payload)
-        if (p.success && p.data.note.scope === scope && p.data.note.tier === NOTE_TIER.plan) ids.add(p.data.note.id)
-      } else {
-        const p = MemoryDeletedPayload.safeParse(e.payload)
-        if (p.success && p.data.scope === scope) ids.add(p.data.id)
-      }
-    }
-    return [...ids]
+    return planNotesWrittenAfter(await this.log.byTaskSince(taskId, seq), taskId, seq)
   }
 
   // D4 conversational gate, human side: answers the latest still-open feedback_requested and resumes
@@ -484,18 +490,13 @@ export class Kernel {
   async replyFeedback(taskId: string, text: string, origin: Origin): Promise<string | null> {
     const open = await this.log.transaction(async tx => {
       const task = await this.requireTask(tx, taskId)
-      const requested = this.openRequest(await tx.byTask(taskId))
+      const events = await tx.byTask(taskId)
+      const requested = this.openRequest(events)
       if (!requested) return null
       const { topic, event } = requested
       if (!event.stepId || !event.runToken)
         throw new KernelError(KERNEL_ERROR_CODE.invalid_transition, `feedback_requested for topic '${topic}' has no step/run envelope to resume`)
-      const approvingPlan = planApprovalStamp(task, event, text)
-      const planHash = approvingPlan
-        ? planGraphHash(foldPlanNotes(
-          await tx.after(0, [EVENT_KIND.memory_written, EVENT_KIND.memory_deleted]),
-          planScope(taskId),
-        ))
-        : undefined
+      const planHash = planApprovalStamp(task, event, text) ? planGraphHash(planNotesOf(events, taskId)) : undefined
       const payload = FeedbackProvidedPayload.parse({
         // workspaceId off the TASK, which requireTask above already has in hand: an answer belongs
         // to the checkout the task is being worked in, not to wherever the person answering happens

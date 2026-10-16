@@ -1,19 +1,5 @@
 import { describe, expect, it } from 'bun:test'
-import { PLAN_FIELD_RULES, planFieldViolations, RULE_SEVERITY, siblingOrderingMisuse, zoneEntryMisuse } from './plan-rules'
-import { LINK_KIND } from './memory'
-
-describe('siblingOrderingMisuse', () => {
-  it('names the sibling edge and the field that actually orders', () => {
-    const m = siblingOrderingMisuse('verify', [{ id: 'generate-doc', kind: LINK_KIND.depends_on }], ['generate-doc'])
-    expect(m).toContain("plan-note 'verify' links depends_on 'generate-doc'")
-    expect(m).toContain('FIELD, not a link')
-  })
-
-  it('says nothing about a depends_on link to a non-sibling, or any other kind', () => {
-    expect(siblingOrderingMisuse('verify', [{ id: 'auth-flow', kind: LINK_KIND.depends_on }], ['generate-doc'])).toBeNull()
-    expect(siblingOrderingMisuse('verify', [{ id: 'generate-doc', kind: LINK_KIND.refines }], ['generate-doc'])).toBeNull()
-  })
-})
+import { PLAN_FIELD_RULES, planFieldViolations, RULE_SEVERITY, zoneEntryMisuse } from './plan-rules'
 
 // A planner froze a zone whose single entry was several globs joined with newlines
 // (`["a/**\nb.ts"]`). Nothing refused it, the frozen fence then matched no real path, two steps were
@@ -65,7 +51,7 @@ describe('zoneEntryMisuse', () => {
   })
 })
 
-const clean = { id: 'verify', zone: ['packages/**'], links: [], siblings: [] }
+const clean = { id: 'verify', zone: ['packages/**'] }
 
 describe('planFieldViolations', () => {
   it('routes a zone misuse to shape with the pinned wording', () => {
@@ -74,10 +60,6 @@ describe('planFieldViolations', () => {
     expect(v.shape[0]).toContain('one glob per array entry')
     expect(v.shape[0]).toContain('\\n') // escapes rendered, not reproduced
     expect(v.judgment).toEqual([])
-  })
-  it('routes a sibling depends_on link to shape with the pinned wording', () => {
-    const v = planFieldViolations({ ...clean, links: [{ id: 'generate-doc', kind: LINK_KIND.depends_on }], siblings: ['generate-doc'] })
-    expect(v.shape[0]).toContain("ordering is the `dependsOn` FIELD, not a link")
   })
   it('returns empty sets for a clean note', () => {
     expect(planFieldViolations(clean)).toEqual({ shape: [], judgment: [] })

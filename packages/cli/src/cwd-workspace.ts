@@ -61,7 +61,7 @@ export const cwdWorkspaceId = async (kernel: WorkspaceFold, dir: string | undefi
   (await cwdWorkspace(kernel, dir)).id
 
 // The ONE builder for every author that is NOT an agent step's: the CLI commands, the MCP door, the
-// auto-heal reactor and post-task consolidation. They all answer "which workspace am I writing
+// auto-heal reactor. They all answer "which workspace am I writing
 // from?" the same way — the checkout the process is running in — and a per-door spelling would
 // drift on the realpath, on what a miss means, or (worse) on quietly substituting a default.
 //

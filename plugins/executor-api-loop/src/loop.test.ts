@@ -176,6 +176,36 @@ describe('api-loop executor', () => {
     expect(prompt).toContain('healed 14 of 26; remaining ids: a, b')
   })
 
+  it('a continuation round renders the continuation block and no prior-failure heading', async () => {
+    const captured: EventDraft[] = []
+    const model = scriptModel([
+      { toolCalls: [{ toolCallId: 'c1', toolName: TOOL_NAME.signal, input: { outcome: SignalOutcome.success, summary: 'finished' } }] },
+    ])
+    await drain(apiLoopExecutor().startTurn({ ...ctx(model, captured), continuation: { round: 1, summary: 'half done' } }))
+    const call = captured.find(d => d.kind === EVENT_KIND.agent_call)
+    const prompt = JSON.stringify(RequestPayload.parse(call?.payload).request)
+    expect(prompt).toContain('Continuing your own previous work')
+    expect(prompt).not.toContain('Your previous attempt failed')
+  })
+
+  it('a retried step renders its previous failure whole in the first prompt; a first attempt renders nothing', async () => {
+    const heading = '# Your previous attempt failed (attempt 1, agent_error)'
+    const message = 'boom: the zone refused src/x.ts'
+    const firstPrompt = async (over: Partial<ExecutorContext<LanguageModel>>): Promise<string> => {
+      const captured: EventDraft[] = []
+      const model = scriptModel([
+        { toolCalls: [{ toolCallId: 'c1', toolName: TOOL_NAME.signal, input: { outcome: SignalOutcome.success, summary: 'finished' } }] },
+      ])
+      await drain(apiLoopExecutor().startTurn({ ...ctx(model, captured), ...over }))
+      const call = captured.find(d => d.kind === EVENT_KIND.agent_call)
+      return JSON.stringify(RequestPayload.parse(call?.payload).request)
+    }
+    const retried = await firstPrompt({ priorFailure: { attempt: 1, class: FailureClass.agent_error, message } })
+    expect(retried).toContain(heading)
+    expect(retried).toContain(message)
+    expect(await firstPrompt({})).not.toContain('Your previous attempt failed')
+  })
+
   // The final-iteration trap, measured live (continuation smoke, both attempts): told "call
   // signal THIS turn" while still offered fs_read, the model spent its last call finishing work
   // and no turn remained to signal from. The final iteration therefore advertises ONLY signal —
@@ -848,10 +878,7 @@ describe('memory lint nudge', () => {
   })
 })
 
-describe('step memory and knowledge seams', () => {
-  type CaptureLog = { captured: unknown[] }
-  const captureLog = (): CaptureLog => ({ captured: [] })
-  const fakeMemory = (log: CaptureLog) => ({ capture: async (signal: unknown) => { log.captured.push(signal) } })
+describe('step knowledge seam', () => {
   const signalled = (outcome: 'success' | 'failure', summary: string) =>
     scriptModel([{ toolCalls: [{ toolCallId: 'c1', toolName: 'signal', input: { outcome, summary } }] }])
 
@@ -886,7 +913,6 @@ describe('step memory and knowledge seams', () => {
   it('surfaces claims citing a file the step EDITED, once, and only after a successful write', async () => {
     const captured: EventDraft[] = []
     const specs: OperationSpec[] = []
-    const log = captureLog()
     const { citedPaths, knowledge } = fakeKnowledge([atRiskClaim])
     // turn 1 edits a file; turn 2 must carry the at-risk block; turn 3 signals. A second edit of the
     // SAME path must not re-surface it — a block repeated every turn is one the model learns to skip.
@@ -896,7 +922,7 @@ describe('step memory and knowledge seams', () => {
       { toolCalls: [{ toolCallId: 'c3', toolName: 'signal', input: { outcome: 'success', summary: 'ok' } }] },
     ])
     await drain(apiLoopExecutor().startTurn(ctx(model, captured, {
-      memory: fakeMemory(log), knowledge, operation: makeOperation(captured, specs),
+      knowledge, operation: makeOperation(captured, specs),
     })))
     expect(citedPaths).toEqual([['main.ts']]) // asked once, for the path actually written
     // specs interleaves model and tool operations — the prompts are the model ones
@@ -914,14 +940,13 @@ describe('step memory and knowledge seams', () => {
   it('says nothing when a read-only step touches no file', async () => {
     const captured: EventDraft[] = []
     const specs: OperationSpec[] = []
-    const log = captureLog()
     const { citedPaths, knowledge } = fakeKnowledge([atRiskClaim])
     const model = scriptModel([
       { toolCalls: [{ toolCallId: 'c1', toolName: 'fs_read', input: { path: 'main.ts' } }] },
       { toolCalls: [{ toolCallId: 'c2', toolName: 'signal', input: { outcome: 'success', summary: 'ok' } }] },
     ])
     await drain(apiLoopExecutor().startTurn(ctx(model, captured, {
-      memory: fakeMemory(log), knowledge, operation: makeOperation(captured, specs),
+      knowledge, operation: makeOperation(captured, specs),
     })))
     // reading a file cannot falsify a claim about it — no query, no block
     expect(citedPaths).toEqual([])
@@ -1059,18 +1084,7 @@ describe('step memory and knowledge seams', () => {
     await gen.return?.(undefined)
   })
 
-  it('hands the signal to capture — success and failure alike', async () => {
-    for (const outcome of ['success', 'failure'] as const) {
-      const captured: EventDraft[] = []
-      const log = captureLog()
-      await drain(apiLoopExecutor().startTurn(ctx(signalled(outcome, 'what happened'), captured, {
-        memory: fakeMemory(log), taskId: 'task-1',
-      })))
-      expect(log.captured).toEqual([expect.objectContaining({ outcome, summary: 'what happened' })])
-    }
-  })
-
-  it('no memory or knowledge on the context: the step runs to done', async () => {
+  it('no knowledge on the context: the step runs to done', async () => {
     const captured: EventDraft[] = []
     const events = await drain(apiLoopExecutor().startTurn(ctx(signalled('success', 'ok'), captured, {
       knowledgePreloadTokens: 1_200,

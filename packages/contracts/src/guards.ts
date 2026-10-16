@@ -26,6 +26,14 @@ export const issueLine = (issue: { path: PropertyKey[]; message: string }): stri
 export const toolError = (err: unknown): { output: { error: string }; isError: true } =>
   ({ output: { error: errorMessage(err) }, isError: true })
 
+export const NO_INPUT_SCHEMA: Record<string, unknown> = { type: 'object', properties: {} }
+
+// a tool's input schema as the model reads it: the zod schema's input side, without `$schema`
+export const toolSchemaOf = (schema: z.ZodType): Record<string, unknown> => {
+  const { $schema: _dropped, ...json } = z.toJSONSchema(schema, { io: 'input' })
+  return json
+}
+
 // Trimmed, non-blank lines out of a git/CLI stdout blob — the one splitter every process-output
 // reader needs, re-spelled five times (commit-tool, drift, grounding-source) before this existed.
 export const nonEmptyLines = (text: string): string[] =>

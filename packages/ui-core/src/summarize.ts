@@ -137,6 +137,7 @@ const SUMMARIZE = {
   [EVENT_KIND.feedback_provided]: entry(PAYLOAD_SCHEMAS.feedback_provided, p => ({
     line: `A: ${snip(p.text, 120)}`,
   })),
+  [EVENT_KIND.plan_note_written]: entry(PAYLOAD_SCHEMAS.plan_note_written, p => ({ line: `${p.note.id}: ${p.note.title}` })),
   [EVENT_KIND.plan_annotated]: entry(PAYLOAD_SCHEMAS.plan_annotated, p => ({
     line: `on ${p.targetNote} (v${p.planVersion}): ${snip(p.text, 100)}`,
   })),

@@ -2,7 +2,7 @@ import { existsSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { z } from 'zod'
-import { COMMIT_STEP_ID, ORC_CHAT_ID, STEP_ROLE, errorMessage, nonEmptyLines, sha256, toolError, type KnowledgeRef, type Origin, type ResolvedTool } from '@orc/contracts'
+import { COMMIT_STEP_ID, ORC_CHAT_ID, STEP_ROLE, errorMessage, nonEmptyLines, sha256, toolError, type KnowledgeRef, type Origin, type ResolvedTool, NO_INPUT_SCHEMA } from '@orc/contracts'
 import type { Kernel } from '../kernel'
 import { subtreeUsage } from '../projections'
 import { clipMiddle } from './clip'
@@ -149,7 +149,7 @@ export function commitTool(opts: {
   return [{
     ref: 'kernel/commit_preview', name: 'commit_preview',
     description: PREVIEW_DESCRIPTION,
-    inputSchema: { type: 'object', properties: {} },
+    inputSchema: NO_INPUT_SCHEMA,
     execute: async () => {
       try {
         const s = await stagedDiff(false)

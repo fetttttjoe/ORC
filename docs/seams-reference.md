@@ -53,20 +53,20 @@ a grep here comes back empty.
 
 **Gate B — `orc reply <taskId> approve`, the grounded-plan gate. This one is bound to a point in the log.**
 
-4. `kernel.replyFeedback` answers the open `feedback_requested`. When the task is `grounded` and the reply is exactly `approve` on the plan step, it stamps `planHash` — `planGraphHash(foldPlanNotes(...))`, SHA-256 over the canonical plan-note graph — onto the `feedback_provided` payload. That hash is the audit record of what was approved, and the marker `approvedPlanHash` uses to tell a plan approval from any other `approve`; the gate itself does not compare it. Its value is reproducible only by the build that stamped it, so it attests *that an approval happened over some graph*, never *that it was this graph* — do not compare it against a freshly computed one
-5. The plan-authoring agent then calls `finalize_plan`, which locates the approval with `kernel.approvedPlanHash(taskId, runToken)` and refuses the freeze when `kernel.planNotesChangedSince(taskId, approvedSeq)` is non-empty — any plan-tier write or any delete in the task's plan scope after the approval — *naming the ids*, so the agent learns which edit cost it the gate instead of only that something moved. That is equivalent to "the graph is unchanged", since `foldPlanNotes` reads exactly those events, and unlike comparing two content hashes it cannot disagree with itself when the approving process and the executor are different builds. Missing, cross-run, or stale approval fails before any child split
+4. `kernel.replyFeedback` answers the open `feedback_requested`. When the task is `grounded` and the reply is exactly `approve` on the plan step, it stamps `planHash` — `planGraphHash(planNotesOf(...))`, SHA-256 over the task's canonical plan notes — onto the `feedback_provided` payload. That hash is the audit record of what was approved, and the marker `approvedPlanHash` uses to tell a plan approval from any other `approve`; the gate itself does not compare it. Its value is reproducible only by the build that stamped it, so it attests *that an approval happened over some graph*, never *that it was this graph* — do not compare it against a freshly computed one
+5. The plan-authoring agent then calls `finalize_plan`, which locates the approval with `kernel.approvedPlanHash(taskId, runToken)` and refuses the freeze when `kernel.planNotesChangedSince(taskId, approvedSeq)` is non-empty — any `plan_note_written` on the task after the approval — *naming the ids*, so the agent learns which edit cost it the gate instead of only that something moved. That is equivalent to "the notes are unchanged", since `planNotesOf` reads exactly those events, and unlike comparing two content hashes it cannot disagree with itself when the approving process and the executor are different builds. Missing, cross-run, or stale approval fails before any child split
 
 **How to debug approval issues:**
 - Ordinary gate: `orc log <task> --json | jq '.[] | select(.kind == "plan_approved")'` — check `approvedBy`
 - Grounded gate: `orc log <task> --json | jq '.[] | select(.kind == "feedback_provided") | .payload.planHash'`
 - `cannot approve while task is '<status>'` means the task is not at `awaiting_approval` — check `orc status <task>`
-- `the plan-note graph changed after approval` from `finalize_plan`: the notes it names moved between the human's `approve` and the freeze. Re-approve, then call `finalize_plan` without editing in between
+- `the plan notes changed after approval` from `finalize_plan`: the notes it names moved between the human's `approve` and the freeze. Re-approve, then call `finalize_plan` without editing in between
 
 ---
 
 ### Scenario 3: Memory writes a note; it becomes searchable
 
-**Starting point:** A step calls `memory_write(note)` via the memory tool
+**Starting point:** a note is written through the memory plugin's `memory_write` tool (no step is offered it; the CLI's `orc note` / `orc memory add` write through the same store)
 
 **Tier ① (application — memory tool):**
 1. `plugins/memory/src/tools.ts` `memory_write` tool → parses the draft, then calls `store.write(draft, author, opts)`. It records NO `memory_accessed`: a write is not a read. `addClaims` / `invalidates` are parsed off the call here and never become note fields.
@@ -99,7 +99,7 @@ a grep here comes back empty.
 - `orc memory cat <id>` shows the full note
 - `orc memory claims <id>` shows a note's live claims; `--history` folds the log instead, which is the only way to see a RETIRED claim and the write that retired it (the tombstone lives on the event, never on the note). `--json` prints the raw claim array of whichever form you asked for — pretty-printed, no envelope — and an empty result is `[]` with exit 0, so a script reads absence as data instead of parsing the human throw
 - `orc memory topics` lists the derived groups (as tab/space-separated human rows); `orc memory topics --json` prints the same inventory as pretty-printed JSON. "no topics" with claims present means stage 3 has not run or the embedder is down; with `--json` an empty inventory prints `[]`. "no topics" on a pre-claims corpus is correct — see the note under the pipeline above
-- SurrealDB down? → `memory_write` tool returns `memory unavailable` but the event still writes to Postgres; vault/memory rebuilds when SurrealDB comes back up
+- SurrealDB down? → the supervisor warns once and runs without the memory projection; vault/memory rebuilds when SurrealDB comes back up
 - `orc status <task>` prints `memory: unreachable` if Surreal is down, and `memory: catching_up` while the projector is behind — those are different problems, and collapsing them used to light the degraded badge on every burst of note writes
 - Check `vault/memory/index.md` — if empty, SurrealDB projector has not run yet; restart the CLI
 
@@ -230,7 +230,7 @@ See [claims and topics](ARCHITECTURE.md#claims-—-the-addressable-unit-of-knowl
 point, since the topic it names is derived and a rebuild can reshape it.
 
 **Degraded mode:** If SurrealDB is down:
-- `memory_write` tool returns `memory unavailable`
+- The supervisor warns once and runs on; no step depends on the memory store
 - Events still append to Postgres (so the data is not lost)
 - Search/neighbors/cat tools return `memory unavailable`
 - On next CLI startup, the projector reconnects and rebuilds vault/memory from events (this may take a few seconds for a large graph)
@@ -453,7 +453,8 @@ still works when nothing else does.
 |---|---|---|---|
 | Step execution | `operation_started`, `agent_call` / `tool_result`, `operation_completed` | all above (live status) | `EventLog`, `OperationJournal` |
 | Plan approval (ordinary) | `plan_approved`, `task_status_changed` | `plan_approved` for routing | `EventLog` |
-| Plan approval (grounded) | `feedback_provided` carrying `planHash` | `feedback_provided` for the approval + its seq, then `memory_written` / `memory_deleted` after it for `finalize_plan`'s gate | `EventLog` |
+| Plan approval (grounded) | `feedback_provided` carrying `planHash` | `feedback_provided` for the approval + its seq, then the task's `plan_note_written` after it for `finalize_plan`'s gate | `EventLog` |
+| Plan authoring (grounded) | `plan_note_written` (the full merged note; envelope = the task, plus the writing step and run) | the task's `plan_note_written`, folded by `planNotesOf` for the freeze, the approval hash and the plan pane | `EventLog` |
 | Memory write | `memory_written` only (note + live claims, plus event-level `invalidates`). NOT `memory_accessed` — a write is not a read | `memory_written` / `memory_deleted` / `memory_accessed` for the projector + search | `EventLog`, Surreal |
 | Memory read | `memory_accessed` — on a HIT only, from `memory_read`, `memory_neighbors` (against its seed) and `orc memory cat`. `memory_search` records nothing | — | `EventLog`, Surreal |
 | Knowledge read | `knowledge_delivered` — the ids a card, search, get, at-risk push or step preload actually handed over, `mode` naming which; a step's preload appends one, after its budget cut | the same, folded into claim evidence | `EventLog` |

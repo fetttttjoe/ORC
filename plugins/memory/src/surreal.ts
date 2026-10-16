@@ -517,8 +517,8 @@ export class SurrealMemory {
       // The driver's connect() does NOT reject on an unreachable endpoint — measured still
       // pending after 400s against a closed port, because its reconnect budget governs a dropped
       // established connection, not the initial dial. Every degraded-memory path in the system
-      // is downstream of this throwing: probeMemory's catch, and the CLI runtime's fallback to
-      // unavailableMemoryTools. Unbounded, `orc status` and every `orc memory` command hang
+      // is downstream of this throwing: probeMemory's catch, and the CLI runtime's degraded
+      // mode. Unbounded, `orc status` and every `orc memory` command hang
       // forever instead of degrading, which is the opposite of the stated guarantee.
       // ponytail: one constant, not a setting — promote it if a real deployment needs longer.
       // authentication as a connect-option PROVIDER, not a one-shot .signin(): when the

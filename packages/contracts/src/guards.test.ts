@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'bun:test'
 import { z } from 'zod'
-import { errorMessage, nonEmptyLines } from './guards'
+import { errorMessage, nonEmptyLines, toolSchemaOf } from './guards'
 
 describe('errorMessage', () => {
   it('unwraps Error and stringifies the rest', () => {
@@ -16,6 +16,16 @@ describe('errorMessage', () => {
     const msg = errorMessage(r.error)
     expect(msg).toContain('paths')
     expect(msg).not.toContain('"code"') // no raw issue JSON
+  })
+})
+
+describe('toolSchemaOf', () => {
+  it('is the input side of the schema, without $schema: a defaulted field is optional to the caller', () => {
+    expect(toolSchemaOf(z.object({ id: z.string(), limit: z.number().default(5) }))).toEqual({
+      type: 'object',
+      properties: { id: { type: 'string' }, limit: { type: 'number', default: 5 } },
+      required: ['id'],
+    })
   })
 })
 

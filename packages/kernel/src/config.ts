@@ -51,16 +51,6 @@ const settingsSchema = (dir: string, projectRoot: string) =>
     // genuinely needs more signals `partial` and continues through the runtime's continuation
     // grants — lean by default, self-extending under evidence, never silently over-provisioned.
     autoHealIterations: z.coerce.number().int().positive().default(15),
-    // the model that DISTILS a finished task's step outcomes into one durable note, as a
-    // 'provider/model' ref. '' (default) = extractive promotion (glued bullets, zero model calls);
-    // set it (e.g. 'anthropic/claude-haiku-4-5') to have the out-of-band lifecycle synthesise a
-    // coherent note instead. A per-task cost, deliberately opt-in — it runs off the agent turn budget.
-    memoryConsolidateModel: z.string().default(''),
-    // ambient capture kill switch: displaces the manual step-report protocol rule —
-    // successful steps auto-persist their signal summary as an expirable plan note, at zero
-    // model-call cost. z.stringbool(), NOT z.coerce.boolean(): coerce turns the env string
-    // 'false' into `true` (any non-empty string is truthy), which would make the switch inoperable.
-    ambientCapture: z.union([z.boolean(), z.stringbool()]).default(true),
     approvalPolicy: ApprovalPolicy.prefault({}), // {} isn't the full output shape — prefault reparses it, applying ApprovalPolicy's own field defaults
     // which doors' approvals satisfy the grounded plan gate (Kernel.approvedPlanHash). Default
     // ['cli'] is today's exact behaviour and covers the web UI too (its replies record 'cli').
@@ -142,8 +132,6 @@ const envOverrides = (): Record<string, string> => {
     knowledgePreloadTokens: process.env.ORC_KNOWLEDGE_PRELOAD_TOKENS,
     memoryEmbedModel: process.env.ORC_MEMORY_EMBED_MODEL,
     autoHealIterations: process.env.ORC_AUTO_HEAL_ITERATIONS,
-    memoryConsolidateModel: process.env.ORC_MEMORY_CONSOLIDATE_MODEL,
-    ambientCapture: process.env.ORC_AMBIENT_CAPTURE,
     autoCommit: process.env.ORC_AUTO_COMMIT,
     autoHeal: process.env.ORC_AUTO_HEAL,
     ollamaBaseUrl: process.env.OLLAMA_BASE_URL,

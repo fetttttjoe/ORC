@@ -1,24 +1,18 @@
 import { describe, expect, it } from 'bun:test'
-import { AUTHOR_SOURCE, CHECKS_STEP_ID, COMMIT_STEP_ID, Door, EVENT_KIND, FINISH_STEP_ID, LINK_KIND, ROLE_SKILL, STEP_ROLE, type EventRecord, type MemoryLink, type Origin, type PlanNote } from '@orc/contracts'
-import { authorFixture, eventFixture, must, planNoteFixture, stepFixture } from '@orc/contracts/fixtures'
-import { foldPlanNotes, freezePlan, groundedPlanOmission, instantiateFrozenPlan, planGraphHash, planScope, withCommitStep } from './grounded-plan'
+import { CHECKS_STEP_ID, COMMIT_STEP_ID, EVENT_KIND, FINISH_STEP_ID, PlanNoteToolName, ROLE_SKILL, STEP_ROLE, type EventRecord, type PlanNote } from '@orc/contracts'
+import { eventFixture, must, planNoteFixture, stepFixture } from '@orc/contracts/fixtures'
+import { freezePlan, groundedPlanOmission, instantiateFrozenPlan, planGraphHash, withCommitStep } from './grounded-plan'
 // the appender lives in the pure module now (finish-step.ts, contracts-only imports); this describe
 // stays here because its subject is what the FREEZE ends with, not the appender in isolation
 import { withFinishStep } from '../../finish-step'
 
-// The planning agent writes inside its run's chat. MemoryAuthor.origin is required, and an author
-// without it makes the lenient fold skip the note instead of failing to compile.
-const RUN: Origin = { chatId: 'run:t1:v1', door: Door.supervisor }
-
-const note = (over: Partial<PlanNote> & { id: string }): PlanNote =>
-  planNoteFixture({ scope: 'plan-t', title: over.id, ...over })
-const link = (id: string, kind: MemoryLink['kind']): MemoryLink => ({ id, kind })
+const note = (over: Partial<PlanNote> & { id: string }): PlanNote => planNoteFixture({ title: over.id, ...over })
 
 describe('planGraphHash', () => {
   it('is canonical across note order and changes with reviewed graph content/order', () => {
     const hash = planGraphHash
     const notes = [
-      note({ id: 'masterplan', links: [link('a', LINK_KIND.decomposes_into), link('b', LINK_KIND.decomposes_into)] }),
+      note({ id: 'masterplan', subplans: ['a', 'b'] }),
       note({ id: 'a', body: 'A', uncertainty: ['verify A'] }),
       note({ id: 'b', body: 'B' }),
     ]
@@ -26,15 +20,15 @@ describe('planGraphHash', () => {
     expect(original).toMatch(/^[a-f0-9]{64}$/)
     expect(hash([...notes].reverse())).toBe(original)
     expect(hash(notes.map(n => n.id === 'a' ? { ...n, body: 'changed' } : n))).not.toBe(original)
-    expect(hash(notes.map(n => n.id === 'masterplan' ? { ...n, links: [...n.links].reverse() } : n))).not.toBe(original)
+    expect(hash(notes.map(n => n.id === 'masterplan' ? { ...n, subplans: [...n.subplans].reverse() } : n))).not.toBe(original)
     expect(hash(notes.map(n => n.id === 'a' ? { ...n, uncertainty: ['different'] } : n))).not.toBe(original)
   })
 })
 
 describe('instantiateFrozenPlan (pure, deterministic)', () => {
-  it('translates decomposes_into children into steps and the dependsOn field into ordering', () => {
+  it("translates the masterplan's subplans into steps and the dependsOn field into ordering", () => {
     const notes: PlanNote[] = [
-      note({ id: 'masterplan', links: [link('db', LINK_KIND.decomposes_into), link('api', LINK_KIND.decomposes_into)] }),
+      note({ id: 'masterplan', subplans: ['db', 'api'] }),
       note({ id: 'db', title: 'DB', body: 'create the schema' }),
       note({ id: 'api', title: 'API', body: 'build the api', dependsOn: ['db'] }),
     ]
@@ -47,7 +41,7 @@ describe('instantiateFrozenPlan (pure, deterministic)', () => {
 
   it("freezes a note's declared write zone into the step — the fence, not the skill, holds it", () => {
     const notes: PlanNote[] = [
-      note({ id: 'masterplan', links: [link('a', LINK_KIND.decomposes_into), link('b', LINK_KIND.decomposes_into)] }),
+      note({ id: 'masterplan', subplans: ['a', 'b'] }),
       note({ id: 'a', title: 'A', body: 'x', zone: ['docs/**'] }),
       note({ id: 'b', title: 'B', body: 'y' }),
     ]
@@ -58,7 +52,7 @@ describe('instantiateFrozenPlan (pure, deterministic)', () => {
 
   it("freezes a 'verify' subplan as auditor; siblings stay implementer", () => {
     const notes: PlanNote[] = [
-      note({ id: 'masterplan', links: [link('work', LINK_KIND.decomposes_into), link('verify', LINK_KIND.decomposes_into)] }),
+      note({ id: 'masterplan', subplans: ['work', 'verify'] }),
       note({ id: 'work', title: 'Work', body: 'do it' }),
       note({ id: 'verify', title: 'Verify', body: 'audit it', dependsOn: ['work'] }),
     ]
@@ -75,7 +69,7 @@ describe('instantiateFrozenPlan (pure, deterministic)', () => {
 
   it('freezes a verify note that already names the role skill without duplication', () => {
     const notes: PlanNote[] = [
-      note({ id: 'masterplan', links: [link('work', LINK_KIND.decomposes_into), link('verify', LINK_KIND.decomposes_into)] }),
+      note({ id: 'masterplan', subplans: ['work', 'verify'] }),
       note({ id: 'work', title: 'Work', body: 'do it' }),
       note({ id: 'verify', title: 'Verify', body: 'audit it', dependsOn: ['work'], skillRefs: [ROLE_SKILL.auditor] }),
     ]
@@ -84,7 +78,7 @@ describe('instantiateFrozenPlan (pure, deterministic)', () => {
 
   it('is a pure function of the notes: same input → identical output', () => {
     const notes: PlanNote[] = [
-      note({ id: 'masterplan', links: [link('a', LINK_KIND.decomposes_into)] }),
+      note({ id: 'masterplan', subplans: ['a'] }),
       note({ id: 'a', title: 'A', summary: 'sum' }),
     ]
     expect(instantiateFrozenPlan('masterplan', notes)).toEqual(instantiateFrozenPlan('masterplan', notes))
@@ -92,29 +86,9 @@ describe('instantiateFrozenPlan (pure, deterministic)', () => {
     expect(must(instantiateFrozenPlan('masterplan', notes).steps[0], 'instantiateFrozenPlan(\'masterplan\', notes).steps[0]').instructions).toBe('sum')
   })
 
-  // A depends_on LINK to a NON-sibling is knowledge ("builds on that finding") and never schedules.
-  it('drops depends_on edges to non-siblings (only sibling subplans become dependsOn)', () => {
-    const notes: PlanNote[] = [
-      note({ id: 'masterplan', links: [link('a', LINK_KIND.decomposes_into)] }),
-      note({ id: 'a', title: 'A', links: [link('outsider', LINK_KIND.depends_on)] }),
-    ]
-    expect(must(instantiateFrozenPlan('masterplan', notes).steps[0], 'instantiateFrozenPlan(\'masterplan\', notes).steps[0]').dependsOn).toEqual([])
-  })
-
-  // A link to a SIBLING is a spelling error with an obvious correction: honouring it would keep two
-  // ways to say one thing, and ignoring it would drop the ordering and let the step run early.
-  it('rejects a depends_on link to a sibling and names the field to use instead', () => {
-    const notes: PlanNote[] = [
-      note({ id: 'masterplan', links: [link('a', LINK_KIND.decomposes_into), link('b', LINK_KIND.decomposes_into)] }),
-      note({ id: 'a', title: 'A' }),
-      note({ id: 'b', title: 'B', links: [link('a', LINK_KIND.depends_on)] }),
-    ]
-    expect(() => instantiateFrozenPlan('masterplan', notes)).toThrow(/dependsOn.*FIELD, not a link/s)
-  })
-
   it('takes ordering from the dependsOn field', () => {
     const notes: PlanNote[] = [
-      note({ id: 'masterplan', links: [link('a', LINK_KIND.decomposes_into), link('b', LINK_KIND.decomposes_into)] }),
+      note({ id: 'masterplan', subplans: ['a', 'b'] }),
       note({ id: 'a', title: 'A' }),
       note({ id: 'b', title: 'B', dependsOn: ['a'] }),
     ]
@@ -126,7 +100,7 @@ describe('instantiateFrozenPlan (pure, deterministic)', () => {
   // the planner replaced `a` with a-read/a-write while `b` kept dependsOn ['a'].
   it('heals a stale ordering target by waiting on every sibling, never by dropping it', () => {
     const notes: PlanNote[] = [
-      note({ id: 'masterplan', links: [link('a-read', LINK_KIND.decomposes_into), link('a-write', LINK_KIND.decomposes_into), link('b', LINK_KIND.decomposes_into)] }),
+      note({ id: 'masterplan', subplans: ['a-read', 'a-write', 'b'] }),
       note({ id: 'a-read', title: 'A read' }),
       note({ id: 'a-write', title: 'A write' }),
       note({ id: 'b', title: 'B', dependsOn: ['a'] }), // 'a' no longer exists
@@ -137,7 +111,7 @@ describe('instantiateFrozenPlan (pure, deterministic)', () => {
 
   it('the heal stays deterministic and never self-depends', () => {
     const notes: PlanNote[] = [
-      note({ id: 'masterplan', links: [link('a', LINK_KIND.decomposes_into), link('b', LINK_KIND.decomposes_into)] }),
+      note({ id: 'masterplan', subplans: ['a', 'b'] }),
       note({ id: 'a', title: 'A', dependsOn: ['gone'] }),
       note({ id: 'b', title: 'B' }),
     ]
@@ -146,36 +120,33 @@ describe('instantiateFrozenPlan (pure, deterministic)', () => {
     expect(first).toEqual(instantiateFrozenPlan('masterplan', notes))
   })
 
-  // A masterplan with NO decomposes_into links freezes to steps: [] — and with autoCommit on,
-  // withCommitStep then appends a trailing commit step, yielding a commit-only pipeline that reports
-  // done having written no code. This is the silent-failure bug (incidents c4bc1d38, 8b5e1034): the
-  // plan agent dropped the links rewriting the masterplan during warning fix-ups (memory_write
-  // replaces links wholesale). Refuse at the freeze — the ONE derivation — naming the fix.
-  it('refuses a masterplan with zero decomposes_into links, naming the fix', () => {
-    const notes: PlanNote[] = [
-      note({ id: 'masterplan', title: 'M', links: [] }),
-    ]
-    expect(() => instantiateFrozenPlan('masterplan', notes)).toThrow(/decomposes_into/)
+  // A masterplan with no subplans freezes to steps: [] — and with autoCommit on, withCommitStep then
+  // appends a commit step, yielding a commit-only pipeline that reports done having written no code
+  // (incidents c4bc1d38, 8b5e1034). Refuse at the freeze — the ONE derivation — naming the field.
+  it('refuses a masterplan with no subplans, naming the field', () => {
+    expect(() => instantiateFrozenPlan('masterplan', [note({ id: 'masterplan', title: 'M' })])).toThrow(/subplans/)
   })
 
-  it('refuses a masterplan whose only links are not decomposes_into (e.g. depends_on / relates_to)', () => {
-    const notes: PlanNote[] = [
-      note({ id: 'masterplan', title: 'M', links: [link('other', LINK_KIND.relates_to), link('again', LINK_KIND.depends_on)] }),
-      note({ id: 'other', title: 'Other' }),
-      note({ id: 'again', title: 'Again' }),
-    ]
-    expect(() => instantiateFrozenPlan('masterplan', notes)).toThrow(/decomposes_into/)
+  it('refuses a subplan id no plan note carries, naming the field and the id', () => {
+    const notes: PlanNote[] = [note({ id: 'masterplan', subplans: ['a', 'ghost'] }), note({ id: 'a' })]
+    expect(() => instantiateFrozenPlan('masterplan', notes)).toThrow(/'ghost'/)
+    expect(() => instantiateFrozenPlan('masterplan', notes)).toThrow(/subplans/)
   })
 
-  it('planScope derives the per-task plan-note scope', () => {
-    expect(planScope('abc-123')).toBe('plan-abc-123')
+  it("leads a subplan's step with its rationale on a Why: line, then the body, then the reviewed uncertainty", () => {
+    const notes: PlanNote[] = [
+      note({ id: 'masterplan', subplans: ['a'] }),
+      note({ id: 'a', body: 'do the thing', rationale: 'the api needs it', uncertainty: ['is X wired?'] }),
+    ]
+    expect(must(instantiateFrozenPlan('masterplan', notes).steps[0], 'step a').instructions).toBe(
+      'Why: the api needs it\n\ndo the thing\n\nUnresolved uncertainty (reviewed at approval — act on these, do not skip):\n- is X wired?')
   })
 
   // A reviewed uncertainty entry is load-bearing material the human approved along with the rest
   // of the plan note — dropping it silently at the freeze means the executing agent never sees it.
   it('appends reviewed uncertainty entries to the derived instructions', () => {
     const notes: PlanNote[] = [
-      note({ id: 'masterplan', links: [link('a', LINK_KIND.decomposes_into)] }),
+      note({ id: 'masterplan', subplans: ['a'] }),
       note({ id: 'a', title: 'A', body: 'do the thing', uncertainty: ['unresolved: does X handle Y?', 'second gap: Z is unverified'] }),
     ]
     const instructions = must(instantiateFrozenPlan('masterplan', notes).steps[0], 'instantiateFrozenPlan(\'masterplan\', notes).steps[0]').instructions
@@ -187,7 +158,7 @@ describe('instantiateFrozenPlan (pure, deterministic)', () => {
   // `n.body || n.summary || n.title` alone produces — no heading, nothing appended.
   it('leaves instructions byte-identical to body||summary||title when uncertainty is empty', () => {
     const notes: PlanNote[] = [
-      note({ id: 'masterplan', links: [link('a', LINK_KIND.decomposes_into)] }),
+      note({ id: 'masterplan', subplans: ['a'] }),
       note({ id: 'a', title: 'A', body: 'do the thing' }),
     ]
     const n = must(notes.find(x => x.id === 'a'), 'notes.find(x => x.id === \'a\')')
@@ -197,16 +168,12 @@ describe('instantiateFrozenPlan (pure, deterministic)', () => {
   })
 })
 
-// the freeze is built from the EVENT LOG, not the async SurrealDB projection. foldPlanNotes
-// reconstructs the plan-note graph from memory_written/memory_deleted events — synchronously durable
-// at finalize time — so a lagging read model can never yield "no masterplan".
-
   // a subplan's step gets only what its note declares — before this, toolRefs/skillRefs were
   // hardcoded empty, so a grounded plan could decompose work but never grant the capability to do
   // it: a research subplan reached execution with no way to search.
   it('freezes the capabilities a subplan declares into its step', () => {
     const notes: PlanNote[] = [
-      note({ id: 'masterplan', links: [link('research', LINK_KIND.decomposes_into), link('local', LINK_KIND.decomposes_into)] }),
+      note({ id: 'masterplan', subplans: ['research', 'local'] }),
       note({ id: 'research', toolRefs: ['web/search', 'web/fetch'], skillRefs: ['web-research'] }),
       note({ id: 'local' }),
     ]
@@ -218,97 +185,6 @@ describe('instantiateFrozenPlan (pure, deterministic)', () => {
     expect(steps.find(s => s.id === 'local')?.toolRefs).toEqual([])
     expect(steps.find(s => s.id === 'local')?.skillRefs).toEqual([])
   })
-
-describe('foldPlanNotes (log-fold, projection-independent)', () => {
-  let seq = 0
-  const written = (note: Record<string, unknown>): EventRecord => eventFixture({
-    seq: ++seq, projectId: 'p', taskId: null, kind: EVENT_KIND.memory_written,
-    payload: { note, author: authorFixture({ source: AUTHOR_SOURCE.agent, origin: RUN }) },
-    ts: `2026-01-01T00:00:${String(seq).padStart(2, '0')}.000Z`,
-  })
-  const deleted = (id: string, scope: string): EventRecord => eventFixture({
-    seq: ++seq, projectId: 'p', taskId: null, kind: EVENT_KIND.memory_deleted,
-    payload: { id, scope, author: authorFixture() },
-    ts: `2026-01-01T00:00:${String(seq).padStart(2, '0')}.000Z`,
-  })
-
-  it('reconstructs the plan-note graph so instantiateFrozenPlan yields the approved draft', () => {
-    const scope = planScope('t1')
-    const notes = foldPlanNotes([
-      written({ id: 'masterplan', scope, tier: 'plan', title: 'Web app', body: 'whole thing', links: [{ id: 'db', kind: LINK_KIND.decomposes_into }, { id: 'api', kind: LINK_KIND.decomposes_into }] }),
-      written({ id: 'db', scope, tier: 'plan', title: 'DB', body: 'schema' }),
-      written({ id: 'api', scope, tier: 'plan', title: 'API', body: 'endpoints', dependsOn: ['db'] }),
-    ], scope)
-    expect(notes.map(n => n.id).sort()).toEqual(['api', 'db', 'masterplan'])
-    const draft = instantiateFrozenPlan('masterplan', notes)
-    expect(draft.steps.map(s => s.id)).toEqual(['db', 'api'])
-    expect(must(draft.steps.find(s => s.id === 'api'), 'draft.steps.find(s => s.id === \'api\')').dependsOn).toEqual(['db'])
-  })
-
-  it('keeps only the latest write per id and mirrors the projector\'s provenance (createdAt fixed, revision advances)', () => {
-    const scope = planScope('t1')
-    const v1 = written({ id: 'db', scope, tier: 'plan', title: 'DB v1', body: 'draft' })
-    const v2 = written({ id: 'db', scope, tier: 'plan', title: 'DB v2', body: 'tightened' })
-    const notes = foldPlanNotes([v1, v2], scope)
-    expect(notes).toHaveLength(1)
-    expect(must(notes[0], 'notes[0]').title).toBe('DB v2')
-    expect(must(notes[0], 'notes[0]').revision).toBe(2)
-    expect(must(notes[0], 'notes[0]').createdAt).toBe(v1.ts) // fixed to the first write
-    expect(must(notes[0], 'notes[0]').updatedAt).toBe(v2.ts) // advances to the latest write
-  })
-
-  it('drops ids removed by a later memory_deleted', () => {
-    const scope = planScope('t1')
-    const notes = foldPlanNotes([
-      written({ id: 'masterplan', scope, tier: 'plan', title: 'M' }),
-      written({ id: 'gone', scope, tier: 'plan', title: 'Gone' }),
-      deleted('gone', scope),
-    ], scope)
-    expect(notes.map(n => n.id)).toEqual(['masterplan'])
-  })
-
-  it('filters to the task\'s plan scope: another task\'s notes never leak in', () => {
-    const notes = foldPlanNotes([
-      written({ id: 'masterplan', scope: planScope('t1'), tier: 'plan', title: 'Mine' }),
-      written({ id: 'masterplan', scope: planScope('t2'), tier: 'plan', title: 'Theirs' }),
-      written({ id: 'analysis', scope: 'project', kind: 'fact', title: 'Arch' }),
-    ], planScope('t1'))
-    expect(notes.map(n => n.title)).toEqual(['Mine'])
-  })
-
-  it('stamps provenance from the event, not from the writer', () => {
-    // regression: foldPlanNotes skipped the shared derivation and threw MemoryNote.parse on notes
-    // whose provenance it had not stamped, wedging human approval (planGraphHash) and finalize.
-    const scope = planScope('t1')
-    const ev = written({ id: 'masterplan', scope, tier: 'plan', title: 'M' })
-    const notes = foldPlanNotes([ev], scope)
-    expect(notes).toHaveLength(1)
-    expect(must(notes[0], 'notes[0]').createdAt).toBe(ev.ts) // stamped from the canonical event ts
-    expect(must(notes[0], 'notes[0]').revision).toBe(1)
-  })
-
-  // A task's plan scope also holds the episodic notes its own planning step left behind. Folding
-  // those in would let a step note the human never reviewed move the plan hash after approval.
-  it("folds ONLY the plan tier — the planning step's own ambient notes are not the plan", () => {
-    const scope = planScope('t1')
-    const notes = foldPlanNotes([
-      written({ id: 'masterplan', scope, tier: 'plan', title: 'M' }),
-      written({ id: 'step-author-plan', scope, tier: 'episodic', title: 'Authored the plan' }),
-    ], scope)
-    expect(notes.map(n => n.id)).toEqual(['masterplan'])
-  })
-
-  it('is lenient: one unparseable memory_written (any scope) is skipped, not fatal to the whole fold', () => {
-    const scope = planScope('t1')
-    const poison = eventFixture({
-      seq: ++seq, projectId: 'p', taskId: null, kind: EVENT_KIND.memory_written,
-      payload: { note: { id: 'BAD ID WITH SPACES' }, author: authorFixture({ source: AUTHOR_SOURCE.agent, origin: RUN }) },
-      ts: '2026-01-01T00:00:59.000Z',
-    })
-    const notes = foldPlanNotes([poison, written({ id: 'masterplan', scope, tier: 'plan', title: 'M' })], scope)
-    expect(notes.map(n => n.id)).toEqual(['masterplan'])
-  })
-})
 
 // The grounded strategy exists to DECOMPOSE. A plan step that signals success without freezing a
 // split did not do its job — and the run reported success anyway, with an empty plan graph. This
@@ -325,10 +201,14 @@ describe('groundedPlanOmission', () => {
     payload: { splitId: 's1', taskId: 't1', stepId: 'plan', runToken: token, childTaskId: 'c1' },
   })
 
-  it('refuses a plan step that signalled success without freezing a split', () => {
-    const reason = groundedPlanOmission([grounded()], 'plan', runToken)
-    expect(reason).toContain('finalize_plan')
+  it('refuses a plan step that signalled success without freezing a split, naming the tool and not the task', () => {
+    const taskId = '7f1c2a9e-3b4d-4e5f-8a6b-9c0d1e2f3a4b'
+    const reason = groundedPlanOmission([grounded({ taskId })], 'plan', runToken)
+    expect(reason).toContain(PlanNoteToolName.finalize)
     expect(reason).toContain('masterplan')
+    expect(reason).toContain(PlanNoteToolName.write)
+    expect(reason).toContain('subplans')
+    expect(reason).not.toContain(taskId)
   })
 
   it('accepts a plan step that proposed its split', () => {
@@ -337,7 +217,7 @@ describe('groundedPlanOmission', () => {
 
   // a split from an EARLIER attempt is not this attempt's work — the check is per runToken
   it('does not accept another attempt\'s split', () => {
-    expect(groundedPlanOmission([grounded(), split('step:t1:plan:a0')], 'plan', runToken)).toContain('finalize_plan')
+    expect(groundedPlanOmission([grounded(), split('step:t1:plan:a0')], 'plan', runToken)).toContain(PlanNoteToolName.finalize)
   })
 
   it('leaves every other step alone — only the grounded plan step owes a plan', () => {
@@ -350,7 +230,7 @@ describe('groundedPlanOmission', () => {
 
 describe('withCommitStep', () => {
   const frozen = () => instantiateFrozenPlan('masterplan', [
-    note({ id: 'masterplan', links: [link('db', LINK_KIND.decomposes_into), link('verify', LINK_KIND.decomposes_into)] }),
+    note({ id: 'masterplan', subplans: ['db', 'verify'] }),
     note({ id: 'db', body: 'do it' }),
     note({ id: 'verify', body: 'check it', dependsOn: ['db'] }),
   ])
@@ -382,12 +262,12 @@ describe('withFinishStep', () => {
   // the same three notes withCommitStep's describe freezes — duplicated rather than shared, so a
   // change to one describe's fixture cannot silently retune the other's assertions
   const frozen = () => instantiateFrozenPlan('masterplan', [
-    note({ id: 'masterplan', links: [link('db', LINK_KIND.decomposes_into), link('verify', LINK_KIND.decomposes_into)] }),
+    note({ id: 'masterplan', subplans: ['db', 'verify'] }),
     note({ id: 'db', body: 'do it' }),
     note({ id: 'verify', body: 'check it', dependsOn: ['db'] }),
   ])
   const notes = (): PlanNote[] => [
-    note({ id: 'masterplan', links: [link('db', LINK_KIND.decomposes_into), link('verify', LINK_KIND.decomposes_into)] }),
+    note({ id: 'masterplan', subplans: ['db', 'verify'] }),
     note({ id: 'db', body: 'do it' }),
     note({ id: 'verify', body: 'check it', dependsOn: ['db'] }),
   ]
@@ -431,7 +311,7 @@ describe('withFinishStep', () => {
   // must never freeze to a finish-only pipeline that asks the human to summarize nothing — the same
   // silent-failure shape the commit-only pipeline had (incidents c4bc1d38, 8b5e1034)
   it('never turns a childless masterplan into a finish-only pipeline — the blank-plan refusal comes first', () => {
-    expect(() => freezePlan('masterplan', [note({ id: 'masterplan', title: 'M', links: [] })], { autoCommit: false, checks: [] })).toThrow(/decomposes_into/)
+    expect(() => freezePlan('masterplan', [note({ id: 'masterplan', title: 'M' })], { autoCommit: false, checks: [] })).toThrow(/subplans/)
   })
 
   it('refuses a plan that already names finish', () => {

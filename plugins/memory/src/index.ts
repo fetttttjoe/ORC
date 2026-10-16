@@ -5,7 +5,6 @@ import { EventLog, type ProjectConfig, type ProjectorLease } from '@orc/kernel'
 import { openKnowledge, type Knowledge } from './knowledge'
 import { createMemoryStore } from './store'
 import { createMemoryProjector, KNOWLEDGE_KINDS, type MemoryProjector } from './projector'
-import { bindStepMemory, unavailableStepMemory, type BindStep } from './step'
 import { checkoutDrift, readCorpusDrift, type DriftSources } from './claim-drift-read'
 import { createWorkspaceView } from './workspace-view'
 import { createDriftCache } from './drift-cache'
@@ -15,8 +14,7 @@ import { treeFingerprint } from '@orc/kernel'
 // module-internal export of its own file (a re-export nobody imports is API surface to keep
 // compatible for no consumer; eighteen of them accumulated here before this was checked).
 export { openKnowledge } from './knowledge'
-export { memoryTools, unavailableMemoryTools, memoryToolsForStep, MEMORY_READ_TOOLS, MEMORY_ROLE, DECISION_KIND_REFUSAL } from './tools'
-export { unavailableStepMemory, type BindStep } from './step'
+export { memoryTools, MEMORY_READ_TOOLS, MEMORY_ROLE, DECISION_KIND_REFUSAL } from './tools'
 export { orphanedNotes } from './sweep'
 // the evidence-based lifecycle: recheck gathers the facts, archive rules on them (no clock in either)
 export { recheckNotes, summarize, RECHECK_KINDS } from './recheck'
@@ -27,12 +25,6 @@ export { recheckNotes, summarize, RECHECK_KINDS } from './recheck'
 export { KNOWLEDGE_KINDS } from './projector'
 export { archiveCandidates } from './archive'
 export { frontier } from './frontier'
-// CONSOLIDATE_EXECUTOR travels with them: both composition roots that build a consolidation author
-// (the serve runtime's lifecycle subscriber and `orc memory consolidate --force`) must name the
-// writer identically, and a literal spelled at each door is exactly what drifts.
-// taskInfo travels with consolidateTask: callers resolve the task and hand it in.
-export { consolidateTask, taskInfo, CONSOLIDATE_EXECUTOR, type ConsolidationInput, type ConsolidationDistiller, type TaskInfo } from './consolidate'
-export { createMemoryLifecycle, type MemoryLifecycle } from './lifecycle'
 export { needsReground, restampableNotes, createDriftProbe } from './drift'
 // the ONE reader every drift surface goes through — per claim where a note has claims, per
 // declared path where it does not
@@ -57,8 +49,7 @@ export { createGroundingSource } from './grounding-source'
 // consumers: packages/cli/src/runtime.ts and memory-open.ts, which key it by checkout directory
 export { treeStamps } from './tree-stamps'
 
-// the orchestrator: assembles the knowledge service + event log into the memory domain
-// services (gateway, projector, tools) — the business logic never opens Surreal itself
+// assembles the knowledge service + event log into the memory store and its projector
 export async function createMemory(opts: {
   log: EventLog
   config: ProjectConfig
@@ -69,7 +60,6 @@ export async function createMemory(opts: {
 }): Promise<{
   store: MemoryStore
   projector: MemoryProjector
-  bindStep: BindStep
   // The handle itself, not just the services built on it: the composition root has read queries to
   // wire that are NOT part of the store contract (notesCiting, injected into the step tools), and
   // with the handle closed over by close() alone it had nothing to pass them. Still owned here —
@@ -79,17 +69,11 @@ export async function createMemory(opts: {
 }> {
   const knowledge = await openKnowledge(opts.config, opts.embedder)
   const store = createMemoryStore({ log: opts.log, surreal: knowledge, ...(opts.stampsFor && { stampsFor: opts.stampsFor }), halfLifeDays: opts.config.memoryHalfLifeDays })
-  // Built here, beside the drift probe, because both answer "how much should a reader trust this
-  // row" and both are read per call rather than snapshotted: one asks whether the CODE moved, the
-  // other whether the WORKSPACE landed. Every surface this root assembles — the step tools and the
-  // vault renderer the projector drives — gets the same view, so the two cannot disagree about one
-  // note. From the log, not from a Kernel: this plugin holds no kernel, and the fold is the rule.
+  // from the log, not from a Kernel: this plugin holds no kernel
   const workspaceView = createWorkspaceView(opts.log)
   const projector = createMemoryProjector({ log: opts.log, surreal: knowledge, vaultDir: opts.config.vaultDir, workspaceView, ...(opts.lease && { lease: opts.lease }) })
-  const drift = checkoutDrift(opts.config.dir)
   return {
     store, projector, knowledge,
-    bindStep: p => bindStepMemory({ ...p, store, drift, workspaceView, catchUp: projector.catchUp }),
     close: async () => { await projector.close(); await knowledge.close() },
   }
 }

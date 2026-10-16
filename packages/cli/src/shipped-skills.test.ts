@@ -2,8 +2,8 @@ import { describe, expect, test } from 'bun:test'
 import { readFileSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { KnowledgeToolName, PlanDraft, ROLE_SKILL, STEP_ROLE, validatePlan, VERIFY_STEP_ID } from '@orc/contracts'
-import { parseSkillMd, SCOPED_CHANGES_TOOL_NAME } from '@orc/kernel'
+import { KnowledgeToolName, PlanDraft, PlanNoteToolName, ROLE_SKILL, STEP_ROLE, validatePlan, VERIFY_STEP_ID } from '@orc/contracts'
+import { parseSkillMd, SCOPED_CHANGES_TOOL_NAME, TASK_PLAN_TOOL_NAME } from '@orc/kernel'
 import { driftLine, REGROUND_HEAL_PLAN, REGROUND_PLAN } from './drift-line'
 import { SHIPPED_SKILLS } from './shipped-skills'
 
@@ -72,6 +72,17 @@ describe('shipped skills', () => {
     expect(body).toContain("reply 'approve' to finish")
     expect(body).toContain('record_decision with it exactly as approved, with `supersedes` when it changes a recorded decision')
     expect(body).toContain('never edit source files')
+    expect(body).toContain(`call ${TASK_PLAN_TOOL_NAME}`)
+    expect(body).toContain(`tag it with ${TASK_PLAN_TOOL_NAME}'s tag`)
+    expect(body).toContain('a task that changed no paths writes none')
+    expect(body).toContain('set `decision`')
+    expect(body).toContain('instead of writing a second one')
+    expect(body).toContain(`send its existing tags plus ${TASK_PLAN_TOOL_NAME}'s tag`)
+    expect(body).toContain('(class fact)')
+    expect(body).toContain('(class why)')
+    expect(body).toContain('(a "Why:" line)')
+    expect(body).toContain('A why claim says why the code is this way; a reason about how the work was split, ordered or tested is not a claim, and it gets none.')
+    expect(body).toContain(`If ${TASK_PLAN_TOOL_NAME}'s tag is null, write new feature claims untagged and leave a kept claim as it is`)
   })
 
   // A planner froze a newline-joined zone entry (zone: ["a/**\nb.ts"]); the fence then matched no
@@ -81,14 +92,18 @@ describe('shipped skills', () => {
     const { body } = read('plan-authoring')
     expect(body).toContain('one glob per entry')
   })
+
+  test('plan-authoring pins what a subplan rationale says', () => {
+    const { body } = read('plan-authoring')
+    expect(body).toContain('why its change is needed, not why it is one subplan')
+  })
 })
 
 // The planner had no clarify phase and no way to record WHY a decomposition looked the way it did
-// past the owning task: a plan-note's `rationale` is task-bound, and archive.ts's taskSettled rule
-// retires it out of the retrieval surface the moment the task ends unless something links to it.
-// So every decision a plan committed to was readable only through `orc plan-notes <taskId>`, by
-// someone who already knew which task to open. This pins the two-phase protocol that fixes it —
-// ask once before authoring, propose the decisions inside the approval ask, record them on approve.
+// past the owning task: a plan note's `rationale` belongs to its task, so every decision a plan
+// committed to was readable only on that task, by someone who already knew which task to open. This
+// pins the two-phase protocol that fixes it — ask once before authoring, propose the decisions inside
+// the approval ask, record them on approve.
 describe('plan-authoring pins the ask-then-record-decisions protocol', () => {
   const { body } = read('plan-authoring')
 
@@ -149,6 +164,18 @@ describe('plan-authoring pins the ask-then-record-decisions protocol', () => {
 
   test('the write happens BEFORE finalize_plan', () => {
     expect(body).toContain('FIRST record each confirmed decision, THEN call `finalize_plan()`')
+  })
+
+  test('plan notes are authored with plan_note_write, the masterplan naming its subplans', () => {
+    expect(body).toContain(`\`${PlanNoteToolName.write}\``)
+    expect(body).toContain('`subplans`')
+    expect(body).toContain('**Order lives in the `dependsOn` FIELD, never in names.**')
+  })
+
+  test('it names none of the memory-store authoring it replaced', () => {
+    expect(body).not.toContain('memory_write')
+    expect(body).not.toContain('decomposes_into')
+    expect(body).not.toContain("tier: 'plan'")
   })
 })
 

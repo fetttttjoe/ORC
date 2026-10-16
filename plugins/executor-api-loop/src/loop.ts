@@ -288,6 +288,9 @@ function buildPrompt(ctx: ExecutorContext<LanguageModel>, knownContextBlock = ''
     `# Your step: ${ctx.step.title} (role: ${ctx.step.role})\n${ctx.step.instructions}`,
     skills, // force-loaded plan data — never model-elective
     deps ? `# Upstream outputs\n${deps}` : '',
+    ctx.priorFailure
+      ? `# Your previous attempt failed (attempt ${ctx.priorFailure.attempt}, ${ctx.priorFailure.class})\n${ctx.priorFailure.message}\nFind what made it fail before you repeat its approach.`
+      : '',
     // The continuation handoff: the previous round's signal summary is the ONLY context that
     // survives a round boundary (the conversation does not), so it renders as its own block —
     // after the upstream outputs it complements, before the protocol.
@@ -628,7 +631,6 @@ export function apiLoopExecutor(sleep: Sleep = timerSleep): AgentExecutor<Langua
               (): EventDraft[] => [{ kind: EVENT_KIND.signal_received, payload: { ...base, signal } }],
             )
             yield { type: UnifiedEventType.signal, signal }
-            await ctx.memory?.capture(signal)
             yield { type: UnifiedEventType.done }
             return
           }

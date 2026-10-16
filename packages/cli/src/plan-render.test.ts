@@ -1,6 +1,8 @@
-import { describe, expect, it } from 'bun:test'
-import { CHECKS_EXECUTOR_REF, CHECKS_STEP_ID } from '@orc/contracts'
-import { renderDerivedPlan, renderPlanHuman } from './plan-render'
+import { afterAll, describe, expect, it } from 'bun:test'
+import { CHECKS_EXECUTOR_REF, CHECKS_STEP_ID, Door, FINISH_STEP_ID, NO_CHAT } from '@orc/contracts'
+import { GROUNDED_TASK_TYPE, Kernel, openStorage } from '@orc/kernel'
+import { createTestDb, seedTestWorkspace, TEST_PROJECT_ID, TEST_WORKSPACE_ID } from '@orc/kernel/test-helpers'
+import { derivedPlanBlock, renderDerivedPlan, renderPlanHuman } from './plan-render'
 import { singleStepDraft } from './plan-template'
 
 const plan = { version: 2, ...singleStepDraft({ title: 'summarize notes', spec: 'read notes.txt, write summary.md' }, 'anthropic/claude-haiku-4-5') }
@@ -54,5 +56,50 @@ describe('renderDerivedPlan', () => {
 
   it('shows the write fence, so two steps aimed at one file are visible', () => {
     expect(renderDerivedPlan({ steps: [step('draft', [], ['docs/page.md'])] })).toContain('docs/page.md')
+  })
+})
+
+describe('derivedPlanBlock (the gate shows what the kernel-held notes freeze to)', () => {
+  const CLI = NO_CHAT(Door.cli)
+  const cleanup: Array<() => Promise<void>> = []
+  afterAll(async () => { for (const c of cleanup.reverse()) await c() })
+
+  const groundedTask = async () => {
+    const db = await createTestDb()
+    const storage = await openStorage(db.url, { projectId: TEST_PROJECT_ID })
+    cleanup.push(() => db.drop(), () => storage.close())
+    await seedTestWorkspace(storage.events, CLI)
+    const kernel = new Kernel(storage.events)
+    const t = await kernel.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'grounded', type: GROUNDED_TASK_TYPE }, CLI)
+    return { kernel, taskId: t.id }
+  }
+
+  it('renders both subplans and the finish step the freeze appends', async () => {
+    const { kernel, taskId } = await groundedTask()
+    await kernel.writePlanNote(taskId, { id: 'masterplan', title: 'Plan', subplans: ['schema', 'endpoints'] }, CLI)
+    await kernel.writePlanNote(taskId, { id: 'schema', title: 'Schema' }, CLI)
+    await kernel.writePlanNote(taskId, { id: 'endpoints', title: 'Endpoints', dependsOn: ['schema'] }, CLI)
+
+    const out = await derivedPlanBlock(kernel, { checks: [] }, taskId)
+
+    expect(out).toContain('schema')
+    expect(out).toContain('endpoints')
+    expect(out).toContain('after schema')
+    expect(out).toContain(FINISH_STEP_ID)
+  })
+
+  it('renders nothing before a masterplan exists', async () => {
+    const { kernel, taskId } = await groundedTask()
+    await kernel.writePlanNote(taskId, { id: 'schema', title: 'Schema' }, CLI)
+    expect(await derivedPlanBlock(kernel, { checks: [] }, taskId)).toBe('')
+  })
+
+  it("renders a dangling subplan id as the freeze's error, never a crash", async () => {
+    const { kernel, taskId } = await groundedTask()
+    await kernel.writePlanNote(taskId, { id: 'masterplan', title: 'Plan', subplans: ['ghost'] }, CLI)
+    const out = await derivedPlanBlock(kernel, { checks: [] }, taskId)
+    expect(out).toStartWith('the plan notes do not derive a runnable plan: ')
+    expect(out).toContain("'ghost'")
+    expect(out).toContain('subplans')
   })
 })

@@ -41,6 +41,7 @@ const ROUTER_RELEVANT: Record<EventKind, boolean> = {
   knowledge_written: false,
   knowledge_checked: false,
   feedback_requested: false, feedback_provided: true, plan_annotated: false, analysis_completed: false,
+  plan_note_written: false, // the plan step's own authoring — nothing routes until finalize_plan splits
   models_discovered: false, // catalog metadata — nothing to route
   copilot_exchange: false, // conversation record — nothing to route
   reaction_failed: false, // the router's OWN diagnosis — routing it would react to itself

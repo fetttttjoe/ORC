@@ -4,13 +4,13 @@ import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import {
-  AUTHOR_SOURCE, Door, EVENT_KIND, MemoryWrittenPayload, NO_CHAT, SignalOutcome,
+  AUTHOR_SOURCE, Door, EVENT_KIND, MemoryWrittenPayload, NO_CHAT, SignalOutcome, taskLaneScopes,
   type AgentExecutor, type EventDraft, type ExecutorContext, type Origin, type ResolvedTool,
   type SplitResult, type UnifiedEvent,
   RunOutcome,
 } from '@orc/contracts'
 import { authorFixture, draftFixture, must, stepFixture } from '@orc/contracts/fixtures'
-import { createMemory } from '@orc/memory'
+import { createMemory, memoryTools } from '@orc/memory'
 import { createTestSurreal } from '@orc/memory/test-helpers'
 import { openStorage } from '../storage'
 import { Kernel } from '../kernel'
@@ -107,7 +107,7 @@ describe('memory reuse over a real run (e2e): step B reads step A\'s note', () =
       storage, config, skills: fakeSkills,
       providers: new Map([['fake', fakeProvider]]),
       executors: new Map([['memory-fake', memoryExecutor()]]),
-      stepTools: p => memory.bindStep({ author: authorFixture({ source: AUTHOR_SOURCE.agent, origin: p.origin, workspaceId: p.workspaceId, taskId: p.taskId, stepId: p.stepId, runToken: p.runToken, executor: p.executor, model: p.model, role: p.role }), step: p.step, taskId: p.taskId, ancestorTaskIds: p.ancestorTaskIds }),
+      stepTools: p => memoryTools({ store: memory.store, author: authorFixture({ source: AUTHOR_SOURCE.agent, origin: p.origin, workspaceId: p.workspaceId, taskId: p.taskId, stepId: p.stepId, runToken: p.runToken, executor: p.executor, model: p.model, role: p.role }), catchUp: memory.projector.catchUp, searchScope: taskLaneScopes(p.taskId, p.ancestorTaskIds) }),
     })
     await port.launch()
 

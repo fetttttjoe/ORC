@@ -45,6 +45,7 @@ const startTurns = new Map<string, number>()
 // The ExecutorContext the port actually handed the executor. The mixed-verdict branch's claim is
 // that the scan-scope directive reaches the scout THROUGH depOutputs — only the real context proves it.
 const lastDepOutputs = new Map<string, Record<string, string>>()
+const priorFailures = new Map<string, ExecutorContext<unknown>['priorFailure'] | null>()
 // Scripted grounding probe for the freshness gate. One mutable holder: bun runs a file's tests
 // serially and the port is built once for the whole file, so each test installs its own script.
 let groundingScript: (GroundingSource & { probes: string[] }) | null = null
@@ -61,6 +62,7 @@ function fakeExecutor(): AgentExecutor<unknown> {
       const key = spyKey(taskId, ctx.step.id)
       startTurns.set(key, (startTurns.get(key) ?? 0) + 1)
       lastDepOutputs.set(key, ctx.depOutputs)
+      priorFailures.set(key, ctx.priorFailure ?? null)
       const behavior = behaviors.get(taskId) ?? {}
       // the journal and declared-output scripts are per-TASK and describe the step under test —
       // the appended finish step journals no operation and declares no output of its own, or one
@@ -382,6 +384,18 @@ describe('DBOS execution port (integration)', () => {
     expect(state.steps.get(t.id)?.get('b')?.attempt).toBe(2)
     expect((await kernel.getTask(t.id))?.status).toBe(TASK_STATUS.done)
   }, 15_000) // two full DBOS workflows — bun's 5s default is too tight under suite load
+
+  it('a retried step is handed its previous attempt failure; its first attempt is not', async () => {
+    const behavior: Record<string, 'ok' | 'fail'> = { a: 'ok', b: 'fail' }
+    const t = await approvedTask(behavior)
+    expect(await (await port.startRun(t.id)).wait()).toBe(RunOutcome.blocked)
+    expect(priorFailures.get(spyKey(t.id, 'b'))).toBeNull()
+    const failed = must((await kernel.state()).steps.get(t.id)?.get('b')?.failure, 'b failed')
+    behavior.b = 'ok'
+    expect(await (await port.retry(t.id)).wait()).toBe(RunOutcome.done)
+    expect(priorFailures.get(spyKey(t.id, 'b'))).toEqual({ attempt: 1, class: failed.class, message: failed.message })
+    expect(priorFailures.get(spyKey(t.id, 'a'))).toBeNull()
+  }, 15_000)
 
   // A run with no explicit cwd works on the project, never in an empty scratch dir —
   // a verify auditor burned five attempts in workspaces where every fs_read of the repo was ENOENT.

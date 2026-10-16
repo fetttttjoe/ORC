@@ -1,8 +1,5 @@
 import path from 'node:path'
-import {
-  DeliveryMode, EntityPath, errorMessage, KNOWLEDGE_DEFAULTS, KNOWLEDGE_LIMITS, KNOWLEDGE_REFUSAL, KnowledgeToolName, ROOT_ENTITY, stepMayPlan, stepMayReconcile, stepMayVerify, toolError,
-  type KnowledgeAccess, type KnowledgeClaim, type KnowledgePort, type KnowledgeWrites, type MemoryAuthor, type PreloadedClaim, type ResolvedTool, type StepKnowledge,
-} from '@orc/contracts'
+import { DeliveryMode, EntityPath, errorMessage, KNOWLEDGE_DEFAULTS, KNOWLEDGE_LIMITS, KNOWLEDGE_REFUSAL, KnowledgeToolName, ROOT_ENTITY, stepMayPlan, stepMayReconcile, stepMayVerify, toolError, type KnowledgeAccess, type KnowledgeClaim, type KnowledgePort, type KnowledgeWrites, type MemoryAuthor, type PreloadedClaim, type ResolvedTool, type StepKnowledge, NO_INPUT_SCHEMA } from '@orc/contracts'
 import { decisionTools } from './decision-tools'
 import { namedPaths, preloadQuery, zonePrefix } from './preload-request'
 import { KNOWLEDGE_STEP_TOOLS, KNOWLEDGE_VERIFY_TOOLS, knowledgeIdempotencyKey, knowledgeTools } from './tools'
@@ -53,7 +50,7 @@ async function preload(port: KnowledgePort, author: MemoryAuthor, p: StepParams,
 function taskClaimsTool(access: KnowledgeAccess, author: MemoryAuthor, writesOf: () => Promise<KnowledgeWrites>): ResolvedTool {
   return {
     ref: `knowledge/${KnowledgeToolName.taskClaims}`, name: KnowledgeToolName.taskClaims,
-    description: TASK_CLAIMS_DESCRIPTION, inputSchema: { type: 'object', properties: {} },
+    description: TASK_CLAIMS_DESCRIPTION, inputSchema: NO_INPUT_SCHEMA,
     execute: async (_input, toolCallId) => {
       if ('unavailable' in access) return { output: { error: KNOWLEDGE_REFUSAL.unavailable(access.unavailable) }, isError: true }
       try {

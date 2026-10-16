@@ -2,14 +2,13 @@ import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, 
 import { spawn } from 'node:child_process'
 import path from 'node:path'
 import { Command, InvalidArgumentError } from 'commander'
-import { AUTHOR_SOURCE, ClaimClass, claimHistory, composeAuthor, Door, NO_CHAT, EDGE_DIRECTION, errorMessage, EVENT_KIND, EventKind, foldMemory, MASTERPLAN_NOTE_ID, MEMORY_ACCESS, MemoryDeletedPayload, MemoryScope, MemoryWrittenPayload, noteKey, NoteKind, NOTE_TIER, NoteTier, parseLinkSpec, PlanDraft, RunOutcome, STRATEGY, TASK_STATUS, TERMINAL_TASK_STATUS, LinkKind, slugId, type Analyzer, type EventRecord, type MemoryAuthor, type MemoryLink, type NoteFields, type ExecutionPort, type Plan, type TaskNode, type WorkspaceWithHealth, formatModelRate, type ClaimEvent } from '@orc/contracts'
-import { openStorage, Kernel, atomicWriteFileSync, listProjectIds, claimSlot, fold, gatedChildren, freezePlan, liveSupervisors, orphanTasks, staleSupervisors, grantExtensionTrust, grantMcpTrust, initializeProject, isExtensionTrusted, isMcpTrusted, loadConfig, loadTrust, migrateDatabase, requireProject, runtimeLockHeld, stepUsage, subtreeUsage, tasksByWorkspace, taskUsage, type EventLog, type OrcConfig, type PluginHost, type ProjectConfig, type Storage } from '@orc/kernel'
+import { AUTHOR_SOURCE, ClaimClass, claimHistory, composeAuthor, Door, NO_CHAT, EDGE_DIRECTION, errorMessage, EVENT_KIND, EventKind, foldMemory, MEMORY_ACCESS, MemoryDeletedPayload, MemoryScope, MemoryWrittenPayload, noteKey, NoteKind, NOTE_TIER, NoteTier, parseLinkSpec, PlanDraft, RunOutcome, STRATEGY, TASK_STATUS, TERMINAL_TASK_STATUS, LinkKind, slugId, type Analyzer, type EventRecord, type MemoryAuthor, type MemoryLink, type NoteFields, type ExecutionPort, type Plan, type TaskNode, type WorkspaceWithHealth, formatModelRate, type ClaimEvent } from '@orc/contracts'
+import { openStorage, Kernel, atomicWriteFileSync, listProjectIds, claimSlot, fold, gatedChildren, liveSupervisors, orphanTasks, staleSupervisors, grantExtensionTrust, grantMcpTrust, initializeProject, isExtensionTrusted, isMcpTrusted, loadConfig, loadTrust, migrateDatabase, requireProject, runtimeLockHeld, stepUsage, subtreeUsage, tasksByWorkspace, taskUsage, type EventLog, type OrcConfig, type PluginHost, type ProjectConfig, type Storage } from '@orc/kernel'
 import { createVaultProjector, parsePlanFile } from '@orc/vault-projector'
-import { archiveCandidates, checkoutDrift, consolidateTask, CONSOLIDATE_EXECUTOR, frontier, needsReground, probeMemory, RECHECK_KINDS, recheckNotes, restampToHead, summarize, taskInfo } from '@orc/memory'
+import { archiveCandidates, checkoutDrift, frontier, needsReground, probeMemory, RECHECK_KINDS, recheckNotes, restampToHead, summarize } from '@orc/memory'
 import { withMemory } from './memory-open'
 import { DEFAULT_TEMPLATE_MODEL, singleStepDraft } from './plan-template'
 import { seedShippedSkills } from './shipped-skills'
-import { buildDistiller } from './consolidation-distiller'
 import { seedRegistries, buildRuntime } from './runtime'
 import { runSupervisor, startBootHeartbeat, supervisorHealth } from './serve'
 import { ensureSupervisor, SUPERVISOR_MODE, type SupervisorMode } from './supervisor-client'
@@ -18,7 +17,7 @@ import { assertDrivable, assertRetryable, buildModelDiscovery, buildOrcActions }
 import { cwdAuthor, cwdWorkspaceId, findCwdWorkspace } from './cwd-workspace'
 import { enumArg } from './enum-arg'
 import { parseNonNegativeInteger, parsePositiveInteger } from './int-arg'
-import { renderDerivedPlan, renderPlanHuman } from './plan-render'
+import { derivedPlanBlock, renderPlanHuman } from './plan-render'
 import { adrCommand } from './adr-commands'
 import { knowledgeCommand } from './knowledge-commands'
 import { wsCommand, WS_NEEDS_PROJECT } from './ws-commands'
@@ -406,7 +405,7 @@ export function buildProgram(
   program
     .command('plan-revise <taskId> <text>')
     .description('targeted re-plan (grounded-plan): annotate each --scope note with <text>, then resume the plan agent to revise just those notes')
-    .requiredOption('--scope <ids...>', 'plan-note ids to revise (only their decomposes_into subtree changes; every other note stays byte-stable)')
+    .requiredOption('--scope <ids...>', 'plan-note ids to revise (only they and the subplans they list change; every other note stays byte-stable)')
     .action(async (taskId: string, text: string, opts: { scope: string[] }) => {
       // annotate-and-resume sugar over `plan-note … && reply`: queue the same change onto each scoped
       // note, then wake the parked plan step so it reads them (read_annotations) and revises in place.
@@ -606,24 +605,12 @@ export function buildProgram(
     return mode
   }
 
+  const derivedPlanFor = (taskId: string): Promise<string> =>
+    derivedPlanBlock(requireKernel(), { autoCommit: plugin?.config.autoCommit, checks: plugin?.config.finishChecks ?? [] }, taskId)
+
   // What a watch's result means at the shell. The ONE place `new`, `run`, `retry`, `reply` and
   // `approve` share, so they cannot drift on what a terminal outcome, a cancellation or a parked
   // human gate prints and exits with.
-  // The executable plan the task's notes derive to, or '' when there is no note graph to derive
-  // from. A dangling decomposes_into makes freezePlan throw — that is precisely what the
-  // human needs to see at the gate, so it is reported rather than allowed to crash it.
-  const derivedPlanBlock = async (taskId: string): Promise<string> => {
-    try {
-      const notes = await requireKernel().listPlanNotes(taskId)
-      if (!notes.some(n => n.id === MASTERPLAN_NOTE_ID)) return ''
-      // the freeze's own derivation, so the human sees EXACTLY what finalize_plan will freeze —
-      // with autoCommit that includes the kernel-appended commit tail
-      return renderDerivedPlan(freezePlan(MASTERPLAN_NOTE_ID, notes, { autoCommit: plugin?.config.autoCommit, checks: plugin?.config.finishChecks ?? [] }))
-    } catch (err) {
-      return `the plan notes do not derive a runnable plan: ${errorMessage(err)}`
-    }
-  }
-
   // rootId: the ROOT of the tree that was watched (never a split child) — subtreeUsage sums the
   // whole tree from there, so a caller that named a child would silently undercount everything
   // above it. Every call site below passes rootOf(taskId) (or a root it already computed).
@@ -635,7 +622,7 @@ export function buildProgram(
       // watched — replying to the wrong one resolves nothing and leaves the tree parked
       console.log(`run parked on a question: ${result.question}`)
       // the human approves THIS, not the prose above it
-      const derived = await derivedPlanBlock(result.taskId)
+      const derived = await derivedPlanFor(result.taskId)
       if (derived) console.log(derived)
       console.log(`answer it to continue: orc reply ${result.taskId} <text>`)
       return
@@ -895,7 +882,7 @@ export function buildProgram(
       const feedback = await requireKernel().openFeedback(taskId)
       if (feedback) {
         console.log(`  awaiting reply: ${feedback.question}  (orc reply ${taskId} <text>)`)
-        const derived = await derivedPlanBlock(taskId)
+        const derived = await derivedPlanFor(taskId)
         for (const line of derived ? derived.split('\n') : []) console.log(`  ${line}`)
       }
       // The runtime failing at its own job. Printed LAST and unconditionally, because it explains
@@ -1411,31 +1398,6 @@ export function buildProgram(
         console.log(targets.length === 0
           ? 'nothing to restamp — no note has fully-committed drift to catch up'
           : `restamped ${targets.length} note(s) to HEAD: ${targets.map(t => t.id).join(', ')}`)
-      })
-    })
-  mem
-    .command('consolidate <taskId>')
-    .description("distill a task's step notes into one durable project note, linked to the knowledge it used")
-    .option('--model <ref>', 'synthesise the note with this model instead of extractive bullets')
-    .action(async (taskId: string, opts: { model?: string }) => {
-      const { config, log } = needPlugin()
-      await withMemory({ log, config }, async memory => {
-        await memory.projector.catchUp()
-        const distill = opts.model ? buildDistiller(seedRegistries(config).providers, opts.model) : undefined
-        // force: an explicit manual request bypasses the salience gate the auto-lifecycle applies
-        // The SAME builder shape the lifecycle subscriber passes (runtime.ts): an agent writer named
-        // through `executor`, never a person at a terminal — but the workspace is NOT this cwd. It
-        // is the named task's own workspace: an operator can run `orc memory consolidate` from any
-        // checkout for a task that ran in a different one, and this cwd is irrelevant to that task's
-        // provenance — see ConsolidationDeps.authorFor.
-        const authorFor = (task: { id: string; workspaceId: string }): MemoryAuthor =>
-          ({ source: AUTHOR_SOURCE.agent, executor: CONSOLIDATE_EXECUTOR, workspaceId: task.workspaceId, taskId: task.id, origin: CLI_ORIGIN })
-        const notes = await consolidateTask({ log, store: memory.store, authorFor, distill }, taskId, await taskInfo(log, taskId), { force: true })
-        if (!notes || notes.length === 0) { console.log(`nothing to consolidate for '${taskId}' — unknown task, planning child, or no step notes`); return }
-        await memory.projector.catchUp()
-        // one line per note: a multi-area task consolidates into one anchored note per area
-        for (const note of notes)
-          console.log(`consolidated '${note.id}'${opts.model ? ` (distilled by ${opts.model})` : ''} with ${note.links.length} source link(s) — read it: orc memory cat ${note.id}`)
       })
     })
 

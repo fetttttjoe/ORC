@@ -17,7 +17,6 @@ flowchart TB
     cli["CLI / MCP / web door"]
     store["memory store<br/>plugins/memory/src/store.ts"]
     log[("Postgres event log<br/>THE ONLY TRUTH")]
-    agent -->|"memory_write · memory_verify"| store
     cli -->|"orc note · orc memory add"| store
     store -->|"append memory_written<br/>memory_verified · memory_deleted"| log
     agent -->|"tool_call · signal · step_completed"| log
@@ -448,7 +447,7 @@ provisional standing is derived from it, and a workspace can only be known at th
 write — recovered later it would have to be guessed from an envelope that is absent on a CLI write
 and wrong for a task that moved. An agent step names the workspace its **task** belongs to (which
 may be a different worktree from the one the supervisor was started in); every other door — CLI,
-MCP, the auto-heal reactor, post-task consolidation — names the checkout its process is running in,
+MCP, the auto-heal reactor — names the checkout its process is running in,
 through one shared `cwdAuthor`, which throws rather than substituting a default.
 
 Access is a fact, not bookkeeping. `memory_accessed` is appended by the call sites that know a
@@ -624,7 +623,6 @@ sequenceDiagram
   participant D as DBOS port
   participant X as api-loop executor
   participant N as StepKnowledge
-  participant Y as StepMemory
   participant M as Model/Tool
 
   U->>K: orc run <task>
@@ -642,8 +640,6 @@ sequenceDiagram
     D->>L: completeOperation → operation_completed + agent_call/tool_* (ONE transaction)
   end
   X->>D: signal(success, outputs)
-  X->>Y: capture(signal)
-  Y->>L: memory_written (episodic step note, linked to deps + what it read)
   D->>D: verifyArtifacts(workspace, outputs)
   D->>L: artifact_produced* + step_completed (ONE transaction)
   L-->>U: live tail via LISTEN/NOTIFY subscription
@@ -671,11 +667,11 @@ questions:
 - **`taskLaneScopes(taskId, ancestorTaskIds)`** — what may this *step* read? Its own plan scope,
   then every ancestor's, then `project`.
 
-The ancestor half is load-bearing: a split child's id is `${parent}.${step}.${callId}`, so
-`plan-<child>` is a different scope from the `plan-<parent>` its subplan notes were authored in.
-Without the ancestor lanes a child cannot see its own decomposition. The step's own `memory_search`
-takes these lanes, and the scope predicate reaches the **query** — the semantic arm ranks then
-truncates, so filtering afterwards would let one task's plan notes occupy every slot.
+The ancestor half matters because a split child's id is `${parent}.${step}.${callId}`, so
+`plan-<child>` is a different scope from `plan-<parent>`. `memory_search` takes these lanes, and the
+scope predicate reaches the **query** — the semantic arm ranks then truncates, so filtering
+afterwards would let one task's notes occupy every slot. A grounded plan's own notes are not memory
+notes: they are the task's `plan_note_written` events.
 
 `isUiMetaNote` excludes chat infrastructure (project display name, working directory) from the
 retrieval surface entirely; it stays readable by id, which is how the chats list resolves a name.
@@ -684,15 +680,15 @@ retrieval surface entirely; it stays readable by id, which is how the chats list
 
 What a running step reads from and records in the knowledge files goes through `StepKnowledge`
 (`contracts/execution.ts`), bound per step by the composition root from `packages/knowledge-core`'s
-`bindStepKnowledge`; the note it leaves behind goes through `StepMemory`, bound from
-`plugins/memory`'s `bindStepMemory`. The executor decides only **when**: `knowledge.preload` before
+`bindStepKnowledge`. The executor decides only **when**: `knowledge.preload` before
 the first prompt (wrapped in `ctx.checkpoint`, so a replay rebuilds the prompt from the recorded
-claims), `knowledge.claimsAt` after each edit, `memory.capture` after the signal. The executor holds
-no store handle and never drives a model-facing knowledge or memory tool itself.
+claims), `knowledge.claimsAt` after each edit. The executor holds no store handle and never drives a
+model-facing knowledge or memory tool itself. A retried step's first prompt also carries its previous
+attempt's failure (`ExecutorContext.priorFailure`, set by the port from the step's folded state).
 
 - **`preload(budget, round)` hands the first prompt claims in four arms, under one budget.** The binding
   builds one `KnowledgePort.preload` request: the claims live in the writes of the step's **root**
-  task tree (`listTaskKnowledgeWrites`, latest first), the paths its title and instructions name
+  task tree (`listTaskKnowledgeWrites`, latest first: a task owns its subtree's writes plus its grounded parent's), the paths its title and instructions name
   plus each zone glob's static folder, and its title and instructions as the search query. The port
   reads the arms in order — `pushed`, `here` (an anchor at or under a requested path, the exact
   matches first), `around` (an anchor in a folder above one; both by `underEntity`, the rule the
@@ -707,9 +703,6 @@ no store handle and never drives a model-facing knowledge or memory tool itself.
   count line, one section per non-empty arm, each claim as `preloadLine` (`contracts/preload-line.ts`,
   the same string the port costs): the knowledge file's line format with its state shown when not
   clean. A failing read yields no block and one warning, never a failed step.
-- **`capture` writes edges, not just a node**: `depends_on` the ambient notes of the steps this one
-  consumed, `derived_from` every durable note it actually pulled. Both resolve under
-  `linkLookupScopes`, so a run wires itself into the graph instead of adding isolated nodes.
 
 A run's outcome is the **tree's**, not the root task's (`projections.subtreeOutcome`). A grounded
 parent finishes the moment its plan step splits, so its own status reads `done` while the child
@@ -728,10 +721,10 @@ step/run envelope; immediate delivery and the signal router use `feedback:<event
 idempotency key. The live router handles new events, and startup replays replies for still-running
 tasks, healing a crash after append but before send.
 
-For a grounded plan step, an exact normalized `approve` reply also stores SHA-256 of the canonical
-plan-note graph — a record of what was approved, not a value the gate compares. `finalize_plan`
-accepts only a human approval from the same run token, and refuses the freeze if anything was written
-to the task's plan scope after that approval's seq, naming the note ids. Missing, cross-attempt, or
+For a grounded plan step, an exact normalized `approve` reply also stores SHA-256 of the task's
+canonical plan notes — a record of what was approved, not a value the gate compares. `finalize_plan`
+accepts only a human approval from the same run token, and refuses the freeze if any plan note was
+written after that approval's seq, naming the note ids. Missing, cross-attempt, or
 stale approval returns a tool error before any child split.
 
 ## Adapters — two doors over one transport-free core
@@ -943,8 +936,8 @@ client-side filter, or a browser fold.
 | `kernel/dbos-port` | Durable run/step workflows, `ctx.checkpoint` and `ctx.operation` wrappers, retry policy, queue partitioning, cancellation cascade, output receipt commit | Model/tool specifics (executor's job), plan authoring |
 | `kernel/signal-router` | Resolving splits, starting approved children, and live/startup delivery of committed feedback | Composing plans, executing steps |
 | `kernel/plugins/*` | Registry + propose-time ref validation (`host`), fingerprint trust store (`trust`), SKILL.md indexing (`skills`), T2 extension loading | Runtime tool execution (that's the hub/executor) |
-| `plugins/executor-api-loop` | The model⇄tool loop, prompt assembly (incl. knowledge protocol + the known-context block), signal/output pre-flight, per-call operation journaling | Durability (delegates to ctx), trust, receipts, **what to preload or remember** (delegates to `ctx.knowledge` and `ctx.memory`) |
-| `plugins/memory` | Event-first note store (gateway stamps git revision, resolved lazily), transactional Surreal projection of notes + edges + `claim` rows, stateless topic derivation (`refreshTopics`, stage 3, driven from the drain and only by drains that touched claims), per-project database boundary, hybrid (vector⊕keyword) retrieval with activation re-ranking over both notes and claims, the `StepMemory` binding (capture, ambient edges), consolidation lifecycle, tri-state drift probe, evidence-based archival + cancel-time sweep, `vault/memory/**` rebuild | Being authoritative — Surreal and vault/memory are disposable. Authoring a topic: stage 3 derives them, nobody writes one |
+| `plugins/executor-api-loop` | The model⇄tool loop, prompt assembly (incl. knowledge protocol + the known-context block), signal/output pre-flight, per-call operation journaling | Durability (delegates to ctx), trust, receipts, **what to preload or remember** (delegates to `ctx.knowledge`) |
+| `plugins/memory` | Event-first note store (gateway stamps git revision, resolved lazily), transactional Surreal projection of notes + edges + `claim` rows, stateless topic derivation (`refreshTopics`, stage 3, driven from the drain and only by drains that touched claims), per-project database boundary, hybrid (vector⊕keyword) retrieval with activation re-ranking over both notes and claims, the step memory tool binding, tri-state drift probe, evidence-based archival + cancel-time sweep, `vault/memory/**` rebuild | Being authoritative — Surreal and vault/memory are disposable. Authoring a topic: stage 3 derives them, nobody writes one |
 | `packages/vault-projector` | Deterministic markdown/mermaid renders of tasks, execution, lineage, task expansion; coalesced live re-render | Truth of any kind; whole-log scans |
 | `packages/cli` | Pre-bootstrap help/init/migrate, command surface, project discovery, startup/shutdown order, degraded-memory wiring, boot adoption of the checkout (`workspace-adopt`) and the impure half of workspace health — does the directory exist, is it clean, how much knowledge is still pending (`workspace-health`) | Business rules (kernel's job); the health state table itself (pure, in `kernel/workspaces.ts`) |
 | `packages/ui-core` | Transport-free UI core: `ProjectSessions` (live folds, graph snapshots/patches), the view registry (`readView`/`viewOf`/`touchesOf` over `WIRE`), `OrcActions` interface, the copilot toolset + `asResolvedTools` door-#2 bridge | Any transport (HTTP/SSE/stdio are adapters' jobs), any DOM |

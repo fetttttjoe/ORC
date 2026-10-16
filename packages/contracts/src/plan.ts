@@ -22,10 +22,7 @@ export const PlanStep = z.object({
   zone: z.array(z.string()),
   maxIterations: z.number().int().positive(),
   dependsOn: z.array(z.string()),
-  // kernel-set on the grounded template's analyze+plan steps: they author memory notes and read
-  // code but must not write source before the plan is approved. Optional (no default) so it adds
-  // no key to the many steps that never set it. Not exposed on the plan-note write path, so an
-  // agent cannot grant itself source writes — only the template sets it.
+  // kernel-set only, never authored: the step writes no source; optional so other steps carry no key
   readOnlySource: z.boolean().optional(),
 })
 export type PlanStep = z.infer<typeof PlanStep>
@@ -91,12 +88,7 @@ export enum GroundedApprovalDoor {
   mcp = 'mcp',
 }
 
-// The per-task plan-note scope. The authoring agent, finalize_plan, and every UI view derive
-// it from the taskId — one format, one place (was duplicated as ui-core's planScopeName).
-// Sanitized because a split child's id (`<uuid>.<stepId>.<toolCallId>`) carries dots and mixed case,
-// which MEMORY_ID_RE rejects — every plan-scoped write below the root task was silently refused.
-// ponytail: case is folded, so ids differing only in case would collide; hash the tail if that
-// ever becomes reachable.
+// A task's memory lane scope, sanitized because a split child's id carries dots and mixed case.
 export const planScope = (taskId: string): string => `plan-${taskId.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`
 
 export const Plan = z.object({
@@ -138,17 +130,9 @@ export function validatePlan(plan: Plan): { ok: true } | { ok: false; errors: st
   for (const s of plan.steps)
     for (const d of s.dependsOn)
       if (!ids.has(d)) errors.push(`step ${s.id} depends on unknown step: ${d}`)
-  // Every shape rule in the plan-rules table, swept over each step. A zone entry that is not ONE
-  // glob is the rule this chokepoint was built for: a planner joined several globs with newlines
-  // into a single entry, it passed every gate, the frozen fence then matched no real path, and two
-  // steps were refused every write to their own files with no repair path. This is the ONE fatal
-  // chokepoint — every plan version, from every entry point, is validated here before it is
-  // appended — and the wording is plan-rules' planFieldViolations, the same table memory_write
-  // refuses the authoring write with, so a shape mistake is refused identically at both boundaries
-  // and the author reads the same sentence whichever one catches it. Steps carry no links/siblings of their own (that shape exists only for plan-notes
-  // at authoring time), so those fields are empty here — only the shape rules that read `zone` fire.
+  // the same rule table the authoring write refuses with, so both boundaries word a mistake alike
   for (const s of plan.steps) {
-    const v = planFieldViolations({ id: s.id, zone: s.zone, links: [], siblings: [] })
+    const v = planFieldViolations({ id: s.id, zone: s.zone })
     for (const msg of v.shape) errors.push(`step '${s.id}': ${msg}`)
   }
   // A multi-step plan where EVERY step is parallel is a defect — it shipped twice in live testing,

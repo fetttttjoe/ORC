@@ -12,6 +12,7 @@ export type KernelMutationVerb =
   | 'approvePlan'
   | 'proposeSplit'
   | 'annotatePlan'
+  | 'writePlanNote'
   | 'replyFeedback'
   | 'reportCoverage'
   | 'requestRun'

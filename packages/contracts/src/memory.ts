@@ -282,10 +282,8 @@ export const EpisodicNoteInput = z.object({
 })
 export type EpisodicNoteInput = z.infer<typeof EpisodicNoteInput>
 
-// PLAN — one node of a task's decomposition. Its extra fields are execution payload, not
-// knowledge: the freezer reads `zone` into the child step's write-fence, and the human reviews
-// `rationale`/`uncertainty` before approving.
-export const PlanNoteInput = z.object({
+// PLAN — the store's decomposition tier; nothing writes it (grounded plans hold plan-note.ts notes)
+export const MemoryPlanNoteInput = z.object({
   ...noteCore,
   tier: z.literal(NOTE_TIER.plan),
   // A decomposition belongs to ONE task, like the episodic trail — so the lane is sweepable by
@@ -295,30 +293,13 @@ export const PlanNoteInput = z.object({
   retention: z.enum(Retention).default(RETENTION.expirable),
   rationale: z.string().max(MEMORY_LIMITS.rationaleChars).default(''),          // why this subplan exists
   uncertainty: stringOrList(z.string().max(MEMORY_LIMITS.detailChars), MEMORY_LIMITS.detailItems).default([]), // coverage gaps / assumptions (RG7)
-  // workspace-relative write globs this subplan may touch at execution — the freezer carries them
-  // into the child step's zone and the executor's write-fence enforces them. Parallel siblings
-  // declare DISJOINT zones; empty = unfenced (paths is documentation, zone is policy).
-  // Sibling ids this subplan must run AFTER. A FIELD, not a link, and deliberately so: ordering is
-  // execution structure with no meaning once the plan is frozen — exactly what `zone` is — while a
-  // LINK is a durable statement about how facts relate. Carrying ordering as a `depends_on` link
-  // overloaded one kind with two meanings (plan-authoring said "order lives in depends_on", while
-  // codebase-analysis said "each area links depends_on: <area>" to mean an import), so the freeze
-  // guesses which is meant from whether the target is a sibling — a heuristic that can fail if
-  // the target changed status, silently un-ordering the plan.
-  // Nothing traverses it either: the graph draws step ordering from the frozen step's own
-  // dependsOn, so this was only ever an input to the freeze.
   dependsOn: stringOrList(z.string().min(1).max(MEMORY_LIMITS.labelChars), MEMORY_LIMITS.detailItems).default([]),
   zone: stringOrList(z.string().min(1).max(MEMORY_LIMITS.detailChars), 16).default([]),
-  // capabilities this subplan needs, frozen into its step like zone is. SELECTION, not grant: a
-  // ref resolves only if the operator declared the MCP server in config AND trusted it, and
-  // refValidator rejects an unknown ref at propose time — before a human ever approves the plan.
   skillRefs: stringOrList(z.string().min(1).max(MEMORY_LIMITS.labelChars), 16).default([]),
   toolRefs: stringOrList(z.string().min(1).max(MEMORY_LIMITS.labelChars), 16).default([]),
-  // 'provider/model' for this subplan's step; '' inherits the parent's. Decomposition is the first
-  // point where model choice is knowable — a web lookup and a refactor need not share one model.
   modelRef: z.string().max(MEMORY_LIMITS.labelChars).default(''),
 })
-export type PlanNoteInput = z.infer<typeof PlanNoteInput>
+export type MemoryPlanNoteInput = z.infer<typeof MemoryPlanNoteInput>
 
 // Classify a note whose payload predates the tier field, or whose writer left it off. Explicit
 // always wins — this only fills a gap, so it can never re-label a note against its author. The
@@ -360,13 +341,13 @@ const withTier = (raw: unknown): unknown => {
 // An AUTHORED note seen by a reader that does not care which tier it got: every tier's fields,
 // all optional, so one code path can render or project any of them and a field the tier does not
 // own simply reads as undefined. NoteView below is the same idea for a STORED note.
-export interface NoteFields extends Partial<Omit<SemanticNoteInput, 'tier'> & Omit<PlanNoteInput, 'tier'>> {
+export interface NoteFields extends Partial<Omit<SemanticNoteInput, 'tier'> & Omit<MemoryPlanNoteInput, 'tier'>> {
   tier: NoteTier
 }
 
 export const MemoryNoteInput = z.preprocess(
   withTier,
-  z.discriminatedUnion('tier', [SemanticNoteInput, EpisodicNoteInput, PlanNoteInput]),
+  z.discriminatedUnion('tier', [SemanticNoteInput, EpisodicNoteInput, MemoryPlanNoteInput]),
 ).refine(
   n => !(n.scope === MemoryScope.project && n.id === 'index'),
   { message: "note id 'index' is reserved in the project scope (collides with vault/memory/index.md)" },
@@ -416,19 +397,19 @@ export const MemoryNoteDraftInput = z.object({
   addClaims: optionalNoDefault(ClaimWrite.shape.addClaims),
   retention: optionalNoDefault(SemanticNoteInput.shape.retention),
   sources: optionalNoDefault(SemanticNoteInput.shape.sources),
-  rationale: optionalNoDefault(PlanNoteInput.shape.rationale),
-  uncertainty: optionalNoDefault(PlanNoteInput.shape.uncertainty),
-  dependsOn: optionalNoDefault(PlanNoteInput.shape.dependsOn),
-  zone: optionalNoDefault(PlanNoteInput.shape.zone),
-  skillRefs: optionalNoDefault(PlanNoteInput.shape.skillRefs),
-  toolRefs: optionalNoDefault(PlanNoteInput.shape.toolRefs),
-  modelRef: optionalNoDefault(PlanNoteInput.shape.modelRef),
+  rationale: optionalNoDefault(MemoryPlanNoteInput.shape.rationale),
+  uncertainty: optionalNoDefault(MemoryPlanNoteInput.shape.uncertainty),
+  dependsOn: optionalNoDefault(MemoryPlanNoteInput.shape.dependsOn),
+  zone: optionalNoDefault(MemoryPlanNoteInput.shape.zone),
+  skillRefs: optionalNoDefault(MemoryPlanNoteInput.shape.skillRefs),
+  toolRefs: optionalNoDefault(MemoryPlanNoteInput.shape.toolRefs),
+  modelRef: optionalNoDefault(MemoryPlanNoteInput.shape.modelRef),
 })
 // a field added to a tier but forgotten here is a compile error, not silent drift
 type TierFields =
   | keyof typeof SemanticNoteInput.shape
   | keyof typeof EpisodicNoteInput.shape
-  | keyof typeof PlanNoteInput.shape
+  | keyof typeof MemoryPlanNoteInput.shape
 type DraftCoversTiers = TierFields extends keyof typeof MemoryNoteDraftInput.shape ? true : never
 const draftCoversTiers: DraftCoversTiers = true
 void draftCoversTiers
@@ -516,12 +497,12 @@ export const SemanticNote = SemanticNoteInput.extend({
 export type SemanticNote = z.infer<typeof SemanticNote>
 export const EpisodicNote = EpisodicNoteInput.extend(noteProvenance)
 export type EpisodicNote = z.infer<typeof EpisodicNote>
-export const PlanNote = PlanNoteInput.extend(noteProvenance)
-export type PlanNote = z.infer<typeof PlanNote>
+export const MemoryPlanNote = MemoryPlanNoteInput.extend(noteProvenance)
+export type MemoryPlanNote = z.infer<typeof MemoryPlanNote>
 
 export const MemoryNote = z.preprocess(
   withTier,
-  z.discriminatedUnion('tier', [SemanticNote, EpisodicNote, PlanNote]),
+  z.discriminatedUnion('tier', [SemanticNote, EpisodicNote, MemoryPlanNote]),
 )
 export type MemoryNote = z.infer<typeof MemoryNote>
 
@@ -530,7 +511,7 @@ export type MemoryNote = z.infer<typeof MemoryNote>
 // result is a view OF a note, never a valid one, and typing it as MemoryNote would be a claim the
 // trimmer cannot honour. Episodic is absent from the intersection deliberately: it adds no field
 // beyond the core, and its literal `retention` would narrow the view's to 'expirable'.
-export interface NoteView extends Partial<Omit<SemanticNote, 'tier'> & Omit<PlanNote, 'tier'>> {
+export interface NoteView extends Partial<Omit<SemanticNote, 'tier'> & Omit<MemoryPlanNote, 'tier'>> {
   tier: NoteTier
 }
 
@@ -939,7 +920,7 @@ export interface MemoryStore {
 const CONTENT_FIELDS = [...new Set([
   ...Object.keys(SemanticNoteInput.shape),
   ...Object.keys(EpisodicNoteInput.shape),
-  ...Object.keys(PlanNoteInput.shape),
+  ...Object.keys(MemoryPlanNoteInput.shape),
 ])].filter(k => k !== 'id' && k !== 'scope' && k !== 'sourceRevision' && k !== 'archived' && k !== 'status').sort()
 
 // The three object-array fields, re-parsed so the two sides of the comparison canonicalize: a zod

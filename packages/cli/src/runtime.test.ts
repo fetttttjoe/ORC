@@ -4,12 +4,12 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { z } from 'zod'
 import { MEMORY_HEALTH, ClaimClass, COMMIT_STEP_ID, DEFAULT_KNOWLEDGE_PLUGIN, Door, NO_CHAT,
-  EVENT_KIND, FINISH_STEP_ID, KNOWLEDGE_REFUSAL, KnowledgeToolName, MEMORY_TOOL_NAME, ROLE_SKILL, SignalOutcome, STEP_ID, STEP_ROLE, VERIFY_STEP_ID,
+  EVENT_KIND, FINISH_STEP_ID, KNOWLEDGE_REFUSAL, KnowledgeToolName, PlanNoteToolName, ROLE_SKILL, SignalOutcome, STEP_ID, STEP_ROLE, VERIFY_STEP_ID,
   type AgentExecutor, type EventDraft, type ExecutorContext, type SplitResult, type UnifiedEvent,
   RunOutcome,
 } from '@orc/contracts'
 import { Surreal } from 'surrealdb'
-import { openStorage, Kernel, projectDatabaseName, SCOPED_CHANGES_TOOL_NAME, type ProjectConfig } from '@orc/kernel'
+import { openStorage, Kernel, projectDatabaseName, SCOPED_CHANGES_TOOL_NAME, TASK_PLAN_TOOL_NAME, type ProjectConfig } from '@orc/kernel'
 import { createTestDb, fakeProvider, seedTestWorkspace, sh, testConfig, TEST_PROJECT_ID, TEST_WORKSPACE_ID } from '@orc/kernel/test-helpers'
 import { authorFixture, draftFixture, stepFixture } from '@orc/contracts/fixtures'
 
@@ -118,7 +118,7 @@ describe('seedPhases (the boot line accounts for a storage open it did not perfo
 })
 
 describe('stepTools knowledge and memory surfaces per step', () => {
-  it('every step gets the knowledge tools; only the plan step keeps memory write; the plan and finish steps get the decision tools; audit steps get knowledge_check', async () => {
+  it('every step gets the knowledge tools; only the plan step gets the plan tools; the plan and finish steps get the decision tools; audit steps get knowledge_check', async () => {
     const db = await createTestDb()
     dbs.push(db)
     const vaultDir = mkdtempSync(path.join(tmpdir(), 'orc-rt-verify-'))
@@ -134,8 +134,7 @@ describe('stepTools knowledge and memory surfaces per step', () => {
     const storage = await openStorage(db.url, { projectId: TEST_PROJECT_ID })
     const log = storage.events
     const kernel = new Kernel(log)
-    // the workspace must sit at THIS config's dir: buildRuntime resolves the consolidation and
-    // auto-heal authors from the directory it serves, and refuses when nothing claims it
+    // the workspace must sit at THIS config's dir: buildRuntime resolves the auto-heal authors from it
     await seedTestWorkspace(log, CLI, realpathSync(config.dir))
     const { host, hub } = await buildPlugins(config)
     host.providers.set('fake', fakeProvider)
@@ -181,17 +180,22 @@ describe('stepTools knowledge and memory surfaces per step', () => {
       expect(family(VERIFY_STEP_ID)).toEqual(new Set([...knowledge, KnowledgeToolName.check]))
       expect(family(AUDITOR_STEP_NAMED_FOR_ITS_JOB)).toEqual(new Set([...knowledge, KnowledgeToolName.check]))
       expect(family('s1')).toEqual(new Set(knowledge))
-      expect(family(STEP_ID.plan)).toEqual(new Set([...knowledge, MEMORY_TOOL_NAME.write]))
+      expect(family(STEP_ID.plan)).toEqual(new Set(knowledge))
       expect(family(FINISH_STEP_ID)).toEqual(new Set(knowledge))
+      const planTools = [PlanNoteToolName.write, PlanNoteToolName.read, PlanNoteToolName.finalize]
+      const planToolsOf = (step: string) => new Set((toolNamesByStep[step] ?? []).filter(n => planTools.some(t => t === n)))
+      expect(planToolsOf(STEP_ID.plan)).toEqual(new Set(planTools))
+      for (const step of [VERIFY_STEP_ID, AUDITOR_STEP_NAMED_FOR_ITS_JOB, 's1', FINISH_STEP_ID]) expect(planToolsOf(step)).toEqual(new Set())
       const decisions = [KnowledgeToolName.decisionList, KnowledgeToolName.decisionRead, KnowledgeToolName.recordDecision]
       const decisionsOf = (step: string) => new Set((toolNamesByStep[step] ?? []).filter(n => decisions.some(d => d === n)))
       expect(decisionsOf(STEP_ID.plan)).toEqual(new Set(decisions))
       expect(decisionsOf(FINISH_STEP_ID)).toEqual(new Set(decisions))
       for (const step of [VERIFY_STEP_ID, AUDITOR_STEP_NAMED_FOR_ITS_JOB, 's1']) expect(decisionsOf(step)).toEqual(new Set())
       expect(new Set(toolNamesByStep[FINISH_STEP_ID]))
-        .toEqual(new Set([...(toolNamesByStep['s1'] ?? []), KnowledgeToolName.taskClaims, SCOPED_CHANGES_TOOL_NAME, ...decisions]))
+        .toEqual(new Set([...(toolNamesByStep['s1'] ?? []), KnowledgeToolName.taskClaims, SCOPED_CHANGES_TOOL_NAME, TASK_PLAN_TOOL_NAME, ...decisions]))
       expect(toolNamesByStep['s1']).not.toContain(KnowledgeToolName.taskClaims)
       expect(toolNamesByStep['s1']).not.toContain(SCOPED_CHANGES_TOOL_NAME)
+      expect(toolNamesByStep['s1']).not.toContain(TASK_PLAN_TOOL_NAME)
       // the port forwards ctx.knowledge to every step, not only the ones that get task_claims
       expect(knowledgePresentByStep['s1']).toBe(true)
       expect(knowledgePresentByStep[FINISH_STEP_ID]).toBe(true)
@@ -424,7 +428,7 @@ describe('buildRuntime unavailable knowledge', () => {
 })
 
 describe('buildRuntime degraded memory', () => {
-  it('a broken Surreal config yields one warning + explicit unavailable tools; execution still completes', async () => {
+  it('a broken Surreal config yields one warning; execution still completes, and no step holds a memory tool', async () => {
     const db = await createTestDb()
     dbs.push(db)
     const vaultDir = mkdtempSync(path.join(tmpdir(), 'orc-rt-'))
@@ -443,8 +447,7 @@ describe('buildRuntime degraded memory', () => {
     const storage = await openStorage(db.url, { projectId: TEST_PROJECT_ID })
     const log = storage.events
     const kernel = new Kernel(log)
-    // the workspace must sit at THIS config's dir: buildRuntime resolves the consolidation and
-    // auto-heal authors from the directory it serves, and refuses when nothing claims it
+    // the workspace must sit at THIS config's dir: buildRuntime resolves the auto-heal authors from it
     await seedTestWorkspace(log, CLI, realpathSync(config.dir))
     const { host, hub } = await buildPlugins(config)
     host.providers.set('fake', fakeProvider)
@@ -465,12 +468,7 @@ describe('buildRuntime degraded memory', () => {
       await kernel.approvePlan(t.id, undefined, undefined, CLI)
       expect(await (await port.startRun(t.id)).wait()).toBe(RunOutcome.done)
 
-      // only the plan step keeps a memory tool, and it answers unavailable with the reason
-      expect(new Set(toolProbe.results.map(r => r.name))).toEqual(new Set([MEMORY_TOOL_NAME.write]))
-      for (const r of toolProbe.results) {
-        expect(r.isError).toBe(true)
-        expect(JSON.stringify(r.output)).toContain('memory unavailable')
-      }
+      expect(new Set(toolProbe.results.map(r => r.name))).toEqual(new Set())
     } finally {
       try {
         await port.shutdown()
@@ -497,8 +495,7 @@ describe('status memory health', () => {
     surrealBases.push(config)
     const log = (await openStorage(db.url, { projectId: TEST_PROJECT_ID })).events
     const kernel = new Kernel(log)
-    // the workspace must sit at THIS config's dir: buildRuntime resolves the consolidation and
-    // auto-heal authors from the directory it serves, and refuses when nothing claims it
+    // the workspace must sit at THIS config's dir: buildRuntime resolves the auto-heal authors from it
     await seedTestWorkspace(log, CLI, realpathSync(config.dir))
     const { host, hub } = await buildPlugins(config)
     cleanup.push(() => log.close(), () => hub.close(), () => host.shutdown())

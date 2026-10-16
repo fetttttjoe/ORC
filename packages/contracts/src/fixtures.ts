@@ -8,9 +8,10 @@ import { ClaimClass, ClaimInput, claimId, type StampedAddition } from './claim'
 import { Door, NO_CHAT } from './origin'
 import { IsolationTier, STRATEGY, type Plan, type PlanDraft, type PlanStep } from './plan'
 import {
-  EpisodicNoteInput, NOTE_TIER, PlanNoteInput, SemanticNoteInput,
-  type EpisodicNote, type PlanNote, type SemanticNote,
+  EpisodicNoteInput, NOTE_TIER, MemoryPlanNoteInput, SemanticNoteInput,
+  type EpisodicNote, type MemoryPlanNote, type SemanticNote,
 } from './memory'
+import type { PlanNote } from './plan-note'
 import { TASK_STATUS, type TaskNode } from './task'
 
 // The ONE workspace id every test-side author and task literal names — the kernel's test-helpers
@@ -37,9 +38,16 @@ export function semanticNoteFixture(over: Partial<SemanticNote> = {}): SemanticN
   return { ...authored, sources: [], ...NOTE_PROVENANCE, ...over }
 }
 
-export function planNoteFixture(over: Partial<PlanNote> = {}): PlanNote {
-  const authored = PlanNoteInput.parse({ tier: NOTE_TIER.plan, id: 'masterplan', scope: 'plan-t1', title: 'Plan' })
+export function memoryPlanNoteFixture(over: Partial<MemoryPlanNote> = {}): MemoryPlanNote {
+  const authored = MemoryPlanNoteInput.parse({ tier: NOTE_TIER.plan, id: 'masterplan', scope: 'plan-t1', title: 'Plan' })
   return { ...authored, ...NOTE_PROVENANCE, ...over }
+}
+
+export function planNoteFixture(over: Partial<PlanNote> = {}): PlanNote {
+  return {
+    id: 'masterplan', title: 'Plan', summary: '', body: '', rationale: '', uncertainty: [],
+    dependsOn: [], zone: [], skillRefs: [], toolRefs: [], modelRef: '', subplans: [], ...over,
+  }
 }
 
 export function episodicNoteFixture(over: Partial<EpisodicNote> = {}): EpisodicNote {

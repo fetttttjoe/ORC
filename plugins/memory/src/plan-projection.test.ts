@@ -1,6 +1,6 @@
 import { afterAll, describe, expect, it } from 'bun:test'
 import { NOTE_TIER, type NoteView } from '@orc/contracts'
-import { authorFixture, planNoteFixture } from '@orc/contracts/fixtures'
+import { authorFixture, memoryPlanNoteFixture } from '@orc/contracts/fixtures'
 import { renderNoteFile } from './note-md'
 import { createLiveMemory, type LiveMemory } from './test-helpers'
 
@@ -33,7 +33,7 @@ describe('plan-tier execution payload round-trip', () => {
 
 describe('vault markdown for a plan note', () => {
   it('renders the execution payload, and omits the keys when empty', () => {
-    const md = renderNoteFile(planNoteFixture({
+    const md = renderNoteFile(memoryPlanNoteFixture({
       dependsOn: ['sub-b'], skillRefs: ['web-research'], toolRefs: ['files'],
       modelRef: 'anthropic/claude',
     }))
@@ -45,7 +45,7 @@ describe('vault markdown for a plan note', () => {
     expect(md).toContain('- files')
     expect(md).toContain('modelRef: anthropic/claude')
     // a plan note that carries none shows its real shape, not a union's worth of hollow keys
-    const bare = renderNoteFile(planNoteFixture())
+    const bare = renderNoteFile(memoryPlanNoteFixture())
     expect(bare).not.toContain('dependsOn:')
     expect(bare).not.toContain('skillRefs:')
     expect(bare).not.toContain('toolRefs:')

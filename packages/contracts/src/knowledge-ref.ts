@@ -14,3 +14,10 @@ export const DecisionSlug = z.string().max(DECISION_SLUG_CHARS).regex(DECISION_S
 export const KNOWLEDGE_TAG_LIMITS = { chars: 40, items: 8 } as const
 export const KNOWLEDGE_TAG_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/
 export const KnowledgeTag = z.string().max(KNOWLEDGE_TAG_LIMITS.chars).regex(KNOWLEDGE_TAG_RE)
+
+export function featureTag(title: string): string | null {
+  const dashed = title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '')
+  const boundary = dashed.slice(0, KNOWLEDGE_TAG_LIMITS.chars + 1).lastIndexOf('-')
+  const cut = dashed.length <= KNOWLEDGE_TAG_LIMITS.chars ? dashed : dashed.slice(0, boundary > 0 ? boundary : KNOWLEDGE_TAG_LIMITS.chars)
+  return cut === '' ? null : cut
+}

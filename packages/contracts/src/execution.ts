@@ -323,24 +323,17 @@ export interface ExecutorContext<LM = unknown> {
   // Optional, additive runtime knobs (no config→executor path existed before these — maxIterations
   // reaches the loop as a frozen PlanStep field, wrong for a runtime knob). Optional so every
   // existing ctx constructor (tests, fixtures) keeps compiling untouched.
-  taskId?: string // the plan this step belongs to — absent in bare test ctxs, which skip ambient capture
+  taskId?: string // the plan this step belongs to — absent in bare test ctxs
   knowledgePreloadTokens?: number
-  memory?: StepMemory
   knowledge?: StepKnowledge
+  // set by the port on a retry: what the previous attempt of this step failed with
+  priorFailure?: { attempt: number; class: FailureClass; message: string }
   // Set by the port on a continuation round (a previous round signalled `partial`): the previous
   // round's summary IS the handoff — the same "your summary is the only output downstream sees"
   // seam, pointed at your own successor. The loop renders it into the first prompt; nothing else
   // changes shape, so round 0 constructors (tests, fixtures) keep compiling untouched.
   continuation?: { round: number; summary: string }
   isCancelled?: () => Promise<boolean>
-}
-
-// The step's own memory, bound by the runtime from the memory plugin. The executor decides only
-// WHEN (after the signal) and wraps the call for durability; what gets recorded, written and linked
-// is the memory domain's business.
-export interface StepMemory {
-  /** What the finished step leaves behind. Best-effort: never throws into the step. */
-  capture(signal: { outcome: SignalOutcome; summary: string }): Promise<void>
 }
 
 /** The step's own knowledge claims: what its first prompt is handed, and what an edited path puts at risk. */

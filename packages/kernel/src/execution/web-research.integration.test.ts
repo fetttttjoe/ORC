@@ -3,12 +3,12 @@ import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from 'node:f
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { AUTHOR_SOURCE, Door, EVENT_KIND, MemoryScope, NO_CHAT, NOTE_KIND, PAYLOAD_SCHEMAS, RETENTION, RunOutcome, type NoteView, type Origin } from '@orc/contracts'
+import { AUTHOR_SOURCE, Door, taskLaneScopes, EVENT_KIND, MemoryScope, NO_CHAT, NOTE_KIND, PAYLOAD_SCHEMAS, RETENTION, RunOutcome, type NoteView, type Origin } from '@orc/contracts'
 import { authorFixture, draftFixture, must, stepFixture } from '@orc/contracts/fixtures'
 import { createMcpHub } from '@orc/mcp-client'
 import { apiLoopExecutor } from '@orc/executor-api-loop'
 import { scriptModel } from '@orc/executor-api-loop/test-model'
-import { createMemory } from '@orc/memory'
+import { createMemory, memoryTools } from '@orc/memory'
 import { createTestSurreal } from '@orc/memory/test-helpers'
 import { openStorage } from '../storage'
 import { Kernel } from '../kernel'
@@ -80,7 +80,7 @@ describe('sourced web research through a durable run (integration)', () => {
       providers: new Map([['fake', { costs: {}, languageModel: () => model }]]),
       executors: new Map([['api-loop', apiLoopExecutor()]]),
       skills, tools: hub,
-      stepTools: p => memory.bindStep({ author: authorFixture({ source: AUTHOR_SOURCE.agent, origin: p.origin, workspaceId: p.workspaceId, taskId: p.taskId, stepId: p.stepId, runToken: p.runToken, executor: p.executor, model: p.model, role: p.role }), step: p.step, taskId: p.taskId, ancestorTaskIds: p.ancestorTaskIds }),
+      stepTools: p => memoryTools({ store: memory.store, author: authorFixture({ source: AUTHOR_SOURCE.agent, origin: p.origin, workspaceId: p.workspaceId, taskId: p.taskId, stepId: p.stepId, runToken: p.runToken, executor: p.executor, model: p.model, role: p.role }), catchUp: memory.projector.catchUp, searchScope: taskLaneScopes(p.taskId, p.ancestorTaskIds) }),
     })
     await port.launch()
     cleanup.push(() => port.shutdown())

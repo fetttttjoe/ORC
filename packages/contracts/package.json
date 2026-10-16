@@ -14,6 +14,7 @@
     "./execution": "./src/execution.ts",
     "./approval-answer": "./src/approval-answer.ts",
     "./plan": "./src/plan.ts",
+    "./plan-note": "./src/plan-note.ts",
     "./ids": "./src/ids.ts",
     "./origin": "./src/origin.ts",
     "./author": "./src/author.ts",

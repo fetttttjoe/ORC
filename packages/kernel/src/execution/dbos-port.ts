@@ -8,7 +8,7 @@ import {
   type AgentExecutor, type Checkpoint, type CommitRecordedPayload, type EventDraft, type EventRecord, type ExecutionPort, type ExecutorContext,
   type Origin, type TaskNode,
   type LoadedSkill, type ModelProvider, type OperationCheckpoint, type Plan, type PlanStep,
-  type ResolvedTool, type RunHandle, type Signal, type SplitResult, type StepKnowledge, type StepMemory, type TaskStatus, type ToolSource,
+  type ResolvedTool, type RunHandle, type Signal, type SplitResult, type StepKnowledge, type TaskStatus, type ToolSource,
 } from '@orc/contracts'
 import { type EventLog, type Storage, type EventLogOps } from '../storage'
 import { openLiveState, type LiveState } from '../live-state'
@@ -179,9 +179,8 @@ export async function createDbosPort(opts: {
   executors: Map<string, AgentExecutor<unknown>>
   skills?: { load(name: string): Promise<LoadedSkill> }
   tools?: ToolSource
-  // The per-step plugin surface: the tools a step's model may call, plus the step's own memory
-  // (contracts StepMemory) when a memory backend is wired. `step` travels whole so a binding can
-  // read title/dependsOn without the port re-deriving them.
+  // The per-step plugin surface: the tools a step's model may call, plus its knowledge when wired.
+  // `step` travels whole so a binding can read title/dependsOn without the port re-deriving them.
   stepTools?: (p: {
     // the RUN's chat, so a tool that spawns a process or writes a note names the same interaction
     origin: Origin
@@ -195,7 +194,7 @@ export async function createDbosPort(opts: {
     workspaceId: string
     // nearest first (parent, …, root) — a split child's decomposition lives in its PARENT's scopes
     ancestorTaskIds: string[]
-  }) => ResolvedTool[] | { tools: ResolvedTool[]; memory?: StepMemory; knowledge?: StepKnowledge }
+  }) => ResolvedTool[] | { tools: ResolvedTool[]; knowledge?: StepKnowledge }
   // Read-only probe behind the grounded analyze step's freshness short-circuit. Optional: a port
   // built without it behaves exactly as before, because the branch is guarded on its presence.
   groundingSource?: GroundingSource
@@ -303,6 +302,8 @@ export async function createDbosPort(opts: {
         if (!task) throw classifiedError(FailureClass.validation_error, `no task '${args.taskId}'`)
         const depOutputs: Record<string, string> = {}
         for (const dep of step.dependsOn) depOutputs[dep] = state.steps.get(args.taskId)?.get(dep)?.output ?? ''
+        const previous = state.steps.get(args.taskId)?.get(args.stepId)
+        const priorFailure = previous?.failure ? { attempt: previous.attempt, ...previous.failure } : null
         const loadedSkills: LoadedSkill[] = []
         for (const ref of step.skillRefs) {
           if (!skills) throw classifiedError(FailureClass.validation_error, `step declares skill '${ref}' but no skill index is configured`)
@@ -315,7 +316,7 @@ export async function createDbosPort(opts: {
         // workspaceId travels with the spec because the task is only in hand HERE: the workflow
         // body below builds the step's tool surface and cannot fold the log again (event-log reads
         // are non-deterministic and must stay inside a checkpoint).
-        return { step, taskSpec: task.spec, workspaceId: task.workspaceId, budgetUSD: task.budgetUSD, depOutputs, skills: loadedSkills }
+        return { step, taskSpec: task.spec, workspaceId: task.workspaceId, budgetUSD: task.budgetUSD, depOutputs, skills: loadedSkills, priorFailure }
       }, r => [
         { kind: EVENT_KIND.step_started, payload: { stepId: args.stepId, runToken, attempt: args.attempt } },
         ...r.skills.map((s): EventDraft => ({
@@ -436,7 +437,6 @@ export async function createDbosPort(opts: {
         }
       }
 
-      let stepMemory: StepMemory | undefined
       let stepKnowledge: StepKnowledge | undefined
       if (stepTools) {
         const bound = stepTools({
@@ -446,9 +446,8 @@ export async function createDbosPort(opts: {
           modelRef: init.step.modelRef, maxIterations: init.step.maxIterations, workspaceDir,
           step: init.step, ancestorTaskIds: ancestorTaskIds(await projectState(), args.taskId),
         })
-        const { tools: stepScoped, memory, knowledge } = Array.isArray(bound) ? { tools: bound, memory: undefined, knowledge: undefined } : bound
+        const { tools: stepScoped, knowledge } = Array.isArray(bound) ? { tools: bound, knowledge: undefined } : bound
         extraTools = [...extraTools, ...stepScoped]
-        stepMemory = memory
         stepKnowledge = knowledge
       }
 
@@ -470,7 +469,7 @@ export async function createDbosPort(opts: {
         workspaceDir,
         taskId: args.taskId,
         knowledgePreloadTokens: config.knowledgePreloadTokens,
-        ...(stepMemory && { memory: stepMemory }),
+        ...(init.priorFailure && { priorFailure: init.priorFailure }),
         ...(stepKnowledge && { knowledge: stepKnowledge }),
         // prices usage drafts on the way through: fill costUSD from the provider table
         checkpoint: (name, fn, toEvents) =>

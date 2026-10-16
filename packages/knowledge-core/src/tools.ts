@@ -1,7 +1,7 @@
 import { z } from 'zod'
 import {
   CheckVerdict, DecisionSlug, DeliveryMode, EntityPath, KNOWLEDGE_DEFAULTS, KNOWLEDGE_LIMITS, KNOWLEDGE_REFUSAL, KnowledgeChange,
-  KnowledgeCheckFields, KnowledgeDraft, KnowledgeId, KnowledgePage, KnowledgeToolName, toolError,
+  KnowledgeCheckFields, KnowledgeDraft, KnowledgeId, KnowledgePage, KnowledgeToolName, toolError, toolSchemaOf,
   type KnowledgeAccess, type KnowledgePort, type MemoryAuthor, type ResolvedTool,
 } from '@orc/contracts'
 
@@ -23,11 +23,6 @@ const CheckInput = KnowledgeCheckFields.extend({ patch: WriteInput.omit({ why: t
 
 export const knowledgeIdempotencyKey = (author: MemoryAuthor, toolCallId: string | undefined): string | null =>
   author.runToken && toolCallId ? `${author.runToken}:tool:${toolCallId}:knowledge` : null
-
-export const toolSchemaOf = (schema: z.ZodType): Record<string, unknown> => {
-  const { $schema: _dropped, ...json } = z.toJSONSchema(schema, { io: 'input' })
-  return json
-}
 
 export interface ToolSpec {
   description: string

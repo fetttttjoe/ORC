@@ -1,5 +1,5 @@
 import type { KnowledgeClaim, PlanStep, ResolvedTool } from '@orc/contracts'
-import { errorMessage, KNOWLEDGE_DEFAULTS, KnowledgeToolName, pathInZone, stepMayReconcile, stepMayVerify, toolError } from '@orc/contracts'
+import { errorMessage, KNOWLEDGE_DEFAULTS, KnowledgeToolName, pathInZone, stepMayReconcile, stepMayVerify, toolError, NO_INPUT_SCHEMA } from '@orc/contracts'
 import type { Kernel } from '../kernel'
 
 // scoped_changes: the paths THIS task's own steps recorded writing, derived purely from the event
@@ -93,7 +93,7 @@ export function scopedChangesTool(opts: {
   return [{
     ref: `kernel/${SCOPED_CHANGES_TOOL_NAME}`, name: SCOPED_CHANGES_TOOL_NAME,
     description: DESCRIPTION,
-    inputSchema: { type: 'object', properties: {} },
+    inputSchema: NO_INPUT_SCHEMA,
     execute: async () => {
       try {
         const [changed, plan] = await Promise.all([

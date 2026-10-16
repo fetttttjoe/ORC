@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'bun:test'
 import { AUTHOR_SOURCE, CheckVerdict, Confidence, DeliveryMode, EVENT_KIND } from '@orc/contracts'
-import { TEST_WORKSPACE_ID, authorFixture, eventFixture, planFixture, stepFixture, taskFixture } from '@orc/contracts/fixtures'
+import { TEST_WORKSPACE_ID, authorFixture, eventFixture, planFixture, planNoteFixture, stepFixture, taskFixture } from '@orc/contracts/fixtures'
 import { summarizeEvent } from './summarize'
 
 describe('summarizeEvent', () => {
@@ -131,6 +131,14 @@ describe('summarizeEvent', () => {
       payload: { task: taskFixture({ title: 'Add ledger summaries', type: 'feature' }) },
     }))
     expect(row.line).toBe('Add ledger summaries (feature) status=draft')
+  })
+
+  it('plan_note_written names the note by id and title', () => {
+    const row = summarizeEvent(eventFixture({
+      kind: EVENT_KIND.plan_note_written, taskId: 'task-A',
+      payload: { note: planNoteFixture({ id: 'db', title: 'Create the schema' }) },
+    }))
+    expect(row.line).toBe('db: Create the schema')
   })
 
   it('plan_proposed names the version, step count and strategy', () => {

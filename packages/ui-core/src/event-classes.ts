@@ -22,6 +22,7 @@ export const STATE_CHANGE: ReadonlySet<string> = new Set<string>([
   EVENT_KIND.plan_edited,
   EVENT_KIND.plan_approved,
   EVENT_KIND.plan_annotated,
+  EVENT_KIND.plan_note_written,
   EVENT_KIND.split_proposed,
   EVENT_KIND.split_resolved,
   EVENT_KIND.analysis_completed,

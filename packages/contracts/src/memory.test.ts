@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test'
-import { MemoryNoteDraftInput, MemoryNoteInput, MemoryNote, MEMORY_ID_RE, MEMORY_USE, USE_VERDICT, LINK_KIND, LinkKind, MemoryScope, NOTE_KIND, NOTE_TIER, RETENTION, VerifiedStamp, deriveNoteProvenance, foldMemory, inferTier, noteContentKey, noteKey, parseLinkSpec, useLine, useVerdict, type MemoryUseOutcome, type PlanNoteInput, type SemanticNoteInput, type UseStats } from './memory'
+import { MemoryNoteDraftInput, MemoryNoteInput, MemoryNote, MEMORY_ID_RE, MEMORY_USE, USE_VERDICT, LINK_KIND, LinkKind, MemoryScope, NOTE_KIND, NOTE_TIER, RETENTION, VerifiedStamp, deriveNoteProvenance, foldMemory, inferTier, noteContentKey, noteKey, parseLinkSpec, useLine, useVerdict, type MemoryUseOutcome, type MemoryPlanNoteInput, type SemanticNoteInput, type UseStats } from './memory'
 import { DECISION_STATUS } from './decision'
 import { AUTHOR_SOURCE } from './author'
 import { EVENT_KIND } from './event-kinds'
@@ -14,7 +14,7 @@ const semantic = (draft: unknown): SemanticNoteInput => {
   if (n.tier !== NOTE_TIER.semantic) throw new Error(`expected a semantic note, got '${n.tier}'`)
   return n
 }
-const plan = (draft: unknown): PlanNoteInput => {
+const plan = (draft: unknown): MemoryPlanNoteInput => {
   const n = MemoryNoteInput.parse(draft)
   if (n.tier !== NOTE_TIER.plan) throw new Error(`expected a plan note, got '${n.tier}'`)
   return n

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'bun:test'
 import { ClaimClass, claimId, DECISION_STATUS, NOTE_KIND, type SemanticNote, LINK_KIND } from '@orc/contracts'
-import { claimFixture, planNoteFixture, semanticNoteFixture } from '@orc/contracts/fixtures'
+import { claimFixture, memoryPlanNoteFixture, semanticNoteFixture } from '@orc/contracts/fixtures'
 import { CLAIMS_HEADING, noteRelPath, renderNoteFile } from './note-md'
 
 const SINGLE_USE = 'Refresh tokens are single-use.'
@@ -61,7 +61,7 @@ describe('renderNoteFile', () => {
     expect(noteRelPath(note({ id: 'auth-token-refresh', scope: 'infra' }))).toBe('infra/auth-token-refresh.md')
   })
   it('renders a plan-note with decomposes_into links, rationale, and uncertainty', () => {
-    const md = renderNoteFile(planNoteFixture({
+    const md = renderNoteFile(memoryPlanNoteFixture({
       id: 'master', scope: 'project', title: 'build web', rationale: 'why',
       uncertainty: ['schema unknown'], links: [{ id: 'db', kind: LINK_KIND.decomposes_into }],
     }))

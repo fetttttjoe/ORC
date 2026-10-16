@@ -411,7 +411,7 @@ Tools served (project-bound, same `OrcActions` validation as the web):
 
 stdout carries ONLY protocol frames: boot diagnostics are rebound to stderr, and the
 transport owns the real stdout — DBOS's logger cannot corrupt the channel. Trust grants and
-`orc init` are never exposed over MCP. Memory writing stays with the agents running inside
+`orc init` are never exposed over MCP. Knowledge writing stays with the agents running inside
 plans, with one deliberate exception: `record_decision`. A decision made in a driver's session
 is exactly the knowledge that otherwise evaporates, so the driver may record decisions — and
 nothing else; `memory_write` is not served.

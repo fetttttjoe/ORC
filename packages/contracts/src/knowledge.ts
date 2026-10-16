@@ -10,7 +10,7 @@ import { DecisionSlug, KNOWLEDGE_ID_LENGTH, KNOWLEDGE_ID_RE, KNOWLEDGE_TAG_LIMIT
 
 export {
   DECISION_SLUG_CHARS, DECISION_SLUG_RE, DecisionSlug, KNOWLEDGE_ID_LENGTH, KNOWLEDGE_ID_RE, KNOWLEDGE_TAG_LIMITS, KNOWLEDGE_TAG_RE,
-  KnowledgeId, KnowledgeRef, KnowledgeTag,
+  KnowledgeId, KnowledgeRef, KnowledgeTag, featureTag,
 } from './knowledge-ref'
 
 const GRAMMAR_BREAKERS = /[\s#@{}]/
